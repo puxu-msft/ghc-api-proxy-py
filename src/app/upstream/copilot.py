@@ -102,6 +102,17 @@ class CopilotUpstream:
             stream=stream,
         )
 
+    async def send_anthropic_count_tokens(
+        self,
+        payload: Mapping[str, Any],
+    ) -> httpx.Response:
+        return await self._clients.anthropic.post(
+            "/v1/messages/count_tokens",
+            cast_to=httpx.Response,
+            body=cast(AnthropicBody, dict(payload)),
+            options={"headers": await self._headers()},
+        )
+
     async def send_responses(
         self,
         payload: Mapping[str, Any],

@@ -19,6 +19,11 @@ class UpstreamTarget(Protocol):
         stream: bool = False,
     ) -> httpx.Response: ...
 
+    async def send_anthropic_count_tokens(
+        self,
+        payload: Mapping[str, Any],
+    ) -> httpx.Response: ...
+
     async def send_responses(
         self,
         payload: Mapping[str, Any],
