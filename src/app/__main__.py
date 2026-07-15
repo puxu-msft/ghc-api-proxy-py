@@ -1,6 +1,4 @@
-def main():
-    print("Hello from ghc-api-proxy-py!")
-
+from app.cli import main
 
 if __name__ == "__main__":
     main()
