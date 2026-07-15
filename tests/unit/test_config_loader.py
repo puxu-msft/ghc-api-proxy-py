@@ -120,6 +120,17 @@ def test_explicit_missing_config_is_an_error(tmp_path: Path) -> None:
         load_settings(config_path=missing_path)
 
 
+def test_missing_ghc_config_environment_is_an_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    missing_path = tmp_path / "missing-from-env.yaml"
+    monkeypatch.setenv("GHC_CONFIG", str(missing_path))
+
+    with pytest.raises(FileNotFoundError, match=str(missing_path)):
+        load_settings()
+
+
 def test_compat_migration_warns_and_preserves_explicit_new_keys() -> None:
     with pytest.warns(DeprecationWarning) as warnings:
         migrated = migrate_compat(
