@@ -1,0 +1,147 @@
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal, cast
+from uuid import uuid4
+
+import httpx
+
+from app.auth.copilot import CopilotTokenManager
+from app.auth.github import GitHubClient, infer_account_type
+from app.auth.providers import (
+    CLITokenProvider,
+    EnvTokenProvider,
+    FileTokenProvider,
+    GitHubTokenManager,
+)
+from app.runtime import RuntimeState
+from app.transform.model_resolver import ModelResolver
+from app.upstream.base import UpstreamTarget
+from app.upstream.client import (
+    SDKClients,
+    create_copilot_sdk_clients,
+    create_http_client,
+    create_sdk_clients,
+)
+from app.upstream.copilot import CopilotUpstream, build_copilot_headers
+from app.upstream.generic import GenericUpstream
+from app.upstream.models_api import ModelCatalog
+from app.upstream.urls import resolve_copilot_base_url
+
+type AccountType = Literal["individual", "business", "enterprise"]
+
+
+@dataclass(slots=True)
+class UpstreamServices:
+    http_client: httpx.AsyncClient
+    sdk_clients: SDKClients
+    target: UpstreamTarget
+    model_catalog: ModelCatalog
+    model_resolver: ModelResolver
+    github_tokens: GitHubTokenManager | None = None
+    copilot_tokens: CopilotTokenManager | None = None
+    resolved_account_type: AccountType | None = None
+
+
+async def initialize_upstream_services(
+    runtime: RuntimeState,
+    *,
+    http_client: httpx.AsyncClient | None = None,
+) -> UpstreamServices:
+    settings = runtime.settings
+    client = http_client or create_http_client(settings)
+    if settings.upstream.type == "generic":
+        sdk_clients = create_sdk_clients(settings, http_client=client)
+        target = GenericUpstream(sdk_clients)
+        catalog = ModelCatalog(
+            client,
+            settings.upstream.openai_base_url or "https://api.openai.com/v1",
+            disabled_ids=set(settings.disabled_models),
+        )
+        await catalog.refresh({"Authorization": f"Bearer {settings.upstream.api_key}"})
+        resolver = ModelResolver(
+            available_ids=catalog.available_ids,
+            model_overrides=settings.model_overrides,
+            model_mappings=settings.model_mappings,
+        )
+        services = UpstreamServices(client, sdk_clients, target, catalog, resolver)
+        runtime.models_ready = True
+        runtime.github_token_ready = True
+        runtime.copilot_token_ready = True
+        runtime.upstream_services = services
+        return services
+
+    token_path = Path(settings.auth.token_file) if settings.auth.token_file else None
+    file_provider = FileTokenProvider(token_path)
+    github_tokens = GitHubTokenManager(
+        [
+            CLITokenProvider(settings.auth.github_token),
+            EnvTokenProvider(),
+            file_provider,
+        ]
+    )
+    github_info = await github_tokens.get_token()
+    runtime.github_token_ready = True
+    copilot_tokens = CopilotTokenManager(github_tokens, client)
+    await copilot_tokens.ensure_valid_token()
+    runtime.copilot_token_ready = True
+
+    account_type = settings.auth.account_type
+    if account_type is None and not settings.upstream.ghc_api_base_url:
+        usage = await GitHubClient(client).get_copilot_usage(github_info.token)
+        inferred = infer_account_type(usage)
+        account_type = cast(AccountType, inferred or "individual")
+        settings = settings.model_copy(
+            update={"auth": settings.auth.model_copy(update={"account_type": account_type})}
+        )
+    else:
+        account_type = account_type or "individual"
+
+    sdk_clients = create_copilot_sdk_clients(settings, http_client=client)
+    interaction_id = str(uuid4())
+    target = CopilotUpstream(
+        sdk_clients,
+        copilot_tokens,
+        settings,
+        interaction_id=interaction_id,
+    )
+    base_url = resolve_copilot_base_url(settings)
+    catalog = ModelCatalog(client, base_url, disabled_ids=set(settings.disabled_models))
+    token = await copilot_tokens.get_token()
+    await catalog.refresh(
+        build_copilot_headers(token, settings, interaction_id=interaction_id)
+    )
+    resolver = ModelResolver(
+        available_ids=catalog.available_ids,
+        model_overrides=settings.model_overrides,
+        model_mappings=settings.model_mappings,
+    )
+    services = UpstreamServices(
+        client,
+        sdk_clients,
+        target,
+        catalog,
+        resolver,
+        github_tokens=github_tokens,
+        copilot_tokens=copilot_tokens,
+        resolved_account_type=account_type,
+    )
+    runtime.settings = settings
+    runtime.models_ready = True
+    runtime.upstream_services = services
+    return services
+
+
+async def close_upstream_services(
+    runtime: RuntimeState,
+    *,
+    close_http_client: bool = True,
+) -> None:
+    services = runtime.upstream_services
+    if services is None:
+        return
+    if close_http_client:
+        await services.http_client.aclose()
+    runtime.upstream_services = None
+    runtime.github_token_ready = False
+    runtime.copilot_token_ready = False
+    runtime.models_ready = False

@@ -32,6 +32,10 @@ def test_copilot_base_url_maps_account_type(account_type: str, expected: str) ->
     assert resolve_copilot_base_url(settings) == expected
 
 
+def test_copilot_base_url_falls_back_to_individual_when_account_type_is_unset() -> None:
+    assert resolve_copilot_base_url(AppSettings()) == "https://api.githubcopilot.com"
+
+
 def test_copilot_headers_protect_core_values_from_model_headers() -> None:
     settings = AppSettings()
 

@@ -1,8 +1,12 @@
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from anyio.abc import TaskGroup
 
 from app.config.settings import AppSettings
+
+if TYPE_CHECKING:
+    from app.upstream.bootstrap import UpstreamServices
 
 
 @dataclass(slots=True)
@@ -13,6 +17,7 @@ class RuntimeState:
     github_token_ready: bool = False
     copilot_token_ready: bool = False
     models_ready: bool = False
+    upstream_services: UpstreamServices | None = None
 
     def readiness_checks(self) -> dict[str, bool]:
         return {
