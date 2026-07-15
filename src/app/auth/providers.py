@@ -96,7 +96,7 @@ class FileTokenProvider(GitHubTokenProvider):
 
         try:
             content = await run_sync(read)
-        except FileNotFoundError:
+        except OSError:
             return None
         token = content.strip()
         if not token:

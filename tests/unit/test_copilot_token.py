@@ -18,6 +18,27 @@ class StaticGitHubProvider(GitHubTokenProvider):
         return TokenInfo(token="ghu_github", source="env")
 
 
+class RefreshableGitHubProvider(GitHubTokenProvider):
+    name = "refreshable"
+    priority = 1
+    refreshable = True
+
+    def __init__(self) -> None:
+        self.token = "old"
+        self.refresh_calls = 0
+
+    async def is_available(self) -> bool:
+        return True
+
+    async def get_token(self) -> TokenInfo:
+        return TokenInfo(token=self.token, source="device-auth", refreshable=True)
+
+    async def refresh(self) -> TokenInfo:
+        self.refresh_calls += 1
+        self.token = "new"
+        return TokenInfo(token=self.token, source="device-auth", refreshable=True)
+
+
 @pytest.mark.asyncio
 async def test_copilot_token_exchange_preserves_raw_response() -> None:
     requests: list[httpx.Request] = []
@@ -108,3 +129,67 @@ async def test_concurrent_refresh_is_single_flight() -> None:
 
     assert calls == 1
     assert tokens == ["shared"] * 10
+
+
+@pytest.mark.asyncio
+async def test_exchange_retries_transient_server_error() -> None:
+    calls = 0
+    sleeps: list[float] = []
+
+    async def no_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        del request
+        calls += 1
+        if calls == 1:
+            return httpx.Response(503, json={"error": "temporary"})
+        return httpx.Response(
+            200,
+            json={"token": "recovered", "expires_at": 5000, "refresh_in": 1500},
+        )
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    manager = CopilotTokenManager(
+        GitHubTokenManager([StaticGitHubProvider()]),
+        http_client,
+        clock=lambda: 1000,
+        sleep=no_sleep,
+    )
+    try:
+        assert await manager.get_token() == "recovered"
+    finally:
+        await http_client.aclose()
+
+    assert calls == 2
+    assert sleeps == [1.0]
+
+
+@pytest.mark.asyncio
+async def test_401_refreshes_github_token_before_retry() -> None:
+    provider = RefreshableGitHubProvider()
+    seen_authorization: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_authorization.append(request.headers["authorization"])
+        if len(seen_authorization) == 1:
+            return httpx.Response(401, json={"error": "expired"})
+        return httpx.Response(
+            200,
+            json={"token": "copilot", "expires_at": 5000, "refresh_in": 1500},
+        )
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    manager = CopilotTokenManager(
+        GitHubTokenManager([provider]),
+        http_client,
+        clock=lambda: 1000,
+    )
+    try:
+        assert await manager.get_token() == "copilot"
+    finally:
+        await http_client.aclose()
+
+    assert provider.refresh_calls == 1
+    assert seen_authorization == ["token old", "token new"]

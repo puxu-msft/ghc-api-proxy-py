@@ -104,7 +104,12 @@ class ModelResolver:
 
         if family is not None:
             suffix = ""
-            if normalized.startswith(f"{family}-"):
+            version_match = VERSION_PATTERN.match(without_date)
+            if version_match is not None:
+                suffix = version_match.group("suffix").removeprefix("-")
+                if suffix:
+                    return normalized
+            elif normalized.startswith(f"{family}-"):
                 suffix = normalized[len(family) + 1 :]
             for preferred in MODEL_PREFERENCE[family]:
                 candidate = f"{preferred}-{suffix}" if suffix else preferred

@@ -81,3 +81,12 @@ def test_unknown_model_is_passed_through() -> None:
     resolver = ModelResolver(available_ids=set(), model_overrides={})
 
     assert resolver.resolve("future-model") == "future-model"
+
+
+def test_unavailable_modifier_is_not_silently_downgraded() -> None:
+    resolver = ModelResolver(
+        available_ids={"claude-opus-4.6"},
+        model_overrides={},
+    )
+
+    assert resolver.resolve("claude-opus-4-6-fast") == "claude-opus-4.6-fast"

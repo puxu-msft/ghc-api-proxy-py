@@ -121,6 +121,14 @@ async def test_file_provider_reads_writes_and_clears_token(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_file_provider_treats_unreadable_path_as_unavailable(tmp_path: Path) -> None:
+    provider = FileTokenProvider(tmp_path)
+
+    assert await provider.is_available() is False
+    assert await provider.get_token() is None
+
+
+@pytest.mark.asyncio
 async def test_manager_refreshes_only_refreshable_winner() -> None:
     provider = StubProvider(priority=1, token="refreshable", refreshable=True)
     manager = GitHubTokenManager([provider])
