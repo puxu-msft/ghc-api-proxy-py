@@ -2,7 +2,16 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
+import anyio
 import typer
+import uvicorn
+import yaml
+from anyio.to_thread import run_sync
+
+from app.config.loader import load_settings
+from app.config.paths import config_file_path
+from app.config.settings import AppSettings
+from app.server import create_app
 
 
 class AccountType(StrEnum):
@@ -22,6 +31,22 @@ app.add_typer(debug_app, name="debug")
 
 def _not_implemented(command: str) -> None:
     typer.echo(f"{command} is not implemented yet")
+
+
+def _write_default_config(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    settings = AppSettings.model_validate({})
+    path.write_text(
+        yaml.safe_dump(settings.model_dump(mode="json"), sort_keys=False),
+        encoding="utf-8",
+    )
+
+
+def _generate_config(path: Path) -> None:
+    async def write() -> None:
+        await run_sync(_write_default_config, path)
+
+    anyio.run(write)
 
 
 @app.command()
@@ -46,21 +71,43 @@ def start(
     generate_config: Annotated[bool, typer.Option("--generate-config")] = False,
 ) -> None:
     """Start the API proxy server."""
-    del (
-        port,
-        host,
-        verbose,
-        account_type,
-        ghc_api_base_url,
-        rate_limit,
-        history,
-        github_token,
-        proxy,
-        config,
-        manual,
-        generate_config,
-    )
-    _not_implemented("start")
+    if generate_config:
+        output_path = config or config_file_path()
+        _generate_config(output_path)
+        typer.echo(f"Generated configuration: {output_path}")
+        return
+
+    cli_overrides: dict[str, object] = {}
+    auth_overrides: dict[str, object] = {}
+    upstream_overrides: dict[str, object] = {}
+    if port is not None:
+        cli_overrides["port"] = port
+    if host is not None:
+        cli_overrides["host"] = host
+    if account_type is not None:
+        auth_overrides["account_type"] = account_type.value
+    if ghc_api_base_url is not None:
+        upstream_overrides["ghc_api_base_url"] = ghc_api_base_url
+    if rate_limit is not None:
+        cli_overrides["rate_limiter"] = {"enabled": rate_limit}
+    if history is not None:
+        cli_overrides["history"] = {"enabled": history}
+    if github_token is not None:
+        auth_overrides["github_token"] = github_token
+    if proxy is not None:
+        upstream_overrides["proxy"] = proxy
+    if manual:
+        cli_overrides["approval"] = {"enabled": True}
+    if verbose:
+        cli_overrides["observability"] = {"log_level": "DEBUG"}
+    if auth_overrides:
+        cli_overrides["auth"] = auth_overrides
+    if upstream_overrides:
+        cli_overrides["upstream"] = upstream_overrides
+
+    settings = load_settings(config_path=config, cli_overrides=cli_overrides)
+    application = create_app(settings)
+    uvicorn.run(application, host=settings.host, port=settings.port, log_config=None)
 
 
 def _authenticate() -> None:

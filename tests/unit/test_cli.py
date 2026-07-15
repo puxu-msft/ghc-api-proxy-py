@@ -1,3 +1,7 @@
+from pathlib import Path
+from unittest.mock import Mock
+
+import pytest
 from typer.testing import CliRunner
 
 from app.cli import app
@@ -59,3 +63,35 @@ def test_debug_subcommands_exist() -> None:
     assert "info" in result.stdout
     assert "models" in result.stdout
     assert "usage" in result.stdout
+
+
+def test_start_generates_config_and_exits(tmp_path: Path) -> None:
+    config_path = tmp_path / "generated.yaml"
+
+    result = runner.invoke(
+        app,
+        ["start", "--config", str(config_path), "--generate-config"],
+    )
+
+    assert result.exit_code == 0
+    assert config_path.is_file()
+    assert "port: 4141" in config_path.read_text(encoding="utf-8")
+    assert str(config_path) in result.stdout
+
+
+def test_start_merges_cli_overrides_and_runs_uvicorn(monkeypatch: pytest.MonkeyPatch) -> None:
+    run = Mock()
+    monkeypatch.setattr("app.cli.uvicorn.run", run)
+
+    result = runner.invoke(
+        app,
+        ["start", "--port", "4242", "--host", "0.0.0.0", "--manual", "--verbose"],
+    )
+
+    assert result.exit_code == 0
+    application = run.call_args.args[0]
+    assert application.state.settings.port == 4242
+    assert application.state.settings.host == "0.0.0.0"
+    assert application.state.settings.approval.enabled is True
+    assert application.state.settings.observability.log_level == "DEBUG"
+    run.assert_called_once_with(application, host="0.0.0.0", port=4242, log_config=None)
