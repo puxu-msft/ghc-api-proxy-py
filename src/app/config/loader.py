@@ -1,3 +1,4 @@
+import os
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
@@ -15,6 +16,18 @@ PER_KEY_PATHS = frozenset(
         ("timeouts", "response_header_overrides"),
     }
 )
+SECTION_PATHS = frozenset(
+    {
+        ("anthropic",),
+        ("approval",),
+        ("auth",),
+        ("history",),
+        ("observability",),
+        ("rate_limiter",),
+        ("timeouts",),
+        ("upstream",),
+    }
+)
 
 
 def _merge_layers(
@@ -29,7 +42,7 @@ def _merge_layers(
         if (
             isinstance(current_value, Mapping)
             and isinstance(value, Mapping)
-            and (current_path in PER_KEY_PATHS or len(current_path) == 1)
+            and (current_path in PER_KEY_PATHS or current_path in SECTION_PATHS)
         ):
             result[key] = _merge_layers(
                 cast(Mapping[str, Any], current_value),
@@ -43,7 +56,16 @@ def _merge_layers(
 
 def _resolve_config_path(explicit_path: Path | None) -> Path | None:
     if explicit_path is not None:
+        if not explicit_path.is_file():
+            raise FileNotFoundError(f"configuration file not found: {explicit_path}")
         return explicit_path
+
+    env_path = os.environ.get("GHC_CONFIG")
+    if env_path:
+        resolved_env_path = Path(env_path)
+        if not resolved_env_path.is_file():
+            raise FileNotFoundError(f"configuration file not found: {resolved_env_path}")
+        return resolved_env_path
 
     local_path = Path.cwd() / "config.yaml"
     if local_path.is_file():

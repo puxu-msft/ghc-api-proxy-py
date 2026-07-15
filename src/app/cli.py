@@ -2,11 +2,9 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
-import anyio
 import typer
 import uvicorn
 import yaml
-from anyio.to_thread import run_sync
 
 from app.config.loader import load_settings
 from app.config.paths import config_file_path
@@ -43,10 +41,7 @@ def _write_default_config(path: Path) -> None:
 
 
 def _generate_config(path: Path) -> None:
-    async def write() -> None:
-        await run_sync(_write_default_config, path)
-
-    anyio.run(write)
+    _write_default_config(path)
 
 
 @app.command()

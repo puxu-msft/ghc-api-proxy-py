@@ -89,6 +89,37 @@ def test_non_per_key_mapping_is_replaced(tmp_path: Path) -> None:
     assert settings.anthropic.effort_overrides == {"cli-model": ["low"]}
 
 
+def test_model_overrides_mapping_is_replaced(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "model_overrides:\n"
+        "  custom: yaml-target\n",
+        encoding="utf-8",
+    )
+
+    settings = load_settings(config_path=config_path)
+
+    assert settings.model_overrides == {"custom": "yaml-target"}
+
+
+def test_ghc_config_environment_selects_yaml(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "from-env.yaml"
+    config_path.write_text("port: 4567\n", encoding="utf-8")
+    monkeypatch.setenv("GHC_CONFIG", str(config_path))
+
+    assert load_settings().port == 4567
+
+
+def test_explicit_missing_config_is_an_error(tmp_path: Path) -> None:
+    missing_path = tmp_path / "missing.yaml"
+
+    with pytest.raises(FileNotFoundError, match=str(missing_path)):
+        load_settings(config_path=missing_path)
+
+
 def test_compat_migration_warns_and_preserves_explicit_new_keys() -> None:
     with pytest.warns(DeprecationWarning) as warnings:
         migrated = migrate_compat(
