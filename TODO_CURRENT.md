@@ -68,13 +68,15 @@ config / models / errors
 
 > 目标：补齐 OpenAI 三端点 + 跨格式翻译。
 
-- [ ] `models/openai.py` —— Chat Completions + Responses 模型
-- [ ] `openai/`（client / responses_client / **responses_conversion** / embeddings / sanitize / accumulators）—— 三个 OpenAI 客户端 + 清洗 + 累积器；`responses_conversion` 承载 `call_` → `fc_` 标准化
-- [ ] `transform/translator.py` —— 跨协议**非流式**格式翻译
-- [ ] `transform/system_prompt.py` —— 系统提示词定制（prepend/append/regex，按 model/endpoint 限定作用域）；跨协议共用，被 Phase 4 请求准备调用
-- [ ] `streaming/translator.py` —— 跨格式**流式**翻译（Chat ↔ Anthropic ↔ Responses ↔ Gemini），与非流式 translator 不同粒度
-- [ ] `routes/openai.py` / `routes/responses.py` —— chat/completions、models、embeddings、responses（含 WS）
-- [ ] `routes/`（token / usage / config / event_logging）—— 管理与静默消费端点（轻量，随协议路由一并落地）
+- [x] `models/openai.py` —— Chat Completions + Responses 模型
+- [x] `openai/`（client / responses_client / **responses_conversion** / embeddings / sanitize / accumulators）—— 三个 OpenAI 客户端 + 清洗 + 累积器；`responses_conversion` 承载 `call_` → `fc_` 标准化
+- [x] `transform/translator.py` —— 跨协议**非流式**格式翻译
+- [x] `transform/system_prompt.py` —— 系统提示词定制（prepend/append/regex，按 model/endpoint 限定作用域）；跨协议共用，被 Phase 4 请求准备调用
+- [x] `streaming/translator.py` —— 跨格式**流式**翻译（Chat ↔ Anthropic ↔ Responses ↔ Gemini），与非流式 translator 不同粒度
+- [x] `routes/openai.py` / `routes/responses_ws.py` —— chat/completions、models、embeddings、responses（含 httpx-ws）
+- [x] `routes/management.py` —— status/config/event_logging 与静默浏览器探针
+
+**完成记录（2026-07-15）**：184 个测试通过，覆盖率 91.55%，Ruff/Pyright strict 通过；OpenAI 深层保真、Chat/Responses/Embeddings、三重前缀、跨协议翻译、sanitizer/accumulators、正式 httpx-ws 上游 transport、bounded queue 和管理端点均通过多轮独立评审，最终 0 blocker / 0 major。
 
 **里程碑**：OpenAI 生态客户端（Cursor 等）可用。
 

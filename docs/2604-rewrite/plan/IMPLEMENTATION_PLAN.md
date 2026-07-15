@@ -632,6 +632,8 @@ curl -X POST http://localhost:4141/v1/messages \
 ## Phase 3 — OpenAI 协议族
 
 > **目标**: 补齐 OpenAI 三端点 + 跨格式翻译。
+>
+> **实施状态（2026-07-15）**：✅ 完成。184 个测试通过，覆盖率 91.55%；Chat/Responses/Embeddings、三前缀、translator、sanitizer/accumulators、httpx-ws 与管理端点经独立复审为 0 blocker / 0 major。
 
 ### 前置依赖
 
