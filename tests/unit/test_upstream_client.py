@@ -3,7 +3,8 @@ import pytest
 
 from app.config.settings import AppSettings
 from app.upstream.client import SDKClients, create_http_client, create_sdk_clients
-from app.upstream.copilot import build_copilot_headers, resolve_copilot_base_url
+from app.upstream.copilot import build_copilot_headers
+from app.upstream.urls import resolve_copilot_base_url
 
 
 def test_copilot_base_url_prefers_explicit_override() -> None:

@@ -5,6 +5,7 @@ from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 
 from app.config.settings import AppSettings
+from app.upstream.urls import resolve_copilot_base_url
 
 
 @dataclass(slots=True)
@@ -55,6 +56,28 @@ def create_sdk_clients(
         anthropic=AsyncAnthropic(
             api_key=api_key,
             base_url=anthropic_base_url,
+            http_client=http_client,
+            max_retries=0,
+        ),
+    )
+
+
+def create_copilot_sdk_clients(
+    settings: AppSettings,
+    *,
+    http_client: httpx.AsyncClient,
+) -> SDKClients:
+    base_url = resolve_copilot_base_url(settings)
+    return SDKClients(
+        openai=AsyncOpenAI(
+            api_key="proxy-managed",
+            base_url=base_url,
+            http_client=http_client,
+            max_retries=0,
+        ),
+        anthropic=AsyncAnthropic(
+            api_key="proxy-managed",
+            base_url=base_url,
             http_client=http_client,
             max_retries=0,
         ),

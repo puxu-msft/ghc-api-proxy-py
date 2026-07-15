@@ -1,17 +1,14 @@
 from collections.abc import Mapping
+from typing import Any, cast
 from uuid import uuid4
 
+import httpx
+from anthropic._types import Body as AnthropicBody
+from openai._types import Body as OpenAIBody
+
+from app.auth.copilot import CopilotTokenManager
 from app.config.settings import AppSettings
-
-
-def resolve_copilot_base_url(settings: AppSettings) -> str:
-    override = settings.upstream.ghc_api_base_url.rstrip("/")
-    if override:
-        return override
-    account_type = settings.auth.account_type
-    if account_type == "individual":
-        return "https://api.githubcopilot.com"
-    return f"https://api.{account_type}.githubcopilot.com"
+from app.upstream.client import SDKClients
 
 
 def build_copilot_headers(
@@ -53,3 +50,68 @@ def build_copilot_headers(
             }
         )
     return headers
+
+
+class CopilotUpstream:
+    def __init__(
+        self,
+        clients: SDKClients,
+        token_manager: CopilotTokenManager,
+        settings: AppSettings,
+        *,
+        interaction_id: str,
+    ) -> None:
+        self._clients = clients
+        self._tokens = token_manager
+        self._settings = settings
+        self._interaction_id = interaction_id
+
+    async def _headers(self) -> dict[str, str]:
+        token = await self._tokens.get_token()
+        return build_copilot_headers(
+            token,
+            self._settings,
+            interaction_id=self._interaction_id,
+        )
+
+    async def send_openai(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        stream: bool = False,
+    ) -> httpx.Response:
+        return await self._clients.openai.post(
+            "/chat/completions",
+            cast_to=httpx.Response,
+            body=cast(OpenAIBody, dict(payload)),
+            options={"headers": await self._headers()},
+            stream=stream,
+        )
+
+    async def send_anthropic(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        stream: bool = False,
+    ) -> httpx.Response:
+        return await self._clients.anthropic.post(
+            "/v1/messages",
+            cast_to=httpx.Response,
+            body=cast(AnthropicBody, dict(payload)),
+            options={"headers": await self._headers()},
+            stream=stream,
+        )
+
+    async def send_responses(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        stream: bool = False,
+    ) -> httpx.Response:
+        return await self._clients.openai.post(
+            "/responses",
+            cast_to=httpx.Response,
+            body=cast(OpenAIBody, dict(payload)),
+            options={"headers": await self._headers()},
+            stream=stream,
+        )
