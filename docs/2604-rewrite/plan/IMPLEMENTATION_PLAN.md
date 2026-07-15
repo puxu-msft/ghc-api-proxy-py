@@ -446,6 +446,8 @@ uv run pytest tests/unit/test_auth* tests/unit/test_upstream* -v --cov=app/auth 
 ## Phase 2 — 核心管道最小闭环 (Walking Skeleton)
 
 > **目标**: 第一个端到端可用请求 —— `/v1/messages` 直连 Copilot、SSE 流式直通。**全项目最重要的验证点**。
+>
+> **实施状态（2026-07-15）**：✅ 完成。154 个测试通过；Anthropic wire models、基础 sanitizer、零缓冲 SSE、token counting、最小 pipeline 和 Messages routes 经独立评审与验收为 0 blocker / 0 major。
 
 ### 前置依赖
 

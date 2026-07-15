@@ -53,12 +53,14 @@ config / models / errors
 
 > 目标：**第一个端到端可用请求**——`/v1/messages` 直连 Copilot、SSE 流式直通。全项目最重要的验证点。
 
-- [ ] `models/anthropic.py` —— Anthropic 请求 / 响应 / SSE 模型
-- [ ] `streaming/`（sse / idle_timeout / accumulator 接口）—— SSE 零缓冲直通、流空闲超时
-- [ ] `anthropic/client.py` + `anthropic/sanitize/`（最小：tool 配对 + 空块）—— Anthropic 客户端 + 基础清洗
-- [ ] `anthropic/token_counting.py` —— `count_tokens`（上游转发 / 本地估算），支撑本阶段的 count_tokens 路由
-- [ ] `pipeline/`（context / executor 最小版）—— 请求生命周期、执行循环（限流 / 审批为空实现直通，重试策略留待 Phase 5）
-- [ ] `routes/anthropic.py` —— `/v1/messages`、`/v1/messages/count_tokens`
+- [x] `models/anthropic.py` —— Anthropic 请求 / 响应 / SSE 模型
+- [x] `streaming/`（sse / idle_timeout / accumulator 接口）—— SSE 零缓冲直通、流空闲超时
+- [x] `anthropic/client.py` + `anthropic/sanitize/`（最小：tool 配对 + 空块）—— Anthropic 客户端 + 基础清洗
+- [x] `anthropic/token_counting.py` —— `count_tokens`（上游转发 / 本地估算），支撑本阶段的 count_tokens 路由
+- [x] `pipeline/`（context / executor 最小版）—— 请求生命周期、执行循环（限流 / 审批为空实现直通，重试策略留待 Phase 5）
+- [x] `routes/anthropic.py` —— `/v1/messages`、`/v1/messages/count_tokens`
+
+**完成记录（2026-07-15）**：154 个测试通过，Ruff/Pyright strict 通过；深层未知字段/null 保真、基础 sanitizer、SDK raw stream、SSE 零缓冲与确定性关闭、per-model idle timeout、上游优先 token counting、最小 pipeline 和 Anthropic HTTP 路由均通过独立 review/verifier，最终 0 blocker / 0 major。
 
 **里程碑**：Claude Code 能连上、能对话、能流式。
 
