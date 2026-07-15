@@ -90,8 +90,8 @@ def test_start_merges_cli_overrides_and_runs_uvicorn(monkeypatch: pytest.MonkeyP
 
     assert result.exit_code == 0
     application = run.call_args.args[0]
-    assert application.state.settings.port == 4242
-    assert application.state.settings.host == "0.0.0.0"
-    assert application.state.settings.approval.enabled is True
-    assert application.state.settings.observability.log_level == "DEBUG"
+    assert application.state.runtime.settings.port == 4242
+    assert application.state.runtime.settings.host == "0.0.0.0"
+    assert application.state.runtime.settings.approval.enabled is True
+    assert application.state.runtime.settings.observability.log_level == "DEBUG"
     run.assert_called_once_with(application, host="0.0.0.0", port=4242, log_config=None)
