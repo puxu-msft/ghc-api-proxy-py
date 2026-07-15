@@ -2,14 +2,34 @@ from pathlib import Path
 
 import pytest
 
+from app.auth.device_flow import DeviceCode
 from app.auth.providers import (
     CLITokenProvider,
+    DeviceAuthProvider,
     EnvTokenProvider,
     FileTokenProvider,
     GitHubTokenManager,
     GitHubTokenProvider,
     TokenInfo,
 )
+
+
+class StubDeviceFlow:
+    def __init__(self) -> None:
+        self.device = DeviceCode(
+            device_code="device",
+            user_code="CODE",
+            verification_uri="https://github.com/login/device",
+            expires_in=900,
+            interval=5,
+        )
+
+    async def request_device_code(self) -> DeviceCode:
+        return self.device
+
+    async def poll_access_token(self, device: DeviceCode) -> str:
+        assert device is self.device
+        return "ghu_device"
 
 
 class StubProvider(GitHubTokenProvider):
@@ -118,3 +138,22 @@ async def test_manager_raises_when_no_provider_succeeds() -> None:
 
     with pytest.raises(RuntimeError, match="GitHub token"):
         await manager.get_token()
+
+
+@pytest.mark.asyncio
+async def test_device_provider_persists_interactive_token(tmp_path: Path) -> None:
+    file_provider = FileTokenProvider(tmp_path / "github_token")
+    provider = DeviceAuthProvider(StubDeviceFlow(), file_provider)
+
+    token = await provider.get_token()
+
+    assert token == TokenInfo(
+        token="ghu_device",
+        source="device-auth",
+        refreshable=True,
+    )
+    assert await file_provider.get_token() == TokenInfo(
+        token="ghu_device",
+        source="file",
+        refreshable=False,
+    )

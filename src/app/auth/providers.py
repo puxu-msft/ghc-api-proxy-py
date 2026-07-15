@@ -2,10 +2,11 @@ import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 
 from anyio.to_thread import run_sync
 
+from app.auth.device_flow import DeviceCode
 from app.config.paths import user_data_path
 
 type TokenSource = Literal["cli", "env", "file", "device-auth"]
@@ -119,6 +120,34 @@ class FileTokenProvider(GitHubTokenProvider):
             self.path.unlink(missing_ok=True)
 
         await run_sync(unlink)
+
+
+class DeviceFlow(Protocol):
+    async def request_device_code(self) -> DeviceCode: ...
+
+    async def poll_access_token(self, device: DeviceCode) -> str: ...
+
+
+class DeviceAuthProvider(GitHubTokenProvider):
+    name = "DeviceAuth"
+    priority = 4
+    refreshable = True
+
+    def __init__(self, device_flow: DeviceFlow, file_provider: FileTokenProvider) -> None:
+        self._device_flow = device_flow
+        self._file_provider = file_provider
+
+    async def is_available(self) -> bool:
+        return True
+
+    async def get_token(self) -> TokenInfo | None:
+        device = await self._device_flow.request_device_code()
+        token = await self._device_flow.poll_access_token(device)
+        await self._file_provider.save_token(token)
+        return TokenInfo(token=token, source="device-auth", refreshable=True)
+
+    async def refresh(self) -> TokenInfo | None:
+        return await self.get_token()
 
 
 class GitHubTokenManager:
