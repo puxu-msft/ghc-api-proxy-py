@@ -1,10 +1,12 @@
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import anyio
 from fastapi import FastAPI
 
 from app import __version__
+from app.auth.providers import noninteractive_token_available
 from app.config.settings import AppSettings
 from app.observability.logging import setup_logging
 from app.routes import health_router
@@ -24,9 +26,15 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
     async with anyio.create_task_group() as task_group:
         runtime.background_task_group = task_group
         try:
-            has_configured_token = bool(settings.auth.github_token)
-            if settings.upstream.type == "generic" or has_configured_token:
-                await initialize_upstream_services(runtime)
+            token_path = Path(settings.auth.token_file) if settings.auth.token_file else None
+            has_noninteractive_token = await noninteractive_token_available(
+                settings.auth.github_token,
+                token_path,
+            )
+            if settings.upstream.type == "generic" or has_noninteractive_token:
+                services = await initialize_upstream_services(runtime)
+                if services.copilot_tokens is not None:
+                    task_group.start_soon(services.copilot_tokens.run_refresh_loop)
             yield
         finally:
             await close_upstream_services(runtime)

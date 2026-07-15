@@ -150,6 +150,21 @@ class DeviceAuthProvider(GitHubTokenProvider):
         return await self.get_token()
 
 
+async def noninteractive_token_available(
+    cli_token: str | None,
+    token_path: Path | None,
+) -> bool:
+    providers: tuple[GitHubTokenProvider, ...] = (
+        CLITokenProvider(cli_token),
+        EnvTokenProvider(),
+        FileTokenProvider(token_path),
+    )
+    for provider in providers:
+        if await provider.is_available():
+            return True
+    return False
+
+
 class GitHubTokenManager:
     def __init__(self, providers: list[GitHubTokenProvider]) -> None:
         self._providers = sorted(providers, key=lambda provider: provider.priority)

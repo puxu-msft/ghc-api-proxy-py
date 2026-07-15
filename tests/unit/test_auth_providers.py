@@ -11,6 +11,7 @@ from app.auth.providers import (
     GitHubTokenManager,
     GitHubTokenProvider,
     TokenInfo,
+    noninteractive_token_available,
 )
 
 
@@ -165,3 +166,18 @@ async def test_device_provider_persists_interactive_token(tmp_path: Path) -> Non
         source="file",
         refreshable=False,
     )
+
+
+@pytest.mark.asyncio
+async def test_noninteractive_token_probe_checks_env_and_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token_path = tmp_path / "github_token"
+
+    assert await noninteractive_token_available(None, token_path) is False
+    monkeypatch.setenv("GITHUB_TOKEN", "from-env")
+    assert await noninteractive_token_available(None, token_path) is True
+    monkeypatch.delenv("GITHUB_TOKEN")
+    token_path.write_text("from-file", encoding="utf-8")
+    assert await noninteractive_token_available(None, token_path) is True

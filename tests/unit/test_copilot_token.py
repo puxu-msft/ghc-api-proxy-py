@@ -193,3 +193,16 @@ async def test_401_refreshes_github_token_before_retry() -> None:
 
     assert provider.refresh_calls == 1
     assert seen_authorization == ["token old", "token new"]
+
+
+def test_next_refresh_delay_uses_server_hint_with_safety_margin() -> None:
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(500)))
+    manager = CopilotTokenManager(
+        GitHubTokenManager([StaticGitHubProvider()]),
+        http_client,
+        clock=lambda: 1000,
+        minimum_refresh_interval=60,
+    )
+
+    assert manager.next_refresh_delay(refresh_in=1500) == 1440
+    assert manager.next_refresh_delay(refresh_in=30) == 60

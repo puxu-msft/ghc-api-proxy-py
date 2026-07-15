@@ -29,6 +29,7 @@ class CopilotTokenManager:
         clock: Callable[[], float] = time.time,
         sleep: Callable[[float], Awaitable[None]] = anyio.sleep,
         validity_margin: float = 60.0,
+        minimum_refresh_interval: float = 60.0,
         max_exchange_attempts: int = 3,
     ) -> None:
         self._github_tokens = github_tokens
@@ -36,6 +37,7 @@ class CopilotTokenManager:
         self._clock = clock
         self._sleep = sleep
         self._validity_margin = validity_margin
+        self._minimum_refresh_interval = minimum_refresh_interval
         self._max_exchange_attempts = max_exchange_attempts
         self._current: CopilotTokenInfo | None = None
         self._lock = anyio.Lock()
@@ -55,6 +57,15 @@ class CopilotTokenManager:
     async def ensure_valid_token(self) -> None:
         if not self._is_valid():
             await self.refresh()
+
+    def next_refresh_delay(self, *, refresh_in: int) -> float:
+        return max(float(refresh_in) - self._validity_margin, self._minimum_refresh_interval)
+
+    async def run_refresh_loop(self) -> None:
+        while True:
+            info = await self.refresh()
+            await self._sleep(self.next_refresh_delay(refresh_in=info.refresh_in))
+            await self.refresh(force=True)
 
     async def refresh(self, *, force: bool = False) -> CopilotTokenInfo:
         async with self._lock:
