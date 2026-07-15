@@ -5,7 +5,9 @@ from typing import Annotated
 import typer
 import uvicorn
 import yaml
+from anyio import run
 
+from app.auth.service import authenticate_device, clear_stored_token
 from app.config.loader import load_settings
 from app.config.paths import config_file_path
 from app.config.settings import AppSettings
@@ -106,7 +108,8 @@ def start(
 
 
 def _authenticate() -> None:
-    _not_implemented("auth")
+    verification_uri, user_code = run(authenticate_device)
+    typer.echo(f"Visit {verification_uri} and enter code {user_code}")
 
 
 @app.command("auth")
@@ -124,7 +127,8 @@ def login() -> None:
 @app.command()
 def logout() -> None:
     """Remove locally stored authentication state."""
-    _not_implemented("logout")
+    run(clear_stored_token)
+    typer.echo("Stored GitHub token removed")
 
 
 @app.command("setup-claude-code")

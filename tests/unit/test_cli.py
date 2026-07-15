@@ -1,5 +1,5 @@
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from typer.testing import CliRunner
@@ -48,12 +48,16 @@ def test_start_subcommand_exposes_bootstrap_options() -> None:
 
 
 def test_auth_and_login_are_aliases() -> None:
-    auth_result = runner.invoke(app, ["auth"])
-    login_result = runner.invoke(app, ["login"])
+    with pytest.MonkeyPatch.context() as patch:
+        authenticate = AsyncMock(return_value=("https://github.com/login/device", "CODE"))
+        patch.setattr("app.cli.authenticate_device", authenticate)
+        auth_result = runner.invoke(app, ["auth"])
+        login_result = runner.invoke(app, ["login"])
 
     assert auth_result.exit_code == 0
     assert login_result.exit_code == 0
     assert auth_result.stdout == login_result.stdout
+    assert authenticate.await_count == 2
 
 
 def test_debug_subcommands_exist() -> None:
@@ -95,3 +99,14 @@ def test_start_merges_cli_overrides_and_runs_uvicorn(monkeypatch: pytest.MonkeyP
     assert application.state.runtime.settings.approval.enabled is True
     assert application.state.runtime.settings.observability.log_level == "DEBUG"
     run.assert_called_once_with(application, host="0.0.0.0", port=4242, log_config=None)
+
+
+def test_logout_clears_stored_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    clear = AsyncMock()
+    monkeypatch.setattr("app.cli.clear_stored_token", clear)
+
+    result = runner.invoke(app, ["logout"])
+
+    assert result.exit_code == 0
+    assert "removed" in result.stdout.lower()
+    clear.assert_awaited_once()
