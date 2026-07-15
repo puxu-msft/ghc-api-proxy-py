@@ -47,9 +47,11 @@ class OpenAIClient:
         response = await self._target.send_responses(self._wire(request), stream=request.stream)
         if request.stream or not response.is_success:
             return response
-        data: JsonValue = loads(await response.aread())
-        normalized = normalize_call_ids(data)
-        await response.aclose()
+        try:
+            data: JsonValue = loads(await response.aread())
+            normalized = normalize_call_ids(data)
+        finally:
+            await response.aclose()
         return httpx.Response(
             response.status_code,
             headers=response.headers,

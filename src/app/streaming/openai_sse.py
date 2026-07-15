@@ -6,7 +6,7 @@ from app.wire_json import JsonValue, loads
 async def parse_sse_json(stream: AsyncIterator[bytes]) -> AsyncIterator[JsonValue]:
     buffer = bytearray()
     async for chunk in stream:
-        buffer.extend(chunk)
+        buffer.extend(chunk.replace(b"\r\n", b"\n").replace(b"\r", b"\n"))
         while b"\n\n" in buffer:
             frame, _, remainder = buffer.partition(b"\n\n")
             buffer = bytearray(remainder)

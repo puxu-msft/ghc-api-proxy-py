@@ -1,3 +1,5 @@
+import json
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.deps import OpenAIClientDependency
@@ -28,6 +30,21 @@ async def responses_websocket(
         payload["stream"] = True
         request = ResponsesRequest.model_validate(payload)
         upstream = await client.responses(request)
+        if not upstream.is_success:
+            data = await upstream.aread()
+            message = "Upstream request failed"
+            try:
+                parsed = json.loads(data)
+                message = parsed.get("error", {}).get("message", message)
+            except (ValueError, AttributeError):
+                pass
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "error": {"message": message, "status_code": upstream.status_code},
+                }
+            )
+            return
         async for event in parse_sse_json(upstream.aiter_raw()):
             await websocket.send_json(event)
     except WebSocketDisconnect:

@@ -32,16 +32,14 @@ def openai_to_anthropic(payload: dict[str, Any]) -> dict[str, Any]:
             output["content"] = blocks
             output.pop("tool_calls", None)
         elif role == "tool":
-            output = {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": message.get("tool_call_id"),
-                        "content": message.get("content", ""),
-                    }
-                ],
+            tool_result = {
+                "type": "tool_result",
+                "tool_use_id": message.get("tool_call_id"),
+                "content": message.get("content", ""),
             }
+            output["role"] = "user"
+            output["content"] = [tool_result]
+            output.pop("tool_call_id", None)
         output_messages.append(output)
     result["messages"] = output_messages
     if system_parts:
@@ -56,6 +54,15 @@ def anthropic_to_openai(payload: dict[str, Any]) -> dict[str, Any]:
     system = result.pop("system", None)
     if isinstance(system, str):
         output_messages.append({"role": "system", "content": system})
+    elif isinstance(system, list):
+        system_blocks = cast(list[dict[str, Any]], system)
+        text = "\n".join(
+            str(block.get("text", ""))
+            for block in system_blocks
+            if block.get("type") == "text"
+        )
+        if text:
+            output_messages.append({"role": "system", "content": text})
     for message in source_messages:
         output = copy.deepcopy(message)
         content = message.get("content")
@@ -67,6 +74,23 @@ def anthropic_to_openai(payload: dict[str, Any]) -> dict[str, Any]:
                 if block.get("type") == "text"
             ]
             calls = [block for block in blocks if block.get("type") == "tool_use"]
+            results = [block for block in blocks if block.get("type") == "tool_result"]
+            if results:
+                for block in results:
+                    tool_message = {
+                        key: copy.deepcopy(value)
+                        for key, value in block.items()
+                        if key not in ("type", "tool_use_id")
+                    }
+                    tool_message.update(
+                        {
+                            "role": "tool",
+                            "tool_call_id": block.get("tool_use_id"),
+                            "content": block.get("content", ""),
+                        }
+                    )
+                    output_messages.append(tool_message)
+                continue
             output["content"] = "".join(texts) or None
             if calls:
                 output["tool_calls"] = [

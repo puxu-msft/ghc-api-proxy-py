@@ -17,7 +17,12 @@ async def status(runtime: RuntimeDependency) -> dict[str, Any]:
 
 @router.get("/api/config")
 async def config(settings: SettingsDependency) -> dict[str, Any]:
-    return settings.model_dump(mode="json")
+    data = settings.model_dump(mode="json")
+    if data["auth"]["github_token"]:
+        data["auth"]["github_token"] = "***"
+    if data["upstream"]["api_key"]:
+        data["upstream"]["api_key"] = "***"
+    return data
 
 
 @router.post("/api/event_logging/batch", status_code=204)

@@ -28,6 +28,15 @@ class StubOpenAIClient:
         return httpx.Response(200, json={"object": "list", "data": []})
 
 
+class FailingStreamClient(StubOpenAIClient):
+    async def chat(self, request: ChatCompletionRequest) -> httpx.Response:
+        return httpx.Response(
+            429,
+            request=httpx.Request("POST", "https://upstream.test/chat/completions"),
+            json={"error": {"type": "rate_limit_error"}},
+        )
+
+
 class StubCatalog:
     models = (ModelInfo(id="gpt-test", vendor="OpenAI"),)
     available_ids = frozenset({"gpt-test"})
@@ -77,3 +86,16 @@ def test_responses_and_embeddings_routes() -> None:
 
     assert responses.status_code == 200
     assert embeddings.status_code == 200
+
+
+def test_streaming_error_preserves_upstream_status() -> None:
+    app = _app()
+    app.dependency_overrides[get_openai_client] = lambda: FailingStreamClient()
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={"model": "gpt-test", "stream": True, "messages": []},
+        )
+
+    assert response.status_code == 429
+    assert response.json() == {"error": {"type": "rate_limit_error"}}

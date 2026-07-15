@@ -87,3 +87,53 @@ def test_system_prompt_rules_apply_replace_prepend_append_without_mutating_input
 
     assert result[0]["content"] == "prefix\nnew rule\nsuffix"
     assert messages[0]["content"] == "old rule"
+
+
+def test_anthropic_list_system_and_tool_result_are_preserved() -> None:
+    payload = {
+        "model": "claude-test",
+        "system": [
+            {"type": "text", "text": "first", "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": "second"},
+        ],
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tool_1",
+                        "content": "result",
+                        "future": True,
+                    }
+                ],
+            }
+        ],
+    }
+
+    translated = anthropic_to_openai(payload)
+
+    assert translated["messages"][0]["content"] == "first\nsecond"
+    assert translated["messages"][1] == {
+        "role": "tool",
+        "tool_call_id": "tool_1",
+        "content": "result",
+        "future": True,
+    }
+
+
+def test_openai_tool_message_extra_fields_are_preserved() -> None:
+    payload = {
+        "messages": [
+            {
+                "role": "tool",
+                "tool_call_id": "tool_1",
+                "content": "result",
+                "future": {"keep": True},
+            }
+        ]
+    }
+
+    translated = openai_to_anthropic(payload)
+
+    assert translated["messages"][0]["future"] == {"keep": True}

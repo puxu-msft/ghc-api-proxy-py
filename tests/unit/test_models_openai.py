@@ -62,7 +62,7 @@ def test_normalize_call_ids_rewrites_call_prefix_recursively() -> None:
     }
 
     assert normalize_call_ids(value) == {
-        "id": "fc_root",
+        "id": "call_root",
         "output": [
             {"type": "function_call", "id": "fc_item", "call_id": "fc_item"},
             {"type": "function_call_output", "call_id": "fc_item"},

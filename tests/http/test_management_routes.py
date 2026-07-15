@@ -1,11 +1,20 @@
 from fastapi.testclient import TestClient
 
 from app.config.settings import AppSettings
+from app.deps import get_settings
 from app.server import create_app
 
 
 def test_status_and_config_management_routes() -> None:
-    with TestClient(create_app(AppSettings())) as client:
+    settings = AppSettings.model_validate(
+        {
+            "auth": {"github_token": "ghu-secret"},
+            "upstream": {"api_key": "sk-secret"},
+        }
+    )
+    app = create_app(AppSettings())
+    app.dependency_overrides[get_settings] = lambda: settings
+    with TestClient(app) as client:
         status = client.get("/api/status")
         config = client.get("/api/config")
 
@@ -13,6 +22,10 @@ def test_status_and_config_management_routes() -> None:
     assert status.json()["ready"] is False
     assert config.status_code == 200
     assert config.json()["port"] == 4141
+    assert config.json()["auth"]["github_token"] == "***"
+    assert config.json()["upstream"]["api_key"] == "***"
+    assert "ghu-secret" not in config.text
+    assert "sk-secret" not in config.text
 
 
 def test_event_logging_batch_is_silently_consumed() -> None:

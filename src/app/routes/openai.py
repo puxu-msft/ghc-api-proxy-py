@@ -11,7 +11,7 @@ router = APIRouter(tags=["openai"])
 
 
 async def _response(upstream: httpx.Response, *, stream: bool = False) -> Response:
-    if stream:
+    if stream and upstream.is_success:
         return create_sse_response(
             passthrough_bytes(upstream.aiter_raw(), cleanup=upstream.aclose)
         )
