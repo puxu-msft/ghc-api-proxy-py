@@ -52,8 +52,17 @@ class AnthropicClient:
         request: MessagesRequest,
     ) -> tuple[httpx.Response, PreparedAnthropicRequest]:
         prepared = self.prepare(request)
+        response = await self.send_prepared(prepared, stream=request.stream)
+        return response, prepared
+
+    async def send_prepared(
+        self,
+        prepared: PreparedAnthropicRequest,
+        *,
+        stream: bool,
+    ) -> httpx.Response:
         response = await self._target.send_anthropic(
             prepared.wire,
-            stream=request.stream,
+            stream=stream,
         )
-        return response, prepared
+        return response
