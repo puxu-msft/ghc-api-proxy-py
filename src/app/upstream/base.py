@@ -30,3 +30,8 @@ class UpstreamTarget(Protocol):
         *,
         stream: bool = False,
     ) -> httpx.Response: ...
+
+    async def send_embeddings(
+        self,
+        payload: Mapping[str, Any],
+    ) -> httpx.Response: ...

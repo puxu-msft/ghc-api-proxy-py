@@ -126,3 +126,14 @@ class CopilotUpstream:
             options={"headers": await self._headers()},
             stream=stream,
         )
+
+    async def send_embeddings(
+        self,
+        payload: Mapping[str, Any],
+    ) -> httpx.Response:
+        return await self._clients.openai.post(
+            "/embeddings",
+            cast_to=httpx.Response,
+            body=cast(OpenAIBody, dict(payload)),
+            options={"headers": await self._headers()},
+        )
