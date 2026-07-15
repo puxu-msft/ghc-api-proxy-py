@@ -35,6 +35,8 @@ class ModelInfo(WireModel):
     object: str = "model"
     vendor: str | None = None
     version: str | None = None
+    supported_endpoints: list[str] = Field(default_factory=list)
+    request_headers: dict[str, str] = Field(default_factory=dict)
     capabilities: ModelCapabilities = Field(default_factory=ModelCapabilities)
 
 

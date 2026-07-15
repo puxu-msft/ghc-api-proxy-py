@@ -35,11 +35,15 @@ def test_model_info_preserves_catalog_metadata() -> None:
             "id": "claude-test",
             "name": "Claude Test",
             "capabilities": {"supports": {"tool_calls": True}},
+            "supported_endpoints": ["/v1/messages"],
+            "request_headers": {"x-model-route": "a"},
             "vendor_extension": 42,
         }
     )
 
     assert model.capabilities.supports.tool_calls is True
+    assert model.supported_endpoints == ["/v1/messages"]
+    assert model.request_headers == {"x-model-route": "a"}
     assert model.model_extra == {"vendor_extension": 42}
 
 
