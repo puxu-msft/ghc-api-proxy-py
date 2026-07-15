@@ -49,7 +49,7 @@ def test_start_subcommand_exposes_bootstrap_options() -> None:
 
 def test_auth_and_login_are_aliases() -> None:
     with pytest.MonkeyPatch.context() as patch:
-        authenticate = AsyncMock(return_value=("https://github.com/login/device", "CODE"))
+        authenticate = AsyncMock()
         patch.setattr("app.cli.authenticate_device", authenticate)
         auth_result = runner.invoke(app, ["auth"])
         login_result = runner.invoke(app, ["login"])

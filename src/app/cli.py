@@ -108,8 +108,10 @@ def start(
 
 
 def _authenticate() -> None:
-    verification_uri, user_code = run(authenticate_device)
-    typer.echo(f"Visit {verification_uri} and enter code {user_code}")
+    def notify(verification_uri: str, user_code: str) -> None:
+        typer.echo(f"Visit {verification_uri} and enter code {user_code}")
+
+    run(authenticate_device, notify)
 
 
 @app.command("auth")
