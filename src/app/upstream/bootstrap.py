@@ -58,6 +58,12 @@ async def initialize_upstream_services(
     http_client: httpx.AsyncClient | None = None,
 ) -> UpstreamServices:
     settings = runtime.settings
+    if settings.upstream.type == "generic":
+        if not settings.upstream.openai_base_url:
+            raise ValueError("generic upstream requires upstream.openai_base_url")
+        if not settings.upstream.api_key:
+            raise ValueError("generic upstream requires upstream.api_key")
+
     client = http_client or create_http_client(settings)
     if settings.upstream.type == "generic":
         sdk_clients = create_sdk_clients(settings, http_client=client)

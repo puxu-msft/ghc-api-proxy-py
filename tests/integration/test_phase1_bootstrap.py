@@ -56,3 +56,11 @@ async def test_copilot_bootstrap_initializes_typed_runtime_services() -> None:
         "/copilot_internal/user",
         "/models",
     ]
+
+
+@pytest.mark.asyncio
+async def test_generic_bootstrap_requires_base_url_and_api_key() -> None:
+    runtime = RuntimeState(settings=AppSettings.model_validate({"upstream": {"type": "generic"}}))
+
+    with pytest.raises(ValueError, match="openai_base_url"):
+        await initialize_upstream_services(runtime)
