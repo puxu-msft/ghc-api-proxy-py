@@ -8,6 +8,7 @@ from app.anthropic.token_counting import TokenCounter
 from app.config.settings import AppSettings
 from app.models.common import ModelInfo
 from app.openai.client import OpenAIClient
+from app.openai.responses_ws import ResponsesWebSocketClient
 from app.runtime import RuntimeState
 
 
@@ -58,9 +59,20 @@ def get_model_catalog(request: Request) -> ModelCatalogView:
     return services.model_catalog
 
 
+def get_responses_ws_client(request: Request) -> ResponsesWebSocketClient:
+    client = get_runtime_state(request).responses_ws_client
+    if client is None:
+        raise RuntimeError("Responses WebSocket client is not initialized")
+    return client
+
+
 RuntimeDependency = Annotated[RuntimeState, Depends(get_runtime_state)]
 SettingsDependency = Annotated[AppSettings, Depends(get_settings)]
 AnthropicClientDependency = Annotated[AnthropicClient, Depends(get_anthropic_client)]
 TokenCounterDependency = Annotated[TokenCounter, Depends(get_token_counter)]
 OpenAIClientDependency = Annotated[OpenAIClient, Depends(get_openai_client)]
 ModelCatalogDependency = Annotated[ModelCatalogView, Depends(get_model_catalog)]
+ResponsesWSClientDependency = Annotated[
+    ResponsesWebSocketClient,
+    Depends(get_responses_ws_client),
+]

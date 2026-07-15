@@ -1,10 +1,7 @@
-import json
-
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app.deps import OpenAIClientDependency
+from app.deps import ResponsesWSClientDependency
 from app.models.openai import ResponsesRequest
-from app.streaming.openai_sse import parse_sse_json
 
 router = APIRouter(tags=["openai-responses"])
 
@@ -12,10 +9,9 @@ router = APIRouter(tags=["openai-responses"])
 @router.websocket("/responses")
 async def responses_websocket(
     websocket: WebSocket,
-    client: OpenAIClientDependency,
+    ws_client: ResponsesWSClientDependency,
 ) -> None:
     await websocket.accept()
-    upstream = None
     try:
         frame = await websocket.receive_json()
         if frame.get("type") != "response.create" or not isinstance(
@@ -28,27 +24,10 @@ async def responses_websocket(
             return
         payload = dict(frame["response"])
         payload["stream"] = True
-        request = ResponsesRequest.model_validate(payload)
-        upstream = await client.responses(request)
-        if not upstream.is_success:
-            data = await upstream.aread()
-            message = "Upstream request failed"
-            try:
-                parsed = json.loads(data)
-                message = parsed.get("error", {}).get("message", message)
-            except (ValueError, AttributeError):
-                pass
-            await websocket.send_json(
-                {
-                    "type": "error",
-                    "error": {"message": message, "status_code": upstream.status_code},
-                }
-            )
-            return
-        async for event in parse_sse_json(upstream.aiter_raw()):
+        ResponsesRequest.model_validate(payload)
+        async for event in ws_client.create_response(
+            {"type": "response.create", "response": payload}
+        ):
             await websocket.send_json(event)
     except WebSocketDisconnect:
         return
-    finally:
-        if upstream is not None:
-            await upstream.aclose()
