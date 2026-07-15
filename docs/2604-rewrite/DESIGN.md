@@ -115,7 +115,6 @@ src/app/
 ├── errors.py                        # 错误分类、格式化错误响应、wire format 检测
 ├── shutdown.py                      # 4 阶段优雅关闭 + 信号升级
 ├── repetition_detector.py           # KMP 流式重复性检测
-├── system_prompt.py                 # System prompt override（prepend/append/regex）
 │
 ├── config/
 │   ├── settings.py                  # Pydantic BaseSettings（全部配置，frozen）

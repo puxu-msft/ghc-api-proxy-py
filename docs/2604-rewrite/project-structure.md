@@ -18,7 +18,6 @@ ghc-api-proxy-py/
 │   ├── errors.py                        # 错误分类、格式化错误响应、wire format 检测
 │   ├── shutdown.py                      # 4 阶段优雅关闭 + 信号升级
 │   ├── repetition_detector.py           # KMP 流式重复性检测
-│   ├── system_prompt.py                 # System prompt override 应用（prepend/append/regex）
 │   │
 │   ├── config/
 │   │   ├── __init__.py
@@ -258,8 +257,9 @@ ghc-api-proxy-py/
 - `protocols/`（azure、gemini）依赖 `models/`、`transform/`、`openai/` 或 `anthropic/`（各自复用对应格式的客户端与清洗）
 - `auth/` 仅依赖 `config/`
 - `upstream/` 依赖 `auth/`、`config/`、`models/`
-- `context/` 依赖 `history/`、`pipeline/`（manager 的门面）
-- `pipeline/` 依赖 `upstream/`、`transform/`、`anthropic/`、`openai/`、`history/`、`context/`、`config/`
+- `context/` 仅依赖 `models/` 与 `observability/`（事件/观察者接口）；**不依赖 `history/`**——历史是消费者
+- `history/` 依赖 `context/`（作为 HistorySink 订阅请求生命周期事件）+ `config/`；据此 `context/`（Phase 5）与 `history/`（Phase 6）依赖面不重叠，可并行构建
+- `pipeline/` 依赖 `upstream/`、`transform/`、`anthropic/`、`openai/`、`context/`、`config/`（经观察者向 `history/` 发事件，不直接 import）
 - `routes/` 依赖 `pipeline/`、`models/`、`deps.py`
 - `server.py` 组装所有模块
 - `cli.py` 仅调用 `server.py` 和 `config/`
@@ -635,10 +635,6 @@ def get_context_manager(request: Request) -> RequestContextManager: ...
 ### `repetition_detector.py` — 重复性检测
 
 使用 KMP 前缀函数检测流式输出中的重复模式。当模型陷入重复输出循环时发出警告。
-
-### `system_prompt.py` — System Prompt Override
-
-应用 `system_prompt.*` 配置中的系统提示词覆盖规则（prepend/append/regex，按 model/endpoint 限定作用域）。
 
 ## 测试结构
 
