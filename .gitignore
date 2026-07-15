@@ -2,6 +2,8 @@
 .venv
 
 __pycache__/
+.coverage
+.coverage.*
 build/
 dist/
 *.py[cod]
