@@ -13,6 +13,11 @@ def sanitize_messages(
         tools,
     )
     cleaned, empty_removed = filter_empty_text_blocks(cleaned)
+    cleaned = [
+        message
+        for message in cleaned
+        if not isinstance(message.content, list) or message.content
+    ]
     return SanitizationResult(
         messages=cleaned,
         orphaned_tool_uses_removed=orphan_uses,

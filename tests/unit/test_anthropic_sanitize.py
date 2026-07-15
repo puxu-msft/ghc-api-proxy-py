@@ -58,7 +58,7 @@ def test_orphan_tool_blocks_and_empty_text_are_removed() -> None:
     assistant_content = result.messages[0].content
     assert isinstance(assistant_content, list)
     assert [block.text for block in assistant_content] == ["keep"]
-    assert result.messages[1].content == []
+    assert len(result.messages) == 1
 
 
 def test_string_content_is_not_rewritten() -> None:
