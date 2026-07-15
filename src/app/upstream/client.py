@@ -13,9 +13,9 @@ class SDKClients:
     openai: AsyncOpenAI
     anthropic: AsyncAnthropic
 
-    async def close(self, *, close_http_client: bool = True) -> None:
-        if close_http_client:
-            await self.openai.close()
+    async def close(self) -> None:
+        await self.openai.close()
+        await self.anthropic.close()
 
 
 def create_http_client(settings: AppSettings) -> httpx.AsyncClient:

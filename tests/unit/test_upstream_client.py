@@ -71,8 +71,9 @@ async def test_sdk_clients_share_http_pool_and_disable_retries() -> None:
         assert clients.anthropic.max_retries == 0
     finally:
         if clients is not None:
-            await clients.close(close_http_client=False)
-        await http_client.aclose()
+            await clients.close()
+
+    assert http_client.is_closed is True
 
 
 def test_http_client_has_no_transport_retry_wrapper() -> None:
