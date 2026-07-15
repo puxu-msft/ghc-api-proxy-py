@@ -24,12 +24,15 @@ config / models / errors
 
 > 目标：能启动空壳服务、有配置、有日志、有健康检查。为后续一切提供地基。
 
-- [ ] `config/`（settings / loader / paths / compat）—— frozen Pydantic Settings、四层合并、跨平台路径
-- [ ] `models/`（common / capabilities）—— 叶子数据模型：Usage、ModelInfo、ErrorResponse、能力元数据
-- [ ] `errors.py` —— 错误分类、wire format 检测、格式化错误响应
-- [ ] `observability/`（logging 骨架）—— 结构化日志、固定宽度前缀
-- [ ] `server.py` / `deps.py` / `cli.py`（骨架）—— 应用工厂、分阶段 lifespan 空实现、DI 提供者、argparse
-- [ ] `routes/health.py` —— `/health`、`/health/liveness`、`/health/readiness`
+- [x] `config/`（settings / loader / paths / compat）—— frozen Pydantic Settings、四层合并、跨平台路径
+- [x] `models/`（common / capabilities）—— 叶子数据模型：Usage、ModelInfo、ErrorResponse、能力元数据
+- [x] `errors.py` —— 错误分类、wire format 检测、格式化错误响应
+- [x] `observability/`（logging 骨架）—— 结构化日志、固定宽度前缀
+- [x] `server.py` / `deps.py` / `cli.py`（骨架）—— 应用工厂、分阶段 lifespan 空实现、DI 提供者、Typer
+- [x] `routes/health.py` —— `/health`、`/health/liveness`、`/health/readiness`
+- [x] `wire_json.py` —— 集中式 orjson wire codec、差异与边界策略测试
+
+**完成记录（2026-07-15）**：Python 3.14.2 下 65 个测试通过，覆盖率 92.87%，Ruff 与 Pyright strict 通过；真实 uvicorn 动态端口启动、配置生成、liveness 和 SIGTERM 关闭均通过；独立 reviewer 为 0 blocker / 0 major，所报配置路径与合并策略问题已修复。
 
 **里程碑**：服务可启动、可配置、可观测。
 
@@ -105,13 +108,13 @@ config / models / errors
 - [ ] `history/`（store / sqlite / in_flight / sessions / ws / types）—— 异步 SQLite（off-loop writer）+ 双源 + 分桶 reaper + WS
 - [ ] `observability/`（tracing / telemetry / middleware）—— OpenTelemetry、轻量遥测、`/metrics`
 - [ ] `routes/history.py` / `routes/management.py` / `routes/metrics.py` —— History REST/WS、`/api/*` 管理、Prometheus
-- [ ] `observability/tui.py`（可选）—— 终端 UI
+- [ ] `observability/tui.py` —— Textual 终端 UI
 
 **里程碑**：完整审计 + 可观测。
 
 ## Phase 7 — 手动审批（本项目独有）
 
-- [ ] `pipeline/approval.py` + `routes/approval.py` —— asyncio.Event 门控、审批 REST/WS（**复用** Phase 6 的 `history/ws.py` WebSocketManager，不另造广播）
+- [ ] `pipeline/approval.py` + `routes/approval.py` —— AnyIO 取消/超时作用域门控、审批 REST/WS（**复用** Phase 6 的 `history/ws.py` WebSocketManager，不另造广播）
 
 ## Phase 8 — 多协议扩展
 
