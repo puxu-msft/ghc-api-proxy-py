@@ -1,11 +1,24 @@
-from typing import Annotated
+from collections.abc import Set
+from typing import Annotated, Protocol
 
 from fastapi import Depends, Request
 
 from app.anthropic.client import AnthropicClient
 from app.anthropic.token_counting import TokenCounter
 from app.config.settings import AppSettings
+from app.models.common import ModelInfo
+from app.openai.client import OpenAIClient
 from app.runtime import RuntimeState
+
+
+class ModelCatalogView(Protocol):
+    @property
+    def models(self) -> tuple[ModelInfo, ...]: ...
+
+    @property
+    def available_ids(self) -> Set[str]: ...
+
+    def get(self, model_id: str) -> ModelInfo | None: ...
 
 
 def get_runtime_state(request: Request) -> RuntimeState:
@@ -31,7 +44,23 @@ def get_token_counter(request: Request) -> TokenCounter:
     return counter
 
 
+def get_openai_client(request: Request) -> OpenAIClient:
+    client = get_runtime_state(request).openai_client
+    if client is None:
+        raise RuntimeError("OpenAI client is not initialized")
+    return client
+
+
+def get_model_catalog(request: Request) -> ModelCatalogView:
+    services = get_runtime_state(request).upstream_services
+    if services is None:
+        raise RuntimeError("Upstream services are not initialized")
+    return services.model_catalog
+
+
 RuntimeDependency = Annotated[RuntimeState, Depends(get_runtime_state)]
 SettingsDependency = Annotated[AppSettings, Depends(get_settings)]
 AnthropicClientDependency = Annotated[AnthropicClient, Depends(get_anthropic_client)]
 TokenCounterDependency = Annotated[TokenCounter, Depends(get_token_counter)]
+OpenAIClientDependency = Annotated[OpenAIClient, Depends(get_openai_client)]
+ModelCatalogDependency = Annotated[ModelCatalogView, Depends(get_model_catalog)]

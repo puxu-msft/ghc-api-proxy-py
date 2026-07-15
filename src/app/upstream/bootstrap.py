@@ -17,6 +17,7 @@ from app.auth.providers import (
     FileTokenProvider,
     GitHubTokenManager,
 )
+from app.openai.client import OpenAIClient
 from app.runtime import RuntimeState
 from app.transform.model_resolver import ModelResolver
 from app.upstream.base import UpstreamTarget
@@ -122,6 +123,7 @@ async def initialize_upstream_services(
         runtime.upstream_services = services
         runtime.anthropic_client = AnthropicClient(target, resolver)
         runtime.token_counter = TokenCounter(target)
+        runtime.openai_client = OpenAIClient(target, resolver)
         return services
 
     token_path = Path(settings.auth.token_file) if settings.auth.token_file else None
@@ -194,6 +196,7 @@ async def initialize_upstream_services(
     runtime.upstream_services = services
     runtime.anthropic_client = AnthropicClient(target, resolver)
     runtime.token_counter = TokenCounter(target)
+    runtime.openai_client = OpenAIClient(target, resolver)
     return services
 
 
@@ -213,3 +216,4 @@ async def close_upstream_services(
     runtime.models_ready = False
     runtime.anthropic_client = None
     runtime.token_counter = None
+    runtime.openai_client = None
