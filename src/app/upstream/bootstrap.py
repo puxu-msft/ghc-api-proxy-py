@@ -7,6 +7,8 @@ from uuid import uuid4
 import anyio
 import httpx
 
+from app.anthropic.client import AnthropicClient
+from app.anthropic.token_counting import TokenCounter
 from app.auth.copilot import CopilotTokenManager
 from app.auth.github import GitHubClient, infer_account_type
 from app.auth.providers import (
@@ -117,6 +119,8 @@ async def initialize_upstream_services(
         runtime.github_token_ready = True
         runtime.copilot_token_ready = True
         runtime.upstream_services = services
+        runtime.anthropic_client = AnthropicClient(target, resolver)
+        runtime.token_counter = TokenCounter(target)
         return services
 
     token_path = Path(settings.auth.token_file) if settings.auth.token_file else None
@@ -187,6 +191,8 @@ async def initialize_upstream_services(
     runtime.settings = settings
     runtime.models_ready = True
     runtime.upstream_services = services
+    runtime.anthropic_client = AnthropicClient(target, resolver)
+    runtime.token_counter = TokenCounter(target)
     return services
 
 
@@ -204,3 +210,5 @@ async def close_upstream_services(
     runtime.github_token_ready = False
     runtime.copilot_token_ready = False
     runtime.models_ready = False
+    runtime.anthropic_client = None
+    runtime.token_counter = None

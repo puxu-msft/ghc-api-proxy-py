@@ -9,7 +9,7 @@ from app import __version__
 from app.auth.providers import noninteractive_token_available
 from app.config.settings import AppSettings
 from app.observability.logging import setup_logging
-from app.routes import health_router
+from app.routes import anthropic_router, health_router
 from app.runtime import RuntimeState
 from app.upstream.bootstrap import close_upstream_services, initialize_upstream_services
 
@@ -55,5 +55,6 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         lifespan=_lifespan,
     )
     app.state.runtime = RuntimeState(settings=resolved_settings)
+    app.include_router(anthropic_router)
     app.include_router(health_router)
     return app

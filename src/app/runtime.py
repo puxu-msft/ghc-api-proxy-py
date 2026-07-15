@@ -6,6 +6,8 @@ from anyio.abc import TaskGroup
 from app.config.settings import AppSettings
 
 if TYPE_CHECKING:
+    from app.anthropic.client import AnthropicClient
+    from app.anthropic.token_counting import TokenCounter
     from app.upstream.bootstrap import UpstreamServices
 
 
@@ -18,6 +20,8 @@ class RuntimeState:
     copilot_token_ready: bool = False
     models_ready: bool = False
     upstream_services: UpstreamServices | None = None
+    anthropic_client: AnthropicClient | None = None
+    token_counter: TokenCounter | None = None
 
     def readiness_checks(self) -> dict[str, bool]:
         return {

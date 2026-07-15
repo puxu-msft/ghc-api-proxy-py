@@ -1,12 +1,17 @@
+from __future__ import annotations
+
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx
 
 from app.anthropic.sanitize import SanitizationResult, sanitize_messages
 from app.models.anthropic import MessagesRequest
 from app.transform.model_resolver import ModelResolver
+
+if TYPE_CHECKING:
+    from app.pipeline.executor import PipelineResult
 
 
 class AnthropicTarget(Protocol):
@@ -66,3 +71,8 @@ class AnthropicClient:
             stream=stream,
         )
         return response
+
+    async def execute(self, request: MessagesRequest) -> PipelineResult:
+        from app.pipeline.executor import execute_anthropic_pipeline
+
+        return await execute_anthropic_pipeline(self, request)

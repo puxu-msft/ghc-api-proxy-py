@@ -1,0 +1,107 @@
+from collections.abc import AsyncIterator
+from typing import Any
+
+import httpx
+from fastapi.testclient import TestClient
+
+from app.config.settings import AppSettings
+from app.deps import get_anthropic_client, get_token_counter
+from app.models.anthropic import MessagesRequest
+from app.pipeline.context import Attempt, RequestContext, RequestState
+from app.pipeline.executor import PipelineResult
+from app.server import create_app
+
+
+class BytesStream(httpx.AsyncByteStream):
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        yield b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+
+
+class StubAnthropicClient:
+    def __init__(self, *, streaming: bool) -> None:
+        self.streaming = streaming
+
+    async def execute(self, request: MessagesRequest) -> PipelineResult:
+        context = RequestContext(
+            original_model=request.model,
+            original_payload=request.model_dump(mode="json"),
+            resolved_model="claude-test",
+            state=RequestState.STREAMING if self.streaming else RequestState.COMPLETED,
+            attempts=[Attempt(number=0, status_code=200)],
+        )
+        if self.streaming:
+            response = httpx.Response(200, stream=BytesStream())
+        else:
+            response = httpx.Response(
+                200,
+                json={
+                    "id": "msg_1",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-test",
+                    "content": [{"type": "text", "text": "hello"}],
+                    "future": True,
+                },
+            )
+        return PipelineResult(context=context, response=response)
+
+
+class StubCounter:
+    async def count(self, request: MessagesRequest) -> dict[str, Any]:
+        assert request.model == "claude-test"
+        return {"input_tokens": 12, "future": True}
+
+
+def _app(client: StubAnthropicClient):
+    app = create_app(AppSettings())
+    app.dependency_overrides[get_anthropic_client] = lambda: client
+    app.dependency_overrides[get_token_counter] = lambda: StubCounter()
+    return app
+
+
+def test_post_v1_messages_non_streaming_preserves_response() -> None:
+    with TestClient(_app(StubAnthropicClient(streaming=False))) as client:
+        response = client.post(
+            "/v1/messages",
+            json={
+                "model": "claude-test",
+                "max_tokens": 100,
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["future"] is True
+
+
+def test_post_v1_messages_streaming_passthrough_headers() -> None:
+    with TestClient(_app(StubAnthropicClient(streaming=True))) as client:
+        response = client.post(
+            "/v1/messages",
+            json={
+                "model": "claude-test",
+                "max_tokens": 100,
+                "stream": True,
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.headers["x-accel-buffering"] == "no"
+    assert response.content == b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+
+
+def test_post_count_tokens_returns_service_result() -> None:
+    with TestClient(_app(StubAnthropicClient(streaming=False))) as client:
+        response = client.post(
+            "/v1/messages/count_tokens",
+            json={
+                "model": "claude-test",
+                "max_tokens": 100,
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"input_tokens": 12, "future": True}
