@@ -8,7 +8,7 @@ import anyio
 import httpx
 
 from app.anthropic.client import AnthropicClient
-from app.anthropic.token_counting import TokenCounter
+from app.anthropic.token_counting import TokenCounter, preload_tokenizer
 from app.auth.copilot import CopilotTokenManager
 from app.auth.github import GitHubClient, infer_account_type
 from app.auth.providers import (
@@ -81,6 +81,7 @@ async def initialize_upstream_services(
     http_client: httpx.AsyncClient | None = None,
 ) -> UpstreamServices:
     settings = runtime.settings
+    await preload_tokenizer()
     if settings.upstream.type == "generic":
         if not settings.upstream.openai_base_url:
             raise ValueError("generic upstream requires upstream.openai_base_url")

@@ -16,6 +16,10 @@ class CountTokensTarget(Protocol):
     ) -> httpx.Response: ...
 
 
+async def preload_tokenizer() -> None:
+    await run_sync(tiktoken.get_encoding, "o200k_base")
+
+
 def _content_for_count(content: str | list[ContentBlock], *, assistant: bool) -> str:
     if isinstance(content, str):
         return content
