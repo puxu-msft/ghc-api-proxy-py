@@ -31,6 +31,12 @@ class AuthConfig(FrozenModel):
     show_github_token: bool = False
 
 
+class HeadersConfig(FrozenModel):
+    vscode_version: str = "1.104.3"
+    copilot_version: str = "0.38.0"
+    api_version: str = "2025-05-01"
+
+
 class ApprovalConfig(FrozenModel):
     enabled: bool = False
     timeout_seconds: float = 300.0
@@ -96,6 +102,7 @@ class AppSettings(BaseSettings):
     debug: bool = False
     upstream: UpstreamConfig = Field(default_factory=UpstreamConfig)
     auth: AuthConfig = Field(default_factory=AuthConfig)
+    headers: HeadersConfig = Field(default_factory=HeadersConfig)
     approval: ApprovalConfig = Field(default_factory=ApprovalConfig)
     history: HistoryConfig = Field(default_factory=HistoryConfig)
     rate_limiter: RateLimiterConfig = Field(default_factory=RateLimiterConfig)

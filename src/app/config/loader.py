@@ -22,6 +22,7 @@ SECTION_PATHS = frozenset(
         ("approval",),
         ("auth",),
         ("history",),
+        ("headers",),
         ("observability",),
         ("rate_limiter",),
         ("timeouts",),
