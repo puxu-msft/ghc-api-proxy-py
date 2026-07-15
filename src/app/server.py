@@ -9,7 +9,7 @@ from app import __version__
 from app.auth.providers import noninteractive_token_available
 from app.config.settings import AppSettings
 from app.observability.logging import setup_logging
-from app.routes import anthropic_router, health_router
+from app.routes import anthropic_router, health_router, management_router
 from app.routes.openai import router as openai_router
 from app.routes.responses_ws import router as responses_ws_router
 from app.runtime import RuntimeState
@@ -58,6 +58,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     )
     app.state.runtime = RuntimeState(settings=resolved_settings)
     app.include_router(anthropic_router)
+    app.include_router(management_router)
     for prefix in ("", "/v1", "/openai/v1"):
         app.include_router(openai_router, prefix=prefix)
         app.include_router(responses_ws_router, prefix=prefix)
