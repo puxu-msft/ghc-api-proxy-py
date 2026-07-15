@@ -40,10 +40,12 @@ config / models / errors
 
 > 目标：能拿到 Copilot token、能向上游发出一个裸请求。
 
-- [ ] `auth/`（providers / github / copilot / device_flow）—— Token provider 链、Copilot token 交换与刷新
-- [ ] `upstream/`（base / client / copilot / generic）—— UpstreamTarget 协议、httpx 客户端封装、请求头伪装
-- [ ] `upstream/models_api.py` —— 模型列表获取、缓存、定期刷新、O(1) 索引
-- [ ] `transform/model_resolver.py` —— 模型名解析（别名 / 标准化 / Override / Family）
+- [x] `auth/`（providers / github / copilot / device_flow）—— Token provider 链、Copilot token 交换与刷新
+- [x] `upstream/`（base / client / copilot / generic）—— UpstreamTarget 协议、httpx 客户端封装、请求头伪装
+- [x] `upstream/models_api.py` —— 模型列表获取、缓存、定期刷新、O(1) 索引
+- [x] `transform/model_resolver.py` —— 模型名解析（别名 / 标准化 / Override / Family）
+
+**完成记录（2026-07-15）**：130 个测试通过；CLI/env/file token provider、显式 Device Flow、Copilot token single-flight 与有限重试、结构化后台刷新、SDK/transport 零重试、raw response passthrough、账户类型推断、模型目录 ETag/保真/O(1) 索引与模型 resolver 已完成。独立 review/verifier 报告的问题均已复核并修复，最终进入 Phase 2。
 
 **里程碑**：认证打通、模型列表可用、模型名可解析。
 

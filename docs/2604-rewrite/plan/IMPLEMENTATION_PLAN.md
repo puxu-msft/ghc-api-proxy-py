@@ -296,6 +296,8 @@ kill %1
 ## Phase 1 — 上游连接与认证
 
 > **目标**: 能拿到 Copilot token、能向上游发出一个裸请求。
+>
+> **实施状态（2026-07-15）**：✅ 完成。130 个测试通过；认证链、Device Flow、Copilot token 生命周期、零重试 SDK raw passthrough、模型目录和 resolver 已通过独立评审与验收。
 
 ### 前置依赖
 
