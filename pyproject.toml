@@ -5,28 +5,55 @@ build-backend = "hatchling.build"
 [project]
 name = "app"
 version = "0.1.0"
-description = "Add your description here"
+description = "High-performance multi-protocol proxy for GitHub Copilot-backed LLM APIs"
 readme = "README.md"
-
 requires-python = ">=3.14"
 dependencies = [
-    "fastapi==0.129.0",
-    "uvicorn==0.40.0",
-    "httpx==0.28.1",
-
-    "anthropic==0.79.0",
-    "openai==2.21.0",
-
-    "opentelemetry-api==1.39.1",
+    "aiofiles",
+    "anthropic",
+    "anyio",
+    "fastapi",
+    "httpx[http2,socks]",
+    "httpx-ws",
+    "openai",
+    "opentelemetry-api",
+    "opentelemetry-exporter-prometheus",
+    "opentelemetry-instrumentation-fastapi",
+    "opentelemetry-instrumentation-httpx",
+    "opentelemetry-sdk",
+    "orjson",
+    "platformdirs",
+    "pydantic",
+    "pydantic-settings[yaml]",
+    "structlog",
+    "textual",
+    "tiktoken",
+    "typer",
+    "uvicorn",
 ]
 
 [dependency-groups]
 dev = [
-    "black",
-    "flake8",
-    "isort",
-    "mypy",
-    "pre-commit",
     "pytest",
+    "pytest-asyncio",
     "pytest-cov",
+    "pyright",
+    "ruff",
 ]
+
+[tool.pytest.ini_options]
+addopts = "--strict-markers --strict-config"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.pyright]
+pythonVersion = "3.14"
+typeCheckingMode = "strict"
+include = ["src", "tests"]
