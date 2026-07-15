@@ -1,3 +1,5 @@
+from collections.abc import AsyncIterator
+
 import httpx
 import pytest
 
@@ -7,6 +9,11 @@ from app.config.settings import AppSettings
 from app.upstream.client import create_copilot_sdk_clients, create_sdk_clients
 from app.upstream.copilot import CopilotUpstream
 from app.upstream.generic import GenericUpstream
+
+
+class RawByteStream(httpx.AsyncByteStream):
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        yield b"data: raw\n\n"
 
 
 class StaticProvider(GitHubTokenProvider):
@@ -32,7 +39,7 @@ async def test_copilot_upstream_returns_unconsumed_raw_anthropic_response() -> N
                 200,
                 json={"token": "copilot", "expires_at": 5000, "refresh_in": 1500},
             )
-        return httpx.Response(200, content=b"data: raw\n\n")
+        return httpx.Response(200, stream=RawByteStream())
 
     http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     settings = AppSettings.model_validate(
@@ -55,6 +62,7 @@ async def test_copilot_upstream_returns_unconsumed_raw_anthropic_response() -> N
             {"model": "claude-test", "messages": [], "stream": True},
             stream=True,
         )
+        assert response.is_stream_consumed is False
         body = await response.aread()
         await response.aclose()
     finally:

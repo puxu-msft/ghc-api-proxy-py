@@ -90,3 +90,12 @@ def test_unavailable_modifier_is_not_silently_downgraded() -> None:
     )
 
     assert resolver.resolve("claude-opus-4-6-fast") == "claude-opus-4.6-fast"
+
+
+def test_short_family_modifier_is_appended_after_override_resolution() -> None:
+    resolver = ModelResolver(
+        available_ids={"claude-opus-4.6-1m"},
+        model_overrides={"opus": "claude-opus-4.6"},
+    )
+
+    assert resolver.resolve("opus-1m") == "claude-opus-4.6-1m"

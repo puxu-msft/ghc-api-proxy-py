@@ -67,6 +67,12 @@ class ModelResolver:
             base = self._resolve(bracket.group("base"), set(), apply_family_override=True)
             candidate = f"{base}-{bracket.group('suffix')}"
             return candidate
+        for family in MODEL_PREFERENCE:
+            prefix = f"{family}-"
+            if raw_name.startswith(prefix):
+                base = self._resolve(family, set(), apply_family_override=True)
+                candidate = f"{base}-{raw_name[len(prefix):]}"
+                return candidate
         return self._resolve(raw_name, set(), apply_family_override=True)
 
     def _resolve(
