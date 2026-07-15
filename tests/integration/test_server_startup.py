@@ -30,11 +30,16 @@ def test_server_lifespan_initializes_and_closes_phase1_services(
     available = AsyncMock(return_value=True)
     services = Mock()
     services.copilot_tokens = None
+    services.run_model_refresh_loop = AsyncMock()
     initialize.return_value = services
     monkeypatch.setattr("app.server.initialize_upstream_services", initialize)
     monkeypatch.setattr("app.server.close_upstream_services", close)
     monkeypatch.setattr("app.server.noninteractive_token_available", available)
-    app = create_app(AppSettings.model_validate({"auth": {"github_token": "ghu"}}))
+    app = create_app(
+        AppSettings.model_validate(
+            {"auth": {"github_token": "ghu"}, "model_refresh_interval": 0}
+        )
+    )
 
     with TestClient(app):
         initialize.assert_awaited_once_with(app.state.runtime)

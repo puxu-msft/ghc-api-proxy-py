@@ -1,3 +1,5 @@
+from collections.abc import Mapping
+
 import httpx
 import pytest
 
@@ -76,3 +78,27 @@ def test_disabled_models_are_removed_only_from_available_index() -> None:
 
     assert catalog.get("disabled") is not None
     assert catalog.available_ids == frozenset({"enabled"})
+
+
+@pytest.mark.asyncio
+async def test_model_refresh_loop_waits_then_refreshes() -> None:
+    class RecordingCatalog(ModelCatalog):
+        def __init__(self) -> None:
+            super().__init__(None, "https://copilot.example")
+            self.headers: list[dict[str, str]] = []
+
+        async def refresh(self, headers: Mapping[str, str]) -> bool:
+            self.headers.append(dict(headers))
+            raise RuntimeError("stop")
+
+    catalog = RecordingCatalog()
+    sleeps: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    with pytest.raises(RuntimeError, match="stop"):
+        await catalog.run_refresh_loop({}, interval_seconds=30, sleep=sleep)
+
+    assert sleeps == [30]
+    assert catalog.headers == [{}]

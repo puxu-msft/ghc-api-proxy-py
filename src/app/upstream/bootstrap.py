@@ -1,8 +1,10 @@
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
 from uuid import uuid4
 
+import anyio
 import httpx
 
 from app.auth.copilot import CopilotTokenManager
@@ -40,6 +42,14 @@ class UpstreamServices:
     github_tokens: GitHubTokenManager | None = None
     copilot_tokens: CopilotTokenManager | None = None
     resolved_account_type: AccountType | None = None
+    model_headers: Callable[[], Awaitable[dict[str, str]]] | None = None
+
+    async def run_model_refresh_loop(self, interval_seconds: float) -> None:
+        if self.model_headers is None:
+            raise RuntimeError("model header provider is not configured")
+        while True:
+            await anyio.sleep(interval_seconds)
+            await self.model_catalog.refresh(await self.model_headers())
 
 
 async def initialize_upstream_services(
@@ -63,7 +73,19 @@ async def initialize_upstream_services(
             model_overrides=settings.model_overrides,
             model_mappings=settings.model_mappings,
         )
-        services = UpstreamServices(client, sdk_clients, target, catalog, resolver)
+        async def generic_model_headers() -> dict[str, str]:
+            if not settings.upstream.api_key:
+                return {}
+            return {"Authorization": f"Bearer {settings.upstream.api_key}"}
+
+        services = UpstreamServices(
+            client,
+            sdk_clients,
+            target,
+            catalog,
+            resolver,
+            model_headers=generic_model_headers,
+        )
         runtime.models_ready = True
         runtime.github_token_ready = True
         runtime.copilot_token_ready = True
@@ -115,6 +137,15 @@ async def initialize_upstream_services(
         model_overrides=settings.model_overrides,
         model_mappings=settings.model_mappings,
     )
+
+    async def copilot_model_headers() -> dict[str, str]:
+        current_token = await copilot_tokens.get_token()
+        return build_copilot_headers(
+            current_token,
+            settings,
+            interaction_id=interaction_id,
+        )
+
     services = UpstreamServices(
         client,
         sdk_clients,
@@ -124,6 +155,7 @@ async def initialize_upstream_services(
         github_tokens=github_tokens,
         copilot_tokens=copilot_tokens,
         resolved_account_type=account_type,
+        model_headers=copilot_model_headers,
     )
     runtime.settings = settings
     runtime.models_ready = True

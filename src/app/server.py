@@ -35,6 +35,11 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
                 services = await initialize_upstream_services(runtime)
                 if services.copilot_tokens is not None:
                     task_group.start_soon(services.copilot_tokens.run_refresh_loop)
+                if settings.model_refresh_interval > 0:
+                    task_group.start_soon(
+                        services.run_model_refresh_loop,
+                        settings.model_refresh_interval,
+                    )
             yield
         finally:
             await close_upstream_services(runtime)

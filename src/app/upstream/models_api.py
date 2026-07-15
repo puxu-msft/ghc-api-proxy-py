@@ -1,6 +1,7 @@
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, cast
 
+import anyio
 import httpx
 
 from app.models.common import ModelInfo
@@ -63,3 +64,14 @@ class ModelCatalog:
         if etag := response.headers.get("etag"):
             self._etag = etag
         return True
+
+    async def run_refresh_loop(
+        self,
+        headers: Mapping[str, str],
+        *,
+        interval_seconds: float,
+        sleep: Callable[[float], Awaitable[None]] = anyio.sleep,
+    ) -> None:
+        while True:
+            await sleep(interval_seconds)
+            await self.refresh(headers)
