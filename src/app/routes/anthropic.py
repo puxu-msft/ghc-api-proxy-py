@@ -3,9 +3,13 @@ from typing import Any
 from fastapi import APIRouter
 from fastapi.responses import Response
 
-from app.deps import AnthropicClientDependency, TokenCounterDependency
+from app.deps import (
+    AnthropicClientDependency,
+    SettingsDependency,
+    TokenCounterDependency,
+)
 from app.models.anthropic import MessagesRequest
-from app.streaming.idle_timeout import with_idle_timeout
+from app.streaming.idle_timeout import resolve_stream_idle, with_idle_timeout
 from app.streaming.sse import create_sse_response, passthrough_bytes
 
 router = APIRouter(tags=["anthropic"])
@@ -15,12 +19,17 @@ router = APIRouter(tags=["anthropic"])
 async def messages(
     request: MessagesRequest,
     client: AnthropicClientDependency,
+    settings: SettingsDependency,
 ) -> Response:
     result = await client.execute(request)
     upstream = result.response
     if request.stream:
+        idle_timeout = resolve_stream_idle(
+            result.context.resolved_model,
+            settings.timeouts,
+        )
         stream = passthrough_bytes(
-            with_idle_timeout(upstream.aiter_raw(), timeout_seconds=300)
+            with_idle_timeout(upstream.aiter_raw(), timeout_seconds=idle_timeout)
         )
         return create_sse_response(stream)
     try:

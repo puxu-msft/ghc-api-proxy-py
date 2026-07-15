@@ -3,7 +3,12 @@ from collections.abc import AsyncIterator
 import anyio
 import pytest
 
-from app.streaming.idle_timeout import StreamIdleTimeoutError, with_idle_timeout
+from app.config.settings import TimeoutConfig
+from app.streaming.idle_timeout import (
+    StreamIdleTimeoutError,
+    resolve_stream_idle,
+    with_idle_timeout,
+)
 from app.streaming.sse import create_sse_response, format_sse_event, passthrough_bytes
 
 
@@ -61,3 +66,13 @@ async def test_idle_timeout_raises_when_next_item_stalls() -> None:
 
     with pytest.raises(StreamIdleTimeoutError):
         _ = [item async for item in with_idle_timeout(stalled(), 0.01)]
+
+
+def test_resolve_stream_idle_prefers_model_override() -> None:
+    settings = TimeoutConfig(
+        stream_idle=300,
+        stream_idle_overrides={"gpt-5.5": 600, "claude-test": 120},
+    )
+
+    assert resolve_stream_idle("claude-test-v2", settings) == 120
+    assert resolve_stream_idle("other", settings) == 300

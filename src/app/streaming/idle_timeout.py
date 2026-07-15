@@ -2,9 +2,18 @@ from collections.abc import AsyncIterator
 
 import anyio
 
+from app.config.settings import TimeoutConfig
+
 
 class StreamIdleTimeoutError(TimeoutError):
     pass
+
+
+def resolve_stream_idle(model: str, settings: TimeoutConfig) -> int:
+    for key, value in settings.stream_idle_overrides.items():
+        if key in model:
+            return value
+    return settings.stream_idle
 
 
 async def with_idle_timeout[T](
