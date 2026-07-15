@@ -1,10 +1,12 @@
-# 手动审批系统
+# 手动审批系统 `[本项目新增]`
+
+> 本文档描述的是**本项目独有功能**——上游参考项目没有手动审批门控。标注约定见 [DESIGN.md](DESIGN.md#文档约定稳定性与借鉴状态标注)。
 
 ## 概述
 
 手动审批系统（`pipeline/approval.py` + `routes/approval.py`）提供可选的请求审批门控。启用后，所有到上游的请求必须经过人工审批才能执行。
 
-核心机制：使用 `asyncio.Event` 挂起请求处理协程，零 CPU 开销等待审批结果。
+**Python 独有功能**：JS 版本没有审批门控。这是 Python 重写版新增的功能，核心机制使用 `asyncio.Event` 挂起请求处理协程，零 CPU 开销等待审批结果。
 
 ## 审批流程
 
@@ -51,12 +53,10 @@
 
 ```python
 class ApprovalGate:
-    """手动审批门控。"""
-
     def __init__(
         self,
         enabled: bool = False,
-        timeout_seconds: float = 300,  # 默认 5 分钟超时
+        timeout_seconds: float = 300,
     ):
         self.enabled = enabled
         self._timeout = timeout_seconds
@@ -64,28 +64,17 @@ class ApprovalGate:
         self._lock = asyncio.Lock()
         self._ws_manager: WebSocketManager | None = None
 
-    def set_ws_manager(self, ws_manager: WebSocketManager) -> None:
-        """注入 WebSocket 管理器用于推送通知。"""
-        self._ws_manager = ws_manager
-
     async def wait_for_approval(
-        self,
-        request_id: str,
-        payload: dict,
-        endpoint: str,
-        model: str,
+        self, ctx: RequestContext,
     ) -> ApprovalResult:
-        """
-        提交请求等待审批。
+        """提交请求等待审批。阻塞直到审批者决策或超时。"""
 
-        阻塞直到审批者做出决策或超时。
-        """
         approval = PendingApproval(
             id=f"approval_{uuid4().hex[:12]}",
-            request_id=request_id,
-            payload=payload,
-            endpoint=endpoint,
-            model=model,
+            request_id=ctx.id,
+            payload=ctx.original_payload,
+            endpoint=ctx.endpoint,
+            model=ctx.resolved_model,
             created_at=time.time(),
             timeout_at=time.time() + self._timeout,
             event=asyncio.Event(),
@@ -95,7 +84,7 @@ class ApprovalGate:
         async with self._lock:
             self._pending[approval.id] = approval
 
-        # 广播通知
+        # WebSocket 广播
         if self._ws_manager:
             await self._ws_manager.broadcast("approval", {
                 "type": "approval_requested",
@@ -155,9 +144,7 @@ class ApprovalGate:
         return True
 
     async def modify_and_approve(
-        self,
-        approval_id: str,
-        modifications: dict,
+        self, approval_id: str, modifications: dict,
     ) -> bool:
         """修改 payload 后批准。"""
         async with self._lock:
@@ -165,26 +152,13 @@ class ApprovalGate:
         if not approval:
             return False
 
-        # 合并修改
         modified_payload = {**approval.payload, **modifications}
-        modified_fields = list(modifications.keys())
-
         approval.result = ApprovalResult(
             status="approved_with_modifications",
             modified_payload=modified_payload,
-            modifications=modified_fields,
+            modifications=list(modifications.keys()),
         )
         approval.event.set()
-
-        if self._ws_manager:
-            await self._ws_manager.broadcast("approval", {
-                "type": "approval_resolved",
-                "approval": {
-                    "id": approval_id,
-                    "status": "approved_with_modifications",
-                    "modifications": modified_fields,
-                },
-            })
         return True
 
     async def get_pending(self) -> list[dict]:
@@ -192,19 +166,10 @@ class ApprovalGate:
         async with self._lock:
             return [a.to_summary() for a in self._pending.values()]
 
-    async def get_pending_detail(self, approval_id: str) -> dict | None:
-        """获取待审批请求完整详情（含 payload）。"""
-        async with self._lock:
-            approval = self._pending.get(approval_id)
-        if not approval:
-            return None
-        return approval.to_detail()
-
     async def reject_all_pending(self, reason: str) -> int:
-        """拒绝所有待审批请求（用于关闭时）。"""
+        """拒绝所有待审批请求（关闭时调用）。"""
         async with self._lock:
             pending = list(self._pending.values())
-
         count = 0
         for approval in pending:
             approval.result = ApprovalResult(status="rejected", reason=reason)
@@ -221,7 +186,7 @@ class PendingApproval:
     id: str
     request_id: str
     payload: dict
-    endpoint: str                     # "openai-chat-completions" | "openai-responses" | "anthropic-messages"
+    endpoint: str
     model: str
     created_at: float
     timeout_at: float
@@ -247,10 +212,7 @@ class PendingApproval:
 
     def to_detail(self) -> dict:
         """完整详情（含 payload）。"""
-        return {
-            **self.to_summary(),
-            "payload": self.payload,
-        }
+        return {**self.to_summary(), "payload": self.payload}
 
 @dataclass
 class ApprovalResult:
@@ -260,32 +222,61 @@ class ApprovalResult:
     modifications: list[str] | None = None
 ```
 
-## 与管道集成
+## REST API
 
-在 `pipeline/executor.py` 中：
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/approval/pending` | GET | 获取所有待审批请求摘要 |
+| `/api/approval/:id` | GET | 获取待审批请求详情（含 payload） |
+| `/api/approval/:id/approve` | POST | 批准请求 |
+| `/api/approval/:id/reject` | POST | 拒绝请求（可选 reason） |
+| `/api/approval/:id/modify` | POST | 修改 payload 后批准 |
+
+## WebSocket 事件
+
+通过 `approval` 频道推送。审批的 WebSocket 通道与 [历史系统的 `/history/ws`](history-system.md#websocket-实时推送) 共享同一个 `WebSocketManager`（按频道订阅区分推送内容，不是各自独立的连接管理器实现），两者复用同一套连接生命周期管理、断连清理逻辑。
+
+| 事件 | 说明 |
+|------|------|
+| `approval_requested` | 新的待审批请求到达 |
+| `approval_resolved` | 审批决策完成（approved/rejected） |
+| `approval_timeout` | 审批超时（自动拒绝） |
 
 ```python
-# 审批阶段
+@router.websocket("/api/approval/ws")
+async def approval_ws(
+    websocket: WebSocket,
+    ws_manager: WebSocketManager = Depends(get_ws_manager),
+):
+    await ws_manager.connect(websocket, "approval")
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        await ws_manager.disconnect(websocket, "approval")
+```
+
+## 与管道集成
+
+在 `pipeline/executor.py` 中（详见 [request-pipeline.md](request-pipeline.md) 的管道阶段与执行流程）：
+
+```python
 if approval_gate.enabled:
     ctx.transition("awaiting_approval")
-    result = await approval_gate.wait_for_approval(
-        request_id=ctx.id,
-        payload=payload,
-        endpoint=ctx.endpoint,
-        model=ctx.resolved_model,
-    )
+    result = await approval_gate.wait_for_approval(ctx)
     ctx.approval_status = result.status
 
     if result.status == "rejected":
-        error = ApiError(type="rejected", message=f"Request rejected: {result.reason}")
-        ctx.fail(error)
-        raise RequestRejectedError(error)
+        ctx.fail(ApiError(type="rejected", message=f"Rejected: {result.reason}"))
+        raise RequestRejectedError(result.reason)
 
     if result.modified_payload:
         payload = result.modified_payload
 ```
 
 ## 配置
+
+配置键与 [config-system.md 的 `approval` section](config-system.md#approval-section-本项目独有-新增) 对齐（`approval.enabled` / `approval.timeout_seconds`）：
 
 ```yaml
 approval:
@@ -295,23 +286,23 @@ approval:
 
 CLI 参数：
 ```
---manual              启用手动审批
---approval-timeout    审批超时秒数（默认 300）
+--manual              启用手动审批（映射 approval.enabled=true）
 ```
+审批超时仅通过 config `approval.timeout_seconds`（默认 300）配置，无对应 CLI flag。
 
 ## 关闭处理
 
 服务器关闭时，所有待审批请求自动拒绝：
 
 ```python
-# server.py lifespan 关闭阶段
 rejected = await approval_gate.reject_all_pending("server shutting down")
 logger.info(f"Rejected {rejected} pending approval(s) during shutdown")
 ```
 
 ## 相关文档
 
-- [整体架构概览](architecture.md)
-- [请求执行管道](request-pipeline.md)
-- [API 端点规格](api-endpoints.md)（审批 API 详情）
-- [配置系统](config-system.md)
+- [设计文档总纲](DESIGN.md)
+- [请求执行管道](request-pipeline.md)（管道阶段中的审批位置、与重试策略的先后顺序）
+- [历史与审计系统](history-system.md#websocket-实时推送)（WebSocket 事件推送，共享同一 `WebSocketManager`）
+- [优雅关闭](shutdown.md)（关闭时拒绝所有待审批请求）
+- [配置系统](config-system.md#approval-section-本项目独有-新增)（`approval.*` 完整配置键清单）
