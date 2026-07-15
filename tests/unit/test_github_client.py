@@ -41,3 +41,13 @@ async def test_github_client_gets_user_and_usage_with_token_headers() -> None:
     assert paths == ["/user", "/copilot_internal/user"]
     assert user["login"] == "octocat"
     assert usage["future"] is True
+
+
+@pytest.mark.asyncio
+async def test_copilot_usage_uses_internal_api_version() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["x-github-api-version"] == "2025-04-01"
+        return httpx.Response(200, json={"copilot_plan": "individual"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        await GitHubClient(http_client).get_copilot_usage("ghu")

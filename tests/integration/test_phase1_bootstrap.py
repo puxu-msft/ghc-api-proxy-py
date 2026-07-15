@@ -1,3 +1,5 @@
+from collections.abc import Mapping
+
 import httpx
 import pytest
 
@@ -64,3 +66,36 @@ async def test_generic_bootstrap_requires_base_url_and_api_key() -> None:
 
     with pytest.raises(ValueError, match="openai_base_url"):
         await initialize_upstream_services(runtime)
+
+
+@pytest.mark.asyncio
+async def test_model_refresh_loop_survives_catalog_failure() -> None:
+    class FailingCatalog:
+        async def refresh(self, headers: Mapping[str, str]) -> bool:
+            del headers
+            raise httpx.ConnectError("temporary")
+
+    sleeps = 0
+
+    async def sleep(delay: float) -> None:
+        nonlocal sleeps
+        del delay
+        sleeps += 1
+        if sleeps >= 2:
+            raise RuntimeError("stop")
+
+    from app.upstream.bootstrap import run_model_refresh_loop
+
+    with pytest.raises(RuntimeError, match="stop"):
+        await run_model_refresh_loop(
+            FailingCatalog(),
+            lambda: _empty_headers(),
+            interval_seconds=1,
+            sleep=sleep,
+        )
+
+    assert sleeps == 2
+
+
+async def _empty_headers() -> dict[str, str]:
+    return {}

@@ -5,6 +5,7 @@ import httpx
 
 GITHUB_API_BASE_URL = "https://api.github.com"
 GITHUB_API_VERSION = "2022-11-28"
+COPILOT_INTERNAL_API_VERSION = "2025-04-01"
 
 
 def infer_account_type(usage: Mapping[str, object]) -> str | None:
@@ -40,9 +41,11 @@ class GitHubClient:
         return data
 
     async def get_copilot_usage(self, token: str) -> dict[str, Any]:
+        headers = self._headers(token)
+        headers["X-GitHub-Api-Version"] = COPILOT_INTERNAL_API_VERSION
         response = await self._http.get(
             f"{GITHUB_API_BASE_URL}/copilot_internal/user",
-            headers=self._headers(token),
+            headers=headers,
         )
         response.raise_for_status()
         data: dict[str, Any] = response.json()

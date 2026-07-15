@@ -206,3 +206,34 @@ def test_next_refresh_delay_uses_server_hint_with_safety_margin() -> None:
 
     assert manager.next_refresh_delay(refresh_in=1500) == 1440
     assert manager.next_refresh_delay(refresh_in=30) == 60
+
+
+@pytest.mark.asyncio
+async def test_refresh_loop_survives_exhausted_refresh_failure() -> None:
+    calls = 0
+
+    async def stop_after_retry(delay: float) -> None:
+        nonlocal calls
+        del delay
+        calls += 1
+        if calls >= 3:
+            raise RuntimeError("stop")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(503, json={"error": "temporary"})
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    manager = CopilotTokenManager(
+        GitHubTokenManager([StaticGitHubProvider()]),
+        http_client,
+        sleep=stop_after_retry,
+        max_exchange_attempts=1,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="stop"):
+            await manager.run_refresh_loop()
+    finally:
+        await http_client.aclose()
+
+    assert calls == 3

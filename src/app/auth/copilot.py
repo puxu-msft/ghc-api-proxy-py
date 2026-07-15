@@ -62,10 +62,18 @@ class CopilotTokenManager:
         return max(float(refresh_in) - self._validity_margin, self._minimum_refresh_interval)
 
     async def run_refresh_loop(self) -> None:
+        info: CopilotTokenInfo | None = self._current
         while True:
-            info = await self.refresh()
-            await self._sleep(self.next_refresh_delay(refresh_in=info.refresh_in))
-            await self.refresh(force=True)
+            delay = (
+                self.next_refresh_delay(refresh_in=info.refresh_in)
+                if info is not None
+                else self._minimum_refresh_interval
+            )
+            await self._sleep(delay)
+            try:
+                info = await self.refresh(force=True)
+            except (httpx.HTTPError, OSError):
+                await self._sleep(self._minimum_refresh_interval)
 
     async def refresh(self, *, force: bool = False) -> CopilotTokenInfo:
         async with self._lock:

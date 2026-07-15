@@ -1,7 +1,7 @@
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal, Protocol, cast
 from uuid import uuid4
 
 import anyio
@@ -32,6 +32,10 @@ from app.upstream.urls import resolve_copilot_base_url
 type AccountType = Literal["individual", "business", "enterprise"]
 
 
+class RefreshableModelCatalog(Protocol):
+    async def refresh(self, headers: Mapping[str, str]) -> bool: ...
+
+
 @dataclass(slots=True)
 class UpstreamServices:
     http_client: httpx.AsyncClient
@@ -47,9 +51,26 @@ class UpstreamServices:
     async def run_model_refresh_loop(self, interval_seconds: float) -> None:
         if self.model_headers is None:
             raise RuntimeError("model header provider is not configured")
-        while True:
-            await anyio.sleep(interval_seconds)
-            await self.model_catalog.refresh(await self.model_headers())
+        await run_model_refresh_loop(
+            self.model_catalog,
+            self.model_headers,
+            interval_seconds=interval_seconds,
+        )
+
+
+async def run_model_refresh_loop(
+    catalog: RefreshableModelCatalog,
+    header_provider: Callable[[], Awaitable[dict[str, str]]],
+    *,
+    interval_seconds: float,
+    sleep: Callable[[float], Awaitable[None]] = anyio.sleep,
+) -> None:
+    while True:
+        await sleep(interval_seconds)
+        try:
+            await catalog.refresh(await header_provider())
+        except (httpx.HTTPError, OSError):
+            continue
 
 
 async def initialize_upstream_services(
