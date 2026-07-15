@@ -1,7 +1,9 @@
 from collections.abc import AsyncIterator
 from typing import Any
 
+import httpx
 from fastapi.testclient import TestClient
+from httpx_ws import WebSocketNetworkError, WebSocketUpgradeError
 
 from app.config.settings import AppSettings
 from app.deps import get_responses_ws_client
@@ -28,6 +30,30 @@ class FailingClient:
             "type": "error",
             "error": {"message": "bad request", "status_code": 400},
         }
+
+
+class UpgradeFailingClient:
+    async def create_response(
+        self,
+        frame: dict[str, Any],
+    ) -> AsyncIterator[dict[str, Any]]:
+        del frame
+        response = httpx.Response(
+            403,
+            request=httpx.Request("GET", "wss://upstream.test/responses"),
+        )
+        raise WebSocketUpgradeError(response)
+        yield {}
+
+
+class NetworkFailingClient:
+    async def create_response(
+        self,
+        frame: dict[str, Any],
+    ) -> AsyncIterator[dict[str, Any]]:
+        del frame
+        raise WebSocketNetworkError("connection lost")
+        yield {}
 
 
 def test_responses_websocket_bridges_response_create_to_json_frames() -> None:
@@ -70,3 +96,31 @@ def test_responses_websocket_forwards_upstream_error_frame() -> None:
         "type": "error",
         "error": {"message": "bad request", "status_code": 400},
     }
+
+
+def test_responses_websocket_reports_upgrade_rejection() -> None:
+    app = create_app(AppSettings())
+    app.dependency_overrides[get_responses_ws_client] = lambda: UpgradeFailingClient()
+
+    with TestClient(app) as client, client.websocket_connect("/v1/responses") as websocket:
+        websocket.send_json(
+            {"type": "response.create", "response": {"model": "gpt-test", "input": "hi"}}
+        )
+        error = websocket.receive_json()
+
+    assert error["type"] == "error"
+    assert error["error"]["status_code"] == 403
+
+
+def test_responses_websocket_reports_network_failure() -> None:
+    app = create_app(AppSettings())
+    app.dependency_overrides[get_responses_ws_client] = lambda: NetworkFailingClient()
+
+    with TestClient(app) as client, client.websocket_connect("/v1/responses") as websocket:
+        websocket.send_json(
+            {"type": "response.create", "response": {"model": "gpt-test", "input": "hi"}}
+        )
+        error = websocket.receive_json()
+
+    assert error["type"] == "error"
+    assert "connection lost" in error["error"]["message"]

@@ -1,4 +1,7 @@
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from httpx_ws import WebSocketDisconnect as UpstreamWebSocketDisconnect
+from httpx_ws import WebSocketNetworkError, WebSocketUpgradeError
+from pydantic import ValidationError
 
 from app.deps import ResponsesWSClientDependency
 from app.models.openai import ResponsesRequest
@@ -31,3 +34,27 @@ async def responses_websocket(
             await websocket.send_json(event)
     except WebSocketDisconnect:
         return
+    except WebSocketUpgradeError as error:
+        await websocket.send_json(
+            {
+                "type": "error",
+                "error": {
+                    "message": "Upstream rejected WebSocket upgrade",
+                    "status_code": error.response.status_code,
+                },
+            }
+        )
+        await websocket.close(code=4000)
+    except (WebSocketNetworkError, UpstreamWebSocketDisconnect) as error:
+        await websocket.send_json(
+            {"type": "error", "error": {"message": str(error)}}
+        )
+        await websocket.close(code=4000)
+    except ValidationError as error:
+        await websocket.send_json(
+            {
+                "type": "error",
+                "error": {"message": error.errors()[0]["msg"]},
+            }
+        )
+        await websocket.close(code=4000)
