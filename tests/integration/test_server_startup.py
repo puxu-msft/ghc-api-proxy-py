@@ -1,3 +1,6 @@
+from unittest.mock import AsyncMock
+
+import pytest
 from fastapi.testclient import TestClient
 
 from app.config.settings import AppSettings
@@ -17,3 +20,18 @@ def test_create_app_does_not_enable_otel_by_default() -> None:
     app = create_app(AppSettings())
 
     assert app.state.runtime.otel_enabled is False
+
+
+def test_server_lifespan_initializes_and_closes_phase1_services(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    initialize = AsyncMock()
+    close = AsyncMock()
+    monkeypatch.setattr("app.server.initialize_upstream_services", initialize)
+    monkeypatch.setattr("app.server.close_upstream_services", close)
+    app = create_app(AppSettings.model_validate({"auth": {"github_token": "ghu"}}))
+
+    with TestClient(app):
+        initialize.assert_awaited_once_with(app.state.runtime)
+
+    close.assert_awaited_once_with(app.state.runtime)

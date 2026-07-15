@@ -9,6 +9,7 @@ from app.config.settings import AppSettings
 from app.observability.logging import setup_logging
 from app.routes import health_router
 from app.runtime import RuntimeState
+from app.upstream.bootstrap import close_upstream_services, initialize_upstream_services
 
 
 @asynccontextmanager
@@ -23,8 +24,12 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
     async with anyio.create_task_group() as task_group:
         runtime.background_task_group = task_group
         try:
+            has_configured_token = bool(settings.auth.github_token)
+            if settings.upstream.type == "generic" or has_configured_token:
+                await initialize_upstream_services(runtime)
             yield
         finally:
+            await close_upstream_services(runtime)
             task_group.cancel_scope.cancel()
             runtime.background_task_group = None
 
