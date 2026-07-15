@@ -48,6 +48,7 @@ async def test_anthropic_client_resolves_sanitizes_and_preserves_stream() -> Non
                 }
             ],
             "future_request_field": {"keep": True},
+            "future_nullable": None,
         }
     )
 
@@ -59,6 +60,8 @@ async def test_anthropic_client_resolves_sanitizes_and_preserves_stream() -> Non
     assert target.payload is not None
     assert target.payload["model"] == "claude-opus-4.6"
     assert target.payload["future_request_field"] == {"keep": True}
+    assert "future_nullable" in target.payload
+    assert target.payload["future_nullable"] is None
     messages = target.payload["messages"]
     assert isinstance(messages, list)
     assert messages[0]["content"] == [{"type": "text", "text": "hi"}]

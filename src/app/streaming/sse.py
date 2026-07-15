@@ -1,4 +1,4 @@
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
 
 from fastapi.responses import StreamingResponse
 
@@ -11,7 +11,11 @@ def format_sse_event(data: str, *, event: str | None = None) -> bytes:
     return ("\n".join(lines) + "\n\n").encode()
 
 
-async def passthrough_bytes(stream: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+async def passthrough_bytes(
+    stream: AsyncIterator[bytes],
+    *,
+    cleanup: Callable[[], Awaitable[None]] | None = None,
+) -> AsyncGenerator[bytes]:
     try:
         async for chunk in stream:
             if chunk:
@@ -20,6 +24,8 @@ async def passthrough_bytes(stream: AsyncIterator[bytes]) -> AsyncIterator[bytes
         close = getattr(stream, "aclose", None)
         if close is not None:
             await close()
+        if cleanup is not None:
+            await cleanup()
 
 
 def create_sse_response(

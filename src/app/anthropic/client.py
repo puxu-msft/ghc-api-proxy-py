@@ -39,10 +39,10 @@ class AnthropicClient:
     def prepare(self, request: MessagesRequest) -> PreparedAnthropicRequest:
         resolved_model = self._resolver.resolve(request.model)
         sanitization = sanitize_messages(request.messages, request.tools or [])
-        wire = request.model_dump(mode="json", exclude_none=True)
+        wire = request.model_dump(mode="json", exclude_unset=True)
         wire["model"] = resolved_model
         wire["messages"] = [
-            message.model_dump(mode="json", exclude_none=True)
+            message.model_dump(mode="json", exclude_unset=True)
             for message in sanitization.messages
         ]
         return PreparedAnthropicRequest(

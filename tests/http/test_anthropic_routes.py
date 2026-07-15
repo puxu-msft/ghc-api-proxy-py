@@ -1,5 +1,5 @@
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Protocol
 
 import httpx
 from fastapi.testclient import TestClient
@@ -8,7 +8,7 @@ from app.config.settings import AppSettings
 from app.deps import get_anthropic_client, get_token_counter
 from app.models.anthropic import MessagesRequest
 from app.pipeline.context import Attempt, RequestContext, RequestState
-from app.pipeline.executor import PipelineResult
+from app.pipeline.executor import PipelineResult, UpstreamResponseError
 from app.server import create_app
 
 
@@ -52,7 +52,26 @@ class StubCounter:
         return {"input_tokens": 12, "future": True}
 
 
-def _app(client: StubAnthropicClient):
+class ExecutableAnthropicClient(Protocol):
+    async def execute(self, request: MessagesRequest) -> PipelineResult: ...
+
+
+class FailingAnthropicClient:
+    async def execute(self, request: MessagesRequest) -> PipelineResult:
+        context = RequestContext(
+            original_model=request.model,
+            original_payload=request.model_dump(mode="json"),
+            state=RequestState.FAILED,
+        )
+        response = httpx.Response(
+            429,
+            request=httpx.Request("POST", "https://upstream.test/v1/messages"),
+            json={"type": "error", "error": {"type": "rate_limit_error"}},
+        )
+        raise UpstreamResponseError(context, response)
+
+
+def _app(client: ExecutableAnthropicClient):
     app = create_app(AppSettings())
     app.dependency_overrides[get_anthropic_client] = lambda: client
     app.dependency_overrides[get_token_counter] = lambda: StubCounter()
@@ -105,3 +124,21 @@ def test_post_count_tokens_returns_service_result() -> None:
 
     assert response.status_code == 200
     assert response.json() == {"input_tokens": 12, "future": True}
+
+
+def test_upstream_error_status_and_body_are_forwarded() -> None:
+    with TestClient(_app(FailingAnthropicClient())) as client:
+        response = client.post(
+            "/v1/messages",
+            json={
+                "model": "claude-test",
+                "max_tokens": 100,
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+
+    assert response.status_code == 429
+    assert response.json() == {
+        "type": "error",
+        "error": {"type": "rate_limit_error"},
+    }

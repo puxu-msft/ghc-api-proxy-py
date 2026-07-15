@@ -36,6 +36,24 @@ async def test_passthrough_bytes_yields_each_upstream_chunk_immediately() -> Non
     assert await anext(stream) == b"second"
 
 
+@pytest.mark.asyncio
+async def test_passthrough_runs_explicit_cleanup_on_close() -> None:
+    cleaned = False
+
+    async def source() -> AsyncIterator[bytes]:
+        yield b"first"
+        await anyio.sleep_forever()
+
+    async def cleanup() -> None:
+        nonlocal cleaned
+        cleaned = True
+
+    stream = passthrough_bytes(source(), cleanup=cleanup)
+    assert await anext(stream) == b"first"
+    await stream.aclose()
+    assert cleaned is True
+
+
 def test_sse_response_sets_no_buffering_headers() -> None:
     async def empty() -> AsyncIterator[bytes]:
         if False:

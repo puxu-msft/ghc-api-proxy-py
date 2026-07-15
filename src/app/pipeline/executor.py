@@ -47,7 +47,6 @@ async def execute_anthropic_pipeline(
     attempt.completed_at = time.time()
     if not response.is_success:
         body = await response.aread()
-        await response.aclose()
         error = ApiError(
             body.decode(errors="replace") or f"HTTP {response.status_code}",
             status_code=response.status_code,
