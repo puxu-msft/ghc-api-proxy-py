@@ -97,5 +97,34 @@ async def test_model_refresh_loop_survives_catalog_failure() -> None:
     assert sleeps == 2
 
 
+@pytest.mark.asyncio
+async def test_model_refresh_loop_survives_validation_failure() -> None:
+    class InvalidCatalog:
+        async def refresh(self, headers: Mapping[str, str]) -> bool:
+            del headers
+            raise ValueError("invalid model payload")
+
+    sleeps = 0
+
+    async def sleep(delay: float) -> None:
+        nonlocal sleeps
+        del delay
+        sleeps += 1
+        if sleeps >= 2:
+            raise RuntimeError("stop")
+
+    from app.upstream.bootstrap import run_model_refresh_loop
+
+    with pytest.raises(RuntimeError, match="stop"):
+        await run_model_refresh_loop(
+            InvalidCatalog(),
+            lambda: _empty_headers(),
+            interval_seconds=1,
+            sleep=sleep,
+        )
+
+    assert sleeps == 2
+
+
 async def _empty_headers() -> dict[str, str]:
     return {}

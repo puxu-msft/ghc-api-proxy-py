@@ -72,7 +72,7 @@ class CopilotTokenManager:
             await self._sleep(delay)
             try:
                 info = await self.refresh(force=True)
-            except (httpx.HTTPError, OSError):
+            except Exception:
                 await self._sleep(self._minimum_refresh_interval)
 
     async def refresh(self, *, force: bool = False) -> CopilotTokenInfo:

@@ -69,7 +69,7 @@ async def run_model_refresh_loop(
         await sleep(interval_seconds)
         try:
             await catalog.refresh(await header_provider())
-        except (httpx.HTTPError, OSError):
+        except Exception:
             continue
 
 

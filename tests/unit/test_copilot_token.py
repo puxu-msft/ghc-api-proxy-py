@@ -237,3 +237,31 @@ async def test_refresh_loop_survives_exhausted_refresh_failure() -> None:
         await http_client.aclose()
 
     assert calls == 3
+
+
+@pytest.mark.asyncio
+async def test_refresh_loop_survives_invalid_success_payload() -> None:
+    sleeps = 0
+
+    async def stop(delay: float) -> None:
+        nonlocal sleeps
+        del delay
+        sleeps += 1
+        if sleeps >= 2:
+            raise RuntimeError("stop")
+
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"unexpected": True}))
+    )
+    manager = CopilotTokenManager(
+        GitHubTokenManager([StaticGitHubProvider()]),
+        http_client,
+        sleep=stop,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="stop"):
+            await manager.run_refresh_loop()
+    finally:
+        await http_client.aclose()
+
+    assert sleeps == 2
