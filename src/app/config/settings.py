@@ -88,6 +88,15 @@ class ObservabilityConfig(FrozenModel):
     tui_enabled: bool = False
 
 
+class ResponsesConfig(FrozenModel):
+    normalize_call_ids: bool = True
+    upstream_ws: bool = False
+    ws_queue_size: int = Field(default=32, ge=1)
+    max_ws_frame_bytes: int = 0
+    max_client_ws_connections: int = 256
+    max_upstream_ws_connections: int = 32
+
+
 class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="GHC_",
@@ -109,6 +118,7 @@ class AppSettings(BaseSettings):
     timeouts: TimeoutConfig = Field(default_factory=TimeoutConfig)
     anthropic: AnthropicConfig = Field(default_factory=AnthropicConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
+    openai_responses: ResponsesConfig = Field(default_factory=ResponsesConfig)
     model_overrides: dict[str, str] = Field(
         default_factory=lambda: {
             "opus": "claude-opus-4.6",

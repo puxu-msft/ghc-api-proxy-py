@@ -24,6 +24,8 @@ SECTION_PATHS = frozenset(
         ("history",),
         ("headers",),
         ("observability",),
+        ("openai_responses",),
+        ("openai_responses",),
         ("rate_limiter",),
         ("timeouts",),
         ("upstream",),

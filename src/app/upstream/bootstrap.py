@@ -203,6 +203,7 @@ async def initialize_upstream_services(
     runtime.responses_ws_client = ResponsesWebSocketClient(
         client,
         f"{ws_base_url}/responses",
+        queue_size=settings.openai_responses.ws_queue_size,
     )
     return services
 

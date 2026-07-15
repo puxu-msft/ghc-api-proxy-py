@@ -5,6 +5,7 @@ import httpx
 
 from app.models.openai import ChatCompletionRequest, EmbeddingsRequest, ResponsesRequest
 from app.openai.responses_conversion import normalize_call_ids
+from app.openai.sanitize import sanitize_chat_messages
 from app.transform.model_resolver import ModelResolver
 from app.wire_json import JsonValue, dumps, loads
 
@@ -41,7 +42,9 @@ class OpenAIClient:
         return wire
 
     async def chat(self, request: ChatCompletionRequest) -> httpx.Response:
-        return await self._target.send_openai(self._wire(request), stream=request.stream)
+        wire = self._wire(request)
+        wire["messages"] = sanitize_chat_messages(wire["messages"])
+        return await self._target.send_openai(wire, stream=request.stream)
 
     async def responses(self, request: ResponsesRequest) -> httpx.Response:
         response = await self._target.send_responses(self._wire(request), stream=request.stream)
