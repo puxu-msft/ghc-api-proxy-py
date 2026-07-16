@@ -93,8 +93,10 @@ async def history_websocket(websocket: WebSocket, store: HistoryStoreDependency)
         while True:
             message = await websocket.receive_json()
             if message.get("type") == "subscribe":
+                topic = str(message.get("topic", "history"))
+                store.websockets.subscribe(websocket, topic)
                 await websocket.send_json(
-                    {"type": "subscribed", "topic": message.get("topic", "history")}
+                    {"type": "subscribed", "topic": topic}
                 )
     except WebSocketDisconnect:
         store.websockets.disconnect(websocket)

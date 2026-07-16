@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from app.anthropic.client import AnthropicClient
     from app.anthropic.token_counting import TokenCounter
     from app.history.store import HistoryStore
+    from app.history.ws import WebSocketManager
     from app.openai.client import OpenAIClient
     from app.openai.responses_ws import ResponsesWebSocketClient
     from app.pipeline.approval import ApprovalGate
@@ -30,6 +31,7 @@ class RuntimeState:
     responses_ws_client: ResponsesWebSocketClient | None = None
     history_store: HistoryStore | None = None
     approval_gate: ApprovalGate | None = None
+    websocket_manager: WebSocketManager | None = None
 
     def readiness_checks(self) -> dict[str, bool]:
         return {

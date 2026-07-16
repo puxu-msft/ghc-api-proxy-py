@@ -12,6 +12,7 @@ from app.config.paths import user_data_path
 from app.config.settings import AppSettings
 from app.history.consumer import HistoryConsumer
 from app.history.store import HistoryStore
+from app.history.ws import WebSocketManager
 from app.observability.logging import setup_logging
 from app.observability.telemetry import setup_metrics
 from app.observability.tracing import setup_tracing
@@ -61,14 +62,15 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
                     else user_data_path() / "history.db"
                 )
                 runtime.history_store = HistoryStore(history_path)
+                runtime.websocket_manager = runtime.history_store.websockets
                 await runtime.history_store.start()
+            if runtime.websocket_manager is None:
+                runtime.websocket_manager = WebSocketManager()
             runtime.approval_gate = ApprovalGate(
                 enabled=settings.approval.enabled,
                 timeout_seconds=settings.approval.timeout_seconds,
                 websockets=(
-                    runtime.history_store.websockets
-                    if runtime.history_store is not None
-                    else None
+                    runtime.websocket_manager
                 ),
             )
             token_path = Path(settings.auth.token_file) if settings.auth.token_file else None
@@ -104,6 +106,7 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
             if runtime.approval_gate is not None:
                 await runtime.approval_gate.reject_all_pending("server shutting down")
                 runtime.approval_gate = None
+            runtime.websocket_manager = None
             if runtime.history_store is not None:
                 await runtime.history_store.close()
                 runtime.history_store = None

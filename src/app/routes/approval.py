@@ -2,7 +2,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
-from app.deps import ApprovalGateDependency, HistoryStoreDependency
+from app.deps import ApprovalGateDependency, WebSocketManagerDependency
 
 router = APIRouter(prefix="/api/approval", tags=["approval"])
 
@@ -47,11 +47,11 @@ async def modify(
 @router.websocket("/ws")
 async def approval_websocket(
     websocket: WebSocket,
-    store: HistoryStoreDependency,
+    manager: WebSocketManagerDependency,
 ) -> None:
-    await store.websockets.connect(websocket, "approval")
+    await manager.connect(websocket, "approval")
     try:
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
-        store.websockets.disconnect(websocket)
+        manager.disconnect(websocket)

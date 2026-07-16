@@ -7,6 +7,7 @@ from app.anthropic.client import AnthropicClient
 from app.anthropic.token_counting import TokenCounter
 from app.config.settings import AppSettings
 from app.history.store import HistoryStore
+from app.history.ws import WebSocketManager
 from app.models.common import ModelInfo
 from app.openai.client import OpenAIClient
 from app.openai.responses_ws import ResponsesWebSocketClient
@@ -82,6 +83,13 @@ def get_approval_gate(request: Request) -> ApprovalGate:
     return gate
 
 
+def get_websocket_manager(request: Request) -> WebSocketManager:
+    manager = get_runtime_state(request).websocket_manager
+    if manager is None:
+        raise RuntimeError("WebSocket manager is not initialized")
+    return manager
+
+
 RuntimeDependency = Annotated[RuntimeState, Depends(get_runtime_state)]
 SettingsDependency = Annotated[AppSettings, Depends(get_settings)]
 AnthropicClientDependency = Annotated[AnthropicClient, Depends(get_anthropic_client)]
@@ -94,3 +102,7 @@ ResponsesWSClientDependency = Annotated[
 ]
 HistoryStoreDependency = Annotated[HistoryStore, Depends(get_history_store)]
 ApprovalGateDependency = Annotated[ApprovalGate, Depends(get_approval_gate)]
+WebSocketManagerDependency = Annotated[
+    WebSocketManager,
+    Depends(get_websocket_manager),
+]
