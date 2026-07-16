@@ -126,6 +126,26 @@ def test_post_count_tokens_returns_service_result() -> None:
     assert response.json() == {"input_tokens": 12, "future": True}
 
 
+def test_warmup_fake_policy_short_circuits_upstream() -> None:
+    settings = AppSettings.model_validate({"anthropic": {"warmup": "fake"}})
+    app = create_app(settings)
+    app.dependency_overrides[get_anthropic_client] = lambda: StubAnthropicClient(
+        streaming=False
+    )
+    app.dependency_overrides[get_token_counter] = lambda: StubCounter()
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/messages",
+            json={
+                "model": "claude-test",
+                "max_tokens": 100,
+                "messages": [{"role": "user", "content": "Warmup"}],
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["content"][0]["text"] == "Cache warmed."
+
+
 def test_upstream_error_status_and_body_are_forwarded() -> None:
     with TestClient(_app(FailingAnthropicClient())) as client:
         response = client.post(
