@@ -2,11 +2,13 @@ from collections.abc import AsyncGenerator
 from typing import Any, cast
 
 import httpx
+import tiktoken
 from fastapi import APIRouter, Response
 
-from app.deps import OpenAIClientDependency
-from app.models.gemini import GenerateContentRequest
+from app.deps import ApprovalGateDependency, OpenAIClientDependency
+from app.models.gemini import CountTokensRequest, GenerateContentRequest
 from app.models.openai import ChatCompletionRequest
+from app.pipeline.protocol_guard import apply_approval_guard
 from app.protocols.gemini import (
     GeminiPathError,
     gemini_to_openai,
@@ -34,12 +36,35 @@ async def _gemini_stream(response: httpx.Response) -> AsyncGenerator[bytes]:
             if not isinstance(delta, dict):
                 delta = {}
             typed_delta = cast(dict[str, Any], delta)
+            tool_calls = typed_delta.get("tool_calls", [])
+            parts: list[dict[str, Any]] = []
+            if typed_delta.get("content"):
+                parts.append({"text": typed_delta["content"]})
+            calls = cast(list[object], tool_calls) if isinstance(tool_calls, list) else []
+            for call in calls:
+                if not isinstance(call, dict):
+                    continue
+                typed_call = cast(dict[str, Any], call)
+                function = typed_call.get("function", {})
+                if isinstance(function, dict):
+                    typed_function = cast(dict[str, Any], function)
+                    arguments = typed_function.get("arguments", "{}")
+                    parts.append(
+                        {
+                            "functionCall": {
+                                "name": typed_function.get("name"),
+                                "args": loads(
+                                    arguments if isinstance(arguments, str) else "{}"
+                                ),
+                            }
+                        }
+                    )
             frame: dict[str, Any] = {
                 "candidates": [
                     {
                         "content": {
                             "role": "model",
-                            "parts": [{"text": typed_delta.get("content", "")}],
+                            "parts": parts,
                         },
                         "finishReason": choice.get("finish_reason"),
                         "index": 0,
@@ -54,8 +79,9 @@ async def _gemini_stream(response: httpx.Response) -> AsyncGenerator[bytes]:
 @router.post("/{model_with_method}")
 async def gemini_endpoint(
     model_with_method: str,
-    body: GenerateContentRequest,
+    body: dict[str, Any],
     client: OpenAIClientDependency,
+    gate: ApprovalGateDependency,
 ) -> Response:
     try:
         model, method = parse_model_with_method(model_with_method)
@@ -73,12 +99,55 @@ async def gemini_endpoint(
             status_code=404,
             media_type="application/json",
         )
+    if method == "countTokens":
+        count_request = CountTokensRequest.model_validate(body)
+        contents = count_request.contents or (
+            count_request.generate_content_request.contents
+            if count_request.generate_content_request
+            else []
+        )
+        text = "".join(
+            part.text or ""
+            for content in contents
+            for part in content.parts
+        )
+        total = len(tiktoken.get_encoding("o200k_base").encode(text))
+        return Response(
+            content=dumps({"totalTokens": total}),
+            media_type="application/json",
+        )
+    request_body = GenerateContentRequest.model_validate(body)
     stream = method == "streamGenerateContent"
     payload = ChatCompletionRequest.model_validate(
-        gemini_to_openai(body, model=model, stream=stream)
+        gemini_to_openai(request_body, model=model, stream=stream)
     )
+    guarded = await apply_approval_guard(
+        payload.model_dump(mode="json", exclude_unset=True),
+        model=model,
+        endpoint=f"gemini-{method}",
+        gate=gate,
+    )
+    payload = ChatCompletionRequest.model_validate(guarded)
     upstream = await client.chat(payload)
     if stream:
+        if not upstream.is_success:
+            try:
+                error_body = loads(await upstream.aread())
+            finally:
+                await upstream.aclose()
+            return Response(
+                content=dumps(
+                    {
+                        "error": {
+                            "code": upstream.status_code,
+                            "message": str(error_body),
+                            "status": "UPSTREAM_ERROR",
+                        }
+                    }
+                ),
+                status_code=upstream.status_code,
+                media_type="application/json",
+            )
         return create_sse_response(_gemini_stream(upstream))
     try:
         raw = loads(await upstream.aread())

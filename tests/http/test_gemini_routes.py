@@ -62,3 +62,13 @@ def test_gemini_unknown_method_uses_gemini_error_shape() -> None:
         response = client.post("/v1beta/models/gemini-test:unknown", json={})
     assert response.status_code == 404
     assert response.json()["error"]["status"] == "NOT_FOUND"
+
+
+def test_gemini_count_tokens_uses_local_counting() -> None:
+    with TestClient(_app()) as client:
+        response = client.post(
+            "/v1beta/models/gemini-test:countTokens",
+            json={"contents": [{"role": "user", "parts": [{"text": "hello"}]}]},
+        )
+    assert response.status_code == 200
+    assert response.json()["totalTokens"] > 0

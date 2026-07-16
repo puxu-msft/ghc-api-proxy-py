@@ -1,4 +1,5 @@
-from typing import Any
+import json
+from typing import Any, cast
 
 from app.models.gemini import GenerateContentRequest
 
@@ -32,13 +33,48 @@ def gemini_to_openai(
             {"role": "system", "content": _content_text(request.system_instruction.parts)}
         )
     for content in request.contents:
-        messages.append(
-            {
-                "role": "assistant" if content.role == "model" else "user",
-                "content": _content_text(content.parts),
-            }
-        )
+        role = "assistant" if content.role == "model" else "user"
+        text = _content_text(content.parts)
+        tool_calls = [part.function_call for part in content.parts if part.function_call]
+        tool_results = [part.function_response for part in content.parts if part.function_response]
+        if tool_results:
+            for result_part in tool_results:
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": result_part.get("name"),
+                        "content": str(result_part.get("response", "")),
+                    }
+                )
+        else:
+            message: dict[str, Any] = {"role": role, "content": text or None}
+            if tool_calls:
+                message["tool_calls"] = [
+                    {
+                        "id": call.get("name"),
+                        "type": "function",
+                        "function": {
+                            "name": call.get("name"),
+                            "arguments": json.dumps(call.get("args", {})),
+                        },
+                    }
+                    for call in tool_calls
+                ]
+            messages.append(message)
     result: dict[str, Any] = {"model": model, "messages": messages, "stream": stream}
+    if request.tools:
+        result["tools"] = [
+            {
+                "type": "function",
+                "function": declaration.model_dump(
+                    mode="json",
+                    by_alias=True,
+                    exclude_none=True,
+                ),
+            }
+            for tool in request.tools
+            for declaration in (tool.function_declarations or [])
+        ]
     config = request.generation_config
     if config:
         for target, value in (
@@ -57,14 +93,24 @@ def openai_to_gemini(data: dict[str, Any]) -> dict[str, Any]:
     text = ""
     finish_reason = None
     if choices:
-        message = choices[0].get("message", {})
+        choice = cast(dict[str, Any], choices[0])
+        message = cast(dict[str, Any], choice.get("message", {}))
         text = message.get("content") or ""
-        finish_reason = choices[0].get("finish_reason")
+        finish_reason = choice.get("finish_reason")
+        tool_calls = cast(list[dict[str, Any]], message.get("tool_calls", []))
+    else:
+        tool_calls = []
     usage = data.get("usage", {})
     return {
         "candidates": [
             {
-                "content": {"role": "model", "parts": [{"text": text}]},
+                "content": {
+                    "role": "model",
+                    "parts": [
+                        *([{"text": text}] if text else []),
+                        *[_tool_call_part(call) for call in tool_calls],
+                    ],
+                },
                 "finishReason": finish_reason,
                 "index": 0,
             }
@@ -74,4 +120,15 @@ def openai_to_gemini(data: dict[str, Any]) -> dict[str, Any]:
             "candidatesTokenCount": usage.get("completion_tokens", 0),
             "totalTokenCount": usage.get("total_tokens", 0),
         },
+    }
+
+
+def _tool_call_part(call: dict[str, Any]) -> dict[str, Any]:
+    function = cast(dict[str, Any], call.get("function", {}))
+    arguments = function.get("arguments", "{}")
+    return {
+        "functionCall": {
+            "name": function.get("name"),
+            "args": json.loads(arguments if isinstance(arguments, str) else "{}"),
+        }
     }

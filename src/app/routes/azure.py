@@ -3,8 +3,9 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, Response
 
-from app.deps import OpenAIClientDependency
+from app.deps import ApprovalGateDependency, OpenAIClientDependency
 from app.models.openai import ChatCompletionRequest, EmbeddingsRequest, ResponsesRequest
+from app.pipeline.protocol_guard import apply_approval_guard
 from app.protocols.azure import adapt_azure_payload
 from app.streaming.sse import create_sse_response, passthrough_bytes
 
@@ -31,9 +32,16 @@ async def azure_chat(
     deployment: str,
     body: dict[str, Any],
     client: OpenAIClientDependency,
+    gate: ApprovalGateDependency,
 ) -> Response:
     adapted = adapt_azure_payload(body, deployment=deployment)
-    request = ChatCompletionRequest.model_validate(adapted.wire_payload)
+    guarded = await apply_approval_guard(
+        adapted.wire_payload,
+        model=deployment,
+        endpoint="azure-chat-completions",
+        gate=gate,
+    )
+    request = ChatCompletionRequest.model_validate(guarded)
     return await _response(await client.chat(request), stream=request.stream)
 
 
@@ -42,10 +50,16 @@ async def azure_responses(
     deployment: str,
     body: dict[str, Any],
     client: OpenAIClientDependency,
+    gate: ApprovalGateDependency,
 ) -> Response:
-    request = ResponsesRequest.model_validate(
-        adapt_azure_payload(body, deployment=deployment).wire_payload
+    adapted = adapt_azure_payload(body, deployment=deployment)
+    guarded = await apply_approval_guard(
+        adapted.wire_payload,
+        model=deployment,
+        endpoint="azure-responses",
+        gate=gate,
     )
+    request = ResponsesRequest.model_validate(guarded)
     return await _response(await client.responses(request), stream=request.stream)
 
 
@@ -54,8 +68,14 @@ async def azure_embeddings(
     deployment: str,
     body: dict[str, Any],
     client: OpenAIClientDependency,
+    gate: ApprovalGateDependency,
 ) -> Response:
-    request = EmbeddingsRequest.model_validate(
-        adapt_azure_payload(body, deployment=deployment).wire_payload
+    adapted = adapt_azure_payload(body, deployment=deployment)
+    guarded = await apply_approval_guard(
+        adapted.wire_payload,
+        model=deployment,
+        endpoint="azure-embeddings",
+        gate=gate,
     )
+    request = EmbeddingsRequest.model_validate(guarded)
     return await _response(await client.embeddings(request))

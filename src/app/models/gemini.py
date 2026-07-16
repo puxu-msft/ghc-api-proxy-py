@@ -21,6 +21,21 @@ class Part(GeminiWireModel):
     thought_signature: str | None = None
 
 
+class FunctionDeclaration(GeminiWireModel):
+    name: str
+    description: str | None = None
+    parameters: dict[str, Any] | None = None
+
+
+class GeminiTool(GeminiWireModel):
+    function_declarations: list[FunctionDeclaration] | None = None
+
+
+class ThinkingConfigGemini(GeminiWireModel):
+    include_thoughts: bool | None = None
+    thinking_budget: int | None = None
+
+
 class Content(GeminiWireModel):
     role: str | None = None
     parts: list[Part] = Field(default_factory=lambda: list[Part]())
@@ -32,12 +47,24 @@ class GenerationConfig(GeminiWireModel):
     top_k: int | None = None
     max_output_tokens: int | None = None
     stop_sequences: list[str] | None = None
+    candidate_count: int | None = None
+    response_mime_type: str | None = None
+    thinking_config: ThinkingConfigGemini | None = None
 
 
 class GenerateContentRequest(GeminiWireModel):
     contents: list[Content] = Field(default_factory=lambda: list[Content]())
-    tools: list[dict[str, Any]] | None = None
+    tools: list[GeminiTool] | None = None
     tool_config: dict[str, Any] | None = None
     system_instruction: Content | None = None
     generation_config: GenerationConfig | None = None
     cached_content: str | None = None
+
+
+class CountTokensRequest(GeminiWireModel):
+    contents: list[Content] | None = None
+    generate_content_request: GenerateContentRequest | None = None
+
+
+class CountTokensResponse(GeminiWireModel):
+    total_tokens: int

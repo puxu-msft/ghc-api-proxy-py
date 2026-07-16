@@ -28,3 +28,19 @@ def test_azure_classic_chat_uses_deployment_model() -> None:
         )
     assert response.status_code == 200
     assert response.json()["model"] == "deployment"
+
+
+def test_azure_responses_and_embeddings_use_deployment_model() -> None:
+    app = create_app(AppSettings())
+    app.dependency_overrides[get_openai_client] = lambda: StubClient()
+    with TestClient(app) as client:
+        responses = client.post(
+            "/openai/deployments/deployment/responses",
+            json={"model": "ignored", "input": "hi"},
+        )
+        embeddings = client.post(
+            "/openai/deployments/deployment/embeddings",
+            json={"model": "ignored", "input": "hi"},
+        )
+    assert responses.json()["model"] == "deployment"
+    assert embeddings.json()["model"] == "deployment"

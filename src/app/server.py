@@ -3,7 +3,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import anyio
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from app import __version__
 from app.auth.providers import noninteractive_token_available
@@ -14,7 +15,7 @@ from app.history.store import HistoryStore
 from app.observability.logging import setup_logging
 from app.observability.telemetry import setup_metrics
 from app.observability.tracing import setup_tracing
-from app.pipeline.approval import ApprovalGate
+from app.pipeline.approval import ApprovalGate, ApprovalRejectedError
 from app.routes import (
     anthropic_router,
     approval_router,
@@ -29,6 +30,16 @@ from app.routes.openai import router as openai_router
 from app.routes.responses_ws import router as responses_ws_router
 from app.runtime import RuntimeState
 from app.upstream.bootstrap import close_upstream_services, initialize_upstream_services
+
+
+async def _approval_rejected_handler(
+    _request: Request,
+    error: Exception,
+) -> JSONResponse:
+    return JSONResponse(
+        {"error": {"type": "approval_rejected", "message": str(error)}},
+        status_code=403,
+    )
 
 
 @asynccontextmanager
@@ -109,6 +120,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         lifespan=_lifespan,
     )
     app.state.runtime = RuntimeState(settings=resolved_settings)
+    app.add_exception_handler(ApprovalRejectedError, _approval_rejected_handler)
     setup_metrics()
     setup_tracing(app, enabled=resolved_settings.observability.tracing_enabled)
     app.include_router(anthropic_router)
