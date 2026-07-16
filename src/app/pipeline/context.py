@@ -38,6 +38,8 @@ class Attempt:
     completed_at: float | None = None
     status_code: int | None = None
     error: ApiError | None = None
+    session_id: str | None = None
+    agent_id: str | None = None
     strategy_applied: str | None = None
     payload_modifications: list[str] = field(default_factory=lambda: list[str]())
 
@@ -56,6 +58,8 @@ class RequestContext:
     rate_limiter_wait_ms: float = 0.0
     attempts: list[Attempt] = field(default_factory=lambda: list[Attempt]())
     error: ApiError | None = None
+    session_id: str | None = None
+    agent_id: str | None = None
 
     def transition(self, state: RequestState) -> None:
         if state not in ALLOWED_TRANSITIONS[self.state]:

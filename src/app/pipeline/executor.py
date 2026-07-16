@@ -1,10 +1,13 @@
 import time
 from dataclasses import dataclass
+from typing import Any, cast
 
 import httpx
 
 from app.anthropic.client import AnthropicClient
-from app.errors import ApiError
+from app.anthropic.thinking.quarantine import QuarantineKey
+from app.anthropic.thinking.strip_all import strip_all_thinking
+from app.errors import ApiError, ErrorCategory
 from app.models.anthropic import MessagesRequest
 from app.pipeline.context import Attempt, RequestContext, RequestState
 from app.pipeline.rate_limiter import PassthroughRateLimiter
@@ -29,21 +32,34 @@ async def execute_anthropic_pipeline(
     request: MessagesRequest,
     *,
     rate_limiter: PassthroughRateLimiter | None = None,
+    session_id: str | None = None,
+    agent_id: str | None = None,
 ) -> PipelineResult:
     limiter = rate_limiter or PassthroughRateLimiter()
     context = RequestContext(
         original_model=request.model,
         original_payload=request.model_dump(mode="json", exclude_none=True),
+        session_id=session_id,
+        agent_id=agent_id,
     )
     context.transition(RequestState.SANITIZING)
     prepared = client.prepare(request)
     context.resolved_model = prepared.resolved_model
     context.sanitization = prepared.sanitization
     context.transition(RequestState.EXECUTING)
-    context.rate_limiter_wait_ms += await limiter.acquire()
-    coordinator = RetryCoordinator([PoisonedThinkingStrategy()], max_retries=1)
+    key = QuarantineKey(session_id, agent_id or "") if session_id else None
+    strategy = PoisonedThinkingStrategy(client.quarantine, key)
+    coordinator = RetryCoordinator([strategy], max_retries=1)
     payload: dict[str, object] = prepared.wire
+    if key is not None and client.quarantine is not None and client.quarantine.is_poisoned(key):
+        messages = payload.get("messages")
+        if isinstance(messages, list):
+            stripped, _ = strip_all_thinking(
+                cast(list[dict[str, Any]], messages)
+            )
+            payload = {**payload, "messages": stripped}
     for attempt_number in range(2):
+        context.rate_limiter_wait_ms += await limiter.acquire()
         attempt = Attempt(number=attempt_number)
         context.attempts.append(attempt)
         current = prepared.__class__(
@@ -58,6 +74,7 @@ async def execute_anthropic_pipeline(
         attempt.completed_at = time.time()
         if response.is_success:
             limiter.report_success()
+            strategy.on_success()
             context.transition(
                 RequestState.STREAMING if request.stream else RequestState.COMPLETED
             )
@@ -68,6 +85,13 @@ async def execute_anthropic_pipeline(
             status_code=response.status_code,
         )
         attempt.error = error
+        if error.category is ErrorCategory.RATE_LIMIT:
+            retry_after_value = response.headers.get("retry-after")
+            try:
+                retry_after = float(retry_after_value) if retry_after_value else None
+            except ValueError:
+                retry_after = None
+            limiter.report_rate_limit(retry_after)
         decision = await coordinator.decide(error, payload)
         if decision is not None:
             attempt.strategy_applied = decision.owner

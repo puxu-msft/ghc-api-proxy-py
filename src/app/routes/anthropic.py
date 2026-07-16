@@ -1,6 +1,6 @@
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Header
 from fastapi.responses import Response
 
 from app.anthropic.header_policy import forward_response_headers
@@ -24,6 +24,8 @@ async def messages(
     request: MessagesRequest,
     client: AnthropicClientDependency,
     settings: SettingsDependency,
+    session_id: str | None = Header(default=None, alias="x-claude-code-session-id"),
+    agent_id: str | None = Header(default=None, alias="x-claude-code-agent-id"),
 ) -> Response:
     warmup = apply_warmup_policy(
         request.model_dump(mode="json", exclude_unset=True),
@@ -37,7 +39,7 @@ async def messages(
             media_type="application/json",
         )
     try:
-        result = await client.execute(request)
+        result = await client.execute(request, session_id=session_id, agent_id=agent_id)
     except UpstreamResponseError as error:
         body = await error.response.aread()
         content_type = error.response.headers.get("content-type", "application/json")

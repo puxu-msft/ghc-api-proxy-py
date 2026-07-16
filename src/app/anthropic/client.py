@@ -8,6 +8,7 @@ import httpx
 
 from app.anthropic.request_preparation import prepare_anthropic_request
 from app.anthropic.sanitize import SanitizationResult, sanitize_messages
+from app.anthropic.thinking.quarantine import ThinkingQuarantineStore
 from app.config.settings import AppSettings
 from app.models.anthropic import MessagesRequest
 from app.transform.model_resolver import ModelResolver
@@ -41,10 +42,12 @@ class AnthropicClient:
         target: AnthropicTarget,
         resolver: ModelResolver,
         settings: AppSettings | None = None,
+        quarantine: ThinkingQuarantineStore | None = None,
     ) -> None:
         self._target = target
         self._resolver = resolver
         self._settings = settings or AppSettings()
+        self.quarantine = quarantine
 
     def prepare(self, request: MessagesRequest) -> PreparedAnthropicRequest:
         resolved_model = self._resolver.resolve(request.model)
@@ -91,7 +94,18 @@ class AnthropicClient:
         )
         return response
 
-    async def execute(self, request: MessagesRequest) -> PipelineResult:
+    async def execute(
+        self,
+        request: MessagesRequest,
+        *,
+        session_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> PipelineResult:
         from app.pipeline.executor import execute_anthropic_pipeline
 
-        return await execute_anthropic_pipeline(self, request)
+        return await execute_anthropic_pipeline(
+            self,
+            request,
+            session_id=session_id,
+            agent_id=agent_id,
+        )

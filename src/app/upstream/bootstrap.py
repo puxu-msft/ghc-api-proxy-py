@@ -8,6 +8,7 @@ import anyio
 import httpx
 
 from app.anthropic.client import AnthropicClient
+from app.anthropic.thinking.quarantine import ThinkingQuarantineStore
 from app.anthropic.token_counting import TokenCounter, preload_tokenizer
 from app.auth.copilot import CopilotTokenManager
 from app.auth.github import GitHubClient, infer_account_type
@@ -122,7 +123,15 @@ async def initialize_upstream_services(
         runtime.github_token_ready = True
         runtime.copilot_token_ready = True
         runtime.upstream_services = services
-        runtime.anthropic_client = AnthropicClient(target, resolver, settings)
+        quarantine = ThinkingQuarantineStore(
+            ttl_seconds=settings.anthropic.poisoned_thinking_ttl_hours * 3600
+        )
+        runtime.anthropic_client = AnthropicClient(
+            target,
+            resolver,
+            settings,
+            quarantine,
+        )
         runtime.token_counter = TokenCounter(target)
         runtime.openai_client = OpenAIClient(target, resolver)
         runtime.responses_ws_client = None
@@ -196,7 +205,15 @@ async def initialize_upstream_services(
     runtime.settings = settings
     runtime.models_ready = True
     runtime.upstream_services = services
-    runtime.anthropic_client = AnthropicClient(target, resolver, settings)
+    quarantine = ThinkingQuarantineStore(
+        ttl_seconds=settings.anthropic.poisoned_thinking_ttl_hours * 3600
+    )
+    runtime.anthropic_client = AnthropicClient(
+        target,
+        resolver,
+        settings,
+        quarantine,
+    )
     runtime.token_counter = TokenCounter(target)
     runtime.openai_client = OpenAIClient(target, resolver)
     ws_base_url = base_url.replace("https://", "wss://").replace("http://", "ws://")

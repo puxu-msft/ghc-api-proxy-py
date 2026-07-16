@@ -21,7 +21,14 @@ class StubAnthropicClient:
     def __init__(self, *, streaming: bool) -> None:
         self.streaming = streaming
 
-    async def execute(self, request: MessagesRequest) -> PipelineResult:
+    async def execute(
+        self,
+        request: MessagesRequest,
+        *,
+        session_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> PipelineResult:
+        del session_id, agent_id
         context = RequestContext(
             original_model=request.model,
             original_payload=request.model_dump(mode="json"),
@@ -53,11 +60,24 @@ class StubCounter:
 
 
 class ExecutableAnthropicClient(Protocol):
-    async def execute(self, request: MessagesRequest) -> PipelineResult: ...
+    async def execute(
+        self,
+        request: MessagesRequest,
+        *,
+        session_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> PipelineResult: ...
 
 
 class FailingAnthropicClient:
-    async def execute(self, request: MessagesRequest) -> PipelineResult:
+    async def execute(
+        self,
+        request: MessagesRequest,
+        *,
+        session_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> PipelineResult:
+        del session_id, agent_id
         context = RequestContext(
             original_model=request.model,
             original_payload=request.model_dump(mode="json"),

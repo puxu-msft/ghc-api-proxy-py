@@ -2,6 +2,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
+from app.anthropic.thinking.quarantine import QuarantineKey, ThinkingQuarantineStore
 from app.anthropic.thinking.strip_all import strip_all_thinking
 from app.errors import ApiError
 
@@ -62,8 +63,14 @@ class RetryCoordinator:
 class PoisonedThinkingStrategy:
     name = "poisoned_thinking"
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        store: ThinkingQuarantineStore | None = None,
+        key: QuarantineKey | None = None,
+    ) -> None:
         self._attempted = False
+        self._store = store
+        self._key = key
 
     def can_handle(self, error: ApiError) -> bool:
         message = error.message.lower()
@@ -91,6 +98,10 @@ class PoisonedThinkingStrategy:
             {**payload, "messages": stripped},
             ("strip_all_thinking",),
         )
+
+    def on_success(self) -> None:
+        if self._attempted and self._store is not None and self._key is not None:
+            self._store.record(self._key)
 
 
 __all__ = [
