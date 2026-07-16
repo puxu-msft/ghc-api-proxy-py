@@ -4,9 +4,12 @@ from typing import Any
 import httpx
 from fastapi.testclient import TestClient
 from httpx_ws import WebSocketNetworkError, WebSocketUpgradeError
+from starlette.websockets import WebSocketDisconnect
 
 from app.config.settings import AppSettings
-from app.deps import get_responses_ws_client
+from app.deps import get_approval_gate, get_responses_ws_client
+from app.pipeline.approval import ApprovalResult
+from app.pipeline.context import RequestContext
 from app.server import create_app
 
 
@@ -30,6 +33,14 @@ class FailingClient:
             "type": "error",
             "error": {"message": "bad request", "status_code": 400},
         }
+
+
+class RejectingGate:
+    enabled = True
+
+    async def wait_for_approval(self, context: RequestContext) -> ApprovalResult:
+        del context
+        return ApprovalResult("rejected", "denied")
 
 
 class UpgradeFailingClient:
@@ -96,6 +107,25 @@ def test_responses_websocket_forwards_upstream_error_frame() -> None:
         "type": "error",
         "error": {"message": "bad request", "status_code": 400},
     }
+
+
+def test_responses_websocket_reports_approval_rejection() -> None:
+    app = create_app(AppSettings())
+    app.dependency_overrides[get_responses_ws_client] = lambda: StubClient()
+    app.dependency_overrides[get_approval_gate] = lambda: RejectingGate()
+
+    with TestClient(app) as client, client.websocket_connect("/v1/responses") as websocket:
+        websocket.send_json(
+            {"type": "response.create", "response": {"model": "gpt-test", "input": "hi"}}
+        )
+        assert websocket.receive_json() == {
+            "type": "error",
+            "error": {"message": "Rejected: denied"},
+        }
+        try:
+            websocket.receive_json()
+        except WebSocketDisconnect as error:
+            assert error.code == 4003
 
 
 def test_responses_websocket_reports_upgrade_rejection() -> None:

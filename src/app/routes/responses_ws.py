@@ -9,6 +9,7 @@ from app.deps import (
     RuntimeDependency,
 )
 from app.models.openai import ResponsesRequest
+from app.pipeline.approval import ApprovalRejectedError
 from app.pipeline.protocol_guard import apply_approval_guard
 from app.routes.protocol_history import (
     finalize_protocol_history,
@@ -66,6 +67,14 @@ async def responses_websocket(
             )
     except WebSocketDisconnect:
         return
+    except ApprovalRejectedError as error:
+        await websocket.send_json(
+            {
+                "type": "error",
+                "error": {"message": f"Rejected: {error}"},
+            }
+        )
+        await websocket.close(code=4003)
     except WebSocketUpgradeError as error:
         await websocket.send_json(
             {
