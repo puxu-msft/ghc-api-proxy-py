@@ -18,6 +18,8 @@ from app.pipeline.approval import ApprovalGate
 from app.routes import (
     anthropic_router,
     approval_router,
+    azure_router,
+    gemini_router,
     health_router,
     history_router,
     management_router,
@@ -111,6 +113,8 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     setup_tracing(app, enabled=resolved_settings.observability.tracing_enabled)
     app.include_router(anthropic_router)
     app.include_router(approval_router)
+    app.include_router(azure_router)
+    app.include_router(gemini_router)
     app.include_router(management_router)
     app.include_router(history_router)
     app.include_router(metrics_router)
