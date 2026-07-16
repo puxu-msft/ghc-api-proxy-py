@@ -126,7 +126,9 @@ config / models / errors
 
 ## Phase 7 — 手动审批（本项目独有）
 
-- [ ] `pipeline/approval.py` + `routes/approval.py` —— AnyIO 取消/超时作用域门控、审批 REST/WS（**复用** Phase 6 的 `history/ws.py` WebSocketManager，不另造广播）
+- [x] `pipeline/approval.py` + `routes/approval.py` —— AnyIO Event/超时/shield cleanup、bounded pending、审批 REST/WS、shutdown 全拒；复用 Phase 6 topic-aware WebSocketManager
+
+**完成记录（2026-07-16）**：234 个测试通过，Ruff/Pyright strict 通过；approve/reject/modify/timeout/shutdown、pipeline 403、approval topic WebSocket 经两轮独立评审，最终 0 blocker / 0 major。
 
 ## Phase 8 — 多协议扩展
 

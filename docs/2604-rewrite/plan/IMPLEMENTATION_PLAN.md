@@ -1159,6 +1159,8 @@ curl http://localhost:4141/api/negotiation
 ## Phase 7 — 手动审批
 
 > **目标**: 完成可超时、可修改、可在 shutdown 中确定性拒绝的审批闭环。
+>
+> **实施状态（2026-07-16）**：✅ 完成。234 个测试通过；AnyIO ApprovalGate、REST/WS、topic 广播、403 rejection 和 shutdown cleanup 经独立终审为 0 blocker / 0 major。
 
 ### Step 7.1: ApprovalGate 状态机
 
