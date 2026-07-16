@@ -134,9 +134,11 @@ config / models / errors
 
 > 各适配层**复用** Phase 3（openai 客户端 / 清洗）与 Phase 4（anthropic 深度能力）的实现，不重新造轮子。
 
-- [ ] `models/gemini.py` —— Gemini 模型
-- [ ] `protocols/azure.py` + `routes/azure.py` —— Azure deployment 经典 + v1
-- [ ] `protocols/gemini.py` + `routes/gemini.py` —— Gemini `/v1beta`（流式复用 `streaming/translator.py`）
+- [x] `models/gemini.py` —— camelCase/extra 保真的 Gemini models、thinking/tool/count structures
+- [x] `protocols/azure.py` + `routes/azure.py` —— Azure classic deployment Chat/Responses/Embeddings，deployment model override
+- [x] `protocols/gemini.py` + `routes/gemini.py` —— Gemini generate/stream/count、tool/thinking mapping、Gemini error envelopes
+
+**完成记录（2026-07-16）**：244 个测试通过，Ruff/Pyright strict 通过；Gemini count/tools/stream/error 与 Azure deployment adapters、跨协议 approval guard 经三轮独立评审，最终 0 blocker / 0 major。
 
 ## Phase 9 — 可选能力（BACKLOG，按需）
 

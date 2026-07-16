@@ -1197,6 +1197,8 @@ uv run pytest tests/unit/test_approval_gate.py tests/http/test_approval_routes.p
 ## Phase 8 — 多协议扩展
 
 > **目标**: 落地 Azure OpenAI 与 Gemini `/v1beta`，复用既有 translator、streaming 和上游能力，不另建并行 pipeline。
+>
+> **实施状态（2026-07-16）**：✅ 完成。244 个测试通过；Gemini generate/stream/count/tools/errors 与 Azure classic adapters 经独立终审为 0 blocker / 0 major。
 
 ### Step 8.1: Gemini 模型与路径解析
 
