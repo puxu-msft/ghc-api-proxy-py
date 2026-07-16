@@ -8,6 +8,7 @@ import httpx
 
 from app.anthropic.request_preparation import prepare_anthropic_request
 from app.anthropic.sanitize import SanitizationResult, sanitize_messages
+from app.config.settings import AppSettings
 from app.models.anthropic import MessagesRequest
 from app.transform.model_resolver import ModelResolver
 
@@ -35,9 +36,15 @@ class PreparedAnthropicRequest:
 
 
 class AnthropicClient:
-    def __init__(self, target: AnthropicTarget, resolver: ModelResolver) -> None:
+    def __init__(
+        self,
+        target: AnthropicTarget,
+        resolver: ModelResolver,
+        settings: AppSettings | None = None,
+    ) -> None:
         self._target = target
         self._resolver = resolver
+        self._settings = settings or AppSettings()
 
     def prepare(self, request: MessagesRequest) -> PreparedAnthropicRequest:
         resolved_model = self._resolver.resolve(request.model)
@@ -48,7 +55,13 @@ class AnthropicClient:
             message.model_dump(mode="json", exclude_unset=True)
             for message in sanitization.messages
         ]
-        deeply_prepared = prepare_anthropic_request(wire)
+        deeply_prepared = prepare_anthropic_request(
+            wire,
+            tool_search=self._settings.anthropic.tool_search,
+            non_deferred_tools=tuple(
+                self._settings.anthropic.tool_search_non_deferred
+            ),
+        )
         return PreparedAnthropicRequest(
             original_model=request.model,
             resolved_model=resolved_model,

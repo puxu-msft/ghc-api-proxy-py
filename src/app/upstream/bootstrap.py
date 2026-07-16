@@ -122,7 +122,7 @@ async def initialize_upstream_services(
         runtime.github_token_ready = True
         runtime.copilot_token_ready = True
         runtime.upstream_services = services
-        runtime.anthropic_client = AnthropicClient(target, resolver)
+        runtime.anthropic_client = AnthropicClient(target, resolver, settings)
         runtime.token_counter = TokenCounter(target)
         runtime.openai_client = OpenAIClient(target, resolver)
         runtime.responses_ws_client = None
@@ -196,7 +196,7 @@ async def initialize_upstream_services(
     runtime.settings = settings
     runtime.models_ready = True
     runtime.upstream_services = services
-    runtime.anthropic_client = AnthropicClient(target, resolver)
+    runtime.anthropic_client = AnthropicClient(target, resolver, settings)
     runtime.token_counter = TokenCounter(target)
     runtime.openai_client = OpenAIClient(target, resolver)
     ws_base_url = base_url.replace("https://", "wss://").replace("http://", "ws://")
