@@ -23,6 +23,7 @@ router = APIRouter(prefix="/v1beta/models", tags=["gemini"])
 
 
 async def _gemini_stream(response: httpx.Response) -> AsyncGenerator[bytes]:
+    call_states: dict[int, dict[str, str]] = {}
     try:
         async for event in parse_sse_json(response.aiter_raw()):
             if not isinstance(event, dict):
@@ -40,22 +41,38 @@ async def _gemini_stream(response: httpx.Response) -> AsyncGenerator[bytes]:
             parts: list[dict[str, Any]] = []
             if typed_delta.get("content"):
                 parts.append({"text": typed_delta["content"]})
-            calls = cast(list[object], tool_calls) if isinstance(tool_calls, list) else []
-            for call in calls:
+            call_chunks = (
+                cast(list[object], tool_calls)
+                if isinstance(tool_calls, list)
+                else []
+            )
+            for call in call_chunks:
                 if not isinstance(call, dict):
                     continue
                 typed_call = cast(dict[str, Any], call)
+                index = int(typed_call.get("index", 0))
                 function = typed_call.get("function", {})
                 if isinstance(function, dict):
                     typed_function = cast(dict[str, Any], function)
-                    arguments = typed_function.get("arguments", "{}")
+                    state = call_states.setdefault(
+                        index,
+                        {"name": "", "arguments": ""},
+                    )
+                    if isinstance(typed_function.get("name"), str):
+                        state["name"] = typed_function["name"]
+                    if isinstance(typed_function.get("arguments"), str):
+                        state["arguments"] += typed_function["arguments"]
+            if choice.get("finish_reason") is not None:
+                for state in call_states.values():
+                    try:
+                        args = loads(state["arguments"] or "{}")
+                    except ValueError:
+                        args = {"raw": state["arguments"]}
                     parts.append(
                         {
                             "functionCall": {
-                                "name": typed_function.get("name"),
-                                "args": loads(
-                                    arguments if isinstance(arguments, str) else "{}"
-                                ),
+                                "name": state["name"],
+                                "args": args,
                             }
                         }
                     )
@@ -149,6 +166,24 @@ async def gemini_endpoint(
                 media_type="application/json",
             )
         return create_sse_response(_gemini_stream(upstream))
+    if not upstream.is_success:
+        try:
+            error_body = loads(await upstream.aread())
+        finally:
+            await upstream.aclose()
+        return Response(
+            content=dumps(
+                {
+                    "error": {
+                        "code": upstream.status_code,
+                        "message": str(error_body),
+                        "status": "UPSTREAM_ERROR",
+                    }
+                }
+            ),
+            status_code=upstream.status_code,
+            media_type="application/json",
+        )
     try:
         raw = loads(await upstream.aread())
         if not isinstance(raw, dict):
