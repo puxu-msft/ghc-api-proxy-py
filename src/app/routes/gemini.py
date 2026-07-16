@@ -5,7 +5,7 @@ import httpx
 import tiktoken
 from fastapi import APIRouter, Response
 
-from app.deps import ApprovalGateDependency, OpenAIClientDependency
+from app.deps import ApprovalGateDependency, OpenAIClientDependency, RuntimeDependency
 from app.models.gemini import CountTokensRequest, GenerateContentRequest
 from app.models.openai import ChatCompletionRequest
 from app.pipeline.protocol_guard import apply_approval_guard
@@ -14,6 +14,11 @@ from app.protocols.gemini import (
     gemini_to_openai,
     openai_to_gemini,
     parse_model_with_method,
+)
+from app.routes.protocol_history import (
+    finalize_protocol_history,
+    history_stream,
+    start_protocol_history,
 )
 from app.streaming.openai_sse import parse_sse_json
 from app.streaming.sse import create_sse_response, format_sse_event
@@ -99,6 +104,7 @@ async def gemini_endpoint(
     body: dict[str, Any],
     client: OpenAIClientDependency,
     gate: ApprovalGateDependency,
+    runtime: RuntimeDependency,
 ) -> Response:
     try:
         model, method = parse_model_with_method(model_with_method)
@@ -145,6 +151,12 @@ async def gemini_endpoint(
         gate=gate,
     )
     payload = ChatCompletionRequest.model_validate(guarded)
+    history_entry = start_protocol_history(
+        runtime,
+        endpoint=f"gemini-{method}",
+        model=model,
+        payload=body,
+    )
     upstream = await client.chat(payload)
     if stream:
         if not upstream.is_success:
@@ -152,6 +164,11 @@ async def gemini_endpoint(
                 error_body = loads(await upstream.aread())
             finally:
                 await upstream.aclose()
+            await finalize_protocol_history(
+                runtime,
+                history_entry,
+                status="failed",
+            )
             return Response(
                 content=dumps(
                     {
@@ -165,12 +182,23 @@ async def gemini_endpoint(
                 status_code=upstream.status_code,
                 media_type="application/json",
             )
-        return create_sse_response(_gemini_stream(upstream))
+        return create_sse_response(
+            history_stream(
+                _gemini_stream(upstream),
+                runtime=runtime,
+                entry=history_entry,
+            )
+        )
     if not upstream.is_success:
         try:
             error_body = loads(await upstream.aread())
         finally:
             await upstream.aclose()
+        await finalize_protocol_history(
+            runtime,
+            history_entry,
+            status="failed",
+        )
         return Response(
             content=dumps(
                 {
@@ -188,6 +216,11 @@ async def gemini_endpoint(
         raw = loads(await upstream.aread())
         if not isinstance(raw, dict):
             raise ValueError("OpenAI response must be an object")
+        await finalize_protocol_history(
+            runtime,
+            history_entry,
+            status="completed" if upstream.is_success else "failed",
+        )
         return Response(
             content=dumps(openai_to_gemini(raw)),
             status_code=upstream.status_code,

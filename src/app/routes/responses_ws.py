@@ -3,8 +3,17 @@ from httpx_ws import WebSocketDisconnect as UpstreamWebSocketDisconnect
 from httpx_ws import WebSocketNetworkError, WebSocketUpgradeError
 from pydantic import ValidationError
 
-from app.deps import ResponsesWSClientDependency
+from app.deps import (
+    ApprovalGateDependency,
+    ResponsesWSClientDependency,
+    RuntimeDependency,
+)
 from app.models.openai import ResponsesRequest
+from app.pipeline.protocol_guard import apply_approval_guard
+from app.routes.protocol_history import (
+    finalize_protocol_history,
+    start_protocol_history,
+)
 
 router = APIRouter(tags=["openai-responses"])
 
@@ -13,6 +22,8 @@ router = APIRouter(tags=["openai-responses"])
 async def responses_websocket(
     websocket: WebSocket,
     ws_client: ResponsesWSClientDependency,
+    gate: ApprovalGateDependency,
+    runtime: RuntimeDependency,
 ) -> None:
     await websocket.accept()
     try:
@@ -27,11 +38,32 @@ async def responses_websocket(
             return
         payload = dict(frame["response"])
         payload["stream"] = True
-        ResponsesRequest.model_validate(payload)
-        async for event in ws_client.create_response(
-            {"type": "response.create", "response": payload}
-        ):
-            await websocket.send_json(event)
+        request = ResponsesRequest.model_validate(payload)
+        payload = await apply_approval_guard(
+            request.model_dump(mode="json", exclude_unset=True),
+            model=request.model,
+            endpoint="openai-responses-websocket",
+            gate=gate,
+        )
+        history_entry = start_protocol_history(
+            runtime,
+            endpoint="openai-responses-websocket",
+            model=request.model,
+            payload=payload,
+        )
+        completed = False
+        try:
+            async for event in ws_client.create_response(
+                {"type": "response.create", "response": payload}
+            ):
+                await websocket.send_json(event)
+            completed = True
+        finally:
+            await finalize_protocol_history(
+                runtime,
+                history_entry,
+                status="completed" if completed else "aborted",
+            )
     except WebSocketDisconnect:
         return
     except WebSocketUpgradeError as error:
