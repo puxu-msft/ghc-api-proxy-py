@@ -11,6 +11,7 @@ from app.deps import (
     SettingsDependency,
     TokenCounterDependency,
 )
+from app.errors import ApiError, ErrorCategory
 from app.models.anthropic import MessagesRequest
 from app.pipeline.context import RequestContext, RequestState
 from app.pipeline.executor import UpstreamResponseError
@@ -33,11 +34,19 @@ async def _history_stream(
             yield chunk
         completed = True
     finally:
+        history = getattr(client, "history", None)
         if completed:
             context.transition(RequestState.COMPLETED)
-            history = getattr(client, "history", None)
-            if history is not None:
-                await history.finalized(context)
+        else:
+            context.fail(
+                ApiError(
+                    "stream interrupted",
+                    category=ErrorCategory.NETWORK,
+                    status_code=499,
+                )
+            )
+        if history is not None:
+            await history.finalized(context)
 
 
 @router.post("/v1/messages")
