@@ -46,6 +46,21 @@ async def execute_anthropic_pipeline(
     if client.history is not None:
         await client.history.started(context)
     prepared = client.prepare(request)
+    if client.approval_gate is not None and client.approval_gate.enabled:
+        approval = await client.approval_gate.wait_for_approval(context)
+        if approval.status == "rejected":
+            error = ApiError(
+                f"Rejected: {approval.reason}",
+                category=ErrorCategory.CLIENT,
+                status_code=403,
+            )
+            context.fail(error)
+            if client.history is not None:
+                await client.history.finalized(context)
+            raise RuntimeError(error.message)
+        if approval.modified_payload:
+            request = MessagesRequest.model_validate(approval.modified_payload)
+            prepared = client.prepare(request)
     context.resolved_model = prepared.resolved_model
     context.sanitization = prepared.sanitization
     context.transition(RequestState.EXECUTING)

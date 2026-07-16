@@ -14,7 +14,14 @@ from app.history.store import HistoryStore
 from app.observability.logging import setup_logging
 from app.observability.telemetry import setup_metrics
 from app.observability.tracing import setup_tracing
-from app.routes import anthropic_router, health_router, history_router, management_router
+from app.pipeline.approval import ApprovalGate
+from app.routes import (
+    anthropic_router,
+    approval_router,
+    health_router,
+    history_router,
+    management_router,
+)
 from app.routes.metrics import router as metrics_router
 from app.routes.openai import router as openai_router
 from app.routes.responses_ws import router as responses_ws_router
@@ -42,6 +49,15 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
                 )
                 runtime.history_store = HistoryStore(history_path)
                 await runtime.history_store.start()
+            runtime.approval_gate = ApprovalGate(
+                enabled=settings.approval.enabled,
+                timeout_seconds=settings.approval.timeout_seconds,
+                websockets=(
+                    runtime.history_store.websockets
+                    if runtime.history_store is not None
+                    else None
+                ),
+            )
             token_path = Path(settings.auth.token_file) if settings.auth.token_file else None
             has_noninteractive_token = await noninteractive_token_available(
                 settings.auth.github_token,
@@ -51,6 +67,8 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
                 services = await initialize_upstream_services(runtime)
                 if runtime.history_store is not None and runtime.anthropic_client is not None:
                     runtime.anthropic_client.history = HistoryConsumer(runtime.history_store)
+                if runtime.anthropic_client is not None:
+                    runtime.anthropic_client.approval_gate = runtime.approval_gate
                 if services.copilot_tokens is not None:
                     task_group.start_soon(services.copilot_tokens.run_refresh_loop)
                 if settings.model_refresh_interval > 0:
@@ -70,6 +88,9 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
                 )
             yield
         finally:
+            if runtime.approval_gate is not None:
+                await runtime.approval_gate.reject_all_pending("server shutting down")
+                runtime.approval_gate = None
             if runtime.history_store is not None:
                 await runtime.history_store.close()
                 runtime.history_store = None
@@ -89,6 +110,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     setup_metrics()
     setup_tracing(app, enabled=resolved_settings.observability.tracing_enabled)
     app.include_router(anthropic_router)
+    app.include_router(approval_router)
     app.include_router(management_router)
     app.include_router(history_router)
     app.include_router(metrics_router)

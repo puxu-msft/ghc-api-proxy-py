@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from app.history.store import HistoryStore
     from app.openai.client import OpenAIClient
     from app.openai.responses_ws import ResponsesWebSocketClient
+    from app.pipeline.approval import ApprovalGate
     from app.upstream.bootstrap import UpstreamServices
 
 
@@ -28,6 +29,7 @@ class RuntimeState:
     openai_client: OpenAIClient | None = None
     responses_ws_client: ResponsesWebSocketClient | None = None
     history_store: HistoryStore | None = None
+    approval_gate: ApprovalGate | None = None
 
     def readiness_checks(self) -> dict[str, bool]:
         return {

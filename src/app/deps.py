@@ -10,6 +10,7 @@ from app.history.store import HistoryStore
 from app.models.common import ModelInfo
 from app.openai.client import OpenAIClient
 from app.openai.responses_ws import ResponsesWebSocketClient
+from app.pipeline.approval import ApprovalGate
 from app.runtime import RuntimeState
 
 
@@ -74,6 +75,13 @@ def get_history_store(request: Request) -> HistoryStore:
     return store
 
 
+def get_approval_gate(request: Request) -> ApprovalGate:
+    gate = get_runtime_state(request).approval_gate
+    if gate is None:
+        raise RuntimeError("Approval gate is not initialized")
+    return gate
+
+
 RuntimeDependency = Annotated[RuntimeState, Depends(get_runtime_state)]
 SettingsDependency = Annotated[AppSettings, Depends(get_settings)]
 AnthropicClientDependency = Annotated[AnthropicClient, Depends(get_anthropic_client)]
@@ -85,3 +93,4 @@ ResponsesWSClientDependency = Annotated[
     Depends(get_responses_ws_client),
 ]
 HistoryStoreDependency = Annotated[HistoryStore, Depends(get_history_store)]
+ApprovalGateDependency = Annotated[ApprovalGate, Depends(get_approval_gate)]
