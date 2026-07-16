@@ -1,7 +1,7 @@
 # 实施交接：Phase 5～9
 
 > 更新时间：2026-07-15
-> 当前 HEAD：`f8adb39`
+> 当前状态：Phase 0～8 已全部完成；本文档保留为实施历史，不再作为待办交接。
 > 用户指令：持续实施直至最终完成；只有出现无法从已定规格裁决的分歧时才询问用户。
 
 ## 已完成
@@ -31,7 +31,11 @@
 - Pyright strict 全项目通过。
 - 最近 Phase 4 独立复审：0 blocker / 0 major。
 
-## Phase 5 下一步顺序
+## Phase 5～8 实施结果
+
+Phase 5～8 已按下列顺序全部实施、测试、独立评审并提交；实时状态以 `TODO_CURRENT.md` 和 `IMPLEMENTATION_PLAN.md` 为准。
+
+## 原 Phase 5 实施顺序
 
 严格按 `IMPLEMENTATION_PLAN.md` Phase 5 TDD 实施并做语义提交：
 
