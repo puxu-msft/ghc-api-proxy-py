@@ -14,6 +14,7 @@ from app.models.anthropic import MessagesRequest
 from app.transform.model_resolver import ModelResolver
 
 if TYPE_CHECKING:
+    from app.history.consumer import HistoryConsumer
     from app.pipeline.executor import PipelineResult
 
 
@@ -43,11 +44,13 @@ class AnthropicClient:
         resolver: ModelResolver,
         settings: AppSettings | None = None,
         quarantine: ThinkingQuarantineStore | None = None,
+        history: HistoryConsumer | None = None,
     ) -> None:
         self._target = target
         self._resolver = resolver
         self._settings = settings or AppSettings()
         self.quarantine = quarantine
+        self.history = history
 
     def prepare(self, request: MessagesRequest) -> PreparedAnthropicRequest:
         resolved_model = self._resolver.resolve(request.model)

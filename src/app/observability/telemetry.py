@@ -1,4 +1,18 @@
 from opentelemetry import metrics
+from opentelemetry.exporter.prometheus import PrometheusMetricReader
+from opentelemetry.sdk.metrics import MeterProvider
+
+_provider: MeterProvider | None = None
+
+
+def setup_metrics() -> bool:
+    global _provider
+    if _provider is not None:
+        return False
+    reader = PrometheusMetricReader()
+    _provider = MeterProvider(metric_readers=[reader])
+    metrics.set_meter_provider(_provider)
+    return True
 
 
 class RequestTelemetry:

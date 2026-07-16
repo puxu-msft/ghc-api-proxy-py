@@ -59,3 +59,28 @@ def test_in_flight_and_session_identification() -> None:
     assert identify_session(
         {"x-session-id": "generic", "x-claude-code-session-id": "claude"}
     ) == ("claude", "main")
+
+
+@pytest.mark.asyncio
+async def test_writer_continues_after_single_job_failure(tmp_path: Path) -> None:
+    class FlakyWriter(HistoryWriter):
+        failed = False
+
+        def _insert(self, entry: HistoryEntry) -> None:
+            if not self.failed:
+                self.failed = True
+                raise OSError("disk hiccup")
+            super()._insert(entry)
+
+    writer = FlakyWriter(tmp_path / "history.db")
+    await writer.start()
+    try:
+        await writer.submit(_entry("bad", "completed", 1))
+        await writer.submit(_entry("good", "completed", 2))
+        await writer.flush()
+        entries = await writer.list_entries(limit=10)
+    finally:
+        await writer.close()
+
+    assert writer.error_count == 1
+    assert [entry.id for entry in entries] == ["good"]

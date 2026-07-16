@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import anyio
+
 from app.history.in_flight import InFlightHistory
 from app.history.sqlite.writer import HistoryWriter
 from app.history.types import HistoryEntry
@@ -20,6 +22,19 @@ class HistoryStore:
 
     async def flush(self) -> None:
         await self.writer.flush()
+
+    async def run_reaper(
+        self,
+        interval_seconds: float,
+        success_limit: int,
+        failure_limit: int,
+    ) -> None:
+        while True:
+            await anyio.sleep(interval_seconds)
+            await self.writer.reap(
+                success_limit=success_limit,
+                failure_limit=failure_limit,
+            )
 
     async def list_entries(self, *, limit: int = 100) -> list[HistoryEntry]:
         persisted = await self.writer.list_entries(limit=limit) if self.writer.started else []

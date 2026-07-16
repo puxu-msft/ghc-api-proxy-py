@@ -43,6 +43,8 @@ async def execute_anthropic_pipeline(
         agent_id=agent_id,
     )
     context.transition(RequestState.SANITIZING)
+    if client.history is not None:
+        await client.history.started(context)
     prepared = client.prepare(request)
     context.resolved_model = prepared.resolved_model
     context.sanitization = prepared.sanitization
@@ -78,6 +80,8 @@ async def execute_anthropic_pipeline(
             context.transition(
                 RequestState.STREAMING if request.stream else RequestState.COMPLETED
             )
+            if client.history is not None and not request.stream:
+                await client.history.finalized(context)
             return PipelineResult(context=context, response=response)
         body = await response.aread()
         error = ApiError(
@@ -100,5 +104,7 @@ async def execute_anthropic_pipeline(
             await response.aclose()
             continue
         context.fail(error)
+        if client.history is not None:
+            await client.history.finalized(context)
         raise UpstreamResponseError(context, response)
     raise RuntimeError("retry loop exhausted without terminal result")

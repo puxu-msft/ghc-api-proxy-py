@@ -1,5 +1,6 @@
 import asyncio
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -8,12 +9,21 @@ from app.history.types import HistoryEntry, ModelRef
 from app.wire_json import dumps, loads
 
 
+@dataclass(frozen=True, slots=True)
+class ReapJob:
+    success_limit: int
+    failure_limit: int
+
+
 class HistoryWriter:
     def __init__(self, db_path: Path, *, queue_size: int = 1000) -> None:
         self._path = db_path
-        self._queue: asyncio.Queue[HistoryEntry | None] = asyncio.Queue(maxsize=queue_size)
+        self._queue: asyncio.Queue[HistoryEntry | ReapJob | None] = asyncio.Queue(
+            maxsize=queue_size
+        )
         self._task: asyncio.Task[None] | None = None
         self._connection: sqlite3.Connection | None = None
+        self.error_count = 0
 
     @property
     def started(self) -> bool:
@@ -49,7 +59,16 @@ class HistoryWriter:
             try:
                 if entry is None:
                     return
-                await asyncio.to_thread(self._insert, entry)
+                if isinstance(entry, ReapJob):
+                    await asyncio.to_thread(
+                        self._reap,
+                        entry.success_limit,
+                        entry.failure_limit,
+                    )
+                else:
+                    await asyncio.to_thread(self._insert, entry)
+            except Exception:
+                self.error_count += 1
             finally:
                 self._queue.task_done()
 
@@ -73,7 +92,8 @@ class HistoryWriter:
         await self._queue.join()
 
     async def reap(self, *, success_limit: int, failure_limit: int) -> None:
-        await asyncio.to_thread(self._reap, success_limit, failure_limit)
+        await self._queue.put(ReapJob(success_limit, failure_limit))
+        await self._queue.join()
 
     def _reap(self, success_limit: int, failure_limit: int) -> None:
         assert self._connection is not None

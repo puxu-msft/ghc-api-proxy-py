@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.config.settings import AppSettings
-from app.observability.telemetry import RequestTelemetry
+from app.observability.telemetry import RequestTelemetry, setup_metrics
 from app.observability.tracing import setup_tracing, trace_context
 from app.server import create_app
 
@@ -21,6 +21,7 @@ def test_trace_context_is_empty_without_active_span() -> None:
 
 
 def test_otel_telemetry_records_without_handwritten_counter_state() -> None:
+    setup_metrics()
     telemetry = RequestTelemetry()
     telemetry.record_request(
         model="test",
@@ -35,7 +36,19 @@ def test_otel_telemetry_records_without_handwritten_counter_state() -> None:
 
 
 def test_metrics_endpoint_exposes_prometheus_text() -> None:
+    setup_metrics()
+    RequestTelemetry().record_request(
+        model="visible-model",
+        endpoint="test-endpoint",
+        status="success",
+        duration_ms=1,
+        input_tokens=1,
+        output_tokens=1,
+        reasoning_tokens=0,
+    )
     with TestClient(create_app(AppSettings())) as client:
         response = client.get("/metrics")
     assert response.status_code == 200
     assert "text/plain" in response.headers["content-type"]
+    assert "ghc_proxy_requests" in response.text
+    assert "visible-model" in response.text

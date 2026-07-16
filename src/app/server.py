@@ -9,8 +9,10 @@ from app import __version__
 from app.auth.providers import noninteractive_token_available
 from app.config.paths import user_data_path
 from app.config.settings import AppSettings
+from app.history.consumer import HistoryConsumer
 from app.history.store import HistoryStore
 from app.observability.logging import setup_logging
+from app.observability.telemetry import setup_metrics
 from app.observability.tracing import setup_tracing
 from app.routes import anthropic_router, health_router, history_router, management_router
 from app.routes.metrics import router as metrics_router
@@ -47,6 +49,8 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
             )
             if settings.upstream.type == "generic" or has_noninteractive_token:
                 services = await initialize_upstream_services(runtime)
+                if runtime.history_store is not None and runtime.anthropic_client is not None:
+                    runtime.anthropic_client.history = HistoryConsumer(runtime.history_store)
                 if services.copilot_tokens is not None:
                     task_group.start_soon(services.copilot_tokens.run_refresh_loop)
                 if settings.model_refresh_interval > 0:
@@ -54,6 +58,16 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
                         services.run_model_refresh_loop,
                         settings.model_refresh_interval,
                     )
+            if (
+                runtime.history_store is not None
+                and settings.history.reaper_interval > 0
+            ):
+                task_group.start_soon(
+                    runtime.history_store.run_reaper,
+                    settings.history.reaper_interval,
+                    settings.history.success_limit,
+                    settings.history.failure_limit,
+                )
             yield
         finally:
             if runtime.history_store is not None:
@@ -72,6 +86,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         lifespan=_lifespan,
     )
     app.state.runtime = RuntimeState(settings=resolved_settings)
+    setup_metrics()
     setup_tracing(app, enabled=resolved_settings.observability.tracing_enabled)
     app.include_router(anthropic_router)
     app.include_router(management_router)
