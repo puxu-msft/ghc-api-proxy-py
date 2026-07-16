@@ -100,12 +100,14 @@ config / models / errors
 
 > 目标：容错、限流、优雅关闭。让代理"扛得住"。（可与 Phase 6 并行）
 
-- [ ] `pipeline/strategies/` —— 全部重试策略（network / token_refresh / auto_truncate / orphan / deferred_tool / poisoned_thinking / server_tool_rejection）；其中 `poisoned_thinking` 接入后，Phase 4 的 thinking L2/L3 才**行为闭环、端到端可用**
-- [ ] `pipeline/rate_limiter.py` —— 自适应三模式限流（替换 Phase 2 的空实现直通）
-- [ ] `auto_truncate/` —— 响应式截断 + token 限制学习
-- [ ] `streaming/`（keepalive / delayed_commit / buffered_retry）—— 延迟提交、keepalive 心跳、缓冲重试（默认关）
-- [ ] `pipeline/manager.py` + `context/`（manager / consumers / error_persistence）—— RequestContextManager、观察者注册、stale reaper、deadline、错误持久化（off-loop、never-throw）
-- [ ] `shutdown.py` + `repetition_detector.py` —— 4 阶段关闭 + 信号升级、KMP 重复检测
+- [x] `pipeline/strategies/` —— single-owner coordinator 与 poisoned-thinking L2/L3 行为闭环
+- [x] `pipeline/rate_limiter.py` —— 自适应三模式限流与 retry deadline 自愈
+- [x] `auto_truncate/` —— 截断 engine + normalized model 24h token 限制缓存
+- [x] `streaming/`（keepalive / delayed_commit / buffered_retry）—— 结构化 keepalive、延迟首帧与 opt-in 有界缓冲
+- [x] `pipeline/manager.py` + `context/`（consumers / error_persistence）—— active/stale 管理、观察者、off-loop 原子错误持久化
+- [x] `shutdown.py` + `repetition_detector.py` —— 4 阶段异步回调关闭、KMP 重复检测
+
+**完成记录（2026-07-15）**：218 个测试通过，Ruff/Pyright strict 通过；429 limiter feedback、single-owner retry、Thinking L2/L3、KMP、token cache、stream resilience、context consumers 与 shutdown 经两轮独立评审，最终 0 blocker / 0 major。
 
 **里程碑**：长时运行稳定、优雅关闭、限流自愈；thinking L2/L3 端到端可用。
 

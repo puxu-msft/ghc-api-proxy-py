@@ -878,6 +878,8 @@ uv run pytest tests/unit/test_thinking* tests/unit/test_feature* -v --cov=app/an
 ## Phase 5 — 韧性与重试
 
 > **目标**: 容错、限流、优雅关闭。让代理"扛得住"。
+>
+> **实施状态（2026-07-15）**：✅ 完成。218 个测试通过；retry owner、limiter feedback、自愈 Thinking、truncate/token cache、stream resilience、context consumers、4 阶段 shutdown 与 KMP 经独立复审为 0 blocker / 0 major。
 
 ### 前置依赖
 
