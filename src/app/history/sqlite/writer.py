@@ -124,6 +124,29 @@ class HistoryWriter:
         ).fetchall()
         return [self._from_row(row) for row in rows]
 
+    async def get(self, entry_id: str) -> HistoryEntry | None:
+        return await asyncio.to_thread(self._get, entry_id)
+
+    def _get(self, entry_id: str) -> HistoryEntry | None:
+        assert self._connection is not None
+        row = self._connection.execute(
+            "SELECT * FROM entries WHERE id = ?",
+            (entry_id,),
+        ).fetchone()
+        return self._from_row(row) if row is not None else None
+
+    async def set_pinned(self, entry_id: str, pinned: bool) -> bool:
+        return await asyncio.to_thread(self._set_pinned, entry_id, pinned)
+
+    def _set_pinned(self, entry_id: str, pinned: bool) -> bool:
+        assert self._connection is not None
+        cursor = self._connection.execute(
+            "UPDATE entries SET pinned = ? WHERE id = ?",
+            (int(pinned), entry_id),
+        )
+        self._connection.commit()
+        return cursor.rowcount > 0
+
     @staticmethod
     def _from_row(row: tuple[Any, ...]) -> HistoryEntry:
         request_payload = loads(row[9])

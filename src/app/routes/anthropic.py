@@ -1,3 +1,4 @@
+from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Any
 
 from fastapi import APIRouter, Header
@@ -11,12 +12,32 @@ from app.deps import (
     TokenCounterDependency,
 )
 from app.models.anthropic import MessagesRequest
+from app.pipeline.context import RequestContext, RequestState
 from app.pipeline.executor import UpstreamResponseError
 from app.streaming.idle_timeout import resolve_stream_idle, with_idle_timeout
 from app.streaming.sse import create_sse_response, passthrough_bytes
 from app.wire_json import dumps
 
 router = APIRouter(tags=["anthropic"])
+
+
+async def _history_stream(
+    stream: AsyncIterator[bytes],
+    *,
+    context: RequestContext,
+    client: AnthropicClientDependency,
+) -> AsyncGenerator[bytes]:
+    completed = False
+    try:
+        async for chunk in stream:
+            yield chunk
+        completed = True
+    finally:
+        if completed:
+            context.transition(RequestState.COMPLETED)
+            history = getattr(client, "history", None)
+            if history is not None:
+                await history.finalized(context)
 
 
 @router.post("/v1/messages")
@@ -62,7 +83,11 @@ async def messages(
             settings.timeouts,
         )
         stream = passthrough_bytes(
-            with_idle_timeout(upstream.aiter_raw(), timeout_seconds=idle_timeout),
+            _history_stream(
+                with_idle_timeout(upstream.aiter_raw(), timeout_seconds=idle_timeout),
+                context=result.context,
+                client=client,
+            ),
             cleanup=upstream.aclose,
         )
         return create_sse_response(stream, headers=forwarded_headers)

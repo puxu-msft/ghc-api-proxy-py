@@ -48,19 +48,15 @@ async def export_entry(entry_id: str, store: HistoryStoreDependency) -> Response
 
 @router.post("/history/api/entries/{entry_id}/pin")
 async def pin(entry_id: str, store: HistoryStoreDependency) -> dict[str, bool]:
-    result = await store.get(entry_id)
-    if result is None:
+    if not await store.set_pinned(entry_id, True):
         raise HTTPException(status_code=404, detail="Entry not found")
-    result.pinned = True
     return {"pinned": True}
 
 
 @router.post("/history/api/entries/{entry_id}/unpin")
 async def unpin(entry_id: str, store: HistoryStoreDependency) -> dict[str, bool]:
-    result = await store.get(entry_id)
-    if result is None:
+    if not await store.set_pinned(entry_id, False):
         raise HTTPException(status_code=404, detail="Entry not found")
-    result.pinned = False
     return {"pinned": False}
 
 

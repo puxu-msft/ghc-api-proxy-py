@@ -46,8 +46,14 @@ class HistoryStore:
         live = self.in_flight.get(entry_id)
         if live is not None:
             return live
-        entries = await self.list_entries(limit=1000)
-        return next((entry for entry in entries if entry.id == entry_id), None)
+        return await self.writer.get(entry_id) if self.writer.started else None
+
+    async def set_pinned(self, entry_id: str, pinned: bool) -> bool:
+        live = self.in_flight.get(entry_id)
+        if live is not None:
+            live.pinned = pinned
+            return True
+        return await self.writer.set_pinned(entry_id, pinned) if self.writer.started else False
 
     async def close(self) -> None:
         await self.writer.close()

@@ -84,3 +84,17 @@ async def test_writer_continues_after_single_job_failure(tmp_path: Path) -> None
 
     assert writer.error_count == 1
     assert [entry.id for entry in entries] == ["good"]
+
+
+@pytest.mark.asyncio
+async def test_persisted_pin_update_round_trips(tmp_path: Path) -> None:
+    writer = HistoryWriter(tmp_path / "history.db")
+    await writer.start()
+    try:
+        await writer.submit(_entry("pin-me", "completed", 1))
+        await writer.flush()
+        assert await writer.set_pinned("pin-me", True) is True
+        entry = await writer.get("pin-me")
+    finally:
+        await writer.close()
+    assert entry is not None and entry.pinned is True
