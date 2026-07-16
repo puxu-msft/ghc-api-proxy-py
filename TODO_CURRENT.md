@@ -115,10 +115,12 @@ config / models / errors
 
 > 目标：审计、监控、运维面板。（可与 Phase 5 并行——`history/` 作为 HistorySink 订阅 `context/` 事件，`context/` 不反向依赖 `history/`，依赖面不重叠）
 
-- [ ] `history/`（store / sqlite / in_flight / sessions / ws / types）—— 异步 SQLite（off-loop writer）+ 双源 + 分桶 reaper + WS
-- [ ] `observability/`（tracing / telemetry / middleware）—— OpenTelemetry、轻量遥测、`/metrics`
-- [ ] `routes/history.py` / `routes/management.py` / `routes/metrics.py` —— History REST/WS、`/api/*` 管理、Prometheus
-- [ ] `observability/tui.py` —— Textual 终端 UI
+- [x] `history/`（store / sqlite / in_flight / sessions / ws / types）—— 单 writer off-loop SQLite、双源、串行 reaper、WS
+- [x] `observability/`（tracing / telemetry）—— opt-in OTel instrumentation、OTel Metrics 单一数据源、Prometheus reader
+- [x] `routes/history.py` / `routes/management.py` / `routes/metrics.py` —— History REST/WS、管理 API、`/metrics`
+- [x] `observability/tui.py` —— Textual shell + 纯 reducer
+
+**完成记录（2026-07-16）**：230 个测试通过，Ruff/Pyright strict 通过；writer 异常韧性、串行 reaper、History 请求/流式生命周期、持久化 pin、OTel-Prometheus bridge、API/WS/TUI 经三轮独立评审，最终 0 blocker / 0 major。
 
 **里程碑**：完整审计 + 可观测。
 

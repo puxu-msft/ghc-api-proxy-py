@@ -1025,6 +1025,8 @@ kill -TERM <pid>
 ## Phase 6 — 历史与可观测性
 
 > **目标**: 审计、监控、运维面板。
+>
+> **实施状态（2026-07-16）**：✅ 完成。230 个测试通过；History 单 writer/双源/reaper/REST/WS、OTel-Prometheus 单数据源和 Textual reducer 经独立终审为 0 blocker / 0 major。
 
 ### 前置依赖
 
