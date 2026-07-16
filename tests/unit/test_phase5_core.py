@@ -8,10 +8,10 @@ from app.shutdown import ShutdownManager, ShutdownPhase
 
 @pytest.mark.asyncio
 async def test_rate_limiter_transitions_rate_limited_recovering_normal() -> None:
-    limiter = AdaptiveRateLimiter(consecutive_successes=2)
+    limiter = AdaptiveRateLimiter(consecutive_successes=2, default_retry_interval=0)
     limiter.report_rate_limit(0)
     assert limiter.mode is RateLimitMode.RATE_LIMITED
-    await limiter.release_for_retry()
+    await limiter.acquire()
     assert limiter.mode is RateLimitMode.RECOVERING
     limiter.report_success()
     limiter.report_success()
