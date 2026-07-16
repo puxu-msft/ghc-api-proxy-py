@@ -746,6 +746,8 @@ wscat -c ws://localhost:4141/v1/responses
 ## Phase 4 — Anthropic 深度兼容
 
 > **目标**: 把 Anthropic 路径做深做正确。价值密度最高、也是上游最复杂的部分。
+>
+> **实施状态（2026-07-15）**：✅ 完成。205 个测试通过；Thinking、feature negotiation、tools、header policy、warmup、sanitizer 与 request preparation 已接入生产路径并通过独立复审，最终 0 blocker / 0 major。
 
 ### 前置依赖
 

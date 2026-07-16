@@ -84,13 +84,15 @@ config / models / errors
 
 > 目标：把 Anthropic 路径做深做正确。价值密度最高、也是上游最复杂的部分。
 
-- [ ] `anthropic/sanitize/`（完整 2 阶段）—— 全部清洗步骤 + 消息映射
-- [ ] `anthropic/thinking/` —— 块级保护 / destack / L2 剥离 / **L3 内存隔离** / signature 兼容
-- [ ] `anthropic/features.py` + `feature_negotiation.py` —— 特性检测 + beta headers + 11 类学习缓存（内存）
-- [ ] `anthropic/message_tools.py` + `server_tool_filter.py` —— tool_search 注入、CC 官方工具注入、server tool 过滤
-- [ ] `anthropic/header_policy/` —— 请求 / 响应头转发安全
-- [ ] `anthropic/warmup.py` —— Warmup 策略
-- [ ] `anthropic/request_preparation.py` —— 请求准备总编排（cache control 四模式、context editing）
+- [x] `anthropic/sanitize/`（完整 2 阶段）—— 基础清洗、reminder/read tags、tool pair 去重
+- [x] `anthropic/thinking/` —— 块级保护 / destack / L2 剥离 / **L3 内存隔离** / signature 兼容
+- [x] `anthropic/features.py` + `feature_negotiation.py` —— 特性检测 + beta headers + 11 类学习缓存（内存）
+- [x] `anthropic/message_tools.py` + `server_tool_filter.py` —— tool_search/defer_loading 与 server tool 过滤
+- [x] `anthropic/header_policy/` —— 请求 / 响应头转发安全
+- [x] `anthropic/warmup.py` —— Warmup 策略及路由短路
+- [x] `anthropic/request_preparation.py` —— 请求准备编排并接入生产 client
+
+**完成记录（2026-07-15）**：205 个测试通过，Ruff/Pyright strict 通过；Thinking、11 类协商缓存、工具预处理、header floor、warmup、深度 sanitizer 与 preparation 生产接线经两轮独立评审，最终 0 blocker / 0 major。L2/L3 的反应式重试闭环按计划归 Phase 5。
 
 **里程碑**：Anthropic 路径**机制完整**——保护 / destack / 剥离函数 / 隔离数据结构 / 特性协商 / cache / header 转发 / warmup 均单元可测。注意：thinking 拒绝场景的**自动降级重试（L2/L3 行为闭环）**依赖 Phase 5 的 `poisoned_thinking` 策略接入重试循环后才端到端可用——本阶段止于"机制就绪、单元可测"，非"拒绝场景端到端可用"。
 
