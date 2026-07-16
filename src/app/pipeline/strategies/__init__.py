@@ -1,0 +1,101 @@
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Any, Protocol, cast
+
+from app.anthropic.thinking.strip_all import strip_all_thinking
+from app.errors import ApiError
+
+
+@dataclass(frozen=True, slots=True)
+class RetryDecision:
+    should_retry: bool
+    payload: dict[str, object]
+    modifications: tuple[str, ...] = ()
+    owner: str | None = None
+
+
+class RetryStrategy(Protocol):
+    name: str
+
+    def can_handle(self, error: ApiError) -> bool: ...
+
+    async def handle(
+        self,
+        error: ApiError,
+        payload: dict[str, object],
+    ) -> RetryDecision: ...
+
+
+class RetryCoordinator:
+    def __init__(
+        self,
+        strategies: Sequence[RetryStrategy],
+        *,
+        max_retries: int,
+    ) -> None:
+        self._strategies = tuple(strategies)
+        self._remaining = max_retries
+
+    async def decide(
+        self,
+        error: ApiError,
+        payload: dict[str, object],
+    ) -> RetryDecision | None:
+        if self._remaining <= 0:
+            return None
+        for strategy in self._strategies:
+            if not strategy.can_handle(error):
+                continue
+            decision = await strategy.handle(error, payload)
+            if decision.should_retry:
+                self._remaining -= 1
+                return RetryDecision(
+                    True,
+                    decision.payload,
+                    decision.modifications,
+                    owner=strategy.name,
+                )
+            return None
+        return None
+
+
+class PoisonedThinkingStrategy:
+    name = "poisoned_thinking"
+
+    def __init__(self) -> None:
+        self._attempted = False
+
+    def can_handle(self, error: ApiError) -> bool:
+        message = error.message.lower()
+        return (
+            not self._attempted
+            and "cannot be modified" in message
+            and ("thinking" in message or "redacted_thinking" in message)
+        )
+
+    async def handle(
+        self,
+        error: ApiError,
+        payload: dict[str, object],
+    ) -> RetryDecision:
+        del error
+        self._attempted = True
+        messages = payload.get("messages")
+        if not isinstance(messages, list):
+            return RetryDecision(False, payload)
+        stripped, count = strip_all_thinking(cast(list[dict[str, Any]], messages))
+        if count == 0:
+            return RetryDecision(False, payload)
+        return RetryDecision(
+            True,
+            {**payload, "messages": stripped},
+            ("strip_all_thinking",),
+        )
+
+
+__all__ = [
+    "PoisonedThinkingStrategy",
+    "RetryCoordinator",
+    "RetryDecision",
+    "RetryStrategy",
+]
