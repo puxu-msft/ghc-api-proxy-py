@@ -6,6 +6,7 @@ from fastapi import Depends, Request
 from app.anthropic.client import AnthropicClient
 from app.anthropic.token_counting import TokenCounter
 from app.config.settings import AppSettings
+from app.history.store import HistoryStore
 from app.models.common import ModelInfo
 from app.openai.client import OpenAIClient
 from app.openai.responses_ws import ResponsesWebSocketClient
@@ -66,6 +67,13 @@ def get_responses_ws_client(request: Request) -> ResponsesWebSocketClient:
     return client
 
 
+def get_history_store(request: Request) -> HistoryStore:
+    store = get_runtime_state(request).history_store
+    if store is None:
+        raise RuntimeError("History store is not initialized")
+    return store
+
+
 RuntimeDependency = Annotated[RuntimeState, Depends(get_runtime_state)]
 SettingsDependency = Annotated[AppSettings, Depends(get_settings)]
 AnthropicClientDependency = Annotated[AnthropicClient, Depends(get_anthropic_client)]
@@ -76,3 +84,4 @@ ResponsesWSClientDependency = Annotated[
     ResponsesWebSocketClient,
     Depends(get_responses_ws_client),
 ]
+HistoryStoreDependency = Annotated[HistoryStore, Depends(get_history_store)]

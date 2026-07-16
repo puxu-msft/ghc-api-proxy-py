@@ -15,6 +15,10 @@ class HistoryWriter:
         self._task: asyncio.Task[None] | None = None
         self._connection: sqlite3.Connection | None = None
 
+    @property
+    def started(self) -> bool:
+        return self._connection is not None
+
     async def start(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = await asyncio.to_thread(self._open)

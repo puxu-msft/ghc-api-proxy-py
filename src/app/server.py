@@ -7,9 +7,13 @@ from fastapi import FastAPI
 
 from app import __version__
 from app.auth.providers import noninteractive_token_available
+from app.config.paths import user_data_path
 from app.config.settings import AppSettings
+from app.history.store import HistoryStore
 from app.observability.logging import setup_logging
-from app.routes import anthropic_router, health_router, management_router
+from app.observability.tracing import setup_tracing
+from app.routes import anthropic_router, health_router, history_router, management_router
+from app.routes.metrics import router as metrics_router
 from app.routes.openai import router as openai_router
 from app.routes.responses_ws import router as responses_ws_router
 from app.runtime import RuntimeState
@@ -28,6 +32,14 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
     async with anyio.create_task_group() as task_group:
         runtime.background_task_group = task_group
         try:
+            if settings.history.enabled:
+                history_path = (
+                    Path(settings.history.db_path)
+                    if settings.history.db_path
+                    else user_data_path() / "history.db"
+                )
+                runtime.history_store = HistoryStore(history_path)
+                await runtime.history_store.start()
             token_path = Path(settings.auth.token_file) if settings.auth.token_file else None
             has_noninteractive_token = await noninteractive_token_available(
                 settings.auth.github_token,
@@ -44,6 +56,9 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
                     )
             yield
         finally:
+            if runtime.history_store is not None:
+                await runtime.history_store.close()
+                runtime.history_store = None
             await close_upstream_services(runtime)
             task_group.cancel_scope.cancel()
             runtime.background_task_group = None
@@ -57,8 +72,11 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         lifespan=_lifespan,
     )
     app.state.runtime = RuntimeState(settings=resolved_settings)
+    setup_tracing(app, enabled=resolved_settings.observability.tracing_enabled)
     app.include_router(anthropic_router)
     app.include_router(management_router)
+    app.include_router(history_router)
+    app.include_router(metrics_router)
     for prefix in ("", "/v1", "/openai/v1"):
         app.include_router(openai_router, prefix=prefix)
         app.include_router(responses_ws_router, prefix=prefix)

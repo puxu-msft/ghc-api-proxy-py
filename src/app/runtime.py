@@ -8,6 +8,7 @@ from app.config.settings import AppSettings
 if TYPE_CHECKING:
     from app.anthropic.client import AnthropicClient
     from app.anthropic.token_counting import TokenCounter
+    from app.history.store import HistoryStore
     from app.openai.client import OpenAIClient
     from app.openai.responses_ws import ResponsesWebSocketClient
     from app.upstream.bootstrap import UpstreamServices
@@ -26,6 +27,7 @@ class RuntimeState:
     token_counter: TokenCounter | None = None
     openai_client: OpenAIClient | None = None
     responses_ws_client: ResponsesWebSocketClient | None = None
+    history_store: HistoryStore | None = None
 
     def readiness_checks(self) -> dict[str, bool]:
         return {
