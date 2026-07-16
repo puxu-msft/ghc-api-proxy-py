@@ -5,18 +5,23 @@ from fastapi import WebSocket
 
 class WebSocketManager:
     def __init__(self) -> None:
-        self._connections: set[WebSocket] = set()
+        self._connections: dict[WebSocket, set[str]] = {}
 
-    async def connect(self, websocket: WebSocket) -> None:
+    async def connect(self, websocket: WebSocket, topic: str = "history") -> None:
         await websocket.accept()
-        self._connections.add(websocket)
+        self._connections[websocket] = {topic}
+
+    def subscribe(self, websocket: WebSocket, topic: str) -> None:
+        self._connections.setdefault(websocket, set()).add(topic)
 
     def disconnect(self, websocket: WebSocket) -> None:
-        self._connections.discard(websocket)
+        self._connections.pop(websocket, None)
 
-    async def broadcast(self, message: dict[str, Any]) -> None:
+    async def broadcast(self, message: dict[str, Any], topic: str = "history") -> None:
         disconnected: list[WebSocket] = []
-        for websocket in self._connections:
+        for websocket, topics in self._connections.items():
+            if topic not in topics:
+                continue
             try:
                 await websocket.send_json(message)
             except Exception:

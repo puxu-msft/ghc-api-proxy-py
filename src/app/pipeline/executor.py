@@ -9,6 +9,7 @@ from app.anthropic.thinking.quarantine import QuarantineKey
 from app.anthropic.thinking.strip_all import strip_all_thinking
 from app.errors import ApiError, ErrorCategory
 from app.models.anthropic import MessagesRequest
+from app.pipeline.approval import ApprovalRejectedError
 from app.pipeline.context import Attempt, RequestContext, RequestState
 from app.pipeline.rate_limiter import PassthroughRateLimiter
 from app.pipeline.strategies import PoisonedThinkingStrategy, RetryCoordinator
@@ -57,7 +58,7 @@ async def execute_anthropic_pipeline(
             context.fail(error)
             if client.history is not None:
                 await client.history.finalized(context)
-            raise RuntimeError(error.message)
+            raise ApprovalRejectedError(error.message)
         if approval.modified_payload:
             request = MessagesRequest.model_validate(approval.modified_payload)
             prepared = client.prepare(request)

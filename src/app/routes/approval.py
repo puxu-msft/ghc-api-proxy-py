@@ -1,8 +1,8 @@
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
-from app.deps import ApprovalGateDependency
+from app.deps import ApprovalGateDependency, HistoryStoreDependency
 
 router = APIRouter(prefix="/api/approval", tags=["approval"])
 
@@ -42,3 +42,16 @@ async def modify(
     gate: ApprovalGateDependency,
 ) -> dict[str, bool]:
     return {"resolved": await gate.modify_and_approve(approval_id, body)}
+
+
+@router.websocket("/ws")
+async def approval_websocket(
+    websocket: WebSocket,
+    store: HistoryStoreDependency,
+) -> None:
+    await store.websockets.connect(websocket, "approval")
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        store.websockets.disconnect(websocket)

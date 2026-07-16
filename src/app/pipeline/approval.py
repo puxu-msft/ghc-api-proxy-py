@@ -75,13 +75,22 @@ class ApprovalGate:
             self._pending[approval.id] = approval
         if self._websockets:
             await self._websockets.broadcast(
-                {"type": "approval_requested", "approval": approval.summary()}
+                {"type": "approval_requested", "approval": approval.summary()},
+                topic="approval",
             )
         try:
             with anyio.move_on_after(self._timeout) as scope:
                 await approval.event.wait()
             if scope.cancel_called:
                 approval.result = ApprovalResult("rejected", "Approval timeout")
+                if self._websockets:
+                    await self._websockets.broadcast(
+                        {
+                            "type": "approval_timeout",
+                            "approval": {"id": approval.id},
+                        },
+                        topic="approval",
+                    )
             assert approval.result is not None
             return approval.result
         finally:
@@ -101,7 +110,8 @@ class ApprovalGate:
                 {
                     "type": "approval_resolved",
                     "approval": {"id": approval_id, "status": result.status},
-                }
+                },
+                topic="approval",
             )
         return True
 
@@ -142,3 +152,7 @@ class ApprovalGate:
         for approval_id in ids:
             resolved += int(await self.reject(approval_id, reason))
         return resolved
+
+
+class ApprovalRejectedError(RuntimeError):
+    pass

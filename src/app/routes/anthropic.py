@@ -13,6 +13,7 @@ from app.deps import (
 )
 from app.errors import ApiError, ErrorCategory
 from app.models.anthropic import MessagesRequest
+from app.pipeline.approval import ApprovalRejectedError
 from app.pipeline.context import RequestContext, RequestState
 from app.pipeline.executor import UpstreamResponseError
 from app.streaming.idle_timeout import resolve_stream_idle, with_idle_timeout
@@ -70,6 +71,12 @@ async def messages(
         )
     try:
         result = await client.execute(request, session_id=session_id, agent_id=agent_id)
+    except ApprovalRejectedError as error:
+        return Response(
+            content=dumps({"type": "error", "error": {"message": str(error)}}),
+            status_code=403,
+            media_type="application/json",
+        )
     except UpstreamResponseError as error:
         body = await error.response.aread()
         content_type = error.response.headers.get("content-type", "application/json")
