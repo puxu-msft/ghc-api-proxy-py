@@ -25,8 +25,9 @@ class Target:
         payload: Mapping[str, Any],
         *,
         stream: bool = False,
+        extra_headers: Mapping[str, str] | None = None,
     ) -> httpx.Response:
-        del payload, stream
+        del payload, stream, extra_headers
         return httpx.Response(
             self.status_code,
             request=httpx.Request("POST", "https://upstream.test/v1/messages"),

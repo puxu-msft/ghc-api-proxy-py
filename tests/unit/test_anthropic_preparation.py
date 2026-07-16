@@ -14,6 +14,29 @@ def test_request_header_floor_blocks_credentials_and_topology() -> None:
     assert selected == {"x-claude-code-id": "ok", "authorization": "Bearer good"}
 
 
+def test_header_floor_blocks_complete_hop_by_hop_sets() -> None:
+    request_headers = {
+        name: "bad"
+        for name in (
+            "set-cookie", "expect", "keep-alive", "te", "trailer",
+            "x-forwarded-port", "cf-connecting-ip", "x-client-ip",
+        )
+    }
+    assert forward_request_headers(
+        request_headers,
+        core={},
+        strict=False,
+        blacklist=[],
+        whitelist=[],
+    ) == {}
+    assert forward_response_headers(
+        {"proxy-authenticate": "bad", "te": "bad", "upgrade": "bad"},
+        strict=False,
+        blacklist=[],
+        whitelist=[],
+    ) == {}
+
+
 def test_response_header_floor_blocks_framing_even_if_whitelisted() -> None:
     selected = forward_response_headers(
         {"content-length": "99", "request-id": "req"},

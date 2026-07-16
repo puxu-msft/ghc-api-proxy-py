@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx
 
+from app.anthropic.request_preparation import prepare_anthropic_request
 from app.anthropic.sanitize import SanitizationResult, sanitize_messages
 from app.models.anthropic import MessagesRequest
 from app.transform.model_resolver import ModelResolver
@@ -20,6 +21,7 @@ class AnthropicTarget(Protocol):
         payload: Mapping[str, Any],
         *,
         stream: bool = False,
+        extra_headers: Mapping[str, str] | None = None,
     ) -> httpx.Response: ...
 
 
@@ -29,6 +31,7 @@ class PreparedAnthropicRequest:
     resolved_model: str
     sanitization: SanitizationResult
     wire: dict[str, Any]
+    headers: dict[str, str]
 
 
 class AnthropicClient:
@@ -45,11 +48,13 @@ class AnthropicClient:
             message.model_dump(mode="json", exclude_unset=True)
             for message in sanitization.messages
         ]
+        deeply_prepared = prepare_anthropic_request(wire)
         return PreparedAnthropicRequest(
             original_model=request.model,
             resolved_model=resolved_model,
             sanitization=sanitization,
-            wire=wire,
+            wire=deeply_prepared.wire,
+            headers=deeply_prepared.headers,
         )
 
     async def send_messages(
@@ -69,6 +74,7 @@ class AnthropicClient:
         response = await self._target.send_anthropic(
             prepared.wire,
             stream=stream,
+            extra_headers=prepared.headers,
         )
         return response
 

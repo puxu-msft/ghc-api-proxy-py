@@ -78,6 +78,38 @@ class AnthropicConfig(FrozenModel):
     stream_keepalive_ping_sec: int = 20
     stream_keepalive_mode: Literal["ping", "empty_text"] = "empty_text"
     stream_commit_after_sec: int = 20
+    thinking_block_message_policy: Literal["preserve", "stripped"] = "preserve"
+    thinking_block_sanitize: str = "all_empty"
+    thinking_destack_strategy: Literal["passthrough", "insert_text", "move_blocks"] = "move_blocks"
+    poisoned_thinking_quarantine: bool = True
+    poisoned_thinking_ttl_hours: float = 72
+    tool_search: bool = True
+    tool_search_non_deferred: list[str] = Field(default_factory=list)
+    warmup: Literal["allow", "reject", "drop", "fake"] = "allow"
+    strict_request_headers: bool = False
+    strict_response_headers: bool = False
+    request_header_blacklist: list[str] = Field(
+        default_factory=lambda: ["x-anthropic-billing-header"]
+    )
+    request_header_whitelist: list[str] = Field(
+        default_factory=lambda: [
+            "accept",
+            "anthropic-dangerous-direct-browser-access",
+            "x-app",
+            "x-claude-code-*",
+            "x-stainless-*",
+        ]
+    )
+    response_header_blacklist: list[str] = Field(default_factory=list)
+    response_header_whitelist: list[str] = Field(
+        default_factory=lambda: [
+            "request-id",
+            "x-request-id",
+            "anthropic-ratelimit-*",
+            "anthropic-organization-id",
+            "retry-after",
+        ]
+    )
 
 
 class ObservabilityConfig(FrozenModel):

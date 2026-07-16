@@ -2,7 +2,12 @@ from app.anthropic.feature_negotiation import (
     NEGOTIATION_CATEGORIES,
     FeatureNegotiationStore,
 )
-from app.anthropic.features import build_anthropic_beta_headers, model_has_adaptive_thinking
+from app.anthropic.features import (
+    build_anthropic_beta_headers,
+    model_has_adaptive_thinking,
+    model_supports_context_editing,
+    model_supports_tool_search,
+)
 from app.models.common import ModelInfo
 
 
@@ -50,3 +55,14 @@ def test_beta_headers_are_capability_driven_and_filtered() -> None:
         strip={"context-management-2025-06-27"},
     )
     assert "context-management-2025-06-27" not in headers.get("anthropic-beta", "")
+
+
+def test_context_editing_and_tool_search_detection() -> None:
+    model = ModelInfo.model_validate(
+        {
+            "id": "future-model",
+            "capabilities": {"supports": {"context_editing": True, "tool_search": True}},
+        }
+    )
+    assert model_supports_context_editing(model.id, model) is True
+    assert model_supports_tool_search(model.id, model) is True

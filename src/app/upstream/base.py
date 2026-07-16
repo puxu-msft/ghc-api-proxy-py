@@ -17,6 +17,7 @@ class UpstreamTarget(Protocol):
         payload: Mapping[str, Any],
         *,
         stream: bool = False,
+        extra_headers: Mapping[str, str] | None = None,
     ) -> httpx.Response: ...
 
     async def send_anthropic_count_tokens(

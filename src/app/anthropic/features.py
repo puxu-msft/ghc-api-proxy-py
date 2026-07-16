@@ -4,6 +4,11 @@ from app.models.common import ModelInfo
 from app.transform.model_resolver import normalize_for_matching
 
 ADAPTIVE_PREFIXES = ("claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8")
+CONTEXT_EDITING_PREFIXES = (
+    "claude-haiku-4-5",
+    "claude-sonnet-4",
+    "claude-opus-4",
+)
 
 
 def model_has_adaptive_thinking(model_id: str, model: ModelInfo | None = None) -> bool:
@@ -17,6 +22,28 @@ def model_has_adaptive_thinking(model_id: str, model: ModelInfo | None = None) -
     return any(
         normalized == prefix or normalized.startswith(f"{prefix}-")
         for prefix in ADAPTIVE_PREFIXES
+    )
+
+
+def model_supports_context_editing(model_id: str, model: ModelInfo | None = None) -> bool:
+    if model is not None and model.capabilities.supports.context_editing is not None:
+        return model.capabilities.supports.context_editing
+    normalized = normalize_for_matching(model_id)
+    return any(
+        normalized == prefix or normalized.startswith(f"{prefix}-")
+        for prefix in CONTEXT_EDITING_PREFIXES
+    )
+
+
+def model_supports_tool_search(model_id: str, model: ModelInfo | None = None) -> bool:
+    if model is not None and model.capabilities.supports.tool_search is not None:
+        return model.capabilities.supports.tool_search
+    normalized = normalize_for_matching(model_id)
+    if "haiku" in normalized:
+        return False
+    return any(
+        marker in normalized
+        for marker in ("sonnet-4-5", "sonnet-4-6", "opus-4-5", "opus-4-6")
     )
 
 

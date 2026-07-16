@@ -93,12 +93,13 @@ class CopilotUpstream:
         payload: Mapping[str, Any],
         *,
         stream: bool = False,
+        extra_headers: Mapping[str, str] | None = None,
     ) -> httpx.Response:
         return await self._clients.anthropic.post(
             "/v1/messages",
             cast_to=httpx.Response,
             body=cast(AnthropicBody, dict(payload)),
-            options={"headers": await self._headers()},
+            options={"headers": {**await self._headers(), **dict(extra_headers or {})}},
             stream=stream,
         )
 

@@ -17,14 +17,17 @@ class RawStream(httpx.AsyncByteStream):
 class StubTarget:
     def __init__(self) -> None:
         self.payload: dict[str, object] | None = None
+        self.headers: Mapping[str, str] | None = None
 
     async def send_anthropic(
         self,
         payload: Mapping[str, Any],
         *,
         stream: bool = False,
+        extra_headers: Mapping[str, str] | None = None,
     ) -> httpx.Response:
         self.payload = dict(payload)
+        self.headers = extra_headers
         return httpx.Response(200, stream=RawStream())
 
 
@@ -49,6 +52,7 @@ async def test_anthropic_client_resolves_sanitizes_and_preserves_stream() -> Non
             ],
             "future_request_field": {"keep": True},
             "future_nullable": None,
+            "inference_geo": "strip-me",
         }
     )
 
@@ -62,6 +66,9 @@ async def test_anthropic_client_resolves_sanitizes_and_preserves_stream() -> Non
     assert target.payload["future_request_field"] == {"keep": True}
     assert "future_nullable" in target.payload
     assert target.payload["future_nullable"] is None
+    assert "inference_geo" not in target.payload
+    assert target.headers is not None
+    assert target.headers["anthropic-version"] == "2023-06-01"
     messages = target.payload["messages"]
     assert isinstance(messages, list)
     assert messages[0]["content"] == [{"type": "text", "text": "hi"}]

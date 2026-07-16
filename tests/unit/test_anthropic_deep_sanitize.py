@@ -20,6 +20,7 @@ def test_read_tool_result_tag_stripping_only_targets_read_results() -> None:
 
 def test_tool_call_dedup_keeps_last_pair() -> None:
     messages = [
+    {"role": "user", "content": "keep me"},
         {
             "role": "assistant",
             "content": [{"type": "tool_use", "id": "a", "name": "Read", "input": {"p": 1}}],
@@ -38,8 +39,9 @@ def test_tool_call_dedup_keeps_last_pair() -> None:
         },
     ]
     result = deduplicate_tool_calls(messages, "input")
-    assert len(result) == 2
-    assert result[0]["content"][0]["id"] == "b"
+    assert len(result) == 3
+    assert result[0] == {"role": "user", "content": "keep me"}
+    assert result[1]["content"][0]["id"] == "b"
 
 
 def test_signature_compat_emits_delta_for_inline_signature() -> None:
