@@ -9,7 +9,6 @@ import httpx
 
 from app.anthropic.client import AnthropicClient
 from app.anthropic.thinking.quarantine import ThinkingQuarantineStore
-from app.anthropic.token_counting import TokenCounter, preload_tokenizer
 from app.auth.copilot import CopilotTokenManager
 from app.auth.github import GitHubClient, infer_account_type
 from app.auth.providers import (
@@ -18,9 +17,13 @@ from app.auth.providers import (
     FileTokenProvider,
     GitHubTokenManager,
 )
+from app.config.paths import user_data_path
 from app.openai.client import OpenAIClient
 from app.openai.responses_ws import ResponsesWebSocketClient
 from app.runtime import RuntimeState
+from app.tokenization.estimators import preload_tokenizer
+from app.tokenization.service import AnthropicTokenCountingService
+from app.tokenization.state_store import TokenizationStateStore
 from app.transform.model_resolver import ModelResolver
 from app.upstream.base import UpstreamTarget
 from app.upstream.client import (
@@ -84,6 +87,11 @@ async def initialize_upstream_services(
     http_client: httpx.AsyncClient | None = None,
 ) -> UpstreamServices:
     settings = runtime.settings
+    if runtime.tokenization_state is None:
+        runtime.tokenization_state = TokenizationStateStore(
+            user_data_path() / "tokenization.json"
+        )
+        await runtime.tokenization_state.load()
     await preload_tokenizer()
     if settings.upstream.type == "generic":
         if not settings.upstream.openai_base_url:
@@ -132,7 +140,11 @@ async def initialize_upstream_services(
             settings,
             quarantine,
         )
-        runtime.token_counter = TokenCounter(target)
+        runtime.token_counter = AnthropicTokenCountingService(
+            target,
+            runtime.tokenization_state,
+            use_upstream=settings.anthropic.use_upstream_count_tokens,
+        )
         runtime.openai_client = OpenAIClient(target, resolver)
         runtime.responses_ws_client = None
         return services
@@ -214,7 +226,11 @@ async def initialize_upstream_services(
         settings,
         quarantine,
     )
-    runtime.token_counter = TokenCounter(target)
+    runtime.token_counter = AnthropicTokenCountingService(
+        target,
+        runtime.tokenization_state,
+        use_upstream=settings.anthropic.use_upstream_count_tokens,
+    )
     runtime.openai_client = OpenAIClient(target, resolver)
     ws_base_url = base_url.replace("https://", "wss://").replace("http://", "ws://")
     runtime.responses_ws_client = ResponsesWebSocketClient(

@@ -71,7 +71,7 @@
 | 中 | tokenizer / token 计数（`anthropic/token_counting.py`，capabilities 的 `o200k_base`） | `tiktoken` / `tokenizers` |
 | 中 | 网络层重试（httpx transport 级，与域2 的「内容自愈型重试」不同层） | `httpx-retries` / httpx 内建 transport retries |
 | 低 | KMP 重复检测（`repetition_detector.py`） | 是否有成熟串匹配库替代 |
-| 低 | auto_truncate 引擎（token 估算/截断策略） | — |
+| 低 | tokenization estimator/calibration（历史截断已删除） | `tiktoken` + 自研 calibration |
 | 低 | sanitize 管道 / JSON schema 校验 | — |
 | 低 | 优雅关闭（`shutdown.py` 4 阶段 + 信号） | uvicorn 内建 / `anyio` |
 

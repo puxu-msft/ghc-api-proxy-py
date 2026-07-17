@@ -86,8 +86,8 @@ config / models / errors
 
 - [x] `anthropic/sanitize/`（完整 2 阶段）—— 基础清洗、reminder/read tags、tool pair 去重
 - [x] `anthropic/thinking/` —— 块级保护 / destack / L2 剥离 / **L3 内存隔离** / signature 兼容
-- [x] `anthropic/features.py` + `feature_negotiation.py` —— 特性检测 + beta headers + 11 类学习缓存（内存）
-- [x] `anthropic/message_tools.py` + `server_tool_filter.py` —— tool_search/defer_loading 与 server tool 过滤
+- [x] `anthropic/features.py` + `feature_negotiation.py` —— 特性检测 + beta headers + 9 类学习缓存（内存）
+- [x] `anthropic/message_tools.py` —— 普通 client tool 的 tool_search/defer_loading
 - [x] `anthropic/header_policy/` —— 请求 / 响应头转发安全
 - [x] `anthropic/warmup.py` —— Warmup 策略及路由短路
 - [x] `anthropic/request_preparation.py` —— 请求准备编排并接入生产 client
@@ -102,7 +102,7 @@ config / models / errors
 
 - [x] `pipeline/strategies/` —— single-owner coordinator 与 poisoned-thinking L2/L3 行为闭环
 - [x] `pipeline/rate_limiter.py` —— 自适应三模式限流与 retry deadline 自愈
-- [x] `auto_truncate/` —— 截断 engine + normalized model 24h token 限制缓存
+- [x] 删除代理侧历史截断；保留并模块化 token count/calibration/prompt-limit observation
 - [x] `streaming/`（keepalive / delayed_commit / buffered_retry）—— 结构化 keepalive、延迟首帧与 opt-in 有界缓冲
 - [x] `pipeline/manager.py` + `context/`（consumers / error_persistence）—— active/stale 管理、观察者、off-loop 原子错误持久化
 - [x] `shutdown.py` + `repetition_detector.py` —— 4 阶段异步回调关闭、KMP 重复检测
@@ -110,6 +110,14 @@ config / models / errors
 **完成记录（2026-07-15）**：218 个测试通过，Ruff/Pyright strict 通过；429 limiter feedback、single-owner retry、Thinking L2/L3、KMP、token cache、stream resilience、context consumers 与 shutdown 经两轮独立评审，最终 0 blocker / 0 major。
 
 **里程碑**：长时运行稳定、优雅关闭、限流自愈；thinking L2/L3 端到端可用。
+
+## 2026-07-17 — Hooks / Tokenization 收敛
+
+- [x] 删除 `auto_truncate/` 与原生 server-tool filter/negotiation 类别
+- [x] `tokenization/` —— Anthropic/Gemini estimator、size-aware calibration、prompt-limit observation、原子持久化
+- [x] `hooks/` —— 四类 typed contracts、启动期不可变 registry、可信 module loader、built-ins
+- [x] Anthropic tool pair/orphan repair 改为局部相邻、result-first、重复 ID 幂等算法
+- [x] 管理 API 暴露 calibration 与 advertised/observed prompt limits
 
 ## Phase 6 — 历史与可观测性
 

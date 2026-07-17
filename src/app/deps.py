@@ -5,7 +5,6 @@ from fastapi import Depends
 from starlette.requests import HTTPConnection
 
 from app.anthropic.client import AnthropicClient
-from app.anthropic.token_counting import TokenCounter
 from app.config.settings import AppSettings
 from app.history.store import HistoryStore
 from app.history.ws import WebSocketManager
@@ -14,6 +13,7 @@ from app.openai.client import OpenAIClient
 from app.openai.responses_ws import ResponsesWebSocketClient
 from app.pipeline.approval import ApprovalGate
 from app.runtime import RuntimeState
+from app.tokenization.service import AnthropicTokenCountingService
 
 
 class ModelCatalogView(Protocol):
@@ -42,7 +42,7 @@ def get_anthropic_client(connection: HTTPConnection) -> AnthropicClient:
     return client
 
 
-def get_token_counter(connection: HTTPConnection) -> TokenCounter:
+def get_token_counter(connection: HTTPConnection) -> AnthropicTokenCountingService:
     counter = get_runtime_state(connection).token_counter
     if counter is None:
         raise RuntimeError("Token counter is not initialized")
@@ -94,7 +94,10 @@ def get_websocket_manager(connection: HTTPConnection) -> WebSocketManager:
 RuntimeDependency = Annotated[RuntimeState, Depends(get_runtime_state)]
 SettingsDependency = Annotated[AppSettings, Depends(get_settings)]
 AnthropicClientDependency = Annotated[AnthropicClient, Depends(get_anthropic_client)]
-TokenCounterDependency = Annotated[TokenCounter, Depends(get_token_counter)]
+TokenCounterDependency = Annotated[
+    AnthropicTokenCountingService,
+    Depends(get_token_counter),
+]
 OpenAIClientDependency = Annotated[OpenAIClient, Depends(get_openai_client)]
 ModelCatalogDependency = Annotated[ModelCatalogView, Depends(get_model_catalog)]
 ResponsesWSClientDependency = Annotated[

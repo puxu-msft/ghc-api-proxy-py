@@ -16,6 +16,7 @@ from app.models.anthropic import MessagesRequest
 from app.pipeline.approval import ApprovalRejectedError
 from app.pipeline.context import RequestContext, RequestState
 from app.pipeline.executor import UpstreamResponseError
+from app.streaming.anthropic_usage import AnthropicSSEUsageTap
 from app.streaming.idle_timeout import resolve_stream_idle, with_idle_timeout
 from app.streaming.sse import create_sse_response, passthrough_bytes
 from app.wire_json import dumps
@@ -28,10 +29,13 @@ async def _history_stream(
     *,
     context: RequestContext,
     client: AnthropicClientDependency,
+    request: MessagesRequest,
 ) -> AsyncGenerator[bytes]:
     completed = False
+    usage_tap = AnthropicSSEUsageTap()
     try:
         async for chunk in stream:
+            usage_tap.feed(chunk)
             yield chunk
         completed = True
     finally:
@@ -46,6 +50,12 @@ async def _history_stream(
                     status_code=499,
                 )
             )
+        await client.observe_stream_finalized(
+            request,
+            context,
+            usage=usage_tap.usage,
+            completed=completed,
+        )
         if history is not None:
             await history.finalized(context)
 
@@ -103,6 +113,7 @@ async def messages(
                 with_idle_timeout(upstream.aiter_raw(), timeout_seconds=idle_timeout),
                 context=result.context,
                 client=client,
+                request=request,
             ),
             cleanup=upstream.aclose,
         )

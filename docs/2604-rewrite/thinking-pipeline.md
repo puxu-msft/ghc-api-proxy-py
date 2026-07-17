@@ -4,7 +4,7 @@
 
 Anthropic Extended Thinking 会在 assistant 消息中返回 `thinking` / `redacted_thinking` 块，其 `signature` 字段是加密签名——服务端用它验证「这段 thinking 内容在回传时没被篡改」。GHC（GitHub Copilot 的 Anthropic 直连端点）对**被修改过的**、或**堆叠**（两个 thinking 块相邻）的历史 thinking 块会报 `HTTP 400`：`"thinking blocks cannot be modified"`。
 
-**关键实证结论（本项目立论基础）**：thinking `signature` 是**自包含**的——它加密的是 thinking 内容本身，上游解密重建校验，**不绑定周围上下文或数组位置**（针对 opus-4.6 系列实测验证）。换言之，只要 thinking 块的**内容逐字不变、相对顺序不变、不被丢弃**，其前后可以自由清理（孤儿 tool 块、降级 server tool、编辑/删除非-thinking 块）——**相邻性不受保护**，需要另一套机制（destack）单独处理。
+**关键实证结论（本项目立论基础）**：thinking `signature` 是**自包含**的——它加密的是 thinking 内容本身，上游解密重建校验，**不绑定周围上下文或数组位置**（针对 opus-4.6 系列实测验证）。换言之，只要 thinking 块的**内容逐字不变、相对顺序不变、不被丢弃**，其前后可以清理孤儿 client-tool 块或其他非-thinking 内容；相邻性由 destack 单独处理。
 
 这一实证结论直接决定了本文档的核心设计：保护粒度是**块级（block-level）**，而不是像旧文档写的那样是**消息级（message-level）**布尔开关。旧文档的 `immutable_thinking`（布尔）或某些实现中出现过的三值策略，本质上是把整条包含 thinking 的 assistant 消息「冻结」——这在语义上过度保守（挡住了消息内可以安全做的清理），在实现上也不必要。本项目采用块级保护原语 `thinking_block_message_policy`，见下节。
 

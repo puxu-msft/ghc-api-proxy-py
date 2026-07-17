@@ -73,6 +73,7 @@ class TimeoutConfig(FrozenModel):
 
 
 class AnthropicConfig(FrozenModel):
+    use_upstream_count_tokens: bool = True
     effort_overrides: dict[str, list[str]] = Field(default_factory=dict)
     beta_strip_headers: dict[str, list[str]] = Field(default_factory=dict)
     stream_keepalive_ping_sec: int = 20
@@ -129,6 +130,18 @@ class ResponsesConfig(FrozenModel):
     max_upstream_ws_connections: int = 32
 
 
+class TokenizationConfig(FrozenModel):
+    state_path: str = ""
+    flush_interval: float = Field(default=5.0, gt=0)
+
+
+class HooksConfig(FrozenModel):
+    modules: list[str] = Field(default_factory=list)
+    disabled: list[str] = Field(default_factory=list)
+    timeout_ms: int = Field(default=5_000, ge=1)
+    deduplicate_tool_calls: bool = False
+
+
 class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="GHC_",
@@ -151,6 +164,8 @@ class AppSettings(BaseSettings):
     anthropic: AnthropicConfig = Field(default_factory=AnthropicConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     openai_responses: ResponsesConfig = Field(default_factory=ResponsesConfig)
+    tokenization: TokenizationConfig = Field(default_factory=TokenizationConfig)
+    hooks: HooksConfig = Field(default_factory=HooksConfig)
     model_overrides: dict[str, str] = Field(
         default_factory=lambda: {
             "opus": "claude-opus-4.6",

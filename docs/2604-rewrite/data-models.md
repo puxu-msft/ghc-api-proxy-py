@@ -209,7 +209,7 @@ class AnthropicTool(BaseModel):
     name: str
     description: str | None = None
     input_schema: dict | None = None
-    type: str | None = None          # server tools 的类型（如 "web_search_20250305"）
+    type: str | None = None          # API-defined typed tool 的 wire 保真字段；代理不实现原生服务端执行
     cache_control: dict | None = None
     defer_loading: bool | None = None
 
@@ -568,7 +568,7 @@ class ModelRef:
 class AttemptSummary:
     """单次上游尝试的摘要标量，不保留完整 wire 报文。"""
     attempt_index: int
-    strategy: str | None         # 触发该次重试的策略名（如 "auto_truncate"），首次尝试为 None
+    strategy: str | None         # 触发该次重试的策略名（如 "poisoned_thinking"），首次尝试为 None
     status_code: int | None
     duration_ms: float
     error_message: str | None = None
@@ -603,7 +603,7 @@ class HistoryEntry:
 
 关键设计取舍：
 
-1. **单一视角，非双腿**：`request_payload`/`response` 只是客户端可见的入站/出站数据，不额外维护一份"upstream 视角"的平行结构。多次重试中，每次实际打给 Copilot 的请求内容可能与 `request_payload` 不同（如 auto-truncate 改写过 payload），但这些中间态**不逐条持久化**——只在内存中的 `RequestContext.attempts`（见 [request-pipeline.md](request-pipeline.md)）里保留用于当次请求处理，终态时压缩为 `attempts: list[AttemptSummary]` 标量列表写入 entry。
+1. **单一视角，非双腿**：`request_payload`/`response` 只是客户端可见的入站/出站数据，不额外维护一份"upstream 视角"的平行结构。多次重试中，每次实际打给 Copilot 的请求内容可能被 retry strategy 或 `pre_send` hook 调整，但这些中间态**不逐条持久化**——只在内存中的 `RequestContext.attempts` 与 hook telemetry 中保留，终态时压缩为摘要写入 entry。
 2. **终态一次性写入，非多 stage**：整个请求生命周期只有一次异步落盘（见 [history-system.md](history-system.md) 的 off-loop writer 设计）——不做 eager head、不做逐 attempt 追加。进行中的状态完全留在内存 in-flight 映射中供 WebSocket 实时推送，不依赖数据库的中间态行来反映"请求正在处理"。
 3. **惰性投影，非预算全部派生字段**：`EntrySummary.preview_text` 这类展示用字段在终态写入时**惰性生成一次**（截断固定长度），而非像上游那样每次读取都重新计算。列表/详情/WebSocket 消费的是同一份预算好的摘要，不重复付出计算成本。
 

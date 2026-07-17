@@ -7,12 +7,14 @@ from app.config.settings import AppSettings
 
 if TYPE_CHECKING:
     from app.anthropic.client import AnthropicClient
-    from app.anthropic.token_counting import TokenCounter
     from app.history.store import HistoryStore
     from app.history.ws import WebSocketManager
+    from app.hooks.registry import HookRegistry
     from app.openai.client import OpenAIClient
     from app.openai.responses_ws import ResponsesWebSocketClient
     from app.pipeline.approval import ApprovalGate
+    from app.tokenization.service import AnthropicTokenCountingService
+    from app.tokenization.state_store import TokenizationStateStore
     from app.upstream.bootstrap import UpstreamServices
 
 
@@ -26,7 +28,9 @@ class RuntimeState:
     models_ready: bool = False
     upstream_services: UpstreamServices | None = None
     anthropic_client: AnthropicClient | None = None
-    token_counter: TokenCounter | None = None
+    token_counter: AnthropicTokenCountingService | None = None
+    tokenization_state: TokenizationStateStore | None = None
+    hook_registry: HookRegistry | None = None
     openai_client: OpenAIClient | None = None
     responses_ws_client: ResponsesWebSocketClient | None = None
     history_store: HistoryStore | None = None

@@ -18,22 +18,24 @@ def prepare_anthropic_request(
     *,
     tool_search: bool = False,
     non_deferred_tools: tuple[str, ...] = (),
+    apply_payload_rewrites: bool = True,
 ) -> PreparedRequest:
     wire = copy.deepcopy(payload)
     wire.pop("inference_geo", None)
     tools = wire.get("tools")
-    if isinstance(tools, list):
+    if apply_payload_rewrites and isinstance(tools, list):
         wire["tools"] = preprocess_tools(
             cast(list[dict[str, Any]], tools),
             inject_tool_search=tool_search,
             non_deferred=non_deferred_tools,
         )
-    messages = cast(list[dict[str, Any]], wire.get("messages", []))
-    for message in messages:
-        if message.get("role") != "assistant" or not isinstance(message.get("content"), list):
-            continue
-        content, _ = destack_content(message["content"], "move_blocks")
-        message["content"] = content
+    if apply_payload_rewrites:
+        messages = cast(list[dict[str, Any]], wire.get("messages", []))
+        for message in messages:
+            if message.get("role") != "assistant" or not isinstance(message.get("content"), list):
+                continue
+            content, _ = destack_content(message["content"], "move_blocks")
+            message["content"] = content
     headers = {"anthropic-version": "2023-06-01"}
     headers.update(
         build_anthropic_beta_headers(

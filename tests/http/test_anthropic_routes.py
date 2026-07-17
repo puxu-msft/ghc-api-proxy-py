@@ -52,6 +52,16 @@ class StubAnthropicClient:
             )
         return PipelineResult(context=context, response=response)
 
+    async def observe_stream_finalized(
+        self,
+        request: MessagesRequest,
+        context: RequestContext,
+        *,
+        usage: dict[str, int],
+        completed: bool,
+    ) -> None:
+        del request, context, usage, completed
+
 
 class StubCounter:
     async def count(self, request: MessagesRequest) -> dict[str, Any]:
@@ -67,6 +77,15 @@ class ExecutableAnthropicClient(Protocol):
         session_id: str | None = None,
         agent_id: str | None = None,
     ) -> PipelineResult: ...
+
+    async def observe_stream_finalized(
+        self,
+        request: MessagesRequest,
+        context: RequestContext,
+        *,
+        usage: dict[str, int],
+        completed: bool,
+    ) -> None: ...
 
 
 class FailingAnthropicClient:
@@ -89,6 +108,16 @@ class FailingAnthropicClient:
             json={"type": "error", "error": {"type": "rate_limit_error"}},
         )
         raise UpstreamResponseError(context, response)
+
+    async def observe_stream_finalized(
+        self,
+        request: MessagesRequest,
+        context: RequestContext,
+        *,
+        usage: dict[str, int],
+        completed: bool,
+    ) -> None:
+        del request, context, usage, completed
 
 
 def _app(client: ExecutableAnthropicClient):

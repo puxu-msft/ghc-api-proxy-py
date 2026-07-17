@@ -11,10 +11,10 @@ from app.anthropic.features import (
 from app.models.common import ModelInfo
 
 
-def test_store_supports_all_11_categories_and_ttl() -> None:
+def test_store_supports_all_9_categories_and_ttl() -> None:
     now = 100.0
     store = FeatureNegotiationStore(default_ttl_seconds=10, clock=lambda: now)
-    assert len(NEGOTIATION_CATEGORIES) == 11
+    assert len(NEGOTIATION_CATEGORIES) == 9
     for category in NEGOTIATION_CATEGORIES:
         store.learn(category, "key", "value")
         assert store.is_active(category, "key", "value") is True

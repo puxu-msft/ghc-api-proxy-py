@@ -27,6 +27,7 @@ class RetryStrategy(Protocol):
     ) -> RetryDecision: ...
 
 
+
 class RetryCoordinator:
     def __init__(
         self,
@@ -58,6 +59,12 @@ class RetryCoordinator:
                 )
             return None
         return None
+
+    def notify_success(self) -> None:
+        for strategy in self._strategies:
+            callback = getattr(strategy, "on_success", None)
+            if callable(callback):
+                callback()
 
 
 class PoisonedThinkingStrategy:

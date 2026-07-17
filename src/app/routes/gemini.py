@@ -2,7 +2,6 @@ from collections.abc import AsyncGenerator
 from typing import Any, cast
 
 import httpx
-import tiktoken
 from fastapi import APIRouter, Response
 
 from app.deps import ApprovalGateDependency, OpenAIClientDependency, RuntimeDependency
@@ -22,6 +21,7 @@ from app.routes.protocol_history import (
 )
 from app.streaming.openai_sse import parse_sse_json
 from app.streaming.sse import create_sse_response, format_sse_event
+from app.tokenization.estimators import estimate_gemini_input
 from app.wire_json import dumps, loads
 
 router = APIRouter(prefix="/v1beta/models", tags=["gemini"])
@@ -124,17 +124,7 @@ async def gemini_endpoint(
         )
     if method == "countTokens":
         count_request = CountTokensRequest.model_validate(body)
-        contents = count_request.contents or (
-            count_request.generate_content_request.contents
-            if count_request.generate_content_request
-            else []
-        )
-        text = "".join(
-            part.text or ""
-            for content in contents
-            for part in content.parts
-        )
-        total = len(tiktoken.get_encoding("o200k_base").encode(text))
+        total = estimate_gemini_input(count_request)
         return Response(
             content=dumps({"totalTokens": total}),
             media_type="application/json",

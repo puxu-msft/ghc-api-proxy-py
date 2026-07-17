@@ -1,6 +1,8 @@
 # 域2：可靠性 / 控制流机制
 
 > 已按 [_briefing.md](_briefing.md) 的调研纪律执行：不臆断版本/能力，逐库通过 PyPI/官方文档核实。相关设计意图读自 [request-pipeline.md](../request-pipeline.md)、[feature-negotiation.md](../feature-negotiation.md)、[thinking-pipeline.md](../thinking-pipeline.md)、[shutdown.md](../shutdown.md)、[project-structure.md](../project-structure.md)。
+>
+> **后续裁决（2026-07-17）**：旧 `auto_truncate/token_limits.py` 已删除；真实 prompt limit 迁为 `tokenization/limits.py` observation registry，不参与 payload 改写。
 
 ## 概览结论表
 

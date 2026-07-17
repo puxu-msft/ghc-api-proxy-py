@@ -1,6 +1,8 @@
 # 域6：热路径基础能力与遗漏模块
 
 > 本报告补齐 [HANDOVER](HANDOVER.md) 第 5 节列出的覆盖缺口。事实核验日期为 2026-07-15；版本号来自 PyPI JSON API，行为结论来自项目固定版本源码、候选库源码或隔离探针。版本号只用于证明当前兼容性，实施时仍应重新解析最新稳定版并锁定。
+>
+> **后续裁决（2026-07-17）**：代理侧历史截断已删除。下文对应调研仅作历史记录；保留的是 `tiktoken`、协议计数、校准与 prompt-limit observation。
 
 ## 结论总表
 
@@ -12,7 +14,7 @@
 | 本地 token 估算与离线回退 | `tiktoken` / `tokenizers` | **采用 `tiktoken` 的 `o200k_base`，不采用 `tokenizers`** | 设计明确需要 OpenAI `o200k_base`；`tiktoken` 原生提供该编码，`tokenizers` 只是通用 tokenizer 引擎，不附带等价的 OpenAI encoding 定义 |
 | transport 级网络重试 | HTTPX 内建 retries / `httpx-retries` | **不采用自动 transport 重试；显式禁用 OpenAI/Anthropic SDK 内建重试** | 隐式重试绕过 `RequestContext.attempts`、共享预算、限流反馈和学习回调，并可能与代理重试相乘；流开始后的读取失败也无法由 transport 自动安全重放 |
 | KMP 流式重复检测 | `regex` / `pyahocorasick` 等 | **保留自研、固定有界窗口** | 需求是发现未知周期，不是搜索已知模式；Aho-Corasick 解决多固定模式，正则回溯方案不适合逐 delta 有界延迟，KMP 前缀函数是更小且确定性的算法核心 |
-| auto-truncate 引擎 | LangChain/LlamaIndex 消息裁剪工具 | **保留领域引擎，仅借 `tiktoken`** | 本项目必须同时维护 tool_use/tool_result 配对、thinking 不可变块、system、原始索引映射、最近约 30% 对话和错误驱动的已学习上限；通用裁剪器不能维持这些协议不变量 |
+| 本地 token 估算与校准 | LangChain/LlamaIndex 消息裁剪工具 | **不采用裁剪器；保留 `tiktoken` + 自研 size-aware calibration** | 计数与校准不改写请求前缀；消息裁剪破坏 KV/prompt cache 与语义 |
 | sanitize 管道 | Pydantic / `jsonschema` | **保留领域清洗；边界结构校验继续用 Pydantic** | sanitize 是有序、可审计、可重复执行的协议修复状态机，不是 JSON Schema validation；未出现“执行任意用户 schema 验证实例”的需求，不应为此引入 `jsonschema` |
 | 四阶段优雅关闭 | Uvicorn lifespan / AnyIO | **保留协调器；借 lifespan 和结构化取消原语** | Uvicorn 只能提供服务器生命周期钩子，不能表达本项目的阶段升级、共享 abort、历史库延迟关闭和资源顺序；第三方库只能提供原语，不能替代编排 |
 

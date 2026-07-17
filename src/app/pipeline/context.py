@@ -57,6 +57,7 @@ class RequestContext:
     sanitization: SanitizationResult | None = None
     rate_limiter_wait_ms: float = 0.0
     attempts: list[Attempt] = field(default_factory=lambda: list[Attempt]())
+    hook_records: list[dict[str, Any]] = field(default_factory=lambda: list[dict[str, Any]]())
     error: ApiError | None = None
     session_id: str | None = None
     agent_id: str | None = None

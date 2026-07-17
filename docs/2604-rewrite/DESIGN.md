@@ -68,9 +68,10 @@
 - **Anthropic 直连**：Claude 模型通过 Copilot 原生 Anthropic 端点直连
 - **消息清洗**：2 阶段清洗管道（预处理 + 可重复清洗），修复 tool 配对、清理空块、处理 system-reminder
 - **Thinking-block 处理管道**：块级保护（`preserve`/`stripped`）+ 去堆叠（destack）+ L2 拒绝后剥离 + L3 会话隔离（内存实现）`[重构，见 P5]`
-- **Auto-Truncate**：响应式（限制错误时截断重试）+ 主动式（预检查已知限制）+ tool_result 压缩
+- **Tokenization**：Anthropic/Gemini 协议专用计数、本地 size-aware calibration、prompt-limit observations；不改写历史
+- **Typed Hooks**：Payload / Retry factory / Response / Observer 四类扩展点，启动期冻结 registry，支持可信用户模块
 - **模型解析**：别名、版本标准化、修饰符后缀、Family Override、链式解析
-- **Feature Negotiation**：多类别学习缓存（body 字段 / beta headers / effort / server tools / tool 字段 / cache_control 子字段等），TTL 裁决
+- **Feature Negotiation**：多类别学习缓存（body 字段 / beta headers / effort / tool 字段 / cache_control 子字段等），TTL 裁决
 - **Cache Control 模式**：`disabled / passthrough / sanitize / proxied`（默认 **passthrough**）`[采纳]`
 - **Context Editing**：服务端上下文管理（clear-thinking / clear-tooluse / clear-both）
 - **Tool Search**：注入 Copilot `tool_search_tool_regex`，支持 deferred tool loading + per-model 覆盖
@@ -97,8 +98,8 @@
 
 1. 请求进入 FastAPI 路由（`routes/`），按协议前缀分发（OpenAI / Anthropic / Azure / Gemini）
 2. 模型解析 + 端点决策
-3. Pipeline 处理：清洗 → 审批（可选）→ 限流 → 执行 → 重试（策略模式）
-4. 消息经 2 阶段清洗 + Anthropic 请求准备（thinking 管道、cache control、header 转发、feature negotiation）后发送
+3. Pipeline 处理：payload hooks → mandatory 清洗 → 审批（可选）→ 限流 → per-attempt hooks → 执行 → 重试
+4. Anthropic 请求经 mandatory tool-pair repair 与 built-in hooks（thinking destack、tool preprocessing 等）后发送
 5. 流式响应逐事件直通（含 keepalive / idle timeout / 重复检测），累积器旁路记账
 6. 请求终态异步落历史（off-loop），WebSocket 推送
 
@@ -148,9 +149,7 @@ src/app/
 │   ├── executor.py                  # 请求执行管道核心循环
 │   ├── rate_limiter.py              # 自适应三模式限流器
 │   ├── approval.py                  # 手动审批门控
-│   └── strategies/                  # 重试策略：network / token_refresh / auto_truncate /
-│                                    #   orphan_cleanup / deferred_tool / poisoned_thinking /
-│                                    #   server_tool_rejection
+│   └── strategies/                  # RetryCoordinator + poisoned-thinking strategy
 │
 ├── anthropic/
 │   ├── client.py                    # Anthropic 客户端（直连 Copilot）
@@ -161,11 +160,8 @@ src/app/
 │   ├── header_policy/               # 请求/响应头转发（blacklist/whitelist + floor）
 │   ├── feature_negotiation.py       # 多类别学习缓存 + TTL 裁决
 │   ├── features.py                  # 模型特性检测 + anthropic-beta + context management
-│   ├── message_tools.py             # Tool 预处理（tool_search 注入、defer、CC 官方工具注入）
-│   ├── server_tool_filter.py        # Server tool 结果过滤（响应侧常驻）+ 块索引重映射
-│   ├── warmup.py                    # Warmup 请求策略
-│   ├── stream_accumulator.py        # Anthropic SSE 累积器
-│   └── token_counting.py            # count_tokens（上游转发 / 本地估算）
+│   ├── message_tools.py             # 普通 client tool defer + tool_search 声明注入
+│   └── warmup.py                    # Warmup 请求策略
 │
 ├── openai/
 │   ├── client.py                    # Chat Completions 客户端
@@ -192,9 +188,18 @@ src/app/
 │   ├── buffered_retry.py           # 缓冲重试（opt-in，默认关）
 │   └── translator.py              # 跨格式流式翻译
 │
-├── auto_truncate/
-│   ├── engine.py                    # 响应式 auto-truncate 引擎
-│   └── token_limits.py             # 动态 token 限制学习
+├── tokenization/
+│   ├── estimators.py                # Anthropic/Gemini 协议专用本地估算
+│   ├── calibration.py               # protocol+model size-aware factor model
+│   ├── limits.py                    # Prompt-limit 解析与 observation registry
+│   ├── state_store.py               # Versioned/off-loop/atomic persistence
+│   └── service.py                   # Anthropic upstream-first count service
+│
+├── hooks/
+│   ├── types.py / context.py        # 四类 Protocol + frozen HookContext
+│   ├── registry.py / loader.py      # Builder、immutable registry、可信 modules
+│   ├── executor.py                  # 顺序、timeout、隔离、telemetry
+│   └── builtin/                     # Payload/retry/calibration built-ins
 │
 ├── routes/
 │   ├── openai.py                    # chat/completions, models, embeddings（三重前缀）
@@ -297,16 +302,15 @@ src/app/
 | `upstream` | 类型、base_url、连接池、超时、HTTP2、代理 |
 | `auth` / `headers` | GitHub token、账户类型、VSCode 伪装头 |
 | `model_overrides` / `model_mappings` | 模型名映射与别名 |
-| `anthropic` | thinking 管道、cache control、header 转发、warmup、tool 处理、context editing、feature negotiation 孪生键、system 消息处理 |
+| `anthropic` | count-token 上游开关、thinking、header 转发、warmup、普通 client tool preprocessing |
 | `openai_responses` | call_id 标准化、上游 WS、WS 连接上限 |
+| `hooks` | 用户 modules、disabled names、timeout、可选 tool-call 内容去重 |
+| `tokenization` | 状态文件路径、周期 flush 间隔 |
 | `rate_limiter` | 退避、恢复、连续成功 |
 | `approval` | 手动审批开关、超时 `[新增]` |
-| `timeouts` | fetch / stream_idle（+per-model）/ response_header / stale_request / request_deadline |
-| `streaming`（anthropic 下） | keepalive、delayed-commit、buffered-retry `[实验/opt-in]` |
-| `shutdown` | graceful_wait / abort_wait |
-| `history` | enabled、success/failure 上限、reaper、db_path、archive（分层，可选）`[部分缓存/延后]` |
-| `telemetry` | 分层遥测（可选，默认可关）`[简化]` |
-| `observability` | 日志级别/格式、OpenTelemetry |
+| `timeouts` | stream idle/response header/upstream/stale request/deadline |
+| `history` | enabled、success/failure 上限、reaper、db_path、WebSocket |
+| `observability` | 日志级别/格式、OpenTelemetry、TUI |
 
 ### 关键更正（相对本项目旧文档）
 
@@ -332,7 +336,9 @@ src/app/
 | [multi-protocol.md](multi-protocol.md) | Azure / Gemini 适配、三重前缀、模型格式 | **新增** |
 | [sanitize-pipeline.md](sanitize-pipeline.md) | 2 阶段消息清洗、Tool blocks 处理 | 更新 |
 | [thinking-pipeline.md](thinking-pipeline.md) | Thinking 块保护 / destack / L2 剥离 / L3 内存隔离 | **新增** |
-| [tool-use.md](tool-use.md) | Tool Use、server tools、tool_search、CC 官方工具注入 | 更新 |
+| [tool-use.md](tool-use.md) | Client Tool Use、pair repair、tool_search 边界 | 更新 |
+| [hooks-system.md](hooks-system.md) | Typed Hooks 契约、注册、错误语义与 built-ins | **新增** |
+| [tokenization.md](tokenization.md) | 协议计数、校准、prompt limits 与持久化 | **新增** |
 | [anthropic-compat.md](anthropic-compat.md) | 兼容性、feature 检测、cache 模式、context editing、warmup | 更新 |
 | [header-forwarding.md](header-forwarding.md) | 请求/响应头转发安全（blacklist/whitelist + floor） | **新增** |
 | [feature-negotiation.md](feature-negotiation.md) | 多类别学习缓存、TTL 裁决、管理 API | **新增** |

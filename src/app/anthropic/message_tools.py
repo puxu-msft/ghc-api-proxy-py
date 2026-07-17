@@ -13,7 +13,8 @@ def preprocess_tools(
     output = [copy.deepcopy(tool) for tool in tools]
     for tool in output:
         name = tool.get("name")
-        if isinstance(name, str) and name not in eager:
+        tool_type = tool.get("type")
+        if tool_type is None and isinstance(name, str) and name not in eager:
             tool["defer_loading"] = True
     has_search = any(
         str(tool.get("type", "")).startswith("tool_search")

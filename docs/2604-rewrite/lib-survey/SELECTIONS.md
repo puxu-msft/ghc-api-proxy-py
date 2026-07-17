@@ -39,10 +39,10 @@
 | RetryStrategy 调度器 | 错误驱动 payload 改写、跨策略预算、attempt 审计、学习回调，不是“重复同一函数” | 标准随机抖动/退避公式 |
 | transport 自动重试 | 必须由唯一的可观测 retry owner 控制；SDK 与 transport 自动 retry 全关 | HTTPX exception taxonomy |
 | AdaptiveRateLimiter | 上游反馈驱动三态状态机，不是固定速率 limiter | Event、clock、jitter |
-| feature negotiation / thinking quarantine / token-limit store | 领域元数据、滑动 TTL、pin/expire/migration 语义超出通用 cache | dict、monotonic clock、原子文件替换 |
+| feature negotiation / thinking quarantine / tokenization state | 领域元数据、滑动 TTL、calibration buckets 与 observation 语义超出通用 cache | dict、clock、off-loop 原子文件替换 |
 | History SQLite writer/schema | 有界队列、丢弃策略、单 writer 连接是核心；aiosqlite 无外层背压，ORM 与架构不符 | `sqlite3` + `asyncio.to_thread`/专用单线程 executor |
 | sanitize 两阶段管道 | 是有序、幂等、可审计的协议修复状态机，不是 JSON Schema validation | Pydantic 做固定边界校验 |
-| auto-truncate | tool 配对、thinking、system、索引映射和错误学习是领域不变量 | `tiktoken` 做 token primitive |
+| token estimation/calibration | 协议口径、按模型/规模分桶学习和 prompt-limit observation 是领域不变量；不裁剪历史 | `tiktoken` 做 token primitive |
 | repetition detector | 未知周期检测不匹配多-pattern 库；KMP 小、确定、有界 | property-based differential tests |
 | 四阶段 shutdown | Uvicorn/AnyIO 不表达阶段升级和资源关闭顺序 | FastAPI lifespan、task group、event、cancel scope |
 | request deadline / stale reaper | 单请求 SLA 与泄漏兜底是项目生命周期语义 | AnyIO/asyncio timeout 原语 |

@@ -8,10 +8,8 @@ NEGOTIATION_CATEGORIES = (
     "efforts",
     "effortUnsupported",
     "deferredTools",
-    "serverTools",
     "partnerFeatures",
     "systemRejectModels",
-    "serverToolDowngrade",
     "toolFields",
     "cacheControlSubfields",
 )

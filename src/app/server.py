@@ -13,6 +13,10 @@ from app.config.settings import AppSettings
 from app.history.consumer import HistoryConsumer
 from app.history.store import HistoryStore
 from app.history.ws import WebSocketManager
+from app.hooks.builtin import register_builtin_hooks
+from app.hooks.executor import HooksExecutor
+from app.hooks.loader import load_user_hook_modules
+from app.hooks.registry import HookRegistryBuilder
 from app.observability.logging import setup_logging
 from app.observability.telemetry import setup_metrics
 from app.observability.tracing import setup_tracing
@@ -30,6 +34,7 @@ from app.routes.metrics import router as metrics_router
 from app.routes.openai import router as openai_router
 from app.routes.responses_ws import router as responses_ws_router
 from app.runtime import RuntimeState
+from app.tokenization.state_store import TokenizationStateStore
 from app.upstream.bootstrap import close_upstream_services, initialize_upstream_services
 
 
@@ -55,6 +60,17 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
     async with anyio.create_task_group() as task_group:
         runtime.background_task_group = task_group
         try:
+            tokenization_path = (
+                Path(settings.tokenization.state_path)
+                if settings.tokenization.state_path
+                else user_data_path() / "tokenization.json"
+            )
+            runtime.tokenization_state = TokenizationStateStore(tokenization_path)
+            await runtime.tokenization_state.load()
+            task_group.start_soon(
+                runtime.tokenization_state.run_periodic_flush,
+                settings.tokenization.flush_interval,
+            )
             if settings.history.enabled:
                 history_path = (
                     Path(settings.history.db_path)
@@ -91,6 +107,24 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
                         services.run_model_refresh_loop,
                         settings.model_refresh_interval,
                     )
+            hook_builder = HookRegistryBuilder(disabled=tuple(settings.hooks.disabled))
+            register_builtin_hooks(
+                hook_builder,
+                settings,
+                quarantine=(
+                    runtime.anthropic_client.quarantine
+                    if runtime.anthropic_client is not None
+                    else None
+                ),
+                tokenization_state=runtime.tokenization_state,
+            )
+            load_user_hook_modules(hook_builder, settings)
+            runtime.hook_registry = hook_builder.build()
+            if runtime.anthropic_client is not None:
+                runtime.anthropic_client.hooks = HooksExecutor(
+                    runtime.hook_registry,
+                    user_timeout_ms=settings.hooks.timeout_ms,
+                )
             if (
                 runtime.history_store is not None
                 and settings.history.reaper_interval > 0
@@ -106,6 +140,8 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
             if runtime.approval_gate is not None:
                 await runtime.approval_gate.reject_all_pending("server shutting down")
                 runtime.approval_gate = None
+            if runtime.tokenization_state is not None:
+                await runtime.tokenization_state.flush()
             runtime.websocket_manager = None
             if runtime.history_store is not None:
                 await runtime.history_store.close()
@@ -113,6 +149,8 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
             await close_upstream_services(runtime)
             task_group.cancel_scope.cancel()
             runtime.background_task_group = None
+            runtime.tokenization_state = None
+            runtime.hook_registry = None
 
 
 def create_app(settings: AppSettings | None = None) -> FastAPI:

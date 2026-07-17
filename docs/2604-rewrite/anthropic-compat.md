@@ -283,7 +283,6 @@ def is_warmup_request(payload: MessagesPayload) -> bool:
 [B1. 构建 wire payload]
     ├─ 剥离 Copilot 不接受的字段（内置黑名单 + config 按模型配置 + feature negotiation 学习集，见 feature-negotiation.md）
     │   内置默认：["inference_geo"]
-    └─ 剥离 server tools 顶层字段 / 整个 server tool（`strip_server_tools` 配置 + negotiation 学习集）
     │   payload 中会被就地修改的嵌套字段（messages/system/tools/output_config/thinking）在此深拷贝，
     │   避免重试时上一次准备结果的修改污染下一次准备（每次重试都从干净的原始 payload 出发）
     │

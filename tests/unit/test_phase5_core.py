@@ -1,6 +1,5 @@
 import pytest
 
-from app.auto_truncate.token_limits import TokenLimitCache
 from app.pipeline.rate_limiter import AdaptiveRateLimiter, RateLimitMode
 from app.repetition_detector import RepetitionDetector
 from app.shutdown import ShutdownManager, ShutdownPhase
@@ -16,15 +15,6 @@ async def test_rate_limiter_transitions_rate_limited_recovering_normal() -> None
     limiter.report_success()
     limiter.report_success()
     assert limiter.mode is RateLimitMode.NORMAL
-
-
-def test_token_limit_cache_uses_normalized_model_and_24h_ttl() -> None:
-    now = 100.0
-    cache = TokenLimitCache(ttl_seconds=86400, clock=lambda: now)
-    cache.record("Claude-Opus-4.6", 200_000)
-    assert cache.get("claude-opus-4-6") == 200_000
-    now = 86_501
-    assert cache.get("claude-opus-4.6") is None
 
 
 def test_repetition_detector_finds_repeated_pattern_incrementally() -> None:

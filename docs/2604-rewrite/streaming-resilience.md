@@ -113,7 +113,7 @@ def make_keepalive_frame(open_block: OpenBlock | None, mode: KeepaliveMode) -> S
             return content_block_delta_frame(idx, {"type": "thinking_delta", "thinking": ""})
         case OpenBlock(type="text", index=idx):
             return content_block_delta_frame(idx, {"type": "text_delta", "text": ""})
-        case OpenBlock(type="tool_use" | "server_tool_use", index=idx):
+        case OpenBlock(type="tool_use", index=idx):
             return content_block_delta_frame(idx, {"type": "input_json_delta", "partial_json": ""})
         case _:
             # 尚无已打开的 block（如延迟提交窗口耗尽、上游还未吐出第一个 block）

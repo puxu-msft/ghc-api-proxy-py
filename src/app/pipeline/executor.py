@@ -4,10 +4,13 @@ from typing import Any, cast
 
 import httpx
 
-from app.anthropic.client import AnthropicClient
+from app.anthropic.client import AnthropicClient, PreparedAnthropicRequest
+from app.anthropic.sanitize import sanitize_messages
 from app.anthropic.thinking.quarantine import QuarantineKey
 from app.anthropic.thinking.strip_all import strip_all_thinking
 from app.errors import ApiError, ErrorCategory
+from app.hooks.context import HookContext
+from app.hooks.types import ObserverEvent, PayloadPhase
 from app.models.anthropic import MessagesRequest
 from app.pipeline.approval import ApprovalRejectedError
 from app.pipeline.context import Attempt, RequestContext, RequestState
@@ -28,6 +31,93 @@ class UpstreamResponseError(Exception):
         self.response = response
 
 
+async def _fail_internal(
+    context: RequestContext,
+    client: AnthropicClient,
+    error: Exception,
+) -> None:
+    if context.state not in (RequestState.COMPLETED, RequestState.FAILED):
+        context.fail(
+            ApiError(
+                f"request hook failed: {error}",
+                category=ErrorCategory.INTERNAL,
+                status_code=500,
+            )
+        )
+    if client.history is not None:
+        await client.history.finalized(context)
+
+
+def _hook_context(
+    context: RequestContext,
+    client: AnthropicClient,
+    *,
+    attempt_number: int,
+) -> HookContext:
+    return HookContext(
+        request_id=context.id,
+        endpoint=context.endpoint,
+        protocol="anthropic",
+        original_model=context.original_model,
+        resolved_model=context.resolved_model,
+        session_id=context.session_id,
+        agent_id=context.agent_id,
+        attempt_number=attempt_number,
+        settings=client.settings,
+    )
+
+
+async def _prepare_with_hooks(
+    client: AnthropicClient,
+    request: MessagesRequest,
+    context: RequestContext,
+) -> tuple[MessagesRequest, PreparedAnthropicRequest]:
+    hooks = client.hooks
+    if hooks is None:
+        return request, client.prepare(request)
+    initial_context = _hook_context(context, client, attempt_number=0)
+    await hooks.observe(
+        ObserverEvent.REQUEST_RECEIVED,
+        initial_context,
+        {"request": request, "payload": context.original_payload},
+        records=context.hook_records,
+    )
+    raw_payload, _ = await hooks.run_payload(
+        PayloadPhase.PRE_SANITIZE,
+        request.model_dump(mode="json", exclude_unset=True),
+        initial_context,
+        records=context.hook_records,
+    )
+    rewritten_request = MessagesRequest.model_validate(raw_payload)
+    resolved_model = client.resolve_model(rewritten_request.model)
+    sanitization = sanitize_messages(
+        rewritten_request.messages,
+        rewritten_request.tools or [],
+    )
+    wire = rewritten_request.model_dump(mode="json", exclude_unset=True)
+    wire["model"] = resolved_model
+    wire["messages"] = [
+        message.model_dump(mode="json", exclude_unset=True)
+        for message in sanitization.messages
+    ]
+    context.resolved_model = resolved_model
+    post_context = _hook_context(context, client, attempt_number=0)
+    wire, _ = await hooks.run_payload(
+        PayloadPhase.POST_SANITIZE,
+        wire,
+        post_context,
+        records=context.hook_records,
+    )
+    prepared = client.prepare_payload(
+        rewritten_request,
+        resolved_model=resolved_model,
+        sanitization=sanitization,
+        payload=wire,
+        apply_payload_rewrites=False,
+    )
+    return rewritten_request, prepared
+
+
 async def execute_anthropic_pipeline(
     client: AnthropicClient,
     request: MessagesRequest,
@@ -46,7 +136,11 @@ async def execute_anthropic_pipeline(
     context.transition(RequestState.SANITIZING)
     if client.history is not None:
         await client.history.started(context)
-    prepared = client.prepare(request)
+    try:
+        request, prepared = await _prepare_with_hooks(client, request, context)
+    except Exception as error:
+        await _fail_internal(context, client, error)
+        raise
     if client.approval_gate is not None and client.approval_gate.enabled:
         approval = await client.approval_gate.wait_for_approval(context)
         if approval.status == "rejected":
@@ -60,14 +154,29 @@ async def execute_anthropic_pipeline(
                 await client.history.finalized(context)
             raise ApprovalRejectedError(error.message)
         if approval.modified_payload:
-            request = MessagesRequest.model_validate(approval.modified_payload)
-            prepared = client.prepare(request)
+            try:
+                request = MessagesRequest.model_validate(approval.modified_payload)
+                request, prepared = await _prepare_with_hooks(client, request, context)
+            except Exception as error:
+                await _fail_internal(context, client, error)
+                raise
     context.resolved_model = prepared.resolved_model
     context.sanitization = prepared.sanitization
     context.transition(RequestState.EXECUTING)
     key = QuarantineKey(session_id, agent_id or "") if session_id else None
-    strategy = PoisonedThinkingStrategy(client.quarantine, key)
-    coordinator = RetryCoordinator([strategy], max_retries=1)
+    try:
+        if client.hooks is not None:
+            strategy_context = _hook_context(context, client, attempt_number=0)
+            strategies = [
+                factory.create(strategy_context)
+                for factory in client.hooks.registry.retry_factories
+            ]
+        else:
+            strategies = [PoisonedThinkingStrategy(client.quarantine, key)]
+    except Exception as error:
+        await _fail_internal(context, client, error)
+        raise
+    coordinator = RetryCoordinator(strategies, max_retries=1)
     payload: dict[str, object] = prepared.wire
     if key is not None and client.quarantine is not None and client.quarantine.is_poisoned(key):
         messages = payload.get("messages")
@@ -80,11 +189,25 @@ async def execute_anthropic_pipeline(
         context.rate_limiter_wait_ms += await limiter.acquire()
         attempt = Attempt(number=attempt_number)
         context.attempts.append(attempt)
+        attempt_payload = cast(dict[str, Any], payload)
+        if client.hooks is not None:
+            try:
+                attempt_payload, hook_modifications = await client.hooks.run_payload(
+                    PayloadPhase.PRE_SEND,
+                    attempt_payload,
+                    _hook_context(context, client, attempt_number=attempt_number),
+                    records=context.hook_records,
+                )
+            except Exception as error:
+                await _fail_internal(context, client, error)
+                raise
+            attempt.payload_modifications.extend(hook_modifications)
+        payload = attempt_payload
         current = prepared.__class__(
             prepared.original_model,
             prepared.resolved_model,
             prepared.sanitization,
-            payload,
+            attempt_payload,
             prepared.headers,
         )
         response = await client.send_prepared(current, stream=request.stream)
@@ -92,7 +215,50 @@ async def execute_anthropic_pipeline(
         attempt.completed_at = time.time()
         if response.is_success:
             limiter.report_success()
-            strategy.on_success()
+            coordinator.notify_success()
+            if client.hooks is not None and not request.stream:
+                body = await response.aread()
+                hook_context = _hook_context(
+                    context,
+                    client,
+                    attempt_number=attempt_number,
+                )
+                await client.hooks.observe(
+                    ObserverEvent.RESPONSE,
+                    hook_context,
+                    {
+                        "request": request,
+                        "response_body": body,
+                        "status_code": response.status_code,
+                    },
+                    records=context.hook_records,
+                )
+                try:
+                    transformed = await client.hooks.run_response(
+                        body,
+                        response.status_code,
+                        hook_context,
+                        records=context.hook_records,
+                    )
+                except Exception as error:
+                    await response.aclose()
+                    await _fail_internal(context, client, error)
+                    raise
+                original = response
+                response = httpx.Response(
+                    original.status_code,
+                    headers=original.headers,
+                    content=transformed.body,
+                    request=getattr(original, "_request", None),
+                    extensions=original.extensions,
+                )
+                await original.aclose()
+                await client.hooks.observe(
+                    ObserverEvent.FINALIZE,
+                    hook_context,
+                    {"request": request, "state": "completed"},
+                    records=context.hook_records,
+                )
             context.transition(
                 RequestState.STREAMING if request.stream else RequestState.COMPLETED
             )
@@ -105,6 +271,18 @@ async def execute_anthropic_pipeline(
             status_code=response.status_code,
         )
         attempt.error = error
+        if client.hooks is not None:
+            await client.hooks.observe(
+                ObserverEvent.ERROR,
+                _hook_context(context, client, attempt_number=attempt_number),
+                {
+                    "request": request,
+                    "response_body": body,
+                    "status_code": response.status_code,
+                    "error": error,
+                },
+                records=context.hook_records,
+            )
         if error.category is ErrorCategory.RATE_LIMIT:
             retry_after_value = response.headers.get("retry-after")
             try:
@@ -115,11 +293,18 @@ async def execute_anthropic_pipeline(
         decision = await coordinator.decide(error, payload)
         if decision is not None:
             attempt.strategy_applied = decision.owner
-            attempt.payload_modifications = list(decision.modifications)
+            attempt.payload_modifications.extend(decision.modifications)
             payload = decision.payload
             await response.aclose()
             continue
         context.fail(error)
+        if client.hooks is not None:
+            await client.hooks.observe(
+                ObserverEvent.FINALIZE,
+                _hook_context(context, client, attempt_number=attempt_number),
+                {"request": request, "state": "failed", "error": error},
+                records=context.hook_records,
+            )
         if client.history is not None:
             await client.history.finalized(context)
         raise UpstreamResponseError(context, response)

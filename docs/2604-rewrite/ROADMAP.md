@@ -14,7 +14,8 @@
 - 模型解析（别名 / 标准化 / Override / Family）
 - Anthropic 直连 Copilot + 请求准备（wire payload / thinking budget / cache control `passthrough`）
 - 2 阶段消息清洗 + tool 配对修复
-- 请求管道：清洗 → 限流 → 执行 → 重试（network / token_refresh / auto_truncate / orphan_cleanup）
+- 请求管道：typed hooks → mandatory 清洗 → 限流 → 执行 → poisoned-thinking 重试
+- Anthropic count-tokens 上游优先、本地 calibrated fallback；prompt-limit observations 不改写历史
 - SSE 流式直通 + 流空闲超时 + 重复检测
 - Token provider 链（CLI / env / file / device-auth）
 - 结构化日志 + 健康检查（liveness / readiness）
@@ -26,10 +27,10 @@
 - Thinking-block 处理管道：块级保护 / destack / L2 剥离 / **L3 内存隔离**（非上游的磁盘 sidecar，见 P5）
 - Context Editing（clear-thinking / clear-tooluse / clear-both）
 - Cache control 全模式（disabled / passthrough / sanitize / proxied）
-- Tool Search 注入 + deferred loading + per-model 覆盖 + CC 官方工具注入
+- Tool Search 注入 + deferred loading
 - 请求/响应头转发安全（blacklist / whitelist + security floor + 归属头剥离）
 - Warmup 策略（allow / reject / drop / fake）
-- Server tool 结果过滤（响应侧常驻 + 块索引重映射）
+- Typed Hooks registry、可信用户 modules 与内建 payload/retry/observer hooks
 
 ### M3 — 韧性与运维
 
@@ -59,8 +60,8 @@
 | **优雅重启（零停机换代）** | `[上游未落地]`（"设计（未实现）"，含未解 sd_notify PoC 与多个 overlap bug） | `[缓存/延后]` | 上游都没实现且有已知竞态；Python 侧可用进程管理器（systemd / supervisor）+ SO_REUSEPORT 另行设计 |
 | **`enveloped_ping` keepalive** | `[上游实验]`（"预期会超时"） | `[拒绝]` | 上游明确其撑不住 300s；只实现 `empty_text`（有效）+ `ping`（逃生舱） |
 | **error-shaping AskUserQuestion 交互** | `[上游实验]`（未实测，headless 无用户可问） | `[缓存/延后]` | 语义不清、价值待验证 |
-| **memory tool（server_tool_memory）** | `[上游实验]`（默认关，CAPI 接受度未验证） | `[缓存/延后]` | 上游未验证，观望 |
-| **upstream hooks 模块** | `[上游稳定]`（dev/test only） | `[缓存/延后]` | 仅开发期用途，非核心 |
+| **原生 server-tool 编排/过滤/降级** | 上游已移除 | `[拒绝]` | 不执行、不伪造签名结果、不隐式剥离历史 |
+| **代理侧历史截断/压缩** | 上游已移除 | `[拒绝]` | 改写前缀破坏 KV/prompt cache 与对话语义 |
 | **分层遥测（DDSketch + raw/hourly/daily）** | `[上游稳定]` | `[简化]` M4 可选 | 见 BACKLOG；默认用轻量计数器 + OpenTelemetry |
 
 ## 参见

@@ -39,3 +39,34 @@ def test_event_logging_batch_is_silently_consumed() -> None:
 def test_browser_probe_is_silently_consumed() -> None:
     with TestClient(create_app(AppSettings())) as client:
         assert client.get("/favicon.ico").status_code == 204
+
+
+def test_tokenization_management_routes_expose_and_filter_state() -> None:
+    app = create_app(AppSettings())
+    with TestClient(app) as client:
+        state = app.state.runtime.tokenization_state
+        assert state is not None
+        state.calibration.learn("anthropic", "Claude-Test", 10_000, 12_000)
+        state.calibration.learn("gemini", "Gemini-Test", 10_000, 11_000)
+        state.prompt_limits.record(
+            "anthropic",
+            "Claude-Test",
+            current=120_000,
+            limit=100_000,
+            source="anthropic_messages_error",
+            observed_at=10,
+        )
+
+        calibration = client.get(
+            "/api/tokenization/calibration",
+            params={"protocol": "anthropic", "model": "claude.test"},
+        )
+        limits = client.get("/api/tokenization/limits")
+
+    assert calibration.status_code == 200
+    assert list(calibration.json()["calibration"]) == ["anthropic:claude-test"]
+    assert limits.status_code == 200
+    item = limits.json()["limits"]["anthropic:claude-test"]
+    assert item["observed_limit"] == 100_000
+    assert item["advertised_limit"] is None
+    assert item["difference"] is None
