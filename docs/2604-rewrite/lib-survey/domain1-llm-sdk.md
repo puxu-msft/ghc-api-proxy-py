@@ -8,7 +8,7 @@
 |---|---|---|---|---|---|
 | `anthropic/client.py`（打 `/v1/messages`） | `anthropic.AsyncAnthropic` 底层 `client.post(cast_to=httpx.Response, stream=True)` | 高 | 否 | **采纳**：复用 SDK 传输层做原始字节直通 | 与 `AsyncOpenAI` 完全同构的 stainless 生成代码，`cast_to == httpx.Response` 短路点逐行核对一致，见下 §1 |
 | `openai/responses_client.py`（打 `/responses`） | `AsyncOpenAI` 底层 `client.post(cast_to=httpx.Response, stream=True)` | 高 | 否 | **采纳**：与 chat/completions 同一套底层 client，同一份 PoC 结论直接适用 | `resources/responses/responses.py` 用的仍是同一 `AsyncAPIClient.post`，路径只是换成 `/responses`，无新短路点需要验证 |
-| `/responses` 的 `ws:/responses` 传输 | openai SDK 的 `Realtime`/`beta.realtime` WebSocket 封装 | **不适配** | — | **保留自研**：代理自己建立到上游的 WS 连接（httpx 不支持 WS，需 `websockets` 库），不借用 openai SDK 的 realtime 封装 | openai SDK 的 WS 支持是 `/realtime` 专用协议（事件类型、鉴权握手均为 Realtime API 私有语义），并非通用的"把任意 REST 端点转 WS 调用"的机制，见 §2 |
+| `/responses` 的 `ws:/responses` 传输 | openai SDK 的 `Realtime`/`beta.realtime` WebSocket 封装 | **不适配** | — | **采用域3选定的 `httpx_ws` 建立上游 WS 连接**，不借用 openai SDK 的 realtime 封装 | openai SDK 的 WS 支持是 `/realtime` 专用协议（事件类型、鉴权握手均为 Realtime API 私有语义），并非通用的"把任意 REST 端点转 WS 调用"的机制，见 §2；通用传输库结论见域3 |
 | `transform/translator.py`、`streaming/translator.py`（跨协议转换 anthropic↔openai↔responses↔gemini） | `litellm` | **不适配** | **是**（Python 版本硬冲突 + 强缓冲倾向） | **拒绝** | `litellm` 声明 `requires-python "<3.14,>=3.10"`，与项目 `requires-python = ">=3.14"` 直接冲突；其定位是"调用层"而非"纯转换层"（自己发请求、自己管路由/重试/缓存），见 §3 |
 | 同上 | `any-llm-sdk`（mozilla-ai/any-llm） | **不适配** | 未知（需自测），但定位不符 | **拒绝** | 同样是"统一调用层"（`completion()`/`AnyLLM.create()`），不提供独立的、无状态的"仅做协议格式转换、不发请求"的函数/模块；引入它等于让它接管调用而非只借类型，见 §3 |
 | `models/openai.py`、`models/anthropic.py` 的自定义 Pydantic 模型 | 直接复用 `openai.types.*` / `anthropic.types.*` | 部分适配 | 部分（见下） | **部分采纳**：入站校验层保留自研 `BaseModel`（`extra` 策略不同、需要宽松未知字段透传）；转换/构造 wire body 时可借用 SDK 的 `TypedDict` Param 类型做类型提示，不必照抄字段定义 | 见 §4：SDK 的 request-param 类型是 `TypedDict`（非 Pydantic），response 类型是 SDK 自带 `BaseModel`（`extra="allow"` 但类结构面向"SDK 自己解析响应"而非"承接任意上游 wire 并保真透传"），直接复用会绑死升级节奏且与本项目"未知字段不丢"的保真度要求不完全对齐 |
@@ -30,7 +30,7 @@
 - `AsyncAnthropic` 默认 `base_url`（`anthropic/_client.py:340-343`：`ANTHROPIC_BASE_URL` 环境变量或 `https://api.anthropic.com`）可通过构造参数覆盖为 Copilot 的 Anthropic 端点 base，与 `AsyncOpenAI` 覆盖 `base_url` 打 Copilot 的做法完全一致的用法模式。
 - `openai/resources/responses/responses.py` 内部对 `/responses` 路径的调用（第 877/1191/2508/2826 行的 `"/responses"` 字面量）走的正是同一个 `AsyncAPIClient.post`/`request`，**没有为 Responses 端点引入任何专属的底层传输机制**——它只是 `.responses.create()` 高层封装传给 `cast_to=Response`（SDK 自己的 pydantic 类型）而非 `httpx.Response`；把最外层的 typed `cast_to` 参数换成 `httpx.Response` 即可复用同一 PoC 结论，无需新验证。
 
-**结论**：两条新链路的推广**成立**，且不需要额外 PoC——两个 SDK 由同一家 Stainless 代码生成器产出，`_base_client.py` 的 `cast_to` 短路机制、`post()` 签名、`options={"headers": ...}` 合并语义在两个包间逐行核对一致。唯一需要在实现时留意的差异点（非阻塞）：
+**结论**：两条新链路的推广**成立**，且不需要额外 PoC——两个 SDK 由同一家 Stainless 代码生成器产出，`_base_client.py` 的 `cast_to` 短路机制、`post()` 签名、`options={"headers": ...}` 合并语义在两个包间逐行核对一致。实现时还必须把两个 SDK client 的 `max_retries` 显式设为 `0`：固定版本默认都会在 SDK 内自动重试最多 2 次，覆盖 408、409、429、5xx 和部分连接异常；若不关闭，会绕过本项目的共享重试预算、`RequestContext.attempts`、限流反馈与学习回调，并与外层策略形成乘法放大。网络重试的完整裁决见 [domain6-hot-path-foundations](domain6-hot-path-foundations.md)。其余差异点：
 
 - anthropic 的 `_merge_mappings` 会额外注入 `x-stainless-timeout` 头（`_base_client.py:442-450` 附近），openai 没有这一行为；若严格审计出站 header 差异需知晓这一点，但不影响直通可行性。
 - anthropic 默认走 `HTTPTransport`/`AsyncHTTPTransport` 并显式设置 TCP keepalive socket 选项（`_base_client.py:843` 起新增代码），openai 未做此定制；这是连接层面的优化差异，不影响 `cast_to` 短路结论。
@@ -45,7 +45,7 @@
 - 搜索 openai 包内所有涉及 websocket 的文件（`grep -rn websocket`），命中的全部落在 `resources/realtime/`、`resources/beta/realtime/`、`types/realtime/`、`types/websocket_connection_options.py` 目录下，**没有** `resources/responses/` 下任何 WS 相关代码；`.responses.create(stream=True)` 与其底层 `post()` 全部走 HTTP（第 877/1191/2508/2826 行 `"/responses"` 是纯 REST 路径）。
 - 本项目当前 `pyproject.toml` 未依赖 `websockets` 包（`uv pip list` 未见），意味着即便想反向复用 openai SDK 内部的 `websockets.asyncio.client`，也需要额外显式引入该依赖（openai 把它标为 optional extra，非核心依赖强制安装）。
 
-**结论**：openai==2.21.0 **不原生支持** "把 Responses API 当作 WebSocket 调用"这件事——SDK 里唯一的 WS 能力是 Realtime API 专属封装，协议语义（事件类型、URL 拼接规则）与 Responses 完全不同，**不能**被复用或"稍加改造"套到 `ws:/responses`。因此代理连接上游 `ws:/responses` 这条链路**用不上 openai SDK**，需要域3（传输层）直接用通用 WS 客户端库（如 `websockets` 包本身）自行实现，仅在**构造 JSON 帧内容**时可以复用本项目自己的 `ResponsesRequest`/`OutputItem` 等 Pydantic 模型（或视 §4 结论决定是否借用 SDK 的 Responses TypedDict 类型），传输层与 SDK 无关。这与 `docs/2604-rewrite/streaming.md` 第 159 行"WebSocket 处理器复用现有 HTTP pipeline 的全部逻辑"的表述**不矛盾**——那里说的是复用本项目自己的 pipeline（token 刷新、重试、rate limiting），不是复用 openai SDK 的传输机制。
+**结论**：openai==2.21.0 **不原生支持** "把 Responses API 当作 WebSocket 调用"这件事——SDK 里唯一的 WS 能力是 Realtime API 专属封装，协议语义（事件类型、URL 拼接规则）与 Responses 完全不同，**不能**被复用或"稍加改造"套到 `ws:/responses`。因此代理连接上游 `ws:/responses` 这条链路**用不上 openai SDK**，采用域3选定的通用传输库 `httpx_ws`，仅在**构造 JSON 帧内容**时复用本项目自己的 `ResponsesRequest`/`OutputItem` 等 Pydantic 模型或 SDK 的 Responses TypedDict 类型。传输层与 SDK 无关。这与 `docs/2604-rewrite/streaming.md` 第 159 行"WebSocket 处理器复用现有 HTTP pipeline 的全部逻辑"的表述**不矛盾**——那里说的是复用本项目自己的 pipeline（token 刷新、重试、rate limiting），不是复用 openai SDK 的传输机制。
 
 ### 3. 跨协议翻译（anthropic↔openai↔responses↔gemini）：有没有现成库值得借用
 
@@ -86,6 +86,6 @@
 ## 遗留疑问 / 需主会话或用户裁决的点
 
 1. **`any-llm-sdk` 的 Python 3.14 兼容性未实测**（只确认 `requires-python ">=3.11"` 声明范围覆盖，未实际 `uv pip install` 验证是否有 C 扩展/间接依赖在 3.14 上失败）。但因其"调用层"定位已经不适配本项目架构，实测优先级不高，除非主会话认为仍有必要留作候补。
-2. **`websockets` 包尚未被列入 `pyproject.toml` 依赖**——域3（传输层）要实现连接上游 `ws:/responses`，需要显式新增该依赖（或用 httpx 生态里的 `httpx-ws` 等替代方案，两者的成熟度/维护活跃度对比应由域3调研，本域只确认"openai SDK 用不上"这一结论）。
+2. **上游 WS 依赖由域3收敛为 `httpx_ws`**——不单独引入 `websockets`；实现前仍需在 Python 3.14 环境运行最小 mock WS PoC，验证安装、代理/TLS 参数透传和逐消息背压。
 3. anthropic SDK 的 `_merge_mappings` 会额外注入 `x-stainless-timeout` 请求头（openai 没有此行为）——若代理需要对出站 header 做白名单式精确控制（`header-forwarding.md` 涉及的双模式转发），实现时需注意这一 SDK 侧差异不要被误判为"客户端注入的可疑 header"。
 4. 本报告未覆盖 `openai/embeddings.py`（`/embeddings` 端点）是否也适用同一套 `cast_to=httpx.Response` 直通模式——虽然结构上应该同样成立（同一 `AsyncAPIClient.post`），但 embeddings 响应通常非流式，直通的收益（零缓冲）不如三条主链路显著，建议由域2或实现阶段按需确认，不在本域展开验证。

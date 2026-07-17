@@ -8,7 +8,7 @@
 |---|---|---|---|---|---|
 | 重试策略框架（`pipeline/strategies/*` + `executor.py` 的 for 循环） | `tenacity` / `stamina` / `backoff` | 低（语义不匹配） | 否（若强套用会牺牲清晰度，非直接违反 P1/P6） | **保留自研**；可选借用 `wait_exponential`/`stop_after_attempt` 等**纯函数原语** | 这些库的核心抽象是「同一次调用，参数不变，重试直到成功/超限」；本项目要的是「读上一次错误 body → 改写 payload/headers/messages → 换个不同的调用再试」，且要与 `RetryStrategy` 的 `can_handle`/多策略优先级匹配、`max_reactive_retries` 跨策略共享预算、`on_resolved` 学习回调等自定义状态机耦合。tenacity 唯一支持这种改写语义的方式是手动 `for attempt in Retrying(...)` 循环，而这本质上就是本项目已有的 for 循环，借库不省代码反而多一层不必要的抽象/依赖 |
 | 自适应限流器（`pipeline/rate_limiter.py`） | `aiolimiter` / `limits` / `pyrate-limiter` | 低（能力错配） | 否 | **保留自研** | 三个库都面向**客户端主动、预先声明速率**的限流（漏桶/令牌桶/滑动窗口），不具备"依据上游 429/503 响应反馈切换 Normal/Rate-Limited/Recovering 三态、动态调整退避时长"的状态机语义；本项目要的不是「限制我方发送速率」而是「感知上游限流反馈并自适应退避+恢复」，属于两类不同问题 |
-| TTL 学习缓存（`feature_negotiation.py` 多类别缓存、`auto_truncate/token_limits.py`、`thinking/quarantine.py`） | `cachetools`(TTLCache) / `cacheout` / `aiocache` | 中（可部分借用） | 需逐条核对 | **部分替换**：`thinking/quarantine.py`（单一滑动 TTL、无持久化需求）可考虑用 `cachetools.TTLCache` 替代手写 dict；`feature_negotiation.py`（11 类别、per-entry 元数据 `LearnedEntryMeta`、pin/manually_expired/迁移语义、原子落盘）**保留自研** | 细节见下文逐项 |
+| TTL 学习缓存（`feature_negotiation.py` 多类别缓存、`auto_truncate/token_limits.py`、`thinking/quarantine.py`） | `cachetools`(TTLCache) / `cacheout` / `aiocache` | 低-中 | 需逐条核对 | **保留自研**：quarantine 需要命中续期的滑动 TTL，`TTLCache` 是固定过期；feature negotiation 还有 per-entry 元数据、pin、迁移和原子落盘；token limit 是否过期仍待定 | 细节见下文逐项 |
 | 断路器 / deadline（`pipeline/manager.py` stale reaper + request deadline） | `anyio` 超时原语 / `circuitbreaker` | 低-中 | 否 | **保留自研**（deadline/reaper 用 asyncio 原语已足够简洁）；`circuitbreaker` **不采用** | 详见下文 |
 
 ## 逐项详述

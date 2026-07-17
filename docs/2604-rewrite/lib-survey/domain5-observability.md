@@ -7,8 +7,8 @@
 项目已锁定 `opentelemetry-api==1.39.1`（发布于 2025-12-11）。经查 PyPI 元数据与 `opentelemetry-python-contrib` CHANGELOG：
 
 - core（`opentelemetry-api`/`opentelemetry-sdk`/`opentelemetry-exporter-otlp*`）与 instrumentation 系列（`opentelemetry-instrumentation-*`、`opentelemetry-exporter-prometheus`）**不是同一版本号体系**，instrumentation 系列用 `0.xxb0`/`0.xxb1` 版本号，但两个系列按发布时间**同步打包发布**。
-- 核对结果：**`opentelemetry-api/sdk 1.39.1` 精确对应 instrumentation 系列 `0.60b1`**（2025-12-11 同日发布）。`opentelemetry-instrumentation-fastapi==0.60b1` / `opentelemetry-instrumentation-httpx==0.60b1` / `opentelemetry-instrumentation-asgi==0.60b1` / `opentelemetry-exporter-prometheus==0.60b1` 均显式声明 `opentelemetry-sdk~=1.39.1`（`opentelemetry-exporter-prometheus` 的 `pyproject` 依赖甚至精确锁 `~=1.39.1`）。
-- 若本项目要引入这些 instrumentation 包，**必须锁定 `0.60b1`**，不能凭直觉挑最新版（最新是 `0.64b0`，对应 core `1.43.0`，与已锁定的 `1.39.1` api 不兼容，会被 pip 依赖解析拒绝或产生运行时不一致）。
+- 核对结果：**`opentelemetry-api/sdk 1.39.1` 对应同批次 instrumentation 系列 `0.60b1`**（2025-12-11 同日发布）。`opentelemetry-exporter-prometheus==0.60b1` 显式声明 `opentelemetry-sdk~=1.39.1`；`opentelemetry-instrumentation-httpx==0.60b1` 自身只宽松声明 `opentelemetry-api~=1.12`，但依赖同批次 `opentelemetry-semantic-conventions==0.60b1`。因此“所有 instrumentation 包都显式锁 SDK 1.39.1”的旧表述不成立，正确依据是同批次 semantic-conventions 与项目整体版本矩阵。
+- 若维持项目当前 `opentelemetry-api==1.39.1`，应锁定 core `1.39.1` + contrib `0.60b1` 这一批次，不能单独挑 contrib 最新版。核验时 PyPI 最新已是 core `1.43.0` + contrib `0.64b0`；长期更优的实施策略是把 OTel 当成**整套原子升级单元**，实施开始时先验证并整体升级到当时最新兼容批次，而不是永久冻结 2025 年版本。
 - **重要风险提示**：`opentelemetry-python-contrib` 官方 README 明确声明这些 instrumentation 包 "currently in beta, and shouldn't generally be used in production environments"。这是需要主会话/用户知悉并明确接受的风险，不属于本调研可自行拍板豁免的范畴，已列入「遗留疑问」。
 - OTLP exporter（`opentelemetry-exporter-otlp-proto-grpc`）在 Python 3.14 上要求 `grpcio>=1.75.1`（版本号里显式区分了 `python_version>=3.14` 的约束），需要额外确认 `grpcio` 对 3.14 的 wheel 可用性（本次未见明确 ABI 问题报告，但建议实现阶段先跑一次 `pip install` 验证）。
 
@@ -70,7 +70,7 @@ opentelemetry-exporter-prometheus==0.60b1    # 可选，仅当需要 /metrics �
 
 - **`opentelemetry-instrumentation-fastapi==0.60b1`**（对应 core 1.39.1；`requires-python>=3.10`；依赖 `opentelemetry-instrumentation-asgi==0.60b1` + `opentelemetry-instrumentation==0.60b1`）：`FastAPIInstrumentor.instrument_app(app)` 一行代码即可为每个入站请求自动生成 span，span 命名规则、`http.method`/`http.route`/`http.status_code` 属性均由库自动填充，与文档描述完全一致。**零手写 span 代码**，文档里给出的 `setup_tracing()` 示例函数本身就是标准装配代码而非自定义埋点逻辑，符合"用成熟库"的诉求。
 - **`opentelemetry-instrumentation-httpx==0.60b1`**：`HTTPXClientInstrumentor().instrument()` 全局接管所有 httpx client 的出站请求，自动生成子 span 并与入站 span 建立父子关系（通过 OTel Context 传播机制，无需手动传递 trace context）。
-  - **已读源码确认不违反 P6**：`opentelemetry/instrumentation/httpx/__init__.py` 中的 `AsyncOpenTelemetryTransport.handle_async_request()` 只是在原始 `handle_async_request` 调用前后加 span 记录（`start_as_current_span` + 耗时统计），响应对象的 `stream`（`httpx.AsyncByteStream`）字段被原样提取并透传给上层（`_extract_response()` 只是解包 `(status_code, headers, stream, extensions, http_version)` 元组，不读取/不消费 stream 内容），**不存在强制缓冲整个响应体的行为**。SSE 流式转发场景可以安全叠加此 instrumentation。
+  - **已读 0.60b1 源码确认不违反 P6**：`opentelemetry/instrumentation/httpx/__init__.py` 中的 `AsyncOpenTelemetryTransport.handle_async_request()` 只是在原始 `handle_async_request` 调用前后加 span 记录，响应对象的 `stream`（`httpx.AsyncByteStream`）被原样返回，不读取、不包装、不消费内容，**不存在强制缓冲整个响应体的行为**。代价是 client span 在响应 headers 返回时就结束，并不覆盖 SSE body 的完整消费时长；完整流时长仍需项目现有 request/stream span 或指标表达，不能误读自动 span 的 duration。
 - **`opentelemetry-sdk` + `opentelemetry-exporter-otlp`（`==1.39.1`）**：`TracerProvider` + `BatchSpanProcessor` + 可插拔 exporter（OTLP/stdout/None）是 OTel SDK 官方标准用法，文档现有 `setup_tracing()` 示例本身已经是"标准装配"而非自研，仅需确保版本号精确对齐（见前文版本对齐结论）。OTLP exporter 在 Python 3.14 上依赖 `grpcio>=1.75.1`，需在实现阶段验证 wheel 可用性。
 
 **是否威胁 P1/P6/保真度**：不威胁。span 记录是内存操作 + `BatchSpanProcessor` 后台批量导出（off 请求热路径，本身就是 OTel SDK 设计的一部分）；httpx instrumentation 透传 stream，不缓冲。
@@ -79,12 +79,12 @@ opentelemetry-exporter-prometheus==0.60b1    # 可选，仅当需要 /metrics �
 
 ### 请求遥测 / 指标（`observability/telemetry.py` + `routes/metrics.py`）
 
-**现状**：文档已经采取"轻量内存计数器 + 同步导出到 OTel Metrics"的分层简化方案（`telemetry-observability.md` L119-186），明确放弃 DDSketch/三层 SQLite/rollup（见 `BACKLOG.md` 第 3 条），核心诉求是把直方图分位数计算、长期聚合完全交给 OTel + collector/TSDB。本次调研的关键问题是：现设计中"内存 dict 计数器"与"OTel instrument"两者同时维护（`record_request_telemetry()` 示例代码里 `_counters[dims].requests += 1` 之后又调用 `_otel_request_counter.add(...)`）是否有必要，能否进一步简化为单一数据源。
+**原始现状与采纳结果**：调研时文档采取"轻量内存计数器 + 同步导出到 OTel Metrics"的双写方案，明确放弃 DDSketch/三层 SQLite/rollup。本报告据此提出简化为单一数据源；该建议现已被 [telemetry-observability](../telemetry-observability.md) 采纳，当前设计只保留 OTel instruments，不再有待删除的 `_counters` dict。
 
 **候选库核对**：
 
 - **直接使用 OTel Metrics API（`meter.create_counter()` / `meter.create_histogram()`）**：OTel SDK 的 `Counter`/`Histogram` instrument 本身就是"进程内维护计数状态 + 支持多维度 attributes"的实现，与文档手写的 `_counters: dict[TelemetryDimensions, Counters]` 在功能上完全重合。**没有必要再手写一份内存 dict 做重复记账**——`.add(n, attributes=...)` 调用本身就是 O(1) 的原子操作，满足"简单递增、无锁竞争热点"的诉求，且已经是标准库级实现，无需自研。
-- **`opentelemetry-exporter-prometheus==0.60b1`（`PrometheusMetricReader`）**：已下载源码核实（`opentelemetry/exporter/prometheus/__init__.py`）。它是一个 `MetricReader` 子类，工作模式是 **pull**：Prometheus/`generate_latest()` 抓取时触发 `_CustomCollector.collect()` 回调，从 OTel SDK 内部状态里拉取最新聚合值实时转换成 Prometheus 文本格式（`CounterMetricFamily`/`HistogramMetricFamily` 等）。**关键结论：不需要额外维护一份 `prometheus_client.Counter/Histogram`**，`prometheus_client` 库在这里只承担两个角色：(a) 提供 `REGISTRY.register()` 机制供 `PrometheusMetricReader` 挂载自己；(b)（可选）`start_http_server()` 独立起一个抓取端口。文档现有表述"`prometheus_client` 库的 `Counter`/`Histogram` 与内存计数器/OTel instrument 保持同一份数据源"这一设计可以进一步简化——**不需要 `prometheus_client.Counter/Histogram` 这两个类型**，只需要 OTel Metrics API 一份数据源，`PrometheusMetricReader` 作为 `MeterProvider` 的第二个 `metric_readers`（第一个可以是 OTLP 相关 reader）即可同时供 OTLP 和 Prometheus 抓取。
+- **`opentelemetry-exporter-prometheus==0.60b1`（`PrometheusMetricReader`）**：已下载源码核实（`opentelemetry/exporter/prometheus/__init__.py`）。它是一个 `MetricReader` 子类，工作模式是 **pull**：Prometheus/`generate_latest()` 抓取时触发 `_CustomCollector.collect()`，collector 先调用 `MetricReader.collect()` 从 OTel SDK 聚合状态收集，再把收到的 `MetricsData` 转换成 Prometheus families。**关键结论：不需要额外维护一份 `prometheus_client.Counter/Histogram`**，`prometheus_client` 只提供 registry、文本生成和可选独立 HTTP server。文档现有三份并行记账可以简化为 OTel Metrics API 单一数据源。
 - **`prometheus_client` 单独使用**（不接入 OTel）：更轻量，但会退回"两套独立计数体系"的重复记账问题，除非项目决定完全放弃 OTel Metrics（不符合文档已确立的"以 OTel 为标准协议"取向），不推荐作为主方案。
 
 **是否威胁 P1/P6/保真度**：不威胁。指标记录是内存操作；`PrometheusMetricReader` 是 pull 模型，抓取发生在独立的 `/metrics` 请求处理时，不在业务请求热路径上产生额外开销（除非抓取频率极高，但这是可观测性基础设施的常规行为，不受本项目控制也不需要控制）。

@@ -6,7 +6,7 @@
 
 手动审批系统（`pipeline/approval.py` + `routes/approval.py`）提供可选的请求审批门控。启用后，所有到上游的请求必须经过人工审批才能执行。
 
-**Python 独有功能**：JS 版本没有审批门控。这是 Python 重写版新增的功能，核心机制使用 `asyncio.Event` 挂起请求处理协程，零 CPU 开销等待审批结果。
+**Python 独有功能**：JS 版本没有审批门控。这是 Python 重写版新增的功能，核心机制使用 AnyIO Event 挂起请求处理协程，并用 cancel scope 表达超时与 shutdown 取消，零 CPU 开销等待审批结果。
 
 ## 审批流程
 
@@ -24,7 +24,7 @@
     创建 PendingApproval
     ├─ 生成 approval_id
     ├─ 记录完整 payload
-    ├─ 创建 asyncio.Event（初始未设置）
+    ├─ 创建 AnyIO Event（初始未设置）
     ├─ 启动超时定时器
          │
          ▼
@@ -61,7 +61,7 @@ class ApprovalGate:
         self.enabled = enabled
         self._timeout = timeout_seconds
         self._pending: dict[str, PendingApproval] = {}
-        self._lock = asyncio.Lock()
+        self._lock = anyio.Lock()
         self._ws_manager: WebSocketManager | None = None
 
     async def wait_for_approval(
@@ -77,7 +77,7 @@ class ApprovalGate:
             model=ctx.resolved_model,
             created_at=time.time(),
             timeout_at=time.time() + self._timeout,
-            event=asyncio.Event(),
+            event=anyio.Event(),
             result=None,
         )
 
@@ -92,20 +92,19 @@ class ApprovalGate:
             })
 
         # 等待审批或超时
-        try:
-            await asyncio.wait_for(
-                approval.event.wait(),
-                timeout=self._timeout,
-            )
-        except asyncio.TimeoutError:
+        with anyio.move_on_after(self._timeout) as scope:
+            await approval.event.wait()
+        if scope.cancelled_caught:
             approval.result = ApprovalResult(
                 status="rejected",
                 reason="Approval timeout",
             )
 
-        # 清理
-        async with self._lock:
-            self._pending.pop(approval.id, None)
+        # 清理必须放在 finally 等价路径；实现时即使外层 shutdown cancel scope 取消，
+        # 也要用短暂 shielded scope 移除 pending，避免泄漏。
+        with anyio.CancelScope(shield=True):
+            async with self._lock:
+                self._pending.pop(approval.id, None)
 
         return approval.result
 
@@ -190,7 +189,7 @@ class PendingApproval:
     model: str
     created_at: float
     timeout_at: float
-    event: asyncio.Event
+    event: anyio.Event
     result: ApprovalResult | None
 
     def to_summary(self) -> dict:

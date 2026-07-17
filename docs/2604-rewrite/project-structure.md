@@ -12,7 +12,7 @@ ghc-api-proxy-py/
 │
 ├── src/app/
 │   ├── __init__.py                      # 包初始化、版本号
-│   ├── cli.py                           # CLI 参数解析（argparse），多子命令，启动 uvicorn
+│   ├── cli.py                           # CLI 参数解析（Typer），多子命令，启动 uvicorn
 │   ├── server.py                        # FastAPI 应用工厂、分阶段 lifespan、中间件注册
 │   ├── deps.py                          # FastAPI 依赖注入提供者（Depends 工厂函数）
 │   ├── errors.py                        # 错误分类、格式化错误响应、wire format 检测
@@ -55,7 +55,7 @@ ghc-api-proxy-py/
 │   │   ├── manager.py                   # RequestContextManager（活跃请求跟踪 + stale reaper + deadline）
 │   │   ├── executor.py                  # 请求执行管道核心循环
 │   │   ├── rate_limiter.py              # 自适应三模式限流器（Normal/Rate-Limited/Recovering）
-│   │   ├── approval.py                  # 手动审批门控（asyncio.Event）
+│   │   ├── approval.py                  # 手动审批门控（AnyIO Event + cancel scope）
 │   │   └── strategies/
 │   │       ├── __init__.py
 │   │       ├── base.py                  # RetryStrategy 协议定义
@@ -269,7 +269,7 @@ ghc-api-proxy-py/
 ### `cli.py` — 命令行入口
 
 职责：
-- 使用 `argparse` 解析命令行参数（port、host、config、verbose 等）
+- 使用 Typer 解析命令行参数（port、host、config、verbose 等）
 - 支持子命令：`start`（默认）、`auth`（别名 `login`）、`logout`、`debug`（子命令 `info`/`models`/`usage`——**注意 `debug usage` 才是使用量查询，无顶层 `check-usage`**）、`setup-claude-code`、`setup-codex`、`list-claude-code`
 - 调用 `config.loader` 完成四层配置合并（含 `compat.py` 弃用键迁移）
 - 调用 `uvicorn.run()` 启动 ASGI 服务器
@@ -362,40 +362,36 @@ async def lifespan(app: FastAPI):
     await upstream.fetch_models()
     model_resolver = ModelResolver(resolved_settings.model_mappings, upstream.models)
 
-    # 后台任务（off-loop，不阻塞请求路径）
-    background_tasks: list[asyncio.Task] = []
-    if resolved_settings.model_refresh_interval > 0:
-        background_tasks.append(
-            asyncio.create_task(periodic_model_refresh(upstream, resolved_settings.model_refresh_interval))
-        )
-    if resolved_settings.history.enabled and resolved_settings.history.reaper_interval > 0:
-        background_tasks.append(
-            asyncio.create_task(history_store.run_reaper(resolved_settings.history.reaper_interval))
-        )
-    background_tasks.append(
-        asyncio.create_task(context_manager.run_stale_reaper())
-    )
+    # 后台服务由应用级 AnyIO task group 结构化持有。
+    async with anyio.create_task_group() as task_group:
+        if resolved_settings.model_refresh_interval > 0:
+            task_group.start_soon(periodic_model_refresh, upstream, resolved_settings.model_refresh_interval)
+        if resolved_settings.history.enabled and resolved_settings.history.reaper_interval > 0:
+            task_group.start_soon(history_store.run_reaper, resolved_settings.history.reaper_interval)
+        task_group.start_soon(context_manager.run_stale_reaper)
 
-    # Phase 5 —— 存入 app.state，服务器就绪
-    app.state.upstream = upstream
-    app.state.model_resolver = model_resolver
-    app.state.context_manager = context_manager
-    app.state.history_store = history_store
-    app.state.ws_manager = ws_manager
-    app.state.rate_limiter = rate_limiter
-    app.state.approval_gate = approval_gate
-    app.state.background_tasks = background_tasks
+        # Phase 5 —— 存入 app.state，服务器就绪
+        app.state.upstream = upstream
+        app.state.model_resolver = model_resolver
+        app.state.context_manager = context_manager
+        app.state.history_store = history_store
+        app.state.ws_manager = ws_manager
+        app.state.rate_limiter = rate_limiter
+        app.state.approval_gate = approval_gate
+        app.state.background_task_group = task_group
 
-    yield  # 应用运行中
+        yield  # 应用运行中
 
-    # 4 阶段优雅关闭（见 shutdown.md）
-    await graceful_shutdown(app)
+        # 4 阶段优雅关闭（见 shutdown.md），完成后取消并等待后台服务退出。
+        await graceful_shutdown(app)
+        task_group.cancel_scope.cancel()
 ```
 
 **性能要点**：
 - Phase 3/4 的初始化本身是启动期一次性成本，不在请求热路径
 - `history_store` 内部持有 writer 任务与有界 `asyncio.Queue`；请求完成后写历史是 fire-and-forget，不阻塞响应返回（P1）
-- `periodic_model_refresh` / `run_reaper` / `run_stale_reaper` 全部是独立后台 `asyncio.Task`，与请求处理并发但不共享阻塞资源
+- `periodic_model_refresh` / `run_reaper` / `run_stale_reaper` 全部由 lifespan 内的 AnyIO task group 持有；关闭时通过 cancel scope 统一取消并等待，不产生 fire-and-forget 孤儿任务
+- 底层 httpx/httpx_ws 等 asyncio-only 互操作若必须创建原生 task，必须保存引用、显式取消并 await，且通过取消传播集成测试
 - L3 thinking quarantine（`anthropic/thinking/quarantine.py`）常驻内存 dict，不在 lifespan 中做磁盘初始化（P5）
 
 ### `deps.py` — 依赖注入
@@ -466,7 +462,7 @@ def get_context_manager(request: Request) -> RequestContextManager: ...
 **`models_api.py`** — 模型列表管理：
 - 从上游获取可用模型（Copilot：专用 API；Generic：`/v1/models`）
 - 构建 O(1) 查找索引（`model_index: dict[str, Model]`、`model_ids: set[str]`）
-- 定期后台刷新（`model_refresh_interval` 秒，off-loop `asyncio.Task`）
+- 定期后台刷新（`model_refresh_interval` 秒，由 lifespan AnyIO task group 持有）
 - 提供两种输出格式：OpenAI 标准格式（`/models`）与内部完整格式（`/api/models`）
 
 ### `pipeline/` — 请求执行管道
@@ -477,7 +473,7 @@ def get_context_manager(request: Request) -> RequestContextManager: ...
 - **`manager.py`** — `RequestContextManager`：跟踪活跃请求生命周期、stale reaper（定期检查超时请求强制清理）、hard request deadline 计时器
 - **`executor.py`** — 管道核心循环：清洗 → 审批（可选）→ 限流 → 执行 → 重试（策略模式）
 - **`rate_limiter.py`** — 自适应三模式限流器（Normal → Rate-Limited → Recovering）
-- **`approval.py`** — 手动审批门控（`asyncio.Event`，本项目独有 `[新增]`）
+- **`approval.py`** — 手动审批门控（AnyIO Event + cancel scope，本项目独有 `[新增]`）
 - **`strategies/`** — 重试策略集合：`network_retry`、`token_refresh`、`auto_truncate`、`orphan_cleanup`、`deferred_tool_retry`、`poisoned_thinking`（L2/L3）、`server_tool_rejection`；共享 `retry.max_reactive_retries` 预算
 
 ### `anthropic/` — Anthropic 协议处理

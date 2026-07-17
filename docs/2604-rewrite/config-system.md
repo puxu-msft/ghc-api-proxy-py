@@ -31,7 +31,7 @@
    └─ 文件存在 → 解析 YAML → compat.py 迁移别名键（warn-and-continue）→ 覆盖对应字段
 
 3. CLI 参数覆盖
-   └─ argparse 解析的非 None 参数 → 覆盖对应字段
+  └─ Typer 解析的非 None 参数 → 覆盖对应字段
 
 4. 返回最终 frozen AppSettings 实例
 ```
@@ -40,7 +40,7 @@
 
 ```python
 def load_settings(
-    cli_args: argparse.Namespace | None = None,
+    cli_overrides: Mapping[str, Any] | None = None,
 ) -> AppSettings:
     """加载并合并四层配置。"""
 

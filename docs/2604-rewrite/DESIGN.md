@@ -57,7 +57,7 @@
 | 配置管理 | CLI + config.yaml 手动合并 + 大量 compat 迁移 | Pydantic BaseSettings 四层自动合并 `[重构]` |
 | 历史存储 | 同步 SQLite + 三层归档 + 内容寻址搜索 | 异步单层 SQLite（off-loop）+ 简单清理，重能力可选 `[简化/重构]` |
 | 请求生命周期 | 手动 context + sink 总线 | FastAPI middleware + 依赖注入 + 观察者 `[重构]` |
-| 手动审批 | 无 | 完整审批门控（asyncio.Event） `[新增]` |
+| 手动审批 | 无 | 完整审批门控（AnyIO Event + cancel scope） `[新增]` |
 | 可观测性 | consola + 分层遥测 SQLite + DDSketch | 结构化日志 + OpenTelemetry；重遥测可选 `[简化]` |
 
 ## 核心能力
@@ -89,7 +89,7 @@
 
 ### 入口点
 
-- `main.py` — CLI 入口（argparse），子命令：`start`、`auth`/`login`、`logout`、`debug`（`info`/`models`/`usage`）、`setup-claude-code`、`setup-codex`、`list-claude-code`
+- `main.py` — CLI 入口（Typer），子命令：`start`、`auth`/`login`、`logout`、`debug`（`info`/`models`/`usage`）、`setup-claude-code`、`setup-codex`、`list-claude-code`
 - `server.py` — FastAPI 应用工厂 + lifespan（分阶段启动）
 - `deps.py` — FastAPI 依赖注入提供者
 
@@ -109,7 +109,7 @@
 ```
 src/app/
 ├── __init__.py                      # 包初始化、版本号
-├── cli.py                           # CLI 入口（argparse），多子命令
+├── cli.py                           # CLI 入口（Typer），多子命令
 ├── server.py                        # FastAPI 应用工厂 + 分阶段 lifespan
 ├── deps.py                          # FastAPI 依赖注入提供者
 ├── errors.py                        # 错误分类、格式化错误响应、wire format 检测
@@ -341,7 +341,7 @@ src/app/
 | [streaming-resilience.md](streaming-resilience.md) | 延迟提交、keepalive 心跳、缓冲重试（性能取舍） | **新增** |
 | [history-system.md](history-system.md) | 异步 SQLite 存储（off-loop）、session、REST、WS（含性能重设计） | 更新 |
 | [telemetry-observability.md](telemetry-observability.md) | 日志、OpenTelemetry、请求遥测、TUI（可选） | **新增** |
-| [approval-system.md](approval-system.md) | 手动审批门控、asyncio.Event、WebSocket 通知 | `[新增]` |
+| [approval-system.md](approval-system.md) | 手动审批门控、AnyIO Event/cancel scope、WebSocket 通知 | `[新增]` |
 | [shutdown.md](shutdown.md) | 4 阶段关闭、请求上下文、reaper、deadline、错误持久化 | 更新 |
 | [ROADMAP.md](ROADMAP.md) | 借鉴但暂缓的能力、里程碑 | **新增** |
 | [BACKLOG.md](BACKLOG.md) | 上游重能力的可选实现（分层归档、全文搜索、分层遥测等） | **新增** |

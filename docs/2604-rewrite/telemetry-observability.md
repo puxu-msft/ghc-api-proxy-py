@@ -120,7 +120,7 @@ def setup_tracing(app: FastAPI, settings: ObservabilitySettings) -> None:
 
 ### 轻量维度计数
 
-进程内维护一组内存计数器，按以下维度分组：
+进程内只维护 OTel Metrics API 的 `Counter`/`Histogram` instruments，不再额外维护一份手写 dict 计数器。每次记录按以下 attributes 分组：
 
 - `model`：解析后的模型名
 - `endpoint`：`openai-chat-completions` / `openai-responses` / `anthropic-messages` / `gemini-generate-content` 等
@@ -149,14 +149,8 @@ def record_request_telemetry(ctx: RequestContext, usage: UsageData) -> None:
         client=ctx.client_label,
         agent=ctx.agent_label,
     )
-    _counters[dims].requests += 1
-    _counters[dims].input_tokens += usage.input_tokens
-    _counters[dims].output_tokens += usage.output_tokens
-    _counters[dims].reasoning_tokens += reasoning
-    _counters[dims].duration_seconds += ctx.duration()
-
-    # 同步导出到 OpenTelemetry Metrics（Counter/Histogram），
-    # 不在进程内做任何聚合/持久化——留给 OTel SDK 的内置批处理 + collector
+    # OpenTelemetry Metrics 是进程内唯一指标数据源；
+    # 不再手写一份 dict 或 prometheus_client Counter/Histogram 做重复记账。
     _otel_request_counter.add(1, attributes=dims.as_otel_attributes())
     _otel_token_counter.add(usage.input_tokens, attributes={**dims.as_otel_attributes(), "token_type": "input"})
     _otel_token_counter.add(usage.output_tokens, attributes={**dims.as_otel_attributes(), "token_type": "output"})
@@ -170,7 +164,7 @@ def record_request_telemetry(ctx: RequestContext, usage: UsageData) -> None:
 
 ### `/metrics` 暴露 Prometheus 文本
 
-对于没有部署 OTel collector、只想直接用 Prometheus 抓取的简单场景，额外暴露一个标准 Prometheus 文本格式端点：
+对于没有部署 OTel collector、只想直接用 Prometheus 抓取的简单场景，给同一 `MeterProvider` 安装 `PrometheusMetricReader`，并额外暴露标准 Prometheus 文本格式端点：
 
 ```python
 @router.get("/metrics")
@@ -182,7 +176,7 @@ async def metrics_endpoint() -> Response:
     )
 ```
 
-`prometheus_client` 库的 `Counter`/`Histogram` 与上文的内存计数器/OTel instrument 保持同一份数据源（避免重复记账），二者是同一套指标的两种导出通道。
+`PrometheusMetricReader` 会注册进 `prometheus_client.REGISTRY`；`generate_latest(REGISTRY)` 抓取时回调 OTel reader，从同一份 OTel 聚合状态生成文本。不要再创建 `prometheus_client.Counter`/`Histogram`，否则会形成第二份独立指标状态。
 
 ## 观察者/sink 模型
 
@@ -193,7 +187,7 @@ async def metrics_endpoint() -> Response:
 | `ConsoleSink` | 驱动 TUI（终端交互式展示，见下文，可选） |
 | `LogSink` | 写入结构化日志 |
 | `HistorySink` | 触发历史记录的 off-loop 持久化（见 [history-system.md](history-system.md)） |
-| `TelemetrySink` | 更新内存维度计数器 + 推送 OTel metrics |
+| `TelemetrySink` | 更新 OTel Metrics instruments |
 | `WsSink` | 通过 WebSocket 推送给前端订阅者 |
 
 ```python
