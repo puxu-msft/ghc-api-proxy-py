@@ -2,10 +2,14 @@ from pathlib import Path
 
 import pytest
 
+from app.errors import ApiError, ErrorCategory
+from app.history.consumer import HistoryConsumer
 from app.history.in_flight import InFlightHistory
 from app.history.sessions import identify_session
 from app.history.sqlite.writer import HistoryWriter
+from app.history.store import HistoryStore
 from app.history.types import HistoryEntry, ModelRef
+from app.pipeline.context import RequestContext, RequestState
 
 
 def _entry(identifier: str, status: str, started_at: float) -> HistoryEntry:
@@ -125,3 +129,127 @@ async def test_writer_round_trips_response_and_usage_summary(tmp_path: Path) -> 
     assert actual is not None
     assert actual.response == expected.response
     assert actual.usage == expected.usage
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("state", "projection"),
+    [
+        (
+            RequestState.COMPLETED,
+            {
+                "type": "message",
+                "content": [{"type": "text", "text": "streamed"}],
+                "delivery": {"complete": True, "uncertain": False},
+                "usage": {"input_tokens": 2, "output_tokens": 1},
+            },
+        ),
+        (
+            RequestState.FAILED,
+            {
+                "type": "message",
+                "content": [],
+                "delivery": {
+                    "complete": False,
+                    "uncertain": True,
+                    "possibly_visible_block": {"type": "text", "text": "maybe"},
+                },
+                "usage": {"input_tokens": 0, "output_tokens": 0},
+                "error": {
+                    "type": "api_error",
+                    "message": "downstream delivery outcome is uncertain",
+                    "code": "delivery_uncertain",
+                },
+            },
+        ),
+    ],
+)
+async def test_history_consumer_persists_explicit_stream_projection(
+    tmp_path: Path,
+    state: RequestState,
+    projection: dict[str, object],
+) -> None:
+    store = HistoryStore(tmp_path / "history.db")
+    await store.start()
+    consumer = HistoryConsumer(store)
+    context = RequestContext(
+        original_model="requested",
+        original_payload={"model": "requested", "stream": True},
+        session_id="session",
+    )
+    context.resolved_model = "resolved"
+    context.transition(RequestState.SANITIZING)
+    context.transition(RequestState.EXECUTING)
+    context.transition(RequestState.STREAMING)
+    await consumer.started(context)
+    if state is RequestState.COMPLETED:
+        context.transition(RequestState.COMPLETED)
+    else:
+        context.fail(
+            ApiError(
+                "downstream delivery outcome is uncertain",
+                category=ErrorCategory.NETWORK,
+                status_code=499,
+                code="delivery_uncertain",
+            )
+        )
+    try:
+        stream_usage = {"input_tokens": 2, "output_tokens": 1}
+        await consumer.finalized(
+            context,
+            response=projection,
+            usage=stream_usage,
+            usage_estimated=state is RequestState.FAILED,
+        )
+        actual = await store.get(context.id)
+    finally:
+        await store.close()
+
+    assert actual is not None
+    assert actual.status == state.value
+    assert actual.response == projection
+    assert actual.usage == {
+        "input_tokens": 2,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 1,
+        "reasoning_tokens": 0,
+        "total_tokens": 3,
+        "estimated": state is RequestState.FAILED,
+        "inconsistent": False,
+        "conversion_facts": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_history_consumer_failure_without_projection_has_no_success_facts(
+    tmp_path: Path,
+) -> None:
+    store = HistoryStore(tmp_path / "history.db")
+    await store.start()
+    consumer = HistoryConsumer(store)
+    context = RequestContext(
+        original_model="requested",
+        original_payload={"model": "requested"},
+        session_id="session",
+    )
+    context.final_response_payload = {"type": "message", "content": []}
+    context.transition(RequestState.SANITIZING)
+    context.fail(
+        ApiError(
+            "invalid final response",
+            category=ErrorCategory.UPSTREAM,
+            status_code=502,
+        )
+    )
+    await consumer.started(context)
+    try:
+        await consumer.finalized(context)
+        actual = await store.get(context.id)
+    finally:
+        await store.close()
+
+    assert actual is not None
+    assert actual.status == "failed"
+    assert actual.response is None
+    assert actual.usage is None

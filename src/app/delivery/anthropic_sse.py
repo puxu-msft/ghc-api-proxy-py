@@ -22,7 +22,9 @@ from app.openai.responses_stream_parser import (
 )
 from app.streaming.sse import format_sse_event
 
-type BatchKind = Literal["block", "terminal"]
+type BatchKind = Literal["block", "terminal", "error"]
+type DeliveryOutcome = Literal["pending", "accepted", "uncertain"]
+type EnvelopeState = Literal["not_started", "accepted", "uncertain"]
 
 
 class DeliveryOrderError(ValueError):
@@ -139,6 +141,7 @@ class CommittedBlock:
     order_key: BlockOrderKey
     block_index: int
     batch_digest: str
+    block: CompletedBlock
 
     @property
     def source_order(self) -> int:
@@ -146,7 +149,7 @@ class CommittedBlock:
 
 
 class DeliveryWriter(Protocol):
-    async def write(self, batch: bytes) -> None: ...
+    async def write(self, batch: bytes) -> DeliveryOutcome | None: ...
 
 
 class DeliverySink(Protocol):
@@ -157,8 +160,9 @@ class _InMemoryWriter:
     def __init__(self, batches: list[bytes]) -> None:
         self._batches = batches
 
-    async def write(self, batch: bytes) -> None:
+    async def write(self, batch: bytes) -> DeliveryOutcome:
         self._batches.append(batch)
+        return "accepted"
 
 
 class InMemoryDeliverySink:
@@ -263,13 +267,37 @@ class DeliveryFrontier:
     """Accepted downstream envelopes; assembly and rendering do not advance it."""
 
     def __init__(self) -> None:
-        self._message_start_accepted = False
+        self._headers_state: EnvelopeState = "not_started"
+        self._message_start_state: EnvelopeState = "not_started"
         self._committed_blocks: list[CommittedBlock] = []
-        self._terminal_accepted = False
+        self._uncertain_block_index: int | None = None
+        self._uncertain_block: CompletedBlock | None = None
+        self._terminal_state: EnvelopeState = "not_started"
+        self._successful_terminal = False
+
+    @property
+    def headers_state(self) -> EnvelopeState:
+        return self._headers_state
+
+    @property
+    def message_start_state(self) -> EnvelopeState:
+        return self._message_start_state
+
+    @property
+    def terminal_state(self) -> EnvelopeState:
+        return self._terminal_state
+
+    @property
+    def uncertain_block_index(self) -> int | None:
+        return self._uncertain_block_index
+
+    @property
+    def uncertain_block(self) -> CompletedBlock | None:
+        return self._uncertain_block
 
     @property
     def message_start_accepted(self) -> bool:
-        return self._message_start_accepted
+        return self._message_start_state == "accepted"
 
     @property
     def committed_blocks(self) -> tuple[CommittedBlock, ...]:
@@ -277,11 +305,35 @@ class DeliveryFrontier:
 
     @property
     def terminal_accepted(self) -> bool:
-        return self._terminal_accepted
+        return self._terminal_state == "accepted" and self._successful_terminal
+
+    @property
+    def delivery_uncertain(self) -> bool:
+        return self._uncertain_block_index is not None or "uncertain" in (
+            self._headers_state,
+            self._message_start_state,
+            self._terminal_state,
+        )
+
+    def accept_headers(self) -> None:
+        if self._headers_state != "not_started":
+            raise DeliveryOrderError("response headers were already resolved")
+        self._headers_state = "accepted"
+
+    def mark_headers_uncertain(self) -> None:
+        if self._headers_state == "not_started":
+            self._headers_state = "uncertain"
+
+    def block_state(self, block_index: int) -> EnvelopeState:
+        if block_index < len(self._committed_blocks):
+            return "accepted"
+        if block_index == self._uncertain_block_index:
+            return "uncertain"
+        return "not_started"
 
     def accept_block(self, block: CompletedBlock, batch: RenderedBatch) -> None:
         expected_index = len(self._committed_blocks)
-        if self._terminal_accepted:
+        if self._terminal_state != "not_started":
             raise DeliveryOrderError("cannot accept a block after terminal")
         if batch.kind != "block" or batch.block_index != expected_index:
             raise DeliveryOrderError("block batch does not match the delivery frontier")
@@ -289,10 +341,12 @@ class DeliveryFrontier:
         if batch.order_key != order_key:
             raise DeliveryOrderError("block batch order key does not match its source")
         if batch.includes_message_start:
-            if self._message_start_accepted or expected_index != 0:
+            if self._message_start_state != "not_started" or expected_index != 0:
                 raise DeliveryOrderError("message_start can only accompany the first block")
-            self._message_start_accepted = True
-        elif not self._message_start_accepted:
+            if self._headers_state == "not_started":
+                self._headers_state = "accepted"
+            self._message_start_state = "accepted"
+        elif not self.message_start_accepted:
             raise DeliveryOrderError("the first block must include message_start")
         self._committed_blocks.append(
             CommittedBlock(
@@ -300,21 +354,44 @@ class DeliveryFrontier:
                 order_key=order_key,
                 block_index=expected_index,
                 batch_digest=batch.digest,
+                block=block,
             )
         )
 
     def accept_terminal(self, batch: RenderedBatch) -> None:
-        if self._terminal_accepted:
+        if self._terminal_state != "not_started":
             raise DeliveryOrderError("terminal was already accepted")
         if batch.kind != "terminal":
             raise DeliveryOrderError("expected a terminal batch")
         if batch.includes_message_start:
-            if self._message_start_accepted or self._committed_blocks:
+            if self._message_start_state != "not_started" or self._committed_blocks:
                 raise DeliveryOrderError("terminal can start only an empty message")
-            self._message_start_accepted = True
-        elif not self._message_start_accepted:
+            if self._headers_state == "not_started":
+                self._headers_state = "accepted"
+            self._message_start_state = "accepted"
+        elif not self.message_start_accepted:
             raise DeliveryOrderError("terminal requires an accepted message_start")
-        self._terminal_accepted = True
+        self._terminal_state = "accepted"
+        self._successful_terminal = True
+
+    def accept_error(self, batch: RenderedBatch) -> None:
+        if batch.kind != "error" or self._terminal_state != "not_started":
+            raise DeliveryOrderError("error terminal does not match the delivery frontier")
+        self._terminal_state = "accepted"
+
+    def mark_uncertain(
+        self, batch: RenderedBatch, block: CompletedBlock | None = None
+    ) -> None:
+        if batch.includes_message_start:
+            if self._headers_state == "not_started":
+                self._headers_state = "uncertain"
+            if self._message_start_state == "not_started":
+                self._message_start_state = "uncertain"
+        if batch.kind == "block" and batch.block_index is not None:
+            self._uncertain_block_index = batch.block_index
+            self._uncertain_block = block
+        if batch.kind in {"terminal", "error"} and self._terminal_state == "not_started":
+            self._terminal_state = "uncertain"
 
 
 class AnthropicSseRenderer:
@@ -372,6 +449,15 @@ class AnthropicSseRenderer:
             kind="terminal",
             data=b"".join(events),
             includes_message_start=include_message_start,
+        )
+
+    def render_error(self, *, error_type: str, message: str, code: str | None) -> RenderedBatch:
+        detail: dict[str, Any] = {"type": error_type, "message": message}
+        if code is not None:
+            detail["code"] = code
+        return RenderedBatch(
+            kind="error",
+            data=_event("error", {"type": "error", "error": detail}),
         )
 
     def _message_start(self) -> bytes:
@@ -507,6 +593,10 @@ class DeliverySession:
         self._stopped_error: ResponsesDeliveryError | None = None
         self._terminal_fact: ResponsesTerminal | None = None
         self._mode: Literal["unset", "manual", "typed"] = "unset"
+        self._scheduled_blocks: list[CompletedBlock] = []
+        self._message_start_scheduled = False
+        self._terminal_scheduled = False
+        self._pending: list[tuple[RenderedBatch, CompletedBlock | None]] = []
         self.frontier = DeliveryFrontier()
 
     @property
@@ -543,7 +633,7 @@ class DeliverySession:
         async with self._operation_lock:
             self._select_mode("typed")
             self._raise_if_stopped()
-            if self.frontier.terminal_accepted:
+            if self._terminal_scheduled:
                 raise DeliveryOrderError("cannot consume events after terminal")
             terminal: ResponsesTerminal | None = None
             for event in events:
@@ -594,18 +684,20 @@ class DeliverySession:
     async def _write_ready(
         self, ready: tuple[CompletedBlock, ...]
     ) -> tuple[RenderedBatch, ...]:
-        if self.frontier.terminal_accepted:
+        if self._terminal_scheduled:
             raise DeliveryOrderError("cannot deliver a block after terminal")
         accepted: list[RenderedBatch] = []
         for ready_block in ready:
-            block_index = len(self.frontier.committed_blocks)
+            block_index = len(self._scheduled_blocks)
             batch = self._renderer.render_block(
                 ready_block,
                 block_index=block_index,
-                include_message_start=not self.frontier.message_start_accepted,
+                include_message_start=not self._message_start_scheduled,
             )
-            await self._writer.write(batch.data)
-            self.frontier.accept_block(ready_block, batch)
+            self._scheduled_blocks.append(ready_block)
+            self._message_start_scheduled = True
+            outcome = await self._writer.write(batch.data)
+            await self.acknowledge(batch, outcome or "accepted")
             accepted.append(batch)
         return tuple(accepted)
 
@@ -631,7 +723,11 @@ class DeliverySession:
         stop_reason: str,
         usage: TerminalUsage | None,
     ) -> RenderedBatch:
-        if terminal.kind != "completed":
+        successful_incomplete = (
+            terminal.kind == "incomplete"
+            and terminal.error_code == "max_output_tokens"
+        )
+        if terminal.kind != "completed" and not successful_incomplete:
             raise ResponsesDeliveryError(terminal)
         if terminal.open_blocks or open_identities:
             raise ResponsesDeliveryError(
@@ -663,16 +759,81 @@ class DeliverySession:
         stop_reason: str,
         usage: TerminalUsage,
     ) -> RenderedBatch:
-        if self.frontier.terminal_accepted:
+        if self._terminal_scheduled:
             raise DeliveryOrderError("terminal was already accepted")
         batch = self._renderer.render_terminal(
             stop_reason=stop_reason,
             usage=usage,
-            include_message_start=not self.frontier.message_start_accepted,
+            include_message_start=not self._message_start_scheduled,
         )
-        await self._writer.write(batch.data)
-        self.frontier.accept_terminal(batch)
+        self._terminal_scheduled = True
+        self._message_start_scheduled = True
+        outcome = await self._writer.write(batch.data)
+        await self.acknowledge(batch, outcome or "accepted")
         return batch
+
+    async def render_error(
+        self, *, error_type: str, message: str, code: str | None
+    ) -> RenderedBatch:
+        async with self._operation_lock:
+            if self._terminal_scheduled:
+                raise DeliveryOrderError("terminal was already scheduled")
+            batch = self._renderer.render_error(
+                error_type=error_type,
+                message=message,
+                code=code,
+            )
+            self._terminal_scheduled = True
+            outcome = await self._writer.write(batch.data)
+            await self.acknowledge(batch, outcome or "accepted")
+            return batch
+
+    async def acknowledge(
+        self, batch: RenderedBatch, outcome: DeliveryOutcome
+    ) -> None:
+        if outcome == "pending":
+            self._pending.append((batch, self._block_for(batch)))
+            return
+        block = self._block_for(batch)
+        if self._pending:
+            pending_batch, pending_block = self._pending.pop(0)
+            if pending_batch != batch:
+                raise DeliveryOrderError("sink acknowledgements must preserve batch order")
+            block = pending_block
+        if outcome == "uncertain":
+            self.frontier.mark_uncertain(batch, block)
+            return
+        if batch.kind == "block":
+            if block is None:
+                raise DeliveryOrderError("block acknowledgement lost its semantic block")
+            self.frontier.accept_block(block, batch)
+        elif batch.kind == "terminal":
+            self.frontier.accept_terminal(batch)
+        else:
+            self.frontier.accept_error(batch)
+
+    async def acknowledge_data(
+        self, data: bytes, outcome: DeliveryOutcome
+    ) -> None:
+        if not self._pending:
+            raise DeliveryOrderError("sink acknowledgement has no pending batch")
+        batch, _ = self._pending[0]
+        if batch.data != data:
+            raise DeliveryOrderError("sink acknowledgement does not match pending bytes")
+        await self.acknowledge(batch, outcome)
+
+    async def acknowledge_data_if_pending(
+        self, data: bytes, outcome: DeliveryOutcome
+    ) -> bool:
+        if not self._pending:
+            return False
+        await self.acknowledge_data(data, outcome)
+        return True
+
+    def _block_for(self, batch: RenderedBatch) -> CompletedBlock | None:
+        if batch.kind != "block" or batch.block_index is None:
+            return None
+        return self._scheduled_blocks[batch.block_index]
 
     @staticmethod
     def _unsupported(event: UnsupportedResponsesEvent) -> ResponsesDeliveryError:
@@ -707,6 +868,7 @@ __all__ = [
     "ContinuousPrefixSequencer",
     "DeliveryFrontier",
     "DeliveryOrderError",
+    "DeliveryOutcome",
     "DeliverySession",
     "DeliverySink",
     "DeliveryWriter",

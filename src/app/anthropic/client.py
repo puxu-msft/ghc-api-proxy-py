@@ -188,7 +188,7 @@ class AnthropicClient:
         stream: bool,
     ) -> AnthropicAttemptResult:
         if prepared.route is not None and prepared.route.protocol_leg.value == "responses":
-            return await self._send_responses(prepared)
+            return await self._send_responses(prepared, stream=stream)
         response = await self._target.send_anthropic(
             prepared.wire,
             stream=stream,
@@ -235,14 +235,9 @@ class AnthropicClient:
     async def _send_responses(
         self,
         prepared: PreparedAnthropicRequest,
+        *,
+        stream: bool,
     ) -> AnthropicAttemptResult:
-        if bool(prepared.wire.get("stream")):
-            raise ApiError(
-                "streaming is not implemented for the Anthropic Responses bridge",
-                category=ErrorCategory.CLIENT,
-                status_code=400,
-                code="responses_stream_not_supported",
-            )
         reasoning_capabilities = self._reasoning_capabilities(
             prepared.resolved_model
         )
@@ -261,11 +256,16 @@ class AnthropicClient:
         responses_target = cast(ResponsesTarget, self._target)
         upstream = await responses_target.send_responses(
             converted_request.wire,
-            stream=False,
+            stream=stream,
         )
         if not upstream.is_success:
             return AnthropicAttemptResult(
                 await _responses_error_response(upstream),
+                converted_request_facts=converted_request.facts,
+            )
+        if stream:
+            return AnthropicAttemptResult(
+                upstream,
                 converted_request_facts=converted_request.facts,
             )
         try:
@@ -366,6 +366,7 @@ class AnthropicClient:
         *,
         usage: Mapping[str, int],
         completed: bool,
+        usage_estimated: bool = False,
     ) -> None:
         if self.hooks is None:
             return
@@ -387,13 +388,33 @@ class AnthropicClient:
             await self.hooks.observe(
                 ObserverEvent.RESPONSE,
                 hook_context,
-                {"request": request, "usage": dict(usage), "status_code": 200},
+                {
+                    "request": request,
+                    "usage": dict(usage),
+                    "status_code": 200,
+                    **({"usage_facts": {"estimated": True}} if usage_estimated else {}),
+                },
+                records=context.hook_records,
+            )
+        elif context.error is not None:
+            await self.hooks.observe(
+                ObserverEvent.ERROR,
+                hook_context,
+                {
+                    "request": request,
+                    "status_code": context.error.status_code,
+                    "error": context.error,
+                },
                 records=context.hook_records,
             )
         await self.hooks.observe(
             ObserverEvent.FINALIZE,
             hook_context,
-            {"request": request, "state": "completed" if completed else "failed"},
+            {
+                "request": request,
+                "state": "completed" if completed else "failed",
+                **({"error": context.error} if context.error is not None else {}),
+            },
             records=context.hook_records,
         )
 

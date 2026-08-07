@@ -59,8 +59,9 @@ class StubAnthropicClient:
         *,
         usage: dict[str, int],
         completed: bool,
+        usage_estimated: bool = False,
     ) -> None:
-        del request, context, usage, completed
+        del request, context, usage, completed, usage_estimated
 
 
 class StubCounter:
@@ -85,6 +86,7 @@ class ExecutableAnthropicClient(Protocol):
         *,
         usage: dict[str, int],
         completed: bool,
+        usage_estimated: bool = False,
     ) -> None: ...
 
 
@@ -116,8 +118,9 @@ class FailingAnthropicClient:
         *,
         usage: dict[str, int],
         completed: bool,
+        usage_estimated: bool = False,
     ) -> None:
-        del request, context, usage, completed
+        del request, context, usage, completed, usage_estimated
 
 
 def _app(client: ExecutableAnthropicClient):

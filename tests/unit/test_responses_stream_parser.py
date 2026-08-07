@@ -209,6 +209,33 @@ def test_function_call_rejects_delta_and_authoritative_arguments_conflict() -> N
     assert caught.value.event_type == "response.function_call_arguments.done"
 
 
+@pytest.mark.parametrize("arguments", ["{", "[]", "null", '"value"'])
+def test_function_call_rejects_arguments_that_are_not_a_json_object(
+    arguments: str,
+) -> None:
+    parser = ResponsesStreamParser()
+    item = {
+        "id": "fc_bad",
+        "type": "function_call",
+        "call_id": "call_bad",
+        "name": "weather",
+        "arguments": "",
+    }
+    parser.process(_added(0, item))
+
+    with pytest.raises(ResponsesStreamProtocolError) as caught:
+        parser.process(
+            {
+                "type": "response.function_call_arguments.done",
+                "output_index": 0,
+                "item_id": "fc_bad",
+                "arguments": arguments,
+            }
+        )
+
+    assert caught.value.code == "invalid_tool_arguments"
+
+
 def test_reasoning_uses_item_done_for_authoritative_summary_and_ciphertext() -> None:
     parser = ResponsesStreamParser()
     assert parser.process(
@@ -580,6 +607,318 @@ def test_completed_terminal_reports_added_only_message_as_incomplete() -> None:
         message="response completed with open output items",
         open_blocks=(identity,),
     )
+
+
+def test_message_item_done_can_authoritatively_supply_output_text() -> None:
+    parser = ResponsesStreamParser()
+    parser.process(_added(0, {"id": "msg_done", "type": "message", "content": []}))
+
+    (block,) = parser.process(
+        _done(
+            0,
+            {
+                "id": "msg_done",
+                "type": "message",
+                "content": [{"type": "output_text", "text": "authoritative"}],
+            },
+        )
+    )
+
+    assert isinstance(block, CompletedBlock)
+    assert block.content == TextBlock("authoritative")
+
+
+def test_text_authoritative_layers_must_agree_after_block_is_emitted() -> None:
+    parser = ResponsesStreamParser()
+    parser.process(_added(0, {"id": "msg_conflict", "type": "message", "content": []}))
+    parser.process(
+        {
+            "type": "response.output_text.done",
+            "output_index": 0,
+            "item_id": "msg_conflict",
+            "content_index": 0,
+            "text": "FIRST",
+        }
+    )
+
+    with pytest.raises(ResponsesStreamProtocolError) as content_part_caught:
+        parser.process(
+            {
+                "type": "response.content_part.done",
+                "output_index": 0,
+                "item_id": "msg_conflict",
+                "content_index": 0,
+                "part": {"type": "output_text", "text": "SECOND"},
+            }
+        )
+
+    assert content_part_caught.value.code == "authoritative_text_mismatch"
+
+
+def test_equal_text_authoritative_layers_are_accepted_without_duplicate_block() -> None:
+    parser = ResponsesStreamParser()
+    parser.process(_added(0, {"id": "msg_equal", "type": "message", "content": []}))
+    (block,) = parser.process(
+        {
+            "type": "response.output_text.done",
+            "output_index": 0,
+            "item_id": "msg_equal",
+            "content_index": 0,
+            "text": "SAME",
+        }
+    )
+
+    assert isinstance(block, CompletedBlock)
+    assert parser.process(
+        {
+            "type": "response.content_part.done",
+            "output_index": 0,
+            "item_id": "msg_equal",
+            "content_index": 0,
+            "part": {"type": "output_text", "text": "SAME"},
+        }
+    ) == ()
+
+
+def test_equal_text_authoritative_layers_are_accepted_in_reverse_order() -> None:
+    parser = ResponsesStreamParser()
+    parser.process(_added(0, {"id": "msg_reverse", "type": "message", "content": []}))
+    (block,) = parser.process(
+        {
+            "type": "response.content_part.done",
+            "output_index": 0,
+            "item_id": "msg_reverse",
+            "content_index": 0,
+            "part": {"type": "output_text", "text": "SAME"},
+        }
+    )
+
+    assert isinstance(block, CompletedBlock)
+    assert parser.process(
+        {
+            "type": "response.output_text.done",
+            "output_index": 0,
+            "item_id": "msg_reverse",
+            "content_index": 0,
+            "text": "SAME",
+        }
+    ) == ()
+    assert parser.process(
+        _done(
+            0,
+            {
+                "id": "msg_reverse",
+                "type": "message",
+                "content": [{"type": "output_text", "text": "SAME"}],
+            },
+        )
+    ) == ()
+
+
+@pytest.mark.parametrize("final_layer", ["content_part", "item"])
+def test_empty_text_delta_conflicts_with_nonempty_authoritative_text(
+    final_layer: str,
+) -> None:
+    parser = ResponsesStreamParser()
+    parser.process(_added(0, {"id": "msg_empty_delta", "type": "message"}))
+    parser.process(
+        {
+            "type": "response.output_text.delta",
+            "output_index": 0,
+            "item_id": "msg_empty_delta",
+            "content_index": 0,
+            "delta": "",
+        }
+    )
+
+    event = (
+        {
+            "type": "response.content_part.done",
+            "output_index": 0,
+            "item_id": "msg_empty_delta",
+            "content_index": 0,
+            "part": {"type": "output_text", "text": "NONEMPTY"},
+        }
+        if final_layer == "content_part"
+        else _done(
+            0,
+            {
+                "id": "msg_empty_delta",
+                "type": "message",
+                "content": [{"type": "output_text", "text": "NONEMPTY"}],
+            },
+        )
+    )
+
+    with pytest.raises(ResponsesStreamProtocolError) as caught:
+        parser.process(event)
+
+    assert caught.value.code == "authoritative_text_mismatch"
+
+
+def test_empty_content_part_placeholder_allows_done_only_authoritative_text() -> None:
+    parser = ResponsesStreamParser()
+    parser.process(_added(0, {"id": "msg_done_only", "type": "message"}))
+    assert parser.process(
+        {
+            "type": "response.content_part.added",
+            "output_index": 0,
+            "item_id": "msg_done_only",
+            "content_index": 0,
+            "part": {"type": "output_text", "text": ""},
+        }
+    ) == ()
+
+    (block,) = parser.process(
+        {
+            "type": "response.content_part.done",
+            "output_index": 0,
+            "item_id": "msg_done_only",
+            "content_index": 0,
+            "part": {"type": "output_text", "text": "DONE ONLY"},
+        }
+    )
+
+    assert isinstance(block, CompletedBlock)
+    assert block.content == TextBlock("DONE ONLY")
+
+
+def test_item_done_rejects_conflict_with_content_part_done_text() -> None:
+    parser = ResponsesStreamParser()
+    parser.process(_added(0, {"id": "msg_layer_conflict", "type": "message"}))
+    parser.process(
+        {
+            "type": "response.content_part.done",
+            "output_index": 0,
+            "item_id": "msg_layer_conflict",
+            "content_index": 0,
+            "part": {"type": "output_text", "text": "FIRST"},
+        }
+    )
+
+    with pytest.raises(ResponsesStreamProtocolError) as caught:
+        parser.process(
+            _done(
+                0,
+                {
+                    "id": "msg_layer_conflict",
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "SECOND"}],
+                },
+            )
+        )
+
+    assert caught.value.code == "authoritative_text_mismatch"
+    assert caught.value.event_type == "response.output_item.done"
+
+
+def test_item_done_rejects_conflict_with_emitted_authoritative_text() -> None:
+    parser = ResponsesStreamParser()
+    parser.process(_added(0, {"id": "msg_item_conflict", "type": "message"}))
+    parser.process(
+        {
+            "type": "response.output_text.done",
+            "output_index": 0,
+            "item_id": "msg_item_conflict",
+            "content_index": 0,
+            "text": "FIRST",
+        }
+    )
+
+    with pytest.raises(ResponsesStreamProtocolError) as caught:
+        parser.process(
+            _done(
+                0,
+                {
+                    "id": "msg_item_conflict",
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "THIRD"}],
+                },
+            )
+        )
+
+    assert caught.value.code == "authoritative_text_mismatch"
+
+
+def test_terminal_response_id_must_match_created_response_id() -> None:
+    parser = ResponsesStreamParser()
+    assert parser.process(
+        {
+            "type": "response.created",
+            "response": {"id": "resp_a", "status": "in_progress"},
+        }
+    ) == ()
+
+    with pytest.raises(ResponsesStreamProtocolError) as caught:
+        parser.process(
+            {
+                "type": "response.completed",
+                "response": {"id": "resp_b", "status": "completed"},
+            }
+        )
+
+    assert caught.value.code == "response_id_mismatch"
+
+
+def test_unknown_message_content_part_is_a_typed_failure() -> None:
+    parser = ResponsesStreamParser()
+    parser.process(_added(0, {"id": "msg_future", "type": "message", "content": []}))
+
+    with pytest.raises(ResponsesStreamProtocolError) as caught:
+        parser.process(
+            _done(
+                0,
+                {
+                    "id": "msg_future",
+                    "type": "message",
+                    "content": [{"type": "future_part", "value": "lost"}],
+                },
+            )
+        )
+
+    assert caught.value.code == "unsupported_content_part"
+
+
+def test_completed_response_with_only_empty_message_sources_is_incomplete() -> None:
+    parser = ResponsesStreamParser()
+    empty: dict[str, object] = {"id": "msg_empty", "type": "message", "content": []}
+    parser.process(_added(0, empty))
+    assert parser.process(_done(0, empty)) == ()
+
+    (terminal,) = parser.process(
+        {
+            "type": "response.completed",
+            "response": {"id": "resp_empty", "status": "completed"},
+        }
+    )
+
+    assert terminal == ResponsesTerminal(
+        "incomplete",
+        "resp_empty",
+        "completed",
+        "empty_response_content",
+        "response completed without content",
+        (),
+    )
+
+
+def test_incomplete_terminal_exposes_max_output_tokens_reason() -> None:
+    parser = ResponsesStreamParser()
+
+    (terminal,) = parser.process(
+        {
+            "type": "response.incomplete",
+            "response": {
+                "id": "resp_limited",
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+            },
+        }
+    )
+
+    assert isinstance(terminal, ResponsesTerminal)
+    assert terminal.kind == "incomplete"
+    assert terminal.error_code == "max_output_tokens"
 
 
 def test_unknown_item_done_stays_typed_and_terminal_is_incomplete() -> None:

@@ -53,7 +53,9 @@ async def session_liveness_stream[T](
         primary = sys.exception()
         if isinstance(primary, GeneratorExit):
             primary = None
-        cleanup_error, cleanup_cancellation = await _finish_cleanup(pending, stream)
+        cleanup_error, cleanup_cancellation = await finish_stream_cleanup(
+            pending, stream, primary=primary
+        )
         primary = primary or cleanup_cancellation
         if primary is not None:
             if cleanup_error is not None:
@@ -64,16 +66,28 @@ async def session_liveness_stream[T](
             raise cleanup_error
 
 
-async def _finish_cleanup[T](
+async def finish_stream_cleanup[T](
     pending: asyncio.Task[T] | None,
     stream: AsyncIterator[T],
+    *,
+    primary: BaseException | None = None,
 ) -> tuple[BaseException | None, asyncio.CancelledError | None]:
     """Finish cleanup before returning any cancellation or cleanup failure."""
 
     async def cleanup() -> None:
+        pending_error: BaseException | None = None
         if pending is not None:
-            await _cancel_and_observe(pending)
-        await _close_iterator(stream)
+            pending_error = await _cancel_and_observe(pending)
+            if pending_error is primary:
+                pending_error = None
+        try:
+            await _close_iterator(stream)
+        except BaseException as close_error:
+            if pending_error is not None:
+                raise pending_error from close_error
+            raise
+        if pending_error is not None:
+            raise pending_error
 
     cleanup_task = asyncio.create_task(cleanup())
     current = asyncio.current_task()
@@ -101,7 +115,7 @@ async def _finish_cleanup[T](
     return None, deferred_cancellation
 
 
-async def _cancel_and_observe[T](pending: asyncio.Task[T]) -> None:
+async def _cancel_and_observe[T](pending: asyncio.Task[T]) -> BaseException | None:
     """Settle a pull task without replacing the exit that initiated cleanup."""
     if not pending.done():
         pending.cancel()
@@ -110,15 +124,16 @@ async def _cancel_and_observe[T](pending: asyncio.Task[T]) -> None:
     cancelling_before = current.cancelling() if current is not None else 0
     try:
         await pending
+    except StopAsyncIteration:
+        return None
     except asyncio.CancelledError:
         if current is not None and current.cancelling() > cancelling_before:
             raise
         # The pull task's own cancellation is expected during cleanup. An outer
         # cancellation already in flight resumes after this finally block.
-    except Exception:
-        # Closing, cancellation, or the exception already leaving the stream
-        # takes priority, but retrieving a concurrently settled error is required.
-        pass
+    except Exception as error:
+        return error
+    return None
 
 
 def _deadline(

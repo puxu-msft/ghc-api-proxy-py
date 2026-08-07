@@ -611,15 +611,6 @@ def test_dual_capability_auto_keeps_existing_messages_leg() -> None:
             0,
             "",
         ),
-        (
-            ["/responses"],
-            "auto",
-            True,
-            "responses_stream_not_supported",
-            "streaming is not implemented for the Anthropic Responses bridge",
-            1,
-            "responses",
-        ),
     ],
 )
 def test_pre_attempt_typed_rejection_uses_single_failure_finalizer(

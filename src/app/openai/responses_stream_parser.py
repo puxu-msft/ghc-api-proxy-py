@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, Never, cast
 
+import orjson
+
 type JsonObject = dict[str, Any]
 
 
@@ -87,6 +89,11 @@ class _TextDraft:
     first_observed_order: int
     deltas: list[str] = field(default_factory=lambda: list[str]())
     done: bool = False
+    emitted: bool = False
+    authoritative_text: str | None = None
+    output_text_done: bool = False
+    part_added: bool = False
+    part_done: bool = False
 
 
 @dataclass(slots=True)
@@ -146,6 +153,9 @@ class ResponsesStreamParser:
         self._reasoning: dict[int, _ReasoningDraft] = {}
         self._next_source_order = 0
         self._next_completion_order = 0
+        self._completed_block_count = 0
+        self._message_item_seen = False
+        self._response_id: str | None = None
         self._terminal: ResponsesTerminal | None = None
 
     @property
@@ -163,18 +173,26 @@ class ResponsesStreamParser:
                 code="event_after_terminal",
                 event_type=event_type,
             )
+        if event_type in {"response.created", "response.in_progress"}:
+            self._observe_response_identity(event, event_type)
+            return ()
+
+        if event_type == "response.content_part.added":
+            return self._on_content_part_added(event, event_type)
+        if event_type == "response.content_part.done":
+            return self._on_content_part_done(event, event_type)
 
         if event_type == "response.output_item.added":
             opened = self._on_output_item_added(event, event_type)
             return (opened,)
         if event_type == "response.output_item.done":
-            completed = self._on_output_item_done(event, event_type)
-            return (completed,) if completed is not None else ()
+            return self._on_output_item_done(event, event_type)
         if event_type == "response.output_text.delta":
             self._on_output_text_delta(event, event_type)
             return ()
         if event_type == "response.output_text.done":
-            return (self._on_output_text_done(event, event_type),)
+            completed = self._on_output_text_done(event, event_type)
+            return (completed,) if completed is not None else ()
         if event_type == "response.function_call_arguments.delta":
             self._on_function_arguments_delta(event, event_type)
             return ()
@@ -250,11 +268,13 @@ class ResponsesStreamParser:
         elif item_type != "message":
             state.unsupported = True
             return self._unsupported(event, event_type)
+        else:
+            self._message_item_seen = True
         return SourceOpened(identity, source_order)
 
     def _on_output_item_done(
         self, event: dict[str, Any], event_type: str
-    ) -> CompletedBlock | UnsupportedResponsesEvent | None:
+    ) -> tuple[ResponsesSemanticEvent, ...]:
         output_index = self._require_index(event, "output_index", event_type)
         item = self._require_object(event, "item", event_type)
         state = self._require_item(event, output_index, event_type)
@@ -271,13 +291,14 @@ class ResponsesStreamParser:
         state.done = True
 
         if state.unsupported:
-            return self._unsupported(event, event_type)
+            return (self._unsupported(event, event_type),)
 
         if item_type == "function_call":
             draft = self._function_calls[output_index]
             draft.item_done = True
             self._update_function_call_from_item(draft, item, event_type)
-            return self._complete_function_call(draft, event_type)
+            completed = self._complete_function_call(draft, event_type)
+            return (completed,) if completed is not None else ()
         if item_type == "reasoning":
             draft = self._reasoning[output_index]
             draft.item_done = True
@@ -296,8 +317,58 @@ class ResponsesStreamParser:
                     event_type=event_type,
                 )
             draft.encrypted_content = encrypted_content or None
-            return self._complete_reasoning(draft, event_type)
-        return None
+            completed = self._complete_reasoning(draft, event_type)
+            return (completed,) if completed is not None else ()
+        return self._complete_message_from_item(state, item, event_type)
+
+    def _on_content_part_added(
+        self, event: dict[str, Any], event_type: str
+    ) -> tuple[ResponsesSemanticEvent, ...]:
+        draft, part = self._content_part(event, event_type)
+        if draft.part_added:
+            self._fail(
+                "duplicate content part added event",
+                code="duplicate_content_part",
+                event_type=event_type,
+            )
+        text = self._require_string(part, "text", event_type, allow_empty=True)
+        if text:
+            draft.deltas.append(text)
+        draft.part_added = True
+        return ()
+
+    def _on_content_part_done(
+        self, event: dict[str, Any], event_type: str
+    ) -> tuple[ResponsesSemanticEvent, ...]:
+        draft, part = self._content_part(event, event_type)
+        if draft.part_done:
+            self._fail(
+                "duplicate content part done event",
+                code="duplicate_content_part",
+                event_type=event_type,
+            )
+        authoritative = self._require_string(part, "text", event_type, allow_empty=True)
+        accumulated = "".join(draft.deltas)
+        if draft.deltas and accumulated != authoritative:
+            self._fail(
+                "content part done disagrees with authoritative text",
+                code="authoritative_text_mismatch",
+                event_type=event_type,
+            )
+        self._validate_authoritative_text(draft, authoritative, event_type)
+        draft.part_done = True
+        if draft.emitted:
+            return ()
+        draft.done = True
+        draft.emitted = True
+        draft.authoritative_text = authoritative
+        return (
+            self._completed(
+                draft.identity,
+                TextBlock(authoritative),
+                draft.first_observed_order,
+            ),
+        )
 
     def _on_output_text_delta(self, event: dict[str, Any], event_type: str) -> None:
         draft = self._text_draft(event, event_type)
@@ -311,9 +382,9 @@ class ResponsesStreamParser:
 
     def _on_output_text_done(
         self, event: dict[str, Any], event_type: str
-    ) -> CompletedBlock:
+    ) -> CompletedBlock | None:
         draft = self._text_draft(event, event_type)
-        if draft.done:
+        if draft.output_text_done:
             self._duplicate_done(event_type, draft.identity.output_index)
         authoritative = self._require_string(event, "text", event_type, allow_empty=True)
         accumulated = "".join(draft.deltas)
@@ -323,7 +394,13 @@ class ResponsesStreamParser:
                 code="authoritative_text_mismatch",
                 event_type=event_type,
             )
+        self._validate_authoritative_text(draft, authoritative, event_type)
+        draft.output_text_done = True
         draft.done = True
+        draft.authoritative_text = authoritative
+        if draft.emitted:
+            return None
+        draft.emitted = True
         return self._completed(draft.identity, TextBlock(authoritative), draft.first_observed_order)
 
     def _on_function_arguments_delta(self, event: dict[str, Any], event_type: str) -> None:
@@ -389,6 +466,8 @@ class ResponsesStreamParser:
         response = event.get("response")
         response_object = cast(JsonObject, response) if isinstance(response, dict) else {}
         response_id = self._optional_string(response_object.get("id"))
+        if response_id is not None:
+            self._validate_response_id(response_id, event_type)
         status = self._optional_string(response_object.get("status"))
         error = response_object.get("error")
         error_object = cast(JsonObject, error) if isinstance(error, dict) else {}
@@ -417,6 +496,20 @@ class ResponsesStreamParser:
             kind = "incomplete"
             error_code = "incomplete_lifecycle"
             message = "response completed with open output items"
+        elif (
+            kind == "completed"
+            and self._message_item_seen
+            and self._completed_block_count == 0
+        ):
+            kind = "incomplete"
+            error_code = "empty_response_content"
+            message = "response completed without content"
+        elif kind == "incomplete":
+            incomplete_details = response_object.get("incomplete_details")
+            if isinstance(incomplete_details, dict):
+                error_code = self._optional_string(
+                    cast(JsonObject, incomplete_details).get("reason")
+                ) or error_code
         terminal = ResponsesTerminal(
             kind=kind,
             response_id=response_id,
@@ -486,6 +579,7 @@ class ResponsesStreamParser:
                 code="incomplete_function_call",
                 event_type=event_type,
             )
+        self._validate_tool_arguments_object(draft.arguments, event_type)
         draft.emitted = True
         content = FunctionCallBlock(draft.call_id, draft.name, draft.arguments)
         return self._completed(draft.identity, content, draft.first_observed_order)
@@ -548,6 +642,158 @@ class ResponsesStreamParser:
                 code="authoritative_arguments_mismatch",
                 event_type=event_type,
             )
+        self._validate_tool_arguments_object(authoritative, event_type)
+
+    def _validate_tool_arguments_object(self, arguments: str, event_type: str) -> None:
+        try:
+            parsed = orjson.loads(arguments)
+        except orjson.JSONDecodeError as error:
+            raise ResponsesStreamProtocolError(
+                "function-call arguments must be valid JSON",
+                code="invalid_tool_arguments",
+                event_type=event_type,
+            ) from error
+        if not isinstance(parsed, dict):
+            self._fail(
+                "function-call arguments must decode to an object",
+                code="invalid_tool_arguments",
+                event_type=event_type,
+            )
+
+    def _complete_message_from_item(
+        self,
+        state: _ItemDraft,
+        item: dict[str, Any],
+        event_type: str,
+    ) -> tuple[ResponsesSemanticEvent, ...]:
+        content = item.get("content")
+        observed = {
+            content_index: draft
+            for (output_index, content_index), draft in self._text.items()
+            if output_index == state.output_index
+        }
+        if content is None:
+            if any(not draft.emitted for draft in observed.values()):
+                self._fail(
+                    "message item completed with unfinished content",
+                    code="incomplete_message_content",
+                    event_type=event_type,
+                )
+            return ()
+        if not isinstance(content, list):
+            self._fail(
+                "message item done requires a content array",
+                code="invalid_message_content",
+                event_type=event_type,
+            )
+        content_items = cast(list[Any], content)
+        if not content_items:
+            return ()
+        completed: list[ResponsesSemanticEvent] = []
+        for content_index, raw_part in enumerate(content_items):
+            if not isinstance(raw_part, dict):
+                self._fail(
+                    "message content parts must be objects",
+                    code="invalid_message_content",
+                    event_type=event_type,
+                )
+            part = cast(JsonObject, raw_part)
+            if part.get("type") != "output_text":
+                self._fail(
+                    "unsupported message content part",
+                    code="unsupported_content_part",
+                    event_type=event_type,
+                )
+            authoritative = self._require_string(
+                part, "text", event_type, allow_empty=True
+            )
+            key = (state.output_index, content_index)
+            draft = self._text.get(key)
+            if draft is None:
+                draft = _TextDraft(
+                    identity=BlockIdentity(
+                        state.output_index,
+                        state.item_id,
+                        content_index,
+                    ),
+                    first_observed_order=state.source_order,
+                )
+                self._text[key] = draft
+            accumulated = "".join(draft.deltas)
+            if draft.deltas and accumulated != authoritative:
+                self._fail(
+                    "message item content disagrees with authoritative text",
+                    code="authoritative_text_mismatch",
+                    event_type=event_type,
+                )
+            self._validate_authoritative_text(draft, authoritative, event_type)
+            if not draft.emitted:
+                draft.done = True
+                draft.emitted = True
+                draft.authoritative_text = authoritative
+                completed.append(
+                    self._completed(
+                        draft.identity,
+                        TextBlock(authoritative),
+                        draft.first_observed_order,
+                    )
+                )
+        expected_indexes = set(range(len(content_items)))
+        observed_indexes = {
+            content_index
+            for output_index, content_index in self._text
+            if output_index == state.output_index
+        }
+        if observed_indexes != expected_indexes:
+            self._fail(
+                "message item content does not match observed content parts",
+                code="message_content_mismatch",
+                event_type=event_type,
+            )
+        return tuple(completed)
+
+    def _observe_response_identity(
+        self, event: dict[str, Any], event_type: str
+    ) -> None:
+        response = self._require_object(event, "response", event_type)
+        response_id = self._require_string(response, "id", event_type)
+        if self._response_id is None:
+            self._response_id = response_id
+            return
+        self._validate_response_id(response_id, event_type)
+
+    def _validate_response_id(self, response_id: str, event_type: str) -> None:
+        if self._response_id is not None and response_id != self._response_id:
+            self._fail(
+                "response id changed during stream lifecycle",
+                code="response_id_mismatch",
+                event_type=event_type,
+            )
+
+    def _validate_authoritative_text(
+        self, draft: _TextDraft, authoritative: str, event_type: str
+    ) -> None:
+        if (
+            draft.authoritative_text is not None
+            and draft.authoritative_text != authoritative
+        ):
+            self._fail(
+                "authoritative text values disagree",
+                code="authoritative_text_mismatch",
+                event_type=event_type,
+            )
+
+    def _content_part(
+        self, event: dict[str, Any], event_type: str
+    ) -> tuple[_TextDraft, JsonObject]:
+        part = self._require_object(event, "part", event_type)
+        if part.get("type") != "output_text":
+            self._fail(
+                "unsupported message content part",
+                code="unsupported_content_part",
+                event_type=event_type,
+            )
+        return self._text_draft(event, event_type), part
 
     def _reasoning_summary_parts(
         self, item: dict[str, Any], event_type: str
@@ -606,6 +852,7 @@ class ResponsesStreamParser:
     ) -> CompletedBlock:
         completion_order = self._next_completion_order
         self._next_completion_order += 1
+        self._completed_block_count += 1
         return CompletedBlock(identity, content, first_observed_order, completion_order)
 
     def _open_blocks(self) -> tuple[BlockIdentity, ...]:

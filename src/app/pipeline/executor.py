@@ -218,15 +218,6 @@ async def execute_anthropic_pipeline(
         context.protocol_leg = prepared.route.protocol_leg.value
         context.route_reason = prepared.route.reason.value
     context.sanitization = prepared.sanitization
-    if bool(prepared.wire.get("stream")) and context.protocol_leg == "responses":
-        error = ApiError(
-            "streaming is not implemented for the Anthropic Responses bridge",
-            category=ErrorCategory.CLIENT,
-            status_code=400,
-            code="responses_stream_not_supported",
-        )
-        await _finalize_failure(request, context, client, error)
-        raise error
     context.transition(RequestState.EXECUTING)
     key = QuarantineKey(session_id, agent_id or "") if session_id else None
     try:

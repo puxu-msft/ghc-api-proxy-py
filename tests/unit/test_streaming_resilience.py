@@ -331,6 +331,44 @@ async def test_session_liveness_keeps_consumer_cancellation_primary_when_close_f
 
 
 @pytest.mark.asyncio
+async def test_session_liveness_chains_pull_unwind_failure_after_cancellation() -> None:
+    pull_started = anyio.Event()
+    closed = False
+
+    class PullFinalizeFails(AsyncIterator[bytes]):
+        async def __anext__(self) -> bytes:
+            try:
+                pull_started.set()
+                await anyio.sleep_forever()
+                return b"unreachable"
+            finally:
+                await anyio.sleep(0)
+                raise RuntimeError("pull finalization failed")
+
+        async def aclose(self) -> None:
+            nonlocal closed
+            closed = True
+
+    stream = session_liveness_stream(
+        PullFinalizeFails(),
+        heartbeat_interval_seconds=0,
+        heartbeat=b"heartbeat",
+        upstream_idle_timeout_seconds=1,
+    )
+    consumer = asyncio.create_task(anext(stream))
+    await pull_started.wait()
+
+    consumer.cancel()
+
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await consumer
+
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert str(exc_info.value.__cause__) == "pull finalization failed"
+    assert closed is True
+
+
+@pytest.mark.asyncio
 async def test_session_liveness_keeps_upstream_error_primary_when_close_fails() -> None:
     class PullAndCloseFail(AsyncIterator[bytes]):
         async def __anext__(self) -> bytes:

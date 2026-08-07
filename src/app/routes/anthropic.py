@@ -1,11 +1,18 @@
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from typing import Any
 
 from fastapi import APIRouter, Header
 from fastapi.responses import Response
 
-from app.anthropic.header_policy import forward_response_headers
+from app.anthropic.header_policy import (
+    forward_response_headers,
+    normalize_responses_response_headers,
+)
 from app.anthropic.warmup import apply_warmup_policy
+from app.delivery.responses_anthropic_stream import (
+    ResponsesAnthropicStreamState,
+    render_responses_as_anthropic_sse,
+)
 from app.deps import (
     AnthropicClientDependency,
     SettingsDependency,
@@ -18,7 +25,7 @@ from app.pipeline.context import RequestContext, RequestState
 from app.pipeline.executor import UpstreamResponseError
 from app.streaming.anthropic_usage import AnthropicSSEUsageTap
 from app.streaming.idle_timeout import resolve_stream_idle, with_idle_timeout
-from app.streaming.sse import create_sse_response, passthrough_bytes
+from app.streaming.sse import create_delayed_sse_response, create_sse_response, passthrough_bytes
 from app.wire_json import dumps
 
 router = APIRouter(tags=["anthropic"])
@@ -30,34 +37,127 @@ async def _history_stream(
     context: RequestContext,
     client: AnthropicClientDependency,
     request: MessagesRequest,
+    responses_state: ResponsesAnthropicStreamState | None = None,
 ) -> AsyncGenerator[bytes]:
     completed = False
+    stream_error: ApiError | None = None
     usage_tap = AnthropicSSEUsageTap()
     try:
         async for chunk in stream:
             usage_tap.feed(chunk)
             yield chunk
-        completed = True
+        completed = (
+            responses_state is None
+            or (
+                responses_state.error is None
+                and responses_state.frontier is not None
+                and responses_state.frontier.terminal_accepted
+            )
+        )
+        if responses_state is not None and responses_state.error is not None:
+            stream_error = responses_state.error
+    except ApiError as error:
+        stream_error = error
+        raise
     finally:
         history = getattr(client, "history", None)
+        normalized_usage = (
+            responses_state.usage.as_wire()
+            if responses_state is not None and responses_state.usage is not None
+            else usage_tap.usage
+        )
         if completed:
             context.transition(RequestState.COMPLETED)
         else:
-            context.fail(
-                ApiError(
-                    "stream interrupted",
+            if stream_error is None:
+                delivery_uncertain = (
+                    responses_state is not None
+                    and responses_state.frontier is not None
+                    and responses_state.frontier.delivery_uncertain
+                )
+                stream_error = ApiError(
+                    (
+                        "downstream delivery outcome is uncertain"
+                        if delivery_uncertain
+                        else "stream interrupted"
+                    ),
                     category=ErrorCategory.NETWORK,
                     status_code=499,
+                    code="delivery_uncertain" if delivery_uncertain else None,
                 )
-            )
+            context.fail(stream_error)
         await client.observe_stream_finalized(
             request,
             context,
-            usage=usage_tap.usage,
+            usage=normalized_usage,
             completed=completed,
+            usage_estimated=(
+                responses_state.usage_estimated
+                if responses_state is not None
+                else False
+            ),
         )
         if history is not None:
-            await history.finalized(context)
+            response = (
+                responses_state.committed_response
+                if responses_state is not None
+                else None
+            )
+            if response is not None:
+                response["usage"] = dict(normalized_usage)
+                if responses_state is not None and responses_state.usage_estimated:
+                    response["usage_facts"] = {"estimated": True}
+                if stream_error is not None:
+                    response["error"] = {
+                        "type": stream_error.wire_type,
+                        "message": stream_error.message,
+                        "code": stream_error.code,
+                    }
+            await history.finalized(
+                context,
+                response=response,
+                usage=normalized_usage if response is not None else None,
+                usage_estimated=(
+                    responses_state.usage_estimated
+                    if responses_state is not None
+                    else False
+                ),
+            )
+
+
+def _api_error_response(error: ApiError) -> Response:
+    error_detail: dict[str, Any] = {
+        "type": error.wire_type,
+        "message": error.message,
+    }
+    if error.code is not None:
+        error_detail["code"] = error.code
+    if error.request_id is not None:
+        error_detail["request_id"] = error.request_id
+    return Response(
+        content=dumps({"type": "error", "error": error_detail}),
+        status_code=error.status_code,
+        media_type="application/json",
+    )
+
+
+def _response_headers(
+    headers: Mapping[str, str],
+    *,
+    responses_leg: bool,
+    settings: SettingsDependency,
+) -> dict[str, str]:
+    selected = (
+        normalize_responses_response_headers(headers)
+        if responses_leg
+        else dict(headers)
+    )
+    return forward_response_headers(
+        selected,
+        strict=settings.anthropic.strict_response_headers,
+        blacklist=settings.anthropic.response_header_blacklist,
+        whitelist=settings.anthropic.response_header_whitelist,
+    )
 
 
 @router.post("/v1/messages")
@@ -88,27 +188,14 @@ async def messages(
             media_type="application/json",
         )
     except ApiError as error:
-        error_detail: dict[str, Any] = {
-            "type": error.wire_type,
-            "message": error.message,
-        }
-        if error.code is not None:
-            error_detail["code"] = error.code
-        if error.request_id is not None:
-            error_detail["request_id"] = error.request_id
-        return Response(
-            content=dumps({"type": "error", "error": error_detail}),
-            status_code=error.status_code,
-            media_type="application/json",
-        )
+        return _api_error_response(error)
     except UpstreamResponseError as error:
         body = await error.response.aread()
         content_type = error.response.headers.get("content-type", "application/json")
-        error_headers = forward_response_headers(
+        error_headers = _response_headers(
             error.response.headers,
-            strict=settings.anthropic.strict_response_headers,
-            blacklist=settings.anthropic.response_header_blacklist,
-            whitelist=settings.anthropic.response_header_whitelist,
+            responses_leg=error.context.protocol_leg == "responses",
+            settings=settings,
         )
         await error.response.aclose()
         return Response(
@@ -118,26 +205,59 @@ async def messages(
             headers=error_headers,
         )
     upstream = result.response
-    forwarded_headers = forward_response_headers(
+    responses_leg = result.context.protocol_leg == "responses"
+    forwarded_headers = _response_headers(
         upstream.headers,
-        strict=settings.anthropic.strict_response_headers,
-        blacklist=settings.anthropic.response_header_blacklist,
-        whitelist=settings.anthropic.response_header_whitelist,
+        responses_leg=responses_leg,
+        settings=settings,
     )
     if request.stream:
         idle_timeout = resolve_stream_idle(
             result.context.resolved_model,
             settings.timeouts,
         )
+        upstream_stream: AsyncIterator[bytes] = with_idle_timeout(
+            upstream.aiter_raw(),
+            timeout_seconds=idle_timeout,
+        )
+        responses_state: ResponsesAnthropicStreamState | None = None
+        if responses_leg:
+            responses_state = ResponsesAnthropicStreamState()
+            upstream_stream = render_responses_as_anthropic_sse(
+                upstream_stream,
+                model=result.context.resolved_model,
+                state=responses_state,
+            )
         stream = passthrough_bytes(
             _history_stream(
-                with_idle_timeout(upstream.aiter_raw(), timeout_seconds=idle_timeout),
+                upstream_stream,
                 context=result.context,
                 client=client,
                 request=request,
+                responses_state=responses_state,
             ),
             cleanup=upstream.aclose,
         )
+        if responses_leg:
+            return create_delayed_sse_response(
+                stream,
+                headers=forwarded_headers,
+                on_start_accepted=(
+                    responses_state.accept_headers
+                    if responses_state is not None
+                    else None
+                ),
+                on_start_uncertain=(
+                    responses_state.mark_headers_uncertain
+                    if responses_state is not None
+                    else None
+                ),
+                on_body_uncertain=(
+                    responses_state.mark_body_uncertain
+                    if responses_state is not None
+                    else None
+                ),
+            )
         return create_sse_response(stream, headers=forwarded_headers)
     try:
         content = await upstream.aread()

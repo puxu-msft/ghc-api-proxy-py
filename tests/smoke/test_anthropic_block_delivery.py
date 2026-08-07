@@ -10,6 +10,7 @@ import pytest
 from app.delivery import (
     AnthropicSseRenderer,
     DeliveryOrderError,
+    DeliveryOutcome,
     DeliverySession,
     DeliveryWriter,
     InMemoryDeliverySink,
@@ -539,6 +540,91 @@ class _PausedWriter:
         await self.release.wait()
         self.batches.append(batch)
         self.active_writes -= 1
+
+
+class _PendingWriter:
+    def __init__(self) -> None:
+        self.batches: list[bytes] = []
+
+    async def write(self, batch: bytes) -> DeliveryOutcome:
+        self.batches.append(batch)
+        return "pending"
+
+
+class _PendingSink:
+    def __init__(self, writer: _PendingWriter) -> None:
+        self._writer = writer
+
+    def open_writer(self) -> DeliveryWriter:
+        return self._writer
+
+
+@pytest.mark.asyncio
+async def test_pending_sink_write_does_not_advance_frontier_until_acknowledged() -> None:
+    writer = _PendingWriter()
+    session = DeliverySession(
+        renderer=AnthropicSseRenderer(message_id="msg_delivery", model="gpt-test"),
+        sink=_PendingSink(writer),
+    )
+
+    (batch,) = await session.deliver(_block(0, TextBlock("pending")))
+
+    assert len(writer.batches) == 1
+    assert session.frontier.headers_state == "not_started"
+    assert session.frontier.message_start_state == "not_started"
+    assert session.frontier.committed_blocks == ()
+
+    await session.acknowledge_data(batch.data, "accepted")
+
+    assert session.frontier.headers_state == "accepted"
+    assert session.frontier.message_start_state == "accepted"
+    assert [entry.block.content for entry in session.frontier.committed_blocks] == [
+        TextBlock("pending")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_uncertain_sink_write_never_becomes_committed() -> None:
+    writer = _PendingWriter()
+    session = DeliverySession(
+        renderer=AnthropicSseRenderer(message_id="msg_delivery", model="gpt-test"),
+        sink=_PendingSink(writer),
+    )
+    (batch,) = await session.deliver(_block(0, TextBlock("uncertain")))
+
+    session.frontier.accept_headers()
+    await session.acknowledge_data(batch.data, "uncertain")
+
+    assert session.frontier.delivery_uncertain is True
+    assert session.frontier.headers_state == "accepted"
+    assert session.frontier.message_start_state == "uncertain"
+    assert session.frontier.block_state(0) == "uncertain"
+    assert session.frontier.committed_blocks == ()
+
+
+@pytest.mark.asyncio
+async def test_max_output_tokens_incomplete_finishes_with_max_tokens() -> None:
+    session, sink = _session()
+    terminal = ResponsesTerminal(
+        "incomplete",
+        "resp_limited",
+        "incomplete",
+        "max_output_tokens",
+        None,
+        (),
+    )
+
+    await session.consume(
+        (terminal,),
+        open_identities=(),
+        terminal_usage=TerminalUsage(input_tokens=3, output_tokens=5),
+        stop_reason="max_tokens",
+    )
+
+    names = [name for name, _ in _events(sink.batches[0])]
+    assert names == ["message_start", "message_delta", "message_stop"]
+    assert _events(sink.batches[0])[1][1]["delta"]["stop_reason"] == "max_tokens"
+    assert session.frontier.terminal_accepted is True
 
 
 class _PausedSink:
