@@ -3,17 +3,26 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 import httpx
+import orjson
+from pydantic import ValidationError
 
 from app.anthropic.client import AnthropicClient, PreparedAnthropicRequest
+from app.anthropic.response_validation import validate_messages_response_wire
 from app.anthropic.sanitize import sanitize_messages
 from app.anthropic.thinking.quarantine import QuarantineKey
 from app.anthropic.thinking.strip_all import strip_all_thinking
 from app.errors import ApiError, ErrorCategory
 from app.hooks.context import HookContext
 from app.hooks.types import ObserverEvent, PayloadPhase
-from app.models.anthropic import MessagesRequest
+from app.models.anthropic import MessagesRequest, MessagesResponse
 from app.pipeline.approval import ApprovalRejectedError
-from app.pipeline.context import Attempt, RequestContext, RequestState
+from app.pipeline.context import (
+    Attempt,
+    RequestContext,
+    RequestConversionFactRecord,
+    RequestState,
+    ResponseConversionFactRecord,
+)
 from app.pipeline.rate_limiter import PassthroughRateLimiter
 from app.pipeline.strategies import PoisonedThinkingStrategy, RetryCoordinator
 
@@ -29,6 +38,25 @@ class UpstreamResponseError(Exception):
         super().__init__(f"upstream returned HTTP {response.status_code}")
         self.context = context
         self.response = response
+
+
+def _validate_response_body(
+    body: bytes,
+    *,
+    after_response_hooks: bool,
+) -> tuple[MessagesResponse, dict[str, Any]]:
+    try:
+        payload = validate_messages_response_wire(orjson.loads(body))
+        return MessagesResponse.model_validate(payload), payload
+    except (orjson.JSONDecodeError, ValidationError) as error:
+        source = "response hook" if after_response_hooks else "upstream"
+        category = ErrorCategory.INTERNAL if after_response_hooks else ErrorCategory.UPSTREAM
+        raise ApiError(
+            f"{source} produced an invalid Anthropic response body",
+            category=category,
+            status_code=500 if after_response_hooks else 502,
+            code="invalid_anthropic_response_body",
+        ) from error
 
 
 async def _finalize_failure(
@@ -249,7 +277,11 @@ async def execute_anthropic_pipeline(
             prepared.route,
         )
         try:
-            response = await client.send_prepared(current, stream=request.stream)
+            attempt_result = await client.send_prepared_attempt(
+                current,
+                stream=request.stream,
+            )
+            response = attempt_result.response
         except Exception as error:
             normalized_error = (
                 error
@@ -269,15 +301,101 @@ async def execute_anthropic_pipeline(
         attempt.status_code = response.status_code
         attempt.completed_at = time.time()
         if response.is_success:
-            limiter.report_success()
-            coordinator.notify_success()
-            if client.hooks is not None and not request.stream:
-                body = await response.aread()
-                hook_context = _hook_context(
-                    context,
-                    client,
-                    attempt_number=attempt_number,
+            body = b""
+            hook_context: HookContext | None = None
+            if not request.stream:
+                try:
+                    body = await response.aread()
+                except Exception as error:
+                    normalized_error = ApiError(
+                        str(error) or "failed to read upstream response body",
+                        category=ErrorCategory.NETWORK,
+                        status_code=502,
+                        code="upstream_response_read_failed",
+                    )
+                    attempt.error = normalized_error
+                    await response.aclose()
+                    await _finalize_failure(
+                        request,
+                        context,
+                        client,
+                        normalized_error,
+                    )
+                    raise normalized_error from error
+                after_response_hooks = bool(
+                    client.hooks is not None
+                    and client.hooks.registry.response_hooks
                 )
+                if client.hooks is not None:
+                    hook_context = _hook_context(
+                        context,
+                        client,
+                        attempt_number=attempt_number,
+                    )
+                    try:
+                        transformed = await client.hooks.run_response(
+                            body,
+                            response.status_code,
+                            hook_context,
+                            records=context.hook_records,
+                        )
+                    except Exception as error:
+                        await response.aclose()
+                        await _finalize_failure(request, context, client, error)
+                        raise
+                    body = transformed.body
+                try:
+                    normalized_response, final_response_payload = _validate_response_body(
+                        body,
+                        after_response_hooks=after_response_hooks,
+                    )
+                except Exception as error:
+                    await response.aclose()
+                    await _finalize_failure(request, context, client, error)
+                    raise
+                if client.hooks is not None:
+                    assert hook_context is not None
+                    original = response
+                    response = httpx.Response(
+                        original.status_code,
+                        headers=original.headers,
+                        content=body,
+                        request=getattr(original, "_request", None),
+                        extensions=original.extensions,
+                    )
+                    await original.aclose()
+                context.normalized_response = normalized_response
+                context.final_response_payload = final_response_payload
+                converted = attempt_result.converted_response
+                context.conversion_facts = tuple(
+                    RequestConversionFactRecord(
+                        attempt=attempt_number,
+                        field_path=fact.field_path,
+                        disposition=fact.disposition,
+                        reason=fact.reason,
+                    )
+                    for fact in attempt_result.converted_request_facts
+                ) + tuple(
+                    ResponseConversionFactRecord(
+                        attempt=attempt_number,
+                        code=fact.code,
+                        field_path=fact.field_path,
+                    )
+                    for fact in (
+                        converted.facts if converted is not None else ()
+                    )
+                )
+                if converted is not None:
+                    context.response_usage = converted.usage_facts
+            try:
+                coordinator.notify_success()
+                limiter.report_success()
+            except Exception as error:
+                await response.aclose()
+                await _finalize_failure(request, context, client, error)
+                raise
+            if not request.stream and client.hooks is not None:
+                assert hook_context is not None
                 await client.hooks.observe(
                     ObserverEvent.RESPONSE,
                     hook_context,
@@ -288,37 +406,20 @@ async def execute_anthropic_pipeline(
                     },
                     records=context.hook_records,
                 )
-                try:
-                    transformed = await client.hooks.run_response(
-                        body,
-                        response.status_code,
-                        hook_context,
-                        records=context.hook_records,
-                    )
-                except Exception as error:
-                    await response.aclose()
-                    await _finalize_failure(request, context, client, error)
-                    raise
-                original = response
-                response = httpx.Response(
-                    original.status_code,
-                    headers=original.headers,
-                    content=transformed.body,
-                    request=getattr(original, "_request", None),
-                    extensions=original.extensions,
-                )
-                await original.aclose()
-                await client.hooks.observe(
-                    ObserverEvent.FINALIZE,
-                    hook_context,
-                    {"request": request, "state": "completed"},
-                    records=context.hook_records,
-                )
             context.transition(
                 RequestState.STREAMING if request.stream else RequestState.COMPLETED
             )
-            if client.history is not None and not request.stream:
-                await client.history.finalized(context)
+            if not request.stream:
+                if client.hooks is not None:
+                    assert hook_context is not None
+                    await client.hooks.observe(
+                        ObserverEvent.FINALIZE,
+                        hook_context,
+                        {"request": request, "state": "completed"},
+                        records=context.hook_records,
+                    )
+                if client.history is not None:
+                    await client.history.finalized(context)
             return PipelineResult(context=context, response=response)
         body = await response.aread()
         error = ApiError(

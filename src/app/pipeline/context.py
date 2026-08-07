@@ -1,11 +1,13 @@
 import time
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from app.anthropic.sanitize import SanitizationResult
 from app.errors import ApiError
+from app.models.anthropic import MessagesResponse
+from app.protocols.responses_anthropic import ResponseUsageFacts
 
 
 class RequestState(StrEnum):
@@ -44,6 +46,26 @@ class Attempt:
     payload_modifications: list[str] = field(default_factory=lambda: list[str]())
 
 
+@dataclass(frozen=True, slots=True)
+class RequestConversionFactRecord:
+    attempt: int
+    field_path: str
+    disposition: str
+    reason: str
+    provenance: Literal["request"] = "request"
+
+
+@dataclass(frozen=True, slots=True)
+class ResponseConversionFactRecord:
+    attempt: int
+    code: str
+    field_path: str
+    provenance: Literal["response"] = "response"
+
+
+type ConversionFactRecord = RequestConversionFactRecord | ResponseConversionFactRecord
+
+
 @dataclass(slots=True)
 class RequestContext:
     original_model: str
@@ -60,6 +82,10 @@ class RequestContext:
     rate_limiter_wait_ms: float = 0.0
     attempts: list[Attempt] = field(default_factory=lambda: list[Attempt]())
     hook_records: list[dict[str, Any]] = field(default_factory=lambda: list[dict[str, Any]]())
+    normalized_response: MessagesResponse | None = None
+    final_response_payload: dict[str, Any] | None = None
+    response_usage: ResponseUsageFacts | None = None
+    conversion_facts: tuple[ConversionFactRecord, ...] = ()
     error: ApiError | None = None
     session_id: str | None = None
     agent_id: str | None = None

@@ -50,7 +50,9 @@
 
 **本项目默认**：轻量 `dataclass` 记录关键字段（request/response payload、attempts 摘要、usage、timing）。终态**一次性**异步落盘（off-loop），不做增量 multi-stage 写入。进行中状态留在内存 in-flight 映射供 WebSocket。惰性构造摘要，不预算所有派生字段。
 
-**可选实现路径**：若需完整的每-attempt 审计，增加一个可选的"详细模式"，但仍终态一次写入。
+Responses bridge 的当前轻量投影把 exact usage、`estimated`／`inconsistent` 与 conversion facts 摘要写入既有 `usage` JSON，不新增 SQLite 列或第二套持久化生命周期。若未来需要按 conversion fact 独立查询、过滤或建立 typed API，再单独设计 History schema／迁移；不能从当前 summary 反推完整逐-attempt conversion journal。
+
+**可选实现路径**：若需完整的每-attempt 审计，增加一个可选的"详细模式"，但仍终态一次写入；若只需结构化 conversion-fact 查询，优先增加窄 typed projection，而不是启用整套逐-attempt 对象图。
 
 ## 5. 三重前缀路由注册 `[采纳但简化]`
 

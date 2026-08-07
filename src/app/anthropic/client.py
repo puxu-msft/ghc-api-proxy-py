@@ -18,12 +18,14 @@ from app.hooks.executor import HooksExecutor
 from app.models.anthropic import MessagesRequest
 from app.models.common import ModelInfo
 from app.protocols.anthropic_responses import (
+    ConversionFact,
     ReasoningCapabilityFacts,
     ReasoningEffortBand,
     RequestConversionError,
     convert_messages_request_to_responses,
 )
 from app.protocols.responses_anthropic import (
+    ConvertedResponse,
     ResponseConversionError,
     convert_responses_response_to_anthropic,
 )
@@ -72,6 +74,13 @@ class PreparedAnthropicRequest:
     wire: dict[str, Any]
     headers: dict[str, str]
     route: RouteDecision | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AnthropicAttemptResult:
+    response: httpx.Response
+    converted_request_facts: tuple[ConversionFact, ...] = ()
+    converted_response: ConvertedResponse | None = None
 
 
 class AnthropicClient:
@@ -169,6 +178,15 @@ class AnthropicClient:
         *,
         stream: bool,
     ) -> httpx.Response:
+        result = await self.send_prepared_attempt(prepared, stream=stream)
+        return result.response
+
+    async def send_prepared_attempt(
+        self,
+        prepared: PreparedAnthropicRequest,
+        *,
+        stream: bool,
+    ) -> AnthropicAttemptResult:
         if prepared.route is not None and prepared.route.protocol_leg.value == "responses":
             return await self._send_responses(prepared)
         response = await self._target.send_anthropic(
@@ -176,7 +194,7 @@ class AnthropicClient:
             stream=stream,
             extra_headers=prepared.headers,
         )
-        return response
+        return AnthropicAttemptResult(response)
 
     def _decide_route(self, resolved_model: str) -> RouteDecision | None:
         from app.pipeline.route_policy import (
@@ -217,7 +235,7 @@ class AnthropicClient:
     async def _send_responses(
         self,
         prepared: PreparedAnthropicRequest,
-    ) -> httpx.Response:
+    ) -> AnthropicAttemptResult:
         if bool(prepared.wire.get("stream")):
             raise ApiError(
                 "streaming is not implemented for the Anthropic Responses bridge",
@@ -246,7 +264,10 @@ class AnthropicClient:
             stream=False,
         )
         if not upstream.is_success:
-            return await _responses_error_response(upstream)
+            return AnthropicAttemptResult(
+                await _responses_error_response(upstream),
+                converted_request_facts=converted_request.facts,
+            )
         try:
             parsed_body: object = orjson.loads(await upstream.aread())
             if not isinstance(parsed_body, dict):
@@ -258,14 +279,18 @@ class AnthropicClient:
                 )
             body = cast(dict[str, Any], parsed_body)
             converted = convert_responses_response_to_anthropic(body)
-            return httpx.Response(
-                upstream.status_code,
-                headers=normalize_responses_response_headers(upstream.headers),
-                content=dumps(
-                    converted.message.model_dump(mode="json", exclude_none=True)
+            return AnthropicAttemptResult(
+                response=httpx.Response(
+                    upstream.status_code,
+                    headers=normalize_responses_response_headers(upstream.headers),
+                    content=dumps(
+                        converted.message.model_dump(mode="json", exclude_none=True)
+                    ),
+                    request=getattr(upstream, "_request", None),
+                    extensions=upstream.extensions,
                 ),
-                request=getattr(upstream, "_request", None),
-                extensions=upstream.extensions,
+                converted_request_facts=converted_request.facts,
+                converted_response=converted,
             )
         except (orjson.JSONDecodeError, ResponseConversionError) as error:
             code = getattr(error, "code", "invalid_responses_body")

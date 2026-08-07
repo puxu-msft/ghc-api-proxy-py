@@ -98,3 +98,30 @@ async def test_persisted_pin_update_round_trips(tmp_path: Path) -> None:
     finally:
         await writer.close()
     assert entry is not None and entry.pinned is True
+
+
+@pytest.mark.asyncio
+async def test_writer_round_trips_response_and_usage_summary(tmp_path: Path) -> None:
+    writer = HistoryWriter(tmp_path / "history.db")
+    await writer.start()
+    expected = _entry("with-facts", "completed", 1)
+    expected.response = {"content": [{"type": "text", "text": "hooked"}]}
+    expected.usage = {
+        "input_tokens": 7,
+        "output_tokens": 3,
+        "estimated": False,
+        "inconsistent": True,
+        "conversion_facts": [
+            {"code": "usage_inconsistent", "field_path": "usage.total_tokens"}
+        ],
+    }
+    try:
+        await writer.submit(expected)
+        await writer.flush()
+        actual = await writer.get(expected.id)
+    finally:
+        await writer.close()
+
+    assert actual is not None
+    assert actual.response == expected.response
+    assert actual.usage == expected.usage
