@@ -5,10 +5,10 @@
 - **类型**：正式 living plan。本文不是等待一次性批准后封存的静态 runbook；开发、验证、候选集成、运行态发现和每次演练都必须及时回写当前状态、证据、阻塞项与下一动作。
 - **当前执行状态**：`NO_CUTOVER`。本文只规划，不授权或执行 `localhost:4141` 接管、旧进程停止、user unit 安装、systemd reload、数据迁移、数据删除或 `cc-daemon` 重启。
 - **目标**：在 Anthropic Messages → OpenAI Responses 路径通过完整替代验收后，以可回滚方式让 `ghc-api-proxy-py` 接管当前由 `copilot-api-js` 提供的 `localhost:4141` 前门，随后观察并退役旧裸进程。
-- **作者基线**：`/home/xp/src/ghc-api-proxy-py` 的 `main@ec5e8f5240c6a587544e022b449aa7b392ba7ca1`。本轮每次 shell 调用均要求先验证物理仓库根、`main` 分支和该完整 HEAD；任何未通过该 gate 的输出不得作为本文证据。
-- **权威边界**：Anthropic Responses bridge 的用户可观察行为来自 `../anthropic-responses-bridge/spec.md`，current 状态为 `FINALIZED@5e3628226238a2c271824bc47d0f2fd67db9a6eb36224ee088984c96eb62a5f1`；执行验收来自 `../anthropic-responses-bridge/acceptance.md`，current 状态为 `FINALIZED_ACCEPTANCE_ORACLE@224b020d30059b899bbdc2571af0ebd199f061df2288e5c202f8cd264e9c76f4`；易变实现状态来自持续更新且不收口的 `../anthropic-responses-bridge/implementation.md`，current SHA-256 为 `4ace302283e2b4b539c8195e55a2a23020f692d40fe0df868546dd58312036e2`。Implementation current bytes已消费上一checkpoint评审点名的状态漂移并继续等待自身定向复评；不得把该living文档、定稿oracle或局部checkpoint当成完整产品`PASS`。本文只定义服务接管、部署、数据处置和回滚顺序，不重新决定 bridge 行为或内部架构。
-- **评审状态**：`LIVING／PLAN_R2_0_MAJOR`。`docs/tmp/260807-review-service-cutover-plan-r2.md` 对 SHA-256 `ab840f2a37407877bc1c6c9526ff811ab7364e795012ffad0596927f3a3a4765` 的上一稳定 bytes 给出 `0 blocker／0 major／0 minor`，确认实施节奏、逐项数据 disposition、旧 `--restart` supervisor／listener／writer fence以及首次切换与回滚的配置化时间门可继续；本轮只同步随后变化的 oracle、Implementation 与 systemd 状态链，新 bytes仍须 current-byte 联合复评。任何 0 major只表示可继续 living implementation 的下一切片，不代表计划封存、候选 `PASS`、生产切换获授权或本文不再动态更新。
-- **文件范围约束**：本轮只修改本文件与配套 `readiness.md`。Kick-off 提示词内嵌在文末，不另建文件。
+- **作者基线**：`/home/xp/src/ghc-api-proxy-py` 的 current `main@cf53334a10a717a3a3d30d6c0e8a297f5000d90c`。本轮每次 shell 调用均要求在同一调用内验证物理仓库根、`main` 分支和 `HEAD == refs/heads/main`，并读取当次 current HEAD；未来 `main` 前进后必须先更新本文，不能把该完整 hash 当作永久 gate。
+- **权威边界**：Anthropic Responses bridge 的用户可观察行为来自 `../anthropic-responses-bridge/spec.md`，current 状态为 `FINALIZED@5e3628226238a2c271824bc47d0f2fd67db9a6eb36224ee088984c96eb62a5f1`；执行验收来自 `../anthropic-responses-bridge/acceptance.md`，current 状态为 `FINALIZED_ACCEPTANCE_ORACLE@224b020d30059b899bbdc2571af0ebd199f061df2288e5c202f8cd264e9c76f4`；易变实现状态来自持续更新且不收口的 `../anthropic-responses-bridge/implementation.md`，current SHA-256 为 `60e09d3b6310361dad0025e88802f3774d0dc4ff8d264bdabe483bfc7635ba2a`。Implementation current bytes已同步 foundations与systemd进入main、happy R2及usage review／verify状态，但仍须自身定向复评；不得把该living文档、定稿oracle、局部checkpoint或main-side回归当成完整产品`PASS`。本文只定义服务接管、部署、数据处置和回滚顺序，不重新决定 bridge 行为或内部架构。
+- **评审状态**：`LIVING／PLAN_R2_0_MAJOR`。`docs/tmp/260807-review-service-cutover-plan-r2.md` 对 SHA-256 `ab840f2a37407877bc1c6c9526ff811ab7364e795012ffad0596927f3a3a4765` 的上一稳定 bytes 给出 `0 blocker／0 major／0 minor`，确认实施节奏、逐项数据 disposition、旧 `--restart` supervisor／listener／writer fence以及首次切换与回滚的配置化时间门可继续；本轮同步 foundations与systemd进入main／归档、happy／usage仍未进入main及新的备用端口／真实manager dry-run准备顺序，新 bytes仍须 current-byte定向复评。任何 0 major只表示可继续 living implementation 的下一切片，不代表计划封存、候选 `PASS`、生产切换获授权或本文不再动态更新。
+- **文件范围约束**：本轮只修改本文件。Kick-off 提示词内嵌在文末，不另建文件。
 
 ## 不可破坏边界
 
@@ -27,16 +27,16 @@
 
 | 对象 | 当前证据 | 计划含义 |
 |---|---|---|
-| 主仓 | `main@ec5e8f5240c6a587544e022b449aa7b392ba7ca1` | 当前 main新增正式 bridge Spec／Acceptance文档，但尚不是可切换产品候选 |
+| 主仓 | `main@cf53334a10a717a3a3d30d6c0e8a297f5000d90c` | Foundations三片已按`d274f58… → 798ba3e… → 1c13fda…`进入main，systemd runtime已由`cf53334…`进入main；这些仓库checkpoint仍不是可切换产品候选 |
 | `localhost:4141` | 只读 `ss` probe 观察到 Bun 同时监听 `127.0.0.1:4141` 与 `[::1]:4141` | “localhost 前门”当前包含 IPv4 与 IPv6 loopback；只接管 IPv4 会造成兼容性回归 |
 | `cc-daemon` | `cc-daemon.service` 与 `cc-daemon-calib.service` 均为 user systemd active／running | 两者是硬禁触碰对象；切换只能保持其现有 endpoint 并在前门下替换服务端 |
-| Python main CLI | `src/app/cli.py:50-107` 只以 host／port 调 `uvicorn.run()`，没有 inherited socket fd 入口 | 当前 main 不能直接消费 systemd socket；这是接管前实现门 |
+| Python main CLI | Current main已包含`--fd >= 1` inherited socket入口，并拒绝与显式host／port混用；当前合同仍是单fd | 仓库级fd骨架已落地，但目标user runtime仍需具名双fd／双栈、错误fd与真实manager接缝验收 |
 | Python 默认持久化 | `src/app/server.py:63-80` 默认使用 XDG data 下的 `tokenization.json` 与 `history.db` | 备用实例必须使用隔离目录；切换前必须确认实际配置覆盖和 owner |
 | Python lifespan cleanup | `src/app/server.py:139-152` 会拒绝 pending approval、flush tokenization、关闭 History 与 upstream | 已有基础 cleanup，但仍需真实 SIGTERM／长连接／强制超时验收，不能仅凭源码声称优雅退出完成 |
-| systemd 候选 | Source为clean `feat/systemd-cgroup-runtime@49fb1988621bba4356e7a5039a6994c2e6d19604`；code R4为`0 blocker／0 major`并放行精确三提交squash。Clean integration `integrate/260807-systemd-runtime@fe9c20315b0137ca5b2253fdbd86a30d504255ef` 已把该范围squash到`ec5e8f5…`之上，但尚未进入main | `fe9c203…`是已准备的仓库checkpoint，不是已回并、已安装或已部署；模板仍是system-level单socket形态，不可直接当作目标user unit安装，也不证明真实manager／cgroup、双fd／双栈或生产运行态 |
-| 候选 socket | 仅 `ListenStream=127.0.0.1:4141`、`Accept=no`、`Backlog=1024` | 未保持当前 IPv6 loopback；单 fd 设计也不能直接覆盖双 listener 合同 |
-| 候选 service | 包含 `User=`、`Group=`、`/opt` 路径和 `WantedBy=multi-user.target` | 这些是 system-level 假设；user unit 必须另行适配并静态验证 |
-| bridge 产品状态 | Spec `FINALIZED@5e362822…`与Acceptance `FINALIZED_ACCEPTANCE_ORACLE@224b020d…`已定稿；Implementation current `4ace3022…`已处置上一checkpoint major但新bytes待复评，happy `7e4b642…`仍待R2，完整产品继续为`UNVERIFIED` | Oracle定稿、Implementation修订与局部checkpoint不等于产品通过；替代验收未闭合，当前禁止切换 |
+| systemd runtime | Reviewed source `49fb1988621bba4356e7a5039a6994c2e6d19604` 已由 immutable `archive/260807-systemd-runtime` 精确保留；其语义等价checkpoint已作为`main@cf53334…`落地，main-side全仓pytest记录为375项、Ruff与Pyright通过 | 不再回放`fe9c203…`或重建systemd线；代码进入main仍不表示unit已安装、服务已部署、真实manager／cgroup已验收或生产运行态已切换 |
+| Current socket模板 | Main中的system-level模板仅`ListenStream=127.0.0.1:4141`、`Accept=no`、`Backlog=1024`，应用合同仍是单fd | 未保持当前IPv6 loopback；单fd设计不能直接覆盖目标双listener合同，备用端口真实manager dry-run准备必须补user unit适配与具名双fd方案 |
+| Current service模板 | Main中的system-level模板包含`User=`、`Group=`、`/opt`路径和`WantedBy=multi-user.target` | 这些是system-level假设；user unit必须另行render／check，默认dry-run，不安装、不reload、不enable、不start |
+| bridge产品状态 | Spec `FINALIZED@5e362822…`与Acceptance `FINALIZED_ACCEPTANCE_ORACLE@224b020d…`已定稿；foundations已进入main并归档，happy integration `7e4b642…`已获R2 0／0／0但尚未进入main，usage `aca3ced…`已获review 0／0与声明范围verify `PASS`但尚未进入main；完整产品继续为`UNVERIFIED` | Oracle定稿、Implementation修订、foundations落地及happy／usage局部绿灯都不等于产品通过；替代验收未闭合，当前禁止切换 |
 
 ## Living 更新协议
 
@@ -194,7 +194,7 @@
 - 当前 front door 同时包含 `127.0.0.1` 与 `::1`。目标 user socket必须保持两个地址族，或在切换前取得明确合同变更。推荐保持双栈，并让应用按 systemd `LISTEN_FDS`／`LISTEN_FDNAMES`消费全部声明 socket；仅硬编码 `fd 3` 的单 socket实现不足以替代当前前门。
 - `Accept=no` 保持一个 service处理监听 socket。Backlog 是有限容量，不得描述为无限排队或请求成功保证。
 - `.service` 与 `.socket` 不得声明对 `cc-daemon.service`、`cc-daemon-calib.service` 或其 target 的 `PartOf=`、`BindsTo=`、`Conflicts=`、`Requires=` 或 restart传播关系。
-- `Type=simple` 只说明进程已启动，不说明应用 ready。没有真实 `sd_notify(READY=1)` 前不得改称 `Type=notify`；切换 gate 必须独立轮询 readiness。
+- Current `Type=exec` 只证明进程成功跨过 `execve()`，不说明应用 ready。没有真实 `sd_notify(READY=1)` 前不得改称 `Type=notify`；切换 gate 必须独立轮询 readiness。
 - 自定义 user slice只约束代理 service。它位于 user manager 的父 cgroup限制之下，不能宣称获得 system-level资源保证，也不得把 `cc-daemon` 移入该 slice。
 - user manager退出后的存活需求必须在 inventory 中明确。若服务必须跨 logout持续运行，应先验证当前 linger政策；启用 linger属于独立主机状态变更，不在 dry-run中自动执行。
 
@@ -471,7 +471,7 @@ Ledger ID 必须由 current inventory 生成；当前冻结的 `CUTOVER-ASSET-IN
 |---|---|---|---|
 | 只监听 IPv4 | `localhost`优先解析 IPv6的客户端失败 | 双栈 inventory＋真实客户端正反测试 | 释放 socket并恢复旧双栈 listener |
 | 单 fd实现遗漏第二 socket | 一个地址族未被应用 accept | `LISTEN_FDS`／fd names测试与真实双 listener probe | 同上 |
-| `Type=simple`误当 ready | socket已接收但应用未可用，客户端 timeout | 独立 readiness gate | 自动回滚 |
+| `Type=exec`或process active误当 ready | socket已接收但应用未可用，客户端 timeout | 独立 readiness gate | 自动回滚 |
 | 首次端口交接窗口 | 短暂 connect failure | 预装全部资产、冻结短路径、客户端重试校准、单调时钟记录 | 按已实测 `D_ROLLBACK_RECOVERY_MAX` 恢复旧 listener；未验证时不声称恢复时限 |
 | 已 accept长连接中断 | SSE／WS会话失败 | grace与客户端重连测试，切换前连接 inventory | 恢复只影响新连接；不伪造旧连接续接 |
 | SQLite双写或热拷贝 | 数据损坏／不一致 | owner、WAL、backup API、freeze gate | 停新 writer，恢复冻结旧资产 |
@@ -486,10 +486,10 @@ Ledger ID 必须由 current inventory 生成；当前冻结的 `CUTOVER-ASSET-IN
 
 | 位置 | 怪味类型 | 处置 |
 |---|---|---|
-| `src/app/cli.py:50-107` | 监听 owner写死为应用 host／port，无法承载 socket activation | 在 systemd切片中先跑通 inherited socket 骨架与happy path，再补双fd、冲突和回归证据；保持直接启动兼容 |
+| `src/app/cli.py`与current main的single-fd runtime | inherited socket骨架已进入main，但单fd合同仍不足以承载目标双栈socket activation | 在备用端口dry-run准备中保留直接启动兼容，设计并验证具名双fd、地址族遗漏、错误fd与host／port冲突证据；不得把single-fd main checkpoint写成真实manager已通过 |
 | `src/app/shutdown.py` 与 `src/app/server.py:139-152` | 四阶段设计与当前 lifespan cleanup可能存在“文档能力强于生产接线”漂移 | 先用真实 SIGTERM探针判定；缺失则修共享生命周期基座，不在 unit层用更长 timeout掩盖 |
-| systemd候选 `.socket`／CLI | 单 fd＋仅 IPv4，而当前前门为 IPv4＋IPv6 | 推荐改为具名多 fd合同并做双栈真实 activation测试 |
-| systemd候选 `.service` | system-level `User=`／`Group=`／`/opt`假设与目标 user unit职责错位 | 分离 user模板，不以条件堆叠一个万能 unit |
+| current main systemd `.socket`／CLI | 单fd＋仅IPv4，而当前前门为IPv4＋IPv6 | 推荐改为具名多fd合同并做备用端口双栈真实activation测试；本轮只准备，不执行manager动作 |
+| current main systemd `.service` | system-level `User=`／`Group=`／`/opt`假设与目标user unit职责错位 | 分离user模板并提供默认dry-run的render／check路径，不以条件堆叠一个万能unit |
 | 旧／新数据目录 | 两套实现的 schema与owner不同，直接共用会产生双写与兼容风险 | disposition ledger逐项裁决，默认 archive旧数据、隔离新 writer |
 | 备用 shadow | 自动镜像生成请求会重复副作用和成本 | 默认只用显式 canary＋离线 corpus，不做全流量镜像 |
 
@@ -514,12 +514,13 @@ Ledger ID 必须由 current inventory 生成；当前冻结的 `CUTOVER-ASSET-IN
 
 ## 下一最小动作
 
-1. 对本次两份 service-cutover living文档的新 bytes进行current-byte联合复评；Plan R2的`0 blocker／0 major`已消费，不重复上一轮4项major。新复评即使为`0 blocker／0 major`，也只允许继续下一living implementation切片，不授权`4141`切换。
-2. 在 bridge living implementation中继续推进完整产品，使同一候选满足current Spec `5e362822…`与Acceptance `224b020d…`；Implementation current `4ace3022…`已消费上一checkpoint评审发现但新bytes仍待定向复评，happy `7e4b642…`待R2、usage `aca3ced…`待review，完整产品通过前保持`NO_CUTOVER`。
-3. 保持clean systemd squash `integrate/260807-systemd-runtime@fe9c20315b0137ca5b2253fdbd86a30d504255ef`的单一身份，不重复建线；按current Implementation顺序在happy与usage收敛后重新gate当时的current main，核对source range／path／blob／patch身份，回放并执行main-side gate。仓库回放顺序不阻止提前按“骨架→happy path→真实smoke→尽快squash稳定纵向切片→补边界／fault”的节奏准备user unit适配、多fd／双栈 inherited socket和真实graceful shutdown；不得把code R4或squash准备外推为已回并、已安装、真实manager验证或生产`4141`运行态，不安装或启动生产`4141` unit。
-4. 重取并回写完整inventory，尤其是旧Bun `--restart` parent／child／supervisor身份、精确停止／恢复原语、全部open writer、旧数据目录、所有client地址族行为和user manager linger需求。
-5. 在隔离数据目录与备用端口完成可重复启动、协议smoke、live canary、supervisor／listener／writer fence、配置化时间门、观察阈值、cgroup和回滚dry-run。
+1. 对本次 service-cutover Plan新bytes做current-byte定向复评；Plan R2的`0 blocker／0 major`已消费，不重复上一轮4项major。新复评即使为`0 blocker／0 major`，也只允许继续living准备，不授权安装unit、改变manager状态或接管`4141`。
+2. 不再回放foundations或systemd，也不重建对应开发线；保持foundations三个reviewed source archive与`archive/260807-systemd-runtime@49fb198…` immutable。Systemd仓库checkpoint已由`main@cf53334…`承载，但unit仍未安装，真实user manager／cgroup仍未验收。
+3. 准备备用端口纵向切片，不执行：从current inventory选择非`4141`的空闲loopback候选，冻结独立XDG data／History／tokenization路径、精确进程owner、liveness／readiness／最小Anthropic canary、停止后资源归零及旧Bun／`cc-daemon`前后不变量。Happy `7e4b642…`与usage `aca3ced…`尚未进入main，因此只准备config、manifest、probe与expected，不声称存在完整可运行bridge候选，也不启动实例。
+4. 准备真实manager dry-run，不执行：以current main的single-fd／system-level模板为输入，先定义user unit render／check与默认dry-run合同、备用动态端口、隔离状态根、具名双fd／双栈、graceful timeout、真实readiness、declared／effective／runtime cgroup对账、自动清理和unsupported语义。任何后续执行必须使用可回收fixture并另获运行态授权；不得写入真实unit目录，不得`daemon-reload`、enable、start、restart或占用`4141`。
+5. 并行保持bridge产品线按current Implementation推进happy四片→usage→route wiring与完整Acceptance；在happy／usage进入main并形成同一完整候选前，service-cutover状态继续为`NO_CUTOVER`。
+6. 数据disposition ledger、inventory＝ledger集合门、旧Bun `--restart` supervisor／listener／writer三道fence、配置化时间门、观察阈值、rollback dry-run及`cc-daemon`禁触碰边界全部保持；本轮不裁决`PENDING_DECISION`，不执行inventory写入、数据迁移、fence、dry-run或任何生产动作。
 
 ## Kick-off 提示词
 
-> 继续执行 `docs/agents/service-cutover/plan.md` 的下一未完成切片。先完整读取该living plan、Anthropic Responses bridge的current Spec `5e362822…`／Acceptance `224b020d…`／living Implementation、current service-cutover inventory，以及systemd source `49fb198…`、code R4和已准备但尚未进入main的squash `fe9c203…`；随后在每次shell调用内验证目标repo物理根、预期branch和明确candidate HEAD，重新取得`--restart` parent／child／supervisor、双栈listener、全部open writer、unit、`cc-daemon`、数据owner与工作树状态。严格保持`NO_CUTOVER`，除非计划中的前置切片、替代验收、inventory＝ledger资产集合、逐项data disposition、supervisor／listener／writer fence、配置化切换／回滚deadline、观察阈值、独立评审和回滚演练全部绑定同一候选为`PASS`；计划复评即使为`0 blocker／0 major`也只允许继续living implementation，不授权生产切换。不得停止、重启、reload或修改`cc-daemon.service`／`cc-daemon-calib.service`，不得使用宽匹配进程操作或只kill当前listener PID，不得占用或切换生产`localhost:4141`，不得让旧新服务双写同一数据资产。实施按“可运行骨架→happy path→真实入口smoke→尽快squash稳定纵向切片→补边界／fault／正反控制”推进，不设置普遍的先红门；任何gate标`PASS`或进入下一有副作用阶段前，补齐能区分正确／错误状态的自动测试或真实probe。完成后运行定向测试、全仓测试、Ruff、Pyright及对应真实socket／systemd／live／fault gate，并立即把候选commit、证据、状态、阻塞项、结构怪味和下一动作回写本plan。若发现会改变公开行为、地址族合同、数据迁移政策、可接受中断／恢复目标或首次切换可用性保证的硬分叉，列出选项、权衡和推荐交回主会话，不自行缩减范围或执行切换。
+> 继续执行 `docs/agents/service-cutover/plan.md` 的下一未完成准备切片。先完整读取该living plan、current readiness、Anthropic Responses bridge的current Spec `5e362822…`／Acceptance `224b020d…`／living Implementation、current inventory、systemd runtime living Plan及archive／worktree审计；每次shell都在同一调用内验证主树物理root、`main`与`HEAD == refs/heads/main`，并记录当次current HEAD。Foundations三片与systemd runtime已经进入main且reviewed sources已归档，不得重复回放、重建开发线或把历史integration当作待办；systemd unit仍未安装，真实user manager／cgroup仍未验收，happy `7e4b642…`与usage `aca3ced…`仍未进入main，生产双栈`localhost:4141`仍由旧Bun持有，整体严格保持`NO_CUTOVER`。本轮只准备两项无执行产物：一是备用端口的隔离config／data、精确owner、health／canary expected、cleanup与旧前门不变量manifest；二是默认dry-run的user unit render／check、备用动态端口、隔离状态根、具名双fd／双栈、graceful timeout、真实readiness、cgroup三层对账、自动清理与unsupported合同。不得安装unit，不得改变真实manager状态，不得执行`daemon-reload`／enable／start／restart，不得启动备用实例或占用／切换`4141`。继续保留逐项data disposition、inventory＝ledger资产集合、旧Bun supervisor／listener／writer三道fence、配置化切换／回滚deadline、观察阈值与rollback dry-run门；不得让旧新服务双写同一资产。不得停止、重启、reload、修改或向`cc-daemon.service`／`cc-daemon-calib.service`及其进程发送信号，不得用宽匹配进程操作或只kill当前listener PID。任何后续真实probe或manager dry-run都需另获运行态授权，并在前后机械核对生产listener与`cc-daemon`身份不变。若发现会改变公开行为、地址族合同、数据迁移政策、可接受中断／恢复目标或首次切换可用性保证的硬分叉，列出选项、权衡和推荐交回主会话，不自行缩减范围或执行切换。
