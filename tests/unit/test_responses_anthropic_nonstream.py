@@ -6,6 +6,7 @@ from app.anthropic.thinking.responses_reasoning import responses_reasoning_to_an
 from app.protocols.responses_anthropic import (
     ResponseConversionError,
     ResponseConversionFact,
+    ResponseUsageFacts,
     convert_responses_response_to_anthropic,
 )
 
@@ -45,6 +46,7 @@ def test_converts_output_text_parts_in_source_order() -> None:
     assert converted.upstream_model == "gpt-test"
     assert converted.facts == (
         ResponseConversionFact(code="response_id_transformed", field_path="id"),
+        ResponseConversionFact(code="usage_estimated", field_path="usage"),
     )
     assert converted.message.model == "gpt-test"
     assert converted.message.stop_reason == "end_turn"
@@ -128,7 +130,17 @@ def test_maps_basic_usage_and_subtracts_cache_tokens_from_anthropic_input() -> N
             usage={
                 "input_tokens": 100,
                 "output_tokens": 30,
-                "input_tokens_details": {"cached_tokens": 20, "cache_write_tokens": 10},
+                "total_tokens": 130,
+                "input_tokens_details": {
+                    "cached_tokens": 20,
+                    "cache_write_tokens": 10,
+                    "audio_tokens": 3,
+                },
+                "output_tokens_details": {
+                    "reasoning_tokens": 12,
+                    "audio_tokens": 4,
+                    "accepted_prediction_tokens": 5,
+                },
             },
         )
     )
@@ -140,6 +152,108 @@ def test_maps_basic_usage_and_subtracts_cache_tokens_from_anthropic_input() -> N
         "cache_creation_input_tokens": 10,
         "cache_read_input_tokens": 20,
     }
+    assert converted.usage_facts == ResponseUsageFacts(
+        upstream_input_tokens=100,
+        input_tokens=70,
+        cache_read_input_tokens=20,
+        cache_creation_input_tokens=10,
+        output_tokens=30,
+        reasoning_tokens=12,
+        total_tokens=130,
+        input_tokens_details={
+            "cached_tokens": 20,
+            "cache_write_tokens": 10,
+            "audio_tokens": 3,
+        },
+        output_tokens_details={
+            "reasoning_tokens": 12,
+            "audio_tokens": 4,
+            "accepted_prediction_tokens": 5,
+        },
+        upstream_total_tokens=130,
+    )
+
+
+def test_preserves_usage_details_and_reports_inconsistent_subcounts() -> None:
+    converted = convert_responses_response_to_anthropic(
+        _response(
+            usage={
+                "input_tokens": 5,
+                "output_tokens": 5,
+                "total_tokens": 10,
+                "input_tokens_details": {
+                    "cached_tokens": 4,
+                    "cache_write_tokens": 3,
+                    "text_tokens": 2,
+                },
+                "output_tokens_details": {
+                    "reasoning_tokens": 7,
+                    "rejected_prediction_tokens": 1,
+                },
+            }
+        )
+    )
+
+    assert converted.message.usage is not None
+    assert converted.message.usage.input_tokens == 0
+    assert converted.message.usage.output_tokens == 5
+    assert converted.usage_facts is not None
+    assert converted.usage_facts.reasoning_tokens == 7
+    assert converted.usage_facts.input_tokens_details["text_tokens"] == 2
+    assert (
+        converted.usage_facts.output_tokens_details["rejected_prediction_tokens"] == 1
+    )
+    assert converted.usage_facts.inconsistent is True
+    assert ResponseConversionFact(
+        code="usage_inconsistent",
+        field_path="usage.input_tokens",
+    ) in converted.facts
+    assert ResponseConversionFact(
+        code="usage_inconsistent",
+        field_path="usage.output_tokens_details.reasoning_tokens",
+    ) in converted.facts
+
+
+def test_absent_usage_has_no_exact_usage_facts() -> None:
+    converted = convert_responses_response_to_anthropic(_response())
+
+    assert converted.message.usage is not None
+    assert converted.message.usage.model_dump() == {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+    }
+    assert converted.usage_facts is None
+    assert ResponseConversionFact(code="usage_estimated", field_path="usage") in converted.facts
+
+
+@pytest.mark.parametrize(
+    ("details_name", "detail_name", "invalid_value"),
+    [
+        ("input_tokens_details", "cached_tokens", True),
+        ("input_tokens_details", "cache_write_tokens", -1),
+        ("output_tokens_details", "reasoning_tokens", 1.5),
+    ],
+)
+def test_rejects_malformed_usage_detail_values(
+    details_name: str,
+    detail_name: str,
+    invalid_value: object,
+) -> None:
+    with pytest.raises(ResponseConversionError) as caught:
+        convert_responses_response_to_anthropic(
+            _response(
+                usage={
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    details_name: {detail_name: invalid_value},
+                }
+            )
+        )
+
+    assert caught.value.code == "invalid_usage"
+    assert caught.value.field_path == f"usage.{details_name}.{detail_name}"
 
 
 def test_rejects_unknown_output_item_explicitly() -> None:

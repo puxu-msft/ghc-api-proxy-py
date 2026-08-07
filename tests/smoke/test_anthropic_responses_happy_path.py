@@ -97,6 +97,44 @@ def test_nonstream_reasoning_uses_static_project_v1_vector_and_public_reverse() 
     assert anthropic_thinking_to_responses(block.model_dump(mode="python")) == reasoning
 
 
+def test_nonstream_usage_keeps_reasoning_and_future_details_as_typed_facts() -> None:
+    converted = convert_responses_response_to_anthropic(
+        {
+            "id": "resp_usage",
+            "model": "gpt-test",
+            "status": "completed",
+            "output": [],
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 30,
+                "total_tokens": 130,
+                "input_tokens_details": {
+                    "cached_tokens": 20,
+                    "cache_write_tokens": 10,
+                },
+                "output_tokens_details": {
+                    "reasoning_tokens": 12,
+                    "accepted_prediction_tokens": 5,
+                },
+            },
+        }
+    )
+
+    assert converted.message.usage is not None
+    assert converted.message.usage.model_dump() == {
+        "input_tokens": 70,
+        "output_tokens": 30,
+        "cache_creation_input_tokens": 10,
+        "cache_read_input_tokens": 20,
+    }
+    assert converted.usage_facts is not None
+    assert converted.usage_facts.reasoning_tokens == 12
+    assert converted.usage_facts.output_tokens_details == {
+        "reasoning_tokens": 12,
+        "accepted_prediction_tokens": 5,
+    }
+
+
 def test_stream_parser_reasoning_payload_feeds_the_project_carrier() -> None:
     parser = ResponsesStreamParser()
     parser.process(

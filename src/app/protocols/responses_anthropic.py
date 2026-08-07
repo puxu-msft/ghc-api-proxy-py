@@ -4,6 +4,7 @@ from base64 import urlsafe_b64encode
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from hashlib import sha256
+from types import MappingProxyType
 from typing import Any, Never, cast
 
 import orjson
@@ -24,11 +25,41 @@ class ResponseConversionFact:
 
 
 @dataclass(frozen=True, slots=True)
+class ResponseUsageFacts:
+    """Exact Responses usage details plus their normalized Anthropic totals."""
+
+    upstream_input_tokens: int
+    input_tokens: int
+    cache_read_input_tokens: int
+    cache_creation_input_tokens: int
+    output_tokens: int
+    reasoning_tokens: int
+    total_tokens: int
+    input_tokens_details: Mapping[str, int]
+    output_tokens_details: Mapping[str, int]
+    upstream_total_tokens: int | None = None
+    inconsistent: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "input_tokens_details",
+            MappingProxyType(dict(self.input_tokens_details)),
+        )
+        object.__setattr__(
+            self,
+            "output_tokens_details",
+            MappingProxyType(dict(self.output_tokens_details)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ConvertedResponse:
     message: MessagesResponse
     upstream_response_id: str
     upstream_model: str
     facts: tuple[ResponseConversionFact, ...]
+    usage_facts: ResponseUsageFacts | None
 
 
 class ResponseConversionError(ValueError):
@@ -90,6 +121,7 @@ def convert_responses_response_to_anthropic(
     if not content:
         content.append(ContentBlock(type="text", text=""))
 
+    converted_usage = _convert_usage(response.get("usage"))
     return ConvertedResponse(
         message=MessagesResponse(
             id=anthropic_message_id_from_response_id(response_id),
@@ -97,11 +129,15 @@ def convert_responses_response_to_anthropic(
             content=content,
             stop_reason="tool_use" if has_tool_use else "end_turn",
             stop_sequence=None,
-            usage=_convert_usage(response.get("usage")),
+            usage=converted_usage.wire,
         ),
         upstream_response_id=response_id,
         upstream_model=model,
-        facts=(ResponseConversionFact(code="response_id_transformed", field_path="id"),),
+        facts=(
+            ResponseConversionFact(code="response_id_transformed", field_path="id"),
+            *converted_usage.facts,
+        ),
+        usage_facts=converted_usage.exact,
     )
 
 
@@ -168,32 +204,91 @@ def _convert_function_call(
     )
 
 
-def _convert_usage(value: object) -> AnthropicUsage:
+@dataclass(frozen=True, slots=True)
+class _ConvertedUsage:
+    wire: AnthropicUsage
+    exact: ResponseUsageFacts | None
+    facts: tuple[ResponseConversionFact, ...]
+
+
+def _convert_usage(value: object) -> _ConvertedUsage:
     if value is None:
-        return AnthropicUsage()
+        return _ConvertedUsage(
+            wire=AnthropicUsage(),
+            exact=None,
+            facts=(ResponseConversionFact(code="usage_estimated", field_path="usage"),),
+        )
     usage = _mapping(value, "usage")
     total_input = _non_negative_integer(usage, "input_tokens", "usage.input_tokens")
     output = _non_negative_integer(usage, "output_tokens", "usage.output_tokens")
+    upstream_total = _optional_non_negative_integer_or_none(
+        usage,
+        "total_tokens",
+        "usage.total_tokens",
+    )
+    input_details = _usage_details(
+        usage.get("input_tokens_details"),
+        "usage.input_tokens_details",
+    )
+    output_details = _usage_details(
+        usage.get("output_tokens_details"),
+        "usage.output_tokens_details",
+    )
+    cache_read = input_details.get("cached_tokens", 0)
+    cache_creation = input_details.get("cache_write_tokens", 0)
+    reasoning = output_details.get("reasoning_tokens", 0)
+    input_tokens = max(0, total_input - cache_read - cache_creation)
+    total_tokens = input_tokens + cache_read + cache_creation + output
 
-    details_value = usage.get("input_tokens_details")
-    if details_value is None:
-        details: Mapping[str, Any] = {}
-    else:
-        details = _mapping(details_value, "usage.input_tokens_details")
-    cache_read = _optional_non_negative_integer(
-        details, "cached_tokens", "usage.input_tokens_details.cached_tokens"
+    facts: list[ResponseConversionFact] = []
+    if total_input < cache_read + cache_creation:
+        facts.append(
+            ResponseConversionFact(code="usage_inconsistent", field_path="usage.input_tokens")
+        )
+    if reasoning > output:
+        facts.append(
+            ResponseConversionFact(
+                code="usage_inconsistent",
+                field_path="usage.output_tokens_details.reasoning_tokens",
+            )
+        )
+    if upstream_total is not None and upstream_total != total_input + output:
+        facts.append(
+            ResponseConversionFact(code="usage_inconsistent", field_path="usage.total_tokens")
+        )
+
+    return _ConvertedUsage(
+        wire=AnthropicUsage(
+            input_tokens=input_tokens,
+            output_tokens=output,
+            cache_read_input_tokens=cache_read,
+            cache_creation_input_tokens=cache_creation,
+        ),
+        exact=ResponseUsageFacts(
+            upstream_input_tokens=total_input,
+            input_tokens=input_tokens,
+            cache_read_input_tokens=cache_read,
+            cache_creation_input_tokens=cache_creation,
+            output_tokens=output,
+            reasoning_tokens=reasoning,
+            total_tokens=total_tokens,
+            input_tokens_details=input_details,
+            output_tokens_details=output_details,
+            upstream_total_tokens=upstream_total,
+            inconsistent=bool(facts),
+        ),
+        facts=tuple(facts),
     )
-    cache_creation = _optional_non_negative_integer(
-        details,
-        "cache_write_tokens",
-        "usage.input_tokens_details.cache_write_tokens",
-    )
-    return AnthropicUsage(
-        input_tokens=max(0, total_input - cache_read - cache_creation),
-        output_tokens=output,
-        cache_read_input_tokens=cache_read,
-        cache_creation_input_tokens=cache_creation,
-    )
+
+
+def _usage_details(value: object, field_path: str) -> Mapping[str, int]:
+    if value is None:
+        return MappingProxyType({})
+    details = _mapping(value, field_path)
+    converted: dict[str, int] = {}
+    for key, candidate in details.items():
+        converted[key] = _non_negative_integer_value(candidate, f"{field_path}.{key}")
+    return MappingProxyType(converted)
 
 
 def _required_string(
@@ -210,17 +305,20 @@ def _required_string(
 
 
 def _non_negative_integer(value: Mapping[str, Any], key: str, field_path: str) -> int:
-    candidate = value.get(key)
+    return _non_negative_integer_value(value.get(key), field_path)
+
+
+def _non_negative_integer_value(candidate: object, field_path: str) -> int:
     if not isinstance(candidate, int) or isinstance(candidate, bool) or candidate < 0:
         _fail(field_path, "invalid_usage", f"{field_path} must be a non-negative integer")
     return candidate
 
 
-def _optional_non_negative_integer(
+def _optional_non_negative_integer_or_none(
     value: Mapping[str, Any], key: str, field_path: str
-) -> int:
+) -> int | None:
     if key not in value or value[key] is None:
-        return 0
+        return None
     return _non_negative_integer(value, key, field_path)
 
 
@@ -242,6 +340,7 @@ __all__ = [
     "ConvertedResponse",
     "ResponseConversionError",
     "ResponseConversionFact",
+    "ResponseUsageFacts",
     "anthropic_message_id_from_response_id",
     "convert_responses_response_to_anthropic",
 ]
