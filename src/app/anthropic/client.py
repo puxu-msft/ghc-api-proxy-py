@@ -18,6 +18,8 @@ from app.hooks.executor import HooksExecutor
 from app.models.anthropic import MessagesRequest
 from app.models.common import ModelInfo
 from app.protocols.anthropic_responses import (
+    ReasoningCapabilityFacts,
+    ReasoningEffortBand,
     RequestConversionError,
     convert_messages_request_to_responses,
 )
@@ -223,8 +225,14 @@ class AnthropicClient:
                 status_code=400,
                 code="responses_stream_not_supported",
             )
+        reasoning_capabilities = self._reasoning_capabilities(
+            prepared.resolved_model
+        )
         try:
-            converted_request = convert_messages_request_to_responses(prepared.wire)
+            converted_request = convert_messages_request_to_responses(
+                prepared.wire,
+                reasoning_capabilities=reasoning_capabilities,
+            )
         except RequestConversionError as error:
             raise ApiError(
                 str(error),
@@ -269,6 +277,46 @@ class AnthropicClient:
             ) from error
         finally:
             await upstream.aclose()
+
+    def _reasoning_capabilities(
+        self,
+        resolved_model: str,
+    ) -> ReasoningCapabilityFacts | None:
+        if self._model_catalog is None:
+            return None
+        model = self._model_catalog.get(resolved_model)
+        if model is None:
+            return None
+        supports = model.capabilities.supports
+        efforts = tuple(supports.reasoning_effort or ())
+        if len(set(efforts)) != len(efforts) or any(not effort for effort in efforts):
+            efforts = ()
+        budget_limits_known = {
+            "min_thinking_budget",
+            "max_thinking_budget",
+        }.issubset(supports.model_fields_set)
+        selected_effort = efforts[0] if len(efforts) == 1 else None
+        return ReasoningCapabilityFacts(
+            supported_efforts=efforts,
+            budget_limits_known=budget_limits_known,
+            min_budget_tokens=supports.min_thinking_budget,
+            max_budget_tokens=supports.max_thinking_budget,
+            enabled_budget_bands=(
+                (
+                    ReasoningEffortBand(
+                        max_budget_tokens=None,
+                        effort=selected_effort,
+                    ),
+                )
+                if selected_effort is not None
+                else ()
+            ),
+            adaptive_effort=(
+                selected_effort
+                if supports.adaptive_thinking and "adaptive_thinking" in supports.model_fields_set
+                else None
+            ),
+        )
 
     async def execute(
         self,

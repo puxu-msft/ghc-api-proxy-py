@@ -205,11 +205,12 @@ class FailingTerminalObserver:
 
 
 @dataclass(frozen=True, slots=True)
-class PreSendMaxTokensHook:
+class PreSendPayloadHook:
     name: str = "route-smoke-pre-send"
     phase: PayloadPhase = PayloadPhase.PRE_SEND
     order: int = 1001
     error_mode: HookErrorMode = HookErrorMode.FAIL_REQUEST
+    thinking: dict[str, Any] | None = None
 
     async def run(
         self,
@@ -217,10 +218,15 @@ class PreSendMaxTokensHook:
         context: HookContext,
     ) -> PayloadHookResult:
         assert context.attempt_number == 0
+        updated = {**payload, "max_tokens": 32}
+        modifications = ["max_tokens"]
+        if self.thinking is not None:
+            updated["thinking"] = self.thinking
+            modifications.append("thinking")
         return PayloadHookResult(
-            payload={**payload, "max_tokens": 32},
+            payload=updated,
             modified=True,
-            modifications=("max_tokens",),
+            modifications=tuple(modifications),
         )
 
 
@@ -239,6 +245,9 @@ def _harness(
     route_override: str = "auto",
     responses_status: int = 200,
     failing_terminal_observer: bool = False,
+    model_id: str = "resolved-model",
+    supports: Mapping[str, Any] | None = None,
+    pre_send_thinking: dict[str, Any] | None = None,
 ) -> Harness:
     settings = AppSettings.model_validate(
         {
@@ -247,18 +256,14 @@ def _harness(
         }
     )
     catalog = ModelCatalog(None, "https://upstream.test")
-    catalog.replace_from_data(
-        {
-            "object": "list",
-            "data": [
-                {
-                    "id": "resolved-model",
-                    "vendor": "test",
-                    "supported_endpoints": endpoints,
-                }
-            ],
-        }
-    )
+    model: dict[str, Any] = {
+        "id": model_id,
+        "vendor": "test",
+        "supported_endpoints": endpoints,
+    }
+    if supports is not None:
+        model["capabilities"] = {"supports": dict(supports)}
+    catalog.replace_from_data({"object": "list", "data": [model]})
     target = RecordingTarget(responses_status=responses_status)
     history = RecordingHistory()
     approval = RecordingApproval()
@@ -267,13 +272,13 @@ def _harness(
     if failing_terminal_observer:
         hooks_builder.register_observer(FailingTerminalObserver())
     hooks_builder.register_observer(observer)
-    hooks_builder.register_payload(PreSendMaxTokensHook())
+    hooks_builder.register_payload(PreSendPayloadHook(thinking=pre_send_thinking))
     anthropic = AnthropicClient(
         target,
         ModelResolver(
             available_ids=catalog.available_ids,
             model_overrides={},
-            model_mappings={"requested-model": "resolved-model"},
+            model_mappings={"requested-model": model_id},
         ),
         settings,
         history=cast(Any, history),
@@ -400,6 +405,165 @@ def test_anthropic_nonstream_responses_leg_is_a_real_single_owner_asgi_flow(
     }
     response_observation = harness.observer.seen[1][2]
     assert b"hello bridge" in response_observation["response_body"]
+
+
+SINGLETON_REASONING_SUPPORTS = {
+    "adaptive_thinking": True,
+    "min_thinking_budget": 1_024,
+    "max_thinking_budget": 32_768,
+    "reasoning_effort": ["medium"],
+}
+
+
+@pytest.mark.parametrize(
+    ("thinking", "expected_reasoning"),
+    [
+        (
+            {"type": "enabled", "budget_tokens": 8_192},
+            {"effort": "medium", "summary": "auto"},
+        ),
+        ({"type": "adaptive"}, {"effort": "medium", "summary": "auto"}),
+    ],
+)
+def test_responses_only_reasoning_uses_resolved_model_capability_facts(
+    thinking: dict[str, Any],
+    expected_reasoning: dict[str, str],
+) -> None:
+    harness = _harness(
+        endpoints=["/responses"],
+        supports=SINGLETON_REASONING_SUPPORTS,
+    )
+    request = {**_request_body(), "thinking": thinking}
+
+    with harness.client as client:
+        response = client.post("/v1/messages", json=request)
+
+    assert response.status_code == 200
+    assert harness.target.anthropic_payloads == []
+    assert len(harness.target.responses_payloads) == 1
+    assert harness.target.responses_payloads[0]["reasoning"] == expected_reasoning
+
+
+@pytest.mark.parametrize(
+    "supports",
+    [None, {"reasoning_effort": ["low", "medium", "high"]}],
+)
+def test_unknown_reasoning_capabilities_fail_closed_without_model_name_guessing(
+    supports: Mapping[str, Any] | None,
+) -> None:
+    harness = _harness(
+        endpoints=["/responses"],
+        model_id="o3-reasoning-model-name-is-not-a-capability",
+        supports=supports,
+    )
+    request = {
+        **_request_body(),
+        "thinking": {"type": "enabled", "budget_tokens": 8_192},
+    }
+
+    with harness.client as client:
+        response = client.post("/v1/messages", json=request)
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "reasoning_not_supported"
+    assert harness.target.anthropic_payloads == []
+    assert harness.target.responses_payloads == []
+
+
+@pytest.mark.parametrize(
+    "efforts",
+    [
+        ["low", "medium", "high"],
+        ["high", "medium", "low"],
+    ],
+)
+@pytest.mark.parametrize(
+    ("thinking", "expected_code"),
+    [
+        (
+            {"type": "enabled", "budget_tokens": 8_192},
+            "reasoning_budget_not_supported",
+        ),
+        ({"type": "adaptive"}, "reasoning_not_supported"),
+    ],
+)
+def test_ambiguous_reasoning_effort_set_is_rejected_independent_of_order(
+    efforts: list[str],
+    thinking: dict[str, Any],
+    expected_code: str,
+) -> None:
+    harness = _harness(
+        endpoints=["/responses"],
+        supports={
+            **SINGLETON_REASONING_SUPPORTS,
+            "reasoning_effort": efforts,
+        },
+    )
+
+    with harness.client as client:
+        response = client.post(
+            "/v1/messages",
+            json={**_request_body(), "thinking": thinking},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == expected_code
+    assert harness.target.anthropic_payloads == []
+    assert harness.target.responses_payloads == []
+
+
+@pytest.mark.parametrize(
+    ("budget", "expected_status"),
+    [(1_023, 400), (1_024, 200), (32_768, 200), (32_769, 400)],
+)
+def test_responses_reasoning_budget_uses_exact_catalog_boundaries(
+    budget: int,
+    expected_status: int,
+) -> None:
+    harness = _harness(
+        endpoints=["/responses"],
+        supports=SINGLETON_REASONING_SUPPORTS,
+    )
+    request = {
+        **_request_body(),
+        "thinking": {"type": "enabled", "budget_tokens": budget},
+    }
+
+    with harness.client as client:
+        response = client.post("/v1/messages", json=request)
+
+    assert response.status_code == expected_status
+    if expected_status == 200:
+        assert harness.target.responses_payloads[0]["reasoning"] == {
+            "effort": "medium",
+            "summary": "auto",
+        }
+    else:
+        assert response.json()["error"]["code"] == "reasoning_budget_not_supported"
+        assert harness.target.responses_payloads == []
+
+
+def test_pre_send_reasoning_modification_is_reconverted_with_capability_facts() -> None:
+    harness = _harness(
+        endpoints=["/responses"],
+        supports=SINGLETON_REASONING_SUPPORTS,
+        pre_send_thinking={"type": "adaptive"},
+    )
+    request = {
+        **_request_body(),
+        "thinking": {"type": "disabled"},
+    }
+
+    with harness.client as client:
+        response = client.post("/v1/messages", json=request)
+
+    assert response.status_code == 200
+    assert harness.target.responses_payloads[0]["reasoning"] == {
+        "effort": "medium",
+        "summary": "auto",
+    }
+    context = harness.history.finalized_contexts[0]
+    assert context.attempts[0].payload_modifications == ["max_tokens", "thinking"]
 
 
 def test_dual_capability_auto_keeps_existing_messages_leg() -> None:
