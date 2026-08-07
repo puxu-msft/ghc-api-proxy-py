@@ -1,16 +1,16 @@
 # systemd runtime living 实施计划
 
-> 状态：`LIVING`，Plan 可继续。候选 `49fb198…` 的 code R4 已达到 `0 blocker／0 major` 并明确可 squash；Plan R4 的唯一 major 是 current 状态尚未消费已落盘的 R4 结论，本次修订已按其清单同步状态、证据与下一动作。M1 integration squash 已准备完成，下一动作是先清理主树 Anthropic Responses bridge README／Implementation WIP，再回放 `fe9c203…`；不等待后续强化。
-> 文档同步基线：本次修订在 `main@ec5e8f5240c6a587544e022b449aa7b392ba7ca1` 完成；后续每次 shell 以当次 `main` current HEAD 为门，不把该点时 hash 当作永久执行基线。候选实现仍以 `ed77c9d191df81c451c25161420515cca52ce6a4` 为代码 base。
-> 候选实现：`feat/systemd-cgroup-runtime@49fb1988621bba4356e7a5039a6994c2e6d19604`；提交链为候选 base → `66551e451d15ebd95a2bcfb5f0eaa227e8cb82ff`（骨架）→ `1a220e04a99c6ce07b4bdd6bb0876b4180d4c489`（R1／可行性 findings 修复）→ `49fb1988621bba4356e7a5039a6994c2e6d19604`（code R2 权限 major 与扩展 smoke 修复）。
+> 状态：`LIVING`，Plan 继续。M1 仓库 checkpoint 已以 `cf53334a10a717a3a3d30d6c0e8a297f5000d90c` 回放到 `main`；main-side 全仓 pytest `375 passed`、Ruff 与 Pyright 均通过。该 checkpoint 完成不表示 Plan 收口，下一强化顺序为 graceful timeout 合同、默认 dry-run 的 rootless install helper、真实 user-manager／cgroup smoke，最后才是 rolling 后续。
+> 文档同步基线：本次修订在 `main@cf53334a10a717a3a3d30d6c0e8a297f5000d90c` 完成；后续每次 shell 仍以当次 `main` current HEAD 为门，不把该点时 hash 当作永久执行基线。
+> M1 provenance：reviewed source 为 `feat/systemd-cgroup-runtime@49fb1988621bba4356e7a5039a6994c2e6d19604`，原始代码 base 为 `ed77c9d191df81c451c25161420515cca52ce6a4`；source 提交链为 `66551e451d15ebd95a2bcfb5f0eaa227e8cb82ff` → `1a220e04a99c6ce07b4bdd6bb0876b4180d4c489` → `49fb1988621bba4356e7a5039a6994c2e6d19604`。归档引用 `archive/260807-systemd-runtime` 精确指向 reviewed source `49fb198…`，而 current main checkpoint 是语义等价的 squash 回放提交 `cf53334…`。
 > 评审输入：两份初始 systemd 报告 `docs/tmp/260807-review-code-systemd-runtime.md`、`docs/tmp/260807-systemd-socket-feasibility.md`，code R2／R3／R4 `docs/tmp/260807-review-code-systemd-runtime-r2.md`、`docs/tmp/260807-review-code-systemd-runtime-r3.md`、`docs/tmp/260807-review-code-systemd-runtime-r4.md`，以及 Plan R2／R3／R4 `docs/tmp/260807-review-systemd-runtime-plan-r2.md`、`docs/tmp/260807-review-systemd-runtime-plan-r3.md`、`docs/tmp/260807-review-systemd-runtime-plan-r4.md` 均已消费。code R4 精确绑定 `49fb198…`，verdict 为 `0 blocker／0 major／1 non-blocking minor`、明确三提交可 squash；Plan R4 为 `0 blocker／1 major／0 minor`，唯一 major 即本文件仍停留在“R4 进行中／code R3 current”的旧状态，本次修订只关闭该状态同步项，不把它冒充为新 bytes 的独立复评 verdict。
-> integration 准备：clean `integrate/260807-systemd-runtime@fe9c20315b0137ca5b2253fdbd86a30d504255ef` 是 `main@ec5e8f5…` 的直接子提交，已把候选三提交 squash 为单一 `feat: add systemd socket activation runtime`。本次修订现场在该 exact HEAD 与正确 import oracle 下复验全仓 pytest `301 passed`，并以独立 collect-only node ID 计数交叉核对为 301；全仓 Ruff、全仓 Pyright 与 `tests/smoke/test_systemd_units.py` fd smoke 均通过，验证后 integration worktree clean。
+> M1 checkpoint：prepared integration `fe9c20315b0137ca5b2253fdbd86a30d504255ef` 已作为单一语义提交回放到后续 `main`，形成 `cf53334… feat: add systemd socket activation runtime`。回放后的 main-side gate 为全仓 pytest `375 passed`、Ruff 与 Pyright 通过；`archive/260807-systemd-runtime` 已在 gate 后固定到 reviewed source `49fb198…`。这些是仓库 checkpoint 证据，不是安装、真实 manager／cgroup 或运行态切换证据。
 > 当前边界：本计划只规划仓库内实现、测试、文档与 rootless probe；不得安装、启用、启动、停止或替换任何 system／user unit，不得触碰当前运行中的 `copilot-api-js`。
 > 计划位置：`docs/agents/systemd-runtime/plan.md`。
 
 ## 1. 目标与完成定义
 
-本计划把候选提交中的 systemd socket activation、Uvicorn inherited fd 与 cgroup v2 骨架逐步收敛为可评审、可 rootless 验证、可由用户显式安装的运行方案。开发节奏遵循本项目当前约定：骨架与 happy path → 真实 fd smoke → current candidate 独立代码复评达到 0 blocker／0 major → living Plan 同步 current 证据与下一动作 → squash／回并 → 在已回并基座上继续 timeout、install helper、cgroup observability 与 rolling 强化。候选 `49fb198…` 已通过 code R4，integration squash `fe9c203…` 已准备并通过 main-side 回放前全量 gate；当前不再等待代码或 Plan R4，先完成主树 Anthropic Responses bridge README／Implementation WIP 清理，再把该 squash 回放到届时的 `main` current。计划在每个切片后动态更新，不以“计划尚未批准”为由停工，也不把传统 test-first／强制 TDD 设为流程门。
+本计划把已进入 main 的 systemd socket activation、Uvicorn inherited fd 与 cgroup v2 骨架逐步收敛为可评审、可 rootless 验证、可由用户显式安装的运行方案。开发节奏遵循本项目当前约定：骨架与 happy path → 真实 fd smoke → current candidate 独立代码复评达到 0 blocker／0 major → squash／回放并完成 M1 checkpoint → 在 main 基座上继续 graceful timeout、rootless install helper、真实 user-manager／cgroup smoke 与 rolling 强化。M1 已完成，当前直接进入后续强化，不重复回放或重开 code R4。计划在每个切片后动态更新，不以“计划尚未批准”为由停工，也不把传统 test-first／强制 TDD 设为流程门。
 
 首次回并里程碑 M1 完成不等于已经部署，也不等于 long-term systemd runtime 全部完成。M1 的 squash／回并门只包含：
 
@@ -19,15 +19,15 @@
 3. 无需 root、无需安装 unit 的真实 fd smoke 已证明预连接 backlog 请求可由应用处理，并在 `HOME=/nonexistent` 时成功启动；扩展 smoke 还使用受控 generic upstream 验证 readiness 200、真实 Anthropic 请求、History 与 tokenization 落盘、EnvironmentFile 等价覆盖目录，以及状态目录／数据库／WAL／SHM／临时与最终文件均无 group／other 权限。activation happy path 与 listener continuity probe 的 harness 职责继续分开。
 4. 文档严格区分 listen／queued-unaccepted continuity 与旧进程 accepted connection drain，不使用“无缝重启”或“零停机”替代可验证语义。
 5. current candidate HEAD 的 code R4 已达到 0 blocker／0 major，并记录定向测试、Ruff、Pyright 与适用于当前骨架的 rootless smoke 通过。原始模板的 `systemd-analyze verify` 唯一诊断仍是安装前约定路径 `/opt/ghc-api-proxy/.venv/bin/python` 不存在，未发现 unit 语法或字段诊断；不得把该预期非零写成原模板 verify 通过。
-6. integration squash `fe9c203…` 已基于 `main@ec5e8f5…` 准备并在本次修订现场通过全仓 pytest 301 项、Ruff、Pyright 与 fd smoke；301 同时由 pytest 执行汇总和 collect-only node ID 计数核对。M1 下一动作只等待主树 `docs/agents/anthropic-responses-bridge/README.md` 与 `implementation.md` 的 WIP 清理／提交边界闭合，随后重新读取 `main` current 并回放该 squash；不等待 graceful timeout、install helper、完整 cgroup observability 或 rolling。
+6. `cf53334…` 已把 reviewed M1 范围作为单一语义提交回放到 current main；main-side 全仓 pytest 375 项、Ruff 与 Pyright 均通过，归档引用已固定到 reviewed source `49fb198…`。M1 checkpoint 已完成，不再有待回放动作，也不等待 graceful timeout、install helper、真实 user-manager／cgroup smoke 或 rolling 才承认该 checkpoint。
 
-回并后的 M2 强化保持完整范围，但不反向扩大 M1：对齐 graceful timeout；实现默认 dry-run 的 rootless user install helper；建立 cgroup declared／effective／runtime 三层读取和观测；最后另开双实例／rolling 切片。每片独立提交、验证、评审并更新本 living plan。
+M1 后的强化保持完整范围，但不反向改写已完成 checkpoint：先冻结并验证 graceful timeout 合同；再实现默认 dry-run 的 rootless user install helper；随后在备用端口和隔离状态根上执行真实 user-manager／cgroup smoke，并在该切片内对账 declared／effective／runtime 三层事实；最后另开双实例／rolling 切片。每片独立提交、验证、评审并更新本 living Plan。
 
 ## 2. 固定事实、已知可行性与能力边界
 
 ### 2.1 基线与候选事实
 
-以下候选事实锚定到代码 base `ed77c9d191df81c451c25161420515cca52ce6a4` 与 current candidate `49fb1988621bba4356e7a5039a6994c2e6d19604`；文档状态则锚定本次修订时的 `main@ec5e8f5240c6a587544e022b449aa7b392ba7ca1`，执行时必须重新读取 `main` current：
+以下 reviewed source 事实锚定到代码 base `ed77c9d191df81c451c25161420515cca52ce6a4` 与 source `49fb1988621bba4356e7a5039a6994c2e6d19604`；M1 current 状态锚定本次修订时的 `main@cf53334a10a717a3a3d30d6c0e8a297f5000d90c`，执行时必须重新读取 `main` current：
 
 - 候选包含三个提交：`66551e45… feat: add systemd socket activation runtime`、`1a220e04… fix: harden systemd runtime contract` 与 `49fb198… fix: restrict systemd state permissions`。第三个提交消费 code R2 的权限 major 及非阻断 smoke 覆盖项。
 - CLI 候选增加 `--fd`，拒绝与显式 `--host`／`--port` 混用，并把 inherited fd 传给 `uvicorn.run(..., fd=fd)`。
@@ -38,8 +38,8 @@
 - slice 候选当前声明 `MemoryHigh=1G`、`MemoryMax=2G`、`CPUQuota=200%` 与 `TasksMax=256`。
 - 候选现有 smoke 已超出纯静态字段自证：父进程创建真实 TCP listener，预先建立 backlog 连接，把 fd 3 交给真实 CLI／Uvicorn，在无可写 HOME 环境通过受控 generic upstream 验证 readiness、真实 Anthropic 请求、History／tokenization 与覆盖路径写入，并验证真实 writers 的最小权限。它仍未证明真实 systemd manager 传递 fd、service gap 中同一 listener identity、旧 accepted connection drain、超时升级或 effective cgroup limits。
 - R1 代码／部署报告为 0 blocker／1 major／2 minor，可行性报告为 0 blocker／1 major／2 minor；code R2 绑定 `1a220e04…`，关闭旧 findings 后发现 0 blocker／1 权限 major／1 minor；`49fb198…` 修复该 major并补齐 non-blocking smoke 覆盖，code R3 首次达到 0 blocker／0 major，code R4 在最终 bytes 上独立确认 `0 blocker／0 major／1 文档 minor` 并明确可 squash。Plan R2／R3 均指出旧 Plan 状态滞后；Plan R4 的唯一 major 仍是 R4 结论未回写，本次修订已消费其精确同步清单，Plan living 可继续。
-- clean integration `fe9c203…` 是 `ec5e8f5…` 的直接子提交，tree 内容是候选三提交的单提交 squash。现场 gate 绑定该 exact HEAD、integration branch、clean worktree 与该树下的 `app` import oracle；全仓 pytest 执行汇总和 collect-only node ID 两种方法均得到 301，全仓 Ruff、全仓 Pyright 与 systemd fd smoke 通过。该证据只放行仓库回放，不表示 unit 已安装或运行态已切换。
-- 候选尚未进入 `main`，尚未执行任何 system／user 安装或运行态替换。
+- 历史 prepared integration `fe9c203…` 是 `ec5e8f5…` 的直接子提交，tree 内容是候选三提交的单提交 squash。回放前 gate 绑定该 exact HEAD、integration branch、clean worktree 与该树下的 `app` import oracle；全仓 pytest 执行汇总和 collect-only node ID 两种方法均得到当时口径的 301，全仓 Ruff、全仓 Pyright 与 systemd fd smoke 通过。该历史证据只放行当次仓库回放；current main 证据以 `cf53334…` 的 375 项 gate 为准，两者都不表示 unit 已安装或运行态已切换。
+- M1 仓库范围已进入 `main`；尚未执行任何 system／user 安装、真实 user-manager 激活或运行态替换。
 
 规划环境已确认存在 `systemd-analyze`、`systemd-run`、`systemctl` 与 `curl`，systemd 为 255，用户 bus 与 `XDG_RUNTIME_DIR` 可用，`/sys/fs/cgroup` 为 cgroup v2。它们只说明 rootless probe 在当前环境可行，不构成其他 Linux 主机必然具备同样条件的兼容性保证；测试必须对缺失工具给出显式 skip／unsupported 结果，不能静默假绿。
 
@@ -87,11 +87,11 @@ unit 声明、内核运行态与 Prometheus 观测必须分三层：
 | S0 候选骨架 | **已实现、已完成 R1／可行性评审** | `66551e45…`；两报告均为 0 blocker／1 major／2 minor | 作为历史骨架保留，不再重复评审旧 HEAD |
 | S1 findings 与权限修复 | **已实现并由 code R4 终审关闭** | `1a220e04…` 的 R1 findings 由 code R2 关闭；`49fb198…` 的 `0700／0077`、覆盖目录文档与真实 writer mode 回归关闭 code R2 权限 major；code R4 为 0 blocker／0 major | 不重开已关闭代码 findings；credentials minor 留作回并后部署强化 |
 | S2 M1 真实 fd smoke | **已扩展并由 code R4 复核通过** | 真实 inherited fd、预连接 backlog、readiness 200、真实 Anthropic 请求、SIGTERM cleanup、无 HOME 启动、History＋tokenization、覆盖目录及权限 smoke 已覆盖；`fe9c203…` 上 fd smoke 再次通过 | 更完整的 activation／service-gap／accepted-drain probe 留在回并后，不扩大 M1 |
-| M1 首次 squash／回并 | **integration squash 已准备，Plan living 可继续** | clean `fe9c203…` 直接基于 `ec5e8f5…`；全仓 pytest 301 项、Ruff、Pyright、fd smoke 通过；Plan R4 状态同步 major 已由本次修订消费 | 先清理主树 Anthropic Responses bridge README／Implementation WIP，再读取 `main` current 并回放 `fe9c203…`；不等待 S3～S7 |
-| S3 graceful timeout 对齐 | **回并后切片** | unit 当前为 `330s`；尚无与 Uvicorn／app cleanup 同源的完整时间模型 | 在已回并基座上建立真实时间模型与超时执行测试 |
-| S4 user install helper | **回并后切片** | 当前只有 system-level 模板文档 | 实现 rootless render／check／默认 dry-run／显式 install；绝不自动 reload／enable／start |
-| S5 cgroup v2 reader／observability | **回并后切片** | slice 已声明 4 项 limits；effective files 与 runtime metrics 尚未实现 | 先做 typed reader＋fake-tree，再经 API 评审接 metrics；可选 delegated probe |
-| S6 M2 组合复核 | **后续** | 等待 S3～S5 分片落地 | 每片独立评审，组合后做 merged-state review；不追溯阻塞已完成的 M1 |
+| M1 首次 squash／回放 checkpoint | **已在 main 完成，Plan 继续 living** | `main@cf53334…`；main-side 全仓 pytest 375 项、Ruff、Pyright 通过；`archive/260807-systemd-runtime` → `49fb198…` | 不重复回放，不外推为部署或 cutover；直接进入 S3 |
+| S3 graceful timeout 合同 | **下一强化切片** | unit 当前为 `330s`；尚无与 Uvicorn／app cleanup 同源的完整时间模型 | 在 current main 上冻结 owner、deadline 与升级语义，并做真实超时执行测试 |
+| S4 rootless install dry-run helper | **S3 后切片** | 当前只有 system-level 模板与手工说明 | 实现 rootless render／check／默认 dry-run／显式 install；绝不自动 reload／enable／start |
+| S5 真实 user-manager／cgroup smoke | **S4 后切片** | direct inherited-fd smoke 已有；真实 user manager 传 fd、service lifecycle 与 effective cgroup 尚未证明 | 在备用端口、隔离状态根与可回收 user-manager fixture 中验证 activation、graceful、真实 cgroup 归属及 declared／effective／runtime 三层事实 |
+| S6 M2 组合复核 | **S3～S5 后续** | 等待三个强化分片落地 | 每片独立评审，组合后做 merged-state review；不追溯阻塞已完成的 M1 |
 | S7 双实例／rolling | **后续独立切片，未设计、不可冒充已支持** | 单实例 socket activation 只提供 listener continuity | 冻结拓扑、readiness 切流、状态隔离、drain、回滚和并发规则，再实施 overlap smoke |
 
 每个切片完成后立即更新本表、对应阶段的“实际结果”和“证据”字段，并写明候选 HEAD、测试命令与评审 verdict。不得等待所有切片结束后一次性补记。
@@ -100,7 +100,7 @@ unit 声明、内核运行态与 Prometheus 观测必须分三层：
 
 ### 4.1 shell 与树身份 gate
 
-主树不是固定旧 HEAD。规划、取证、Plan R4 消费与回并准备的每次 shell 都必须在同一次调用内验证物理主树、`main` 分支并读取当次 current HEAD：
+主树不是固定旧 HEAD。后续规划、取证与强化实施的每次 shell 都必须在同一次调用内验证物理主树、`main` 分支并读取当次 current HEAD：
 
 ```bash
 ROOT=/home/xp/src/ghc-api-proxy-py
@@ -112,7 +112,7 @@ MAIN_CURRENT=$(git rev-parse HEAD)
 printf 'SHELL_GATE_MAIN_CURRENT root=%s branch=main head=%s\n' "$ROOT" "$MAIN_CURRENT"
 ```
 
-候选取证仍必须在同一次 shell 验证候选物理 root、分支与 exact HEAD `49fb1988621bba4356e7a5039a6994c2e6d19604`，并证明代码 base `ed77c9d…` 是候选 HEAD 的祖先；不得把 `git -C` 指向主树的单条命令误当作当前 shell 位于候选树的证明。回并前再次读取 `main` current，记录主树漂移并在重放后的主树状态运行 M1 gates。切片开始与结束都记录 `git status --short`，只提交本切片精确 pathspec。
+后续强化以 current main 为实施基座。需要追溯 M1 时，在同一次 shell 验证 `archive/260807-systemd-runtime` 精确指向 `49fb1988621bba4356e7a5039a6994c2e6d19604`，并证明代码 base `ed77c9d…` 是该 reviewed source 的祖先；归档只作 provenance，不作为后续切片的开发 HEAD。不得把 `git -C` 指向主树的单条命令误当作当前 shell 位于目标树的证明。切片开始与结束都记录 `git status --short`，只提交本切片精确 pathspec。
 
 ### 4.2 渐进开发与测试节奏
 
@@ -172,7 +172,7 @@ printf 'SHELL_GATE_MAIN_CURRENT root=%s branch=main head=%s\n' "$ROOT" "$MAIN_CU
 5. unit 声明的 `0700／0077` 作用于真实 writers 后，目录、数据库、WAL／SHM、tokenization 临时与最终文件均无 group／other 权限。
 6. smoke 不安装 unit、不连接真实 manager、不使用生产端口、不依赖真实 token或外部 upstream；静态 unit 测试继续作为字段 tripwire，但不冒充运行态证明。
 
-**M1 门**：current candidate code R4 已达到 0 blocker／0 major，三提交已在 integration 上 squash 为 `fe9c203…`；Plan R4 的唯一状态同步 major 已由本次修订消费，Plan living 可继续。先清理主树 Anthropic Responses bridge README／Implementation WIP，再读取 `main` current、回放该 squash并重跑 main-side M1 gates。M1 不等待以下强化：`systemd-socket-activate` 环境验证、service-gap listener identity、旧 accepted connection drain／timeout、main＋child manager-level stop、install helper、effective cgroup limits、metrics 或 rolling。
+**M1 门结果**：current candidate code R4 已达到 0 blocker／0 major，reviewed 范围已经 squash 并以 `cf53334…` 进入 main；main-side pytest 375 项、Ruff 与 Pyright 通过，归档引用已固定到 `49fb198…`。M1 checkpoint 完成但 Plan 继续 living。M1 没有证明以下强化：真实 manager activation、service-gap listener identity、旧 accepted connection drain／timeout、main＋child manager-level stop、install helper、effective cgroup limits、runtime metrics 或 rolling。
 
 **回并后 continuity 强化**：
 
@@ -183,17 +183,17 @@ printf 'SHELL_GATE_MAIN_CURRENT root=%s branch=main head=%s\n' "$ROOT" "$MAIN_CU
 
 **风险与回滚**：CI 可能没有 systemd 工具或 user manager。可移植 direct inherited-fd smoke 始终运行；systemd-specific probe 能力不足时显式 skip／unsupported，不能伪装通过，也不反向阻塞已通过 code R4 的 M1 基座回并。
 
-### M1：清理 living docs WIP 后回放 integration squash
+### M1：main checkpoint 已完成，Plan 继续 living
 
-**状态**：骨架、findings／权限修复与扩展真实 fd smoke 已在 `49fb198…`；code R4 为 0 blocker／0 major并明确可 squash。Plan R4 的唯一 major 是状态滞后，本次修订已消费。clean integration `fe9c203…` 已将三提交 squash 为一个直接基于 `main@ec5e8f5…` 的语义提交，并通过全仓 pytest 301 项、Ruff、Pyright 与 fd smoke；Plan living 可继续。
+**状态**：**checkpoint 已完成，Plan 继续 living。** 骨架、findings／权限修复与扩展真实 fd smoke 已从 reviewed source `49fb198…` 经冻结 squash 回放到 `main@cf53334…`。回放后的 main-side gate 为全仓 pytest 375 项、Ruff 与 Pyright 通过；`archive/260807-systemd-runtime` 精确指向 `49fb198…`。
 
-**动作**：先完成主树 `docs/agents/anthropic-responses-bridge/README.md` 与 `docs/agents/anthropic-responses-bridge/implementation.md` 的 WIP 清理／提交边界闭合，确认不会在回放时夹带现有 `AM` 状态；随后重新读取当时 `main` current，把 `fe9c203…` 回放到目标主树，重跑同一组 M1 gates并回并。若主树漂移导致冲突，按当前内容修复并完整复验，不重做已经由 code R4 接受的候选设计，也不把 timeout、helper、cgroup 或 rolling 塞入 M1。回并代码不等于安装或部署，不授权 unit copy、daemon-reload、enable、start、restart 或现服务 cutover。
+**下一动作**：不再清理旧回放前 WIP、不再回放 `fe9c203…`，也不重复 code R4。直接从 current main 开始 S3 graceful timeout 合同，随后依次推进 S4 默认 dry-run 的 rootless install helper、S5 真实 user-manager／cgroup smoke，最后才进入 S7 rolling。每片仍要独立验证、评审并回写本 living Plan。
 
-**不得扩大门**：S3 graceful timeout、S4 install helper、S5 cgroup reader／observability、完整 continuity 强化及 S7 rolling 都是已保留的后续切片，不是 M1 squash 前置。
+**证据边界**：M1 完成只表示仓库 checkpoint 已进入 main。它不表示 unit 已安装、user manager 已激活、真实 cgroup limits 已施加、现有服务已替换、部署完成或 cutover；不授权 unit copy、daemon-reload、enable、start、restart 或任何运行态切换。
 
 ### S3：graceful timeout 单一时间模型
 
-**状态**：M1 回并后实施；不阻塞首次 squash／回并。
+**状态**：M1 checkpoint 后的下一强化切片。
 
 **目标**：消除候选 `TimeoutStopSec=330s` 与实际应用运行态之间的无证据对应关系。
 
@@ -201,7 +201,7 @@ printf 'SHELL_GATE_MAIN_CURRENT root=%s branch=main head=%s\n' "$ROOT" "$MAIN_CU
 
 - `docs/2604-rewrite/shutdown.md` 描述 `60s` graceful wait、`120s` abort wait 与四阶段设计，但旧设计文档不能证明生产已接线。
 - `src/app/shutdown.py` 当前只按顺序 await 可选 callbacks；`src/app/server.py` 的 lifespan cleanup 未创建或消费 `ShutdownManager`。
-- CLI 候选只传 `fd`，没有显式固定 Uvicorn graceful timeout。
+- current CLI 只传 `fd`，没有显式固定 Uvicorn graceful timeout。
 - 因此，`330s` 目前只是候选模板值，不得写成“60＋120＋余量”的已实现合同。
 
 **实施顺序**：
@@ -223,9 +223,9 @@ printf 'SHELL_GATE_MAIN_CURRENT root=%s branch=main head=%s\n' "$ROOT" "$MAIN_CU
 
 **风险与回滚**：修改 timeout 可能放大 stop 延迟或过早切断 SSE／WebSocket。先以缩短时间的隔离测试验证状态机，再改变模板；回滚只恢复 timeout 对齐提交，不回退 socket activation。
 
-### S4：rootless user install helper
+### S4：rootless user install dry-run helper
 
-**状态**：M1 回并后实施；不阻塞首次 squash／回并，本计划不执行真实安装。
+**状态**：S3 合同关闭后实施；本计划不执行真实安装。
 
 **目标**：让普通用户能把仓库路径、Python 解释器、配置文件、监听地址和 limits 渲染为 user units，且整个过程可预览、可检查、可逆，不需要 sudo。
 
@@ -244,13 +244,13 @@ printf 'SHELL_GATE_MAIN_CURRENT root=%s branch=main head=%s\n' "$ROOT" "$MAIN_CU
 
 **风险与回滚**：user 与 system unit 语义不完全相同。采用共享模板数据＋两套明确渲染合同，避免字符串替换 `User=` 等脆弱做法；helper 提交可独立 revert。
 
-### S5：cgroup v2 effective limits 与 observability
+### S5：真实 user-manager／cgroup smoke
 
-**状态**：M1 回并后实施；不阻塞首次 squash／回并。
+**状态**：S4 helper 的 render／check／默认 dry-run 合同关闭后实施；不触碰生产端口或现有服务。
 
-**目标**：既能验证 slice 模板声明，也能让运行实例报告自己真正受到的 cgroup v2 限制与压力信号。
+**目标**：在备用端口、隔离状态根和可回收 fixture 中，由真实 user manager 加载渲染后的 socket／service／slice，证明真实 fd activation、service lifecycle、graceful／force timeout 边界和 cgroup v2 effective limits；同时让运行实例能够区分 declared limits、effective limits 与 runtime pressure facts。
 
-**涉及文件建议**：在 `src/app/observability/` 下增加职责单一的 cgroup reader，并从现有 telemetry setup 注册 metrics；对应增加 unit tests 与 rootless smoke。最终文件名由实现者按当前模块结构选择并回写本计划。
+**涉及文件建议**：为 user unit 渲染结果增加独立 smoke harness；在确需产品内观测时，于 `src/app/observability/` 下增加职责单一的 cgroup reader，并从现有 telemetry setup 注册 metrics。对应增加 fake-tree unit tests 与 capability-gated live smoke。最终文件名由实现者按当前模块结构选择并回写本计划。
 
 **实现要求**：
 
@@ -265,16 +265,18 @@ printf 'SHELL_GATE_MAIN_CURRENT root=%s branch=main head=%s\n' "$ROOT" "$MAIN_CU
 
 - fake cgroup tree 覆盖 numeric、`max`、缺文件、权限错误、counter 增长、cgroup path escape 和文件在读取间消失。
 - metric collector 测试证明 counter／gauge 类型、单位、低基数与 unavailable 语义；exact 名称在评审后冻结。
-- 可选 rootless probe 在 transient delegated user scope 中设置较小但安全的 `MemoryHigh`／`CPUQuota`／`TasksMax`，只读取 effective files，不制造 OOM、不压测共享主机。
+- capability gate 先确认隔离 user manager、runtime directory、cgroup v2 delegation 与所需 controllers 可用；缺任一能力时必须报告 `unsupported`／skip 原因，不能回退为只读模板后宣称 live smoke 通过。
+- 真实 rootless probe 使用备用动态端口与隔离状态根，加载 S4 渲染产物，证明 manager 传递 listener、应用 readiness、service restart 前后 listener continuity、SIGTERM graceful 路径、受控 force-timeout 路径、进程真实 cgroup 归属和退出后 unit／cgroup 清理。
+- 在 transient delegated user scope 中设置较小但安全的 `MemoryHigh`／`CPUQuota`／`TasksMax`，以 systemd 属性、`/proc/<pid>/cgroup` 与对应 cgroupfs 文件交叉对账；不制造 OOM、不压测共享主机。
 - `.slice` 声明与 user／system 渲染结果分别通过静态 verify，不把 system template 数值强套到 user 环境。
 
-**验收**：声明值、effective 值与动态事件三者可区分；fake-tree tests 在所有 CI 环境运行；rootless live probe 可用时对账真实 cgroup v2，不可用时有明确报告。
+**验收**：同一渲染候选在真实 user manager 下完成 activation、readiness、restart、graceful／force timeout 与 cleanup；声明值、effective 值与动态事件三者可区分；fake-tree tests 在所有 CI 环境运行；live smoke 前后只读证明生产 listener、现有服务与 `cc-daemon` 身份不变。能力不可用时有明确 unsupported 报告，不得把静态 verify 冒充真实 manager／cgroup 通过。
 
 **风险与回滚**：scrape 热路径频繁读 procfs／cgroupfs 可能增加开销。先 profile 采样成本并采用 observable callback／有界缓存；若 metrics 接线需回滚，保留 unit limits 与 reader tests，不影响服务启动。
 
 ### S6：M2 强化组合验证与复核
 
-**状态**：等待 S3～S5 分片完成；只复核 M2 强化，不追溯扩大 M1 回并门。
+**状态**：等待 S3～S5 分片完成；只复核 M2 强化，不追溯改写已完成的 M1 checkpoint。
 
 **目标**：证明回并后强化分片各自通过后，组合状态没有在 unit、CLI、shutdown、helper 与 metrics 接缝重新引入矛盾。
 
@@ -284,10 +286,10 @@ printf 'SHELL_GATE_MAIN_CURRENT root=%s branch=main head=%s\n' "$ROOT" "$MAIN_CU
 |---|---|---|
 | 静态 unit | parser tests、`systemd-analyze verify`、路径与依赖对账 | fd 真传递、进程 readiness、effective limits |
 | CLI unit | `--fd` 接线、bind 冲突、错误 fd | systemd lifecycle |
-| rootless activation smoke | 真实 inherited fd、HTTP health、listener restart window | accepted connection 迁移、生产容量 |
+| 真实 user-manager activation smoke | 真实 inherited fd、HTTP health、listener restart window、unit cleanup | accepted connection 迁移、生产容量或 cutover |
 | shutdown integration | SIGTERM、drain、deadline、cleanup | crash／OOM 时连接不中断 |
 | cgroup fake-tree | 解析、metric mapping、错误语义 | 宿主机实际 controller delegation |
-| optional user-scope probe | effective limits、进程归属、cleanup | system unit 账户与 `/opt` 部署 |
+| user-manager／cgroup live probe | effective limits、进程归属、graceful／force timeout、cleanup | system unit 账户、`/opt` 部署或生产接管 |
 | full project gates | Ruff、Pyright、全量 pytest | 已安装或生产可替换 |
 
 **评审**：S3、S4 与 S5 每片做定向独立评审；组合后再做 M2 merged-state review，两个方向都检查：错误状态是否可能假绿，正确环境是否被过严 gate 误报。每片达到 0 blocker／0 major 后可独立回并，不要求攒齐所有强化；M2 组合复核也不得推翻已通过 code R4 并完成的 M1，除非发现直接影响 M1 正确性的新事实。
@@ -296,7 +298,7 @@ printf 'SHELL_GATE_MAIN_CURRENT root=%s branch=main head=%s\n' "$ROOT" "$MAIN_CU
 
 ### S7：双实例／rolling 后续切片
 
-**状态**：M1 与 M2 后的独立切片；明确保留，当前不实施、不伪装成 S0～S6 的自然副作用。
+**状态**：S3～S6 后的独立切片；明确保留，当前不实施、不伪装成 M1 或真实 user-manager smoke 的自然副作用。
 
 **目标**：在不迁移 accepted connections 的前提下，让新旧应用实例短时间重叠，先把新连接切到 ready 的新实例，再 drain 旧实例，并支持失败回切。
 
@@ -321,12 +323,12 @@ printf 'SHELL_GATE_MAIN_CURRENT root=%s branch=main head=%s\n' "$ROOT" "$MAIN_CU
 | `--fd 0` | **R1 minor 已由 code R2～R4 关闭** | Typer `min=1` 与精确拒绝测试已落地且无回归 |
 | M1 真实 fd smoke | **已扩展并由 code R4 复核，integration 再次通过** | inherited fd、预连接 backlog、readiness 200、真实请求、无 HOME、History＋tokenization、覆盖目录、状态权限与 cleanup 已覆盖；`fe9c203…` 上 smoke 6 项通过 |
 | EnvironmentFile secret 边界 | **code R4 non-blocking minor，后续部署强化** | 现路径仅作兼容且不阻塞 M1；后续优先评估 `LoadCredential=`／`LoadCredentialEncrypted=` 与现有 `auth.token_file` 接线 |
-| M1 squash／回并 | **integration squash 已准备，Plan living 可继续** | `fe9c203…` 为 `ec5e8f5…` 直接子提交；全仓 pytest 301 项经执行与 collect-only 计数交叉核对，Ruff、Pyright、fd smoke 通过 | 先清理 Anthropic Responses bridge README／Implementation WIP，再回放 `fe9c203…`；不等待后续强化 |
-| activation／service-gap／accepted-drain 深化 | **回并后开放** | `systemd-socket-activate` 与父进程 listener-owner probe 分工；accepted connection 单独验证 drain／timeout／不迁移 |
-| shutdown owner／deadline | **回并后开放** | 从生产接线冻结 Uvicorn、应用 manager 与 systemd 的时间模型；历史四阶段文档不能替代证据 |
-| user install helper | **回并后开放** | 冻结 CLI、默认 dry-run、原子写入、冲突／备份／卸载策略；不自动 reload／enable／start |
-| cgroup 三层与 metric API | **回并后开放** | 先做 typed reader／fake-tree，再冻结 metric names、types、units、unavailable、采样频率与 cardinality |
-| 平台兼容 | **回并后开放** | 明确 systemd 版本下限、user manager／delegation 要求，以及非 systemd／非 Linux 的 unsupported 行为 |
+| M1 squash／回放 checkpoint | **已在 main 完成，Plan living 继续** | `main@cf53334…`；全仓 pytest 375 项、Ruff、Pyright 通过；archive ref → `49fb198…` | 不重复回放；进入 graceful timeout 合同，不外推安装、部署或 cutover |
+| activation／service-gap／accepted-drain 深化 | **S5 真实 user-manager smoke 范围** | `systemd-socket-activate` 与父进程 listener-owner probe 继续作为可移植分层证据；真实 manager 下单独验证 drain／timeout／不迁移 |
+| shutdown owner／deadline | **S3 下一强化切片** | 从生产接线冻结 Uvicorn、应用 manager 与 systemd 的时间模型；历史四阶段文档不能替代证据 |
+| rootless install dry-run helper | **S4 开放** | 冻结 CLI、默认 dry-run、原子写入、冲突／备份／卸载策略；不自动 reload／enable／start |
+| 真实 user-manager／cgroup 三层与 metric API | **S5 开放** | 使用备用端口和隔离状态根验证真实 manager lifecycle 与 effective cgroup；typed reader／fake-tree 支撑 declared／effective／runtime 对账，再冻结 metrics 合同 |
+| 平台兼容 | **S4～S5 开放** | 明确 systemd 版本下限、user manager／delegation 要求，以及非 systemd／非 Linux 的 unsupported 行为 |
 | rolling | **后续独立设计** | readiness 切流、状态隔离、drain、回滚与并发规则先冻结 |
 
 ## 7. 验证命令与 rootless 证据边界
@@ -343,9 +345,9 @@ python -m pytest -q tests
 
 仓库模板的 `ExecStart=/opt/ghc-api-proxy/.venv/bin/python` 在未安装环境中可能使直接 `systemd-analyze verify` 因目标路径不存在而非零；M1 应使用受控临时副本替换为真实可执行 fixture，或由测试封装该前置后再 verify，不能屏蔽其他错误，也不能把路径替换后的绿误称为已安装模板可运行。`systemd-analyze verify` 只证明 unit 可解析和部分引用一致，不证明真实 manager 已传 fd、unit 已安装或 cgroup limits 已施加。
 
-integration `fe9c203…` 的本次实际 gate 绑定 `/home/xp/src/ghc-api-proxy-py-integrate-systemd`、分支 `integrate/260807-systemd-runtime`、exact HEAD、clean worktree 与该树下的 `app` import oracle：全仓 pytest 自报 `301 passed`，collect-only 输出中的 node ID 独立计数同为 301；全仓 Ruff 为 `All checks passed!`，全仓 Pyright 为 `0 errors, 0 warnings, 0 informations`，`tests/smoke/test_systemd_units.py` 为 6 passed，结束状态 clean。首次全量尝试受共享终端外部 `Ctrl-C` 在 13 项后中断，已废弃且不作为证据；上述有效结果来自忽略外部 INT、隔离进程组并等待真实子进程退出的重跑。
+M1 回放后的实际 gate 绑定 `main@cf53334a10a717a3a3d30d6c0e8a297f5000d90c` 与主树自身 import oracle：全仓 pytest 自报 `375 passed`，全仓 Ruff 与全仓 Pyright 通过；归档引用随后固定到 reviewed source `49fb1988621bba4356e7a5039a6994c2e6d19604`。这些结果的口径是回放时 current `tests`、`src` 与主树环境，不是永久测试数阈值；后续执行时重跑并记录当时数量。该 gate 没有连接真实 user manager、安装 unit、验证 effective cgroup 或操作生产 listener。
 
-回并后新增的 continuity、shutdown、helper 与 cgroup 测试路径在各切片落地时再加入本节；不存在的 `tests/smoke/test_systemd_socket_activation.py` 与 `tests/unit/test_cgroup_observability.py` 不作为 current M1 已通过命令。optional user-scope probe 必须由测试 harness 创建临时状态并自动清理；不允许手工 `systemctl --user` 改变真实用户 manager 来补证据。
+后续新增的 shutdown、helper 与真实 user-manager／cgroup 测试路径在各切片落地时再加入本节；不存在的 `tests/smoke/test_systemd_socket_activation.py` 与 `tests/unit/test_cgroup_observability.py` 不作为 current M1 已通过命令。user-manager smoke 必须由测试 harness 创建隔离 runtime／状态并自动清理；不允许手工改动常驻用户 manager 来补证据。
 
 任何测试数量、耗时或性能数据都在实际运行后记录命令、HEAD、路径范围与环境，并用不同原理交叉核对；本计划不预填数字。
 
@@ -384,9 +386,9 @@ integration `fe9c203…` 的本次实际 gate 绑定 `/home/xp/src/ghc-api-proxy
 | 位置 | 怪味 | 处置 |
 |---|---|---|
 | `src/app/shutdown.py` 与 `src/app/server.py` | 设计类存在但生产 lifespan 未消费，容易把“类已实现”误写成“四阶段运行态已接线” | S3 本轮核对真实 signal／lifespan 调用图；未接线前文档明确降级，不以 helper 存在证明支持 |
-| `contrib/systemd/ghc-api-proxy.service` 候选 | `330s` 与应用 runtime timeout 非同源常量 | S3 建立单一时间模型与机械对账 |
-| `tests/smoke/test_systemd_units.py` 候选 | 静态 unit tripwire、真实 writer 权限与 inherited-fd／upstream smoke 同文件，且 direct harness 尚不能证明 manager-level activation／service-gap | M1 保留 code R4 已复核并在 `fe9c203…` 再次通过的可移植纵向 smoke；回并后把 activation、listener-owner continuity 与 accepted-drain probe 按能力边界拆分 |
-| `contrib/systemd/ghc-api-proxy.service` 的 EnvironmentFile | 兼容配置与 secret 传递边界混在同一机制，文件 mode 不能消除环境经 D-Bus／进程树暴露的风险 | 记录 code R4 non-blocking minor；回并后优先评估 systemd credentials 与现有 token-file 接线，不反向阻塞 M1 |
+| `contrib/systemd/ghc-api-proxy.service` | `330s` 与应用 runtime timeout 非同源常量 | S3 建立单一时间模型与机械对账 |
+| `tests/smoke/test_systemd_units.py` | 静态 unit tripwire、真实 writer 权限与 inherited-fd／upstream smoke 同文件，且 direct harness 尚不能证明 manager-level activation／service-gap | M1 保留 code R4 已复核并在 `fe9c203…` 再次通过的可移植纵向 smoke；S5 把 activation、listener-owner continuity 与 accepted-drain probe 按能力边界拆分 |
+| `contrib/systemd/ghc-api-proxy.service` 的 EnvironmentFile | 兼容配置与 secret 传递边界混在同一机制，文件 mode 不能消除环境经 D-Bus／进程树暴露的风险 | 记录 code R4 non-blocking minor；后续部署强化优先评估 systemd credentials 与现有 token-file 接线，不反向改写 M1 |
 | system 与未来 user units | 若复制两份全文，路径、targets、账户字段和 limits 会漂移 | S4 使用共享 typed render inputs 与两套明确模板合同；避免脆弱字符串替换 |
 | cgroup 声明与 metrics | unit 配置和应用观测分属两处，可能一边改 limits、一边继续解释旧阈值 | S5 把 declared／effective／runtime 三层写入同一测试矩阵和部署文档 |
 
@@ -402,14 +404,12 @@ integration `fe9c203…` 的本次实际 gate 绑定 `/home/xp/src/ghc-api-proxy
 
 ## 11. 实施 kick-off
 
-在 `feat/systemd-cgroup-runtime` 候选 worktree 与 `integrate/260807-systemd-runtime` integration worktree 继续本计划。候选代码 base 为 `ed77c9d191df81c451c25161420515cca52ce6a4`，current candidate 为 `49fb1988621bba4356e7a5039a6994c2e6d19604`，已准备的 integration squash 为 `fe9c20315b0137ca5b2253fdbd86a30d504255ef`；主树每次 shell 都以当次 `main` current 为门，不把本文件记录的点时 HEAD 当作永久 expected。每次 shell 都在同一次调用内验证物理 root、分支、current HEAD 和所用候选／integration exact HEAD，不依赖前一调用的 cwd；记录开始／结束 status，只提交当前语义切片的精确 pathspec。
+从 current `main` 继续本 living Plan。M1 已以 `cf53334a10a717a3a3d30d6c0e8a297f5000d90c` 进入 main，回放时全仓 pytest 375 项、Ruff 与 Pyright 通过；`archive/260807-systemd-runtime` 精确指向 reviewed source `49fb1988621bba4356e7a5039a6994c2e6d19604`。不要重放 `fe9c203…`，不要在旧 source／integration worktree 上开始强化。每次 shell 都在同一次调用内验证主树物理 root、`main` 分支和当次 current HEAD，不依赖前一调用的 cwd；记录开始／结束 status，只提交当前语义切片的精确 pathspec。
 
-先消费两份初始 systemd reports、code R2～R4 与 Plan R2～R4。已确认 `49fb198…` 的 `Type=exec`、`KillMode=control-group`、StateDirectory＋显式 History／tokenization 路径、`--fd >= 1`、`StateDirectoryMode=0700`、`UMask=0077`、覆盖目录文档、真实 writer 权限回归，以及无 HOME 的 inherited-fd／backlog／readiness／真实请求／History＋tokenization smoke；code R4 为 0 blocker／0 major、明确三提交可 squash。保持 `/health/readiness` 为独立 oracle；不得把 `Type=exec` 写成应用 ready。
+先消费两份初始 systemd reports、code R2～R4、Plan R2～R4 与 squash 审计。M1 已确认 `Type=exec`、`KillMode=control-group`、StateDirectory＋显式 History／tokenization 路径、`--fd >= 1`、`StateDirectoryMode=0700`、`UMask=0077`、覆盖目录文档、真实 writer 权限回归，以及无 HOME 的 inherited-fd／backlog／readiness／真实请求／History＋tokenization smoke。保持 `/health/readiness` 为独立 oracle；不得把 `Type=exec` 写成应用 ready，也不得把仓库 checkpoint 写成 unit 已安装或运行态已切换。
 
-Plan R4 已落盘并指出唯一状态同步 major；本次修订已消费其实际 verdict 与精确清单，Plan living 可继续。三候选提交已 squash 为 clean integration `fe9c203…`，且该 exact HEAD 上的全仓 pytest 301 项、Ruff、Pyright 与 fd smoke 已通过。下一动作不是等待更多代码或强化：先清理主树 `docs/agents/anthropic-responses-bridge/README.md` 与 `implementation.md` 的 WIP／提交边界，再重新读取 `main` current、回放 `fe9c203…`、运行 main-side M1 gates并回并；不要等待 graceful timeout、install helper、完整 continuity、cgroup observability 或 rolling。
+按顺序执行后续强化：S3 从 Uvicorn、signal handler、FastAPI lifespan 与 cleanup 真实调用链冻结 graceful timeout owner、deadline 和升级合同；S4 实现 rootless install helper，默认固定 dry-run，只有显式 install 才写测试隔离目录，绝不自动 reload／enable／start；S5 用 S4 渲染结果在备用动态端口、隔离状态根与可回收 user-manager fixture 中执行真实 activation、restart、graceful／force timeout、cgroup 归属与 cleanup smoke，并以 typed reader／fake-tree 支撑 declared／effective／runtime 三层对账。每片独立提交、验证、评审和回并，不攒成一个大候选。
 
-M1 回并后再按独立切片继续强化：先分开 `systemd-socket-activate` happy path 与父进程自持 listener 的 service-gap probe，并单独验证旧 accepted connections 的 drain／timeout／不迁移；S3 从 Uvicorn、signal handler、FastAPI lifespan 与 cleanup 真实调用链重建 shutdown 时间模型；S4 实现 rootless user install helper，默认固定 dry-run，只有显式 install 才写临时测试目录，绝不自动 reload／enable／start；S5 先实现 cgroup v2 typed reader 与 fake-tree，再经观测 API 评审接入 declared／effective／runtime 三层 metrics。每片独立提交、验证、评审和回并，不攒成一个大候选。
+始终区分 listener continuity、queued／unaccepted connections 与旧进程 accepted connections；单实例 socket activation 和真实 user-manager smoke 都不得称为双实例／rolling 或 accepted connection zero-downtime。双实例／rolling 留到 S7，先冻结稳定 listener／proxy 拓扑、readiness 切流、状态隔离、drain 与回滚，再实施。
 
-始终区分 listener continuity、queued／unaccepted connections 与旧进程 accepted connections；单实例 socket activation 不得称为双实例／rolling 或 accepted connection zero-downtime。双实例／rolling 留到 S7，先冻结稳定 listener／proxy 拓扑、readiness 切流、状态隔离、drain 与回滚，再实施。
-
-完成每个切片后立即更新本文件的状态看板、实际 HEAD、测试证据、评审 verdict、结构怪味和下一动作。任何仓库内 gate 全绿都不等于已部署；系统安装、运行态替换和发布由用户另行明确发起。
+完成每个切片后立即更新本文件的状态看板、实际 HEAD、测试证据、评审 verdict、结构怪味和下一动作。任何仓库内 gate 或备用 user-manager smoke 全绿都不等于已部署或已 cutover；系统安装、运行态替换和发布由用户另行明确发起。
