@@ -51,6 +51,10 @@ def start(
     port: Annotated[int | None, typer.Option("--port", "-p", min=1, max=65535)] = None,
     host: Annotated[str | None, typer.Option("--host", "-H")] = None,
     fd: Annotated[int | None, typer.Option("--fd", min=1)] = None,
+    graceful_timeout: Annotated[
+        int | None,
+        typer.Option("--graceful-timeout", min=1),
+    ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
     account_type: Annotated[
         AccountType | None,
@@ -85,6 +89,8 @@ def start(
         cli_overrides["port"] = port
     if host is not None:
         cli_overrides["host"] = host
+    if graceful_timeout is not None:
+        cli_overrides["shutdown"] = {"graceful_timeout": graceful_timeout}
     if account_type is not None:
         auth_overrides["account_type"] = account_type.value
     if ghc_api_base_url is not None:
@@ -109,9 +115,20 @@ def start(
     settings = load_settings(config_path=config, cli_overrides=cli_overrides)
     application = create_app(settings)
     if fd is None:
-        uvicorn.run(application, host=settings.host, port=settings.port, log_config=None)
+        uvicorn.run(
+            application,
+            host=settings.host,
+            port=settings.port,
+            log_config=None,
+            timeout_graceful_shutdown=settings.shutdown.graceful_timeout,
+        )
     else:
-        uvicorn.run(application, fd=fd, log_config=None)
+        uvicorn.run(
+            application,
+            fd=fd,
+            log_config=None,
+            timeout_graceful_shutdown=settings.shutdown.graceful_timeout,
+        )
 
 
 def _authenticate() -> None:

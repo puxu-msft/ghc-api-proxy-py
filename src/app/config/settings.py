@@ -3,6 +3,8 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.graceful_timeout import DEFAULT_GRACEFUL_TIMEOUT_SECONDS
+
 
 class FrozenModel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -143,6 +145,13 @@ class HooksConfig(FrozenModel):
     deduplicate_tool_calls: bool = False
 
 
+class ShutdownConfig(FrozenModel):
+    graceful_timeout: int = Field(
+        default=DEFAULT_GRACEFUL_TIMEOUT_SECONDS,
+        ge=1,
+    )
+
+
 class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="GHC_",
@@ -167,6 +176,7 @@ class AppSettings(BaseSettings):
     openai_responses: ResponsesConfig = Field(default_factory=ResponsesConfig)
     tokenization: TokenizationConfig = Field(default_factory=TokenizationConfig)
     hooks: HooksConfig = Field(default_factory=HooksConfig)
+    shutdown: ShutdownConfig = Field(default_factory=ShutdownConfig)
     model_overrides: dict[str, str] = Field(
         default_factory=lambda: {
             "opus": "claude-opus-4.6",

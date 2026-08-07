@@ -9,7 +9,7 @@
 这不是双实例 rolling restart，也不承诺所有连接 zero-downtime：
 
 - 已被旧进程接受的 HTTP、SSE 或 WebSocket 连接仍归旧进程所有。SIGTERM 后 Uvicorn 会停止接受新连接并等待现有连接完成，然后执行 FastAPI lifespan 清理。
-- systemd 的单个 `.service` 重启是先停旧进程、再启动新进程。若旧连接未能在 `TimeoutStopSec=330s` 内结束，systemd 会终止该 cgroup 中的剩余进程，这些连接会中断。
+- systemd 的单个 `.service` 重启是先停旧进程、再启动新进程。模板把 Uvicorn graceful timeout 显式设为 `300s`，并把 `TimeoutStopSec=330s` 设为严格更大的 manager deadline；若旧连接和 lifespan cleanup 未能在该窗口内结束，systemd 会终止该 cgroup 中的剩余进程，这些连接会中断。
 - listen backlog 只能覆盖尚未 accept 的连接，并且容量有限。过载或重启时间过长时，客户端仍可能连接失败或超时。
 - 真正让已有长连接跨版本无损迁移，或让新旧应用实例重叠服务，需要后续实现双实例／rolling 编排、readiness 切流和共享状态并发规则；本模板没有伪装成该能力。
 
@@ -39,6 +39,8 @@ GHC_HISTORY__DB_PATH=/var/lib/ghc-api-proxy/history.db
 GHC_TOKENIZATION__STATE_PATH=/var/lib/ghc-api-proxy/tokenization.json
 ```
 
+应用 graceful timeout 的配置键是 `shutdown.graceful_timeout`，环境变量形式为 `GHC_SHUTDOWN__GRACEFUL_TIMEOUT`，CLI override 为 `--graceful-timeout`。它直接传给 Uvicorn 的 `timeout_graceful_shutdown`，约束 SIGTERM 后等待在途任务完成的应用窗口；FastAPI lifespan cleanup 仍由 Uvicorn 随后的 shutdown 生命周期执行。Systemd 模板在 `ExecStart` 中显式传入 `--graceful-timeout 300`，因此该 CLI 值优先于环境文件中的同名设置；模板没有把 `GHC_SHUTDOWN__GRACEFUL_TIMEOUT` 放进环境文件示例，以免制造一个看似可覆盖、实际被 CLI 固定值遮蔽的旋钮。部署者若调整模板 timeout，必须同时保持 `TimeoutStopSec > --graceful-timeout`；仓库 smoke 会把 CLI 值、Python 默认常量和 `TimeoutStopSec` 的 `30s` manager 余量机械对账，任一处漂移都会失败。
+
 `HistoryConfig.db_path` 与 `TokenizationConfig.state_path` 在应用配置中允许为空，此时会回退到用户数据目录。system service 不应依赖服务账户具有可写 HOME，因此模板通过 `StateDirectory=ghc-api-proxy` 创建并授权 `/var/lib/ghc-api-proxy`，同时用 `Environment=` 把这两个路径显式设置到该目录。`StateDirectoryMode=0700` 让默认状态目录仅服务账户可遍历，`UMask=0077` 让应用创建的 History 数据库、SQLite WAL／SHM、tokenization 原子写临时文件与最终文件不带 group／other 权限；当前 writer 在该模板下创建的这些文件 mode 均为 `0600`。
 
 上面的 EnvironmentFile 示例写出了相同值；需要改用其他目录时，可以在环境文件中覆盖 unit 默认值。覆盖目录必须由管理员预先创建、归服务账户独占并设为 `0700` 或等价的最小权限，已有数据库、WAL／SHM、tokenization 临时文件与最终文件也必须保持 `0600` 或等价的无 group／other 权限。`UMask=0077` 只约束服务进程新建的文件，不会自动收紧既有目录或文件。
@@ -61,10 +63,11 @@ GHC_TOKENIZATION__STATE_PATH=/var/lib/ghc-api-proxy/tokenization.json
 ## 关闭与故障恢复语义
 
 - `KillSignal=SIGTERM` 触发 Uvicorn 的 graceful shutdown 和 FastAPI lifespan 清理。当前清理会拒绝待审批、刷新 tokenization 状态、关闭 History、关闭 upstream clients，并取消后台任务。
-- `KillMode=control-group` 向该 service cgroup 中的所有进程发送 SIGTERM，让主进程与未来可能出现的协作子进程共享 graceful shutdown 窗口；超过 `TimeoutStopSec` 后，systemd 强制清理剩余进程。
+- `--graceful-timeout 300` 传给 Uvicorn 的 `timeout_graceful_shutdown`。超过该应用窗口仍未完成的在途任务会被 Uvicorn 取消，随后继续执行 FastAPI lifespan cleanup；当前没有把历史四阶段 `ShutdownManager` 接入生产信号路径，也不宣称支持重复信号升级。
+- `KillMode=control-group` 向该 service cgroup 中的所有进程发送 SIGTERM，让主进程与未来可能出现的协作子进程共享 graceful shutdown 窗口；`TimeoutStopSec=330s` 比应用 timeout 多 `30s`，为 Uvicorn 结束 server lifecycle、执行 lifespan cleanup 和进程退出保留 manager 余量。超过 systemd deadline 后，systemd 强制清理剩余进程。
 - `Restart=on-failure` 会在异常退出后重启；正常停止不会形成重启循环。socket 保持 active 时，新连接也可再次激活 service。
 - `.slice` 的限制作用于该 slice 下的工作负载。`MemoryHigh` 是回收压力阈值，`MemoryMax` 是硬上限；触及硬上限可能触发 cgroup OOM，随后由 `Restart=on-failure` 恢复进程，但在途连接仍会中断。
 
 ## 无需 root 的仓库验证
 
-`tests/smoke/test_systemd_units.py` 解析模板并核对 socket fd 接线、状态目录、最小权限、关闭合同与 cgroup 关键字段；它以 unit 声明的 mode／umask 运行真实 History 与 tokenization writer，核对状态目录、数据库、WAL／SHM、原子写临时文件和最终文件的实际 mode。运行态 smoke 由父进程创建真实 TCP listener 和预连接 backlog，在无可写 HOME 的环境中把 listener 交给应用 fd 3，并连接受控 generic upstream，验证 readiness 200、真实 Anthropic 请求、EnvironmentFile 等价路径覆盖、SIGTERM 清理，以及 History 与 tokenization 状态均落到覆盖目录。`tests/unit/test_cli.py` 核对 `--fd` 被传给 Uvicorn，并拒绝 fd 0。测试不安装 unit、不连接 systemd，也不需要 root。
+`tests/smoke/test_systemd_units.py` 解析模板并核对 socket fd 接线、状态目录、最小权限、关闭合同与 cgroup 关键字段；它从 `ExecStart` 反解 application timeout，并与 Python 默认常量、`TimeoutStopSec` 和 `30s` manager 余量机械对账。它还以 unit 声明的 mode／umask 运行真实 History 与 tokenization writer，核对状态目录、数据库、WAL／SHM、原子写临时文件和最终文件的实际 mode。运行态 smoke 由父进程创建真实 TCP listener 和预连接 backlog，在无可写 HOME 的环境中把 listener 交给应用 fd 3，并连接受控 generic upstream，验证 readiness 200、真实 Anthropic 请求、EnvironmentFile 等价路径覆盖、SIGTERM 清理，以及 History 与 tokenization 状态均落到覆盖目录。独立短 timeout probe 使用 `--graceful-timeout 1` 阻塞一个真实在途请求，发送 SIGTERM，并断言 Uvicorn timeout 分支、lifespan cleanup 和进程退出均发生。`tests/unit/test_cli.py` 核对 `--fd` 与 graceful timeout 被传给 Uvicorn，并拒绝 fd 0。测试不安装 unit、不连接 systemd，也不需要 root。

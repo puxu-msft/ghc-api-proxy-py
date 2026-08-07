@@ -5,16 +5,22 @@ import socket
 import stat
 import subprocess
 import sys
+import time
 from configparser import ConfigParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from shlex import split
-from threading import Thread
+from threading import Event, Thread
 from typing import ClassVar
 
 import pytest
 
 from app.config.loader import load_settings
+from app.graceful_timeout import (
+    DEFAULT_GRACEFUL_TIMEOUT_SECONDS,
+    SYSTEMD_STOP_TIMEOUT_MARGIN_SECONDS,
+    SYSTEMD_STOP_TIMEOUT_SECONDS,
+)
 from app.history.sqlite.writer import HistoryWriter
 from app.history.types import HistoryEntry, ModelRef
 from app.tokenization.state_store import TokenizationStateStore
@@ -27,6 +33,16 @@ def _read_unit(name: str) -> ConfigParser:
     with (SYSTEMD_DIR / name).open(encoding="utf-8") as unit_file:
         parser.read_file(unit_file)
     return parser
+
+
+def _assert_graceful_timeout_contract(service: ConfigParser) -> None:
+    command = split(service["Service"]["ExecStart"])
+    graceful_timeout = int(command[command.index("--graceful-timeout") + 1])
+    stop_timeout = int(service["Service"]["TimeoutStopSec"].removesuffix("s"))
+    assert stop_timeout > graceful_timeout, "systemd deadline must strictly exceed app timeout"
+    assert graceful_timeout == DEFAULT_GRACEFUL_TIMEOUT_SECONDS
+    assert stop_timeout == SYSTEMD_STOP_TIMEOUT_SECONDS
+    assert stop_timeout - graceful_timeout == SYSTEMD_STOP_TIMEOUT_MARGIN_SECONDS
 
 
 def _http_request(connection: socket.socket, path: str) -> bytes:
@@ -57,6 +73,9 @@ def _http_json_request(connection: socket.socket, path: str, payload: object) ->
 
 class _GenericUpstreamHandler(BaseHTTPRequestHandler):
     requests: ClassVar[list[str]] = []
+    hold_messages: ClassVar[bool] = False
+    message_started: ClassVar[Event] = Event()
+    release_message: ClassVar[Event] = Event()
 
     def do_GET(self) -> None:
         self.requests.append(self.path)
@@ -80,17 +99,24 @@ class _GenericUpstreamHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers["Content-Length"])
         request = json.loads(self.rfile.read(content_length))
         assert request["model"] == "claude-test"
-        self._respond(
-            {
-                "id": "msg_smoke",
-                "type": "message",
-                "role": "assistant",
-                "model": "claude-test",
-                "content": [{"type": "text", "text": "ok"}],
-                "stop_reason": "end_turn",
-                "usage": {"input_tokens": 12, "output_tokens": 1},
-            }
-        )
+        if self.hold_messages:
+            self.message_started.set()
+            self.release_message.wait(timeout=15)
+        try:
+            self._respond(
+                {
+                    "id": "msg_smoke",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-test",
+                    "content": [{"type": "text", "text": "ok"}],
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 12, "output_tokens": 1},
+                }
+            )
+        except (BrokenPipeError, ConnectionResetError):
+            if not self.hold_messages:
+                raise
 
     def log_message(self, format: str, *args: object) -> None:
         del format, args
@@ -113,7 +139,16 @@ def test_socket_activation_units_share_the_inherited_listener() -> None:
     assert socket["Socket"]["Service"] == "ghc-api-proxy.service"
     assert service["Service"]["Type"] == "exec"
     assert "ExecReload" not in service["Service"]
-    assert service["Service"]["ExecStart"].endswith(" -m app start --fd 3")
+    assert split(service["Service"]["ExecStart"]) == [
+        "/opt/ghc-api-proxy/.venv/bin/python",
+        "-m",
+        "app",
+        "start",
+        "--fd",
+        "3",
+        "--graceful-timeout",
+        str(DEFAULT_GRACEFUL_TIMEOUT_SECONDS),
+    ]
     assert "ghc-api-proxy.socket" in service["Unit"]["Requires"].split()
 
 
@@ -222,12 +257,20 @@ def test_service_shutdown_and_cgroup_contract() -> None:
     assert service["Service"]["Restart"] == "on-failure"
     assert service["Service"]["KillSignal"] == "SIGTERM"
     assert service["Service"]["KillMode"] == "control-group"
-    assert service["Service"]["TimeoutStopSec"] == "330s"
+    _assert_graceful_timeout_contract(service)
     assert service["Service"]["Slice"] == "ghc-api-proxy.slice"
     assert resource_slice["Slice"]["MemoryHigh"] == "1G"
     assert resource_slice["Slice"]["MemoryMax"] == "2G"
     assert resource_slice["Slice"]["CPUQuota"] == "200%"
     assert resource_slice["Slice"]["TasksMax"] == "256"
+
+
+def test_service_shutdown_contract_rejects_nonpositive_manager_margin() -> None:
+    service = _read_unit("ghc-api-proxy.service")
+    service["Service"]["TimeoutStopSec"] = f"{DEFAULT_GRACEFUL_TIMEOUT_SECONDS}s"
+
+    with pytest.raises(AssertionError, match="strictly exceed"):
+        _assert_graceful_timeout_contract(service)
 
 
 def test_inherited_listener_serves_ready_generic_upstream_and_persists_overrides(
@@ -334,7 +377,120 @@ def test_inherited_listener_serves_ready_generic_upstream_and_persists_overrides
         assert not (default_state_directory / "tokenization.json").exists()
         assert _GenericUpstreamHandler.requests == ["/v1/models", "/v1/messages"]
     finally:
+        _GenericUpstreamHandler.hold_messages = False
+        _GenericUpstreamHandler.message_started.clear()
+        _GenericUpstreamHandler.release_message.clear()
         backlog_client.close()
+        listener.close()
+        upstream.shutdown()
+        upstream.server_close()
+        upstream_thread.join(timeout=10)
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=10)
+
+
+def test_short_graceful_timeout_cancels_inflight_request_and_runs_lifespan(
+    tmp_path: Path,
+) -> None:
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), _GenericUpstreamHandler)
+    upstream_thread = Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    upstream_url = f"http://127.0.0.1:{upstream.server_address[1]}"
+    _GenericUpstreamHandler.requests = []
+    _GenericUpstreamHandler.hold_messages = True
+    _GenericUpstreamHandler.message_started.clear()
+    _GenericUpstreamHandler.release_message.clear()
+
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(8)
+    address = listener.getsockname()
+    environment = os.environ.copy()
+    for name in (
+        "COPILOT_API_GITHUB_TOKEN",
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "GHC_AUTH__GITHUB_TOKEN",
+        "GHC_CONFIG",
+    ):
+        environment.pop(name, None)
+    environment.update(
+        {
+            "HOME": "/nonexistent",
+            "PYTHONPATH": str(SYSTEMD_DIR.parents[1] / "src"),
+            "GHC_HISTORY__ENABLED": "false",
+            "GHC_TOKENIZATION__STATE_PATH": str(tmp_path / "tokenization.json"),
+            "GHC_UPSTREAM__TYPE": "generic",
+            "GHC_UPSTREAM__OPENAI_BASE_URL": f"{upstream_url}/v1",
+            "GHC_UPSTREAM__ANTHROPIC_BASE_URL": upstream_url,
+            "GHC_UPSTREAM__API_KEY": "smoke-key",
+            "GHC_MODEL_REFRESH_INTERVAL": "0",
+        }
+    )
+    inherited_fd = listener.fileno()
+    launcher = (
+        "import os, sys; "
+        "source = int(sys.argv[1]); "
+        "os.dup2(source, 3); "
+        "os.set_inheritable(3, True); "
+        "os.execv(sys.executable, "
+        "[sys.executable, '-m', 'app', 'start', '--fd', '3', "
+        "'--graceful-timeout', '1'])"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", launcher, str(inherited_fd)],
+        cwd=SYSTEMD_DIR.parents[1],
+        env=environment,
+        pass_fds=(inherited_fd,),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    request_errors: list[OSError] = []
+
+    def send_blocked_request() -> None:
+        try:
+            with socket.create_connection(address, timeout=10) as client:
+                client.settimeout(10)
+                _http_json_request(
+                    client,
+                    "/v1/messages",
+                    {
+                        "model": "claude-test",
+                        "max_tokens": 16,
+                        "messages": [{"role": "user", "content": "hold"}],
+                    },
+                )
+        except OSError as error:
+            request_errors.append(error)
+
+    request_thread = Thread(target=send_blocked_request, daemon=True)
+    try:
+        with socket.create_connection(address, timeout=10) as readiness_client:
+            readiness_client.settimeout(10)
+            readiness_response = _http_request(readiness_client, "/health/readiness")
+        assert b"HTTP/1.1 200 OK" in readiness_response
+
+        request_thread.start()
+        assert _GenericUpstreamHandler.message_started.wait(timeout=10)
+        started_at = time.monotonic()
+        process.send_signal(signal.SIGTERM)
+        output, _ = process.communicate(timeout=10)
+        elapsed = time.monotonic() - started_at
+
+        assert process.returncode == -signal.SIGTERM, output
+        assert elapsed < 8
+        assert "timeout graceful shutdown exceeded" in output
+        assert "Application shutdown complete." in output
+        assert "Finished server process" in output
+    finally:
+        _GenericUpstreamHandler.release_message.set()
+        request_thread.join(timeout=10)
+        _GenericUpstreamHandler.hold_messages = False
+        _GenericUpstreamHandler.message_started.clear()
+        _GenericUpstreamHandler.release_message.clear()
         listener.close()
         upstream.shutdown()
         upstream.server_close()

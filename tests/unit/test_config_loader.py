@@ -89,6 +89,26 @@ def test_non_per_key_mapping_is_replaced(tmp_path: Path) -> None:
     assert settings.anthropic.effort_overrides == {"cli-model": ["low"]}
 
 
+def test_shutdown_graceful_timeout_uses_normal_config_precedence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "shutdown:\n"
+        "  graceful_timeout: 11\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GHC_SHUTDOWN__GRACEFUL_TIMEOUT", "12")
+
+    settings = load_settings(
+        config_path=config_path,
+        cli_overrides={"shutdown": {"graceful_timeout": 13}},
+    )
+
+    assert settings.shutdown.graceful_timeout == 13
+
+
 def test_model_overrides_mapping_is_replaced(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(

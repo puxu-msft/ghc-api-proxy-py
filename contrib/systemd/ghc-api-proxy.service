@@ -15,7 +15,7 @@ StateDirectoryMode=0700
 UMask=0077
 Environment="GHC_HISTORY__DB_PATH=/var/lib/ghc-api-proxy/history.db" "GHC_TOKENIZATION__STATE_PATH=/var/lib/ghc-api-proxy/tokenization.json"
 EnvironmentFile=-/etc/ghc-api-proxy/ghc-api-proxy.env
-ExecStart=/opt/ghc-api-proxy/.venv/bin/python -m app start --fd 3
+ExecStart=/opt/ghc-api-proxy/.venv/bin/python -m app start --fd 3 --graceful-timeout 300
 Restart=on-failure
 RestartSec=2s
 KillSignal=SIGTERM

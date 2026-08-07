@@ -34,6 +34,7 @@ def test_start_subcommand_exposes_bootstrap_options() -> None:
         "--port",
         "--host",
         "--fd",
+        "--graceful-timeout",
         "--verbose",
         "--account-type",
         "--ghc-api-base-url",
@@ -90,16 +91,33 @@ def test_start_merges_cli_overrides_and_runs_uvicorn(monkeypatch: pytest.MonkeyP
 
     result = runner.invoke(
         app,
-        ["start", "--port", "4242", "--host", "0.0.0.0", "--manual", "--verbose"],
+        [
+            "start",
+            "--port",
+            "4242",
+            "--host",
+            "0.0.0.0",
+            "--graceful-timeout",
+            "7",
+            "--manual",
+            "--verbose",
+        ],
     )
 
     assert result.exit_code == 0
     application = run.call_args.args[0]
     assert application.state.runtime.settings.port == 4242
     assert application.state.runtime.settings.host == "0.0.0.0"
+    assert application.state.runtime.settings.shutdown.graceful_timeout == 7
     assert application.state.runtime.settings.approval.enabled is True
     assert application.state.runtime.settings.observability.log_level == "DEBUG"
-    run.assert_called_once_with(application, host="0.0.0.0", port=4242, log_config=None)
+    run.assert_called_once_with(
+        application,
+        host="0.0.0.0",
+        port=4242,
+        log_config=None,
+        timeout_graceful_shutdown=7,
+    )
 
 
 def test_start_passes_inherited_socket_fd_to_uvicorn(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -112,7 +130,12 @@ def test_start_passes_inherited_socket_fd_to_uvicorn(monkeypatch: pytest.MonkeyP
     application = run.call_args.args[0]
     assert application.state.runtime.settings.host == "127.0.0.1"
     assert application.state.runtime.settings.port == 4141
-    run.assert_called_once_with(application, fd=3, log_config=None)
+    run.assert_called_once_with(
+        application,
+        fd=3,
+        log_config=None,
+        timeout_graceful_shutdown=300,
+    )
 
 
 def test_start_rejects_stdin_as_inherited_socket_fd(
