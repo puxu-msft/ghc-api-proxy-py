@@ -64,7 +64,13 @@ class _GenericUpstreamHandler(BaseHTTPRequestHandler):
         self._respond(
             {
                 "object": "list",
-                "data": [{"id": "claude-test", "vendor": "Anthropic"}],
+                "data": [
+                    {
+                        "id": "claude-test",
+                        "vendor": "Anthropic",
+                        "supported_endpoints": ["/v1/messages"],
+                    }
+                ],
             }
         )
 

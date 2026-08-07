@@ -54,6 +54,8 @@ class RequestContext:
     created_at: float = field(default_factory=time.time)
     completed_at: float | None = None
     resolved_model: str = ""
+    protocol_leg: str = ""
+    route_reason: str = ""
     sanitization: SanitizationResult | None = None
     rate_limiter_wait_ms: float = 0.0
     attempts: list[Attempt] = field(default_factory=lambda: list[Attempt]())

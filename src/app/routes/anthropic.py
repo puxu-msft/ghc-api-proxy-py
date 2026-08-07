@@ -87,14 +87,35 @@ async def messages(
             status_code=403,
             media_type="application/json",
         )
+    except ApiError as error:
+        error_detail: dict[str, Any] = {
+            "type": error.wire_type,
+            "message": error.message,
+        }
+        if error.code is not None:
+            error_detail["code"] = error.code
+        if error.request_id is not None:
+            error_detail["request_id"] = error.request_id
+        return Response(
+            content=dumps({"type": "error", "error": error_detail}),
+            status_code=error.status_code,
+            media_type="application/json",
+        )
     except UpstreamResponseError as error:
         body = await error.response.aread()
         content_type = error.response.headers.get("content-type", "application/json")
+        error_headers = forward_response_headers(
+            error.response.headers,
+            strict=settings.anthropic.strict_response_headers,
+            blacklist=settings.anthropic.response_header_blacklist,
+            whitelist=settings.anthropic.response_header_whitelist,
+        )
         await error.response.aclose()
         return Response(
             content=body,
             status_code=error.response.status_code,
             media_type=content_type,
+            headers=error_headers,
         )
     upstream = result.response
     forwarded_headers = forward_response_headers(

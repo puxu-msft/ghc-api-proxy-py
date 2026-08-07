@@ -73,6 +73,7 @@ class TimeoutConfig(FrozenModel):
 
 
 class AnthropicConfig(FrozenModel):
+    route_override: Literal["auto", "messages", "responses"] = "auto"
     use_upstream_count_tokens: bool = True
     effort_overrides: dict[str, list[str]] = Field(default_factory=dict)
     beta_strip_headers: dict[str, list[str]] = Field(default_factory=dict)

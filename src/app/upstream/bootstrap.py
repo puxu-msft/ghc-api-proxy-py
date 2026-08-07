@@ -139,6 +139,7 @@ async def initialize_upstream_services(
             resolver,
             settings,
             quarantine,
+            model_catalog=catalog,
         )
         runtime.token_counter = AnthropicTokenCountingService(
             target,
@@ -225,6 +226,7 @@ async def initialize_upstream_services(
         resolver,
         settings,
         quarantine,
+        model_catalog=catalog,
     )
     runtime.token_counter = AnthropicTokenCountingService(
         target,

@@ -1,24 +1,39 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+import copy
+from collections.abc import Mapping, Set
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import httpx
+import orjson
 
+from app.anthropic.header_policy import normalize_responses_response_headers
 from app.anthropic.request_preparation import prepare_anthropic_request
 from app.anthropic.sanitize import SanitizationResult, sanitize_messages
 from app.anthropic.thinking.quarantine import ThinkingQuarantineStore
 from app.config.settings import AppSettings
+from app.errors import ApiError, ErrorCategory
 from app.hooks.executor import HooksExecutor
 from app.models.anthropic import MessagesRequest
+from app.models.common import ModelInfo
+from app.protocols.anthropic_responses import (
+    RequestConversionError,
+    convert_messages_request_to_responses,
+)
+from app.protocols.responses_anthropic import (
+    ResponseConversionError,
+    convert_responses_response_to_anthropic,
+)
 from app.transform.model_resolver import ModelResolver
+from app.wire_json import dumps
 
 if TYPE_CHECKING:
     from app.history.consumer import HistoryConsumer
     from app.pipeline.approval import ApprovalGate
     from app.pipeline.context import RequestContext
     from app.pipeline.executor import PipelineResult
+    from app.pipeline.route_policy import RouteDecision
 
 
 class AnthropicTarget(Protocol):
@@ -31,6 +46,22 @@ class AnthropicTarget(Protocol):
     ) -> httpx.Response: ...
 
 
+class ResponsesTarget(Protocol):
+    async def send_responses(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        stream: bool = False,
+    ) -> httpx.Response: ...
+
+
+class ModelCatalogView(Protocol):
+    @property
+    def available_ids(self) -> Set[str]: ...
+
+    def get(self, model_id: str) -> ModelInfo | None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class PreparedAnthropicRequest:
     original_model: str
@@ -38,6 +69,7 @@ class PreparedAnthropicRequest:
     sanitization: SanitizationResult
     wire: dict[str, Any]
     headers: dict[str, str]
+    route: RouteDecision | None = None
 
 
 class AnthropicClient:
@@ -50,6 +82,7 @@ class AnthropicClient:
         history: HistoryConsumer | None = None,
         approval_gate: ApprovalGate | None = None,
         hooks: HooksExecutor | None = None,
+        model_catalog: ModelCatalogView | None = None,
     ) -> None:
         self._target = target
         self._resolver = resolver
@@ -58,6 +91,7 @@ class AnthropicClient:
         self.history = history
         self.approval_gate = approval_gate
         self.hooks = hooks
+        self._model_catalog = model_catalog
 
     def resolve_model(self, model: str) -> str:
         return self._resolver.resolve(model)
@@ -75,6 +109,16 @@ class AnthropicClient:
         payload: dict[str, Any],
         apply_payload_rewrites: bool,
     ) -> PreparedAnthropicRequest:
+        route = self._decide_route(resolved_model)
+        if route is not None and route.protocol_leg.value == "responses":
+            return PreparedAnthropicRequest(
+                original_model=request.model,
+                resolved_model=resolved_model,
+                sanitization=sanitization,
+                wire=copy.deepcopy(payload),
+                headers={},
+                route=route,
+            )
         deeply_prepared = prepare_anthropic_request(
             payload,
             tool_search=self._settings.anthropic.tool_search,
@@ -89,6 +133,7 @@ class AnthropicClient:
             sanitization=sanitization,
             wire=deeply_prepared.wire,
             headers=deeply_prepared.headers,
+            route=route,
         )
 
     def prepare(self, request: MessagesRequest) -> PreparedAnthropicRequest:
@@ -122,12 +167,108 @@ class AnthropicClient:
         *,
         stream: bool,
     ) -> httpx.Response:
+        if prepared.route is not None and prepared.route.protocol_leg.value == "responses":
+            return await self._send_responses(prepared)
         response = await self._target.send_anthropic(
             prepared.wire,
             stream=stream,
             extra_headers=prepared.headers,
         )
         return response
+
+    def _decide_route(self, resolved_model: str) -> RouteDecision | None:
+        from app.pipeline.route_policy import (
+            ProtocolLeg,
+            ResolvedModelFacts,
+            RouteDecisionError,
+            TransportAvailability,
+            decide_protocol_leg,
+        )
+
+        if self._model_catalog is None:
+            return None
+        model = self._model_catalog.get(resolved_model)
+        override_value = self._settings.anthropic.route_override
+        override = None if override_value == "auto" else ProtocolLeg(override_value)
+        try:
+            return decide_protocol_leg(
+                None
+                if model is None
+                else ResolvedModelFacts(
+                    resolved_model=resolved_model,
+                    supported_endpoints=model.supported_endpoints,
+                ),
+                override=override,
+                transports=TransportAvailability(
+                    messages_http=True,
+                    responses_http=True,
+                ),
+            )
+        except RouteDecisionError as error:
+            raise ApiError(
+                error.detail,
+                category=ErrorCategory.CLIENT,
+                status_code=400,
+                code=error.code.value,
+            ) from error
+
+    async def _send_responses(
+        self,
+        prepared: PreparedAnthropicRequest,
+    ) -> httpx.Response:
+        if bool(prepared.wire.get("stream")):
+            raise ApiError(
+                "streaming is not implemented for the Anthropic Responses bridge",
+                category=ErrorCategory.CLIENT,
+                status_code=400,
+                code="responses_stream_not_supported",
+            )
+        try:
+            converted_request = convert_messages_request_to_responses(prepared.wire)
+        except RequestConversionError as error:
+            raise ApiError(
+                str(error),
+                category=ErrorCategory.CLIENT,
+                status_code=400,
+                code=error.code,
+            ) from error
+        responses_target = cast(ResponsesTarget, self._target)
+        upstream = await responses_target.send_responses(
+            converted_request.wire,
+            stream=False,
+        )
+        if not upstream.is_success:
+            return await _responses_error_response(upstream)
+        try:
+            parsed_body: object = orjson.loads(await upstream.aread())
+            if not isinstance(parsed_body, dict):
+                raise ApiError(
+                    "Responses upstream returned a non-object JSON body",
+                    category=ErrorCategory.UPSTREAM,
+                    status_code=502,
+                    code="invalid_responses_body",
+                )
+            body = cast(dict[str, Any], parsed_body)
+            converted = convert_responses_response_to_anthropic(body)
+            return httpx.Response(
+                upstream.status_code,
+                headers=normalize_responses_response_headers(upstream.headers),
+                content=dumps(
+                    converted.message.model_dump(mode="json", exclude_none=True)
+                ),
+                request=getattr(upstream, "_request", None),
+                extensions=upstream.extensions,
+            )
+        except (orjson.JSONDecodeError, ResponseConversionError) as error:
+            code = getattr(error, "code", "invalid_responses_body")
+            raise ApiError(
+                str(error) or "Responses response conversion failed",
+                category=ErrorCategory.UPSTREAM,
+                status_code=502,
+                code=code,
+            ) from error
+        finally:
+            await upstream.aclose()
 
     async def execute(
         self,
@@ -182,3 +323,45 @@ class AnthropicClient:
             {"request": request, "state": "completed" if completed else "failed"},
             records=context.hook_records,
         )
+
+
+async def _responses_error_response(upstream: httpx.Response) -> httpx.Response:
+    raw = await upstream.aread()
+    message = raw.decode(errors="replace") or (
+        f"Responses upstream returned HTTP {upstream.status_code}"
+    )
+    code: str | None = None
+    try:
+        parsed_value: object = orjson.loads(raw)
+        if isinstance(parsed_value, dict):
+            parsed = cast(dict[str, Any], parsed_value)
+            error_value: object = parsed.get("error")
+            if isinstance(error_value, dict):
+                error = cast(dict[str, Any], error_value)
+                error_message: object = error.get("message")
+                error_code: object = error.get("code")
+                if isinstance(error_message, str):
+                    message = error_message
+                if isinstance(error_code, str):
+                    code = error_code
+    except orjson.JSONDecodeError:
+        pass
+    api_error = ApiError(message, status_code=upstream.status_code, code=code)
+    response = httpx.Response(
+        upstream.status_code,
+        headers=normalize_responses_response_headers(upstream.headers),
+        content=dumps(
+            {
+                "type": "error",
+                "error": {
+                    "type": api_error.wire_type,
+                    "message": api_error.message,
+                    **({"code": code} if code is not None else {}),
+                },
+            }
+        ),
+        request=getattr(upstream, "_request", None),
+        extensions=upstream.extensions,
+    )
+    await upstream.aclose()
+    return response

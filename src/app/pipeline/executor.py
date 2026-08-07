@@ -31,18 +31,45 @@ class UpstreamResponseError(Exception):
         self.response = response
 
 
-async def _fail_internal(
+async def _finalize_failure(
+    request: MessagesRequest,
     context: RequestContext,
     client: AnthropicClient,
     error: Exception,
 ) -> None:
-    if context.state not in (RequestState.COMPLETED, RequestState.FAILED):
-        context.fail(
-            ApiError(
-                f"request hook failed: {error}",
-                category=ErrorCategory.INTERNAL,
-                status_code=500,
-            )
+    if context.state in (RequestState.COMPLETED, RequestState.FAILED):
+        return
+    normalized_error = (
+        error
+        if isinstance(error, ApiError)
+        else ApiError(
+            f"request hook failed: {error}",
+            category=ErrorCategory.INTERNAL,
+            status_code=500,
+        )
+    )
+    context.fail(normalized_error)
+    if client.hooks is not None:
+        hook_context = _hook_context(
+            context,
+            client,
+            attempt_number=max(len(context.attempts) - 1, 0),
+        )
+        await client.hooks.observe(
+            ObserverEvent.ERROR,
+            hook_context,
+            {
+                "request": request,
+                "status_code": normalized_error.status_code,
+                "error": normalized_error,
+            },
+            records=context.hook_records,
+        )
+        await client.hooks.observe(
+            ObserverEvent.FINALIZE,
+            hook_context,
+            {"request": request, "state": "failed", "error": normalized_error},
+            records=context.hook_records,
         )
     if client.history is not None:
         await client.history.finalized(context)
@@ -139,7 +166,7 @@ async def execute_anthropic_pipeline(
     try:
         request, prepared = await _prepare_with_hooks(client, request, context)
     except Exception as error:
-        await _fail_internal(context, client, error)
+        await _finalize_failure(request, context, client, error)
         raise
     if client.approval_gate is not None and client.approval_gate.enabled:
         approval = await client.approval_gate.wait_for_approval(context)
@@ -149,19 +176,29 @@ async def execute_anthropic_pipeline(
                 category=ErrorCategory.CLIENT,
                 status_code=403,
             )
-            context.fail(error)
-            if client.history is not None:
-                await client.history.finalized(context)
+            await _finalize_failure(request, context, client, error)
             raise ApprovalRejectedError(error.message)
         if approval.modified_payload:
             try:
                 request = MessagesRequest.model_validate(approval.modified_payload)
                 request, prepared = await _prepare_with_hooks(client, request, context)
             except Exception as error:
-                await _fail_internal(context, client, error)
+                await _finalize_failure(request, context, client, error)
                 raise
     context.resolved_model = prepared.resolved_model
+    if prepared.route is not None:
+        context.protocol_leg = prepared.route.protocol_leg.value
+        context.route_reason = prepared.route.reason.value
     context.sanitization = prepared.sanitization
+    if bool(prepared.wire.get("stream")) and context.protocol_leg == "responses":
+        error = ApiError(
+            "streaming is not implemented for the Anthropic Responses bridge",
+            category=ErrorCategory.CLIENT,
+            status_code=400,
+            code="responses_stream_not_supported",
+        )
+        await _finalize_failure(request, context, client, error)
+        raise error
     context.transition(RequestState.EXECUTING)
     key = QuarantineKey(session_id, agent_id or "") if session_id else None
     try:
@@ -174,7 +211,7 @@ async def execute_anthropic_pipeline(
         else:
             strategies = [PoisonedThinkingStrategy(client.quarantine, key)]
     except Exception as error:
-        await _fail_internal(context, client, error)
+        await _finalize_failure(request, context, client, error)
         raise
     coordinator = RetryCoordinator(strategies, max_retries=1)
     payload: dict[str, object] = prepared.wire
@@ -199,7 +236,7 @@ async def execute_anthropic_pipeline(
                     records=context.hook_records,
                 )
             except Exception as error:
-                await _fail_internal(context, client, error)
+                await _finalize_failure(request, context, client, error)
                 raise
             attempt.payload_modifications.extend(hook_modifications)
         payload = attempt_payload
@@ -209,8 +246,26 @@ async def execute_anthropic_pipeline(
             prepared.sanitization,
             attempt_payload,
             prepared.headers,
+            prepared.route,
         )
-        response = await client.send_prepared(current, stream=request.stream)
+        try:
+            response = await client.send_prepared(current, stream=request.stream)
+        except Exception as error:
+            normalized_error = (
+                error
+                if isinstance(error, ApiError)
+                else ApiError(
+                    str(error),
+                    category=ErrorCategory.NETWORK,
+                    status_code=502,
+                )
+            )
+            attempt.error = normalized_error
+            attempt.completed_at = time.time()
+            await _finalize_failure(request, context, client, normalized_error)
+            if normalized_error is error:
+                raise
+            raise normalized_error from error
         attempt.status_code = response.status_code
         attempt.completed_at = time.time()
         if response.is_success:
@@ -242,7 +297,7 @@ async def execute_anthropic_pipeline(
                     )
                 except Exception as error:
                     await response.aclose()
-                    await _fail_internal(context, client, error)
+                    await _finalize_failure(request, context, client, error)
                     raise
                 original = response
                 response = httpx.Response(

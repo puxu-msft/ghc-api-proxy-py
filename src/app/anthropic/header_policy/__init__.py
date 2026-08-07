@@ -51,6 +51,14 @@ RESPONSE_FLOOR = frozenset(
         "date",
     }
 )
+RESPONSES_RESPONSE_HEADERS = frozenset(
+    {
+        "request-id",
+        "x-request-id",
+        "retry-after",
+    }
+)
+RESPONSES_RATE_LIMIT_HEADERS = ("x-ratelimit-*",)
 
 
 def _matches(name: str, patterns: Sequence[str]) -> bool:
@@ -101,4 +109,19 @@ def forward_response_headers(
     return {name: value for name, value in selected.items() if not _matches(name, blacklist)}
 
 
-__all__ = ["forward_request_headers", "forward_response_headers"]
+def normalize_responses_response_headers(
+    headers: Mapping[str, str],
+) -> dict[str, str]:
+    return {
+        name: value
+        for name, value in headers.items()
+        if name.lower() in RESPONSES_RESPONSE_HEADERS
+        or _matches(name, RESPONSES_RATE_LIMIT_HEADERS)
+    }
+
+
+__all__ = [
+    "forward_request_headers",
+    "forward_response_headers",
+    "normalize_responses_response_headers",
+]
