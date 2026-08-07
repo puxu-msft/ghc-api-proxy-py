@@ -55,3 +55,4 @@ uv run pytest tests --cov=app --cov-report=term --cov-fail-under=80
 
 详细架构、专题设计和实施记录位于 [docs/2604-rewrite](docs/2604-rewrite)。
 Hooks 用法见 [docs/2604-rewrite/hooks-system.md](docs/2604-rewrite/hooks-system.md)，计数与校准见 [docs/2604-rewrite/tokenization.md](docs/2604-rewrite/tokenization.md)。
+systemd socket activation、优雅退出与 cgroup v2 部署模板见 [docs/agents/deployment-systemd](docs/agents/deployment-systemd/README.md)。

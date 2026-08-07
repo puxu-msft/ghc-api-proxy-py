@@ -50,6 +50,7 @@ def _generate_config(path: Path) -> None:
 def start(
     port: Annotated[int | None, typer.Option("--port", "-p", min=1, max=65535)] = None,
     host: Annotated[str | None, typer.Option("--host", "-H")] = None,
+    fd: Annotated[int | None, typer.Option("--fd", min=1)] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
     account_type: Annotated[
         AccountType | None,
@@ -73,6 +74,9 @@ def start(
         _generate_config(output_path)
         typer.echo(f"Generated configuration: {output_path}")
         return
+
+    if fd is not None and (host is not None or port is not None):
+        raise typer.BadParameter("--fd cannot be combined with --host or --port")
 
     cli_overrides: dict[str, object] = {}
     auth_overrides: dict[str, object] = {}
@@ -104,7 +108,10 @@ def start(
 
     settings = load_settings(config_path=config, cli_overrides=cli_overrides)
     application = create_app(settings)
-    uvicorn.run(application, host=settings.host, port=settings.port, log_config=None)
+    if fd is None:
+        uvicorn.run(application, host=settings.host, port=settings.port, log_config=None)
+    else:
+        uvicorn.run(application, fd=fd, log_config=None)
 
 
 def _authenticate() -> None:

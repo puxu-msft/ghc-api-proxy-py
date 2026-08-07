@@ -1,0 +1,27 @@
+[Unit]
+Description=GitHub Copilot API proxy
+Documentation=file:/opt/ghc-api-proxy/docs/agents/deployment-systemd/README.md
+Requires=ghc-api-proxy.socket
+After=network-online.target ghc-api-proxy.socket
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=ghc-api-proxy
+Group=ghc-api-proxy
+WorkingDirectory=/opt/ghc-api-proxy
+StateDirectory=ghc-api-proxy
+StateDirectoryMode=0700
+UMask=0077
+Environment="GHC_HISTORY__DB_PATH=/var/lib/ghc-api-proxy/history.db" "GHC_TOKENIZATION__STATE_PATH=/var/lib/ghc-api-proxy/tokenization.json"
+EnvironmentFile=-/etc/ghc-api-proxy/ghc-api-proxy.env
+ExecStart=/opt/ghc-api-proxy/.venv/bin/python -m app start --fd 3
+Restart=on-failure
+RestartSec=2s
+KillSignal=SIGTERM
+KillMode=control-group
+TimeoutStopSec=330s
+Slice=ghc-api-proxy.slice
+
+[Install]
+WantedBy=multi-user.target

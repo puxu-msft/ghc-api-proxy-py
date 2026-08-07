@@ -1,0 +1,8 @@
+[Unit]
+Description=Resource controls for ghc-api-proxy
+
+[Slice]
+MemoryHigh=1G
+MemoryMax=2G
+CPUQuota=200%
+TasksMax=256

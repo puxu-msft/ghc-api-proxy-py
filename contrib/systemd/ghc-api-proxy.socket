@@ -1,0 +1,13 @@
+[Unit]
+Description=ghc-api-proxy listening socket
+
+[Socket]
+ListenStream=127.0.0.1:4141
+Accept=no
+Backlog=1024
+NoDelay=true
+FileDescriptorName=http
+Service=ghc-api-proxy.service
+
+[Install]
+WantedBy=sockets.target

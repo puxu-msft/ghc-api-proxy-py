@@ -33,6 +33,7 @@ def test_start_subcommand_exposes_bootstrap_options() -> None:
     for option in (
         "--port",
         "--host",
+        "--fd",
         "--verbose",
         "--account-type",
         "--ghc-api-base-url",
@@ -99,6 +100,47 @@ def test_start_merges_cli_overrides_and_runs_uvicorn(monkeypatch: pytest.MonkeyP
     assert application.state.runtime.settings.approval.enabled is True
     assert application.state.runtime.settings.observability.log_level == "DEBUG"
     run.assert_called_once_with(application, host="0.0.0.0", port=4242, log_config=None)
+
+
+def test_start_passes_inherited_socket_fd_to_uvicorn(monkeypatch: pytest.MonkeyPatch) -> None:
+    run = Mock()
+    monkeypatch.setattr("app.cli.uvicorn.run", run)
+
+    result = runner.invoke(app, ["start", "--fd", "3"])
+
+    assert result.exit_code == 0
+    application = run.call_args.args[0]
+    assert application.state.runtime.settings.host == "127.0.0.1"
+    assert application.state.runtime.settings.port == 4141
+    run.assert_called_once_with(application, fd=3, log_config=None)
+
+
+def test_start_rejects_stdin_as_inherited_socket_fd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = Mock()
+    monkeypatch.setattr("app.cli.uvicorn.run", run)
+
+    result = runner.invoke(app, ["start", "--fd", "0"])
+
+    assert result.exit_code == 2
+    assert "Invalid value for '--fd'" in result.output
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize("bind_option", [("--host", "0.0.0.0"), ("--port", "4242")])
+def test_start_rejects_fd_with_explicit_bind_option(
+    bind_option: tuple[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = Mock()
+    monkeypatch.setattr("app.cli.uvicorn.run", run)
+
+    result = runner.invoke(app, ["start", "--fd", "3", *bind_option])
+
+    assert result.exit_code == 2
+    assert "--fd cannot be combined with --host or --port" in result.output
+    run.assert_not_called()
 
 
 def test_logout_clears_stored_token(monkeypatch: pytest.MonkeyPatch) -> None:
