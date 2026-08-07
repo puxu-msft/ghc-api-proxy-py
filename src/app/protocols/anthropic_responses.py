@@ -526,10 +526,8 @@ class _RequestConverter:
     def _convert_thinking(self, block: ContentBlock, path: str) -> JsonObject | None:
         decoded = decode_anthropic_thinking(block.model_dump(mode="python"))
         if decoded.item is None:
-            self._degrade(path, "thinking_signature_not_portable")
+            self._degrade(path, decoded.classification or "thinking_signature_not_portable")
             return None
-        if decoded.malformed_payload:
-            self._degrade(path, "malformed_reasoning_carrier")
         return cast(JsonObject, decoded.item)
 
     def _convert_tools(self) -> list[JsonObject]:

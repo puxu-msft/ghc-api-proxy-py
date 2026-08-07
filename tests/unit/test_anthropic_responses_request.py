@@ -767,19 +767,21 @@ def test_reasoning_forward_blocks_round_trip_through_messages_request_converter(
 
 
 @pytest.mark.parametrize(
-    ("payload", "expected_encrypted_content"),
+    "payload",
     [
-        ("A", ""),
-        ("YWJjZA=garbage", "abcd"),
-        ("_w", "�"),
-        ("/w", "�"),
-        ("+w", "�"),
-        ("你好", ""),
+        "A",
+        "YWJjZA=garbage",
+        "_w",
+        "/w",
+        "+w",
+        "你好",
     ],
 )
-def test_malformed_reasoning_carriers_match_fixed_node_vectors(
-    payload: str, expected_encrypted_content: str
+def test_malformed_upstream_reasoning_carriers_are_dropped_with_classification(
+    payload: str,
 ) -> None:
+    # The 2026-08-07 carrier decision supersedes Node's permissive malformed vectors:
+    # recognized malformed carriers must not restore summary or encrypted content.
     converted = convert_messages_request_to_responses(
         {
             "model": "gpt-test",
@@ -799,18 +801,12 @@ def test_malformed_reasoning_carriers_match_fixed_node_vectors(
         }
     )
 
-    assert converted.wire["input"] == [
-        {
-            "type": "reasoning",
-            "summary": [{"type": "summary_text", "text": "summary"}],
-            "encrypted_content": expected_encrypted_content,
-        }
-    ]
+    assert converted.wire["input"] == []
     assert converted.facts == (
         ConversionFact(
             field_path="messages[0].content[0]",
             disposition="degrade",
-            reason="malformed_reasoning_carrier",
+            reason="upstream_malformed_v1",
         ),
     )
 
@@ -1020,7 +1016,7 @@ def test_degrades_foreign_thinking_without_forwarding_signature() -> None:
         ConversionFact(
             field_path="messages[0].content[0]",
             disposition="degrade",
-            reason="thinking_signature_not_portable",
+            reason="foreign",
         ),
     )
 

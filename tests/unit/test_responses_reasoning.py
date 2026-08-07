@@ -1,6 +1,8 @@
 from collections.abc import Mapping
 
+from app.anthropic.thinking.reasoning_carrier import encode_reasoning_carrier
 from app.anthropic.thinking.responses_reasoning import (
+    PROJECT_SYNTHETIC_REASONING_SIGNATURE,
     SYNTHETIC_REASONING_SIGNATURE,
     SYNTHETIC_REASONING_SIGNATURE_PREFIX,
     anthropic_thinking_to_responses,
@@ -21,7 +23,7 @@ def test_plain_summary_becomes_thinking_with_bare_carrier() -> None:
         {
             "type": "thinking",
             "thinking": "step 1... step 2...",
-            "signature": SYNTHETIC_REASONING_SIGNATURE_PREFIX,
+            "signature": PROJECT_SYNTHETIC_REASONING_SIGNATURE,
         }
     ]
 
@@ -35,7 +37,7 @@ def test_encrypted_only_reasoning_creates_a_reversible_thinking_block() -> None:
         {
             "type": "thinking",
             "thinking": "",
-            "signature": f"{SYNTHETIC_REASONING_SIGNATURE_PREFIX}RU5DPT0",
+            "signature": encode_reasoning_carrier("ENC=="),
         }
     ]
     assert blocks is not None
@@ -43,6 +45,25 @@ def test_encrypted_only_reasoning_creates_a_reversible_thinking_block() -> None:
         "type": "reasoning",
         "summary": [],
         "encrypted_content": "ENC==",
+    }
+
+
+def test_empty_reasoning_item_keeps_one_item_one_block_cardinality() -> None:
+    blocks = responses_reasoning_to_anthropic(
+        [{"type": "reasoning", "summary": [], "encrypted_content": ""}]
+    )
+
+    assert blocks is not None
+    assert blocks == [
+        {
+            "type": "thinking",
+            "thinking": "",
+            "signature": PROJECT_SYNTHETIC_REASONING_SIGNATURE,
+        }
+    ]
+    assert anthropic_thinking_to_responses(blocks[0]) == {
+        "type": "reasoning",
+        "summary": [],
     }
 
 
@@ -74,7 +95,7 @@ def test_mixed_reasoning_joins_summary_and_carries_encrypted_content() -> None:
         {
             "type": "thinking",
             "thinking": "first + second",
-            "signature": f"{SYNTHETIC_REASONING_SIGNATURE_PREFIX}b3BhcXVlLfCfmIA",
+            "signature": encode_reasoning_carrier("opaque-😀"),
         }
     ]
 
@@ -108,22 +129,22 @@ def test_reasoning_items_become_independent_blocks_in_source_order() -> None:
         {
             "type": "thinking",
             "thinking": "first",
-            "signature": f"{SYNTHETIC_REASONING_SIGNATURE_PREFIX}RU5DLTE",
+            "signature": encode_reasoning_carrier("ENC-1"),
         },
         {
             "type": "thinking",
             "thinking": " + second",
-            "signature": SYNTHETIC_REASONING_SIGNATURE_PREFIX,
+            "signature": PROJECT_SYNTHETIC_REASONING_SIGNATURE,
         },
         {
             "type": "thinking",
             "thinking": "",
-            "signature": f"{SYNTHETIC_REASONING_SIGNATURE_PREFIX}RU5DLTI",
+            "signature": encode_reasoning_carrier("ENC-2"),
         },
         {
             "type": "thinking",
             "thinking": " + third",
-            "signature": SYNTHETIC_REASONING_SIGNATURE_PREFIX,
+            "signature": PROJECT_SYNTHETIC_REASONING_SIGNATURE,
         },
     ]
 
@@ -201,7 +222,7 @@ def test_foreign_and_redacted_thinking_are_not_recovered() -> None:
     )
 
 
-def test_invalid_blocks_and_legacy_carrier_follow_upstream_compatibility() -> None:
+def test_invalid_blocks_and_legacy_carrier_follow_minimal_compatibility() -> None:
     assert anthropic_thinking_to_responses({"type": "thinking", "thinking": 42}) is None
     assert (
         anthropic_thinking_to_responses(
@@ -224,11 +245,7 @@ def test_invalid_blocks_and_legacy_carrier_follow_upstream_compatibility() -> No
                 "signature": f"{SYNTHETIC_REASONING_SIGNATURE_PREFIX}!!!",
             }
         )
-        == {
-            "type": "reasoning",
-            "summary": [{"type": "summary_text", "text": "malformed payload"}],
-            "encrypted_content": "",
-        }
+        is None
     )
     assert (
         anthropic_thinking_to_responses(
@@ -238,12 +255,5 @@ def test_invalid_blocks_and_legacy_carrier_follow_upstream_compatibility() -> No
                 "signature": f"{SYNTHETIC_REASONING_SIGNATURE_PREFIX}A",
             }
         )
-        == {
-            "type": "reasoning",
-            "summary": [{"type": "summary_text", "text": "truncated payload"}],
-            "encrypted_content": "",
-        }
+        is None
     )
-
-
-# These malformed carriers intentionally mirror Node's permissive base64url decoder.

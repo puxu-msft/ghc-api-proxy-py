@@ -1,5 +1,9 @@
 from app.anthropic.header_policy import forward_request_headers, forward_response_headers
 from app.anthropic.request_preparation import prepare_anthropic_request
+from app.anthropic.thinking.reasoning_carrier import (
+    PROJECT_SYNTHETIC_REASONING_SIGNATURE,
+    UPSTREAM_SYNTHETIC_REASONING_SIGNATURE_PREFIX,
+)
 from app.anthropic.warmup import apply_warmup_policy, is_warmup_request
 
 
@@ -73,3 +77,51 @@ def test_request_preparation_strips_field_adds_betas_and_destacks() -> None:
     assert "inference_geo" not in prepared.wire
     assert "anthropic-beta" in prepared.headers
     assert prepared.wire["messages"][0]["content"][1]["type"] == "text"
+
+
+def test_request_preparation_always_strips_synthetic_thinking() -> None:
+    payload = {
+        "model": "claude-test",
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "thinking",
+                        "thinking": "remove whole project block",
+                        "signature": PROJECT_SYNTHETIC_REASONING_SIGNATURE,
+                    }
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "thinking",
+                        "thinking": "remove whole upstream block",
+                        "signature": f"{UPSTREAM_SYNTHETIC_REASONING_SIGNATURE_PREFIX}RU5E",
+                    },
+                    {
+                        "type": "thinking",
+                        "thinking": "keep real Anthropic block",
+                        "signature": "CAIS-real-anthropic",
+                    },
+                ],
+            },
+        ],
+    }
+
+    prepared = prepare_anthropic_request(payload, apply_payload_rewrites=False)
+
+    assert prepared.wire["messages"] == [
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "thinking",
+                    "thinking": "keep real Anthropic block",
+                    "signature": "CAIS-real-anthropic",
+                }
+            ],
+        }
+    ]
