@@ -1,6 +1,7 @@
 import base64
 import binascii
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Literal, NotRequired, TypedDict, cast
 
 SYNTHETIC_REASONING_SIGNATURE_PREFIX = "copilot-api:synthetic-reasoning:v1:"
@@ -24,6 +25,12 @@ class AnthropicThinkingBlock(TypedDict):
     signature: str
 
 
+@dataclass(frozen=True, slots=True)
+class AnthropicThinkingDecode:
+    item: ResponsesReasoningItem | None
+    malformed_payload: bool = False
+
+
 def _encode_encrypted_content(encrypted_content: str | None) -> str:
     if not encrypted_content:
         return SYNTHETIC_REASONING_SIGNATURE_PREFIX
@@ -31,15 +38,17 @@ def _encode_encrypted_content(encrypted_content: str | None) -> str:
     return f"{SYNTHETIC_REASONING_SIGNATURE_PREFIX}{payload}"
 
 
-def _decode_encrypted_content(payload: str) -> str | None:
+def _decode_encrypted_content(payload: str) -> tuple[str | None, bool]:
     encoded = payload.partition("=")[0]
     encoded = "".join(
         character
         for character in encoded
-        if character.isascii() and (character.isalnum() or character in "-_")
+        if character.isascii() and (character.isalnum() or character in "-_+/")
     )
+    malformed = encoded != payload or any(character in "+/" for character in encoded)
     if len(encoded) % 4 == 1:
         encoded = encoded[:-1]
+        malformed = True
     padding = "=" * (-len(encoded) % 4)
     try:
         decoded = base64.b64decode(
@@ -48,8 +57,11 @@ def _decode_encrypted_content(payload: str) -> str | None:
             validate=False,
         )
     except (ValueError, binascii.Error):
-        return None
-    return decoded.decode(errors="replace")
+        return None, True
+    try:
+        return decoded.decode(), malformed
+    except UnicodeDecodeError:
+        return decoded.decode(errors="replace"), True
 
 
 def responses_reasoning_to_anthropic(
@@ -100,24 +112,30 @@ def anthropic_thinking_to_responses(
     block: Mapping[str, object],
 ) -> ResponsesReasoningItem | None:
     """Recover one Responses reasoning item only from this bridge's carrier."""
+    return decode_anthropic_thinking(block).item
+
+
+def decode_anthropic_thinking(block: Mapping[str, object]) -> AnthropicThinkingDecode:
+    """Recover one item and classify non-canonical payloads without rejecting Node vectors."""
     if block.get("type") != "thinking":
-        return None
+        return AnthropicThinkingDecode(item=None)
     thinking = block.get("thinking")
     signature = block.get("signature")
     if not isinstance(thinking, str) or not isinstance(signature, str):
-        return None
+        return AnthropicThinkingDecode(item=None)
 
     encrypted_content: str | None = None
     carries_payload = False
+    malformed_payload = False
     if signature == SYNTHETIC_REASONING_SIGNATURE:
         pass
     elif signature.startswith(SYNTHETIC_REASONING_SIGNATURE_PREFIX):
         payload = signature.removeprefix(SYNTHETIC_REASONING_SIGNATURE_PREFIX)
         carries_payload = bool(payload)
         if carries_payload:
-            encrypted_content = _decode_encrypted_content(payload)
+            encrypted_content, malformed_payload = _decode_encrypted_content(payload)
     else:
-        return None
+        return AnthropicThinkingDecode(item=None)
 
     summary: list[ResponsesSummaryText] = []
     if thinking:
@@ -125,4 +143,4 @@ def anthropic_thinking_to_responses(
     item: ResponsesReasoningItem = {"type": "reasoning", "summary": summary}
     if carries_payload and encrypted_content is not None:
         item["encrypted_content"] = encrypted_content
-    return item
+    return AnthropicThinkingDecode(item=item, malformed_payload=malformed_payload)
