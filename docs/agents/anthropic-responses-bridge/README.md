@@ -25,13 +25,14 @@
 本节只是 2026-08-07 的导航快照，不是长期状态源。
 
 - 主仓：`/home/xp/src/ghc-api-proxy-py`。
-- 当前分支与 HEAD：`main`，`ec5e8f5240c6a587544e022b449aa7b392ba7ca1`。本快照写入时，`README.md` 已加入 index，`implementation.md` 同时存在已暂存与未暂存修改；其余四份源文档在主树工作区相对 index 无修改。不要把工作区状态或本导航快照冒充长期状态源。
+- 当前分支与 HEAD：`main`，`cf53334a10a717a3a3d30d6c0e8a297f5000d90c`。不要把本导航快照冒充长期状态源；操作前必须重新 gate current `main`，并以 `implementation.md` 的最新修订核对易变事实。
 - `spec.md` 当前 SHA-256 为 `5e3628226238a2c271824bc47d0f2fd67db9a6eb36224ee088984c96eb62a5f1`，自身状态为 `FINALIZED`；这表示行为规格已定稿，不表示 bridge 已实现。
 - `research.md` 继续只提供可追溯证据、来源与反例；其权威边界和阅读位置不变。
 - `architecture.md` 当前 SHA-256 为 `c6088a2d2ce89e2355627372d10973bea6a0794ddc45b84b33b4aaa5a9f29b8d`，仍是“非规范架构提案，尚未获用户接受”。其裁决矩阵终审为 blocker 0、major 0；当前门是用户按本索引完整阅读五份文档，尤其完整阅读 Architecture 后，分别裁决 `D-ARCH` 与 `D-MIGRATION`。终审通过不等于用户接受。
 - `acceptance.md` 当前 SHA-256 为 `224b020d30059b899bbdc2571af0ebd199f061df2288e5c202f8cd264e9c76f4`，自身状态为 `FINALIZED_ACCEPTANCE_ORACLE`；候选产品及完整 bridge verdict 仍为 `UNVERIFIED`，required gates 尚未对完整 bridge 候选执行。
 - `implementation.md` 是 Implementation living 入口，持续记录 current `main`、候选／integration identities、评审门、组合顺序与下一动作；它不会因某个 checkpoint 通过而收口。操作前必须重新 gate 其中的易变事实，其跨文档转述若落后于源文档，应以源文档自身状态为准。
-- Foundations integration `integrate/260806-bridge-foundations@6a00f6f7aaa5083cebd7387208eca65b7df3bd79` 与 happy-path integration `integrate/260807-bridge-happy-path@d78b3cdc172ecad42873a70f1df31438ecca1663` 均已有独立本地载体，但都尚未进入 `main`。任何 integration 侧 review、verification 或 smoke 只覆盖其声明范围，不能外推为完整 bridge 产品 `PASS`。
+- Foundations 三片已作为 `d274f584219f8ae32f59d15d08ac007c45058c8d`（reasoning cardinality）、`798ba3e7653b513c3c9c732019e793f828ae0890`（session liveness）与 `1c13fda4f5eac5e42ca0025d503f91eb0563f0e7`（request converter）进入 `main`，reviewed sources 已归档；systemd runtime 已作为 `cf53334a10a717a3a3d30d6c0e8a297f5000d90c` 进入 `main`，reviewed source 也已归档。它们不再是重复回放动作。
+- Happy integration `integrate/260807-bridge-happy-path@7e4b642be8bd526d8f20f3f8d7e2d7848278a443` 已取得 R2 blocker 0、major 0、minor 0与声明范围 verification 阶段 `PASS`，但尚未进入 `main`。Non-stream usage 后继 `feat/nonstream-usage-details@aca3ced6e38efabf13ffe43d5935697801c74857` 已取得代码 review blocker 0、major 0与独立 verify `PASS`，同样尚未进入 `main`，且必须排在 happy 之后消费。所有这些局部 verdict 都不能外推为完整 bridge 产品 `PASS`。
 
 ## 推荐阅读顺序
 
@@ -192,21 +193,22 @@
 
 | 章节 | 阅读重点 | 关键问题 |
 |---|---|---|
-| “文档状态”“评审 major 处置” | 快照日期、权威边界、主树 WIP、完整 foundations integration 载体、跨文档状态转述 | 哪些状态是 current source-of-truth，哪些只是滞后的跨文档转述？主树 WIP 是否阻止直接产品回放？ |
-| “总体进度” | carrier baseline、三个 reviewed feature HEAD、`integrate/260806-bridge-foundations@6a00f6f…` 的三提交线性链、gate 与下一动作 | merged-state review／verification 是否被误写成“已进入 main”或完整产品 PASS？是否错误重建第二套 integration 链？ |
-| “切片 1：Reasoning carrier 与 cardinality correction” | main baseline、archive、cardinality 候选、one-item-one-block 缺口 | 当前 main 的 codec／reverse primitive 与尚未进入 main 的 forward 修复是否被分开？ |
-| “切片 2：Session liveness” | cancellation-resilient cleanup、primary／secondary failure、integration commit | integration commit 是否只作为组合载体而未冒充主线？cleanup 是否经 cancellation storm 验证？ |
-| “切片 3：Request converter” | thinking capability、tool mapper、Node-compatible decode、unknown-field fail closed、与 cardinality 同文件冲突 | 组合时是否禁止整文件覆盖 `responses_reasoning.py`？request 的旧聚合 API 是否可能回归？ |
+| “文档状态”“评审 major 处置” | 快照日期、权威边界、foundations／systemd 的主线与归档状态、happy／usage 的候选状态、跨文档状态转述 | 哪些状态是 current source-of-truth，哪些只是滞后的跨文档转述？局部 checkpoint 是否被误写成完整产品 PASS？ |
+| “总体进度” | carrier baseline、已进入 `main` 的 foundations／systemd、happy `7e4b642…`、usage `aca3ced…`、gate 与下一动作 | 已归档切片是否被错误列为待重复回放？candidate-side review／verify 是否被误写成 main-side PASS？ |
+| “切片 1：Reasoning carrier 与 cardinality correction” | main baseline、reviewed-source archive、one-item-one-block 落地与后续组合边界 | 当前 main 的 codec／reverse primitive 与 forward cardinality correction 是否都已落地且保持单一来源？ |
+| “切片 2：Session liveness” | cancellation-resilient cleanup、primary／secondary failure、main commit 与 archive | cleanup 是否已进入主线并经声明范围 gate 验证？后续 stream owner 接线是否继续守住相同不变量？ |
+| “切片 3：Request converter” | thinking capability、tool mapper、Node-compatible decode、unknown-field fail closed、与 cardinality 同文件的历史组合风险 | 已进入主线的组合是否避免整文件覆盖 `responses_reasoning.py`？后续 route wiring 是否可能恢复 request 的旧聚合 API？ |
 | “文档复评剩余项” | Spec／Architecture／Acceptance／Research／重组计划／本文的交叉状态 | 这些转述是否已同步到源文档当前状态？若没有，应先修状态源再继续后续动作。 |
-| “Squash 与分支归档策略” | cardinality → liveness → request 顺序、main-side gate、immutable archive、feature 与共享 integration 清理条件 | 是否逐片保留 reviewed HEAD？是否在 request 尚未进入 main 时错误清理共享 integration 载体？ |
+| “Squash 与分支归档策略” | 已完成的 foundations／systemd 归档、happy → usage 顺序、main-side gate、immutable archive 与载体清理条件 | 已落地主线的切片是否保持 reviewed HEAD 可追溯？尚未进入主线的 happy／usage 载体是否被过早清理？ |
 | “回滚” | 独立 squash commit 的逆序回退与 archive 不变性 | 回滚是否只改变 main，而不移动评审证据 ref？ |
-| “下一步” | 文档收敛、三片组合、main 回放、archive／cleanup、merged-state review、Acceptance 执行 | 哪些步骤已经被后续文档修改覆盖？执行前是否重新核对 current main 与最新文档状态？ |
+| “下一步” | happy 四片、usage 后继、route wiring、完整 Acceptance 与独立部署状态 | 哪些步骤已经被后续文档修改覆盖？执行前是否重新核对 current main 与最新文档状态？ |
 | “结构怪味登记” | cleanup owner、converter 集中边界、同文件双分支修改、oracle 冲突 | 组合评审是否覆盖这些高风险接缝，而不是只复跑各切片孤立测试？ |
 
 ### 当前仍未实现或未放行的内容
 
 - 完整 Anthropic Messages → Responses upstream bridge 尚未在 `main` 落地；当前 Anthropic stream 仍不是目标 block-level semantic bridge。
-- Reasoning cardinality correction、session liveness、request converter 已在 clean foundations integration `6a00f6f7aaa5083cebd7387208eca65b7df3bd79` 中按三个线性 squash commits 完成组合，并取得 merged-state 代码复评 blocker 0、major 0与范围内独立复验 `PASS`；它们当前仍未进入 `main`，integration 证据不能替代回放后的 main-side gate。
+- Reasoning cardinality correction、session liveness 与 request converter 已作为 `d274f584… → 798ba3e765… → 1c13fda4…` 进入 `main` 并归档 reviewed sources；systemd runtime 已作为 `cf53334a…` 进入 `main` 并归档 reviewed source。它们不再属于待回放范围，但其局部主线 gate 仍不能替代完整 bridge 验收。
+- Happy integration `7e4b642…` 已取得 R2 0 blocker／0 major／0 minor与声明范围 verification 阶段 `PASS`，usage 后继 `aca3ced…` 已取得 review 0 blocker／0 major与独立 verify `PASS`；两者均尚未进入 `main`，usage 必须在 happy 之后消费，candidate-side 证据不能替代未来 main-side gate。
 - Response normalizer、stream assembler、continuous-prefix sequencer、delayed response start、single sink／delivery frontier、完整 route policy 接线、HTTP／WS parity、History／hook／approval／tokenization 全桥接线与资源预算仍需要后续实现切片。
 - Acceptance required gates、mutation controls、live canary、capture corpus 校准和 local fault suite 尚未对完整候选执行；产品 verdict 必须保持 `UNVERIFIED`。
 - Architecture 尚未被用户接受为 ADR，因此不能据方案 B 的评审通过状态直接开始把全部内部合同当成既定事实。
@@ -239,8 +241,8 @@ Architecture 的详细提案不构成一串独立投票。它们只通过[唯一
 
 ### 已有代码基础，但不能代表完整实现
 
-- `main` 已有 upstream-compatible reasoning carrier codec、legacy recognition 与逐 block reverse consumer。
-- 当前 `main` 的 forward reasoning cardinality 仍不符合最终 Spec；对应修复只存在于尚未进入主线的 reviewed candidate。
+- `main` 已有 upstream-compatible reasoning carrier codec、legacy recognition、逐 block reverse consumer、forward reasoning cardinality correction、session liveness 与 request converter；对应 reviewed sources 已归档。
+- Happy integration `7e4b642…` 与 usage 后继 `aca3ced…` 的局部 review／verify 已通过，但都尚未进入 `main`，不能据此宣称 response 或 route 能力已在主线落地。
 - 应用层已有 single pipeline、SDK retry disabled、hooks／approval／attempt／History 等基础 owner，但尚未完成目标 route、semantic conversion、block assembly 与 delivery contract。
 - 当前原生 Responses HTTP／WS 能力可提供 transport primitive，不得直接作为 Anthropic bridge 的第二 pipeline owner。
 
@@ -271,6 +273,6 @@ Architecture 的详细提案不构成一串独立投票。它们只通过[唯一
 
 ## 裁决后的记录要求
 
-用户完成阅读并分别作出 `D-ARCH`／`D-MIGRATION` 裁决后，应把结果写成正式 ADR 或等价决策记录，至少包含：两个决策各自的选择；若选择 B，其五项不可拆分核心的接受或明确修改；A 形迁移边界、route 前置门与退出条件；C 的处置；与 Spec 的不覆盖声明；以及 foundations integration 尚未进入 `main`、完整 bridge 仍待实施和 Acceptance required gates 验证的事实。
+用户完成阅读并分别作出 `D-ARCH`／`D-MIGRATION` 裁决后，应把结果写成正式 ADR 或等价决策记录，至少包含：两个决策各自的选择；若选择 B，其五项不可拆分核心的接受或明确修改；A 形迁移边界、route 前置门与退出条件；C 的处置；与 Spec 的不覆盖声明；以及 foundations／systemd 已进入 `main` 并归档、happy／usage 尚未进入 `main`、完整 bridge 仍待实施和 Acceptance required gates 验证的事实。
 
 在 ADR 形成前，实施者只能继续不依赖未决架构选择的事实核对、候选保全与文档同步；不得把本 README 的推荐措辞当作用户授权。
