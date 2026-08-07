@@ -54,10 +54,9 @@ def _decode_encrypted_content(payload: str) -> str | None:
 
 def responses_reasoning_to_anthropic(
     items: Sequence[Mapping[str, object]],
-) -> AnthropicThinkingBlock | None:
-    """Aggregate Responses output reasoning into at most one Anthropic thinking block."""
-    summary_text: list[str] = []
-    encrypted_content: str | None = None
+) -> list[AnthropicThinkingBlock] | None:
+    """Convert each Responses reasoning item into its own Anthropic thinking block."""
+    blocks: list[AnthropicThinkingBlock] = []
     for item in items:
         if item.get("type") != "reasoning":
             continue
@@ -66,6 +65,7 @@ def responses_reasoning_to_anthropic(
         if not isinstance(summary, list):
             return None
 
+        summary_text: list[str] = []
         for part in cast(list[object], summary):
             if not isinstance(part, Mapping):
                 return None
@@ -81,18 +81,19 @@ def responses_reasoning_to_anthropic(
         encrypted = item.get("encrypted_content")
         if encrypted is not None and not isinstance(encrypted, str):
             return None
-        if encrypted:
-            encrypted_content = encrypted
+        thinking = "".join(summary_text)
+        if not thinking and not encrypted:
+            continue
 
-    thinking = "".join(summary_text)
-    if not thinking:
-        return None
+        blocks.append(
+            {
+                "type": "thinking",
+                "thinking": thinking,
+                "signature": _encode_encrypted_content(encrypted),
+            }
+        )
 
-    return {
-        "type": "thinking",
-        "thinking": thinking,
-        "signature": _encode_encrypted_content(encrypted_content),
-    }
+    return blocks
 
 
 def anthropic_thinking_to_responses(
