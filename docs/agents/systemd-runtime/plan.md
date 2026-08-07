@@ -1,17 +1,18 @@
 # systemd runtime living 实施计划
 
-> 状态：`LIVING`，Plan 继续且不收口。M1 仓库 checkpoint 已以 `cf53334a10a717a3a3d30d6c0e8a297f5000d90c` 进入 current `main@80bc8f252b46c511f428af1d97159a5980ee9dc9`。S3 graceful source `865a5b71210e2436b36786b5de67146939d1e0f5` 与 S4 installer source `e16c2a700f23f66535e7347ab7357518eb8e56bd` 均已取得独立代码评审 `0 blocker／0 major`、明确可 squash；两片已按顺序重建为 code-only integration `integrate/260807-systemd-code-only@2ec0cb81832691685bfe8d98ad03071d2d5e5316` 的两个线性非 merge 提交 `862f4cfa55b124ef9ad21ff2ded2b944ee3307bc` → `2ec0cb81832691685bfe8d98ad03071d2d5e5316`。两条代码提交均明确排除 `docs/agents/systemd-runtime/plan.md`，不会携带或回退 living Plan bytes。该 exact integration 已取得独立 merged-state code review `0 blocker／0 major` 与独立 verify `PASS`；固定集成树全仓 pytest 执行与 collect-only 两种方法均为 440 项。Current living 文档 checkpoint 形成后，立即按 `862f4cfa…` → `2ec0cb8…` 逐片回放并逐片执行 main-side gate，每片 gate 后都从当时 Plan checkpoint bytes fresh 向前更新本 Plan。上述 checkpoint 不表示两片已进入 main、unit 已安装或运行态已切换。
-> 文档同步基线：本次修订在 `main@80bc8f252b46c511f428af1d97159a5980ee9dc9` 完成；后续每次 shell 仍以当次 `main` current HEAD 为门，不把该点时 hash 当作永久执行基线。
+> 状态：`LIVING`，Plan 继续且不收口。Current主树仍为`main@b91e58a29324b11840002efc53ed6f869b800c39`。New-main rebuild为`integrate/260807-systemd-rebuild-resume@d3fabfadfba57af6c2d63e543e3198444777df54`，exact链为`b91e58a29324b11840002efc53ed6f869b800c39 → 8cae6c260c8bc2930be96eaecc7d6d24d470e00a → d3fabfadfba57af6c2d63e543e3198444777df54`且两提交排除本Plan。[New-main merged-state独立代码评审](../../tmp/260807-resume-review-systemd-rebuild.md)精确绑定该base／tip并给出`0 blocker／0 major`，明确允许按`8cae6c2… → d3fabfa…`顺序逐片squash进入main；[独立验收](../../tmp/260807-verify-systemd-rebuild-resume.md)为`PASS，0 blocker／0 major／3 non-blocking minor`，[第二份独立验收](../../tmp/260807-resume-verify-systemd-rebuild.md)同样为`PASS`，两者验证474项全仓执行／collect-only、Ruff、Pyright、deadline正控与installer零manager操作。Candidate尚未进入main；review／PASS不覆盖真实user manager／cgroup、安装、部署或cutover。Current动作是先squash第一片`8cae6c2…`，通过该片identity／preimage与main-side tests gate后立即fresh更新本Plan；再squash第二片`d3fabfa…`，通过同类main-side gate后再次fresh更新本Plan，不重复重建、review或verify已闭合的candidate。
+> 文档同步基线：本次修订在 `main@b91e58a29324b11840002efc53ed6f869b800c39` 完成；读取主树事实的每次 shell仍固定该完整SHA。验证rebuilt candidate时必须在同一次调用内固定物理worktree `/home/xp/src/ghc-api-proxy-py-integrate-systemd-rebuild-resume`、branch `integrate/260807-systemd-rebuild-resume` 与 exact `HEAD=d3fabfadfba57af6c2d63e543e3198444777df54`，并分别核对S3 parent／tip `b91e58a… → 8cae6c2…`及S4 parent／tip `8cae6c2… → d3fabfa…`。Candidate若后续进入main，fresh Plan checkpoint再记录actual完整main SHA；不能预填未来main identity。
 > M1 provenance：reviewed source 为 `feat/systemd-cgroup-runtime@49fb1988621bba4356e7a5039a6994c2e6d19604`，原始代码 base 为 `ed77c9d191df81c451c25161420515cca52ce6a4`；source 提交链为 `66551e451d15ebd95a2bcfb5f0eaa227e8cb82ff` → `1a220e04a99c6ce07b4bdd6bb0876b4180d4c489` → `49fb1988621bba4356e7a5039a6994c2e6d19604`。归档引用 `archive/260807-systemd-runtime` 精确指向 reviewed source `49fb198…`，而 current main checkpoint 是语义等价的 squash 回放提交 `cf53334…`。
-> 评审输入：两份初始 systemd 报告 `docs/tmp/260807-review-code-systemd-runtime.md`、`docs/tmp/260807-systemd-socket-feasibility.md`，code R2／R3／R4 `docs/tmp/260807-review-code-systemd-runtime-r2.md`、`docs/tmp/260807-review-code-systemd-runtime-r3.md`、`docs/tmp/260807-review-code-systemd-runtime-r4.md`，Plan R2～R6，旧 systemd-next merged-state review／verify／replay gate，以及重建审计 `docs/tmp/260807-audit-systemd-next-rebuild.md`、code-only merged-state review `docs/tmp/260807-review-systemd-code-only.md`、独立验收 `docs/tmp/260807-verify-systemd-code-only.md` 均已消费。重建审计否决携带旧 Plan patch 的直接 cherry-pick；code-only review 精确绑定 `2ec0cb8…`，verdict 为 `0 blocker／0 major／2 non-blocking minor`，明确允许按 `862f4cfa…` → `2ec0cb8…` 逐片回放；独立 verify 对同一 exact tip 给出 `PASS`。本次修订关闭 current 路线同步项，但不把本文件自述冒充为新 Plan bytes 的独立复评 verdict。
+> 评审输入：两份初始 systemd 报告 `docs/tmp/260807-review-code-systemd-runtime.md`、`docs/tmp/260807-systemd-socket-feasibility.md`，code R2／R3／R4 `docs/tmp/260807-review-code-systemd-runtime-r2.md`、`docs/tmp/260807-review-code-systemd-runtime-r3.md`、`docs/tmp/260807-review-code-systemd-runtime-r4.md`，Plan R2～R6，旧 systemd-next merged-state review／verify／replay gate，以及重建审计 `docs/tmp/260807-audit-systemd-next-rebuild.md`、旧code-only merged-state review `docs/tmp/260807-review-systemd-code-only.md`、旧独立验收 `docs/tmp/260807-verify-systemd-code-only.md` 均已消费。重建审计否决携带旧 Plan patch 的直接 cherry-pick；旧code-only review精确绑定`2ec0cb8…`，verdict为`0 blocker／0 major／2 non-blocking minor`，旧独立verify对同一exact tip给出`PASS`。该旧 verdict 只证明 `80bc8f2…` base 上的两片顺序与语义，不放行在 `b91e58a29324b11840002efc53ed6f869b800c39` 直接 replay。Current输入另明确消费new-main merged-state独立代码评审`docs/tmp/260807-resume-review-systemd-rebuild.md`：它精确绑定`base@b91e58a29324b11840002efc53ed6f869b800c39`与`tip@d3fabfadfba57af6c2d63e543e3198444777df54`，verdict为`0 blocker／0 major`，只授权按`8cae6c2… → d3fabfa…`逐片squash且每片通过identity／preimage与main-side tests gate后才继续；并列消费`docs/tmp/260807-verify-systemd-rebuild-resume.md`与`docs/tmp/260807-resume-verify-systemd-rebuild.md`两份exact-tip独立verify `PASS`。三份current证据角色不互相替代，也不冒充本轮新Plan bytes已取得独立复评。
 > M1 checkpoint：prepared integration `fe9c20315b0137ca5b2253fdbd86a30d504255ef` 已作为单一语义提交回放到后续 `main`，形成 `cf53334… feat: add systemd socket activation runtime`。回放后的 main-side gate 为全仓 pytest `375 passed`、Ruff 与 Pyright 通过；`archive/260807-systemd-runtime` 已在 gate 后固定到 reviewed source `49fb198…`。这些是仓库 checkpoint 证据，不是安装、真实 manager／cgroup 或运行态切换证据。
-> M2 current code-only integration：`862f4cfa55b124ef9ad21ff2ded2b944ee3307bc feat: configure graceful shutdown timeout` 的 parent 是 current `main@80bc8f2…`，`2ec0cb81832691685bfe8d98ad03071d2d5e5316 feat: add rootless systemd user installer` 的 parent 是 `862f4cfa…`；范围内恰有两个非 merge 提交，且两片均不含本 Plan。Exact tip 的 merged-state review 已为 `0 blocker／0 major`，独立 verify 已为 `PASS`。Current living 文档 checkpoint 后按 `862f4cfa…` → `2ec0cb8…` 逐片回放 main，每片 main-side gate 通过后立即 fresh 更新并 checkpoint 本 Plan，再进入下一片。旧 `integrate/260807-systemd-next@0a93e7f…` 及 `91f95f7…` → `0a93e7f…` 仅保留为历史组合语义、路径适配与重建 provenance，禁止作为 current 回放载荷，也禁止采用其 Plan postimage。回放不等待 installer atomicity、S3 配置测试判别力或其他后续 helper hardening。
+> M2 恢复边界：旧`862f4cfa… → 2ec0cb8…`只证明old-base语义。Current rebuilt图`b91e58a… → 8cae6c2… → d3fabfa…`已经两份独立验收PASS，其中一份为0 blocker／0 major／3 minor；旧链仍不得direct replay。两项既有minor与新增timeout facts重复owner minor继续后补，不阻断main收敛。旧`systemd-next@0a93e7f…`及其Plan postimage同样禁止使用。
+> WSL 运行态恢复：生产双栈 `localhost:4141` 当前仍由旧 Bun 进程持有，进程位于 `/init.scope`，不是候选或已安装的 systemd unit。该身份是执行前必须重取的运行态事实，不授权停止旧 Bun、释放／占用 4141、安装 unit、修改 manager 或 cutover。
 > 当前边界：本计划只规划仓库内实现、测试、文档与 rootless probe；不得安装、启用、启动、停止或替换任何 system／user unit，不得触碰当前运行中的 `copilot-api-js`。
 > 计划位置：`docs/agents/systemd-runtime/plan.md`。
 
 ## 1. 目标与完成定义
 
-本计划把已进入 main 的 systemd socket activation、Uvicorn inherited fd 与 cgroup v2 骨架逐步收敛为可评审、可 rootless 验证、可由用户显式安装的运行方案。开发节奏遵循本项目当前约定：骨架与 happy path → 真实 fd smoke → current candidate 独立代码复评达到 0 blocker／0 major → squash／回放并完成 M1 checkpoint → 在 main 基座上继续 graceful timeout、rootless install helper、真实 user-manager／cgroup smoke 与 rolling 强化。M1 已完成；S3／S4 source review 均已达到 0 blocker／0 major，重建后的 code-only integration `2ec0cb8…` 也已取得 merged-state review `0 blocker／0 major` 与独立 verify `PASS`。Current living 文档 checkpoint 后立即按 `862f4cfa…` → `2ec0cb8…` 逐片回放 main；每片 gate 后都 fresh 更新本 Plan，不重复 M1 回放或重开已闭合评审，也不为非阻断后续强化延迟回放。计划在每个切片后动态更新，不以“计划尚未批准”为由停工，也不把传统 test-first／强制 TDD 设为流程门。
+本计划把已进入main的systemd socket activation、Uvicorn inherited fd与cgroup v2骨架逐步收敛为可评审、可rootless验证、可由用户显式安装的运行方案。M1已完成；new-main candidate`8cae6c2… → d3fabfa…`已获两份独立验收PASS，其中一份为0 blocker／0 major／3 non-blocking minor。当前保持new identity与证据绑定并准备main收敛与fresh Plan checkpoint；不重复施工或验收。后续真实user-manager／cgroup与rolling强化仍完整保留，Plan持续living。
 
 首次回并里程碑 M1 完成不等于已经部署，也不等于 long-term systemd runtime 全部完成。M1 的 squash／回并门只包含：
 
@@ -22,13 +23,13 @@
 5. current candidate HEAD 的 code R4 已达到 0 blocker／0 major，并记录定向测试、Ruff、Pyright 与适用于当前骨架的 rootless smoke 通过。原始模板的 `systemd-analyze verify` 唯一诊断仍是安装前约定路径 `/opt/ghc-api-proxy/.venv/bin/python` 不存在，未发现 unit 语法或字段诊断；不得把该预期非零写成原模板 verify 通过。
 6. `cf53334…` 已把 reviewed M1 范围作为单一语义提交回放到 current main；main-side 全仓 pytest 375 项、Ruff 与 Pyright 均通过，归档引用已固定到 reviewed source `49fb198…`。M1 checkpoint 已完成，不再有待回放动作，也不等待 graceful timeout、install helper、真实 user-manager／cgroup smoke 或 rolling 才承认该 checkpoint。
 
-M1 后的强化保持完整范围，但不反向改写已完成 checkpoint：graceful timeout 与默认 dry-run 的 rootless user install helper 已完成 source review，并已重建为排除 Plan bytes 的两提交 code-only integration，merged-state review 为 `0 blocker／0 major`、独立 verify 为 `PASS`。Current living 文档 checkpoint 形成后先逐片回放，每片 gate 后 fresh 更新并 checkpoint 本 Plan；随后在备用端口和隔离状态根上执行真实 user-manager／cgroup smoke，并在该切片内对账 declared／effective／runtime 三层事实；最后另开双实例／rolling 切片。Installer 的逐文件 atomic 故障恢复、S3 配置测试判别力与其他 helper hardening 保留为后补，不扩大本次回放门。每片独立提交、验证、评审并更新本 living Plan；后续强化均不阻断已经满足的逐片回放门，也不使 Plan 收口。
+M1后的强化保持完整范围。New-main S3／S4 identity与code-only证据已形成并通过两份独立验收，下一步是main收敛与fresh Plan checkpoint；随后执行S5真实user-manager／cgroup，最后另开S7 rolling。Config precedence、逐文件atomicity与timeout facts重复owner三个non-blocking minor继续后补，不扩大当前收敛门。
 
 ## 2. 固定事实、已知可行性与能力边界
 
 ### 2.1 基线与候选事实
 
-以下 M1 reviewed source 事实锚定到代码 base `ed77c9d191df81c451c25161420515cca52ce6a4` 与 source `49fb1988621bba4356e7a5039a6994c2e6d19604`；current main 状态锚定本次修订时的 `main@80bc8f252b46c511f428af1d97159a5980ee9dc9`，执行时必须重新读取 `main` current：
+以下 M1 reviewed source 事实锚定到代码 base `ed77c9d191df81c451c25161420515cca52ce6a4` 与 source `49fb1988621bba4356e7a5039a6994c2e6d19604`；WSL恢复后的current main状态锚定本次修订时的`main@b91e58a29324b11840002efc53ed6f869b800c39`。读取主树时验证该完整SHA；验证new-main candidate时固定其物理worktree、branch与`HEAD=d3fabfadfba57af6c2d63e543e3198444777df54`，并按切片核对parent／tip：
 
 - 候选包含三个提交：`66551e45… feat: add systemd socket activation runtime`、`1a220e04… fix: harden systemd runtime contract` 与 `49fb198… fix: restrict systemd state permissions`。第三个提交消费 code R2 的权限 major 及非阻断 smoke 覆盖项。
 - CLI 候选增加 `--fd`，拒绝与显式 `--host`／`--port` 混用，并把 inherited fd 传给 `uvicorn.run(..., fd=fd)`。
@@ -41,10 +42,11 @@ M1 后的强化保持完整范围，但不反向改写已完成 checkpoint：gra
 - R1 代码／部署报告为 0 blocker／1 major／2 minor，可行性报告为 0 blocker／1 major／2 minor；code R2 绑定 `1a220e04…`，关闭旧 findings 后发现 0 blocker／1 权限 major／1 minor；`49fb198…` 修复该 major并补齐 non-blocking smoke 覆盖，code R3 首次达到 0 blocker／0 major，code R4 在最终 bytes 上独立确认 `0 blocker／0 major／1 文档 minor` 并明确可 squash。Plan R2／R3 指出早期状态滞后，Plan R4 的唯一 major 是 code R4 结论未回写；Plan R6 的唯一 major 是旧 systemd-next merged-state review／verify 已完成却仍被写成待执行。后续重建审计进一步确认旧提交携带的 Plan patch 已被 current bytes 超越，必须改走 code-only integration。本次修订已消费该重建结论，Plan living 可继续，但新 bytes 仍须形成稳定文档 checkpoint。
 - 历史 prepared integration `fe9c203…` 是 `ec5e8f5…` 的直接子提交，tree 内容是候选三提交的单提交 squash。回放前 gate 绑定该 exact HEAD、integration branch、clean worktree 与该树下的 `app` import oracle；全仓 pytest 执行汇总和 collect-only node ID 两种方法均得到当时口径的 301，全仓 Ruff、全仓 Pyright 与 systemd fd smoke 通过。该历史证据只放行当次仓库回放；current main 证据以 `cf53334…` 的 375 项 gate 为准，两者都不表示 unit 已安装或运行态已切换。
 - M1 仓库范围已进入 `main`；尚未执行任何 system／user 安装、真实 user-manager 激活或运行态替换。
-- S3 reviewed source `865a5b71210e2436b36786b5de67146939d1e0f5` 基于 `80bc8f2…`，独立代码评审为 `0 blocker／0 major／1 minor`、明确可 squash；唯一 minor 是配置优先级测试不能独立证明 YAML／env 中间层均被消费，不是运行时错误，不阻塞回放。
-- S4 reviewed source `e16c2a700f23f66535e7347ab7357518eb8e56bd` 同样基于 `80bc8f2…`，独立代码评审为 `0 blocker／0 major／1 minor`、明确可 squash。Atomicity 裁决确认 helper 只承诺逐文件原子替换，不承诺三文件 all-or-nothing；该 minor 可后补措辞和第二／第三文件替换失败后的重跑收敛回归，不要求 squash 前修。
+- S3 new-main identity为`8cae6c2…`，parent为`b91e58a…`，含9个S3非Plan paths；两份tip验收已覆盖其合同。Config precedence永久测试minor继续后补。
+- S4 new-main identity为`d3fabfa…`，parent为`8cae6c2…`，含3个S4非Plan paths；两份tip验收已覆盖installer与组合合同。Atomicity及timeout facts重复owner minor继续后补。
 - Historical integration `integrate/260807-systemd-next@0a93e7f18f197bf8a2395eaaf20afda446f92d6b` 从 `main@80bc8f2…` 依次包含 `91f95f7d30c0b399eef98d997c0f88f57c2d0284` 与 `0a93e7f18f197bf8a2395eaaf20afda446f92d6b` 两个线性非 merge 提交；其固定 clean tree 全仓 pytest 与 collect-only 均为 440 项，merged-state review 为 `0 blocker／0 major`、独立 verify 为 `PASS`、final replay gate 为 `0 blocker／0 major`。这些证据继续证明组合语义与路径适配，但两个提交都携带过时 Plan patch，因此只作历史 provenance，禁止直接回放或采用其 Plan postimage。
-- Current code-only integration `integrate/260807-systemd-code-only@2ec0cb81832691685bfe8d98ad03071d2d5e5316` 从 `main@80bc8f2…` 依次包含 `862f4cfa55b124ef9ad21ff2ded2b944ee3307bc` 与 `2ec0cb81832691685bfe8d98ad03071d2d5e5316` 两个线性非 merge 提交；第一片只含 9 个 S3 非 Plan paths，第二片只含 3 个 S4 非 Plan paths，Plan blob 与 base 相同。它与 historical integration 的所有非 Plan bytes 相同，独立 merged-state review 为 `0 blocker／0 major`、独立 verify 为 `PASS`，全仓 pytest 与 collect-only 均为 440 项。Current living 文档 checkpoint 后按该链逐片回放，每片 gate 后 fresh 更新本 Plan。
+- 旧 code-only integration `integrate/260807-systemd-code-only@2ec0cb81832691685bfe8d98ad03071d2d5e5316` 从旧 `main@80bc8f2…` 依次包含 `862f4cfa55b124ef9ad21ff2ded2b944ee3307bc` 与 `2ec0cb81832691685bfe8d98ad03071d2d5e5316` 两个线性非 merge 提交；第一片只含 9 个 S3 非 Plan paths，第二片只含 3 个 S4 非 Plan paths，Plan blob 与 base 相同。它与 historical integration 的所有非 Plan bytes 相同，独立 merged-state review 为 `0 blocker／0 major`、独立 verify 为 `PASS`，全仓 pytest 与 collect-only 均为 440 项。该证据继续作为重建 oracle，但旧 commits 均不是 `b91e58a29324b11840002efc53ed6f869b800c39` 的祖先，禁止直接 replay／cherry-pick；new-main 重建必须重新核对逐路径 preimage 与结果 bytes。
+- WSL 恢复后的只读运行态确认双栈 4141 listener 仍由旧 Bun 持有，cgroup 为 `/init.scope`，不是候选 systemd unit。Plan 的仓库重建动作不得外推为 unit 安装、manager activation 或端口接管。
 
 规划环境已确认存在 `systemd-analyze`、`systemd-run`、`systemctl` 与 `curl`，systemd 为 255，用户 bus 与 `XDG_RUNTIME_DIR` 可用，`/sys/fs/cgroup` 为 cgroup v2。它们只说明 rootless probe 在当前环境可行，不构成其他 Linux 主机必然具备同样条件的兼容性保证；测试必须对缺失工具给出显式 skip／unsupported 结果，不能静默假绿。
 
@@ -92,11 +94,11 @@ unit 声明、内核运行态与 Prometheus 观测必须分三层：
 | S0 候选骨架 | **已实现、已完成 R1／可行性评审** | `66551e45…`；两报告均为 0 blocker／1 major／2 minor | 作为历史骨架保留，不再重复评审旧 HEAD |
 | S1 findings 与权限修复 | **已实现并由 code R4 终审关闭** | `1a220e04…` 的 R1 findings 由 code R2 关闭；`49fb198…` 的 `0700／0077`、覆盖目录文档与真实 writer mode 回归关闭 code R2 权限 major；code R4 为 0 blocker／0 major | 不重开已关闭代码 findings；credentials minor 留作回并后部署强化 |
 | S2 M1 真实 fd smoke | **已扩展并由 code R4 复核通过** | 真实 inherited fd、预连接 backlog、readiness 200、真实 Anthropic 请求、SIGTERM cleanup、无 HOME 启动、History＋tokenization、覆盖目录及权限 smoke 已覆盖；`fe9c203…` 上 fd smoke 再次通过 | 更完整的 activation／service-gap／accepted-drain probe 留在回并后，不扩大 M1 |
-| M1 首次 squash／回放 checkpoint | **已在 main 完成，Plan 继续 living** | `cf53334…` 已是 current `main@80bc8f2…` 的祖先；M1 main-side 全仓 pytest 375 项、Ruff、Pyright 通过；`archive/260807-systemd-runtime` → `49fb198…` | 不重复回放，不外推为部署或 cutover |
-| S3 graceful timeout 合同 | **source review 与 code-only 组合门均通过，待第一片回放** | `865a5b7…` review 为 0 blocker／0 major／1 non-blocking minor；code-only 集成提交 `862f4cfa…` 对齐 Uvicorn `300s` 与 systemd `330s`，不含 Plan patch；exact tip review 0 major、verify `PASS` | Living 文档 checkpoint 后立即作为第一片回放 main；该片 main-side gate 通过后 fresh 更新并 checkpoint 本 Plan，配置测试判别力后补不阻断 |
-| S4 rootless install dry-run helper | **source review 与 code-only 组合门均通过，待第二片回放** | `e16c2a7…` review 为 0 blocker／0 major／1 non-blocking atomic minor；code-only 集成提交 `2ec0cb8…` 不含 Plan patch，exact tip 全仓 pytest 与 collect-only 均为 440 项；review 0 major、verify `PASS` | 第一片 gate 与 fresh Plan checkpoint 完成后作为第二片回放；第二片 gate 后再次 fresh 更新 Plan，atomicity 与其他 helper hardening 后补不阻断 |
-| S5 真实 user-manager／cgroup smoke | **S4 后切片** | direct inherited-fd smoke 已有；真实 user manager 传 fd、service lifecycle 与 effective cgroup 尚未证明 | 在备用端口、隔离状态根与可回收 user-manager fixture 中验证 activation、graceful、真实 cgroup 归属及 declared／effective／runtime 三层事实 |
-| S6 M2 code-only 组合复核 | **current code-only review 0 major、verify `PASS`，待 living 文档 checkpoint 后逐片回放** | `2ec0cb8…` 恰含 `862f4cfa…` → `2ec0cb8…` 两个线性非 merge 提交并排除 Plan bytes；source reviews 均为 0 major；code-only merged-state review 0 major、verify `PASS` | 文档 checkpoint 后按 current code-only 链逐片回放；每片 gate 后 fresh 更新并 checkpoint Plan。旧 `91f95f7…`／`0a93e7f…` 仅作历史 provenance，不可回放 |
+| M1 首次 squash／回放 checkpoint | **已在 main 完成，Plan 继续 living** | `cf53334…` 已是 current `main@b91e58a29324b11840002efc53ed6f869b800c39` 的祖先；M1 main-side 全仓 pytest 375 项、Ruff、Pyright 通过；`archive/260807-systemd-runtime` → `49fb198…` | 不重复回放，不外推为部署或 cutover |
+| S3 graceful timeout 合同 | **new-main candidate验收PASS；未main** | rebuilt`8cae6c2…`直接基于`b91e58a…`；两份tip验收覆盖S3配置、两条Uvicorn路径、deadline与短SIGTERM | 保持identity，准备main收敛；不外推真实manager行为 |
+| S4 rootless install dry-run helper | **new-main candidate验收PASS；未main** | rebuilt tip`d3fabfa…`两份独立验收PASS；默认dry-run、临时apply、幂等、零systemctl与真实parser已验 | 保持exact tip与报告绑定，准备main收敛；三个non-blocking minor后补 |
+| S5 真实 user-manager／cgroup smoke | **new-main candidate gates、main收敛与fresh Plan checkpoint后的后续切片** | direct inherited-fd smoke 已有；真实 user manager 传 fd、service lifecycle 与 effective cgroup 尚未证明；当前旧 Bun 4141 owner 在 `/init.scope`，不是 unit | 在备用端口、隔离状态根与可回收 user-manager fixture 中验证 activation、graceful、真实 cgroup 归属及 declared／effective／runtime 三层事实，不触碰生产 4141 |
+| S6 M2 new-main 组合复核 | **merged-state review 0 blocker／0 major＋两份独立verify PASS；未main** | exact链`b91e58a… → 8cae6c2… → d3fabfa…`；474项执行／collect-only、Ruff、Pyright、正控与Plan排除通过 | 逐片squash；每片通过identity／preimage与main-side tests gate后fresh更新本Plan，再进入下一片；S5仍须另行真实manager／cgroup验证 |
 | S7 双实例／rolling | **后续独立切片，未设计、不可冒充已支持** | 单实例 socket activation 只提供 listener continuity | 冻结拓扑、readiness 切流、状态隔离、drain、回滚和并发规则，再实施 overlap smoke |
 
 每个切片完成后立即更新本表、对应阶段的“实际结果”和“证据”字段，并写明候选 HEAD、测试命令与评审 verdict。不得等待所有切片结束后一次性补记。
@@ -114,10 +116,11 @@ test "$(git rev-parse --show-toplevel)" = "$ROOT"
 test "$PWD" = "$ROOT"
 test "$(git symbolic-ref --short HEAD)" = main
 MAIN_CURRENT=$(git rev-parse HEAD)
+test "$MAIN_CURRENT" = b91e58a29324b11840002efc53ed6f869b800c39
 printf 'SHELL_GATE_MAIN_CURRENT root=%s branch=main head=%s\n' "$ROOT" "$MAIN_CURRENT"
 ```
 
-后续强化以 current main 为实施基座。需要追溯 M1 时，在同一次 shell 验证 `archive/260807-systemd-runtime` 精确指向 `49fb1988621bba4356e7a5039a6994c2e6d19604`，并证明代码 base `ed77c9d…` 是该 reviewed source 的祖先；归档只作 provenance，不作为后续切片的开发 HEAD。不得把 `git -C` 指向主树的单条命令误当作当前 shell 位于目标树的证明。切片开始与结束都记录 `git status --short`，只提交本切片精确 pathspec。
+读取主树事实时每次shell都以完整`b91e58a29324b11840002efc53ed6f869b800c39`为exact gate，不接受短SHA。验证S3时固定candidate worktree并核对`8cae6c2…`的parent为`b91e58a…`；验证S4或组合态时固定同一worktree、branch与exact`HEAD=d3fabfa…`，核对其parent为`8cae6c2…`。Candidate后续若进入main，本段才由fresh Plan checkpoint更新为actual完整main SHA。需要追溯M1时，在同一次shell验证`archive/260807-systemd-runtime`精确指向`49fb1988621bba4356e7a5039a6994c2e6d19604`，并证明代码base`ed77c9d…`是该reviewed source的祖先；归档只作provenance，不作为后续切片的开发HEAD。不得把`git -C`指向目标树的单条命令误当作当前shell位于目标树的证明。切片开始与结束都记录`git status --short`，只提交本切片精确pathspec。
 
 ### 4.2 渐进开发与测试节奏
 
@@ -192,13 +195,13 @@ printf 'SHELL_GATE_MAIN_CURRENT root=%s branch=main head=%s\n' "$ROOT" "$MAIN_CU
 
 **状态**：**checkpoint 已完成，Plan 继续 living。** 骨架、findings／权限修复与扩展真实 fd smoke 已从 reviewed source `49fb198…` 经冻结 squash 回放到 `main@cf53334…`。回放后的 main-side gate 为全仓 pytest 375 项、Ruff 与 Pyright 通过；`archive/260807-systemd-runtime` 精确指向 `49fb198…`。
 
-**下一动作**：不再清理旧回放前 WIP、不再回放 `fe9c203…`，也不重复 code R4。S3／S4 已完成 source review，并形成排除 Plan bytes 的 current code-only integration `integrate/260807-systemd-code-only@2ec0cb8…`；exact tip 已取得 merged-state review `0 blocker／0 major` 与 verify `PASS`。Living 文档 checkpoint 形成后立即按 `862f4cfa…` → `2ec0cb8…` 逐片回放 current main；每片后执行 main-side gate，随后从当时 checkpoint bytes fresh 更新并再次 checkpoint 本 Plan。旧 `91f95f7…`／`0a93e7f…` 链只作历史 provenance，禁止回放或用于 Plan 冲突解决。Current 回放不等待 installer atomicity、S3 配置测试判别力或其他 helper hardening；随后进入 S5，最后才是 S7 rolling，Plan 全程保持 living。
+**下一动作**：`d3fabfa…`两份独立验收已PASS，不重复验收或重建。保持candidate exact identity，准备后续main收敛与fresh Plan checkpoint；进入main后再执行S5真实user-manager／cgroup smoke。三个non-blocking minor后补，不升级为当前门；unit安装、manager操作、S5与S7均继续后置。
 
 **证据边界**：M1 完成只表示仓库 checkpoint 已进入 main。它不表示 unit 已安装、user manager 已激活、真实 cgroup limits 已施加、现有服务已替换、部署完成或 cutover；不授权 unit copy、daemon-reload、enable、start、restart 或任何运行态切换。
 
 ### S3：graceful timeout 单一时间模型
 
-**状态**：reviewed source `feat/systemd-graceful-timeout@865a5b71210e2436b36786b5de67146939d1e0f5` 已完成并取得独立代码评审 `0 blocker／0 major／1 non-blocking minor`、明确可 squash；其语义已作为 current code-only integration 第一提交 `862f4cfa55b124ef9ad21ff2ded2b944ee3307bc` 落在 `80bc8f2…` 之上，该提交明确不含本 Plan，尚未进入 main。
+**状态**：New-main S3 identity`8cae6c260c8bc2930be96eaecc7d6d24d470e00a`直接基于`b91e58a…`且排除本Plan；两份tip独立验收PASS覆盖S3合同。Candidate未main；当前保持identity与证据绑定并准备main收敛。
 
 **目标**：消除候选 `TimeoutStopSec=330s` 与实际应用运行态之间的无证据对应关系。
 
@@ -224,13 +227,13 @@ printf 'SHELL_GATE_MAIN_CURRENT root=%s branch=main head=%s\n' "$ROOT" "$MAIN_CU
 - 真实短 timeout probe 使用动态 listener、受控 generic upstream 和 `--graceful-timeout 1`，阻塞一个 accepted request 后发送 SIGTERM；已观察 Uvicorn timeout 分支、FastAPI lifespan shutdown completion 与进程有界退出。
 - 现有真实 fd smoke 继续覆盖未阻塞请求的正常 SIGTERM／lifespan cleanup、History 与 tokenization 落盘。再次发送终止信号的四阶段升级仍明确 unsupported，不以 helper 类存在宣称支持。
 
-**验收与评审结果**：unit、CLI／Uvicorn 与 app lifecycle 已共享可复现时间模型；定向 pytest 30 项通过，全仓 pytest 执行与 collect-only 两种方法均为 437 项，全仓 Ruff 与 Pyright 通过，临时替换未安装 `/opt` 解释器路径后的 `systemd-analyze verify` 返回 0。独立代码评审确认 `865a5b7…` 为 0 blocker／0 major、可以 squash。唯一 minor 是 shutdown 专属配置优先级测试只断言最终 CLI 值，不能独立证明 YAML／env 中间层均被消费；独立 runtime probe 已确认产品行为正确，该测试增强不阻塞集成或回放。
+**验收与评审结果**：unit、CLI／Uvicorn 与 app lifecycle 已共享可复现时间模型；定向 pytest 30 项通过，全仓 pytest 执行与 collect-only 两种方法均为 437 项，全仓 Ruff 与 Pyright 通过，临时替换未安装 `/opt` 解释器路径后的 `systemd-analyze verify` 返回 0。独立代码评审确认 `865a5b7…` 为 0 blocker／0 major、可以 squash。唯一 minor 是 shutdown 专属配置优先级测试只断言最终 CLI 值，不能独立证明 YAML／env 中间层均被消费；独立 runtime probe 已确认产品行为正确，该测试增强不阻塞 new-main S3 重建。
 
 **风险与回滚**：修改 timeout 可能放大 stop 延迟或过早切断 SSE／WebSocket。先以缩短时间的隔离测试验证状态机，再改变模板；回滚只恢复 timeout 对齐提交，不回退 socket activation。
 
 ### S4：rootless user install dry-run helper
 
-**状态**：reviewed source `feat/systemd-user-install@e16c2a700f23f66535e7347ab7357518eb8e56bd` 已完成并取得独立代码评审 `0 blocker／0 major／1 non-blocking minor`、明确可 squash；其语义已作为 current code-only integration 第二提交 `2ec0cb81832691685bfe8d98ad03071d2d5e5316` 接在 `862f4cfa…` 之后，该提交明确不含本 Plan，尚未进入 main。本计划不执行真实安装。
+**状态**：New-main S4 tip`d3fabfadfba57af6c2d63e543e3198444777df54`直接基于`8cae6c2…`且排除本Plan；两份独立验收PASS覆盖S4与组合合同。Candidate未main；当前保持identity与证据绑定并准备main收敛。本计划不执行真实安装。
 
 **目标**：让普通用户能把仓库路径、Python 解释器、配置文件、监听地址和 limits 渲染为 user units，且整个过程可预览、可检查、可幂等重跑，不需要 sudo。当前切片不承诺备份／卸载意义上的完整可逆。
 
@@ -243,15 +246,15 @@ printf 'SHELL_GATE_MAIN_CURRENT root=%s branch=main head=%s\n' "$ROOT" "$MAIN_CU
 - user service 不保留 system unit 的 `User=`／`Group=`；路径、WantedBy target、slice 名称与资源控制按 user manager 语义渲染，不能机械复制系统模板。
 - secrets 不写入生成日志或 world-readable unit；环境文件只引用路径，helper 不采集 token。
 
-**测试与实际结果**：临时 HOME／XDG 根覆盖 dry-run 零写、check、explicit apply 精确三文件、重复运行幂等、路径含空格、secret 不泄露、parser 缺失时诚实降级、真实 `systemd-analyze --user verify` 和零 `systemctl`；所有测试不调用真实 user manager。Source exact HEAD 全仓 pytest 执行与 collect-only 均为 437 项，Ruff 与 Pyright 通过。已有文件冲突、备份／uninstall manifest、恶意 symlink 与权限错误属于后续 helper hardening，不冒充 current slice 已覆盖，也不阻塞 code-only integration 回放。
+**测试与实际结果**：临时 HOME／XDG 根覆盖 dry-run 零写、check、explicit apply 精确三文件、重复运行幂等、路径含空格、secret 不泄露、parser 缺失时诚实降级、真实 `systemd-analyze --user verify` 和零 `systemctl`；所有测试不调用真实 user manager。Source exact HEAD 全仓 pytest 执行与 collect-only 均为 437 项，Ruff 与 Pyright 通过。已有文件冲突、备份／uninstall manifest、恶意 symlink 与权限错误属于后续 helper hardening，不冒充 current slice 已覆盖，也不阻塞 new-main S4 重建。
 
 **验收**：rootless helper 的默认 dry-run 没有持久副作用；测试中的显式 install 只写临时 `XDG_CONFIG_HOME`；仓库文档把 dry-run／render、install、reload、enable 与 start 分成用户分别主动发起的步骤。本计划实施和验收阶段不执行真实安装。
 
-**评审 minor、风险与回滚**：独立评审与后续裁决确认 apply 只保证逐文件原子替换，第二／第三文件替换失败会显式非零、无临时残留，修复外部故障后重跑可收敛；不保证整组事务。后补只需统一“逐文件原子替换；整组不承诺 all-or-nothing”措辞，并增加一个参数化故障恢复回归，不引入 generation staging、整组 rollback 或 manager orchestration。该 minor 与冲突备份／卸载／symlink hardening 不推翻已完成的 merged-state review／verify，也不阻塞逐片回放。User 与 system unit 语义不完全相同，继续保留两套明确 renderer 与共享 facts 机械对账；helper 提交可独立 revert。
+**评审 minor、风险与回滚**：独立评审与后续裁决确认 apply 只保证逐文件原子替换，第二／第三文件替换失败会显式非零、无临时残留，修复外部故障后重跑可收敛；不保证整组事务。后补只需统一“逐文件原子替换；整组不承诺 all-or-nothing”措辞，并增加一个参数化故障恢复回归，不引入 generation staging、整组 rollback 或 manager orchestration。该逐文件 atomicity non-blocking minor 与冲突备份／卸载／symlink hardening 不推翻已完成的 old-base merged-state review／verify，也不阻塞 new-main 重建。User 与 system unit 语义不完全相同，继续保留两套明确 renderer 与共享 facts 机械对账；helper 提交可独立 revert。
 
 ### S5：真实 user-manager／cgroup smoke
 
-**状态**：S4 helper 的 render／check／默认 dry-run 合同关闭后实施；不触碰生产端口或现有服务。
+**状态**：new-main S4 重建、main-side gate 与 fresh Plan checkpoint 完成后实施；不触碰生产端口或现有服务。WSL 恢复时旧 Bun 仍持有双栈 4141 且位于 `/init.scope`，该非 unit 运行态不属于本阶段可修改对象。
 
 **目标**：在备用端口、隔离状态根和可回收 fixture 中，由真实 user manager 加载渲染后的 socket／service／slice，证明真实 fd activation、service lifecycle、graceful／force timeout 边界和 cgroup v2 effective limits；同时让运行实例能够区分 declared limits、effective limits 与 runtime pressure facts。
 
@@ -281,7 +284,7 @@ printf 'SHELL_GATE_MAIN_CURRENT root=%s branch=main head=%s\n' "$ROOT" "$MAIN_CU
 
 ### S6：M2 强化组合验证与复核
 
-**状态**：S3＋S4 已形成 current code-only integration `integrate/260807-systemd-code-only@2ec0cb81832691685bfe8d98ad03071d2d5e5316`，exact range 相对 current `main@80bc8f2…` 恰有 `862f4cfa…` → `2ec0cb8…` 两个线性非 merge 提交，且两片都排除 `docs/agents/systemd-runtime/plan.md`。固定 clean tree 的全仓 pytest 执行与 collect-only 均为 440 项；该 exact tip 的 merged-state review 为 `0 blocker／0 major`、独立 verify 为 `PASS`。S5 仍是回放后的后续切片，本阶段不追溯改写已完成的 M1 checkpoint。
+**状态**：New-main exact链`b91e58a29324b11840002efc53ed6f869b800c39 → 8cae6c260c8bc2930be96eaecc7d6d24d470e00a → d3fabfadfba57af6c2d63e543e3198444777df54`的merged-state独立代码评审`docs/tmp/260807-resume-review-systemd-rebuild.md`为`0 blocker／0 major`；`docs/tmp/260807-verify-systemd-rebuild-resume.md`与`docs/tmp/260807-resume-verify-systemd-rebuild.md`两份独立verify均为`PASS`，其中前者记录`0 blocker／0 major／3 non-blocking minor`。474项执行／collect-only、Ruff、Pyright、四个deadline正控、短SIGTERM、installer零manager操作及Plan排除均通过。Candidate未main；S5仍在两片逐片进入main并完成fresh Plan checkpoint之后。
 
 **目标**：证明回并后强化分片各自通过后，组合状态没有在 unit、CLI、shutdown、helper 与 metrics 接缝重新引入矛盾。
 
@@ -297,9 +300,9 @@ printf 'SHELL_GATE_MAIN_CURRENT root=%s branch=main head=%s\n' "$ROOT" "$MAIN_CU
 | user-manager／cgroup live probe | effective limits、进程归属、graceful／force timeout、cleanup | system unit 账户、`/opt` 部署或生产接管 |
 | full project gates | Ruff、Pyright、全量 pytest | 已安装或生产可替换 |
 
-**评审**：S3 source `865a5b7…` 与 S4 source `e16c2a7…` 的定向独立评审均已达到 0 blocker／0 major。Current `2ec0cb8…` 两提交 code-only 组合已从假绿与假红两个方向检查并取得 merged-state review `0 blocker／0 major`；独立 verify 为 `PASS`，并确认 Plan bytes 相对 base 未改变、system／user deadline drift 正控按目标原因转红。Living 文档 checkpoint 后，不等待 installer atomicity、配置测试判别力或其他 helper hardening，直接按 `862f4cfa…` → `2ec0cb8…` 逐片回放 main。每片回放后重跑该片 main-side gate，任一片失败即停止；通过后 fresh 更新并 checkpoint 本 Plan，再进入下一片。旧 `0a93e7f…` 的 review／verify／replay gate 继续作为历史组合语义与路径适配证据，但其 commit identity 与 Plan postimage 不可用于 current 回放。M2 组合复核不得推翻已完成的 M1，除非发现直接影响 M1 正确性的新事实。
+**评审**：`docs/tmp/260807-resume-review-systemd-rebuild.md`精确绑定new-main base`b91e58a…`与tip`d3fabfa…`，merged-state verdict为`0 blocker／0 major`，明确允许按`8cae6c2… → d3fabfa…`顺序逐片squash，并要求每片identity／preimage gate与main-side tests gate通过后才进入下一片。`docs/tmp/260807-verify-systemd-rebuild-resume.md`与`docs/tmp/260807-resume-verify-systemd-rebuild.md`分别对同一exact tip给出独立`PASS`；474项执行／collect-only、Ruff、Pyright、deadline正控、短SIGTERM、installer与Plan排除均通过。旧code-only／systemd-next identity与Plan postimage仍不可作为current payload。M2 review与verify证据门已闭合到code-only范围，不得外推S5或cutover。
 
-**回并边界**：回放前重新验证 current main、`integrate/260807-systemd-code-only@2ec0cb8…` exact tip、两个 parent、恰好两个非 merge 提交、两片 pathset 均不含本 Plan，以及 clean worktree；若 main、Plan checkpoint bytes 或 code-only identity 已前进，则先重建适用性 gate，不盲用旧 verdict。按顺序逐片回放，并在每片 main-side gate 与 fresh Plan checkpoint 通过后才进入下一片；不得把两片压成一个无法独立回滚的提交。两片成功后的 source archive targets 仍为 `865a5b7…` 与 `e16c2a7…`，不改指 rebuilt commits；worktree／branch 清理与 archive ref 更新属于回放后动作，不在本计划自动执行。
+**回并边界与下一动作**：重新验证current main精确为`b91e58a29324b11840002efc53ed6f869b800c39`，并验证new candidate exact tip`d3fabfadfba57af6c2d63e543e3198444777df54`、两个parent、恰好两个非merge提交、两片pathset均不含本Plan，以及S3／S4目标路径的preimage与result bytes。先把第一片`8cae6c260c8bc2930be96eaecc7d6d24d470e00a`单独squash到main；该片identity／preimage与main-side tests gate通过后，立即用actual main完整SHA、结果与下一片前置条件fresh更新本Plan并形成checkpoint。随后才把第二片`d3fabfadfba57af6c2d63e543e3198444777df54`单独squash到更新后的main；第二片同类main-side gate通过后再次fresh更新本Plan。不得用旧链替换new candidate，也不得把两片压成一个无法独立回滚的提交。任一identity、preimage、Plan bytes、pathset或main-side gate漂移都停止并重建适用性gate。放行后的source archive targets仍为`865a5b7…`与`e16c2a7…`，不改指old integration或new-main rebuilt commits；worktree／branch清理与archive ref更新属于后续动作，不在本计划自动执行。
 
 ### S7：双实例／rolling 后续切片
 
@@ -328,11 +331,11 @@ printf 'SHELL_GATE_MAIN_CURRENT root=%s branch=main head=%s\n' "$ROOT" "$MAIN_CU
 | `--fd 0` | **R1 minor 已由 code R2～R4 关闭** | Typer `min=1` 与精确拒绝测试已落地且无回归 |
 | M1 真实 fd smoke | **已扩展并由 code R4 复核，integration 再次通过** | inherited fd、预连接 backlog、readiness 200、真实请求、无 HOME、History＋tokenization、覆盖目录、状态权限与 cleanup 已覆盖；`fe9c203…` 上 smoke 6 项通过 |
 | EnvironmentFile secret 边界 | **code R4 non-blocking minor，后续部署强化** | 现路径仅作兼容且不阻塞 M1；后续优先评估 `LoadCredential=`／`LoadCredentialEncrypted=` 与现有 `auth.token_file` 接线 |
-| M1 squash／回放 checkpoint | **已在 main 完成，Plan living 继续** | `cf53334…` 已是 current `main@80bc8f2…` 的祖先；M1 gate 为全仓 pytest 375 项、Ruff、Pyright 通过；archive ref → `49fb198…` | 不重复回放；S3＋S4 code-only 组合门已闭合，当前等待 living 文档 checkpoint 后逐片回放，不外推安装、部署或 cutover |
+| M1 squash／回放 checkpoint | **已在 main 完成，Plan living 继续** | `cf53334…` 已是 current `main@b91e58a29324b11840002efc53ed6f869b800c39` 的祖先；M1 gate 为全仓 pytest 375 项、Ruff、Pyright 通过；archive ref → `49fb198…` | 不重复回放；new-main S3／S4 candidate已形成，当前执行其证据门，不外推安装、部署或cutover |
 | activation／service-gap／accepted-drain 深化 | **S5 真实 user-manager smoke 范围** | `systemd-socket-activate` 与父进程 listener-owner probe 继续作为可移植分层证据；真实 manager 下单独验证 drain／timeout／不迁移 |
-| shutdown owner／deadline | **S3 source review 0 major，code-only integration 第一片** | `865a5b7…` 冻结 Uvicorn `300s` graceful cap、FastAPI lifespan cleanup owner 与 systemd `330s` deadline；review 0 blocker／0 major，配置中间层测试 minor 后补；current 集成提交为 `862f4cfa…`，不含 Plan patch |
-| rootless install dry-run helper | **S4 source review 0 major，code-only integration 第二片** | `e16c2a7…` 默认 dry-run、显式 apply、诚实 check、幂等、零 manager 操作；review 0 blocker／0 major。Atomic minor 已裁决为后补逐文件故障恢复合同，不阻塞 current 集成提交 `2ec0cb8…`，该提交不含 Plan patch |
-| S3＋S4 current code-only integration | **merged-state review 0 major／verify `PASS`，待 living 文档 checkpoint 后回放** | `integrate/260807-systemd-code-only@2ec0cb8…` 恰含 `862f4cfa…` → `2ec0cb8…` 两提交；全仓 pytest 与 collect-only 均为 440 项；两片排除 Plan bytes。文档 checkpoint 后逐片回放并在每片 gate 后 fresh 更新 Plan，不等待后续 hardening |
+| shutdown owner／deadline | **new-main candidate验收PASS** | `8cae6c2…`为S3 identity；两份tip验收覆盖300／330、优先级、两启动路径与短SIGTERM；config precedence永久测试minor后补 |
+| rootless install dry-run helper | **new-main candidate验收PASS** | `d3fabfa…`为S4 tip；dry-run、临时apply、幂等、零systemctl与parser已验；逐文件atomicity minor后补 |
+| S3＋S4 new-main code-only integration | **两份独立验收PASS；未main** | exact tip`d3fabfa…`，一份为0 blocker／0 major／3 minor；Plan排除 | 保持identity与报告绑定，准备main收敛；不外推安装或cutover |
 | 旧 S3＋S4 integration | **仅历史 provenance，不可回放** | `integrate/260807-systemd-next@0a93e7f…` 与 `91f95f7…` → `0a93e7f…` 的非 Plan 语义、review／verify／replay 证据继续保留；其 Plan patch已过时 | 禁止 cherry-pick、禁止采用 old Plan postimage、禁止把旧 commit identity写成 current 执行路线 |
 | 真实 user-manager／cgroup 三层与 metric API | **S5 开放** | 使用备用端口和隔离状态根验证真实 manager lifecycle 与 effective cgroup；typed reader／fake-tree 支撑 declared／effective／runtime 对账，再冻结 metrics 合同 |
 | 平台兼容 | **S4～S5 开放** | 明确 systemd 版本下限、user manager／delegation 要求，以及非 systemd／非 Linux 的 unsupported 行为 |
@@ -354,7 +357,7 @@ python -m pytest -q tests
 
 M1 回放后的实际 gate 绑定 `main@cf53334a10a717a3a3d30d6c0e8a297f5000d90c` 与主树自身 import oracle：全仓 pytest 自报 `375 passed`，全仓 Ruff 与全仓 Pyright 通过；归档引用随后固定到 reviewed source `49fb1988621bba4356e7a5039a6994c2e6d19604`。这些结果的口径是回放时 current `tests`、`src` 与主树环境，不是永久测试数阈值；后续执行时重跑并记录当时数量。该 gate 没有连接真实 user manager、安装 unit、验证 effective cgroup 或操作生产 listener。
 
-S3 已把 graceful timeout 检查加入 `tests/unit/test_cli.py`、`tests/unit/test_config_loader.py` 与 `tests/smoke/test_systemd_units.py`；短 timeout probe 直接运行真实 CLI／Uvicorn，但不连接真实 manager。S4 已增加 `tests/smoke/test_systemd_user_install.py`，只在临时 HOME／XDG 根验证 helper，不连接真实 manager。Current code-only integration `2ec0cb8…` 的全仓 pytest 执行汇总为 440 passed，同一 `tests` 范围的 collect-only 独立计得 440 个 node IDs；该数字绑定 `integrate/260807-systemd-code-only@2ec0cb8…`，不是永久阈值。Merged-state review `0 blocker／0 major` 与独立 verify `PASS` 均已完成，但不替代未来逐片 main-side gate与每片后的 fresh Plan update。Verify 还确认 base／candidate／worktree 的 Plan blob未变化；这证明代码集成排除 Plan bytes，不证明 current main working-tree Plan 已 checkpoint。不存在的 `tests/smoke/test_systemd_socket_activation.py` 与 `tests/unit/test_cgroup_observability.py` 不作为 current 已通过命令。User-manager smoke 必须由测试 harness 创建隔离 runtime／状态并自动清理；不允许手工改动常驻用户 manager 来补证据。
+S3 reviewed 语义把 graceful timeout 检查加入 `tests/unit/test_cli.py`、`tests/unit/test_config_loader.py` 与 `tests/smoke/test_systemd_units.py`；短 timeout probe 直接运行真实 CLI／Uvicorn，但不连接真实 manager。S4 reviewed 语义增加 `tests/smoke/test_systemd_user_install.py`，只在临时 HOME／XDG 根验证 helper，不连接真实 manager。旧 code-only integration `2ec0cb8…` 的全仓 pytest执行汇总为 440 passed，同一 `tests` 范围的 collect-only 独立计得 440 个 node IDs；该数字绑定 old-base integration，不是 new-main gate 结果或永久阈值。Merged-state review `0 blocker／0 major` 与独立 verify `PASS` 不替代 S3／S4 new-main 重建后的逐片 gate与每片 fresh Plan update。Verify 确认旧 base／candidate／worktree 的 Plan blob未变化，只证明旧代码集成排除 Plan bytes。不存在的 `tests/smoke/test_systemd_socket_activation.py` 与 `tests/unit/test_cgroup_observability.py` 不作为 current 已通过命令。User-manager smoke 必须由测试 harness 创建隔离 runtime／状态并自动清理；不允许手工改动常驻用户 manager 来补证据，也不触碰 `/init.scope` 中持有 4141 的旧 Bun。
 
 任何测试数量、耗时或性能数据都在实际运行后记录命令、HEAD、路径范围与环境，并用不同原理交叉核对；本计划不预填数字。
 
@@ -376,9 +379,9 @@ S3 已把 graceful timeout 检查加入 `tests/unit/test_cli.py`、`tests/unit/t
 
 未采纳。当前生产 lifespan 未消费历史文档描述的四阶段 manager，数字没有运行态同源关系。S3 从真实接线重建时间模型。
 
-### 直接回放旧 `systemd-next` 提交链
+### 直接回放旧 `systemd-next` 或 code-only 提交链
 
-未采纳。旧 `91f95f7…` 与 `0a93e7f…` 都携带已被 current living bytes 超越的 Plan patch，三方模拟会产生冲突；人工采用 old postimage 会回退 current 状态。Current 唯一路线是回放排除 Plan bytes 且已取得 review `0 blocker／0 major`、verify `PASS` 的 `862f4cfa…` → `2ec0cb8…`，并在每片 main-side gate 后 fresh 更新本 Plan。
+未采纳。旧 `91f95f7…` 与 `0a93e7f…` 携带已被 current living bytes 超越的 Plan patch；排除 Plan 的 `862f4cfa…` → `2ec0cb8…` 虽有 review `0 blocker／0 major` 与 verify `PASS`，但它们基于旧 `80bc8f2…`，不是 new `main@b91e58a29324b11840002efc53ed6f869b800c39` 的直接 replay 载荷。已据此形成的current identity是`8cae6c2… → d3fabfa…`；后续只按new identity核对preimage／result／gate，并在main收敛后fresh更新本Plan。
 
 ### 为测试安装 user unit
 
@@ -400,12 +403,12 @@ S3 已把 graceful timeout 检查加入 `tests/unit/test_cli.py`、`tests/unit/t
 | `contrib/systemd/ghc-api-proxy.service` | 静态 unit 无法直接导入 Python 常量，`300s` 与 `330s` 仍以文本值存在 | `src/app/graceful_timeout.py` 统一声明默认值、正余量与计算结果；smoke 从 unit 反解两个文本值并与常量机械对账，任一侧漂移即红 |
 | `tests/smoke/test_systemd_units.py` | 静态 unit tripwire、真实 writer 权限与 inherited-fd／upstream smoke 同文件，且 direct harness 尚不能证明 manager-level activation／service-gap | M1 保留 code R4 已复核并在 `fe9c203…` 再次通过的可移植纵向 smoke；S5 把 activation、listener-owner continuity 与 accepted-drain probe 按能力边界拆分 |
 | `contrib/systemd/ghc-api-proxy.service` 的 EnvironmentFile | 兼容配置与 secret 传递边界混在同一机制，文件 mode 不能消除环境经 D-Bus／进程树暴露的风险 | 记录 code R4 non-blocking minor；后续部署强化优先评估 systemd credentials 与现有 token-file 接线，不反向改写 M1 |
-| system templates 与 user-unit renderer | 两套合同独立表达，公共 shutdown／resource 数值仍可能漂移 | S4 避免从 system unit 做字符串替换；current code-only review／verify 已机械对账 timeout facts并以 deadline drift 正控验证判别力，resource facts 留到 S5，不把全文模板强行合一 |
-| `tests/unit/test_config_loader.py` 的 shutdown 优先级用例 | 只断言最终 CLI 值，YAML／env 同时失效时仍可能假绿 | 记录 S3 review non-blocking minor；后补拆分或参数化 `300／11／12／13`，不阻塞当前集成评审与回放 |
-| `contrib/systemd/install-user.py` 的 apply 路径 | 单文件原子替换容易被误读为三文件 all-or-nothing；现有仓库测试未固化第二／第三文件失败后的恢复合同 | 记录 S4 review／裁决 non-blocking minor；后补统一逐文件原子措辞并增加“显式失败、无临时残留、重跑收敛”参数化回归，不为本轮引入整组事务，也不阻塞回放 |
-| rootless helper 错误路径 | 冲突备份／卸载 manifest 与 symlink hardening 尚未实现 | 保留后续 helper hardening；不把现有 happy-path 测试外推到这些路径，也不让其延迟已获 0 major 的两片回放 |
+| system templates 与 user-unit renderer | 两套合同独立表达，公共 shutdown／resource 数值仍可能漂移 | `d3fabfa…`验收已用system／user四个单侧deadline drift正控机械对账；timeout facts重复owner保留为minor，resource facts留到S5 |
+| `tests/unit/test_config_loader.py` 的 shutdown 优先级用例 | 只断言最终 CLI 值，YAML／env 同时失效时仍可能假绿 | 保留 S3 config precedence 判别力 non-blocking minor；后补拆分或参数化 `300／11／12／13`，不阻塞 new-main 重建 |
+| `contrib/systemd/install-user.py` 的 apply 路径 | 单文件原子替换容易被误读为三文件 all-or-nothing；现有仓库测试未固化第二／第三文件失败后的恢复合同 | 保留 S4 逐文件 atomicity non-blocking minor；后补统一逐文件原子措辞并增加“显式失败、无临时残留、重跑收敛”参数化回归，不为本轮引入整组事务，也不阻塞 new-main 重建 |
+| rootless helper 错误路径 | 冲突备份／卸载 manifest 与 symlink hardening 尚未实现 | 保留后续 helper hardening；不把现有 happy-path 测试外推到这些路径，也不让其延迟已获 0 major 的两片 new-main 重建 |
 | cgroup 声明与 metrics | unit 配置和应用观测分属两处，可能一边改 limits、一边继续解释旧阈值 | S5 把 declared／effective／runtime 三层写入同一测试矩阵和部署文档 |
-| 旧 integration commits 中的 `docs/agents/systemd-runtime/plan.md` patch | 高频 living 状态与可复用代码语义耦合，导致代码仍适用而提交对象不可安全回放 | Current code-only commits 排除 Plan bytes；每片 gate 后从当时 checkpoint fresh 更新 Plan。旧链仅保留 provenance，长期可再拆分 volatile execution state 与稳定设计，但不删减本 Plan 的 living 信息 |
+| 旧 integration commits 与 `docs/agents/systemd-runtime/plan.md` | 高频 living 状态、旧 base 与可复用代码语义耦合，导致代码语义仍可作 oracle，而 old commits 不可安全回放到 new main | New-main重建已形成排除Plan的`8cae6c2… → d3fabfa…`；当前按new identity复核并在main收敛后fresh更新Plan。旧两条链仅保留provenance，长期可再拆分volatile execution state与稳定设计，但不删减本Plan的living信息 |
 
 ## 10. 每轮反思门
 
@@ -419,13 +422,17 @@ S3 已把 graceful timeout 检查加入 `tests/unit/test_cli.py`、`tests/unit/t
 
 ## 11. 实施 kick-off
 
-从 current `main@80bc8f252b46c511f428af1d97159a5980ee9dc9` 继续本 living Plan。M1 已以 `cf53334a10a717a3a3d30d6c0e8a297f5000d90c` 进入 main，回放时全仓 pytest 375 项、Ruff 与 Pyright 通过；`archive/260807-systemd-runtime` 精确指向 reviewed source `49fb1988621bba4356e7a5039a6994c2e6d19604`。不要重放 `fe9c203…`。每次 shell 都在同一次调用内验证主树物理 root、`main` 分支和当次 current HEAD，不依赖前一调用的 cwd；记录开始／结束 status，只提交当前语义切片的精确 pathspec。
+从new-main rebuilt candidate `integrate/260807-systemd-rebuild-resume@d3fabfadfba57af6c2d63e543e3198444777df54`继续本living Plan。M1已以`cf53334a10a717a3a3d30d6c0e8a297f5000d90c`进入main历史，`archive/260807-systemd-runtime`仍精确指向reviewed source`49fb1988621bba4356e7a5039a6994c2e6d19604`。不要重放`fe9c203…`，不要再次重建已形成的S3／S4 candidate。每次candidate shell都在同一次调用内验证物理root`/home/xp/src/ghc-api-proxy-py-integrate-systemd-rebuild-resume`、branch与完整`d3fabfa…`，并按所测切片额外固定parent／tip；读取主树时仍固定`main@b91e58a29324b11840002efc53ed6f869b800c39`。
 
-先消费两份初始 systemd reports、code R2～R4、Plan R2～R6、旧 systemd-next 证据，以及 `docs/tmp/260807-audit-systemd-next-rebuild.md`、`docs/tmp/260807-review-systemd-code-only.md`、`docs/tmp/260807-verify-systemd-code-only.md`。M1 已确认 `Type=exec`、`KillMode=control-group`、StateDirectory＋显式 History／tokenization 路径、`--fd >= 1`、`StateDirectoryMode=0700`、`UMask=0077`、覆盖目录文档、真实 writer 权限回归，以及无 HOME 的 inherited-fd／backlog／readiness／真实请求／History＋tokenization smoke。保持 `/health/readiness` 为独立 oracle；不得把 `Type=exec` 写成应用 ready，也不得把仓库 checkpoint 写成 unit 已安装或运行态已切换。
+先消费两份初始 systemd reports、code R2～R4、Plan R2～R6、旧 systemd-next 证据，以及 `docs/tmp/260807-audit-systemd-next-rebuild.md`、`docs/tmp/260807-review-systemd-code-only.md`、`docs/tmp/260807-verify-systemd-code-only.md`。Current new-main证据必须另外并列消费：`docs/tmp/260807-resume-review-systemd-rebuild.md`精确绑定`b91e58a… → 8cae6c2… → d3fabfa…`并给出merged-state review `0 blocker／0 major`；`docs/tmp/260807-verify-systemd-rebuild-resume.md`与`docs/tmp/260807-resume-verify-systemd-rebuild.md`对同一exact tip分别给出独立`PASS`。Code review、两份verify与旧链历史证据角色不同，不得互相替代。M1 已确认 `Type=exec`、`KillMode=control-group`、StateDirectory＋显式 History／tokenization 路径、`--fd >= 1`、`StateDirectoryMode=0700`、`UMask=0077`、覆盖目录文档、真实 writer 权限回归，以及无 HOME 的 inherited-fd／backlog／readiness／真实请求／History＋tokenization smoke。保持 `/health/readiness` 为独立 oracle；不得把 `Type=exec` 写成应用 ready，也不得把仓库 checkpoint 写成 unit 已安装或运行态已切换。
 
-S3 source `865a5b71210e2436b36786b5de67146939d1e0f5` 与 S4 source `e16c2a700f23f66535e7347ab7357518eb8e56bd` 均已独立评审为 0 blocker／0 major、可以 squash，后续 source archive targets 保持这两个 exact HEAD 不变。Current integration 是 `integrate/260807-systemd-code-only@2ec0cb81832691685bfe8d98ad03071d2d5e5316`，相对 `main@80bc8f2…` 恰含 `862f4cfa55b124ef9ad21ff2ded2b944ee3307bc` → `2ec0cb81832691685bfe8d98ad03071d2d5e5316` 两个线性非 merge 提交；两片均排除本 Plan bytes，固定 clean tree 的全仓 pytest 与 collect-only 均为 440 项，exact tip merged-state review 为 `0 blocker／0 major`、独立 verify 为 `PASS`。Living 文档 checkpoint 形成后按上述顺序逐片回放 current main：第一片 gate 通过后 fresh 更新并 checkpoint Plan，第二片只在该 checkpoint 后回放，第二片 gate 后再次 fresh 更新 Plan。旧 `integrate/260807-systemd-next@0a93e7f…` 及 `91f95f7…` → `0a93e7f…` 只作历史 provenance，绝不可回放或用于恢复 Plan postimage。不要等待 installer atomicity、配置测试判别力、冲突备份／卸载或 symlink hardening；这些均已明确记录为后补，不得偷偷升级为本轮回放门。
+Current candidate链精确为`b91e58a29324b11840002efc53ed6f869b800c39 → 8cae6c260c8bc2930be96eaecc7d6d24d470e00a → d3fabfadfba57af6c2d63e543e3198444777df54`，两片均排除Plan，merged-state review为`0 blocker／0 major`且两份独立verify均为`PASS`。下一动作固定为：先单独squash`8cae6c2…`，通过该片identity／preimage与main-side tests gate后立即fresh更新本Plan并记录actual main完整SHA；再单独squash`d3fabfa…`，通过同类main-side gate后再次fresh更新本Plan。任一gate漂移即停，不得合并两片或跳过片间Plan checkpoint。S5仍须等待两片进入main与最终fresh Plan checkpoint。三个non-blocking minor继续登记但不升级为当前门。
 
-两片进入 main 后继续 S5：使用 S4 渲染结果在备用动态端口、隔离状态根与可回收 user-manager fixture 中执行真实 activation、restart、graceful／force timeout、cgroup 归属与 cleanup smoke，并以 typed reader／fake-tree 支撑 declared／effective／runtime 三层对账。S5 与后续 rolling 仍各自独立实施、验证和评审；本 living Plan 不因 S3／S4 回放而收口。
+本次Plan修订产生新的内容hash；旧hash`f5704171…`的Plan R2 review所报“未消费current new-main merged-state code review”唯一major已由本轮同步处理，但其verdict不能沿用。后续必须用本轮新hash重新定向复评。Plan仍保持`LIVING`且不收口，也不授权安装、manager操作或cutover。
+
+WSL 恢复时，生产双栈 `localhost:4141` 仍由旧 Bun 持有，cgroup 为 `/init.scope`，不是候选或已安装的 systemd unit。仓库内 S3／S4 重建、gate 或 Plan checkpoint 都不授权停止旧 Bun、释放或占用 4141、写入真实 unit 目录、执行 manager 操作或切换运行态。
+
+Candidate进入main并完成fresh Plan checkpoint后继续S5：使用S4渲染结果在备用动态端口、隔离状态根与可回收user-manager fixture中执行真实activation、restart、graceful／force timeout、cgroup归属与cleanup smoke。S5与后续rolling S7仍各自独立实施、验证和评审；本living Plan不因S3／S4进入main而收口。
 
 始终区分 listener continuity、queued／unaccepted connections 与旧进程 accepted connections；单实例 socket activation 和真实 user-manager smoke 都不得称为双实例／rolling 或 accepted connection zero-downtime。双实例／rolling 留到 S7，先冻结稳定 listener／proxy 拓扑、readiness 切流、状态隔离、drain 与回滚，再实施。
 
