@@ -281,7 +281,13 @@ class ResponsesStreamParser:
         if item_type == "reasoning":
             draft = self._reasoning[output_index]
             draft.item_done = True
-            draft.authoritative_summary = self._reasoning_summary(item, event_type)
+            authoritative_parts = self._reasoning_summary_parts(item, event_type)
+            self._validate_reasoning_summary_parts(
+                draft, authoritative_parts, event_type
+            )
+            draft.authoritative_summary = (
+                None if authoritative_parts is None else "".join(authoritative_parts)
+            )
             encrypted_content = item.get("encrypted_content")
             if encrypted_content is not None and not isinstance(encrypted_content, str):
                 self._fail(
@@ -340,9 +346,11 @@ class ResponsesStreamParser:
         draft = self._function_call_draft(event, output_index, event_type)
         if draft.arguments_done:
             self._duplicate_done(event_type, output_index)
-        draft.arguments = self._require_string(
+        arguments = self._require_string(
             event, "arguments", event_type, allow_empty=True
         )
+        self._validate_function_arguments(draft, arguments, event_type)
+        draft.arguments = arguments
         draft.arguments_done = True
         return self._complete_function_call(draft, event_type)
 
@@ -498,9 +506,6 @@ class ResponsesStreamParser:
             summary = "".join(
                 part.text or "" for _, part in sorted(draft.parts.items())
             )
-        if not summary and draft.encrypted_content is None:
-            draft.emitted = True
-            return None
         draft.emitted = True
         content = ReasoningBlock(summary, draft.encrypted_content)
         return self._completed(draft.identity, content, draft.first_observed_order)
@@ -524,6 +529,7 @@ class ResponsesStreamParser:
                     code="invalid_arguments",
                     event_type=event_type,
                 )
+            self._validate_function_arguments(draft, arguments, event_type)
             if draft.arguments is not None and draft.arguments != arguments:
                 self._fail(
                     "function argument done values disagree",
@@ -533,7 +539,19 @@ class ResponsesStreamParser:
             draft.arguments = arguments
             draft.arguments_done = True
 
-    def _reasoning_summary(self, item: dict[str, Any], event_type: str) -> str | None:
+    def _validate_function_arguments(
+        self, draft: _FunctionCallDraft, authoritative: str, event_type: str
+    ) -> None:
+        if draft.argument_deltas and "".join(draft.argument_deltas) != authoritative:
+            self._fail(
+                "function argument deltas do not match authoritative arguments",
+                code="authoritative_arguments_mismatch",
+                event_type=event_type,
+            )
+
+    def _reasoning_summary_parts(
+        self, item: dict[str, Any], event_type: str
+    ) -> tuple[str, ...] | None:
         summary = item.get("summary")
         if summary is None:
             return None
@@ -547,20 +565,41 @@ class ResponsesStreamParser:
         for raw_part in cast(list[Any], summary):
             if not isinstance(raw_part, dict):
                 self._fail(
-                    "reasoning summary parts require text",
+                    "reasoning summary parts require type summary_text and text",
                     code="invalid_reasoning",
                     event_type=event_type,
                 )
             part = cast(JsonObject, raw_part)
             text = part.get("text")
-            if not isinstance(text, str):
+            if part.get("type") != "summary_text" or not isinstance(text, str):
                 self._fail(
-                    "reasoning summary parts require text",
+                    "reasoning summary parts require type summary_text and text",
                     code="invalid_reasoning",
                     event_type=event_type,
                 )
             parts.append(text)
-        return "".join(parts)
+        return tuple(parts)
+
+    def _validate_reasoning_summary_parts(
+        self,
+        draft: _ReasoningDraft,
+        authoritative_parts: tuple[str, ...] | None,
+        event_type: str,
+    ) -> None:
+        if authoritative_parts is None:
+            return
+        for summary_index, part in draft.parts.items():
+            if not part.done:
+                continue
+            if (
+                summary_index >= len(authoritative_parts)
+                or part.text != authoritative_parts[summary_index]
+            ):
+                self._fail(
+                    "reasoning summary done values disagree",
+                    code="authoritative_reasoning_mismatch",
+                    event_type=event_type,
+                )
 
     def _completed(
         self, identity: BlockIdentity, content: SemanticBlock, first_observed_order: int

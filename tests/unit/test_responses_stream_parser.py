@@ -3,16 +3,24 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
+from app.anthropic.thinking.responses_reasoning import (
+    PROJECT_SYNTHETIC_REASONING_SIGNATURE,
+)
 from app.openai.responses_stream_parser import (
     BlockIdentity,
     CompletedBlock,
     FunctionCallBlock,
     ReasoningBlock,
     ResponsesStreamParser,
+    ResponsesStreamProtocolError,
     ResponsesTerminal,
     SourceOpened,
     TextBlock,
     UnsupportedResponsesEvent,
+)
+from app.protocols.responses_anthropic import (
+    ResponseConversionError,
+    convert_responses_response_to_anthropic,
 )
 
 
@@ -93,6 +101,14 @@ def test_function_call_waits_for_arguments_done_and_item_done() -> None:
     ) == ()
     assert parser.process(
         {
+            "type": "response.function_call_arguments.delta",
+            "output_index": 0,
+            "item_id": "fc_0",
+            "delta": '"Paris"}',
+        }
+    ) == ()
+    assert parser.process(
+        {
             "type": "response.function_call_arguments.done",
             "output_index": 0,
             "item_id": "fc_0",
@@ -108,6 +124,89 @@ def test_function_call_waits_for_arguments_done_and_item_done() -> None:
     assert block.content == FunctionCallBlock(
         call_id="call_0", name="weather", arguments='{"city":"Paris"}'
     )
+
+
+def test_function_call_accepts_authoritative_arguments_without_deltas() -> None:
+    parser = ResponsesStreamParser()
+    item = {
+        "id": "fc_0",
+        "type": "function_call",
+        "call_id": "call_0",
+        "name": "weather",
+        "arguments": "",
+    }
+    parser.process(_added(0, item))
+    assert parser.process(
+        {
+            "type": "response.function_call_arguments.done",
+            "output_index": 0,
+            "item_id": "fc_0",
+            "arguments": '{"city":"Paris"}',
+        }
+    ) == ()
+
+    (block,) = parser.process(_done(0, {**item, "arguments": '{"city":"Paris"}'}))
+
+    assert isinstance(block, CompletedBlock)
+    assert block.content == FunctionCallBlock(
+        call_id="call_0", name="weather", arguments='{"city":"Paris"}'
+    )
+
+
+def test_function_call_accepts_arguments_only_from_item_done() -> None:
+    parser = ResponsesStreamParser()
+    item = {
+        "id": "fc_0",
+        "type": "function_call",
+        "call_id": "call_0",
+        "name": "weather",
+        "arguments": "",
+    }
+    parser.process(_added(0, item))
+
+    (block,) = parser.process(_done(0, {**item, "arguments": '{"city":"Paris"}'}))
+
+    assert isinstance(block, CompletedBlock)
+    assert block.content == FunctionCallBlock(
+        call_id="call_0", name="weather", arguments='{"city":"Paris"}'
+    )
+
+
+def test_function_call_rejects_delta_and_authoritative_arguments_conflict() -> None:
+    parser = ResponsesStreamParser()
+    parser.process(
+        _added(
+            0,
+            {
+                "id": "fc_0",
+                "type": "function_call",
+                "call_id": "call_0",
+                "name": "weather",
+                "arguments": "",
+            },
+        )
+    )
+    parser.process(
+        {
+            "type": "response.function_call_arguments.delta",
+            "output_index": 0,
+            "item_id": "fc_0",
+            "delta": '{"city":"Paris"}',
+        }
+    )
+
+    with pytest.raises(ResponsesStreamProtocolError) as caught:
+        parser.process(
+            {
+                "type": "response.function_call_arguments.done",
+                "output_index": 0,
+                "item_id": "fc_0",
+                "arguments": '{"city":"London"}',
+            }
+        )
+
+    assert caught.value.code == "authoritative_arguments_mismatch"
+    assert caught.value.event_type == "response.function_call_arguments.done"
 
 
 def test_reasoning_uses_item_done_for_authoritative_summary_and_ciphertext() -> None:
@@ -156,6 +255,196 @@ def test_reasoning_uses_item_done_for_authoritative_summary_and_ciphertext() -> 
 
     assert isinstance(block, CompletedBlock)
     assert block.content == ReasoningBlock("visible", "authoritative")
+
+
+def test_reasoning_accepts_authoritative_item_done_without_summary_events() -> None:
+    parser = ResponsesStreamParser()
+    parser.process(
+        _added(
+            0,
+            {
+                "id": "rs_0",
+                "type": "reasoning",
+                "summary": [],
+                "encrypted_content": None,
+            },
+        )
+    )
+
+    (block,) = parser.process(
+        _done(
+            0,
+            {
+                "id": "rs_0",
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "visible"}],
+                "encrypted_content": None,
+            },
+        )
+    )
+
+    assert isinstance(block, CompletedBlock)
+    assert block.content == ReasoningBlock("visible", None)
+
+
+def test_unknown_reasoning_summary_part_is_rejected_by_stream_and_nonstream() -> None:
+    item = {
+        "id": "rs_future",
+        "type": "reasoning",
+        "summary": [{"type": "future_summary", "text": "accepted?"}],
+        "encrypted_content": None,
+    }
+
+    with pytest.raises(ResponseConversionError) as nonstream_caught:
+        convert_responses_response_to_anthropic(
+            {
+                "id": "resp_future",
+                "model": "gpt-test",
+                "status": "completed",
+                "output": [item],
+            }
+        )
+
+    assert nonstream_caught.value.code == "invalid_reasoning"
+    assert nonstream_caught.value.field_path == "output[0]"
+
+    parser = ResponsesStreamParser()
+    parser.process(_added(0, item))
+    with pytest.raises(ResponsesStreamProtocolError) as stream_caught:
+        parser.process(_done(0, item))
+
+    assert stream_caught.value.code == "invalid_reasoning"
+    assert stream_caught.value.event_type == "response.output_item.done"
+
+
+@pytest.mark.parametrize("encrypted_content", [pytest.param(None, id="absent"), ""])
+def test_empty_reasoning_has_stream_nonstream_semantic_parity(
+    encrypted_content: str | None,
+) -> None:
+    item: dict[str, object] = {
+        "id": "rs_empty",
+        "type": "reasoning",
+        "summary": [],
+    }
+    if encrypted_content is not None:
+        item["encrypted_content"] = encrypted_content
+    nonstream = convert_responses_response_to_anthropic(
+        {
+            "id": "resp_empty",
+            "model": "gpt-test",
+            "status": "completed",
+            "output": [item],
+        }
+    )
+
+    parser = ResponsesStreamParser()
+    parser.process(_added(0, item))
+    (stream_block,) = parser.process(_done(0, item))
+
+    assert isinstance(stream_block, CompletedBlock)
+    assert stream_block.content == ReasoningBlock("", None)
+    assert [
+        block.model_dump(exclude_none=True) for block in nonstream.message.content
+    ] == [
+        {
+            "type": "thinking",
+            "thinking": "",
+            "signature": PROJECT_SYNTHETIC_REASONING_SIGNATURE,
+        }
+    ]
+
+
+def test_reasoning_rejects_summary_done_and_item_done_conflict() -> None:
+    parser = ResponsesStreamParser()
+    parser.process(
+        _added(
+            0,
+            {
+                "id": "rs_0",
+                "type": "reasoning",
+                "summary": [],
+                "encrypted_content": None,
+            },
+        )
+    )
+    parser.process(
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "output_index": 0,
+            "item_id": "rs_0",
+            "summary_index": 0,
+            "delta": "first",
+        }
+    )
+    parser.process(
+        {
+            "type": "response.reasoning_summary_text.done",
+            "output_index": 0,
+            "item_id": "rs_0",
+            "summary_index": 0,
+            "text": "first",
+        }
+    )
+
+    with pytest.raises(ResponsesStreamProtocolError) as caught:
+        parser.process(
+            _done(
+                0,
+                {
+                    "id": "rs_0",
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": "second"}],
+                    "encrypted_content": None,
+                },
+            )
+        )
+
+    assert caught.value.code == "authoritative_reasoning_mismatch"
+    assert caught.value.event_type == "response.output_item.done"
+
+
+def test_reasoning_rejects_item_done_that_changes_summary_part_boundaries() -> None:
+    parser = ResponsesStreamParser()
+    parser.process(
+        _added(
+            0,
+            {
+                "id": "rs_0",
+                "type": "reasoning",
+                "summary": [],
+                "encrypted_content": None,
+            },
+        )
+    )
+    for summary_index, text in enumerate(("a", "bc")):
+        parser.process(
+            {
+                "type": "response.reasoning_summary_text.done",
+                "output_index": 0,
+                "item_id": "rs_0",
+                "summary_index": summary_index,
+                "text": text,
+            }
+        )
+
+    with pytest.raises(ResponsesStreamProtocolError) as caught:
+        parser.process(
+            _done(
+                0,
+                {
+                    "id": "rs_0",
+                    "type": "reasoning",
+                    "summary": [
+                        {"type": "summary_text", "text": "ab"},
+                        {"type": "summary_text", "text": "c"},
+                    ],
+                    "encrypted_content": None,
+                },
+            )
+        )
+
+    assert caught.value.code == "authoritative_reasoning_mismatch"
+    assert caught.value.event_type == "response.output_item.done"
 
 
 def test_interleaved_items_keep_source_and_completion_order_facts() -> None:
