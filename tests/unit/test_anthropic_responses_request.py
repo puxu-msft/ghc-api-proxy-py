@@ -52,6 +52,7 @@ def test_converts_text_system_and_metadata_without_mutating_request() -> None:
 
     assert converted.wire == {
         "model": "gpt-test",
+        "include": ["reasoning.encrypted_content"],
         "instructions": "first\n\n\n\nthird",
         "input": [
             {
@@ -77,6 +78,18 @@ def test_converts_text_system_and_metadata_without_mutating_request() -> None:
         ),
     )
     assert request.model_dump(mode="json", exclude_none=True) == before
+
+
+def test_requests_reasoning_encrypted_content_for_public_carrier_round_trip() -> None:
+    converted = convert_messages_request_to_responses(
+        {
+            "model": "gpt-test",
+            "max_tokens": 32,
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+    )
+
+    assert converted.wire["include"] == ["reasoning.encrypted_content"]
 
 
 @pytest.mark.parametrize("empty_role", ["user", "assistant"])

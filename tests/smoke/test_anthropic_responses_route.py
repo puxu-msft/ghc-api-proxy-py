@@ -598,6 +598,124 @@ def test_anthropic_nonstream_tool_call_and_result_complete_two_route_rounds(
     ]
 
 
+PROJECT_V1_OPAQUE_SIGNATURE = (
+    "ghc-api-proxy:synthetic-reasoning:v1:"
+    "eyJ0YWciOiJvcGVuYWkucmVzcG9uc2VzLnJlYXNvbmluZy5lbmNyeXB0ZWRfY29udGVudCIs"
+    "ImVuY3J5cHRlZF9jb250ZW50Ijoib3BhcXVlLfCfmIAifQ"
+)
+
+
+def test_anthropic_nonstream_reasoning_carrier_echoes_through_two_route_rounds(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(
+        endpoints=["/responses"],
+        responses_bodies=[
+            {
+                "id": "resp_reasoning",
+                "model": "resolved-model",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "reasoning",
+                        "summary": [{"type": "summary_text", "text": "visible"}],
+                        "encrypted_content": "opaque-😀",
+                    },
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": "first answer"}],
+                    },
+                ],
+                "usage": {"input_tokens": 5, "output_tokens": 3, "total_tokens": 8},
+            },
+            {
+                "id": "resp_reasoning_echo",
+                "model": "resolved-model",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": "echo accepted"}],
+                    }
+                ],
+                "usage": {"input_tokens": 9, "output_tokens": 2, "total_tokens": 11},
+            },
+        ],
+        builtin_state_path=tmp_path / "tokenization.json",
+    )
+    first_user = {"role": "user", "content": "Answer briefly."}
+
+    with harness.client as client:
+        first = client.post(
+            "/v1/messages",
+            json={
+                "model": "requested-model",
+                "max_tokens": 64,
+                "messages": [first_user],
+            },
+        )
+        first_body = first.json()
+        thinking = first_body["content"][0]
+        echoed_content = first_body["content"]
+
+        second = client.post(
+            "/v1/messages",
+            json={
+                "model": "requested-model",
+                "max_tokens": 64,
+                "messages": [
+                    first_user,
+                    {"role": "assistant", "content": echoed_content},
+                    {"role": "user", "content": "Continue briefly."},
+                ],
+            },
+        )
+
+    assert first.status_code == 200
+    assert thinking == {
+        "type": "thinking",
+        "thinking": "visible",
+        "signature": PROJECT_V1_OPAQUE_SIGNATURE,
+    }
+    assert second.status_code == 200
+    assert second.json()["content"] == [{"type": "text", "text": "echo accepted"}]
+    assert harness.target.anthropic_payloads == []
+    assert len(harness.target.responses_payloads) == 2
+    first_wire, second_wire = harness.target.responses_payloads
+    assert first_wire["include"] == ["reasoning.encrypted_content"]
+    assert second_wire["include"] == ["reasoning.encrypted_content"]
+    assert second_wire["input"] == [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Answer briefly."}],
+        },
+        {
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "visible"}],
+            "encrypted_content": "opaque-😀",
+        },
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "first answer"}],
+        },
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Continue briefly."}],
+        },
+    ]
+    assert len(harness.history.started_contexts) == 2
+    assert harness.history.finalized_contexts == harness.history.started_contexts
+    assert all(
+        context.state is RequestState.COMPLETED
+        and context.protocol_leg == "responses"
+        and len(context.attempts) == 1
+        for context in harness.history.finalized_contexts
+    )
+
+
 SINGLETON_REASONING_SUPPORTS = {
     "adaptive_thinking": True,
     "min_thinking_budget": 1_024,

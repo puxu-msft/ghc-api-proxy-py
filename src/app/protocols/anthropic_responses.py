@@ -180,6 +180,7 @@ class _RequestConverter:
 
         wire: JsonObject = {
             "model": self.request.model,
+            "include": ["reasoning.encrypted_content"],
             "input": self._convert_messages(),
             "max_output_tokens": self.request.max_tokens,
             "stream": self.request.stream,

@@ -10,6 +10,14 @@ Anthropic Extended Thinking 会在 assistant 消息中返回 `thinking` / `redac
 
 > 参见 [DESIGN.md](DESIGN.md) 的「性能设计原则」P5——本管道 L3 会话隔离的内存化重设计是本项目相对上游参考项目最重要的性能改造之一。
 
+## Responses reasoning carrier
+
+Anthropic `/v1/messages` 选择 OpenAI Responses upstream 时，所有 outbound Responses 请求都显式设置 `include: ["reasoning.encrypted_content"]`。该字段不是为了向客户端暴露 Responses opaque wire，而是为了让 response converter取得可回传状态：每个Responses reasoning item各自生成一个Anthropic `thinking` block，visible summary进入`thinking`，非空`encrypted_content`进入本项目版本化v1 `signature` carrier；缺失或空payload使用项目bare marker并保持一item一block。
+
+客户端下一轮原样回传该 `thinking` block时，Responses request converter恢复对应的reasoning item与opaque payload。项目producer只输出`ghc-api-proxy:synthetic-reasoning:v1` namespace；consumer另兼容已冻结的`copilot-api-js` v1合法主路径。Direct Messages leg不消费该synthetic状态，会在上游发送前剥离整个项目／兼容carrier block，避免把Responses专属opaque状态误发到Anthropic原生leg。
+
+这一合同独立于客户端是否显式设置顶层`thinking`：模型可能在普通Responses请求中返回reasoning item，因此不能只在显式thinking请求中条件化`include`。完整双格式wire、malformed最小止血、encrypted-only与multi-item合同以[Anthropic Responses bridge Spec](../agents/anthropic-responses-bridge/spec.md)为权威。
+
 ## 管道总览（分层防御）
 
 ```
@@ -66,13 +74,13 @@ Anthropic Extended Thinking 会在 assistant 消息中返回 `thinking` / `redac
 - **`preserve`（默认）**：assistant 消息若包含 `thinking` / `redacted_thinking` 块，则该消息在合并（如相邻同角色消息合并）、去重、system-role 消息转换等 **会重排/删除消息** 的清洗步骤中被**跳过**——避免把 thinking 块所在的消息与相邻消息合并、或整条移除导致 thinking 顺序被打乱。
 - **`stripped`**：放开这一限制，允许清洗管道自由合并/重排/删除包含 thinking 块的消息（用于用户明确知晓風险、或该会话已确定不再需要 thinking 连续性的场景，例如已通过 L3 隔离主动剥离过 thinking 的会话）。
 
-### 唯一不变量（Invariant）
+### Leg sanitizer 之后的不变量（Invariant）
 
-无论 `preserve` 还是 `stripped`，**只要 thinking 块本身还存在于 payload 中**，就必须满足：
+协议 leg 专属 sanitizer 先处理不属于该 leg 的状态：Direct Messages leg定向剥离proxy-owned项目／兼容synthetic carrier blocks，同时保留native Anthropic thinking与其他内容；Responses leg则保留并恢复这些carrier blocks。完成这一步后，无论`preserve`还是`stripped`，**只要仍属于当前leg的thinking块还存在于payload中**，就必须满足：
 
 1. **内容逐字（verbatim）**——不得修改 `thinking` 文本或 `signature` 字段的任何字节；
 2. **相对顺序（relative order）**——多个 thinking 块之间的先后顺序不得颠倒；
-3. **不丢弃（no-drop）**——不能静默丢弃某个 thinking 块（要么整体剥离全部——见 L2/L3，要么保留）。
+3. **不丢弃（no-drop）**——不能静默丢弃某个仍属于当前leg的thinking块。合法删除路径只有上述Direct Messages synthetic carrier定向剥离、下一节按显式配置执行的损坏空块清洗，或L2／L3明确执行的整体thinking剥离；除此之外必须保留。
 
 **相邻性明确不受保护**——两个 thinking 块相邻本身不违反上述不变量，但会触发上游「不允许相邻」规则的 400，这是 destack（L1）要解决的独立问题。
 
