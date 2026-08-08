@@ -241,6 +241,7 @@ async def messages(
                 model=result.context.resolved_model,
                 state=responses_state,
                 resident_account=resident_account,
+                require_stable_response_id=settings.upstream.type != "copilot",
             )
         stream = passthrough_bytes(
             _history_stream(

@@ -860,6 +860,75 @@ def test_terminal_response_id_must_match_created_response_id() -> None:
     assert caught.value.code == "response_id_mismatch"
 
 
+@pytest.mark.parametrize("require_stable_response_id", [True, False])
+def test_terminal_response_id_is_required_after_created(
+    require_stable_response_id: bool,
+) -> None:
+    parser = ResponsesStreamParser(
+        require_stable_response_id=require_stable_response_id
+    )
+    parser.process(
+        {
+            "type": "response.created",
+            "response": {"id": "resp_a", "status": "in_progress"},
+        }
+    )
+
+    with pytest.raises(ResponsesStreamProtocolError) as caught:
+        parser.process(
+            {
+                "type": "response.completed",
+                "response": {"status": "completed"},
+            }
+        )
+
+    assert caught.value.code == "invalid_event"
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        "response.created",
+        "response.in_progress",
+        "response.completed",
+        "response.incomplete",
+        "response.failed",
+    ],
+)
+def test_relaxed_response_identity_still_requires_nonempty_nested_id(
+    event_type: str,
+) -> None:
+    parser = ResponsesStreamParser(require_stable_response_id=False)
+
+    with pytest.raises(ResponsesStreamProtocolError) as caught:
+        parser.process({"type": event_type, "response": {"id": ""}})
+
+    assert caught.value.code == "invalid_event"
+    assert caught.value.event_type == event_type
+
+
+def test_relaxed_response_identity_preserves_error_identity_validation() -> None:
+    parser = ResponsesStreamParser(require_stable_response_id=False)
+    parser.process(
+        {
+            "type": "response.created",
+            "response": {"id": "resp_a", "status": "in_progress"},
+        }
+    )
+
+    with pytest.raises(ResponsesStreamProtocolError) as caught:
+        parser.process(
+            {
+                "type": "error",
+                "response": {"id": "resp_b"},
+                "code": "server_error",
+            }
+        )
+
+    assert caught.value.code == "response_id_mismatch"
+    assert caught.value.event_type == "error"
+
+
 def test_unknown_message_content_part_is_a_typed_failure() -> None:
     parser = ResponsesStreamParser()
     parser.process(_added(0, {"id": "msg_future", "type": "message", "content": []}))

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import httpx
 import orjson
@@ -19,7 +19,7 @@ from app.delivery.responses_anthropic_stream import (
     ResponsesAnthropicStreamState,
     render_responses_as_anthropic_sse,
 )
-from app.deps import get_anthropic_client
+from app.deps import get_anthropic_client, get_settings
 from app.hooks.context import HookContext
 from app.hooks.executor import HooksExecutor
 from app.hooks.registry import HookRegistryBuilder
@@ -227,6 +227,7 @@ def _harness(
     *,
     checkpoint_finalize: bool = False,
     resident_limits: tuple[int, int] | None = None,
+    route_upstream_type: Literal["copilot", "generic"] = "copilot",
 ) -> Harness:
     responses_config: dict[str, int] = {}
     if resident_limits is not None:
@@ -276,6 +277,15 @@ def _harness(
     )
     app = create_app(settings)
     app.dependency_overrides[get_anthropic_client] = lambda: anthropic
+    if route_upstream_type != settings.upstream.type:
+        route_settings = settings.model_copy(
+            update={
+                "upstream": settings.upstream.model_copy(
+                    update={"type": route_upstream_type}
+                )
+            }
+        )
+        app.dependency_overrides[get_settings] = lambda: route_settings
     return Harness(app, target, history, approval, observer)
 
 
@@ -1436,6 +1446,59 @@ def test_max_output_tokens_without_usage_uses_estimated_zero_usage() -> None:
     assert response_observation["usage_facts"] == {"estimated": True}
 
 
+def test_copilot_route_accepts_distinct_response_ids_across_lifecycle() -> None:
+    events: tuple[dict[str, Any], ...] = (
+        {
+            "type": "response.created",
+            "response": {
+                "id": "resp_copilot_created",
+                "model": "resolved-model",
+                "status": "in_progress",
+            },
+        },
+        {
+            "type": "response.in_progress",
+            "response": {
+                "id": "resp_copilot_in_progress",
+                "model": "resolved-model",
+                "status": "in_progress",
+            },
+        },
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {"id": "msg_copilot", "type": "message", "content": []},
+        },
+        {
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {
+                "id": "msg_copilot",
+                "type": "message",
+                "content": [{"type": "output_text", "text": "copilot lifecycle"}],
+            },
+        },
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_copilot_completed",
+                "status": "completed",
+                "usage": {"input_tokens": 1, "output_tokens": 2},
+            },
+        },
+    )
+    stream = StaticResponsesStream(tuple(_sse(event) for event in events))
+    harness = _harness(stream)
+
+    with TestClient(harness.app) as client:
+        response = client.post("/v1/messages", json=_request_body())
+
+    assert response.status_code == 200
+    assert _event_names(response.content)[-1] == "message_stop"
+    assert b"response_id_mismatch" not in response.content
+    assert harness.history.finalized_contexts[0].state is RequestState.COMPLETED
+
+
 @pytest.mark.parametrize(
     ("terminal_id", "trailing_event", "expected_code"),
     [
@@ -1487,7 +1550,7 @@ def test_success_terminal_is_validated_before_message_stop(
     if trailing_event is not None:
         events.append(trailing_event)
     stream = StaticResponsesStream(tuple(_sse(event) for event in events))
-    harness = _harness(stream)
+    harness = _harness(stream, route_upstream_type="generic")
 
     with TestClient(harness.app) as client:
         response = client.post("/v1/messages", json=_request_body())

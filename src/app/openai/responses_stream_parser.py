@@ -146,7 +146,8 @@ class ResponsesStreamParser:
     sequence completed blocks for a sink, advance a delivery frontier, or retry.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, require_stable_response_id: bool = True) -> None:
+        self._require_stable_response_id = require_stable_response_id
         self._items: dict[int, _ItemDraft] = {}
         self._text: dict[tuple[int, int], _TextDraft] = {}
         self._function_calls: dict[int, _FunctionCallDraft] = {}
@@ -465,7 +466,11 @@ class ResponsesStreamParser:
     def _on_terminal(self, event: dict[str, Any], event_type: str) -> ResponsesTerminal:
         response = event.get("response")
         response_object = cast(JsonObject, response) if isinstance(response, dict) else {}
-        response_id = self._optional_string(response_object.get("id"))
+        response_id = (
+            self._require_string(response_object, "id", event_type)
+            if event_type != "error"
+            else self._optional_string(response_object.get("id"))
+        )
         if response_id is not None:
             self._validate_response_id(response_id, event_type)
         status = self._optional_string(response_object.get("status"))
@@ -763,7 +768,11 @@ class ResponsesStreamParser:
         self._validate_response_id(response_id, event_type)
 
     def _validate_response_id(self, response_id: str, event_type: str) -> None:
-        if self._response_id is not None and response_id != self._response_id:
+        if (
+            (self._require_stable_response_id or event_type == "error")
+            and self._response_id is not None
+            and response_id != self._response_id
+        ):
             self._fail(
                 "response id changed during stream lifecycle",
                 code="response_id_mismatch",
