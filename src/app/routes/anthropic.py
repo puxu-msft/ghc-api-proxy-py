@@ -226,6 +226,7 @@ async def messages(
         responses_state: ResponsesAnthropicStreamState | None = None
         if responses_leg:
             responses_state = ResponsesAnthropicStreamState()
+            require_stable_responses_identity = settings.upstream.type != "copilot"
             resident_account = (
                 RequestResidentAccount(
                     request_id=result.context.id,
@@ -241,7 +242,8 @@ async def messages(
                 model=result.context.resolved_model,
                 state=responses_state,
                 resident_account=resident_account,
-                require_stable_response_id=settings.upstream.type != "copilot",
+                require_stable_response_id=require_stable_responses_identity,
+                require_stable_item_id=require_stable_responses_identity,
             )
         stream = passthrough_bytes(
             _history_stream(

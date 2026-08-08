@@ -79,6 +79,208 @@ def test_text_block_is_emitted_only_after_authoritative_done() -> None:
         block.completion_order = 2  # type: ignore[misc]
 
 
+@pytest.mark.parametrize(
+    "event",
+    [
+        {
+            "type": "response.output_text.delta",
+            "output_index": 0,
+            "item_id": "msg_other",
+            "content_index": 0,
+            "delta": "text",
+        },
+        _done(0, {"id": "msg_other", "type": "message", "content": []}),
+    ],
+)
+def test_default_item_identity_rejects_mismatch(event: dict[str, object]) -> None:
+    parser = ResponsesStreamParser()
+    parser.process(_added(0, {"id": "msg_added", "type": "message"}))
+
+    with pytest.raises(ResponsesStreamProtocolError) as caught:
+        parser.process(event)
+
+    assert caught.value.code == "item_id_mismatch"
+
+
+def test_default_item_identity_preserves_empty_event_id_as_mismatch() -> None:
+    parser = ResponsesStreamParser()
+    parser.process(_added(0, {"id": "msg_added", "type": "message"}))
+
+    with pytest.raises(ResponsesStreamProtocolError) as caught:
+        parser.process(
+            {
+                "type": "response.output_text.delta",
+                "output_index": 0,
+                "item_id": "",
+                "content_index": 0,
+                "delta": "text",
+            }
+        )
+
+    assert caught.value.code == "item_id_mismatch"
+
+
+@pytest.mark.parametrize("require_stable_item_id", [True, False])
+def test_missing_event_item_id_remains_allowed(
+    require_stable_item_id: bool,
+) -> None:
+    parser = ResponsesStreamParser(
+        require_stable_item_id=require_stable_item_id
+    )
+    parser.process(_added(0, {"id": "msg_added", "type": "message"}))
+
+    assert parser.process(
+        {
+            "type": "response.output_text.delta",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "text",
+        }
+    ) == ()
+
+
+@pytest.mark.parametrize("require_stable_item_id", [True, False])
+def test_null_event_item_id_remains_equivalent_to_missing(
+    require_stable_item_id: bool,
+) -> None:
+    parser = ResponsesStreamParser(
+        require_stable_item_id=require_stable_item_id
+    )
+    parser.process(_added(0, {"id": "msg_added", "type": "message"}))
+
+    assert parser.process(
+        {
+            "type": "response.output_text.delta",
+            "output_index": 0,
+            "item_id": None,
+            "content_index": 0,
+            "delta": "text",
+        }
+    ) == ()
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        {
+            "type": "response.content_part.added",
+            "output_index": 0,
+            "item_id": "",
+            "content_index": 0,
+            "part": {"type": "output_text", "text": ""},
+        },
+        {
+            "type": "response.output_text.delta",
+            "output_index": 0,
+            "item_id": "",
+            "content_index": 0,
+            "delta": "text",
+        },
+        _done(0, {"id": "", "type": "message", "content": []}),
+    ],
+)
+def test_relaxed_item_identity_rejects_empty_present_id(
+    event: dict[str, object],
+) -> None:
+    parser = ResponsesStreamParser(require_stable_item_id=False)
+    parser.process(_added(0, {"id": "msg_added", "type": "message"}))
+
+    with pytest.raises(ResponsesStreamProtocolError) as caught:
+        parser.process(event)
+
+    assert caught.value.code == (
+        "invalid_event"
+        if event["type"] == "response.output_item.done"
+        else "item_id_mismatch"
+    )
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected_code"),
+    [
+        ("unknown_output_index", "unknown_output_item"),
+        ("item_type", "item_type_mismatch"),
+        ("function_call_id", "function_call_identity_mismatch"),
+        ("function_name", "function_call_identity_mismatch"),
+        ("content_index", "message_content_mismatch"),
+    ],
+)
+def test_relaxed_item_identity_preserves_other_identity_constraints(
+    scenario: str,
+    expected_code: str,
+) -> None:
+    parser = ResponsesStreamParser(require_stable_item_id=False)
+    if scenario in {"function_call_id", "function_name"}:
+        parser.process(
+            _added(
+                0,
+                {
+                    "id": "fc_added",
+                    "type": "function_call",
+                    "call_id": "call_added",
+                    "name": "weather",
+                    "arguments": "",
+                },
+            )
+        )
+        event = _done(
+            0,
+            {
+                "id": "fc_done",
+                "type": "function_call",
+                "call_id": (
+                    "call_changed" if scenario == "function_call_id" else "call_added"
+                ),
+                "name": "forecast" if scenario == "function_name" else "weather",
+                "arguments": "{}",
+            },
+        )
+    else:
+        parser.process(_added(0, {"id": "msg_added", "type": "message"}))
+        if scenario == "unknown_output_index":
+            event = {
+                "type": "response.output_text.delta",
+                "output_index": 1,
+                "item_id": "msg_other",
+                "content_index": 0,
+                "delta": "text",
+            }
+        elif scenario == "item_type":
+            event = _done(
+                0,
+                {
+                    "id": "fc_done",
+                    "type": "function_call",
+                    "call_id": "call_0",
+                    "name": "weather",
+                    "arguments": "{}",
+                },
+            )
+        else:
+            parser.process(
+                {
+                    "type": "response.output_text.done",
+                    "output_index": 0,
+                    "item_id": "msg_text_done",
+                    "content_index": 1,
+                    "text": "text",
+                }
+            )
+            event = _done(
+                0,
+                {
+                    "id": "msg_done",
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "text"}],
+                },
+            )
+
+    with pytest.raises(ResponsesStreamProtocolError) as caught:
+        parser.process(event)
+
+    assert caught.value.code == expected_code
+
+
 def test_function_call_waits_for_arguments_done_and_item_done() -> None:
     parser = ResponsesStreamParser()
     item = {

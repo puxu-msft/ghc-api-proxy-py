@@ -1446,7 +1446,7 @@ def test_max_output_tokens_without_usage_uses_estimated_zero_usage() -> None:
     assert response_observation["usage_facts"] == {"estimated": True}
 
 
-def test_copilot_route_accepts_distinct_response_ids_across_lifecycle() -> None:
+def test_copilot_route_accepts_distinct_response_and_item_ids_across_lifecycle() -> None:
     events: tuple[dict[str, Any], ...] = (
         {
             "type": "response.created",
@@ -1467,13 +1467,41 @@ def test_copilot_route_accepts_distinct_response_ids_across_lifecycle() -> None:
         {
             "type": "response.output_item.added",
             "output_index": 0,
-            "item": {"id": "msg_copilot", "type": "message", "content": []},
+            "item": {"id": "msg_added", "type": "message", "content": []},
+        },
+        {
+            "type": "response.content_part.added",
+            "output_index": 0,
+            "item_id": "msg_part_added",
+            "content_index": 0,
+            "part": {"type": "output_text", "text": ""},
+        },
+        {
+            "type": "response.output_text.delta",
+            "output_index": 0,
+            "item_id": "msg_delta",
+            "content_index": 0,
+            "delta": "copilot lifecycle",
+        },
+        {
+            "type": "response.output_text.done",
+            "output_index": 0,
+            "item_id": "msg_text_done",
+            "content_index": 0,
+            "text": "copilot lifecycle",
+        },
+        {
+            "type": "response.content_part.done",
+            "output_index": 0,
+            "item_id": "msg_part_done",
+            "content_index": 0,
+            "part": {"type": "output_text", "text": "copilot lifecycle"},
         },
         {
             "type": "response.output_item.done",
             "output_index": 0,
             "item": {
-                "id": "msg_copilot",
+                "id": "msg_item_done",
                 "type": "message",
                 "content": [{"type": "output_text", "text": "copilot lifecycle"}],
             },
@@ -1495,8 +1523,44 @@ def test_copilot_route_accepts_distinct_response_ids_across_lifecycle() -> None:
 
     assert response.status_code == 200
     assert _event_names(response.content)[-1] == "message_stop"
+    assert b"copilot lifecycle" in response.content
     assert b"response_id_mismatch" not in response.content
+    assert b"item_id_mismatch" not in response.content
     assert harness.history.finalized_contexts[0].state is RequestState.COMPLETED
+
+
+def test_generic_route_rejects_distinct_item_ids_across_message_lifecycle() -> None:
+    events: tuple[dict[str, Any], ...] = (
+        {
+            "type": "response.created",
+            "response": {
+                "id": "resp_generic_item_identity",
+                "model": "resolved-model",
+                "status": "in_progress",
+            },
+        },
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {"id": "msg_added", "type": "message", "content": []},
+        },
+        {
+            "type": "response.content_part.added",
+            "output_index": 0,
+            "item_id": "msg_part_added",
+            "content_index": 0,
+            "part": {"type": "output_text", "text": ""},
+        },
+    )
+    stream = StaticResponsesStream(tuple(_sse(event) for event in events))
+    harness = _harness(stream, route_upstream_type="generic")
+
+    with TestClient(harness.app) as client:
+        response = client.post("/v1/messages", json=_request_body())
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "item_id_mismatch"
+    assert harness.history.finalized_contexts[0].state is RequestState.FAILED
 
 
 @pytest.mark.parametrize(

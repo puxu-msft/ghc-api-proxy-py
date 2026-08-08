@@ -146,8 +146,14 @@ class ResponsesStreamParser:
     sequence completed blocks for a sink, advance a delivery frontier, or retry.
     """
 
-    def __init__(self, *, require_stable_response_id: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        require_stable_response_id: bool = True,
+        require_stable_item_id: bool = True,
+    ) -> None:
         self._require_stable_response_id = require_stable_response_id
+        self._require_stable_item_id = require_stable_item_id
         self._items: dict[int, _ItemDraft] = {}
         self._text: dict[tuple[int, int], _TextDraft] = {}
         self._function_calls: dict[int, _FunctionCallDraft] = {}
@@ -922,8 +928,18 @@ class ResponsesStreamParser:
     def _validate_event_item_id(
         self, event: dict[str, Any], item: _ItemDraft, event_type: str
     ) -> None:
+        if "item_id" not in event:
+            return
         item_id = event.get("item_id")
-        if item_id is not None and item_id != item.item_id:
+        if item_id is None:
+            return
+        if not isinstance(item_id, str) or not item_id:
+            self._fail(
+                "event item_id does not match output_index",
+                code="item_id_mismatch",
+                event_type=event_type,
+            )
+        if self._require_stable_item_id and item_id != item.item_id:
             self._fail(
                 "event item_id does not match output_index",
                 code="item_id_mismatch",
@@ -933,7 +949,8 @@ class ResponsesStreamParser:
     def _validate_item_id(
         self, item: dict[str, Any], state: _ItemDraft, event_type: str
     ) -> None:
-        if self._require_string(item, "id", event_type) != state.item_id:
+        item_id = self._require_string(item, "id", event_type)
+        if self._require_stable_item_id and item_id != state.item_id:
             self._fail(
                 "done item id does not match added item id",
                 code="item_id_mismatch",

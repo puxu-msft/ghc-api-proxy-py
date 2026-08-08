@@ -163,6 +163,7 @@ async def render_responses_as_anthropic_sse(
     state: ResponsesAnthropicStreamState | None = None,
     resident_account: RequestResidentAccount | None = None,
     require_stable_response_id: bool = True,
+    require_stable_item_id: bool = True,
 ) -> AsyncIterator[bytes]:
     """Render a successful Responses SSE attempt as complete Anthropic block batches."""
     stream_state = state or ResponsesAnthropicStreamState()
@@ -173,6 +174,7 @@ async def render_responses_as_anthropic_sse(
             state=stream_state,
             resident_account=resident_account,
             require_stable_response_id=require_stable_response_id,
+            require_stable_item_id=require_stable_item_id,
         ):
             yield batch
     finally:
@@ -188,9 +190,11 @@ async def _render_responses_as_anthropic_sse(
     state: ResponsesAnthropicStreamState,
     resident_account: RequestResidentAccount | None,
     require_stable_response_id: bool,
+    require_stable_item_id: bool,
 ) -> AsyncIterator[bytes]:
     parser = ResponsesStreamParser(
-        require_stable_response_id=require_stable_response_id
+        require_stable_response_id=require_stable_response_id,
+        require_stable_item_id=require_stable_item_id,
     )
     sink: _BufferedSink | None = None
     session: DeliverySession | None = None
