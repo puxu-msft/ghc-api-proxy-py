@@ -1226,6 +1226,49 @@ async def test_responses_transport_failure_retries_once_before_headers() -> None
 
 
 @pytest.mark.asyncio
+async def test_responses_connect_failures_exhaust_single_retry_budget() -> None:
+    history = RecordingHistory()
+    observer = RecordingObserver()
+    pre_send = RecordingPreSendHook()
+    request = httpx.Request("POST", "https://upstream.test/responses")
+    target = FailingResponsesTarget(
+        _responses_body(),
+        [
+            httpx.ConnectError("first connection failed", request=request),
+            httpx.ConnectError("second connection failed", request=request),
+        ],
+    )
+    client = _responses_client(
+        target,
+        history,
+        ReplaceResponseTextHook(),
+        observer=observer,
+        payload_hook=pre_send,
+    )
+
+    with pytest.raises(ApiError) as captured:
+        await execute_anthropic_pipeline(client, _request())
+
+    assert captured.value.category.value == "network"
+    assert target.calls == 2
+    assert history.finalized_contexts == history.started_contexts
+    context = history.finalized_contexts[0]
+    assert context.state is RequestState.FAILED
+    assert len(context.attempts) == 2
+    assert all(attempt.error is not None for attempt in context.attempts)
+    assert context.attempts[0].strategy_applied == "responses_network_transport"
+    assert context.attempts[1].strategy_applied is None
+    assert context.normalized_response is None
+    assert context.final_response_payload is None
+    assert context.response_usage is None
+    assert context.conversion_facts == ()
+    assert pre_send.attempts == [0, 1]
+    assert observer.seen.count(ObserverEvent.ERROR) == 2
+    assert observer.seen.count(ObserverEvent.RESPONSE) == 0
+    assert observer.seen.count(ObserverEvent.FINALIZE) == 1
+
+
+@pytest.mark.asyncio
 async def test_responses_runtime_error_is_not_retried() -> None:
     history = RecordingHistory()
     observer = RecordingObserver()
