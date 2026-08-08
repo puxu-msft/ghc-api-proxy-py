@@ -63,13 +63,10 @@ class RecordingTarget:
             },
         )
 
-    async def send_responses(
+    async def send_responses_headers(
         self,
         payload: Mapping[str, Any],
-        *,
-        stream: bool = False,
     ) -> httpx.Response:
-        assert stream is False
         self.responses_payloads.append(dict(payload))
         if self.responses_status != 200:
             return httpx.Response(

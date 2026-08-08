@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import httpx
+import openai
 import orjson
 import pytest
 from anthropic.types import Message as SdkMessage
@@ -21,6 +22,9 @@ from app.hooks.registry import HookRegistryBuilder
 from app.hooks.types import (
     HookErrorMode,
     ObserverEvent,
+    PayloadHook,
+    PayloadHookResult,
+    PayloadPhase,
     ResponseHook,
     ResponseHookResult,
     RetryStrategyFactory,
@@ -32,6 +36,10 @@ from app.pipeline.rate_limiter import AdaptiveRateLimiter
 from app.pipeline.strategies import RetryDecision
 from app.tokenization.state_store import TokenizationStateStore
 from app.transform.model_resolver import ModelResolver
+from app.upstream.base import (
+    ResponsesHeadersPendingTransportError,
+    is_responses_headers_pending_transport_error,
+)
 from app.upstream.models_api import ModelCatalog
 
 
@@ -89,13 +97,11 @@ class ResponsesTarget:
         del payload, stream, extra_headers
         raise AssertionError("Responses route must not call the Messages transport")
 
-    async def send_responses(
+    async def send_responses_headers(
         self,
         payload: Mapping[str, Any],
-        *,
-        stream: bool = False,
     ) -> httpx.Response:
-        del payload, stream
+        del payload
         self.calls += 1
         return httpx.Response(
             200,
@@ -105,13 +111,11 @@ class ResponsesTarget:
 
 
 class RetryingResponsesTarget(ResponsesTarget):
-    async def send_responses(
+    async def send_responses_headers(
         self,
         payload: Mapping[str, Any],
-        *,
-        stream: bool = False,
     ) -> httpx.Response:
-        del payload, stream
+        del payload
         self.calls += 1
         request = httpx.Request("POST", "https://upstream.test/responses")
         if self.calls == 1:
@@ -121,6 +125,50 @@ class RetryingResponsesTarget(ResponsesTarget):
                 json={"error": {"message": "retry", "code": "rate_limit"}},
             )
         return httpx.Response(200, request=request, json=self.response_body)
+
+
+class FailingResponsesTarget(ResponsesTarget):
+    def __init__(
+        self,
+        response_body: dict[str, Any],
+        failures: list[Exception],
+    ) -> None:
+        super().__init__(response_body)
+        self.failures = failures
+
+    async def send_responses_headers(
+        self,
+        payload: Mapping[str, Any],
+    ) -> httpx.Response:
+        del payload
+        self.calls += 1
+        if self.failures:
+            error = self.failures.pop(0)
+            if is_responses_headers_pending_transport_error(error):
+                raise ResponsesHeadersPendingTransportError(error) from error
+            raise error
+        return httpx.Response(
+            200,
+            request=httpx.Request("POST", "https://upstream.test/responses"),
+            json=self.response_body,
+        )
+
+
+class FailingMessagesTarget:
+    def __init__(self, failure: Exception) -> None:
+        self.failure = failure
+        self.calls = 0
+
+    async def send_anthropic(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        stream: bool = False,
+        extra_headers: Mapping[str, str] | None = None,
+    ) -> httpx.Response:
+        del payload, stream, extra_headers
+        self.calls += 1
+        raise self.failure
 
 
 @dataclass(slots=True)
@@ -153,6 +201,9 @@ class RecordingObserver:
     seen: list[ObserverEvent] = field(
         default_factory=lambda: list[ObserverEvent]()
     )
+    attempts: list[tuple[ObserverEvent, int]] = field(
+        default_factory=lambda: list[tuple[ObserverEvent, int]]()
+    )
     commit_order: list[str] | None = None
 
     async def observe(
@@ -161,10 +212,28 @@ class RecordingObserver:
         context: HookContext,
         data: Mapping[str, Any],
     ) -> None:
-        del context, data
+        del data
         self.seen.append(event)
+        self.attempts.append((event, context.attempt_number))
         if event is ObserverEvent.RESPONSE and self.commit_order is not None:
             self.commit_order.append("response")
+
+
+@dataclass(slots=True)
+class RecordingPreSendHook:
+    name: str = "record-pre-send-attempt"
+    phase: PayloadPhase = PayloadPhase.PRE_SEND
+    order: int = 1000
+    error_mode: HookErrorMode = HookErrorMode.FAIL_REQUEST
+    attempts: list[int] = field(default_factory=lambda: list[int]())
+
+    async def run(
+        self,
+        payload: dict[str, Any],
+        context: HookContext,
+    ) -> PayloadHookResult:
+        self.attempts.append(context.attempt_number)
+        return PayloadHookResult(payload)
 
 
 @dataclass(frozen=True, slots=True)
@@ -386,6 +455,7 @@ def _responses_client(
     retry_factory: RetryStrategyFactory | None = None,
     tokenization_state: TokenizationStateStore | None = None,
     observer: RecordingObserver | None = None,
+    payload_hook: PayloadHook | None = None,
 ) -> AnthropicClient:
     catalog = ModelCatalog(None, "https://upstream.test")
     catalog.replace_from_data(
@@ -411,6 +481,8 @@ def _responses_client(
             quarantine=None,
             tokenization_state=tokenization_state,
         )
+    if payload_hook is not None:
+        builder.register_payload(payload_hook)
     builder.register_response(response_hook)
     if retry_factory is not None:
         builder.register_retry(retry_factory)
@@ -1107,6 +1179,158 @@ async def test_history_projects_only_final_success_attempt_conversion_facts(
         "response",
         "response",
     ]
+
+
+@pytest.mark.asyncio
+async def test_responses_transport_failure_retries_once_before_headers() -> None:
+    history = RecordingHistory()
+    observer = RecordingObserver()
+    pre_send = RecordingPreSendHook()
+    request = httpx.Request("POST", "https://upstream.test/responses")
+    target = FailingResponsesTarget(
+        _responses_body(),
+        [httpx.ConnectError("connection failed", request=request)],
+    )
+    client = _responses_client(
+        target,
+        history,
+        ReplaceResponseTextHook(),
+        observer=observer,
+        payload_hook=pre_send,
+    )
+
+    result = await execute_anthropic_pipeline(client, _request())
+    await result.response.aclose()
+
+    assert target.calls == 2
+    assert result.context.state is RequestState.COMPLETED
+    assert len(result.context.attempts) == 2
+    failed, succeeded = result.context.attempts
+    assert failed.status_code is None
+    assert failed.error is not None
+    assert failed.error.category.value == "network"
+    assert failed.strategy_applied == "responses_network_transport"
+    assert failed.payload_modifications == []
+    assert failed.completed_at is not None
+    assert succeeded.status_code == 200
+    assert succeeded.error is None
+    assert {fact.attempt for fact in result.context.conversion_facts} == {1}
+    assert result.context.response_usage is not None
+    assert result.context.normalized_response is not None
+    assert result.context.final_response_payload is not None
+    assert history.finalized_contexts == [result.context]
+    assert pre_send.attempts == [0, 1]
+    assert observer.seen.count(ObserverEvent.ERROR) == 1
+    assert observer.seen.count(ObserverEvent.RESPONSE) == 1
+    assert observer.seen.count(ObserverEvent.FINALIZE) == 1
+
+
+@pytest.mark.asyncio
+async def test_responses_runtime_error_is_not_retried() -> None:
+    history = RecordingHistory()
+    observer = RecordingObserver()
+    request = httpx.Request("POST", "https://upstream.test/responses")
+    failure = openai.APIConnectionError(request=request)
+    failure.__cause__ = RuntimeError("programming defect")
+    target = FailingResponsesTarget(
+        _responses_body(),
+        [failure],
+    )
+    client = _responses_client(
+        target,
+        history,
+        ReplaceResponseTextHook(),
+        observer=observer,
+    )
+
+    with pytest.raises(ApiError) as captured:
+        await execute_anthropic_pipeline(client, _request())
+
+    assert captured.value.category.value == "network"
+    assert target.calls == 1
+    context = history.finalized_contexts[0]
+    assert len(context.attempts) == 1
+    assert context.attempts[0].strategy_applied is None
+    assert observer.seen.count(ObserverEvent.ERROR) == 1
+    assert observer.seen.count(ObserverEvent.RESPONSE) == 0
+    assert observer.seen.count(ObserverEvent.FINALIZE) == 1
+
+
+@pytest.mark.asyncio
+async def test_responses_bare_api_connection_error_is_not_retried() -> None:
+    history = RecordingHistory()
+    observer = RecordingObserver()
+    request = httpx.Request("POST", "https://upstream.test/responses")
+    failure = openai.APIConnectionError(request=request)
+    assert failure.__cause__ is None
+    target = FailingResponsesTarget(
+        _responses_body(),
+        [failure],
+    )
+    client = _responses_client(
+        target,
+        history,
+        ReplaceResponseTextHook(),
+        observer=observer,
+    )
+
+    with pytest.raises(ApiError) as captured:
+        await execute_anthropic_pipeline(client, _request())
+
+    assert captured.value.category.value == "network"
+    assert target.calls == 1
+    context = history.finalized_contexts[0]
+    assert len(context.attempts) == 1
+    assert context.attempts[0].strategy_applied is None
+    assert observer.seen.count(ObserverEvent.ERROR) == 1
+    assert observer.seen.count(ObserverEvent.RESPONSE) == 0
+    assert observer.seen.count(ObserverEvent.FINALIZE) == 1
+
+
+@pytest.mark.asyncio
+async def test_responses_direct_read_error_is_not_retried() -> None:
+    history = RecordingHistory()
+    observer = RecordingObserver()
+    request = httpx.Request("POST", "https://upstream.test/responses")
+    target = FailingResponsesTarget(
+        _responses_body(),
+        [httpx.ReadError("response headers failed", request=request)],
+    )
+    client = _responses_client(
+        target,
+        history,
+        ReplaceResponseTextHook(),
+        observer=observer,
+    )
+
+    with pytest.raises(ApiError) as captured:
+        await execute_anthropic_pipeline(client, _request())
+
+    assert captured.value.category.value == "network"
+    assert target.calls == 1
+    context = history.finalized_contexts[0]
+    assert len(context.attempts) == 1
+    assert context.attempts[0].strategy_applied is None
+    assert observer.seen.count(ObserverEvent.ERROR) == 1
+    assert observer.seen.count(ObserverEvent.RESPONSE) == 0
+    assert observer.seen.count(ObserverEvent.FINALIZE) == 1
+
+
+@pytest.mark.asyncio
+async def test_messages_transport_failure_behavior_remains_single_attempt() -> None:
+    request = httpx.Request("POST", "https://upstream.test/v1/messages")
+    target = FailingMessagesTarget(
+        httpx.ConnectError("connection failed", request=request)
+    )
+    client = AnthropicClient(
+        target,
+        ModelResolver(available_ids={"claude-test"}, model_overrides={}),
+    )
+
+    with pytest.raises(ApiError):
+        await execute_anthropic_pipeline(client, _request())
+
+    assert target.calls == 1
 
 
 @pytest.mark.asyncio

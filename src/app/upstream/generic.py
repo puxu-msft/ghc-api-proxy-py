@@ -3,8 +3,18 @@ from typing import Any, cast
 
 import httpx
 from anthropic._types import Body as AnthropicBody
+from openai import (
+    APIConnectionError as OpenAIAPIConnectionError,
+)
+from openai import (
+    APIStatusError as OpenAIAPIStatusError,
+)
 from openai._types import Body as OpenAIBody
 
+from app.upstream.base import (
+    ResponsesHeadersPendingTransportError,
+    is_responses_headers_pending_transport_error,
+)
 from app.upstream.client import SDKClients
 
 
@@ -62,6 +72,24 @@ class GenericUpstream:
             body=cast(OpenAIBody, dict(payload)),
             stream=stream,
         )
+
+    async def send_responses_headers(
+        self,
+        payload: Mapping[str, Any],
+    ) -> httpx.Response:
+        try:
+            return await self._clients.openai.post(
+                "/responses",
+                cast_to=httpx.Response,
+                body=cast(OpenAIBody, dict(payload)),
+                stream=True,
+            )
+        except OpenAIAPIStatusError as error:
+            return error.response
+        except (httpx.TransportError, OpenAIAPIConnectionError) as error:
+            if is_responses_headers_pending_transport_error(error):
+                raise ResponsesHeadersPendingTransportError(error) from error
+            raise
 
     async def send_embeddings(
         self,

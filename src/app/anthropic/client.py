@@ -51,11 +51,9 @@ class AnthropicTarget(Protocol):
 
 
 class ResponsesTarget(Protocol):
-    async def send_responses(
+    async def send_responses_headers(
         self,
         payload: Mapping[str, Any],
-        *,
-        stream: bool = False,
     ) -> httpx.Response: ...
 
 
@@ -254,9 +252,8 @@ class AnthropicClient:
                 code=error.code,
             ) from error
         responses_target = cast(ResponsesTarget, self._target)
-        upstream = await responses_target.send_responses(
+        upstream = await responses_target.send_responses_headers(
             converted_request.wire,
-            stream=stream,
         )
         if not upstream.is_success:
             return AnthropicAttemptResult(

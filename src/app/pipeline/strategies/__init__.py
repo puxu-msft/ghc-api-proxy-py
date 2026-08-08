@@ -27,7 +27,6 @@ class RetryStrategy(Protocol):
     ) -> RetryDecision: ...
 
 
-
 class RetryCoordinator:
     def __init__(
         self,
@@ -65,6 +64,21 @@ class RetryCoordinator:
             callback = getattr(strategy, "on_success", None)
             if callable(callback):
                 callback()
+
+
+class ResponsesNetworkTransportStrategy:
+    name = "responses_network_transport"
+
+    def can_handle(self, error: ApiError) -> bool:
+        return error.code == "responses_transport_error"
+
+    async def handle(
+        self,
+        error: ApiError,
+        payload: dict[str, object],
+    ) -> RetryDecision:
+        del error
+        return RetryDecision(True, payload)
 
 
 class PoisonedThinkingStrategy:
@@ -113,6 +127,7 @@ class PoisonedThinkingStrategy:
 
 __all__ = [
     "PoisonedThinkingStrategy",
+    "ResponsesNetworkTransportStrategy",
     "RetryCoordinator",
     "RetryDecision",
     "RetryStrategy",

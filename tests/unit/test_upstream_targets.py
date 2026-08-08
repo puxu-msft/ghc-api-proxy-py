@@ -1,11 +1,13 @@
 from collections.abc import AsyncIterator
 
 import httpx
+import openai
 import pytest
 
 from app.auth.copilot import CopilotTokenManager
 from app.auth.providers import GitHubTokenManager, GitHubTokenProvider, TokenInfo
 from app.config.settings import AppSettings
+from app.upstream.base import ResponsesHeadersPendingTransportError
 from app.upstream.client import create_copilot_sdk_clients, create_sdk_clients
 from app.upstream.copilot import CopilotUpstream
 from app.upstream.generic import GenericUpstream
@@ -112,3 +114,95 @@ async def test_generic_upstream_uses_protocol_specific_sdk_base_urls() -> None:
         "https://anthropic.example/v1/messages",
         "https://openai.example/v1/responses",
     ]
+
+
+@pytest.mark.asyncio
+async def test_generic_responses_headers_returns_unconsumed_response() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, request=request, stream=RawByteStream())
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    settings = AppSettings.model_validate(
+        {
+            "upstream": {
+                "openai_base_url": "https://openai.example/v1",
+                "api_key": "key",
+            }
+        }
+    )
+    clients = create_sdk_clients(settings, http_client=http_client)
+    upstream = GenericUpstream(clients)
+    try:
+        response = await upstream.send_responses_headers(
+            {"model": "gpt", "input": []}
+        )
+        assert response.is_stream_consumed is False
+        body = await response.aread()
+        await response.aclose()
+    finally:
+        await http_client.aclose()
+
+    assert body == b"data: raw\n\n"
+
+
+@pytest.mark.asyncio
+async def test_generic_responses_headers_wraps_connection_failure() -> None:
+    request = httpx.Request("POST", "https://openai.example/v1/responses")
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection failed", request=request)
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    settings = AppSettings.model_validate(
+        {
+            "upstream": {
+                "openai_base_url": "https://openai.example/v1",
+                "api_key": "key",
+            }
+        }
+    )
+    clients = create_sdk_clients(settings, http_client=http_client)
+    upstream = GenericUpstream(clients)
+    try:
+        with pytest.raises(ResponsesHeadersPendingTransportError) as captured:
+            await upstream.send_responses_headers({"model": "gpt", "input": []})
+    finally:
+        await http_client.aclose()
+
+    assert isinstance(captured.value.original, openai.APIConnectionError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [429, 500])
+async def test_generic_responses_headers_returns_sdk_error_response(
+    status_code: int,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code,
+            request=request,
+            json={"error": {"message": "upstream failed"}},
+        )
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    settings = AppSettings.model_validate(
+        {
+            "upstream": {
+                "openai_base_url": "https://openai.example/v1",
+                "api_key": "key",
+            }
+        }
+    )
+    clients = create_sdk_clients(settings, http_client=http_client)
+    upstream = GenericUpstream(clients)
+    try:
+        response = await upstream.send_responses_headers(
+            {"model": "gpt", "input": []}
+        )
+        body = await response.aread()
+        await response.aclose()
+    finally:
+        await http_client.aclose()
+
+    assert response.status_code == status_code
+    assert body == b'{"error":{"message":"upstream failed"}}'

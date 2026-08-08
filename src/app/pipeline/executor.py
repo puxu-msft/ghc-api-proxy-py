@@ -6,7 +6,10 @@ import httpx
 import orjson
 from pydantic import ValidationError
 
-from app.anthropic.client import AnthropicClient, PreparedAnthropicRequest
+from app.anthropic.client import (
+    AnthropicClient,
+    PreparedAnthropicRequest,
+)
 from app.anthropic.response_validation import validate_messages_response_wire
 from app.anthropic.sanitize import sanitize_messages
 from app.anthropic.thinking.quarantine import QuarantineKey
@@ -24,7 +27,13 @@ from app.pipeline.context import (
     ResponseConversionFactRecord,
 )
 from app.pipeline.rate_limiter import PassthroughRateLimiter
-from app.pipeline.strategies import PoisonedThinkingStrategy, RetryCoordinator
+from app.pipeline.strategies import (
+    PoisonedThinkingStrategy,
+    ResponsesNetworkTransportStrategy,
+    RetryCoordinator,
+    RetryStrategy,
+)
+from app.upstream.base import ResponsesHeadersPendingTransportError
 
 
 @dataclass(slots=True)
@@ -38,6 +47,17 @@ class UpstreamResponseError(Exception):
         super().__init__(f"upstream returned HTTP {response.status_code}")
         self.context = context
         self.response = response
+
+
+def _is_retryable_responses_transport_error(
+    prepared: PreparedAnthropicRequest,
+    error: Exception,
+) -> bool:
+    return (
+        prepared.route is not None
+        and prepared.route.protocol_leg.value == "responses"
+        and isinstance(error, ResponsesHeadersPendingTransportError)
+    )
 
 
 def _validate_response_body(
@@ -221,6 +241,7 @@ async def execute_anthropic_pipeline(
     context.transition(RequestState.EXECUTING)
     key = QuarantineKey(session_id, agent_id or "") if session_id else None
     try:
+        strategies: list[RetryStrategy]
         if client.hooks is not None:
             strategy_context = _hook_context(context, client, attempt_number=0)
             strategies = [
@@ -229,6 +250,8 @@ async def execute_anthropic_pipeline(
             ]
         else:
             strategies = [PoisonedThinkingStrategy(client.quarantine, key)]
+        if prepared.route is not None and prepared.route.protocol_leg.value == "responses":
+            strategies.insert(0, ResponsesNetworkTransportStrategy())
     except Exception as error:
         await _finalize_failure(request, context, client, error)
         raise
@@ -274,6 +297,10 @@ async def execute_anthropic_pipeline(
             )
             response = attempt_result.response
         except Exception as error:
+            retryable_transport = _is_retryable_responses_transport_error(
+                prepared,
+                error,
+            )
             normalized_error = (
                 error
                 if isinstance(error, ApiError)
@@ -281,10 +308,37 @@ async def execute_anthropic_pipeline(
                     str(error),
                     category=ErrorCategory.NETWORK,
                     status_code=502,
+                    code=(
+                        "responses_transport_error"
+                        if retryable_transport
+                        else None
+                    ),
                 )
             )
             attempt.error = normalized_error
             attempt.completed_at = time.time()
+            if retryable_transport:
+                decision = await coordinator.decide(normalized_error, payload)
+                if decision is not None:
+                    attempt.strategy_applied = decision.owner
+                    attempt.payload_modifications.extend(decision.modifications)
+                    payload = decision.payload
+                    if client.hooks is not None:
+                        await client.hooks.observe(
+                            ObserverEvent.ERROR,
+                            _hook_context(
+                                context,
+                                client,
+                                attempt_number=attempt_number,
+                            ),
+                            {
+                                "request": request,
+                                "status_code": normalized_error.status_code,
+                                "error": normalized_error,
+                            },
+                            records=context.hook_records,
+                        )
+                    continue
             await _finalize_failure(request, context, client, normalized_error)
             if normalized_error is error:
                 raise

@@ -101,13 +101,10 @@ class RecordingTarget:
         del payload, stream, extra_headers
         raise AssertionError("Responses-only model must not use Messages upstream")
 
-    async def send_responses(
+    async def send_responses_headers(
         self,
         payload: Mapping[str, Any],
-        *,
-        stream: bool = False,
     ) -> httpx.Response:
-        assert stream is True
         self.responses_payloads.append(dict(payload))
         self.called.set()
         return httpx.Response(
