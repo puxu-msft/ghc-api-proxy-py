@@ -3,13 +3,13 @@
 ## 文档状态
 
 - **状态**：正式开发规格，当前为 **`FINALIZED`**。2026-08-07 用户最新重裁覆盖旧 D4，也覆盖 2026-08-06“必须逐字节固定 `copilot-api-js` 格式及全部 malformed 边界”的范围：本项目生产自己的版本化主 carrier，同时兼容 `copilot-api-js` 当前 v1 合法主路径；不要求每个 malformed 输入与 Node codec 同边界，也不复制 upstream 的有损聚合。`docs/tmp/260807-review-spec-carrier-dual-format.md` 已对 SHA-256 `0d81c21fb6efcc71e217b162418a89cf53cc7f392669e5b0b280651de512691e` 的本次双格式合同完成独立定向评审，结论为 0 blocker／0 major，可恢复 `FINALIZED` 并按冻结合同继续实施。D1～D3 仍有效。本文件是实现与验收的行为 oracle，但不替代另行接受的 ADR。
-- **仓库基线**：`ghc-api-proxy-py` commit `ed77c9d191df81c451c25161420515cca52ce6a4`。
-- **总体 verdict**：`FINALIZED`。Carrier 双格式合同已冻结，可继续实施；其余已冻结行为继续有效。规格合同维持“一 Responses reasoning item → 一 Anthropic thinking block”与普通模式下非空 encrypted-only no-loss，当前主线 forward cardinality 尚不合规，在候选 `b876e62` 回并前仍是开放实现缺口。目标可在现有 Anthropic pipeline 上形成单一生命周期的 direct bridge；不能复制 OpenAI route 的第二套 orchestration，也不能复用当前 raw passthrough、“超限后退化为 live forwarding”或参考实现的有损 non-stream reasoning 聚合行为。
+- **历史编写基线**：`ghc-api-proxy-py` commit `ed77c9d191df81c451c25161420515cca52ce6a4`。该 commit 只解释本规格形成时观察到的缺口，不表示 current 实现状态；current 状态见 [implementation.md](implementation.md)。
+- **总体 verdict**：`FINALIZED`。Carrier 双格式合同及其余行为已经冻结，可继续实施。规格维持“一 Responses reasoning item → 一 Anthropic thinking block”与普通模式下非空 encrypted-only no-loss；实现进度不得反向改写本规格。目标在 Anthropic pipeline 的单一生命周期内形成 direct bridge，不能复制 OpenAI route 的第二套 orchestration，也不能采用 raw passthrough、“超限后退化为 live forwarding”或参考实现的有损 non-stream reasoning 聚合行为。
 - **已裁决且不可重开**：semantic block 就是一个 Anthropic content block；block-level buffering 是基础能力；下游不提供 token/event 级 live streaming。上游可以增量读取，但完整 Anthropic content block 是最小可观察提交单元。buffer 与 carrier 是普通内存对象，统一服从全局内存预算、准入与背压，不 spill，也不因容量压力退化为 live forwarding。双 endpoint 模型默认走 Messages，Responses bridge 由明确 route policy／config 启用。reasoning signature 的 producer 固定使用本项目主 v1；consumer 同时接受本项目主 v1 与 `copilot-api-js` 当前 v1 合法主路径。不得加入 HMAC、keyring、domain binding 或泛化安全系统，也不得恢复 Anthropic 原生 server-tool 编排。
 
 ## 问题与意图
 
-当前 `/v1/messages` 只把 Anthropic 请求发到 Messages upstream，并把流式响应原字节透传。目标是在不改变 Anthropic 客户端公共协议、不复制 lifecycle owner 的前提下，让符合路由与模型能力条件的 Anthropic Messages 请求选择 OpenAI Responses upstream，完成双向语义转换，并仍由 Anthropic pipeline 统一拥有 approval、hooks、retry、History、tokenization、取消与终态。
+本规格形成时，`/v1/messages` 只把 Anthropic 请求发到 Messages upstream，并把流式响应原字节透传；该描述是历史问题背景，不是 current 实现状态。规格目标是在不改变 Anthropic 客户端公共协议、不复制 lifecycle owner 的前提下，让符合路由与模型能力条件的 Anthropic Messages 请求选择 OpenAI Responses upstream，完成双向语义转换，并仍由 Anthropic pipeline 统一拥有 approval、hooks、retry、History、tokenization、取消与终态。Current 实现状态见 [implementation.md](implementation.md)。
 
 这不是 Anthropic→Chat Completions→Responses 的中转桥。请求与响应都必须在 Anthropic 与 Responses 之间直接转换；Chat Completions 不得成为语义中间表示。
 
@@ -248,7 +248,7 @@ Consumer 对每个 thinking block 固定按以下顺序分类，首个命中即�
 - 本项目只承诺 upstream v1 合法 canonical payload 的主路径兼容，不承诺与 Node `Buffer.from(..., "base64url")` 对每个非 canonical alphabet、padding、trailing data 或 UTF-8 replacement 边界一致。兼容测试必须覆盖合法向量、bare、legacy、unknown、foreign 与代表性 malformed 分类，但不得把 differential malformed 全空间提升为产品合同。
 - 所有 carrier bytes 仍作为普通对象进入既有 request／global memory budget。Malformed／unknown 不得绕过 size、cancel、deadline 或 cleanup 合同；除此之外不新增 carrier 专用阈值或安全状态机。
 
-当前主线 `ed77c9d191df81c451c25161420515cca52ce6a4` 已落地 upstream v1 prefix／base64url codec、legacy 识别与逐 thinking block reverse consumer；这些是兼容输入的实现基础，不是项目主 v1 producer 的完成证据。该提交的 forward `responses_reasoning_to_anthropic()` 仍把全部 reasoning items 聚合为至多一个 thinking block，只保留最后一个非空 `encrypted_content`，并在 summary 为空时返回 `None`；现有单测也把 encrypted-only 丢失与跨 item 聚合固化为预期。因此当前 forward 不是本规格的完成或合规证据，必须由 `fix/reasoning-cardinality` 改为逐 item、有序、普通模式下非空 encrypted-only no-loss，并相应修正测试 oracle；不得反向放宽本规格迁就当前实现。
+历史编写基线 `ed77c9d191df81c451c25161420515cca52ce6a4` 已落地 upstream v1 prefix／base64url codec、legacy 识别与逐 thinking block reverse consumer；这些当时只是兼容输入基础。该历史提交的 forward 聚合、encrypted-only 丢失与旧测试 oracle 是本规格要求纠正的反例，不是 current 实现断言。Current 合规状态见 [implementation.md](implementation.md)，不得反向放宽本规格迁就任何实现快照。
 
 ## Response conversion 契约
 
@@ -550,10 +550,10 @@ semantic block 固定等于一个 Anthropic content block，而不是 Responses 
 - **unknown item silent drop、malformed tool args变空对象、reasoning summary／ciphertext不对称聚合**：均制造不可见语义损失，排除。
 - **把 `copilot-api-js` v1 继续作为本项目唯一 producer 格式或逐 malformed 边界 oracle**：已被 2026-08-07 用户重裁覆盖；只保留其合法主路径 consumer compatibility，排除。
 
-## 当前基线事实与证据
+## 历史编写基线事实与证据
 
-- reasoning carrier codec 与逐 block reverse consumer 已在主线 `ed77c9d191df81c451c25161420515cca52ce6a4` 落地：`src/app/anthropic/thinking/responses_reasoning.py:6-52,98-123`。
-- 同一主线的 forward cardinality 尚不符合本规格：`src/app/anthropic/thinking/responses_reasoning.py:55-95` 跨 item 聚合 summary、仅保留最后一个非空 ciphertext，并丢失非空 encrypted-only item；`tests/unit/test_responses_reasoning.py:25-30,64-93` 固化了这两个有损行为。该缺口待 `fix/reasoning-cardinality` 修复，不能作为 carrier 兼容已经完成整体 reasoning bridge 的证据。
+- reasoning carrier codec 与逐 block reverse consumer 已在历史基线 `ed77c9d191df81c451c25161420515cca52ce6a4` 落地；该事实解释兼容层来源，不代表 current 状态。
+- 同一历史基线曾存在跨 item 聚合与 encrypted-only 丢失，旧单测也固化了有损行为。这些内容只作为反例保留；current 修复与验证状态见 [implementation.md](implementation.md)。
 - Anthropic route当前由`client.execute()`进入单一pipeline，但stream仍是raw-byte passthrough：`src/app/routes/anthropic.py:65-120`。
 - pipeline当前拥有hooks、approval、attempt与retry lifecycle：`src/app/pipeline/executor.py:121-280`。
 - `PRE_SEND`位于attempt loop内，目标converter必须接在其后：`src/app/pipeline/executor.py:189-215`。
@@ -568,7 +568,7 @@ semantic block 固定等于一个 Anthropic content block，而不是 Responses 
 
 ## 结论
 
-该bridge的正确切缝是：**保留Anthropic pipeline为唯一orchestrator，把Responses建模为可选attempt transport + direct semantic converter + memory-only block commit buffer。** 已决的Anthropic-content-block buffering与“无token/event live streaming”必须贯穿HTTP SSE和upstream WS两种物理transport，任何retry、quota、backpressure或兼容降级都不能绕过它。D1～D3 继续有效；2026-08-07 最新 carrier 重裁把旧 D4 与 2026-08-06 upstream-byte-exact 全边界范围替换为“项目主 v1 producer＋upstream v1 合法主路径 compatibility consumer”，同时维持一 item一 block、普通模式下 encrypted-only no-loss 与不复制有损聚合。`docs/tmp/260807-review-spec-carrier-dual-format.md` 已对本次双格式合同给出 0 blocker／0 major 的定向评审结论，因此 Spec carrier 双格式合同现已冻结，本文件恢复 `FINALIZED`，可按该合同继续实施。Carrier compatibility primitive 已落地仍不代表项目主 v1 或 forward reasoning 合规；候选 `b876e62` 回并前，当前主线的 forward cardinality 缺口继续保持开放。
+该bridge的正确切缝是：**保留Anthropic pipeline为唯一orchestrator，把Responses建模为可选attempt transport + direct semantic converter + memory-only block commit buffer。** 已决的Anthropic-content-block buffering与“无token/event live streaming”必须贯穿HTTP SSE和upstream WS两种物理transport，任何retry、quota、backpressure或兼容降级都不能绕过它。D1～D3继续有效；2026-08-07 carrier重裁把旧D4与2026-08-06 upstream-byte-exact全边界范围替换为“项目主v1 producer＋upstream v1合法主路径 compatibility consumer”，同时维持一item一block、普通模式encrypted-only no-loss与不复制有损聚合。双格式合同已经冻结，本文件为`FINALIZED`；具体实现进度和缺口只在 [implementation.md](implementation.md) 维护。
 
 ## 评审处置表
 

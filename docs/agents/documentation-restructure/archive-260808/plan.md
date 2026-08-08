@@ -1,6 +1,8 @@
 # 文档渐进式重组实施计划
 
-> 状态：R4、merged-state R2 与定向终审 R7 指出的 major 均已修订，连同既有修订待定向独立复评；复评达到 0 blocker、0 major 后可执行
+> **历史终止记录：禁止执行。** 本计划已于 2026-08-08 归档。其“整理 live 入口、提炼有效结论、归档历史材料”目标继续由 [../README.md](../README.md) 与项目规则承载；generation、closure certificate、ledger checker、受管 action gate 及下文 kick-off 已被明确废止，不得恢复执行。
+>
+> 历史状态：R4、merged-state R2 与定向终审 R7 指出的 major 曾按当时方案修订。本段只记录历史，不构成 current approval。
 > 规划基线：`47d9ef101c4b81ac70d805b1da157b34d021d33d`
 > 基线日期：2026-08-06
 > 计划位置：`docs/agents/documentation-restructure/plan.md`
@@ -657,6 +659,8 @@
 未采纳。评审 ledger 的报告会要求改 ledger，改后的 ledger 又需要评审，形成无终点闭环。generation cut-off 冻结本 revision 的正文输入，后续报告正文进入后继 dirty generation；若报告 PASS 且对当前 action 无 unresolved impact，精确 certificate 允许窄化 carry forward。否则当前授权立即 stale，并在动作尚未消费时关闭同 ordinal revision，或按协议关闭下一 generation；不能以终止性为由先消费旧授权。
 
 ## 11. 实施 kick-off
+
+> **已废止：以下 kick-off 仅为历史原文，不得复制或执行。** Current 文档整理入口是 [../README.md](../README.md)。
 
 在 `/home/xp/src/ghc-api-proxy-py` 执行 `docs/agents/documentation-restructure/plan.md`，先只完成阶段 0A、0B 和阶段 1。每次 shell 调用必须在同一调用内绑定并验证仓库绝对路径，打印 HEAD 与 `git status --short`；首次确认规划基线 `47d9ef101c4b81ac70d805b1da157b34d021d33d` 是实际 HEAD 的祖先，之后记录每个切片自己的开始和结束 HEAD。
 

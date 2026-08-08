@@ -2,7 +2,7 @@
 
 > 状态：**非规范架构提案，尚未获用户接受。** 本版裁决矩阵已于 260807 经 `docs/tmp/260807-review-architecture-decision-matrix.md` 独立终审为 0 blocker、0 major；当前唯一门是用户从 `README.md` 开始按规定顺序完整阅读五份文档，尤其完整阅读本文后，分别裁决 `D-ARCH` 与 `D-MIGRATION`。独立终审通过、推荐结论、旧评审记录或实现进度均不能替代用户接受。
 >
-> 事实基线：`/home/xp/src/ghc-api-proxy-py`，`main HEAD ed77c9d191df81c451c25161420515cca52ce6a4`。
+> 历史设计基线：`/home/xp/src/ghc-api-proxy-py`，`main HEAD ed77c9d191df81c451c25161420515cca52ce6a4`。下文“生产事实”描述提案形成时的代码接缝，不是 current 状态；current 实现状态见 [implementation.md](implementation.md)。
 >
 > 权威边界：`spec.md` 是唯一行为 oracle。完整 block、Anthropic SSE、首 block 前零 success headers／body、单一串行下游写入 owner，以及无已证明 resume contract 时的 post-commit partial failure 都是已决可观察行为；本文只说明架构如何承载，不重新投票。
 >
@@ -13,7 +13,7 @@
 本文必须完整阅读；本目录只用于定位，不能替代正文，也不能只读推荐与裁决矩阵后直接接受。
 
 - [提案结论与裁决边界](#提案结论与裁决边界)
-- [当前事实与不可破坏边界](#当前事实与不可破坏边界)
+- [历史事实与不可破坏边界](#历史事实与不可破坏边界)
 - [候选架构比较](#候选架构比较)
 - [推荐目标架构](#推荐目标架构)
 - [共享内部事实模型](#共享内部事实模型)
@@ -41,9 +41,9 @@
 
 本文还推荐用户为 `D-MIGRATION` 选择“分阶段建立 B，并以受约束的 A 形 adapter 过渡”，而不是要求首个切片一次形成全部 B 模块。过渡只改变落地节奏，不允许形成第二个 lifecycle owner、第二套 converter 语义或永久 wire-shaped canonical state；正式 bridge route 启用前必须通过本文列出的前置门。该推荐同样不是接受记录。
 
-## 当前事实与不可破坏边界
+## 历史事实与不可破坏边界
 
-### 当前生产事实
+### 历史设计基线下的生产事实
 
 - Anthropic route 已把请求交给 `client.execute()`，当前流式返回仍是 `with_idle_timeout()` 后的原始 upstream bytes passthrough，见 `src/app/routes/anthropic.py:82-120`。目标架构必须保留 route 薄层，但替换 raw-byte downstream 接线。
 - `execute_anthropic_pipeline()` 已是 approval、hooks、rate limiter、attempt、retry 和 History 的主要生命周期 owner，见 `src/app/pipeline/executor.py:121-280`。目标不是再造一条 Responses pipeline，而是把该 owner 泛化为协议中立 driver。
@@ -55,7 +55,7 @@
 - Responses WebSocket 当前是独立 client/route 生命周期，见 `src/app/openai/responses_ws.py:17-38` 与 `src/app/routes/responses_ws.py:22-62`。目标 bridge 不应从 Anthropic route 跳进该 route，而应把 WebSocket 收敛为 `ResponsesTransport` 的一个物理实现。
 - 当前 `parse_sse_json()` 只切分 SSE JSON，见 `src/app/streaming/openai_sse.py:6-19`；`collect_with_limit()` 只收集整条 byte stream，见 `src/app/streaming/buffered_retry.py:8-18`。二者都不是 semantic block assembler 或 block-level delivery policy。
 - `HistoryConsumer` 当前以同一个 `RequestContext.id` 创建与 finalize entry，见 `src/app/history/consumer.py:9-52`。目标必须保留单 entry、单 finalizer，不为 Responses leg 另建 protocol history。
-- 当前主线 `ed77c9d191df81c451c25161420515cca52ce6a4` 的 `responses_reasoning_to_anthropic()` 会把多个 Responses reasoning items 聚合为至多一个 thinking block，只保留最后一个非空 `encrypted_content`，并丢弃 encrypted-only item，见 `src/app/anthropic/thinking/responses_reasoning.py:55-95` 与 `tests/unit/test_responses_reasoning.py:25-30,64-93`。这是**待修的当前实现状态，不是目标架构合同**；carrier codec 与逐 block reverse consumer 可以保留，forward aggregation 不得进入目标 bridge normalizer。
+- 历史基线 `ed77c9d191df81c451c25161420515cca52ce6a4` 的 `responses_reasoning_to_anthropic()` 曾把多个 Responses reasoning items 聚合为至多一个 thinking block，只保留最后一个非空 `encrypted_content`，并丢弃 encrypted-only item。这是设计反例，不是 current 实现断言；current 状态见 [implementation.md](implementation.md)。Carrier codec 与逐 block reverse consumer 可以保留，有损 forward aggregation 不得进入目标 bridge normalizer。
 
 ### 已决不变量
 
@@ -562,7 +562,7 @@ History projection 必须在 assembler／buffer cleanup 与 request-owned reserv
 
 - **Block identity：** 以目标 Anthropic content block 为单位；一个 Responses item 的多个 content parts 分别形成多个 block identities。
 - **默认 route：** 明确 override 通过 capability gate 后优先；无 override 且 Messages／Responses 双端点同时可用时默认 Messages。
-- **Reasoning identity：** 兼容 `copilot-api-js` 当前 wire grammar：Anthropic synthetic `thinking.signature` 使用 `copilot-api:synthetic-reasoning:v1:<base64url(UTF-8 encrypted_content)>`；无 `encrypted_content` 时使用 bare prefix `copilot-api:synthetic-reasoning:v1:`。回传 Responses leg 时，仅该带冒号 prefix 的 sentinel 可恢复每个 block 自己的 `encrypted_content` 与 summary；legacy bare sentinel `copilot-api:synthetic-reasoning:v1` 仅作安全识别，不携带 payload；foreign Anthropic signature 不得冒充可移植 Responses reasoning。Cardinality 固定为一个 Responses reasoning item 对应一个 Anthropic thinking block；item 内 summary parts 可拼接，item 间不得聚合，non-empty encrypted-only 必须保留为空 visible thinking 加本 item carrier。当前 main `ed77c9d191df81c451c25161420515cca52ce6a4` 的 forward 聚合 helper 是待替换迁移起点，而非可继续复用的目标 primitive；迁移保留 codec 与 reverse consumer，替换 forward API／oracle。新版本必须另行裁决迁移合同，不能无版本改写当前 envelope。
+- **Reasoning identity：** 项目自己的版本化 carrier 是默认 producer；consumer 额外兼容 `copilot-api-js` v1 的合法 payload、bare prefix 与 legacy sentinel 主路径。兼容不要求所有 malformed decoder 边界逐字节相同，也不授权复制 upstream 的有损聚合。Cardinality 固定为一个 Responses reasoning item 对应一个 Anthropic thinking block；item 内 summary parts 可拼接，item 间不得聚合，non-empty encrypted-only 必须保留为空 visible thinking 加本 item carrier。历史基线的 forward 聚合 helper 只是迁移反例，不是 current primitive。具体 wire expected 以 Finalized Spec 为准。
 - **Delivery：** block buffering，首个完整 block 前 no live downstream；HTTP success response start 由 delayed-start owner 管理。
 - **History：** 完整 journal 仅为 request-local 运行态真相；默认 History 仍是既有轻量终态投影。
 
