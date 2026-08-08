@@ -17,6 +17,7 @@ from app.delivery.anthropic_sse import (
     ResponsesDeliveryError,
     TerminalUsage,
 )
+from app.delivery.reservation import RequestResidentAccount
 from app.errors import ApiError, ErrorCategory
 from app.openai.responses_stream_parser import (
     CompletedBlock,
@@ -70,6 +71,7 @@ class ResponsesAnthropicStreamState:
     usage: TerminalUsage | None = None
     usage_estimated: bool = False
     delivery_session: DeliverySession | None = None
+    _committed_response: dict[str, Any] | None = None
 
     def accept_headers(self) -> None:
         if self.frontier is None:
@@ -88,6 +90,14 @@ class ResponsesAnthropicStreamState:
 
     @property
     def committed_response(self) -> dict[str, Any] | None:
+        if self._committed_response is not None:
+            return self._committed_response
+        return self._project_committed_response()
+
+    def freeze_committed_response(self) -> None:
+        self._committed_response = self._project_committed_response()
+
+    def _project_committed_response(self) -> dict[str, Any] | None:
         frontier = self.frontier
         if frontier is None or (
             not frontier.committed_blocks
@@ -151,8 +161,31 @@ async def render_responses_as_anthropic_sse(
     *,
     model: str,
     state: ResponsesAnthropicStreamState | None = None,
+    resident_account: RequestResidentAccount | None = None,
 ) -> AsyncIterator[bytes]:
     """Render a successful Responses SSE attempt as complete Anthropic block batches."""
+    stream_state = state or ResponsesAnthropicStreamState()
+    try:
+        async for batch in _render_responses_as_anthropic_sse(
+            stream,
+            model=model,
+            state=stream_state,
+            resident_account=resident_account,
+        ):
+            yield batch
+    finally:
+        stream_state.freeze_committed_response()
+        if stream_state.delivery_session is not None:
+            await stream_state.delivery_session.aclose()
+
+
+async def _render_responses_as_anthropic_sse(
+    stream: AsyncIterator[bytes],
+    *,
+    model: str,
+    state: ResponsesAnthropicStreamState,
+    resident_account: RequestResidentAccount | None,
+) -> AsyncIterator[bytes]:
     parser = ResponsesStreamParser()
     sink: _BufferedSink | None = None
     session: DeliverySession | None = None
@@ -164,7 +197,7 @@ async def render_responses_as_anthropic_sse(
         bool,
         str,
     ] | None = None
-    stream_state = state or ResponsesAnthropicStreamState()
+    stream_state = state
 
     try:
         async for value in parse_sse_json(stream):
@@ -194,6 +227,7 @@ async def render_responses_as_anthropic_sse(
                         model=model,
                     ),
                     sink=cast(DeliverySink, sink),
+                    resident_account=resident_account,
                 )
                 stream_state.frontier = session.frontier
                 stream_state.delivery_session = session
@@ -270,7 +304,6 @@ async def render_responses_as_anthropic_sse(
                 yield batch
             return
         raise api_error from error
-
     if session is None:
         api_error = _upstream_error(
             "Responses stream ended before response.created",

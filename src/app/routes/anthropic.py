@@ -9,12 +9,14 @@ from app.anthropic.header_policy import (
     normalize_responses_response_headers,
 )
 from app.anthropic.warmup import apply_warmup_policy
+from app.delivery.reservation import RequestResidentAccount
 from app.delivery.responses_anthropic_stream import (
     ResponsesAnthropicStreamState,
     render_responses_as_anthropic_sse,
 )
 from app.deps import (
     AnthropicClientDependency,
+    RuntimeDependency,
     SettingsDependency,
     TokenCounterDependency,
 )
@@ -164,6 +166,7 @@ def _response_headers(
 async def messages(
     request: MessagesRequest,
     client: AnthropicClientDependency,
+    runtime: RuntimeDependency,
     settings: SettingsDependency,
     session_id: str | None = Header(default=None, alias="x-claude-code-session-id"),
     agent_id: str | None = Header(default=None, alias="x-claude-code-agent-id"),
@@ -223,10 +226,21 @@ async def messages(
         responses_state: ResponsesAnthropicStreamState | None = None
         if responses_leg:
             responses_state = ResponsesAnthropicStreamState()
+            resident_account = (
+                RequestResidentAccount(
+                    request_id=result.context.id,
+                    attempt=result.context.attempts[-1].number,
+                    capacity_bytes=settings.openai_responses.request_resident_bytes,
+                    budget=runtime.resident_byte_budget,
+                )
+                if runtime.resident_byte_budget is not None
+                else None
+            )
             upstream_stream = render_responses_as_anthropic_sse(
                 upstream_stream,
                 model=result.context.resolved_model,
                 state=responses_state,
+                resident_account=resident_account,
             )
         stream = passthrough_bytes(
             _history_stream(
