@@ -79,6 +79,52 @@ def test_request_preparation_strips_field_adds_betas_and_destacks() -> None:
     assert prepared.wire["messages"][0]["content"][1]["type"] == "text"
 
 
+def test_request_preparation_applies_messages_tool_wire_extensions_once() -> None:
+    prepared = prepare_anthropic_request(
+        {
+            "model": "claude-test",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [
+                {
+                    "name": "local_tool",
+                    "input_schema": {"type": "object"},
+                    "future": "preserved",
+                }
+            ],
+        },
+        tool_search=True,
+    )
+
+    assert prepared.wire["tools"] == [
+        {
+            "name": "local_tool",
+            "input_schema": {"type": "object"},
+            "future": "preserved",
+            "defer_loading": True,
+        },
+        {
+            "type": "tool_search_tool_regex_20251119",
+            "name": "tool_search_tool_regex",
+        },
+    ]
+
+
+def test_request_preparation_can_disable_messages_tool_wire_extensions() -> None:
+    prepared = prepare_anthropic_request(
+        {
+            "model": "claude-test",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [{"name": "local_tool", "input_schema": {"type": "object"}}],
+        },
+        tool_search=True,
+        apply_tool_preprocessing=False,
+    )
+
+    assert prepared.wire["tools"] == [
+        {"name": "local_tool", "input_schema": {"type": "object"}}
+    ]
+
+
 def test_request_preparation_always_strips_synthetic_thinking() -> None:
     payload = {
         "model": "claude-test",
@@ -111,7 +157,11 @@ def test_request_preparation_always_strips_synthetic_thinking() -> None:
         ],
     }
 
-    prepared = prepare_anthropic_request(payload, apply_payload_rewrites=False)
+    prepared = prepare_anthropic_request(
+        payload,
+        apply_tool_preprocessing=False,
+        apply_thinking_destack=False,
+    )
 
     assert prepared.wire["messages"] == [
         {

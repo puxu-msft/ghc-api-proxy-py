@@ -4,7 +4,6 @@ from app.hooks.builtin.payload import (
     DeduplicateToolCallsHook,
     StripReadToolResultTagsHook,
     ThinkingDestackHook,
-    ToolPreprocessorHook,
 )
 from app.hooks.builtin.retry import PoisonedThinkingRetryFactory
 from app.hooks.builtin.token_calibration import (
@@ -25,13 +24,6 @@ def register_builtin_hooks(
     builder.register_payload(StripReadToolResultTagsHook(), builtin=True)
     builder.register_payload(
         ThinkingDestackHook(settings.anthropic.thinking_destack_strategy),
-        builtin=True,
-    )
-    builder.register_payload(
-        ToolPreprocessorHook(
-            settings.anthropic.tool_search,
-            tuple(settings.anthropic.tool_search_non_deferred),
-        ),
         builtin=True,
     )
     if settings.hooks.deduplicate_tool_calls:

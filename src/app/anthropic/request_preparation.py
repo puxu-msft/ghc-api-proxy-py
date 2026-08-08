@@ -19,12 +19,13 @@ def prepare_anthropic_request(
     *,
     tool_search: bool = False,
     non_deferred_tools: tuple[str, ...] = (),
-    apply_payload_rewrites: bool = True,
+    apply_tool_preprocessing: bool = True,
+    apply_thinking_destack: bool = True,
 ) -> PreparedRequest:
     wire = copy.deepcopy(payload)
     wire.pop("inference_geo", None)
     tools = wire.get("tools")
-    if apply_payload_rewrites and isinstance(tools, list):
+    if apply_tool_preprocessing and isinstance(tools, list):
         wire["tools"] = preprocess_tools(
             cast(list[dict[str, Any]], tools),
             inject_tool_search=tool_search,
@@ -46,7 +47,7 @@ def prepare_anthropic_request(
         for message in messages
         if not isinstance(message.get("content"), list) or message["content"]
     ]
-    if apply_payload_rewrites:
+    if apply_thinking_destack:
         for message in messages:
             if message.get("role") != "assistant" or not isinstance(message.get("content"), list):
                 continue

@@ -51,12 +51,13 @@ Telemetry 记录：`name`、`type`、`phase`、`duration_ms`、`modified`、`err
 
 - `builtin:strip_read_tool_result_tags`
 - `builtin:thinking_destack`
-- `builtin:tool_preprocessor`
 - `builtin:poisoned_thinking`
 - `builtin:token_calibration_success`
 - `builtin:token_calibration_failure`
 
 `builtin:deduplicate_tool_calls` 仅在 `hooks.deduplicate_tool_calls=true` 时注册。
+
+`builtin:tool_preprocessor` 不再注册为跨协议 payload hook。该名称仅作为兼容禁用键保留：默认情况下，普通 client tools 的 defer-loading 与 tool-search wire adaptation 在 route 已确定为 direct Messages 后、`PRE_SEND` 前执行；将完整名称列入 `hooks.disabled` 会关闭这项 Messages-only preparation。内建 tool preparation 不会向 Responses leg 注入 direct-Messages 专属字段或 server-tool declaration；可信用户 hook若自行加入不受支持的字段，Responses converter会显式拒绝。
 
 Mandatory tool pair/orphan repair、模型解析、认证、header security floor、审批、限流、RequestContext 状态机、History lifecycle 与 transport 正确性不可 hook 化或禁用。
 

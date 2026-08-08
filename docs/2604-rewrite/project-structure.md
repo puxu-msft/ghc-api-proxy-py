@@ -39,7 +39,7 @@ src/app/
 - `registry.py`：启动期可变 builder 与请求期不可变 registry。
 - `loader.py`：显式可信 Python module 加载。
 - `executor.py`：顺序、timeout、错误隔离与 telemetry。
-- `builtin/`：Read 标签、thinking destack、tool preprocessing、可选内容去重、poisoned-thinking retry、token calibration observers。
+- `builtin/`：Read 标签、thinking destack、可选内容去重、poisoned-thinking retry、token calibration observers。普通工具的defer-loading／tool-search adaptation属于route-aware direct Messages preparation，不在跨协议built-in registry中。
 
 ### `anthropic/sanitize/`
 

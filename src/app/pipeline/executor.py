@@ -188,7 +188,7 @@ async def _prepare_with_hooks(
         resolved_model=resolved_model,
         sanitization=sanitization,
         payload=wire,
-        apply_payload_rewrites=False,
+        apply_thinking_destack=False,
     )
     return rewritten_request, prepared
 

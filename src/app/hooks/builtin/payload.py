@@ -3,7 +3,6 @@ import json
 from dataclasses import dataclass
 from typing import Any, cast
 
-from app.anthropic.message_tools import preprocess_tools
 from app.anthropic.sanitize.read_tool_result_tags import strip_read_tool_result_tags
 from app.anthropic.thinking.destack import DestackStrategy, destack_content
 from app.hooks.context import HookContext
@@ -76,40 +75,6 @@ class ThinkingDestackHook:
             wire,
             changed,
             ("thinking_destack",) if changed else (),
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class ToolPreprocessorHook:
-    enabled: bool
-    non_deferred: tuple[str, ...]
-    name: str = "builtin:tool_preprocessor"
-    phase: PayloadPhase = PayloadPhase.POST_SANITIZE
-    order: int = 300
-    error_mode: HookErrorMode = HookErrorMode.FAIL_REQUEST
-
-    async def run(
-        self,
-        payload: dict[str, Any],
-        context: HookContext,
-    ) -> PayloadHookResult:
-        del context
-        wire = copy.deepcopy(payload)
-        tools = wire.get("tools")
-        if not isinstance(tools, list):
-            return PayloadHookResult(wire)
-        typed_tools = cast(list[dict[str, Any]], tools)
-        rewritten = preprocess_tools(
-            typed_tools,
-            inject_tool_search=self.enabled,
-            non_deferred=self.non_deferred,
-        )
-        changed = rewritten != typed_tools
-        wire["tools"] = rewritten
-        return PayloadHookResult(
-            wire,
-            changed,
-            ("tool_preprocessor",) if changed else (),
         )
 
 

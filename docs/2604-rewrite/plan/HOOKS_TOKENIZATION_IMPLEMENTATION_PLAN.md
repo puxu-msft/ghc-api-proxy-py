@@ -1,8 +1,8 @@
 # Hooks、Tokenization 与协议修复实施计划
 
-> 状态：已执行  
+> **状态：历史实施记录，已执行且非规范；禁止重放。**
 > 日期：2026-07-17  
-> 关联 Spec：`docs/2604-rewrite/hooks-tokenization-spec.md`
+> Current oracle：[Hooks 规格](../hooks-tokenization-spec.md)、[Hooks 机制](../hooks-system.md)与[Tool Use 机制](../tool-use.md)。正文记录当时的迁移设计，不得据此恢复跨协议 `builtin:tool_preprocessor` payload hook；该名称当前仅是兼容禁用键，ordinary tool 的 wire adaptation只在 direct Messages leg执行。
 
 ## 概述
 

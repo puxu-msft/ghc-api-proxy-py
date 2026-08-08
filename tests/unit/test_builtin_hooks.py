@@ -38,7 +38,7 @@ def _registry(tmp_path: Path, settings: AppSettings | None = None):
 
 
 @pytest.mark.asyncio
-async def test_builtin_payload_hooks_preserve_unknowns_and_prepare_tools(
+async def test_builtin_payload_hooks_preserve_unknowns_without_wire_tool_preparation(
     tmp_path: Path,
 ) -> None:
     registry = _registry(tmp_path)
@@ -65,13 +65,21 @@ async def test_builtin_payload_hooks_preserve_unknowns_and_prepare_tools(
     messages = cast(list[dict[str, Any]], current["messages"])
     content = cast(list[dict[str, Any]], messages[0]["content"])
     assert tools[0]["future"] == 1
-    assert tools[0]["defer_loading"] is True
-    assert tools[-1]["type"] == "tool_search_tool_regex_20251119"
+    assert "defer_loading" not in tools[0]
+    assert len(tools) == 1
     assert [block["type"] for block in content] == [
         "thinking",
         "text",
         "thinking",
     ]
+
+
+def test_tool_preprocessor_name_is_not_a_cross_protocol_payload_hook(tmp_path: Path) -> None:
+    names = {
+        hook.name for hook in _registry(tmp_path).for_phase(PayloadPhase.POST_SANITIZE)
+    }
+
+    assert "builtin:tool_preprocessor" not in names
 
 
 def test_deduplicate_hook_is_disabled_by_default(tmp_path: Path) -> None:

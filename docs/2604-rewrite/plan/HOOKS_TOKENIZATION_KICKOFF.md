@@ -1,6 +1,6 @@
 # Hooks、Tokenization 与协议修复：实施 Kick-off
 
-> 实施者请完整阅读本文档与实施计划后再开始工作。
+> **历史实施记录，禁止作为 current kick-off 执行。** 本文描述 2026-07-17 当时的迁移步骤，已被 current [Hooks 规格](../hooks-tokenization-spec.md)、[Hooks 机制](../hooks-system.md)与[Tool Use 机制](../tool-use.md)取代。尤其不得按下文恢复跨协议 `builtin:tool_preprocessor` payload hook；该名称当前仅是兼容禁用键，ordinary tool 的 defer-loading 与 tool-search adaptation只在 route 已确定为 direct Messages 后执行。
 
 ## 任务概述
 

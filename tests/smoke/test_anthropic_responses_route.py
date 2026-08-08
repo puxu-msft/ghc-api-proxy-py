@@ -1,14 +1,17 @@
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, cast
 
 import httpx
+import orjson
 import pytest
 from fastapi.testclient import TestClient
 
 from app.anthropic.client import AnthropicClient
 from app.config.settings import AppSettings
 from app.deps import get_anthropic_client
+from app.hooks.builtin import register_builtin_hooks
 from app.hooks.context import HookContext
 from app.hooks.executor import HooksExecutor
 from app.hooks.registry import HookRegistryBuilder
@@ -21,6 +24,7 @@ from app.hooks.types import (
 from app.pipeline.approval import ApprovalGate, ApprovalResult
 from app.pipeline.context import RequestContext, RequestState
 from app.server import create_app
+from app.tokenization.state_store import TokenizationStateStore
 from app.transform.model_resolver import ModelResolver
 from app.upstream.models_api import ModelCatalog
 
@@ -34,6 +38,10 @@ class RecordingTarget:
         default_factory=lambda: list[dict[str, Any]]()
     )
     responses_status: int = 200
+    responses_bodies: list[dict[str, Any]] | None = None
+    anthropic_headers: list[dict[str, str]] = field(
+        default_factory=lambda: list[dict[str, str]]()
+    )
 
     async def send_anthropic(
         self,
@@ -42,8 +50,9 @@ class RecordingTarget:
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
     ) -> httpx.Response:
-        del stream, extra_headers
+        del stream
         self.anthropic_payloads.append(dict(payload))
+        self.anthropic_headers.append(dict(extra_headers or {}))
         return httpx.Response(
             200,
             headers={
@@ -84,17 +93,10 @@ class RecordingTarget:
                     }
                 },
             )
-        return httpx.Response(
-            200,
-            headers={
-                "content-type": "application/json",
-                "content-length": "99999",
-                "request-id": "req_responses",
-                "x-ratelimit-remaining-requests": "8",
-                "x-internal-openai": "must-not-forward",
-            },
-            request=httpx.Request("POST", "https://upstream.test/responses"),
-            json={
+        body = (
+            self.responses_bodies[len(self.responses_payloads) - 1]
+            if self.responses_bodies is not None
+            else {
                 "id": "resp_vertical",
                 "model": payload["model"],
                 "status": "completed",
@@ -120,7 +122,19 @@ class RecordingTarget:
                     "output_tokens": 7,
                     "total_tokens": 19,
                 },
+            }
+        )
+        return httpx.Response(
+            200,
+            headers={
+                "content-type": "application/json",
+                "content-length": "99999",
+                "request-id": "req_responses",
+                "x-ratelimit-remaining-requests": "8",
+                "x-internal-openai": "must-not-forward",
             },
+            request=httpx.Request("POST", "https://upstream.test/responses"),
+            json=body,
         )
 
 
@@ -245,11 +259,15 @@ def _harness(
     model_id: str = "resolved-model",
     supports: Mapping[str, Any] | None = None,
     pre_send_thinking: dict[str, Any] | None = None,
+    responses_bodies: list[dict[str, Any]] | None = None,
+    builtin_state_path: Path | None = None,
+    disabled_hooks: list[str] | None = None,
 ) -> Harness:
     settings = AppSettings.model_validate(
         {
             "anthropic": {"route_override": route_override},
             "history": {"enabled": False},
+            "hooks": {"disabled": disabled_hooks or []},
         }
     )
     catalog = ModelCatalog(None, "https://upstream.test")
@@ -261,11 +279,21 @@ def _harness(
     if supports is not None:
         model["capabilities"] = {"supports": dict(supports)}
     catalog.replace_from_data({"object": "list", "data": [model]})
-    target = RecordingTarget(responses_status=responses_status)
+    target = RecordingTarget(
+        responses_status=responses_status,
+        responses_bodies=responses_bodies,
+    )
     history = RecordingHistory()
     approval = RecordingApproval()
     observer = RecordingObserver()
-    hooks_builder = HookRegistryBuilder()
+    hooks_builder = HookRegistryBuilder(disabled=tuple(settings.hooks.disabled))
+    if builtin_state_path is not None:
+        register_builtin_hooks(
+            hooks_builder,
+            settings,
+            quarantine=None,
+            tokenization_state=TokenizationStateStore(builtin_state_path),
+        )
     if failing_terminal_observer:
         hooks_builder.register_observer(FailingTerminalObserver())
     hooks_builder.register_observer(observer)
@@ -402,6 +430,172 @@ def test_anthropic_nonstream_responses_leg_is_a_real_single_owner_asgi_flow(
     }
     response_observation = harness.observer.seen[1][2]
     assert b"hello bridge" in response_observation["response_body"]
+
+
+def test_anthropic_nonstream_tool_call_and_result_complete_two_route_rounds(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(
+        endpoints=["/responses"],
+        responses_bodies=[
+            {
+                "id": "resp_tool_call",
+                "model": "resolved-model",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_local_echo",
+                        "name": "local_echo_marker",
+                        "arguments": '{"marker":"TOOL_ROUNDTRIP_OK"}',
+                    }
+                ],
+                "usage": {"input_tokens": 5, "output_tokens": 3, "total_tokens": 8},
+            },
+            {
+                "id": "resp_tool_result",
+                "model": "resolved-model",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": "result accepted"}],
+                    }
+                ],
+                "usage": {"input_tokens": 9, "output_tokens": 2, "total_tokens": 11},
+            },
+        ],
+        builtin_state_path=tmp_path / "tokenization.json",
+    )
+    tool = {
+        "name": "local_echo_marker",
+        "description": "Return one fixed local marker without external side effects",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "marker": {"type": "string", "enum": ["TOOL_ROUNDTRIP_OK"]}
+            },
+            "required": ["marker"],
+            "additionalProperties": False,
+        },
+    }
+
+    with harness.client as client:
+        first = client.post(
+            "/v1/messages",
+            json={
+                "model": "requested-model",
+                "max_tokens": 64,
+                "messages": [{"role": "user", "content": "Call the local marker tool."}],
+                "tools": [tool],
+                "tool_choice": {
+                    "type": "tool",
+                    "name": "local_echo_marker",
+                    "disable_parallel_tool_use": True,
+                },
+            },
+        )
+        first_body = first.json()
+        tool_use = first_body["content"][0]
+
+        second = client.post(
+            "/v1/messages",
+            json={
+                "model": "requested-model",
+                "max_tokens": 64,
+                "messages": [
+                    {"role": "user", "content": "Call the local marker tool."},
+                    {"role": "assistant", "content": [tool_use]},
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": tool_use["id"],
+                                "content": "TOOL_ROUNDTRIP_OK",
+                            }
+                        ],
+                    },
+                ],
+                "tools": [tool],
+                "tool_choice": {"type": "none"},
+            },
+        )
+
+    assert first.status_code == 200
+    assert first_body["stop_reason"] == "tool_use"
+    assert tool_use == {
+        "type": "tool_use",
+        "id": "call_local_echo",
+        "name": "local_echo_marker",
+        "input": {"marker": "TOOL_ROUNDTRIP_OK"},
+    }
+    assert second.status_code == 200
+    second_body = second.json()
+    assert second_body["stop_reason"] == "end_turn"
+    assert second_body["content"] == [{"type": "text", "text": "result accepted"}]
+
+    assert harness.target.anthropic_payloads == []
+    assert len(harness.target.responses_payloads) == 2
+    first_wire, second_wire = harness.target.responses_payloads
+    assert first_wire["tools"] == [
+        {
+            "type": "function",
+            "name": "local_echo_marker",
+            "description": "Return one fixed local marker without external side effects",
+            "parameters": tool["input_schema"],
+        }
+    ]
+    assert first_wire["tool_choice"] == {
+        "type": "function",
+        "name": "local_echo_marker",
+    }
+    assert first_wire["parallel_tool_calls"] is False
+    assert second_wire["input"][:2] == [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Call the local marker tool."}],
+        },
+        {
+            "type": "function_call",
+            "call_id": "call_local_echo",
+            "name": "local_echo_marker",
+            "arguments": second_wire["input"][1]["arguments"],
+        },
+    ]
+    assert orjson.loads(second_wire["input"][1]["arguments"]) == {
+        "marker": "TOOL_ROUNDTRIP_OK"
+    }
+    assert second_wire["input"][2] == {
+        "type": "function_call_output",
+        "call_id": "call_local_echo",
+        "output": "TOOL_ROUNDTRIP_OK",
+    }
+    assert second_wire["tool_choice"] == "none"
+    assert len(harness.history.started_contexts) == 2
+    assert harness.history.finalized_contexts == harness.history.started_contexts
+    assert harness.approval.contexts == harness.history.started_contexts
+    assert harness.history.started_contexts[0] is not harness.history.started_contexts[1]
+    assert all(
+        context.state is RequestState.COMPLETED
+        and context.protocol_leg == "responses"
+        for context in harness.history.finalized_contexts
+    )
+    assert all(len(context.attempts) == 1 for context in harness.history.finalized_contexts)
+    assert [event for event, _, _ in harness.observer.seen] == [
+        ObserverEvent.REQUEST_RECEIVED,
+        ObserverEvent.RESPONSE,
+        ObserverEvent.FINALIZE,
+        ObserverEvent.REQUEST_RECEIVED,
+        ObserverEvent.RESPONSE,
+        ObserverEvent.FINALIZE,
+    ]
+    assert [hook_context.request_id for _, hook_context, _ in harness.observer.seen] == [
+        context.id
+        for context in harness.history.started_contexts
+        for _ in range(3)
+    ]
 
 
 SINGLETON_REASONING_SUPPORTS = {
@@ -577,6 +771,69 @@ def test_dual_capability_auto_keeps_existing_messages_leg() -> None:
     assert context.protocol_leg == "messages"
     assert context.route_reason == "dual_capability_default"
     assert len(context.attempts) == 1
+
+
+@pytest.mark.parametrize(
+    ("disabled_hooks", "expected_tools", "expects_tool_beta"),
+    [
+        (
+            [],
+            [
+                {
+                    "name": "weather",
+                    "description": "Get weather",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                    "defer_loading": True,
+                },
+                {
+                    "type": "tool_search_tool_regex_20251119",
+                    "name": "tool_search_tool_regex",
+                },
+            ],
+            True,
+        ),
+        (
+            ["builtin:tool_preprocessor"],
+            [
+                {
+                    "name": "weather",
+                    "description": "Get weather",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                }
+            ],
+            False,
+        ),
+    ],
+)
+def test_messages_leg_applies_tool_wire_preparation_after_route_selection(
+    tmp_path: Path,
+    disabled_hooks: list[str],
+    expected_tools: list[dict[str, Any]],
+    expects_tool_beta: bool,
+) -> None:
+    harness = _harness(
+        endpoints=["/v1/messages", "/responses"],
+        builtin_state_path=tmp_path / "tokenization.json",
+        disabled_hooks=disabled_hooks,
+    )
+
+    with harness.client as client:
+        response = client.post("/v1/messages", json=_request_body())
+
+    assert response.status_code == 200
+    assert len(harness.target.anthropic_payloads) == 1
+    assert harness.target.responses_payloads == []
+    assert harness.target.anthropic_payloads[0]["tools"] == expected_tools
+    beta_header = harness.target.anthropic_headers[0]["anthropic-beta"]
+    assert ("advanced-tool-use-2025-11-20" in beta_header) is expects_tool_beta
 
 
 @pytest.mark.parametrize(

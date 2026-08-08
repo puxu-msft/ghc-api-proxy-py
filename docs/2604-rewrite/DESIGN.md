@@ -99,7 +99,7 @@
 1. 请求进入 FastAPI 路由（`routes/`），按协议前缀分发（OpenAI / Anthropic / Azure / Gemini）
 2. 模型解析 + 端点决策
 3. Pipeline 处理：payload hooks → mandatory 清洗 → 审批（可选）→ 限流 → per-attempt hooks → 执行 → 重试
-4. Anthropic 请求经 mandatory tool-pair repair 与 built-in hooks（thinking destack、tool preprocessing 等）后发送
+4. Anthropic 请求经 mandatory tool-pair repair 与 built-in hooks后完成canonical语义处理；route确定后仅direct Messages leg执行tool defer-loading／tool-search wire preparation，Responses leg转为普通function tools
 5. 流式响应逐事件直通（含 keepalive / idle timeout / 重复检测），累积器旁路记账
 6. 请求终态异步落历史（off-loop），WebSocket 推送
 

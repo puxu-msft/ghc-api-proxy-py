@@ -21,9 +21,9 @@
 4. 缺失或重复项按 block 粒度清除，不删除同消息中的普通内容。
 5. User content 中所有保留的 `tool_result` 排在 text/image/document 之前。
 
-## Tool preprocessing built-in hook
+## Tool preprocessing
 
-`builtin:tool_preprocessor` 在 `post_sanitize` 阶段执行：
+普通 client tool preprocessing 是 direct Messages wire preparation，不是跨协议 `post_sanitize` payload hook。Route 确定为 Messages 后、`PRE_SEND` 前执行以下 adaptation：
 
 - 普通 tool definitions 可按配置标记 `defer_loading: true`。
 - `anthropic.tool_search_non_deferred` 中的工具保持 eager。
@@ -32,6 +32,8 @@
 - 带非空 `type` 的 API-defined typed tools 不被改写为 deferred；代理只透传其声明。
 
 `tool_search` 是 Copilot 的工具发现 wire extension，并不意味着代理实现 Anthropic 原生 server-tool 执行或响应过滤。
+
+Responses leg 的内建 preparation 保持普通 function tool 的 Anthropic canonical shape，随后由 Responses converter 同时转换 declaration、forced choice、历史 call 与 result；不得先注入 `defer_loading` 或 Anthropic tool-search server declaration。可信用户 hook若自行加入这些不受支持字段，converter会显式拒绝。兼容配置名 `builtin:tool_preprocessor` 仍可列入 `hooks.disabled`，其效果是关闭 Messages-only defer-loading 与 tool-search preparation；该名称不再产生 payload-hook 执行记录。
 
 ## Read tool 结果标签
 

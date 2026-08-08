@@ -63,7 +63,8 @@ def test_direct_messages_strips_static_proxy_carrier_vectors() -> None:
                 }
             ],
         },
-        apply_payload_rewrites=False,
+        apply_tool_preprocessing=False,
+        apply_thinking_destack=False,
     )
 
     assert prepared.wire["messages"][0]["content"] == [

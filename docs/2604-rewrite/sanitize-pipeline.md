@@ -11,7 +11,8 @@
 1. `process_tool_blocks()` 修复 client `tool_use` / `tool_result` 配对与工具名大小写。
 2. `filter_empty_text_blocks()` 删除空 text blocks。
 3. 删除清洗后 content 数组为空的消息。
-4. `post_sanitize` built-in hooks 执行可选改写：Read 结果标签清理、thinking destack、tool preprocessing；内容去重默认关闭。
+4. `post_sanitize` built-in hooks 执行可选改写：Read 结果标签清理与 thinking destack；内容去重默认关闭。
+5. Route确定后，direct Messages leg执行普通工具的defer-loading与tool-search wire preparation；Responses leg保持canonical普通function tools。
 
 ## Tool pair/orphan repair
 

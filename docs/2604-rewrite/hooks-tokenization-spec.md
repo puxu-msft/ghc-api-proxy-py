@@ -190,10 +190,9 @@ Hook context 是 frozen snapshot，包含 request ID、endpoint、protocol、ori
 
 - `builtin:strip_read_tool_result_tags`
 - `builtin:thinking_destack`
-- `builtin:tool_preprocessor`
 - 可选、默认关闭的 `builtin:deduplicate_tool_calls`
 
-`builtin:tool_preprocessor` 只处理普通 client tool definitions：按配置注入 `tool_search_tool_regex`、为非白名单工具设置 `defer_loading`，并保持未知字段。它不识别、注入、降级或过滤 Anthropic server tools。
+`builtin:tool_preprocessor` 已从跨协议 payload hook 收敛为兼容禁用键。普通 client tool definitions 只在 route 已确定为 direct Messages 后做 wire preparation：按配置注入 `tool_search_tool_regex`、为非白名单工具设置 `defer_loading`，并保持未知字段。内建 preparation 不得向 Responses leg 注入这些 direct-Messages 专属字段；可信用户 hook若自行加入不受支持字段，Responses converter显式拒绝。将该名称列入 `hooks.disabled` 继续关闭 Messages-only preparation，但 registry不再注册或执行同名 hook，也不产生对应hook record。
 
 首版 retry factory：
 

@@ -116,7 +116,7 @@ class AnthropicClient:
         resolved_model: str,
         sanitization: SanitizationResult,
         payload: dict[str, Any],
-        apply_payload_rewrites: bool,
+        apply_thinking_destack: bool,
     ) -> PreparedAnthropicRequest:
         route = self._decide_route(resolved_model)
         if route is not None and route.protocol_leg.value == "responses":
@@ -128,13 +128,20 @@ class AnthropicClient:
                 headers={},
                 route=route,
             )
+        tool_preprocessing_enabled = (
+            "builtin:tool_preprocessor" not in self._settings.hooks.disabled
+        )
         deeply_prepared = prepare_anthropic_request(
             payload,
-            tool_search=self._settings.anthropic.tool_search,
+            tool_search=(
+                self._settings.anthropic.tool_search
+                and tool_preprocessing_enabled
+            ),
             non_deferred_tools=tuple(
                 self._settings.anthropic.tool_search_non_deferred
             ),
-            apply_payload_rewrites=apply_payload_rewrites,
+            apply_tool_preprocessing=tool_preprocessing_enabled,
+            apply_thinking_destack=apply_thinking_destack,
         )
         return PreparedAnthropicRequest(
             original_model=request.model,
@@ -159,7 +166,7 @@ class AnthropicClient:
             resolved_model=resolved_model,
             sanitization=sanitization,
             payload=wire,
-            apply_payload_rewrites=True,
+            apply_thinking_destack=True,
         )
 
     async def send_messages(
