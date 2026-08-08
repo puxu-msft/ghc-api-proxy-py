@@ -19,6 +19,12 @@ from app.delivery import (
     SingleWriterViolation,
     TerminalUsage,
 )
+from app.delivery.reservation import (
+    RequestResidentAccount,
+    ResidentByteBudget,
+    ResidentCapacityError,
+    ResidentLease,
+)
 from app.openai.responses_stream_parser import (
     BlockIdentity,
     CompletedBlock,
@@ -552,7 +558,7 @@ class _PendingWriter:
 
 
 class _PendingSink:
-    def __init__(self, writer: _PendingWriter) -> None:
+    def __init__(self, writer: DeliveryWriter) -> None:
         self._writer = writer
 
     def open_writer(self) -> DeliveryWriter:
@@ -715,3 +721,433 @@ async def test_concurrent_deliver_and_finish_cannot_overtake_one_writer() -> Non
         "message_delta",
         "message_stop",
     ]
+
+
+class _DiscardingWriter:
+    def __init__(self) -> None:
+        self.write_count = 0
+
+    async def write(self, batch: bytes) -> DeliveryOutcome:
+        self.write_count += 1
+        return "accepted"
+
+
+class _DiscardingSink:
+    def __init__(self) -> None:
+        self.writer = _DiscardingWriter()
+
+    def open_writer(self) -> DeliveryWriter:
+        return self.writer
+
+
+@pytest.mark.asyncio
+async def test_opt_in_resident_account_tracks_delivery_payload_until_close() -> None:
+    budget = ResidentByteBudget(capacity_bytes=4096)
+    account = RequestResidentAccount(
+        request_id="request-happy",
+        attempt=1,
+        capacity_bytes=4096,
+        budget=budget,
+    )
+    writer = _PendingWriter()
+    session = DeliverySession(
+        renderer=AnthropicSseRenderer(message_id="msg_delivery", model="gpt-test"),
+        sink=_PendingSink(writer),
+        resident_account=account,
+    )
+    semantic_bytes = len("resident-😀".encode())
+
+    (batch,) = await session.deliver(_block(0, TextBlock("resident-😀")))
+
+    assert batch.kind == "block"
+    assert writer.batches == [batch.data]
+    assert account.high_water_bytes == semantic_bytes + len(batch.data)
+    assert budget.high_water_bytes == semantic_bytes + len(batch.data)
+    assert account.current_bytes == semantic_bytes + len(batch.data)
+    assert budget.current_bytes == semantic_bytes + len(batch.data)
+    assert session.frontier.committed_blocks == ()
+
+    await session.acknowledge_data(batch.data, "accepted")
+
+    assert account.current_bytes == semantic_bytes
+    assert budget.current_bytes == semantic_bytes
+    assert len(session.frontier.committed_blocks) == 1
+
+    await session.aclose()
+    await session.aclose()
+
+    assert account.current_bytes == 0
+    assert budget.current_bytes == 0
+    assert account.high_water_bytes > 0
+
+
+@pytest.mark.asyncio
+async def test_cancelled_delivery_reservation_wait_does_not_charge_or_mutate() -> None:
+    capacity_bytes = 1024
+    budget = ResidentByteBudget(capacity_bytes=capacity_bytes)
+    holder_account = RequestResidentAccount(
+        request_id="request-holder",
+        attempt=1,
+        capacity_bytes=capacity_bytes,
+        budget=budget,
+    )
+    waiting_account = RequestResidentAccount(
+        request_id="request-waiting",
+        attempt=1,
+        capacity_bytes=capacity_bytes,
+        budget=budget,
+    )
+    holder = await holder_account.reserve(owner="holder", amount=capacity_bytes)
+    sink = _DiscardingSink()
+    session = DeliverySession(
+        renderer=AnthropicSseRenderer(message_id="msg_delivery", model="gpt-test"),
+        sink=sink,
+        resident_account=waiting_account,
+    )
+
+    delivery = asyncio.create_task(session.deliver(_block(0, TextBlock("wait"))))
+    await asyncio.sleep(0)
+
+    assert delivery.done() is False
+    assert waiting_account.current_bytes == 0
+    assert budget.current_bytes == capacity_bytes
+    assert session.pending_source_orders == ()
+    assert session.frontier.committed_blocks == ()
+    assert sink.writer.write_count == 0
+
+    delivery.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await delivery
+
+    assert waiting_account.current_bytes == 0
+    assert budget.current_bytes == capacity_bytes
+    assert session.pending_source_orders == ()
+    assert session.frontier.committed_blocks == ()
+    assert sink.writer.write_count == 0
+
+    await holder_account.release(holder)
+    assert budget.current_bytes == 0
+    with pytest.raises(RuntimeError, match="already released"):
+        await holder_account.release(holder)
+    await session.aclose()
+
+
+@pytest.mark.asyncio
+async def test_request_aggregate_capacity_fails_without_changing_balances() -> None:
+    budget = ResidentByteBudget(capacity_bytes=20)
+    account = RequestResidentAccount(
+        request_id="request-aggregate",
+        attempt=1,
+        capacity_bytes=10,
+        budget=budget,
+    )
+    held = await account.reserve(owner="held", amount=6)
+
+    with pytest.raises(ResidentCapacityError) as caught:
+        await account.reserve(owner="over-request-capacity", amount=5)
+
+    assert caught.value.scope == "request"
+    assert caught.value.amount == 11
+    assert account.current_bytes == 6
+    assert budget.current_bytes == 6
+    await account.release(held)
+    assert account.current_bytes == 0
+    assert budget.current_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_reserve_many_is_all_or_nothing() -> None:
+    budget = ResidentByteBudget(capacity_bytes=20)
+    account = RequestResidentAccount(
+        request_id="request-atomic-batch",
+        attempt=1,
+        capacity_bytes=10,
+        budget=budget,
+    )
+
+    with pytest.raises(ResidentCapacityError) as caught:
+        await account.reserve_many((("first", 6), ("second", 5)))
+
+    assert caught.value.scope == "request"
+    assert account.current_bytes == 0
+    assert budget.current_bytes == 0
+    first = await account.reserve(owner="first", amount=6)
+    await account.release(first)
+
+
+@pytest.mark.asyncio
+async def test_waiting_reservation_continues_after_capacity_is_released() -> None:
+    budget = ResidentByteBudget(capacity_bytes=10)
+    holder_account = RequestResidentAccount(
+        request_id="request-capacity-holder",
+        attempt=1,
+        capacity_bytes=10,
+        budget=budget,
+    )
+    waiting_account = RequestResidentAccount(
+        request_id="request-capacity-waiter",
+        attempt=1,
+        capacity_bytes=10,
+        budget=budget,
+    )
+    holder = await holder_account.reserve(owner="holder", amount=8)
+    waiting = asyncio.create_task(
+        waiting_account.reserve(owner="waiting", amount=4)
+    )
+    await asyncio.sleep(0)
+
+    assert waiting.done() is False
+    assert waiting_account.current_bytes == 0
+    assert budget.current_bytes == 8
+
+    await holder_account.release(holder)
+    waiting_lease = await asyncio.wait_for(waiting, timeout=1)
+
+    assert waiting_account.current_bytes == 4
+    assert budget.current_bytes == 4
+    await waiting_account.release(waiting_lease)
+    assert waiting_account.current_bytes == 0
+    assert budget.current_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_resident_lease_state_and_charge_facts_are_read_only() -> None:
+    budget = ResidentByteBudget(capacity_bytes=10)
+    account = RequestResidentAccount(
+        request_id="request-read-only-lease",
+        attempt=1,
+        capacity_bytes=10,
+        budget=budget,
+    )
+    lease = await account.reserve(owner="payload", amount=5)
+
+    for name, value in (
+        ("owner", "forged"),
+        ("amount", 1),
+        ("_account", object()),
+        ("_owner", "forged"),
+        ("_amount", 1),
+        ("_released", True),
+    ):
+        with pytest.raises(AttributeError):
+            setattr(lease, name, value)
+    assert not hasattr(lease, "mark_released")
+    assert not hasattr(lease, "release")
+    assert lease.owner == "payload"
+    assert lease.amount == 5
+    assert lease.released is False
+
+    with pytest.raises(RuntimeError, match="already initialized"):
+        lease.__init__("payload", 1)
+    assert lease.amount == 5
+    assert account.current_bytes == 5
+    assert budget.current_bytes == 5
+
+    await account.release(lease)
+
+    assert lease.released is True
+    assert account.current_bytes == 0
+    assert budget.current_bytes == 0
+
+
+class _OutcomeWriter:
+    def __init__(self, outcome: DeliveryOutcome) -> None:
+        self._outcome: DeliveryOutcome = outcome
+        self.batches: list[bytes] = []
+
+    async def write(self, batch: bytes) -> DeliveryOutcome:
+        self.batches.append(batch)
+        return self._outcome
+
+
+@pytest.mark.asyncio
+async def test_closed_session_rejects_every_write_entry_before_reserve_or_sink() -> None:
+    async def assert_rejected(action: str) -> None:
+        budget = ResidentByteBudget(capacity_bytes=4096)
+        account = RequestResidentAccount(
+            request_id=f"request-closed-{action}",
+            attempt=1,
+            capacity_bytes=4096,
+            budget=budget,
+        )
+        writer = _OutcomeWriter("accepted")
+        session = DeliverySession(
+            renderer=AnthropicSseRenderer(message_id="msg_delivery", model="gpt-test"),
+            sink=_PendingSink(writer),
+            resident_account=account,
+        )
+        await session.aclose()
+
+        with pytest.raises(DeliveryOrderError, match="closed"):
+            if action == "deliver":
+                await session.deliver(_block(0, TextBlock("closed")))
+            elif action == "consume":
+                await session.consume(
+                    (
+                        SourceOpened(BlockIdentity(0, "item_0", None), 0),
+                        _block(0, TextBlock("closed")),
+                    ),
+                    open_identities=(),
+                )
+            elif action == "finish":
+                await session.finish(
+                    stop_reason="end_turn",
+                    usage=TerminalUsage(input_tokens=1, output_tokens=1),
+                )
+            else:
+                await session.render_error(
+                    error_type="api_error",
+                    message="closed",
+                    code="closed",
+                )
+
+        assert writer.batches == []
+        assert account.current_bytes == 0
+        assert budget.current_bytes == 0
+        await session.aclose()
+
+    for action in ("deliver", "consume", "finish", "render_error"):
+        await assert_rejected(action)
+
+
+@pytest.mark.asyncio
+async def test_closed_session_cannot_create_a_pending_rendered_lease() -> None:
+    budget = ResidentByteBudget(capacity_bytes=4096)
+    account = RequestResidentAccount(
+        request_id="request-closed-pending-error",
+        attempt=1,
+        capacity_bytes=4096,
+        budget=budget,
+    )
+    writer = _OutcomeWriter("pending")
+    session = DeliverySession(
+        renderer=AnthropicSseRenderer(message_id="msg_delivery", model="gpt-test"),
+        sink=_PendingSink(writer),
+        resident_account=account,
+    )
+    await session.aclose()
+
+    with pytest.raises(DeliveryOrderError, match="closed"):
+        await session.render_error(
+            error_type="api_error",
+            message="closed",
+            code="closed",
+        )
+
+    assert writer.batches == []
+    assert account.current_bytes == 0
+    assert budget.current_bytes == 0
+
+
+class _PausedReleaseAccount(RequestResidentAccount):
+    def __init__(
+        self,
+        *,
+        request_id: str,
+        capacity_bytes: int,
+        budget: ResidentByteBudget,
+    ) -> None:
+        super().__init__(
+            request_id=request_id,
+            attempt=1,
+            capacity_bytes=capacity_bytes,
+            budget=budget,
+        )
+        self.first_release_entered = asyncio.Event()
+        self.continue_first_release = asyncio.Event()
+        self.release_owners: list[object] = []
+
+    async def release(self, lease: ResidentLease) -> None:
+        self.release_owners.append(lease.owner)
+        if len(self.release_owners) == 1:
+            self.first_release_entered.set()
+            await self.continue_first_release.wait()
+        await super().release(lease)
+
+
+@pytest.mark.parametrize("first_operation", ["acknowledge", "close"])
+@pytest.mark.asyncio
+async def test_pending_ack_and_close_serialize_rendered_lease_release(
+    first_operation: str,
+) -> None:
+    budget = ResidentByteBudget(capacity_bytes=4096)
+    account = _PausedReleaseAccount(
+        request_id="request-ack-close-race",
+        capacity_bytes=4096,
+        budget=budget,
+    )
+    writer = _PendingWriter()
+    session = DeliverySession(
+        renderer=AnthropicSseRenderer(message_id="msg_delivery", model="gpt-test"),
+        sink=_PendingSink(writer),
+        resident_account=account,
+    )
+    (batch,) = await session.deliver(_block(0, TextBlock("race")))
+
+    if first_operation == "acknowledge":
+        acknowledgement = asyncio.create_task(
+            session.acknowledge_data(batch.data, "accepted")
+        )
+        await account.first_release_entered.wait()
+        close = asyncio.create_task(session.aclose())
+        await asyncio.sleep(0)
+        assert close.done() is False
+    else:
+        close = asyncio.create_task(session.aclose())
+        await account.first_release_entered.wait()
+        acknowledgement = asyncio.create_task(
+            session.acknowledge_data(batch.data, "accepted")
+        )
+        await acknowledgement
+
+    account.continue_first_release.set()
+    await asyncio.gather(acknowledgement, close)
+
+    rendered_release_count = sum(
+        1
+        for owner in account.release_owners
+        if isinstance(owner, tuple)
+        and cast(tuple[object, ...], owner)[0] == "rendered"
+    )
+    assert rendered_release_count == 1
+    assert account.current_bytes == 0
+    assert budget.current_bytes == 0
+    await session.aclose()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_close_does_not_interrupt_background_cleanup() -> None:
+    budget = ResidentByteBudget(capacity_bytes=4096)
+    account = _PausedReleaseAccount(
+        request_id="request-cancelled-close",
+        capacity_bytes=4096,
+        budget=budget,
+    )
+    writer = _PendingWriter()
+    session = DeliverySession(
+        renderer=AnthropicSseRenderer(message_id="msg_delivery", model="gpt-test"),
+        sink=_PendingSink(writer),
+        resident_account=account,
+    )
+    await session.deliver(_block(0, TextBlock("cleanup")))
+    cancelled_waiter = asyncio.create_task(session.aclose())
+    await account.first_release_entered.wait()
+    surviving_waiter = asyncio.create_task(session.aclose())
+    await asyncio.sleep(0)
+
+    cancelled_waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled_waiter
+    account.continue_first_release.set()
+    await surviving_waiter
+
+    rendered_release_count = sum(
+        1
+        for owner in account.release_owners
+        if isinstance(owner, tuple)
+        and cast(tuple[object, ...], owner)[0] == "rendered"
+    )
+    assert rendered_release_count == 1
+    assert account.current_bytes == 0
+    assert budget.current_bytes == 0
+    await session.aclose()

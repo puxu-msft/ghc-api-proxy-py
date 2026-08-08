@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, cast
 
 import orjson
@@ -63,7 +63,6 @@ class _BufferedSink:
 @dataclass(slots=True)
 class ResponsesAnthropicStreamState:
     frontier: DeliveryFrontier | None = None
-    batches: list[bytes] = field(default_factory=lambda: list[bytes]())
     error: ApiError | None = None
     message_id: str | None = None
     model: str | None = None
@@ -252,7 +251,7 @@ async def render_responses_as_anthropic_sse(
                 terminal_usage=None,
                 stop_reason=stop_reason,
             )
-            async for batch in _drain_accepted(session, sink, stream_state):
+            async for batch in _drain_accepted(session, sink):
                 yield batch
     except Exception as error:
         api_error = _normalize_stream_error(error)
@@ -267,7 +266,7 @@ async def render_responses_as_anthropic_sse(
                 message=api_error.message,
                 code=api_error.code,
             )
-            async for batch in _drain_accepted(session, sink, stream_state):
+            async for batch in _drain_accepted(session, sink):
                 yield batch
             return
         raise api_error from error
@@ -293,7 +292,7 @@ async def render_responses_as_anthropic_sse(
             stream_state.usage_estimated = usage_estimated
             if sink is None:
                 raise RuntimeError("Responses delivery session lost its sink")
-            async for batch in _drain_accepted(session, sink, stream_state):
+            async for batch in _drain_accepted(session, sink):
                 yield batch
         except Exception as error:
             api_error = _normalize_stream_error(error)
@@ -304,7 +303,7 @@ async def render_responses_as_anthropic_sse(
                     message=api_error.message,
                     code=api_error.code,
                 )
-                async for batch in _drain_accepted(session, sink, stream_state):
+                async for batch in _drain_accepted(session, sink):
                     yield batch
                 return
             raise api_error from error
@@ -322,7 +321,7 @@ async def render_responses_as_anthropic_sse(
             )
             if sink is None:
                 raise RuntimeError("Responses delivery session lost its sink")
-            async for batch in _drain_accepted(session, sink, stream_state):
+            async for batch in _drain_accepted(session, sink):
                 yield batch
             return
         raise api_error
@@ -331,7 +330,6 @@ async def render_responses_as_anthropic_sse(
 async def _drain_accepted(
     session: DeliverySession,
     sink: _BufferedSink,
-    state: ResponsesAnthropicStreamState,
 ) -> AsyncIterator[bytes]:
     for batch in sink.drain():
         try:
@@ -341,7 +339,6 @@ async def _drain_accepted(
             raise
         else:
             await session.acknowledge_data(batch, "accepted")
-            state.batches.append(batch)
 
 
 def _normalize_stream_error(error: Exception) -> ApiError:

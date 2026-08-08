@@ -9,6 +9,7 @@ from typing import Any, Literal, Protocol, cast
 import orjson
 
 from app.anthropic.thinking.reasoning_carrier import encode_reasoning_carrier
+from app.delivery.reservation import RequestResidentAccount, ResidentLease
 from app.openai.responses_stream_parser import (
     BlockIdentity,
     CompletedBlock,
@@ -393,6 +394,11 @@ class DeliveryFrontier:
         if batch.kind in {"terminal", "error"} and self._terminal_state == "not_started":
             self._terminal_state = "uncertain"
 
+    def clear_payloads(self) -> None:
+        """Drop semantic payload references after their projection is self-contained."""
+        self._committed_blocks.clear()
+        self._uncertain_block = None
+
 
 class AnthropicSseRenderer:
     """Render immutable completed blocks into fully materialized Anthropic SSE batches."""
@@ -585,9 +591,16 @@ class AnthropicSseRenderer:
 class DeliverySession:
     """Single-writer owner for typed parser facts, rendering, sinking, and commits."""
 
-    def __init__(self, *, renderer: AnthropicSseRenderer, sink: DeliverySink) -> None:
+    def __init__(
+        self,
+        *,
+        renderer: AnthropicSseRenderer,
+        sink: DeliverySink,
+        resident_account: RequestResidentAccount | None = None,
+    ) -> None:
         self._renderer = renderer
         self._writer = sink.open_writer()
+        self._resident_account = resident_account
         self._sequencer = ContinuousPrefixSequencer()
         self._operation_lock = asyncio.Lock()
         self._stopped_error: ResponsesDeliveryError | None = None
@@ -596,7 +609,13 @@ class DeliverySession:
         self._scheduled_blocks: list[CompletedBlock] = []
         self._message_start_scheduled = False
         self._terminal_scheduled = False
-        self._pending: list[tuple[RenderedBatch, CompletedBlock | None]] = []
+        self._pending: list[
+            tuple[RenderedBatch, CompletedBlock | None, ResidentLease | None]
+        ] = []
+        self._semantic_leases: dict[BlockIdentity, ResidentLease] = {}
+        self._rendered_leases: dict[int, ResidentLease] = {}
+        self._cleanup_task: asyncio.Task[None] | None = None
+        self._closed = False
         self.frontier = DeliveryFrontier()
 
     @property
@@ -611,6 +630,7 @@ class DeliverySession:
         async with self._operation_lock:
             self._raise_if_stopped()
             self._select_mode("manual")
+            await self._reserve_semantic((block,))
             identity = BlockIdentity(
                 block.identity.output_index,
                 block.identity.item_id,
@@ -635,6 +655,8 @@ class DeliverySession:
             self._raise_if_stopped()
             if self._terminal_scheduled:
                 raise DeliveryOrderError("cannot consume events after terminal")
+            completed = tuple(event for event in events if isinstance(event, CompletedBlock))
+            await self._reserve_semantic(completed)
             terminal: ResponsesTerminal | None = None
             for event in events:
                 if isinstance(event, SourceOpened):
@@ -694,10 +716,18 @@ class DeliverySession:
                 block_index=block_index,
                 include_message_start=not self._message_start_scheduled,
             )
+            rendered_lease = await self._reserve_rendered(batch)
             self._scheduled_blocks.append(ready_block)
             self._message_start_scheduled = True
-            outcome = await self._writer.write(batch.data)
-            await self.acknowledge(batch, outcome or "accepted")
+            try:
+                outcome = await self._writer.write(batch.data)
+            except BaseException:
+                if rendered_lease is not None:
+                    await self._release_rendered(rendered_lease)
+                raise
+            await self._acknowledge_locked(
+                batch, outcome or "accepted", rendered_lease=rendered_lease
+            )
             accepted.append(batch)
         return tuple(accepted)
 
@@ -766,16 +796,25 @@ class DeliverySession:
             usage=usage,
             include_message_start=not self._message_start_scheduled,
         )
+        rendered_lease = await self._reserve_rendered(batch)
         self._terminal_scheduled = True
         self._message_start_scheduled = True
-        outcome = await self._writer.write(batch.data)
-        await self.acknowledge(batch, outcome or "accepted")
+        try:
+            outcome = await self._writer.write(batch.data)
+        except BaseException:
+            if rendered_lease is not None:
+                await self._release_rendered(rendered_lease)
+            raise
+        await self._acknowledge_locked(
+            batch, outcome or "accepted", rendered_lease=rendered_lease
+        )
         return batch
 
     async def render_error(
         self, *, error_type: str, message: str, code: str | None
     ) -> RenderedBatch:
         async with self._operation_lock:
+            self._raise_if_closed()
             if self._terminal_scheduled:
                 raise DeliveryOrderError("terminal was already scheduled")
             batch = self._renderer.render_error(
@@ -783,52 +822,165 @@ class DeliverySession:
                 message=message,
                 code=code,
             )
+            rendered_lease = await self._reserve_rendered(batch)
             self._terminal_scheduled = True
-            outcome = await self._writer.write(batch.data)
-            await self.acknowledge(batch, outcome or "accepted")
+            try:
+                outcome = await self._writer.write(batch.data)
+            except BaseException:
+                if rendered_lease is not None:
+                    await self._release_rendered(rendered_lease)
+                raise
+            await self._acknowledge_locked(
+                batch, outcome or "accepted", rendered_lease=rendered_lease
+            )
             return batch
 
     async def acknowledge(
-        self, batch: RenderedBatch, outcome: DeliveryOutcome
+        self,
+        batch: RenderedBatch,
+        outcome: DeliveryOutcome,
+        *,
+        rendered_lease: ResidentLease | None = None,
+    ) -> None:
+        async with self._operation_lock:
+            if self._closed:
+                return
+            await self._acknowledge_locked(
+                batch,
+                outcome,
+                rendered_lease=rendered_lease,
+            )
+
+    async def _acknowledge_locked(
+        self,
+        batch: RenderedBatch,
+        outcome: DeliveryOutcome,
+        *,
+        rendered_lease: ResidentLease | None = None,
     ) -> None:
         if outcome == "pending":
-            self._pending.append((batch, self._block_for(batch)))
+            self._pending.append((batch, self._block_for(batch), rendered_lease))
             return
         block = self._block_for(batch)
         if self._pending:
-            pending_batch, pending_block = self._pending.pop(0)
+            pending_batch, pending_block, pending_lease = self._pending[0]
             if pending_batch != batch:
                 raise DeliveryOrderError("sink acknowledgements must preserve batch order")
+            self._pending.pop(0)
             block = pending_block
-        if outcome == "uncertain":
-            self.frontier.mark_uncertain(batch, block)
-            return
-        if batch.kind == "block":
-            if block is None:
-                raise DeliveryOrderError("block acknowledgement lost its semantic block")
-            self.frontier.accept_block(block, batch)
-        elif batch.kind == "terminal":
-            self.frontier.accept_terminal(batch)
-        else:
-            self.frontier.accept_error(batch)
+            rendered_lease = pending_lease
+        try:
+            if outcome == "uncertain":
+                self.frontier.mark_uncertain(batch, block)
+                return
+            if batch.kind == "block":
+                if block is None:
+                    raise DeliveryOrderError("block acknowledgement lost its semantic block")
+                self.frontier.accept_block(block, batch)
+            elif batch.kind == "terminal":
+                self.frontier.accept_terminal(batch)
+            else:
+                self.frontier.accept_error(batch)
+        finally:
+            if rendered_lease is not None:
+                await self._release_rendered(rendered_lease)
 
     async def acknowledge_data(
         self, data: bytes, outcome: DeliveryOutcome
     ) -> None:
+        async with self._operation_lock:
+            if self._closed:
+                return
+            await self._acknowledge_data_locked(data, outcome)
+
+    async def _acknowledge_data_locked(
+        self, data: bytes, outcome: DeliveryOutcome
+    ) -> None:
         if not self._pending:
             raise DeliveryOrderError("sink acknowledgement has no pending batch")
-        batch, _ = self._pending[0]
+        batch, _, _ = self._pending[0]
         if batch.data != data:
             raise DeliveryOrderError("sink acknowledgement does not match pending bytes")
-        await self.acknowledge(batch, outcome)
+        await self._acknowledge_locked(batch, outcome)
 
     async def acknowledge_data_if_pending(
         self, data: bytes, outcome: DeliveryOutcome
     ) -> bool:
-        if not self._pending:
-            return False
-        await self.acknowledge_data(data, outcome)
-        return True
+        async with self._operation_lock:
+            if self._closed or not self._pending:
+                return False
+            await self._acknowledge_data_locked(data, outcome)
+            return True
+
+    async def aclose(self) -> None:
+        """Drop delivery-owned payload references and release their reservations."""
+        async with self._operation_lock:
+            cleanup_task = self._cleanup_task
+            if cleanup_task is None:
+                cleanup_leases = [
+                    *self._rendered_leases.values(),
+                    *self._semantic_leases.values(),
+                ]
+                self._closed = True
+                self._pending.clear()
+                self._scheduled_blocks.clear()
+                self._rendered_leases.clear()
+                self._semantic_leases.clear()
+                self._sequencer = ContinuousPrefixSequencer()
+                self.frontier.clear_payloads()
+                cleanup_task = asyncio.create_task(self._cleanup(cleanup_leases))
+                self._cleanup_task = cleanup_task
+        await asyncio.shield(cleanup_task)
+
+    async def _cleanup(self, leases: list[ResidentLease]) -> None:
+        account = self._resident_account
+        if account is None:
+            if leases:
+                raise RuntimeError("delivery leases require a resident account")
+            return
+        while leases:
+            lease = leases[0]
+            if not lease.released:
+                await account.release(lease)
+            leases.pop(0)
+
+    async def _reserve_semantic(self, blocks: tuple[CompletedBlock, ...]) -> None:
+        account = self._resident_account
+        if account is None or not blocks:
+            return
+        charged_blocks = tuple(
+            (block, amount)
+            for block in blocks
+            if (amount := _completed_block_payload_bytes(block)) > 0
+        )
+        charges = tuple(
+            (("semantic", block.identity), amount)
+            for block, amount in charged_blocks
+        )
+        leases = await account.reserve_many(charges)
+        self._semantic_leases.update(
+            (block.identity, lease)
+            for (block, _), lease in zip(charged_blocks, leases, strict=True)
+        )
+
+    async def _reserve_rendered(self, batch: RenderedBatch) -> ResidentLease | None:
+        account = self._resident_account
+        if account is None:
+            return None
+        lease = await account.reserve(
+            owner=("rendered", id(batch)),
+            amount=len(batch.data),
+        )
+        self._rendered_leases[id(lease)] = lease
+        return lease
+
+    async def _release_rendered(self, lease: ResidentLease) -> None:
+        account = self._resident_account
+        if account is None:
+            raise RuntimeError("rendered lease requires a resident account")
+        if not lease.released:
+            await account.release(lease)
+        self._rendered_leases.pop(id(lease), None)
 
     def _block_for(self, batch: RenderedBatch) -> CompletedBlock | None:
         if batch.kind != "block" or batch.block_index is None:
@@ -845,10 +997,15 @@ class DeliverySession:
         )
 
     def _raise_if_stopped(self) -> None:
+        self._raise_if_closed()
         if self._stopped_error is not None:
             raise self._stopped_error
         if self._terminal_fact is not None:
             raise DeliveryOrderError("terminal fact was already consumed")
+
+    def _raise_if_closed(self) -> None:
+        if self._closed:
+            raise DeliveryOrderError("delivery session is closed")
 
     def _select_mode(self, mode: Literal["manual", "typed"]) -> None:
         if self._mode == "unset":
@@ -859,6 +1016,17 @@ class DeliverySession:
 
 def _event(event_type: str, payload: Mapping[str, Any]) -> bytes:
     return format_sse_event(orjson.dumps(payload).decode("utf-8"), event=event_type)
+
+
+def _completed_block_payload_bytes(block: CompletedBlock) -> int:
+    content = block.content
+    if isinstance(content, TextBlock):
+        values = (content.text,)
+    elif isinstance(content, FunctionCallBlock):
+        values = (content.call_id, content.name, content.arguments)
+    else:
+        values = (content.summary, content.encrypted_content or "")
+    return sum(len(value.encode("utf-8")) for value in values)
 
 
 __all__ = [
