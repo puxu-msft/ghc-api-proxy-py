@@ -37,6 +37,7 @@ class HistoryConsumer:
             entry.response = response
             if usage is not None:
                 entry.usage = self._stream_usage_summary(
+                    context,
                     usage,
                     estimated=usage_estimated,
                 )
@@ -75,27 +76,7 @@ class HistoryConsumer:
         if response is None:
             return None
         exact = context.response_usage
-        facts: list[dict[str, Any]] = []
-        for fact in context.conversion_facts:
-            if isinstance(fact, RequestConversionFactRecord):
-                facts.append(
-                    {
-                        "provenance": fact.provenance,
-                        "attempt": fact.attempt,
-                        "field_path": fact.field_path,
-                        "disposition": fact.disposition,
-                        "reason": fact.reason,
-                    }
-                )
-            else:
-                facts.append(
-                    {
-                        "provenance": fact.provenance,
-                        "attempt": fact.attempt,
-                        "code": fact.code,
-                        "field_path": fact.field_path,
-                    }
-                )
+        facts = HistoryConsumer._conversion_facts(context)
         estimated = any(
             isinstance(fact, ResponseConversionFactRecord)
             and fact.code == "usage_estimated"
@@ -142,7 +123,33 @@ class HistoryConsumer:
         }
 
     @staticmethod
+    def _conversion_facts(context: RequestContext) -> list[dict[str, Any]]:
+        facts: list[dict[str, Any]] = []
+        for fact in context.conversion_facts:
+            if isinstance(fact, RequestConversionFactRecord):
+                facts.append(
+                    {
+                        "provenance": fact.provenance,
+                        "attempt": fact.attempt,
+                        "field_path": fact.field_path,
+                        "disposition": fact.disposition,
+                        "reason": fact.reason,
+                    }
+                )
+            else:
+                facts.append(
+                    {
+                        "provenance": fact.provenance,
+                        "attempt": fact.attempt,
+                        "code": fact.code,
+                        "field_path": fact.field_path,
+                    }
+                )
+        return facts
+
+    @staticmethod
     def _stream_usage_summary(
+        context: RequestContext,
         usage: Mapping[str, int],
         *,
         estimated: bool,
@@ -162,5 +169,5 @@ class HistoryConsumer:
             ),
             "estimated": estimated,
             "inconsistent": False,
-            "conversion_facts": [],
+            "conversion_facts": HistoryConsumer._conversion_facts(context),
         }

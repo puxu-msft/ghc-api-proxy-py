@@ -1107,3 +1107,80 @@ async def test_history_projects_only_final_success_attempt_conversion_facts(
         "response",
         "response",
     ]
+
+
+@pytest.mark.asyncio
+async def test_stream_history_projects_final_attempt_request_facts_without_mutating_payload(
+    tmp_path: Path,
+) -> None:
+    store = HistoryStore(tmp_path / "history.db")
+    await store.start()
+    target = RetryingResponsesTarget(_responses_body())
+    strategy = RetryOnceStrategy()
+    request = MessagesRequest.model_validate(
+        {
+            "model": "claude-test",
+            "max_tokens": 100,
+            "stream": True,
+            "system": [
+                {
+                    "type": "text",
+                    "text": "system",
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            "metadata": {"user_id": "user", "tenant": "not-forwarded"},
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+    )
+    original_payload = request.model_dump(mode="json", exclude_none=True)
+    history = HistoryConsumer(store)
+    client = _responses_client(
+        target,
+        history,
+        ReplaceResponseTextHook(),
+        retry_factory=RecordingSuccessStrategyFactory(strategy),
+    )
+
+    try:
+        result = await execute_anthropic_pipeline(
+            client,
+            request,
+            rate_limiter=AdaptiveRateLimiter(default_retry_interval=0),
+        )
+        result.context.transition(RequestState.COMPLETED)
+        await history.finalized(
+            result.context,
+            response={
+                "type": "message",
+                "content": [{"type": "text", "text": "streamed"}],
+                "delivery": {"complete": True, "uncertain": False},
+            },
+            usage={"input_tokens": 2, "output_tokens": 1},
+        )
+        entry = await store.get(result.context.id)
+        await result.response.aclose()
+    finally:
+        await store.close()
+
+    assert target.calls == 2
+    assert [attempt.status_code for attempt in result.context.attempts] == [429, 200]
+    assert entry is not None
+    assert entry.request_payload == original_payload
+    assert entry.usage is not None
+    assert entry.usage["conversion_facts"] == [
+        {
+            "provenance": "request",
+            "attempt": 1,
+            "field_path": "system[0].cache_control",
+            "disposition": "degrade",
+            "reason": "cache_control_not_supported",
+        },
+        {
+            "provenance": "request",
+            "attempt": 1,
+            "field_path": "metadata.tenant",
+            "disposition": "degrade",
+            "reason": "metadata_not_allowlisted",
+        },
+    ]

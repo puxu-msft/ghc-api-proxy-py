@@ -292,6 +292,15 @@ async def execute_anthropic_pipeline(
         attempt.status_code = response.status_code
         attempt.completed_at = time.time()
         if response.is_success:
+            context.conversion_facts = tuple(
+                RequestConversionFactRecord(
+                    attempt=attempt_number,
+                    field_path=fact.field_path,
+                    disposition=fact.disposition,
+                    reason=fact.reason,
+                )
+                for fact in attempt_result.converted_request_facts
+            )
             body = b""
             hook_context: HookContext | None = None
             if not request.stream:
@@ -358,15 +367,7 @@ async def execute_anthropic_pipeline(
                 context.normalized_response = normalized_response
                 context.final_response_payload = final_response_payload
                 converted = attempt_result.converted_response
-                context.conversion_facts = tuple(
-                    RequestConversionFactRecord(
-                        attempt=attempt_number,
-                        field_path=fact.field_path,
-                        disposition=fact.disposition,
-                        reason=fact.reason,
-                    )
-                    for fact in attempt_result.converted_request_facts
-                ) + tuple(
+                context.conversion_facts += tuple(
                     ResponseConversionFactRecord(
                         attempt=attempt_number,
                         code=fact.code,

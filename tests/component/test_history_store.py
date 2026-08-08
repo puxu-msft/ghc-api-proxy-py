@@ -9,7 +9,11 @@ from app.history.sessions import identify_session
 from app.history.sqlite.writer import HistoryWriter
 from app.history.store import HistoryStore
 from app.history.types import HistoryEntry, ModelRef
-from app.pipeline.context import RequestContext, RequestState
+from app.pipeline.context import (
+    RequestContext,
+    RequestConversionFactRecord,
+    RequestState,
+)
 
 
 def _entry(identifier: str, status: str, started_at: float) -> HistoryEntry:
@@ -148,6 +152,20 @@ async def test_writer_round_trips_response_and_usage_summary(tmp_path: Path) -> 
             RequestState.FAILED,
             {
                 "type": "message",
+                "content": [{"type": "text", "text": "committed prefix"}],
+                "delivery": {"complete": False, "uncertain": False},
+                "usage": {"input_tokens": 2, "output_tokens": 1},
+                "error": {
+                    "type": "upstream_error",
+                    "message": "stream conversion failed",
+                    "code": "unsupported_responses_event",
+                },
+            },
+        ),
+        (
+            RequestState.FAILED,
+            {
+                "type": "message",
                 "content": [],
                 "delivery": {
                     "complete": False,
@@ -178,6 +196,14 @@ async def test_history_consumer_persists_explicit_stream_projection(
         session_id="session",
     )
     context.resolved_model = "resolved"
+    context.conversion_facts = (
+        RequestConversionFactRecord(
+            attempt=1,
+            field_path="metadata.tenant",
+            disposition="degrade",
+            reason="metadata_not_allowlisted",
+        ),
+    )
     context.transition(RequestState.SANITIZING)
     context.transition(RequestState.EXECUTING)
     context.transition(RequestState.STREAMING)
@@ -217,7 +243,15 @@ async def test_history_consumer_persists_explicit_stream_projection(
         "total_tokens": 3,
         "estimated": state is RequestState.FAILED,
         "inconsistent": False,
-        "conversion_facts": [],
+        "conversion_facts": [
+            {
+                "provenance": "request",
+                "attempt": 1,
+                "field_path": "metadata.tenant",
+                "disposition": "degrade",
+                "reason": "metadata_not_allowlisted",
+            }
+        ],
     }
 
 
