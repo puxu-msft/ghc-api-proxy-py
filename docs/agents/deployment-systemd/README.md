@@ -60,6 +60,30 @@ GHC_TOKENIZATION__STATE_PATH=/var/lib/ghc-api-proxy/tokenization.json
 
 当前应用没有配置热重载合同，unit 也不提供 `ExecReload`。配置或代码变更只支持 restart；不要用 SIGHUP 或伪 reload 绕过上述 socket activation 与 readiness 流程。
 
+## Rootless user unit helper
+
+`contrib/systemd/install-user.py` 为当前用户渲染独立的 `.service`、`.socket` 与 `.slice`，不机械复制 system-level 模板。默认动作固定为 dry-run，只把三份 unit 打印到 stdout，不创建目录、不写 unit，也不连接 user manager：
+
+```bash
+python contrib/systemd/install-user.py --check
+```
+
+`--check` 始终先执行内置文本合同检查；能找到 `systemd-analyze` 时，再执行 `systemd-analyze --user verify`。工具缺失时会明确报告只完成文本检查，不会把它伪装成 systemd verify 通过。该检查不需要运行中的 user manager。
+
+只有显式传入 `--apply` 才会把精确三份文件原子写入 `$XDG_CONFIG_HOME/systemd/user/`；未设置 `XDG_CONFIG_HOME` 时目标为 `~/.config/systemd/user/`：
+
+```bash
+python contrib/systemd/install-user.py --apply --check
+```
+
+重复 apply 相同内容会报告 `UNCHANGED`，不重写文件。helper 在 dry-run 和 apply 下都绝不调用 `systemctl`，不会执行 `daemon-reload`、enable、start、restart 或 stop；这些 manager 状态变更必须由用户在审阅生成文件后另行显式执行。helper 也不会创建或读取 EnvironmentFile，不会采集、复制或打印其中可能存在的 token。
+
+默认使用 helper 所在仓库为 `WorkingDirectory=`，使用运行 helper 的 Python 解释器为 `ExecStart=`，显式传入与 system template 相同的 `--graceful-timeout 300`，并只引用 `$XDG_CONFIG_HOME/ghc-api-proxy/ghc-api-proxy.env` 作为可选 EnvironmentFile。可分别用 `--project-dir`、`--python` 与 `--environment-file` 传入其他绝对路径；路径中的空格、`%` 与非 ASCII 字符会按 systemd unit 语法转义。
+
+user service 不含 system service 的 `User=`／`Group=`，也不使用 `/opt`、`/etc` 或 `/var/lib`。systemd 255 的 `systemd.exec(5)` 明确支持 user service 的 `StateDirectory=`：user manager 会在其 `%S` 状态根，即 `$XDG_STATE_HOME` 语义下创建 `ghc-api-proxy`；未显式设置 XDG 状态根时通常回退到 `~/.local/state`。生成的 service 因此保留 `StateDirectory=ghc-api-proxy` 与 `StateDirectoryMode=0700`，并把 History 和 tokenization 路径分别设置为 `%S/ghc-api-proxy/history.db` 与 `%S/ghc-api-proxy/tokenization.json`。helper 本身不创建该状态目录；它只会在 user manager 真正启动 service 时由 systemd 创建。
+
+生成的 socket 仍监听 `127.0.0.1:4141`，并保留 `Accept=no` 与 fd 3 合同；其 `[Install]` 目标为 user manager 的 `sockets.target`。service 故意没有 `[Install]`，避免把“复制 unit”误解为“启用或启动 service”。资源限制仍由独立 user slice 声明，但 user manager 只能在自身被授予的 cgroup 和资源上限内施加这些限制；静态 verify 不证明 effective limits 已由内核采用。
+
 ## 关闭与故障恢复语义
 
 - `KillSignal=SIGTERM` 触发 Uvicorn 的 graceful shutdown 和 FastAPI lifespan 清理。当前清理会拒绝待审批、刷新 tokenization 状态、关闭 History、关闭 upstream clients，并取消后台任务。
@@ -70,4 +94,4 @@ GHC_TOKENIZATION__STATE_PATH=/var/lib/ghc-api-proxy/tokenization.json
 
 ## 无需 root 的仓库验证
 
-`tests/smoke/test_systemd_units.py` 解析模板并核对 socket fd 接线、状态目录、最小权限、关闭合同与 cgroup 关键字段；它从 `ExecStart` 反解 application timeout，并与 Python 默认常量、`TimeoutStopSec` 和 `30s` manager 余量机械对账。它还以 unit 声明的 mode／umask 运行真实 History 与 tokenization writer，核对状态目录、数据库、WAL／SHM、原子写临时文件和最终文件的实际 mode。运行态 smoke 由父进程创建真实 TCP listener 和预连接 backlog，在无可写 HOME 的环境中把 listener 交给应用 fd 3，并连接受控 generic upstream，验证 readiness 200、真实 Anthropic 请求、EnvironmentFile 等价路径覆盖、SIGTERM 清理，以及 History 与 tokenization 状态均落到覆盖目录。独立短 timeout probe 使用 `--graceful-timeout 1` 阻塞一个真实在途请求，发送 SIGTERM，并断言 Uvicorn timeout 分支、lifespan cleanup 和进程退出均发生。`tests/unit/test_cli.py` 核对 `--fd` 与 graceful timeout 被传给 Uvicorn，并拒绝 fd 0。测试不安装 unit、不连接 systemd，也不需要 root。
+`tests/smoke/test_systemd_units.py` 解析 system 模板并核对 socket fd 接线、状态目录、最小权限、关闭合同与 cgroup 关键字段；它从 `ExecStart` 反解 application timeout，并与 Python 默认常量、`TimeoutStopSec` 和 `30s` manager 余量机械对账。它还以 unit 声明的 mode／umask 运行真实 History 与 tokenization writer，核对状态目录、数据库、WAL／SHM、原子写临时文件和最终文件的实际 mode。运行态 smoke 由父进程创建真实 TCP listener 和预连接 backlog，在无可写 HOME 的环境中把 listener 交给应用 fd 3，并连接受控 generic upstream，验证 readiness 200、真实 Anthropic 请求、EnvironmentFile 等价路径覆盖、SIGTERM 清理，以及 History 与 tokenization 状态均落到覆盖目录。独立短 timeout probe 使用 `--graceful-timeout 1` 阻塞一个真实在途请求，发送 SIGTERM，并断言 Uvicorn timeout 分支、lifespan cleanup 和进程退出均发生。`tests/smoke/test_systemd_user_install.py` 使用临时 HOME／XDG 根验证 rootless helper 的 dry-run 零写入、apply 精确三文件、幂等、路径转义、真实 `systemd-analyze --user verify`、与 system template 相同的 graceful／manager deadlines，以及零 `systemctl` 调用。`tests/unit/test_cli.py` 核对 `--fd` 与 graceful timeout 被传给 Uvicorn，并拒绝 fd 0。测试不安装真实 unit、不连接 systemd manager，也不需要 root。
