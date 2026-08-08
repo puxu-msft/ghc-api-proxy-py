@@ -21,6 +21,16 @@ from app.upstream.base import (
 from app.upstream.client import SDKClients
 
 
+def build_copilot_identity_headers(settings: AppSettings) -> dict[str, str]:
+    versions = settings.headers
+    return {
+        "editor-version": f"vscode/{versions.vscode_version}",
+        "editor-plugin-version": f"copilot-chat/{versions.copilot_version}",
+        "user-agent": f"GitHubCopilotChat/{versions.copilot_version}",
+        "x-vscode-user-agent-library-version": "electron-fetch",
+    }
+
+
 def build_copilot_headers(
     token: str,
     settings: AppSettings,
@@ -34,19 +44,16 @@ def build_copilot_headers(
     resolved_request_id = request_id or str(uuid4())
     versions = settings.headers
     headers = {
+        **build_copilot_identity_headers(settings),
         "Authorization": f"Bearer {token}",
         "content-type": "application/json",
         "copilot-integration-id": "vscode-chat",
-        "editor-version": f"vscode/{versions.vscode_version}",
-        "editor-plugin-version": f"copilot-chat/{versions.copilot_version}",
-        "user-agent": f"GitHubCopilotChat/{versions.copilot_version}",
         "openai-intent": intent,
         "x-github-api-version": versions.api_version,
         "x-request-id": resolved_request_id,
         "X-Interaction-Id": interaction_id,
         "X-Interaction-Type": intent,
         "X-Agent-Task-Id": resolved_request_id,
-        "x-vscode-user-agent-library-version": "electron-fetch",
     }
     if vision:
         headers["copilot-vision-request"] = "true"

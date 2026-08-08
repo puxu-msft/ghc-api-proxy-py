@@ -32,7 +32,11 @@ from app.upstream.client import (
     create_http_client,
     create_sdk_clients,
 )
-from app.upstream.copilot import CopilotUpstream, build_copilot_headers
+from app.upstream.copilot import (
+    CopilotUpstream,
+    build_copilot_headers,
+    build_copilot_identity_headers,
+)
 from app.upstream.generic import GenericUpstream
 from app.upstream.models_api import ModelCatalog
 from app.upstream.urls import resolve_copilot_base_url
@@ -161,7 +165,11 @@ async def initialize_upstream_services(
     )
     github_info = await github_tokens.get_token()
     runtime.github_token_ready = True
-    copilot_tokens = CopilotTokenManager(github_tokens, client)
+    copilot_tokens = CopilotTokenManager(
+        github_tokens,
+        client,
+        identity_headers=build_copilot_identity_headers(settings),
+    )
     await copilot_tokens.ensure_valid_token()
     runtime.copilot_token_ready = True
 

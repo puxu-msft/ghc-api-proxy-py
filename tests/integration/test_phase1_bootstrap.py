@@ -35,7 +35,15 @@ async def test_copilot_bootstrap_initializes_typed_runtime_services() -> None:
             )
         raise AssertionError(f"unexpected request: {request.method} {request.url}")
 
-    settings = AppSettings.model_validate({"auth": {"github_token": "ghu_cli"}})
+    settings = AppSettings.model_validate(
+        {
+            "auth": {"github_token": "ghu_cli"},
+            "headers": {
+                "vscode_version": "1.2.3",
+                "copilot_version": "4.5.6",
+            },
+        }
+    )
     runtime = RuntimeState(settings=settings)
     http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     try:
@@ -58,6 +66,11 @@ async def test_copilot_bootstrap_initializes_typed_runtime_services() -> None:
         "/copilot_internal/user",
         "/models",
     ]
+    token_headers = requests[0].headers
+    assert token_headers["editor-version"] == "vscode/1.2.3"
+    assert token_headers["editor-plugin-version"] == "copilot-chat/4.5.6"
+    assert token_headers["user-agent"] == "GitHubCopilotChat/4.5.6"
+    assert token_headers["x-vscode-user-agent-library-version"] == "electron-fetch"
 
 
 @pytest.mark.asyncio

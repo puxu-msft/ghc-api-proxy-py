@@ -56,11 +56,19 @@ async def test_copilot_token_exchange_preserves_raw_response() -> None:
         )
 
     http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    identity_headers = {
+        "editor-version": "vscode/1.2.3",
+        "editor-plugin-version": "copilot-chat/4.5.6",
+        "user-agent": "GitHubCopilotChat/4.5.6",
+        "x-vscode-user-agent-library-version": "electron-fetch",
+    }
     manager = CopilotTokenManager(
         GitHubTokenManager([StaticGitHubProvider()]),
         http_client,
         clock=lambda: 1000,
+        identity_headers=identity_headers,
     )
+    identity_headers["editor-version"] = "vscode/changed"
     try:
         info = await manager.refresh(force=True)
     finally:
@@ -69,8 +77,43 @@ async def test_copilot_token_exchange_preserves_raw_response() -> None:
     assert requests[0].method == "GET"
     assert requests[0].url == "https://api.github.com/copilot_internal/v2/token"
     assert requests[0].headers["authorization"] == "token ghu_github"
+    assert requests[0].headers["editor-version"] == "vscode/1.2.3"
+    assert requests[0].headers["editor-plugin-version"] == "copilot-chat/4.5.6"
+    assert requests[0].headers["user-agent"] == "GitHubCopilotChat/4.5.6"
+    assert requests[0].headers["x-vscode-user-agent-library-version"] == "electron-fetch"
     assert info.token == "tid=copilot"
     assert info.raw["endpoints"] == {"api": "https://example.test"}
+
+
+@pytest.mark.asyncio
+async def test_dynamic_token_headers_override_case_variant_identity_headers() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={"token": "copilot", "expires_at": 5000, "refresh_in": 1500},
+        )
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    manager = CopilotTokenManager(
+        GitHubTokenManager([StaticGitHubProvider()]),
+        http_client,
+        clock=lambda: 1000,
+        identity_headers={
+            "authorization": "identity-static",
+            "X-GITHUB-API-VERSION": "old",
+            "editor-version": "vscode/1.2.3",
+        },
+    )
+    try:
+        await manager.refresh(force=True)
+    finally:
+        await http_client.aclose()
+
+    assert requests[0].headers.get_list("authorization") == ["token ghu_github"]
+    assert requests[0].headers.get_list("x-github-api-version") == ["2025-04-01"]
 
 
 @pytest.mark.asyncio
@@ -169,11 +212,11 @@ async def test_exchange_retries_transient_server_error() -> None:
 @pytest.mark.asyncio
 async def test_401_refreshes_github_token_before_retry() -> None:
     provider = RefreshableGitHubProvider()
-    seen_authorization: list[str] = []
+    seen_headers: list[httpx.Headers] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        seen_authorization.append(request.headers["authorization"])
-        if len(seen_authorization) == 1:
+        seen_headers.append(request.headers)
+        if len(seen_headers) == 1:
             return httpx.Response(401, json={"error": "expired"})
         return httpx.Response(
             200,
@@ -185,6 +228,15 @@ async def test_401_refreshes_github_token_before_retry() -> None:
         GitHubTokenManager([provider]),
         http_client,
         clock=lambda: 1000,
+        identity_headers={
+            "editor-version": "vscode/1.2.3",
+            "editor-plugin-version": "copilot-chat/4.5.6",
+            "user-agent": "GitHubCopilotChat/4.5.6",
+            "x-vscode-user-agent-library-version": "electron-fetch",
+            "authorization": "stale",
+            "accept": "stale",
+            "x-github-api-version": "stale",
+        },
     )
     try:
         assert await manager.get_token() == "copilot"
@@ -192,7 +244,18 @@ async def test_401_refreshes_github_token_before_retry() -> None:
         await http_client.aclose()
 
     assert provider.refresh_calls == 1
-    assert seen_authorization == ["token old", "token new"]
+    assert [headers["authorization"] for headers in seen_headers] == [
+        "token old",
+        "token new",
+    ]
+    for headers in seen_headers:
+        assert headers.get_list("authorization") == [headers["authorization"]]
+        assert headers.get_list("accept") == ["application/json"]
+        assert headers.get_list("x-github-api-version") == ["2025-04-01"]
+        assert headers["editor-version"] == "vscode/1.2.3"
+        assert headers["editor-plugin-version"] == "copilot-chat/4.5.6"
+        assert headers["user-agent"] == "GitHubCopilotChat/4.5.6"
+        assert headers["x-vscode-user-agent-library-version"] == "electron-fetch"
 
 
 def test_next_refresh_delay_uses_server_hint_with_safety_margin() -> None:

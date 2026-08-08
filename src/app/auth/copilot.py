@@ -1,6 +1,7 @@
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
 import anyio
@@ -31,6 +32,7 @@ class CopilotTokenManager:
         validity_margin: float = 60.0,
         minimum_refresh_interval: float = 60.0,
         max_exchange_attempts: int = 3,
+        identity_headers: Mapping[str, str] | None = None,
     ) -> None:
         self._github_tokens = github_tokens
         self._http = http_client
@@ -39,6 +41,7 @@ class CopilotTokenManager:
         self._validity_margin = validity_margin
         self._minimum_refresh_interval = minimum_refresh_interval
         self._max_exchange_attempts = max_exchange_attempts
+        self._identity_headers = MappingProxyType(dict(identity_headers or {}))
         self._current: CopilotTokenInfo | None = None
         self._lock = anyio.Lock()
 
@@ -98,13 +101,17 @@ class CopilotTokenManager:
         for attempt in range(self._max_exchange_attempts):
             github = await self._github_tokens.get_token()
             try:
-                response = await self._http.get(
-                    TOKEN_URL,
-                    headers={
+                headers = httpx.Headers(self._identity_headers)
+                headers.update(
+                    {
                         "Accept": "application/json",
                         "Authorization": f"token {github.token}",
                         "X-GitHub-Api-Version": COPILOT_INTERNAL_API_VERSION,
-                    },
+                    }
+                )
+                response = await self._http.get(
+                    TOKEN_URL,
+                    headers=headers,
                 )
                 response.raise_for_status()
                 raw: dict[str, Any] = response.json()
