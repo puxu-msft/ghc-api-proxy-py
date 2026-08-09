@@ -38,15 +38,22 @@ PoC正确样本绿、上述反样本红。若resume不可行，停止后续实�
 
 ## 阶段2：多fd production入口
 
+**实现状态**：`IMPLEMENTED_FOR_REVIEW`。已新增独立`start-rolling`入口、production 4144双栈profile、`LISTEN_*`collector接线、rolling runtime编排与filesystem／abstract `sd_notify`。49项focused tests、Ruff与Pyright通过；尚未安装unit或运行真实systemd manager。
+
+**后继minor**：阶段2正式停止入口仅为TERM／INT；若调用`RollingRuntime.run()`的外层task被直接cancel，当前不承诺完整cleanup。阶段3建立完整generation lifecycle owner时补cancellation回归，不把该非systemd入口冒充当前已支持。
+
 ### 文件
 
 - `src/app/socket_activation.py`
 - `src/app/server_adapter.py`
 - `src/app/systemd_notify.py`
+- `src/app/rolling_runtime.py`
 - `src/app/cli.py`
 - `tests/unit/test_cli.py`
 - `tests/unit/test_socket_activation.py`
-- `tests/integration/test_multi_fd_server.py`
+- `tests/unit/test_systemd_notify.py`
+- `tests/unit/test_rolling_runtime.py`
+- `tests/integration/test_rolling_runtime_integration.py`
 
 ### 实现
 
@@ -235,6 +242,6 @@ Unit parser与`systemd-analyze verify`通过；fake systemctl／control UDS枚�
 
 ## 当前下一动作
 
-1. 实施阶段1 PoC：socket activation collector、双栈dormant registration、统一arm及stop／resume accept。
-2. PoC正确样本和目标反样本通过后形成独立checkpoint并评审。
-3. PoC不通过则停止后续实现，回到Spec重新裁决，不以SO_REUSEPORT或固定槽位绕过。
+1. 独立评审阶段2多fd production入口与`sd_notify`接线。
+2. 关闭blocker／major后形成阶段2 squash checkpoint并回并main。
+3. 从新main开始阶段3 generation lifecycle、control UDS、USR1／USR2与operation drain。

@@ -11,6 +11,7 @@ from app.auth.service import authenticate_device, clear_stored_token
 from app.config.loader import load_settings
 from app.config.paths import config_file_path
 from app.config.settings import AppSettings
+from app.rolling_runtime import run_systemd_generation
 from app.server import create_app
 
 
@@ -129,6 +130,19 @@ def start(
             log_config=None,
             timeout_graceful_shutdown=settings.shutdown.graceful_timeout,
         )
+
+
+@app.command("start-rolling")
+def start_rolling(
+    config: Annotated[
+        Path | None,
+        typer.Option("--config", exists=False, file_okay=True, dir_okay=False),
+    ] = None,
+) -> None:
+    """Start one systemd-managed rolling generation on inherited dual-stack sockets."""
+    settings = load_settings(config_path=config, cli_overrides={})
+    application = create_app(settings)
+    run(run_systemd_generation, application)
 
 
 def _authenticate() -> None:

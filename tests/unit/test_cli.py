@@ -15,6 +15,7 @@ def test_cli_smoke() -> None:
     assert result.exit_code == 0
     for command in (
         "start",
+        "start-rolling",
         "auth",
         "login",
         "logout",
@@ -47,6 +48,16 @@ def test_start_subcommand_exposes_bootstrap_options() -> None:
         "--generate-config",
     ):
         assert option in result.stdout
+
+
+def test_start_rolling_exposes_only_config_option() -> None:
+    result = runner.invoke(app, ["start-rolling", "--help"])
+
+    assert result.exit_code == 0
+    assert "--config" in result.stdout
+    assert "--host" not in result.stdout
+    assert "--port" not in result.stdout
+    assert "--fd" not in result.stdout
 
 
 def test_auth_and_login_are_aliases() -> None:
@@ -136,6 +147,24 @@ def test_start_passes_inherited_socket_fd_to_uvicorn(monkeypatch: pytest.MonkeyP
         log_config=None,
         timeout_graceful_shutdown=300,
     )
+
+
+def test_start_rolling_uses_systemd_generation_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generation_runner = AsyncMock()
+    uvicorn_run = Mock()
+    monkeypatch.setattr("app.cli.run_systemd_generation", generation_runner)
+    monkeypatch.setattr("app.cli.uvicorn.run", uvicorn_run)
+
+    result = runner.invoke(app, ["start-rolling"])
+
+    assert result.exit_code == 0
+    generation_runner.assert_awaited_once()
+    assert generation_runner.await_args is not None
+    application = generation_runner.await_args.args[0]
+    assert application.state.runtime.settings.port == 4141
+    uvicorn_run.assert_not_called()
 
 
 def test_start_rejects_stdin_as_inherited_socket_fd(
