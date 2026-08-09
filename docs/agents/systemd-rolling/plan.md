@@ -69,6 +69,10 @@ PoC正确样本绿、上述反样本红。若resume不可行，停止后续实�
 
 ## 阶段3：Generation lifecycle与drain
 
+**基础子切片状态**：`IMPLEMENTED_FOR_REVIEW_R4`。已实现runtime级单一transition owner、rolling-only generation phase、FastAPI绝对外层operation registry、原子admission permit、health gating、ApprovalGate共享admission事实源，以及History／Approval observer双topic closing/reopen gate、late-registration 1012与完整fanout。Operation归零只表示业务调用结束，不自动进入`DRAINED_STANDBY`；History／tokenization durability barrier仍由后继显式`mark_drained()`承接。38项相关测试、Ruff与Pyright通过。
+
+**后继control子切片**：实现generation control UDS、USR2 quiesce／USR1 resume、首次TERM drain、第二TERM／INT立即退出，并把control状态与本基础状态机接线。
+
 ### 文件
 
 - `src/app/generation.py`
@@ -242,6 +246,6 @@ Unit parser与`systemd-analyze verify`通过；fake systemctl／control UDS枚�
 
 ## 当前下一动作
 
-1. 独立评审阶段2多fd production入口与`sd_notify`接线。
-2. 关闭blocker／major后形成阶段2 squash checkpoint并回并main。
-3. 从新main开始阶段3 generation lifecycle、control UDS、USR1／USR2与operation drain。
+1. 将阶段3 lifecycle基础`1cbf418…`作为独立squash checkpoint回并main并归档reviewed source。
+2. 从新main开始阶段3 control子切片：generation UDS、USR2 quiesce／USR1 resume、首次TERM drain与第二TERM／INT立即退出。
+3. Control子切片收敛后再进入阶段5动态generation units与controller，不把真实manager／cgroup证据提前外推。

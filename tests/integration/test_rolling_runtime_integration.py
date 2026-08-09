@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from fastapi import FastAPI
 
+from app.generation import GenerationLifecycle
 from app.rolling_runtime import RollingRuntime, RollingRuntimeError
 from app.socket_activation import ActivatedSocketSet, ExpectedListener
 from app.systemd_notify import notify_ready, notify_stopping
@@ -15,10 +16,13 @@ from app.systemd_notify import notify_ready, notify_stopping
 
 @dataclass
 class _ReadyState:
-    is_ready: bool
+    dependencies_ready: bool
+    generation_lifecycle: GenerationLifecycle
+    approval_gate: None = None
+    websocket_manager: None = None
 
     def readiness_checks(self) -> dict[str, bool]:
-        return {"ready": self.is_ready}
+        return {"ready": self.dependencies_ready}
 
 
 def _listener(family: socket.AddressFamily) -> socket.socket:
@@ -54,7 +58,7 @@ def _activated(ipv4: socket.socket, ipv6: socket.socket) -> ActivatedSocketSet:
 
 def _app(*, ready: bool) -> FastAPI:
     app = FastAPI()
-    app.state.runtime = _ReadyState(ready)
+    app.state.runtime = _ReadyState(ready, GenerationLifecycle())
 
     async def liveness() -> dict[str, str]:
         return {"status": "ok"}

@@ -11,6 +11,7 @@ from app.auth.providers import noninteractive_token_available
 from app.config.paths import user_data_path
 from app.config.settings import AppSettings
 from app.delivery.reservation import ResidentByteBudget
+from app.generation import GenerationLifecycle
 from app.history.consumer import HistoryConsumer
 from app.history.store import HistoryStore
 from app.history.ws import WebSocketManager
@@ -159,7 +160,11 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
             runtime.resident_byte_budget = None
 
 
-def create_app(settings: AppSettings | None = None) -> FastAPI:
+def create_app(
+    settings: AppSettings | None = None,
+    *,
+    generation_lifecycle: GenerationLifecycle | None = None,
+) -> FastAPI:
     resolved_settings = settings or AppSettings()
     app = FastAPI(
         title="ghc-api-proxy",
@@ -167,6 +172,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         lifespan=_lifespan,
     )
     app.state.runtime = RuntimeState(settings=resolved_settings)
+    app.state.runtime.generation_lifecycle = generation_lifecycle
     app.add_exception_handler(ApprovalRejectedError, _approval_rejected_handler)
     setup_metrics()
     setup_tracing(app, enabled=resolved_settings.observability.tracing_enabled)

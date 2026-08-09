@@ -88,7 +88,8 @@ async def export_all(store: HistoryStoreDependency) -> Response:
 
 @router.websocket("/history/ws")
 async def history_websocket(websocket: WebSocket, store: HistoryStoreDependency) -> None:
-    await store.websockets.connect(websocket)
+    if not await store.websockets.connect(websocket):
+        return
     try:
         while True:
             message = await websocket.receive_json()

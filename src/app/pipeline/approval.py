@@ -1,4 +1,5 @@
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 from uuid import uuid4
@@ -54,6 +55,9 @@ class ApprovalGate:
         self._websockets = websockets
         self._pending: dict[str, PendingApproval] = {}
         self._lock = anyio.Lock()
+        self._creation_open = True
+        self._quiesce_reason = "server_restarting"
+        self._creation_predicate: Callable[[], bool] | None = None
 
     async def wait_for_approval(self, context: RequestContext) -> ApprovalResult:
         if not self.enabled:
@@ -70,6 +74,11 @@ class ApprovalGate:
             event=anyio.Event(),
         )
         async with self._lock:
+            if not self._creation_open or (
+                self._creation_predicate is not None
+                and not self._creation_predicate()
+            ):
+                return ApprovalResult("rejected", self._quiesce_reason)
             if len(self._pending) >= self._max_pending:
                 return ApprovalResult("rejected", "Approval queue full")
             self._pending[approval.id] = approval
@@ -152,6 +161,34 @@ class ApprovalGate:
         for approval_id in ids:
             resolved += int(await self.reject(approval_id, reason))
         return resolved
+
+    async def quiesce(self, reason: str = "server_restarting") -> int:
+        resolved_ids: list[str] = []
+        async with self._lock:
+            self._creation_open = False
+            self._quiesce_reason = reason
+            for approval_id, approval in self._pending.items():
+                if approval.result is None:
+                    approval.result = ApprovalResult("rejected", reason)
+                    approval.event.set()
+                    resolved_ids.append(approval_id)
+        if self._websockets:
+            for approval_id in resolved_ids:
+                await self._websockets.broadcast(
+                    {
+                        "type": "approval_resolved",
+                        "approval": {"id": approval_id, "status": "rejected"},
+                    },
+                    topic="approval",
+                )
+        return len(resolved_ids)
+
+    async def resume(self) -> None:
+        async with self._lock:
+            self._creation_open = True
+
+    def set_creation_predicate(self, predicate: Callable[[], bool] | None) -> None:
+        self._creation_predicate = predicate
 
 
 class ApprovalRejectedError(RuntimeError):

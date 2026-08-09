@@ -49,7 +49,8 @@ async def approval_websocket(
     websocket: WebSocket,
     manager: WebSocketManagerDependency,
 ) -> None:
-    await manager.connect(websocket, "approval")
+    if not await manager.connect(websocket, "approval"):
+        return
     try:
         while True:
             await websocket.receive_text()

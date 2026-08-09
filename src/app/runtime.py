@@ -8,6 +8,7 @@ from app.config.settings import AppSettings
 if TYPE_CHECKING:
     from app.anthropic.client import AnthropicClient
     from app.delivery.reservation import ResidentByteBudget
+    from app.generation import GenerationLifecycle
     from app.history.store import HistoryStore
     from app.history.ws import WebSocketManager
     from app.hooks.registry import HookRegistry
@@ -38,6 +39,7 @@ class RuntimeState:
     approval_gate: ApprovalGate | None = None
     websocket_manager: WebSocketManager | None = None
     resident_byte_budget: ResidentByteBudget | None = None
+    generation_lifecycle: GenerationLifecycle | None = None
 
     def readiness_checks(self) -> dict[str, bool]:
         return {
@@ -47,5 +49,10 @@ class RuntimeState:
         }
 
     @property
-    def is_ready(self) -> bool:
+    def dependencies_ready(self) -> bool:
         return all(self.readiness_checks().values())
+
+    @property
+    def is_ready(self) -> bool:
+        lifecycle = self.generation_lifecycle
+        return self.dependencies_ready and (lifecycle is None or lifecycle.accepting)

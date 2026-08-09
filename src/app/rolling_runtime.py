@@ -5,10 +5,13 @@ import signal
 import socket
 from collections.abc import Callable, MutableMapping, Sequence
 from contextlib import suppress
+from typing import cast
 
 from fastapi import FastAPI
 from uvicorn import Config
+from uvicorn._types import ASGI3Application
 
+from app.generation import GenerationAdmissionMiddleware, GenerationLifecycle
 from app.server_adapter import UvicornListenerAdapter
 from app.socket_activation import ActivatedSocketSet, ExpectedListener
 from app.systemd_notify import notify_ready, notify_stopping
@@ -38,13 +41,25 @@ class RollingRuntime:
         notify_stopping_fn: Callable[[], None] = notify_stopping,
     ) -> None:
         self._application = application
+        lifecycle = application.state.runtime.generation_lifecycle
+        if not isinstance(lifecycle, GenerationLifecycle):
+            raise RollingRuntimeError("rolling application requires generation lifecycle")
+        self._lifecycle = lifecycle
         self._adapter = UvicornListenerAdapter(
-            Config(application, log_config=None, timeout_graceful_shutdown=None),
+            Config(
+                GenerationAdmissionMiddleware(
+                    cast(ASGI3Application, application),
+                    lifecycle,
+                ),
+                log_config=None,
+                timeout_graceful_shutdown=None,
+            ),
             activated,
         )
         self._notify_ready = notify_ready_fn
         self._notify_stopping = notify_stopping_fn
         self._stop_event = asyncio.Event()
+        self._transition_lock = asyncio.Lock()
 
     @property
     def adapter(self) -> UvicornListenerAdapter:
@@ -52,11 +67,14 @@ class RollingRuntime:
 
     async def startup(self) -> None:
         await self._adapter.startup_lifespan()
+        approval_gate = self._application.state.runtime.approval_gate
+        if approval_gate is not None:
+            approval_gate.set_creation_predicate(lambda: self._lifecycle.accepting)
         self._raise_if_stopping()
         await self._adapter.register_dormant()
         self._raise_if_stopping()
         runtime = self._application.state.runtime
-        if not runtime.is_ready:
+        if not runtime.dependencies_ready:
             raise RollingRuntimeError(
                 f"runtime dependencies are not ready: {runtime.readiness_checks()}"
             )
@@ -65,6 +83,7 @@ class RollingRuntime:
         # TERM/INT delivered while arm() was completing is observed before READY.
         await asyncio.sleep(0)
         self._raise_if_stopping()
+        await self._lifecycle.mark_ready()
         self._notify_ready()
 
     async def run_until_stopped(self) -> None:
@@ -100,6 +119,44 @@ class RollingRuntime:
     async def shutdown(self) -> None:
         await self._cleanup(notify_stopping=True)
 
+    async def quiesce(self) -> None:
+        task = asyncio.create_task(self._quiesce())
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            raise
+
+    async def _quiesce(self) -> None:
+        runtime = self._application.state.runtime
+        async with self._transition_lock:
+            await self._lifecycle.quiesce(
+                runtime.approval_gate,
+                runtime.websocket_manager,
+            )
+            await self._adapter.stop_accepting()
+
+    async def resume(self) -> None:
+        task = asyncio.create_task(self._resume())
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            raise
+
+    async def _resume(self) -> None:
+        runtime = self._application.state.runtime
+        async with self._transition_lock:
+            await self._adapter.resume_accepting()
+            try:
+                await self._lifecycle.resume(
+                    runtime.approval_gate,
+                    runtime.websocket_manager,
+                )
+            except BaseException:
+                await self._adapter.stop_accepting()
+                raise
+
     def request_stop(self) -> None:
         self._stop_event.set()
 
@@ -125,19 +182,24 @@ class RollingRuntime:
 
     async def _cleanup(self, *, notify_stopping: bool) -> None:
         errors: list[BaseException] = []
-        if notify_stopping:
+        async with self._transition_lock:
             try:
-                self._notify_stopping()
+                await self._lifecycle.start_stopping()
             except BaseException as error:
                 errors.append(error)
-        try:
-            await self._adapter.shutdown_lifespan(drain_timeout=None)
-        except BaseException as error:
-            errors.append(error)
-        try:
-            await self._adapter.close_masters()
-        except BaseException as error:
-            errors.append(error)
+            if notify_stopping:
+                try:
+                    self._notify_stopping()
+                except BaseException as error:
+                    errors.append(error)
+            try:
+                await self._adapter.shutdown_lifespan(drain_timeout=None)
+            except BaseException as error:
+                errors.append(error)
+            try:
+                await self._adapter.close_masters()
+            except BaseException as error:
+                errors.append(error)
         if errors:
             raise BaseExceptionGroup("rolling cleanup failed", errors)
 

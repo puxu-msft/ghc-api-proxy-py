@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from fastapi import FastAPI
 
+from app.generation import GenerationLifecycle
 from app.rolling_runtime import (
     ROLLING_LISTENERS,
     ROLLING_PORT,
@@ -20,15 +21,18 @@ from app.socket_activation import ActivatedSocketSet, ExpectedListener
 
 @dataclass
 class _RuntimeState:
-    is_ready: bool
+    dependencies_ready: bool
+    generation_lifecycle: GenerationLifecycle
+    approval_gate: None = None
+    websocket_manager: None = None
 
     def readiness_checks(self) -> dict[str, bool]:
-        return {"ready": self.is_ready}
+        return {"ready": self.dependencies_ready}
 
 
 def _app(*, ready: bool) -> FastAPI:
     application = FastAPI()
-    application.state.runtime = _RuntimeState(ready)
+    application.state.runtime = _RuntimeState(ready, GenerationLifecycle())
     return application
 
 
@@ -320,3 +324,45 @@ async def test_run_generation_consumes_supplied_environment_object(
 
     assert environment == {"KEEP": "yes"}
     run.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_runtime_quiesce_resume_is_one_serial_transition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    entered_stop = __import__("asyncio").Event()
+    release_stop = __import__("asyncio").Event()
+    adapter = Mock()
+
+    async def stop_accepting() -> None:
+        events.append("stop-enter")
+        entered_stop.set()
+        await release_stop.wait()
+        events.append("stop-complete")
+
+    async def resume_accepting() -> None:
+        events.append("resume-adapter")
+
+    adapter.stop_accepting = AsyncMock(side_effect=stop_accepting)
+    adapter.resume_accepting = AsyncMock(side_effect=resume_accepting)
+    monkeypatch.setattr("app.rolling_runtime.UvicornListenerAdapter", _adapter_factory(adapter))
+    application = _app(ready=True)
+    lifecycle = application.state.runtime.generation_lifecycle
+    await lifecycle.mark_ready()
+    runtime = RollingRuntime(application, Mock(), notify_stopping_fn=Mock())
+
+    quiesce = __import__("asyncio").create_task(runtime.quiesce())
+    await entered_stop.wait()
+    resume = __import__("asyncio").create_task(runtime.resume())
+    quiesce.cancel()
+    await __import__("asyncio").sleep(0)
+    assert not resume.done()
+    release_stop.set()
+    with pytest.raises(__import__("asyncio").CancelledError):
+        await quiesce
+    await resume
+
+    assert events == ["stop-enter", "stop-complete", "resume-adapter"]
+    assert lifecycle.phase.value == "ready_accepting"
+    assert lifecycle.accepting is True
