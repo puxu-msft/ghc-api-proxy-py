@@ -121,6 +121,8 @@ Rollout helper可按规范generation ID明确区分任意数量generation；私�
 
 ## 阶段5：Rolling units与controller／helper
 
+**骨架状态**：`IMPLEMENTED_FOR_REVIEW_R8`。已实现4144双栈socket units、动态generation `Type=notify`模板、稳定launcher、controller service/target/slice、带初始化marker与allocation facts的单调ID frontier、带revision／初始化marker／newest-checkpoint选择／strict领域schema的canonical state、全链路deadline与strict framing/schema UDS client、窄systemctl adapter、空拓扑cold activation及`reserved → environment_ready → started → committed／failed／conflict`恢复、topology-level degraded conflict、failed初代后新ID bootstrap、replace dry-run planner。完整replace apply、snapshot／promotion／maintenance owner、committed generation crash自动替代和完整rollout checkpoint矩阵仍未实现并保持硬关闭；dry-run不burn ID、不发signal、不写state。75项相关测试含`systemd-analyze verify`，Ruff与Pyright通过。
+
 ### 文件
 
 - `contrib/systemd/rolling/ghc-api-proxy-v4.socket`
@@ -131,24 +133,22 @@ Rollout helper可按规范generation ID明确区分任意数量generation；私�
 - `contrib/systemd/rolling/ghc-api-proxy-rolling.slice`
 - `src/app/rolling_controller.py`
 - `src/app/rolling_state.py`
-- `contrib/systemd/rolling/rollout.py`
 - `tests/smoke/test_systemd_rolling_units.py`
-- `tests/smoke/test_systemd_rollout_helper.py`
 - `tests/unit/test_rolling_state.py`
 - `tests/integration/test_rolling_controller.py`
 
 ### 实现
 
 - 4144双栈、具名fds、每generation独立service cgroup、rolling slice按任意重叠generation总资源建模、`TimeoutStopSec=infinity`、`KillMode=control-group`。
-- Stable controller为常驻socket activation target，不转发数据。它持单实例锁，使用durable epoch状态，负责cold activation、持续unit／UDS reconcile、rollout、commit、rollback、观察和drainer回收。
-- ID frontier是独立于可回滚canonical state的多副本单调寄存器；恢复取有效副本与未compact allocation facts的最大高水位，无法证明时fail closed。Canonical state只持`committed_generation／release／snapshot／maintenance_owner`逻辑tuple、任意长非终态`generations`映射和未闭合checkpoint。两者写入均为同目录temp→flush→fsync(temp)→`os.replace`→fsync(parent)，带schema/version/checksum；损坏时fail closed。Durable state允许`O(L+I)`，已完成checkpoint与退出明细可compact，但frontier永久保留。
-- 阶段5 controller只开放dry-run、cold activation与reconcile；完整apply rollout保持feature-disabled。阶段6完成snapshot、promotion与History durability后才启用apply。正式调用顺序固定为durably burn新generation ID→取得bootstrap／live／canonical immutable tokenization snapshot→candidate start→UDS ready→private UDS canary→旧USR2→旧not-accepting→shared 4144 v4/v6 fresh provenance canary→old demote→candidate promote→publish candidate immutable snapshot→durable complete commit tuple。
+- Stable controller为常驻socket activation target，不转发数据。当前骨架持单实例锁，负责空拓扑cold activation、generation unit／UDS观察、failed初代后新ID bootstrap和replace dry-run规划；replace commit、rollback与drainer cleanup尚未实现。
+- ID frontier是独立于可回滚canonical state的多副本单调寄存器；恢复取有效副本与allocation facts的最大高水位，初始化后facts缺失／损坏即fail closed。当前canonical state字段为`revision`、`controller_status／conflict_error`、apply gate、`committed_generation／release`及generation records；primary/checkpoint均带checksum并选择最新完整有效revision。Snapshot、maintenance owner和完整intent矩阵尚未进入当前schema。
+- 阶段5 controller只开放dry-run、cold activation与reconcile；完整apply rollout保持feature-disabled。阶段6完成snapshot、promotion与History durability后才实现并启用正式调用顺序：durably burn新generation ID→取得bootstrap／live／canonical immutable tokenization snapshot→candidate start→UDS ready→private UDS canary→旧USR2→旧not-accepting→shared 4144 v4/v6 fresh provenance canary→old demote→candidate promote→publish candidate immutable snapshot→durable complete commit tuple。
 - Candidate失败不signal old；rollback先resume old，再quiesce／stop candidate。
-- Controller已active但唯一generation crash时持续reconcile并按canonical release创建新generation；两个socket units保持active。每个intent／completion和atomic replace前后都有controller crash注入测试，恢复按Spec checkpoint phase而非PID／唯一accepting启发式裁决。
+- 当前crash恢复只覆盖cold activation的`reserved／environment_ready／started`续跑与candidate identity conflict；唯一committed generation crash自动替代、完整intent／completion矩阵和atomic replace逐接缝注入仍是后续工作。
 
 ### 退出门
 
-Unit parser与`systemd-analyze verify`通过；fake systemctl／control UDS枚举candidate启动失败、UDS超时／版本错、private canary失败、old quiesce确认失败、shared fresh TCP归属失败、resume失败、candidate stop失败、canonical损坏与冲突；helper绝不stop socket、操作4141或无关unit。ID轨迹混合success／startup failure／pre-start crash，burn后损坏当前state、回退旧checkpoint、删除退出明细并重启controller，下一ID仍大于历史全部ID；按集合长度／存活最大ID／失败不耗ID／低checkpoint恢复的mutation均红。Canonical写入在replace前、replace后completion前、截断／损坏状态均有恢复测试。Promotion／rollback／dead recovery的每个外部子动作调用前和ack后注入crash，逐字段核对新单调epoch及完整commit tuple。Cleanup每个资源删除步骤前后注入crash，identity manifest只在cleanup completion与parent fsync后compact。真实manager门另证controller cold activation与active-controller下generation crash恢复。
+当前退出门：unit parser与`systemd-analyze verify`、launcher identity/release path、frontier corruption、state primary/checkpoint恢复、strict UDS deadline/schema、cold candidate正常／失败／三phase续跑、identity/MainPID冲突、stop conflict与dry-run零副作用。Private canary、old quiesce、shared provenance canary、promotion／rollback／dead recovery和cleanup checkpoint矩阵仍是future apply退出门，不能外推为当前通过。
 
 ## 阶段6：Overlap状态隔离
 
@@ -246,6 +246,6 @@ Unit parser与`systemd-analyze verify`通过；fake systemctl／control UDS枚�
 
 ## 当前下一动作
 
-1. 将阶段3 control候选`e8a0d8a…`作为独立squash checkpoint回并main并归档reviewed source。
-2. 从新main开始阶段5动态generation units与controller：4144双栈socket units、generation template、常驻controller及默认dry-run rollout helper。
-3. Units/controller收敛后进入状态隔离与多generation process harness；真实manager／cgroup证据仍留给固定VM门。
+1. 关闭阶段5 units/controller R6复评blocker／major，运行全仓门并作为独立squash checkpoint回并main、归档reviewed source。
+2. 从新main进入阶段6状态隔离：History多进程durability、tokenization immutable snapshot及maintenance owner promotion/demotion。
+3. 状态隔离收敛后实现replace apply／rollback与多generation process harness；真实manager／cgroup证据仍留给固定VM门。

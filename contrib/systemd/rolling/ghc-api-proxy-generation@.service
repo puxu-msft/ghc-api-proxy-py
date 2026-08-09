@@ -1,0 +1,27 @@
+[Unit]
+Description=ghc-api-proxy rolling generation %i
+Requires=ghc-api-proxy-v4.socket ghc-api-proxy-v6.socket
+After=network-online.target ghc-api-proxy-v4.socket ghc-api-proxy-v6.socket
+Wants=network-online.target
+PartOf=ghc-api-proxy-rolling.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=ghc-api-proxy
+Group=ghc-api-proxy
+UMask=0077
+WorkingDirectory=/opt/ghc-api-proxy
+Sockets=ghc-api-proxy-v4.socket
+Sockets=ghc-api-proxy-v6.socket
+RuntimeDirectory=ghc-api-proxy/generations/%i
+RuntimeDirectoryMode=0700
+StateDirectory=ghc-api-proxy/generations/%i
+StateDirectoryMode=0700
+EnvironmentFile=/run/ghc-api-proxy/generations/%i.env
+ExecStart=/opt/ghc-api-proxy/.venv/bin/python /opt/ghc-api-proxy/contrib/systemd/rolling/rolling-generation-launcher.py %i
+Restart=no
+KillSignal=SIGTERM
+KillMode=control-group
+TimeoutStopSec=infinity
+Slice=ghc-api-proxy-rolling.slice

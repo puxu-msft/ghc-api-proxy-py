@@ -1,3 +1,4 @@
+import os
 from enum import StrEnum
 from functools import partial
 from pathlib import Path
@@ -14,6 +15,7 @@ from app.config.paths import config_file_path
 from app.config.settings import AppSettings
 from app.generation import GenerationLifecycle
 from app.generation_identity import GenerationIdentityError, parse_generation_id
+from app.rolling_controller import RollingController, plan_to_json
 from app.rolling_runtime import run_systemd_generation
 from app.server import create_app
 
@@ -169,6 +171,57 @@ def start_rolling(
             generation_id=generation_id,
             release_id=release_id,
             control_path=control_socket,
+        )
+    )
+
+
+@app.command("rolling-controller")
+def rolling_controller(
+    state_root: Annotated[Path, typer.Option("--state-root")],
+    runtime_root: Annotated[Path, typer.Option("--runtime-root")],
+    releases_root: Annotated[
+        Path,
+        typer.Option("--releases-root"),
+    ] = Path("/opt/ghc-api-proxy/releases"),
+    config: Annotated[Path, typer.Option("--config")] = Path(
+        "/etc/ghc-api-proxy/config.yaml"
+    ),
+    bootstrap_release: Annotated[
+        str | None,
+        typer.Option("--bootstrap-release"),
+    ] = None,
+    plan_release: Annotated[
+        str | None,
+        typer.Option("--plan-release"),
+    ] = None,
+    once: Annotated[bool, typer.Option("--once")] = False,
+) -> None:
+    """Run the rolling controller; replacement rollout apply remains disabled."""
+    for name, path in (
+        ("--state-root", state_root),
+        ("--runtime-root", runtime_root),
+        ("--releases-root", releases_root),
+        ("--config", config),
+    ):
+        if not path.is_absolute():
+            raise typer.BadParameter("path must be absolute", param_hint=name)
+    controller = RollingController(
+        state_root=state_root,
+        runtime_root=runtime_root,
+        releases_root=releases_root,
+        config_path=config,
+    )
+    if plan_release is not None:
+        typer.echo(plan_to_json(controller.plan_rollout(plan_release)))
+        return
+    resolved_bootstrap = bootstrap_release or os.environ.get(
+        "GHC_ROLLING_BOOTSTRAP_RELEASE"
+    )
+    run(
+        partial(
+            controller.run_forever,
+            bootstrap_release=resolved_bootstrap,
+            once=once,
         )
     )
 

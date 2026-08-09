@@ -1,0 +1,7 @@
+[Unit]
+Description=Resource controls for ghc-api-proxy rolling generations
+
+[Slice]
+MemoryAccounting=true
+CPUAccounting=true
+TasksAccounting=true

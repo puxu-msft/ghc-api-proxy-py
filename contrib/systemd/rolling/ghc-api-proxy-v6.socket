@@ -1,0 +1,13 @@
+[Unit]
+Description=ghc-api-proxy rolling IPv6 listener
+
+[Socket]
+ListenStream=[::1]:4144
+Accept=no
+Backlog=1024
+NoDelay=true
+FileDescriptorName=http-v6
+Service=ghc-api-proxy-controller.service
+
+[Install]
+WantedBy=ghc-api-proxy-rolling.target

@@ -16,6 +16,7 @@ def test_cli_smoke() -> None:
     for command in (
         "start",
         "start-rolling",
+        "rolling-controller",
         "auth",
         "login",
         "logout",
@@ -222,6 +223,35 @@ def test_start_rolling_rejects_relative_control_path() -> None:
     )
     assert result.exit_code == 2
     assert "absolute" in result.output.lower()
+
+
+def test_rolling_controller_plan_is_dry_run_and_reports_blockers(tmp_path: Path) -> None:
+    releases = tmp_path / "releases"
+    (releases / "release-a").mkdir(parents=True)
+    config = tmp_path / "config.yaml"
+    config.write_text("", encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "rolling-controller",
+            "--state-root",
+            str(tmp_path / "state"),
+            "--runtime-root",
+            str(tmp_path / "run"),
+            "--releases-root",
+            str(releases),
+            "--config",
+            str(config),
+            "--plan-release",
+            "release-a",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert '"apply_enabled": false' in result.stdout
+    assert "missing_private_canary_command" in result.stdout
+    assert not (tmp_path / "state" / "frontier").exists()
 
 
 def test_start_rejects_stdin_as_inherited_socket_fd(
