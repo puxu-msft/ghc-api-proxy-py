@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import signal
 from collections.abc import Callable, MutableMapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi import FastAPI
 
+from app.config.settings import AppSettings
 from app.generation import GenerationLifecycle
 from app.rolling_runtime import (
     ROLLING_LISTENERS,
@@ -24,15 +25,22 @@ class _RuntimeState:
     dependencies_ready: bool
     generation_lifecycle: GenerationLifecycle
     approval_gate: None = None
-    websocket_manager: None = None
+    websocket_manager: object | None = None
+    settings: AppSettings = field(default_factory=AppSettings)
 
     def readiness_checks(self) -> dict[str, bool]:
         return {"ready": self.dependencies_ready}
 
 
-def _app(*, ready: bool) -> FastAPI:
+def _app(*, ready: bool, drain_timeout: int = 0) -> FastAPI:
     application = FastAPI()
-    application.state.runtime = _RuntimeState(ready, GenerationLifecycle())
+    application.state.runtime = _RuntimeState(
+        ready,
+        GenerationLifecycle(),
+        settings=AppSettings.model_validate(
+            {"shutdown": {"drain_timeout": drain_timeout}}
+        ),
+    )
     return application
 
 
@@ -50,6 +58,7 @@ async def test_startup_arms_then_notifies(monkeypatch: pytest.MonkeyPatch) -> No
     adapter.startup_lifespan = AsyncMock(side_effect=lambda: events.append("lifespan"))
     adapter.register_dormant = AsyncMock(side_effect=lambda: events.append("dormant"))
     adapter.arm = AsyncMock(side_effect=lambda: events.append("arm"))
+    adapter.stop_accepting = AsyncMock()
     adapter.shutdown_lifespan = AsyncMock()
     adapter.close_masters = AsyncMock()
     monkeypatch.setattr("app.rolling_runtime.UvicornListenerAdapter", _adapter_factory(adapter))
@@ -79,6 +88,7 @@ async def test_unready_dependencies_never_arm_or_notify(monkeypatch: pytest.Monk
     adapter.startup_lifespan = AsyncMock()
     adapter.register_dormant = AsyncMock()
     adapter.arm = AsyncMock()
+    adapter.stop_accepting = AsyncMock()
     adapter.shutdown_lifespan = AsyncMock()
     adapter.close_masters = AsyncMock()
     monkeypatch.setattr("app.rolling_runtime.UvicornListenerAdapter", _adapter_factory(adapter))
@@ -100,6 +110,7 @@ async def test_notify_failure_cleans_up(monkeypatch: pytest.MonkeyPatch) -> None
     adapter.startup_lifespan = AsyncMock()
     adapter.register_dormant = AsyncMock()
     adapter.arm = AsyncMock()
+    adapter.stop_accepting = AsyncMock()
     adapter.shutdown_lifespan = AsyncMock()
     adapter.close_masters = AsyncMock()
     monkeypatch.setattr("app.rolling_runtime.UvicornListenerAdapter", _adapter_factory(adapter))
@@ -207,7 +218,7 @@ async def test_stopping_notify_failure_does_not_block_cleanup(
         notify_stopping_fn=stopping,
     )
 
-    with pytest.raises(BaseExceptionGroup, match="cleanup failed"):
+    with pytest.raises(BaseExceptionGroup, match="runtime failed"):
         await runtime.run()
 
     assert events == ["stopping-failed", "cleanup", "close"]
@@ -222,15 +233,20 @@ async def test_signal_handlers_are_installed_before_startup(
     adapter.startup_lifespan = AsyncMock(side_effect=lambda: events.append("lifespan"))
     adapter.register_dormant = AsyncMock()
     adapter.arm = AsyncMock()
+    adapter.stop_accepting = AsyncMock()
     adapter.shutdown_lifespan = AsyncMock()
     adapter.close_masters = AsyncMock()
     monkeypatch.setattr("app.rolling_runtime.UvicornListenerAdapter", _adapter_factory(adapter))
     loop = __import__("asyncio").get_running_loop()
     original_add = loop.add_signal_handler
 
-    def record_add(sig: signal.Signals, callback: Callable[[], None]) -> None:
+    def record_add(
+        sig: signal.Signals,
+        callback: Callable[..., None],
+        *args: object,
+    ) -> None:
         events.append(f"handler:{sig}")
-        original_add(sig, callback)
+        original_add(sig, callback, *args)
 
     monkeypatch.setattr(loop, "add_signal_handler", record_add)
     runtime: RollingRuntime
@@ -366,3 +382,267 @@ async def test_runtime_quiesce_resume_is_one_serial_transition(
     assert events == ["stop-enter", "stop-complete", "resume-adapter"]
     assert lifecycle.phase.value == "ready_accepting"
     assert lifecycle.accepting is True
+
+
+@pytest.mark.asyncio
+async def test_usr_commands_quiesce_and_resume_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = Mock()
+    adapter.stop_accepting = AsyncMock()
+    adapter.resume_accepting = AsyncMock()
+    monkeypatch.setattr("app.rolling_runtime.UvicornListenerAdapter", _adapter_factory(adapter))
+    application = _app(ready=True)
+    lifecycle = application.state.runtime.generation_lifecycle
+    await lifecycle.mark_ready()
+    runtime = RollingRuntime(application, Mock(), exit_fn=Mock())
+    commands = __import__("asyncio").create_task(runtime.run_until_stopped())
+
+    runtime.request_quiesce()
+    while adapter.stop_accepting.await_count == 0:
+        await __import__("asyncio").sleep(0)
+    assert lifecycle.phase.value == "quiescing"
+    adapter.stop_accepting.assert_awaited_once()
+
+    before_resume = await lifecycle.snapshot()
+    runtime.request_resume()
+    resumed = await lifecycle.wait_for_change(before_resume.revision, 1)
+    assert resumed.phase.value == "ready_accepting"
+    adapter.resume_accepting.assert_awaited_once()
+
+    runtime.request_stop()
+    await commands
+    assert lifecycle.phase.value == "quiescing"
+
+
+@pytest.mark.asyncio
+async def test_first_termination_waits_for_active_operation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = Mock()
+    adapter.stop_accepting = AsyncMock()
+    monkeypatch.setattr("app.rolling_runtime.UvicornListenerAdapter", _adapter_factory(adapter))
+    application = _app(ready=True)
+    lifecycle = application.state.runtime.generation_lifecycle
+    await lifecycle.mark_ready()
+    release = __import__("asyncio").Event()
+
+    async def operation() -> None:
+        async with lifecycle.try_admit() as admitted:
+            assert admitted
+            await release.wait()
+
+    active = __import__("asyncio").create_task(operation())
+    while lifecycle.active_operations == 0:
+        await __import__("asyncio").sleep(0)
+    runtime = RollingRuntime(application, Mock(), exit_fn=Mock())
+    commands = __import__("asyncio").create_task(runtime.run_until_stopped())
+    runtime.request_stop()
+    await __import__("asyncio").sleep(0)
+    assert not commands.done()
+    release.set()
+    await active
+    await commands
+
+
+@pytest.mark.asyncio
+async def test_positive_drain_timeout_cancels_active_operation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = Mock()
+    adapter.stop_accepting = AsyncMock()
+    monkeypatch.setattr("app.rolling_runtime.UvicornListenerAdapter", _adapter_factory(adapter))
+    application = _app(ready=True, drain_timeout=1)
+    lifecycle = application.state.runtime.generation_lifecycle
+    await lifecycle.mark_ready()
+
+    async def operation() -> None:
+        async with lifecycle.try_admit() as admitted:
+            assert admitted
+            await __import__("asyncio").Event().wait()
+
+    active = __import__("asyncio").create_task(operation())
+    while lifecycle.active_operations == 0:
+        await __import__("asyncio").sleep(0)
+    runtime = RollingRuntime(application, Mock(), exit_fn=Mock())
+    commands = __import__("asyncio").create_task(runtime.run_until_stopped())
+    runtime.request_stop()
+    await commands
+    assert active.cancelled()
+    assert lifecycle.active_operations == 0
+
+
+def test_second_termination_signal_exits_immediately_with_second_signal_code() -> None:
+    exit_fn = Mock()
+    runtime = RollingRuntime(_app(ready=True), Mock(), exit_fn=exit_fn)
+
+    runtime.request_termination(signal.SIGTERM)
+    runtime.request_termination(signal.SIGINT)
+
+    exit_fn.assert_called_once_with(130)
+
+
+@pytest.mark.asyncio
+async def test_run_aggregates_primary_cleanup_and_control_close_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = Mock()
+    adapter.startup_lifespan = AsyncMock(side_effect=RuntimeError("primary failure"))
+    adapter.shutdown_lifespan = AsyncMock(side_effect=RuntimeError("cleanup failure"))
+    adapter.close_masters = AsyncMock()
+    monkeypatch.setattr("app.rolling_runtime.UvicornListenerAdapter", _adapter_factory(adapter))
+    control = Mock()
+    control.start = AsyncMock()
+    control.close = AsyncMock(side_effect=RuntimeError("control close failure"))
+    runtime = RollingRuntime(
+        _app(ready=True),
+        Mock(),
+        control_server=control,
+        notify_ready_fn=Mock(),
+    )
+
+    with pytest.raises(BaseExceptionGroup) as captured:
+        await runtime.run()
+
+    rendered = repr(captured.value)
+    for message in (
+        "primary failure",
+        "cleanup failure",
+        "control close failure",
+    ):
+        assert message in rendered
+
+
+@pytest.mark.asyncio
+async def test_quiesce_failure_still_stops_accepting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = Mock()
+    adapter.stop_accepting = AsyncMock()
+    monkeypatch.setattr("app.rolling_runtime.UvicornListenerAdapter", _adapter_factory(adapter))
+    application = _app(ready=True)
+    lifecycle = application.state.runtime.generation_lifecycle
+    await lifecycle.mark_ready()
+
+    class FailingObservers:
+        async def close_topics(
+            self,
+            _topics: set[str],
+            *,
+            code: int,
+            reason: str,
+        ) -> int:
+            assert code == 1012
+            assert reason == "server_restarting"
+            raise RuntimeError("observer close failed")
+
+        def reopen_topics(self, _topics: set[str]) -> None:
+            return None
+
+    application.state.runtime.websocket_manager = FailingObservers()
+    runtime = RollingRuntime(application, Mock(), exit_fn=Mock())
+
+    with pytest.raises(BaseExceptionGroup, match="quiesce failed"):
+        await runtime.quiesce()
+
+    adapter.stop_accepting.assert_awaited_once()
+    assert lifecycle.phase.value == "failed"
+    assert lifecycle.accepting is False
+
+
+@pytest.mark.asyncio
+async def test_adapter_resume_failure_marks_generation_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = Mock()
+    adapter.resume_accepting = AsyncMock(side_effect=RuntimeError("resume failed"))
+    adapter.stop_accepting = AsyncMock()
+    monkeypatch.setattr("app.rolling_runtime.UvicornListenerAdapter", _adapter_factory(adapter))
+    application = _app(ready=True)
+    lifecycle = application.state.runtime.generation_lifecycle
+    await lifecycle.mark_ready()
+    await lifecycle.quiesce()
+    runtime = RollingRuntime(application, Mock(), exit_fn=Mock())
+
+    with pytest.raises(BaseExceptionGroup, match="resume failed"):
+        await runtime.resume()
+
+    assert lifecycle.phase.value == "failed"
+    snapshot = await lifecycle.snapshot()
+    assert snapshot.last_error == "RuntimeError: resume failed"
+    adapter.stop_accepting.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_resume_cancels_pending_usr2_drain_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = Mock()
+    adapter.stop_accepting = AsyncMock()
+    adapter.resume_accepting = AsyncMock()
+    monkeypatch.setattr("app.rolling_runtime.UvicornListenerAdapter", _adapter_factory(adapter))
+    application = _app(ready=True, drain_timeout=1)
+    lifecycle = application.state.runtime.generation_lifecycle
+    await lifecycle.mark_ready()
+    runtime = RollingRuntime(application, Mock(), exit_fn=Mock())
+    release = __import__("asyncio").Event()
+
+    async def operation() -> None:
+        async with lifecycle.try_admit() as admitted:
+            assert admitted
+            await release.wait()
+
+    active = __import__("asyncio").create_task(operation())
+    while lifecycle.active_operations == 0:
+        await __import__("asyncio").sleep(0)
+    await runtime.quiesce()
+    await runtime.resume()
+    await __import__("asyncio").sleep(1.1)
+
+    assert not active.cancelled()
+    release.set()
+    await active
+
+
+@pytest.mark.asyncio
+async def test_full_run_preserves_failed_phase_until_term(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = Mock()
+    adapter.startup_lifespan = AsyncMock()
+    adapter.register_dormant = AsyncMock()
+    adapter.arm = AsyncMock()
+    adapter.stop_accepting = AsyncMock()
+    adapter.resume_accepting = AsyncMock(side_effect=RuntimeError("resume failed"))
+    adapter.shutdown_lifespan = AsyncMock()
+    adapter.close_masters = AsyncMock()
+    monkeypatch.setattr("app.rolling_runtime.UvicornListenerAdapter", _adapter_factory(adapter))
+    application = _app(ready=True)
+    lifecycle = application.state.runtime.generation_lifecycle
+    ready = __import__("asyncio").Event()
+    runtime = RollingRuntime(
+        application,
+        Mock(),
+        notify_ready_fn=ready.set,
+        notify_stopping_fn=Mock(),
+        exit_fn=Mock(),
+    )
+    running = __import__("asyncio").create_task(runtime.run())
+    await ready.wait()
+
+    runtime.request_quiesce()
+    while lifecycle.phase.value != "quiescing":
+        await __import__("asyncio").sleep(0)
+    quiesced = await lifecycle.snapshot()
+    runtime.request_resume()
+    failed = await lifecycle.wait_for_change(quiesced.revision, 1)
+    assert failed.phase.value == "failed"
+    assert not running.done()
+    snapshot = await lifecycle.snapshot()
+    assert snapshot.last_error == "RuntimeError: resume failed"
+
+    runtime.request_stop()
+    await running
+    final = await lifecycle.snapshot()
+    assert final.phase.value == "failed"
+    assert final.last_error == "RuntimeError: resume failed"

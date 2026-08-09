@@ -1,4 +1,5 @@
 from enum import StrEnum
+from functools import partial
 from pathlib import Path
 from typing import Annotated
 
@@ -12,6 +13,7 @@ from app.config.loader import load_settings
 from app.config.paths import config_file_path
 from app.config.settings import AppSettings
 from app.generation import GenerationLifecycle
+from app.generation_identity import GenerationIdentityError, parse_generation_id
 from app.rolling_runtime import run_systemd_generation
 from app.server import create_app
 
@@ -135,15 +137,40 @@ def start(
 
 @app.command("start-rolling")
 def start_rolling(
+    generation_id: Annotated[str, typer.Option("--generation-id")],
+    release_id: Annotated[str, typer.Option("--release-id")],
+    control_socket: Annotated[
+        Path,
+        typer.Option("--control-socket", file_okay=True, dir_okay=False),
+    ],
     config: Annotated[
         Path | None,
         typer.Option("--config", exists=False, file_okay=True, dir_okay=False),
     ] = None,
 ) -> None:
     """Start one systemd-managed rolling generation on inherited dual-stack sockets."""
+    try:
+        parse_generation_id(generation_id)
+    except GenerationIdentityError as error:
+        raise typer.BadParameter(str(error), param_hint="--generation-id") from error
+    if not release_id.strip():
+        raise typer.BadParameter("release id cannot be empty", param_hint="--release-id")
+    if not control_socket.is_absolute():
+        raise typer.BadParameter(
+            "control socket must be an absolute path",
+            param_hint="--control-socket",
+        )
     settings = load_settings(config_path=config, cli_overrides={})
     application = create_app(settings, generation_lifecycle=GenerationLifecycle())
-    run(run_systemd_generation, application)
+    run(
+        partial(
+            run_systemd_generation,
+            application,
+            generation_id=generation_id,
+            release_id=release_id,
+            control_path=control_socket,
+        )
+    )
 
 
 def _authenticate() -> None:

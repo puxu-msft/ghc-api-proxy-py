@@ -168,6 +168,7 @@ class ShutdownConfig(FrozenModel):
         default=DEFAULT_GRACEFUL_TIMEOUT_SECONDS,
         ge=1,
     )
+    drain_timeout: int = Field(default=0, ge=0)
 
 
 class AppSettings(BaseSettings):

@@ -55,6 +55,9 @@ def test_start_rolling_exposes_only_config_option() -> None:
 
     assert result.exit_code == 0
     assert "--config" in result.stdout
+    assert "--generation-id" in result.stdout
+    assert "--release-id" in result.stdout
+    assert "--control-socket" in result.stdout
     assert "--host" not in result.stdout
     assert "--port" not in result.stdout
     assert "--fd" not in result.stdout
@@ -157,14 +160,68 @@ def test_start_rolling_uses_systemd_generation_runner(
     monkeypatch.setattr("app.cli.run_systemd_generation", generation_runner)
     monkeypatch.setattr("app.cli.uvicorn.run", uvicorn_run)
 
-    result = runner.invoke(app, ["start-rolling"])
+    result = runner.invoke(
+        app,
+        [
+            "start-rolling",
+            "--generation-id",
+            "g0000000000000001",
+            "--release-id",
+            "release-test",
+            "--control-socket",
+            "/tmp/ghc-generation-test.sock",
+        ],
+    )
 
     assert result.exit_code == 0
     generation_runner.assert_awaited_once()
     assert generation_runner.await_args is not None
     application = generation_runner.await_args.args[0]
     assert application.state.runtime.settings.port == 4141
+    assert generation_runner.await_args.kwargs == {
+        "generation_id": "g0000000000000001",
+        "release_id": "release-test",
+        "control_path": Path("/tmp/ghc-generation-test.sock"),
+    }
     uvicorn_run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "generation_id",
+    ["g1", "g00000000000000001", "g000000000000000/", " generation"],
+)
+def test_start_rolling_rejects_noncanonical_generation_id(generation_id: str) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "start-rolling",
+            "--generation-id",
+            generation_id,
+            "--release-id",
+            "release-test",
+            "--control-socket",
+            "/tmp/ghc-generation-test.sock",
+        ],
+    )
+    assert result.exit_code == 2
+    assert "generation id" in result.output.lower()
+
+
+def test_start_rolling_rejects_relative_control_path() -> None:
+    result = runner.invoke(
+        app,
+        [
+            "start-rolling",
+            "--generation-id",
+            "g0000000000000001",
+            "--release-id",
+            "release-test",
+            "--control-socket",
+            "relative.sock",
+        ],
+    )
+    assert result.exit_code == 2
+    assert "absolute" in result.output.lower()
 
 
 def test_start_rejects_stdin_as_inherited_socket_fd(

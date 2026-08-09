@@ -71,7 +71,7 @@ PoC正确样本绿、上述反样本红。若resume不可行，停止后续实�
 
 **基础子切片状态**：`IMPLEMENTED_FOR_REVIEW_R4`。已实现runtime级单一transition owner、rolling-only generation phase、FastAPI绝对外层operation registry、原子admission permit、health gating、ApprovalGate共享admission事实源，以及History／Approval observer双topic closing/reopen gate、late-registration 1012与完整fanout。Operation归零只表示业务调用结束，不自动进入`DRAINED_STANDBY`；History／tokenization durability barrier仍由后继显式`mark_drained()`承接。38项相关测试、Ruff与Pyright通过。
 
-**后继control子切片**：实现generation control UDS、USR2 quiesce／USR1 resume、首次TERM drain、第二TERM／INT立即退出，并把control状态与本基础状态机接线。
+**Control子切片状态**：`IMPLEMENTED_FOR_REVIEW_R5`。已实现generation-local UDS `status／wait`完整schema、单调revision与last error、canonical generation identity、USR2 quiesce／USR1 resume、USR2／TERM正timeout取消真实HTTP operation、第二TERM／INT立即退出，以及control path lock／预绑定socket／`cleanup_socket=False`／partial-start事务安全门。为根治pathname条件删除TOCTOU，generation runtime不自动unlink任何control pathname；任何既存path均fail closed，只能由controller分配新generation path，或在process EXITED cleanup manifest与同一lock协议下显式维护清理。Runtime统一聚合主错误、cleanup与control close错误；resume任一子动作失败稳定保留FAILED至TERM。候选测试含真实HTTP process signal smoke，Ruff与Pyright通过。
 
 ### 文件
 
@@ -113,7 +113,7 @@ PoC正确样本绿、上述反样本红。若resume不可行，停止后续实�
 
 - Generation-local `0600` UDS，尽早报告starting。
 - 版本化`status／wait／canary`协议，输出generation、PID、release、phase、ready、accepting、active operations、families和last error。`canary`是generation-private应用探针，必须穿过依赖与最小应用处理但不经过共享4144 listener；controller在signal old前只信该私有探针。
-- 活socket拒绝覆盖；只回收可证明死亡的stale path。
+- 任何既存control pathname均拒绝启动；runtime不自动回收stale path。显式维护清理必须在process EXITED硬门、generation cleanup manifest和同一`.lock`协议下执行。
 
 ### 退出门
 
@@ -246,6 +246,6 @@ Unit parser与`systemd-analyze verify`通过；fake systemctl／control UDS枚�
 
 ## 当前下一动作
 
-1. 将阶段3 lifecycle基础`1cbf418…`作为独立squash checkpoint回并main并归档reviewed source。
-2. 从新main开始阶段3 control子切片：generation UDS、USR2 quiesce／USR1 resume、首次TERM drain与第二TERM／INT立即退出。
-3. Control子切片收敛后再进入阶段5动态generation units与controller，不把真实manager／cgroup证据提前外推。
+1. 将阶段3 control候选`e8a0d8a…`作为独立squash checkpoint回并main并归档reviewed source。
+2. 从新main开始阶段5动态generation units与controller：4144双栈socket units、generation template、常驻controller及默认dry-run rollout helper。
+3. Units/controller收敛后进入状态隔离与多generation process harness；真实manager／cgroup证据仍留给固定VM门。

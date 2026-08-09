@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import socket
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
 
+from app.config.settings import AppSettings
 from app.generation import GenerationLifecycle
 from app.rolling_runtime import RollingRuntime, RollingRuntimeError
 from app.socket_activation import ActivatedSocketSet, ExpectedListener
@@ -20,6 +21,7 @@ class _ReadyState:
     generation_lifecycle: GenerationLifecycle
     approval_gate: None = None
     websocket_manager: None = None
+    settings: AppSettings = field(default_factory=AppSettings)
 
     def readiness_checks(self) -> dict[str, bool]:
         return {"ready": self.dependencies_ready}

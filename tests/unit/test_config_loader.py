@@ -109,6 +109,12 @@ def test_shutdown_graceful_timeout_uses_normal_config_precedence(
     assert settings.shutdown.graceful_timeout == 13
 
 
+def test_shutdown_drain_timeout_defaults_to_infinite_and_accepts_positive_value() -> None:
+    assert AppSettings().shutdown.drain_timeout == 0
+    settings = AppSettings.model_validate({"shutdown": {"drain_timeout": 17}})
+    assert settings.shutdown.drain_timeout == 17
+
+
 def test_model_overrides_mapping_is_replaced(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
