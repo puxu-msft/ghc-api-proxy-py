@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from app.errors import ApiError, ErrorCategory
+from app.generation import GenerationLifecycle
 from app.history.consumer import HistoryConsumer
 from app.history.in_flight import InFlightHistory
 from app.history.sessions import identify_session
@@ -54,9 +55,35 @@ async def test_history_writer_persists_and_reaps_status_buckets(tmp_path: Path) 
 
 @pytest.mark.asyncio
 async def test_discardable_history_job_drops_when_queue_is_full(tmp_path: Path) -> None:
-    writer = HistoryWriter(tmp_path / "history.db", queue_size=1)
-    assert writer.submit_nowait(_entry("a", "completed", 1), discardable=False) is True
-    assert writer.submit_nowait(_entry("b", "completed", 2), discardable=True) is False
+    import threading
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingWriter(HistoryWriter):
+        def _insert(self, entry: HistoryEntry) -> None:
+            if entry.id == "inflight":
+                entered.set()
+                release.wait(timeout=5)
+            super()._insert(entry)
+
+    writer = BlockingWriter(tmp_path / "history.db", queue_size=1)
+    await writer.start()
+    try:
+        with pytest.raises(ValueError, match="mandatory"):
+            writer.submit_nowait(_entry("bad-api", "completed", 0), discardable=False)
+        assert writer.submit_nowait(_entry("inflight", "completed", 1), discardable=True)
+        assert await __import__("asyncio").to_thread(entered.wait, 1)
+        assert writer.submit_nowait(_entry("queued", "completed", 2), discardable=True)
+        assert writer.submit_nowait(_entry("dropped", "completed", 3), discardable=True) is False
+        mandatory = __import__("asyncio").create_task(
+            writer.submit(_entry("mandatory", "completed", 4))
+        )
+        release.set()
+        await mandatory
+    finally:
+        release.set()
+        await writer.close()
 
 
 def test_in_flight_and_session_identification() -> None:
@@ -83,7 +110,8 @@ async def test_writer_continues_after_single_job_failure(tmp_path: Path) -> None
     writer = FlakyWriter(tmp_path / "history.db")
     await writer.start()
     try:
-        await writer.submit(_entry("bad", "completed", 1))
+        with pytest.raises(OSError, match="disk hiccup"):
+            await writer.submit(_entry("bad", "completed", 1))
         await writer.submit(_entry("good", "completed", 2))
         await writer.flush()
         entries = await writer.list_entries(limit=10)
@@ -92,6 +120,123 @@ async def test_writer_continues_after_single_job_failure(tmp_path: Path) -> None
 
     assert writer.error_count == 1
     assert [entry.id for entry in entries] == ["good"]
+
+
+@pytest.mark.asyncio
+async def test_fatal_write_error_propagates_to_submit_flush_and_close(tmp_path: Path) -> None:
+    class FatalWriter(HistoryWriter):
+        def _insert(self, entry: HistoryEntry) -> None:
+            del entry
+            import sqlite3
+
+            raise sqlite3.OperationalError("attempt to write a readonly database")
+
+    writer = FatalWriter(tmp_path / "history.db")
+    await writer.start()
+    with pytest.raises(Exception, match="readonly"):
+        await writer.submit(_entry("bad", "completed", 1))
+    with pytest.raises(RuntimeError, match="fatal state"):
+        await writer.flush()
+    with pytest.raises(RuntimeError, match="fatal state"):
+        await writer.close()
+
+
+@pytest.mark.asyncio
+async def test_busy_retry_respects_submit_deadline(tmp_path: Path) -> None:
+    class BusyWriter(HistoryWriter):
+        def _insert(self, entry: HistoryEntry) -> None:
+            del entry
+            import sqlite3
+
+            raise sqlite3.OperationalError("database is locked")
+
+    writer = BusyWriter(tmp_path / "history.db", busy_timeout=1)
+    await writer.start()
+    try:
+        with pytest.raises(Exception, match="locked"):
+            await writer.submit(_entry("busy", "completed", 1), timeout=0.05)
+    finally:
+        await writer.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_submit_waiter_does_not_kill_writer(tmp_path: Path) -> None:
+    import threading
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingWriter(HistoryWriter):
+        def _insert(self, entry: HistoryEntry) -> None:
+            if entry.id == "cancelled":
+                entered.set()
+                release.wait(timeout=5)
+            super()._insert(entry)
+
+    writer = BlockingWriter(tmp_path / "history.db")
+    await writer.start()
+    cancelled = __import__("asyncio").create_task(
+        writer.submit(_entry("cancelled", "completed", 1))
+    )
+    assert await __import__("asyncio").to_thread(entered.wait, 1)
+    cancelled.cancel()
+    with pytest.raises(__import__("asyncio").CancelledError):
+        await cancelled
+    release.set()
+    await writer.submit(_entry("after", "completed", 2))
+    await writer.flush()
+    entries = await writer.list_entries(limit=10)
+    await writer.close()
+    assert {entry.id for entry in entries} == {"cancelled", "after"}
+
+
+@pytest.mark.asyncio
+async def test_submit_after_close_fails_without_hanging(tmp_path: Path) -> None:
+    writer = HistoryWriter(tmp_path / "history.db")
+    await writer.start()
+    await writer.close()
+    with pytest.raises(RuntimeError, match="not accepting"):
+        await writer.submit(_entry("late", "completed", 1))
+    with pytest.raises(RuntimeError, match="not accepting"):
+        await writer.reap(success_limit=1, failure_limit=1)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_close_uses_one_worker_sentinel(tmp_path: Path) -> None:
+    writer = HistoryWriter(tmp_path / "history.db")
+    await writer.start()
+
+    await __import__("asyncio").gather(writer.close(), writer.close())
+
+    assert writer.queued_jobs == 0
+
+
+@pytest.mark.asyncio
+async def test_fatal_history_write_marks_generation_failed_and_blocks_standby(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lifecycle = GenerationLifecycle()
+    await lifecycle.mark_ready()
+    store = HistoryStore(tmp_path / "history.db", generation_lifecycle=lifecycle)
+    await store.start()
+
+    def fail_insert(_entry: HistoryEntry) -> None:
+        import sqlite3
+
+        raise sqlite3.OperationalError("disk I/O error")
+
+    def patched_insert(_writer: HistoryWriter, entry: HistoryEntry) -> None:
+        fail_insert(entry)
+
+    monkeypatch.setattr(HistoryWriter, "_insert", patched_insert)
+    with pytest.raises(Exception, match="I/O"):
+        await store.finalize(_entry("fatal", "failed", 1))
+    assert lifecycle.phase.value == "failed"
+    with pytest.raises(Exception, match="drained requires"):
+        await lifecycle.mark_drained()
+    with pytest.raises(RuntimeError, match="fatal state"):
+        await store.close()
 
 
 @pytest.mark.asyncio

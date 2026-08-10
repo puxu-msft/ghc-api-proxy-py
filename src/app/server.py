@@ -83,7 +83,10 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
                     if settings.history.db_path
                     else user_data_path() / "history.db"
                 )
-                runtime.history_store = HistoryStore(history_path)
+                runtime.history_store = HistoryStore(
+                    history_path,
+                    generation_lifecycle=runtime.generation_lifecycle,
+                )
                 runtime.websocket_manager = runtime.history_store.websockets
                 await runtime.history_store.start()
             if runtime.websocket_manager is None:

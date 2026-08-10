@@ -152,6 +152,8 @@ Rollout helper可按规范generation ID明确区分任意数量generation；私�
 
 ## 阶段6：Overlap状态隔离
 
+**History durability子切片状态**：`IMPLEMENTED_FOR_REVIEW_R3`。Mandatory terminal submit现以cancellation-safe acknowledgement等待SQLite commit；writer具备RUNNING／CLOSING／CLOSED／FATAL线性状态，reap与并发close纳入同一lifecycle gate；BUSY／LOCKED由Python按caller deadline重试，同一次submit在确认进入真实`_insert()`后等待锁释放并成功，持续锁超过deadline显式失败；READONLY／IOERR／CORRUPT／FULL含extended result code进入fatal，由submit／flush／close传播并推进generation FAILED；两个真实进程共享WAL后独立reader精确看到完整terminal ID集合。直接选择`test_history_store.py＋test_history_multi_process.py＋test_responses_ws.py＋test_generation_lifecycle.py`共33项通过；候选改动文件Ruff与全仓Pyright通过。
+
 ### 文件
 
 - `src/app/server.py`
