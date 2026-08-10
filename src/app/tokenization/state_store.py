@@ -32,9 +32,14 @@ class TokenizationStateStore:
     def dirty(self) -> bool:
         return self._revision != self._flushed_revision
 
+    @property
+    def revision(self) -> int:
+        return self._revision
+
     def snapshot(self) -> dict[str, Any]:
         return {
             "version": _STATE_VERSION,
+            "revision": self._revision,
             "calibration": self.calibration.snapshot(),
             "prompt_limits": self.prompt_limits.snapshot(),
         }
@@ -56,6 +61,10 @@ class TokenizationStateStore:
             logger.warning("unsupported tokenization state version; starting empty")
             return
         typed_value = cast(dict[str, Any], value)
+        revision = typed_value.get("revision", 0)
+        if type(revision) is not int or revision < 0:
+            logger.warning("invalid tokenization revision; starting empty")
+            return
         calibration = typed_value.get("calibration", {})
         prompt_limits = typed_value.get("prompt_limits", {})
         if not isinstance(calibration, dict) or not isinstance(prompt_limits, dict):
@@ -69,8 +78,8 @@ class TokenizationStateStore:
             cast(dict[str, Any], prompt_limits),
             on_change=self._mark_dirty,
         )
-        self._revision = 0
-        self._flushed_revision = 0
+        self._revision = revision
+        self._flushed_revision = revision
 
     async def flush(self) -> bool:
         async with self._flush_lock:

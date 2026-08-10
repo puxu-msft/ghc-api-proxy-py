@@ -46,6 +46,7 @@ async def test_state_store_round_trip_and_dirty_lifecycle(tmp_path: Path) -> Non
     assert observation is not None
     assert observation.observed_limit == 20_000
     assert restored.dirty is False
+    assert restored.revision == state.revision
 
 
 @pytest.mark.asyncio

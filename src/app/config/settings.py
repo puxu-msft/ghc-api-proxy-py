@@ -153,6 +153,7 @@ class ResponsesConfig(FrozenModel):
 
 class TokenizationConfig(FrozenModel):
     state_path: str = ""
+    snapshot_root: str = ""
     flush_interval: float = Field(default=5.0, gt=0)
 
 

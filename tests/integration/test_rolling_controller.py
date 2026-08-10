@@ -4,7 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from app.generation_control_client import GenerationControlClientError, GenerationStatus
+from app.generation_control_client import (
+    GenerationControlClientError,
+    GenerationStatus,
+    TokenizationFlushReceipt,
+)
 from app.rolling_controller import (
     ColdActivationContainedError,
     RollingController,
@@ -12,6 +16,8 @@ from app.rolling_controller import (
 )
 from app.rolling_state import GenerationRecord, RollingStateStore
 from app.systemctl_adapter import UnitStatus
+from app.tokenization.snapshot_store import TokenizationSnapshotStore
+from app.wire_json import loads
 
 
 class FakeSystemctl:
@@ -42,6 +48,7 @@ class FakeSystemctl:
 class FakeControls:
     def __init__(self) -> None:
         self.statuses: dict[str, GenerationStatus] = {}
+        self.flush_receipt: TokenizationFlushReceipt | None = None
 
     async def wait_ready(self, path: Path, *, timeout: float) -> GenerationStatus:
         del timeout
@@ -56,6 +63,15 @@ class FakeControls:
             return self.statuses[path.parent.name]
         except KeyError as error:
             raise FileNotFoundError(path) from error
+
+    async def flush_tokenization(
+        self,
+        *_args: object,
+        **_kwargs: object,
+    ) -> TokenizationFlushReceipt:
+        if self.flush_receipt is None:
+            raise RuntimeError("no flush receipt")
+        return self.flush_receipt
 
 
 def _status(generation: str, release: str) -> GenerationStatus:
@@ -87,6 +103,7 @@ def _controller(
         runtime_root=tmp_path / "run",
         releases_root=releases,
         config_path=config,
+        generation_state_root=tmp_path / "generation-state",
         systemctl=systemctl,  # type: ignore[arg-type]
         controls=controls,  # type: ignore[arg-type]
     )
@@ -394,6 +411,179 @@ async def test_run_forever_propagates_unpersisted_bootstrap_configuration_error(
         )
 
     assert not (tmp_path / "state" / "state.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_cold_generation_bootstraps_from_canonical_tokenization_snapshot(
+    tmp_path: Path,
+) -> None:
+    systemctl = FakeSystemctl()
+    controls = FakeControls()
+    controls.statuses["g0000000000000001"] = _status(
+        "g0000000000000001",
+        "release-a",
+    )
+    snapshots = TokenizationSnapshotStore(
+        tmp_path / "tokenization" / "snapshots",
+        canonical_path=tmp_path / "state" / "tokenization-canonical.json",
+    )
+    reference = snapshots.publish_local(
+        generation="g0000000000000000",
+        release="release-old",
+        revision=3,
+        payload={"version": 1, "calibration": {}, "prompt_limits": {}},
+    ).reference
+    snapshots.publish_canonical(
+        reference,
+        committed_generation=reference.generation,
+        expected_previous_hash=None,
+    )
+    controller = _controller(tmp_path, systemctl, controls)
+
+    await controller.cold_activate("release-a")
+
+    local_state = (
+        tmp_path
+        / "generation-state"
+        / "g0000000000000001"
+        / "tokenization.json"
+    )
+    assert loads(local_state.read_bytes()) == {
+        "version": 1,
+        "revision": 3,
+        "calibration": {},
+        "prompt_limits": {},
+    }
+
+
+@pytest.mark.asyncio
+async def test_controller_flushes_only_committed_generation_to_canonical(
+    tmp_path: Path,
+) -> None:
+    systemctl = FakeSystemctl()
+    controls = FakeControls()
+    generation = "g0000000000000001"
+    controls.statuses[generation] = _status(generation, "release-a")
+    controller = _controller(tmp_path, systemctl, controls)
+    await controller.cold_activate("release-a")
+    snapshots = TokenizationSnapshotStore(tmp_path / "tokenization" / "snapshots")
+    local = snapshots.publish_local(
+        generation=generation,
+        release="release-a",
+        revision=2,
+        payload={"version": 1, "revision": 2, "calibration": {}, "prompt_limits": {}},
+    ).reference
+    controls.flush_receipt = TokenizationFlushReceipt(
+        generation=local.generation,
+        release=local.release,
+        revision=local.revision,
+        sha256=local.sha256,
+        path=local.path,
+        changed=True,
+    )
+
+    published = await controller.flush_committed_tokenization()
+
+    assert published.canonical_updated is True
+    canonical = TokenizationSnapshotStore(
+        tmp_path / "tokenization" / "snapshots",
+        canonical_path=tmp_path / "state" / "tokenization-canonical.json",
+    ).load_canonical()
+    assert canonical == local
+
+    controls.flush_receipt = TokenizationFlushReceipt(
+        generation="g0000000000000002",
+        release="release-b",
+        revision=3,
+        sha256=local.sha256,
+        path=local.path,
+        changed=True,
+    )
+    denied = await controller.flush_committed_tokenization()
+    assert denied.canonical_updated is False
+    assert denied.reason == "losing_generation"
+
+
+@pytest.mark.asyncio
+async def test_inflight_old_flush_is_rejected_after_durable_commit_switch(
+    tmp_path: Path,
+) -> None:
+    systemctl = FakeSystemctl()
+    entered = __import__("asyncio").Event()
+    release = __import__("asyncio").Event()
+
+    class BlockingFlushControls(FakeControls):
+        async def flush_tokenization(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> TokenizationFlushReceipt:
+            entered.set()
+            await release.wait()
+            assert self.flush_receipt is not None
+            return self.flush_receipt
+
+    controls = BlockingFlushControls()
+    old = "g0000000000000001"
+    new = "g0000000000000002"
+    controls.statuses[old] = _status(old, "release-a")
+    controller = _controller(tmp_path, systemctl, controls)
+    await controller.cold_activate("release-a")
+    snapshots = TokenizationSnapshotStore(tmp_path / "tokenization" / "snapshots")
+    local = snapshots.publish_local(
+        generation=old,
+        release="release-a",
+        revision=2,
+        payload={"version": 1, "revision": 2, "calibration": {}, "prompt_limits": {}},
+    ).reference
+    controls.flush_receipt = TokenizationFlushReceipt(
+        generation=old,
+        release="release-a",
+        revision=2,
+        sha256=local.sha256,
+        path=local.path,
+        changed=True,
+    )
+    flushing = __import__("asyncio").create_task(
+        controller.flush_committed_tokenization()
+    )
+    await entered.wait()
+
+    state_store = RollingStateStore(tmp_path / "state" / "state.json")
+    state = state_store.load()
+    old_record = state.generations[old]
+    state.generations[old] = GenerationRecord(
+        generation_id=old,
+        release_id="release-a",
+        control_socket=old_record.control_socket,
+        unit_name=old_record.unit_name,
+        role="draining",
+        phase="quiescing",
+        ready=False,
+        accepting=False,
+        pid=old_record.pid,
+    )
+    state.generations[new] = GenerationRecord(
+        generation_id=new,
+        release_id="release-b",
+        control_socket=str(tmp_path / "run" / "generations" / new / "control.sock"),
+        unit_name=f"ghc-api-proxy-generation@{new}.service",
+        role="committed",
+        phase="ready_accepting",
+        ready=True,
+        accepting=True,
+        pid=84,
+    )
+    state.committed_generation = new
+    state.committed_release = "release-b"
+    state_store.replace(state)
+    release.set()
+
+    result = await flushing
+
+    assert result.canonical_updated is False
+    assert result.reason == "losing_generation"
+    assert not (tmp_path / "state" / "tokenization-canonical.json").exists()
 
 
 @pytest.mark.asyncio

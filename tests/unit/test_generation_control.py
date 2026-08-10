@@ -187,7 +187,46 @@ async def test_post_bind_failure_preserves_path_and_releases_lock(
     )
     await replacement.start()
     await replacement.close()
-    path.unlink()
+
+
+@pytest.mark.asyncio
+async def test_flush_tokenization_returns_generation_local_snapshot_receipt(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "generation.sock"
+
+    async def flush() -> dict[str, object]:
+        return {
+            "changed": True,
+            "revision": 7,
+            "sha256": "a" * 64,
+            "path": str(tmp_path / "snapshot.json"),
+            "canonical_updated": False,
+            "reason": "local_snapshot",
+        }
+
+    server = GenerationControlServer(
+        path,
+        GenerationLifecycle(),
+        generation_id="g0000000000000001",
+        release_id="release-a",
+        flush_tokenization=flush,
+    )
+    await server.start()
+    try:
+        response = await _request(
+            path,
+            {"version": 1, "command": "flush_tokenization"},
+        )
+    finally:
+        await server.close()
+        path.unlink()
+
+    assert response["generation"] == "g0000000000000001"
+    tokenization = response["tokenization"]
+    assert isinstance(tokenization, dict)
+    assert tokenization["revision"] == 7
+    assert tokenization["canonical_updated"] is False
 
 
 @pytest.mark.asyncio

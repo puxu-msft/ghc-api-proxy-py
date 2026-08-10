@@ -154,6 +154,8 @@ Rollout helper可按规范generation ID明确区分任意数量generation；私�
 
 **History durability子切片状态**：`IMPLEMENTED_FOR_REVIEW_R3`。Mandatory terminal submit现以cancellation-safe acknowledgement等待SQLite commit；writer具备RUNNING／CLOSING／CLOSED／FATAL线性状态，reap与并发close纳入同一lifecycle gate；BUSY／LOCKED由Python按caller deadline重试，同一次submit在确认进入真实`_insert()`后等待锁释放并成功，持续锁超过deadline显式失败；READONLY／IOERR／CORRUPT／FULL含extended result code进入fatal，由submit／flush／close传播并推进generation FAILED；两个真实进程共享WAL后独立reader精确看到完整terminal ID集合。直接选择`test_history_store.py＋test_history_multi_process.py＋test_responses_ws.py＋test_generation_lifecycle.py`共33项通过；候选改动文件Ruff与全仓Pyright通过。
 
+**Tokenization snapshot子切片状态**：`IMPLEMENTED_FOR_REVIEW_R4`。已实现版本化canonical JSON envelope、temp＋fsync＋hard-link no-replace immutable object、generation-local locked monotonic live-head、controller-owned locked canonical CAS/checksum、reference与object envelope全字段对账、losing generation拒绝canonical推进、strict UDS `flush_tokenization` revision/hash/path/local-only receipt、rolling runtime local publish、controller显式committed flush及从canonical payload/revision初始化新generation-local state。Controller state-changing operations共用单一operation lock，committed flush在UDS返回后重新读取durable tuple，切流期间旧代flush稳定按loser拒绝。Generation进程只写共享object/live-head区，canonical pointer位于controller state root。84项基础测试与66项竞态相关回归通过，Ruff与Pyright通过。
+
 ### 文件
 
 - `src/app/server.py`
@@ -169,7 +171,7 @@ Rollout helper可按规范generation ID明确区分任意数量generation；私�
 - History共享WAL必须通过多进程测试；migration／reaper单owner。
 - Quiesce停止maintenance producer，但保留在途终态writer。
 - Writer flush／close暴露未持久化失败，不能只累计error count。
-- Snapshot来源三分：首次empty／legacy bootstrap；live committed UDS flush；committed已死时canonical content-addressed immutable snapshot。Immutable artifact采用content hash命名、temp→fsync→rename→parent fsync、同hash幂等与冲突拒绝；canonical tuple不得引用未durable artifact。Candidate只复制到generation-local路径，失败candidate不发布。
+- Snapshot来源三分：首次empty／legacy bootstrap；live committed UDS flush；committed已死时canonical content-addressed immutable snapshot。Immutable artifact采用content hash命名、temp→fsync→hard-link no-replace→parent fsync、同hash幂等与冲突拒绝；canonical tuple不得引用未durable artifact。Candidate只复制到generation-local路径，失败candidate不发布。
 - Generation UDS实现`flush_snapshot／promote／demote`。完整apply rollout直到本阶段完成前保持禁用，阶段5 controller仅支持dry-run／cold reconcile。正式顺序为durable promotion intent→old demote ack→candidate promote ack→snapshot publish→完整commit tuple completion。Rollback固定为old resume＋private canary→candidate quiesce ack→shared双栈canary证明命中old→candidate demote→old promote／snapshot restore→tuple replace→candidate stop／exit observed；每个子动作调用前与ack后均有独立checkpoint。允许短暂无owner，不允许双owner。
 
 ### 退出门

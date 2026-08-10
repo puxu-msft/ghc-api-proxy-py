@@ -23,6 +23,7 @@ from app.generation_control import GenerationControlServer
 from app.server_adapter import UvicornListenerAdapter
 from app.socket_activation import ActivatedSocketSet, ExpectedListener
 from app.systemd_notify import notify_ready, notify_stopping
+from app.tokenization.snapshot_store import TokenizationSnapshotStore
 
 ROLLING_PORT = 4144
 ROLLING_LISTENERS = (
@@ -77,6 +78,8 @@ class RollingRuntime:
         )
         self._notify_ready = notify_ready_fn
         self._notify_stopping = notify_stopping_fn
+        self._generation_id = generation_id
+        self._release_id = release_id
         self._transition_lock = asyncio.Lock()
         self._drain_timer: asyncio.Task[None] | None = None
         self._commands: asyncio.Queue[RuntimeCommand] = asyncio.Queue()
@@ -91,6 +94,7 @@ class RollingRuntime:
                 listener_families=tuple(
                     identity.name for identity in activated.identities()
                 ),
+                flush_tokenization=self.flush_tokenization_snapshot,
             )
             if control_path is not None
             else None
@@ -307,6 +311,30 @@ class RollingRuntime:
         except TimeoutError:
             await self._lifecycle.cancel_active_operations()
             await self._lifecycle.wait_for_drained()
+
+    async def flush_tokenization_snapshot(self) -> dict[str, object]:
+        runtime = self._application.state.runtime
+        state = runtime.tokenization_state
+        if state is None:
+            raise RollingRuntimeError("tokenization state is not initialized")
+        snapshot_root = runtime.settings.tokenization.snapshot_root
+        if not snapshot_root:
+            raise RollingRuntimeError("tokenization snapshot_root is not configured")
+        await state.flush()
+        receipt = TokenizationSnapshotStore(Path(snapshot_root)).publish_local(
+            generation=self._generation_id,
+            release=self._release_id,
+            revision=state.revision,
+            payload=state.snapshot(),
+        )
+        return {
+            "changed": receipt.changed,
+            "revision": receipt.reference.revision,
+            "sha256": receipt.reference.sha256,
+            "path": receipt.reference.path,
+            "canonical_updated": False,
+            "reason": receipt.reason,
+        }
 
     def _start_drain_timer(self) -> None:
         timeout_seconds = self._application.state.runtime.settings.shutdown.drain_timeout

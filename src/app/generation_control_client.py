@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +27,16 @@ class GenerationStatus:
     listener_families: tuple[str, ...]
     last_error: str | None
     revision: int
+
+
+@dataclass(frozen=True, slots=True)
+class TokenizationFlushReceipt:
+    generation: str
+    release: str
+    revision: int
+    sha256: str
+    path: str
+    changed: bool
 
 
 class GenerationControlClient:
@@ -60,6 +71,66 @@ class GenerationControlClient:
                 raise TimeoutError(f"generation wait timed out: {path}")
             status = self._parse(response)
         return status
+
+    async def flush_tokenization(
+        self,
+        path: Path,
+        *,
+        expected_generation: str,
+        expected_release: str,
+        snapshot_root: Path,
+        timeout: float = 10,
+    ) -> TokenizationFlushReceipt:
+        deadline = asyncio.get_running_loop().time() + timeout
+        response = await self._request(
+            path,
+            {"version": 1, "command": "flush_tokenization"},
+            deadline=deadline,
+        )
+        if response.get("ok") is not True:
+            raise GenerationControlClientError(str(response.get("error", "flush failed")))
+        if response.get("version") != 1:
+            raise GenerationControlClientError("unsupported control response version")
+        if (
+            response.get("generation") != expected_generation
+            or response.get("release") != expected_release
+        ):
+            raise GenerationControlClientError("tokenization receipt identity mismatch")
+        tokenization = response.get("tokenization")
+        if not isinstance(tokenization, dict):
+            raise GenerationControlClientError("tokenization receipt must be an object")
+        values = cast(dict[str, object], tokenization)
+        if type(values.get("revision")) is not int or cast(int, values["revision"]) < 0:
+            raise GenerationControlClientError("tokenization revision is invalid")
+        if not all(isinstance(values.get(name), str) for name in ("sha256", "path", "reason")):
+            raise GenerationControlClientError("tokenization reference is invalid")
+        if type(values.get("changed")) is not bool:
+            raise GenerationControlClientError("tokenization changed flag is invalid")
+        digest = cast(str, values["sha256"])
+        if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+            raise GenerationControlClientError("tokenization digest is invalid")
+        object_path = Path(cast(str, values["path"]))
+        expected_path = snapshot_root / "objects" / "sha256" / f"{digest}.json"
+        if object_path != expected_path:
+            raise GenerationControlClientError("tokenization object path escapes snapshot root")
+        try:
+            data = object_path.read_bytes()
+        except OSError as error:
+            raise GenerationControlClientError(
+                f"tokenization object is unreadable: {error}"
+            ) from error
+        if hashlib.sha256(data).hexdigest() != digest:
+            raise GenerationControlClientError("tokenization object hash mismatch")
+        if values.get("canonical_updated") is not False or values.get("reason") != "local_snapshot":
+            raise GenerationControlClientError("generation flush must be local-only")
+        return TokenizationFlushReceipt(
+            generation=expected_generation,
+            release=expected_release,
+            revision=cast(int, values["revision"]),
+            sha256=digest,
+            path=str(object_path),
+            changed=cast(bool, values["changed"]),
+        )
 
     async def _request(
         self,

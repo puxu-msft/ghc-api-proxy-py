@@ -17,6 +17,11 @@ from app.release_identity import ReleaseIdentityError, parse_release_id
 from app.rolling_frontier import RollingFrontierStore
 from app.rolling_state import GenerationRecord, RollingState, RollingStateStore
 from app.systemctl_adapter import SystemctlAdapter, UnitStatus
+from app.tokenization.snapshot_store import (
+    SnapshotReceipt,
+    SnapshotRef,
+    TokenizationSnapshotStore,
+)
 
 
 class RollingControllerError(RuntimeError):
@@ -45,6 +50,7 @@ class RollingController:
         runtime_root: Path,
         releases_root: Path,
         config_path: Path,
+        generation_state_root: Path = Path("/var/lib/ghc-api-proxy/generations"),
         systemctl: SystemctlAdapter | None = None,
         controls: GenerationControlClient | None = None,
     ) -> None:
@@ -52,17 +58,28 @@ class RollingController:
         self._runtime_root = runtime_root
         self._releases_root = releases_root
         self._config_path = config_path
+        self._generation_state_root = generation_state_root
         self._frontier = RollingFrontierStore(state_root / "frontier")
         self._state = RollingStateStore(state_root / "state.json")
         self._systemctl = systemctl or SystemctlAdapter()
         self._controls = controls or GenerationControlClient()
         self._lock_fd: int | None = None
+        self._operation_lock = asyncio.Lock()
 
     async def cold_activate(
         self,
         release_id: str,
         *,
         ready_timeout: float = 30,
+    ) -> GenerationRecord:
+        async with self._operation_lock:
+            return await self._cold_activate(release_id, ready_timeout=ready_timeout)
+
+    async def _cold_activate(
+        self,
+        release_id: str,
+        *,
+        ready_timeout: float,
     ) -> GenerationRecord:
         self._validate_release(release_id)
         state = self._state.load()
@@ -89,6 +106,10 @@ class RollingController:
         )
 
     async def reconcile_once(self) -> dict[str, object]:
+        async with self._operation_lock:
+            return await self._reconcile_once()
+
+    async def _reconcile_once(self) -> dict[str, object]:
         state = self._state.load()
         observed: dict[str, str] = {}
         for generation_id, record in list(state.generations.items()):
@@ -283,6 +304,51 @@ class RollingController:
             blockers=tuple(state.apply_blockers),
         )
 
+    async def flush_committed_tokenization(self) -> SnapshotReceipt:
+        async with self._operation_lock:
+            state = self._state.load()
+            generation_id = state.committed_generation
+            if generation_id is None:
+                raise RollingControllerError("there is no committed generation")
+            record = state.generations[generation_id]
+            snapshot_root = self._generation_state_root.parent / "tokenization" / "snapshots"
+            receipt = await self._controls.flush_tokenization(
+                Path(record.control_socket),
+                expected_generation=generation_id,
+                expected_release=record.release_id,
+                snapshot_root=snapshot_root,
+            )
+            reference = SnapshotRef(
+                generation=receipt.generation,
+                release=receipt.release,
+                revision=receipt.revision,
+                sha256=receipt.sha256,
+                path=receipt.path,
+            )
+            current = self._state.load()
+            current_record = current.generations.get(generation_id)
+            if (
+                current.committed_generation != generation_id
+                or current.committed_release != record.release_id
+                or current_record is None
+                or current_record.role != "committed"
+            ):
+                return SnapshotReceipt(
+                    changed=False,
+                    reference=reference,
+                    reason="losing_generation",
+                )
+            snapshots = TokenizationSnapshotStore(
+                snapshot_root,
+                canonical_path=self._state_root / "tokenization-canonical.json",
+            )
+            previous = snapshots.load_canonical()
+            return snapshots.publish_canonical(
+                reference,
+                committed_generation=generation_id,
+                expected_previous_hash=previous.sha256 if previous is not None else None,
+            )
+
     async def run_forever(
         self,
         *,
@@ -315,7 +381,18 @@ class RollingController:
         directory = self._runtime_root / "generations"
         directory.mkdir(parents=True, exist_ok=True, mode=0o711)
         directory.chmod(0o711)
-        state_directory = Path("/var/lib/ghc-api-proxy/generations") / generation_id
+        state_directory = self._generation_state_root / generation_id
+        snapshot_root = self._generation_state_root.parent / "tokenization" / "snapshots"
+        snapshots = TokenizationSnapshotStore(
+            snapshot_root,
+            canonical_path=self._state_root / "tokenization-canonical.json",
+        )
+        canonical = snapshots.load_canonical()
+        if canonical is not None:
+            self._atomic_write_bytes(
+                state_directory / "tokenization.json",
+                snapshots.load_payload_bytes(canonical),
+            )
         lines = {
             "GHC_GENERATION_ID": generation_id,
             "GHC_RELEASE_ID": release_id,
@@ -324,6 +401,9 @@ class RollingController:
             "GHC_CONFIG": str(self._config_path),
             "GHC_HISTORY__DB_PATH": str(state_directory / "history.db"),
             "GHC_TOKENIZATION__STATE_PATH": str(state_directory / "tokenization.json"),
+            "GHC_TOKENIZATION__SNAPSHOT_ROOT": (
+                str(snapshot_root)
+            ),
         }
         content = "".join(
             f"{key}={self._quote_environment_value(value)}\n"
@@ -349,6 +429,26 @@ class RollingController:
 
     def _control_socket(self, generation_id: str) -> Path:
         return self._runtime_root / "generations" / generation_id / "control.sock"
+
+    @staticmethod
+    def _atomic_write_bytes(path: Path, content: bytes) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(content)
+                output.flush()
+                os.fsync(output.fileno())
+            temporary.chmod(0o600)
+            temporary.replace(path)
+            directory_fd = os.open(path.parent, os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     @staticmethod
     def _quote_environment_value(value: str) -> str:

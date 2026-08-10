@@ -3,6 +3,7 @@ from __future__ import annotations
 import signal
 from collections.abc import Callable, MutableMapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -18,6 +19,7 @@ from app.rolling_runtime import (
     run_systemd_generation,
 )
 from app.socket_activation import ActivatedSocketSet, ExpectedListener
+from app.tokenization.state_store import TokenizationStateStore
 
 
 @dataclass
@@ -27,6 +29,7 @@ class _RuntimeState:
     approval_gate: None = None
     websocket_manager: object | None = None
     settings: AppSettings = field(default_factory=AppSettings)
+    tokenization_state: TokenizationStateStore | None = None
 
     def readiness_checks(self) -> dict[str, bool]:
         return {"ready": self.dependencies_ready}
@@ -480,6 +483,35 @@ def test_second_termination_signal_exits_immediately_with_second_signal_code() -
     runtime.request_termination(signal.SIGINT)
 
     exit_fn.assert_called_once_with(130)
+
+
+@pytest.mark.asyncio
+async def test_runtime_flushes_generation_local_tokenization_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = Mock()
+    monkeypatch.setattr("app.rolling_runtime.UvicornListenerAdapter", _adapter_factory(adapter))
+    application = _app(ready=True)
+    state = TokenizationStateStore(tmp_path / "local" / "tokenization.json")
+    state.calibration.learn("anthropic", "model", 10, 12)
+    application.state.runtime.tokenization_state = state
+    application.state.runtime.settings = AppSettings.model_validate(
+        {"tokenization": {"snapshot_root": str(tmp_path / "snapshots")}}
+    )
+    runtime = RollingRuntime(
+        application,
+        Mock(),
+        generation_id="g0000000000000001",
+        release_id="release-a",
+    )
+
+    receipt = await runtime.flush_tokenization_snapshot()
+
+    assert receipt["revision"] == 1
+    assert isinstance(receipt["sha256"], str)
+    assert Path(str(receipt["path"])).is_file()
+    assert receipt["canonical_updated"] is False
 
 
 @pytest.mark.asyncio

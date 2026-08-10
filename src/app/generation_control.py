@@ -6,6 +6,7 @@ import json
 import os
 import socket
 import stat
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, cast
 
@@ -27,12 +28,14 @@ class GenerationControlServer:
         generation_id: str,
         release_id: str,
         listener_families: tuple[str, ...] = ("http-v4", "http-v6"),
+        flush_tokenization: Callable[[], Awaitable[dict[str, object]]] | None = None,
     ) -> None:
         self._path = path
         self._lifecycle = lifecycle
         self._generation_id = generation_id
         self._release_id = release_id
         self._listener_families = listener_families
+        self._flush_tokenization = flush_tokenization
         self._server: asyncio.Server | None = None
         self._lock_fd: int | None = None
 
@@ -139,6 +142,16 @@ class GenerationControlServer:
             except TimeoutError:
                 return {"ok": False, "error": "wait_timeout"}
             return self._response(snapshot)
+        if command == "flush_tokenization":
+            if self._flush_tokenization is None:
+                raise ValueError("tokenization snapshot publishing is unavailable")
+            return {
+                "ok": True,
+                "version": PROTOCOL_VERSION,
+                "generation": self._generation_id,
+                "release": self._release_id,
+                "tokenization": await self._flush_tokenization(),
+            }
         raise ValueError(f"unsupported command: {command!r}")
 
     def _response(self, snapshot: GenerationSnapshot) -> dict[str, object]:

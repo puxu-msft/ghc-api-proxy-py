@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 
@@ -107,3 +108,41 @@ async def test_status_wraps_malformed_json_as_typed_error(tmp_path: Path) -> Non
     finally:
         server.close()
         await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_flush_tokenization_receipt_round_trips(tmp_path: Path) -> None:
+    path = tmp_path / "control.sock"
+    object_path = tmp_path / "snapshots" / "objects" / "sha256"
+    object_path.mkdir(parents=True)
+    data = b'{"payload":{}}'
+    digest = hashlib.sha256(data).hexdigest()
+    snapshot = object_path / f"{digest}.json"
+    snapshot.write_bytes(data)
+    response: dict[str, object] = {
+        "ok": True,
+        "version": 1,
+        "generation": "g0000000000000001",
+        "release": "release-a",
+        "tokenization": {
+            "changed": True,
+            "revision": 4,
+            "sha256": digest,
+            "path": str(snapshot),
+            "canonical_updated": False,
+            "reason": "local_snapshot",
+        },
+    }
+    server = await _server(path, response)
+    try:
+        receipt = await GenerationControlClient().flush_tokenization(
+            path,
+            expected_generation="g0000000000000001",
+            expected_release="release-a",
+            snapshot_root=tmp_path / "snapshots",
+        )
+    finally:
+        server.close()
+        await server.wait_closed()
+    assert receipt.revision == 4
+    assert receipt.sha256 == digest
