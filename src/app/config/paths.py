@@ -16,3 +16,11 @@ def user_data_path() -> Path:
 
 def config_file_path() -> Path:
     return user_config_path() / "config.yaml"
+
+
+def spec_config_file_path() -> Path:
+    """The config file location the human-controlled spec names.
+
+    Deliberately under XDG_DATA rather than XDG_CONFIG; the spec places the pidfile there too.
+    """
+    return user_data_path() / "config.yaml"
