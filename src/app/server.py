@@ -34,7 +34,6 @@ from app.routes import (
 )
 from app.routes.metrics import router as metrics_router
 from app.routes.openai import router as openai_router
-from app.routes.responses_ws import router as responses_ws_router
 from app.runtime import RuntimeState
 from app.tokenization.state_store import TokenizationStateStore
 from app.upstream.bootstrap import close_upstream_services, initialize_upstream_services
@@ -188,6 +187,5 @@ def create_app(
     app.include_router(metrics_router)
     for prefix in ("", "/v1", "/openai/v1"):
         app.include_router(openai_router, prefix=prefix)
-        app.include_router(responses_ws_router, prefix=prefix)
     app.include_router(health_router)
     return app

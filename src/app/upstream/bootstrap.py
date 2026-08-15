@@ -22,7 +22,6 @@ from app.ghc_client import (
     infer_account_type,
 )
 from app.openai.client import OpenAIClient
-from app.openai.responses_ws import ResponsesWebSocketClient
 from app.runtime import RuntimeState
 from app.tokenization.estimators import preload_tokenizer
 from app.tokenization.service import AnthropicTokenCountingService
@@ -155,7 +154,6 @@ async def initialize_upstream_services(
             use_upstream=settings.anthropic.use_upstream_count_tokens,
         )
         runtime.openai_client = OpenAIClient(target, resolver)
-        runtime.responses_ws_client = None
         return services
 
     token_path = Path(settings.auth.token_file) if settings.auth.token_file else None
@@ -246,12 +244,6 @@ async def initialize_upstream_services(
         use_upstream=settings.anthropic.use_upstream_count_tokens,
     )
     runtime.openai_client = OpenAIClient(target, resolver)
-    ws_base_url = base_url.replace("https://", "wss://").replace("http://", "ws://")
-    runtime.responses_ws_client = ResponsesWebSocketClient(
-        client,
-        f"{ws_base_url}/responses",
-        queue_size=settings.openai_responses.ws_queue_size,
-    )
     return services
 
 
@@ -272,4 +264,3 @@ async def close_upstream_services(
     runtime.anthropic_client = None
     runtime.token_counter = None
     runtime.openai_client = None
-    runtime.responses_ws_client = None
