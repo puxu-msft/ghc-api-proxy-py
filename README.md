@@ -30,6 +30,7 @@ uv run python -m app start --config ./config.yaml --generate-config
 - Anthropic：`POST /v1/messages`、`POST /v1/messages/count_tokens`
 - OpenAI：`POST /chat/completions`、`POST /responses`、`POST /embeddings`、`GET /models`
 - OpenAI 兼容前缀：同一组端点也注册在 `/v1` 和 `/openai/v1`
+- Responses WebSocket：`GET /responses`、`/v1/responses`、`/openai/v1/responses`
 - Azure：`POST /openai/deployments/{deployment}/{chat/completions|responses|embeddings}`
 - Gemini：`POST /v1beta/models/{model}:{generateContent|streamGenerateContent|countTokens}`
 

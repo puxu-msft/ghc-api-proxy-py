@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from app.history.ws import WebSocketManager
     from app.hooks.registry import HookRegistry
     from app.openai.client import OpenAIClient
+    from app.openai.responses_ws import ResponsesWebSocketClient
     from app.pipeline.approval import ApprovalGate
     from app.tokenization.service import AnthropicTokenCountingService
     from app.tokenization.state_store import TokenizationStateStore
@@ -33,6 +34,7 @@ class RuntimeState:
     tokenization_state: TokenizationStateStore | None = None
     hook_registry: HookRegistry | None = None
     openai_client: OpenAIClient | None = None
+    responses_ws_client: ResponsesWebSocketClient | None = None
     history_store: HistoryStore | None = None
     approval_gate: ApprovalGate | None = None
     websocket_manager: WebSocketManager | None = None

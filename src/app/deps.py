@@ -10,6 +10,7 @@ from app.history.store import HistoryStore
 from app.history.ws import WebSocketManager
 from app.models.common import ModelInfo
 from app.openai.client import OpenAIClient
+from app.openai.responses_ws import ResponsesWebSocketClient
 from app.pipeline.approval import ApprovalGate
 from app.runtime import RuntimeState
 from app.tokenization.service import AnthropicTokenCountingService
@@ -62,6 +63,13 @@ def get_model_catalog(connection: HTTPConnection) -> ModelCatalogView:
     return services.model_catalog
 
 
+def get_responses_ws_client(connection: HTTPConnection) -> ResponsesWebSocketClient:
+    client = get_runtime_state(connection).responses_ws_client
+    if client is None:
+        raise RuntimeError("Responses WebSocket client is not initialized")
+    return client
+
+
 def get_history_store(connection: HTTPConnection) -> HistoryStore:
     store = get_runtime_state(connection).history_store
     if store is None:
@@ -92,6 +100,10 @@ TokenCounterDependency = Annotated[
 ]
 OpenAIClientDependency = Annotated[OpenAIClient, Depends(get_openai_client)]
 ModelCatalogDependency = Annotated[ModelCatalogView, Depends(get_model_catalog)]
+ResponsesWSClientDependency = Annotated[
+    ResponsesWebSocketClient,
+    Depends(get_responses_ws_client),
+]
 HistoryStoreDependency = Annotated[HistoryStore, Depends(get_history_store)]
 ApprovalGateDependency = Annotated[ApprovalGate, Depends(get_approval_gate)]
 WebSocketManagerDependency = Annotated[
