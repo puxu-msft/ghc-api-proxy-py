@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Literal
 
-type AccountType = Literal["individual", "business", "enterprise"]
+type AccountType = Literal["individual", "business", "enterprise", "self-hosted"]
 
 INDIVIDUAL_BASE_URL = "https://api.githubcopilot.com"
 
@@ -28,6 +28,9 @@ def resolve_base_url(config: GhcClientConfig) -> str:
     override = config.base_url_override.rstrip("/")
     if override:
         return override
+    if config.account_type == "self-hosted":
+        # A self-hosted host (e.g. msft.ghe.com) cannot be derived; it must be configured.
+        raise ValueError("self-hosted accounts require an explicit base_url_override")
     if config.account_type == "individual":
         return INDIVIDUAL_BASE_URL
     return f"https://api.{config.account_type}.githubcopilot.com"

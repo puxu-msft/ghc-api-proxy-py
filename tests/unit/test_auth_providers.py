@@ -2,7 +2,6 @@ from pathlib import Path
 
 import pytest
 
-from app.auth.device_flow import DeviceCode
 from app.auth.providers import (
     CLITokenProvider,
     DeviceAuthProvider,
@@ -13,6 +12,7 @@ from app.auth.providers import (
     TokenInfo,
     noninteractive_token_available,
 )
+from app.ghc_client.device_flow import DeviceCode
 
 
 class StubDeviceFlow:

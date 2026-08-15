@@ -6,8 +6,8 @@ from typing import Literal, Protocol
 
 from anyio.to_thread import run_sync
 
-from app.auth.device_flow import DeviceCode
 from app.config.paths import user_data_path
+from app.ghc_client.device_flow import DeviceCode
 
 type TokenSource = Literal["cli", "env", "file", "device-auth"]
 

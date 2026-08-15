@@ -30,7 +30,7 @@ class UpstreamConfig(FrozenModel):
 
 class AuthConfig(FrozenModel):
     github_token: str = ""
-    account_type: Literal["individual", "business", "enterprise"] | None = None
+    account_type: Literal["individual", "business", "enterprise", "self-hosted"] | None = None
     token_file: str = ""
     show_github_token: bool = False
 

@@ -28,3 +28,18 @@ def test_override_wins_over_account_type_and_drops_trailing_slash() -> None:
 def test_empty_override_falls_back_to_account_type() -> None:
     config = GhcClientConfig(account_type="business", base_url_override="")
     assert config.base_url == "https://api.business.githubcopilot.com"
+
+
+def test_self_hosted_uses_the_configured_host() -> None:
+    config = GhcClientConfig(
+        account_type="self-hosted",
+        base_url_override="https://msft.ghe.com",
+    )
+    assert config.base_url == "https://msft.ghe.com"
+
+
+def test_self_hosted_without_a_host_is_rejected() -> None:
+    # A self-hosted host cannot be derived from the account type, unlike the three hosted tiers.
+    config = GhcClientConfig(account_type="self-hosted")
+    with pytest.raises(ValueError, match="self-hosted"):
+        resolve_base_url(config)

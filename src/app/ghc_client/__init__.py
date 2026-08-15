@@ -11,6 +11,11 @@ Out of scope: model name resolution, body translation, history, retry orchestrat
 from app.ghc_client.account import GitHubAccountClient, infer_account_type
 from app.ghc_client.client import GhcApiClient
 from app.ghc_client.config import GhcClientConfig, resolve_base_url
+from app.ghc_client.device_flow import (
+    DeviceCode,
+    DeviceFlowClient,
+    DeviceFlowError,
+)
 from app.ghc_client.headers import build_identity_headers, build_request_headers
 from app.ghc_client.models import ModelCatalogPage, fetch_models
 from app.ghc_client.tokens import (
@@ -26,6 +31,9 @@ from app.ghc_client.transport import (
 __all__ = [
     "CopilotTokenInfo",
     "CopilotTokenManager",
+    "DeviceCode",
+    "DeviceFlowClient",
+    "DeviceFlowError",
     "GhcApiClient",
     "GhcClientConfig",
     "GitHubAccountClient",

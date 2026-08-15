@@ -45,7 +45,7 @@ from app.upstream.generic import GenericUpstream
 from app.upstream.models_api import ModelCatalog
 from app.upstream.urls import resolve_copilot_base_url
 
-type AccountType = Literal["individual", "business", "enterprise"]
+type AccountType = Literal["individual", "business", "enterprise", "self-hosted"]
 
 
 class RefreshableModelCatalog(Protocol):

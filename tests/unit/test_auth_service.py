@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from app.auth.device_flow import DeviceCode
 from app.auth.service import run_device_authentication
+from app.ghc_client.device_flow import DeviceCode
 
 
 class FakeDeviceFlow:
