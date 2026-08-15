@@ -54,6 +54,13 @@ def test_model_headers_cannot_override_protected_fields_case_insensitively() -> 
             "x-model-extra": "kept",
         },
     )
+    # Asserting on the original casing alone would pass even without the protection.
+    # Dict keys are case sensitive, so the attacker entry would simply land beside it.
+    values = set(headers.values())
+    assert "Bearer attacker" not in values
+    assert "attacker" not in values
+    assert "vscode/0.0.0" not in values
+
     assert headers["Authorization"] == "Bearer copilot-token"
     assert headers["X-Interaction-Id"] == "interaction"
     assert headers["editor-version"] == "vscode/1.2.3"
