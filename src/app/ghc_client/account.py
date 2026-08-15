@@ -1,5 +1,4 @@
 from collections.abc import Mapping
-from typing import Any
 
 import httpx
 
@@ -19,7 +18,12 @@ def infer_account_type(usage: Mapping[str, object]) -> str | None:
     return None
 
 
-class GitHubClient:
+class GitHubAccountClient:
+    """Read-only GitHub REST endpoints describing the Copilot subscription.
+
+    Used only to infer the account type, which selects the API base URL.
+    """
+
     def __init__(self, http_client: httpx.AsyncClient) -> None:
         self._http = http_client
 
@@ -31,16 +35,16 @@ class GitHubClient:
             "X-GitHub-Api-Version": GITHUB_API_VERSION,
         }
 
-    async def get_user(self, token: str) -> dict[str, Any]:
+    async def get_user(self, token: str) -> dict[str, object]:
         response = await self._http.get(
             f"{GITHUB_API_BASE_URL}/user",
             headers=self._headers(token),
         )
         response.raise_for_status()
-        data: dict[str, Any] = response.json()
+        data: dict[str, object] = response.json()
         return data
 
-    async def get_copilot_usage(self, token: str) -> dict[str, Any]:
+    async def get_copilot_usage(self, token: str) -> dict[str, object]:
         headers = self._headers(token)
         headers["X-GitHub-Api-Version"] = COPILOT_INTERNAL_API_VERSION
         response = await self._http.get(
@@ -48,5 +52,5 @@ class GitHubClient:
             headers=headers,
         )
         response.raise_for_status()
-        data: dict[str, Any] = response.json()
+        data: dict[str, object] = response.json()
         return data

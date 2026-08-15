@@ -1,7 +1,7 @@
 import httpx
 import pytest
 
-from app.auth.github import GitHubClient, infer_account_type
+from app.ghc_client.account import GitHubAccountClient, infer_account_type
 
 
 @pytest.mark.parametrize(
@@ -31,7 +31,7 @@ async def test_github_client_gets_user_and_usage_with_token_headers() -> None:
         return httpx.Response(200, json={"copilot_plan": "business", "future": True})
 
     http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    client = GitHubClient(http_client)
+    client = GitHubAccountClient(http_client)
     try:
         user = await client.get_user("ghu_test")
         usage = await client.get_copilot_usage("ghu_test")
@@ -50,4 +50,4 @@ async def test_copilot_usage_uses_internal_api_version() -> None:
         return httpx.Response(200, json={"copilot_plan": "individual"})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
-        await GitHubClient(http_client).get_copilot_usage("ghu")
+        await GitHubAccountClient(http_client).get_copilot_usage("ghu")

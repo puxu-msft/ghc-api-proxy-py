@@ -1,34 +1,48 @@
+"""Copilot upstream adapter.
+
+The actual Copilot API access lives in the standalone `app.ghc_client` library.
+This module maps `AppSettings` onto the library config.
+It adapts `GitHubTokenManager` to the library's token source protocol.
+It wraps the library client as this project's `UpstreamTarget`.
+"""
+
 from collections.abc import Mapping
-from typing import Any, cast
-from uuid import uuid4
+from typing import Any
 
 import httpx
-from anthropic._types import Body as AnthropicBody
-from openai import (
-    APIConnectionError as OpenAIAPIConnectionError,
-)
-from openai import (
-    APIStatusError as OpenAIAPIStatusError,
-)
-from openai._types import Body as OpenAIBody
 
-from app.auth.copilot import CopilotTokenManager
+from app.auth.providers import GitHubTokenManager
 from app.config.settings import AppSettings
-from app.upstream.base import (
-    ResponsesHeadersPendingTransportError,
-    is_responses_headers_pending_transport_error,
+from app.ghc_client import (
+    GhcApiClient,
+    build_identity_headers,
+    build_request_headers,
 )
+from app.ghc_client.tokens import CopilotTokenManager
 from app.upstream.client import SDKClients
+from app.upstream.ghc_settings import ghc_config_from_settings
+
+
+class GitHubTokenSourceAdapter:
+    """Adapts `GitHubTokenManager` to the `GitHubTokenSource` protocol of `app.ghc_client`.
+
+    The library only needs the token string, not this project's `TokenInfo` or provider chain.
+    """
+
+    def __init__(self, manager: GitHubTokenManager) -> None:
+        self._manager = manager
+
+    async def get_token(self) -> str:
+        info = await self._manager.get_token()
+        return info.token
+
+    async def refresh(self) -> str | None:
+        refreshed = await self._manager.refresh()
+        return refreshed.token if refreshed is not None else None
 
 
 def build_copilot_identity_headers(settings: AppSettings) -> dict[str, str]:
-    versions = settings.headers
-    return {
-        "editor-version": f"vscode/{versions.vscode_version}",
-        "editor-plugin-version": f"copilot-chat/{versions.copilot_version}",
-        "user-agent": f"GitHubCopilotChat/{versions.copilot_version}",
-        "x-vscode-user-agent-library-version": "electron-fetch",
-    }
+    return build_identity_headers(ghc_config_from_settings(settings))
 
 
 def build_copilot_headers(
@@ -41,35 +55,24 @@ def build_copilot_headers(
     vision: bool = False,
     model_request_headers: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    resolved_request_id = request_id or str(uuid4())
-    versions = settings.headers
-    headers = {
-        **build_copilot_identity_headers(settings),
-        "Authorization": f"Bearer {token}",
-        "content-type": "application/json",
-        "copilot-integration-id": "vscode-chat",
-        "openai-intent": intent,
-        "x-github-api-version": versions.api_version,
-        "x-request-id": resolved_request_id,
-        "X-Interaction-Id": interaction_id,
-        "X-Interaction-Type": intent,
-        "X-Agent-Task-Id": resolved_request_id,
-    }
-    if vision:
-        headers["copilot-vision-request"] = "true"
-    if model_request_headers:
-        protected = {name.lower() for name in headers}
-        headers.update(
-            {
-                name: value
-                for name, value in model_request_headers.items()
-                if name.lower() not in protected
-            }
-        )
-    return headers
+    return build_request_headers(
+        token,
+        ghc_config_from_settings(settings),
+        interaction_id=interaction_id,
+        request_id=request_id,
+        intent=intent,
+        vision=vision,
+        model_request_headers=model_request_headers,
+    )
 
 
 class CopilotUpstream:
+    """Exposes `GhcApiClient` in the shape of `UpstreamTarget`.
+
+    `UpstreamTarget` names protocol families; the library names endpoints.
+    This class is the single translation point between the two.
+    """
+
     def __init__(
         self,
         clients: SDKClients,
@@ -78,17 +81,12 @@ class CopilotUpstream:
         *,
         interaction_id: str,
     ) -> None:
-        self._clients = clients
-        self._tokens = token_manager
-        self._settings = settings
-        self._interaction_id = interaction_id
-
-    async def _headers(self) -> dict[str, str]:
-        token = await self._tokens.get_token()
-        return build_copilot_headers(
-            token,
-            self._settings,
-            interaction_id=self._interaction_id,
+        self._client = GhcApiClient(
+            clients.openai,
+            clients.anthropic,
+            token_manager,
+            ghc_config_from_settings(settings),
+            interaction_id=interaction_id,
         )
 
     async def send_openai(
@@ -97,13 +95,7 @@ class CopilotUpstream:
         *,
         stream: bool = False,
     ) -> httpx.Response:
-        return await self._clients.openai.post(
-            "/chat/completions",
-            cast_to=httpx.Response,
-            body=cast(OpenAIBody, dict(payload)),
-            options={"headers": await self._headers()},
-            stream=stream,
-        )
+        return await self._client.send_chat_completions(payload, stream=stream)
 
     async def send_anthropic(
         self,
@@ -112,24 +104,17 @@ class CopilotUpstream:
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
     ) -> httpx.Response:
-        return await self._clients.anthropic.post(
-            "/v1/messages",
-            cast_to=httpx.Response,
-            body=cast(AnthropicBody, dict(payload)),
-            options={"headers": {**await self._headers(), **dict(extra_headers or {})}},
+        return await self._client.send_anthropic_messages(
+            payload,
             stream=stream,
+            extra_headers=extra_headers,
         )
 
     async def send_anthropic_count_tokens(
         self,
         payload: Mapping[str, Any],
     ) -> httpx.Response:
-        return await self._clients.anthropic.post(
-            "/v1/messages/count_tokens",
-            cast_to=httpx.Response,
-            body=cast(AnthropicBody, dict(payload)),
-            options={"headers": await self._headers()},
-        )
+        return await self._client.send_anthropic_count_tokens(payload)
 
     async def send_responses(
         self,
@@ -137,40 +122,16 @@ class CopilotUpstream:
         *,
         stream: bool = False,
     ) -> httpx.Response:
-        return await self._clients.openai.post(
-            "/responses",
-            cast_to=httpx.Response,
-            body=cast(OpenAIBody, dict(payload)),
-            options={"headers": await self._headers()},
-            stream=stream,
-        )
+        return await self._client.send_responses(payload, stream=stream)
 
     async def send_responses_headers(
         self,
         payload: Mapping[str, Any],
     ) -> httpx.Response:
-        try:
-            return await self._clients.openai.post(
-                "/responses",
-                cast_to=httpx.Response,
-                body=cast(OpenAIBody, dict(payload)),
-                options={"headers": await self._headers()},
-                stream=True,
-            )
-        except OpenAIAPIStatusError as error:
-            return error.response
-        except (httpx.TransportError, OpenAIAPIConnectionError) as error:
-            if is_responses_headers_pending_transport_error(error):
-                raise ResponsesHeadersPendingTransportError(error) from error
-            raise
+        return await self._client.send_responses_headers(payload)
 
     async def send_embeddings(
         self,
         payload: Mapping[str, Any],
     ) -> httpx.Response:
-        return await self._clients.openai.post(
-            "/embeddings",
-            cast_to=httpx.Response,
-            body=cast(OpenAIBody, dict(payload)),
-            options={"headers": await self._headers()},
-        )
+        return await self._client.send_embeddings(payload)

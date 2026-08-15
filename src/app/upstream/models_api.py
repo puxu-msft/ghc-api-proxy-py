@@ -4,6 +4,7 @@ from typing import Any, cast
 import anyio
 import httpx
 
+from app.ghc_client import fetch_models
 from app.models.common import ModelInfo
 
 
@@ -52,17 +53,12 @@ class ModelCatalog:
     async def refresh(self, headers: Mapping[str, str]) -> bool:
         if self._http is None:
             raise RuntimeError("model catalog has no HTTP client")
-        request_headers = dict(headers)
-        if self._etag is not None:
-            request_headers["If-None-Match"] = self._etag
-        response = await self._http.get(f"{self._base_url}/models", headers=request_headers)
-        if response.status_code == 304:
+        page = await fetch_models(self._http, self._base_url, headers, etag=self._etag)
+        if page is None:
             return False
-        response.raise_for_status()
-        data: dict[str, Any] = response.json()
-        self.replace_from_data(data)
-        if etag := response.headers.get("etag"):
-            self._etag = etag
+        self.replace_from_data(page.raw)
+        if page.etag:
+            self._etag = page.etag
         return True
 
     async def run_refresh_loop(

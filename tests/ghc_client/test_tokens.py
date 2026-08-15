@@ -2,41 +2,29 @@ import anyio
 import httpx
 import pytest
 
-from app.auth.copilot import CopilotTokenManager
-from app.auth.providers import GitHubTokenManager, GitHubTokenProvider, TokenInfo
+from app.ghc_client.tokens import CopilotTokenManager
 
 
-class StaticGitHubProvider(GitHubTokenProvider):
-    name = "static"
-    priority = 1
-    refreshable = False
+class StaticTokenSource:
+    async def get_token(self) -> str:
+        return "ghu_github"
 
-    async def is_available(self) -> bool:
-        return True
-
-    async def get_token(self) -> TokenInfo:
-        return TokenInfo(token="ghu_github", source="env")
+    async def refresh(self) -> str | None:
+        return None
 
 
-class RefreshableGitHubProvider(GitHubTokenProvider):
-    name = "refreshable"
-    priority = 1
-    refreshable = True
-
+class RefreshableTokenSource:
     def __init__(self) -> None:
         self.token = "old"
         self.refresh_calls = 0
 
-    async def is_available(self) -> bool:
-        return True
+    async def get_token(self) -> str:
+        return self.token
 
-    async def get_token(self) -> TokenInfo:
-        return TokenInfo(token=self.token, source="device-auth", refreshable=True)
-
-    async def refresh(self) -> TokenInfo:
+    async def refresh(self) -> str | None:
         self.refresh_calls += 1
         self.token = "new"
-        return TokenInfo(token=self.token, source="device-auth", refreshable=True)
+        return self.token
 
 
 @pytest.mark.asyncio
@@ -63,7 +51,7 @@ async def test_copilot_token_exchange_preserves_raw_response() -> None:
         "x-vscode-user-agent-library-version": "electron-fetch",
     }
     manager = CopilotTokenManager(
-        GitHubTokenManager([StaticGitHubProvider()]),
+        StaticTokenSource(),
         http_client,
         clock=lambda: 1000,
         identity_headers=identity_headers,
@@ -98,7 +86,7 @@ async def test_dynamic_token_headers_override_case_variant_identity_headers() ->
 
     http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     manager = CopilotTokenManager(
-        GitHubTokenManager([StaticGitHubProvider()]),
+        StaticTokenSource(),
         http_client,
         clock=lambda: 1000,
         identity_headers={
@@ -128,7 +116,7 @@ async def test_valid_copilot_token_is_cached() -> None:
 
     http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     manager = CopilotTokenManager(
-        GitHubTokenManager([StaticGitHubProvider()]),
+        StaticTokenSource(),
         http_client,
         clock=lambda: 1000,
     )
@@ -154,7 +142,7 @@ async def test_concurrent_refresh_is_single_flight() -> None:
 
     http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     manager = CopilotTokenManager(
-        GitHubTokenManager([StaticGitHubProvider()]),
+        StaticTokenSource(),
         http_client,
         clock=lambda: 1000,
     )
@@ -195,7 +183,7 @@ async def test_exchange_retries_transient_server_error() -> None:
 
     http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     manager = CopilotTokenManager(
-        GitHubTokenManager([StaticGitHubProvider()]),
+        StaticTokenSource(),
         http_client,
         clock=lambda: 1000,
         sleep=no_sleep,
@@ -211,7 +199,7 @@ async def test_exchange_retries_transient_server_error() -> None:
 
 @pytest.mark.asyncio
 async def test_401_refreshes_github_token_before_retry() -> None:
-    provider = RefreshableGitHubProvider()
+    provider = RefreshableTokenSource()
     seen_headers: list[httpx.Headers] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -225,7 +213,7 @@ async def test_401_refreshes_github_token_before_retry() -> None:
 
     http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     manager = CopilotTokenManager(
-        GitHubTokenManager([provider]),
+        provider,
         http_client,
         clock=lambda: 1000,
         identity_headers={
@@ -261,7 +249,7 @@ async def test_401_refreshes_github_token_before_retry() -> None:
 def test_next_refresh_delay_uses_server_hint_with_safety_margin() -> None:
     http_client = httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(500)))
     manager = CopilotTokenManager(
-        GitHubTokenManager([StaticGitHubProvider()]),
+        StaticTokenSource(),
         http_client,
         clock=lambda: 1000,
         minimum_refresh_interval=60,
@@ -288,7 +276,7 @@ async def test_refresh_loop_survives_exhausted_refresh_failure() -> None:
 
     http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     manager = CopilotTokenManager(
-        GitHubTokenManager([StaticGitHubProvider()]),
+        StaticTokenSource(),
         http_client,
         sleep=stop_after_retry,
         max_exchange_attempts=1,
@@ -317,7 +305,7 @@ async def test_refresh_loop_survives_invalid_success_payload() -> None:
         transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"unexpected": True}))
     )
     manager = CopilotTokenManager(
-        GitHubTokenManager([StaticGitHubProvider()]),
+        StaticTokenSource(),
         http_client,
         sleep=stop,
     )

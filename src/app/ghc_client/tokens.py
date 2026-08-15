@@ -2,15 +2,25 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Protocol
 
 import anyio
 import httpx
 
-from app.auth.providers import GitHubTokenManager
-
 TOKEN_URL = "https://api.github.com/copilot_internal/v2/token"
 COPILOT_INTERNAL_API_VERSION = "2025-04-01"
+
+
+class GitHubTokenSource(Protocol):
+    """Where GitHub tokens come from.
+
+    The library does not care whether the token comes from a flag, an env var, a file or a flow.
+    `refresh()` returns `None` when this source cannot produce a new token.
+    """
+
+    async def get_token(self) -> str: ...
+
+    async def refresh(self) -> str | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,9 +32,14 @@ class CopilotTokenInfo:
 
 
 class CopilotTokenManager:
+    """Exchanges a GitHub token for a Copilot token and keeps it valid.
+
+    Concurrent `get_token()` callers share a single exchange request via the internal lock.
+    """
+
     def __init__(
         self,
-        github_tokens: GitHubTokenManager,
+        github_tokens: GitHubTokenSource,
         http_client: httpx.AsyncClient,
         *,
         clock: Callable[[], float] = time.time,
@@ -76,6 +91,8 @@ class CopilotTokenManager:
             try:
                 info = await self.refresh(force=True)
             except Exception:
+                # A failed background refresh must not end the loop.
+                # get_token() still refreshes synchronously and propagates the error to callers.
                 await self._sleep(self._minimum_refresh_interval)
 
     async def refresh(self, *, force: bool = False) -> CopilotTokenInfo:
@@ -99,20 +116,17 @@ class CopilotTokenManager:
     async def _exchange_with_retry(self) -> dict[str, Any]:
         last_error: Exception | None = None
         for attempt in range(self._max_exchange_attempts):
-            github = await self._github_tokens.get_token()
+            github_token = await self._github_tokens.get_token()
             try:
                 headers = httpx.Headers(self._identity_headers)
                 headers.update(
                     {
                         "Accept": "application/json",
-                        "Authorization": f"token {github.token}",
+                        "Authorization": f"token {github_token}",
                         "X-GitHub-Api-Version": COPILOT_INTERNAL_API_VERSION,
                     }
                 )
-                response = await self._http.get(
-                    TOKEN_URL,
-                    headers=headers,
-                )
+                response = await self._http.get(TOKEN_URL, headers=headers)
                 response.raise_for_status()
                 raw: dict[str, Any] = response.json()
                 return raw

@@ -1,11 +1,7 @@
 from app.config.settings import AppSettings
+from app.ghc_client import resolve_base_url
+from app.upstream.ghc_settings import ghc_config_from_settings
 
 
 def resolve_copilot_base_url(settings: AppSettings) -> str:
-    override = settings.upstream.ghc_api_base_url.rstrip("/")
-    if override:
-        return override
-    account_type = settings.auth.account_type or "individual"
-    if account_type == "individual":
-        return "https://api.githubcopilot.com"
-    return f"https://api.{account_type}.githubcopilot.com"
+    return resolve_base_url(ghc_config_from_settings(settings))

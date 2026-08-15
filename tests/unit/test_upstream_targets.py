@@ -4,12 +4,12 @@ import httpx
 import openai
 import pytest
 
-from app.auth.copilot import CopilotTokenManager
 from app.auth.providers import GitHubTokenManager, GitHubTokenProvider, TokenInfo
 from app.config.settings import AppSettings
+from app.ghc_client import CopilotTokenManager
 from app.upstream.base import ResponsesHeadersPendingTransportError
 from app.upstream.client import create_copilot_sdk_clients, create_sdk_clients
-from app.upstream.copilot import CopilotUpstream
+from app.upstream.copilot import CopilotUpstream, GitHubTokenSourceAdapter
 from app.upstream.generic import GenericUpstream
 
 
@@ -48,7 +48,7 @@ async def test_copilot_upstream_returns_unconsumed_raw_anthropic_response() -> N
         {"upstream": {"ghc_api_base_url": "https://copilot.example"}}
     )
     token_manager = CopilotTokenManager(
-        GitHubTokenManager([StaticProvider()]),
+        GitHubTokenSourceAdapter(GitHubTokenManager([StaticProvider()])),
         http_client,
         clock=lambda: 1000,
     )

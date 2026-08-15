@@ -9,8 +9,6 @@ import httpx
 
 from app.anthropic.client import AnthropicClient
 from app.anthropic.thinking.quarantine import ThinkingQuarantineStore
-from app.auth.copilot import CopilotTokenManager
-from app.auth.github import GitHubClient, infer_account_type
 from app.auth.providers import (
     CLITokenProvider,
     EnvTokenProvider,
@@ -18,6 +16,11 @@ from app.auth.providers import (
     GitHubTokenManager,
 )
 from app.config.paths import user_data_path
+from app.ghc_client import (
+    CopilotTokenManager,
+    GitHubAccountClient,
+    infer_account_type,
+)
 from app.openai.client import OpenAIClient
 from app.openai.responses_ws import ResponsesWebSocketClient
 from app.runtime import RuntimeState
@@ -34,6 +37,7 @@ from app.upstream.client import (
 )
 from app.upstream.copilot import (
     CopilotUpstream,
+    GitHubTokenSourceAdapter,
     build_copilot_headers,
     build_copilot_identity_headers,
 )
@@ -166,7 +170,7 @@ async def initialize_upstream_services(
     github_info = await github_tokens.get_token()
     runtime.github_token_ready = True
     copilot_tokens = CopilotTokenManager(
-        github_tokens,
+        GitHubTokenSourceAdapter(github_tokens),
         client,
         identity_headers=build_copilot_identity_headers(settings),
     )
@@ -175,7 +179,7 @@ async def initialize_upstream_services(
 
     account_type = settings.auth.account_type
     if account_type is None and not settings.upstream.ghc_api_base_url:
-        usage = await GitHubClient(client).get_copilot_usage(github_info.token)
+        usage = await GitHubAccountClient(client).get_copilot_usage(github_info.token)
         inferred = infer_account_type(usage)
         account_type = cast(AccountType, inferred or "individual")
         settings = settings.model_copy(
