@@ -15,6 +15,7 @@ from app.config.paths import config_file_path
 from app.config.settings import AppSettings
 from app.generation import GenerationLifecycle
 from app.generation_identity import GenerationIdentityError, parse_generation_id
+from app.lifecycle.entry import StandaloneOptions, run_standalone
 from app.rolling_controller import RollingController, plan_to_json
 from app.rolling_runtime import run_systemd_generation
 from app.server import create_app
@@ -77,6 +78,8 @@ def start(
     ] = None,
     manual: Annotated[bool, typer.Option("--manual")] = False,
     generate_config: Annotated[bool, typer.Option("--generate-config")] = False,
+    restart: Annotated[bool, typer.Option("--restart")] = False,
+    pidfile: Annotated[Path | None, typer.Option("--pidfile")] = None,
 ) -> None:
     """Start the API proxy server."""
     if generate_config:
@@ -120,21 +123,28 @@ def start(
 
     settings = load_settings(config_path=config, cli_overrides=cli_overrides)
     application = create_app(settings)
-    if fd is None:
-        uvicorn.run(
-            application,
-            host=settings.host,
-            port=settings.port,
-            log_config=None,
-            timeout_graceful_shutdown=settings.shutdown.graceful_timeout,
-        )
-    else:
+    if fd is not None:
+        # An inherited listener means systemd owns it, and lifecycle.md's escalating shutdown is
+        # written for the stand-alone section only. Whether it also governs the systemd path is
+        # recorded as an open question for the user, so that path is left exactly as it was.
         uvicorn.run(
             application,
             fd=fd,
             log_config=None,
             timeout_graceful_shutdown=settings.shutdown.graceful_timeout,
         )
+        return
+
+    # Served through app.lifecycle rather than uvicorn.run: the escalating shutdown and the
+    # SO_REUSEPORT handover both need to own the listener, which uvicorn.run does not give up.
+    options = StandaloneOptions(
+        host=settings.host,
+        port=settings.port,
+        cleanup_timeout=settings.shutdown.graceful_timeout,
+        pidfile=pidfile,
+        restart=restart,
+    )
+    run(partial(run_standalone, application, options))
 
 
 @app.command("start-rolling")

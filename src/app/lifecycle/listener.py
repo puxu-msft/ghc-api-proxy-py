@@ -44,6 +44,31 @@ def _resolve(host: str, port: int) -> tuple[socket.AddressFamily, tuple[str, int
     raise ListenerBindError(f"no IPv4 or IPv6 address for {host!r}:{port}")
 
 
+def adopt_listener(fd: int) -> ActivatedSocketSet:
+    """Wrap a listening socket this process was handed, without binding anything.
+
+    The address is read back off the socket rather than taken from configuration, so an inherited
+    listener cannot be described as something it is not.
+    """
+    try:
+        sock = socket.socket(fileno=fd)
+    except OSError as error:
+        raise ListenerBindError(f"cannot adopt fd {fd}: {error}") from error
+    try:
+        bound = sock.getsockname()
+        expected = ExpectedListener(
+            name=LISTENER_NAME,
+            family=sock.family,
+            host=str(bound[0]),
+            port=int(bound[1]),
+        )
+        return ActivatedSocketSet({LISTENER_NAME: sock}, [expected])
+    except OSError as error:
+        raise ListenerBindError(f"cannot adopt fd {fd}: {error}") from error
+    finally:
+        sock.close()
+
+
 def bind_listener(host: str, port: int, *, reuse_port: bool = True) -> ActivatedSocketSet:
     """Bind and listen, returning the same listener container the systemd path produces.
 

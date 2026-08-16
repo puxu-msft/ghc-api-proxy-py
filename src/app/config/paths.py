@@ -27,6 +27,11 @@ def spec_config_file_path() -> Path:
     return user_data_path() / "config.yaml"
 
 
+def standalone_pidfile_path() -> Path:
+    """Where the stand-alone pidfile lives when the operator names none."""
+    return user_data_path() / "standalone.pid"
+
+
 def expand_user_path(value: str) -> Path:
     """Expand a configured path the way the spec writes them.
 

@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -6,6 +7,7 @@ import typer.rich_utils
 from typer.testing import CliRunner
 
 from app.cli import app
+from app.lifecycle.entry import StandaloneOptions
 
 runner = CliRunner()
 
@@ -24,6 +26,16 @@ def plain_help_rendering(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(typer.rich_utils, "COLOR_SYSTEM", None)
     monkeypatch.setattr(typer.rich_utils, "FORCE_TERMINAL", False)
     monkeypatch.setattr(typer.rich_utils, "MAX_WIDTH", 200)
+
+
+def served_application(run: Mock) -> Any:
+    """The ASGI app handed to the lifecycle runner."""
+    return run.call_args.args[0].args[0]
+
+
+def serve_options(run: Mock) -> StandaloneOptions:
+    """The options handed to the lifecycle runner."""
+    return run.call_args.args[0].args[1]
 
 
 def test_cli_smoke() -> None:
@@ -117,9 +129,14 @@ def test_start_generates_config_and_exits(tmp_path: Path) -> None:
     assert str(config_path) in result.stdout
 
 
-def test_start_merges_cli_overrides_and_runs_uvicorn(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_start_merges_cli_overrides_and_serves(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CLI options must reach both the settings and the server that binds the listener.
+
+    The target moved from `uvicorn.run` to `app.lifecycle`, which owns the listener and the
+    escalating shutdown. The guarded invariant is unchanged: these options must arrive.
+    """
     run = Mock()
-    monkeypatch.setattr("app.cli.uvicorn.run", run)
+    monkeypatch.setattr("app.cli.run", run)
 
     result = runner.invoke(
         app,
@@ -137,46 +154,74 @@ def test_start_merges_cli_overrides_and_runs_uvicorn(monkeypatch: pytest.MonkeyP
     )
 
     assert result.exit_code == 0
-    application = run.call_args.args[0]
+    application = served_application(run)
     assert application.state.runtime.settings.port == 4242
     assert application.state.runtime.settings.host == "0.0.0.0"
     assert application.state.runtime.settings.shutdown.graceful_timeout == 7
     assert application.state.runtime.settings.approval.enabled is True
     assert application.state.runtime.settings.observability.log_level == "DEBUG"
-    run.assert_called_once_with(
-        application,
-        host="0.0.0.0",
-        port=4242,
-        log_config=None,
-        timeout_graceful_shutdown=7,
-    )
+    options = serve_options(run)
+    assert options.host == "0.0.0.0"
+    assert options.port == 4242
+    assert options.cleanup_timeout == 7
+    assert options.fd is None
 
 
 def test_start_passes_inherited_socket_fd_to_uvicorn(monkeypatch: pytest.MonkeyPatch) -> None:
-    run = Mock()
-    monkeypatch.setattr("app.cli.uvicorn.run", run)
+    """An inherited listener stays on the pre-existing path.
+
+    lifecycle.md writes the escalating shutdown for the stand-alone section, and whether it also
+    governs the systemd path is an open question for the user. Until it is answered, `--fd` keeps
+    the behaviour the systemd units already rely on.
+    """
+    uvicorn_run = Mock()
+    standalone = Mock()
+    monkeypatch.setattr("app.cli.uvicorn.run", uvicorn_run)
+    monkeypatch.setattr("app.cli.run_standalone", standalone)
 
     result = runner.invoke(app, ["start", "--fd", "3"])
 
     assert result.exit_code == 0
-    application = run.call_args.args[0]
+    application = uvicorn_run.call_args.args[0]
     assert application.state.runtime.settings.host == "127.0.0.1"
     assert application.state.runtime.settings.port == 4141
-    run.assert_called_once_with(
+    uvicorn_run.assert_called_once_with(
         application,
         fd=3,
         log_config=None,
         timeout_graceful_shutdown=300,
     )
+    standalone.assert_not_called()
+
+
+def test_start_forwards_the_restart_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    # --restart is what tells the new process to signal the one it replaces.
+    run = Mock()
+    monkeypatch.setattr("app.cli.run", run)
+
+    result = runner.invoke(app, ["start", "--restart"])
+
+    assert result.exit_code == 0
+    assert serve_options(run).restart is True
+
+
+def test_start_does_not_request_a_restart_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    run = Mock()
+    monkeypatch.setattr("app.cli.run", run)
+
+    assert runner.invoke(app, ["start"]).exit_code == 0
+    assert serve_options(run).restart is False
 
 
 def test_start_rolling_uses_systemd_generation_runner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     generation_runner = AsyncMock()
-    uvicorn_run = Mock()
+    standalone = Mock()
     monkeypatch.setattr("app.cli.run_systemd_generation", generation_runner)
-    monkeypatch.setattr("app.cli.uvicorn.run", uvicorn_run)
+    # Not `app.cli.run`: this path really has to run its coroutine. What is asserted is that the
+    # rolling entry does not go through the stand-alone one.
+    monkeypatch.setattr("app.cli.run_standalone", standalone)
 
     result = runner.invoke(
         app,
@@ -201,7 +246,7 @@ def test_start_rolling_uses_systemd_generation_runner(
         "release_id": "release-test",
         "control_path": Path("/tmp/ghc-generation-test.sock"),
     }
-    uvicorn_run.assert_not_called()
+    standalone.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -275,7 +320,7 @@ def test_start_rejects_stdin_as_inherited_socket_fd(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     run = Mock()
-    monkeypatch.setattr("app.cli.uvicorn.run", run)
+    monkeypatch.setattr("app.cli.run", run)
 
     result = runner.invoke(app, ["start", "--fd", "0"])
 
@@ -290,7 +335,7 @@ def test_start_rejects_fd_with_explicit_bind_option(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     run = Mock()
-    monkeypatch.setattr("app.cli.uvicorn.run", run)
+    monkeypatch.setattr("app.cli.run", run)
 
     result = runner.invoke(app, ["start", "--fd", "3", *bind_option])
 
