@@ -2,11 +2,28 @@ from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+import typer.rich_utils
 from typer.testing import CliRunner
 
 from app.cli import app
 
-runner = CliRunner(env={"COLUMNS": "200"})
+runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def plain_help_rendering(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Render help as plain, wide text for the assertions in this file only.
+
+    Typer builds its console per call from these module globals.
+    Setting them here beats an environment variable: no import-order dependency, no leak elsewhere.
+
+    Left alone, `--port` arrives as two styled runs with an ANSI escape between the dashes.
+    Long option names are also truncated at 80 columns.
+    Both make an offered option look absent.
+    """
+    monkeypatch.setattr(typer.rich_utils, "COLOR_SYSTEM", None)
+    monkeypatch.setattr(typer.rich_utils, "FORCE_TERMINAL", False)
+    monkeypatch.setattr(typer.rich_utils, "MAX_WIDTH", 200)
 
 
 def test_cli_smoke() -> None:

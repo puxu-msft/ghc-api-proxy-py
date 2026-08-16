@@ -43,7 +43,9 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-addopts = "--strict-markers --strict-config"
+# tests/tui is excluded from the default sweep and has its own entry; see tests/tui/conftest.py.
+# `--ignore` only drops it from directory discovery, so naming the path still runs it.
+addopts = "--strict-markers --strict-config --ignore=tests/tui"
 asyncio_mode = "auto"
 testpaths = ["tests"]
 
