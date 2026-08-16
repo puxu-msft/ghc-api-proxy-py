@@ -30,6 +30,7 @@ dependencies = [
     "tiktoken",
     "typer",
     "uvicorn",
+    "cryptography>=50.0.0",
 ]
 
 [dependency-groups]
