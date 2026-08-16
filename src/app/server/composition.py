@@ -4,7 +4,7 @@ Builds the chain a request travels: config -> provider -> pipeline -> driver.
 Everything is constructed once at startup and handed down, so nothing reaches for a global.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import httpx
 from anthropic import AsyncAnthropic
@@ -32,6 +32,7 @@ from app.model_provider import (
     resolve_default_name,
 )
 from app.pipeline.events import FrozenSubscribers, SubscriberRegistry
+from app.pipeline.rate_limiting import RateLimiter
 from app.pipeline.request import RequestContext
 from app.pipeline.translation_driver import TranslatorRegistry, default_registry
 from app.upstream.copilot import GitHubTokenSourceAdapter
@@ -83,6 +84,10 @@ class Chain:
     translators: TranslatorRegistry
     subscribers: FrozenSubscribers[RequestContext]
     http_client: httpx.AsyncClient
+    rate_limiters: dict[str, RateLimiter] = field(default_factory=lambda: dict[str, RateLimiter]())
+
+    def rate_limiter_for(self, provider_name: str) -> RateLimiter:
+        return self.rate_limiters[provider_name]
 
     async def aclose(self) -> None:
         await self.http_client.aclose()
@@ -177,6 +182,8 @@ def build_chain(
         translators=default_registry(),
         subscribers=(subscribers or SubscriberRegistry[RequestContext]()).freeze(),
         http_client=http_client,
+        # One limiter per provider: a limit on one upstream must not throttle another.
+        rate_limiters={name: RateLimiter(config.rate_limiter) for name in providers},
     )
 
 

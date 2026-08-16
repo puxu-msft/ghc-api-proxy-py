@@ -25,6 +25,7 @@ from app.pipeline.direct_driver.openai_chat_completions import OpenAIChatComplet
 from app.pipeline.direct_driver.openai_embeddings import OpenAIEmbeddingsDriver
 from app.pipeline.direct_driver.openai_responses import OpenAIResponsesDriver
 from app.pipeline.events import FrozenSubscribers
+from app.pipeline.rate_limiting import RateLimiter
 from app.pipeline.request import RequestContext
 
 
@@ -38,6 +39,7 @@ class DriverFactory(Protocol):
         *,
         budget: Budget,
         attempt_deadline: int = 0,
+        rate_limiter: RateLimiter | None = None,
     ) -> DirectDriver: ...
 
 

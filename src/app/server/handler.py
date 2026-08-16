@@ -80,6 +80,7 @@ async def handle(chain: Chain, context: RequestContext) -> HandledRequest:
         chain.subscribers,
         budget=LedgerBudget(RetryLedger(chain.config.upstream_request_retry)),
         attempt_deadline=attempt_deadline,
+        rate_limiter=chain.rate_limiter_for(provider.name),
     )
     outcome = await driver.run(context)
     return HandledRequest(context=context, route=route, outcome=outcome)

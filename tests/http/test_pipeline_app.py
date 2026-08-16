@@ -335,3 +335,59 @@ def test_untranslated_route_body_is_returned_unchanged() -> None:
     )
     response = client.post("/v1/messages", json={"model": "claude-model", "messages": []})
     assert response.json()["custom"] == {"kept": True}
+
+
+def test_upstream_429_is_seen_by_the_rate_limiter() -> None:
+    # A 429 must reach the limiter, not merely surface as an error.
+    from app.pipeline.rate_limiting import RateLimitMode
+
+    provider, http_client = make_provider(
+        lambda request: (
+            httpx.Response(200, json={"token": "c", "expires_at": 5000, "refresh_in": 1500})
+            if request.url.host == "api.github.com"
+            else httpx.Response(429, json={"error": "slow down"})
+        )
+    )
+    config = ProxyConfig.model_validate(
+        {
+            "model_providers": {"ghc": {"type": "github_copilot", "base_url": BASE_URL}},
+            "default_model_provider": "ghc",
+            "rate_limiter": {"retry_interval": 0, "request_interval": 0},
+            "upstream_request_retry": {"max_total": 0},
+        }
+    )
+    providers: dict[str, ModelProvider] = {"ghc": provider}
+    chain = build_chain(config, http_client=http_client, providers=providers)
+    client = TestClient(create_pipeline_app(chain))
+
+    response = client.post("/v1/messages", json={"model": "claude-model", "messages": []})
+
+    assert response.status_code == 502
+    assert chain.rate_limiter_for("ghc").mode is RateLimitMode.LIMITED
+
+
+def test_upstream_503_does_not_enter_limited_mode() -> None:
+    # The spec keeps 503 out of the reactive triggers.
+    from app.pipeline.rate_limiting import RateLimitMode
+
+    provider, http_client = make_provider(
+        lambda request: (
+            httpx.Response(200, json={"token": "c", "expires_at": 5000, "refresh_in": 1500})
+            if request.url.host == "api.github.com"
+            else httpx.Response(503, json={"error": "unavailable"})
+        )
+    )
+    config = ProxyConfig.model_validate(
+        {
+            "model_providers": {"ghc": {"type": "github_copilot", "base_url": BASE_URL}},
+            "default_model_provider": "ghc",
+            "upstream_request_retry": {"max_total": 0},
+        }
+    )
+    providers: dict[str, ModelProvider] = {"ghc": provider}
+    chain = build_chain(config, http_client=http_client, providers=providers)
+    client = TestClient(create_pipeline_app(chain))
+
+    client.post("/v1/messages", json={"model": "claude-model", "messages": []})
+
+    assert chain.rate_limiter_for("ghc").mode is RateLimitMode.NORMAL

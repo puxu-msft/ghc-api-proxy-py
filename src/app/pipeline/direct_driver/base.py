@@ -15,7 +15,14 @@ import httpx
 
 from app.model_provider import ModelEndpoint, ModelProvider
 from app.pipeline.events import FrozenSubscribers
-from app.pipeline.exceptions import Disposition, PipelineAbort, UpstreamTimeout, classify
+from app.pipeline.exceptions import (
+    Disposition,
+    PipelineAbort,
+    UpstreamError,
+    UpstreamTimeout,
+    classify,
+)
+from app.pipeline.rate_limiting import RateLimiter
 from app.pipeline.request import RequestContext
 from app.pipeline.retry import RetryLedger, reason_for
 
@@ -91,12 +98,14 @@ class DirectDriver:
         *,
         budget: Budget,
         attempt_deadline: int = 0,
+        rate_limiter: RateLimiter | None = None,
     ) -> None:
         self._endpoint = endpoint
         self._provider = provider
         self._subscribers = subscribers
         self._budget = budget
         self._attempt_deadline = attempt_deadline
+        self._rate_limiter = rate_limiter
 
     @property
     def endpoint(self) -> ModelEndpoint:
@@ -122,6 +131,8 @@ class DirectDriver:
                 # Subscribers edit the context payload.
                 # Re-read it rather than trusting the copy taken when the attempt opened.
                 attempt.payload = dict(context.payload)
+                if self._rate_limiter is not None:
+                    context.extras["rate_limit_wait_s"] = await self._rate_limiter.acquire()
                 response = await self._send(context, attempt.payload)
             except BaseException as error:
                 attempt.error = str(error)
@@ -131,6 +142,23 @@ class DirectDriver:
 
             attempt.status_code = response.status_code
             outcome.response = response
+            if self._rate_limiter is not None:
+                headers = dict(response.headers)
+                if self._rate_limiter.observe_failure(response.status_code, headers):
+                    # A limited status is not a delivered response; let the retry path see it.
+                    outcome.response = None
+                    attempt.error = f"upstream returned {response.status_code}"
+                    if not await self._handle_failure(
+                        UpstreamError(
+                            f"upstream returned {response.status_code}",
+                            status_code=response.status_code,
+                        ),
+                        context,
+                        outcome,
+                    ):
+                        return outcome
+                    continue
+                self._rate_limiter.observe_success(headers)
             try:
                 await self._publish(EVENT_ATTEMPT_SUCCEEDED, context, outcome)
                 await self._publish(EVENT_REQUEST_SUCCEEDED, context, outcome)
@@ -142,6 +170,25 @@ class DirectDriver:
                 continue
             return outcome
 
+    @staticmethod
+    def _upstream_status(error: BaseException) -> tuple[int | None, dict[str, str]]:
+        """Read the status and headers off a failure.
+
+        The SDKs raise on 4xx and 5xx rather than returning a response, so a limited status
+        arrives here as an exception. Reading it only from a returned response would leave the
+        limiter blind to every 429.
+        """
+        status = getattr(error, "status_code", None)
+        headers: dict[str, str] = {}
+        response = getattr(error, "response", None)
+        if response is not None:
+            raw = getattr(response, "headers", None)
+            if raw is not None:
+                headers = {str(k): str(v) for k, v in dict(raw).items()}
+            if status is None:
+                status = getattr(response, "status_code", None)
+        return (status if isinstance(status, int) else None), headers
+
     async def _handle_failure(
         self,
         error: BaseException,
@@ -149,6 +196,10 @@ class DirectDriver:
         outcome: DriverOutcome,
     ) -> bool:
         """Return whether to attempt again. Records the terminal error when not."""
+        if self._rate_limiter is not None:
+            status, headers = self._upstream_status(error)
+            if status is not None:
+                self._rate_limiter.observe_failure(status, headers)
         await self._publish(EVENT_ATTEMPT_FAILED, context, outcome)
         disposition = classify(error)
         if disposition is Disposition.RETRY:
