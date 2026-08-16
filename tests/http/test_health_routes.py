@@ -1,7 +1,7 @@
 from fastapi.testclient import TestClient
 
 from app.config.settings import AppSettings
-from app.generation import GenerationLifecycle, GenerationPhase
+from app.lifecycle.rolling.generation.phases import GenerationLifecycle, GenerationPhase
 from app.routes.health import readiness
 from app.runtime import RuntimeState
 from app.server import create_app

@@ -2,11 +2,11 @@ from pathlib import Path
 
 import anyio
 
-from app.generation import GenerationLifecycle
 from app.history.in_flight import InFlightHistory
 from app.history.sqlite.writer import HistoryWriter
 from app.history.types import HistoryEntry
 from app.history.ws import WebSocketManager
+from app.lifecycle.rolling.generation.phases import GenerationLifecycle
 
 
 class HistoryStore:

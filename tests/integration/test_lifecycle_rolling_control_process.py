@@ -59,8 +59,8 @@ def _child_script() -> str:
         from pathlib import Path
         from fastapi import FastAPI
         from app.config.settings import AppSettings
-        from app.generation import GenerationLifecycle
-        from app.rolling_runtime import RollingRuntime
+        from app.lifecycle.rolling.generation.phases import GenerationLifecycle
+        from app.lifecycle.rolling.runtime import RollingRuntime
         from app.socket_activation import ActivatedSocketSet, ExpectedListener
 
         @dataclass

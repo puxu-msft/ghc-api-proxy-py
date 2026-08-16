@@ -7,7 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from app.generation_control_client import GenerationControlClient, GenerationControlClientError
+from app.lifecycle.rolling.generation.control_client import (
+    GenerationControlClient,
+    GenerationControlClientError,
+)
 
 
 async def _server(path: Path, response: dict[str, object] | None) -> asyncio.Server:

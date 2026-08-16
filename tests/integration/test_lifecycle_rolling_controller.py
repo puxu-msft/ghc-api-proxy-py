@@ -4,17 +4,17 @@ from pathlib import Path
 
 import pytest
 
-from app.generation_control_client import (
-    GenerationControlClientError,
-    GenerationStatus,
-    TokenizationFlushReceipt,
-)
-from app.rolling_controller import (
+from app.lifecycle.rolling.controller import (
     ColdActivationContainedError,
     RollingController,
     RollingControllerError,
 )
-from app.rolling_state import GenerationRecord, RollingStateStore
+from app.lifecycle.rolling.generation.control_client import (
+    GenerationControlClientError,
+    GenerationStatus,
+    TokenizationFlushReceipt,
+)
+from app.lifecycle.rolling.state import GenerationRecord, RollingStateStore
 from app.systemctl_adapter import UnitStatus
 from app.tokenization.snapshot_store import TokenizationSnapshotStore
 from app.wire_json import loads

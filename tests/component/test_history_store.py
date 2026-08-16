@@ -3,13 +3,13 @@ from pathlib import Path
 import pytest
 
 from app.errors import ApiError, ErrorCategory
-from app.generation import GenerationLifecycle
 from app.history.consumer import HistoryConsumer
 from app.history.in_flight import InFlightHistory
 from app.history.sessions import identify_session
 from app.history.sqlite.writer import HistoryWriter
 from app.history.store import HistoryStore
 from app.history.types import HistoryEntry, ModelRef
+from app.lifecycle.rolling.generation.phases import GenerationLifecycle
 from app.pipeline.context import (
     RequestContext,
     RequestConversionFactRecord,

@@ -10,8 +10,8 @@ import pytest
 from fastapi import FastAPI
 
 from app.config.settings import AppSettings
-from app.generation import GenerationLifecycle
-from app.rolling_runtime import (
+from app.lifecycle.rolling.generation.phases import GenerationLifecycle
+from app.lifecycle.rolling.runtime import (
     ROLLING_LISTENERS,
     ROLLING_PORT,
     RollingRuntime,
@@ -20,6 +20,8 @@ from app.rolling_runtime import (
 )
 from app.socket_activation import ActivatedSocketSet, ExpectedListener
 from app.tokenization.state_store import TokenizationStateStore
+
+LISTENER_ADAPTER = "app.lifecycle.rolling.runtime.UvicornListenerAdapter"
 
 
 @dataclass
@@ -64,7 +66,7 @@ async def test_startup_arms_then_notifies(monkeypatch: pytest.MonkeyPatch) -> No
     adapter.stop_accepting = AsyncMock()
     adapter.shutdown_lifespan = AsyncMock()
     adapter.close_masters = AsyncMock()
-    monkeypatch.setattr("app.rolling_runtime.UvicornListenerAdapter", _adapter_factory(adapter))
+    monkeypatch.setattr(LISTENER_ADAPTER, _adapter_factory(adapter))
     runtime: RollingRuntime
 
     def ready() -> None:
@@ -94,7 +96,7 @@ async def test_unready_dependencies_never_arm_or_notify(monkeypatch: pytest.Monk
     adapter.stop_accepting = AsyncMock()
     adapter.shutdown_lifespan = AsyncMock()
     adapter.close_masters = AsyncMock()
-    monkeypatch.setattr("app.rolling_runtime.UvicornListenerAdapter", _adapter_factory(adapter))
+    monkeypatch.setattr(LISTENER_ADAPTER, _adapter_factory(adapter))
     notify_ready = Mock()
     runtime = RollingRuntime(_app(ready=False), Mock(), notify_ready_fn=notify_ready)
 
@@ -116,7 +118,7 @@ async def test_notify_failure_cleans_up(monkeypatch: pytest.MonkeyPatch) -> None
     adapter.stop_accepting = AsyncMock()
     adapter.shutdown_lifespan = AsyncMock()
     adapter.close_masters = AsyncMock()
-    monkeypatch.setattr("app.rolling_runtime.UvicornListenerAdapter", _adapter_factory(adapter))
+    monkeypatch.setattr(LISTENER_ADAPTER, _adapter_factory(adapter))
     runtime = RollingRuntime(
         _app(ready=True),
         Mock(),
@@ -146,7 +148,7 @@ async def test_request_stop_unblocks_wait_and_shutdown_notifies(
 
     adapter.shutdown_lifespan = AsyncMock(side_effect=cleanup)
     adapter.close_masters = AsyncMock(side_effect=lambda: events.append("close"))
-    monkeypatch.setattr("app.rolling_runtime.UvicornListenerAdapter", _adapter_factory(adapter))
+    monkeypatch.setattr(LISTENER_ADAPTER, _adapter_factory(adapter))
     stopping = Mock(side_effect=lambda: events.append("stopping"))
     runtime = RollingRuntime(
         _app(ready=True),
@@ -178,7 +180,7 @@ async def test_startup_failure_always_cleans_up(
     getattr(adapter, failure_point).side_effect = RuntimeError(f"{failure_point} failed")
     adapter.shutdown_lifespan = AsyncMock()
     adapter.close_masters = AsyncMock()
-    monkeypatch.setattr("app.rolling_runtime.UvicornListenerAdapter", _adapter_factory(adapter))
+    monkeypatch.setattr(LISTENER_ADAPTER, _adapter_factory(adapter))
     runtime = RollingRuntime(_app(ready=True), Mock(), notify_ready_fn=Mock())
 
     with pytest.raises(RuntimeError, match=f"{failure_point} failed"):
@@ -204,7 +206,7 @@ async def test_stopping_notify_failure_does_not_block_cleanup(
 
     adapter.shutdown_lifespan = AsyncMock(side_effect=cleanup)
     adapter.close_masters = AsyncMock(side_effect=lambda: events.append("close"))
-    monkeypatch.setattr("app.rolling_runtime.UvicornListenerAdapter", _adapter_factory(adapter))
+    monkeypatch.setattr(LISTENER_ADAPTER, _adapter_factory(adapter))
     runtime: RollingRuntime
 
     def ready() -> None:
@@ -239,7 +241,7 @@ async def test_signal_handlers_are_installed_before_startup(
     adapter.stop_accepting = AsyncMock()
     adapter.shutdown_lifespan = AsyncMock()
     adapter.close_masters = AsyncMock()
-    monkeypatch.setattr("app.rolling_runtime.UvicornListenerAdapter", _adapter_factory(adapter))
+    monkeypatch.setattr(LISTENER_ADAPTER, _adapter_factory(adapter))
     loop = __import__("asyncio").get_running_loop()
     original_add = loop.add_signal_handler
 
@@ -278,7 +280,7 @@ async def test_stop_scheduled_during_arm_prevents_ready(
     adapter.register_dormant = AsyncMock()
     adapter.shutdown_lifespan = AsyncMock()
     adapter.close_masters = AsyncMock()
-    monkeypatch.setattr("app.rolling_runtime.UvicornListenerAdapter", _adapter_factory(adapter))
+    monkeypatch.setattr(LISTENER_ADAPTER, _adapter_factory(adapter))
     notify_ready = Mock()
     notify_stopping = Mock()
     runtime: RollingRuntime
@@ -334,10 +336,10 @@ async def test_run_generation_consumes_supplied_environment_object(
 
     run = AsyncMock()
     monkeypatch.setattr(
-        "app.rolling_runtime.ActivatedSocketSet.from_systemd_environment",
+        "app.lifecycle.rolling.runtime.ActivatedSocketSet.from_systemd_environment",
         collect,
     )
-    monkeypatch.setattr("app.rolling_runtime.RollingRuntime.run", run)
+    monkeypatch.setattr("app.lifecycle.rolling.runtime.RollingRuntime.run", run)
 
     await run_systemd_generation(_app(ready=True), environ=environment)
 
@@ -365,7 +367,7 @@ async def test_runtime_quiesce_resume_is_one_serial_transition(
 
     adapter.stop_accepting = AsyncMock(side_effect=stop_accepting)
     adapter.resume_accepting = AsyncMock(side_effect=resume_accepting)
-    monkeypatch.setattr("app.rolling_runtime.UvicornListenerAdapter", _adapter_factory(adapter))
+    monkeypatch.setattr(LISTENER_ADAPTER, _adapter_factory(adapter))
     application = _app(ready=True)
     lifecycle = application.state.runtime.generation_lifecycle
     await lifecycle.mark_ready()
@@ -394,7 +396,7 @@ async def test_usr_commands_quiesce_and_resume_generation(
     adapter = Mock()
     adapter.stop_accepting = AsyncMock()
     adapter.resume_accepting = AsyncMock()
-    monkeypatch.setattr("app.rolling_runtime.UvicornListenerAdapter", _adapter_factory(adapter))
+    monkeypatch.setattr(LISTENER_ADAPTER, _adapter_factory(adapter))
     application = _app(ready=True)
     lifecycle = application.state.runtime.generation_lifecycle
     await lifecycle.mark_ready()
@@ -424,7 +426,7 @@ async def test_first_termination_waits_for_active_operation(
 ) -> None:
     adapter = Mock()
     adapter.stop_accepting = AsyncMock()
-    monkeypatch.setattr("app.rolling_runtime.UvicornListenerAdapter", _adapter_factory(adapter))
+    monkeypatch.setattr(LISTENER_ADAPTER, _adapter_factory(adapter))
     application = _app(ready=True)
     lifecycle = application.state.runtime.generation_lifecycle
     await lifecycle.mark_ready()
@@ -454,7 +456,7 @@ async def test_positive_drain_timeout_cancels_active_operation(
 ) -> None:
     adapter = Mock()
     adapter.stop_accepting = AsyncMock()
-    monkeypatch.setattr("app.rolling_runtime.UvicornListenerAdapter", _adapter_factory(adapter))
+    monkeypatch.setattr(LISTENER_ADAPTER, _adapter_factory(adapter))
     application = _app(ready=True, drain_timeout=1)
     lifecycle = application.state.runtime.generation_lifecycle
     await lifecycle.mark_ready()
@@ -491,7 +493,7 @@ async def test_runtime_flushes_generation_local_tokenization_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     adapter = Mock()
-    monkeypatch.setattr("app.rolling_runtime.UvicornListenerAdapter", _adapter_factory(adapter))
+    monkeypatch.setattr(LISTENER_ADAPTER, _adapter_factory(adapter))
     application = _app(ready=True)
     state = TokenizationStateStore(tmp_path / "local" / "tokenization.json")
     state.calibration.learn("anthropic", "model", 10, 12)
@@ -522,7 +524,7 @@ async def test_run_aggregates_primary_cleanup_and_control_close_errors(
     adapter.startup_lifespan = AsyncMock(side_effect=RuntimeError("primary failure"))
     adapter.shutdown_lifespan = AsyncMock(side_effect=RuntimeError("cleanup failure"))
     adapter.close_masters = AsyncMock()
-    monkeypatch.setattr("app.rolling_runtime.UvicornListenerAdapter", _adapter_factory(adapter))
+    monkeypatch.setattr(LISTENER_ADAPTER, _adapter_factory(adapter))
     control = Mock()
     control.start = AsyncMock()
     control.close = AsyncMock(side_effect=RuntimeError("control close failure"))
@@ -551,7 +553,7 @@ async def test_quiesce_failure_still_stops_accepting(
 ) -> None:
     adapter = Mock()
     adapter.stop_accepting = AsyncMock()
-    monkeypatch.setattr("app.rolling_runtime.UvicornListenerAdapter", _adapter_factory(adapter))
+    monkeypatch.setattr(LISTENER_ADAPTER, _adapter_factory(adapter))
     application = _app(ready=True)
     lifecycle = application.state.runtime.generation_lifecycle
     await lifecycle.mark_ready()
@@ -589,7 +591,7 @@ async def test_adapter_resume_failure_marks_generation_failed(
     adapter = Mock()
     adapter.resume_accepting = AsyncMock(side_effect=RuntimeError("resume failed"))
     adapter.stop_accepting = AsyncMock()
-    monkeypatch.setattr("app.rolling_runtime.UvicornListenerAdapter", _adapter_factory(adapter))
+    monkeypatch.setattr(LISTENER_ADAPTER, _adapter_factory(adapter))
     application = _app(ready=True)
     lifecycle = application.state.runtime.generation_lifecycle
     await lifecycle.mark_ready()
@@ -612,7 +614,7 @@ async def test_resume_cancels_pending_usr2_drain_timeout(
     adapter = Mock()
     adapter.stop_accepting = AsyncMock()
     adapter.resume_accepting = AsyncMock()
-    monkeypatch.setattr("app.rolling_runtime.UvicornListenerAdapter", _adapter_factory(adapter))
+    monkeypatch.setattr(LISTENER_ADAPTER, _adapter_factory(adapter))
     application = _app(ready=True, drain_timeout=1)
     lifecycle = application.state.runtime.generation_lifecycle
     await lifecycle.mark_ready()
@@ -648,7 +650,7 @@ async def test_full_run_preserves_failed_phase_until_term(
     adapter.resume_accepting = AsyncMock(side_effect=RuntimeError("resume failed"))
     adapter.shutdown_lifespan = AsyncMock()
     adapter.close_masters = AsyncMock()
-    monkeypatch.setattr("app.rolling_runtime.UvicornListenerAdapter", _adapter_factory(adapter))
+    monkeypatch.setattr(LISTENER_ADAPTER, _adapter_factory(adapter))
     application = _app(ready=True)
     lifecycle = application.state.runtime.generation_lifecycle
     ready = __import__("asyncio").Event()

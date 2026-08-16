@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from app.generation import GenerationLifecycle
-from app.generation_control import GenerationControlError, GenerationControlServer
+from app.lifecycle.rolling.generation.control import GenerationControlError, GenerationControlServer
+from app.lifecycle.rolling.generation.phases import GenerationLifecycle
 
 
 async def _request(path: Path, payload: object) -> dict[str, object]:
@@ -21,6 +21,9 @@ async def _request(path: Path, payload: object) -> dict[str, object]:
     finally:
         writer.close()
         await writer.wait_closed()
+
+
+START_UNIX_SERVER = "app.lifecycle.rolling.generation.control.asyncio.start_unix_server"
 
 
 @pytest.mark.asyncio
@@ -166,7 +169,7 @@ async def test_post_bind_failure_preserves_path_and_releases_lock(
     async def fail_server(*_args: object, **_kwargs: object) -> asyncio.Server:
         raise OSError("server setup failed")
 
-    monkeypatch.setattr("app.generation_control.asyncio.start_unix_server", fail_server)
+    monkeypatch.setattr(START_UNIX_SERVER, fail_server)
     failed = GenerationControlServer(
         path,
         GenerationLifecycle(),

@@ -13,8 +13,8 @@ from uvicorn._types import (
     Scope,
 )
 
-from app.generation import (
-    GenerationAdmissionMiddleware,
+from app.lifecycle.rolling.generation.admission import GenerationAdmissionMiddleware
+from app.lifecycle.rolling.generation.phases import (
     GenerationLifecycle,
     GenerationLifecycleError,
     GenerationPhase,

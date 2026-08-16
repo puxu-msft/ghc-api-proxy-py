@@ -9,8 +9,8 @@ import pytest
 from fastapi import FastAPI
 
 from app.config.settings import AppSettings
-from app.generation import GenerationLifecycle
-from app.rolling_runtime import RollingRuntime, RollingRuntimeError
+from app.lifecycle.rolling.generation.phases import GenerationLifecycle
+from app.lifecycle.rolling.runtime import RollingRuntime, RollingRuntimeError
 from app.socket_activation import ActivatedSocketSet, ExpectedListener
 from app.systemd_notify import notify_ready, notify_stopping
 

@@ -4,7 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from app.rolling_state import GenerationRecord, RollingState, RollingStateError, RollingStateStore
+from app.lifecycle.rolling.state import (
+    GenerationRecord,
+    RollingState,
+    RollingStateError,
+    RollingStateStore,
+)
 
 
 def test_state_roundtrip_keeps_apply_gate_disabled(tmp_path: Path) -> None:

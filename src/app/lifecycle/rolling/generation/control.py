@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, cast
 
-from app.generation import GenerationLifecycle, GenerationSnapshot
+from app.lifecycle.rolling.generation.phases import GenerationLifecycle, GenerationSnapshot
 
 PROTOCOL_VERSION = 1
 

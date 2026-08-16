@@ -14,12 +14,12 @@ from fastapi import FastAPI
 from uvicorn import Config
 from uvicorn._types import ASGI3Application
 
-from app.generation import (
-    GenerationAdmissionMiddleware,
+from app.lifecycle.rolling.generation.admission import GenerationAdmissionMiddleware
+from app.lifecycle.rolling.generation.control import GenerationControlServer
+from app.lifecycle.rolling.generation.phases import (
     GenerationLifecycle,
     GenerationPhase,
 )
-from app.generation_control import GenerationControlServer
 from app.server_adapter import UvicornListenerAdapter
 from app.socket_activation import ActivatedSocketSet, ExpectedListener
 from app.systemd_notify import notify_ready, notify_stopping

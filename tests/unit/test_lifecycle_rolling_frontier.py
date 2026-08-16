@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from app.rolling_frontier import RollingFrontierError, RollingFrontierStore
+from app.lifecycle.rolling.frontier import RollingFrontierError, RollingFrontierStore
 
 
 def test_frontier_burns_monotonic_ids_and_recovers_from_one_bad_copy(tmp_path: Path) -> None:

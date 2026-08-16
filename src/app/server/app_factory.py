@@ -11,7 +11,6 @@ from app.auth.providers import noninteractive_token_available
 from app.config.paths import user_data_path
 from app.config.settings import AppSettings
 from app.delivery.reservation import ResidentByteBudget
-from app.generation import GenerationLifecycle
 from app.history.consumer import HistoryConsumer
 from app.history.store import HistoryStore
 from app.history.ws import WebSocketManager
@@ -19,6 +18,7 @@ from app.hooks.builtin import register_builtin_hooks
 from app.hooks.executor import HooksExecutor
 from app.hooks.loader import load_user_hook_modules
 from app.hooks.registry import HookRegistryBuilder
+from app.lifecycle.rolling.generation.phases import GenerationLifecycle
 from app.observability.logging import setup_logging
 from app.observability.telemetry import setup_metrics
 from app.observability.tracing import setup_tracing

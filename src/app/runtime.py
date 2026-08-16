@@ -8,10 +8,10 @@ from app.config.settings import AppSettings
 if TYPE_CHECKING:
     from app.anthropic.client import AnthropicClient
     from app.delivery.reservation import ResidentByteBudget
-    from app.generation import GenerationLifecycle
     from app.history.store import HistoryStore
     from app.history.ws import WebSocketManager
     from app.hooks.registry import HookRegistry
+    from app.lifecycle.rolling.generation.phases import GenerationLifecycle
     from app.openai.client import OpenAIClient
     from app.openai.responses_ws import ResponsesWebSocketClient
     from app.pipeline.approval import ApprovalGate
