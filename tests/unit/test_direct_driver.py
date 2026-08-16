@@ -1,0 +1,304 @@
+from typing import Any
+
+import httpx
+import pytest
+
+from app.model_provider import (
+    EndpointNotSupported,
+    ModelDescriptor,
+    ModelEndpoint,
+    UnknownModel,
+)
+from app.pipeline.direct_driver import (
+    EVENT_ATTEMPT_FAILED,
+    EVENT_ATTEMPT_PREPARE,
+    EVENT_REQUEST_FAILED,
+    EVENT_REQUEST_SUCCEEDED,
+    AnthropicMessagesDriver,
+    DirectDriver,
+    RetryBudget,
+)
+from app.pipeline.events import SubscriberRegistry
+from app.pipeline.exceptions import PipelineAbort, PipelineRetry, UpstreamError
+from app.pipeline.request import RequestContext, WireFormat
+from app.pipeline.routing import RoutingError, decide_route, split_format_suffix
+
+CATALOG: dict[str, ModelDescriptor] = {
+    "claude-model": ModelDescriptor(
+        id="claude-model",
+        endpoints=frozenset({ModelEndpoint.ANTHROPIC_MESSAGES}),
+    ),
+    "gpt-model": ModelDescriptor(
+        id="gpt-model",
+        endpoints=frozenset({ModelEndpoint.OPENAI_RESPONSES}),
+    ),
+    "dual-model": ModelDescriptor(
+        id="dual-model",
+        endpoints=frozenset(
+            {ModelEndpoint.ANTHROPIC_MESSAGES, ModelEndpoint.OPENAI_RESPONSES}
+        ),
+    ),
+    "ws-only-model": ModelDescriptor(
+        id="ws-only-model",
+        endpoints=frozenset({ModelEndpoint.OPENAI_RESPONSES_WS}),
+    ),
+    "mute-model": ModelDescriptor(id="mute-model", endpoints=frozenset()),
+}
+
+
+class FakeProvider:
+    def __init__(self, *, responses: list[Any] | None = None) -> None:
+        self.name = "ghc"
+        self.sent: list[tuple[ModelEndpoint, dict[str, Any]]] = []
+        self._responses = responses or []
+
+    @property
+    def available_ids(self) -> frozenset[str]:
+        return frozenset(CATALOG)
+
+    def describe(self, model_id: str) -> ModelDescriptor | None:
+        return CATALOG.get(model_id)
+
+    async def refresh_catalog(self) -> bool:
+        return False
+
+    async def send(
+        self,
+        endpoint: ModelEndpoint,
+        payload: Any,
+        *,
+        model_id: str,
+        stream: bool = False,
+        extra_headers: Any = None,
+    ) -> httpx.Response:
+        self.sent.append((endpoint, dict(payload)))
+        outcome = self._responses.pop(0) if self._responses else httpx.Response(200)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
+def context(model: str = "claude-model") -> RequestContext:
+    ctx = RequestContext(
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        requested_model=model,
+        payload={"model": model, "messages": []},
+    )
+    ctx.resolved_model = model
+    return ctx
+
+
+def driver(
+    provider: FakeProvider,
+    registry: SubscriberRegistry[RequestContext] | None = None,
+    *,
+    max_total: int = 3,
+) -> DirectDriver:
+    frozen = (registry or SubscriberRegistry[RequestContext]()).freeze()
+    return AnthropicMessagesDriver(provider, frozen, budget=RetryBudget(max_total=max_total))
+
+
+def test_route_needs_no_translation_when_the_model_speaks_the_inbound_format() -> None:
+    route = decide_route(
+        requested_model="claude-model",
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        provider=FakeProvider(),
+        mappings={},
+    )
+    assert route.endpoint is ModelEndpoint.ANTHROPIC_MESSAGES
+    assert route.translation_required is False
+    assert route.reason == "inbound_format_supported"
+
+
+def test_route_requires_translation_when_the_model_speaks_another_format() -> None:
+    route = decide_route(
+        requested_model="gpt-model",
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        provider=FakeProvider(),
+        mappings={},
+    )
+    assert route.endpoint is ModelEndpoint.OPENAI_RESPONSES
+    assert route.target_format is WireFormat.OPENAI_RESPONSES
+    assert route.translation_required is True
+
+
+def test_explicit_format_suffix_selects_the_endpoint() -> None:
+    route = decide_route(
+        requested_model="dual-model@openai-responses",
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        provider=FakeProvider(),
+        mappings={},
+    )
+    assert route.endpoint is ModelEndpoint.OPENAI_RESPONSES
+    assert route.reason == "explicit_format"
+    assert route.translation_required is True
+
+
+def test_explicit_format_the_model_lacks_is_refused() -> None:
+    with pytest.raises(EndpointNotSupported):
+        decide_route(
+            requested_model="claude-model@openai-responses",
+            inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+            provider=FakeProvider(),
+            mappings={},
+        )
+
+
+def test_unknown_format_suffix_is_an_error_not_part_of_the_name() -> None:
+    with pytest.raises(RoutingError, match="unknown target format"):
+        split_format_suffix("some-model@no-such-format")
+
+
+def test_model_with_only_an_undriveable_endpoint_is_refused() -> None:
+    # ws:/responses is advertised but has no driver, so routing must not select it.
+    with pytest.raises(EndpointNotSupported):
+        decide_route(
+            requested_model="ws-only-model",
+            inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+            provider=FakeProvider(),
+            mappings={},
+        )
+
+
+def test_route_applies_model_mappings() -> None:
+    route = decide_route(
+        requested_model="opus",
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        provider=FakeProvider(),
+        mappings={"opus": "claude-model"},
+    )
+    assert route.model_id == "claude-model"
+
+
+def test_route_rejects_an_unmapped_unknown_model() -> None:
+    with pytest.raises(UnknownModel):
+        decide_route(
+            requested_model="mystery",
+            inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+            provider=FakeProvider(),
+            mappings={},
+        )
+
+
+@pytest.mark.asyncio
+async def test_successful_attempt_publishes_the_success_events() -> None:
+    provider = FakeProvider()
+    outcome = await driver(provider).run(context())
+    assert outcome.succeeded is True
+    assert outcome.attempts == 1
+    assert EVENT_REQUEST_SUCCEEDED in outcome.events
+    assert EVENT_REQUEST_FAILED not in outcome.events
+
+
+@pytest.mark.asyncio
+async def test_subscriber_edit_reaches_the_sent_payload() -> None:
+    registry = SubscriberRegistry[RequestContext]()
+
+    async def add_marker(ctx: RequestContext) -> None:
+        ctx.payload["marker"] = "set"
+
+    registry.subscribe(EVENT_ATTEMPT_PREPARE, "marker", add_marker)
+    provider = FakeProvider()
+
+    await driver(provider, registry).run(context())
+
+    # The attempt copies the payload when it opens.
+    # An edit made during prepare must therefore be re-read rather than lost.
+    assert provider.sent[0][1]["marker"] == "set"
+
+
+@pytest.mark.asyncio
+async def test_retryable_upstream_error_is_attempted_again() -> None:
+    provider = FakeProvider(responses=[UpstreamError("boom", status_code=502), httpx.Response(200)])
+    outcome = await driver(provider).run(context())
+    assert outcome.succeeded is True
+    assert outcome.attempts == 2
+    assert EVENT_ATTEMPT_FAILED in outcome.events
+
+
+@pytest.mark.asyncio
+async def test_abort_stops_without_another_attempt() -> None:
+    provider = FakeProvider(responses=[PipelineAbort("no"), httpx.Response(200)])
+    outcome = await driver(provider).run(context())
+    assert outcome.succeeded is False
+    assert outcome.attempts == 1
+    assert isinstance(outcome.error, PipelineAbort)
+    assert EVENT_REQUEST_FAILED in outcome.events
+
+
+@pytest.mark.asyncio
+async def test_unknown_exception_aborts_rather_than_retrying() -> None:
+    # A subscriber bug must not spend the retry budget on a defect.
+    provider = FakeProvider(responses=[KeyError("bug"), httpx.Response(200)])
+    outcome = await driver(provider).run(context())
+    assert outcome.succeeded is False
+    assert outcome.attempts == 1
+    assert isinstance(outcome.error, KeyError)
+
+
+@pytest.mark.asyncio
+async def test_budget_bounds_the_retries() -> None:
+    failures: list[Any] = [UpstreamError("boom") for _ in range(10)]
+    provider = FakeProvider(responses=failures)
+    outcome = await driver(provider, max_total=2).run(context())
+    assert outcome.succeeded is False
+    # One initial attempt plus two funded retries.
+    assert outcome.attempts == 3
+    assert isinstance(outcome.error, PipelineAbort)
+    assert "budget exhausted" in str(outcome.error)
+
+
+@pytest.mark.asyncio
+async def test_subscriber_raising_retry_reattempts() -> None:
+    registry = SubscriberRegistry[RequestContext]()
+    calls: list[int] = []
+
+    async def fail_once(ctx: RequestContext) -> None:
+        calls.append(ctx.attempt_count)
+        if len(calls) == 1:
+            raise PipelineRetry("try again")
+
+    registry.subscribe(EVENT_ATTEMPT_PREPARE, "flaky", fail_once)
+    provider = FakeProvider()
+
+    outcome = await driver(provider, registry).run(context())
+
+    assert outcome.succeeded is True
+    assert outcome.attempts == 2
+    # The first attempt never reached the provider.
+    assert len(provider.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_subscribers_run_in_the_frozen_order() -> None:
+    registry = SubscriberRegistry[RequestContext]()
+    order: list[str] = []
+
+    async def first(_: RequestContext) -> None:
+        order.append("first")
+
+    async def second(_: RequestContext) -> None:
+        order.append("second")
+
+    registry.subscribe(EVENT_ATTEMPT_PREPARE, "zebra", second, after=["apple"])
+    registry.subscribe(EVENT_ATTEMPT_PREPARE, "apple", first)
+
+    await driver(FakeProvider(), registry).run(context())
+
+    assert order == ["first", "second"]
+
+
+@pytest.mark.asyncio
+async def test_late_subscriber_abort_discards_the_response() -> None:
+    registry = SubscriberRegistry[RequestContext]()
+
+    async def reject(_: RequestContext) -> None:
+        raise PipelineAbort("not acceptable")
+
+    registry.subscribe(EVENT_REQUEST_SUCCEEDED, "reject", reject)
+
+    outcome = await driver(FakeProvider(), registry).run(context())
+
+    assert outcome.succeeded is False
+    assert outcome.response is None
+    assert isinstance(outcome.error, PipelineAbort)
