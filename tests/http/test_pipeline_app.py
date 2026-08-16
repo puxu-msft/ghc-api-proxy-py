@@ -5,6 +5,8 @@ Upstream protocol behaviour is therefore the real thing rather than a friendlier
 """
 
 from collections.abc import Callable
+from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -20,6 +22,7 @@ from app.ghc_client.tokens import CopilotTokenManager
 from app.model_provider import GithubCopilotProvider, ModelProvider
 from app.server.composition import build_chain
 from app.server.pipeline_app import create_pipeline_app
+from app.tokenization.state_store import TokenizationStateStore
 
 BASE_URL = "https://copilot.example"
 
@@ -81,6 +84,7 @@ def make_client(
     handler: Callable[[httpx.Request], httpx.Response],
     *,
     mappings: dict[str, str] | None = None,
+    tokenization_path: Path | None = None,
 ) -> tuple[TestClient, list[httpx.Request]]:
     seen: list[httpx.Request] = []
 
@@ -103,6 +107,9 @@ def make_client(
     )
     providers: dict[str, ModelProvider] = {"ghc": provider}
     chain = build_chain(config, http_client=http_client, providers=providers)
+    if tokenization_path is not None:
+        # Otherwise the calibrator would read and write the real user data directory.
+        chain = replace(chain, tokenization=TokenizationStateStore(tokenization_path))
     return TestClient(create_pipeline_app(chain)), seen
 
 
@@ -487,3 +494,38 @@ def test_count_tokens_refuses_a_model_without_the_messages_capability() -> None:
 
     assert response.status_code == 400
     assert seen == []
+
+
+def test_what_the_calibrator_learns_survives_a_restart(tmp_path: Path) -> None:
+    """Learning that dies with the process makes `local` worse the more the service restarts.
+
+    Two apps over the same state file. The first is taught by a real upstream count; the second
+    never reaches upstream at all, so the number it returns can only have come from disk.
+    """
+    state = tmp_path / "tokenization.json"
+    body = {"model": "claude-model", "messages": [{"role": "user", "content": "hello there"}]}
+
+    untaught, _ = make_client(
+        lambda _: httpx.Response(503, json={"error": "down"}),
+        tokenization_path=tmp_path / "empty.json",
+    )
+    with untaught:
+        before = untaught.post("/v1/messages/count_tokens", json=body).json()["input_tokens"]
+
+    teacher, _ = make_client(
+        lambda _: httpx.Response(200, json={"input_tokens": before * 10}),
+        tokenization_path=state,
+    )
+    with teacher:
+        assert teacher.post("/v1/messages/count_tokens", json=body).status_code == 200
+    assert state.is_file(), "the lifespan must flush what was learnt"
+
+    successor, seen = make_client(
+        lambda _: httpx.Response(503, json={"error": "down"}),
+        tokenization_path=state,
+    )
+    with successor:
+        after = successor.post("/v1/messages/count_tokens", json=body).json()
+    assert after["estimated"] is True
+    assert after["input_tokens"] != before, "the successor did not read what was learnt"
+    assert seen, "this test is only meaningful if upstream really was tried and failed"

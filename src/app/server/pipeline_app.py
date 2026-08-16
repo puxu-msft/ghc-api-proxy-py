@@ -4,8 +4,11 @@ Separate from `app_factory`, which still serves the existing implementation.
 Mounting both would give one path two owners.
 """
 
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from typing import Any, cast
 
+import anyio
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
@@ -24,6 +27,10 @@ from app.server.handler import (
 from app.server.inbound import ROUTES, InboundRequestError, build_context, route_for_path
 
 CHAIN_STATE_KEY = "pipeline_chain"
+
+# What the calibrator has learnt is only worth keeping if it survives the process.
+# Not configurable: `config.example.yaml` has no `tokenization` section to put it in.
+TOKENIZATION_FLUSH_SECONDS = 5.0
 
 
 def _chain(request: Request) -> Chain:
@@ -106,7 +113,27 @@ def build_router() -> APIRouter:
 
 
 def create_pipeline_app(chain: Chain) -> FastAPI:
-    app = FastAPI(title="ghc-api-proxy")
+    app = FastAPI(title="ghc-api-proxy", lifespan=_lifespan)
     setattr(app.state, CHAIN_STATE_KEY, chain)
     app.include_router(build_router())
     return app
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
+    """Carry the calibrator's state across restarts.
+
+    Without this the `local` token counter starts from nothing every time and throws away
+    everything it learns, which makes its estimates worse the more the process is restarted —
+    and says nothing about it, because an estimate is still returned.
+    """
+    chain = cast(Chain, getattr(app.state, CHAIN_STATE_KEY))
+    await chain.tokenization.load()
+    async with anyio.create_task_group() as flushing:
+        flushing.start_soon(chain.tokenization.run_periodic_flush, TOKENIZATION_FLUSH_SECONDS)
+        try:
+            yield
+        finally:
+            # The periodic flush cannot be relied on to have caught the last change.
+            await chain.tokenization.flush()
+            flushing.cancel_scope.cancel()
