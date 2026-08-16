@@ -15,9 +15,11 @@ import httpx
 
 from app.model_provider import ProviderError
 from app.pipeline.delivery import BlockBuffer, CompletedBlock, DeliverySession
+from app.pipeline.delivery.assembler import AnthropicAssembler, BlockAssembler, ResponsesAssembler
+from app.pipeline.delivery.stream import StreamSettings
 from app.pipeline.direct_driver import DRIVERS, DriverOutcome, LedgerBudget
 from app.pipeline.exceptions import UpstreamTimeout
-from app.pipeline.request import RequestContext
+from app.pipeline.request import RequestContext, WireFormat
 from app.pipeline.retry import RetryLedger
 from app.pipeline.routing import Route, RoutingError, decide_route
 from app.pipeline.timeouts import resolve_timeout
@@ -170,3 +172,28 @@ def deliver_blocks(chain: Chain, blocks: list[CompletedBlock]) -> list[Completed
         committed.extend(session.offer(block))
     committed.extend(session.finish())
     return committed
+
+
+def assembler_for(handled: HandledRequest) -> BlockAssembler:
+    """Pick the assembler matching the upstream this route actually used."""
+    if handled.route.target_format is WireFormat.OPENAI_RESPONSES:
+        return ResponsesAssembler()
+    return AnthropicAssembler()
+
+
+def stream_settings(chain: Chain) -> StreamSettings:
+    delivery = chain.config.client_delivery
+    return StreamSettings(
+        sse_ping_interval=delivery.sse_ping_interval,
+        synthesized_response_headers_after_sec=(
+            delivery.synthesized_response_headers_after_sec
+        ),
+    )
+
+
+def delivery_buffer(chain: Chain) -> BlockBuffer:
+    delivery = chain.config.client_delivery
+    return BlockBuffer(
+        policy=delivery.buffering_policy,
+        cap_bytes=delivery.buffer_cap_bytes,
+    )

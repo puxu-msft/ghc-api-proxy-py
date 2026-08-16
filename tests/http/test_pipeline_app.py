@@ -189,20 +189,33 @@ def test_missing_model_is_rejected_by_inbound_parsing() -> None:
     assert seen == []
 
 
+def sse_upstream(*texts: str) -> bytes:
+    """An upstream Anthropic SSE stream carrying one text block per argument."""
+    frames: list[str] = []
+    for index, text in enumerate(texts):
+        for event, data in (
+            ("content_block_start", {"index": index, "content_block": {"type": "text"}}),
+            (
+                "content_block_delta",
+                {"index": index, "delta": {"type": "text_delta", "text": text}},
+            ),
+            ("content_block_stop", {"index": index}),
+        ):
+            frames.append(f"event: {event}\ndata: {orjson.dumps(data).decode()}\n\n")
+    frames.append(
+        'event: message_delta\ndata: {"delta":{"stop_reason":"end_turn"}}\n\n'
+    )
+    frames.append('event: message_stop\ndata: {}\n\n')
+    return "".join(frames).encode()
+
+
 def test_streaming_is_served_as_block_level_sse() -> None:
     # Each block is already whole before a frame is written; the SSE envelope carries them.
     client, _ = make_client(
         lambda _: httpx.Response(
             200,
-            json={
-                "id": "msg_1",
-                "model": "claude-model",
-                "content": [
-                    {"type": "text", "text": "first"},
-                    {"type": "text", "text": "second"},
-                ],
-                "stop_reason": "end_turn",
-            },
+            content=sse_upstream("first", "second"),
+            headers={"content-type": "text/event-stream"},
         )
     )
     response = client.post(
@@ -235,11 +248,8 @@ def test_streamed_delta_carries_the_whole_block() -> None:
     client, _ = make_client(
         lambda _: httpx.Response(
             200,
-            json={
-                "id": "msg_1",
-                "model": "claude-model",
-                "content": [{"type": "text", "text": "the whole thing"}],
-            },
+            content=sse_upstream("the whole thing"),
+            headers={"content-type": "text/event-stream"},
         )
     )
     response = client.post(

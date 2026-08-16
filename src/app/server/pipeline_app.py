@@ -9,15 +9,16 @@ from typing import Any, cast
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from app.pipeline.delivery import render
+from app.pipeline.delivery.stream import stream_delivery
 from app.server.composition import Chain
 from app.server.handler import (
-    blocks_from_anthropic,
-    deliver_blocks,
+    assembler_for,
+    delivery_buffer,
     error_body,
     error_status,
     handle_bounded,
     response_payload,
+    stream_settings,
 )
 from app.server.inbound import ROUTES, InboundRequestError, build_context, route_for_path
 
@@ -57,26 +58,25 @@ async def _serve(request: Request) -> Response:
         return JSONResponse(error_body(error), status_code=error_status(error))
 
     chain = _chain(request)
+    if context.stream:
+        # Block-level delivery over the live upstream.
+        # The body is never read whole here, so a block goes out while the rest still arrives.
+        return StreamingResponse(
+            stream_delivery(
+                response.aiter_bytes(),
+                assembler_for(handled),
+                buffer=delivery_buffer(chain),
+                settings=stream_settings(chain),
+                message_id=context.id,
+                model=context.resolved_model,
+            ),
+            status_code=response.status_code,
+            media_type="text/event-stream",
+        )
+
     body = cast(dict[str, Any], response.json())
     payload = response_payload(chain, handled, body)
-
-    if not context.stream:
-        return JSONResponse(payload, status_code=response.status_code)
-
-    # Block-level delivery: every block is already complete before a frame is written.
-    committed = deliver_blocks(chain, blocks_from_anthropic(payload))
-    frames = render(
-        committed,
-        message_id=str(payload.get("id", context.id)),
-        model=str(payload.get("model", context.resolved_model)),
-        stop_reason=str(payload.get("stop_reason", "end_turn")),
-        usage=cast(dict[str, Any], payload.get("usage", {})),
-    )
-    return StreamingResponse(
-        iter(list(frames)),
-        status_code=response.status_code,
-        media_type="text/event-stream",
-    )
+    return JSONResponse(payload, status_code=response.status_code)
 
 
 def build_router() -> APIRouter:
