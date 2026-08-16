@@ -7,14 +7,20 @@ It is either allowed to finish, cut short, or abandoned.
 
 import asyncio
 import signal
+import socket
+import subprocess
+import sys
 from collections.abc import AsyncIterator
 from contextlib import suppress
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
 from uvicorn import Config
 
+from app.lifecycle.entry import StandaloneOptions, run_standalone
 from app.lifecycle.listener import LISTENER_NAME, bind_listener
+from app.lifecycle.pidfile import PidfileEntry, PidfileError, write_pidfile
 from app.lifecycle.shutdown import ShutdownStage
 from app.lifecycle.standalone import ShutdownReport, StandaloneServer
 from app.server_adapter import UvicornListenerAdapter
@@ -80,9 +86,7 @@ class Harness:
     async def request(self, path: str) -> bytes:
         reader, writer = await asyncio.open_connection("127.0.0.1", self.port)
         try:
-            writer.write(
-                f"GET {path} HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n".encode()
-            )
+            writer.write(f"GET {path} HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n".encode())
             await writer.drain()
             return await reader.read()
         finally:
@@ -274,3 +278,42 @@ async def test_the_listener_is_released_after_shutdown(harness: Harness) -> None
     replacement = bind_listener("127.0.0.1", harness.port, reuse_port=False)
     assert replacement.identities()[0].name == LISTENER_NAME
     replacement.close()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_handover_leaves_the_predecessor_its_pidfile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A start that never became a server must not strip the live process of its record.
+
+    The successor overwrites the pidfile before signalling, so a failure in between would otherwise
+    leave the predecessor — still serving — with no file naming it, and the next `--restart` with
+    nothing to find.
+    """
+    predecessor = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    pidfile = tmp_path / "standalone.pid"
+    try:
+        await asyncio.sleep(0.5)
+        write_pidfile(pidfile, predecessor.pid)
+        recorded = pidfile.read_text(encoding="utf-8")
+
+        def refuse(entry: PidfileEntry) -> bool:
+            raise PidfileError("handover failed")
+
+        monkeypatch.setattr("app.lifecycle.entry.signal_restart", refuse)
+        options = StandaloneOptions(port=free_port(), pidfile=pidfile, restart=True)
+
+        with pytest.raises(PidfileError, match="handover failed"):
+            await run_standalone(FastAPI(), options)
+
+        assert pidfile.read_text(encoding="utf-8") == recorded
+    finally:
+        predecessor.kill()
+        predecessor.wait(timeout=5)
+
+
+def free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])

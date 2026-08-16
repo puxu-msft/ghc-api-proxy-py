@@ -68,10 +68,13 @@ async def run_standalone(
     address = listeners.identities()[0].address
 
     adapter = UvicornListenerAdapter(Config(application, log_config=None), listeners)
+    announced = False
 
     async def announce() -> None:
+        nonlocal announced
         # Recorded only once accepting, so the file never names a process that cannot serve.
         write_pidfile(pidfile)
+        announced = True
         if predecessor is not None:
             signal_restart(predecessor)
 
@@ -83,10 +86,18 @@ async def run_standalone(
 
     try:
         report = await server.serve()
-    finally:
+    except BaseException:
+        # A start that never became a running server must not leave the predecessor without the
+        # pidfile it is still the rightful owner of; it is the live process, and we are not.
+        if announced and predecessor is not None:
+            write_pidfile(pidfile, predecessor.pid)
+        elif announced:
+            remove_pidfile(pidfile)
+        raise
+    else:
         remove_pidfile(pidfile)
     return StandaloneOutcome(
         report=report,
         address=address,
-        signalled_predecessor=predecessor,
+        signalled_predecessor=predecessor.pid if predecessor is not None else None,
     )

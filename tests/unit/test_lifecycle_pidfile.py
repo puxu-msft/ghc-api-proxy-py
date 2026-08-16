@@ -16,6 +16,7 @@ import pytest
 
 from app.lifecycle.pidfile import (
     PidfileEntry,
+    PidfileError,
     live_predecessor,
     process_start_token,
     read_pidfile,
@@ -110,7 +111,8 @@ def test_a_live_matching_process_is_the_predecessor(tmp_path: Path) -> None:
     with subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"]) as other:
         try:
             write_pidfile(path, other.pid)
-            assert live_predecessor(path) == other.pid
+            found = live_predecessor(path)
+            assert found is not None and found.pid == other.pid
         finally:
             other.kill()
 
@@ -136,13 +138,38 @@ def test_the_predecessor_receives_the_restart_signal(tmp_path: Path) -> None:
         try:
             write_pidfile(path, other.pid)
             time.sleep(0.5)
-            pid = live_predecessor(path)
-            assert pid is not None and pid == other.pid
-            signal_restart(pid)
+            found = live_predecessor(path)
+            assert found is not None and found.pid == other.pid
+            assert signal_restart(found) is True
             assert other.wait(timeout=5) == 7
         finally:
             if other.poll() is None:
                 other.kill()
+
+
+def test_a_recycled_pid_is_not_signalled(tmp_path: Path) -> None:
+    """The failure this whole mechanism exists to prevent: signalling somebody else.
+
+    A live process wearing a PID we recorded earlier must not be signalled just for holding the
+    number. Standing in for the recycled process is a live one whose recorded token is wrong, which
+    is the same thing as far as the check is concerned — and it would die of SIGUSR2 if signalled.
+    """
+    del tmp_path
+    with subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"]) as other:
+        try:
+            time.sleep(0.5)
+            impostor = PidfileEntry(pid=other.pid, start_token="1")
+            assert signal_restart(impostor) is False
+            time.sleep(0.5)
+            assert other.poll() is None, "an unrelated process was signalled"
+        finally:
+            other.kill()
+
+
+def test_signal_restart_refuses_an_unverifiable_entry() -> None:
+    # No token means the claim cannot be checked at all, so nothing may be signalled on it.
+    with pytest.raises(PidfileError):
+        signal_restart(PidfileEntry(pid=os.getpid(), start_token=""))
 
 
 def test_signal_restart_uses_sigusr2() -> None:

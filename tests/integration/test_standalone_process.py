@@ -158,7 +158,8 @@ def test_a_replacement_takes_the_port_and_retires_its_predecessor(pidfile: Path)
     second: subprocess.Popen[str] | None = None
     try:
         first_pid = wait_until_serving(pidfile)
-        assert live_predecessor(pidfile) == first_pid
+        found = live_predecessor(pidfile)
+        assert found is not None and found.pid == first_pid
 
         second = start_child(port, pidfile, restart=True)
         # The pidfile now names the successor, which is how we know it took over.

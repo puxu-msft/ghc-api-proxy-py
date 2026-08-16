@@ -33,6 +33,7 @@ class StubAdapter:
         self.cleanup_started = False
         self.cleanup_finished = False
         self.masters_closed = False
+        self.stopped_accepting = False
 
     async def startup_lifespan(self) -> None:
         return None
@@ -44,7 +45,7 @@ class StubAdapter:
         return None
 
     async def stop_accepting(self) -> None:
-        return None
+        self.stopped_accepting = True
 
     async def wait_drained(self, timeout: float | None = None) -> None:
         del timeout
@@ -107,7 +108,14 @@ async def test_an_overrunning_cleanup_is_reported_and_still_completes() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_budget_that_expires_is_reported_without_killing_the_teardown() -> None:
+async def test_a_budget_that_expires_is_reported_and_the_teardown_still_finishes() -> None:
+    """The budget marks that cleanup ran long; it never decides to skip it.
+
+    Returning while the teardown is merely pending would be no better than cancelling it: the
+    composition root's runner closes the loop on the way out and cancels it there instead. So the
+    guarded invariant is the stronger one — over budget is reported, and cleanup has still run by
+    the time `serve()` returns.
+    """
     started = asyncio.Event()
 
     class SlowAdapter(StubAdapter):
@@ -115,7 +123,7 @@ async def test_a_budget_that_expires_is_reported_without_killing_the_teardown() 
             del drain_timeout
             self.cleanup_started = True
             started.set()
-            await asyncio.sleep(3)
+            await asyncio.sleep(1)
             self.cleanup_finished = True
 
     adapter = SlowAdapter()
@@ -126,11 +134,11 @@ async def test_a_budget_that_expires_is_reported_without_killing_the_teardown() 
 
     report = await asyncio.wait_for(serving, 5)
     assert report.cleanup_timed_out is True
-    assert report.cleanup_completed is False
-    # Still running rather than cancelled: the budget bounded the wait only.
     assert started.is_set() is True
-    assert adapter.cleanup_finished is False
-    await asyncio.sleep(0)
+    # Waited out rather than abandoned: exiting at the budget is what loses the state.
+    assert report.cleanup_completed is True
+    assert adapter.cleanup_finished is True
+    assert adapter.masters_closed is True
 
 
 @pytest.mark.asyncio
@@ -172,4 +180,26 @@ async def test_a_clean_shutdown_reports_no_error() -> None:
     assert report.cleanup_error == ""
     assert report.cleanup_completed is True
     assert report.cleanup_timed_out is False
+    assert adapter.masters_closed is True
+
+
+@pytest.mark.asyncio
+async def test_a_failing_serving_hook_releases_the_listener() -> None:
+    """Past `arm()` the port is answering, so a failed start must not leave it that way.
+
+    Without the teardown the exception escapes with the listener still armed: a port that accepts
+    while nobody drives it, which is worse than the start having failed outright.
+    """
+    adapter = StubAdapter()
+
+    async def refuse() -> None:
+        raise RuntimeError("cannot announce")
+
+    server = StandaloneServer(adapter, on_serving=refuse)  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError, match="cannot announce"):
+        await server.serve()
+
+    assert adapter.stopped_accepting is True
+    assert adapter.cleanup_started is True
     assert adapter.masters_closed is True

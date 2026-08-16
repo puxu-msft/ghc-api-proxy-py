@@ -85,16 +85,36 @@ class StandaloneServer:
             self._advanced.set()
 
     async def serve(self) -> ShutdownReport:
-        await self._adapter.startup_lifespan()
-        await self._adapter.register_dormant()
-        await self._adapter.arm()
-        if self._on_serving is not None:
-            await self._on_serving()
+        try:
+            await self._adapter.startup_lifespan()
+            await self._adapter.register_dormant()
+            await self._adapter.arm()
+            if self._on_serving is not None:
+                await self._on_serving()
+        except BaseException:
+            # Past `arm()` the listener is accepting, so an escaping failure would leave a port
+            # answering with nobody driving it. Tear down before the exception continues outward.
+            await self._abandon_startup()
+            raise
 
         with self._signal_handlers():
             await self._await_advance()
             await self._adapter.stop_accepting()
             return await self._descend()
+
+    async def _abandon_startup(self) -> None:
+        """Release whatever start-up managed to acquire, on the way out of a failed start.
+
+        Best effort by design: the original failure is what the caller must see, so nothing raised
+        here may replace it.
+        """
+        for release in (
+            self._adapter.stop_accepting,
+            lambda: self._adapter.shutdown_lifespan(drain_timeout=0),
+            self._adapter.close_masters,
+        ):
+            with suppress(Exception):
+                await release()
 
     async def _descend(self) -> ShutdownReport:
         interrupted = 0
@@ -130,26 +150,33 @@ class StandaloneServer:
     async def _finalize(self) -> CleanupOutcome:
         """Run lifespan shutdown and release the listener.
 
-        The budget bounds how long we *wait*, not how long cleanup may take.
-        The spec requires the last rung to persist state and release resources, so the cleanup task
-        is shielded: exceeding the budget stops the waiting and is reported, and never cancels the
-        teardown that the rung exists to perform.
+        The spec's last rung must persist state and release resources *before* exiting, and it hands
+        the operator SIGKILL as the way to cut that short. So the budget cannot abandon cleanup: it
+        only marks that cleanup ran long. Exceeding it is reported and then still awaited.
+
+        Leaving a pending cleanup task behind would be worse than an inline await rather than safer.
+        `asyncio.shield` protects a task from *its awaiter's* cancellation, not from the event loop
+        closing underneath it, so the composition root's `anyio.run` would cancel it on the way out.
         """
         cleanup = asyncio.ensure_future(self._adapter.shutdown_lifespan(drain_timeout=None))
         timed_out = False
         try:
             await asyncio.wait_for(asyncio.shield(cleanup), self._cleanup_timeout or None)
-        except (TimeoutError, Exception):
-            # Both outcomes are read off the task below rather than raised onward.
-            # A failed teardown is reported to the caller; it must not abort the rest of the stop.
-            # The budget expiring cancels the shield, never `cleanup`, so `done()` tells them apart.
-            timed_out = not cleanup.done()
+        except TimeoutError:
+            timed_out = True
+        except Exception:
+            pass  # Read off the task below; a failed teardown is reported, not raised onward.
+
+        if not cleanup.done():
+            # Over budget. Still waited out, because exiting here is what loses the state.
+            with suppress(Exception):
+                await cleanup
 
         error = ""
         failure = cleanup.exception() if cleanup.done() and not cleanup.cancelled() else None
         if failure is not None:
             error = f"{type(failure).__name__}: {failure}"
-        if not timed_out and not error:
+        if not error:
             try:
                 await self._adapter.close_masters()
             except Exception as failure:
