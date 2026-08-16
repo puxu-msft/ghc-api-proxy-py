@@ -18,7 +18,13 @@ from uvicorn._types import ASGIApplication
 
 from app.config.paths import standalone_pidfile_path
 from app.lifecycle.listener import adopt_listener, bind_listener
-from app.lifecycle.pidfile import live_predecessor, remove_pidfile, signal_restart, write_pidfile
+from app.lifecycle.pidfile import (
+    live_predecessor,
+    remove_pidfile,
+    signal_restart,
+    write_entry,
+    write_pidfile,
+)
 from app.lifecycle.standalone import ShutdownReport, StandaloneServer
 from app.server_adapter import UvicornListenerAdapter
 
@@ -89,8 +95,10 @@ async def run_standalone(
     except BaseException:
         # A start that never became a running server must not leave the predecessor without the
         # pidfile it is still the rightful owner of; it is the live process, and we are not.
+        # The original record goes back verbatim: re-deriving its token would read whoever holds
+        # that PID now, which is the one case the token exists to catch.
         if announced and predecessor is not None:
-            write_pidfile(pidfile, predecessor.pid)
+            write_entry(pidfile, predecessor)
         elif announced:
             remove_pidfile(pidfile)
         raise

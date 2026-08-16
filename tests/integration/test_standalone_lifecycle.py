@@ -299,6 +299,13 @@ async def test_a_failed_handover_leaves_the_predecessor_its_pidfile(
         recorded = pidfile.read_text(encoding="utf-8")
 
         def refuse(entry: PidfileEntry) -> bool:
+            # Standing in for the predecessor having exited and its PID been reused: from here on,
+            # re-deriving the token yields somebody else's. Restoring must not do that.
+            def foreign_token(pid: int) -> str:
+                del pid
+                return "999999"
+
+            monkeypatch.setattr("app.lifecycle.pidfile.process_start_token", foreign_token)
             raise PidfileError("handover failed")
 
         monkeypatch.setattr("app.lifecycle.entry.signal_restart", refuse)
@@ -307,6 +314,7 @@ async def test_a_failed_handover_leaves_the_predecessor_its_pidfile(
         with pytest.raises(PidfileError, match="handover failed"):
             await run_standalone(FastAPI(), options)
 
+        # Byte-identical, token included: a re-derived record would carry "999999" instead.
         assert pidfile.read_text(encoding="utf-8") == recorded
     finally:
         predecessor.kill()

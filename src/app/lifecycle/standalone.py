@@ -91,10 +91,11 @@ class StandaloneServer:
             await self._adapter.arm()
             if self._on_serving is not None:
                 await self._on_serving()
-        except BaseException:
+        except BaseException as failure:
             # Past `arm()` the listener is accepting, so an escaping failure would leave a port
             # answering with nobody driving it. Tear down before the exception continues outward.
-            await self._abandon_startup()
+            for note in await self._abandon_startup():
+                failure.add_note(note)
             raise
 
         with self._signal_handlers():
@@ -102,19 +103,24 @@ class StandaloneServer:
             await self._adapter.stop_accepting()
             return await self._descend()
 
-    async def _abandon_startup(self) -> None:
-        """Release whatever start-up managed to acquire, on the way out of a failed start.
+    async def _abandon_startup(self) -> list[str]:
+        """Release whatever start-up managed to acquire, and report what would not release.
 
-        Best effort by design: the original failure is what the caller must see, so nothing raised
-        here may replace it.
+        The original failure is what the caller must see, so nothing raised here may replace it —
+        but a release that fails leaves a socket or a lifespan behind, and silently dropping that
+        makes the leak undiagnosable. Each one is returned for the caller to attach as a note.
         """
-        for release in (
-            self._adapter.stop_accepting,
-            lambda: self._adapter.shutdown_lifespan(drain_timeout=0),
-            self._adapter.close_masters,
+        notes: list[str] = []
+        for name, release in (
+            ("stop_accepting", self._adapter.stop_accepting),
+            ("shutdown_lifespan", lambda: self._adapter.shutdown_lifespan(drain_timeout=0)),
+            ("close_masters", self._adapter.close_masters),
         ):
-            with suppress(Exception):
+            try:
                 await release()
+            except Exception as error:
+                notes.append(f"start-up teardown: {name} failed: {type(error).__name__}: {error}")
+        return notes
 
     async def _descend(self) -> ShutdownReport:
         interrupted = 0
@@ -172,16 +178,22 @@ class StandaloneServer:
             with suppress(Exception):
                 await cleanup
 
-        error = ""
+        errors: list[str] = []
         failure = cleanup.exception() if cleanup.done() and not cleanup.cancelled() else None
         if failure is not None:
-            error = f"{type(failure).__name__}: {failure}"
-        if not error:
-            try:
-                await self._adapter.close_masters()
-            except Exception as failure:
-                error = f"{type(failure).__name__}: {failure}"
-        return CleanupOutcome(timed_out=timed_out, completed=cleanup.done(), error=error)
+            errors.append(f"{type(failure).__name__}: {failure}")
+        # Attempted either way: a lifespan that raised is the case where the listener is most likely
+        # to be left open, so skipping the release there would strand exactly the resource the last
+        # rung exists to give back.
+        try:
+            await self._adapter.close_masters()
+        except Exception as release_failure:
+            errors.append(f"{type(release_failure).__name__}: {release_failure}")
+        return CleanupOutcome(
+            timed_out=timed_out,
+            completed=cleanup.done(),
+            error="; ".join(errors),
+        )
 
     async def _await_advance(self) -> None:
         """Wait until the shutdown starts at all."""

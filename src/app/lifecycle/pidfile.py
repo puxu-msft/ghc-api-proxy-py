@@ -92,15 +92,24 @@ def read_pidfile(path: Path) -> PidfileEntry | None:
 
 
 def write_pidfile(path: Path, pid: int | None = None) -> PidfileEntry:
-    """Record this process, replacing whatever was there.
+    """Record this process, replacing whatever was there."""
+    resolved = os.getpid() if pid is None else pid
+    return write_entry(path, PidfileEntry(pid=resolved, start_token=process_start_token(resolved)))
+
+
+def write_entry(path: Path, entry: PidfileEntry) -> PidfileEntry:
+    """Write an already-formed record, token and all.
+
+    Restoring a record must not go through `write_pidfile`: that re-derives the token from whoever
+    holds the PID *now*, so putting back a process that has since exited would mint a fresh identity
+    for its replacement and certify a stranger. Writing the original bytes keeps the entry either
+    correct or provably stale, which the identity check can act on.
 
     Written to a temporary name and renamed, so a reader never sees a half-written file.
     """
-    resolved = os.getpid() if pid is None else pid
-    entry = PidfileEntry(pid=resolved, start_token=process_start_token(resolved))
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(f"{path.name}.{resolved}.tmp")
+        temporary = path.with_name(f"{path.name}.{entry.pid}.tmp")
         temporary.write_text(entry.rendered(), encoding="utf-8")
         temporary.replace(path)
     except OSError as error:
@@ -138,10 +147,10 @@ def signal_restart(entry: PidfileEntry) -> bool:
     different processes: the predecessor can exit in between and its PID be handed to something
     else, which would then receive the signal. So the order here is pin, verify, signal.
 
-    The pin is a directory descriptor on `/proc/<pid>`, which holds a reference to that specific
-    process and thereby keeps its PID from being handed out again. Both later steps go through that
-    descriptor, so they are about the process that was pinned rather than about whoever holds the
-    number by then.
+    The pin is a directory descriptor on `/proc/<pid>`, which refers to that one process rather than
+    to the number. Should the process exit and its PID be handed out again, the descriptor does not
+    follow: reads through it and signals sent through it fail instead of reaching the newcomer. Both
+    later steps go through it, so neither can be answered by a stranger.
     """
     if not entry.start_token:
         raise PidfileError(f"refusing to signal {entry.pid}: no recorded identity to verify")

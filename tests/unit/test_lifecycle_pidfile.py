@@ -22,6 +22,7 @@ from app.lifecycle.pidfile import (
     read_pidfile,
     remove_pidfile,
     signal_restart,
+    write_entry,
     write_pidfile,
 )
 
@@ -195,3 +196,24 @@ def test_removal_happens_when_the_file_records_us(tmp_path: Path) -> None:
 
 def test_removing_an_absent_file_reports_false(tmp_path: Path) -> None:
     assert remove_pidfile(tmp_path / "absent.pid") is False
+
+
+def test_restoring_a_record_keeps_its_original_token(tmp_path: Path) -> None:
+    """Putting a record back must not re-derive its identity from whoever holds the PID now.
+
+    A predecessor that exited during a failed handover may have had its PID reused. Recomputing the
+    token would then certify the stranger, and the next `--restart` would signal it — the very
+    accident the token exists to prevent. Writing the original bytes leaves it provably stale
+    instead, which the identity check refuses.
+    """
+    path = tmp_path / "standalone.pid"
+    with subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"]) as other:
+        try:
+            time.sleep(0.5)
+            stale = PidfileEntry(pid=other.pid, start_token="1")
+            write_entry(path, stale)
+
+            assert read_pidfile(path) == stale
+            assert live_predecessor(path) is None, "a stale token must not be re-certified"
+        finally:
+            other.kill()

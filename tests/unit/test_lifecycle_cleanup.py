@@ -152,6 +152,9 @@ async def test_a_failing_cleanup_is_reported_rather_than_swallowed() -> None:
     report = await asyncio.wait_for(serving, 5)
     assert "lifespan teardown blew up" in report.cleanup_error
     assert report.stage is ShutdownStage.DRAINING
+    # A lifespan that raised is where the listener is most likely to be left open, so the release
+    # is attempted anyway rather than skipped along with the rest of the teardown.
+    assert adapter.masters_closed is True
 
 
 @pytest.mark.asyncio
@@ -203,3 +206,41 @@ async def test_a_failing_serving_hook_releases_the_listener() -> None:
     assert adapter.stopped_accepting is True
     assert adapter.cleanup_started is True
     assert adapter.masters_closed is True
+
+
+@pytest.mark.asyncio
+async def test_both_teardown_failures_are_reported_together() -> None:
+    # Reporting only the first would hide a listener that is still open behind a lifespan error.
+    adapter = StubAdapter(
+        cleanup_error=RuntimeError("lifespan teardown blew up"),
+        close_error=OSError("cannot close listener"),
+    )
+    server = server_for(adapter)
+    serving = asyncio.create_task(server.serve())
+    await asyncio.sleep(0.05)
+    server.receive_signal(signal.SIGTERM)
+
+    report = await asyncio.wait_for(serving, 5)
+    assert "lifespan teardown blew up" in report.cleanup_error
+    assert "cannot close listener" in report.cleanup_error
+
+
+@pytest.mark.asyncio
+async def test_a_release_that_fails_during_a_failed_start_is_still_reported() -> None:
+    """The start-up failure stays the exception; a leak underneath it must not vanish with it.
+
+    Suppressing these outright leaves a socket or a lifespan behind with nothing anywhere saying so,
+    which is the difference between a diagnosable leak and an invisible one.
+    """
+    adapter = StubAdapter(close_error=OSError("cannot close listener"))
+
+    async def refuse() -> None:
+        raise RuntimeError("cannot announce")
+
+    server = StandaloneServer(adapter, on_serving=refuse)  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError, match="cannot announce") as caught:
+        await server.serve()
+
+    notes = getattr(caught.value, "__notes__", [])
+    assert any("close_masters" in note and "cannot close listener" in note for note in notes)
