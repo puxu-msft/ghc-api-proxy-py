@@ -45,3 +45,19 @@ class ModelProvider(Protocol):
         Raises before touching the network when the model does not advertise the endpoint.
         """
         ...
+
+    async def count_tokens(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        model_id: str,
+    ) -> httpx.Response:
+        """Ask upstream how many tokens an Anthropic Messages body comes to.
+
+        On the protocol rather than on one implementation because the spec's
+        `inbound.anthropic_count_tokens.providers` names `ghc` as one provider among others; a
+        counter that only some providers offered could not be selected by name.
+
+        Gated on the Messages capability, the same as sending that body would be.
+        """
+        ...

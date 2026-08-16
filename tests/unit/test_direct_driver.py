@@ -77,6 +77,11 @@ class FakeProvider:
             raise outcome
         return outcome
 
+    async def count_tokens(self, payload: Any, *, model_id: str) -> httpx.Response:
+        # Present so the fake really satisfies the protocol. Nothing here counts tokens, and a
+        # silent stub would let a test think it had.
+        raise NotImplementedError("this fake does not count tokens")
+
 
 def context(model: str = "claude-model") -> RequestContext:
     ctx = RequestContext(

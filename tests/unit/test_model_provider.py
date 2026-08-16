@@ -217,12 +217,32 @@ async def test_disabled_model_is_refused_before_the_network() -> None:
 
 @pytest.mark.asyncio
 async def test_count_tokens_is_gated_on_the_messages_capability() -> None:
-    provider, http_client = build_provider(upstream(httpx.Response(200, json={})))
+    """Counting a body is refused wherever sending it would be, and before the network.
+
+    Three ways to be refused, and they are not the same: `gpt-model` advertises other endpoints,
+    `mute-model` advertises none, and the third is not in the catalog at all. A gate that only
+    asked "is this model known" would let the first two through.
+    """
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"input_tokens": 1})
+
+    provider, http_client = build_provider(handler)
     try:
         with pytest.raises(EndpointNotSupported):
             await provider.count_tokens({"model": "gpt-model"}, model_id="gpt-model")
+
+        with pytest.raises(CapabilityMissing):
+            await provider.count_tokens({"model": "mute-model"}, model_id="mute-model")
+
+        with pytest.raises(UnknownModel):
+            await provider.count_tokens({"model": "no-such"}, model_id="no-such")
     finally:
         await http_client.aclose()
+
+    assert seen == [], "a refused count must not reach upstream"
 
 
 @pytest.mark.asyncio
@@ -334,3 +354,4 @@ def test_payload_is_not_mutated_by_send_preparation() -> None:
     provider, _ = build_provider(upstream(httpx.Response(200)))
     assert provider.describe("claude-model") is not None
     assert payload == before
+

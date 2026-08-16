@@ -32,6 +32,16 @@ def standalone_pidfile_path() -> Path:
     return user_data_path() / "standalone.pid"
 
 
+def tokenization_state_path() -> Path:
+    """Where the calibration and prompt-limit state lives.
+
+    Derived rather than configured: `config.example.yaml` has no `tokenization` section, and the
+    `local` token counter is useless without somewhere to keep what it has learnt. Naming the
+    location here keeps that working without inventing a config key the spec does not have.
+    """
+    return user_data_path() / "tokenization.json"
+
+
 def expand_user_path(value: str) -> Path:
     """Expand a configured path the way the spec writes them.
 

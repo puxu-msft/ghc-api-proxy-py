@@ -17,7 +17,7 @@ from app.auth.providers import (
     FileTokenProvider,
     GitHubTokenManager,
 )
-from app.config.paths import expand_user_path
+from app.config.paths import expand_user_path, tokenization_state_path
 from app.config.schema import ProxyConfig
 from app.ghc_client import (
     CopilotTokenManager,
@@ -37,6 +37,7 @@ from app.pipeline.events import FrozenSubscribers, SubscriberRegistry
 from app.pipeline.rate_limiting import RateLimiter
 from app.pipeline.request import RequestContext
 from app.pipeline.translation_driver import TranslatorRegistry, default_registry
+from app.tokenization.state_store import TokenizationStateStore
 from app.upstream.copilot import GitHubTokenSourceAdapter
 
 
@@ -87,6 +88,10 @@ class Chain:
     subscribers: FrozenSubscribers[RequestContext]
     http_client: httpx.AsyncClient
     rate_limiters: dict[str, RateLimiter] = field(default_factory=lambda: dict[str, RateLimiter]())
+    # What the `local` token counter has learnt. Constructing it touches nothing; `load()` does.
+    tokenization: TokenizationStateStore = field(
+        default_factory=lambda: TokenizationStateStore(tokenization_state_path())
+    )
 
     def rate_limiter_for(self, provider_name: str) -> RateLimiter:
         return self.rate_limiters[provider_name]

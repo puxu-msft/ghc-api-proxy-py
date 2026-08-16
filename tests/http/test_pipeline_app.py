@@ -401,3 +401,89 @@ def test_upstream_503_does_not_enter_limited_mode() -> None:
     client.post("/v1/messages", json={"model": "claude-model", "messages": []})
 
     assert chain.rate_limiter_for("ghc").mode is RateLimitMode.NORMAL
+
+
+def test_count_tokens_asks_upstream_and_returns_its_number() -> None:
+    client, seen = make_client(lambda _: httpx.Response(200, json={"input_tokens": 4242}))
+    response = client.post(
+        "/v1/messages/count_tokens",
+        json={"model": "claude-model", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 200
+    # Upstream's own number, unmodified, and no claim that it was estimated.
+    assert response.json() == {"input_tokens": 4242}
+    assert str(seen[-1].url) == f"{BASE_URL}/v1/messages/count_tokens"
+
+
+def test_count_tokens_falls_back_to_the_local_estimate() -> None:
+    """A provider that fails hands over to the next, so a broken upstream degrades rather than 502s.
+
+    The reply says `estimated`, because an estimate presented as a measurement is worse than no
+    answer: the caller sizes its request against it.
+    """
+    client, _ = make_client(lambda _: httpx.Response(500, json={"error": "upstream is down"}))
+    response = client.post(
+        "/v1/messages/count_tokens",
+        json={"model": "claude-model", "messages": [{"role": "user", "content": "hello there"}]},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["estimated"] is True
+    assert body["input_tokens"] > 0
+
+
+def test_count_tokens_asks_about_the_mapped_model() -> None:
+    # A count that ignored model_mappings would answer about a model the request never reaches.
+    client, seen = make_client(
+        lambda _: httpx.Response(200, json={"input_tokens": 7}),
+        mappings={"alias": "claude-model"},
+    )
+    response = client.post(
+        "/v1/messages/count_tokens",
+        json={"model": "alias", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 200
+    assert orjson.loads(seen[-1].read())["model"] == "claude-model"
+
+
+def test_count_tokens_accepts_a_body_without_max_tokens() -> None:
+    # Anthropic's own count_tokens does not require it; requiring it would reject valid bodies.
+    client, _ = make_client(lambda _: httpx.Response(200, json={"input_tokens": 11}))
+    response = client.post(
+        "/v1/messages/count_tokens",
+        json={"model": "claude-model", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["input_tokens"] == 11
+
+
+def test_count_tokens_rejects_a_body_that_is_not_countable() -> None:
+    client, seen = make_client(lambda _: httpx.Response(200, json={"input_tokens": 1}))
+    response = client.post(
+        "/v1/messages/count_tokens",
+        json={"model": "claude-model", "messages": "not a list of messages"},
+    )
+
+    assert response.status_code == 400
+    assert seen == [], "an uncountable body must not reach upstream"
+
+
+def test_count_tokens_refuses_a_model_without_the_messages_capability() -> None:
+    """Refused by routing, before any counter is chosen.
+
+    The refusal here comes from `decide_route`, not from the provider's own gate — a mutation that
+    removes the provider check leaves this test green. The provider gate has its own test in
+    `tests/unit/test_model_provider.py`.
+    """
+    client, seen = make_client(lambda _: httpx.Response(200, json={"input_tokens": 1}))
+    response = client.post(
+        "/v1/messages/count_tokens",
+        json={"model": "mute-model", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 400
+    assert seen == []

@@ -8,12 +8,16 @@ client while a block is still forming.
 """
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, cast
 
 import httpx
+from pydantic import ValidationError
 
 from app.model_provider import ProviderError
+from app.models.anthropic import MessagesRequest
+from app.pipeline.count_tokens import CountTokensUnavailable, count_tokens
 from app.pipeline.delivery import BlockBuffer, CompletedBlock, DeliverySession
 from app.pipeline.delivery.assembler import AnthropicAssembler, BlockAssembler, ResponsesAssembler
 from app.pipeline.delivery.stream import StreamSettings
@@ -25,6 +29,7 @@ from app.pipeline.routing import Route, RoutingError, decide_route
 from app.pipeline.timeouts import resolve_timeout
 from app.pipeline.translation_driver import TranslatorNotFound
 from app.server.composition import Chain
+from app.tokenization.estimators import estimate_anthropic_input
 
 
 @dataclass(slots=True)
@@ -88,6 +93,85 @@ async def handle(chain: Chain, context: RequestContext) -> HandledRequest:
     return HandledRequest(context=context, route=route, outcome=outcome)
 
 
+class CountTokensRequestError(ValueError):
+    """The body cannot be read as an Anthropic Messages request, so there is nothing to count."""
+
+
+async def handle_count_tokens(chain: Chain, context: RequestContext) -> dict[str, Any]:
+    """Serve `/v1/messages/count_tokens` through the provider chain the spec names.
+
+    Routed first, exactly like the request being measured: a count that ignored `model_mappings`
+    or the capability gate would answer about a different model than the one that would be asked.
+
+    The two providers are not interchangeable. `ghc` returns upstream's own number and is worth
+    learning from; `local` returns an estimate corrected by what has been learnt so far. So the
+    answer says which one it came from rather than presenting an estimate as a measurement.
+    """
+    provider = chain.providers.get(context.provider_name or chain.providers.default_name)
+    route = decide_route(
+        requested_model=context.requested_model,
+        inbound_format=context.inbound_format,
+        provider=provider,
+        mappings=chain.config.model_mappings,
+    )
+    apply_route(context, route)
+    context.payload["model"] = route.model_id
+
+    estimate = estimate_anthropic_input(_countable(context.payload))
+    calibration = chain.tokenization.calibration
+
+    async def ask_upstream(payload: Mapping[str, Any]) -> int:
+        response = await provider.count_tokens(payload, model_id=route.model_id)
+        try:
+            response.raise_for_status()
+            body = cast(dict[str, Any], response.json())
+        finally:
+            await response.aclose()
+        counted = body.get("input_tokens")
+        if not isinstance(counted, int) or counted <= 0:
+            raise ValueError("upstream count_tokens gave no positive input_tokens")
+        return counted
+
+    def estimate_locally(payload: Mapping[str, Any]) -> int:
+        del payload  # Already measured above; recomputing per attempt would only cost time.
+        return calibration.calibrate("anthropic", route.model_id, estimate)
+
+    settings = chain.config.inbound.anthropic_count_tokens
+    payload = dict(context.payload)
+    payload.pop("stream", None)
+    result = await count_tokens(
+        payload,
+        providers=settings.providers,
+        max_retries=settings.max_retries,
+        upstream=ask_upstream,
+        local=estimate_locally,
+    )
+    context.extras["count_tokens_provider"] = result.provider
+    if result.attempts:
+        context.extras["count_tokens_attempts"] = list(result.attempts)
+
+    if result.provider == "ghc":
+        # Upstream's number is ground truth for the estimator, which is the only way it improves.
+        calibration.learn("anthropic", route.model_id, estimate, result.tokens)
+        return {"input_tokens": result.tokens}
+    return {"input_tokens": result.tokens, "estimated": True}
+
+
+def _countable(payload: Mapping[str, Any]) -> MessagesRequest:
+    """Read the body as a Messages request for estimation only.
+
+    `max_tokens` is required to *send* a Messages request but means nothing when counting its
+    input, and Anthropic's own count_tokens endpoint does not ask for it. Supplying one here keeps
+    a legitimate body from being rejected; it is never sent anywhere.
+    """
+    countable = dict(payload)
+    countable.setdefault("max_tokens", 1)
+    try:
+        return MessagesRequest.model_validate(countable)
+    except ValidationError as error:
+        raise CountTokensRequestError(f"not a countable Messages body: {error}") from error
+
+
 async def handle_bounded(chain: Chain, context: RequestContext) -> HandledRequest:
     """Run a request under the client deadline.
 
@@ -110,8 +194,14 @@ def error_status(error: BaseException) -> int:
     A routing or capability refusal means the request is unserviceable, not that upstream failed.
     It must not be reported as a bad gateway.
     """
-    if isinstance(error, ProviderError | RoutingError | TranslatorNotFound):
+    if isinstance(
+        error,
+        ProviderError | RoutingError | TranslatorNotFound | CountTokensRequestError,
+    ):
         return 400
+    if isinstance(error, CountTokensUnavailable):
+        # Every counter failed, including the local one. Upstream is not to blame for that.
+        return 503
     return 502
 
 

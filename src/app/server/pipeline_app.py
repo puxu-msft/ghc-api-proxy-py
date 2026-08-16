@@ -17,6 +17,7 @@ from app.server.handler import (
     error_body,
     error_status,
     handle_bounded,
+    handle_count_tokens,
     response_payload,
     stream_settings,
 )
@@ -46,6 +47,15 @@ async def _serve(request: Request) -> Response:
         context = build_context(route, body)
     except InboundRequestError as error:
         return JSONResponse(error_body(error), status_code=400)
+
+    if route.count_tokens:
+        # Answered here rather than driven: the reply is a count, not an upstream response to
+        # deliver, so none of the block buffering below applies to it.
+        try:
+            counted = await handle_count_tokens(_chain(request), context)
+        except Exception as error:
+            return JSONResponse(error_body(error), status_code=error_status(error))
+        return JSONResponse(counted)
 
     try:
         handled = await handle_bounded(_chain(request), context)
