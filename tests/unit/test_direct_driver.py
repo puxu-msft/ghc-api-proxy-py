@@ -302,3 +302,48 @@ async def test_late_subscriber_abort_discards_the_response() -> None:
     assert outcome.succeeded is False
     assert outcome.response is None
     assert isinstance(outcome.error, PipelineAbort)
+
+
+@pytest.mark.asyncio
+async def test_named_strategies_bound_each_reason_separately() -> None:
+    # A 401 draws on githubTokenExpired, which the spec caps at 0, so it must not be retried even
+    # though the shared total has room.
+    from app.config.schema import UpstreamRequestRetryConfig
+    from app.pipeline.direct_driver import LedgerBudget
+    from app.pipeline.retry import RetryLedger
+
+    provider = FakeProvider(
+        responses=[UpstreamError("expired", status_code=401), httpx.Response(200)]
+    )
+    ledger = RetryLedger(UpstreamRequestRetryConfig())
+    frozen = SubscriberRegistry[RequestContext]().freeze()
+    driver_under_test = AnthropicMessagesDriver(
+        provider, frozen, budget=LedgerBudget(ledger)
+    )
+
+    outcome = await driver_under_test.run(context())
+
+    assert outcome.succeeded is False
+    assert outcome.attempts == 1
+    assert "githubTokenExpired" in str(outcome.error)
+
+
+@pytest.mark.asyncio
+async def test_named_strategies_allow_a_funded_reason() -> None:
+    from app.config.schema import UpstreamRequestRetryConfig
+    from app.pipeline.direct_driver import LedgerBudget
+    from app.pipeline.retry import RetryLedger
+
+    provider = FakeProvider(
+        responses=[UpstreamError("gateway", status_code=503), httpx.Response(200)]
+    )
+    driver_under_test = AnthropicMessagesDriver(
+        provider,
+        SubscriberRegistry[RequestContext]().freeze(),
+        budget=LedgerBudget(RetryLedger(UpstreamRequestRetryConfig())),
+    )
+
+    outcome = await driver_under_test.run(context())
+
+    assert outcome.succeeded is True
+    assert outcome.attempts == 2

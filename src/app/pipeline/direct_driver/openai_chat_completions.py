@@ -4,7 +4,7 @@ Binds the endpoint; the loop is shared, so behaviour cannot drift between the fo
 """
 
 from app.model_provider import ModelEndpoint, ModelProvider
-from app.pipeline.direct_driver.base import DirectDriver, RetryBudget
+from app.pipeline.direct_driver.base import Budget, DirectDriver
 from app.pipeline.events import FrozenSubscribers
 from app.pipeline.request import RequestContext
 
@@ -17,6 +17,6 @@ class OpenAIChatCompletionsDriver(DirectDriver):
         provider: ModelProvider,
         subscribers: FrozenSubscribers[RequestContext],
         *,
-        budget: RetryBudget,
+        budget: Budget,
     ) -> None:
         super().__init__(ENDPOINT, provider, subscribers, budget=budget)

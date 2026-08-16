@@ -13,8 +13,9 @@ from typing import Any
 import httpx
 
 from app.model_provider import ProviderError
-from app.pipeline.direct_driver import DRIVERS, DriverOutcome, RetryBudget
+from app.pipeline.direct_driver import DRIVERS, DriverOutcome, LedgerBudget
 from app.pipeline.request import RequestContext
+from app.pipeline.retry import RetryLedger
 from app.pipeline.routing import Route, RoutingError, decide_route
 from app.pipeline.translation_driver import TranslatorNotFound
 from app.server.composition import Chain
@@ -74,7 +75,7 @@ async def handle(chain: Chain, context: RequestContext) -> HandledRequest:
     driver = driver_type(
         provider,
         chain.subscribers,
-        budget=RetryBudget(max_total=chain.config.upstream_request_retry.max_total),
+        budget=LedgerBudget(RetryLedger(chain.config.upstream_request_retry)),
     )
     outcome = await driver.run(context)
     return HandledRequest(context=context, route=route, outcome=outcome)

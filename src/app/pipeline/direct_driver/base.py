@@ -8,6 +8,7 @@ Copying it per endpoint is how the four drift apart.
 """
 
 from dataclasses import dataclass, field
+from typing import Protocol
 
 import httpx
 
@@ -15,6 +16,7 @@ from app.model_provider import ModelEndpoint, ModelProvider
 from app.pipeline.events import FrozenSubscribers
 from app.pipeline.exceptions import Disposition, PipelineAbort, classify
 from app.pipeline.request import RequestContext
+from app.pipeline.retry import RetryLedger, reason_for
 
 EVENT_ATTEMPT_PREPARE = "attempt.prepare"
 EVENT_ATTEMPT_SUCCEEDED = "attempt.succeeded"
@@ -33,7 +35,7 @@ EVENTS = (
 
 @dataclass(slots=True)
 class RetryBudget:
-    """One budget per client request, spent by every retry reason together."""
+    """A simple shared counter, kept for callers that have no named strategies configured."""
 
     max_total: int
     spent: int = 0
@@ -43,6 +45,27 @@ class RetryBudget:
             return False
         self.spent += 1
         return True
+
+    def take_for(self, error: BaseException) -> tuple[bool, str]:
+        return (self.take(), "retry budget exhausted")
+
+
+@dataclass(slots=True)
+class LedgerBudget:
+    """Spends the named per-reason strategies alongside the shared total."""
+
+    ledger: RetryLedger
+
+    def take_for(self, error: BaseException) -> tuple[bool, str]:
+        reason = reason_for(error)
+        if reason is None:
+            return (False, "failure is not retryable")
+        verdict = self.ledger.take(reason)
+        return (verdict.allowed, verdict.detail or f"{reason.value} retry refused")
+
+
+class Budget(Protocol):
+    def take_for(self, error: BaseException) -> tuple[bool, str]: ...
 
 
 @dataclass(slots=True)
@@ -65,7 +88,7 @@ class DirectDriver:
         provider: ModelProvider,
         subscribers: FrozenSubscribers[RequestContext],
         *,
-        budget: RetryBudget,
+        budget: Budget,
     ) -> None:
         self._endpoint = endpoint
         self._provider = provider
@@ -130,12 +153,13 @@ class DirectDriver:
         """Return whether to attempt again. Records the terminal error when not."""
         await self._publish(EVENT_ATTEMPT_FAILED, context, outcome)
         disposition = classify(error)
-        if disposition is Disposition.RETRY and self._budget.take():
-            return True
-        outcome.error = (
-            error
-            if disposition is Disposition.ABORT
-            else PipelineAbort(f"retry budget exhausted: {error}")
-        )
+        if disposition is Disposition.RETRY:
+            funded, detail = self._budget.take_for(error)
+            if funded:
+                return True
+            outcome.error = PipelineAbort(f"{detail}: {error}")
+            await self._publish(EVENT_REQUEST_FAILED, context, outcome)
+            return False
+        outcome.error = error
         await self._publish(EVENT_REQUEST_FAILED, context, outcome)
         return False

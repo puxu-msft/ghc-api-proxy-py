@@ -15,8 +15,10 @@ from app.pipeline.direct_driver.base import (
     EVENT_REQUEST_FAILED,
     EVENT_REQUEST_SUCCEEDED,
     EVENTS,
+    Budget,
     DirectDriver,
     DriverOutcome,
+    LedgerBudget,
     RetryBudget,
 )
 from app.pipeline.direct_driver.openai_chat_completions import OpenAIChatCompletionsDriver
@@ -34,7 +36,7 @@ class DriverFactory(Protocol):
         provider: ModelProvider,
         subscribers: FrozenSubscribers[RequestContext],
         *,
-        budget: RetryBudget,
+        budget: Budget,
     ) -> DirectDriver: ...
 
 
@@ -54,9 +56,11 @@ __all__ = [
     "EVENT_REQUEST_FAILED",
     "EVENT_REQUEST_SUCCEEDED",
     "AnthropicMessagesDriver",
+    "Budget",
     "DirectDriver",
     "DriverFactory",
     "DriverOutcome",
+    "LedgerBudget",
     "OpenAIChatCompletionsDriver",
     "OpenAIEmbeddingsDriver",
     "OpenAIResponsesDriver",
