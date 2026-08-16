@@ -18,5 +18,12 @@ class AnthropicMessagesDriver(DirectDriver):
         subscribers: FrozenSubscribers[RequestContext],
         *,
         budget: Budget,
+        attempt_deadline: int = 0,
     ) -> None:
-        super().__init__(ENDPOINT, provider, subscribers, budget=budget)
+        super().__init__(
+            ENDPOINT,
+            provider,
+            subscribers,
+            budget=budget,
+            attempt_deadline=attempt_deadline,
+        )

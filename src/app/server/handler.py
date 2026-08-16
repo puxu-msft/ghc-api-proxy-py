@@ -7,6 +7,7 @@ put through the buffer, and only complete blocks are framed as Anthropic SSE. No
 client while a block is still forming.
 """
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -15,9 +16,11 @@ import httpx
 from app.model_provider import ProviderError
 from app.pipeline.delivery import BlockBuffer, CompletedBlock, DeliverySession
 from app.pipeline.direct_driver import DRIVERS, DriverOutcome, LedgerBudget
+from app.pipeline.exceptions import UpstreamTimeout
 from app.pipeline.request import RequestContext
 from app.pipeline.retry import RetryLedger
 from app.pipeline.routing import Route, RoutingError, decide_route
+from app.pipeline.timeouts import resolve_timeout
 from app.pipeline.translation_driver import TranslatorNotFound
 from app.server.composition import Chain
 
@@ -65,14 +68,37 @@ async def handle(chain: Chain, context: RequestContext) -> HandledRequest:
     # The payload names the inbound model; upstream must be asked for the resolved one.
     context.payload["model"] = route.model_id
 
+    timeouts = chain.config.upstream_request_timeouts
+    attempt_deadline = resolve_timeout(
+        route.model_id,
+        timeouts.upstream_request_deadline,
+        timeouts.response_header_overrides,
+    )
     driver_type = DRIVERS[route.endpoint]
     driver = driver_type(
         provider,
         chain.subscribers,
         budget=LedgerBudget(RetryLedger(chain.config.upstream_request_retry)),
+        attempt_deadline=attempt_deadline,
     )
     outcome = await driver.run(context)
     return HandledRequest(context=context, route=route, outcome=outcome)
+
+
+async def handle_bounded(chain: Chain, context: RequestContext) -> HandledRequest:
+    """Run a request under the client deadline.
+
+    Measured from admission and never reset by a retry, so it bounds the whole client-visible
+    operation rather than any one attempt.
+    """
+    deadline = chain.config.client_delivery.client_request_deadline
+    if deadline <= 0:
+        return await handle(chain, context)
+    try:
+        async with asyncio.timeout(deadline):
+            return await handle(chain, context)
+    except TimeoutError as error:
+        raise UpstreamTimeout(f"client request exceeded {deadline}s") from error
 
 
 def error_status(error: BaseException) -> int:

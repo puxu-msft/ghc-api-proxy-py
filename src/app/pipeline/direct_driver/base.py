@@ -7,14 +7,15 @@ The four named drivers differ only in which endpoint they target, so the loop li
 Copying it per endpoint is how the four drift apart.
 """
 
+import asyncio
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 import httpx
 
 from app.model_provider import ModelEndpoint, ModelProvider
 from app.pipeline.events import FrozenSubscribers
-from app.pipeline.exceptions import Disposition, PipelineAbort, classify
+from app.pipeline.exceptions import Disposition, PipelineAbort, UpstreamTimeout, classify
 from app.pipeline.request import RequestContext
 from app.pipeline.retry import RetryLedger, reason_for
 
@@ -89,11 +90,13 @@ class DirectDriver:
         subscribers: FrozenSubscribers[RequestContext],
         *,
         budget: Budget,
+        attempt_deadline: int = 0,
     ) -> None:
         self._endpoint = endpoint
         self._provider = provider
         self._subscribers = subscribers
         self._budget = budget
+        self._attempt_deadline = attempt_deadline
 
     @property
     def endpoint(self) -> ModelEndpoint:
@@ -119,12 +122,7 @@ class DirectDriver:
                 # Subscribers edit the context payload.
                 # Re-read it rather than trusting the copy taken when the attempt opened.
                 attempt.payload = dict(context.payload)
-                response = await self._provider.send(
-                    self._endpoint,
-                    attempt.payload,
-                    model_id=context.resolved_model,
-                    stream=context.stream,
-                )
+                response = await self._send(context, attempt.payload)
             except BaseException as error:
                 attempt.error = str(error)
                 if not await self._handle_failure(error, context, outcome):
@@ -163,3 +161,29 @@ class DirectDriver:
         outcome.error = error
         await self._publish(EVENT_REQUEST_FAILED, context, outcome)
         return False
+
+    async def _send(
+        self,
+        context: RequestContext,
+        payload: dict[str, Any],
+    ) -> httpx.Response:
+        """Send one attempt, bounded by the attempt deadline when one is configured.
+
+        The deadline bounds the whole attempt rather than a phase of it, which is what catches an
+        upstream that trickles forever without ever finishing.
+        """
+        send = self._provider.send(
+            self._endpoint,
+            payload,
+            model_id=context.resolved_model,
+            stream=context.stream,
+        )
+        if self._attempt_deadline <= 0:
+            return await send
+        try:
+            async with asyncio.timeout(self._attempt_deadline):
+                return await send
+        except TimeoutError as error:
+            raise UpstreamTimeout(
+                f"attempt exceeded {self._attempt_deadline}s"
+            ) from error

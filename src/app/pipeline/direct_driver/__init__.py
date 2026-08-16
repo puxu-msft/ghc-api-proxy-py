@@ -37,6 +37,7 @@ class DriverFactory(Protocol):
         subscribers: FrozenSubscribers[RequestContext],
         *,
         budget: Budget,
+        attempt_deadline: int = 0,
     ) -> DirectDriver: ...
 
 

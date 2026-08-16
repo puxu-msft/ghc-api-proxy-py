@@ -16,7 +16,7 @@ from app.server.handler import (
     deliver_blocks,
     error_body,
     error_status,
-    handle,
+    handle_bounded,
     response_payload,
 )
 from app.server.inbound import ROUTES, InboundRequestError, build_context, route_for_path
@@ -47,7 +47,7 @@ async def _serve(request: Request) -> Response:
         return JSONResponse(error_body(error), status_code=400)
 
     try:
-        handled = await handle(_chain(request), context)
+        handled = await handle_bounded(_chain(request), context)
     except Exception as error:
         return JSONResponse(error_body(error), status_code=error_status(error))
 

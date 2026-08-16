@@ -37,6 +37,43 @@ from app.pipeline.translation_driver import TranslatorRegistry, default_registry
 from app.upstream.copilot import GitHubTokenSourceAdapter
 
 
+@dataclass(frozen=True, slots=True)
+class TransportOptions:
+    """What the transport settings mean for the outbound client.
+
+    Kept separate from constructing the client so the decision can be asserted without reaching
+    into a third-party object's private state.
+    """
+
+    proxy: str | None
+    http2: bool
+    keepalive_expiry: float | None
+
+
+def transport_options(config: ProxyConfig) -> TransportOptions:
+    """Read the transport settings.
+
+    `proxy` applies to every outgoing request, not only the model ones, as the spec states.
+    Both intervals use 0 to disable.
+    """
+    transport = config.upstream_transport
+    keepalive = transport.tcp_keepalive_interval
+    return TransportOptions(
+        proxy=config.proxy or None,
+        http2=transport.http2_ping_interval > 0,
+        keepalive_expiry=float(keepalive) if keepalive > 0 else None,
+    )
+
+
+def build_http_client(config: ProxyConfig) -> httpx.AsyncClient:
+    options = transport_options(config)
+    return httpx.AsyncClient(
+        proxy=options.proxy,
+        http2=options.http2,
+        limits=httpx.Limits(keepalive_expiry=options.keepalive_expiry),
+    )
+
+
 @dataclass(slots=True)
 class Chain:
     """Everything a request handler needs, built once."""
@@ -155,9 +192,12 @@ async def refresh_catalogs(chain: Chain, *, token_headers: dict[str, str] | None
 
 __all__ = [
     "Chain",
+    "TransportOptions",
     "build_chain",
     "build_copilot_provider",
     "build_github_token_source",
+    "build_http_client",
     "build_request_headers",
     "refresh_catalogs",
+    "transport_options",
 ]
