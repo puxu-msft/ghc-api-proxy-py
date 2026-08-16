@@ -144,6 +144,31 @@ class UvicornListenerAdapter:
         else:
             await asyncio.wait_for(wait(), timeout)
 
+    def interrupt_connections(self) -> int:
+        """Ask every open connection to shut down, and report how many were asked.
+
+        This is the escalation between waiting for requests and abandoning them.
+        The connection stops reading and closes once its current response ends.
+        A request is therefore cut short rather than killed mid-write.
+        The count lets a caller say whether anything was actually interrupted.
+        """
+        connections = list(self._server.server_state.connections)
+        for connection in connections:
+            connection.shutdown()
+        return len(connections)
+
+    def abandon_requests(self) -> int:
+        """Cancel whatever is still running, and report how many tasks were cancelled.
+
+        The last resort, for when waiting has been given up on.
+        Cancelling rather than ignoring is what lets the drain finish.
+        Lifespan shutdown and state persistence therefore still get to run.
+        """
+        tasks = [task for task in self._server.server_state.tasks if not task.done()]
+        for task in tasks:
+            task.cancel()
+        return len(tasks)
+
     async def shutdown_lifespan(self, *, drain_timeout: float | None = None) -> None:
         async with self._operation_lock:
             if self._state is ListenerState.CLOSED:
