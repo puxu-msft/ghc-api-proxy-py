@@ -9,7 +9,7 @@ from uvicorn._types import ASGI3Application, ASGIReceiveCallable, ASGISendCallab
 from uvicorn.config import Config
 from uvicorn.server import Server, ServerState
 
-from app.socket_activation import ActivatedSocketSet, ListenerIdentity, SocketActivationError
+from app.lifecycle.activation import ActivatedSocketSet, ListenerIdentity, SocketActivationError
 
 
 class ListenerAdapterError(RuntimeError):

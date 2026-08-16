@@ -15,7 +15,7 @@ from app.lifecycle.rolling.generation.control_client import (
     TokenizationFlushReceipt,
 )
 from app.lifecycle.rolling.state import GenerationRecord, RollingStateStore
-from app.systemctl_adapter import UnitStatus
+from app.lifecycle.systemd.systemctl import UnitStatus
 from app.tokenization.snapshot_store import TokenizationSnapshotStore
 from app.wire_json import loads
 

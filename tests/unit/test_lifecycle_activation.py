@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from app.socket_activation import (
+from app.lifecycle.activation import (
     ActivatedSocketSet,
     ExpectedListener,
     SocketActivationError,
@@ -131,7 +131,7 @@ def test_systemd_environment_consumes_original_fd_and_unsets_metadata() -> None:
         """
         import os
         import socket
-        from app.socket_activation import ActivatedSocketSet, ExpectedListener
+        from app.lifecycle.activation import ActivatedSocketSet, ExpectedListener
 
         activated = ActivatedSocketSet.from_systemd_environment(
             [ExpectedListener("http-v4", socket.AF_INET, "127.0.0.1", int(os.environ["PORT"]))]

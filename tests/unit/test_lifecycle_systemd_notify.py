@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from app.systemd_notify import SystemdNotifyError, notify, notify_ready
+from app.lifecycle.systemd.notify import SystemdNotifyError, notify, notify_ready
 
 
 def test_notify_ready_sends_to_filesystem_socket(tmp_path: Path) -> None:

@@ -15,7 +15,7 @@ Both reach `UvicornListenerAdapter` unchanged.
 
 import socket
 
-from app.socket_activation import ActivatedSocketSet, ExpectedListener
+from app.lifecycle.activation import ActivatedSocketSet, ExpectedListener
 
 LISTENER_NAME = "http"
 

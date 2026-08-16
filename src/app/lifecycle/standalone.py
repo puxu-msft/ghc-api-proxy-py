@@ -23,8 +23,8 @@ from collections.abc import Awaitable, Callable, Generator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 
+from app.lifecycle.adapter import UvicornListenerAdapter
 from app.lifecycle.shutdown import ESCALATING_SIGNALS, RESTART_SIGNAL, ShutdownLadder, ShutdownStage
-from app.server_adapter import UvicornListenerAdapter
 
 HANDLED_SIGNALS = (*sorted(ESCALATING_SIGNALS), RESTART_SIGNAL)
 

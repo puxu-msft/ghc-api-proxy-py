@@ -61,7 +61,7 @@ def _child_script() -> str:
         from app.config.settings import AppSettings
         from app.lifecycle.rolling.generation.phases import GenerationLifecycle
         from app.lifecycle.rolling.runtime import RollingRuntime
-        from app.socket_activation import ActivatedSocketSet, ExpectedListener
+        from app.lifecycle.activation import ActivatedSocketSet, ExpectedListener
 
         @dataclass
         class State:

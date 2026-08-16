@@ -18,12 +18,12 @@ import pytest
 from fastapi import FastAPI
 from uvicorn import Config
 
+from app.lifecycle.adapter import UvicornListenerAdapter
 from app.lifecycle.entry import StandaloneOptions, run_standalone
 from app.lifecycle.listener import LISTENER_NAME, bind_listener
 from app.lifecycle.pidfile import PidfileEntry, PidfileError, write_pidfile
 from app.lifecycle.shutdown import ShutdownStage
 from app.lifecycle.standalone import ShutdownReport, StandaloneServer
-from app.server_adapter import UvicornListenerAdapter
 
 
 def slow_app(

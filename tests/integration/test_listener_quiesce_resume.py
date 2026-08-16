@@ -12,8 +12,8 @@ import pytest
 from fastapi import FastAPI
 from uvicorn import Config
 
-from app.server_adapter import ListenerState, UvicornListenerAdapter
-from app.socket_activation import ActivatedSocketSet, ExpectedListener, SocketActivationError
+from app.lifecycle.activation import ActivatedSocketSet, ExpectedListener, SocketActivationError
+from app.lifecycle.adapter import ListenerState, UvicornListenerAdapter
 
 
 def _listeners() -> tuple[socket.socket, socket.socket]:

@@ -16,7 +16,7 @@ from app.lifecycle.rolling.generation.control_client import (
     GenerationStatus,
 )
 from app.lifecycle.rolling.state import GenerationRecord, RollingState, RollingStateStore
-from app.systemctl_adapter import SystemctlAdapter, UnitStatus
+from app.lifecycle.systemd.systemctl import SystemctlAdapter, UnitStatus
 from app.tokenization.snapshot_store import (
     SnapshotReceipt,
     SnapshotRef,

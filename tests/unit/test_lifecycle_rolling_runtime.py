@@ -10,6 +10,7 @@ import pytest
 from fastapi import FastAPI
 
 from app.config.settings import AppSettings
+from app.lifecycle.activation import ActivatedSocketSet, ExpectedListener
 from app.lifecycle.rolling.generation.phases import GenerationLifecycle
 from app.lifecycle.rolling.runtime import (
     ROLLING_LISTENERS,
@@ -18,7 +19,6 @@ from app.lifecycle.rolling.runtime import (
     RollingRuntimeError,
     run_systemd_generation,
 )
-from app.socket_activation import ActivatedSocketSet, ExpectedListener
 from app.tokenization.state_store import TokenizationStateStore
 
 LISTENER_ADAPTER = "app.lifecycle.rolling.runtime.UvicornListenerAdapter"

@@ -14,15 +14,15 @@ from fastapi import FastAPI
 from uvicorn import Config
 from uvicorn._types import ASGI3Application
 
+from app.lifecycle.activation import ActivatedSocketSet, ExpectedListener
+from app.lifecycle.adapter import UvicornListenerAdapter
 from app.lifecycle.rolling.generation.admission import GenerationAdmissionMiddleware
 from app.lifecycle.rolling.generation.control import GenerationControlServer
 from app.lifecycle.rolling.generation.phases import (
     GenerationLifecycle,
     GenerationPhase,
 )
-from app.server_adapter import UvicornListenerAdapter
-from app.socket_activation import ActivatedSocketSet, ExpectedListener
-from app.systemd_notify import notify_ready, notify_stopping
+from app.lifecycle.systemd.notify import notify_ready, notify_stopping
 from app.tokenization.snapshot_store import TokenizationSnapshotStore
 
 ROLLING_PORT = 4144

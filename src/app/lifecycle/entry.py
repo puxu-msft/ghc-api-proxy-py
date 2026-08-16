@@ -17,6 +17,7 @@ from uvicorn import Config
 from uvicorn._types import ASGIApplication
 
 from app.config.paths import standalone_pidfile_path
+from app.lifecycle.adapter import UvicornListenerAdapter
 from app.lifecycle.listener import adopt_listener, bind_listener
 from app.lifecycle.pidfile import (
     live_predecessor,
@@ -26,7 +27,6 @@ from app.lifecycle.pidfile import (
     write_pidfile,
 )
 from app.lifecycle.standalone import ShutdownReport, StandaloneServer
-from app.server_adapter import UvicornListenerAdapter
 
 # Mirrors what `uvicorn.Config` accepts, so a FastAPI instance passes without a cast.
 type Application = ASGIApplication | Callable[..., Any]
