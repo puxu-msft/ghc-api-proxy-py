@@ -5,7 +5,7 @@ Time is injected, so these assert the decisions rather than waiting for a wall c
 
 import pytest
 
-from app.config.schema import RateLimiterConfig
+from app.config.schema import ReactiveRateLimiterConfig
 from app.pipeline.rate_limiting import (
     RateLimiter,
     RateLimitMode,
@@ -33,7 +33,7 @@ class FakeClock:
 
 def limiter(clock: FakeClock, **overrides: object) -> RateLimiter:
     return RateLimiter(
-        RateLimiterConfig.model_validate(overrides),
+        ReactiveRateLimiterConfig.model_validate(overrides),
         clock=clock,
         sleep=clock.sleep,
     )

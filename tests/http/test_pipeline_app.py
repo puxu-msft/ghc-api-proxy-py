@@ -362,7 +362,7 @@ def test_upstream_429_is_seen_by_the_rate_limiter() -> None:
         {
             "model_providers": {"ghc": {"type": "github_copilot", "base_url": BASE_URL}},
             "default_model_provider": "ghc",
-            "rate_limiter": {"retry_interval": 0, "request_interval": 0},
+            "reactive_rate_limiter": {"retry_interval": 0, "request_interval": 0},
             "upstream_request_retry": {"max_total": 0},
         }
     )

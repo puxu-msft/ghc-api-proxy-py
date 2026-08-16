@@ -17,7 +17,7 @@ from enum import StrEnum
 
 import anyio
 
-from app.config.schema import RateLimiterConfig
+from app.config.schema import ReactiveRateLimiterConfig
 
 # Only these two put the limiter into limited mode.
 REACTIVE_STATUSES = frozenset({429, 502})
@@ -100,7 +100,7 @@ class RateLimiter:
 
     def __init__(
         self,
-        config: RateLimiterConfig,
+        config: ReactiveRateLimiterConfig,
         *,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = anyio.sleep,

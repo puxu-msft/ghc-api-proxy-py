@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from platformdirs import user_config_path as platform_user_config_path
@@ -24,3 +25,17 @@ def spec_config_file_path() -> Path:
     Deliberately under XDG_DATA rather than XDG_CONFIG; the spec places the pidfile there too.
     """
     return user_data_path() / "config.yaml"
+
+
+def expand_user_path(value: str) -> Path:
+    """Expand a configured path the way the spec writes them.
+
+    The spec spells locations as `$XDG_DATA_HOME/...`, and that variable is usually unset.
+    `os.path.expandvars` would leave it as a literal directory name, so platformdirs resolves it.
+    `~` and other variables expand normally.
+    """
+    text = value.strip()
+    for spelling in ("$XDG_DATA_HOME/ghc-api-proxy", "${XDG_DATA_HOME}/ghc-api-proxy"):
+        if text.startswith(spelling) and "XDG_DATA_HOME" not in os.environ:
+            return user_data_path() / text[len(spelling) :].lstrip("/")
+    return Path(os.path.expandvars(text)).expanduser()

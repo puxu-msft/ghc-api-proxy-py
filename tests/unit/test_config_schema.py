@@ -17,12 +17,17 @@ def test_authoritative_example_config_parses() -> None:
     config = ProxyConfig.model_validate(raw)
 
     assert config.server.tls.mode == "both"
+    assert config.server.host == "127.0.0.1"
+    assert config.server.port == 4142
     assert config.default_model_provider == "ghc"
     assert config.model_providers["ghc"].type == "github_copilot"
+    assert config.model_providers["ghc"].github_token_file.endswith("github_token.txt")
     assert config.model_mappings["opus"] == "claude-opus-5"
     assert config.upstream_request_timeouts.upstream_request_deadline == 1200
     assert config.client_delivery.client_request_deadline == 3600
     assert config.upstream_request_retry.strategies.continuation.enabled is True
+    assert config.hooks.on_client_request_parsed == []
+    assert config.history.enabled is True
 
 
 def test_defaults_disable_the_upstream_silence_terminators() -> None:
@@ -86,5 +91,11 @@ def test_snapshot_is_frozen() -> None:
 
 def test_restart_only_paths_are_recorded() -> None:
     assert "proxy" in NOT_HOT_RELOADABLE
-    assert "rate_limiter" in NOT_HOT_RELOADABLE
+    assert "reactive_rate_limiter" in NOT_HOT_RELOADABLE
     assert "upstream_request_retry.max_total" in NOT_HOT_RELOADABLE
+
+
+def test_the_listen_address_is_restart_only() -> None:
+    # Nothing rebinds a live listener, so `current` would otherwise report a port nobody serves.
+    assert "server.host" in NOT_HOT_RELOADABLE
+    assert "server.port" in NOT_HOT_RELOADABLE

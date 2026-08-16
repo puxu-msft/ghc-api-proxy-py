@@ -21,12 +21,20 @@ type ContentBlockStartCompat = bool | Literal["signature_delta", "redacted_think
 type RefusalAction = Literal["passthrough", "as_end_turn", "as_error"]
 
 # Dotted paths the spec marks as requiring a restart. Everything else is hot-reloadable.
+#
+# `server.host` / `server.port` carry no such note, but nothing rebinds a live listener.
+# lifecycle.md realises a port change by starting a new process on the same port.
+# Leaving them reloadable would make `current` report a port nobody listens on.
+# They are pinned and reported as restart-required rather than silently applied.
 NOT_HOT_RELOADABLE = frozenset(
     {
         "model_providers.*.base_url",
+        "model_providers.*.github_token_file",
         "pidfile",
         "proxy",
-        "rate_limiter",
+        "reactive_rate_limiter",
+        "server.host",
+        "server.port",
         "upstream_request_retry.max_total",
     }
 )
@@ -45,6 +53,9 @@ class TlsConfig(Section):
 
 
 class ServerConfig(Section):
+    # Localhost-only by default; the port deliberately differs from the Bun service on 4141.
+    host: str = "127.0.0.1"
+    port: int = Field(default=4142, ge=1, le=65535)
     tls: TlsConfig = Field(default_factory=TlsConfig)
 
 
@@ -60,6 +71,8 @@ class InboundConfig(Section):
 class ModelProviderConfig(Section):
     type: Literal["github_copilot"]
     base_url: str = ""
+    # May contain `$XDG_DATA_HOME`; expanded by `app.config.paths.expand_user_path`.
+    github_token_file: str = ""
     model_refresh_interval: int = Field(default=3600, ge=0)
     disabled_models: list[str] = Field(default_factory=lambda: list[str]())
 
@@ -114,7 +127,12 @@ class UpstreamRequestRetryConfig(Section):
     max_tokens_as_retryable: bool = True
 
 
-class RateLimiterConfig(Section):
+class ReactiveRateLimiterConfig(Section):
+    """Engaged only by an upstream 429 or 502, per the spec.
+
+    503 and 504 stay with ordinary retry, so a slow upstream does not become a rate limit.
+    """
+
     retry_interval: int = Field(default=10, ge=0)
     request_interval: int = Field(default=10, ge=0)
     recovery_interval: int = Field(default=600, ge=0)
@@ -135,6 +153,25 @@ class ClientDeliveryConfig(Section):
     synthesized_response_headers_after_sec: int = Field(default=240, ge=0)
     sse_ping_interval: int = Field(default=15, ge=0)
     hedge: HedgeConfig = Field(default_factory=HedgeConfig)
+
+
+class HistoryConfig(Section):
+    enabled: bool = True
+
+
+class HooksConfig(Section):
+    """Subscription points the spec names, each listing the hooks to run there.
+
+    These are the operator-facing points, not the driver's internal `attempt.*`/`request.*` events.
+    Order within a list is the order given.
+    """
+
+    on_client_request_parsed: list[str] = Field(default_factory=lambda: list[str]())
+    on_upstream_request_ready: list[str] = Field(default_factory=lambda: list[str]())
+    on_upstream_sse_block_ready: list[str] = Field(default_factory=lambda: list[str]())
+    on_client_sse_block_ready: list[str] = Field(default_factory=lambda: list[str]())
+    on_upstream_request_closed: list[str] = Field(default_factory=lambda: list[str]())
+    on_client_request_closed: list[str] = Field(default_factory=lambda: list[str]())
 
 
 class StripRequestHeadersHook(Section):
@@ -219,8 +256,13 @@ class ProxyConfig(Section):
     upstream_request_retry: UpstreamRequestRetryConfig = Field(
         default_factory=UpstreamRequestRetryConfig
     )
-    rate_limiter: RateLimiterConfig = Field(default_factory=RateLimiterConfig)
+    reactive_rate_limiter: ReactiveRateLimiterConfig = Field(
+        default_factory=ReactiveRateLimiterConfig
+    )
     client_delivery: ClientDeliveryConfig = Field(default_factory=ClientDeliveryConfig)
+
+    history: HistoryConfig = Field(default_factory=HistoryConfig)
+    hooks: HooksConfig = Field(default_factory=HooksConfig)
 
     hook_strip_anthropic_request_headers: StripRequestHeadersHook = Field(
         default_factory=StripRequestHeadersHook

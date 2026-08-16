@@ -5,6 +5,7 @@ Everything is constructed once at startup and handed down, so nothing reaches fo
 """
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import httpx
 from anthropic import AsyncAnthropic
@@ -16,6 +17,7 @@ from app.auth.providers import (
     FileTokenProvider,
     GitHubTokenManager,
 )
+from app.config.paths import expand_user_path
 from app.config.schema import ProxyConfig
 from app.ghc_client import (
     CopilotTokenManager,
@@ -93,15 +95,32 @@ class Chain:
         await self.http_client.aclose()
 
 
-def build_github_token_source(config: ProxyConfig) -> GitHubTokenSourceAdapter:
+def github_token_path(config: ProxyConfig, provider_name: str = "") -> Path | None:
+    """Where a provider's GitHub token file lives, or None to use the default location.
+
+    The spec spells it with `$XDG_DATA_HOME`, which is unset on a default install.
+    """
+    provider_config = config.model_providers.get(provider_name) if provider_name else None
+    configured = provider_config.github_token_file if provider_config else ""
+    return expand_user_path(configured) if configured else None
+
+
+def build_github_token_source(
+    config: ProxyConfig,
+    provider_name: str = "",
+) -> GitHubTokenSourceAdapter:
     """Assemble the CLI/env/file provider chain the host owns.
 
     The library only wants a token string, so the chain stays on this side of the boundary.
+    A provider naming `github_token_file` points the file step at it, else the default location.
     """
-    del config  # token sources are not configured through the proxy config yet
     return GitHubTokenSourceAdapter(
         GitHubTokenManager(
-            [CLITokenProvider(None), EnvTokenProvider(), FileTokenProvider(None)]
+            [
+                CLITokenProvider(None),
+                EnvTokenProvider(),
+                FileTokenProvider(github_token_path(config, provider_name)),
+            ]
         )
     )
 
@@ -157,10 +176,11 @@ def build_chain(
     """
     if providers is None:
         built: dict[str, ModelProvider] = {}
-        token_source = build_github_token_source(config)
         for name, provider_config in config.model_providers.items():
             if provider_config.type != PROVIDER_TYPE:
                 raise ValueError(f"unsupported provider type {provider_config.type!r}")
+            # Per provider: each may name its own token file.
+            token_source = build_github_token_source(config, name)
             ghc_config = GhcClientConfig(base_url_override=provider_config.base_url)
             token_manager = CopilotTokenManager(
                 token_source,
@@ -183,7 +203,7 @@ def build_chain(
         subscribers=(subscribers or SubscriberRegistry[RequestContext]()).freeze(),
         http_client=http_client,
         # One limiter per provider: a limit on one upstream must not throttle another.
-        rate_limiters={name: RateLimiter(config.rate_limiter) for name in providers},
+        rate_limiters={name: RateLimiter(config.reactive_rate_limiter) for name in providers},
     )
 
 
@@ -205,6 +225,7 @@ __all__ = [
     "build_github_token_source",
     "build_http_client",
     "build_request_headers",
+    "github_token_path",
     "refresh_catalogs",
     "transport_options",
 ]

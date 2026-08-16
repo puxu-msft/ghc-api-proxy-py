@@ -115,10 +115,10 @@ def test_restart_only_scalar_is_pinned_to_the_startup_value() -> None:
 
 def test_restart_only_section_is_pinned_as_a_whole() -> None:
     startup = ProxyConfig()
-    candidate = ProxyConfig.model_validate({"rate_limiter": {"retry_interval": 99}})
+    candidate = ProxyConfig.model_validate({"reactive_rate_limiter": {"retry_interval": 99}})
     outcome = pin_restart_only(startup, candidate)
-    assert outcome.config.rate_limiter.retry_interval == 10
-    assert outcome.restart_required == ("rate_limiter",)
+    assert outcome.config.reactive_rate_limiter.retry_interval == 10
+    assert outcome.restart_required == ("reactive_rate_limiter",)
 
 
 def test_restart_only_wildcard_path_is_pinned_per_provider() -> None:
@@ -173,3 +173,34 @@ def test_failed_reload_leaves_the_current_snapshot_in_place() -> None:
     with pytest.raises(ValueError, match="bad edit"):
         provider.reload()
     assert provider.current.graceful_cleanup_timeout == 60
+
+
+def test_the_listen_address_is_pinned_to_what_the_process_bound() -> None:
+    # A port change is realised by starting a new process, so reporting the new one would lie.
+    startup = ProxyConfig.model_validate({"server": {"host": "127.0.0.1", "port": 4142}})
+    candidate = ProxyConfig.model_validate({"server": {"host": "0.0.0.0", "port": 9999}})
+    outcome = pin_restart_only(startup, candidate)
+    assert outcome.config.server.host == "127.0.0.1"
+    assert outcome.config.server.port == 4142
+    assert outcome.restart_required == ("server.host", "server.port")
+
+
+def test_the_token_file_is_pinned_per_provider() -> None:
+    startup = ProxyConfig.model_validate(
+        {"model_providers": {"ghc": {"type": "github_copilot", "github_token_file": "/a"}}}
+    )
+    candidate = ProxyConfig.model_validate(
+        {"model_providers": {"ghc": {"type": "github_copilot", "github_token_file": "/b"}}}
+    )
+    outcome = pin_restart_only(startup, candidate)
+    assert outcome.config.model_providers["ghc"].github_token_file == "/a"
+    assert outcome.restart_required == ("model_providers.ghc.github_token_file",)
+
+
+def test_tls_settings_stay_hot_reloadable() -> None:
+    # Only the bind address is restart-only; the rest of `server` is not swept in with it.
+    startup = ProxyConfig()
+    candidate = ProxyConfig.model_validate({"server": {"tls": {"mode": "both"}}})
+    outcome = pin_restart_only(startup, candidate)
+    assert outcome.config.server.tls.mode == "both"
+    assert outcome.restart_required == ()
