@@ -7,10 +7,18 @@ Mounting both would give one path two owners.
 from typing import Any, cast
 
 from fastapi import APIRouter, FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from app.pipeline.delivery import render
 from app.server.composition import Chain
-from app.server.handler import error_body, error_status, handle
+from app.server.handler import (
+    blocks_from_anthropic,
+    deliver_blocks,
+    error_body,
+    error_status,
+    handle,
+    response_payload,
+)
 from app.server.inbound import ROUTES, InboundRequestError, build_context, route_for_path
 
 CHAIN_STATE_KEY = "pipeline_chain"
@@ -20,7 +28,7 @@ def _chain(request: Request) -> Chain:
     return cast(Chain, getattr(request.app.state, CHAIN_STATE_KEY))
 
 
-async def _serve(request: Request) -> JSONResponse:
+async def _serve(request: Request) -> Response:
     route = route_for_path(request.url.path)
     if route is None:
         return JSONResponse({"error": {"message": "unknown endpoint"}}, status_code=404)
@@ -48,8 +56,27 @@ async def _serve(request: Request) -> JSONResponse:
         error = handled.outcome.error or RuntimeError("request produced no response")
         return JSONResponse(error_body(error), status_code=error_status(error))
 
-    payload = cast(dict[str, Any], response.json())
-    return JSONResponse(payload, status_code=response.status_code)
+    chain = _chain(request)
+    body = cast(dict[str, Any], response.json())
+    payload = response_payload(chain, handled, body)
+
+    if not context.stream:
+        return JSONResponse(payload, status_code=response.status_code)
+
+    # Block-level delivery: every block is already complete before a frame is written.
+    committed = deliver_blocks(chain, blocks_from_anthropic(payload))
+    frames = render(
+        committed,
+        message_id=str(payload.get("id", context.id)),
+        model=str(payload.get("model", context.resolved_model)),
+        stop_reason=str(payload.get("stop_reason", "end_turn")),
+        usage=cast(dict[str, Any], payload.get("usage", {})),
+    )
+    return StreamingResponse(
+        iter(list(frames)),
+        status_code=response.status_code,
+        media_type="text/event-stream",
+    )
 
 
 def build_router() -> APIRouter:

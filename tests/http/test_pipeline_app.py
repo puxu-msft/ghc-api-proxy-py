@@ -8,6 +8,7 @@ from collections.abc import Callable
 from typing import Any
 
 import httpx
+import orjson
 import pytest
 from anthropic import AsyncAnthropic
 from fastapi.testclient import TestClient
@@ -188,18 +189,70 @@ def test_missing_model_is_rejected_by_inbound_parsing() -> None:
     assert seen == []
 
 
-def test_streaming_is_refused_rather_than_passed_through() -> None:
-    # Block-level delivery is required and not built yet.
-    # A raw pass-through would look like it worked while breaking that invariant.
-    client, seen = make_client(lambda _: httpx.Response(200, json={}))
+def test_streaming_is_served_as_block_level_sse() -> None:
+    # Each block is already whole before a frame is written; the SSE envelope carries them.
+    client, _ = make_client(
+        lambda _: httpx.Response(
+            200,
+            json={
+                "id": "msg_1",
+                "model": "claude-model",
+                "content": [
+                    {"type": "text", "text": "first"},
+                    {"type": "text", "text": "second"},
+                ],
+                "stop_reason": "end_turn",
+            },
+        )
+    )
     response = client.post(
         "/v1/messages",
         json={"model": "claude-model", "messages": [], "stream": True},
     )
 
-    assert response.status_code == 501
-    assert response.json()["error"]["type"] == "StreamingNotWired"
-    assert seen == []
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    events = [
+        line.removeprefix("event: ")
+        for line in response.text.splitlines()
+        if line.startswith("event: ")
+    ]
+    assert events == [
+        "message_start",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+        "message_delta",
+        "message_stop",
+    ]
+
+
+def test_streamed_delta_carries_the_whole_block() -> None:
+    # A delta holds a finished block, not a fragment of one.
+    client, _ = make_client(
+        lambda _: httpx.Response(
+            200,
+            json={
+                "id": "msg_1",
+                "model": "claude-model",
+                "content": [{"type": "text", "text": "the whole thing"}],
+            },
+        )
+    )
+    response = client.post(
+        "/v1/messages",
+        json={"model": "claude-model", "messages": [], "stream": True},
+    )
+    deltas = [
+        orjson.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    text_deltas = [d["delta"]["text"] for d in deltas if d["type"] == "content_block_delta"]
+    assert text_deltas == ["the whole thing"]
 
 
 def test_upstream_error_status_reaches_the_client_as_a_gateway_failure() -> None:
@@ -219,3 +272,66 @@ def test_embeddings_endpoint_is_served(path: str) -> None:
     response = client.post(path, json={"model": "embed-model", "input": "hi"})
     assert response.status_code == 200
     assert str(seen[-1].url) == f"{BASE_URL}/embeddings"
+
+
+def test_translated_route_answers_in_the_format_the_client_asked_in() -> None:
+    # The earlier translation test only checked the request. Half a crossing means the client
+    # gets a Responses body it never asked for and cannot parse.
+    client, _ = make_client(
+        lambda _: httpx.Response(
+            200,
+            json={
+                "id": "resp_1",
+                "model": "gpt-model",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "hello"}],
+                    }
+                ],
+            },
+        )
+    )
+    response = client.post("/v1/messages", json={"model": "gpt-model", "messages": []})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["type"] == "message"
+    assert body["content"] == [{"type": "text", "text": "hello"}]
+    assert "output" not in body
+
+
+def test_max_output_tokens_becomes_the_anthropic_stop_reason() -> None:
+    # spec.md: an incomplete response due to the output-token limit is max_tokens downstream.
+    client, _ = make_client(
+        lambda _: httpx.Response(
+            200,
+            json={
+                "id": "resp_1",
+                "model": "gpt-model",
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "cut"}],
+                    }
+                ],
+            },
+        )
+    )
+    response = client.post("/v1/messages", json={"model": "gpt-model", "messages": []})
+
+    assert response.status_code == 200
+    assert response.json()["stop_reason"] == "max_tokens"
+
+
+def test_untranslated_route_body_is_returned_unchanged() -> None:
+    client, _ = make_client(
+        lambda _: httpx.Response(200, json={"id": "msg_1", "custom": {"kept": True}})
+    )
+    response = client.post("/v1/messages", json={"model": "claude-model", "messages": []})
+    assert response.json()["custom"] == {"kept": True}
