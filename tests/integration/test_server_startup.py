@@ -32,9 +32,9 @@ def test_server_lifespan_initializes_and_closes_phase1_services(
     services.copilot_tokens = None
     services.run_model_refresh_loop = AsyncMock()
     initialize.return_value = services
-    monkeypatch.setattr("app.server.initialize_upstream_services", initialize)
-    monkeypatch.setattr("app.server.close_upstream_services", close)
-    monkeypatch.setattr("app.server.noninteractive_token_available", available)
+    monkeypatch.setattr("app.server.app_factory.initialize_upstream_services", initialize)
+    monkeypatch.setattr("app.server.app_factory.close_upstream_services", close)
+    monkeypatch.setattr("app.server.app_factory.noninteractive_token_available", available)
     app = create_app(
         AppSettings.model_validate(
             {"auth": {"github_token": "ghu"}, "model_refresh_interval": 0}
