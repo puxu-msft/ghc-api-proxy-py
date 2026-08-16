@@ -244,3 +244,24 @@ async def test_a_release_that_fails_during_a_failed_start_is_still_reported() ->
 
     notes = getattr(caught.value, "__notes__", [])
     assert any("close_masters" in note and "cannot close listener" in note for note in notes)
+
+
+@pytest.mark.asyncio
+async def test_identical_failures_on_both_sides_stay_distinguishable() -> None:
+    """The ambiguous case the "; " join alone cannot resolve.
+
+    Same type, same message, two different stages. Without the stage names the caller cannot tell
+    whether the listener is still open — which is the one thing it needs from this report.
+    """
+    adapter = StubAdapter(
+        cleanup_error=RuntimeError("same failure"),
+        close_error=RuntimeError("same failure"),
+    )
+    server = server_for(adapter)
+    serving = asyncio.create_task(server.serve())
+    await asyncio.sleep(0.05)
+    server.receive_signal(signal.SIGTERM)
+
+    report = await asyncio.wait_for(serving, 5)
+    assert "shutdown_lifespan: RuntimeError: same failure" in report.cleanup_error
+    assert "close_masters: RuntimeError: same failure" in report.cleanup_error

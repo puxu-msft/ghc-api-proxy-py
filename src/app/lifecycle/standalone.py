@@ -181,14 +181,17 @@ class StandaloneServer:
         errors: list[str] = []
         failure = cleanup.exception() if cleanup.done() and not cleanup.cancelled() else None
         if failure is not None:
-            errors.append(f"{type(failure).__name__}: {failure}")
+            errors.append(f"shutdown_lifespan: {type(failure).__name__}: {failure}")
         # Attempted either way: a lifespan that raised is the case where the listener is most likely
         # to be left open, so skipping the release there would strand exactly the resource the last
         # rung exists to give back.
         try:
             await self._adapter.close_masters()
         except Exception as release_failure:
-            errors.append(f"{type(release_failure).__name__}: {release_failure}")
+            errors.append(f"close_masters: {type(release_failure).__name__}: {release_failure}")
+        # Each carries the stage it came from. Two failures of the same type and message would
+        # otherwise be indistinguishable, and whether the listener is still open is precisely what
+        # the caller needs to know.
         return CleanupOutcome(
             timed_out=timed_out,
             completed=cleanup.done(),
