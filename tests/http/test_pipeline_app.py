@@ -457,8 +457,13 @@ def test_count_tokens_asks_about_the_mapped_model() -> None:
 
 
 def test_count_tokens_accepts_a_body_without_max_tokens() -> None:
-    # Anthropic's own count_tokens does not require it; requiring it would reject valid bodies.
-    client, _ = make_client(lambda _: httpx.Response(200, json={"input_tokens": 11}))
+    """Anthropic's own count_tokens does not require it; requiring it would reject valid bodies.
+
+    The default supplied to make the body countable must stay on this side of the wire. Asserting
+    only that the request succeeds cannot tell the two apart — a version that mutated the outbound
+    payload passes that just as well.
+    """
+    client, seen = make_client(lambda _: httpx.Response(200, json={"input_tokens": 11}))
     response = client.post(
         "/v1/messages/count_tokens",
         json={"model": "claude-model", "messages": [{"role": "user", "content": "hi"}]},
@@ -466,6 +471,26 @@ def test_count_tokens_accepts_a_body_without_max_tokens() -> None:
 
     assert response.status_code == 200
     assert response.json()["input_tokens"] == 11
+    assert "max_tokens" not in orjson.loads(seen[-1].read())
+
+
+def test_count_tokens_refuses_a_model_that_advertises_other_endpoints() -> None:
+    """The gap between refusal and failure.
+
+    `gpt-model` is routable and known — it just cannot take a Messages body. Treating that refusal
+    as one more failed attempt would fall through to the local estimate and answer 200 with a count
+    for a model this request can never reach. `mute-model` does not exercise this: it is stopped
+    earlier, by routing.
+    """
+    client, seen = make_client(lambda _: httpx.Response(200, json={"input_tokens": 99}))
+    response = client.post(
+        "/v1/messages/count_tokens",
+        json={"model": "gpt-model", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "EndpointNotSupported"
+    assert seen == []
 
 
 def test_count_tokens_rejects_a_body_that_is_not_countable() -> None:

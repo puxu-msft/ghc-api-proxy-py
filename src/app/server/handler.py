@@ -200,7 +200,8 @@ def error_status(error: BaseException) -> int:
     ):
         return 400
     if isinstance(error, CountTokensUnavailable):
-        # Every counter failed, including the local one. Upstream is not to blame for that.
+        # Every configured counter failed. Reachable when `providers` names only `ghc`;
+        # with `local` in the list the estimate has no way to fail on the normal path.
         return 503
     return 502
 
