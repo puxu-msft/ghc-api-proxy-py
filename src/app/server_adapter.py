@@ -157,12 +157,13 @@ class UvicornListenerAdapter:
             connection.shutdown()
         return len(connections)
 
-    def abandon_requests(self) -> int:
-        """Cancel whatever is still running, and report how many tasks were cancelled.
+    def cancel_requests(self) -> int:
+        """Cancel the request tasks still running, and report how many were cancelled.
 
-        The last resort, for when waiting has been given up on.
-        Cancelling rather than ignoring is what lets the drain finish.
-        Lifespan shutdown and state persistence therefore still get to run.
+        `interrupt_connections` alone does not reach a handler that is mid-request: Uvicorn only
+        clears `keep_alive` there and lets the response finish.
+        Actually interrupting a request therefore means cancelling the task running it.
+        Idempotent, so a caller may call it again without counting the same work twice.
         """
         tasks = [task for task in self._server.server_state.tasks if not task.done()]
         for task in tasks:

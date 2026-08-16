@@ -32,13 +32,25 @@ type Hook = Callable[[], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
+class CleanupOutcome:
+    """What the final teardown managed to do within its budget."""
+
+    timed_out: bool
+    completed: bool
+    error: str
+
+
+@dataclass(frozen=True, slots=True)
 class ShutdownReport:
     """What the shutdown actually did, so a caller can log it rather than guess."""
 
     stage: ShutdownStage
     interrupted_connections: int = 0
-    abandoned_requests: int = 0
+    cancelled_requests: int = 0
     cleanup_timed_out: bool = False
+    cleanup_completed: bool = True
+    # Errors are reported rather than swallowed; cleanup failing must not look like success.
+    cleanup_error: str = ""
 
 
 class StandaloneServer:
@@ -86,43 +98,63 @@ class StandaloneServer:
 
     async def _descend(self) -> ShutdownReport:
         interrupted = 0
-        abandoned = 0
+        cancelled = 0
 
         # Driven by the rung currently in effect rather than by a fixed sequence of waits.
         # Signals can arrive faster than this loop runs, so the ladder is read, never assumed.
         while True:
             stage = self._ladder.stage
             if stage is ShutdownStage.FINALIZING:
-                # Stop waiting. Cancelling rather than walking away is what lets cleanup run.
-                abandoned = self._adapter.abandon_requests()
+                # Stop waiting for the requests. The interruption still happens.
+                cancelled += self._adapter.cancel_requests()
                 break
             if stage is ShutdownStage.INTERRUPTING and interrupted == 0:
-                # Cut the in-flight requests short, then wait for that to take effect.
+                # Interrupt the requests, then wait for the interruption to land.
+                # Closing the connection is not enough: Uvicorn leaves a running handler alone,
+                # so the request is only actually interrupted by cancelling its task.
                 interrupted = self._adapter.interrupt_connections()
+                cancelled += self._adapter.cancel_requests()
             if await self._drained_before_advance(stage):
                 break
 
-        timed_out = await self._finalize()
+        outcome = await self._finalize()
         return ShutdownReport(
             stage=self._ladder.stage,
             interrupted_connections=interrupted,
-            abandoned_requests=abandoned,
-            cleanup_timed_out=timed_out,
+            cancelled_requests=cancelled,
+            cleanup_timed_out=outcome.timed_out,
+            cleanup_completed=outcome.completed,
+            cleanup_error=outcome.error,
         )
 
-    async def _finalize(self) -> bool:
-        """Run lifespan shutdown and release the listener. Returns whether the budget ran out."""
-        timeout = self._cleanup_timeout or None
+    async def _finalize(self) -> CleanupOutcome:
+        """Run lifespan shutdown and release the listener.
+
+        The budget bounds how long we *wait*, not how long cleanup may take.
+        The spec requires the last rung to persist state and release resources, so the cleanup task
+        is shielded: exceeding the budget stops the waiting and is reported, and never cancels the
+        teardown that the rung exists to perform.
+        """
+        cleanup = asyncio.ensure_future(self._adapter.shutdown_lifespan(drain_timeout=None))
         timed_out = False
         try:
-            async with asyncio.timeout(timeout):
-                await self._adapter.shutdown_lifespan(drain_timeout=None)
-        except TimeoutError:
-            # The budget bounds cleanup; it is not a reason to kill the process.
-            timed_out = True
-        with suppress(Exception):
-            await self._adapter.close_masters()
-        return timed_out
+            await asyncio.wait_for(asyncio.shield(cleanup), self._cleanup_timeout or None)
+        except (TimeoutError, Exception):
+            # Both outcomes are read off the task below rather than raised onward.
+            # A failed teardown is reported to the caller; it must not abort the rest of the stop.
+            # The budget expiring cancels the shield, never `cleanup`, so `done()` tells them apart.
+            timed_out = not cleanup.done()
+
+        error = ""
+        failure = cleanup.exception() if cleanup.done() and not cleanup.cancelled() else None
+        if failure is not None:
+            error = f"{type(failure).__name__}: {failure}"
+        if not timed_out and not error:
+            try:
+                await self._adapter.close_masters()
+            except Exception as failure:
+                error = f"{type(failure).__name__}: {failure}"
+        return CleanupOutcome(timed_out=timed_out, completed=cleanup.done(), error=error)
 
     async def _await_advance(self) -> None:
         """Wait until the shutdown starts at all."""

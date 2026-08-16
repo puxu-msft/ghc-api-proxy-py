@@ -20,7 +20,12 @@ from app.lifecycle.standalone import ShutdownReport, StandaloneServer
 from app.server_adapter import UvicornListenerAdapter
 
 
-def slow_app(hold: asyncio.Event, entered: asyncio.Event) -> FastAPI:
+def slow_app(
+    hold: asyncio.Event,
+    entered: asyncio.Event,
+    interrupted: asyncio.Event,
+    stubborn: asyncio.Event,
+) -> FastAPI:
     app = FastAPI()
 
     async def quick() -> dict[str, str]:
@@ -28,7 +33,17 @@ def slow_app(hold: asyncio.Event, entered: asyncio.Event) -> FastAPI:
 
     async def slow() -> dict[str, str]:
         entered.set()
-        await hold.wait()
+        try:
+            await hold.wait()
+        except asyncio.CancelledError:
+            # The handler observing cancellation is the only proof the request was interrupted.
+            # A count of connections told to shut down proves nothing: Uvicorn leaves a running
+            # handler alone and merely clears keep_alive.
+            interrupted.set()
+            if stubborn.is_set():
+                # Refuses to unwind, which is what makes rung 3 distinguishable from rung 2.
+                await asyncio.sleep(30)
+            raise
         return {"status": "done"}
 
     app.add_api_route("/quick", quick)
@@ -42,9 +57,14 @@ class Harness:
     def __init__(self, cleanup_timeout: int = 0) -> None:
         self.hold = asyncio.Event()
         self.entered = asyncio.Event()
+        self.interrupted = asyncio.Event()
+        self.stubborn = asyncio.Event()
         self.listeners = bind_listener("127.0.0.1", 0)
         self.port = self.listeners.identities()[0].address[1]
-        config = Config(slow_app(self.hold, self.entered), log_config=None)
+        config = Config(
+            slow_app(self.hold, self.entered, self.interrupted, self.stubborn),
+            log_config=None,
+        )
         self.adapter = UvicornListenerAdapter(config, self.listeners)
         self.serving = asyncio.Event()
 
@@ -117,7 +137,10 @@ async def test_the_first_signal_stops_accepting_but_lets_a_request_finish(
     report = await asyncio.wait_for(serving, 5)
     assert report.stage is ShutdownStage.DRAINING
     assert report.interrupted_connections == 0
-    assert report.abandoned_requests == 0
+    assert harness.interrupted.is_set() is False
+    assert report.cancelled_requests == 0
+    # Rung 1 must leave the request alone entirely.
+    assert harness.interrupted.is_set() is False
 
 
 @pytest.mark.asyncio
@@ -158,26 +181,29 @@ async def test_a_restart_signal_alone_never_interrupts_the_request(harness: Harn
 
 
 @pytest.mark.asyncio
-async def test_a_second_signal_interrupts_without_abandoning(harness: Harness) -> None:
+async def test_a_second_signal_actually_interrupts_the_running_request(harness: Harness) -> None:
+    """Rung 2 must reach the handler, not merely the connection.
+
+    The handler is never released, so the only way the shutdown can finish is if the request was
+    genuinely interrupted. Counting connections would not show that.
+    """
     serving = await run_until_serving(harness)
     in_flight = asyncio.create_task(harness.request("/slow"))
     await asyncio.wait_for(harness.entered.wait(), 5)
 
     harness.server.receive_signal(signal.SIGTERM)
     await asyncio.sleep(0.1)
+    assert harness.interrupted.is_set() is False
+
     harness.server.receive_signal(signal.SIGTERM)
-    await asyncio.sleep(0.2)
 
-    # Interrupting the connection does not end a handler that is still awaiting something.
-    # That is precisely why a third rung exists, and why this one must not cancel.
-    assert serving.done() is False
-
-    harness.hold.set()
     report = await asyncio.wait_for(serving, 5)
     assert report.stage is ShutdownStage.INTERRUPTING
-    assert report.interrupted_connections >= 1
-    assert report.abandoned_requests == 0
+    assert harness.interrupted.is_set() is True
+    assert report.cancelled_requests >= 1
     in_flight.cancel()
+    with suppress(BaseException):
+        await in_flight
 
 
 @pytest.mark.asyncio
@@ -188,17 +214,26 @@ async def test_the_third_signal_abandons_a_request_that_ignores_interruption(
     in_flight = asyncio.create_task(harness.request("/slow"))
     await asyncio.wait_for(harness.entered.wait(), 5)
 
-    for _ in range(3):
-        harness.server.receive_signal(signal.SIGTERM)
-        await asyncio.sleep(0.05)
+    # This handler swallows the cancellation and keeps running, so rung 2 cannot end it.
+    harness.stubborn.set()
 
-    # The request is never released, yet the server stops waiting for it.
+    harness.server.receive_signal(signal.SIGTERM)
+    await asyncio.sleep(0.05)
+    harness.server.receive_signal(signal.SIGTERM)
+    await asyncio.wait_for(harness.interrupted.wait(), 5)
+    # Rung 2 interrupted it but cannot finish, because the handler refuses to unwind.
+    await asyncio.sleep(0.2)
+    assert serving.done() is False
+
+    harness.server.receive_signal(signal.SIGTERM)
+
+    # Rung 3 stops waiting, which is the only difference from rung 2.
     report = await asyncio.wait_for(serving, 5)
     assert report.stage is ShutdownStage.FINALIZING
-    assert report.abandoned_requests >= 1
-    # Cleanup still ran: the point of cancelling rather than walking away.
     assert report.cleanup_timed_out is False
     in_flight.cancel()
+    with suppress(BaseException):
+        await in_flight
 
 
 @pytest.mark.asyncio
@@ -216,7 +251,7 @@ async def test_a_burst_of_signals_does_not_stall_the_shutdown(harness: Harness) 
 
     report = await asyncio.wait_for(serving, 5)
     assert report.stage is ShutdownStage.FINALIZING
-    assert report.abandoned_requests >= 1
+    assert report.cancelled_requests >= 1
     in_flight.cancel()
 
 
