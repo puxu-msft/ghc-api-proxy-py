@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 
-from app.generation_identity import parse_generation_id
+from app.core.generation_identity import parse_generation_id
 
 
 class SystemctlError(RuntimeError):

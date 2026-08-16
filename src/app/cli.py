@@ -13,8 +13,8 @@ from app.auth.service import authenticate_device, clear_stored_token
 from app.config.loader import load_settings
 from app.config.paths import config_file_path
 from app.config.settings import AppSettings
+from app.core.generation_identity import GenerationIdentityError, parse_generation_id
 from app.generation import GenerationLifecycle
-from app.generation_identity import GenerationIdentityError, parse_generation_id
 from app.lifecycle.entry import StandaloneOptions, run_standalone
 from app.rolling_controller import RollingController, plan_to_json
 from app.rolling_runtime import run_systemd_generation

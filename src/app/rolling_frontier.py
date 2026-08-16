@@ -6,7 +6,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from app.generation_identity import parse_generation_id
+from app.core.generation_identity import parse_generation_id
 
 
 class RollingFrontierError(RuntimeError):

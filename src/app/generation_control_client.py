@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
-from app.generation_identity import GenerationIdentityError, parse_generation_id
-from app.release_identity import ReleaseIdentityError, parse_release_id
+from app.core.generation_identity import GenerationIdentityError, parse_generation_id
+from app.core.release_identity import ReleaseIdentityError, parse_release_id
 
 
 class GenerationControlClientError(RuntimeError):

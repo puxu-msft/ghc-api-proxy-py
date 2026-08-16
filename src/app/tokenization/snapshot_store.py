@@ -9,8 +9,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, cast
 
-from app.generation_identity import GenerationIdentityError, parse_generation_id
-from app.release_identity import ReleaseIdentityError, parse_release_id
+from app.core.generation_identity import GenerationIdentityError, parse_generation_id
+from app.core.release_identity import ReleaseIdentityError, parse_release_id
 from app.wire_json import loads
 
 

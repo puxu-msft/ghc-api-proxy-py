@@ -5,8 +5,8 @@ import os
 import sys
 from pathlib import Path
 
-from app.generation_identity import GenerationIdentityError, parse_generation_id
-from app.release_identity import ReleaseIdentityError, parse_release_id
+from app.core.generation_identity import GenerationIdentityError, parse_generation_id
+from app.core.release_identity import ReleaseIdentityError, parse_release_id
 
 RELEASES_ROOT = Path("/opt/ghc-api-proxy/releases")
 

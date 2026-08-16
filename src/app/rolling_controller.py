@@ -8,12 +8,12 @@ import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from app.core.release_identity import ReleaseIdentityError, parse_release_id
 from app.generation_control_client import (
     GenerationControlClient,
     GenerationControlClientError,
     GenerationStatus,
 )
-from app.release_identity import ReleaseIdentityError, parse_release_id
 from app.rolling_frontier import RollingFrontierStore
 from app.rolling_state import GenerationRecord, RollingState, RollingStateStore
 from app.systemctl_adapter import SystemctlAdapter, UnitStatus
