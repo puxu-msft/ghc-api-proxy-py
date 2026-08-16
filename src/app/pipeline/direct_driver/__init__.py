@@ -4,7 +4,9 @@ One module per upstream endpoint, as MAIN.md's driver table names them.
 `ws:/responses` has no driver, matching the spec's unsupported row.
 """
 
-from app.model_provider import ModelEndpoint
+from typing import Protocol
+
+from app.model_provider import ModelEndpoint, ModelProvider
 from app.pipeline.direct_driver.anthropic_messages import AnthropicMessagesDriver
 from app.pipeline.direct_driver.base import (
     EVENT_ATTEMPT_FAILED,
@@ -20,8 +22,23 @@ from app.pipeline.direct_driver.base import (
 from app.pipeline.direct_driver.openai_chat_completions import OpenAIChatCompletionsDriver
 from app.pipeline.direct_driver.openai_embeddings import OpenAIEmbeddingsDriver
 from app.pipeline.direct_driver.openai_responses import OpenAIResponsesDriver
+from app.pipeline.events import FrozenSubscribers
+from app.pipeline.request import RequestContext
 
-DRIVERS: dict[ModelEndpoint, type[DirectDriver]] = {
+
+class DriverFactory(Protocol):
+    """How a named driver is constructed; the endpoint is already bound."""
+
+    def __call__(
+        self,
+        provider: ModelProvider,
+        subscribers: FrozenSubscribers[RequestContext],
+        *,
+        budget: RetryBudget,
+    ) -> DirectDriver: ...
+
+
+DRIVERS: dict[ModelEndpoint, DriverFactory] = {
     ModelEndpoint.ANTHROPIC_MESSAGES: AnthropicMessagesDriver,
     ModelEndpoint.OPENAI_CHAT_COMPLETIONS: OpenAIChatCompletionsDriver,
     ModelEndpoint.OPENAI_RESPONSES: OpenAIResponsesDriver,
@@ -38,6 +55,7 @@ __all__ = [
     "EVENT_REQUEST_SUCCEEDED",
     "AnthropicMessagesDriver",
     "DirectDriver",
+    "DriverFactory",
     "DriverOutcome",
     "OpenAIChatCompletionsDriver",
     "OpenAIEmbeddingsDriver",

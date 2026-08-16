@@ -8,6 +8,8 @@ became a package. `inbound` is the parsing that feeds the new pipeline.
 """
 
 from app.server.app_factory import create_app
+from app.server.composition import Chain, build_chain, refresh_catalogs
+from app.server.handler import HandledRequest, StreamingNotWired, handle
 from app.server.inbound import (
     ROUTES,
     InboundRequestError,
@@ -15,12 +17,20 @@ from app.server.inbound import (
     build_context,
     route_for_path,
 )
+from app.server.pipeline_app import create_pipeline_app
 
 __all__ = [
     "ROUTES",
+    "Chain",
+    "HandledRequest",
     "InboundRequestError",
     "InboundRoute",
+    "StreamingNotWired",
+    "build_chain",
     "build_context",
     "create_app",
+    "create_pipeline_app",
+    "handle",
+    "refresh_catalogs",
     "route_for_path",
 ]
