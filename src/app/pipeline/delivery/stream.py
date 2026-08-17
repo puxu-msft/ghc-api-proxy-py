@@ -7,7 +7,7 @@ They carry no content, so they cannot be mistaken for a block.
 
 import asyncio
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from app.pipeline.delivery.anthropic_sse import block_frames, message_start, terminal_frames
@@ -27,21 +27,44 @@ class StreamSettings:
 async def _events_with_ping(
     chunks: AsyncIterator[bytes],
     interval: int,
+    *,
+    response_headers_deadline: float | None = None,
+    response_started: asyncio.Event | None = None,
 ) -> AsyncIterator[SseEvent | None]:
-    """Yield events, and `None` whenever the interval passes without one.
+    """Yield events, and `None` whenever an enabled deadline passes without one.
 
-    A `None` is the caller's cue to send a keep-alive.
+    A `None` cues the caller to send a keep-alive.
+    Before the first complete block, it cues response-preamble synthesis.
     Waiting on upstream in silence is what makes a client give up on a long thinking turn.
     """
     events = read_events(chunks).__aiter__()
+    loop = asyncio.get_running_loop()
     while True:
         task = asyncio.ensure_future(anext(events))
+        ping_deadline = loop.time() + interval if interval > 0 else None
         try:
             while True:
+                pending_deadlines = [
+                    deadline
+                    for deadline in (
+                        ping_deadline,
+                        response_headers_deadline
+                        if response_started is not None and not response_started.is_set()
+                        else None,
+                    )
+                    if deadline is not None
+                ]
+                timeout = (
+                    max(0.0, min(pending_deadlines) - loop.time())
+                    if pending_deadlines
+                    else None
+                )
                 try:
-                    yield await asyncio.wait_for(asyncio.shield(task), timeout=interval or None)
+                    yield await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
                     break
                 except TimeoutError:
+                    if ping_deadline is not None and loop.time() >= ping_deadline:
+                        ping_deadline = loop.time() + interval
                     yield None
         except StopAsyncIteration:
             return
@@ -62,13 +85,50 @@ async def stream_delivery(
     """Turn an upstream byte stream into Anthropic SSE, one complete block at a time."""
     session = DeliverySession(buffer=buffer)
     started = False
+    synthetic_block_sent = False
+    response_started = asyncio.Event()
+    response_headers_deadline = (
+        asyncio.get_running_loop().time() + settings.synthesized_response_headers_after_sec
+        if settings.synthesized_response_headers_after_sec > 0
+        else None
+    )
 
-    async for event in _events_with_ping(chunks, settings.sse_ping_interval):
+    async for event in _events_with_ping(
+        chunks,
+        settings.sse_ping_interval,
+        response_headers_deadline=response_headers_deadline,
+        response_started=response_started,
+    ):
         if event is None:
-            if started:
+            if (
+                response_headers_deadline is not None
+                and not response_started.is_set()
+                and asyncio.get_running_loop().time() >= response_headers_deadline
+            ):
+                response_started.set()
+                synthetic_block_sent = True
+                for chunk in _commit(
+                    session,
+                    synthesized_headers_block(),
+                    message_id,
+                    model,
+                    started,
+                ):
+                    if not started:
+                        started = True
+                    yield chunk
+            elif started:
                 yield PING_FRAME
             continue
-        for block in assembler.push(event):
+        blocks = assembler.push(event)
+        if blocks:
+            # The synthesis timer ends when the first real complete block arrives.
+            # It ends even if the selected buffering policy holds that block for a later commit.
+            response_started.set()
+        for block in blocks:
+            if synthetic_block_sent:
+                # Index zero belongs to the completed synthetic block already sent downstream.
+                block = replace(block, index=block.index + 1)
             for chunk in _commit(session, block, message_id, model, started):
                 if not started:
                     started = True

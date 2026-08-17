@@ -51,14 +51,25 @@ async def collect(
     policy: str = "block",
     interval: int = 0,
     gap: float = 0.0,
+    initial_delay: float = 0.0,
+    synthesized_response_headers_after_sec: int = 0,
 ) -> list[bytes]:
+    async def delayed_feed() -> AsyncIterator[bytes]:
+        if initial_delay:
+            await asyncio.sleep(initial_delay)
+        async for payload in feed(payloads, gap=gap):
+            yield payload
+
     return [
         chunk
         async for chunk in stream_delivery(
-            feed(payloads, gap=gap),
+            delayed_feed(),
             AnthropicAssembler(),
             buffer=BlockBuffer(policy=policy),  # pyright: ignore[reportArgumentType]
-            settings=StreamSettings(sse_ping_interval=interval),
+            settings=StreamSettings(
+                sse_ping_interval=interval,
+                synthesized_response_headers_after_sec=synthesized_response_headers_after_sec,
+            ),
             message_id="msg_1",
             model="claude-model",
         )
@@ -71,6 +82,14 @@ def events_of(chunks: list[bytes]) -> list[str]:
         for chunk in chunks
         for line in chunk.decode().splitlines()
         if line.startswith("event: ")
+    ]
+
+
+def block_start_indices(chunks: list[bytes]) -> list[int]:
+    return [
+        int(orjson.loads(chunk.partition(b"data: ")[2])["index"])
+        for chunk in chunks
+        if chunk.startswith(b"event: content_block_start\n")
     ]
 
 
@@ -98,6 +117,52 @@ async def test_nothing_is_written_before_the_first_block_closes() -> None:
         frame("content_block_delta", {"index": 0, "delta": {"type": "text_delta", "text": "hi"}}),
     ]
     assert await collect(partial) == []
+
+
+@pytest.mark.asyncio
+async def test_synthesizes_one_empty_block_when_first_real_block_is_late() -> None:
+    chunks = await collect(
+        anthropic_stream("one"),
+        initial_delay=1.1,
+        synthesized_response_headers_after_sec=1,
+    )
+    assert events_of(chunks) == [
+        "message_start",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+        "message_delta",
+        "message_stop",
+    ]
+    assert b'"text":"one"' in b"".join(chunks)
+    assert block_start_indices(chunks) == [0, 1]
+
+
+@pytest.mark.asyncio
+async def test_real_block_before_synthesis_deadline_has_no_synthetic_block() -> None:
+    chunks = await collect(
+        anthropic_stream("one"),
+        synthesized_response_headers_after_sec=1,
+    )
+    assert events_of(chunks).count("content_block_stop") == 1
+    assert b'"text":"one"' in b"".join(chunks)
+    assert block_start_indices(chunks) == [0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("after_sec", [0, -1])
+async def test_nonpositive_synthesis_timeout_is_disabled(after_sec: int) -> None:
+    chunks = await collect(
+        anthropic_stream("one"),
+        initial_delay=1.1,
+        synthesized_response_headers_after_sec=after_sec,
+    )
+    assert events_of(chunks).count("content_block_stop") == 1
+    assert b'"text":"one"' in b"".join(chunks)
+    assert block_start_indices(chunks) == [0]
 
 
 @pytest.mark.asyncio
