@@ -558,3 +558,76 @@ def test_what_the_calibrator_learns_survives_a_restart(tmp_path: Path) -> None:
     assert after["estimated"] is True
     assert after["input_tokens"] != before, "the successor did not read what was learnt"
     assert seen, "this test is only meaningful if upstream really was tried and failed"
+
+
+def thinking(text: str = "t", signature: str = "sig") -> dict[str, Any]:
+    return {"type": "thinking", "thinking": text, "signature": signature}
+
+
+def test_adjacent_thinking_blocks_are_separated_before_they_reach_upstream() -> None:
+    """Upstream rejects adjacent thinking blocks with a 400 the client cannot act on.
+
+    Asserted against the body that actually went out rather than against the fixup in isolation:
+    the fixup has to run *before* translation, and a test of the function alone cannot tell whether
+    the wiring put it there or after.
+    """
+    client, seen = make_client(lambda _: httpx.Response(200, json={"id": "msg_1", "content": []}))
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "claude-model",
+            "messages": [
+                {"role": "assistant", "content": [thinking("a"), thinking("b")]},
+                {"role": "user", "content": "go on"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    sent = orjson.loads(seen[-1].read())
+    blocks = sent["messages"][0]["content"]
+    kinds = [block["type"] for block in blocks]
+    assert kinds != ["thinking", "thinking"], "adjacent thinking blocks reached upstream"
+    assert kinds[0] == "thinking" and kinds[-1] == "thinking"
+    assert len(kinds) == 3, "a separator should sit between them"
+
+
+def test_a_thinking_block_with_nothing_in_it_is_dropped() -> None:
+    # Neither signature nor text: it carries nothing upstream can use, and it would otherwise be
+    # spent as a separator between two real ones.
+    client, seen = make_client(lambda _: httpx.Response(200, json={"id": "msg_1", "content": []}))
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "claude-model",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [thinking("keep"), thinking(text="", signature="")],
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    blocks = orjson.loads(seen[-1].read())["messages"][0]["content"]
+    assert [block["type"] for block in blocks] == ["thinking"]
+    assert blocks[0]["thinking"] == "keep"
+
+
+def test_a_user_turn_is_left_alone() -> None:
+    """The negative control: the adjacency rule the spec states is about *assistant* turns.
+
+    Uses adjacent thinking blocks rather than text ones on purpose. `destack_content` is a no-op
+    on content with no adjacent thinking blocks, so a user turn carrying two text blocks passes
+    this test whether the role is checked or not — it cannot tell the guard from its absence.
+    """
+    client, seen = make_client(lambda _: httpx.Response(200, json={"id": "msg_1", "content": []}))
+    original = [thinking("one"), thinking("two")]
+    response = client.post(
+        "/v1/messages",
+        json={"model": "claude-model", "messages": [{"role": "user", "content": original}]},
+    )
+
+    assert response.status_code == 200
+    assert orjson.loads(seen[-1].read())["messages"][0]["content"] == original

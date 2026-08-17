@@ -17,6 +17,7 @@ from pydantic import ValidationError
 
 from app.model_provider import ProviderError
 from app.models.anthropic import MessagesRequest
+from app.pipeline.anthropic_request_hook import fix_anthropic_request
 from app.pipeline.count_tokens import CountTokensUnavailable, count_tokens
 from app.pipeline.delivery import BlockBuffer, CompletedBlock, DeliverySession
 from app.pipeline.delivery.assembler import AnthropicAssembler, BlockAssembler, ResponsesAssembler
@@ -61,6 +62,11 @@ async def handle(chain: Chain, context: RequestContext) -> HandledRequest:
         mappings=chain.config.model_mappings,
     )
     apply_route(context, route)
+
+    if context.inbound_format is WireFormat.ANTHROPIC_MESSAGES:
+        # Before translation on purpose: these fixups read `messages`, which the target format may
+        # not have. The spec calls this point `on_client_request_parsed`.
+        fix_anthropic_request(context.payload, chain.config.hook_fix_anthropic_request)
 
     if route.translation_required:
         translated, semantic = chain.translators.translate(
