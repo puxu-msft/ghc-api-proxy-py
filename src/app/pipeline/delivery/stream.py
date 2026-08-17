@@ -6,7 +6,7 @@ They carry no content, so they cannot be mistaken for a block.
 """
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -81,8 +81,13 @@ async def stream_delivery(
     settings: StreamSettings,
     message_id: str,
     model: str,
-) -> AsyncIterator[bytes]:
-    """Turn an upstream byte stream into Anthropic SSE, one complete block at a time."""
+) -> AsyncGenerator[bytes]:
+    """Turn an upstream byte stream into Anthropic SSE, one complete block at a time.
+
+    Typed as a generator rather than a plain iterator so a caller that stops early can close
+    it: abandoning it mid-stream otherwise leaves the upstream response open until the loop
+    is collected.
+    """
     session = DeliverySession(buffer=buffer)
     started = False
     synthetic_block_sent = False
@@ -107,15 +112,12 @@ async def stream_delivery(
             ):
                 response_started.set()
                 synthetic_block_sent = True
-                for chunk in _commit(
-                    session,
-                    synthesized_headers_block(),
-                    message_id,
-                    model,
-                    started,
-                ):
-                    if not started:
-                        started = True
+                # Written straight out rather than offered to the buffer. Its whole purpose is to
+                # put bytes in front of a client that would otherwise time out, and `full` or
+                # `until-tool-use` would hold it back for exactly as long as the wait that made it
+                # necessary — which is the same as not synthesising anything.
+                for chunk in _frame_now(synthesized_headers_block(), message_id, model, started):
+                    started = True
                     yield chunk
             elif started:
                 yield PING_FRAME
@@ -150,6 +152,25 @@ async def stream_delivery(
             usage=terminal.usage or None,
         ):
             yield frame.encode()
+
+
+def _frame_now(
+    block: CompletedBlock,
+    message_id: str,
+    model: str,
+    started: bool,
+) -> list[bytes]:
+    """Frame one block for immediate delivery, bypassing the buffering policy.
+
+    Only for blocks whose value is that they arrive *now*. A content block must still go through
+    `_commit`, because the policy is what the operator configured for content.
+    """
+    chunks: list[bytes] = []
+    if not started:
+        chunks.append(message_start(message_id, model).encode())
+    for frame in block_frames(block):
+        chunks.append(frame.encode())
+    return chunks
 
 
 def _commit(

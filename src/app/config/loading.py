@@ -60,16 +60,42 @@ def bundled_config_values() -> dict[str, Any]:
     return cast(dict[str, Any], loaded)
 
 
+def bundled_config_text() -> str:
+    """The shipped config as written, comments and all.
+
+    Separate from `bundled_config_values`: that one is for layering, this one is for handing the
+    operator a file to edit, and the comments are most of what makes it worth handing over.
+    """
+    resource = resources.files("app.config").joinpath(BUNDLED_CONFIG_RESOURCE)
+    return resource.read_text(encoding="utf-8") if resource.is_file() else ""
+
+
 def resolve_config_path(explicit_path: Path | None) -> Path | None:
     """Locate the user config file.
 
     An explicitly named file that does not exist is an error.
     The default location simply being absent is not.
+
+    `GHC_CONFIG` and a `config.yaml` in the working directory are honoured because the path this
+    replaces honoured them. Dropping them would have been a change to how operators start the
+    service, arriving as a side effect of swapping the schema rather than as a decision.
     """
     if explicit_path is not None:
         if not explicit_path.is_file():
             raise FileNotFoundError(f"configuration file not found: {explicit_path}")
         return explicit_path
+
+    env_path = os.environ.get(f"{ENV_PREFIX}CONFIG")
+    if env_path:
+        resolved = Path(env_path)
+        if not resolved.is_file():
+            raise FileNotFoundError(f"configuration file not found: {resolved}")
+        return resolved
+
+    local_path = Path.cwd() / "config.yaml"
+    if local_path.is_file():
+        return local_path
+
     default_path = spec_config_file_path()
     return default_path if default_path.is_file() else None
 

@@ -9,8 +9,9 @@ import uvicorn
 from anyio import run
 
 from app.auth.service import authenticate_device, clear_stored_token
-from app.config.loader import load_proxy_config, load_settings
-from app.config.paths import bundled_config_path, config_file_path
+from app.config.loader import load_settings
+from app.config.loading import bundled_config_text, load_proxy_config
+from app.config.paths import config_file_path
 from app.config.schema import ProxyConfig
 from app.core.generation_identity import GenerationIdentityError, parse_generation_id
 from app.lifecycle.entry import StandaloneOptions, run_standalone
@@ -49,7 +50,7 @@ def _write_default_config(path: Path) -> None:
     silently not reach them.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(bundled_config_path().read_text(encoding="utf-8"), encoding="utf-8")
+    path.write_text(bundled_config_text(), encoding="utf-8")
 
 
 def _generate_config(path: Path) -> None:

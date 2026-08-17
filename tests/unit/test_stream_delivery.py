@@ -6,6 +6,7 @@ Nothing before the first whole block, each block as a closed group, keep-alives 
 
 import asyncio
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from typing import Any
 
 import orjson
@@ -258,3 +259,43 @@ async def test_the_terminal_reports_what_upstream_said() -> None:
     chunks = await collect(payloads)
     body = b"".join(chunks).decode()
     assert '"stop_reason":"max_tokens"' in body.replace(" ", "")
+
+
+@pytest.mark.asyncio
+async def test_the_synthesized_block_goes_out_while_the_policy_holds_everything_else() -> None:
+    """`full` holds content until the end — but this block exists to arrive now.
+
+    Putting it through the buffer delays it for exactly as long as the wait that made it
+    necessary, which is the same as never synthesising it. Collecting the whole stream cannot
+    see that: the events come out in the same order either way. So this one pulls the first
+    chunk under a deadline while upstream is still silent.
+    """
+
+    async def silent_then_late() -> AsyncIterator[bytes]:
+        await asyncio.sleep(30)
+        for payload in anthropic_stream("one"):
+            yield payload
+
+    early: list[bytes] = []
+    async with aclosing(
+        stream_delivery(
+            silent_then_late(),
+            AnthropicAssembler(),
+            buffer=BlockBuffer(policy="full"),
+            settings=StreamSettings(synthesized_response_headers_after_sec=1),
+            message_id="msg_1",
+            model="claude-model",
+        )
+    ) as stream:
+        # Deliberately shorter than upstream's silence: anything arriving here cannot have come
+        # from upstream, and cannot have waited for the buffer to release.
+        async with asyncio.timeout(4):
+            while not any(b"content_block_stop" in chunk for chunk in early):
+                early.append(await anext(stream))
+
+    assert events_of(early) == [
+        "message_start",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+    ]
