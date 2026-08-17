@@ -22,13 +22,41 @@ import signal
 from collections.abc import Awaitable, Callable, Generator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
+from typing import Protocol
 
-from app.lifecycle.adapter import UvicornListenerAdapter
 from app.lifecycle.shutdown import ESCALATING_SIGNALS, RESTART_SIGNAL, ShutdownLadder, ShutdownStage
 
 HANDLED_SIGNALS = (*sorted(ESCALATING_SIGNALS), RESTART_SIGNAL)
 
 type Hook = Callable[[], Awaitable[None]]
+
+
+class ListenerLifecycle(Protocol):
+    """What driving a listener through serve and shutdown actually requires.
+
+    A protocol rather than the concrete adapter because `both` mode puts a first-byte router in
+    front of it, and that router is not a `UvicornListenerAdapter`. Asserting otherwise with a cast
+    would have told the type checker something untrue in order to keep a name; naming the nine
+    methods that are really used costs less and lets a stand-in satisfy it honestly.
+    """
+
+    async def startup_lifespan(self) -> None: ...
+
+    async def register_dormant(self) -> None: ...
+
+    async def arm(self) -> None: ...
+
+    async def stop_accepting(self) -> None: ...
+
+    async def wait_drained(self, timeout: float | None = None) -> None: ...
+
+    def interrupt_connections(self) -> int: ...
+
+    def cancel_requests(self) -> int: ...
+
+    async def shutdown_lifespan(self, *, drain_timeout: float | None = None) -> None: ...
+
+    async def close_masters(self) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,7 +86,7 @@ class StandaloneServer:
 
     def __init__(
         self,
-        adapter: UvicornListenerAdapter,
+        adapter: ListenerLifecycle,
         *,
         cleanup_timeout: int = 0,
         on_serving: Hook | None = None,

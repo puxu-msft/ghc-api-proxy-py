@@ -18,7 +18,11 @@ from app.lifecycle.standalone import StandaloneServer
 
 
 class StubAdapter:
-    """Enough of the adapter surface for the descent, with a controllable teardown."""
+    """Enough of the adapter surface for the descent, with a controllable teardown.
+
+    Satisfies `ListenerLifecycle` structurally, so the type checker confirms this stand-in really
+    does mirror what the server asks for rather than that being taken on trust.
+    """
 
     def __init__(
         self,
@@ -73,7 +77,7 @@ class StubAdapter:
 
 
 def server_for(adapter: StubAdapter, *, cleanup_timeout: int = 0) -> StandaloneServer:
-    return StandaloneServer(adapter, cleanup_timeout=cleanup_timeout)  # pyright: ignore[reportArgumentType]
+    return StandaloneServer(adapter, cleanup_timeout=cleanup_timeout)
 
 
 @pytest.mark.asyncio
@@ -198,7 +202,7 @@ async def test_a_failing_serving_hook_releases_the_listener() -> None:
     async def refuse() -> None:
         raise RuntimeError("cannot announce")
 
-    server = StandaloneServer(adapter, on_serving=refuse)  # type: ignore[arg-type]
+    server = StandaloneServer(adapter, on_serving=refuse)
 
     with pytest.raises(RuntimeError, match="cannot announce"):
         await server.serve()
@@ -237,7 +241,7 @@ async def test_a_release_that_fails_during_a_failed_start_is_still_reported() ->
     async def refuse() -> None:
         raise RuntimeError("cannot announce")
 
-    server = StandaloneServer(adapter, on_serving=refuse)  # type: ignore[arg-type]
+    server = StandaloneServer(adapter, on_serving=refuse)
 
     with pytest.raises(RuntimeError, match="cannot announce") as caught:
         await server.serve()
@@ -281,7 +285,7 @@ async def test_a_lifespan_that_never_started_is_not_asked_to_shut_down() -> None
             raise RuntimeError("lifespan refused to start")
 
     adapter = RefusingAdapter()
-    server = StandaloneServer(adapter)  # type: ignore[arg-type]
+    server = StandaloneServer(adapter)
 
     with pytest.raises(RuntimeError, match="lifespan refused") as caught:
         await server.serve()

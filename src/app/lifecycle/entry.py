@@ -11,7 +11,7 @@ It refuses to name a process it cannot verify, so an unrelated process never rec
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from uvicorn import Config
 from uvicorn._types import ASGIApplication
@@ -110,10 +110,8 @@ async def run_standalone(
         if predecessor is not None:
             signal_restart(predecessor)
 
-    # Router retains Uvicorn lifecycle and connection state.
-    server_adapter = cast(UvicornListenerAdapter, adapter)
     server = StandaloneServer(
-        server_adapter,
+        adapter,
         cleanup_timeout=options.cleanup_timeout,
         on_serving=announce,
     )
