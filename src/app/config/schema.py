@@ -16,8 +16,9 @@ type BufferingPolicy = Literal["block", "until-tool-use", "full"]
 type CacheControlMode = Literal["disabled", "passthrough", "sanitize", "proxied"]
 type CacheTtl = Literal["5m", "1h"]
 type ContextEditingMode = bool | Literal["clear-thinking", "clear-tooluse", "clear-both"]
-type AssistantMessageLayout = bool | Literal["move_and_synthetic", "synthetic_only"]
-type ContentBlockStartCompat = bool | Literal["signature_delta", "redacted_thinking"]
+# `bool` would accept `true`, which the spec does not define; only `false` carries meaning.
+type AssistantMessageLayout = Literal[False, "move_and_synthetic", "synthetic_only"]
+type ContentBlockStartCompat = Literal[False, "signature_delta", "redacted_thinking"]
 type RefusalAction = Literal["passthrough", "as_end_turn", "as_error"]
 
 # Dotted paths the spec marks as requiring a restart. Everything else is hot-reloadable.

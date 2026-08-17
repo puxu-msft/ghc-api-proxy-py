@@ -13,6 +13,7 @@ from typing import Any
 
 import orjson
 
+from app.config.schema import ContentBlockStartCompat
 from app.pipeline.delivery.blocks import CompletedBlock
 
 
@@ -59,12 +60,46 @@ def _delta_for(block: CompletedBlock) -> dict[str, Any] | None:
     return None
 
 
-def block_frames(block: CompletedBlock) -> tuple[SseFrame, ...]:
+def signature_frame(block: CompletedBlock) -> SseFrame | None:
+    """The `signature_delta` a standard client needs to keep a thinking block's signature.
+
+    Upstream puts the signature inside `content_block_start` and never sends a delta for it, and
+    Claude Code reads it from the delta — so without this the signature is present on the wire and
+    still lost. `hook_fix_anthropic_sse.thinking.content_block_start_compat` names this shim.
+    """
+    if block.kind != "thinking":
+        return None
+    signature = block.payload.get("signature")
+    if not isinstance(signature, str) or not signature:
+        return None
+    return SseFrame(
+        "content_block_delta",
+        {
+            "type": "content_block_delta",
+            "index": block.index,
+            "delta": {"type": "signature_delta", "signature": signature},
+        },
+    )
+
+
+def block_frames(
+    block: CompletedBlock,
+    *,
+    signature_compat: ContentBlockStartCompat = "signature_delta",
+) -> tuple[SseFrame, ...]:
     """Frame one already-complete block.
 
     Emitted as a closed group: start, the content, stop.
     A caller cannot obtain a partial group, which keeps a half-formed block off the wire.
     """
+    if signature_compat == "redacted_thinking":
+        # Schema-valid but undefined: `config.example.yaml` documents only what `signature_delta`
+        # does. Refused at the point of use rather than quietly served as one of the other two —
+        # an operator who asked for a third behaviour should not be given a different one.
+        raise ValueError(
+            "content_block_start_compat='redacted_thinking' is not implemented; "
+            "use 'signature_delta' (default) or false"
+        )
     start_payload = dict(block.payload)
     if block.kind == "tool_use":
         # The arguments ride in the delta, so the start frame carries an empty input.
@@ -84,6 +119,11 @@ def block_frames(block: CompletedBlock) -> tuple[SseFrame, ...]:
             },
         )
     ]
+    if signature_compat == "signature_delta":
+        signature = signature_frame(block)
+        if signature is not None:
+            frames.append(signature)
+
     delta = _delta_for(block)
     if delta is not None:
         frames.append(

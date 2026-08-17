@@ -7,7 +7,7 @@ Upstream protocol behaviour is therefore the real thing rather than a friendlier
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import orjson
@@ -15,6 +15,7 @@ import pytest
 from anthropic import AsyncAnthropic
 from fastapi.testclient import TestClient
 from openai import AsyncOpenAI
+from pydantic import ValidationError
 
 from app.config.schema import ModelProviderConfig, ProxyConfig
 from app.ghc_client import GhcApiClient, GhcClientConfig
@@ -85,6 +86,7 @@ def make_client(
     *,
     mappings: dict[str, str] | None = None,
     tokenization_path: Path | None = None,
+    overrides: dict[str, Any] | None = None,
 ) -> tuple[TestClient, list[httpx.Request]]:
     seen: list[httpx.Request] = []
 
@@ -107,6 +109,7 @@ def make_client(
             "model_providers": {"ghc": {"type": "github_copilot", "base_url": BASE_URL}},
             "default_model_provider": "ghc",
             "model_mappings": mappings or {},
+            **(overrides or {}),
         }
     )
     providers: dict[str, ModelProvider] = {"ghc": provider}
@@ -631,3 +634,130 @@ def test_a_user_turn_is_left_alone() -> None:
 
     assert response.status_code == 200
     assert orjson.loads(seen[-1].read())["messages"][0]["content"] == original
+
+
+def layout(value: object) -> dict[str, Any]:
+    return {"hook_fix_anthropic_request": {"thinking": {"assistant_message_layout": value}}}
+
+
+def assistant_blocks(seen: list[httpx.Request]) -> list[dict[str, Any]]:
+    return cast(list[dict[str, Any]], orjson.loads(seen[-1].read())["messages"][0]["content"])
+
+
+def send_stacked(client: TestClient) -> httpx.Response:
+    """Two adjacent thinking blocks with a real text block after them.
+
+    The real block is what tells the two layouts apart: `move_and_synthetic` moves it between the
+    thinking blocks, `synthetic_only` leaves it where it is and inserts a marker. Without it both
+    layouts produce the same three blocks and no test can distinguish them.
+    """
+    return client.post(
+        "/v1/messages",
+        json={
+            "model": "claude-model",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [thinking("a"), thinking("b"), {"type": "text", "text": "real"}],
+                }
+            ],
+        },
+    )
+
+
+def test_move_and_synthetic_separates_with_the_real_block() -> None:
+    client, seen = make_client(
+        lambda _: httpx.Response(200, json={"id": "msg_1", "content": []}),
+        overrides=layout("move_and_synthetic"),
+    )
+    assert send_stacked(client).status_code == 200
+
+    blocks = assistant_blocks(seen)
+    assert [block["type"] for block in blocks] == ["thinking", "text", "thinking"]
+    # The real block became the separator rather than a synthetic marker being inserted.
+    assert blocks[1]["text"] == "real"
+
+
+def test_synthetic_only_leaves_the_real_block_where_it_was() -> None:
+    client, seen = make_client(
+        lambda _: httpx.Response(200, json={"id": "msg_1", "content": []}),
+        overrides=layout("synthetic_only"),
+    )
+    assert send_stacked(client).status_code == 200
+
+    blocks = assistant_blocks(seen)
+    assert [block["type"] for block in blocks] == ["thinking", "text", "thinking", "text"]
+    assert blocks[1]["text"] != "real", "synthetic_only must not move the real block"
+    assert blocks[3]["text"] == "real"
+
+
+def test_layout_false_passes_the_stack_through_untouched() -> None:
+    # The opt-out: an operator who turns it off gets exactly what the client sent.
+    client, seen = make_client(
+        lambda _: httpx.Response(200, json={"id": "msg_1", "content": []}),
+        overrides=layout(False),
+    )
+    assert send_stacked(client).status_code == 200
+    assert [block["type"] for block in assistant_blocks(seen)] == ["thinking", "thinking", "text"]
+
+
+def test_an_undefined_layout_value_is_refused() -> None:
+    # `true` is not one of the three spellings the spec defines; accepting it would silently
+    # rewrite request bodies under a config the operator got wrong.
+    with pytest.raises(ValidationError):
+        ProxyConfig.model_validate(layout(True))
+
+
+def sse_thinking_upstream(signature: str) -> bytes:
+    """Upstream's thinking frame: the signature rides in content_block_start, never as a delta."""
+    frames: list[tuple[str, dict[str, Any]]] = [
+        (
+            "content_block_start",
+            {
+                "index": 0,
+                "content_block": {"type": "thinking", "thinking": "", "signature": signature},
+            },
+        ),
+        (
+            "content_block_delta",
+            {"index": 0, "delta": {"type": "thinking_delta", "thinking": "pondering"}},
+        ),
+        ("content_block_stop", {"index": 0}),
+        ("message_delta", {"delta": {"stop_reason": "end_turn"}}),
+        ("message_stop", {}),
+    ]
+    return "".join(
+        f"event: {event}\ndata: {orjson.dumps(data).decode()}\n\n" for event, data in frames
+    ).encode()
+
+
+def stream_thinking(client: TestClient) -> httpx.Response:
+    return client.post(
+        "/v1/messages",
+        json={"model": "claude-model", "messages": [], "stream": True},
+    )
+
+
+def signature_compat(value: object) -> dict[str, Any]:
+    return {"hook_fix_anthropic_sse": {"thinking": {"content_block_start_compat": value}}}
+
+
+def test_the_signature_shim_is_driven_by_configuration() -> None:
+    """Turning it off in the config must reach the frames the client receives.
+
+    The shim's default matches `StreamSettings`' default, so a test that never sets a non-default
+    value passes whether the config is read or ignored — which is exactly the wiring under test.
+    """
+    def upstream(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            content=sse_thinking_upstream("sig-abc"),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    on, _ = make_client(upstream)
+    assert "signature_delta" in stream_thinking(on).text
+
+    off, _ = make_client(upstream, overrides=signature_compat(False))
+    assert "signature_delta" not in stream_thinking(off).text

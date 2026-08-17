@@ -7,11 +7,12 @@ Nothing before the first whole block, each block as a closed group, keep-alives 
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import aclosing
-from typing import Any
+from typing import Any, cast
 
 import orjson
 import pytest
 
+from app.config.schema import ContentBlockStartCompat
 from app.pipeline.delivery.assembler import AnthropicAssembler, ResponsesAssembler
 from app.pipeline.delivery.blocks import BlockBuffer
 from app.pipeline.delivery.stream import PING_FRAME, StreamSettings, stream_delivery
@@ -54,6 +55,7 @@ async def collect(
     gap: float = 0.0,
     initial_delay: float = 0.0,
     synthesized_response_headers_after_sec: int = 0,
+    signature_compat: ContentBlockStartCompat = "signature_delta",
 ) -> list[bytes]:
     async def delayed_feed() -> AsyncIterator[bytes]:
         if initial_delay:
@@ -70,6 +72,7 @@ async def collect(
             settings=StreamSettings(
                 sse_ping_interval=interval,
                 synthesized_response_headers_after_sec=synthesized_response_headers_after_sec,
+                signature_compat=signature_compat,
             ),
             message_id="msg_1",
             model="claude-model",
@@ -299,3 +302,65 @@ async def test_the_synthesized_block_goes_out_while_the_policy_holds_everything_
         "content_block_delta",
         "content_block_stop",
     ]
+
+
+def thinking_stream(signature: str) -> list[bytes]:
+    """Upstream's shape: the signature rides inside content_block_start, never as a delta."""
+    return [
+        frame(
+            "content_block_start",
+            {
+                "index": 0,
+                "content_block": {"type": "thinking", "thinking": "", "signature": signature},
+            },
+        ),
+        frame(
+            "content_block_delta",
+            {"index": 0, "delta": {"type": "thinking_delta", "thinking": "pondering"}},
+        ),
+        frame("content_block_stop", {"index": 0}),
+        frame("message_delta", {"delta": {"stop_reason": "end_turn"}}),
+        frame("message_stop", {}),
+    ]
+
+
+def signature_deltas(chunks: list[bytes]) -> list[str]:
+    signatures: list[str] = []
+    for line in b"".join(chunks).split(b"\n"):
+        if not line.startswith(b"data: "):
+            continue
+        payload: object = orjson.loads(line[len(b"data: ") :])
+        if not isinstance(payload, dict):
+            continue
+        delta: object = cast(dict[str, Any], payload).get("delta")
+        if not isinstance(delta, dict):
+            continue
+        typed = cast(dict[str, Any], delta)
+        if typed.get("type") == "signature_delta":
+            signatures.append(str(typed.get("signature", "")))
+    return signatures
+
+
+@pytest.mark.asyncio
+async def test_a_thinking_signature_reaches_the_client_as_a_delta() -> None:
+    """Claude Code reads the signature from a delta, and upstream never sends one.
+
+    Without this the signature is on the wire — inside content_block_start — and still lost,
+    which is the failure `content_block_start_compat: signature_delta` names.
+    """
+    chunks = await collect(thinking_stream("sig-abc"))
+    assert signature_deltas(chunks) == ["sig-abc"]
+
+
+@pytest.mark.asyncio
+async def test_the_signature_shim_can_be_turned_off() -> None:
+    # The opt-out: `false` leaves the frame exactly as the assembler built it.
+    chunks = await collect(thinking_stream("sig-abc"), signature_compat=False)
+    assert signature_deltas(chunks) == []
+
+
+@pytest.mark.asyncio
+async def test_a_thinking_block_without_a_signature_gets_no_delta() -> None:
+    # The negative control: nothing is synthesised when there is no signature to carry.
+    chunks = await collect(thinking_stream(""))
+    assert signature_deltas(chunks) == []

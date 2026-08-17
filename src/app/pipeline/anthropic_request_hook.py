@@ -16,7 +16,7 @@ from app.anthropic.thinking.protection import sanitize_empty_thinking
 from app.config.schema import AssistantMessageLayout, FixAnthropicRequestHook
 
 # The spec names the outcome; the existing implementation names the manoeuvre.
-_LAYOUT_STRATEGY: dict[object, DestackStrategy] = {
+_LAYOUT_STRATEGY: dict[AssistantMessageLayout, DestackStrategy] = {
     False: "passthrough",
     "move_and_synthetic": "move_blocks",
     "synthetic_only": "insert_text",
@@ -26,12 +26,11 @@ _LAYOUT_STRATEGY: dict[object, DestackStrategy] = {
 def layout_strategy(layout: AssistantMessageLayout) -> DestackStrategy:
     """Map the configured layout onto the destack strategy that produces it.
 
-    `True` is not one of the spec's spellings — the field is `bool | Literal[...]` and only `false`
-    carries meaning as a boolean. Treated as the default rather than rejected: refusing to serve a
-    request over a config value the schema itself accepts would be a worse failure than picking the
-    documented default.
+    Total rather than defaulted: the schema now admits exactly the three spellings the spec
+    defines, so a missing case would be a bug here rather than an operator's typo. A fallback
+    would have turned an unhandled value into a silent rewrite of the request body.
     """
-    return _LAYOUT_STRATEGY.get(layout, "move_blocks")
+    return _LAYOUT_STRATEGY[layout]
 
 
 def fix_anthropic_request(payload: dict[str, Any], config: FixAnthropicRequestHook) -> None:

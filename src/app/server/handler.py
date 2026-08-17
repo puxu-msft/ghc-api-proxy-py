@@ -281,6 +281,7 @@ def assembler_for(handled: HandledRequest) -> BlockAssembler:
 def stream_settings(chain: Chain) -> StreamSettings:
     delivery = chain.config.client_delivery
     return StreamSettings(
+        signature_compat=chain.config.hook_fix_anthropic_sse.thinking.content_block_start_compat,
         sse_ping_interval=delivery.sse_ping_interval,
         synthesized_response_headers_after_sec=(
             delivery.synthesized_response_headers_after_sec

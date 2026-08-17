@@ -10,6 +10,7 @@ from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass, replace
 from typing import Any
 
+from app.config.schema import ContentBlockStartCompat
 from app.pipeline.delivery.anthropic_sse import block_frames, message_start, terminal_frames
 from app.pipeline.delivery.assembler import BlockAssembler
 from app.pipeline.delivery.blocks import BlockBuffer, CompletedBlock, DeliverySession
@@ -22,6 +23,7 @@ PING_FRAME = b": ping\n\n"
 class StreamSettings:
     sse_ping_interval: int = 15
     synthesized_response_headers_after_sec: int = 0
+    signature_compat: ContentBlockStartCompat = "signature_delta"
 
 
 async def _events_with_ping(
@@ -116,7 +118,13 @@ async def stream_delivery(
                 # put bytes in front of a client that would otherwise time out, and `full` or
                 # `until-tool-use` would hold it back for exactly as long as the wait that made it
                 # necessary — which is the same as not synthesising anything.
-                for chunk in _frame_now(synthesized_headers_block(), message_id, model, started):
+                for chunk in _frame_now(
+                    synthesized_headers_block(),
+                    message_id,
+                    model,
+                    started,
+                    settings.signature_compat,
+                ):
                     started = True
                     yield chunk
             elif started:
@@ -131,7 +139,9 @@ async def stream_delivery(
             if synthetic_block_sent:
                 # Index zero belongs to the completed synthetic block already sent downstream.
                 block = replace(block, index=block.index + 1)
-            for chunk in _commit(session, block, message_id, model, started):
+            for chunk in _commit(
+                session, block, message_id, model, started, settings.signature_compat
+            ):
                 if not started:
                     started = True
                 yield chunk
@@ -142,7 +152,7 @@ async def stream_delivery(
         yield message_start(message_id, model).encode()
         started = True
     for block in remaining:
-        for frame in block_frames(block):
+        for frame in block_frames(block, signature_compat=settings.signature_compat):
             yield frame.encode()
 
     if started:
@@ -159,6 +169,7 @@ def _frame_now(
     message_id: str,
     model: str,
     started: bool,
+    signature_compat: ContentBlockStartCompat,
 ) -> list[bytes]:
     """Frame one block for immediate delivery, bypassing the buffering policy.
 
@@ -168,7 +179,7 @@ def _frame_now(
     chunks: list[bytes] = []
     if not started:
         chunks.append(message_start(message_id, model).encode())
-    for frame in block_frames(block):
+    for frame in block_frames(block, signature_compat=signature_compat):
         chunks.append(frame.encode())
     return chunks
 
@@ -179,6 +190,7 @@ def _commit(
     message_id: str,
     model: str,
     started: bool,
+    signature_compat: ContentBlockStartCompat,
 ) -> list[bytes]:
     """Offer one block and frame whatever the buffer released."""
     released = session.offer(block)
@@ -190,7 +202,7 @@ def _commit(
         # A response that never produces one never looks like a message that began.
         chunks.append(message_start(message_id, model).encode())
     for ready in released:
-        for frame in block_frames(ready):
+        for frame in block_frames(ready, signature_compat=signature_compat):
             chunks.append(frame.encode())
     return chunks
 
