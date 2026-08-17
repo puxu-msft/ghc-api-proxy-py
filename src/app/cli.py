@@ -11,7 +11,7 @@ from anyio import run
 from app.auth.service import authenticate_device, clear_stored_token
 from app.config.loader import load_settings
 from app.config.loading import bundled_config_text, load_proxy_config
-from app.config.paths import config_file_path
+from app.config.paths import config_file_path, tls_material_dir
 from app.config.schema import ProxyConfig
 from app.core.generation_identity import GenerationIdentityError, parse_generation_id
 from app.lifecycle.entry import StandaloneOptions, run_standalone
@@ -20,6 +20,7 @@ from app.lifecycle.rolling.generation.phases import GenerationLifecycle
 from app.lifecycle.rolling.runtime import run_systemd_generation
 from app.server import build_chain, build_http_client, create_app
 from app.server.pipeline_app import create_pipeline_app
+from app.server.tls import resolve_tls_material
 
 
 class AccountType(StrEnum):
@@ -251,6 +252,10 @@ def start(
     options = StandaloneOptions(
         host=proxy_config.server.host,
         port=proxy_config.server.port,
+        tls_mode=proxy_config.server.tls.mode,
+        # None for an HTTP-only deployment, so a listener cannot be built with TLS it has no
+        # material for; generated once and reused when the operator named no cert.
+        tls_material=resolve_tls_material(proxy_config, tls_dir=tls_material_dir()),
         cleanup_timeout=proxy_config.graceful_cleanup_timeout,
         pidfile=pidfile,
         restart=restart,

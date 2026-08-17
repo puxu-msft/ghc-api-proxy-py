@@ -204,3 +204,20 @@ def test_tls_settings_stay_hot_reloadable() -> None:
     outcome = pin_restart_only(startup, candidate)
     assert outcome.config.server.tls.mode == "both"
     assert outcome.restart_required == ()
+
+
+def test_the_config_path_variable_is_not_read_as_a_setting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`GHC_CONFIG` names the file; it is not one of the settings inside it.
+
+    Left in the value layer it arrives as a top-level `config` key, and `ProxyConfig` forbids
+    unknown ones — so pointing at a config file would refuse to start rather than select it.
+    """
+    config = tmp_path / "config.yaml"
+    config.write_text("server:\n  port: 4321\n", encoding="utf-8")
+    monkeypatch.setenv("GHC_CONFIG", str(config))
+
+    assert environment_values() == {}
+    assert load_proxy_config().server.port == 4321

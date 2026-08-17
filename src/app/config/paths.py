@@ -43,6 +43,17 @@ def tokenization_state_path() -> Path:
 
 
 
+def tls_material_dir() -> Path:
+    """Where a generated self-signed pair is kept.
+
+    `config.example.yaml` says `<config-dir>/tls/`, and the config directory is the one holding
+    the config file — which the user placed under `$XDG_DATA_HOME`. A fixed location rather than
+    the directory the config happened to be read from: a `config.yaml` picked up from the working
+    directory would otherwise scatter key material into whatever tree the service was started in.
+    """
+    return user_data_path() / "tls"
+
+
 def expand_user_path(value: str) -> Path:
     """Expand a configured path the way the spec writes them.
 

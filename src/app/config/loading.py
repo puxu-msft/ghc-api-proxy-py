@@ -18,6 +18,10 @@ from app.config.schema import ProxyConfig
 ENV_PREFIX = "GHC_"
 ENV_NESTED_DELIMITER = "__"
 BUNDLED_CONFIG_RESOURCE = "bundled-config.yaml"
+# Names the file to read, so it is not one of the settings inside it. Left in, it would be
+# read as a top-level `config` key and `ProxyConfig` forbids unknown ones — the variable would
+# break start-up rather than select a file.
+CONFIG_PATH_VARIABLE = f"{ENV_PREFIX}CONFIG"
 
 
 def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
@@ -85,7 +89,7 @@ def resolve_config_path(explicit_path: Path | None) -> Path | None:
             raise FileNotFoundError(f"configuration file not found: {explicit_path}")
         return explicit_path
 
-    env_path = os.environ.get(f"{ENV_PREFIX}CONFIG")
+    env_path = os.environ.get(CONFIG_PATH_VARIABLE)
     if env_path:
         resolved = Path(env_path)
         if not resolved.is_file():
@@ -120,7 +124,7 @@ def environment_values(environ: Mapping[str, str] | None = None) -> dict[str, An
     source = environ if environ is not None else os.environ
     values: dict[str, Any] = {}
     for name, raw in source.items():
-        if not name.startswith(ENV_PREFIX):
+        if not name.startswith(ENV_PREFIX) or name == CONFIG_PATH_VARIABLE:
             continue
         remainder = name[len(ENV_PREFIX) :].lower()
         if not remainder:

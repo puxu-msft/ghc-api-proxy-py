@@ -368,3 +368,48 @@ def test_logout_clears_stored_token(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.exit_code == 0
     assert "removed" in result.stdout.lower()
     clear.assert_awaited_once()
+
+def test_start_hands_the_configured_tls_mode_to_the_listener(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The config's TLS settings have to reach the thing that binds the socket.
+
+    Everything else about TLS is exercised against real sockets, but those tests build
+    `StandaloneOptions` directly. Nothing between the config file and that object was checked, and
+    a listener that quietly serves plaintext for a `mode: both` config looks entirely healthy.
+    """
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "server:\n  port: 4199\n  tls:\n    mode: both\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("app.cli.tls_material_dir", lambda: tmp_path / "tls")
+    run = Mock()
+    monkeypatch.setattr("app.cli.run", run)
+
+    result = runner.invoke(app, ["start", "--config", str(config)])
+
+    assert result.exit_code == 0
+    options = serve_options(run)
+    assert options.tls_mode == "both"
+    assert options.tls_material is not None, "both mode needs material or it serves plaintext"
+    assert options.tls_material.cert_path.is_file()
+
+
+def test_start_asks_for_no_tls_material_when_the_config_wants_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The negative control: an HTTP-only deployment must not have a key pair minted for it.
+    config = tmp_path / "config.yaml"
+    config.write_text("server:\n  port: 4199\n", encoding="utf-8")
+    monkeypatch.setattr("app.cli.tls_material_dir", lambda: tmp_path / "tls")
+    run = Mock()
+    monkeypatch.setattr("app.cli.run", run)
+
+    assert runner.invoke(app, ["start", "--config", str(config)]).exit_code == 0
+    options = serve_options(run)
+    assert options.tls_mode is False
+    assert options.tls_material is None
+    assert not (tmp_path / "tls").exists()
