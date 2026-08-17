@@ -42,6 +42,15 @@ def tokenization_state_path() -> Path:
     return user_data_path() / "tokenization.json"
 
 
+def bundled_config_path() -> Path:
+    """The configuration shipped inside the package.
+
+    Not a fallback for a missing user config but the layer every user config sits on: it carries
+    the few settings the service cannot start without, which the schema has no default for.
+    """
+    return Path(__file__).with_name("default_config.yaml")
+
+
 def expand_user_path(value: str) -> Path:
     """Expand a configured path the way the spec writes them.
 

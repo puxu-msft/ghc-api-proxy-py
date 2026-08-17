@@ -265,3 +265,29 @@ async def test_identical_failures_on_both_sides_stay_distinguishable() -> None:
     report = await asyncio.wait_for(serving, 5)
     assert "shutdown_lifespan: RuntimeError: same failure" in report.cleanup_error
     assert "close_masters: RuntimeError: same failure" in report.cleanup_error
+
+
+@pytest.mark.asyncio
+async def test_a_lifespan_that_never_started_is_not_asked_to_shut_down() -> None:
+    """A release that was never acquired must not be attempted.
+
+    Asking a failed lifespan to shut down waits for a reply that is never coming, and the timeout
+    it reports is not a real leak. Every failed start-up would then carry a note saying nothing,
+    which is how notes stop being read.
+    """
+
+    class RefusingAdapter(StubAdapter):
+        async def startup_lifespan(self) -> None:
+            raise RuntimeError("lifespan refused to start")
+
+    adapter = RefusingAdapter()
+    server = StandaloneServer(adapter)  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError, match="lifespan refused") as caught:
+        await server.serve()
+
+    assert adapter.cleanup_started is False, "a lifespan that never started was asked to stop"
+    assert adapter.stopped_accepting is False, "nothing was registered to stop accepting"
+    # The sockets exist from construction, so that one really does need releasing.
+    assert adapter.masters_closed is True
+    assert getattr(caught.value, "__notes__", []) == []

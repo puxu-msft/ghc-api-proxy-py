@@ -13,7 +13,7 @@ from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from app.pipeline.delivery.stream import stream_delivery
-from app.server.composition import Chain
+from app.server.composition import Chain, refresh_catalogs
 from app.server.handler import (
     assembler_for,
     delivery_buffer,
@@ -128,6 +128,10 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
     and says nothing about it, because an estimate is still returned.
     """
     chain = cast(Chain, getattr(app.state, CHAIN_STATE_KEY))
+    # Routing fails closed on capability, so until this runs the catalog is empty and every request
+    # is refused. Done before accepting rather than lazily: a request that arrives first would
+    # otherwise get a refusal that says the model does not exist.
+    await refresh_catalogs(chain)
     await chain.tokenization.load()
     async with anyio.create_task_group() as flushing:
         flushing.start_soon(chain.tokenization.run_periodic_flush, TOKENIZATION_FLUSH_SECONDS)

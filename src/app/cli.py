@@ -6,19 +6,19 @@ from typing import Annotated
 
 import typer
 import uvicorn
-import yaml
 from anyio import run
 
 from app.auth.service import authenticate_device, clear_stored_token
-from app.config.loader import load_settings
-from app.config.paths import config_file_path
-from app.config.settings import AppSettings
+from app.config.loader import load_proxy_config, load_settings
+from app.config.paths import bundled_config_path, config_file_path
+from app.config.schema import ProxyConfig
 from app.core.generation_identity import GenerationIdentityError, parse_generation_id
 from app.lifecycle.entry import StandaloneOptions, run_standalone
 from app.lifecycle.rolling.controller import RollingController, plan_to_json
 from app.lifecycle.rolling.generation.phases import GenerationLifecycle
 from app.lifecycle.rolling.runtime import run_systemd_generation
-from app.server import create_app
+from app.server import build_chain, build_http_client, create_app
+from app.server.pipeline_app import create_pipeline_app
 
 
 class AccountType(StrEnum):
@@ -41,16 +41,107 @@ def _not_implemented(command: str) -> None:
 
 
 def _write_default_config(path: Path) -> None:
+    """Write a starting config in the shape the spec defines.
+
+    A copy of the shipped file rather than a dump of the schema defaults: dumping every default
+    would produce hundreds of lines the operator did not choose and would then have to maintain,
+    and it would freeze today's defaults into their file, where a later change to a default would
+    silently not reach them.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    settings = AppSettings.model_validate({})
-    path.write_text(
-        yaml.safe_dump(settings.model_dump(mode="json"), sort_keys=False),
-        encoding="utf-8",
-    )
+    path.write_text(bundled_config_path().read_text(encoding="utf-8"), encoding="utf-8")
 
 
 def _generate_config(path: Path) -> None:
     _write_default_config(path)
+
+
+
+# Options the old `AppSettings` served that the spec's `ProxyConfig` has nowhere to put. The user
+# ruled on 2026-08-17 that the entry switch goes ahead with these inactive; naming each one and why
+# is what keeps "temporarily inactive" from turning into "quietly gone".
+_NO_HOME_IN_SPEC: dict[str, str] = {
+    "--verbose": "config.example.yaml has no `observability` section",
+    "--manual": "config.example.yaml has no `approval` section",
+    "--rate-limit/--no-rate-limit": "the spec's `reactive_rate_limiter` has no `enabled` field",
+    "--github-token": "the spec takes `model_providers.<name>.github_token_file`, not a token",
+    "--account-type": "config.example.yaml has no `auth` section",
+}
+
+
+def _load_spec_config(
+    *,
+    config_path: Path | None,
+    port: int | None,
+    host: str | None,
+    graceful_timeout: int | None,
+    proxy: str | None,
+    history: bool | None,
+    ghc_api_base_url: str | None,
+    verbose: bool,
+    manual: bool,
+    rate_limit: bool | None,
+    github_token: str | None,
+    account_type: AccountType | None,
+) -> tuple[ProxyConfig, list[tuple[str, str]]]:
+    """Read the spec's config and report which CLI options it cannot carry."""
+    server: dict[str, object] = {}
+    if port is not None:
+        server["port"] = port
+    if host is not None:
+        server["host"] = host
+
+    overrides: dict[str, object] = {}
+    if server:
+        overrides["server"] = server
+    if graceful_timeout is not None:
+        overrides["graceful_cleanup_timeout"] = graceful_timeout
+    if proxy is not None:
+        overrides["proxy"] = proxy
+    if history is not None:
+        overrides["history"] = {"enabled": history}
+
+    config = load_proxy_config(config_path=config_path, cli_overrides=overrides)
+
+    inactive: list[tuple[str, str]] = []
+    supplied = {
+        "--verbose": verbose,
+        "--manual": manual,
+        "--rate-limit/--no-rate-limit": rate_limit is not None,
+        "--github-token": github_token is not None,
+        "--account-type": account_type is not None,
+    }
+    for option, was_given in supplied.items():
+        if was_given:
+            inactive.append((option, _NO_HOME_IN_SPEC[option]))
+
+    if ghc_api_base_url is not None:
+        # Applied after loading rather than as an override: which provider it belongs to is only
+        # known once the config names a default.
+        name = config.default_model_provider
+        providers = dict(config.model_providers)
+        if name in providers:
+            providers[name] = providers[name].model_copy(update={"base_url": ghc_api_base_url})
+            config = config.model_copy(update={"model_providers": providers})
+        else:
+            inactive.append(
+                ("--ghc-api-base-url", f"no provider named {name!r} to apply it to")
+            )
+    return config, inactive
+
+
+async def _serve_pipeline(config: ProxyConfig, options: StandaloneOptions) -> None:
+    """Build the chain and serve it, closing the outbound client on the way out.
+
+    The client is created here rather than inside `build_chain` because whoever creates it has to
+    close it, and the chain is handed to an app that outlives neither.
+    """
+    http_client = build_http_client(config)
+    try:
+        chain = build_chain(config, http_client=http_client)
+        await run_standalone(create_pipeline_app(chain), options)
+    finally:
+        await http_client.aclose()
 
 
 @app.command()
@@ -121,30 +212,49 @@ def start(
     if upstream_overrides:
         cli_overrides["upstream"] = upstream_overrides
 
-    settings = load_settings(config_path=config, cli_overrides=cli_overrides)
-    application = create_app(settings)
     if fd is not None:
         # An inherited listener means systemd owns it, and lifecycle.md's escalating shutdown is
         # written for the stand-alone section only. Whether it also governs the systemd path is
-        # recorded as an open question for the user, so that path is left exactly as it was.
+        # recorded as an open question for the user, so that path is left exactly as it was —
+        # including which application it serves.
+        settings = load_settings(config_path=config, cli_overrides=cli_overrides)
         uvicorn.run(
-            application,
+            create_app(settings),
             fd=fd,
             log_config=None,
             timeout_graceful_shutdown=settings.shutdown.graceful_timeout,
         )
         return
 
+    proxy_config, inactive = _load_spec_config(
+        config_path=config,
+        port=port,
+        host=host,
+        graceful_timeout=graceful_timeout,
+        proxy=proxy,
+        history=history,
+        ghc_api_base_url=ghc_api_base_url,
+        verbose=verbose,
+        manual=manual,
+        rate_limit=rate_limit,
+        github_token=github_token,
+        account_type=account_type,
+    )
+    for option, reason in inactive:
+        # Said out loud rather than dropped: an option that is accepted and then ignored is worse
+        # than one that is refused, because nothing distinguishes it from having worked.
+        typer.echo(f"warning: {option} has no effect on this path — {reason}", err=True)
+
     # Served through app.lifecycle rather than uvicorn.run: the escalating shutdown and the
     # SO_REUSEPORT handover both need to own the listener, which uvicorn.run does not give up.
     options = StandaloneOptions(
-        host=settings.host,
-        port=settings.port,
-        cleanup_timeout=settings.shutdown.graceful_timeout,
+        host=proxy_config.server.host,
+        port=proxy_config.server.port,
+        cleanup_timeout=proxy_config.graceful_cleanup_timeout,
         pidfile=pidfile,
         restart=restart,
     )
-    run(partial(run_standalone, application, options))
+    run(partial(_serve_pipeline, proxy_config, options))
 
 
 @app.command("start-rolling")

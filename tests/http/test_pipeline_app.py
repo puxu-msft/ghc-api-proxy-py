@@ -94,6 +94,10 @@ def make_client(
                 200,
                 json={"token": "copilot", "expires_at": 5000, "refresh_in": 1500},
             )
+        if request.url.path.endswith("/models"):
+            # The app refreshes the catalog before it accepts anything, so the stand-in has to
+            # answer that too. Left out of `seen`: it is start-up, not the request under test.
+            return httpx.Response(200, json=CATALOG)
         seen.append(request)
         return handler(request)
 

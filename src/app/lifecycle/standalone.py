@@ -85,16 +85,19 @@ class StandaloneServer:
             self._advanced.set()
 
     async def serve(self) -> ShutdownReport:
+        acquired: set[str] = set()
         try:
             await self._adapter.startup_lifespan()
+            acquired.add("lifespan")
             await self._adapter.register_dormant()
+            acquired.add("registrations")
             await self._adapter.arm()
             if self._on_serving is not None:
                 await self._on_serving()
         except BaseException as failure:
             # Past `arm()` the listener is accepting, so an escaping failure would leave a port
             # answering with nobody driving it. Tear down before the exception continues outward.
-            for note in await self._abandon_startup():
+            for note in await self._abandon_startup(acquired):
                 failure.add_note(note)
             raise
 
@@ -103,19 +106,31 @@ class StandaloneServer:
             await self._adapter.stop_accepting()
             return await self._descend()
 
-    async def _abandon_startup(self) -> list[str]:
-        """Release whatever start-up managed to acquire, and report what would not release.
+    async def _abandon_startup(self, acquired: set[str]) -> list[str]:
+        """Release what start-up actually acquired, and report what would not release.
+
+        Driven by what was acquired rather than by the full list, because releasing something that
+        was never taken does not merely waste time: asking a lifespan that failed to start to shut
+        down waits for a reply that is never coming, and the timeout it reports is not a real leak.
+        Every failed start-up would then carry a note that says nothing, which is how notes stop
+        being read.
 
         The original failure is what the caller must see, so nothing raised here may replace it —
-        but a release that fails leaves a socket or a lifespan behind, and silently dropping that
-        makes the leak undiagnosable. Each one is returned for the caller to attach as a note.
+        but a release that genuinely fails leaves a socket or a lifespan behind, and dropping that
+        silently makes the leak undiagnosable. Each one is returned for the caller to attach.
         """
+        releases: list[tuple[str, Callable[[], Awaitable[None]]]] = []
+        if "registrations" in acquired:
+            releases.append(("stop_accepting", self._adapter.stop_accepting))
+        if "lifespan" in acquired:
+            releases.append(
+                ("shutdown_lifespan", lambda: self._adapter.shutdown_lifespan(drain_timeout=0))
+            )
+        # The sockets exist from construction, before any of the steps above ran.
+        releases.append(("close_masters", self._adapter.close_masters))
+
         notes: list[str] = []
-        for name, release in (
-            ("stop_accepting", self._adapter.stop_accepting),
-            ("shutdown_lifespan", lambda: self._adapter.shutdown_lifespan(drain_timeout=0)),
-            ("close_masters", self._adapter.close_masters),
-        ):
+        for name, release in releases:
             try:
                 await release()
             except Exception as error:

@@ -1,0 +1,14 @@
+# 随包默认配置 / Configuration shipped with the package.
+#
+# 它只写「没有它服务就起不来」的那几项，其余一律交给 `app.config.schema` 的默认值——在这里重复一遍 schema 默认值，等于把同一个事实放到两个地方各自维护，迟早漂移。
+#
+# 用户配置**叠加**在本文件之上，而不是取代它。所以一份只写了 `server.port` 的用户配置仍然有 provider 可用。要覆盖下面任何一项，在自己的 config.yaml 里写同名键即可。
+#
+# 完整的、带注释的配置样例见 `docs/.human-controlled/config.example.yaml`。
+
+# 至少要有一个 provider：`model_providers` 的 schema 默认是空字典，而路由在能力上 fail-closed——没有 provider 时每个请求都会被拒。
+model_providers:
+  ghc:
+    type: github_copilot
+
+default_model_provider: ghc

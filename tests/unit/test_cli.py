@@ -1,12 +1,14 @@
 from pathlib import Path
-from typing import Any
+from typing import cast
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 import typer.rich_utils
+import yaml
 from typer.testing import CliRunner
 
 from app.cli import app
+from app.config.schema import ProxyConfig
 from app.lifecycle.entry import StandaloneOptions
 
 runner = CliRunner()
@@ -28,14 +30,14 @@ def plain_help_rendering(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(typer.rich_utils, "MAX_WIDTH", 200)
 
 
-def served_application(run: Mock) -> Any:
-    """The ASGI app handed to the lifecycle runner."""
-    return run.call_args.args[0].args[0]
+def served_config(run: Mock) -> ProxyConfig:
+    """The configuration handed to the lifecycle runner."""
+    return cast(ProxyConfig, run.call_args.args[0].args[0])
 
 
 def serve_options(run: Mock) -> StandaloneOptions:
     """The options handed to the lifecycle runner."""
-    return run.call_args.args[0].args[1]
+    return cast(StandaloneOptions, run.call_args.args[0].args[1])
 
 
 def test_cli_smoke() -> None:
@@ -116,6 +118,11 @@ def test_debug_subcommands_exist() -> None:
 
 
 def test_start_generates_config_and_exits(tmp_path: Path) -> None:
+    """What is generated must be a config the service can actually start from.
+
+    Asserting on one key would only prove a file was written; validating it proves the generated
+    shape is the one the loader accepts, which is the reason to generate it at all.
+    """
     config_path = tmp_path / "generated.yaml"
 
     result = runner.invoke(
@@ -125,8 +132,13 @@ def test_start_generates_config_and_exits(tmp_path: Path) -> None:
 
     assert result.exit_code == 0
     assert config_path.is_file()
-    assert "port: 4141" in config_path.read_text(encoding="utf-8")
     assert str(config_path) in result.stdout
+
+    generated = ProxyConfig.model_validate(
+        yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    )
+    # Without a provider the catalog is empty and routing refuses every request.
+    assert generated.default_model_provider in generated.model_providers
 
 
 def test_start_merges_cli_overrides_and_serves(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -154,17 +166,20 @@ def test_start_merges_cli_overrides_and_serves(monkeypatch: pytest.MonkeyPatch) 
     )
 
     assert result.exit_code == 0
-    application = served_application(run)
-    assert application.state.runtime.settings.port == 4242
-    assert application.state.runtime.settings.host == "0.0.0.0"
-    assert application.state.runtime.settings.shutdown.graceful_timeout == 7
-    assert application.state.runtime.settings.approval.enabled is True
-    assert application.state.runtime.settings.observability.log_level == "DEBUG"
+    config = served_config(run)
+    assert config.server.port == 4242
+    assert config.server.host == "0.0.0.0"
+    assert config.graceful_cleanup_timeout == 7
     options = serve_options(run)
     assert options.host == "0.0.0.0"
     assert options.port == 4242
     assert options.cleanup_timeout == 7
     assert options.fd is None
+
+    # --manual and --verbose have nowhere to land in the spec's schema. The user ruled that the
+    # switch proceeds with them inactive, so what is guarded is that they are said out loud.
+    assert "--manual has no effect" in result.output
+    assert "--verbose has no effect" in result.output
 
 
 def test_start_passes_inherited_socket_fd_to_uvicorn(monkeypatch: pytest.MonkeyPatch) -> None:
