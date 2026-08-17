@@ -1,7 +1,10 @@
-"""Five-level configuration loading, per `config.example.yaml`.
+"""Five-level configuration loading for `ProxyConfig`, per `config.example.yaml`.
 
 Priority, highest first: CLI options, environment variables, the user config file.
 Then the bundled config shipped with the distribution, then the schema defaults.
+
+This is the loader the direct-run path uses. `app.config.loader`, one letter away, loads the old
+`AppSettings` for the `--fd` path and is not interchangeable with it.
 """
 
 import os

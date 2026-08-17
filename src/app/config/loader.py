@@ -1,3 +1,10 @@
+"""Loading for the *old* `AppSettings`, which now serves only the `--fd` (systemd) path.
+
+Not to be confused with `app.config.loading`, one letter away, which loads the spec's
+`ProxyConfig` and is what the direct-run path uses. The names are close enough that this one was
+found first and its neighbour rewritten from scratch once; the two are not interchangeable.
+"""
+
 import os
 from collections.abc import Mapping
 from pathlib import Path
