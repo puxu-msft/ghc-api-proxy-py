@@ -12,6 +12,7 @@ What is under test is the lifecycle, not the proxy's dependencies.
 import os
 import signal
 import socket
+import ssl
 import subprocess
 import sys
 import textwrap
@@ -41,9 +42,19 @@ def child_script() -> str:
         app.add_api_route("/health/liveness", live)
 
         async def main():
+            configured_tls_mode = False
+            tls_material = None
+            requested_tls_mode = os.environ.get("TLS_MODE")
+            if requested_tls_mode is not None:
+                from app.server.tls import generate_self_signed
+
+                configured_tls_mode = True if requested_tls_mode == "true" else requested_tls_mode
+                tls_material = generate_self_signed(Path(os.environ["TLS_DIR"]))
             options = StandaloneOptions(
                 host="127.0.0.1",
                 port=int(os.environ["PORT"]),
+                tls_mode=configured_tls_mode,
+                tls_material=tls_material,
                 cleanup_timeout=5,
                 pidfile=Path(os.environ["PIDFILE"]),
                 restart=os.environ.get("RESTART") == "1",
@@ -63,11 +74,20 @@ def free_port() -> int:
         return int(probe.getsockname()[1])
 
 
-def start_child(port: int, pidfile: Path, *, restart: bool = False) -> subprocess.Popen[str]:
+def start_child(
+    port: int,
+    pidfile: Path,
+    *,
+    restart: bool = False,
+    tls_mode: bool | str | None = None,
+) -> subprocess.Popen[str]:
     env = os.environ.copy()
     env.update({"PYTHONPATH": str(SRC), "PORT": str(port), "PIDFILE": str(pidfile)})
     if restart:
         env["RESTART"] = "1"
+    if tls_mode is not None:
+        env["TLS_MODE"] = "true" if tls_mode is True else str(tls_mode)
+        env["TLS_DIR"] = str(pidfile.parent / "tls")
     return subprocess.Popen(
         [sys.executable, "-c", child_script()],
         env=env,
@@ -91,12 +111,28 @@ def wait_until_serving(pidfile: Path, timeout: float = 20.0) -> int:
 def request_liveness(port: int, timeout: float = 5.0) -> bytes:
     with socket.create_connection(("127.0.0.1", port), timeout=timeout) as client:
         client.sendall(b"GET /health/liveness HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
-        chunks: list[bytes] = []
-        while True:
-            piece = client.recv(4096)
-            if not piece:
-                return b"".join(chunks)
-            chunks.append(piece)
+        return read_response(client)
+
+
+def request_tls_liveness(port: int, timeout: float = 5.0) -> bytes:
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    with (
+        socket.create_connection(("127.0.0.1", port), timeout=timeout) as raw_client,
+        context.wrap_socket(raw_client, server_hostname="localhost") as client,
+    ):
+        client.sendall(b"GET /health/liveness HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
+        return read_response(client)
+
+
+def read_response(client: socket.socket) -> bytes:
+    chunks: list[bytes] = []
+    while True:
+        piece = client.recv(4096)
+        if not piece:
+            return b"".join(chunks)
+        chunks.append(piece)
 
 
 def stop(process: subprocess.Popen[str]) -> None:
@@ -117,6 +153,42 @@ def test_a_real_process_serves_and_records_its_pid(pidfile: Path) -> None:
         pid = wait_until_serving(pidfile)
         assert pid == child.pid
         assert b"200 OK" in request_liveness(port)
+    finally:
+        stop(child)
+
+
+def test_both_mode_serves_http_and_https_on_one_port(pidfile: Path) -> None:
+    port = free_port()
+    child = start_child(port, pidfile, tls_mode="both")
+    try:
+        wait_until_serving(pidfile)
+        assert b"200 OK" in request_liveness(port)
+        assert b"200 OK" in request_tls_liveness(port)
+    finally:
+        stop(child)
+
+
+def test_tls_only_naturally_closes_a_plaintext_connection(pidfile: Path) -> None:
+    port = free_port()
+    child = start_child(port, pidfile, tls_mode=True)
+    try:
+        wait_until_serving(pidfile)
+        try:
+            response = request_liveness(port)
+        except (ConnectionError, OSError):
+            response = b""
+        assert response == b""
+    finally:
+        stop(child)
+
+
+def test_plaintext_only_does_not_complete_a_tls_handshake(pidfile: Path) -> None:
+    port = free_port()
+    child = start_child(port, pidfile)
+    try:
+        wait_until_serving(pidfile)
+        with pytest.raises((ssl.SSLError, ConnectionError, OSError)):
+            request_tls_liveness(port)
     finally:
         stop(child)
 

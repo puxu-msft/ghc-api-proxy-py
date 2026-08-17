@@ -9,6 +9,7 @@ Omitting both generates a self-signed pair once and reuses it.
 
 import datetime as dt
 import ipaddress
+import ssl
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,6 +37,13 @@ class TlsMaterial:
     cert_path: Path
     key_path: Path
     generated: bool = False
+
+
+def build_server_ssl_context(material: TlsMaterial) -> ssl.SSLContext:
+    """Load the configured certificate pair into a server-side TLS context."""
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(material.cert_path, material.key_path)
+    return context
 
 
 def is_tls_handshake(first_byte: int) -> bool:

@@ -11,14 +11,15 @@ It refuses to name a process it cannot verify, so an unrelated process never rec
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from uvicorn import Config
 from uvicorn._types import ASGIApplication
 
 from app.config.paths import standalone_pidfile_path
+from app.config.schema import TlsMode
 from app.lifecycle.adapter import UvicornListenerAdapter
-from app.lifecycle.listener import adopt_listener, bind_listener
+from app.lifecycle.listener import FirstByteRoutingAdapter, adopt_listener, bind_listener
 from app.lifecycle.pidfile import (
     live_predecessor,
     remove_pidfile,
@@ -27,6 +28,7 @@ from app.lifecycle.pidfile import (
     write_pidfile,
 )
 from app.lifecycle.standalone import ShutdownReport, StandaloneServer
+from app.server.tls import TlsMaterial, build_server_ssl_context
 
 # Mirrors what `uvicorn.Config` accepts, so a FastAPI instance passes without a cast.
 type Application = ASGIApplication | Callable[..., Any]
@@ -38,6 +40,8 @@ class StandaloneOptions:
     port: int = 4142
     # An inherited listener; when set, nothing is bound and host/port are read off the socket.
     fd: int | None = None
+    tls_mode: TlsMode = False
+    tls_material: TlsMaterial | None = None
     cleanup_timeout: int = 0
     pidfile: Path | None = None
     restart: bool = False
@@ -73,7 +77,29 @@ async def run_standalone(
     )
     address = listeners.identities()[0].address
 
-    adapter = UvicornListenerAdapter(Config(application, log_config=None), listeners)
+    adapter: UvicornListenerAdapter | FirstByteRoutingAdapter
+    if options.tls_mode is True:
+        material = options.tls_material
+        if material is None:
+            raise ValueError("TLS mode requires certificate material")
+        config = Config(
+            application,
+            log_config=None,
+            ssl_certfile=material.cert_path,
+            ssl_keyfile=material.key_path,
+        )
+        adapter = UvicornListenerAdapter(config, listeners)
+    else:
+        adapter = UvicornListenerAdapter(Config(application, log_config=None), listeners)
+        if options.tls_mode == "both":
+            material = options.tls_material
+            if material is None:
+                raise ValueError("TLS mode requires certificate material")
+            adapter = FirstByteRoutingAdapter(
+                adapter,
+                listeners,
+                build_server_ssl_context(material),
+            )
     announced = False
 
     async def announce() -> None:
@@ -84,8 +110,10 @@ async def run_standalone(
         if predecessor is not None:
             signal_restart(predecessor)
 
+    # Router retains Uvicorn lifecycle and connection state.
+    server_adapter = cast(UvicornListenerAdapter, adapter)
     server = StandaloneServer(
-        adapter,
+        server_adapter,
         cleanup_timeout=options.cleanup_timeout,
         on_serving=announce,
     )

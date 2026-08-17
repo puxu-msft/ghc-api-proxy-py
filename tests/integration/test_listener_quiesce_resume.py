@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import socket
+import ssl
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from pathlib import Path
@@ -14,6 +15,8 @@ from uvicorn import Config
 
 from app.lifecycle.activation import ActivatedSocketSet, ExpectedListener, SocketActivationError
 from app.lifecycle.adapter import ListenerState, UvicornListenerAdapter
+from app.lifecycle.listener import FirstByteRoutingAdapter
+from app.server.tls import build_server_ssl_context, generate_self_signed
 
 
 def _listeners() -> tuple[socket.socket, socket.socket]:
@@ -41,6 +44,25 @@ def _activated(ipv4: socket.socket, ipv6: socket.socket) -> ActivatedSocketSet:
 
 async def _request(host: str, port: int) -> bytes:
     reader, writer = await asyncio.open_connection(host, port)
+    try:
+        writer.write(b"GET /health/liveness HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n")
+        await writer.drain()
+        return await reader.read()
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+async def _tls_request(host: str, port: int) -> bytes:
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    reader, writer = await asyncio.open_connection(
+        host,
+        port,
+        ssl=context,
+        server_hostname="localhost",
+    )
     try:
         writer.write(b"GET /health/liveness HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n")
         await writer.drain()
@@ -111,6 +133,47 @@ async def test_dormant_dual_stack_arm_stop_and_resume() -> None:
         assert b"200 OK" in await asyncio.wait_for(queued_v4, 2)
         assert b"200 OK" in await asyncio.wait_for(queued_v6, 2)
     finally:
+        await adapter.shutdown_lifespan()
+        await adapter.close_masters()
+        ipv4.close()
+        ipv6.close()
+
+
+@pytest.mark.asyncio
+async def test_tls_router_stop_accepting_preserves_masters_and_resumes(tmp_path: Path) -> None:
+    ipv4, ipv6 = _listeners()
+    activated = _activated(ipv4, ipv6)
+    material = generate_self_signed(tmp_path / "tls")
+    uvicorn_adapter = UvicornListenerAdapter(Config(_app(), log_config=None), activated)
+    adapter = FirstByteRoutingAdapter(
+        uvicorn_adapter,
+        activated,
+        build_server_ssl_context(material),
+    )
+    queued: asyncio.Task[bytes] | None = None
+    try:
+        await adapter.startup_lifespan()
+        await adapter.register_dormant()
+        await adapter.arm()
+        port = ipv4.getsockname()[1]
+        assert b"200 OK" in await asyncio.wait_for(_tls_request("127.0.0.1", port), 2)
+
+        identities_before = adapter.listener_identities
+        master_inodes = sorted((identity.device, identity.inode) for identity in identities_before)
+        assert list(adapter.registration_identities()) == master_inodes
+        await adapter.stop_accepting()
+        queued = asyncio.create_task(_tls_request("127.0.0.1", port))
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(queued), 0.05)
+
+        await adapter.resume_accepting()
+        assert adapter.listener_identities == identities_before
+        assert list(adapter.registration_identities()) == master_inodes
+        assert b"200 OK" in await asyncio.wait_for(queued, 2)
+    finally:
+        if queued is not None and not queued.done():
+            queued.cancel()
+            await asyncio.gather(queued, return_exceptions=True)
         await adapter.shutdown_lifespan()
         await adapter.close_masters()
         ipv4.close()
