@@ -134,9 +134,17 @@ class GithubCopilotProvider:
                 extra_headers=extra_headers,
             )
         if endpoint is ModelEndpoint.OPENAI_CHAT_COMPLETIONS:
-            return await self._client.send_chat_completions(payload, stream=stream)
+            return await self._client.send_chat_completions(
+                payload,
+                stream=stream,
+                extra_headers=extra_headers,
+            )
         if endpoint is ModelEndpoint.OPENAI_RESPONSES:
-            return await self._client.send_responses(payload, stream=stream)
+            return await self._client.send_responses(
+                payload,
+                stream=stream,
+                extra_headers=extra_headers,
+            )
         return await self._client.send_embeddings(payload)
 
     async def count_tokens(

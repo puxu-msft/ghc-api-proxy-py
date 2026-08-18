@@ -50,6 +50,10 @@ class FakeProvider:
     def __init__(self, *, responses: list[Any] | None = None) -> None:
         self.name = "ghc"
         self.sent: list[tuple[ModelEndpoint, dict[str, Any]]] = []
+        # Recorded rather than discarded: the header path existed as a parameter on every layer
+        # for a long time with nothing ever filling it, and a fake that drops the value cannot
+        # tell that state apart from a working one.
+        self.sent_headers: list[Any] = []
         self._responses = responses or []
 
     @property
@@ -72,6 +76,7 @@ class FakeProvider:
         extra_headers: Any = None,
     ) -> httpx.Response:
         self.sent.append((endpoint, dict(payload)))
+        self.sent_headers.append(extra_headers)
         outcome = self._responses.pop(0) if self._responses else httpx.Response(200)
         if isinstance(outcome, BaseException):
             raise outcome
@@ -352,3 +357,31 @@ async def test_named_strategies_allow_a_funded_reason() -> None:
 
     assert outcome.succeeded is True
     assert outcome.attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_the_driver_hands_the_clients_headers_to_the_provider() -> None:
+    """Every layer accepted `extra_headers` and nobody ever passed one.
+
+    The signature was there from the start, so the gap was invisible to type checking and to any
+    test that only looked at the payload: production dropped `anthropic-beta`, and upstream then
+    refused body fields that beta enables. Asserting the value rather than the parameter.
+    """
+    provider = FakeProvider()
+    ctx = context()
+    ctx.client_headers = {"anthropic-beta": "context-management-2025-06-27"}
+
+    outcome = await driver(provider).run(ctx)
+
+    assert outcome.succeeded is True
+    assert provider.sent_headers == [{"anthropic-beta": "context-management-2025-06-27"}]
+
+
+@pytest.mark.asyncio
+async def test_no_client_headers_sends_none_rather_than_an_empty_mapping() -> None:
+    """`None` is what the provider signature means by "nothing to add"."""
+    provider = FakeProvider()
+
+    await driver(provider).run(context())
+
+    assert provider.sent_headers == [None]

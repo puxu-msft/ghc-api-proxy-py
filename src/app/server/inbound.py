@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.pipeline.request import RequestContext, WireFormat
+from app.pipeline.request_headers import forwarded_client_headers
 
 
 class InboundRequestError(ValueError):
@@ -58,11 +59,15 @@ def route_for_path(path: str) -> InboundRoute | None:
 def build_context(
     route: InboundRoute,
     payload: Mapping[str, Any],
+    headers: Mapping[str, str] | None = None,
 ) -> RequestContext:
     """Turn a parsed body into a RequestContext.
 
     A missing or non-string model is rejected here rather than downstream.
     Routing cannot fail closed on a capability if it never learned which model to ask about.
+
+    Headers are filtered here rather than at the send site so that nothing downstream ever holds
+    the client's credentials.
     """
     model = payload.get("model")
     if not isinstance(model, str) or not model.strip():
@@ -77,6 +82,7 @@ def build_context(
         requested_model=model.strip(),
         payload=dict(payload),
         stream=stream,
+        client_headers=forwarded_client_headers(headers or {}),
     )
     if route.count_tokens:
         context.extras["count_tokens"] = True

@@ -228,6 +228,7 @@ class DirectDriver:
             payload,
             model_id=context.resolved_model,
             stream=context.stream,
+            extra_headers=context.client_headers or None,
         )
         if self._attempt_deadline <= 0:
             return await send

@@ -33,12 +33,35 @@ def layout_strategy(layout: AssistantMessageLayout) -> DestackStrategy:
     return _LAYOUT_STRATEGY[layout]
 
 
+def normalize_context_management(payload: dict[str, Any]) -> None:
+    """Make `context_management` say "no edits" in the spelling upstream accepts.
+
+    Claude Code sends `{"edits": null}` on every request. Upstream rejects that outright — with
+    the `context-management-2025-06-27` beta it answers `context_management.edits: Input should be
+    a valid array`, and without the beta it does not recognise the field at all. `{"edits": []}`
+    is accepted, and so is dropping the key; the empty list is used because it preserves what the
+    client actually said rather than pretending it said nothing.
+
+    Measured against the live upstream on 2026-08-18, all three spellings.
+    """
+    value = payload.get("context_management")
+    if not isinstance(value, dict):
+        return
+    management = cast(dict[str, Any], value)
+    if "edits" in management and management["edits"] is None:
+        management["edits"] = []
+
+
 def fix_anthropic_request(payload: dict[str, Any], config: FixAnthropicRequestHook) -> None:
     """Apply the configured request fixups in place.
 
     In place because the caller owns the payload and the next step reads it from the same context;
     returning a copy would leave two versions and no rule about which one travels.
     """
+    # Before the messages guard below: this one is about a top-level field, and a body with no
+    # `messages` list still carries it.
+    normalize_context_management(payload)
+
     messages_value = payload.get("messages")
     if not isinstance(messages_value, list):
         return

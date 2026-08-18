@@ -51,7 +51,7 @@ async def _serve(request: Request) -> Response:
     body = cast(dict[str, Any], parsed)
 
     try:
-        context = build_context(route, body)
+        context = build_context(route, body, request.headers)
     except InboundRequestError as error:
         return JSONResponse(error_body(error), status_code=400)
 

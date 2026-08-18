@@ -5,7 +5,7 @@ Every field is writable by design.
 The user ruled that no ownership or permission rule applies, so this is a plain mutable record.
 """
 
-from collections.abc import MutableMapping
+from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -54,6 +54,11 @@ class RequestContext:
 
     id: str = field(default_factory=lambda: str(uuid4()))
     stream: bool = False
+
+    # The client's own protocol-negotiation headers, already filtered by
+    # `app.pipeline.request_headers`. Held here rather than read at the send site because the
+    # driver is where an attempt is built, and it has no access to the ASGI request.
+    client_headers: Mapping[str, str] = field(default_factory=lambda: dict[str, str]())
 
     # Filled in by routing.
     resolved_model: str = ""

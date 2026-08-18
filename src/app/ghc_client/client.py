@@ -46,6 +46,13 @@ class GhcApiClient:
         *,
         extra_headers: Mapping[str, str] | None = None,
     ) -> dict[str, str]:
+        """The upstream headers, with anything the caller adds underneath rather than on top.
+
+        `build_request_headers` already says the protocol and identity fields are owned by this
+        library, and they have to be: the identity set makes the request look like Copilot Chat,
+        and upstream rejects requests that do not. A caller forwarding a client's headers would
+        otherwise replace `user-agent` — or `Authorization` — without anything failing loudly.
+        """
         token = await self._tokens.get_token()
         headers = build_request_headers(
             token,
@@ -53,7 +60,7 @@ class GhcApiClient:
             interaction_id=self._interaction_id,
         )
         if extra_headers:
-            headers.update(dict(extra_headers))
+            headers = {**{str(k): str(v) for k, v in extra_headers.items()}, **headers}
         return headers
 
     async def _post_openai(
@@ -93,8 +100,14 @@ class GhcApiClient:
         payload: Mapping[str, Any],
         *,
         stream: bool = False,
+        extra_headers: Mapping[str, str] | None = None,
     ) -> httpx.Response:
-        return await self._post_openai("/chat/completions", payload, stream=stream)
+        return await self._post_openai(
+            "/chat/completions",
+            payload,
+            stream=stream,
+            extra_headers=extra_headers,
+        )
 
     async def send_anthropic_messages(
         self,
@@ -121,8 +134,14 @@ class GhcApiClient:
         payload: Mapping[str, Any],
         *,
         stream: bool = False,
+        extra_headers: Mapping[str, str] | None = None,
     ) -> httpx.Response:
-        return await self._post_openai("/responses", payload, stream=stream)
+        return await self._post_openai(
+            "/responses",
+            payload,
+            stream=stream,
+            extra_headers=extra_headers,
+        )
 
     async def send_responses_headers(
         self,
