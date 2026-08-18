@@ -1,4 +1,4 @@
-from collections.abc import Mapping
+from collections.abc import Coroutine, Mapping
 from typing import Any, cast
 
 import httpx
@@ -10,6 +10,7 @@ from openai import AsyncOpenAI
 from openai._types import Body as OpenAIBody
 
 from app.ghc_client.config import GhcClientConfig
+from app.ghc_client.errors import normalize_upstream_error
 from app.ghc_client.headers import build_request_headers
 from app.ghc_client.tokens import CopilotTokenManager
 from app.ghc_client.transport import (
@@ -95,6 +96,22 @@ class GhcApiClient:
             stream=stream,
         )
 
+    @staticmethod
+    async def _in_pipeline_terms(post: Coroutine[Any, Any, httpx.Response]) -> httpx.Response:
+        """Await one SDK call, raising the pipeline's error for an upstream failure.
+
+        Applied per send method rather than inside `_post_*` because `send_responses_headers`
+        deliberately catches the SDK's own status error to read the response off it, and that
+        contract belongs to the existing chain.
+        """
+        try:
+            return await post
+        except BaseException as error:
+            normalized = normalize_upstream_error(error)
+            if normalized is None:
+                raise
+            raise normalized from error
+
     async def send_chat_completions(
         self,
         payload: Mapping[str, Any],
@@ -102,11 +119,13 @@ class GhcApiClient:
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
     ) -> httpx.Response:
-        return await self._post_openai(
-            "/chat/completions",
-            payload,
-            stream=stream,
-            extra_headers=extra_headers,
+        return await self._in_pipeline_terms(
+            self._post_openai(
+                "/chat/completions",
+                payload,
+                stream=stream,
+                extra_headers=extra_headers,
+            )
         )
 
     async def send_anthropic_messages(
@@ -116,18 +135,22 @@ class GhcApiClient:
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
     ) -> httpx.Response:
-        return await self._post_anthropic(
-            "/v1/messages",
-            payload,
-            stream=stream,
-            extra_headers=extra_headers,
+        return await self._in_pipeline_terms(
+            self._post_anthropic(
+                "/v1/messages",
+                payload,
+                stream=stream,
+                extra_headers=extra_headers,
+            )
         )
 
     async def send_anthropic_count_tokens(
         self,
         payload: Mapping[str, Any],
     ) -> httpx.Response:
-        return await self._post_anthropic("/v1/messages/count_tokens", payload, stream=False)
+        return await self._in_pipeline_terms(
+            self._post_anthropic("/v1/messages/count_tokens", payload, stream=False)
+        )
 
     async def send_responses(
         self,
@@ -136,11 +159,13 @@ class GhcApiClient:
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
     ) -> httpx.Response:
-        return await self._post_openai(
-            "/responses",
-            payload,
-            stream=stream,
-            extra_headers=extra_headers,
+        return await self._in_pipeline_terms(
+            self._post_openai(
+                "/responses",
+                payload,
+                stream=stream,
+                extra_headers=extra_headers,
+            )
         )
 
     async def send_responses_headers(
@@ -165,4 +190,6 @@ class GhcApiClient:
         self,
         payload: Mapping[str, Any],
     ) -> httpx.Response:
-        return await self._post_openai("/embeddings", payload, stream=False)
+        return await self._in_pipeline_terms(
+            self._post_openai("/embeddings", payload, stream=False)
+        )

@@ -8,6 +8,7 @@ from openai import AsyncOpenAI
 
 from app.ghc_client import GhcApiClient, GhcClientConfig
 from app.ghc_client.tokens import CopilotTokenManager
+from app.pipeline.exceptions import UpstreamRateLimit
 
 BASE_URL = "https://copilot.example"
 
@@ -138,13 +139,26 @@ async def test_extra_headers_reach_the_anthropic_leg() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ordinary_send_raises_on_error_status() -> None:
-    client, http_client = build_client(token_or(httpx.Response(429, json={"error": "slow down"})))
+async def test_ordinary_send_raises_in_the_pipelines_vocabulary() -> None:
+    """The asymmetry this guards is unchanged; the exception it raises is not.
+
+    An ordinary send still raises where `send_responses_headers` returns. It used to raise the
+    SDK's own `openai.RateLimitError`, which is outside the driver's closed set, so `classify`
+    aborted and the 429 reached the client as a 502 with no retry ever considered.
+    """
+    client, http_client = build_client(
+        token_or(httpx.Response(429, json={"error": "slow down"}, headers={"retry-after": "7"}))
+    )
     try:
-        with pytest.raises(openai.RateLimitError):
+        with pytest.raises(UpstreamRateLimit) as raised:
             await client.send_responses({"model": "m"})
     finally:
         await http_client.aclose()
+
+    assert raised.value.status_code == 429
+    assert raised.value.retry_after == 7.0
+    # The SDK error is still reachable, so nothing about the cause is lost in translation.
+    assert isinstance(raised.value.__cause__, openai.RateLimitError)
 
 
 @pytest.mark.asyncio

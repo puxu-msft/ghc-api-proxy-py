@@ -5,6 +5,7 @@ The closed set is the point.
 A subscriber's KeyError must not read as a control instruction.
 """
 
+from collections.abc import Mapping
 from enum import StrEnum
 
 
@@ -23,9 +24,20 @@ class PipelineError(Exception):
 class UpstreamError(PipelineError):
     """Upstream refused or failed. Retryable by default; the budget decides."""
 
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        headers: Mapping[str, str] | None = None,
+        body: str = "",
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        # Carried because the rate limiter reads `Retry-After` and the client deserves upstream's
+        # own words. Both are lost the moment an SDK exception is flattened to a string.
+        self.headers: Mapping[str, str] = dict(headers or {})
+        self.body = body
 
 
 class UpstreamTimeout(UpstreamError):
@@ -33,9 +45,42 @@ class UpstreamTimeout(UpstreamError):
 
 
 class UpstreamRateLimit(UpstreamError):
-    def __init__(self, message: str, *, retry_after: float | None = None) -> None:
-        super().__init__(message, status_code=429)
+    def __init__(
+        self,
+        message: str,
+        *,
+        retry_after: float | None = None,
+        headers: Mapping[str, str] | None = None,
+        body: str = "",
+    ) -> None:
+        super().__init__(message, status_code=429, headers=headers, body=body)
         self.retry_after = retry_after
+
+
+class UpstreamRejected(PipelineError):
+    """Upstream refused the request itself; sending the same body again cannot help.
+
+    Deliberately *not* an `UpstreamError`, so `classify` aborts rather than retries. A malformed
+    body, an unsupported field, an unknown tool — these are deterministic. Spending the server-error
+    budget on nine identical rejections wastes the budget, delays the client's answer by the
+    backoff, and asks upstream the same question nine times.
+
+    The status and body travel so the client is told what upstream actually said, rather than a
+    bare 502 that reads like the proxy failed.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int,
+        headers: Mapping[str, str] | None = None,
+        body: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.headers: Mapping[str, str] = dict(headers or {})
+        self.body = body
 
 
 class PipelineRetry(PipelineError):

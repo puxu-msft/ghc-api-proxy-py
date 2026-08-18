@@ -23,7 +23,7 @@ from app.pipeline.delivery import BlockBuffer, CompletedBlock, DeliverySession
 from app.pipeline.delivery.assembler import AnthropicAssembler, BlockAssembler, ResponsesAssembler
 from app.pipeline.delivery.stream import StreamSettings
 from app.pipeline.direct_driver import DRIVERS, DriverOutcome, LedgerBudget
-from app.pipeline.exceptions import UpstreamTimeout
+from app.pipeline.exceptions import UpstreamRateLimit, UpstreamRejected, UpstreamTimeout
 from app.pipeline.request import RequestContext, WireFormat
 from app.pipeline.retry import RetryLedger
 from app.pipeline.routing import Route, RoutingError, decide_route
@@ -195,10 +195,15 @@ async def handle_bounded(chain: Chain, context: RequestContext) -> HandledReques
 
 
 def error_status(error: BaseException) -> int:
-    """Map a pre-network failure to a status code.
+    """Map a failure to the status the client should see.
 
     A routing or capability refusal means the request is unserviceable, not that upstream failed.
     It must not be reported as a bad gateway.
+
+    Nor must an upstream answer be flattened into one. A client that gets 429 can back off and a
+    client that gets 400 can fix its body; both learn nothing from a 502, which says the proxy
+    itself broke. Everything used to land on that 502 because the SDK's exceptions were outside
+    the closed set — see `app.ghc_client.errors`.
     """
     if isinstance(
         error,
@@ -209,11 +214,36 @@ def error_status(error: BaseException) -> int:
         # Every configured counter failed. Reachable when `providers` names only `ghc`;
         # with `local` in the list the estimate has no way to fail on the normal path.
         return 503
+    if isinstance(error, UpstreamRateLimit):
+        return 429
+    if isinstance(error, UpstreamTimeout):
+        return 504
+    if isinstance(error, UpstreamRejected):
+        # Upstream's own verdict on the request. Passed through so the client is told what is
+        # wrong with what it sent, rather than that some gateway failed.
+        return error.status_code
     return 502
 
 
+def error_headers(error: BaseException) -> dict[str, str]:
+    """The few upstream headers a client needs in order to act on a failure.
+
+    `Retry-After` only: it is the one that changes what a well-behaved client does next. An
+    allowlist rather than forwarding upstream's set, which carries its own framing headers.
+    """
+    if isinstance(error, UpstreamRateLimit) and error.retry_after is not None:
+        return {"retry-after": str(int(error.retry_after))}
+    return {}
+
+
 def error_body(error: BaseException) -> dict[str, Any]:
-    return {"error": {"type": type(error).__name__, "message": str(error)}}
+    body: dict[str, Any] = {"type": type(error).__name__, "message": str(error)}
+    upstream = getattr(error, "body", "")
+    if isinstance(upstream, str) and upstream:
+        # What upstream actually said. Named as upstream's rather than merged, so nothing reads
+        # our wrapper's wording as though the model had produced it.
+        body["upstream"] = upstream
+    return {"error": body}
 
 
 def response_payload(chain: Chain, handled: HandledRequest, body: dict[str, Any]) -> dict[str, Any]:

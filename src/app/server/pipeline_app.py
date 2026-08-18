@@ -18,6 +18,7 @@ from app.server.handler import (
     assembler_for,
     delivery_buffer,
     error_body,
+    error_headers,
     error_status,
     handle_bounded,
     handle_count_tokens,
@@ -61,18 +62,30 @@ async def _serve(request: Request) -> Response:
         try:
             counted = await handle_count_tokens(_chain(request), context)
         except Exception as error:
-            return JSONResponse(error_body(error), status_code=error_status(error))
+            return JSONResponse(
+            error_body(error),
+            status_code=error_status(error),
+            headers=error_headers(error),
+        )
         return JSONResponse(counted)
 
     try:
         handled = await handle_bounded(_chain(request), context)
     except Exception as error:
-        return JSONResponse(error_body(error), status_code=error_status(error))
+        return JSONResponse(
+            error_body(error),
+            status_code=error_status(error),
+            headers=error_headers(error),
+        )
 
     response = handled.response
     if response is None:
         error = handled.outcome.error or RuntimeError("request produced no response")
-        return JSONResponse(error_body(error), status_code=error_status(error))
+        return JSONResponse(
+            error_body(error),
+            status_code=error_status(error),
+            headers=error_headers(error),
+        )
 
     chain = _chain(request)
     if context.stream:
