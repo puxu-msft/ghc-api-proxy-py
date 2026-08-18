@@ -1,8 +1,13 @@
 """OpenAI Responses translators.
 
-`model-translation.md`: Anthropic carries the system prompt in a top-level `system` array.
-Responses carries it in a top-level `instructions` array of objects with `role` and `content`.
-Responses has the richer shape, which we do not need yet, so one system entry carries the blocks.
+`model-translation.md` shows `instructions` as an array of role-bearing objects, and notes we do
+not need that flexibility yet. The Copilot upstream does not offer it either: measured on
+2026-08-18, it accepts `instructions` only as a string and answers `failed to parse request` to
+every array form tried — `[str]`, `[{role, content: str}]`, `[{role, content: [{type: text}]}]`,
+the same with `input_text`, and with an explicit `type: message`. So the blocks are joined here.
+
+That costs the per-block `cache_control` on this path, which is why `Conversion` records it rather
+than letting it vanish. The Anthropic passthrough path keeps the blocks intact.
 """
 
 from collections.abc import Mapping
@@ -13,6 +18,8 @@ from app.pipeline.translation_driver.semantic import (
     SystemBlock,
     system_blocks_from_value,
 )
+
+WIRE_FORMAT = "openai-responses"
 
 _PASSTHROUGH_KEYS = frozenset(
     {"model", "instructions", "input", "tools", "stream", "max_output_tokens", "temperature"}
@@ -61,6 +68,7 @@ def from_openai_responses(payload: Mapping[str, Any]) -> SemanticRequest:
         messages=_dict_list(payload.get("input")),
         tools=_dict_list(payload.get("tools")),
         stream=bool(payload.get("stream", False)),
+        source_format=WIRE_FORMAT,
     )
     if problem is not None:
         request.conversion.record(problem)
@@ -78,21 +86,50 @@ def from_openai_responses(payload: Mapping[str, Any]) -> SemanticRequest:
     return request
 
 
+def _instructions_value(blocks: list[SystemBlock], request: SemanticRequest) -> str:
+    """Join the system blocks into the one shape this upstream accepts.
+
+    Blank-line separated so two blocks do not run into one sentence. Any per-block metadata is
+    lost here — `cache_control` in practice — and named rather than dropped in silence.
+    """
+    dropped = sorted({key for block in blocks for key in block.metadata})
+    if dropped:
+        request.conversion.record(
+            f"system block metadata not carried into {WIRE_FORMAT} instructions: "
+            f"{', '.join(dropped)}"
+        )
+    return "\n\n".join(block.text for block in blocks)
+
+
+def _function_tool(tool: dict[str, Any]) -> dict[str, Any]:
+    """Put one tool in the shape the Responses endpoint takes.
+
+    Anthropic names the schema `input_schema` and carries no `type`; Responses wants a flat
+    function tool with `parameters`. Passing the Anthropic shape through earns
+    `One of the tools requested is invalid.` — measured 2026-08-18.
+
+    A tool that already looks like a Responses tool is left alone, so a Responses-to-Responses
+    round trip does not get rewritten.
+    """
+    if "input_schema" not in tool:
+        return tool
+    converted = {key: value for key, value in tool.items() if key != "input_schema"}
+    converted["type"] = tool.get("type", "function")
+    converted["parameters"] = tool["input_schema"]
+    return converted
+
+
 def to_openai_responses(request: SemanticRequest) -> dict[str, Any]:
     payload: dict[str, Any] = {"model": request.model, "input": request.messages}
     if request.system:
-        content = [
-            {"type": "text", "text": block.text, **dict(block.metadata)}
-            for block in request.system
-        ]
-        payload["instructions"] = [{"role": SYSTEM_ROLE, "content": content}]
+        payload["instructions"] = _instructions_value(request.system, request)
     if request.tools:
-        payload["tools"] = request.tools
+        payload["tools"] = [_function_tool(tool) for tool in request.tools]
     if request.stream:
         payload["stream"] = True
     if request.max_output_tokens is not None:
         payload["max_output_tokens"] = request.max_output_tokens
     if request.temperature is not None:
         payload["temperature"] = request.temperature
-    payload.update(request.extensions)
+    payload.update(request.extensions_for(WIRE_FORMAT))
     return payload

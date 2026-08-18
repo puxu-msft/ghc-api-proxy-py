@@ -9,6 +9,8 @@ from app.pipeline.translation_driver.semantic import (
     system_blocks_from_value,
 )
 
+WIRE_FORMAT = "anthropic-messages"
+
 _PASSTHROUGH_KEYS = frozenset(
     {"model", "system", "messages", "tools", "stream", "max_tokens", "temperature"}
 )
@@ -30,6 +32,7 @@ def from_anthropic_messages(payload: Mapping[str, Any]) -> SemanticRequest:
         messages=_dict_list(payload.get("messages")),
         tools=_dict_list(payload.get("tools")),
         stream=bool(payload.get("stream", False)),
+        source_format=WIRE_FORMAT,
     )
     if problem is not None:
         request.conversion.record(problem)
@@ -65,5 +68,5 @@ def to_anthropic_messages(request: SemanticRequest) -> dict[str, Any]:
         payload["max_tokens"] = request.max_output_tokens
     if request.temperature is not None:
         payload["temperature"] = request.temperature
-    payload.update(request.extensions)
+    payload.update(request.extensions_for(WIRE_FORMAT))
     return payload

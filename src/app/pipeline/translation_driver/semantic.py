@@ -53,9 +53,27 @@ class SemanticRequest:
     stream: bool = False
     max_output_tokens: int | None = None
     temperature: float | None = None
+    # Which wire format the extensions below came off. A writer for a different format must not
+    # replay them: an unclaimed key is unclaimed *in its own format*, and in another one it is at
+    # best meaningless. Measured — sending Anthropic's `context_management` to the Responses
+    # endpoint gets `failed to parse request`, so replaying it is not merely untidy.
+    source_format: str = ""
     # Fields no translator claimed, kept so an unknown key is not silently dropped.
     extensions: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
     conversion: Conversion = field(default_factory=Conversion)
+
+    def extensions_for(self, wire_format: str) -> dict[str, Any]:
+        """The extensions a writer for `wire_format` may replay — all of them or none.
+
+        Records the drop rather than performing it silently, which is what `Conversion` is for.
+        """
+        if not self.extensions or self.source_format == wire_format:
+            return dict(self.extensions)
+        self.conversion.record(
+            f"extensions from {self.source_format or 'an unnamed format'} not carried into "
+            f"{wire_format}: {', '.join(sorted(self.extensions))}"
+        )
+        return {}
 
 
 def system_blocks_from_value(value: object) -> tuple[list[SystemBlock], str | None]:

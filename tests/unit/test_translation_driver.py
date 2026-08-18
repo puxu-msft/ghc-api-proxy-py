@@ -37,30 +37,84 @@ ANTHROPIC_REQUEST: dict[str, Any] = {
 }
 
 
-def test_system_becomes_one_instructions_entry_with_the_system_role() -> None:
+def test_system_becomes_a_single_instructions_string() -> None:
+    """The one shape the Copilot Responses endpoint accepts.
+
+    This assertion used to require `model-translation.md`'s worked example — one entry with
+    `role: system` and a `content` list of blocks. Measured 2026-08-18, that shape and five other
+    array forms all get `failed to parse request`; only a string is accepted. The conflict with
+    the authored spec is written up in
+    `docs/.human-controlled-candidates/instructions-shape-conflict.md` and is the user's to rule
+    on — this test records what upstream does, not a preference.
+    """
     payload, _ = default_registry().translate(
         ANTHROPIC_REQUEST,
         source=WireFormat.ANTHROPIC_MESSAGES,
         target=WireFormat.OPENAI_RESPONSES,
     )
-    instructions = payload["instructions"]
-    assert len(instructions) == 1
-    assert instructions[0]["role"] == "system"
-    assert [block["text"] for block in instructions[0]["content"]] == [
-        "You are Claude Code, Anthropic's official CLI for Claude.",
-        "\nYou are an interactive agent.",
+    assert payload["instructions"] == (
+        "You are Claude Code, Anthropic's official CLI for Claude.\n\n"
+        "\nYou are an interactive agent."
+    )
+
+
+def test_the_lost_block_metadata_is_named_rather_than_dropped() -> None:
+    """`cache_control` cannot survive the string form, so it has to be reported.
+
+    The guard this replaces asserted the metadata crossed intact. It cannot any more, and the
+    thing worth guarding instead is that the loss is visible: a silently dropped `cache_control`
+    is a prompt-caching regression nobody would ever see.
+    """
+    _, semantic = default_registry().translate(
+        ANTHROPIC_REQUEST,
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    losses = semantic.conversion.losses
+    assert any("cache_control" in loss for loss in losses), losses
+
+
+def test_anthropic_tools_become_responses_function_tools() -> None:
+    """Passing Anthropic's `input_schema` through earns `One of the tools requested is invalid.`"""
+    payload, _ = default_registry().translate(
+        {
+            **ANTHROPIC_REQUEST,
+            "tools": [
+                {
+                    "name": "get_time",
+                    "description": "Return the current time.",
+                    "input_schema": {"type": "object", "properties": {}},
+                }
+            ],
+        },
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    assert payload["tools"] == [
+        {
+            "type": "function",
+            "name": "get_time",
+            "description": "Return the current time.",
+            "parameters": {"type": "object", "properties": {}},
+        }
     ]
 
 
-def test_per_block_metadata_survives_the_crossing() -> None:
-    # cache_control lives on each block; flattening the system prompt to a string would lose it.
-    payload, _ = default_registry().translate(
-        ANTHROPIC_REQUEST,
+def test_anthropic_only_fields_do_not_reach_a_responses_body() -> None:
+    """An unclaimed key is unclaimed *in its own format*, and elsewhere it is a parse error.
+
+    `context_management` is the measured case: the Responses endpoint answers
+    `failed to parse request` to a body carrying it, so replaying every extension into whatever
+    format is being written is not merely untidy.
+    """
+    payload, semantic = default_registry().translate(
+        {**ANTHROPIC_REQUEST, "context_management": {"edits": []}},
         source=WireFormat.ANTHROPIC_MESSAGES,
         target=WireFormat.OPENAI_RESPONSES,
     )
-    content = payload["instructions"][0]["content"]
-    assert all(block["cache_control"] == {"type": "ephemeral"} for block in content)
+    assert "context_management" not in payload
+    losses = semantic.conversion.losses
+    assert any("context_management" in loss for loss in losses), losses
 
 
 def test_messages_and_limits_map_to_the_responses_names() -> None:
@@ -94,8 +148,13 @@ def test_round_trip_through_the_intermediate_preserves_the_request() -> None:
     assert back["messages"] == ANTHROPIC_REQUEST["messages"]
     assert back["max_tokens"] == 100
     assert back["stream"] is True
+    # The system prompt returns as one block rather than two. That is the string `instructions`
+    # form doing what it must — the block boundary has nowhere to live in it. Asserted as a
+    # single joined block rather than dropped from the test, so a future change that loses the
+    # *text* still fails.
     assert [block["text"] for block in back["system"]] == [
-        block["text"] for block in ANTHROPIC_SYSTEM
+        "You are Claude Code, Anthropic's official CLI for Claude.\n\n"
+        "\nYou are an interactive agent."
     ]
 
 
