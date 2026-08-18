@@ -56,6 +56,7 @@ async def collect(
     initial_delay: float = 0.0,
     synthesized_response_headers_after_sec: int = 0,
     signature_compat: ContentBlockStartCompat = "signature_delta",
+    assembler: str = "anthropic",
 ) -> list[bytes]:
     async def delayed_feed() -> AsyncIterator[bytes]:
         if initial_delay:
@@ -67,7 +68,7 @@ async def collect(
         chunk
         async for chunk in stream_delivery(
             delayed_feed(),
-            AnthropicAssembler(),
+            ResponsesAssembler() if assembler == "responses" else AnthropicAssembler(),
             buffer=BlockBuffer(policy=policy),  # pyright: ignore[reportArgumentType]
             settings=StreamSettings(
                 sse_ping_interval=interval,
@@ -364,3 +365,40 @@ async def test_a_thinking_block_without_a_signature_gets_no_delta() -> None:
     # The negative control: nothing is synthesised when there is no signature to carry.
     chunks = await collect(thinking_stream(""))
     assert signature_deltas(chunks) == []
+
+
+def responses_stream_with_unstable_ids() -> list[bytes]:
+    """A Responses stream shaped like Copilot's: `added` and `done` carry *different* item ids.
+
+    Taken from a live capture. `output_index` is the only identifier that pairs the two, so an
+    assembler keyed on the id closes nothing and the whole response renders as zero bytes.
+    """
+    events: list[tuple[str, dict[str, Any]]] = [
+        (
+            "response.output_item.added",
+            {"output_index": 0, "item": {"id": "added-aaa", "type": "message"}},
+        ),
+        ("response.output_text.delta", {"output_index": 0, "delta": "PONG"}),
+        (
+            "response.output_item.done",
+            {"output_index": 0, "item": {"id": "done-zzz", "type": "message"}},
+        ),
+        ("response.completed", {"response": {"usage": {}}}),
+    ]
+    return [frame(event, data) for event, data in events]
+
+
+@pytest.mark.asyncio
+async def test_a_response_assembles_even_when_upstream_changes_the_item_id() -> None:
+    chunks = await collect(responses_stream_with_unstable_ids(), assembler="responses")
+    body = b"".join(chunks)
+    assert body, "the response assembled into nothing"
+    assert b'"text":"PONG"' in body
+    assert events_of(chunks) == [
+        "message_start",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+        "message_delta",
+        "message_stop",
+    ]

@@ -168,11 +168,22 @@ class ResponsesAssembler:
         return ()
 
     def _item_key(self, data: dict[str, Any]) -> str:
+        """Which draft an event belongs to.
+
+        `output_index` first, because it is the only identifier this upstream keeps stable: Copilot
+        sends a *different* `item.id` on `output_item.added` and `output_item.done` for the same
+        item, so keying on the id meant `_close` never found what `_open` had created and the whole
+        response assembled into nothing. The ids are kept as a fallback for upstreams that omit the
+        index; between the two, only the index is load-bearing.
+        """
+        index = data.get("output_index")
+        if index is not None:
+            return f"index:{index}"
         raw = data.get("item")
         if isinstance(raw, dict):
             item = cast(dict[str, Any], raw)
-            return str(item.get("id") or data.get("item_id") or data.get("output_index", ""))
-        return str(data.get("item_id") or data.get("output_index", ""))
+            return str(item.get("id") or data.get("item_id") or "")
+        return str(data.get("item_id") or "")
 
     def _open(self, data: dict[str, Any]) -> None:
         raw = data.get("item")

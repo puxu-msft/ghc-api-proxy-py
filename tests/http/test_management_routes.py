@@ -1,8 +1,26 @@
+from pathlib import Path
+
+import pytest
 from fastapi.testclient import TestClient
 
 from app.config.settings import AppSettings
 from app.deps import get_settings
 from app.server import create_app
+
+
+@pytest.fixture(autouse=True)
+def no_ambient_credentials(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the developer's own credentials out of these assertions.
+
+    Both tests here assert that dependencies are *uninitialised*, and the app looks for a GitHub
+    token in the real data directory and the environment. So they passed only while the machine
+    running them happened to have no credentials — putting a token on it turned them red without
+    anything in the app changing. Local to this file rather than a shared entry: the other test
+    groups have no business inheriting this environment.
+    """
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    for name in ("COPILOT_API_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
 
 
 def test_status_and_config_management_routes() -> None:
