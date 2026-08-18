@@ -224,6 +224,10 @@ class Interaction:
     # `pipeline/executor.py` and `anthropic/client.py` — so a replay that dropped them would make
     # HTTP/2 traffic look like HTTP/1.1 to everything downstream.
     extensions: dict[str, str]
+    # Where these bytes came from, because it changes what they prove. A live recording carries
+    # the wire's own chunk boundaries; one rebuilt from the history database carries frame
+    # boundaries instead, and only a recording can settle how chunks actually fell.
+    source: str
     # The few request fields whose change would make the recorded answer the wrong one. Matching on
     # method and path alone let a request for a different model, or a non-streaming one, be served
     # this recording without a word; matching on the whole body cannot work, because it carries a
@@ -245,6 +249,7 @@ class Interaction:
                 "status": self.status,
                 "headers": self.headers,
                 "extensions": self.extensions,
+                "source": self.source,
                 "chunks": [_encode_chunk(chunk) for chunk in self.chunks],
             },
         }
@@ -262,6 +267,7 @@ class Interaction:
             status=int(response["status"]),
             headers=dict(cast(dict[str, str], response.get("headers", {}))),
             extensions=dict(cast(dict[str, str], response.get("extensions", {}))),
+            source=str(response.get("source", "unknown")),
             chunks=[_decode_chunk(chunk) for chunk in stored],
         )
 
@@ -388,6 +394,7 @@ class RecordingTransport(httpx.AsyncBaseTransport):
                     if name in RECORDED_EXTENSIONS
                 },
                 request_shape=_request_shape(request),
+                source="live-recording",
                 status=response.status_code,
                 headers={
                     name: value

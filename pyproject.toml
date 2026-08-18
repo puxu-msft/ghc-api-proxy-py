@@ -40,6 +40,9 @@ dev = [
     "pytest-cov",
     "pyright",
     "ruff",
+    # Only `tests/integration/recorded/from_history.py` needs it: the copilot-api history database
+    # stores its objects zstd-compressed. Nothing the proxy itself runs touches this.
+    "zstandard",
 ]
 
 [project.scripts]
