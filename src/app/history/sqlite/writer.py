@@ -136,8 +136,15 @@ class HistoryWriter:
         self._connection.execute(
             """INSERT OR REPLACE INTO entries VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                entry.id, entry.session_id, entry.agent_id, entry.started_at, entry.ended_at,
-                entry.endpoint, entry.status, entry.model.requested, entry.model.resolved,
+                entry.id,
+                entry.session_id,
+                entry.agent_id,
+                entry.started_at,
+                entry.ended_at,
+                entry.endpoint,
+                entry.status,
+                entry.model.requested,
+                entry.model.resolved,
                 dumps(entry.request_payload),
                 dumps(entry.response) if entry.response is not None else None,
                 dumps(entry.usage) if entry.usage is not None else None,
@@ -221,8 +228,14 @@ class HistoryWriter:
         if usage is not None and not isinstance(usage, dict):
             raise ValueError("history usage must be an object")
         return HistoryEntry(
-            id=row[0], session_id=row[1], agent_id=row[2], started_at=row[3], ended_at=row[4],
-            endpoint=row[5], status=row[6], model=ModelRef(row[7], row[8]),
+            id=row[0],
+            session_id=row[1],
+            agent_id=row[2],
+            started_at=row[3],
+            ended_at=row[4],
+            endpoint=row[5],
+            status=row[6],
+            model=ModelRef(row[7], row[8]),
             request_payload=request_payload,
             response=response,
             usage=usage,
