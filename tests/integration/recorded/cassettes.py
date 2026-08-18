@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, cast
 
@@ -176,9 +177,7 @@ def _scrub_response_body(chunks: list[bytes], content_type: str) -> list[bytes]:
     return [replacement]
 
 
-# Read from a request body when one is recorded. Deliberately few: enough that swapping the
-# request for a different one is noticed, few enough that a replay does not break every time an
-# unrelated field is added upstream.
+# Kept in clear so a mismatch says something useful; the digest below is what actually decides.
 SHAPE_FIELDS = ("model", "stream")
 
 # Extensions worth replaying. Only `http_version`: it is what product code reads, and it is text.
@@ -188,7 +187,16 @@ RECORDED_EXTENSIONS = frozenset({"http_version"})
 
 
 def _request_shape(request: httpx.Request) -> dict[str, Any]:
-    """The part of a request that decides whether a recorded answer still applies."""
+    """What decides whether a recorded answer still applies to this request.
+
+    A digest of the whole body rather than a chosen few fields. Naming fields meant the ones left
+    unnamed went unchecked: emptying `input` entirely — losing every message — still matched a
+    recording that agreed on `model` and `stream`. The outbound body was measured to be identical
+    across runs, so the whole of it can be the criterion and nothing has to be judged unimportant.
+
+    `model` and `stream` are also kept in clear, so a mismatch reports something a reader can act
+    on rather than two hashes.
+    """
     try:
         loaded: object = orjson.loads(request.content) if request.content else None
     except orjson.JSONDecodeError:
@@ -196,7 +204,8 @@ def _request_shape(request: httpx.Request) -> dict[str, Any]:
     if not isinstance(loaded, dict):
         return {}
     body = cast(dict[str, Any], loaded)
-    return {name: body[name] for name in SHAPE_FIELDS if name in body}
+    named = {name: body[name] for name in SHAPE_FIELDS if name in body}
+    return {**named, "digest": sha256(orjson.dumps(body, option=orjson.OPT_SORT_KEYS)).hexdigest()}
 
 
 def _keep_response_header(name: str) -> bool:
@@ -393,6 +402,9 @@ class RecordingTransport(httpx.AsyncBaseTransport):
             headers=response.headers,
             stream=_ReplayStream(chunks),
             request=request,
+            # Passed through: the code below this transport is the real code, and dropping these
+            # made an HTTP/2 exchange look like HTTP/1.1 to it while recording.
+            extensions=response.extensions,
         )
 
     async def aclose(self) -> None:

@@ -2,7 +2,8 @@
 
 Run by hand, never by the test suite: it needs credentials and it makes real calls.
 
-    uv run python tests/support/record_cassette.py anthropic_to_responses_stream
+    PYTHONPATH=src:tests/integration uv run python \\
+        tests/integration/recorded/record_cassette.py anthropic_to_responses_stream
 
 The prompts are deliberately trivial ("Reply with exactly: PONG") because a cassette is committed
 and read by people. Nothing here should ever carry a real conversation.

@@ -10,6 +10,7 @@ cannot make that mistake — it does not know what we expected.
 """
 
 import re
+from collections.abc import AsyncIterator
 from typing import Any, cast
 
 import httpx
@@ -18,6 +19,7 @@ import pytest
 from recorded.cassettes import (
     KEPT_RESPONSE_HEADERS,
     Cassette,
+    RecordingTransport,
     ReplayTransport,
     UnauthenticatedRequest,
 )
@@ -111,15 +113,20 @@ def test_the_cassette_carries_nothing_that_identifies_the_account() -> None:
     for secret in ("Bearer ", "ghu_", "gho_", "ghp_", "github_pat"):
         assert secret not in raw, f"{secret!r} reached the cassette"
 
+    cassette = Cassette.read(cassette_path(CASSETTE))
+
     # Checked against the allowlist rather than against a list of things to avoid: a denylist is
     # what let three separate identifying headers through, one per round of reading this by hand.
-    cassette = Cassette.read(cassette_path(CASSETTE))
     for interaction in cassette.interactions:
         unexpected = set(interaction.headers) - KEPT_RESPONSE_HEADERS
         assert not unexpected, f"{sorted(unexpected)} were kept without being allowed"
 
-    # A 64-hex value is what an account hash looks like; none should have survived.
-    assert not re.search(r"\b[0-9a-f]{64}\b", raw), "something hash-shaped reached the cassette"
+    # A 64-hex value is what an account hash looks like. The request digests we write ourselves
+    # are the same shape, so they are excluded by name rather than by loosening the pattern —
+    # the point is that nothing hash-shaped arrived from upstream.
+    ours = {interaction.request_shape.get("digest") for interaction in cassette.interactions}
+    found = set(re.findall(r"\b[0-9a-f]{64}\b", raw)) - ours
+    assert not found, f"something hash-shaped reached the cassette: {sorted(found)[:1]}"
 
 
 @pytest.mark.asyncio
@@ -281,3 +288,83 @@ async def test_the_replayed_protocol_version_comes_from_the_cassette() -> None:
         )
 
     assert response.http_version == "HTTP/2"
+
+
+class _FakeUpstream(httpx.AsyncBaseTransport):
+    """Answers with a fixed set of chunks, so the recorder can be driven without a network."""
+
+    def __init__(self, chunks: list[bytes], headers: dict[str, str]) -> None:
+        self._chunks = chunks
+        self._headers = headers
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        del request
+
+        class _Stream(httpx.AsyncByteStream):
+            def __init__(self, chunks: list[bytes]) -> None:
+                self._chunks = chunks
+
+            async def __aiter__(self) -> AsyncIterator[bytes]:
+                for chunk in self._chunks:
+                    yield chunk
+
+        return httpx.Response(200, headers=self._headers, stream=_Stream(list(self._chunks)))
+
+
+@pytest.mark.asyncio
+async def test_the_recorder_scrubs_an_sse_frame_that_spans_two_chunks() -> None:
+    """Drives the scrubber rather than inspecting its past output.
+
+    The other guard reads the cassette that is already committed, so making the scrubber a no-op
+    left it green — and the next re-record would have published identity data again. This one
+    records, and it splits a frame across chunks because that is what a real capture does: only 9
+    of 26 chunks ended on a frame boundary, and a scrubber that worked chunk by chunk parsed
+    truncated JSON, failed silently and left the identifiers in place.
+    """
+    frame = (
+        b'event: response.created\n'
+        b'data: {"response":{"safety_identifier":"' + b"a" * 64 + b'","id":"resp_1"}}\n\n'
+    )
+    split = len(frame) // 2
+    chunks = [frame[:split], frame[split:]]
+
+    recorder = RecordingTransport(
+        _FakeUpstream(chunks, {"content-type": "text/event-stream", "x-request-id": "trace-me"})
+    )
+    async with (
+        httpx.AsyncClient(transport=recorder) as client,
+        client.stream("POST", "https://upstream.test/responses") as response,
+    ):
+        [chunk async for chunk in response.aiter_raw()]
+
+    recorded = recorder.cassette.interactions[0]
+    body = b"".join(recorded.chunks)
+
+    assert b"a" * 64 not in body, "the account hash survived recording"
+    assert b'"safety_identifier":"REDACTED"' in body
+    assert len(recorded.chunks) == len(chunks), "chunk boundaries were lost while scrubbing"
+    assert set(recorded.headers) <= KEPT_RESPONSE_HEADERS, "a header outside the allowlist was kept"
+
+
+@pytest.mark.asyncio
+async def test_the_recorder_hands_downstream_what_upstream_sent() -> None:
+    """The recorder is transparent, not just faithful to disk.
+
+    The first fix preserved extensions from cassette to replay but not from upstream to the live
+    code during recording, so a recording session saw HTTP/1.1 for an HTTP/2 exchange — and any
+    behaviour that depends on the version would have been recorded from the wrong branch.
+    """
+    upstream = _FakeUpstream([b'{"ok":true}'], {"content-type": "application/json"})
+
+    class _Http2(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            response = await upstream.handle_async_request(request)
+            response.extensions["http_version"] = b"HTTP/2"
+            return response
+
+    recorder = RecordingTransport(_Http2())
+    async with httpx.AsyncClient(transport=recorder) as client:
+        live = await client.get("https://upstream.test/probe")
+
+    assert live.http_version == "HTTP/2", "the live response lost what upstream reported"
+    assert recorder.cassette.interactions[0].extensions["http_version"] == "HTTP/2"
