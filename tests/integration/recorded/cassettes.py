@@ -39,28 +39,18 @@ VOLATILE_REQUEST_HEADERS = frozenset(
     }
 )
 
-# Response headers that identify the caller, the call, or the moment. None of them affect replay —
-# nothing downstream reads them — and all of them are traces of one real request by one real
-# account. A cassette is committed, so they are dropped rather than explained away.
-VOLATILE_RESPONSE_HEADERS = frozenset(
+# Response headers kept in a cassette, by name. An allowlist rather than a denylist: three rounds
+# of reading a capture by hand each found an identifying header the round before had missed
+# (`x-oauth-client-id`, then `x-request-id`, then `copilot-edits-session`), which is what a
+# denylist does. Nothing downstream reads a response header, so keeping few costs nothing, and a
+# header that turns out to matter can be added deliberately.
+KEPT_RESPONSE_HEADERS = frozenset(
     {
-        "date",
-        "x-github-request-id",
-        "x-github-edge-region",
-        "x-github-backend",
-        "x-oauth-client-id",
-        "x-oauth-scopes",
-        "x-accepted-oauth-scopes",
-        "x-copilot-service-request-id",
-        "x-copilot-api-exp-assignment-context",
-        "x-request-id",
-        "set-cookie",
+        "content-type",
+        "transfer-encoding",
+        "cache-control",
     }
 )
-
-# Rate-limit headers say how much quota this account has left. Prefix-matched because the family
-# grows, and a new member would otherwise arrive unnoticed.
-VOLATILE_RESPONSE_PREFIXES = ("x-ratelimit-",)
 
 # The token exchange answers with a live Copilot token and with fields that identify the account
 # it belongs to. A cassette is committed, so none of it may travel: `token` is the credential, and
@@ -72,6 +62,8 @@ REDACTED_RESPONSE_FIELDS = frozenset(
         "tracking_id",
         "enterprise_list",
         "organization_list",
+        # A stable hash of the account, sent back inside every Responses frame.
+        "safety_identifier",
     }
 )
 
@@ -93,34 +85,125 @@ def _decode_chunk(stored: dict[str, str]) -> bytes:
     return base64.b64decode(stored.get("base64", ""))
 
 
-def _scrub_response_body(chunks: list[bytes]) -> list[bytes]:
-    """Blank out secrets that arrive in a response body rather than a header."""
-    joined = b"".join(chunks)
+def _scrub_value(value: object) -> object:
+    """Redact the named fields wherever they appear, however deeply nested.
+
+    By field name at any depth rather than at the top level: `safety_identifier` rides inside the
+    `response` object of an SSE frame, and a scrubber that only looked at the outermost object
+    walked straight past it while reporting success.
+    """
+    if isinstance(value, dict):
+        entry = cast(dict[str, Any], value)
+        scrubbed: dict[str, Any] = {}
+        for name, inner in entry.items():
+            if name in REDACTED_RESPONSE_FIELDS:
+                # Shapes are preserved: a list that became a string would change what code reads.
+                scrubbed[name] = [] if isinstance(inner, list) else REDACTION
+            else:
+                scrubbed[name] = _scrub_value(inner)
+        return scrubbed
+    if isinstance(value, list):
+        return [_scrub_value(item) for item in cast(list[Any], value)]
+    return value
+
+
+def _scrub_json(raw: bytes) -> bytes | None:
+    """Scrub one JSON document, or None when it is not one or nothing changed."""
     try:
-        loaded: object = orjson.loads(joined)
+        loaded: object = orjson.loads(raw)
     except orjson.JSONDecodeError:
+        return None
+    scrubbed = _scrub_value(loaded)
+    rendered = orjson.dumps(scrubbed)
+    return rendered if rendered != orjson.dumps(loaded) else None
+
+
+def _scrub_sse(chunks: list[bytes]) -> list[bytes]:
+    """Scrub every `data:` payload in a stream, then hand back the same chunk boundaries.
+
+    Joined first because a frame does not respect chunk boundaries: in a real capture only 9 of 26
+    chunks ended on a frame, so scrubbing chunk by chunk parsed truncated JSON, failed silently and
+    left the identifiers in place. Re-split by the original lengths afterwards, because those
+    boundaries are the one thing this recorder exists to preserve.
+
+    Redaction can change a payload's length, so the split follows each chunk's *share* of the
+    stream rather than its byte offset. Boundaries stay where a reader would expect them: at the
+    same point in the same frame.
+    """
+    lengths = [len(chunk) for chunk in chunks]
+    joined = b"".join(chunks)
+
+    scrubbed_lines: list[bytes] = []
+    for line in joined.split(b"\n"):
+        if line.startswith(b"data: "):
+            replacement = _scrub_json(line[len(b"data: ") :])
+            scrubbed_lines.append(b"data: " + replacement if replacement is not None else line)
+        else:
+            scrubbed_lines.append(line)
+    scrubbed = b"\n".join(scrubbed_lines)
+
+    if scrubbed == joined:
         return chunks
-    if not isinstance(loaded, dict):
+    return _resplit(scrubbed, lengths)
+
+
+def _resplit(body: bytes, lengths: list[int]) -> list[bytes]:
+    """Cut `body` into as many pieces as `lengths`, keeping their relative sizes."""
+    total = sum(lengths)
+    if total == 0:
+        return [body]
+    pieces: list[bytes] = []
+    start = 0
+    for index, length in enumerate(lengths):
+        if index == len(lengths) - 1:
+            pieces.append(body[start:])
+            break
+        end = start + round(len(body) * length / total)
+        pieces.append(body[start:end])
+        start = end
+    return pieces
+
+
+def _scrub_response_body(chunks: list[bytes], content_type: str) -> list[bytes]:
+    """Remove identifying fields from a response body, whatever shape it arrives in."""
+    if "text/event-stream" in content_type:
+        return _scrub_sse(chunks)
+    replacement = _scrub_json(b"".join(chunks))
+    if replacement is None:
         return chunks
-    body = cast(dict[str, Any], loaded)
-    if not REDACTED_RESPONSE_FIELDS & body.keys():
-        return chunks
-    for name in REDACTED_RESPONSE_FIELDS & body.keys():
-        # A list stays a list: replacing it with a string would change the shape the code reads.
-        body[name] = [] if isinstance(body[name], list) else REDACTION
-    # One chunk: a scrubbed body is no longer the bytes that arrived, so pretending to preserve
+    # One chunk: a rewritten body is no longer the bytes that arrived, so pretending to preserve
     # its framing would be a lie about something nothing depends on.
-    return [orjson.dumps(body)]
+    return [replacement]
+
+
+# Read from a request body when one is recorded. Deliberately few: enough that swapping the
+# request for a different one is noticed, few enough that a replay does not break every time an
+# unrelated field is added upstream.
+SHAPE_FIELDS = ("model", "stream")
+
+# Extensions worth replaying. Only `http_version`: it is what product code reads, and it is text.
+# `reason_phrase` is bytes in httpx and carries nothing a test could assert on, so recording it
+# bought a round-trip conversion and no information.
+RECORDED_EXTENSIONS = frozenset({"http_version"})
+
+
+def _request_shape(request: httpx.Request) -> dict[str, Any]:
+    """The part of a request that decides whether a recorded answer still applies."""
+    try:
+        loaded: object = orjson.loads(request.content) if request.content else None
+    except orjson.JSONDecodeError:
+        return {}
+    if not isinstance(loaded, dict):
+        return {}
+    body = cast(dict[str, Any], loaded)
+    return {name: body[name] for name in SHAPE_FIELDS if name in body}
 
 
 def _keep_response_header(name: str) -> bool:
-    lowered = name.lower()
-    if lowered in VOLATILE_RESPONSE_HEADERS:
-        return False
-    return not lowered.startswith(VOLATILE_RESPONSE_PREFIXES)
+    return name.lower() in KEPT_RESPONSE_HEADERS
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class Interaction:
     method: str
     path: str
@@ -128,6 +211,15 @@ class Interaction:
     # never stored, but the *fact* is what makes a replay able to notice that the code under test
     # stopped authenticating — which is how the catalog fetch went out bare and nothing said so.
     authenticated: bool
+    # `http_version` and the like. Product code propagates `response.extensions` — see
+    # `pipeline/executor.py` and `anthropic/client.py` — so a replay that dropped them would make
+    # HTTP/2 traffic look like HTTP/1.1 to everything downstream.
+    extensions: dict[str, str]
+    # The few request fields whose change would make the recorded answer the wrong one. Matching on
+    # method and path alone let a request for a different model, or a non-streaming one, be served
+    # this recording without a word; matching on the whole body cannot work, because it carries a
+    # per-request id that can never be sent again.
+    request_shape: dict[str, Any]
     status: int
     headers: dict[str, str]
     chunks: list[bytes]
@@ -138,10 +230,12 @@ class Interaction:
                 "method": self.method,
                 "path": self.path,
                 "authenticated": self.authenticated,
+                "shape": self.request_shape,
             },
             "response": {
                 "status": self.status,
                 "headers": self.headers,
+                "extensions": self.extensions,
                 "chunks": [_encode_chunk(chunk) for chunk in self.chunks],
             },
         }
@@ -155,8 +249,10 @@ class Interaction:
             method=str(request["method"]),
             path=str(request["path"]),
             authenticated=bool(request.get("authenticated", False)),
+            request_shape=dict(cast(dict[str, Any], request.get("shape", {}))),
             status=int(response["status"]),
             headers=dict(cast(dict[str, str], response.get("headers", {}))),
+            extensions=dict(cast(dict[str, str], response.get("extensions", {}))),
             chunks=[_decode_chunk(chunk) for chunk in stored],
         )
 
@@ -207,6 +303,10 @@ class UnauthenticatedRequest(RuntimeError):
     """A request that was authenticated when recorded went out bare on replay."""
 
 
+class RequestShapeChanged(RuntimeError):
+    """The request asks for something other than what the recording answers."""
+
+
 class ReplayTransport(httpx.MockTransport):
     """Answers from a cassette, in the order it was recorded.
 
@@ -225,6 +325,12 @@ class ReplayTransport(httpx.MockTransport):
         for index, interaction in enumerate(self._remaining):
             if interaction.method == request.method and interaction.path == path:
                 del self._remaining[index]
+                shape = _request_shape(request)
+                if shape != interaction.request_shape:
+                    raise RequestShapeChanged(
+                        f"{request.method} {path} was recorded for {interaction.request_shape} "
+                        f"but this request asks for {shape}"
+                    )
                 if interaction.authenticated and "authorization" not in request.headers:
                     raise UnauthenticatedRequest(
                         f"{request.method} {path} carried no Authorization, but the recording "
@@ -234,6 +340,12 @@ class ReplayTransport(httpx.MockTransport):
                     interaction.status,
                     headers=interaction.headers,
                     stream=_ReplayStream(interaction.chunks),
+                    # httpx reads these as bytes and a cassette holds text, so they go back as
+                    # bytes on the way out.
+                    extensions=cast(
+                        dict[str, Any],
+                        {name: value.encode() for name, value in interaction.extensions.items()},
+                    ),
                 )
         raise CassetteExhausted(f"cassette has no recorded {request.method} {path}")
 
@@ -253,12 +365,20 @@ class RecordingTransport(httpx.AsyncBaseTransport):
         # Scrubbed for the cassette only. The live code downstream must receive what upstream
         # actually sent: handing it the redacted body once made the token manager authenticate
         # with the literal word REDACTED, and upstream said so.
-        recorded = _scrub_response_body(chunks)
+        recorded = _scrub_response_body(chunks, response.headers.get("content-type", ""))
         self.cassette.interactions.append(
             Interaction(
                 method=request.method,
                 path=request.url.path,
                 authenticated="authorization" in request.headers,
+                # Only the textual, reproducible ones. A network stream or a socket object means
+                # nothing on replay, and writing it to a cassette would be writing a live handle.
+                extensions={
+                    name: value.decode() if isinstance(value, bytes) else str(value)
+                    for name, value in response.extensions.items()
+                    if name in RECORDED_EXTENSIONS
+                },
+                request_shape=_request_shape(request),
                 status=response.status_code,
                 headers={
                     name: value

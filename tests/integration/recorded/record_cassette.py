@@ -25,9 +25,11 @@ from app.config.loading import load_proxy_config
 from app.server.composition import build_chain, refresh_catalogs
 from app.server.handler import handle_bounded
 from app.server.inbound import build_context, route_for_path
-from support.cassettes import RecordingTransport
+from recorded.cassettes import RecordingTransport
 
-CASSETTE_DIR = Path(__file__).resolve().parents[1] / "cassettes"
+# Data, not code: cassettes stay under `tests/` so they are easy to find and diff, while
+# the harness lives with the one group that imports it.
+CASSETTE_DIR = Path(__file__).resolve().parents[2] / "cassettes"
 
 # Each scenario is one recorded session: whatever requests it makes, in the order it makes them.
 SCENARIOS: dict[str, dict[str, Any]] = {

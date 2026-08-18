@@ -24,9 +24,11 @@ from app.config.schema import ModelProviderConfig, ProxyConfig
 from app.ghc_client import CopilotTokenManager, GhcApiClient, GhcClientConfig
 from app.model_provider import GithubCopilotProvider, ModelProvider
 from app.server.composition import Chain, build_chain
-from support.cassettes import Cassette, ReplayTransport
+from recorded.cassettes import Cassette, ReplayTransport
 
-CASSETTE_DIR = Path(__file__).resolve().parents[1] / "cassettes"
+# Data, not code: cassettes stay under `tests/` so they are easy to find and diff, while
+# the harness lives with the one group that imports it.
+CASSETTE_DIR = Path(__file__).resolve().parents[2] / "cassettes"
 BASE_URL = "https://api.githubcopilot.com"
 
 

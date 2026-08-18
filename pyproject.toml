@@ -51,9 +51,6 @@ ghc-api-proxy = "app.cli:main"
 addopts = "--strict-markers --strict-config --ignore=tests/tui"
 asyncio_mode = "auto"
 testpaths = ["tests"]
-# Makes `tests/support/` importable by the tests that ask for it. A path entry only, not a
-# shared fixture or environment: nothing is imposed on a group that does not import it.
-pythonpath = ["tests"]
 
 [tool.ruff]
 target-version = "py314"

@@ -9,12 +9,19 @@ reproduced upstream's habit of changing an item's id between `added` and `done`.
 cannot make that mistake — it does not know what we expected.
 """
 
+import re
 from typing import Any, cast
 
+import httpx
 import orjson
 import pytest
-from support.cassettes import Cassette
-from support.recorded_provider import cassette_path, recorded_chain
+from recorded.cassettes import (
+    KEPT_RESPONSE_HEADERS,
+    Cassette,
+    ReplayTransport,
+    UnauthenticatedRequest,
+)
+from recorded.recorded_provider import cassette_path, recorded_chain
 
 from app.pipeline.delivery.stream import stream_delivery
 from app.server.composition import refresh_catalogs
@@ -92,47 +99,6 @@ async def test_a_recorded_stream_assembles_into_anthropic_blocks() -> None:
     assert b"PONG" in body
 
 
-@pytest.mark.asyncio
-async def test_the_recorded_upstream_really_does_change_the_item_id() -> None:
-    """The recording's own premise, asserted so it cannot quietly stop holding.
-
-    If a future re-recording came from an upstream that kept ids stable, the regression above
-    would still pass while no longer testing anything. This says out loud what makes it a test.
-    """
-    async with recorded_chain(CASSETTE) as chain:
-        await refresh_catalogs(chain)
-        route = route_for_path("/v1/messages")
-        assert route is not None
-        handled = await handle_bounded(chain, build_context(route, messages_body(stream=True)))
-        response = handled.response
-        assert response is not None
-        raw = await response.aread()
-
-    ids: dict[str, list[str]] = {"added": [], "done": []}
-    for line in raw.splitlines():
-        if not line.startswith(b"data: "):
-            continue
-        try:
-            event = cast(dict[str, Any], orjson.loads(line[len(b"data: ") :]))
-        except orjson.JSONDecodeError:
-            continue
-        kind = str(event.get("type", ""))
-        item = event.get("item")
-        if not isinstance(item, dict):
-            continue
-        identifier = str(cast(dict[str, Any], item).get("id", ""))
-        if kind == "response.output_item.added":
-            ids["added"].append(identifier)
-        elif kind == "response.output_item.done":
-            ids["done"].append(identifier)
-
-    assert ids["added"] and ids["done"], "the capture has no output items to compare"
-    assert ids["added"] != ids["done"], (
-        "upstream kept the item ids stable in this recording, so the regression above no longer "
-        "reproduces the defect it was written for"
-    )
-
-
 def test_the_cassette_carries_nothing_that_identifies_the_account() -> None:
     """A cassette is committed, so what it keeps is published.
 
@@ -145,16 +111,173 @@ def test_the_cassette_carries_nothing_that_identifies_the_account() -> None:
     for secret in ("Bearer ", "ghu_", "gho_", "ghp_", "github_pat"):
         assert secret not in raw, f"{secret!r} reached the cassette"
 
+    # Checked against the allowlist rather than against a list of things to avoid: a denylist is
+    # what let three separate identifying headers through, one per round of reading this by hand.
     cassette = Cassette.read(cassette_path(CASSETTE))
     for interaction in cassette.interactions:
-        for name in interaction.headers:
-            lowered = name.lower()
-            assert not lowered.startswith("x-ratelimit-"), f"{name} names this account's quota"
-            assert lowered not in {
-                "date",
-                "set-cookie",
-                "x-github-request-id",
-                "x-request-id",
-                "x-oauth-client-id",
-                "x-copilot-service-request-id",
-            }, f"{name} identifies the caller or the call"
+        unexpected = set(interaction.headers) - KEPT_RESPONSE_HEADERS
+        assert not unexpected, f"{sorted(unexpected)} were kept without being allowed"
+
+    # A 64-hex value is what an account hash looks like; none should have survived.
+    assert not re.search(r"\b[0-9a-f]{64}\b", raw), "something hash-shaped reached the cassette"
+
+
+@pytest.mark.asyncio
+async def test_replay_hands_back_the_recorded_chunk_boundaries() -> None:
+    """The property this whole harness was built for, asserted rather than assumed.
+
+    vcrpy was rejected because it merges a streamed response into one chunk. Nothing was stopping
+    this replayer from drifting the same way: collapsing every chunk into one left the other tests
+    green, because they only read the assembled result.
+    """
+    cassette = Cassette.read(cassette_path(CASSETTE))
+    recorded = next(
+        interaction for interaction in cassette.interactions if interaction.path == "/responses"
+    )
+    assert len(recorded.chunks) > 1, "this cassette has nothing to say about chunking"
+
+    async with recorded_chain(CASSETTE) as chain:
+        await refresh_catalogs(chain)
+        route = route_for_path("/v1/messages")
+        assert route is not None
+        handled = await handle_bounded(chain, build_context(route, messages_body(stream=True)))
+        response = handled.response
+        assert response is not None
+        # `aiter_raw` rather than `aiter_bytes`: the question is what the transport handed over,
+        # before any decoding had a chance to re-chunk it.
+        replayed = [chunk async for chunk in response.aiter_raw()]
+
+    assert replayed == recorded.chunks
+
+
+@pytest.mark.asyncio
+async def test_the_recorded_upstream_changes_the_id_of_the_same_item() -> None:
+    """The recording's own premise, paired the way the assembler pairs.
+
+    Comparing the two id *lists* was not enough: a recording whose ids were stable but whose
+    `done` events arrived out of order also made those lists differ, so the assertion passed
+    while the defect it stands for was absent.
+    """
+    async with recorded_chain(CASSETTE) as chain:
+        await refresh_catalogs(chain)
+        route = route_for_path("/v1/messages")
+        assert route is not None
+        handled = await handle_bounded(chain, build_context(route, messages_body(stream=True)))
+        response = handled.response
+        assert response is not None
+        raw = await response.aread()
+
+    added: dict[str, str] = {}
+    done: dict[str, str] = {}
+    for line in raw.splitlines():
+        if not line.startswith(b"data: "):
+            continue
+        try:
+            event = cast(dict[str, Any], orjson.loads(line[len(b"data: ") :]))
+        except orjson.JSONDecodeError:
+            continue
+        item = event.get("item")
+        if not isinstance(item, dict):
+            continue
+        index = str(event.get("output_index", ""))
+        identifier = str(cast(dict[str, Any], item).get("id", ""))
+        kind = str(event.get("type", ""))
+        if kind == "response.output_item.added":
+            added[index] = identifier
+        elif kind == "response.output_item.done":
+            done[index] = identifier
+
+    paired = [(added[index], done[index]) for index in added.keys() & done.keys()]
+    assert paired, "the capture has no item that was both opened and closed"
+    assert all(opened != closed for opened, closed in paired), (
+        "upstream kept each item's id stable in this recording, so the regression above no longer "
+        "reproduces the defect it was written for"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_request_for_something_else_is_not_served_this_recording() -> None:
+    """Method and path alone are not enough to say a recorded answer still applies.
+
+    A recording made for a streaming `gpt-5.5` request was being served to any POST of the same
+    path, so a regression that changed the model, or stopped asking for a stream, was answered
+    with the old recording and nothing noticed.
+    """
+    async with recorded_chain(CASSETTE) as chain:
+        await refresh_catalogs(chain)
+        route = route_for_path("/v1/messages")
+        assert route is not None
+        # Non-streaming: the recording answers a streamed request, so it must not be served.
+        handled = await handle_bounded(chain, build_context(route, messages_body()))
+
+    # Asserted on the outcome rather than on the exception type: the SDK wraps a transport error
+    # as APIConnectionError and the driver records it, so the observable fact is that no answer
+    # came back — which is exactly what should happen when the recording does not apply.
+    assert handled.response is None
+    assert handled.outcome.error is not None
+
+
+@pytest.mark.asyncio
+async def test_replay_reports_the_recorded_http_version() -> None:
+    """Product code propagates `response.extensions`, so a replay that dropped them would lie.
+
+    `pipeline/executor.py` and `anthropic/client.py` both pass the upstream extensions through, so
+    a recording of an HTTP/2 exchange replayed without them would look like HTTP/1.1 to everything
+    downstream, and any path that depends on the version would be tested against the wrong answer.
+    """
+    cassette = Cassette.read(cassette_path(CASSETTE))
+    recorded = next(
+        interaction for interaction in cassette.interactions if interaction.path == "/responses"
+    )
+    assert recorded.extensions.get("http_version"), "the cassette recorded no protocol version"
+
+    async with recorded_chain(CASSETTE) as chain:
+        await refresh_catalogs(chain)
+        route = route_for_path("/v1/messages")
+        assert route is not None
+        handled = await handle_bounded(chain, build_context(route, messages_body(stream=True)))
+        response = handled.response
+        assert response is not None
+        # `response.http_version` decodes it; `extensions` holds the raw bytes httpx expects.
+        replayed = response.http_version
+        await response.aclose()
+
+    assert replayed == recorded.extensions["http_version"]
+
+
+@pytest.mark.asyncio
+async def test_a_replay_refuses_a_request_that_stopped_authenticating() -> None:
+    """The guard that caught the bare catalog fetch, exercised directly.
+
+    Every other test here authenticates, so nothing reached this branch: removing the check left
+    them all green. A stand-in that cannot tell an authenticated request from a bare one is how
+    the catalog went out with no Authorization and the service could not start.
+    """
+    cassette = Cassette.read(cassette_path(CASSETTE))
+    assert any(interaction.authenticated for interaction in cassette.interactions)
+
+    transport = ReplayTransport(cassette)
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(UnauthenticatedRequest):
+            await client.get("https://api.githubcopilot.com/copilot_internal/v2/token")
+
+
+@pytest.mark.asyncio
+async def test_the_replayed_protocol_version_comes_from_the_cassette() -> None:
+    """Asserted against a version httpx would not invent.
+
+    The captured exchange is HTTP/1.1, which is also what httpx reports when a response carries no
+    version at all — so a cassette-versus-replay comparison passes whether the extension was
+    replayed or dropped. Recording HTTP/2 makes the two answers differ.
+    """
+    cassette = Cassette.read(cassette_path(CASSETTE))
+    for interaction in cassette.interactions:
+        interaction.extensions["http_version"] = "HTTP/2"
+
+    async with httpx.AsyncClient(transport=ReplayTransport(cassette)) as client:
+        response = await client.get(
+            "https://api.githubcopilot.com/copilot_internal/v2/token",
+            headers={"authorization": "Bearer test"},
+        )
+
+    assert response.http_version == "HTTP/2"
