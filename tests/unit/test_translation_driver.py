@@ -61,9 +61,11 @@ def test_system_becomes_a_single_instructions_string() -> None:
 def test_the_lost_block_metadata_is_named_rather_than_dropped() -> None:
     """`cache_control` cannot survive the string form, so it has to be reported.
 
-    The guard this replaces asserted the metadata crossed intact. It cannot any more, and the
-    thing worth guarding instead is that the loss is visible: a silently dropped `cache_control`
-    is a prompt-caching regression nobody would ever see.
+    The guard this replaces asserted the metadata crossed intact. It cannot any more. What is
+    worth guarding instead is that the loss is visible — not because caching breaks, which was
+    measured and does not (the endpoint caches by prefix on its own: the same 24082-token body
+    sent twice reported `cached_tokens` 0 then 24079), but because a field that silently vanishes
+    at a format boundary is how the next one gets missed.
     """
     _, semantic = default_registry().translate(
         ANTHROPIC_REQUEST,

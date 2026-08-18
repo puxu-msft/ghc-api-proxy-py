@@ -6,8 +6,13 @@ not need that flexibility yet. The Copilot upstream does not offer it either: me
 every array form tried — `[str]`, `[{role, content: str}]`, `[{role, content: [{type: text}]}]`,
 the same with `input_text`, and with an explicit `type: message`. So the blocks are joined here.
 
-That costs the per-block `cache_control` on this path, which is why `Conversion` records it rather
-than letting it vanish. The Anthropic passthrough path keeps the blocks intact.
+That drops the per-block `cache_control` marker, which `Conversion` records — but it does not drop
+prompt caching. Measured on 2026-08-18: the same 24082-token body sent twice with a plain string
+`instructions` and no cache field at all reported `cached_tokens` 0 then 24079. This endpoint
+caches by prefix on its own, so the marker Anthropic needs has nothing to do here. Sending the
+Anthropic field anyway is refused — `Unknown parameter: 'input[0].content[0].cache_control'`.
+
+The Anthropic passthrough path keeps the blocks and their markers intact.
 """
 
 from collections.abc import Mapping
@@ -89,8 +94,9 @@ def from_openai_responses(payload: Mapping[str, Any]) -> SemanticRequest:
 def _instructions_value(blocks: list[SystemBlock], request: SemanticRequest) -> str:
     """Join the system blocks into the one shape this upstream accepts.
 
-    Blank-line separated so two blocks do not run into one sentence. Any per-block metadata is
-    lost here — `cache_control` in practice — and named rather than dropped in silence.
+    Blank-line separated so two blocks do not run into one sentence. Per-block metadata is named
+    rather than dropped in silence — `cache_control` in practice, which this endpoint neither takes
+    nor needs, since it caches by prefix without being told where the boundaries are.
     """
     dropped = sorted({key for block in blocks for key in block.metadata})
     if dropped:

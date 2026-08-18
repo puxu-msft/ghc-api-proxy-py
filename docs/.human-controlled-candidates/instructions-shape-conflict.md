@@ -36,18 +36,36 @@
 
 规格自己那句「目前我们用不到这层灵活性」也指向字符串。
 
-## 四、代价（这是需要你裁决的部分）
+## 四、代价（实测后已大幅缩小）
 
-塌缩成字符串会**丢掉 system block 的 `cache_control`**，也就是在 Responses 路径上失去系统提示词的 prompt caching。今天的真实流量每条请求带 842 个 system 侧 `cache_control`（全为 `{"type":"ephemeral"}`），量不小。
+塌缩成字符串会丢掉 system block 上的 `cache_control` marker。我起初判断这等于在 Responses 路径上失去 prompt caching——**实测证明这个判断是错的**。
 
-已实现的处置：`to_openai_responses` 用 `\n\n` 连接各 block 的文本，并把丢弃的 metadata 键记入 `Conversion.losses`，不静默消失。Anthropic 直通路径不受影响，blocks 原样保留。
+对 `gpt-5.6-terra` 发同一个 24082 token 的请求两次，`instructions` 为纯字符串、不带任何缓存字段：
 
-**未验证的替代路径**：Responses 可能在别处表达缓存意图（例如 `prompt_cache_key`，真实流量的 Responses 侧请求体里出现过该字段）。本轮没有测它是否能替代 `cache_control`。若你认为缓存必须保住，这是下一步该验的方向。
+| | `input_tokens` | `cached_tokens` |
+|---|---:|---:|
+| 第 1 次（前缀是冷的） | 24082 | **0** |
+| 第 2 次（同前缀） | 24082 | **24079** |
+
+**GHC 的 Responses 端点做自动前缀缓存**，不需要显式 breakpoint。第一次 `cached=0` 证明前缀确实冷，第二次几乎全部命中。
+
+补充实测：
+- 把 Anthropic 的 `cache_control` 原样放进 `input[].content[]` → **400** `Unknown parameter: 'input[0].content[0].cache_control'`。
+- Responses 自己的显式机制是 `prompt_cache_breakpoint: {mode: "explicit"}`，放在 `input[].content[]` 上，GHC **接受**（200）。但按上表，不用它也已经命中。
+- `prompt_cache_key` 是顶层的路由/亲和性提示，不写缓存条目、不规定 block 边界或 TTL，**不是 `cache_control` 的同义物**。
+
+**结论**：丢的是 marker，不是缓存。仍记入 `Conversion.losses`（字段确实没了，不该静默），但它不构成性能回退。
+
+**仍未验证的一点**：Anthropic 的 `cache_control` 可带 `ttl`（如 `"1h"`）。今天的真实流量里 `ttl` 出现 **0 次**（1263 个 `cache_control` 全是裸的 `{"type":"ephemeral"}`），所以这条今天不触发；若将来客户端开始发 `ttl`，Responses 侧的对应物是 `prompt_cache_options.ttl` / `prompt_cache_retention`，需要另行映射。
+
+### 旁证：既有服务的做法相同
+
+`copilot-api-js` 对 `gpt` 走的**也是** Anthropic→Responses（`src/lib/codec/openai-responses/openai-responses-cell.ts:12-21,109-124`），它发往上游的 `instructions` **也是字符串、也是 `"\n\n"` join**，`cache_control` 同样丢在翻译边界——其活跃 history 里 `payload:0` 有 breakpoint、最终 `upstream-request` 的 body 无任何缓存字段。它的 cache 处理只在 Anthropic 原生腿上（`src/lib/anthropic/request-preparation.ts:992-1045`）。
 
 ## 五、待裁决
 
 1. 确认把 `model-translation.md` 的 `instructions` 形态改为字符串（并注明原数组形态是该格式的通用能力、GHC 不支持）。
-2. 确认接受 Responses 路径上 system 侧 prompt caching 的损失，或要求先验证 `prompt_cache_key` 一类替代。
+2. ~~确认接受 Responses 路径上 system 侧 prompt caching 的损失~~ —— **本项已由第四节的实测解除**：缓存并未损失。若你仍希望显式表达缓存边界（例如将来客户端开始发 `ttl`），可再裁决是否把 system 改走 `input` + `prompt_cache_breakpoint`；按当前证据它不是必需的。
 
 ## 六、连带受影响的既有测试
 
