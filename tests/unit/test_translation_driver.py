@@ -246,3 +246,40 @@ def test_unregistered_inbound_format_is_reported() -> None:
             source=WireFormat.OPENAI_EMBEDDINGS,
             target=WireFormat.ANTHROPIC_MESSAGES,
         )
+
+
+def test_the_system_prompt_placement_is_configurable() -> None:
+    """The seam exists before the second placement does.
+
+    `instructions-joint-string` is the only value today; the point of naming it is that adding
+    `as-role-system` later changes a mapping entry rather than the shape of every call site. The
+    setting is bound into the registry, so this asserts the wiring reaches the translator rather
+    than that the default happens to be right.
+    """
+    from app.config.schema import ModelTranslationConfig, ToOpenAiResponsesConfig
+    from app.pipeline.translation_driver import default_registry as build
+
+    configured = build(
+        ModelTranslationConfig(
+            to_openai_responses=ToOpenAiResponsesConfig(
+                system_prompts="instructions-joint-string"
+            )
+        )
+    )
+    payload, _ = configured.translate(
+        ANTHROPIC_REQUEST,
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    assert isinstance(payload["instructions"], str)
+
+
+def test_an_unregistered_placement_fails_loudly() -> None:
+    """A fallback would silently reshape the request instead.
+
+    Same reasoning as `layout_strategy`: the config admits exactly the spellings the schema
+    defines, so an unmapped one is a bug in this module, not an operator's typo.
+    """
+    request = from_anthropic_messages(ANTHROPIC_REQUEST)
+    with pytest.raises(KeyError):
+        to_openai_responses(request, system_prompts="as-role-system")  # type: ignore[arg-type]

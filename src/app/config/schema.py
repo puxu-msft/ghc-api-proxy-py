@@ -20,6 +20,9 @@ type ContextEditingMode = bool | Literal["clear-thinking", "clear-tooluse", "cle
 type AssistantMessageLayout = Literal[False, "move_and_synthetic", "synthetic_only"]
 type ContentBlockStartCompat = Literal[False, "signature_delta", "redacted_thinking"]
 type RefusalAction = Literal["passthrough", "as_end_turn", "as_error"]
+# One value today. Named so the seam exists before the second placement does; `as-role-system`
+# would put the system prompt at the head of the conversation instead.
+type SystemPromptPlacement = Literal["instructions-joint-string"]
 
 # Dotted paths the spec marks as requiring a restart. Everything else is hot-reloadable.
 #
@@ -145,6 +148,23 @@ class HedgeConfig(Section):
     max_secondary_candidates: int = Field(default=1, ge=0)
 
 
+class ToOpenAiResponsesConfig(Section):
+    """How an Anthropic request is shaped for the Responses endpoint."""
+
+    # Where the system prompt goes. `instructions-joint-string` puts the blocks in the top-level
+    # `instructions` as one `\n\n`-joined string, which is the only form this upstream accepts
+    # today. Kept as a named setting rather than baked in so a second placement — `as-role-system`,
+    # a `role: system` message at the head of the conversation — can be added without the caller
+    # changing.
+    system_prompts: SystemPromptPlacement = "instructions-joint-string"
+
+
+class ModelTranslationConfig(Section):
+    to_openai_responses: ToOpenAiResponsesConfig = Field(
+        default_factory=ToOpenAiResponsesConfig
+    )
+
+
 class ClientDeliveryConfig(Section):
     # Measured from admission and never reset by retries, so it bounds the whole operation.
     # Also the base for the systemd stop timeout.
@@ -238,6 +258,8 @@ class ProxyConfig(Section):
 
     # The sole source of model-name mapping; the spec forbids built-in defaults.
     model_mappings: dict[str, str] = Field(default_factory=lambda: dict[str, str]())
+
+    model_translation: ModelTranslationConfig = Field(default_factory=ModelTranslationConfig)
 
     model_providers: dict[str, ModelProviderConfig] = Field(
         default_factory=lambda: dict[str, ModelProviderConfig]()

@@ -15,9 +15,10 @@ Anthropic field anyway is refused — `Unknown parameter: 'input[0].content[0].c
 The Anthropic passthrough path keeps the blocks and their markers intact.
 """
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, cast
 
+from app.config.schema import SystemPromptPlacement
 from app.pipeline.translation_driver.semantic import (
     SemanticRequest,
     SystemBlock,
@@ -125,10 +126,32 @@ def _function_tool(tool: dict[str, Any]) -> dict[str, Any]:
     return converted
 
 
-def to_openai_responses(request: SemanticRequest) -> dict[str, Any]:
+def _place_in_instructions(payload: dict[str, Any], request: SemanticRequest) -> None:
+    """`instructions-joint-string`: the blocks as one string in the top-level field."""
+    payload["instructions"] = _instructions_value(request.system, request)
+
+
+# Total rather than defaulted, the same reasoning as `layout_strategy` in the request hook: the
+# schema admits exactly the spellings the config defines, so a missing case is a bug here rather
+# than an operator's typo, and a fallback would silently reshape the request.
+#
+# One entry today. A second — `as-role-system`, the prompt as a `role: system` message at the head
+# of `input` — adds a function and a line; the endpoint was measured to accept that shape.
+_SYSTEM_PROMPT_PLACEMENTS: dict[
+    SystemPromptPlacement, Callable[[dict[str, Any], SemanticRequest], None]
+] = {
+    "instructions-joint-string": _place_in_instructions,
+}
+
+
+def to_openai_responses(
+    request: SemanticRequest,
+    *,
+    system_prompts: SystemPromptPlacement = "instructions-joint-string",
+) -> dict[str, Any]:
     payload: dict[str, Any] = {"model": request.model, "input": request.messages}
     if request.system:
-        payload["instructions"] = _instructions_value(request.system, request)
+        _SYSTEM_PROMPT_PLACEMENTS[system_prompts](payload, request)
     if request.tools:
         payload["tools"] = [_function_tool(tool) for tool in request.tools]
     if request.stream:

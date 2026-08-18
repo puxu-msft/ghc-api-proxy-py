@@ -204,7 +204,7 @@ def build_chain(
     return Chain(
         config=config,
         providers=ProviderRegistry(providers, default=resolve_default_name(config)),
-        translators=default_registry(),
+        translators=default_registry(config.model_translation),
         subscribers=(subscribers or SubscriberRegistry[RequestContext]()).freeze(),
         http_client=http_client,
         # One limiter per provider: a limit on one upstream must not throttle another.
