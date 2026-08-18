@@ -39,6 +39,29 @@ VOLATILE_REQUEST_HEADERS = frozenset(
     }
 )
 
+# Response headers that identify the caller, the call, or the moment. None of them affect replay —
+# nothing downstream reads them — and all of them are traces of one real request by one real
+# account. A cassette is committed, so they are dropped rather than explained away.
+VOLATILE_RESPONSE_HEADERS = frozenset(
+    {
+        "date",
+        "x-github-request-id",
+        "x-github-edge-region",
+        "x-github-backend",
+        "x-oauth-client-id",
+        "x-oauth-scopes",
+        "x-accepted-oauth-scopes",
+        "x-copilot-service-request-id",
+        "x-copilot-api-exp-assignment-context",
+        "x-request-id",
+        "set-cookie",
+    }
+)
+
+# Rate-limit headers say how much quota this account has left. Prefix-matched because the family
+# grows, and a new member would otherwise arrive unnoticed.
+VOLATILE_RESPONSE_PREFIXES = ("x-ratelimit-",)
+
 # The token exchange answers with a live Copilot token and with fields that identify the account
 # it belongs to. A cassette is committed, so none of it may travel: `token` is the credential, and
 # the rest name the person and the organisations they belong to. Everything else in that response
@@ -88,6 +111,13 @@ def _scrub_response_body(chunks: list[bytes]) -> list[bytes]:
     # One chunk: a scrubbed body is no longer the bytes that arrived, so pretending to preserve
     # its framing would be a lie about something nothing depends on.
     return [orjson.dumps(body)]
+
+
+def _keep_response_header(name: str) -> bool:
+    lowered = name.lower()
+    if lowered in VOLATILE_RESPONSE_HEADERS:
+        return False
+    return not lowered.startswith(VOLATILE_RESPONSE_PREFIXES)
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,7 +263,7 @@ class RecordingTransport(httpx.AsyncBaseTransport):
                 headers={
                     name: value
                     for name, value in response.headers.items()
-                    if name.lower() not in VOLATILE_REQUEST_HEADERS
+                    if _keep_response_header(name)
                 },
                 chunks=recorded,
             )

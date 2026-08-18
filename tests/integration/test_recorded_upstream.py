@@ -13,7 +13,8 @@ from typing import Any, cast
 
 import orjson
 import pytest
-from support.recorded_provider import recorded_chain
+from support.cassettes import Cassette
+from support.recorded_provider import cassette_path, recorded_chain
 
 from app.pipeline.delivery.stream import stream_delivery
 from app.server.composition import refresh_catalogs
@@ -130,3 +131,30 @@ async def test_the_recorded_upstream_really_does_change_the_item_id() -> None:
         "upstream kept the item ids stable in this recording, so the regression above no longer "
         "reproduces the defect it was written for"
     )
+
+
+def test_the_cassette_carries_nothing_that_identifies_the_account() -> None:
+    """A cassette is committed, so what it keeps is published.
+
+    Asserted here rather than left to whoever records the next one: the scrub list is a list, and a
+    list is exactly the kind of thing that gets one entry short. Two rounds of reading this file by
+    hand each found a field the round before had missed.
+    """
+    raw = cassette_path(CASSETTE).read_text(encoding="utf-8")
+
+    for secret in ("Bearer ", "ghu_", "gho_", "ghp_", "github_pat"):
+        assert secret not in raw, f"{secret!r} reached the cassette"
+
+    cassette = Cassette.read(cassette_path(CASSETTE))
+    for interaction in cassette.interactions:
+        for name in interaction.headers:
+            lowered = name.lower()
+            assert not lowered.startswith("x-ratelimit-"), f"{name} names this account's quota"
+            assert lowered not in {
+                "date",
+                "set-cookie",
+                "x-github-request-id",
+                "x-request-id",
+                "x-oauth-client-id",
+                "x-copilot-service-request-id",
+            }, f"{name} identifies the caller or the call"
