@@ -212,12 +212,15 @@ def build_chain(
     )
 
 
-async def refresh_catalogs(chain: Chain, *, token_headers: dict[str, str] | None = None) -> None:
+async def refresh_catalogs(chain: Chain) -> None:
     """Populate every provider's catalog.
 
     Routing fails closed on capability, so an empty catalog rejects every request until this runs.
+
+    No headers parameter: each provider authenticates its own refresh from its own token manager.
+    One taken from a caller would be captured once and expire, and having the parameter at all
+    suggested authentication was the caller's job when nothing was in fact supplying it.
     """
-    del token_headers
     for name in chain.providers.names:
         await chain.providers.get(name).refresh_catalog()
 

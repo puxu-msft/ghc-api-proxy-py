@@ -367,7 +367,10 @@ async def test_headers_ticks_lifespan_and_fd_count_are_stable() -> None:
         ipv4.close()
         ipv6.close()
     assert events == ["startup", "shutdown"]
-    assert len(list(Path("/proc/self/fd").iterdir())) == initial_fd_count
+    # The guard is that twelve arm/stop cycles leak nothing, and a leak makes this grow. Equality
+    # would also fail when the count *drops*, which happens whenever another test's client is
+    # collected while this one runs — a false red that says nothing about this adapter.
+    assert len(list(Path("/proc/self/fd").iterdir())) <= initial_fd_count
 
 
 @pytest.mark.asyncio

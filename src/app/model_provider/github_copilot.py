@@ -91,10 +91,17 @@ class GithubCopilotProvider:
         self._descriptors = descriptors
 
     async def refresh_catalog(self) -> bool:
+        """Refetch the catalog, authenticating as of now.
+
+        The headers are obtained per call rather than held from construction: the Copilot token
+        expires, so a set captured once would authenticate the first refresh and nothing after it.
+        Held headers are merged on top for the catalog-specific extras a caller passed in.
+        """
+        headers = await self._client.request_headers(extra_headers=self._catalog_headers)
         page = await fetch_models(
             self._http,
             self._base_url,
-            self._catalog_headers,
+            headers,
             etag=self._etag,
         )
         if page is None:

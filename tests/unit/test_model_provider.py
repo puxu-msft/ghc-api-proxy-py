@@ -51,7 +51,17 @@ def build_provider(
     *,
     disabled: list[str] | None = None,
 ) -> tuple[GithubCopilotProvider, httpx.AsyncClient]:
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    def with_token_exchange(request: httpx.Request) -> httpx.Response:
+        # The real code exchanges the GitHub token for a Copilot one before every authenticated
+        # call, so a stand-in that cannot answer this cannot stand in for the real thing.
+        if request.url.host == "api.github.com":
+            return httpx.Response(
+                200,
+                json={"token": "copilot", "expires_at": 5000, "refresh_in": 1500},
+            )
+        return handler(request)
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(with_token_exchange))
     tokens = CopilotTokenManager(StaticTokenSource(), http_client, clock=lambda: 1000)
     client = GhcApiClient(
         AsyncOpenAI(
@@ -355,3 +365,51 @@ def test_payload_is_not_mutated_by_send_preparation() -> None:
     assert provider.describe("claude-model") is not None
     assert payload == before
 
+
+
+@pytest.mark.asyncio
+async def test_the_catalog_fetch_is_authenticated() -> None:
+    """An unauthenticated catalog request is refused, and the service cannot start without one.
+
+    The headers were held from construction and nothing ever put a token in them, so `/models`
+    went out bare — meaning the service could not start even with valid credentials.
+    """
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=CATALOG)
+
+    provider, http_client = build_provider(handler)
+    try:
+        assert await provider.refresh_catalog() is True
+    finally:
+        await http_client.aclose()
+
+    catalog_requests = [request for request in seen if request.url.path.endswith("/models")]
+    assert catalog_requests, "no catalog request was made"
+    assert catalog_requests[-1].headers.get("authorization", "").startswith("Bearer ")
+
+
+@pytest.mark.asyncio
+async def test_each_catalog_refresh_authenticates_afresh() -> None:
+    # The Copilot token expires, so headers captured once would authenticate the first refresh
+    # and nothing after it. Two refreshes must each ask the token manager.
+    asked: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/models"):
+            asked.append(request.headers.get("authorization", ""))
+            # No etag, so the second refresh is a full fetch rather than a 304.
+            return httpx.Response(200, json=CATALOG)
+        return httpx.Response(200, json={})
+
+    provider, http_client = build_provider(handler)
+    try:
+        await provider.refresh_catalog()
+        await provider.refresh_catalog()
+    finally:
+        await http_client.aclose()
+
+    assert len(asked) == 2
+    assert all(value.startswith("Bearer ") for value in asked)
