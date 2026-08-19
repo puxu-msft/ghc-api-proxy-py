@@ -957,6 +957,23 @@ def test_every_answered_request_reports_bytes_in_both_directions(request_log: No
     assert "↑" in refused and "↓" in refused, "a refusal has a size too, and used to report neither"
 
 
+def test_the_count_endpoint_reports_its_model_and_its_number(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
+    """A count is a model request: it resolves a model and produces a token number.
+
+    Its line reported neither, which made the endpoint most likely to be called in a loop the least legible one on the proxy. Routing happens inside the handler, so both facts only exist once it has returned.
+    """
+    client, _ = make_client(
+        lambda _: httpx.Response(200, json={"input_tokens": 4242}), mappings={"alias": "claude-model"}
+    )
+
+    with caplog.at_level(logging.INFO):
+        client.post("/v1/messages/count_tokens", json={"model": "alias", "messages": [{"role": "user", "content": "hi"}]})
+
+    line = _request_lines(caplog.records)[0]
+    assert "alias → claude-model" in line
+    assert "↑4.2k" in line
+
+
 def test_upstream_token_usage_reaches_the_line(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
     # Taken from the payload that goes downstream, so the numbers on the line are the ones the client was told.
     client, _ = make_client(

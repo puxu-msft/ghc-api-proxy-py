@@ -75,8 +75,11 @@ def format_tokens(usage: dict[str, Any], *, unicode: bool = True) -> str:
 
     supplied = input_tokens + cache_read + cache_write
     if cache_read or cache_write:
+        # Both rates, as upstream shows them: what came out of cache, and what went into it on this request. `+new%` is what tells a warm prompt apart from one that just paid to be cached, which read alone cannot.
         rate = "↻" if unicode else "cache "
-        parts.append(f"{rate}{round(100 * cache_read / supplied) if supplied else 0}%")
+        hit = round(100 * cache_read / supplied) if supplied else 0
+        new = round(100 * cache_write / supplied) if supplied else 0
+        parts.append(f"{rate}{hit}%+{new}%" if cache_write else f"{rate}{hit}%")
 
     if "output_tokens" in usage:
         parts.append(f"{down}{format_count(read('output_tokens'))}")

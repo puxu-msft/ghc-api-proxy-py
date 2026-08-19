@@ -120,12 +120,15 @@ async def _serve(request: Request) -> Response:
 
 
 async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
-    route = route_for_path(request.url.path)
-    if route is None:
-        return JSONResponse({"error": {"message": "unknown endpoint"}}, status_code=404)
-    trace.inbound_format = route.wire_format.value
+    # Read before anything can return, so a rejected request reports its size like every other one.
     # Starlette caches the body it already read for `json()`, so this is a length, not a second read.
     trace.bytes_in = len(await request.body())
+
+    route = route_for_path(request.url.path)
+    if route is None:
+        # Defensive rather than reachable: `build_router` registers only paths `route_for_path` knows, so a request that got here has one. An unregistered URL is answered by FastAPI's own router and never reaches this function, which is why no completion line is written for it — that is a deliberate boundary, not an oversight: a 404 for a path this proxy does not serve is not a proxied request.
+        return JSONResponse({"error": {"message": "unknown endpoint"}}, status_code=404)
+    trace.inbound_format = route.wire_format.value
 
     try:
         parsed: object = await request.json()
@@ -142,6 +145,9 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
     except InboundRequestError as error:
         trace.detail = str(error)
         return JSONResponse(error_body(error), status_code=400)
+
+    # Recorded here rather than beside the resolved model, so every path below — the count endpoint, the failures, the ones that never route at all — reports what the client asked for even when nothing answered it.
+    trace.requested_model = context.requested_model
 
     active = chain.active_requests
     # Registered before routing, so the footer shows the request as `(resolving)` from the moment it arrives rather than only once its model is known. Everything below must leave through `_release`, except the streaming branch, which hands the registration to the generator instead.
@@ -161,12 +167,20 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
             try:
                 counted = await handle_count_tokens(chain, context)
             except Exception as error:
+                # Routing runs inside the handler, so a failure after it has a resolved model worth naming; before it, this is still empty and the field drops out.
+                trace.model = context.resolved_model
                 trace.detail = str(error)
                 return JSONResponse(
                     error_body(error),
                     status_code=error_status(error),
                     headers=error_headers(error),
                 )
+            # A count is a model request like any other: it resolves a model and it produces a token number, and a line that reported neither made the busiest endpoint on the proxy the least legible one.
+            trace.model = context.resolved_model
+            active.set_model(context.id, context.resolved_model)
+            tokens = counted.get("input_tokens")
+            if isinstance(tokens, int):
+                trace.usage = {"input_tokens": tokens}
             return JSONResponse(counted)
 
         try:
@@ -298,11 +312,13 @@ async def _tracked_delivery(chunks: AsyncGenerator[bytes], accounting: _StreamAc
     Wrapping rather than instrumenting `stream_delivery`: byte accounting is an observability concern, and threading it into the delivery layer would put a display detail on the path that decides what the client receives. The bytes are forwarded object-identical, so block boundaries are preserved.
 
     `finally` rather than a trailing statement, because a client that disconnects mid-stream cancels this generator — and a request that vanishes from the footer, or never gets its log line, only when something has gone wrong is exactly backwards.
+
+    A chunk is counted **after** the yield returns, which is when the consumer came back for the next one and therefore when the previous send succeeded. Counting before it reports bytes that were handed over and then failed to go out: a probe that failed the first body send still saw the line claim `↓3B`.
     """
     try:
         async for chunk in chunks:
-            accounting.count(len(chunk))
             yield chunk
+            accounting.count(len(chunk))
     finally:
         accounting.finish()
 
