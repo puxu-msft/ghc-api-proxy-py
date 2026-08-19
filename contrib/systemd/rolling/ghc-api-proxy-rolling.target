@@ -1,7 +1,0 @@
-[Unit]
-Description=ghc-api-proxy rolling runtime
-Wants=ghc-api-proxy-controller.service ghc-api-proxy-v4.socket ghc-api-proxy-v6.socket
-After=ghc-api-proxy-controller.service ghc-api-proxy-v4.socket ghc-api-proxy-v6.socket
-
-[Install]
-WantedBy=multi-user.target

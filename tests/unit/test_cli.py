@@ -46,8 +46,6 @@ def test_cli_smoke() -> None:
     assert result.exit_code == 0
     for command in (
         "start",
-        "start-rolling",
-        "rolling-controller",
         "auth",
         "login",
         "logout",
@@ -80,19 +78,6 @@ def test_start_subcommand_exposes_bootstrap_options() -> None:
         "--generate-config",
     ):
         assert option in result.stdout
-
-
-def test_start_rolling_exposes_only_config_option() -> None:
-    result = runner.invoke(app, ["start-rolling", "--help"])
-
-    assert result.exit_code == 0
-    assert "--config" in result.stdout
-    assert "--generation-id" in result.stdout
-    assert "--release-id" in result.stdout
-    assert "--control-socket" in result.stdout
-    assert "--host" not in result.stdout
-    assert "--port" not in result.stdout
-    assert "--fd" not in result.stdout
 
 
 def test_auth_and_login_are_aliases() -> None:
@@ -223,109 +208,6 @@ def test_start_does_not_request_a_restart_by_default(monkeypatch: pytest.MonkeyP
 
     assert runner.invoke(app, ["start"]).exit_code == 0
     assert serve_options(run).restart is False
-
-
-def test_start_rolling_uses_systemd_generation_runner(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    generation_runner = AsyncMock()
-    standalone = Mock()
-    monkeypatch.setattr("app.cli.run_systemd_generation", generation_runner)
-    # Not `app.cli.run`: this path really has to run its coroutine. What is asserted is that the
-    # rolling entry does not go through the stand-alone one.
-    monkeypatch.setattr("app.cli.run_standalone", standalone)
-
-    result = runner.invoke(
-        app,
-        [
-            "start-rolling",
-            "--generation-id",
-            "g0000000000000001",
-            "--release-id",
-            "release-test",
-            "--control-socket",
-            "/tmp/ghc-generation-test.sock",
-        ],
-    )
-
-    assert result.exit_code == 0
-    generation_runner.assert_awaited_once()
-    assert generation_runner.await_args is not None
-    application = generation_runner.await_args.args[0]
-    assert application.state.runtime.settings.port == 4141
-    assert generation_runner.await_args.kwargs == {
-        "generation_id": "g0000000000000001",
-        "release_id": "release-test",
-        "control_path": Path("/tmp/ghc-generation-test.sock"),
-    }
-    standalone.assert_not_called()
-
-
-@pytest.mark.parametrize(
-    "generation_id",
-    ["g1", "g00000000000000001", "g000000000000000/", " generation"],
-)
-def test_start_rolling_rejects_noncanonical_generation_id(generation_id: str) -> None:
-    result = runner.invoke(
-        app,
-        [
-            "start-rolling",
-            "--generation-id",
-            generation_id,
-            "--release-id",
-            "release-test",
-            "--control-socket",
-            "/tmp/ghc-generation-test.sock",
-        ],
-    )
-    assert result.exit_code == 2
-    assert "generation id" in result.output.lower()
-
-
-def test_start_rolling_rejects_relative_control_path() -> None:
-    result = runner.invoke(
-        app,
-        [
-            "start-rolling",
-            "--generation-id",
-            "g0000000000000001",
-            "--release-id",
-            "release-test",
-            "--control-socket",
-            "relative.sock",
-        ],
-    )
-    assert result.exit_code == 2
-    assert "absolute" in result.output.lower()
-
-
-def test_rolling_controller_plan_is_dry_run_and_reports_blockers(tmp_path: Path) -> None:
-    releases = tmp_path / "releases"
-    (releases / "release-a").mkdir(parents=True)
-    config = tmp_path / "config.yaml"
-    config.write_text("", encoding="utf-8")
-
-    result = runner.invoke(
-        app,
-        [
-            "rolling-controller",
-            "--state-root",
-            str(tmp_path / "state"),
-            "--runtime-root",
-            str(tmp_path / "run"),
-            "--releases-root",
-            str(releases),
-            "--config",
-            str(config),
-            "--plan-release",
-            "release-a",
-        ],
-    )
-
-    assert result.exit_code == 0
-    assert '"apply_enabled": false' in result.stdout
-    assert "missing_private_canary_command" in result.stdout
-    assert not (tmp_path / "state" / "frontier").exists()
 
 
 def test_start_rejects_stdin_as_inherited_socket_fd(

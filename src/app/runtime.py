@@ -11,7 +11,6 @@ if TYPE_CHECKING:
     from app.history.store import HistoryStore
     from app.history.ws import WebSocketManager
     from app.hooks.registry import HookRegistry
-    from app.lifecycle.rolling.generation.phases import GenerationLifecycle
     from app.openai.client import OpenAIClient
     from app.openai.responses_ws import ResponsesWebSocketClient
     from app.pipeline.approval import ApprovalGate
@@ -39,7 +38,6 @@ class RuntimeState:
     approval_gate: ApprovalGate | None = None
     websocket_manager: WebSocketManager | None = None
     resident_byte_budget: ResidentByteBudget | None = None
-    generation_lifecycle: GenerationLifecycle | None = None
 
     def readiness_checks(self) -> dict[str, bool]:
         return {
@@ -54,5 +52,4 @@ class RuntimeState:
 
     @property
     def is_ready(self) -> bool:
-        lifecycle = self.generation_lifecycle
-        return self.dependencies_ready and (lifecycle is None or lifecycle.accepting)
+        return self.dependencies_ready

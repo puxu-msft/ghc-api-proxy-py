@@ -9,7 +9,6 @@ from app.history.sessions import identify_session
 from app.history.sqlite.writer import HistoryWriter
 from app.history.store import HistoryStore
 from app.history.types import HistoryEntry, ModelRef
-from app.lifecycle.rolling.generation.phases import GenerationLifecycle
 from app.pipeline.context import (
     RequestContext,
     RequestConversionFactRecord,
@@ -212,13 +211,18 @@ async def test_concurrent_close_uses_one_worker_sentinel(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_fatal_history_write_marks_generation_failed_and_blocks_standby(
+async def test_a_fatal_history_write_poisons_the_store(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    lifecycle = GenerationLifecycle()
-    await lifecycle.mark_ready()
-    store = HistoryStore(tmp_path / "history.db", generation_lifecycle=lifecycle)
+    """A write that fails fatally must not be followed by a clean close.
+
+    This used to also assert that the failure marked the rolling generation failed, so the
+    controller could keep the previous one serving. That mechanism was removed on 2026-08-19; what
+    survives is the store's own refusal to pretend it shut down cleanly, which is what stops a
+    caller treating a lost write as a successful one.
+    """
+    store = HistoryStore(tmp_path / "history.db")
     await store.start()
 
     def fail_insert(_entry: HistoryEntry) -> None:
@@ -232,9 +236,6 @@ async def test_fatal_history_write_marks_generation_failed_and_blocks_standby(
     monkeypatch.setattr(HistoryWriter, "_insert", patched_insert)
     with pytest.raises(Exception, match="I/O"):
         await store.finalize(_entry("fatal", "failed", 1))
-    assert lifecycle.phase.value == "failed"
-    with pytest.raises(Exception, match="drained requires"):
-        await lifecycle.mark_drained()
     with pytest.raises(RuntimeError, match="fatal state"):
         await store.close()
 

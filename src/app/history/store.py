@@ -6,19 +6,18 @@ from app.history.in_flight import InFlightHistory
 from app.history.sqlite.writer import HistoryWriter
 from app.history.types import HistoryEntry
 from app.history.ws import WebSocketManager
-from app.lifecycle.rolling.generation.phases import GenerationLifecycle
 
 
 class HistoryStore:
     def __init__(
         self,
         db_path: Path,
-        *,
-        generation_lifecycle: GenerationLifecycle | None = None,
     ) -> None:
         async def on_fatal(error: BaseException) -> None:
-            if generation_lifecycle is not None:
-                await generation_lifecycle.mark_failed(error)
+            # Nothing to escalate to. A fatal write error used to fail the rolling generation so
+            # the controller could keep the previous one serving; that mechanism is gone, and
+            # inventing a substitute here would be a second answer to a question nobody asks.
+            del error
 
         self.writer = HistoryWriter(db_path, on_fatal=on_fatal)
         self.in_flight = InFlightHistory()

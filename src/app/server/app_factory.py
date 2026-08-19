@@ -18,7 +18,6 @@ from app.hooks.builtin import register_builtin_hooks
 from app.hooks.executor import HooksExecutor
 from app.hooks.loader import load_user_hook_modules
 from app.hooks.registry import HookRegistryBuilder
-from app.lifecycle.rolling.generation.phases import GenerationLifecycle
 from app.observability.logging import setup_logging
 from app.observability.telemetry import setup_metrics
 from app.observability.tracing import setup_tracing
@@ -85,7 +84,6 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
                 )
                 runtime.history_store = HistoryStore(
                     history_path,
-                    generation_lifecycle=runtime.generation_lifecycle,
                 )
                 runtime.websocket_manager = runtime.history_store.websockets
                 await runtime.history_store.start()
@@ -163,11 +161,7 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
             runtime.resident_byte_budget = None
 
 
-def create_app(
-    settings: AppSettings | None = None,
-    *,
-    generation_lifecycle: GenerationLifecycle | None = None,
-) -> FastAPI:
+def create_app(settings: AppSettings | None = None) -> FastAPI:
     resolved_settings = settings or AppSettings()
     app = FastAPI(
         title="ghc-api-proxy",
@@ -175,7 +169,6 @@ def create_app(
         lifespan=_lifespan,
     )
     app.state.runtime = RuntimeState(settings=resolved_settings)
-    app.state.runtime.generation_lifecycle = generation_lifecycle
     app.add_exception_handler(ApprovalRejectedError, _approval_rejected_handler)
     setup_metrics()
     setup_tracing(app, enabled=resolved_settings.observability.tracing_enabled)

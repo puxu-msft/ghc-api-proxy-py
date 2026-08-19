@@ -1,4 +1,3 @@
-import os
 from enum import StrEnum
 from functools import partial
 from pathlib import Path
@@ -9,16 +8,10 @@ import uvicorn
 from anyio import run
 
 from app.auth.service import authenticate_device, clear_stored_token
-from app.config.loader import load_settings
 from app.config.loading import bundled_config_text, load_proxy_config
 from app.config.paths import config_file_path, tls_material_dir
 from app.config.schema import ProxyConfig
-from app.core.generation_identity import GenerationIdentityError, parse_generation_id
 from app.lifecycle.entry import StandaloneOptions, run_standalone
-from app.lifecycle.rolling.controller import RollingController, plan_to_json
-from app.lifecycle.rolling.generation.phases import GenerationLifecycle
-from app.lifecycle.rolling.runtime import run_systemd_generation
-from app.server.app_factory import create_app
 from app.server.composition import build_chain, build_http_client
 from app.server.pipeline_app import create_pipeline_app
 from app.server.tls import resolve_tls_material
@@ -292,100 +285,6 @@ def start(
         restart=restart,
     )
     run(partial(_serve_pipeline, proxy_config, options))
-
-
-@app.command("start-rolling")
-def start_rolling(
-    generation_id: Annotated[str, typer.Option("--generation-id")],
-    release_id: Annotated[str, typer.Option("--release-id")],
-    control_socket: Annotated[
-        Path,
-        typer.Option("--control-socket", file_okay=True, dir_okay=False),
-    ],
-    config: Annotated[
-        Path | None,
-        typer.Option("--config", exists=False, file_okay=True, dir_okay=False),
-    ] = None,
-) -> None:
-    """Start one systemd-managed rolling generation on inherited dual-stack sockets."""
-    try:
-        parse_generation_id(generation_id)
-    except GenerationIdentityError as error:
-        raise typer.BadParameter(str(error), param_hint="--generation-id") from error
-    if not release_id.strip():
-        raise typer.BadParameter("release id cannot be empty", param_hint="--release-id")
-    if not control_socket.is_absolute():
-        raise typer.BadParameter(
-            "control socket must be an absolute path",
-            param_hint="--control-socket",
-        )
-    # Still the existing chain, unlike `--fd` and `start`. `RollingRuntime` reads four things off
-    # `application.state.runtime` — the approval gate, dependency readiness, the drain timeout and
-    # the tokenization snapshot — and the new chain has no equivalent surface. What that port
-    # needs is inventoried in `docs/agents/anthropic-responses-bridge/implementation.md`; moving
-    # this path before it exists would break a generation's readiness and drain, not just its app.
-    settings = load_settings(config_path=config, cli_overrides={})
-    application = create_app(settings, generation_lifecycle=GenerationLifecycle())
-    run(
-        partial(
-            run_systemd_generation,
-            application,
-            generation_id=generation_id,
-            release_id=release_id,
-            control_path=control_socket,
-        )
-    )
-
-
-@app.command("rolling-controller")
-def rolling_controller(
-    state_root: Annotated[Path, typer.Option("--state-root")],
-    runtime_root: Annotated[Path, typer.Option("--runtime-root")],
-    releases_root: Annotated[
-        Path,
-        typer.Option("--releases-root"),
-    ] = Path("/opt/ghc-api-proxy/releases"),
-    config: Annotated[Path, typer.Option("--config")] = Path(
-        "/etc/ghc-api-proxy/config.yaml"
-    ),
-    bootstrap_release: Annotated[
-        str | None,
-        typer.Option("--bootstrap-release"),
-    ] = None,
-    plan_release: Annotated[
-        str | None,
-        typer.Option("--plan-release"),
-    ] = None,
-    once: Annotated[bool, typer.Option("--once")] = False,
-) -> None:
-    """Run the rolling controller; replacement rollout apply remains disabled."""
-    for name, path in (
-        ("--state-root", state_root),
-        ("--runtime-root", runtime_root),
-        ("--releases-root", releases_root),
-        ("--config", config),
-    ):
-        if not path.is_absolute():
-            raise typer.BadParameter("path must be absolute", param_hint=name)
-    controller = RollingController(
-        state_root=state_root,
-        runtime_root=runtime_root,
-        releases_root=releases_root,
-        config_path=config,
-    )
-    if plan_release is not None:
-        typer.echo(plan_to_json(controller.plan_rollout(plan_release)))
-        return
-    resolved_bootstrap = bootstrap_release or os.environ.get(
-        "GHC_ROLLING_BOOTSTRAP_RELEASE"
-    )
-    run(
-        partial(
-            controller.run_forever,
-            bootstrap_release=resolved_bootstrap,
-            once=once,
-        )
-    )
 
 
 def _authenticate() -> None:
