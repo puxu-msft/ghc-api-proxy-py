@@ -7,7 +7,7 @@ import typer.rich_utils
 import yaml
 from typer.testing import CliRunner
 
-from app.cli import app
+from app.cli import app, serve_inherited
 from app.config.schema import ProxyConfig
 from app.lifecycle.entry import StandaloneOptions
 
@@ -182,31 +182,28 @@ def test_start_merges_cli_overrides_and_serves(monkeypatch: pytest.MonkeyPatch) 
     assert "--verbose has no effect" in result.output
 
 
-def test_start_passes_inherited_socket_fd_to_uvicorn(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An inherited listener stays on the pre-existing path.
+def test_an_inherited_listener_serves_the_same_chain_as_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--fd` used to serve the existing chain while `start` served this one.
 
-    lifecycle.md writes the escalating shutdown for the stand-alone section, and whether it also
-    governs the systemd path is an open question for the user. Until it is answered, `--fd` keeps
-    the behaviour the systemd units already rely on.
+    The docstring this replaces said `--fd` kept the old behaviour until the user answered whether
+    lifecycle.md's escalating shutdown governs the systemd path. Answered 2026-08-19: switch it.
+    Uvicorn keeps the listener here because systemd owns it, which is what makes the escalating
+    ladder — written for the section that owns its own listener — not apply.
     """
-    uvicorn_run = Mock()
-    standalone = Mock()
-    monkeypatch.setattr("app.cli.uvicorn.run", uvicorn_run)
-    monkeypatch.setattr("app.cli.run_standalone", standalone)
+    run = Mock()
+    monkeypatch.setattr("app.cli.run", run)
 
     result = runner.invoke(app, ["start", "--fd", "3"])
 
-    assert result.exit_code == 0
-    application = uvicorn_run.call_args.args[0]
-    assert application.state.runtime.settings.host == "127.0.0.1"
-    assert application.state.runtime.settings.port == 4141
-    uvicorn_run.assert_called_once_with(
-        application,
-        fd=3,
-        log_config=None,
-        timeout_graceful_shutdown=300,
-    )
-    standalone.assert_not_called()
+    assert result.exit_code == 0, result.output
+    served = run.call_args.args[0]
+    # The whole point: the same helper, so the same chain. `--port` cannot be asserted alongside
+    # `--fd` — they are mutually exclusive, because the listener belongs to systemd here.
+    assert served.func is serve_inherited
+    assert served.args[1] == 3
+    assert isinstance(served.args[0], ProxyConfig)
 
 
 def test_start_forwards_the_restart_request(monkeypatch: pytest.MonkeyPatch) -> None:

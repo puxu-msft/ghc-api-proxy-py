@@ -273,6 +273,25 @@ def test_service_shutdown_contract_rejects_nonpositive_manager_margin() -> None:
         _assert_graceful_timeout_contract(service)
 
 
+FROZEN_BY_CHAIN_SWITCH = pytest.mark.skip(
+    reason=(
+        "Frozen 2026-08-19, when `--fd` switched to the pipeline chain (user ruling: switch, then "
+        "analyse the old content and either port or freeze it). These two exercise a real "
+        "invariant — a listener systemd already opened is served end to end — and are kept rather "
+        "than deleted. They cannot be ported yet: they configure the retired chain through "
+        "`GHC_UPSTREAM__*` and its `generic` upstream type, and the pipeline chain has neither. "
+        "It offers only the `github_copilot` provider, whose token exchange is the module-level "
+        "constant `app.ghc_client.tokens.TOKEN_URL` pointing at api.github.com — so there is no "
+        "way to stand the new chain up against a local fake at all. "
+        "Exit condition: make the token endpoint configurable (or add a second provider type), "
+        "then rewrite the fake upstream here to speak the Copilot token and catalog protocol. "
+        "Until then `--fd` has no end-to-end coverage, which is the cost of the switch and is "
+        "recorded rather than hidden."
+    )
+)
+
+
+@FROZEN_BY_CHAIN_SWITCH
 def test_inherited_listener_serves_ready_generic_upstream_and_persists_overrides(
     tmp_path: Path,
 ) -> None:
@@ -390,6 +409,7 @@ def test_inherited_listener_serves_ready_generic_upstream_and_persists_overrides
             process.communicate(timeout=10)
 
 
+@FROZEN_BY_CHAIN_SWITCH
 def test_short_graceful_timeout_cancels_inflight_request_and_runs_lifespan(
     tmp_path: Path,
 ) -> None:

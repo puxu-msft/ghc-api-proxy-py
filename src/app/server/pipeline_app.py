@@ -4,6 +4,7 @@ Separate from `app_factory`, which still serves the existing implementation.
 Mounting both would give one path two owners.
 """
 
+import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any, cast
@@ -145,10 +146,20 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
     and says nothing about it, because an estimate is still returned.
     """
     chain = cast(Chain, getattr(app.state, CHAIN_STATE_KEY))
-    # Routing fails closed on capability, so until this runs the catalog is empty and every request
-    # is refused. Done before accepting rather than lazily: a request that arrives first would
-    # otherwise get a refusal that says the model does not exist.
-    await refresh_catalogs(chain)
+    # Attempted before accepting, because routing fails closed on capability: a request arriving
+    # first would otherwise be refused with a message saying the model does not exist.
+    #
+    # Not fatal, though. A supervised service that cannot reach upstream at boot — no credential
+    # yet, network not up — must still start and say it is not ready, which is what
+    # `/health/readiness` answers from the same empty catalog. Raising here instead turns a
+    # degraded start into a service that never comes up at all, and the socket systemd already
+    # opened would hold the client's connection open against a process that is dying.
+    try:
+        await refresh_catalogs(chain)
+    except Exception as error:
+        logging.getLogger(__name__).warning(
+            "model catalog unavailable at startup; serving as not-ready: %s", error
+        )
     await chain.tokenization.load()
     async with anyio.create_task_group() as flushing:
         flushing.start_soon(chain.tokenization.run_periodic_flush, TOKENIZATION_FLUSH_SECONDS)

@@ -133,6 +133,27 @@ def _load_spec_config(
     return config, inactive
 
 
+async def serve_inherited(config: ProxyConfig, fd: int) -> None:
+    """Serve the chain on a listener systemd already opened.
+
+    Not `run_standalone`: that owns the listener so it can hand it over, and here systemd does.
+    """
+    http_client = build_http_client(config)
+    try:
+        chain = build_chain(config, http_client=http_client)
+        server = uvicorn.Server(
+            uvicorn.Config(
+                create_pipeline_app(chain),
+                fd=fd,
+                log_config=None,
+                timeout_graceful_shutdown=config.graceful_cleanup_timeout,
+            )
+        )
+        await server.serve()
+    finally:
+        await http_client.aclose()
+
+
 async def _serve_pipeline(config: ProxyConfig, options: StandaloneOptions) -> None:
     """Build the chain and serve it, closing the outbound client on the way out.
 
@@ -216,17 +237,26 @@ def start(
         cli_overrides["upstream"] = upstream_overrides
 
     if fd is not None:
-        # An inherited listener means systemd owns it, and lifecycle.md's escalating shutdown is
-        # written for the stand-alone section only. Whether it also governs the systemd path is
-        # recorded as an open question for the user, so that path is left exactly as it was —
-        # including which application it serves.
-        settings = load_settings(config_path=config, cli_overrides=cli_overrides)
-        uvicorn.run(
-            create_app(settings),
-            fd=fd,
-            log_config=None,
-            timeout_graceful_shutdown=settings.shutdown.graceful_timeout,
+        # An inherited listener means systemd owns it, so uvicorn may keep it: lifecycle.md's
+        # escalating shutdown is written for the stand-alone section, which owns its own listener.
+        # What this path serves is no longer the difference — it is the same chain `start` serves.
+        # Ruled 2026-08-19; what the existing chain offered and this one does not is inventoried
+        # in `docs/agents/anthropic-responses-bridge/implementation.md`.
+        proxy_config, _ = _load_spec_config(
+            config_path=config,
+            port=port,
+            host=host,
+            graceful_timeout=graceful_timeout,
+            proxy=proxy,
+            history=history,
+            ghc_api_base_url=ghc_api_base_url,
+            verbose=verbose,
+            manual=manual,
+            rate_limit=rate_limit,
+            github_token=github_token,
+            account_type=account_type,
         )
+        run(partial(serve_inherited, proxy_config, fd))
         return
 
     proxy_config, inactive = _load_spec_config(
@@ -289,6 +319,11 @@ def start_rolling(
             "control socket must be an absolute path",
             param_hint="--control-socket",
         )
+    # Still the existing chain, unlike `--fd` and `start`. `RollingRuntime` reads four things off
+    # `application.state.runtime` — the approval gate, dependency readiness, the drain timeout and
+    # the tokenization snapshot — and the new chain has no equivalent surface. What that port
+    # needs is inventoried in `docs/agents/anthropic-responses-bridge/implementation.md`; moving
+    # this path before it exists would break a generation's readiness and drain, not just its app.
     settings = load_settings(config_path=config, cli_overrides={})
     application = create_app(settings, generation_lifecycle=GenerationLifecycle())
     run(
