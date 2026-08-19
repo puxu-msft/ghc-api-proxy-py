@@ -68,8 +68,8 @@ def detect_terminal(stream: TextIO | None = None, environ: dict[str, str] | None
 
     return TerminalCapabilities(
         live=interactive,
-        # `NO_COLOR` is about colour alone, so it must not take the footer down with it.
-        color=interactive and "NO_COLOR" not in env,
+        # `NO_COLOR` is about colour alone, so it must not take the footer down with it. The convention is "present **and non-empty**": `NO_COLOR=` is how a caller unsets an inherited value in a shell that cannot delete it, and reading that as "disable colour" does the opposite of what was asked.
+        color=interactive and not env.get("NO_COLOR"),
         # Independent of `live`: a file or a pipe still renders UTF-8 correctly, and there is no reason to degrade the byte-count glyph just because the footer cannot run.
         unicode=_supports_unicode(target, probe),
     )

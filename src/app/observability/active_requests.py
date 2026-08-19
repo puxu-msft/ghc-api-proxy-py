@@ -1,10 +1,13 @@
 """The in-flight request registry that feeds the live footer.
 
-One process-wide registry, mutated from the request path and read by the footer renderer. No lock: every mutation happens on the event loop thread, and the renderer reads a snapshot rather than holding the live mapping.
+One process-wide registry, written from the request path and read by the footer renderer. Those are **two different threads**: requests are served on the event loop, while `rich.Live` refreshes from a thread of its own. So every access takes a lock.
+
+An earlier version of this file claimed a lock was unnecessary because "every mutation happens on the event loop thread". That was true of the mutations and false of the reads, and the gap is not theoretical — building the snapshot iterates the mapping, and a review reproduced `RuntimeError: dictionary keys changed during iteration` under concurrent load. The refresh thread dies with it and the footer freezes at whatever it last drew.
 
 The tracking boundary is deliberately not the handler's return. A streaming request has produced no bytes at the moment its handler returns — the body is consumed afterwards — so deregistering there would drop each streaming request off the footer at exactly the moment it starts being worth watching. `track_stream` exists to hold the registration open across the generator instead.
 """
 
+import threading
 import time
 from collections.abc import AsyncGenerator, Generator
 from contextlib import asynccontextmanager, contextmanager
@@ -24,42 +27,53 @@ class _Entry:
 @dataclass(slots=True)
 class ActiveRequestRegistry:
     _entries: dict[str, _Entry] = field(default_factory=lambda: dict[str, _Entry]())
+    # Uncontended in practice — the critical sections are a dict write or a short copy — so the cost is a few tens of nanoseconds on a path that is already doing network I/O.
+    _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def snapshot(self) -> list[ActiveRequest]:
-        """A detached view for the renderer, so a mutation mid-render cannot change what it is drawing."""
-        return [
-            ActiveRequest(
-                request_id=request_id,
-                model=entry.model,
-                started_at=entry.started_at,
-                bytes_out=entry.bytes_out,
-                attempts=entry.attempts,
-            )
-            for request_id, entry in self._entries.items()
-        ]
+        """A detached view for the renderer, so a mutation mid-render cannot change what it is drawing.
+
+        Built inside the lock: the detachment is what protects the *caller*, and the iteration that produces it is exactly what needs protecting from a concurrent write.
+        """
+        with self._lock:
+            return [
+                ActiveRequest(
+                    request_id=request_id,
+                    model=entry.model,
+                    started_at=entry.started_at,
+                    bytes_out=entry.bytes_out,
+                    attempts=entry.attempts,
+                )
+                for request_id, entry in self._entries.items()
+            ]
 
     def add(self, request_id: str, *, model: str = "", started_at: float | None = None) -> None:
-        self._entries[request_id] = _Entry(model=model, started_at=started_at if started_at is not None else time.monotonic())
+        with self._lock:
+            self._entries[request_id] = _Entry(model=model, started_at=started_at if started_at is not None else time.monotonic())
 
     def remove(self, request_id: str) -> None:
-        self._entries.pop(request_id, None)
+        with self._lock:
+            self._entries.pop(request_id, None)
 
     def set_model(self, request_id: str, model: str) -> None:
         """Routing resolves the model after the request is already registered, so the footer shows `(resolving)` first and the real name once it is known."""
-        entry = self._entries.get(request_id)
-        if entry is not None:
-            entry.model = model
+        with self._lock:
+            entry = self._entries.get(request_id)
+            if entry is not None:
+                entry.model = model
 
     def set_attempts(self, request_id: str, attempts: int) -> None:
-        entry = self._entries.get(request_id)
-        if entry is not None:
-            entry.attempts = attempts
+        with self._lock:
+            entry = self._entries.get(request_id)
+            if entry is not None:
+                entry.attempts = attempts
 
     def add_bytes(self, request_id: str, count: int) -> None:
         """Record downstream progress. The first call is what turns `↓` on: until then the footer shows no byte field at all, which reads as "nothing has streamed back yet" rather than "zero bytes"."""
-        entry = self._entries.get(request_id)
-        if entry is not None:
-            entry.bytes_out = (entry.bytes_out or 0) + count
+        with self._lock:
+            entry = self._entries.get(request_id)
+            if entry is not None:
+                entry.bytes_out = (entry.bytes_out or 0) + count
 
     @contextmanager
     def track(self, request_id: str, *, model: str = "") -> Generator[None]:

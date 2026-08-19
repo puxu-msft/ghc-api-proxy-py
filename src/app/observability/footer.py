@@ -10,6 +10,8 @@ How many requests each segment gets is decided by the terminal width rather than
 import re
 from dataclasses import dataclass
 
+from rich.cells import cell_len, set_cell_size
+
 PREFIX = "[<-->] "
 RESOLVING = "(resolving)"
 SEPARATOR = " | "
@@ -107,13 +109,13 @@ def build_footer(active: list[ActiveRequest], now: float, columns: int, *, unico
 
     # Pass one decides which models appear at all. Each is measured in its minimum form (head plus its longest-running request); models that do not fit collapse into a ` | +K more` tail.
     shown: list[_Group] = []
-    used = len(PREFIX)
+    used = cell_len(PREFIX)
     for index, group in enumerate(groups):
-        separator = len(SEPARATOR) if shown else 0
+        separator = cell_len(SEPARATOR) if shown else 0
         remaining = len(groups) - index
         # Reserve the overflow tail exactly rather than approximately: if this model is taken, `remaining - 1` are left over; if it is rejected the loop breaks immediately, so the real overflow equals what was reserved on the previously accepted model.
-        tail = len(f"{SEPARATOR}+{remaining - 1} more") if remaining > 1 else 0
-        width = len(group.head) + 1 + len(group.items[0])
+        tail = cell_len(f"{SEPARATOR}+{remaining - 1} more") if remaining > 1 else 0
+        width = cell_len(group.head) + 1 + cell_len(group.items[0])
         if used + separator + width + tail > budget and shown:
             break
         used += separator + width
@@ -122,14 +124,14 @@ def build_footer(active: list[ActiveRequest], now: float, columns: int, *, unico
 
     # Pass two spends the leftover columns widening the shown models one request at a time, round-robin, so one busy model cannot starve the others.
     counts = [1] * len(shown)
-    total = used + (len(SEPARATOR) + len(f"+{overflow} more") if overflow else 0)
+    total = used + (cell_len(SEPARATOR) + cell_len(f"+{overflow} more") if overflow else 0)
     grew = True
     while grew:
         grew = False
         for index, group in enumerate(shown):
             if counts[index] >= len(group.items):
                 continue
-            cost = 1 + len(group.items[counts[index]])
+            cost = 1 + cell_len(group.items[counts[index]])
             if total + cost > budget:
                 continue
             total += cost
@@ -145,6 +147,8 @@ def build_footer(active: list[ActiveRequest], now: float, columns: int, *, unico
 def _finalize(line: str, columns: int) -> str:
     """The single exit for every branch, and the only place the one-line invariant is enforced.
 
-    Strips control characters first, since a model name or path carrying one would force a second physical line whatever the width, then truncates to `columns - 1`. The -1 avoids the last-column auto-wrap some terminals do. Measured: without this an 80-column footer wraps at 40 columns on every run, and under a reserved-region renderer the overflow lands outside the region and corrupts the log area.
+    Strips control characters first, since a model name or path carrying one would force a second physical line whatever the width, then cuts to `columns - 1`. The -1 avoids the last-column auto-wrap some terminals do. Measured: without the cut an 80-column footer wraps at 40 columns on every run, and under a reserved-region renderer the overflow lands outside the region and corrupts the log area.
+
+    Measured in **terminal cells**, not code points. A CJK or emoji model name occupies two columns per character, so slicing by `len()` lets a 36-character name claim 72 columns and wrap — the same defect the cut exists to prevent, arriving through the one input the proxy does not control. `rich.cells` is already in the dependency tree and answers this properly, including padding when the cut lands mid-character.
     """
-    return CONTROL_CHARS.sub("", line)[: max(0, columns - 1)]
+    return set_cell_size(CONTROL_CHARS.sub("", line), max(0, columns - 1))

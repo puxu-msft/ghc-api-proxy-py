@@ -188,7 +188,10 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
             #
             # The registration deliberately outlives this function. A streaming request has produced nothing at the moment the handler returns — the body is consumed after — so releasing here would drop it off the footer at exactly the point it becomes worth watching.
             released = True
-            return StreamingResponse(
+            accounting = _StreamAccounting(
+                chain=chain, request_id=context.id, trace=trace, status_code=response.status_code
+            )
+            return _AccountedStreamingResponse(
                 _tracked_delivery(
                     stream_delivery(
                         response.aiter_bytes(),
@@ -198,11 +201,9 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
                         message_id=context.id,
                         model=context.resolved_model,
                     ),
-                    chain,
-                    context.id,
-                    trace,
-                    response.status_code,
+                    accounting,
                 ),
+                accounting,
                 status_code=response.status_code,
                 media_type="text/event-stream",
             )
@@ -214,28 +215,64 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
         _release()
 
 
-async def _tracked_delivery(
-    chunks: AsyncGenerator[bytes],
-    chain: Chain,
-    request_id: str,
-    trace: _Trace,
-    status_code: int,
-) -> AsyncGenerator[bytes]:
+@dataclass(slots=True)
+class _StreamAccounting:
+    """One streaming request's slot in the footer and its eventual log line.
+
+    Shared by the delivery generator and the response that carries it, because either one may be the last to run. `finish` is idempotent so whichever gets there first records, and the other is a no-op.
+    """
+
+    chain: Chain
+    request_id: str
+    trace: _Trace
+    status_code: int
+    sent: int = 0
+    done: bool = False
+
+    def count(self, size: int) -> None:
+        self.sent += size
+        self.chain.active_requests.add_bytes(self.request_id, size)
+
+    def finish(self) -> None:
+        if self.done:
+            return
+        self.done = True
+        self.chain.active_requests.remove(self.request_id)
+        _log_completion(self.chain, self.trace, self.status_code, bytes_out=self.sent)
+
+
+class _AccountedStreamingResponse(StreamingResponse):
+    """A streaming response that is accounted for even if its body never runs.
+
+    The generator's own `finally` covers every case where delivery started, including a mid-stream disconnect. It does **not** cover a client that disappears before the first chunk is pulled: an async generator that was never iterated has no suspended frame, so closing it runs nothing, and the request would sit in the footer for the life of the process with its clock climbing and no log line ever written. A review reproduced exactly that by failing the `http.response.start` send.
+
+    Overriding `__call__` puts a `finally` outside everything the framework does, which is the only place that survives a failure before the first iteration.
+    """
+
+    def __init__(self, content: AsyncGenerator[bytes], accounting: _StreamAccounting, **kwargs: Any) -> None:
+        super().__init__(content, **kwargs)
+        self._accounting = accounting
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._accounting.finish()
+
+
+async def _tracked_delivery(chunks: AsyncGenerator[bytes], accounting: _StreamAccounting) -> AsyncGenerator[bytes]:
     """Pass the delivery stream through untouched, counting what goes out and accounting for it at the end.
 
     Wrapping rather than instrumenting `stream_delivery`: byte accounting is an observability concern, and threading it into the delivery layer would put a display detail on the path that decides what the client receives. The bytes are forwarded object-identical, so block boundaries are preserved.
 
     `finally` rather than a trailing statement, because a client that disconnects mid-stream cancels this generator — and a request that vanishes from the footer, or never gets its log line, only when something has gone wrong is exactly backwards.
     """
-    sent = 0
     try:
         async for chunk in chunks:
-            sent += len(chunk)
-            chain.active_requests.add_bytes(request_id, len(chunk))
+            accounting.count(len(chunk))
             yield chunk
     finally:
-        chain.active_requests.remove(request_id)
-        _log_completion(chain, trace, status_code, bytes_out=sent)
+        accounting.finish()
 
 
 def build_router() -> APIRouter:
