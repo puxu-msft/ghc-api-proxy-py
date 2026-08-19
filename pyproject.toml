@@ -39,6 +39,8 @@ dev = [
     "pytest-asyncio",
     "pytest-cov",
     "pyright",
+    # Only `tests/tui/` needs it: a terminal emulator that turns the footer's byte stream back into a screen grid plus scrollback. Asserting on the bytes instead would not catch a footer that lands on top of a log line, which is the whole failure mode.
+    "pyte",
     "ruff",
     # Only `tests/integration/recorded/from_history.py` needs it: the copilot-api history database
     # stores its objects zstd-compressed. Nothing the proxy itself runs touches this.
@@ -61,6 +63,8 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+# Prose is never hard-wrapped here, so a column limit on comments and docstrings only fights the house style. Ruled 2026-08-19. `line-length` above still governs what the formatter would do to code, and `ruff format` remains banned regardless (see .claude/rules/00-development-workflow.md).
+ignore = ["E501"]
 
 [tool.pyright]
 pythonVersion = "3.14"

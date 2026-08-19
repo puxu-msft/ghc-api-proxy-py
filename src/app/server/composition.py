@@ -33,6 +33,8 @@ from app.model_provider import (
     ProviderRegistry,
     resolve_default_name,
 )
+from app.observability.active_requests import ActiveRequestRegistry
+from app.observability.terminal import TerminalCapabilities, detect_terminal
 from app.pipeline.events import FrozenSubscribers, SubscriberRegistry
 from app.pipeline.rate_limiting import RateLimiter
 from app.pipeline.request import RequestContext
@@ -88,6 +90,10 @@ class Chain:
     subscribers: FrozenSubscribers[RequestContext]
     http_client: httpx.AsyncClient
     rate_limiters: dict[str, RateLimiter] = field(default_factory=lambda: dict[str, RateLimiter]())
+    # Who is in flight right now. Always maintained, whether or not anything renders it: the cost is one dict entry per request, and making it conditional would mean the footer shows an empty line for its first few seconds after being switched on.
+    active_requests: ActiveRequestRegistry = field(default_factory=ActiveRequestRegistry)
+    # Probed once, here, and shared by the footer and the log lines. Asking twice invites two answers that disagree, and a log stream that emits a glyph the footer has already decided this terminal cannot encode is exactly the kind of split nobody thinks to look for.
+    capabilities: TerminalCapabilities = field(default_factory=detect_terminal)
     # What the `local` token counter has learnt. Constructing it touches nothing; `load()` does.
     tokenization: TokenizationStateStore = field(
         default_factory=lambda: TokenizationStateStore(tokenization_state_path())

@@ -1,10 +1,11 @@
 import logging
-import sys
 from collections.abc import MutableMapping
 from typing import Any, Literal
 
 import structlog
 from structlog.typing import EventDict, Processor, WrappedLogger
+
+from app.observability.terminal import detect_terminal
 
 LogFormat = Literal["json", "text"]
 STATUS_PREFIXES = {
@@ -47,15 +48,23 @@ def _render_text(
     method_name: str,
     event_dict: EventDict,
 ) -> str:
+    """`[PREFIX] HH:MM:SS <message> <extras>`, the shape `DESIGN.md` records for console logs.
+
+    No level column: the fixed-width prefix already says whether this went well, and repeating it in words pushes the part worth reading further right on every line.
+
+    Extras are rendered plainly rather than with `repr`, so a path stays `/v1/messages` instead of becoming `'/v1/messages'`. They are the tail of the line by design — a request line puts what matters into the message itself and leaves only the incidental fields here.
+    """
     del logger, method_name
     prefix = str(event_dict.pop("prefix", "[....]"))
     timestamp = str(event_dict.pop("timestamp", ""))
-    level = str(event_dict.pop("level", "info")).upper()
     event = str(event_dict.pop("event", ""))
     event_dict.pop("logger", None)
-    extras = " ".join(f"{key}={value!r}" for key, value in sorted(event_dict.items()))
+    event_dict.pop("level", None)
+    # The prefix is this field, rendered. Printing it again at the end of the line says the same thing twice and pushes the message left of a column of `status=ok`.
+    event_dict.pop("status", None)
+    extras = " ".join(f"{key}={value}" for key, value in sorted(event_dict.items()))
     suffix = f" {extras}" if extras else ""
-    return f"{prefix} {timestamp} {level:<7} {event}{suffix}"
+    return f"{prefix} {timestamp} {event}{suffix}"
 
 
 def _build_renderer(log_format: LogFormat, *, colors: bool) -> Processor:
@@ -71,14 +80,18 @@ def setup_logging(
     log_level: str = "INFO",
     colors: bool | None = None,
 ) -> None:
-    resolved_colors = sys.stderr.isatty() if colors is None else colors
+    # One detector for the whole process. Asking `isatty()` here as well would be a second answer to the same question, free to disagree with the one the footer uses — and a log stream that colours itself while the footer has decided the terminal cannot take colour is exactly the kind of split nobody thinks to look for.
+    resolved_colors = detect_terminal().color if colors is None else colors
     renderer = _build_renderer(log_format, colors=resolved_colors)
 
     shared_processors: list[Processor] = [
         structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
-        structlog.processors.TimeStamper(fmt="iso", utc=True),
+        # Wall-clock time of day for the console, an absolute UTC instant for JSON. A person watching a terminal is placing the line against the request they just made; a log shipper is correlating it with another machine, and `HH:MM:SS` cannot survive that.
+        structlog.processors.TimeStamper(fmt="iso", utc=True)
+        if log_format == "json"
+        else structlog.processors.TimeStamper(fmt="%H:%M:%S", utc=False),
         _add_status_prefix,
     ]
     if log_format == "json":
@@ -104,6 +117,10 @@ def setup_logging(
         logger.handlers.clear()
         logger.propagate = True
 
+    # Libraries that narrate their own progress at INFO. This process already says when it is listening and what each request did, so leaving these on means every one of those lines arrives twice — once in our words and once in theirs — and `httpx` additionally announces every upstream call, which on a proxy is the same event as the request line right below it. Raised to WARNING rather than silenced: when one of them has something to say that is not routine, it still gets through.
+    for noisy in ("uvicorn.error", "uvicorn.access", "httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
     structlog.configure(
         processors=[
             *shared_processors,
@@ -115,6 +132,12 @@ def setup_logging(
     )
 
 
-def get_logger(**initial_values: Any) -> structlog.stdlib.BoundLogger:
+def get_logger(name: str = "", **initial_values: Any) -> structlog.stdlib.BoundLogger:
+    """A bound logger, optionally under a named stdlib logger.
+
+    The name matters beyond tidiness: it is what lets a caller — a test, a filter, a log shipper — select this process's own lines out of a stream that also carries `httpx` and `uvicorn`. Selecting on message content instead looks equivalent until a third-party line happens to contain the same substring, which `httpx` does for every upstream call it narrates.
+    """
     values: MutableMapping[str, Any] = dict(initial_values)
+    if name:
+        return structlog.get_logger(name, **values)
     return structlog.get_logger(**values)

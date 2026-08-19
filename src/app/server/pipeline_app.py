@@ -4,15 +4,26 @@ Separate from `app_factory`, which still serves the existing implementation.
 Mounting both would give one path two owners.
 """
 
-import logging
+import os
+import time
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
+from dataclasses import dataclass
+from importlib.metadata import PackageNotFoundError, version
 from typing import Any, cast
 
 import anyio
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from app.observability.logging import get_logger
+from app.observability.request_log import (
+    RequestLine,
+    format_arrival_line,
+    format_completion_line,
+    status_for,
+)
+from app.observability.tui import footer_tui_or_none
 from app.pipeline.delivery.stream import stream_delivery
 from app.server.composition import Chain, refresh_catalogs
 from app.server.handler import (
@@ -31,6 +42,9 @@ from app.server.ops_routes import router as ops_router
 
 CHAIN_STATE_KEY = "pipeline_chain"
 
+# The logger every per-request line goes under. Named so a filter, a test or a log shipper can select this process's own lines out of a stream that also carries `httpx` and `uvicorn` — a substring match on the message cannot, because `httpx` narrates every upstream call with the same path in it.
+REQUEST_LOGGER = "app.request"
+
 # What the calibrator has learnt is only worth keeping if it survives the process.
 # Not configurable: `config.example.yaml` has no `tokenization` section to put it in.
 TOKENIZATION_FLUSH_SECONDS = 5.0
@@ -40,75 +54,188 @@ def _chain(request: Request) -> Chain:
     return cast(Chain, getattr(request.app.state, CHAIN_STATE_KEY))
 
 
+@dataclass(slots=True)
+class _Trace:
+    """What is known about a request as it goes, gathered for its log line.
+
+    Mutable and filled in as routing learns things, because the line is written at the end but its fields become known at four different points. A frozen record would mean rebuilding it at each one.
+    """
+
+    method: str
+    path: str
+    inbound_format: str = ""
+    model: str = ""
+    attempts: int = 1
+    detail: str = ""
+    started: float = 0.0
+
+
+def _log_completion(chain: Chain, trace: _Trace, status_code: int | None, *, bytes_out: int | None) -> None:
+    """Write the one line that says this request happened.
+
+    Emitted here rather than inside the handler because every exit path — a rejected body, a routing refusal, an upstream failure, a delivered answer — has to produce exactly one, and the handler has a return for each of them.
+    """
+    line = RequestLine(
+        method=trace.method,
+        path=trace.path,
+        inbound_format=trace.inbound_format,
+        model=trace.model,
+        status_code=status_code,
+        duration_s=time.monotonic() - trace.started,
+        bytes_out=bytes_out,
+        attempts=trace.attempts,
+        detail=trace.detail,
+    )
+    get_logger(REQUEST_LOGGER).info(
+        format_completion_line(line, unicode=chain.capabilities.unicode),
+        status=status_for(status_code, failed=False),
+    )
+
+
 async def _serve(request: Request) -> Response:
+    """Time the request, hand it to the dispatcher, and account for it on the way out.
+
+    A streaming response is left alone here: at this point it has produced no bytes and its own generator is what knows when it finished and how much went out, so it writes its own completion line.
+    """
+    chain = _chain(request)
+    trace = _Trace(method=request.method, path=request.url.path, started=time.monotonic())
+    # Off by default, the way `copilot-api-js` treats its arrival line: on a busy proxy it doubles the log for information the completion line repeats.
+    get_logger(REQUEST_LOGGER).debug(format_arrival_line(RequestLine(method=trace.method, path=trace.path)), status="pending")
+
+    response = await _dispatch(request, chain, trace)
+    if not isinstance(response, StreamingResponse):
+        _log_completion(chain, trace, response.status_code, bytes_out=None)
+    return response
+
+
+async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
     route = route_for_path(request.url.path)
     if route is None:
         return JSONResponse({"error": {"message": "unknown endpoint"}}, status_code=404)
+    trace.inbound_format = route.wire_format.value
 
     try:
         parsed: object = await request.json()
     except ValueError:
+        trace.detail = "body is not valid JSON"
         return JSONResponse({"error": {"message": "body is not valid JSON"}}, status_code=400)
     if not isinstance(parsed, dict):
+        trace.detail = "body must be an object"
         return JSONResponse({"error": {"message": "body must be an object"}}, status_code=400)
     body = cast(dict[str, Any], parsed)
 
     try:
         context = build_context(route, body, request.headers)
     except InboundRequestError as error:
+        trace.detail = str(error)
         return JSONResponse(error_body(error), status_code=400)
 
-    if route.count_tokens:
-        # Answered here rather than driven: the reply is a count, not an upstream response to
-        # deliver, so none of the block buffering below applies to it.
-        try:
-            counted = await handle_count_tokens(_chain(request), context)
-        except Exception as error:
-            return JSONResponse(
-            error_body(error),
-            status_code=error_status(error),
-            headers=error_headers(error),
-        )
-        return JSONResponse(counted)
+    active = chain.active_requests
+    # Registered before routing, so the footer shows the request as `(resolving)` from the moment it arrives rather than only once its model is known. Everything below must leave through `_release`, except the streaming branch, which hands the registration to the generator instead.
+    active.add(context.id)
+    released = False
+
+    def _release() -> None:
+        nonlocal released
+        if not released:
+            released = True
+            active.remove(context.id)
 
     try:
-        handled = await handle_bounded(_chain(request), context)
-    except Exception as error:
-        return JSONResponse(
-            error_body(error),
-            status_code=error_status(error),
-            headers=error_headers(error),
-        )
+        if route.count_tokens:
+            # Answered here rather than driven: the reply is a count, not an upstream response to
+            # deliver, so none of the block buffering below applies to it.
+            try:
+                counted = await handle_count_tokens(chain, context)
+            except Exception as error:
+                trace.detail = str(error)
+                return JSONResponse(
+                    error_body(error),
+                    status_code=error_status(error),
+                    headers=error_headers(error),
+                )
+            return JSONResponse(counted)
 
-    response = handled.response
-    if response is None:
-        error = handled.outcome.error or RuntimeError("request produced no response")
-        return JSONResponse(
-            error_body(error),
-            status_code=error_status(error),
-            headers=error_headers(error),
-        )
+        try:
+            handled = await handle_bounded(chain, context)
+        except Exception as error:
+            trace.model = context.resolved_model
+            trace.attempts = context.attempt_count
+            trace.detail = str(error)
+            return JSONResponse(
+                error_body(error),
+                status_code=error_status(error),
+                headers=error_headers(error),
+            )
+        active.set_model(context.id, context.resolved_model)
+        active.set_attempts(context.id, context.attempt_count)
+        trace.model = context.resolved_model
+        trace.attempts = context.attempt_count
 
-    chain = _chain(request)
-    if context.stream:
-        # Block-level delivery over the live upstream.
-        # The body is never read whole here, so a block goes out while the rest still arrives.
-        return StreamingResponse(
-            stream_delivery(
-                response.aiter_bytes(),
-                assembler_for(handled),
-                buffer=delivery_buffer(chain),
-                settings=stream_settings(chain),
-                message_id=context.id,
-                model=context.resolved_model,
-            ),
-            status_code=response.status_code,
-            media_type="text/event-stream",
-        )
+        response = handled.response
+        if response is None:
+            error = handled.outcome.error or RuntimeError("request produced no response")
+            trace.detail = str(error)
+            return JSONResponse(
+                error_body(error),
+                status_code=error_status(error),
+                headers=error_headers(error),
+            )
 
-    body = cast(dict[str, Any], response.json())
-    payload = response_payload(chain, handled, body)
-    return JSONResponse(payload, status_code=response.status_code)
+        if context.stream:
+            # Block-level delivery over the live upstream.
+            # The body is never read whole here, so a block goes out while the rest still arrives.
+            #
+            # The registration deliberately outlives this function. A streaming request has produced nothing at the moment the handler returns — the body is consumed after — so releasing here would drop it off the footer at exactly the point it becomes worth watching.
+            released = True
+            return StreamingResponse(
+                _tracked_delivery(
+                    stream_delivery(
+                        response.aiter_bytes(),
+                        assembler_for(handled),
+                        buffer=delivery_buffer(chain),
+                        settings=stream_settings(chain),
+                        message_id=context.id,
+                        model=context.resolved_model,
+                    ),
+                    chain,
+                    context.id,
+                    trace,
+                    response.status_code,
+                ),
+                status_code=response.status_code,
+                media_type="text/event-stream",
+            )
+
+        body = cast(dict[str, Any], response.json())
+        payload = response_payload(chain, handled, body)
+        return JSONResponse(payload, status_code=response.status_code)
+    finally:
+        _release()
+
+
+async def _tracked_delivery(
+    chunks: AsyncGenerator[bytes],
+    chain: Chain,
+    request_id: str,
+    trace: _Trace,
+    status_code: int,
+) -> AsyncGenerator[bytes]:
+    """Pass the delivery stream through untouched, counting what goes out and accounting for it at the end.
+
+    Wrapping rather than instrumenting `stream_delivery`: byte accounting is an observability concern, and threading it into the delivery layer would put a display detail on the path that decides what the client receives. The bytes are forwarded object-identical, so block boundaries are preserved.
+
+    `finally` rather than a trailing statement, because a client that disconnects mid-stream cancels this generator — and a request that vanishes from the footer, or never gets its log line, only when something has gone wrong is exactly backwards.
+    """
+    sent = 0
+    try:
+        async for chunk in chunks:
+            sent += len(chunk)
+            chain.active_requests.add_bytes(request_id, len(chunk))
+            yield chunk
+    finally:
+        chain.active_requests.remove(request_id)
+        _log_completion(chain, trace, status_code, bytes_out=sent)
 
 
 def build_router() -> APIRouter:
@@ -137,6 +264,17 @@ def create_pipeline_app(chain: Chain) -> FastAPI:
     return app
 
 
+def _version() -> str:
+    """The installed version, or `unknown` when there is no installed distribution to ask.
+
+    Never raises. Running from a source tree that was never installed is an ordinary way to run this, and a banner line is the last thing that should be able to stop the server from starting — which it did, until the lookup was given the wrong distribution name and took the whole lifespan down with it.
+    """
+    try:
+        return version("app")
+    except PackageNotFoundError:
+        return "unknown"
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
     """Carry the calibrator's state across restarts.
@@ -146,6 +284,8 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
     and says nothing about it, because an estimate is still returned.
     """
     chain = cast(Chain, getattr(app.state, CHAIN_STATE_KEY))
+    logger = get_logger()
+    logger.info(f"ghc-api-proxy v{_version()} pid={os.getpid()}", status="ok")
     # Attempted before accepting, because routing fails closed on capability: a request arriving
     # first would otherwise be refused with a message saying the model does not exist.
     #
@@ -157,14 +297,22 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
     try:
         await refresh_catalogs(chain)
     except Exception as error:
-        logging.getLogger(__name__).warning(
-            "model catalog unavailable at startup; serving as not-ready: %s", error
-        )
+        logger.warning(f"model catalog unavailable, serving as not-ready: {error}", status="fail")
+    else:
+        provider = chain.providers.get(chain.providers.default_name)
+        logger.info(f"{len(provider.available_ids)} models available from {chain.providers.default_name}", status="ok")
     await chain.tokenization.load()
+    # Said before the listener is announced by whoever owns it, so the operator sees which upstream and which port belong together even when the two lines come from different layers.
+    logger.info(f"listening on http://{chain.config.server.host}:{chain.config.server.port}", status="ok")
+    # Probed, not configured: whether a live footer belongs on this stream is a fact about where the output goes, and the process can see that for itself. Nothing is logged when it comes back unsupported — a pipe or a CI job is the normal case, not a degradation worth a line in everybody's log.
+    tui = footer_tui_or_none(chain.active_requests, chain.capabilities)
     async with anyio.create_task_group() as flushing:
         flushing.start_soon(chain.tokenization.run_periodic_flush, TOKENIZATION_FLUSH_SECONDS)
         try:
-            yield
+            with ExitStack() as terminal:
+                if tui is not None:
+                    terminal.enter_context(tui.activate())
+                yield
         finally:
             # The periodic flush cannot be relied on to have caught the last change.
             await chain.tokenization.flush()

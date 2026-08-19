@@ -12,6 +12,7 @@ from app.config.loading import bundled_config_text, load_proxy_config
 from app.config.paths import config_file_path, tls_material_dir
 from app.config.schema import ProxyConfig
 from app.lifecycle.entry import StandaloneOptions, run_standalone
+from app.observability.logging import setup_logging
 from app.server.composition import build_chain, build_http_client
 from app.server.pipeline_app import create_pipeline_app
 from app.server.tls import resolve_tls_material
@@ -57,7 +58,6 @@ def _generate_config(path: Path) -> None:
 # ruled on 2026-08-17 that the entry switch goes ahead with these inactive; naming each one and why
 # is what keeps "temporarily inactive" from turning into "quietly gone".
 _NO_HOME_IN_SPEC: dict[str, str] = {
-    "--verbose": "config.example.yaml has no `observability` section",
     "--manual": "config.example.yaml has no `approval` section",
     "--rate-limit/--no-rate-limit": "the spec's `reactive_rate_limiter` has no `enabled` field",
     "--github-token": "the spec takes `model_providers.<name>.github_token_file`, not a token",
@@ -101,7 +101,6 @@ def _load_spec_config(
 
     inactive: list[tuple[str, str]] = []
     supplied = {
-        "--verbose": verbose,
         "--manual": manual,
         "--rate-limit/--no-rate-limit": rate_limit is not None,
         "--github-token": github_token is not None,
@@ -198,6 +197,9 @@ def start(
 
     if fd is not None and (host is not None or port is not None):
         raise typer.BadParameter("--fd cannot be combined with --host or --port")
+
+    # Before anything that might log. Both serve paths hand uvicorn `log_config=None`, so nothing else installs a handler and, without this call, every line the process produces — its own and uvicorn's — is dropped by the root logger's default level and never reaches the terminal at all.
+    setup_logging(log_format="text", log_level="DEBUG" if verbose else "INFO")
 
     cli_overrides: dict[str, object] = {}
     auth_overrides: dict[str, object] = {}

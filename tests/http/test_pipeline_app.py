@@ -4,7 +4,8 @@ The upstream is a MockTransport under the real SDKs.
 Upstream protocol behaviour is therefore the real thing rather than a friendlier stand-in.
 """
 
-from collections.abc import Callable
+import logging
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -12,7 +13,9 @@ from typing import Any, cast
 import httpx
 import orjson
 import pytest
+import structlog
 from anthropic import AsyncAnthropic
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from openai import AsyncOpenAI
 from pydantic import ValidationError
@@ -21,8 +24,10 @@ from app.config.schema import ModelProviderConfig, ProxyConfig
 from app.ghc_client import GhcApiClient, GhcClientConfig
 from app.ghc_client.tokens import CopilotTokenManager
 from app.model_provider import GithubCopilotProvider, ModelProvider
-from app.server.composition import build_chain
-from app.server.pipeline_app import create_pipeline_app
+from app.observability.active_requests import ActiveRequestRegistry
+from app.observability.logging import setup_logging
+from app.server.composition import Chain, build_chain
+from app.server.pipeline_app import CHAIN_STATE_KEY, REQUEST_LOGGER, create_pipeline_app
 from app.tokenization.state_store import TokenizationStateStore
 
 BASE_URL = "https://copilot.example"
@@ -761,3 +766,176 @@ def test_the_signature_shim_is_driven_by_configuration() -> None:
 
     off, _ = make_client(upstream, overrides=signature_compat(False))
     assert "signature_delta" not in stream_thinking(off).text
+
+
+def _chain_of(client: TestClient) -> Chain:
+    """The chain the app was built with.
+
+    Reached through `app.state` rather than returned by `make_client`, so the existing helper's signature stays as every other test in this file uses it. The cast is needed because `TestClient.app` is typed as a bare ASGI callable.
+    """
+    return cast(Chain, getattr(cast(FastAPI, client.app).state, CHAIN_STATE_KEY))
+
+
+def _registry(client: TestClient) -> ActiveRequestRegistry:
+    return _chain_of(client).active_requests
+
+
+def test_a_request_is_in_the_footer_registry_while_it_is_in_flight() -> None:
+    # Observed from inside the upstream handler, the one point that runs while the request genuinely is in flight. Asserting after the response returns could only ever see an empty registry, and would pass just as happily if nothing were ever registered.
+    inflight: list[str] = []
+
+    def upstream(_: httpx.Request) -> httpx.Response:
+        inflight.extend(entry.model for entry in _registry(client).snapshot())
+        return httpx.Response(200, json={"id": "msg_1", "content": []})
+
+    client, _ = make_client(upstream)
+    client.post("/v1/messages", json={"model": "claude-model", "messages": []})
+
+    # Registered before routing resolves the model, so the footer can show it as `(resolving)` from arrival.
+    assert inflight == [""]
+    # Released afterwards, or the footer fills with requests that finished long ago.
+    assert _registry(client).snapshot() == []
+
+
+def test_a_streaming_request_stays_registered_until_its_body_is_finished() -> None:
+    """The seam this design is most likely to get wrong.
+
+    A streaming request has produced nothing when its handler returns — the body is consumed after. Releasing at the handler's exit would drop it off the footer at the moment it starts streaming, which is exactly when it is worth watching.
+
+    Asserted on the order of the registry's own calls rather than by snapshotting from the client side. `TestClient` drives the ASGI app to completion before handing back a response, so a client-side snapshot finds an empty registry whether the release is correctly placed or not — it cannot tell the two apart, which is the one thing this test exists to do.
+    """
+    calls: list[str] = []
+
+    class Recording(ActiveRequestRegistry):
+        def add(self, request_id: str, *, model: str = "", started_at: float | None = None) -> None:
+            calls.append("add")
+            super().add(request_id, model=model, started_at=started_at)
+
+        def add_bytes(self, request_id: str, count: int) -> None:
+            calls.append("bytes")
+            super().add_bytes(request_id, count)
+
+        def remove(self, request_id: str) -> None:
+            calls.append("remove")
+            super().remove(request_id)
+
+    client, _ = make_client(
+        lambda _: httpx.Response(
+            200,
+            content=sse_upstream("first", "second"),
+            headers={"content-type": "text/event-stream"},
+        )
+    )
+    chain = _chain_of(client)
+    setattr(cast(FastAPI, client.app).state, CHAIN_STATE_KEY, replace(chain, active_requests=Recording()))
+
+    response = client.post(
+        "/v1/messages", json={"model": "claude-model", "messages": [], "stream": True}
+    )
+    assert response.status_code == 200
+
+    assert calls[0] == "add"
+    assert "bytes" in calls, "no downstream bytes were counted, so the footer could never show one"
+    # The decisive assertion: every byte is counted before the slot is released. Releasing at the handler's exit puts `remove` ahead of them all.
+    assert calls.index("remove") > max(index for index, call in enumerate(calls) if call == "bytes")
+    assert _registry(client).snapshot() == []
+
+
+def test_a_client_that_stops_reading_still_releases_its_slot() -> None:
+    # The release sits in a `finally` rather than after the loop: a request that only leaves the footer on the happy path leaves it stale exactly when something has gone wrong.
+    client, _ = make_client(
+        lambda _: httpx.Response(
+            200,
+            content=sse_upstream("first", "second"),
+            headers={"content-type": "text/event-stream"},
+        )
+    )
+
+    with client.stream(
+        "POST", "/v1/messages", json={"model": "claude-model", "messages": [], "stream": True}
+    ) as response:
+        next(response.iter_bytes())
+
+    assert _registry(client).snapshot() == []
+
+
+@pytest.fixture
+def request_log() -> Iterator[None]:
+    """Install the real logging configuration for the duration of one test.
+
+    Needed rather than incidental: unconfigured, structlog writes through its own `PrintLogger` straight to stdout and never creates a `LogRecord`, so `caplog` sees nothing and every assertion below passes on an empty list. Calling the production setup is also what makes these tests exercise the wiring the CLI installs, instead of a second arrangement that only exists here.
+    """
+    setup_logging(log_format="text", colors=False)
+    try:
+        yield
+    finally:
+        structlog.reset_defaults()
+        logging.getLogger().handlers.clear()
+
+
+def _request_lines(records: list[logging.LogRecord]) -> list[str]:
+    """The completion lines `_serve` wrote, in order.
+
+    Selected by logger name, not by message content. Content matching looked equivalent until it also picked up `httpx`, which narrates every upstream call with the same route in it — and silently turned "exactly one line" into "exactly two".
+
+    The message is pulled out of the structlog event dict rather than from `getMessage()`: with `ProcessorFormatter` the record carries the dict and the rendering happens at the handler, so `getMessage()` returns the whole dict stringified.
+    """
+    lines: list[str] = []
+    for record in records:
+        if record.name != REQUEST_LOGGER or record.levelno < logging.INFO:
+            continue
+        payload = record.msg
+        if isinstance(payload, dict):
+            lines.append(str(cast(dict[str, Any], payload)["event"]))
+        else:
+            lines.append(record.getMessage())
+    return lines
+
+
+def test_a_served_request_writes_exactly_one_log_line(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
+    """The gap that let a silent server ship.
+
+    Every part of the footer was tested and correct while the log stream it sits under did not exist: nothing in the served chain emitted a line, and nothing asserted that anything did. A component test cannot catch that — only one that watches the served path can.
+    """
+    client, _ = make_client(lambda _: httpx.Response(200, json={"id": "msg_1", "content": []}))
+
+    with caplog.at_level(logging.INFO):
+        client.post("/v1/messages", json={"model": "claude-model", "messages": []})
+
+    lines = _request_lines(caplog.records)
+    assert len(lines) == 1
+    # A success names the model instead of the route, and carries the status and how long it took.
+    assert lines[0].startswith("200 anthropic-messages/claude-model ")
+
+
+def test_a_refused_request_is_reported_with_its_route_and_reason(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
+    client, _ = make_client(lambda _: httpx.Response(200, json={"id": "msg_1", "content": []}))
+
+    with caplog.at_level(logging.INFO):
+        client.post("/v1/messages", json={"model": "no-such-model", "messages": []})
+
+    lines = _request_lines(caplog.records)
+    assert len(lines) == 1
+    # A failure keeps `METHOD /path`, because that is what has to be reproduced, and ends in the reason.
+    assert lines[0].startswith("400 POST /v1/messages ")
+    assert "no-such-model" in lines[0]
+
+
+def test_a_streaming_request_reports_what_it_actually_delivered(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
+    # Written by the delivery generator, not by the handler: at the moment the handler returns a stream has sent nothing, so a line written there would report every stream as having delivered zero bytes.
+    client, _ = make_client(
+        lambda _: httpx.Response(
+            200,
+            content=sse_upstream("first", "second"),
+            headers={"content-type": "text/event-stream"},
+        )
+    )
+
+    with caplog.at_level(logging.INFO):
+        client.post("/v1/messages", json={"model": "claude-model", "messages": [], "stream": True})
+
+    lines = _request_lines(caplog.records)
+    assert len(lines) == 1
+    assert lines[0].startswith("200 anthropic-messages/claude-model ")
+    assert "↓" in lines[0], "a delivered stream must report its byte count"
+    assert "↓0B" not in lines[0]

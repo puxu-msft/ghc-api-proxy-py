@@ -161,10 +161,10 @@ def test_start_merges_cli_overrides_and_serves(monkeypatch: pytest.MonkeyPatch) 
     assert options.cleanup_timeout == 7
     assert options.fd is None
 
-    # --manual and --verbose have nowhere to land in the spec's schema. The user ruled that the
-    # switch proceeds with them inactive, so what is guarded is that they are said out loud.
+    # `--manual` has nowhere to land in the spec's schema. The user ruled that the switch proceeds with it inactive, so what is guarded is that it is said out loud.
     assert "--manual has no effect" in result.output
-    assert "--verbose has no effect" in result.output
+    # `--verbose` was on that list until it acquired a real effect: it now sets the log level, which is what turns on the per-request arrival line. Announcing it as inactive would be the same defect in the opposite direction — a warning that is itself untrue.
+    assert "--verbose has no effect" not in result.output
 
 
 def test_an_inherited_listener_serves_the_same_chain_as_start(
