@@ -73,6 +73,8 @@ class LiveConsoleHandler(logging.Handler):
     A second writer to the same terminal is the whole problem: `rich.Live` tracks how many rows its region occupies and erases exactly that many before redrawing, so anything written behind its back lands inside the region and is wiped, or pushes the region without it noticing. Printing through the live console is what keeps the two in one accounting.
 
     `markup=False` is load-bearing rather than tidiness: the log format opens with `[ OK ]` / `[FAIL]`, and rich reads square brackets as markup. Left on, every status prefix is swallowed as an unknown style tag.
+
+    `soft_wrap=True` for the same class of reason. Without it rich re-flows the record to the console width and inserts its own line break, so a rich request line arrives split across two physical lines with no prefix on the second and the fields it was carrying stranded there. Wrapping a log line is the terminal's job, and it does it without rewriting the text.
     """
 
     def __init__(self, live: Live) -> None:
@@ -81,7 +83,7 @@ class LiveConsoleHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            self._live.console.print(self.format(record), markup=False, highlight=False, soft_wrap=False)
+            self._live.console.print(self.format(record), markup=False, highlight=False, soft_wrap=True)
         except Exception:
             self.handleError(record)
 

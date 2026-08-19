@@ -939,3 +939,42 @@ def test_a_streaming_request_reports_what_it_actually_delivered(request_log: Non
     assert lines[0].startswith("200 anthropic-messages/claude-model ")
     assert "↓" in lines[0], "a delivered stream must report its byte count"
     assert "↓0B" not in lines[0]
+
+
+def test_every_answered_request_reports_bytes_in_both_directions(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
+    """The gap that prompted this: only the streaming path counted anything.
+
+    A non-streaming request produced no byte field at all, so the line said nothing about size for the majority of traffic. Read off the rendered response, every non-streaming exit has a count — including the refusals, which have no payload to measure but do have a body.
+    """
+    client, _ = make_client(lambda _: httpx.Response(200, json={"id": "msg_1", "content": []}))
+
+    with caplog.at_level(logging.INFO):
+        client.post("/v1/messages", json={"model": "claude-model", "messages": []})
+        client.post("/v1/messages", json={"model": "no-such-model", "messages": []})
+
+    answered, refused = _request_lines(caplog.records)
+    assert "↑" in answered and "↓" in answered
+    assert "↑" in refused and "↓" in refused, "a refusal has a size too, and used to report neither"
+
+
+def test_upstream_token_usage_reaches_the_line(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
+    # Taken from the payload that goes downstream, so the numbers on the line are the ones the client was told.
+    client, _ = make_client(
+        lambda _: httpx.Response(
+            200,
+            json={
+                "id": "msg_1",
+                "content": [],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 12, "output_tokens": 456, "cache_read_input_tokens": 8000},
+            },
+        )
+    )
+
+    with caplog.at_level(logging.INFO):
+        client.post("/v1/messages", json={"model": "claude-model", "messages": []})
+
+    line = _request_lines(caplog.records)[0]
+    assert "↑12+8.0k" in line
+    assert "↓456" in line
+    assert line.endswith("end_turn")

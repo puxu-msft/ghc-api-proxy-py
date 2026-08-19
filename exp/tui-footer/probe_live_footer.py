@@ -95,3 +95,5 @@ plain = ANSI.sub("", raw).replace("\r", "\n")
 for line in plain.splitlines():
     if line.startswith(("[ OK ]", "[FAIL]", "[....]", "[RETRY]")):
         print(line)
+print("\n--- raw tail ---")
+print(repr(raw[-700:]))

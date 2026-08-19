@@ -149,6 +149,10 @@ def _finalize(line: str, columns: int) -> str:
 
     Strips control characters first, since a model name or path carrying one would force a second physical line whatever the width, then cuts to `columns - 1`. The -1 avoids the last-column auto-wrap some terminals do. Measured: without the cut an 80-column footer wraps at 40 columns on every run, and under a reserved-region renderer the overflow lands outside the region and corrupts the log area.
 
-    Measured in **terminal cells**, not code points. A CJK or emoji model name occupies two columns per character, so slicing by `len()` lets a 36-character name claim 72 columns and wrap — the same defect the cut exists to prevent, arriving through the one input the proxy does not control. `rich.cells` is already in the dependency tree and answers this properly, including padding when the cut lands mid-character.
+    Measured in **terminal cells**, not code points. A CJK or emoji model name occupies two columns per character, so slicing by `len()` lets a 36-character name claim 72 columns and wrap — the same defect the cut exists to prevent, arriving through the one input the proxy does not control. `rich.cells` is already in the dependency tree and answers this properly, including a cut that lands mid-character.
+
+    Cut only when it is too wide. `set_cell_size` also *pads*, and padding every frame to the full width would make an idle footer a line of spaces rather than nothing, and would repaint the whole width on every tick for no gain.
     """
-    return set_cell_size(CONTROL_CHARS.sub("", line), max(0, columns - 1))
+    stripped = CONTROL_CHARS.sub("", line)
+    limit = max(0, columns - 1)
+    return stripped if cell_len(stripped) <= limit else set_cell_size(stripped, limit)

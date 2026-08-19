@@ -8,7 +8,7 @@ import os
 import time
 from collections.abc import AsyncGenerator
 from contextlib import ExitStack, asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any, cast
 
@@ -24,6 +24,7 @@ from app.observability.request_log import (
     status_for,
 )
 from app.observability.tui import footer_tui_or_none
+from app.pipeline.delivery.assembler import BlockAssembler
 from app.pipeline.delivery.stream import stream_delivery
 from app.server.composition import Chain, refresh_catalogs
 from app.server.handler import (
@@ -64,10 +65,14 @@ class _Trace:
     method: str
     path: str
     inbound_format: str = ""
+    requested_model: str = ""
     model: str = ""
     attempts: int = 1
     detail: str = ""
     started: float = 0.0
+    bytes_in: int | None = None
+    usage: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
+    stop_reason: str = ""
 
 
 def _log_completion(chain: Chain, trace: _Trace, status_code: int | None, *, bytes_out: int | None) -> None:
@@ -79,10 +84,14 @@ def _log_completion(chain: Chain, trace: _Trace, status_code: int | None, *, byt
         method=trace.method,
         path=trace.path,
         inbound_format=trace.inbound_format,
+        requested_model=trace.requested_model,
         model=trace.model,
         status_code=status_code,
         duration_s=time.monotonic() - trace.started,
+        bytes_in=trace.bytes_in,
         bytes_out=bytes_out,
+        usage=trace.usage,
+        stop_reason=trace.stop_reason,
         attempts=trace.attempts,
         detail=trace.detail,
     )
@@ -104,7 +113,9 @@ async def _serve(request: Request) -> Response:
 
     response = await _dispatch(request, chain, trace)
     if not isinstance(response, StreamingResponse):
-        _log_completion(chain, trace, response.status_code, bytes_out=None)
+        # Read off the rendered response rather than recomputed from the payload, so it is the count of what actually goes on the wire and so every non-streaming exit — including the error ones, which have no payload to measure — reports one. Leaving this `None` is why rejected requests used to show no byte field at all.
+        body = getattr(response, "body", None)
+        _log_completion(chain, trace, response.status_code, bytes_out=len(body) if isinstance(body, bytes) else None)
     return response
 
 
@@ -113,6 +124,8 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
     if route is None:
         return JSONResponse({"error": {"message": "unknown endpoint"}}, status_code=404)
     trace.inbound_format = route.wire_format.value
+    # Starlette caches the body it already read for `json()`, so this is a length, not a second read.
+    trace.bytes_in = len(await request.body())
 
     try:
         parsed: object = await request.json()
@@ -170,6 +183,7 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
         active.set_model(context.id, context.resolved_model)
         active.set_attempts(context.id, context.attempt_count)
         trace.model = context.resolved_model
+        trace.requested_model = context.requested_model
         trace.attempts = context.attempt_count
 
         response = handled.response
@@ -188,14 +202,20 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
             #
             # The registration deliberately outlives this function. A streaming request has produced nothing at the moment the handler returns — the body is consumed after — so releasing here would drop it off the footer at exactly the point it becomes worth watching.
             released = True
+            # Held rather than passed straight through: the assembler is what reads the upstream's terminal event, so after the stream finishes it is the only thing that knows the token usage and the stop reason.
+            assembler = assembler_for(handled)
             accounting = _StreamAccounting(
-                chain=chain, request_id=context.id, trace=trace, status_code=response.status_code
+                chain=chain,
+                request_id=context.id,
+                trace=trace,
+                status_code=response.status_code,
+                assembler=assembler,
             )
             return _AccountedStreamingResponse(
                 _tracked_delivery(
                     stream_delivery(
                         response.aiter_bytes(),
-                        assembler_for(handled),
+                        assembler,
                         buffer=delivery_buffer(chain),
                         settings=stream_settings(chain),
                         message_id=context.id,
@@ -210,6 +230,13 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
 
         body = cast(dict[str, Any], response.json())
         payload = response_payload(chain, handled, body)
+        # Taken from what goes downstream rather than from the upstream body, so the numbers on the line are the ones the client was actually told.
+        usage = payload.get("usage")
+        if isinstance(usage, dict):
+            trace.usage = dict(cast(dict[str, Any], usage))
+        stop_reason = payload.get("stop_reason")
+        if isinstance(stop_reason, str):
+            trace.stop_reason = stop_reason
         return JSONResponse(payload, status_code=response.status_code)
     finally:
         _release()
@@ -226,6 +253,7 @@ class _StreamAccounting:
     request_id: str
     trace: _Trace
     status_code: int
+    assembler: BlockAssembler | None = None
     sent: int = 0
     done: bool = False
 
@@ -238,6 +266,10 @@ class _StreamAccounting:
             return
         self.done = True
         self.chain.active_requests.remove(self.request_id)
+        # Read at the end because that is when the upstream's terminal event has been seen. `seen` guards against reporting the assembler's defaults — `end_turn` and no usage — for a stream that was cut off before its final frame, which would claim a clean finish for a request that had none.
+        if self.assembler is not None and self.assembler.terminal.seen:
+            self.trace.usage = dict(self.assembler.terminal.usage)
+            self.trace.stop_reason = self.assembler.terminal.stop_reason
         _log_completion(self.chain, self.trace, self.status_code, bytes_out=self.sent)
 
 
