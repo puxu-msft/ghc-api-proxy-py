@@ -13,7 +13,12 @@ WorkingDirectory=/opt/ghc-api-proxy
 StateDirectory=ghc-api-proxy
 StateDirectoryMode=0700
 UMask=0077
-Environment="GHC_HISTORY__DB_PATH=/var/lib/ghc-api-proxy/history.db" "GHC_TOKENIZATION__STATE_PATH=/var/lib/ghc-api-proxy/tokenization.json"
+# The chain derives every state location from XDG_DATA_HOME, so pointing that at the directory
+# systemd already creates puts the config, the token file and the calibration state under it.
+# The two keys that used to stand here — GHC_HISTORY__DB_PATH and GHC_TOKENIZATION__STATE_PATH —
+# belonged to the chain this unit no longer runs, and the current schema rejects them outright:
+# the process would exit at startup rather than ignore them.
+Environment="XDG_DATA_HOME=/var/lib"
 EnvironmentFile=-/etc/ghc-api-proxy/ghc-api-proxy.env
 ExecStart=/opt/ghc-api-proxy/.venv/bin/python -m app start --fd 3 --graceful-timeout 300
 Restart=on-failure

@@ -67,7 +67,7 @@ def make_provider(
             max_retries=0,
         ),
         tokens,
-        GhcClientConfig(base_url_override=BASE_URL),
+        GhcClientConfig(api_base_url_override=BASE_URL),
         interaction_id="interaction",
     )
     provider = GithubCopilotProvider(
@@ -106,7 +106,7 @@ def make_client(
     provider, http_client = make_provider(recording)
     config = ProxyConfig.model_validate(
         {
-            "model_providers": {"ghc": {"type": "github_copilot", "base_url": BASE_URL}},
+            "model_providers": {"ghc": {"type": "github_copilot", "api_base_url": BASE_URL}},
             "default_model_provider": "ghc",
             "model_mappings": mappings or {},
             **(overrides or {}),
@@ -374,7 +374,7 @@ def test_upstream_429_is_seen_by_the_rate_limiter() -> None:
     )
     config = ProxyConfig.model_validate(
         {
-            "model_providers": {"ghc": {"type": "github_copilot", "base_url": BASE_URL}},
+            "model_providers": {"ghc": {"type": "github_copilot", "api_base_url": BASE_URL}},
             "default_model_provider": "ghc",
             "reactive_rate_limiter": {"retry_interval": 0, "request_interval": 0},
             "upstream_request_retry": {"max_total": 0},
@@ -403,7 +403,7 @@ def test_upstream_503_does_not_enter_limited_mode() -> None:
     )
     config = ProxyConfig.model_validate(
         {
-            "model_providers": {"ghc": {"type": "github_copilot", "base_url": BASE_URL}},
+            "model_providers": {"ghc": {"type": "github_copilot", "api_base_url": BASE_URL}},
             "default_model_provider": "ghc",
             "upstream_request_retry": {"max_total": 0},
         }

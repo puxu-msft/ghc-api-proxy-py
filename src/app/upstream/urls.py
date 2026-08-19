@@ -1,7 +1,7 @@
 from app.config.settings import AppSettings
-from app.ghc_client import resolve_base_url
+from app.ghc_client import resolve_api_base_url
 from app.upstream.ghc_settings import ghc_config_from_settings
 
 
 def resolve_copilot_base_url(settings: AppSettings) -> str:
-    return resolve_base_url(ghc_config_from_settings(settings))
+    return resolve_api_base_url(ghc_config_from_settings(settings))

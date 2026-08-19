@@ -139,8 +139,11 @@ def build_copilot_provider(
     interaction_id: str,
 ) -> GithubCopilotProvider:
     provider_config = config.model_providers[name]
-    ghc_config = GhcClientConfig(base_url_override=provider_config.base_url)
-    base_url = ghc_config.base_url
+    ghc_config = GhcClientConfig(
+        api_base_url_override=provider_config.api_base_url,
+        auth_base_url_override=provider_config.auth_base_url,
+    )
+    base_url = ghc_config.api_base_url
     client = GhcApiClient(
         AsyncOpenAI(
             api_key="proxy-managed",
@@ -186,10 +189,14 @@ def build_chain(
                 raise ValueError(f"unsupported provider type {provider_config.type!r}")
             # Per provider: each may name its own token file.
             token_source = build_github_token_source(config, name)
-            ghc_config = GhcClientConfig(base_url_override=provider_config.base_url)
+            ghc_config = GhcClientConfig(
+                api_base_url_override=provider_config.api_base_url,
+                auth_base_url_override=provider_config.auth_base_url,
+            )
             token_manager = CopilotTokenManager(
                 token_source,
                 http_client,
+                auth_base_url=ghc_config.auth_base_url,
                 identity_headers=build_identity_headers(ghc_config),
             )
             built[name] = build_copilot_provider(

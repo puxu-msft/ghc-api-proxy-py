@@ -13,7 +13,7 @@ def ghc_config_from_settings(settings: AppSettings) -> GhcClientConfig:
     versions = settings.headers
     return GhcClientConfig(
         account_type=settings.auth.account_type or "individual",
-        base_url_override=settings.upstream.ghc_api_base_url,
+        api_base_url_override=settings.upstream.ghc_api_base_url,
         vscode_version=versions.vscode_version,
         copilot_version=versions.copilot_version,
         api_version=versions.api_version,

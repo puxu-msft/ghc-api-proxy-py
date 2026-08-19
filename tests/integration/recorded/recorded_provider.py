@@ -58,7 +58,7 @@ def recorded_provider(name: str, http_client: httpx.AsyncClient) -> GithubCopilo
     exchange is itself in the cassette, so the manager runs its real code path against a recorded
     answer rather than being replaced.
     """
-    ghc_config = GhcClientConfig(base_url_override=BASE_URL)
+    ghc_config = GhcClientConfig(api_base_url_override=BASE_URL)
     client = GhcApiClient(
         AsyncOpenAI(
             api_key="proxy-managed", base_url=BASE_URL, http_client=http_client, max_retries=0
@@ -73,7 +73,7 @@ def recorded_provider(name: str, http_client: httpx.AsyncClient) -> GithubCopilo
     return GithubCopilotProvider(
         "ghc",
         client,
-        ModelProviderConfig(type="github_copilot", base_url=BASE_URL),
+        ModelProviderConfig(type="github_copilot", api_base_url=BASE_URL),
         http_client=http_client,
         base_url=BASE_URL,
     )
@@ -87,7 +87,7 @@ def pinned_config(base_url: str = BASE_URL) -> ProxyConfig:
     """
     return ProxyConfig.model_validate(
         {
-            "model_providers": {"ghc": {"type": "github_copilot", "base_url": base_url}},
+            "model_providers": {"ghc": {"type": "github_copilot", "api_base_url": base_url}},
             "default_model_provider": "ghc",
         }
     )

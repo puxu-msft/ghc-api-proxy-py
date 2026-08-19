@@ -32,7 +32,8 @@ type SystemPromptPlacement = Literal["instructions-joint-string"]
 # They are pinned and reported as restart-required rather than silently applied.
 NOT_HOT_RELOADABLE = frozenset(
     {
-        "model_providers.*.base_url",
+        "model_providers.*.api_base_url",
+        "model_providers.*.auth_base_url",
         "model_providers.*.github_token_file",
         "pidfile",
         "proxy",
@@ -74,7 +75,13 @@ class InboundConfig(Section):
 
 class ModelProviderConfig(Section):
     type: Literal["github_copilot"]
-    base_url: str = ""
+    # Where inference goes.
+    api_base_url: str = ""
+    # Where a GitHub token is exchanged for a Copilot one, and where the account is described.
+    # A separate host from the one above, and separately configurable: an enterprise install moves
+    # both, and leaving this one a module constant meant nothing could be stood up locally — the
+    # inference calls could be redirected and the three auth calls could not.
+    auth_base_url: str = ""
     # May contain `$XDG_DATA_HOME`; expanded by `app.config.paths.expand_user_path`.
     github_token_file: str = ""
     model_refresh_interval: int = Field(default=3600, ge=0)

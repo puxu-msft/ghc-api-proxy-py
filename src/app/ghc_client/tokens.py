@@ -7,7 +7,9 @@ from typing import Any, Protocol
 import anyio
 import httpx
 
-TOKEN_URL = "https://api.github.com/copilot_internal/v2/token"
+from app.ghc_client.config import GITHUB_AUTH_BASE_URL
+
+TOKEN_PATH = "/copilot_internal/v2/token"
 COPILOT_INTERNAL_API_VERSION = "2025-04-01"
 
 
@@ -42,6 +44,7 @@ class CopilotTokenManager:
         github_tokens: GitHubTokenSource,
         http_client: httpx.AsyncClient,
         *,
+        auth_base_url: str = GITHUB_AUTH_BASE_URL,
         clock: Callable[[], float] = time.time,
         sleep: Callable[[float], Awaitable[None]] = anyio.sleep,
         validity_margin: float = 60.0,
@@ -51,6 +54,10 @@ class CopilotTokenManager:
     ) -> None:
         self._github_tokens = github_tokens
         self._http = http_client
+        # Where the GitHub token is exchanged for a Copilot one. Configurable because an
+        # enterprise install moves it, and because a hardcoded host made this library impossible
+        # to stand up against a local server for testing.
+        self._auth_base_url = auth_base_url.rstrip("/")
         self._clock = clock
         self._sleep = sleep
         self._validity_margin = validity_margin
@@ -126,7 +133,9 @@ class CopilotTokenManager:
                         "X-GitHub-Api-Version": COPILOT_INTERNAL_API_VERSION,
                     }
                 )
-                response = await self._http.get(TOKEN_URL, headers=headers)
+                response = await self._http.get(
+                    f"{self._auth_base_url}{TOKEN_PATH}", headers=headers
+                )
                 response.raise_for_status()
                 raw: dict[str, Any] = response.json()
                 return raw

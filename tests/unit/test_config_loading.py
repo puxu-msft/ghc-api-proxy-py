@@ -123,24 +123,24 @@ def test_restart_only_section_is_pinned_as_a_whole() -> None:
 
 def test_restart_only_wildcard_path_is_pinned_per_provider() -> None:
     startup = ProxyConfig.model_validate(
-        {"model_providers": {"ghc": {"type": "github_copilot", "base_url": "https://old"}}}
+        {"model_providers": {"ghc": {"type": "github_copilot", "api_base_url": "https://old"}}}
     )
     candidate = ProxyConfig.model_validate(
         {
             "model_providers": {
                 "ghc": {
                     "type": "github_copilot",
-                    "base_url": "https://new",
+                    "api_base_url": "https://new",
                     "model_refresh_interval": 60,
                 }
             }
         }
     )
     outcome = pin_restart_only(startup, candidate)
-    assert outcome.config.model_providers["ghc"].base_url == "https://old"
+    assert outcome.config.model_providers["ghc"].api_base_url == "https://old"
     # A hot-reloadable sibling in the same section still takes effect.
     assert outcome.config.model_providers["ghc"].model_refresh_interval == 60
-    assert outcome.restart_required == ("model_providers.ghc.base_url",)
+    assert outcome.restart_required == ("model_providers.ghc.api_base_url",)
 
 
 def test_hot_reloadable_change_applies_without_being_reported() -> None:

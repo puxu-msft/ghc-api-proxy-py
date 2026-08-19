@@ -2,7 +2,10 @@ from collections.abc import Mapping
 
 import httpx
 
-GITHUB_API_BASE_URL = "https://api.github.com"
+from app.ghc_client.config import GITHUB_AUTH_BASE_URL
+
+USER_PATH = "/user"
+COPILOT_USER_PATH = "/copilot_internal/user"
 GITHUB_API_VERSION = "2022-11-28"
 COPILOT_INTERNAL_API_VERSION = "2025-04-01"
 
@@ -24,8 +27,14 @@ class GitHubAccountClient:
     Used only to infer the account type, which selects the API base URL.
     """
 
-    def __init__(self, http_client: httpx.AsyncClient) -> None:
+    def __init__(
+        self,
+        http_client: httpx.AsyncClient,
+        *,
+        auth_base_url: str = GITHUB_AUTH_BASE_URL,
+    ) -> None:
         self._http = http_client
+        self._auth_base_url = auth_base_url.rstrip("/")
 
     @staticmethod
     def _headers(token: str) -> dict[str, str]:
@@ -37,7 +46,7 @@ class GitHubAccountClient:
 
     async def get_user(self, token: str) -> dict[str, object]:
         response = await self._http.get(
-            f"{GITHUB_API_BASE_URL}/user",
+            f"{self._auth_base_url}{USER_PATH}",
             headers=self._headers(token),
         )
         response.raise_for_status()
@@ -48,7 +57,7 @@ class GitHubAccountClient:
         headers = self._headers(token)
         headers["X-GitHub-Api-Version"] = COPILOT_INTERNAL_API_VERSION
         response = await self._http.get(
-            f"{GITHUB_API_BASE_URL}/copilot_internal/user",
+            f"{self._auth_base_url}{COPILOT_USER_PATH}",
             headers=headers,
         )
         response.raise_for_status()

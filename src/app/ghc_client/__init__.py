@@ -10,7 +10,7 @@ Out of scope: model name resolution, body translation, history, retry orchestrat
 
 from app.ghc_client.account import GitHubAccountClient, infer_account_type
 from app.ghc_client.client import GhcApiClient
-from app.ghc_client.config import GhcClientConfig, resolve_base_url
+from app.ghc_client.config import GhcClientConfig, resolve_api_base_url
 from app.ghc_client.device_flow import (
     DeviceCode,
     DeviceFlowClient,
@@ -45,5 +45,5 @@ __all__ = [
     "fetch_models",
     "infer_account_type",
     "is_responses_headers_pending_transport_error",
-    "resolve_base_url",
+    "resolve_api_base_url",
 ]

@@ -45,7 +45,7 @@ def build_client(
             max_retries=0,
         ),
         tokens,
-        GhcClientConfig(base_url_override=BASE_URL),
+        GhcClientConfig(api_base_url_override=BASE_URL),
         interaction_id="interaction",
     )
     return client, http_client

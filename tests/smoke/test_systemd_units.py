@@ -15,7 +15,11 @@ from typing import ClassVar
 
 import pytest
 
-from app.config.loader import load_settings
+from app.config.paths import (
+    spec_config_file_path,
+    tokenization_state_path,
+    user_data_path,
+)
 from app.graceful_timeout import (
     DEFAULT_GRACEFUL_TIMEOUT_SECONDS,
     SYSTEMD_STOP_TIMEOUT_MARGIN_SECONDS,
@@ -28,7 +32,7 @@ from app.tokenization.state_store import TokenizationStateStore
 SYSTEMD_DIR = Path(__file__).parents[2] / "contrib" / "systemd"
 
 
-def _read_unit(name: str) -> ConfigParser:
+def read_unit(name: str) -> ConfigParser:
     parser = ConfigParser(interpolation=None)
     with (SYSTEMD_DIR / name).open(encoding="utf-8") as unit_file:
         parser.read_file(unit_file)
@@ -45,7 +49,7 @@ def _assert_graceful_timeout_contract(service: ConfigParser) -> None:
     assert stop_timeout - graceful_timeout == SYSTEMD_STOP_TIMEOUT_MARGIN_SECONDS
 
 
-def _http_request(connection: socket.socket, path: str) -> bytes:
+def http_request(connection: socket.socket, path: str) -> bytes:
     connection.sendall(
         f"GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".encode()
     )
@@ -79,7 +83,21 @@ class _GenericUpstreamHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         self.requests.append(self.path)
-        assert self.path == "/v1/models"
+        # Both hosts land here: the service is configured with `api_base_url` and `auth_base_url`
+        # pointing at this one server, which is the whole reason those two are configurable.
+        if self.path == "/copilot_internal/v2/token":
+            # The exchange the proxy performs before it can talk to the inference host at all.
+            # `refresh_in` is required: without it the exchange is rejected as an invalid
+            # response and the catalog stays empty, which reads as an unreachable upstream.
+            self._respond(
+                {
+                    "token": "copilot-smoke-token",
+                    "expires_at": 4102444800,
+                    "refresh_in": 1500,
+                }
+            )
+            return
+        assert self.path == "/models", self.path
         self._respond(
             {
                 "object": "list",
@@ -131,8 +149,8 @@ class _GenericUpstreamHandler(BaseHTTPRequestHandler):
 
 
 def test_socket_activation_units_share_the_inherited_listener() -> None:
-    socket = _read_unit("ghc-api-proxy.socket")
-    service = _read_unit("ghc-api-proxy.service")
+    socket = read_unit("ghc-api-proxy.socket")
+    service = read_unit("ghc-api-proxy.service")
 
     assert socket["Socket"]["ListenStream"] == "127.0.0.1:4141"
     assert socket["Socket"]["Accept"] == "no"
@@ -153,30 +171,38 @@ def test_socket_activation_units_share_the_inherited_listener() -> None:
 
 
 def test_service_provisions_and_configures_writable_state_directory() -> None:
-    service = _read_unit("ghc-api-proxy.service")
+    service = read_unit("ghc-api-proxy.service")
 
     assert service["Service"]["StateDirectory"] == "ghc-api-proxy"
     assert service["Service"]["StateDirectoryMode"] == "0700"
     assert service["Service"]["UMask"] == "0077"
+    # One variable, not two paths. The chain derives every state location from XDG_DATA_HOME, so
+    # pointing that at the directory systemd already creates covers the config, the token file and
+    # the calibration state at once. The two keys that stood here named the retired chain's paths,
+    # and the current schema rejects them — the process exits at startup rather than ignoring them.
     environment = set(split(service["Service"]["Environment"]))
-    assert environment == {
-        "GHC_HISTORY__DB_PATH=/var/lib/ghc-api-proxy/history.db",
-        "GHC_TOKENIZATION__STATE_PATH=/var/lib/ghc-api-proxy/tokenization.json",
-    }
+    assert environment == {"XDG_DATA_HOME=/var/lib"}
 
 
-def test_service_state_environment_is_consumed_by_settings(
+def test_service_state_environment_lands_in_the_state_directory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service = _read_unit("ghc-api-proxy.service")
+    """The unit's `Environment=` has to actually decide where state is written.
+
+    The invariant is unchanged; its consumer is not. It used to be asserted against
+    `load_settings()` and the two `GHC_*__*_PATH` keys, which belong to the chain `--fd` no longer
+    runs. `StateDirectory=ghc-api-proxy` makes systemd create `/var/lib/ghc-api-proxy`, and the
+    assertion is that this is exactly where the chain then looks.
+    """
+    service = read_unit("ghc-api-proxy.service")
     for assignment in split(service["Service"]["Environment"]):
         name, value = assignment.split("=", 1)
         monkeypatch.setenv(name, value)
 
-    settings = load_settings()
-
-    assert settings.history.db_path == "/var/lib/ghc-api-proxy/history.db"
-    assert settings.tokenization.state_path == "/var/lib/ghc-api-proxy/tokenization.json"
+    expected = Path("/var/lib") / service["Service"]["StateDirectory"]
+    assert user_data_path() == expected
+    assert tokenization_state_path() == expected / "tokenization.json"
+    assert spec_config_file_path() == expected / "config.yaml"
 
 
 @pytest.mark.asyncio
@@ -184,7 +210,7 @@ async def test_service_permissions_restrict_real_state_writers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service = _read_unit("ghc-api-proxy.service")
+    service = read_unit("ghc-api-proxy.service")
     directory_mode = int(service["Service"]["StateDirectoryMode"], 8)
     service_umask = int(service["Service"]["UMask"], 8)
     state_directory = tmp_path / "state"
@@ -250,8 +276,8 @@ async def test_service_permissions_restrict_real_state_writers(
 
 
 def test_service_shutdown_and_cgroup_contract() -> None:
-    service = _read_unit("ghc-api-proxy.service")
-    resource_slice = _read_unit("ghc-api-proxy.slice")
+    service = read_unit("ghc-api-proxy.service")
+    resource_slice = read_unit("ghc-api-proxy.slice")
 
     assert service["Service"]["EnvironmentFile"].startswith("-")
     assert service["Service"]["Restart"] == "on-failure"
@@ -266,32 +292,33 @@ def test_service_shutdown_and_cgroup_contract() -> None:
 
 
 def test_service_shutdown_contract_rejects_nonpositive_manager_margin() -> None:
-    service = _read_unit("ghc-api-proxy.service")
+    service = read_unit("ghc-api-proxy.service")
     service["Service"]["TimeoutStopSec"] = f"{DEFAULT_GRACEFUL_TIMEOUT_SECONDS}s"
 
     with pytest.raises(AssertionError, match="strictly exceed"):
         _assert_graceful_timeout_contract(service)
 
 
-FROZEN_BY_CHAIN_SWITCH = pytest.mark.skip(
+RETIRED_CHAIN_CONTRACT = pytest.mark.skip(
     reason=(
-        "Frozen 2026-08-19, when `--fd` switched to the pipeline chain (user ruling: switch, then "
-        "analyse the old content and either port or freeze it). These two exercise a real "
-        "invariant — a listener systemd already opened is served end to end — and are kept rather "
-        "than deleted. They cannot be ported yet: they configure the retired chain through "
-        "`GHC_UPSTREAM__*` and its `generic` upstream type, and the pipeline chain has neither. "
-        "It offers only the `github_copilot` provider, whose token exchange is the module-level "
-        "constant `app.ghc_client.tokens.TOKEN_URL` pointing at api.github.com — so there is no "
-        "way to stand the new chain up against a local fake at all. "
-        "Exit condition: make the token endpoint configurable (or add a second provider type), "
-        "then rewrite the fake upstream here to speak the Copilot token and catalog protocol. "
-        "Until then `--fd` has no end-to-end coverage, which is the cost of the switch and is "
-        "recorded rather than hidden."
+        "Frozen 2026-08-19: `--fd` now runs the pipeline chain, and these two assert the retired "
+        "chain's contract rather than the invariant they were written for. Liveness answering "
+        "`{'status': 'ok'}` is now `alive`; readiness `healthy` is now `ready`; a written "
+        "`history.db` presumes a history store the pipeline chain does not have; and the state "
+        "locations came from `GHC_HISTORY__DB_PATH` / `GHC_TOKENIZATION__STATE_PATH`, which the "
+        "current schema rejects outright. "
+        "Superseded by `test_systemd_pipeline_unit.py`, which stands the same unit up on an "
+        "inherited listener with both hosts pointed at a local fake and no real credentials — "
+        "the coverage these lost, on the chain that is actually served. "
+        "They are kept rather than deleted because their inference and graceful-shutdown halves "
+        "have no replacement yet: the fake there speaks only the two GET halves of the protocol. "
+        "Exit condition: teach it `POST /v1/messages`, then port those assertions across and "
+        "delete these."
     )
 )
 
 
-@FROZEN_BY_CHAIN_SWITCH
+@RETIRED_CHAIN_CONTRACT
 def test_inherited_listener_serves_ready_generic_upstream_and_persists_overrides(
     tmp_path: Path,
 ) -> None:
@@ -319,11 +346,11 @@ def test_inherited_listener_serves_ready_generic_upstream_and_persists_overrides
         "COPILOT_API_GITHUB_TOKEN",
         "GH_TOKEN",
         "GITHUB_TOKEN",
-        "GHC_AUTH__GITHUB_TOKEN",
         "GHC_CONFIG",
     ):
         environment.pop(name, None)
-    service = _read_unit("ghc-api-proxy.service")
+    # Re-added below with a fake value; popped first so the operator's real one cannot leak in.
+    service = read_unit("ghc-api-proxy.service")
     unit_state_environment = {
         name: str(default_state_directory / Path(value).name)
         for assignment in split(service["Service"]["Environment"])
@@ -334,13 +361,15 @@ def test_inherited_listener_serves_ready_generic_upstream_and_persists_overrides
         {
             "HOME": "/nonexistent",
             "PYTHONPATH": str(SYSTEMD_DIR.parents[1] / "src"),
-            "GHC_HISTORY__DB_PATH": str(history_path),
-            "GHC_TOKENIZATION__STATE_PATH": str(tokenization_path),
-            "GHC_UPSTREAM__TYPE": "generic",
-            "GHC_UPSTREAM__OPENAI_BASE_URL": f"{upstream_url}/v1",
-            "GHC_UPSTREAM__ANTHROPIC_BASE_URL": upstream_url,
-            "GHC_UPSTREAM__API_KEY": "smoke-key",
-            "GHC_MODEL_REFRESH_INTERVAL": "0",
+            # Both hosts at the local fake. Configurable since 2026-08-19; before that the auth
+            # host was a module constant and this could not be stood up without real credentials.
+            "GHC_MODEL_PROVIDERS__GHC__TYPE": "github_copilot",
+            "GHC_MODEL_PROVIDERS__GHC__API_BASE_URL": upstream_url,
+            "GHC_MODEL_PROVIDERS__GHC__AUTH_BASE_URL": upstream_url,
+            "GHC_MODEL_PROVIDERS__GHC__MODEL_REFRESH_INTERVAL": "0",
+            "GHC_DEFAULT_MODEL_PROVIDER": "ghc",
+            # A GitHub token for `EnvTokenProvider`; the fake exchanges whatever it is given.
+            "GITHUB_TOKEN": "ghu_smoke",
         }
     )
     inherited_fd = listener.fileno()
@@ -361,13 +390,13 @@ def test_inherited_listener_serves_ready_generic_upstream_and_persists_overrides
         text=True,
     )
     try:
-        backlog_response = _http_request(backlog_client, "/health/liveness")
+        backlog_response = http_request(backlog_client, "/health/liveness")
         assert b"HTTP/1.1 200 OK" in backlog_response
         assert b'{"status":"ok"}' in backlog_response
 
         with socket.create_connection(address, timeout=10) as readiness_client:
             readiness_client.settimeout(10)
-            readiness_response = _http_request(readiness_client, "/health/readiness")
+            readiness_response = http_request(readiness_client, "/health/readiness")
         assert b"HTTP/1.1 200 OK" in readiness_response
         assert b'"status":"healthy"' in readiness_response
 
@@ -409,7 +438,7 @@ def test_inherited_listener_serves_ready_generic_upstream_and_persists_overrides
             process.communicate(timeout=10)
 
 
-@FROZEN_BY_CHAIN_SWITCH
+@RETIRED_CHAIN_CONTRACT
 def test_short_graceful_timeout_cancels_inflight_request_and_runs_lifespan(
     tmp_path: Path,
 ) -> None:
@@ -432,7 +461,6 @@ def test_short_graceful_timeout_cancels_inflight_request_and_runs_lifespan(
         "COPILOT_API_GITHUB_TOKEN",
         "GH_TOKEN",
         "GITHUB_TOKEN",
-        "GHC_AUTH__GITHUB_TOKEN",
         "GHC_CONFIG",
     ):
         environment.pop(name, None)
@@ -490,7 +518,7 @@ def test_short_graceful_timeout_cancels_inflight_request_and_runs_lifespan(
     try:
         with socket.create_connection(address, timeout=10) as readiness_client:
             readiness_client.settimeout(10)
-            readiness_response = _http_request(readiness_client, "/health/readiness")
+            readiness_response = http_request(readiness_client, "/health/readiness")
         assert b"HTTP/1.1 200 OK" in readiness_response
 
         request_thread.start()
