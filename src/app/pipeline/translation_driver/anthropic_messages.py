@@ -150,6 +150,16 @@ def _system_value(blocks: list[SystemBlock]) -> list[dict[str, Any]]:
     return [{"type": TEXT, "text": block.text, **dict(block.metadata)} for block in blocks]
 
 
+def block_to_anthropic(block: ContentBlock, conversion: Conversion) -> dict[str, Any] | None:
+    """Render one block as Anthropic content, or None when it has no faithful rendering."""
+    return _block_to_anthropic(block, conversion)
+
+
+def block_from_anthropic(raw: dict[str, Any]) -> ContentBlock:
+    """Read one Anthropic content block into the typed model."""
+    return _block_from_anthropic(raw)
+
+
 def _block_to_anthropic(block: ContentBlock, conversion: Conversion) -> dict[str, Any] | None:
     if block.kind is BlockKind.TEXT:
         return {"type": TEXT, "text": block.text}

@@ -136,6 +136,54 @@ def _function_tool(tool: dict[str, Any]) -> dict[str, Any]:
     return converted
 
 
+def blocks_from_item(item: dict[str, Any]) -> tuple[str, tuple[ContentBlock, ...]]:
+    """Read one Responses item as the role it belongs to and the blocks it holds.
+
+    Shared by the request `input` reader and the response `output` reader: an item means the same
+    thing in both, and two copies of this would drift the moment one gained an item type.
+    """
+    kind = str(item.get("type", ""))
+    if kind == "message":
+        return (
+            str(item.get("role", "user")),
+            tuple(_block_from_content_part(part) for part in _dict_list(item.get("content"))),
+        )
+    if kind == "function_call":
+        return "assistant", (
+            ContentBlock(
+                BlockKind.TOOL_USE,
+                call_id=str(item.get("call_id") or item.get("id", "")),
+                name=str(item.get("name", "")),
+                arguments=_decoded_arguments(item.get("arguments")),
+                raw=item,
+            ),
+        )
+    if kind == "function_call_output":
+        return "user", (
+            ContentBlock(
+                BlockKind.TOOL_RESULT,
+                call_id=str(item.get("call_id", "")),
+                output=item.get("output"),
+                raw=item,
+            ),
+        )
+    if kind == "reasoning":
+        encrypted = str(item.get("encrypted_content", ""))
+        return "assistant", (
+            ContentBlock(
+                BlockKind.REASONING,
+                text=_summary_text(item.get("summary")),
+                reasoning=(
+                    ReasoningState(OpaqueFormat.RESPONSES_ENCRYPTED, encrypted)
+                    if encrypted
+                    else None
+                ),
+                raw=item,
+            ),
+        )
+    return "user", (ContentBlock(BlockKind.UNKNOWN, raw=item),)
+
+
 def _messages_from_input(value: object) -> list[SemanticMessage]:
     """Read Responses `input` items back into typed messages.
 
@@ -144,65 +192,8 @@ def _messages_from_input(value: object) -> list[SemanticMessage]:
     """
     messages: list[SemanticMessage] = []
     for item in _dict_list(value):
-        kind = str(item.get("type", ""))
-        if kind == "message":
-            role = str(item.get("role", "user"))
-            blocks = tuple(
-                _block_from_content_part(part) for part in _dict_list(item.get("content"))
-            )
-            messages.append(SemanticMessage(role, blocks))
-        elif kind == "function_call":
-            messages.append(
-                SemanticMessage(
-                    "assistant",
-                    (
-                        ContentBlock(
-                            BlockKind.TOOL_USE,
-                            call_id=str(item.get("call_id") or item.get("id", "")),
-                            name=str(item.get("name", "")),
-                            arguments=_decoded_arguments(item.get("arguments")),
-                            raw=item,
-                        ),
-                    ),
-                )
-            )
-        elif kind == "function_call_output":
-            messages.append(
-                SemanticMessage(
-                    "user",
-                    (
-                        ContentBlock(
-                            BlockKind.TOOL_RESULT,
-                            call_id=str(item.get("call_id", "")),
-                            output=item.get("output"),
-                            raw=item,
-                        ),
-                    ),
-                )
-            )
-        elif kind == "reasoning":
-            encrypted = str(item.get("encrypted_content", ""))
-            messages.append(
-                SemanticMessage(
-                    "assistant",
-                    (
-                        ContentBlock(
-                            BlockKind.REASONING,
-                            text=_summary_text(item.get("summary")),
-                            reasoning=(
-                                ReasoningState(OpaqueFormat.RESPONSES_ENCRYPTED, encrypted)
-                                if encrypted
-                                else None
-                            ),
-                            raw=item,
-                        ),
-                    ),
-                )
-            )
-        else:
-            messages.append(
-                SemanticMessage("user", (ContentBlock(BlockKind.UNKNOWN, raw=item),))
-            )
+        role, blocks = blocks_from_item(item)
+        messages.append(SemanticMessage(role, blocks))
     return messages
 
 
@@ -264,6 +255,15 @@ def _input_from_messages(
 
 def _message_item(role: str, parts: list[dict[str, Any]]) -> dict[str, Any]:
     return {"type": "message", "role": role, "content": parts}
+
+
+def item_from_block(
+    block: ContentBlock,
+    role: str,
+    conversion: Conversion,
+) -> dict[str, Any] | None:
+    """Render one block as a Responses item, or None when it may not cross."""
+    return _item_from_block(block, role, conversion)
 
 
 def _item_from_block(

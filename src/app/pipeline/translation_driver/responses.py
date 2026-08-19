@@ -6,34 +6,38 @@ An Anthropic client asking for a Responses-backed model would receive a Response
 `spec.md` fixes two mappings this must honour.
 An `incomplete` response whose reason is the output-token limit carries `stop_reason: max_tokens`.
 A legal success with no content may produce an empty text block.
+
+Blocks are the same `ContentBlock` the request side uses, read and written by the same functions.
+`D-ARCH = B` asks for one typed truth, and two block models would have been two. This file used to
+hold Anthropic-shaped dicts under a `kind`, which is why the Responses writer sent `arguments` as
+an object where the wire wants a JSON string, and why a reasoning block crossing to Anthropic
+arrived with an empty signature.
 """
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
 
+from app.pipeline.translation_driver.anthropic_messages import (
+    block_from_anthropic,
+    block_to_anthropic,
+)
+from app.pipeline.translation_driver.content import BlockKind, ContentBlock
+from app.pipeline.translation_driver.openai_responses import blocks_from_item, item_from_block
 from app.pipeline.translation_driver.semantic import Conversion, LossCode
 
 TEXT = "text"
-THINKING = "thinking"
-TOOL_USE = "tool_use"
 
 MAX_TOKENS = "max_tokens"
 END_TURN = "end_turn"
 TOOL_USE_STOP = "tool_use"
 
 
-@dataclass(frozen=True, slots=True)
-class SemanticBlock:
-    kind: str
-    payload: dict[str, Any]
-
-
 @dataclass(slots=True)
 class SemanticResponse:
     id: str = ""
     model: str = ""
-    blocks: list[SemanticBlock] = field(default_factory=lambda: list[SemanticBlock]())
+    blocks: list[ContentBlock] = field(default_factory=lambda: list[ContentBlock]())
     stop_reason: str = END_TURN
     usage: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
     conversion: Conversion = field(default_factory=Conversion)
@@ -58,14 +62,20 @@ def from_anthropic_response(payload: Mapping[str, Any]) -> SemanticResponse:
     if isinstance(usage, Mapping):
         response.usage = dict[str, Any](cast(Mapping[str, Any], usage))
 
-    for block in _mapping_list(payload.get("content")):
-        kind = str(block.get("type", ""))
-        response.blocks.append(SemanticBlock(kind=kind, payload=block))
+    response.blocks = [
+        block_from_anthropic(block) for block in _mapping_list(payload.get("content"))
+    ]
     return response
 
 
 def to_anthropic_response(response: SemanticResponse) -> dict[str, Any]:
-    content = [block.payload for block in response.blocks]
+    content = [
+        rendered
+        for rendered in (
+            block_to_anthropic(block, response.conversion) for block in response.blocks
+        )
+        if rendered is not None
+    ]
     if not content:
         # A legal success with no content may carry one empty text block; spec.md permits it.
         content = [{"type": TEXT, "text": ""}]
@@ -109,43 +119,17 @@ def from_openai_responses_response(payload: Mapping[str, Any]) -> SemanticRespon
     if isinstance(usage, Mapping):
         response.usage = dict[str, Any](cast(Mapping[str, Any], usage))
 
-    has_tool_call = False
     for item in _mapping_list(payload.get("output")):
-        item_type = str(item.get("type", ""))
-        if item_type == "message":
-            for part in _mapping_list(item.get("content")):
-                if str(part.get("type", "")) in {"output_text", "text"}:
-                    response.blocks.append(
-                        SemanticBlock(TEXT, {"type": TEXT, "text": str(part.get("text", ""))})
-                    )
-                else:
-                    response.conversion.record(
-                        LossCode.BLOCK_NOT_CARRIED,
-                        f"content part {part.get('type')!r}",
-                    )
-        elif item_type == "function_call":
-            has_tool_call = True
-            response.blocks.append(
-                SemanticBlock(
-                    TOOL_USE,
-                    {
-                        "type": TOOL_USE,
-                        "id": str(item.get("call_id") or item.get("id", "")),
-                        "name": str(item.get("name", "")),
-                        "input": item.get("arguments", {}),
-                    },
+        _, blocks = blocks_from_item(item)
+        for block in blocks:
+            if block.kind is BlockKind.UNKNOWN:
+                response.conversion.record(
+                    LossCode.ITEM_NOT_CARRIED, f"output item {item.get('type')!r}"
                 )
-            )
-        elif item_type == "reasoning":
-            response.blocks.append(
-                SemanticBlock(
-                    THINKING,
-                    {"type": THINKING, "thinking": _reasoning_text(item), "signature": ""},
-                )
-            )
-        else:
-            response.conversion.record(LossCode.ITEM_NOT_CARRIED, f"output item {item_type!r}")
+                continue
+            response.blocks.append(block)
 
+    has_tool_call = any(block.kind is BlockKind.TOOL_USE for block in response.blocks)
     stop_reason, problem = _responses_stop_reason(payload, has_tool_call)
     response.stop_reason = stop_reason
     if problem is not None:
@@ -153,53 +137,36 @@ def from_openai_responses_response(payload: Mapping[str, Any]) -> SemanticRespon
     return response
 
 
-def _reasoning_text(item: Mapping[str, Any]) -> str:
-    """Join a reasoning item's summary parts.
-
-    Parts inside one item concatenate; items never merge with each other.
-    """
-    return "".join(str(part.get("text", "")) for part in _mapping_list(item.get("summary")))
-
-
 def to_openai_responses_response(response: SemanticResponse) -> dict[str, Any]:
-    output: list[dict[str, Any]] = []
-    for block in response.blocks:
-        if block.kind == TEXT:
-            output.append(
-                {
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [
-                        {"type": "output_text", "text": str(block.payload.get("text", ""))}
-                    ],
-                }
-            )
-        elif block.kind == TOOL_USE:
-            output.append(
-                {
-                    "type": "function_call",
-                    "call_id": str(block.payload.get("id", "")),
-                    "name": str(block.payload.get("name", "")),
-                    "arguments": block.payload.get("input", {}),
-                }
-            )
-        elif block.kind == THINKING:
-            output.append(
-                {
-                    "type": "reasoning",
-                    "summary": [
-                        {"type": "summary_text", "text": str(block.payload.get(THINKING, ""))}
-                    ],
-                }
-            )
-        else:
-            response.conversion.record(LossCode.BLOCK_NOT_CARRIED, f"block {block.kind!r}")
+    """Render the blocks as Responses `output` items.
 
+    Every block in a response is the assistant's, which is what makes text `output_text`.
+    """
+    rendered = [
+        item
+        for item in (
+            item_from_block(block, "assistant", response.conversion)
+            for block in response.blocks
+        )
+        if item is not None
+    ]
     return {
         "id": response.id,
         "object": "response",
         "model": response.model,
         "status": "incomplete" if response.stop_reason == MAX_TOKENS else "completed",
-        "output": output,
+        "output": [_as_output_item(item) for item in rendered],
         "usage": response.usage,
     }
+
+
+def _as_output_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Wrap a bare content part in the message item a Responses `output` expects.
+
+    The shared writer produces content parts, because in a request they sit inside a message. In a
+    response each one is its own item, so the wrapping happens here rather than by giving the
+    writer a second mode.
+    """
+    if str(item.get("type", "")) in {"output_text", "input_text", "input_image"}:
+        return {"type": "message", "role": "assistant", "content": [item]}
+    return item

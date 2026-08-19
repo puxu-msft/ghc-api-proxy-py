@@ -23,7 +23,6 @@ from app.pipeline.translation_driver.registry import (
     outbound_name,
 )
 from app.pipeline.translation_driver.responses import (
-    SemanticBlock,
     SemanticResponse,
     from_anthropic_response,
     from_openai_responses_response,
@@ -70,7 +69,6 @@ def default_registry(config: ModelTranslationConfig | None = None) -> Translator
 
 __all__ = [
     "Conversion",
-    "SemanticBlock",
     "SemanticRequest",
     "SemanticResponse",
     "SystemBlock",

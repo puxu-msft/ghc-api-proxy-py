@@ -3,6 +3,7 @@ from typing import Any
 
 import pytest
 
+from app.anthropic.thinking.reasoning_carrier import decode_reasoning_carrier
 from app.pipeline.request import WireFormat
 from app.pipeline.translation_driver import (
     TranslatorNotFound,
@@ -443,3 +444,93 @@ def test_responses_input_reads_back_into_the_same_blocks() -> None:
         if block["type"] == "tool_use"
     )
     assert call["input"] == {"path": "/x"}
+
+
+RESPONSES_RESPONSE: dict[str, Any] = {
+    "id": "resp_1",
+    "model": "gpt-5.6-terra",
+    "status": "completed",
+    "output": [
+        {
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "thought"}],
+            "encrypted_content": "ENC123",
+        },
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "hi"}],
+        },
+        {
+            "type": "function_call",
+            "call_id": "call_9",
+            "name": "Read",
+            "arguments": '{"path":"/y"}',
+        },
+    ],
+    "usage": {"input_tokens": 5, "output_tokens": 7},
+}
+
+
+def test_a_responses_reasoning_item_reaches_anthropic_with_its_state_intact() -> None:
+    """The signature used to be written as `""`, which threw the continuation state away.
+
+    `encrypted_content` has no Anthropic spelling, so it rides inside a carrier this proxy signs —
+    the reverse of the refusal on the way out, and legitimate for the same reason: the value is
+    upstream's own, recovered rather than invented.
+    """
+    payload, _ = default_registry().translate_response(
+        RESPONSES_RESPONSE,
+        source=WireFormat.OPENAI_RESPONSES,
+        target=WireFormat.ANTHROPIC_MESSAGES,
+    )
+    thinking = next(block for block in payload["content"] if block["type"] == "thinking")
+    assert thinking["thinking"] == "thought"
+    assert thinking["signature"], "the continuation state was dropped"
+    assert decode_reasoning_carrier(thinking["signature"]).encrypted_content == "ENC123"
+
+
+def test_a_response_round_trip_keeps_the_reasoning_payload() -> None:
+    """Losing it here is invisible until the next turn cannot continue the reasoning."""
+    registry = default_registry()
+    crossed, _ = registry.translate_response(
+        RESPONSES_RESPONSE,
+        source=WireFormat.OPENAI_RESPONSES,
+        target=WireFormat.ANTHROPIC_MESSAGES,
+    )
+    back, semantic = registry.translate_response(
+        crossed,
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    reasoning = next(item for item in back["output"] if item["type"] == "reasoning")
+    assert reasoning["encrypted_content"] == "ENC123"
+    assert semantic.conversion.lossless, semantic.conversion.losses
+
+
+def test_a_response_tool_call_leaves_as_a_json_string() -> None:
+    """It used to leave as an object, which the wire refuses."""
+    payload, _ = default_registry().translate_response(
+        RESPONSES_RESPONSE,
+        source=WireFormat.OPENAI_RESPONSES,
+        target=WireFormat.ANTHROPIC_MESSAGES,
+    )
+    tool_use = next(block for block in payload["content"] if block["type"] == "tool_use")
+    assert tool_use["input"] == {"path": "/y"}
+
+    back, _ = default_registry().translate_response(
+        payload,
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    call = next(item for item in back["output"] if item["type"] == "function_call")
+    assert call["arguments"] == '{"path": "/y"}'
+
+
+def test_a_tool_call_in_the_response_sets_the_anthropic_stop_reason() -> None:
+    payload, _ = default_registry().translate_response(
+        RESPONSES_RESPONSE,
+        source=WireFormat.OPENAI_RESPONSES,
+        target=WireFormat.ANTHROPIC_MESSAGES,
+    )
+    assert payload["stop_reason"] == "tool_use"
