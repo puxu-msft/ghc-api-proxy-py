@@ -14,6 +14,7 @@ import orjson
 
 from app.pipeline.delivery.blocks import CompletedBlock
 from app.pipeline.delivery.sse_source import SseEvent
+from app.pipeline.translation_driver.reasoning_carrier import encode_reasoning_carrier
 
 TEXT = "text"
 THINKING = "thinking"
@@ -222,7 +223,11 @@ class ResponsesAssembler:
                 "input": _decode_json(draft.partial_json or "{}"),
             }
         elif draft.kind == THINKING:
-            payload = {"type": THINKING, THINKING: draft.text, "signature": ""}
+            payload = {
+                "type": THINKING,
+                THINKING: draft.text,
+                "signature": _reasoning_signature(draft, data),
+            }
         else:
             payload = {"type": TEXT, TEXT: draft.text}
         return (CompletedBlock(index=draft.index, kind=draft.kind, payload=payload),)
@@ -245,6 +250,25 @@ class ResponsesAssembler:
             )
             return
         self._terminal.stop_reason = TOOL_USE if self._saw_tool_call else "end_turn"
+
+
+def _reasoning_signature(draft: _Draft, closing: dict[str, Any]) -> str:
+    """The carrier for a Responses reasoning item, read from the event that closed it.
+
+    `spec.md` fixes both halves: a non-empty `encrypted_content` must survive value-exact so the
+    client can echo it back and the next turn can carry on, and a missing or empty one still emits
+    the project's bare marker rather than nothing. This used to write `""`, which broke both.
+
+    Read from the closing item rather than the draft: `output_item.added` and `output_item.done`
+    do not carry the same content — that is the same asymmetry that made the assembler pair
+    nothing when it keyed drafts on `item.id`. The draft is the fallback, not the source.
+    """
+    raw = closing.get("item")
+    item = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+    encrypted = str(item.get("encrypted_content", "")) or str(
+        draft.payload.get("encrypted_content", "")
+    )
+    return encode_reasoning_carrier(encrypted or None)
 
 
 def _decode_json(raw: str) -> Any:

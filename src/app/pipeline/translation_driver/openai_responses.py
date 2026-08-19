@@ -351,12 +351,17 @@ def _reasoning_item(block: ContentBlock, conversion: Conversion) -> dict[str, An
             "summary": _summary_parts(block.text),
             "encrypted_content": state.value,
         }
-    if state.format is OpaqueFormat.PROXY_CARRIER and state.encrypted_content:
-        return {
+    if state.format is OpaqueFormat.PROXY_CARRIER:
+        # A carrier this proxy issued. With a payload it round-trips value-exact; bare, `spec.md`
+        # says TRANSFORM — restore a summary-only reasoning item rather than drop the block. It
+        # used to be dropped, which lost the turn's reasoning entirely on the way back.
+        item: dict[str, Any] = {
             "type": "reasoning",
             "summary": _summary_parts(block.text),
-            "encrypted_content": state.encrypted_content,
         }
+        if state.encrypted_content:
+            item["encrypted_content"] = state.encrypted_content
+        return item
     conversion.record(
         LossCode.REASONING_STATE_NOT_PORTABLE,
         f"{state.format.value} cannot be written as {WIRE_FORMAT} encrypted_content",
