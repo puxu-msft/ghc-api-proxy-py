@@ -13,6 +13,7 @@ from app.pipeline.translation_driver import (
     outbound_name,
     to_openai_responses,
 )
+from app.pipeline.translation_driver.semantic import LossCode
 
 # The worked example from model-translation.md.
 ANTHROPIC_SYSTEM: list[dict[str, Any]] = [
@@ -72,8 +73,8 @@ def test_the_lost_block_metadata_is_named_rather_than_dropped() -> None:
         source=WireFormat.ANTHROPIC_MESSAGES,
         target=WireFormat.OPENAI_RESPONSES,
     )
-    losses = semantic.conversion.losses
-    assert any("cache_control" in loss for loss in losses), losses
+    assert semantic.conversion.has(LossCode.SYSTEM_METADATA_NOT_CARRIED), semantic.conversion.losses
+    assert any("cache_control" in loss.detail for loss in semantic.conversion.losses)
 
 
 def test_anthropic_tools_become_responses_function_tools() -> None:
@@ -115,8 +116,8 @@ def test_anthropic_only_fields_do_not_reach_a_responses_body() -> None:
         target=WireFormat.OPENAI_RESPONSES,
     )
     assert "context_management" not in payload
-    losses = semantic.conversion.losses
-    assert any("context_management" in loss for loss in losses), losses
+    assert semantic.conversion.has(LossCode.EXTENSIONS_NOT_CARRIED), semantic.conversion.losses
+    assert any("context_management" in loss.detail for loss in semantic.conversion.losses)
 
 
 def test_messages_and_limits_map_to_the_responses_names() -> None:
@@ -125,7 +126,10 @@ def test_messages_and_limits_map_to_the_responses_names() -> None:
         source=WireFormat.ANTHROPIC_MESSAGES,
         target=WireFormat.OPENAI_RESPONSES,
     )
-    assert payload["input"] == [{"role": "user", "content": "hi"}]
+    # Anthropic's block shape does not survive as-is: upstream answers `Invalid value: 'text'`.
+    assert payload["input"] == [
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}
+    ]
     assert payload["max_output_tokens"] == 100
     assert payload["stream"] is True
     assert "messages" not in payload
@@ -147,7 +151,11 @@ def test_round_trip_through_the_intermediate_preserves_the_request() -> None:
         target=WireFormat.ANTHROPIC_MESSAGES,
     )
     assert back["model"] == ANTHROPIC_REQUEST["model"]
-    assert back["messages"] == ANTHROPIC_REQUEST["messages"]
+    # The string content comes back as an explicit text block, which is the same message said in
+    # the spelling the typed model round-trips through.
+    assert back["messages"] == [
+        {"role": "user", "content": [{"type": "text", "text": "hi"}]}
+    ]
     assert back["max_tokens"] == 100
     assert back["stream"] is True
     # The system prompt returns as one block rather than two. That is the string `instructions`
@@ -203,7 +211,7 @@ def test_a_non_system_instruction_role_is_recorded_as_a_loss() -> None:
         target=WireFormat.ANTHROPIC_MESSAGES,
     )
     assert semantic.conversion.lossless is False
-    assert any("developer" in loss for loss in semantic.conversion.losses)
+    assert semantic.conversion.has(LossCode.INSTRUCTIONS_ROLE_NOT_CARRIED)
 
 
 def test_malformed_system_entry_is_recorded_as_a_loss() -> None:
@@ -283,3 +291,155 @@ def test_an_unregistered_placement_fails_loudly() -> None:
     request = from_anthropic_messages(ANTHROPIC_REQUEST)
     with pytest.raises(KeyError):
         to_openai_responses(request, system_prompts="as-role-system")  # type: ignore[arg-type]
+
+
+# A conversation with the block types real traffic actually carries. Counted from three rehydrated
+# production requests on 2026-08-18: 856 tool_use, 856 tool_result, 490 thinking, 450 text.
+CONVERSATION: dict[str, Any] = {
+    "model": "m",
+    "max_tokens": 100,
+    "messages": [
+        {"role": "user", "content": [{"type": "text", "text": "read it"}]},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "pondering", "signature": "REAL_ANTHROPIC_SIG"},
+                {"type": "text", "text": "looking now"},
+                {"type": "tool_use", "id": "tu_1", "name": "Read", "input": {"path": "/x"}},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "tu_1",
+                    "content": [{"type": "text", "text": "file body"}],
+                }
+            ],
+        },
+    ],
+}
+
+
+def test_a_real_conversation_becomes_responses_input_items() -> None:
+    """The shapes measured off the existing service for the same conversation.
+
+    Anthropic's own block spelling reaching upstream is what produced
+    `Invalid value: 'text'. Supported values are: 'input_text', ...` on every real request.
+    """
+    payload, _ = default_registry().translate(
+        CONVERSATION,
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    assert payload["input"] == [
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "read it"}]},
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "looking now"}],
+        },
+        {
+            "type": "function_call",
+            "call_id": "tu_1",
+            "name": "Read",
+            "arguments": '{"path": "/x"}',
+        },
+        {"type": "function_call_output", "call_id": "tu_1", "output": "file body"},
+    ]
+
+
+def test_tool_arguments_cross_as_a_json_string() -> None:
+    """Asserted on its own because an object here is a 400 and the type checker cannot see it."""
+    payload, _ = default_registry().translate(
+        CONVERSATION,
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    call = next(item for item in payload["input"] if item["type"] == "function_call")
+    assert isinstance(call["arguments"], str)
+
+
+def test_a_real_anthropic_signature_is_refused_rather_than_forged() -> None:
+    """The safety property, not a formatting one.
+
+    `encrypted_content` is a value only the Responses endpoint can produce. Writing Anthropic's
+    signature into it would hand upstream something it never issued and cannot verify, so the
+    reasoning item is dropped and the refusal is recorded instead.
+    """
+    payload, semantic = default_registry().translate(
+        CONVERSATION,
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    assert not [item for item in payload["input"] if item["type"] == "reasoning"]
+    assert semantic.conversion.has(LossCode.REASONING_STATE_NOT_PORTABLE)
+
+
+def test_a_carrier_this_proxy_issued_does_cross() -> None:
+    """The other half of the same rule: recovering our own value is not inventing one."""
+    from app.anthropic.thinking.reasoning_carrier import encode_reasoning_carrier
+
+    signed = encode_reasoning_carrier("upstream-encrypted-payload")
+    payload, semantic = default_registry().translate(
+        {
+            **CONVERSATION,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "recalled", "signature": signed}
+                    ],
+                }
+            ],
+        },
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    reasoning = next(item for item in payload["input"] if item["type"] == "reasoning")
+    assert reasoning["encrypted_content"] == "upstream-encrypted-payload"
+    assert not semantic.conversion.has(LossCode.REASONING_STATE_NOT_PORTABLE)
+
+
+def test_an_unknown_block_is_carried_rather_than_dropped() -> None:
+    """A format grows block types faster than a translator learns them.
+
+    Same-format crossing must return what it was given, or a conversation quietly loses a turn.
+    """
+    payload, _ = default_registry().translate(
+        {
+            "model": "m",
+            "messages": [
+                {"role": "user", "content": [{"type": "some_future_block", "payload": 1}]}
+            ],
+        },
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.ANTHROPIC_MESSAGES,
+    )
+    assert payload["messages"][0]["content"] == [{"type": "some_future_block", "payload": 1}]
+
+
+def test_responses_input_reads_back_into_the_same_blocks() -> None:
+    """Both directions, since a reader that cannot undo its writer is only half a bridge."""
+    crossed, _ = default_registry().translate(
+        CONVERSATION,
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    back, _ = default_registry().translate(
+        crossed,
+        source=WireFormat.OPENAI_RESPONSES,
+        target=WireFormat.ANTHROPIC_MESSAGES,
+    )
+    kinds = [
+        block["type"] for message in back["messages"] for block in message["content"]
+    ]
+    assert kinds == ["text", "text", "tool_use", "tool_result"]
+    call = next(
+        block
+        for message in back["messages"]
+        for block in message["content"]
+        if block["type"] == "tool_use"
+    )
+    assert call["input"] == {"path": "/x"}

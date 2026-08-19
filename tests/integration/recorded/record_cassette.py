@@ -11,6 +11,11 @@ and read by people. Nothing here should ever carry a real conversation.
 Secrets are removed on the way to disk, not on the way through: the live code below this transport
 must receive what upstream actually sent. Handing it a redacted token once made it authenticate
 with the literal word REDACTED, and upstream said so.
+
+The config is pinned rather than loaded. Recording once used `load_proxy_config()` and picked up
+whichever `model_mappings` happened to be on the machine, so `gpt-5.5` went out as `gpt-5.6-terra`
+while the replay — which pins its own config — still asked for `gpt-5.5`, and the shape guard fired
+on a cassette that had just been recorded. Only credentials may come from the environment.
 """
 
 from __future__ import annotations
@@ -22,11 +27,12 @@ from typing import Any
 
 import httpx
 
-from app.config.loading import load_proxy_config
+from app.config.schema import ProxyConfig
 from app.server.composition import build_chain, refresh_catalogs
 from app.server.handler import handle_bounded
 from app.server.inbound import build_context, route_for_path
 from recorded.cassettes import RecordingTransport
+from recorded.recorded_provider import pinned_config
 
 # Data, not code: cassettes stay under `tests/` so they are easy to find and diff, while
 # the harness lives with the one group that imports it.
@@ -45,7 +51,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
 
 async def record(name: str) -> None:
     body = SCENARIOS[name]
-    config = load_proxy_config()
+    config: ProxyConfig = pinned_config()
     recorder = RecordingTransport()
     client = httpx.AsyncClient(transport=recorder, timeout=120)
     try:

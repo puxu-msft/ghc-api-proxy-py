@@ -168,13 +168,23 @@ def _resplit(body: bytes, lengths: list[int]) -> list[bytes]:
 def _scrub_response_body(chunks: list[bytes], content_type: str) -> list[bytes]:
     """Remove identifying fields from a response body, whatever shape it arrives in."""
     if "text/event-stream" in content_type:
-        return _scrub_sse(chunks)
+        return _without_empties(_scrub_sse(chunks))
     replacement = _scrub_json(b"".join(chunks))
     if replacement is None:
-        return chunks
+        return _without_empties(chunks)
     # One chunk: a rewritten body is no longer the bytes that arrived, so pretending to preserve
     # its framing would be a lie about something nothing depends on.
     return [replacement]
+
+
+def _without_empties(chunks: list[bytes]) -> list[bytes]:
+    """Drop zero-length chunks, in the one place both ways of producing one pass through.
+
+    A replay hands back only chunks with content, so a cassette holding an empty one claims a
+    boundary the replay can never reproduce. They arrive two ways: upstream ending the stream with
+    an empty read, and `_resplit` rounding a share down to nothing while redacting.
+    """
+    return [chunk for chunk in chunks if chunk]
 
 
 # Kept in clear so a mismatch says something useful; the digest below is what actually decides.

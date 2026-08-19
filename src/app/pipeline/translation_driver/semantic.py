@@ -10,7 +10,10 @@ The spec does not require capability parity, so what a translator cannot express
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
+
+from app.pipeline.translation_driver.content import SemanticMessage
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +28,35 @@ class SystemBlock:
     metadata: Mapping[str, Any] = field(default_factory=lambda: dict[str, Any]())
 
 
+class LossCode(StrEnum):
+    """Why something did not cross, as a value rather than a sentence.
+
+    Codes rather than prose because the reason is read by other code — a metric, a receipt, a
+    future degradation policy — and matching on English is how those quietly stop matching. The
+    detail string stays for a human reading a log; the code is what anything else keys on.
+    """
+
+    EXTENSIONS_NOT_CARRIED = "extensions-not-carried"
+    SYSTEM_METADATA_NOT_CARRIED = "system-metadata-not-carried"
+    SYSTEM_FIELD_MALFORMED = "system-field-malformed"
+    BLOCK_NOT_CARRIED = "block-not-carried"
+    ITEM_NOT_CARRIED = "item-not-carried"
+    REASONING_STATE_NOT_PORTABLE = "reasoning-state-not-portable"
+    INSTRUCTIONS_ROLE_NOT_CARRIED = "instructions-role-not-carried"
+    TOOL_RESULT_CONTENT_FLATTENED = "tool-result-content-flattened"
+
+
+@dataclass(frozen=True, slots=True)
+class Loss:
+    """One thing a translation could not carry."""
+
+    code: LossCode
+    detail: str = ""
+
+    def __str__(self) -> str:
+        return f"{self.code.value}: {self.detail}" if self.detail else self.code.value
+
+
 @dataclass(slots=True)
 class Conversion:
     """What a translation could not carry over.
@@ -32,10 +64,13 @@ class Conversion:
     A named loss is the difference between a degraded response and a silent one.
     """
 
-    losses: list[str] = field(default_factory=lambda: list[str]())
+    losses: list[Loss] = field(default_factory=lambda: list[Loss]())
 
-    def record(self, detail: str) -> None:
-        self.losses.append(detail)
+    def record(self, code: LossCode, detail: str = "") -> None:
+        self.losses.append(Loss(code, detail))
+
+    def has(self, code: LossCode) -> bool:
+        return any(loss.code is code for loss in self.losses)
 
     @property
     def lossless(self) -> bool:
@@ -48,7 +83,7 @@ class SemanticRequest:
 
     model: str
     system: list[SystemBlock] = field(default_factory=lambda: list[SystemBlock]())
-    messages: list[dict[str, Any]] = field(default_factory=lambda: list[dict[str, Any]]())
+    messages: list[SemanticMessage] = field(default_factory=lambda: list[SemanticMessage]())
     tools: list[dict[str, Any]] = field(default_factory=lambda: list[dict[str, Any]]())
     stream: bool = False
     max_output_tokens: int | None = None
@@ -70,13 +105,14 @@ class SemanticRequest:
         if not self.extensions or self.source_format == wire_format:
             return dict(self.extensions)
         self.conversion.record(
-            f"extensions from {self.source_format or 'an unnamed format'} not carried into "
-            f"{wire_format}: {', '.join(sorted(self.extensions))}"
+            LossCode.EXTENSIONS_NOT_CARRIED,
+            f"from {self.source_format or 'an unnamed format'} into {wire_format}: "
+            f"{', '.join(sorted(self.extensions))}",
         )
         return {}
 
 
-def system_blocks_from_value(value: object) -> tuple[list[SystemBlock], str | None]:
+def system_blocks_from_value(value: object) -> tuple[list[SystemBlock], LossCode | None]:
     """Read a system field that may be a string or a list of blocks.
 
     Anthropic allows both spellings, so accepting only one would reject valid inbound requests.
@@ -92,12 +128,12 @@ def system_blocks_from_value(value: object) -> tuple[list[SystemBlock], str | No
                 blocks.append(SystemBlock(text=entry))
                 continue
             if not isinstance(entry, Mapping):
-                return [], "system entry is neither text nor a block"
+                return [], LossCode.SYSTEM_FIELD_MALFORMED
             block = dict[str, Any](entry)  # pyright: ignore[reportUnknownArgumentType]
             text = block.pop("text", "")
             block.pop("type", None)
             if not isinstance(text, str):
-                return [], "system block text is not a string"
+                return [], LossCode.SYSTEM_FIELD_MALFORMED
             blocks.append(SystemBlock(text=text, metadata=block))
         return blocks, None
-    return [], "system field is neither a string nor a list"
+    return [], LossCode.SYSTEM_FIELD_MALFORMED

@@ -1,12 +1,14 @@
 # Anthropic Messages → OpenAI Responses bridge 目标架构
 
-> 状态：**非规范架构提案，尚未获用户接受。** 本版裁决矩阵已于 260807 经 `docs/tmp/260807-review-architecture-decision-matrix.md` 独立终审为 0 blocker、0 major；当前唯一门是用户从 `README.md` 开始按规定顺序完整阅读五份文档，尤其完整阅读本文后，分别裁决 `D-ARCH` 与 `D-MIGRATION`。独立终审通过、推荐结论、旧评审记录或实现进度均不能替代用户接受。
+> 状态：**已获用户接受（2026-08-19）。** `D-ARCH = B`（typed semantic kernel＋single driver＋protocol／transport legs），`D-MIGRATION = M1`（一次建立完整 B 骨架）。注意 `D-MIGRATION` 的裁决与本文推荐（M2）**不同**，以用户裁决为准。
+>
+> 用户在裁决时附加了一条授权范围说明，逐条实施时以它为准：本轮属于「在用户授权下、依用户提议实现补全」，并非所有细节都是用户已逐项知悉的实现；因此实现方可全面推进 B，**若将来发现与用户文档不一致，再讨论与修复，而不是停下来等裁决**。这条授权覆盖实现细节，不覆盖 `spec.md` 的可观察行为合同，也不覆盖 `docs/.human-controlled/`。
+>
+> 裁决前的旧状态记录（保留以便追溯）：本版裁决矩阵曾于 260807 经 `docs/tmp/260807-review-architecture-decision-matrix.md` 独立终审为 0 blocker、0 major，当时唯一门是用户阅读后分别裁决 `D-ARCH` 与 `D-MIGRATION`；该门已于 2026-08-19 关闭。
 >
 > 历史设计基线：`/home/xp/src/ghc-api-proxy-py`，`main HEAD ed77c9d191df81c451c25161420515cca52ce6a4`。下文“生产事实”描述提案形成时的代码接缝，不是 current 状态；current 实现状态见 [implementation.md](implementation.md)。
 >
 > 权威边界：`spec.md` 是唯一行为 oracle。完整 block、Anthropic SSE、首 block 前零 success headers／body、单一串行下游写入 owner，以及无已证明 resume contract 时的 post-commit partial failure 都是已决可观察行为；本文只说明架构如何承载，不重新投票。
->
-> 唯一待用户裁决：`D-ARCH` 选择目标内部架构，`D-MIGRATION` 选择迁移节奏。除此之外，本文没有隐藏投票项；旧 `ADR-BRIDGE-02`～`06` 只作为已决 Spec 输入或历史追踪编号保留。
 
 ## 目录与阅读要求
 
@@ -568,12 +570,14 @@ History projection 必须在 assembler／buffer cleanup 与 request-owned reserv
 
 ## 唯一用户裁决矩阵
 
-本矩阵是全文唯一待用户裁决清单。用户必须完整阅读本文后分别裁决两行；接受其中一行不自动接受另一行，沉默、独立评审通过或开始实施都不构成接受。`ADR-BRIDGE-02`～`06` 已在上一节归类为 Spec 输入或历史承载记录，不是隐藏附加项。旧 `ADR-BRIDGE-01` 的“内部 canonical model”讨论由 `D-ARCH` 完整取代，不再作为第三个问题并行存在。
+**两行均已由用户于 2026-08-19 裁决，本节自此是裁决记录而非待决清单。** 裁决内容与授权范围见文首状态段。旧的「沉默／独立评审／开始实施都不构成接受」措辞只适用于裁决之前，保留在下段以说明当时的门是怎么关的。
 
-| 决策 ID | 真正问题 | 可选方案 | 本文推荐 | 裁决影响 |
+裁决前的口径：本矩阵是全文唯一待用户裁决清单。用户必须完整阅读本文后分别裁决两行；接受其中一行不自动接受另一行，沉默、独立评审通过或开始实施都不构成接受。`ADR-BRIDGE-02`～`06` 已在上一节归类为 Spec 输入或历史承载记录，不是隐藏附加项。旧 `ADR-BRIDGE-01` 的“内部 canonical model”讨论由 `D-ARCH` 完整取代，不再作为第三个问题并行存在。
+
+| 决策 ID | 真正问题 | 可选方案 | 本文推荐 | 用户裁决（2026-08-19） |
 |---|---|---|---|---|
-| `D-ARCH` | 长期目标内部架构采用哪一种组织方式？ | A：Anthropic canonical pipeline＋Responses adapter；B：typed semantic kernel＋single driver＋protocol／transport legs；C：Anthropic route 调用现有 Responses route pipeline | **B**；A 只可作为迁移形态，C 拒绝 | 决定长期 owner、内部真相、转换与交付边界；不改变任何 Spec 行为 |
-| `D-MIGRATION` | 在保持目标 B 不变时，以何种节奏落地？ | M1：一次建立完整 B 骨架后才接入切片；M2：分阶段建立 B，并以受约束 A 形 adapter 过渡 | **M2 渐进迁移** | 决定集成风险、兼容层寿命与 route 启用门；不授权永久保留 A 或绕过 B 核心 |
+| `D-ARCH` | 长期目标内部架构采用哪一种组织方式？ | A：Anthropic canonical pipeline＋Responses adapter；B：typed semantic kernel＋single driver＋protocol／transport legs；C：Anthropic route 调用现有 Responses route pipeline | **B**；A 只可作为迁移形态，C 拒绝 | **B**（与推荐一致） |
+| `D-MIGRATION` | 在保持目标 B 不变时，以何种节奏落地？ | M1：一次建立完整 B 骨架后才接入切片；M2：分阶段建立 B，并以受约束 A 形 adapter 过渡 | **M2 渐进迁移** | **M1**（**与推荐不同**，以裁决为准；本文 M2 相关推荐段落自此仅作备选分析，不再是执行依据） |
 
 ### D-ARCH：目标内部架构
 

@@ -12,7 +12,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
 
-from app.pipeline.translation_driver.semantic import Conversion
+from app.pipeline.translation_driver.semantic import Conversion, LossCode
 
 TEXT = "text"
 THINKING = "thinking"
@@ -120,7 +120,8 @@ def from_openai_responses_response(payload: Mapping[str, Any]) -> SemanticRespon
                     )
                 else:
                     response.conversion.record(
-                        f"content part {part.get('type')!r} is not carried"
+                        LossCode.BLOCK_NOT_CARRIED,
+                        f"content part {part.get('type')!r}",
                     )
         elif item_type == "function_call":
             has_tool_call = True
@@ -143,12 +144,12 @@ def from_openai_responses_response(payload: Mapping[str, Any]) -> SemanticRespon
                 )
             )
         else:
-            response.conversion.record(f"output item {item_type!r} is not carried")
+            response.conversion.record(LossCode.ITEM_NOT_CARRIED, f"output item {item_type!r}")
 
     stop_reason, problem = _responses_stop_reason(payload, has_tool_call)
     response.stop_reason = stop_reason
     if problem is not None:
-        response.conversion.record(problem)
+        response.conversion.record(LossCode.ITEM_NOT_CARRIED, problem)
     return response
 
 
@@ -192,7 +193,7 @@ def to_openai_responses_response(response: SemanticResponse) -> dict[str, Any]:
                 }
             )
         else:
-            response.conversion.record(f"block {block.kind!r} is not carried")
+            response.conversion.record(LossCode.BLOCK_NOT_CARRIED, f"block {block.kind!r}")
 
     return {
         "id": response.id,

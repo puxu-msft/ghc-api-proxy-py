@@ -79,6 +79,20 @@ def recorded_provider(name: str, http_client: httpx.AsyncClient) -> GithubCopilo
     )
 
 
+def pinned_config(base_url: str = BASE_URL) -> ProxyConfig:
+    """The config both recording and replay use, so a cassette does not depend on the machine.
+
+    No `model_mappings`: whatever the operator has configured locally must not decide which model
+    a cassette was recorded against, or the recording and the replay ask for different things.
+    """
+    return ProxyConfig.model_validate(
+        {
+            "model_providers": {"ghc": {"type": "github_copilot", "base_url": base_url}},
+            "default_model_provider": "ghc",
+        }
+    )
+
+
 @asynccontextmanager
 async def recorded_chain(name: str) -> AsyncGenerator[Chain]:
     """A whole chain served by the recording, closed on the way out."""
@@ -86,12 +100,6 @@ async def recorded_chain(name: str) -> AsyncGenerator[Chain]:
     try:
         provider = recorded_provider(name, http_client)
         providers: dict[str, ModelProvider] = {"ghc": provider}
-        config = ProxyConfig.model_validate(
-            {
-                "model_providers": {"ghc": {"type": "github_copilot", "base_url": BASE_URL}},
-                "default_model_provider": "ghc",
-            }
-        )
-        yield build_chain(config, http_client=http_client, providers=providers)
+        yield build_chain(pinned_config(), http_client=http_client, providers=providers)
     finally:
         await http_client.aclose()
