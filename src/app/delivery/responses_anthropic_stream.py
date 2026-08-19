@@ -6,7 +6,6 @@ from typing import Any, cast
 
 import orjson
 
-from app.anthropic.thinking.reasoning_carrier import encode_reasoning_carrier
 from app.delivery.anthropic_sse import (
     AnthropicSseRenderer,
     DeliveryFrontier,
@@ -27,6 +26,7 @@ from app.openai.responses_stream_parser import (
     ResponsesTerminal,
     TextBlock,
 )
+from app.pipeline.translation_driver.reasoning_carrier import encode_reasoning_carrier
 from app.protocols.responses_anthropic import anthropic_message_id_from_response_id
 from app.streaming.openai_sse import parse_sse_json
 

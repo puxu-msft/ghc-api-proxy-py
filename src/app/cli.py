@@ -18,7 +18,8 @@ from app.lifecycle.entry import StandaloneOptions, run_standalone
 from app.lifecycle.rolling.controller import RollingController, plan_to_json
 from app.lifecycle.rolling.generation.phases import GenerationLifecycle
 from app.lifecycle.rolling.runtime import run_systemd_generation
-from app.server import build_chain, build_http_client, create_app
+from app.server.app_factory import create_app
+from app.server.composition import build_chain, build_http_client
 from app.server.pipeline_app import create_pipeline_app
 from app.server.tls import resolve_tls_material
 

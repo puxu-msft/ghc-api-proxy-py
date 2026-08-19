@@ -3,16 +3,16 @@ from typing import Any
 
 import pytest
 
-from app.anthropic.thinking.reasoning_carrier import decode_reasoning_carrier
 from app.pipeline.request import WireFormat
-from app.pipeline.translation_driver import (
+from app.pipeline.translation_driver.anthropic_messages import from_anthropic_messages
+from app.pipeline.translation_driver.openai_responses import to_openai_responses
+from app.pipeline.translation_driver.reasoning_carrier import decode_reasoning_carrier
+from app.pipeline.translation_driver.registry import (
     TranslatorNotFound,
     TranslatorRegistry,
     default_registry,
-    from_anthropic_messages,
     inbound_name,
     outbound_name,
-    to_openai_responses,
 )
 from app.pipeline.translation_driver.semantic import LossCode
 
@@ -266,9 +266,7 @@ def test_the_system_prompt_placement_is_configurable() -> None:
     than that the default happens to be right.
     """
     from app.config.schema import ModelTranslationConfig, ToOpenAiResponsesConfig
-    from app.pipeline.translation_driver import default_registry as build
-
-    configured = build(
+    configured = default_registry(
         ModelTranslationConfig(
             to_openai_responses=ToOpenAiResponsesConfig(
                 system_prompts="instructions-joint-string"
@@ -380,7 +378,7 @@ def test_a_real_anthropic_signature_is_refused_rather_than_forged() -> None:
 
 def test_a_carrier_this_proxy_issued_does_cross() -> None:
     """The other half of the same rule: recovering our own value is not inventing one."""
-    from app.anthropic.thinking.reasoning_carrier import encode_reasoning_carrier
+    from app.pipeline.translation_driver.reasoning_carrier import encode_reasoning_carrier
 
     signed = encode_reasoning_carrier("upstream-encrypted-payload")
     payload, semantic = default_registry().translate(

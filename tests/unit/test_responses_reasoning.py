@@ -1,6 +1,5 @@
 from collections.abc import Mapping
 
-from app.anthropic.thinking.reasoning_carrier import encode_reasoning_carrier
 from app.anthropic.thinking.responses_reasoning import (
     PROJECT_SYNTHETIC_REASONING_SIGNATURE,
     SYNTHETIC_REASONING_SIGNATURE,
@@ -8,6 +7,7 @@ from app.anthropic.thinking.responses_reasoning import (
     anthropic_thinking_to_responses,
     responses_reasoning_to_anthropic,
 )
+from app.pipeline.translation_driver.reasoning_carrier import encode_reasoning_carrier
 
 
 def test_plain_summary_becomes_thinking_with_bare_carrier() -> None:

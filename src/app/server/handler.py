@@ -28,7 +28,7 @@ from app.pipeline.request import RequestContext, WireFormat
 from app.pipeline.retry import RetryLedger
 from app.pipeline.routing import Route, RoutingError, decide_route
 from app.pipeline.timeouts import resolve_timeout
-from app.pipeline.translation_driver import TranslatorNotFound
+from app.pipeline.translation_driver.registry import TranslatorNotFound
 from app.server.composition import Chain
 from app.tokenization.estimators import estimate_anthropic_input
 

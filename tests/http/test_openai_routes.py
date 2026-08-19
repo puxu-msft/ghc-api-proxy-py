@@ -7,7 +7,7 @@ from app.config.settings import AppSettings
 from app.deps import get_model_catalog, get_openai_client
 from app.models.common import ModelInfo
 from app.models.openai import ChatCompletionRequest, EmbeddingsRequest, ResponsesRequest
-from app.server import create_app
+from app.server.app_factory import create_app
 
 
 class Stream(httpx.AsyncByteStream):

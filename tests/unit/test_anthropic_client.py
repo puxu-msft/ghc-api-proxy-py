@@ -5,14 +5,14 @@ import httpx
 import pytest
 
 from app.anthropic.client import AnthropicClient
-from app.anthropic.thinking.reasoning_carrier import (
+from app.models.anthropic import MessagesRequest
+from app.pipeline.translation_driver.reasoning_carrier import (
     PROJECT_SYNTHETIC_REASONING_SIGNATURE,
     PROJECT_SYNTHETIC_REASONING_SIGNATURE_PREFIX,
     UPSTREAM_SYNTHETIC_REASONING_SIGNATURE,
     UPSTREAM_SYNTHETIC_REASONING_SIGNATURE_PREFIX,
     encode_reasoning_carrier,
 )
-from app.models.anthropic import MessagesRequest
 from app.transform.model_resolver import ModelResolver
 
 

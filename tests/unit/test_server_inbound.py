@@ -3,7 +3,7 @@ from typing import Any
 import pytest
 
 from app.pipeline.request import WireFormat
-from app.server import InboundRequestError, InboundRoute, build_context, route_for_path
+from app.server.inbound import InboundRequestError, InboundRoute, build_context, route_for_path
 
 
 def route(path: str) -> InboundRoute:

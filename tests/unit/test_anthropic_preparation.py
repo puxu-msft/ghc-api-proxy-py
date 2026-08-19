@@ -1,10 +1,10 @@
 from app.anthropic.header_policy import forward_request_headers, forward_response_headers
 from app.anthropic.request_preparation import prepare_anthropic_request
-from app.anthropic.thinking.reasoning_carrier import (
+from app.anthropic.warmup import apply_warmup_policy, is_warmup_request
+from app.pipeline.translation_driver.reasoning_carrier import (
     PROJECT_SYNTHETIC_REASONING_SIGNATURE,
     UPSTREAM_SYNTHETIC_REASONING_SIGNATURE_PREFIX,
 )
-from app.anthropic.warmup import apply_warmup_policy, is_warmup_request
 
 
 def test_request_header_floor_blocks_credentials_and_topology() -> None:

@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 from app.config.settings import AppSettings
 from app.observability.telemetry import RequestTelemetry, setup_metrics
 from app.observability.tracing import setup_tracing, trace_context
-from app.server import create_app
+from app.server.app_factory import create_app
 
 
 def test_tracing_default_off_and_opt_in_idempotent() -> None:

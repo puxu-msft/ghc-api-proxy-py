@@ -7,7 +7,7 @@ from app.config.settings import AppSettings
 from app.lifecycle.rolling.generation.phases import GenerationLifecycle, GenerationPhase
 from app.routes.health import readiness
 from app.runtime import RuntimeState
-from app.server import create_app
+from app.server.app_factory import create_app
 
 
 @pytest.fixture(autouse=True)

@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from app.anthropic.thinking.reasoning_carrier import (
+from app.pipeline.translation_driver.reasoning_carrier import (
     PROJECT_SYNTHETIC_REASONING_SIGNATURE,
     PROJECT_SYNTHETIC_REASONING_SIGNATURE_PREFIX,
     REASONING_ENCRYPTED_CONTENT_TAG,

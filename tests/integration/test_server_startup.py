@@ -4,7 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.config.settings import AppSettings
-from app.server import create_app
+from app.server.app_factory import create_app
 
 
 def test_server_lifespan_starts_and_stops_cleanly() -> None:

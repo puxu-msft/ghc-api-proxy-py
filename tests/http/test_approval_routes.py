@@ -3,7 +3,7 @@ from fastapi.testclient import TestClient
 from app.config.settings import AppSettings
 from app.deps import get_approval_gate
 from app.pipeline.approval import ApprovalGate
-from app.server import create_app
+from app.server.app_factory import create_app
 
 
 def test_approval_pending_and_missing_detail_routes() -> None:

@@ -10,7 +10,7 @@ from app.config.settings import AppSettings
 from app.deps import get_approval_gate, get_responses_ws_client
 from app.pipeline.approval import ApprovalResult
 from app.pipeline.context import RequestContext
-from app.server import create_app
+from app.server.app_factory import create_app
 
 
 class StubClient:

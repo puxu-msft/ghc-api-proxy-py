@@ -8,7 +8,6 @@ from typing import Any, Literal, Protocol, cast
 
 import orjson
 
-from app.anthropic.thinking.reasoning_carrier import encode_reasoning_carrier
 from app.delivery.reservation import RequestResidentAccount, ResidentLease
 from app.openai.responses_stream_parser import (
     BlockIdentity,
@@ -21,6 +20,7 @@ from app.openai.responses_stream_parser import (
     TextBlock,
     UnsupportedResponsesEvent,
 )
+from app.pipeline.translation_driver.reasoning_carrier import encode_reasoning_carrier
 from app.streaming.sse import format_sse_event
 
 type BatchKind = Literal["block", "terminal", "error"]

@@ -36,7 +36,7 @@ from app.model_provider import (
 from app.pipeline.events import FrozenSubscribers, SubscriberRegistry
 from app.pipeline.rate_limiting import RateLimiter
 from app.pipeline.request import RequestContext
-from app.pipeline.translation_driver import TranslatorRegistry, default_registry
+from app.pipeline.translation_driver.registry import TranslatorRegistry, default_registry
 from app.tokenization.state_store import TokenizationStateStore
 from app.upstream.copilot import GitHubTokenSourceAdapter
 

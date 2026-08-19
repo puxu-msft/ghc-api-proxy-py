@@ -2,7 +2,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal, NotRequired, TypedDict, cast
 
-from app.anthropic.thinking.reasoning_carrier import (
+from app.pipeline.translation_driver.reasoning_carrier import (
     PROJECT_SYNTHETIC_REASONING_SIGNATURE,
     PROJECT_SYNTHETIC_REASONING_SIGNATURE_PREFIX,
     UPSTREAM_SYNTHETIC_REASONING_SIGNATURE,

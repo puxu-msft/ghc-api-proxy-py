@@ -5,7 +5,7 @@ from typing import Any, cast
 from app.anthropic.features import build_anthropic_beta_headers
 from app.anthropic.message_tools import preprocess_tools
 from app.anthropic.thinking.destack import destack_content
-from app.anthropic.thinking.reasoning_carrier import is_direct_messages_synthetic_signature
+from app.pipeline.translation_driver.reasoning_carrier import is_direct_messages_synthetic_signature
 
 
 @dataclass(frozen=True, slots=True)

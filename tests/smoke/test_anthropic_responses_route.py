@@ -23,7 +23,7 @@ from app.hooks.types import (
 )
 from app.pipeline.approval import ApprovalGate, ApprovalResult
 from app.pipeline.context import RequestContext, RequestState
-from app.server import create_app
+from app.server.app_factory import create_app
 from app.tokenization.state_store import TokenizationStateStore
 from app.transform.model_resolver import ModelResolver
 from app.upstream.models_api import ModelCatalog

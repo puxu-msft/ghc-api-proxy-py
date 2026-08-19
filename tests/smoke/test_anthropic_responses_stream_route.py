@@ -26,7 +26,7 @@ from app.hooks.registry import HookRegistryBuilder
 from app.hooks.types import ObserverEvent
 from app.pipeline.approval import ApprovalGate, ApprovalResult
 from app.pipeline.context import RequestContext, RequestState
-from app.server import create_app
+from app.server.app_factory import create_app
 from app.streaming.sse import create_delayed_sse_response
 from app.transform.model_resolver import ModelResolver
 from app.upstream.models_api import ModelCatalog

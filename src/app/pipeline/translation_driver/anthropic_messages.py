@@ -7,16 +7,16 @@ shapes live at this boundary and nowhere inside.
 from collections.abc import Mapping
 from typing import Any, cast
 
-from app.anthropic.thinking.reasoning_carrier import (
-    decode_reasoning_carrier,
-    encode_reasoning_carrier,
-)
 from app.pipeline.translation_driver.content import (
     BlockKind,
     ContentBlock,
     OpaqueFormat,
     ReasoningState,
     SemanticMessage,
+)
+from app.pipeline.translation_driver.reasoning_carrier import (
+    decode_reasoning_carrier,
+    encode_reasoning_carrier,
 )
 from app.pipeline.translation_driver.semantic import (
     Conversion,

@@ -6,7 +6,7 @@ from app.config.settings import AppSettings
 from app.deps import get_history_store
 from app.history.store import HistoryStore
 from app.history.types import HistoryEntry, ModelRef
-from app.server import create_app
+from app.server.app_factory import create_app
 
 
 def _entry() -> HistoryEntry:

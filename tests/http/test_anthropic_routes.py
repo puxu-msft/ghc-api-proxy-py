@@ -9,7 +9,7 @@ from app.deps import get_anthropic_client, get_token_counter
 from app.models.anthropic import MessagesRequest
 from app.pipeline.context import Attempt, RequestContext, RequestState
 from app.pipeline.executor import PipelineResult, UpstreamResponseError
-from app.server import create_app
+from app.server.app_factory import create_app
 
 
 class BytesStream(httpx.AsyncByteStream):

@@ -3,35 +3,12 @@
 MAIN.md: this module receives requests, does basic input format parsing, and hands them to
 app.pipeline.
 
-`app_factory` is the FastAPI application as it stands today, moved here unchanged when this
-became a package. `inbound` is the parsing that feeds the new pipeline.
+Deliberately empty of imports. Re-exporting `create_app` here meant that importing *anything*
+under `app.server` — including `pipeline_app`, which is the new chain — eagerly pulled in the
+whole existing chain behind it. Measured before removing it: every one of the 175 reachable
+modules was reachable from both entry points, so the dependency graph said the two chains were
+one. They are not; the package init was.
+
+Import the module you mean: `app.server.pipeline_app`, `app.server.app_factory`,
+`app.server.composition`, `app.server.handler`, `app.server.inbound`.
 """
-
-from app.server.app_factory import create_app
-from app.server.composition import Chain, build_chain, build_http_client, refresh_catalogs
-from app.server.handler import HandledRequest, handle, handle_bounded
-from app.server.inbound import (
-    ROUTES,
-    InboundRequestError,
-    InboundRoute,
-    build_context,
-    route_for_path,
-)
-from app.server.pipeline_app import create_pipeline_app
-
-__all__ = [
-    "ROUTES",
-    "Chain",
-    "HandledRequest",
-    "InboundRequestError",
-    "InboundRoute",
-    "build_chain",
-    "build_context",
-    "build_http_client",
-    "create_app",
-    "create_pipeline_app",
-    "handle",
-    "handle_bounded",
-    "refresh_catalogs",
-    "route_for_path",
-]

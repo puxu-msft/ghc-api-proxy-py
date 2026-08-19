@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 from app.config.settings import AppSettings
 from app.deps import get_settings
-from app.server import create_app
+from app.server.app_factory import create_app
 
 
 @pytest.fixture(autouse=True)

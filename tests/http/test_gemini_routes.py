@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from app.config.settings import AppSettings
 from app.deps import get_openai_client
 from app.models.openai import ChatCompletionRequest
-from app.server import create_app
+from app.server.app_factory import create_app
 
 
 class Stream(httpx.AsyncByteStream):
