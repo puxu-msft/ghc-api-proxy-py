@@ -26,6 +26,7 @@ from app.server.handler import (
     stream_settings,
 )
 from app.server.inbound import ROUTES, InboundRequestError, build_context, route_for_path
+from app.server.ops_routes import router as ops_router
 
 CHAIN_STATE_KEY = "pipeline_chain"
 
@@ -129,6 +130,9 @@ def create_pipeline_app(chain: Chain) -> FastAPI:
     app = FastAPI(title="ghc-api-proxy", lifespan=_lifespan)
     setattr(app.state, CHAIN_STATE_KEY, chain)
     app.include_router(build_router())
+    # Health, the model list and metrics. A supervisor that cannot ask whether the process is
+    # ready has to guess, and the inference routes alone give it nothing to ask.
+    app.include_router(ops_router)
     return app
 
 
