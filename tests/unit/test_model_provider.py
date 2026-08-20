@@ -349,6 +349,27 @@ def test_catalog_without_a_data_list_is_rejected() -> None:
         provider.replace_catalog({"data": "nope"})
 
 
+def test_the_catalog_is_kept_as_upstream_sent_it() -> None:
+    """The descriptors are a projection built for routing; `raw_catalog` is the original.
+
+    Everything a catalog says beyond the endpoint list — vendor, family, limits, policy state — survives only here, and `debug models` reports on exactly that. Rebuilding it from the descriptors would report a catalog upstream never sent.
+    """
+    provider, _ = build_provider(upstream(httpx.Response(200)))
+
+    assert provider.raw_catalog == CATALOG
+    assert provider.base_url == BASE_URL
+
+
+def test_a_rejected_catalog_leaves_the_previous_one_standing() -> None:
+    # Fail-closed applies to the report too: a payload that could not be read must not blank out the answer already held.
+    provider, _ = build_provider(upstream(httpx.Response(200)))
+
+    with pytest.raises(ValueError):
+        provider.replace_catalog({"data": "nope"})
+
+    assert provider.raw_catalog == CATALOG
+
+
 def test_send_signature_matches_the_protocol() -> None:
     # Structural check: the concrete provider must satisfy ModelProvider without inheritance.
     from app.model_provider.base import ModelProvider

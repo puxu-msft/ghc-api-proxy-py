@@ -34,6 +34,9 @@ _SEND_METHODS = {
     ModelEndpoint.OPENAI_EMBEDDINGS: "send_embeddings",
 }
 
+# Which advertised endpoints this proxy can actually drive. Derived from the send table rather than written out again, so a report of what is drivable cannot drift from what `send` will take.
+DRIVEN_ENDPOINTS: frozenset[ModelEndpoint] = frozenset(_SEND_METHODS)
+
 
 class GithubCopilotProvider:
     def __init__(
@@ -54,11 +57,25 @@ class GithubCopilotProvider:
         self._catalog_headers = dict(headers or {})
         self._disabled = frozenset(config.disabled_models)
         self._descriptors: dict[str, ModelDescriptor] = {}
+        self._raw_catalog: dict[str, Any] = {"object": "list", "data": []}
         self._etag: str | None = None
 
     @property
     def name(self) -> str:
         return self._name
+
+    @property
+    def base_url(self) -> str:
+        """Where this provider's inference and catalog calls go. Reported, never reconstructed from config by a caller."""
+        return self._base_url
+
+    @property
+    def raw_catalog(self) -> Mapping[str, Any]:
+        """The catalog exactly as upstream sent it.
+
+        Kept beside the descriptors rather than derived back from them: the descriptors are a projection built for routing and drop nearly everything else the catalog said, so anything reporting on the catalog itself would otherwise have to fetch it a second time.
+        """
+        return self._raw_catalog
 
     @property
     def available_ids(self) -> frozenset[str]:
@@ -89,6 +106,7 @@ class GithubCopilotProvider:
                 request_headers=_string_mapping(model.get("request_headers")),
             )
         self._descriptors = descriptors
+        self._raw_catalog = dict(raw)
 
     async def refresh_catalog(self) -> bool:
         """Refetch the catalog, authenticating as of now.

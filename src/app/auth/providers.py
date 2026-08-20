@@ -165,6 +165,13 @@ async def noninteractive_token_available(
     return False
 
 
+class NoGitHubToken(RuntimeError):
+    """Every configured source was asked and none had a token.
+
+    Named rather than a bare `RuntimeError` because it is the one failure here the operator fixes themselves, and a caller that cannot tell it apart from an upstream failure can only offer a message covering both. Still a `RuntimeError`, so anything catching the old type keeps working.
+    """
+
+
 class GitHubTokenManager:
     def __init__(self, providers: list[GitHubTokenProvider]) -> None:
         self._providers = sorted(providers, key=lambda provider: provider.priority)
@@ -183,7 +190,7 @@ class GitHubTokenManager:
             self._current = token
             self._current_provider = provider
             return token
-        raise RuntimeError("No GitHub token provider produced a usable token")
+        raise NoGitHubToken("No GitHub token provider produced a usable token")
 
     async def refresh(self) -> TokenInfo | None:
         if self._current is None:

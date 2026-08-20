@@ -7,13 +7,17 @@ from typing import Annotated
 import typer
 import uvicorn
 from anyio import run
+from pydantic import ValidationError
+from yaml import YAMLError
 
 from app.auth.service import authenticate_device, clear_stored_token
 from app.config.loading import bundled_config_text, load_proxy_config
 from app.config.paths import config_file_path, tls_material_dir
 from app.config.schema import ProxyConfig
+from app.debug.models import collect_catalogs, render_json, render_text
 from app.lifecycle.entry import StandaloneOptions, run_standalone
 from app.lifecycle.standalone import LIFECYCLE_LOGGER, ShutdownReport
+from app.model_provider import ProviderNotConfigured
 from app.observability.logging import get_logger, setup_logging
 from app.server.composition import build_chain, build_http_client
 from app.server.pipeline_app import create_pipeline_app
@@ -370,10 +374,64 @@ def debug_info() -> None:
     _not_implemented("debug info")
 
 
+def _read_config(path: Path | None) -> ProxyConfig:
+    """Load the config, reporting a bad one as an error rather than a traceback.
+
+    A missing file and a config the schema rejects are both ordinary operator input on a command that accepts `--config`, and Typer's pretty traceback answers them with a stack that names this module rather than the key they mistyped. Pydantic's message already carries the field path and the reason, so it is passed through whole; only the frames are dropped.
+
+    Scoped to `debug models` on purpose: `start` still raises through, and changing what an already-shipped path does on a bad config was not part of implementing this command.
+    """
+    try:
+        return load_proxy_config(config_path=path)
+    except (FileNotFoundError, ValidationError, YAMLError) as error:
+        typer.echo(f"error: {error}", err=True)
+        raise typer.Exit(code=1) from error
+
+
 @debug_app.command("models")
-def debug_models() -> None:
+def debug_models(
+    config: Annotated[
+        Path | None,
+        typer.Option("--config", exists=False, file_okay=True, dir_okay=False),
+    ] = None,
+    provider: Annotated[
+        str | None,
+        typer.Option("--provider", help="Report only this configured provider."),
+    ] = None,
+    as_json: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help="Print the complete decoded upstream payload, keyed by provider name.",
+        ),
+    ] = False,
+) -> None:
     """Show upstream model information."""
-    _not_implemented("debug models")
+    proxy_config = _read_config(config)
+    if provider is not None and provider not in proxy_config.model_providers:
+        configured = ", ".join(sorted(proxy_config.model_providers)) or "none"
+        raise typer.BadParameter(
+            f"no model provider named {provider!r} is configured (configured: {configured})"
+        )
+
+    try:
+        catalogs, failures = run(partial(collect_catalogs, proxy_config, provider))
+    except ProviderNotConfigured as error:
+        # `resolve_default_name` raises this with an empty name when the config leaves the choice open, and "no model provider named '' is configured" tells the operator nothing about which key to set.
+        detail = (
+            "config sets no `default_model_provider` and more than one provider is configured"
+            if not error.name
+            else str(error)
+        )
+        typer.echo(f"error: {detail}", err=True)
+        raise typer.Exit(code=1) from error
+
+    if catalogs:
+        typer.echo(render_json(catalogs) if as_json else render_text(catalogs))
+    for failure in failures:
+        typer.echo(f"error: {failure.name}: {failure.reason}", err=True)
+    if failures:
+        raise typer.Exit(code=1)
 
 
 @debug_app.command("usage")
