@@ -61,13 +61,15 @@ def transport_options(config: ProxyConfig) -> TransportOptions:
     """Read the transport settings.
 
     `proxy` applies to every outgoing request, not only the model ones, as the spec states.
-    Both intervals use 0 to disable.
+    `tcp_keepalive_interval` uses 0 to disable.
+
+    `http2` is read straight from its own key. It used to be derived from `http2_ping_interval > 0`, so a key named after a ping interval silently decided which protocol we spoke — and an operator looking for the HTTP/1.1 switch had no reason to look there. `http2_ping_interval` is now inert: neither httpx 0.28.1 nor httpcore 1.0.9 offers a PING interval to set, so it never produced a ping in the first place.
     """
     transport = config.upstream_transport
     keepalive = transport.tcp_keepalive_interval
     return TransportOptions(
         proxy=config.proxy or None,
-        http2=transport.http2_ping_interval > 0,
+        http2=transport.http2,
         keepalive_expiry=float(keepalive) if keepalive > 0 else None,
     )
 

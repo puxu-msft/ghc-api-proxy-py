@@ -90,6 +90,10 @@ class ModelProviderConfig(Section):
 
 class UpstreamTransportConfig(Section):
     tcp_keepalive_interval: int = Field(default=15, ge=0)
+    # Set false to negotiate HTTP/1.1 upstream. Ruled 2026-08-20, after one upstream GOAWAY killed every in-flight stream at once: HTTP/2 multiplexes them onto one connection, so one connection-level event is one blast radius. HTTP/1.1 gives each request its own connection and costs more handshakes. See `docs/agents/upstream-h2-goaway/findings.md`.
+    # Authoritative on its own. It used to be derived from `http2_ping_interval > 0`, which meant a key named after a ping interval silently decided the protocol.
+    http2: bool = True
+    # NOT IMPLEMENTED by the current transport, and kept rather than deleted because it is a user-authored key with a spec behind it. httpx 0.28.1 / httpcore 1.0.9 expose no HTTP/2 PING interval to configure, so nothing reads this value today. It does not disable HTTP/2 — `http2` above does.
     http2_ping_interval: int = Field(default=15, ge=0)
 
 
