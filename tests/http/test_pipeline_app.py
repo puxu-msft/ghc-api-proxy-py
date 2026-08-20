@@ -19,6 +19,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from openai import AsyncOpenAI
 from pydantic import ValidationError
+from starlette.requests import Request
 
 from app.config.schema import ModelProviderConfig, ProxyConfig
 from app.ghc_client import GhcApiClient, GhcClientConfig
@@ -890,6 +891,35 @@ def _request_lines(records: list[logging.LogRecord]) -> list[str]:
         else:
             lines.append(record.getMessage())
     return lines
+
+
+def test_a_request_still_arriving_is_already_in_the_footer(request_log: None) -> None:
+    """The invariant behind the reported blank footer.
+
+    Registration used to happen after the body was read, so a client that announced a body and stopped sending did not exist as far as the display was concerned — the shutdown waited on it correctly and nothing said so. Asserted from inside `body()` because that is the window: any check after `_serve` returns sees an empty registry whether the fix is present or not.
+    """
+    client, _ = make_client(lambda _: httpx.Response(200, json={"id": "msg_1", "content": []}))
+    chain = _chain_of(client)
+    seen_while_reading: list[list[str]] = []
+
+    class Watching(ActiveRequestRegistry):
+        pass
+
+    watching = Watching()
+    setattr(cast(FastAPI, client.app).state, CHAIN_STATE_KEY, replace(chain, active_requests=watching))
+
+    original = Request.body
+
+    async def body(self: Request) -> bytes:
+        seen_while_reading.append([entry.request_id for entry in watching.snapshot()])
+        return await original(self)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Request, "body", body)
+        client.post("/v1/messages", json={"model": "claude-model", "messages": []})
+
+    assert seen_while_reading and seen_while_reading[0], "the request was invisible while its body was still arriving"
+    assert watching.snapshot() == [], "and it must still be released when the request ends"
 
 
 def test_a_served_request_writes_exactly_one_log_line(request_log: None, caplog: pytest.LogCaptureFixture) -> None:

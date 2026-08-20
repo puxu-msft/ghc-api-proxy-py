@@ -207,22 +207,12 @@ def test_sigterm_reaches_the_ladder_in_a_real_process(pidfile: Path) -> None:
         stop(child)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "A drain waits on the server's request tasks, and a request whose body has not finished "
-        "arriving already has one. The module docstring justifies the unbounded drain with 'a "
-        "request already carries its own deadline' — true once it reaches the pipeline, false "
-        "while it is still being read, because nothing bounds that read. One client that stops "
-        "mid-body therefore holds the shutdown open until the operator escalates. Reproduced "
-        "against aa8eea6, so this predates the observability work. Awaiting a ruling on whether "
-        "to bound the read or to bound the drain."
-    ),
-)
-def test_a_half_sent_request_does_not_hold_the_shutdown_open(pidfile: Path) -> None:
-    """The reported hang, reduced to its smallest form.
+def test_a_half_sent_request_holds_the_drain_until_the_operator_escalates(pidfile: Path) -> None:
+    """A request still arriving is a real request, and the drain is right to wait for it.
 
-    No upstream is involved and none is needed: the request never gets far enough to route, which is the whole point. It is also why the live footer showed nothing while this was happening — the proxy registers a request after reading its body, so a request stuck before that is invisible to the display and visible only as a connection count.
+    This pins that on purpose. The module docstring rules the drain unbounded because a second wall-clock limit would cut off legitimate work while the operator still has escalation available, and a client that has not finished sending is no different: nothing here can know whether the rest is one packet away. What was wrong was never the waiting — it was that the display said nothing, because the proxy used to register a request only after reading its body. It registers on arrival now, so the footer shows it as `(resolving)` with a climbing clock for exactly as long as this test keeps it waiting.
+
+    No upstream is involved and none is needed: the request never gets far enough to route.
     """
     port = free_port()
     child = start_child(port, pidfile)
@@ -240,9 +230,14 @@ def test_a_half_sent_request_does_not_hold_the_shutdown_open(pidfile: Path) -> N
             held.append(sock)
 
         child.send_signal(signal.SIGTERM)
-        # Generous rather than long: an unobstructed drain here finishes well inside a second, so anything still running at five is stuck rather than slow.
-        stdout, _ = child.communicate(timeout=5)
-        assert "STOPPED DRAINING" in stdout
+        # An unobstructed drain here finishes well inside a second, so a process still running at three is waiting on these two rather than merely slow.
+        time.sleep(3.0)
+        assert child.poll() is None, "the drain gave up on requests that were still arriving"
+
+        # The escalation the docstring points at, and the only thing that should end this.
+        child.send_signal(signal.SIGTERM)
+        stdout, _ = child.communicate(timeout=15)
+        assert "STOPPED INTERRUPTING" in stdout
     finally:
         for sock in held:
             sock.close()

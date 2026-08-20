@@ -11,6 +11,7 @@ from contextlib import ExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any, cast
+from uuid import uuid4
 
 import anyio
 from fastapi import APIRouter, FastAPI, Request
@@ -28,6 +29,7 @@ from app.observability.tui import footer_tui_or_none
 from app.pipeline.delivery.assembler import BlockAssembler
 from app.pipeline.delivery.stream import stream_delivery
 from app.pipeline.request import RequestContext
+from app.server.admission import InFlightLimit
 from app.server.composition import Chain, refresh_catalogs
 from app.server.handler import (
     assembler_for,
@@ -66,6 +68,7 @@ class _Trace:
 
     method: str
     path: str
+    request_id: str = ""
     inbound_format: str = ""
     client_protocol: str = ""
     upstream_protocol: str = ""
@@ -111,12 +114,20 @@ def _log_completion(chain: Chain, trace: _Trace, status_code: int | None, *, byt
 
 
 async def _serve(request: Request) -> Response:
-    """Time the request, hand it to the dispatcher, and account for it on the way out.
+    """Register the request, hand it to the dispatcher, and account for it on the way out.
 
-    A streaming response is left alone here: at this point it has produced no bytes and its own generator is what knows when it finished and how much went out, so it writes its own completion line.
+    Registration happens **here**, before a single byte of the body has been read, and that placement is the point. It used to happen after the body was in hand, which meant a request still arriving did not exist as far as the display was concerned. A client that announced a body and stopped sending was then invisible: the footer was blank while the shutdown waited on it, and waiting on it is correct — a half-sent request is a real request — so the fault was never the waiting, only that nothing said what was being waited for.
+
+    A streaming response is left alone on the way out: it has produced no bytes at this point and its own generator is what knows when it finished, so it owns both the release and the completion line.
     """
     chain = _chain(request)
-    trace = _Trace(method=request.method, path=request.url.path, started=time.monotonic())
+    trace = _Trace(
+        method=request.method,
+        path=request.url.path,
+        started=time.monotonic(),
+        # Its own identifier rather than the context's, which does not exist yet and may never: a body that fails to parse never produces one, and the footer still has to be able to show and then drop the request.
+        request_id=str(uuid4()),
+    )
     # Off the ASGI scope, which is where the server records what it negotiated with the client. `websocket` covers the upgrade case, whose transport is HTTP/1.1 underneath but whose behaviour is nothing like it.
     trace.client_protocol = http_label(
         str(request.scope.get("http_version", "")), websocket=request.scope.get("type") == "websocket"
@@ -124,15 +135,22 @@ async def _serve(request: Request) -> Response:
     # Off by default, the way `copilot-api-js` treats its arrival line: on a busy proxy it doubles the log for information the completion line repeats.
     get_logger(REQUEST_LOGGER).debug(format_arrival_line(RequestLine(method=trace.method, path=trace.path)), status="pending")
 
-    response = await _dispatch(request, chain, trace)
-    if not isinstance(response, StreamingResponse):
-        # `received` rather than the size of what goes to the client: the line describes the proxy's exchange with upstream, and the two differ once anything is rewritten on the way out.
-        _log_completion(chain, trace, response.status_code, bytes_out=trace.received or None)
+    chain.active_requests.add(trace.request_id)
+    try:
+        response = await _dispatch(request, chain, trace)
+    except BaseException:
+        chain.active_requests.remove(trace.request_id)
+        raise
+    if isinstance(response, StreamingResponse):
+        return response
+    chain.active_requests.remove(trace.request_id)
+    # `received` rather than the size of what goes to the client: the line describes the proxy's exchange with upstream, and the two differ once anything is rewritten on the way out.
+    _log_completion(chain, trace, response.status_code, bytes_out=trace.received or None)
     return response
 
 
 async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
-    # Consumed here so the request is fully read before anything can return, which is what lets a rejected body be reported at all. Its size is deliberately **not** what `↑` reports — see `_log_completion`.
+    # Consumed here so the request is fully read before anything can return, which is what lets a rejected body be reported at all. Its size is deliberately **not** what `↑` reports — see `_log_completion`. The request is already registered, so a client that never finishes sending is visible for however long it takes.
     await request.body()
 
     route = route_for_path(request.url.path)
@@ -161,129 +179,116 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
     trace.requested_model = context.requested_model
 
     active = chain.active_requests
-    # Registered before routing, so the footer shows the request as `(resolving)` from the moment it arrives rather than only once its model is known. Everything below must leave through `_release`, except the streaming branch, which hands the registration to the generator instead.
-    active.add(context.id)
-    released = False
-
-    def _release() -> None:
-        nonlocal released
-        if not released:
-            released = True
-            active.remove(context.id)
 
     def _routed(routed: RequestContext) -> None:
         """Tell the footer which model answered, the moment routing decides it."""
-        active.set_model(context.id, routed.resolved_model)
+        active.set_model(trace.request_id, routed.resolved_model)
         trace.model = routed.resolved_model
 
-    try:
-        if route.count_tokens:
-            # Answered here rather than driven: the reply is a count, not an upstream response to
-            # deliver, so none of the block buffering below applies to it.
-            try:
-                counted = await handle_count_tokens(chain, context)
-            except Exception as error:
-                # Routing runs inside the handler, so a failure after it has a resolved model worth naming; before it, this is still empty and the field drops out.
-                trace.model = context.resolved_model
-                trace.detail = str(error)
-                return JSONResponse(
-                    error_body(error),
-                    status_code=error_status(error),
-                    headers=error_headers(error),
-                )
-            # A count is a model request like any other: it resolves a model and it produces a token number, and a line that reported neither made the busiest endpoint on the proxy the least legible one.
-            trace.model = context.resolved_model
-            active.set_model(context.id, context.resolved_model)
-            tokens = counted.get("input_tokens")
-            if isinstance(tokens, int):
-                trace.usage = {"input_tokens": tokens}
-            return JSONResponse(counted)
-
+    if route.count_tokens:
+        # Answered here rather than driven: the reply is a count, not an upstream response to
+        # deliver, so none of the block buffering below applies to it.
         try:
-            handled = await handle_bounded(chain, context, _routed)
+            counted = await handle_count_tokens(chain, context)
         except Exception as error:
+            # Routing runs inside the handler, so a failure after it has a resolved model worth naming; before it, this is still empty and the field drops out.
             trace.model = context.resolved_model
-            trace.attempts = context.attempt_count
             trace.detail = str(error)
             return JSONResponse(
                 error_body(error),
                 status_code=error_status(error),
                 headers=error_headers(error),
             )
-        active.set_model(context.id, context.resolved_model)
-        active.set_attempts(context.id, context.attempt_count)
+        # A count is a model request like any other: it resolves a model and it produces a token number, and a line that reported neither made the busiest endpoint on the proxy the least legible one.
         trace.model = context.resolved_model
-        trace.requested_model = context.requested_model
+        active.set_model(trace.request_id, context.resolved_model)
+        tokens = counted.get("input_tokens")
+        if isinstance(tokens, int):
+            trace.usage = {"input_tokens": tokens}
+        return JSONResponse(counted)
+
+    try:
+        handled = await handle_bounded(chain, context, _routed)
+    except Exception as error:
+        trace.model = context.resolved_model
         trace.attempts = context.attempt_count
+        trace.detail = str(error)
+        return JSONResponse(
+            error_body(error),
+            status_code=error_status(error),
+            headers=error_headers(error),
+        )
+    active.set_model(trace.request_id, context.resolved_model)
+    active.set_attempts(trace.request_id, context.attempt_count)
+    trace.model = context.resolved_model
+    trace.requested_model = context.requested_model
+    trace.attempts = context.attempt_count
 
-        response = handled.response
-        if response is None:
-            error = handled.outcome.error or RuntimeError("request produced no response")
-            trace.detail = str(error)
-            return JSONResponse(
-                error_body(error),
-                status_code=error_status(error),
-                headers=error_headers(error),
-            )
-        # Exactly what went out to upstream, taken off the request httpx actually sent rather than re-serialized from the payload. It is not the client's body size: translation rewrites the payload, and the version upstream is billed and tokenized for is the one worth reporting.
-        trace.bytes_in = len(response.request.content)
-        trace.upstream_protocol = http_label(response.http_version)
+    response = handled.response
+    if response is None:
+        error = handled.outcome.error or RuntimeError("request produced no response")
+        trace.detail = str(error)
+        return JSONResponse(
+            error_body(error),
+            status_code=error_status(error),
+            headers=error_headers(error),
+        )
+    # Exactly what went out to upstream, taken off the request httpx actually sent rather than re-serialized from the payload. It is not the client's body size: translation rewrites the payload, and the version upstream is billed and tokenized for is the one worth reporting.
+    trace.bytes_in = len(response.request.content)
+    trace.upstream_protocol = http_label(response.http_version)
 
-        if context.stream:
-            # Block-level delivery over the live upstream.
-            # The body is never read whole here, so a block goes out while the rest still arrives.
-            #
-            # The registration deliberately outlives this function. A streaming request has produced nothing at the moment the handler returns — the body is consumed after — so releasing here would drop it off the footer at exactly the point it becomes worth watching.
-            released = True
-            # Held rather than passed straight through: the assembler is what reads the upstream's terminal event, so after the stream finishes it is the only thing that knows the token usage and the stop reason.
-            assembler = assembler_for(handled)
-            accounting = _StreamAccounting(
-                chain=chain,
-                request_id=context.id,
-                trace=trace,
-                status_code=response.status_code,
-                assembler=assembler,
-            )
-            return _AccountedStreamingResponse(
-                _tracked_delivery(
-                    stream_delivery(
-                        _counted_upstream(response.aiter_bytes(), chain, context.id, trace),
-                        assembler,
-                        buffer=delivery_buffer(chain),
-                        settings=stream_settings(chain),
-                        message_id=context.id,
-                        model=context.resolved_model,
-                    ),
-                    accounting,
+    if context.stream:
+        # Block-level delivery over the live upstream.
+        # The body is never read whole here, so a block goes out while the rest still arrives.
+        #
+        # The registration deliberately outlives this function. A streaming request has produced nothing at the moment the handler returns — the body is consumed after — so releasing here would drop it off the footer at exactly the point it becomes worth watching.
+        # Held rather than passed straight through: the assembler is what reads the upstream's terminal event, so after the stream finishes it is the only thing that knows the token usage and the stop reason.
+        assembler = assembler_for(handled)
+        accounting = _StreamAccounting(
+            chain=chain,
+            request_id=trace.request_id,
+            trace=trace,
+            status_code=response.status_code,
+            assembler=assembler,
+        )
+        return _AccountedStreamingResponse(
+            _tracked_delivery(
+                stream_delivery(
+                    _counted_upstream(response.aiter_bytes(), chain, trace.request_id, trace),
+                    assembler,
+                    buffer=delivery_buffer(chain),
+                    settings=stream_settings(chain),
+                    message_id=context.id,
+                    model=context.resolved_model,
                 ),
                 accounting,
-                status_code=response.status_code,
-                media_type="text/event-stream",
-            )
+            ),
+            accounting,
+            status_code=response.status_code,
+            media_type="text/event-stream",
+        )
 
-        body = cast(dict[str, Any], response.json())
-        # What upstream sent us, not what we hand onward. A buffered reply is one read, so this is the whole of it.
-        trace.received = len(response.content)
-        payload = response_payload(chain, handled, body)
-        # Taken from what goes downstream rather than from the upstream body, so the numbers on the line are the ones the client was actually told.
-        usage = payload.get("usage")
-        if isinstance(usage, dict):
-            trace.usage = dict(cast(dict[str, Any], usage))
-        stop_reason = payload.get("stop_reason")
-        if isinstance(stop_reason, str):
-            trace.stop_reason = stop_reason
-        content = payload.get("content")
-        if isinstance(content, list):
-            # Same fact the streaming path reads off the assembler, taken here from the blocks themselves so a buffered reply reads identically to a streamed one.
-            blocks = cast(list[Any], content)
-            trace.tools = tuple(
-                str(cast(dict[str, Any], block).get("name", ""))
-                for block in blocks
-                if isinstance(block, dict) and cast(dict[str, Any], block).get("type") == "tool_use"
-            )
-        return JSONResponse(payload, status_code=response.status_code)
-    finally:
-        _release()
+    body = cast(dict[str, Any], response.json())
+    # What upstream sent us, not what we hand onward. A buffered reply is one read, so this is the whole of it.
+    trace.received = len(response.content)
+    payload = response_payload(chain, handled, body)
+    # Taken from what goes downstream rather than from the upstream body, so the numbers on the line are the ones the client was actually told.
+    usage = payload.get("usage")
+    if isinstance(usage, dict):
+        trace.usage = dict(cast(dict[str, Any], usage))
+    stop_reason = payload.get("stop_reason")
+    if isinstance(stop_reason, str):
+        trace.stop_reason = stop_reason
+    content = payload.get("content")
+    if isinstance(content, list):
+        # Same fact the streaming path reads off the assembler, taken here from the blocks themselves so a buffered reply reads identically to a streamed one.
+        blocks = cast(list[Any], content)
+        trace.tools = tuple(
+            str(cast(dict[str, Any], block).get("name", ""))
+            for block in blocks
+            if isinstance(block, dict) and cast(dict[str, Any], block).get("type") == "tool_use"
+        )
+    return JSONResponse(payload, status_code=response.status_code)
 
 
 @dataclass(slots=True)
@@ -378,6 +383,13 @@ def create_pipeline_app(chain: Chain) -> FastAPI:
     # Health, the model list and metrics. A supervisor that cannot ask whether the process is
     # ready has to guess, and the inference routes alone give it nothing to ask.
     app.include_router(ops_router)
+    # Outermost, so the bound counts a request from the moment it arrives rather than from the
+    # moment routing finishes. Over the limit a request waits; it is never refused and its
+    # connection is never closed — see `app.server.admission`.
+    app.add_middleware(
+        InFlightLimit,
+        max_inflight=chain.config.proactive_rate_limiter.max_inflight,
+    )
     return app
 
 
