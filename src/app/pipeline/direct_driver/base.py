@@ -225,9 +225,9 @@ class DirectDriver:
     ) -> httpx.Response:
         """Send one attempt under both upstream guards that can act from here.
 
-        This await ends when the response headers arrive, not when the body has been read — measured 2026-08-20 on a server that held the body back two seconds after its headers. So `response_header` is exactly what this bounds, and the attempt deadline can only do half its job here: the streaming body outlives this function, and the delivery chain enforces the rest of the same instant.
+        This await ends when the response headers arrive, not when the body has been read — measured 2026-08-20 on a server that held the body back two seconds after its headers. So `response_header` is bounded here in full, while the attempt deadline is one bound enforced from two places: a streaming body outlives this function, and the delivery chain holds it to the same instant.
 
-        Both raise `UpstreamTimeout`, which is retryable, because both fire while the driver still owns the attempt and nothing has been shown to the client yet.
+        Both raise `UpstreamTimeout`: both fire while the driver still owns the attempt, so either one leaves through the same path as any other attempt that ran out of time. What is then done about it — another attempt, a continuation, nothing — belongs to the retry configuration, not here.
         """
         send = self._provider.send(
             self._endpoint,
