@@ -44,6 +44,20 @@ def duration_colour(seconds: float) -> str:
     return BOLD_RED
 
 
+def volume_colour(value: float, *, notable: float, heavy: float) -> str:
+    """A severity ramp for "how much came back": quiet below `notable`, plain up to `heavy`, warm above it.
+
+    Grey rather than absent for the small case, because most replies are small and a column that shouts on every line stops carrying information. The escalation is the point: a reply an order of magnitude bigger than usual is worth seeing without reading the number, which is the same reason `duration_colour` exists.
+
+    Stops at yellow. Red and bold red are spoken for by failure and by a request that has run long enough to be a problem, and a large reply is neither — it is worth noticing, not worth alarm.
+    """
+    if value < notable:
+        return DIM
+    if value < heavy:
+        return WHITE
+    return YELLOW
+
+
 def cache_hit_colour(percent: int) -> str:
     """Severity for a prompt-cache hit rate — inverted, because a high rate is the good case.
 

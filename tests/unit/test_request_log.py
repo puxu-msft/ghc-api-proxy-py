@@ -15,7 +15,7 @@ from app.observability.request_log import (
     http_label,
     status_for,
 )
-from app.observability.terminal import BOLD_RED, DIM, RED, WHITE, YELLOW
+from app.observability.terminal import BOLD_RED, CYAN, DIM, GREEN, RED, RESET, WHITE, YELLOW
 from app.pipeline.delivery.assembler import ReplyDialect
 
 
@@ -344,3 +344,84 @@ def test_the_dialect_reaches_the_rendered_line() -> None:
         )
     )
     assert line.endswith("function_call(Bash) reason(enc:1)")
+
+
+def _received(byte_count: int) -> str:
+    return format_completion_line(
+        RequestLine(method="POST", path="/p", status_code=200, duration_s=1.0, bytes_out=byte_count),
+        color=True,
+    )
+
+
+def test_what_came_back_escalates_with_its_size() -> None:
+    """A reply an order of magnitude larger than usual should be visible without reading the number.
+
+    Thresholds are 1024-based so the colour turns on the same line the printed figure crosses `10.0KB`, rather than a few hundred bytes to either side of where a reader would expect it.
+    """
+    assert DIM in _received(10 * 1024 - 1)
+    assert WHITE in _received(10 * 1024)
+    assert WHITE in _received(100 * 1024 - 1)
+    assert YELLOW in _received(100 * 1024)
+
+
+def test_what_went_out_stays_quiet_however_large() -> None:
+    # Its size follows from the request the client made, so it says nothing about how the reply went. Escalating it would put a warm colour on every long-context turn and mean nothing by it.
+    line = format_completion_line(
+        RequestLine(method="POST", path="/p", status_code=200, duration_s=1.0, bytes_in=5_000_000),
+        color=True,
+    )
+    assert YELLOW not in line
+    assert DIM in line
+
+
+def test_output_tokens_escalate_on_their_own_scale() -> None:
+    # Counted, not measured in bytes, so the thresholds are the round numbers a reader thinks in.
+    def produced(count: int) -> str:
+        return format_tokens({"input_tokens": 1, "output_tokens": count}, color=True)
+
+    assert DIM in produced(999)
+    assert WHITE in produced(1_000)
+    assert WHITE in produced(9_999)
+    assert YELLOW in produced(10_000)
+
+
+def test_a_clean_finish_is_green_and_a_curtailed_one_is_not() -> None:
+    """Green has to keep meaning "nothing to look at here".
+
+    `max_tokens` and `refusal` did end the turn, so they are terminal in the sense the word usually carries — but painting them the same green as a clean finish would hide the one thing about them worth seeing.
+    """
+    assert format_stop_reason("end_turn", (), color=True) == f"{GREEN}end_turn{RESET}"
+    assert format_stop_reason("stop_sequence", (), color=True) == f"{GREEN}stop_sequence{RESET}"
+    assert format_stop_reason("max_tokens", (), color=True) == f"{YELLOW}max_tokens{RESET}"
+    assert format_stop_reason("refusal", (), color=True) == f"{YELLOW}refusal{RESET}"
+    # Not a finish at all: the turn is continuing, and colouring it as one would make the most common non-finish look like the end.
+    assert format_stop_reason("tool_use", (), color=True) == "tool_use"
+
+
+def test_the_tool_that_waits_on_a_person_is_picked_out_of_the_list() -> None:
+    """Every other entry resolves on its own; this one does not, which is what makes it worth seeing in a scrolling log."""
+    line = format_stop_reason("tool_use", ("Bash", "AskUserQuestion", "Read"), color=True)
+    assert f"{CYAN}AskUserQuestion{RESET}" in line
+    assert f"{DIM}Bash{RESET}" in line and f"{DIM}Read{RESET}" in line
+
+
+def test_a_run_of_quiet_tools_is_coloured_with_its_commas() -> None:
+    # Painting name by name would leave white commas between grey names, which reads as though the separators belonged to something else.
+    assert format_stop_reason("tool_use", ("Bash", "Bash", "Read"), color=True) == f"tool_use({DIM}Bash,Bash,Read{RESET})"
+
+
+def test_none_of_this_shows_up_without_colour() -> None:
+    # The plain form is what a pipe, a log file and a `TERM=dumb` terminal get, and it must stay byte-for-byte what it was.
+    assert format_stop_reason("end_turn", ("Bash", "AskUserQuestion")) == "end_turn(Bash,AskUserQuestion)"
+    assert "\x1b" not in format_completion_line(
+        RequestLine(
+            method="POST",
+            path="/p",
+            status_code=200,
+            duration_s=1.0,
+            bytes_out=500_000,
+            usage={"input_tokens": 1, "output_tokens": 50_000},
+            stop_reason="end_turn",
+            tools=("AskUserQuestion",),
+        )
+    )

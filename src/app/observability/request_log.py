@@ -24,6 +24,7 @@ from app.observability.terminal import (
     cache_hit_colour,
     duration_colour,
     paint,
+    volume_colour,
 )
 from app.pipeline.delivery.assembler import ReplyDialect
 
@@ -32,6 +33,18 @@ from app.pipeline.delivery.assembler import ReplyDialect
 TOOL_USE_REASON = "tool_use"
 REASONING_WORD = {ReplyDialect.ANTHROPIC: "think", ReplyDialect.RESPONSES: "reason"}
 TOOL_WORD = {ReplyDialect.ANTHROPIC: TOOL_USE_REASON, ReplyDialect.RESPONSES: "function_call"}
+
+# Where a reply stops being ordinary. Byte thresholds are 1024-based to match what `format_bytes` prints, so the colour changes on the same line the number crosses `10.0KB` rather than a few hundred bytes either side of it.
+NOTABLE_BYTES, HEAVY_BYTES = 10 * 1024, 100 * 1024
+NOTABLE_TOKENS, HEAVY_TOKENS = 1_000, 10_000
+
+# Reasons that mean the turn is over, split by whether it ended the way it meant to. `tool_use` is in neither: it says the turn is *continuing*, and colouring it as a finish would make the most common non-finish look like one.
+# Two tiers rather than one because green has to keep meaning "nothing to look at here". A reply cut off at the token limit, or one the model declined to give, did end the turn — but painting those the same green as a clean finish would hide the one thing about them worth seeing.
+FINISHED_REASONS = frozenset({"end_turn", "stop_sequence"})
+CURTAILED_REASONS = frozenset({"max_tokens", "refusal"})
+
+# Tools whose presence means the turn is waiting on a person rather than on a machine. Worth picking out of an otherwise quiet list: it is the one entry that will not resolve on its own.
+ATTENTION_TOOLS = frozenset({"AskUserQuestion"})
 
 
 def http_label(version: str | None, *, websocket: bool = False) -> str:
@@ -108,19 +121,51 @@ def format_thinking(kinds: tuple[str, ...], dialect: ReplyDialect = ReplyDialect
 
 
 def format_stop_reason(
-    stop_reason: str, tools: tuple[str, ...], dialect: ReplyDialect = ReplyDialect.ANTHROPIC
+    stop_reason: str, tools: tuple[str, ...], dialect: ReplyDialect = ReplyDialect.ANTHROPIC, *, color: bool = False
 ) -> str:
     """`tool_use(Bash,Bash,Read)` / `function_call(Bash,Bash,Read)` — the reason, and for tool calls which tools were asked for.
 
     Duplicates are kept and the order is the model's. The reason alone says only that the turn ended in tool calls; three `Bash` in a row and one `Bash` are very different turns, and collapsing them would hide exactly the pattern worth noticing in a log.
 
     A Responses upstream has no stop reason of its own, so the assembler synthesises the Anthropic one the client is owed. That synthesised word is right for the response body and wrong for this line, which reports what upstream did: there, the thing that happened was a `function_call` item. The real name is used here so a reader is not left looking for a `tool_use` in a Responses trace that never contained one.
+
+    Colour says how the turn ended: green for a clean finish, yellow for one that ended without getting there, and nothing at all for a turn that has not ended. The names in the parentheses are quiet — see `_painted_tools`.
     """
     if not stop_reason:
         return ""
     named = [tool for tool in tools if tool]
     word = TOOL_WORD[dialect] if stop_reason == TOOL_USE_REASON else stop_reason
-    return f"{word}({','.join(named)})" if named else word
+    if stop_reason in FINISHED_REASONS:
+        painted = paint(word, GREEN, color=color)
+    elif stop_reason in CURTAILED_REASONS:
+        painted = paint(word, YELLOW, color=color)
+    else:
+        painted = word
+    return f"{painted}({_painted_tools(named, color=color)})" if named else painted
+
+
+def _painted_tools(names: list[str], *, color: bool) -> str:
+    """The tool names inside the parentheses, quiet except for the one that stops the turn.
+
+    Dim by default because the list is context for the word in front of it: what matters at a glance is that the turn ended in tool calls, and *which* ones only once somebody is already reading. `AskUserQuestion` is the exception and gets picked out, because it means the turn is waiting on a person — unlike every other entry, it will not resolve on its own, and that is worth spotting in a scrolling log.
+
+    Painted in runs rather than name by name so the commas inside a run are coloured with it. Painting each name separately would leave white commas between grey names, which reads as though the separators were part of something else.
+    """
+    if not color:
+        return ",".join(names)
+    spans: list[str] = []
+    run: list[str] = []
+    run_colour = ""
+    for name in names:
+        colour = CYAN if name in ATTENTION_TOOLS else DIM
+        if run and colour != run_colour:
+            spans.append(paint(",".join(run), run_colour, color=True))
+            run = []
+        run_colour = colour
+        run.append(name)
+    if run:
+        spans.append(paint(",".join(run), run_colour, color=True))
+    return ",".join(spans)
 
 
 def format_count(value: int) -> str:
@@ -172,7 +217,9 @@ def format_tokens(usage: dict[str, Any], *, unicode: bool = True, color: bool = 
         parts.append(rate)
 
     if "output_tokens" in usage:
-        parts.append(f"{down}{format_count(read('output_tokens'))}")
+        produced = read("output_tokens")
+        colour = volume_colour(produced, notable=NOTABLE_TOKENS, heavy=HEAVY_TOKENS)
+        parts.append(paint(f"{down}{format_count(produced)}", colour, color=color))
     return " ".join(parts)
 
 
@@ -208,7 +255,9 @@ def format_completion_line(line: RequestLine, *, unicode: bool = True, color: bo
 
     Ordered status, subject, duration, wire bytes, tokens, stop reason, retries, detail — narrowing from how it went, to what it cost, to why it ended. Every field after the subject is omitted when it has nothing to say, so a bare rejection and a full streamed answer share one column order instead of drifting into two formats.
 
-    Colour carries meaning rather than decoration, following `copilot-api-js`: the status and the failure reason say whether to care, the model is the one name worth finding at a glance, the duration escalates on its own so a slow request is visible without reading the number, and the volumes stay dim because they are context for everything else.
+    Colour carries meaning rather than decoration, following `copilot-api-js`: the status and the failure reason say whether to care, the model is the one name worth finding at a glance, and the duration escalates on its own so a slow request is visible without reading the number.
+
+    What came *back* escalates too, on its own scale — bytes and output tokens both go quiet, plain, then warm as they cross an order of magnitude. What went out does not: its size follows from the request the client made and says nothing about how the reply went.
     """
     succeeded = line.status_code is not None and line.status_code < 400
     up, down = ("↑", "↓") if unicode else (">", "<")
@@ -225,9 +274,13 @@ def format_completion_line(line: RequestLine, *, unicode: bool = True, color: bo
         parts.append(paint(format_duration(line.duration_s), duration_colour(line.duration_s), color=color))
 
     # Wire bytes, one field for both directions so they read as a pair rather than as two unrelated numbers.
+    # Only the returning half escalates. What this proxy sent upstream is a consequence of the request the client made and says nothing about how the reply went, so it stays quiet whatever its size.
+    received_colour = (
+        volume_colour(line.bytes_out, notable=NOTABLE_BYTES, heavy=HEAVY_BYTES) if line.bytes_out is not None else DIM
+    )
     wire = [
         paint(f"{up}{format_bytes(line.bytes_in)}", DIM, color=color) if line.bytes_in is not None else "",
-        paint(f"{down}{format_bytes(line.bytes_out)}", DIM, color=color) if line.bytes_out is not None else "",
+        paint(f"{down}{format_bytes(line.bytes_out)}", received_colour, color=color) if line.bytes_out is not None else "",
     ]
     parts.extend(part for part in wire if part)
 
@@ -235,7 +288,7 @@ def format_completion_line(line: RequestLine, *, unicode: bool = True, color: bo
     if tokens:
         parts.append(tokens)
     if line.stop_reason:
-        parts.append(format_stop_reason(line.stop_reason, line.tools, line.dialect))
+        parts.append(format_stop_reason(line.stop_reason, line.tools, line.dialect, color=color))
     if line.attempts > 1:
         # Named on the line that reports the outcome, where the count is final. A retry still in progress is the footer's job.
         parts.append(paint(f"retries={line.attempts - 1}", YELLOW, color=color))
