@@ -25,6 +25,10 @@ from app.pipeline.translation_driver.anthropic_messages import (
 from app.pipeline.translation_driver.content import BlockKind, ContentBlock
 from app.pipeline.translation_driver.openai_responses import blocks_from_item, item_from_block
 from app.pipeline.translation_driver.semantic import Conversion, LossCode
+from app.protocols.responses_anthropic import (
+    ResponseConversionError,
+    anthropic_usage_from_responses,
+)
 
 TEXT = "text"
 
@@ -66,6 +70,19 @@ def from_anthropic_response(payload: Mapping[str, Any]) -> SemanticResponse:
         block_from_anthropic(block) for block in _mapping_list(payload.get("content"))
     ]
     return response
+
+
+def _anthropic_usage(usage: Mapping[str, Any]) -> dict[str, Any]:
+    """Responses token counts in Anthropic's keys, for a body that is about to claim to be Anthropic's.
+
+    This used to copy the object across untouched, which handed the client `input_tokens_details` and `total_tokens` it has no schema for, no `cache_read_input_tokens` at all, and — the part that misleads rather than merely omits — an `input_tokens` that in Responses *includes* what came from cache but in Anthropic means what was sent fresh. A heavily cached prompt therefore arrived downstream looking like a full-price one. The streaming path converts, so the same route was answering with two different usage contracts depending on one flag.
+
+    A malformed usage leaves the field empty rather than failing the response. The reply itself is complete and legal; refusing to deliver it over a count would trade the answer for its accounting, and passing the raw object through instead would put back the shape the client cannot read.
+    """
+    try:
+        return dict[str, Any](anthropic_usage_from_responses(usage))
+    except ResponseConversionError:
+        return {}
 
 
 def to_anthropic_response(response: SemanticResponse) -> dict[str, Any]:
@@ -117,7 +134,7 @@ def from_openai_responses_response(payload: Mapping[str, Any]) -> SemanticRespon
     )
     usage = payload.get("usage")
     if isinstance(usage, Mapping):
-        response.usage = dict[str, Any](cast(Mapping[str, Any], usage))
+        response.usage = _anthropic_usage(cast(Mapping[str, Any], usage))
 
     for item in _mapping_list(payload.get("output")):
         _, blocks = blocks_from_item(item)

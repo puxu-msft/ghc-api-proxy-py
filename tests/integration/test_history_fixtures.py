@@ -186,3 +186,27 @@ async def test_the_assembler_pairs_the_recorded_items_despite_the_id_change() ->
     assert len(blocks) == 2, f"expected the reasoning and text items to close, got {blocks}"
     assert [block.kind for block in blocks] == ["thinking", "text"]
     assert orjson.dumps(blocks[0].payload), "a block came out unserialisable"
+
+
+@pytest.mark.asyncio
+async def test_the_recorded_usage_is_read_as_the_upstream_actually_reports_it() -> None:
+    """What the token figures mean, checked against a capture rather than against what we believe.
+
+    This is the one property a hand-written usage cannot establish: Responses counts the cached
+    portion *inside* `input_tokens`, so reading that object with Anthropic keys reports a heavily
+    cached prompt as having been sent whole. This capture is 55680 of 56919 served from cache — a
+    turn that costs almost nothing, and that the log line called full price before the conversion
+    went in.
+
+    It also carries no `cache_write_tokens` key at all, which is why the converter defaults it
+    rather than requiring it. A fixture written from memory would have included it.
+    """
+    assembler = ResponsesAssembler()
+    await deliver(RESPONSES, assembler)
+
+    assert assembler.terminal.usage == {
+        "input_tokens": 1_239,
+        "cache_read_input_tokens": 55_680,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 637,
+    }

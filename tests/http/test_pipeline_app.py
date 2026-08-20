@@ -1244,3 +1244,70 @@ async def test_a_body_that_fails_to_close_is_still_accounted_for() -> None:
     # The exit that ended the request, not the close that failed on the way out — with the close failure chained on so neither is lost.
     assert str(raised.value) == "the client went away"
     assert str(raised.value.__cause__) == "closing the body blew up"
+
+
+def test_a_buffered_translated_reply_hands_the_client_anthropic_token_keys(
+    request_log: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The body, not just the line. Nothing asserted this contract before, which is how it went wrong.
+
+    Responses counts the cached portion inside `input_tokens` and puts the breakdown in
+    `input_tokens_details`. Copied across untouched, the client got keys it has no schema for, no
+    `cache_read_input_tokens` at all, and an `input_tokens` meaning the opposite of what Anthropic's
+    means — a cached prompt arriving downstream as a full-price one. The streaming path converts, so
+    the same route was answering with two different usage contracts depending on one flag.
+    """
+    client, _ = make_client(
+        lambda _: httpx.Response(
+            200,
+            json={
+                "id": "resp_1",
+                "model": "gpt-model",
+                "status": "completed",
+                "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hi"}]}],
+                "usage": {
+                    "input_tokens": 138_500,
+                    "input_tokens_details": {"cached_tokens": 135_000},
+                    "output_tokens": 2_700,
+                    "total_tokens": 141_200,
+                },
+            },
+        )
+    )
+
+    with caplog.at_level(logging.INFO):
+        response = client.post("/v1/messages", json={"model": "gpt-model", "messages": []})
+
+    assert response.json()["usage"] == {
+        "input_tokens": 3_500,
+        "cache_read_input_tokens": 135_000,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 2_700,
+    }
+    # And the line reports the same numbers, because it reads what the client was told.
+    assert "↑3.5k+135.0k" in _request_lines(caplog.records)[0]
+
+
+def test_a_malformed_usage_costs_the_counts_and_not_the_buffered_reply(
+    request_log: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The reply itself is complete and legal; refusing to deliver it over a count would trade the answer for its accounting.
+    client, _ = make_client(
+        lambda _: httpx.Response(
+            200,
+            json={
+                "id": "resp_1",
+                "model": "gpt-model",
+                "status": "completed",
+                "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hi"}]}],
+                "usage": {"input_tokens": "lots"},
+            },
+        )
+    )
+
+    with caplog.at_level(logging.INFO):
+        response = client.post("/v1/messages", json={"model": "gpt-model", "messages": []})
+
+    assert response.status_code == 200
+    assert response.json()["content"] == [{"type": "text", "text": "hi"}]
+    assert response.json()["usage"] == {"input_tokens": 0, "output_tokens": 0}

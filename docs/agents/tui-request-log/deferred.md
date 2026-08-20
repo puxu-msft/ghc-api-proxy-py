@@ -20,6 +20,20 @@
 
 **判断**：值得做，但 ROI 取决于 `/responses` 入站实际有多少流量——本项目的主产品路径是 Anthropic Messages 入站，这条是次要面。**证据强度：现象已由 mock 上游复现，可据此行动；流量占比未测，属于待确认。**
 
+## 0.5 上游 usage 自相矛盾时，这条信号在当前管线里没有落点
+
+**现状**：`protocols/responses_anthropic.py` 的 `_convert_usage` 除了产出数字，还会产出 `ResponseConversionFact`（`usage_inconsistent`：缓存明细之和大于 `input_tokens`、`reasoning_tokens > output_tokens`、`total_tokens` 对不上）与 `ResponseUsageFacts`（保留 `reasoning_tokens` 与上游原始 totals）。
+
+2026-08-20 新增的公开包装 `anthropic_usage_from_responses()` **只返回 `.wire`**，把 facts 与 exact usage 都丢掉了。流式路径（assembler）与缓冲路径（translation_driver）都用这个包装，所以当前主管线两条路都不保留这些信号。旧的 `app.anthropic.client` 路径会把它们放进 context / history，但那条路不是现在的主路。
+
+**后果**：`_convert_usage` 用 `max(0, ...)` 仍会产出可交付的数字，于是**上游报了自相矛盾的 usage 时，管线照常给出看起来正常的数字，而没有任何地方说明它来自矛盾输入**。
+
+**同类的第二个缺口**：usage 格式非法时（`ResponseConversionError`），两处都返回 `{}` 并继续交付。这在优先级上是对的——不能为一个没人在等的计数中断已交付的响应——但运行时**没有任何信号**，「上游没报 usage」与「上游报了坏数据」在日志上完全一样。异常本身带着 `code` 与 `field_path`，现在被丢弃。
+
+**为什么本次没做**：修法需要把 facts 挂到某处并让有 request context 的层去消费，或者在 pipeline 层直接打日志。后者是新的依赖方向——**当前 `src/app/pipeline/` 下没有任何模块 import `app.observability.logging`**，为一个 minor 引入这个方向不划算。前者是独立切片。评审同样评为 minor，且明确不建议为此中断响应。
+
+**倾向**：值得做，优先级低于第 0 条。做的时候应当一并处理，别只补一半。
+
 ## 1. Responses 上游的 stop reason 仍是合成词
 
 **现状**：2026-08-20 起，日志行对推理块与工具调用已按上游用词区分（`think` / `reason`，`tool_use` / `function_call`，见 `SPEC.md` 的「描述回复的用词跟随上游」）。但同一行上的 `end_turn` 与 `max_tokens` **在 Responses 上游同样是合成的**：
