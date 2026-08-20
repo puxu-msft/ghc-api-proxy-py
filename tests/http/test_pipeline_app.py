@@ -559,13 +559,12 @@ def test_count_tokens_accepts_a_body_without_max_tokens() -> None:
     assert "max_tokens" not in orjson.loads(seen[-1].read())
 
 
-def test_count_tokens_refuses_a_model_that_advertises_other_endpoints() -> None:
-    """The gap between refusal and failure.
+def test_count_tokens_estimates_locally_for_a_model_with_no_upstream_counter() -> None:
+    """The gap between refusal and failure, corrected 2026-08-20.
 
-    `gpt-model` is routable and known — it just cannot take a Messages body. Treating that refusal
-    as one more failed attempt would fall through to the local estimate and answer 200 with a count
-    for a model this request can never reach. `mute-model` does not exercise this: it is stopped
-    earlier, by routing.
+    This asserted 400 on the reasoning that answering would give "a count for a model this request can never reach". That premise is false, and demonstrably so in this same file: `test_anthropic_request_for_a_responses_model_is_translated` sends `gpt-model` a Messages body to `/v1/messages` and gets 200 — the difference between the two URLs is the whole argument, since it is the same model and the same inbound protocol. The model is reached; it is reached by translation. What `gpt-model` lacks is not reachability but a *counter* — upstream's only one serves the Anthropic protocol, and the OpenAI family reports usage on a finished response instead.
+
+    So a 400 here told a client that a request it was about to make successfully could not be measured. The route now decides whether an upstream counter exists before one is called, and the answer falls to the local estimate, marked `estimated`.
     """
     client, seen = make_client(lambda _: httpx.Response(200, json={"input_tokens": 99}))
     response = client.post(
@@ -573,8 +572,11 @@ def test_count_tokens_refuses_a_model_that_advertises_other_endpoints() -> None:
         json={"model": "gpt-model", "messages": [{"role": "user", "content": "hi"}]},
     )
 
-    assert response.status_code == 400
-    assert response.json()["error"]["type"] == "EndpointNotSupported"
+    assert response.status_code == 200
+    body = response.json()
+    assert body["estimated"] is True
+    assert body["input_tokens"] > 0
+    # Never asked: a refusal from this counter is fatal, so it must not be tried and caught.
     assert seen == []
 
 

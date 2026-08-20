@@ -45,15 +45,19 @@ async def count_tokens(
     max_retries: int,
     upstream: UpstreamCounter | None = None,
     local: LocalCounter | None = None,
+    upstream_absent_reason: str = "unconfigured",
 ) -> CountTokensResult:
-    """Try each provider in order, retrying within one before moving on."""
+    """Try each provider in order, retrying within one before moving on.
+
+    `upstream_absent_reason` names *why* there is no upstream counter, for the attempts trail. It defaults to the historical answer — nobody supplied one — but a caller that withheld it deliberately should say so, because `ghc:unconfigured` read against a config file that plainly configures `ghc` sends the next reader looking for a settings bug that is not there.
+    """
     attempts: list[str] = []
     for provider in providers:
         for attempt in range(max_retries + 1):
             try:
                 if provider == "ghc":
                     if upstream is None:
-                        attempts.append("ghc:unconfigured")
+                        attempts.append(f"ghc:{upstream_absent_reason}")
                         break
                     return CountTokensResult(
                         tokens=await upstream(payload),

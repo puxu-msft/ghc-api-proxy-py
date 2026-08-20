@@ -10,6 +10,24 @@ Token count 是协议 wire contract，不是单一通用端点：
 
 共享模块只复用 tokenizer 生命周期、状态与结果机制；Anthropic/Gemini 各自保留协议专用 payload 估算，避免伪造 canonical request。
 
+## 与请求管道共享的部分（2026-08-20）
+
+`/v1/messages/count_tokens` 与 `/v1/messages` 共用 `handler.shape_request()`：**路由**与 **`fix_anthropic_request`**。理由是 count endpoint 量的必须是**真正会发出去的那个 body**——上游已实测会用**逐字相同**的措辞拒绝 counting 请求与被计数的请求（server-tool 声明即为一例）。
+
+`attempt.prepare` 订阅者**不在** `shape_request()` 内：真实路径由驱动逐 attempt 发布，count 路径只有一次 attempt，故在 `handle_count_tokens` 中自行发布一次。这一条早于本次改动就已共享。
+
+**翻译不共享。** 本节开头那条「token count 是协议 wire contract」与「避免伪造 canonical request」同时否掉了「为了计数先翻译一遍」：翻译后的 body 在两侧都没有计数器——上游对 OpenAI 家族不提供，本地 estimator 读的是 Anthropic body。
+
+**分成两问，而不是一问。**
+
+1. **这个请求发得出去吗**——`translation_required` 但没有对应 translator 时（例如只广告 `/embeddings` 的模型），`handle()` 会抛 `TranslatorNotFound` 给出 400；count endpoint 用 `TranslatorRegistry.can_translate()` 问同一个问题并给出同样的 400。量一个注定被拒的请求，答案再准也没有意义。
+2. **上游有没有计数器**——`target_format` 不是 Anthropic Messages 时，不向 `count_tokens()` 传 upstream counter，链路按既有语义交棒给 `local`，答案带 `estimated: true`；跳过原因经 `upstream_absent_reason` 进入 attempts trail（形如 `ghc:no-counter-for-openai-responses`），**不写成 `ghc:unconfigured`**——那会让下一个读日志的人去查一个并不存在的配置错误。
+
+> **推翻了一条旧行为。** 此前翻译路径上 count endpoint 返回 **400 `EndpointNotSupported`**，理由写在 `count_tokens.py` 与其测试里：「answering would report a count for a model this request can never reach」。**该前提不成立**——同一个模型、同一个入站协议下 `POST /v1/messages` 会经翻译成功返回 200（`tests/http/test_pipeline_app.py::test_anthropic_request_for_a_responses_model_is_translated`）。模型是够得着的，够不着的是**计数器**。于是旧行为等于告诉客户端「你马上要发的这个请求没法量」。用户 2026-08-20 裁决改为本地估算。
+
+`count_tokens.py` 中「`ProviderError` 一律外抛、不降级」的规则**未改**，但**在这个调用点上现已整体不可达**：只有 `target_format` 为 Anthropic Messages 时才会传入 upstream counter，而那种情况下 `require_endpoint` 必然通过。该规则继续为其他调用者保留。
+
+
 ## Anthropic service
 
 `AnthropicTokenCountingService`：

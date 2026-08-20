@@ -15,7 +15,7 @@ from typing import Any, cast
 import httpx
 from pydantic import ValidationError
 
-from app.model_provider import ProviderError
+from app.model_provider import ModelProvider, ProviderError
 from app.models.anthropic import MessagesRequest
 from app.pipeline.anthropic_request_hook import fix_anthropic_request
 from app.pipeline.count_tokens import CountTokensUnavailable, count_tokens
@@ -65,7 +65,17 @@ def apply_route(context: RequestContext, route: Route) -> None:
     context.route_reason = route.reason
 
 
-async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[RequestContext], None] | None = None) -> HandledRequest:
+def shape_request(
+    chain: Chain,
+    context: RequestContext,
+    on_routed: Callable[[RequestContext], None] | None = None,
+) -> tuple[ModelProvider, Route]:
+    """Route the request and repair it, up to but not including translation.
+
+    Shared by the two entry points because they are asking about the same request. A count taken from a body that had not been through these steps answers about a body nobody was going to send — and, since 2026-08-20, upstream refuses the counting request over the same defects it refuses the real one, in the same words.
+
+    Translation deliberately stops outside this function. `tokenization.md` puts token counting under a per-protocol wire contract and warns against fabricating a canonical request; a body translated into another protocol has no counter on either side of the wire — upstream offers none for the OpenAI family, and the local estimator reads an Anthropic body.
+    """
     provider = chain.providers.get(context.provider_name or chain.providers.default_name)
     route = decide_route(
         requested_model=context.requested_model,
@@ -79,9 +89,13 @@ async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[Req
         on_routed(context)
 
     if context.inbound_format is WireFormat.ANTHROPIC_MESSAGES:
-        # Before translation on purpose: these fixups read `messages`, which the target format may
-        # not have. The spec calls this point `on_client_request_parsed`.
+        # Before translation on purpose: these fixups read `messages`, which the target format may not have. The spec calls this point `on_client_request_parsed`.
         fix_anthropic_request(context.payload, chain.config.hook_fix_anthropic_request)
+    return provider, route
+
+
+async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[RequestContext], None] | None = None) -> HandledRequest:
+    provider, route = shape_request(chain, context, on_routed)
 
     if route.translation_required:
         translated, semantic = chain.translators.translate(
@@ -121,21 +135,11 @@ class CountTokensRequestError(ValueError):
 async def handle_count_tokens(chain: Chain, context: RequestContext) -> dict[str, Any]:
     """Serve `/v1/messages/count_tokens` through the provider chain the spec names.
 
-    Routed first, exactly like the request being measured: a count that ignored `model_mappings`
-    or the capability gate would answer about a different model than the one that would be asked.
+    Shaped by `shape_request`, exactly like the request being measured: a count that ignored `model_mappings`, the capability gate, or the repairs the outbound body gets would answer about a different request than the one that would be asked.
 
-    The two providers are not interchangeable. `ghc` returns upstream's own number and is worth
-    learning from; `local` returns an estimate corrected by what has been learnt so far. So the
-    answer says which one it came from rather than presenting an estimate as a measurement.
+    The two counters are not interchangeable. `ghc` returns upstream's own number and is worth learning from; `local` returns an estimate corrected by what has been learnt so far. So the answer says which one it came from rather than presenting an estimate as a measurement.
     """
-    provider = chain.providers.get(context.provider_name or chain.providers.default_name)
-    route = decide_route(
-        requested_model=context.requested_model,
-        inbound_format=context.inbound_format,
-        provider=provider,
-        mappings=chain.config.model_mappings,
-    )
-    apply_route(context, route)
+    provider, route = shape_request(chain, context)
     context.payload["model"] = route.model_id
 
     # The same subscribers the driver runs, for the same reason: this is an upstream request too, and upstream rejects a counting request carrying a server-tool declaration in exactly the words it rejects the request being counted. Measured 2026-08-20.
@@ -163,6 +167,21 @@ async def handle_count_tokens(chain: Chain, context: RequestContext) -> dict[str
         del payload  # Already measured above; recomputing per attempt would only cost time.
         return calibration.calibrate("anthropic", route.model_id, estimate)
 
+    # Two questions, not one, because they have different answers and the wrong pairing produced both of this endpoint's past mistakes.
+    #
+    # First: is this request carryable at all? A model whose only endpoint has no outbound translator cannot be sent a Messages body by any route — `handle()` raises `TranslatorNotFound` and the client gets a 400. Counting it would describe a request that is going to be refused, which is exactly the objection the old `EndpointNotSupported` refusal was written to make. That objection was right about this class and wrong about the next one.
+    #
+    # Second: does upstream have a counter for where this is going? `tokenization.md` makes token counting a per-protocol wire contract — `POST /v1/messages/count_tokens` serves the Anthropic protocol, and the OpenAI family has no count endpoint at all, reporting usage only on a finished response. A translated route is perfectly sendable and simply has no counter, so the answer is the local estimate rather than a refusal.
+    #
+    # Withholding the counter is how that is said: `count_tokens()` already understands a missing one as "hand over to the next", so this needs no new failure mode. The reason travels with it into the attempts trail, because `ghc:unconfigured` against a config file that configures `ghc` would send the next reader hunting a settings bug that does not exist.
+    if route.translation_required and not chain.translators.can_translate(
+        source=route.inbound_format, target=route.target_format
+    ):
+        raise TranslatorNotFound(
+            f"no translator carries {route.inbound_format.value} to {route.target_format.value}"
+        )
+    upstream_counts = route.target_format is WireFormat.ANTHROPIC_MESSAGES
+
     settings = chain.config.inbound.anthropic_count_tokens
     payload = dict(context.payload)
     payload.pop("stream", None)
@@ -170,8 +189,9 @@ async def handle_count_tokens(chain: Chain, context: RequestContext) -> dict[str
         payload,
         providers=settings.providers,
         max_retries=settings.max_retries,
-        upstream=ask_upstream,
+        upstream=ask_upstream if upstream_counts else None,
         local=estimate_locally,
+        upstream_absent_reason=f"no-counter-for-{route.target_format.value}",
     )
     context.extras["count_tokens_provider"] = result.provider
     if result.attempts:
@@ -375,3 +395,14 @@ def delivery_buffer(chain: Chain) -> BlockBuffer:
         policy=delivery.buffering_policy,
         cap_bytes=delivery.buffer_cap_bytes,
     )
+
+
+def stream_idle_seconds(chain: Chain, model: str) -> int:
+    """How long upstream may go quiet mid-stream before the attempt is given up on.
+
+    Resolved per model through the same precedence every other override uses, rather than through the legacy path's first-match-wins scan: which of two matching keys applies must not depend on the order they were written in.
+
+    0 disables it, and 0 is the bundled default. The frozen invariant is never to false-kill legitimate thinking — silence on a live connection has no provably safe bound, so an operator setting this is choosing bounded waiting rather than accepting a default.
+    """
+    timeouts = chain.config.upstream_request_timeouts
+    return resolve_timeout(model, timeouts.stream_idle, timeouts.stream_idle_overrides)

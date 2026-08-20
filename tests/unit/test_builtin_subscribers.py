@@ -8,9 +8,10 @@ The two tests at the bottom are the ones that matter most. Everything above them
 from typing import Any
 
 import httpx
+import pytest
 
 from app.config.schema import ProxyConfig
-from app.model_provider import ModelDescriptor, ModelEndpoint
+from app.model_provider import EndpointNotSupported, ModelDescriptor, ModelEndpoint
 from app.pipeline.direct_driver import AnthropicMessagesDriver, RetryBudget
 from app.pipeline.direct_driver.base import EVENT_ATTEMPT_PREPARE
 from app.pipeline.events import SubscriberRegistry
@@ -20,6 +21,7 @@ from app.pipeline.subscribers import (
     SERVER_TOOL_CAPABILITY_ID,
     register_builtin_subscribers,
 )
+from app.pipeline.translation_driver.registry import TranslatorNotFound
 from app.server.composition import build_chain
 from app.server.handler import handle_count_tokens
 
@@ -69,9 +71,11 @@ class RecordingProvider:
 
     name = "ghc"
 
-    def __init__(self) -> None:
+    def __init__(self, *, endpoint: ModelEndpoint = ModelEndpoint.ANTHROPIC_MESSAGES) -> None:
         self.sent: list[dict[str, Any]] = []
         self.counted: list[dict[str, Any]] = []
+        # The one model's only endpoint. `/responses` is what every GPT model on this upstream advertises and no Claude one does, so the route translates; `/embeddings` has no outbound translator at all, so nothing can carry a Messages body there.
+        self._endpoint = endpoint
 
     @property
     def available_ids(self) -> frozenset[str]:
@@ -80,7 +84,7 @@ class RecordingProvider:
     def describe(self, model_id: str) -> ModelDescriptor | None:
         if model_id != "claude-model":
             return None
-        return ModelDescriptor(id=model_id, endpoints=frozenset({ModelEndpoint.ANTHROPIC_MESSAGES}))
+        return ModelDescriptor(id=model_id, endpoints=frozenset({self._endpoint}))
 
     async def refresh_catalog(self) -> bool:
         return False
@@ -98,6 +102,9 @@ class RecordingProvider:
         return httpx.Response(200)
 
     async def count_tokens(self, payload: Any, *, model_id: str) -> httpx.Response:
+        # The real provider gates this on the Messages capability and raises `EndpointNotSupported` when it is absent. Mirrored here so a caller that asks anyway fails the same way it would in production, rather than quietly succeeding against a fake that has no opinion.
+        if self._endpoint is not ModelEndpoint.ANTHROPIC_MESSAGES:
+            raise EndpointNotSupported(self.name, model_id, ModelEndpoint.ANTHROPIC_MESSAGES.value)
         self.counted.append(dict(payload))
         # Carries a request because the caller calls `raise_for_status()`, which needs one. A bare response makes that raise, and the count then quietly falls back to the local estimate — a green assertion about `counted` would have hidden it.
         return httpx.Response(
@@ -211,3 +218,98 @@ async def test_the_counting_leg_gets_the_same_treatment_as_the_leg_it_measures()
     assert provider.counted == [
         {"model": "claude-model", "messages": [{"role": "user", "content": "hi"}]}
     ]
+
+
+async def test_a_translated_route_is_counted_locally_rather_than_refused() -> None:
+    """Upstream's only counter serves the Anthropic protocol; asking it about a Responses route used to fail the request outright.
+
+    `provider.count_tokens` gates on the Messages capability and raises `EndpointNotSupported`, a `ProviderError`, which the counting chain deliberately propagates rather than degrading. That rule is right when the model is unreachable and wrong here: the model is reached perfectly well through `/responses`, and it is the counter that is missing. So the route decides, before anything is called, whether an upstream counter exists at all.
+    """
+    config = ProxyConfig.model_validate(
+        {
+            "default_model_provider": "ghc",
+            "model_providers": {"ghc": {"type": "github_copilot"}},
+        }
+    )
+    provider = RecordingProvider(endpoint=ModelEndpoint.OPENAI_RESPONSES)
+    chain = build_chain(
+        config,
+        http_client=httpx.AsyncClient(),
+        providers={"ghc": provider},
+    )
+    context = RequestContext(
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        requested_model="claude-model",
+        payload={"model": "claude-model", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    answer = await handle_count_tokens(chain, context)
+
+    assert answer["estimated"] is True
+    assert answer["input_tokens"] > 0
+    # Not called at all, rather than called and refused: a refusal from this one is fatal.
+    assert provider.counted == []
+    # The trail says why, in words that do not accuse the config file of a fault it does not have.
+    assert context.extras["count_tokens_attempts"] == ["ghc:no-counter-for-openai-responses"]
+
+
+async def test_the_counted_body_is_the_repaired_one() -> None:
+    """The count answers about the body that would be sent, so it must go through the same repairs.
+
+    `context_management: {"edits": null}` is the discriminating case, not a blank text block: Claude Code sends it on every request, upstream rejects it outright, and `fix_anthropic_request` is the *only* thing that rewrites it — the `attempt.prepare` subscribers do not touch it. A blank block would have proved nothing here, because `builtin:blank-text-blocks` removes those too and the assertion could not tell which of the two had run.
+    """
+    config = ProxyConfig.model_validate(
+        {
+            "default_model_provider": "ghc",
+            "model_providers": {"ghc": {"type": "github_copilot"}},
+        }
+    )
+    provider = RecordingProvider()
+    chain = build_chain(
+        config,
+        http_client=httpx.AsyncClient(),
+        providers={"ghc": provider},
+    )
+    context = RequestContext(
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        requested_model="claude-model",
+        payload={
+            "model": "claude-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "context_management": {"edits": None},
+        },
+    )
+
+    await handle_count_tokens(chain, context)
+
+    [sent] = provider.counted
+    assert sent["context_management"] == {"edits": []}
+
+
+async def test_a_request_no_route_can_carry_is_refused_rather_than_estimated() -> None:
+    """The class the old refusal was right about, kept refusing.
+
+    A model whose only endpoint is `/embeddings` has no outbound translator, so `handle()` cannot send it a Messages body at all — the client gets a 400. Answering the count with an estimate would describe a request that is going to be refused, which is the objection the removed `EndpointNotSupported` refusal was written to make. It was right here and wrong about a translated route, so the two are now asked separately.
+    """
+    config = ProxyConfig.model_validate(
+        {
+            "default_model_provider": "ghc",
+            "model_providers": {"ghc": {"type": "github_copilot"}},
+        }
+    )
+    provider = RecordingProvider(endpoint=ModelEndpoint.OPENAI_EMBEDDINGS)
+    chain = build_chain(
+        config,
+        http_client=httpx.AsyncClient(),
+        providers={"ghc": provider},
+    )
+    context = RequestContext(
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        requested_model="claude-model",
+        payload={"model": "claude-model", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    with pytest.raises(TranslatorNotFound):
+        await handle_count_tokens(chain, context)
+
+    assert provider.counted == []
