@@ -17,7 +17,7 @@
 | 编号 | 级别 | 一句话 |
 |---|---|---|
 | F1 | major（相邻缺陷，非本 patch 缺陷） | `_counted_upstream` 与 `_tracked_delivery` 各自都是裸 `async for`，都不关闭自己的源。生产交给 starlette 的 `body_iterator` 是 `_tracked_delivery`；关它**完全不会**触达上游，本次修好的确定性关闭在生产链路的两端各断了一次。 |
-| F2 | minor（本 patch 引入） | 新的 `aclosing` 在 `loop.shutdown_asyncgens()` 时会多产生一条 `RuntimeError: aclose(): asynchronous generator is already running` 日志（基线 3 条 → 现在 4 条）。同一次实测里，改动**换来**的是上游在 `shutdown_asyncgens()` 返回时已经关闭（基线是没关）。净收益为正。 |
+| F2 | minor（本 patch 引入） | 新的 `aclosing` 在 `loop.shutdown_asyncgens()` 时会多产生一条 `RuntimeError: aclose(): asynchronous generator is already running` 日志（基线 3 条 → 现在 4 条）（2026-08-20 更正，见文末）。同一次实测里，改动**换来**的是上游在 `shutdown_asyncgens()` 返回时已经关闭（基线是没关）。净收益为正。 |
 | F3 | minor（既有） | `_StreamAccounting.finish()` 读取 `trace.received` 之后，在途 pull 仍可能继续记账。实测漏报 105 B（分片 40 段）到 4209 B（整段一次到达）。与本次改动无关：基线数字逐位相同。 |
 | F4 | minor（既有） | 从未被迭代过的 `stream_delivery`，`aclose()` 什么也不关——`response.aiter_bytes()` 连启动都没有。这正是 `_AccountedStreamingResponse` docstring 里描述的「首个 chunk 之前客户端就消失」那一幕，它盖住了记账，没盖住上游释放。 |
 | F5 | 提示（既有） | 三处不变量（`task = None`、异常优先级尾巴、`primary=primary`）在本仓库现有测试下变异不红。同形代码在 `keepalive.py` 里被 `test_streaming_resilience.py` 5 条测试钉住，因此不建议为副本补测；仅记录「这份副本本身无独立防回归」。 |
@@ -281,3 +281,13 @@ closed-loop    0       0
 **增量为零。** 该改动不新增停机噪声，原报告据此交回用户的「接受还是消音」裁决点随之作废。
 
 报告其余内容未改动。此处只追加时间点与更正，不修改原结论文字。
+
+### 再订正（同日追加）
+
+上面那段把增量归零解释成「补 F2 之后」，与它自己给出的数字矛盾，独立复核指出后订正如下：
+
+**当前侧一条噪声都没少。** `explicit` 形态原报告记为 4、重测仍为 4；变的是**基线**——原报告记 3，而用评审自己那份基线快照 `/tmp/rev-s1/base` 重测三次均为 **4**。所以增量为零的原因是「原报告的基线数字 3 无法复现」，不是「F2 修复消除了什么」。F2 覆盖的是经由响应对象的那条路径，对 `explicit` 形态的计数没有影响。
+
+结论不变（该改动不新增停机噪声），但因果不同：读者不应据此认为 `_AccountedStreamingResponse` 的改动降低了停机噪声。
+
+顺带记一笔：**基线也是探针**，它的数字同样需要证明它跑过。原报告的「3」很可能是一次没有对照的单跑。
