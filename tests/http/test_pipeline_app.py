@@ -27,6 +27,7 @@ from app.config.schema import ModelProviderConfig, ProxyConfig
 from app.ghc_client import GhcApiClient, GhcClientConfig
 from app.ghc_client.tokens import CopilotTokenManager
 from app.model_provider import GithubCopilotProvider, ModelProvider
+from app.observability import rejection_capture
 from app.observability.active_requests import ActiveRequestRegistry
 from app.observability.logging import setup_logging
 from app.pipeline.delivery.assembler import AnthropicAssembler
@@ -715,6 +716,38 @@ def test_what_the_calibrator_learns_survives_a_restart(tmp_path: Path) -> None:
     assert after["estimated"] is True
     assert after["input_tokens"] != before, "the successor did not read what was learnt"
     assert seen, "this test is only meaningful if upstream really was tried and failed"
+
+
+def test_a_refused_body_is_kept_where_someone_can_read_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Proves the note is written on the path a request actually takes, not merely that a function can write one.
+
+    Two investigations in one day had to reconstruct the outbound request from the client's own transcripts, because nothing here kept it. A capture module nobody calls looks identical to a working one from every other angle — which is the failure this repository has already had three times — so this asserts through the app, and on the body as it went out rather than as it arrived.
+    """
+    monkeypatch.setattr(rejection_capture, "user_data_path", lambda: tmp_path)
+    refusal = '{"type":"error","error":{"message":"messages: text content blocks must be non-empty"}}'
+    client, seen = make_client(lambda _: httpx.Response(400, text=refusal))
+
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "claude-model",
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "hi"}, {"type": "text", "text": ""}]}
+            ],
+        },
+    )
+
+    assert response.status_code == 400
+    captures = list((tmp_path / "rejected").glob("*.json"))
+    assert len(captures) == 1, f"nothing kept the refused body: {captures}"
+    record = orjson.loads(captures[0].read_bytes())
+    assert record["status"] == 400
+    assert "text content blocks must be non-empty" in record["upstream"]
+    # The blank block is gone from what was sent, so the capture must show it gone too: this is the body upstream refused, not the one the client offered.
+    assert record["payload"]["messages"][0]["content"] == [{"type": "text", "text": "hi"}]
+    assert record["payload"] == orjson.loads(seen[-1].read())
 
 
 def thinking(text: str = "t", signature: str = "sig") -> dict[str, Any]:

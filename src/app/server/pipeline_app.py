@@ -19,6 +19,7 @@ from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from app.observability.logging import get_logger
+from app.observability.rejection_capture import capture_rejection
 from app.observability.request_log import (
     LogStatus,
     RequestLine,
@@ -214,6 +215,7 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
             # Routing runs inside the handler, so a failure after it has a resolved model worth naming; before it, this is still empty and the field drops out.
             trace.model = context.resolved_model
             trace.detail = str(error)
+            # No capture here on purpose. `count_tokens` converts every upstream failure into `CountTokensUnavailable` before it reaches this line, so an `UpstreamRejected` never arrives and a call would be wiring that looks live and is not. That conversion also means a counting request refused over its body answers 503 rather than upstream's own verdict, which is a separate gap and not this one's to close.
             return JSONResponse(
                 error_body(error),
                 status_code=error_status(error),
@@ -233,6 +235,8 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
         trace.model = context.resolved_model
         trace.attempts = context.attempt_count
         trace.detail = str(error)
+        # Before the response is written, because `context.payload` is the body upstream refused and nothing downstream keeps it.
+        capture_rejection(context, error, request_id=trace.request_id)
         return JSONResponse(
             error_body(error),
             status_code=error_status(error),
@@ -248,6 +252,8 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
     if response is None:
         error = handled.outcome.error or RuntimeError("request produced no response")
         trace.detail = str(error)
+        # The branch an upstream refusal actually takes: the driver reports it in the outcome rather than raising, so the exception path above never sees one.
+        capture_rejection(context, error, request_id=trace.request_id)
         return JSONResponse(
             error_body(error),
             status_code=error_status(error),
