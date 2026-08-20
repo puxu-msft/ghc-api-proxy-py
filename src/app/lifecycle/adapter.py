@@ -19,6 +19,9 @@ REFUSAL_HEADERS: tuple[tuple[bytes, bytes], ...] = (
     # The connection is going away regardless; saying so keeps a pooled client from queueing more onto a socket we are about to close under it.
     (b"connection", b"close"),
 )
+# One byte is enough: the question is whether anything is waiting, not what it says. `MSG_DONTWAIT` is belt-and-braces — an asyncio transport's socket is already non-blocking — and is absent on platforms this service does not target, so it degrades to a plain peek rather than failing to import.
+_PEEK_UNREAD = socket.MSG_PEEK | getattr(socket, "MSG_DONTWAIT", 0)
+
 # 1012 is "service restart", and the rolling control plane already speaks it for the same event.
 REFUSAL_WEBSOCKET_CODE = 1012
 
@@ -69,6 +72,7 @@ class UvicornListenerAdapter:
         self._admission_open = asyncio.Event()
         self._admission_refusal: str | None = None
         self._refused_requests = 0
+        self._severed_connections = 0
 
     @property
     def server_state(self) -> ServerState:
@@ -174,6 +178,17 @@ class UvicornListenerAdapter:
         """
         return self._refused_requests
 
+    def severed_connections(self) -> int:
+        """How many connections were closed at the drain with a request already sitting unread, since this adapter was built.
+
+        Cumulative, like `refused_requests`, so one shutdown's worth is a before-and-after difference.
+
+        This is the count that says a client genuinely went without, and it is the one `refused_requests` cannot see: a refused request got a 503 telling it to come back, while these got an RST and never reached the application at all. The two are deliberately separate because they are opposite ends of the same moment — the 503 is the drain working, this is the drain costing somebody.
+
+        Under-counts rather than over-counts by construction; see `_closing_would_sever` for which cases it cannot see.
+        """
+        return self._severed_connections
+
     def interrupt_connections(self) -> int:
         """Ask every open connection to shut down, and report how many were asked.
 
@@ -213,12 +228,17 @@ class UvicornListenerAdapter:
 
         The count is of connections *asked*, the same reading `interrupt_connections` reports, and deliberately not of connections that went this instant. Only Uvicorn's own cycle state distinguishes the two, and a number derived from it would go quietly wrong the next time that internal changes, where a number that says what it counted stays true.
 
+        Closing an idle connection is not free for every client, though, and `severed_connections` is where that shows up: each one is peeked at first, so a connection carrying bytes nobody has read yet is counted separately from one that was genuinely idle.
+
         Takes the lock although `interrupt_connections` does not, for the refusal rather than the connections: the refusal is one half of a two-field barrier state that the arm and register paths also write, and those hold this lock.
         """
         async with self._operation_lock:
             self._refuse_admission_locked("server is shutting down")
             connections = list(self._server.server_state.connections)
             for connection in connections:
+                # Before the close, because afterwards there is nothing left to ask.
+                if _closing_would_sever(connection):
+                    self._severed_connections += 1
                 connection.shutdown()
             return len(connections)
 
@@ -393,6 +413,43 @@ class UvicornListenerAdapter:
         """
         self._admission_refusal = reason
         self._admission_open.set()
+
+
+def _closing_would_sever(connection: object) -> bool:
+    """Whether closing this connection now would throw away bytes the client already sent.
+
+    This is the difference between the two costs a drain can impose. Closing a genuinely idle pooled connection costs the client nothing: it notices the EOF and opens a new one elsewhere. Closing one whose kernel receive buffer already holds an unread request destroys that request, and because the unread bytes make the kernel answer with an RST rather than a FIN, the client sees a connection reset rather than a refusal — for a non-idempotent `POST` that is not safely retryable, and it is invisible everywhere else in this process because those bytes never reached the application.
+
+    `MSG_PEEK` leaves the data in place, so the event loop still delivers it to whoever would have read it; this only asks whether it is there.
+
+    Two limits, both erring towards under-counting, which is the safe direction for a number that appears next to the word "severed":
+
+    - a connection with a response still in progress is not being closed at all here, so it is not counted, even if its client has pipelined further bytes;
+    - under TLS the bytes may already have been drained into the SSL object rather than left in the kernel buffer, and a peek then reports nothing.
+    """
+    cycle = getattr(connection, "cycle", None)
+    if cycle is not None and not getattr(cycle, "response_complete", False):
+        # Uvicorn only clears `keep_alive` for this one; the response finishes and nothing is lost.
+        return False
+    transport = getattr(connection, "transport", None)
+    raw_socket = transport.get_extra_info("socket") if transport is not None else None
+    if raw_socket is None:
+        return False
+    try:
+        # `get_extra_info` hands back asyncio's `TransportSocket`, which refuses I/O on purpose so that nobody reads bytes out from under the event loop. Peeking is exactly the exception — it consumes nothing — so the descriptor is borrowed rather than the wrapper used, and `detach` gives it back without closing it.
+        probe = socket.socket(fileno=raw_socket.fileno())
+    except OSError:
+        return False
+    try:
+        return bool(probe.recv(1, _PEEK_UNREAD))
+    except (BlockingIOError, InterruptedError):
+        # Nothing waiting, which is the ordinary idle case.
+        return False
+    except OSError:
+        # Already unusable, so closing it takes nothing from anybody. Reported as not-severed rather than raised: a probe that cannot answer must not take down the shutdown it was measuring.
+        return False
+    finally:
+        probe.detach()
 
 
 async def _refuse_admission(

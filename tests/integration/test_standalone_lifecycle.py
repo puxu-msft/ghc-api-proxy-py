@@ -428,6 +428,49 @@ async def test_rung_one_delivers_a_response_that_had_already_started_streaming(
 
 
 @pytest.mark.asyncio
+async def test_a_connection_closed_over_an_unread_request_is_counted_as_severed(
+    harness: Harness,
+) -> None:
+    """The cost the drain imposes on a client that had already sent, told apart from the cost it does not.
+
+    Both connections are idle pooled ones and both are closed, so `connections_asked_to_close` cannot tell them apart. Only one of them has a request sitting in the kernel that nobody has read, and closing that one makes the kernel answer with an RST — the client sees a reset rather than an answer, which for a `POST` is not safely retryable, and those bytes reach nothing else in this process that could report them.
+
+    The write goes through the transport but is never drained, and nothing is awaited between it and the signal. Both halves matter: asyncio's transport sends straight to the kernel when its buffer is empty, and the wakeup that resumes `serve()` was queued before the socket became readable, so the shutdown reaches its peek before the event loop reads those bytes and turns them into a request that would have been refused instead.
+    """
+    serving = await run_until_serving(harness)
+    quiet_reader, quiet_writer = await harness.pooled()
+    loud_reader, loud_writer = await harness.pooled()
+    assert harness.adapter.connection_count() == 2
+
+    loud_writer.write(b"GET /quick HTTP/1.1\r\nHost: test\r\n\r\n")
+    harness.server.receive_signal(signal.SIGTERM)
+    report = await asyncio.wait_for(serving, 5)
+
+    assert report.connections_asked_to_close == 2
+    # One of the two, not both: the other was genuinely idle, and a probe that could not tell them apart would say two.
+    assert report.severed_connections == 1
+    # Those bytes never reached the barrier, which is the whole reason this count has to exist alongside that one.
+    assert report.refused_requests == 0
+    for writer in (quiet_writer, loud_writer):
+        writer.close()
+    del quiet_reader, loud_reader
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_idle_connection_is_not_counted_as_severed(harness: Harness) -> None:
+    # The negative control for the probe above: without it, "everything is severed" would pass too.
+    serving = await run_until_serving(harness)
+    _, pooled_writer = await harness.pooled()
+
+    harness.server.receive_signal(signal.SIGTERM)
+    report = await asyncio.wait_for(serving, 5)
+
+    assert report.connections_asked_to_close == 1
+    assert report.severed_connections == 0
+    pooled_writer.close()
+
+
+@pytest.mark.asyncio
 async def test_shutdown_returns_rather_than_exiting_the_process(harness: Harness) -> None:
     # The spec forbids an unguarded exit: serve() completes and hands a report back.
     serving = await run_until_serving(harness)

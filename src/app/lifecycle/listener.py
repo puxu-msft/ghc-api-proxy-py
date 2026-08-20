@@ -259,6 +259,9 @@ class FirstByteRoutingAdapter:
     def refused_requests(self) -> int:
         return self._adapter.refused_requests()
 
+    def severed_connections(self) -> int:
+        return self._adapter.severed_connections()
+
     def connection_count(self) -> int:
         # The router owns no connections of its own; every accepted socket is handed to the adapter behind it, so the count it keeps is the whole count.
         return self._adapter.connection_count()

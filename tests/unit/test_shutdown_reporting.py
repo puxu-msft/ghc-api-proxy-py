@@ -194,6 +194,30 @@ def test_the_benign_counts_sit_beside_an_incident_without_softening_the_verdict(
     assert _statuses(caplog.records) == ["fail"]
 
 
+def test_a_severed_connection_is_the_one_drain_cost_that_counts_as_a_failure(
+    captured: object,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The count that names a client who got nothing, sitting beside the two that do not.
+
+    All three come out of the same rung, so the line has to rank them: closing an idle connection cost nobody anything, a 503 told its client to come back, and this one threw away a request that had already been sent and answered it with an RST. Only the last is a failure, and the verdict is the only thing that says so — the wording alone would read the same either way.
+    """
+    with caplog.at_level(logging.INFO):
+        report_shutdown(
+            ShutdownReport(
+                stage=ShutdownStage.DRAINING,
+                connections_asked_to_close=3,
+                refused_requests=1,
+                severed_connections=1,
+            )
+        )
+    assert _lines(caplog.records) == [
+        "stopped — 3 connections asked to close, 1 requests refused, "
+        "1 connections severed with a request already sent"
+    ]
+    assert _statuses(caplog.records) == ["fail"]
+
+
 def test_a_cleanup_that_overran_is_not_reported_as_clean(captured: object, caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.INFO):
         report_shutdown(ShutdownReport(stage=ShutdownStage.FINALIZING, cleanup_timed_out=True))

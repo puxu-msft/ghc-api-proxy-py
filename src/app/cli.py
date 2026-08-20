@@ -181,7 +181,7 @@ def report_shutdown(report: ShutdownReport) -> None:
 
     Neither count of the first kind makes the line say `fail`. Telling the idle pooled connections to go is what the first rung is *for*, and a request the barrier answered with a 503 got a well-formed "come back shortly" — that is the shutdown working, not failing. Marking either as an incident would report every ordinary restart as one.
 
-    That decision was originally the other way for refusals, and measurement is what changed it. The 503 is the *mild* outcome: the harsh one is a pooled connection closed while the client's next request was already on the wire, which the kernel answers with an RST and nothing here can see. Counting the mild case as `fail` while the harsh case reads `ok` inverts exactly the judgement an operator makes from this line.
+    That decision was originally the other way for refusals, and measurement is what changed it. The 503 is the *mild* outcome: the harsh one is a pooled connection closed while the client's next request was already on the wire, which the kernel answers with an RST. `severed_connections` is that case, peeked for before each close, and it is the one count here that names a client who genuinely went without — so it sits with the incidents, and it is the reason the refusals no longer do.
 
     The noun stays plural at any count. `1 connections` is the reading the count already gives, and branching on it buys a nicety at the cost of a second code path through every line that reports a number — the same trade the footer's connection block settled the same way.
     """
@@ -191,6 +191,8 @@ def report_shutdown(report: ShutdownReport) -> None:
     if report.refused_requests:
         reported.append(f"{report.refused_requests} requests refused")
     incidents: list[str] = []
+    if report.severed_connections:
+        incidents.append(f"{report.severed_connections} connections severed with a request already sent")
     if report.interrupted_connections:
         incidents.append(f"{report.interrupted_connections} connections interrupted")
     if report.cancelled_requests:

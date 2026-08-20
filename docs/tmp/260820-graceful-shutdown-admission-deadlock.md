@@ -232,3 +232,48 @@ asyncio.exceptions.CancelledError
 ## 一次自己造成的返工，记下来
 
 复现评审的变异时我用 `git checkout -- <file>` 还原，把同一文件里**尚未提交的修改**一起清掉了。改法是按原样反向替换那一处、而不是 checkout 整个文件，并在前后比对 `git status` 指纹确认工作树逐字节还原。
+
+---
+
+# 用户裁决：把「真的被切断」那一格量出来（2026-08-20）
+
+用户裁定采纳增量评审列的第 1 个选项：「在 `transport.close()` 前用 `MSG_PEEK` 探一下内核缓冲里有没有未读字节」，并明确「多一次系统调用在这时候不是问题，项目依赖 uvicorn 也是既定事实」——即此前我列为「待裁决」的两点顾虑都被排除。
+
+## 实现
+
+`_closing_would_sever(connection)` 在每次 `connection.shutdown()` **之前**问一句：关掉它会不会丢掉客户端已经发出、而这里从未读过的字节。
+
+- 响应还在写的连接直接返回 False——它根本不会在这一档被关闭，所以什么都没丢。
+- `get_extra_info("socket")` 拿到的是 asyncio 的 `TransportSocket`，它**故意禁掉 I/O 方法**以防有人从事件循环底下把字节读走。peek 恰恰是那个例外（它不消费），所以借 fd 包一层临时 socket，用完 `detach()` 还回去、不关闭。
+- `MSG_PEEK` 不消费数据，事件循环该读到的照样读得到。
+
+计数进 `ShutdownReport.severed_connections`，并且**进 incidents**——它就是那个「有人真的没被服务」的数字，而 `connections_asked_to_close` 与 `refused_requests` 都不是。
+
+两条限制都写在 `_closing_would_sever` 的 docstring 里，方向都是**少报而非多报**（对一个印在「severed」旁边的数字，少报是安全的那一侧）：响应进行中的连接不计；TLS 下字节可能已被吸进 SSL 对象而不在内核缓冲里，peek 就看不到。
+
+## 真实进程实测
+
+窗口只有大约**一次事件循环迭代**宽：服务端被信号唤醒之后、`stop_admitting()` 关闭连接之前。客户端从外部瞄不准它——单连接扫时序（gap ∈ {-0.05, 0, 0.002, 0.05}）四次全部落空：gap ≤ 0 时服务端来得及读走并正常回应，gap ≥ 0.002 时连接已关、写入根本没到达。
+
+改用 40 条池化连接、由一个线程跨越信号持续错峰写入，3 次尝试命中 2 次：
+
+```
+[ OK ] stopped — 40 connections asked to close, 11 requests refused
+[FAIL] stopped — 40 connections asked to close, 8 requests refused, 8 connections severed with a request already sent
+[FAIL] stopped — 40 connections asked to close, 9 requests refused, 10 connections severed with a request already sent
+```
+
+这三行正好演示了分级的意义：**纯拒绝是 `[ OK ]`**（客户端被告知稍后再来），**一旦有连接被切断就是 `[FAIL]`**（有人真的丢了请求）。
+
+## 顺带更正增量评审的一处结论
+
+评审判定 `refused_requests` 在真实关停路径上**恒为 0**（11 组实测同向）。上面的实测表明那是**单客户端条件下**的结论：并发负载下它稳定非零（11 / 8 / 9）。机制不变——池化连接被关掉之后到达的字节确实不经过闸——但同时存在若干请求赶在关闭前进到了闸上并被答成 503。
+
+所以评审的机制分析成立，「恒为 0」这个量化结论的适用范围要收窄到「单条空闲池化连接」。这不改变把它移出 incidents 的处置：503 仍然是温和的那一端。
+
+## 分辨力
+
+- 探针恒返回 True（丢掉空闲/切断的区分）→ 正样本 `assert 2 == 1` 与负样本 `assert 1 == 0` 双双变红。
+- 探针恒返回 False（等价于特性不存在）→ 正样本 `assert 0 == 1` 变红。
+- `severed_connections` 不进 incidents → `test_a_severed_connection_is_the_one_drain_cost_that_counts_as_a_failure` 变红（这一格第一次跑变异时**没有**被守住，是补出来的）。
+- 进程内那条正样本连跑 10 次全绿，时序确定：asyncio transport 在缓冲为空时当场同步 send，而唤醒 `serve()` 的回调排在 socket 可读回调之前入队。
