@@ -93,23 +93,30 @@ class RequestLine:
 
     method: str
     path: str
+    request_id: str = ""
+    message_id: str = ""
     inbound_format: str = ""
     client_protocol: str = ""
     upstream_protocol: str = ""
     requested_model: str = ""
     model: str = ""
     status_code: int | None = None
+    started_at: str = ""
     duration_s: float | None = None
+    first_upstream_byte_s: float | None = None
     bytes_in: int | None = None
     bytes_out: int | None = None
     usage: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
+    terminal_seen: bool = False
     stop_reason: str = ""
+    blocks: int = 0
     tools: tuple[str, ...] = ()
     thinking: tuple[str, ...] = ()
     # Whose words to use for the reasoning and tool-call fields. See `ReplyDialect`; it travels with the reply summary the line is built from.
     dialect: ReplyDialect = ReplyDialect.ANTHROPIC
     attempts: int = 1
     detail: str = ""
+    upstream_conn: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
 
 
 def format_thinking(kinds: tuple[str, ...], dialect: ReplyDialect = ReplyDialect.ANTHROPIC) -> str:
@@ -269,7 +276,7 @@ def format_arrival_line(line: RequestLine) -> str:
 def format_completion_line(line: RequestLine, *, unicode: bool = True, color: bool = False) -> str:
     """The message body for a finished request.
 
-    Ordered status, subject, duration, wire bytes, tokens, stop reason, retries, detail — narrowing from how it went, to what it cost, to why it ended. Every field after the subject is omitted when it has nothing to say, so a bare rejection and a full streamed answer share one column order instead of drifting into two formats.
+    Ordered status, subject, duration, wire bytes, tokens, request id, stop reason, retries, detail — narrowing from how it went, to what it cost, to why it ended. The durable join key precedes the semantic ending so `end_turn`, tool calls and failure explanations remain the line's final fact. Every field after the subject is omitted when it has nothing to say, so a bare rejection and a full streamed answer share one column order instead of drifting into two formats.
 
     Colour carries meaning rather than decoration, following `copilot-api-js`: the status and the failure reason say whether to care, the model is the one name worth finding at a glance, and the duration escalates on its own so a slow request is visible without reading the number.
 
@@ -303,6 +310,9 @@ def format_completion_line(line: RequestLine, *, unicode: bool = True, color: bo
     tokens = format_tokens(line.usage, unicode=unicode, color=color)
     if tokens:
         parts.append(tokens)
+    if line.request_id:
+        # Full rather than shortened: this is the join key between the console line and its structured record, so two simultaneous failures must never become ambiguous. It precedes the semantic ending so the reason remains the line's final fact.
+        parts.append(paint(f"request_id={line.request_id}", DIM, color=color))
     if line.stop_reason:
         parts.append(format_stop_reason(line.stop_reason, line.tools, line.dialect, color=color))
     elif line.tools:

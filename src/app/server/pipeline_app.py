@@ -28,6 +28,7 @@ from app.observability.request_log import (
     http_label,
     status_for,
 )
+from app.observability.request_log_file import utc_timestamp, write_request_record
 from app.observability.tui import footer_tui_or_none
 from app.pipeline.delivery.assembler import BlockAssembler, ReplyDialect, Terminal
 from app.pipeline.delivery.stream import stream_delivery
@@ -65,6 +66,53 @@ def _chain(request: Request) -> Chain:
     return cast(Chain, getattr(request.app.state, CHAIN_STATE_KEY))
 
 
+def _extra_info(network_stream: Any, name: str) -> Any:
+    """Read one live transport fact without letting observability affect the request."""
+    if network_stream is None:
+        return None
+    try:
+        return network_stream.get_extra_info(name)
+    except Exception:
+        # Not only `OSError`: a transport wrapper may reject an unknown key or expose a closed backing object through another ordinary exception. Every such case means only that this optional fact is unavailable.
+        return None
+
+
+def _socket_address(value: object) -> str:
+    """Render an httpcore socket address without retaining the live socket."""
+    if isinstance(value, tuple):
+        parts = cast(tuple[object, ...], value)
+        if len(parts) >= 2:
+            host, port = str(parts[0]), parts[1]
+            return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+    return str(cast(object, value)) if value is not None else ""
+
+
+def _snapshot_upstream_connection(response: Any) -> dict[str, Any]:
+    """Copy connection identity from response headers before its network stream closes."""
+    try:
+        extensions = response.extensions
+        network_stream = extensions.get("network_stream")
+        ssl_object = _extra_info(network_stream, "ssl_object")
+        alpn = ""
+        if ssl_object is not None:
+            try:
+                selected = ssl_object.selected_alpn_protocol()
+                alpn = str(selected) if selected is not None else ""
+            except Exception:
+                # As above, this is optional evidence and wrappers need not fail specifically with `OSError`.
+                pass
+        stream_id = extensions.get("stream_id")
+        return {
+            "local": _socket_address(_extra_info(network_stream, "client_addr")),
+            "peer": _socket_address(_extra_info(network_stream, "server_addr")),
+            "alpn": alpn,
+            "stream_id": stream_id if isinstance(stream_id, int) else None,
+        }
+    except Exception:
+        # A non-httpcore transport can expose a different extension mapping. Logging must still never change the response path.
+        return {"local": "", "peer": "", "alpn": "", "stream_id": None}
+
+
 @dataclass(slots=True)
 class _Trace:
     """What is known about a request as it goes, gathered for its log line.
@@ -75,6 +123,7 @@ class _Trace:
     method: str
     path: str
     request_id: str = ""
+    message_id: str = ""
     inbound_format: str = ""
     client_protocol: str = ""
     upstream_protocol: str = ""
@@ -85,13 +134,18 @@ class _Trace:
     # What the HTTP status cannot say. A streaming status is fixed the moment the response headers arrive, so everything that happens over the next several minutes — the stream stopping mid-turn, upstream tearing, the client leaving — leaves it at 200. `None` means the status code is the whole story.
     status_override: LogStatus | None = None
     started: float = 0.0
+    started_at: str = ""
+    first_upstream_byte_s: float | None = None
     bytes_in: int | None = None
     received: int = 0
     usage: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
+    terminal_seen: bool = False
     stop_reason: str = ""
+    blocks: int = 0
     tools: tuple[str, ...] = ()
     thinking: tuple[str, ...] = ()
     dialect: ReplyDialect = ReplyDialect.ANTHROPIC
+    upstream_conn: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
 
     def absorb(self, reply: Terminal) -> None:
         """Take the aggregated reply record onto the line.
@@ -99,7 +153,9 @@ class _Trace:
         One call rather than four assignments at each of the two delivery paths, so a field added to the record reaches the line without either path being edited — and, more to the point, so neither path can decide for itself what "the tools this turn asked for" means.
         """
         self.usage = dict(reply.usage)
+        self.terminal_seen = reply.seen
         self.stop_reason = reply.stop_reason
+        self.blocks = reply.blocks
         self.tools = tuple(reply.tools)
         self.thinking = tuple(reply.thinking)
         self.dialect = reply.dialect
@@ -113,26 +169,35 @@ def _log_completion(chain: Chain, trace: _Trace, status_code: int | None, *, byt
     line = RequestLine(
         method=trace.method,
         path=trace.path,
+        request_id=trace.request_id,
+        message_id=trace.message_id,
         inbound_format=trace.inbound_format,
         client_protocol=trace.client_protocol,
         upstream_protocol=trace.upstream_protocol,
         requested_model=trace.requested_model,
         model=trace.model,
         status_code=status_code,
+        started_at=trace.started_at,
         duration_s=time.monotonic() - trace.started,
+        first_upstream_byte_s=trace.first_upstream_byte_s,
         bytes_in=trace.bytes_in,
         bytes_out=bytes_out,
         usage=trace.usage,
+        terminal_seen=trace.terminal_seen,
         stop_reason=trace.stop_reason,
+        blocks=trace.blocks,
         tools=trace.tools,
         thinking=trace.thinking,
         dialect=trace.dialect,
         attempts=trace.attempts,
         detail=trace.detail,
+        upstream_conn=trace.upstream_conn,
     )
+    status = status_for(status_code, override=trace.status_override)
+    write_request_record(line, status=status)
     get_logger(REQUEST_LOGGER).info(
         format_completion_line(line, unicode=chain.capabilities.unicode, color=chain.capabilities.color),
-        status=status_for(status_code, override=trace.status_override),
+        status=status,
     )
 
 
@@ -148,6 +213,7 @@ async def _serve(request: Request) -> Response:
         method=request.method,
         path=request.url.path,
         started=time.monotonic(),
+        started_at=utc_timestamp(),
         # Its own identifier rather than the context's, which does not exist yet and may never: a body that fails to parse never produces one, and the footer still has to be able to show and then drop the request.
         request_id=str(uuid4()),
     )
@@ -199,6 +265,7 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
         return JSONResponse(error_body(error), status_code=400)
 
     # Recorded here rather than beside the resolved model, so every path below — the count endpoint, the failures, the ones that never route at all — reports what the client asked for even when nothing answered it.
+    trace.message_id = context.id
     trace.requested_model = context.requested_model
 
     active = chain.active_requests
@@ -264,6 +331,8 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
     # Exactly what went out to upstream, taken off the request httpx actually sent rather than re-serialized from the payload. It is not the client's body size: translation rewrites the payload, and the version upstream is billed and tokenized for is the one worth reporting.
     trace.bytes_in = len(response.request.content)
     trace.upstream_protocol = http_label(response.http_version)
+    # Snapshot the live socket now. `_log_completion` intentionally runs only after the response is released, when httpcore's `client_addr` lookup can already raise `OSError: [Errno 9] Bad file descriptor`.
+    trace.upstream_conn = _snapshot_upstream_connection(response)
 
     if context.stream:
         # Block-level delivery over the live upstream.
@@ -412,6 +481,8 @@ async def _counted_upstream(chunks: AsyncIterator[bytes], chain: Chain, request_
     This is the number both the footer and the completion line report, because what an operator is watching is the proxy's conversation with upstream. Bytes delivered onward to the client are a different quantity and a much worse indicator: block-level delivery holds a block until it is whole, so a downstream count sits at zero for most of a request and then jumps — which reads as a broken display rather than as the buffering it is.
     """
     async for chunk in chunks:
+        if chunk and trace.first_upstream_byte_s is None:
+            trace.first_upstream_byte_s = time.monotonic() - trace.started
         trace.received += len(chunk)
         chain.active_requests.add_bytes(request_id, len(chunk))
         yield chunk

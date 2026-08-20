@@ -1,0 +1,225 @@
+"""Durable structured records emitted from the existing per-request aggregate."""
+
+import json
+import time
+from datetime import UTC, datetime
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
+
+import pytest
+
+from app.observability import request_log_file
+from app.observability.terminal import TerminalCapabilities
+from app.pipeline.delivery.assembler import ReplyDialect, Terminal
+from app.pipeline.delivery.blocks import CompletedBlock
+from app.server import pipeline_app
+from app.server.pipeline_app import (
+    _log_completion,  # pyright: ignore[reportPrivateUsage]
+    _snapshot_upstream_connection,  # pyright: ignore[reportPrivateUsage]
+    _Trace,  # pyright: ignore[reportPrivateUsage]
+)
+
+
+@pytest.fixture(autouse=True)
+def elsewhere(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(request_log_file, "user_data_path", lambda: tmp_path)
+
+
+def _chain() -> Any:
+    return SimpleNamespace(capabilities=TerminalCapabilities(live=False, color=False, unicode=True))
+
+
+def _capture_console(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    emitted: list[tuple[str, str]] = []
+
+    class Logger:
+        def info(self, event: str, *, status: str) -> None:
+            emitted.append((event, status))
+
+    def logger_for(_name: str) -> Logger:
+        return Logger()
+
+    monkeypatch.setattr(pipeline_app, "get_logger", logger_for)
+    return emitted
+
+
+def _only_record(tmp_path: Path) -> dict[str, Any]:
+    paths = list((tmp_path / "requests").glob("requests-*.jsonl"))
+    assert len(paths) == 1, f"expected one daily request log, found {paths}"
+    lines = paths[0].read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1, f"expected one request record, found {len(lines)}"
+    return cast(dict[str, Any], json.loads(lines[0]))
+
+
+def test_a_successful_request_writes_one_complete_structured_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    emitted = _capture_console(monkeypatch)
+    terminal = Terminal(
+        stop_reason="tool_use",
+        usage={"input_tokens": 10, "output_tokens": 4},
+        seen=True,
+        dialect=ReplyDialect.RESPONSES,
+    )
+    terminal.record(CompletedBlock(index=0, kind="text", payload={"type": "text", "text": "done"}))
+    terminal.record(CompletedBlock(index=1, kind="tool_use", payload={"type": "tool_use", "name": "Bash"}))
+    terminal.record(CompletedBlock(index=2, kind="thinking", payload={"type": "thinking", "thinking": ""}))
+    trace = _Trace(
+        method="POST",
+        path="/v1/messages",
+        request_id="req-1",
+        message_id="msg-1",
+        inbound_format="anthropic-messages",
+        client_protocol="H1",
+        upstream_protocol="H2",
+        requested_model="claude-opus-5",
+        model="gpt-5.1-codex",
+        attempts=2,
+        started=time.monotonic() - 1.0,
+        started_at="2026-08-20T15:01:53.580Z",
+        first_upstream_byte_s=0.42,
+        bytes_in=1783221,
+        upstream_conn={"local": "172.19.141.235:56822", "peer": "140.82.116.5:443", "alpn": "h2", "stream_id": 7},
+    )
+    trace.absorb(terminal)
+
+    _log_completion(_chain(), trace, 200, bytes_out=2153)
+
+    record = _only_record(tmp_path)
+    assert set(record) == {
+        "at",
+        "status",
+        "method",
+        "path",
+        "request_id",
+        "message_id",
+        "inbound_format",
+        "client_protocol",
+        "upstream_protocol",
+        "requested_model",
+        "model",
+        "status_code",
+        "started_at",
+        "duration_s",
+        "first_upstream_byte_s",
+        "bytes_in",
+        "bytes_out",
+        "usage",
+        "terminal_seen",
+        "stop_reason",
+        "blocks",
+        "tools",
+        "thinking",
+        "dialect",
+        "attempts",
+        "detail",
+        "upstream_conn",
+    }
+    assert record | {"at": "ignored", "duration_s": "ignored"} == {
+        "at": "ignored",
+        "status": "ok",
+        "method": "POST",
+        "path": "/v1/messages",
+        "request_id": "req-1",
+        "message_id": "msg-1",
+        "inbound_format": "anthropic-messages",
+        "client_protocol": "H1",
+        "upstream_protocol": "H2",
+        "requested_model": "claude-opus-5",
+        "model": "gpt-5.1-codex",
+        "status_code": 200,
+        "started_at": "2026-08-20T15:01:53.580Z",
+        "duration_s": "ignored",
+        "first_upstream_byte_s": 0.42,
+        "bytes_in": 1783221,
+        "bytes_out": 2153,
+        "usage": {"input_tokens": 10, "output_tokens": 4},
+        "terminal_seen": True,
+        "stop_reason": "tool_use",
+        "blocks": 3,
+        "tools": ["Bash"],
+        "thinking": ["enc"],
+        "dialect": "responses",
+        "attempts": 2,
+        "detail": "",
+        "upstream_conn": {"local": "172.19.141.235:56822", "peer": "140.82.116.5:443", "alpn": "h2", "stream_id": 7},
+    }
+    assert record["at"].endswith("Z")
+    assert cast(float, record["duration_s"]) >= 1.0
+    assert "request_id=req-1" in emitted[0][0]
+    assert emitted[0][1] == record["status"]
+
+
+def test_a_failed_request_keeps_detail_and_reports_no_terminal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    emitted = _capture_console(monkeypatch)
+    detail = "stream failed before a terminal event: <ConnectionTerminated error_code:0, last_stream_id:2147483647>"
+    trace = _Trace(
+        method="POST",
+        path="/v1/messages",
+        request_id="req-fail",
+        message_id="msg-fail",
+        started=time.monotonic(),
+        started_at="2026-08-20T15:01:53.580Z",
+        status_override="fail",
+        received=321,
+        detail=detail,
+        blocks=3,
+        terminal_seen=False,
+    )
+
+    _log_completion(_chain(), trace, 200, bytes_out=trace.received)
+
+    record = _only_record(tmp_path)
+    assert record["status"] == "fail"
+    assert record["status_code"] == 200
+    assert record["detail"] == detail
+    assert record["terminal_seen"] is False
+    assert record["blocks"] == 3
+    assert emitted[0][1] == "fail"
+
+
+def test_a_write_failure_does_not_interrupt_request_completion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    emitted = _capture_console(monkeypatch)
+    monkeypatch.setattr(request_log_file, "user_data_path", lambda: tmp_path / "nope" / "\0bad")
+    trace = _Trace(method="POST", path="/v1/messages", started=time.monotonic(), started_at="2026-08-20T15:01:53.580Z")
+
+    _log_completion(_chain(), trace, 200, bytes_out=0)
+
+    assert len(emitted) == 1
+    assert emitted[0][1] == "ok"
+
+
+def test_connection_identity_is_copied_while_the_transport_is_live() -> None:
+    class Tls:
+        def selected_alpn_protocol(self) -> str:
+            return "h2"
+
+    class NetworkStream:
+        closed = False
+
+        def get_extra_info(self, name: str) -> Any:
+            if self.closed:
+                raise OSError(9, "Bad file descriptor")
+            return {"client_addr": ("172.19.141.235", 56822), "server_addr": ("140.82.116.5", 443), "ssl_object": Tls()}[name]
+
+    stream = NetworkStream()
+    response = SimpleNamespace(extensions={"network_stream": stream, "stream_id": 7})
+
+    snapshot = _snapshot_upstream_connection(response)
+    stream.closed = True
+
+    assert snapshot == {"local": "172.19.141.235:56822", "peer": "140.82.116.5:443", "alpn": "h2", "stream_id": 7}
+    assert _snapshot_upstream_connection(response) == {"local": "", "peer": "", "alpn": "", "stream_id": 7}
+
+
+def test_only_the_newest_utc_day_files_are_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(request_log_file, "KEEP_DAYS", 2)
+    directory = tmp_path / "requests"
+    directory.mkdir()
+    for day in ("20260801", "20260802", "20260803"):
+        (directory / f"requests-{day}.jsonl").write_text("{}\n", encoding="utf-8")
+
+    request_log_file.write_request_record(pipeline_app.RequestLine(method="POST", path="/v1/messages"), status="ok")
+
+    kept = sorted(path.name for path in directory.glob("requests-*.jsonl"))
+    today = f"requests-{datetime.now(UTC):%Y%m%d}.jsonl"
+    assert kept == ["requests-20260803.jsonl", today]

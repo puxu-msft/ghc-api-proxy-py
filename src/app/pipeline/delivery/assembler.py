@@ -51,6 +51,8 @@ class Terminal:
     seen: bool = False
     # Which upstream described this reply, and so which words the console line should use for it. Anthropic by default because that is also the shape a translated reply is read back in.
     dialect: ReplyDialect = ReplyDialect.ANTHROPIC
+    # Every complete content block received before the terminal event, or before the upstream stopped. A count here remains truthful for a truncated turn because only `record()` advances it.
+    blocks: int = 0
     # Every tool the model asked for, in the order it asked, duplicates kept. `tool_use` on its own says a turn ended in tool calls; which tools, and how many of each, is the part that tells one turn from another when reading a log.
     tools: list[str] = field(default_factory=lambda: list[str]())
     # Thinking blocks by kind: `txt` carried readable reasoning, `enc` carried only an opaque signature. The distinction is the interesting one — a turn that reasoned and a turn that was handed back sealed reasoning cost the same tokens and look identical from the outside.
@@ -61,6 +63,7 @@ class Terminal:
 
         Classification lives here, on the record itself, rather than at each place a block becomes final. There are three such places — the two assemblers and a buffered reply read back whole — and when each did its own classifying, the same question ("was this reasoning readable?") was answered by three separate expressions that were free to drift apart. Reading the block's own payload, rather than whatever local draft produced it, is what lets one implementation serve all three.
         """
+        self.blocks += 1
         if block.kind == TOOL_USE:
             self.tools.append(str(block.payload.get("name", "")))
         elif block.kind == THINKING:
