@@ -6,13 +6,13 @@
 |---|---|---|
 | 下游保活 | `dbb6104 fix: keep the client alive on our own writes, not on upstream's pace` | 面向客户端的保活，判据不再取自替身量（七副面孔，见下） |
 | 上游保活 | `52d877c feat: give the upstream connection the keep-alive its setting promised` | `tcp_keepalive_interval` 实现成真的 `SO_KEEPALIVE`；环境变量代理重建挂载；SOCKS 告警；删两个 legacy 键 |
-| 合入后复评修复 | 待合入 | `NO_PROXY` 重复包装导致的 `RecursionError`、两个补丁的顺序回归、SOCKS IPv6 origin。见 `deferred.md` D-8 / D-9 / D-10 |
+| 合入后复评修复 | `306bdb7 fix: cap each connection pool once, and get the keep-alive docs' provenance right` | `NO_PROXY` 重复包装导致的 `RecursionError`、两个补丁的顺序回归、SOCKS IPv6 origin 与端口 0，以及两轮文档核对查出的全部失效断言。见 `deferred.md` D-8 / D-9 / D-10 |
 
-闸门（各自合入时点实测，不是同一个数）：`dbb6104` 时 1504 passed / 3 skipped；`52d877c` 时 1550 passed / 3 skipped；第三个 slice 当前 **1555 passed / 3 skipped**（`uv run pytest -q`，新增 5 条回归）。`ruff check src tests` 通过。Pyright **净增 0**（本树基线与当前均为 21 errors，`uv run pyright src tests`）。
+闸门（各自合入时点实测，不是同一个数）：`dbb6104` 时 1504 passed / 3 skipped；`52d877c` 时 1550 passed / 3 skipped；`306bdb7` **合入后在 `main` 上实测 1557 passed / 3 skipped**（`uv run pytest -q`，本 slice 新增 5 条回归；比隔离树里的 1555 多 2 条，那 2 条来自同伴同期的提交）。`ruff check src tests` 通过。Pyright **净增 0**：集成前的 `f025e3c` 与集成后的 `306bdb7` 都是 22 errors。
 
 关于 Pyright 的一个读数陷阱：合入后复评报告里那个「父提交 94 → 目标 95」是**在 git 解包副本里测的**，那份副本没有本树的 venv 与已安装的 `app` 包，导入解析退化会凭空多出几十条形状正确的假诊断。**净增 1 那个差值可信（同环境同配置两侧对比），94 / 95 这两个绝对值与本仓的 `uv run pyright src tests` 不可比，不要当闸门数引用。**
 
-本文档第二节末尾那句调和时点的「Pyright 干净」**不是同一回事**，那是在真实工作树里测出的 0 errors。它与今天的 21 的差距来自另一个原因：主线自身的基线在这段时间里漂移过。当前这 21 条全部落在 `stream_cap` 这一对文件上——`src/app/upstream/stream_cap.py` 3 条、`tests/unit/upstream/test_stream_cap.py` 18 条，全是伸进 httpx/httpcore 私有属性产生的 private-usage 与 unknown-type 诊断，是该模块刻意采取的做法（模块 docstring 写明了为什么读这些私有名），不是本主题新引入的缺陷。**读任何 Pyright 数字之前先问它是在哪棵树、哪个基线上测的**——这三个数（0、94/95、21）分别属于三种不同的测量条件，横向比较没有意义。
+本文档第二节末尾那句调和时点的「Pyright 干净」**不是同一回事**，那是在真实工作树里测出的 0 errors。它与今天的 22 的差距来自另一个原因：主线自身的基线在这段时间里漂移过。当前这 22 条里，21 条落在 `stream_cap` 这一对文件上——`src/app/upstream/stream_cap.py` 3 条、`tests/unit/upstream/test_stream_cap.py` 18 条，全是伸进 httpx/httpcore 私有属性产生的 private-usage 与 unknown-type 诊断，是该模块刻意采取的做法（模块 docstring 写明了为什么读这些私有名）；剩下 1 条在 `tests/unit/pipeline/translation_driver/test_translation_driver.py`，与本主题无关。**读任何 Pyright 数字之前先问它是在哪棵树、哪个基线上测的**——本文出现过的这几个数（0、94/95、21、22）分别属于不同的测量条件，横向比较没有意义。
 
 **`tests/e2e` 的 `ModuleNotFoundError: No module named 'harness'` 已经修好了**，别再按红灯处理：`65e0781`（主线孪生 `0c1524f`）把 `from harness import` 改成 `from _harness import`，实测 `tests/e2e --collect-only` 现在收集出 5 个测试。同一个提交也把 `addopts` 改成含 `--ignore=tests/e2e`，所以全量回归不必再手动加这个参数。（`52d877c` 合入时点它确实是红的，那时的判断没错，只是此后被修掉了。）
 
@@ -24,6 +24,7 @@
 | `archive/260820-delivery-keepalive-onmain` | `1bb22fb` | 调和后的 4 个提交 |
 | `archive/260820-upstream-keepalive` | `2705281` | 已评审的源提交链，7 个 |
 | `archive/260820-upstream-keepalive-onmain` | `0176e93` | **一个 rebase 中转的 squash**，不是多提交源。项目规则「归档不得指向 squash 提交」针对的是集成 squash（这里是 `52d877c`），本分支是中间态；记在这里是因为同后缀在两个 slice 里不同义 |
+| `archive/260820-keepalive-followup` | `5116606` | 合入后复评修复的已评审源，5 个提交（`10da106` / `029bf0a` / `b472a03` / `bf1e3c1` / `5116606`）。集成 squash 是 `306bdb7`，按规则本分支不指向它 |
 
 评审：五路独立、异源。契约 3 轮判定 spec 可固定为规范；asyncio 正确性 8 轮判定可以合入；调和评审确认主线的清理语义、STR-04 与本分支七条保活性质全部保持，无忙等、无第八种替身量；传输层 3 轮加合入后复评 2 轮（`review-merged-upstream-keepalive.md`、`review-followup-cap-dedup.md`）；文档与裁决核对 2 轮（`docs/tmp/260820-review-keepalive-rulings.md`、`docs/tmp/260820-review-keepalive-doc-fixes.md`）。
 
