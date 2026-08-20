@@ -42,6 +42,7 @@ from app.pipeline.subscribers import register_builtin_subscribers
 from app.pipeline.translation_driver.registry import TranslatorRegistry, default_registry
 from app.tokenization.state_store import TokenizationStateStore
 from app.upstream.copilot import GitHubTokenSourceAdapter
+from app.upstream.stream_cap import cap_streams_per_connection
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +56,8 @@ class TransportOptions:
     proxy: str | None
     http2: bool
     keepalive_expiry: float | None
+    # 0 = unlimited, which is httpx's own behaviour.
+    max_streams_per_connection: int
 
 
 def transport_options(config: ProxyConfig) -> TransportOptions:
@@ -71,16 +74,21 @@ def transport_options(config: ProxyConfig) -> TransportOptions:
         proxy=config.proxy or None,
         http2=transport.http2,
         keepalive_expiry=float(keepalive) if keepalive > 0 else None,
+        max_streams_per_connection=transport.max_streams_per_connection,
     )
 
 
 def build_http_client(config: ProxyConfig) -> httpx.AsyncClient:
     options = transport_options(config)
-    return httpx.AsyncClient(
+    client = httpx.AsyncClient(
         proxy=options.proxy,
         http2=options.http2,
         limits=httpx.Limits(keepalive_expiry=options.keepalive_expiry),
     )
+    if options.max_streams_per_connection > 0:
+        # After the client is built, not instead of building it: the cap wraps the pool httpx configured rather than replacing it, so every setting httpx passed through — and every one it gains later — is kept. See `app.upstream.stream_cap`.
+        cap_streams_per_connection(client, options.max_streams_per_connection)
+    return client
 
 
 @dataclass(slots=True)

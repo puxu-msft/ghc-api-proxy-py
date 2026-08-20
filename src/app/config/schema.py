@@ -131,6 +131,11 @@ class UpstreamTransportConfig(Section):
     http2: bool = True
     # NOT IMPLEMENTED by the current transport, and kept rather than deleted because it is a user-authored key with a spec behind it. httpx 0.28.1 / httpcore 1.0.9 expose no HTTP/2 PING interval to configure, so nothing reads this value today. It does not disable HTTP/2 — `http2` above does.
     http2_ping_interval: int = Field(default=15, ge=0)
+    # How many concurrent requests may share one upstream connection. 0 = unlimited, which is httpx's own behaviour and what this ran with until 2026-08-20.
+    # Bounds the blast radius of a connection-level event: one GOAWAY ends every stream riding that connection, and on 2026-08-20 that was four requests at the same instant. At N, it is at most N.
+    # This is a different choice from `http2: false`, not a milder version of it. A capped connection is still HTTP/2 — framing, HPACK, stream-level resets, and whatever the upstream edge does differently for h2. Turning HTTP/2 off gives that up. Measured evidence for both is in `docs/agents/upstream-h2-goaway/findings.md`.
+    # Left off by default because no measurement here supports a particular number, and one invented would be a decision the operator did not ask to make. Two facts for whoever picks one: upstream advertises `MAX_CONCURRENT_STREAMS = 100`, so only this cap binds; and the sibling service ships 1.
+    max_streams_per_connection: int = Field(default=0, ge=0)
 
 
 class UpstreamRequestTimeoutsConfig(Section):
