@@ -35,8 +35,20 @@ class RequestLine:
     bytes_out: int | None = None
     usage: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
     stop_reason: str = ""
+    tools: tuple[str, ...] = ()
     attempts: int = 1
     detail: str = ""
+
+
+def format_stop_reason(stop_reason: str, tools: tuple[str, ...]) -> str:
+    """`tool_use(Bash,Bash,Read)` — the reason, and for tool calls which tools were asked for.
+
+    Duplicates are kept and the order is the model's. `tool_use` on its own says only that the turn ended in tool calls; three `Bash` in a row and one `Bash` are very different turns, and collapsing them would hide exactly the pattern worth noticing in a log.
+    """
+    if not stop_reason:
+        return ""
+    named = [tool for tool in tools if tool]
+    return f"{stop_reason}({','.join(named)})" if named else stop_reason
 
 
 def format_count(value: int) -> str:
@@ -134,7 +146,7 @@ def format_completion_line(line: RequestLine, *, unicode: bool = True) -> str:
     if tokens:
         parts.append(tokens)
     if line.stop_reason:
-        parts.append(line.stop_reason)
+        parts.append(format_stop_reason(line.stop_reason, line.tools))
     if line.attempts > 1:
         # Named on the line that reports the outcome, where the count is final. A retry still in progress is the footer's job.
         parts.append(f"retries={line.attempts - 1}")

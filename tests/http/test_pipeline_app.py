@@ -791,8 +791,8 @@ def test_a_request_is_in_the_footer_registry_while_it_is_in_flight() -> None:
     client, _ = make_client(upstream)
     client.post("/v1/messages", json={"model": "claude-model", "messages": []})
 
-    # Registered before routing resolves the model, so the footer can show it as `(resolving)` from arrival.
-    assert inflight == [""]
+    # Resolved by the time upstream is called, because routing decides it before the call and says so immediately. This asserted `[""]` while the model was published only after the whole exchange finished, which meant the footer read `(resolving)` for the entire upstream call — not slow feedback but wrong feedback, and the test was encoding it as correct.
+    assert inflight == ["claude-model"]
     # Released afterwards, or the footer fills with requests that finished long ago.
     assert _registry(client).snapshot() == []
 
@@ -941,10 +941,10 @@ def test_a_streaming_request_reports_what_it_actually_delivered(request_log: Non
     assert "↓0B" not in lines[0]
 
 
-def test_every_answered_request_reports_bytes_in_both_directions(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
-    """The gap that prompted this: only the streaming path counted anything.
+def test_a_request_that_reached_upstream_reports_bytes_in_both_directions(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
+    """The line describes the proxy's exchange with upstream, so both directions are upstream's.
 
-    A non-streaming request produced no byte field at all, so the line said nothing about size for the majority of traffic. Read off the rendered response, every non-streaming exit has a count — including the refusals, which have no payload to measure but do have a body.
+    `↑` is what went out on the wire to upstream — not the client's body, which translation rewrites — and `↓` is what came back. A request refused before it ever reached upstream therefore reports neither: it has no upstream exchange to describe, and printing the client-side sizes there would be inventing numbers about a conversation that never happened.
     """
     client, _ = make_client(lambda _: httpx.Response(200, json={"id": "msg_1", "content": []}))
 
@@ -954,7 +954,7 @@ def test_every_answered_request_reports_bytes_in_both_directions(request_log: No
 
     answered, refused = _request_lines(caplog.records)
     assert "↑" in answered and "↓" in answered
-    assert "↑" in refused and "↓" in refused, "a refusal has a size too, and used to report neither"
+    assert "↑" not in refused and "↓" not in refused
 
 
 def test_the_count_endpoint_reports_its_model_and_its_number(request_log: None, caplog: pytest.LogCaptureFixture) -> None:

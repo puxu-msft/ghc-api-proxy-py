@@ -6,7 +6,7 @@ Mounting both would give one path two owners.
 
 import os
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import ExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version
@@ -26,6 +26,7 @@ from app.observability.request_log import (
 from app.observability.tui import footer_tui_or_none
 from app.pipeline.delivery.assembler import BlockAssembler
 from app.pipeline.delivery.stream import stream_delivery
+from app.pipeline.request import RequestContext
 from app.server.composition import Chain, refresh_catalogs
 from app.server.handler import (
     assembler_for,
@@ -71,8 +72,10 @@ class _Trace:
     detail: str = ""
     started: float = 0.0
     bytes_in: int | None = None
+    received: int = 0
     usage: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
     stop_reason: str = ""
+    tools: tuple[str, ...] = ()
 
 
 def _log_completion(chain: Chain, trace: _Trace, status_code: int | None, *, bytes_out: int | None) -> None:
@@ -92,6 +95,7 @@ def _log_completion(chain: Chain, trace: _Trace, status_code: int | None, *, byt
         bytes_out=bytes_out,
         usage=trace.usage,
         stop_reason=trace.stop_reason,
+        tools=trace.tools,
         attempts=trace.attempts,
         detail=trace.detail,
     )
@@ -113,16 +117,14 @@ async def _serve(request: Request) -> Response:
 
     response = await _dispatch(request, chain, trace)
     if not isinstance(response, StreamingResponse):
-        # Read off the rendered response rather than recomputed from the payload, so it is the count of what actually goes on the wire and so every non-streaming exit — including the error ones, which have no payload to measure — reports one. Leaving this `None` is why rejected requests used to show no byte field at all.
-        body = getattr(response, "body", None)
-        _log_completion(chain, trace, response.status_code, bytes_out=len(body) if isinstance(body, bytes) else None)
+        # `received` rather than the size of what goes to the client: the line describes the proxy's exchange with upstream, and the two differ once anything is rewritten on the way out.
+        _log_completion(chain, trace, response.status_code, bytes_out=trace.received or None)
     return response
 
 
 async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
-    # Read before anything can return, so a rejected request reports its size like every other one.
-    # Starlette caches the body it already read for `json()`, so this is a length, not a second read.
-    trace.bytes_in = len(await request.body())
+    # Consumed here so the request is fully read before anything can return, which is what lets a rejected body be reported at all. Its size is deliberately **not** what `↑` reports — see `_log_completion`.
+    await request.body()
 
     route = route_for_path(request.url.path)
     if route is None:
@@ -160,6 +162,11 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
             released = True
             active.remove(context.id)
 
+    def _routed(routed: RequestContext) -> None:
+        """Tell the footer which model answered, the moment routing decides it."""
+        active.set_model(context.id, routed.resolved_model)
+        trace.model = routed.resolved_model
+
     try:
         if route.count_tokens:
             # Answered here rather than driven: the reply is a count, not an upstream response to
@@ -184,7 +191,7 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
             return JSONResponse(counted)
 
         try:
-            handled = await handle_bounded(chain, context)
+            handled = await handle_bounded(chain, context, _routed)
         except Exception as error:
             trace.model = context.resolved_model
             trace.attempts = context.attempt_count
@@ -209,6 +216,8 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
                 status_code=error_status(error),
                 headers=error_headers(error),
             )
+        # Exactly what went out to upstream, taken off the request httpx actually sent rather than re-serialized from the payload. It is not the client's body size: translation rewrites the payload, and the version upstream is billed and tokenized for is the one worth reporting.
+        trace.bytes_in = len(response.request.content)
 
         if context.stream:
             # Block-level delivery over the live upstream.
@@ -228,7 +237,7 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
             return _AccountedStreamingResponse(
                 _tracked_delivery(
                     stream_delivery(
-                        response.aiter_bytes(),
+                        _counted_upstream(response.aiter_bytes(), chain, context.id, trace),
                         assembler,
                         buffer=delivery_buffer(chain),
                         settings=stream_settings(chain),
@@ -243,6 +252,8 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
             )
 
         body = cast(dict[str, Any], response.json())
+        # What upstream sent us, not what we hand onward. A buffered reply is one read, so this is the whole of it.
+        trace.received = len(response.content)
         payload = response_payload(chain, handled, body)
         # Taken from what goes downstream rather than from the upstream body, so the numbers on the line are the ones the client was actually told.
         usage = payload.get("usage")
@@ -251,6 +262,15 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
         stop_reason = payload.get("stop_reason")
         if isinstance(stop_reason, str):
             trace.stop_reason = stop_reason
+        content = payload.get("content")
+        if isinstance(content, list):
+            # Same fact the streaming path reads off the assembler, taken here from the blocks themselves so a buffered reply reads identically to a streamed one.
+            blocks = cast(list[Any], content)
+            trace.tools = tuple(
+                str(cast(dict[str, Any], block).get("name", ""))
+                for block in blocks
+                if isinstance(block, dict) and cast(dict[str, Any], block).get("type") == "tool_use"
+            )
         return JSONResponse(payload, status_code=response.status_code)
     finally:
         _release()
@@ -268,12 +288,7 @@ class _StreamAccounting:
     trace: _Trace
     status_code: int
     assembler: BlockAssembler | None = None
-    sent: int = 0
     done: bool = False
-
-    def count(self, size: int) -> None:
-        self.sent += size
-        self.chain.active_requests.add_bytes(self.request_id, size)
 
     def finish(self) -> None:
         if self.done:
@@ -284,7 +299,8 @@ class _StreamAccounting:
         if self.assembler is not None and self.assembler.terminal.seen:
             self.trace.usage = dict(self.assembler.terminal.usage)
             self.trace.stop_reason = self.assembler.terminal.stop_reason
-        _log_completion(self.chain, self.trace, self.status_code, bytes_out=self.sent)
+            self.trace.tools = tuple(self.assembler.terminal.tools)
+        _log_completion(self.chain, self.trace, self.status_code, bytes_out=self.trace.received)
 
 
 class _AccountedStreamingResponse(StreamingResponse):
@@ -306,19 +322,25 @@ class _AccountedStreamingResponse(StreamingResponse):
             self._accounting.finish()
 
 
-async def _tracked_delivery(chunks: AsyncGenerator[bytes], accounting: _StreamAccounting) -> AsyncGenerator[bytes]:
-    """Pass the delivery stream through untouched, counting what goes out and accounting for it at the end.
+async def _counted_upstream(chunks: AsyncIterator[bytes], chain: Chain, request_id: str, trace: _Trace) -> AsyncGenerator[bytes]:
+    """Count what upstream sends, as it arrives, and forward it untouched.
 
-    Wrapping rather than instrumenting `stream_delivery`: byte accounting is an observability concern, and threading it into the delivery layer would put a display detail on the path that decides what the client receives. The bytes are forwarded object-identical, so block boundaries are preserved.
+    This is the number both the footer and the completion line report, because what an operator is watching is the proxy's conversation with upstream. Bytes delivered onward to the client are a different quantity and a much worse indicator: block-level delivery holds a block until it is whole, so a downstream count sits at zero for most of a request and then jumps — which reads as a broken display rather than as the buffering it is.
+    """
+    async for chunk in chunks:
+        trace.received += len(chunk)
+        chain.active_requests.add_bytes(request_id, len(chunk))
+        yield chunk
+
+
+async def _tracked_delivery(chunks: AsyncGenerator[bytes], accounting: _StreamAccounting) -> AsyncGenerator[bytes]:
+    """Forward the delivery stream untouched and account for the request when it ends.
 
     `finally` rather than a trailing statement, because a client that disconnects mid-stream cancels this generator — and a request that vanishes from the footer, or never gets its log line, only when something has gone wrong is exactly backwards.
-
-    A chunk is counted **after** the yield returns, which is when the consumer came back for the next one and therefore when the previous send succeeded. Counting before it reports bytes that were handed over and then failed to go out: a probe that failed the first body send still saw the line claim `↓3B`.
     """
     try:
         async for chunk in chunks:
             yield chunk
-            accounting.count(len(chunk))
     finally:
         accounting.finish()
 

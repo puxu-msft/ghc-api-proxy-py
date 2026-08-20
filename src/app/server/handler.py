@@ -8,7 +8,7 @@ client while a block is still forming.
 """
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -53,7 +53,7 @@ def apply_route(context: RequestContext, route: Route) -> None:
     context.route_reason = route.reason
 
 
-async def handle(chain: Chain, context: RequestContext) -> HandledRequest:
+async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[RequestContext], None] | None = None) -> HandledRequest:
     provider = chain.providers.get(context.provider_name or chain.providers.default_name)
     route = decide_route(
         requested_model=context.requested_model,
@@ -62,6 +62,9 @@ async def handle(chain: Chain, context: RequestContext) -> HandledRequest:
         mappings=chain.config.model_mappings,
     )
     apply_route(context, route)
+    if on_routed is not None:
+        # Announced the moment the model is known rather than when the request finishes, because everything below this line can take tens of seconds and a display that waits for it reports "still deciding" for the whole upstream call. That is not slow feedback, it is wrong feedback.
+        on_routed(context)
 
     if context.inbound_format is WireFormat.ANTHROPIC_MESSAGES:
         # Before translation on purpose: these fixups read `messages`, which the target format may
@@ -178,7 +181,7 @@ def _countable(payload: Mapping[str, Any]) -> MessagesRequest:
         raise CountTokensRequestError(f"not a countable Messages body: {error}") from error
 
 
-async def handle_bounded(chain: Chain, context: RequestContext) -> HandledRequest:
+async def handle_bounded(chain: Chain, context: RequestContext, on_routed: Callable[[RequestContext], None] | None = None) -> HandledRequest:
     """Run a request under the client deadline.
 
     Measured from admission and never reset by a retry, so it bounds the whole client-visible
@@ -186,10 +189,10 @@ async def handle_bounded(chain: Chain, context: RequestContext) -> HandledReques
     """
     deadline = chain.config.client_delivery.client_request_deadline
     if deadline <= 0:
-        return await handle(chain, context)
+        return await handle(chain, context, on_routed)
     try:
         async with asyncio.timeout(deadline):
-            return await handle(chain, context)
+            return await handle(chain, context, on_routed)
     except TimeoutError as error:
         raise UpstreamTimeout(f"client request exceeded {deadline}s") from error
 

@@ -75,6 +75,8 @@ class LiveConsoleHandler(logging.Handler):
     `markup=False` is load-bearing rather than tidiness: the log format opens with `[ OK ]` / `[FAIL]`, and rich reads square brackets as markup. Left on, every status prefix is swallowed as an unknown style tag.
 
     `soft_wrap=True` for the same class of reason. Without it rich re-flows the record to the console width and inserts its own line break, so a rich request line arrives split across two physical lines with no prefix on the second and the fields it was carrying stranded there. Wrapping a log line is the terminal's job, and it does it without rewriting the text.
+
+    The record is handed over as `Text.from_ansi` rather than as a string. The renderer emits real escape sequences, which is what the plain path needs; passed to rich as a string they would be *characters*, counted toward the width and printed literally. Parsing them turns them back into styles rich understands and keeps its width accounting honest.
     """
 
     def __init__(self, live: Live) -> None:
@@ -83,7 +85,7 @@ class LiveConsoleHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            self._live.console.print(self.format(record), markup=False, highlight=False, soft_wrap=True)
+            self._live.console.print(Text.from_ansi(self.format(record)), soft_wrap=True)
         except Exception:
             self.handleError(record)
 

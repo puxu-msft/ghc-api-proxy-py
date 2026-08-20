@@ -28,6 +28,8 @@ class Terminal:
     stop_reason: str = "end_turn"
     usage: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
     seen: bool = False
+    # Every tool the model asked for, in the order it asked, duplicates kept. `tool_use` on its own says a turn ended in tool calls; which tools, and how many of each, is the part that tells one turn from another when reading a log.
+    tools: list[str] = field(default_factory=lambda: list[str]())
 
 
 class BlockAssembler(Protocol):
@@ -118,6 +120,8 @@ class AnthropicAssembler:
             payload[THINKING] = draft.text
         elif draft.kind == TOOL_USE and draft.partial_json:
             payload["input"] = _decode_json(draft.partial_json)
+        if draft.kind == TOOL_USE:
+            self._terminal.tools.append(str(payload.get("name", "")))
         return (CompletedBlock(index=draft.index, kind=draft.kind, payload=payload),)
 
     def _read_terminal(self, data: dict[str, Any]) -> None:
@@ -222,6 +226,7 @@ class ResponsesAssembler:
                 "name": str(draft.payload.get("name", "")),
                 "input": _decode_json(draft.partial_json or "{}"),
             }
+            self._terminal.tools.append(str(payload["name"]))
         elif draft.kind == THINKING:
             payload = {
                 "type": THINKING,

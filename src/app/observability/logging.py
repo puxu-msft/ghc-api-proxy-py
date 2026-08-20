@@ -43,6 +43,26 @@ def _drop_status_prefix(
     return event_dict
 
 
+DIM = "\x1b[2m"
+RESET = "\x1b[0m"
+# One colour per status prefix, since the prefix is what the eye lands on first when scanning a wall of requests.
+PREFIX_COLOURS = {
+    "[ OK ]": "\x1b[32m",
+    "[FAIL]": "\x1b[31m",
+    "[RETRY]": "\x1b[33m",
+    "[<-->]": "\x1b[36m",
+    "[....]": DIM,
+}
+
+
+def _paint(text: str, code: str, *, colors: bool) -> str:
+    """Wrap `text` in one self-contained SGR span.
+
+    Self-contained on purpose: each span carries its own reset and none of them nest. A nested span's reset would end the enclosing one too, which is how a line ends up half-coloured in a way nobody can reproduce from reading the code.
+    """
+    return f"{code}{text}{RESET}" if colors and text else text
+
+
 def _render_text(
     logger: WrappedLogger,
     method_name: str,
@@ -53,8 +73,11 @@ def _render_text(
     No level column: the fixed-width prefix already says whether this went well, and repeating it in words pushes the part worth reading further right on every line.
 
     Extras are rendered plainly rather than with `repr`, so a path stays `/v1/messages` instead of becoming `'/v1/messages'`. They are the tail of the line by design — a request line puts what matters into the message itself and leaves only the incidental fields here.
+
+    Colour is applied here rather than left to the caller because this is the only place that still knows which span is the prefix, which is the clock and which is the message. It is also where it was previously dropped: the resolved capability was passed in and immediately discarded, so a terminal that could take colour was told nothing about it.
     """
     del logger, method_name
+    colors = bool(event_dict.pop("_colors", False))
     prefix = str(event_dict.pop("prefix", "[....]"))
     timestamp = str(event_dict.pop("timestamp", ""))
     event = str(event_dict.pop("event", ""))
@@ -63,15 +86,20 @@ def _render_text(
     # The prefix is this field, rendered. Printing it again at the end of the line says the same thing twice and pushes the message left of a column of `status=ok`.
     event_dict.pop("status", None)
     extras = " ".join(f"{key}={value}" for key, value in sorted(event_dict.items()))
-    suffix = f" {extras}" if extras else ""
-    return f"{prefix} {timestamp} {event}{suffix}"
+    suffix = f" {_paint(extras, DIM, colors=colors)}" if extras else ""
+    painted_prefix = _paint(prefix, PREFIX_COLOURS.get(prefix, DIM), colors=colors)
+    return f"{painted_prefix} {_paint(timestamp, DIM, colors=colors)} {event}{suffix}"
 
 
 def _build_renderer(log_format: LogFormat, *, colors: bool) -> Processor:
-    del colors
     if log_format == "json":
         return structlog.processors.JSONRenderer()
-    return _render_text
+
+    def render(logger: WrappedLogger, method_name: str, event_dict: EventDict) -> str:
+        event_dict["_colors"] = colors
+        return _render_text(logger, method_name, event_dict)
+
+    return render
 
 
 def setup_logging(

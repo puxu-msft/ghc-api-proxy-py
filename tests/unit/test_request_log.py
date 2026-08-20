@@ -9,6 +9,7 @@ from app.observability.request_log import (
     RequestLine,
     format_arrival_line,
     format_completion_line,
+    format_stop_reason,
     format_tokens,
     status_for,
 )
@@ -88,6 +89,30 @@ def test_an_upstream_error_status_reads_as_a_failure_even_though_it_arrived() ->
     assert status_for(500, failed=False) == "fail"
     assert status_for(None, failed=False) == "fail"
     assert status_for(200, failed=True) == "fail"
+
+
+def test_a_tool_use_turn_names_the_tools_it_asked_for() -> None:
+    # `tool_use` alone says only that the turn ended in tool calls. Three `Bash` and one `Bash` are very different turns, so duplicates are kept and the model's order is preserved.
+    line = format_completion_line(
+        RequestLine(
+            method="POST",
+            path="/p",
+            inbound_format="f",
+            model="m",
+            status_code=200,
+            duration_s=1.0,
+            stop_reason="tool_use",
+            tools=("Bash", "Bash", "Read"),
+        )
+    )
+    assert line.endswith("tool_use(Bash,Bash,Read)")
+
+
+def test_a_stop_reason_without_tools_is_left_alone() -> None:
+    assert format_stop_reason("end_turn", ()) == "end_turn"
+    # An empty name is dropped rather than rendered as a gap, which would read as a tool called "".
+    assert format_stop_reason("tool_use", ("", "")) == "tool_use"
+    assert format_stop_reason("", ("Bash",)) == ""
 
 
 def test_a_mapped_model_shows_what_was_asked_for_and_what_answered() -> None:
