@@ -57,6 +57,21 @@ def _lines(records: list[logging.LogRecord]) -> list[str]:
     return out
 
 
+def _statuses(records: list[logging.LogRecord]) -> list[str]:
+    """The `ok`/`fail`/`draining` each line carries, which decides how it is coloured and read.
+
+    Separate from `_lines` because the two answer different questions, and because reading only the message is how the closing line's verdict went unguarded: every assertion in this file compared wording, so the whole ok-versus-fail decision could be inverted without a single test noticing.
+    """
+    out: list[str] = []
+    for record in records:
+        if record.name != LIFECYCLE_LOGGER:
+            continue
+        payload = record.msg
+        if isinstance(payload, dict):
+            out.append(str(cast(dict[str, Any], payload).get("status", "")))
+    return out
+
+
 def test_a_signal_is_reported_the_moment_it_arrives(captured: object, caplog: pytest.LogCaptureFixture) -> None:
     """The immediacy is the feature.
 
@@ -124,6 +139,29 @@ def test_a_clean_stop_is_one_short_line(captured: object, caplog: pytest.LogCapt
     with caplog.at_level(logging.INFO):
         report_shutdown(ShutdownReport(stage=ShutdownStage.DRAINING))
     assert _lines(caplog.records) == ["stopped"]
+    assert _statuses(caplog.records) == ["ok"]
+
+
+def test_an_ordinary_drain_reports_its_counts_without_calling_itself_a_failure(
+    captured: object,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Telling pooled clients to go, and answering a straggler with a 503, is the shutdown working.
+
+    Both numbers were unguarded until this existed: deleting the refusal count, or folding either number back into the verdict, left every test in the suite green. That mattered most for the verdict, because the argument for keeping these two out of it is the longest one in `report_shutdown`'s docstring and it was the one thing nothing checked.
+
+    The refusal is deliberately the mild outcome. A client that gets a 503 knows to come back; the one whose connection was closed under an in-flight request gets an RST and is not counted anywhere, so marking the 503 as a failure would rank the two exactly the wrong way round.
+    """
+    with caplog.at_level(logging.INFO):
+        report_shutdown(
+            ShutdownReport(
+                stage=ShutdownStage.DRAINING,
+                connections_asked_to_close=2,
+                refused_requests=1,
+            )
+        )
+    assert _lines(caplog.records) == ["stopped — 2 connections asked to close, 1 requests refused"]
+    assert _statuses(caplog.records) == ["ok"]
 
 
 def test_a_stop_that_cut_something_off_names_the_count(captured: object, caplog: pytest.LogCaptureFixture) -> None:
@@ -133,9 +171,31 @@ def test_a_stop_that_cut_something_off_names_the_count(captured: object, caplog:
             ShutdownReport(stage=ShutdownStage.FINALIZING, interrupted_connections=1, cancelled_requests=2)
         )
     assert _lines(caplog.records) == ["stopped — 1 connections interrupted, 2 requests cancelled"]
+    assert _statuses(caplog.records) == ["fail"]
+
+
+def test_the_benign_counts_sit_beside_an_incident_without_softening_the_verdict(
+    captured: object,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The two kinds share one line, so the ordering and the verdict have to survive being mixed.
+    with caplog.at_level(logging.INFO):
+        report_shutdown(
+            ShutdownReport(
+                stage=ShutdownStage.FINALIZING,
+                connections_asked_to_close=3,
+                refused_requests=2,
+                cancelled_requests=1,
+            )
+        )
+    assert _lines(caplog.records) == [
+        "stopped — 3 connections asked to close, 2 requests refused, 1 requests cancelled"
+    ]
+    assert _statuses(caplog.records) == ["fail"]
 
 
 def test_a_cleanup_that_overran_is_not_reported_as_clean(captured: object, caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.INFO):
         report_shutdown(ShutdownReport(stage=ShutdownStage.FINALIZING, cleanup_timed_out=True))
     assert _lines(caplog.records) == ["stopped — cleanup exceeded its budget"]
+    assert _statuses(caplog.records) == ["fail"]

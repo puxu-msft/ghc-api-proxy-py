@@ -177,16 +177,20 @@ async def _serve_pipeline(config: ProxyConfig, options: StandaloneOptions) -> No
 def report_shutdown(report: ShutdownReport) -> None:
     """The last line the process writes: what the shutdown actually did.
 
-    Ordered by what an operator is deciding — whether anything was cut off, and whether cleanup finished. A clean drain says so in one short line; anything else names the count, because "2 requests cancelled" is the difference between a restart that was safe and one that was not.
+    Ordered so the benign counts come first and anything that cost somebody comes after, because a clean drain then says so in one short line, and "2 requests cancelled" is the difference between a restart that was safe and one that was not.
 
-    Connections asked to close are counted but never make the line say `fail`. Telling the idle pooled connections to go is what the first rung is *for*, so a healthy drain reports a number here, and folding it in with the incidents would mark every ordinary shutdown as one. A refused request is the opposite and sits with the incidents: it is the one count that says a client asked for something and did not get it.
+    Neither count of the first kind makes the line say `fail`. Telling the idle pooled connections to go is what the first rung is *for*, and a request the barrier answered with a 503 got a well-formed "come back shortly" — that is the shutdown working, not failing. Marking either as an incident would report every ordinary restart as one.
+
+    That decision was originally the other way for refusals, and measurement is what changed it. The 503 is the *mild* outcome: the harsh one is a pooled connection closed while the client's next request was already on the wire, which the kernel answers with an RST and nothing here can see. Counting the mild case as `fail` while the harsh case reads `ok` inverts exactly the judgement an operator makes from this line.
 
     The noun stays plural at any count. `1 connections` is the reading the count already gives, and branching on it buys a nicety at the cost of a second code path through every line that reports a number — the same trade the footer's connection block settled the same way.
     """
-    incidents: list[str] = []
+    reported: list[str] = []
+    if report.connections_asked_to_close:
+        reported.append(f"{report.connections_asked_to_close} connections asked to close")
     if report.refused_requests:
-        # An incident, unlike the connection count beside it: a connection asked to close cost nobody anything, while a refused request is a client that asked for work and did not get it.
-        incidents.append(f"{report.refused_requests} requests refused")
+        reported.append(f"{report.refused_requests} requests refused")
+    incidents: list[str] = []
     if report.interrupted_connections:
         incidents.append(f"{report.interrupted_connections} connections interrupted")
     if report.cancelled_requests:
@@ -195,8 +199,7 @@ def report_shutdown(report: ShutdownReport) -> None:
         incidents.append("cleanup exceeded its budget")
     if report.cleanup_error:
         incidents.append(f"cleanup failed: {report.cleanup_error}")
-    parts = [f"{report.connections_asked_to_close} connections asked to close"] if report.connections_asked_to_close else []
-    parts += incidents
+    parts = reported + incidents
     detail = f" — {', '.join(parts)}" if parts else ""
     clean = not incidents and report.cleanup_completed
     get_logger(LIFECYCLE_LOGGER).info(f"stopped{detail}", status="ok" if clean else "fail")

@@ -164,11 +164,13 @@ class UvicornListenerAdapter:
         return len(self._server.server_state.connections)
 
     def refused_requests(self) -> int:
-        """How many requests were turned away at the barrier rather than served.
+        """How many requests the barrier answered with a 503 rather than passing on, since this adapter was built.
 
-        The one number in a shutdown report that says a client went without. Connections asked to close and requests cancelled are both things done *to* work this process had; this counts work it declined to take, and a restart that declined none is a restart nobody noticed.
+        Cumulative, so a caller wanting one shutdown's worth reads it before and after and subtracts.
 
-        It is counted here because the barrier sits above the pipeline app, so a refused request never reaches the request log or the display — without this, "nobody was refused" and "refusals are not reported" look identical.
+        **Expect zero on the stand-alone shutdown path, and do not read that as "nobody went without".** Measured over eleven real-signal runs: `stop_admitting` closes the pooled connections in the same breath as it raises the refusal, so a client's next request finds no socket at all — an RST if its bytes were already on the wire, a bare EOF if not. Neither reaches this counter, and the RST case is the one that actually costs somebody, because an interrupted `POST` is not safely retryable. A non-zero value here means a request was genuinely parked at the barrier when the refusal landed: a `both`-mode quiesce window, or a caller driving the adapter directly.
+
+        So this measures the mild outcome and cannot see the harsh one. It is worth reporting for what it is; it is not the number that tells you whether a restart hurt anyone, and an earlier version of this docstring claimed it was.
         """
         return self._refused_requests
 

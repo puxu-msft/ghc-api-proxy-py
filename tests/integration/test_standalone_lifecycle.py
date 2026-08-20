@@ -381,9 +381,13 @@ async def test_a_request_held_at_the_barrier_is_answered_rather_than_left_waitin
     assert b"503" in response.split(b"\r\n")[0]
     assert b"connection: close" in response.lower()
     assert b"shutting down" in response
+    # The count exists so a shutdown can report this, and nothing else in the suite ever makes it non-zero — the closing of the pooled connections normally beats a request to the barrier, which is exactly why the refusal path needs its own witness here.
+    assert harness.adapter.refused_requests() == 1
 
     harness.server.receive_signal(signal.SIGTERM)
-    await asyncio.wait_for(serving, 5)
+    report = await asyncio.wait_for(serving, 5)
+    # Zero, and that is the point: the adapter's counter runs for its whole life, while the report describes one shutdown. This refusal happened before that shutdown began, so reporting it here would attribute somebody else's quiesce to this stop.
+    assert report.refused_requests == 0
     pooled_writer.close()
 
 

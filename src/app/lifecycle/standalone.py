@@ -163,8 +163,10 @@ class StandaloneServer:
             await self._await_advance()
             await self._adapter.stop_accepting()
             # Closing the listener is only half of stopping. The other half is telling the clients that already hold a connection, because they can still send on it — and until they are told, a pooled client keeps handing this process work it has just promised to stop taking.
+            # The refusal count is cumulative over the adapter's life, and this report describes one shutdown, so the baseline is taken before anything can be refused.
+            refused_before = self._adapter.refused_requests()
             asked_to_close = await self._adapter.stop_admitting()
-            return await self._descend(asked_to_close)
+            return await self._descend(asked_to_close, refused_before)
 
     async def _abandon_startup(self, acquired: set[str]) -> list[str]:
         """Release what start-up actually acquired, and report what would not release.
@@ -197,7 +199,7 @@ class StandaloneServer:
                 notes.append(f"start-up teardown: {name} failed: {type(error).__name__}: {error}")
         return notes
 
-    async def _descend(self, asked_to_close: int = 0) -> ShutdownReport:
+    async def _descend(self, asked_to_close: int = 0, refused_before: int = 0) -> ShutdownReport:
         interrupted = 0
         cancelled = 0
 
@@ -222,7 +224,7 @@ class StandaloneServer:
         return ShutdownReport(
             stage=self._ladder.stage,
             connections_asked_to_close=asked_to_close,
-            refused_requests=self._adapter.refused_requests(),
+            refused_requests=self._adapter.refused_requests() - refused_before,
             interrupted_connections=interrupted,
             cancelled_requests=cancelled,
             cleanup_timed_out=outcome.timed_out,
