@@ -242,6 +242,22 @@ async def test_silence_before_the_first_block_produces_no_keep_alive() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_keep_alive_wait_leaves_no_asyncio_noise() -> None:
+    # A keep-alive means the upstream pull outlived its wait.
+    # The pull has to survive that wait without asyncio concluding that nobody is left to observe how it ends: end-of-stream reaches the pull as StopAsyncIteration, and a stale observer turns that ordinary ending into `StopAsyncIteration exception in shielded future` on the operator's stderr.
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    reported: list[str] = []
+    loop.set_exception_handler(lambda _loop, context: reported.append(str(context.get("message"))))
+    try:
+        assert await collect([], interval=1, initial_delay=1.2) == []
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous)
+    assert reported == []
+
+
+@pytest.mark.asyncio
 async def test_an_empty_upstream_stream_produces_nothing() -> None:
     assert await collect([]) == []
 

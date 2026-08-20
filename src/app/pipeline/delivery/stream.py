@@ -60,13 +60,14 @@ async def _events_with_ping(
                     if pending_deadlines
                     else None
                 )
-                try:
-                    yield await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+                # Waited on directly rather than through `wait_for(shield(task), ...)`. Both leave the pull running past a timeout, but a shield whose waiter times out hands the pull a last-resort observer that reports whatever it ends with, and a later shield over the same pull installs its own observer without displacing that one. So the StopAsyncIteration that merely means end-of-stream gets reported as `StopAsyncIteration exception in shielded future` on the operator's stderr, once for every pull that outlived a keep-alive. `asyncio.wait` needs no observer, and `session_liveness_stream` already waits this way.
+                await asyncio.wait({task}, timeout=timeout)
+                if task.done():
+                    yield task.result()
                     break
-                except TimeoutError:
-                    if ping_deadline is not None and loop.time() >= ping_deadline:
-                        ping_deadline = loop.time() + interval
-                    yield None
+                if ping_deadline is not None and loop.time() >= ping_deadline:
+                    ping_deadline = loop.time() + interval
+                yield None
         except StopAsyncIteration:
             return
         finally:
