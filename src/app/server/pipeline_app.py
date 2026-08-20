@@ -100,7 +100,7 @@ def _log_completion(chain: Chain, trace: _Trace, status_code: int | None, *, byt
         detail=trace.detail,
     )
     get_logger(REQUEST_LOGGER).info(
-        format_completion_line(line, unicode=chain.capabilities.unicode),
+        format_completion_line(line, unicode=chain.capabilities.unicode, color=chain.capabilities.color),
         status=status_for(status_code, failed=False),
     )
 

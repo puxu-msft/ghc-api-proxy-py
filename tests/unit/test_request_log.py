@@ -13,6 +13,7 @@ from app.observability.request_log import (
     format_tokens,
     status_for,
 )
+from app.observability.terminal import BOLD_RED, DIM, RED, WHITE, YELLOW
 
 
 def test_a_successful_request_names_the_model_rather_than_the_route() -> None:
@@ -113,6 +114,46 @@ def test_a_stop_reason_without_tools_is_left_alone() -> None:
     # An empty name is dropped rather than rendered as a gap, which would read as a tool called "".
     assert format_stop_reason("tool_use", ("", "")) == "tool_use"
     assert format_stop_reason("", ("Bash",)) == ""
+
+
+def test_colour_is_off_unless_asked_for() -> None:
+    # The plain form is the one every other assertion in this file reads, and the one a pipe or a `TERM=dumb` terminal gets. Colour is a rendering choice made from the probe, never a default.
+    line = RequestLine(method="POST", path="/p", inbound_format="f", model="m", status_code=500, duration_s=1.0, detail="boom")
+    assert "\x1b" not in format_completion_line(line)
+    assert "\x1b" in format_completion_line(line, color=True)
+
+
+def test_the_duration_escalates_on_its_own() -> None:
+    """A slow request should be visible without reading the number.
+
+    Thresholds ported from `copilot-api-js`: white up to 20s, yellow to 60s, red to 180s, bold red beyond.
+    """
+    def coloured(seconds: float) -> str:
+        return format_completion_line(
+            RequestLine(method="POST", path="/p", inbound_format="f", model="m", status_code=200, duration_s=seconds),
+            color=True,
+        )
+
+    assert WHITE in coloured(5.0)
+    assert YELLOW in coloured(30.0)
+    assert RED in coloured(120.0)
+    assert BOLD_RED in coloured(300.0)
+
+
+def test_a_failing_status_and_its_reason_are_red() -> None:
+    line = format_completion_line(
+        RequestLine(method="POST", path="/p", status_code=429, duration_s=1.0, detail="rate limited"),
+        color=True,
+    )
+    assert line.count(RED) == 2, "the status and the reason are both what says whether to care"
+
+
+def test_a_healthy_cache_rate_stays_quiet_and_a_collapsing_one_shouts() -> None:
+    # Inverted against duration on purpose: here the number getting smaller is what costs money.
+    warm = format_tokens({"input_tokens": 10, "cache_read_input_tokens": 990, "output_tokens": 1}, color=True)
+    cold = format_tokens({"input_tokens": 990, "cache_read_input_tokens": 10, "output_tokens": 1}, color=True)
+    assert DIM in warm
+    assert BOLD_RED in cold
 
 
 def test_a_mapped_model_shows_what_was_asked_for_and_what_answered() -> None:

@@ -13,6 +13,18 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.observability.footer import format_bytes, format_duration
+from app.observability.terminal import (
+    CYAN,
+    DIM,
+    GREEN,
+    MAGENTA,
+    RED,
+    WHITE,
+    YELLOW,
+    cache_hit_colour,
+    duration_colour,
+    paint,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,12 +72,14 @@ def format_count(value: int) -> str:
     return str(value)
 
 
-def format_tokens(usage: dict[str, Any], *, unicode: bool = True) -> str:
-    """`↑<input>[+<cache-read>][+<cache-write>][ ↻<hit>%] ↓<output>`, or empty when nothing was reported.
+def format_tokens(usage: dict[str, Any], *, unicode: bool = True, color: bool = False) -> str:
+    """`↑<input>[+<cache-read>][+<cache-write>][ ↻<hit>%[+<new>%]] ↓<output>`, or empty when nothing was reported.
 
-    The cache breakdown is additive on the input side because that is what the numbers are: reading from cache and writing to it are both ways of supplying input. The hit rate is shown only when there was cache activity, since `↻0%` on every uncached request is a column of noise.
+    The cache breakdown is additive on the input side because that is what the numbers are: reading from cache and writing to it are both ways of supplying input. The rates are shown only when there was cache activity, since `↻0%` on every uncached request is a column of noise.
 
     `↓output` is rendered whenever it was measured, `0` included — a request that produced no output tokens is a real and interesting outcome, and omitting it would make that indistinguishable from an endpoint that does not count output at all.
+
+    Colouring follows upstream: the cache-read segment is dim because a cache hit is the cheap, uninteresting case, and the cache-write segment and `+new%` are cyan because they are what this request paid to store.
     """
 
     def read(key: str) -> int:
@@ -79,38 +93,44 @@ def format_tokens(usage: dict[str, Any], *, unicode: bool = True) -> str:
     cache_read = read("cache_read_input_tokens")
     cache_write = read("cache_creation_input_tokens")
 
-    parts = [f"{up}{format_count(input_tokens)}"]
+    head = f"{up}{format_count(input_tokens)}"
     if cache_read:
-        parts[0] += f"+{format_count(cache_read)}"
+        head += paint(f"+{format_count(cache_read)}", DIM, color=color)
     if cache_write:
-        parts[0] += f"+{format_count(cache_write)}"
+        head += paint(f"+{format_count(cache_write)}", CYAN, color=color)
+    parts = [head]
 
     supplied = input_tokens + cache_read + cache_write
     if cache_read or cache_write:
         # Both rates, as upstream shows them: what came out of cache, and what went into it on this request. `+new%` is what tells a warm prompt apart from one that just paid to be cached, which read alone cannot.
-        rate = "↻" if unicode else "cache "
+        marker = "↻" if unicode else "cache "
         hit = round(100 * cache_read / supplied) if supplied else 0
         new = round(100 * cache_write / supplied) if supplied else 0
-        parts.append(f"{rate}{hit}%+{new}%" if cache_write else f"{rate}{hit}%")
+        rate = paint(f"{marker}{hit}%", cache_hit_colour(hit), color=color)
+        if cache_write:
+            rate += paint(f"+{new}%", CYAN, color=color)
+        parts.append(rate)
 
     if "output_tokens" in usage:
         parts.append(f"{down}{format_count(read('output_tokens'))}")
     return " ".join(parts)
 
 
-def _subject(line: RequestLine, *, succeeded: bool) -> list[str]:
+def _subject(line: RequestLine, *, succeeded: bool, color: bool) -> list[str]:
     """Who the request was for: the model when it worked, the route when it did not.
 
-    A mapped model is shown as `asked → answered`, because a line reporting only the resolved name hides the mapping — and a mapping doing something unintended is invisible in exactly the request where it matters.
+    A mapped model is shown as `asked → answered`, because a line reporting only the resolved name hides the mapping — and a mapping doing something unintended is invisible in exactly the request where it matters. The name it resolved to is the coloured half; what was asked for is dim, since it is context for the model that actually answered.
     """
-    named = line.model
+    target = paint(line.model, MAGENTA, color=color)
+    named = target
     if line.requested_model and line.model and line.requested_model != line.model:
-        named = f"{line.requested_model} → {line.model}"
+        named = f"{paint(line.requested_model, DIM, color=color)} → {target}"
 
-    if succeeded and named:
-        return [f"{line.inbound_format}/{named}" if line.inbound_format else named]
-    parts = [line.method, line.path]
-    if named:
+    if succeeded and line.model:
+        prefix = paint(f"{line.inbound_format}/", DIM, color=color) if line.inbound_format else ""
+        return [f"{prefix}{named}"]
+    parts = [paint(line.method, WHITE, color=color), paint(line.path, WHITE, color=color)]
+    if line.model:
         parts.append(named)
     return parts
 
@@ -123,37 +143,42 @@ def format_arrival_line(line: RequestLine) -> str:
     return " ".join(parts)
 
 
-def format_completion_line(line: RequestLine, *, unicode: bool = True) -> str:
+def format_completion_line(line: RequestLine, *, unicode: bool = True, color: bool = False) -> str:
     """The message body for a finished request.
 
     Ordered status, subject, duration, wire bytes, tokens, stop reason, retries, detail — narrowing from how it went, to what it cost, to why it ended. Every field after the subject is omitted when it has nothing to say, so a bare rejection and a full streamed answer share one column order instead of drifting into two formats.
+
+    Colour carries meaning rather than decoration, following `copilot-api-js`: the status and the failure reason say whether to care, the model is the one name worth finding at a glance, the duration escalates on its own so a slow request is visible without reading the number, and the volumes stay dim because they are context for everything else.
     """
     succeeded = line.status_code is not None and line.status_code < 400
     up, down = ("↑", "↓") if unicode else (">", "<")
 
     parts: list[str] = []
     if line.status_code is not None:
-        parts.append(str(line.status_code))
-    parts.extend(_subject(line, succeeded=succeeded))
+        parts.append(paint(str(line.status_code), GREEN if succeeded else RED, color=color))
+    parts.extend(_subject(line, succeeded=succeeded, color=color))
     if line.duration_s is not None:
-        parts.append(format_duration(line.duration_s))
+        parts.append(paint(format_duration(line.duration_s), duration_colour(line.duration_s), color=color))
 
     # Wire bytes, one field for both directions so they read as a pair rather than as two unrelated numbers.
-    wire = [f"{up}{format_bytes(line.bytes_in)}" if line.bytes_in is not None else "", f"{down}{format_bytes(line.bytes_out)}" if line.bytes_out is not None else ""]
+    wire = [
+        paint(f"{up}{format_bytes(line.bytes_in)}", DIM, color=color) if line.bytes_in is not None else "",
+        paint(f"{down}{format_bytes(line.bytes_out)}", DIM, color=color) if line.bytes_out is not None else "",
+    ]
     parts.extend(part for part in wire if part)
 
-    tokens = format_tokens(line.usage, unicode=unicode)
+    tokens = format_tokens(line.usage, unicode=unicode, color=color)
     if tokens:
         parts.append(tokens)
     if line.stop_reason:
         parts.append(format_stop_reason(line.stop_reason, line.tools))
     if line.attempts > 1:
         # Named on the line that reports the outcome, where the count is final. A retry still in progress is the footer's job.
-        parts.append(f"retries={line.attempts - 1}")
+        parts.append(paint(f"retries={line.attempts - 1}", YELLOW, color=color))
 
     rendered = " ".join(parts)
     # A colon rather than a space before the reason, matching the upstream shape and giving the eye somewhere to stop on a line that is otherwise all fields.
-    return f"{rendered}: {line.detail}" if line.detail else rendered
+    return f"{rendered}: {paint(line.detail, RED, color=color)}" if line.detail else rendered
 
 
 def status_for(status_code: int | None, *, failed: bool) -> str:

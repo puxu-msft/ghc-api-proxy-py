@@ -10,6 +10,53 @@ import sys
 from dataclasses import dataclass
 from typing import TextIO
 
+# The palette, kept here because this module already owns the question of what the terminal can take. One definition means the log line and the footer cannot drift into disagreeing about what "dim" is.
+RESET = "\x1b[0m"
+DIM = "\x1b[2m"
+RED = "\x1b[31m"
+GREEN = "\x1b[32m"
+YELLOW = "\x1b[33m"
+MAGENTA = "\x1b[35m"
+CYAN = "\x1b[36m"
+WHITE = "\x1b[37m"
+BOLD_RED = "\x1b[1;31m"
+
+
+def paint(text: str, code: str, *, color: bool) -> str:
+    """Wrap `text` in one self-contained SGR span.
+
+    Self-contained on purpose: each span carries its own reset and none of them nest. A nested span's reset would end the enclosing one too, which is how a line ends up half-coloured in a way nobody can reproduce from reading the code.
+    """
+    return f"{code}{text}{RESET}" if color and text else text
+
+
+def duration_colour(seconds: float) -> str:
+    """Escalating severity for how long a request took, thresholds ported from `copilot-api-js`.
+
+    A slow request is worth noticing, and the escalation is what makes it noticeable without reading the number. No dim (terminals render it as grey, which reads as "ignore me") and no magenta, which would collide with the model name.
+    """
+    if seconds <= 20:
+        return WHITE
+    if seconds <= 60:
+        return YELLOW
+    if seconds <= 180:
+        return RED
+    return BOLD_RED
+
+
+def cache_hit_colour(percent: int) -> str:
+    """Severity for a prompt-cache hit rate — inverted, because a high rate is the good case.
+
+    Healthy stays quiet and a collapsing rate escalates, which is the opposite direction from duration and deliberately so: here the number getting *smaller* is what costs money.
+    """
+    if percent >= 80:
+        return DIM
+    if percent >= 40:
+        return YELLOW
+    if percent >= 20:
+        return RED
+    return BOLD_RED
+
 
 @dataclass(frozen=True, slots=True)
 class TerminalCapabilities:
