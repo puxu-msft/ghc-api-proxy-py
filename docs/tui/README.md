@@ -12,6 +12,7 @@
 | `archive-request-log/` | 历史 | 每请求一行：字段构成、着色、用词、数据来源的收口 |
 | `archive-truncated-stream/` | 历史 | 一行什么都没说时它在说什么：缺席不可读、三种结局的区分、`[GONE]` 档的由来 |
 | `archive-token-accounting/` | 历史 | 词元用量换算：Responses 与 Anthropic 两套语义的差异及其后果 |
+| `archive-count-tokens-line/` | 历史 | 计数请求那一行：端点与计数提供方各答一半、上游腿的窄含义、以及「修好一层会在上一层重演」 |
 
 ## 档案怎么读
 
