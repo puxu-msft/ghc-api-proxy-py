@@ -6,7 +6,11 @@ Copilot's Anthropic Messages endpoint does not run Anthropic's native server too
 
 Refusing produces the opposite, and it is on record rather than reasoned: when a search sub-request returned 400, the client handed the main conversation a `tool_result` with `is_error: true`, and the model said it would not mistake an interface failure for the fact not existing — then reached for WebFetch and finished the task. A refused search costs a turn. A silently invented one costs the answer's truth.
 
-**The history is still rewritten rather than refused.** A transcript carrying `server_tool_use` calls and `*_tool_result` answers from an earlier session is rejected on its own account, and there is nothing dishonest about flattening those into text: they are a record of searches that really happened, not a claim that one is happening now. They become plain text rather than a client `tool_use` / `tool_result` pair, because a downgraded pair refers to a tool this request does not declare, while text refers to nothing.
+**The history is rewritten rather than refused, and on this client that path has never once run.** Flattening a past `server_tool_use` call and its `*_tool_result` answer into text is honest where refusing the declaration is not: those blocks are a record of searches that really happened, not a claim that one is happening now. They become plain text rather than a client `tool_use` / `tool_result` pair, because a downgraded pair refers to a tool this request does not declare, while text refers to nothing.
+
+What the earlier version of this docstring got wrong was implying such a transcript is what arrives. Measured 2026-08-20 across five history databases: on Claude Code these blocks **never enter the main conversation**. Its main `messages` carry an ordinary `tool_use` named `WebSearch` — a plain function tool with no `type` at all, which `_rejected_type` ignores and this module therefore never touches. The server-tool declaration lives only in the throwaway sub-request, and that sub-request carries no history. So the flattening below is for transcripts from somewhere else: another provider, a direct Anthropic session, a client that does not split the two. That is a real shape and worth handling; it is not one this project has seen.
+
+**Nothing here has a production sighting at all.** This project's own `history.db` holds 8,966 requests and not one of them reached this module — every measurement above comes from the existing Bun service's records and from client transcripts. The behaviour is derived from what the client demonstrably sends and from what upstream demonstrably answers, not from having watched this code run.
 
 **Scoped to the Anthropic leg, and the Responses leg has its own answer.** That endpoint does execute hosted web search, under its own spelling — measured 2026-08-20 on gpt-5.5, `{"type": "web_search"}` returns 200 while the Anthropic `web_search_20250305` spelling returns 400. So that leg translates the declaration and renders what comes back (`translation_driver/openai_responses.py`, `delivery/assembler.py`), and refuses only when the model is not known to search at all (`subscribers/hosted_web_search.py`).
 
@@ -30,9 +34,9 @@ SUBSCRIBER_ID = "builtin:server-tool-capability"
 # `web_search`: today's 400, and the reason this module exists.
 # `web_fetch`: rejected too, and it says so in different words — `{"message": "rejected tool(s): web_fetch", "code": "invalid_request_body"}`. Two shapes for one rule is exactly why the predicate here reads the declaration we send rather than the wording that comes back; a matcher written against one message would have let the other through.
 #
-# No trailing underscore, so both spellings are caught: Anthropic dates its server tools (`web_search_20250305`) while the OpenAI form is bare (`web_search`), and the bare form really does arrive here — a `/responses` request naming a Claude model falls back to the Anthropic endpoint and the translator carries `tools` across verbatim.
+# No trailing underscore, so both spellings are caught: Anthropic dates its server tools (`web_search_20250305`) while the OpenAI form is bare (`web_search`). The bare form has a route to this leg — a `/responses` request naming a Claude model finds no `/responses` on that model, routes to Messages instead, and `to_anthropic_messages` assigns `tools` across verbatim — but that is read off the code, not off a request anyone has seen. Every measured arrival here carries the dated spelling.
 #
-# Deliberately absent: `memory_`, `tool_search_`, `text_editor_`, `bash_`, `computer_`. Those are executed by the client, not by the model's host, and Claude Code really does send some of them. Nothing has been measured rejecting them, so removing them would break working requests to prevent a failure nobody has seen. The reference implementation strips all ten known prefixes and is wrong to.
+# Deliberately absent: `memory_`, `tool_search_`, `text_editor_`, `bash_`, `computer_`. Those are executed by the client, not by the model's host, and Claude Code really does send some of them. Nothing has been measured rejecting them, so refusing them would break working requests to prevent a failure nobody has seen. The reference implementation strips all ten known prefixes and is wrong to.
 _REJECTED_TYPE_PREFIXES: tuple[str, ...] = ("web_search", "web_fetch")
 
 
@@ -161,7 +165,9 @@ def _flatten_history_block(block: Any) -> dict[str, Any] | None:
 def _flatten_history(payload: dict[str, Any]) -> int:
     """Replace rejected server-tool blocks left in the history, returning how many.
 
-    Runs whether or not this request declared anything. A history block is rejected on its own account, so a client that has since stopped asking for web search still replays turns from when it did.
+    Runs whether or not this request declared anything, and unlike the declaration it does not refuse: a block here records a search that already happened somewhere it was possible, so turning it into text loses provenance rather than inventing an answer.
+
+    On the client this project actually serves, this has nothing to do. Claude Code keeps its main conversation free of these blocks — the search lives in a separate sub-request that carries no history at all — so what this handles is a transcript from elsewhere: another provider, a direct Anthropic session, a client that does not split the two. Real shapes, none of them observed here.
     """
     messages = payload.get("messages")
     if not isinstance(messages, list):
@@ -227,11 +233,11 @@ def _refuse_declarations(payload: dict[str, Any]) -> None:
 
 
 async def adapt_server_tools(context: RequestContext) -> None:
-    """Drop server-tool declarations the routed endpoint will reject, and flatten what they left in the history.
+    """Refuse a declaration this endpoint cannot execute, and flatten what earlier ones left in the history.
 
     Reads the route rather than the inbound format, because what upstream accepts is a property of the endpoint being spoken to. A request that arrived in another protocol and was translated *into* Anthropic shape belongs here too, and gets the same treatment for the same reason; one that was translated *out* of it does not, and its `tools` is a different protocol's field that happens to share the name.
 
-    Two passes, and the history one is not conditional on the first. Removing the declaration prevents the rejection this module is named for; leaving the turns that declaration produced would simply buy a different one.
+    Two passes, and only the second can be reached with a declaration present: refusing raises, so a request that declares a search this endpoint cannot run never gets its history rewritten. Nothing is lost by that — the request is not being sent. The flattening therefore runs for the requests that declare nothing and still carry blocks from a turn that did, and on the counting leg, where refusing is suspended and the measured body should be the one that would actually go out.
     """
     if context.target_format is not WireFormat.ANTHROPIC_MESSAGES:
         return
