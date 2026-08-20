@@ -409,7 +409,7 @@ def debug_models(
         bool,
         typer.Option(
             "--json",
-            help="Print the complete decoded upstream payload, keyed by provider name.",
+            help="Print the complete decoded upstream payload, keyed by provider name unless --provider names one.",
         ),
     ] = False,
 ) -> None:
@@ -434,7 +434,11 @@ def debug_models(
         raise typer.Exit(code=1) from error
 
     if catalogs:
-        typer.echo(render_json(catalogs) if as_json else render_text(catalogs))
+        # `provider is None` and not `len(catalogs) == 1`: the shape follows what was asked for, so a deployment that happens to run one provider still gets a document naming it.
+        rendered = (
+            render_json(catalogs, keyed=provider is None) if as_json else render_text(catalogs)
+        )
+        typer.echo(rendered)
     for failure in failures:
         typer.echo(f"error: {failure.name}: {failure.reason}", err=True)
     if failures:

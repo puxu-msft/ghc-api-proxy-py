@@ -365,13 +365,15 @@ def render_text(catalogs: Sequence[ProviderCatalog]) -> str:
     return "\n\n".join(blocks)
 
 
-def render_json(catalogs: Sequence[ProviderCatalog]) -> str:
-    """Every provider's decoded payload, complete and unprojected, keyed by provider name.
+def render_json(catalogs: Sequence[ProviderCatalog], *, keyed: bool = True) -> str:
+    """Every provider's decoded payload, complete and unprojected.
 
     Not the upstream bytes: the response was parsed to JSON before it reached here, so whitespace, escape spelling and any duplicate object key are already gone. What survives is every field of the decoded catalog, which is what distinguishes this from the table — the table shows seven columns, this shows everything upstream said.
 
-    Keyed even for a single provider so the shape does not change with the configuration; `--provider` narrows it to one.
+    `keyed` reflects what was asked for, not how many providers happen to be configured. Without `--provider` the caller asked about the deployment and the answer has to say which upstream each payload came from; with it they named one, and wrapping that single answer in a key they already typed only makes it something to unwrap again.
     """
+    if not keyed and len(catalogs) == 1:
+        return json.dumps(dict(catalogs[0].raw), indent=2, ensure_ascii=False)
     return json.dumps(
         {catalog.name: dict(catalog.raw) for catalog in catalogs},
         indent=2,
