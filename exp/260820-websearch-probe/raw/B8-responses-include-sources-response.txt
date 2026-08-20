@@ -1,0 +1,126 @@
+# HTTP 200 content-type: application/json
+
+{
+  "copilot_usage": {
+    "token_details": [
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 500000000000,
+        "token_count": 737,
+        "token_type": "input"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 50000000000,
+        "token_count": 3712,
+        "token_type": "cache_read"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 0,
+        "token_count": 0,
+        "token_type": "cache_write"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 3000000000000,
+        "token_count": 13,
+        "token_type": "output"
+      }
+    ],
+    "total_nano_aiu": 593100000
+  },
+  "created_at": 1787210000,
+  "id": "omPsy4+hLvy+tPtm5q9W2/kmzty2tbrH0yIwvknMDAivP5OHmRgCqWbLiFjOAeB5iKqjkgMRzi9t/ATiH00k1M/ciDF2l4pz1jMxNM3GRfC7L2FUsarNllaTIRf5wb8nCL0A9ZoTJf8QcfqEQAyxeC+TqinOjhfdCYS4dZUCqvXpKzVkXFvIQl88TQnHkN3XhgvARgxGIiY4N+awgxpCGpuE9SsypC4R1JkGkrYTy4WZYX2fBYzK65lxiSo8zXISfFdxAoD8WQDCUDSnkn1xD3098G3T8lqPLCLar+XE1IOMzIG1e1/e5INsqxQAEXEjXAip3SaWe1y+5jNP0Y253nHPZDeOh7mHLynkdgmzLogDUZe/FfoicZFXyjHIM793E/7Lnsk2xMeZ7YV87fIve8zmR8kJG/30",
+  "incomplete_details": null,
+  "instructions": null,
+  "max_output_tokens": 64,
+  "model": "gpt-5.5-2026-04-23",
+  "object": "response",
+  "output": [
+    {
+      "content": [
+        {
+          "annotations": [],
+          "logprobs": [],
+          "text": "The capital of France is **Paris**.",
+          "type": "output_text"
+        }
+      ],
+      "id": "JMSyJX8JB6MzEJb0r0Q8VOYhpigBUDgltb348mRuqkLQ8phWglZVfwx/PPrwgTIecEouCRE60IBNnyigg118dZH9K9I/PHmUkKBPEyYnIaRIck5/+vTCRUcWc1kG02rY+ZR7LkLqJYhWDXjim06Nf4RNf2QV4H53CoxnzD5OtCw/tVMg96KC0LVq84BBIPknms7wco7M/XcacsdcW5vTapPJOzUwsGBxTnAUZ81HESi9kV5FR20pCxr6rrUYDXzeW7VsvfrKWzThEoEs6R+/Mmf5qh1mTZbaGRZFgRMMDgtgMr0z/ZMFUD38QTU6k6Ap9YpcTad59PrD7hf2Wm4/LbUyj+9QyXnAy/Yfo+BkSJz+cmdollg1Cd4Q9UCXEzRmurESKRfp7026bLKmSh4Q3BZrlMH47c8=",
+      "phase": "final_answer",
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    }
+  ],
+  "output_text": null,
+  "parallel_tool_calls": true,
+  "previous_response_id": null,
+  "prompt_cache_retention": "24h",
+  "reasoning": {
+    "context": "current_turn",
+    "effort": "medium",
+    "summary": null
+  },
+  "safety_identifier": "REDACTED",
+  "service_tier": "default",
+  "status": "completed",
+  "temperature": 1,
+  "text": {
+    "format": {
+      "type": "text"
+    },
+    "verbosity": "medium"
+  },
+  "tool_choice": "auto",
+  "tool_usage": {
+    "image_gen": {
+      "input_tokens": 0,
+      "input_tokens_details": {
+        "image_tokens": 0,
+        "text_tokens": 0
+      },
+      "output_tokens": 0,
+      "output_tokens_details": {
+        "image_tokens": 0,
+        "text_tokens": 0
+      },
+      "total_tokens": 0
+    },
+    "web_search": {
+      "num_requests": 0
+    }
+  },
+  "tools": [
+    {
+      "type": "web_search",
+      "return_token_budget": "default",
+      "search_content_types": [
+        "text"
+      ],
+      "search_context_size": "medium",
+      "user_location": {
+        "type": "approximate",
+        "city": null,
+        "country": "US",
+        "region": null,
+        "timezone": null
+      }
+    }
+  ],
+  "top_p": 0.98,
+  "truncation": "disabled",
+  "usage": {
+    "input_tokens": 4449,
+    "input_tokens_details": {
+      "cache_write_tokens": 0,
+      "cached_tokens": 3712
+    },
+    "output_tokens": 13,
+    "output_tokens_details": {
+      "reasoning_tokens": 0
+    },
+    "total_tokens": 4462
+  }
+}

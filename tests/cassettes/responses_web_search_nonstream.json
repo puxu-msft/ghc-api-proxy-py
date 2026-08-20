@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "interactions": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/copilot_internal/v2/token",
+        "authenticated": true,
+        "shape": {}
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "extensions": {
+          "http_version": "HTTP/1.1"
+        },
+        "source": "live-recording",
+        "chunks": [
+          {
+            "text": "{\"agent_mode_auto_approval\":true,\"azure_only\":false,\"blackbird_clientside_indexing\":false,\"blackbird_external_indexing\":false,\"chat_enabled\":true,\"code_quote_enabled\":true,\"code_review_enabled\":true,\"codesearch\":true,\"copilotignore_enabled\":true,\"endpoints\":{\"api\":\"https://api.enterprise.githubcopilot.com\",\"exp\":\"https://exp.enterprise.githubcopilot.com\",\"origin-tracker\":\"https://origin-tracker.enterprise.githubcopilot.com\",\"proxy\":\"https://proxy.enterprise.githubcopilot.com\",\"telemetry\":\"https://telemetry.enterprise.githubcopilot.com\"},\"enterprise_list\":[],\"expires_at\":4102444800,\"individual\":false,\"limited_user_quotas\":null,\"limited_user_reset_date\":null,\"organization_list\":[],\"public_suggestions\":\"disabled\",\"refresh_in\":86340,\"sku\":\"copilot_enterprise_seat_multi_quota\",\"telemetry\":\"enabled\",\"token\":\"REDACTED\",\"tracking_id\":\"REDACTED\"}"
+          }
+        ]
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/responses",
+        "authenticated": true,
+        "shape": {
+          "model": "gpt-5.5",
+          "stream": false,
+          "digest": "44816fc0353755d8c4076d676831024ee187b3a4e5ff6fe1d8e0db4c84afa80a"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "transfer-encoding": "chunked"
+        },
+        "extensions": {
+          "http_version": "HTTP/1.1"
+        },
+        "source": "live-recording",
+        "chunks": [
+          {
+            "text": "{\"copilot_usage\":{\"token_details\":[{\"batch_size\":1000000,\"cost_per_batch\":500000000000,\"token_count\":981,\"token_type\":\"input\"},{\"batch_size\":1000000,\"cost_per_batch\":50000000000,\"token_count\":3712,\"token_type\":\"cache_read\"},{\"batch_size\":1000000,\"cost_per_batch\":0,\"token_count\":0,\"token_type\":\"cache_write\"},{\"batch_size\":1000000,\"cost_per_batch\":3000000000000,\"token_count\":112,\"token_type\":\"output\"}],\"total_nano_aiu\":1012100000},\"created_at\":1787210100,\"id\":\"cB+yry8Sr3zq7ub/kGxXEeUwaN5akM7J1Um4hXMdeZ8v+uZmyxs5GO/zYAWSz3NQvmxZnvVakffT6qJbs/90jM6IH896QcBsZr+rX5UjMuawkDRzsnhbQWNhApQu5hYMpfCr4AdU3XjPWBFxcaKe3npfWVELCxH0NRP0taZDHAAZtSsUb3a6sUSw7gfzFz4904xLJywMjcD7eSJh6OEmXTqxxNEui1b3s1SEthEELGg83r4XiguUmClfQ9rJ8ErGQqlvmdoYXrAT1pyaRGNwznY2OmkRChdhF8aMUMYSotjBVClysSCJuCxxEkMHvvJyHkb9GscwEM35g3ADQq4Kd3ahF+wG9U067/U0IfYyhRQOYX5gueIQiRdFRtxOtvbZ4hlwTGErIo3SS4pGwaIrj7P42QgflY3O\",\"incomplete_details\":null,\"instructions\":null,\"max_output_tokens\":512,\"model\":\"gpt-5.5-2026-04-23\",\"object\":\"response\",\"output\":[{\"action\":{\"queries\":[\"time: {\\\"utc_offset\\\":\\\"-04:00\\\"}\"],\"query\":\"time: {\\\"utc_offset\\\":\\\"-04:00\\\"}\",\"type\":\"search\"},\"id\":\"30OdnIpDtffm5xchj0koG8//bPefnNL3pk71g+ULHiHb/UnYf8e8qYE/zcyjKr0HWSx5R+Shh9pIBHNOM8g/3zubg/6zd/lse3DVR98f1ezoeCBKrhbzLmEsxrEI/T2saycvZtsC4QGXyW1C3V+t3t03FGeJlWNiFXtMedJciO8s3CyRmjJSFFYi62GWFpFoCp2I5Bj0bTrdtH0CpwwDUDJsP1zB0M6iJOt0FO55vhDD38iV737XzJ/oXsKcvtwScYK3yjGN+KEsjXw1lxXRZbD4TG2hNJcutvfUolM9YgepkgwBPPhstruH50zkXOJl+KIX9NBVzIoo2xX86crNLLOcuexW52u6kXQ1WrqhnkGheCniDcNdyKo8eD4SzVdlKlTbinP7arwB2hajWTHYECeAPagRkw==\",\"status\":\"completed\",\"type\":\"web_search_call\"},{\"content\":[{\"annotations\":[],\"logprobs\":[],\"text\":\"Today’s date is **Thursday, August 20, 2026** in U.S. time zones. \",\"type\":\"output_text\"}],\"id\":\"Cil3obOP6MJv+Qrd9q/CFcbZdKjOsh+mWgjKIS7RzSQJ7joFQ3uroli7U2czVenp1OP6pjPdHOIO6BZt9/e1g9+dPeIqwVN1FVNYWIC/66JIhRLA1GECBryYZFcs6q6ZEbE3PFZq+Sojg0Y5evOPwxPgmMKRhP2uqLyAtie/faCr4Y9elCXw2OYz6+9VUgp0dl3iychHR/6xOBXliDMiHvmzI6F93VRTagcesb9hlKjGXg7I6RmmKV5da/QP8XPMjxE7gsYlT7gVYDLAC1KECC30+4QHtoTzI5EEqZeh23zQr013h3GcLf8OQdWPvf2xGbshaY3kKubdYCrbwm/C3Xkqtkr4ZJgia5+mlOUxOFsIWcOX9g2PlElpDdk86FBCJKXsp9cmIhS5ExQGBYMg1oMHd2LVjkE=\",\"phase\":\"final_answer\",\"role\":\"assistant\",\"status\":\"completed\",\"type\":\"message\"}],\"output_text\":null,\"parallel_tool_calls\":true,\"previous_response_id\":null,\"prompt_cache_retention\":\"24h\",\"reasoning\":{\"context\":\"current_turn\",\"effort\":\"medium\",\"summary\":null},\"safety_identifier\":\"REDACTED\",\"service_tier\":\"default\",\"status\":\"completed\",\"temperature\":1,\"text\":{\"format\":{\"type\":\"text\"},\"verbosity\":\"medium\"},\"tool_choice\":\"auto\",\"tool_usage\":{\"image_gen\":{\"input_tokens\":0,\"input_tokens_details\":{\"image_tokens\":0,\"text_tokens\":0},\"output_tokens\":0,\"output_tokens_details\":{\"image_tokens\":0,\"text_tokens\":0},\"total_tokens\":0},\"web_search\":{\"num_requests\":1}},\"tools\":[{\"type\":\"web_search\",\"return_token_budget\":\"default\",\"search_content_types\":[\"text\"],\"search_context_size\":\"medium\",\"user_location\":{\"type\":\"approximate\",\"city\":null,\"country\":\"US\",\"region\":null,\"timezone\":null}}],\"top_p\":0.98,\"truncation\":\"disabled\",\"usage\":{\"input_tokens\":4693,\"input_tokens_details\":{\"cache_write_tokens\":0,\"cached_tokens\":3712},\"output_tokens\":112,\"output_tokens_details\":{\"reasoning_tokens\":51},\"total_tokens\":4805}}"
+          }
+        ]
+      }
+    }
+  ]
+}

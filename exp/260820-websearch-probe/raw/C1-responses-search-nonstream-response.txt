@@ -1,0 +1,138 @@
+# HTTP 200 content-type: application/json
+
+{
+  "copilot_usage": {
+    "token_details": [
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 500000000000,
+        "token_count": 927,
+        "token_type": "input"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 50000000000,
+        "token_count": 3712,
+        "token_type": "cache_read"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 0,
+        "token_count": 0,
+        "token_type": "cache_write"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 3000000000000,
+        "token_count": 95,
+        "token_type": "output"
+      }
+    ],
+    "total_nano_aiu": 934100000
+  },
+  "created_at": 1787210000,
+  "id": "WL1peJ/EnV1JS5pK0zGfpFNIEVL20FhzU94ZfY4cNnNYUwShe2crbgEMQPKbprVkX8bo9fP+HWuoZbTZsCx2w6Oo47tP+Kf5e/rk8sf/ReoVSBmvgCJWzujVn+lM6zla1jGaDxRJxRfQPcgZaWyh44hSsUJh74uZ8NuHgiuRwMLz3jq2iSX1ESeFfnHmq7H+fiwWuMbFoUHsZUGxzT9xqrMleUPs4HiVC75ON0rPfJzb95ZT8nkyJCgqP64tUKise5G9V8YShKX4wpZrB10VR1B69IxZ2gT3Mdkb9ohyFZVD8+vJoBA9XvQ5fY/jMidG9GI8l5Pn1vYTv6smKvtB3QY4np3dADWVTtE04h5HQzL/xgswNGz5m5I1ogRXSi7MTBhemHPy0cLU5BTHisYflj7W2JrYO7NZ",
+  "incomplete_details": null,
+  "instructions": null,
+  "max_output_tokens": 512,
+  "model": "gpt-5.5-2026-04-23",
+  "object": "response",
+  "output": [
+    {
+      "action": {
+        "queries": [
+          "time: {\"utc_offset\":\"-04:00\"}"
+        ],
+        "query": "time: {\"utc_offset\":\"-04:00\"}",
+        "type": "search"
+      },
+      "id": "Q604Qgq27FefvuQ5t/qL1iSo2ersozVnNG/py8UXSOeE6HKZZpikSwgwSbCNsSg1sr4L67RXCGYqGu4jBJLNibt1uJQkGwNP1OySqNcT/7+BQ+YRQBFcwIFhkDAusrqtMDJUCTgy4m/MJZyg1LxT1K1SG+MCmrp0xwjVwaW1C0cFpZt3AHSXZ2VhFBlwAufOSM+CmcZYvROw7biUay+zLEA2XKDEq+3ivIUsKXls9weTFJFTOe/DM75i75PVHiD3CmTZjC8cU8v9IqXDY9LQc7LEMK/gHvQ8ijCzk+t//Pp1tCOzcd8zryPjUrdqe7L3lDTZYXsnUYAQ16M7RZ9meafzLvNr08mrgBtHCJTx2g/VzlWQJ2ctOnWmQag8t63SfrMl5d/JxvkA1JMs53ElNwFFWFJujQ==",
+      "status": "completed",
+      "type": "web_search_call"
+    },
+    {
+      "content": [
+        {
+          "annotations": [],
+          "logprobs": [],
+          "text": "Today\u2019s date is **Thursday, August 20, 2026** in the United States. ",
+          "type": "output_text"
+        }
+      ],
+      "id": "SAKOt5urZg1ftKbM9B6kHCh7IDGK/Oav129dY/z977vMrL0hyZzzgA3qaL5T05jUi/QQCrF/6yUn0rNuHzt+TWaT1vPOe098gyN+RIXPy6eqW7KIBNXbmeCZ7XiTK52HOnN7eo5EAgFBDpFNqW9oQ3q1gKD4KwOswaduuRUBnjgtOcJrRzieb52rK/pEyxaJtA/wkt6/pwl/1ALQVmNzvCwMJUQ0hThv1iMZhfpe4xkHEq8RPWr1c7Mu9+ATcEu8XTMygTsCHNt0dEnAjvVe/5j2uyxkP6Oj4iZrqYCqyW1x6OyCv/IpgFbriRng7fF4K/HFmEtzqxHKPBsUdPeb8VqyAn2UfNBjcaH8vRcGLRsx7VW90tPoQ8qSiS4QZrPjWpGWQ73XUM0CwRDM12wGkOmkcodvzL4=",
+      "phase": "final_answer",
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    }
+  ],
+  "output_text": null,
+  "parallel_tool_calls": true,
+  "previous_response_id": null,
+  "prompt_cache_retention": "24h",
+  "reasoning": {
+    "context": "current_turn",
+    "effort": "medium",
+    "summary": null
+  },
+  "safety_identifier": "REDACTED",
+  "service_tier": "default",
+  "status": "completed",
+  "temperature": 1,
+  "text": {
+    "format": {
+      "type": "text"
+    },
+    "verbosity": "medium"
+  },
+  "tool_choice": "auto",
+  "tool_usage": {
+    "image_gen": {
+      "input_tokens": 0,
+      "input_tokens_details": {
+        "image_tokens": 0,
+        "text_tokens": 0
+      },
+      "output_tokens": 0,
+      "output_tokens_details": {
+        "image_tokens": 0,
+        "text_tokens": 0
+      },
+      "total_tokens": 0
+    },
+    "web_search": {
+      "num_requests": 1
+    }
+  },
+  "tools": [
+    {
+      "type": "web_search",
+      "return_token_budget": "default",
+      "search_content_types": [
+        "text"
+      ],
+      "search_context_size": "medium",
+      "user_location": {
+        "type": "approximate",
+        "city": null,
+        "country": "US",
+        "region": null,
+        "timezone": null
+      }
+    }
+  ],
+  "top_p": 0.98,
+  "truncation": "disabled",
+  "usage": {
+    "input_tokens": 4639,
+    "input_tokens_details": {
+      "cache_write_tokens": 0,
+      "cached_tokens": 3712
+    },
+    "output_tokens": 95,
+    "output_tokens_details": {
+      "reasoning_tokens": 43
+    },
+    "total_tokens": 4734
+  }
+}
