@@ -39,10 +39,11 @@ from app.server.pipeline_app import (
     REQUEST_LOGGER,
     _AccountedStreamingResponse,  # pyright: ignore[reportPrivateUsage]
     _StreamAccounting,  # pyright: ignore[reportPrivateUsage]
-    _tracked_delivery,  # pyright: ignore[reportPrivateUsage]
     _Trace,  # pyright: ignore[reportPrivateUsage]
+    _tracked_delivery,  # pyright: ignore[reportPrivateUsage]
     create_pipeline_app,
 )
+from app.streaming.idle_timeout import StreamIdleTimeoutError
 from app.tokenization.state_store import TokenizationStateStore
 
 BASE_URL = "https://copilot.example"
@@ -1706,3 +1707,62 @@ def test_a_malformed_usage_costs_the_counts_and_not_the_buffered_reply(
     assert response.status_code == 200
     assert response.json()["content"] == [{"type": "text", "text": "hi"}]
     assert response.json()["usage"] == {"input_tokens": 0, "output_tokens": 0}
+
+
+def _upstream_that_goes_quiet(gap: float) -> Callable[[httpx.Request], httpx.Response]:
+    """One whole block, then a silence longer than any guard under test, then the rest."""
+    whole = sse_upstream("first")
+    head, _, tail = whole.partition(b'event: message_delta')
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        async def body() -> AsyncIterator[bytes]:
+            yield head
+            await asyncio.sleep(gap)
+            yield b'event: message_delta' + tail
+
+        return httpx.Response(200, content=body(), headers={"content-type": "text/event-stream"})
+
+    return handler
+
+
+def _delivered(client: TestClient) -> bytes:
+    with client.stream(
+        "POST", "/v1/messages", json={"model": "claude-model", "messages": [], "stream": True}
+    ) as response:
+        return b"".join(response.iter_bytes())
+
+
+def test_an_upstream_that_goes_quiet_past_the_idle_timeout_is_given_up_on() -> None:
+    # `stream_idle` says how long upstream may say nothing mid-turn. It was honoured only on the legacy path; here the setting was read from the config file, validated, and then had no effect on anything.
+    client, _ = make_client(
+        _upstream_that_goes_quiet(1.5),
+        overrides={"upstream_request_timeouts": {"stream_idle": 1}},
+    )
+
+    # Given up on the same way every other mid-stream upstream failure is: the turn ends by raising, rather than by quietly rounding off a stream upstream never finished. What that then looks like to a client is the truncation-reporting question — one contract for all of these, not this guard's to answer on its own.
+    # Only the raise is asserted. What the client keeps of a turn cut off mid-flight is a property of the wire, and this harness discards the body it had already sent once the app raises, so asserting it here would be asserting the harness.
+    with pytest.raises(StreamIdleTimeoutError):
+        _delivered(client)
+
+
+def test_the_bundled_default_leaves_a_quiet_upstream_alone() -> None:
+    # 0 is the bundled default and it disables the guard. The frozen invariant is never to false-kill legitimate thinking, so a turn that goes quiet for longer than any timeout would have allowed must still be delivered whole when nobody asked for one.
+    client, _ = make_client(_upstream_that_goes_quiet(1.5))
+
+    delivered = _delivered(client)
+
+    assert b'"text":"first"' in delivered
+    assert b"message_stop" in delivered
+
+
+def test_a_per_model_override_decides_the_idle_timeout() -> None:
+    # The overrides map is a second wire, and a wire nothing pulls on is a wire nobody notices is attached to the wrong terminal — which is how the sibling map came to be read as the attempt deadline's. The scalar here says "never give up"; only the override can produce this outcome.
+    client, _ = make_client(
+        _upstream_that_goes_quiet(1.5),
+        overrides={
+            "upstream_request_timeouts": {"stream_idle": 0, "stream_idle_overrides": {"claude-model": 1}}
+        },
+    )
+
+    with pytest.raises(StreamIdleTimeoutError):
+        _delivered(client)

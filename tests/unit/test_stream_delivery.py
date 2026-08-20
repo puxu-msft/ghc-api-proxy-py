@@ -7,15 +7,22 @@ Nothing before the first whole block, each block as a closed group, keep-alives 
 import asyncio
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import aclosing, suppress
+from types import SimpleNamespace
 from typing import Any, cast
 
 import orjson
 import pytest
 
 from app.config.schema import ContentBlockStartCompat
+from app.observability.active_requests import ActiveRequestRegistry
 from app.pipeline.delivery.assembler import AnthropicAssembler, ResponsesAssembler
 from app.pipeline.delivery.blocks import BlockBuffer
 from app.pipeline.delivery.stream import PING_FRAME, StreamSettings, stream_delivery
+from app.server.pipeline_app import (
+    _counted_upstream,  # pyright: ignore[reportPrivateUsage]
+    _Trace,  # pyright: ignore[reportPrivateUsage]
+)
+from app.streaming.idle_timeout import with_idle_timeout
 
 
 def frame(event: str, data: dict[str, Any]) -> bytes:
@@ -533,6 +540,8 @@ async def test_a_pull_in_flight_does_not_outlive_the_delivery() -> None:
 
     pump = asyncio.create_task(_drain(delivery))
     await asyncio.wait_for(reached.wait(), 2)
+    # This one fails by not finishing: settling the pull is what lets the close proceed, so a change that stops settling it leaves the close waiting on an upstream that never speaks again, and the run hangs rather than this test failing.
+    # Left unbounded on purpose, having measured that bounding it does nothing: `finish_stream_cleanup` defers a cancellation it receives and keeps waiting for the cleanup it owns, which is what makes cleanup survive a second cancel — and also what makes an outer `asyncio.timeout` unable to preempt it.
     pump.cancel()
     with suppress(asyncio.CancelledError):
         await pump
@@ -546,3 +555,53 @@ async def _drain(delivery: AsyncGenerator[bytes]) -> None:
     async for _ in delivery:
         pass
 
+
+@pytest.mark.asyncio
+async def test_a_client_leaving_while_the_idle_guard_is_armed_leaves_nothing_behind() -> None:
+    # The guard holds an anyio cancel scope open across the `anext` it is timing, and that `anext` runs in a task this delivery creates fresh for every pull. A client leaving cancels exactly that task, mid-scope — an anyio scope entered in one task and unwound in another is the shape that strands one, so the composition is worth pinning rather than reasoning about.
+    # Armed well beyond the test's own lifetime: what is under test is the cancellation, not the firing.
+    closed: list[bool] = []
+    reached = asyncio.Event()
+    delivery = _delivery(with_idle_timeout(_hanging_upstream(closed, reached), timeout_seconds=30))
+    before = asyncio.all_tasks()
+
+    pump = asyncio.create_task(_drain(delivery))
+    await asyncio.wait_for(reached.wait(), 2)
+    pump.cancel()
+    with suppress(asyncio.CancelledError):
+        await pump
+    await delivery.aclose()
+
+    assert closed == [True]
+    assert asyncio.all_tasks() - before - {asyncio.current_task()} == set()
+
+
+@pytest.mark.asyncio
+async def test_the_idle_guard_settles_the_stream_it_was_watching() -> None:
+    # Every layer on this chain releases what it consumes when it is closed, and the guard is now one of them. Composed as production composes it — the byte counter sits between the guard and the delivery — because that is the layer that makes the difference visible at all.
+    # Snapshotted immediately after `aclose()` and with no tick in between: what is under test is that the release is part of the close rather than something the collector gets to later.
+    # What this does not pin: the release of a real httpx response. Measured 2026-08-20 — `aiter_raw` closes the response after its loop rather than in a `finally`, so a real upstream is released by generator finalisation whether or not this layer settles it. This test uses a source that does cascade, and so speaks only for this layer's own link.
+    released: list[bool] = []
+
+    async def source() -> AsyncIterator[bytes]:
+        try:
+            for payload in anthropic_stream("one"):
+                yield payload
+            await asyncio.Event().wait()
+        finally:
+            released.append(True)
+
+    trace = _Trace(method="POST", path="/v1/messages")
+    counted = _counted_upstream(
+        with_idle_timeout(source(), timeout_seconds=30),
+        cast(Any, SimpleNamespace(active_requests=ActiveRequestRegistry())),
+        "req",
+        trace,
+    )
+    delivery = _delivery(counted)
+
+    async for _ in delivery:
+        break
+    await delivery.aclose()
+
+    assert released == [True]

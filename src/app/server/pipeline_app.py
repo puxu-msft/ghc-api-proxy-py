@@ -44,10 +44,12 @@ from app.server.handler import (
     handle_count_tokens,
     reply_summary,
     response_payload,
+    stream_idle_seconds,
     stream_settings,
 )
 from app.server.inbound import ROUTES, InboundRequestError, build_context, route_for_path
 from app.server.ops_routes import router as ops_router
+from app.streaming.idle_timeout import with_idle_timeout
 
 CHAIN_STATE_KEY = "pipeline_chain"
 
@@ -281,7 +283,16 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
         return _AccountedStreamingResponse(
             _tracked_delivery(
                 stream_delivery(
-                    _counted_upstream(response.aiter_bytes(), chain, trace.request_id, trace),
+                    # The idle guard goes on the upstream bytes themselves, not on the events read out of them: upstream keeps a quiet connection alive with SSE comments, and those carry no event. Measuring what the parser yields would start the clock on a stream that is visibly still there, which is the false-kill the frozen invariant exists to prevent.
+                    _counted_upstream(
+                        with_idle_timeout(
+                            response.aiter_bytes(),
+                            timeout_seconds=stream_idle_seconds(chain, context.resolved_model),
+                        ),
+                        chain,
+                        trace.request_id,
+                        trace,
+                    ),
                     assembler,
                     buffer=delivery_buffer(chain),
                     settings=stream_settings(chain),
