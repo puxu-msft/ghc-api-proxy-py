@@ -146,6 +146,7 @@ class _Trace:
     thinking: tuple[str, ...] = ()
     # Which counter answered a token-counting request, and nothing at all on any other route. See `format_counter`.
     counter: str = ""
+    counter_reason: str = ""
     dialect: ReplyDialect = ReplyDialect.ANTHROPIC
     upstream_conn: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
 
@@ -191,6 +192,7 @@ def _log_completion(chain: Chain, trace: _Trace, status_code: int | None, *, byt
         tools=trace.tools,
         thinking=trace.thinking,
         counter=trace.counter,
+        counter_reason=trace.counter_reason,
         dialect=trace.dialect,
         attempts=trace.attempts,
         detail=trace.detail,
@@ -303,6 +305,10 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
         provider = context.extras.get("count_tokens_provider")
         if isinstance(provider, str):
             trace.counter = provider
+        # Why the estimator answered, when that is worth saying. Decided in `handle_count_tokens`, which is where the facts that separate a configured estimate from a failed upstream are; this end only carries it.
+        reason = context.extras.get("count_tokens_reason")
+        if isinstance(reason, str):
+            trace.counter_reason = reason
         # The upstream leg, present only when upstream responded to the count — which is not the same as answering it, since a reply carrying no usable number is handed to the estimator with the leg already flown. A refusal never gets this far, the client raises it as a pipeline error, and the local estimator never leaves the process; showing a leg for either would claim a request that was never sent.
         upstream_protocol = context.extras.get("count_tokens_upstream_protocol")
         if isinstance(upstream_protocol, str):

@@ -90,7 +90,7 @@ class RequestLine:
 
     `bytes_in` / `bytes_out` are wire bytes in each direction; `usage` is the upstream's own token accounting, keyed as Anthropic reports it. The two are separate facts and a request can have either without the other — a rejected body has bytes and no tokens, a cached hit has tokens and almost no bytes.
 
-    `counter` is set only on a token-counting request, and names the counter that answered it. See `format_counter`.
+    `counter` is set only on a token-counting request, and names the counter that produced the number; `counter_reason` says why it was the estimator, when there is something to say. See `format_counter`.
     """
 
     method: str
@@ -115,6 +115,7 @@ class RequestLine:
     tools: tuple[str, ...] = ()
     thinking: tuple[str, ...] = ()
     counter: str = ""
+    counter_reason: str = ""
     # Whose words to use for the reasoning and tool-call fields. See `ReplyDialect`; it travels with the reply summary the line is built from.
     dialect: ReplyDialect = ReplyDialect.ANTHROPIC
     attempts: int = 1
@@ -169,18 +170,23 @@ def format_pending_tools(tools: tuple[str, ...], *, color: bool = False) -> str:
     return f"called({_painted_tools(named, color=color)})" if named else ""
 
 
-def format_counter(counter: str, *, color: bool = False) -> str:
-    """`count(ghc)` / `count(local)` — this request was a token count, and which counter answered it.
+def format_counter(counter: str, reason: str = "", *, color: bool = False) -> str:
+    """`count(ghc)` / `count(local:ghc-failed)` — which counter produced the number on this line, and where the estimate came from when it is one.
 
-    A count is the one 200 with no reply at all: nothing comes back to measure, no blocks complete, no reason ends the turn, and on a successful line the route has already collapsed into `<inbound-format>/<model>`. What was left read as `anthropic-messages/claude-opus-5 1.2s ↑19.7k`. A delivered turn is not literally that line — it would still carry its own byte fields — but every one of those absences is also what a turn looks like when its reply goes missing, and absence is the one thing a reader cannot tell apart: nothing on the line says which of the two it is looking at, on the endpoint clients call most often.
+    A count is the one 200 with no reply at all: nothing comes back to measure, no blocks complete, no reason ends the turn, and on a successful line the route has already collapsed into `<inbound-format>/<model>`. What was left read as `anthropic-messages/claude-opus-5 1.2s ↑19.7k`. A delivered turn is not literally that line — it would still carry its own byte fields — but every one of those absences is also what a turn looks like when its reply goes missing, and absence is the one thing a reader cannot tell apart.
 
     Which counter answered is the other half, and it is the same distinction the reply body already makes by marking an estimate `estimated`: `ghc` is upstream's own measurement, `local` is this proxy's calibrated estimate. On the line they are the same bare number, so without the name there is no reading of `↑19.7k` that says whether anything was measured.
 
-    The counter is dim and the word is not, because the field's first job is to say *what kind of request this was*; which counter served it is the detail behind that. It occupies the slot a stop reason would, being this line's ending.
+    The reason exists because `local` alone was three outcomes wearing one word, two of which are incidents: a route with no upstream counter estimates every time and is working as configured (`no-counter`), while an upstream that was asked and could not answer is something to look at (`ghc-failed`). That is this line's own defect one level up — the failure was never absent from it, it was wearing the ordinary case's clothes. Ruled 2026-08-20 by the user, who chose the reason over a `ghc→local` arrow. Written only when there is something to say — a plain `count(local)` remains, and means the operator configured this proxy to estimate rather than ask.
+
+    Not coloured, ruled with the spelling. A count that always estimates is the steady state on a translated route, so painting the field would fire on the ordinary case daily and stop meaning anything; the degraded reading is carried by the word instead, which also survives a log file.
+
+    The counter and its reason are dim and the word is not, because the field's first job is to say which counter served this request; why is the detail behind that. It occupies the slot a stop reason would, being this line's ending.
     """
     if not counter:
         return ""
-    return f"count({paint(counter, DIM, color=color)})"
+    named = f"{counter}:{reason}" if reason else counter
+    return f"count({paint(named, DIM, color=color)})"
 
 
 def _painted_tools(names: list[str], *, color: bool) -> str:
@@ -332,7 +338,7 @@ def format_completion_line(line: RequestLine, *, unicode: bool = True, color: bo
         parts.append(paint(f"request_id={line.request_id}", DIM, color=color))
     if line.counter:
         # A count has no reply and therefore no stop reason, so this is its ending. The order is for the reader rather than for the state machine: `counter` is set only on the count branch, which returns before a reply is ever aggregated, so no reachable request carries both and swapping these two arms would change nothing that runs.
-        parts.append(format_counter(line.counter, color=color))
+        parts.append(format_counter(line.counter, line.counter_reason, color=color))
     elif line.stop_reason:
         parts.append(format_stop_reason(line.stop_reason, line.tools, line.dialect, color=color))
     elif line.tools:

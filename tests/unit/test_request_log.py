@@ -91,6 +91,30 @@ def test_a_token_count_is_not_a_turn_that_lost_its_reply() -> None:
     assert "count(" not in format_completion_line(replace(counting, counter=""))
 
 
+def test_an_estimate_says_why_it_is_one() -> None:
+    """`local` alone was three outcomes wearing one word, two of them incidents.
+
+    A route with no upstream counter estimates every time and is working as configured; an upstream that was asked and could not answer is something to look at; and an operator who left `ghc` out of `providers` chose the estimate. All three produced the same `count(local)`, which is this line's own defect one level up from the one the counter was added to fix — the failure was not absent from the line, it was wearing the ordinary case's clothes.
+
+    Ruled 2026-08-20 by the user: the reason goes in the parentheses, and the field stays uncoloured because the ordinary case is the common one and a colour that fires daily stops being read.
+    """
+    estimating = RequestLine(
+        method="POST",
+        path="/v1/messages/count_tokens",
+        inbound_format="anthropic-messages",
+        client_protocol="H1",
+        model="claude-opus-5",
+        status_code=200,
+        duration_s=1.2,
+        usage={"input_tokens": 19_700},
+        counter="local",
+    )
+    assert format_completion_line(replace(estimating, counter_reason="ghc-failed")).endswith("count(local:ghc-failed)")
+    assert format_completion_line(replace(estimating, counter_reason="no-counter")).endswith("count(local:no-counter)")
+    # Nothing to say is said with nothing: the operator configured this proxy to estimate, and no upstream was involved to have a verdict about.
+    assert format_completion_line(estimating).endswith("count(local)")
+
+
 def test_retries_are_reported_once_the_count_is_final() -> None:
     line = format_completion_line(
         RequestLine(method="POST", path="/p", inbound_format="f", model="m", status_code=200, duration_s=1.0, attempts=3)

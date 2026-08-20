@@ -110,6 +110,7 @@ def test_a_successful_request_writes_one_complete_structured_record(tmp_path: Pa
         "tools",
         "thinking",
         "counter",
+        "counter_reason",
         "dialect",
         "attempts",
         "detail",
@@ -141,6 +142,7 @@ def test_a_successful_request_writes_one_complete_structured_record(tmp_path: Pa
         "thinking": ["enc"],
         # Empty on a delivered turn: nothing counted it, it was answered.
         "counter": "",
+        "counter_reason": "",
         "dialect": "responses",
         "attempts": 2,
         "detail": "",
