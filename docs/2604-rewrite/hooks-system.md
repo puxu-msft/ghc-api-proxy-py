@@ -97,7 +97,7 @@ hooks:
 | id | 事件 | 作用 |
 |---|---|---|
 | `builtin:server-tool-capability` | `attempt.prepare` | 路由到 Anthropic Messages 端点时，剥掉上游已实测拒绝的 server-tool 声明、清理因此悬空的 `tool_choice`，并把历史里残留的 server-tool blocks 摊平成文本。见 [tool-use.md](tool-use.md) |
-| `builtin:blank-text-blocks` | `attempt.prepare`（在上一条之后） | 剥掉上游拒收的空／纯空白文本块。排在后面是因为上一条会把 server-tool 轮次摊平成文本，可能产出这一条要删的东西 |
+| `builtin:blank-text-blocks` | `attempt.prepare`（注册在上一条之后） | 路由到 Anthropic Messages 端点时，剥掉上游拒收的空／纯空白文本块。两者之间没有数据依赖：上一条写出的每个文本块都带 `[family]` 前缀，永远不空，触发不了这一条。末位是约定——只做删除的 pass 放在改写者之后，看到的才是真正会发出的形态 |
 
 顺序表与「为什么它排在那里」写在 `src/app/pipeline/subscribers/__init__.py` 的模块文档里，锁定它的测试是 `tests/unit/test_builtin_subscribers.py`。
 

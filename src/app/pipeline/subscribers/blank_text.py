@@ -4,7 +4,7 @@ A text block whose text is empty or only whitespace says nothing, and Copilot's 
 
 Where the block came from is settled and is not this module's problem any more: `stream.py` used to synthesise a placeholder text block when upstream had produced nothing for 240 seconds, the client stored it as part of that turn, and the turn came back. That producer is gone. This is the other half — the guard that catches such a block whoever produced it, including a client that arrives carrying one from an older session. One exception, and it is deliberate: a turn whose content is *nothing but* blank blocks is sent as it arrived, for the reason given at the bottom of this file.
 
-**Scoped to the Anthropic leg, and measured rather than assumed.** `exp/260820-empty-text-probe/` asked the live upstream directly: `/responses` answers 200 to an empty `input_text`, to a whitespace-only one, and to an assistant turn whose `output_text` is empty, while `/v1/messages` answers 400 to the empty block in the same run with the same credentials. So the Responses leg tolerates the shape and is left alone — this runs at `attempt.prepare` and reads the routed endpoint, which is the last point at which the question "who is going to read this" has an answer.
+**Scoped to the Anthropic leg, and measured rather than assumed.** `exp/260820-empty-text-probe/` asked the live upstream directly: on `gpt-5.5`, non-streaming, `/responses` answers 200 to an empty `input_text`, to a whitespace-only one, and to an assistant turn whose `output_text` is empty, while `/v1/messages` answers 400 to the empty block in the same run with the same credentials. So the Responses leg tolerates the shape and is left alone — this runs at `attempt.prepare` and reads the routed endpoint, which is the last point at which the question "who is going to read this" has an answer. The qualifiers matter: that same run shows two endpoints on one host disagreeing about a body, so "same endpoint, same verdict" is an extrapolation for other models rather than something the probe established. The exposure is small — no Claude model on this upstream advertises `/responses` at all.
 
 **Why not earlier.** An earlier revision did this before translation, where the body is still Anthropic-shaped for both legs. That put the rewrite on the primary path to satisfy a rule only the other path has, which the probe above showed to be unnecessary. Format repair belongs where the format is going, not where it happened to arrive.
 """
@@ -84,7 +84,7 @@ async def drop_blank_text_blocks(context: RequestContext) -> None:
                 payload["system"] = kept
                 logger.debug("dropped %d blank block(s) from system", len(system) - len(kept))
             else:
-                # A system prompt made of nothing but blank blocks says exactly as much as no system prompt, and the second spelling is one upstream takes. `[]` is neither.
+                # A system prompt made of nothing but blank blocks says exactly as much as no system prompt, and a body with no `system` at all is unremarkable to this upstream. `system: []` is a third thing neither of us has asked it about, so it is not the one to send.
                 del payload["system"]
                 logger.debug("system carried nothing but blank blocks; the field is gone rather than empty")
 
@@ -106,7 +106,7 @@ async def drop_blank_text_blocks(context: RequestContext) -> None:
             logger.debug("dropped %d blank block(s) from a message", len(content) - len(kept))
             entry["content"] = kept
             continue
-        # Unlike `system`, no rewrite of a turn is known to be both valid and to mean the same. Emptying it to `content: []` is certainly refused, so that one is out on its own. Dropping the turn is not obviously safe rather than known to be unsafe: it moves every later turn's position and can put two same-role turns next to each other, and neither consequence has been measured against this upstream. With nothing measured to replace it, the input travels unchanged and upstream names what is wrong with it, which is at least the client's own error rather than one this chain invented.
+        # Unlike `system`, no rewrite of a turn is known to be both valid and to mean the same. Emptying it to `content: []` is refused according to the reference implementation, which asserts it in two comments — second-hand, not measured here, and the probe below never asked. Dropping the turn is not obviously safe rather than known to be unsafe: it moves every later turn's position and can put two same-role turns next to each other, and neither consequence has been measured against this upstream either. With nothing measured to replace it, the input travels unchanged and upstream names what is wrong with it, which is at least the client's own error rather than one this chain invented.
         logger.warning(
             "a message carries nothing but blank text blocks; it is being sent unchanged, because no rewrite of a turn is known to be both accepted and to mean the same thing",
         )

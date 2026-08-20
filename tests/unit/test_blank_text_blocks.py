@@ -38,6 +38,7 @@ def _content(payload: dict[str, Any], index: int = 0) -> list[dict[str, Any]]:
 _THINKING_A: dict[str, Any] = {"type": "thinking", "thinking": "first", "signature": "sig-a"}
 _THINKING_B: dict[str, Any] = {"type": "thinking", "thinking": "second", "signature": "sig-b"}
 _BLANK: dict[str, Any] = {"type": "text", "text": ""}
+_SEPARATOR: dict[str, Any] = {"type": "text", "text": SYNTHETIC_SEPARATOR}
 
 
 async def test_a_blank_text_block_beside_real_content_is_dropped() -> None:
@@ -86,7 +87,7 @@ async def test_whitespace_only_text_counts_as_blank() -> None:
 async def test_a_message_of_nothing_but_blank_text_is_left_alone() -> None:
     """The one place the rule stops, and why it stops there rather than everywhere.
 
-    A turn is not a field that can be dropped for saying nothing: the rest of the history is paired against it by position, and a `tool_result` names a `tool_use` in the turn before. `content: []` is refused as surely as the blank block was, so emptying it would trade one rejection for another while also inventing a body the client never sent. It goes out as it arrived and upstream names what is actually wrong with it.
+    No rewrite of a turn is known to be both accepted and to mean the same. `content: []` is refused according to the reference implementation, which asserts it twice — second-hand, never measured here. Dropping the turn is not obviously safe rather than known to be unsafe: it moves every later turn's position and can put two same-role turns together, neither of which has been measured against this upstream either. With nothing measured to put in its place, the input travels unchanged and the client gets its own error rather than one this chain invented.
 
     The reference implementation has this exact hole — it filters without a surviving-block check and sends `content: []` — which is why this is pinned rather than left to reading.
     """
@@ -138,9 +139,9 @@ async def test_the_system_prompt_is_held_to_the_same_rule() -> None:
 
 
 async def test_a_system_prompt_of_nothing_loses_the_field_rather_than_emptying_it() -> None:
-    """Saying nothing and having nothing to say are the same thing here, and only one is a body upstream takes.
+    """Saying nothing and having nothing to say are the same thing here, and only one of the three spellings is one this upstream is known to be fine with.
 
-    `system: []` is refused as surely as the blank block was, so emptying the list would trade one rejection for another. Dropping the field is the spelling that means the same and is accepted — which is exactly why a turn cannot be treated this way.
+    A body with no `system` at all is unremarkable to it. `system: []` is a third thing nobody has asked it about, so emptying the list would swap a known refusal for an unknown. Dropping the field means the same and stays on measured ground — which is exactly why a turn cannot be treated this way: there is no equivalent spelling for "a turn that says nothing".
     """
     payload = await _run(
         {
@@ -210,29 +211,26 @@ async def test_a_body_bound_for_responses_is_not_touched() -> None:
     [
         (
             [_THINKING_A, _BLANK, _BLANK, _THINKING_B],
-            [_THINKING_A, {"type": "text", "text": SYNTHETIC_SEPARATOR}, _THINKING_B],
+            [_THINKING_A, _SEPARATOR, _THINKING_B],
         ),
         ([_BLANK, _THINKING_A], [_THINKING_A]),
         ([_THINKING_A, _BLANK], [_THINKING_A]),
-        ([_BLANK, _THINKING_A, _BLANK, _THINKING_B, _BLANK], None),
+        (
+            [_BLANK, _THINKING_A, _BLANK, _THINKING_B, _BLANK],
+            [_THINKING_A, _SEPARATOR, _THINKING_B],
+        ),
     ],
     ids=["run-of-two", "leading", "trailing", "leading-middle-trailing"],
 )
 async def test_the_separator_is_spent_only_where_one_is_needed(
-    content: list[dict[str, Any]], expected: list[dict[str, Any]] | None
+    content: list[dict[str, Any]], expected: list[dict[str, Any]]
 ) -> None:
     """One separator where two thinking blocks would otherwise meet, and none anywhere else.
 
-    A run of blanks must not turn into a run of separators, and a blank at either end has nothing to separate — it is simply gone. These are the shapes the lookahead exists for; without them a version that emitted one separator per blank, or one for a trailing blank, would still pass every test above.
+    A run of blanks must not turn into a run of separators, and a blank at either end has nothing to separate — it is simply gone. These are the shapes the lookahead exists for; without it a version that emitted one separator per blank, or one for a trailing blank, would still pass every test above.
     """
     payload = await _run({"messages": [{"role": "assistant", "content": content}]})
 
-    if expected is None:
-        expected = [
-            _THINKING_A,
-            {"type": "text", "text": SYNTHETIC_SEPARATOR},
-            _THINKING_B,
-        ]
     assert _content(payload) == expected
 
 
