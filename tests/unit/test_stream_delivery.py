@@ -155,14 +155,17 @@ async def test_a_late_first_block_gets_a_message_start_and_no_placeholder_conten
 
 
 @pytest.mark.asyncio
-async def test_a_synthesized_start_that_never_gets_a_block_still_ends_the_message() -> None:
+async def test_a_synthesized_start_that_never_gets_a_block_ends_in_an_error() -> None:
     """The degenerate line: the deadline fires and upstream then produces nothing at all.
 
-    Pinned because it is the one shape this change alters that has no other witness. The client is left a message with no content blocks, where before it was left one that said nothing — and the terminal frames still arrive either way, so the stream closes rather than hanging. With the deadline disabled the same silence produces no bytes at all, which is what makes "no content blocks" an existing shape rather than one introduced here.
+    Pinned because it is the one shape this change alters that has no other witness. The client is left a message with no content blocks, where before it was left one that said nothing. With the deadline disabled the same silence produces no bytes at all, which is what makes "no content blocks" an existing shape rather than one introduced here.
+
+    The stream still closes rather than hanging — that was always this test's point, and an `error` event closes it just as a terminal does. What changed is which ending: upstream never sent a terminal event, so under STR-04 this is truncation, and the synthesized `message_start` must not be followed by frames claiming the turn finished. The earlier expectation here (`message_delta` + `message_stop`) encoded that claim.
     """
     chunks = await collect([], initial_delay=1.1, synthesized_response_headers_after_sec=1)
 
-    assert events_of(chunks) == ["message_start", "message_delta", "message_stop"]
+    assert events_of(chunks) == ["message_start", "error"]
+    assert b"incomplete_responses_stream" in b"".join(chunks)
 
     assert await collect([], initial_delay=1.1) == []
 
@@ -269,8 +272,6 @@ def test_a_keep_alive_wait_leaves_no_asyncio_noise() -> None:
     assert reported == []
 
 
-
-
 @pytest.mark.asyncio
 async def test_an_empty_upstream_stream_produces_nothing() -> None:
     assert await collect([]) == []
@@ -344,18 +345,19 @@ async def test_delivering_a_truncated_stream_does_not_make_its_record_look_finis
 
 
 @pytest.mark.asyncio
-async def test_a_truncated_stream_is_still_flushed_as_a_clean_ending_downstream() -> None:
-    """Pins today's behaviour on a path the frozen Spec says is wrong, so the gap cannot go quiet.
+async def test_a_truncated_stream_ends_in_an_error_event_and_never_claims_success() -> None:
+    """STR-04: an EOF with no legal terminal event is truncation, and the client must be told so.
 
-    `docs/agents/anthropic-responses-bridge/spec.md` is FINALIZED: an EOF with no legal terminal event is truncation, not success. `acceptance.md` STR-04 requires those paths to produce a determinate Anthropic error and a failed History, and names "calling the normal flush on a clean EOF" — which is what happens below — as a defect its injection control must go red on. The legacy chain already implements the rule (`app/delivery/responses_anthropic_stream.py`), so this is a regression in this chain rather than an unstarted feature, and nothing here endorses it.
+    This test replaces one that pinned the opposite — the chain used to flush `message_delta{stop_reason: "end_turn"}` + `message_stop` here, dressing a truncated turn as a clean one and storing it in the client's history as a complete answer. That predecessor said in its own docstring that it existed to be reversed rather than preserved; this is the reversal.
 
-    **This test is meant to be reversed, not preserved.** Its one job until then is to stop the `end_turn` synthesis being quietly deleted on the way past — sending `stop_reason: ""` downstream would be worse than either the current behaviour or the specified one.
+    Both halves are asserted, because either alone lets the regression back. Emitting the error event while still flushing the terminal would satisfy the first half and tell the client two contradictory things; the frozen Spec rules the two mutually exclusive — 不得再发 `message_stop` 冒充成功.
     """
     body = await _truncated_delivery(AnthropicAssembler())
 
-    # Known non-conforming, per STR-04 above: the client is told the turn ended cleanly.
-    assert '"stop_reason":"end_turn"' in body
-    assert "message_stop" in body
+    assert '"type":"error"' in body
+    assert "incomplete_responses_stream" in body
+    assert '"stop_reason":"end_turn"' not in body
+    assert "message_stop" not in body
 
 
 @pytest.mark.asyncio

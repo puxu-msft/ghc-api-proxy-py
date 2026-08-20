@@ -12,7 +12,13 @@ from contextlib import aclosing
 from dataclasses import dataclass
 
 from app.config.schema import ContentBlockStartCompat
-from app.pipeline.delivery.anthropic_sse import block_frames, message_start, terminal_frames
+from app.errors import WIRE_TYPES, ErrorCategory
+from app.pipeline.delivery.anthropic_sse import (
+    block_frames,
+    error_frame,
+    message_start,
+    terminal_frames,
+)
 from app.pipeline.delivery.assembler import BlockAssembler
 from app.pipeline.delivery.blocks import BlockBuffer, CompletedBlock, DeliverySession
 from app.pipeline.delivery.sse_source import SseEvent, read_events
@@ -168,18 +174,26 @@ async def stream_delivery(
         for frame in block_frames(block, signature_compat=settings.signature_compat):
             yield frame.encode()
 
-    if started:
-        terminal = assembler.terminal
-        # KNOWN SPEC VIOLATION, and a regression rather than unstarted work — do not read the `or "end_turn"` below as a decision.
-        # `docs/agents/anthropic-responses-bridge/spec.md` is FINALIZED. Its downstream SSE envelope contract rules that a terminal error already past committed headers uses an Anthropic SSE `error` event "且不得再发 `message_stop` 冒充成功", and its upstream sections rule for both legs that an EOF with no legal terminal event is truncation, not success. `acceptance.md` STR-04 requires those paths to produce a determinate Anthropic error and a failed History, and names "calling the normal flush on a clean EOF" — this line — as a defect its injection control must go red on.
-        # The legacy chain already does it: `app/delivery/responses_anthropic_stream.py`, on `not frontier.terminal_accepted`, raises `incomplete_responses_stream` and renders an SSE error. This chain does not, so what goes out is `message_delta{stop_reason: "end_turn"}` + `message_stop` — a truncated turn dressed as a clean one and stored in the client's history as a complete answer. See `docs/agents/anthropic-responses-bridge/implementation.md`.
-        # Written as an explicit `or` rather than left to ride on a field default, which is the shape that hid it: `Terminal.stop_reason` used to default to `"end_turn"`, so nothing here looked like a claim at all. The synthesis is now visible where it happens, and `terminal.seen` stays false so the request's console line reports the truncation — currently the only place the truth reaches anybody.
-        # One byte-level difference from the default it replaced, and an intentional one: an upstream that sends an explicit empty `stop_reason` used to have that empty string forwarded, and now gets `end_turn` too. Neither is what the client is owed, and `""` is not a stop reason any Anthropic consumer accepts.
-        for frame in terminal_frames(
-            stop_reason=terminal.stop_reason or "end_turn",
-            usage=terminal.usage or None,
-        ):
-            yield frame.encode()
+    terminal = assembler.terminal
+    if not started:
+        # Nothing was ever committed downstream, so there is no started message to correct — the same case the legacy chain leaves to its caller (`render_error` there runs only `if session.frontier.message_start_accepted`). An upstream that produced no block and no terminal still leaves the client a 200 with an empty body; that is pre-existing behaviour on a path this slice does not touch, and widening it is a separate question from STR-04's flush.
+        return
+    if not terminal.seen:
+        # STR-04: an EOF with no legal terminal event is truncation, not success.
+        # Ported from the legacy chain rather than redesigned, as `implementation.md` directs: `app/delivery/responses_anthropic_stream.py`, on `not frontier.terminal_accepted`, raises `incomplete_responses_stream` and renders an SSE error. Same code, same wire shape, same message, same gate on the message having started — a client that already learned to read one of these does not have to learn a second.
+        # `message_stop` deliberately does not follow. The frozen Spec rules these two mutually exclusive: 不得再发 `message_stop` 冒充成功.
+        yield error_frame(
+            error_type=WIRE_TYPES[ErrorCategory.UPSTREAM],
+            message="Responses stream ended before a successful terminal event",
+            code="incomplete_responses_stream",
+        ).encode()
+        return
+    # `or "end_turn"` is still a synthesis, and still visible where it happens — but it now only ever runs on a stream that really did see a terminal event, so it fills in a field upstream left empty rather than inventing an ending upstream never reached. An upstream that sends an explicit empty `stop_reason` gets `end_turn`, because `""` is not a stop reason any Anthropic consumer accepts.
+    for frame in terminal_frames(
+        stop_reason=terminal.stop_reason or "end_turn",
+        usage=terminal.usage or None,
+    ):
+        yield frame.encode()
 
 
 def _commit(
