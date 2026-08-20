@@ -57,11 +57,11 @@ def normalize_context_management(payload: dict[str, Any]) -> None:
 
 
 def _is_blank_text(block: Any) -> bool:
-    """Whether upstream would reject this block for carrying no text.
+    """Whether this block carries no text at all.
 
-    `.strip()` rather than `== ""` because upstream rejects whitespace separately and says so in its own words: alongside `text content blocks must be non-empty` it answers `text content blocks must contain non-whitespace text`. One predicate covers both, and it is the same one `filter_empty_text_blocks` and the reference implementation already use.
+    That is the whole criterion, and it is a property of the block rather than of whoever receives it: a text block whose text is empty or only whitespace says nothing, so nothing downstream can be reading it. `.strip()` rather than `== ""` because whitespace is not text either — corroborated by the Anthropic upstream, which refuses the two separately and in its own words, `text content blocks must be non-empty` alongside `text content blocks must contain non-whitespace text`. It is the same predicate `filter_empty_text_blocks` and the reference implementation already use.
 
-    A missing or null `text` counts as blank. A `text` that is not a string does not: this fixup exists to drop blocks that carry nothing, and quietly deleting a malformed one would hide a client bug behind a rewrite instead of letting upstream name it.
+    A missing or null `text` counts as blank. A `text` that is not a string does not: this fixup exists to drop blocks that carry nothing, and quietly deleting a malformed one would hide a client bug behind a rewrite instead of letting the receiver name it.
     """
     if not isinstance(block, dict):
         return False
@@ -74,46 +74,40 @@ def _is_blank_text(block: Any) -> bool:
     return isinstance(text, str) and not text.strip()
 
 
-def drop_blank_text(content: list[Any], *, field: str) -> list[Any]:
-    """Remove text blocks upstream will reject, unless they are all this field has.
+def drop_blank_text(content: list[Any]) -> list[Any]:
+    """Every block except the ones that carry no text.
 
-    A blank text block carries nothing, so dropping it cannot change what the model is being told — which is what makes this safe to do without asking. Leaving it in costs the whole request: upstream rejects the entire body over one such block, and the client's next turn replays the same history and is rejected again.
+    Unconditional, and with nothing to configure: removing a block that says nothing cannot change what the model is being told, so there is no case in which keeping it is the better answer. Keeping one can cost the whole request, which is how this was found.
 
-    The all-blank case is deliberately left alone. Emptying the list to `[]` trades one rejection for another, and the alternatives — deleting the message, or inventing filler text for it — either break the user/assistant sequence the rest of the history is paired against or put words in someone's mouth. Failing exactly as before is the honest outcome, so it is logged rather than patched.
-
-    `field` names where this ran, because the same rule covers `messages` and `system` and a log line that guessed would send a reader to the wrong half of the body.
+    Returns the argument itself when nothing matched, so an untouched body stays the object it arrived as and a caller can tell "nothing to do" from "everything went" by identity. Deciding what an empty result means is the caller's, because the answer differs by field — see `fix_anthropic_request` — which is also why nothing is logged here: at this point it is not yet known whether the result will be used.
     """
     kept = [block for block in content if not _is_blank_text(block)]
-    if len(kept) == len(content):
-        return content
-    if not kept:
-        logger.warning(
-            "every block in %s is blank text; upstream will reject this request and there is no rewrite that preserves its meaning",
-            field,
-        )
-        return content
-    logger.debug("dropped %d blank text block(s) from %s that upstream would have rejected", len(content) - len(kept), field)
-    return kept
+    return content if len(kept) == len(content) else kept
 
 
-def fix_anthropic_request(
-    payload: dict[str, Any], config: FixAnthropicRequestHook, *, upstream_is_anthropic: bool
-) -> None:
+def fix_anthropic_request(payload: dict[str, Any], config: FixAnthropicRequestHook) -> None:
     """Apply the configured request fixups in place.
 
     In place because the caller owns the payload and the next step reads it from the same context;
     returning a copy would leave two versions and no rule about which one travels.
-
-    `upstream_is_anthropic` is required rather than defaulted: it decides whether the fixups that exist only to satisfy the Anthropic upstream's contract run at all, and a default would silently pick one of the two legs for any caller that forgot to say which it was on.
     """
     # Before the messages guard below: this one is about a top-level field, and a body with no
     # `messages` list still carries it.
     normalize_context_management(payload)
 
-    # `system` is rejected on the same grounds as `messages`, and it is a sibling top-level field rather than part of a turn, so it is handled here rather than in the loop. A string `system` has no blocks to drop.
+    # `system` carries the same blocks and is a sibling top-level field rather than part of a turn, so it is handled here rather than in the loop. A string `system` has no blocks to drop.
     system_value = payload.get("system")
-    if upstream_is_anthropic and isinstance(system_value, list):
-        payload["system"] = drop_blank_text(cast(list[Any], system_value), field="system")
+    if isinstance(system_value, list):
+        system = cast(list[Any], system_value)
+        kept = drop_blank_text(system)
+        if kept is not system:
+            if kept:
+                payload["system"] = kept
+                logger.debug("dropped %d blank block(s) from system", len(system) - len(kept))
+            else:
+                # A system prompt made of nothing but blank blocks says exactly as much as no system prompt, and the second spelling is one every upstream takes. `[]` is neither.
+                del payload["system"]
+                logger.debug("system carried nothing but blank blocks; the field is gone rather than empty")
 
     messages_value = payload.get("messages")
     if not isinstance(messages_value, list):
@@ -137,12 +131,16 @@ def fix_anthropic_request(
             # letting it separate two real thinking blocks would spend a separator on a placeholder.
             content, _ = sanitize_empty_thinking(content, "all_empty")
 
-        # Before the layout pass for the same reason, and for a second one: a blank text block sitting between two thinking blocks makes them look non-adjacent, so the layout would leave the pair upstream rejects while the blank block earns its own rejection. Removing it first lets the layout see the adjacency and spend a real separator on it.
-        # Gated on the outbound upstream because only the Anthropic one is known to refuse these. On the Responses leg a blank block is currently carried into the joined `instructions` string and into the text parts, and dropping it there would change bytes this defect never asked us to change.
-        if upstream_is_anthropic:
-            content = cast(
-                list[dict[str, Any]],
-                drop_blank_text(cast(list[Any], content), field="messages"),
+        # Before the layout pass for the same reason, and for a second one: a blank text block sitting between two thinking blocks makes them look non-adjacent, so the layout would leave a pair the Anthropic upstream refuses while the blank block earns its own rejection. Removing it first lets the layout see the adjacency and spend a real separator on it.
+        kept_content = cast(list[dict[str, Any]], drop_blank_text(cast(list[Any], content)))
+        if kept_content:
+            if kept_content is not content:
+                logger.debug("dropped %d blank block(s) from a message", len(content) - len(kept_content))
+            content = kept_content
+        else:
+            # Unlike `system`, a turn cannot be dropped for saying nothing: the rest of the history is paired against it by position, and `tool_result` blocks name a `tool_use` in the turn before. Emptying it to `content: []` would invent a body the client never sent, so the turn goes out as it arrived and whoever receives it gets to say what is wrong with it.
+            logger.warning(
+                "a message carries nothing but blank text blocks; it is being sent unchanged, because dropping the turn or emptying its content would break the sequence the rest of the history is paired against",
             )
 
         # Only assistant turns can hit the adjacency rejection the layout exists to avoid.

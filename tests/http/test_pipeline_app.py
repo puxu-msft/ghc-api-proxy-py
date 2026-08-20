@@ -163,6 +163,52 @@ def test_anthropic_request_for_a_responses_model_is_translated() -> None:
     assert '"messages"' not in sent
 
 
+def test_blank_blocks_are_gone_from_the_body_the_responses_leg_sends() -> None:
+    """The translated leg is held to the same rule, checked where it actually shows: the wire.
+
+    The hook runs before translation, so a unit test of it cannot say what upstream ends up reading. This one does: the blank system block must not survive into the joined `instructions`, and a system of nothing but blank blocks must leave no `instructions` at all rather than an empty one.
+    """
+    client, seen = make_client(lambda _: httpx.Response(200, json={"id": "resp_1"}))
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "gpt-model",
+            "system": [
+                {"type": "text", "text": "be brief"},
+                {"type": "text", "text": "   \n"},
+            ],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": ""},
+                        {"type": "text", "text": "hi"},
+                    ],
+                }
+            ],
+            "max_tokens": 64,
+        },
+    )
+
+    assert response.status_code == 200
+    sent = orjson.loads(seen[-1].read())
+    assert sent["instructions"] == "be brief"
+    assert b"hi" in orjson.dumps(sent["input"])
+    assert b'"text":""' not in orjson.dumps(sent)
+
+    blank_only = make_client(lambda _: httpx.Response(200, json={"id": "resp_1"}))
+    blank_only[0].post(
+        "/v1/messages",
+        json={
+            "model": "gpt-model",
+            "system": [{"type": "text", "text": ""}],
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 64,
+        },
+    )
+    assert "instructions" not in orjson.loads(blank_only[1][-1].read())
+
+
 def test_model_mapping_is_applied_before_the_upstream_call() -> None:
     client, seen = make_client(
         lambda _: httpx.Response(200, json={"id": "msg_1"}),

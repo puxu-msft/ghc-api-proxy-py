@@ -14,10 +14,8 @@ from app.config.schema import FixAnthropicRequestHook
 from app.pipeline.anthropic_request_hook import fix_anthropic_request
 
 
-def _fix(payload: dict[str, Any], *, upstream_is_anthropic: bool = True) -> None:
-    fix_anthropic_request(
-        payload, FixAnthropicRequestHook(), upstream_is_anthropic=upstream_is_anthropic
-    )
+def _fix(payload: dict[str, Any]) -> None:
+    fix_anthropic_request(payload, FixAnthropicRequestHook())
 
 
 def _content(payload: dict[str, Any], index: int = 0) -> list[dict[str, Any]]:
@@ -66,9 +64,11 @@ def test_whitespace_only_text_counts_as_blank() -> None:
 
 
 def test_a_message_of_nothing_but_blank_text_is_left_alone() -> None:
-    """Emptying `content` trades one rejection for another, so the request goes out as it arrived.
+    """The one place the rule stops, and why it stops there rather than everywhere.
 
-    The reference implementation has this exact hole — it filters without a surviving-block check and sends `content: []` — which is why it is pinned here rather than left to reading.
+    A turn is not a field that can be dropped for saying nothing: the rest of the history is paired against it by position, and a `tool_result` names a `tool_use` in the turn before. `content: []` is refused as surely as the blank block was, so emptying it would trade one rejection for another while also inventing a body the client never sent. It goes out as it arrived and upstream names what is actually wrong with it.
+
+    The reference implementation has this exact hole — it filters without a surviving-block check and sends `content: []` — which is why this is pinned rather than left to reading.
     """
     payload: dict[str, Any] = {
         "messages": [{"role": "user", "content": [{"type": "text", "text": ""}]}]
@@ -168,10 +168,12 @@ def test_where_the_predicate_draws_its_line(block: dict[str, Any], dropped: bool
     assert {"type": "text", "text": "anchor"} in survivors
 
 
-def test_the_responses_leg_is_left_alone() -> None:
-    """The primary path keeps the bytes it had.
+def test_nothing_about_the_route_changes_the_answer() -> None:
+    """There is no leg on which a block that says nothing is worth carrying.
 
-    Only the Anthropic upstream is known to refuse a blank block. On the Responses leg it is still carried into the joined `instructions` string and into the text parts, so dropping it here would change the primary path's output over a rule that was never measured against it.
+    An earlier revision gated this on the outbound upstream, on the grounds that only the Anthropic one is known to refuse a blank block. Ruled against on 2026-08-20: the predicate is that the block carries no meaning, not that some receiver complains about it, so there is nothing left to condition on — this hook no longer takes the route as an argument at all.
+
+    What that means on the wire for the translated leg is a separate question, and one this test cannot answer because it stops at the hook. `tests/http/test_pipeline_app.py` carries that half.
     """
     payload: dict[str, Any] = {
         "system": [{"type": "text", "text": "be brief"}, {"type": "text", "text": ""}],
@@ -186,13 +188,25 @@ def test_the_responses_leg_is_left_alone() -> None:
         ],
     }
 
-    _fix(payload, upstream_is_anthropic=False)
+    _fix(payload)
 
-    assert payload["system"] == [
-        {"type": "text", "text": "be brief"},
-        {"type": "text", "text": ""},
-    ]
+    assert payload["system"] == [{"type": "text", "text": "be brief"}]
     assert _content(payload) == [
-        {"type": "text", "text": ""},
-        {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {}},
+        {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {}}
     ]
+
+
+def test_a_system_prompt_of_nothing_loses_the_field_rather_than_emptying_it() -> None:
+    """Saying nothing and having nothing to say are the same thing here, and only one is a body upstream takes.
+
+    `system: []` is refused as surely as the blank block was, so emptying the list would trade one rejection for another. Dropping the field is the spelling that means the same and is accepted — which is exactly why a turn cannot be treated this way; see the test below.
+    """
+    payload: dict[str, Any] = {
+        "system": [{"type": "text", "text": ""}, {"type": "text", "text": "  \n"}],
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+    }
+
+    _fix(payload)
+
+    assert "system" not in payload
+    assert _content(payload) == [{"type": "text", "text": "hi"}]
