@@ -8,7 +8,7 @@ import os
 import sys
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
-from contextlib import ExitStack, asynccontextmanager
+from contextlib import ExitStack, aclosing, asynccontextmanager
 from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any, cast
@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from app.observability.logging import get_logger
 from app.observability.request_log import (
+    LogStatus,
     RequestLine,
     format_arrival_line,
     format_completion_line,
@@ -78,6 +79,8 @@ class _Trace:
     model: str = ""
     attempts: int = 1
     detail: str = ""
+    # What the HTTP status cannot say. A streaming status is fixed the moment the response headers arrive, so everything that happens over the next several minutes — the stream stopping mid-turn, upstream tearing, the client leaving — leaves it at 200. `None` means the status code is the whole story.
+    status_override: LogStatus | None = None
     started: float = 0.0
     bytes_in: int | None = None
     received: int = 0
@@ -126,7 +129,7 @@ def _log_completion(chain: Chain, trace: _Trace, status_code: int | None, *, byt
     )
     get_logger(REQUEST_LOGGER).info(
         format_completion_line(line, unicode=chain.capabilities.unicode, color=chain.capabilities.color),
-        status=status_for(status_code, failed=False),
+        status=status_for(status_code, override=trace.status_override),
     )
 
 
@@ -312,18 +315,46 @@ class _StreamAccounting:
     context: RequestContext | None = None
     assembler: BlockAssembler | None = None
     done: bool = False
+    # How the delivery generator ended. Three endings arrive here indistinguishable — upstream's stream ran out, upstream tore, or delivery was cut short from this side — because none of them saw a terminal event and that is all the assembler records. Naming the wrong one sends whoever reads the line to the wrong half of the system, so each is recorded where it happens instead of guessed here.
+    drained: bool = False
+    failure: BaseException | None = None
 
     def finish(self) -> None:
         if self.done:
             return
         self.done = True
         self.chain.active_requests.remove(self.request_id)
-        # Read at the end because that is when the upstream's terminal event has been seen. `seen` guards against reporting the assembler's defaults — `end_turn` and no usage — for a stream that was cut off before its final frame, which would claim a clean finish for a request that had none.
-        if self.assembler is not None and self.assembler.terminal.seen:
-            if self.context is not None:
-                self.context.reply = self.assembler.terminal
-            self.trace.absorb(self.assembler.terminal)
+        # Read at the end because that is when the upstream's terminal event has either been seen or failed to arrive.
+        if self.assembler is not None:
+            terminal = self.assembler.terminal
+            # Absorbed either way. Every field on the record was put there by an event that actually arrived, so a stream cut off mid-turn still has a true account of the blocks it did produce — which tools were asked for, how much reasoning came back — and withholding those said nothing about the truncation while losing everything else. What upstream never said is now simply absent from the record rather than standing at a default that reads like an answer.
+            self.trace.absorb(terminal)
+            # Deliberately still gated on `seen` while the line above is not, and conservatively rather than undecidedly: `reply is not None` currently means the reply finished, hooks and History are written against that, and widening it is a contract change that belongs with the STR-04 slice which needs a failed History anyway. Registered in `implementation.md`'s 结构怪味登记 so it is reconsidered there rather than rediscovered.
+            if terminal.seen and self.context is not None:
+                self.context.reply = terminal
+            # Two conditions, because either one alone lets a real incident through. Upstream's reason is not enough: `stream_delivery` writes its terminal frames after its event loop, so a tear or a disconnect unwinds straight past them and the client gets neither `message_delta` nor `message_stop` even when the assembler recorded upstream's. And a clean drain is not enough either: that is exactly the truncation this whole path exists to report.
+            # Gating on the reason rather than on `seen` is what separates the one benign case from all of these — an Anthropic leg splits its ending, `message_delta` carrying the reason and usage and `message_stop` merely closing, and a stream that drained after the first has told us everything the client was owed. Reporting that as truncated produced a line arguing with itself: `end_turn` followed by a note saying nothing ended.
+            # `failure is None` is there to keep this gate and `_ending()` asking the same question in the same order, not to cover a case anyone has produced: a review measured that `drained` and `failure` cannot both be set today, because an exception from the delivery chain surfaces inside the loop below and so never reaches the assignment that marks a drain. Do not go looking for the state — it needs an early `break` in that loop to exist. Without this term, adding one would silently reopen a gap `_ending()` still believes it is closing.
+            delivered_whole = self.drained and self.failure is None
+            if not (delivered_whole and terminal.stop_reason):
+                # Said outright, because absence is not readable. The status was fixed when the response headers arrived and stays 200 however the stream ends; the fields upstream never sent are simply gone; and a reader cannot tell a field this endpoint does not report from one this request never got.
+                self.trace.status_override, self.trace.detail = self._ending()
         _log_completion(self.chain, self.trace, self.status_code, bytes_out=self.trace.received)
+
+    def _ending(self) -> tuple[LogStatus, str]:
+        """Which of the three ways this stream stopped short, and how much of a problem each is.
+
+        The failure is quoted rather than summarised. It is the only account of what went wrong that exists anywhere — an upstream reset unwinds through the delivery generator and out through the framework, and nothing else on this path writes it down — so a line reporting only that the stream stopped would discard the one fact worth having.
+
+        A client that left is `gone` rather than `fail`, ruled 2026-08-20. Two of these are the proxy's problem and one is not: on a proxy fronting an interactive client, cancelling a turn is routine, and painting every Esc the same red as an upstream reset would bury the resets. `[ OK ]`, which is what those lines used to get, is the other direction of the same mistake — it made a cancelled turn indistinguishable from an answer that arrived.
+
+        The last branch also catches a shutdown cancelling its own in-flight streams, where the client had not gone anywhere and we are the ones leaving. `gone` and the wording both still hold — nobody received the answer, and delivery stopped before upstream finished — but nothing here can tell the two apart, and the line should not claim to.
+        """
+        if self.failure is not None:
+            return "fail", f"stream failed before a terminal event: {self.failure}"
+        if self.drained:
+            return "fail", "upstream stream ended without a terminal event"
+        return "gone", "delivery stopped before upstream finished"
 
 
 class _AccountedStreamingResponse(StreamingResponse):
@@ -373,10 +404,22 @@ async def _tracked_delivery(chunks: AsyncGenerator[bytes], accounting: _StreamAc
     """Forward the delivery stream untouched and account for the request when it ends.
 
     `finally` rather than a trailing statement, because a client that disconnects mid-stream cancels this generator — and a request that vanishes from the footer, or never gets its log line, only when something has gone wrong is exactly backwards.
+
+    `aclosing` for the same reason `stream_delivery` wraps its own inner generator: a bare `async for` closes nothing, so a client that goes away throws GeneratorExit at the `yield` below and unwinds straight past the loop, leaving the delivery chain — and the upstream response under it — suspended until the collector happens to reach it. The layer above already closes *this* generator; this is the link that carried that no further.
+
+    It also puts the upstream's release ahead of `finish()`, so the completion line is written after the response is actually gone rather than while it is still open. That is the order this file wants, and it now depends on the cleanup chain below being prompt — which the layers below have their own tests for. Reordering to decouple them would buy nothing and would put the line back in front of the release.
     """
     try:
-        async for chunk in chunks:
-            yield chunk
+        async with aclosing(chunks):
+            async for chunk in chunks:
+                yield chunk
+            # Reached only when upstream's stream ran out on its own. A client that goes away closes this generator at a `yield`, and GeneratorExit unwinds straight past this line to the `finally` — which is exactly what tells "upstream stopped mid-turn" apart from "there was nobody left to deliver to". Neither has seen a terminal event, so nothing else can.
+            accounting.drained = True
+    except Exception as error:
+        # The third ending, and the one that used to be filed under the second: upstream tearing the connection — `httpx.ReadError`, a reset, a converter blowing up — leaves this generator by raising rather than by being closed, so it skips the line above and would otherwise be reported as a client that walked away.
+        # `Exception` rather than `BaseException` on purpose. GeneratorExit and CancelledError are the two ways this side stops the delivery, and they are already the case the `finally` alone describes correctly; widening the catch would fold all three back into one.
+        accounting.failure = error
+        raise
     finally:
         accounting.finish()
 

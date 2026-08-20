@@ -89,10 +89,20 @@ def test_the_arrival_line_says_only_what_is_known_on_arrival() -> None:
 
 def test_an_upstream_error_status_reads_as_a_failure_even_though_it_arrived() -> None:
     # Judged on whether the caller got a usable answer, not on whether a response object exists. A 500 delivered intact is still a failure to the person watching.
-    assert status_for(200, failed=False) == "ok"
-    assert status_for(500, failed=False) == "fail"
-    assert status_for(None, failed=False) == "fail"
-    assert status_for(200, failed=True) == "fail"
+    assert status_for(200) == "ok"
+    assert status_for(500) == "fail"
+    assert status_for(None) == "fail"
+
+
+def test_a_streaming_outcome_outranks_the_status_code_it_was_stuck_with() -> None:
+    """A streaming status is fixed when upstream's headers arrive and cannot describe what happened next.
+
+    Three endings, three words. `gone` is neither of the other two on purpose: the request did not produce an answer, and nothing about that is a fault — ruled 2026-08-20 so that a client cancelling a turn does not scroll past in the same red as an upstream reset.
+    """
+    assert status_for(200, override="fail") == "fail"
+    assert status_for(200, override="gone") == "gone"
+    # And an override of `ok` still overrides, so a path that knows better than the status code is not silently ignored on the one value that happens to agree with the default.
+    assert status_for(500, override="ok") == "ok"
 
 
 def test_reasoning_blocks_are_counted_by_kind() -> None:
@@ -187,6 +197,29 @@ def test_a_stop_reason_without_tools_is_left_alone() -> None:
     # An empty name is dropped rather than rendered as a gap, which would read as a tool called "".
     assert format_stop_reason("tool_use", ("", "")) == "tool_use"
     assert format_stop_reason("", ("Bash",)) == ""
+
+
+def test_tools_without_a_stop_reason_are_still_named() -> None:
+    """A truncated turn had already asked for tools, and the line used to drop them with the reason.
+
+    A separate word from `format_stop_reason`'s, and deliberately neither upstream's. `tool_use` and `function_call` both claim the reply *ended* in tool calls; on this line nothing said the reply ended at all. `called` rather than `tools` because the latter is also what a request's tool *declarations* are called, and a log line gives the reader no way to tell the two apart.
+    """
+    line = format_completion_line(
+        RequestLine(
+            method="POST",
+            path="/p",
+            inbound_format="f",
+            model="m",
+            status_code=200,
+            duration_s=1.0,
+            tools=("Bash", "Bash", "Read"),
+            detail="upstream stream ended without a terminal event",
+        )
+    )
+    assert "called(Bash,Bash,Read)" in line
+    assert "tool_use" not in line and "function_call" not in line
+    # Still last, and still the thing the eye stops on.
+    assert line.endswith(": upstream stream ended without a terminal event")
 
 
 def test_colour_is_off_unless_asked_for() -> None:

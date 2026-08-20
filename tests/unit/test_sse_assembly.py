@@ -284,6 +284,34 @@ def test_a_reply_summarises_the_same_whether_it_streamed_or_arrived_whole() -> N
     assert buffered.seen is streamed.terminal.seen is True
 
 
+def test_a_stream_cut_off_before_its_ending_still_says_what_it_did_produce() -> None:
+    """What upstream never said, and what it did — two facts, not one.
+
+    The console line used to be gated on `seen`, so a stream that stopped mid-turn reported nothing at all: no tokens, no reason, no reasoning, no tools. But the blocks that closed *did* close, and the record already held them. Only the ending was ever unknown, and only the ending should be missing.
+
+    `stop_reason` empty is the load-bearing half. It used to default to `end_turn`, which made "upstream said the turn ended cleanly" and "upstream never said anything" the same value — and nothing downstream of this record could tell them apart.
+    """
+    streamed = AnthropicAssembler()
+    streamed.push(SseEvent("content_block_start", orjson.dumps(
+        {"index": 0, "content_block": {"type": "thinking", "thinking": ""}}
+    ).decode()))
+    streamed.push(SseEvent("content_block_delta", orjson.dumps(
+        {"index": 0, "delta": {"type": "thinking_delta", "thinking": "weighing it up"}}
+    ).decode()))
+    streamed.push(SseEvent("content_block_stop", orjson.dumps({"index": 0}).decode()))
+    streamed.push(SseEvent("content_block_start", orjson.dumps(
+        {"index": 1, "content_block": {"type": "tool_use", "name": "Bash", "id": "toolu_1"}}
+    ).decode()))
+    streamed.push(SseEvent("content_block_stop", orjson.dumps({"index": 1}).decode()))
+    # And then upstream stopped. No `message_delta`, no `message_stop`.
+
+    assert streamed.terminal.seen is False
+    assert streamed.terminal.stop_reason == "", "an ending nobody reported must not read as one that was"
+    assert streamed.terminal.usage == {}
+    assert streamed.terminal.thinking == ["txt"]
+    assert streamed.terminal.tools == ["Bash"]
+
+
 def test_each_assembler_says_whose_reply_it_assembled() -> None:
     """The streaming path's half of the wording decision.
 

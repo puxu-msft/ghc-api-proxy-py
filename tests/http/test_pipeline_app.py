@@ -4,8 +4,10 @@ The upstream is a MockTransport under the real SDKs.
 Upstream protocol behaviour is therefore the real thing rather than a friendlier stand-in.
 """
 
+import asyncio
 import logging
-from collections.abc import AsyncGenerator, Callable, Iterator
+import time
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -27,11 +29,17 @@ from app.ghc_client.tokens import CopilotTokenManager
 from app.model_provider import GithubCopilotProvider, ModelProvider
 from app.observability.active_requests import ActiveRequestRegistry
 from app.observability.logging import setup_logging
+from app.pipeline.delivery.assembler import AnthropicAssembler
+from app.pipeline.delivery.stream import stream_delivery
 from app.server.composition import Chain, build_chain
+from app.server.handler import delivery_buffer, stream_settings
 from app.server.pipeline_app import (
     CHAIN_STATE_KEY,
     REQUEST_LOGGER,
     _AccountedStreamingResponse,  # pyright: ignore[reportPrivateUsage]
+    _StreamAccounting,  # pyright: ignore[reportPrivateUsage]
+    _tracked_delivery,  # pyright: ignore[reportPrivateUsage]
+    _Trace,  # pyright: ignore[reportPrivateUsage]
     create_pipeline_app,
 )
 from app.tokenization.state_store import TokenizationStateStore
@@ -299,6 +307,28 @@ def sse_upstream(*texts: str) -> bytes:
     )
     frames.append('event: message_stop\ndata: {}\n\n')
     return "".join(frames).encode()
+
+
+def truncated_sse_upstream(*texts: str) -> bytes:
+    """The same stream, cut off after the last block and before upstream said how it ended.
+
+    Derived from `sse_upstream` by removing its ending rather than written out again, so a change to the frames upstream actually sends cannot leave this fixture describing a stream nobody produces.
+    """
+    whole = sse_upstream(*texts)
+    ending = b'event: message_delta\ndata: {"delta":{"stop_reason":"end_turn"}}\n\n'
+    assert ending in whole, "the fixture no longer ends the way this one is built from"
+    return whole[: whole.index(ending)]
+
+
+def sse_upstream_without_message_stop(*texts: str) -> bytes:
+    """The same stream, cut after upstream said how the turn ended and before it closed the message.
+
+    The other half of the Anthropic ending. Derived from `sse_upstream` for the same reason as `truncated_sse_upstream`.
+    """
+    whole = sse_upstream(*texts)
+    ending = b"event: message_stop\ndata: {}\n\n"
+    assert ending in whole, "the fixture no longer ends the way this one is built from"
+    return whole[: whole.index(ending)]
 
 
 def test_streaming_is_served_as_block_level_sse() -> None:
@@ -967,6 +997,34 @@ def _request_lines(records: list[logging.LogRecord]) -> list[str]:
     return lines
 
 
+def _request_outcomes(records: list[logging.LogRecord]) -> list[tuple[str, str]]:
+    """Each completion line paired with the `ok` / `fail` the prefix processor renders from it.
+
+    Separate from `_request_lines` because the two halves are decided in different places and can disagree — the fields come from what the reply carried, the prefix comes from `status_for` — and reading only the message cannot see a request reported as clean when it was not. That is exactly the shape the truncation bug had.
+    """
+    outcomes: list[tuple[str, str]] = []
+    for record in records:
+        if record.name != REQUEST_LOGGER or record.levelno < logging.INFO:
+            continue
+        payload = record.msg
+        assert isinstance(payload, dict), "the completion line is expected to arrive as a structlog event dict"
+        event = cast(dict[str, Any], payload)
+        outcomes.append((str(event["event"]), str(event["status"])))
+    return outcomes
+
+
+def _request_prefixes(records: list[logging.LogRecord]) -> list[str]:
+    """The fixed-width prefix each completion line was actually rendered with.
+
+    Worth asserting separately from the status word it comes from: `_add_status_prefix` falls back to `[....]` for a status it does not recognise, so a status the prefix table has never heard of produces a line that looks merely unremarkable rather than one that fails.
+    """
+    return [
+        str(cast(dict[str, Any], record.msg)["prefix"])
+        for record in records
+        if record.name == REQUEST_LOGGER and record.levelno >= logging.INFO
+    ]
+
+
 def test_a_request_still_arriving_is_already_in_the_footer(request_log: None) -> None:
     """The invariant behind the reported blank footer.
 
@@ -1043,6 +1101,235 @@ def test_a_streaming_request_reports_what_it_actually_delivered(request_log: Non
     assert lines[0].startswith("H1/H1 200 anthropic-messages/claude-model ")
     assert "↓" in lines[0], "a delivered stream must report its byte count"
     assert "↓0B" not in lines[0]
+
+
+def test_a_stream_that_never_terminated_is_not_reported_as_a_clean_finish(
+    request_log: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The reported line, in full: `[ OK ] 09:00:11 H1/H2 200 anthropic-messages/claude-opus-5 385.0s ↑583.5KB ↓43.2KB`.
+
+    43KB had come back over 385 seconds and then upstream stopped without saying how the turn ended. The reply summary was gated on having seen that ending, so it was never taken onto the line — and every field that says what a reply *was* dropped out together, leaving something indistinguishable from a quiet successful request. The status could not correct it either: it is fixed when the response headers arrive and stays 200 however the stream ends.
+
+    So the two halves are asserted separately. The prefix must say `fail`, and the line must name the truncation rather than leave it to be inferred from which fields are missing — an absence reads the same as a field this endpoint does not report.
+    """
+    client, _ = make_client(
+        lambda _: httpx.Response(
+            200,
+            content=truncated_sse_upstream("first", "second"),
+            headers={"content-type": "text/event-stream"},
+        )
+    )
+
+    with caplog.at_level(logging.INFO):
+        client.post("/v1/messages", json={"model": "claude-model", "messages": [], "stream": True})
+
+    (line, status), = _request_outcomes(caplog.records)
+    assert status == "fail", f"a truncated stream was reported as a clean finish: {line}"
+    assert "upstream stream ended without a terminal event" in line
+    # The reason upstream never gave must not appear on the line under any spelling. `end_turn` is the one the code had to invent for the client's benefit; the operator is told what actually happened.
+    assert "end_turn" not in line
+
+
+async def test_an_upstream_that_tore_says_so_and_says_what_broke(
+    request_log: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The third ending, which the first version of this fix filed under the second.
+
+    A reset, a `ReadError`, a converter blowing up — upstream failing mid-stream leaves the delivery generator by *raising*, not by being closed, so it skips the flag that marks a drained stream and used to be reported as a client that walked away. Two different sides of the proxy, one message.
+
+    The error text is on the line because nothing else on this path writes it down: it unwinds out through the framework, and the request's own line is the only record that survives. A line saying merely that the stream stopped throws away the one fact worth having.
+
+    This and the disconnect test below reach past the HTTP layer this file is otherwise about, because neither ending can be produced through it — `TestClient` drains the body rather than disconnecting, and no upstream stand-in reachable from a request can tear mid-stream. They stay here rather than moving to a component file because they need this file's `make_client` and `_chain_of` to build a real chain, and duplicating that to satisfy the directory name would be the worse trade.
+    """
+    client, _ = make_client(lambda _: httpx.Response(200, json={"id": "msg_1", "content": []}))
+    chain = _chain_of(client)
+    trace = _Trace(method="POST", path="/v1/messages", request_id="req_1", started=time.monotonic())
+    assembler = AnthropicAssembler()
+    accounting = _StreamAccounting(
+        chain=chain, request_id="req_1", trace=trace, status_code=200, assembler=assembler
+    )
+    chain.active_requests.add("req_1")
+
+    async def tears_after_the_first_block() -> AsyncIterator[bytes]:
+        whole = sse_upstream("first", "second")
+        yield whole[: whole.index(b'event: content_block_start\ndata: {"index":1', 1)]
+        raise httpx.ReadError("connection reset by peer")
+
+    delivery = _tracked_delivery(
+        stream_delivery(
+            tears_after_the_first_block(),
+            assembler,
+            buffer=delivery_buffer(chain),
+            settings=stream_settings(chain),
+            message_id="msg_1",
+            model="claude-model",
+        ),
+        accounting,
+    )
+
+    with caplog.at_level(logging.INFO):
+        async with asyncio.timeout(10):
+            assert await anext(delivery), "the first block should have reached the client"
+            with pytest.raises(httpx.ReadError):
+                async for _ in delivery:
+                    pass
+
+    (line, status), = _request_outcomes(caplog.records)
+    assert status == "fail"
+    assert "connection reset by peer" in line, f"the only record of what broke was dropped: {line}"
+    # Neither of the other two endings: upstream did not run out, and nobody on this side walked away.
+    assert "upstream stream ended without a terminal event" not in line
+    assert "delivery stopped before upstream finished" not in line
+
+
+async def test_a_tear_after_the_stop_reason_is_still_a_tear(
+    request_log: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The hole the previous shape of this gate left, and the reason it needs two conditions.
+
+    `stream_delivery` writes its terminal frames *after* its event loop, so a tear unwinds straight past them: the client gets neither `message_delta` nor `message_stop` even though the assembler recorded upstream's. Gating the report on upstream's stop reason alone therefore let this land as a green line reading `end_turn` and nothing else — the exact silence this whole change exists to remove, restored on a narrower path.
+
+    The other tear test cannot catch it: that one breaks after the first block, so no reason was ever recorded and the gate is never reached.
+    """
+    client, _ = make_client(lambda _: httpx.Response(200, json={"id": "msg_1", "content": []}))
+    chain = _chain_of(client)
+    trace = _Trace(method="POST", path="/v1/messages", request_id="req_1", started=time.monotonic())
+    assembler = AnthropicAssembler()
+    accounting = _StreamAccounting(
+        chain=chain, request_id="req_1", trace=trace, status_code=200, assembler=assembler
+    )
+    chain.active_requests.add("req_1")
+
+    async def tears_after_its_stop_reason() -> AsyncIterator[bytes]:
+        # Everything including `message_delta`, so upstream's reason is on the record, and then nothing.
+        yield sse_upstream_without_message_stop("first", "second")
+        raise httpx.ReadError("connection reset by peer")
+
+    delivery = _tracked_delivery(
+        stream_delivery(
+            tears_after_its_stop_reason(),
+            assembler,
+            buffer=delivery_buffer(chain),
+            settings=stream_settings(chain),
+            message_id="msg_1",
+            model="claude-model",
+        ),
+        accounting,
+    )
+
+    with caplog.at_level(logging.INFO):
+        async with asyncio.timeout(10):
+            with pytest.raises(httpx.ReadError):
+                async for _ in delivery:
+                    pass
+
+    assert assembler.terminal.stop_reason == "end_turn", "upstream did give its reason before it tore"
+    (line, status), = _request_outcomes(caplog.records)
+    assert status == "fail", f"a tear was reported as a clean finish: {line}"
+    assert "connection reset by peer" in line
+
+
+def test_a_stream_cut_after_its_stop_reason_is_not_called_truncated(
+    request_log: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An Anthropic upstream splits the ending in two, and only the second half is optional.
+
+    `message_delta` carries the stop reason and the usage; `message_stop` merely closes. A stream cut between them has told us everything the client is owed and loses nothing downstream — the terminal frames go out with upstream's own reason, not a synthesised one.
+
+    Reported as truncated anyway, the line argued with itself: `end_turn` followed immediately by a note saying nothing ended. So the report is gated on whether a reason came back rather than on the closing frame, which is also why this cannot be folded into the truncation test above — on the Responses leg the two arrive together and the distinction is invisible.
+    """
+    client, _ = make_client(
+        lambda _: httpx.Response(
+            200,
+            content=sse_upstream_without_message_stop("first", "second"),
+            headers={"content-type": "text/event-stream"},
+        )
+    )
+
+    with caplog.at_level(logging.INFO):
+        client.post("/v1/messages", json={"model": "claude-model", "messages": [], "stream": True})
+
+    (line, status), = _request_outcomes(caplog.records)
+    assert status == "ok", f"upstream gave its reason, so nothing here is a failure: {line}"
+    assert "end_turn" in line
+    assert "upstream stream ended without a terminal event" not in line
+
+
+async def test_a_client_that_walked_away_is_not_blamed_on_upstream(
+    request_log: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The other way a stream reaches its end with no terminal event seen.
+
+    `finish` runs from a `finally`, so a client that stops reading lands in exactly the same place as a truncated upstream: nothing was assembled to the end, `seen` is false. But upstream was fine — it was still sending — and reporting this as an upstream truncation points the operator at the wrong side of the proxy, which is worse than the silence it replaced.
+
+    Driven through `_tracked_delivery` rather than `TestClient`, which cannot express this. Written the obvious way first — stream over HTTP, stop reading, assert — it passed while proving nothing: `TestClient` drains the response body on the way out, so upstream finished, the line said `end_turn`, and no disconnect was ever exercised. Closing the delivery generator is what a client going away does to this code, and it is reachable only from here.
+    """
+    client, _ = make_client(lambda _: httpx.Response(200, json={"id": "msg_1", "content": []}))
+    chain = _chain_of(client)
+    trace = _Trace(method="POST", path="/v1/messages", request_id="req_1", started=time.monotonic())
+    assembler = AnthropicAssembler()
+    accounting = _StreamAccounting(
+        chain=chain, request_id="req_1", trace=trace, status_code=200, assembler=assembler
+    )
+    chain.active_requests.add("req_1")
+
+    async def still_sending() -> AsyncIterator[bytes]:
+        whole = sse_upstream("first", "second")
+        cut = whole.index(b'event: content_block_start\ndata: {"index":1', 1)
+        yield whole[:cut]
+        # Upstream has more to send and no idea anyone left. Cancelled when the delivery generator is closed.
+        await asyncio.Event().wait()
+
+    delivery = _tracked_delivery(
+        stream_delivery(
+            still_sending(),
+            assembler,
+            buffer=delivery_buffer(chain),
+            settings=stream_settings(chain),
+            message_id="msg_1",
+            model="claude-model",
+        ),
+        accounting,
+    )
+
+    with caplog.at_level(logging.INFO):
+        async with asyncio.timeout(10):
+            assert await anext(delivery), "the first block should have reached the client"
+            # And now the client is gone.
+            await delivery.aclose()
+
+    (line, status), = _request_outcomes(caplog.records)
+    # `gone`, not `fail`: nothing here is the proxy's fault or upstream's, and painting every cancelled turn the same red as a reset would bury the resets. Ruled 2026-08-20.
+    assert status == "gone", f"a client that walked away is not a failure: {line}"
+    assert _request_prefixes(caplog.records) == ["[GONE]"], "the status word never reached a prefix the reader sees"
+    assert "upstream stream ended without a terminal event" not in line, (
+        f"a client-side disconnect was reported as an upstream fault: {line}"
+    )
+    assert "delivery stopped before upstream finished" in line
+
+
+def test_a_stream_that_did_terminate_is_still_reported_as_one(
+    request_log: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The control for the test above, on the same fixture minus the cut.
+
+    Without it, reporting *every* stream as truncated would pass — and the fields the fix restores are exactly the ones a clean stream has always carried, so nothing else would notice.
+    """
+    client, _ = make_client(
+        lambda _: httpx.Response(
+            200,
+            content=sse_upstream("first", "second"),
+            headers={"content-type": "text/event-stream"},
+        )
+    )
+
+    with caplog.at_level(logging.INFO):
+        client.post("/v1/messages", json={"model": "claude-model", "messages": [], "stream": True})
+
+    (line, status), = _request_outcomes(caplog.records)
+    assert status == "ok"
+    assert "end_turn" in line
+    assert "upstream stream ended without a terminal event" not in line
 
 
 def test_a_request_that_reached_upstream_reports_bytes_in_both_directions(request_log: None, caplog: pytest.LogCaptureFixture) -> None:

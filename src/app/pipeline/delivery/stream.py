@@ -170,8 +170,13 @@ async def stream_delivery(
 
     if started:
         terminal = assembler.terminal
+        # KNOWN SPEC VIOLATION, and a regression rather than unstarted work — do not read the `or "end_turn"` below as a decision.
+        # `docs/agents/anthropic-responses-bridge/spec.md` is FINALIZED. Its downstream SSE envelope contract rules that a terminal error already past committed headers uses an Anthropic SSE `error` event "且不得再发 `message_stop` 冒充成功", and its upstream sections rule for both legs that an EOF with no legal terminal event is truncation, not success. `acceptance.md` STR-04 requires those paths to produce a determinate Anthropic error and a failed History, and names "calling the normal flush on a clean EOF" — this line — as a defect its injection control must go red on.
+        # The legacy chain already does it: `app/delivery/responses_anthropic_stream.py`, on `not frontier.terminal_accepted`, raises `incomplete_responses_stream` and renders an SSE error. This chain does not, so what goes out is `message_delta{stop_reason: "end_turn"}` + `message_stop` — a truncated turn dressed as a clean one and stored in the client's history as a complete answer. See `docs/agents/anthropic-responses-bridge/implementation.md`.
+        # Written as an explicit `or` rather than left to ride on a field default, which is the shape that hid it: `Terminal.stop_reason` used to default to `"end_turn"`, so nothing here looked like a claim at all. The synthesis is now visible where it happens, and `terminal.seen` stays false so the request's console line reports the truncation — currently the only place the truth reaches anybody.
+        # One byte-level difference from the default it replaced, and an intentional one: an upstream that sends an explicit empty `stop_reason` used to have that empty string forwarded, and now gets `end_turn` too. Neither is what the client is owed, and `""` is not a stop reason any Anthropic consumer accepts.
         for frame in terminal_frames(
-            stop_reason=terminal.stop_reason,
+            stop_reason=terminal.stop_reason or "end_turn",
             usage=terminal.usage or None,
         ):
             yield frame.encode()

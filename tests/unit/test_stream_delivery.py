@@ -295,6 +295,55 @@ async def test_the_terminal_reports_what_upstream_said() -> None:
     assert '"stop_reason":"max_tokens"' in body.replace(" ", "")
 
 
+async def _truncated_delivery(assembler: AnthropicAssembler) -> str:
+    """Deliver a stream that stops after its blocks and before upstream says how it ended."""
+    delivered: list[bytes] = []
+    async with aclosing(
+        stream_delivery(
+            # Everything upstream sent before it stopped: the blocks, and neither `message_delta` nor `message_stop`.
+            feed(anthropic_stream("one")[:-2]),
+            assembler,
+            buffer=BlockBuffer(policy="block"),
+            settings=StreamSettings(sse_ping_interval=0),
+            message_id="msg_1",
+            model="claude-model",
+        )
+    ) as stream:
+        async for chunk in stream:
+            delivered.append(chunk)
+    return b"".join(delivered).decode().replace(" ", "")
+
+
+@pytest.mark.asyncio
+async def test_delivering_a_truncated_stream_does_not_make_its_record_look_finished() -> None:
+    """The durable half, and the one that outlives the gap below.
+
+    `seen` and the stop reason are what tells the operator's console line — and, when it arrives, the STR-04 implementation — apart from a turn that genuinely ended. Running the delivery loop over the events must not set either: only upstream's own terminal event may.
+
+    Kept in its own function on purpose. The test below pins behaviour that a later slice is meant to *reverse*, so it will be rewritten or deleted then; these assertions must stay true either way, and sharing a function with it would have taken them along.
+    """
+    assembler = AnthropicAssembler()
+    await _truncated_delivery(assembler)
+
+    assert assembler.terminal.seen is False, "upstream never sent a terminal event"
+    assert assembler.terminal.stop_reason == "", "and so it never gave a reason"
+
+
+@pytest.mark.asyncio
+async def test_a_truncated_stream_is_still_flushed_as_a_clean_ending_downstream() -> None:
+    """Pins today's behaviour on a path the frozen Spec says is wrong, so the gap cannot go quiet.
+
+    `docs/agents/anthropic-responses-bridge/spec.md` is FINALIZED: an EOF with no legal terminal event is truncation, not success. `acceptance.md` STR-04 requires those paths to produce a determinate Anthropic error and a failed History, and names "calling the normal flush on a clean EOF" — which is what happens below — as a defect its injection control must go red on. The legacy chain already implements the rule (`app/delivery/responses_anthropic_stream.py`), so this is a regression in this chain rather than an unstarted feature, and nothing here endorses it.
+
+    **This test is meant to be reversed, not preserved.** Its one job until then is to stop the `end_turn` synthesis being quietly deleted on the way past — sending `stop_reason: ""` downstream would be worse than either the current behaviour or the specified one.
+    """
+    body = await _truncated_delivery(AnthropicAssembler())
+
+    # Known non-conforming, per STR-04 above: the client is told the turn ended cleanly.
+    assert '"stop_reason":"end_turn"' in body
+    assert "message_stop" in body
+
+
 @pytest.mark.asyncio
 async def test_the_synthesized_start_goes_out_while_the_policy_holds_everything_else() -> None:
     """`full` holds content until the end — but this frame exists to arrive now.
@@ -496,3 +545,4 @@ async def test_a_pull_in_flight_does_not_outlive_the_delivery() -> None:
 async def _drain(delivery: AsyncGenerator[bytes]) -> None:
     async for _ in delivery:
         pass
+

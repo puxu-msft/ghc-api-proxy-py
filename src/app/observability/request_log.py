@@ -10,7 +10,7 @@ Kept pure and separate from the emitting call so a line can be asserted without 
 """
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from app.observability.footer import format_bytes, format_duration
 from app.observability.terminal import (
@@ -50,6 +50,9 @@ REASON_COLOURS = {
 
 # Tools whose presence means the turn is waiting on a person rather than on a machine. Worth picking out of an otherwise quiet list: it is the one entry that will not resolve on its own.
 ATTENTION_TOOLS = frozenset({"AskUserQuestion"})
+
+# The three endings a request line can report, spelled as `STATUS_PREFIXES` keys because that is the one place they are turned into something a reader sees. `gone` is not a failure and not a success: nobody was left to receive the answer.
+type LogStatus = Literal["ok", "fail", "gone"]
 
 
 def http_label(version: str | None, *, websocket: bool = False) -> str:
@@ -143,6 +146,17 @@ def format_stop_reason(
     reason_colour = REASON_COLOURS.get(stop_reason)
     painted = paint(word, reason_colour, color=color) if reason_colour else word
     return f"{painted}({_painted_tools(named, color=color)})" if named else painted
+
+
+def format_pending_tools(tools: tuple[str, ...], *, color: bool = False) -> str:
+    """`called(Bash,Read)` — what the turn asked for, on a line that never learned how it ended.
+
+    A separate word from `format_stop_reason`'s, and deliberately neither upstream's. `tool_use` and `function_call` both say the reply *ended* in tool calls; this is the line where nothing said the reply ended at all, and borrowing either word would put an ending on a turn that was cut off. What is true is only that these blocks completed and these tools were named, which is worth reading — a truncated turn that had already asked for three tools is a different incident from one that produced nothing.
+
+    `called` rather than `tools`, which was the first spelling and collided with the other meaning the word carries here: the tool *declarations* a request sends. A reader glancing at a log line has no way to tell "this request declared Bash and Read" from "this turn called them", and those are opposite ends of the exchange.
+    """
+    named = [tool for tool in tools if tool]
+    return f"called({_painted_tools(named, color=color)})" if named else ""
 
 
 def _painted_tools(names: list[str], *, color: bool) -> str:
@@ -291,6 +305,9 @@ def format_completion_line(line: RequestLine, *, unicode: bool = True, color: bo
         parts.append(tokens)
     if line.stop_reason:
         parts.append(format_stop_reason(line.stop_reason, line.tools, line.dialect, color=color))
+    elif line.tools:
+        # No reason came back, but the tools did. Dropping them with the reason lost the only thing that said what the turn had got through before it stopped.
+        parts.append(format_pending_tools(line.tools, color=color))
     if line.attempts > 1:
         # Named on the line that reports the outcome, where the count is final. A retry still in progress is the footer's job.
         parts.append(paint(f"retries={line.attempts - 1}", YELLOW, color=color))
@@ -304,11 +321,15 @@ def format_completion_line(line: RequestLine, *, unicode: bool = True, color: bo
     return f"{rendered}: {paint(line.detail, RED, color=color)}" if line.detail else rendered
 
 
-def status_for(status_code: int | None, *, failed: bool) -> str:
-    """The `status` field the prefix processor turns into `[ OK ]` or `[FAIL]`.
+def status_for(status_code: int | None, *, override: LogStatus | None = None) -> str:
+    """The `status` field the prefix processor turns into `[ OK ]`, `[FAIL]` or `[GONE]`.
 
     Driven by whether the request produced a usable response rather than by the exception type, so an upstream 500 delivered intact and a transport error that produced nothing both read as failures — which is what the person watching cares about.
+
+    `override` carries what the status code cannot. A streaming response's status is fixed the moment upstream's headers arrive and stays 200 however the next several minutes go, so the code that watched the delivery end is the only thing that knows whether an answer actually arrived — and, separately, whether anyone was still there to receive it. One value rather than a flag per outcome, because these are alternatives and a pile of booleans would let two of them be true at once.
     """
-    if failed or status_code is None:
+    if override is not None:
+        return override
+    if status_code is None:
         return "fail"
     return "ok" if status_code < 400 else "fail"

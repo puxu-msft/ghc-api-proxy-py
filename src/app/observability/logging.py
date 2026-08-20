@@ -17,6 +17,8 @@ STATUS_PREFIXES = {
     "success": "[ OK ]",
     "fail": "[FAIL]",
     "failure": "[FAIL]",
+    # A request nobody was left to receive. Its own tier because the alternatives both say something untrue: `[ OK ]` is what a client that pressed Esc used to get, which is indistinguishable from an answer that arrived, and `[FAIL]` puts a cancelled turn in the same colour as an upstream that tore — on a proxy fronting an interactive client, cancels are routine and would drown the failures that are not.
+    "gone": "[GONE]",
     "retry": "[RETRY]",
 }
 # The fallback for a record that carries no `status`, which is every record from a library: asyncio, httpx, httpcore, uvicorn, sqlite. They have no way to set one, so they all landed on `[....]` — the same prefix, and the same dimmed styling, as a line saying a request has just started. `_render_text` then drops `level`, so in text mode a third-party ERROR was not merely hard to spot, it was unfindable: the word never reached the output for anyone to grep. That is the opposite of what raising those loggers to WARNING below is for.
@@ -61,6 +63,8 @@ PENDING = "[....]"
 PREFIX_COLOURS = {
     "[ OK ]": GREEN,
     "[FAIL]": RED,
+    # Between the two it sits between: something did not finish, and nothing is wrong with the proxy or with upstream.
+    "[GONE]": YELLOW,
     "[WARN]": YELLOW,
     "[RETRY]": YELLOW,
     "[<-->]": CYAN,

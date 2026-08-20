@@ -41,8 +41,10 @@ class ReplyDialect(StrEnum):
 class Terminal:
     """What the upstream said when it finished."""
 
-    stop_reason: str = "end_turn"
+    # Empty until an upstream says otherwise, so the field cannot be read as a claim nobody made. It used to default to `end_turn`, which made "upstream said the turn ended cleanly" and "upstream never said anything" the same value — and the console line, which prints this, could not tell them apart either. Whoever has to put a reason on the wire for a stream that ended without one synthesises it there, where the synthesis is visible; see `stream_delivery`.
+    stop_reason: str = ""
     usage: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
+    # Whether the upstream's own terminal event arrived — `message_stop` here, `response.completed` / `response.incomplete` on the Responses side. False means the stream stopped mid-turn, and everything this record does *not* carry is unknown rather than absent.
     seen: bool = False
     # Which upstream described this reply, and so which words the console line should use for it. Anthropic by default because that is also the shape a translated reply is read back in.
     dialect: ReplyDialect = ReplyDialect.ANTHROPIC
