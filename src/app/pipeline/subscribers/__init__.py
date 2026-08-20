@@ -11,7 +11,7 @@
 | id | event | goes before/after | why |
 |---|---|---|---|
 | `builtin:server-tool-capability` | `attempt.prepare` | — | Reads and edits `tools`. Anything else that comes to read `tools` has to say whether it wants the client's list or the one that will actually be sent, and answer it here rather than by landing at whatever position happens to work. |
-| `builtin:blank-text-blocks` | `attempt.prepare` | after `builtin:server-tool-capability` | That pass flattens server-tool turns into text, so it can produce the very thing this one removes — a text block whose text came out empty. Running first would leave one behind, and the request would be refused over a block this chain wrote itself. |
+| `builtin:blank-text-blocks` | `attempt.prepare` | after `builtin:server-tool-capability` | Nothing forces it. Neither reads what the other writes: that pass edits `tools`, `tool_choice` and server-tool history blocks, and every text block it produces is generated with a `[family]` prefix and so is never blank. Last on purpose all the same — this one only removes, and a remover placed after the rewriters sees the shape that will actually be sent, so a future pass that does emit a blank block is covered without anyone having to remember to reorder. |
 
 `tests/unit/test_builtin_subscribers.py` locks the registered set and the frozen order, so a subscriber added without a decision about where it goes fails there rather than in production.
 """

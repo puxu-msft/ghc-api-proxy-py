@@ -35,6 +35,11 @@ def _content(payload: dict[str, Any], index: int = 0) -> list[dict[str, Any]]:
     return messages[index]["content"]
 
 
+_THINKING_A: dict[str, Any] = {"type": "thinking", "thinking": "first", "signature": "sig-a"}
+_THINKING_B: dict[str, Any] = {"type": "thinking", "thinking": "second", "signature": "sig-b"}
+_BLANK: dict[str, Any] = {"type": "text", "text": ""}
+
+
 async def test_a_blank_text_block_beside_real_content_is_dropped() -> None:
     """The shape that costs a whole request for a block that says nothing.
 
@@ -198,6 +203,37 @@ async def test_a_body_bound_for_responses_is_not_touched() -> None:
     )
 
     assert payload == original
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        (
+            [_THINKING_A, _BLANK, _BLANK, _THINKING_B],
+            [_THINKING_A, {"type": "text", "text": SYNTHETIC_SEPARATOR}, _THINKING_B],
+        ),
+        ([_BLANK, _THINKING_A], [_THINKING_A]),
+        ([_THINKING_A, _BLANK], [_THINKING_A]),
+        ([_BLANK, _THINKING_A, _BLANK, _THINKING_B, _BLANK], None),
+    ],
+    ids=["run-of-two", "leading", "trailing", "leading-middle-trailing"],
+)
+async def test_the_separator_is_spent_only_where_one_is_needed(
+    content: list[dict[str, Any]], expected: list[dict[str, Any]] | None
+) -> None:
+    """One separator where two thinking blocks would otherwise meet, and none anywhere else.
+
+    A run of blanks must not turn into a run of separators, and a blank at either end has nothing to separate — it is simply gone. These are the shapes the lookahead exists for; without them a version that emitted one separator per blank, or one for a trailing blank, would still pass every test above.
+    """
+    payload = await _run({"messages": [{"role": "assistant", "content": content}]})
+
+    if expected is None:
+        expected = [
+            _THINKING_A,
+            {"type": "text", "text": SYNTHETIC_SEPARATOR},
+            _THINKING_B,
+        ]
+    assert _content(payload) == expected
 
 
 @pytest.mark.parametrize(

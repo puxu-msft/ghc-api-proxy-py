@@ -2,7 +2,7 @@
 
 A text block whose text is empty or only whitespace says nothing, and Copilot's Anthropic Messages endpoint refuses the whole request over one — `messages: text content blocks must be non-empty`, and for whitespace `text content blocks must contain non-whitespace text`. One block the client never meant to send costs the entire turn, and the client replays it on its next request and is refused again. Production hit this twice in a row on 2026-08-20 with `claude-opus-5`.
 
-Where the block came from is settled and is not this module's problem any more: `stream.py` used to synthesise a placeholder text block when upstream had produced nothing for 240 seconds, the client stored it as part of that turn, and the turn came back. That producer is gone. This is the other half — the guard that catches such a block whoever produced it, including a client that arrives carrying one from an older session.
+Where the block came from is settled and is not this module's problem any more: `stream.py` used to synthesise a placeholder text block when upstream had produced nothing for 240 seconds, the client stored it as part of that turn, and the turn came back. That producer is gone. This is the other half — the guard that catches such a block whoever produced it, including a client that arrives carrying one from an older session. One exception, and it is deliberate: a turn whose content is *nothing but* blank blocks is sent as it arrived, for the reason given at the bottom of this file.
 
 **Scoped to the Anthropic leg, and measured rather than assumed.** `exp/260820-empty-text-probe/` asked the live upstream directly: `/responses` answers 200 to an empty `input_text`, to a whitespace-only one, and to an assistant turn whose `output_text` is empty, while `/v1/messages` answers 400 to the empty block in the same run with the same credentials. So the Responses leg tolerates the shape and is left alone — this runs at `attempt.prepare` and reads the routed endpoint, which is the last point at which the question "who is going to read this" has an answer.
 
@@ -106,7 +106,7 @@ async def drop_blank_text_blocks(context: RequestContext) -> None:
             logger.debug("dropped %d blank block(s) from a message", len(content) - len(kept))
             entry["content"] = kept
             continue
-        # Unlike `system`, a turn cannot be dropped for saying nothing: the rest of the history is paired against it by position, and a `tool_result` names a `tool_use` in the turn before. Emptying it to `content: []` would invent a body the client never sent, so it goes out as it arrived and upstream names what is actually wrong with it.
+        # Unlike `system`, no rewrite of a turn is known to be both valid and to mean the same. Emptying it to `content: []` is certainly refused, so that one is out on its own. Dropping the turn is not obviously safe rather than known to be unsafe: it moves every later turn's position and can put two same-role turns next to each other, and neither consequence has been measured against this upstream. With nothing measured to replace it, the input travels unchanged and upstream names what is wrong with it, which is at least the client's own error rather than one this chain invented.
         logger.warning(
-            "a message carries nothing but blank text blocks; it is being sent unchanged, because dropping the turn or emptying its content would break the sequence the rest of the history is paired against",
+            "a message carries nothing but blank text blocks; it is being sent unchanged, because no rewrite of a turn is known to be both accepted and to mean the same thing",
         )
