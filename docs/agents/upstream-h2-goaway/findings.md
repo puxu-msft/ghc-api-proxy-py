@@ -28,30 +28,53 @@ httpcore.RemoteProtocolError: <ConnectionTerminated error_code:0, last_stream_id
 
 ## 已经确凿的 / 仍然未决的
 
-| 确凿（源码 + 白盒 + 端到端实测） | 未决（不可用于决策） |
+| 确凿（源码 + 白盒 + 端到端实测） | 未决（可查，但尚未查） |
 |---|---|
-| httpcore 使「还需再次网络读取」的流在 GOAWAY 后失败 | 四条请求是否共用同一条 H2 连接（日志无 connection id） |
-| 同连接多条并发流一起死（双流实测 3/3） | 生产对端在 GOAWAY 后实际做了什么（我方停止读取，看不到） |
-| 已排队完整终止事件的流可正常完成（3/3） | 发 GOAWAY 的是源站还是边缘／中间 TLS 终止节点 |
+| httpcore 使「还需再次网络读取」的流在 GOAWAY 后失败 | 四条请求是否共用同一条 H2 连接（日志无 connection id——**这正是要加结构化日志的原因**） |
+| 同连接多条并发流一起死（双流实测 3/3） | 这类中断的真实频率与模式（正在挖 history） |
+| 已排队完整终止事件的流可正常完成（3/3） | 失败时我方已从上游收到的内容与语义位置 |
 | `last_stream_id=0` 因 Python 真值判断同样致命 | 裸 `h2.ProtocolError` 在生产中出现的概率 |
-| 裸 `h2.ProtocolError` 不被包装、绕开我方全部捕获边界 | 上游为何在此刻回收连接 |
+| 裸 `h2.ProtocolError` 不被包装、绕开我方全部捕获边界 | |
+
+### 不可知项——不要再把它们当成待查
+
+用户裁决（2026-08-20）：**发 GOAWAY 的是什么，我们不可能知道，不能据此分析；只能根据收到的内容决定。**
+
+所以下面这些**从表里移除**，不是因为查清了，而是因为它们**在我们这一侧原理上不可判定**，留在「未决」栏里会持续吸引投入却永远不会关闭：
+
+- 发 GOAWAY 的是源站、边缘节点、还是中间 TLS 终止节点；
+- 上游为何在此刻回收连接（连接寿命上限？滚动更新？负载再平衡？）；
+- 对端在 GOAWAY 之后本来会不会继续传输——我方栈收到该帧即停止读取，这一半在任何日志里都不会出现。
+
+**设计推论，比上面三条更重要**：既然「谁发的、为什么发」不可知，那么恢复策略**不能**建立在对端意图之上。唯一可依据的是**我们已经收到了什么**——已完成的块、已到的语义位置、已发给客户端的字节。这条直接决定了下面「重试 / 续写 / 完成」那件事的形状：它必须是一个读**已收内容**的裁决，而不是一个读异常类型的裁决。
 
 ## 已修复
 
-**STR-04 的 SSE 信封一半**（`16dd68c`）。与本次故障相邻但独立：一个没有合法终止事件的 EOF，此前被 flush 成 `message_delta{stop_reason:"end_turn"}` + `message_stop`，把截断的 turn 伪装成干净结束存进客户端历史。现在改为发 Anthropic SSE `error`（`upstream_error` ／ `incomplete_responses_stream`），且不再跟发 `message_stop`。从 legacy 移植而非重新设计。
+**HTTP/1.1 上游开关**（裁决 2026-08-20）。新增 `upstream_transport.http2`（默认 `true`），设 `false` 即与上游协商 HTTP/1.1，每个请求独占连接，一帧 GOAWAY 最多打掉一个请求。代价是握手与连接数上升。
+
+顺带修掉一个陷阱：此前决定协议的是 `upstream_transport.http2_ping_interval > 0`——一个以「PING 间隔」命名的键**静默地**决定了走哪个协议，而找 HTTP/1.1 开关的人没有理由去看它。**并且 `http2_ping_interval` 从来没产生过任何 PING**：httpx 0.28.1 与 httpcore 1.0.9 都不提供 HTTP/2 PING 间隔接口，全仓也只有那一处读它。该键予以保留（它是用户亲笔配置里的键，背后有 spec），但已在 schema 中标注为当前传输层未实现，且不再影响协议选择。
+
+**STR-04 的 SSE 信封一半**（`16dd68c`）。与本次故障相邻但独立：一个没有合法终止事件的 EOF，此前被 flush 成 `message_delta{stop_reason:"end_turn"}` + `message_stop`，把截断的 turn 伪装成干净结束存进客户端历史。现在发 Anthropic SSE `error`（`upstream_error` ／ `incomplete_responses_stream`），且不再跟发 `message_stop`。从 legacy 移植而非重新设计。
 
 **未闭合的另一半**：failed History。`context.reply` 仍 gate 在 `terminal.seen`，需与该 gate 的放宽一同裁决——那是 hooks／History 的契约变更。见 `docs/agents/anthropic-responses-bridge/implementation.md` 结构怪味登记。
 
-## 待裁决（四条，均未实施）
+## 在建（2026-08-20 裁决，调研中）
+
+| | 要做的事 | 状态 |
+|---|---|---|
+| 结构化日志文件 | 让「这些请求是否共用一条上游连接」这类问题**可回答**。字段设计以回答本次事故答不出的问题为准，复用既有聚合记录，不另造一套抽取 | 调研中：连接标识能否从 httpx 取到 |
+| 每连接流数上限 | 可配置「一条 H2 连接最多共享几个流」，缩小单帧 GOAWAY 的爆炸半径 | PoC 中：httpx/httpcore 是否支持，代价与维护性 |
+| 重试／续写／完成 | GOAWAY 打断后，依据**已收内容**裁决走哪条路 | 待前两项落地——没有结构化的「已收到什么」，就没有可裁决的对象 |
+| 频率与模式 | 挖 history 弄清这类中断多频繁、有无可辨认模式 | 取证中 |
+
+## 待裁决（两条，均未实施）
 
 | | 动作 | 为什么需要裁决 |
 |---|---|---|
 | A | 把 GOAWAY 类错误纳入 headers-pending 重试判据 | 「客户端还没看见响应」只让重试**对下游可隐藏**，不代表上游没处理过第一次 POST。要接受 at-least-once 与**重复计费**。且须按 `ConnectionTerminated` 窄匹配，不能整类纳入 |
-| B | 在块级缓冲窗口内重试 | 前提「失败时下游零字节」当前**未观测**；孤儿 helper（`buffered_retry`／`delayed_commit`）只提供局部构件，远不够 |
-| C | `upstream_transport.http2_ping_interval: 0` 降级 HTTP/1.1 | 纯配置、可立即实验。但收益取决于回收的是单条连接还是整节点全部连接，**当前证据无法区分** |
 | E | 向 httpcore／hyper-h2 上报 | 对外动作。上报须同时覆盖两层，只报 httpcore 会让对方以为改一处条件即可 |
 
-**注意一个易踩的坑**：活跃链路上决定是否启用 HTTP/2 的开关是 `upstream_transport.http2_ping_interval`（`composition.py:70`），**不是** `UpstreamConfig.http2`——后者只控制 legacy 路径。
+（原 C「降级 HTTP/1.1」已裁决并落地，见上。原 B「缓冲窗口内重试」已并入在建的「重试／续写／完成」，因为它的前提——知道失败时已收到什么——正是结构化日志要提供的。）
 
 ### 想动 A 的话，先看这个
 
@@ -64,6 +87,10 @@ except (httpx.TransportError, OpenAIAPIConnectionError) as error:
 ```
 
 它两个类型都不是。**只改 `transport.py` 的判据元组不会让判据被调用到**，必须先改捕获边界。
+
+### 另一个易踩的坑
+
+`upstream_transport.http2`（本次新增，管活跃 pipeline 链路）与 `UpstreamConfig.http2`（只管 `upstream/client.py` 那条 legacy surface）**是两个不同的键**，名字一样、作用范围不同。改协议时认准前者。
 
 ## 一条方法学教训
 
