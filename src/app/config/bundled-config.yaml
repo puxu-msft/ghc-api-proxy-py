@@ -6,9 +6,57 @@
 #
 # 完整的、带注释的配置样例见 `docs/.human-controlled/config.example.yaml`。
 
+model_mappings:
+
+  # 短别名必须指定，否则会被直接透传给上游并被拒绝。
+  # Short aliases must be set; an unmapped alias is sent upstream as-is and rejected.
+
+  # 使用最新版本 / Use latest version
+  #
+
+  fable: claude-opus-5
+  claude-fable-5: claude-opus-5
+
+  opus: claude-opus-5
+  claude-opus-4.1: claude-opus-5
+  claude-opus-4.5: claude-opus-5
+  claude-opus-4.6: claude-opus-5
+  claude-opus-4.7: claude-opus-5
+
+  sonnet: claude-sonnet-5
+  claude-sonnet-4.5: claude-sonnet-5
+  claude-sonnet-4.6: claude-sonnet-5
+
+  # haiku: claude-haiku-4.5
+
+  # 使用 GPT 系列 / Use GPT series
+  #
+
+  gpt: gpt-5.6-sol
+  gpt-5.5: gpt-5.6-terra
+
+  haiku: gpt-5.6-luna
+  claude-haiku-4.5: gpt-5.6-luna
+
+  # Anthropic 模型名兼容处理：日期后缀 / Anthropic-compatible model name resolver: date-suffix
+  #
+  # 自 2026/07/16 起，不再自动剥离日期后缀 "-YYYYMMDD"，必须显式配置。
+  # Since 2026/07/16, date-suffix "-YYYYMMDD" is no longer internally stripped; must be explicitly set.
+  #
+  claude-opus-4-5-20251101: claude-opus-5
+  claude-opus-4-1-20250805: claude-opus-5
+  claude-haiku-4-5-20251001: gpt-5.6-luna
+  claude-sonnet-4-5-20250929: claude-sonnet-5
+
 # 至少要有一个 provider：`model_providers` 的 schema 默认是空字典，而路由在能力上 fail-closed——没有 provider 时每个请求都会被拒。
 model_providers:
   ghc:
     type: github_copilot
+
+    models_support_web_search:
+      - gpt-5.6-sol
+      - gpt-5.6-terra
+      - gpt-5.6-luna
+      - gpt-5.5
 
 default_model_provider: ghc
