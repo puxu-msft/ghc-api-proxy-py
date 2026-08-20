@@ -28,7 +28,7 @@ from recorded.cassettes import Cassette, ReplayTransport
 
 # Data, not code: cassettes stay under `tests/` so they are easy to find and diff, while
 # the harness lives with the one group that imports it.
-CASSETTE_DIR = Path(__file__).resolve().parents[2] / "cassettes"
+CASSETTE_DIR = Path(__file__).resolve().parents[1] / "cassettes"
 BASE_URL = "https://api.githubcopilot.com"
 
 

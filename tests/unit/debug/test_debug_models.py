@@ -29,7 +29,7 @@ from app.model_provider import GithubCopilotProvider, ProviderNotConfigured
 
 runner = CliRunner()
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 @pytest.fixture(autouse=True)

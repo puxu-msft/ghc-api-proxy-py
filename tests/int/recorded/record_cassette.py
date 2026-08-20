@@ -2,8 +2,8 @@
 
 Run by hand, never by the test suite: it needs credentials and it makes real calls.
 
-    PYTHONPATH=src:tests/integration uv run python \\
-        tests/integration/recorded/record_cassette.py anthropic_to_responses_stream
+    PYTHONPATH=src:tests/int uv run python \\
+        tests/int/recorded/record_cassette.py anthropic_to_responses_stream
 
 The prompts are deliberately trivial ("Reply with exactly: PONG") because a cassette is committed
 and read by people. Nothing here should ever carry a real conversation.
@@ -36,7 +36,7 @@ from recorded.recorded_provider import pinned_config
 
 # Data, not code: cassettes stay under `tests/` so they are easy to find and diff, while
 # the harness lives with the one group that imports it.
-CASSETTE_DIR = Path(__file__).resolve().parents[2] / "cassettes"
+CASSETTE_DIR = Path(__file__).resolve().parents[1] / "cassettes"
 
 # Each scenario is one recorded session: whatever requests it makes, in the order it makes them.
 SCENARIOS: dict[str, dict[str, Any]] = {

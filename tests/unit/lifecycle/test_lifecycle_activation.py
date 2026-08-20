@@ -156,7 +156,7 @@ def test_systemd_environment_consumes_original_fd_and_unsets_metadata() -> None:
             "LISTEN_FDNAMES": "http-v4",
             "PORT": str(port),
             "SOURCE_FD": str(listener.fileno()),
-            "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src"),
+            "PYTHONPATH": str(Path(__file__).resolve().parents[3] / "src"),
         }
     )
     wrapper = (

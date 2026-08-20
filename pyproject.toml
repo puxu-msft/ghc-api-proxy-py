@@ -42,7 +42,7 @@ dev = [
     # Only `tests/tui/` needs it: a terminal emulator that turns the footer's byte stream back into a screen grid plus scrollback. Asserting on the bytes instead would not catch a footer that lands on top of a log line, which is the whole failure mode.
     "pyte",
     "ruff",
-    # Only `tests/integration/recorded/from_history.py` needs it: the copilot-api history database
+    # Only `tests/int/recorded/from_history.py` needs it: the copilot-api history database
     # stores its objects zstd-compressed. Nothing the proxy itself runs touches this.
     "zstandard",
 ]
@@ -53,7 +53,7 @@ ghc-api-proxy = "app.cli:main"
 [tool.pytest.ini_options]
 # tests/tui is excluded from the default sweep and has its own entry; see tests/tui/conftest.py.
 # `--ignore` only drops it from directory discovery, so naming the path still runs it.
-addopts = "--strict-markers --strict-config --ignore=tests/tui --ignore=tests/client_e2e"
+addopts = "--strict-markers --strict-config --ignore=tests/tui --ignore=tests/e2e"
 asyncio_mode = "auto"
 testpaths = ["tests"]
 

@@ -2,7 +2,7 @@
 
 Every other test group in this repository drives the proxy from inside the process, which is the right trade for them: it is faster and it can assert on objects rather than bytes. This group exists for the one question those cannot answer — what the *real client* does with what we send it — and that question is only worth asking if everything between the client and the fake is real. So the proxy here is the actual application on an actual port, and only the far side is replaced.
 
-The far side is replaced rather than recorded because these tests are about the client's behaviour, not upstream's. A cassette would pin both ends at once and make every test a re-run of one captured conversation; a script lets a test say "answer the first request with a tool call, the second with text" and then watch what the client does in between. Where upstream's exact behaviour is the subject, `tests/integration/recorded/` is the group that answers it.
+The far side is replaced rather than recorded because these tests are about the client's behaviour, not upstream's. A cassette would pin both ends at once and make every test a re-run of one captured conversation; a script lets a test say "answer the first request with a tool call, the second with text" and then watch what the client does in between. Where upstream's exact behaviour is the subject, `tests/int/recorded/` is the group that answers it.
 
 Requests are kept in order and in full, so a test can assert on what the proxy actually sent — which is how the interesting failures show up. A client that never made the second request, or made it without the tool, looks identical from the outside to one that made it correctly.
 """

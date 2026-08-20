@@ -6,7 +6,7 @@ from pydantic import ValidationError
 
 from app.config.schema import NOT_HOT_RELOADABLE, ProxyConfig
 
-SPEC_PATH = Path(__file__).resolve().parents[2] / "docs/.human-controlled/config.example.yaml"
+SPEC_PATH = Path(__file__).resolve().parents[3] / "docs/.human-controlled/config.example.yaml"
 
 
 @pytest.mark.skipif(not SPEC_PATH.is_file(), reason="authoritative config spec not present")

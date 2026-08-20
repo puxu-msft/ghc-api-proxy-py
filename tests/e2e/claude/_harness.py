@@ -21,7 +21,7 @@ from typing import Any, cast
 
 import httpx
 import uvicorn
-from upstream import BASE_URL, CATALOG, ScriptedUpstream
+from _upstream import BASE_URL, CATALOG, ScriptedUpstream
 
 from app.config.schema import ProxyConfig
 from app.ghc_client import GhcApiClient, GhcClientConfig

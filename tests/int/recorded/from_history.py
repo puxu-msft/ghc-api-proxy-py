@@ -39,7 +39,7 @@ import zstandard
 from recorded.cassettes import Cassette, Interaction
 
 HISTORY_DIR = Path.home() / ".local/share/copilot-api"
-CASSETTE_DIR = Path(__file__).resolve().parents[2] / "cassettes"
+CASSETTE_DIR = Path(__file__).resolve().parents[1] / "cassettes"
 
 # String fields worth keeping, by name. An allowlist because naming what to *remove* missed
 # `description`, `instructions` and `definition` — tool definitions and system prompts echoed back

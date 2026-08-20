@@ -261,13 +261,13 @@ def test_an_anthropic_web_search_declaration_reaches_upstream_in_its_own_spellin
 
 
 def test_a_streamed_search_is_delivered_as_a_line_rather_than_an_empty_block() -> None:
-    """Driven by a real upstream recording: `tests/cassettes/responses_web_search_stream.json`.
+    """Driven by a real upstream recording: `tests/int/cassettes/responses_web_search_stream.json`.
 
     A `web_search_call` has no delta events and arrives with only an id, a status and a type on `output_item.added` — the query appears for the first time on `done`. Assembled the ordinary way, from the draft the `added` opened, it closed as an empty text block: the client got a blank content block ahead of every answer, and the one fact the item carried was thrown away.
 
     The cassette is used rather than a hand-written stream because that asymmetry is exactly the kind of thing a stand-in gets wrong — it would have been written from what the events are assumed to carry.
     """
-    cassette = orjson.loads(Path("tests/cassettes/responses_web_search_stream.json").read_bytes())
+    cassette = orjson.loads(Path("tests/int/cassettes/responses_web_search_stream.json").read_bytes())
     interaction = next(
         i for i in cassette["interactions"] if "responses" in i["request"]["path"]
     )
@@ -1794,7 +1794,7 @@ def test_a_responses_upstream_is_logged_in_its_own_words(request_log: None, capl
 def responses_sse_upstream(usage: dict[str, Any] | None = None) -> bytes:
     """A Responses SSE stream carrying one sealed reasoning item and one function call.
 
-    Hand-written because what it has to hold up is the route → assembler → line wiring under an event contract that is already known, not how Copilot actually behaves on the wire. The frames only have to be shaped enough for the assembler to open and close both items. Anything asserting the real upstream's quirks — id instability, chunk boundaries — belongs on a cassette instead; see `tests/integration/recorded/`.
+    Hand-written because what it has to hold up is the route → assembler → line wiring under an event contract that is already known, not how Copilot actually behaves on the wire. The frames only have to be shaped enough for the assembler to open and close both items. Anything asserting the real upstream's quirks — id instability, chunk boundaries — belongs on a cassette instead; see `tests/int/recorded/`.
     """
     items: list[dict[str, Any]] = [
         {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "sealed"},

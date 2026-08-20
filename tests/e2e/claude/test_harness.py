@@ -7,8 +7,8 @@ pass while measuring nothing. These two check the plumbing itself.
 
 from pathlib import Path
 
-from harness import run_claude, running_proxy
-from upstream import ScriptedUpstream, anthropic_text
+from _harness import run_claude, running_proxy
+from _upstream import ScriptedUpstream, anthropic_text
 
 
 def test_the_client_reaches_the_model_through_the_proxy(config_dir: Path) -> None:

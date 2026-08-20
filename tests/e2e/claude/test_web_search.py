@@ -7,8 +7,8 @@ The setup is the two-stage shape the client actually uses. A test cannot make Cl
 
 from pathlib import Path
 
-from harness import run_claude, running_proxy
-from upstream import ScriptedUpstream, anthropic_text, anthropic_tool_call
+from _harness import run_claude, running_proxy
+from _upstream import ScriptedUpstream, anthropic_text, anthropic_tool_call
 
 SEARCH_TOOLS = ["--allowedTools", "WebSearch"]
 

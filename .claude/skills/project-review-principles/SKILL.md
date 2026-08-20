@@ -87,7 +87,7 @@ rg -n "stop_reason|usage" src/app/pipeline/delivery/assembler.py src/app/pipelin
 
 判别的轴是**期望值归谁所有**，不是「换个上游还成立吗」——后者会误判：路由分支的结果可能随上游能力变化，但它仍由本项目的规范与逻辑裁决，不因此需要录制。
 
-按命题选 ground truth 的一般方法在 `verifying-authoritative-claims`，本条不重写它。**这里只管本仓的复查问题**：哪些断言在声称外部 wire，它们有没有落到 `tests/cassettes/` + `tests/integration/recorded/`。项目对录制基建本身的约定（为什么拒绝 vcrpy、chunk 边界为何要保留、`from_history.py` 的适用边界）是 always-on 的，在 `CLAUDE.md`，不在这里。
+按命题选 ground truth 的一般方法在 `verifying-authoritative-claims`，本条不重写它。**这里只管本仓的复查问题**：哪些断言在声称外部 wire，它们有没有落到 `tests/int/cassettes/` + `tests/int/recorded/`。项目对录制基建本身的约定（为什么拒绝 vcrpy、chunk 边界为何要保留、`from_history.py` 的适用边界）是 always-on 的，在 `CLAUDE.md`，不在这里。
 
 ### 怎么查
 
@@ -99,7 +99,7 @@ rg -c --type py 'input_tokens_details|output_tokens_details|"type":\s*"response\
 python - <<'PY'
 import json, pathlib
 def terminal_usage(name):
-    p = pathlib.Path("tests/cassettes") / name
+    p = pathlib.Path("tests/int/cassettes") / name
     for it in json.loads(p.read_text())["interactions"]:
         blob = "".join(c.get("text", "") for c in (it["response"].get("chunks") or []))
         for line in blob.splitlines():
@@ -238,7 +238,7 @@ done
 
 ### 凭什么在这里
 
-2026-08-20：`tests/integration/test_standalone_process.py::test_a_half_sent_request_holds_the_drain_until_the_operator_escalates` 在优雅关闭修复后变红。它断言「进程 3 秒后还活着」——而那**正是死锁的症状**。实测确认它的夹具产生不了它自称的前提：发的 `POST /health/liveness` 打在只注册了 GET 的裸 FastAPI 上，Starlette 只看 headers 就回 405、从不读 body，所以从来没有「还在到达的请求」。它此前的绿来自准入闸死锁本身。
+2026-08-20：`tests/int/test_standalone_process.py::test_a_half_sent_request_holds_the_drain_until_the_operator_escalates` 在优雅关闭修复后变红。它断言「进程 3 秒后还活着」——而那**正是死锁的症状**。实测确认它的夹具产生不了它自称的前提：发的 `POST /health/liveness` 打在只注册了 GET 的裸 FastAPI 上，Starlette 只看 headers 就回 405、从不读 body，所以从来没有「还在到达的请求」。它此前的绿来自准入闸死锁本身。
 
 第二层由独立评审补上：我改夹具让它真能表达契约，而那样**等于把「真实进程层唯一会因死锁复发而变红的守卫」一并搬走**（变异实测：改写后的版本对该缺陷完全不敏感）。最终处置是保留原场景、换上正确期望，另立一条。
 
