@@ -384,3 +384,82 @@ docs/<topic>/
 ---
 
 *评审者：closeout-review agent。日期 2026-08-20。基准：`.dev` 提交 `544987d` + 工作树中对 `client-side/README.md` 的历史注记修订；主仓库 `main` @ `5c1afbe`。*
+
+---
+
+# 附：复核处置（`.dev` 提交 `b5add6c`，2026-08-20）
+
+只针对上文自己的发现核对是否关闭，不重做全面评审。核对基准：`git -C .dev show b5add6c` 的完整 diff、`DISPOSITION.md` 当前内容（它不在 `.dev` 仓库里，单独读的）、以及处置动作在磁盘上留下的产物。
+
+## 逐条判定
+
+| 发现 | 判定 | 一句话依据 |
+|---|---|---|
+| M-1 张冠李戴 | **已关闭** | 主语改回 `connections_asked_to_close`，补了原名与实测失真，并显式排除 `severed_connections` |
+| M-2 单侧保证 | **已关闭** | 新增一段写明反方向也不是保证，结论改为「非零是『很可能』，涉及 TLS 会被误触」 |
+| M-3 跑不起来 | **已关闭，且有独立产物佐证** | 四个 `.sh` 改用会自行创建的目录；`/tmp/ghc-shutdown-probes/tmp/` 下有 3 份 17:34 的新日志 |
+| M-4 开放项不全 | **已关闭** | O-1、F-3、S-5 三条进了「遗留张力」，表述与原件相符 |
+| m-1 凭据与配额 | **已关闭** | 新增「凭据与配额」一节，四个 `.sh` 与配额的关系按实测重写 |
+| m-2 三份 ham 日志 | **已关闭** | 改为「一次运行的三个 attempt，其中 2 次命中、1 次未命中」 |
+| m-3 `e2e.log` 归类 | **已关闭** | 单列一行，载体指向 `exp/README.md`「凭据与配额」，该节确有那行 200 日志 |
+| T-8 补一行指向本报告 | **顺带关闭** | 「本目录」表新增 `260820-closeout-review.md` 一行 |
+| m-4 目录形态 | **未动，按建议留给用户** | 与我的建议一致，不视为未关闭 |
+| m-5 / m-6 / m-7、T-1～T-7 | **仍开放** | 本轮未声称处理，见下方清单 |
+
+## 逐条依据
+
+**M-1。** 新文本：「**`connections_asked_to_close` 只统计真正当场关掉的连接**……评审量到过 1 空闲 + 1 在跑 → 报 2 的失真……选了改名（原叫 `released_connections`）……**这条讲的是 `connections_asked_to_close`，与 `severed_connections` 无关**——后者是另一次改动，用 `MSG_PEEK` 新增的。」逐项对得上原件：`1 空闲 + 1 在跑 → 报 2` 出自 `260820-graceful-shutdown-admission-deadlock.md` 的 gpt 6.1 行与 `260820-shutdown-test-rebase-review.md` 附带发现 2（`probe4` 实测）；改名前叫 `released_connections` 属实；severed 由 `89002eb` 引入属实。多加的那句显式排除，正好挡住了我踩到的那个误读路径。
+
+**M-2。** 新文本保留了下界方向，并补「反方向也不是保证……TLS 下等待的字节可能是重协商记录、session ticket 或 close_notify，探针分辨不了，那是**多报**」，收在「非零是『很可能有人没被服务』，在涉及 TLS 的部署上会被误触；零不代表没人。两侧都不是硬保证——这个数字用来引起注意，不用来结案」。与 shipped docstring（`693dd0d:src/app/lifecycle/adapter.py:429-433` 的「Three limits, and they do not all point the same way」）一致，与 `exp/README.md` 的多报表述也不再打架——M-2 同时记的那处跨文档矛盾一并消除。
+
+*一处残留，不构成未关闭*：`260820-severed-probe-review.md` 的 S-3 列的多报形状不止 TLS，还有「客户端发完请求就走人」与「RFC 9112 允许的请求行前空行／杂散 CRLF 也会被读成 a request already sent」（S-8 同指）。新文本写「明文 h11 下非零基本可信」，用「基本」和「两侧都不是硬保证」兜住了，读者不会被误导到硬结论上；shipped docstring 也只把多报归给 TLS。记录，不要求再改。
+
+**M-3。** 四个脚本一致改成 `TMP="${CLAUDE_JOB_DIR:-/tmp/ghc-shutdown-probes}/tmp"` + `mkdir -p "$TMP"`，四处 `mkdir` 都排在第一次使用 `$TMP` 之前（`e2e_real_cli.sh` 在 `PIDFILE=` 与重定向之前，另外三个在 `for` 循环／`start` 之前），`$TMP` 是绝对路径，不受随后 `cd "$ROOT"` 影响。README 那段错误说明被整段重写，并把失败形态（静默夭折 + 40 秒空转 + 可信的假结论）写进了正文与脚本注释。
+
+独立佐证：`/tmp/ghc-shutdown-probes/tmp/` 里有 17:34 的三份新日志——目录确实是被脚本自己创建的，而不是人手 `mkdir` 出来的：
+
+```
+ham-33993.log  [FAIL] 17:34:44 stopped — 40 connections asked to close, 14 requests refused, 9 connections severed…
+ham-33845.log  [FAIL] 17:34:47 stopped — 40 connections asked to close, 14 requests refused, 9 connections severed…
+ham-53563.log  [FAIL] 17:34:50 stopped — 40 connections asked to close, 2 requests refused, 19 connections severed…
+```
+
+3/3 命中，与协调者的口头结果一致。**这轮实跑顺带给了一条与本次修复无关但有价值的旁证**：命中率 3/3、severed 9/9/19，落在独立审计量到的 90%–100% 区间里，进一步支持文档里「我报的 3 次命中 2 次是保守说法」那句。
+
+**M-4。** 三条新增项与原件核对：O-1 的「既有缺陷、与父提交逐行比对确认未引入也未加重」出自 `260820-shutdown-delta-review.md` O-1；F-3 的两条不可达性依赖（`asyncio.Lock` 无竞争不让出、第二次 `stop_accepting` 时 `routing_tasks` 恰好为空）逐字对得上 F-3；S-5 的「去掉 `MSG_PEEK` 测试全绿」「`dup()` 之后最阴险的一条已不复存在」「不消费这条结构上无法守」对得上 S-5。*一处从简*：O-1 的一行改法（`finally` 里判 `fileno() != -1`，或把 `except OSError` 放宽到 `ValueError`）没有抄进来，但条目点名了「第三轮评审 O-1」，取证一跳可达，可接受。
+
+**m-1。** 新「凭据与配额」一节的三段分别对应我核到的三件事：启动会拉模型列表（我复查了 job 目录里 10 份服务端日志，**10/10 都有** `42 models available from ghc`，加上新跑的 3 份共 13/13）；只有 `e2e_real_cli.sh` 的请求走到上游（`e2e.log` 的 `H1/H2 200`）；另外三个发 `{}` 在本地被 400 打回（`H1 400 … 0ms`）。末句「想在不烧配额的前提下复算切断窗口，跑 `e2e_severed_hammer.sh`」正好堵住我担心的那个误跳过。
+
+**m-2 / m-3。** `DISPOSITION.md` 第 19 行改成「hammer **一次运行的三个 attempt** 日志……**其中 2 次命中切断窗口、1 次未命中**」，并补了「三行都在，含未命中那行」；`e2e.log` 从第 20 行的「未命中的扫描」里摘出来单列为第 21 行，载体指向 `exp/README.md`「凭据与配额」——我核过该节确实写着那行 200 日志。分类计数同步改成 8 + 3 + 10 + 1 + 1 = 23，算式自洽。新增的「修订」一节交代了改动来源，符合归档留痕的做法。
+
+## 改动本身引入的新问题（3 条，都很小）
+
+**新-1【minor】`DISPOSITION.md` 里「8 个脚本逐字持久化」这句现在过时了。** b5add6c 改了 4 个 `.sh`，于是 job 目录原件与 `.dev/exp` 副本不再逐字节相同：
+
+```
+DIFFERS   e2e_real_cli.sh / e2e_severed.sh / e2e_severed_burst.sh / e2e_severed_hammer.sh
+IDENTICAL probe_half_sent.py / probe_router_resume.py / repro_hang.py / repro_hang2.py
+```
+
+这不是错误处置——`.dev/README.md` 只要求 `reports/` 逐字保留，`exp/` 是「保留可跑」，为了可跑而改脚本正是它的用途，而且 4/8 仍逐字。但 `DISPOSITION.md` 那一格的措辞是「逐字持久化」，且它正是本轮被修订过的文件，读者会以为它已经与当下对齐。**改法**：那一格改成「持久化（四个 `.sh` 随后在 `b5add6c` 修了临时目录回退，见该提交；四个 `.py` 仍逐字）」。
+
+**新-2【nit】`DISPOSITION.md` 新增的「本清单已经过独立评审……它对本文件报了 2 条 minor，均已改正」不全。** 本报告对该文件实际提了 **4** 条：m-2、m-3（minor，已改）与 T-1（「三行逐字抄进」实际去掉了时间戳）、T-6（23 项是写它之前的快照，照它给的命令现在数出 24）——后两条仍在原样。现在的写法容易读成「评审对本文件提的都已闭合」。**改法**：写成「2 条 minor 已改，另有 2 条 nit 未改（见报告 T-1、T-6）」。
+
+**新-3【nit】两处措辞比证据略强，方向都安全。** 其一，`mkdir -p "$TMP"` 没有检查失败（脚本仍是 `set -u` 无 `set -e`），万一目标不可写，回到的还是「静默继续」那一类失败——概率极低（`/tmp` 与 job 目录都可写），提一句是为了不让下一个人以为这条路已经彻底封死。其二，「启动时会去拉模型列表……**这一步就要凭据**」：我实测到的是 13/13 都发生了这次拉取，**没有**实测「无凭据则启动失败」。这是推断，但方向安全（宁可多提示要凭据），不必改，只是别把它当成实测结论再往下传。
+
+## 仍然开放的发现（本轮未声称处理，列出以免丢失）
+
+- **m-4** 目录形态与未决项归属 —— 按我的建议留给用户裁决。其中「话题入口 `docs/graceful-shutdown/README.md` 没有任何地方提示存在待裁决项」这半条，无论怎么裁都该补（现在「遗留张力」已有 6 条，入口一层仍只写「已落地进 main」）。
+- **m-5** 五个提交在 `main` 上不连续；`1463 / 3` 只在 `89002eb` 上可复现。
+- **m-6** `repro_hang.py` 的结论在原件里无直接证据，且与脚本自身 docstring 相反。
+- **m-7** 命中率复算所需的写入节奏与建池陷阱没进文档（参数在 hammer 脚本里，但文档没说）。
+- **T-1**～**T-7**（T-8 已顺带关闭）。其中 T-4「没有一个走 TLS 路径」本轮改了同一行的括号内容却未触及该措辞，`probe_router_resume.py` 仍构造着 TLS context。
+- 第六节的两条缺口（适用范围只说了缺陷侧、没有一张「现在的守卫长什么样」的小表）也未处理。
+
+## 复核结论
+
+**四条 major 与三条被声称处理的 minor 全部真实关闭**，其中 M-3 有独立可核的磁盘产物、M-1/M-2/M-4 与原件逐条对得上，没有一条是「改了文字但没改到点上」。改动引入的三个新问题都在文字层，没有一个触及取证层：7 份原件仍逐字、清点数仍自洽、无新断链。
+
+**复核判定：pass（就本轮声称处理的 7 条而言）**；整份归档的总判定仍是 needs-fix，因为 m-4 待用户裁决、m-5～m-7 与七条 nit 尚未处理。以上均不阻塞归档可用。
+
+*复核者：同一 closeout-review agent。基准：`.dev` @ `b5add6c`；`DISPOSITION.md` 为 2026-08-20 17:35 后的当前内容。只读复核，未修改任何被审文件（本报告除外）。*
