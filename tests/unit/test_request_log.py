@@ -213,6 +213,15 @@ def test_the_duration_escalates_on_its_own() -> None:
     assert BOLD_RED in coloured(300.0)
 
 
+def test_the_route_on_a_failed_line_is_left_at_the_terminal_default() -> None:
+    # It is reference material — what has to be repeated to reproduce the failure — and the status and the reason are what carry the weight. An explicit white made it brighter than the untouched text around it.
+    line = format_completion_line(
+        RequestLine(method="POST", path="/v1/messages", status_code=400, detail="body must be an object"),
+        color=True,
+    )
+    assert line == f"{RED}400{RESET} POST /v1/messages: {RED}body must be an object{RESET}"
+
+
 def test_a_failing_status_and_its_reason_are_red() -> None:
     line = format_completion_line(
         RequestLine(method="POST", path="/p", status_code=429, duration_s=1.0, detail="rate limited"),
@@ -359,16 +368,20 @@ def test_what_came_back_escalates_with_its_size() -> None:
 
     Asserted as whole spans — marker, printed figure and colour together — because that is the thing a reader sees, and because a bare colour check passes on any other coloured field in the line.
     """
-    assert f"{DIM}↓5.0KB{RESET}" in _received(5 * 1024)
-    assert f"{WHITE}↓10.0KB{RESET}" in _received(10 * 1024)
-    assert f"{WHITE}↓50.0KB{RESET}" in _received(50 * 1024)
-    assert f"{YELLOW}↓100.0KB{RESET}" in _received(100 * 1024)
+    def field(byte_count: int) -> str:
+        return _received(byte_count).split()[-1]
+
+    assert field(5 * 1024) == f"{DIM}↓5.0KB{RESET}"
+    # The middle rung carries no escape at all: an explicit white was brighter than the untouched text beside it and read as emphasis. Compared for equality so a stray code fails here rather than being invisible to an `in` check.
+    assert field(10 * 1024) == "↓10.0KB"
+    assert field(50 * 1024) == "↓50.0KB"
+    assert field(100 * 1024) == f"{YELLOW}↓100.0KB{RESET}"
 
 
 def test_the_thresholds_are_the_round_numbers() -> None:
-    # Exactly `10 * 1024`, not the point where the printed figure reaches `10.0KB`. Both counts below print `10.0KB`, so the two colours sit on the same shown number — accepted, because the threshold being the round number is what was asked for.
-    assert f"{DIM}↓10.0KB{RESET}" in _received(10 * 1024 - 1)
-    assert f"{WHITE}↓10.0KB{RESET}" in _received(10 * 1024)
+    # Exactly `10 * 1024`, not the point where the printed figure reaches `10.0KB`. Both counts below print `10.0KB`, so the same shown number comes out grey on one line and untouched on the next — accepted, because the threshold being the round number is what was asked for.
+    assert _received(10 * 1024 - 1).split()[-1] == f"{DIM}↓10.0KB{RESET}"
+    assert _received(10 * 1024).split()[-1] == "↓10.0KB"
 
 
 def test_what_went_out_stays_quiet_however_large() -> None:
@@ -386,10 +399,10 @@ def test_output_tokens_escalate_on_their_own_scale() -> None:
     def produced(count: int) -> str:
         return format_tokens({"input_tokens": 1, "output_tokens": count}, color=True)
 
-    assert f"{DIM}↓999{RESET}" in produced(999)
-    assert f"{WHITE}↓1.0k{RESET}" in produced(1_000)
-    assert f"{WHITE}↓9.9k{RESET}" in produced(9_949)
-    assert f"{YELLOW}↓10.0k{RESET}" in produced(10_000)
+    assert produced(999) == f"↑1 {DIM}↓999{RESET}"
+    assert produced(1_000) == "↑1 ↓1.0k"
+    assert produced(9_000) == "↑1 ↓9.0k"
+    assert produced(10_000) == f"↑1 {YELLOW}↓10.0k{RESET}"
 
 
 def test_how_the_turn_ended_is_a_ladder_not_a_flag() -> None:

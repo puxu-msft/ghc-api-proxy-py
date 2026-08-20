@@ -5,7 +5,7 @@ Both inputs are injected, so every combination is reachable without a terminal a
 
 import io
 
-from app.observability.terminal import detect_terminal
+from app.observability.terminal import DIM, RESET, detect_terminal, paint
 
 
 class _Stream(io.TextIOWrapper):
@@ -75,3 +75,9 @@ def test_a_stream_that_refuses_to_answer_is_treated_as_not_a_terminal() -> None:
 
     # Erring towards plain output: the cost of being wrong this way is a missing footer, and the cost of the other way is escape sequences in somebody's log file.
     assert detect_terminal(_Closed(), {"TERM": "xterm"}).live is False
+
+
+def test_an_empty_colour_leaves_the_text_alone() -> None:
+    # How "no colour" is expressed by a ramp whose middle rung is the terminal's own foreground. A naive format string would emit a bare reset here, which would end whatever span came before it.
+    assert paint("50.0KB", "", color=True) == "50.0KB"
+    assert paint("50.0KB", DIM, color=True) == f"{DIM}50.0KB{RESET}"

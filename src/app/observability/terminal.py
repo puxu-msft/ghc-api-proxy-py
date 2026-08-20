@@ -26,8 +26,10 @@ def paint(text: str, code: str, *, color: bool) -> str:
     """Wrap `text` in one self-contained SGR span.
 
     Self-contained on purpose: each span carries its own reset and none of them nest. A nested span's reset would end the enclosing one too, which is how a line ends up half-coloured in a way nobody can reproduce from reading the code.
+
+    An empty `code` means leave it alone, and emits nothing — not a bare reset, which is what a naive format string would produce and which would end the *previous* span early.
     """
-    return f"{code}{text}{RESET}" if color and text else text
+    return f"{code}{text}{RESET}" if color and text and code else text
 
 
 def duration_colour(seconds: float) -> str:
@@ -45,16 +47,18 @@ def duration_colour(seconds: float) -> str:
 
 
 def volume_colour(value: float, *, notable: float, heavy: float) -> str:
-    """A severity ramp for "how much came back": quiet below `notable`, plain up to `heavy`, warm above it.
+    """A severity ramp for "how much came back": quiet below `notable`, untouched up to `heavy`, warm above it.
 
     Grey rather than absent for the small case, because most replies are small and a column that shouts on every line stops carrying information. The escalation is the point: a reply an order of magnitude bigger than usual is worth seeing without reading the number, which is the same reason `duration_colour` exists.
+
+    The middle rung is no colour at all rather than an explicit white. `\x1b[37m` sets the foreground to the palette's white, which in most dark themes is brighter than the terminal's own default — so the ordinary case came out *louder* than the fields nobody had touched, and read as emphasis. It also assumes a dark background, and is close to invisible on a light one.
 
     Stops at yellow. Red and bold red are spoken for by failure and by a request that has run long enough to be a problem, and a large reply is neither — it is worth noticing, not worth alarm.
     """
     if value < notable:
         return DIM
     if value < heavy:
-        return WHITE
+        return ""
     return YELLOW
 
 

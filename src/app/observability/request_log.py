@@ -19,7 +19,6 @@ from app.observability.terminal import (
     GREEN,
     MAGENTA,
     RED,
-    WHITE,
     YELLOW,
     cache_hit_colour,
     duration_colour,
@@ -238,7 +237,8 @@ def _subject(line: RequestLine, *, succeeded: bool, color: bool) -> list[str]:
     if succeeded and line.model:
         prefix = paint(f"{line.inbound_format}/", DIM, color=color) if line.inbound_format else ""
         return [f"{prefix}{named}"]
-    parts = [paint(line.method, WHITE, color=color), paint(line.path, WHITE, color=color)]
+    # Left at the terminal's own foreground. An explicit white here was brighter than the untouched text beside it and read as emphasis, which the route does not deserve: on a failed line it is reference material, and the status and the reason are what carry the weight.
+    parts = [line.method, line.path]
     if line.model:
         parts.append(named)
     return parts
