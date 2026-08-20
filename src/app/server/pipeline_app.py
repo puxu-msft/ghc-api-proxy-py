@@ -5,6 +5,7 @@ Mounting both would give one path two owners.
 """
 
 import os
+import sys
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import ExitStack, asynccontextmanager
@@ -335,13 +336,26 @@ class _AccountedStreamingResponse(StreamingResponse):
 
     def __init__(self, content: AsyncGenerator[bytes], accounting: _StreamAccounting, **kwargs: Any) -> None:
         super().__init__(content, **kwargs)
+        self._content = content
         self._accounting = accounting
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         try:
             await super().__call__(scope, receive, send)
         finally:
-            self._accounting.finish()
+            # Closing the body is this response's job and nobody else's: the framework iterates the generator but never closes it, so a client that stops reading leaves the whole delivery chain suspended for the collector to find. Every layer below already knows how to release the upstream when it is closed — until this line, nothing asked them to. `DelayedStartStreamingResponse` on the legacy path settles its own body for the same reason.
+            # Before accounting, so the completion line is written after the upstream is actually released rather than while it is still open. The generator's own `finally` reaches `finish()` first; it is idempotent, and the call below stays for the case where the body was never iterated at all.
+            # `finally` rather than the next statement, because accounting is the thing this class exists to guarantee: a close that raises would otherwise leave the request in the footer with its clock running and no line ever written, which is the exact failure the docstring above says this override was added to prevent.
+            # The exit that got us here stays the exit that propagates, with the close failure chained onto it. Raising from a `finally` otherwise replaces it, and the replacement is the less useful of the two: a body that fails to close is a consequence of whatever ended the request, and the operator needs the cause. `finish_stream_cleanup` orders the same pair the same way.
+            primary = sys.exception()
+            try:
+                await self._content.aclose()
+            except BaseException as close_error:
+                if primary is None:
+                    raise
+                raise primary from close_error
+            finally:
+                self._accounting.finish()
 
 
 async def _counted_upstream(chunks: AsyncIterator[bytes], chain: Chain, request_id: str, trace: _Trace) -> AsyncGenerator[bytes]:

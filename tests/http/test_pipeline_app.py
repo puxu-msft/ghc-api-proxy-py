@@ -5,7 +5,7 @@ Upstream protocol behaviour is therefore the real thing rather than a friendlier
 """
 
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncGenerator, Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -28,7 +28,12 @@ from app.model_provider import GithubCopilotProvider, ModelProvider
 from app.observability.active_requests import ActiveRequestRegistry
 from app.observability.logging import setup_logging
 from app.server.composition import Chain, build_chain
-from app.server.pipeline_app import CHAIN_STATE_KEY, REQUEST_LOGGER, create_pipeline_app
+from app.server.pipeline_app import (
+    CHAIN_STATE_KEY,
+    REQUEST_LOGGER,
+    _AccountedStreamingResponse,  # pyright: ignore[reportPrivateUsage]
+    create_pipeline_app,
+)
 from app.tokenization.state_store import TokenizationStateStore
 
 BASE_URL = "https://copilot.example"
@@ -1204,3 +1209,38 @@ def test_a_streamed_translated_reply_reports_what_the_prompt_actually_cost(
     assert "↻97%" in line
     assert "↓2.7k" in line
     assert "↑138.5k" not in line, "the total was being reported as though none of it was cached"
+
+
+@pytest.mark.asyncio
+async def test_a_body_that_fails_to_close_is_still_accounted_for() -> None:
+    # Accounting is the one thing this response exists to guarantee, so it cannot be what a failure skips. Closing the body was added here to release the upstream, and a close that raises would otherwise leave the request in the footer with its clock running and no line ever written — the same failure the class was added to prevent, arriving through a different door.
+    finished: list[str] = []
+
+    async def body() -> AsyncGenerator[bytes]:
+        try:
+            yield b"chunk"
+        finally:
+            raise RuntimeError("closing the body blew up")
+
+    class _Accounting:
+        def finish(self) -> None:
+            finished.append("finished")
+
+    content = body()
+    # Started, so that closing it has a suspended frame to unwind and the `finally` above can run.
+    assert await anext(content) == b"chunk"
+    response = _AccountedStreamingResponse(content, cast(Any, _Accounting()))
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, Any]) -> None:
+        raise RuntimeError("the client went away")
+
+    with pytest.raises(RuntimeError) as raised:
+        await response({"type": "http", "method": "POST", "path": "/", "headers": []}, receive, send)
+
+    assert finished == ["finished"]
+    # The exit that ended the request, not the close that failed on the way out — with the close failure chained on so neither is lost.
+    assert str(raised.value) == "the client went away"
+    assert str(raised.value.__cause__) == "closing the body blew up"

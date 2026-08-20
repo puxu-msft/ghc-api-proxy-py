@@ -5,8 +5,8 @@ Nothing before the first whole block, each block as a closed group, keep-alives 
 """
 
 import asyncio
-from collections.abc import AsyncIterator
-from contextlib import aclosing
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import aclosing, suppress
 from typing import Any, cast
 
 import orjson
@@ -427,3 +427,72 @@ async def test_a_response_assembles_even_when_upstream_changes_the_item_id() -> 
         "message_delta",
         "message_stop",
     ]
+
+
+async def _recorded_feed(payloads: list[bytes], closed: list[bool]) -> AsyncIterator[bytes]:
+    try:
+        for payload in payloads:
+            yield payload
+    finally:
+        closed.append(True)
+
+
+async def _hanging_upstream(closed: list[bool], reached: asyncio.Event) -> AsyncIterator[bytes]:
+    """One whole block, then the silence of a model that is still thinking."""
+    try:
+        for payload in anthropic_stream("one")[:3]:
+            yield payload
+        reached.set()
+        await asyncio.Event().wait()
+    finally:
+        closed.append(True)
+
+
+def _delivery(chunks: AsyncIterator[bytes]) -> AsyncGenerator[bytes]:
+    return stream_delivery(
+        chunks,
+        AnthropicAssembler(),
+        buffer=BlockBuffer(policy="block"),
+        settings=StreamSettings(sse_ping_interval=0),
+        message_id="m",
+        model="model",
+    )
+
+
+@pytest.mark.asyncio
+async def test_closing_the_delivery_closes_the_upstream_under_it() -> None:
+    # The promise this type is a generator for. A client that goes away mid-turn is ordinary — pressing Esc is this — and what it leaves behind is an upstream response nobody will read and nobody will close, held for as long as the model keeps thinking.
+    closed: list[bool] = []
+    delivery = _delivery(_recorded_feed(anthropic_stream("one"), closed))
+
+    async for _ in delivery:
+        break
+    assert closed == []
+    await delivery.aclose()
+
+    # Closed by the time `aclose()` returns, not a few ticks later once the collector reaches it.
+    assert closed == [True]
+
+
+@pytest.mark.asyncio
+async def test_a_pull_in_flight_does_not_outlive_the_delivery() -> None:
+    # The worse half of the same story: with a pull suspended on an upstream that has gone quiet, the pull task pinned the upstream's frame, so it could not even be collected. It stayed pending for the life of the process.
+    closed: list[bool] = []
+    reached = asyncio.Event()
+    delivery = _delivery(_hanging_upstream(closed, reached))
+    before = asyncio.all_tasks()
+
+    pump = asyncio.create_task(_drain(delivery))
+    await asyncio.wait_for(reached.wait(), 2)
+    pump.cancel()
+    with suppress(asyncio.CancelledError):
+        await pump
+    await delivery.aclose()
+
+    assert closed == [True]
+    assert asyncio.all_tasks() - before - {asyncio.current_task()} == set()
+
+
+async def _drain(delivery: AsyncGenerator[bytes]) -> None:
+    async for _ in delivery:
+        pass

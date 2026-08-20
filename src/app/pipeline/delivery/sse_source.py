@@ -66,15 +66,22 @@ async def read_events(chunks: AsyncIterator[bytes]) -> AsyncIterator[SseEvent]:
     """Read events off a chunked byte stream.
 
     Chunk boundaries are arbitrary, so a frame split across two reads must still parse.
+
+    Closing this closes the byte stream under it. A bare `async for` does not: closed early, GeneratorExit unwinds past the loop and leaves the source suspended, to be closed whenever the collector happens to reach it. That is the difference between an upstream HTTP response released at the moment the client goes away and one released a few ticks later — or not at all, once anything holds a reference to the frame.
     """
     buffer = bytearray()
-    async for chunk in chunks:
-        buffer.extend(chunk)
-        for frame in iter_frames(buffer):
-            event = parse_frame(frame)
+    close = getattr(chunks, "aclose", None)
+    try:
+        async for chunk in chunks:
+            buffer.extend(chunk)
+            for frame in iter_frames(buffer):
+                event = parse_frame(frame)
+                if event is not None:
+                    yield event
+        if buffer.strip():
+            event = parse_frame(bytes(buffer))
             if event is not None:
                 yield event
-    if buffer.strip():
-        event = parse_frame(bytes(buffer))
-        if event is not None:
-            yield event
+    finally:
+        if close is not None:
+            await close()
