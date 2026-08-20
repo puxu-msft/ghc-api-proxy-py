@@ -70,8 +70,6 @@ class TimeoutConfig(FrozenModel):
     )
     response_header: int = 300
     response_header_overrides: dict[str, int] = Field(default_factory=dict)
-    upstream_keepalive: int = 15
-    upstream_h2_ping: int = 15
     stale_request_max_age: int = 600
     request_deadline: int = 0
 

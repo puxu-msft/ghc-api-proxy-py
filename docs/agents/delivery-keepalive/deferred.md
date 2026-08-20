@@ -16,59 +16,69 @@
 
 `docs/.human-controlled/config.example.yaml:404-409` 定义的窗口是「上游都没有响应头」且合成物是「半块」；实现从响应头**到达之后**才起算，且只发 `message_start`。**用户已表示会自行修订人写文档**，本项目侧不动实现，等文档定稿后再对齐。
 
-## 已裁决，待实现
+## 已实现（`1a2daac`，本轮）
 
-### D-3a `upstream_transport.tcp_keepalive_interval` 该怎么办 —— **用户裁决 A1**
+### D-3a `tcp_keepalive_interval` 实现成真的 `SO_KEEPALIVE` —— 用户裁决 A1
 
-**2026-08-20 用户裁决：实现成真的 `SO_KEEPALIVE`（A1）。** 下面的选项表保留备查。
+`SO_KEEPALIVE` 开启，`TCP_KEEPIDLE` 与 `TCP_KEEPINTVL` 取配置值，探测四次。上游腿因此有了它名字一直承诺、却从未有过的活性探测——**射程见本文「代理在场时 keep-alive 到底探的是谁」一节：直连时探的是上游本身，有代理时只到代理那一跳。**
 
-实现这条时必须先证明的一件事：自建 `AsyncHTTPTransport` 会让 httpx 关掉 `HTTP_PROXY`/`HTTPS_PROXY` 支持（`httpx/_client.py:1399`），而人写文档明确规定了代理的优先级——**必须自己补回环境变量代理解析，并且用测试钉住它没有静默回归**。另需一个独立的连接池过期时长配置键（新键在人写文档里，落地时请用户过目）。顺带可以把 D-3b、D-3c 一并修掉，它们同在 `composition.py` 那几行。
+A1 那个已知陷阱**已补偿并钉住**：自建 transport 会让 httpx 关掉 `HTTP_PROXY`/`HTTPS_PROXY`（`allow_env_proxies` 是 `trust_env and transport is None`），所以环境变量代理映射在 `composition.py` 里重建并挂载，由 `test_environment_proxies_are_still_honoured` 保证 httpx 改动这个私有辅助时会**红**，而不是代理支持静默消失。
 
-名字承诺「TCP 保活间隔」，实际被换算成 `httpx.Limits(keepalive_expiry=...)`——那是**连接池里一条空闲连接能躺多久才被回收**，从不往 socket 写任何字节，且请求在飞期间根本不生效（`_expire_at` 为 `None`）。所以它在任何意义上都不是保活。
+**不新增任何配置键，也没有兼容范围要谈。** 这一点我先前搞错了，用户当场指出：所谓「连接池保留时长」**从来没有被裁决过**——它是这个 bug 的副产物，`tcp_keepalive_interval` 被错映射成 `keepalive_expiry`，于是碰巧产生了 15 秒。我却把这个副产物当成契约，为保住它新造了一个面向用户的键 `pool_idle_expiry`，还写了迁移规则。那是在给一个缺陷的意外行为立约，并擅自铸造配置面。
 
-三个互斥选项：
+已撤销：`pool_idle_expiry` 删除，`composition.py` 不再向 transport 传 `limits`，池的一切回到 httpx 自己的默认。核对过用户亲笔 `docs/.human-controlled/` 里从未出现 `keepalive_expiry` / 池相关的任何裁决。
 
-| | 动作 | 代价 | 后果 |
-|---|---|---|---|
-| **A1** | 实现成真的 `SO_KEEPALIVE`（`AsyncHTTPTransport(socket_options=[SO_KEEPALIVE, TCP_KEEPIDLE, TCP_KEEPINTVL, TCP_KEEPCNT])`），并给连接池过期时长一个自己的键 | 中。**自建 transport 会让 httpx 关掉 `HTTP_PROXY`/`HTTPS_PROXY` 支持**（`httpx/_client.py:1399`），必须自己补回环境变量代理解析——而人写文档明写了该优先级。另需一个新配置键（在人写文档里，要用户点头） | 名实相符；上游腿获得当前唯一默认开启的活性探测 |
-| **A2** | 只改名，承认它是连接池空闲过期时长 | 低，但**改的是人写文档**，只能由用户做 | 名实相符；上游腿继续没有任何活性探测 |
-| **A3** | 保留现状加注释 | 极低 | 一个键继续承载两个不相干语义，下一个读它的人会再撞一次 |
+### D-3b `0 = 禁用` 的语义反转 —— 随错映射一并消失
 
-**调查方的偏好是 A1**，理由不是「防中间设备掐断」——那条风险在本部署形态（直连、无代理、静默尺度差一个数量级、唯一观测到的连接死亡是 GOAWAY）判**低**——而是**上游腿的三道守卫当前全部失效**（两道默认关，第三道因 D-6 失效），`SO_KEEPALIVE` 是唯一成本可控、默认开启、不依赖猜测的活性探测。A3 被判为不可接受：它把一个已知的错误命名再冻结一轮。
+反转本身是错映射的产物：一个名为「keepalive 间隔」的键，0 被映射成「连接池永不回收空闲连接」。错映射删掉之后，`tcp_keepalive_interval: 0` 就是字面意思——不开 keepalive。没有第二个键需要为 0 定义语义。
 
-`SO_KEEPALIVE` 的可行性已实测（带反向对照：设了读回 15/15/4，对照组读回 `SO_KEEPALIVE 0`）。
+### D-3c 出站连接数无上限 —— 已修，且不是靠新配置
 
-## 缺陷（无岔路，排期修）
+根因是「只传了一个字段的 `Limits`」：`httpx.Limits(keepalive_expiry=...)` 让另外两个值留成 `None`，httpcore 读成 `sys.maxsize`。现在**根本不传 `limits`**，httpx 自己的 100 / 20 / 5.0 就是生效值。不为此立任何配置项，也不写死任何数字。
 
-### D-3b `0 = 禁用` 的语义在实现里是反的
+## 已裁决
 
-`composition.py:73` 把 0 映射成 `keepalive_expiry=None`，而 `None` 让 `has_expired()` 的时间分支恒假，即空闲连接**永不**因超时被回收。人写文档写的是「0 = 禁用」，落地成了「关掉空闲回收」。
+### D-3f SOCKS 路径的 keep-alive —— 用户裁决 S2：接受限制并告警
 
-### D-3c 出站连接数当前无上限
+**用户 2026-08-20 裁决：接受这个限制，保留告警。** 当前代码已是这个形态：配置或环境里出现 SOCKS 代理且 keepalive 开启时，构造期发一条 warning，只记 origin 不记凭据。
 
-`composition.py:82` 只传了 `keepalive_expiry`，`max_connections` / `max_keepalive_connections` 为 `None`，httpcore 换成 `sys.maxsize`。httpx 自己的默认与 `docs/2604-rewrite/streaming-resilience.md:245` 写的都是 100 / 20。
+原因：`AsyncSOCKSProxy` 根本没有 `socket_options` 参数——不是「传了没生效」（HTTP 代理那条是，已覆写修好），而是「没得传」。要覆盖它得接管 `AsyncNetworkBackend` 并自己构造 SOCKS 池。
 
-### D-3d `upstream_transport.http2_ping_interval` 无法实现，应固化为结论
+### 一并厘清：代理在场时 keep-alive 到底探的是谁
 
-httpcore 1.0.9 不提供发送 PING 的接口；h2 有 `ping()` 但 httpcore 从不调用、也无后台读循环。**缺能力的是 httpcore**，实现等于分叉传输层。键保留 + 现有「NOT IMPLEMENTED」标注即可，另需把 `docs/2604-rewrite/streaming-resilience.md:264-280` 那段伪代码改写成这个结论。
+用户在裁决时追问 SOCKS 路径的 `SO_KEEPALIVE` 是不是只能表示「我们 ↔ SOCKS 代理」。**是，而且这不限于 SOCKS。**
 
-### D-3e `settings.py:73-74` 的 `upstream_keepalive` / `upstream_h2_ping` 是死键
+TCP keep-alive 是逐连接的，而代理会终结 TCP 连接。实测（`getpeername()`）：
 
-零引用，非人写文档内容，且它们所在的 `AppSettings` 整体是不被服务的 legacy 配置面。删除不触碰任何已裁决的东西。
+| 形态 | socket 对端 | 这条 keep-alive 说明什么 |
+|---|---|---|
+| 直连 | 上游本身 | 上游还活着 |
+| HTTP forward 代理 | 代理 | 到代理这一跳还活着 |
+| HTTPS CONNECT 隧道 | **代理**（不是 TLS origin） | 同上 |
+| SOCKS | 代理（当前读回 0，即什么也没探） | —— |
 
-### D-5 `response_header_overrides` 被拿去覆盖 `upstream_request_deadline`
+**所以「HTTP 代理路径的 keep-alive 已修好」这句话的射程只到第一跳**，代理到上游那一段是代理自己的 socket，我们既看不见也设不了选项。我先前把它说成「上游腿获得活性探测」是说过了头，已在 `schema.py`、`composition.py` 与本节更正。只有直连形态下这个键才谈得上探测上游本身——而本项目的部署形态正是直连。
 
-`src/app/server/handler.py` 把 `timeouts.response_header_overrides` 当作 `upstream_request_deadline` 的按模型覆盖表。这是两个不同的量。**正确写法唯一**：`attempt_deadline = timeouts.upstream_request_deadline`——不存在 `upstream_request_deadline_overrides`，人写文档与 schema 都没有这个概念。当前部署下**零行为变化**（两张覆盖表都是 `{}`），不碰红任何现有测试。
+## 已由并行会话接手
 
-与之相邻但独立的两件事：`response_header` 这个守卫**从未实现**（工作项）；**要不要新增一张 deadline 覆盖表**（这一条才是裁决项，但优先级低，等有人真的需要按模型区分再提）。
+### D-3d `http2_ping_interval` 固化为结论 —— 已完成
 
-### D-6 `upstream_request_deadline` 对流式请求实际不生效
+并行会话已把 `http2` 拆成独立键，并给 `http2_ping_interval` 加上 NOT IMPLEMENTED 标注。剩下的只有文档侧那张表（见文末）。
 
-`src/app/pipeline/direct_driver/base.py` 的 docstring 称该 deadline「bounds the whole attempt」。**这不是文档写错，是实现漏了**：`asyncio.timeout` 只包住 `await send`，流式请求拿到响应头即退出该上下文，body 由 `pipeline_app.py` 在上下文之外迭代。docstring 描述的正是人写文档 `config.example.yaml:308-314` 的语义（拦住一直滴水但永不结束的尝试），所以**只改 docstring 等于用实现判人写文档的负**。
+### D-5 / D-6 上游超时语义 —— 并行会话正在做
 
-与「绝不误杀合法长思考」不冲突：那条不变量管的是静默类终止器，且 1200s 远高于实测的客户端 300s 天花板。
+2026-08-20 查看其未提交改动：`direct_driver/base.py` 已把 `response_header_timeout` 拆成独立参数（D-5 的错配），并把 `attempt.deadline_at` 固定成整次尝试的时刻、由交付链承担 body 那一段（D-6），docstring 也改成了与实测一致的说法。**我不重复做。**
 
-**同一个病 `handle_bounded` 也有一份**，建议合成一个 slice 一起修。
+## 已删除
+
+### D-3e `settings.py` 的 `upstream_keepalive` / `upstream_h2_ping` —— 已被取代，已删
+
+用户 2026-08-20 裁决：被取代就删。逐条核对确实被取代——原始意图在 `.dev/docs/archived-2604-rewrite/streaming-resilience.md:284-288`：
+
+- `timeouts.upstream_keepalive`（「上游 TCP keepalive 首次探测延迟秒数」）→ 由 `upstream_transport.tcp_keepalive_interval` 取代，且该文档给出的代码草案（`SO_KEEPALIVE` + `TCP_KEEPIDLE 15` + `TCP_KEEPINTVL 15`）正是本轮实现的东西。
+- `timeouts.upstream_h2_ping`（「上游 HTTP/2 PING 心跳间隔秒数」）→ 由 `upstream_transport.http2_ping_interval` 取代。**这一项为什么至今没实现**：httpx 不暴露周期性 PING 的接口，httpcore 1.0.9 从不调用 h2 的 `ping()`、也没有后台读循环，没有可挂接的点，实现等于分叉传输层。该文档当年已写到「需要在 httpcore 的连接对象层面接入」，本轮把它坐实为「在当前依赖版本上做不到」，并写进了 `http2_ping_interval` 的注释。
+
+先前我用 `extra="forbid"`（删键会让写着它的配置加载失败）当理由挡下删除。那个风险是真的，但射程比我说的小：`AppSettings` 只从 `GHC_` 前缀的环境变量读，这两个键只出现在一份已归档的我方设计文档里，从未进入用户亲笔配置。
 
 ## 暂缓
 
@@ -78,4 +88,4 @@ httpcore 1.0.9 不提供发送 PING 的接口；h2 有 `ping()` 但 httpcore 从
 
 ## 文档侧顺手项（无岔路）
 
-`docs/2604-rewrite/streaming-resilience.md:284-288` 的配置表用的是旧 `AppSettings` 键名，与新链路的 `upstream_transport.*` 对不上；`:286` 的 `upstream.keepalive_expiry = 30` 也不是新链路的生效值。该表应按实际重写。
+该文档已被并行会话移到 `.dev/docs/archived-2604-rewrite/streaming-resilience.md`，属归档件。其 `:284-288` 的配置表用旧 `AppSettings` 键名，且 `upstream.keepalive_expiry = 30` 从来不是生效值——但归档件记录的是当时的设计意图，不是当前事实，**不必回头改它**。当前事实以 `schema.py` 的注释与本文件为准。

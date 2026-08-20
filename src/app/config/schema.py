@@ -44,6 +44,9 @@ NOT_HOT_RELOADABLE = frozenset(
         "reactive_rate_limiter",
         "server.host",
         "server.port",
+        # The outbound client is built once, at startup. Socket options are fixed when a connection is opened, so a reload that accepted these would report a value no live connection is using.
+        "upstream_transport.http2",
+        "upstream_transport.tcp_keepalive_interval",
         "upstream_request_retry.max_total",
     }
 )
@@ -125,11 +128,13 @@ class ModelProviderConfig(Section):
 
 
 class UpstreamTransportConfig(Section):
+    # A real TCP keep-alive: seconds of idle before the first probe, and seconds between probes. 0 disables it. Until 2026-08-20 this key was mapped to httpx's connection-pool idle expiry instead, which never writes a byte to the socket and does not apply at all while a request is in flight — so the name promised liveness the transport never had. Nothing replaces that mapping: pooling is httpx's own business and was never a setting anyone chose.
+    # What it can tell you depends on whether a proxy is in the way. TCP keep-alive is per-connection, and a proxy terminates the connection: measured 2026-08-20, our socket's peer is the origin when direct and the proxy when tunnelling through one. So with a proxy configured this probes the hop to the proxy and says nothing about upstream, whose connection is the proxy's to keep.
     tcp_keepalive_interval: int = Field(default=15, ge=0)
     # Set false to negotiate HTTP/1.1 upstream. Ruled 2026-08-20, after one upstream GOAWAY killed every in-flight stream at once: HTTP/2 multiplexes them onto one connection, so one connection-level event is one blast radius. HTTP/1.1 gives each request its own connection and costs more handshakes. See `.dev/docs/upstream/h2-goaway/findings.md`.
     # Authoritative on its own. It used to be derived from `http2_ping_interval > 0`, which meant a key named after a ping interval silently decided the protocol.
     http2: bool = True
-    # NOT IMPLEMENTED by the current transport, and kept rather than deleted because it is a user-authored key with a spec behind it. httpx 0.28.1 / httpcore 1.0.9 expose no HTTP/2 PING interval to configure, so nothing reads this value today. It does not disable HTTP/2 — `http2` above does.
+    # NOT IMPLEMENTED, and it cannot be from here. `docs/.dev/…/streaming-resilience.md` asked for a periodic HTTP/2 PING because some intermediaries retire a connection on application-level silence, which an L4 keep-alive cannot answer. httpx exposes no such interval; httpcore 1.0.9 never calls h2's `ping()` and runs no background read loop, so there is nothing to hook without forking the transport. Kept rather than deleted because it is a user-authored key with a spec behind it. It does not disable HTTP/2 — `http2` above does. `timeouts.upstream_h2_ping`, the legacy spelling of the same intent, was deleted in favour of this one.
     http2_ping_interval: int = Field(default=15, ge=0)
     # How many concurrent requests may share one upstream connection. 0 = unlimited, which is httpx's own behaviour and what this ran with until 2026-08-20.
     # Bounds the blast radius of a connection-level event: one GOAWAY ends every stream riding that connection, and on 2026-08-20 that was four requests at the same instant. At N, it is at most N.

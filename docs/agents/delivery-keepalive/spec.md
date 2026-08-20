@@ -96,18 +96,35 @@
 
 **这一侧与 §2 没有任何共享的计时器、配置项或代码路径。** 它的正确做法是 socket 层的 `SO_KEEPALIVE` 或 HTTP/2 PING 帧，而不是往下游写字节；下游的保活也永远不能替它工作。
 
-**当前实现状态（事实陈述，非本规范承诺的行为）：** `upstream_transport` 只有两个配置项，两个都没有实现名字所承诺的东西——
+**本节初版写的是「两个配置项都没有实现名字所承诺的东西」。2026-08-20 用户裁决 A1 之后，`tcp_keepalive_interval` 已经实现，以下是当前状态。**
 
-- `tcp_keepalive_interval` 被映射为 `httpx.Limits(keepalive_expiry=...)`，那是**连接池里空闲连接的保留期限**；全仓没有任何地方设置 `SO_KEEPALIVE`。
-- `http2_ping_interval` **什么都不做**。它原先兼职决定协议（`http2 = interval > 0`），而并行会话已用独立的 `upstream_transport.http2` 取代了那个用法，于是它连副作用都没有了；没有任何地方按这个间隔发送 HTTP/2 PING。**这不是接线遗漏而是能力缺口**：httpcore 1.0.9 不提供发送 PING 的接口，h2 库有 `ping()` 但 httpcore 从不调用、也没有后台读循环，实现它等于分叉传输层。
-- **`0 = 禁用` 这个承诺在实现里是反的**：`composition.py:73` 把 0 映射成 `keepalive_expiry=None`，而 `None` 让过期判定恒假，即空闲连接**永不**因超时被回收——正好是「禁用」的反面。
-- 同一行还漏了连接数上限：`composition.py:82` 没传 `max_connections` / `max_keepalive_connections`，httpcore 把 `None` 换成 `sys.maxsize`，因此出站连接数当前无上限，而 httpx 自己的默认与本项目设计文档写的都是 100 / 20。
+### `tcp_keepalive_interval`：已实现，但要说清它探的是哪一跳
 
-见 `src/app/server/composition.py:60-81`。相关的既有设计文档是 `docs/2604-rewrite/streaming-resilience.md`，命名与本节不一致，需要对齐。
+`SO_KEEPALIVE` 开启，`TCP_KEEPIDLE` 与 `TCP_KEEPINTVL` 取配置值，探测四次；0 关闭。
 
-**另有两个同类死旋钮**：`src/app/config/settings.py:73-74` 的 `upstream_keepalive` 与 `upstream_h2_ping`（各默认 15），在 `src/` 内除定义外**没有任何引用**。连同上面两个，上游侧一共四个旋钮都不产生任何保活行为。
+**射程取决于有没有代理。** TCP keep-alive 是逐连接的，而代理会终结 TCP 连接。实测 `getpeername()`：直连时 socket 对端是上游本身，走 CONNECT 隧道时对端是**代理**而不是 origin。所以：
 
-**【需用户裁决】这两个名字目前在说谎。** 处置方式有三条——实现它们、改名以匹配实际行为、或撤掉——但它们出现在用户亲笔的 `docs/.human-controlled/config.example.yaml` 里，**本规范不作提议性裁决，只记录事实并交回**。在裁决之前，任何人都不得因为「上游侧已经有保活了」而放松 §2 的要求，因为它其实没有。
+| 形态 | 这条 keep-alive 说明什么 |
+|---|---|
+| 直连 | 上游还活着 |
+| HTTP forward 代理 / HTTPS CONNECT 隧道 | 到代理这一跳还活着；代理到上游那一段是代理自己的 socket，我们既看不见也设不了选项 |
+| SOCKS | 什么也没探（见下） |
+
+**本项目的部署形态是直连**，所以这个键在实际部署里确实探的是上游本身。但不要把「代理路径也修好了」读成「代理路径也能探到上游」。
+
+### `http2_ping_interval`：不是接线遗漏，是能力缺口
+
+httpcore 1.0.9 不提供发送 PING 的接口，h2 库有 `ping()` 但 httpcore 从不调用、也没有后台读循环，实现它等于分叉传输层。键保留并标注 NOT IMPLEMENTED。它原先兼职决定协议（`http2 = interval > 0`），并行会话已用独立的 `upstream_transport.http2` 取代那个用法。
+
+### SOCKS 路径：用户裁决接受限制并告警
+
+`httpcore.AsyncSOCKSProxy` **根本没有 `socket_options` 参数**——与 HTTP 代理那条不同（那是收了参数却在 `create_connection` 丢掉，已覆写修好）。实测 SOCKS5 连接读回 `SO_KEEPALIVE=0`。2026-08-20 用户裁决：**接受这个限制，构造期告警**（覆盖配置与环境变量两种来源，只记 origin 不记凭据）。
+
+### 不再由本项目决定的事
+
+连接池的保留时长与连接数上限**不是本项目的配置**。初版曾把 `tcp_keepalive_interval` 错映射产生的 15 秒当成需要保住的行为、并为此新造了一个键——用户指出那从来没有被裁决过，是缺陷的副产物。现已撤销：`composition.py` 不向 transport 传 `limits`，httpx 自己的默认即生效值。
+
+`src/app/config/settings.py` 的 `upstream_keepalive` / `upstream_h2_ping` 是这两项的 legacy 拼写，均已被上述键取代并删除。
 
 ## 4. 相邻但不属于本规范的
 

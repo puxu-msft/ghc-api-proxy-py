@@ -97,7 +97,14 @@ def cap_streams_per_connection(client: httpx.AsyncClient, max_streams: int) -> N
     if max_streams < 1:
         raise ValueError(f"max_streams must be >= 1, got {max_streams}")
 
-    transport = client._transport
+    _cap_one(client._transport, max_streams)
+    # Mounted transports too. A client built with explicit `mounts` — which is how the composition root keeps `HTTP_PROXY` / `HTTPS_PROXY` working while handing httpx a transport of its own — routes proxied traffic through them and not through `_transport`, so capping only the default would leave the cap doing nothing for exactly the destinations a proxy serves.
+    for mounted in client._mounts.values():
+        if mounted is not None:
+            _cap_one(mounted, max_streams)
+
+
+def _cap_one(transport: httpx.AsyncBaseTransport, max_streams: int) -> None:
     pool = getattr(transport, "_pool", None)
     if pool is None:
         raise TypeError(f"{type(transport).__name__} carries no connection pool to cap")
