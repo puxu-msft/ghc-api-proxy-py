@@ -1,0 +1,335 @@
+Traceback (most recent call last):
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpx/_transports/default.py", line 101, in map_httpcore_exceptions
+    yield
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpx/_transports/default.py", line 271, in __aiter__
+    async for part in self._httpcore_stream:
+        yield part
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpcore/_async/connection_pool.py", line 407, in __aiter__
+    raise exc from None
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpcore/_async/connection_pool.py", line 403, in __aiter__
+    async for part in self._stream:
+        yield part
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpcore/_async/http2.py", line 585, in __aiter__
+    raise exc
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpcore/_async/http2.py", line 575, in __aiter__
+    async for chunk in self._connection._receive_response_body(
+    ...<2 lines>...
+        yield chunk
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpcore/_async/http2.py", line 316, in _receive_response_body
+    event = await self._receive_stream_event(request, stream_id)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpcore/_async/http2.py", line 336, in _receive_stream_event
+    await self._receive_events(request, stream_id)
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpcore/_async/http2.py", line 355, in _receive_events
+    raise RemoteProtocolError(self._connection_terminated)
+httpcore.RemoteProtocolError: <ConnectionTerminated error_code:0, last_stream_id:2147483647, additional_data:None>
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/xp/src/ghc-api-proxy-py/exp/260820-h2-goaway-poc/run_poc.py", line 184, in run_client
+    async for chunk in resp.aiter_bytes():
+        print(f"  chunk received: {chunk!r}")
+        chunks.append(chunk)
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpx/_models.py", line 997, in aiter_bytes
+    async for raw_bytes in self.aiter_raw():
+    ...<2 lines>...
+            yield chunk
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpx/_models.py", line 1055, in aiter_raw
+    async for raw_stream_bytes in self.stream:
+    ...<2 lines>...
+            yield chunk
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpx/_client.py", line 176, in __aiter__
+    async for chunk in self._stream:
+        yield chunk
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpx/_transports/default.py", line 270, in __aiter__
+    with map_httpcore_exceptions():
+         ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/home/xp/.local/share/uv/python/cpython-3.14.2-linux-x86_64-gnu/lib/python3.14/contextlib.py", line 162, in __exit__
+    self.gen.throw(value)
+    ~~~~~~~~~~~~~~^^^^^^^
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpx/_transports/default.py", line 118, in map_httpcore_exceptions
+    raise mapped_exc(message) from exc
+httpx.RemoteProtocolError: <ConnectionTerminated error_code:0, last_stream_id:2147483647, additional_data:None>
+Traceback (most recent call last):
+  File "/home/xp/src/ghc-api-proxy-py/exp/260820-h2-goaway-poc/run_poc.py", line 184, in run_client
+    async for chunk in resp.aiter_bytes():
+        print(f"  chunk received: {chunk!r}")
+        chunks.append(chunk)
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpx/_models.py", line 997, in aiter_bytes
+    async for raw_bytes in self.aiter_raw():
+    ...<2 lines>...
+            yield chunk
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpx/_models.py", line 1055, in aiter_raw
+    async for raw_stream_bytes in self.stream:
+    ...<2 lines>...
+            yield chunk
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpx/_client.py", line 176, in __aiter__
+    async for chunk in self._stream:
+        yield chunk
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpx/_transports/default.py", line 271, in __aiter__
+    async for part in self._httpcore_stream:
+        yield part
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpcore/_async/connection_pool.py", line 407, in __aiter__
+    raise exc from None
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpcore/_async/connection_pool.py", line 403, in __aiter__
+    async for part in self._stream:
+        yield part
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpcore/_async/http2.py", line 585, in __aiter__
+    raise exc
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpcore/_async/http2.py", line 575, in __aiter__
+    async for chunk in self._connection._receive_response_body(
+    ...<2 lines>...
+        yield chunk
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpcore/_async/http2.py", line 316, in _receive_response_body
+    event = await self._receive_stream_event(request, stream_id)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpcore/_async/http2.py", line 336, in _receive_stream_event
+    await self._receive_events(request, stream_id)
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpcore/_async/http2.py", line 364, in _receive_events
+    events = await self._read_incoming_data(request)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpcore/_async/http2.py", line 457, in _read_incoming_data
+    events: list[h2.events.Event] = self._h2_state.receive_data(data)
+                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/h2/connection.py", line 1514, in receive_data
+    events.extend(self._receive_frame(frame))
+                  ~~~~~~~~~~~~~~~~~~~^^^^^^^
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/h2/connection.py", line 1540, in _receive_frame
+    frames, events = self._frame_dispatch_table[frame.__class__](frame)
+                     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/h2/connection.py", line 1736, in _receive_data_frame
+    events = self.state_machine.process_input(
+        ConnectionInputs.RECV_DATA,
+    )
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/h2/connection.py", line 265, in process_input
+    raise ProtocolError(msg) from e
+h2.exceptions.ProtocolError: Invalid input ConnectionInputs.RECV_DATA in state ConnectionState.CLOSED
+Traceback (most recent call last):
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpx/_transports/default.py", line 101, in map_httpcore_exceptions
+    yield
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpx/_transports/default.py", line 394, in handle_async_request
+    resp = await self._pool.handle_async_request(req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpcore/_async/connection_pool.py", line 256, in handle_async_request
+    raise exc from None
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpcore/_async/connection_pool.py", line 236, in handle_async_request
+    response = await connection.handle_async_request(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        pool_request.request
+        ^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpcore/_async/connection.py", line 103, in handle_async_request
+    return await self._connection.handle_async_request(request)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpcore/_async/http2.py", line 187, in handle_async_request
+    raise exc
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpcore/_async/http2.py", line 150, in handle_async_request
+    status, headers = await self._receive_response(
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        request=request, stream_id=stream_id
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpcore/_async/http2.py", line 294, in _receive_response
+    event = await self._receive_stream_event(request, stream_id)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpcore/_async/http2.py", line 336, in _receive_stream_event
+    await self._receive_events(request, stream_id)
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpcore/_async/http2.py", line 355, in _receive_events
+    raise RemoteProtocolError(self._connection_terminated)
+httpcore.RemoteProtocolError: <ConnectionTerminated error_code:0, last_stream_id:2147483647, additional_data:None>
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/xp/src/ghc-api-proxy-py/exp/260820-h2-goaway-poc/run_poc.py", line 178, in run_client
+    async with client.stream(
+               ~~~~~~~~~~~~~^
+        "GET", f"https://127.0.0.1:{port}/test"
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ) as resp:
+    ^
+  File "/home/xp/.local/share/uv/python/cpython-3.14.2-linux-x86_64-gnu/lib/python3.14/contextlib.py", line 214, in __aenter__
+    return await anext(self.gen)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpx/_client.py", line 1583, in stream
+    response = await self.send(
+               ^^^^^^^^^^^^^^^^
+    ...<4 lines>...
+    )
+    ^
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpx/_client.py", line 1629, in send
+    response = await self._send_handling_auth(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<4 lines>...
+    )
+    ^
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpx/_client.py", line 1657, in _send_handling_auth
+    response = await self._send_handling_redirects(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+    )
+    ^
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpx/_client.py", line 1694, in _send_handling_redirects
+    response = await self._send_single_request(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpx/_client.py", line 1730, in _send_single_request
+    response = await transport.handle_async_request(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpx/_transports/default.py", line 393, in handle_async_request
+    with map_httpcore_exceptions():
+         ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/home/xp/.local/share/uv/python/cpython-3.14.2-linux-x86_64-gnu/lib/python3.14/contextlib.py", line 162, in __exit__
+    self.gen.throw(value)
+    ~~~~~~~~~~~~~~^^^^^^^
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpx/_transports/default.py", line 118, in map_httpcore_exceptions
+    raise mapped_exc(message) from exc
+httpx.RemoteProtocolError: <ConnectionTerminated error_code:0, last_stream_id:2147483647, additional_data:None>
+Traceback (most recent call last):
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpx/_transports/default.py", line 101, in map_httpcore_exceptions
+    yield
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpx/_transports/default.py", line 394, in handle_async_request
+    resp = await self._pool.handle_async_request(req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpcore/_async/connection_pool.py", line 256, in handle_async_request
+    raise exc from None
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpcore/_async/connection_pool.py", line 236, in handle_async_request
+    response = await connection.handle_async_request(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        pool_request.request
+        ^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpcore/_async/connection.py", line 103, in handle_async_request
+    return await self._connection.handle_async_request(request)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpcore/_async/http2.py", line 187, in handle_async_request
+    raise exc
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpcore/_async/http2.py", line 150, in handle_async_request
+    status, headers = await self._receive_response(
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        request=request, stream_id=stream_id
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpcore/_async/http2.py", line 294, in _receive_response
+    event = await self._receive_stream_event(request, stream_id)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpcore/_async/http2.py", line 336, in _receive_stream_event
+    await self._receive_events(request, stream_id)
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpcore/_async/http2.py", line 355, in _receive_events
+    raise RemoteProtocolError(self._connection_terminated)
+httpcore.RemoteProtocolError: <ConnectionTerminated error_code:0, last_stream_id:0, additional_data:None>
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/xp/src/ghc-api-proxy-py/exp/260820-h2-goaway-poc/run_poc.py", line 178, in run_client
+    async with client.stream(
+               ~~~~~~~~~~~~~^
+        "GET", f"https://127.0.0.1:{port}/test"
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ) as resp:
+    ^
+  File "/home/xp/.local/share/uv/python/cpython-3.14.2-linux-x86_64-gnu/lib/python3.14/contextlib.py", line 214, in __aenter__
+    return await anext(self.gen)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpx/_client.py", line 1583, in stream
+    response = await self.send(
+               ^^^^^^^^^^^^^^^^
+    ...<4 lines>...
+    )
+    ^
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpx/_client.py", line 1629, in send
+    response = await self._send_handling_auth(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<4 lines>...
+    )
+    ^
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpx/_client.py", line 1657, in _send_handling_auth
+    response = await self._send_handling_redirects(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+    )
+    ^
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpx/_client.py", line 1694, in _send_handling_redirects
+    response = await self._send_single_request(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpx/_client.py", line 1730, in _send_single_request
+    response = await transport.handle_async_request(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpx/_transports/default.py", line 393, in handle_async_request
+    with map_httpcore_exceptions():
+         ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/home/xp/.local/share/uv/python/cpython-3.14.2-linux-x86_64-gnu/lib/python3.14/contextlib.py", line 162, in __exit__
+    self.gen.throw(value)
+    ~~~~~~~~~~~~~~^^^^^^^
+  File "/home/xp/src/ghc-api-proxy-py/.venv/lib/python3.14/site-packages/httpx/_transports/default.py", line 118, in map_httpcore_exceptions
+    raise mapped_exc(message) from exc
+httpx.RemoteProtocolError: <ConnectionTerminated error_code:0, last_stream_id:0, additional_data:None>
+====================================================================================================
+EXPERIMENT: control
+  No GOAWAY at all. Positive control: proves the harness itself (server + TLS + h2c-over-TLS + httpx client) can deliver two chunks across a 1s gap and end the stream cleanly. If this fails, nothing else means anything.
+----------------------------------------------------------------------------------------------------
+  status: 200
+  http_version: HTTP/2
+  chunk received: b'data: hello\n\n'
+  chunk received: b'data: bye\n\n'
+  STREAM ENDED NORMALLY. total bytes: b'data: hello\n\ndata: bye\n\n'
+
+====================================================================================================
+EXPERIMENT: goaway_sentinel_separate_reads
+  Main experiment. Server sends HEADERS+DATA1, then GOAWAY(NO_ERROR, last_stream_id=2**31-1), then 1s later a legitimate DATA2+END_STREAM for the SAME still-open stream, in a separate TCP write/read. Tests the user's hypothesis directly: does httpcore kill the in-flight read before DATA2 is ever delivered?
+----------------------------------------------------------------------------------------------------
+  status: 200
+  http_version: HTTP/2
+  chunk received: b'data: hello\n\n'
+  EXCEPTION RAISED: httpx.RemoteProtocolError: RemoteProtocolError('<ConnectionTerminated error_code:0, last_stream_id:2147483647, additional_data:None>')
+  full traceback:
+  is httpcore.RemoteProtocolError: False
+  is httpcore.ConnectionNotAvailable: False
+  is httpx.RemoteProtocolError: True
+  is bare h2.exceptions.ProtocolError (not wrapped by httpcore): False
+  wire-level confirmation: GOAWAY frame on wire: last_stream_id=2147483647 error_code=0 additional_data=b''
+
+====================================================================================================
+EXPERIMENT: goaway_sentinel_same_write
+  Same scenario, but GOAWAY and DATA2 are written in a single writer.write() call with no delay, biasing towards both frames landing in the SAME client-side socket read (and hence the same h2 receive_data() call). Explores whether the failure mode changes (bare h2.exceptions.ProtocolError instead of httpcore.RemoteProtocolError) when events are batched.
+----------------------------------------------------------------------------------------------------
+  status: 200
+  http_version: HTTP/2
+  chunk received: b'data: hello\n\n'
+  EXCEPTION RAISED: h2.exceptions.ProtocolError: ProtocolError('Invalid input ConnectionInputs.RECV_DATA in state ConnectionState.CLOSED')
+  full traceback:
+  is httpcore.RemoteProtocolError: False
+  is httpcore.ConnectionNotAvailable: False
+  is httpx.RemoteProtocolError: False
+  is bare h2.exceptions.ProtocolError (not wrapped by httpcore): True
+  wire-level confirmation: GOAWAY frame on wire: last_stream_id=2147483647 error_code=0 additional_data=b''
+
+====================================================================================================
+EXPERIMENT: goaway_before_headers_sentinel
+  Secondary question. Server sends GOAWAY(last_stream_id=2**31-1) BEFORE ever sending response headers for the in-flight request. Does the client get a fatal RemoteProtocolError, or the retryable ConnectionNotAvailable?
+----------------------------------------------------------------------------------------------------
+  EXCEPTION RAISED: httpx.RemoteProtocolError: RemoteProtocolError('<ConnectionTerminated error_code:0, last_stream_id:2147483647, additional_data:None>')
+  full traceback:
+  is httpcore.RemoteProtocolError: False
+  is httpcore.ConnectionNotAvailable: False
+  is httpx.RemoteProtocolError: True
+  is bare h2.exceptions.ProtocolError (not wrapped by httpcore): False
+  wire-level confirmation: GOAWAY frame on wire: last_stream_id=2147483647 error_code=0 additional_data=b''
+
+====================================================================================================
+EXPERIMENT: goaway_before_headers_low
+  Falsification-oriented control for the secondary question. Same as above but last_stream_id=0 (server claims to have fully processed nothing, including this very request). Prediction: NOW the client should get the retryable ConnectionNotAvailable, because stream_id(1) > last_stream_id(0) becomes true. If so, the determining factor is the last_stream_id value, not 'before vs after headers'.
+----------------------------------------------------------------------------------------------------
+  EXCEPTION RAISED: httpx.RemoteProtocolError: RemoteProtocolError('<ConnectionTerminated error_code:0, last_stream_id:0, additional_data:None>')
+  full traceback:
+  is httpcore.RemoteProtocolError: False
+  is httpcore.ConnectionNotAvailable: False
+  is httpx.RemoteProtocolError: True
+  is bare h2.exceptions.ProtocolError (not wrapped by httpcore): False
+  wire-level confirmation: GOAWAY frame on wire: last_stream_id=0 error_code=0 additional_data=b''
+
