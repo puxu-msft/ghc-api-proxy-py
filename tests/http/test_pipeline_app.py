@@ -214,12 +214,12 @@ def test_the_responses_leg_keeps_the_blank_blocks_it_was_given() -> None:
     ]
 
 
-def test_an_anthropic_server_tool_declaration_never_reaches_the_responses_endpoint() -> None:
-    """The whole turn used to be rejected over it: `Invalid value: 'web_search_20250305'`, measured 2026-08-20 against gpt-5.6-sol.
+def test_an_anthropic_web_search_declaration_reaches_upstream_in_its_own_spelling() -> None:
+    """The whole turn used to be rejected over it: `Invalid value: 'web_search_20250305'`, measured 2026-08-20 against gpt-5.6-sol. `{"type": "web_search"}` is answered 200 and the search really runs.
 
-    Asserted on the bytes upstream received rather than on the translator's return value, because the declaration reached the wire through a shortcut in the translator that every unit test of the tool conversion walked straight past — `_function_tool` left alone anything without an `input_schema`, on the reasoning that it must already be Responses-shaped, and an Anthropic server tool has no `input_schema` either.
+    Asserted on the bytes upstream received rather than on the translator's return value, because the declaration reached the wire through a shortcut that every unit test of the tool conversion walked straight past — `_function_tool` left alone anything without an `input_schema`, on the reasoning that it must already be Responses-shaped, and an Anthropic server tool has no `input_schema` either.
 
-    The function tool beside it is the other half: removing the declaration must not take the client's real tools with it.
+    The function tool beside it is the other half: translating the declaration must not disturb the client's real tools.
     """
     client, seen = make_client(lambda _: httpx.Response(200, json={"id": "resp_1"}))
     response = client.post(
@@ -236,11 +236,55 @@ def test_an_anthropic_server_tool_declaration_never_reaches_the_responses_endpoi
     )
 
     assert response.status_code == 200
-    assert b"web_search" not in seen[-1].read()
     sent = orjson.loads(seen[-1].read())
     assert sent["tools"] == [
-        {"type": "function", "name": "get_time", "parameters": {"type": "object"}}
+        {"type": "web_search"},
+        {"type": "function", "name": "get_time", "parameters": {"type": "object"}},
     ]
+    # The dated Anthropic spelling is the exact value upstream named when it refused the turn.
+    assert b"web_search_20250305" not in seen[-1].read()
+
+
+def test_a_streamed_search_is_delivered_as_a_line_rather_than_an_empty_block() -> None:
+    """Driven by a real upstream recording: `tests/cassettes/responses_web_search_stream.json`.
+
+    A `web_search_call` has no delta events and arrives with only an id, a status and a type on `output_item.added` — the query appears for the first time on `done`. Assembled the ordinary way, from the draft the `added` opened, it closed as an empty text block: the client got a blank content block ahead of every answer, and the one fact the item carried was thrown away.
+
+    The cassette is used rather than a hand-written stream because that asymmetry is exactly the kind of thing a stand-in gets wrong — it would have been written from what the events are assumed to carry.
+    """
+    cassette = orjson.loads(Path("tests/cassettes/responses_web_search_stream.json").read_bytes())
+    interaction = next(
+        i for i in cassette["interactions"] if "responses" in i["request"]["path"]
+    )
+    sse = "".join(chunk["text"] for chunk in interaction["response"]["chunks"]).encode()
+
+    client, _ = make_client(
+        lambda _: httpx.Response(
+            200, content=sse, headers={"content-type": "text/event-stream"}
+        )
+    )
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "gpt-model",
+            "messages": [{"role": "user", "content": "what day is it"}],
+            "max_tokens": 256,
+            "stream": True,
+            "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+        },
+    )
+
+    assert response.status_code == 200
+    deltas = [
+        orjson.loads(line[6:])["delta"]["text"]
+        for line in response.text.splitlines()
+        if line.startswith("data: ") and '"content_block_delta"' in line
+    ]
+    assert deltas[0].startswith("[web_search] "), deltas
+    assert "Thursday, August 20, 2026" in deltas[1]
+    # No block may be delivered empty: that was the symptom, and it is invisible in a test that
+    # only checks the answer arrived.
+    assert all(text for text in deltas), deltas
 
 
 def test_model_mapping_is_applied_before_the_upstream_call() -> None:

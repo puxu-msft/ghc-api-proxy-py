@@ -1,3 +1,4 @@
+import json
 import re
 from typing import Any
 
@@ -551,18 +552,18 @@ def test_a_tool_call_in_the_response_sets_the_anthropic_stop_reason() -> None:
     assert payload["stop_reason"] == "tool_use"
 
 
-def test_an_anthropic_server_tool_declaration_does_not_reach_the_responses_endpoint() -> None:
-    """`Invalid value: 'web_search_20250305'` — 400, measured 2026-08-20 against gpt-5.6-sol.
+def test_an_anthropic_web_search_declaration_becomes_the_spelling_this_endpoint_runs() -> None:
+    """`Invalid value: 'web_search_20250305'` — 400, measured 2026-08-20 against gpt-5.6-sol, while `{"type": "web_search"}` returns 200 and really executes the search.
 
-    The declaration carries no `input_schema`, which is what the function-tool rewrite keys on, so it used to travel across untouched and cost the whole turn. A client with web search switched on replays it every request, so the turn after the failure failed the same way.
+    The declaration carries no `input_schema`, which is what the function-tool rewrite keys on, so it used to travel across untouched and cost the whole turn.
 
-    The function tool beside it is the other half of the assertion: dropping the declaration must not take the client's real tools with it.
+    The function tool beside it is the other half: translating the declaration must not disturb the client's real tools.
     """
-    payload, semantic = default_registry().translate(
+    payload, _ = default_registry().translate(
         {
             **ANTHROPIC_REQUEST,
             "tools": [
-                {"type": "web_search_20250305", "name": "web_search", "max_uses": 5},
+                {"type": "web_search_20250305", "name": "web_search"},
                 {"name": "get_time", "input_schema": {"type": "object"}},
             ],
         },
@@ -570,28 +571,24 @@ def test_an_anthropic_server_tool_declaration_does_not_reach_the_responses_endpo
         target=WireFormat.OPENAI_RESPONSES,
     )
     assert payload["tools"] == [
-        {"type": "function", "name": "get_time", "parameters": {"type": "object"}}
+        {"type": "web_search"},
+        {"type": "function", "name": "get_time", "parameters": {"type": "object"}},
     ]
-    assert semantic.conversion.has(LossCode.SERVER_TOOL_NOT_CARRIED), semantic.conversion.losses
 
 
-def test_a_request_whose_only_tool_was_a_server_tool_sends_no_tools_key() -> None:
-    """Absent rather than `[]`. An empty array is a different thing to say than saying nothing, and it is not the spelling every request without tools already uses."""
-    payload, _ = default_registry().translate(
-        {
-            **ANTHROPIC_REQUEST,
-            "tools": [{"type": "web_search_20250305", "name": "web_search"}],
-        },
-        source=WireFormat.ANTHROPIC_MESSAGES,
-        target=WireFormat.OPENAI_RESPONSES,
+def test_the_next_dated_version_of_the_declaration_maps_too() -> None:
+    """Anthropic dates its server tools, so matching today's value literally would go quiet on the day it issues the next one."""
+    request = SemanticRequest(
+        model="gpt-5.6-sol",
+        tools=[{"type": "web_search_20991231", "name": "web_search"}],
     )
-    assert "tools" not in payload
+    assert to_openai_responses(request)["tools"] == [{"type": "web_search"}]
 
 
 def test_the_endpoints_own_web_search_spellings_are_left_alone() -> None:
     """The reason the predicate reads the date suffix and not the `web_search_` prefix.
 
-    All three are values this endpoint accepts — the last two appear by name in the enumeration it prints when it refuses one — and a prefix test would have removed them from a Responses-to-Responses crossing that had every right to them.
+    All three are values this endpoint accepts — the last two appear by name in the enumeration it prints when it refuses one — and a prefix test would have rewritten them on a Responses-to-Responses crossing that had every right to them.
     """
     request = SemanticRequest(
         model="gpt-5.6-sol",
@@ -606,37 +603,62 @@ def test_the_endpoints_own_web_search_spellings_are_left_alone() -> None:
     assert request.conversion.lossless, request.conversion.losses
 
 
-def test_the_next_dated_version_of_a_server_tool_is_caught_too() -> None:
-    """Anthropic dates its server tools, so matching today's value literally would go quiet on the day it issues the next one."""
+def test_a_user_location_travels_but_an_unknown_sub_key_does_not() -> None:
+    """`user_location` is echoed back verbatim in the 200, so it is forwarded; an unknown sub-parameter is measured to 400 the whole request, so it is removed rather than risked."""
     request = SemanticRequest(
         model="gpt-5.6-sol",
-        tools=[{"type": "web_search_20991231", "name": "web_search"}],
+        tools=[
+            {
+                "type": "web_search_20250305",
+                "name": "web_search",
+                "user_location": {
+                    "type": "approximate",
+                    "city": "Toronto",
+                    "region": None,
+                    "invented_key": "x",
+                },
+            }
+        ],
     )
-    assert "tools" not in to_openai_responses(request)
-    assert request.conversion.has(LossCode.SERVER_TOOL_NOT_CARRIED)
+    assert to_openai_responses(request)["tools"] == [
+        {
+            "type": "web_search",
+            # `region: None` is kept: upstream's own default echo contains nulls, so they are legal.
+            "user_location": {"type": "approximate", "city": "Toronto", "region": None},
+        }
+    ]
+    assert request.conversion.has(LossCode.SERVER_TOOL_CONSTRAINT_DROPPED)
 
 
-def test_web_fetch_is_left_for_its_own_repair() -> None:
-    """This endpoint refuses `web_fetch` too, and taking it out here would still be the wrong repair.
+def test_a_domain_restriction_cannot_be_sent_and_is_recorded_rather_than_dropped_quietly() -> None:
+    """Upstream answers `Unknown parameter: 'tools[0].allowed_domains'`, so it cannot travel under any spelling.
 
-    The two families are owed different things. `hosted-web-search-spec.md` §8.3 has web search removed and the turn carried on; §13 has `web_fetch` refused outright and locally, so the client is told the tool is unavailable instead of being served without it and never finding out. Stripping it here delivers neither, so it travels unchanged and is refused upstream — the same standing gap `bash_20250124` and the other dated client-side tools sit in, recorded in `docs/tmp/260820-websearch-responses-leg-400-fix.md` §5.1.
-
-    Asserted rather than left implicit because the obvious edit is to add `web_fetch_` to the family list — it is one word, it looks like a completion, and nothing else would object.
+    Recorded rather than dropped in silence because of what it is: a narrowing the client asked for, whose loss **cannot be detected afterwards**. The search runs upstream and its results reach the model directly, so this proxy never sees which sites were read. `max_uses` is dropped on the same wire but is only a ceiling on cost, and upstream reports the count back.
     """
     request = SemanticRequest(
         model="gpt-5.6-sol",
-        tools=[{"type": "web_fetch_20250910", "name": "web_fetch"}],
+        tools=[
+            {
+                "type": "web_search_20250305",
+                "name": "web_search",
+                "allowed_domains": ["example.com"],
+                "max_uses": 5,
+            }
+        ],
     )
-    assert to_openai_responses(request)["tools"] == [
-        {"type": "web_fetch_20250910", "name": "web_fetch"}
+    assert to_openai_responses(request)["tools"] == [{"type": "web_search"}]
+    dropped = [
+        loss for loss in request.conversion.losses
+        if loss.code is LossCode.SERVER_TOOL_CONSTRAINT_DROPPED
     ]
-    assert request.conversion.lossless
+    assert any("allowed_domains" in loss.detail for loss in dropped), dropped
+    assert any("max_uses" in loss.detail for loss in dropped), dropped
 
 
-def test_a_choice_left_pointing_at_a_removed_declaration_goes_with_it() -> None:
-    """Otherwise one rejection is traded for another.
+def test_a_choice_that_named_the_declaration_follows_it_into_the_builtin_spelling() -> None:
+    """A builtin tool object has no `name`, so a choice that named the declaration would point at nothing and cost the turn on its own account — the mapping trading one rejection for another.
 
-    Reachable only on the same-format crossing: `tool_choice` is nobody's modelled field, so it rides in `extensions` and is dropped on the way to another format — but a Responses request replays its own extensions verbatim, and a client can have sent the Anthropic spelling of a declaration and named it here too.
+    `{"type": "web_search"}` in the choice position is measured 200, echoed back normalised as `web_search_preview`, with `num_requests` of 1 and a `web_search_call` in the output: it really does force the search.
     """
     payload, _ = default_registry().translate(
         {
@@ -648,12 +670,12 @@ def test_a_choice_left_pointing_at_a_removed_declaration_goes_with_it() -> None:
         source=WireFormat.OPENAI_RESPONSES,
         target=WireFormat.OPENAI_RESPONSES,
     )
-    assert "tools" not in payload
-    assert "tool_choice" not in payload
+    assert payload["tools"] == [{"type": "web_search"}]
+    assert payload["tool_choice"] == {"type": "web_search"}
 
 
 def test_a_choice_that_still_names_a_declared_tool_is_left_alone() -> None:
-    """The control. Removing a choice that resolves would change what the client asked for, to no purpose — and a cleanup keyed on anything looser than "its tool is gone" does exactly that."""
+    """The control. Rewriting a choice that resolves would change what the client asked for, to no purpose."""
     payload, _ = default_registry().translate(
         {
             "model": "gpt-5.6-sol",
@@ -667,7 +689,54 @@ def test_a_choice_that_still_names_a_declared_tool_is_left_alone() -> None:
         source=WireFormat.OPENAI_RESPONSES,
         target=WireFormat.OPENAI_RESPONSES,
     )
-    assert payload["tools"] == [
-        {"type": "function", "name": "get_time", "parameters": {"type": "object"}}
-    ]
     assert payload["tool_choice"] == {"type": "function", "name": "get_time"}
+
+
+def test_web_fetch_is_left_for_its_own_repair() -> None:
+    """This endpoint refuses `web_fetch` under every spelling tried, so unlike web search there is nothing to map it to.
+
+    `hosted-web-search-spec.md` §13 has that family refused locally rather than removed quietly, which is its own piece of work. Asserted rather than left implicit because the obvious edit is to add `web_fetch_` to the family list — it is one word and it looks like a completion.
+    """
+    request = SemanticRequest(
+        model="gpt-5.6-sol",
+        tools=[{"type": "web_fetch_20250910", "name": "web_fetch"}],
+    )
+    assert to_openai_responses(request)["tools"] == [
+        {"type": "web_fetch_20250910", "name": "web_fetch"}
+    ]
+
+
+def test_a_search_the_upstream_ran_is_reported_rather_than_dropped() -> None:
+    """The item has no Anthropic spelling and nothing to revive: it carries a query, a status and an opaque id, and the results are not in it — they reached the model directly and are already folded into the answer that follows.
+
+    So what is left to say is what was searched for, in the same words `builtin:server-tool-capability` flattens the Anthropic leg's history into. One wording, because the same conversation moves between the two legs when a client switches model.
+    """
+    payload, semantic = default_registry().translate_response(
+        {
+            "id": "resp_1",
+            "model": "gpt-5.6-sol",
+            "output": [
+                {
+                    "type": "web_search_call",
+                    "id": "x" * 416,
+                    "status": "completed",
+                    "action": {"type": "search", "query": "bun release notes", "queries": ["bun release notes"]},
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Bun 1.3 is out.", "annotations": []}],
+                },
+            ],
+        },
+        source=WireFormat.OPENAI_RESPONSES,
+        target=WireFormat.ANTHROPIC_MESSAGES,
+    )
+    assert payload["content"] == [
+        {"type": "text", "text": "[web_search] bun release notes"},
+        {"type": "text", "text": "Bun 1.3 is out."},
+    ]
+    # The 416-character upstream handle must not reach the client: it means nothing to the model, it
+    # inflates every later request, and this project carries no continuation that could spend it.
+    assert "x" * 32 not in json.dumps(payload)
+    assert semantic.conversion.lossless, semantic.conversion.losses

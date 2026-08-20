@@ -1,0 +1,190 @@
+# Responses 腿 hosted web search：映射实现
+
+日期：2026-08-20
+性质：现行实现说明 + 与官方／参考项目做法的对照 + 待裁决点
+
+**取代** [`260820-websearch-responses-leg-400-fix.md`](260820-websearch-responses-leg-400-fix.md) 的修复方案（那份是剥离，让 400 消失但 web search 一并不可用；用户裁决不符合初衷）。那份文档的根因分析、对 spec 的事实更正与评审处置仍然有效，不重复于此。
+
+## 1. 现在的行为
+
+Anthropic 客户端声明 web search，模型走 Responses 腿：**搜索真的执行**，答案带着搜索结果回到客户端，并且客户端看得见模型搜了什么。
+
+真实上游存证（`tests/cassettes/responses_web_search_nonstream.json`，gpt-5.5）驱动的端到端结果：
+
+```json
+"content": [
+  {"type": "text", "text": "[web_search] time: {\"utc_offset\":\"-04:00\"}"},
+  {"type": "text", "text": "Today's date is **Thursday, August 20, 2026** in U.S. time zones. "}
+]
+```
+
+流式路径产出等价的两个块，且**不再有空块**（见 §3.3）。
+
+## 2. 请求侧
+
+### 2.1 映射
+
+| 输入（Anthropic） | 发往 `/responses` |
+|---|---|
+| `{"type":"web_search_20250305","name":"web_search"}` | `{"type":"web_search"}` |
+| 带 `user_location` | `{"type":"web_search","user_location":{...}}` |
+| `web_search` / `web_search_preview` / `web_search_preview_2025_03_11` | 原样保留（本就是上游合法值） |
+| `web_fetch_20250910` | 原样透传，未处理（§5.1） |
+| `bash_20250124` 等客户端执行型 | 原样透传，未处理（§5.1） |
+
+判据是 `<family>_<YYYYMMDD>`（8 位 ASCII 数字后缀），不是 `web_search_` 前缀——`web_search_preview` 与 `web_search_preview_2025_03_11` 都以该前缀开头且都是上游合法值，前缀判据会把它们从 Responses→Responses 直通里改写掉。同时它对未来的日期版本仍然有效。
+
+### 2.2 各字段的处置
+
+| 字段 | 处置 | 依据 |
+|---|---|---|
+| `user_location` | **透传**，但只保留 `type`／`city`／`region`／`country`／`timezone` 五个已实测键 | 实测写入 200 且原样回显。未知子参数实测使整条请求 400，所以剥离一个未知键好过赔上整轮 |
+| `max_uses` | 剥离 + 记 `SERVER_TOOL_CONSTRAINT_DROPPED` | 实测 `Unknown parameter`。它是**成本上界**，丢弃导致更多搜索与延迟，但不反转任何断言，且上游回报 `tool_usage.web_search.num_requests` 事后可查 |
+| `allowed_domains` / `blocked_domains` | 剥离 + 记 loss + **WARNING 日志** | 实测 `Unknown parameter`。它们与 `max_uses` **不同类**：这是用户明确要求的**收紧**，丢弃等于把限制变成 no-op，且**事后无法补救**——搜索在上游执行、结果直接进模型，代理从头到尾看不到读了哪些站点 |
+| `name` | 不写入 | builtin 工具对象没有这个键 |
+| `cache_control` | 不写入 | 块级缓存标记，该端点自己按前缀缓存 |
+
+### 2.3 `tool_choice`
+
+指向 web search 声明的 named choice 会**跟着改写**成 `{"type":"web_search"}`。
+
+必须做，因为 builtin 工具对象**没有 `name`**：choice 若仍按名字指向它，就指向了不存在的东西，整轮失败——那等于映射把一个 400 换成另一个 400。上游对 choice 位置的 `{"type":"web_search"}` 实测 200，回显归一化为 `web_search_preview`，`num_requests` 为 1 且 output 里确有 `web_search_call`，**它真的强制执行了搜索**。
+
+**仅在同格式路径（Responses→Responses）可达**。Anthropic 腿的 `tool_choice` 落进 `extensions`，跨格式时整体丢弃——那是一个独立缺口，见 §5.2。
+
+### 2.4 没有能力门，这是有意的
+
+不判断模型是否支持 hosted web search。参考项目在产腿上同样没有（`translateTools` 连 `model` 参数都不接）。
+
+风险是有界的：广告 `/responses` 的模型里有 `grok-4.5`、`grok-4.6`、`mai-code-*` 等从未探针的非 OpenAI 模型，对它们映射可能把一个 400 换成另一个 400。但那是**客户端本来就会遇到的失败**，而且**响亮可见**；反过来，用一份手工维护的清单做门控，一旦清单在另一个方向上错了，就会**静默扣掉一个本来能用的能力**——没有任何人会发现。两类错误代价不对称，所以选可见的那一类。
+
+spec §9.3（裁决 D4）要求这份清单落到配置项。**未实现**，见 §5.3。
+
+## 3. 响应侧
+
+### 3.1 我们手上有什么
+
+`web_search_call` item **恰好四个键**：`action`、`id`、`status`、`type`。**搜索结果不在里面**——它们直接进了模型上下文，已经体现在随后的答案正文里。`id` 是 416 字符的不透明句柄。
+
+（本项目 cassette 两次实测，与参考项目跨仓库跨日期的记录一致。）
+
+### 3.2 渲染成一行文本
+
+```
+[web_search] <query>
+```
+
+`query` 缺失时退到 `queries` 以 `", "` 连接；`action` 整个缺失时（`status: incomplete` 观测到过）渲染成裸 `[web_search]`——那是真的：搜索发生了，我们说不出搜的什么。
+
+**这个文本形状与 Anthropic 腿摊平历史后的形状完全一致**，由同一份实现产出（`src/app/pipeline/server_tool_text.py`）。理由是 spec §10 的硬性要求：同一段对话会在两条腿之间迁移（客户端换模型就会），两套措辞会让一份历史里出现同一事实的两种形态，而**不会有任何东西报错**。
+
+**`id` 不进正文**，这是与参考项目的明确分歧，见 §4.2。
+
+### 3.3 流式：空块的来源与修法
+
+`web_search_call` **没有任何 delta 事件**，且 `output_item.added` 上只有 `id`／`status`／`type`——**`action` 只在 `done` 上出现**。
+
+所以常规的「added 开块 → delta 累积 → done 收口」模型在这里失效：draft 里从来没有内容，收口时产出的是**空 text 块**。客户端在每次搜索前都会收到一个空内容块。
+
+修法是在 `_close` 里从**收口事件的权威快照**读 `action`，而不是从 draft 读——与 `_reasoning_signature` 处理 `encrypted_content` 的既有做法同源。
+
+关联键用 `output_index` **不用 `id`**：本项目实测同一个 `web_search_call` 在五个事件里带了五个互不相同的 416 字符 id。现有 assembler 本来就按 `output_index` 关联，天然免疫这一点。
+
+### 3.4 三个专有事件
+
+`response.web_search_call.in_progress` / `.searching` / `.completed` 只带 `item_id`／`output_index`／`sequence_number`，**不带内容增量**，被忽略，不触发任何块的开启或关闭。
+
+## 4. 与官方／参考项目的对照
+
+### 4.1 官方 VS Code Copilot Chat：不用 hosted web search
+
+- 唯一处理点是**剔除**：`oaiLanguageModelServer.ts:134-143` 过滤 `tool.type.startsWith('web_search')`。提交 `52032e48d`，**2025-11-01**。
+- `responsesApi.ts:42-47` 把 `type: 'function'` 写死在 tools 构造里，**结构上产不出 builtin 工具**。
+- 响应侧完全不处理 web search（但**处理了** `image_generation_call`，说明是有选择地只接了一个 hosted item，不是不知道）。
+- 它自己的「网页搜索」走的是另一条路：`#web` → GitHub platform 远程 agent 的服务端 `bing-search` skill，进的是请求体的 `copilot_skills` 字段，**从不进 `tools` 数组**。
+
+**两条不能照抄的理由**：
+
+1. **那个剔除决策是 2025-11 做的**，而我们 2026-08-20 实测 `{"type":"web_search"}` 返回 200 并真的执行搜索。当时正确，今天不是最优。
+2. **`disallowedTools: ['WebSearch']` 的适用范围比看上去窄得多**：它只作用于 VS Code 内嵌的 Claude Agent SDK 实例（`claudeCodeAgent.ts:432-434`）。同一扩展的 terminal 路径把**真的 `claude` CLI** 指向同一个本地服务器，命令行没有任何工具禁用，而那个服务器（`claudeLanguageModelServer.ts`）对 `tools` **零过滤**。**我们的代理与后者同构，而第一方在这个位置根本没解决问题**——所以这里没有可抄的答案。
+
+（完整审计：[`260820-vscode-ext-websearch-audit.md`](260820-vscode-ext-websearch-audit.md)）
+
+### 4.2 参考项目 copilot-api-js：做了映射，深度到此为止
+
+它的实现就是「请求侧一行映射表 + 响应侧一行降级文字」：
+
+| 面 | 它的做法 | 我们 |
+|---|---|---|
+| 请求侧映射 | `web_search_` → 裸 `{"type":"web_search"}`，**只有一个键** | 同，但**保留 `user_location`** |
+| `max_uses`／域名限制／`user_location` | **全部静默丢弃**，无 warn 无 observation | 记 loss；域名限制额外 WARNING |
+| `tool_choice` | 按 name 找回原声明走同一映射，译不出就整个省略 | 同 |
+| 能力门 | 在产腿上**完全没有** | 同（§2.4） |
+| 响应侧 | 降级成一个 text 块，逐字 `[web_search: "<q>"] (id: <id>, status: <status>)` | `[web_search] <query>`，**不含 id** |
+| 关联键 | `output_index`，不用 `id` | 同 |
+| `url_citation` | **完全且静默丢弃** | 同（§5.4） |
+| 原生块对／citations／续接／usage／流式子事件 | **六项全无** | 同 |
+
+**唯一明确不照抄的一条**：`webSearchCallToText` 把 416 字符的 `id` 写进面向客户端的正文（`server-tool.ts:26`）。它会被客户端存进历史、随每一轮重发，对模型不可读，还把服务端句柄暴露给客户端；而在我们这里 id 每个事件都不同，该值连稳定引用都算不上。参考项目自己的 `exp/encrypted-content-400/` 事故正是同族失败模式。
+
+（完整审计：[`260820-copilot-api-js-websearch-audit.md`](260820-copilot-api-js-websearch-audit.md)）
+
+## 5. 已知缺口
+
+### 5.1 其他 Anthropic typed tool 仍原样透传
+
+`web_fetch_20250910`、`bash_20250124`、`text_editor_*`、`computer_*`、`memory_*`、`tool_search_*` 都没有 `input_schema`，都会被 `_function_tool` 原样透传给 `/responses`，且**上游那条 400 的枚举里一个都没有**。
+
+它们与 web search 不同类，不能用同一种处置：`web_fetch` 在该端点下**没有任何可映射的拼法**（spec §13 要求本地明确拒绝）；`bash_`／`text_editor_` 是**客户端执行型**工具，静默剥掉会改变对话能做什么。两者都需要一条本地拒绝路径，那是独立的一片。
+
+**在那一片落地前，声明这些工具的客户端仍会整轮 400。**
+
+### 5.2 `tool_choice` 跨协议时被整体丢弃
+
+`SemanticRequest` 没有 `tool_choice` 字段；Anthropic 的 `tool_choice` 落进 `extensions`，`extensions_for()` 在跨格式时返回空并记 `EXTENSIONS_NOT_CARRIED`。
+
+所以 **Anthropic 客户端的 forced tool choice 从未到达上游**。与 spec §4 要求的映射表直接冲突。§2.3 的改写只在同格式路径生效。
+
+### 5.3 能力门未实现（spec D4 已裁决要配置项）
+
+见 §2.4 的取舍。用户已裁决它应落到配置项，**本片未做**。
+
+### 5.4 `url_citation` 未使用
+
+上游后续 message 的 `annotations` 可能带 `url_citation`（`{type,url,title,start_index,end_index}`），也可能是空数组（两个反向样本各一次）。目前**丢弃**。
+
+spec §5.3（裁决 D6）要求用它填充 `web_search_tool_result.content`。见 §6。
+
+### 5.5 `tool_usage.web_search.num_requests` 未采集
+
+上游一直在响应体里回报搜索次数，双方项目都没读。它可以直接进日志／footer 的可观测 facts。
+
+## 6. 待裁决：是否升级到 D6 的原生块对
+
+用户 2026-08-20 裁决 D6 要求响应侧「尽量还原成原生块」——`server_tool_use` + `web_search_tool_result` 块对，而不是本片交付的文本行。
+
+**本片没有做**，因为它不是一行代码：需要 citation 归因（spec §5.3 的三分支）、成块时点从 `output_item.done` 推迟到后随文本块的 `content_part.done`（spec §6.3，否则 citation 还没到）、以及请求侧识别并摊平自己合成的块（spec §5.4）。
+
+**本片的文本行不阻碍它**：升级时替换的是同一个渲染点，且文本形状的共享实现（`server_tool_text.py`）正是两条腿一致性的落点。
+
+需要裁决：现在就上 D6，还是先让搜索跑一段时间再说。
+
+## 7. 验证
+
+- 全量：`uv run pytest -q` → **1424 passed, 2 skipped, 0 failed**。
+- 端到端两条路径均由**真实上游存证**驱动（`tests/cassettes/responses_web_search_*.json`），非手写 stand-in。选 cassette 是因为「`added` 上没有 `action`」这种不对称正是手写 fake 会写错的地方——它会按「事件应该携带什么」来写。
+- 变异验证（四项，均已还原）：
+  - 屏蔽映射谓词 → 6 个测试红
+  - `user_location` 不剥未知子键 → 对应测试红
+  - 不改写 `tool_choice` → 对应测试红
+  - 流式搜索退回空块 → 端到端测试红，失败输出逐字显示 `['', 'Today's date is ...']`
+- Ruff `check`、Pyright 于全部改动文件干净。
+
+## 8. 相关文档
+
+- 前一版（剥离方案，含根因分析与两轮评审）：[`260820-websearch-responses-leg-400-fix.md`](260820-websearch-responses-leg-400-fix.md)
+- 产品规格：[`../agents/anthropic-responses-bridge/hosted-web-search-spec.md`](../agents/anthropic-responses-bridge/hosted-web-search-spec.md)
+- 上游实测一手报告：[`260820-websearch-upstream-probe.md`](260820-websearch-upstream-probe.md)
+- Responses 腿全面调研：[`260820-websearch-on-responses-leg.md`](260820-websearch-on-responses-leg.md)
+- 官方扩展审计：[`260820-vscode-ext-websearch-audit.md`](260820-vscode-ext-websearch-audit.md)
+- 参考项目审计：[`260820-copilot-api-js-websearch-audit.md`](260820-copilot-api-js-websearch-audit.md)

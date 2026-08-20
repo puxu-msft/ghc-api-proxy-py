@@ -16,6 +16,7 @@ import orjson
 
 from app.pipeline.delivery.blocks import CompletedBlock
 from app.pipeline.delivery.sse_source import SseEvent
+from app.pipeline.server_tool_text import web_search_call_text
 from app.pipeline.translation_driver.reasoning_carrier import encode_reasoning_carrier
 from app.protocols.responses_anthropic import (
     ResponseConversionError,
@@ -25,6 +26,8 @@ from app.protocols.responses_anthropic import (
 TEXT = "text"
 THINKING = "thinking"
 TOOL_USE = "tool_use"
+# The item type upstream reports a search it ran itself under. Carried as its own draft kind so `_close` can tell it from a message and render it, rather than falling through to the empty-text default.
+WEB_SEARCH_CALL = "web_search_call"
 
 
 class ReplyDialect(StrEnum):
@@ -275,6 +278,7 @@ class ResponsesAssembler:
         draft = self._drafts.pop(key, None)
         if draft is None:
             return ()
+        kind = draft.kind
         if draft.kind == TOOL_USE:
             self._saw_tool_call = True
             payload: dict[str, Any] = {
@@ -289,9 +293,16 @@ class ResponsesAssembler:
                 THINKING: draft.text,
                 "signature": _reasoning_signature(draft, data),
             }
+        elif draft.kind == WEB_SEARCH_CALL:
+            # Read off the closing event, not the draft. `output_item.added` carries this item with only an id, a status and a type — the query appears for the first time on `done`, and this item has no delta events at all, so the draft has nothing in it to render. Assembling from the draft is what produced an empty text block on every search.
+            raw = data.get("item")
+            item = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+            payload = {"type": TEXT, TEXT: web_search_call_text(item.get("action"))}
+            # Text from here on. The item type is upstream's, and it has no Anthropic spelling to keep.
+            kind = TEXT
         else:
             payload = {"type": TEXT, TEXT: draft.text}
-        block = CompletedBlock(index=draft.index, kind=draft.kind, payload=payload)
+        block = CompletedBlock(index=draft.index, kind=kind, payload=payload)
         self._terminal.record(block)
         return (block,)
 

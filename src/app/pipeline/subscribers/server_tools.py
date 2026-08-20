@@ -8,13 +8,16 @@ Removing a declaration removes a capability, which is why this is loud rather th
 
 **The history gets the same treatment, and not as an afterthought.** A session that used web search before this ran carries `server_tool_use` calls and `*_tool_result` answers in its transcript, and those are rejected on their own account, so removing only the declaration trades one rejection for another. They are flattened into plain text rather than downgraded into a client `tool_use` / `tool_result` pair, because a downgraded pair still refers to a tool that is no longer declared. Text refers to nothing.
 
-**Scoped to the Anthropic leg on purpose, and the Responses leg needs its own answer rather than this one.** What decides it is the endpoint: no Claude model in the catalog advertises `/responses`, and that endpoint does execute hosted web search natively — but only under its own spelling. Measured 2026-08-20 on gpt-5.5: `{"type": "web_search"}` returns 200, while the Anthropic `web_search_20250305` spelling returns 400 `Invalid value`. So carrying a declaration across untouched is no good there either; what that leg needs is a mapping, and a mapping cannot ship without the response side, because a reply carrying `web_search_call` items has nowhere to go in the Anthropic protocol today. Removing the declaration here would be the wrong repair for the wrong endpoint, so this stays out of its way.
+**Scoped to the Anthropic leg on purpose, and the Responses leg has its own answer rather than this one.** What decides it is the endpoint: no Claude model in the catalog advertises `/responses`, and that endpoint does execute hosted web search natively — but only under its own spelling. Measured 2026-08-20 on gpt-5.5: `{"type": "web_search"}` returns 200, while the Anthropic `web_search_20250305` spelling returns 400 `Invalid value`. So that leg translates the declaration instead of removing it, and renders the `web_search_call` the upstream reports back (`translation_driver/openai_responses.py`, `delivery/assembler.py`). Removing the declaration there would be the wrong repair for the wrong endpoint.
+
+The one thing the two legs do share is the wording: both say a search happened with the same line, from `pipeline/server_tool_text.py`. A conversation is not pinned to one leg — the same history moves between them when a client switches model — and two renderings would leave one session carrying two shapes of the same fact, with nothing to report it.
 """
 
 import logging
 from typing import Any, cast
 
 from app.pipeline.request import RequestContext, WireFormat
+from app.pipeline.server_tool_text import call_subject
 
 logger = logging.getLogger(__name__)
 
@@ -143,23 +146,6 @@ def _render_results(content: Any, family: str) -> str:
     return "\n".join([f"[{family} results]", *lines])
 
 
-def _call_subject(raw_input: Any) -> str:
-    """What the call was about, as a trailing fragment, or the empty string.
-
-    Reads `query` and `url` because the two families name their argument differently — `web_search` asks a question, `web_fetch` names a page — and a renderer that knew only about the first turned every fetch into a bare `[web_fetch]`.
-
-    Stripped, because the surrounding text is generated: a trailing newline in the client's query would put whitespace at the end of an assistant turn, which upstream rejects separately.
-    """
-    if not isinstance(raw_input, dict):
-        return ""
-    entry = cast(dict[str, Any], raw_input)
-    for key in ("query", "url"):
-        value = entry.get(key)
-        if isinstance(value, str) and value.strip():
-            return f" {value.strip()}"
-    return ""
-
-
 def _as_text(entry: dict[str, Any], text: str) -> dict[str, Any]:
     """The replacement block, carrying over what the original said about caching.
 
@@ -193,7 +179,7 @@ def _flatten_history_block(block: Any) -> dict[str, Any] | None:
         family = _family(name)
         if family is None:
             return None
-        return _as_text(entry, f"[{family}]{_call_subject(entry.get('input'))}")
+        return _as_text(entry, f"[{family}]{call_subject(entry.get('input'))}")
 
     # `tool_result` on its own is the client-side one and belongs to a tool we never touched.
     if block_type == "tool_result" or not block_type.endswith("_tool_result"):
