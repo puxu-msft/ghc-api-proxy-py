@@ -66,3 +66,15 @@
 **要做需要什么**：让关停路径在取消在途流之前给 `_StreamAccounting` 留一个标记（关停是本进程自己发起的，它知道自己在做什么），再在 `_ending()` 里多一档。技术上不难，难在判断值不值：关停时终端通常正在被 SIGTERM 收走，那批行有没有人读是个问题。
 
 **判断**：**证据强度仅为「已想到」，未观测到任何人因此误判过**。不建议在没有真实困扰之前做——多一档就多一个要维护的词，而这条区分只在关停这一个窗口内有意义。若将来关停诊断成为议题，这是现成的接入点。
+
+## 4. 计数行说不出上游是怎么失败的
+
+**已解决的那半**：`provider(local)` 原本合并了「没有上游计数器」「上游被问了却答不出」「运维配成只估算」三种情形。2026-08-20 由用户裁决，改为 `provider(no-counter,local)` / `provider(ghc-failed,local)` / `provider(local)`，判定在 `handle_count_tokens` 里做（依据是它自己传出的 `upstream_absent_reason` 与尝试轨迹里有没有 `ghc:` 条目）。见 `spec.md`「一次计数请求怎么读」。
+
+**仍然没有读者的那半**：`ghc-failed` 说不出是超时、429 还是 500，也说不出重试了几次。这些都躺在 `context.extras["count_tokens_attempts"]` 里（形如 `ghc:0:APIStatusError`），**至今没有任何消费者**。
+
+**做法**：把 `count_tokens_attempts` 带进 `_Trace` → `RequestLine` → JSONL 结构化记录，**不上控制台行**——`request_id=` 这个 join key 就能回答「那次到底怎么失败的」，而行宽不变。上控制台会把最长的那个字段放进最常见的端点，不建议。
+
+**为什么没做**：`ghc-failed` 已经把「要不要看一眼」这个判断交付给读者了，剩下的是排障时才需要的细节，而排障时结构化记录本来就在手边。**证据强度：已想到，未观测到有人因此卡住过。**
+
+**来源**：`docs/tmp/260820-review-count-tokens-log-line.md` F6，以及更早的 `docs/tmp/260820-review-count-tokens-shared-pipeline.md:72`。
