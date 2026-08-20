@@ -82,19 +82,19 @@ def test_a_token_count_is_not_a_turn_that_lost_its_reply() -> None:
         status_code=200,
         duration_s=1.2,
         usage={"input_tokens": 19_700},
-        counter="local",
+        count_provider="local",
     )
     line = format_completion_line(counting)
-    assert line == "H1 200 anthropic-messages/claude-opus-5 1.2s ↑19.7k count(local)"
-    assert "count(ghc)" in format_completion_line(replace(counting, counter="ghc"))
+    assert line == "H1 200 anthropic-messages/claude-opus-5 1.2s ↑19.7k provider(local)"
+    assert "provider(ghc)" in format_completion_line(replace(counting, count_provider="ghc"))
     # And the field stays off every line that is not a count, rather than printing a placeholder for the counter that did not run.
-    assert "count(" not in format_completion_line(replace(counting, counter=""))
+    assert "provider(" not in format_completion_line(replace(counting, count_provider=""))
 
 
 def test_an_estimate_says_why_it_is_one() -> None:
     """`local` alone was three outcomes wearing one word, two of them incidents.
 
-    A route with no upstream counter estimates every time and is working as configured; an upstream that was asked and could not answer is something to look at; and an operator who left `ghc` out of `providers` chose the estimate. All three produced the same `count(local)`, which is this line's own defect one level up from the one the counter was added to fix — the failure was not absent from the line, it was wearing the ordinary case's clothes.
+    A route with no upstream counter estimates every time and is working as configured; an upstream that was asked and could not answer is something to look at; and an operator who left `ghc` out of `providers` chose the estimate. All three produced the same `provider(local)`, which is this line's own defect one level up from the one the counter was added to fix — the failure was not absent from the line, it was wearing the ordinary case's clothes.
 
     Ruled 2026-08-20 by the user: the reason goes in the parentheses, and the field stays uncoloured because the ordinary case is the common one and a colour that fires daily stops being read.
     """
@@ -107,12 +107,12 @@ def test_an_estimate_says_why_it_is_one() -> None:
         status_code=200,
         duration_s=1.2,
         usage={"input_tokens": 19_700},
-        counter="local",
+        count_provider="local",
     )
-    assert format_completion_line(replace(estimating, counter_reason="ghc-failed")).endswith("count(local:ghc-failed)")
-    assert format_completion_line(replace(estimating, counter_reason="no-counter")).endswith("count(local:no-counter)")
+    assert format_completion_line(replace(estimating, count_provider_reason="ghc-failed")).endswith("provider(ghc-failed,local)")
+    assert format_completion_line(replace(estimating, count_provider_reason="no-counter")).endswith("provider(no-counter,local)")
     # Nothing to say is said with nothing: the operator configured this proxy to estimate, and no upstream was involved to have a verdict about.
-    assert format_completion_line(estimating).endswith("count(local)")
+    assert format_completion_line(estimating).endswith("provider(local)")
 
 
 def test_retries_are_reported_once_the_count_is_final() -> None:

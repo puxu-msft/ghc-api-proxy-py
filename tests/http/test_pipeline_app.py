@@ -1315,7 +1315,7 @@ def test_a_token_count_says_it_was_one_and_which_counter_answered(request_log: N
     assert len(lines) == 1
     # Both legs, because this count really did go upstream, and the counter named because the number is upstream's own measurement.
     assert lines[0].startswith("H1/H1 200 anthropic-messages-count-tokens/claude-model ")
-    assert lines[0].endswith("count(ghc)")
+    assert lines[0].endswith("provider(ghc)")
     # Both directions of that leg. One of them alone would say, by this line's own convention, that nothing came back — from the exchange that produced the number on the line.
     assert re.search(r"[↑>][\d.]+(B|KB|MB)\b", lines[0]), "the body sent upstream is what the count was measured on"
     assert re.search(r"[↓<][\d.]+(B|KB|MB)\b", lines[0]), "and upstream's answer is where the number came from"
@@ -1326,7 +1326,7 @@ def test_a_count_upstream_could_not_answer_is_reported_as_an_estimate(request_lo
 
     Not a *refusal*, which is a settled word here: `pipeline/count_tokens.py` lets a `ProviderError` — an unknown model, a missing capability — travel out rather than degrading, so a refused count never reaches the estimator and never produces this line at all. This is the other case, where upstream was reachable and broke.
 
-    The counter's name and its reason are the whole of what says so. The upstream leg does not: `send_anthropic_count_tokens` raises an error status as a pipeline error, so no response reaches the code that records which leg was flown, and this line looks like one that never left the process. Without `:ghc-failed` it would also read exactly like a route that has no upstream counter and was always going to estimate.
+    The counter's name and its reason are the whole of what says so. The upstream leg does not: `send_anthropic_count_tokens` raises an error status as a pipeline error, so no response reaches the code that records which leg was flown, and this line looks like one that never left the process. Without the `ghc-failed` in front of it, it would also read exactly like a route that has no upstream counter and was always going to estimate.
     """
     client, _ = make_client(lambda _: httpx.Response(500, json={"error": "upstream is down"}))
 
@@ -1340,13 +1340,13 @@ def test_a_count_upstream_could_not_answer_is_reported_as_an_estimate(request_lo
     lines = _request_lines(caplog.records)
     assert len(lines) == 1
     assert lines[0].startswith("H1 200 anthropic-messages-count-tokens/claude-model ")
-    assert lines[0].endswith("count(local:ghc-failed)")
+    assert lines[0].endswith("provider(ghc-failed,local)")
 
 
 def test_a_count_with_no_upstream_counter_says_that_rather_than_a_failure(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
     """The ordinary case that must not read as an incident.
 
-    `gpt-model` is served by translating to `/responses`, which has no count endpoint at all, so this route estimates every time and is working as configured. It shares `count(local)` with an upstream that was asked and broke, and the reason is the only thing that separates them — which is why the reason is on the line rather than only in the attempts trail nobody reads.
+    `gpt-model` is served by translating to `/responses`, which has no count endpoint at all, so this route estimates every time and is working as configured. It shares `provider(local)` with an upstream that was asked and broke, and the reason is the only thing that separates them — which is why the reason is on the line rather than only in the attempts trail nobody reads.
     """
     client, seen = make_client(lambda _: httpx.Response(200, json={"input_tokens": 99}))
 
@@ -1362,7 +1362,7 @@ def test_a_count_with_no_upstream_counter_says_that_rather_than_a_failure(reques
     assert len(lines) == 1
     # One leg, because nothing was sent, and the reason says that is by design rather than a failure.
     assert lines[0].startswith("H1 200 anthropic-messages-count-tokens/gpt-model ")
-    assert lines[0].endswith("count(local:no-counter)")
+    assert lines[0].endswith("provider(no-counter,local)")
 
 
 def test_a_count_upstream_answered_uselessly_keeps_the_leg_it_flew(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
@@ -1383,7 +1383,7 @@ def test_a_count_upstream_answered_uselessly_keeps_the_leg_it_flew(request_log: 
     assert len(lines) == 1
     # Both legs and both directions, next to the counter that says the number on the line is not upstream's.
     assert lines[0].startswith("H1/H1 200 anthropic-messages-count-tokens/claude-model ")
-    assert lines[0].endswith("count(local:ghc-failed)")
+    assert lines[0].endswith("provider(ghc-failed,local)")
     assert re.search(r"[↑>][\d.]+(B|KB|MB)\b", lines[0])
     assert re.search(r"[↓<][\d.]+(B|KB|MB)\b", lines[0])
 

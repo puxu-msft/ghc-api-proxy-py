@@ -90,7 +90,7 @@ class RequestLine:
 
     `bytes_in` / `bytes_out` are wire bytes in each direction; `usage` is the upstream's own token accounting, keyed as Anthropic reports it. The two are separate facts and a request can have either without the other — a rejected body has bytes and no tokens, a cached hit has tokens and almost no bytes.
 
-    `counter` is set only on a token-counting request, and names the counter that produced the number; `counter_reason` says why it was the estimator, when there is something to say. See `format_counter`.
+    `count_provider` is set only on a token-counting request, and names the counting provider that produced the number; `count_provider_reason` carries what was tried before it, when anything was. See `format_count_provider`.
     """
 
     method: str
@@ -114,8 +114,8 @@ class RequestLine:
     blocks: int = 0
     tools: tuple[str, ...] = ()
     thinking: tuple[str, ...] = ()
-    counter: str = ""
-    counter_reason: str = ""
+    count_provider: str = ""
+    count_provider_reason: str = ""
     # Whose words to use for the reasoning and tool-call fields. See `ReplyDialect`; it travels with the reply summary the line is built from.
     dialect: ReplyDialect = ReplyDialect.ANTHROPIC
     attempts: int = 1
@@ -170,23 +170,21 @@ def format_pending_tools(tools: tuple[str, ...], *, color: bool = False) -> str:
     return f"called({_painted_tools(named, color=color)})" if named else ""
 
 
-def format_counter(counter: str, reason: str = "", *, color: bool = False) -> str:
-    """`count(ghc)` / `count(local:ghc-failed)` — which counter produced the number on this line, and where the estimate came from when it is one.
+def format_count_provider(provider: str, reason: str = "", *, color: bool = False) -> str:
+    """`provider(ghc)` / `provider(ghc-failed,local)` — which counting provider produced the number on this line, and what was tried before it.
 
-    A count is the one 200 with no reply at all: nothing comes back to measure, no blocks complete, no reason ends the turn, and on a successful line the route has already collapsed into `<inbound-format>/<model>`. What was left read as `anthropic-messages/claude-opus-5 1.2s ↑19.7k`. A delivered turn is not literally that line — it would still carry its own byte fields — but every one of those absences is also what a turn looks like when its reply goes missing, and absence is the one thing a reader cannot tell apart.
+    Named for the thing `inbound.anthropic_count_tokens.providers` configures, because that is what it reports: `ghc` is upstream's own measurement and `local` is this proxy's calibrated estimate, and they are the two values of `CountTokensProvider`. The word `count` was the first spelling and became redundant once the format prefix started carrying the count-tokens endpoint, where that belongs — saying what kind of request this was is not what this field is for.
 
-    Which counter answered is the other half, and it is the same distinction the reply body already makes by marking an estimate `estimated`: `ghc` is upstream's own measurement, `local` is this proxy's calibrated estimate. On the line they are the same bare number, so without the name there is no reading of `↑19.7k` that says whether anything was measured.
+    The parenthetical is the trail, in the order it happened: what was tried and did not answer, then the provider that did. `provider(ghc-failed,local)` is an upstream that was asked and could not answer; `provider(no-counter,local)` is a route with no upstream counter, which estimates every time and is working as configured; a bare `provider(local)` is an operator who configured the estimate rather than asking. Those three were one word until 2026-08-20, and two of them are incidents — this line's own defect one level up, where the failure was never absent from the line, it was wearing the ordinary case's clothes.
 
-    The reason exists because `local` alone was three outcomes wearing one word, two of which are incidents: a route with no upstream counter estimates every time and is working as configured (`no-counter`), while an upstream that was asked and could not answer is something to look at (`ghc-failed`). That is this line's own defect one level up — the failure was never absent from it, it was wearing the ordinary case's clothes. Ruled 2026-08-20 by the user, who chose the reason over a `ghc→local` arrow. Written only when there is something to say — a plain `count(local)` remains, and means the operator configured this proxy to estimate rather than ask.
+    Not coloured, ruled with the spelling. A count that always estimates is the steady state on a translated route, so painting the field would fire on the ordinary case daily and stop meaning anything; the degraded reading is carried by the words instead, which also survives a log file.
 
-    Not coloured, ruled with the spelling. A count that always estimates is the steady state on a translated route, so painting the field would fire on the ordinary case daily and stop meaning anything; the degraded reading is carried by the word instead, which also survives a log file.
-
-    The counter and its reason are dim and the word is not, because the field's first job is to say which counter served this request; why is the detail behind that. It occupies the slot a stop reason would, being this line's ending.
+    The trail is dim and the word is not, being context for what the field is — the same division `format_pending_tools` makes with its tool names.
     """
-    if not counter:
+    if not provider:
         return ""
-    named = f"{counter}:{reason}" if reason else counter
-    return f"count({paint(named, DIM, color=color)})"
+    trail = f"{reason},{provider}" if reason else provider
+    return f"provider({paint(trail, DIM, color=color)})"
 
 
 def _painted_tools(names: list[str], *, color: bool) -> str:
@@ -299,7 +297,7 @@ def format_arrival_line(line: RequestLine) -> str:
 def format_completion_line(line: RequestLine, *, unicode: bool = True, color: bool = False) -> str:
     """The message body for a finished request.
 
-    Ordered status, subject, duration, wire bytes, tokens, request id, ending, retries, detail — narrowing from how it went, to what it cost, to why it ended. The ending is the stop reason, or on a token-counting request the counter that answered it. The durable join key precedes it so `end_turn`, tool calls and failure explanations remain the line's final fact. Every field after the subject is omitted when it has nothing to say, so a bare rejection and a full streamed answer share one column order instead of drifting into two formats.
+    Ordered status, subject, duration, wire bytes, tokens, request id, ending, retries, detail — narrowing from how it went, to what it cost, to why it ended. The ending is the stop reason, or on a token-counting request the counting provider that answered it. The durable join key precedes it so `end_turn`, tool calls and failure explanations remain the line's final fact. Every field after the subject is omitted when it has nothing to say, so a bare rejection and a full streamed answer share one column order instead of drifting into two formats.
 
     Colour carries meaning rather than decoration, following `copilot-api-js`: the status and the failure reason say whether to care, the model is the one name worth finding at a glance, and the duration escalates on its own so a slow request is visible without reading the number.
 
@@ -336,9 +334,9 @@ def format_completion_line(line: RequestLine, *, unicode: bool = True, color: bo
     if line.request_id:
         # Full rather than shortened: this is the join key between the console line and its structured record, so two simultaneous failures must never become ambiguous. It precedes the semantic ending so the reason remains the line's final fact.
         parts.append(paint(f"request_id={line.request_id}", DIM, color=color))
-    if line.counter:
-        # A count has no reply and therefore no stop reason, so this is its ending. The order is for the reader rather than for the state machine: `counter` is set only on the count branch, which returns before a reply is ever aggregated, so no reachable request carries both and swapping these two arms would change nothing that runs.
-        parts.append(format_counter(line.counter, line.counter_reason, color=color))
+    if line.count_provider:
+        # A count has no reply and therefore no stop reason, so this is its ending. The order is for the reader rather than for the state machine: `count_provider` is set only on the count branch, which returns before a reply is ever aggregated, so no reachable request carries both and swapping these two arms would change nothing that runs.
+        parts.append(format_count_provider(line.count_provider, line.count_provider_reason, color=color))
     elif line.stop_reason:
         parts.append(format_stop_reason(line.stop_reason, line.tools, line.dialect, color=color))
     elif line.tools:
