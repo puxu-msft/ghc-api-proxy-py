@@ -92,5 +92,5 @@ def test_normalisation_happens_even_when_there_are_no_messages() -> None:
     green.
     """
     payload: dict[str, Any] = {"context_management": {"edits": None}}
-    fix_anthropic_request(payload, FixAnthropicRequestHook())
+    fix_anthropic_request(payload, FixAnthropicRequestHook(), upstream_is_anthropic=True)
     assert payload["context_management"] == {"edits": []}

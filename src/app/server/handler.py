@@ -76,7 +76,12 @@ async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[Req
     if context.inbound_format is WireFormat.ANTHROPIC_MESSAGES:
         # Before translation on purpose: these fixups read `messages`, which the target format may
         # not have. The spec calls this point `on_client_request_parsed`.
-        fix_anthropic_request(context.payload, chain.config.hook_fix_anthropic_request)
+        # The route decides which fixups apply: some of them exist only because the Anthropic upstream refuses a shape, and running those against a body bound for Responses would rewrite the primary path over a rule it was never measured against.
+        fix_anthropic_request(
+            context.payload,
+            chain.config.hook_fix_anthropic_request,
+            upstream_is_anthropic=route.target_format is WireFormat.ANTHROPIC_MESSAGES,
+        )
 
     if route.translation_required:
         translated, semantic = chain.translators.translate(
