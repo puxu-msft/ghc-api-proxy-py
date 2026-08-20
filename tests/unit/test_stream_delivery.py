@@ -125,7 +125,11 @@ async def test_nothing_is_written_before_the_first_block_closes() -> None:
 
 
 @pytest.mark.asyncio
-async def test_synthesizes_one_empty_block_when_first_real_block_is_late() -> None:
+async def test_a_late_first_block_gets_a_message_start_and_no_placeholder_content() -> None:
+    """The client hears that a message began; it is not handed a block that says nothing.
+
+    This used to synthesise `{"type":"text","text":""}` as content block zero. The client stores it as part of the turn and replays it in its next request, and upstream refuses the whole body over it — `messages: text content blocks must be non-empty`, measured in production on 2026-08-20 after a 242-second wait. `message_start` puts the same bytes in front of the client and commits us to no content, so the real block still arrives as index zero.
+    """
     chunks = await collect(
         anthropic_stream("one"),
         initial_delay=1.1,
@@ -136,14 +140,24 @@ async def test_synthesizes_one_empty_block_when_first_real_block_is_late() -> No
         "content_block_start",
         "content_block_delta",
         "content_block_stop",
-        "content_block_start",
-        "content_block_delta",
-        "content_block_stop",
         "message_delta",
         "message_stop",
     ]
     assert b'"text":"one"' in b"".join(chunks)
-    assert block_start_indices(chunks) == [0, 1]
+    assert block_start_indices(chunks) == [0]
+
+
+@pytest.mark.asyncio
+async def test_a_synthesized_start_that_never_gets_a_block_still_ends_the_message() -> None:
+    """The degenerate line: the deadline fires and upstream then produces nothing at all.
+
+    Pinned because it is the one shape this change alters that has no other witness. The client is left a message with no content blocks, where before it was left one that said nothing — and the terminal frames still arrive either way, so the stream closes rather than hanging. With the deadline disabled the same silence produces no bytes at all, which is what makes "no content blocks" an existing shape rather than one introduced here.
+    """
+    chunks = await collect([], initial_delay=1.1, synthesized_response_headers_after_sec=1)
+
+    assert events_of(chunks) == ["message_start", "message_delta", "message_stop"]
+
+    assert await collect([], initial_delay=1.1) == []
 
 
 @pytest.mark.asyncio
@@ -266,8 +280,8 @@ async def test_the_terminal_reports_what_upstream_said() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_synthesized_block_goes_out_while_the_policy_holds_everything_else() -> None:
-    """`full` holds content until the end — but this block exists to arrive now.
+async def test_the_synthesized_start_goes_out_while_the_policy_holds_everything_else() -> None:
+    """`full` holds content until the end — but this frame exists to arrive now.
 
     Putting it through the buffer delays it for exactly as long as the wait that made it
     necessary, which is the same as never synthesising it. Collecting the whole stream cannot
@@ -294,15 +308,10 @@ async def test_the_synthesized_block_goes_out_while_the_policy_holds_everything_
         # Deliberately shorter than upstream's silence: anything arriving here cannot have come
         # from upstream, and cannot have waited for the buffer to release.
         async with asyncio.timeout(4):
-            while not any(b"content_block_stop" in chunk for chunk in early):
+            while not any(b"message_start" in chunk for chunk in early):
                 early.append(await anext(stream))
 
-    assert events_of(early) == [
-        "message_start",
-        "content_block_start",
-        "content_block_delta",
-        "content_block_stop",
-    ]
+    assert events_of(early) == ["message_start"]
 
 
 def thinking_stream(signature: str) -> list[bytes]:

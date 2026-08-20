@@ -7,8 +7,7 @@ They carry no content, so they cannot be mistaken for a block.
 
 import asyncio
 from collections.abc import AsyncGenerator, AsyncIterator
-from dataclasses import dataclass, replace
-from typing import Any
+from dataclasses import dataclass
 
 from app.config.schema import ContentBlockStartCompat
 from app.pipeline.delivery.anthropic_sse import block_frames, message_start, terminal_frames
@@ -92,7 +91,6 @@ async def stream_delivery(
     """
     session = DeliverySession(buffer=buffer)
     started = False
-    synthetic_block_sent = False
     response_started = asyncio.Event()
     response_headers_deadline = (
         asyncio.get_running_loop().time() + settings.synthesized_response_headers_after_sec
@@ -113,20 +111,11 @@ async def stream_delivery(
                 and asyncio.get_running_loop().time() >= response_headers_deadline
             ):
                 response_started.set()
-                synthetic_block_sent = True
-                # Written straight out rather than offered to the buffer. Its whole purpose is to
-                # put bytes in front of a client that would otherwise time out, and `full` or
-                # `until-tool-use` would hold it back for exactly as long as the wait that made it
-                # necessary — which is the same as not synthesising anything.
-                for chunk in _frame_now(
-                    synthesized_headers_block(),
-                    message_id,
-                    model,
-                    started,
-                    settings.signature_compat,
-                ):
-                    started = True
-                    yield chunk
+                # `message_start` and nothing else. What this moment needs is bytes in front of a client that would otherwise time out, and `message_start` is the first thing every stream sends anyway — sending it early costs the client nothing and commits us to no content.
+                # It used to be a placeholder text block, which the client stores as part of the turn and replays in its next request. Measured on 2026-08-20: a 242-second wait put `{"type":"text","text":""}` into a session's history and upstream rejected the following request outright — `messages: text content blocks must be non-empty` — over a block that never carried anything.
+                # Written straight out rather than offered to the buffer, for the same reason as before: `full` or `until-tool-use` would hold it back for exactly as long as the wait that made it necessary, which is the same as not synthesising anything.
+                started = True
+                yield message_start(message_id, model).encode()
             elif started:
                 yield PING_FRAME
             continue
@@ -136,9 +125,6 @@ async def stream_delivery(
             # It ends even if the selected buffering policy holds that block for a later commit.
             response_started.set()
         for block in blocks:
-            if synthetic_block_sent:
-                # Index zero belongs to the completed synthetic block already sent downstream.
-                block = replace(block, index=block.index + 1)
             for chunk in _commit(
                 session, block, message_id, model, started, settings.signature_compat
             ):
@@ -164,26 +150,6 @@ async def stream_delivery(
             yield frame.encode()
 
 
-def _frame_now(
-    block: CompletedBlock,
-    message_id: str,
-    model: str,
-    started: bool,
-    signature_compat: ContentBlockStartCompat,
-) -> list[bytes]:
-    """Frame one block for immediate delivery, bypassing the buffering policy.
-
-    Only for blocks whose value is that they arrive *now*. A content block must still go through
-    `_commit`, because the policy is what the operator configured for content.
-    """
-    chunks: list[bytes] = []
-    if not started:
-        chunks.append(message_start(message_id, model).encode())
-    for frame in block_frames(block, signature_compat=signature_compat):
-        chunks.append(frame.encode())
-    return chunks
-
-
 def _commit(
     session: DeliverySession,
     block: CompletedBlock,
@@ -205,13 +171,3 @@ def _commit(
         for frame in block_frames(ready, signature_compat=signature_compat):
             chunks.append(frame.encode())
     return chunks
-
-
-def synthesized_headers_block(text: str = "") -> CompletedBlock:
-    """A placeholder block used when upstream has produced no headers for too long.
-
-    Synthesising one forfeits the real upstream status code.
-    It is only worth doing when the alternative is the client timing out.
-    """
-    payload: dict[str, Any] = {"type": "text", "text": text}
-    return CompletedBlock(index=0, kind="text", payload=payload)
