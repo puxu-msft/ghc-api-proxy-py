@@ -103,13 +103,30 @@ async def test_an_assistant_turn_that_said_nothing_is_allowed_to_say_nothing() -
     assert _content(payload, 0) == [{"type": "text", "text": "hi"}]
 
 
-async def test_a_user_turn_of_nothing_but_blank_text_is_left_alone() -> None:
-    """The one place the rule stops, and it stops there because every alternative was measured to fail too.
+async def test_a_user_turn_that_said_nothing_goes_rather_than_its_content() -> None:
+    """A user turn has no spelling for "nothing", so the turn is what goes.
 
-    `content: []` is refused for a user turn in its own words — `messages.0: user messages must have non-empty content` (F1, 400) — beside the blank block's own refusal (F2, 400). Dropping the turn instead is not obviously safe rather than known to be unsafe: it moves every later turn's position and can put two same-role turns together, neither of which has been measured here. Both spellings fail, so the one that travels is the client's own and the error names what the client actually sent.
+    `content: []` is refused for a user turn in its own words — `messages.0: user messages must have non-empty content` (F1, 400) — beside the blank block's own refusal (F2, 400). Dropping the turn was declined at first because it puts two same-role turns next to each other and that had not been measured; `exp/260820-tool-pair-probe/` G4 has since measured it at 200.
 
-    The reference implementation has this exact hole in the other direction — it filters without a surviving-block check and sends `content: []` for every role — which is why this is pinned rather than left to reading.
+    The reference implementation gets this wrong in the other direction — it filters without a surviving-block check and sends `content: []` for every role.
     """
+    payload = await _run(
+        {
+            "messages": [
+                {"role": "assistant", "content": [{"type": "text", "text": "hi"}]},
+                {"role": "user", "content": [{"type": "text", "text": ""}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "still here"}]},
+            ]
+        }
+    )
+
+    messages = payload["messages"]
+    assert len(messages) == 2
+    assert [message["role"] for message in messages] == ["assistant", "assistant"]
+
+
+async def test_a_body_of_nothing_but_blank_turns_travels_as_it_came() -> None:
+    """Dropping every turn would make a different request, not a repaired one."""
     payload = await _run({"messages": [{"role": "user", "content": [{"type": "text", "text": ""}]}]})
 
     assert _content(payload) == [{"type": "text", "text": ""}]

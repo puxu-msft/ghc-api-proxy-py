@@ -91,7 +91,9 @@ async def drop_blank_text_blocks(context: RequestContext) -> None:
     messages_value = payload.get("messages")
     if not isinstance(messages_value, list):
         return
-    for message in cast(list[Any], messages_value):
+    messages = cast(list[Any], messages_value)
+    doomed: list[int] = []
+    for index, message in enumerate(messages):
         if not isinstance(message, dict):
             continue
         entry = cast(dict[str, Any], message)
@@ -111,7 +113,14 @@ async def drop_blank_text_blocks(context: RequestContext) -> None:
             logger.debug("a message carried nothing but blank text blocks; emptying the assistant turn, which upstream accepts")
             entry["content"] = []
             continue
-        # A user turn has no such spelling: `content: []` is refused too, and in its own words — `messages.0: user messages must have non-empty content` (F1, 400) beside the blank block's `text content blocks must be non-empty` (F2, 400). Dropping the turn instead is not obviously safe rather than known to be unsafe: it moves every later turn's position and can put two same-role turns next to each other, and neither consequence has been measured against this upstream. Both spellings fail, so the one that travels is the client's own, and the error names what the client actually sent.
-        logger.warning(
-            "a user message carries nothing but blank text blocks; it is being sent unchanged, because every rewrite of it is refused too",
-        )
+        # A user turn has no such spelling: `content: []` is refused too, and in its own words — `messages.0: user messages must have non-empty content` (F1, 400) beside the blank block's `text content blocks must be non-empty` (F2, 400). So the turn goes rather than its content.
+        # This used to travel unchanged, on the grounds that dropping a turn puts two same-role turns next to each other and that had not been measured. It has since: `exp/260820-tool-pair-probe/` G4 sends two assistant turns in a row and gets 200. The same reasoning now runs the other way — a turn saying nothing is worth less than the request it was costing.
+        doomed.append(index)
+
+    if doomed and len(doomed) < len(messages):
+        logger.info("dropped %d turn(s) carrying nothing but blank text blocks", len(doomed))
+        gone = set(doomed)
+        messages[:] = [message for index, message in enumerate(messages) if index not in gone]
+    elif doomed:
+        # Every turn would go. A request with no messages is a different request, not a repaired one, so the body travels as it came and upstream says what is wrong with it.
+        logger.warning("every turn carries nothing but blank text blocks; the body is being sent unchanged")
