@@ -359,24 +359,16 @@ def test_what_came_back_escalates_with_its_size() -> None:
 
     Asserted as whole spans — marker, printed figure and colour together — because that is the thing a reader sees, and because a bare colour check passes on any other coloured field in the line.
     """
-    assert f"{DIM}↓9.9KB{RESET}" in _received(10_188)
-    assert f"{WHITE}↓10.0KB{RESET}" in _received(10_189)
-    assert f"{WHITE}↓99.9KB{RESET}" in _received(102_348)
-    assert f"{YELLOW}↓100.0KB{RESET}" in _received(102_349)
+    assert f"{DIM}↓5.0KB{RESET}" in _received(5 * 1024)
+    assert f"{WHITE}↓10.0KB{RESET}" in _received(10 * 1024)
+    assert f"{WHITE}↓50.0KB{RESET}" in _received(50 * 1024)
+    assert f"{YELLOW}↓100.0KB{RESET}" in _received(100 * 1024)
 
 
-def test_the_same_number_is_never_shown_in_two_colours() -> None:
-    """The invariant behind where the thresholds sit.
-
-    `format_bytes` prints one decimal, so a raw threshold of exactly `10 * 1024` put `10239` and `10240` — both printed `10.0KB` — on opposite sides of it, and the line then showed one number in two colours. Colouring from the shown figure is what fixes that, and this is the assertion that keeps the two in step if either formatter's precision is ever changed.
-    """
-    seen: dict[str, set[str]] = {}
-    for count in list(range(10_100, 10_300)) + list(range(102_300, 102_500)):
-        rendered = _received(count).split()[-1]
-        colour, _, rest = rendered.partition("↓")
-        seen.setdefault(rest, set()).add(colour)
-    disagreeing = {shown: colours for shown, colours in seen.items() if len(colours) > 1}
-    assert not disagreeing, f"the same printed size came out in more than one colour: {disagreeing}"
+def test_the_thresholds_are_the_round_numbers() -> None:
+    # Exactly `10 * 1024`, not the point where the printed figure reaches `10.0KB`. Both counts below print `10.0KB`, so the two colours sit on the same shown number — accepted, because the threshold being the round number is what was asked for.
+    assert f"{DIM}↓10.0KB{RESET}" in _received(10 * 1024 - 1)
+    assert f"{WHITE}↓10.0KB{RESET}" in _received(10 * 1024)
 
 
 def test_what_went_out_stays_quiet_however_large() -> None:
@@ -397,10 +389,7 @@ def test_output_tokens_escalate_on_their_own_scale() -> None:
     assert f"{DIM}↓999{RESET}" in produced(999)
     assert f"{WHITE}↓1.0k{RESET}" in produced(1_000)
     assert f"{WHITE}↓9.9k{RESET}" in produced(9_949)
-    # Rounds up to `10.0k` on screen, so it is coloured as the figure it shows rather than the one it holds. `round` and `f"{:.1f}"` round the same float the same way, which is what keeps the two in step.
-    assert f"{YELLOW}↓10.0k{RESET}" in produced(9_951)
-    # Just below the k form, where the bare count is printed and rounding must not be applied.
-    assert f"{DIM}↓999{RESET}" in produced(999)
+    assert f"{YELLOW}↓10.0k{RESET}" in produced(10_000)
 
 
 def test_how_the_turn_ended_is_a_ladder_not_a_flag() -> None:

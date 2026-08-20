@@ -34,9 +34,9 @@ TOOL_USE_REASON = "tool_use"
 REASONING_WORD = {ReplyDialect.ANTHROPIC: "think", ReplyDialect.RESPONSES: "reason"}
 TOOL_WORD = {ReplyDialect.ANTHROPIC: TOOL_USE_REASON, ReplyDialect.RESPONSES: "function_call"}
 
-# Where a reply stops being ordinary, stated on the scale the reader sees rather than in raw units: kilobytes for wire bytes, thousands for token counts.
-NOTABLE_KB, HEAVY_KB = 10.0, 100.0
-NOTABLE_K_TOKENS, HEAVY_K_TOKENS = 1.0, 10.0
+# Where a reply stops being ordinary. Bytes are 1024-based, matching what `format_bytes` prints. A count inside the printed figure's rounding band can show the same number in a different colour from one just over the threshold; the thresholds are the round numbers rather than the rounding band, and that is the accepted trade.
+NOTABLE_BYTES, HEAVY_BYTES = 10 * 1024, 100 * 1024
+NOTABLE_TOKENS, HEAVY_TOKENS = 1_000, 10_000
 
 # How the turn ended, as a ladder rather than a flag. Every one of these is terminal, so a single colour would say only "it stopped" — which the presence of the field already says. What the reader wants is how much of a problem the ending was.
 # Green has to keep meaning "nothing to look at here", so a reply cut off at the token limit cannot share it: truncation is the one thing about that line worth seeing. A refusal goes further still — nothing was delivered and the turn cannot simply be resumed — which is why it sits at the same level as a failed status rather than one below.
@@ -170,16 +170,6 @@ def _painted_tools(names: list[str], *, color: bool) -> str:
     return ",".join(spans)
 
 
-def shown_magnitude(value: int, base: int) -> float:
-    """The figure a reader will actually see, on the scale the thresholds are stated in.
-
-    Both formatters print one decimal place, so a count just under a threshold can round *up* to the same string as one just over it — 10239 and 10240 bytes both print `10.0KB`. Deciding the colour from the raw count then puts two different colours on two identical numbers, which is precisely the confusion the colour exists to prevent. Reading the shown figure instead costs about half a percent of threshold precision and buys a line that cannot contradict itself.
-
-    Below the scale's own switchover the formatter prints the bare count, so the ratio is left unrounded there: 999 tokens print as `999`, and rounding would call that `1.0` and colour it as though it had crossed.
-    """
-    return round(value / base, 1) if value >= base else value / base
-
-
 def format_count(value: int) -> str:
     """Compact token counts. Bare of any byte unit, which is what tells a token column from a byte one."""
     if value >= 1_000_000:
@@ -230,7 +220,7 @@ def format_tokens(usage: dict[str, Any], *, unicode: bool = True, color: bool = 
 
     if "output_tokens" in usage:
         produced = read("output_tokens")
-        colour = volume_colour(shown_magnitude(produced, 1000), notable=NOTABLE_K_TOKENS, heavy=HEAVY_K_TOKENS)
+        colour = volume_colour(produced, notable=NOTABLE_TOKENS, heavy=HEAVY_TOKENS)
         parts.append(paint(f"{down}{format_count(produced)}", colour, color=color))
     return " ".join(parts)
 
@@ -288,9 +278,7 @@ def format_completion_line(line: RequestLine, *, unicode: bool = True, color: bo
     # Wire bytes, one field for both directions so they read as a pair rather than as two unrelated numbers.
     # Only the returning half escalates. What this proxy sent upstream is a consequence of the request the client made and says nothing about how the reply went, so it stays quiet whatever its size.
     received_colour = (
-        volume_colour(shown_magnitude(line.bytes_out, 1024), notable=NOTABLE_KB, heavy=HEAVY_KB)
-        if line.bytes_out is not None
-        else DIM
+        volume_colour(line.bytes_out, notable=NOTABLE_BYTES, heavy=HEAVY_BYTES) if line.bytes_out is not None else DIM
     )
     wire = [
         paint(f"{up}{format_bytes(line.bytes_in)}", DIM, color=color) if line.bytes_in is not None else "",
