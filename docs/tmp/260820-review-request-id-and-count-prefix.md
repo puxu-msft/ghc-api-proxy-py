@@ -114,3 +114,11 @@ JSONL 内确实同时有原始 `path` 和分类后的 `count_tokens`，但这是
 另记一条复评顺带证实的事实：`logging.PREFIX_COLOURS` 已有同样的 `ok/fail/gone → GREEN/RED/YELLOW` 三档。两处是同一个判断的两次陈述（一个给固定词上色，一个给数字和句子上色），已在 `STATUS_COLOURS` 的注释里互相指认，改一处要改两处。
 
 验证：`uv run pytest tests --ignore=tests/tui` 1519 passed / 2 skipped；`ruff check src tests` 通过；`pyright src tests` 0 error。
+
+## 更正（收尾独立验收，2026-08-20）
+
+复评那一节的依据行写「`src/app/observability`、`src/app/server` 与 `tests` 内共 45 个 `format_completion_line()` 调用」。收尾时一名未卷入的验收者用 AST 复数，**实数是 46**：`tests/unit/test_request_log.py` 45 个，加 `src/app/server/pipeline_app.py` 的生产调用 1 个。评审报告的正文按惯例保持原样，更正记在这里。
+
+结论不受影响，而且它依赖的正是那条被漏计的：46 个调用里缺 `status=` 的为 0（生产那一个传的是 `_log_completion` 已解出的最终状态），字面量状态值落在 `LogStatus` 以外的为 0。
+
+第二处更正，性质不同——它是**我的验证方法坏了**，不是文档记错。我在收尾时称「把 HEAD 干净检出到临时目录跑，1528 passed」，但那条命令是 `cd <归档目录> && uv run --project <仓库> python -m pytest`，`--project` 指回共享工作树，`app` 很可能就是从工作树导入的，检出因此没有起到隔离作用。正确配方要加 `PYTHONPATH=<归档目录>/src`。独立验收者按修正后的配方在 `bbbcb371` 上实测 **1546 passed / 3 skipped**（提交比我取样时更新，故数字不同），该结果取代我报的 1528。结论不变：HEAD 不再是「调用方传了新参数而定义那半没提交」的半截状态。
