@@ -23,3 +23,7 @@ dist/
 /refs/agent-maestro
 /refs/ghc-api-py
 /refs/vscode-copilot-chat
+
+# Agent-authored development state: work records, evidence and archives.
+# Kept out of the main branch by the standing convention; carry it on its own branch if it needs versioning.
+.dev/
