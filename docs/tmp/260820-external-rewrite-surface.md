@@ -11,9 +11,9 @@
 
 1. **本项目已经有一整套「外置改写」机制，而且是完整实现的**：`src/app/hooks/`（四类 typed 契约 ＋ 启动期不可变 registry ＋ `importlib` 加载用户模块 ＋ 超时 ＋ 记账 ＋ 5 个测试文件）。它**只接在生产不跑的 legacy app 上**（`server/app_factory.py`），新 pipeline 链路完全不引用。
 2. **新链路上也已经有一套订阅机制**：`pipeline/events.py` 的 `SubscriberRegistry`（唯一 id ＋ before/after 拓扑排序 ＋ freeze 时定序），驱动在 5 个事件点投递，`attempt.prepare` 的订阅者**可以直接改写 `context.payload` 并被下一步读走**（`direct_driver/base.py:130-133`）。它**默认零订阅者**，且**除测试外没有任何生产代码注册过订阅者**。
-3. **用户已经裁决过方向**：`docs/.human-controlled/MAIN.md:62` 要求驱动提供事件订阅点；`docs/.human-controlled-candidates/pipeline-subscriptions.md:5` 记「方向已由用户裁决：**订阅机制吸收 hooks**」。所以「外置」不是新方向，而是一件**已裁决但未执行的迁移**。
+3. **用户已经裁决过方向**：`docs/.human-controlled/MAIN.md:62` 要求驱动提供事件订阅点；`.dev/human-controlled-docs-candidates/pipeline-subscriptions.md:5` 记「方向已由用户裁决：**订阅机制吸收 hooks**」。所以「外置」不是新方向，而是一件**已裁决但未执行的迁移**。
 4. **响应侧（出站方向）在新链路上没有任何改写接入点**。流式路径上更是明确「首版没有通用逐事件 transform hook」（`docs/2604-rewrite/hooks-system.md:64-66`）。legacy 侧有 `ResponseHook`，但只处理**完整非流式响应 bytes**。
-5. 配置面上，`ProxyConfig.hooks` 的六个运维订阅点（`on_client_request_parsed` 等）**只有定义、零消费者**，且**列表项的语义至今未定义**（`docs/.human-controlled-candidates/config-migration-gaps.md:45-49`）。
+5. 配置面上，`ProxyConfig.hooks` 的六个运维订阅点（`on_client_request_parsed` 等）**只有定义、零消费者**，且**列表项的语义至今未定义**（`.dev/human-controlled-docs-candidates/config-migration-gaps.md:45-49`）。
 
 证据权重：以上五条全部为**强，可据以动手**——都是静态可达性事实，用 `rg` 零命中/唯一命中判定，无分支歧义。
 
@@ -209,7 +209,7 @@ class HooksConfig(Section):
 
 来源是用户亲笔的 `docs/.human-controlled/config.example.yaml:436-453`，每个点带一句中文说明。
 
-**未决问题**（`docs/.human-controlled-candidates/config-migration-gaps.md:45-49`）：
+**未决问题**（`.dev/human-controlled-docs-candidates/config-migration-gaps.md:45-49`）：
 
 > **新**：`hooks` 一节已有六个订阅点，但**列表项指什么没有说明**（模块路径？已注册订阅者的 id？），实现暂按 `list[str]` 建模、无消费者。**单 hook 超时**也没有承载。
 
@@ -244,7 +244,7 @@ class HooksConfig(Section):
 | | `rewrite_refusal` | `action="as_end_turn"` | **无** |
 | `history` | `enabled` | `True` | **无**（新链路不接 history） |
 
-（本表与 `docs/.human-controlled-candidates/config-schema-gap.md:72-86` 的结论一致，我独立复核了每一项的 `rg` 命中。）
+（本表与 `.dev/human-controlled-docs-candidates/config-schema-gap.md:72-86` 的结论一致，我独立复核了每一项的 `rg` 命中。）
 
 **legacy 侧的 `AppSettings.hooks`**（`config/settings.py:144-148`）是另一套：`modules: list[str]`、`disabled: list[str]`、`timeout_ms: int = 5000`、`deduplicate_tool_calls: bool = False`。**它才是「外置」的现役配置面**，但它属于生产不跑的那套。
 
@@ -284,7 +284,7 @@ class HooksConfig(Section):
 
 ### 4.2 已裁决：订阅机制吸收 hooks
 
-`docs/.human-controlled-candidates/pipeline-subscriptions.md:5`：
+`.dev/human-controlled-docs-candidates/pipeline-subscriptions.md:5`：
 
 > 方向已由用户裁决：**订阅机制吸收 hooks**。本文只处理「怎么吸收」，不重开「要不要吸收」。
 
@@ -298,7 +298,7 @@ class HooksConfig(Section):
 2. 现有 `HookErrorMode` 的语义是保留还是并入异常体系；
 3. `config.example.yaml` 的 `hooks` 六个订阅点，列表项指什么，以及是否需要单 hook 超时。
 
-`docs/.human-controlled-candidates/uncovered-modules.md:18`：
+`.dev/human-controlled-docs-candidates/uncovered-modules.md:18`：
 
 > `hooks/` | 四类 typed 扩展契约、启动期不可变 registry、可信 loader、三个内置实现 | 用户已裁决由事件订阅吸收，见 `pipeline-subscriptions.md`
 
@@ -323,7 +323,7 @@ class HooksConfig(Section):
 ### 4.4 `feature_negotiation.py` 是什么，为什么被称为孤儿，缺的两类是刻意删除的
 
 - **是什么**：`src/app/anthropic/feature_negotiation.py`（83 行）——进程内 TTL 缓存，记「上游拒绝过哪些能力值」。API：`learn(category, key, value)` / `is_active(...)` / `pin(...)` / `expire(...)` / `active_values(category, key, configured=...)`。条目带 `first_learned_at` / `last_confirmed_at` / `pinned` / `manually_expired`（`:18-23`）。`_validate`（`:37-39`）对未知类别抛 `ValueError`。
-- **被谁用**：**没有人**。`rg "feature_negotiation" --type py src/` 只命中文件自身；唯一引用者是 `tests/unit/test_feature_negotiation.py`。这就是「孤儿模块」的含义。`docs/.human-controlled-candidates/uncovered-modules.md:42` 把它列在「未被 `MAIN.md` 覆盖」的清单里。
+- **被谁用**：**没有人**。`rg "feature_negotiation" --type py src/` 只命中文件自身；唯一引用者是 `tests/unit/test_feature_negotiation.py`。这就是「孤儿模块」的含义。`.dev/human-controlled-docs-candidates/uncovered-modules.md:42` 把它列在「未被 `MAIN.md` 覆盖」的清单里。
 - **缺的两类**：`NEGOTIATION_CATEGORIES`（`:5-15`）共 9 类，对比现网 JS 服务少了 `serverTools` 与 `serverToolDowngrade`——**正是处理本次 400 的那两类**。
 - **为什么缺**：**这不是遗漏，是冻结 spec 明写的删除项**（`hooks-tokenization-spec.md:224`）。JS 侧的对应实现见 synthesis 文档 §2；本项目在 2026-07-17 主动删掉了这两个类别，并要求运行时对未知类别显式报错。
 - **附带事实**：JS 侧的 learned state 是**落盘**的（`<APP_DIR>/negotiation-states.json`，TTL 30 天）；本项目这个 store 是**纯内存**，没有任何持久化代码。

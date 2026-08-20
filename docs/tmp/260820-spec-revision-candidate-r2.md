@@ -52,7 +52,7 @@
 
 `spec.md:23` 另外要求「并发、时间均有边界」，无上界等待同样与它冲突。
 
-三条路（详见 `docs/.human-controlled-candidates/proactive-rate-limiter.md`）：
+三条路（详见 `.dev/human-controlled-docs-candidates/proactive-rate-limiter.md`）：
 
 1. 保持无上界——最贴合裁决原话，但需同时删掉 `:462` 的「不得无限等待」与 `:23` 的「时间有边界」，**扩大了裁决范围**。
 2. **把排队时间纳入 `client_request_deadline`**——仍是等待，超时按 504 收尾而非按准入拒绝收尾。上面的替换文本按这条写。

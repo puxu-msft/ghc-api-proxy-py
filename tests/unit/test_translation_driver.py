@@ -51,7 +51,7 @@ def test_system_becomes_a_single_instructions_string() -> None:
     `role: system` and a `content` list of blocks. Measured 2026-08-18, that shape and five other
     array forms all get `failed to parse request`; only a string is accepted. The conflict with
     the authored spec is written up in
-    `docs/.human-controlled-candidates/instructions-shape-conflict.md` and is the user's to rule
+    `.dev/human-controlled-docs-candidates/instructions-shape-conflict.md` and is the user's to rule
     on — this test records what upstream does, not a preference.
     """
     payload, _ = default_registry().translate(

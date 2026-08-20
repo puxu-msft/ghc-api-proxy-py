@@ -43,7 +43,7 @@
 
 实测：`client_request_deadline`（默认 3600 秒）在 `handle_bounded` 内起算，而限流门在它外面，所以**排队时间不计入任何 deadline**——按真实层级搭的探针里，排队请求在 0.30 秒 deadline 下总耗时 0.35 秒却没有超时。
 
-50 并发对一天 429 个请求基本够不着，但队列一旦形成就没有上界。三条路写在 `docs/.human-controlled-candidates/proactive-rate-limiter.md`，模型倾向「把排队时间纳入 `client_request_deadline`」——仍是等待，超时按 504 收尾而非按准入拒绝收尾。**未裁决前不动代码，也不动这一条 spec。**
+50 并发对一天 429 个请求基本够不着，但队列一旦形成就没有上界。三条路写在 `.dev/human-controlled-docs-candidates/proactive-rate-limiter.md`，模型倾向「把排队时间纳入 `client_request_deadline`」——仍是等待，超时按 504 收尾而非按准入拒绝收尾。**未裁决前不动代码，也不动这一条 spec。**
 
 ---
 

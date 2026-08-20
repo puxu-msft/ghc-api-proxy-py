@@ -79,7 +79,7 @@ hooks:
 
 ## 事件订阅（新链路）
 
-本节描述的是**新处理链**上的机制，与上面四类 hooks 并存但方向已定：`MAIN.md` 要求驱动提供事件订阅点，订阅者传入唯一 id 与可选的「插入到谁之前/后」，能修改公共对象、也能靠抛不同异常触发中止/重试。已裁决的方向是**订阅机制吸收 hooks**，「要不要吸收」不再重开；细节与剩余待裁决点见 [pipeline-subscriptions.md](../.human-controlled-candidates/pipeline-subscriptions.md)。
+本节描述的是**新处理链**上的机制，与上面四类 hooks 并存但方向已定：`MAIN.md` 要求驱动提供事件订阅点，订阅者传入唯一 id 与可选的「插入到谁之前/后」，能修改公共对象、也能靠抛不同异常触发中止/重试。已裁决的方向是**订阅机制吸收 hooks**，「要不要吸收」不再重开；细节与剩余待裁决点见 [pipeline-subscriptions.md](../../.dev/human-controlled-docs-candidates/pipeline-subscriptions.md)。
 
 ### 已建成
 
@@ -103,7 +103,7 @@ hooks:
 
 ### 尚未建成
 
-- **配置面**。内置订阅者目前没有开关：协议兼容性修复属于不可禁用的 mandatory sanitizer，与 `normalize_context_management` 一样本就无开关。`config.example.yaml` 的 `hooks:` 一节另给了六个**面向运维**的订阅点（`on_client_request_parsed` 等），与驱动内部的 `attempt.*` / `request.*` 不是同一层，其**列表项语义尚未定义**——是模块路径还是订阅者 id，见 [config-migration-gaps.md](../.human-controlled-candidates/config-migration-gaps.md)。配置面等这道裁决落地后再补。
+- **配置面**。内置订阅者目前没有开关：协议兼容性修复属于不可禁用的 mandatory sanitizer，与 `normalize_context_management` 一样本就无开关。`config.example.yaml` 的 `hooks:` 一节另给了六个**面向运维**的订阅点（`on_client_request_parsed` 等），与驱动内部的 `attempt.*` / `request.*` 不是同一层，其**列表项语义尚未定义**——是模块路径还是订阅者 id，见 [config-migration-gaps.md](../../.dev/human-controlled-docs-candidates/config-migration-gaps.md)。配置面等这道裁决落地后再补。
 - **响应侧接入点**。新链路上非流式只有翻译，流式链全程无订阅点；`config.example.yaml` 已定名的两个 SSE 块级点尚未发布。
 - **吸收本身**。`src/app/hooks/` 的四类 typed 契约、loader、executor 仍只接在 legacy app 上，没有一个内置 hook 迁过来。
 
@@ -113,4 +113,4 @@ hooks:
 - [消息清洗](sanitize-pipeline.md)
 - [工具使用](tool-use.md)
 - [Tokenization](tokenization.md)
-- [订阅机制如何吸收 hooks（候选）](../.human-controlled-candidates/pipeline-subscriptions.md)
+- [订阅机制如何吸收 hooks（候选）](../../.dev/human-controlled-docs-candidates/pipeline-subscriptions.md)

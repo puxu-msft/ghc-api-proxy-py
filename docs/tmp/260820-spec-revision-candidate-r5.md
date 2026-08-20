@@ -110,7 +110,7 @@
 
 上面保留了「准入等待必须有上界」，**而当前实现没有上界**。结构依据（评审已独立复核）：`pipeline_app.py:391-394` 挂 middleware → `admission.py:47-48` 先取名额 → `pipeline_app.py:224` 才进 `handle_bounded` → `handler.py:190-195` 才进 `asyncio.timeout`。`spec.md:23` 亦要求「时间有边界」。
 
-三条路（详见 `docs/.human-controlled-candidates/proactive-rate-limiter.md`）：**保持无上界**（需同时删掉 `:462`／`:23` 的相关要求，扩大裁决范围）／**纳入 `client_request_deadline`**（上面按这条写）／**单独配置键**。模型倾向第二条。
+三条路（详见 `.dev/human-controlled-docs-candidates/proactive-rate-limiter.md`）：**保持无上界**（需同时删掉 `:462`／`:23` 的相关要求，扩大裁决范围）／**纳入 `client_request_deadline`**（上面按这条写）／**单独配置键**。模型倾向第二条。
 
 ---
 

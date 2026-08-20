@@ -2,7 +2,7 @@
 
 **评审者**：leaf executor（只读；未修改仓库任何文件，本报告除外）
 **评审基准**：工作树 `git diff` 中属于本切片的 6 个文件，HEAD = `db9aa7d`
-**范围**：`src/app/pipeline/subscribers/server_tools.py`、`tests/unit/test_subscribers_server_tools.py`、`docs/2604-rewrite/{hooks-system,tool-use,anthropic-compat}.md`、`docs/.human-controlled-candidates/pipeline-subscriptions.md`
+**范围**：`src/app/pipeline/subscribers/server_tools.py`、`tests/unit/test_subscribers_server_tools.py`、`docs/2604-rewrite/{hooks-system,tool-use,anthropic-compat}.md`、`.dev/human-controlled-docs-candidates/pipeline-subscriptions.md`
 **已排除**：`5e98a9e` 已评审部分（本次未破坏它，见 §5 的隔离验证）；并行会话的 `auth/providers.py`、`cli.py`、`bundled-config.yaml`、`model_provider/github_copilot.py`、`server/handler.py`、`tests/unit/test_builtin_subscribers.py`
 
 **结论**：blocker 1，major 1，minor 7。摊平这条路本身的判据是对的，实现对 `web_search` 族正确；缺陷集中在 `web_fetch` 族与一份未同步的冻结 spec。
@@ -111,7 +111,7 @@ export interface WebFetchBlockParam {          // 成功形态
 | m3 | `server_tools.py:140` | `input: {"query": "date   "}` → 实测 `'[web_search] date   '`，尾随空白被原样带入 | `query.strip()` 只用来判空，插值时没有 strip。仅当该块是**末尾 assistant 轮的最后一个块**时才致命（Anthropic 拒 `final assistant content cannot end with trailing whitespace`），且这段文本不会再经过 `fix_anthropic_request`。一字符修法：插值也用 `query.strip()` |
 | m4 | `server_tools.py:9`、`:52`、`:120` | 三处把 `Tool 'web_search' not found in provided tools` 当作上游必然回话陈述，无出处标注 | 溯源到 `copilot-api-js/src/lib/request/strategies/web-search-not-found-retry.ts` 的 matcher，是参考项目的一手、本项目的二手，**本项目未实测**。同一个模块对别的事实标注得极其克制（「measured on gpt-5.5」「has not been measured」），这三处破了自己的规矩。**证据权重：足以据此决策**（参考项目为它专门写了一条自愈臂），只是措辞该标出来 |
 | m5 | `server_tools.py:184-234` | `_strip_declarations` 定义在唯一调用者 `adapt_server_tools` **之后** | 运行无碍。但这个文件的主产物是 docstring，顺读一遍现在是倒着的；`:198` 的注释「the declaration line below」也只有靠这个倒序才读得通。建议把 `_strip_declarations` 挪到 `adapt_server_tools` 之前 |
-| m6 | `docs/.human-controlled-candidates/pipeline-subscriptions.md`（2026-08-20 增补段） | 「六个调用点无一改动」 | `git grep -n "build_chain(" 5e98a9e -- src tests` 实测 **9** 处（去掉锁定测试自己是 8 处）。承重的那半句（无一改动）成立，数字不成立 |
+| m6 | `.dev/human-controlled-docs-candidates/pipeline-subscriptions.md`（2026-08-20 增补段） | 「六个调用点无一改动」 | `git grep -n "build_chain(" 5e98a9e -- src tests` 实测 **9** 处（去掉锁定测试自己是 8 处）。承重的那半句（无一改动）成立，数字不成立 |
 | m7 | `docs/2604-rewrite/hooks-system.md` 新增小节标题 | 「## 事件订阅（新链路，**正在吸收 hooks**）」 | 同一节的「尚未建成」条目写「吸收本身……没有一个内置 hook 迁过来」，`pipeline-subscriptions.md` 写「吸收尚未发生」。标题比正文超前一步，读目录的人会以为迁移已开工。改成「（新链路，方向是吸收 hooks）」即可 |
 
 另有一处不在评审范围但顺手看到、修起来极便宜：`docs/tmp/260820-websearch-fix-v2-design.md:262` 表格里「出站前剥除」误写成「出**станции**前剥除」（混入西里尔字母）。`anthropic-compat.md` 本身没有这个问题。
@@ -147,7 +147,7 @@ export interface WebFetchBlockParam {          // 成功形态
 - `anthropic-compat.md` 那行从「完整支持」改成「不支持，且已实测被拒的族会在出站前剥除」：**既不过头也不不足**。逐条核对——代理确实不执行 web search/fetch/code execution（一直如此，旧文写「完整支持」才是错的）；`web_search*`/`web_fetch*` 声明与历史 blocks 确实被剥/摊平；`memory_*`/`tool_search_*`/`text_editor_*` 确实继续透传（`_REJECTED_TYPE_PREFIXES` 只有两个前缀）；Responses leg 的 hosted web search 确实未实现。旧文那句「可按配置剥离」暗示存在一个从来不存在的配置项，删掉是对的。
 - 「已实测被拒」对 `web_fetch` 成立：Anthropic 腿 400 `rejected tool(s): web_fetch` 有 2026-07-12 的一手记录（经 `docs/tmp/260820-websearch-on-responses-leg.md:351` 转述自 `copilot-api-js/exp/server-tool-web-fetch-poc/README.md`）。
 - `hooks-system.md` 新节的事实核对：五个事件名与 `direct_driver/base.py:29-33` 逐字一致；「`attempt.prepare` 在重试循环内发布」与 `base.py:130` 一致；「翻译发生在驱动之前，订阅者在翻译腿上看到的是已翻译成目标格式的载荷」与 `server/handler.py:79-87` 一致；锁定测试 `tests/unit/test_builtin_subscribers.py` 存在且断言按事件全集（`frozen_by_event`）。
-- **链接全部可解析**：`../.human-controlled-candidates/pipeline-subscriptions.md`、`../.human-controlled-candidates/config-migration-gaps.md`、`hooks-tokenization-spec.md`、`anthropic-compat.md`、`tool-use.md`、`../2604-rewrite/hooks-system.md` —— 逐个对 `ls` 核过，均存在。（B1 是**语义**断链，不是路径断链。）
+- **链接全部可解析**：`../../.dev/human-controlled-docs-candidates/pipeline-subscriptions.md`、`../../.dev/human-controlled-docs-candidates/config-migration-gaps.md`、`hooks-tokenization-spec.md`、`anthropic-compat.md`、`tool-use.md`、`../2604-rewrite/hooks-system.md` —— 逐个对 `ls` 核过，均存在。（B1 是**语义**断链，不是路径断链。）
 - 一处观察不列为发现：`tool-use.md:24` 从 live doc 指向 `docs/tmp/260820-websearch-fix-v2-design.md`。它是并列在 `anthropic-compat.md` 之后的补充指针，不是唯一权威，符合项目规则的字面；只提醒该主题定稿时把它蒸馏掉。
 
 **测试分辨力（提问 7）——无恒真断言。**

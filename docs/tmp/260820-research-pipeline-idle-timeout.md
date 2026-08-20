@@ -104,7 +104,7 @@ upstream_request_timeouts:
 - `docs/agents/anthropic-responses-bridge/architecture.md:50`：只是描述 legacy 现状（「当前流式返回仍是 `with_idle_timeout()` 后的原始 upstream bytes passthrough」），并要求「替换 raw-byte downstream 接线」。没有说替换后 idle timeout 怎么办。
 - `docs/tmp/260820-server-timeout-forensics.md:87`：已经查明「本次运行中，上游空闲超时机制没有被接线」。本报告与它一致，并在 §4.3 补上了它没查到的那一层。
 - `docs/tmp/260820-downstream-keepalive-defect.md:110`：已记录 `keepalive.py` 两个生成器无生产接线，形态归入项目记忆「守卫被留在了 legacy 链路上」。本报告 §4 复核一致。
-- `docs/.human-controlled-candidates/config-schema-gap.md:65`：「上游超时默认值 → `response_header` / `stream_idle` 均为 0，新增 `upstream_request_deadline: 1200`；旧默认仍是 300」。**注意这是 candidates 目录，不是 `.human-controlled/`**，属于待用户签收的稿件，不能当裁决用；但它与用户亲笔文档一致，可作交叉印证。
+- `.dev/human-controlled-docs-candidates/config-schema-gap.md:65`：「上游超时默认值 → `response_header` / `stream_idle` 均为 0，新增 `upstream_request_deadline: 1200`；旧默认仍是 300」。**注意这是 candidates 目录，不是 `.human-controlled/`**，属于待用户签收的稿件，不能当裁决用；但它与用户亲笔文档一致，可作交叉印证。
 
 **Q1 总答**：**是**——范围、键名、默认值、语义边界、覆盖规则已被用户亲笔裁决；**否**——接入点、触发后的对外行为、以及是否重试，一律没有裁决。
 

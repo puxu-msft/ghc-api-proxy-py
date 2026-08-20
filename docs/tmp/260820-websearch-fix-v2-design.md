@@ -259,7 +259,7 @@ cassette 里 `web_search_call` 零次（只有信封里 `num_requests:0`）；�
 | `docs/2604-rewrite/hooks-system.md` | 新增「事件订阅」一节：已建成／内置订阅者／尚未建成三块，并链到 `pipeline-subscriptions.md` 与 `config-migration-gaps.md` |
 | `docs/2604-rewrite/tool-use.md` | 「不过滤服务端 blocks」已不成立，改写并说明**反应式路径仍不成立** |
 | `docs/2604-rewrite/anthropic-compat.md` | Server-side Tools 一行由「完整支持」改为「不支持，且已实测被拒的族会在出станции前剥除」 |
-| `docs/.human-controlled-candidates/pipeline-subscriptions.md` | 增补 2026-08-20 现状段：第一个订阅者已落地，但**吸收仍未发生**（它是新增能力，不是迁过来的 hook） |
+| `.dev/human-controlled-docs-candidates/pipeline-subscriptions.md` | 增补 2026-08-20 现状段：第一个订阅者已落地，但**吸收仍未发生**（它是新增能力，不是迁过来的 hook） |
 
 ## 10. 上游实测（2026-08-20）与它推翻的结论
 
