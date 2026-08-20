@@ -21,7 +21,7 @@ from collections.abc import Callable, Mapping
 from typing import Any, cast
 
 from app.config.schema import SystemPromptPlacement, WebSearchConstraintPolicy
-from app.pipeline.server_tool_text import web_search_call_text
+from app.pipeline.server_tool_text import call_text, web_search_call_text
 from app.pipeline.translation_driver.content import (
     BlockKind,
     ContentBlock,
@@ -196,7 +196,7 @@ def _web_search_tool(
 
     `max_uses` is dropped and recorded. It is a *ceiling on cost*, so losing it means more searches and more latency, but it reverses no claim the client made — and upstream reports `tool_usage.web_search.num_requests` back, so what actually happened stays observable.
 
-    `allowed_domains` / `blocked_domains` refuse the request instead. They are a narrowing the client asked for, and dropping one turns a restriction into a no-op that **cannot be detected after the fact**: the search runs upstream and its results reach the model directly, so this proxy never sees which sites were read and has nothing to check them against. Carrying on would mean the model reading pages the client explicitly ruled out while the client is told nothing. The spec (§3.4, D1) rules this configurable with three settings and `error` as the default; the configuration does not exist yet, so what is implemented here is that default.
+    `allowed_domains` / `blocked_domains` refuse the request instead. They are a narrowing the client asked for, and dropping one turns a restriction into a no-op that **cannot be detected after the fact**: the search runs upstream and its results reach the model directly, so this proxy never sees which sites were read and has nothing to check them against. Carrying on would mean the model reading pages the client explicitly ruled out while the client is told nothing. Which of those happens is `web_search_domain_restrictions`: `error` refuses, `drop_fields` sends the search without them and records the widening. The default is `drop_fields` and that is a deliberate departure from the spec's D1 ruling — every one of 190 measured client sub-requests carries a non-empty `allowed_domains`, so `error` as the default is not "occasionally refuse" but "never search". Set `error` to have the ruled behaviour back.
 
     A field outside the allowed set refuses too, rather than being stripped. An unknown field today is a field with meaning tomorrow, and silently removing one turns whatever it asked for into a no-op — the same failure as the domain lists, arriving later and with nobody watching for it.
     """
@@ -274,7 +274,7 @@ def _tools_for_upstream(
 
     Anthropic's dated spelling costs the whole turn here; `{"type": "web_search"}` is accepted and the upstream really executes the search, returning the answer with the results already folded into it. So the declaration is translated rather than removed — removing it was this repair's first form and it traded a broken turn for a silently missing capability.
 
-    There is no capability gate in front of this, which is a deliberate choice and a bounded risk. Several models advertising `/responses` have never been asked whether they run hosted search, and for those the mapping turns one 400 into another. That is the same failure the client already had, it is loud, and an operator can see it — whereas gating on a hand-maintained list would, when the list is wrong in the other direction, silently withhold a working capability. The spec (§9.3, D4) wants that list in configuration; until it exists, failing visibly is the better of the two errors.
+    Whether the model behind this actually runs the search is decided elsewhere, and after this: `subscribers/hosted-web-search-gate` reads the resolved model against `models_support_web_search` at `attempt.prepare`. It has to be there rather than here, because this is handed the name the *client* asked for. So this translates unconditionally and the gate answers the request when the answer is no.
 
     What comes back needs no separate arrangement: a `web_search_call` item has no Anthropic spelling, and both the streaming and non-streaming paths render it as the same line of text that the Anthropic leg flattens its history into.
     """
@@ -478,8 +478,48 @@ def _item_from_block(
         }
     if block.kind is BlockKind.REASONING:
         return _reasoning_item(block, conversion)
+    flattened = _server_tool_block_as_text(block)
+    if flattened is not None:
+        conversion.record(
+            LossCode.SERVER_TOOL_NOT_CARRIED,
+            f"{flattened[0]} into {WIRE_FORMAT}: flattened to text",
+        )
+        return {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": flattened[1]}],
+        }
     conversion.record(LossCode.BLOCK_NOT_CARRIED, f"{block.kind.value} into {WIRE_FORMAT}")
     return None
+
+
+def _server_tool_block_as_text(block: ContentBlock) -> tuple[str, str] | None:
+    """An Anthropic server-tool block rendered as text, or `None` when it is not one.
+
+    These arrive because *we sent them*. When a search cannot run, this proxy answers with a `server_tool_use` paired with a failed `web_search_tool_result`, and the client replays that turn verbatim on the next request. There is no `server_tool_use` in the Responses protocol, so without this the whole assistant turn is dropped — not merely the two blocks, since a message left with no content is not carried either.
+
+    What that cost is worth stating plainly: the model would be shown two consecutive user turns and no trace of the search, so it does not know one was attempted, does not know it failed, and is free to try again — producing the same failure, dropped the same way. Telling it once and then forgetting is worse than not telling it, because the second turn looks like the first.
+
+    Text rather than a downgraded `function_call`, for the reason the Anthropic leg gives at the same decision: a downgraded pair refers to a tool this request does not declare, while text refers to nothing. The wording comes from `pipeline/server_tool_text.py`, which is also what the Anthropic leg flattens with — one history, one shape, whichever leg it crosses.
+    """
+    raw = block.raw
+    if not raw:
+        return None
+    kind = raw.get("type")
+    if kind == "server_tool_use":
+        name = raw.get("name")
+        if not isinstance(name, str):
+            return None
+        return kind, call_text(name, raw.get("input"))
+    if not isinstance(kind, str) or not kind.endswith("_tool_result") or kind == "tool_result":
+        return None
+    family = kind[: -len("_tool_result")]
+    content = raw.get("content")
+    if isinstance(content, dict):
+        code = cast(dict[str, Any], content).get("error_code")
+        if isinstance(code, str) and code:
+            return kind, f"[{family} failed: {code}]"
+    return kind, f"[{family} results omitted]"
 
 
 def _encoded_arguments(value: Any) -> str:

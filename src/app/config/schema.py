@@ -95,8 +95,10 @@ class ModelProviderConfig(Section):
     disabled_models: list[str] = Field(default_factory=lambda: list[str]())
     # Which models actually execute hosted web search, matched exactly against upstream `model.id`
     # as `disabled_models` is. A declaration from the client is translated into this endpoint's own
-    # `{"type": "web_search"}` only for a model named here; for any other it is removed, and the
-    # turn goes on without the capability.
+    # `{"type": "web_search"}` only for a model named here. For any other, the request is answered
+    # with a failed `web_search_tool_result` rather than sent on without the tool: a search
+    # sub-request stripped of its only tool succeeds by answering from memory, and the client
+    # labels that reply as search results.
     #
     # Maintained by hand because the catalog cannot answer the question. Measured 2026-08-20 across
     # the live catalog — 42 models, 67,656 bytes — the union of `capabilities.supports` keys holds

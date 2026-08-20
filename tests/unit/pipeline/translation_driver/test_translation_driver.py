@@ -862,3 +862,50 @@ def test_a_forced_choice_is_not_carried_when_the_name_is_ambiguous() -> None:
         target=WireFormat.OPENAI_RESPONSES,
     )
     assert "tool_choice" not in payload
+
+
+def test_a_replayed_failed_search_still_says_it_happened() -> None:
+    """These blocks arrive because *we sent them*, so dropping them loses a fact we chose to state.
+
+    When a search cannot run this proxy answers with a `server_tool_use` paired with a failed `web_search_tool_result`, and the client replays that turn verbatim. Responses has no `server_tool_use`, so without flattening the whole assistant turn goes — not just the two blocks, since a message left with no content is not carried either. The model would then see two consecutive user turns, no trace of the attempt, and every reason to try again: same failure, dropped the same way.
+    """
+    payload, semantic = default_registry().translate(
+        {
+            "model": "gpt-5.6-sol",
+            "max_tokens": 64,
+            "messages": [
+                {"role": "user", "content": "search for bun"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "server_tool_use",
+                            "id": "srvtoolu_x",
+                            "name": "web_search",
+                            "input": {"query": "bun 1.3"},
+                        },
+                        {
+                            "type": "web_search_tool_result",
+                            "tool_use_id": "srvtoolu_x",
+                            "content": {
+                                "type": "web_search_tool_result_error",
+                                "error_code": "unavailable",
+                            },
+                        },
+                    ],
+                },
+                {"role": "user", "content": "so what did you find"},
+            ],
+        },
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    texts = [
+        part["text"]
+        for item in payload["input"]
+        for part in item.get("content", [])
+        if isinstance(part, dict) and "text" in part
+    ]
+    assert "[web_search] bun 1.3" in texts, texts
+    assert "[web_search failed: unavailable]" in texts, texts
+    assert semantic.conversion.has(LossCode.SERVER_TOOL_NOT_CARRIED)
