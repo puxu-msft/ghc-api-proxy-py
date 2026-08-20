@@ -12,6 +12,7 @@ import pytest
 
 from app.config.schema import ProxyConfig
 from app.model_provider import EndpointNotSupported, ModelDescriptor, ModelEndpoint
+from app.models.anthropic import MessagesRequest
 from app.pipeline.direct_driver import AnthropicMessagesDriver, RetryBudget
 from app.pipeline.direct_driver.base import EVENT_ATTEMPT_PREPARE
 from app.pipeline.events import SubscriberRegistry
@@ -21,9 +22,10 @@ from app.pipeline.subscribers import (
     SERVER_TOOL_CAPABILITY_ID,
     register_builtin_subscribers,
 )
-from app.pipeline.translation_driver.registry import TranslatorNotFound
+from app.pipeline.translation_driver.registry import TranslatorNotFound, default_registry
 from app.server.composition import build_chain
 from app.server.handler import handle_count_tokens
+from app.tokenization.estimators import estimate_anthropic_input, estimate_responses_input
 
 EXPECTED_ON_ATTEMPT_PREPARE = (SERVER_TOOL_CAPABILITY_ID, BLANK_TEXT_BLOCKS_ID)
 # Keyed by event, so a subscriber added on a *different* event fails here too. Asserting one bucket would have let the next one land on `attempt.failed` with both assertions still green — a lock that only covers the door it was hung on.
@@ -220,10 +222,12 @@ async def test_the_counting_leg_gets_the_same_treatment_as_the_leg_it_measures()
     ]
 
 
-async def test_a_translated_route_is_counted_locally_rather_than_refused() -> None:
-    """Upstream's only counter serves the Anthropic protocol; asking it about a Responses route used to fail the request outright.
+async def test_a_translated_route_is_counted_from_the_body_it_would_actually_send() -> None:
+    """The translated leg is answered properly, not merely answered.
 
-    `provider.count_tokens` gates on the Messages capability and raises `EndpointNotSupported`, a `ProviderError`, which the counting chain deliberately propagates rather than degrading. That rule is right when the model is unreachable and wrong here: the model is reached perfectly well through `/responses`, and it is the counter that is missing. So the route decides, before anything is called, whether an upstream counter exists at all.
+    Two things used to be wrong here. Asking upstream's counter about a Responses route failed the whole request — `provider.count_tokens` gates on the Messages capability and raises `EndpointNotSupported`, a `ProviderError`, which the counting chain propagates rather than degrading. And measuring the Anthropic body described a request that is never sent: `/responses` receives different items, a different tool shape and a different spelling of every role, so its tokenizer counts something else.
+
+    So the count is now taken from the translated body with the estimator for that protocol. The second assertion is what makes the first discriminating: if the two estimators happened to agree on this input, matching one of them would prove nothing about which ran.
     """
     config = ProxyConfig.model_validate(
         {
@@ -237,16 +241,30 @@ async def test_a_translated_route_is_counted_locally_rather_than_refused() -> No
         http_client=httpx.AsyncClient(),
         providers={"ghc": provider},
     )
+    body: dict[str, Any] = {
+        "model": "claude-model",
+        "system": "be brief",
+        "tools": [{"name": "calc", "description": "adds", "input_schema": {"type": "object"}}],
+        "messages": [{"role": "user", "content": "what is 2+2?"}],
+    }
     context = RequestContext(
         inbound_format=WireFormat.ANTHROPIC_MESSAGES,
         requested_model="claude-model",
-        payload={"model": "claude-model", "messages": [{"role": "user", "content": "hi"}]},
+        payload=dict(body),
     )
 
     answer = await handle_count_tokens(chain, context)
 
+    translated, _ = default_registry(None).translate(
+        body, source=WireFormat.ANTHROPIC_MESSAGES, target=WireFormat.OPENAI_RESPONSES
+    )
+    translated["model"] = "claude-model"
+    as_anthropic = estimate_anthropic_input(
+        MessagesRequest.model_validate({**body, "max_tokens": 1})
+    )
+    assert estimate_responses_input(translated) != as_anthropic
+    assert answer["input_tokens"] == estimate_responses_input(translated)
     assert answer["estimated"] is True
-    assert answer["input_tokens"] > 0
     # Not called at all, rather than called and refused: a refusal from this one is fatal.
     assert provider.counted == []
     # The trail says why, in words that do not accuse the config file of a fault it does not have.

@@ -86,13 +86,6 @@ class TranslatorRegistry:
             raise TranslatorNotFound(f"no translator registered as {outbound_name(wire)}")
         return translator
 
-    def can_translate(self, *, source: WireFormat, target: WireFormat) -> bool:
-        """Whether `translate` would find both halves — the same two lookups, asked without running them.
-
-        For a caller that needs to know whether a request is carryable at all but has no use for the carried body. Counting is one: it measures the Anthropic body, yet a body that cannot reach the target is a body nobody can send, and answering about it would describe a request that is going to be refused.
-        """
-        return source in self._inbound and target in self._outbound
-
     def translate(
         self,
         payload: Mapping[str, Any],
@@ -109,7 +102,6 @@ class TranslatorRegistry:
         to_wire = self.outbound(target)
         semantic = to_semantic(payload)
         return to_wire(semantic), semantic
-
 
     def translate_response(
         self,

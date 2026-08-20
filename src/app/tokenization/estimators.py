@@ -1,4 +1,5 @@
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, cast
 
 import tiktoken
 from anyio.to_thread import run_sync
@@ -108,3 +109,74 @@ def _gemini_part_values(parts: list[Any]) -> list[str]:
         elif part.inline_data is not None:
             values.append(dumps(part.inline_data).decode())
     return values
+
+
+def _responses_item_text(item: Mapping[str, Any]) -> str:
+    """What one `input` item contributes, as text.
+
+    Every item contributes something. The first draft skipped `reasoning`, mirroring the Anthropic estimator's treatment of `thinking`, on the reasoning that calibration would absorb whatever upstream really charges. That was wrong twice over: nothing teaches this protocol's calibration yet, so there is nothing absorbing anything, and a reasoning item is not small — a measured round trip carried 7286 characters of `encrypted_content` in one, and the 7.6 KB body it belonged to was reported as 30 tokens.
+
+    Whether upstream bills for that payload is still not measurable from here; the OpenAI family publishes no count endpoint to ask. But zero is measurably wrong for what the number is used for, and it is wrong in the direction that gets a request refused after it was said to fit.
+
+    An item of a kind not listed falls back to its whole JSON, for the same reason.
+    """
+    kind = item.get("type")
+    if kind == "message":
+        content = item.get("content")
+        parts: list[str] = []
+        role = item.get("role")
+        if isinstance(role, str):
+            parts.append(role)
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            for part in cast(list[Any], content):
+                if not isinstance(part, dict):
+                    parts.append(dumps(part).decode())
+                    continue
+                entry = cast(dict[str, Any], part)
+                text = entry.get("text")
+                parts.append(text if isinstance(text, str) else dumps(entry).decode())
+        elif content is not None:
+            parts.append(dumps(content).decode())
+        return "\n".join(parts)
+    if kind == "function_call":
+        return "\n".join(
+            str(item[key]) for key in ("call_id", "name", "arguments") if item.get(key) is not None
+        )
+    if kind == "function_call_output":
+        output = item.get("output")
+        return "\n".join(
+            [
+                *([str(item["call_id"])] if item.get("call_id") is not None else []),
+                output if isinstance(output, str) else dumps(output).decode(),
+            ]
+        )
+    return dumps(item).decode()
+
+
+def estimate_responses_input(payload: Mapping[str, Any]) -> int:
+    """Estimate the input tokens of an OpenAI Responses body.
+
+    Reads the wire dict rather than a typed model, because this runs on a body the translator has just produced and the translator's output shape is the thing being measured. A model in between would have to be kept in step with it to say anything true.
+
+    Upstream has no counter to check this against: the OpenAI family reports usage only on a finished response. So the number is an estimate in a stronger sense than the Anthropic one, which at least shares a caliber with an endpoint that answers — and, until something teaches this protocol's calibration, an *uncorrected* one. Calibration is keyed on the target protocol all the same, because mixing the two families' factors would correct each with the other's error.
+    """
+    encoding = tiktoken.get_encoding(_TOKENIZER_NAME)
+    total = 0
+    instructions = payload.get("instructions")
+    if isinstance(instructions, str) and instructions:
+        total += len(encoding.encode(instructions)) + 4
+    tools = payload.get("tools")
+    if tools:
+        total += len(encoding.encode(dumps(tools).decode())) + 4
+    items = payload.get("input")
+    if isinstance(items, list):
+        for item in cast(list[Any], items):
+            if not isinstance(item, dict):
+                total += len(encoding.encode(dumps(item).decode())) + 4
+                continue
+            text = _responses_item_text(cast(dict[str, Any], item))
+            if text:
+                total += len(encoding.encode(text)) + 4
+    return max(total, 1)

@@ -43,7 +43,7 @@ from app.pipeline.timeouts import resolve_timeout
 from app.pipeline.translation_driver.registry import TranslatorNotFound
 from app.pipeline.translation_driver.semantic import TranslationRefused
 from app.server.composition import Chain
-from app.tokenization.estimators import estimate_anthropic_input
+from app.tokenization.estimators import estimate_anthropic_input, estimate_responses_input
 
 
 @dataclass(slots=True)
@@ -75,7 +75,7 @@ def shape_request(
 
     Shared by the two entry points because they are asking about the same request. A count taken from a body that had not been through these steps answers about a body nobody was going to send — and, since 2026-08-20, upstream refuses the counting request over the same defects it refuses the real one, in the same words.
 
-    Translation deliberately stops outside this function. `tokenization.md` puts token counting under a per-protocol wire contract and warns against fabricating a canonical request; a body translated into another protocol has no counter on either side of the wire — upstream offers none for the OpenAI family, and the local estimator reads an Anthropic body.
+    Translation is left to each caller rather than pulled in here, because they need it at different moments and for different reasons — the real request needs the carried body to send, the count needs it to measure — but both do translate, and both do it right after this returns.
     """
     provider = chain.providers.get(context.provider_name or chain.providers.default_name)
     route = decide_route(
@@ -141,15 +141,36 @@ async def handle_count_tokens(chain: Chain, context: RequestContext) -> dict[str
     The two counters are not interchangeable. `ghc` returns upstream's own number and is worth learning from; `local` returns an estimate corrected by what has been learnt so far. So the answer says which one it came from rather than presenting an estimate as a measurement.
     """
     provider, route = shape_request(chain, context)
+
+    # Translated too, and in the same order the real request takes it: shape, translate, name the resolved model, then let the subscribers see it. A count that stopped short of translation would be measuring an Anthropic body against a model that is never going to be sent one — `/responses` receives a different set of items, a different tool shape, and a different spelling of every role, and its tokenizer counts what arrives rather than what was asked.
+    # This is also the only way the subscribers see here what they see in production: the driver publishes `attempt.prepare` after translation, so publishing it before would hand them a protocol they never meet on this route.
+    if route.translation_required:
+        translated, semantic = chain.translators.translate(
+            context.payload,
+            source=route.inbound_format,
+            target=route.target_format,
+        )
+        context.payload = translated
+        if not semantic.conversion.lossless:
+            context.extras["conversion_losses"] = list(semantic.conversion.losses)
     context.payload["model"] = route.model_id
 
-    # The same subscribers the driver runs, for the same reason: this is an upstream request too, and upstream rejects a counting request carrying a server-tool declaration in exactly the words it rejects the request being counted. Measured 2026-08-20.
-    # Before the estimate rather than after, so what is measured is what would actually be sent.
     context.begin_attempt()
     for subscription in chain.subscribers.for_event(EVENT_ATTEMPT_PREPARE):
         await subscription.handler(context)
 
-    estimate = estimate_anthropic_input(_countable(context.payload))
+    # One estimator per wire contract, and the calibration key follows it. `tokenization.md` keeps the protocols' payload estimates separate so neither corrects the other with its own error; the same reason applies to the factor learnt from them.
+    protocol = route.target_format.value
+    if route.target_format is WireFormat.ANTHROPIC_MESSAGES:
+        protocol = "anthropic"
+        estimate = estimate_anthropic_input(_countable(context.payload))
+    elif route.target_format is WireFormat.OPENAI_RESPONSES:
+        estimate = estimate_responses_input(context.payload)
+    else:
+        # Unreachable today and written to stay loud if that changes: the only outbound translators registered are Anthropic and Responses, so any other target already failed above with `TranslatorNotFound`. Add one — chat-completions is the obvious candidate, and three models in the catalogue advertise nothing else — and this branch opens. Reading a chat-completions body with the Responses estimator finds no `input` and no `instructions` and returns 1, which is not an estimate but a claim that the request is free.
+        raise CountTokensRequestError(
+            f"no token estimator for {route.target_format.value}; add one before routing counts there"
+        )
     calibration = chain.tokenization.calibration
 
     async def ask_upstream(payload: Mapping[str, Any]) -> int:
@@ -166,21 +187,13 @@ async def handle_count_tokens(chain: Chain, context: RequestContext) -> dict[str
 
     def estimate_locally(payload: Mapping[str, Any]) -> int:
         del payload  # Already measured above; recomputing per attempt would only cost time.
-        return calibration.calibrate("anthropic", route.model_id, estimate)
+        return calibration.calibrate(protocol, route.model_id, estimate)
 
-    # Two questions, not one, because they have different answers and the wrong pairing produced both of this endpoint's past mistakes.
-    #
-    # First: is this request carryable at all? A model whose only endpoint has no outbound translator cannot be sent a Messages body by any route — `handle()` raises `TranslatorNotFound` and the client gets a 400. Counting it would describe a request that is going to be refused, which is exactly the objection the old `EndpointNotSupported` refusal was written to make. That objection was right about this class and wrong about the next one.
-    #
-    # Second: does upstream have a counter for where this is going? `tokenization.md` makes token counting a per-protocol wire contract — `POST /v1/messages/count_tokens` serves the Anthropic protocol, and the OpenAI family has no count endpoint at all, reporting usage only on a finished response. A translated route is perfectly sendable and simply has no counter, so the answer is the local estimate rather than a refusal.
+    # Whether upstream has a counter is a property of where this is going, not of whether the request is serviceable. `tokenization.md` makes token counting a per-protocol wire contract: `POST /v1/messages/count_tokens` serves the Anthropic protocol, and the OpenAI family has no count endpoint at all, reporting usage only on a finished response. A translated route is perfectly sendable and simply has no counter upstream, so it is answered from the estimator for its own protocol rather than refused.
     #
     # Withholding the counter is how that is said: `count_tokens()` already understands a missing one as "hand over to the next", so this needs no new failure mode. The reason travels with it into the attempts trail, because `ghc:unconfigured` against a config file that configures `ghc` would send the next reader hunting a settings bug that does not exist.
-    if route.translation_required and not chain.translators.can_translate(
-        source=route.inbound_format, target=route.target_format
-    ):
-        raise TranslatorNotFound(
-            f"no translator carries {route.inbound_format.value} to {route.target_format.value}"
-        )
+    #
+    # A request no translator can carry never reaches here: `translate` above raises `TranslatorNotFound` exactly as it does for the request being counted, and the client gets the same 400 it would have got for sending it.
     upstream_counts = route.target_format is WireFormat.ANTHROPIC_MESSAGES
 
     settings = chain.config.inbound.anthropic_count_tokens
@@ -200,7 +213,7 @@ async def handle_count_tokens(chain: Chain, context: RequestContext) -> dict[str
 
     if result.provider == "ghc":
         # Upstream's number is ground truth for the estimator, which is the only way it improves.
-        calibration.learn("anthropic", route.model_id, estimate, result.tokens)
+        calibration.learn(protocol, route.model_id, estimate, result.tokens)
         return {"input_tokens": result.tokens}
     return {"input_tokens": result.tokens, "estimated": True}
 

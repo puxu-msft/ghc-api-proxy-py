@@ -12,21 +12,36 @@ Token count 是协议 wire contract，不是单一通用端点：
 
 ## 与请求管道共享的部分（2026-08-20）
 
-`/v1/messages/count_tokens` 与 `/v1/messages` 共用 `handler.shape_request()`：**路由**与 **`fix_anthropic_request`**。理由是 count endpoint 量的必须是**真正会发出去的那个 body**——上游已实测会用**逐字相同**的措辞拒绝 counting 请求与被计数的请求（server-tool 声明即为一例）。
+`/v1/messages/count_tokens` 与 `/v1/messages` **走同一条塑形路径**：`handler.shape_request()`（路由 + `fix_anthropic_request`），随后**同样翻译**，再发布 `attempt.prepare` 订阅者。顺序与真实请求逐步对齐——真实路径由驱动在翻译之后发布 `attempt.prepare`，count 路径只有一次 attempt，故自行发布一次，但位置相同。
 
-`attempt.prepare` 订阅者**不在** `shape_request()` 内：真实路径由驱动逐 attempt 发布，count 路径只有一次 attempt，故在 `handle_count_tokens` 中自行发布一次。这一条早于本次改动就已共享。
+理由是 count endpoint 量的必须是**真正会发出去的那个 body**：
 
-**翻译不共享。** 本节开头那条「token count 是协议 wire contract」与「避免伪造 canonical request」同时否掉了「为了计数先翻译一遍」：翻译后的 body 在两侧都没有计数器——上游对 OpenAI 家族不提供，本地 estimator 读的是 Anthropic body。
+- 上游已实测会用**逐字相同**的措辞拒绝 counting 请求与被计数的请求（server-tool 声明即为一例），所以修复必须共享；
+- 翻译腿上真正发出的是 Responses body——不同的 item 集合、不同的工具形状、每个 role 的拼法都不同——**上游的 tokenizer 数的是到达的东西，不是被问的东西**。量 Anthropic body 等于在描述一个不会发生的请求。
 
-**分成两问，而不是一问。**
+### 计数器按目标协议选
 
-1. **这个请求发得出去吗**——`translation_required` 但没有对应 translator 时（例如只广告 `/embeddings` 的模型），`handle()` 会抛 `TranslatorNotFound` 给出 400；count endpoint 用 `TranslatorRegistry.can_translate()` 问同一个问题并给出同样的 400。量一个注定被拒的请求，答案再准也没有意义。
-2. **上游有没有计数器**——`target_format` 不是 Anthropic Messages 时，不向 `count_tokens()` 传 upstream counter，链路按既有语义交棒给 `local`，答案带 `estimated: true`；跳过原因经 `upstream_absent_reason` 进入 attempts trail（形如 `ghc:no-counter-for-openai-responses`），**不写成 `ghc:unconfigured`**——那会让下一个读日志的人去查一个并不存在的配置错误。
+| 目标格式 | 计数器 | calibration 协议键 |
+|---|---|---|
+| Anthropic Messages | 上游 `POST /v1/messages/count_tokens` 优先，失败退本地 `estimate_anthropic_input` | `anthropic` |
+| OpenAI Responses | 本地 `estimate_responses_input`（上游无预检端点） | `openai-responses` |
 
-> **推翻了一条旧行为。** 此前翻译路径上 count endpoint 返回 **400 `EndpointNotSupported`**，理由写在 `count_tokens.py` 与其测试里：「answering would report a count for a model this request can never reach」。**该前提不成立**——同一个模型、同一个入站协议下 `POST /v1/messages` 会经翻译成功返回 200（`tests/http/test_pipeline_app.py::test_anthropic_request_for_a_responses_model_is_translated`）。模型是够得着的，够不着的是**计数器**。于是旧行为等于告诉客户端「你马上要发的这个请求没法量」。用户 2026-08-20 裁决改为本地估算。
+- **上游有没有计数器由 route 判定，不靠调用去发现**：`target_format` 不是 Anthropic Messages 时不传 upstream counter，链路按既有语义交棒给 `local`，跳过原因经 `upstream_absent_reason` 进入 attempts trail（形如 `ghc:no-counter-for-openai-responses`），**不写成 `ghc:unconfigured`**——那会让下一个读日志的人去查一个并不存在的配置错误。
+- **calibration 键跟随目标协议**，与本文开头「各协议保留专用 payload 估算」同一条理由：两族的因子混训会让彼此用对方的误差去校正自己。
+- **发不出去的请求仍然 400**：`translate()` 找不到 translator 时抛 `TranslatorNotFound`，与 `/v1/messages` 上一模一样。这一类不是「没有计数器」，是**根本发不出去**，量它没有意义。今天落在这一类的有：只广告 `/embeddings` 的模型，以及只广告 `/chat/completions` 的三个（`gemini-3.1-pro-preview`、`gemini-3.5-flash`、`trajectory-compaction`）——注册表尚未登记 chat-completions 的 outbound translator。
+- **没有估算器的目标格式显式报错**：目前只有 Anthropic 与 Responses 两个估算器。若将来补上 chat-completions 的 translator 而不补估算器，`handle_count_tokens` 会抛错而不是拿 Responses 估算器去读一个没有 `input` 的 body 并返回 1。
+
+> **两次推翻的记录。** 此前翻译路径上 count endpoint 返回 **400 `EndpointNotSupported`**，理由是「answering would report a count for a model this request can never reach」。**该前提不成立**——同一个模型、同一个入站协议下 `POST /v1/messages` 会经翻译成功返回 200（`tests/http/test_pipeline_app.py::test_anthropic_request_for_a_responses_model_is_translated`）。模型是够得着的，够不着的是计数器。随后的第一版改法**只**退回到 Anthropic body 的本地估算，用户 2026-08-20 判定**不够**：翻译路径要**正确支持**，即量翻译后的 body。现行行为即此。
+
+`estimate_responses_input` 的规矩只有一条：**每个 item 都计入，没有例外**。未列出的种类按整段 JSON 计入，`reasoning` 也一样。
+
+> **这条规矩是改出来的。** 初版跳过 `reasoning`，镜像 Anthropic 侧不计 `thinking`，并声称差额由 calibration 吸收。两处都错：本协议的 calibration **当前无人训练**（全仓没有 `learn("openai-responses", ...)` 的调用点，`calibrate` 是恒等），所以没有任何东西在吸收；而 reasoning item 并不小——实测一次往返携带 7286 字符的 `encrypted_content`，它所属的 7.6 KB body 被报成 30 tokens，生产 history 中 157 个 `encrypted_content` 的中位数为 7164 字符。上游是否对该 payload 计费仍然无从测量（OpenAI 家族不发布计数端点），但 0 对这个数的用途而言是**可测量地错**，且错在「说了装得下、发出去被拒」的方向。
+
+估算器本身由 `tests/unit/test_responses_estimator.py` 以增量断言钉住：每条测试对应一种能击穿它的变异。**不用绝对值断言**——那要复述公式，而复述公式的测试对该公式的每个版本都通过，初版正是这样漏掉了三种变异。
 
 `count_tokens.py` 中「`ProviderError` 一律外抛、不降级」的规则**未改**，但**在这个调用点上现已整体不可达**：只有 `target_format` 为 Anthropic Messages 时才会传入 upstream counter，而那种情况下 `require_endpoint` 必然通过。该规则继续为其他调用者保留。
 
+**尚未做**：OpenAI 家族的 calibration 没有学习来源——上游只在响应完成时报 usage，而 count 发生在之前。把 Responses 响应的 usage 回喂给 `learn("openai-responses", ...)` 是自然的下一步，本次未做。
 
 ## Anthropic service
 
