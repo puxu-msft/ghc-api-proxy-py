@@ -293,3 +293,36 @@ def test_each_assembler_says_whose_reply_it_assembled() -> None:
     assert ResponsesAssembler().terminal.dialect is ReplyDialect.RESPONSES
     # A buffered reply has to be told, because by the time it is read back it looks Anthropic-shaped whatever answered.
     assert terminal_from_anthropic({}, (), dialect=ReplyDialect.RESPONSES).dialect is ReplyDialect.RESPONSES
+
+
+def test_responses_token_counts_are_recorded_in_the_keys_every_reader_expects() -> None:
+    """The reported gap: a translated stream's line showed one input figure and no cache at all.
+
+    `Terminal.usage` is read as Anthropic reports it, and a Responses usage read that way is not merely missing the cache fields — its `input_tokens` is the total *including* what came from cache, so a 97%-cached turn was being reported as having sent all of it fresh. The conversion is the one the buffered path already does.
+    """
+    assembler = ResponsesAssembler()
+    assembler.push(SseEvent("response.completed", orjson.dumps({
+        "response": {"usage": {
+            "input_tokens": 138_500,
+            "input_tokens_details": {"cached_tokens": 135_000},
+            "output_tokens": 2_700,
+            "total_tokens": 141_200,
+        }}
+    }).decode()))
+    assert assembler.terminal.usage == {
+        # 138_500 total less the 135_000 that came from cache: what was actually sent fresh.
+        "input_tokens": 3_500,
+        "cache_read_input_tokens": 135_000,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 2_700,
+    }
+
+
+def test_a_malformed_usage_costs_the_counts_and_not_the_response() -> None:
+    # This runs on the terminal event of a stream whose blocks have already gone out. Raising here would trade a delivered reply for a log field nobody is waiting on.
+    assembler = ResponsesAssembler()
+    assembler.push(SseEvent("response.completed", orjson.dumps(
+        {"response": {"usage": {"input_tokens": "lots"}}}
+    ).decode()))
+    assert assembler.terminal.usage == {}
+    assert assembler.terminal.seen is True

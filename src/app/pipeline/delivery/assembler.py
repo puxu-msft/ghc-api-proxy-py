@@ -17,6 +17,10 @@ import orjson
 from app.pipeline.delivery.blocks import CompletedBlock
 from app.pipeline.delivery.sse_source import SseEvent
 from app.pipeline.translation_driver.reasoning_carrier import encode_reasoning_carrier
+from app.protocols.responses_anthropic import (
+    ResponseConversionError,
+    anthropic_usage_from_responses,
+)
 
 TEXT = "text"
 THINKING = "thinking"
@@ -295,7 +299,7 @@ class ResponsesAssembler:
         response = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
         usage = response.get("usage")
         if isinstance(usage, dict):
-            self._terminal.usage = dict[str, Any](cast(dict[str, Any], usage))
+            self._terminal.usage = _anthropic_usage(cast(dict[str, Any], usage))
         if kind == "response.incomplete":
             details = response.get("incomplete_details")
             reason = ""
@@ -326,6 +330,19 @@ def _reasoning_signature(draft: _Draft, closing: dict[str, Any]) -> str:
         draft.payload.get("encrypted_content", "")
     )
     return encode_reasoning_carrier(encrypted or None)
+
+
+def _anthropic_usage(usage: dict[str, Any]) -> dict[str, Any]:
+    """Responses token counts in the keys every reader of this record already expects.
+
+    Stored converted rather than raw because `Terminal.usage` is read as Anthropic reports it, and a Responses usage read that way is not merely missing the cache fields: its `input_tokens` *includes* what came from cache, so a mostly-cached prompt is reported as having been sent whole. The conversion is the one the buffered path already does, reused rather than repeated — the subtraction is the load-bearing part and two copies of it would drift.
+
+    A malformed usage yields no counts instead of propagating. This runs on the terminal event of a stream whose blocks have already been delivered, and the numbers it produces are for a log line: aborting a delivered response over a field nobody is waiting on would trade a working reply for a cosmetic one.
+    """
+    try:
+        return dict[str, Any](anthropic_usage_from_responses(usage))
+    except ResponseConversionError:
+        return {}
 
 
 def _decode_json(raw: str) -> Any:

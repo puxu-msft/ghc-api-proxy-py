@@ -1096,7 +1096,7 @@ def test_a_responses_upstream_is_logged_in_its_own_words(request_log: None, capl
     assert "think(" not in line and "tool_use(" not in line
 
 
-def responses_sse_upstream() -> bytes:
+def responses_sse_upstream(usage: dict[str, Any] | None = None) -> bytes:
     """A Responses SSE stream carrying one sealed reasoning item and one function call.
 
     Hand-written because what it has to hold up is the route → assembler → line wiring under an event contract that is already known, not how Copilot actually behaves on the wire. The frames only have to be shaped enough for the assembler to open and close both items. Anything asserting the real upstream's quirks — id instability, chunk boundaries — belongs on a cassette instead; see `tests/integration/recorded/`.
@@ -1110,9 +1110,10 @@ def responses_sse_upstream() -> bytes:
         data: dict[str, Any] = {"output_index": index, "item": item}
         for event in ("response.output_item.added", "response.output_item.done"):
             frames.append(f"event: {event}\ndata: {orjson.dumps(data).decode()}\n\n")
+    reported = usage if usage is not None else {"input_tokens": 3, "output_tokens": 4}
     frames.append(
         "event: response.completed\n"
-        f'data: {orjson.dumps({"response": {"usage": {"input_tokens": 3, "output_tokens": 4}}}).decode()}\n\n'
+        f'data: {orjson.dumps({"response": {"usage": reported}}).decode()}\n\n'
     )
     return "".join(frames).encode()
 
@@ -1172,3 +1173,34 @@ def test_a_route_whose_reply_cannot_be_read_claims_nothing_about_it(
     # The reply's contents are simply not reported on this route yet. Asserted so that giving it a reader is a deliberate change to this test rather than a silent one.
     assert "reason(" not in line and "think(" not in line
     assert "function_call(" not in line and "tool_use(" not in line
+
+
+def test_a_streamed_translated_reply_reports_what_the_prompt_actually_cost(
+    request_log: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The reported gap: a translated stream's line carried one input figure and no cache breakdown.
+
+    Responses puts the cached portion in `input_tokens_details` and counts it *inside* `input_tokens`, so reading that usage with Anthropic keys reported a heavily cached prompt as having been sent whole — the one number on the line that decides whether a turn was expensive.
+    """
+    client, _ = make_client(
+        lambda _: httpx.Response(
+            200,
+            content=responses_sse_upstream({
+                "input_tokens": 138_500,
+                "input_tokens_details": {"cached_tokens": 135_000},
+                "output_tokens": 2_700,
+                "total_tokens": 141_200,
+            }),
+            headers={"content-type": "text/event-stream"},
+        )
+    )
+
+    with caplog.at_level(logging.INFO):
+        client.post("/v1/messages", json={"model": "gpt-model", "messages": [], "stream": True})
+
+    line = _request_lines(caplog.records)[0]
+    # What was sent fresh, what came from cache, and the rate that says which of the two dominated.
+    assert "↑3.5k+135.0k" in line
+    assert "↻97%" in line
+    assert "↓2.7k" in line
+    assert "↑138.5k" not in line, "the total was being reported as though none of it was cached"

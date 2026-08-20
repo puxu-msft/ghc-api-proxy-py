@@ -211,6 +211,17 @@ class _ConvertedUsage:
     facts: tuple[ResponseConversionFact, ...]
 
 
+def anthropic_usage_from_responses(usage: object) -> dict[str, int]:
+    """A Responses `usage` object in the keys Anthropic reports, for a caller that wants the numbers and not the response.
+
+    Exists so the streaming path can report the same figures the buffered path already converts. Reading a Responses usage with Anthropic keys does not merely lose the cache breakdown: `input_tokens` there is the total *including* what was served from cache, so a mostly-cached prompt read that way claims to have sent all of it fresh.
+
+    Raises `ResponseConversionError` on a malformed usage, exactly as the response conversion does. A caller for whom this is a side concern — a log line, say — has to decide what to do with that rather than have a default chosen for it here.
+    """
+    converted = _convert_usage(usage)
+    return converted.wire.model_dump()
+
+
 def _convert_usage(value: object) -> _ConvertedUsage:
     if value is None:
         return _ConvertedUsage(
@@ -342,5 +353,6 @@ __all__ = [
     "ResponseConversionFact",
     "ResponseUsageFacts",
     "anthropic_message_id_from_response_id",
+    "anthropic_usage_from_responses",
     "convert_responses_response_to_anthropic",
 ]
