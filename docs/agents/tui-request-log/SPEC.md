@@ -61,6 +61,21 @@
 
 沿用现有 structlog 的定宽前缀格式（`[ OK ]` / `[FAIL]` / `[<-->]` / `[....]` / `[RETRY]`），本次不改。唯一变化是 footer 存在时它们**必须经由 footer 所属的 console 打印**，而不是另一个独立 handler——两个写者各自持有光标假设，输出必然互相踩踏。
 
+### 描述回复的用词跟随上游
+
+裁决于 2026-08-20。日志行描述的是 proxy 与 upstream 之间那一段，所以**描述回复内容的字段用上游自己的词**，而不是统一翻译成下游契约的词：
+
+| 事实 | Anthropic 上游 | OpenAI Responses 上游 |
+|---|---|---|
+| 推理块 | `think(enc:1,txt:2)` | `reason(enc:1,txt:2)` |
+| 以工具调用收尾 | `tool_use(Bash,Read)` | `function_call(Bash,Read)` |
+
+理由：两者足够像，会被混淆；而「这一轮到底走了哪个上游」正是有人翻日志要查的东西。Responses 本身没有 stop reason，`tool_use` 是 assembler 为满足下游契约**合成**出来的——它对响应体是对的，对这一行是错的，因为 Responses 的追踪里根本不存在名为 `tool_use` 的东西可供检索。
+
+判定依据是**路由**（`handler.dialect_for`），不是回复体：缓冲回复是在翻译成客户端形状之后才被读回的，那时体内已不再有任何东西说明是谁应答的。流式路径由 assembler 自身携带（一个 assembler 只可能描述一种上游）。两者共用同一个分支——`assembler_for` 基于 `dialect_for` 的结果分派——以免两条路径对「谁应答的」得出不同答案。
+
+**本次未改、留待裁决**：`end_turn` / `max_tokens` 在 Responses 上游同样是合成词（真实的是 `response.completed` 与 `incomplete_details.reason = max_output_tokens`），`enc` / `txt` 两个计数标签同理（真实的是 `encrypted_content` 与 reasoning summary）。用户本次只指定了推理块与工具调用两处，故不自行扩大；见 `deferred` 记录。
+
 ## 数据来源
 
 在飞请求登记在 `_serve`（`src/app/server/pipeline_app.py`）这一层，它是覆盖整个请求生命期的唯一 ASGI 接缝。

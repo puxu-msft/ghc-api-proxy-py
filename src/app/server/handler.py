@@ -20,7 +20,14 @@ from app.models.anthropic import MessagesRequest
 from app.pipeline.anthropic_request_hook import fix_anthropic_request
 from app.pipeline.count_tokens import CountTokensUnavailable, count_tokens
 from app.pipeline.delivery import BlockBuffer, CompletedBlock, DeliverySession
-from app.pipeline.delivery.assembler import AnthropicAssembler, BlockAssembler, ResponsesAssembler
+from app.pipeline.delivery.assembler import (
+    AnthropicAssembler,
+    BlockAssembler,
+    ReplyDialect,
+    ResponsesAssembler,
+    Terminal,
+    terminal_from_anthropic,
+)
 from app.pipeline.delivery.stream import StreamSettings
 from app.pipeline.direct_driver import DRIVERS, DriverOutcome, LedgerBudget
 from app.pipeline.exceptions import UpstreamRateLimit, UpstreamRejected, UpstreamTimeout
@@ -304,9 +311,38 @@ def deliver_blocks(chain: Chain, blocks: list[CompletedBlock]) -> list[Completed
     return committed
 
 
-def assembler_for(handled: HandledRequest) -> BlockAssembler:
-    """Pick the assembler matching the upstream this route actually used."""
+def dialect_for(handled: HandledRequest) -> ReplyDialect:
+    """Which upstream's vocabulary this route's reply came back in.
+
+    Taken from the route rather than from the reply, because a buffered reply is read back after translation and by then looks Anthropic-shaped whatever answered it. The route is the only thing that still knows which upstream was actually spoken to, which is what the console line reports.
+
+    Two dialects, not one per wire format: anything that is not a Responses upstream is assembled as Anthropic — `assembler_for` below dispatches on this very answer — so the pair describes what the code actually does rather than the whole `WireFormat` taxonomy. A third upstream would need its own assembler before it could need its own words.
+    """
     if handled.route.target_format is WireFormat.OPENAI_RESPONSES:
+        return ReplyDialect.RESPONSES
+    return ReplyDialect.ANTHROPIC
+
+
+def reply_summary(handled: HandledRequest, payload: dict[str, Any]) -> Terminal | None:
+    """Summarise a buffered reply for the console line, or `None` when this route's shape cannot be read.
+
+    `payload` is in the **client's** format by the time it gets here, which is what decides whether it can be read at all: only an Anthropic-shaped body has the `content` blocks the reader wants. An inbound `/responses` or `/chat/completions` request keeps its own shape end to end, and reading one of those as Anthropic finds nothing — silently, since an absent `content` is indistinguishable from a reply that had none.
+
+    Returning `None` rather than an empty summary is the honest answer: those lines carry no reasoning or tool fields today, which is a gap worth closing but not one to paper over with a record that says a reply had nothing in it. See `docs/agents/tui-request-log/deferred.md`.
+
+    The dialect is separate and comes from the route, because which *words* to use is about the upstream leg while which *reader* to use is about the client leg, and on a translated route those are two different formats.
+    """
+    if handled.route.inbound_format is not WireFormat.ANTHROPIC_MESSAGES:
+        return None
+    return terminal_from_anthropic(payload, blocks_from_anthropic(payload), dialect=dialect_for(handled))
+
+
+def assembler_for(handled: HandledRequest) -> BlockAssembler:
+    """Pick the assembler matching the upstream this route actually used.
+
+    Dispatched on `dialect_for` rather than testing the wire format again, so the streaming and buffered paths cannot come to disagree about which upstream answered — one branch decides it for both.
+    """
+    if dialect_for(handled) is ReplyDialect.RESPONSES:
         return ResponsesAssembler()
     return AnthropicAssembler()
 

@@ -16,6 +16,7 @@ from app.observability.request_log import (
     status_for,
 )
 from app.observability.terminal import BOLD_RED, DIM, RED, WHITE, YELLOW
+from app.pipeline.delivery.assembler import ReplyDialect
 
 
 def test_a_successful_request_names_the_model_rather_than_the_route() -> None:
@@ -305,3 +306,41 @@ def test_token_markers_degrade_with_the_rest_of_the_line() -> None:
     assert "↑" not in ascii_form
     assert "↻" not in ascii_form
     assert ascii_form.startswith(">10+5")
+
+
+def test_each_upstream_is_reported_in_its_own_words() -> None:
+    """Anthropic sends thinking blocks; the Responses API sends reasoning items.
+
+    Close enough to be confused, and the log is where somebody works out which upstream a turn actually went to — so the line says what it saw rather than translating both into one house word.
+    """
+    assert format_thinking(("enc",), ReplyDialect.ANTHROPIC) == "think(enc:1)"
+    assert format_thinking(("enc", "txt"), ReplyDialect.RESPONSES) == "reason(enc:1,txt:1)"
+
+
+def test_a_responses_turn_names_the_item_upstream_actually_sent() -> None:
+    # `tool_use` is the Anthropic stop reason the assembler synthesises for the client. Right for the body, wrong for a line that reports what upstream did: a Responses trace contains `function_call` items and no `tool_use` anywhere.
+    assert format_stop_reason("tool_use", ("Bash", "Read"), ReplyDialect.RESPONSES) == "function_call(Bash,Read)"
+    # The word is corrected whether or not any tool survived naming.
+    assert format_stop_reason("tool_use", (), ReplyDialect.RESPONSES) == "function_call"
+    # Reasons that are not the synthesised one are upstream's own already and are left alone.
+    assert format_stop_reason("max_tokens", (), ReplyDialect.RESPONSES) == "max_tokens"
+    assert format_stop_reason("tool_use", ("Bash",), ReplyDialect.ANTHROPIC) == "tool_use(Bash)"
+
+
+def test_the_dialect_reaches_the_rendered_line() -> None:
+    # The fields are chosen field-by-field elsewhere; this is the one assertion that the record's dialect survives the trip to the line rather than being defaulted away at the last step.
+    line = format_completion_line(
+        RequestLine(
+            method="POST",
+            path="/p",
+            inbound_format="anthropic-messages",
+            model="gpt-5",
+            status_code=200,
+            duration_s=1.0,
+            stop_reason="tool_use",
+            tools=("Bash",),
+            thinking=("enc",),
+            dialect=ReplyDialect.RESPONSES,
+        )
+    )
+    assert line.endswith("function_call(Bash) reason(enc:1)")

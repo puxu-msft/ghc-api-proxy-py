@@ -9,6 +9,7 @@ Both produce the same `CompletedBlock`, so delivery never learns which upstream 
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any, Protocol, cast
 
 import orjson
@@ -22,6 +23,16 @@ THINKING = "thinking"
 TOOL_USE = "tool_use"
 
 
+class ReplyDialect(StrEnum):
+    """Whose vocabulary the reply arrived in.
+
+    Not `WireFormat`. That enum is the whole taxonomy of body shapes a route can take, and it lives with `RequestContext`, which now holds one of these records — importing it here would close a cycle. What a summary of a reply needs is narrower anyway: only which of the two upstreams described it, so the words on the console line can be that upstream's own. A reply is assembled by exactly one of them, so this is a property of the record rather than something a reader has to be told separately.
+    """
+
+    ANTHROPIC = "anthropic"
+    RESPONSES = "responses"
+
+
 @dataclass(slots=True)
 class Terminal:
     """What the upstream said when it finished."""
@@ -29,6 +40,8 @@ class Terminal:
     stop_reason: str = "end_turn"
     usage: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
     seen: bool = False
+    # Which upstream described this reply, and so which words the console line should use for it. Anthropic by default because that is also the shape a translated reply is read back in.
+    dialect: ReplyDialect = ReplyDialect.ANTHROPIC
     # Every tool the model asked for, in the order it asked, duplicates kept. `tool_use` on its own says a turn ended in tool calls; which tools, and how many of each, is the part that tells one turn from another when reading a log.
     tools: list[str] = field(default_factory=lambda: list[str]())
     # Thinking blocks by kind: `txt` carried readable reasoning, `enc` carried only an opaque signature. The distinction is the interesting one — a turn that reasoned and a turn that was handed back sealed reasoning cost the same tokens and look identical from the outside.
@@ -45,14 +58,20 @@ class Terminal:
             self.thinking.append("txt" if block.payload.get(THINKING) else "enc")
 
 
-def terminal_from_anthropic(body: dict[str, Any], blocks: Iterable[CompletedBlock]) -> Terminal:
+def terminal_from_anthropic(
+    body: dict[str, Any], blocks: Iterable[CompletedBlock], *, dialect: ReplyDialect = ReplyDialect.ANTHROPIC
+) -> Terminal:
     """The same summary, for a reply that arrived whole instead of in events.
 
     A buffered request never runs an assembler, so without this the facts a finished reply carries — which tools were asked for, how much reasoning came back, what it cost — had to be dug back out of the response payload at whatever place happened to want them. That is how the same reply came to be described by two different pieces of code, and why only one of them was ever fixed when the description was wrong.
 
+    Reads an **Anthropic-shaped** body. It has no way to notice one that is not, so a caller holding some other shape must not reach for this — `handler.reply_summary` is where that decision is made.
+
     `seen` is true by construction: a body read whole is a reply that finished, which is exactly what the flag means on the streaming side.
+
+    The stop reason starts empty rather than at the class default. A stream that never sent its terminal event still has a reason to be called `end_turn` by the code that synthesises one; a body simply not carrying the field means nobody said, and printing `end_turn` there would claim a clean finish on no evidence at all.
     """
-    terminal = Terminal(seen=True)
+    terminal = Terminal(seen=True, dialect=dialect, stop_reason="")
     stop_reason = body.get("stop_reason")
     if isinstance(stop_reason, str) and stop_reason:
         terminal.stop_reason = stop_reason
@@ -177,7 +196,7 @@ class ResponsesAssembler:
     def __init__(self) -> None:
         self._drafts: dict[str, _Draft] = {}
         self._order = 0
-        self._terminal = Terminal()
+        self._terminal = Terminal(dialect=ReplyDialect.RESPONSES)
         self._saw_tool_call = False
 
     @property

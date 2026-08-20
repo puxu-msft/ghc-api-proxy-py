@@ -26,20 +26,20 @@ from app.observability.request_log import (
     status_for,
 )
 from app.observability.tui import footer_tui_or_none
-from app.pipeline.delivery.assembler import BlockAssembler, Terminal, terminal_from_anthropic
+from app.pipeline.delivery.assembler import BlockAssembler, ReplyDialect, Terminal
 from app.pipeline.delivery.stream import stream_delivery
 from app.pipeline.request import RequestContext
 from app.server.admission import InFlightLimit
 from app.server.composition import Chain, refresh_catalogs
 from app.server.handler import (
     assembler_for,
-    blocks_from_anthropic,
     delivery_buffer,
     error_body,
     error_headers,
     error_status,
     handle_bounded,
     handle_count_tokens,
+    reply_summary,
     response_payload,
     stream_settings,
 )
@@ -84,6 +84,7 @@ class _Trace:
     stop_reason: str = ""
     tools: tuple[str, ...] = ()
     thinking: tuple[str, ...] = ()
+    dialect: ReplyDialect = ReplyDialect.ANTHROPIC
 
     def absorb(self, reply: Terminal) -> None:
         """Take the aggregated reply record onto the line.
@@ -94,6 +95,7 @@ class _Trace:
         self.stop_reason = reply.stop_reason
         self.tools = tuple(reply.tools)
         self.thinking = tuple(reply.thinking)
+        self.dialect = reply.dialect
 
 
 def _log_completion(chain: Chain, trace: _Trace, status_code: int | None, *, bytes_out: int | None) -> None:
@@ -117,6 +119,7 @@ def _log_completion(chain: Chain, trace: _Trace, status_code: int | None, *, byt
         stop_reason=trace.stop_reason,
         tools=trace.tools,
         thinking=trace.thinking,
+        dialect=trace.dialect,
         attempts=trace.attempts,
         detail=trace.detail,
     )
@@ -287,8 +290,10 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
     trace.received = len(response.content)
     payload = response_payload(chain, handled, body)
     # Read off what goes downstream rather than the upstream body, so the numbers on the line are the ones the client was actually told. Summarised once, into the same record the streaming path publishes, so this function never has to know what a `tool_use` block looks like.
-    context.reply = terminal_from_anthropic(payload, blocks_from_anthropic(payload))
-    trace.absorb(context.reply)
+    # Summarised by the route's own reader, which knows both what shape this payload is in and which upstream's words describe it. `None` means this route has no reader yet, and the line then reports nothing about the reply's contents rather than reporting emptiness as fact.
+    context.reply = reply_summary(handled, payload)
+    if context.reply is not None:
+        trace.absorb(context.reply)
     return JSONResponse(payload, status_code=response.status_code)
 
 

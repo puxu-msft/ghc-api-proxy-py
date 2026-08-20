@@ -25,6 +25,13 @@ from app.observability.terminal import (
     duration_colour,
     paint,
 )
+from app.pipeline.delivery.assembler import ReplyDialect
+
+# What to call the same two things under each upstream, abbreviated to fit a line. Held here, in the layer that renders, because which word to print is a display decision; what happened is the record's business and it says only which upstream described it.
+# `tool_use` is the Anthropic stop reason the Responses assembler synthesises for the client's benefit. Recognised by name so the line can put back what upstream actually sent.
+TOOL_USE_REASON = "tool_use"
+REASONING_WORD = {ReplyDialect.ANTHROPIC: "think", ReplyDialect.RESPONSES: "reason"}
+TOOL_WORD = {ReplyDialect.ANTHROPIC: TOOL_USE_REASON, ReplyDialect.RESPONSES: "function_call"}
 
 
 def http_label(version: str | None, *, websocket: bool = False) -> str:
@@ -78,12 +85,16 @@ class RequestLine:
     stop_reason: str = ""
     tools: tuple[str, ...] = ()
     thinking: tuple[str, ...] = ()
+    # Whose words to use for the reasoning and tool-call fields. See `ReplyDialect`; it travels with the reply summary the line is built from.
+    dialect: ReplyDialect = ReplyDialect.ANTHROPIC
     attempts: int = 1
     detail: str = ""
 
 
-def format_thinking(kinds: tuple[str, ...]) -> str:
-    """`think(enc:1)` / `think(enc:1,txt:2)` — how much reasoning came back, and of which sort.
+def format_thinking(kinds: tuple[str, ...], dialect: ReplyDialect = ReplyDialect.ANTHROPIC) -> str:
+    """`think(enc:1)` / `reason(enc:1,txt:2)` — how much reasoning came back, and of which sort.
+
+    The leading word is abbreviated from each upstream's own vocabulary: Anthropic sends `thinking` blocks, the Responses API sends `reasoning` items. They are close enough to be confused and different enough to matter when reading a log to work out which upstream a turn actually went to, so the line says which one it saw rather than translating both into one house word.
 
     `txt` carried readable reasoning; `enc` carried only an opaque signature. Worth telling apart because the two cost the same tokens and are indistinguishable from the outside: a turn that reasoned aloud and one handed back sealed reasoning it cannot read look identical on every other field of this line.
 
@@ -93,18 +104,23 @@ def format_thinking(kinds: tuple[str, ...]) -> str:
         return ""
     counted = [(kind, sum(1 for item in kinds if item == kind)) for kind in ("enc", "txt")]
     named = ",".join(f"{kind}:{count}" for kind, count in counted if count)
-    return f"think({named})" if named else ""
+    return f"{REASONING_WORD[dialect]}({named})" if named else ""
 
 
-def format_stop_reason(stop_reason: str, tools: tuple[str, ...]) -> str:
-    """`tool_use(Bash,Bash,Read)` — the reason, and for tool calls which tools were asked for.
+def format_stop_reason(
+    stop_reason: str, tools: tuple[str, ...], dialect: ReplyDialect = ReplyDialect.ANTHROPIC
+) -> str:
+    """`tool_use(Bash,Bash,Read)` / `function_call(Bash,Bash,Read)` — the reason, and for tool calls which tools were asked for.
 
-    Duplicates are kept and the order is the model's. `tool_use` on its own says only that the turn ended in tool calls; three `Bash` in a row and one `Bash` are very different turns, and collapsing them would hide exactly the pattern worth noticing in a log.
+    Duplicates are kept and the order is the model's. The reason alone says only that the turn ended in tool calls; three `Bash` in a row and one `Bash` are very different turns, and collapsing them would hide exactly the pattern worth noticing in a log.
+
+    A Responses upstream has no stop reason of its own, so the assembler synthesises the Anthropic one the client is owed. That synthesised word is right for the response body and wrong for this line, which reports what upstream did: there, the thing that happened was a `function_call` item. The real name is used here so a reader is not left looking for a `tool_use` in a Responses trace that never contained one.
     """
     if not stop_reason:
         return ""
     named = [tool for tool in tools if tool]
-    return f"{stop_reason}({','.join(named)})" if named else stop_reason
+    word = TOOL_WORD[dialect] if stop_reason == TOOL_USE_REASON else stop_reason
+    return f"{word}({','.join(named)})" if named else word
 
 
 def format_count(value: int) -> str:
@@ -219,13 +235,13 @@ def format_completion_line(line: RequestLine, *, unicode: bool = True, color: bo
     if tokens:
         parts.append(tokens)
     if line.stop_reason:
-        parts.append(format_stop_reason(line.stop_reason, line.tools))
+        parts.append(format_stop_reason(line.stop_reason, line.tools, line.dialect))
     if line.attempts > 1:
         # Named on the line that reports the outcome, where the count is final. A retry still in progress is the footer's job.
         parts.append(paint(f"retries={line.attempts - 1}", YELLOW, color=color))
 
     rendered = " ".join(parts)
-    thinking = format_thinking(line.thinking)
+    thinking = format_thinking(line.thinking, line.dialect)
     if thinking:
         # Last, and grey. It says what the model did on its way to the answer rather than anything about the exchange, so it belongs after the fields that describe the exchange and should not compete with them.
         rendered = f"{rendered} {paint(thinking, DIM, color=color)}"

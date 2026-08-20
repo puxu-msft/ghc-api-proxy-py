@@ -1025,3 +1025,112 @@ def test_upstream_token_usage_reaches_the_line(request_log: None, caplog: pytest
     assert "↑12+8.0k" in line
     assert "↓456" in line
     assert line.endswith("end_turn")
+
+
+def test_a_responses_upstream_is_logged_in_its_own_words(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
+    """The line reports the upstream exchange, so it uses the upstream's names.
+
+    A buffered reply is read back *after* translation, by which point it is Anthropic-shaped whatever answered it — so nothing in the body still says a Responses API was on the other end. The route does, and that is where the wording comes from. Worth an end-to-end assertion rather than a unit one: every piece of this was already correct in isolation while the buffered path was the one deriving its own answer.
+    """
+    client, _ = make_client(
+        lambda _: httpx.Response(
+            200,
+            json={
+                "id": "resp_1",
+                "model": "gpt-model",
+                "status": "completed",
+                "output": [
+                    {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "sealed"},
+                    {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "Bash", "arguments": "{}"},
+                ],
+            },
+        )
+    )
+
+    with caplog.at_level(logging.INFO):
+        client.post("/v1/messages", json={"model": "gpt-model", "messages": []})
+
+    line = _request_lines(caplog.records)[0]
+    # `reason`, not `think`: the Responses API sends reasoning items, and which upstream a turn went to is exactly what somebody reads this log to find out.
+    assert "reason(enc:1)" in line
+    # `function_call`, not the `tool_use` stop reason synthesised downstream for the client's benefit — a Responses trace contains no `tool_use` to go looking for.
+    assert "function_call(Bash)" in line
+    assert "think(" not in line and "tool_use(" not in line
+
+
+def responses_sse_upstream() -> bytes:
+    """A Responses SSE stream carrying one sealed reasoning item and one function call.
+
+    Hand-written because what it has to hold up is the route → assembler → line wiring under an event contract that is already known, not how Copilot actually behaves on the wire. The frames only have to be shaped enough for the assembler to open and close both items. Anything asserting the real upstream's quirks — id instability, chunk boundaries — belongs on a cassette instead; see `tests/integration/recorded/`.
+    """
+    items: list[dict[str, Any]] = [
+        {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "sealed"},
+        {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "Bash", "arguments": ""},
+    ]
+    frames: list[str] = []
+    for index, item in enumerate(items):
+        data: dict[str, Any] = {"output_index": index, "item": item}
+        for event in ("response.output_item.added", "response.output_item.done"):
+            frames.append(f"event: {event}\ndata: {orjson.dumps(data).decode()}\n\n")
+    frames.append(
+        "event: response.completed\n"
+        f'data: {orjson.dumps({"response": {"usage": {"input_tokens": 3, "output_tokens": 4}}}).decode()}\n\n'
+    )
+    return "".join(frames).encode()
+
+
+def test_a_streamed_responses_reply_is_logged_in_its_own_words(
+    request_log: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The streaming half of the same wording decision.
+
+    Its dialect comes from the assembler that read the stream rather than from the route, so the two paths reach the same answer by different routes and both have to be held to it.
+    """
+    client, _ = make_client(
+        lambda _: httpx.Response(
+            200, content=responses_sse_upstream(), headers={"content-type": "text/event-stream"}
+        )
+    )
+
+    with caplog.at_level(logging.INFO):
+        client.post("/v1/messages", json={"model": "gpt-model", "messages": [], "stream": True})
+
+    line = _request_lines(caplog.records)[0]
+    assert "reason(enc:1)" in line
+    assert "function_call(Bash)" in line
+    assert "think(" not in line and "tool_use(" not in line
+
+
+def test_a_route_whose_reply_cannot_be_read_claims_nothing_about_it(
+    request_log: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An inbound `/responses` reply keeps its own shape end to end, and the Anthropic reader finds nothing in it.
+
+    The regression this pins: summarising through a record whose stop reason defaults to `end_turn` turned "nobody said" into "finished cleanly", so every one of these lines claimed an outcome no upstream had reported. An absent `content` is indistinguishable from a reply that had none, which is exactly why the empty summary has to be refused rather than absorbed.
+
+    Reporting nothing here is the honest state and also the pre-existing one; giving these routes a real summary is open work, tracked in `docs/agents/tui-request-log/deferred.md`.
+    """
+    client, _ = make_client(
+        lambda _: httpx.Response(
+            200,
+            json={
+                "id": "resp_1",
+                "model": "gpt-model",
+                "status": "completed",
+                "output": [
+                    {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "sealed"},
+                    {"type": "function_call", "id": "fc_1", "call_id": "c1", "name": "Bash", "arguments": "{}"},
+                ],
+            },
+        )
+    )
+
+    with caplog.at_level(logging.INFO):
+        client.post("/responses", json={"model": "gpt-model", "input": []})
+
+    line = _request_lines(caplog.records)[0]
+    assert line.startswith("H1/H1 200 openai-responses/gpt-model ")
+    assert "end_turn" not in line, "a stop reason nobody sent must not appear"
+    # The reply's contents are simply not reported on this route yet. Asserted so that giving it a reader is a deliberate change to this test rather than a silent one.
+    assert "reason(" not in line and "think(" not in line
+    assert "function_call(" not in line and "tool_use(" not in line

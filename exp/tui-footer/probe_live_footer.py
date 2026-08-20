@@ -69,6 +69,21 @@ if os.environ.get("THINK") == "1":
     request_body["max_tokens"] = 2048
     request_body["thinking"] = {"type": "enabled", "budget_tokens": 1024}
     request_body["messages"] = [{"role": "user", "content": "What is 37 * 43? Think it through."}]
+if os.environ.get("TOOLS") == "1":
+    # A turn that ends in tool calls, so the line has to name them — and, on a Responses upstream, name them as the `function_call` items they arrived as rather than the `tool_use` stop reason synthesised downstream.
+    request_body["messages"] = [{"role": "user", "content": "Run `ls` and then read ./README.md. Use the tools."}]
+    request_body["tools"] = [
+        {
+            "name": "Bash",
+            "description": "Run a shell command",
+            "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
+        },
+        {
+            "name": "Read",
+            "description": "Read a file",
+            "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+        },
+    ]
 body = json.dumps(request_body).encode()
 
 

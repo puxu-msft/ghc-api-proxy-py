@@ -13,6 +13,7 @@ import pytest
 
 from app.pipeline.delivery.assembler import (
     AnthropicAssembler,
+    ReplyDialect,
     ResponsesAssembler,
     terminal_from_anthropic,
 )
@@ -281,3 +282,14 @@ def test_a_reply_summarises_the_same_whether_it_streamed_or_arrived_whole() -> N
     assert buffered.stop_reason == streamed.terminal.stop_reason == "tool_use"
     assert buffered.usage == streamed.terminal.usage == {"output_tokens": 12}
     assert buffered.seen is streamed.terminal.seen is True
+
+
+def test_each_assembler_says_whose_reply_it_assembled() -> None:
+    """The streaming path's half of the wording decision.
+
+    An assembler is picked per upstream and can only ever describe that one, so the dialect belongs to the record it builds rather than being handed to the console line separately — which would leave two places able to disagree about who answered.
+    """
+    assert AnthropicAssembler().terminal.dialect is ReplyDialect.ANTHROPIC
+    assert ResponsesAssembler().terminal.dialect is ReplyDialect.RESPONSES
+    # A buffered reply has to be told, because by the time it is read back it looks Anthropic-shaped whatever answered.
+    assert terminal_from_anthropic({}, (), dialect=ReplyDialect.RESPONSES).dialect is ReplyDialect.RESPONSES
