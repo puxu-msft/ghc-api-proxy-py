@@ -81,11 +81,14 @@ def _render_text(
     event_dict.pop("level", None)
     # The prefix is this field, rendered. Printing it again at the end of the line says the same thing twice and pushes the message left of a column of `status=ok`.
     event_dict.pop("status", None)
+    # Taken out of the extras and given its own lines. A traceback is many lines of text that the reader works through top to bottom, and rendering it as one more `key=value` at the tail puts it on the same line as the message — which is how it stayed unread.
+    traceback = event_dict.pop("exception", None)
     extras = " ".join(f"{key}={value}" for key, value in sorted(event_dict.items()))
     suffix = f" {paint(extras, DIM, color=colors)}" if extras else ""
     body = paint(event, DIM, color=colors) if prefix == PENDING else event
     painted_prefix = paint(prefix, PREFIX_COLOURS.get(prefix, DIM), color=colors)
-    return f"{painted_prefix} {paint(timestamp, DIM, color=colors)} {body}{suffix}"
+    trace = f"\n{traceback}" if traceback else ""
+    return f"{painted_prefix} {paint(timestamp, DIM, color=colors)} {body}{suffix}{trace}"
 
 
 def _build_renderer(log_format: LogFormat, *, colors: bool) -> Processor:
@@ -117,6 +120,9 @@ def setup_logging(
         structlog.processors.TimeStamper(fmt="iso", utc=True)
         if log_format == "json"
         else structlog.processors.TimeStamper(fmt="%H:%M:%S", utc=False),
+        # `ProcessorFormatter` does not format exceptions on its own, and without this every `exc_info` reached the renderer as a raw tuple and was printed as one more extra: `exc_info=(<class 'ValueError'>, ValueError('...'), <traceback object at 0x7f...>)`, with `exc_info=True` degrading further to the literal `True`. So no exception this process ever logged carried a stack — including asyncio's own handler, which is how `StopAsyncIteration exception in shielded future` arrived with nothing to trace it by.
+        # Listed here rather than in the formatter's own chain because this list is both the `foreign_pre_chain` and what `structlog.configure` runs, so one entry covers stdlib records and structlog's own. It has to run at logging time either way: `exc_info=True` is resolved with `sys.exc_info()`, which only answers inside the `except` block that logged it.
+        structlog.processors.format_exc_info,
         _add_status_prefix,
     ]
     if log_format == "json":
