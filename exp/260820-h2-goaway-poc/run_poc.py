@@ -1,6 +1,6 @@
 """Decisive local PoC for the GOAWAY(NO_ERROR, last_stream_id=2**31-1) hypothesis.
 
-Claim under test (see docs/tmp/260820-h2-goaway-poc.md for the write-up): a GOAWAY that RFC 9113 section 6.8 defines as a graceful-shutdown *preamble* (error_code=NO_ERROR, last_stream_id=2**31-1, meaning "stop opening new streams, in-flight streams are fine") gets treated by httpcore 1.0.9 as an unconditional, immediate death sentence for every stream still being read on that connection -- because httpcore's retry branch only fires when `stream_id > last_stream_id`, which can never be true when last_stream_id is 2**31-1.
+Claim under test (see .dev/docs/upstream/h2-goaway/archive-260820/260820-h2-goaway-poc.md for the write-up): a GOAWAY that RFC 9113 section 6.8 defines as a graceful-shutdown *preamble* (error_code=NO_ERROR, last_stream_id=2**31-1, meaning "stop opening new streams, in-flight streams are fine") gets treated by httpcore 1.0.9 as an unconditional, immediate death sentence for every stream still being read on that connection -- because httpcore's retry branch only fires when `stream_id > last_stream_id`, which can never be true when last_stream_id is 2**31-1.
 
 Everything here is local: a hand-rolled h2 server (TLS + ALPN h2, self-signed cert from gen_cert.py) and a real httpx.AsyncClient(http2=True) talking to it over 127.0.0.1. No production code is touched, no real upstream is contacted.
 

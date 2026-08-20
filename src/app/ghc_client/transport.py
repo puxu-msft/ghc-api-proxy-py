@@ -28,7 +28,7 @@ class ResponsesHeadersPendingTransportError(Exception):
 def is_responses_headers_pending_transport_error(error: Exception) -> bool:
     if isinstance(error, _RESPONSES_PRE_HEADERS_HTTPX_ERRORS):
         return True
-    # Not an httpx error at all, and the reason this is checked separately: httpcore guards only the socket read in `_read_incoming_data`, so when a GOAWAY and the frames after it land in one read, hyper-h2 raises through the gap and nothing wraps it. Measured in `docs/tmp/260820-h2-goaway-poc.md`. An `isinstance` against `httpx.TransportError` misses it entirely, which is why the caller's `except` has to name it too.
+    # Not an httpx error at all, and the reason this is checked separately: httpcore guards only the socket read in `_read_incoming_data`, so when a GOAWAY and the frames after it land in one read, hyper-h2 raises through the gap and nothing wraps it. Measured in `.dev/docs/upstream/h2-goaway/archive-260820/260820-h2-goaway-poc.md`. An `isinstance` against `httpx.TransportError` misses it entirely, which is why the caller's `except` has to name it too.
     if isinstance(error, H2ProtocolError):
         return True
     if not isinstance(error, OpenAIAPIConnectionError):

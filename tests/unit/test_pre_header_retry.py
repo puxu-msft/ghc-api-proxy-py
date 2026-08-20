@@ -47,7 +47,7 @@ def test_a_torn_connection_is_retryable_before_headers() -> None:
 def test_a_bare_h2_error_is_retryable_too() -> None:
     """The one that is not an httpx error at all, and so escapes an `isinstance` against `httpx.TransportError`.
 
-    httpcore guards only the socket read in `_read_incoming_data`; the `h2_state.receive_data` call after it is outside the `try`. So when a GOAWAY and the frames following it arrive in a single read, hyper-h2 raises through the gap unwrapped. Measured in `docs/tmp/260820-h2-goaway-poc.md`.
+    httpcore guards only the socket read in `_read_incoming_data`; the `h2_state.receive_data` call after it is outside the `try`. So when a GOAWAY and the frames following it arrive in a single read, hyper-h2 raises through the gap unwrapped. Measured in `.dev/docs/upstream/h2-goaway/archive-260820/260820-h2-goaway-poc.md`.
     """
     error = H2ProtocolError("Invalid input ConnectionInputs.RECV_DATA in state ConnectionState.CLOSED")
     assert is_responses_headers_pending_transport_error(error) is True

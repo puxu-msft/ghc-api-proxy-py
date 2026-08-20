@@ -41,7 +41,7 @@ deferred.md 原文把四个旋钮并列成「都不产生保活」，这句话�
 
 **后两个还死得更彻底一层**：它们所在的 `AppSettings`（`src/app/config/settings.py`）是 legacy 配置面。`src/app/cli.py` 的 `start` 只服务 `create_pipeline_app`（`cli.py:23,144,155,169`），走的是新的 `ProxyConfig`。所以就算有人把它们接上，也是接在一条不被服务的链路上。【读码】
 
-**同时更正 `spec.md` §3 的一处已过时表述**：那里说 `http2_ping_interval`「只被用作 `http2 = interval > 0` 的布尔开关」——在 `4511aa3` 上这已不成立，协议开关是独立的 `upstream_transport.http2`。这是并行会话按 `docs/agents/upstream-h2-goaway/findings.md:53-55` 落的修复。【读码 + 读文档】
+**同时更正 `spec.md` §3 的一处已过时表述**：那里说 `http2_ping_interval`「只被用作 `http2 = interval > 0` 的布尔开关」——在 `4511aa3` 上这已不成立，协议开关是独立的 `upstream_transport.http2`。这是并行会话按 `.dev/docs/upstream/h2-goaway/findings.md:53-55` 落的修复。【读码 + 读文档】
 
 ### 1.2 `httpx.Limits(keepalive_expiry=...)` 的准确语义
 
@@ -147,7 +147,7 @@ upstream_transport:
 
 1. **部署形态里没有被证实存在的、我们控制之外的中间设备**。监听是 `127.0.0.1`（`schema.py:62`），出站直连 GitHub Copilot API；`proxy` 默认空（`schema.py:297`），当前机器上也没有 `HTTP_PROXY` / `HTTPS_PROXY`（`env | grep -i proxy` 仅命中 `PWD`）；`/home/xp/.local/share/ghc-api-proxy/config.yaml` 没有写 `upstream_transport` 节（`docs/tmp/260820-server-timeout-forensics.md:50-54`，那份是用真实 loader 复算出来的）。【读码 + 读文档】
 2. **静默尺度对不上**。要防的静默是「数十秒」，而 Linux 默认 `TCP_KEEPIDLE` 就是 7200 秒（上面实测的对照组），NAT 侧 established 连接的回收窗口通常是几百秒量级。数十秒的静默离任何一档回收窗口都还差一个数量级。【实测 + 推断】
-3. **唯一一次实际观测到的上游连接死亡，keepalive 挡不住**。`docs/agents/upstream-h2-goaway/findings.md:10-22`：2026-08-20 15:01:59 四条流被同一帧 `GOAWAY(NO_ERROR, last_stream_id=2^31-1)` 一起打掉。那是应用层的 graceful shutdown，TCP keepalive 与 h2 PING 都不能阻止对端主动发 GOAWAY。而且用户已裁决（同文件 `:41`）：**发 GOAWAY 的是什么我们不可能知道，不能据此分析**——所以也不能把 GOAWAY 反过来当作「需要保活」的证据。【读文档】
+3. **唯一一次实际观测到的上游连接死亡，keepalive 挡不住**。`.dev/docs/upstream/h2-goaway/findings.md:10-22`：2026-08-20 15:01:59 四条流被同一帧 `GOAWAY(NO_ERROR, last_stream_id=2^31-1)` 一起打掉。那是应用层的 graceful shutdown，TCP keepalive 与 h2 PING 都不能阻止对端主动发 GOAWAY。而且用户已裁决（同文件 `:41`）：**发 GOAWAY 的是什么我们不可能知道，不能据此分析**——所以也不能把 GOAWAY 反过来当作「需要保活」的证据。【读文档】
 4. **`streaming-resilience.md:258` 的 15 秒本身是抄来的经验值**：「上游参考项目默认值为 15 秒（其运行时 undici 默认是 60 秒……）」。那是 Node/undici 连接池行为的约束，不是对我们这条链路测出来的。【读文档】
 
 **但有一条动机成立，而且和上面那条不是一回事**：`SO_KEEPALIVE` 的另一半价值是**探测对端已死**（half-open 连接：对端进程没了、WSL2 的 NAT 状态被丢弃、笔记本睡眠恢复、VPN 抖动）。而当前 bundled 默认下，上游侧三道守卫是 `response_header: 0`（禁用）、`stream_idle: 0`（禁用）、`upstream_request_deadline: 1200`——**前两道都关着，第三道又因为 D-6 对流式请求不生效**。也就是说，一条流式请求撞上 half-open 连接时，我方**没有任何机制**会发现，只能等客户端自己放弃（实测约 300s 天花板）。在这个前提下，`SO_KEEPALIVE`（15s idle / 15s interval / 4 count ≈ 75 秒内失败）是这条腿上**唯一一个默认开启的活性探测**。

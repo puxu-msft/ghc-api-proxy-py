@@ -145,7 +145,7 @@ def decide_stream_ending(
 ) -> EndingVerdict:
     """Choose between finishing, replaying, continuing and giving up.
 
-    Decided from what this side received and delivered, and from nothing else. Who sent the GOAWAY, and why, is not observable from here — our stack stops reading the moment the frame arrives — so a rule written in terms of the peer's intent would be a rule written about something we cannot see. Ruled 2026-08-20; see `docs/agents/upstream-h2-goaway/findings.md`.
+    Decided from what this side received and delivered, and from nothing else. Who sent the GOAWAY, and why, is not observable from here — our stack stops reading the moment the frame arrives — so a rule written in terms of the peer's intent would be a rule written about something we cannot see. Ruled 2026-08-20; see `.dev/docs/upstream/h2-goaway/findings.md`.
 
     The exception type is deliberately not an input. A clean EOF with no terminal event and a torn connection leave the client in the same place, and it is that place — not the manner of arrival — that decides what may legally happen next.
 
