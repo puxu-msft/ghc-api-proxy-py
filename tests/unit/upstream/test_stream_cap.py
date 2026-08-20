@@ -5,7 +5,7 @@ The predicate is small; what these mostly guard is the private surface underneat
 
 import asyncio
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, cast
 
 import httpcore
 import httpx
@@ -143,6 +143,66 @@ def test_capping_reaches_the_proxy_pool_too() -> None:
     client = httpx.AsyncClient(http2=True, proxy="http://127.0.0.1:1080")
     cap_streams_per_connection(client, 1)
     created = client._transport._pool.create_connection(httpcore.Origin(b"https", b"example.invalid", 443))  # pyright: ignore[reportAttributeAccessIssue]
+    assert isinstance(created, StreamCappedConnection)
+
+
+def _clear_proxy_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def _direct_mounts(client: httpx.AsyncClient) -> list[httpx.AsyncBaseTransport]:
+    return [
+        transport
+        for transport in client._mounts.values()  # pyright: ignore[reportPrivateUsage]
+        if transport is not None and getattr(getattr(transport, "_pool", None), "_proxy_url", None) is None
+    ]
+
+
+def _connection_for(transport: httpx.AsyncBaseTransport, host: bytes) -> Any:
+    """What this transport's pool would build for an origin, without connecting.
+
+    Typed `Any` deliberately: httpcore's pool attributes are untyped, so reading them at each call site spreads three unknown-type diagnostics per site instead of one place that says "this is third-party private state".
+    """
+    pool: Any = cast(Any, transport)._pool  # pyright: ignore[reportPrivateUsage]
+    return pool.create_connection(httpcore.Origin(b"https", host, 443))
+
+
+def test_one_pool_is_capped_once_however_many_mounts_reach_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every `NO_PROXY` rule mounts the same direct transport, and it must still be wrapped exactly once.
+
+    Wrapping it once per mention is not a wrong cap — the pool assigns each request to the outermost wrapper, so the inner layers count zero and only delegate — which is why nothing about the connection counts would have shown this. What it does instead is nest `create_connection` one call deeper per mention; see the test below for where that ends.
+    """
+    _clear_proxy_environment(monkeypatch)
+    monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:7890")
+    monkeypatch.setenv("NO_PROXY", "a.example.com,b.example.com,c.example.com")
+
+    client = build_http_client(
+        ProxyConfig.model_validate({"upstream_transport": {"max_streams_per_connection": 2}})
+    )
+    direct = _direct_mounts(client)
+    # Not vacuous: there really are several mounts, and they really are one object.
+    assert len(direct) >= 3
+    assert len({id(transport) for transport in direct}) == 1
+
+    created = _connection_for(direct[0], b"a.example.com")
+    assert isinstance(created, StreamCappedConnection)
+    assert not isinstance(created._inner, StreamCappedConnection), "the same pool was capped once per mount"  # pyright: ignore[reportPrivateUsage]
+
+
+def test_a_long_no_proxy_list_still_opens_a_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The nesting above is what makes an ordinary setting fail, so the failure itself gets an assertion.
+
+    1100 rules is a few tens of KiB of environment variable — well inside what a shell will pass, and nothing about it is malformed. Against the un-deduplicated version this raises `RecursionError` before any socket is touched, so the operator sees a stack overflow rather than a request.
+    """
+    _clear_proxy_environment(monkeypatch)
+    monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:7890")
+    monkeypatch.setenv("NO_PROXY", ",".join(f"h{index}.example.com" for index in range(1100)))
+
+    client = build_http_client(
+        ProxyConfig.model_validate({"upstream_transport": {"max_streams_per_connection": 2}})
+    )
+    created = _connection_for(_direct_mounts(client)[0], b"h0.example.com")
     assert isinstance(created, StreamCappedConnection)
 
 

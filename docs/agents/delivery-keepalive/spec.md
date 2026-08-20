@@ -2,9 +2,9 @@
 
 - 状态：规范。适用范围是 `src/app/pipeline/delivery/stream.py` 的下游交付，随该外部契约有效而有效。
 - 用户裁决：**「要清晰区分 client ↔ proxy ↔ upstream 这两侧的保活，它们是不同的，不可混为一谈。」**（2026-08-20）
-- 缺陷背景与实测证据：`docs/tmp/260820-downstream-keepalive-defect.md`（含独立证伪评审 `docs/tmp/260820-review-downstream-keepalive-defect.md`）
-- 本文经两轮独立评审：`review-async-correctness.md`（asyncio 控制流，pass）、`review-contract.md`（契约，needs-fix；本版按其 F1–F11 修订）
-- 未决事项集中在 `deferred.md`；**§2.2 与 §3 各有一条需要用户裁决，未裁之前不得当作已定**
+- 缺陷背景与实测证据：`docs/tmp/260820-downstream-keepalive-defect.md`（含独立证伪评审 `docs/tmp/260820-review-downstream-keepalive-defect.md`）与 `docs/tmp/260820-review-synthetic-start-fix.md`。**这三份连同 `docs/.human-controlled/` 目前都还不在 `main` 上**，由并行会话的 `53fec22` 一并提交；在它落到 `main` 之前，从 `main` 的干净 checkout 出发读不到本文引用的实测数字。
+- 本文所在主题共 19 份独立评审报告：`docs/agents/delivery-keepalive/` 下 17 份（asyncio 正确性 8 轮、契约 3 轮、传输层 3 轮、调和 1 份、合入后传输层复评 1 份、合入后 cap 去重复评 1 份），`docs/tmp/` 下 2 份文档与裁决核对（`260820-review-keepalive-rulings.md`、`260820-review-keepalive-doc-fixes.md`）。本文正文经契约评审 3 轮修订（F1–F11 出自第一轮）。**§3 是上游 slice 落地后重写的，未经代码评审以外的任何评审；§2.2 与 §4 在 2026-08-20 又整段重写过一次，那一次由文档核对的第二轮覆盖。**
+- 未决事项集中在 `deferred.md`；**§2.2 尚有一条需要用户裁决，未裁之前不得当作已定**
 
 ---
 
@@ -69,22 +69,24 @@
 
 #### 【需用户裁决】实现与人写文档的窗口定义冲突
 
-`docs/.human-controlled/config.example.yaml:404-409`（用户亲笔，按项目约定压过一切我方推导的 ADR 与 spec）写的是：
+`docs/.human-controlled/config.example.yaml` 的 `synthesized_response_headers_after_sec` 一节（用户亲笔，按项目约定压过一切我方推导的 ADR 与 spec）。**不引行号**：该文件正被用户持续修订，行号引用已经失效过一次。
 
-> 客户端发起流式请求时，若很久**上游都没有响应头**，合成一个**半块**给客户端。
+初版在此列了两条冲突，**其中一条已经不存在了**：
 
-两处对不上：
+1. **窗口定义反了——仍在。** 用户描述的窗口是「若很久上游都没有响应头」，而实现的计时**从上游响应头到达之后**才起算——`_deliver` 的函数体要等 uvicorn 第一次拉取 `StreamingResponse` 才执行，那必然在拿到带响应头的 httpx response 之后。
+2. ~~合成物不同（用户写「半块」，实现只发 `message_start`）~~ —— **已消解，无需裁决**。用户已于 2026-08-20 把中文原文改成「合成 HTTP 200 以及一个 `message_start`」，与实现一致。（该文件的**英文半句仍写着 `synthesize a half-block`**，中英不一致；那份文件归用户，我方不改，只在 `deferred.md` 记一笔提醒。）
 
-1. **窗口定义反了。** 用户描述的窗口是「上游还没有响应头」，而实现的计时**从上游响应头到达之后**才起算——`_deliver` 的函数体要等 uvicorn 第一次拉取 `StreamingResponse` 才执行，那必然在拿到带响应头的 httpx response 之后。
-2. **合成物不同。** 用户写的是「半块」，实现只发 `message_start`。
+用户在同一次修订里还新写了一条合成代价，我方文档此前没有记过：**「一旦合成，就无法再转发真正的上游 HTTP 状态码了，无法使用原生的客户端重试/退避机制。」** 这与本节下面讨论的代价是不同的一条——下面说的是「多发一次 `message_start` 会把零字节请求变成客户端可见的截断报错」，用户说的是「合成即锁死 HTTP 200，客户端自身的 retry/backoff 从此不可用」。两条都直接影响这个键该不该开、开多大。
 
-**用户描述的那个窗口（请求受理 → 上游首字节）目前确实没有任何保活**，但**它有上限**：`upstream_request_timeouts.upstream_request_deadline`（默认 **1200**，`src/app/server/handler.py:99-104` → `src/app/pipeline/direct_driver/base.py:233-241` 的 `asyncio.timeout`）恰好且仅仅覆盖这一段（流式请求拿到响应头就退出该上下文，body 在上下文之外消费）。1200s 远高于背景文档 §4 实测的客户端 300s 天花板，**所以这个上限对客户端毫无意义**。
+**用户描述的那个窗口（请求受理 → 上游首字节）目前确实没有任何保活**，但它落在一个更大的上界之内：`upstream_request_timeouts.upstream_request_deadline`（默认 **1200**，由 `src/app/server/handler.py` 的 `attempt_deadline` 读出，`src/app/pipeline/direct_driver/base.py` 在开始一次尝试时把它固定成一个时刻）。1200s 远高于背景文档 §4 实测的客户端 300s 天花板，**所以指望它替客户端兜底是没有意义的**。
 
-**但不要把「调低它」当成本节的解法。** 它是终止器，不是保活——按 §4 的分类，它决定何时放弃上游，而不是让客户端连接活着；把它调到 300 以下换来的是「代理主动掐断」而不是「客户端不再超时」。而且 `docs/.human-controlled/config.example.yaml:280-289` 写明**用户冻结的不变量是绝不误杀合法长思考**，「运维可显式配置非零值以选择有界等待，但那是对该不变量的主动覆盖」。**本规范不提议这种覆盖。** 这一段该怎么保活，属于上面那条待裁决事项的一部分。
+**注意这个上界的射程在 2026-08-20 当天变过，本文初版的描述已作废。** 初版写的是它「恰好且仅仅覆盖首字节前那一段」，理由是 `asyncio.timeout` 只包住 `await send`、body 在上下文之外消费——那正是 `deferred.md` D-6 记的缺陷。`783f023 fix: make each of the three upstream timeouts guard the phase it names` 已经修掉它：header 等待与 `pipeline_app.py` 的 body 流现在读同一个 `attempt.deadline_at`（后者经 `with_deadline_at`），**一个上界，两处执行**。
 
-一处精度说明：那段不变量的正文写在 `response_header` 名下，而 `upstream_request_deadline` 自己的 bundled default 是非零的 1200，按用户的描述它是「总时长」上界而不是「静默」上界。它之所以恰好退化成这一段的静默上界，是因为 `deferred.md` D-6 记的那个缺陷——`asyncio.timeout` 只包住 `await send`，body 在上下文之外消费。**D-6 一旦修好，这个上限就会扩大成砍断整次流式回答，届时上面这条「不提议调低」的理由只会更强。**
+**它管到哪里，要说三点精度边界**：`with_deadline_at` 只在每次拉取的边界上判定，不打断正在进行的下游消费；上游流结束之后的下游交付（块级缓冲的释放、终止帧）不在界内；而且它是**每次尝试**的界——重试与续写各自 `begin_attempt()` 一次、各得一份新的 1200s，整个请求的墙钟不受它约束。所以它现在是整次尝试的总时长上界，包括流式正文。
 
-这两条怎么处置由用户裁决：改实现向人写文档靠拢，还是修订人写文档。**未裁之前，实现维持现状。**
+**这使得「不要把调低它当成本节的解法」这条理由更强，而不是更弱。** 它是终止器，不是保活——按 §4 的分类，它决定何时放弃上游，而不是让客户端连接活着。把它调到 300 以下换来的不再只是「代理主动掐断等待」，而是**砍断一次已经在输出的长回答**（准确地说，是砍断当前这次尝试；重试会另起一份新的界）。而且人写文档在 `response_header` 名下写明**用户冻结的不变量是绝不误杀合法长思考**，「运维可显式配置非零值以选择有界等待，但那是对该不变量的主动覆盖」。**本规范不提议这种覆盖。**
+
+剩下的那一条冲突（窗口定义）怎么处置由用户裁决：改实现向人写文档靠拢，还是修订人写文档。**未裁之前，实现维持现状。**
 
 ### 2.3 本节治下但尚未实现的缓解手段
 
@@ -122,7 +124,9 @@ httpcore 1.0.9 不提供发送 PING 的接口，h2 库有 `ping()` 但 httpcore 
 
 ### 不再由本项目决定的事
 
-连接池的保留时长与连接数上限**不是本项目的配置**。初版曾把 `tcp_keepalive_interval` 错映射产生的 15 秒当成需要保住的行为、并为此新造了一个键——用户指出那从来没有被裁决过，是缺陷的副产物。现已撤销：`composition.py` 不向 transport 传 `limits`，httpx 自己的默认即生效值。
+连接池的保留时长与连接数上限**不再由新链路配置**。初版曾把 `tcp_keepalive_interval` 错映射产生的 15 秒当成需要保住的行为、并为此新造了一个键——用户指出那从来没有被裁决过，是缺陷的副产物。现已撤销：`composition.py` 不向 transport 传 `limits`，httpx 自己的默认即生效值。
+
+（射程限定在**新链路**是有必要的：旧链路 `src/app/config/settings.py` 的 `UpstreamConfig` 仍带 `max_connections` / `max_keepalive_connections` / `keepalive_expiry`，并由 `src/app/upstream/client.py` 的 `create_http_client()` 传给 `httpx.Limits`。那条链路没有被删，按项目约定孤儿模块可以留着。写成「不是本项目的配置」是把射程放大了。）
 
 `src/app/config/settings.py` 的 `upstream_keepalive` / `upstream_h2_ping` 是这两项的 legacy 拼写，均已被上述键取代并删除。
 
@@ -130,8 +134,12 @@ httpcore 1.0.9 不提供发送 PING 的接口，h2 库有 `ping()` 但 httpcore 
 
 **上游空闲检测**（「上游多久不说话就判定它死了」）是终止条件，不是保活：一个是让连接活着，一个是决定放弃它。
 
-**这一段在 2026-08-20 当天被并行会话改过，本规范初版的描述已作废。** 初版写的是「`upstream_request_timeouts.stream_idle` 无任何消费方，实际生效的是旧链路 `routes/anthropic.py` 那个同名配置」。`a7ca9ea feat: honour the upstream idle timeout on the pipeline streaming path` 之后不再成立：`src/app/server/handler.py:429-437` 的 `stream_idle_seconds` 读的正是 `upstream_request_timeouts.stream_idle` 与 `stream_idle_overrides`，并由 `src/app/server/pipeline_app.py:289-291` 经 `with_idle_timeout` 接到生产流式路径上。**新链路现在有上游空闲检测，默认值 0（禁用）。**
+**这一段在 2026-08-20 当天被并行会话改过两次，本规范此前的两版描述都已作废。** 初版写的是「`upstream_request_timeouts.stream_idle` 无任何消费方，实际生效的是旧链路 `routes/anthropic.py` 那个同名配置」；`a7ca9ea feat: honour the upstream idle timeout on the pipeline streaming path` 之后不再成立。第二版写的是它读 `stream_idle` **与 `stream_idle_overrides`**；`064ba63` 之后这半句也不成立了——那次提交把 `stream_idle_seconds` 的 overrides 解析删掉，随后 `783f023` 又删掉了 `schema.py` 里对应的两个字段。
 
-记这一笔不是为了记录一次配置变更，而是因为它示范了本规范的一个使用限制：**本文里每一条关于「某处有没有接线」的断言都有保质期**，主线在动，读到时请重新核实，不要把它当成当前事实引用。
+当前事实：`src/app/server/handler.py` 的 `stream_idle_seconds` 函数体只有一行，直接返回 `chain.config.upstream_request_timeouts.stream_idle`，没有 overrides；`UpstreamRequestTimeoutsConfig` 只剩 `response_header` / `stream_idle` / `upstream_request_deadline` 三个字段。接线点在 `src/app/server/pipeline_app.py`，经 `with_idle_timeout` 套在上游字节流上，并由 `with_deadline_at` 包在外层。**新链路现在有上游空闲检测，默认值 0（禁用）。**
 
-`response_header` / `response_header_overrides` 的问题另见 `deferred.md` D-5。
+（`src/app/config/settings.py` 的 legacy `TimeoutConfig` 里还留着 `stream_idle_overrides` / `response_header_overrides` 同名字段，读它们的是旧链路的 `app/streaming/idle_timeout.py` 的 `resolve_stream_idle`，只有 `routes/anthropic.py` 导入。与本节讨论的 `upstream_request_timeouts.*` 不是同一组配置。注意 `with_idle_timeout` 本身是两条链路共用的函数——分离的是字段，不是那个函数。）
+
+记这一笔不是为了记录一次配置变更，而是因为它示范了本规范的一个使用限制：**本文里每一条关于「某处有没有接线」的断言都有保质期**，主线在动，读到时请重新核实，不要把它当成当前事实引用。这条警告目前已击发五次：本节两次、§2.2 一次、§3 关于 `http2_ping_interval` 兼职协议开关一次，以及用户改写人写文档使 §2.2 的引文作废一次。
+
+`upstream_request_deadline` **被 `response_header_overrides` 解析**（`deferred.md` D-5）由 `064ba63` 修掉，body 未被 deadline 约束（D-6）由 `783f023` 修掉。**注意 D-5 的主语是 deadline 不是 `response_header`**；`response_header` 无消费方是另一件事，一道从未实现的守卫。

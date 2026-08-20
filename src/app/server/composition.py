@@ -150,6 +150,8 @@ def build_http_client(config: ProxyConfig) -> httpx.AsyncClient:
     )
     if options.max_streams_per_connection > 0:
         # After the client is built, not instead of building it: the cap wraps the pool httpx configured rather than replacing it, so every setting httpx passed through — and every one it gains later — is kept. See `app.upstream.stream_cap`.
+        #
+        # And after `_keep_proxy_connections_alive`, not before. Both patch `create_connection` on the same proxy pool, so whichever runs second wraps the first. This way round the cap wraps the keep-alive closure and both apply; the other way round the keep-alive closure is assigned straight over the cap's, which then becomes unreachable — with no error raised and the socket options still perfectly correct. Measured on a real CONNECT tunnel: five concurrent requests share one h2 tunnel instead of the four connections a cap of 2 produces. `test_a_proxy_pool_keeps_both_the_cap_and_the_keepalive` is what makes swapping these two lines go red.
         cap_streams_per_connection(client, options.max_streams_per_connection)
     return client
 
@@ -220,8 +222,15 @@ def _warn_about_socks(options: TransportOptions) -> None:
 
 
 def _origin_of(url: str) -> str:
+    """Scheme, host and port — the part of a proxy URL that names it, without the credentials it may carry.
+
+    Brackets go back on an IPv6 host, because httpx hands one back without them and `socks5://fe80::1:1080` cannot be read back as a host and a port — nor as anything else. The warning says it is printing an origin, so it should print one.
+
+    `is not None` rather than truthiness: httpx parses an explicit `:0` as the integer 0, and testing the port for truth would print it as though no port had been given.
+    """
     parsed = httpx.URL(url)
-    return f"{parsed.scheme}://{parsed.host}:{parsed.port}" if parsed.port else f"{parsed.scheme}://{parsed.host}"
+    host = f"[{parsed.host}]" if ":" in parsed.host else parsed.host
+    return f"{parsed.scheme}://{host}:{parsed.port}" if parsed.port is not None else f"{parsed.scheme}://{host}"
 
 
 def _is_socks(proxy: str | None) -> bool:

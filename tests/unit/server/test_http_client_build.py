@@ -11,13 +11,15 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+import httpcore
 import httpx
 import pytest
 
 from app.config.schema import ProxyConfig
 from app.server.composition import build_http_client, transport_options
+from app.upstream.stream_cap import StreamCappedConnection
 
 
 def socket_options_of_transport(transport: httpx.AsyncBaseTransport) -> object:
@@ -83,7 +85,7 @@ def test_pooling_is_left_to_httpx() -> None:
 def test_an_explicit_proxy_reaching_httpx_shuts_the_environment_out() -> None:
     """Pins the httpx-facing behaviour only: an explicit proxy is `all://`, and the environment is not consulted.
 
-    Deliberately not named for the product's priority rule. `docs/.human-controlled/config.example.yaml` puts `HTTP_PROXY` / `HTTPS_PROXY` *above* the config file's `proxy`, but `load_proxy_config()` flattens CLI, `GHC_PROXY` and YAML into one field with no provenance, so nothing downstream can tell them apart. That predates this change and is not fixed here; naming this test after the rule would freeze the wrong half of it. Recorded in `docs/agents/delivery-keepalive/deferred.md`.
+    Deliberately not named for the product's priority rule. `docs/.human-controlled/config.example.yaml` puts `HTTP_PROXY` / `HTTPS_PROXY` *above* the config file's `proxy`, but `load_proxy_config()` flattens CLI, `GHC_PROXY` and YAML into one field with no provenance, so nothing downstream can tell them apart. That predates this change and is not fixed here; naming this test after the rule would freeze the wrong half of it. Recorded as D-7 in `docs/agents/delivery-keepalive/deferred.md`.
     """
     config = ProxyConfig.model_validate({"proxy": "http://127.0.0.1:9999"})
     client = build_http_client(config)
@@ -185,11 +187,71 @@ def test_a_socks_proxy_says_the_keepalive_will_not_apply(caplog: pytest.LogCaptu
     assert any("SOCKS" in record.message for record in caplog.records)
 
 
+def connection_the_pool_would_build(client: httpx.AsyncClient) -> Any:
+    """What the pool builds for an HTTPS origin, without connecting.
+
+    Typed `Any` deliberately: httpcore's pool attributes are untyped, and reading them at each call site spreads three unknown-type diagnostics per site instead of one place that says "this is third-party private state".
+    """
+    pool: Any = cast(Any, client._transport)._pool  # pyright: ignore[reportPrivateUsage]
+    return pool.create_connection(httpcore.Origin(b"https", b"example.invalid", 443))
+
+
 def test_a_direct_proxy_says_nothing_of_the_sort(caplog: pytest.LogCaptureFixture) -> None:
     config = ProxyConfig.model_validate({"proxy": "http://127.0.0.1:7890"})
     with caplog.at_level("WARNING"):
         build_http_client(config)
     assert not [record for record in caplog.records if "SOCKS" in record.message]
+
+
+def test_the_socks_warning_prints_an_ipv6_origin_that_can_be_read_back(caplog: pytest.LogCaptureFixture) -> None:
+    """httpx returns an IPv6 host without its brackets, and `socks5://::1:1080` is not a URL of anything.
+
+    The round trip is the assertion rather than the string, because the point is that an operator can paste what the warning printed back into a config and get the same proxy.
+    """
+    config = ProxyConfig.model_validate({"proxy": "socks5://user:hunter2@[::1]:1080"})
+    with caplog.at_level("WARNING"):
+        build_http_client(config)
+    printed = [record for record in caplog.records if "SOCKS" in record.message]
+    assert len(printed) == 1
+    message = printed[0].getMessage()
+    assert "hunter2" not in message
+    origin = httpx.URL(message.split(" ", 2)[1])
+    assert origin.host == "::1"
+    assert origin.port == 1080
+
+
+def test_the_socks_warning_keeps_an_explicit_port_zero(caplog: pytest.LogCaptureFixture) -> None:
+    """`if parsed.port` would drop it: httpx parses `:0` as the integer 0, which is falsy.
+
+    Port 0 is not a working proxy destination, so this is about the warning telling the truth rather than about reachability — but the predicate is the one an operator's setting has to survive.
+    """
+    config = ProxyConfig.model_validate({"proxy": "socks5://user:hunter2@host.example:0"})
+    with caplog.at_level("WARNING"):
+        build_http_client(config)
+    printed = [record for record in caplog.records if "SOCKS" in record.message]
+    assert len(printed) == 1
+    assert "socks5://host.example:0" in printed[0].getMessage()
+
+
+def test_a_proxy_pool_keeps_both_the_cap_and_the_keepalive() -> None:
+    """Two patches land on the same `create_connection`, and the order decides whether both survive.
+
+    Keep-alive first, cap second: the cap wraps the keep-alive closure and both apply. Reversed, the keep-alive closure is assigned over the cap's and the cap is unreachable — no error, and the socket options still correct, so every other assertion in this file would still pass. Measured on a real CONNECT tunnel: five concurrent requests on one h2 tunnel instead of the four connections a cap of 2 produces.
+    """
+    config = ProxyConfig.model_validate(
+        {
+            "proxy": "http://127.0.0.1:7890",
+            "upstream_transport": {"tcp_keepalive_interval": 25, "max_streams_per_connection": 2},
+        }
+    )
+    client = build_http_client(config)
+    created = connection_the_pool_would_build(client)
+
+    assert isinstance(created, StreamCappedConnection), "the keep-alive patch was installed over the cap"
+    # Constructing the tunnel does not connect, so the options are read off the connection it will use rather than off a socket.
+    options = getattr(getattr(created._inner, "_connection", None), "_socket_options", None)  # pyright: ignore[reportPrivateUsage]
+    assert options is not None
+    assert (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1) in options
 
 
 def test_a_platform_without_the_timing_constants_says_so(

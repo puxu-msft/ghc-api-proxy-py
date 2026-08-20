@@ -13,7 +13,7 @@ Two things make it work at the right moment, and getting either wrong produces a
 
 `is_available()` is called inside the pool's own lock, so reading `_requests` needs no extra synchronisation.
 
-**Private surface, named so an upgrade knows what to check.** `pool._requests` and the `.connection` on its elements. Both have existed since httpcore's 0.14 redesign (2021-11-11) and survived the 2024 pool rewrite (#880) that renamed the element class around them. Neither is documented, and httpcore's CHANGELOG has never once mentioned the pool internals — including in the release that rewrote them — so **upgrading httpcore means diffing its source, not reading its release notes**. `tests/unit/test_stream_cap.py` carries a structural guard that fails loudly if either name moves; without it this degrades silently into a decoration that caps nothing.
+**Private surface, named so an upgrade knows what to check.** `pool._requests` and the `.connection` on its elements. Both have existed since httpcore's 0.14 redesign (2021-11-11) and survived the 2024 pool rewrite (#880) that renamed the element class around them. Neither is documented, and httpcore's CHANGELOG has never once mentioned the pool internals — including in the release that rewrote them — so **upgrading httpcore means diffing its source, not reading its release notes**. `tests/unit/upstream/test_stream_cap.py` carries a structural guard that fails loudly if either name moves; without it this degrades silently into a decoration that caps nothing.
 """
 
 from typing import Any, Protocol, cast
@@ -97,11 +97,17 @@ def cap_streams_per_connection(client: httpx.AsyncClient, max_streams: int) -> N
     if max_streams < 1:
         raise ValueError(f"max_streams must be >= 1, got {max_streams}")
 
-    _cap_one(client._transport, max_streams)
-    # Mounted transports too. A client built with explicit `mounts` — which is how the composition root keeps `HTTP_PROXY` / `HTTPS_PROXY` working while handing httpx a transport of its own — routes proxied traffic through them and not through `_transport`, so capping only the default would leave the cap doing nothing for exactly the destinations a proxy serves.
-    for mounted in client._mounts.values():
-        if mounted is not None:
-            _cap_one(mounted, max_streams)
+    # Mounted transports as well as the default one. A client built with explicit `mounts` — which is how the composition root keeps `HTTP_PROXY` / `HTTPS_PROXY` working while handing httpx a transport of its own — routes proxied traffic through them and not through `_transport`, so capping only the default would leave the cap doing nothing for exactly the destinations a proxy serves.
+    #
+    # Once per pool, not once per name that reaches it. The composition root deliberately gives every `NO_PROXY` rule the *same* direct transport, and that transport is usually `_transport` too, so a plain walk wraps one pool as many times as it is mentioned. The extra layers do not change the cap — the pool assigns each request to the outermost wrapper, so the inner ones count zero and only delegate — but they nest `create_connection` calls one deep per mention, and a legitimate `NO_PROXY` list long enough (measured: 1100 rules) raises `RecursionError` before any connection is attempted.
+    #
+    # Keyed by `id()` rather than put in a set, because identity is the property meant here and a set would spell it as equality. Transports have no `__eq__` today, so the two agree; a future httpx that gave them value equality *and* a matching `__hash__` would have a set fold two distinct pools into one and leave the second uncapped — silently, which is the failure this whole module is written against. (With `__eq__` alone the set would raise instead, which is at least loud.) Every transport is kept alive by `client` for the duration, so the ids cannot be reused underneath us.
+    pools_to_cap: dict[int, httpx.AsyncBaseTransport] = {}
+    for transport in (client._transport, *client._mounts.values()):
+        if transport is not None:
+            pools_to_cap.setdefault(id(transport), transport)
+    for transport in pools_to_cap.values():
+        _cap_one(transport, max_streams)
 
 
 def _cap_one(transport: httpx.AsyncBaseTransport, max_streams: int) -> None:

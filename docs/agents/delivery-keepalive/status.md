@@ -1,9 +1,35 @@
 # 实施状态
 
-- **已合入 `main`**：squash 提交 `dbb6104 fix: keep the client alive on our own writes, not on upstream's pace`
-- 主线侧闸门（含同伴叠在其上的后续提交）：全量 `pytest` **1504 passed、3 skipped**；`ruff check src tests` 通过；`pyright src tests` 0 errors
-- 已评审的源封存在两个不可变归档分支：`archive/260820-delivery-keepalive`（原始 12 个提交，基于 `5e2f1d5`，含七副面孔的逐条提交信息）与 `archive/260820-delivery-keepalive-onmain`（调和后的 4 个提交）
-- 评审：三路独立、异源。契约评审三轮判定 spec 可固定为规范；asyncio 正确性评审八轮判定可以合入；调和评审确认主线的清理语义、STR-04 与本分支七条保活性质全部保持，无忙等、无第八种替身量
+本主题共三个 slice，前两个已合入 `main`，第三个是合入后复评查出的修复。
+
+| slice | `main` 上的提交 | 内容 |
+|---|---|---|
+| 下游保活 | `dbb6104 fix: keep the client alive on our own writes, not on upstream's pace` | 面向客户端的保活，判据不再取自替身量（七副面孔，见下） |
+| 上游保活 | `52d877c feat: give the upstream connection the keep-alive its setting promised` | `tcp_keepalive_interval` 实现成真的 `SO_KEEPALIVE`；环境变量代理重建挂载；SOCKS 告警；删两个 legacy 键 |
+| 合入后复评修复 | 待合入 | `NO_PROXY` 重复包装导致的 `RecursionError`、两个补丁的顺序回归、SOCKS IPv6 origin。见 `deferred.md` D-8 / D-9 / D-10 |
+
+闸门（各自合入时点实测，不是同一个数）：`dbb6104` 时 1504 passed / 3 skipped；`52d877c` 时 1550 passed / 3 skipped；第三个 slice 当前 **1555 passed / 3 skipped**（`uv run pytest -q`，新增 5 条回归）。`ruff check src tests` 通过。Pyright **净增 0**（本树基线与当前均为 21 errors，`uv run pyright src tests`）。
+
+关于 Pyright 的一个读数陷阱：合入后复评报告里那个「父提交 94 → 目标 95」是**在 git 解包副本里测的**，那份副本没有本树的 venv 与已安装的 `app` 包，导入解析退化会凭空多出几十条形状正确的假诊断。**净增 1 那个差值可信（同环境同配置两侧对比），94 / 95 这两个绝对值与本仓的 `uv run pyright src tests` 不可比，不要当闸门数引用。**
+
+本文档第二节末尾那句调和时点的「Pyright 干净」**不是同一回事**，那是在真实工作树里测出的 0 errors。它与今天的 21 的差距来自另一个原因：主线自身的基线在这段时间里漂移过。当前这 21 条全部落在 `stream_cap` 这一对文件上——`src/app/upstream/stream_cap.py` 3 条、`tests/unit/upstream/test_stream_cap.py` 18 条，全是伸进 httpx/httpcore 私有属性产生的 private-usage 与 unknown-type 诊断，是该模块刻意采取的做法（模块 docstring 写明了为什么读这些私有名），不是本主题新引入的缺陷。**读任何 Pyright 数字之前先问它是在哪棵树、哪个基线上测的**——这三个数（0、94/95、21）分别属于三种不同的测量条件，横向比较没有意义。
+
+**`tests/e2e` 的 `ModuleNotFoundError: No module named 'harness'` 已经修好了**，别再按红灯处理：`65e0781`（主线孪生 `0c1524f`）把 `from harness import` 改成 `from _harness import`，实测 `tests/e2e --collect-only` 现在收集出 5 个测试。同一个提交也把 `addopts` 改成含 `--ignore=tests/e2e`，所以全量回归不必再手动加这个参数。（`52d877c` 合入时点它确实是红的，那时的判断没错，只是此后被修掉了。）
+
+归档分支（**两个 slice 的 `-onmain` 后缀含义不同，不要按同一个规则读**）：
+
+| 分支 | 指向 | 是什么 |
+|---|---|---|
+| `archive/260820-delivery-keepalive` | `68a50e7` | 已评审的原始 12 个提交，基于 `5e2f1d5`，含七副面孔的逐条提交信息 |
+| `archive/260820-delivery-keepalive-onmain` | `1bb22fb` | 调和后的 4 个提交 |
+| `archive/260820-upstream-keepalive` | `2705281` | 已评审的源提交链，7 个 |
+| `archive/260820-upstream-keepalive-onmain` | `0176e93` | **一个 rebase 中转的 squash**，不是多提交源。项目规则「归档不得指向 squash 提交」针对的是集成 squash（这里是 `52d877c`），本分支是中间态；记在这里是因为同后缀在两个 slice 里不同义 |
+
+评审：五路独立、异源。契约 3 轮判定 spec 可固定为规范；asyncio 正确性 8 轮判定可以合入；调和评审确认主线的清理语义、STR-04 与本分支七条保活性质全部保持，无忙等、无第八种替身量；传输层 3 轮加合入后复评 2 轮（`review-merged-upstream-keepalive.md`、`review-followup-cap-dedup.md`）；文档与裁决核对 2 轮（`docs/tmp/260820-review-keepalive-rulings.md`、`docs/tmp/260820-review-keepalive-doc-fixes.md`）。
+
+第一轮文档核对判定八条裁决在实现里全部准确落实、两条提交信息无夸大，14 条问题全在文档侧；第二轮核对这次修订本身，判定 13/14 已处置，并查出修订过程**新引入**的 4 条假断言（D-5 主语写反、修复提交归错、e2e 红灯早已修好、`deferred.md` D-2 未跟上），均已改。
+
+**唯一未处置的是第一轮的 F-11，理由记在这里而不是略过**：F-11 指出 `review-transport-keepalive-r3.md` 的 `needs-fix` 裁决被无声关掉了——其后又落了三个提交却没有 R4。不补 R4 的理由是那三条前置条件已各自有归宿：① SOCKS 只告警由用户 S2 裁决消解；② 兼容范围与迁移规则随 `pool_idle_expiry` 整个撤销而自然消失，剩下的 proxy 优先级缺口已落成 D-7；③ HTTPS tunnel 的提交内 fd 回归由 `test_the_keepalive_is_on_the_socket_of_a_connect_tunnel` 补上，且已由合入后复评独立复验。**该补的是这段关闭说明本身，不是再跑一轮 R4**，现已补上。
 
 ## 合入是怎么完成的（这一段是给下一个撞上同样情况的人）
 
@@ -15,7 +41,7 @@
 
 ## 落地了什么
 
-规范见 `spec.md`，未决事项见 `deferred.md`。代码改动集中在 `src/app/pipeline/delivery/stream.py` 一个文件。
+规范见 `spec.md`，未决事项见 `deferred.md`。下游保活的改动集中在 `src/app/pipeline/delivery/stream.py` 一个文件；上游保活与其后的复评修复动的是 `src/app/server/composition.py`、`src/app/upstream/stream_cap.py`、`src/app/config/schema.py`、`src/app/config/settings.py`。
 
 一句话：**面向客户端的保活，其判据不再取自任何替身量。**
 
@@ -61,16 +87,24 @@
 
 **已调和**：已评审的 12 个提交存进不可变归档 `archive/260820-delivery-keepalive`，然后压成一个提交 rebase 到 `main`，把本分支的保活调度**手工重新施加**在主线那版之上。结果：`tests/unit/test_stream_delivery.py` 37 passed（主线 30 + 本分支 7），全量 1488 passed / 3 skipped，Ruff、Pyright 干净。**调和后已另派独立评审**——合并两份对同一异步循环的重写，是新缺陷最容易出现的地方，不靠「测试全绿」放行。
 
+（本节与上一节记的是当时发生的事，路径照当时写。那个文件此后被并行会话的测试树重组移到了 **`tests/unit/pipeline/delivery/test_stream_delivery.py`**；要跑它请用新路径。）
+
 跟进主线还暴露了一件比那次更正本身更重要的事：`spec.md` 里每一条关于「某处有没有接线」的断言都有保质期。`a7ca9ea` 一落地，§4 关于 `stream_idle` 的整段就作废了；并行会话对 `upstream_transport.http2` 的改动又让 §3 关于 `http2_ping_interval` 的表述作废。两处都已更正，并在 §4 写明了这条使用限制。
 
 ## 用户已裁决
 
 | 项 | 裁决 |
 |---|---|
+| 两侧保活的关系 | **「要清晰区分 client ↔ proxy ↔ upstream 这两侧的保活，它们是不同的，不可混为一谈。」** 本主题的全部结构由这条决定 |
 | 主线跟进与合入 | 持续跟进新版，合适时机 `ExitWorktree` 合入 |
 | D-2 合成窗口与人写文档冲突 | **用户自行修订人写文档**，本项目侧不动实现 |
+| D-3a `tcp_keepalive_interval` | **A1：实现成真的 `SO_KEEPALIVE`** |
+| D-3e 两个 legacy 键 | **被取代就删**；没取代的要说清为什么没实现 |
+| D-3f SOCKS 路径 | **S2：接受限制并告警** |
+| 连接池保留时长 | **从来没有被裁决过**，不得为保住那 15 秒新造配置键 |
 | D-4 `hedge` 未实现 | **未来做，目前暂缓** |
-| D-5 / D-6 | 用户指出这两条是缺陷不是裁决点。**已更正分类**：正确做法唯一，排期修，不需要任何输入 |
+
+**一条不属于本表的**：用户指出 D-5 / D-6 是缺陷不是裁决点——「如果是修复问题，有什么可裁决的？」把它登记进「已裁决」表本身就是同一个错误的复发，故移出表外记在这里。分类已更正：正确做法唯一，排期修，不需要任何输入；现已由并行会话的 `783f023` 完成。
 
 ## 待裁决：已裁完
 
@@ -84,6 +118,10 @@
 
 其余原 D-3 内容已重新分类为**无岔路的缺陷**，见 `deferred.md`：`0 = 禁用` 语义反转、出站连接数无上限、HTTP/2 PING 在 httpcore 上不可实现（应固化为结论）、`settings.py` 两个死键。
 
-## 排期修（不需要输入）
+## 排期修：本主题内已全部做完
 
-按 `deferred.md`：D-3b、D-3c、D-3d、D-3e、D-5、D-6，以及 `streaming-resilience.md` 配置表的顺手更正。D-6 与 `handle_bounded` 是同一个病，合成一个 slice。
+本节此前列着「D-3b、D-3c、D-3d、D-3e、D-5、D-6，以及 `streaming-resilience.md` 配置表的顺手更正」。**这六条现在一条不剩全都完成了**——D-3b/c 随错映射的删除一并消失，D-3d 由并行会话加上 NOT IMPLEMENTED 标注，D-3e 两个 legacy 键已删（`52d877c`），D-5 由并行会话的 `064ba63` 修掉、D-6 由 `783f023` 修掉。`streaming-resilience.md` 已判定为归档件、不必回头改（见 `deferred.md`「文档侧顺手项」一节）。照旧清单接手会去重做六件已完成的事，故改写为现状。
+
+**当前真正未完成的只有一条**：`deferred.md` D-7，proxy 优先级三来源被压平、无 provenance，因而无法实现人写文档规定的优先级。缺陷，无岔路，排期做掉。
+
+另有交还用户的两条文档问题（人写文档中英不一致、`http2_ping_interval` 仍被描述成生效的保活），见 `deferred.md`「交还用户的文档问题」一节——我方不改那份文件。
