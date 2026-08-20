@@ -16,6 +16,7 @@ from typer.testing import CliRunner
 from app.cli import app
 from app.config.schema import ProxyConfig
 from app.debug.models import (
+    ASSUMED_MARK,
     CatalogFailure,
     ProviderCatalog,
     build_rows,
@@ -100,6 +101,8 @@ def test_an_unstated_endpoint_is_filled_in_from_the_model_kind() -> None:
                 _model("embedder", capabilities={"type": "embeddings"}, supported_endpoints=None),
                 _model("chatter", capabilities={"type": "chat"}, supported_endpoints=None),
                 _model("completer", capabilities={"type": "completion"}, supported_endpoints=None),
+                # A non-empty kind nobody has measured — the shape upstream would actually add, not just a missing field.
+                _model("future-kind", capabilities={"type": "chat-v2"}, supported_endpoints=None),
                 _model("typeless", capabilities={}, supported_endpoints=None),
             ]
         }
@@ -113,10 +116,11 @@ def test_an_unstated_endpoint_is_filled_in_from_the_model_kind() -> None:
     assert rows["embedder"].assumed and rows["chatter"].assumed
 
     # A kind nobody measured gets nothing. `gpt-41-copilot` is the live `completion` model, and on 2026-08-20 it answered `model_not_supported` on every endpoint this host offers — a default would have reported it routable and had it 400 every time.
-    assert rows["completer"].endpoints == ()
-    assert rows["completer"].status == "no-endpoints"
-    assert rows["typeless"].endpoints == ()
-    assert rows["typeless"].status == "no-endpoints"
+    for name in ("completer", "future-kind", "typeless"):
+        assert rows[name].endpoints == (), name
+        assert rows[name].status == "no-endpoints", name
+        # And none of them may claim an endpoint was filled in. Saying so printed a legend about the standard endpoint for the kind, next to a row whose endpoint column was empty.
+        assert rows[name].assumed is False, name
 
 
 def test_an_endpoint_upstream_did_name_is_never_overwritten() -> None:
@@ -159,6 +163,24 @@ def test_a_field_we_could_not_read_never_becomes_a_capability() -> None:
         assert rows[name].endpoints == (), name
         assert rows[name].assumed is False, name
         assert rows[name].status == "malformed", name
+
+
+def test_an_unreadable_capabilities_type_is_malformed_rather_than_endpointless() -> None:
+    """`capabilities.type` decides which endpoint an unstated model gets, so an unreadable one is the same defect as an unreadable endpoint list.
+
+    Reported as `no-endpoints` it would read as a statement about upstream's offering, when what actually happened is that the catalog's shape could not be read.
+    """
+    rows = _rows_by_id(
+        {
+            "data": [
+                _model("type-not-a-string", capabilities={"type": 1}, supported_endpoints=None),
+                _model("capabilities-not-an-object", capabilities="chat", supported_endpoints=None),
+            ]
+        }
+    )
+
+    assert rows["type-not-a-string"].status == "malformed"
+    assert rows["capabilities-not-an-object"].status == "malformed"
 
 
 def test_an_upstream_policy_state_cannot_impersonate_one_of_our_own_words() -> None:
@@ -310,6 +332,17 @@ def test_a_mark_nothing_carries_is_left_out_of_the_legend() -> None:
 
     assert "no driver in this proxy" not in text
     assert "not named by upstream" not in text
+
+
+def test_a_report_of_only_unmeasured_kinds_promises_no_standard_endpoint() -> None:
+    """The legend explains a mark; with no endpoint filled in there is no mark, and the sentence would contradict the empty column beside it."""
+    raw = {"data": [_model("future-kind", capabilities={"type": "chat-v2"}, supported_endpoints=None)]}
+
+    text = render_text([_catalog(raw=raw, disabled=[])])
+
+    assert "no-endpoints" in text
+    assert "not named by upstream" not in text
+    assert ASSUMED_MARK not in text
 
 
 def test_the_summary_line_cannot_be_split_by_upstream_text() -> None:

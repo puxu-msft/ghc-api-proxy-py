@@ -112,7 +112,7 @@ def status_of(
 
     Ordered by who can act on it: the disabled list is the operator's to edit, the policy state is theirs to accept on github.com, an offering of nothing is upstream's to change, and a missing driver is ours to write. Reporting the first of those hides nothing — clearing it re-runs this command and reveals the next.
 
-    `no-endpoints` does **not** mean the catalog left the key out. Copilot does that for part of its catalog and `resolve_endpoints` fills those in with the standard endpoint for the model's kind, so they never reach here. It means upstream sent an explicit empty list — it offered zero endpoints, which is a different fix from a driver we have not written, and which upstream has never actually been observed doing.
+    `no-endpoints` means no endpoint is known for this model, and it covers two ways of getting there: upstream sent an explicit empty list, or upstream said nothing and the model's `capabilities.type` has no measured default. Neither has been seen in a live catalog. They are one word because the operator's next step is the same — look at what upstream actually sent — and `--json` carries the `capabilities.type` that tells them apart. What it never means is the ordinary absent key: `resolve_endpoints` fills those in, so they do not reach here.
 
     `malformed` outranks the rest because it is the one answer that is not about this model. A `supported_endpoints` that arrived as a string rather than a list is a field we could not read at all, and it must not be reported as a confident claim about what upstream offers.
 
@@ -138,6 +138,13 @@ def _wrong_shape(model: Mapping[str, Any]) -> bool:
     """
     endpoints = model.get("supported_endpoints")
     if endpoints is not None and not isinstance(endpoints, list):
+        return True
+    # `capabilities.type` decides which endpoint an unstated model gets, so an unreadable one is the same class of defect as an unreadable endpoint list — and without this it would read as `no-endpoints`, losing the fact that the catalog's shape is wrong.
+    capabilities: object = model.get("capabilities")
+    if capabilities is not None and not isinstance(capabilities, dict):
+        return True
+    model_type: object = _mapping(model.get("capabilities")).get("type")
+    if model_type is not None and not isinstance(model_type, str):
         return True
     policy: object = model.get("policy")
     if policy is not None and not isinstance(policy, dict):
@@ -198,7 +205,8 @@ def build_rows(
                 family=_text(capabilities.get("family")),
                 endpoints=offered,
                 undriven=undriven,
-                assumed=not resolved.advertised,
+                # Filled in only counts when something actually was: an unmeasured kind yields no endpoint, and calling that `assumed` printed a legend about a standard endpoint next to an empty column.
+                assumed=bool(offered) and not resolved.advertised,
                 context_window=_count(limits.get("max_context_window_tokens")),
                 max_output_tokens=_count(limits.get("max_output_tokens")),
             )

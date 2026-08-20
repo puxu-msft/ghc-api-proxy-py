@@ -101,7 +101,7 @@ _DEFAULT_ENDPOINT_BY_TYPE = {
     "embeddings": ModelEndpoint.OPENAI_EMBEDDINGS,
 }
 
-# `completion` is deliberately absent, and it is the reason this is an allowlist. The 18th model, `gpt-41-copilot`, is the one of that type, and on the same date it answered `model_not_supported` on `/chat/completions`, on `/responses` and on `/v1/messages`, with `/completions` a 404. It is not served by this host at all: `refs/vscode-copilot-chat/.../openai/fetch.ts:310` sends that type to `v1/engines/<model>/completions` on the *completions proxy* host, a different service this proxy does not talk to. Giving it a default would report a model as routable that answers 400 every time.
+# `completion` is deliberately absent, and it is the reason this is an allowlist. The 18th model, `gpt-41-copilot`, is the one of that type, and on the same date it answered `model_not_supported` on `/chat/completions`, on `/responses` and on `/v1/messages`, with `/completions` a 404 — the four paths probed, which is what was measured rather than a claim about every path this host might have. The reference implementation explains the shape: `refs/vscode-copilot-chat/.../openai/model.ts:112` selects models by `capabilities.type === 'completion'`, `openai/fetch.ts:470` names the endpoint `completions`, and `openai/fetch.ts:310` builds that URL against the *completions proxy* host — a separate service this proxy does not talk to. Giving the type a default would report a model as routable that answered 400 on everything tried.
 
 
 def model_type_of(model: Mapping[str, Any]) -> str:
