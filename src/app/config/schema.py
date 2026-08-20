@@ -86,6 +86,38 @@ class ModelProviderConfig(Section):
     github_token_file: str = ""
     model_refresh_interval: int = Field(default=3600, ge=0)
     disabled_models: list[str] = Field(default_factory=lambda: list[str]())
+    # Which models actually execute hosted web search, matched exactly against upstream `model.id`
+    # as `disabled_models` is. A declaration from the client is translated into this endpoint's own
+    # `{"type": "web_search"}` only for a model named here; for any other it is removed, and the
+    # turn goes on without the capability.
+    #
+    # Maintained by hand because the catalog cannot answer the question. Measured 2026-08-20 across
+    # the live catalog — 42 models, 67,656 bytes — the union of `capabilities.supports` keys holds
+    # no web-search bit of any kind, and a value-level scan for `search|web_|builtin|hosted` over
+    # the whole document returns nothing. The two models known to work cannot be told apart from
+    # the rest on any advertised field.
+    #
+    # The default is the catalog's OpenAI-vendor models that advertise `/responses`, as of that
+    # date. Taken by `vendor` rather than by a `gpt-` name prefix, which would sweep in `gpt-5-mini`
+    # — vendor `Azure OpenAI`, a different supply chain. Only `gpt-5.5` and `gpt-5.6-sol` have
+    # actually been put to upstream; the rest are inferred from sharing a vendor with them, and
+    # `gpt-5.3-codex` is the most doubtful of those.
+    #
+    # Both ways of being wrong show up, and neither is silent. A model listed here that cannot
+    # search answers 400 and says which value it refused. A model left out that could search has
+    # its declaration removed, which is reported at INFO with the model named. Expect this list to
+    # drift as the catalog does.
+    models_support_web_search: list[str] = Field(
+        default_factory=lambda: [
+            "gpt-5.3-codex",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+            "gpt-5.5",
+            "gpt-5.6-luna",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+        ]
+    )
 
 
 class UpstreamTransportConfig(Section):

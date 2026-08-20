@@ -223,7 +223,18 @@ def test_an_anthropic_web_search_declaration_reaches_upstream_in_its_own_spellin
 
     The function tool beside it is the other half: translating the declaration must not disturb the client's real tools.
     """
-    client, seen = make_client(lambda _: httpx.Response(200, json={"id": "resp_1"}))
+    client, seen = make_client(
+        lambda _: httpx.Response(200, json={"id": "resp_1"}),
+        overrides={
+            "model_providers": {
+                "ghc": {
+                    "type": "github_copilot",
+                    "api_base_url": BASE_URL,
+                    "models_support_web_search": ["gpt-model"],
+                }
+            }
+        },
+    )
     response = client.post(
         "/v1/messages",
         json={
@@ -287,6 +298,46 @@ def test_a_streamed_search_is_delivered_as_a_line_rather_than_an_empty_block() -
     # No block may be delivered empty: that was the symptom, and it is invisible in a test that
     # only checks the answer arrived.
     assert all(text for text in deltas), deltas
+
+
+def test_a_model_not_listed_as_searching_does_not_get_the_builtin() -> None:
+    """The gate, and the reason it cannot live in the translator.
+
+    Whether a model runs hosted search is not something the catalog says — measured over the live catalog, no model advertises a bit for it under any name — so it is an operator's list, matched against the *resolved* model. The translator only ever sees the name the client asked for.
+
+    Withheld rather than refused: a model that cannot search has not sent a bad request, and failing the turn would take the conversation with it. The client's own tools must survive that.
+    """
+    client, seen = make_client(
+        lambda _: httpx.Response(200, json={"id": "resp_1"}),
+        overrides={
+            "model_providers": {
+                "ghc": {
+                    "type": "github_copilot",
+                    "api_base_url": BASE_URL,
+                    "models_support_web_search": ["some-other-model"],
+                }
+            }
+        },
+    )
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "gpt-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 64,
+            "tools": [
+                {"type": "web_search_20250305", "name": "web_search"},
+                {"name": "get_time", "input_schema": {"type": "object"}},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    sent = orjson.loads(seen[-1].read())
+    assert sent["tools"] == [
+        {"type": "function", "name": "get_time", "parameters": {"type": "object"}}
+    ]
+    assert b"web_search" not in seen[-1].read()
 
 
 def test_a_domain_restriction_refuses_before_upstream_is_called() -> None:

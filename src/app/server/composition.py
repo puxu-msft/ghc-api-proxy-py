@@ -219,7 +219,15 @@ def build_chain(
 
     # The built-ins go into whatever registry the caller brought, so their order is resolved together with anything a caller added rather than in a second, separate pass.
     subscriber_registry = subscribers if subscribers is not None else SubscriberRegistry[RequestContext]()
-    register_builtin_subscribers(subscriber_registry)
+    # Every provider's list, merged. Which provider serves a request is decided per request, and a
+    # model id is unique across the catalog, so there is nothing for a per-provider lookup to
+    # disambiguate here that this does not already answer.
+    web_search_models = frozenset(
+        model
+        for provider in config.model_providers.values()
+        for model in provider.models_support_web_search
+    )
+    register_builtin_subscribers(subscriber_registry, web_search_models=web_search_models)
 
     return Chain(
         config=config,

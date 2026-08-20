@@ -11,6 +11,7 @@
 | id | event | goes before/after | why |
 |---|---|---|---|
 | `builtin:server-tool-capability` | `attempt.prepare` | — | Reads and edits `tools`. Anything else that comes to read `tools` has to say whether it wants the client's list or the one that will actually be sent, and answer it here rather than by landing at whatever position happens to work. |
+| `builtin:hosted-web-search-gate` | `attempt.prepare` | after `builtin:server-tool-capability` | Nothing forces it — the two are mutually exclusive by route, one acting only when the target is Anthropic Messages and the other only when it is Responses, so neither can see what the other wrote. Registered next to it because they answer the same question for the two legs, and a reader looking for "where is web search decided" should find both in one place rather than at either end of the list. |
 | `builtin:blank-text-blocks` | `attempt.prepare` | registered last, by convention | Nothing forces it. It does read what that pass writes — `server_tools.py` rewrites a message's `content` and this reads the same list — but every text block that pass emits carries a `[family]` prefix and `_render_results` has no branch returning an empty string, so none of it can trigger this rule. Last on purpose all the same: this one only removes, and a remover placed after the rewriters sees the shape that will actually be sent, so a future pass that does emit a blank block is covered without anyone having to remember to reorder. The order comes from registration order rather than a `before=`/`after=` constraint, and the tuple in `tests/unit/test_builtin_subscribers.py` is what holds it. |
 
 `tests/unit/test_builtin_subscribers.py` locks the registered set and the frozen order, so a subscriber added without a decision about where it goes fails there rather than in production.
@@ -21,11 +22,17 @@ from app.pipeline.events import SubscriberRegistry
 from app.pipeline.request import RequestContext
 from app.pipeline.subscribers.blank_text import SUBSCRIBER_ID as BLANK_TEXT_BLOCKS_ID
 from app.pipeline.subscribers.blank_text import drop_blank_text_blocks
+from app.pipeline.subscribers.hosted_web_search import SUBSCRIBER_ID as HOSTED_WEB_SEARCH_GATE_ID
+from app.pipeline.subscribers.hosted_web_search import gate_hosted_web_search
 from app.pipeline.subscribers.server_tools import SUBSCRIBER_ID as SERVER_TOOL_CAPABILITY_ID
 from app.pipeline.subscribers.server_tools import adapt_server_tools
 
 
-def register_builtin_subscribers(registry: SubscriberRegistry[RequestContext]) -> None:
+def register_builtin_subscribers(
+    registry: SubscriberRegistry[RequestContext],
+    *,
+    web_search_models: frozenset[str] = frozenset(),
+) -> None:
     """Add every built-in subscriber to a registry that has not been frozen yet.
 
     Takes the registry rather than building one so a caller that has its own subscribers ends up with one ordering over all of them. Two registries would mean two frozen orders and no rule about which runs first.
@@ -39,6 +46,14 @@ def register_builtin_subscribers(registry: SubscriberRegistry[RequestContext]) -
     )
     registry.subscribe(
         EVENT_ATTEMPT_PREPARE,
+        HOSTED_WEB_SEARCH_GATE_ID,
+        # Bound at registration rather than read from the context: the list is configuration, fixed
+        # for the life of the chain, and threading it through every request would put a startup
+        # decision in a per-request field where something could change it mid-flight.
+        lambda context: gate_hosted_web_search(context, web_search_models),
+    )
+    registry.subscribe(
+        EVENT_ATTEMPT_PREPARE,
         BLANK_TEXT_BLOCKS_ID,
         drop_blank_text_blocks,
     )
@@ -46,8 +61,10 @@ def register_builtin_subscribers(registry: SubscriberRegistry[RequestContext]) -
 
 __all__ = [
     "BLANK_TEXT_BLOCKS_ID",
+    "HOSTED_WEB_SEARCH_GATE_ID",
     "SERVER_TOOL_CAPABILITY_ID",
     "adapt_server_tools",
     "drop_blank_text_blocks",
+    "gate_hosted_web_search",
     "register_builtin_subscribers",
 ]

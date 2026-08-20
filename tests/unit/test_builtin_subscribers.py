@@ -19,6 +19,7 @@ from app.pipeline.events import SubscriberRegistry
 from app.pipeline.request import RequestContext, WireFormat
 from app.pipeline.subscribers import (
     BLANK_TEXT_BLOCKS_ID,
+    HOSTED_WEB_SEARCH_GATE_ID,
     SERVER_TOOL_CAPABILITY_ID,
     register_builtin_subscribers,
 )
@@ -27,7 +28,11 @@ from app.server.composition import build_chain
 from app.server.handler import handle_count_tokens
 from app.tokenization.estimators import estimate_anthropic_input, estimate_responses_input
 
-EXPECTED_ON_ATTEMPT_PREPARE = (SERVER_TOOL_CAPABILITY_ID, BLANK_TEXT_BLOCKS_ID)
+EXPECTED_ON_ATTEMPT_PREPARE = (
+    SERVER_TOOL_CAPABILITY_ID,
+    HOSTED_WEB_SEARCH_GATE_ID,
+    BLANK_TEXT_BLOCKS_ID,
+)
 # Keyed by event, so a subscriber added on a *different* event fails here too. Asserting one bucket would have let the next one land on `attempt.failed` with both assertions still green — a lock that only covers the door it was hung on.
 EXPECTED_BY_EVENT = {EVENT_ATTEMPT_PREPARE: EXPECTED_ON_ATTEMPT_PREPARE}
 
@@ -331,3 +336,24 @@ async def test_a_request_no_route_can_carry_is_refused_rather_than_estimated() -
         await handle_count_tokens(chain, context)
 
     assert provider.counted == []
+
+
+async def test_the_web_search_gate_leaves_the_anthropic_leg_alone() -> None:
+    """Its counterpart already owns that leg, and the two must not both act on one request.
+
+    Harmless today by accident rather than by design: `builtin:server-tool-capability` removes both spellings there before this could see them. The route check is what makes it deliberate — without it this reaches a leg whose `tools` is a different protocol's field that happens to share the name.
+    """
+    from app.pipeline.subscribers import gate_hosted_web_search
+
+    payload: dict[str, Any] = {"tools": [{"type": "web_search"}]}
+    context = RequestContext(
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        requested_model="claude-model",
+        payload=payload,
+        resolved_model="claude-model",
+        target_format=WireFormat.ANTHROPIC_MESSAGES,
+    )
+
+    await gate_hosted_web_search(context, frozenset())
+
+    assert payload["tools"] == [{"type": "web_search"}]
