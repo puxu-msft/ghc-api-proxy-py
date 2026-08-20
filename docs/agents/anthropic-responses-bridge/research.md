@@ -13,7 +13,7 @@
 以下四项均是本轮用户对目标项目的直接裁决，不是主 upstream 或 refs 的事实，也不改变本文对固定 commit tree 的核验结论。
 
 1. **Anthropic content block 是 block-level buffering 与 commit 的交付单元。** parser 可以按上游协议维护更细事件状态，但 delivery frontier 以完整 Anthropic content block 为准。
-2. **Block buffer 没有 16 MiB 或其他单 block 专属阈值。** buffer 与 carrier 是普通内存对象，统一服从普通 per-request aggregate、全局 reservation、准入与背压；不建立按单 block 大小触发的专门状态、fixture、metric threshold、spill 或 overflow-to-live 路径。对实际全局内存耗尽这一夸张小概率事件，当前只做拒绝新 bridge admission 的最小止血；若真实运行证据要求 victim selection、额外终止政策或其他全面资源设计，必须先询问用户并取得裁决。
+2. **Block buffer 没有 16 MiB 或其他单 block 专属阈值。** buffer 与 carrier 是普通内存对象，服从 per-request `client_delivery.buffer_cap_bytes`、有界队列与背压；不建立按单 block 大小触发的专门状态、fixture、metric threshold、spill 或 overflow-to-live 路径。进程级只有等待式在途请求上限 `proactive_rate_limiter.max_inflight`，超限请求排队等待而不被拒绝；若真实运行证据要求 victim selection、额外终止政策或其他全面资源设计，必须先询问用户并取得裁决。
 3. **Anthropic `/v1/messages` bridge 的默认 route。** 仅对该 bridge：无 endpoint override 时，resolved model 同时支持 Messages 与 Responses 则选择 Messages，Responses-only 模型选择 Responses，Messages-only 模型选择 Messages，能力未知则 fail closed。原生 OpenAI Responses 公共入口继续使用其 Responses upstream；不得从该 bridge 的 route precedence 推导其改走 Messages。显式 override、能力例外与 fallback 的优先级仍须在规格中冻结。
 4. **Opaque reasoning carrier wire 固定与 `copilot-api-js` v1 byte-compatible。** 目标 producer／consumer 必须兼容固定 upstream 的 ASCII prefix `copilot-api:synthetic-reasoning:v1:`、UTF-8→unpadded base64url payload、bare prefix、legacy sentinel、strip option 与 malformed 边界；不得另造私有 delimiter、schema、HMAC 或其他 carrier。该裁决只冻结 carrier wire 与 echo／strip 互操作，不把 upstream non-stream 的跨 item summary 聚合、last-ciphertext-wins 或 encrypted-only 丢失提升为目标语义。
 
@@ -120,7 +120,7 @@
 
 **可移植项。** 将“parser 已识别完整 block”“delivery 已提交 block”“attempt 可否重试”分成三个事实。目标项目已裁决 Anthropic content block 是 block-level buffering 与 commit 的交付单元。pre-commit 失败可以重试未提交区间；post-commit 失败不得重放已提交 block，只能续接、发 canonical error，或按冻结合同终止。ledger 必须绑定 generation／attempt identity，并由唯一 downstream writer 使用。
 
-**必须按用户裁决改造的部分。** upstream 主实现仍包含 live sink／逐帧路径；本项目不能复制“边解析边下游 flush”。目标结构应是 `upstream stream → protocol parser → block accumulator → commit predicate → delivery owner`，其中 commit predicate 只在完整 Anthropic content block 或 terminal/error block 上放行。buffer pressure 不得退回 live 直写，也不得引入磁盘 spill；16 MiB 或其他单 block 大小不是状态、测试或指标边界。buffer 只走普通 per-request aggregate、全局 reservation、准入与背压；实际全局内存耗尽时仅拒绝新 bridge admission，任何更全面的资源设计必须先询问用户。
+**必须按用户裁决改造的部分。** upstream 主实现仍包含 live sink／逐帧路径；本项目不能复制“边解析边下游 flush”。目标结构应是 `upstream stream → protocol parser → block accumulator → commit predicate → delivery owner`，其中 commit predicate 只在完整 Anthropic content block 或 terminal/error block 上放行。buffer pressure 不得退回 live 直写，也不得引入磁盘 spill；16 MiB 或其他单 block 大小不是状态、测试或指标边界。buffer 只走 per-request `client_delivery.buffer_cap_bytes`、有界队列与背压；进程级只有等待式在途请求上限 `proactive_rate_limiter.max_inflight`，超限请求排队等待而不被拒绝，任何更全面的资源设计必须先询问用户。
 
 ### 8. Buffered merge 与 terminal repair
 
@@ -190,7 +190,7 @@
 
 3. **block 定义与 commit frontier。** 以 Anthropic content block 为已裁决交付单元，冻结 terminal／error 是否独立 block，以及跨 attempt 如何识别已提交 block。依据：`/home/xp/src/copilot-api-js/src/lib/codec/anthropic/commit-boundaries.ts:1-24` 与 `/home/xp/src/copilot-api-js/src/lib/pipeline/committed-blocks-ledger.ts:1-29` @ `8d5c861c2e079b92401dd8ccd49695a363d078fe`。
 
-4. **资源与背压。** 16 MiB 不是产品／架构阈值，不建立专属 gate、fixture、metric threshold、状态分支或 spill 路径；buffer 与 carrier 只服从普通 per-request aggregate、全局 reservation、准入、backpressure 与取消清理。实际全局内存耗尽这一夸张小概率事件只做拒绝新 bridge admission 的最小止血；若运行证据要求 victim selection、额外终止政策或其他全面资源设计，必须先询问用户。当前目标 primitive 只有整流 cap，见 `/home/xp/src/ghc-api-proxy-py/src/app/streaming/buffered_retry.py:4-18` @ `47d9ef101c4b81ac70d805b1da157b34d021d33d`；该现状属于目标仓当前事实，不是目标裁决，更不能把其 cap 提升为目标合同。
+4. **资源与背压。** 16 MiB 不是产品／架构阈值，不建立专属 gate、fixture、metric threshold、状态分支或 spill 路径；buffer 与 carrier 只服从 per-request `client_delivery.buffer_cap_bytes`、有界队列、backpressure 与取消清理。进程级只有等待式在途请求上限 `proactive_rate_limiter.max_inflight`，超限请求按到达顺序等待而不被拒绝；若运行证据要求 victim selection、额外终止政策或其他全面资源设计，必须先询问用户。当前目标 primitive 只有整流 cap，见 `/home/xp/src/ghc-api-proxy-py/src/app/streaming/buffered_retry.py:4-18` @ `47d9ef101c4b81ac70d805b1da157b34d021d33d`；该现状属于目标仓当前事实，不是目标裁决，更不能把其 cap 提升为目标合同。
 
 5. **History／hooks／approval 时点。** 原始 upstream frame、translated block、committed downstream block、synthetic repair、retry attempt 和 final outcome 分别何时观察、记录和审批；不得让 History 只看到压缩后的客户端视图。当前目标 route 的 History 与 raw stream 紧耦合，见 `/home/xp/src/ghc-api-proxy-py/src/app/routes/openai.py:17-39`、`/home/xp/src/ghc-api-proxy-py/src/app/routes/openai.py:80-112` @ `47d9ef101c4b81ac70d805b1da157b34d021d33d`。
 
@@ -205,8 +205,9 @@
 | major：`driver.ts:1335-1390` 未覆盖 flush、`committedAny` 与 ledger record | 采纳 | 扩为 `driver.ts:1335-1418`，结论不变 |
 | major：stream translator `:88-125` 未覆盖 default／`return []` | 采纳 | 扩为 `:88-144`，结论不变 |
 | 全文 `file:line` 关键动词覆盖复验 | 采纳并完成 | 逐项以固定 commit tree 复验全部 76 个唯一引用；另扩大 delivery owner error、network retry、Anthropic abort、hooyoo identity adapter、provider bag 与 committed ledger 六处窄范围；未采信脏工作树 |
-| R2 唯一 major／最新用户重裁：carrier wire 固定兼容 `copilot-api-js` v1；16 MiB 不是产品／架构阈值 | 采纳并关闭 | 目标约束已改为 byte-compatible wire 且明确不继承 upstream 有损聚合；删除 16 MiB 专属 gate／状态建议，改为普通内存预算／准入／背压、实际全局耗尽时拒绝新 admission 的最小止血，全面资源设计先询问用户；上游事实与目标裁决继续分层 |
+| R2 唯一 major／最新用户重裁：carrier wire 固定兼容 `copilot-api-js` v1；16 MiB 不是产品／架构阈值 | 采纳并关闭；其中的内存预算部分已于 2026-08-19 被覆盖，见下一行 | 目标约束已改为 byte-compatible wire 且明确不继承 upstream 有损聚合；删除 16 MiB 专属 gate／状态建议，改为普通内存预算／准入／背压、实际全局耗尽时拒绝新 admission 的最小止血，全面资源设计先询问用户；上游事实与目标裁决继续分层 |
 | merged-state major：把 Anthropic `/v1/messages` bridge 的默认 route precedence 误扩张到原生 OpenAI Responses 公共入口 | 采纳并关闭 | “目标项目约束”、能力矩阵与后续路由合同均已限定为 Anthropic `/v1/messages` bridge：无 override 时双能力模型选 Messages、Responses-only 模型选 Responses；原生 OpenAI Responses 公共入口保持 Responses upstream，不从 bridge precedence 推导改走 Messages |
+| 2026-08-19 用户重裁：删除全局内存预算，改以在途请求数封顶（覆盖上面 R2 行的内存预算部分） | 采纳并关闭 | 字节级内存预算整体删除（`src/app/delivery/reservation.py` 与 `openai_responses.global_resident_bytes`／`request_resident_bytes` 随 `546852a` 移除）；进程级改为等待式在途请求上限 `proactive_rate_limiter.max_inflight`（默认 50，`InFlightLimit`，`f5589ec`），超限请求按到达顺序等待，不拒绝、不返回 429、不断连，`/health`、`/health/liveness`、`/health/readiness`、`/metrics` 豁免（`7e9b62d`）；per-request `client_delivery.buffer_cap_bytes` 保留。“16 MiB 不是阈值”“全面资源设计先询问用户”两条继续有效 |
 
 ## 持续同步 upstream 的方法
 

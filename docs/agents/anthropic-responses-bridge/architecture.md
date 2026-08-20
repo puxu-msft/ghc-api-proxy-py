@@ -63,7 +63,7 @@
 
 - **一个入站请求只有一个 driver、一个 request id、一个 attempt 序列和一个 History entry。** Protocol leg 或物理 transport 切换不创建第二套生命周期。
 - **上游读取可以增量进行，下游提交必须以完整 Anthropic semantic content block 为最小业务单元。** SSE 仍可作为兼容 framing envelope，但不得把未完成 block 的 delta 提前写出。
-- **buffer pressure 不得退化为 live forwarding。** Block buffer 只使用内存，并由普通全局 reservation、有限队列与 upstream/downstream backpressure 控制；16 MiB 不是特殊边界，不存在按单个 block 大小触发的专门状态、spill 或阈值分支。全局 reservation 暂不可得时停止继续读取 upstream；若实际全局内存耗尽，当前最小止血是拒绝新的 bridge admission，不设计落盘。若真实运行证据表明还需 victim selection、额外终止政策或其他全面容量设计，必须先提交用户裁决。
+- **buffer pressure 不得退化为 live forwarding。** Block buffer 只使用内存，并由 per-request `client_delivery.buffer_cap_bytes`、有限队列与 upstream/downstream backpressure 控制；16 MiB 不是特殊边界，不存在按单个 block 大小触发的专门状态、spill 或阈值分支。下游未取走 block 时停止继续读取 upstream；单请求累计缓冲字节越过 `buffer_cap_bytes` 时放弃该 response（`BufferCapExceeded`），不落盘、不裁剪。进程级只有在途请求数一道闸：超过 `proactive_rate_limiter.max_inflight` 的请求在 ASGI 层按到达顺序等待，不被拒绝、不返回 429、连接不关闭（`src/app/server/admission.py`）。若真实运行证据表明还需 victim selection、额外终止政策或其他全面容量设计，必须先提交用户裁决。
 - **retry 与 commit 共用同一份 frontier 真相。** Frontier 前可安全丢弃 attempt-local draft 并重试；frontier 后不得透明重放整条 response。
 - **converter 不拥有网络重发、sleep、budget、History finalize 或 downstream write。** 它只作协议语义转换并产生具名事实或 typed error。
 - **History 和 observer 消费事实，不重新解析 raw Responses events 来猜 route、usage、commit 或 failure state。**
@@ -146,7 +146,7 @@ flowchart LR
     RH --> PN
     RW --> PN
     PN --> BA[Semantic block assembler]
-    BA --> BB[Per-block memory buffer + global reservation]
+    BA --> BB[Per-block memory buffer + per-request buffer cap]
     BB --> DR[Anthropic block renderer]
     DR --> DS[Single downstream sink]
     DS --> CF[Envelope-aware monotonic delivery frontier]
@@ -271,7 +271,7 @@ HistoryDurabilityReceipt(
     outcome,
     persisted_at,
     failure,
-    reservation_released,
+    projection_released,
 )
 ```
 
@@ -289,7 +289,7 @@ HistoryDurabilityReceipt(
 | `DeliveryFacts` | delayed response-start owner＋driver＋sink acknowledgement | request-scoped | headers、message start、连续 block prefix 与 terminal 状态只单调前移，digest append-only | retry 不回退；任一外部 envelope 已提交后禁止透明 full replay | 对应 sink 操作返回 accepted 后发布 committed effect；write outcome 不确定时发布 uncertain |
 | `TerminalFacts` | parser/normalizer 提议，driver finalize | request-scoped | 各字段 single-assignment，final error 最终冻结 | retry attempt terminal 不等于 request terminal | 对应真值成立后；request terminal 仅 finalize 时 |
 | `HistoryProjectionFacts` | driver | request-scoped | projection handoff 只从 pending 进入 accepted 或 rejected；FINALIZE 后冻结 | retry 不新建 History entry；projection id 全 request 唯一 | queue 接受或明确拒绝时 |
-| `HistoryDurabilityReceipt` | History writer | per-projection、request-external | durable 或 failed 单次终结，reservation release 恰好一次 | 不参与 retry，不改变 request terminal | driver 发布 `request.finalized` 后，由 writer 的独立 receipt stream 发布 |
+| `HistoryDurabilityReceipt` | History writer | per-projection、request-external | durable 或 failed 单次终结，projection ownership release 恰好一次 | 不参与 retry，不改变 request terminal | driver 发布 `request.finalized` 后，由 writer 的独立 receipt stream 发布 |
 
 ### 隔离规则
 
@@ -392,7 +392,7 @@ AnthropicBlockKey(
 - **Parser/normalizer** 把 transport frames 变成 validated Responses semantic events；它不知道 downstream commit。
 - **Block assembler** 按 `AnthropicBlockKey` 维护相互隔离的 per-block drafts，聚合 text、thinking、tool arguments 等。它只在对应 Anthropic block 达到协议完成条件时产出 immutable `CompletedBlock`，不按完成先后决定下游顺序。
 - **Commit sequencer** 按协议 output／content 序位冻结 semantic order；只有队首及其之前不存在未完成 block 时，才把连续完成的 blocks 交给 renderer。较晚 block 即使先完成也必须等待，不能越过较早 block。
-- **Block memory buffer** 保存所有未完成 per-block drafts 和等待顺序提交的 completed blocks，通过 request reservation、全局 memory reservation、有限 completed-block queue 与上下游背压约束 resident memory；它不知道 retry policy，也没有默认 disk spill 分支。
+- **Block memory buffer** 保存所有未完成 per-block drafts 和等待顺序提交的 completed blocks，通过 per-request `client_delivery.buffer_cap_bytes`、有限 completed-block queue 与上下游背压约束内存；它不知道 retry policy，也没有默认 disk spill 分支。
 - **Anthropic block renderer** 把一个 `CompletedBlock` 渲染为闭合、index 连续的 Anthropic event batch。第一批可附带 `message_start`；最后由 terminal batch附带 `message_delta` 和 `message_stop`。
 - **Delayed response-start owner** 是 route 与 sink 之间唯一有权发送 ASGI `http.response.start` 的组件。流式 success headers 在首个完整 block 已 materialize、或无 block 的 terminal／pre-body error 已确定前保持未提交。
 - **Downstream sink** 是唯一 body writer，串行接收完整 bytes batch。Heartbeat、error、normal block 与 terminal 不得从旁路并发写响应。
@@ -404,13 +404,13 @@ Anthropic SSE 作为 `stream=true` 的兼容 envelope，以及完整 semantic bl
 
 这保证的是**应用层提交前不暴露未完成 block**，不是宣称一次 Python `yield` 会成为单个 TCP packet 或客户端事务。Delivery frontier 的观测点是本进程 response-start／body sink 接受对应操作；当前 HTTP 协议没有客户端 durable acknowledgement，因此不得宣称进程崩溃后对下游 exactly-once。
 
-### 容量 reservation 与背压
+### 容量约束与背压
 
-Block 可能包含很长 text、reasoning 或 tool arguments。已决默认是 request-owned memory buffer：接收 frame／扩展 draft 前增量申请全局 reservation；申请暂不可用时停止继续读取 upstream，并让有限 queue 的背压沿 await 链传播。完成并提交 block、丢弃 attempt draft、取消或失败时释放对应 reservation。Reservation 必须按实际 resident bytes 记账并具备原子 acquire／release，不能先分配后补记。
+Block 可能包含很长 text、reasoning 或 tool arguments。已决默认是 request-owned memory buffer：累计缓冲字节由 `client_delivery.buffer_cap_bytes` 约束，上限由 `BlockBuffer` 私有持有，并在 block 被接纳进 buffer **之前**按预计字节数检查（`src/app/pipeline/delivery/blocks.py`）；越过上限时抛出 `BufferCapExceeded` 并放弃该 response，不裁剪、不落盘。下游未取走 completed block 时，有限 queue 的背压沿 await 链传播，upstream 停止继续读取。完成并提交 block、丢弃 attempt draft、取消或失败时释放对应内存，不存在需要显式记账的字节配额。
 
-Global budget 是所有 bridge requests 共用的 resident-memory admission 水位，不是 single-block hard cap。每次 request admission 与后续 draft 增长都走同一套 reservation／backpressure 机制；16 MiB 只是普通大小，不触发专门分支。架构不定义独占超大 block 状态机、固定 per-block threshold 或 disk spill。可观测性保留全局 resident／reserved bytes、reservation wait、queue depth 和 admission rejection，不增加按单个 block 大小分类的专属指标。
+进程级不再有字节预算，只有在途请求数上限：`proactive_rate_limiter.max_inflight`（默认 50，`src/app/config/schema.py:150`）由 ASGI 中间件 `InFlightLimit` 实施（`src/app/server/admission.py`）。它计的是**请求数**而非连接数，`0` 表示禁用；超过上限的请求在 `asyncio.Semaphore` 上按到达顺序等待，不被拒绝、不返回 429、连接也不关闭——等待本身即为设计，断连会让客户端重试并放大过载。`/health`、`/health/liveness`、`/health/readiness` 与 `/metrics` 不受该上限约束，饱和进程仍能回答 supervisor。16 MiB 只是普通大小，不触发专门分支；架构不定义独占超大 block 状态机、固定 per-block threshold 或 disk spill。可观测性保留在途请求数、admission 等待时长与 queue depth，不增加按单个 block 大小分类的专属指标。
 
-若实际全局内存已经耗尽，当前推荐只做最小止血：拒绝新的 bridge admission，避免继续扩大 resident set；已接纳请求仍服从普通 reservation backpressure、取消和既有 request deadline，并在结束时释放 reservation。不为这个低概率事件预先设计 spill、超大 block debt、专门阈值、victim selection 或新的容量状态机。若最小止血不足，必须先携带真实压力证据向用户确认全面设计，不能由实现自行扩张政策。共同约束仍是：不提交 partial block、不退化 live、不回退已提交 frontier；架构也不承诺物理 OOM 后仍可构造协议错误，因此 admission rejection 必须发生在可控的 allocator failure 之前。
+已接纳请求继续服从有限 queue 背压、取消和既有 request deadline；进程真实内存耗尽由 cgroup 层兜底，不由应用内字节记账承担。不为这个低概率事件预先设计 spill、超大 block debt、专门阈值、victim selection 或新的容量状态机。若在途上限与 per-request buffer cap 不足以覆盖真实压力，必须先携带真实压力证据向用户确认全面设计，不能由实现自行扩张政策。共同约束仍是：不提交 partial block、不退化 live、不回退已提交 frontier；架构也不承诺物理 OOM 后仍可构造协议错误。
 
 ### Assembler 不变量
 
@@ -451,8 +451,8 @@ Frontier 是 request-scoped、append-only、由 delayed response-start owner 与
 | HTTP headers accepted，但 `message_start`／首 block 尚未 accepted | headers=`accepted`，body 为 `not_started` 或 `uncertain` | 不再透明 full retry；若写入确定未开始则发送单一 Anthropic SSE error，否则按 delivery-uncertain 终止 | 改 HTTP status；重写 response start；声称 frontier 为空 |
 | `message_start` 或一个以上 block accepted 后，上游失败 | 对应 envelope／block prefix 非空 | 显式 partial failure；或在已证明 resume contract 下请求 continuation | 透明重放完整 response |
 | 任一 response-start／body write outcome 不确定 | 对应 state=`uncertain` | 标记 delivery-uncertain，终止并 finalize failed | 猜测客户端没收到而重写同一 envelope／batch |
-| client abort | 保持现有 frontier | 传播 cancel provenance、退出 exchange context、释放 memory reservation、finalize aborted/failed | 继续后台生成并把 History 标 completed |
-| 全局 memory reservation 持续不可得 | 保持现有 frontier | 对已接纳请求传播普通 backpressure，取消／既有 deadline 可终止等待；实际全局内存耗尽时拒绝新的 bridge admission | spill、flush partial block、切 live、引入按单个 block 大小分叉的状态或阈值；未经用户裁决扩张全面容量政策 |
+| client abort | 保持现有 frontier | 传播 cancel provenance、退出 exchange context、释放 buffer 内存、finalize aborted/failed | 继续后台生成并把 History 标 completed |
+| 在途请求数已达 `max_inflight` | 保持现有 frontier | 新请求在 ASGI 层按到达顺序等待信号量；已接纳请求继续服从有限 queue 背压，取消／既有 deadline 可终止等待 | 拒绝新请求、返回 429 或关闭其连接；spill、flush partial block、切 live、引入按单个 block 大小分叉的状态或阈值；未经用户裁决扩张全面容量政策 |
 
 ### Post-commit continuation
 
@@ -470,11 +470,11 @@ Request-local journal 的事件面包括：
 
 - `request.received`、`request.approved`、`route.selected`。
 - `attempt.started`、`transport.opened`、`conversion.warning`、`attempt.failed`、`attempt.completed`。
-- `block.assembled`、`memory.reservation_waited`、`block.commit_started`、`block.committed`。
+- `block.assembled`、`block.commit_started`、`block.committed`。
 - `upstream.terminal`、`delivery.partial`、`delivery.uncertain`、`client.aborted`。
 - `request.completed`、`request.failed`、`history.projection_accepted`、`history.projection_rejected`、`request.finalized`。
 
-History writer 的独立 receipt event stream 只承载 `history.durable`、`history.persistence_failed` 与对应 reservation release；每条事件必须带 `projection_id`，可由查询层与 request view 关联，但不得反向修改 request terminal facts。Driver 不发布或代签 durability receipt，普通 observer 也不得伪装成 receipt owner。
+History writer 的独立 receipt event stream 只承载 `history.durable`、`history.persistence_failed` 与对应的 projection ownership release；每条事件必须带 `projection_id`，可由查询层与 request view 关联，但不得反向修改 request terminal facts。Driver 不发布或代签 durability receipt，普通 observer 也不得伪装成 receipt owner。
 
 ### 真值时点
 
@@ -482,12 +482,12 @@ History writer 的独立 receipt event stream 只承载 `history.durable`、`his
 - `block.assembled` 不证明 committed；只有 sink ack 发布 `block.committed`。
 - `RESPONSE` observer 的成功语义是规范化 Anthropic response 已完成并满足 delivery contract。流式请求应在所有 blocks 与 terminal batch committed 后触发一次；失败流不得发送成功 `RESPONSE`。
 - `ERROR` observation 在错误分类成立时发布，即使 retry 随后成功也保留为 attempt fact；request 最终状态另行发布。
-- `FINALIZE` 对每个 request 恰好一次，发生在 upstream exchange context 已退出、sink／drain 结束、History projection 已移交或明确拒绝、request-owned buffer／reservation 已清理并冻结 terminal facts 后。Driver 把 `request.finalized` 作为 request-local journal 的最后一个事实发布并立即冻结该 journal；FINALIZE 不等待 SQLite transaction，也不得把 queue accepted 写成 durable。Accepted projection 的 History writer 在该 finalized-request barrier 后独立完成 SQLite transaction并发布 durability receipt，因此默认 History 仍可在 request FINALIZE 后异步 durable／failed。
+- `FINALIZE` 对每个 request 恰好一次，发生在 upstream exchange context 已退出、sink／drain 结束、History projection 已移交或明确拒绝、request-owned buffer 已清理并冻结 terminal facts 后。Driver 把 `request.finalized` 作为 request-local journal 的最后一个事实发布并立即冻结该 journal；FINALIZE 不等待 SQLite transaction，也不得把 queue accepted 写成 durable。Accepted projection 的 History writer 在该 finalized-request barrier 后独立完成 SQLite transaction并发布 durability receipt，因此默认 History 仍可在 request FINALIZE 后异步 durable／failed。
 - Observer failure 可继续隔离，不得改变 request action；但失败记录必须进入 hook records/metrics。History writer 是持久化 consumer，其 durability policy应显式，不与普通 best-effort observer 混为一类。
 
 ### History 投影
 
-History projection 必须在 assembler／buffer cleanup 与 request-owned reservation release **之前**由 driver 从待冻结 journal 生成。Projection 是自包含 immutable value：需要保留既有客户端可见 response 时，在此阶段形成该 response 或把其 immutable ownership 移交给 History consumer；不得让异步 writer 在 cleanup 后回头读取 request buffer。为避免大 response 在异步 writer queue 中逃逸全局内存记账，projection 连同覆盖其 resident bytes 的 reservation token 一起移交；History queue 必须同时按 job 数与 reserved bytes 有界。History consumer 返回 `Accepted(projection_id)` 后，projection 与 reservation token 归 History 所有，driver 发布 `history.projection_accepted`，request owner 只释放自己的引用；writer 等待 `request.finalized` barrier 后完成序列化／transaction，发布 `history.durable` 或 `history.persistence_failed` receipt，并恰好一次释放 token。返回 `Rejected(reason)` 时，driver 发布 `history.projection_rejected`，由 request owner 恰好一次释放 token 并完成 cleanup；未被 writer 接受的 projection 不得伪造 persistence receipt，也不能无限保留大 block。
+History projection 必须在 assembler／buffer cleanup **之前**由 driver 从待冻结 journal 生成。Projection 是自包含 immutable value：需要保留既有客户端可见 response 时，在此阶段形成该 response 或把其 immutable ownership 移交给 History consumer；不得让异步 writer 在 cleanup 后回头读取 request buffer。History queue 必须按 job 数有界，避免大 response 在异步 writer queue 中无界堆积。History consumer 返回 `Accepted(projection_id)` 后，projection 归 History 所有，driver 发布 `history.projection_accepted`，request owner 只释放自己的引用；writer 等待 `request.finalized` barrier 后完成序列化／transaction，发布 `history.durable` 或 `history.persistence_failed` receipt，并恰好一次释放该 projection。返回 `Rejected(reason)` 时，driver 发布 `history.projection_rejected`，由 request owner 恰好一次释放该 projection 并完成 cleanup；未被 writer 接受的 projection 不得伪造 persistence receipt，也不能无限保留大 block。
 
 默认持久化严格遵守既有精简裁决：保留原始 Anthropic payload、既有客户端可见 response、original／resolved model、selected route／transport、`attempt_count`、`retry_strategies_applied`、必要的 conversion／commit／terminal 摘要、normalized usage 与 final error；**不持久化完整 request-local journal，不持久化连续逐-attempt 对象图，也不持久化 raw Responses event 序列。** 完整逐-attempt diagnostics 只可进入已另行裁决的可选 detailed mode／受限诊断附件。Bridge 架构不得借新增 journal 隐式重裁 `docs/2604-rewrite/history-system.md` 的轻量终态一次写入设计。
 
@@ -512,12 +512,12 @@ History projection 必须在 assembler／buffer cleanup 与 request-owned reserv
 - **reasoning cardinality／no-loss：** 两个 reasoning items 各有 summary／`encrypted_content` 时必须生成两个有序 thinking blocks，逐 block reverse 后分别恢复各自 payload；同 item 多个 summary parts 只在 item 内拼接；non-empty encrypted-only item 必须生成 `thinking=""` block。故意恢复 `ed77c9d191df81c451c25161420515cca52ce6a4` 的跨 item forward aggregation／last-ciphertext-wins 行为时判据必须变红，同时 carrier byte compatibility 正样本保持为绿。
 - **frontier 真值：** assembler complete 但 response-start／sink 尚未 accepted 时 frontier 不变；headers、`message_start`、block 与 terminal 分别只前移一次；任一 write uncertainty 进入对应 uncertain state。故意在 render 后提前标 committed 或遗漏 headers state 应使测试变红。
 - **retry boundary：** pre-commit transport cut 可按预算重试；post-commit cut 不得启动透明 full replay。故意清空 `committed_block_count` 应使测试捕获重复 prefix。
-- **普通全局内存门：** 所有 request admission 与 draft 增长共用 resident-byte reservation，不按单个 block 大小进入专门状态或阈值路径；reservation 暂不可得时 upstream read 受背压，实际全局内存耗尽时新 admission 被拒绝，block complete 前 sink 仍无写入。故意启用 spill、per-block threshold failure 或 overflow flush 应使测试变红；不同大小的普通 block 与容量恢复样本必须保持为绿，不建立 16 MiB 专属 fixture 类别。
+- **普通容量门：** 所有 draft 增长共用 per-request `buffer_cap_bytes`，不按单个 block 大小进入专门状态或阈值路径；下游未取走 block 时 upstream read 受有限 queue 背压，在途请求数超过 `max_inflight` 时新请求等待而不被拒绝，block complete 前 sink 仍无写入。故意启用 spill、per-block threshold failure 或 overflow flush 应使测试变红；对超限请求返回 429 或关闭连接同样应使测试变红；不同大小的普通 block 与容量恢复样本必须保持为绿，不建立 16 MiB 专属 fixture 类别。
 - **grammar：** start/delta/stop index 连续且 stop 后无 delta；交错 tool arguments 不能恢复已关闭 block。正确的多 item 交错样本也必须通过，避免判据过严。
 - **顺序：** item A 先出现但晚完成、item B 后出现但先完成时，sink 在 A 完成前写入数为零；随后按 A、B 顺序提交。故意按完成顺序提交应使测试变红。
 - **唯一 finalize：** success、pre-commit exhausted、post-commit partial、sink uncertainty 和 client abort 都各触发一次 FINALIZE，并以 `request.finalized` 冻结 request journal；projection accepted／rejected 恰好一次，observer failure 不改变该结论。
 - **exchange cleanup：** HTTP／WS success、fallback、parse failure、capacity failure、client abort 与 shutdown 都退出 async context，资源计数归零；cleanup 中点连续投递第二次及更多 cancellation 时，同一 shielded cleanup task 仍执行到 terminal 且底层 close 至多一次。`cancel + close error` 与 `parser error + close error` 最终保留 primary 并以 close error 为 `__cause__`；`normal exit + close error` 最终传播 close error；所有分支都观察 secondary failure 且无 orphan task。
-- **History 移交与 receipt owner：** 大 block 的 immutable History projection 在 request buffer cleanup 前被 accepted 或明确 rejected；accepted 后 driver 可发布 `request.finalized` 并结束 request，writer 随后在独立 receipt stream 发布 durable／failed，且 reservation 恰好释放一次。故意让 writer 回写已冻结 request journal、在 finalized barrier 前发布 receipt、延迟到 cleanup 后读取 request buffer，或把 queue accepted 当 durable，应使测试变红；默认落盘仍只有既定终态摘要而无逐-attempt 对象图。
+- **History 移交与 receipt owner：** 大 block 的 immutable History projection 在 request buffer cleanup 前被 accepted 或明确 rejected；accepted 后 driver 可发布 `request.finalized` 并结束 request，writer 随后在独立 receipt stream 发布 durable／failed，且 projection ownership 恰好释放一次。故意让 writer 回写已冻结 request journal、在 finalized barrier 前发布 receipt、延迟到 cleanup 后读取 request buffer，或把 queue accepted 当 durable，应使测试变红；默认落盘仍只有既定终态摘要而无逐-attempt 对象图。
 
 ## 结构怪味与目标处置
 
@@ -528,7 +528,7 @@ History projection 必须在 assembler／buffer cleanup 与 request-owned reserv
 | `src/app/routes/anthropic.py:99-120` | Route 持有 raw stream delivery 与 History finalization 接缝 | Route 只绑定 HTTP envelope；delayed response-start owner 与 driver／delivery session 拥有 headers、drain、commit 与 finalize |
 | `src/app/anthropic/client.py:148-184` | 流式 observer/finalize 与 executor 的非流式路径分裂 | 统一由 fact journal 的 request terminal 时点驱动 |
 | `src/app/openai/client.py:49-62` 与 `src/app/openai/responses_ws.py:31-38` | Responses HTTP/WS 各自暴露不同 exchange 形态 | 收敛为同一 Responses transport port 与 typed event normalizer |
-| `src/app/streaming/buffered_retry.py:8-18` | 整 response byte collector 容易被误当 block buffering | 保留为通用 primitive 或退役；目标使用按 Anthropic block identity 分桶的 memory buffer 与 global reservation |
+| `src/app/streaming/buffered_retry.py:8-18` | 整 response byte collector 容易被误当 block buffering | 保留为通用 primitive 或退役；目标使用按 Anthropic block identity 分桶的 memory buffer 与 per-request buffer cap |
 | `src/app/history/consumer.py:20-33` | Final state、projection handoff 与 persistence receipt 时点压成一次调用 | 在 buffer cleanup 前形成自包含投影；driver 以 `request.finalized` 冻结 request journal；History writer 另发 durable／failed receipt，按 projection id 关联且不回写 request state |
 
 ## 已决 Spec 输入与历史 ADR 承载记录（非待裁决）
@@ -543,10 +543,11 @@ History projection 必须在 assembler／buffer cleanup 与 request-owned reserv
 
 ### ADR-BRIDGE-03：buffer capacity policy
 
-- **用户重裁后的已决边界：** memory-only block buffer＋普通 global reservation／有限队列／backpressure；16 MiB 不是架构阈值，不设计超大 block 专属状态机、per-block threshold、disk spill 或 overflow-to-live。
-- **最小止血：** 实际全局内存耗尽时拒绝新的 bridge admission；已接纳请求继续服从普通 backpressure、取消与既有 deadline。
-- **用户门控：** 只有真实运行证据表明最小止血不足时，才提出全面容量设计并先征询用户；实现不得预先加入 victim selection、额外终止政策或其他专门容量路径。
+- **用户重裁后的已决边界（前半已于 2026-08-19 被覆盖，见下）：** memory-only block buffer＋普通 global reservation／有限队列／backpressure；16 MiB 不是架构阈值，不设计超大 block 专属状态机、per-block threshold、disk spill 或 overflow-to-live。
+- **最小止血（已于 2026-08-19 被覆盖，见下）：** 实际全局内存耗尽时拒绝新的 bridge admission；已接纳请求继续服从普通 backpressure、取消与既有 deadline。
+- **用户门控：** 只有真实运行证据表明当前容量约束不足时，才提出全面容量设计并先征询用户；实现不得预先加入 victim selection、额外终止政策或其他专门容量路径。
 - **覆盖记录：** 本裁决明确覆盖本文旧版“单 block 越过 nominal global budget 后进入独占债务状态并继续增长”的决定。
+- **2026-08-19 用户重裁（覆盖上面「已决边界」中的 global reservation 与整条「最小止血」）：** 全局内存预算整体删除——`src/app/delivery/reservation.py` 及 `openai_responses.global_resident_bytes`／`openai_responses.request_resident_bytes` 随 `546852a` 移除；进程级改由等待式在途请求上限 `proactive_rate_limiter.max_inflight`（默认 50，`InFlightLimit`，`f5589ec`）承接，超过上限的请求按到达顺序等待，不拒绝、不返回 429、不关闭连接，`/health`、`/health/liveness`、`/health/readiness` 与 `/metrics` 豁免（`7e9b62d`）。per-request `client_delivery.buffer_cap_bytes` 保留，越限时放弃该 response。memory-only、无 spill、无 per-block threshold、16 MiB 不是架构阈值这几条继续有效。
 
 ### ADR-BRIDGE-04：未知 endpoint capability
 
@@ -595,7 +596,7 @@ History projection 必须在 assembler／buffer cleanup 与 request-owned reserv
 2. **Single driver 是唯一 lifecycle 与 action owner。** Approval、attempt、retry、transport exchange、cancel、delivery、finalize 与 request-local journal 冻结只有一个编排者；policy、converter、transport、observer 和 History writer 不建立第二套请求生命周期。
 3. **Protocol leg 与 transport leg 正交。** Messages／Responses 是语义协议腿，HTTP JSON／SSE／WebSocket 是物理交换腿；transport primitive 可复用，但 route-to-route 或 facade-to-facade orchestration 不可复用。
 4. **Assembler／sequencer／sink／frontier 是一条完整交付链。** Assembler 只发布完整目标 blocks，sequencer 保持连续语义顺序，唯一 sink 串行写入，frontier 只依据真实 accepted／uncertain outcome 单调推进；任何组件都不能旁路该链发 body。
-5. **History projection ownership 与 request lifecycle 分离。** Driver 在 request-owned state cleanup 前生成并移交 immutable projection，以 `request.finalized` 冻结 request journal；History writer 独立拥有 durable／failed receipt 和移交后的 reservation，不回写 request terminal facts，也不把 queue accepted 冒充 durable。
+5. **History projection ownership 与 request lifecycle 分离。** Driver 在 request-owned state cleanup 前生成并移交 immutable projection，以 `request.finalized` 冻结 request journal；History writer 独立拥有 durable／failed receipt 与移交后的 projection，不回写 request terminal facts，也不把 queue accepted 冒充 durable。
 
 上述五项是共同解决 single owner、typed truth、protocol／transport 分层、完整 block 交付和 History 时点的最低组合。若用户希望删除或替换其中任一项，应记录为对方案 B 的修改并重新检查整体一致性，而不是默认为“仍接受 B”。
 
@@ -635,8 +636,8 @@ History projection 必须在 assembler／buffer cleanup 与 request-owned reserv
 1. **Single-owner gate：** 一个 request id、一个 driver、一个 attempt 序列、一个 approval／finalize owner；真实 exchange 数与 attempt facts 一一对应。
 2. **Per-attempt semantic conversion gate：** `PRE_SEND` 后每次重新从当前 semantic state 生成 wire；request／response 的 text、tool、reasoning、usage、error 与 strict unknown policy 不存在旁路 converter。
 3. **Protocol／transport gate：** route policy 只选 protocol leg，HTTP／WS transport 只交换并归一事件；transport 不静默 fallback／retry，exchange 在 success、failure、cancel 和 shutdown 均有唯一 cleanup owner。
-4. **Delivery gate：** assembler、continuous-prefix sequencer、request／global reservation、delayed response start、唯一 sink 与 envelope-aware frontier 已共同接线；首 block 前零 success headers／body，write uncertainty 不被误判为未提交。
-5. **Lifecycle／History gate：** request-local journal、immutable History projection、`request.finalized` barrier、writer receipt ownership、reservation release 与 single finalize 边界已接通；默认 History 仍只持久化既定精简投影。
+4. **Delivery gate：** assembler、continuous-prefix sequencer、per-request buffer cap、delayed response start、唯一 sink 与 envelope-aware frontier 已共同接线；首 block 前零 success headers／body，write uncertainty 不被误判为未提交。
+5. **Lifecycle／History gate：** request-local journal、immutable History projection、`request.finalized` barrier、writer receipt ownership、projection ownership release 与 single finalize 边界已接通；默认 History 仍只持久化既定精简投影。
 6. **真实入口验收 gate：** 对应 Acceptance required gates 已在真实 ASGI／HTTP／WS／sink 接缝证明正确样本为绿、目标缺陷注入为红；helper 单测、模块存在或候选分支局部通过不能替代该门。
 
 #### M2 过渡退出条件
@@ -652,7 +653,7 @@ M2 不是永久混合架构。满足以下条件后，A 形过渡必须退出：
 | M3 frontier 漏 headers／`message_start` | **已采纳并修订（C）** | Frontier 扩展为 headers、`message_start`、连续 blocks、terminal 与 uncertainty；新增 delayed response-start owner 和分状态 failure matrix | 真实 ASGI probe 证明首 block／terminal 前无 success headers，且 headers 已提交后的错误不再冒充 pre-commit retry |
 | M4／R2-M2 cleanup、History projection 与 durability receipt owner 冲突 | **已采纳并修订（A，遵从本轮用户裁决）** | cleanup 前移交 immutable projection＋reservation token；driver 发布 `request.finalized` 后冻结 request journal；History writer 独立拥有并另发 durable／failed receipt，不回写 request state | accepted 后 request 可结束；writer 后续 durable／failed 均按 projection id 可观测；rejected 不伪造 receipt；reservation 在各分支恰好释放一次 |
 | M5 完整 attempt records 越过精简 History 裁决 | **已采纳并修订（C）** | 完整 typed journal 仅 request-local；默认 History 只投影既有 response 与标量／终态摘要，detailed mode 仍需另行裁决 | 默认 schema 不出现逐-attempt 对象图或 raw event 序列，`attempt_count` 等摘要与 request-local journal 一致 |
-| U1 用户重裁：`>16 MiB block` 是夸张假设，旧超大 block 债务设计过度 | **用户已重裁并修订，覆盖旧决定（A）** | 删除超大 block 专属债务状态与状态机；16 MiB 不再是架构边界；只保留普通 global reservation／backpressure，实际全局内存耗尽时最小止血为拒绝新 admission，不设计落盘 | 代码与测试不得出现按单个 block 大小分叉的状态、threshold 或 spill 路径；不同大小的 block 只经过普通 reservation，容量恢复后正样本可继续 |
+| U1 用户重裁：`>16 MiB block` 是夸张假设，旧超大 block 债务设计过度 | **用户已重裁并修订，覆盖旧决定（A）；本行的容量机制部分已于 2026-08-19 再次被覆盖，见 U3 行** | 删除超大 block 专属债务状态与状态机；16 MiB 不再是架构边界；只保留普通 global reservation／backpressure，实际全局内存耗尽时最小止血为拒绝新 admission，不设计落盘 | 代码与测试不得出现按单个 block 大小分叉的状态、threshold 或 spill 路径；不同大小的 block 只经过普通 reservation，容量恢复后正样本可继续 |
 | U2／R2-M3 reasoning carrier、block cardinality 与迁移路径 | **已采纳并修订（A，遵从本轮用户裁决）** | v1 carrier byte-compatible；一 Responses reasoning item 对应一 thinking block，non-empty encrypted-only no-loss；保留 main `ed77c9d…` 的 codec／reverse primitive，替换待修的跨 item forward aggregation 与错误 oracle | 两个 reasoning items 分别 round-trip 自己的 summary／ciphertext；encrypted-only 保留；恢复 main 聚合／last-ciphertext-wins 缺陷时测试变红，同时 carrier fixtures 保持为绿 |
 | 可读性-M1 ADR-BRIDGE-04 把 Spec 已冻结的 unknown capability fail-closed 重新列为待决 | **已采纳并修订（C）** | 顶部已决合同、Route policy 与独立的“已决约束的架构承载记录”统一声明 fail closed；ADR-BRIDGE-04 已从“待主会话确认”列表移除，仅说明架构如何承载 Spec 约束 | 全文不得再把 unknown／missing capability 行为写成 Architecture 待确认项；改变该行为必须先重裁正式 Spec |
 | 可读性-m1 置顶 Verdict 首次集中使用未解码术语 | **已采纳并修订（C）** | Verdict 前置紧邻短说明，分别解释 typed semantic kernel、protocol／transport leg、assembler、sink、delayed response-start owner 与 delivery frontier 的职责 | 首次阅读 Verdict 无需回跳技术正文即可区分内部事实模型、协议／传输分支、完整 block 组装、唯一写入点、延迟响应头与交付记录 |
@@ -660,14 +661,15 @@ M2 不是永久混合架构。满足以下条件后，A 形过渡必须退出：
 | 阅读核对-M2 待决集合漏迁移节奏，且方案 B 接受范围不可追踪 | **已采纳并修订（C）** | 建立全文唯一裁决矩阵；`D-ARCH` 明列 A／B／C、B 的五项不可拆分核心及可局部调整边界；`D-MIGRATION` 比较 M1／M2 并冻结风险、兼容代价、退出条件与 route 前置门 | 用户可以分别记录目标架构与迁移节奏；选择 B 时能明确知道接受了什么、哪些细节仍可后续调整 |
 | 阅读核对-m1 章节导航与待决范围漂移 | **Architecture 内已采纳；跨文件部分待后续同步（C）** | 本文新增完整目录，章节改为“已决 Spec 输入与历史 ADR 承载记录”与“唯一用户裁决矩阵”，不再使用旧“仅 ADR-BRIDGE-01／02／05”标题 | 本文件内目录链接与真实标题一致；`README.md` 不在本轮允许修改范围内，其导航文字须由后续独立文档同步处理，不能由本文虚报已完成 |
 | merged-state M1 Architecture current review provenance 仍写“须独立复评” | **已采纳并修订（C）** | 顶部 current provenance 更新为裁决矩阵已于 260807 独立终审 0 blocker、0 major；当前唯一门是用户从 `README.md` 开始完整阅读并分别裁决 `D-ARCH`／`D-MIGRATION` | 顶部不再要求 Architecture 独立复评；全文不得把独立终审通过表述为用户接受；技术正文与裁决矩阵保持不变 |
+| U3（2026-08-19 用户重裁，覆盖 U1 的容量机制部分）：字节级内存预算过细，改以并发数封顶 | **用户已重裁并修订，覆盖 U1（A）** | 删除 `src/app/delivery/reservation.py` 与 `openai_responses.global_resident_bytes`／`request_resident_bytes` 配置（`546852a`）；进程级只保留等待式在途请求上限 `proactive_rate_limiter.max_inflight`（默认 50，`InFlightLimit`，`f5589ec`），`/health`、`/health/liveness`、`/health/readiness`、`/metrics` 豁免（`7e9b62d`）；per-request `client_delivery.buffer_cap_bytes` 保留 | 代码与测试不得出现 resident-byte 记账、reservation acquire／release，也不得对超出在途上限的请求做拒绝、429 或断连；超限请求按到达顺序等待的正样本必须为绿 |
 
 ## 容量政策的当前边界
 
 用户最新重裁已否定把 `>16 MiB block` 当成需要专门架构的常态假设，并覆盖旧版超大 block 专属债务决定。当前不再预选多套极端容量终止政策，也不为该低概率事件设计状态机。
 
-普通路径只有一套机制：admission 与 draft 增长按实际 resident bytes 申请 global reservation；暂不可得就通过有限 queue 和 await 链背压 upstream；取消、既有 deadline、完成或失败负责释放 reservation。16 MiB 不参与状态选择。
+普通路径只有一套机制：单请求累计缓冲字节由 `client_delivery.buffer_cap_bytes` 约束，并在 block 被接纳进 buffer 前检查，越限即放弃该 response；下游未取走 block 就通过有限 queue 和 await 链背压 upstream；取消、既有 deadline、完成或失败负责释放该请求持有的内存。16 MiB 不参与状态选择。
 
-实际全局内存耗尽时，当前推荐的最小止血仅是拒绝新的 bridge admission；不 spill，不新增超大 block 专属状态，不为当前 request 临时发明专门阈值或 victim policy。若生产证据显示该止血不足，主会话必须先把观测到的压力形态、候选政策及公开失败行为提交用户裁决，再扩展全面设计。
+进程级只有在途请求数这一道闸：超过 `proactive_rate_limiter.max_inflight`（默认 50）的请求在 ASGI 层按到达顺序等待，不拒绝、不返回 429、不关闭连接，也不 spill；`/health`、`/health/liveness`、`/health/readiness` 与 `/metrics` 不受该闸约束。不新增超大 block 专属状态，不为当前 request 临时发明专门阈值或 victim policy；进程真实内存耗尽由 cgroup 层兜底。若生产证据显示这道闸不足，主会话必须先把观测到的压力形态、候选政策及公开失败行为提交用户裁决，再扩展全面设计。
 
 ## 最终推荐
 
@@ -675,4 +677,4 @@ M2 不是永久混合架构。满足以下条件后，A 形过渡必须退出：
 
 方案 B 的核心不是“能把 Anthropic 转成 Responses”，而是：**typed facts 作为内部真相；单一 driver 拥有 lifecycle 与 action；protocol／transport legs 正交；assembler／sequencer／唯一 sink／frontier 形成不可旁路的交付链；request journal 在 `request.finalized` 冻结，History writer 独立拥有 projection receipt。** 具体类型名、port 签名、模块拆分、单个逻辑 batch 的 sink API 调用次数与未来 continuation 接缝均可按本文边界后续局部调整，不能反向破坏这五项核心。
 
-这一路径与用户关于 Anthropic content block、双端点默认 Messages、兼容 `copilot-api-js` 当前 v1 reasoning envelope、普通全局内存 admission／backpressure、block buffering／no live downstream 的裁决一致，并为 Messages direct leg、Responses HTTP／WS、完整 converter 语义、post-commit recovery、History durability 和未来其他协议保留长期演进位置。16 MiB 不再是架构边界；若低概率全局容量事件需要超出“拒绝新 admission”的全面设计，必须先征询用户。泛化安全事项不作为本轮架构门；具体 signature 信任边界、日志脱敏等继续由相应兼容规格与现有工程规范承接，不扩张为与 M1～M5、U1～U2 无关的阻断项。
+这一路径与用户关于 Anthropic content block、双端点默认 Messages、兼容 `copilot-api-js` 当前 v1 reasoning envelope、等待式在途请求上限与 per-request buffer cap、block buffering／no live downstream 的裁决一致，并为 Messages direct leg、Responses HTTP／WS、完整 converter 语义、post-commit recovery、History durability 和未来其他协议保留长期演进位置。16 MiB 不再是架构边界；若在途上限与 per-request buffer cap 不足以覆盖真实容量压力，必须先征询用户。泛化安全事项不作为本轮架构门；具体 signature 信任边界、日志脱敏等继续由相应兼容规格与现有工程规范承接，不扩张为与 M1～M5、U1～U2 无关的阻断项。
