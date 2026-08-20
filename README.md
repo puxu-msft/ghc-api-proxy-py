@@ -53,6 +53,7 @@ uv run pyright src tests
 uv run pytest tests --cov=app --cov-report=term --cov-fail-under=80
 ```
 
-详细架构、专题设计和实施记录位于 [docs/2604-rewrite](docs/2604-rewrite)。
-Hooks 用法见 [docs/2604-rewrite/hooks-system.md](docs/2604-rewrite/hooks-system.md)，计数与校准见 [docs/2604-rewrite/tokenization.md](docs/2604-rewrite/tokenization.md)。
+行为规范以 [docs/.human-controlled](docs/.human-controlled) 为准；各专题的开发文档在 [docs/agents](docs/agents)。
+
+> 本节此前指向 `docs/2604-rewrite/`。用户于 2026-08-20 裁定该目录整体过期——它是早期对参考项目 `copilot-api-js` 的学习笔记，不是本项目的设计规范，已移入开发记录仓 `.dev/docs/archived-2604-rewrite/` 仅供参考。Hooks 用法与计数校准的当前说明尚无替代入口，暂以代码与 `docs/agents/` 下相关话题为准。
 systemd socket activation、优雅退出与 cgroup v2 部署模板见 [docs/agents/deployment-systemd](docs/agents/deployment-systemd/README.md)。

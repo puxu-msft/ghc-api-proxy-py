@@ -1,7 +1,7 @@
 # TODO_CURRENT — 当前开发计划
 
-> **粒度**：模块划分级（第一版，暂不含实现细节）。每阶段展开的接口契约 / TDD 计划 / kickoff prompt 后续落到 `docs/2604-rewrite/plan/`。
-> **依据**：[DESIGN.md](docs/2604-rewrite/DESIGN.md)（性能原则 P1–P8、模块树、状态标注）、[ROADMAP.md](docs/2604-rewrite/ROADMAP.md)、[BACKLOG.md](docs/2604-rewrite/BACKLOG.md)。
+> **粒度**：模块划分级（第一版，暂不含实现细节）。
+> **依据**：原本是 `docs/2604-rewrite/` 的 DESIGN／ROADMAP／BACKLOG。**用户于 2026-08-20 裁定该目录整体过期**（早期对 `copilot-api-js` 的学习笔记，非本项目设计规范），已移入 `.dev/docs/archived-2604-rewrite/` 仅供参考。**本文件的依据因此悬空**，其阶段划分与状态标注在被重新对照代码核实之前不应据以决策。
 > **排序原则**：依赖倒序（叶子先行）+ 尽早打通端到端"走通骨架"+ 按里程碑分层价值。
 
 ## 依赖主线
@@ -150,7 +150,7 @@ config / models / errors
 
 ## Phase 9 — 可选能力（BACKLOG，按需）
 
-- [ ] 分层归档、FTS5 全文搜索、分层遥测、块级缓冲重试等 —— 均 `[缓存/延后]`，仅在明确需求时启动。详见 [BACKLOG.md](docs/2604-rewrite/BACKLOG.md)。
+- [ ] 分层归档、FTS5 全文搜索、分层遥测、块级缓冲重试等 —— 均 `[缓存/延后]`，仅在明确需求时启动。原详情在 `docs/2604-rewrite/BACKLOG.md`，现为 `.dev/docs/archived-2604-rewrite/BACKLOG.md`，按上面的裁决仅供参考。
 
 **状态（2026-07-16）**：条件性 backlog，非未完成的强制范围。Phase 0～8 已全部实施并通过最终验收。
 
