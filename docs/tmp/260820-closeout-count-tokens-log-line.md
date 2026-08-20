@@ -2,7 +2,9 @@
 
 日期：2026-08-20
 会话 transcript：`~/.claude/projects/-home-xp-src-ghc-api-proxy-py/23a78bec-3ecd-45d0-b2eb-5b4a5f43ba48.jsonl`
-状态：**草稿，未经独立评审**（评审通过后本行改为终态）
+状态：**终态。** 两轮独立评审（事实核查 + 遗漏枚举），第二轮复评 blocker 0 / major 6，六条全部处置并逐条改进文本；报告见 `260820-closeout-verify-facts.md`（含「复评（第二轮）」节）与 `260820-closeout-verify-omissions.md`。
+
+复评抓到的六条里有三条值得记在标题下面，因为它们都是**同一族错误在我自己的更正里复发**：改后的验证表把 `f76f395` 的通过数写成了邻居提交的（1180 → 实为 1170，我已独立复现确认，且该提交相对 `783f023` 只动了文档）；正样本对照的「命中 5 个文件」是 `head -5` 的截断产物（实为 9）；以及我给出的 `rg` 失效机制是错的（不是 `-F` 不带参数，而是**一旦用 `-e`，位置参数全变成路径**，已在 `/tmp` 对照实测）。第三条当时已经写进了四个地方，包括一份 skill。
 
 ## 起因与结论
 
@@ -50,7 +52,7 @@
 |---|---|---|---|
 | 基线 | `6ef4b03`（`d3335b6` 的父） | 44 failed / 1184 passed / 1 skipped | —— |
 | 我的两个功能提交 | `9e3d374` | 44 failed / 1190 passed / 1 skipped | **集合双向差分为空**：同一批 44 条，零新增失败 |
-| 同伴点位 | `f76f395` | 75 failed / 1180 passed / 1 skipped | 基线 44 条中 43 条仍在、1 条被修，另新增 32 条 |
+| 同伴点位 | `f76f395` | 75 failed / **1170** passed / 1 skipped | 基线 44 条中 43 条仍在、1 条被修，另新增 32 条 |
 | 我的改名提交 | `40681ce` | 75 failed / 1180 passed / 1 skipped | **集合双向差分为空**：零新增失败 |
 | 当前 main | `fa1df74` | 1257 passed / 0 failed / 1 skipped | 前述失败均已被同伴的提交修掉 |
 
@@ -67,11 +69,15 @@
 | Ruff | All checks passed | 新产出 | `uv run ruff check src tests` |
 | Pyright | 0 errors | 新产出 | `uv run pyright src/app/observability/request_log.py src/app/server/pipeline_app.py src/app/server/handler.py` |
 | 共享树全量 | 1272 passed | 新产出，**但不可复现** | `uv run pytest tests/unit tests/http -q`。共享树是移动靶：核查评审当时跑同一命令得 1277。这一行只说明当时那棵树的状态，**依据仅为作者自述** |
-| 活文档旧写法残留 | `src`/`tests`/`.dev/docs` 零命中 | 新产出（**重做过**，见下） | `rg -n --fixed-strings -e 'count(ghc' -e 'count(local' -- src tests .dev/docs docs`，另有正样本对照 `provider(ghc` 命中 5 个文件 |
+| 活文档旧写法残留 | `src`/`tests`/`.dev/docs` 零命中 | 新产出（**重做过**，见下） | `rg -n --fixed-strings -e 'count(ghc' -e 'count(local' -- src tests .dev/docs docs`，另有正样本对照：`provider(ghc` 在同一范围内命中 **9** 个文件（其中 3 个是本会话自己的文档）。初稿写的 5 是 `head -5` 的截断产物 |
 
 **不含** `tests/tui`（项目约定默认排除）与冒烟测试，所以「零新增失败」只在这两个目录的范围内成立。未跑 `ruff format`（项目禁止）。
 
-**第二次证据作废与重做**：收尾初稿声称「活文档无残留」时，连续两条扫描命令都是坏的——第一条的反引号触发了 shell 命令替换，第二条 `-F` 不带参数使 pattern 落到路径位而报 `No such file or directory`——而我在同一行硬编码了 `echo "(空=无残留)"`，两次都照印了结论。第三次用 `--fixed-strings -e … --` 并加正样本对照后，结论恰好不变，但**先前那两次没有任何证据力**。
+**第二次证据作废与重做**：收尾初稿声称「活文档无残留」时，连续两条扫描命令都是坏的——第一条的反引号触发了 shell 命令替换（`bash: count(: command not found`），且反引号留下的空择一分支使模式**匹配一切**，打出一屏 `import os` 之类的噪声；第二条**一旦用了 `-e` 提供模式，位置参数就全变成路径**（`/tmp` 对照实测：单用 `-F` 完全正常，是 `-e` 改变了位置参数的含义），于是 `rg: … No such file or directory`、退出码 2。
+
+**两次的报错都是大声打出来的**——这不是「失败不可见」，而是**报错在上、我自己硬编码的 `echo "(空=无残留)"` 在下，我读了下面那句**。这个区别有操作后果：防线不是「让失败可见」（它本来就可见），而是**不要在命令旁边写死结论**，以及**结论只能由命令自己的输出承担**。
+
+第三次改用 `rg -n --fixed-strings -e … -e … -- <路径>` 并加正样本对照后，结论恰好不变，但**先前那两次没有任何证据力**。
 
 ## 分支与工作树
 
@@ -81,7 +87,7 @@
 
 ## 临时状态
 
-`$CLAUDE_JOB_DIR/tmp` 清点时 **20** 个文件（`find` 与 `fd -H -I` 两法一致），写入处置记录后为 **21**。**未删除任何文件**，全部就地处置，处置记录落在 `/home/xp/.claude/jobs/23a78bec/tmp/DISPOSITION.md`，目录留给 harness 过期。16 个是被提交进 git 的内容副本（载体＝提交本身，`git show <sha>:<path>` 可取回），4 个是构造索引的一次性脚本（载体＝记忆条目与评审报告第七节），1 个是处置记录本身。非文件线索的载体见该记录。
+`$CLAUDE_JOB_DIR/tmp` 清点时 **20** 个文件（`find` 与 `fd -H -I` 两法一致），写入处置记录后为 **21**。**未删除任何文件**，全部就地处置，处置记录落在 `/home/xp/.claude/jobs/23a78bec/tmp/DISPOSITION.md`，目录留给 harness 过期。16 个是被提交进 git 的内容副本（载体＝提交本身，`git show <sha>:<path>` 可取回），4 个是构造索引的一次性脚本（载体＝本报告「提交手法」节，含锚点唯一性断言；**不是**记忆条目或评审报告第七节——那两个载体经复评证否），1 个是处置记录本身。非文件线索的载体见该记录。
 
 ## 提交手法（共享树）
 

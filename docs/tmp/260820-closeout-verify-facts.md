@@ -372,5 +372,335 @@ OK  c-{同五个} + c-handler.py == 40681ce:{对应路径}
 - 保留的证据文件（`/tmp`，可随时删）：`failed-6ef4b03.txt`、`failed-9e3d374.txt`、`failed-783f023.txt`（FAILED 列表，用于集合比对）、`render2.py`（五种形态渲染脚本）。隔离检出目录已删。
 - 核查期间 `main` 移动了四次（`bbbcb37` → `8a36fe3` → `7debb39` → `414d03c`），`.dev` 移动一次；记忆条目 `git-commit-takes-the-whole-index` 被改写一次（18:35 → 19:06）。这些都不是我做的。
 
+---
+---
+
+# 复评（第二轮）
+
+日期：2026-08-20，收到主会话处置后的收窄复评。
+复评基准：收尾报告已提交为 `1ba1d10`；本轮**不重跑**第一轮已复现的数字（1257 / 44+1184 / 44+1190 / 75），只核**新出现的**主张。
+约束同前：只读，不写仓库内除本文件外的任何文件，不执行任何写操作 git 命令。
+
+## R1. 账目（对应第一轮 7a / 7b）：**已修好，且两份文档口径一致**
+
+| 检查 | 结果 |
+|---|---|
+| `DISPOSITION.md` 第 10-12 行 | 「清点时（本记录写入**之前**）= 20；写入本记录后 population 变为 **21**（20 + 本文件）」——两个口径分开写了，还加了一句提醒读者别拿一个核另一个。**采纳到位** |
+| `DISPOSITION.md` 分类表 | `16 + 4 + 1 = 21` ✓；文件列写成 `test_*.py`（5）、`b-*`（5）、`c-*`（6）= 16 ✓ |
+| 收尾报告 §临时状态 | 「清点时 **20** …写入处置记录后为 **21**…16 个内容副本…4 个脚本…1 个处置记录本身」——`16+4+1=21` ✓，`20` 也对得上 |
+| 实测（当前 tmp 目录） | `find … | wc -l` = **21**；分项 bare=5 / `b-`=5 / `c-`=6 / stage=4 → 内容副本 16、脚本 4、记录 1。**与两份文档完全吻合** |
+
+**7a、7b 两条 major 均已闭合。严重度：无发现。**
+
+## R2. major（新）：重做后的验证表里，`f76f395` 那一行的 passed 数是错的（应为 1170，写成了 1180）
+
+收尾报告 §验证 的表（第 49-55 行）声称是用**显式 SHA** 重建四棵 worktree 重跑的。我把其中两个我上轮没跑过的点位跑了（`git archive` 隔离副本，命令与第一轮相同）：
+
+| 点位 | 报告写的 | 我实测 | 判定 |
+|---|---|---|---|
+| `f76f395` | 75 failed / **1180** passed / 1 skipped | **75 failed / 1170 passed / 1 skipped** | **passed 数错 10** |
+| `40681ce` | 75 failed / 1180 passed / 1 skipped | 75 failed / 1180 passed / 1 skipped | **完全复现** |
+
+**这不是我这边的偏差，可以从结构上推出来。** `f76f395` 是纯文档提交：`git diff --stat 783f023 f76f395 -- src tests` 为**空**，即它与 `783f023` 的 `src`/`tests` 逐字节相同。而我第一轮实测 `783f023` = 75 failed / **1170** passed。两者必然同数，实跑也确认失败集合 `diff` 全等。
+
+1180 这个数属于**下一个点位**：`09ef3cc feat: retry a connection torn before the client could see anything`（18:15，新增 `tests/unit/test_pre_header_retry.py` +82 行）在 `f76f395` 与 `40681ce` 之间加进了 10 个通过的测试，`1170 + 10 = 1180`。所以这一格是把 `40681ce` 那一行的数字复制过来了。
+
+**严重度：major。** 理由不是差 10 个数本身，而是：这张表存在的**全部理由**就是「初稿那次两棵 worktree 落在同一提交上，是同一点位测两遍」——重做版里又出现一处「一个数字出现在两个点位」。同一形态的错误在同一张表里复发了一次。
+
+**但结论不受影响，我实测确认了：**
+
+```
+diff failed-f76f395.txt failed-40681ce.txt   → IDENTICAL（75 vs 75，双向差分为空）
+diff failed-783f023.txt failed-f76f395.txt   → IDENTICAL
+```
+
+所以第 54 行「集合双向差分为空：零新增失败」**成立**，第 59 行「`f76f395` 与 `40681ce` 的失败集合完全相同即为证」也**成立**。要改的只有那一格数字。
+
+### R2a. minor：那一段跨越了同伴的两个提交，「相对上一行」把整段记在了改名提交头上
+
+`f76f395`（18:09:45）到 `40681ce`（18:19:15）之间还夹着同伴的 `09ef3cc`（feat，18:15）与 `fdeb367`（docs，18:16）。「零新增失败」对这整段成立，但**不是只对我的改名提交成立**。1170→1180 那 10 个新增通过恰恰就是同伴的 feat 带进来的，改掉 R2 那个数字之后这一点会自动显形，届时建议在「相对上一行」里补一句「此段含同伴的 `09ef3cc`」。
+
+## R3. major（新，属「改一半」）：收尾报告 §临时状态 仍写着旧载体
+
+`DISPOSITION.md` 第 19 行已按我第一轮 7d 改好，载体改成「`docs/tmp/260820-closeout-count-tokens-log-line.md`「提交手法」节——含锚点唯一性断言」，并明写「**注意脚本走的是共享索引变体，不是记忆里那套私有索引方案**」。**这一处改得很到位。**
+
+但**同一批修改没有覆盖收尾报告自己**。收尾报告第 84 行（§临时状态）仍写：
+
+> 4 个是构造索引的一次性脚本（**载体＝记忆条目与评审报告第七节**）
+
+这正是我第一轮 7d 证明为**不成立**的那两个载体：记忆条目讲的是私有索引方案（脚本没用），评审 §七 与记忆都不含锚点唯一性断言（第一轮已 grep 过三份候选载体）。现在的后果比原来更糟——两份文档对同一件事给出了**互相冲突**的载体指向，而收尾报告自己第 86-101 行就是正确答案。
+
+**严重度：major**（既是事实错，又造成两文档口径不一致）。改法：第 84 行括注改为「载体＝本报告「提交手法」节」。
+
+## R4. minor（新）：活文档扫描那一行，命令与结论的范围对不上，且正样本数是 6 不是 5
+
+第 70 行：结论写「`src`/`tests`/`.dev/docs` 零命中」，锚点里的命令却是 `rg -n --fixed-strings -e 'count(ghc' -e 'count(local' -- src tests .dev/docs **docs**`——多一个 `docs`。
+
+我按原样复跑，**不是零命中**：
+
+```
+docs/tmp/260820-closeout-verify-omissions.md
+docs/tmp/260820-closeout-count-tokens-log-line.md      ← 收尾报告自己
+```
+
+两处都是**引用**这个旧写法的文档（一份是另一位评审的报告，另一份是记录这条命令的收尾报告本身）。所以结论按它自己声明的范围（`src`/`tests`/`.dev/docs`）**是成立的**，错的是锚点里的命令比结论宽一格。
+
+有一个自指的小陷阱值得点出来：收尾报告第 70 行**自己就含有 `count(ghc` 这个字面串**，所以只要这一行还在，那条记录下来的命令就**永远不可能返回空**。下一个读者照着跑会看到命中并以为结论被推翻。
+
+正样本对照数也差一个：报告写「`provider(ghc` 命中 5 个文件」，我在结论声明的范围内实测是 **6 个**：
+
+```
+src/app/observability/request_log.py
+src/app/server/handler.py
+tests/http/test_pipeline_app.py
+tests/unit/test_request_log.py
+.dev/docs/tui/deferred.md
+.dev/docs/tui/spec.md
+```
+
+**严重度：minor**（正样本对照的作用是「证明这条命令抓得到东西」，6 与 5 都达成了这个目的；但一个用来立信的数字自己不准，会削弱它想立的那个信）。改法：命令去掉 `docs` 或结论加上 `docs/tmp` 的例外，并把 5 改成 6。
+
+## R5. major（新）：「5 个文件」这个正样本数是 `head -5` 截出来的，不是数出来的
+
+从 transcript 取出 18:52:21 那条重做命令的原文：
+
+```bash
+echo "=== 正样本对照：先证明这个命令抓得到东西 ==="
+rg --count-matches --fixed-strings 'provider(ghc' -- src tests .dev/docs docs | head -5
+```
+
+我原样复跑：输出**恰好 5 行**，因为 `head -5` 就截在 5。去掉 `head -5` 的真实文件数是 **9**；即使把本轮之后才产生的两份评审报告排除掉（近似 18:52 当时的集合），也有 **7**。所以收尾报告第 70 行「正样本对照 `provider(ghc` 命中 5 个文件」里的 5，**等于截断上限，不是观测值**。
+
+**为什么判 major 而不是 minor**：这一格的存在理由，正是收尾报告第 74 行那段「证据作废与重做」的教训——不要让命令之外的东西替你产出结论。而重做后的正样本数，是被管道里的 `head -5` 产出的。同一族失效（判据的载体不在被测命令里）在**用来修它的那次重做里**又出现了一次，只是这次载体从 `echo` 换成了 `head`。
+
+同一条命令的另外两处反而做对了：`echo "  ↑ count(ghc 命中数：$(rg --count-matches … | wc -l) 个文件"` 是**从输出派生**的数字，正是新记忆第 23 行要求的形态。所以问题不是作者不懂这条，是 `head -5` 作为一个「防刷屏」的习惯动作没被当成判据的一部分。
+
+改法：正样本那行去掉 `head -5`，或改成 `| wc -l`。
+
+## R6. major（新）：新记忆里对失败机制的解释是错的，同一句话还在另外两处
+
+`never-echo-the-conclusion-beside-the-command.md` 第 17 行、收尾报告第 74 行、以及 `260820-closeout-verify-omissions.md:85`，三处都写同一句：
+
+> 第二条 **`-F` 不带参数**使 pattern 落到路径位而报 `No such file or directory`
+
+**`-F` / `--fixed-strings` 是布尔开关，它从不吃参数**，所以「`-F` 不带参数」既不是一个可能的状态，也不是这次失败的成因。
+
+transcript 里 18:34:38 那条命令的原文是：
+
+```bash
+rg -n -F 'count(ghc' -e 'count(local' docs .dev/docs src tests 2>&1 | head; echo "--- 上面为空即无残留 ---"
+```
+
+我在 `/tmp` 一次性目录里做了对照实验（`sample.txt` 含 `count(ghc)` 与 `count(local)` 两行）：
+
+| 命令 | 结果 |
+|---|---|
+| `rg -n -F 'count(ghc' -e 'count(local' .` | `rg: count(ghc: No such file or directory`，exit **2**，同时**照常搜出** `count(local` 的命中 |
+| `rg -n -F 'count(ghc' .`（只有 `-F`，没有 `-e`） | **完全正常**，exit 0，正确命中 |
+| `rg -n 'count(ghc' -e 'count(local' .`（有 `-e`，无 `-F`） | `regex parse error: unclosed group`，exit 2 |
+| `rg -n --fixed-strings -e 'count(ghc' -e 'count(local' -- .` | 两条都命中，exit 0 |
+
+**真正的机制是：一旦用 `-e` 显式提供了模式，所有位置参数就全部变成路径**，于是写在前面的 `'count(ghc'` 落到路径位。`-F` 与这次失败毫无关系——第二行对照证明只有 `-F` 时一切正常。
+
+**严重度：major。** 一条记忆的价值全在它的 How to apply，而按错误机制去防，会防错地方：读者会以为「别用 `-F`」或「给 `-F` 补个参数」，真正该记住的是「**用了 `-e` 就必须把每个模式都写成 `-e`，并用 `--` 收尾**」——而这条记忆第 25 行的建议形态恰好是对的，只是它上面的解释在拆自己的台。
+
+改法：三处统一改成「第二条把一个模式写在位置参数上、另一个用 `-e`，而 `-e` 一出现，位置参数就全部变成路径」。
+
+### R6a. minor：「两次都没有任何证据力」对第二条命令说重了
+
+对照实验第一行显示：那条坏命令**仍然搜索了剩下的路径并打印了 `count(local` 的命中**。也就是说 18:34:38 那次对 `count(local` 是有效搜索，只有 `count(ghc` 那一半落空了（并且 rg 用 exit 2 + stderr 报了出来，只是 `2>&1 | head` 把它混进了正常输出里）。
+
+「两次都没有任何证据力」这个说法把「一半失效」讲成了「全部失效」。作为教训无伤大雅，作为事实陈述则是把否定放大了。**minor**，改法：「第二条只对两个模式中的一个有效，另一个被当成了路径」。
+
+### R6b. 仅记录：第三次那条「正确」的命令里，硬编码的 echo 还在
+
+transcript 18:34:44：`rg -n --fixed-strings -e … -- … | head -10; echo "--- ^空=无残留 ---"`。命令形态修对了，**结论仍然是硬编码的**。真正把 echo 换掉是在 18:52 那次（改用 `$(… | wc -l)` 派生）。收尾报告第 74 行说「第三次…才真正成立」，指的是**扫描形态**成立，不是这条 echo 教训在第三次就落实了。不影响结论，仅记录。
+
+## R7. minor（新）：`DISPOSITION.md` 结尾那句「载体一律指向仓库内文件」与它自己的表格不符
+
+第 42 行：「**载体一律指向仓库内文件**：本记录随 job 目录过期，不能充当任何东西的持久载体。」
+
+这句话的**意图**（不要拿本记录当载体）已经贯彻了——我逐行核过，原先三处指向「本记录」的都改掉了：第 31、34、35、36 行现在指向收尾报告的「验证」节与「两条查错手法」节，**这几处改到位了**。
+
+但「一律指向仓库内文件」这个全称句本身不成立：同一张表的第 37、38 行指向的是**记忆条目**（`git-commit-takes-the-whole-index`、`never-echo-the-conclusion-beside-the-command`），它们在 `~/.claude/projects/…/memory/`，不在任何仓库里。
+
+这不是缺陷——记忆条目比 job 目录持久得多，是完全合格的载体；错的只是那句绝对话。**minor**，改法：「载体一律指向随 job 目录消失之外的持久位置（仓库文件或记忆条目）」。
+
+### R7a. minor：第 30 行的载体路径写成了省略号，现在能匹配两个文件
+
+第 30 行写 `docs/tmp/260820-…-log-line.md` 第七节。当前 `docs/tmp/` 下能匹配这个形状的有两个：`260820-review-count-tokens-log-line.md`（真正含第七节的那个）与 `260820-closeout-count-tokens-log-line.md`。载体指向应当唯一。**minor**，写全 `review` 那个即可。
+
+## R8. 新记忆 `never-echo-the-conclusion-beside-the-command` 的重复性
+
+**判定：不重复，收尾报告第 122 行那句自评成立。** 依据：
+
+- 项目记忆目录 20 个条目里，**没有**任何一条讲 rg 选项或命令形态（我列了全部文件名逐个看）。所以「与既有的 rg 用法条目不重叠」这句里的「既有条目」指的只能是用户级规则 `~/.claude/rules/00-user/20-tool-use-preference.md` 的 rg 小节；那一节确实只讲**选项误用**（`-r`/`-h`/`-E`/`-I`/`-c` 等的语义差异），而本条讲的是**判据的载体被挪出被测命令**，两者切的是不同的面。
+- 与 `absence-is-not-readable-on-a-log-line` 的关系也处理对了：新条第 28 行明写「同一个思路在数据侧的形态」，是交叉引用而不是复制。
+
+**严重度：无发现**（但本条的机制解释错误见 R6，那是内容问题不是重复问题）。
+
+## R9. `absence-is-not-readable-on-a-log-line` 的更新
+
+第 21-29 行新增的「补一条：修好一层，往往在上一层重演」与收尾报告第 121 行的描述**一致**，且与原有三条推论不重复——原三条讲「什么都不显示」，新增这条讲「显示得和最常见的正常情况一模一样」，并自己点明了差别（「后者更难发现，因为它有输出」）。第 29 行还记了被否决的判据来源（`upstream_counts` 布尔会撒谎），与 `DISPOSITION.md` 第 29 行、`handler.py:279` 注释三处一致。**严重度：无发现。**
+
+## R10. `closing-a-development-session/SKILL.md` 新增那段（第 148 行）
+
+先说结论：**位置对、方向对、处方对，但两处事实陈述被 transcript 本身推翻。**
+
+### R10a. major：同一个错误机制（`-F` 不带参数）出现在了第四处，而且是复用面最广的那一处
+
+第 148 行写「the second passed `-F` **without an argument** so the pattern landed in the path position」。这与 R6 是同一句话，机制同样是错的（`-F` 是布尔开关，不吃参数；我的对照实验里单用 `-F` 完全正常）。
+
+现在这句话在四个地方：新记忆、收尾报告第 74 行、`260820-closeout-verify-omissions.md:85`、以及**这个 skill**。前三处只影响本项目，第四处是跨项目复用的指导文本。**严重度：major**，且应当**优先**改这一处。
+
+### R10b. major：「Neither failure was visible」被 transcript 的实际输出推翻——两次失败都**打印出来了**
+
+我从 transcript 里取出了这三条命令的 `tool_result` 原文。
+
+**第一条（18:34:20）的输出不是空的，是一屏噪声：**
+
+```
+=== 仓内残留 count( 写法 ===
+/bin/bash: line 1: count(: command not found
+tests/smoke/test_systemd_user_install.py:1:import os
+tests/smoke/test_systemd_user_install.py:2:import stat
+…（继续到 head 截断）
+(空=无残留)
+```
+
+两件事都和 skill 现在的描述相反：
+
+1. bash **明明白白报了错**：`count(: command not found`；
+2. 反引号被替换成空串后，模式变成 `count\(ghc|count\(local|`——**末尾多了一个空的择一分支，于是它匹配一切**。所以这条命令返回的不是「无残留」，是 `test_systemd_user_install.py` 的 `import os`、`import stat` 这种一眼可见与 `count(` 毫无关系的行。
+
+**第二条（18:34:38）的输出第一行就是错误：**
+
+```
+rg: count(ghc: No such file or directory (os error 2)
+--- 上面为空即无残留 ---
+```
+
+所以 skill 现在写的「Neither failure was visible」与「got "no stale spellings" both times」**两句都不成立**。真实形态更值得写下来，也更难防：
+
+> 失败**大声打印在上面**，而硬编码的结论打印**在下面**；读者取了下面那句，跳过了上面那些。
+
+这个区别有操作后果。按「失败不可见」去防，你会去找「怎么让隐藏的失败现形」（加 `set -o pipefail`、去掉 `2>/dev/null`）——而第一条恰恰**没有**隐藏，它输出了一屏一眼可见的噪声。真正起作用的是这段自己给出的处方：**让数字从命令输出派生**（`--count-matches` / `wc -l`），因为那样噪声会变成一个大得离谱的数字，而不是一句你自己写的断言。处方是对的，诊断需要改。
+
+**严重度：major。** 依据是作者自己引用的那次运行的原始输出。
+
+### R10c. minor：与同文件第 118 行是近重复，且该文件自己要求近重复应交叉链接
+
+第 118 行（Step 3，归档计划状态）已经写着：
+
+> Negative findings ("this was never implemented") need a positive control proving the search would have found it: **an empty result is not the same as absence.**
+
+第 148 行（Step 4）的后半句是同一条原则的重述：「An empty result is evidence only after something non-empty proved the command works.」两处都不指向对方。而同文件第 128 行的自我要求是「near-duplicates get **cross-linked**」。
+
+不建议合并——两个 Step 的读者不同，各自需要自足。**minor**，加一句互指即可。至于与 `V-method`（把命令管进过滤器再读退出码）的关系：**不是重复**，那条讲退出码被过滤器改写，这条讲结论根本不来自被测命令，机制不同；不过第一条命令的 `2>/dev/null` 与第二条的 `2>&1 | head` 确实属于 V-method 那一族，可在改写时顺手点一句。
+
+### R10d. 仅记录：插入位置在论证链上，但可以更靠前
+
+第 140 行已经说「run a cross-document scan **and read the output**」，第 148 行讲的正是「read the output」怎么失效——**在链上**。只是它排在第 146 行（讲覆盖面不足）之后，与前一句不是同一个话题。放到第 140 行紧后面更顺。不影响正确性。
+
+### R10e. 关于「该不该未经评审就改 SKILL.md」——我认为**不该退回**
+
+`verification-log.md` 开头自称「**This file is the sole authority for the recording protocol**」，并写明「**Any single falsification changes SKILL.md on the spot**」。这是针对这一动作的最具体规则，比 Step 8 的通用「instruction changes 需独立评审」更近、更专门，按就近优先应当适用。所以**当场改是照规则做的，不是绕过评审**。
+
+要补的是评审本身——而这一轮就是。它的产出恰好支持保留这条流程：现改现审抓到了两条 major（R10a、R10b），若先排队等评审，那两句错误陈述会在队列里躺着。**结论：不退回，改掉 R10a / R10b 两处内容错误即可；改完再算真正安装。**
+
+## R11. `verification-log.md` 新增的 6 条
+
+### R11a. 投票规则遵守情况：**6/6 合规**
+
+规则原文：「A session that edited this skill may not cast a confirming vote… you may only record "insufficient data" or "falsified"。」
+
+| 条目 | verdict | 合规 |
+|---|---|---|
+| V5 | falsified | ✓ |
+| V9 | insufficient data (author edited the skill this round) | ✓ |
+| V6 | insufficient data（同上） | ✓ |
+| V4 | insufficient data | ✓ |
+| V-`discover_nonfile_candidates` | insufficient data | ✓ |
+| V-shared-tree | falsified | ✓（就该条规则而言） |
+
+**没有一条投了 confirming 票**，节标题也写明了理由。这一条贯彻到位。**严重度：无发现。**
+
+### R11b. major：V-shared-tree 记 `falsified` 与该文件自己的规则冲突，且该触发的动作没做
+
+同一份文件的规则还有另一半：「**Any single falsification changes SKILL.md on the spot**, and the change is recorded here.」
+
+- V5 记 falsified → SKILL.md 第 148 行当场改了 ✓，并在条目里写明 ✓。
+- **V-shared-tree 记 falsified → SKILL.md 没有任何对应改动。** 我 grep 过整份 SKILL.md：`explicit sha`、`HEAD~`、`relative ref`、`moving target`、`shared tree/worktree`、`peer` 全部只命中第 54 行，而那一行讲的是**共享索引与 pathspec 提交**，不是相对引用。条目自己也只写「**Suggest a clause**: …」——是提议，不是落地。
+
+而这份文件已有一个**正好匹配这种形状的先例 verdict**：`n/a`（全文用过 3 次），其中 `[V-method/checkout-isolation]` 就在**同一天**，同样是「非本 skill 条款，但直接损害它 Step 7 的执行」，同样以「正文若要收，可在 Step 7 补一句」收尾，verdict 写的是 **`n/a (method defect, logged for the next edit)`**。
+
+所以两条路二选一，现在卡在中间：要么把 verdict 改成 `n/a`（与先例一致，不触发当场改的义务），要么现在就把那条 clause 写进 SKILL.md。**严重度：major**（这是该文件唯一一条自己定的规则没被自己执行的地方）。
+
+### R11c. V-shared-tree 的普遍性：**没有高估**（正面回答主会话的疑虑）
+
+三条独立依据：
+
+1. **机制是 git 的性质，不是这次的巧合。** 相对 revspec 在**命令执行那一刻**才对 ref 求值，而 `HEAD` 在共享 checkout 里由别的进程推进。任何共享树、任何相对引用都成立，与本项目无关。
+2. **锚点确实在高频移动，有独立观测。** 我第一轮核查的一个多小时里，`main` 移动了四次（`bbbcb37` → `8a36fe3` → `7debb39` → `414d03c`），`.dev` 一次。不是偶发。
+3. **具体实例有完整记录**：`260820-closeout-verify-omissions.md` 的 O-2 写明 `HEAD~2` 那一刻落到了 `9e3d374`（即作者自己的提交），于是「两个点位」是同一个提交测了两遍，两次都是 44 failed / 1190 passed。
+
+而且**重做后的表里同族错误又复发了一次**（本报告 R2：`f76f395` 那一格的 passed 数是从别的点位复制来的）。一条教训在同一份文档的修订版里再次被踩，是它有普遍性的旁证，不是相反。
+
+一处措辞可以更准：「on a shared tree every relative ref is a moving target」——移动的不是 revspec 而是它的**锚点**，同一个 `HEAD~2` 在不同时刻解析到不同提交。写成「every relative revspec resolves against an anchor a peer can move」更贴。**仅记录。**
+
+### R11d. minor：V9 写的「21 rows」与实际清单形态不符
+
+V9 的判据要求的是**逐文件** manifest。`DISPOSITION.md` 的「按类处置」表只有 **3 行**（内容副本 16 / 脚本 4 / 本记录 1），是**按类**而不是逐文件的；21 是**文件数**，不是行数。
+
+不影响 V9 的核心结论（21 个文件确实都被通配覆盖到，没有漏项，我逐个核过），但「21 rows」把「按类 3 行」说成了「逐文件 21 行」，正好是 V9 想验的那个形态。**minor**，改成「population 21, covered by 3 class rows」。
+
+### R11e. 其余可核事实全部属实
+
+| 主张 | 核查 |
+|---|---|
+| V9「16/16 content copies blob-hash-equal，由独立评审核过」 | **属实**，就是本报告第一轮 §7c |
+| V9「One was caught by my own re-list, one by the reviewer」 | **属实**。transcript 18:38:13 已在编辑 `DISPOSITION.md` 里「写入本记录后 population 变为」那一句，早于任何评审报告存在；16-vs-15 那处的落盘在 19:13:31，与我的发现同期。分工陈述与时间线相符 |
+| V9「three rows named the marker itself as their carrier… repointed into a committed report」 | **属实**，第 31/34/35/36 行现在都指向收尾报告（另见 R7：那句「一律指向仓库内文件」本身仍越界） |
+| V-discover「13 omissions — 4 of them with no carrier」 | **属实**。该报告有 O-1…O-13 共 13 条，标 `❌ 无载体` 的恰为 **4** 条 |
+| V-discover「I listed 6 candidates」 | **属实**。我第一轮读到的「非文件线索」表就是 6 行（现为 11 行） |
+| V-discover「6/19」 | 算术自洽（6 + 13 = 19） |
+| V-discover「downgraded three of my claims」 | **属实**，即该报告 §7.1 的 D1-1（44 条只有计数级支撑）、D1-2（`783f023` 归属是推断）、D1-3（漏了 `1 skipped`），一一对应 |
+
+补一句正面的：D1-1 当时的判定是「集合同一性**从未被核对**」，而我第一轮把它核了且结果为真（双向差分为空），所以收尾报告现在以集合级写它是**升级后有据**，不是把夸大照抄。
+
+### R11f. 仅记录：V-discover 的「42 events」我无法核实
+
+`260820-closeout-verify-omissions.md` 全文没有出现「42」。它 §1–3 的带标号条目是 A-1…A-16、B-1…B-6、C-1…C-6 共 **28** 条，§4–6 另有若干无标号行（标定值、4 次变异 + 1 次差分探针、P-1…P-7 探针）。合计落在 40 出头是合理的，但**没有任何一处给出 42**。不判为缺陷（很可能是作者按 §1–6 自行合计），仅记录该数字无法从被引来源复原。
+
+---
+
+## 复评结论
+
+| 严重度 | 本轮新增 | 编号 |
+|---|---|---|
+| blocker | 0 | —— |
+| major | 6 | R2（`f76f395` passed 数错 10）、R3（收尾报告 §临时状态 仍写旧载体，改一半）、R5（正样本「5 个文件」是 `head -5` 截断产物）、R6 + R10a（`-F` 机制解释错，共四处载体，按一条计）、R10b（「两次失败都不可见」被 transcript 推翻）、R11b（V-shared-tree 记 falsified 却没执行随附义务） |
+| minor | 7 | R2a、R4、R6a、R7、R7a、R10c、R11d |
+| 仅记录 | 4 | R6b、R10d、R11c 措辞、R11f |
+
+**第一轮三条 major 的处置核查**：
+
+- 7a（清点口径）→ **已闭合**，两份文档都分开写了 20 / 21，实测吻合。
+- 7b（16 不是 15）→ **已闭合**，`16+4+1=21` 两处一致，实测吻合。
+- 4a（`783f023` 修复归属）→ **已闭合且标注了归属**，收尾报告第 61 行采信并写明「非我的观测」。
+- 7d（脚本载体指错，minor）→ **只闭合了一半**：`DISPOSITION.md` 改对了，收尾报告 §临时状态 没跟上（R3）。
+
+**本轮最值得说的一句**：三条新 major（R5 的 `head -5`、R6/R10a 的错误机制、R10b 的「不可见」）都长在**为修正「证据作废」而做的那次重做上**。这不是讽刺，是这类失效的特征——`head -5` 和 `echo` 一样是「防刷屏」的手指记忆，而它同样把判据挪出了被测命令。R10b 尤其值得改：作者引用的那次运行的原始输出就摆在 transcript 里，它讲的故事比现在写进 skill 的那个更有用。
+
+## 附：第二轮足迹
+
+- 新跑的隔离检出：`git archive f76f395|40681ce` → `/tmp/verify-facts-260820/r2-*`（已删）。未建任何 worktree，`git worktree list` 仍是三项。
+- 对照实验在 `/tmp/verify-facts-260820/rgtest/`（自建 `sample.txt`，与仓库无关）。
+- 只读命令：`git show/log/diff/archive`、`rg`、`find`、`python3` 读 transcript JSONL。共享树里只跑过 `rg`。
+- 共享仓新增文件仍只有本报告一个；`git diff --cached --name-only` 为空。
+- 本轮读过但**未修改**的仓外文件：`~/.claude/skills/closing-a-development-session/{SKILL.md,verification-log.md}`、两个 memory 条目、`DISPOSITION.md`、会话 transcript。
+
+
+
 
 
