@@ -138,6 +138,18 @@ class UpstreamRequestRetryConfig(Section):
     max_tokens_as_retryable: bool = True
 
 
+class ProactiveRateLimiterConfig(Section):
+    """The bound that replaced byte-level memory accounting.
+
+    Ruled 2026-08-19. 50 is a ceiling for a pathological client, not a throttle: real traffic is
+    429 requests across a whole day. A request over the limit waits rather than being refused —
+    see `app.server.admission` for why refusing is worse than waiting.
+    """
+
+    # 0 disables the gate.
+    max_inflight: int = Field(default=50, ge=0)
+
+
 class ReactiveRateLimiterConfig(Section):
     """Engaged only by an upstream 429 or 502, per the spec.
 
@@ -285,6 +297,9 @@ class ProxyConfig(Section):
     )
     upstream_request_retry: UpstreamRequestRetryConfig = Field(
         default_factory=UpstreamRequestRetryConfig
+    )
+    proactive_rate_limiter: ProactiveRateLimiterConfig = Field(
+        default_factory=ProactiveRateLimiterConfig
     )
     reactive_rate_limiter: ReactiveRateLimiterConfig = Field(
         default_factory=ReactiveRateLimiterConfig

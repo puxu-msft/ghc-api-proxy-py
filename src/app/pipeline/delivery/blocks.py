@@ -50,27 +50,50 @@ class CompletedBlock:
         return len(repr(self.payload).encode())
 
 
-@dataclass(slots=True)
 class BlockBuffer:
-    """Holds completed blocks until the policy says they may go out."""
+    """Holds completed blocks until the policy says they may go out.
 
-    policy: BufferingPolicy = "block"
-    cap_bytes: int = 0
-    _held: list[CompletedBlock] = field(default_factory=lambda: list[CompletedBlock]())
-    _released_after_tool_use: bool = False
+    The cap is the only bound on how much this proxy holds for one response — byte-level global
+    accounting was removed on 2026-08-19 in favour of `proactive_rate_limiter.max_inflight`, which
+    bounds how many of these exist at once. So this one has to actually hold.
+
+    Nothing outside reads or writes it. It is set once at construction and kept private: a module
+    that could raise the cap, or add to `_held` directly, would be a second answer to "how much may
+    this request hold" and neither answer would be the enforced one.
+    """
+
+    __slots__ = ("_cap_bytes", "_held", "_held_bytes", "_policy", "_released_after_tool_use")
+
+    def __init__(self, policy: BufferingPolicy = "block", cap_bytes: int = 0) -> None:
+        self._policy: BufferingPolicy = policy
+        self._cap_bytes = cap_bytes
+        self._held: list[CompletedBlock] = []
+        # Kept as a running total rather than summed on demand. Summing per `add` is quadratic
+        # over a response, and the cap has to be checked on every one of them.
+        self._held_bytes = 0
+        self._released_after_tool_use = False
+
+    @property
+    def policy(self) -> BufferingPolicy:
+        return self._policy
 
     @property
     def held_bytes(self) -> int:
-        return sum(block.size_bytes for block in self._held)
+        return self._held_bytes
 
     @property
     def held_count(self) -> int:
         return len(self._held)
 
     def add(self, block: CompletedBlock) -> tuple[CompletedBlock, ...]:
-        """Take one completed block and return whatever may now be delivered."""
+        """Take one completed block and return whatever may now be delivered.
+
+        The cap is checked *before* the block goes in, so the buffer never holds more than it is
+        allowed to even for the instant before raising.
+        """
+        self._enforce_cap(incoming=block.size_bytes)
         self._held.append(block)
-        self._enforce_cap()
+        self._held_bytes += block.size_bytes
 
         if self.policy == "full":
             return ()
@@ -91,14 +114,15 @@ class BlockBuffer:
     def _drain(self) -> tuple[CompletedBlock, ...]:
         drained = tuple(self._held)
         self._held.clear()
+        self._held_bytes = 0
         return drained
 
-    def _enforce_cap(self) -> None:
-        if self.cap_bytes <= 0:
+    def _enforce_cap(self, *, incoming: int) -> None:
+        if self._cap_bytes <= 0:
             return
-        held = self.held_bytes
-        if held > self.cap_bytes:
-            raise BufferCapExceeded(held, self.cap_bytes)
+        projected = self._held_bytes + incoming
+        if projected > self._cap_bytes:
+            raise BufferCapExceeded(projected, self._cap_bytes)
 
 
 @dataclass(slots=True)
