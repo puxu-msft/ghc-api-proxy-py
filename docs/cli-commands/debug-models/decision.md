@@ -4,7 +4,7 @@
 
 权威来源：代码本身，以及 `docs/.human-controlled/MAIN.md`（用户亲笔）。本文件的事实陈述都标注了实测日期；实测均在 2026-08-20 对单一个人账户、单次读取，不外推为上游长期契约。
 
-相关提交（主仓库）：`a46eb8d`、`883b104`、`14a5012`、`a224654`、`0f9abbc`。逐条评审处置见主仓库 `docs/tmp/260820-debug-models-review-disposition.md`。
+相关提交（主仓库）：`a46eb8d`、`883b104`、`14a5012`、`a224654`、`0f9abbc`、`aa1b2c4`。逐条评审处置见同目录 `review-disposition.md`，五份评审报告在 `reports/`。
 
 ---
 
