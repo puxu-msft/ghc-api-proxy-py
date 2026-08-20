@@ -11,8 +11,13 @@ from typing import Any
 import orjson
 import pytest
 
-from app.pipeline.delivery.assembler import AnthropicAssembler, ResponsesAssembler
+from app.pipeline.delivery.assembler import (
+    AnthropicAssembler,
+    ResponsesAssembler,
+    terminal_from_anthropic,
+)
 from app.pipeline.delivery.sse_source import SseEvent, parse_frame, read_events
+from app.server.handler import blocks_from_anthropic
 
 
 def frame(event: str, data: dict[str, Any], *, space: bool = True) -> bytes:
@@ -233,3 +238,46 @@ def test_malformed_tool_arguments_are_kept_rather_than_dropped() -> None:
         {"item": {"id": "i1", "type": "function_call", "call_id": "c", "name": "Read"}}
     ).decode()))
     assert blocks[0].payload["input"] == {"__raw": "{not json"}
+
+
+# --- one summary, two ways in ----------------------------------------------
+
+
+def test_a_reply_summarises_the_same_whether_it_streamed_or_arrived_whole() -> None:
+    """The buffered path used to answer this question with its own code.
+
+    Both paths feed one console line, and while each classified blocks for itself the two descriptions of the same reply were free to drift — a fix to one leaving the other quietly wrong. Asserting them equal, rather than asserting each against a literal, is what makes that drift a failure rather than a discrepancy nobody compares.
+    """
+    content: list[dict[str, Any]] = [
+        {"type": "thinking", "thinking": "let me work this out", "signature": "sig-a"},
+        # Sealed reasoning: same cost, nothing readable. The kinds have to be told apart identically on both paths.
+        {"type": "thinking", "thinking": "", "signature": "sig-b"},
+        {"type": "tool_use", "id": "t1", "name": "Bash", "input": {}},
+        {"type": "tool_use", "id": "t2", "name": "Bash", "input": {}},
+        {"type": "text", "text": "done"},
+    ]
+    body = {"content": content, "stop_reason": "tool_use", "usage": {"output_tokens": 12}}
+
+    streamed = AnthropicAssembler()
+    for index, block in enumerate(content):
+        opening = {key: value for key, value in block.items() if key != "thinking"}
+        streamed.push(SseEvent("content_block_start", orjson.dumps(
+            {"index": index, "content_block": opening}
+        ).decode()))
+        if block["type"] == "thinking" and block["thinking"]:
+            streamed.push(SseEvent("content_block_delta", orjson.dumps(
+                {"index": index, "delta": {"type": "thinking_delta", "thinking": block["thinking"]}}
+            ).decode()))
+        streamed.push(SseEvent("content_block_stop", orjson.dumps({"index": index}).decode()))
+    streamed.push(SseEvent("message_delta", orjson.dumps(
+        {"delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 12}}
+    ).decode()))
+    streamed.push(SseEvent("message_stop", orjson.dumps({}).decode()))
+
+    buffered = terminal_from_anthropic(body, blocks_from_anthropic(body))
+
+    assert buffered.tools == streamed.terminal.tools == ["Bash", "Bash"]
+    assert buffered.thinking == streamed.terminal.thinking == ["txt", "enc"]
+    assert buffered.stop_reason == streamed.terminal.stop_reason == "tool_use"
+    assert buffered.usage == streamed.terminal.usage == {"output_tokens": 12}
+    assert buffered.seen is streamed.terminal.seen is True

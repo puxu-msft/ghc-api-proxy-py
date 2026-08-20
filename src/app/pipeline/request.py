@@ -12,6 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 from app.model_provider import ModelEndpoint
+from app.pipeline.delivery.assembler import Terminal
 
 
 class WireFormat(StrEnum):
@@ -69,6 +70,11 @@ class RequestContext:
     route_reason: str = ""
 
     attempts: list[Attempt] = field(default_factory=lambda: list[Attempt]())
+
+    # What the reply came back with, once one has.
+    # Aggregated here rather than re-derived by whoever wants it, so a consumer — the console line, and anything after it — reads a record instead of inspecting the response payload for itself.
+    # Both delivery paths fill it: the streaming one from its assembler, a buffered one from the body it read whole. `None` means no reply was reached.
+    reply: Terminal | None = None
 
     # Anything a subscriber wants to carry between events.
     extras: MutableMapping[str, Any] = field(default_factory=lambda: dict[str, Any]())

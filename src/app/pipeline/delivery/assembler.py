@@ -7,6 +7,7 @@ Two upstream shapes are handled, matching the two protocol legs.
 Both produce the same `CompletedBlock`, so delivery never learns which upstream a block is from.
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any, Protocol, cast
 
@@ -32,6 +33,35 @@ class Terminal:
     tools: list[str] = field(default_factory=lambda: list[str]())
     # Thinking blocks by kind: `txt` carried readable reasoning, `enc` carried only an opaque signature. The distinction is the interesting one — a turn that reasoned and a turn that was handed back sealed reasoning cost the same tokens and look identical from the outside.
     thinking: list[str] = field(default_factory=lambda: list[str]())
+
+    def record(self, block: CompletedBlock) -> None:
+        """Take one finished block into the running summary of the reply.
+
+        Classification lives here, on the record itself, rather than at each place a block becomes final. There are three such places — the two assemblers and a buffered reply read back whole — and when each did its own classifying, the same question ("was this reasoning readable?") was answered by three separate expressions that were free to drift apart. Reading the block's own payload, rather than whatever local draft produced it, is what lets one implementation serve all three.
+        """
+        if block.kind == TOOL_USE:
+            self.tools.append(str(block.payload.get("name", "")))
+        elif block.kind == THINKING:
+            self.thinking.append("txt" if block.payload.get(THINKING) else "enc")
+
+
+def terminal_from_anthropic(body: dict[str, Any], blocks: Iterable[CompletedBlock]) -> Terminal:
+    """The same summary, for a reply that arrived whole instead of in events.
+
+    A buffered request never runs an assembler, so without this the facts a finished reply carries — which tools were asked for, how much reasoning came back, what it cost — had to be dug back out of the response payload at whatever place happened to want them. That is how the same reply came to be described by two different pieces of code, and why only one of them was ever fixed when the description was wrong.
+
+    `seen` is true by construction: a body read whole is a reply that finished, which is exactly what the flag means on the streaming side.
+    """
+    terminal = Terminal(seen=True)
+    stop_reason = body.get("stop_reason")
+    if isinstance(stop_reason, str) and stop_reason:
+        terminal.stop_reason = stop_reason
+    usage = body.get("usage")
+    if isinstance(usage, dict):
+        terminal.usage = dict[str, Any](cast(dict[str, Any], usage))
+    for block in blocks:
+        terminal.record(block)
+    return terminal
 
 
 class BlockAssembler(Protocol):
@@ -122,11 +152,9 @@ class AnthropicAssembler:
             payload[THINKING] = draft.text
         elif draft.kind == TOOL_USE and draft.partial_json:
             payload["input"] = _decode_json(draft.partial_json)
-        if draft.kind == TOOL_USE:
-            self._terminal.tools.append(str(payload.get("name", "")))
-        elif draft.kind == THINKING:
-            self._terminal.thinking.append("txt" if draft.text else "enc")
-        return (CompletedBlock(index=draft.index, kind=draft.kind, payload=payload),)
+        block = CompletedBlock(index=draft.index, kind=draft.kind, payload=payload)
+        self._terminal.record(block)
+        return (block,)
 
     def _read_terminal(self, data: dict[str, Any]) -> None:
         raw = data.get("delta")
@@ -230,17 +258,17 @@ class ResponsesAssembler:
                 "name": str(draft.payload.get("name", "")),
                 "input": _decode_json(draft.partial_json or "{}"),
             }
-            self._terminal.tools.append(str(payload["name"]))
         elif draft.kind == THINKING:
             payload = {
                 "type": THINKING,
                 THINKING: draft.text,
                 "signature": _reasoning_signature(draft, data),
             }
-            self._terminal.thinking.append("txt" if draft.text else "enc")
         else:
             payload = {"type": TEXT, TEXT: draft.text}
-        return (CompletedBlock(index=draft.index, kind=draft.kind, payload=payload),)
+        block = CompletedBlock(index=draft.index, kind=draft.kind, payload=payload)
+        self._terminal.record(block)
+        return (block,)
 
     def _read_terminal(self, kind: str, data: dict[str, Any]) -> None:
         self._terminal.seen = True

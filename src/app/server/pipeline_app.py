@@ -26,13 +26,14 @@ from app.observability.request_log import (
     status_for,
 )
 from app.observability.tui import footer_tui_or_none
-from app.pipeline.delivery.assembler import BlockAssembler
+from app.pipeline.delivery.assembler import BlockAssembler, Terminal, terminal_from_anthropic
 from app.pipeline.delivery.stream import stream_delivery
 from app.pipeline.request import RequestContext
 from app.server.admission import InFlightLimit
 from app.server.composition import Chain, refresh_catalogs
 from app.server.handler import (
     assembler_for,
+    blocks_from_anthropic,
     delivery_buffer,
     error_body,
     error_headers,
@@ -83,6 +84,16 @@ class _Trace:
     stop_reason: str = ""
     tools: tuple[str, ...] = ()
     thinking: tuple[str, ...] = ()
+
+    def absorb(self, reply: Terminal) -> None:
+        """Take the aggregated reply record onto the line.
+
+        One call rather than four assignments at each of the two delivery paths, so a field added to the record reaches the line without either path being edited — and, more to the point, so neither path can decide for itself what "the tools this turn asked for" means.
+        """
+        self.usage = dict(reply.usage)
+        self.stop_reason = reply.stop_reason
+        self.tools = tuple(reply.tools)
+        self.thinking = tuple(reply.thinking)
 
 
 def _log_completion(chain: Chain, trace: _Trace, status_code: int | None, *, bytes_out: int | None) -> None:
@@ -251,6 +262,7 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
             request_id=trace.request_id,
             trace=trace,
             status_code=response.status_code,
+            context=context,
             assembler=assembler,
         )
         return _AccountedStreamingResponse(
@@ -274,28 +286,9 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
     # What upstream sent us, not what we hand onward. A buffered reply is one read, so this is the whole of it.
     trace.received = len(response.content)
     payload = response_payload(chain, handled, body)
-    # Taken from what goes downstream rather than from the upstream body, so the numbers on the line are the ones the client was actually told.
-    usage = payload.get("usage")
-    if isinstance(usage, dict):
-        trace.usage = dict(cast(dict[str, Any], usage))
-    stop_reason = payload.get("stop_reason")
-    if isinstance(stop_reason, str):
-        trace.stop_reason = stop_reason
-    content = payload.get("content")
-    if isinstance(content, list):
-        # Same fact the streaming path reads off the assembler, taken here from the blocks themselves so a buffered reply reads identically to a streamed one.
-        blocks = cast(list[Any], content)
-        trace.tools = tuple(
-            str(cast(dict[str, Any], block).get("name", ""))
-            for block in blocks
-            if isinstance(block, dict) and cast(dict[str, Any], block).get("type") == "tool_use"
-        )
-        trace.thinking = tuple(
-            # Readable reasoning or a sealed signature, told apart the same way the assembler tells them apart: by whether there is any text to read.
-            "txt" if cast(dict[str, Any], block).get("thinking") else "enc"
-            for block in blocks
-            if isinstance(block, dict) and cast(dict[str, Any], block).get("type") == "thinking"
-        )
+    # Read off what goes downstream rather than the upstream body, so the numbers on the line are the ones the client was actually told. Summarised once, into the same record the streaming path publishes, so this function never has to know what a `tool_use` block looks like.
+    context.reply = terminal_from_anthropic(payload, blocks_from_anthropic(payload))
+    trace.absorb(context.reply)
     return JSONResponse(payload, status_code=response.status_code)
 
 
@@ -310,6 +303,7 @@ class _StreamAccounting:
     request_id: str
     trace: _Trace
     status_code: int
+    context: RequestContext | None = None
     assembler: BlockAssembler | None = None
     done: bool = False
 
@@ -320,10 +314,9 @@ class _StreamAccounting:
         self.chain.active_requests.remove(self.request_id)
         # Read at the end because that is when the upstream's terminal event has been seen. `seen` guards against reporting the assembler's defaults — `end_turn` and no usage — for a stream that was cut off before its final frame, which would claim a clean finish for a request that had none.
         if self.assembler is not None and self.assembler.terminal.seen:
-            self.trace.usage = dict(self.assembler.terminal.usage)
-            self.trace.stop_reason = self.assembler.terminal.stop_reason
-            self.trace.tools = tuple(self.assembler.terminal.tools)
-            self.trace.thinking = tuple(self.assembler.terminal.thinking)
+            if self.context is not None:
+                self.context.reply = self.assembler.terminal
+            self.trace.absorb(self.assembler.terminal)
         _log_completion(self.chain, self.trace, self.status_code, bytes_out=self.trace.received)
 
 
