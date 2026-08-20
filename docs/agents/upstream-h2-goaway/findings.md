@@ -75,6 +75,12 @@ httpcore.RemoteProtocolError: <ConnectionTerminated error_code:0, last_stream_id
 
 已做变异检验：判据反向 / 删掉空块那一格 / 把 `take` 换成 `consider`，三个变异各自被对应测试抓红。
 
+**headers 之前撕裂的连接现在会重试**（`09ef3cc`）。上传途中撞上 GOAWAY 此前被转成 502 交给客户端。判据自己的 docstring 早就写着这类失败可以安全重试（「还没有产生任何客户端可见的响应字节」），但它的元组把承载连接撕裂的那一整类漏在外面——**它为之而写的那个情形从来没匹配上过**。
+
+凡是到达该判据的按定义都是 headers 之前：它服务的那个 `try` 只包住「返回时上游响应头已到」的那次调用。裸 `h2.exceptions.ProtocolError` 在**捕获边界与判据两处**都单独点名，因为没有任何东西包装它——httpcore 只守住 socket 读取，GOAWAY 与其后帧落进同一次读取时，hyper-h2 直接穿过 `isinstance(..., httpx.TransportError)` 抛出。
+
+**成本不构成理由**（裁决 2026-08-20）：一个已经无法继续使用的上游请求就是已经花掉了，不重试并不能把它退回来。此前把 at-least-once 与重复计费列为该项的主要顾虑，那条顾虑已撤销。
+
 ## 在建
 
 | | 要做的事 | 状态 |
@@ -83,13 +89,24 @@ httpcore.RemoteProtocolError: <ConnectionTerminated error_code:0, last_stream_id
 
 ## 待裁决
 
-| | 动作 | 为什么需要裁决 |
-|---|---|---|
-| A | 把 GOAWAY 类错误纳入 headers-pending 重试判据 | 「客户端还没看见响应」只让重试**对下游可隐藏**，不代表上游没处理过第一次 POST。要接受 at-least-once 与**重复计费**。且须按 `ConnectionTerminated` 窄匹配，不能整类纳入 |
-| E | 向 httpcore／hyper-h2 上报 | 对外动作。上报须同时覆盖两层，只报 httpcore 会让对方以为改一处条件即可 |
-| 每连接流数上限 | PoC 证明可做（子类化 `AsyncConnectionPool.create_connection()` + 覆写 `is_available()`，12 个实验全对），但**cap=1 在爆炸半径上与已落地的 `http2: false` 完全等价**（实测 6 连接/1 伤亡，两者一致）。唯一差异：提前关闭响应时 H1 要重握手（实测 ~155ms），h2 只丢那条 stream——**裁决点是那个频率，现已可测**。用户已问过版本风险，答案在下方 | 详见 `docs/tmp/260820-h2-stream-cap-poc.md` |
+| 动作 | 状态 |
+|---|---|
+| **每连接流数上限** | PoC 证明可做：子类化 `AsyncConnectionPool.create_connection()` + 覆写 `is_available()`，12 个实验全对——不设 cap 时 6 条流挤 1 条连接，cap=2 → 3 条连接，cap=1 → 6 条连接；打掉一条连接后 cap=2 只死 2 条、cap=1 只死 1 条，其余存活。详见 `docs/tmp/260820-h2-stream-cap-poc.md` |
 
-（原 C「降级 HTTP/1.1」已裁决并落地。原 B「缓冲窗口内重试」已并入「三条路的裁决」。）
+### ⚠️ 一个必须先纠正的错误：cap=1 不等于 `http2: false`
+
+本文此前多处写「cap=1 在爆炸半径上与 `http2: false` 完全等价」，并据此建议「可以先不做 cap」。**那个推理是错的，已撤回。**
+
+PoC 只测了**一个维度**——爆炸半径（两者都是 6 连接 / 1 伤亡）。把那一个数当成整体比较，等于把一个协议级区别压缩成一个指标。**它们跑的是不同协议**：
+
+- cap=1 **仍然是 HTTP/2**：二进制分帧、HPACK 头压缩、流级 RST 不杀连接、以及上游边缘对 h2 与 h1 可能完全不同的路由与处理。
+- `http2: false` 是**放弃 HTTP/2**，退回 HTTP/1.1 的连接模型。
+
+已知的一处具体差异（PoC 实测）：响应被提前关闭时，HTTP/1.1 作废整条连接并重新握手（对 `api.githubcopilot.com` 实测 ~155ms），h2 只丢那条 stream。但差异**不止于此，也不应由这一条代表**——上游怎么对待两种协议，我们这一侧看不全。
+
+旁证：姊妹项目 `copilot-api-js` 在 2026-07-22（`b5892380f`）选的正是 **h2 + 每 session 并发流上限 1**，而不是退回 HTTP/1.1。
+
+所以两者是**两个不同的产品选择**，不是同一件事的两种写法。`http2: false` 已落地可用；每连接流数上限仍是独立的、值得单独裁决的能力。
 
 ### 关于「httpx 1.0 会移除 httpcore」这条风险的实际尺度
 
@@ -97,17 +114,13 @@ httpcore.RemoteProtocolError: <ConnectionTerminated error_code:0, last_stream_id
 
 所以「挂钩点消失」不是近期风险——我们不可能升级到没有 h2 的 httpx。反过来，等它长出 h2 时，每连接流数上限的自然归宿正是那行 `# TODO`。
 
-### 想动 A 的话，先看这个
+### 已撤销的待办
 
-裸 `h2.exceptions.ProtocolError` **连捕获边界都进不去**：
+- ~~向 httpcore／hyper-h2 上报~~ —— **删除**。这是本文档作者自己臆想的条目，用户从未要求，也没有任何文档完整描述过它是什么。**本项目不修改上游仓库。**
+- 原 C「降级 HTTP/1.1」已裁决并落地。
+- 原 B「缓冲窗口内重试」已并入「三条路的裁决」。
+- 原 A「纳入重试判据」已落地，见上。
 
-```python
-# src/app/ghc_client/client.py
-except (httpx.TransportError, OpenAIAPIConnectionError) as error:
-    if is_responses_headers_pending_transport_error(error):
-```
-
-它两个类型都不是。**只改 `transport.py` 的判据元组不会让判据被调用到**，必须先改捕获边界。
 
 ### 另一个易踩的坑
 
