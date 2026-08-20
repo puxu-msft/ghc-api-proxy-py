@@ -25,6 +25,18 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from app.lifecycle.shutdown import ESCALATING_SIGNALS, RESTART_SIGNAL, ShutdownLadder, ShutdownStage
+from app.observability.logging import get_logger
+
+# Where the lifecycle speaks, kept distinct from the request log so either can be filtered without the other.
+LIFECYCLE_LOGGER = "app.lifecycle"
+
+# What each rung means to somebody watching, rather than the enum's own name. The ladder itself stays free of this: it is documented as holding no I/O, and a display vocabulary is not its business.
+_STAGE_WORDS = {
+    ShutdownStage.RUNNING: "running",
+    ShutdownStage.DRAINING: "draining, waiting for in-flight requests",
+    ShutdownStage.INTERRUPTING: "interrupting in-flight requests",
+    ShutdownStage.FINALIZING: "finalizing, no longer waiting",
+}
 
 HANDLED_SIGNALS = (*sorted(ESCALATING_SIGNALS), RESTART_SIGNAL)
 
@@ -111,6 +123,11 @@ class StandaloneServer:
         after = self._ladder.receive(sig)
         if after is not before:
             self._advanced.set()
+            # Said here because this is the only point that sees the keystroke. Everything after it can take as long as the drain takes, and a terminal that goes silent the moment Ctrl-C is pressed gives the operator no way to tell a graceful drain from a hung process — which is exactly when they reach for a second, harder signal.
+            get_logger(LIFECYCLE_LOGGER).info(
+                f"{sig.name} received, {_STAGE_WORDS[after]}",
+                status="ok" if after is ShutdownStage.DRAINING else "streaming",
+            )
 
     async def serve(self) -> ShutdownReport:
         acquired: set[str] = set()

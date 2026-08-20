@@ -12,7 +12,8 @@ from app.config.loading import bundled_config_text, load_proxy_config
 from app.config.paths import config_file_path, tls_material_dir
 from app.config.schema import ProxyConfig
 from app.lifecycle.entry import StandaloneOptions, run_standalone
-from app.observability.logging import setup_logging
+from app.lifecycle.standalone import LIFECYCLE_LOGGER, ShutdownReport
+from app.observability.logging import get_logger, setup_logging
 from app.server.composition import build_chain, build_http_client
 from app.server.pipeline_app import create_pipeline_app
 from app.server.tls import resolve_tls_material
@@ -155,9 +156,35 @@ async def _serve_pipeline(config: ProxyConfig, options: StandaloneOptions) -> No
     http_client = build_http_client(config)
     try:
         chain = build_chain(config, http_client=http_client)
-        await run_standalone(create_pipeline_app(chain), options)
+        outcome = await run_standalone(create_pipeline_app(chain), options)
+        # `ShutdownReport` says of itself that it exists "so a caller can log it rather than guess", and until now every caller discarded it — the process simply stopped, and whether it drained cleanly or gave up on live requests was unknowable from the terminal.
+        report_shutdown(outcome.report)
     finally:
         await http_client.aclose()
+
+
+def _plural(count: int, noun: str) -> str:
+    """`1 request` / `2 requests`. A count that reads as broken English reads as a broken program."""
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def report_shutdown(report: ShutdownReport) -> None:
+    """The last line the process writes: what the shutdown actually did.
+
+    Ordered by what an operator is deciding — whether anything was cut off, and whether cleanup finished. A clean drain says so in one short line; anything else names the count, because "2 requests cancelled" is the difference between a restart that was safe and one that was not.
+    """
+    parts: list[str] = []
+    if report.interrupted_connections:
+        parts.append(f"{_plural(report.interrupted_connections, 'connection')} interrupted")
+    if report.cancelled_requests:
+        parts.append(f"{_plural(report.cancelled_requests, 'request')} cancelled")
+    if report.cleanup_timed_out:
+        parts.append("cleanup exceeded its budget")
+    if report.cleanup_error:
+        parts.append(f"cleanup failed: {report.cleanup_error}")
+    detail = f" — {', '.join(parts)}" if parts else ""
+    clean = not parts and report.cleanup_completed
+    get_logger(LIFECYCLE_LOGGER).info(f"stopped{detail}", status="ok" if clean else "fail")
 
 
 @app.command()
