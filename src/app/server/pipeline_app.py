@@ -67,15 +67,22 @@ def _chain(request: Request) -> Chain:
     return cast(Chain, getattr(request.app.state, CHAIN_STATE_KEY))
 
 
+# What a transport read could not produce, as distinct from what it produced as nothing. Both used to come back `None`, and the snapshot then rendered both as `""` — so a row that failed to read the socket was byte-for-byte a row whose transport never had an address to give.
+UNREADABLE = object()
+
+
 def _extra_info(network_stream: Any, name: str) -> Any:
-    """Read one live transport fact without letting observability affect the request."""
+    """Read one live transport fact without letting observability affect the request.
+
+    Returns `None` when the transport simply has no such fact, and `UNREADABLE` when asking for it raised. The two are different answers to a forensic reader — the first is how a mock or a plain HTTP/1.1 exchange normally looks, the second means this row's identity is missing because something went wrong — and collapsing them is what `_snapshot_upstream_connection` is careful not to do.
+    """
     if network_stream is None:
         return None
     try:
         return network_stream.get_extra_info(name)
     except Exception:
-        # Not only `OSError`: a transport wrapper may reject an unknown key or expose a closed backing object through another ordinary exception. Every such case means only that this optional fact is unavailable.
-        return None
+        # Not only `OSError`: a transport wrapper may reject an unknown key or expose a closed backing object through another ordinary exception. What they share is that the fact was asked for and did not come back — which is the half worth keeping.
+        return UNREADABLE
 
 
 def _socket_address(value: object) -> str:
@@ -89,29 +96,50 @@ def _socket_address(value: object) -> str:
 
 
 def _snapshot_upstream_connection(response: Any) -> dict[str, Any]:
-    """Copy connection identity from response headers before its network stream closes."""
+    """Copy connection identity from response headers before its network stream closes.
+
+    **Only what was actually observed goes in.** A fact the transport did not supply is left out rather than written as `""`, and when something is missing the record says so under `unavailable`. The reason is a named reader: `.dev/docs/upstream/h2-goaway/` reads `upstream_conn.local` across several rows and concludes that equal values mean one shared connection. Filling the blanks with `""` made every unidentified row equal to every other, so that rule would answer "same connection" for rows that carry no identity at all — a positive conclusion drawn from an absence. Leaving the key out cannot be compared, so the question fails loudly instead.
+
+    Four shapes, each meaning one thing: every key present is a real reading; `unavailable: no-transport-identity` is the ordinary case where the transport had nothing to give (a mock, or an HTTP/1.1 exchange that exposes no stream here); `unavailable: socket-unreadable` means the facts were asked for and the read raised — this is not hypothetical, it is why the snapshot is taken the moment headers arrive rather than at completion, see the call site; `unavailable: snapshot-failed: …` is a transport whose extension mapping is shaped differently altogether. An empty dict is none of those — it is `_Trace`'s default, meaning no snapshot was ever attempted.
+
+    `unavailable` can sit beside real keys. A closed socket still yields `stream_id` from the extensions mapping while the addresses are gone, and reporting the half that is known alongside the reason the other half is missing is more use than either alone.
+    """
     try:
         extensions = response.extensions
         network_stream = extensions.get("network_stream")
-        ssl_object = _extra_info(network_stream, "ssl_object")
-        alpn = ""
-        if ssl_object is not None:
-            try:
-                selected = ssl_object.selected_alpn_protocol()
-                alpn = str(selected) if selected is not None else ""
-            except Exception:
-                # As above, this is optional evidence and wrappers need not fail specifically with `OSError`.
-                pass
-        stream_id = extensions.get("stream_id")
-        return {
-            "local": _socket_address(_extra_info(network_stream, "client_addr")),
-            "peer": _socket_address(_extra_info(network_stream, "server_addr")),
-            "alpn": alpn,
-            "stream_id": stream_id if isinstance(stream_id, int) else None,
+        readings = {
+            "local": _extra_info(network_stream, "client_addr"),
+            "peer": _extra_info(network_stream, "server_addr"),
+            "alpn": _alpn(_extra_info(network_stream, "ssl_object")),
         }
+        observed = {
+            name: _socket_address(value) if name != "alpn" else value
+            for name, value in readings.items()
+            if value is not None and value is not UNREADABLE
+        }
+        stream_id = extensions.get("stream_id")
+        if isinstance(stream_id, int):
+            observed["stream_id"] = stream_id
+        if any(value is UNREADABLE for value in readings.values()):
+            observed["unavailable"] = "socket-unreadable"
+        elif not observed:
+            observed["unavailable"] = "no-transport-identity"
+        return observed
+    except Exception as failure:
+        # A non-httpcore transport can expose a different extension mapping. Logging must still never change the response path — so the reason travels in the record rather than through a logger, which would also mean a new stream of warnings for a case that has never been observed to fire.
+        return {"unavailable": f"snapshot-failed: {failure!r}"}
+
+
+def _alpn(ssl_object: Any) -> Any:
+    """The negotiated protocol, or `None` when there is no TLS to ask, or `UNREADABLE` when asking failed."""
+    if ssl_object is None or ssl_object is UNREADABLE:
+        return ssl_object
+    try:
+        selected = ssl_object.selected_alpn_protocol()
     except Exception:
-        # A non-httpcore transport can expose a different extension mapping. Logging must still never change the response path.
-        return {"local": "", "peer": "", "alpn": "", "stream_id": None}
+        # As above: optional evidence, and wrappers need not fail specifically with `OSError`.
+        return UNREADABLE
+    return str(selected) if selected is not None else None
 
 
 @dataclass(slots=True)

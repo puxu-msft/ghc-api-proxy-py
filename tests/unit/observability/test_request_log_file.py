@@ -219,7 +219,22 @@ def test_connection_identity_is_copied_while_the_transport_is_live() -> None:
     stream.closed = True
 
     assert snapshot == {"local": "172.19.141.235:56822", "peer": "140.82.116.5:443", "alpn": "h2", "stream_id": 7}
-    assert _snapshot_upstream_connection(response) == {"local": "", "peer": "", "alpn": "", "stream_id": 7}
+    # Once the socket is closed the addresses raise, and the row must say so rather than carry `""` in their place: a named reader compares `local` across rows and reads equal values as one shared connection, which every blanked-out row would satisfy. `stream_id` survives because it comes off the extensions mapping, not the socket — reporting the half that is known beside the reason the rest is missing beats reporting either alone.
+    assert _snapshot_upstream_connection(response) == {"stream_id": 7, "unavailable": "socket-unreadable"}
+
+
+def test_a_transport_with_no_identity_says_that_rather_than_going_blank() -> None:
+    """The ordinary case, and the one that must not read as a real observation.
+
+    Every HTTP/1.1 exchange recorded so far, and every request served through a mock transport, lands here — 152 of 2527 rows on 2026-08-20. They used to be written as `{"local": "", "peer": "", "alpn": "", "stream_id": null}`, which is indistinguishable from a failed read and, worse, equal to every other such row.
+    """
+    assert _snapshot_upstream_connection(SimpleNamespace(extensions={})) == {"unavailable": "no-transport-identity"}
+    # An extensions mapping shaped unlike httpcore's is a third thing again, and it carries what went wrong.
+    broken = _snapshot_upstream_connection(SimpleNamespace())
+    assert list(broken) == ["unavailable"]
+    assert broken["unavailable"].startswith("snapshot-failed: ")
+    # And none of the three is the empty dict, which `_Trace` uses to mean no snapshot was ever taken.
+    assert {} not in (broken, _snapshot_upstream_connection(SimpleNamespace(extensions={})))
 
 
 def test_only_the_newest_utc_day_files_are_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
