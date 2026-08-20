@@ -54,6 +54,9 @@
 | `exp/tui-footer/` | 上面那件事的实验脚本 |
 | `docs/graceful-shutdown/` | 关闭信号到进程退出之间的一切；目前只有 `client-side/` |
 | `exp/graceful-shutdown-client-side/` | 上面那件事的探针与复现脚本 |
+| `docs/archived-2604-rewrite/` | 早期 peer 写的 `copilot-api-js` 学习笔记，用户 2026-08-20 裁定整体过期，**仅供参考、无权威地位** |
+
+> 2026-08-20 追记：`docs/2604-rewrite/` 已按用户裁决整体搬入本目录（`docs/archived-2604-rewrite/`）。它与下面这条待办不是一回事——那条讲的是把仍然有效的开发文档搬进来，这一次搬的是被判定为过期的材料。
 
 ## 一件待办
 
