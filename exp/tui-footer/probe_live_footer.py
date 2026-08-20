@@ -16,6 +16,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from typing import Any
 
 PORT = 41997
 MODEL = sys.argv[1] if len(sys.argv) > 1 else "claude-sonnet-4.5"
@@ -57,14 +58,18 @@ pump.start()
 time.sleep(6.0)
 
 # Long enough to still be running while the footer redraws, short enough to be a trivial call.
-body = json.dumps(
-    {
-        "model": MODEL,
-        "max_tokens": 512,
-        "stream": True,
-        "messages": [{"role": "user", "content": "Count from 1 to 40, one number per line."}],
-    }
-).encode()
+request_body: dict[str, Any] = {
+    "model": MODEL,
+    "max_tokens": 512,
+    "stream": True,
+    "messages": [{"role": "user", "content": "Count from 1 to 40, one number per line."}],
+}
+if os.environ.get("THINK") == "1":
+    # Extended thinking, so the reply carries reasoning blocks and the line has something to report.
+    request_body["max_tokens"] = 2048
+    request_body["thinking"] = {"type": "enabled", "budget_tokens": 1024}
+    request_body["messages"] = [{"role": "user", "content": "What is 37 * 43? Think it through."}]
+body = json.dumps(request_body).encode()
 
 
 def fire(index: int) -> None:

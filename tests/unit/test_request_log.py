@@ -10,6 +10,7 @@ from app.observability.request_log import (
     format_arrival_line,
     format_completion_line,
     format_stop_reason,
+    format_thinking,
     format_tokens,
     http_label,
     status_for,
@@ -91,6 +92,36 @@ def test_an_upstream_error_status_reads_as_a_failure_even_though_it_arrived() ->
     assert status_for(500, failed=False) == "fail"
     assert status_for(None, failed=False) == "fail"
     assert status_for(200, failed=True) == "fail"
+
+
+def test_reasoning_blocks_are_counted_by_kind() -> None:
+    # `txt` carried readable reasoning, `enc` only a sealed signature. They cost the same tokens and are indistinguishable on every other field of the line.
+    assert format_thinking(("enc",)) == "think(enc:1)"
+    assert format_thinking(("enc", "txt", "txt")) == "think(enc:1,txt:2)"
+    assert format_thinking(("txt",)) == "think(txt:1)"
+    # The common case takes no width at all.
+    assert format_thinking(()) == ""
+
+
+def test_reasoning_is_reported_last_and_quietly() -> None:
+    line = format_completion_line(
+        RequestLine(
+            method="POST",
+            path="/p",
+            inbound_format="f",
+            model="m",
+            status_code=200,
+            duration_s=1.0,
+            stop_reason="end_turn",
+            thinking=("enc", "txt", "txt"),
+        )
+    )
+    # After the fields that describe the exchange, since it describes how the model got to the answer rather than anything about the exchange itself.
+    assert line.endswith("end_turn think(enc:1,txt:2)")
+    assert DIM in format_completion_line(
+        RequestLine(method="POST", path="/p", status_code=200, duration_s=1.0, thinking=("enc",)),
+        color=True,
+    )
 
 
 def test_the_protocol_of_each_leg_is_labelled() -> None:

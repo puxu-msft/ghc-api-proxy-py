@@ -30,6 +30,8 @@ class Terminal:
     seen: bool = False
     # Every tool the model asked for, in the order it asked, duplicates kept. `tool_use` on its own says a turn ended in tool calls; which tools, and how many of each, is the part that tells one turn from another when reading a log.
     tools: list[str] = field(default_factory=lambda: list[str]())
+    # Thinking blocks by kind: `txt` carried readable reasoning, `enc` carried only an opaque signature. The distinction is the interesting one — a turn that reasoned and a turn that was handed back sealed reasoning cost the same tokens and look identical from the outside.
+    thinking: list[str] = field(default_factory=lambda: list[str]())
 
 
 class BlockAssembler(Protocol):
@@ -122,6 +124,8 @@ class AnthropicAssembler:
             payload["input"] = _decode_json(draft.partial_json)
         if draft.kind == TOOL_USE:
             self._terminal.tools.append(str(payload.get("name", "")))
+        elif draft.kind == THINKING:
+            self._terminal.thinking.append("txt" if draft.text else "enc")
         return (CompletedBlock(index=draft.index, kind=draft.kind, payload=payload),)
 
     def _read_terminal(self, data: dict[str, Any]) -> None:
@@ -233,6 +237,7 @@ class ResponsesAssembler:
                 THINKING: draft.text,
                 "signature": _reasoning_signature(draft, data),
             }
+            self._terminal.thinking.append("txt" if draft.text else "enc")
         else:
             payload = {"type": TEXT, TEXT: draft.text}
         return (CompletedBlock(index=draft.index, kind=draft.kind, payload=payload),)

@@ -82,6 +82,7 @@ class _Trace:
     usage: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
     stop_reason: str = ""
     tools: tuple[str, ...] = ()
+    thinking: tuple[str, ...] = ()
 
 
 def _log_completion(chain: Chain, trace: _Trace, status_code: int | None, *, bytes_out: int | None) -> None:
@@ -104,6 +105,7 @@ def _log_completion(chain: Chain, trace: _Trace, status_code: int | None, *, byt
         usage=trace.usage,
         stop_reason=trace.stop_reason,
         tools=trace.tools,
+        thinking=trace.thinking,
         attempts=trace.attempts,
         detail=trace.detail,
     )
@@ -288,6 +290,12 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
             for block in blocks
             if isinstance(block, dict) and cast(dict[str, Any], block).get("type") == "tool_use"
         )
+        trace.thinking = tuple(
+            # Readable reasoning or a sealed signature, told apart the same way the assembler tells them apart: by whether there is any text to read.
+            "txt" if cast(dict[str, Any], block).get("thinking") else "enc"
+            for block in blocks
+            if isinstance(block, dict) and cast(dict[str, Any], block).get("type") == "thinking"
+        )
     return JSONResponse(payload, status_code=response.status_code)
 
 
@@ -315,6 +323,7 @@ class _StreamAccounting:
             self.trace.usage = dict(self.assembler.terminal.usage)
             self.trace.stop_reason = self.assembler.terminal.stop_reason
             self.trace.tools = tuple(self.assembler.terminal.tools)
+            self.trace.thinking = tuple(self.assembler.terminal.thinking)
         _log_completion(self.chain, self.trace, self.status_code, bytes_out=self.trace.received)
 
 

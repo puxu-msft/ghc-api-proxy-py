@@ -77,8 +77,23 @@ class RequestLine:
     usage: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
     stop_reason: str = ""
     tools: tuple[str, ...] = ()
+    thinking: tuple[str, ...] = ()
     attempts: int = 1
     detail: str = ""
+
+
+def format_thinking(kinds: tuple[str, ...]) -> str:
+    """`think(enc:1)` / `think(enc:1,txt:2)` — how much reasoning came back, and of which sort.
+
+    `txt` carried readable reasoning; `enc` carried only an opaque signature. Worth telling apart because the two cost the same tokens and are indistinguishable from the outside: a turn that reasoned aloud and one handed back sealed reasoning it cannot read look identical on every other field of this line.
+
+    Kinds appear in a fixed order rather than the order they arrived, so two lines can be compared at a glance. Empty when nothing came back, which is the common case and should take no width.
+    """
+    if not kinds:
+        return ""
+    counted = [(kind, sum(1 for item in kinds if item == kind)) for kind in ("enc", "txt")]
+    named = ",".join(f"{kind}:{count}" for kind, count in counted if count)
+    return f"think({named})" if named else ""
 
 
 def format_stop_reason(stop_reason: str, tools: tuple[str, ...]) -> str:
@@ -210,6 +225,10 @@ def format_completion_line(line: RequestLine, *, unicode: bool = True, color: bo
         parts.append(paint(f"retries={line.attempts - 1}", YELLOW, color=color))
 
     rendered = " ".join(parts)
+    thinking = format_thinking(line.thinking)
+    if thinking:
+        # Last, and grey. It says what the model did on its way to the answer rather than anything about the exchange, so it belongs after the fields that describe the exchange and should not compete with them.
+        rendered = f"{rendered} {paint(thinking, DIM, color=color)}"
     # A colon rather than a space before the reason, matching the upstream shape and giving the eye somewhere to stop on a line that is otherwise all fields.
     return f"{rendered}: {paint(line.detail, RED, color=color)}" if line.detail else rendered
 
