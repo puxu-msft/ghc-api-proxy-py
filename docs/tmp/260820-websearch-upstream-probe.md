@@ -211,3 +211,89 @@ B7（prompt 是 trivial 的 `What is the capital of France?`，`tool_choice` 强
 - `status: "searching"` / `"failed"` / `"incomplete"` 未在本次观测到。
 - 流式下带 `url_citation` 时是否发 `response.output_text.annotation.added` 事件（C2 这次答案没有引用）。
 - Anthropic 腿带 `anthropic-beta` 头时 server tool 是否仍被拒（本次未加 beta 头）。
+
+---
+
+## `/models` 是否给出 hosted web search 信号
+
+**追加探针，2026-08-20，1 次请求。** 完整原始响应存于 [`exp/260820-websearch-probe/raw/models-live.json`](../../exp/260820-websearch-probe/raw/models-live.json)（42 个模型，67,656 字节）。用户裁决「能力判定优先看上游 `/models` 有没有信号，没有信号才由配置项手动维护」，本节回答前半句。
+
+### 结论：**没有。实时目录里不存在任何可用于判定 hosted web search 的信号。**
+
+这不是「基于过期 ref 的旧推论」，而是对**今天的实时目录**重新做的判定。证据权重：**强，一手，全量扫描而非抽样**。
+
+### 1. `capabilities.supports` 的键并集（42 个模型全量）
+
+```
+adaptive_thinking, dimensions, max_thinking_budget, min_thinking_budget,
+parallel_tool_calls, reasoning_effort, streaming, structured_outputs, tool_calls, vision
+```
+
+**与过期 ref 的并集完全相同——10 个键，一个没多，一个没少。** 目录换了模型，能力位的词汇表没变。
+
+### 2. 键名含 `search` / `tool` / `builtin` / `web` 的全部路径（递归任意深度）
+
+```
+.capabilities.supports.parallel_tool_calls
+.capabilities.supports.tool_calls
+```
+
+只有这两个，都是**普通 function calling** 的能力位，与 hosted server tool 无关。
+
+补做了一次**值级**扫描：在整个 67KB 响应的**任意位置**（键、值、字符串片段）正则搜 `search|web_|builtin|hosted`，**零命中**。所以不存在「藏在 `warning_message` 或 `policy` 文案里的信号」这种可能。
+
+其余键并集（供参考）：
+
+| 层 | 键 |
+|---|---|
+| 模型顶层 | `billing, capabilities, id, is_chat_default, is_chat_fallback, model_picker_category, model_picker_enabled, name, object, policy, preview, supported_endpoints, vendor, version, warning_message` |
+| `capabilities` | `family, limits, object, supports, tokenizer, type` |
+| `capabilities.limits` | `max_context_window_tokens, max_inputs, max_non_streaming_output_tokens, max_output_tokens, max_prompt_tokens, vision` |
+
+### 3. 已实测成立的模型能否与其余 `/responses` 模型区分开？——**不能**
+
+广告 `/responses` 的模型现在有 **12 个**。逐字段对比已实测 web search 成立的 `gpt-5.5`（本次）与 `gpt-5.6-sol`（`copilot-api-js` 2026-08-11）：
+
+| 字段 | 是否能把「已实测为真」的两个与其余 10 个分开 |
+|---|---|
+| `capabilities.supports` 的 true 集合 | **不能**。12 个里有 11 个完全相同（`parallel_tool_calls, streaming, structured_outputs, tool_calls, vision`），唯一的例外 `mai-code-1-flash-picker` 只是少了 `vision` |
+| `reasoning_effort` 取值表 | **不能**。`gpt-5.5` 是 `[none,low,medium,high,xhigh]`，`gpt-5.6-sol` 是 `[…,max]`——两个已实测为真的模型**彼此就不同**，何况 `gpt-5.4` 与 `gpt-5.5` 逐字相同 |
+| `capabilities.type` | **不能**，12 个全是 `chat` |
+| `capabilities.limits` 键集 | **不能**，12 个里 11 个相同 |
+| `model_picker_category` | **不能**。已实测为真的两个都是 `powerful`，但 `gpt-5.3-codex`、`gpt-5.4` 也是 `powerful`，而 `gpt-5.6-terra` 是 `versatile` |
+| `billing.restricted_to` | **不能**。`gpt-5.5` 与 `gpt-5.6-sol` 恰好都是 `[pro_plus, business, enterprise, max]`，但这是**订阅档位**，描述的是「谁能用这个模型」，不是「这个模型能干什么」；换个账号档位就变，拿它当能力 oracle 是把账单当能力 |
+| `preview` / `policy` / `warning_message` | **不能**，无区分度 |
+| `vendor` | **有区分度，但区分的不是 web search**：12 个里 `OpenAI` 7 个、`xAI` 2 个（grok-4.5/4.6）、`Microsoft` 2 个（mai-code）、`Azure OpenAI` 1 个（gpt-5-mini） |
+
+**关键点**：`gpt-5.5` 与 `gpt-5.4`、`gpt-5.6-terra` 在目录里**逐字段无法区分**（除了 `id`/`family`/`version` 这三个同义的名字字段和 `billing`）。目录里没有任何东西知道 web search 这件事。
+
+### 4. 建议的手工判定依据
+
+**推荐**：配置项维护一份**模型 id 允许清单**，默认值取
+
+> `vendor == "OpenAI"` **且** `supported_endpoints` 含 `/responses`
+
+即 7 个：`gpt-5.3-codex`、`gpt-5.4`、`gpt-5.4-mini`、`gpt-5.5`、`gpt-5.6-luna`、`gpt-5.6-sol`、`gpt-5.6-terra`。
+
+选它而不选「模型名前缀 `gpt-`」的理由：前缀会把 `gpt-5-mini` 卷进来（它的 `vendor` 是 `Azure OpenAI`，是另一条供给链），也会漏掉将来 OpenAI 换掉 `gpt-` 命名的情况；`vendor` 字段是目录里唯一一个**语义上与「这个 hosted tool 由谁实现」相关**的字段。
+
+**它会误判哪些模型，逐条说明**（全部未测量，这是清单必须可配置的原因）：
+
+| 模型 | 默认判定 | 风险 |
+|---|---|---|
+| `gpt-5.3-codex` | 判为支持 | **最可疑的假阳性**。codex 专用模型，工具面与聊天模型不同，很可能不吃 `web_search` |
+| `gpt-5.4-mini`、`gpt-5.6-luna` | 判为支持 | lightweight 档，hosted tool 常是首个被裁掉的东西 |
+| `gpt-5.4`、`gpt-5.6-terra` | 判为支持 | 与 gpt-5.5 目录上无法区分，假阳性概率低但仍是推断 |
+| `grok-4.5`、`grok-4.6` | 判为**不支持** | **可能的假阴性**。xAI 自带搜索能力，Copilot 的 `/responses` 腿是否透出来完全未知 |
+| `mai-code-1.1-flash`、`mai-code-1-flash-picker` | 判为不支持 | 同上，未知 |
+| `gpt-5-mini` | 判为不支持 | 假阴性风险中等：它是 OpenAI 家族但挂在 `Azure OpenAI` vendor 下 |
+
+**失败方向**：判错的代价不对称。假阳性 = 用户的 WebSearch 请求撞 400（可见的硬失败）；假阴性 = 声明被剥离，用户以为在搜其实没搜（静默降级）。所以默认清单**宁可窄**，把不确定的留给配置打开。若要更保守，把默认清单收到已实测的 `gpt-5.5` + `gpt-5.6-sol` 两个也是合理的——代价是每上一个新模型都要人工加一次。
+
+### 5. 一个目录之外的、真正的运行期信号（本次副产品，值得单独裁决）
+
+B2/B9 证明：向 `/responses` 发一个不认识的 builtin 工具类型，上游 400 的 message 里会**列出该端点当前接受的全部 builtin 工具名**（本次是 15 个，含 `web_search_preview`）。这意味着存在一条**不依赖目录、也不依赖手工清单**的能力探测路径：对某个模型发一次带哨兵工具类型的最小请求，从错误体里读回它的 builtin 工具清单。
+
+**没有验证的前提**（不要当已知）：这份清单是**按模型**给的还是整个 `/responses` 端点共用一份——本次只在 `gpt-5.5` 上见过两次，两次内容一致，**无法区分这两种解释**。若它是端点级的，这条路答不出「哪个模型支持」，只能答「端点接受哪些名字」。要用它就得先在第二个模型上验证一次。
+
+记在这里，不主张现在就实现：它与「配置项手工维护」是两条路，选哪条应当由用户裁决。

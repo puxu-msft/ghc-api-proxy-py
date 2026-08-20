@@ -14,7 +14,7 @@ from app.pipeline.translation_driver.registry import (
     inbound_name,
     outbound_name,
 )
-from app.pipeline.translation_driver.semantic import LossCode
+from app.pipeline.translation_driver.semantic import LossCode, SemanticRequest
 
 # The worked example from model-translation.md.
 ANTHROPIC_SYSTEM: list[dict[str, Any]] = [
@@ -532,3 +532,125 @@ def test_a_tool_call_in_the_response_sets_the_anthropic_stop_reason() -> None:
         target=WireFormat.ANTHROPIC_MESSAGES,
     )
     assert payload["stop_reason"] == "tool_use"
+
+
+def test_an_anthropic_server_tool_declaration_does_not_reach_the_responses_endpoint() -> None:
+    """`Invalid value: 'web_search_20250305'` — 400, measured 2026-08-20 against gpt-5.6-sol.
+
+    The declaration carries no `input_schema`, which is what the function-tool rewrite keys on, so it used to travel across untouched and cost the whole turn. A client with web search switched on replays it every request, so the turn after the failure failed the same way.
+
+    The function tool beside it is the other half of the assertion: dropping the declaration must not take the client's real tools with it.
+    """
+    payload, semantic = default_registry().translate(
+        {
+            **ANTHROPIC_REQUEST,
+            "tools": [
+                {"type": "web_search_20250305", "name": "web_search", "max_uses": 5},
+                {"name": "get_time", "input_schema": {"type": "object"}},
+            ],
+        },
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    assert payload["tools"] == [
+        {"type": "function", "name": "get_time", "parameters": {"type": "object"}}
+    ]
+    assert semantic.conversion.has(LossCode.SERVER_TOOL_NOT_CARRIED), semantic.conversion.losses
+
+
+def test_a_request_whose_only_tool_was_a_server_tool_sends_no_tools_key() -> None:
+    """Absent rather than `[]`. An empty array is a different thing to say than saying nothing, and it is not the spelling every request without tools already uses."""
+    payload, _ = default_registry().translate(
+        {
+            **ANTHROPIC_REQUEST,
+            "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+        },
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    assert "tools" not in payload
+
+
+def test_the_endpoints_own_web_search_spellings_are_left_alone() -> None:
+    """The reason the predicate reads the date suffix and not the `web_search_` prefix.
+
+    All three are values this endpoint accepts — the last two appear by name in the enumeration it prints when it refuses one — and a prefix test would have removed them from a Responses-to-Responses crossing that had every right to them.
+    """
+    request = SemanticRequest(
+        model="gpt-5.6-sol",
+        tools=[
+            {"type": "web_search"},
+            {"type": "web_search_preview"},
+            {"type": "web_search_preview_2025_03_11"},
+        ],
+    )
+    payload = to_openai_responses(request)
+    assert payload["tools"] == request.tools
+    assert request.conversion.lossless, request.conversion.losses
+
+
+def test_the_next_dated_version_of_a_server_tool_is_caught_too() -> None:
+    """Anthropic dates its server tools, so matching today's value literally would go quiet on the day it issues the next one."""
+    request = SemanticRequest(
+        model="gpt-5.6-sol",
+        tools=[{"type": "web_search_20991231", "name": "web_search"}],
+    )
+    assert "tools" not in to_openai_responses(request)
+    assert request.conversion.has(LossCode.SERVER_TOOL_NOT_CARRIED)
+
+
+def test_web_fetch_is_left_for_its_own_repair() -> None:
+    """This endpoint refuses `web_fetch` too, and taking it out here would still be the wrong repair.
+
+    The two families are owed different things. `hosted-web-search-spec.md` §8.3 has web search removed and the turn carried on; §13 has `web_fetch` refused outright and locally, so the client is told the tool is unavailable instead of being served without it and never finding out. Stripping it here delivers neither, so it travels unchanged and is refused upstream — the same standing gap `bash_20250124` and the other dated client-side tools sit in, recorded in `docs/tmp/260820-websearch-responses-leg-400-fix.md` §5.1.
+
+    Asserted rather than left implicit because the obvious edit is to add `web_fetch_` to the family list — it is one word, it looks like a completion, and nothing else would object.
+    """
+    request = SemanticRequest(
+        model="gpt-5.6-sol",
+        tools=[{"type": "web_fetch_20250910", "name": "web_fetch"}],
+    )
+    assert to_openai_responses(request)["tools"] == [
+        {"type": "web_fetch_20250910", "name": "web_fetch"}
+    ]
+    assert request.conversion.lossless
+
+
+def test_a_choice_left_pointing_at_a_removed_declaration_goes_with_it() -> None:
+    """Otherwise one rejection is traded for another.
+
+    Reachable only on the same-format crossing: `tool_choice` is nobody's modelled field, so it rides in `extensions` and is dropped on the way to another format — but a Responses request replays its own extensions verbatim, and a client can have sent the Anthropic spelling of a declaration and named it here too.
+    """
+    payload, _ = default_registry().translate(
+        {
+            "model": "gpt-5.6-sol",
+            "input": [],
+            "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+            "tool_choice": {"type": "function", "name": "web_search"},
+        },
+        source=WireFormat.OPENAI_RESPONSES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    assert "tools" not in payload
+    assert "tool_choice" not in payload
+
+
+def test_a_choice_that_still_names_a_declared_tool_is_left_alone() -> None:
+    """The control. Removing a choice that resolves would change what the client asked for, to no purpose — and a cleanup keyed on anything looser than "its tool is gone" does exactly that."""
+    payload, _ = default_registry().translate(
+        {
+            "model": "gpt-5.6-sol",
+            "input": [],
+            "tools": [
+                {"type": "web_search_20250305", "name": "web_search"},
+                {"type": "function", "name": "get_time", "parameters": {"type": "object"}},
+            ],
+            "tool_choice": {"type": "function", "name": "get_time"},
+        },
+        source=WireFormat.OPENAI_RESPONSES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    assert payload["tools"] == [
+        {"type": "function", "name": "get_time", "parameters": {"type": "object"}}
+    ]
+    assert payload["tool_choice"] == {"type": "function", "name": "get_time"}

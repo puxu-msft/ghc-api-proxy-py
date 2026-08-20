@@ -44,6 +44,7 @@ class LossCode(StrEnum):
     REASONING_STATE_NOT_PORTABLE = "reasoning-state-not-portable"
     INSTRUCTIONS_ROLE_NOT_CARRIED = "instructions-role-not-carried"
     TOOL_RESULT_CONTENT_FLATTENED = "tool-result-content-flattened"
+    SERVER_TOOL_NOT_CARRIED = "server-tool-not-carried"
 
 
 @dataclass(frozen=True, slots=True)

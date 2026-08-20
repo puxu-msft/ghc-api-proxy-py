@@ -206,6 +206,35 @@ def test_the_responses_leg_keeps_the_blank_blocks_it_was_given() -> None:
     ]
 
 
+def test_an_anthropic_server_tool_declaration_never_reaches_the_responses_endpoint() -> None:
+    """The whole turn used to be rejected over it: `Invalid value: 'web_search_20250305'`, measured 2026-08-20 against gpt-5.6-sol.
+
+    Asserted on the bytes upstream received rather than on the translator's return value, because the declaration reached the wire through a shortcut in the translator that every unit test of the tool conversion walked straight past — `_function_tool` left alone anything without an `input_schema`, on the reasoning that it must already be Responses-shaped, and an Anthropic server tool has no `input_schema` either.
+
+    The function tool beside it is the other half: removing the declaration must not take the client's real tools with it.
+    """
+    client, seen = make_client(lambda _: httpx.Response(200, json={"id": "resp_1"}))
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "gpt-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 64,
+            "tools": [
+                {"type": "web_search_20250305", "name": "web_search", "max_uses": 5},
+                {"name": "get_time", "input_schema": {"type": "object"}},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert b"web_search" not in seen[-1].read()
+    sent = orjson.loads(seen[-1].read())
+    assert sent["tools"] == [
+        {"type": "function", "name": "get_time", "parameters": {"type": "object"}}
+    ]
+
+
 def test_model_mapping_is_applied_before_the_upstream_call() -> None:
     client, seen = make_client(
         lambda _: httpx.Response(200, json={"id": "msg_1"}),

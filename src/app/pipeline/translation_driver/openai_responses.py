@@ -16,6 +16,7 @@ The Anthropic passthrough path keeps the blocks and their markers intact.
 """
 
 import json
+import logging
 from collections.abc import Callable, Mapping
 from typing import Any, cast
 
@@ -36,6 +37,8 @@ from app.pipeline.translation_driver.semantic import (
 )
 
 WIRE_FORMAT = "openai-responses"
+
+logger = logging.getLogger(__name__)
 
 _PASSTHROUGH_KEYS = frozenset(
     {"model", "instructions", "input", "tools", "stream", "max_output_tokens", "temperature"}
@@ -134,6 +137,66 @@ def _function_tool(tool: dict[str, Any]) -> dict[str, Any]:
     converted["type"] = tool.get("type", "function")
     converted["parameters"] = tool["input_schema"]
     return converted
+
+
+# The one family this repair covers, and the one the production failure was about: `Invalid value: 'web_search_20250305'` with `invalid_request_body`, measured 2026-08-20 against gpt-5.6-sol.
+#
+# `web_fetch_` is deliberately *not* here, though this endpoint refuses it too. What the two need is not the same thing: `hosted-web-search-spec.md` §8.3 has web search removed and the turn continued, while §13 has `web_fetch` refused outright, locally, so the client is told rather than quietly served without it. Removing it here would deliver neither, and it is not what the failure being repaired was about.
+#
+# Nor are `memory_`, `tool_search_`, `text_editor_`, `bash_` and `computer_`. Those are declared by clients that really do send them, nothing has been put to this endpoint about them, and removing a declaration on a guess breaks a working request to prevent a failure nobody has seen. They travel unchanged today and are named in `docs/tmp/260820-websearch-responses-leg-400-fix.md` §5.1 as the gap that leaves.
+_ANTHROPIC_SERVER_TOOL_FAMILIES: tuple[str, ...] = ("web_search_",)
+
+
+def _is_anthropic_server_tool(tool: dict[str, Any]) -> bool:
+    """Whether this declaration is an Anthropic server tool under its dated spelling.
+
+    Matched on the date suffix, not on the family prefix alone, and that is the whole difficulty. `web_search_preview` and `web_search_preview_2025_03_11` are values this endpoint *does* accept — they are in the enumeration it prints when it refuses one — so a bare `web_search_` prefix test would strip them out of a Responses-to-Responses crossing that had every right to them. Anthropic dates its server tools `<family>_<YYYYMMDD>`, which nothing on the Responses side spells that way.
+
+    Reading the date rather than the exact value also survives the next version: the declaration in production today is `web_search_20250305`, and matching it literally would go quiet the day Anthropic issues the next one.
+    """
+    declared = tool.get("type")
+    if not isinstance(declared, str):
+        return False
+    for family in _ANTHROPIC_SERVER_TOOL_FAMILIES:
+        if not declared.startswith(family):
+            continue
+        suffix = declared[len(family) :]
+        # `isascii` as well as `isdigit`, because the latter alone accepts other scripts' digits.
+        if len(suffix) == 8 and suffix.isascii() and suffix.isdigit():
+            return True
+    return False
+
+
+def _tools_for_upstream(request: SemanticRequest) -> list[dict[str, Any]]:
+    """The declarations to send, with the web search one taken out.
+
+    Removed rather than translated into the endpoint's own `{"type": "web_search"}`, which it does accept and does execute — but that translation is not this repair's to make. It needs a model allow-list beside it, because the models advertising `/responses` include several nobody has put the question to, and it needs an answer for `allowed_domains` / `blocked_domains`, which upstream refuses outright and which cannot be dropped in silence: they are a *narrowing* the client asked for, and dropping one turns it into a no-op nothing downstream can detect. Both are already ruled on in `docs/agents/anthropic-responses-bridge/hosted-web-search-spec.md` (§9.3, §3.4), and neither is a line of code.
+
+    What happens to the reply is *not* among the reasons. An earlier version of this comment said a mapped declaration would come back as a `web_search_call` the response side could not take — that was read off the legacy chain, which is not the one serving this. Here an unmodelled item lands as `BlockKind.UNKNOWN`, is recorded as `ITEM_NOT_CARRIED` and dropped, and the answer text is delivered as usual.
+
+    So this is a stopgap and not the first half of that spec. The spec's capability gate would *pass* for the models this endpoint serves and ask for the mapping; what is written here removes the declaration unconditionally, which is the behaviour the gate's false branch describes. Calling it a subset would misread which branch we are on.
+
+    The trade is the one the Anthropic leg already makes in `builtin:server-tool-capability`: removing a declaration removes a capability, which is a real loss, and it is still the better of the two outcomes on offer, because the alternative is not "web search works" but "the whole turn is rejected".
+    """
+    kept: list[dict[str, Any]] = []
+    dropped: list[str] = []
+    for tool in request.tools:
+        if _is_anthropic_server_tool(tool):
+            dropped.append(cast(str, tool["type"]))
+            request.conversion.record(
+                LossCode.SERVER_TOOL_NOT_CARRIED,
+                f"{tool['type']} into {WIRE_FORMAT}: this endpoint has no such value",
+            )
+            continue
+        kept.append(_function_tool(tool))
+    if dropped:
+        # INFO, and for the reason the Anthropic-leg subscriber gives at the same decision: a client with web search switched on sends this on every request, so it is a setting rather than a warning — but it removes a capability the client believes it has, and an operator asking why search never runs should not have to turn on debug logging to find out. The structured record above goes to `conversion_losses`, which nothing reads today.
+        logger.info(
+            "dropped %d server-tool declaration(s) the Responses endpoint rejects: %s — the model will not be offered them",
+            len(dropped),
+            ", ".join(sorted(dropped)),
+        )
+    return kept
 
 
 def blocks_from_item(item: dict[str, Any]) -> tuple[str, tuple[ContentBlock, ...]]:
@@ -391,6 +454,35 @@ _SYSTEM_PROMPT_PLACEMENTS: dict[
 }
 
 
+def _drop_dangling_tool_choice(payload: dict[str, Any]) -> None:
+    """Remove a `tool_choice` left pointing at a declaration that is no longer being sent.
+
+    Only reachable on the same-format crossing. Anthropic's `tool_choice` is not a key any translator claims, so it rides in `extensions` and is dropped on the way to another format — but a Responses request replays its own extensions verbatim, and a client that sent the Anthropic spelling of a declaration can have named it here too.
+
+    Left behind, it trades one rejection for another: the declaration would no longer be refused, and the choice naming a tool that is not declared would be. That is the same reasoning, and the same two cases, as `_drop_dangling_choice` on the Anthropic leg — a choice that names a missing tool, and a choice of any kind once nothing is left to choose from.
+    """
+    choice = payload.get("tool_choice")
+    if choice is None:
+        return
+    remaining = payload.get("tools")
+    if not remaining:
+        del payload["tool_choice"]
+        return
+    if not isinstance(choice, dict) or not isinstance(remaining, list):
+        return
+    entry = cast(dict[str, Any], choice)
+    named = entry.get("name")
+    if not isinstance(named, str):
+        return
+    declared = {
+        cast(dict[str, Any], tool).get("name")
+        for tool in cast(list[Any], remaining)
+        if isinstance(tool, dict)
+    }
+    if named not in declared:
+        del payload["tool_choice"]
+
+
 def to_openai_responses(
     request: SemanticRequest,
     *,
@@ -402,8 +494,13 @@ def to_openai_responses(
     }
     if request.system:
         _SYSTEM_PROMPT_PLACEMENTS[system_prompts](payload, request)
+    dropped_any = False
     if request.tools:
-        payload["tools"] = [_function_tool(tool) for tool in request.tools]
+        tools = _tools_for_upstream(request)
+        dropped_any = len(tools) != len(request.tools)
+        if tools:
+            # Not `[]` when everything was removed. An empty array is a different thing to say than saying nothing, and absent is the spelling every request without tools already uses.
+            payload["tools"] = tools
     if request.stream:
         payload["stream"] = True
     if request.max_output_tokens is not None:
@@ -411,4 +508,7 @@ def to_openai_responses(
     if request.temperature is not None:
         payload["temperature"] = request.temperature
     payload.update(request.extensions_for(WIRE_FORMAT))
+    # After the extensions, because that is where `tool_choice` arrives on the crossing where it survives at all.
+    if dropped_any:
+        _drop_dangling_tool_choice(payload)
     return payload
