@@ -34,14 +34,20 @@ TOOL_USE_REASON = "tool_use"
 REASONING_WORD = {ReplyDialect.ANTHROPIC: "think", ReplyDialect.RESPONSES: "reason"}
 TOOL_WORD = {ReplyDialect.ANTHROPIC: TOOL_USE_REASON, ReplyDialect.RESPONSES: "function_call"}
 
-# Where a reply stops being ordinary. Byte thresholds are 1024-based to match what `format_bytes` prints, so the colour changes on the same line the number crosses `10.0KB` rather than a few hundred bytes either side of it.
-NOTABLE_BYTES, HEAVY_BYTES = 10 * 1024, 100 * 1024
-NOTABLE_TOKENS, HEAVY_TOKENS = 1_000, 10_000
+# Where a reply stops being ordinary, stated on the scale the reader sees rather than in raw units: kilobytes for wire bytes, thousands for token counts.
+NOTABLE_KB, HEAVY_KB = 10.0, 100.0
+NOTABLE_K_TOKENS, HEAVY_K_TOKENS = 1.0, 10.0
 
-# Reasons that mean the turn is over, split by whether it ended the way it meant to. `tool_use` is in neither: it says the turn is *continuing*, and colouring it as a finish would make the most common non-finish look like one.
-# Two tiers rather than one because green has to keep meaning "nothing to look at here". A reply cut off at the token limit, or one the model declined to give, did end the turn — but painting those the same green as a clean finish would hide the one thing about them worth seeing.
-FINISHED_REASONS = frozenset({"end_turn", "stop_sequence"})
-CURTAILED_REASONS = frozenset({"max_tokens", "refusal"})
+# How the turn ended, as a ladder rather than a flag. Every one of these is terminal, so a single colour would say only "it stopped" — which the presence of the field already says. What the reader wants is how much of a problem the ending was.
+# Green has to keep meaning "nothing to look at here", so a reply cut off at the token limit cannot share it: truncation is the one thing about that line worth seeing. A refusal goes further still — nothing was delivered and the turn cannot simply be resumed — which is why it sits at the same level as a failed status rather than one below.
+# `tool_use` is absent on purpose. It does end the model's reply, but it is the one reason that says the *work* is not over: the caller is expected to run the tools and come back, so painting it as an ending would put a full stop on the most common midpoint.
+# A closed whitelist rather than a rule. An unrecognised reason is left uncoloured, because there is no way to tell from its name whether it is good news or bad, and colouring it either way would assert something this code does not know.
+REASON_COLOURS = {
+    "end_turn": GREEN,
+    "stop_sequence": GREEN,
+    "max_tokens": YELLOW,
+    "refusal": RED,
+}
 
 # Tools whose presence means the turn is waiting on a person rather than on a machine. Worth picking out of an otherwise quiet list: it is the one entry that will not resolve on its own.
 ATTENTION_TOOLS = frozenset({"AskUserQuestion"})
@@ -129,25 +135,21 @@ def format_stop_reason(
 
     A Responses upstream has no stop reason of its own, so the assembler synthesises the Anthropic one the client is owed. That synthesised word is right for the response body and wrong for this line, which reports what upstream did: there, the thing that happened was a `function_call` item. The real name is used here so a reader is not left looking for a `tool_use` in a Responses trace that never contained one.
 
-    Colour says how the turn ended: green for a clean finish, yellow for one that ended without getting there, and nothing at all for a turn that has not ended. The names in the parentheses are quiet — see `_painted_tools`.
+    Colour says how much of a problem the ending was: green for a clean finish, yellow for a reply cut short at the token limit, red for one the model declined to give. A reason that ends the reply but not the work — `tool_use`, where the caller is expected to run the tools and come back — is left uncoloured, as is any reason not on the list. The names in the parentheses are quiet — see `_painted_tools`.
     """
     if not stop_reason:
         return ""
     named = [tool for tool in tools if tool]
     word = TOOL_WORD[dialect] if stop_reason == TOOL_USE_REASON else stop_reason
-    if stop_reason in FINISHED_REASONS:
-        painted = paint(word, GREEN, color=color)
-    elif stop_reason in CURTAILED_REASONS:
-        painted = paint(word, YELLOW, color=color)
-    else:
-        painted = word
+    reason_colour = REASON_COLOURS.get(stop_reason)
+    painted = paint(word, reason_colour, color=color) if reason_colour else word
     return f"{painted}({_painted_tools(named, color=color)})" if named else painted
 
 
 def _painted_tools(names: list[str], *, color: bool) -> str:
     """The tool names inside the parentheses, quiet except for the one that stops the turn.
 
-    Dim by default because the list is context for the word in front of it: what matters at a glance is that the turn ended in tool calls, and *which* ones only once somebody is already reading. `AskUserQuestion` is the exception and gets picked out, because it means the turn is waiting on a person — unlike every other entry, it will not resolve on its own, and that is worth spotting in a scrolling log.
+    Dim by default because the list is context for the word in front of it: what matters at a glance is that the reply ended in tool calls, and *which* ones only once somebody is already reading. `AskUserQuestion` is the exception and gets picked out, because that tool's whole purpose is to ask a person something — the work is now blocked on somebody noticing, which is worth spotting in a scrolling log. No claim is made about the other names: a tool is any string, and plenty of others may wait on approvals or external events too. This one simply says so on its face.
 
     Painted in runs rather than name by name so the commas inside a run are coloured with it. Painting each name separately would leave white commas between grey names, which reads as though the separators were part of something else.
     """
@@ -166,6 +168,16 @@ def _painted_tools(names: list[str], *, color: bool) -> str:
     if run:
         spans.append(paint(",".join(run), run_colour, color=True))
     return ",".join(spans)
+
+
+def shown_magnitude(value: int, base: int) -> float:
+    """The figure a reader will actually see, on the scale the thresholds are stated in.
+
+    Both formatters print one decimal place, so a count just under a threshold can round *up* to the same string as one just over it — 10239 and 10240 bytes both print `10.0KB`. Deciding the colour from the raw count then puts two different colours on two identical numbers, which is precisely the confusion the colour exists to prevent. Reading the shown figure instead costs about half a percent of threshold precision and buys a line that cannot contradict itself.
+
+    Below the scale's own switchover the formatter prints the bare count, so the ratio is left unrounded there: 999 tokens print as `999`, and rounding would call that `1.0` and colour it as though it had crossed.
+    """
+    return round(value / base, 1) if value >= base else value / base
 
 
 def format_count(value: int) -> str:
@@ -218,7 +230,7 @@ def format_tokens(usage: dict[str, Any], *, unicode: bool = True, color: bool = 
 
     if "output_tokens" in usage:
         produced = read("output_tokens")
-        colour = volume_colour(produced, notable=NOTABLE_TOKENS, heavy=HEAVY_TOKENS)
+        colour = volume_colour(shown_magnitude(produced, 1000), notable=NOTABLE_K_TOKENS, heavy=HEAVY_K_TOKENS)
         parts.append(paint(f"{down}{format_count(produced)}", colour, color=color))
     return " ".join(parts)
 
@@ -276,7 +288,9 @@ def format_completion_line(line: RequestLine, *, unicode: bool = True, color: bo
     # Wire bytes, one field for both directions so they read as a pair rather than as two unrelated numbers.
     # Only the returning half escalates. What this proxy sent upstream is a consequence of the request the client made and says nothing about how the reply went, so it stays quiet whatever its size.
     received_colour = (
-        volume_colour(line.bytes_out, notable=NOTABLE_BYTES, heavy=HEAVY_BYTES) if line.bytes_out is not None else DIM
+        volume_colour(shown_magnitude(line.bytes_out, 1024), notable=NOTABLE_KB, heavy=HEAVY_KB)
+        if line.bytes_out is not None
+        else DIM
     )
     wire = [
         paint(f"{up}{format_bytes(line.bytes_in)}", DIM, color=color) if line.bytes_in is not None else "",

@@ -347,8 +347,9 @@ def test_the_dialect_reaches_the_rendered_line() -> None:
 
 
 def _received(byte_count: int) -> str:
+    """One line's rendering of `byte_count` coming back. No duration: that field is white too, and a bare `WHITE in line` would then pass with the byte field left grey."""
     return format_completion_line(
-        RequestLine(method="POST", path="/p", status_code=200, duration_s=1.0, bytes_out=byte_count),
+        RequestLine(method="POST", path="/p", status_code=200, bytes_out=byte_count),
         color=True,
     )
 
@@ -356,12 +357,26 @@ def _received(byte_count: int) -> str:
 def test_what_came_back_escalates_with_its_size() -> None:
     """A reply an order of magnitude larger than usual should be visible without reading the number.
 
-    Thresholds are 1024-based so the colour turns on the same line the printed figure crosses `10.0KB`, rather than a few hundred bytes to either side of where a reader would expect it.
+    Asserted as whole spans — marker, printed figure and colour together — because that is the thing a reader sees, and because a bare colour check passes on any other coloured field in the line.
     """
-    assert DIM in _received(10 * 1024 - 1)
-    assert WHITE in _received(10 * 1024)
-    assert WHITE in _received(100 * 1024 - 1)
-    assert YELLOW in _received(100 * 1024)
+    assert f"{DIM}↓9.9KB{RESET}" in _received(10_188)
+    assert f"{WHITE}↓10.0KB{RESET}" in _received(10_189)
+    assert f"{WHITE}↓99.9KB{RESET}" in _received(102_348)
+    assert f"{YELLOW}↓100.0KB{RESET}" in _received(102_349)
+
+
+def test_the_same_number_is_never_shown_in_two_colours() -> None:
+    """The invariant behind where the thresholds sit.
+
+    `format_bytes` prints one decimal, so a raw threshold of exactly `10 * 1024` put `10239` and `10240` — both printed `10.0KB` — on opposite sides of it, and the line then showed one number in two colours. Colouring from the shown figure is what fixes that, and this is the assertion that keeps the two in step if either formatter's precision is ever changed.
+    """
+    seen: dict[str, set[str]] = {}
+    for count in list(range(10_100, 10_300)) + list(range(102_300, 102_500)):
+        rendered = _received(count).split()[-1]
+        colour, _, rest = rendered.partition("↓")
+        seen.setdefault(rest, set()).add(colour)
+    disagreeing = {shown: colours for shown, colours in seen.items() if len(colours) > 1}
+    assert not disagreeing, f"the same printed size came out in more than one colour: {disagreeing}"
 
 
 def test_what_went_out_stays_quiet_however_large() -> None:
@@ -379,27 +394,33 @@ def test_output_tokens_escalate_on_their_own_scale() -> None:
     def produced(count: int) -> str:
         return format_tokens({"input_tokens": 1, "output_tokens": count}, color=True)
 
-    assert DIM in produced(999)
-    assert WHITE in produced(1_000)
-    assert WHITE in produced(9_999)
-    assert YELLOW in produced(10_000)
+    assert f"{DIM}↓999{RESET}" in produced(999)
+    assert f"{WHITE}↓1.0k{RESET}" in produced(1_000)
+    assert f"{WHITE}↓9.9k{RESET}" in produced(9_949)
+    # Rounds up to `10.0k` on screen, so it is coloured as the figure it shows rather than the one it holds. `round` and `f"{:.1f}"` round the same float the same way, which is what keeps the two in step.
+    assert f"{YELLOW}↓10.0k{RESET}" in produced(9_951)
+    # Just below the k form, where the bare count is printed and rounding must not be applied.
+    assert f"{DIM}↓999{RESET}" in produced(999)
 
 
-def test_a_clean_finish_is_green_and_a_curtailed_one_is_not() -> None:
-    """Green has to keep meaning "nothing to look at here".
+def test_how_the_turn_ended_is_a_ladder_not_a_flag() -> None:
+    """Every one of these is terminal, so one colour would say only "it stopped" — which the field already says.
 
-    `max_tokens` and `refusal` did end the turn, so they are terminal in the sense the word usually carries — but painting them the same green as a clean finish would hide the one thing about them worth seeing.
+    What the reader wants is how much of a problem the ending was: a clean finish is nothing to look at, truncation at the token limit is the single thing worth seeing on that line, and a refusal delivered nothing and cannot simply be resumed.
     """
     assert format_stop_reason("end_turn", (), color=True) == f"{GREEN}end_turn{RESET}"
     assert format_stop_reason("stop_sequence", (), color=True) == f"{GREEN}stop_sequence{RESET}"
     assert format_stop_reason("max_tokens", (), color=True) == f"{YELLOW}max_tokens{RESET}"
-    assert format_stop_reason("refusal", (), color=True) == f"{YELLOW}refusal{RESET}"
-    # Not a finish at all: the turn is continuing, and colouring it as one would make the most common non-finish look like the end.
+    assert format_stop_reason("refusal", (), color=True) == f"{RED}refusal{RESET}"
+    # Not an ending at all: the turn is continuing, and colouring it as one would make the most common non-ending look like the end.
     assert format_stop_reason("tool_use", (), color=True) == "tool_use"
 
 
-def test_the_tool_that_waits_on_a_person_is_picked_out_of_the_list() -> None:
-    """Every other entry resolves on its own; this one does not, which is what makes it worth seeing in a scrolling log."""
+def test_the_tool_that_asks_a_person_is_picked_out_of_the_list() -> None:
+    """That tool's purpose is to put a question to somebody, so the work is now blocked on a human noticing — worth seeing in a scrolling log.
+
+    No claim about the other names: a tool is any string and plenty of others may wait on approvals too. This one says so on its face, which is all the colour rests on.
+    """
     line = format_stop_reason("tool_use", ("Bash", "AskUserQuestion", "Read"), color=True)
     assert f"{CYAN}AskUserQuestion{RESET}" in line
     assert f"{DIM}Bash{RESET}" in line and f"{DIM}Read{RESET}" in line
