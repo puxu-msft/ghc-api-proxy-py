@@ -12,6 +12,7 @@ from app.model_provider.types import (
     ModelDescriptor,
     ModelEndpoint,
     UnknownModel,
+    model_type_of,
     require_endpoint,
     resolve_endpoints,
 )
@@ -24,18 +25,6 @@ def _string_mapping(value: object) -> dict[str, str]:
         return {}
     entries = cast(dict[object, object], value)
     return {str(key): str(item) for key, item in entries.items()}
-
-
-def _model_type(model: Mapping[str, Any]) -> str:
-    """`capabilities.type` — `chat`, `completion` or `embeddings` — or empty when unreadable.
-
-    It is the only thing in an entry that says which endpoint a model of this kind is served on, and it is needed exactly when `supported_endpoints` is absent.
-    """
-    capabilities = model.get("capabilities")
-    if not isinstance(capabilities, dict):
-        return ""
-    model_type = cast(dict[str, Any], capabilities).get("type")
-    return model_type if isinstance(model_type, str) else ""
 
 
 # ws:/responses is deliberately absent: the spec lists it as unsupported.
@@ -113,7 +102,7 @@ class GithubCopilotProvider:
             # `resolve_endpoints` rather than `parse_endpoints`: Copilot omits `supported_endpoints` for part of its catalog, and those models are served on the standard endpoint for their kind rather than being endpoint-less. Reading that here, once, is what keeps routing and any report of the catalog from answering the question differently.
             resolved = resolve_endpoints(
                 model.get("supported_endpoints"),
-                model_type=_model_type(model),
+                model_type=model_type_of(model),
             )
             descriptors[model_id] = ModelDescriptor(
                 id=model_id,

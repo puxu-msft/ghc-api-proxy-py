@@ -400,13 +400,63 @@ async def test_a_model_with_an_unstated_endpoint_can_actually_be_sent_to() -> No
 
 
 def test_an_endpoint_upstream_did_name_is_never_replaced_by_the_default() -> None:
-    # The fallback fires only where upstream was silent; an embeddings model that names an endpoint keeps it, and an empty list stays the refusal it is.
-    provider, _ = build_provider(upstream(httpx.Response(200)))
+    """The fallback fires only where upstream was silent.
 
-    assert provider.describe("embed-model") is not None
-    mute = provider.describe("mute-model")
-    assert mute is not None
-    assert mute.endpoints == frozenset()
+    The embeddings model has to name something *other* than `/embeddings` to be worth asserting: an embeddings model that named `/embeddings` would read the same whether the value was honoured or overwritten by the default for its kind.
+    """
+    provider, _ = build_provider(upstream(httpx.Response(200)))
+    provider.replace_catalog(
+        {
+            "data": [
+                {
+                    "id": "odd-embedder",
+                    "capabilities": {"type": "embeddings"},
+                    "supported_endpoints": ["/chat/completions"],
+                },
+                {"id": "explicitly-none", "supported_endpoints": []},
+                {"id": "unreadable", "supported_endpoints": "/responses"},
+            ]
+        }
+    )
+
+    def endpoints(model_id: str) -> frozenset[ModelEndpoint]:
+        descriptor = provider.describe(model_id)
+        assert descriptor is not None
+        return descriptor.endpoints
+
+    assert endpoints("odd-embedder") == {ModelEndpoint.OPENAI_CHAT_COMPLETIONS}
+    # Upstream said "none"; that stays a refusal rather than being filled in.
+    assert endpoints("explicitly-none") == frozenset()
+    # And a field nothing could read must not become a capability either.
+    assert endpoints("unreadable") == frozenset()
+
+
+async def test_an_unreadable_endpoint_field_is_refused_before_the_network() -> None:
+    """The end of it: a `supported_endpoints` we could not parse used to be answered by sending to the default.
+
+    The string case is the sharp one — `"/responses"` names a path contradicting the default, so filling it in would have sent the request to `/chat/completions` on the strength of a field nobody could read.
+    """
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    provider, http_client = build_provider(handler)
+    provider.replace_catalog(
+        {"data": [{"id": "unreadable", "capabilities": {"type": "chat"}, "supported_endpoints": "/responses"}]}
+    )
+    try:
+        with pytest.raises(CapabilityMissing):
+            await provider.send(
+                ModelEndpoint.OPENAI_CHAT_COMPLETIONS,
+                {"model": "unreadable"},
+                model_id="unreadable",
+            )
+    finally:
+        await http_client.aclose()
+
+    assert seen == []
 
 
 def test_the_catalog_is_kept_as_upstream_sent_it() -> None:

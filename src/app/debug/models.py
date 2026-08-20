@@ -15,7 +15,7 @@ from rich.cells import cell_len
 
 from app.auth.providers import NoGitHubToken
 from app.config.schema import ProxyConfig
-from app.model_provider import GithubCopilotProvider, resolve_endpoints
+from app.model_provider import GithubCopilotProvider, model_type_of, resolve_endpoints
 from app.model_provider.github_copilot import DRIVEN_ENDPOINTS
 from app.observability.footer import CONTROL_CHARS
 from app.server.composition import build_chain, build_http_client
@@ -104,14 +104,15 @@ def status_of(
     *,
     disabled: bool,
     policy_state: str,
+    offered: bool,
     drivable: bool,
     malformed: bool = False,
 ) -> str:
     """One word for why a request naming this model would not get through.
 
-    Ordered by who can act on it: the disabled list is the operator's to edit, the policy state is theirs to accept on github.com, and a missing driver is ours to write. Reporting the first of those hides nothing — clearing it re-runs this command and reveals the next.
+    Ordered by who can act on it: the disabled list is the operator's to edit, the policy state is theirs to accept on github.com, an offering of nothing is upstream's to change, and a missing driver is ours to write. Reporting the first of those hides nothing — clearing it re-runs this command and reveals the next.
 
-    There is no answer here for "upstream named no endpoints", because that is not a state a model is in. Copilot simply omits the key for part of its catalog, and `resolve_endpoints` gives those models the standard endpoint for their kind — the same one routing will use. A status saying otherwise would have described the catalog's phrasing rather than the model.
+    `no-endpoints` does **not** mean the catalog left the key out. Copilot does that for part of its catalog and `resolve_endpoints` fills those in with the standard endpoint for the model's kind, so they never reach here. It means upstream sent an explicit empty list — it offered zero endpoints, which is a different fix from a driver we have not written, and which upstream has never actually been observed doing.
 
     `malformed` outranks the rest because it is the one answer that is not about this model. A `supported_endpoints` that arrived as a string rather than a list is a field we could not read at all, and it must not be reported as a confident claim about what upstream offers.
 
@@ -123,6 +124,8 @@ def status_of(
         return "disabled"
     if policy_state and policy_state != _ENABLED_POLICY:
         return f"policy:{_printable(policy_state)}"
+    if not offered:
+        return "no-endpoints"
     if not drivable:
         return "no-driver"
     return ROUTABLE
@@ -168,10 +171,10 @@ def build_rows(
             continue
         capabilities = _mapping(model.get("capabilities"))
         limits = _mapping(capabilities.get("limits"))
-        # The same resolution routing uses, so the two cannot disagree about what a model offers.
+        # The same resolution routing uses, read through the same accessor, so the two cannot drift over what `capabilities.type` says.
         resolved = resolve_endpoints(
             model.get("supported_endpoints"),
-            model_type=_text(capabilities.get("type")),
+            model_type=model_type_of(model),
         )
         offered = tuple(
             sorted([endpoint.value for endpoint in resolved.known] + list(resolved.unknown))
@@ -187,6 +190,7 @@ def build_rows(
                 status=status_of(
                     disabled=model_id in blocked,
                     policy_state=_text(_mapping(model.get("policy")).get("state")),
+                    offered=bool(offered),
                     drivable=bool(set(offered) - undriven),
                     malformed=_wrong_shape(model),
                 ),
@@ -370,7 +374,7 @@ def render_json(catalogs: Sequence[ProviderCatalog], *, keyed: bool = True) -> s
 
     Not the upstream bytes: the response was parsed to JSON before it reached here, so whitespace, escape spelling and any duplicate object key are already gone. What survives is every field of the decoded catalog, which is what distinguishes this from the table — the table shows seven columns, this shows everything upstream said.
 
-    `keyed` reflects what was asked for, not how many providers happen to be configured. Without `--provider` the caller asked about the deployment and the answer has to say which upstream each payload came from; with it they named one, and wrapping that single answer in a key they already typed only makes it something to unwrap again.
+    `keyed` reflects what was asked for, not how many providers happen to be configured. The wrapper is dropped only when it also leaves exactly one payload to return — two catalogs cannot be one document, so a `keyed=False` that arrived alongside several of them keeps the names rather than picking a winner. Without `--provider` the caller asked about the deployment and the answer has to say which upstream each payload came from; with it they named one, and wrapping that single answer in a key they already typed only makes it something to unwrap again.
     """
     if not keyed and len(catalogs) == 1:
         return json.dumps(dict(catalogs[0].raw), indent=2, ensure_ascii=False)

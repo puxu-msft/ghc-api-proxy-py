@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
+from typing import Any, cast
 
 
 class ModelEndpoint(StrEnum):
@@ -98,6 +99,18 @@ _DEFAULT_ENDPOINT_BY_TYPE = {"embeddings": ModelEndpoint.OPENAI_EMBEDDINGS}
 DEFAULT_ENDPOINT = ModelEndpoint.OPENAI_CHAT_COMPLETIONS
 
 
+def model_type_of(model: Mapping[str, Any]) -> str:
+    """`capabilities.type` — `chat`, `completion` or `embeddings` — or empty when unreadable.
+
+    It is the only thing in an entry that says which endpoint a model of this kind is served on, and it is needed exactly when `supported_endpoints` says nothing. It lives beside `resolve_endpoints` rather than in either caller because routing and the report both have to read it, and reading it twice is how the two would come to disagree.
+    """
+    capabilities = model.get("capabilities")
+    if not isinstance(capabilities, dict):
+        return ""
+    model_type = cast(dict[str, Any], capabilities).get("type")
+    return model_type if isinstance(model_type, str) else ""
+
+
 @dataclass(frozen=True, slots=True)
 class ResolvedEndpoints:
     """Which endpoints a model offers, and whether the catalog is where that came from.
@@ -113,12 +126,16 @@ class ResolvedEndpoints:
 def resolve_endpoints(advertised: object, *, model_type: str = "") -> ResolvedEndpoints:
     """Read a catalog entry's endpoints, falling back to the standard one for its kind.
 
-    The fallback fires only where upstream said nothing at all. A list naming endpoints — even ones with no enum member — is upstream speaking and is taken at its word, and so is an empty list: "none" and "unstated" are different claims, and only the second is ours to fill in. Copilot has never been observed sending the empty form, so the distinction costs nothing and keeps `CapabilityMissing` meaning what it says.
+    Three inputs, three answers, and the distinction between the last two is the whole point:
+
+    - **Nothing stated** (the key is absent, or present as `null`) — Copilot's actual shape for part of its catalog. Filled in with the default for the model's kind.
+    - **A list** — upstream speaking, taken at its word, including the empty list. "None" and "unstated" are different claims and only the second is ours to fill in, so an empty list keeps `CapabilityMissing` meaning what it says. Copilot has never been observed sending that form.
+    - **Anything else** — a string, a mapping, a number. Upstream emitted the field and we could not read it, which is not silence. Filling in a default here would invent a capability from an unreadable field, and worse, would ignore a value that may contradict it: `"/responses"` as a bare string would be answered by sending to `/chat/completions`. It fails closed instead, and `_wrong_shape` in the report calls the same entry `malformed`, so routing and the report cannot disagree about it.
     """
     known, unknown = parse_endpoints(advertised)
     if known or unknown:
         return ResolvedEndpoints(known, unknown, True)
-    if isinstance(advertised, list):
+    if advertised is not None:
         return ResolvedEndpoints(frozenset(), (), True)
     default = _DEFAULT_ENDPOINT_BY_TYPE.get(model_type, DEFAULT_ENDPOINT)
     return ResolvedEndpoints(frozenset({default}), (), False)

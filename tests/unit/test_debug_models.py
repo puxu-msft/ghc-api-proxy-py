@@ -130,7 +130,29 @@ def test_an_endpoint_upstream_did_name_is_never_overwritten() -> None:
     assert rows["named"].assumed is False
     assert rows["explicitly-none"].endpoints == ()
     assert rows["explicitly-none"].assumed is False
-    assert rows["explicitly-none"].status == "no-driver"
+    # Not `no-driver`: there is no driver question when upstream offered nothing to drive, and the two send the operator to different places.
+    assert rows["explicitly-none"].status == "no-endpoints"
+
+
+def test_a_field_we_could_not_read_never_becomes_a_capability() -> None:
+    """A malformed `supported_endpoints` used to be filled in with the default and then actually sent to.
+
+    The string case is the sharp one: `"/responses"` carries a path contradicting the default, and answering it by sending to `/chat/completions` is worse than refusing. The report already called these `malformed`; routing has to agree, or the two layers rule differently on the same entry.
+    """
+    rows = _rows_by_id(
+        {
+            "data": [
+                _model("string-value", supported_endpoints="/responses"),
+                _model("mapping-value", supported_endpoints={}),
+                _model("number-value", supported_endpoints=7),
+            ]
+        }
+    )
+
+    for name in ("string-value", "mapping-value", "number-value"):
+        assert rows[name].endpoints == (), name
+        assert rows[name].assumed is False, name
+        assert rows[name].status == "malformed", name
 
 
 def test_an_upstream_policy_state_cannot_impersonate_one_of_our_own_words() -> None:
