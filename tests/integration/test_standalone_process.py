@@ -287,7 +287,9 @@ def test_a_pooled_client_that_races_the_signal_is_answered_rather_than_wedging_t
 
     This is the scenario `test_a_half_sent_request_holds_the_drain_until_the_operator_escalates` used to run: send, then signal at once, with nothing synchronising the two. Deliberately unsynchronised, because the race is the point — the signal lands first, the request reaches the barrier after admission has already been shut, and before the fix it waited there for a resume that a shutdown never performs. The whole process then sat at rung 1 until the operator escalated, which is what was reported from production.
 
-    It kept passing back then only because "still running at three seconds" was the very symptom. The correct expectation is the opposite one, and it is the only assertion in the suite that would notice this deadlock coming back to a real process — the in-process tests reach the same code, but the incident happened here.
+    It kept passing back then only because "still running at three seconds" was the very symptom. The correct expectation is the opposite one, and this is the only place in the suite aimed at this deadlock in a real process under a real signal — the in-process tests reach the same code, but the incident happened here.
+
+    **A probabilistic guard, and worth knowing which way.** The race it depends on is the one being tested, so how often it fires depends on what broke. Measured over ten isolated runs each: clean code 0/10 (it raises no false alarms), the whole of `stop_admitting` removed 10/10, the deadlock mechanism revived on its own 4/10, the refusal alone removed 2/10. So one green run does not mean the guard held, and one red run is always real. Treat it as a net that catches a returning deadlock eventually rather than immediately, and do not read a single pass as coverage.
     """
     port = free_port()
     child = start_child(port, pidfile)

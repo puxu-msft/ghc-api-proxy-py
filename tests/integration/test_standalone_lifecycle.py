@@ -304,9 +304,9 @@ async def test_a_pooled_connection_that_sends_mid_drain_does_not_hold_the_shutdo
 ) -> None:
     """The drain must end even though a client kept a connection and used it after the signal.
 
-    This is the shape of the incident, end to end: a pooled connection outlives the signal, the client sends on it, and the shutdown has to finish anyway.
+    This is the shape of the incident, end to end: a pooled connection outlives the signal, the client sends on it, and the shutdown has to finish anyway. What it catches is a regression in the mechanism as a whole — removing either half of `stop_admitting` on its own leaves this green, and only removing both turns it red.
 
-    What actually saves it here is the connection being closed, not the refusal — measured, by removing each half in turn. By the time this test writes its second request the pooled connection is already gone, so the bytes land in a closed socket and no second handler ever runs. The refusal is what covers the same client arriving a moment earlier, and `test_a_request_held_at_the_barrier_is_answered_rather_than_left_waiting` is where that half is pinned. Both belong: this one is the incident's own shape, and a whole-mechanism regression is what it catches.
+    On unmutated code the connection is already closed by the time this writes its second request, so those bytes land in a closed socket and no second handler runs. That is a description of the path taken, not a claim that it is the only path that would save it: the refusal covers the same client arriving a moment earlier, and `test_a_request_held_at_the_barrier_is_answered_rather_than_left_waiting` is where that half is pinned on its own.
     """
     serving = await run_until_serving(harness)
     _, pooled_writer = await harness.pooled()
@@ -332,17 +332,27 @@ async def test_a_pooled_connection_that_sends_mid_drain_does_not_hold_the_shutdo
 
 @pytest.mark.asyncio
 async def test_the_drain_lets_go_of_an_idle_pooled_connection(harness: Harness) -> None:
-    """A client holding an idle connection is told to go, rather than being left to discover it."""
+    """A client holding an idle connection is told to go at the drain, not at the teardown.
+
+    Both halves of that sentence need a witness, and the timing is the harder one. `shutdown_lifespan` closes the connections too, so an EOF observed after `serve()` returns proves nothing about rung 1 — a build that never closed a connection during the drain produces exactly the same EOF a moment later. Measured: with the closing removed, the earlier version of this test passed ten times out of ten.
+
+    So the slow request is here to hold the drain open. While it runs, `serve()` cannot return, the teardown cannot have run, and an EOF on the pooled connection has only one possible source.
+    """
     serving = await run_until_serving(harness)
     pooled_reader, pooled_writer = await harness.pooled()
-    assert harness.adapter.connection_count() == 1
+    in_flight = asyncio.create_task(harness.request("/slow"))
+    await asyncio.wait_for(harness.entered.wait(), 5)
+    assert harness.adapter.connection_count() == 2
 
     harness.server.receive_signal(signal.SIGTERM)
-    report = await asyncio.wait_for(serving, 5)
-
-    assert report.connections_asked_to_close == 1
     # The client's own socket is the proof; a count the server kept could be true of a connection it never actually closed.
     assert await asyncio.wait_for(pooled_reader.read(), 2) == b""
+    assert serving.done() is False, "the drain must still be running for that EOF to mean anything"
+
+    harness.hold.set()
+    assert b"200 OK" in await asyncio.wait_for(in_flight, 5)
+    report = await asyncio.wait_for(serving, 5)
+    assert report.connections_asked_to_close == 2
     pooled_writer.close()
 
 

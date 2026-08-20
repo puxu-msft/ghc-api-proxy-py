@@ -85,12 +85,14 @@ asyncio.exceptions.CancelledError
 - 复现脚本：修复前挂起并打出与生产同形的 traceback；修复后干净退出，在途长请求仍拿到 200。
 - 变异验证（做完即还原，`rg MUTATION` 已确认无残留）：
   - 把 `stop_admitting()` 调用改成 `0` → 「pooled 连接中途发请求」测试 `TimeoutError`（与生产同形）、「空闲连接被放掉」断言失败，评审后新增的真实进程测试 `TimeoutExpired`。
-  - 让 `stop_admitting()` 顺手 `cancel_requests()`（一个看似合理的过度修法）→ 三条第一档守卫全红，含既有的 `test_the_first_signal_stops_accepting_but_lets_a_request_finish`。
+  - 让 `stop_admitting()` 顺手 `cancel_requests()`（一个看似合理的过度修法）→ **8 条红**，三档守卫全在内，含既有的 `test_the_first_signal_stops_accepting_but_lets_a_request_finish`。（我原先只点了三条，是低报；红名单规模由独立审计复算得出。）
   - 只切「已开始写、尚未写完」的响应 → **只有**新增的 SSE 测试变红（9 块只到 1 块），其余全绿——这正是评审证明的那个盲区。
   - 让 `open_admission()` 只开闸不清拒绝态 → 新增的 resume 测试变红，复现出 resume 后的永久 503。
-- 全量：**1424 passed / 2 skipped**。Ruff `check` 与 Pyright 在全部改动文件上干净。
+- 全量：**1419 passed / 2 skipped**，在 `/tmp` 的干净 clone、checkout 到本次提交上测得。Ruff `check` 与 Pyright 在全部改动文件上干净。
 
-注：本次全量之前的一轮里 `tests/http/test_pipeline_app.py` 有两条红，属并行会话正在编辑该文件的在飞改动，与本次无关；重跑已绿。
+  ⚠️ 我先前在正文与对话里报过 1415／1424／1425 三个数，**那些都是在主工作树上量的，而主工作树混有并行会话的在飞测试改动，因此在本提交上不可复现**。一个在脏树上量出来的基线数字，最有害的用法就是被下一个人拿去做对比。以干净 checkout 的 1419 / 2 为准。
+
+注：本次全量之前的一轮里 `tests/http/test_pipeline_app.py` 有两条红，属并行会话正在编辑该文件的在飞改动，与本次无关；重跑已绿。同一批在飞改动也是上面那个数字差额的来源。
 
 ## 新增测试
 
@@ -166,3 +168,28 @@ asyncio.exceptions.CancelledError
 - 503 错误信封形状（Anthropic `overloaded_error`）与 WebSocket 1012 的意图，是我选的默认，未经裁决。
 - 滚动路径「quiesce 期间在已建连接上到达的请求是否该原地挂住」——`systemd-rolling/spec.md` 写着「仅 TCP 已 accept 不构成 drain 资格」，与当前挂住的行为存在张力。本次未动。
 - 评审顺带提示：工作树里 `tests/http/test_pipeline_app.py` 删掉了 `test_count_tokens_refuses_a_model_that_advertises_other_endpoints`（原断言 400 + `EndpointNotSupported`，改为 200 + 本地估算）。那属于**其他会话的在飞改动**，不在本次范围；是否已被裁决只有你知道。
+
+---
+
+# 变异审计处置（2026-08-20，提交 `1a7353e` 之后）
+
+报告：`docs/tmp/260820-shutdown-mutation-audit.md`。审计者在 `/tmp` 的干净 clone 上逐条复算了上面「变异验证」的四条声称，每条跑全量、竞态项另做 10 次隔离重复。
+
+**结论：四条声称全部成立**——红名单、失败异常类型、具体断言值（`assert 1 == 9`、503 报文原文）逐一对得上，没有一条是「跑过了、变红了」的空口声称。第 2 条是**低报**（实测 8 红，我只点了 3 条），方向对结论无害但会让读者低估爆破半径。
+
+## 采纳并已修
+
+| 发现 | 问题 | 处置 |
+|---|---|---|
+| 4.1 | 全量数字 **1424 不可复现**：那是在混有并行会话在飞改动的脏树上量的，干净 checkout 上是 1419 / 2 | 正文已改为 1419 / 2 并注明测量位置，同时标出先前三个数字都不该被当基线 |
+| 发现 A（major） | `test_the_drain_lets_go_of_an_idle_pooled_connection` **对它自称在证的东西零分辨力**：E1（第一档一条连接都不关）下 10/10 全绿。两条断言各自失效——计数是 `len(connections)`，与是否真调过 `shutdown()` 无关；而 EOF 读在 `serving` 完成**之后**，那时 `shutdown_lifespan` 早已把连接关了，EOF 来自收尾而非第一档 | 加一个在途 `/slow` 请求把排空窗口撑开，把 EOF 的读取挪到 `serve()` 返回**之前**，并断言 `serving.done() is False`——此时收尾还没跑，EOF 只有一个可能来源。实测：E1 下 **5/5 变红**（改前同一变异 10/10 全绿），干净码 5/5 通过 |
+| 发现 B（minor） | `test_a_pooled_connection_that_sends_mid_drain...` 的 docstring 写「measured, by removing each half in turn」来支撑**排他归因**（「救它的是关连接不是拒绝」）。实测两半各自去掉它都绿，只有两半都没有才红——那个测量恰恰**不**支持排他归因 | docstring 改为：它抓的是整体机制回归；「未变异时走关连接那条路」是对路径的描述，不是「只有这条路救得了它」的主张 |
+| 发现 C（minor） | 真实进程竞态守卫的 docstring 称自己是「唯一会注意到死锁复发的断言」，读起来像一道确定性防线。实测检出率是概率性的：干净码 0/10（无假红）、整体移除 10/10、死锁机制复活 4/10、只删拒绝 2/10 | docstring 写明它是**概率性守卫**并附实测数量级：一次绿不等于守住了，一次红一定是真的 |
+| 第 2 条声称 | 红名单低报（3 → 8） | 正文已改，并注明原数是低报 |
+
+## 记录但不改
+
+- **发现 D**：真正承重的那一半（拒绝准入）在全量 1421 条里只有 `test_a_request_held_at_the_barrier_is_answered_rather_than_left_waiting` 一条**确定性**守卫（真实进程那条只有 2/10）。它直接驱动 adapter，守的是 `stop_admitting()` 的内部契约；关停路径的接线另有三条守着。两层各有守卫、无缺口，但承重半边的确定性守卫只有一条——记录下来，不为此再加测试。
+- **发现 E**：E3 变异顺带打红 `test_partial_arm_failure_rolls_back_all_registrations`，说明「置拒绝态时必须开闸」这条不变量在 arm 失败路径上也有守卫。正面信息，无需处置。
+- **4.3**：`--fd` systemd 路径不受影响的陈述**属实**，审计者穷尽枚举了 `_install_admission_barrier()` 的调用点。限定条件：静态可达性分析，未在运行时实际拉起 `--fd` 路径验证。
+- **4.4**：复现脚本与真实 CLI 端到端两节依赖未入库的一次性脚本与真实上游凭据，审计者无法复算，对其不作判断。
