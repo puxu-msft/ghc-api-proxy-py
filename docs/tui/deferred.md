@@ -77,4 +77,4 @@
 
 **为什么没做**：`ghc-failed` 已经把「要不要看一眼」这个判断交付给读者了，剩下的是排障时才需要的细节，而排障时结构化记录本来就在手边。**证据强度：已想到，未观测到有人因此卡住过。**
 
-**来源**：`docs/tmp/260820-review-count-tokens-log-line.md` F6，以及更早的 `docs/tmp/260820-review-count-tokens-shared-pipeline.md:72`。
+**来源**：`archive-count-tokens-line/reports/260820-review-count-tokens-log-line.md` F6，以及更早的 `docs/tmp/260820-review-count-tokens-shared-pipeline.md:72`（后者属另一切片，仍在主仓 `docs/tmp`）。
