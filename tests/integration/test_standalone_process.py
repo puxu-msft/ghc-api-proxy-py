@@ -207,6 +207,48 @@ def test_sigterm_reaches_the_ladder_in_a_real_process(pidfile: Path) -> None:
         stop(child)
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "A drain waits on the server's request tasks, and a request whose body has not finished "
+        "arriving already has one. The module docstring justifies the unbounded drain with 'a "
+        "request already carries its own deadline' — true once it reaches the pipeline, false "
+        "while it is still being read, because nothing bounds that read. One client that stops "
+        "mid-body therefore holds the shutdown open until the operator escalates. Reproduced "
+        "against aa8eea6, so this predates the observability work. Awaiting a ruling on whether "
+        "to bound the read or to bound the drain."
+    ),
+)
+def test_a_half_sent_request_does_not_hold_the_shutdown_open(pidfile: Path) -> None:
+    """The reported hang, reduced to its smallest form.
+
+    No upstream is involved and none is needed: the request never gets far enough to route, which is the whole point. It is also why the live footer showed nothing while this was happening — the proxy registers a request after reading its body, so a request stuck before that is invisible to the display and visible only as a connection count.
+    """
+    port = free_port()
+    child = start_child(port, pidfile)
+    held: list[socket.socket] = []
+    try:
+        wait_until_serving(pidfile)
+        for _ in range(2):
+            sock = socket.create_connection(("127.0.0.1", port), timeout=10)
+            # Announces more than it sends, so the server is still waiting on `receive` when the signal lands.
+            sock.sendall(
+                b"POST /health/liveness HTTP/1.1\r\nHost: localhost\r\n"
+                b"Content-Type: application/json\r\nContent-Length: 400\r\n\r\n"
+                b'{"partial":'
+            )
+            held.append(sock)
+
+        child.send_signal(signal.SIGTERM)
+        # Generous rather than long: an unobstructed drain here finishes well inside a second, so anything still running at five is stuck rather than slow.
+        stdout, _ = child.communicate(timeout=5)
+        assert "STOPPED DRAINING" in stdout
+    finally:
+        for sock in held:
+            sock.close()
+        stop(child)
+
+
 def test_the_pidfile_is_removed_when_the_process_stops(pidfile: Path) -> None:
     port = free_port()
     child = start_child(port, pidfile)
