@@ -6,7 +6,7 @@ A request that started under one version keeps seeing it.
 `NOT_HOT_RELOADABLE` lists the dotted paths the spec marks as requiring a restart.
 """
 
-from typing import Annotated, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -138,12 +138,7 @@ class UpstreamRequestTimeoutsConfig(Section):
     # The spec's frozen invariant is never to false-kill legitimate thinking.
     # Silence on a live connection has no provably safe wall-clock bound.
     response_header: int = Field(default=0, ge=0)
-    response_header_overrides: dict[str, int] = Field(default_factory=lambda: dict[str, int]())
     stream_idle: int = Field(default=0, ge=0)
-    # Constrained on the value, not just the key: the scalar above already refuses a negative, and without the same bound here a negative override passes validation and then reads as `<= 0` at the guard — which means "disabled". An operator who mistypes the sign gets the opposite of what they asked for, silently.
-    stream_idle_overrides: dict[str, Annotated[int, Field(ge=0)]] = Field(
-        default_factory=lambda: dict[str, int]()
-    )
     upstream_request_deadline: int = Field(default=1200, ge=0)
 
 

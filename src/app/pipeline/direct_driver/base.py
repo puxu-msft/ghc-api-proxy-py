@@ -98,6 +98,7 @@ class DirectDriver:
         *,
         budget: Budget,
         attempt_deadline: int = 0,
+        response_header_timeout: int = 0,
         rate_limiter: RateLimiter | None = None,
     ) -> None:
         self._endpoint = endpoint
@@ -105,6 +106,7 @@ class DirectDriver:
         self._subscribers = subscribers
         self._budget = budget
         self._attempt_deadline = attempt_deadline
+        self._response_header_timeout = response_header_timeout
         self._rate_limiter = rate_limiter
 
     @property
@@ -125,6 +127,9 @@ class DirectDriver:
         outcome = DriverOutcome(context=context)
         while True:
             attempt = context.begin_attempt()
+            if self._attempt_deadline > 0:
+                # Fixed here rather than at the send, so that everything this attempt does — preparing, waiting on the rate limiter, sending, and then streaming a body long after this function has returned — is measured against one instant.
+                attempt.deadline_at = asyncio.get_running_loop().time() + self._attempt_deadline
             outcome.attempts = context.attempt_count
             try:
                 await self._publish(EVENT_ATTEMPT_PREPARE, context, outcome)
@@ -218,10 +223,11 @@ class DirectDriver:
         context: RequestContext,
         payload: dict[str, Any],
     ) -> httpx.Response:
-        """Send one attempt, bounded by the attempt deadline when one is configured.
+        """Send one attempt under both upstream guards that can act from here.
 
-        The deadline bounds the whole attempt rather than a phase of it, which is what catches an
-        upstream that trickles forever without ever finishing.
+        This await ends when the response headers arrive, not when the body has been read — measured 2026-08-20 on a server that held the body back two seconds after its headers. So `response_header` is exactly what this bounds, and the attempt deadline can only do half its job here: the streaming body outlives this function, and the delivery chain enforces the rest of the same instant.
+
+        Both raise `UpstreamTimeout`, which is retryable, because both fire while the driver still owns the attempt and nothing has been shown to the client yet.
         """
         send = self._provider.send(
             self._endpoint,
@@ -230,12 +236,25 @@ class DirectDriver:
             stream=context.stream,
             extra_headers=context.client_headers or None,
         )
-        if self._attempt_deadline <= 0:
-            return await send
-        try:
-            async with asyncio.timeout(self._attempt_deadline):
+        attempt = context.current_attempt
+        deadline_at = attempt.deadline_at if attempt is not None else None
+
+        async def under_header_guard() -> httpx.Response:
+            if self._response_header_timeout <= 0:
                 return await send
+            try:
+                async with asyncio.timeout(self._response_header_timeout):
+                    return await send
+            except TimeoutError as error:
+                raise UpstreamTimeout(
+                    f"no response headers within {self._response_header_timeout}s"
+                ) from error
+
+        if deadline_at is None:
+            return await under_header_guard()
+        try:
+            async with asyncio.timeout_at(deadline_at):
+                return await under_header_guard()
         except TimeoutError as error:
-            raise UpstreamTimeout(
-                f"attempt exceeded {self._attempt_deadline}s"
-            ) from error
+            # Reached only when the outer guard fired: an `UpstreamTimeout` from the inner one is not a `TimeoutError`, so it passes through with its own account of what ran out.
+            raise UpstreamTimeout(f"attempt exceeded {self._attempt_deadline}s") from error

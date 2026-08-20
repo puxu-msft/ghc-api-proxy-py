@@ -20,6 +20,7 @@ class OpenAIResponsesDriver(DirectDriver):
         *,
         budget: Budget,
         attempt_deadline: int = 0,
+        response_header_timeout: int = 0,
         rate_limiter: RateLimiter | None = None,
     ) -> None:
         super().__init__(
@@ -28,5 +29,6 @@ class OpenAIResponsesDriver(DirectDriver):
             subscribers,
             budget=budget,
             attempt_deadline=attempt_deadline,
+            response_header_timeout=response_header_timeout,
             rate_limiter=rate_limiter,
         )

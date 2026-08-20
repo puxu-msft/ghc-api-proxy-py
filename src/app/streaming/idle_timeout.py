@@ -1,6 +1,5 @@
+import asyncio
 from collections.abc import AsyncIterator
-
-import anyio
 
 from app.config.settings import TimeoutConfig
 
@@ -34,12 +33,16 @@ async def with_idle_timeout[T](
             return
 
         while True:
+            bound = asyncio.timeout(timeout_seconds)
             try:
-                with anyio.fail_after(timeout_seconds):
+                async with bound:
                     item = await anext(stream)
             except StopAsyncIteration:
                 return
             except TimeoutError as error:
+                # Only when this bound is what expired. Whatever is nested inside may report its own expiry as a `TimeoutError` too — `StreamDeadlineError` is one — and claiming it here would send an operator to a setting that is already correct. Without this the two guards could only be composed in one order, and nothing said so.
+                if not bound.expired():
+                    raise
                 raise StreamIdleTimeoutError(
                     f"No stream item received for {timeout_seconds:g}s"
                 ) from error

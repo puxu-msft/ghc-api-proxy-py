@@ -44,6 +44,7 @@ from app.server.pipeline_app import (
     _tracked_delivery,  # pyright: ignore[reportPrivateUsage]
     create_pipeline_app,
 )
+from app.streaming.deadline import StreamDeadlineError
 from app.streaming.idle_timeout import StreamIdleTimeoutError
 from app.tokenization.state_store import TokenizationStateStore
 
@@ -1313,7 +1314,7 @@ def test_a_token_count_says_it_was_one_and_which_counter_answered(request_log: N
     lines = _request_lines(caplog.records)
     assert len(lines) == 1
     # Both legs, because this count really did go upstream, and the counter named because the number is upstream's own measurement.
-    assert lines[0].startswith("H1/H1 200 anthropic-messages/claude-model ")
+    assert lines[0].startswith("H1/H1 200 anthropic-messages-count-tokens/claude-model ")
     assert lines[0].endswith("count(ghc)")
     # Both directions of that leg. One of them alone would say, by this line's own convention, that nothing came back — from the exchange that produced the number on the line.
     assert re.search(r"[↑>][\d.]+(B|KB|MB)\b", lines[0]), "the body sent upstream is what the count was measured on"
@@ -1338,7 +1339,7 @@ def test_a_count_upstream_could_not_answer_is_reported_as_an_estimate(request_lo
     assert response.json()["estimated"] is True
     lines = _request_lines(caplog.records)
     assert len(lines) == 1
-    assert lines[0].startswith("H1 200 anthropic-messages/claude-model ")
+    assert lines[0].startswith("H1 200 anthropic-messages-count-tokens/claude-model ")
     assert lines[0].endswith("count(local:ghc-failed)")
 
 
@@ -1360,7 +1361,7 @@ def test_a_count_with_no_upstream_counter_says_that_rather_than_a_failure(reques
     lines = _request_lines(caplog.records)
     assert len(lines) == 1
     # One leg, because nothing was sent, and the reason says that is by design rather than a failure.
-    assert lines[0].startswith("H1 200 anthropic-messages/gpt-model ")
+    assert lines[0].startswith("H1 200 anthropic-messages-count-tokens/gpt-model ")
     assert lines[0].endswith("count(local:no-counter)")
 
 
@@ -1381,7 +1382,7 @@ def test_a_count_upstream_answered_uselessly_keeps_the_leg_it_flew(request_log: 
     lines = _request_lines(caplog.records)
     assert len(lines) == 1
     # Both legs and both directions, next to the counter that says the number on the line is not upstream's.
-    assert lines[0].startswith("H1/H1 200 anthropic-messages/claude-model ")
+    assert lines[0].startswith("H1/H1 200 anthropic-messages-count-tokens/claude-model ")
     assert lines[0].endswith("count(local:ghc-failed)")
     assert re.search(r"[↑>][\d.]+(B|KB|MB)\b", lines[0])
     assert re.search(r"[↓<][\d.]+(B|KB|MB)\b", lines[0])
@@ -1994,14 +1995,104 @@ def test_the_bundled_default_leaves_a_quiet_upstream_alone() -> None:
     assert b"message_stop" in delivered
 
 
-def test_a_per_model_override_decides_the_idle_timeout() -> None:
-    # The overrides map is a second wire, and a wire nothing pulls on is a wire nobody notices is attached to the wrong terminal — which is how the sibling map came to be read as the attempt deadline's. The scalar here says "never give up"; only the override can produce this outcome.
+
+def _upstream_that_trickles(rounds: int) -> Callable[[httpx.Request], httpx.Response]:
+    """Never silent, and far too slow to finish: the shape neither phase guard can see.
+
+    Ends on its own after `rounds`, so that a deadline which failed to fire shows up as a stream that ran to completion rather than as a test that never returns.
+    """
+    whole = sse_upstream("first")
+    head, _, tail = whole.partition(b"event: message_delta")
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        async def body() -> AsyncIterator[bytes]:
+            yield head
+            for _round in range(rounds):
+                await asyncio.sleep(0.05)
+                yield b": ping\n\n"
+            yield b"event: message_delta" + tail
+
+        return httpx.Response(200, content=body(), headers={"content-type": "text/event-stream"})
+
+    return handler
+
+
+def test_the_attempt_deadline_reaches_the_streamed_body() -> None:
+    # The deadline was enforced only up to the response headers, because that is where the driver's await ends on a streaming request. Everything after — the part the setting's own documentation says it exists for — ran unbounded.
     client, _ = make_client(
-        _upstream_that_goes_quiet(1.5),
-        overrides={
-            "upstream_request_timeouts": {"stream_idle": 0, "stream_idle_overrides": {"claude-model": 1}}
-        },
+        _upstream_that_trickles(rounds=60),
+        overrides={"upstream_request_timeouts": {"upstream_request_deadline": 1}},
     )
 
-    with pytest.raises(StreamIdleTimeoutError):
+    with pytest.raises(StreamDeadlineError):
         _delivered(client)
+
+
+def _upstream_slow_to_answer(delay: float) -> Callable[[httpx.Request], Any]:
+    async def handler(_: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(delay)
+        return httpx.Response(
+            200,
+            content=sse_upstream("first"),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    return handler
+
+
+def test_the_configured_header_timeout_reaches_the_driver() -> None:
+    # The wire from the config file to the guard, which is the part that had been missing entirely: `response_header` was read, validated, and then handed to nothing. A guard that exists but is never given its setting looks exactly like one set generously, and the only way to tell them apart is to configure it and watch it fire.
+    client, _ = make_client(
+        _upstream_slow_to_answer(1.5),
+        overrides={"upstream_request_timeouts": {"response_header": 1}},
+    )
+
+    response = client.post(
+        "/v1/messages", json={"model": "claude-model", "messages": [], "stream": True}
+    )
+
+    assert response.status_code != 200
+    assert "no response headers within 1s" in response.text
+
+
+def test_a_slow_answer_is_left_alone_when_no_header_timeout_is_set() -> None:
+    # 0 is the bundled default, and the other direction has to hold too: the guard must not be firing on its own account.
+    client, _ = make_client(_upstream_slow_to_answer(1.5))
+
+    assert b'"text":"first"' in _delivered(client)
+
+
+def _upstream_slow_then_trickling(header_delay: float, rounds: int) -> Callable[[httpx.Request], Any]:
+    whole = sse_upstream("first")
+    head, _, tail = whole.partition(b"event: message_delta")
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(header_delay)
+
+        async def body() -> AsyncIterator[bytes]:
+            yield head
+            for _round in range(rounds):
+                await asyncio.sleep(0.05)
+                yield b": ping\n\n"
+            yield b"event: message_delta" + tail
+
+        return httpx.Response(200, content=body(), headers={"content-type": "text/event-stream"})
+
+    return handler
+
+
+def test_the_deadline_is_one_instant_and_not_a_duration_started_twice() -> None:
+    # The driver fixes the instant and the delivery chain reads it. Were the delivery chain to work it out again from its own clock, it would start counting when the headers arrived — and an attempt that spent two seconds waiting for them would get its full life all over again on top.
+    # Measured rather than asserted structurally, because the two readings differ only in when they land: three seconds from the start of the attempt, or three more from the moment the headers came back.
+    client, _ = make_client(
+        _upstream_slow_then_trickling(header_delay=2.0, rounds=200),
+        overrides={"upstream_request_timeouts": {"upstream_request_deadline": 3}},
+    )
+
+    started = time.monotonic()
+    with pytest.raises(StreamDeadlineError):
+        _delivered(client)
+    elapsed = time.monotonic() - started
+
+    # The headers alone cost two of the three seconds. Recomputing downstream would land near five.
+    assert elapsed < 4.0, f"the deadline was restarted downstream: {elapsed:.1f}s"

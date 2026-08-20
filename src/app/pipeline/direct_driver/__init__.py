@@ -39,6 +39,7 @@ class DriverFactory(Protocol):
         *,
         budget: Budget,
         attempt_deadline: int = 0,
+        response_header_timeout: int = 0,
         rate_limiter: RateLimiter | None = None,
     ) -> DirectDriver: ...
 

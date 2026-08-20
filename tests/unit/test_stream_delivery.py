@@ -30,7 +30,8 @@ from app.server.pipeline_app import (
     _counted_upstream,  # pyright: ignore[reportPrivateUsage]
     _Trace,  # pyright: ignore[reportPrivateUsage]
 )
-from app.streaming.idle_timeout import with_idle_timeout
+from app.streaming.deadline import StreamDeadlineError, with_deadline_at
+from app.streaming.idle_timeout import StreamIdleTimeoutError, with_idle_timeout
 
 
 def frame(event: str, data: dict[str, Any]) -> bytes:
@@ -926,3 +927,77 @@ async def test_a_due_preamble_goes_out_even_though_the_stream_is_already_over() 
 
     assert PING_FRAME not in chunks
     assert events_of(chunks) == ["message_start", "error"]
+async def _trickling_upstream() -> AsyncIterator[bytes]:
+    """Never silent, never finished — the shape the two phase guards cannot see."""
+    for payload in anthropic_stream("one")[:3]:
+        yield payload
+    while True:
+        await asyncio.sleep(0.05)
+        yield b": ping\n\n"
+
+
+@pytest.mark.asyncio
+async def test_the_deadline_stops_an_upstream_that_trickles_forever() -> None:
+    # What `upstream_request_deadline` is for, and what nothing enforced: `response_header` is spent once the headers arrive and `stream_idle` is reset by every drip, so an upstream that keeps talking without ever finishing satisfies both.
+    loop = asyncio.get_running_loop()
+    delivery = _delivery(with_deadline_at(_trickling_upstream(), deadline_at=loop.time() + 0.4))
+
+    with pytest.raises(StreamDeadlineError):
+        async for _ in delivery:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_the_deadline_does_not_answer_for_the_idle_guard() -> None:
+    # Nested guards both raise `TimeoutError`, so the outer one can report the inner one's expiry as its own. An operator reading that line reaches for the wrong setting and finds it already correct.
+    async def goes_quiet() -> AsyncIterator[bytes]:
+        for payload in anthropic_stream("one")[:3]:
+            yield payload
+        await asyncio.sleep(5)
+
+    loop = asyncio.get_running_loop()
+    delivery = _delivery(
+        with_deadline_at(
+            with_idle_timeout(goes_quiet(), timeout_seconds=1),
+            deadline_at=loop.time() + 30,
+        )
+    )
+
+    with pytest.raises(StreamIdleTimeoutError):
+        async for _ in delivery:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_no_deadline_leaves_a_slow_stream_alone() -> None:
+    delivered = [chunk async for chunk in _delivery(with_deadline_at(feed(anthropic_stream("one"), gap=0.05), None))]
+    assert events_of(delivered)[-1] == "message_stop"
+
+
+@pytest.mark.asyncio
+async def test_the_deadline_guard_settles_the_stream_it_was_watching() -> None:
+    # Same rule as every other layer on this chain, and the same reason for pinning it: nothing else on the chain notices if this one stops releasing what it consumes.
+    released: list[bool] = []
+
+    async def source() -> AsyncIterator[bytes]:
+        try:
+            for payload in anthropic_stream("one"):
+                yield payload
+            await asyncio.Event().wait()
+        finally:
+            released.append(True)
+
+    trace = _Trace(method="POST", path="/v1/messages")
+    counted = _counted_upstream(
+        with_deadline_at(source(), deadline_at=asyncio.get_running_loop().time() + 30),
+        cast(Any, SimpleNamespace(active_requests=ActiveRequestRegistry())),
+        "req",
+        trace,
+    )
+    delivery = _delivery(counted)
+
+    async for _ in delivery:
+        break
+    await delivery.aclose()
+
+    assert released == [True]

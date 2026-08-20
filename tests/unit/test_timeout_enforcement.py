@@ -112,3 +112,73 @@ async def test_zero_deadline_disables_the_guard() -> None:
     provider = SlowProvider(delay=0.05)
     outcome = await driver(provider, deadline=0).run(context())
     assert outcome.succeeded is True
+
+
+@pytest.mark.asyncio
+async def test_the_header_guard_stops_an_upstream_that_never_answers() -> None:
+    # `response_header` had a value, a name and documentation, and reached nothing: it was read out of the config file and then never passed to anything. A configured guard that does not exist looks exactly like a generous one.
+    provider = SlowProvider(delay=5.0)
+    driver_under_test = AnthropicMessagesDriver(
+        provider,
+        SubscriberRegistry[RequestContext]().freeze(),
+        budget=RetryBudget(max_total=0),
+        response_header_timeout=1,
+    )
+    outcome = await driver_under_test.run(context())
+    assert outcome.succeeded is False
+    assert "no response headers within 1s" in str(outcome.error)
+
+
+@pytest.mark.asyncio
+async def test_the_two_guards_each_report_themselves() -> None:
+    # They are set by different people for different reasons, and the completion line names the one an operator should reach for. Whichever runs out first has to say so under its own name.
+    provider = SlowProvider(delay=5.0)
+    header_first = AnthropicMessagesDriver(
+        provider,
+        SubscriberRegistry[RequestContext]().freeze(),
+        budget=RetryBudget(max_total=0),
+        attempt_deadline=10,
+        response_header_timeout=1,
+    )
+    assert "no response headers within 1s" in str((await header_first.run(context())).error)
+
+    deadline_first = AnthropicMessagesDriver(
+        SlowProvider(delay=5.0),
+        SubscriberRegistry[RequestContext]().freeze(),
+        budget=RetryBudget(max_total=0),
+        attempt_deadline=1,
+        response_header_timeout=10,
+    )
+    assert "attempt exceeded 1s" in str((await deadline_first.run(context())).error)
+
+
+@pytest.mark.asyncio
+async def test_zero_header_timeout_disables_the_guard() -> None:
+    provider = SlowProvider(delay=0.05)
+    driver_under_test = AnthropicMessagesDriver(
+        provider,
+        SubscriberRegistry[RequestContext]().freeze(),
+        budget=RetryBudget(max_total=0),
+        response_header_timeout=0,
+    )
+    assert (await driver_under_test.run(context())).succeeded is True
+
+
+@pytest.mark.asyncio
+async def test_the_attempt_carries_the_one_deadline_both_halves_read() -> None:
+    # The body is guarded after the driver has returned, so the instant has to survive the driver rather than be worked out again downstream — recomputing it there would hand the attempt a second full lifetime starting from whenever its headers happened to arrive.
+    provider = SlowProvider(delay=0.0)
+    ctx = context()
+    loop = asyncio.get_running_loop()
+    before = loop.time()
+    await driver(provider, deadline=30).run(ctx)
+
+    attempt = ctx.current_attempt
+    assert attempt is not None
+    assert attempt.deadline_at is not None
+    assert before + 30 <= attempt.deadline_at <= loop.time() + 30
+
+    unbounded = context()
+    await driver(SlowProvider(delay=0.0), deadline=0).run(unbounded)
+    assert unbounded.current_attempt is not None
+    assert unbounded.current_attempt.deadline_at is None

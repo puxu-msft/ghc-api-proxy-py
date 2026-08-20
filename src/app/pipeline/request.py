@@ -45,6 +45,8 @@ class Attempt:
     payload: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
     status_code: int | None = None
     error: str = ""
+    # The monotonic instant this attempt must not outlive, or `None` when nothing bounds it. An instant rather than a duration because two places enforce it — the driver, up to the response headers, and the delivery chain, over the body that arrives after the driver has returned — and a duration would be started twice, from two different moments, and would then bound rather more than one attempt's life.
+    deadline_at: float | None = None
 
 
 @dataclass(slots=True)

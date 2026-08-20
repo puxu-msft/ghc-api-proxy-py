@@ -50,6 +50,7 @@ from app.server.handler import (
 )
 from app.server.inbound import ROUTES, InboundRequestError, build_context, route_for_path
 from app.server.ops_routes import router as ops_router
+from app.streaming.deadline import with_deadline_at
 from app.streaming.idle_timeout import with_idle_timeout
 
 CHAIN_STATE_KEY = "pipeline_chain"
@@ -125,6 +126,8 @@ class _Trace:
     request_id: str = ""
     message_id: str = ""
     inbound_format: str = ""
+    # Which endpoint took the request, recorded as soon as the route is known — before anything can fail — so a count that never reached a counter is still reported as a count.
+    count_tokens: bool = False
     client_protocol: str = ""
     upstream_protocol: str = ""
     requested_model: str = ""
@@ -175,6 +178,7 @@ def _log_completion(chain: Chain, trace: _Trace, status_code: int | None, *, byt
         request_id=trace.request_id,
         message_id=trace.message_id,
         inbound_format=trace.inbound_format,
+        count_tokens=trace.count_tokens,
         client_protocol=trace.client_protocol,
         upstream_protocol=trace.upstream_protocol,
         requested_model=trace.requested_model,
@@ -201,7 +205,7 @@ def _log_completion(chain: Chain, trace: _Trace, status_code: int | None, *, byt
     status = status_for(status_code, override=trace.status_override)
     write_request_record(line, status=status)
     get_logger(REQUEST_LOGGER).info(
-        format_completion_line(line, unicode=chain.capabilities.unicode, color=chain.capabilities.color),
+        format_completion_line(line, status=status, unicode=chain.capabilities.unicode, color=chain.capabilities.color),
         status=status,
     )
 
@@ -252,6 +256,7 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
         # Defensive rather than reachable: `build_router` registers only paths `route_for_path` knows, so a request that got here has one. An unregistered URL is answered by FastAPI's own router and never reaches this function, which is why no completion line is written for it — that is a deliberate boundary, not an oversight: a 404 for a path this proxy does not serve is not a proxied request.
         return JSONResponse({"error": {"message": "unknown endpoint"}}, status_code=404)
     trace.inbound_format = route.wire_format.value
+    trace.count_tokens = route.count_tokens
 
     try:
         parsed: object = await request.json()
@@ -365,6 +370,8 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
         # The registration deliberately outlives this function. A streaming request has produced nothing at the moment the handler returns — the body is consumed after — so releasing here would drop it off the footer at exactly the point it becomes worth watching.
         # Held rather than passed straight through: the assembler is what reads the upstream's terminal event, so after the stream finishes it is the only thing that knows the token usage and the stop reason.
         assembler = assembler_for(handled)
+        # The instant the driver fixed when it opened this attempt, read rather than recomputed: a second `now + deadline` here would start the clock at the moment the headers came back and quietly grant the attempt a second full lifetime.
+        attempt = context.current_attempt
         accounting = _StreamAccounting(
             chain=chain,
             request_id=trace.request_id,
@@ -378,9 +385,14 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
                 stream_delivery(
                     # The guard measures upstream SSE activity, not the events parsed out of it. Ruled 2026-08-20: a comment frame and a large event still arriving both keep bytes moving while the parser yields nothing, so timing the parser would call a connection that is still transmitting silent — and never false-killing legitimate thinking is what `config.example.yaml` freezes.
                     _counted_upstream(
-                        with_idle_timeout(
-                            response.aiter_bytes(),
-                            timeout_seconds=stream_idle_seconds(chain, context.resolved_model),
+                        # Two guards on the same bytes, and the order decides which one gets to speak: the deadline is outermost so that an idle timeout raised beneath it arrives with its own name rather than being relabelled by whichever guard happens to wrap the other.
+                        # This is the half of `upstream_request_deadline` the driver cannot enforce. `await send` returns when the response headers arrive — measured 2026-08-20 — so everything the body does afterwards happens with the driver already off the stack, and until this line nothing was holding the attempt to the life it was given.
+                        with_deadline_at(
+                            with_idle_timeout(
+                                response.aiter_bytes(),
+                                timeout_seconds=stream_idle_seconds(chain),
+                            ),
+                            deadline_at=attempt.deadline_at if attempt is not None else None,
                         ),
                         chain,
                         trace.request_id,
