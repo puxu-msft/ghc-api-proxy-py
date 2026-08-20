@@ -248,20 +248,27 @@ async def test_silence_before_the_first_block_produces_no_keep_alive() -> None:
     assert events_of(chunks)[0] == "message_start"
 
 
-@pytest.mark.asyncio
-async def test_a_keep_alive_wait_leaves_no_asyncio_noise() -> None:
-    # A keep-alive means the upstream pull outlived its wait.
-    # The pull has to survive that wait without asyncio concluding that nobody is left to observe how it ends: end-of-stream reaches the pull as StopAsyncIteration, and a stale observer turns that ordinary ending into `StopAsyncIteration exception in shielded future` on the operator's stderr.
-    loop = asyncio.get_running_loop()
-    previous = loop.get_exception_handler()
+def test_a_keep_alive_wait_leaves_no_asyncio_noise() -> None:
+    """A keep-alive means the upstream pull outlived its wait, and it has to survive that quietly.
+
+    End-of-stream reaches the pull as StopAsyncIteration, and a stale observer turns that ordinary ending into `StopAsyncIteration exception in shielded future` on the operator's stderr.
+
+    Synchronous, with a loop of its own. A loop-wide exception handler sees whatever that loop reports, and asyncio reports an unretrieved exception when the object is collected — which can be long after whichever test created it. Installed on the shared loop, this assertion failed for things other tests left behind, on the orderings that happened to collect them here. A private loop can only report what this test put on it.
+    """
     reported: list[str] = []
-    loop.set_exception_handler(lambda _loop, context: reported.append(str(context.get("message"))))
-    try:
+
+    async def run() -> None:
+        asyncio.get_running_loop().set_exception_handler(
+            lambda _loop, context: reported.append(str(context.get("message")))
+        )
         assert await collect([], interval=1, initial_delay=1.2) == []
         await asyncio.sleep(0)
-    finally:
-        loop.set_exception_handler(previous)
+
+    asyncio.run(run())
+
     assert reported == []
+
+
 
 
 @pytest.mark.asyncio
