@@ -100,23 +100,37 @@ def _group(active: list[ActiveRequest], now: float, *, unicode: bool) -> list[_G
     return list(groups.values())
 
 
-def build_footer(active: list[ActiveRequest], now: float, columns: int, *, unicode: bool = True, draining: bool = False) -> str:
-    """The footer line, or an empty string when nothing is in flight.
-
-    Empty rather than a blank line: there is a difference between "no requests" and "a request whose fields are all blank", and the caller renders the former as no footer at all.
+def build_footer(
+    active: list[ActiveRequest],
+    now: float,
+    columns: int,
+    *,
+    unicode: bool = True,
+    draining: bool = False,
+    connections: int = 0,
+) -> str:
+    """The footer line, or an empty string when there is nothing to report.
 
     `draining` swaps the prefix for `[DRIN]`. Once the listener has stopped accepting, the same list of requests means something different — it can only shrink, and nothing new will join it — and a display that looked identical either way would leave the operator unable to tell a busy server from one that is on its way out.
+
+    `connections` is drawn even with no requests in flight, and that combination is the reason the field exists. A pooled client holds its connection between requests, so a drain waits on something the request list cannot show; without this the footer goes blank and a stall is indistinguishable from a finished shutdown.
     """
-    if not active:
+    if not active and connections <= 0:
         return ""
 
     prefix = DRAINING_PREFIX if draining else PREFIX
+    segments: list[str] = []
+    if connections > 0:
+        segments.append(f"{connections} conn" if connections == 1 else f"{connections} conns")
+    if not active:
+        return _finalize(prefix + SEPARATOR.join(segments), columns)
+
     groups = _group(active, now, unicode=unicode)
     budget = columns - 1
 
     # Pass one decides which models appear at all. Each is measured in its minimum form (head plus its longest-running request); models that do not fit collapse into a ` | +K more` tail.
     shown: list[_Group] = []
-    used = cell_len(prefix)
+    used = cell_len(prefix) + sum(cell_len(segment) + cell_len(SEPARATOR) for segment in segments)
     for index, group in enumerate(groups):
         separator = cell_len(SEPARATOR) if shown else 0
         remaining = len(groups) - index
@@ -145,7 +159,7 @@ def build_footer(active: list[ActiveRequest], now: float, columns: int, *, unico
             counts[index] += 1
             grew = True
 
-    segments = [group.render(counts[index]) for index, group in enumerate(shown)]
+    segments.extend(group.render(counts[index]) for index, group in enumerate(shown))
     if overflow:
         segments.append(f"+{overflow} more")
     return _finalize(prefix + SEPARATOR.join(segments), columns)

@@ -144,6 +144,13 @@ class UvicornListenerAdapter:
         else:
             await asyncio.wait_for(wait(), timeout)
 
+    def connection_count(self) -> int:
+        """How many client connections are currently open.
+
+        Distinct from the number of requests in flight, and the difference is the point: a pooled client holds its connection between requests, so a count that stays at one with nothing running is the normal idle state — and a drain that will not finish is a count that will not fall.
+        """
+        return len(self._server.server_state.connections)
+
     def interrupt_connections(self) -> int:
         """Ask every open connection to shut down, and report how many were asked.
 

@@ -112,6 +112,7 @@ class FooterTui:
             columns,
             unicode=self.capabilities.unicode,
             draining=self.registry.draining,
+            connections=self.registry.connections(),
         )
         # `dim` is an ANSI attribute, so it is withheld on the same probe that withholds colour rather than on a separate one.
         return Text(line, style="dim" if self.capabilities.color else "", no_wrap=True, overflow="crop")

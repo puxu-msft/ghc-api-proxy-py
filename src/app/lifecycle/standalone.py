@@ -64,6 +64,8 @@ class ListenerLifecycle(Protocol):
 
     def interrupt_connections(self) -> int: ...
 
+    def connection_count(self) -> int: ...
+
     def cancel_requests(self) -> int: ...
 
     async def shutdown_lifespan(self, *, drain_timeout: float | None = None) -> None: ...
@@ -130,10 +132,9 @@ class StandaloneServer:
                 # Only on the first move off `RUNNING`. Later rungs are escalations of a drain that has already been announced.
                 self._on_draining()
             # Said here because this is the only point that sees the keystroke. Everything after it can take as long as the drain takes, and a terminal that goes silent the moment Ctrl-C is pressed gives the operator no way to tell a graceful drain from a hung process — which is exactly when they reach for a second, harder signal.
-            get_logger(LIFECYCLE_LOGGER).info(
-                f"{sig.name} received, {_STAGE_WORDS[after]}",
-                status="ok" if after is ShutdownStage.DRAINING else "streaming",
-            )
+            #
+            # One prefix for every rung: they are the same kind of event, and picking a different one per severity said that a drain had "succeeded" and an interruption was "streaming". Severity belongs to the closing line, which reports what the shutdown actually cost.
+            get_logger(LIFECYCLE_LOGGER).info(f"{sig.name} received, {_STAGE_WORDS[after]}", status="draining")
 
     async def serve(self) -> ShutdownReport:
         acquired: set[str] = set()

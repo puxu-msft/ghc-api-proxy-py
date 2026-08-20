@@ -83,7 +83,7 @@ signalled = time.monotonic()
 print(f"sending SIGINT to pid {process.pid}")
 process.send_signal(signal.SIGINT)
 
-if busy:
+if busy and "--single" not in sys.argv:
     # The second key press, which is what escalates a drain into an interruption.
     time.sleep(1.5)
     print("sending a second SIGINT")

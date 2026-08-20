@@ -27,6 +27,33 @@ from app.observability.terminal import (
 )
 
 
+def http_label(version: str | None, *, websocket: bool = False) -> str:
+    """`H1` / `H2` / `WS` — which protocol carried this leg.
+
+    Short because it sits at the front of every line and its job is to be noticed only when it is not what was expected. `HTTP/1` and `HTTP/1.1` collapse to one label: the distinction has no bearing on anything this proxy does, while 1 versus 2 changes multiplexing and framing. A WebSocket is HTTP/1.1 underneath, but calling it `H1` would hide the one thing about it that matters.
+    """
+    if websocket:
+        return "WS"
+    if not version:
+        return ""
+    normalised = version.removeprefix("HTTP/")
+    if normalised.startswith("2"):
+        return "H2"
+    if normalised.startswith("1"):
+        return "H1"
+    return normalised
+
+
+def format_protocols(client: str, upstream: str) -> str:
+    """`<client>/<upstream>`, the two legs this proxy sits between, in that order.
+
+    Ordered as the request travels. Either side may be unknown — a request rejected before it reached upstream has no second leg — and the pair then degrades to whichever half is known rather than printing a placeholder for the other.
+    """
+    if client and upstream:
+        return f"{client}/{upstream}"
+    return client or upstream
+
+
 @dataclass(frozen=True, slots=True)
 class RequestLine:
     """Everything one request contributes to its own log line.
@@ -39,6 +66,8 @@ class RequestLine:
     method: str
     path: str
     inbound_format: str = ""
+    client_protocol: str = ""
+    upstream_protocol: str = ""
     requested_model: str = ""
     model: str = ""
     status_code: int | None = None
@@ -154,6 +183,10 @@ def format_completion_line(line: RequestLine, *, unicode: bool = True, color: bo
     up, down = ("↑", "↓") if unicode else (">", "<")
 
     parts: list[str] = []
+    protocols = format_protocols(line.client_protocol, line.upstream_protocol)
+    if protocols:
+        # Ahead of the status, so the two facts that describe the exchange itself — how it was carried and how it ended — sit together at the front.
+        parts.append(paint(protocols, DIM, color=color))
     if line.status_code is not None:
         parts.append(paint(str(line.status_code), GREEN if succeeded else RED, color=color))
     parts.extend(_subject(line, succeeded=succeeded, color=color))

@@ -9,7 +9,7 @@ The tracking boundary is deliberately not the handler's return. A streaming requ
 
 import threading
 import time
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import AsyncGenerator, Callable, Generator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 
@@ -31,6 +31,13 @@ class ActiveRequestRegistry:
     _lock: threading.Lock = field(default_factory=threading.Lock)
     # Set once the listener stops accepting. Held here rather than passed to each render because the renderer runs on its own thread and needs somewhere to read it from that is not a moving argument.
     _draining: bool = False
+    # Read on demand rather than stored, because the count changes without this class being told and a copy would be stale before it was drawn. `None` until the listener exists, and on the inherited-descriptor path where nobody owns a count to publish.
+    connection_count: Callable[[], int] | None = None
+
+    def connections(self) -> int:
+        """Open client connections, or zero when nothing is publishing a count."""
+        source = self.connection_count
+        return source() if source is not None else 0
 
     @property
     def draining(self) -> bool:

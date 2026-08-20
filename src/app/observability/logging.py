@@ -11,6 +11,8 @@ LogFormat = Literal["json", "text"]
 STATUS_PREFIXES = {
     "pending": "[....]",
     "streaming": "[<-->]",
+    # Every line of a shutdown sequence carries this one, whichever rung it reports. They are the same kind of event and giving them different prefixes by severity said, wrongly, that one of them had succeeded and another was streaming. Severity is the closing line's job.
+    "draining": "[DRIN]",
     "ok": "[ OK ]",
     "success": "[ OK ]",
     "fail": "[FAIL]",
@@ -50,6 +52,7 @@ PREFIX_COLOURS = {
     "[FAIL]": RED,
     "[RETRY]": YELLOW,
     "[<-->]": CYAN,
+    "[DRIN]": YELLOW,
     PENDING: DIM,
 }
 

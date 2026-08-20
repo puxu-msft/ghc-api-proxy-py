@@ -905,7 +905,7 @@ def test_a_served_request_writes_exactly_one_log_line(request_log: None, caplog:
     lines = _request_lines(caplog.records)
     assert len(lines) == 1
     # A success names the model instead of the route, and carries the status and how long it took.
-    assert lines[0].startswith("200 anthropic-messages/claude-model ")
+    assert lines[0].startswith("H1/H1 200 anthropic-messages/claude-model ")
 
 
 def test_a_refused_request_is_reported_with_its_route_and_reason(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
@@ -916,8 +916,8 @@ def test_a_refused_request_is_reported_with_its_route_and_reason(request_log: No
 
     lines = _request_lines(caplog.records)
     assert len(lines) == 1
-    # A failure keeps `METHOD /path`, because that is what has to be reproduced, and ends in the reason.
-    assert lines[0].startswith("400 POST /v1/messages ")
+    # A failure keeps `METHOD /path`, because that is what has to be reproduced, and ends in the reason. One protocol label rather than a pair: this request never reached upstream, so there is no second leg to name.
+    assert lines[0].startswith("H1 400 POST /v1/messages ")
     assert "no-such-model" in lines[0]
 
 
@@ -936,7 +936,7 @@ def test_a_streaming_request_reports_what_it_actually_delivered(request_log: Non
 
     lines = _request_lines(caplog.records)
     assert len(lines) == 1
-    assert lines[0].startswith("200 anthropic-messages/claude-model ")
+    assert lines[0].startswith("H1/H1 200 anthropic-messages/claude-model ")
     assert "↓" in lines[0], "a delivered stream must report its byte count"
     assert "↓0B" not in lines[0]
 

@@ -58,6 +58,10 @@ class StubAdapter:
     def interrupt_connections(self) -> int:
         return 0
 
+    def connection_count(self) -> int:
+        # Nothing here opens a socket, so nothing is holding one. The method exists because the protocol names it, and a stub that satisfies the protocol honestly is what lets the type checker catch the next caller that forgets it.
+        return 0
+
     def cancel_requests(self) -> int:
         return 0
 

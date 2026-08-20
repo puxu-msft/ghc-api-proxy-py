@@ -61,6 +61,7 @@ async def run_standalone(
     application: Application,
     options: StandaloneOptions,
     on_draining: Callable[[], None] | None = None,
+    on_observable: Callable[[Callable[[], int]], None] | None = None,
 ) -> StandaloneOutcome:
     """Serve until the shutdown ladder finishes, then release everything.
 
@@ -71,6 +72,10 @@ async def run_standalone(
     `on_draining` is a parameter rather than a field of `StandaloneOptions` because the options
     describe the listener; this is a hook for whoever is watching, and the two have no reason to
     travel together.
+
+    `on_observable` is handed the live connection count once the adapter exists. A number rather
+    than a snapshot, because a display reads it on its own schedule and a value copied out here
+    would be stale before it was drawn.
     """
     pidfile = options.pidfile_path()
     predecessor = live_predecessor(pidfile) if options.restart else None
@@ -106,6 +111,9 @@ async def run_standalone(
                 build_server_ssl_context(material),
             )
     announced = False
+
+    if on_observable is not None:
+        on_observable(adapter.connection_count)
 
     async def announce() -> None:
         nonlocal announced

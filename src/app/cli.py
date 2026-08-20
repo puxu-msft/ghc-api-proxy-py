@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from enum import StrEnum
 from functools import partial
 from pathlib import Path
@@ -157,8 +158,11 @@ async def _serve_pipeline(config: ProxyConfig, options: StandaloneOptions) -> No
     try:
         chain = build_chain(config, http_client=http_client)
         # Wired here because this is the one scope holding both the chain that owns the display and the server that learns the listener has stopped accepting.
+        def publish_connections(source: Callable[[], int]) -> None:
+            chain.active_requests.connection_count = source
+
         outcome = await run_standalone(
-            create_pipeline_app(chain), options, chain.active_requests.begin_draining
+            create_pipeline_app(chain), options, chain.active_requests.begin_draining, publish_connections
         )
         # `ShutdownReport` says of itself that it exists "so a caller can log it rather than guess", and until now every caller discarded it — the process simply stopped, and whether it drained cleanly or gave up on live requests was unknowable from the terminal.
         report_shutdown(outcome.report)

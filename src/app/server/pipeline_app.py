@@ -21,6 +21,7 @@ from app.observability.request_log import (
     RequestLine,
     format_arrival_line,
     format_completion_line,
+    http_label,
     status_for,
 )
 from app.observability.tui import footer_tui_or_none
@@ -66,6 +67,8 @@ class _Trace:
     method: str
     path: str
     inbound_format: str = ""
+    client_protocol: str = ""
+    upstream_protocol: str = ""
     requested_model: str = ""
     model: str = ""
     attempts: int = 1
@@ -87,6 +90,8 @@ def _log_completion(chain: Chain, trace: _Trace, status_code: int | None, *, byt
         method=trace.method,
         path=trace.path,
         inbound_format=trace.inbound_format,
+        client_protocol=trace.client_protocol,
+        upstream_protocol=trace.upstream_protocol,
         requested_model=trace.requested_model,
         model=trace.model,
         status_code=status_code,
@@ -112,6 +117,10 @@ async def _serve(request: Request) -> Response:
     """
     chain = _chain(request)
     trace = _Trace(method=request.method, path=request.url.path, started=time.monotonic())
+    # Off the ASGI scope, which is where the server records what it negotiated with the client. `websocket` covers the upgrade case, whose transport is HTTP/1.1 underneath but whose behaviour is nothing like it.
+    trace.client_protocol = http_label(
+        str(request.scope.get("http_version", "")), websocket=request.scope.get("type") == "websocket"
+    )
     # Off by default, the way `copilot-api-js` treats its arrival line: on a busy proxy it doubles the log for information the completion line repeats.
     get_logger(REQUEST_LOGGER).debug(format_arrival_line(RequestLine(method=trace.method, path=trace.path)), status="pending")
 
@@ -218,6 +227,7 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
             )
         # Exactly what went out to upstream, taken off the request httpx actually sent rather than re-serialized from the payload. It is not the client's body size: translation rewrites the payload, and the version upstream is billed and tokenized for is the one worth reporting.
         trace.bytes_in = len(response.request.content)
+        trace.upstream_protocol = http_label(response.http_version)
 
         if context.stream:
             # Block-level delivery over the live upstream.

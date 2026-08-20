@@ -11,6 +11,7 @@ from app.observability.request_log import (
     format_completion_line,
     format_stop_reason,
     format_tokens,
+    http_label,
     status_for,
 )
 from app.observability.terminal import BOLD_RED, DIM, RED, WHITE, YELLOW
@@ -90,6 +91,46 @@ def test_an_upstream_error_status_reads_as_a_failure_even_though_it_arrived() ->
     assert status_for(500, failed=False) == "fail"
     assert status_for(None, failed=False) == "fail"
     assert status_for(200, failed=True) == "fail"
+
+
+def test_the_protocol_of_each_leg_is_labelled() -> None:
+    # Client first, then upstream, in the order the request travels.
+    line = format_completion_line(
+        RequestLine(
+            method="POST",
+            path="/p",
+            inbound_format="f",
+            client_protocol="H2",
+            upstream_protocol="H1",
+            model="m",
+            status_code=200,
+            duration_s=1.0,
+        )
+    )
+    assert line.startswith("H2/H1 200 ")
+
+
+def test_a_leg_that_never_happened_is_not_invented() -> None:
+    # A request refused before it reached upstream has one leg, and printing a placeholder for the other would describe a connection that was never made.
+    line = format_completion_line(
+        RequestLine(method="POST", path="/p", client_protocol="H1", status_code=400, duration_s=0.001)
+    )
+    assert line.startswith("H1 400 POST /p")
+
+
+def test_http_versions_collapse_to_what_changes_behaviour() -> None:
+    # 1 versus 1.1 changes nothing this proxy does; 1 versus 2 changes multiplexing and framing.
+    assert http_label("1.0") == "H1"
+    assert http_label("1.1") == "H1"
+    assert http_label("HTTP/1.1") == "H1"
+    assert http_label("2") == "H2"
+    assert http_label("HTTP/2") == "H2"
+    assert http_label("") == ""
+
+
+def test_a_websocket_is_not_reported_as_the_http_1_1_it_rides_on() -> None:
+    # True underneath and useless to say: the upgrade is the one thing about the leg that matters.
+    assert http_label("1.1", websocket=True) == "WS"
 
 
 def test_a_tool_use_turn_names_the_tools_it_asked_for() -> None:
