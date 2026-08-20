@@ -26,6 +26,12 @@ rows = [
     ("legal leading bare",         [BARE, 1],                    False),
     ("trailing loss (2 of 3)",     [0],                          False),  # from [0,1,2]
     ("trailing bare loss",         [0],                          False),  # from [0,BARE]
+    # Found by review, not by me: the detector only ever compares payload carriers, so any
+    # corruption confined to bare markers is invisible wherever it sits — not just at the tail.
+    # The ten rows above were all cases I thought of, which is exactly why they could not
+    # support the general claim I drew from them.
+    ("bare-only swap (interior)",  [BARE, BARE, 2],              False),  # [bareA,bareB,p2] <-> swapped
+    ("bare-only substitution",     [BARE, BARE, 2],              False),  # one bare duplicated over another
 ]
 print(f"{'case':26} {'claimed':>8} {'actual':>8}  ok")
 ok = True
