@@ -21,9 +21,16 @@
 
 - **`repro_hang.py` 的绿什么都不证明。** 没有在途请求时整个关停在毫秒级走完，第二个请求根本落不进窗口——修复版与变异版都会「正常退出」。它留在这里是**反面教材**：一个探针的绿只有在先证明它能看见坏行为之后才作数。
 - **`e2e_severed.sh` 与 `e2e_severed_burst.sh` 的「没命中」不等于「不会发生」。** 它们量的是「从外部瞄不准这个窗口」，不是「窗口不存在」；`e2e_severed_hammer.sh` 证明了它存在。
-- **全部脚本只覆盖明文 HTTP/1.1 + h11。** 没有一个走 TLS 路径，而 TLS 恰恰是切断探测已知会**多报**（等待的字节可能是重协商）和**少报**（字节已被吸进 SSL 对象）的地方。
-- **`e2e_real_cli.sh` 与 `e2e_severed_hammer.sh` 会发起真实上游请求**（`POST /v1/messages`），需要凭据，且会计入配额。
+- **全部脚本只覆盖明文 HTTP/1.1 + h11。** 没有一个走 TLS 路径，而 TLS 恰恰是切断探测已知会**多报**（等待的字节可能是重协商或 close_notify）和**少报**（字节已被吸进 SSL 对象）的地方。
 - 命中率数字来自 16 核机器上的若干次运行，不是稳定基线。
+
+## 凭据与配额
+
+**四个 `.sh` 都需要一个能启动的代理进程**——`uv run ghc-api-proxy start` 启动时会去拉模型列表（日志里的 `42 models available from ghc`），这一步就要凭据。
+
+**只有 `e2e_real_cli.sh` 的请求真的走到上游、计入配额**：它发的是完整合法的 `{"model": "gpt-5.5", "max_tokens": 16, ...}`，日志里能看到 `H1/H2 200 anthropic-messages/gpt-5.5 → gpt-5.6-terra`。
+
+`e2e_severed.sh` / `e2e_severed_burst.sh` / `e2e_severed_hammer.sh` 发的是 `Content-Length: 2` 的 `{}`，`MessagesRequest` 的必填字段校验在**本地**就打回（`H1 400 POST /v1/messages 0ms`），从不出网。想在不烧配额的前提下复算切断窗口，跑 `e2e_severed_hammer.sh`——它正是唯一证明那个窗口存在的脚本。
 
 ## 怎么跑
 
@@ -40,4 +47,6 @@ bash <这个目录>/e2e_real_cli.sh
 bash <这个目录>/e2e_severed_hammer.sh
 ```
 
-`$CLAUDE_JOB_DIR` 已不存在，脚本里引用它的地方会退回 `/tmp`。**每个脚本都只对自己 `start` 的子进程发信号，不会碰 4141 上的既有服务**——修改时请保持这条。
+四个 `.sh` 把中间产物写进 `${CLAUDE_JOB_DIR:-/tmp/ghc-shutdown-probes}/tmp` 并会自行创建该目录。**这一点是修过的**：原先回退到 `/tmp/tmp`，而那个目录并不存在；脚本用 `set -u` 而没有 `set -e`，于是重定向失败只会让后台启动静默夭折，探针对着一个没起来的端口空转 40 秒，然后给出一个看起来像测出来的假结论。**这是最坏的失败形态——不报错、只是慢、静、且可信。**
+
+**每个脚本都只对自己 `start` 的子进程发信号，不会碰 4141 上的既有服务**——修改时请保持这条。

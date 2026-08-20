@@ -3,7 +3,12 @@
 # Twenty pooled connections all writing across the signal makes it very likely at least one does.
 set -u
 ROOT=/home/xp/src/ghc-api-proxy-py
-TMP="${CLAUDE_JOB_DIR:-/tmp}/tmp"
+# Falls back to a directory that is created rather than assumed: with CLAUDE_JOB_DIR unset
+# the old default was /tmp/tmp, which does not exist, and since these scripts run under
+# `set -u` without `set -e` the failed redirect killed the background start silently and
+# left the probe spinning 40s before reporting a confident, wrong result.
+TMP="${CLAUDE_JOB_DIR:-/tmp/ghc-shutdown-probes}/tmp"
+mkdir -p "$TMP"
 cd "$ROOT" || exit 1
 PORT=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
 uv run ghc-api-proxy start --port "$PORT" --pidfile "$TMP/burst-$PORT.pid" --no-history >"$TMP/burst.log" 2>&1 &
