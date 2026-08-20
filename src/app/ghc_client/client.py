@@ -4,6 +4,7 @@ from typing import Any, cast
 import httpx
 from anthropic import AsyncAnthropic
 from anthropic._types import Body as AnthropicBody
+from h2.exceptions import ProtocolError as H2ProtocolError
 from openai import APIConnectionError as OpenAIAPIConnectionError
 from openai import APIStatusError as OpenAIAPIStatusError
 from openai import AsyncOpenAI
@@ -181,7 +182,8 @@ class GhcApiClient:
             return await self._post_openai("/responses", payload, stream=True)
         except OpenAIAPIStatusError as error:
             return error.response
-        except (httpx.TransportError, OpenAIAPIConnectionError) as error:
+        except (httpx.TransportError, OpenAIAPIConnectionError, H2ProtocolError) as error:
+            # `H2ProtocolError` is named here because it is not an httpx error and nothing wraps it: httpcore guards only the socket read, so a GOAWAY arriving in the same read as the frames after it raises straight through. Without this it would leave as an unhandled exception and never reach the classifier at all.
             if is_responses_headers_pending_transport_error(error):
                 raise ResponsesHeadersPendingTransportError(error) from error
             raise
