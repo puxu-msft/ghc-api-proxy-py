@@ -102,5 +102,5 @@ end_turn: upstream stream ended without a terminal event
 ## 七、相关位置
 
 - 实现在 `src/app/observability/request_log.py`（`status_for` / `format_pending_tools` / `LogStatus`）、`src/app/observability/logging.py`（`STATUS_PREFIXES` / `PREFIX_COLOURS`）、`src/app/server/pipeline_app.py`（`_Trace.status_override` / `_StreamAccounting` / `_tracked_delivery`）、`src/app/pipeline/delivery/assembler.py`（`Terminal` 默认值）、`src/app/pipeline/delivery/stream.py`（合成 `end_turn` 的那一处）。
-- 主仓提交 `15abef4 fix: say when a stream ended without upstream's terminal event`。
+- 主仓那次改动的提交标题是 `fix: say when a stream ended without upstream's terminal event`。**这里不记哈希**：写下时记的 `15abef4` 在一小时内就因并行会话重写历史而不再是 `main` 的祖先。在这棵被反复重写的树上，提交标题比哈希耐用。
 - 遗留的 STR-04 缺口登记在 `docs/agents/anthropic-responses-bridge/implementation.md` 的结构怪味表。
