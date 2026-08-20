@@ -1,0 +1,4 @@
+# `exp/` 下是可跑的探针，跑一次就会留下这些。
+__pycache__/
+*.py[cod]
+.pytest_cache/
