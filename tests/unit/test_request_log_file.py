@@ -153,7 +153,8 @@ def test_a_successful_request_writes_one_complete_structured_record(tmp_path: Pa
     }
     assert record["at"].endswith("Z")
     assert cast(float, record["duration_s"]) >= 1.0
-    assert "request_id=req-1" in emitted[0][0]
+    # The join key lives in the record, not on the console line: there is nothing to join to on a request that worked, and the id is wider than several real fields put together.
+    assert "req-1" not in emitted[0][0]
     assert emitted[0][1] == record["status"]
 
 
@@ -183,6 +184,8 @@ def test_a_failed_request_keeps_detail_and_reports_no_terminal(tmp_path: Path, m
     assert record["terminal_seen"] is False
     assert record["blocks"] == 3
     assert emitted[0][1] == "fail"
+    # Shown because this line reports a failure, and last because the id is the widest thing on it. The status code is 200 — a stream that tore after upstream's headers arrived — so nothing but the resolved status can tell this line from a delivered answer.
+    assert emitted[0][0].endswith(" req=req-fail")
 
 
 def test_a_write_failure_does_not_interrupt_request_completion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

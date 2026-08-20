@@ -30,7 +30,8 @@ def test_a_successful_request_names_the_model_rather_than_the_route() -> None:
             status_code=200,
             duration_s=3.0,
             bytes_out=12_400,
-        )
+        ),
+        status="ok",
     )
     assert line == "200 anthropic-messages/claude-sonnet-4.5 3.0s ↓12.1KB"
     assert "POST" not in line
@@ -47,23 +48,82 @@ def test_a_failed_request_keeps_the_method_and_path() -> None:
             status_code=429,
             duration_s=1.0,
             detail="rate limited",
-        )
+        ),
+        status="fail",
     )
     assert line == "429 POST /v1/messages gpt-5 1.0s: rate limited"
+
+
+def test_the_join_key_is_kept_for_the_lines_somebody_will_come_looking_for() -> None:
+    """`req=<id>` at the very end of a line that went wrong, and nothing at all on one that worked.
+
+    The id is a UUID — wider than the status, the model and the duration put together — and on a delivered request it points at a record nobody is going to open. The structured record keeps it on every request either way, so dropping it here loses nothing and buys back the width. Where it is kept it goes last, past even the detail, so that neither the fields a reader scans nor the explanation they came for is pushed sideways by it.
+    """
+    identifier = "3f2a1c88-0d9e-4f77-9a41-2b6c5e0d8a13"
+    served = RequestLine(
+        method="POST",
+        path="/v1/messages",
+        request_id=identifier,
+        inbound_format="anthropic-messages",
+        model="claude-opus-5",
+        status_code=200,
+        duration_s=1.0,
+    )
+    assert identifier not in format_completion_line(served, status="ok")
+    failed = replace(served, status_code=502, detail="upstream is down")
+    assert format_completion_line(failed, status="fail") == f"502 POST /v1/messages claude-opus-5 1.0s: upstream is down req={identifier}"
+    # A stream that tore halfway keeps the 200 its headers arrived with, so the status code cannot tell this line from a delivered answer and the resolved status is what has to.
+    torn = replace(served, detail="upstream stream ended without a terminal event")
+    assert format_completion_line(torn, status="fail").endswith(f"req={identifier}")
+    # A client that left is not a success either: nobody received the answer, and that is a line somebody comes looking for.
+    assert format_completion_line(served, status="gone").endswith(f"req={identifier}")
+
+
+def test_the_verdict_rather_than_the_status_code_decides_how_the_line_reads() -> None:
+    """The one line that could say `[FAIL]` and read as an answer at the same time.
+
+    A streamed reply's status code is settled the moment upstream's headers arrive, so a stream that tore an hour later still carries a 200. Reading the shape off that code dressed the incident as a delivered turn — green code, route collapsed into `<inbound-format>/<model>` — under a prefix already saying it failed. The verdict decides both, so the two halves of the line can no longer disagree.
+
+    `gone` is amber rather than red, on the ruling `STATUS_PREFIXES` records for `[GONE]`: cancelling a turn is routine on a proxy fronting an interactive client, and painting every Esc the colour of an upstream reset would bury the resets. It still loses the successful shape — nobody received the answer, so nothing about it earned the form that says one arrived.
+    """
+    torn = RequestLine(
+        method="POST",
+        path="/v1/messages",
+        inbound_format="anthropic-messages",
+        model="claude-opus-5",
+        status_code=200,
+        duration_s=61.0,
+        detail="upstream stream ended without a terminal event",
+    )
+    assert format_completion_line(torn, status="fail").startswith("200 POST /v1/messages claude-opus-5 ")
+    assert format_completion_line(torn, status="gone").startswith("200 POST /v1/messages claude-opus-5 ")
+    # The same record with the same 200, delivered: this is the shape the two above must not borrow.
+    assert format_completion_line(torn, status="ok").startswith("200 anthropic-messages/claude-opus-5 ")
+    assert f"{RED}200{RESET}" in format_completion_line(torn, status="fail", color=True)
+    assert f"{YELLOW}200{RESET}" in format_completion_line(torn, status="gone", color=True)
+    assert f"{GREEN}200{RESET}" in format_completion_line(torn, status="ok", color=True)
+    # The account of why wears the verdict's colour too. Left at a fixed red, a cancelled turn read as an incident — amber prefix, amber code, red explanation — which is the reading the amber was chosen to prevent.
+    # Twelve seconds rather than the sixty above, so the duration is quiet and any red left in the line can only have come from the detail.
+    cancelled = format_completion_line(
+        replace(torn, duration_s=12.0, detail="delivery stopped before upstream finished"), status="gone", color=True
+    )
+    assert RED not in cancelled
+    assert f"{YELLOW}delivery stopped before upstream finished{RESET}" in cancelled
 
 
 def test_a_request_that_never_resolved_a_model_omits_it() -> None:
     # `DESIGN.md`: a non-model request shows no model and no tokens. A placeholder would read as a model actually named that.
     line = format_completion_line(
-        RequestLine(method="POST", path="/v1/messages", status_code=400, duration_s=0.002, detail="body must be an object")
+        RequestLine(method="POST", path="/v1/messages", status_code=400, duration_s=0.002, detail="body must be an object"),
+        status="fail",
     )
     assert line == "400 POST /v1/messages 2ms: body must be an object"
 
 
 def test_absent_bytes_are_not_the_same_as_zero() -> None:
     base = RequestLine(method="POST", path="/p", inbound_format="f", model="m", status_code=200, duration_s=1.0)
-    assert "↓" not in format_completion_line(base)
-    assert "↓0B" in format_completion_line(replace(base, bytes_out=0))
+    assert "↓" not in format_completion_line(base, status="ok")
+    assert "↓0B" in format_completion_line(replace(base, bytes_out=0), status="ok")
 
 
 def test_a_token_count_is_not_a_turn_that_lost_its_reply() -> None:
@@ -85,15 +145,15 @@ def test_a_token_count_is_not_a_turn_that_lost_its_reply() -> None:
         usage={"input_tokens": 19_700},
         count_provider="local",
     )
-    line = format_completion_line(counting)
+    line = format_completion_line(counting, status="ok")
     assert line == "H1 200 anthropic-messages-count-tokens/claude-opus-5 1.2s ↑19.7k provider(local)"
-    assert "provider(ghc)" in format_completion_line(replace(counting, count_provider="ghc"))
+    assert "provider(ghc)" in format_completion_line(replace(counting, count_provider="ghc"), status="ok")
     # And the field stays off every line that is not a count, rather than printing a placeholder for the counter that did not run.
-    assert "provider(" not in format_completion_line(replace(counting, count_provider=""))
+    assert "provider(" not in format_completion_line(replace(counting, count_provider=""), status="ok")
     # The endpoint is what the format prefix reports, so it survives a count no provider ever answered — where `count_provider` is empty and could not have said it.
-    assert format_completion_line(replace(counting, count_provider="")).startswith("H1 200 anthropic-messages-count-tokens/")
+    assert format_completion_line(replace(counting, count_provider=""), status="ok").startswith("H1 200 anthropic-messages-count-tokens/")
     # And it is added only to a count: an ordinary turn keeps the bare format.
-    assert format_completion_line(replace(counting, count_tokens=False)).startswith("H1 200 anthropic-messages/")
+    assert format_completion_line(replace(counting, count_tokens=False), status="ok").startswith("H1 200 anthropic-messages/")
 
 
 def test_an_estimate_says_why_it_is_one() -> None:
@@ -115,15 +175,16 @@ def test_an_estimate_says_why_it_is_one() -> None:
         usage={"input_tokens": 19_700},
         count_provider="local",
     )
-    assert format_completion_line(replace(estimating, count_provider_reason="ghc-failed")).endswith("provider(ghc-failed,local)")
-    assert format_completion_line(replace(estimating, count_provider_reason="no-counter")).endswith("provider(no-counter,local)")
+    assert format_completion_line(replace(estimating, count_provider_reason="ghc-failed"), status="ok").endswith("provider(ghc-failed,local)")
+    assert format_completion_line(replace(estimating, count_provider_reason="no-counter"), status="ok").endswith("provider(no-counter,local)")
     # Nothing to say is said with nothing: the operator configured this proxy to estimate, and no upstream was involved to have a verdict about.
-    assert format_completion_line(estimating).endswith("provider(local)")
+    assert format_completion_line(estimating, status="ok").endswith("provider(local)")
 
 
 def test_retries_are_reported_once_the_count_is_final() -> None:
     line = format_completion_line(
-        RequestLine(method="POST", path="/p", inbound_format="f", model="m", status_code=200, duration_s=1.0, attempts=3)
+        RequestLine(method="POST", path="/p", inbound_format="f", model="m", status_code=200, duration_s=1.0, attempts=3),
+        status="ok",
     )
     assert "retries=2" in line
 
@@ -132,6 +193,7 @@ def test_the_byte_marker_degrades_where_the_glyph_cannot_be_encoded() -> None:
     line = format_completion_line(
         RequestLine(method="POST", path="/p", inbound_format="f", model="m", status_code=200, duration_s=1.0, bytes_out=2048),
         unicode=False,
+        status="ok",
     )
     assert "↓" not in line
     assert "<2.0KB" in line
@@ -180,13 +242,15 @@ def test_reasoning_is_reported_last_and_quietly() -> None:
             duration_s=1.0,
             stop_reason="end_turn",
             thinking=("enc", "txt", "txt"),
-        )
+        ),
+        status="ok",
     )
     # After the fields that describe the exchange, since it describes how the model got to the answer rather than anything about the exchange itself.
     assert line.endswith("end_turn think(enc:1,txt:2)")
     assert DIM in format_completion_line(
         RequestLine(method="POST", path="/p", status_code=200, duration_s=1.0, thinking=("enc",)),
         color=True,
+        status="ok",
     )
 
 
@@ -202,7 +266,8 @@ def test_the_protocol_of_each_leg_is_labelled() -> None:
             model="m",
             status_code=200,
             duration_s=1.0,
-        )
+        ),
+        status="ok",
     )
     assert line.startswith("H2/H1 200 ")
 
@@ -210,7 +275,8 @@ def test_the_protocol_of_each_leg_is_labelled() -> None:
 def test_a_leg_that_never_happened_is_not_invented() -> None:
     # A request refused before it reached upstream has one leg, and printing a placeholder for the other would describe a connection that was never made.
     line = format_completion_line(
-        RequestLine(method="POST", path="/p", client_protocol="H1", status_code=400, duration_s=0.001)
+        RequestLine(method="POST", path="/p", client_protocol="H1", status_code=400, duration_s=0.001),
+        status="fail",
     )
     assert line.startswith("H1 400 POST /p")
 
@@ -242,7 +308,8 @@ def test_a_tool_use_turn_names_the_tools_it_asked_for() -> None:
             duration_s=1.0,
             stop_reason="tool_use",
             tools=("Bash", "Bash", "Read"),
-        )
+        ),
+        status="ok",
     )
     assert line.endswith("tool_use(Bash,Bash,Read)")
 
@@ -269,7 +336,8 @@ def test_tools_without_a_stop_reason_are_still_named() -> None:
             duration_s=1.0,
             tools=("Bash", "Bash", "Read"),
             detail="upstream stream ended without a terminal event",
-        )
+        ),
+        status="ok",
     )
     assert "called(Bash,Bash,Read)" in line
     assert "tool_use" not in line and "function_call" not in line
@@ -280,8 +348,8 @@ def test_tools_without_a_stop_reason_are_still_named() -> None:
 def test_colour_is_off_unless_asked_for() -> None:
     # The plain form is the one every other assertion in this file reads, and the one a pipe or a `TERM=dumb` terminal gets. Colour is a rendering choice made from the probe, never a default.
     line = RequestLine(method="POST", path="/p", inbound_format="f", model="m", status_code=500, duration_s=1.0, detail="boom")
-    assert "\x1b" not in format_completion_line(line)
-    assert "\x1b" in format_completion_line(line, color=True)
+    assert "\x1b" not in format_completion_line(line, status="ok")
+    assert "\x1b" in format_completion_line(line, color=True, status="ok")
 
 
 def test_the_duration_escalates_on_its_own() -> None:
@@ -293,6 +361,7 @@ def test_the_duration_escalates_on_its_own() -> None:
         return format_completion_line(
             RequestLine(method="POST", path="/p", inbound_format="f", model="m", status_code=200, duration_s=seconds),
             color=True,
+            status="ok",
         )
 
     assert WHITE in coloured(5.0)
@@ -306,6 +375,7 @@ def test_the_route_on_a_failed_line_is_left_at_the_terminal_default() -> None:
     line = format_completion_line(
         RequestLine(method="POST", path="/v1/messages", status_code=400, detail="body must be an object"),
         color=True,
+        status="fail",
     )
     assert line == f"{RED}400{RESET} POST /v1/messages: {RED}body must be an object{RESET}"
 
@@ -314,6 +384,7 @@ def test_a_failing_status_and_its_reason_are_red() -> None:
     line = format_completion_line(
         RequestLine(method="POST", path="/p", status_code=429, duration_s=1.0, detail="rate limited"),
         color=True,
+        status="fail",
     )
     assert line.count(RED) == 2, "the status and the reason are both what says whether to care"
 
@@ -337,7 +408,8 @@ def test_a_mapped_model_shows_what_was_asked_for_and_what_answered() -> None:
             model="claude-sonnet-5",
             status_code=200,
             duration_s=1.5,
-        )
+        ),
+        status="ok",
     )
     assert line == "200 anthropic-messages/claude-sonnet-4.5 → claude-sonnet-5 1.5s"
 
@@ -352,7 +424,8 @@ def test_an_unmapped_model_is_named_once() -> None:
             model="same-model",
             status_code=200,
             duration_s=1.0,
-        )
+        ),
+        status="ok",
     )
     assert "→" not in line
     assert "f/same-model" in line
@@ -361,7 +434,8 @@ def test_an_unmapped_model_is_named_once() -> None:
 def test_both_directions_of_wire_bytes_are_reported() -> None:
     # The reported gap: only the streaming path counted anything, so every other request showed no byte field at all.
     line = format_completion_line(
-        RequestLine(method="POST", path="/p", inbound_format="f", model="m", status_code=200, duration_s=1.0, bytes_in=152, bytes_out=2300)
+        RequestLine(method="POST", path="/p", inbound_format="f", model="m", status_code=200, duration_s=1.0, bytes_in=152, bytes_out=2300),
+        status="ok",
     )
     assert "↑152B ↓2.2KB" in line
 
@@ -377,7 +451,8 @@ def test_token_usage_is_rendered_with_its_cache_breakdown() -> None:
             duration_s=1.0,
             usage={"input_tokens": 12, "cache_read_input_tokens": 8000, "cache_creation_input_tokens": 1000, "output_tokens": 456},
             stop_reason="end_turn",
-        )
+        ),
+        status="ok",
     )
     # Cache reads and writes are additive on the input side because that is what they are: both supply input.
     assert "↑12+8.0k+1.0k" in line
@@ -438,7 +513,8 @@ def test_the_dialect_reaches_the_rendered_line() -> None:
             tools=("Bash",),
             thinking=("enc",),
             dialect=ReplyDialect.RESPONSES,
-        )
+        ),
+        status="ok",
     )
     assert line.endswith("function_call(Bash) reason(enc:1)")
 
@@ -448,6 +524,7 @@ def _received(byte_count: int) -> str:
     return format_completion_line(
         RequestLine(method="POST", path="/p", status_code=200, bytes_out=byte_count),
         color=True,
+        status="ok",
     )
 
 
@@ -477,6 +554,7 @@ def test_what_went_out_stays_quiet_however_large() -> None:
     line = format_completion_line(
         RequestLine(method="POST", path="/p", status_code=200, duration_s=1.0, bytes_in=5_000_000),
         color=True,
+        status="ok",
     )
     assert YELLOW not in line
     assert DIM in line
@@ -534,5 +612,6 @@ def test_none_of_this_shows_up_without_colour() -> None:
             usage={"input_tokens": 1, "output_tokens": 50_000},
             stop_reason="end_turn",
             tools=("AskUserQuestion",),
-        )
+        ),
+        status="ok",
     )

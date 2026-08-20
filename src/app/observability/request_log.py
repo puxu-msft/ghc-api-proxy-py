@@ -2,7 +2,7 @@
 
 `DESIGN.md` fixes the frame: `[PREFIX] HH:MM:SS METHOD /path ...`, with the fixed-width prefix and the timestamp supplied by the structlog processor chain. What this module builds is the part after them.
 
-The field order follows `copilot-api-js`, whose real rendered lines look like `[ OK ] 14:25:36 200 anthropic/claude-opus-4-8 1.2s ↑1.0k+8.0k+1.0k ↻80% ↓456 end_turn`. Two things there are deliberate rather than incidental, and both are kept: a **successful** line collapses method and path into `<inbound-format>/<model>`, because once a request has worked, which model answered is the thing worth reading and the route is noise; a **failed** one keeps `METHOD /path`, because that is what has to be reproduced.
+The field order follows `copilot-api-js`, whose real rendered lines look like `[ OK ] 14:25:36 200 anthropic/claude-opus-4-8 1.2s ↑1.0k+8.0k+1.0k ↻80% ↓456 end_turn`. Two things there are deliberate rather than incidental, and both are kept: a **successful** line collapses method and path into `<inbound-format>/<model>`, because once a request has worked, which model answered is the thing worth reading and the route is noise; a line that did **not** succeed keeps `METHOD /path`, because that is what has to be reproduced. Which of the two a line is comes from the verdict passed to `format_completion_line`, never from the status code: a streamed reply's code is settled when upstream's headers arrive, so a stream that tore an hour later still carries a 200 and would otherwise be dressed as an answer that arrived.
 
 Bytes and tokens both use `↑`/`↓` and are told apart by unit, again as upstream does: bytes carry `B`/`KB`/`MB`, token counts are bare with a `k`/`m` suffix. Every field is dropped when it has nothing to say, so the line grows only with what actually happened.
 
@@ -56,6 +56,11 @@ COUNT_TOKENS_SUFFIX = "-count-tokens"
 
 # The three endings a request line can report, spelled as `STATUS_PREFIXES` keys because that is the one place they are turned into something a reader sees. `gone` is not a failure and not a success: nobody was left to receive the answer.
 type LogStatus = Literal["ok", "fail", "gone"]
+
+# How the status code and the detail are painted, on the same three tiers the prefix uses rather than on the code's own value. A streamed reply's code is settled when upstream's headers arrive, so a torn stream carries a green-looking 200 that says nothing about how the next several minutes went; the verdict is what the colour has to follow.
+# `gone` is amber rather than red on the ruling `STATUS_PREFIXES` records for `[GONE]`: on a proxy fronting an interactive client, cancelling a turn is routine, and painting every Esc the same red as an upstream reset would bury the resets. Amber keeps it out of the green that means "nothing to look at" without claiming the proxy broke.
+# The same three tiers as `logging.PREFIX_COLOURS`, which paints the prefix on the far left of the same line. Restated rather than imported because the two answer different questions — that one colours a fixed word, this one a number and a sentence — but they are one judgement about how much of a problem each verdict is, and a change to either belongs in both.
+STATUS_COLOURS: dict[LogStatus, str] = {"ok": GREEN, "fail": RED, "gone": YELLOW}
 
 
 def http_label(version: str | None, *, websocket: bool = False) -> str:
@@ -272,7 +277,9 @@ def format_tokens(usage: dict[str, Any], *, unicode: bool = True, color: bool = 
 
 
 def _subject(line: RequestLine, *, succeeded: bool, color: bool) -> list[str]:
-    """Who the request was for: the model when it worked, the route when it did not.
+    """Who the request was for: the model when the request worked, the route when it did not.
+
+    `succeeded` is the line's verdict rather than its status code, so a stream that tore mid-turn takes the route form even though it answered 200 — that line is one somebody has to reproduce, and dressing it as `<inbound-format>/<model>` said the opposite of its own `[FAIL]` prefix. A client that left takes the route form too: nobody received the answer, so nothing about it earned the shape that means one arrived.
 
     A mapped model is shown as `asked → answered`, because a line reporting only the resolved name hides the mapping — and a mapping doing something unintended is invisible in exactly the request where it matters. The name it resolved to is the coloured half; what was asked for is dim, since it is context for the model that actually answered.
 
@@ -302,16 +309,20 @@ def format_arrival_line(line: RequestLine) -> str:
     return " ".join(parts)
 
 
-def format_completion_line(line: RequestLine, *, unicode: bool = True, color: bool = False) -> str:
+def format_completion_line(line: RequestLine, *, status: LogStatus, unicode: bool = True, color: bool = False) -> str:
     """The message body for a finished request.
 
-    Ordered status, subject, duration, wire bytes, tokens, request id, ending, retries, detail — narrowing from how it went, to what it cost, to why it ended. The ending is the stop reason, or on a token-counting request the counting provider that answered it. The durable join key precedes it so `end_turn`, tool calls and failure explanations remain the line's final fact. Every field after the subject is omitted when it has nothing to say, so a bare rejection and a full streamed answer share one column order instead of drifting into two formats.
+    Ordered status, subject, duration, wire bytes, tokens, ending, retries, detail, request id — narrowing from how it went, to what it cost, to why it ended. The ending is the stop reason, or on a token-counting request the counting provider that answered it. Every field after the subject is omitted when it has nothing to say, so a bare rejection and a full streamed answer share one column order instead of drifting into two formats.
+
+    The request id is the exception to that order and sits past the end of it, because it is not a fact about the request: it is the join key to the structured record, a UUID as wide as several real fields put together, and on a line that worked there is nothing to go and join to. So it is printed only when the line reports something other than success, and printed last, where a reader who wants it knows to look and a reader scanning the fields never has to step over it. The record file carries it on every request either way, which is what makes dropping it here cost nothing.
+
+    `status` is the whole line's verdict and is **required**, because the status code cannot supply it: a streamed reply's code is fixed when upstream's headers arrive, so a stream that tore halfway is a failure wearing a 200. It decides three things together — the prefix the processor will print, whether this line takes the successful shape, and how the code is painted — so that a line can no longer say `[FAIL]` while every other part of it reads as an answer that arrived. No default, deliberately: the one wrong value here is `ok`, and a default would hand it to exactly the caller who forgot to think about it.
 
     Colour carries meaning rather than decoration, following `copilot-api-js`: the status and the failure reason say whether to care, the model is the one name worth finding at a glance, and the duration escalates on its own so a slow request is visible without reading the number.
 
     What came *back* escalates too, on its own scale — bytes and output tokens both go quiet, plain, then warm as they cross an order of magnitude. What went out does not: its size follows from the request the client made and says nothing about how the reply went.
     """
-    succeeded = line.status_code is not None and line.status_code < 400
+    succeeded = status == "ok"
     up, down = ("↑", "↓") if unicode else (">", "<")
 
     parts: list[str] = []
@@ -320,7 +331,7 @@ def format_completion_line(line: RequestLine, *, unicode: bool = True, color: bo
         # Ahead of the status, so the two facts that describe the exchange itself — how it was carried and how it ended — sit together at the front.
         parts.append(paint(protocols, DIM, color=color))
     if line.status_code is not None:
-        parts.append(paint(str(line.status_code), GREEN if succeeded else RED, color=color))
+        parts.append(paint(str(line.status_code), STATUS_COLOURS[status], color=color))
     parts.extend(_subject(line, succeeded=succeeded, color=color))
     if line.duration_s is not None:
         parts.append(paint(format_duration(line.duration_s), duration_colour(line.duration_s), color=color))
@@ -339,9 +350,6 @@ def format_completion_line(line: RequestLine, *, unicode: bool = True, color: bo
     tokens = format_tokens(line.usage, unicode=unicode, color=color)
     if tokens:
         parts.append(tokens)
-    if line.request_id:
-        # Full rather than shortened: this is the join key between the console line and its structured record, so two simultaneous failures must never become ambiguous. It precedes the semantic ending so the reason remains the line's final fact.
-        parts.append(paint(f"request_id={line.request_id}", DIM, color=color))
     if line.count_provider:
         # A count has no reply and therefore no stop reason, so this is its ending. The order is for the reader rather than for the state machine: `count_provider` is set only on the count branch, which returns before a reply is ever aggregated, so no reachable request carries both and swapping these two arms would change nothing that runs.
         parts.append(format_count_provider(line.count_provider, line.count_provider_reason, color=color))
@@ -360,10 +368,16 @@ def format_completion_line(line: RequestLine, *, unicode: bool = True, color: bo
         # Last, and grey. It says what the model did on its way to the answer rather than anything about the exchange, so it belongs after the fields that describe the exchange and should not compete with them.
         rendered = f"{rendered} {paint(thinking, DIM, color=color)}"
     # A colon rather than a space before the reason, matching the upstream shape and giving the eye somewhere to stop on a line that is otherwise all fields.
-    return f"{rendered}: {paint(line.detail, RED, color=color)}" if line.detail else rendered
+    if line.detail:
+        # The same tier as the status code, because this is that verdict's explanation and cannot be louder than it. Fixed red here left a cancelled turn reading as an incident — amber prefix, amber 200, red account of why — which is the reading `STATUS_COLOURS` exists to prevent.
+        rendered = f"{rendered}: {paint(line.detail, STATUS_COLOURS[status], color=color)}"
+    if line.request_id and status != "ok":
+        # Full rather than shortened: this is the join key between the console line and its structured record, so two simultaneous failures must never become ambiguous. Past the detail as well as past the fields — the detail is what the reader came for, and a UUID wedged in front of it would be read as part of the explanation.
+        rendered = f"{rendered} {paint(f'req={line.request_id}', DIM, color=color)}"
+    return rendered
 
 
-def status_for(status_code: int | None, *, override: LogStatus | None = None) -> str:
+def status_for(status_code: int | None, *, override: LogStatus | None = None) -> LogStatus:
     """The `status` field the prefix processor turns into `[ OK ]`, `[FAIL]` or `[GONE]`.
 
     Driven by whether the request produced a usable response rather than by the exception type, so an upstream 500 delivered intact and a transport error that produced nothing both read as failures — which is what the person watching cares about.
