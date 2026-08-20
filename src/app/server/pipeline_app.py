@@ -144,6 +144,8 @@ class _Trace:
     blocks: int = 0
     tools: tuple[str, ...] = ()
     thinking: tuple[str, ...] = ()
+    # Which counter answered a token-counting request, and nothing at all on any other route. See `format_counter`.
+    counter: str = ""
     dialect: ReplyDialect = ReplyDialect.ANTHROPIC
     upstream_conn: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
 
@@ -188,6 +190,7 @@ def _log_completion(chain: Chain, trace: _Trace, status_code: int | None, *, byt
         blocks=trace.blocks,
         tools=trace.tools,
         thinking=trace.thinking,
+        counter=trace.counter,
         dialect=trace.dialect,
         attempts=trace.attempts,
         detail=trace.detail,
@@ -296,6 +299,21 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
         tokens = counted.get("input_tokens")
         if isinstance(tokens, int):
             trace.usage = {"input_tokens": tokens}
+        # What kind of request this was, and which counter answered. Everything else on a count line is absent because a count has no reply, and absence is what a delivered turn that lost its reply looks like too — so without this the two are one line.
+        provider = context.extras.get("count_tokens_provider")
+        if isinstance(provider, str):
+            trace.counter = provider
+        # The upstream leg, present only when upstream responded to the count — which is not the same as answering it, since a reply carrying no usable number is handed to the estimator with the leg already flown. A refusal never gets this far, the client raises it as a pipeline error, and the local estimator never leaves the process; showing a leg for either would claim a request that was never sent.
+        upstream_protocol = context.extras.get("count_tokens_upstream_protocol")
+        if isinstance(upstream_protocol, str):
+            trace.upstream_protocol = http_label(upstream_protocol)
+        sent = context.extras.get("count_tokens_bytes_in")
+        if isinstance(sent, int):
+            trace.bytes_in = sent
+        # `received` rather than the size of what goes back to the client, exactly as the delivery path uses it: both halves of the line describe this proxy's exchange with upstream.
+        came_back = context.extras.get("count_tokens_bytes_out")
+        if isinstance(came_back, int):
+            trace.received = came_back
         return JSONResponse(counted)
 
     try:

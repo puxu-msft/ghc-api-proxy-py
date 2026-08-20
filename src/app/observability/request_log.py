@@ -89,6 +89,8 @@ class RequestLine:
     `model` empty means routing never resolved one — a rejected body, an unknown model. It is then left out rather than printed as a placeholder, which is what `DESIGN.md` means by not showing model or tokens for a non-model request.
 
     `bytes_in` / `bytes_out` are wire bytes in each direction; `usage` is the upstream's own token accounting, keyed as Anthropic reports it. The two are separate facts and a request can have either without the other — a rejected body has bytes and no tokens, a cached hit has tokens and almost no bytes.
+
+    `counter` is set only on a token-counting request, and names the counter that answered it. See `format_counter`.
     """
 
     method: str
@@ -112,6 +114,7 @@ class RequestLine:
     blocks: int = 0
     tools: tuple[str, ...] = ()
     thinking: tuple[str, ...] = ()
+    counter: str = ""
     # Whose words to use for the reasoning and tool-call fields. See `ReplyDialect`; it travels with the reply summary the line is built from.
     dialect: ReplyDialect = ReplyDialect.ANTHROPIC
     attempts: int = 1
@@ -164,6 +167,20 @@ def format_pending_tools(tools: tuple[str, ...], *, color: bool = False) -> str:
     """
     named = [tool for tool in tools if tool]
     return f"called({_painted_tools(named, color=color)})" if named else ""
+
+
+def format_counter(counter: str, *, color: bool = False) -> str:
+    """`count(ghc)` / `count(local)` — this request was a token count, and which counter answered it.
+
+    A count is the one 200 with no reply at all: nothing comes back to measure, no blocks complete, no reason ends the turn, and on a successful line the route has already collapsed into `<inbound-format>/<model>`. What was left read as `anthropic-messages/claude-opus-5 1.2s ↑19.7k`. A delivered turn is not literally that line — it would still carry its own byte fields — but every one of those absences is also what a turn looks like when its reply goes missing, and absence is the one thing a reader cannot tell apart: nothing on the line says which of the two it is looking at, on the endpoint clients call most often.
+
+    Which counter answered is the other half, and it is the same distinction the reply body already makes by marking an estimate `estimated`: `ghc` is upstream's own measurement, `local` is this proxy's calibrated estimate. On the line they are the same bare number, so without the name there is no reading of `↑19.7k` that says whether anything was measured.
+
+    The counter is dim and the word is not, because the field's first job is to say *what kind of request this was*; which counter served it is the detail behind that. It occupies the slot a stop reason would, being this line's ending.
+    """
+    if not counter:
+        return ""
+    return f"count({paint(counter, DIM, color=color)})"
 
 
 def _painted_tools(names: list[str], *, color: bool) -> str:
@@ -276,7 +293,7 @@ def format_arrival_line(line: RequestLine) -> str:
 def format_completion_line(line: RequestLine, *, unicode: bool = True, color: bool = False) -> str:
     """The message body for a finished request.
 
-    Ordered status, subject, duration, wire bytes, tokens, request id, stop reason, retries, detail — narrowing from how it went, to what it cost, to why it ended. The durable join key precedes the semantic ending so `end_turn`, tool calls and failure explanations remain the line's final fact. Every field after the subject is omitted when it has nothing to say, so a bare rejection and a full streamed answer share one column order instead of drifting into two formats.
+    Ordered status, subject, duration, wire bytes, tokens, request id, ending, retries, detail — narrowing from how it went, to what it cost, to why it ended. The ending is the stop reason, or on a token-counting request the counter that answered it. The durable join key precedes it so `end_turn`, tool calls and failure explanations remain the line's final fact. Every field after the subject is omitted when it has nothing to say, so a bare rejection and a full streamed answer share one column order instead of drifting into two formats.
 
     Colour carries meaning rather than decoration, following `copilot-api-js`: the status and the failure reason say whether to care, the model is the one name worth finding at a glance, and the duration escalates on its own so a slow request is visible without reading the number.
 
@@ -313,7 +330,10 @@ def format_completion_line(line: RequestLine, *, unicode: bool = True, color: bo
     if line.request_id:
         # Full rather than shortened: this is the join key between the console line and its structured record, so two simultaneous failures must never become ambiguous. It precedes the semantic ending so the reason remains the line's final fact.
         parts.append(paint(f"request_id={line.request_id}", DIM, color=color))
-    if line.stop_reason:
+    if line.counter:
+        # A count has no reply and therefore no stop reason, so this is its ending. The order is for the reader rather than for the state machine: `counter` is set only on the count branch, which returns before a reply is ever aggregated, so no reachable request carries both and swapping these two arms would change nothing that runs.
+        parts.append(format_counter(line.counter, color=color))
+    elif line.stop_reason:
         parts.append(format_stop_reason(line.stop_reason, line.tools, line.dialect, color=color))
     elif line.tools:
         # No reason came back, but the tools did. Dropping them with the reason lost the only thing that said what the turn had got through before it stopped.

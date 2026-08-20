@@ -66,6 +66,31 @@ def test_absent_bytes_are_not_the_same_as_zero() -> None:
     assert "↓0B" in format_completion_line(replace(base, bytes_out=0))
 
 
+def test_a_token_count_is_not_a_turn_that_lost_its_reply() -> None:
+    """The reported line: `H1 200 anthropic-messages/claude-opus-5 1.2s ↑19.7k` and nothing else.
+
+    Every absence on it was honest — a count has no reply, so no returning bytes, no blocks, no stop reason — but on a successful line the route has already collapsed into `<inbound-format>/<model>`, leaving nothing that says a count is what this was. The same line is what a delivered turn looks like when its whole reply goes missing, which is the one reading a reader must not have to guess at.
+
+    The counter's name is the second half. `ghc` is upstream's measurement and `local` is this proxy's estimate; the reply body distinguishes them with `estimated` and the line has only the same bare number.
+    """
+    counting = RequestLine(
+        method="POST",
+        path="/v1/messages/count_tokens",
+        inbound_format="anthropic-messages",
+        client_protocol="H1",
+        model="claude-opus-5",
+        status_code=200,
+        duration_s=1.2,
+        usage={"input_tokens": 19_700},
+        counter="local",
+    )
+    line = format_completion_line(counting)
+    assert line == "H1 200 anthropic-messages/claude-opus-5 1.2s ↑19.7k count(local)"
+    assert "count(ghc)" in format_completion_line(replace(counting, counter="ghc"))
+    # And the field stays off every line that is not a count, rather than printing a placeholder for the counter that did not run.
+    assert "count(" not in format_completion_line(replace(counting, counter=""))
+
+
 def test_retries_are_reported_once_the_count_is_final() -> None:
     line = format_completion_line(
         RequestLine(method="POST", path="/p", inbound_format="f", model="m", status_code=200, duration_s=1.0, attempts=3)

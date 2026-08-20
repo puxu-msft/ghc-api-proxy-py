@@ -6,6 +6,7 @@ Upstream protocol behaviour is therefore the real thing rather than a friendlier
 
 import asyncio
 import logging
+import re
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator
 from dataclasses import replace
@@ -1294,6 +1295,74 @@ def test_a_served_request_writes_exactly_one_log_line(request_log: None, caplog:
     assert len(lines) == 1
     # A success names the model instead of the route, and carries the status and how long it took.
     assert lines[0].startswith("H1/H1 200 anthropic-messages/claude-model ")
+
+
+def test_a_token_count_says_it_was_one_and_which_counter_answered(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
+    """The reported line, served: `H1 200 anthropic-messages/claude-opus-5 1.2s ↑19.7k` and nothing more.
+
+    Read at the console it looked like a delivered turn that had lost every reply field, and it was a count — which has no reply to lose. The count branch returns before anything is sent or received on the delivery path, so it filled in none of the fields that branch fills in, and the successful-line shape had already dropped the route that would have said so.
+    """
+    client, _ = make_client(lambda _: httpx.Response(200, json={"input_tokens": 4242}))
+
+    with caplog.at_level(logging.INFO):
+        client.post(
+            "/v1/messages/count_tokens",
+            json={"model": "claude-model", "messages": [{"role": "user", "content": "hi"}]},
+        )
+
+    lines = _request_lines(caplog.records)
+    assert len(lines) == 1
+    # Both legs, because this count really did go upstream, and the counter named because the number is upstream's own measurement.
+    assert lines[0].startswith("H1/H1 200 anthropic-messages/claude-model ")
+    assert lines[0].endswith("count(ghc)")
+    # Both directions of that leg. One of them alone would say, by this line's own convention, that nothing came back — from the exchange that produced the number on the line.
+    assert re.search(r"[↑>][\d.]+(B|KB|MB)\b", lines[0]), "the body sent upstream is what the count was measured on"
+    assert re.search(r"[↓<][\d.]+(B|KB|MB)\b", lines[0]), "and upstream's answer is where the number came from"
+
+
+def test_a_count_upstream_could_not_answer_is_reported_as_an_estimate(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
+    """Upstream failed, the estimator answered, and the client's number is marked `estimated`.
+
+    Not a *refusal*, which is a settled word here: `pipeline/count_tokens.py` lets a `ProviderError` — an unknown model, a missing capability — travel out rather than degrading, so a refused count never reaches the estimator and never produces this line at all. This is the other case, where upstream was reachable and broke.
+
+    The counter's name is what carries that. The upstream leg does not: `send_anthropic_count_tokens` raises an error status as a pipeline error, so no response reaches the code that records which leg was flown, and this line looks like one that never left the process. `count(local)` is therefore the whole of what distinguishes an estimate from a measurement here, which is the reason it is on the line at all.
+    """
+    client, _ = make_client(lambda _: httpx.Response(500, json={"error": "upstream is down"}))
+
+    with caplog.at_level(logging.INFO):
+        response = client.post(
+            "/v1/messages/count_tokens",
+            json={"model": "claude-model", "messages": [{"role": "user", "content": "hello there"}]},
+        )
+
+    assert response.json()["estimated"] is True
+    lines = _request_lines(caplog.records)
+    assert len(lines) == 1
+    assert lines[0].startswith("H1 200 anthropic-messages/claude-model ")
+    assert lines[0].endswith("count(local)")
+
+
+def test_a_count_upstream_answered_uselessly_keeps_the_leg_it_flew(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
+    """The other half of the leg's meaning: it says upstream *responded*, not that upstream answered.
+
+    A 200 carrying no usable `input_tokens` is a reply — it has a protocol, a size, and a round trip behind it — and the count still falls to the estimator. Reporting no leg here would say the request never left the process, which is the reading that sent somebody looking at the wrong end of the exchange in the first place.
+    """
+    client, _ = make_client(lambda _: httpx.Response(200, json={"input_tokens": 0}))
+
+    with caplog.at_level(logging.INFO):
+        response = client.post(
+            "/v1/messages/count_tokens",
+            json={"model": "claude-model", "messages": [{"role": "user", "content": "hello there"}]},
+        )
+
+    assert response.json()["estimated"] is True
+    lines = _request_lines(caplog.records)
+    assert len(lines) == 1
+    # Both legs and both directions, next to the counter that says the number on the line is not upstream's.
+    assert lines[0].startswith("H1/H1 200 anthropic-messages/claude-model ")
+    assert lines[0].endswith("count(local)")
+    assert re.search(r"[↑>][\d.]+(B|KB|MB)\b", lines[0])
+    assert re.search(r"[↓<][\d.]+(B|KB|MB)\b", lines[0])
 
 
 def test_a_refused_request_is_reported_with_its_route_and_reason(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
