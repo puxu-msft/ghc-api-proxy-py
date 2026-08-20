@@ -29,7 +29,12 @@ from app.pipeline.delivery.assembler import (
     terminal_from_anthropic,
 )
 from app.pipeline.delivery.stream import StreamSettings
-from app.pipeline.direct_driver import DRIVERS, DriverOutcome, LedgerBudget
+from app.pipeline.direct_driver import (
+    DRIVERS,
+    EVENT_ATTEMPT_PREPARE,
+    DriverOutcome,
+    LedgerBudget,
+)
 from app.pipeline.exceptions import UpstreamRateLimit, UpstreamRejected, UpstreamTimeout
 from app.pipeline.request import RequestContext, WireFormat
 from app.pipeline.retry import RetryLedger
@@ -132,6 +137,12 @@ async def handle_count_tokens(chain: Chain, context: RequestContext) -> dict[str
     )
     apply_route(context, route)
     context.payload["model"] = route.model_id
+
+    # The same subscribers the driver runs, for the same reason: this is an upstream request too, and upstream rejects a counting request carrying a server-tool declaration in exactly the words it rejects the request being counted. Measured 2026-08-20.
+    # Before the estimate rather than after, so what is measured is what would actually be sent.
+    context.begin_attempt()
+    for subscription in chain.subscribers.for_event(EVENT_ATTEMPT_PREPARE):
+        await subscription.handler(context)
 
     estimate = estimate_anthropic_input(_countable(context.payload))
     calibration = chain.tokenization.calibration

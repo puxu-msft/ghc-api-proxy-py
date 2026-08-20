@@ -15,7 +15,7 @@ Anthropic `/v1/messages` 端点直连 Copilot 的原生 Anthropic API。仅支�
 | Prompt Caching | 部分支持（写入侧） | 读侧只读：`cache_read_input_tokens` 来自 Copilot 响应的 `cached_tokens`。写入侧由 `cache_control` 四模式控制（默认 **passthrough**），见下节 |
 | Batch Processing | 不支持 | Copilot API 不支持批处理，无需适配 |
 | Extended Thinking | 支持 | `thinking` 参数转发；支持 interleaved thinking 与 adaptive thinking；块级保护/剥离/隔离见 [thinking-pipeline.md](thinking-pipeline.md) |
-| Server-side Tools | 完整支持 | 所有类型（`web_search` / `code_execution` / `tool_search` 等）。默认透传，可按配置剥离，见 [tool-use.md](tool-use.md) |
+| Server-side Tools | 不支持，且已实测被拒的族会在出站前剥除 | 代理不执行 web search/fetch/code execution。Anthropic 端点对 `web_search*` / `web_fetch*` 声明整条拒绝请求，故这两族的声明与历史 blocks 由 `builtin:server-tool-capability` 在出站前剥除／摊平；`memory_*` / `tool_search_*` / `text_editor_*` 等客户端执行的 typed tools 继续透传。Responses leg 的 hosted web search 支持尚未实现。见 [tool-use.md](tool-use.md) |
 | Context Management | 完整支持 | 服务端上下文编辑（`clear-thinking` / `clear-tooluse` / `clear-both`），含 feature negotiation 自愈 |
 | Token Counting | 支持（默认转发上游精确计数） | `use_upstream_count_tokens`（默认 `true`），见下节 |
 

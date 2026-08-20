@@ -228,13 +228,87 @@ cassette 里 `web_search_call` 零次（只有信封里 `num_requests:0`）；�
 
 **验收的关键限定**（作者认可）：全程假上游，只证明「这条声明不会被发出去」，**不证明上游会 200**；也未验证前缀名单是否完整。
 
-## 9. 待用户裁决（剩余）
+## 9. 用户第二批裁决（2026-08-20）与处置
 
-1. **响应侧渲染形态**：参考实现的「一行降级文本」前提在本项目不成立（第 3.1 节）。本项目要不要还原成 `server_tool_use` + `web_search_tool_result`？这决定要不要探针 `encrypted_content` 的替代。
-2. **历史残留块**：`hooks-tokenization-spec.md` 把「历史里残留的 server-tool 块被上游拒绝」定为**有意的 breaking removal**，本次裁决未改这一半。本次只剥 `tools[]` 声明，所以**已经产生过 server-tool 块的旧会话**修复后撞到的是另一句 `Tool 'X' not found in provided tools`——「立刻恢复可用」只对新会话与从未用过 web search 的会话成立。要不要改这个立场？
-3. **`count_tokens` 腿**：要不要让它也过订阅者（须改 `handler.py`，等并行会话的改动落定）。
-4. **订阅者的配置面**：等 `pipeline-subscriptions.md` 第 3 项（`hooks:` 列表项语义）落地。
-5. **翻译到 `/responses` 的腿**：Anthropic 拼法的 server tool 声明在该端点是否被接受，未测量。要不要探针。
+| 项 | 裁决 | 状态 |
+|---|---|---|
+| 9.1 响应侧渲染形态 | 与 9.5 合并：**翻译路径要正确支持 server tool web_search** | 待做，见 §10 |
+| 9.2 历史残留块 | **同步去掉，或换成无害 no-op** | **已做**：摊平成纯文本 |
+| 9.3 count_tokens 是否因此 400 | 要求验证 | **已实测：会 400，且措辞与 `/v1/messages` 逐字相同**；已修 |
+| 9.4 订阅者配置面 | 推迟，但**写文档并正确链接** | **已做** |
+| 9.5 翻译到 `/responses` 的腿 | **用户希望支持** | 待做，见 §10 |
+
+### 9.2 的做法与理由
+
+摊平成纯文本，不降级成 `tool_use`／`tool_result` 对。参考实现的 `rewriteServerToolBlocks` 走的是降级，但**那条路在本项目走不通**：声明刚被剥掉，降级后的引用只会换来 `Tool 'web_search' not found in provided tools`。也无法就地修复——上游要求每条搜索结果带真实非空 `encrypted_content`，空串与占位串都被拒（`/home/xp/src/copilot-api-js/src/lib/anthropic/sanitize/empty-encrypted-search-result.ts` 记录的 `exp/encrypted-content-400` 实测）。文本不引用任何东西，所以不会悬空。
+
+渲染只保留 `title` 与 `url`，丢弃 `encrypted_content`（它是每条结果的绝大部分字节，且除上游外对谁都不透明）。错误形态渲染成 `[web_search failed: <code>]`。
+
+历史这一遍**不以本次请求是否声明了工具为条件**——客户端可能已经关掉 web search，但仍在重放当初开着时的轮次。
+
+### 9.3 的实测结果
+
+`/v1/messages/count_tokens` 带 `web_search_20250305` → **400**，`The use of the web search tool is not supported.` / `unsupported_value`，与 `/v1/messages` **逐字相同**。两条对照：无 tools → 200（14 tokens）；普通 function tool → 200（427 tokens）。所以 400 只由 server tool 类型引起。
+
+修法：`handle_count_tokens` 现在也发布 `attempt.prepare`。理由是提交 `b082039` 已经裁定「count 端点就是一次模型请求」，那它就该走同一套订阅者。发布点在**估算之前**，所以本地估算量的是真正会发出去的 payload。
+
+### 9.4 已更新的文档
+
+| 文档 | 改动 |
+|---|---|
+| `docs/2604-rewrite/hooks-system.md` | 新增「事件订阅」一节：已建成／内置订阅者／尚未建成三块，并链到 `pipeline-subscriptions.md` 与 `config-migration-gaps.md` |
+| `docs/2604-rewrite/tool-use.md` | 「不过滤服务端 blocks」已不成立，改写并说明**反应式路径仍不成立** |
+| `docs/2604-rewrite/anthropic-compat.md` | Server-side Tools 一行由「完整支持」改为「不支持，且已实测被拒的族会在出станции前剥除」 |
+| `docs/.human-controlled-candidates/pipeline-subscriptions.md` | 增补 2026-08-20 现状段：第一个订阅者已落地，但**吸收仍未发生**（它是新增能力，不是迁过来的 hook） |
+
+## 10. 上游实测（2026-08-20）与它推翻的结论
+
+完整报告：[`260820-websearch-upstream-probe.md`](260820-websearch-upstream-probe.md)。19 次探针请求，gpt-5.5，各一次。原始输出在 `exp/260820-websearch-probe/raw/`。
+
+### 请求侧（`/responses`）
+
+| 探针 | 结果 |
+|---|---|
+| `{"type":"web_search"}` | **200**，回显补默认形状 |
+| `{"type":"web_search_20250305","name":"web_search"}` | **400** `invalid_request_body` / `Invalid value` —— **Anthropic 拼法不被接受，映射是必须的** |
+| `user_location`（Anthropic 形状） | **200 且逐字回显** —— 可 1:1 映射，从推断升级为实测 |
+| `allowed_domains` / `blocked_domains` / `max_uses` | **全部 400** `Unknown parameter` —— 写进去直接失败，不是静默丢 |
+| `tool_choice:{"type":"web_search"}` | **200**，归一化为 `web_search_preview`，且真的强制执行了搜索 |
+| `include:["web_search_call.action.sources"]` | **200 但静默丢弃**（响应体 `include: null`） |
+| `{"type":"web_fetch"}` | **400** `Invalid value` —— 与 Anthropic 腿的 `rejected tool(s): web_fetch` 是**第三种措辞** |
+
+### 两条推翻既有结论的发现
+
+1. **流式下 `web_search_call` 的 id 每个事件都不同。** 同一 item 在 `output_item.added`、`web_search_call.in_progress`、`.searching`、`.completed`、`output_item.done` 五个事件里带了**五个不同的 416 字符 id**，两次独立运行复现。这推翻了 [`260820-websearch-on-responses-leg.md`](260820-websearch-on-responses-leg.md) §2.3(4) 引自 `copilot-api-js` 的「id 在两事件间稳定」。**唯一稳定的关联键是 `output_index`。**
+2. **中间不是「零事件」。** 存在 `response.web_search_call.{in_progress,searching,completed}` 三个专有事件（只带 `item_id`／`output_index`／`sequence_number`，无内容增量）；`added` 上的 item **没有 `action`**，query 只在 `done` 出现。「按 whole-item 在 `done` 成块」的实质结论仍成立。
+
+### 其他修正
+
+- **`annotations` 会真的填 `url_citation`**（`{type,url,title,start_index,end_index}`），另一个样本是 `[]`。旧结论「不要在 annotations 上建东西」修正一半：载体真实存在，但必须容忍空数组。证据权重中等偏强（一手、单次、两个反向样本）。
+- **`refs/available_models.json` 已过期**：`claude-sonnet-4.5` 已从上游目录消失，新增 `claude-opus-5`；`/responses` 集合新增 `grok-4.5`、`grok-4.6`、`mai-code-1.1-flash`——**非 GPT 的 `/responses` 模型已经存在**，「含 `/responses` 是必要非充分」这句现在更弱，这几个都未探针。
+
+### 拿到的真实样本
+
+- `tests/cassettes/responses_web_search_nonstream.json`（2 interactions）
+- `tests/cassettes/responses_web_search_stream.json`（18 chunk，SSE 16 事件全在）
+
+走仓库既定 `RecordingTransport`：允许清单响应头、按字段名深度清洗（SSE payload 里的 `safety_identifier` 已 `REDACTED`）、`authenticated: true`、chunk 边界保留。
+
+**限定**：这两份**目前没有测试回放**，且请求 shape 摘要算的是手写的 Responses body——产品链今天造不出这个请求（订阅者只剥不映射），所以接不进 `record_cassette.py` 的 scenario。映射落地后应挪进 `SCENARIOS` 用产品链重录。
+
+## 11. 待办：翻译腿的 hosted web search（9.1 + 9.5）
+
+冻结裁决要求一次性覆盖七个面。实测之后的状态：
+
+| 面 | 状态 |
+|---|---|
+| declaration 映射 | **可做**：`web_search_*` → `{"type":"web_search"}`；`user_location` 1:1 带过；`allowed_domains`／`blocked_domains`／`max_uses` **必须不写**（写了 400），带这些限制时的取舍待定 |
+| forced choice | **可做**：`{"type":"web_search"}` 被接受并归一化为 `web_search_preview`，真的强制搜索 |
+| response presentation | **待裁决**：还原成 `server_tool_use` + `web_search_tool_result`（受 `encrypted_content` 限制），还是别的形态 |
+| stream lifecycle | **必须按 `output_index` 关联，不能用 id**；whole-item 在 `done` 成块；三个专有中间事件 |
+| History／continuation | 待设计 |
+| 错误处理 | 三种拒绝措辞已知 |
+| capability gate | `supported_endpoints` 含 `/responses`，但非 GPT 模型已出现且未探针 |
 
 
 ---

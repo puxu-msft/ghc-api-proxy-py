@@ -140,3 +140,185 @@ async def test_a_request_declaring_no_tools_is_left_exactly_as_it_was() -> None:
     await adapt_server_tools(ctx)
 
     assert ctx.payload == {"messages": []}
+
+
+SEARCH_CALL: dict[str, Any] = {
+    "type": "server_tool_use",
+    "id": "srvtoolu_1",
+    "name": "web_search",
+    "input": {"query": "today's date"},
+}
+SEARCH_RESULT: dict[str, Any] = {
+    "type": "web_search_tool_result",
+    "tool_use_id": "srvtoolu_1",
+    "content": [
+        {
+            "type": "web_search_result",
+            "title": "Example",
+            "url": "https://example.com",
+            "encrypted_content": "AAAA" * 200,
+        }
+    ],
+}
+
+
+async def test_a_search_turn_left_in_the_history_becomes_text() -> None:
+    ctx = context(
+        {
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "when?"}]},
+                {"role": "assistant", "content": [SEARCH_CALL, SEARCH_RESULT]},
+            ]
+        }
+    )
+
+    await adapt_server_tools(ctx)
+
+    blocks = ctx.payload["messages"][1]["content"]
+    assert [block["type"] for block in blocks] == ["text", "text"]
+    assert blocks[0]["text"] == "[web_search] today's date"
+    assert blocks[1]["text"] == "[web_search results]\n- Example — https://example.com"
+
+
+async def test_the_opaque_bulk_of_a_result_is_not_carried_into_the_text() -> None:
+    # `encrypted_content` is most of a result's bytes and means nothing to anyone but upstream. Upstream also rejects it unless it is genuine, so there is no repairing it either — only leaving it out.
+    ctx = context({"messages": [{"role": "assistant", "content": [SEARCH_RESULT]}]})
+
+    await adapt_server_tools(ctx)
+
+    assert "AAAA" not in ctx.payload["messages"][0]["content"][0]["text"]
+
+
+async def test_a_failed_search_turn_says_so_rather_than_pretending_it_returned_nothing() -> None:
+    failed: dict[str, Any] = {
+        "type": "web_search_tool_result",
+        "tool_use_id": "srvtoolu_1",
+        "content": {"type": "web_search_tool_result_error", "error_code": "max_uses_exceeded"},
+    }
+    ctx = context({"messages": [{"role": "assistant", "content": [failed]}]})
+
+    await adapt_server_tools(ctx)
+
+    assert ctx.payload["messages"][0]["content"][0]["text"] == "[web_search failed: max_uses_exceeded]"
+
+
+async def test_the_history_is_flattened_even_when_this_request_declares_nothing() -> None:
+    # A client that has since switched web search off still replays the turns from when it was on, and those are rejected on their own account.
+    ctx = context({"messages": [{"role": "assistant", "content": [SEARCH_CALL, SEARCH_RESULT]}]})
+
+    await adapt_server_tools(ctx)
+
+    assert all(block["type"] == "text" for block in ctx.payload["messages"][0]["content"])
+
+
+async def test_a_client_side_tool_result_is_not_mistaken_for_a_server_one() -> None:
+    # Plain `tool_result` belongs to a tool that was never removed. Matching on the `_tool_result` suffix alone would have swallowed it.
+    client_result: dict[str, Any] = {
+        "type": "tool_result",
+        "tool_use_id": "toolu_1",
+        "content": "42",
+    }
+    ctx = context({"messages": [{"role": "user", "content": [client_result]}]})
+
+    await adapt_server_tools(ctx)
+
+    assert ctx.payload["messages"][0]["content"] == [client_result]
+
+
+async def test_a_server_tool_family_we_do_not_strip_keeps_its_blocks() -> None:
+    # The declaration for these survives, so the blocks referring to it still have something to refer to.
+    code_call: dict[str, Any] = {
+        "type": "server_tool_use",
+        "id": "srvtoolu_2",
+        "name": "code_execution",
+        "input": {"code": "1+1"},
+    }
+    ctx = context({"messages": [{"role": "assistant", "content": [code_call]}]})
+
+    await adapt_server_tools(ctx)
+
+    assert ctx.payload["messages"][0]["content"] == [code_call]
+
+
+async def test_a_history_with_nothing_to_flatten_is_left_exactly_as_it_was() -> None:
+    payload: dict[str, Any] = {
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]
+    }
+    ctx = context(payload)
+
+    await adapt_server_tools(ctx)
+
+    assert ctx.payload == {
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]
+    }
+
+
+async def test_a_successful_fetch_is_not_reported_as_a_failure() -> None:
+    """A single object is not evidence of failure — `web_fetch` returns one when it works.
+
+    Reading the payload's shape instead of its `type` turned a fetch that worked into `[web_fetch failed]` and threw away the URL on the way.
+    """
+    fetched: dict[str, Any] = {
+        "type": "web_fetch_tool_result",
+        "tool_use_id": "srvtoolu_9",
+        "content": {
+            "type": "web_fetch_result",
+            "url": "https://example.com/page",
+            "retrieved_at": "2026-08-20T00:00:00Z",
+        },
+    }
+    ctx = context({"messages": [{"role": "assistant", "content": [fetched]}]})
+
+    await adapt_server_tools(ctx)
+
+    text = ctx.payload["messages"][0]["content"][0]["text"]
+    assert text == "[web_fetch results]\n- https://example.com/page"
+
+
+async def test_a_fetch_call_names_the_page_it_asked_for() -> None:
+    # `web_fetch` puts its argument under `url`, not `query`. A renderer that knew only `query` made every fetch a bare `[web_fetch]`.
+    call: dict[str, Any] = {
+        "type": "server_tool_use",
+        "id": "srvtoolu_9",
+        "name": "web_fetch",
+        "input": {"url": "https://example.com/page"},
+    }
+    ctx = context({"messages": [{"role": "assistant", "content": [call]}]})
+
+    await adapt_server_tools(ctx)
+
+    assert ctx.payload["messages"][0]["content"][0]["text"] == "[web_fetch] https://example.com/page"
+
+
+async def test_a_result_with_a_title_and_no_url_still_gets_a_line() -> None:
+    # Dropping it would let a turn that read three pages report two.
+    titled: dict[str, Any] = {
+        "type": "web_search_tool_result",
+        "tool_use_id": "srvtoolu_1",
+        "content": [{"type": "web_search_result", "title": "Untitled source"}],
+    }
+    ctx = context({"messages": [{"role": "assistant", "content": [titled]}]})
+
+    await adapt_server_tools(ctx)
+
+    assert ctx.payload["messages"][0]["content"][0]["text"] == "[web_search results]\n- Untitled source"
+
+
+async def test_a_cache_breakpoint_survives_the_flattening() -> None:
+    # `cache_control` marks a position in the prompt, not a kind of block. Dropping it moves where the cached prefix ends without saying so.
+    marked: dict[str, Any] = {**SEARCH_RESULT, "cache_control": {"type": "ephemeral"}}
+    ctx = context({"messages": [{"role": "assistant", "content": [marked]}]})
+
+    await adapt_server_tools(ctx)
+
+    assert ctx.payload["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+
+
+async def test_a_query_does_not_bring_its_trailing_whitespace_along() -> None:
+    # It would land at the end of an assistant turn, which upstream rejects on its own terms.
+    call: dict[str, Any] = {**SEARCH_CALL, "input": {"query": "today's date\n\n"}}
+    ctx = context({"messages": [{"role": "assistant", "content": [call]}]})
+
+    await adapt_server_tools(ctx)
+
+    assert ctx.payload["messages"][0]["content"][0]["text"] == "[web_search] today's date"

@@ -2,7 +2,7 @@
 
 The point of a registry is that the set and the order are decisions rather than accidents of import order, so this file is where a subscriber added without such a decision fails. It is deliberately blunt: adding one and not updating the expected tuple here is meant to be a failing test, not a passing one that quietly grew an entry.
 
-The last test is the one that matters most. Everything above it proves `register_builtin_subscribers` does what it says; only that one proves anybody calls it. A carrier nothing invokes looks identical to a working one from every other angle.
+The two tests at the bottom are the ones that matter most. Everything above them proves `register_builtin_subscribers` does what it says; only those prove anybody calls it, on each of the two paths that reach upstream. A carrier nothing invokes looks identical to a working one from every other angle.
 """
 
 from typing import Any
@@ -21,6 +21,7 @@ from app.pipeline.subscribers import (
     register_builtin_subscribers,
 )
 from app.server.composition import build_chain
+from app.server.handler import handle_count_tokens
 
 EXPECTED_ON_ATTEMPT_PREPARE = (SERVER_TOOL_CAPABILITY_ID, BLANK_TEXT_BLOCKS_ID)
 # Keyed by event, so a subscriber added on a *different* event fails here too. Asserting one bucket would have let the next one land on `attempt.failed` with both assertions still green — a lock that only covers the door it was hung on.
@@ -70,6 +71,7 @@ class RecordingProvider:
 
     def __init__(self) -> None:
         self.sent: list[dict[str, Any]] = []
+        self.counted: list[dict[str, Any]] = []
 
     @property
     def available_ids(self) -> frozenset[str]:
@@ -96,8 +98,13 @@ class RecordingProvider:
         return httpx.Response(200)
 
     async def count_tokens(self, payload: Any, *, model_id: str) -> httpx.Response:
-        # Present so the fake really satisfies the protocol; nothing here counts tokens.
-        raise NotImplementedError("this fake does not count tokens")
+        self.counted.append(dict(payload))
+        # Carries a request because the caller calls `raise_for_status()`, which needs one. A bare response makes that raise, and the count then quietly falls back to the local estimate — a green assertion about `counted` would have hidden it.
+        return httpx.Response(
+            200,
+            json={"input_tokens": 7},
+            request=httpx.Request("POST", "https://upstream.invalid/v1/messages/count_tokens"),
+        )
 
 
 async def test_the_declaration_is_gone_from_what_the_driver_actually_sends() -> None:
@@ -168,4 +175,39 @@ async def test_a_blank_block_is_gone_from_what_the_driver_actually_sends() -> No
                 }
             ],
         }
+    ]
+
+
+async def test_the_counting_leg_gets_the_same_treatment_as_the_leg_it_measures() -> None:
+    """Upstream rejects a counting request over a server tool in the very same words.
+
+    Measured 2026-08-20: `/v1/messages/count_tokens` with a `web_search_20250305` declaration answers `The use of the web search tool is not supported.` / `unsupported_value`, character for character what `/v1/messages` answers, while the same body without tools and the same body with an ordinary function tool both return a count. So this path has to run the subscribers too, and a count taken before they ran would have measured a body that was never going to be sent.
+    """
+    config = ProxyConfig.model_validate(
+        {
+            "default_model_provider": "ghc",
+            "model_providers": {"ghc": {"type": "github_copilot"}},
+        }
+    )
+    provider = RecordingProvider()
+    chain = build_chain(
+        config,
+        http_client=httpx.AsyncClient(),
+        providers={"ghc": provider},
+    )
+    context = RequestContext(
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        requested_model="claude-model",
+        payload={
+            "model": "claude-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+        },
+    )
+
+    answer = await handle_count_tokens(chain, context)
+
+    assert answer == {"input_tokens": 7}
+    assert provider.counted == [
+        {"model": "claude-model", "messages": [{"role": "user", "content": "hi"}]}
     ]

@@ -6,7 +6,9 @@ The first-party client reached the same conclusion and acts on it the same way: 
 
 Removing a declaration removes a capability, which is why this is loud rather than silent: the model is no longer offered a tool the client believes it has. That is a real loss, and it is still the better of the two outcomes on offer, because the alternative is not "web search works" but "nothing works".
 
-**Scoped to the Anthropic leg on purpose.** What decides this is the endpoint, not the client: no Claude model in the catalog advertises `/responses` at all, and the `/responses` endpoint does execute hosted web search natively, measured on gpt-5.5. Whether *this* spelling — an Anthropic `web_search_YYYYMMDD` declaration carried onto a Responses request by translation — is accepted there has not been measured; upstream was only ever asked with the Responses spelling `{"type": "web_search"}`. So the Responses leg is left alone because nothing has been measured rejecting it, not because it is known to work. Mapping the Anthropic declaration onto the Responses builtin is a separate product capability: it has to be decided before translation rather than here, and it cannot ship without the response side, because a reply carrying `web_search_call` items has nowhere to go in the Anthropic protocol today.
+**The history gets the same treatment, and not as an afterthought.** A session that used web search before this ran carries `server_tool_use` calls and `*_tool_result` answers in its transcript, and those are rejected on their own account, so removing only the declaration trades one rejection for another. They are flattened into plain text rather than downgraded into a client `tool_use` / `tool_result` pair, because a downgraded pair still refers to a tool that is no longer declared. Text refers to nothing.
+
+**Scoped to the Anthropic leg on purpose, and the Responses leg needs its own answer rather than this one.** What decides it is the endpoint: no Claude model in the catalog advertises `/responses`, and that endpoint does execute hosted web search natively — but only under its own spelling. Measured 2026-08-20 on gpt-5.5: `{"type": "web_search"}` returns 200, while the Anthropic `web_search_20250305` spelling returns 400 `Invalid value`. So carrying a declaration across untouched is no good there either; what that leg needs is a mapping, and a mapping cannot ship without the response side, because a reply carrying `web_search_call` items has nowhere to go in the Anthropic protocol today. Removing the declaration here would be the wrong repair for the wrong endpoint, so this stays out of its way.
 """
 
 import logging
@@ -47,7 +49,7 @@ def _rejected_type(tool: Any) -> str | None:
 def _drop_dangling_choice(payload: dict[str, Any]) -> None:
     """Remove a `tool_choice` that now points at nothing.
 
-    Two ways it can dangle. It names a tool that is no longer declared, or it demands *some* tool of a request that no longer declares any. Both are rejected upstream on their own, so leaving one behind would trade the rejection this module exists to prevent for another one — and `Tool 'web_search' not found in provided tools` is exactly the wording that would come back.
+    Two ways it can dangle. It names a tool that is no longer declared, or it demands *some* tool of a request that no longer declares any. Both are rejected upstream on their own, so leaving one behind would trade the rejection this module exists to prevent for another one. The reference project matches `Tool 'X' not found in provided tools` for that case; this project has not put it to upstream itself.
 
     Decided against what survives rather than against what was removed. A declaration carrying no `name` cannot be recorded on the way out, and a choice pointing at it would then have looked like a choice pointing at something still present.
 
@@ -78,14 +80,163 @@ def _drop_dangling_choice(payload: dict[str, Any]) -> None:
         del payload["tool_choice"]
 
 
-async def adapt_server_tools(context: RequestContext) -> None:
-    """Drop server-tool declarations the routed endpoint will reject.
+def _family(name: str) -> str | None:
+    """The rejected server-tool family a type or tool name belongs to, else `None`."""
+    for prefix in _REJECTED_TYPE_PREFIXES:
+        if name.startswith(prefix):
+            return prefix
+    return None
 
-    Reads the route rather than the inbound format, because what upstream accepts is a property of the endpoint being spoken to. A request that arrived in another protocol and was translated *into* Anthropic shape belongs here too, and gets the same treatment for the same reason; one that was translated *out* of it does not, and its `tools` is a different protocol's field that happens to share the name.
+
+def _describe_one(item: Any) -> str | None:
+    """One line for one result, or `None` when it says nothing worth a line.
+
+    `encrypted_content` is deliberately not among the fields read. It is the bulk of a search result's bytes and is opaque to everyone but upstream, so carrying it would multiply the history's size to say nothing.
     """
-    if context.target_format is not WireFormat.ANTHROPIC_MESSAGES:
-        return
-    payload = context.payload
+    if not isinstance(item, dict):
+        return None
+    result = cast(dict[str, Any], item)
+    title = result.get("title")
+    url = result.get("url")
+    has_title = isinstance(title, str) and title.strip()
+    has_url = isinstance(url, str) and url.strip()
+    if has_title and has_url:
+        return f"- {title} — {url}"
+    if has_url:
+        return f"- {url}"
+    if has_title:
+        # A result with a title and no URL still names what was read. Dropping it would let a turn that fetched three pages report two.
+        return f"- {title}"
+    return None
+
+
+def _failure_of(content: Any) -> str | None:
+    """The error code when this result payload is a failure, else `None`.
+
+    Read off `type` and `error_code` rather than off the payload's *shape*. A single object is not evidence of failure: a successful `web_fetch_tool_result` carries one object too, and treating shape as the discriminator reported a fetch that worked as one that failed — and threw away its URL and text on the way.
+    """
+    if not isinstance(content, dict):
+        return None
+    entry = cast(dict[str, Any], content)
+    kind = entry.get("type")
+    code = entry.get("error_code")
+    failed = (isinstance(kind, str) and kind.endswith("_error")) or code is not None
+    if not failed:
+        return None
+    return code if isinstance(code, str) else ""
+
+
+def _render_results(content: Any, family: str) -> str:
+    """Turn a server-tool result's payload into something a model can still read.
+
+    Three payload shapes reach here: a list of results (`web_search`), a single result object (`web_fetch`), and an error object (either family).
+    """
+    failure = _failure_of(content)
+    if failure is not None:
+        return f"[{family} failed: {failure}]" if failure else f"[{family} failed]"
+    items: list[Any] = (
+        cast(list[Any], content) if isinstance(content, list) else [content] if content else []
+    )
+    lines = [line for line in (_describe_one(item) for item in items) if line is not None]
+    if not lines:
+        return f"[{family} results omitted]"
+    return "\n".join([f"[{family} results]", *lines])
+
+
+def _call_subject(raw_input: Any) -> str:
+    """What the call was about, as a trailing fragment, or the empty string.
+
+    Reads `query` and `url` because the two families name their argument differently — `web_search` asks a question, `web_fetch` names a page — and a renderer that knew only about the first turned every fetch into a bare `[web_fetch]`.
+
+    Stripped, because the surrounding text is generated: a trailing newline in the client's query would put whitespace at the end of an assistant turn, which upstream rejects separately.
+    """
+    if not isinstance(raw_input, dict):
+        return ""
+    entry = cast(dict[str, Any], raw_input)
+    for key in ("query", "url"):
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            return f" {value.strip()}"
+    return ""
+
+
+def _as_text(entry: dict[str, Any], text: str) -> dict[str, Any]:
+    """The replacement block, carrying over what the original said about caching.
+
+    `cache_control` is a property of the position in the prompt, not of the block's kind, so a breakpoint the client placed here still marks the same boundary once the block is text. Dropping it would silently move where the prefix ends.
+    """
+    replacement: dict[str, Any] = {"type": "text", "text": text}
+    cache_control = entry.get("cache_control")
+    if cache_control is not None:
+        replacement["cache_control"] = cache_control
+    return replacement
+
+
+def _flatten_history_block(block: Any) -> dict[str, Any] | None:
+    """The text a rejected server-tool block becomes, or `None` to leave the block alone.
+
+    Flattened to text rather than downgraded to a client `tool_use` / `tool_result` pair, which is what the reference implementation does. That downgrade only works while the tool stays declared; here the declaration has just been removed, so a surviving reference would be rejected in its own right — the reference project matches `Tool 'X' not found in provided tools` for that case, which this project has not measured for itself. Text refers to nothing and so cannot dangle either way.
+
+    Repairing these in place is not on the table either: upstream requires a real, non-empty `encrypted_content` on every search result and rejects both an empty string and any placeholder, measured by the reference project. Whatever a client replays, we cannot make it sendable.
+    """
+    if not isinstance(block, dict):
+        return None
+    entry = cast(dict[str, Any], block)
+    block_type = entry.get("type")
+    if not isinstance(block_type, str):
+        return None
+
+    if block_type == "server_tool_use":
+        name = entry.get("name")
+        if not isinstance(name, str):
+            return None
+        family = _family(name)
+        if family is None:
+            return None
+        return _as_text(entry, f"[{family}]{_call_subject(entry.get('input'))}")
+
+    # `tool_result` on its own is the client-side one and belongs to a tool we never touched.
+    if block_type == "tool_result" or not block_type.endswith("_tool_result"):
+        return None
+    family = _family(block_type)
+    if family is None:
+        return None
+    return _as_text(entry, _render_results(entry.get("content"), family))
+
+
+def _flatten_history(payload: dict[str, Any]) -> int:
+    """Replace rejected server-tool blocks left in the history, returning how many.
+
+    Runs whether or not this request declared anything. A history block is rejected on its own account, so a client that has since stopped asking for web search still replays turns from when it did.
+    """
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return 0
+    flattened = 0
+    for message in cast(list[Any], messages):
+        if not isinstance(message, dict):
+            continue
+        entry = cast(dict[str, Any], message)
+        content = entry.get("content")
+        if not isinstance(content, list):
+            continue
+        rebuilt: list[Any] = []
+        touched = False
+        for block in cast(list[Any], content):
+            replacement = _flatten_history_block(block)
+            if replacement is None:
+                rebuilt.append(block)
+                continue
+            rebuilt.append(replacement)
+            touched = True
+            flattened += 1
+        if touched:
+            entry["content"] = rebuilt
+    return flattened
+
+
+def _strip_declarations(payload: dict[str, Any]) -> None:
+    """Remove the declarations, and any `tool_choice` left pointing at one."""
     tools_value = payload.get("tools")
     if not isinstance(tools_value, list):
         return
@@ -122,3 +273,24 @@ async def adapt_server_tools(context: RequestContext) -> None:
         ", ".join(sorted(dropped)),
         ", ".join(sorted(dropped_names)) if dropped_names else "them",
     )
+
+
+async def adapt_server_tools(context: RequestContext) -> None:
+    """Drop server-tool declarations the routed endpoint will reject, and flatten what they left in the history.
+
+    Reads the route rather than the inbound format, because what upstream accepts is a property of the endpoint being spoken to. A request that arrived in another protocol and was translated *into* Anthropic shape belongs here too, and gets the same treatment for the same reason; one that was translated *out* of it does not, and its `tools` is a different protocol's field that happens to share the name.
+
+    Two passes, and the history one is not conditional on the first. Removing the declaration prevents the rejection this module is named for; leaving the turns that declaration produced would simply buy a different one.
+    """
+    if context.target_format is not WireFormat.ANTHROPIC_MESSAGES:
+        return
+    payload = context.payload
+
+    _strip_declarations(payload)
+    flattened = _flatten_history(payload)
+    if flattened:
+        # INFO for the same reason as the declaration line below: routine for a session that used web search, but it rewrites what the model is shown, which is not something to bury in debug.
+        logger.info(
+            "flattened %d server-tool block(s) left in the history into text; upstream would have rejected them",
+            flattened,
+        )

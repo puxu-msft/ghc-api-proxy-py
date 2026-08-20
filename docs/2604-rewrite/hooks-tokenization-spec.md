@@ -129,9 +129,15 @@ Completion usage 通过 byte-preserving 旁路 tap 提取：非流式响应从�
 >
 > 用户裁决：能力**跟随已路由的模型**——路由到 Anthropic Messages 端点时，剥掉上游已实测拒绝的 server-tool 声明并记录；路由到 `/responses` 时映射为 hosted builtin（该映射因耦合响应侧而尚未实现）。
 >
-> 落地为具名订阅者 `builtin:server-tool-capability`（`src/app/pipeline/subscribers/server_tools.py`，事件 `attempt.prepare`）。它**只动 `tools[]` 声明，不碰历史 blocks**，所以本节关于「残留 server-tool blocks 被上游拒绝是有意的 breaking removal」的立场**未被改变**，仍然有效。
+> 落地为具名订阅者 `builtin:server-tool-capability`（`src/app/pipeline/subscribers/server_tools.py`，事件 `attempt.prepare`）。
 >
-> 触发这道裁决的是一条生产 400：`The use of the web search tool is not supported.`（`unsupported_value`），来自 Copilot 的 Anthropic Messages 端点。完整根因、参考项目对照与设计理由见 `docs/tmp/260820-websearch-fix-v2-design.md`；根因见 `docs/tmp/260820-websearch-400-synthesis.md`。
+> **2026-08-20 第二批裁决，继续推翻本节剩下的那一半。** 上面第一批裁决只动 `tools[]` 声明、明确不碰历史 blocks；用户随后裁决**历史请求也要同步处理**——去掉，或换成无害 no-op。因此本节「残留 server-tool blocks 被上游拒绝是有意的 breaking removal，项目只提供清晰错误」的立场**不再成立**。
+>
+> 现行行为：同一个订阅者把历史里的 `server_tool_use` 与 `*_tool_result` blocks **摊平成纯文本**（保留 `title`／`url`／query 或 fetch 的 URL，丢弃 `encrypted_content`，错误形态渲染成 `[<family> failed: <code>]`，并保留原块上的 `cache_control`）。不降级成 `tool_use`／`tool_result` 对：声明已被剥掉，降级后的引用仍会被上游拒绝；也无法就地修复，上游要求每条搜索结果带真实非空 `encrypted_content`。
+>
+> **仍然成立的是**：本项目不做反应式路径——不在收到 400 后剥离并降级重试。判据读的是我们自己发出的声明类型，不是上游的错误措辞。
+>
+> 触发第一批裁决的是一条生产 400：`The use of the web search tool is not supported.`（`unsupported_value`），来自 Copilot 的 Anthropic Messages 端点；`/v1/messages/count_tokens` 已实测返回**逐字相同**的错误，故该腿也走同一套订阅者。完整根因、参考项目对照、上游实测与设计理由见 `docs/tmp/260820-websearch-fix-v2-design.md`。
 
 按消息局部相邻关系处理：
 
