@@ -14,7 +14,6 @@ from starlette.types import Message, Receive, Scope, Send
 
 from app.anthropic.client import AnthropicClient
 from app.config.settings import AppSettings
-from app.delivery.reservation import RequestResidentAccount, ResidentByteBudget
 from app.delivery.responses_anthropic_stream import (
     ResponsesAnthropicStreamState,
     render_responses_as_anthropic_sse,
@@ -226,21 +225,12 @@ def _harness(
     stream: httpx.AsyncByteStream,
     *,
     checkpoint_finalize: bool = False,
-    resident_limits: tuple[int, int] | None = None,
     route_upstream_type: Literal["copilot", "generic"] = "copilot",
 ) -> Harness:
-    responses_config: dict[str, int] = {}
-    if resident_limits is not None:
-        global_bytes, request_bytes = resident_limits
-        responses_config = {
-            "global_resident_bytes": global_bytes,
-            "request_resident_bytes": request_bytes,
-        }
     settings = AppSettings.model_validate(
         {
             "anthropic": {"route_override": "responses"},
             "history": {"enabled": False},
-            "openai_responses": responses_config,
         }
     )
     catalog = ModelCatalog(None, "https://upstream.test")
@@ -962,126 +952,6 @@ async def test_chunked_responses_sse_reaches_real_anthropic_asgi_after_complete_
             },
         }
     ]
-
-
-def test_responses_stream_route_releases_resident_budget_after_success() -> None:
-    events: tuple[Mapping[str, Any], ...] = (
-        {
-            "type": "response.created",
-            "response": {
-                "id": "resp_resident_route",
-                "model": "resolved-model",
-                "status": "in_progress",
-            },
-        },
-        {
-            "type": "response.output_item.added",
-            "output_index": 0,
-            "item": {
-                "id": "msg_resident_route",
-                "type": "message",
-                "content": [],
-            },
-        },
-        {
-            "type": "response.output_item.done",
-            "output_index": 0,
-            "item": {
-                "id": "msg_resident_route",
-                "type": "message",
-                "content": [{"type": "output_text", "text": "resident route"}],
-            },
-        },
-        {
-            "type": "response.completed",
-            "response": {
-                "id": "resp_resident_route",
-                "status": "completed",
-                "usage": {"input_tokens": 1, "output_tokens": 2},
-            },
-        },
-    )
-    stream = StaticResponsesStream(
-        tuple(_sse(event) for event in events)
-    )
-    harness = _harness(stream, resident_limits=(16_384, 8_192))
-
-    with TestClient(harness.app) as client:
-        response = client.post("/v1/messages", json=_request_body())
-        budget = harness.app.state.runtime.resident_byte_budget
-
-        assert response.status_code == 200
-        assert _event_names(response.content)[-1] == "message_stop"
-        assert budget is not None
-        assert budget.high_water_bytes > 0
-        assert budget.current_bytes == 0
-
-
-@pytest.mark.asyncio
-async def test_cancelled_renderer_capacity_wait_releases_request_account() -> None:
-    capacity_bytes = 4096
-    budget = ResidentByteBudget(capacity_bytes=capacity_bytes)
-    holder_account = RequestResidentAccount(
-        request_id="request-renderer-holder",
-        attempt=0,
-        capacity_bytes=capacity_bytes,
-        budget=budget,
-    )
-    waiting_account = RequestResidentAccount(
-        request_id="request-renderer-waiting",
-        attempt=0,
-        capacity_bytes=capacity_bytes,
-        budget=budget,
-    )
-    holder = await holder_account.reserve(owner="holder", amount=capacity_bytes)
-    source = StaticResponsesStream(
-        (
-            _sse(
-                {
-                    "type": "response.created",
-                    "response": {
-                        "id": "resp_resident_wait",
-                        "model": "resolved-model",
-                        "status": "in_progress",
-                    },
-                }
-            ),
-            _sse(
-                {
-                    "type": "response.output_item.done",
-                    "output_index": 0,
-                    "item": {
-                        "id": "msg_resident_wait",
-                        "type": "message",
-                        "content": [{"type": "output_text", "text": "wait"}],
-                    },
-                }
-            ),
-        )
-    )
-    rendered = render_responses_as_anthropic_sse(
-        source.__aiter__(),
-        model="resolved-model",
-        resident_account=waiting_account,
-    )
-    async def next_batch() -> bytes:
-        return await anext(rendered)
-
-    waiting = asyncio.create_task(next_batch())
-    await asyncio.sleep(0)
-
-    assert waiting.done() is False
-    assert waiting_account.current_bytes == 0
-    assert budget.current_bytes == capacity_bytes
-
-    waiting.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await waiting
-
-    assert waiting_account.current_bytes == 0
-    assert budget.current_bytes == capacity_bytes
-    await holder_account.release(holder)
-    assert budget.current_bytes == 0
 
 
 @pytest.mark.parametrize(

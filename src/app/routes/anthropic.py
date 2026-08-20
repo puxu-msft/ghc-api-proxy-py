@@ -9,7 +9,6 @@ from app.anthropic.header_policy import (
     normalize_responses_response_headers,
 )
 from app.anthropic.warmup import apply_warmup_policy
-from app.delivery.reservation import RequestResidentAccount
 from app.delivery.responses_anthropic_stream import (
     ResponsesAnthropicStreamState,
     render_responses_as_anthropic_sse,
@@ -227,21 +226,10 @@ async def messages(
         if responses_leg:
             responses_state = ResponsesAnthropicStreamState()
             require_stable_responses_identity = settings.upstream.type != "copilot"
-            resident_account = (
-                RequestResidentAccount(
-                    request_id=result.context.id,
-                    attempt=result.context.attempts[-1].number,
-                    capacity_bytes=settings.openai_responses.request_resident_bytes,
-                    budget=runtime.resident_byte_budget,
-                )
-                if runtime.resident_byte_budget is not None
-                else None
-            )
             upstream_stream = render_responses_as_anthropic_sse(
                 upstream_stream,
                 model=result.context.resolved_model,
                 state=responses_state,
-                resident_account=resident_account,
                 require_stable_response_id=require_stable_responses_identity,
                 require_stable_item_id=require_stable_responses_identity,
             )

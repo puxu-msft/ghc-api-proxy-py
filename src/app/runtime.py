@@ -7,7 +7,6 @@ from app.config.settings import AppSettings
 
 if TYPE_CHECKING:
     from app.anthropic.client import AnthropicClient
-    from app.delivery.reservation import ResidentByteBudget
     from app.history.store import HistoryStore
     from app.history.ws import WebSocketManager
     from app.hooks.registry import HookRegistry
@@ -37,7 +36,6 @@ class RuntimeState:
     history_store: HistoryStore | None = None
     approval_gate: ApprovalGate | None = None
     websocket_manager: WebSocketManager | None = None
-    resident_byte_budget: ResidentByteBudget | None = None
 
     def readiness_checks(self) -> dict[str, bool]:
         return {

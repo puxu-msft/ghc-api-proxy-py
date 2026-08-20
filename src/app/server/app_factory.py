@@ -10,7 +10,6 @@ from app import __version__
 from app.auth.providers import noninteractive_token_available
 from app.config.paths import user_data_path
 from app.config.settings import AppSettings
-from app.delivery.reservation import ResidentByteBudget
 from app.history.consumer import HistoryConsumer
 from app.history.store import HistoryStore
 from app.history.ws import WebSocketManager
@@ -57,11 +56,6 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
         log_format=settings.observability.log_format,
         log_level=settings.observability.log_level,
     )
-    if settings.openai_responses.global_resident_bytes > 0:
-        runtime.resident_byte_budget = ResidentByteBudget(
-            capacity_bytes=settings.openai_responses.global_resident_bytes
-        )
-
     async with anyio.create_task_group() as task_group:
         runtime.background_task_group = task_group
         try:
@@ -158,7 +152,6 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
             runtime.background_task_group = None
             runtime.tokenization_state = None
             runtime.hook_registry = None
-            runtime.resident_byte_budget = None
 
 
 def create_app(settings: AppSettings | None = None) -> FastAPI:

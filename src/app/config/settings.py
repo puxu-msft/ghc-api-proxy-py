@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.graceful_timeout import DEFAULT_GRACEFUL_TIMEOUT_SECONDS
@@ -133,22 +133,6 @@ class ResponsesConfig(FrozenModel):
     max_ws_frame_bytes: int = 0
     max_client_ws_connections: int = 256
     max_upstream_ws_connections: int = 32
-    global_resident_bytes: int = Field(default=0, ge=0)
-    request_resident_bytes: int = Field(default=0, ge=0)
-
-    @model_validator(mode="after")
-    def validate_resident_limits(self) -> ResponsesConfig:
-        global_bytes = self.global_resident_bytes
-        request_bytes = self.request_resident_bytes
-        if (global_bytes == 0) != (request_bytes == 0):
-            raise ValueError(
-                "global_resident_bytes and request_resident_bytes must be enabled together"
-            )
-        if request_bytes > global_bytes:
-            raise ValueError(
-                "request_resident_bytes cannot exceed global_resident_bytes"
-            )
-        return self
 
 
 class TokenizationConfig(FrozenModel):
