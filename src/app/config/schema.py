@@ -292,7 +292,6 @@ class FixAnthropicRequestHook(Section):
     extended_cache_ttl: ExtendedCacheTtlConfig = Field(default_factory=ExtendedCacheTtlConfig)
     context_editing: ContextEditingConfig = Field(default_factory=ContextEditingConfig)
     thinking: RequestThinkingConfig = Field(default_factory=RequestThinkingConfig)
-    strip_system_reminder_from_Read: bool = False
 
 
 class SseThinkingConfig(Section):
