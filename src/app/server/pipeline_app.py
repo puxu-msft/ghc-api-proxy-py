@@ -85,14 +85,22 @@ def _extra_info(network_stream: Any, name: str) -> Any:
         return UNREADABLE
 
 
+def _readable(value: Any) -> bool:
+    """Whether a transport reading is a fact rather than the absence of one. See `UNREADABLE`."""
+    return value is not None and value is not UNREADABLE
+
+
 def _socket_address(value: object) -> str:
-    """Render an httpcore socket address without retaining the live socket."""
+    """Render an httpcore socket address without retaining the live socket.
+
+    Callers filter with `_readable` first, so there is no `None` case to render — an earlier version answered `""` for it, which is the exact conflation `_snapshot_upstream_connection` exists to avoid, sitting one call deeper.
+    """
     if isinstance(value, tuple):
         parts = cast(tuple[object, ...], value)
         if len(parts) >= 2:
             host, port = str(parts[0]), parts[1]
             return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
-    return str(cast(object, value)) if value is not None else ""
+    return str(cast(object, value))
 
 
 def _snapshot_upstream_connection(response: Any) -> dict[str, Any]:
@@ -107,20 +115,19 @@ def _snapshot_upstream_connection(response: Any) -> dict[str, Any]:
     try:
         extensions = response.extensions
         network_stream = extensions.get("network_stream")
-        readings = {
+        addresses = {
             "local": _extra_info(network_stream, "client_addr"),
             "peer": _extra_info(network_stream, "server_addr"),
-            "alpn": _alpn(_extra_info(network_stream, "ssl_object")),
         }
-        observed = {
-            name: _socket_address(value) if name != "alpn" else value
-            for name, value in readings.items()
-            if value is not None and value is not UNREADABLE
-        }
+        alpn = _alpn(_extra_info(network_stream, "ssl_object"))
+        # Kept out of the address mapping rather than branching on the key name inside it: `alpn` is a protocol string, not a socket address, and rendering it correctly by asking "is this the alpn key" reads as a special case where there is simply a second kind of fact.
+        observed: dict[str, Any] = {name: _socket_address(value) for name, value in addresses.items() if _readable(value)}
+        if _readable(alpn):
+            observed["alpn"] = alpn
         stream_id = extensions.get("stream_id")
         if isinstance(stream_id, int):
             observed["stream_id"] = stream_id
-        if any(value is UNREADABLE for value in readings.values()):
+        if any(value is UNREADABLE for value in (*addresses.values(), alpn)):
             observed["unavailable"] = "socket-unreadable"
         elif not observed:
             observed["unavailable"] = "no-transport-identity"
