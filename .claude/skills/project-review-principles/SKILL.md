@@ -32,7 +32,8 @@ description: "本项目的定期复查清单：拿几条已经付过代价的原
 **范围限定在当前 CLI 所用的 `pipeline_app`**，它对正常上游回复有两种处理模式：
 
 - **live upstream 上的 block-level delivery**（对应请求的 `stream=true`）——经 `assembler.py` 的 `Terminal`。注意术语：下游交付单位是完整的 Anthropic content block，SSE 只是信封，别把它写成语义上的「流式交付」。
-- **whole-body 回复**——`pipeline_app.py:313` 先 `response_payload()`（内部走 translator registry 做响应翻译），`:316` 再由 `handler.reply_summary()` 汇总。**顺序是先翻译后汇总**，`reply_summary` 调用的是 `terminal_from_anthropic`，不会下行到 `translation_driver/responses.py`。
+- **whole-body 回复**——`pipeline_app.py:417` 先 `response_payload()`（内部走 translator registry 做响应翻译），`:420` 再由 `handler.reply_summary()` 汇总（行号取于 2026-08-20 收尾时；本节其余行号同批）。**顺序是先翻译后汇总**，`reply_summary` 调用的是 `terminal_from_anthropic`，不会下行到 `translation_driver/responses.py`。
+- **token 计数**——`/v1/messages/count_tokens`，`pipeline_app.py:308` 直接 `trace.usage = {"input_tokens": tokens}`。它**不经过 `Terminal`**，是第三个写入同一条记录的出口。纳入范围的理由：`provider(ghc)` 那一档，行上那个数字**就是上游答的**，与另两种模式描述的是同一件事、由同一个 `format_tokens` 渲染；`provider(local)` 那一档不是上游的数，而这正是 `provider(...)` 这个字段存在的原因（见 `.dev/docs/tui/archive-count-tokens-line/`）。**它没有 `absorb`，所以下面命令 C 结构上看不见它**——2026-08-20 首次真实复查发现的召回缺口。
 
 仓库里还有一条 legacy 交付链（`src/app/routes/anthropic.py`、`src/app/delivery/`），**本条不覆盖它**——它不在当前 CLI 的正常回复路径上。若哪天它重新上线，这条原则的事实清单与命令都要先扩，不能默认适用。
 
@@ -52,6 +53,9 @@ rg -n "Terminal\(|\.record\(|tools\.append|thinking\.append|(stop_reason|usage|d
 # C 消费者：两条 absorb 调用点都必须出现（一条 whole-body、一条 block-level）
 rg -n "absorb\(|\.reply\b" src/app/server/pipeline_app.py src/app/pipeline/delivery/stream.py
 
+# C2 绕开 Terminal 直接写记录字段的出口（count 路径就在这里，C 抓不到它）
+rg -n "trace\.(usage|stop_reason|tools|thinking|blocks|dialect|terminal_seen)\s*=" src/app/server/pipeline_app.py
+
 # D 重复判定热点：同一语义在两个文件里各判一次
 rg -n "stop_reason|usage" src/app/pipeline/delivery/assembler.py src/app/pipeline/translation_driver/responses.py | rg "=\s|def |if "
 ```
@@ -62,6 +66,7 @@ rg -n "stop_reason|usage" src/app/pipeline/delivery/assembler.py src/app/pipelin
 - **同一语义有两处独立表达式。** 「什么算 `tool_use` 块」「怎么区分可读推理与密封签名」「缓存要不要从 `input_tokens` 里减掉」出现两份，就是漂移的开始：修好一份时另一份不会有人动。
 - **分派条件写了两遍。** 「这是哪种上游」若两处各判一次，两种模式可以对同一请求得出不同答案。
 - **某条路径没有读取器却仍产出记录。** 空记录与「没读」是两个事实，混同会让下游把「读不出来」当成「回复里没有」。
+- **某个出口绕开记录、直接写记录的字段。** 今天渲染正确不等于没违背——判据是「将来给 `Terminal` 加一个键或改一次换算时，这个出口会不会被漏掉」。2026-08-20 实测：count 出口手工构造 `usage`，而 `format_tokens` 对缓存键用 `.get` 取 0，所以缺键当天无害；下一次改换算它就会掉队。
 
 ### 修法方向
 
@@ -73,7 +78,9 @@ rg -n "stop_reason|usage" src/app/pipeline/delivery/assembler.py src/app/pipelin
 
 2026-08-20 一场之内同一形状发作三次，每次都由评审或用户事后发现：`tools`/`thinking` 两处各自分类；usage 只在 block-level 那侧换算，导致同一路由因 `stream` 开关给出两套契约、且 whole-body 那套破坏了下游 schema；`Terminal.stop_reason` 的类默认值在「读不出内容」的路径上伪造出 `end_turn`。详见 `.dev/docs/tui/archive-request-log/` 与 `archive-token-accounting/`。
 
-**权重：足以作为暂定复查项执行**——依据是同一机制在三个独立代码点造成了具名缺陷，不是单次印象。**不足以支撑「上面这组命令有召回力」**：它们从未在一次真实复查里被检验过，首次复查应当把「有没有该抓到却没抓到的位置」一并记下来。
+**权重：足以作为暂定复查项执行**——依据是同一机制在三个独立代码点造成了具名缺陷，不是单次印象。
+
+**首次真实复查（2026-08-20）的召回结果**：命令 A/C 按预期打出两条 `absorb`，与描述一致；**但漏掉了 count 出口**——它写同一条记录的 `usage` 却不调 `absorb`，命令 C 的模式结构上够不着。已补 C2。这正是本节此前留的那句话要记的东西，记完之后仍**不足以支撑「这组命令有召回力」**：C2 只覆盖 `trace.<字段> =` 这一种写法，换成经由构造函数或字典展开写入就又漏了。
 
 ### 什么时候退役
 
@@ -312,6 +319,59 @@ rg -n --fixed-strings -B4 -A4 \
 
 ---
 
+## `a-failure-path-must-not-produce-the-ordinary-value`
+
+**一个被记录或被渲染的值，不得同时可由「正常但无内容」与「读取失败／降级」两条路径产生，除非记录里另有东西分得出来。**
+
+这是 `absence-is-not-readable-on-a-log-line`（记忆）那条的**镜像**。那条管缺席：字段「有才打印」，于是「没观测到」与「不报这项」同形。这条管**同形**：字段有值，而那个值恰好就是最常见的正常情况长的样子。后者更难发现，因为它**有输出**——看的人不会觉得缺了什么。
+
+失效的形态是：异常兜底返回一个与成功路径同形的值，或一个取值覆盖了「配置如此」与「出事了」两种结局。**两者的共同点是把判据的分辨力交了出去，而没有任何地方声明这件事。**
+
+### 怎么查
+
+```bash
+# A 异常兜底返回与成功路径同形的值
+rg -n -A4 '^\s+except .*:' src/app/observability/*.py src/app/server/pipeline_app.py \
+  | rg 'return \{|return ""|return None|return str'
+
+# B 一个封闭取值集合里，某个取值是否在活文档里各有一行含义
+rg -n --fixed-strings -e 'provider(' -e 'count_tokens_reason' \
+   src/app/server/handler.py .dev/docs/tui/spec.md
+```
+
+A 给候选，需要人逐行看。**2026-08-20 实测：A 打出 5 行 —— 2 行属于同一处违背（`pipeline_app.py:78` 与 `:114`）、1 行是它的成功路径（`:106`，由 `return {` 命中）、2 行是正确写法（`request_log_file.py:48`、`rejection_capture.py:82`）。** 命令就该把成功路径也交出来：违背恰恰是「失败长得和它一样」，不并排看就判不了。
+
+对每个候选问一句：**这个值，正常但无内容时会不会也长这样？** 会，就再问：记录里还有别的东西分得出来吗（一条 warning、一个 `None`、一个原因串）？没有，就是违背。
+
+### 什么算违背
+
+- **异常兜底与成功路径返回同形的值，且失败侧不留痕。** 反例是正确写法：失败返回 `None`（与正常返回的 `Path` 不同形）并 `logger.warning`——读者与后续代码都分得出。
+- **一个取值同时覆盖「配置如此」与「出事了」。** 前者天天发生、是正常运转；后者要人看一眼。合成一个词之后，看的人无从判断该不该看。
+- **合并是有意为之，却没写在旁边。** 这一条是分界线：`[GONE]` 合并了「客户端走了」与「关停取消自己的在途流」，而 `.dev/docs/tui/spec.md` 明写「这一行不假装分得出」——**那是合规的**，不是违背。判据不是「有没有合并」，是「合并有没有被声明」。
+
+### 修法方向
+
+按代价从小到大：**先声明**（把合并写在值的旁边，说清非该值意味着什么、该值**不**意味着什么）；**再分形**（失败侧换一个结构上不同的返回，如 `None` + warning）；**最后才是加字段**（新增一个原因串，像 `provider(ghc-failed,local)` 那样把轨迹按发生顺序写出来）。
+
+⚠️ 加字段之后**立刻再问一遍这个新字段本身**——它的每个取值是否只对应一种结局。2026-08-20 实测：补上「谁给的数」之后，`local` 一个词又同时代表三种结局，同一个缺陷原地重演了一层。
+
+### 凭什么在这里
+
+依附本项目结构：请求行与 `~/.local/share/.../requests/*.jsonl` 结构化记录都是本项目的对外面，读它们的人据此判断该不该看一眼。
+
+两个实证：
+
+1. **`pipeline_app.py:78` 与 `:114`（2026-08-20 实测，行号取于当日）**：两层同形。里层 `_extra_info` 有**三条**路径都返回 `None`——`network_stream is None`、`get_extra_info` 查无此键、吞掉异常；外层 `_snapshot_upstream_connection` 的异常兜底返回 `{"local": "", "peer": "", "alpn": "", "stream_id": None}`，与成功路径 `:106` 逐键同形，而成功路径在里层全返回 `None` 时也产出同一个全空字典。落进 JSONL 之后，「这个传输不暴露这些」「读的时候炸了」「确实是空」三件事同形，且无告警。**这条是本条目立条时由命令 A 抓出来的，尚未修**——修法按上面的阶梯，最小的一档是在兜底那侧放一个可分辨的标记或一条 warning，而不是给每个键加分支。
+2. **`provider(local)`**：一个词同时代表「这条路由本来就没有上游计数器」（正常配置、天天发生）与「上游被问了却答不出」（事故）。由用户当场推翻，最终改为把轨迹写进括号，判定放在仍持有事实的那一层（`handler.py:283/:285`）。经过见 `.dev/docs/tui/archive-count-tokens-line/`。
+
+**权重：足以作为暂定复查项执行**——两次同形、分属不同机制（异常兜底 / 取值合并），且第二次的代价是可见的：用户两次推回、一个新字段、四条测试、一节规范重写。**不足以支撑「上面这组命令有召回力」**：A 只认 `except` 直接跟 `return` 的写法，兜底若经由变量或更深的嵌套就漏；B 更是为本项目当前这一个封闭集合写的，换个字段要另写。首次按本条复查时应记下有没有该抓到而没抓到的位置。
+
+### 什么时候退役
+
+本项目不再对外提供人读的请求记录面（日志行与结构化记录都取消或改由外部系统生成）时。**「最近几次跑 A 都是干净的」不是退役条件**——见本文件末「退出的判据」：那只是发起退役复核的弱信号，在命令本身可能漏检时尤其推不出结论。
+
+---
+
 ## 这份清单怎么长、怎么退
 
 ### 进来的门槛（三条都要满足）
@@ -333,7 +393,11 @@ rg -n --fixed-strings -B4 -A4 \
 
 ### 当前状态
 
-五条都立于 2026-08-20，**都还没被真实复查检验过**。第一次复查时要留意：命令是否漏掉了该抓的位置、判别轴是否有判不了的情形。命令不好用就改命令，**不要改判据去迁就命令**。
+六条，都立于 2026-08-20。**其中只有 `one-reply-fact-...` 经过一次真实复查**（同日，计数请求行那一片），结果是**命令漏了一个位置**——count 出口写同一条记录却不调 `absorb`，命令 C 结构上够不着，已补 C2 并把这次召回结果记进该条目。这是「命令不好用就改命令，不要改判据去迁就命令」的第一次实际执行。
+
+其余五条仍未被真实复查检验过。复查时要留意：命令是否漏掉了该抓的位置、判别轴是否有判不了的情形。
+
+`a-failure-path-must-not-produce-the-ordinary-value` 是最后进来的一条，它自带一个**尚未修的实例**（`pipeline_app.py:114` 的异常兜底，2026-08-20 由该条目的命令 A 抓出）。下次复查时它要么已被修掉，要么应当在 `deferred.md` 里有一行说明为什么不修——两者皆无，说明这条立了而没人执行。
 
 后两条另有一处要留意。`declined-and-adopted-...` 在同一事故内有两次同形（4.4×5.5 与 S-4×下界），但**其中只有第二例是命令配出来的**，第一例靠人读原件发现——命令的召回力尚未被真实复查检验。`a-broken-test-...` 只有单次实证，进来靠的是「一次但代价足以让人记住」那一支；若首次复查后仍找不到第二例，应当发起退役复核——但注意「没查出违背」本身只是弱信号（见上）。
 
