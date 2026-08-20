@@ -5,6 +5,7 @@ Nothing before the first whole block, each block as a closed group, keep-alives 
 """
 
 import asyncio
+import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import aclosing, suppress
 from types import SimpleNamespace
@@ -15,9 +16,16 @@ import pytest
 
 from app.config.schema import ContentBlockStartCompat
 from app.observability.active_requests import ActiveRequestRegistry
-from app.pipeline.delivery.assembler import AnthropicAssembler, ResponsesAssembler
-from app.pipeline.delivery.blocks import BlockBuffer
-from app.pipeline.delivery.stream import PING_FRAME, StreamSettings, stream_delivery
+from app.pipeline.delivery.assembler import AnthropicAssembler, ResponsesAssembler, Terminal
+from app.pipeline.delivery.blocks import BlockBuffer, CompletedBlock
+from app.pipeline.delivery.sse_source import SseEvent
+from app.pipeline.delivery.stream import (
+    PING_FRAME,
+    StreamSettings,
+    _events_with_ping,  # pyright: ignore[reportPrivateUsage]
+    _LastWrite,  # pyright: ignore[reportPrivateUsage]
+    stream_delivery,
+)
 from app.server.pipeline_app import (
     _counted_upstream,  # pyright: ignore[reportPrivateUsage]
     _Trace,  # pyright: ignore[reportPrivateUsage]
@@ -614,3 +622,307 @@ async def test_the_idle_guard_settles_the_stream_it_was_watching() -> None:
     await delivery.aclose()
 
     assert released == [True]
+
+
+# --- The client-facing keep-alive, and the seven ways its trigger read a stand-in ---
+
+
+def delivery_of(chunks: AsyncIterator[bytes]) -> AsyncGenerator[bytes]:
+    """`stream_delivery` over a caller-supplied upstream, for the paths `collect` cannot reach."""
+    return stream_delivery(
+        chunks,
+        AnthropicAssembler(),
+        buffer=BlockBuffer(policy="block"),
+        settings=StreamSettings(sse_ping_interval=1),
+        message_id="m",
+        model="model",
+    )
+
+
+class SlowAssembler:
+    """Takes real time to assemble and never completes a block.
+
+    A stand-in for the timing rather than for any upstream behaviour: `push` is synchronous and, on a large event or a busy machine, unbounded. The real assemblers are too fast to hold a deadline open.
+    """
+
+    def __init__(self, *, seconds: float) -> None:
+        self._seconds = seconds
+        self._terminal = Terminal()
+
+    @property
+    def terminal(self) -> Terminal:
+        return self._terminal
+
+    def push(self, event: SseEvent) -> tuple[CompletedBlock, ...]:
+        deadline = time.monotonic() + self._seconds
+        while time.monotonic() < deadline:
+            pass
+        return ()
+
+
+async def run_with_a_talkative_upstream(*, deltas: int, gap: float) -> list[bytes]:
+    """One whole block, then a second block that stays open while upstream keeps talking."""
+
+    async def trickle() -> AsyncIterator[bytes]:
+        for payload in anthropic_stream("one")[:3]:
+            yield payload
+        yield frame("content_block_start", {"index": 1, "content_block": {"type": "text"}})
+        for _ in range(deltas):
+            await asyncio.sleep(gap)
+            yield frame(
+                "content_block_delta",
+                {"index": 1, "delta": {"type": "text_delta", "text": "x"}},
+            )
+
+    return [chunk async for chunk in delivery_of(trickle())]
+
+
+@pytest.mark.asyncio
+async def test_a_talkative_upstream_does_not_suppress_the_keep_alive() -> None:
+    # The window a client actually times out in: upstream is sending faster than the interval, and every one of those deltas belongs to a block that has not closed, so the client is owed a keep-alive for the whole two seconds. Keying the cadence on upstream events instead of on our own writes made this case send nothing at all.
+    chunks = await run_with_a_talkative_upstream(deltas=10, gap=0.2)
+    assert PING_FRAME in chunks
+    # And the pings really did stand in for content: the second block never closed, so only the first one was ever delivered.
+    assert events_of(chunks).count("content_block_stop") == 1
+
+
+async def run_with_a_ready_upstream(*, seconds: float) -> list[bytes]:
+    """One whole block, then deltas that are ready the moment they are asked for."""
+
+    async def trickle() -> AsyncIterator[bytes]:
+        for payload in anthropic_stream("one")[:3]:
+            yield payload
+        yield frame("content_block_start", {"index": 1, "content_block": {"type": "text"}})
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            yield frame(
+                "content_block_delta",
+                {"index": 1, "delta": {"type": "text_delta", "text": "x"}},
+            )
+
+    return [chunk async for chunk in delivery_of(trickle())]
+
+
+@pytest.mark.asyncio
+async def test_an_always_ready_upstream_does_not_starve_the_keep_alive() -> None:
+    # An upstream whose next event is already buffered finishes every pull in the same scheduling turn, so the branch that delivers an event is reached every time and the expired deadline below it never is. The block stays open throughout, so none of those events writes anything downstream, and the client is starved for as long as the run lasts.
+    chunks = await run_with_a_ready_upstream(seconds=1.3)
+    assert PING_FRAME in chunks
+    assert events_of(chunks).count("content_block_stop") == 1
+
+
+async def run_held_back(policy: str) -> list[bytes]:
+    """One whole block that the policy holds back, then a second block upstream never closes."""
+
+    async def trickle() -> AsyncIterator[bytes]:
+        for payload in anthropic_stream("one")[:3]:
+            yield payload
+        yield frame("content_block_start", {"index": 1, "content_block": {"type": "text"}})
+        await asyncio.sleep(2.5)
+
+    return [
+        chunk
+        async for chunk in stream_delivery(
+            trickle(),
+            AnthropicAssembler(),
+            buffer=BlockBuffer(policy=policy),  # pyright: ignore[reportArgumentType]
+            settings=StreamSettings(
+                sse_ping_interval=1,
+                synthesized_response_headers_after_sec=1,
+            ),
+            message_id="m",
+            model="model",
+        )
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("policy", ["full", "until-tool-use"])
+async def test_a_held_back_block_does_not_disarm_both_guards(policy: str) -> None:
+    # These two policies hold every block until the stream ends, so a block existing is not a byte delivered. Disarming the synthesis timer the moment the assembler produced a block turned off the preamble and the keep-alive together, and the client then had nothing at all for as long as upstream cared to talk — the one window here with no upper bound.
+    chunks = await run_held_back(policy)
+    assert events_of(chunks)[0] == "message_start"
+    assert PING_FRAME in chunks
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_consumer_gets_its_cancellation_back() -> None:
+    # The outer generator awaits the inner one. Cancelling the consumer must surface as CancelledError rather than being swallowed by the cleanup that runs on the way out.
+    async def upstream() -> AsyncIterator[bytes]:
+        yield frame("content_block_start", {"index": 0, "content_block": {"type": "text"}})
+        await asyncio.sleep(60)
+
+    async def consume() -> None:
+        async with aclosing(delivery_of(upstream())) as delivery:
+            async for _ in delivery:
+                pass
+
+    task = asyncio.ensure_future(consume())
+    await asyncio.sleep(0.1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_an_upstream_failure_reaches_the_caller() -> None:
+    # An upstream that breaks mid-stream must not be reported as a stream that simply ended: the caller has to be able to tell a finished response from a truncated one.
+    async def upstream() -> AsyncIterator[bytes]:
+        for payload in anthropic_stream("one")[:3]:
+            yield payload
+        raise RuntimeError("upstream broke")
+
+    with pytest.raises(RuntimeError, match="upstream broke"):
+        async with aclosing(delivery_of(upstream())) as delivery:
+            async for _ in delivery:
+                pass
+
+
+@pytest.mark.asyncio
+async def test_the_schedule_adds_no_turn_between_an_event_and_an_ending() -> None:
+    # Narrow on purpose. On the ready path the scheduler hands over what upstream produced and a way to ask; it does not insert a turn of its own before the next pull. It does produce an event-less turn on the other path, when a pull is still running and a deadline elapses — that is a different branch and this construction never reaches it.
+    async def upstream() -> AsyncIterator[bytes]:
+        yield frame("content_block_start", {"index": 0, "content_block": {"type": "text"}})
+
+    last_write = _LastWrite(at=asyncio.get_running_loop().time())
+    pulls: list[Any] = []
+    async with aclosing(_events_with_ping(upstream(), 1, last_write=last_write)) as events:
+        pulls.append(await anext(events))
+        # Nothing is written downstream, so `last_write` stays where it was and the keep-alive falls due while the consumer is away. The next pull ends the stream.
+        await asyncio.sleep(1.2)
+        async for pull in events:
+            pulls.append(pull)
+
+    assert len(pulls) == 1
+    assert pulls[0].event is not None
+
+
+@pytest.mark.asyncio
+async def test_an_unassemblable_event_fails_before_the_preamble() -> None:
+    # A pull that came back with an event has not shown that the event can be delivered. Answering the due preamble first put a `message_start` in front of a stream that was about to fail on the very event whose arrival made the deadline reachable — and had that write failed, the assembler's error would never have been seen at all.
+    chunks: list[bytes] = []
+
+    async def upstream() -> AsyncIterator[bytes]:
+        # Occupies the loop past the synthesis deadline without awaiting, so the deadline is due by the time the event lands.
+        deadline = time.monotonic() + 1.05
+        while time.monotonic() < deadline:
+            pass
+        yield frame(
+            "content_block_start",
+            {"index": "not-an-int", "content_block": {"type": "text"}},
+        )
+
+    with pytest.raises(ValueError):
+        async with aclosing(
+            stream_delivery(
+                upstream(),
+                AnthropicAssembler(),
+                buffer=BlockBuffer(policy="block"),
+                settings=StreamSettings(
+                    sse_ping_interval=0,
+                    synthesized_response_headers_after_sec=1,
+                ),
+                message_id="m",
+                model="model",
+            )
+        ) as delivery:
+            async for chunk in delivery:
+                chunks.append(chunk)
+
+    assert chunks == []
+
+
+@pytest.mark.asyncio
+async def test_a_deadline_that_falls_due_during_assembly_is_not_missed() -> None:
+    # Assembling is synchronous and unbounded, so a deadline can come due while it runs. Reading the answer at pull time and acting on it after assembling asked the question before it could be answered: the keep-alive slipped by a whole assembly, which is one more interval the client spends with nothing.
+    async def upstream() -> AsyncIterator[bytes]:
+        for _ in range(2):
+            yield frame("content_block_start", {"index": 0, "content_block": {"type": "text"}})
+
+    start = time.monotonic()
+    at: list[float] = []
+    async with aclosing(
+        stream_delivery(
+            upstream(),
+            SlowAssembler(seconds=1.05),
+            buffer=BlockBuffer(policy="block"),
+            settings=StreamSettings(
+                sse_ping_interval=1,
+                synthesized_response_headers_after_sec=1,
+            ),
+            message_id="m",
+            model="model",
+        )
+    ) as delivery:
+        async for _ in delivery:
+            at.append(time.monotonic() - start)
+
+    assert at
+    # One assembly is enough to make the deadline due; waiting for a second one to notice is the defect.
+    assert at[0] < 2.0
+
+
+@pytest.mark.asyncio
+async def test_an_always_ready_upstream_does_not_starve_the_preamble() -> None:
+    # Same run of ready events, with keep-alives switched off and synthesis on. The preamble is owed on its own deadline, so settling only the keep-alive on the ready path left it starved too: the first byte of a reply whose block never closes arrived with the end of the stream.
+    finished = False
+
+    async def upstream() -> AsyncIterator[bytes]:
+        nonlocal finished
+        yield frame("content_block_start", {"index": 0, "content_block": {"type": "text"}})
+        deadline = time.monotonic() + 1.6
+        while time.monotonic() < deadline:
+            yield frame(
+                "content_block_delta",
+                {"index": 0, "delta": {"type": "text_delta", "text": "x"}},
+            )
+        finished = True
+
+    arrived_while_running: bool | None = None
+    async with aclosing(
+        stream_delivery(
+            upstream(),
+            AnthropicAssembler(),
+            buffer=BlockBuffer(policy="block"),
+            settings=StreamSettings(
+                sse_ping_interval=0,
+                synthesized_response_headers_after_sec=1,
+            ),
+            message_id="m",
+            model="model",
+        )
+    ) as delivery:
+        async for _ in delivery:
+            if arrived_while_running is None:
+                arrived_while_running = not finished
+
+    assert arrived_while_running is True
+
+
+@pytest.mark.asyncio
+async def test_a_due_preamble_goes_out_even_though_the_stream_is_already_over() -> None:
+    """Freezes the accepted half of the trade-off, in the shape it actually takes.
+
+    Whether the next pull ends the stream cannot be known without pulling, so a cue that is owed goes out first. Where the client already has bytes that costs one comment. Where it does not, the cue is `message_start`, which opens the response — and an opened response that never saw a terminal event is a truncation under STR-04. So the accepted cost is not a tidy empty message: it turns a request that would have been zero bytes into one the client sees fail. Written down here rather than discovered later.
+    """
+
+    async def upstream() -> AsyncIterator[bytes]:
+        yield frame("content_block_start", {"index": 0, "content_block": {"type": "text"}})
+
+    chunks = [
+        chunk
+        async for chunk in stream_delivery(
+            upstream(),
+            SlowAssembler(seconds=1.05),
+            buffer=BlockBuffer(policy="block"),
+            settings=StreamSettings(
+                sse_ping_interval=0,
+                synthesized_response_headers_after_sec=1,
+            ),
+            message_id="m",
+            model="model",
+        )
+    ]
+
+    assert PING_FRAME not in chunks
+    assert events_of(chunks) == ["message_start", "error"]
