@@ -1,0 +1,150 @@
+{
+  "why": "What `[text(''), tool_use]` used to become: an assistant message item carrying nothing.",
+  "request": {
+    "model": "gpt-5.5",
+    "input": [
+      {
+        "type": "message",
+        "role": "user",
+        "content": [
+          {
+            "type": "input_text",
+            "text": "Say OK."
+          }
+        ]
+      },
+      {
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "output_text",
+            "text": ""
+          }
+        ]
+      },
+      {
+        "type": "message",
+        "role": "user",
+        "content": [
+          {
+            "type": "input_text",
+            "text": "Again."
+          }
+        ]
+      }
+    ],
+    "max_output_tokens": 32,
+    "stream": false
+  },
+  "status": 200
+}
+
+{
+  "copilot_usage": {
+    "token_details": [
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 500000000000,
+        "token_count": 21,
+        "token_type": "input"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 50000000000,
+        "token_count": 0,
+        "token_type": "cache_read"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 0,
+        "token_count": 0,
+        "token_type": "cache_write"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 3000000000000,
+        "token_count": 5,
+        "token_type": "output"
+      }
+    ],
+    "total_nano_aiu": 25500000
+  },
+  "created_at": 1787210400,
+  "id": "L4cizaW4BllaZAUEhoYAFxwkuK21MJp8v6A1Oldrdvcc7AaymZrlyedwt/djvtZ6Ov59hqxdD4KpqBsWq106C1/NQJUYGIi9mQeQQi8+QUb/DHLeM+QJ8hktDa6NPONjLbQJlFHJm4zH702X7mzDdkW1R60iVEbVKmj1BlxcZcS9CZxy1Uw6sr7lRSrwZmTQEjamEoz1R+aRI+vslwWkqx2+brBCPh/7gFPuT1EMGFaL3vxXZKNmln9rvcMT7zlLA4ezl90Uk22TIYYbumuKCvhUk7AWXtswQp2P7DnE60lTWXTJpHS9VY0FBLaSn7X7xKE0U8La/SK3UfKmHqAHH5BSjxXynFoCOmJjGdS2hBV/kYroKR5yK6keyU66Vpyn2lJF8Imvoyw2M6dI4fC10hoZftTS68lb",
+  "incomplete_details": null,
+  "instructions": null,
+  "max_output_tokens": 32,
+  "model": "gpt-5.5-2026-04-23",
+  "object": "response",
+  "output": [
+    {
+      "content": [
+        {
+          "annotations": [],
+          "logprobs": [],
+          "text": "OK",
+          "type": "output_text"
+        }
+      ],
+      "id": "xi5/D3wtg96CfytDfLEkyvdsArA5Go74G2EXPhQ1QAKtwhJNSl8lvoTYYWKgCRRkB4pnovj6Xz0jMkeBnD/l5+zVOcIcrrgKE6TWJEv0vencb+oEX9YJZbh6QgiBiEKpa1qY1H5mTA/kPKD8QaTohHW7I/NgnxdnbnR+jJn/mbHKJhV+VbWCmj0dKJdzz/DVnViZjXp8VrWeVSuJZWW9eH390pMfg7/fKq0To1pu0FCLUK7ddyiGXjlkkoo++6SbJWNUzMXrbitOwvcqF8Hj+DBsYuskN5K5touq3D5hv4a2dN/hF/W9w9ANyQGQBETyC/opnuXus7ijuVKuWqwirIXZTlN4rBkzLAkk/TNGEh7zHXzLc0VAY1RCNQ7uZ76jUiy/OKMOEpMl5spyAxuq97sk6hnREn0=",
+      "phase": "final_answer",
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    }
+  ],
+  "output_text": null,
+  "parallel_tool_calls": true,
+  "previous_response_id": null,
+  "prompt_cache_retention": "24h",
+  "reasoning": {
+    "context": "current_turn",
+    "effort": "medium",
+    "summary": null
+  },
+  "safety_identifier": "REDACTED",
+  "service_tier": "default",
+  "status": "completed",
+  "temperature": 1,
+  "text": {
+    "format": {
+      "type": "text"
+    },
+    "verbosity": "medium"
+  },
+  "tool_choice": "auto",
+  "tool_usage": {
+    "image_gen": {
+      "input_tokens": 0,
+      "input_tokens_details": {
+        "image_tokens": 0,
+        "text_tokens": 0
+      },
+      "output_tokens": 0,
+      "output_tokens_details": {
+        "image_tokens": 0,
+        "text_tokens": 0
+      },
+      "total_tokens": 0
+    },
+    "web_search": {
+      "num_requests": 0
+    }
+  },
+  "tools": [],
+  "top_p": 0.98,
+  "truncation": "disabled",
+  "usage": {
+    "input_tokens": 21,
+    "input_tokens_details": {
+      "cache_write_tokens": 0,
+      "cached_tokens": 0
+    },
+    "output_tokens": 5,
+    "output_tokens_details": {
+      "reasoning_tokens": 0
+    },
+    "total_tokens": 26
+  }
+}

@@ -1,8 +1,8 @@
-"""What happens to a text block that carries no text by the time upstream sees it.
+"""What happens to a text block that carries no text, on the leg that refuses one.
 
 Upstream rejects the whole request over one of these: `400 messages: text content blocks must be non-empty`, and a sibling wording, `text content blocks must contain non-whitespace text`, for a block that is only spaces. Production hit the first on 2026-08-20 twice in a row on `/v1/messages` with `claude-opus-5`, and the same rejection is in this machine's transcripts from 2026-07-15 against the previous service, so it is a standing property of the leg rather than something the rewrite introduced.
 
-The rule itself is not new here. `app.anthropic.sanitize.text_blocks.filter_empty_text_blocks` has applied it since the existing chain was written, with the same `.strip()` predicate the reference implementation uses; the new chain never called it, and `tests/unit/test_module_boundaries.py` pins that the new chain does not reach the module it lives in. These tests cover the copy that the new chain does call.
+Which leg is not a guess. `exp/260820-empty-text-probe/` asked the live upstream: `/responses` answers 200 to an empty `input_text`, to a whitespace-only one, and to an assistant turn carrying an empty `output_text`, while `/v1/messages` answers 400 in the same run with the same credentials. So this runs at `attempt.prepare`, where the routed endpoint is known, and does nothing at all to a body bound for Responses.
 """
 
 from typing import Any
@@ -10,12 +10,24 @@ from typing import Any
 import pytest
 
 from app.anthropic.thinking.destack import SYNTHETIC_SEPARATOR
-from app.config.schema import FixAnthropicRequestHook
-from app.pipeline.anthropic_request_hook import fix_anthropic_request
+from app.pipeline.request import RequestContext, WireFormat
+from app.pipeline.subscribers.blank_text import drop_blank_text_blocks
 
 
-def _fix(payload: dict[str, Any]) -> None:
-    fix_anthropic_request(payload, FixAnthropicRequestHook())
+def _context(payload: dict[str, Any], *, target: WireFormat = WireFormat.ANTHROPIC_MESSAGES) -> RequestContext:
+    context = RequestContext(
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        requested_model="claude-model",
+        payload=payload,
+    )
+    context.target_format = target
+    return context
+
+
+async def _run(payload: dict[str, Any], *, target: WireFormat = WireFormat.ANTHROPIC_MESSAGES) -> dict[str, Any]:
+    context = _context(payload, target=target)
+    await drop_blank_text_blocks(context)
+    return context.payload
 
 
 def _content(payload: dict[str, Any], index: int = 0) -> list[dict[str, Any]]:
@@ -23,81 +35,80 @@ def _content(payload: dict[str, Any], index: int = 0) -> list[dict[str, Any]]:
     return messages[index]["content"]
 
 
-def test_a_blank_text_block_beside_real_content_is_dropped() -> None:
-    """The shape that costs a whole request for a block that says nothing."""
-    payload: dict[str, Any] = {
-        "messages": [
-            {
-                "role": "assistant",
-                "content": [
-                    {"type": "text", "text": ""},
-                    {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {}},
-                ],
-            }
-        ]
-    }
+async def test_a_blank_text_block_beside_real_content_is_dropped() -> None:
+    """The shape that costs a whole request for a block that says nothing.
 
-    _fix(payload)
+    This is the production one: the synthesised placeholder landed first and the real tool call twelve seconds later, so the turn the client stored and replayed was exactly this.
+    """
+    payload = await _run(
+        {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": ""},
+                        {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {}},
+                    ],
+                }
+            ]
+        }
+    )
 
     assert _content(payload) == [
         {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {}}
     ]
 
 
-def test_whitespace_only_text_counts_as_blank() -> None:
+async def test_whitespace_only_text_counts_as_blank() -> None:
     """Upstream refuses these under their own error message, so `== ""` would have missed half the rule."""
-    payload: dict[str, Any] = {
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "   \n\t "},
-                    {"type": "text", "text": "what changed?"},
-                ],
-            }
-        ]
-    }
-
-    _fix(payload)
+    payload = await _run(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "   \n\t "},
+                        {"type": "text", "text": "what changed?"},
+                    ],
+                }
+            ]
+        }
+    )
 
     assert _content(payload) == [{"type": "text", "text": "what changed?"}]
 
 
-def test_a_message_of_nothing_but_blank_text_is_left_alone() -> None:
+async def test_a_message_of_nothing_but_blank_text_is_left_alone() -> None:
     """The one place the rule stops, and why it stops there rather than everywhere.
 
     A turn is not a field that can be dropped for saying nothing: the rest of the history is paired against it by position, and a `tool_result` names a `tool_use` in the turn before. `content: []` is refused as surely as the blank block was, so emptying it would trade one rejection for another while also inventing a body the client never sent. It goes out as it arrived and upstream names what is actually wrong with it.
 
     The reference implementation has this exact hole — it filters without a surviving-block check and sends `content: []` — which is why this is pinned rather than left to reading.
     """
-    payload: dict[str, Any] = {
-        "messages": [{"role": "user", "content": [{"type": "text", "text": ""}]}]
-    }
-
-    _fix(payload)
+    payload = await _run({"messages": [{"role": "user", "content": [{"type": "text", "text": ""}]}]})
 
     assert _content(payload) == [{"type": "text", "text": ""}]
 
 
-def test_a_blank_block_stops_hiding_two_adjacent_thinking_blocks() -> None:
-    """Why the drop runs before the layout pass rather than after it.
+async def test_a_blank_block_between_two_thinking_blocks_becomes_a_real_separator() -> None:
+    """Removing it outright would leave behind the arrangement the layout pass exists to prevent.
 
-    A blank text block between two thinking blocks makes them look separated, so the layout leaves the pair upstream also rejects. Removing it first lets the layout see the adjacency and spend a real separator on it — one fixup, both rejections.
+    That pass ran before translation, long before this one, so it cannot clean up after this. The blank block was serving as a separator by accident; it is replaced by one upstream accepts rather than simply deleted.
     """
-    payload: dict[str, Any] = {
-        "messages": [
-            {
-                "role": "assistant",
-                "content": [
-                    {"type": "thinking", "thinking": "first", "signature": "sig-a"},
-                    {"type": "text", "text": ""},
-                    {"type": "thinking", "thinking": "second", "signature": "sig-b"},
-                ],
-            }
-        ]
-    }
-
-    _fix(payload)
+    payload = await _run(
+        {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "first", "signature": "sig-a"},
+                        {"type": "text", "text": ""},
+                        {"type": "thinking", "thinking": "second", "signature": "sig-b"},
+                    ],
+                }
+            ]
+        }
+    )
 
     assert _content(payload) == [
         {"type": "thinking", "thinking": "first", "signature": "sig-a"},
@@ -106,34 +117,87 @@ def test_a_blank_block_stops_hiding_two_adjacent_thinking_blocks() -> None:
     ]
 
 
-def test_the_system_prompt_is_held_to_the_same_rule() -> None:
-    """`system` is refused on the same grounds and is not part of any turn, so the loop would never reach it."""
-    payload: dict[str, Any] = {
-        "system": [
-            {"type": "text", "text": "You are a proxy."},
-            {"type": "text", "text": ""},
-        ],
-        "messages": [],
-    }
-
-    _fix(payload)
+async def test_the_system_prompt_is_held_to_the_same_rule() -> None:
+    """`system` carries the same blocks and is refused on the same grounds."""
+    payload = await _run(
+        {
+            "system": [
+                {"type": "text", "text": "You are a proxy."},
+                {"type": "text", "text": ""},
+            ],
+            "messages": [],
+        }
+    )
 
     assert payload["system"] == [{"type": "text", "text": "You are a proxy."}]
 
 
-def test_a_body_with_nothing_blank_is_unchanged() -> None:
-    """The common case must not be rewritten, including the string form of `system`."""
-    payload: dict[str, Any] = {
-        "system": "You are a proxy.",
-        "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
-    }
+async def test_a_system_prompt_of_nothing_loses_the_field_rather_than_emptying_it() -> None:
+    """Saying nothing and having nothing to say are the same thing here, and only one is a body upstream takes.
 
-    _fix(payload)
+    `system: []` is refused as surely as the blank block was, so emptying the list would trade one rejection for another. Dropping the field is the spelling that means the same and is accepted — which is exactly why a turn cannot be treated this way.
+    """
+    payload = await _run(
+        {
+            "system": [{"type": "text", "text": ""}, {"type": "text", "text": "  \n"}],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+        }
+    )
+
+    assert "system" not in payload
+    assert _content(payload) == [{"type": "text", "text": "hi"}]
+
+
+async def test_a_body_with_nothing_blank_is_unchanged() -> None:
+    """The common case must not be rewritten, including the string form of `system`."""
+    payload = await _run(
+        {
+            "system": "You are a proxy.",
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
+        }
+    )
 
     assert payload == {
         "system": "You are a proxy.",
         "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
     }
+
+
+async def test_a_body_bound_for_responses_is_not_touched() -> None:
+    """Measured, not assumed: that endpoint takes the shape, so rewriting it would be a change with nothing behind it.
+
+    `exp/260820-empty-text-probe/` sent an empty `input_text`, a whitespace-only one, and an empty `output_text` on an assistant turn to the live `/responses`; all three came back 200, in the run whose positive control got 400 from `/v1/messages` over the block below.
+    """
+    original: dict[str, Any] = {
+        "system": [{"type": "text", "text": "be brief"}, {"type": "text", "text": ""}],
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": ""},
+                    {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {}},
+                ],
+            }
+        ],
+    }
+
+    payload = await _run(
+        {
+            "system": [{"type": "text", "text": "be brief"}, {"type": "text", "text": ""}],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": ""},
+                        {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {}},
+                    ],
+                }
+            ],
+        },
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+
+    assert payload == original
 
 
 @pytest.mark.parametrize(
@@ -147,66 +211,15 @@ def test_a_body_with_nothing_blank_is_unchanged() -> None:
     ],
     ids=["missing", "null", "zero", "list", "dict"],
 )
-def test_where_the_predicate_draws_its_line(block: dict[str, Any], dropped: bool) -> None:
+async def test_where_the_predicate_draws_its_line(block: dict[str, Any], dropped: bool) -> None:
     """A `text` that is absent or null carries nothing and goes; one of the wrong type stays.
 
     The split is deliberate and is the part a reader is most likely to get backwards. Dropping a malformed block would turn a client bug into a silent rewrite, and upstream naming the field is more use to whoever has to fix it than a block that quietly disappeared.
     """
-    payload: dict[str, Any] = {
-        "messages": [
-            {
-                "role": "user",
-                "content": [block, {"type": "text", "text": "anchor"}],
-            }
-        ]
-    }
-
-    _fix(payload)
+    payload = await _run(
+        {"messages": [{"role": "user", "content": [block, {"type": "text", "text": "anchor"}]}]}
+    )
 
     survivors = _content(payload)
     assert (block not in survivors) is dropped
     assert {"type": "text", "text": "anchor"} in survivors
-
-
-def test_nothing_about_the_route_changes_the_answer() -> None:
-    """There is no leg on which a block that says nothing is worth carrying.
-
-    An earlier revision gated this on the outbound upstream, on the grounds that only the Anthropic one is known to refuse a blank block. Ruled against on 2026-08-20: the predicate is that the block carries no meaning, not that some receiver complains about it, so there is nothing left to condition on — this hook no longer takes the route as an argument at all.
-
-    What that means on the wire for the translated leg is a separate question, and one this test cannot answer because it stops at the hook. `tests/http/test_pipeline_app.py` carries that half.
-    """
-    payload: dict[str, Any] = {
-        "system": [{"type": "text", "text": "be brief"}, {"type": "text", "text": ""}],
-        "messages": [
-            {
-                "role": "assistant",
-                "content": [
-                    {"type": "text", "text": ""},
-                    {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {}},
-                ],
-            }
-        ],
-    }
-
-    _fix(payload)
-
-    assert payload["system"] == [{"type": "text", "text": "be brief"}]
-    assert _content(payload) == [
-        {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {}}
-    ]
-
-
-def test_a_system_prompt_of_nothing_loses_the_field_rather_than_emptying_it() -> None:
-    """Saying nothing and having nothing to say are the same thing here, and only one is a body upstream takes.
-
-    `system: []` is refused as surely as the blank block was, so emptying the list would trade one rejection for another. Dropping the field is the spelling that means the same and is accepted — which is exactly why a turn cannot be treated this way; see the test below.
-    """
-    payload: dict[str, Any] = {
-        "system": [{"type": "text", "text": ""}, {"type": "text", "text": "  \n"}],
-        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
-    }
-
-    _fix(payload)
-
-    assert "system" not in payload
-    assert _content(payload) == [{"type": "text", "text": "hi"}]

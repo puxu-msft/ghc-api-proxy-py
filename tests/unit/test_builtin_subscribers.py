@@ -15,10 +15,14 @@ from app.pipeline.direct_driver import AnthropicMessagesDriver, RetryBudget
 from app.pipeline.direct_driver.base import EVENT_ATTEMPT_PREPARE
 from app.pipeline.events import SubscriberRegistry
 from app.pipeline.request import RequestContext, WireFormat
-from app.pipeline.subscribers import SERVER_TOOL_CAPABILITY_ID, register_builtin_subscribers
+from app.pipeline.subscribers import (
+    BLANK_TEXT_BLOCKS_ID,
+    SERVER_TOOL_CAPABILITY_ID,
+    register_builtin_subscribers,
+)
 from app.server.composition import build_chain
 
-EXPECTED_ON_ATTEMPT_PREPARE = (SERVER_TOOL_CAPABILITY_ID,)
+EXPECTED_ON_ATTEMPT_PREPARE = (SERVER_TOOL_CAPABILITY_ID, BLANK_TEXT_BLOCKS_ID)
 # Keyed by event, so a subscriber added on a *different* event fails here too. Asserting one bucket would have let the next one land on `attempt.failed` with both assertions still green — a lock that only covers the door it was hung on.
 EXPECTED_BY_EVENT = {EVENT_ATTEMPT_PREPARE: EXPECTED_ON_ATTEMPT_PREPARE}
 
@@ -46,7 +50,7 @@ def test_a_caller_s_own_subscribers_end_up_in_the_same_registry_as_the_built_ins
 
     register_builtin_subscribers(registry)
 
-    assert registry.freeze().ids(EVENT_ATTEMPT_PREPARE) == ("test:mine", SERVER_TOOL_CAPABILITY_ID)
+    assert registry.freeze().ids(EVENT_ATTEMPT_PREPARE) == ("test:mine", *EXPECTED_ON_ATTEMPT_PREPARE)
 
 
 def test_the_chain_the_server_runs_on_actually_carries_them() -> None:
@@ -120,3 +124,48 @@ async def test_the_declaration_is_gone_from_what_the_driver_actually_sends() -> 
     await driver.run(context)
 
     assert provider.sent == [{"model": "claude-model", "messages": []}]
+
+
+async def test_a_blank_block_is_gone_from_what_the_driver_actually_sends() -> None:
+    """The same proof for the second subscriber, because being in the list is not being run.
+
+    The block below is the one production actually sent on 2026-08-20 — a placeholder this proxy synthesised, stored by the client and replayed on its next turn — and upstream refused the whole body over it.
+    """
+    registry = SubscriberRegistry[RequestContext]()
+    register_builtin_subscribers(registry)
+    provider = RecordingProvider()
+    driver = AnthropicMessagesDriver(provider, registry.freeze(), budget=RetryBudget(max_total=1))
+    context = RequestContext(
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        requested_model="claude-model",
+        payload={
+            "model": "claude-model",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": ""},
+                        {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {}},
+                    ],
+                }
+            ],
+        },
+    )
+    context.resolved_model = "claude-model"
+    context.target_format = WireFormat.ANTHROPIC_MESSAGES
+
+    await driver.run(context)
+
+    assert provider.sent == [
+        {
+            "model": "claude-model",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {}}
+                    ],
+                }
+            ],
+        }
+    ]

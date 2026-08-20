@@ -163,10 +163,12 @@ def test_anthropic_request_for_a_responses_model_is_translated() -> None:
     assert '"messages"' not in sent
 
 
-def test_blank_blocks_are_gone_from_the_body_the_responses_leg_sends() -> None:
-    """The translated leg is held to the same rule, checked where it actually shows: the wire.
+def test_the_responses_leg_keeps_the_blank_blocks_it_was_given() -> None:
+    """The primary path is not rewritten to satisfy a rule only the other path has.
 
-    The hook runs before translation, so a unit test of it cannot say what upstream ends up reading. This one does: the blank system block must not survive into the joined `instructions`, and a system of nothing but blank blocks must leave no `instructions` at all rather than an empty one.
+    Measured on 2026-08-20 (`exp/260820-empty-text-probe/`): the live `/responses` answers 200 to an empty `input_text`, to a whitespace-only one, and to an assistant turn carrying an empty `output_text`, in the same run whose positive control got 400 from `/v1/messages` over the Anthropic spelling of the same thing. So removal belongs at `attempt.prepare` on the Anthropic leg, and nothing earlier.
+
+    This is the guard against putting it back too early. A revision that strips before translation passes every unit test of the subscriber and fails here, which is the only place the difference shows.
     """
     client, seen = make_client(lambda _: httpx.Response(200, json={"id": "resp_1"}))
     response = client.post(
@@ -192,21 +194,11 @@ def test_blank_blocks_are_gone_from_the_body_the_responses_leg_sends() -> None:
 
     assert response.status_code == 200
     sent = orjson.loads(seen[-1].read())
-    assert sent["instructions"] == "be brief"
-    assert b"hi" in orjson.dumps(sent["input"])
-    assert b'"text":""' not in orjson.dumps(sent)
-
-    blank_only = make_client(lambda _: httpx.Response(200, json={"id": "resp_1"}))
-    blank_only[0].post(
-        "/v1/messages",
-        json={
-            "model": "gpt-model",
-            "system": [{"type": "text", "text": ""}],
-            "messages": [{"role": "user", "content": "hi"}],
-            "max_tokens": 64,
-        },
-    )
-    assert "instructions" not in orjson.loads(blank_only[1][-1].read())
+    assert sent["instructions"] == "be brief\n\n   \n"
+    assert sent["input"][0]["content"] == [
+        {"type": "input_text", "text": ""},
+        {"type": "input_text", "text": "hi"},
+    ]
 
 
 def test_model_mapping_is_applied_before_the_upstream_call() -> None:

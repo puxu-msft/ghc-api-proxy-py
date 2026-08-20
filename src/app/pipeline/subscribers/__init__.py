@@ -8,11 +8,10 @@
 
 ## Order
 
-One subscriber today, so nothing is ordered against anything. The table stays because the reason each entry sits where it does is the part that gets lost first, and a later reader needs it more than the current one does.
-
 | id | event | goes before/after | why |
 |---|---|---|---|
 | `builtin:server-tool-capability` | `attempt.prepare` | — | Reads and edits `tools`. Anything else that comes to read `tools` has to say whether it wants the client's list or the one that will actually be sent, and answer it here rather than by landing at whatever position happens to work. |
+| `builtin:blank-text-blocks` | `attempt.prepare` | after `builtin:server-tool-capability` | That pass flattens server-tool turns into text, so it can produce the very thing this one removes — a text block whose text came out empty. Running first would leave one behind, and the request would be refused over a block this chain wrote itself. |
 
 `tests/unit/test_builtin_subscribers.py` locks the registered set and the frozen order, so a subscriber added without a decision about where it goes fails there rather than in production.
 """
@@ -20,6 +19,8 @@ One subscriber today, so nothing is ordered against anything. The table stays be
 from app.pipeline.direct_driver.base import EVENT_ATTEMPT_PREPARE
 from app.pipeline.events import SubscriberRegistry
 from app.pipeline.request import RequestContext
+from app.pipeline.subscribers.blank_text import SUBSCRIBER_ID as BLANK_TEXT_BLOCKS_ID
+from app.pipeline.subscribers.blank_text import drop_blank_text_blocks
 from app.pipeline.subscribers.server_tools import SUBSCRIBER_ID as SERVER_TOOL_CAPABILITY_ID
 from app.pipeline.subscribers.server_tools import adapt_server_tools
 
@@ -36,10 +37,17 @@ def register_builtin_subscribers(registry: SubscriberRegistry[RequestContext]) -
         SERVER_TOOL_CAPABILITY_ID,
         adapt_server_tools,
     )
+    registry.subscribe(
+        EVENT_ATTEMPT_PREPARE,
+        BLANK_TEXT_BLOCKS_ID,
+        drop_blank_text_blocks,
+    )
 
 
 __all__ = [
+    "BLANK_TEXT_BLOCKS_ID",
     "SERVER_TOOL_CAPABILITY_ID",
     "adapt_server_tools",
+    "drop_blank_text_blocks",
     "register_builtin_subscribers",
 ]

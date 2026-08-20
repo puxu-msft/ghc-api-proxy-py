@@ -1,0 +1,32 @@
+{
+  "why": "Proves this probe can see a refusal at all. Expected 400 `text content blocks must be non-empty`.",
+  "request": {
+    "model": "claude-sonnet-5",
+    "max_tokens": 32,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": ""
+          },
+          {
+            "type": "text",
+            "text": "Say OK."
+          }
+        ]
+      }
+    ]
+  },
+  "status": 400
+}
+
+{
+  "type": "error",
+  "error": {
+    "type": "invalid_request_error",
+    "message": "messages: text content blocks must be non-empty"
+  },
+  "request_id": "req_011CeDbPwSjTZEc1W2JASgju"
+}
