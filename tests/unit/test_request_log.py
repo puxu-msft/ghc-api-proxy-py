@@ -159,7 +159,7 @@ def test_a_token_count_is_not_a_turn_that_lost_its_reply() -> None:
 def test_an_estimate_says_why_it_is_one() -> None:
     """`local` alone was three outcomes wearing one word, two of them incidents.
 
-    A route with no upstream counter estimates every time and is working as configured; an upstream that was asked and could not answer is something to look at; and an operator who left `ghc` out of `providers` chose the estimate. All three produced the same `provider(local)`, which is this line's own defect one level up from the one the counter was added to fix — the failure was not absent from the line, it was wearing the ordinary case's clothes.
+    A route with no upstream counter estimates every time and is working as configured; an upstream that was asked and could not answer is something to look at; and an operator who left `ghc` out of `providers` chose the estimate. All three produced the same `provider(local)`, which is the same defect one level up from the one this field was added to fix — the failure was not absent from the line, it was wearing the ordinary case's clothes.
 
     Ruled 2026-08-20 by the user: the reason goes in the parentheses, and the field stays uncoloured because the ordinary case is the common one and a colour that fires daily stops being read.
     """
