@@ -262,3 +262,22 @@ PYTHONPATH=/tmp/rev-s1/varB   → 2 failed, 20 passed    （varB = 旧 stream.py
 | `e11_never_iterated.py` | 从未迭代的 delivery，aclose() 关不关上游 |
 | `e12_double_cancel.py` | 清理进行中反复取消 |
 | `base/` `varA/` `varB/` `D1/` `D2/` `D3/` | 对照与变异用的 src 副本（均在 /tmp，仓库未被触碰） |
+
+---
+
+## 更正（2026-08-20 追加，由主会话补测）
+
+**第 5 节 F2「改动新增一条 `shutdown_asyncgens` 噪声（基线 3 条 → 改动后 4 条）」不再成立。**
+
+该测量是在主会话补上 `_AccountedStreamingResponse` 关闭 body（F2 修复，提交 `926cabf`）**之前**做的。补上之后重测 `/tmp/rev-s1/e8_loop_shutdown.py` 的三种模式、各 3 次，并对基线快照做同样测量：
+
+```
+              基线    当前
+abandon        1       1
+explicit       4       4      ← uvicorn 优雅停机的形状
+closed-loop    0       0
+```
+
+**增量为零。** 该改动不新增停机噪声，原报告据此交回用户的「接受还是消音」裁决点随之作废。
+
+报告其余内容未改动。此处只追加时间点与更正，不修改原结论文字。
