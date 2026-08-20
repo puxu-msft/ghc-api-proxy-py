@@ -19,6 +19,14 @@ STATUS_PREFIXES = {
     "failure": "[FAIL]",
     "retry": "[RETRY]",
 }
+# The fallback for a record that carries no `status`, which is every record from a library: asyncio, httpx, httpcore, uvicorn, sqlite. They have no way to set one, so they all landed on `[....]` — the same prefix, and the same dimmed styling, as a line saying a request has just started. `_render_text` then drops `level`, so in text mode a third-party ERROR was not merely hard to spot, it was unfindable: the word never reached the output for anyone to grep. That is the opposite of what raising those loggers to WARNING below is for.
+LEVEL_PREFIXES = {
+    "critical": "[FAIL]",
+    "error": "[FAIL]",
+    "exception": "[FAIL]",
+    "warning": "[WARN]",
+    "warn": "[WARN]",
+}
 
 
 def _add_status_prefix(
@@ -26,12 +34,15 @@ def _add_status_prefix(
     method_name: str,
     event_dict: EventDict,
 ) -> EventDict:
-    del logger, method_name
+    del logger
     status = event_dict.get("status")
     if isinstance(status, str):
         event_dict["prefix"] = STATUS_PREFIXES.get(status.lower(), "[....]")
-    else:
-        event_dict["prefix"] = "[....]"
+        return event_dict
+    # `status` first, so nothing this project reports changes shape: an outcome it named itself outranks the severity it happened to log at. `level` is set by `add_log_level` earlier in this same chain and is present for library records too; `method_name` is the fallback for a caller that reaches this processor without it.
+    level = event_dict.get("level")
+    severity = level if isinstance(level, str) else method_name
+    event_dict["prefix"] = LEVEL_PREFIXES.get(severity.lower(), "[....]")
     return event_dict
 
 
@@ -50,6 +61,7 @@ PENDING = "[....]"
 PREFIX_COLOURS = {
     "[ OK ]": GREEN,
     "[FAIL]": RED,
+    "[WARN]": YELLOW,
     "[RETRY]": YELLOW,
     "[<-->]": CYAN,
     "[DRIN]": YELLOW,

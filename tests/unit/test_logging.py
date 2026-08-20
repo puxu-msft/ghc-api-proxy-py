@@ -105,3 +105,26 @@ def test_json_carries_the_stack_as_one_field(capsys: pytest.CaptureFixture[str])
     assert "exc_info" not in event
     assert event["exception"].startswith("Traceback (most recent call last):")
     assert event["exception"].endswith("ValueError: upstream exploded")
+
+
+def test_a_library_record_shows_its_severity(capsys: pytest.CaptureFixture[str]) -> None:
+    # A library has no way to set `status`, and text mode drops `level`, so every line httpx, httpcore, uvicorn or asyncio produced arrived as `[....]` — the prefix and the dimmed styling of a request that has just started. Not merely hard to spot: in text mode the word `error` never reached the output, so there was nothing to grep for either.
+    setup_logging(log_format="text", colors=False)
+
+    logging.getLogger("httpx").warning("connection pool exhausted")
+    logging.getLogger("httpcore").error("upstream TLS handshake failed")
+    logging.getLogger("app.own").info("a request has started")
+    _flush_handlers()
+
+    lines = capsys.readouterr().err.splitlines()
+    assert [line.split(" ")[0] for line in lines] == ["[WARN]", "[FAIL]", "[....]"]
+
+
+def test_our_own_status_outranks_the_level_it_logged_at(capsys: pytest.CaptureFixture[str]) -> None:
+    # A retry is reported at error level and is still a retry. The outcome this project named itself is the more specific answer, so the severity fallback must not overwrite it.
+    setup_logging(log_format="text", colors=False)
+
+    get_logger("app.own").error("upstream_retried", status="retry")
+    _flush_handlers()
+
+    assert capsys.readouterr().err.startswith("[RETRY] ")
