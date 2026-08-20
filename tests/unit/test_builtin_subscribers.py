@@ -1,0 +1,122 @@
+"""Which subscribers are built in, on which event, and in which order.
+
+The point of a registry is that the set and the order are decisions rather than accidents of import order, so this file is where a subscriber added without such a decision fails. It is deliberately blunt: adding one and not updating the expected tuple here is meant to be a failing test, not a passing one that quietly grew an entry.
+
+The last test is the one that matters most. Everything above it proves `register_builtin_subscribers` does what it says; only that one proves anybody calls it. A carrier nothing invokes looks identical to a working one from every other angle.
+"""
+
+from typing import Any
+
+import httpx
+
+from app.config.schema import ProxyConfig
+from app.model_provider import ModelDescriptor, ModelEndpoint
+from app.pipeline.direct_driver import AnthropicMessagesDriver, RetryBudget
+from app.pipeline.direct_driver.base import EVENT_ATTEMPT_PREPARE
+from app.pipeline.events import SubscriberRegistry
+from app.pipeline.request import RequestContext, WireFormat
+from app.pipeline.subscribers import SERVER_TOOL_CAPABILITY_ID, register_builtin_subscribers
+from app.server.composition import build_chain
+
+EXPECTED_ON_ATTEMPT_PREPARE = (SERVER_TOOL_CAPABILITY_ID,)
+# Keyed by event, so a subscriber added on a *different* event fails here too. Asserting one bucket would have let the next one land on `attempt.failed` with both assertions still green — a lock that only covers the door it was hung on.
+EXPECTED_BY_EVENT = {EVENT_ATTEMPT_PREPARE: EXPECTED_ON_ATTEMPT_PREPARE}
+
+
+def frozen_by_event(frozen: Any) -> dict[str, tuple[str, ...]]:
+    return {event: frozen.ids(event) for event in frozen.events}
+
+
+def test_the_built_in_set_is_what_it_is_declared_to_be() -> None:
+    registry = SubscriberRegistry[RequestContext]()
+
+    register_builtin_subscribers(registry)
+
+    assert frozen_by_event(registry.freeze()) == EXPECTED_BY_EVENT
+
+
+def test_a_caller_s_own_subscribers_end_up_in_the_same_registry_as_the_built_ins() -> None:
+    """Two registries would mean two frozen orders and no rule about which runs first."""
+
+    async def mine(_: RequestContext) -> None:
+        return None
+
+    registry = SubscriberRegistry[RequestContext]()
+    registry.subscribe(EVENT_ATTEMPT_PREPARE, "test:mine", mine)
+
+    register_builtin_subscribers(registry)
+
+    assert registry.freeze().ids(EVENT_ATTEMPT_PREPARE) == ("test:mine", SERVER_TOOL_CAPABILITY_ID)
+
+
+def test_the_chain_the_server_runs_on_actually_carries_them() -> None:
+    config = ProxyConfig.model_validate(
+        {"model_providers": {"one": {"type": "github_copilot"}}},
+    )
+    # Constructing the chain opens no connection, so the client needs no teardown here.
+    chain = build_chain(config, http_client=httpx.AsyncClient())
+
+    assert frozen_by_event(chain.subscribers) == EXPECTED_BY_EVENT
+
+
+class RecordingProvider:
+    """Just enough provider to run the driver loop, keeping what it was actually asked to send."""
+
+    name = "ghc"
+
+    def __init__(self) -> None:
+        self.sent: list[dict[str, Any]] = []
+
+    @property
+    def available_ids(self) -> frozenset[str]:
+        return frozenset({"claude-model"})
+
+    def describe(self, model_id: str) -> ModelDescriptor | None:
+        if model_id != "claude-model":
+            return None
+        return ModelDescriptor(id=model_id, endpoints=frozenset({ModelEndpoint.ANTHROPIC_MESSAGES}))
+
+    async def refresh_catalog(self) -> bool:
+        return False
+
+    async def send(
+        self,
+        endpoint: ModelEndpoint,
+        payload: Any,
+        *,
+        model_id: str,
+        stream: bool = False,
+        extra_headers: Any = None,
+    ) -> httpx.Response:
+        self.sent.append(dict(payload))
+        return httpx.Response(200)
+
+    async def count_tokens(self, payload: Any, *, model_id: str) -> httpx.Response:
+        # Present so the fake really satisfies the protocol; nothing here counts tokens.
+        raise NotImplementedError("this fake does not count tokens")
+
+
+async def test_the_declaration_is_gone_from_what_the_driver_actually_sends() -> None:
+    """The one assertion that would survive the carrier being wired to nothing being noticed late.
+
+    Registration proves the subscriber is in a list. This proves the list is read on the path a request takes, and that what upstream receives is the edited payload rather than the copy the attempt opened with.
+    """
+    registry = SubscriberRegistry[RequestContext]()
+    register_builtin_subscribers(registry)
+    provider = RecordingProvider()
+    driver = AnthropicMessagesDriver(provider, registry.freeze(), budget=RetryBudget(max_total=1))
+    context = RequestContext(
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        requested_model="claude-model",
+        payload={
+            "model": "claude-model",
+            "messages": [],
+            "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+        },
+    )
+    context.resolved_model = "claude-model"
+    context.target_format = WireFormat.ANTHROPIC_MESSAGES
+
+    await driver.run(context)
+
+    assert provider.sent == [{"model": "claude-model", "messages": []}]

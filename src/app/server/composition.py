@@ -38,6 +38,7 @@ from app.observability.terminal import TerminalCapabilities, detect_terminal
 from app.pipeline.events import FrozenSubscribers, SubscriberRegistry
 from app.pipeline.rate_limiting import RateLimiter
 from app.pipeline.request import RequestContext
+from app.pipeline.subscribers import register_builtin_subscribers
 from app.pipeline.translation_driver.registry import TranslatorRegistry, default_registry
 from app.tokenization.state_store import TokenizationStateStore
 from app.upstream.copilot import GitHubTokenSourceAdapter
@@ -214,11 +215,15 @@ def build_chain(
             )
         providers = built
 
+    # The built-ins go into whatever registry the caller brought, so their order is resolved together with anything a caller added rather than in a second, separate pass.
+    subscriber_registry = subscribers if subscribers is not None else SubscriberRegistry[RequestContext]()
+    register_builtin_subscribers(subscriber_registry)
+
     return Chain(
         config=config,
         providers=ProviderRegistry(providers, default=resolve_default_name(config)),
         translators=default_registry(config.model_translation),
-        subscribers=(subscribers or SubscriberRegistry[RequestContext]()).freeze(),
+        subscribers=subscriber_registry.freeze(),
         http_client=http_client,
         # One limiter per provider: a limit on one upstream must not throttle another.
         rate_limiters={name: RateLimiter(config.reactive_rate_limiter) for name in providers},

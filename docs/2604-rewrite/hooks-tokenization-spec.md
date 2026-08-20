@@ -125,6 +125,14 @@ Completion usage 通过 byte-preserving 旁路 tap 提取：非流式响应从�
 
 协议修复是不可禁用的 mandatory sanitizer，不属于用户 hook。只处理 client tools；`server_tool_use` 与 `*_tool_result` 不进入配对修复，也不获得任何 server-tool 降级、过滤或重试支持。从曾支持 server tools 的版本升级时，客户端历史中的残留 server-tool blocks 可能被上游拒绝；这是有意的 breaking removal。项目只提供清晰错误与 release note，不保留隐式 downgrade sanitizer，否则实质上仍在维护 server-tool support。
 
+> **2026-08-20 用户裁决，部分推翻上一段。** 上一段中「不获得任何 server-tool 过滤」这一条**只对历史 blocks 继续成立**，对**请求的 `tools[]` 声明不再成立**。
+>
+> 用户裁决：能力**跟随已路由的模型**——路由到 Anthropic Messages 端点时，剥掉上游已实测拒绝的 server-tool 声明并记录；路由到 `/responses` 时映射为 hosted builtin（该映射因耦合响应侧而尚未实现）。
+>
+> 落地为具名订阅者 `builtin:server-tool-capability`（`src/app/pipeline/subscribers/server_tools.py`，事件 `attempt.prepare`）。它**只动 `tools[]` 声明，不碰历史 blocks**，所以本节关于「残留 server-tool blocks 被上游拒绝是有意的 breaking removal」的立场**未被改变**，仍然有效。
+>
+> 触发这道裁决的是一条生产 400：`The use of the web search tool is not supported.`（`unsupported_value`），来自 Copilot 的 Anthropic Messages 端点。完整根因、参考项目对照与设计理由见 `docs/tmp/260820-websearch-fix-v2-design.md`；根因见 `docs/tmp/260820-websearch-400-synthesis.md`。
+
 按消息局部相邻关系处理：
 
 1. 顺序扫描历史并维护已见 client `tool_use.id`。同一 assistant 消息或跨轮再次出现相同 ID 时，保留全局首次出现的 call pair；后续重复 `tool_use` 及其局部 result 删除并计数。该选择优先保持最旧请求前缀稳定。
