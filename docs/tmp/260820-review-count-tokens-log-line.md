@@ -203,3 +203,14 @@ count 行的字段序变成 `↑<字节> ↑<词元>`，实测形如 `↑77B ↑
 **F6 后续**：用户于 2026-08-20 裁决把降级原因上到行上（`provider(ghc-failed,local)` / `provider(no-counter,local)`），见 `9e3d374`。仍未做的是更细的失败原因（超时还是 500），见 `.dev/docs/tui/deferred.md` 第 4 条。
 
 评审自留的临时证据 `/tmp/mutant/`、`/tmp/probe_count_line.py` 未清理，可随时删。
+
+---
+
+## 八、时点框架（后加，2026-08-20 收尾时）
+
+本报告是**评审当时**的记录，逐字保留，不回改。读它时请注意两处已被后续裁决取代的用词：
+
+- 正文与变异表里的字段名 `counted` / `counter`、渲染 `count(...)`，此后经用户裁决改为 `count_provider` / `count_provider_reason` 与 `provider(...)`（提交 `40681ce`）。变异表里点名的符号名要按这个映射读。
+- F6 当时判为「可选、可推迟」。用户随后推翻该判断，降级原因已上到行上（提交 `9e3d374`），见第七节处置表。
+
+收尾报告：`docs/tmp/260820-closeout-count-tokens-log-line.md`。
