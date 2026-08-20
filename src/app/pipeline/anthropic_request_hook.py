@@ -87,11 +87,18 @@ def tool_names_by_use_id(messages: list[Any]) -> dict[str, str]:
 def strip_read_reminders(messages: list[Any]) -> int:
     """Remove `<system-reminder>` sections from Read results, returning the bytes saved.
 
-    The client appends a general safety notice to every file it reads. It says the same thing each time, it is not about the file, and it is paid for in input tokens on this turn and on every turn that replays the conversation afterwards.
+    **Read what this actually costs before turning it on.** It was built for a general safety notice believed to ride on every file read. Measured afterwards across 3440 real outbound bodies — 4.39 GB, the previous service's own capture, `docs/tmp/260820-system-reminder-wire-shapes.md` — that notice does not exist. Of 44,076 Read results, 371 (0.84%) carry an injected reminder at all, in exactly two variants, and both say something true about that particular result:
 
-    Scoped to Read by the tool that made the call, because that is what the operator's key names and because the other reminders a client injects are not this one — a turn-level notice about tool use is addressed to the model's next decision, and removing it would change what the model was told rather than what it was billed for.
+    - `This memory is 30 days old… Verify against current code before asserting as fact.` (296 occurrences)
+    - `Warning: the file exists but is shorter than the provided offset (2076). The file has 2074 lines.` (75 occurrences)
 
-    **Returns the saving so this cannot fail quietly.** Where the notice actually sits in the outbound body could not be settled from transcripts: the client injects it while building the request, so it is absent from everything it stores — 83 Read results and 416 KB of recorded content contain none. If it turns out to ride somewhere other than the tool result, this removes nothing, and a caller that logs the return value will say so instead of leaving another switch that looks live and is not.
+    So enabling this saves 23.6 bytes per request on average — 0.0019% of the corpus, nothing at all on the ten largest requests — and pays for it by letting the model read a stale memory as live state, or by turning an out-of-range offset into a silent empty result. The switch is honoured because the operator's config asks for it; the default stays off, and this is why.
+
+    The waste the key was aimed at is real but lives elsewhere: repeated `nudge:` and `note:` injections in standalone user text blocks, where one 421-byte notice appears up to 71 times verbatim in a single body. See §5 of the report.
+
+    Scoped to Read by the tool that made the call, since a `tool_result` never says which tool produced it: `tool_name` appears on none of 754,573 recorded blocks.
+
+    Returns the saving so this cannot fail quietly — a caller that logs it will report zero rather than leaving a switch that looks live and is not.
     """
     names = tool_names_by_use_id(messages)
     saved = 0
