@@ -1,0 +1,135 @@
+{
+  "why": "Completes the picture on the leg that accepted every empty part.",
+  "request": {
+    "model": "gpt-5.5",
+    "input": [
+      {
+        "type": "message",
+        "role": "user",
+        "content": [
+          {
+            "type": "input_text",
+            "text": "Say OK."
+          }
+        ]
+      },
+      {
+        "type": "message",
+        "role": "assistant",
+        "content": []
+      }
+    ],
+    "max_output_tokens": 32,
+    "stream": false
+  },
+  "status": 200
+}
+
+{
+  "copilot_usage": {
+    "token_details": [
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 500000000000,
+        "token_count": 9,
+        "token_type": "input"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 50000000000,
+        "token_count": 0,
+        "token_type": "cache_read"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 0,
+        "token_count": 0,
+        "token_type": "cache_write"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 3000000000000,
+        "token_count": 5,
+        "token_type": "output"
+      }
+    ],
+    "total_nano_aiu": 19500000
+  },
+  "created_at": 1787236500,
+  "id": "fxMnDXkbgREuy1ijvz893mtKCWCsrxZVKRaLOE9dR3ckVlCOMviPJMxpEISgRoJwRrXXaEYJTy2BXZt3Tmz0l+gF4l7RJ4GybJOgy8YvfvmxGF5nPBrcnKzApcaii8xJrqcBmwg7MIpwTFnrildChCeWPRELcua+6kYTHeZFIr1rG6GLdYEUn4jXolA5ORP6Zp5iCVoR1FsWk6sOUoYZks+d6AoPNmeYBMEC2W7kmByx2a+5Dmf+jOw294rcwEe5NVJp2OwOyEGxvroqyiEtX/6tvljR0LKDIFgrP4drq2RXlchj9ZGMboExVudAD2K9tB8rPj8b6txUVVRGsW6bRcgoFlZCu/h9o/y0JE94Uyw8jqSI8mHSChmh5fJ33StbLNK8UYlwv5qGUxJkusHVRQ2MmAvZDYSY",
+  "incomplete_details": null,
+  "instructions": null,
+  "max_output_tokens": 32,
+  "model": "gpt-5.5-2026-04-23",
+  "object": "response",
+  "output": [
+    {
+      "content": [
+        {
+          "annotations": [],
+          "logprobs": [],
+          "text": "OK",
+          "type": "output_text"
+        }
+      ],
+      "id": "3gtg5MioQ+Ur7svalELpVyOnp9PWadpC8PAYIsa+2c+n0zIJiE1kBEdfz4E9JBdl+0EHDuMDwaF9ZLiy0SWsona3laIMxN1+ANUJcsLCWFTLPPsIP8St1HJfZAS/SSNRScIzV4Xa6fF5oxF6+/wAWqiJgmyv5pMZA5YB2NZHXFdN4Kmrlt0wuneaC6b8ECR1X8xZ5Y+9TRMIga+EN1MpSBNBiWMuegutahs7W1F7FUZ14ayNae1qJ7v6hWX4RSqFOWu7d0ep09aqoL/7gxZXPTgiMdbCEbY12uWaJrwLqONRWbaWJitlpsZgsUVfbsmsx8wwXHvdFHSarql3nXgBUiNDzHfjwpLhI3We07wzL0GuBXljex2eLiKu2/KMZewHZKQxITF1ueVSwAC0B/8wBxi8LPg1+lY=",
+      "phase": "final_answer",
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    }
+  ],
+  "output_text": null,
+  "parallel_tool_calls": true,
+  "previous_response_id": null,
+  "prompt_cache_retention": "24h",
+  "reasoning": {
+    "context": "current_turn",
+    "effort": "medium",
+    "summary": null
+  },
+  "safety_identifier": "REDACTED",
+  "service_tier": "default",
+  "status": "completed",
+  "temperature": 1,
+  "text": {
+    "format": {
+      "type": "text"
+    },
+    "verbosity": "medium"
+  },
+  "tool_choice": "auto",
+  "tool_usage": {
+    "image_gen": {
+      "input_tokens": 0,
+      "input_tokens_details": {
+        "image_tokens": 0,
+        "text_tokens": 0
+      },
+      "output_tokens": 0,
+      "output_tokens_details": {
+        "image_tokens": 0,
+        "text_tokens": 0
+      },
+      "total_tokens": 0
+    },
+    "web_search": {
+      "num_requests": 0
+    }
+  },
+  "tools": [],
+  "top_p": 0.98,
+  "truncation": "disabled",
+  "usage": {
+    "input_tokens": 9,
+    "input_tokens_details": {
+      "cache_write_tokens": 0,
+      "cached_tokens": 0
+    },
+    "output_tokens": 5,
+    "output_tokens_details": {
+      "reasoning_tokens": 0
+    },
+    "total_tokens": 14
+  }
+}

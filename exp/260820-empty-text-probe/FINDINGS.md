@@ -38,7 +38,44 @@ E5 的响应体逐字为：
 - ~~因此 2026-08-20 那条「无条件剥离」的裁决在 Responses 腿上**不修复任何 400**，它修的是别的东西：翻译后 `instructions` 尾部的空白填充、以及一个只含空块的 assistant 轮会退化成 `message` item 带 `output_text: ""`（剥离后该 item 整个不再产出，只剩 `function_call`）。~~ 已不适用：现在 Responses 腿不剥离，这两项都保持原样。
 - ~~首轮评审当初主张给剥离加门控……裁决取消门控没有引入风险。~~ 已被后续裁决取代：门控回来了，但换了轴——不再问「客户端发的是什么」，而是问「谁会读它」。
 
-## 边界
+## 第二轮：容器为空，而不是块为空
+
+`probe_empty_containers.py`，2026-08-20。第一轮留下的两条未测项都是承重的：`subscribers/blank_text.py` 拒绝清空一条轮次，依据是「`content: []` 会被拒」——而那是参考实现两处注释的说法，本项目从未自测。
+
+**F0 是这一轮的阳性对照，方向与 E5 相反**：E5 防的是「一排 200 其实什么都没证明」，F0 防的是「一排 400 其实只是凭据或这条腿坏了」。F0 是同一次运行里一个普通的合法 Anthropic 请求。
+
+| 探针 | 形态 | HTTP | 上游原话 |
+|---|---|---|---|
+| F0 | **阳性对照**：合法 Anthropic 请求 | **200** | — |
+| F1 | user 轮 `content: []` | **400** | `messages.0: user messages must have non-empty content` |
+| F2 | user 轮 content 只有一个空文本块 | **400** | `messages: text content blocks must be non-empty` |
+| F3 | assistant 轮（会话中间）content 只有一个空文本块 | **400** | 同上 |
+| F4 | **末轮** assistant `content: []` | **200** | — |
+| F6 | **会话中间** assistant `content: []` | **200** | — |
+| F5 | Responses 腿 assistant message `content: []` | **200** | — |
+
+### 结论
+
+**[强，一手实测，足以行动]**
+
+1. **`content: []` 不是一律被拒的。** 它对 **user 轮**被拒，且上游用的是**另一套措辞**（`user messages must have non-empty content`，与空文本块那条不同）；对 **assistant 轮被接受**，无论是末轮还是会话中间。参考实现「`content: []` 会被拒」那条二手断言**只对了一半**，照抄它会得出过度保守的结论——本项目此前正是这样。
+2. 「Anthropic 允许可选的末轮 assistant 为空」这个契约细节**被本上游honour**（F4），而且**不止末轮**（F6）。所以位置不是判据，**角色才是**。
+3. Responses 腿继续接受一切空容器（F5），与第一轮一致。
+
+### 这直接改了代码
+
+`subscribers/blank_text.py` 原先对「一条轮次全是空白块」一律原样发出。按上表改为按角色分：
+
+- **assistant 轮 → 清空成 `content: []`**。两种拼法语义相同，而只有这一种能过（F6/F4 是 200，F3 是 400）。这把一个**必然失败**的请求变成了可以成功的请求。
+- **user 轮 → 仍原样发出**。两种拼法都被拒（F1、F2 都是 400），既然怎么改都失败，那就让客户端自己的输入原样travel，上游报的错才指向客户端真正发了什么。
+
+### 边界
+
+- 未测：user 轮 `content: []` 出现在**非首位**时是否仍是同一条错误（F1 的错误带 `messages.0` 前缀，说明它按位置报，但只测了位置 0）。
+- 未测：`system: []`。`blank_text.py` 对全空 `system` 的处置是删键而非清空，所以这条不承重，但它仍是一条没问过的形态。
+- 未测：一条轮次里既有空白块又有非文本块（如 `tool_use`）时被清空的情形——不会发生，因为非文本块会存活，走不到清空分支。
+
+## 第一轮的边界
 
 - 只测了非流式 `/responses` 与 `gpt-5.5`。没有测流式，没有测其它模型。
 - **「content 全是空 part」的形态：assistant 轮已测**——E4 发的就是 `content: [{"type":"output_text","text":""}]`，200。**未测**的是 user 轮（尤其是末轮）的同一形态，以及 `content: []` 这种空数组。后者正是 `subscribers/blank_text.py` 里那条「参考实现断言会被拒、本项目未自测」的二手断言所在之处，两处互相指认。

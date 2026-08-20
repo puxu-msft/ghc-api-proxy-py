@@ -1,0 +1,96 @@
+{
+  "why": "F4 showed a *final* assistant turn may be empty. This asks whether the position is what matters, which decides whether an all-blank assistant turn should be emptied rather than passed through.",
+  "request": {
+    "model": "claude-sonnet-5",
+    "max_tokens": 32,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "Say OK."
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": []
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "Again."
+          }
+        ]
+      }
+    ]
+  },
+  "status": 200
+}
+
+{
+  "content": [
+    {
+      "signature": "EqwCCqUBCBAYAipABDD8mSKGunRsgWaT8gqCcN/Xr8FChk15x2MqyZwWg9V6Kx+S/XqvoCLTvuC/JHkuMSN2kHPud40EX85l1nv3UTIPY2xhdWRlLXNvbm5ldC01OABCCHRoaW5raW5nWiRjZWQxZjk4ZS0wYjUxLTQ2MTAtODI4Mi00ZTVkODgzODQ1NzRyEHKNiAp1t75onyW000vyXY+IAQGoAfygnNQGEgwCMBcpOkBtPW/jMg8aDDwLzqz11+E9o5wkEiIwvKnythpQahCSd5iKnKuQky2OwibYbDKWXxrUj15N+KhTEYY8KDTfhTHh4WxO1ZzdKjSK4lyuLDesftHvr3inBxKGJvnebwGNOasbyRI9FkEH94nMe2fjIVyzSeAX2NhYjC2XUHC0GAE=",
+      "thinking": "",
+      "type": "thinking"
+    },
+    {
+      "text": "OK",
+      "type": "text"
+    }
+  ],
+  "copilot_usage": {
+    "token_details": [
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 200000000000,
+        "token_count": 18,
+        "token_type": "input"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 20000000000,
+        "token_count": 0,
+        "token_type": "cache_read"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 250000000000,
+        "token_count": 0,
+        "token_type": "cache_write"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 1000000000000,
+        "token_count": 20,
+        "token_type": "output"
+      }
+    ],
+    "total_nano_aiu": 23600000
+  },
+  "id": "msg_011CeEAbv9Gh5N1yqPoNQ437",
+  "model": "claude-sonnet-5",
+  "role": "assistant",
+  "stop_details": null,
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "type": "message",
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 0,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "inference_geo": "global",
+    "input_tokens": 18,
+    "output_tokens": 20,
+    "output_tokens_details": {
+      "thinking_tokens": 15
+    }
+  }
+}

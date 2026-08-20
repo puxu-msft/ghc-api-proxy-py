@@ -84,12 +84,31 @@ async def test_whitespace_only_text_counts_as_blank() -> None:
     assert _content(payload) == [{"type": "text", "text": "what changed?"}]
 
 
-async def test_a_message_of_nothing_but_blank_text_is_left_alone() -> None:
-    """The one place the rule stops, and why it stops there rather than everywhere.
+async def test_an_assistant_turn_that_said_nothing_is_allowed_to_say_nothing() -> None:
+    """`content: []` is the spelling this upstream takes for a turn with nothing in it.
 
-    No rewrite of a turn is known to be both accepted and to mean the same. `content: []` is refused according to the reference implementation, which asserts it twice — second-hand, never measured here. Dropping the turn is not obviously safe rather than known to be unsafe: it moves every later turn's position and can put two same-role turns together, neither of which has been measured against this upstream either. With nothing measured to put in its place, the input travels unchanged and the client gets its own error rather than one this chain invented.
+    Measured 2026-08-20 (`exp/260820-empty-text-probe/`): an assistant turn with `content: []` returns 200 both mid-conversation (F6) and as the final turn (F4), while the blank block it replaces returns 400 (F3). The two mean the same and only one travels, so this is the same rewrite `system` gets — and it turns a request that could not have succeeded into one that can.
+    """
+    payload = await _run(
+        {
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "  \n"}]},
+                {"role": "user", "content": [{"type": "text", "text": "again"}]},
+            ]
+        }
+    )
 
-    The reference implementation has this exact hole — it filters without a surviving-block check and sends `content: []` — which is why this is pinned rather than left to reading.
+    assert _content(payload, 1) == []
+    assert _content(payload, 0) == [{"type": "text", "text": "hi"}]
+
+
+async def test_a_user_turn_of_nothing_but_blank_text_is_left_alone() -> None:
+    """The one place the rule stops, and it stops there because every alternative was measured to fail too.
+
+    `content: []` is refused for a user turn in its own words — `messages.0: user messages must have non-empty content` (F1, 400) — beside the blank block's own refusal (F2, 400). Dropping the turn instead is not obviously safe rather than known to be unsafe: it moves every later turn's position and can put two same-role turns together, neither of which has been measured here. Both spellings fail, so the one that travels is the client's own and the error names what the client actually sent.
+
+    The reference implementation has this exact hole in the other direction — it filters without a surviving-block check and sends `content: []` for every role — which is why this is pinned rather than left to reading.
     """
     payload = await _run({"messages": [{"role": "user", "content": [{"type": "text", "text": ""}]}]})
 

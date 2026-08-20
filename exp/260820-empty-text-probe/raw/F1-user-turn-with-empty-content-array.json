@@ -1,0 +1,23 @@
+{
+  "why": "The second-hand claim: `content: []` is refused. Never checked here.",
+  "request": {
+    "model": "claude-sonnet-5",
+    "max_tokens": 32,
+    "messages": [
+      {
+        "role": "user",
+        "content": []
+      }
+    ]
+  },
+  "status": 400
+}
+
+{
+  "type": "error",
+  "error": {
+    "type": "invalid_request_error",
+    "message": "messages.0: user messages must have non-empty content"
+  },
+  "request_id": "req_011CeEAYxKfG3r7GXiF6TVKg"
+}
