@@ -38,6 +38,7 @@ class StubAdapter:
         self.cleanup_finished = False
         self.masters_closed = False
         self.stopped_accepting = False
+        self.stopped_admitting = False
 
     async def startup_lifespan(self) -> None:
         return None
@@ -51,11 +52,19 @@ class StubAdapter:
     async def stop_accepting(self) -> None:
         self.stopped_accepting = True
 
+    async def stop_admitting(self) -> int:
+        self.stopped_admitting = True
+        # Nothing here holds a connection, so there is nothing to release. What is being asserted around this stub is the cleanup budget, and the count would only be a number this test invented.
+        return 0
+
     async def wait_drained(self, timeout: float | None = None) -> None:
         del timeout
         return None
 
     def interrupt_connections(self) -> int:
+        return 0
+
+    def refused_requests(self) -> int:
         return 0
 
     def connection_count(self) -> int:

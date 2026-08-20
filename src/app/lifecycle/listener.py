@@ -213,8 +213,7 @@ class FirstByteRoutingAdapter:
             self._state = ListenerState.FAILED
             raise
         # The wrapped adapter owns the Uvicorn admission barrier, but this adapter owns accepts.
-        admission = self._adapter._admission_open  # pyright: ignore[reportPrivateUsage]
-        admission.set()
+        self._adapter.open_admission()
         self._state = ListenerState.ACCEPTING
 
     async def stop_accepting(self) -> None:
@@ -232,8 +231,7 @@ class FirstByteRoutingAdapter:
             routing_tasks = tuple(self._routing_tasks)
             for task in routing_tasks:
                 task.cancel()
-            admission = self._adapter._admission_open  # pyright: ignore[reportPrivateUsage]
-            admission.clear()
+            self._adapter.pause_admission()
             self._state = ListenerState.STOPPED
         if routing_tasks:
             # Cancellation is expected here; unexpected route failures are reported by the callback.
@@ -253,6 +251,13 @@ class FirstByteRoutingAdapter:
 
     def interrupt_connections(self) -> int:
         return self._adapter.interrupt_connections()
+
+    async def stop_admitting(self) -> int:
+        # Every accepted socket ends up behind the wrapped adapter, and `stop_accepting` has already dealt with this router's own half — the sockets still waiting on a first byte.
+        return await self._adapter.stop_admitting()
+
+    def refused_requests(self) -> int:
+        return self._adapter.refused_requests()
 
     def connection_count(self) -> int:
         # The router owns no connections of its own; every accepted socket is handed to the adapter behind it, so the count it keeps is the whole count.

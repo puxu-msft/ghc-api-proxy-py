@@ -31,7 +31,7 @@ def child_script() -> str:
         """
         import asyncio, os
         from pathlib import Path
-        from fastapi import FastAPI
+        from fastapi import FastAPI, Request
         from app.lifecycle.entry import StandaloneOptions, run_standalone
 
         app = FastAPI()
@@ -39,7 +39,19 @@ def child_script() -> str:
         async def live():
             return {"status": "ok"}
 
+        async def swallow(request: Request):
+            # Reads the whole body, so a client that announces more than it sends leaves this handler genuinely waiting. A route that never touches the body cannot express that: Starlette answers it off the headers alone.
+            marker = os.environ.get("ENTERED_MARKER")
+            if marker:
+                # A line per arrival, appended and flushed. The alternative — a test that waits and concludes from silence that the handler is in — cannot tell "waiting for the body" from "not scheduled yet", and those two lead to opposite verdicts.
+                with open(marker, "a") as handle:
+                    handle.write("entered\\n")
+                    handle.flush()
+            body = await request.body()
+            return {"read": len(body)}
+
         app.add_api_route("/health/liveness", live)
+        app.add_api_route("/swallow", swallow, methods=["POST"])
 
         async def main():
             configured_tls_mode = False
@@ -80,9 +92,12 @@ def start_child(
     *,
     restart: bool = False,
     tls_mode: bool | str | None = None,
+    entered_marker: Path | None = None,
 ) -> subprocess.Popen[str]:
     env = os.environ.copy()
     env.update({"PYTHONPATH": str(SRC), "PORT": str(port), "PIDFILE": str(pidfile)})
+    if entered_marker is not None:
+        env["ENTERED_MARKER"] = str(entered_marker)
     if restart:
         env["RESTART"] = "1"
     if tls_mode is not None:
@@ -133,6 +148,21 @@ def read_response(client: socket.socket) -> bytes:
         if not piece:
             return b"".join(chunks)
         chunks.append(piece)
+
+
+def wait_for_arrivals(marker: Path, expected: int, timeout: float = 10.0) -> None:
+    """Block until `expected` requests have reached the `/swallow` handler.
+
+    A positive signal from the handler itself, rather than the test inferring from silence that the request must be in. Silence also covers "the event loop has not got to it yet", and those two states send the shutdown down different paths.
+    """
+    deadline = time.monotonic() + timeout
+    arrived = 0
+    while time.monotonic() < deadline:
+        arrived = marker.read_text().count("entered") if marker.exists() else 0
+        if arrived >= expected:
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"only {arrived} of {expected} requests reached the handler")
 
 
 def stop(process: subprocess.Popen[str]) -> None:
@@ -212,10 +242,13 @@ def test_a_half_sent_request_holds_the_drain_until_the_operator_escalates(pidfil
 
     This pins that on purpose. The module docstring rules the drain unbounded because a second wall-clock limit would cut off legitimate work while the operator still has escalation available, and a client that has not finished sending is no different: nothing here can know whether the rest is one packet away. What was wrong was never the waiting — it was that the display said nothing, because the proxy used to register a request only after reading its body. It registers on arrival now, so the footer shows it as `(resolving)` with a climbing clock for exactly as long as this test keeps it waiting.
 
+    The route has to read the body for any of that to be true, and the wait has to be observed before the signal rather than assumed. Sent at a route that answers off the headers alone, this scenario used to hold the drain for a quite different reason — the request never reached a handler at all, and parked at the admission barrier instead, which is the deadlock `stop_admitting` exists to end. `test_a_pooled_client_that_races_the_signal_is_answered_rather_than_wedging_the_process` keeps that scenario, with the expectation it should have had.
+
     No upstream is involved and none is needed: the request never gets far enough to route.
     """
     port = free_port()
-    child = start_child(port, pidfile)
+    marker = pidfile.parent / "entered"
+    child = start_child(port, pidfile, entered_marker=marker)
     held: list[socket.socket] = []
     try:
         wait_until_serving(pidfile)
@@ -223,11 +256,14 @@ def test_a_half_sent_request_holds_the_drain_until_the_operator_escalates(pidfil
             sock = socket.create_connection(("127.0.0.1", port), timeout=10)
             # Announces more than it sends, so the server is still waiting on `receive` when the signal lands.
             sock.sendall(
-                b"POST /health/liveness HTTP/1.1\r\nHost: localhost\r\n"
+                b"POST /swallow HTTP/1.1\r\nHost: localhost\r\n"
                 b"Content-Type: application/json\r\nContent-Length: 400\r\n\r\n"
                 b'{"partial":'
             )
             held.append(sock)
+
+        # The handlers are in, and waiting, before anything is signalled. Without this the signal races the request and what holds the drain is no longer the thing under test.
+        wait_for_arrivals(marker, 2)
 
         child.send_signal(signal.SIGTERM)
         # An unobstructed drain here finishes well inside a second, so a process still running at three is waiting on these two rather than merely slow.
@@ -238,6 +274,42 @@ def test_a_half_sent_request_holds_the_drain_until_the_operator_escalates(pidfil
         child.send_signal(signal.SIGTERM)
         stdout, _ = child.communicate(timeout=15)
         assert "STOPPED INTERRUPTING" in stdout
+    finally:
+        for sock in held:
+            sock.close()
+        stop(child)
+
+
+def test_a_pooled_client_that_races_the_signal_is_answered_rather_than_wedging_the_process(
+    pidfile: Path,
+) -> None:
+    """The incident itself, in a real process under a real signal, with the right expectation.
+
+    This is the scenario `test_a_half_sent_request_holds_the_drain_until_the_operator_escalates` used to run: send, then signal at once, with nothing synchronising the two. Deliberately unsynchronised, because the race is the point — the signal lands first, the request reaches the barrier after admission has already been shut, and before the fix it waited there for a resume that a shutdown never performs. The whole process then sat at rung 1 until the operator escalated, which is what was reported from production.
+
+    It kept passing back then only because "still running at three seconds" was the very symptom. The correct expectation is the opposite one, and it is the only assertion in the suite that would notice this deadlock coming back to a real process — the in-process tests reach the same code, but the incident happened here.
+    """
+    port = free_port()
+    child = start_child(port, pidfile)
+    held: list[socket.socket] = []
+    try:
+        wait_until_serving(pidfile)
+        for _ in range(2):
+            sock = socket.create_connection(("127.0.0.1", port), timeout=10)
+            sock.sendall(
+                b"POST /health/liveness HTTP/1.1\r\nHost: localhost\r\n"
+                b"Content-Type: application/json\r\nContent-Length: 400\r\n\r\n"
+                b'{"partial":'
+            )
+            held.append(sock)
+        child.send_signal(signal.SIGTERM)
+
+        # Nothing legitimate is in flight: this route answers off its headers, so whatever the race decides, no handler is waiting on anything.
+        stdout, stderr = child.communicate(timeout=15)
+        assert child.returncode == 0
+        assert "STOPPED DRAINING" in stdout, "one signal should have been enough"
+        # The deadlock's other symptom, and the one an operator sees first. It only appears once the escalation cancels the parked requests, so a process that exits at rung 1 cannot produce it.
+        assert "Exception in ASGI application" not in stderr
     finally:
         for sock in held:
             sock.close()

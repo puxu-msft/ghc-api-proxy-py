@@ -181,6 +181,48 @@ async def test_tls_router_stop_accepting_preserves_masters_and_resumes(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_a_resume_after_a_refusal_serves_again_rather_than_answering_503(
+    tmp_path: Path,
+) -> None:
+    """A refusal is undone by the resume that follows it, on the TLS router as much as on the adapter.
+
+    The router keeps its own `_arm_locked` and never calls the wrapped adapter's, so the two fields of the barrier were reopened by different code paths — the event by the router, the refusal only by the adapter. A refusal raised and then resumed past left a listener accepting normally while every request on it answered 503 for ever, which is the failure mode that looks healthiest from outside.
+
+    Only `stop_admitting` ever raises a refusal, and today it is only called on the way out. `lifecycle.md` lists `RESUME` as a runtime signal, so this pins the pairing before the control plane reaches it.
+    """
+    ipv4, ipv6 = _listeners()
+    activated = _activated(ipv4, ipv6)
+    material = generate_self_signed(tmp_path / "tls")
+    uvicorn_adapter = UvicornListenerAdapter(Config(_app(), log_config=None), activated)
+    adapter = FirstByteRoutingAdapter(
+        uvicorn_adapter,
+        activated,
+        build_server_ssl_context(material),
+    )
+    try:
+        await adapter.startup_lifespan()
+        await adapter.register_dormant()
+        await adapter.arm()
+        port = ipv4.getsockname()[1]
+        assert b"200 OK" in await asyncio.wait_for(_tls_request("127.0.0.1", port), 2)
+
+        await adapter.stop_accepting()
+        await adapter.stop_admitting()
+        await adapter.resume_accepting()
+
+        # Not merely "answers something": a stuck refusal answers 503 promptly and looks alive.
+        resumed = await asyncio.wait_for(_tls_request("127.0.0.1", port), 2)
+        assert b"200 OK" in resumed
+        assert b"503" not in resumed
+        assert uvicorn_adapter.refused_requests() == 0
+    finally:
+        await adapter.shutdown_lifespan()
+        await adapter.close_masters()
+        ipv4.close()
+        ipv6.close()
+
+
+@pytest.mark.asyncio
 async def test_resume_fails_after_master_listener_close() -> None:
     ipv4, ipv6 = _listeners()
     activated = _activated(ipv4, ipv6)

@@ -60,11 +60,15 @@ class ListenerLifecycle(Protocol):
 
     async def stop_accepting(self) -> None: ...
 
+    async def stop_admitting(self) -> int: ...
+
     async def wait_drained(self, timeout: float | None = None) -> None: ...
 
     def interrupt_connections(self) -> int: ...
 
     def connection_count(self) -> int: ...
+
+    def refused_requests(self) -> int: ...
 
     def cancel_requests(self) -> int: ...
 
@@ -87,6 +91,8 @@ class ShutdownReport:
     """What the shutdown actually did, so a caller can log it rather than guess."""
 
     stage: ShutdownStage
+    connections_asked_to_close: int = 0
+    refused_requests: int = 0
     interrupted_connections: int = 0
     cancelled_requests: int = 0
     cleanup_timed_out: bool = False
@@ -156,7 +162,9 @@ class StandaloneServer:
         with self._signal_handlers():
             await self._await_advance()
             await self._adapter.stop_accepting()
-            return await self._descend()
+            # Closing the listener is only half of stopping. The other half is telling the clients that already hold a connection, because they can still send on it — and until they are told, a pooled client keeps handing this process work it has just promised to stop taking.
+            asked_to_close = await self._adapter.stop_admitting()
+            return await self._descend(asked_to_close)
 
     async def _abandon_startup(self, acquired: set[str]) -> list[str]:
         """Release what start-up actually acquired, and report what would not release.
@@ -189,7 +197,7 @@ class StandaloneServer:
                 notes.append(f"start-up teardown: {name} failed: {type(error).__name__}: {error}")
         return notes
 
-    async def _descend(self) -> ShutdownReport:
+    async def _descend(self, asked_to_close: int = 0) -> ShutdownReport:
         interrupted = 0
         cancelled = 0
 
@@ -213,6 +221,8 @@ class StandaloneServer:
         outcome = await self._finalize()
         return ShutdownReport(
             stage=self._ladder.stage,
+            connections_asked_to_close=asked_to_close,
+            refused_requests=self._adapter.refused_requests(),
             interrupted_connections=interrupted,
             cancelled_requests=cancelled,
             cleanup_timed_out=outcome.timed_out,

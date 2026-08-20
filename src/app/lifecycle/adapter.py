@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import socket
 from enum import StrEnum
 from typing import Any, Protocol, cast
@@ -10,6 +11,16 @@ from uvicorn.config import Config
 from uvicorn.server import Server, ServerState
 
 from app.lifecycle.activation import ActivatedSocketSet, ListenerIdentity, SocketActivationError
+
+# What a request gets when it arrives after admission has been refused. The Anthropic error envelope because that is what almost everything reaching this proxy is speaking, and a client that renders `error.message` then shows its user the actual reason rather than a parse failure. `overloaded_error` is Anthropic's own type for "ask again shortly", which is exactly the advice.
+REFUSAL_STATUS = 503
+REFUSAL_HEADERS: tuple[tuple[bytes, bytes], ...] = (
+    (b"content-type", b"application/json"),
+    # The connection is going away regardless; saying so keeps a pooled client from queueing more onto a socket we are about to close under it.
+    (b"connection", b"close"),
+)
+# 1012 is "service restart", and the rolling control plane already speaks it for the same event.
+REFUSAL_WEBSOCKET_CODE = 1012
 
 
 class ListenerAdapterError(RuntimeError):
@@ -56,7 +67,8 @@ class UvicornListenerAdapter:
         self._tick_task: asyncio.Task[None] | None = None
         self._tick_stop = asyncio.Event()
         self._admission_open = asyncio.Event()
-        self._admission_error: ListenerAdapterError | None = None
+        self._admission_refusal: str | None = None
+        self._refused_requests = 0
 
     @property
     def server_state(self) -> ServerState:
@@ -151,6 +163,15 @@ class UvicornListenerAdapter:
         """
         return len(self._server.server_state.connections)
 
+    def refused_requests(self) -> int:
+        """How many requests were turned away at the barrier rather than served.
+
+        The one number in a shutdown report that says a client went without. Connections asked to close and requests cancelled are both things done *to* work this process had; this counts work it declined to take, and a restart that declined none is a restart nobody noticed.
+
+        It is counted here because the barrier sits above the pipeline app, so a refused request never reaches the request log or the display — without this, "nobody was refused" and "refusals are not reported" look identical.
+        """
+        return self._refused_requests
+
     def interrupt_connections(self) -> int:
         """Ask every open connection to shut down, and report how many were asked.
 
@@ -177,12 +198,34 @@ class UvicornListenerAdapter:
             task.cancel()
         return len(tasks)
 
+    async def stop_admitting(self) -> int:
+        """Stop taking new requests and let the pooled connections go, reporting how many were asked.
+
+        The two halves are not equally load-bearing, and saying so matters to whoever weighs them next.
+
+        **Refusing admission is the half that fixes the deadlock.** `stop_accepting` only closes the listener. A client that already holds a connection can still send on it, and the admission barrier — which exists so a rolling quiesce can hold a request until the listener resumes — would hold that request for a resume that a shutdown is never going to perform. The drain waits on the request tasks, so one held request is enough for the drain to never end. Refusing answers those requests instead of holding them.
+
+        **Closing the connections is the half that tells the client sooner.** Measured by removing it: the drain still ends, because `shutdown_lifespan` closes the connections anyway a moment later. What this buys is that a pooled client learns during a long drain rather than at the end of it, so it stops sending into a process that has already promised to stop. Worth keeping, not load-bearing.
+
+        Either way this is not the interruption rung. An idle pooled connection goes now; one with a request still running keeps it, because Uvicorn only clears `keep_alive` there and closes when that response ends. A response already being written is delivered in full.
+
+        The count is of connections *asked*, the same reading `interrupt_connections` reports, and deliberately not of connections that went this instant. Only Uvicorn's own cycle state distinguishes the two, and a number derived from it would go quietly wrong the next time that internal changes, where a number that says what it counted stays true.
+
+        Takes the lock although `interrupt_connections` does not, for the refusal rather than the connections: the refusal is one half of a two-field barrier state that the arm and register paths also write, and those hold this lock.
+        """
+        async with self._operation_lock:
+            self._refuse_admission_locked("server is shutting down")
+            connections = list(self._server.server_state.connections)
+            for connection in connections:
+                connection.shutdown()
+            return len(connections)
+
     async def shutdown_lifespan(self, *, drain_timeout: float | None = None) -> None:
         async with self._operation_lock:
             if self._state is ListenerState.CLOSED:
                 return
             self._state = ListenerState.STOPPING
-            self._reject_pending_admission_locked("adapter is stopping")
+            self._refuse_admission_locked("server is shutting down")
             self._close_registrations_locked(ListenerState.STOPPING)
             for connection in list(self._server.server_state.connections):
                 connection.shutdown()
@@ -203,6 +246,22 @@ class UvicornListenerAdapter:
             if self._registrations:
                 raise SocketActivationError("stop accepting before closing listener masters")
             self._activated.close()
+
+    def open_admission(self) -> None:
+        """Let arriving requests through, and forget any refusal that was in force.
+
+        Public because the first-byte router in front of this adapter owns the accepts while this one owns the barrier, so it has to drive the barrier from outside. Handing it a method beats letting it reach in: reaching in reached one of the two fields, and a refusal left set behind an open gate answers 503 to every request on a listener that has just resumed.
+        """
+        self._admission_refusal = None
+        self._admission_open.set()
+
+    def pause_admission(self) -> None:
+        """Hold arriving requests until admission opens again, which is what a rolling quiesce wants.
+
+        The opposite of `stop_admitting`, and the distinction is the whole bug this pairing exists to keep straight: a pause is a promise that something will resume, and a shutdown makes no such promise.
+        """
+        self._admission_refusal = None
+        self._admission_open.clear()
 
     def _protocol_factory(self):  # type: ignore[no-untyped-def]
         config = self._config
@@ -255,8 +314,7 @@ class UvicornListenerAdapter:
             raise
         self._accept_duplicates = duplicates
         self._registrations = registrations
-        self._admission_error = None
-        self._admission_open.clear()
+        self.pause_admission()
         self._state = ListenerState.DORMANT
 
     async def _arm_locked(self) -> None:
@@ -270,19 +328,17 @@ class UvicornListenerAdapter:
             for registration in self._registrations:
                 await registration.start_serving()
         except BaseException:
-            self._reject_pending_admission_locked("listener arm failed")
+            self._refuse_admission_locked("listener failed to start accepting")
             self._close_registrations_locked(ListenerState.FAILED)
             raise
-        self._admission_error = None
-        self._admission_open.set()
+        self.open_admission()
         self._state = ListenerState.ACCEPTING
 
     def _close_registrations_locked(self, next_state: ListenerState) -> None:
         registrations, self._registrations = self._registrations, []
         duplicates, self._accept_duplicates = self._accept_duplicates, {}
         if next_state is ListenerState.STOPPED:
-            self._admission_error = None
-            self._admission_open.clear()
+            self.pause_admission()
         for registration in registrations:
             registration.close()
         for duplicate in duplicates.values():
@@ -309,7 +365,6 @@ class UvicornListenerAdapter:
         loaded_config = cast(_LoadedAppConfig, self._config)
         raw_loaded_app = loaded_config.loaded_app
         loaded_app = cast(ASGI3Application, raw_loaded_app)
-        admission_open = self._admission_open
 
         async def gated_app(
             scope: Scope,
@@ -317,13 +372,51 @@ class UvicornListenerAdapter:
             send: ASGISendCallable,
         ) -> None:
             if scope["type"] in {"http", "websocket"}:
-                await admission_open.wait()
-                if self._admission_error is not None:
-                    raise self._admission_error
+                # Read off `self`, not captured, so that both halves of the barrier state are read the same way. Capturing the event by value made "this object is never rebound" an invariant nothing declared and nothing tested — and rebinding it is the natural way to write a reset, whose symptom would be a silent permanent hang, the very shape this barrier's last bug had.
+                await self._admission_open.wait()
+                refusal = self._admission_refusal
+                if refusal is not None:
+                    # Answered rather than raised. Raising here reached Uvicorn as an unhandled application error: the client got a bare 500 with no reason in it, and the log got an "Exception in ASGI application" traceback for what is a planned, ordinary event.
+                    self._refused_requests += 1
+                    await _refuse_admission(scope, receive, send, refusal)
+                    return
             await loaded_app(scope, receive, send)
 
         self._config.loaded_app = gated_app
 
-    def _reject_pending_admission_locked(self, message: str) -> None:
-        self._admission_error = ListenerAdapterError(message)
+    def _refuse_admission_locked(self, reason: str) -> None:
+        """Turn the barrier from "wait for the listener" into "this request is not being served".
+
+        The event is set either way, because a request waiting on it is waiting for an answer that only arrives when something opens the gate. Leaving it clear is what made a refused request wait forever.
+        """
+        self._admission_refusal = reason
         self._admission_open.set()
+
+
+async def _refuse_admission(
+    scope: Scope,
+    receive: ASGIReceiveCallable,
+    send: ASGISendCallable,
+    reason: str,
+) -> None:
+    """Tell one caller the server is not taking it, in whatever protocol it arrived on."""
+    if scope["type"] == "websocket":
+        # ASGI has the application take `websocket.connect` off the queue before it answers. Uvicorn does not police the order, but an intermediary that does would fault a close sent before the connect was read.
+        await receive()
+        # Refused before the handshake, so this is a rejection rather than a close: Uvicorn discards the code and the reason and answers HTTP 403. The code is what this would mean if it were ever sent after an accept, and is kept as the intent; nothing downstream sees the number today.
+        await send({"type": "websocket.close", "code": REFUSAL_WEBSOCKET_CODE, "reason": reason})
+        return
+    body = json.dumps(
+        {"type": "error", "error": {"type": "overloaded_error", "message": reason}}
+    ).encode()
+    await send(
+        {
+            "type": "http.response.start",
+            "status": REFUSAL_STATUS,
+            "headers": [
+                *REFUSAL_HEADERS,
+                (b"content-length", str(len(body)).encode()),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": body, "more_body": False})

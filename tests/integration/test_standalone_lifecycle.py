@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
+from starlette.responses import StreamingResponse
 from uvicorn import Config
 
 from app.lifecycle.adapter import UvicornListenerAdapter
@@ -24,6 +25,9 @@ from app.lifecycle.listener import LISTENER_NAME, bind_listener
 from app.lifecycle.pidfile import PidfileEntry, PidfileError, write_pidfile
 from app.lifecycle.shutdown import ShutdownStage
 from app.lifecycle.standalone import ShutdownReport, StandaloneServer
+
+# Enough blocks that a truncation lands visibly short rather than off by one.
+STREAM_BLOCKS = 9
 
 
 def slow_app(
@@ -52,8 +56,21 @@ def slow_app(
             raise
         return {"status": "done"}
 
+    async def stream() -> StreamingResponse:
+        async def blocks() -> AsyncIterator[bytes]:
+            # The first block is out — and therefore the response has started — before anything signals. Every other route here is still deciding what to say when the signal lands, which is a different state of the connection and the one already covered.
+            yield b"data: block-00\n\n"
+            entered.set()
+            await hold.wait()
+            for index in range(1, STREAM_BLOCKS):
+                yield f"data: block-{index:02d}\n\n".encode()
+            yield b"data: [DONE]\n\n"
+
+        return StreamingResponse(blocks(), media_type="text/event-stream")
+
     app.add_api_route("/quick", quick)
     app.add_api_route("/slow", slow)
+    app.add_api_route("/stream", stream)
     return app
 
 
@@ -93,6 +110,28 @@ class Harness:
             writer.close()
             with suppress(Exception):
                 await writer.wait_closed()
+
+    async def pooled(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        """A connection the client keeps, the way a real pooled client keeps one between requests.
+
+        The connection is what makes the shutdown path interesting, and only a completed keep-alive request produces one: the protocol object is live and accepted, so a later request on it reaches the application without going anywhere near the listener.
+        """
+        reader, writer = await asyncio.open_connection("127.0.0.1", self.port)
+        writer.write(b"GET /quick HTTP/1.1\r\nHost: test\r\n\r\n")
+        await writer.drain()
+        await _read_response(reader)
+        return reader, writer
+
+
+async def _read_response(reader: asyncio.StreamReader) -> bytes:
+    """One whole HTTP response off a connection that stays open, headers and body."""
+    head = await reader.readuntil(b"\r\n\r\n")
+    length = 0
+    for line in head.split(b"\r\n"):
+        name, _, value = line.partition(b":")
+        if name.lower() == b"content-length":
+            length = int(value.strip())
+    return head + await reader.readexactly(length)
 
 
 @pytest.fixture
@@ -257,6 +296,121 @@ async def test_a_burst_of_signals_does_not_stall_the_shutdown(harness: Harness) 
     assert report.stage is ShutdownStage.FINALIZING
     assert report.cancelled_requests >= 1
     in_flight.cancel()
+
+
+@pytest.mark.asyncio
+async def test_a_pooled_connection_that_sends_mid_drain_does_not_hold_the_shutdown_open(
+    harness: Harness,
+) -> None:
+    """The drain must end even though a client kept a connection and used it after the signal.
+
+    This is the shape of the incident, end to end: a pooled connection outlives the signal, the client sends on it, and the shutdown has to finish anyway.
+
+    What actually saves it here is the connection being closed, not the refusal — measured, by removing each half in turn. By the time this test writes its second request the pooled connection is already gone, so the bytes land in a closed socket and no second handler ever runs. The refusal is what covers the same client arriving a moment earlier, and `test_a_request_held_at_the_barrier_is_answered_rather_than_left_waiting` is where that half is pinned. Both belong: this one is the incident's own shape, and a whole-mechanism regression is what it catches.
+    """
+    serving = await run_until_serving(harness)
+    _, pooled_writer = await harness.pooled()
+    in_flight = asyncio.create_task(harness.request("/slow"))
+    await asyncio.wait_for(harness.entered.wait(), 5)
+
+    harness.server.receive_signal(signal.SIGTERM)
+    await asyncio.sleep(0.2)
+    pooled_writer.write(b"GET /quick HTTP/1.1\r\nHost: test\r\n\r\n")
+    with suppress(Exception):
+        await pooled_writer.drain()
+
+    harness.hold.set()
+    assert b"200 OK" in await asyncio.wait_for(in_flight, 5)
+    report = await asyncio.wait_for(serving, 5)
+
+    # Rung 1 throughout: nothing was cut short to get here.
+    assert report.stage is ShutdownStage.DRAINING
+    assert report.cancelled_requests == 0
+    assert harness.interrupted.is_set() is False
+    pooled_writer.close()
+
+
+@pytest.mark.asyncio
+async def test_the_drain_lets_go_of_an_idle_pooled_connection(harness: Harness) -> None:
+    """A client holding an idle connection is told to go, rather than being left to discover it."""
+    serving = await run_until_serving(harness)
+    pooled_reader, pooled_writer = await harness.pooled()
+    assert harness.adapter.connection_count() == 1
+
+    harness.server.receive_signal(signal.SIGTERM)
+    report = await asyncio.wait_for(serving, 5)
+
+    assert report.connections_asked_to_close == 1
+    # The client's own socket is the proof; a count the server kept could be true of a connection it never actually closed.
+    assert await asyncio.wait_for(pooled_reader.read(), 2) == b""
+    pooled_writer.close()
+
+
+@pytest.mark.asyncio
+async def test_a_request_held_at_the_barrier_is_answered_rather_than_left_waiting(
+    harness: Harness,
+) -> None:
+    """The window the incident fell into: admission is shut, and a pooled client sends anyway.
+
+    Driven against the adapter rather than through a signal because the window is between two of its calls, and a test that waited for the right microsecond would be testing the scheduler. The barrier is reached the same way either way — an accepted connection, a second request on it.
+    """
+    serving = await run_until_serving(harness)
+    pooled_reader, pooled_writer = await harness.pooled()
+
+    # Admission is now shut and, on the rolling path, would reopen on resume.
+    await harness.adapter.stop_accepting()
+    pooled_writer.write(b"GET /quick HTTP/1.1\r\nHost: test\r\n\r\n")
+    await pooled_writer.drain()
+    held = asyncio.create_task(_read_response(pooled_reader))
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(asyncio.shield(held), 0.3)
+
+    # No resume is coming, and saying so is what releases the request.
+    assert await harness.adapter.stop_admitting() == 1
+    response = await asyncio.wait_for(held, 2)
+    assert b"503" in response.split(b"\r\n")[0]
+    assert b"connection: close" in response.lower()
+    assert b"shutting down" in response
+
+    harness.server.receive_signal(signal.SIGTERM)
+    await asyncio.wait_for(serving, 5)
+    pooled_writer.close()
+
+
+@pytest.mark.asyncio
+async def test_rung_one_delivers_a_response_that_had_already_started_streaming(
+    harness: Harness,
+) -> None:
+    """A stream already on the wire when the signal lands must arrive whole.
+
+    The other rung-1 tests here catch a request that has not begun answering yet, and that is a different state of the connection: Uvicorn's `shutdown` closes the transport outright when no response is in progress, and only clears `keep_alive` when one is. Nothing covered the second branch, so cutting a response mid-flight passed every test in the suite while a stream stopped at its second block.
+
+    For this proxy that is the severe end of the failure space, since a complete content block is the delivery unit and a truncated stream is a wrong answer rather than a slow one.
+    """
+    serving = await run_until_serving(harness)
+    reader, writer = await asyncio.open_connection("127.0.0.1", harness.port)
+    writer.write(b"GET /stream HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n")
+    await writer.drain()
+    # The first block is out, so the response has started and cannot be restarted.
+    await asyncio.wait_for(harness.entered.wait(), 5)
+
+    harness.server.receive_signal(signal.SIGTERM)
+    await asyncio.sleep(0.2)
+    harness.hold.set()
+
+    delivered = await asyncio.wait_for(reader.read(), 5)
+    writer.close()
+    with suppress(Exception):
+        await writer.wait_closed()
+
+    assert delivered.count(b"data: block-") == STREAM_BLOCKS
+    assert b"data: [DONE]" in delivered
+    # Chunked framing has its own terminator, and a stream cut after its last block would still carry every block while losing this.
+    assert delivered.endswith(b"0\r\n\r\n")
+
+    report = await asyncio.wait_for(serving, 5)
+    assert report.stage is ShutdownStage.DRAINING
+    assert report.cancelled_requests == 0
 
 
 @pytest.mark.asyncio
