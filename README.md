@@ -52,6 +52,8 @@
 |---|---|
 | `docs/tui/` | 请求日志与实时 footer |
 | `exp/tui-footer/` | 上面那件事的实验脚本 |
+| `docs/graceful-shutdown/` | 关闭信号到进程退出之间的一切；目前只有 `client-side/` |
+| `exp/graceful-shutdown-client-side/` | 上面那件事的探针与复现脚本 |
 
 ## 一件待办
 
