@@ -141,6 +141,94 @@ def _strip_in_place(result: dict[str, Any]) -> int:
     return saved
 
 
+def _blocks(message: Any) -> list[Any]:
+    """The content list of a message, or an empty list for every other shape."""
+    if not isinstance(message, dict):
+        return []
+    content = cast(dict[str, Any], message).get("content")
+    return cast(list[Any], content) if isinstance(content, list) else []
+
+
+def _ids_of(message: Any, block_type: str, key: str) -> set[str]:
+    found: set[str] = set()
+    for block in _blocks(message):
+        if not isinstance(block, dict):
+            continue
+        entry = cast(dict[str, Any], block)
+        identifier = entry.get(key)
+        if entry.get("type") == block_type and isinstance(identifier, str):
+            found.add(identifier)
+    return found
+
+
+def _role(message: Any) -> str:
+    return str(cast(dict[str, Any], message).get("role", "")) if isinstance(message, dict) else ""
+
+
+def repair_tool_pairs(messages: list[Any]) -> tuple[int, int, int]:
+    """Remove calls nothing answered and answers nothing called, returning how many of each and how many turns that emptied.
+
+    Both endpoints refuse a broken pair, and each says so in its own words. Measured 2026-08-20, `exp/260820-tool-pair-probe/`:
+
+    - a `tool_use` the next turn does not answer → 400, ``messages.2: `tool_use` ids were found without `tool_result` blocks immediately after`` (G1);
+    - a `tool_result` naming no call before it → 400, ``unexpected `tool_use_id` found in `tool_result` blocks`` (G2);
+    - the same on the Responses leg after translation → 400, `No tool output found for function call call_1.` (G5).
+
+    That last one is why this runs before translation rather than at `attempt.prepare`: the invariant is not a property of one endpoint, so repairing it on the outbound Anthropic leg alone would leave the primary path broken in exactly the same way. The counting endpoint runs this function too, which is also correct — a count of a body carrying an orphan measures a request that was never going to be answered.
+
+    **Ids are not deduplicated, deliberately.** The existing chain removes a `tool_use` whose id was already used. Measured: this upstream answers 200 to a conversation that reuses one (G3). Removing it would take away something upstream accepts, on the strength of a rule it does not enforce.
+
+    **A turn this emptied is dropped, and only one this emptied.** Dropping puts two same-role turns next to each other, which had to be measured rather than assumed — G4 sends two assistant turns in a row and gets 200 — while the alternative, `content: []`, is refused for a user turn. A turn that *arrived* empty is left exactly as it came: it is the client's own body and upstream naming it is the answer the client needs. Telling the two apart is why the drop happens here, where what was removed is still known, rather than in a later pass that can only see the result.
+
+    `immediately after` is upstream's own wording, so the pairing looks exactly one turn ahead. A result that arrives later is an orphan by the same rule that makes the call one.
+    """
+    orphan_uses = 0
+    orphan_results = 0
+    emptied: list[int] = []
+    for index, message in enumerate(messages):
+        following = messages[index + 1] if index + 1 < len(messages) else None
+        answered = _ids_of(following, "tool_result", "tool_use_id") if _role(following) == "user" else set[str]()
+        preceding = messages[index - 1] if index else None
+        called = _ids_of(preceding, "tool_use", "id") if _role(preceding) == "assistant" else set[str]()
+
+        before = _blocks(message)
+        kept: list[Any] = []
+        for block in before:
+            entry = cast(dict[str, Any], block) if isinstance(block, dict) else None
+            kind = entry.get("type") if entry is not None else None
+            if entry is not None and kind == "tool_use" and _role(message) == "assistant":
+                identifier = entry.get("id")
+                if not isinstance(identifier, str) or identifier not in answered:
+                    orphan_uses += 1
+                    continue
+            elif entry is not None and kind == "tool_result" and _role(message) == "user":
+                identifier = entry.get("tool_use_id")
+                if not isinstance(identifier, str) or identifier not in called:
+                    orphan_results += 1
+                    continue
+            kept.append(block)
+        if not isinstance(message, dict) or not isinstance(cast(dict[str, Any], message).get("content"), list):
+            continue
+        cast(dict[str, Any], message)["content"] = kept
+        if before and not kept:
+            emptied.append(index)
+
+    dropped = _drop(messages, emptied)
+    return orphan_uses, orphan_results, dropped
+
+
+def _drop(messages: list[Any], indexes: list[int]) -> int:
+    """Remove the named turns, unless that would leave the body with none.
+
+    A request with no messages is a different request, not a repaired one — so in that one case the orphan travels and upstream says what is wrong with it.
+    """
+    if not indexes or len(indexes) == len(messages):
+        return 0
+    doomed = set(indexes)
+    messages[:] = [message for index, message in enumerate(messages) if index not in doomed]
+    return len(doomed)
+
+
 def fix_anthropic_request(payload: dict[str, Any], config: FixAnthropicRequestHook) -> None:
     """Apply the configured request fixups in place.
 
@@ -161,6 +249,17 @@ def fix_anthropic_request(payload: dict[str, Any], config: FixAnthropicRequestHo
         saved = strip_read_reminders(messages)
         if saved:
             logger.info("dropped %d bytes of Read tool reminders", saved)
+
+    # Before the per-message passes below, because those read `content` and this decides which blocks are still in it. Unconditional and before translation: both endpoints refuse a broken pair, each in its own words, so this is not a property of either leg.
+    orphan_uses, orphan_results, emptied = repair_tool_pairs(messages)
+    if orphan_uses or orphan_results:
+        # INFO rather than DEBUG: this removes a call the model made, or an answer it was given, and an operator wondering why a tool disappeared from the transcript should not have to turn on debug logging to find out. It is also not routine — a client that keeps its own history intact never produces one.
+        logger.info(
+            "repaired %d unanswered tool call(s) and %d unmatched tool result(s); %d turn(s) had nothing left",
+            orphan_uses,
+            orphan_results,
+            emptied,
+        )
 
     strategy = layout_strategy(config.thinking.assistant_message_layout)
     strip_empty = config.thinking.strip_both_empty_thinking_blocks
