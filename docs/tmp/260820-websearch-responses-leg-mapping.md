@@ -100,27 +100,25 @@ Anthropic 客户端声明 web search，模型走 Responses 腿：**搜索真的�
 
 `response.web_search_call.in_progress` / `.searching` / `.completed` 只带 `item_id`／`output_index`／`sequence_number`，**不带内容增量**，被忽略，不触发任何块的开启或关闭。
 
-### 3.5 为什么无法执行时是「拒绝」而不是「剥离」
+### 3.5 无法执行时：合成一个「搜索失败」的结果，而不是剥离、也不是报错
 
-2026-08-20 的客户端取证（[`260820-claude-code-websearch-request-forensics.md`](260820-claude-code-websearch-request-forensics.md)）推翻了原本的处置。
+2026-08-20 的客户端取证（[`260820-claude-code-websearch-request-forensics.md`](260820-claude-code-websearch-request-forensics.md)）推翻了原本的处置，用户随后裁决「去除 drop 策略，drop 远不如 mock_result，凭记忆作答不可接受」。
 
-**Claude Code 的 web search 是两段式的**：主对话里 `WebSearch` 是**普通 function tool**（无 `type`，我们的逻辑碰不到）；模型调用它之后，客户端**另起一个子请求**，`tools` 数组里只有 `web_search_20250305` 一项，用户消息是 `Perform a web search for the query: X`。190/190 真实样本的 `tools` 长度都是 1。
+**为什么 drop 不可接受。** Claude Code 的 web search 是两段式：主对话里 `WebSearch` 是**普通 function tool**（无 `type`，我们碰不到）；模型调用后，客户端**另起一个子请求**，`tools` 数组只有 `web_search_20250305` 一项，用户消息是 `Perform a web search for the query: X`，190/190 真实样本皆如此。剥掉它唯一的工具，请求**不会失败**——模型凭记忆作答，而客户端**无条件**把回复拼上 `Web search results for query:` 抬头交回主对话。无 `is_error`、无标记。**记忆里的文本被当作搜索到的事实交付。**
 
-于是剥离的后果不是「少一个能力」：
+**为什么最终不是 400。** 400 有实证（转录里模型正确降级、改用 WebFetch），但同一份转录也显示客户端**重试了 3 次**——HTTP 错误在客户端看来是传输故障，值得重试，而一个跑不了的搜索不会在第三次变得能跑。
 
-- 子请求被剥掉唯一的工具后**不会失败**，模型凭记忆作答；
-- 客户端**无条件**把回复拼上 `Web search results for query: "X"` 抬头交回主对话；
-- 无 `is_error`、无任何标记。**记忆里的文本被当作搜索到的事实交付**。
+**所以合成结果。** Anthropic 为这种情形定义了形态：200 + `server_tool_use` 配对 `web_search_tool_result`，其 `content` 是**单个** `web_search_tool_result_error` 对象（官方文档原文：搜索出错时 API「仍返回 200」，`content` 是一个对象而非列表）。失败的**工具**不会被重试，而且模型是用自己的协议被告知搜索失败的，不必去解读一段 HTTP 错误字符串。
 
-反向证据是转录实证（会话 `7c4be027-…`）：子请求返回 **400** 时，客户端把它包成 `tool_result{is_error: true, content: "API Error: 400 …"}`，主对话模型的反应是
+`error_code` 取 `unavailable`（文档定义为「发生了内部错误」）。其余合法值都在描述没发生的事：`too_many_requests`、`max_uses_exceeded`、`query_too_long`、`request_too_large`、`invalid_tool_input`。**spec §5.3 悬着的 P12 探针项就此有答案：`unavailable` 合法。**
 
-> 官方搜索接口当前报错，我会直接抓取官方文档页面，**不把接口失败误当成「官方没有该功能」**。
+**不是这两种**：`content: []` 是「搜索了但没匹配」的文档形态，那是关于**互联网**的断言而不是关于我们的；纯文本说明也不行，因为客户端的抬头会把那段说明当作搜索结果呈现。
 
-随即改用 WebFetch 完成任务。没有道歉循环，没有调用不存在的工具。
+实现：合成的是**上游方言**的回复（Anthropic SSE 或 JSON），走与真实回复完全相同的 assembler、buffer 与 delivery 路径——绕过它们会造出系统里唯一一条从未被其他东西检验过的成帧路径。`HandledRequest.synthesized` 告诉交付侧按 Anthropic 读，而 route 仍然记录**本该**由谁作答，供控制台行使用。
 
-**所以：拒绝一次搜索的代价是一轮对话；静默伪造一次搜索的代价是答案的真实性。** 三处原本 drop 的位置（Anthropic 腿声明、Responses 腿能力门、`drop_web_search` 取值）已全部去除。
+**未经真实客户端验证，如实记录**：400 那条有转录实证，这条只有协议文档。若实际效果更差，替代方案的证据在取证报告 §4.2。
 
-**为什么是 HTTP 400 而不是合成 200 + `web_search_tool_result_error`**：后者是 Anthropic 协议表达工具失败的原生形态（`error_code` 合法值含 `unavailable`，`content` 是**单个对象**而非数组，官方文档已核实——spec §5.3 悬着的 P12 探针项就此有答案）。但**已实测有效的是 400 那条**；合成 200 需要构造 SSE 流（子请求全部 `stream=true`）并绕过翻译层，而客户端会如何降级**没有任何证据**。若将来要改，形态记在这里。
+**仍然返回 400 的一处**：`web_search_domain_restrictions: error`（D1 的显式配置）。那是「客户端要求无法表达」而不是「搜索不可执行」，且是运维显式选择要它响亮失败。**但它同样会被客户端重试 3 次**，这一点记账于此。
 
 ## 4. 与官方／参考项目的对照
 

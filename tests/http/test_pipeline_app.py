@@ -311,12 +311,12 @@ def test_a_streamed_search_is_delivered_as_a_line_rather_than_an_empty_block() -
     assert all(text for text in deltas), deltas
 
 
-def test_a_model_not_listed_as_searching_refuses_rather_than_answering_anyway() -> None:
-    """The gate, and why it refuses instead of quietly dropping the tool.
+def test_a_search_that_cannot_run_is_answered_as_a_failed_tool_not_an_error() -> None:
+    """The client issues a search as its own sub-request and treats an HTTP error as a transport problem worth retrying — three times, in the one case on record. A search this endpoint cannot run will not start working on the third attempt.
 
-    Whether a model runs hosted search is not something the catalog says, so it is an operator's list matched against the *resolved* model. When the answer is no, the request must fail: a search sub-request stripped of its only tool still succeeds, answering from memory, and the client renders the reply under a `Web search results for query:` heading it attaches unconditionally.
+    A failed *tool* is not retried. Anthropic defines the shape for exactly this: a 200 carrying `server_tool_use` paired with a `web_search_tool_result` whose content is a single `web_search_tool_result_error` object. So the reply says the search failed in the protocol's own words instead of handing the model an HTTP error string to interpret.
 
-    Asserted on `seen` being empty as well as the status — a refusal after the call would have let the model produce the very text this prevents.
+    Asserted on upstream never being called as well, because the whole point is that nothing was asked to answer this from memory.
     """
     client, seen = make_client(
         lambda _: httpx.Response(200, json={"id": "resp_1"}),
@@ -342,9 +342,63 @@ def test_a_model_not_listed_as_searching_refuses_rather_than_answering_anyway() 
         },
     )
 
-    assert response.status_code == 400
+    assert response.status_code == 200, "an HTTP error here is retried by the client"
     assert seen == [], "the model was asked to answer a search it could not run"
-    assert orjson.loads(response.content)["error"]["code"] == "server_tool_capability_unavailable"
+    blocks = orjson.loads(response.content)["content"]
+    assert [block["type"] for block in blocks] == [
+        "server_tool_use",
+        "web_search_tool_result",
+    ]
+    assert blocks[0]["name"] == "web_search"
+    # The result references its call, or it refers to nothing.
+    assert blocks[1]["tool_use_id"] == blocks[0]["id"]
+    # A single object, not a list: `content: []` is the documented shape for a search that ran and
+    # matched nothing, which would be a claim about the web rather than about us.
+    assert blocks[1]["content"] == {
+        "type": "web_search_tool_result_error",
+        "error_code": "unavailable",
+    }
+
+
+def test_a_streamed_search_that_cannot_run_is_answered_the_same_way() -> None:
+    """The sub-requests that carry a search are all `stream: true`, measured over 190 of them, so the synthesised reply has to survive the streaming path rather than only the buffered one."""
+    client, seen = make_client(
+        lambda _: httpx.Response(200, json={"id": "resp_1"}),
+        overrides={
+            "model_providers": {
+                "ghc": {
+                    "type": "github_copilot",
+                    "api_base_url": BASE_URL,
+                    "models_support_web_search": ["some-other-model"],
+                }
+            }
+        },
+    )
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "gpt-model",
+            "messages": [
+                {"role": "user", "content": "Perform a web search for the query: bun"}
+            ],
+            "max_tokens": 1024,
+            "stream": True,
+            "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert seen == []
+    starts = [
+        orjson.loads(line[6:])["content_block"]
+        for line in response.text.splitlines()
+        if line.startswith("data: ") and '"content_block_start"' in line
+    ]
+    assert [block["type"] for block in starts] == [
+        "server_tool_use",
+        "web_search_tool_result",
+    ]
+    assert starts[1]["content"]["error_code"] == "unavailable"
 
 
 def test_the_shape_claude_code_really_sends_reaches_upstream_as_a_search() -> None:

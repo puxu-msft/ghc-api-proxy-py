@@ -6,7 +6,7 @@ The Responses endpoint executes web search itself, and the request translator tu
 
 **Why it refuses rather than removing the declaration, which is what it used to do.** Removing it looks like the gentler option — the turn survives, one capability short — and on this client it is the dangerous one. Claude Code runs web search as a separate sub-request whose entire content is `Perform a web search for the query: X` and whose `tools` array holds nothing else; measured over 190 real ones, every single time. A sub-request stripped of its only tool does not fail. The model answers from memory, and the client renders whatever comes back under a `Web search results for query:` heading it attaches unconditionally — no `is_error`, no marker of any kind. Remembered text arrives labelled as searched fact.
 
-Refusing produces the opposite, and it is on record: when a search sub-request returned 400, the client passed it to the main conversation as `tool_result` with `is_error: true`, and the model said it would not mistake an interface failure for the fact not existing, then reached for WebFetch instead. A failed search costs a turn. A silently fabricated one costs the truth of the answer.
+So this raises instead, and `handle()` answers it: the reply becomes a `server_tool_use` paired with a `web_search_tool_result` carrying a single error object, which is the shape Anthropic defines for a search that did not run. Not an HTTP error — the same transcript that shows the model degrading well on a 400 also shows the client retrying it three times first, because an HTTP error reads as a transport fault. A failed tool does not get retried. See `delivery/synthetic.py`.
 """
 
 import logging
@@ -14,7 +14,7 @@ from typing import Any, cast
 
 from app.pipeline.request import RequestContext, WireFormat
 from app.pipeline.subscribers.counting import COUNTING_ONLY
-from app.pipeline.translation_driver.semantic import TranslationRefused
+from app.pipeline.translation_driver.semantic import WebSearchNotExecutable
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ def _is_hosted_web_search(tool: Any) -> bool:
 
 
 async def gate_hosted_web_search(context: RequestContext, supported: frozenset[str]) -> None:
-    """Refuse a request asking a model to search when it is not known to run searches."""
+    """Stop a search that this model is not known to run, so it is answered rather than invented."""
     if context.target_format is not WireFormat.OPENAI_RESPONSES:
         return
     if context.extras.get(COUNTING_ONLY):
@@ -51,10 +51,10 @@ async def gate_hosted_web_search(context: RequestContext, supported: frozenset[s
     # operator — and it is the operator who can fix it, by adding the model to the list or finding
     # out that it does not belong there.
     logger.info(
-        "refusing a web search for %r: it is not in models_support_web_search",
+        "answering a web search for %r as failed: it is not in models_support_web_search",
         context.resolved_model,
     )
-    raise TranslationRefused(
+    raise WebSearchNotExecutable(
         f"{context.resolved_model} is not configured to run hosted web search; add it to"
         " models_support_web_search if it does",
         code="server_tool_capability_unavailable",

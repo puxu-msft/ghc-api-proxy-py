@@ -11,6 +11,7 @@ import asyncio
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, cast
+from uuid import uuid4
 
 import httpx
 from pydantic import ValidationError
@@ -29,6 +30,11 @@ from app.pipeline.delivery.assembler import (
     terminal_from_anthropic,
 )
 from app.pipeline.delivery.stream import StreamSettings
+from app.pipeline.delivery.synthetic import (
+    failed_search_body,
+    failed_search_sse,
+    query_from_request,
+)
 from app.pipeline.direct_driver import (
     DRIVERS,
     EVENT_ATTEMPT_PREPARE,
@@ -41,9 +47,13 @@ from app.pipeline.retry import RetryLedger
 from app.pipeline.routing import Route, RoutingError, decide_route
 from app.pipeline.subscribers.counting import COUNTING_ONLY
 from app.pipeline.translation_driver.registry import TranslatorNotFound
-from app.pipeline.translation_driver.semantic import TranslationRefused
+from app.pipeline.translation_driver.semantic import (
+    TranslationRefused,
+    WebSearchNotExecutable,
+)
 from app.server.composition import Chain
 from app.tokenization.estimators import estimate_anthropic_input, estimate_responses_input
+from app.wire_json import dumps
 
 
 @dataclass(slots=True)
@@ -51,6 +61,11 @@ class HandledRequest:
     context: RequestContext
     route: Route
     outcome: DriverOutcome
+    # Written by this proxy rather than by an upstream. The route still names whichever upstream
+    # would have answered — that is what the console line reports — so the reply's own dialect has
+    # to be carried separately, or `dialect_for` would try to read Anthropic blocks with the
+    # Responses assembler.
+    synthesized: bool = False
 
     @property
     def response(self) -> httpx.Response | None:
@@ -124,7 +139,46 @@ async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[Req
         rate_limiter=chain.rate_limiter_for(provider.name),
     )
     outcome = await driver.run(context)
+    if isinstance(outcome.error, WebSearchNotExecutable):
+        # Answered rather than failed. The client issues a search as its own sub-request and treats
+        # an HTTP error as a transport problem worth retrying — three times, in the one case on
+        # record — while a search that cannot run will not start working on the third attempt. A
+        # failed *tool* is not retried, so the reply says so in the protocol's own words.
+        return HandledRequest(
+            context=context,
+            route=route,
+            outcome=_answered_failed_search(context, route),
+            synthesized=True,
+        )
     return HandledRequest(context=context, route=route, outcome=outcome)
+
+
+def _answered_failed_search(context: RequestContext, route: Route) -> DriverOutcome:
+    """A reply this proxy writes, saying the search was attempted and did not run.
+
+    Built as an upstream reply rather than as finished client bytes so it goes through the same assembler, buffer and delivery path as everything else. `synthesized` is what tells the delivery side to read it as Anthropic: the route still names whichever upstream would have answered, and that is what the console line should keep reporting.
+    """
+    query = query_from_request(context.payload)
+    message_id = f"msg_{uuid4().hex[:24]}"
+    call_id = f"srvtoolu_{uuid4().hex[:24]}"
+    request = httpx.Request("POST", "https://synthesized.invalid/messages", content=b"")
+    if context.stream:
+        body = failed_search_sse(
+            query, message_id=message_id, model=route.model_id, call_id=call_id
+        )
+        headers = {"content-type": "text/event-stream"}
+    else:
+        body = dumps(
+            failed_search_body(
+                query, message_id=message_id, model=route.model_id, call_id=call_id
+            )
+        )
+        headers = {"content-type": "application/json"}
+    return DriverOutcome(
+        context=context,
+        response=httpx.Response(200, content=body, headers=headers, request=request),
+        attempts=context.attempt_count,
+    )
 
 
 class CountTokensRequestError(ValueError):
@@ -342,6 +396,11 @@ def response_payload(chain: Chain, handled: HandledRequest, body: dict[str, Any]
     for and cannot parse.
     """
     route = handled.route
+    if handled.synthesized:
+        # Already in the client's format: this proxy wrote it, in the shape the client asked in.
+        # Translating it would carry an Anthropic body through the Responses reader, which has no
+        # `server_tool_use` to read and would hand back the reply with its two blocks missing.
+        return body
     if not route.translation_required:
         return body
     translated, semantic = chain.translators.translate_response(
@@ -397,6 +456,9 @@ def dialect_for(handled: HandledRequest) -> ReplyDialect:
 
     Two dialects, not one per wire format: anything that is not a Responses upstream is assembled as Anthropic — `assembler_for` below dispatches on this very answer — so the pair describes what the code actually does rather than the whole `WireFormat` taxonomy. A third upstream would need its own assembler before it could need its own words.
     """
+    if handled.synthesized:
+        # We wrote it, and we write Anthropic. The route below is about who *would* have answered.
+        return ReplyDialect.ANTHROPIC
     if handled.route.target_format is WireFormat.OPENAI_RESPONSES:
         return ReplyDialect.RESPONSES
     return ReplyDialect.ANTHROPIC

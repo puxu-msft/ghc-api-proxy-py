@@ -4,7 +4,7 @@ Copilot's Anthropic Messages endpoint does not run Anthropic's native server too
 
 **This used to remove the declaration and let the turn continue, and that was the wrong answer.** It reads as the gentler one: the conversation survives, one capability short. What it actually produces on the client that sends these is a fabrication. Claude Code runs a web search as its own sub-request, carrying `Perform a web search for the query: X` and a `tools` array holding nothing but the search — measured over 190 real ones, every single time. Strip its only tool and the request does not fail; the model answers from memory, and the client renders the reply under a `Web search results for query:` heading it attaches unconditionally. No `is_error`, no marker. Remembered text comes back labelled as searched fact, and nothing downstream can tell the difference.
 
-Refusing produces the opposite, and it is on record rather than reasoned: when a search sub-request returned 400, the client handed the main conversation a `tool_result` with `is_error: true`, and the model said it would not mistake an interface failure for the fact not existing — then reached for WebFetch and finished the task. A refused search costs a turn. A silently invented one costs the answer's truth.
+So this raises instead, and `handle()` answers it: the reply becomes a `server_tool_use` paired with a `web_search_tool_result` carrying a single error object — the shape Anthropic defines for a search that did not run. Not an HTTP error, though that was the first form of this fix: the transcript showing the model degrade well on a 400 also shows the client retry it three times first, because an HTTP error reads as a transport fault and a tool failure does not. See `delivery/synthetic.py`.
 
 **The history is rewritten rather than refused, and on this client that path has never once run.** Flattening a past `server_tool_use` call and its `*_tool_result` answer into text is honest where refusing the declaration is not: those blocks are a record of searches that really happened, not a claim that one is happening now. They become plain text rather than a client `tool_use` / `tool_result` pair, because a downgraded pair refers to a tool this request does not declare, while text refers to nothing.
 
@@ -23,7 +23,7 @@ from typing import Any, cast
 from app.pipeline.request import RequestContext, WireFormat
 from app.pipeline.server_tool_text import call_subject
 from app.pipeline.subscribers.counting import COUNTING_ONLY
-from app.pipeline.translation_driver.semantic import TranslationRefused
+from app.pipeline.translation_driver.semantic import WebSearchNotExecutable
 
 logger = logging.getLogger(__name__)
 
@@ -220,11 +220,11 @@ def _refuse_declarations(payload: dict[str, Any]) -> None:
 
     # Named for the operator before the refusal, which is the client's to see.
     logger.info(
-        "refusing %d server-tool declaration(s) this endpoint cannot execute: %s",
+        "answering %d server-tool declaration(s) this endpoint cannot execute as failed: %s",
         len(dropped),
         ", ".join(sorted(dropped)),
     )
-    raise TranslationRefused(
+    raise WebSearchNotExecutable(
         f"this endpoint does not execute {', '.join(sorted(dropped))}, and answering without it"
         " would return remembered text where the client expects a search",
         code="server_tool_not_executable",
