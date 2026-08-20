@@ -93,6 +93,7 @@ def test_a_successful_request_writes_one_complete_structured_record(tmp_path: Pa
         "request_id",
         "message_id",
         "inbound_format",
+        "count_tokens",
         "client_protocol",
         "upstream_protocol",
         "requested_model",
@@ -124,6 +125,8 @@ def test_a_successful_request_writes_one_complete_structured_record(tmp_path: Pa
         "request_id": "req-1",
         "message_id": "msg-1",
         "inbound_format": "anthropic-messages",
+        # This one was a turn, not a count. The endpoint is recorded either way, so the line can say which it was without inferring it from what came back.
+        "count_tokens": False,
         "client_protocol": "H1",
         "upstream_protocol": "H2",
         "requested_model": "claude-opus-5",

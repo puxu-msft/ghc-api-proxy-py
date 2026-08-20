@@ -51,6 +51,9 @@ REASON_COLOURS = {
 # Tools whose presence means the turn is waiting on a person rather than on a machine. Worth picking out of an otherwise quiet list: it is the one entry that will not resolve on its own.
 ATTENTION_TOOLS = frozenset({"AskUserQuestion"})
 
+# What a count adds to the format prefix on a successful line. Written as a suffix on the format rather than as a format of its own, because that is what it is: the same inbound body, asked a different question.
+COUNT_TOKENS_SUFFIX = "-count-tokens"
+
 # The three endings a request line can report, spelled as `STATUS_PREFIXES` keys because that is the one place they are turned into something a reader sees. `gone` is not a failure and not a success: nobody was left to receive the answer.
 type LogStatus = Literal["ok", "fail", "gone"]
 
@@ -90,7 +93,7 @@ class RequestLine:
 
     `bytes_in` / `bytes_out` are wire bytes in each direction; `usage` is the upstream's own token accounting, keyed as Anthropic reports it. The two are separate facts and a request can have either without the other — a rejected body has bytes and no tokens, a cached hit has tokens and almost no bytes.
 
-    `count_provider` is set only on a token-counting request, and names the counting provider that produced the number; `count_provider_reason` carries what was tried before it, when anything was. See `format_count_provider`.
+    `count_provider` is set only on a token-counting request, and names the counting provider that produced the number; `count_provider_reason` carries what was tried before it, when anything was. See `format_count_provider`. `count_tokens` is the endpoint the request arrived at, which is the same fact one step earlier: it is true of a count that failed before any provider ran, where `count_provider` is empty.
     """
 
     method: str
@@ -98,6 +101,8 @@ class RequestLine:
     request_id: str = ""
     message_id: str = ""
     inbound_format: str = ""
+    # Whether this was a count rather than a turn. Not a wire format of its own — the body is an Anthropic Messages body either way — so it is kept beside `inbound_format` rather than folded into it, and the two are joined only when the line is rendered.
+    count_tokens: bool = False
     client_protocol: str = ""
     upstream_protocol: str = ""
     requested_model: str = ""
@@ -270,6 +275,8 @@ def _subject(line: RequestLine, *, succeeded: bool, color: bool) -> list[str]:
     """Who the request was for: the model when it worked, the route when it did not.
 
     A mapped model is shown as `asked → answered`, because a line reporting only the resolved name hides the mapping — and a mapping doing something unintended is invisible in exactly the request where it matters. The name it resolved to is the coloured half; what was asked for is dim, since it is context for the model that actually answered.
+
+    On a successful line the route collapses into the format prefix, and a count then loses the one thing that said which endpoint it hit: `/v1/messages` and `/v1/messages/count_tokens` take the same body and so report the same format. The suffix puts that back. Composed here rather than carried on the record, for the same reason the reasoning and tool words are — what to call it is a display decision, and what happened is that a count-tokens endpoint was asked.
     """
     target = paint(line.model, MAGENTA, color=color)
     named = target
@@ -277,7 +284,8 @@ def _subject(line: RequestLine, *, succeeded: bool, color: bool) -> list[str]:
         named = f"{paint(line.requested_model, DIM, color=color)} → {target}"
 
     if succeeded and line.model:
-        prefix = paint(f"{line.inbound_format}/", DIM, color=color) if line.inbound_format else ""
+        label = f"{line.inbound_format}{COUNT_TOKENS_SUFFIX}" if line.count_tokens else line.inbound_format
+        prefix = paint(f"{label}/", DIM, color=color) if label else ""
         return [f"{prefix}{named}"]
     # Left at the terminal's own foreground. An explicit white here was brighter than the untouched text beside it and read as emphasis, which the route does not deserve: on a failed line it is reference material, and the status and the reason are what carry the weight.
     parts = [line.method, line.path]
