@@ -290,19 +290,6 @@ def _tools_for_upstream(
             if isinstance(name, str):
                 # Kept so a `tool_choice` that named this declaration can follow it: the builtin object it becomes has no `name` of its own to match against.
                 mapped_names.add(name)
-            if policy == "drop_web_search" and any(
-                tool.get(key) for key in _UNREPRESENTABLE_CONSTRAINTS
-            ):
-                # Neither searching wider than asked nor failing the turn: the capability is simply
-                # not available for a request whose restriction cannot be honoured.
-                request.conversion.record(
-                    LossCode.SERVER_TOOL_NOT_CARRIED,
-                    f"{tool['type']} into {WIRE_FORMAT}: withdrawn, its domain restriction cannot be sent",
-                )
-                logger.info(
-                    "removed the web search declaration: its domain restriction cannot be sent to this endpoint and web_search_domain_restrictions is drop_web_search"
-                )
-                continue
             translated = _web_search_tool(tool, request.conversion, policy)
             if seen_web_search:
                 # One builtin, however many declarations arrived. Two identical `{"type": "web_search"}` entries is a shape upstream has never been asked about, and a duplicate says nothing the first one did not.

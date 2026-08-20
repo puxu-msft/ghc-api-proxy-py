@@ -26,7 +26,7 @@ type SystemPromptPlacement = Literal["instructions-joint-string"]
 # What to do when a web search declaration carries a domain restriction this upstream has no
 # parameter for. Measured: `allowed_domains` and `blocked_domains` each earn `Unknown parameter`,
 # so they cannot be sent under any spelling, and the only question is what to do instead.
-type WebSearchConstraintPolicy = Literal["error", "drop_fields", "drop_web_search"]
+type WebSearchConstraintPolicy = Literal["error", "drop_fields"]
 
 # Dotted paths the spec marks as requiring a restart. Everything else is hot-reloadable.
 #
@@ -228,7 +228,11 @@ class ToOpenAiResponsesConfig(Section):
     # `drop_fields` sends the search without them. The results may come from outside the requested
     # set, and the widening is recorded but cannot be checked.
     # `error` refuses the request before calling upstream, naming the field.
-    # `drop_web_search` removes the declaration, so no search happens at all.
+    #
+    # There is deliberately no setting that removes the declaration and lets the turn continue.
+    # On this client a web search is its own sub-request carrying nothing but the search, so a
+    # request stripped of it does not fail — the model answers from memory and the client labels
+    # the reply as search results. Refusing is the only honest way to not search.
     #
     # The default is `drop_fields`, which is *not* what the spec's D1 ruling wrote down. That
     # ruling chose `error`, reading a domain list as a restriction the user had deliberately added

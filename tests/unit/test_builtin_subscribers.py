@@ -23,7 +23,9 @@ from app.pipeline.subscribers import (
     SERVER_TOOL_CAPABILITY_ID,
     register_builtin_subscribers,
 )
+from app.pipeline.subscribers.counting import COUNTING_ONLY
 from app.pipeline.translation_driver.registry import TranslatorNotFound, default_registry
+from app.pipeline.translation_driver.semantic import TranslationRefused
 from app.server.composition import build_chain
 from app.server.handler import handle_count_tokens
 from app.tokenization.estimators import estimate_anthropic_input, estimate_responses_input
@@ -121,10 +123,10 @@ class RecordingProvider:
         )
 
 
-async def test_the_declaration_is_gone_from_what_the_driver_actually_sends() -> None:
-    """The one assertion that would survive the carrier being wired to nothing being noticed late.
+async def test_the_driver_never_sends_a_declaration_this_endpoint_cannot_run() -> None:
+    """Registration proves the subscriber is in a list. This proves the list is read on the path a request takes.
 
-    Registration proves the subscriber is in a list. This proves the list is read on the path a request takes, and that what upstream receives is the edited payload rather than the copy the attempt opened with.
+    Nothing is sent at all now, and that is the point: a request that went out without its only tool would come back answered from memory, under a `Web search results for query:` heading the client attaches whether or not a search happened.
     """
     registry = SubscriberRegistry[RequestContext]()
     register_builtin_subscribers(registry)
@@ -142,10 +144,10 @@ async def test_the_declaration_is_gone_from_what_the_driver_actually_sends() -> 
     context.resolved_model = "claude-model"
     context.target_format = WireFormat.ANTHROPIC_MESSAGES
 
-    await driver.run(context)
+    outcome = await driver.run(context)
 
-    assert provider.sent == [{"model": "claude-model", "messages": []}]
-
+    assert provider.sent == []
+    assert isinstance(outcome.error, TranslationRefused)
 
 async def test_a_blank_block_is_gone_from_what_the_driver_actually_sends() -> None:
     """The same proof for the second subscriber, because being in the list is not being run.
@@ -192,40 +194,27 @@ async def test_a_blank_block_is_gone_from_what_the_driver_actually_sends() -> No
     ]
 
 
-async def test_the_counting_leg_gets_the_same_treatment_as_the_leg_it_measures() -> None:
-    """Upstream rejects a counting request over a server tool in the very same words.
-
-    Measured 2026-08-20: `/v1/messages/count_tokens` with a `web_search_20250305` declaration answers `The use of the web search tool is not supported.` / `unsupported_value`, character for character what `/v1/messages` answers, while the same body without tools and the same body with an ordinary function tool both return a count. So this path has to run the subscribers too, and a count taken before they ran would have measured a body that was never going to be sent.
-    """
-    config = ProxyConfig.model_validate(
-        {
-            "default_model_provider": "ghc",
-            "model_providers": {"ghc": {"type": "github_copilot"}},
-        }
-    )
-    provider = RecordingProvider()
-    chain = build_chain(
-        config,
-        http_client=httpx.AsyncClient(),
-        providers={"ghc": provider},
-    )
+async def test_the_counting_leg_measures_rather_than_refusing() -> None:
+    """Counting reports a size; it sends nothing and produces no reply, so nothing can come back invented and there is nothing to refuse for. Refusing would turn a question that has an answer into an error and drop the client onto its local estimate."""
+    registry = SubscriberRegistry[RequestContext]()
+    register_builtin_subscribers(registry)
     context = RequestContext(
         inbound_format=WireFormat.ANTHROPIC_MESSAGES,
         requested_model="claude-model",
         payload={
             "model": "claude-model",
-            "messages": [{"role": "user", "content": "hi"}],
+            "messages": [],
             "tools": [{"type": "web_search_20250305", "name": "web_search"}],
         },
     )
+    context.resolved_model = "claude-model"
+    context.target_format = WireFormat.ANTHROPIC_MESSAGES
+    context.extras[COUNTING_ONLY] = True
 
-    answer = await handle_count_tokens(chain, context)
+    for subscription in registry.freeze().for_event(EVENT_ATTEMPT_PREPARE):
+        await subscription.handler(context)
 
-    assert answer == {"input_tokens": 7}
-    assert provider.counted == [
-        {"model": "claude-model", "messages": [{"role": "user", "content": "hi"}]}
-    ]
-
+    assert context.payload["tools"] == [{"type": "web_search_20250305", "name": "web_search"}]
 
 async def test_a_translated_route_is_counted_from_the_body_it_would_actually_send() -> None:
     """The translated leg is answered properly, not merely answered.

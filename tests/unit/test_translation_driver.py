@@ -665,13 +665,6 @@ def test_the_error_setting_refuses_before_upstream_is_called() -> None:
     assert caught.value.field_path == "tools.web_search_20250305.allowed_domains"
 
 
-def test_the_drop_web_search_setting_withdraws_the_capability_instead() -> None:
-    """The third answer: neither search wider than asked nor fail the turn. The capability is simply unavailable for a request whose restriction cannot be honoured."""
-    request = SemanticRequest(model="gpt-5.6-sol", tools=[dict(REAL_WEB_SEARCH_DECLARATION)])
-    payload = to_openai_responses(request, web_search_domain_restrictions="drop_web_search")
-    assert "tools" not in payload
-    assert request.conversion.has(LossCode.SERVER_TOOL_NOT_CARRIED)
-
 
 def test_an_empty_domain_restriction_restricts_nothing_and_does_not_refuse() -> None:
     """An empty list narrows nothing, so nothing is lost by not sending it. Refusing over one would fail a request that asked for no restriction at all."""

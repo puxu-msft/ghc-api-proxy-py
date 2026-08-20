@@ -56,13 +56,15 @@ Anthropic 客户端声明 web search，模型走 Responses 腿：**搜索真的�
 
 **仅在同格式路径（Responses→Responses）可达**。Anthropic 腿的 `tool_choice` 落进 `extensions`，跨格式时整体丢弃——那是一个独立缺口，见 §5.2。
 
-### 2.4 没有能力门，这是有意的
+### 2.4 能力门：不在清单就拒绝请求
 
-不判断模型是否支持 hosted web search。参考项目在产腿上同样没有（`translateTools` 连 `model` 参数都不接）。
+清单是 `model_providers.<name>.models_support_web_search`（用户 2026-08-20 裁决的键名），与 `disabled_models` 同族的精确 id 匹配，默认为目录里 vendor 为 OpenAI 且广告 `/responses` 的七个模型。
 
-风险是有界的：广告 `/responses` 的模型里有 `grok-4.5`、`grok-4.6`、`mai-code-*` 等从未探针的非 OpenAI 模型，对它们映射可能把一个 400 换成另一个 400。但那是**客户端本来就会遇到的失败**，而且**响亮可见**；反过来，用一份手工维护的清单做门控，一旦清单在另一个方向上错了，就会**静默扣掉一个本来能用的能力**——没有任何人会发现。两类错误代价不对称，所以选可见的那一类。
+判定落在**订阅者层**而不是 codec：判据是 *resolved* model，而 codec 只拿得到客户端请求的名字。
 
-spec §9.3（裁决 D4）要求这份清单落到配置项。**未实现**——评审判定这是对已裁决项的偏离，我采纳这个方向，但本片没做，落点与阻塞原因见 §8。
+**不通过时返回 400，不是剥离声明。** 这是 2026-08-20 用户裁决「去除 drop 策略」的结果，理由见 §3.5——在 Claude Code 的两段式架构下，剥离会让模型凭记忆作答然后被贴上搜索结果标签。
+
+**计数腿豁免**：`/v1/messages/count_tokens` 只测量、不产生模型输出，没有伪造风险，拒绝它只会把一个有答案的问题变成错误。标记是 `pipeline/subscribers/counting.py` 的 `COUNTING_ONLY`。
 
 ## 3. 响应侧
 
@@ -97,6 +99,28 @@ spec §9.3（裁决 D4）要求这份清单落到配置项。**未实现**——
 ### 3.4 三个专有事件
 
 `response.web_search_call.in_progress` / `.searching` / `.completed` 只带 `item_id`／`output_index`／`sequence_number`，**不带内容增量**，被忽略，不触发任何块的开启或关闭。
+
+### 3.5 为什么无法执行时是「拒绝」而不是「剥离」
+
+2026-08-20 的客户端取证（[`260820-claude-code-websearch-request-forensics.md`](260820-claude-code-websearch-request-forensics.md)）推翻了原本的处置。
+
+**Claude Code 的 web search 是两段式的**：主对话里 `WebSearch` 是**普通 function tool**（无 `type`，我们的逻辑碰不到）；模型调用它之后，客户端**另起一个子请求**，`tools` 数组里只有 `web_search_20250305` 一项，用户消息是 `Perform a web search for the query: X`。190/190 真实样本的 `tools` 长度都是 1。
+
+于是剥离的后果不是「少一个能力」：
+
+- 子请求被剥掉唯一的工具后**不会失败**，模型凭记忆作答；
+- 客户端**无条件**把回复拼上 `Web search results for query: "X"` 抬头交回主对话；
+- 无 `is_error`、无任何标记。**记忆里的文本被当作搜索到的事实交付**。
+
+反向证据是转录实证（会话 `7c4be027-…`）：子请求返回 **400** 时，客户端把它包成 `tool_result{is_error: true, content: "API Error: 400 …"}`，主对话模型的反应是
+
+> 官方搜索接口当前报错，我会直接抓取官方文档页面，**不把接口失败误当成「官方没有该功能」**。
+
+随即改用 WebFetch 完成任务。没有道歉循环，没有调用不存在的工具。
+
+**所以：拒绝一次搜索的代价是一轮对话；静默伪造一次搜索的代价是答案的真实性。** 三处原本 drop 的位置（Anthropic 腿声明、Responses 腿能力门、`drop_web_search` 取值）已全部去除。
+
+**为什么是 HTTP 400 而不是合成 200 + `web_search_tool_result_error`**：后者是 Anthropic 协议表达工具失败的原生形态（`error_code` 合法值含 `unavailable`，`content` 是**单个对象**而非数组，官方文档已核实——spec §5.3 悬着的 P12 探针项就此有答案）。但**已实测有效的是 400 那条**；合成 200 需要构造 SSE 流（子请求全部 `stream=true`）并绕过翻译层，而客户端会如何降级**没有任何证据**。若将来要改，形态记在这里。
 
 ## 4. 与官方／参考项目的对照
 

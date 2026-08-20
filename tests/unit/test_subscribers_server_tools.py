@@ -1,12 +1,16 @@
-"""What the server-tool subscriber removes, and what it must leave alone.
+"""What the server-tool subscriber refuses, and what it must leave alone.
 
-The failure it exists to prevent is a whole-request 400, so the cases that matter most are the ones where removing a declaration is not enough on its own — a `tool_choice` left pointing at what was just removed produces a second rejection in place of the first.
+It used to remove the declaration and let the turn go on. On the client that sends these, that produced a fabrication rather than a degradation: a web search arrives as its own sub-request whose `tools` array holds nothing else, so stripping it leaves a request that succeeds by answering from memory — and the client labels the reply `Web search results for query:` regardless. The cases that matter most are therefore the ones where nothing is refused: a history being flattened, a client-executed tool, a leg this does not own.
 """
 
 from typing import Any
 
+import pytest
+
 from app.pipeline.request import RequestContext, WireFormat
+from app.pipeline.subscribers.counting import COUNTING_ONLY
 from app.pipeline.subscribers.server_tools import adapt_server_tools
+from app.pipeline.translation_driver.semantic import TranslationRefused
 
 WEB_SEARCH: dict[str, Any] = {"type": "web_search_20250305", "name": "web_search", "max_uses": 5}
 CALCULATOR: dict[str, Any] = {"name": "calculator", "input_schema": {"type": "object"}}
@@ -22,52 +26,35 @@ def context(payload: dict[str, Any], *, target: WireFormat = WireFormat.ANTHROPI
     return ctx
 
 
-async def test_a_web_search_declaration_is_removed_and_the_client_tools_are_not() -> None:
+async def test_a_web_search_declaration_is_refused_rather_than_removed() -> None:
+    """Removing it would let the turn succeed by answering from memory, under a heading the client attaches unconditionally. Refusing is the only way to not search without claiming to have searched."""
     ctx = context({"tools": [CALCULATOR, WEB_SEARCH]})
 
-    await adapt_server_tools(ctx)
+    with pytest.raises(TranslationRefused) as caught:
+        await adapt_server_tools(ctx)
 
-    assert ctx.payload["tools"] == [CALCULATOR]
+    assert caught.value.code == "server_tool_not_executable"
+    assert "web_search_20250305" in caught.value.field_path
 
 
-async def test_the_tools_field_goes_away_rather_than_becoming_empty() -> None:
-    # `[]` has never been put to upstream and says something different from saying nothing.
+async def test_the_refusal_names_the_declaration_that_caused_it() -> None:
+    """A client told only "bad request" cannot tell which of its tools this endpoint will not run."""
     ctx = context({"tools": [WEB_SEARCH]})
 
-    await adapt_server_tools(ctx)
+    with pytest.raises(TranslationRefused) as caught:
+        await adapt_server_tools(ctx)
 
-    assert "tools" not in ctx.payload
-
-
-async def test_a_choice_naming_the_removed_tool_goes_with_it() -> None:
-    # Left behind, this trades the rejection being prevented for `Tool 'web_search' not found`.
-    ctx = context(
-        {"tools": [CALCULATOR, WEB_SEARCH], "tool_choice": {"type": "tool", "name": "web_search"}}
-    )
-
-    await adapt_server_tools(ctx)
-
-    assert ctx.payload["tools"] == [CALCULATOR]
-    assert "tool_choice" not in ctx.payload
+    assert "web_search_20250305" in str(caught.value)
 
 
-async def test_a_choice_naming_a_surviving_tool_is_kept() -> None:
-    ctx = context(
-        {"tools": [CALCULATOR, WEB_SEARCH], "tool_choice": {"type": "tool", "name": "calculator"}}
-    )
+async def test_counting_measures_the_body_instead_of_refusing_it() -> None:
+    """Counting reports how large a request is; it sends nothing and produces no reply, so there is nothing that could come back invented. Refusing here would turn a question that has an answer into an error and push the client onto its local estimate for nothing."""
+    ctx = context({"tools": [CALCULATOR, WEB_SEARCH]})
+    ctx.extras[COUNTING_ONLY] = True
 
     await adapt_server_tools(ctx)
 
-    assert ctx.payload["tool_choice"] == {"type": "tool", "name": "calculator"}
-
-
-async def test_any_choice_goes_when_no_tool_is_left_to_choose() -> None:
-    ctx = context({"tools": [WEB_SEARCH], "tool_choice": {"type": "any"}})
-
-    await adapt_server_tools(ctx)
-
-    assert "tools" not in ctx.payload
-    assert "tool_choice" not in ctx.payload
+    assert ctx.payload["tools"] == [CALCULATOR, WEB_SEARCH]
 
 
 async def test_client_executed_typed_tools_are_left_alone() -> None:
@@ -81,37 +68,19 @@ async def test_client_executed_typed_tools_are_left_alone() -> None:
     assert ctx.payload["tools"] == [text_editor, memory]
 
 
-async def test_web_fetch_is_removed_too_despite_upstream_wording_it_differently() -> None:
-    # Upstream answers `rejected tool(s): web_fetch` with `invalid_request_body` rather than the web-search wording, which is why the predicate reads what we send instead of what comes back.
-    web_fetch: dict[str, Any] = {"type": "web_fetch_20250910", "name": "web_fetch"}
-    ctx = context({"tools": [CALCULATOR, web_fetch]})
+async def test_web_fetch_is_refused_too_despite_upstream_wording_it_differently() -> None:
+    """Upstream refuses this family in different words — `rejected tool(s): web_fetch` — which is why the predicate reads the declaration being sent rather than the wording that comes back."""
+    ctx = context({"tools": [{"type": "web_fetch_20250910", "name": "web_fetch"}]})
 
-    await adapt_server_tools(ctx)
+    with pytest.raises(TranslationRefused):
+        await adapt_server_tools(ctx)
 
-    assert ctx.payload["tools"] == [CALCULATOR]
+async def test_the_bare_openai_spelling_is_refused_too() -> None:
+    """A `/responses` request naming a Claude model falls back to this endpoint with `tools` carried across verbatim, so the bare spelling really does arrive here."""
+    ctx = context({"tools": [{"type": "web_search", "name": "web_search"}]})
 
-
-async def test_the_bare_openai_spelling_is_removed_too() -> None:
-    # A `/responses` request naming a Claude model falls back to the Anthropic endpoint and the translator carries `tools` across verbatim, so the undated OpenAI form really does arrive on this leg.
-    bare: dict[str, Any] = {"type": "web_search"}
-    ctx = context({"tools": [CALCULATOR, bare]})
-
-    await adapt_server_tools(ctx)
-
-    assert ctx.payload["tools"] == [CALCULATOR]
-
-
-async def test_a_choice_dangles_even_when_the_removed_declaration_had_no_name() -> None:
-    # Deciding against what was removed cannot see this one: there was no name to record. Deciding against what survives can.
-    nameless: dict[str, Any] = {"type": "web_search_20250305"}
-    ctx = context(
-        {"tools": [CALCULATOR, nameless], "tool_choice": {"type": "tool", "name": "web_search"}}
-    )
-
-    await adapt_server_tools(ctx)
-
-    assert ctx.payload["tools"] == [CALCULATOR]
-    assert "tool_choice" not in ctx.payload
+    with pytest.raises(TranslationRefused):
+        await adapt_server_tools(ctx)
 
 
 async def test_a_translated_route_is_not_touched() -> None:

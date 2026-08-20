@@ -39,7 +39,7 @@ from app.pipeline.exceptions import UpstreamRateLimit, UpstreamRejected, Upstrea
 from app.pipeline.request import RequestContext, WireFormat
 from app.pipeline.retry import RetryLedger
 from app.pipeline.routing import Route, RoutingError, decide_route
-from app.pipeline.timeouts import resolve_timeout
+from app.pipeline.subscribers.counting import COUNTING_ONLY
 from app.pipeline.translation_driver.registry import TranslatorNotFound
 from app.pipeline.translation_driver.semantic import TranslationRefused
 from app.server.composition import Chain
@@ -112,17 +112,15 @@ async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[Req
     context.payload["model"] = route.model_id
 
     timeouts = chain.config.upstream_request_timeouts
-    attempt_deadline = resolve_timeout(
-        route.model_id,
-        timeouts.upstream_request_deadline,
-        timeouts.response_header_overrides,
-    )
+    # Read straight off the field it names. It used to be resolved against `response_header_overrides`, which is a different setting entirely: an operator capping the header wait for one model would have capped that model's whole attempt instead, cutting a long turn short in the name of a guard that was never asked for.
+    attempt_deadline = timeouts.upstream_request_deadline
     driver_type = DRIVERS[route.endpoint]
     driver = driver_type(
         provider,
         chain.subscribers,
         budget=LedgerBudget(RetryLedger(chain.config.upstream_request_retry)),
         attempt_deadline=attempt_deadline,
+        response_header_timeout=timeouts.response_header,
         rate_limiter=chain.rate_limiter_for(provider.name),
     )
     outcome = await driver.run(context)
@@ -156,6 +154,12 @@ async def handle_count_tokens(chain: Chain, context: RequestContext) -> dict[str
     context.payload["model"] = route.model_id
 
     context.begin_attempt()
+    # Counting measures a body; it does not send one. A subscriber that refuses a request this
+    # endpoint cannot serve is right to do so on the leg that would have served it, and wrong here:
+    # nothing is executed, no reply is produced, and there is therefore nothing that could come
+    # back invented. Refusing would only turn a question with an answer — how large is this — into
+    # an error, and push the client onto its local estimate for no gain.
+    context.extras[COUNTING_ONLY] = True
     for subscription in chain.subscribers.for_event(EVENT_ATTEMPT_PREPARE):
         await subscription.handler(context)
 
@@ -175,9 +179,15 @@ async def handle_count_tokens(chain: Chain, context: RequestContext) -> dict[str
 
     async def ask_upstream(payload: Mapping[str, Any]) -> int:
         response = await provider.count_tokens(payload, model_id=route.model_id)
+        # Taken before the body is read and before the response is closed, so the count line can report the leg it actually flew. Without these a count answered by upstream and one estimated in this process render identically apart from the counter's name — same missing byte fields, same single protocol label — and the line's own convention is that a missing field means the exchange had nothing to put there.
+        # What the leg's presence means is narrower than "upstream answered the count": it means upstream *responded*. A refusal or a transport failure never reaches here — `send_anthropic_count_tokens` raises it as a pipeline error — but a 200 whose body carries no usable `input_tokens` does, and then the raise below hands the count to the estimator with both legs already recorded. `↑…B ↓…B … count(local)` is the right reading of that: upstream was asked, upstream replied, and the reply could not be used.
+        context.extras["count_tokens_upstream_protocol"] = response.http_version
+        context.extras["count_tokens_bytes_in"] = len(response.request.content)
         try:
             response.raise_for_status()
             body = cast(dict[str, Any], response.json())
+            # After the body is in hand, so this is the whole of what upstream sent rather than however much had arrived. Recorded for the same reason as the outbound half: a leg reported in one direction only says, by this line's convention, that nothing came back.
+            context.extras["count_tokens_bytes_out"] = len(response.content)
         finally:
             await response.aclose()
         counted = body.get("input_tokens")
@@ -199,17 +209,26 @@ async def handle_count_tokens(chain: Chain, context: RequestContext) -> dict[str
     settings = chain.config.inbound.anthropic_count_tokens
     payload = dict(context.payload)
     payload.pop("stream", None)
+    absent_reason = f"no-counter-for-{route.target_format.value}"
     result = await count_tokens(
         payload,
         providers=settings.providers,
         max_retries=settings.max_retries,
         upstream=ask_upstream if upstream_counts else None,
         local=estimate_locally,
-        upstream_absent_reason=f"no-counter-for-{route.target_format.value}",
+        upstream_absent_reason=absent_reason,
     )
     context.extras["count_tokens_provider"] = result.provider
     if result.attempts:
         context.extras["count_tokens_attempts"] = list(result.attempts)
+    # Why the estimate answered, decided here because this is where the two facts that separate the cases live: the reason this function itself withheld the counter, and whether `ghc` was ever reached. Both readings end in `count(local)` on the line and only one of them is an incident — a route with no upstream counter estimates every time and is working as configured, while an upstream that was asked and could not answer is something to look at. Left to the display layer they would be one string.
+    # Read off the trail rather than off `upstream_counts`, because a counter can be withheld in three ways and only two of them are this function's doing: the operator can also leave `ghc` out of `providers`, or order `local` ahead of it, and then upstream was never asked and nothing failed. `ghc:` is the prefix `count_tokens` writes for every attempt against that provider, and the withheld case is the exact string handed to it above, so neither test has to guess at an entry's shape.
+    if result.provider != "ghc":
+        trail = result.attempts
+        if f"ghc:{absent_reason}" in trail:
+            context.extras["count_tokens_reason"] = "no-counter"
+        elif any(entry.startswith("ghc:") for entry in trail):
+            context.extras["count_tokens_reason"] = "ghc-failed"
 
     if result.provider == "ghc":
         # Upstream's number is ground truth for the estimator, which is the only way it improves.
@@ -426,12 +445,9 @@ def delivery_buffer(chain: Chain) -> BlockBuffer:
     )
 
 
-def stream_idle_seconds(chain: Chain, model: str) -> int:
+def stream_idle_seconds(chain: Chain) -> int:
     """How long upstream may go quiet mid-stream before the attempt is given up on.
-
-    Resolved per model through the same precedence every other override uses, rather than through the legacy path's first-match-wins scan: which of two matching keys applies must not depend on the order they were written in.
 
     0 disables it, and 0 is the bundled default. The frozen invariant is never to false-kill legitimate thinking — silence on a live connection has no provably safe bound, so an operator setting this is choosing bounded waiting rather than accepting a default.
     """
-    timeouts = chain.config.upstream_request_timeouts
-    return resolve_timeout(model, timeouts.stream_idle, timeouts.stream_idle_overrides)
+    return chain.config.upstream_request_timeouts.stream_idle

@@ -274,7 +274,16 @@ def test_a_streamed_search_is_delivered_as_a_line_rather_than_an_empty_block() -
     client, _ = make_client(
         lambda _: httpx.Response(
             200, content=sse, headers={"content-type": "text/event-stream"}
-        )
+        ),
+        overrides={
+            "model_providers": {
+                "ghc": {
+                    "type": "github_copilot",
+                    "api_base_url": BASE_URL,
+                    "models_support_web_search": ["gpt-model"],
+                }
+            }
+        },
     )
     response = client.post(
         "/v1/messages",
@@ -300,12 +309,12 @@ def test_a_streamed_search_is_delivered_as_a_line_rather_than_an_empty_block() -
     assert all(text for text in deltas), deltas
 
 
-def test_a_model_not_listed_as_searching_does_not_get_the_builtin() -> None:
-    """The gate, and the reason it cannot live in the translator.
+def test_a_model_not_listed_as_searching_refuses_rather_than_answering_anyway() -> None:
+    """The gate, and why it refuses instead of quietly dropping the tool.
 
-    Whether a model runs hosted search is not something the catalog says — measured over the live catalog, no model advertises a bit for it under any name — so it is an operator's list, matched against the *resolved* model. The translator only ever sees the name the client asked for.
+    Whether a model runs hosted search is not something the catalog says, so it is an operator's list matched against the *resolved* model. When the answer is no, the request must fail: a search sub-request stripped of its only tool still succeeds, answering from memory, and the client renders the reply under a `Web search results for query:` heading it attaches unconditionally.
 
-    Withheld rather than refused: a model that cannot search has not sent a bad request, and failing the turn would take the conversation with it. The client's own tools must survive that.
+    Asserted on `seen` being empty as well as the status — a refusal after the call would have let the model produce the very text this prevents.
     """
     client, seen = make_client(
         lambda _: httpx.Response(200, json={"id": "resp_1"}),
@@ -323,21 +332,17 @@ def test_a_model_not_listed_as_searching_does_not_get_the_builtin() -> None:
         "/v1/messages",
         json={
             "model": "gpt-model",
-            "messages": [{"role": "user", "content": "hi"}],
-            "max_tokens": 64,
-            "tools": [
-                {"type": "web_search_20250305", "name": "web_search"},
-                {"name": "get_time", "input_schema": {"type": "object"}},
+            "messages": [
+                {"role": "user", "content": "Perform a web search for the query: bun"}
             ],
+            "max_tokens": 1024,
+            "tools": [{"type": "web_search_20250305", "name": "web_search"}],
         },
     )
 
-    assert response.status_code == 200
-    sent = orjson.loads(seen[-1].read())
-    assert sent["tools"] == [
-        {"type": "function", "name": "get_time", "parameters": {"type": "object"}}
-    ]
-    assert b"web_search" not in seen[-1].read()
+    assert response.status_code == 400
+    assert seen == [], "the model was asked to answer a search it could not run"
+    assert orjson.loads(response.content)["error"]["code"] == "server_tool_capability_unavailable"
 
 
 def test_the_shape_claude_code_really_sends_reaches_upstream_as_a_search() -> None:

@@ -1,16 +1,16 @@
-"""Server-tool declarations upstream refuses, removed before the request is sent.
+"""Server-tool declarations this endpoint cannot execute, refused before the request is sent.
 
-Copilot's Anthropic Messages endpoint does not execute Anthropic's native server tools. A request carrying one is rejected whole — `The use of the web search tool is not supported.` with `unsupported_value` — so one declaration the client added on its own costs the entire turn, and the client's next turn replays the same declaration and is rejected again.
+Copilot's Anthropic Messages endpoint does not run Anthropic's native server tools. A request carrying one is rejected whole — `The use of the web search tool is not supported.` with `unsupported_value` — so the question was never whether the client gets its search. It was what the client is told instead.
 
-The first-party client reached the same conclusion and acts on it the same way: VS Code's Copilot Chat filters `tool.type.startsWith('web_search')` out of the tools array before forwarding (`oaiLanguageModelServer.ts`), and tells its Claude Code integration `disallowedTools: ['WebSearch']` under a comment reading `CAPI does not yet support the WebSearch tool`.
+**This used to remove the declaration and let the turn continue, and that was the wrong answer.** It reads as the gentler one: the conversation survives, one capability short. What it actually produces on the client that sends these is a fabrication. Claude Code runs a web search as its own sub-request, carrying `Perform a web search for the query: X` and a `tools` array holding nothing but the search — measured over 190 real ones, every single time. Strip its only tool and the request does not fail; the model answers from memory, and the client renders the reply under a `Web search results for query:` heading it attaches unconditionally. No `is_error`, no marker. Remembered text comes back labelled as searched fact, and nothing downstream can tell the difference.
 
-Removing a declaration removes a capability, which is why this is loud rather than silent: the model is no longer offered a tool the client believes it has. That is a real loss, and it is still the better of the two outcomes on offer, because the alternative is not "web search works" but "nothing works".
+Refusing produces the opposite, and it is on record rather than reasoned: when a search sub-request returned 400, the client handed the main conversation a `tool_result` with `is_error: true`, and the model said it would not mistake an interface failure for the fact not existing — then reached for WebFetch and finished the task. A refused search costs a turn. A silently invented one costs the answer's truth.
 
-**The history gets the same treatment, and not as an afterthought.** A session that used web search before this ran carries `server_tool_use` calls and `*_tool_result` answers in its transcript, and those are rejected on their own account, so removing only the declaration trades one rejection for another. They are flattened into plain text rather than downgraded into a client `tool_use` / `tool_result` pair, because a downgraded pair still refers to a tool that is no longer declared. Text refers to nothing.
+**The history is still rewritten rather than refused.** A transcript carrying `server_tool_use` calls and `*_tool_result` answers from an earlier session is rejected on its own account, and there is nothing dishonest about flattening those into text: they are a record of searches that really happened, not a claim that one is happening now. They become plain text rather than a client `tool_use` / `tool_result` pair, because a downgraded pair refers to a tool this request does not declare, while text refers to nothing.
 
-**Scoped to the Anthropic leg on purpose, and the Responses leg has its own answer rather than this one.** What decides it is the endpoint: no Claude model in the catalog advertises `/responses`, and that endpoint does execute hosted web search natively — but only under its own spelling. Measured 2026-08-20 on gpt-5.5: `{"type": "web_search"}` returns 200, while the Anthropic `web_search_20250305` spelling returns 400 `Invalid value`. So that leg translates the declaration instead of removing it, and renders the `web_search_call` the upstream reports back (`translation_driver/openai_responses.py`, `delivery/assembler.py`). Removing the declaration there would be the wrong repair for the wrong endpoint.
+**Scoped to the Anthropic leg, and the Responses leg has its own answer.** That endpoint does execute hosted web search, under its own spelling — measured 2026-08-20 on gpt-5.5, `{"type": "web_search"}` returns 200 while the Anthropic `web_search_20250305` spelling returns 400. So that leg translates the declaration and renders what comes back (`translation_driver/openai_responses.py`, `delivery/assembler.py`), and refuses only when the model is not known to search at all (`subscribers/hosted_web_search.py`).
 
-The one thing the two legs do share is the wording: both say a search happened with the same line, from `pipeline/server_tool_text.py`. A conversation is not pinned to one leg — the same history moves between them when a client switches model — and two renderings would leave one session carrying two shapes of the same fact, with nothing to report it.
+The one thing the two legs share is the wording of a flattened history: both use `pipeline/server_tool_text.py`. A conversation is not pinned to one leg — the same history moves between them when a client switches model — and two renderings would leave one session carrying two shapes of the same fact, with nothing to report it.
 """
 
 import logging
@@ -18,6 +18,8 @@ from typing import Any, cast
 
 from app.pipeline.request import RequestContext, WireFormat
 from app.pipeline.server_tool_text import call_subject
+from app.pipeline.subscribers.counting import COUNTING_ONLY
+from app.pipeline.translation_driver.semantic import TranslationRefused
 
 logger = logging.getLogger(__name__)
 
@@ -47,40 +49,6 @@ def _rejected_type(tool: Any) -> str | None:
     if declared.startswith(_REJECTED_TYPE_PREFIXES):
         return declared
     return None
-
-
-def _drop_dangling_choice(payload: dict[str, Any]) -> None:
-    """Remove a `tool_choice` that now points at nothing.
-
-    Two ways it can dangle. It names a tool that is no longer declared, or it demands *some* tool of a request that no longer declares any. Both are rejected upstream on their own, so leaving one behind would trade the rejection this module exists to prevent for another one. The reference project matches `Tool 'X' not found in provided tools` for that case; this project has not put it to upstream itself.
-
-    Decided against what survives rather than against what was removed. A declaration carrying no `name` cannot be recorded on the way out, and a choice pointing at it would then have looked like a choice pointing at something still present.
-
-    `auto` with tools still present is left exactly as it was: it neither names a missing tool nor demands one, and rewriting it would change what the client asked for to no purpose. A malformed choice — `type` of `tool` with no name — is also left alone, because this module removes what upstream is known to reject rather than tidying what the client got wrong.
-    """
-    choice = payload.get("tool_choice")
-    if choice is None:
-        return
-    remaining = payload.get("tools")
-    if not remaining:
-        # Nothing left to choose from. `auto` and `none` are as unroutable as `any` once the array is gone, because the field is only accepted alongside a non-empty `tools`.
-        del payload["tool_choice"]
-        return
-    if not isinstance(choice, dict) or not isinstance(remaining, list):
-        return
-    entry = cast(dict[str, Any], choice)
-    if entry.get("type") != "tool":
-        return
-    named = entry.get("name")
-    if not isinstance(named, str):
-        return
-    declared: set[Any] = {
-        cast(dict[str, Any], tool).get("name")
-        for tool in cast(list[Any], remaining)
-        if isinstance(tool, dict)
-    }
-    if named not in declared:
-        del payload["tool_choice"]
 
 
 def _family(name: str) -> str | None:
@@ -221,7 +189,7 @@ def _flatten_history(payload: dict[str, Any]) -> int:
     return flattened
 
 
-def _strip_declarations(payload: dict[str, Any]) -> None:
+def _refuse_declarations(payload: dict[str, Any]) -> None:
     """Remove the declarations, and any `tool_choice` left pointing at one."""
     tools_value = payload.get("tools")
     if not isinstance(tools_value, list):
@@ -244,20 +212,17 @@ def _strip_declarations(payload: dict[str, Any]) -> None:
     if not dropped:
         return
 
-    if kept:
-        payload["tools"] = kept
-    else:
-        # Not `[]`. An empty array is a different thing to say than saying nothing, and upstream has not been asked whether it accepts one; absent is the spelling every request without tools already uses.
-        del payload["tools"]
-
-    _drop_dangling_choice(payload)
-
-    # INFO rather than WARNING. Once a client has web search switched on this fires on every request it sends, and `observability/logging.py` reserves WARNING for what is not routine — a line that repeats hundreds of times a session is not a warning, it is a setting. Not DEBUG either: unlike the blank-text repair next door this removes a capability the client asked for, and an operator wondering why web search never runs should not have to turn on debug logging to find out.
+    # Named for the operator before the refusal, which is the client's to see.
     logger.info(
-        "dropped %d server-tool declaration(s) this endpoint rejects: %s — the model will not be offered %s",
+        "refusing %d server-tool declaration(s) this endpoint cannot execute: %s",
         len(dropped),
         ", ".join(sorted(dropped)),
-        ", ".join(sorted(dropped_names)) if dropped_names else "them",
+    )
+    raise TranslationRefused(
+        f"this endpoint does not execute {', '.join(sorted(dropped))}, and answering without it"
+        " would return remembered text where the client expects a search",
+        code="server_tool_not_executable",
+        field_path=f"tools.{sorted(dropped)[0]}",
     )
 
 
@@ -272,7 +237,11 @@ async def adapt_server_tools(context: RequestContext) -> None:
         return
     payload = context.payload
 
-    _strip_declarations(payload)
+    if not context.extras.get(COUNTING_ONLY):
+        # Measuring is exempt: nothing is executed, so nothing can come back invented. The history
+        # is still flattened below, because that is what makes the measured body the one that would
+        # actually be sent.
+        _refuse_declarations(payload)
     flattened = _flatten_history(payload)
     if flattened:
         # INFO for the same reason as the declaration line below: routine for a session that used web search, but it rewrites what the model is shown, which is not something to bury in debug.
