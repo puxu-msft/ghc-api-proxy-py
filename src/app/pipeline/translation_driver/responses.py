@@ -86,6 +86,12 @@ def _anthropic_usage(usage: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def to_anthropic_response(response: SemanticResponse) -> dict[str, Any]:
+    """Render a reply that arrived whole as an Anthropic message body.
+
+    A legal success with nothing to say gets `content: []`, not a text block carrying no text. The spec permits either — it says such a reply *may* carry the empty block — so the choice is settled by what happens next: the client stores this turn and replays it, and upstream refuses an assistant turn holding a blank text block (400, `messages: text content blocks must be non-empty`) while accepting one whose content is empty (200, both mid-conversation and last). Measured 2026-08-20, `exp/260820-empty-text-probe/` F3 against F6 and F4.
+
+    It is also the shape the streaming path already produces: it opens no content block when there is nothing to open, so a reply with no content reaches the client as a message with none. Two delivery paths for one product answered this differently until now.
+    """
     content = [
         rendered
         for rendered in (
@@ -93,9 +99,6 @@ def to_anthropic_response(response: SemanticResponse) -> dict[str, Any]:
         )
         if rendered is not None
     ]
-    if not content:
-        # A legal success with no content may carry one empty text block; spec.md permits it.
-        content = [{"type": TEXT, "text": ""}]
     return {
         "id": response.id,
         "type": "message",

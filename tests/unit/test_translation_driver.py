@@ -488,6 +488,23 @@ def test_a_responses_reasoning_item_reaches_anthropic_with_its_state_intact() ->
     assert decode_reasoning_carrier(thinking["signature"]).encrypted_content == "ENC123"
 
 
+def test_a_reply_with_nothing_to_say_carries_no_content_rather_than_an_empty_block() -> None:
+    """The two delivery paths used to answer this differently, and one of the answers poisoned the next turn.
+
+    `spec.md:266` permits either — such a reply *may* carry the protocol's empty text block — so it is measurement that decides. The client stores this turn and replays it, and upstream refuses an assistant turn holding a blank text block (400, `messages: text content blocks must be non-empty`) while accepting one whose content is empty (200, both mid-conversation and last): `exp/260820-empty-text-probe/` F3 against F6 and F4, 2026-08-20.
+
+    The streaming path already answers this way — it opens no content block when there is nothing to open. This pins the buffered one to the same answer.
+    """
+    payload, _ = default_registry().translate_response(
+        {"id": "resp_1", "model": "gpt-model", "output": [], "status": "completed"},
+        source=WireFormat.OPENAI_RESPONSES,
+        target=WireFormat.ANTHROPIC_MESSAGES,
+    )
+
+    assert payload["content"] == []
+    assert payload["role"] == "assistant"
+
+
 def test_a_response_round_trip_keeps_the_reasoning_payload() -> None:
     """Losing it here is invisible until the next turn cannot continue the reasoning."""
     registry = default_registry()
