@@ -350,7 +350,7 @@ def test_catalog_without_a_data_list_is_rejected() -> None:
 
 
 def test_a_model_that_names_no_endpoints_gets_the_standard_one_for_its_kind() -> None:
-    """Copilot omits `supported_endpoints` for part of its catalog — 18 of 42 models on 2026-08-20, every embeddings model among them — and those models are served, not endpoint-less.
+    """Copilot omits `supported_endpoints` for part of its catalog — 18 of 42 models on 2026-08-20. A real request to each of them settled which kinds are served: all 14 `chat` on `/chat/completions`, all 3 `embeddings` on `/embeddings`, and the one `completion` on nothing at all.
 
     This is on the provider rather than only on the report because routing is what has to agree: a report calling a model routable while `require_endpoint` refuses it would be worse than no report.
     """
@@ -373,8 +373,9 @@ def test_a_model_that_names_no_endpoints_gets_the_standard_one_for_its_kind() ->
 
     assert endpoints("embedder") == {ModelEndpoint.OPENAI_EMBEDDINGS}
     assert endpoints("chatter") == {ModelEndpoint.OPENAI_CHAT_COMPLETIONS}
-    assert endpoints("completer") == {ModelEndpoint.OPENAI_CHAT_COMPLETIONS}
-    assert endpoints("typeless") == {ModelEndpoint.OPENAI_CHAT_COMPLETIONS}
+    # Measured 2026-08-20: the live `completion` model answers `model_not_supported` on every endpoint this host serves, so it gets none rather than a guess. Same for a kind nobody has measured at all.
+    assert endpoints("completer") == frozenset()
+    assert endpoints("typeless") == frozenset()
 
 
 async def test_a_model_with_an_unstated_endpoint_can_actually_be_sent_to() -> None:

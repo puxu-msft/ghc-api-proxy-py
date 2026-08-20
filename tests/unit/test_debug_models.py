@@ -48,6 +48,8 @@ def _model(model_id: str, **overrides: Any) -> dict[str, Any]:
         "vendor": "Anthropic",
         "capabilities": {
             "family": model_id,
+            # Every entry in the real catalog carries a type; a fixture without one would be testing a shape upstream does not send.
+            "type": "chat",
             "limits": {"max_context_window_tokens": 200000, "max_output_tokens": 64000},
         },
         "supported_endpoints": ["/v1/messages"],
@@ -77,7 +79,7 @@ def _rows_by_id(raw: dict[str, Any], *, disabled: list[str] | None = None):
 def test_status_names_what_stands_between_a_request_and_the_model() -> None:
     """Each blocked model is blocked for a different reason with a different fix.
 
-    `silent` names no endpoints and is still routable: Copilot omits the key for part of its catalog, and those models are served on the standard endpoint for their kind. `ws-only` is the genuinely unroutable one — upstream named an endpoint and we have no driver for it.
+    `silent` names no endpoints and is still routable: Copilot omits the key for part of its catalog, and a `chat` model that does so was measured serving on `/chat/completions`. `ws-only` is the genuinely unroutable one — upstream named an endpoint and we have no driver for it.
     """
     rows = _rows_by_id(CATALOG, disabled=["blocked"])
 
@@ -91,7 +93,7 @@ def test_status_names_what_stands_between_a_request_and_the_model() -> None:
 
 
 def test_an_unstated_endpoint_is_filled_in_from_the_model_kind() -> None:
-    """The two cases, as the live catalog on 2026-08-20 had them: 3 embeddings models and 15 others, none of which carried a `supported_endpoints` key."""
+    """The kinds, as the live catalog on 2026-08-20 had them, and as a real request to each of the 18 answered: 14 `chat` served on `/chat/completions`, 3 `embeddings` on `/embeddings`, and one `completion` served nowhere at all."""
     rows = _rows_by_id(
         {
             "data": [
@@ -105,12 +107,16 @@ def test_an_unstated_endpoint_is_filled_in_from_the_model_kind() -> None:
 
     assert rows["embedder"].endpoints == ("/embeddings",)
     assert rows["chatter"].endpoints == ("/chat/completions",)
-    # `completion` is a chat-completions model too; only embeddings differ.
-    assert rows["completer"].endpoints == ("/chat/completions",)
-    assert rows["typeless"].endpoints == ("/chat/completions",)
-    assert all(rows[name].status == "ok" for name in rows)
-    # And every one of them is flagged as filled in rather than reported as upstream's word.
-    assert all(rows[name].assumed for name in rows)
+    assert rows["embedder"].status == "ok"
+    assert rows["chatter"].status == "ok"
+    # Both are flagged as filled in rather than reported as upstream's word.
+    assert rows["embedder"].assumed and rows["chatter"].assumed
+
+    # A kind nobody measured gets nothing. `gpt-41-copilot` is the live `completion` model, and on 2026-08-20 it answered `model_not_supported` on every endpoint this host offers — a default would have reported it routable and had it 400 every time.
+    assert rows["completer"].endpoints == ()
+    assert rows["completer"].status == "no-endpoints"
+    assert rows["typeless"].endpoints == ()
+    assert rows["typeless"].status == "no-endpoints"
 
 
 def test_an_endpoint_upstream_did_name_is_never_overwritten() -> None:

@@ -93,10 +93,15 @@ def parse_endpoints(advertised: object) -> tuple[frozenset[ModelEndpoint], tuple
     return frozenset(known), tuple(unknown)
 
 
-# The endpoint a model of each kind is served on when the catalog names none. Copilot omits `supported_endpoints` outright for part of its catalog rather than listing an empty one — on 2026-08-20 that was 18 of 42 models — and those models are not endpoint-less; they are served on the standard endpoint for their kind. Embeddings models are the one kind that differs, and they are also the one kind that never appears with an advertised list, so the split cannot be learnt from the catalog itself.
-_DEFAULT_ENDPOINT_BY_TYPE = {"embeddings": ModelEndpoint.OPENAI_EMBEDDINGS}
-# Everything else. The absent set on that date held 14 models of type `chat` and one of type `completion`, and both are chat-completions models.
-DEFAULT_ENDPOINT = ModelEndpoint.OPENAI_CHAT_COMPLETIONS
+# The endpoint a model of each kind is served on when the catalog names none. Copilot omits `supported_endpoints` outright for part of its catalog rather than listing an empty one — on 2026-08-20 that was 18 of 42 models.
+#
+# Measured, not inferred, by sending a real request to every one of those 18 on 2026-08-20: all 14 of type `chat` answered 200 on `/chat/completions`, and all 3 of type `embeddings` answered 200 on `/embeddings`. That is the whole evidence base, and the table is an allowlist for exactly that reason — a type nobody has measured gets no endpoint rather than a guess.
+_DEFAULT_ENDPOINT_BY_TYPE = {
+    "chat": ModelEndpoint.OPENAI_CHAT_COMPLETIONS,
+    "embeddings": ModelEndpoint.OPENAI_EMBEDDINGS,
+}
+
+# `completion` is deliberately absent, and it is the reason this is an allowlist. The 18th model, `gpt-41-copilot`, is the one of that type, and on the same date it answered `model_not_supported` on `/chat/completions`, on `/responses` and on `/v1/messages`, with `/completions` a 404. It is not served by this host at all: `refs/vscode-copilot-chat/.../openai/fetch.ts:310` sends that type to `v1/engines/<model>/completions` on the *completions proxy* host, a different service this proxy does not talk to. Giving it a default would report a model as routable that answers 400 every time.
 
 
 def model_type_of(model: Mapping[str, Any]) -> str:
@@ -128,7 +133,7 @@ def resolve_endpoints(advertised: object, *, model_type: str = "") -> ResolvedEn
 
     Three inputs, three answers, and the distinction between the last two is the whole point:
 
-    - **Nothing stated** (the key is absent, or present as `null`) — Copilot's actual shape for part of its catalog. Filled in with the default for the model's kind.
+    - **Nothing stated** (the key is absent, or present as `null`) — Copilot's actual shape for part of its catalog. Filled in with the measured endpoint for the model's kind, or with nothing when that kind has not been measured; an unknown kind fails closed rather than being guessed at, and `debug models` shows it as `no-endpoints` so the gap is visible instead of silent.
     - **A list** — upstream speaking, taken at its word, including the empty list. "None" and "unstated" are different claims and only the second is ours to fill in, so an empty list keeps `CapabilityMissing` meaning what it says. Copilot has never been observed sending that form.
     - **Anything else** — a string, a mapping, a number. Upstream emitted the field and we could not read it, which is not silence. Filling in a default here would invent a capability from an unreadable field, and worse, would ignore a value that may contradict it: `"/responses"` as a bare string would be answered by sending to `/chat/completions`. It fails closed instead, and `_wrong_shape` in the report calls the same entry `malformed`, so routing and the report cannot disagree about it.
     """
@@ -137,7 +142,9 @@ def resolve_endpoints(advertised: object, *, model_type: str = "") -> ResolvedEn
         return ResolvedEndpoints(known, unknown, True)
     if advertised is not None:
         return ResolvedEndpoints(frozenset(), (), True)
-    default = _DEFAULT_ENDPOINT_BY_TYPE.get(model_type, DEFAULT_ENDPOINT)
+    default = _DEFAULT_ENDPOINT_BY_TYPE.get(model_type)
+    if default is None:
+        return ResolvedEndpoints(frozenset(), (), False)
     return ResolvedEndpoints(frozenset({default}), (), False)
 
 
