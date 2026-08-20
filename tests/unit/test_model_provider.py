@@ -349,6 +349,66 @@ def test_catalog_without_a_data_list_is_rejected() -> None:
         provider.replace_catalog({"data": "nope"})
 
 
+def test_a_model_that_names_no_endpoints_gets_the_standard_one_for_its_kind() -> None:
+    """Copilot omits `supported_endpoints` for part of its catalog — 18 of 42 models on 2026-08-20, every embeddings model among them — and those models are served, not endpoint-less.
+
+    This is on the provider rather than only on the report because routing is what has to agree: a report calling a model routable while `require_endpoint` refuses it would be worse than no report.
+    """
+    provider, _ = build_provider(upstream(httpx.Response(200)))
+    provider.replace_catalog(
+        {
+            "data": [
+                {"id": "embedder", "capabilities": {"type": "embeddings"}},
+                {"id": "chatter", "capabilities": {"type": "chat"}},
+                {"id": "completer", "capabilities": {"type": "completion"}},
+                {"id": "typeless"},
+            ]
+        }
+    )
+
+    def endpoints(model_id: str) -> frozenset[ModelEndpoint]:
+        descriptor = provider.describe(model_id)
+        assert descriptor is not None
+        return descriptor.endpoints
+
+    assert endpoints("embedder") == {ModelEndpoint.OPENAI_EMBEDDINGS}
+    assert endpoints("chatter") == {ModelEndpoint.OPENAI_CHAT_COMPLETIONS}
+    assert endpoints("completer") == {ModelEndpoint.OPENAI_CHAT_COMPLETIONS}
+    assert endpoints("typeless") == {ModelEndpoint.OPENAI_CHAT_COMPLETIONS}
+
+
+async def test_a_model_with_an_unstated_endpoint_can_actually_be_sent_to() -> None:
+    """The end of the change, not the middle: `require_endpoint` used to refuse these before the network."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    provider, http_client = build_provider(handler)
+    provider.replace_catalog({"data": [{"id": "chatter", "capabilities": {"type": "chat"}}]})
+    try:
+        await provider.send(
+            ModelEndpoint.OPENAI_CHAT_COMPLETIONS,
+            {"model": "chatter"},
+            model_id="chatter",
+        )
+    finally:
+        await http_client.aclose()
+
+    assert [request.url.path for request in seen] == ["/chat/completions"]
+
+
+def test_an_endpoint_upstream_did_name_is_never_replaced_by_the_default() -> None:
+    # The fallback fires only where upstream was silent; an embeddings model that names an endpoint keeps it, and an empty list stays the refusal it is.
+    provider, _ = build_provider(upstream(httpx.Response(200)))
+
+    assert provider.describe("embed-model") is not None
+    mute = provider.describe("mute-model")
+    assert mute is not None
+    assert mute.endpoints == frozenset()
+
+
 def test_the_catalog_is_kept_as_upstream_sent_it() -> None:
     """The descriptors are a projection built for routing; `raw_catalog` is the original.
 

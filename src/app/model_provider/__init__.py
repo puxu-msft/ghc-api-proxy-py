@@ -18,9 +18,11 @@ from app.model_provider.types import (
     ModelDescriptor,
     ModelEndpoint,
     ProviderError,
+    ResolvedEndpoints,
     UnknownModel,
     parse_endpoints,
     require_endpoint,
+    resolve_endpoints,
 )
 
 __all__ = [
@@ -35,8 +37,10 @@ __all__ = [
     "ProviderError",
     "ProviderNotConfigured",
     "ProviderRegistry",
+    "ResolvedEndpoints",
     "UnknownModel",
     "parse_endpoints",
     "require_endpoint",
     "resolve_default_name",
+    "resolve_endpoints",
 ]

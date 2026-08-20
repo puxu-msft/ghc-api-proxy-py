@@ -15,7 +15,7 @@ from rich.cells import cell_len
 
 from app.auth.providers import NoGitHubToken
 from app.config.schema import ProxyConfig
-from app.model_provider import GithubCopilotProvider, parse_endpoints
+from app.model_provider import GithubCopilotProvider, resolve_endpoints
 from app.model_provider.github_copilot import DRIVEN_ENDPOINTS
 from app.observability.footer import CONTROL_CHARS
 from app.server.composition import build_chain, build_http_client
@@ -26,6 +26,9 @@ ROUTABLE = "ok"
 # Marks an endpoint upstream advertises that this proxy has no driver for.
 UNDRIVEN_MARK = "*"
 
+# Marks an endpoint upstream never named, filled in from the default for the model's kind.
+ASSUMED_MARK = "?"
+
 _ENABLED_POLICY = "enabled"
 _MISSING = "-"
 
@@ -35,6 +38,8 @@ class ModelRow:
     """One model, already reduced to what a report shows.
 
     Missing numbers are `None` rather than 0: a model that did not state its context window and one that stated zero are different answers, and only the second is a reason to look at the model.
+
+    `assumed` says the endpoint list came from the default for the model's kind rather than from the catalog. Routing does not distinguish them, but a report that showed an assumption in the same ink as something upstream said would stop being usable as evidence about upstream.
     """
 
     id: str
@@ -45,6 +50,7 @@ class ModelRow:
     undriven: frozenset[str]
     context_window: int | None
     max_output_tokens: int | None
+    assumed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,17 +104,16 @@ def status_of(
     *,
     disabled: bool,
     policy_state: str,
-    advertised: bool,
     drivable: bool,
     malformed: bool = False,
 ) -> str:
     """One word for why a request naming this model would not get through.
 
-    Ordered by who can act on it: the disabled list is the operator's to edit, the policy state is theirs to accept on github.com, an empty endpoint list is upstream's to publish, and a missing driver is ours to write. Reporting the first of those hides nothing — clearing it re-runs this command and reveals the next.
+    Ordered by who can act on it: the disabled list is the operator's to edit, the policy state is theirs to accept on github.com, and a missing driver is ours to write. Reporting the first of those hides nothing — clearing it re-runs this command and reveals the next.
 
-    `no-endpoints` is kept apart from `no-driver` even though routing refuses both the same way: 18 of the 42 models this catalog served on 2026-08-20 carry no `supported_endpoints` key at all, including every embeddings model, and calling that a missing driver would send someone looking for a driver we would have no way to select.
+    There is no answer here for "upstream named no endpoints", because that is not a state a model is in. Copilot simply omits the key for part of its catalog, and `resolve_endpoints` gives those models the standard endpoint for their kind — the same one routing will use. A status saying otherwise would have described the catalog's phrasing rather than the model.
 
-    `malformed` outranks all of them because it is the one answer that is not about this model. A `supported_endpoints` that arrived as a string rather than a list would otherwise read as `no-endpoints` — an assured statement about upstream's offering, made from a field we could not read at all.
+    `malformed` outranks the rest because it is the one answer that is not about this model. A `supported_endpoints` that arrived as a string rather than a list is a field we could not read at all, and it must not be reported as a confident claim about what upstream offers.
 
     An upstream policy state is prefixed rather than reported as itself, because it is the one word in this vocabulary that upstream chooses. Left bare, a state spelled `ok` would report a gated model as routable and a state spelled `disabled` would be indistinguishable from the operator's own list — the two answers with the most different fixes, collapsed by a coincidence of spelling. The prefix is also where the state is stripped of control characters, since this is the single point at which upstream text becomes a token the report repeats in its summary line as well as its table.
     """
@@ -118,8 +123,6 @@ def status_of(
         return "disabled"
     if policy_state and policy_state != _ENABLED_POLICY:
         return f"policy:{_printable(policy_state)}"
-    if not advertised:
-        return "no-endpoints"
     if not drivable:
         return "no-driver"
     return ROUTABLE
@@ -163,29 +166,35 @@ def build_rows(
         if not model_id:
             unreadable += 1
             continue
-        known, unknown = parse_endpoints(model.get("supported_endpoints"))
-        advertised = tuple(sorted([endpoint.value for endpoint in known] + list(unknown)))
-        # An endpoint we have no enum member for is by definition one we cannot drive.
-        undriven = frozenset(
-            [endpoint.value for endpoint in known if endpoint not in DRIVEN_ENDPOINTS]
-            + list(unknown)
-        )
         capabilities = _mapping(model.get("capabilities"))
         limits = _mapping(capabilities.get("limits"))
+        # The same resolution routing uses, so the two cannot disagree about what a model offers.
+        resolved = resolve_endpoints(
+            model.get("supported_endpoints"),
+            model_type=_text(capabilities.get("type")),
+        )
+        offered = tuple(
+            sorted([endpoint.value for endpoint in resolved.known] + list(resolved.unknown))
+        )
+        # An endpoint we have no enum member for is by definition one we cannot drive.
+        undriven = frozenset(
+            [endpoint.value for endpoint in resolved.known if endpoint not in DRIVEN_ENDPOINTS]
+            + list(resolved.unknown)
+        )
         rows.append(
             ModelRow(
                 id=model_id,
                 status=status_of(
                     disabled=model_id in blocked,
                     policy_state=_text(_mapping(model.get("policy")).get("state")),
-                    advertised=bool(advertised),
-                    drivable=bool(set(advertised) - undriven),
+                    drivable=bool(set(offered) - undriven),
                     malformed=_wrong_shape(model),
                 ),
                 vendor=_text(model.get("vendor")),
                 family=_text(capabilities.get("family")),
-                endpoints=advertised,
+                endpoints=offered,
                 undriven=undriven,
+                assumed=not resolved.advertised,
                 context_window=_count(limits.get("max_context_window_tokens")),
                 max_output_tokens=_count(limits.get("max_output_tokens")),
             )
@@ -248,6 +257,20 @@ def _number(value: int | None) -> str:
     return _MISSING if value is None else str(value)
 
 
+def _endpoint_cell(row: ModelRow) -> str:
+    """The endpoint list, with each entry marked for why it is not plain.
+
+    `*` and `?` are mutually exclusive in practice — an assumed endpoint is always one we drive — but both are applied rather than chosen between, so a future default we cannot drive would still say both things.
+    """
+    parts = [
+        f"{endpoint}{UNDRIVEN_MARK}" if endpoint in row.undriven else endpoint
+        for endpoint in row.endpoints
+    ]
+    if row.assumed:
+        parts = [f"{part}{ASSUMED_MARK}" for part in parts]
+    return ", ".join(parts) or _MISSING
+
+
 def _cells(row: ModelRow) -> tuple[str, ...]:
     return tuple(
         _printable(cell)
@@ -258,11 +281,7 @@ def _cells(row: ModelRow) -> tuple[str, ...]:
             row.family or _MISSING,
             _number(row.context_window),
             _number(row.max_output_tokens),
-            ", ".join(
-                f"{endpoint}{UNDRIVEN_MARK}" if endpoint in row.undriven else endpoint
-                for endpoint in row.endpoints
-            )
-            or _MISSING,
+            _endpoint_cell(row),
         )
     )
 
@@ -334,9 +353,14 @@ def render_text(catalogs: Sequence[ProviderCatalog]) -> str:
             lines.extend(_table([_cells(row) for row in catalog.rows]))
         else:
             lines.append("upstream offered no models")
-        if any(row.undriven for row in catalog.rows):
+        legend = [
+            (any(row.undriven for row in catalog.rows), f"{UNDRIVEN_MARK} advertised by upstream, no driver in this proxy"),
+            (any(row.assumed for row in catalog.rows), f"{ASSUMED_MARK} not named by upstream; the standard endpoint for this model type"),
+        ]
+        marks = [text for applies, text in legend if applies]
+        if marks:
             lines.append("")
-            lines.append(f"{UNDRIVEN_MARK} advertised by upstream, no driver in this proxy")
+            lines.extend(marks)
         blocks.append("\n".join(lines))
     return "\n\n".join(blocks)
 
@@ -356,6 +380,7 @@ def render_json(catalogs: Sequence[ProviderCatalog]) -> str:
 
 
 __all__ = [
+    "ASSUMED_MARK",
     "ROUTABLE",
     "UNDRIVEN_MARK",
     "CatalogFailure",

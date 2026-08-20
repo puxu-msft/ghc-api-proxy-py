@@ -92,6 +92,38 @@ def parse_endpoints(advertised: object) -> tuple[frozenset[ModelEndpoint], tuple
     return frozenset(known), tuple(unknown)
 
 
+# The endpoint a model of each kind is served on when the catalog names none. Copilot omits `supported_endpoints` outright for part of its catalog rather than listing an empty one — on 2026-08-20 that was 18 of 42 models — and those models are not endpoint-less; they are served on the standard endpoint for their kind. Embeddings models are the one kind that differs, and they are also the one kind that never appears with an advertised list, so the split cannot be learnt from the catalog itself.
+_DEFAULT_ENDPOINT_BY_TYPE = {"embeddings": ModelEndpoint.OPENAI_EMBEDDINGS}
+# Everything else. The absent set on that date held 14 models of type `chat` and one of type `completion`, and both are chat-completions models.
+DEFAULT_ENDPOINT = ModelEndpoint.OPENAI_CHAT_COMPLETIONS
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedEndpoints:
+    """Which endpoints a model offers, and whether the catalog is where that came from.
+
+    `advertised` is false when nothing was named and the default for the model's kind was used instead. Routing does not care which it was — the endpoint is the endpoint — but anything reporting on the catalog does, because presenting an assumption as something upstream said is how a report stops being evidence.
+    """
+
+    known: frozenset[ModelEndpoint]
+    unknown: tuple[str, ...]
+    advertised: bool
+
+
+def resolve_endpoints(advertised: object, *, model_type: str = "") -> ResolvedEndpoints:
+    """Read a catalog entry's endpoints, falling back to the standard one for its kind.
+
+    The fallback fires only where upstream said nothing at all. A list naming endpoints — even ones with no enum member — is upstream speaking and is taken at its word, and so is an empty list: "none" and "unstated" are different claims, and only the second is ours to fill in. Copilot has never been observed sending the empty form, so the distinction costs nothing and keeps `CapabilityMissing` meaning what it says.
+    """
+    known, unknown = parse_endpoints(advertised)
+    if known or unknown:
+        return ResolvedEndpoints(known, unknown, True)
+    if isinstance(advertised, list):
+        return ResolvedEndpoints(frozenset(), (), True)
+    default = _DEFAULT_ENDPOINT_BY_TYPE.get(model_type, DEFAULT_ENDPOINT)
+    return ResolvedEndpoints(frozenset({default}), (), False)
+
+
 def require_endpoint(descriptor: ModelDescriptor, endpoint: ModelEndpoint, provider: str) -> None:
     """Fail closed before the network.
 

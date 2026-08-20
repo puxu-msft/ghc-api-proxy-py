@@ -12,8 +12,8 @@ from app.model_provider.types import (
     ModelDescriptor,
     ModelEndpoint,
     UnknownModel,
-    parse_endpoints,
     require_endpoint,
+    resolve_endpoints,
 )
 
 PROVIDER_TYPE = "github_copilot"
@@ -24,6 +24,18 @@ def _string_mapping(value: object) -> dict[str, str]:
         return {}
     entries = cast(dict[object, object], value)
     return {str(key): str(item) for key, item in entries.items()}
+
+
+def _model_type(model: Mapping[str, Any]) -> str:
+    """`capabilities.type` — `chat`, `completion` or `embeddings` — or empty when unreadable.
+
+    It is the only thing in an entry that says which endpoint a model of this kind is served on, and it is needed exactly when `supported_endpoints` is absent.
+    """
+    capabilities = model.get("capabilities")
+    if not isinstance(capabilities, dict):
+        return ""
+    model_type = cast(dict[str, Any], capabilities).get("type")
+    return model_type if isinstance(model_type, str) else ""
 
 
 # ws:/responses is deliberately absent: the spec lists it as unsupported.
@@ -98,11 +110,15 @@ class GithubCopilotProvider:
             model_id = model.get("id")
             if not isinstance(model_id, str) or not model_id:
                 continue
-            known, unknown = parse_endpoints(model.get("supported_endpoints"))
+            # `resolve_endpoints` rather than `parse_endpoints`: Copilot omits `supported_endpoints` for part of its catalog, and those models are served on the standard endpoint for their kind rather than being endpoint-less. Reading that here, once, is what keeps routing and any report of the catalog from answering the question differently.
+            resolved = resolve_endpoints(
+                model.get("supported_endpoints"),
+                model_type=_model_type(model),
+            )
             descriptors[model_id] = ModelDescriptor(
                 id=model_id,
-                endpoints=known,
-                unknown_endpoints=unknown,
+                endpoints=resolved.known,
+                unknown_endpoints=resolved.unknown,
                 request_headers=_string_mapping(model.get("request_headers")),
             )
         self._descriptors = descriptors

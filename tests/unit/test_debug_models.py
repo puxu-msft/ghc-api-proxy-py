@@ -77,17 +77,60 @@ def _rows_by_id(raw: dict[str, Any], *, disabled: list[str] | None = None):
 def test_status_names_what_stands_between_a_request_and_the_model() -> None:
     """Each blocked model is blocked for a different reason with a different fix.
 
-    `silent` and `ws-only` are both unroutable and are deliberately not given the same word: one is upstream publishing no endpoints, the other is an endpoint we have chosen not to drive.
+    `silent` names no endpoints and is still routable: Copilot omits the key for part of its catalog, and those models are served on the standard endpoint for their kind. `ws-only` is the genuinely unroutable one — upstream named an endpoint and we have no driver for it.
     """
     rows = _rows_by_id(CATALOG, disabled=["blocked"])
 
     assert rows["routable"].status == "ok"
     assert rows["blocked"].status == "disabled"
     assert rows["gated"].status == "policy:unconfigured"
-    assert rows["silent"].status == "no-endpoints"
+    assert rows["silent"].status == "ok"
     assert rows["ws-only"].status == "no-driver"
     # One drivable endpoint is enough to route to, whatever else it also advertises.
     assert rows["half-driven"].status == "ok"
+
+
+def test_an_unstated_endpoint_is_filled_in_from_the_model_kind() -> None:
+    """The two cases, as the live catalog on 2026-08-20 had them: 3 embeddings models and 15 others, none of which carried a `supported_endpoints` key."""
+    rows = _rows_by_id(
+        {
+            "data": [
+                _model("embedder", capabilities={"type": "embeddings"}, supported_endpoints=None),
+                _model("chatter", capabilities={"type": "chat"}, supported_endpoints=None),
+                _model("completer", capabilities={"type": "completion"}, supported_endpoints=None),
+                _model("typeless", capabilities={}, supported_endpoints=None),
+            ]
+        }
+    )
+
+    assert rows["embedder"].endpoints == ("/embeddings",)
+    assert rows["chatter"].endpoints == ("/chat/completions",)
+    # `completion` is a chat-completions model too; only embeddings differ.
+    assert rows["completer"].endpoints == ("/chat/completions",)
+    assert rows["typeless"].endpoints == ("/chat/completions",)
+    assert all(rows[name].status == "ok" for name in rows)
+    # And every one of them is flagged as filled in rather than reported as upstream's word.
+    assert all(rows[name].assumed for name in rows)
+
+
+def test_an_endpoint_upstream_did_name_is_never_overwritten() -> None:
+    """The negative control for the fallback: it must fire only where upstream was silent."""
+    rows = _rows_by_id(
+        {
+            "data": [
+                # An embeddings model that does name an endpoint keeps the one it named.
+                _model("named", capabilities={"type": "embeddings"}),
+                # An empty list is upstream saying "none", which is not the same as saying nothing.
+                _model("explicitly-none", supported_endpoints=[]),
+            ]
+        }
+    )
+
+    assert rows["named"].endpoints == ("/v1/messages",)
+    assert rows["named"].assumed is False
+    assert rows["explicitly-none"].endpoints == ()
+    assert rows["explicitly-none"].assumed is False
+    assert rows["explicitly-none"].status == "no-driver"
 
 
 def test_an_upstream_policy_state_cannot_impersonate_one_of_our_own_words() -> None:
@@ -177,7 +220,7 @@ def test_an_absent_optional_field_is_not_treated_as_malformed() -> None:
     """The negative control. 18 of the 42 models upstream served on 2026-08-20 legitimately omit `supported_endpoints`; calling those malformed would bury the real thing."""
     rows = _rows_by_id({"data": [_model("silent", supported_endpoints=None), _model("routable")]})
 
-    assert rows["silent"].status == "no-endpoints"
+    assert rows["silent"].status == "ok"
     assert rows["routable"].status == "ok"
 
 
@@ -222,13 +265,23 @@ def _catalog(**overrides: Any) -> ProviderCatalog:
     )
 
 
-def test_the_report_counts_by_status_and_explains_its_own_mark() -> None:
+def test_the_report_counts_by_status_and_explains_its_own_marks() -> None:
     text = render_text([_catalog()])
 
     assert "ghc  https://api.githubcopilot.com" in text
-    assert "6 models, 2 routable, 1 disabled, 1 no-driver, 1 no-endpoints, 1 policy:unconfigured" in text
+    assert "6 models, 3 routable, 1 disabled, 1 no-driver, 1 policy:unconfigured" in text
     assert "ws:/responses*" in text
+    assert "/chat/completions?" in text
     assert "* advertised by upstream, no driver in this proxy" in text
+    assert "? not named by upstream; the standard endpoint for this model type" in text
+
+
+def test_a_mark_nothing_carries_is_left_out_of_the_legend() -> None:
+    """Two negative controls in one: neither legend line may appear for a catalog with nothing to explain."""
+    text = render_text([_catalog(raw={"data": [_model("routable")]}, disabled=[])])
+
+    assert "no driver in this proxy" not in text
+    assert "not named by upstream" not in text
 
 
 def test_the_summary_line_cannot_be_split_by_upstream_text() -> None:
@@ -240,12 +293,6 @@ def test_the_summary_line_cannot_be_split_by_upstream_text() -> None:
 
     assert "FAKE SUMMARY LINE" not in text.replace("unconfiguredFAKE SUMMARY LINE", "")
     assert summary.endswith("1 policy:unconfiguredFAKE SUMMARY LINE")
-
-
-def test_the_report_leaves_out_a_mark_nothing_carries() -> None:
-    text = render_text([_catalog(raw={"data": [_model("routable")]}, disabled=[])])
-
-    assert "no driver in this proxy" not in text
 
 
 def test_a_provider_with_an_empty_catalog_says_so() -> None:
