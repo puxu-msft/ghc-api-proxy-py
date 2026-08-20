@@ -110,5 +110,5 @@ print(f"exited {exited - signalled:.2f}s after the signal\n")
 print("--- lines, with seconds since the signal ---")
 for when, chunk in seen:
     for line in ANSI.sub("", chunk.decode(errors="replace")).replace("\r", "\n").splitlines():
-        if line.startswith(("[ OK ]", "[FAIL]", "[....]", "[RETRY]", "[<-->]")):
+        if line.startswith(("[ OK ]", "[FAIL]", "[....]", "[RETRY]", "[<-->]", "[DRIN]")):
             print(f"{when - signalled:+6.2f}s  {line}")

@@ -29,6 +29,21 @@ class ActiveRequestRegistry:
     _entries: dict[str, _Entry] = field(default_factory=lambda: dict[str, _Entry]())
     # Uncontended in practice — the critical sections are a dict write or a short copy — so the cost is a few tens of nanoseconds on a path that is already doing network I/O.
     _lock: threading.Lock = field(default_factory=threading.Lock)
+    # Set once the listener stops accepting. Held here rather than passed to each render because the renderer runs on its own thread and needs somewhere to read it from that is not a moving argument.
+    _draining: bool = False
+
+    @property
+    def draining(self) -> bool:
+        """Whether new requests are no longer being accepted while old ones finish.
+
+        A distinct state from both running and stopped, and the one an operator most needs named: the process is still busy, but nothing further will arrive, so the list on screen can only shrink.
+        """
+        with self._lock:
+            return self._draining
+
+    def begin_draining(self) -> None:
+        with self._lock:
+            self._draining = True
 
     def snapshot(self) -> list[ActiveRequest]:
         """A detached view for the renderer, so a mutation mid-render cannot change what it is drawing.

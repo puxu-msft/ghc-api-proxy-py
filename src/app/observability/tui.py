@@ -106,7 +106,13 @@ class FooterTui:
     def _render(self) -> Text:
         """Recomputed on every refresh, so elapsed fields tick without anyone pushing an update."""
         columns = self._live.console.width if self._live is not None else 80
-        line = build_footer(self.registry.snapshot(), time.monotonic(), columns, unicode=self.capabilities.unicode)
+        line = build_footer(
+            self.registry.snapshot(),
+            time.monotonic(),
+            columns,
+            unicode=self.capabilities.unicode,
+            draining=self.registry.draining,
+        )
         # `dim` is an ANSI attribute, so it is withheld on the same probe that withholds colour rather than on a separate one.
         return Text(line, style="dim" if self.capabilities.color else "", no_wrap=True, overflow="crop")
 

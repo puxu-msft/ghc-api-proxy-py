@@ -18,6 +18,7 @@ from app.lifecycle.standalone import (
     ShutdownReport,
     StandaloneServer,
 )
+from app.observability.active_requests import ActiveRequestRegistry
 from app.observability.logging import setup_logging
 
 
@@ -93,6 +94,30 @@ def test_a_restart_signal_starts_the_descent_without_deepening_it(captured: obje
         server.receive_signal(signal.SIGUSR2)
 
     assert _lines(caplog.records) == ["SIGUSR2 received, draining, waiting for in-flight requests"]
+
+
+def test_the_drain_hook_fires_once_when_the_descent_begins(captured: object) -> None:
+    """What tells the footer to say `[DRIN]`.
+
+    Once, on the first move off `RUNNING`. Later rungs escalate a drain that has already been announced, and a hook that fired again on each of them would make "we started draining" a repeating event rather than a transition.
+    """
+    fired: list[int] = []
+    placeholder: object = object()
+    server = StandaloneServer(cast(ListenerLifecycle, placeholder), on_draining=lambda: fired.append(1))
+
+    server.receive_signal(signal.SIGINT)
+    server.receive_signal(signal.SIGINT)
+    server.receive_signal(signal.SIGINT)
+
+    assert fired == [1]
+
+
+def test_the_registry_reports_draining_once_told(captured: object) -> None:
+    # The other half of the same wire: the CLI hands `begin_draining` to the server, and the renderer reads the flag off the registry from its own thread.
+    registry = ActiveRequestRegistry()
+    assert registry.draining is False
+    registry.begin_draining()
+    assert registry.draining is True
 
 
 def test_a_clean_stop_is_one_short_line(captured: object, caplog: pytest.LogCaptureFixture) -> None:

@@ -12,6 +12,35 @@ def _request(request_id: str, model: str, age: float, bytes_out: int | None = No
     return ActiveRequest(request_id=request_id, model=model, started_at=NOW - age, bytes_out=bytes_out, attempts=attempts)
 
 
+def test_requests_of_one_model_are_separated_by_commas() -> None:
+    """Where one request ends and the next begins.
+
+    Joined by a space, `48.6s ↓15.6KB 28.3s` reads as a single request with three fields, and the reader cannot tell otherwise because any field may be absent — the third request here has no byte count at all.
+    """
+    active = [
+        _request("a", "claude-opus-5", 48.6, bytes_out=15_974),
+        _request("b", "claude-opus-5", 28.3, bytes_out=8_396),
+        _request("c", "claude-opus-5", 3.6),
+    ]
+    assert build_footer(active, NOW, 200) == "[<-->] claude-opus-5 x3 48.6s ↓15.6KB, 28.3s ↓8.2KB, 3.6s"
+
+
+def test_draining_says_so_in_the_prefix() -> None:
+    """A stopped listener changes what the same list means.
+
+    From here it can only shrink and nothing new will join it, so a footer that looked identical either way would leave a busy server and one on its way out indistinguishable.
+    """
+    active = [_request("a", "gpt-5", 1.0)]
+    assert build_footer(active, NOW, 80).startswith("[<-->] ")
+    assert build_footer(active, NOW, 80, draining=True).startswith("[DRIN] ")
+
+
+def test_the_draining_prefix_is_the_same_width() -> None:
+    # A prefix that changed width would shift the whole line sideways at the moment the state changes, which reads as the display restarting rather than as the process changing what it is doing.
+    active = [_request("a", "gpt-5", 1.0)]
+    assert len(build_footer(active, NOW, 80)) == len(build_footer(active, NOW, 80, draining=True))
+
+
 def test_no_active_requests_render_nothing() -> None:
     # Empty rather than a blank line: the caller draws no footer at all, and a line of spaces would still occupy a row.
     assert build_footer([], NOW, 80) == ""

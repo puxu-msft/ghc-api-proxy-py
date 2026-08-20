@@ -13,8 +13,12 @@ from dataclasses import dataclass
 from rich.cells import cell_len, set_cell_size
 
 PREFIX = "[<-->] "
+# Same six columns as the running prefix, so the line does not shift sideways at the moment the state changes — a jump would read as the display restarting rather than as the process changing what it is doing.
+DRAINING_PREFIX = "[DRIN] "
 RESOLVING = "(resolving)"
 SEPARATOR = " | "
+# Between the requests of one model. A space alone ran them together — `48.6s ↓15.6KB 28.3s` reads as one request with three fields rather than as two requests — and the reader has no way to know where one ends, because any of the fields may be absent.
+ITEM_SEPARATOR = ", "
 # Any C0 control character would force a second physical line and break the one-line invariant.
 CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 
@@ -78,7 +82,7 @@ class _Group:
         return f"{name} x{len(self.items)}" if len(self.items) > 1 else name
 
     def render(self, count: int) -> str:
-        return f"{self.head} {' '.join(self.items[:count])}"
+        return f"{self.head} {ITEM_SEPARATOR.join(self.items[:count])}"
 
 
 def _group(active: list[ActiveRequest], now: float, *, unicode: bool) -> list[_Group]:
@@ -96,20 +100,23 @@ def _group(active: list[ActiveRequest], now: float, *, unicode: bool) -> list[_G
     return list(groups.values())
 
 
-def build_footer(active: list[ActiveRequest], now: float, columns: int, *, unicode: bool = True) -> str:
+def build_footer(active: list[ActiveRequest], now: float, columns: int, *, unicode: bool = True, draining: bool = False) -> str:
     """The footer line, or an empty string when nothing is in flight.
 
     Empty rather than a blank line: there is a difference between "no requests" and "a request whose fields are all blank", and the caller renders the former as no footer at all.
+
+    `draining` swaps the prefix for `[DRIN]`. Once the listener has stopped accepting, the same list of requests means something different — it can only shrink, and nothing new will join it — and a display that looked identical either way would leave the operator unable to tell a busy server from one that is on its way out.
     """
     if not active:
         return ""
 
+    prefix = DRAINING_PREFIX if draining else PREFIX
     groups = _group(active, now, unicode=unicode)
     budget = columns - 1
 
     # Pass one decides which models appear at all. Each is measured in its minimum form (head plus its longest-running request); models that do not fit collapse into a ` | +K more` tail.
     shown: list[_Group] = []
-    used = cell_len(PREFIX)
+    used = cell_len(prefix)
     for index, group in enumerate(groups):
         separator = cell_len(SEPARATOR) if shown else 0
         remaining = len(groups) - index
@@ -131,7 +138,7 @@ def build_footer(active: list[ActiveRequest], now: float, columns: int, *, unico
         for index, group in enumerate(shown):
             if counts[index] >= len(group.items):
                 continue
-            cost = 1 + cell_len(group.items[counts[index]])
+            cost = cell_len(ITEM_SEPARATOR) + cell_len(group.items[counts[index]])
             if total + cost > budget:
                 continue
             total += cost
@@ -141,7 +148,7 @@ def build_footer(active: list[ActiveRequest], now: float, columns: int, *, unico
     segments = [group.render(counts[index]) for index, group in enumerate(shown)]
     if overflow:
         segments.append(f"+{overflow} more")
-    return _finalize(PREFIX + SEPARATOR.join(segments), columns)
+    return _finalize(prefix + SEPARATOR.join(segments), columns)
 
 
 def _finalize(line: str, columns: int) -> str:

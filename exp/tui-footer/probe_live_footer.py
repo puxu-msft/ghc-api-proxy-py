@@ -19,6 +19,8 @@ import urllib.request
 
 PORT = 41997
 MODEL = sys.argv[1] if len(sys.argv) > 1 else "claude-sonnet-4.5"
+# More than one at a time is the case that exposed the separator: joined by a space, several requests of one model ran together into an unreadable blob.
+CONCURRENT = int(sys.argv[2]) if len(sys.argv) > 2 else 1
 FOOTER = re.compile(r"\[<-->\][^\r\n]*")
 ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
 
@@ -63,19 +65,28 @@ body = json.dumps(
         "messages": [{"role": "user", "content": "Count from 1 to 40, one number per line."}],
     }
 ).encode()
-request = urllib.request.Request(
-    f"http://127.0.0.1:{PORT}/v1/messages",
-    data=body,
-    headers={"content-type": "application/json", "anthropic-version": "2023-06-01"},
-)
-try:
-    with urllib.request.urlopen(request, timeout=120) as response:
-        delivered = len(response.read())
-    print(f"streamed {delivered} bytes back")
-except urllib.error.HTTPError as error:
-    print(f"request answered {error.code}: {error.read()[:300]!r}")
-except Exception as error:  # noqa: BLE001 - the probe reports whatever happened
-    print(f"request failed: {error!r}")
+
+
+def fire(index: int) -> None:
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{PORT}/v1/messages",
+        data=body,
+        headers={"content-type": "application/json", "anthropic-version": "2023-06-01"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            print(f"request {index} streamed {len(response.read())} bytes back")
+    except urllib.error.HTTPError as error:
+        print(f"request {index} answered {error.code}: {error.read()[:200]!r}")
+    except Exception as error:  # noqa: BLE001 - the probe reports whatever happened
+        print(f"request {index} failed: {error!r}")
+
+
+callers = [threading.Thread(target=fire, args=(index,)) for index in range(CONCURRENT)]
+for caller in callers:
+    caller.start()
+for caller in callers:
+    caller.join(timeout=150)
 
 time.sleep(1.0)
 reading = False

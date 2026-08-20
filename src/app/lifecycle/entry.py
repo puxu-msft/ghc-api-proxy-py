@@ -60,12 +60,17 @@ class StandaloneOutcome:
 async def run_standalone(
     application: Application,
     options: StandaloneOptions,
+    on_draining: Callable[[], None] | None = None,
 ) -> StandaloneOutcome:
     """Serve until the shutdown ladder finishes, then release everything.
 
     The predecessor is signalled only once this process is listening.
     Signalling first would ask it to stop while nothing else could accept yet, opening the very gap
     the restart exists to avoid.
+
+    `on_draining` is a parameter rather than a field of `StandaloneOptions` because the options
+    describe the listener; this is a hook for whoever is watching, and the two have no reason to
+    travel together.
     """
     pidfile = options.pidfile_path()
     predecessor = live_predecessor(pidfile) if options.restart else None
@@ -114,6 +119,7 @@ async def run_standalone(
         adapter,
         cleanup_timeout=options.cleanup_timeout,
         on_serving=announce,
+        on_draining=on_draining,
     )
 
     try:

@@ -102,10 +102,13 @@ class StandaloneServer:
         *,
         cleanup_timeout: int = 0,
         on_serving: Hook | None = None,
+        on_draining: Callable[[], None] | None = None,
     ) -> None:
         self._adapter = adapter
         self._cleanup_timeout = cleanup_timeout
         self._on_serving = on_serving
+        # Called once, when the descent begins. Whoever owns a display wants to know that the shape of what it is showing has changed — the list can only shrink from here — and this class has no business knowing what that display is.
+        self._on_draining = on_draining
         self._ladder = ShutdownLadder()
         self._advanced = asyncio.Event()
 
@@ -123,6 +126,9 @@ class StandaloneServer:
         after = self._ladder.receive(sig)
         if after is not before:
             self._advanced.set()
+            if before is ShutdownStage.RUNNING and self._on_draining is not None:
+                # Only on the first move off `RUNNING`. Later rungs are escalations of a drain that has already been announced.
+                self._on_draining()
             # Said here because this is the only point that sees the keystroke. Everything after it can take as long as the drain takes, and a terminal that goes silent the moment Ctrl-C is pressed gives the operator no way to tell a graceful drain from a hung process — which is exactly when they reach for a second, harder signal.
             get_logger(LIFECYCLE_LOGGER).info(
                 f"{sig.name} received, {_STAGE_WORDS[after]}",
