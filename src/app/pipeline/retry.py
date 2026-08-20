@@ -118,3 +118,61 @@ def continuation_messages(
         {"role": "assistant", "content": committed},
         {"role": "user", "content": config.strategies.continuation.message},
     ]
+
+
+class StreamEnding(StrEnum):
+    """What to do about a stream that stopped, decided from what we received."""
+
+    COMPLETE = "complete"
+    REPLAY = "replay"
+    CONTINUE = "continue"
+    ABANDON = "abandon"
+
+
+@dataclass(frozen=True, slots=True)
+class EndingVerdict:
+    ending: StreamEnding
+    reason: RetryReason | None = None
+    detail: str = ""
+
+
+def decide_stream_ending(
+    *,
+    terminal_seen: bool,
+    downstream_opened: bool,
+    committed_blocks: int,
+    ledger: RetryLedger,
+) -> EndingVerdict:
+    """Choose between finishing, replaying, continuing and giving up.
+
+    Decided from what this side received and delivered, and from nothing else. Who sent the GOAWAY, and why, is not observable from here — our stack stops reading the moment the frame arrives — so a rule written in terms of the peer's intent would be a rule written about something we cannot see. Ruled 2026-08-20; see `docs/agents/upstream-h2-goaway/findings.md`.
+
+    The exception type is deliberately not an input. A clean EOF with no terminal event and a torn connection leave the client in the same place, and it is that place — not the manner of arrival — that decides what may legally happen next.
+
+    Four outcomes rather than the three the rule is usually stated in: a stream that may neither be replayed nor continued still has to end, and telling the client it was truncated is that ending.
+
+    `downstream_opened` means a semantic event has already gone out — a `message_start`, whether it came with the first block or was synthesised during a long silence. Keep-alive comments do not count; they carry nothing a client stores.
+
+    Budget is spent here, not merely consulted: choosing to replay is what consumes a replay. A caller that decides twice for one stream would otherwise be funded twice.
+    """
+    if terminal_seen:
+        return EndingVerdict(StreamEnding.COMPLETE)
+
+    if not downstream_opened:
+        # Nothing the client can see, so the second attempt can stand in for the first with no trace. This is the only place a transparent replay is legal.
+        verdict = ledger.take(RetryReason.STREAM_REPLAY)
+        if verdict.allowed:
+            return EndingVerdict(StreamEnding.REPLAY, RetryReason.STREAM_REPLAY)
+        return EndingVerdict(StreamEnding.ABANDON, RetryReason.STREAM_REPLAY, verdict.detail)
+
+    if committed_blocks == 0:
+        # Opened but empty: the client holds a `message_start` and no content. Replay would send it a second `message_start`, and continuation would ask upstream to carry on from an assistant turn with nothing in it — a shape this upstream rejects outright. Neither is available, so this ends here.
+        return EndingVerdict(
+            StreamEnding.ABANDON,
+            detail="response opened without a content block to continue from",
+        )
+
+    verdict = ledger.take(RetryReason.CONTINUATION)
+    if verdict.allowed:
+        return EndingVerdict(StreamEnding.CONTINUE, RetryReason.CONTINUATION)
+    return EndingVerdict(StreamEnding.ABANDON, RetryReason.CONTINUATION, verdict.detail)
