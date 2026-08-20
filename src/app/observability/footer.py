@@ -121,7 +121,7 @@ def build_footer(
     prefix = DRAINING_PREFIX if draining else PREFIX
     segments: list[str] = []
     if connections > 0:
-        segments.append(f"{connections} conn" if connections == 1 else f"{connections} conns")
+        segments.append(f"{connections} clients")
     if not active:
         return _finalize(prefix + SEPARATOR.join(segments), columns)
 

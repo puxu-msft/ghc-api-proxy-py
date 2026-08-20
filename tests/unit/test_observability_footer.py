@@ -14,8 +14,8 @@ def _request(request_id: str, model: str, age: float, bytes_out: int | None = No
 
 def test_open_connections_are_shown_as_their_own_block() -> None:
     active = [_request("a", "gpt-5", 1.0)]
-    assert build_footer(active, NOW, 200, connections=2) == "[<-->] 2 conns | gpt-5 1.0s"
-    assert build_footer(active, NOW, 200, connections=1).startswith("[<-->] 1 conn | ")
+    assert build_footer(active, NOW, 200, connections=2) == "[<-->] 2 clients | gpt-5 1.0s"
+    assert build_footer(active, NOW, 200, connections=1).startswith("[<-->] 1 clients | ")
 
 
 def test_connections_are_shown_even_with_nothing_in_flight() -> None:
@@ -23,7 +23,7 @@ def test_connections_are_shown_even_with_nothing_in_flight() -> None:
 
     A pooled client holds its connection between requests, so a drain can be waiting on something the request list cannot show. Without this the footer goes blank and a stalled shutdown is indistinguishable from a finished one — which is exactly the report that prompted the field.
     """
-    assert build_footer([], NOW, 200, connections=1, draining=True) == "[DRIN] 1 conn"
+    assert build_footer([], NOW, 200, connections=1, draining=True) == "[DRIN] 1 clients"
     # Nothing at all to report is still nothing at all.
     assert build_footer([], NOW, 200, connections=0) == ""
 

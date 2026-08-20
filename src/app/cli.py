@@ -170,21 +170,18 @@ async def _serve_pipeline(config: ProxyConfig, options: StandaloneOptions) -> No
         await http_client.aclose()
 
 
-def _plural(count: int, noun: str) -> str:
-    """`1 request` / `2 requests`. A count that reads as broken English reads as a broken program."""
-    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
-
-
 def report_shutdown(report: ShutdownReport) -> None:
     """The last line the process writes: what the shutdown actually did.
 
     Ordered by what an operator is deciding — whether anything was cut off, and whether cleanup finished. A clean drain says so in one short line; anything else names the count, because "2 requests cancelled" is the difference between a restart that was safe and one that was not.
+
+    The noun stays plural at any count. `1 connections` is the reading the count already gives, and branching on it buys a nicety at the cost of a second code path through every line that reports a number — the same trade the footer's connection block settled the same way.
     """
     parts: list[str] = []
     if report.interrupted_connections:
-        parts.append(f"{_plural(report.interrupted_connections, 'connection')} interrupted")
+        parts.append(f"{report.interrupted_connections} connections interrupted")
     if report.cancelled_requests:
-        parts.append(f"{_plural(report.cancelled_requests, 'request')} cancelled")
+        parts.append(f"{report.cancelled_requests} requests cancelled")
     if report.cleanup_timed_out:
         parts.append("cleanup exceeded its budget")
     if report.cleanup_error:

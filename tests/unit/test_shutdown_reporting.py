@@ -132,7 +132,7 @@ def test_a_stop_that_cut_something_off_names_the_count(captured: object, caplog:
         report_shutdown(
             ShutdownReport(stage=ShutdownStage.FINALIZING, interrupted_connections=1, cancelled_requests=2)
         )
-    assert _lines(caplog.records) == ["stopped — 1 connection interrupted, 2 requests cancelled"]
+    assert _lines(caplog.records) == ["stopped — 1 connections interrupted, 2 requests cancelled"]
 
 
 def test_a_cleanup_that_overran_is_not_reported_as_clean(captured: object, caplog: pytest.LogCaptureFixture) -> None:
