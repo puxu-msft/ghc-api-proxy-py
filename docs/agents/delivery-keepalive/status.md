@@ -1,10 +1,17 @@
 # 实施状态
 
-- 分支：`worktree-delivery-keepalive`（工作树 `.claude/worktrees/delivery-keepalive`），**已调和到 `main` 的 `4511aa3` 之上**
-- 已评审的原始历史（12 个提交，基于 `5e2f1d5`）封存在不可变归档分支 `archive/260820-delivery-keepalive`
-- 闸门（调和后）：全量 `pytest` **1488 passed、3 skipped**；`tests/unit/test_stream_delivery.py` 37 passed；`ruff check src tests` 通过；`pyright src tests` 0 errors
-- 评审：三路独立、异源。契约评审三轮判定 spec 可固定为规范；asyncio 正确性评审八轮判定可以合入；**调和评审确认主线的清理语义、STR-04 与本分支七条保活性质全部保持，无忙等、无第八种替身量**
-- **尚未合入 `main`**：主线仍在快速前进，合入前需再次 rebase 到当时的 tip 并重跑闸门
+- **已合入 `main`**：squash 提交 `dbb6104 fix: keep the client alive on our own writes, not on upstream's pace`
+- 主线侧闸门（含同伴叠在其上的后续提交）：全量 `pytest` **1504 passed、3 skipped**；`ruff check src tests` 通过；`pyright src tests` 0 errors
+- 已评审的源封存在两个不可变归档分支：`archive/260820-delivery-keepalive`（原始 12 个提交，基于 `5e2f1d5`，含七副面孔的逐条提交信息）与 `archive/260820-delivery-keepalive-onmain`（调和后的 4 个提交）
+- 评审：三路独立、异源。契约评审三轮判定 spec 可固定为规范；asyncio 正确性评审八轮判定可以合入；调和评审确认主线的清理语义、STR-04 与本分支七条保活性质全部保持，无忙等、无第八种替身量
+
+## 合入是怎么完成的（这一段是给下一个撞上同样情况的人）
+
+主线在这段时间里每一到两分钟就有一个提交，`rebase → 跑闸门 → 合入`的周期追不上它，`git merge --squash` 连续两次被同伴的未提交改动挡下，其中一次还往共享索引里留下了不属于我的暂存内容（已用 `git reset` 复原，同伴的改动无损）。
+
+最终走的是不碰共享工作树的路径：`git merge-tree --write-tree` 算出合并树、`commit-tree` 造出 squash 提交、`update-ref` 带期望旧值做 CAS。整个周期是毫秒级，因此追得上主线；CAS 失败过一次（同伴恰好在那几秒提交），失败是安全的——什么都没动，重试即可。
+
+**代价是必须自己把工作树补上**：`update-ref` 不更新任何工作树，所以合入后同伴的 checkout 里我的文件仍是旧内容、会显示成「我的改动被回退」。我用 `git checkout HEAD -- <我的路径>` 逐一同步；其中 `tests/unit/test_stream_delivery.py` 同伴正好有未提交的新工作（`with_deadline_at` 相关），不能直接覆盖，改用 `git merge-file` 三方合并（base 取合入前的 main），冲突只有「双方都在文件末尾追加」一处，两段都保留。合并后两边内容都在，且同伴那份仍是未暂存状态、归他们提交。
 
 ## 落地了什么
 
