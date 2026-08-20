@@ -141,6 +141,7 @@ def default_registry(config: ModelTranslationConfig | None = None) -> Translator
         partial(
             to_openai_responses,
             system_prompts=settings.to_openai_responses.system_prompts,
+            web_search_domain_restrictions=settings.to_openai_responses.web_search_domain_restrictions,
         ),
     )
     registry.register_response_reader(WireFormat.ANTHROPIC_MESSAGES, from_anthropic_response)

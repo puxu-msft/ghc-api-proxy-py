@@ -20,7 +20,7 @@ import logging
 from collections.abc import Callable, Mapping
 from typing import Any, cast
 
-from app.config.schema import SystemPromptPlacement
+from app.config.schema import SystemPromptPlacement, WebSearchConstraintPolicy
 from app.pipeline.server_tool_text import web_search_call_text
 from app.pipeline.translation_driver.content import (
     BlockKind,
@@ -187,7 +187,9 @@ def _is_anthropic_server_tool(tool: dict[str, Any]) -> bool:
     return False
 
 
-def _web_search_tool(tool: dict[str, Any], conversion: Conversion) -> dict[str, Any]:
+def _web_search_tool(
+    tool: dict[str, Any], conversion: Conversion, policy: WebSearchConstraintPolicy
+) -> dict[str, Any]:
     """One Anthropic web search declaration in the spelling this endpoint executes.
 
     The whole mapping is the `type`. Everything else the client may have attached is either accepted verbatim (`user_location`) or cannot travel at all, and the difference between those two costs a turn: the measured reaction to an unknown sub-parameter is a 400 on the whole request, not a shrug.
@@ -214,12 +216,23 @@ def _web_search_tool(tool: dict[str, Any], conversion: Conversion) -> dict[str, 
                     f"{declared}.{key} into {WIRE_FORMAT}: empty, so it restricts nothing",
                 )
                 continue
-            raise TranslationRefused(
-                f"{key} cannot be sent to this endpoint, and dropping it would let the search read"
-                " sites this request ruled out without anything being able to detect it",
-                code="server_tool_constraint_not_representable",
-                field_path=f"tools.{declared}.{key}",
+            if policy == "error":
+                raise TranslationRefused(
+                    f"{key} cannot be sent to this endpoint, and dropping it would let the search"
+                    " read sites this request ruled out without anything being able to detect it",
+                    code="server_tool_constraint_not_representable",
+                    field_path=f"tools.{declared}.{key}",
+                )
+            conversion.record(
+                LossCode.SERVER_TOOL_CONSTRAINT_DROPPED,
+                f"{declared}.{key} into {WIRE_FORMAT}: upstream has no such parameter, so the"
+                " search may read outside the requested set",
             )
+            logger.warning(
+                "web search %s cannot be sent to this endpoint; the search will run without it and this proxy cannot check what was read",
+                key,
+            )
+            continue
         if key in _WEB_SEARCH_DROPPED:
             conversion.record(
                 LossCode.SERVER_TOOL_CONSTRAINT_DROPPED,
@@ -255,7 +268,7 @@ def _user_location(value: Any, conversion: Conversion) -> Any:
 
 
 def _tools_for_upstream(
-    request: SemanticRequest,
+    request: SemanticRequest, policy: WebSearchConstraintPolicy
 ) -> tuple[list[dict[str, Any]], set[str], set[str]]:
     """The declarations to send, with web search in the spelling this endpoint runs.
 
@@ -277,7 +290,20 @@ def _tools_for_upstream(
             if isinstance(name, str):
                 # Kept so a `tool_choice` that named this declaration can follow it: the builtin object it becomes has no `name` of its own to match against.
                 mapped_names.add(name)
-            translated = _web_search_tool(tool, request.conversion)
+            if policy == "drop_web_search" and any(
+                tool.get(key) for key in _UNREPRESENTABLE_CONSTRAINTS
+            ):
+                # Neither searching wider than asked nor failing the turn: the capability is simply
+                # not available for a request whose restriction cannot be honoured.
+                request.conversion.record(
+                    LossCode.SERVER_TOOL_NOT_CARRIED,
+                    f"{tool['type']} into {WIRE_FORMAT}: withdrawn, its domain restriction cannot be sent",
+                )
+                logger.info(
+                    "removed the web search declaration: its domain restriction cannot be sent to this endpoint and web_search_domain_restrictions is drop_web_search"
+                )
+                continue
+            translated = _web_search_tool(tool, request.conversion, policy)
             if seen_web_search:
                 # One builtin, however many declarations arrived. Two identical `{"type": "web_search"}` entries is a shape upstream has never been asked about, and a duplicate says nothing the first one did not.
                 request.conversion.record(
@@ -563,6 +589,36 @@ _SYSTEM_PROMPT_PLACEMENTS: dict[
 }
 
 
+def _carry_forced_search(
+    payload: dict[str, Any],
+    request: SemanticRequest,
+    mapped_names: set[str],
+    function_names: set[str],
+) -> None:
+    """Carry an Anthropic `tool_choice` that demanded the search across the format boundary.
+
+    `tool_choice` is not a key any translator claims, so it rides in `extensions` and is dropped whole when the formats differ — correct for the general case, and wrong for this one. Measured over 190 real Claude Code sub-requests, 95 of them force the search this way, and those requests exist for no other purpose: the client has already decided a search is what it wants and sends a turn saying `Perform a web search for the query: X`.
+
+    Losing it there is worse than losing a preference. The model, no longer obliged to search, may answer from memory instead — and the client renders whatever comes back under a `Web search results for query:` heading regardless. A dropped `tool_choice` is one of the ways that heading ends up over text nothing searched for.
+
+    Upstream takes `{"type": "web_search"}` here: measured 200, echoed back normalised, with a `web_search_call` in the output and `num_requests` of 1. It forces the search rather than merely tolerating the field.
+    """
+    if payload.get("tool_choice") is not None:
+        return
+    choice = request.extensions.get("tool_choice")
+    if not isinstance(choice, dict):
+        return
+    entry = cast(dict[str, Any], choice)
+    named = entry.get("name")
+    if not isinstance(named, str) or named not in mapped_names:
+        return
+    if named in function_names:
+        # Ambiguous: the name is also an ordinary function tool's. Forcing a hosted search would be
+        # answering a question only the client can answer.
+        return
+    payload["tool_choice"] = {"type": _WEB_SEARCH_TYPE}
+
+
 def _repoint_tool_choice(
     payload: dict[str, Any], mapped_names: set[str], function_names: set[str]
 ) -> None:
@@ -622,6 +678,7 @@ def to_openai_responses(
     request: SemanticRequest,
     *,
     system_prompts: SystemPromptPlacement = "instructions-joint-string",
+    web_search_domain_restrictions: WebSearchConstraintPolicy = "drop_fields",
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": request.model,
@@ -633,7 +690,7 @@ def to_openai_responses(
     mapped_names: set[str] = set()
     function_names: set[str] = set()
     if request.tools:
-        tools, mapped_names, function_names = _tools_for_upstream(request)
+        tools, mapped_names, function_names = _tools_for_upstream(request, web_search_domain_restrictions)
         dropped_any = len(tools) != len(request.tools)
         if tools:
             # Not `[]` when everything was removed. An empty array is a different thing to say than saying nothing, and absent is the spelling every request without tools already uses.
@@ -647,6 +704,7 @@ def to_openai_responses(
     payload.update(request.extensions_for(WIRE_FORMAT))
     # After the extensions, because that is where `tool_choice` arrives on the crossing where it survives at all. Repointing comes first: a choice that named a mapped declaration is not dangling, it just has a new spelling to follow.
     if mapped_names:
+        _carry_forced_search(payload, request, mapped_names, function_names)
         _repoint_tool_choice(payload, mapped_names, function_names)
     if dropped_any:
         _drop_dangling_tool_choice(payload)

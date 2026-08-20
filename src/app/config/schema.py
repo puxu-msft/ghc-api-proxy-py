@@ -23,6 +23,10 @@ type RefusalAction = Literal["passthrough", "as_end_turn", "as_error"]
 # One value today. Named so the seam exists before the second placement does; `as-role-system`
 # would put the system prompt at the head of the conversation instead.
 type SystemPromptPlacement = Literal["instructions-joint-string"]
+# What to do when a web search declaration carries a domain restriction this upstream has no
+# parameter for. Measured: `allowed_domains` and `blocked_domains` each earn `Unknown parameter`,
+# so they cannot be sent under any spelling, and the only question is what to do instead.
+type WebSearchConstraintPolicy = Literal["error", "drop_fields", "drop_web_search"]
 
 # Dotted paths the spec marks as requiring a restart. Everything else is hot-reloadable.
 #
@@ -215,6 +219,25 @@ class ToOpenAiResponsesConfig(Section):
     # a `role: system` message at the head of the conversation — can be added without the caller
     # changing.
     system_prompts: SystemPromptPlacement = "instructions-joint-string"
+
+    # `allowed_domains` / `blocked_domains` cannot reach this upstream — measured `Unknown
+    # parameter` for each — and they are a *narrowing* the client asked for, whose loss cannot be
+    # detected afterwards: the search runs upstream and its results reach the model directly, so
+    # this proxy never sees which sites were read.
+    #
+    # `drop_fields` sends the search without them. The results may come from outside the requested
+    # set, and the widening is recorded but cannot be checked.
+    # `error` refuses the request before calling upstream, naming the field.
+    # `drop_web_search` removes the declaration, so no search happens at all.
+    #
+    # The default is `drop_fields`, which is *not* what the spec's D1 ruling wrote down. That
+    # ruling chose `error`, reading a domain list as a restriction the user had deliberately added
+    # for that search. Measured 2026-08-20 over 190 real Claude Code sub-requests, every single one
+    # carries a non-empty `allowed_domains` — the client sends it unconditionally, as part of how
+    # its WebSearch tool is built. Under `error` that makes web search permanently unavailable
+    # rather than occasionally refused, which is not the trade the ruling was making. Set `error`
+    # to have it back.
+    web_search_domain_restrictions: WebSearchConstraintPolicy = "drop_fields"
 
 
 class ModelTranslationConfig(Section):

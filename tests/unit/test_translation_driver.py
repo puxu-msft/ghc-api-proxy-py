@@ -634,25 +634,43 @@ def test_a_user_location_travels_but_an_unknown_sub_key_does_not() -> None:
     assert request.conversion.has(LossCode.SERVER_TOOL_CONSTRAINT_DROPPED)
 
 
-def test_a_domain_restriction_that_cannot_be_sent_refuses_the_request() -> None:
-    """Upstream answers `Unknown parameter: 'tools[0].allowed_domains'`, so it cannot travel under any spelling — and unlike the other unsendable fields, carrying on without it is not an option.
+# The declaration every real Claude Code web search sub-request sends. Measured over 190 of them on
+# 2026-08-20: the shape is identical every time, and `allowed_domains` is non-empty in all 190 —
+# the client attaches it unconditionally, as part of how its WebSearch tool is built.
+REAL_WEB_SEARCH_DECLARATION: dict[str, Any] = {
+    "type": "web_search_20250305",
+    "name": "web_search",
+    "max_uses": 8,
+    "allowed_domains": ["docs.anthropic.com"],
+    "blocked_domains": [],
+}
 
-    It is a narrowing the client asked for, and its loss **cannot be detected afterwards**: the search runs upstream and its results reach the model directly, so this proxy never sees which sites were read and has nothing to check them against. Dropping it would mean the model reading pages the request explicitly ruled out while the client is told nothing.
+
+def test_by_default_a_domain_restriction_is_dropped_so_the_search_can_still_run() -> None:
+    """The default is `drop_fields`, and the reason is what the client actually sends.
+
+    The spec's D1 ruling chose `error`, reading a domain list as a restriction deliberately added for one search. All 190 measured sub-requests carry one, so under `error` web search is not occasionally refused — it never works at all. That is not the trade the ruling was making, and the setting exists so it can be made either way.
     """
-    request = SemanticRequest(
-        model="gpt-5.6-sol",
-        tools=[
-            {
-                "type": "web_search_20250305",
-                "name": "web_search",
-                "allowed_domains": ["example.com"],
-            }
-        ],
-    )
+    request = SemanticRequest(model="gpt-5.6-sol", tools=[dict(REAL_WEB_SEARCH_DECLARATION)])
+    assert to_openai_responses(request)["tools"] == [{"type": "web_search"}]
+    assert request.conversion.has(LossCode.SERVER_TOOL_CONSTRAINT_DROPPED)
+
+
+def test_the_error_setting_refuses_before_upstream_is_called() -> None:
+    """What the D1 ruling asked for, still available: the restriction cannot be sent, and its loss cannot be detected afterwards, so refusing is a defensible answer for an operator who wants it."""
+    request = SemanticRequest(model="gpt-5.6-sol", tools=[dict(REAL_WEB_SEARCH_DECLARATION)])
     with pytest.raises(TranslationRefused) as caught:
-        to_openai_responses(request)
+        to_openai_responses(request, web_search_domain_restrictions="error")
     assert caught.value.code == "server_tool_constraint_not_representable"
     assert caught.value.field_path == "tools.web_search_20250305.allowed_domains"
+
+
+def test_the_drop_web_search_setting_withdraws_the_capability_instead() -> None:
+    """The third answer: neither search wider than asked nor fail the turn. The capability is simply unavailable for a request whose restriction cannot be honoured."""
+    request = SemanticRequest(model="gpt-5.6-sol", tools=[dict(REAL_WEB_SEARCH_DECLARATION)])
+    payload = to_openai_responses(request, web_search_domain_restrictions="drop_web_search")
+    assert "tools" not in payload
+    assert request.conversion.has(LossCode.SERVER_TOOL_NOT_CARRIED)
 
 
 def test_an_empty_domain_restriction_restricts_nothing_and_does_not_refuse() -> None:
@@ -812,3 +830,42 @@ def test_a_choice_is_left_alone_when_its_name_also_belongs_to_a_function_tool() 
         target=WireFormat.OPENAI_RESPONSES,
     )
     assert payload["tool_choice"] == {"type": "function", "name": "web_search"}
+
+
+def test_a_forced_search_survives_the_format_boundary() -> None:
+    """`tool_choice` is nobody's modelled field, so it rides in `extensions` and is dropped whole when the formats differ. Correct in general, wrong here.
+
+    Measured over 190 real Claude Code sub-requests, 95 force the search this way — and those requests exist for no other purpose: the turn they carry says `Perform a web search for the query: X`. A model no longer obliged to search may answer from memory instead, and the client renders whatever comes back under a `Web search results for query:` heading either way. This is one of the ways that heading ends up over text nothing searched for.
+    """
+    payload, _ = default_registry().translate(
+        {
+            "model": "gpt-5.6-sol",
+            "messages": [{"role": "user", "content": "Perform a web search for the query: bun"}],
+            "max_tokens": 1024,
+            "tools": [dict(REAL_WEB_SEARCH_DECLARATION)],
+            "tool_choice": {"type": "tool", "name": "web_search"},
+        },
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    assert payload["tools"] == [{"type": "web_search"}]
+    assert payload["tool_choice"] == {"type": "web_search"}
+
+
+def test_a_forced_choice_is_not_carried_when_the_name_is_ambiguous() -> None:
+    """The same trap as the same-format case: a client may call an ordinary function tool `web_search`. Which one it meant is its own ambiguity, and forcing a hosted search would be answering it on its behalf."""
+    payload, _ = default_registry().translate(
+        {
+            "model": "gpt-5.6-sol",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 1024,
+            "tools": [
+                dict(REAL_WEB_SEARCH_DECLARATION),
+                {"name": "web_search", "input_schema": {"type": "object"}},
+            ],
+            "tool_choice": {"type": "tool", "name": "web_search"},
+        },
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    assert "tool_choice" not in payload

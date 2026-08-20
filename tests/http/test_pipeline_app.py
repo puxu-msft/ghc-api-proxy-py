@@ -340,12 +340,73 @@ def test_a_model_not_listed_as_searching_does_not_get_the_builtin() -> None:
     assert b"web_search" not in seen[-1].read()
 
 
-def test_a_domain_restriction_refuses_before_upstream_is_called() -> None:
-    """`allowed_domains` cannot be sent to this endpoint, and dropping it would let the search read sites the request ruled out — silently, because the results never pass through this proxy.
+def test_the_shape_claude_code_really_sends_reaches_upstream_as_a_search() -> None:
+    """The end-to-end case the whole feature exists for, in the shape it actually arrives in.
 
-    Asserted on `seen` being empty as much as on the status: the refusal is only worth anything if it happens *before* the call. A 400 raised after upstream had already searched would tell the client its restriction failed while the model had already read the pages.
+    Measured over 190 real sub-requests on 2026-08-20: `tools` holds exactly one entry, always with a non-empty `allowed_domains`, and 95 of them force the choice. Every earlier test here used a shape nobody sends — and with the domain policy defaulting to `error`, that difference was the difference between "web search works" and "web search never works".
+
+    The forced choice is asserted beside the tools because the sub-request has no other purpose: it carries a turn reading `Perform a web search for the query: X`, and a model no longer obliged to search may answer from memory while the client still labels the reply as search results.
     """
-    client, seen = make_client(lambda _: httpx.Response(200, json={"id": "resp_1"}))
+    client, seen = make_client(
+        lambda _: httpx.Response(200, json={"id": "resp_1"}),
+        overrides={
+            "model_providers": {
+                "ghc": {
+                    "type": "github_copilot",
+                    "api_base_url": BASE_URL,
+                    "models_support_web_search": ["gpt-model"],
+                }
+            }
+        },
+    )
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "gpt-model",
+            "system": "You are an assistant.",
+            "messages": [
+                {"role": "user", "content": "Perform a web search for the query: bun 1.3"}
+            ],
+            "max_tokens": 1024,
+            "tools": [
+                {
+                    "type": "web_search_20250305",
+                    "name": "web_search",
+                    "max_uses": 8,
+                    "allowed_domains": ["docs.anthropic.com"],
+                    "blocked_domains": [],
+                }
+            ],
+            "tool_choice": {"type": "tool", "name": "web_search"},
+        },
+    )
+
+    assert response.status_code == 200
+    sent = orjson.loads(seen[-1].read())
+    assert sent["tools"] == [{"type": "web_search"}]
+    assert sent["tool_choice"] == {"type": "web_search"}
+
+
+def test_a_domain_restriction_refuses_before_upstream_is_called() -> None:
+    """Under `web_search_domain_restrictions: error`, which is not the default and is what the spec's D1 ruling asked for.
+
+    Asserted on `seen` being empty as much as on the status: the refusal is only worth anything if it happens *before* the call. A 400 raised after upstream had already searched would tell the client its restriction failed while the model had already read the pages — which is the one thing this setting exists to prevent.
+    """
+    client, seen = make_client(
+        lambda _: httpx.Response(200, json={"id": "resp_1"}),
+        overrides={
+            "model_translation": {
+                "to_openai_responses": {"web_search_domain_restrictions": "error"}
+            },
+            "model_providers": {
+                "ghc": {
+                    "type": "github_copilot",
+                    "api_base_url": BASE_URL,
+                    "models_support_web_search": ["gpt-model"],
+                }
+            },
+        },
+    )
     response = client.post(
         "/v1/messages",
         json={
