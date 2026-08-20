@@ -1181,7 +1181,7 @@ def test_a_route_whose_reply_cannot_be_read_claims_nothing_about_it(
 
     The regression this pins: summarising through a record whose stop reason defaults to `end_turn` turned "nobody said" into "finished cleanly", so every one of these lines claimed an outcome no upstream had reported. An absent `content` is indistinguishable from a reply that had none, which is exactly why the empty summary has to be refused rather than absorbed.
 
-    Reporting nothing here is the honest state and also the pre-existing one; giving these routes a real summary is open work, tracked in `docs/agents/tui-request-log/deferred.md`.
+    Reporting nothing here is the honest state and also the pre-existing one; giving these routes a real summary is open work, tracked in `.dev/docs/tui/deferred.md`.
     """
     client, _ = make_client(
         lambda _: httpx.Response(

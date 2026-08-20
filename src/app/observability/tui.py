@@ -63,7 +63,7 @@ def reduce_tui(state: TuiState, action: TuiAction) -> TuiState:
 class ProxyTui(App[None]):
     """Textual application shell; runtime subscription remains opt-in.
 
-    Unused by the live footer below, which renders through `rich.Live` instead. A textual App owns the whole screen or an inline block, and neither produces the shape this project wants — a request log scrolling in native scrollback with one line pinned under it. Kept because the panel and detail views the reducer above already models are the plausible future caller; see `docs/agents/tui-request-log/SPEC.md` for what that would have to re-decide.
+    Unused by the live footer below, which renders through `rich.Live` instead. A textual App owns the whole screen or an inline block, and neither produces the shape this project wants — a request log scrolling in native scrollback with one line pinned under it. Kept because the panel and detail views the reducer above already models are the plausible future caller; see `.dev/docs/tui/spec.md` for what that would have to re-decide.
     """
 
 

@@ -339,7 +339,7 @@ def reply_summary(handled: HandledRequest, payload: dict[str, Any]) -> Terminal 
 
     `payload` is in the **client's** format by the time it gets here, which is what decides whether it can be read at all: only an Anthropic-shaped body has the `content` blocks the reader wants. An inbound `/responses` or `/chat/completions` request keeps its own shape end to end, and reading one of those as Anthropic finds nothing — silently, since an absent `content` is indistinguishable from a reply that had none.
 
-    Returning `None` rather than an empty summary is the honest answer: those lines carry no reasoning or tool fields today, which is a gap worth closing but not one to paper over with a record that says a reply had nothing in it. See `docs/agents/tui-request-log/deferred.md`.
+    Returning `None` rather than an empty summary is the honest answer: those lines carry no reasoning or tool fields today, which is a gap worth closing but not one to paper over with a record that says a reply had nothing in it. See `.dev/docs/tui/deferred.md`.
 
     The dialect is separate and comes from the route, because which *words* to use is about the upstream leg while which *reader* to use is about the client leg, and on a translated route those are two different formats.
     """
