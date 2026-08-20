@@ -15,7 +15,11 @@ from app.pipeline.translation_driver.registry import (
     inbound_name,
     outbound_name,
 )
-from app.pipeline.translation_driver.semantic import LossCode, SemanticRequest
+from app.pipeline.translation_driver.semantic import (
+    LossCode,
+    SemanticRequest,
+    TranslationRefused,
+)
 
 # The worked example from model-translation.md.
 ANTHROPIC_SYSTEM: list[dict[str, Any]] = [
@@ -630,10 +634,10 @@ def test_a_user_location_travels_but_an_unknown_sub_key_does_not() -> None:
     assert request.conversion.has(LossCode.SERVER_TOOL_CONSTRAINT_DROPPED)
 
 
-def test_a_domain_restriction_cannot_be_sent_and_is_recorded_rather_than_dropped_quietly() -> None:
-    """Upstream answers `Unknown parameter: 'tools[0].allowed_domains'`, so it cannot travel under any spelling.
+def test_a_domain_restriction_that_cannot_be_sent_refuses_the_request() -> None:
+    """Upstream answers `Unknown parameter: 'tools[0].allowed_domains'`, so it cannot travel under any spelling — and unlike the other unsendable fields, carrying on without it is not an option.
 
-    Recorded rather than dropped in silence because of what it is: a narrowing the client asked for, whose loss **cannot be detected afterwards**. The search runs upstream and its results reach the model directly, so this proxy never sees which sites were read. `max_uses` is dropped on the same wire but is only a ceiling on cost, and upstream reports the count back.
+    It is a narrowing the client asked for, and its loss **cannot be detected afterwards**: the search runs upstream and its results reach the model directly, so this proxy never sees which sites were read and has nothing to check them against. Dropping it would mean the model reading pages the request explicitly ruled out while the client is told nothing.
     """
     request = SemanticRequest(
         model="gpt-5.6-sol",
@@ -642,17 +646,64 @@ def test_a_domain_restriction_cannot_be_sent_and_is_recorded_rather_than_dropped
                 "type": "web_search_20250305",
                 "name": "web_search",
                 "allowed_domains": ["example.com"],
-                "max_uses": 5,
             }
         ],
     )
+    with pytest.raises(TranslationRefused) as caught:
+        to_openai_responses(request)
+    assert caught.value.code == "server_tool_constraint_not_representable"
+    assert caught.value.field_path == "tools.web_search_20250305.allowed_domains"
+
+
+def test_an_empty_domain_restriction_restricts_nothing_and_does_not_refuse() -> None:
+    """An empty list narrows nothing, so nothing is lost by not sending it. Refusing over one would fail a request that asked for no restriction at all."""
+    request = SemanticRequest(
+        model="gpt-5.6-sol",
+        tools=[
+            {"type": "web_search_20250305", "name": "web_search", "blocked_domains": []},
+        ],
+    )
     assert to_openai_responses(request)["tools"] == [{"type": "web_search"}]
-    dropped = [
-        loss for loss in request.conversion.losses
+    assert request.conversion.has(LossCode.SERVER_TOOL_CONSTRAINT_DROPPED)
+
+
+def test_max_uses_is_dropped_rather_than_refused() -> None:
+    """The other side of the line. It cannot be sent either, but it is a ceiling on *cost*: losing it means more searches and more latency, and reverses no claim the client made. Upstream reports `tool_usage.web_search.num_requests` back, so what happened stays observable."""
+    request = SemanticRequest(
+        model="gpt-5.6-sol",
+        tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}],
+    )
+    assert to_openai_responses(request)["tools"] == [{"type": "web_search"}]
+    assert any(
+        "max_uses" in loss.detail
+        for loss in request.conversion.losses
         if loss.code is LossCode.SERVER_TOOL_CONSTRAINT_DROPPED
-    ]
-    assert any("allowed_domains" in loss.detail for loss in dropped), dropped
-    assert any("max_uses" in loss.detail for loss in dropped), dropped
+    ), request.conversion.losses
+
+
+def test_a_field_outside_the_allowed_set_refuses_rather_than_being_stripped() -> None:
+    """An unknown field today is a field with meaning tomorrow. Removing one silently turns whatever it asked for into a no-op — the same failure as the domain lists, arriving later and with nobody watching for it."""
+    request = SemanticRequest(
+        model="gpt-5.6-sol",
+        tools=[{"type": "web_search_20250305", "name": "web_search", "future_field": 1}],
+    )
+    with pytest.raises(TranslationRefused) as caught:
+        to_openai_responses(request)
+    assert caught.value.code == "unsupported_field"
+    assert caught.value.field_path == "tools.web_search_20250305.future_field"
+
+
+def test_two_declarations_become_one_builtin() -> None:
+    """Two identical `{"type": "web_search"}` entries is a shape upstream has never been asked about, and the second says nothing the first did not."""
+    request = SemanticRequest(
+        model="gpt-5.6-sol",
+        tools=[
+            {"type": "web_search_20250305", "name": "web_search"},
+            {"type": "web_search_20260101", "name": "web_search"},
+        ],
+    )
+    assert to_openai_responses(request)["tools"] == [{"type": "web_search"}]
+    assert request.conversion.has(LossCode.SERVER_TOOL_CONSTRAINT_DROPPED)
 
 
 def test_a_choice_that_named_the_declaration_follows_it_into_the_builtin_spelling() -> None:
@@ -740,3 +791,24 @@ def test_a_search_the_upstream_ran_is_reported_rather_than_dropped() -> None:
     # inflates every later request, and this project carries no continuation that could spend it.
     assert "x" * 32 not in json.dumps(payload)
     assert semantic.conversion.lossless, semantic.conversion.losses
+
+
+def test_a_choice_is_left_alone_when_its_name_also_belongs_to_a_function_tool() -> None:
+    """The trap the spec names: a client may call an ordinary function tool `web_search`.
+
+    With both declared, which one the choice meant is the client's own ambiguity, and answering it by forcing a hosted search would be this proxy inventing the answer — turning a call the client wrote into a search it never asked for.
+    """
+    payload, _ = default_registry().translate(
+        {
+            "model": "gpt-5.6-sol",
+            "input": [],
+            "tools": [
+                {"type": "web_search_20250305", "name": "web_search"},
+                {"type": "function", "name": "web_search", "parameters": {"type": "object"}},
+            ],
+            "tool_choice": {"type": "function", "name": "web_search"},
+        },
+        source=WireFormat.OPENAI_RESPONSES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    assert payload["tool_choice"] == {"type": "function", "name": "web_search"}

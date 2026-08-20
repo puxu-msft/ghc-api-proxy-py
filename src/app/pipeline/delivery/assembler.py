@@ -277,7 +277,18 @@ class ResponsesAssembler:
         key = self._item_key(data)
         draft = self._drafts.pop(key, None)
         if draft is None:
-            return ()
+            raw = data.get("item")
+            item = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+            if str(item.get("type", "")) != WEB_SEARCH_CALL:
+                return ()
+            # A `web_search_call` that closes without ever having opened. This item is whole on
+            # `done` — it has no deltas and nothing to accumulate — so the `added` it skipped
+            # carried nothing this needs, and refusing to close it would throw away a search that
+            # actually ran, silently. The same regression is on record in the reference project,
+            # where the item vanished with no observation of any kind. Registering it late costs
+            # nothing; the alternative costs the turn's search.
+            draft = _Draft(index=self._order, kind=WEB_SEARCH_CALL, payload=dict(item))
+            self._order += 1
         kind = draft.kind
         if draft.kind == TOOL_USE:
             self._saw_tool_call = True

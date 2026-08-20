@@ -34,6 +34,7 @@ from app.pipeline.translation_driver.semantic import (
     LossCode,
     SemanticRequest,
     SystemBlock,
+    TranslationRefused,
     system_blocks_from_value,
 )
 
@@ -150,8 +151,14 @@ _ANTHROPIC_SERVER_TOOL_FAMILIES: tuple[str, ...] = ("web_search_",)
 # The spelling this endpoint answers 200 to and actually executes. Upstream normalises it to `web_search_preview` in the tool echo of its reply, which is how we know the two are the same thing to it.
 _WEB_SEARCH_TYPE = "web_search"
 
-# What the endpoint accepts beside `type`, measured. `user_location` is written back verbatim in the 200 response; `max_uses`, `allowed_domains` and `blocked_domains` each earn `Unknown parameter: 'tools[0].<field>'` — three independent measurements, so they cannot travel under any spelling.
+# What the endpoint accepts beside `type`, measured: `user_location` is written back verbatim in the 200 response.
 _WEB_SEARCH_PASSTHROUGH = frozenset({"user_location"})
+
+# Present on the Anthropic declaration and deliberately not forwarded. `name` has no place in a builtin tool object; `cache_control` is a prompt-caching marker this endpoint neither takes nor needs, since it caches by prefix on its own.
+_WEB_SEARCH_IGNORED = frozenset({"type", "name", "cache_control"})
+
+# Cannot travel — `Unknown parameter: 'tools[0].max_uses'` — but losing it reverses nothing. It is a ceiling on cost, so the turn goes on without it and upstream reports `tool_usage.web_search.num_requests` back for anyone who wants to know what it actually did.
+_WEB_SEARCH_DROPPED = frozenset({"max_uses"})
 
 # The keys of `user_location` this endpoint has been seen to accept and echo. Anything else is removed rather than forwarded: the measured reaction to an unknown sub-parameter is a 400 on the whole request, so passing one through would cost the turn to carry a field upstream does not know.
 _USER_LOCATION_KEYS = frozenset({"type", "city", "region", "country", "timezone"})
@@ -187,31 +194,43 @@ def _web_search_tool(tool: dict[str, Any], conversion: Conversion) -> dict[str, 
 
     `max_uses` is dropped and recorded. It is a *ceiling on cost*, so losing it means more searches and more latency, but it reverses no claim the client made — and upstream reports `tool_usage.web_search.num_requests` back, so what actually happened stays observable.
 
-    `allowed_domains` / `blocked_domains` are different in kind and are recorded at WARNING for it. They are a narrowing the client asked for, and dropping one turns a restriction into a no-op that **cannot be detected after the fact**: the search runs upstream and its results reach the model directly, so this proxy never sees which sites were read and has nothing to check them against. The spec's ruling (§3.4, D1) is that this should be configurable and refuse the request by default; that configuration does not exist yet, so the loss is made loud rather than silent. Recorded in `docs/tmp/260820-websearch-responses-leg-400-fix.md` as the gap it is.
+    `allowed_domains` / `blocked_domains` refuse the request instead. They are a narrowing the client asked for, and dropping one turns a restriction into a no-op that **cannot be detected after the fact**: the search runs upstream and its results reach the model directly, so this proxy never sees which sites were read and has nothing to check them against. Carrying on would mean the model reading pages the client explicitly ruled out while the client is told nothing. The spec (§3.4, D1) rules this configurable with three settings and `error` as the default; the configuration does not exist yet, so what is implemented here is that default.
+
+    A field outside the allowed set refuses too, rather than being stripped. An unknown field today is a field with meaning tomorrow, and silently removing one turns whatever it asked for into a no-op — the same failure as the domain lists, arriving later and with nobody watching for it.
     """
     mapped: dict[str, Any] = {"type": _WEB_SEARCH_TYPE}
     declared = cast(str, tool.get("type"))
     for key, value in tool.items():
-        if key in {"type", "name", "cache_control"}:
-            # `name` has no place in a builtin tool object, and `cache_control` is a prompt-caching
-            # marker this endpoint neither takes nor needs.
+        if key in _WEB_SEARCH_IGNORED:
             continue
         if key in _WEB_SEARCH_PASSTHROUGH:
             mapped[key] = _user_location(value, conversion) if key == "user_location" else value
             continue
-        if key in _UNREPRESENTABLE_CONSTRAINTS and value:
+        if key in _UNREPRESENTABLE_CONSTRAINTS:
+            if not value:
+                # An empty list narrows nothing, so there is nothing to lose by not sending it.
+                conversion.record(
+                    LossCode.SERVER_TOOL_CONSTRAINT_DROPPED,
+                    f"{declared}.{key} into {WIRE_FORMAT}: empty, so it restricts nothing",
+                )
+                continue
+            raise TranslationRefused(
+                f"{key} cannot be sent to this endpoint, and dropping it would let the search read"
+                " sites this request ruled out without anything being able to detect it",
+                code="server_tool_constraint_not_representable",
+                field_path=f"tools.{declared}.{key}",
+            )
+        if key in _WEB_SEARCH_DROPPED:
             conversion.record(
                 LossCode.SERVER_TOOL_CONSTRAINT_DROPPED,
                 f"{declared}.{key} into {WIRE_FORMAT}: upstream has no such parameter",
             )
-            logger.warning(
-                "web search %s was requested but cannot be sent to this endpoint; the search will run without it and the proxy cannot check what was read",
-                key,
-            )
             continue
-        conversion.record(
-            LossCode.SERVER_TOOL_CONSTRAINT_DROPPED,
-            f"{declared}.{key} into {WIRE_FORMAT}: upstream has no such parameter",
+        raise TranslationRefused(
+            f"{key} is not a field this endpoint's web search accepts, and removing it would"
+            " silently discard whatever it asked for",
+            code="unsupported_field",
+            field_path=f"tools.{declared}.{key}",
         )
     return mapped
 
@@ -235,7 +254,9 @@ def _user_location(value: Any, conversion: Conversion) -> Any:
     return {key: item for key, item in entry.items() if key in _USER_LOCATION_KEYS}
 
 
-def _tools_for_upstream(request: SemanticRequest) -> tuple[list[dict[str, Any]], set[str]]:
+def _tools_for_upstream(
+    request: SemanticRequest,
+) -> tuple[list[dict[str, Any]], set[str], set[str]]:
     """The declarations to send, with web search in the spelling this endpoint runs.
 
     Anthropic's dated spelling costs the whole turn here; `{"type": "web_search"}` is accepted and the upstream really executes the search, returning the answer with the results already folded into it. So the declaration is translated rather than removed — removing it was this repair's first form and it traded a broken turn for a silently missing capability.
@@ -247,6 +268,8 @@ def _tools_for_upstream(request: SemanticRequest) -> tuple[list[dict[str, Any]],
     kept: list[dict[str, Any]] = []
     mapped: list[str] = []
     mapped_names: set[str] = set()
+    function_names: set[str] = set()
+    seen_web_search = False
     for tool in request.tools:
         if _is_anthropic_server_tool(tool):
             mapped.append(cast(str, tool["type"]))
@@ -254,8 +277,20 @@ def _tools_for_upstream(request: SemanticRequest) -> tuple[list[dict[str, Any]],
             if isinstance(name, str):
                 # Kept so a `tool_choice` that named this declaration can follow it: the builtin object it becomes has no `name` of its own to match against.
                 mapped_names.add(name)
-            kept.append(_web_search_tool(tool, request.conversion))
+            translated = _web_search_tool(tool, request.conversion)
+            if seen_web_search:
+                # One builtin, however many declarations arrived. Two identical `{"type": "web_search"}` entries is a shape upstream has never been asked about, and a duplicate says nothing the first one did not.
+                request.conversion.record(
+                    LossCode.SERVER_TOOL_CONSTRAINT_DROPPED,
+                    f"{tool['type']} into {WIRE_FORMAT}: merged into the web search already declared",
+                )
+                continue
+            seen_web_search = True
+            kept.append(translated)
             continue
+        ordinary = tool.get("name")
+        if isinstance(ordinary, str):
+            function_names.add(ordinary)
         kept.append(_function_tool(tool))
     if mapped:
         # INFO rather than DEBUG: a client with web search switched on triggers this every request, so it is a setting and not a warning — but it is also the only place an operator can see that the declaration they sent is not the one that went out.
@@ -265,7 +300,7 @@ def _tools_for_upstream(request: SemanticRequest) -> tuple[list[dict[str, Any]],
             ", ".join(sorted(mapped)),
             _WEB_SEARCH_TYPE,
         )
-    return kept, mapped_names
+    return kept, mapped_names, function_names
 
 
 def blocks_from_item(item: dict[str, Any]) -> tuple[str, tuple[ContentBlock, ...]]:
@@ -528,7 +563,9 @@ _SYSTEM_PROMPT_PLACEMENTS: dict[
 }
 
 
-def _repoint_tool_choice(payload: dict[str, Any], mapped_names: set[str]) -> None:
+def _repoint_tool_choice(
+    payload: dict[str, Any], mapped_names: set[str], function_names: set[str]
+) -> None:
     """Follow a `tool_choice` that named a web search declaration into the builtin spelling.
 
     A builtin tool object carries no `name` — it is `{"type": "web_search"}` and nothing else — so a choice that named the Anthropic declaration now points at something with no name to match. Left alone it costs the turn on its own account, which would be the mapping trading one rejection for another.
@@ -542,8 +579,14 @@ def _repoint_tool_choice(payload: dict[str, Any], mapped_names: set[str]) -> Non
         return
     entry = cast(dict[str, Any], choice)
     named = entry.get("name")
-    if isinstance(named, str) and named in mapped_names:
-        payload["tool_choice"] = {"type": _WEB_SEARCH_TYPE}
+    if not isinstance(named, str) or named not in mapped_names:
+        return
+    if named in function_names:
+        # The name resolves to an ordinary function tool as well. Which one the client meant is its
+        # own ambiguity to own, and answering it by forcing a hosted search would be this proxy
+        # inventing the answer — so the choice is left exactly as it arrived.
+        return
+    payload["tool_choice"] = {"type": _WEB_SEARCH_TYPE}
 
 
 def _drop_dangling_tool_choice(payload: dict[str, Any]) -> None:
@@ -588,8 +631,9 @@ def to_openai_responses(
         _SYSTEM_PROMPT_PLACEMENTS[system_prompts](payload, request)
     dropped_any = False
     mapped_names: set[str] = set()
+    function_names: set[str] = set()
     if request.tools:
-        tools, mapped_names = _tools_for_upstream(request)
+        tools, mapped_names, function_names = _tools_for_upstream(request)
         dropped_any = len(tools) != len(request.tools)
         if tools:
             # Not `[]` when everything was removed. An empty array is a different thing to say than saying nothing, and absent is the spelling every request without tools already uses.
@@ -603,7 +647,7 @@ def to_openai_responses(
     payload.update(request.extensions_for(WIRE_FORMAT))
     # After the extensions, because that is where `tool_choice` arrives on the crossing where it survives at all. Repointing comes first: a choice that named a mapped declaration is not dangling, it just has a new spelling to follow.
     if mapped_names:
-        _repoint_tool_choice(payload, mapped_names)
+        _repoint_tool_choice(payload, mapped_names, function_names)
     if dropped_any:
         _drop_dangling_tool_choice(payload)
     return payload

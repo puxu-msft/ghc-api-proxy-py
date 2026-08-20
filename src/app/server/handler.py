@@ -41,6 +41,7 @@ from app.pipeline.retry import RetryLedger
 from app.pipeline.routing import Route, RoutingError, decide_route
 from app.pipeline.timeouts import resolve_timeout
 from app.pipeline.translation_driver.registry import TranslatorNotFound
+from app.pipeline.translation_driver.semantic import TranslationRefused
 from app.server.composition import Chain
 from app.tokenization.estimators import estimate_anthropic_input
 
@@ -248,7 +249,11 @@ def error_status(error: BaseException) -> int:
     """
     if isinstance(
         error,
-        ProviderError | RoutingError | TranslatorNotFound | CountTokensRequestError,
+        ProviderError
+        | RoutingError
+        | TranslatorNotFound
+        | CountTokensRequestError
+        | TranslationRefused,
     ):
         return 400
     if isinstance(error, CountTokensUnavailable):
@@ -279,6 +284,17 @@ def error_headers(error: BaseException) -> dict[str, str]:
 
 def error_body(error: BaseException) -> dict[str, Any]:
     body: dict[str, Any] = {"type": type(error).__name__, "message": str(error)}
+    code = getattr(error, "code", "")
+    if isinstance(code, str) and code:
+        # A stable identifier for what went wrong, where the class name is only a category and the
+        # message is prose. A client that wants to react to one particular refusal — rather than
+        # matching on English that may be reworded — has this to key on.
+        body["code"] = code
+    field_path = getattr(error, "field_path", "")
+    if isinstance(field_path, str) and field_path:
+        # Which part of the request caused it. A refusal that names the field is one the client can
+        # act on; one that does not leaves it to guess which of its tools was the problem.
+        body["field_path"] = field_path
     upstream = getattr(error, "body", "")
     if isinstance(upstream, str) and upstream:
         # What upstream actually said. Named as upstream's rather than merged, so nothing reads

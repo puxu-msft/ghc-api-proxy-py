@@ -289,6 +289,37 @@ def test_a_streamed_search_is_delivered_as_a_line_rather_than_an_empty_block() -
     assert all(text for text in deltas), deltas
 
 
+def test_a_domain_restriction_refuses_before_upstream_is_called() -> None:
+    """`allowed_domains` cannot be sent to this endpoint, and dropping it would let the search read sites the request ruled out — silently, because the results never pass through this proxy.
+
+    Asserted on `seen` being empty as much as on the status: the refusal is only worth anything if it happens *before* the call. A 400 raised after upstream had already searched would tell the client its restriction failed while the model had already read the pages.
+    """
+    client, seen = make_client(lambda _: httpx.Response(200, json={"id": "resp_1"}))
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "gpt-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 64,
+            "tools": [
+                {
+                    "type": "web_search_20250305",
+                    "name": "web_search",
+                    "allowed_domains": ["example.com"],
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 400
+    assert seen == [], "upstream was called despite the request being unserviceable"
+    body = orjson.loads(response.content)["error"]
+    # A stable code and the field that caused it: a client matching on the English would break the
+    # first time the wording changed, and one told only "bad request" cannot find which tool it was.
+    assert body["code"] == "server_tool_constraint_not_representable"
+    assert body["field_path"] == "tools.web_search_20250305.allowed_domains"
+
+
 def test_model_mapping_is_applied_before_the_upstream_call() -> None:
     client, seen = make_client(
         lambda _: httpx.Response(200, json={"id": "msg_1"}),

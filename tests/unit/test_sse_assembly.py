@@ -354,3 +354,44 @@ def test_a_malformed_usage_costs_the_counts_and_not_the_response() -> None:
     ).decode()))
     assert assembler.terminal.usage == {}
     assert assembler.terminal.seen is True
+
+
+def test_a_search_that_closes_without_ever_opening_is_still_delivered() -> None:
+    """A `web_search_call` is whole on `done`: it has no deltas and nothing to accumulate, so the `added` it may skip carried nothing the close needs.
+
+    Refusing to close it would throw away a search that actually ran, and throw it away silently — the same regression is on record in the reference project, where the item vanished with no observation of any kind. The cost of tolerating the shape is nothing; the cost of not tolerating it is the turn's search.
+    """
+    assembler = ResponsesAssembler()
+    blocks = assembler.push(
+        SseEvent(
+            "response.output_item.done",
+            orjson.dumps(
+                {
+                    "output_index": 0,
+                    "item": {
+                        "type": "web_search_call",
+                        "id": "z" * 416,
+                        "status": "completed",
+                        "action": {"type": "search", "query": "orphan query"},
+                    },
+                }
+            ).decode(),
+        )
+    )
+    assert [block.payload["text"] for block in blocks] == ["[web_search] orphan query"]
+
+
+def test_an_ordinary_item_that_closes_without_opening_is_still_ignored() -> None:
+    """The control. Tolerating the whole-item shape is specific to the one item type that arrives that way — widening it would make every unpaired close synthesise a block out of nothing."""
+    assembler = ResponsesAssembler()
+    assert (
+        assembler.push(
+            SseEvent(
+                "response.output_item.done",
+                orjson.dumps(
+                    {"output_index": 0, "item": {"type": "message", "role": "assistant"}}
+                ).decode(),
+            )
+        )
+        == ()
+    )

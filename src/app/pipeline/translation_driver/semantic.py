@@ -48,6 +48,20 @@ class LossCode(StrEnum):
     SERVER_TOOL_CONSTRAINT_DROPPED = "server-tool-constraint-dropped"
 
 
+class TranslationRefused(Exception):
+    """The request says something this crossing cannot carry without changing what it means.
+
+    Distinct from a `Loss`, and the distinction is the point. A loss is something the client can be told about afterwards because the request still means what it meant — a dropped cache marker, a cost ceiling nobody can enforce. This is for the other kind: a field whose removal would silently reverse an instruction, where carrying on is worse than refusing.
+
+    Carries a `code` and the `field_path` that caused it so the client is told which part of its request is the problem, rather than being handed a generic refusal it cannot act on.
+    """
+
+    def __init__(self, message: str, *, code: str, field_path: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.field_path = field_path
+
+
 @dataclass(frozen=True, slots=True)
 class Loss:
     """One thing a translation could not carry."""

@@ -40,13 +40,17 @@ Anthropic 客户端声明 web search，模型走 Responses 腿：**搜索真的�
 |---|---|---|
 | `user_location` | **透传**，但只保留 `type`／`city`／`region`／`country`／`timezone` 五个已实测键 | 实测写入 200 且原样回显。未知子参数实测使整条请求 400，所以剥离一个未知键好过赔上整轮 |
 | `max_uses` | 剥离 + 记 `SERVER_TOOL_CONSTRAINT_DROPPED` | 实测 `Unknown parameter`。它是**成本上界**，丢弃导致更多搜索与延迟，但不反转任何断言，且上游回报 `tool_usage.web_search.num_requests` 事后可查 |
-| `allowed_domains` / `blocked_domains` | 剥离 + 记 loss + **WARNING 日志** | 实测 `Unknown parameter`。它们与 `max_uses` **不同类**：这是用户明确要求的**收紧**，丢弃等于把限制变成 no-op，且**事后无法补救**——搜索在上游执行、结果直接进模型，代理从头到尾看不到读了哪些站点 |
+| `allowed_domains` / `blocked_domains` | **拒绝整个请求**（400，调用上游前），错误码 `server_tool_constraint_not_representable`，`field_path` 精确到该字段。空数组视同未提供，不拒绝 | 实测 `Unknown parameter`。它们与 `max_uses` **不同类**：这是用户明确要求的**收紧**，丢弃等于把限制变成 no-op，且**事后无法补救**——搜索在上游执行、结果直接进模型，代理从头到尾看不到读了哪些站点。这是 spec §3.4 裁决 D1 的默认分支 |
+| 允许集之外的字段 | **拒绝整个请求**，错误码 `unsupported_field` | 今天的未知字段是明天有语义的字段，静默剥离会把它要求的东西变成 no-op——与域名限制同类的失败，只是来得更晚、更没人看着 |
 | `name` | 不写入 | builtin 工具对象没有这个键 |
+| 多条 web search 声明 | 合并成一条 `{"type":"web_search"}` + 记 loss | spec §3.5。两个相同的 builtin 条目是上游从未被问过的形态，而第二条说不出第一条没说的东西 |
 | `cache_control` | 不写入 | 块级缓存标记，该端点自己按前缀缓存 |
 
 ### 2.3 `tool_choice`
 
-指向 web search 声明的 named choice 会**跟着改写**成 `{"type":"web_search"}`。
+指向 web search 声明的 named choice 会**跟着改写**成 `{"type":"web_search"}`——但**仅当那个名字不同时属于一个普通 function tool**。
+
+后半句是 spec §4 点名的陷阱：客户端可以把一个普通 function tool 也命名为 `web_search`。两者都声明时，choice 指的是哪一个是**客户端自己的歧义**，替它判成 hosted search 等于代理凭空作答，会把客户端写的一次函数调用变成它从没要求过的搜索。所以那种情况下 choice 原样保留。
 
 必须做，因为 builtin 工具对象**没有 `name`**：choice 若仍按名字指向它，就指向了不存在的东西，整轮失败——那等于映射把一个 400 换成另一个 400。上游对 choice 位置的 `{"type":"web_search"}` 实测 200，回显归一化为 `web_search_preview`，`num_requests` 为 1 且 output 里确有 `web_search_call`，**它真的强制执行了搜索**。
 
@@ -58,7 +62,7 @@ Anthropic 客户端声明 web search，模型走 Responses 腿：**搜索真的�
 
 风险是有界的：广告 `/responses` 的模型里有 `grok-4.5`、`grok-4.6`、`mai-code-*` 等从未探针的非 OpenAI 模型，对它们映射可能把一个 400 换成另一个 400。但那是**客户端本来就会遇到的失败**，而且**响亮可见**；反过来，用一份手工维护的清单做门控，一旦清单在另一个方向上错了，就会**静默扣掉一个本来能用的能力**——没有任何人会发现。两类错误代价不对称，所以选可见的那一类。
 
-spec §9.3（裁决 D4）要求这份清单落到配置项。**未实现**，见 §5.3。
+spec §9.3（裁决 D4）要求这份清单落到配置项。**未实现**——评审判定这是对已裁决项的偏离，我采纳这个方向，但本片没做，落点与阻塞原因见 §8。
 
 ## 3. 响应侧
 
@@ -117,13 +121,15 @@ spec §9.3（裁决 D4）要求这份清单落到配置项。**未实现**，见
 | 面 | 它的做法 | 我们 |
 |---|---|---|
 | 请求侧映射 | `web_search_` → 裸 `{"type":"web_search"}`，**只有一个键** | 同，但**保留 `user_location`** |
-| `max_uses`／域名限制／`user_location` | **全部静默丢弃**，无 warn 无 observation | 记 loss；域名限制额外 WARNING |
-| `tool_choice` | 按 name 找回原声明走同一映射，译不出就整个省略 | 同 |
+| `max_uses`／域名限制／`user_location` | **全部静默丢弃**，无 warn 无 observation | `user_location` 透传；`max_uses` 记 loss；**域名限制拒绝整个请求** |
+| `tool_choice` | 按 name 找回原声明走同一映射，译不出就整个省略 | 同，但**同名 function tool 存在时不改写**（spec §4 的陷阱） |
 | 能力门 | 在产腿上**完全没有** | 同（§2.4） |
 | 响应侧 | 降级成一个 text 块，逐字 `[web_search: "<q>"] (id: <id>, status: <status>)` | `[web_search] <query>`，**不含 id** |
 | 关联键 | `output_index`，不用 `id` | 同 |
 | `url_citation` | **完全且静默丢弃** | 同（§5.4） |
 | 原生块对／citations／续接／usage／流式子事件 | **六项全无** | 同 |
+| 多重声明去重 | 未做 | 合并成一条 |
+| `done` 无 `added` | 有双保险 | 有（本轮评审后补） |
 
 **唯一明确不照抄的一条**：`webSearchCallToText` 把 416 字符的 `id` 写进面向客户端的正文（`server-tool.ts:26`）。它会被客户端存进历史、随每一轮重发，对模型不可读，还把服务端句柄暴露给客户端；而在我们这里 id 每个事件都不同，该值连稳定引用都算不上。参考项目自己的 `exp/encrypted-content-400/` 事故正是同族失败模式。
 
@@ -180,7 +186,31 @@ spec §5.3（裁决 D6）要求用它填充 `web_search_tool_result.content`。�
   - 流式搜索退回空块 → 端到端测试红，失败输出逐字显示 `['', 'Today's date is ...']`
 - Ruff `check`、Pyright 于全部改动文件干净。
 
-## 8. 相关文档
+## 8. 评审处置（第三轮，异源评审）
+
+评审报 2 blocker、3 major。处置如下：
+
+| 发现 | 定级 | 处置 |
+|---|---|---|
+| 域名限制被无条件放宽，违反已裁决 D1 | blocker | **采纳**。改为调用上游前拒绝，错误码与 `field_path` 按 spec §3.4。D1 的三取值配置仍缺，本片实现的是它的默认分支 |
+| 响应侧是 text 行而非 D6 的原生块对 | blocker | **降级为待裁决（§6）**，理由见下 |
+| `_repoint_tool_choice` 会误改同名 function choice | major | **采纳**，是真 bug。改为「名字同时属于普通 function tool 时不改写」 |
+| 没有实现已裁决的 capability gate | major | **采纳方向，本片未做**，理由见下 |
+| 多重声明不去重；未知字段应 REJECT 而非静默剥离 | major | **两条都采纳** |
+| （评审附带）`done` 无 `added` 时搜索静默丢失 | — | **采纳必修**。已实测复现（返回空元组），spec §6.3 专门要求补登记 |
+| （评审附带）并发 call 的 `done` 逆序到达会逆序交付 | — | **记账不修**，见 §5.6 |
+
+**为什么 D6 不当作 blocker**：它不是安全或正确性问题——文本行与原生块对都让搜索可用，客户端都拿得到答案。它需要 citation 归因（spec §5.3 三分支）与成块时点从 `output_item.done` 推迟到后随文本块的 `content_part.done`（spec §6.3），是独立的一片。本片没有悄悄跳过它，而是列为 §6 的裁决点。评审另一条批评成立并已采纳：新增测试确实固化了一个临时形态，测试注释已写明这一点。
+
+**为什么 capability gate 本片未做**：它的正确落点是**订阅者层**而不是 codec。`to_openai_responses` 只拿得到 `SemanticRequest`，其 `model` 是**客户端请求的名字而非 resolved model**；`RequestContext`（订阅者可见）才有 `resolved_model`，但它不持有模型目录，拿不到 `vendor` 与 `supported_endpoints`。更要紧的是 spec §3.4 与 §9.3 **两处都写着「键名待定」**，且要求与用户亲笔的 `docs/.human-controlled/config.example.yaml` 的扁平键词汇对齐——那是用户的裁决，不由实现者发明。
+
+### 5.6 并发 `web_search_call` 的 `done` 逆序会逆序交付
+
+实测：两个 call 分别 `output_index` 0 与 1，若 `done` 以 1、0 的顺序到达，块以 index 1、index 0 的顺序交付（`index` 值本身正确，按 `added` 顺序分配）。
+
+**不是本片引入**：`_close` 对所有 item 类型都是即到即发，`function_call` 同样如此。上游是否真会乱序发 `done` **未探针**。修它要在交付层引入按 index 排序的缓冲，超出本片范围。**记账。**
+
+## 9. 相关文档
 
 - 前一版（剥离方案，含根因分析与两轮评审）：[`260820-websearch-responses-leg-400-fix.md`](260820-websearch-responses-leg-400-fix.md)
 - 产品规格：[`../agents/anthropic-responses-bridge/hosted-web-search-spec.md`](../agents/anthropic-responses-bridge/hosted-web-search-spec.md)
