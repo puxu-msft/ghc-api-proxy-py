@@ -283,8 +283,7 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
         return _AccountedStreamingResponse(
             _tracked_delivery(
                 stream_delivery(
-                    # The idle guard goes on the upstream bytes themselves, not on the events read out of them. Bytes arriving is the weaker claim and the safer one: a large event trickling in over several reads, or an SSE comment — which `read_events` drops, because a comment carries no event — both keep bytes moving while the parser yields nothing. Timing what the parser yields would start the clock on a stream that is visibly still there, and never false-killing legitimate thinking is the invariant `config.example.yaml` freezes.
-                    # Whether this upstream in particular sends comment keep-alives is not known: the cassettes carry no long silence to show one, and the recorded history stores parsed frames, a shape a comment cannot occupy. The argument does not rest on it — byte-level treats strictly more as alive than event-level does, so it cannot kill anything event-level would have spared.
+                    # The guard measures upstream SSE activity, not the events parsed out of it. Ruled 2026-08-20: a comment frame and a large event still arriving both keep bytes moving while the parser yields nothing, so timing the parser would call a connection that is still transmitting silent — and never false-killing legitimate thinking is what `config.example.yaml` freezes.
                     _counted_upstream(
                         with_idle_timeout(
                             response.aiter_bytes(),
