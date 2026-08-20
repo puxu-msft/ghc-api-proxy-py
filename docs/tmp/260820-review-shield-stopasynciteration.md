@@ -211,3 +211,14 @@ IDENTICAL
 - 未重跑全量回归：提交者已跑过 `1342 passed, 2 skipped`，且工作树此后被并行会话改动，重跑测的已不是同一棵树，重跑结果无法归因给本改动。
 
 实验脚本全部留在 `/tmp/rev-shield/`（`e1_residue.py` 回调残留、`e2_matrix.py` 语义矩阵、`e3_generator.py` 生成器级探针、`e4_boundary.py` 平局、`e5_pings.py` ping 计数与自旋、`e6_abandon.py` 放弃路径、`e7_sites.py` 各调用点形状、`e8_callbacks.py` 回调累积、`test_loopid.py` loop 隔离），仓库内未留任何临时文件。注意：在 `/tmp` 下直接跑 `uv run` 会选到另一个解释器（实测为 Anaconda 3.13.12），必须在仓库根目录发起并用 `PYTHONPATH=src`。
+
+---
+
+## 补记：修 shield 噪声时考虑并否决的两个替代（2026-08-20 收尾追加）
+
+按 `record-what-not-adopted`，未采纳的方案与理由应当留档。当时口头权衡过、未写进任何文件：
+
+- **保留 `shield`，手工 `task.remove_done_callback(asyncio.tasks._log_on_exception)`。** 否决：依赖 CPython 的**私有名字**，一次实现变更就断；而且它是在**消音**，不是纠正用法——那个观察者之所以被挂上，正是因为我们对 asyncio 声称「这个 task 没人等了」，而实际上下一轮还要等它。
+- **`async with asyncio.timeout(...)` 包住 pull。** 否决：超时语义仍然是**取消被等待者**，不满足「超时了也别取消这个 pull」这一硬需求。
+
+采纳的是 `asyncio.wait({task}, timeout=...)`：不建 outer future、超时不取消 task，因而根本不存在兜底观察者，且项目内 `session_liveness_stream` 已是这个形状。
