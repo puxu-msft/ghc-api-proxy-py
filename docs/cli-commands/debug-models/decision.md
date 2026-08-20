@@ -64,7 +64,7 @@
 
 这张表是上面几条裁决的共同背景，也修正了此前一次框定错误。
 
-**同格式路由不需要翻译器**（`decide_route` 探测，四种入站格式打到各自原生端点时 `translation_required=False`）。因此：
+**同格式路由不需要翻译器**（`decide_route` 探测，四种入站格式打到各自原生端点时 `translation_required=False`；复现见本节末）。因此：
 
 | | 数量 | 说明 |
 |---|---|---|
@@ -92,7 +92,9 @@ openai-embeddings            NO         NO
 openai-responses             yes        yes
 ```
 
-复现：
+### 复现（都不需要凭据）
+
+翻译器现状：
 
 ```bash
 cd ~/src/ghc-api-proxy-py
@@ -108,6 +110,38 @@ for w in sorted({r.wire_format for r in ROUTES}, key=lambda w: w.value):
     print(f"{w.value:28} {ok(reg.inbound):6} {ok(reg.outbound)}")
 EOF
 ```
+
+同格式路由是否需要翻译器：
+
+```bash
+cd ~/src/ghc-api-proxy-py
+uv run python - <<'EOF'
+from app.model_provider import ModelEndpoint, ModelDescriptor
+from app.pipeline.routing import decide_route
+from app.server.inbound import ROUTES
+
+class P:
+    name = "ghc"
+    def __init__(self, ep): self._d = ModelDescriptor(id="m", endpoints=frozenset({ep}))
+    @property
+    def available_ids(self): return frozenset({"m"})
+    def describe(self, mid): return self._d if mid == "m" else None
+
+wires = {r.wire_format.value: r.wire_format for r in ROUTES}
+for name, ep in [("anthropic-messages", ModelEndpoint.ANTHROPIC_MESSAGES),
+                 ("openai-chat-completions", ModelEndpoint.OPENAI_CHAT_COMPLETIONS),
+                 ("openai-responses", ModelEndpoint.OPENAI_RESPONSES),
+                 ("openai-embeddings", ModelEndpoint.OPENAI_EMBEDDINGS)]:
+    r = decide_route(requested_model="m", inbound_format=wires[name], provider=P(ep), mappings={})
+    print(f"{name:26} -> {r.endpoint.value:20} translation_required={r.translation_required}")
+# 跨格式对照：Anthropic 入站打到只有 /chat/completions 的模型
+r = decide_route(requested_model="m", inbound_format=wires["anthropic-messages"],
+                 provider=P(ModelEndpoint.OPENAI_CHAT_COMPLETIONS), mappings={})
+print(f"{'cross-format control':26} -> {r.endpoint.value:20} translation_required={r.translation_required}")
+EOF
+```
+
+按上表的 wire format 可达性对 `provider.describe(mid).endpoints` 做交集，即可复算模型计数（那一步需要凭据，因为要真实读取上游目录）。
 
 ---
 
