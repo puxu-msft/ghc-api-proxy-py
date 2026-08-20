@@ -70,6 +70,14 @@ REDACTED_RESPONSE_FIELDS = frozenset(
 
 REDACTION = "REDACTED"
 
+# The token exchange answers with a real expiry, and a cassette holding one stops working roughly
+# half an hour after it was recorded: the manager judges the cached token stale, exchanges again,
+# and the replay — which serves each recorded interaction once — reports the cassette exhausted.
+# Rewritten to a fixed far-future instant, which is a scrub rather than a lie: when the token
+# expires is not what any of these recordings are about, and leaving it real makes them expire too.
+FAR_FUTURE_EPOCH = 4102444800  # 2100-01-01T00:00:00Z
+PINNED_RESPONSE_FIELDS: dict[str, object] = {"expires_at": FAR_FUTURE_EPOCH}
+
 
 def _encode_chunk(chunk: bytes) -> dict[str, str]:
     """Store a chunk as text when it is text, so a cassette can be read rather than decoded."""
@@ -97,7 +105,9 @@ def _scrub_value(value: object) -> object:
         entry = cast(dict[str, Any], value)
         scrubbed: dict[str, Any] = {}
         for name, inner in entry.items():
-            if name in REDACTED_RESPONSE_FIELDS:
+            if name in PINNED_RESPONSE_FIELDS:
+                scrubbed[name] = PINNED_RESPONSE_FIELDS[name]
+            elif name in REDACTED_RESPONSE_FIELDS:
                 # Shapes are preserved: a list that became a string would change what code reads.
                 scrubbed[name] = [] if isinstance(inner, list) else REDACTION
             else:
