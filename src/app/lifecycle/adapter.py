@@ -179,13 +179,15 @@ class UvicornListenerAdapter:
         return self._refused_requests
 
     def severed_connections(self) -> int:
-        """How many connections were closed at the drain with a request already sitting unread, since this adapter was built.
+        """A lower bound on the clients this drain cut off, since this adapter was built.
 
         Cumulative, like `refused_requests`, so one shutdown's worth is a before-and-after difference.
 
-        This is the count that says a client genuinely went without, and it is the one `refused_requests` cannot see: a refused request got a 503 telling it to come back, while these got an RST and never reached the application at all. The two are deliberately separate because they are opposite ends of the same moment — the 503 is the drain working, this is the drain costing somebody.
+        **Non-zero means somebody certainly went without. Zero does not mean nobody did.** The probe can only see bytes already in the kernel buffer at the instant of the close, which is a window about one event-loop iteration wide. Everything a client sends *after* that — for the whole rest of the drain, which in production can be tens of seconds — meets a closed socket and is recorded nowhere. Measured: ten pooled clients each sent a `POST` into an open drain and all ten got nothing back, while this counted zero; in another run seven clients went unanswered and it counted three.
 
-        Under-counts rather than over-counts by construction; see `_closing_would_sever` for which cases it cannot see.
+        So it is worth having, and it is worth ranking above the counts beside it, but it is a floor rather than a total, and an `ok` on the closing line does not certify that a restart was free.
+
+        Not exact in the other direction either: see `_closing_would_sever` for the case that over-counts and the ones that under-count.
         """
         return self._severed_connections
 
@@ -422,10 +424,13 @@ def _closing_would_sever(connection: object) -> bool:
 
     `MSG_PEEK` leaves the data in place, so the event loop still delivers it to whoever would have read it; this only asks whether it is there.
 
-    Two limits, both erring towards under-counting, which is the safe direction for a number that appears next to the word "severed":
+    It answers about one instant — the close — and not about the drain around it. A client that sends a second later meets a closed socket, and no probe placed here can see that. What the caller gets is therefore a floor, and `severed_connections` says so.
 
-    - a connection with a response still in progress is not being closed at all here, so it is not counted, even if its client has pipelined further bytes;
-    - under TLS the bytes may already have been drained into the SSL object rather than left in the kernel buffer, and a peek then reports nothing.
+    Three limits, and they do not all point the same way:
+
+    - **over-counts under TLS**, where the waiting bytes may be a renegotiation or a session ticket rather than a request, and this cannot tell them apart;
+    - under-counts a connection whose response is still in progress, which is not being closed here at all even if its client has pipelined further bytes;
+    - under-counts under TLS in the other direction too, when the bytes have already been drained into the SSL object rather than left in the kernel buffer.
     """
     cycle = getattr(connection, "cycle", None)
     if cycle is not None and not getattr(cycle, "response_complete", False):
@@ -436,8 +441,10 @@ def _closing_would_sever(connection: object) -> bool:
     if raw_socket is None:
         return False
     try:
-        # `get_extra_info` hands back asyncio's `TransportSocket`, which refuses I/O on purpose so that nobody reads bytes out from under the event loop. Peeking is exactly the exception — it consumes nothing — so the descriptor is borrowed rather than the wrapper used, and `detach` gives it back without closing it.
-        probe = socket.socket(fileno=raw_socket.fileno())
+        # `get_extra_info` hands back asyncio's `TransportSocket`, which refuses I/O on purpose so that nobody reads bytes out from under the event loop. Peeking is exactly the exception — it consumes nothing — so a duplicate descriptor is taken rather than the wrapper used.
+        #
+        # `dup` rather than borrowing the descriptor with `socket(fileno=...)`: the duplicate is ours, so the worst a mistake here can do is leak one descriptor, where a borrowed one closed by mistake would close somebody's live connection under them. It also fails the way the handling below expects — a closed transport reports `fileno() == -1`, which `dup` reports as `OSError` while `socket(fileno=-1)` raises `ValueError`, and that would have escaped this function, escaped `stop_admitting`, and left the whole shutdown without its teardown.
+        probe = raw_socket.dup()
     except OSError:
         return False
     try:
@@ -449,7 +456,7 @@ def _closing_would_sever(connection: object) -> bool:
         # Already unusable, so closing it takes nothing from anybody. Reported as not-severed rather than raised: a probe that cannot answer must not take down the shutdown it was measuring.
         return False
     finally:
-        probe.detach()
+        probe.close()
 
 
 async def _refuse_admission(
