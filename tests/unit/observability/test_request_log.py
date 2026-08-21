@@ -549,6 +549,32 @@ def test_the_thresholds_are_the_round_numbers() -> None:
     assert _received(10 * 1024).split()[-1] == "↓10.0KB"
 
 
+def test_how_large_is_large_is_read_off_the_dialect() -> None:
+    """The same byte count is ordinary on one path and worth seeing on the other.
+
+    Both figures are counted at the same place and in the same units, and a Responses reply still costs tens of times more per output token on this proxy's traffic. A single pair of thresholds therefore cannot discriminate on both paths: the pair that suits Anthropic traffic leaves nearly every Responses line lit, and a column lit on almost every line has stopped saying anything. Why the wire costs that much is recorded at `RECEIVED_BYTES_THRESHOLDS`; what this test fixes is only that the two paths are judged apart.
+
+    Asserted as the same count rendered under each dialect rather than as two independent thresholds, because that is the property being bought: what the colour means is "unusual for this path", so the interesting failure is the two paths agreeing.
+    """
+
+    def field(byte_count: int, dialect: ReplyDialect) -> str:
+        return format_completion_line(
+            RequestLine(method="POST", path="/p", status_code=200, bytes_out=byte_count, dialect=dialect),
+            color=True,
+            status="ok",
+        ).split()[-1]
+
+    # 100KB tops out the Anthropic scale and is unremarkable on the Responses one, where the current client's tool declarations alone are observed to put 57-58KB under a reply of any size.
+    assert field(100 * 1024, ReplyDialect.ANTHROPIC) == f"{YELLOW}↓100.0KB{RESET}"
+    assert field(100 * 1024, ReplyDialect.RESPONSES) == f"{DIM}↓100.0KB{RESET}"
+
+    # Both rungs pinned from below as well as on the mark. Without the just-below counts these assertions pass for any thresholds bracketing them — `(256KB, 3MB)` satisfies every on-the-mark line above — so the pair could drift down to where it was lighting every line again without a test noticing.
+    assert field(384 * 1024 - 1, ReplyDialect.RESPONSES) == f"{DIM}↓384.0KB{RESET}"
+    assert field(384 * 1024, ReplyDialect.RESPONSES) == "↓384.0KB"
+    assert field(4 * 1024 * 1024 - 1, ReplyDialect.RESPONSES) == "↓4.0MB"
+    assert field(4 * 1024 * 1024, ReplyDialect.RESPONSES) == f"{YELLOW}↓4.0MB{RESET}"
+
+
 def test_what_went_out_stays_quiet_however_large() -> None:
     # Its size follows from the request the client made, so it says nothing about how the reply went. Escalating it would put a warm colour on every long-context turn and mean nothing by it.
     line = format_completion_line(

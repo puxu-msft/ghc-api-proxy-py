@@ -34,7 +34,14 @@ REASONING_WORD = {ReplyDialect.ANTHROPIC: "think", ReplyDialect.RESPONSES: "reas
 TOOL_WORD = {ReplyDialect.ANTHROPIC: TOOL_USE_REASON, ReplyDialect.RESPONSES: "function_call"}
 
 # Where a reply stops being ordinary. Bytes are 1024-based, matching what `format_bytes` prints. A count inside the printed figure's rounding band can show the same number in a different colour from one just over the threshold; the thresholds are the round numbers rather than the rounding band, and that is the accepted trade.
-NOTABLE_BYTES, HEAVY_BYTES = 10 * 1024, 100 * 1024
+#
+# Bytes are per dialect; tokens are not. The two dialects are counted at the same place and in the same units — `_counted_upstream` wraps `aiter_bytes()`, so both figures are post-decompression bytes off the same wire — and on this proxy's traffic a Responses reply still costs tens of times more per output token than an Anthropic one. That is what the Responses wire costs rather than anything this proxy does, and two measured causes account for it. Item-level events carry a 416-byte opaque item id: in the capture at `exp/260820-websearch-probe/raw/C2-responses-search-stream-response.txt`, 13 item-level events each carry one, and across its three `output_text.delta` frames those ids are 63.7% of the bytes against 3.6% for the text delivered. Responses splits a reply into fine-grained deltas, so that fixed per-event cost is paid many times over. Separately, `response.created`, `response.in_progress` and `response.completed` each echo the entire `tools` array, which is why replies of 7-8 output tokens from the current client are observed at 57-58KB — a floor that follows from that client's tool declarations and their schema sizes, not a constant of the protocol: the C2 capture declares one tool and runs to 16KB in total.
+#
+# So one pair of numbers cannot discriminate on both paths. Measured over 4,546 production requests (snapshot 2026-08-21): the old 10KB/100KB left 98.8% of Responses lines painted notable and 49.6% heavy — a column lit on almost every line has stopped carrying information — while producing 11.8%/0.1% on Anthropic traffic, which is the intended shape. The Responses pair is therefore chosen to restore that same qualitative shape rather than by scaling the old numbers by the byte ratio: roughly the top decile notable and well under one percent heavy (9.8%/0.9% on that snapshot). What the colour means is "unusual for this path", so the display goes by path-relative frequency instead. These shares move with traffic and are a sighting rather than a contract — the thresholds are round numbers that produced the right shape, not a fitted constant. Tokens need no such split: a token means the same thing whoever emitted it.
+RECEIVED_BYTES_THRESHOLDS = {
+    ReplyDialect.ANTHROPIC: (10 * 1024, 100 * 1024),
+    ReplyDialect.RESPONSES: (384 * 1024, 4 * 1024 * 1024),
+}
 NOTABLE_TOKENS, HEAVY_TOKENS = 1_000, 10_000
 
 # How the turn ended, as a ladder rather than a flag. Every one of these is terminal, so a single colour would say only "it stopped" — which the presence of the field already says. What the reader wants is how much of a problem the ending was.
@@ -338,8 +345,10 @@ def format_completion_line(line: RequestLine, *, status: LogStatus, unicode: boo
 
     # Wire bytes, one field for both directions so they read as a pair rather than as two unrelated numbers.
     # Only the returning half escalates. What this proxy sent upstream is a consequence of the request the client made and says nothing about how the reply went, so it stays quiet whatever its size.
+    # The thresholds come from the dialect for the reason recorded at `RECEIVED_BYTES_THRESHOLDS`: subscripted rather than looked up with a default, exactly as `REASONING_WORD` and `TOOL_WORD` are, so a dialect added later fails here instead of silently being judged by another path's sense of large.
+    notable_bytes, heavy_bytes = RECEIVED_BYTES_THRESHOLDS[line.dialect]
     received_colour = (
-        volume_colour(line.bytes_out, notable=NOTABLE_BYTES, heavy=HEAVY_BYTES) if line.bytes_out is not None else DIM
+        volume_colour(line.bytes_out, notable=notable_bytes, heavy=heavy_bytes) if line.bytes_out is not None else DIM
     )
     wire = [
         paint(f"{up}{format_bytes(line.bytes_in)}", DIM, color=color) if line.bytes_in is not None else "",
