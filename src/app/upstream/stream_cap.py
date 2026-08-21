@@ -4,22 +4,32 @@ HTTP/2 multiplexes every concurrent request onto one connection, so one connecti
 
 This is **not** the same choice as turning HTTP/2 off. A capped connection is still HTTP/2 — binary framing, HPACK, stream-level resets that do not kill the connection, and whatever the upstream edge does differently for h2. `upstream_transport.http2: false` abandons the protocol; this bounds it. The sibling service made the same distinction and picked h2 with a cap rather than HTTP/1.1 (`copilot-api-js@b5892380f`, 2026-07-22, which measured batch failures falling from 57.6% to 5.9%).
 
-The whole mechanism is one predicate. httpcore's pool decides where a queued request goes in `_assign_requests_to_connections`, and the only question it asks each existing connection is `can_handle_request(origin) and is_available()`. Answer `False` once a connection already carries N requests and the pool falls through to "create a new connection".
+The mechanism is one predicate asked in two places. httpcore's pool decides where a queued request goes in `_assign_requests_to_connections`, and what it asks each existing connection is `can_handle_request(origin) and is_available()`. Answering `is_available()` with `False` once a connection already carries N requests makes the pool fall through to "create a new connection".
 
-Two things make it work at the right moment, and getting either wrong produces a cap that silently does nothing:
+That alone was the whole mechanism until httpcore2. **httpcore2 2.3.0 rewrote the assignment loop to snapshot the reusable connections once per pass** (PR #974) instead of re-deriving them for each queued request, so `is_available()` is asked once and a pass that releases several queued requests at once can put all of them on one connection. It does not fail while requests arrive one at a time — each arrival runs its own pass with one request queued — but it fails completely once the pool saturates and a finishing response frees several at once. Measured against the real pool loop with `max_connections=100` and a cap of 1: a burst of 500 put **400** requests on a single connection, which is the blast radius this module exists to bound. The probe is `.dev/exp/httpx2-migration/probe_cap_designs.py`.
+
+So the cap is also enforced where the pool cannot snapshot it away: `handle_async_request` refuses over-cap work with `ConnectionNotAvailable`, which is httpcore's own way for a connection to say it accepted an assignment it cannot serve — `AsyncHTTP2Connection` raises exactly this when its state will not take another stream. The pool answers by clearing the assignment and re-queueing (`connection_pool.py`), so nothing is lost and no extra socket is opened; the cost is re-running assignment for that request. At the settings above the same burst of 500 cost 1309 extra assignment rounds and held the cap at 1. Refusing in `can_handle_request` instead was measured and rejected: it pushes the request into the pool's "close an idle connection to make room" branch, which closes connections that still have requests assigned to them.
+
+Two things make the count right, and getting either wrong produces a cap that silently does nothing:
 
 - **The count comes from the pool, not the connection.** `AsyncHTTPConnection` does not know its own in-flight stream count until the TLS handshake completes and an `AsyncHTTP2Connection` exists behind it; before that `is_available()` is a flat `True` for any http2-capable connection. A burst arriving while the first connection is still handshaking would all pile onto it. `pool._requests` holds the right fact and is populated at assignment time.
 - **The count drops when a response finishes.** `PoolByteStream.aclose()` removes the request from `pool._requests`, which is also where the pool re-runs assignment for anything still queued.
 
 `is_available()` is called inside the pool's own lock, so reading `_requests` needs no extra synchronisation.
 
-**Private surface, named so an upgrade knows what to check.** `pool._requests` and the `.connection` on its elements. Both have existed since httpcore's 0.14 redesign (2021-11-11) and survived the 2024 pool rewrite (#880) that renamed the element class around them. Neither is documented, and httpcore's CHANGELOG has never once mentioned the pool internals — including in the release that rewrote them — so **upgrading httpcore means diffing its source, not reading its release notes**. `tests/unit/upstream/test_stream_cap.py` carries a structural guard that fails loudly if either name moves; without it this degrades silently into a decoration that caps nothing.
+**Private surface, named so an upgrade knows what to check.** `pool._requests` and the `.connection` on its elements. Both have existed since httpcore's 0.14 redesign (2021-11-11), survived the 2024 pool rewrite (#880) that renamed the element class around them, and survived the fork to httpcore2. Neither is documented, and httpcore's CHANGELOG has never once mentioned the pool internals — including in the release that rewrote them — so **upgrading httpcore means diffing its source, not reading its release notes**. The 2.3.0 snapshot above is exactly that: a CHANGELOG line about loop complexity that silently disabled this cap. `tests/unit/upstream/test_stream_cap.py` carries a structural guard that fails loudly if either name moves, and a saturated-burst case that fails if the cap stops being enforced; the structural guard alone stayed green right through the snapshot change.
 """
 
 from typing import Any, Protocol, cast
 
 import httpx2
-from httpcore2 import AsyncConnectionInterface, Origin, Request, Response
+from httpcore2 import (
+    AsyncConnectionInterface,
+    ConnectionNotAvailable,
+    Origin,
+    Request,
+    Response,
+)
 
 
 class _PoolWithRequests(Protocol):
@@ -55,6 +65,11 @@ class StreamCappedConnection(AsyncConnectionInterface):
         return self.assigned_request_count() < self._max_streams
 
     async def handle_async_request(self, request: Request) -> Response:
+        if self.assigned_request_count() > self._max_streams:
+            # Over the cap because the pool assigned past it, which httpcore2 can do within one assignment pass. `>` not `>=`: this request is already in `pool._requests` pointing here, so the count includes it, and a count equal to the cap is the last one allowed.
+            #
+            # The two predicates have to agree on where the cap is, or the pool livelocks. `is_available()` says a connection at the cap takes nothing more; refusing at `>=` here would refuse the request that brings it *to* the cap, while `is_available()` still called that connection free — so the pool would assign it, get refused, re-queue, and assign it right back, forever. Measured: swapping this one character hangs the burst test below rather than failing it.
+            raise ConnectionNotAvailable()
         return await self._inner.handle_async_request(request)
 
     async def aclose(self) -> None:
@@ -74,6 +89,14 @@ class StreamCappedConnection(AsyncConnectionInterface):
 
     def is_closed(self) -> bool:
         return self._inner.is_closed()
+
+    def is_connected(self) -> bool:
+        """Added by httpcore2. The base answers `not is_closed()`, which is wrong for a connection still in NEW state, and the pool uses it to drop connections whose request was cancelled before the handshake finished — a branch that would never fire for a capped one."""
+        return self._inner.is_connected()
+
+    def can_multiplex(self) -> bool:
+        """Added by httpcore2. The base answers `False`, which would have the pool treat an established HTTP/2 connection as if it served one request at a time."""
+        return self._inner.can_multiplex()
 
     def max_concurrent_requests(self) -> int:
         """Forwarded defensively against httpcore PR #1088.

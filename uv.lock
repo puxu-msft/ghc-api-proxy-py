@@ -121,7 +121,7 @@ requires-dist = [
     { name = "platformdirs" },
     { name = "pydantic" },
     { name = "pydantic-settings", extras = ["yaml"] },
-    { name = "starlette", specifier = ">=1" },
+    { name = "starlette", specifier = ">=1.2.1" },
     { name = "structlog" },
     { name = "textual" },
     { name = "tiktoken" },

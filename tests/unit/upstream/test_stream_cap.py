@@ -289,6 +289,87 @@ class HeldOpenInner(httpcore2.AsyncConnectionInterface):
         return None
 
 
+class MeteredInner(httpcore2.AsyncConnectionInterface):
+    """Records what actually overlapped on it, counted from the moment the pool hands it a request.
+
+    Counting here rather than in the wrapper is the point: the wrapper's own bookkeeping is what is under test, so a measurement taken from it could agree with a broken cap. This counts admitted work only — the wrapper refuses before delegating — from handler entry to the close of that request's body.
+    """
+
+    def __init__(self, peaks: dict[int, int]) -> None:
+        self._peaks = peaks
+        self._in_flight = 0
+
+    async def handle_async_request(self, request: httpcore2.Request) -> httpcore2.Response:
+        self._in_flight += 1
+        self._peaks[id(self)] = max(self._peaks.get(id(self), 0), self._in_flight)
+
+        async def body() -> AsyncIterator[bytes]:
+            try:
+                # Long enough that the rest of the burst is still queued while this one is in flight, short enough that responses keep finishing and freeing slots.
+                await asyncio.sleep(0.01)
+                yield b"done"
+            finally:
+                self._in_flight -= 1
+
+        return httpcore2.Response(200, content=body())
+
+    def is_available(self) -> bool:
+        return True
+
+    def can_handle_request(self, origin: httpcore2.Origin) -> bool:
+        return True
+
+    def has_expired(self) -> bool:
+        return False
+
+    def is_idle(self) -> bool:
+        return False
+
+    def is_closed(self) -> bool:
+        return False
+
+    def info(self) -> str:
+        return "metered"
+
+    async def aclose(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_the_cap_holds_when_the_pool_releases_a_queue_all_at_once() -> None:
+    """A saturated pool is where answering `is_available()` alone stopped being enough.
+
+    httpcore2 snapshots the reusable connections once per assignment pass, so a pass that has several requests queued asks the predicate once and can put all of them on one connection. That state needs a pool with no room left to open connections and responses finishing under it — one request at a time never reaches it, which is why the six-request test above passes either way and this one does not.
+
+    `== cap` rather than `<= cap`: an off-by-one that refused at the cap instead of past it would hold every request one under it and still satisfy `<=`, leaving connections quietly carrying less than asked for.
+    """
+    cap = 2
+    max_connections = 4
+    burst = 60
+    peaks: dict[int, int] = {}
+    pool = httpcore2.AsyncConnectionPool(max_connections=max_connections)
+
+    def create_connection(origin: httpcore2.Origin) -> httpcore2.AsyncConnectionInterface:
+        return StreamCappedConnection(MeteredInner(peaks), pool, cap)  # pyright: ignore[reportArgumentType]
+
+    pool.create_connection = create_connection  # pyright: ignore[reportAttributeAccessIssue]
+
+    async def issue() -> None:
+        response = await pool.handle_async_request(
+            httpcore2.Request("GET", "https://example.invalid/", extensions={"timeout": {}})
+        )
+        await response.aread()
+        await response.aclose()
+
+    async with asyncio.timeout(30):
+        async with asyncio.TaskGroup() as group:
+            tasks = [group.create_task(issue()) for _ in range(burst)]
+
+    assert all(task.done() and task.exception() is None for task in tasks)
+    assert max(peaks.values()) == cap
+
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("cap", "expected"), [(1, 6), (2, 3), (3, 2), (6, 1)])
 async def test_the_real_pool_opens_another_connection_once_one_is_full(cap: int, expected: int) -> None:
