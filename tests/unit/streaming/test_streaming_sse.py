@@ -4,6 +4,7 @@ from typing import Any
 
 import anyio
 import pytest
+from starlette.requests import ClientDisconnect
 from starlette.types import Message, Scope
 
 from app.config.settings import TimeoutConfig
@@ -163,6 +164,31 @@ async def test_delayed_response_enters_pull_before_preentry_cancellation_cleanup
 
     assert source_started.is_set()
     assert cleanup_finished.is_set()
+
+
+@pytest.mark.asyncio
+async def test_delayed_response_reports_a_disconnect_unwrapped() -> None:
+    """The task group holding the body pump must not turn a disconnect into a group.
+
+    `except ClientDisconnect` stops matching once the exception arrives wrapped, and every caller upstack writes it that way.
+    """
+
+    async def source() -> AsyncIterator[bytes]:
+        raise OSError("peer went away")
+        yield b""  # pragma: no cover - unreachable, present so this is an async generator
+
+    async def receive() -> Message:
+        await anyio.sleep_forever()
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    async def send(message: Message) -> None:
+        del message
+
+    response = create_delayed_sse_response(source())
+    scope: Scope = {"type": "http"}
+
+    with pytest.raises(ClientDisconnect):
+        await response(scope, receive, send)
 
 
 def test_sse_response_sets_no_buffering_headers() -> None:

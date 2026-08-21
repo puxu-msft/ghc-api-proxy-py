@@ -1,12 +1,19 @@
 import asyncio
 import sys
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Generator,
+    Mapping,
+)
+from contextlib import contextmanager
 from functools import partial
-from typing import Any
+from typing import Any, cast
 
 import anyio
 from fastapi.responses import StreamingResponse
-from starlette._utils import collapse_excgroups
 from starlette.requests import ClientDisconnect
 from starlette.types import Receive, Scope, Send
 
@@ -15,6 +22,28 @@ from app.streaming.keepalive import finish_stream_cleanup
 from app.wire_json import dumps
 
 type StreamingChunk = str | bytes | memoryview[Any]
+
+
+@contextmanager
+def collapse_excgroups() -> Generator[None]:
+    """Unwrap single-exception groups so a caller sees the error it would raise alone.
+
+    A task group wrapping one child turns `ClientDisconnect` into a group holding it, and every `except ClientDisconnect` upstack stops matching.
+    Starlette shipped this as the private `starlette._utils.collapse_excgroups` until 1.0 replaced it with a task-group-shaped helper; importing the private name broke every fresh install that resolved starlette 1.x, so the four lines live here instead.
+    """
+    try:
+        yield
+    except BaseException as raised:
+        error: BaseException = raised
+        while isinstance(error, BaseExceptionGroup):
+            group = cast(BaseExceptionGroup[BaseException], error)
+            if len(group.exceptions) != 1:
+                break
+            error = group.exceptions[0]
+        if error is raised:
+            raise
+        context = None if error.__suppress_context__ else error.__context__
+        raise error from error.__cause__ or context
 
 
 def format_sse_event(data: str, *, event: str | None = None) -> bytes:
