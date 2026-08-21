@@ -22,7 +22,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from openai import AsyncOpenAI
 from pydantic import ValidationError
-from starlette.requests import Request
+from starlette.requests import ClientDisconnect, Request
 
 from app.config.schema import ModelProviderConfig, ProxyConfig
 from app.ghc_client import GhcApiClient, GhcClientConfig
@@ -1453,6 +1453,59 @@ def test_a_refused_request_is_reported_with_its_route_and_reason(request_log: No
     # A failure keeps `METHOD /path`, because that is what has to be reproduced, and ends in the reason. One protocol label rather than a pair: this request never reached upstream, so there is no second leg to name.
     assert lines[0].startswith("H1 400 POST /v1/messages ")
     assert "no-such-model" in lines[0]
+
+
+def test_a_request_that_raised_on_its_way_out_still_writes_its_one_line(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
+    """The exit that used to write nothing at all.
+
+    `_log_completion` says every exit path produces exactly one line, and every test around this one checks a path that reaches a `return`. An exception leaving `_dispatch` skipped all of them: the slot was released and the request vanished, and the only trace left was a traceback under the server's own logger with none of this request's identity on it.
+
+    Reproduced without patching anything in the app. Upstream answers 200 and calls its body JSON; `response.json()` in the buffered branch is not inside a `try`, so the decode error goes straight out through `_serve`. That is the same shape as the paths a reader would sooner name — a client hanging up inside `await request.body()`, a translator raising on an input nobody anticipated — and this one needs no monkeypatching to produce.
+    """
+    client, _ = make_client(
+        lambda _: httpx2.Response(200, content=b"<html>bad gateway</html>", headers={"content-type": "application/json"})
+    )
+
+    # Still raised, never swallowed: the completion line is a record of the failure, not a handler for it.
+    with caplog.at_level(logging.INFO), pytest.raises(ValueError):
+        client.post("/v1/messages", json={"model": "claude-model", "messages": []})
+
+    outcomes = _request_outcomes(caplog.records)
+    assert len(outcomes) == 1, "an exception on the way out is an exit path and owes exactly one line"
+    line, status = outcomes[0]
+    assert status == "fail"
+    # The exception is named, not merely alluded to. `str` on a decode error happens to say something, but `str(RuntimeError())` is empty and would leave the detail as a colon with nothing after it, so the line quotes the `repr`.
+    assert "request failed before a response: JSONDecodeError" in line
+    assert _registry(client).snapshot() == [], "and the slot is still released"
+
+
+def test_a_client_that_hung_up_mid_body_is_reported_as_gone_rather_than_as_a_failure(
+    request_log: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The other half of the same exit, and the reason it is not one branch.
+
+    A client abandoning a turn is routine on a proxy fronting an interactive one; a reply this proxy could not parse is an incident. Reporting both as `[FAIL]` with one shared sentence would bury the second under the first, which is the ruling `_StreamAccounting._ending` already records for the streaming path.
+
+    `Request.body` is patched because `TestClient` has no way to announce a body and then stop sending. What is being fixed is what `_serve` does with the exception, and that is exactly what arrives here — `ClientDisconnect`, unwrapped, nothing between the raise and the handler.
+    """
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
+
+    async def body(self: Request) -> bytes:
+        raise ClientDisconnect
+
+    with caplog.at_level(logging.INFO), pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Request, "body", body)
+        with pytest.raises(ClientDisconnect):
+            client.post("/v1/messages", json={"model": "claude-model", "messages": []})
+
+    outcomes = _request_outcomes(caplog.records)
+    assert len(outcomes) == 1
+    line, status = outcomes[0]
+    assert status == "gone"
+    # Asserted separately from the status, because `_add_status_prefix` renders an unrecognised one as `[....]` — a line that then merely looks unremarkable instead of failing.
+    assert _request_prefixes(caplog.records) == ["[GONE]"]
+    assert "client disconnected before the request was answered" in line
+    assert _registry(client).snapshot() == []
 
 
 def test_a_streaming_request_reports_what_it_actually_delivered(request_log: None, caplog: pytest.LogCaptureFixture) -> None:

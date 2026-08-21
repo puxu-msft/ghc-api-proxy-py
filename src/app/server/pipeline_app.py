@@ -4,6 +4,7 @@ Separate from `app_factory`, which still serves the existing implementation.
 Mounting both would give one path two owners.
 """
 
+import asyncio
 import os
 import sys
 import time
@@ -17,6 +18,7 @@ from uuid import uuid4
 import anyio
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from starlette.requests import ClientDisconnect
 
 from app.observability.logging import get_logger
 from app.observability.rejection_capture import capture_rejection
@@ -205,7 +207,7 @@ class _Trace:
 def _log_completion(chain: Chain, trace: _Trace, status_code: int | None, *, bytes_out: int | None) -> None:
     """Write the one line that says this request happened.
 
-    Emitted here rather than inside the handler because every exit path — a rejected body, a routing refusal, an upstream failure, a delivered answer — has to produce exactly one, and the handler has a return for each of them.
+    Emitted here rather than inside the handler because every exit path — a rejected body, a routing refusal, an upstream failure, a delivered answer, and an exception on its way out through `_serve` — has to produce exactly one, and the handler has a return for each of them and no say in the last.
     """
     line = RequestLine(
         method=trace.method,
@@ -271,8 +273,13 @@ async def _serve(request: Request) -> Response:
     chain.active_requests.add(trace.request_id)
     try:
         response = await _dispatch(request, chain, trace)
-    except BaseException:
+    except BaseException as failure:
         chain.active_requests.remove(trace.request_id)
+        # An exception is an exit path like any other, and until this line it was the one that produced no record at all — `_log_completion`'s docstring claimed every path writes exactly one while a client hanging up mid-body, a reply that would not parse, or anything unexpected in translation left nothing behind but a traceback in the server's own log, under a different logger and carrying none of this request's identity. Measured rather than feared: a probe raising from `Request.body()`, and an upstream answering 200 with a body `response.json()` cannot parse, each produced zero `app.request` records.
+        # Exactly-once is structural here rather than guarded by a flag, which is the difference from the streaming path. There, the delivery generator and the response's `__call__` both genuinely arrive and `_StreamAccounting.done` has to decide between them; here the two branches are alternatives — this one runs only when `_dispatch` did not return — so there is no second finisher to be idempotent against, and a flag would only hide it if one ever appeared.
+        trace.status_override, trace.detail = _aborted(failure)
+        # No status code, because none was ever settled: nothing is being sent to the client, so there is nothing to report as what it was told, and the field drops off the line rather than standing at a number nobody saw. That leaves the verdict entirely to the override — `status_for` reads a missing code as a failure, which is right for one of the three endings below and wrong for the other two.
+        _log_completion(chain, trace, None, bytes_out=trace.received or None)
         raise
     if isinstance(response, StreamingResponse):
         return response
@@ -280,6 +287,22 @@ async def _serve(request: Request) -> Response:
     # `received` rather than the size of what goes to the client: the line describes the proxy's exchange with upstream, and the two differ once anything is rewritten on the way out.
     _log_completion(chain, trace, response.status_code, bytes_out=trace.received or None)
     return response
+
+
+def _aborted(failure: BaseException) -> tuple[LogStatus, str]:
+    """Which of the three ways a request left without ever being answered, and whose problem each is.
+
+    The same split `_StreamAccounting._ending` makes for a stream that stopped short, made here for the same reason: absence is not readable. A line whose status code, usage and reply fields are all missing looks identical whether the client hung up while still sending, the process was going down, or something inside this proxy raised — and those three send a reader to three different places.
+
+    A client that left is `gone` rather than `fail`, on the ruling `_ending` already records: against an interactive client, abandoning a turn is routine, and painting it the same red as a proxy that broke buries the ones worth reading. The cancellation branch also covers a shutdown cancelling its own in-flight requests, where nobody left at all — so its wording names no side, because nothing here can tell the two apart and the line should not claim to.
+
+    The failure is quoted with `repr` rather than the `str` `_ending` uses, because that one has a known transport error in hand and this one has whatever escaped. `str(KeyError("model"))` is `"'model'"` with no hint of what kind of thing went wrong, and `str(RuntimeError())` is empty outright — which would print the detail as a colon and nothing after it, exactly the unreadable absence this function exists to prevent. An exception that arrived wrapped in a group is quoted as the group, which is honest: nothing between here and the raise unwraps one, so picking a member would be a guess about which one mattered.
+    """
+    if isinstance(failure, ClientDisconnect):
+        return "gone", "client disconnected before the request was answered"
+    if isinstance(failure, asyncio.CancelledError):
+        return "gone", "request cancelled before it was answered"
+    return "fail", f"request failed before a response: {failure!r}"
 
 
 async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
