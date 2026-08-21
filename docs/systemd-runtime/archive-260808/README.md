@@ -29,9 +29,9 @@ S5本机隔离probe的helper渲染、临时目录apply、动态loopback unit ver
 
 关键point-in-time证据：
 
-- [S3＋S4 new-main review](../../../tmp/260807-resume-review-systemd-rebuild.md)
-- [S3＋S4 independent verification](../../../tmp/260807-resume-verify-systemd-rebuild.md)
-- [S5 user-manager／cgroup smoke](../../../tmp/260807-systemd-user-manager-smoke.md)
+- [S3＋S4 new-main review](../reports/260807-resume-review-systemd-rebuild.md)
+- [S3＋S4 independent verification](../reports/260807-resume-verify-systemd-rebuild.md)
+- [S5 user-manager／cgroup smoke](../reports/260807-systemd-user-manager-smoke.md)
 - [S5 private manager diagnosis](evidence/user-manager-diagnosis.md)
 
 ## 未闭合范围与部署边界

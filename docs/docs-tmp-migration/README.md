@@ -68,7 +68,9 @@
 
 ## 引用重指：改了什么、没改什么
 
-**归档报告原件里的路径一律不动。** 报告里写的 `docs/tmp/xxx.md:251` 是**当时那一刻**的位置，把它改成今天的布局等于伪造记录。`.dev/README.md` 的「归档文档里的路径与行号是快照」那条讲的就是这件事。所以 `.dev/docs/**/reports/` 与 `archive-*/` 下的约 2400 处旧路径保持原样，读的时候当快照读。
+**归档报告原件里的路径一律不动。** 报告里写的 `docs/tmp/xxx.md:251` 是**当时那一刻**的位置，把它改成今天的布局等于伪造记录。`.dev/README.md` 的「归档文档里的路径与行号是快照」那条讲的就是这件事。所以 `.dev/docs/**/reports/`、`archive-*/reports/` 与 `archive-*/evidence/` 下的约 2400 处旧路径保持原样，读的时候当快照读。
+
+**但 `archive-*/README.md` 与 `evidence-index.md` 是例外，它们重指了（31 处）。** 按 `.dev/README.md` 的定义，`archive-<subtopic>/README.md` 是「重写过的知识文档」，与 `reports/` 里逐字保留的原件不是一类；它俩的全部职能就是把读者送到证据那里，路由失效比快照失真更糟。同目录下的 6 处目标本来就不存在，保持原样。
 
 **活文档重指了。** 27 个活文档、180 处引用，分两遍：
 
@@ -77,18 +79,24 @@
 
 顺手修了更早一次搬迁遗留的 `docs/2604-rewrite/` → `../archived-2604-rewrite/`（6 处）。
 
+**独立评审在这套重指里找出三处实错，都已修**，值得记下它们各自的形状：
+
+- `research.md` 的 7 处**绝对路径**被塞进了相对形式的替换值，变成 `/home/xp/src/ghc-api-proxy-py/reports/…`——一个不存在的目录。替换是按字符串做的，没有区分这段路径是相对的还是绝对的。
+- `history/proposal.md` 的 8 份报告被指向 `../tmp/`，而它们在 `history/reports/`。成因是裸目录兜底规则算的是「`docs/tmp/` 这个**目录**搬到哪了」，而不是「这**份文件**搬到哪了」；这 8 份是更早一次搬迁挪进 `.dev` 的，不在本次映射表里，于是掉进了兜底。
+- `graceful-shutdown/client-side/README.md` 里一句**对 commit trailer 的引述**被机械改写了。那些提交的尾注逐字写的是 `Docs: docs/tmp/260820-…`，改完之后引述与被引述物不符，而同一句还紧跟着「尾注保持原样」。这恰好是本次搬迁自己立的原则在**活文档引述快照**的地方失守——原则在 `reports/` 目录层面守住了，却没想到活文档里也会有引文。
+
 **主仓库里 11 处引用**（`src/`、`tests/`、`exp/`、`pyproject.toml`、`.claude/rules`、`.claude/skills`、`contrib/systemd`）改为 `.dev/docs/...`。这些是从被跟踪文件指向 gitignored 目录的链接——对 clone 本仓库的人是断的，但它准确说明了那份文档现在在哪，比指向一个已经不存在的路径强。
 
 链接可达性检查跑过，检查器先用正样本证明过能报出坏链（第一版检查器自己崩了、退出码恰好也是 1，差点当成通过）。
 
 ## 留下的问题
 
-- **四棵活 worktree 仍带着旧目录与旧规则，这是最容易让搬迁被撤销的一处。** `.claude/rules/` 是被跟踪文件，每棵 worktree 停在自己分支的旧提交上，因此各自都有一份仍写着「报告写进 `docs/tmp/`」的规则，而且 `docs/tmp/` 与 `docs/agents/` 在那些树里**实体存在**——规则文本与磁盘现状互相印证，被派进去的 agent 没有任何理由起疑。它写下的报告会随分支 squash 回 `main`，`docs/tmp/` 就重建了。涉及 `.claude/worktrees/{delivery-keepalive,upstream-error-events}` 与 `/home/xp/.claude/jobs/{405f4b84/tmp/slice0/wt,826d4cda/tmp/review}`，四棵都有别的会话在用，rebase 或删除属破坏性操作，**需用户逐项授权**，本次未动。当前的缓解是把这条写进规则本身：整合旧分支时丢掉它在这两个目录下新增的东西。
+- **四棵活 worktree 仍带着旧目录与旧规则，这是最容易让搬迁被撤销的一处。** 它们的分支都在 `0b01cdc` 的祖先侧，树里仍有这两个目录：`slice0/exactly-once` 105 份、`fix/upstream-error-events` 106 份、`worktree-proxy-priority` 105 份、`826d4cda` 那棵 detached 21 份。**按项目约定它们最终以 squash 进 `main`，而 squash 的 tree 来自分支侧——会把这两个目录整个带回来，且是静默的：没有冲突、没有报错。** 同时 `.claude/rules/` 是被跟踪文件，那四棵树里的规则仍写着「报告写进 `docs/tmp/`」，与磁盘上确实存在的目录互相印证，被派进去的 agent 没有理由起疑。规则里新加的那句约束的是「新建」，拦不住「合并带回」，所以**集成完这四条分支中的任何一条之后，必须复核主仓库 `docs/` 是否只剩 `.human-controlled/`**。四棵都有别的会话在用，rebase 或删除属破坏性操作，**需用户逐项授权**，本次未动。
 - **`README.md` 在提交态仍有 3 处指向 `docs/agents/`**（`:56` `:58` `:59`），其中第 56 行直接以「各专题的开发文档在这里」的口吻做路由。工作树里看不到它们，是因为并行会话把 `README.md` 整体重写成了产品 README 并删掉了那一节，**但那份重写未暂存也未提交**。也就是说干净是偶然的，且依赖别人一份随时可能被丢弃的改动。我没有改它——改就等于把同伴那份未提交的重写一并提交。**根因值得记住：在有并行未提交改动的仓库里，用工作树 grep 判断「还有没有残留」会漏掉提交态里的残留，正确判据是 `git grep <commit>`。** 本次搬迁的引用面就是这样漏掉 README 的。
 - **没做蒸馏。** 这次只搬和分类，没把报告里的结论提炼进活文档。`.dev/README.md` 说「归档要重写，不要堆」——现在各话题的 `reports/` 就是堆着的，缺 `README.md` 入口。200 份的 `anthropic-responses-bridge` 尤其需要。
-- **3 处断链是搬迁之前就断的**，目标文件在仓库里根本不存在，不是这次搬出来的：`systemd-runtime/plan.md` 引的 `260807-systemd-user-manager-diagnosis.md`（疑似指 `reports/260807-review-systemd-user-manager-diagnosis.md`，但名字对不上，没有替它猜）、`systemd-rolling/plan.md` 引的 `copilot-api-js-comparison.md` 与 `tests/systemd_vm/README.md`。
+- **搬迁之前就断的链接。** 在本次重指的 27 份活文档范围内有 3 处：`systemd-runtime/plan.md` 引的 `260807-systemd-user-manager-diagnosis.md`（这个名字在任何 ref、任何批次清单、`0b01cdc^` 的树里都没有过；`reports/260807-review-systemd-user-manager-diagnosis.md` 名字对不上，没有替它猜）、`systemd-rolling/plan.md` 引的 `copilot-api-js-comparison.md` 与 `tests/systemd_vm/README.md`。把范围扩到 `.dev/docs` 下全部 126 份活文档则是 11 处，多出来的 9 处在 `archived-2604-rewrite/` 下、是 2026-08-20 导入时就带着的坏链，本次未触碰（其中 `thinking-pipeline.md` 那处目标今天近在咫尺，顺手修了）。
 - **`contrib/systemd/ghc-api-proxy.service` 的 `Documentation=` 需要用户裁决。** 它原本指 `/opt/ghc-api-proxy/docs/agents/deployment-systemd/README.md`；那份文档现在在 `.dev/`，而 `.dev/` 不随部署分发。我做了机械重指，但无论指哪儿这一行都不完全成立：指旧路径是指向不存在的文件，指新路径是断言了一个不会被部署的位置，指 `README.md` 则那里没有 systemd 内容。
-- **CLAUDE.md 第 9 行已过时**，说「曾经用户选用过 `docs/agents/`，你可以逐步按主体迁移」——迁移已经做完。该文件由用户控制，未改动。
+- **CLAUDE.md 第 9 行已过时**，说「曾经用户选用过 `docs/agents/`，你可以逐步按主体迁移」——迁移已经做完。该文件由用户控制，未改动；另外它**未纳入 git 跟踪**，所以既不会被任何提交带走，也没有历史兜底。
 
 ## 评审
 

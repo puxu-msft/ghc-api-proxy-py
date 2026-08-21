@@ -46,7 +46,7 @@
 
 ### 临时输入的角色
 
-以下七份文件只作为调查线索和来源清单，不是本文结论的长期权威：`/home/xp/src/ghc-api-proxy-py/reports/upstream-route-decision.md`、`/home/xp/src/ghc-api-proxy-py/reports/upstream-request-conversion.md`、`/home/xp/src/ghc-api-proxy-py/reports/upstream-response-conversion.md`、`/home/xp/src/ghc-api-proxy-py/reports/upstream-recent-changes.md`、`/home/xp/src/ghc-api-proxy-py/reports/refs-python-bridges.md`、`/home/xp/src/ghc-api-proxy-py/reports/refs-typescript-bridges.md`、`/home/xp/src/ghc-api-proxy-py/reports/refs-go-bridges.md`。本文的已采纳结论均在下文给出固定 repo+HEAD 和绝对 source `file:line` 或 commit；临时文件删除后，本文仍可独立阅读。
+以下七份文件只作为调查线索和来源清单，不是本文结论的长期权威：`/home/xp/src/ghc-api-proxy-py/.dev/docs/anthropic-responses-bridge/reports/upstream-route-decision.md`、`/home/xp/src/ghc-api-proxy-py/.dev/docs/anthropic-responses-bridge/reports/upstream-request-conversion.md`、`/home/xp/src/ghc-api-proxy-py/.dev/docs/anthropic-responses-bridge/reports/upstream-response-conversion.md`、`/home/xp/src/ghc-api-proxy-py/.dev/docs/anthropic-responses-bridge/reports/upstream-recent-changes.md`、`/home/xp/src/ghc-api-proxy-py/.dev/docs/anthropic-responses-bridge/reports/refs-python-bridges.md`、`/home/xp/src/ghc-api-proxy-py/.dev/docs/anthropic-responses-bridge/reports/refs-typescript-bridges.md`、`/home/xp/src/ghc-api-proxy-py/.dev/docs/anthropic-responses-bridge/reports/refs-go-bridges.md`。本文的已采纳结论均在下文给出固定 repo+HEAD 和绝对 source `file:line` 或 commit；临时文件删除后，本文仍可独立阅读。
 
 ## 目标仓当前事实与能力缺口
 

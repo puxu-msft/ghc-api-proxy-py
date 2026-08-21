@@ -24,7 +24,7 @@
 - token值、生成正文、reasoning内容、tool arguments与response body均未写入报告；Python child经精确进程 handle发送SIGTERM并完成`wait()`／reap，清理后`4142`无listener。
 - 成功窗口内旧Bun `4141` incarnation前后一致，canary向旧Bun发送signal数为0；没有执行cutover。
 
-最初的 canary 摘要缺少可访问原始运行输出，独立快速复核因此给出1项major；随后 [最小真实 Copilot canary 独立复跑](evidence/real-copilot-canary.md)重新执行并落下可追溯结果。历史缺口与后续闭合过程分别保留在 [原始摘要](../../../tmp/260807-real-copilot-canary.md)、[证据缺口复核](../../../tmp/260807-review-real-copilot-canary.md)和归档内的[独立复跑](evidence/real-copilot-canary.md)中，不通过改写旧报告抹平。
+最初的 canary 摘要缺少可访问原始运行输出，独立快速复核因此给出1项major；随后 [最小真实 Copilot canary 独立复跑](evidence/real-copilot-canary.md)重新执行并落下可追溯结果。历史缺口与后续闭合过程分别保留在 [原始摘要](../../../tmp/260807-real-copilot-canary.md)、[证据缺口复核](../reports/260807-review-real-copilot-canary.md)和归档内的[独立复跑](evidence/real-copilot-canary.md)中，不通过改写旧报告抹平。
 
 ## 未闭合范围
 

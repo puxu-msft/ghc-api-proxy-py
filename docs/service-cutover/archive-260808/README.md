@@ -23,9 +23,9 @@
 
 - [Real Copilot canary independent rerun](../../../tmp/260807-verify-real-copilot-canary.md)
 - [Current main real Copilot path review](../../../tmp/260807-review-main-real-copilot-path.md)
-- [S5 user-manager／cgroup smoke](../../../tmp/260807-systemd-user-manager-smoke.md)
+- [S5 user-manager／cgroup smoke](../../systemd-runtime/reports/260807-systemd-user-manager-smoke.md)
 - [S5 private manager diagnosis](../../../tmp/260807-systemd-user-manager-diagnosis.md)
-- [Current service cutover inventory](../../../tmp/260807-current-service-cutover-inventory.md)
+- [Current service cutover inventory](../reports/260807-current-service-cutover-inventory.md)
 
 ## `NO_CUTOVER`
 

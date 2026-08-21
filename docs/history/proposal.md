@@ -23,11 +23,11 @@ r2 在重写中新引入的四处：把 L2 说成「数据已在手」（实际�
 
 > r1 → r2 用全文重写，代价是 15 条新问题。此后各版改用定点修改，就是吃这个教训。
 
-完整评审报告：`../tmp/260820-review-history-forensics-proposal.md`、`260820-review-history-forensics-scope.md`（r1 轮）、`260820-review-history-forensics-proposal-r2.md`、`260820-review-history-forensics-scope-r2.md`（r2 轮）、`260820-review-history-forensics-r3-spotcheck.md`（r3 抽查）。逐条处置见第七节。
+完整评审报告：`reports/260820-review-history-forensics-proposal.md`、`reports/260820-review-history-forensics-scope.md`（r1 轮）、`reports/260820-review-history-forensics-proposal-r2.md`、`reports/260820-review-history-forensics-scope-r2.md`（r2 轮）、`reports/260820-review-history-forensics-r3-spotcheck.md`（r3 抽查）。逐条处置见第七节。
 
 ### 证据基线与一个警告
 
-三份只读调查：`../tmp/260820-history-wiring-audit.md`、`260820-forensic-demand-audit.md`、`260820-history-as-fixture-source.md`。
+三份只读调查：`reports/260820-history-wiring-audit.md`、`reports/260820-forensic-demand-audit.md`、`reports/260820-history-as-fixture-source.md`。
 
 > ⚠️ **有并行会话正在改本方案要动的文件。** 本会话开始时工作树中已修改的源文件只有 `bundled-config.yaml`、`sse_source.py`、`stream.py`；进行期间又出现了 `src/app/server/pipeline_app.py`、`src/app/observability/request_log.py`、`src/app/pipeline/delivery/assembler.py`。`_Trace.failed` 字段就是在这期间出现的。
 >

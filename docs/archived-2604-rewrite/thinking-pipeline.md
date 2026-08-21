@@ -16,7 +16,7 @@ Anthropic `/v1/messages` 选择 OpenAI Responses upstream 时，所有 outbound 
 
 客户端下一轮原样回传该 `thinking` block时，Responses request converter恢复对应的reasoning item与opaque payload。项目producer只输出`ghc-api-proxy:synthetic-reasoning:v1` namespace；consumer另兼容已冻结的`copilot-api-js` v1合法主路径。Direct Messages leg不消费该synthetic状态，会在上游发送前剥离整个项目／兼容carrier block，避免把Responses专属opaque状态误发到Anthropic原生leg。
 
-这一合同独立于客户端是否显式设置顶层`thinking`：模型可能在普通Responses请求中返回reasoning item，因此不能只在显式thinking请求中条件化`include`。完整双格式wire、malformed最小止血、encrypted-only与multi-item合同以[Anthropic Responses bridge Spec](../agents/anthropic-responses-bridge/spec.md)为权威。
+这一合同独立于客户端是否显式设置顶层`thinking`：模型可能在普通Responses请求中返回reasoning item，因此不能只在显式thinking请求中条件化`include`。完整双格式wire、malformed最小止血、encrypted-only与multi-item合同以[Anthropic Responses bridge Spec](../anthropic-responses-bridge/spec.md)为权威。
 
 ## 管道总览（分层防御）
 
