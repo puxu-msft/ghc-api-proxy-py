@@ -2,6 +2,8 @@
 
 **读这个目录从 [`findings.md`](findings.md) 开始。** 那是唯一的活文档；本目录其余部分是它的证据。
 
+> **2026-08-21：本主题的一笔欠账已移交。** 「截断之后怎么恢复」——`decide_stream_ending()` 的接线及其四条路——现在归 [`../retry-and-continuation/`](../retry-and-continuation/)。下面那张提交表里 `5c1afbe` 一行记的是**当时**那个函数做了什么，仍然准确；但其中的 CONTINUE（代理内续写）已被用户裁决放弃。本主题对 GOAWAY 机理的结论不受影响。
+
 一起看的还有主仓的 `exp/260820-h2-goaway-poc/` 与 `exp/260820-h2-stream-cap/`——PoC 代码与原样输出留在主仓，因为它们是可复跑的产物，不是记录。
 
 ## 这个主题回答了什么

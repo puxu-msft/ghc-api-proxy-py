@@ -1,0 +1,123 @@
+48 occurrences
+
+2026-07-18 19:52:06 400 req_model=claude-opus-4-8 resolved=claude-opus-4.8 history-v3-260807.db req_1784404326995_700
+    {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1001284 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdA784vkb8RKW4Qdyg2ci","type":"error"}
+2026-07-21 17:21:37 400 req_model=gpt resolved=claude-sonnet-5 history-v3-260807.db req_1784654497464_2034
+    {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1000292 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdFb5DQgCfKBNuV7tJrGs","type":"error"}
+2026-07-21 17:21:42 400 req_model=gpt resolved=claude-sonnet-5 history-v3-260807.db req_1784654502444_2035
+    {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1001591 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdFb5addFnvvdLop4JKxh","type":"error"}
+2026-07-22 20:31:44 400 req_model=claude-opus-4-8 resolved=claude-opus-4.8 history-v3-260807.db req_1784752304856_1357
+    {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1000725 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdHjNzZhWM3Rdco1Sbm1V","type":"error"}
+2026-08-06 20:19:05 400 req_model=sonnet resolved=gpt-5.6-terra history-v3-260807.db req_1786047545891_139
+    {"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","code":"invalid_request_body"}}
+
+2026-08-06 20:29:45 400 req_model=sonnet resolved=gpt-5.6-terra history-v3-260809.db req_1786048185404_46
+    {"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","code":"invalid_request_body"}}
+
+2026-08-07 06:49:14 400 req_model=claude-opus-5 resolved=gpt-5.6-sol history-v3-260809.db req_1786085354889_373
+    {"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","code":"invalid_request_body"}}
+
+2026-08-07 06:49:25 400 req_model=claude-opus-5 resolved=gpt-5.6-sol history-v3-260809.db req_1786085365622_377
+    {"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","code":"invalid_request_body"}}
+
+2026-08-07 09:05:13 400 req_model=claude-opus-5 resolved=gpt-5.6-sol history-v3-260809.db req_1786093513022_209
+    {"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","code":"invalid_request_body"}}
+
+2026-08-07 09:05:32 400 req_model=claude-opus-5 resolved=gpt-5.6-sol history-v3-260809.db req_1786093532417_210
+    {"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","code":"invalid_request_body"}}
+
+2026-08-07 13:16:31 400 req_model=claude-opus-5 resolved=gpt-5.6-sol history-v3-260809.db req_1786108591925_3498
+    {"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","code":"invalid_request_body"}}
+
+2026-08-07 13:16:43 400 req_model=claude-opus-5 resolved=gpt-5.6-sol history-v3-260809.db req_1786108603102_3502
+    {"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","code":"invalid_request_body"}}
+
+2026-08-08 10:43:22 400 req_model=claude-opus-5 resolved=gpt-5.6-sol history-v3-260809.db req_1786185802072_627
+    {"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","code":"invalid_request_body"}}
+
+2026-08-08 10:43:49 400 req_model=claude-opus-5 resolved=gpt-5.6-sol history-v3-260809.db req_1786185829750_634
+    {"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","code":"invalid_request_body"}}
+
+2026-08-08 10:58:13 400 req_model=claude-opus-5 resolved=gpt-5.6-sol history-v3-260809.db req_1786186693137_349
+    {"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","code":"invalid_request_body"}}
+
+2026-08-08 10:58:31 400 req_model=claude-opus-5 resolved=gpt-5.6-sol history-v3-260809.db req_1786186711931_360
+    {"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","code":"invalid_request_body"}}
+
+2026-08-08 10:59:00 400 req_model=claude-opus-5 resolved=gpt-5.6-sol history-v3-260809.db req_1786186740770_371
+    {"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","code":"invalid_request_body"}}
+
+2026-08-08 10:59:26 400 req_model=claude-opus-5 resolved=gpt-5.6-sol history-v3-260809.db req_1786186766358_375
+    {"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","code":"invalid_request_body"}}
+
+2026-08-08 11:24:55 400 req_model=claude-opus-5 resolved=gpt-5.6-sol history-v3-260809.db req_1786188295654_700
+    {"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","code":"invalid_request_body"}}
+
+2026-08-08 14:28:23 400 req_model=claude-opus-5 resolved=gpt-5.6-sol history-v3-260809.db req_1786199303716_3615
+    {"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","code":"invalid_request_body"}}
+
+2026-08-08 14:28:30 400 req_model=claude-opus-5 resolved=gpt-5.6-sol history-v3-260809.db req_1786199310339_3617
+    {"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","code":"invalid_request_body"}}
+
+2026-08-08 14:31:22 400 req_model=claude-opus-5 resolved=gpt-5.6-sol history-v3-260809.db req_1786199482357_3650
+    {"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","code":"invalid_request_body"}}
+
+2026-08-08 14:31:32 400 req_model=claude-opus-5 resolved=gpt-5.6-sol history-v3-260809.db req_1786199492217_3654
+    {"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","code":"invalid_request_body"}}
+
+2026-08-08 17:46:52 400 req_model=claude-opus-5 resolved=gpt-5.6-sol history-v3-260809.db req_1786211212875_94
+    {"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","code":"invalid_request_body"}}
+
+2026-08-08 17:47:01 400 req_model=claude-opus-5 resolved=gpt-5.6-sol history-v3-260809.db req_1786211221667_100
+    {"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","code":"invalid_request_body"}}
+
+2026-08-08 18:49:49 400 req_model=claude-opus-5 resolved=claude-opus-5 history-v3-260809.db req_1786214989420_1
+    {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1299744 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqnMoLxTnJakAt1ofa4k","type":"error"}
+2026-08-08 18:49:52 400 req_model=claude-opus-5 resolved=claude-opus-5 history-v3-260809.db req_1786214992332_5
+    {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1299744 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqnNAXBVoCBFjBDNNq2U","type":"error"}
+2026-08-08 18:51:17 400 req_model=claude-opus-5 resolved=claude-opus-5 history-v3-260809.db req_1786215077067_22
+    {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1056489 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqnUFqL43VNrPQyGcfLZ","type":"error"}
+2026-08-08 18:51:20 400 req_model=claude-opus-5 resolved=claude-opus-5 history-v3-260809.db req_1786215080148_24
+    {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1056489 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqnUUKR7TPNig3HGF2PU","type":"error"}
+2026-08-08 18:51:23 400 req_model=claude-opus-5 resolved=claude-opus-5 history-v3-260809.db req_1786215083692_27
+    {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1223614 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqnVaggA4Yv9n2Zot5Kf","type":"error"}
+2026-08-08 18:51:35 400 req_model=claude-opus-5 resolved=claude-opus-5 history-v3-260809.db req_1786215095990_32
+    {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1098276 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqnVf5r1YH24LQzLGYXx","type":"error"}
+2026-08-08 18:51:47 400 req_model=claude-opus-5 resolved=claude-opus-5 history-v3-260809.db req_1786215107321_35
+    {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1223614 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqnWfDJuS1ECAFj3smAF","type":"error"}
+2026-08-08 18:51:47 400 req_model=claude-opus-5 resolved=claude-opus-5 history-v3-260809.db req_1786215107568_36
+    {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1098276 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqnWebrGkgkMnRVsNKD3","type":"error"}
+2026-08-08 19:13:45 400 req_model=claude-opus-5 resolved=claude-opus-5 history-v3-260809.db req_1786216425652_489
+    {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1051542 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqpBfDGSBVzf9CCXXeBA","type":"error"}
+2026-08-08 19:13:49 400 req_model=claude-opus-5 resolved=claude-opus-5 history-v3-260809.db req_1786216429252_491
+    {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1051542 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqpBvcDk5EtpfHy5U9FA","type":"error"}
+2026-08-08 19:14:37 400 req_model=claude-opus-5 resolved=claude-opus-5 history-v3-260809.db req_1786216477337_512
+    {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1051542 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqpFTxxGaEC3nb2VUiFb","type":"error"}
+2026-08-08 19:15:07 400 req_model=claude-opus-5 resolved=claude-opus-5 history-v3-260809.db req_1786216507671_525
+    {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1051542 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqpHknHrSaA188BwwDHe","type":"error"}
+2026-08-08 19:23:41 400 req_model=claude-opus-5 resolved=claude-opus-5 history-v3-260809.db req_1786217021652_689
+    {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1051542 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqpwjumVF8UnT55ai4DR","type":"error"}
+2026-08-08 19:34:56 400 req_model=claude-opus-5 resolved=claude-opus-5 history-v3-260809.db req_1786217696326_952
+    {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1051542 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqqoMWGx7VGnkDwkCXv6","type":"error"}
+2026-08-08 19:35:00 400 req_model=claude-opus-5 resolved=claude-opus-5 history-v3-260809.db req_1786217700836_958
+    {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1051542 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqqoenLao19Haa3K8ZeT","type":"error"}
+2026-08-08 20:27:08 400 req_model=claude-opus-5 resolved=claude-opus-5 history-v3-260809.db req_1786220828786_2207
+    {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1071938 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqunLb9Sdmqi1yN2eTpK","type":"error"}
+2026-08-08 20:29:00 400 req_model=claude-opus-5 resolved=claude-opus-5 history-v3-260809.db req_1786220940076_24
+    {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1071938 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdquvSKuJYbj5RgQ8jRvX","type":"error"}
+2026-08-08 20:35:25 400 req_model=claude-opus-5 resolved=claude-opus-5 history-v3-260809.db req_1786221325847_171
+    {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1051542 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqvQsQoPn7LWhuKg5oG1","type":"error"}
+2026-08-08 20:35:30 400 req_model=claude-opus-5 resolved=claude-opus-5 history-v3-260809.db req_1786221330509_176
+    {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1051542 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqvRGg2bs1tqRLvnMJKY","type":"error"}
+2026-08-08 20:42:55 400 req_model=claude-opus-5 resolved=claude-opus-5 history-v3-260809.db req_1786221775139_297
+    {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1051542 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqvyzmEeDZ2uWqTa91bj","type":"error"}
+2026-08-08 20:43:01 400 req_model=claude-opus-5 resolved=claude-opus-5 history-v3-260809.db req_1786221781772_307
+    {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1051542 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqvzUfmfRMAsjK2dFEPR","type":"error"}
+2026-08-08 20:45:56 400 req_model=claude-opus-5 resolved=claude-opus-5 history-v3-260809.db req_1786221956083_381
+    {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1051542 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqwDLbhXKcz3joo19PNm","type":"error"}
+2026-08-08 20:46:01 400 req_model=claude-opus-5 resolved=claude-opus-5 history-v3-260809.db req_1786221961723_387
+    {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1051542 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqwDkJy9YDgyzVF2fixv","type":"error"}
+
+distinct field shapes:
+    27x {"error.code": "model_max_prompt_tokens_exceeded", "error.type": "invalid_request_error", "error_keys": ["code", "message", "type"], "top.type": "error", "top_level_keys": ["error", "request_id", "type"]}
+    21x {"error.code": "invalid_request_body", "error.type": null, "error_keys": ["code", "message"], "top.type": null, "top_level_keys": ["error"]}

@@ -1,7 +1,9 @@
 # 上游 GOAWAY 打掉在飞流式请求
 
-**状态**：活文档。诊断已收敛；六处修复已落地；一处接线待做；两处待裁决（见 [`deferred.md`](deferred.md)）。
+**状态**：活文档。诊断已收敛；六处修复已落地；两处待裁决（见 [`deferred.md`](deferred.md)）。原本挂在这里的「一处接线待做」已于 2026-08-21 移交，见下。
 **本文是入口**：目录导览与证据地图在 [`README.md`](README.md)，过程产物在 `archive-260820/`（十份），只在需要证据时去读。
+
+> **2026-08-21 移交**：`decide_stream_ending()` 的接线，连同「截断之后怎么恢复」这整件事，已移交给 [`../retry-and-continuation/`](../retry-and-continuation/)。本文下面几处描述该函数**四条路**的段落是当时的设计记录，其中 **CONTINUE（代理内续写）已被用户裁决放弃**，`continuation_messages`／`RetryReason.CONTINUATION` 由待接线的孤儿件变为待删除的件；**R4（合成 `message_start` 而零块）那一格也随 `synthesized_response_headers_after_sec` 的删除而不再可达**。读那几段时按本注理解，段落本身不改写。
 
 ---
 
@@ -91,7 +93,7 @@ httpcore.RemoteProtocolError: <ConnectionTerminated error_code:0, last_stream_id
 
 | | 要做的事 | 状态 |
 |---|---|---|
-| 裁决的接线 | 让上游 attempt 那一层在流撕裂时读 `decide_stream_ending`：REPLAY 就重开，CONTINUE 就带 `continuation_messages` 重开，ABANDON 才走已落地的 SSE error | **函数已就绪、无调用者。** 排期等待——要动的 `pipeline_app.py`／`handler.py` 正被并行会话大改（`direct_driver` 重构），共用同一棵工作树时同改一文件是互相覆盖而非合并冲突 |
+| 裁决的接线 | 让上游 attempt 那一层在流撕裂时读 `decide_stream_ending`：REPLAY 就重开，ABANDON 才走已落地的 SSE error | **2026-08-21 移交给 `../retry-and-continuation/`，本表不再跟踪。** 函数仍已就绪、无调用者。原本写在这里的第三条路（CONTINUE 带 `continuation_messages` 重开）**已被用户裁决作废**——代理内续写整体放弃，改由客户端经 MCP 工具驱动 |
 
 ## 待裁决
 

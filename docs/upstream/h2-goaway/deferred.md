@@ -23,13 +23,14 @@ SSE 信封那一半已闭合（`16dd68c`）。另一半没有：`context.reply` 
 
 ## 已知未闭合
 
-### 3. 三条路的裁决还没有调用者
+### 3. 三条路的裁决还没有调用者 —— 已移交，且 CONTINUE 那一格已作废
 
 `decide_stream_ending()`（`5c1afbe`）是纯函数、已测、已做变异检验，但**生产链路无人调用**。
 
-要接的地方：上游 attempt 那一层在流撕裂时读它——REPLAY 就重开，CONTINUE 就带 `continuation_messages()` 重开，ABANDON 才走已落地的 SSE error。会动 `pipeline_app.py` 与 `handler.py`。
+**这笔欠账 2026-08-21 移交给 `../retry-and-continuation/`**，本主题不再跟踪它。移交时状态有变，两点：
 
-注意 `continuation_messages()` 与 `RetryReason.CONTINUATION` 此前也是**只被测试引用**的孤儿件，接线时一并接上。
+- **REPLAY / ABANDON 仍然要接**，就是人写文档里的「无痕重试」。
+- **CONTINUE 那一格已被用户裁决作废**——代理内续写整体放弃，改由客户端经 MCP 工具驱动续写。`continuation_messages()` 与 `RetryReason.CONTINUATION` 因此**不再是待接线的孤儿件，而是待删除的件**。见 `../retry-and-continuation/archive-proxy-side-continuation/README.md`。
 
 ### 4. 「上游响应被提前关闭」的频率没有数
 
