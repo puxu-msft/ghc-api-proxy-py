@@ -29,7 +29,7 @@
 
 A1 那个已知陷阱**已补偿并钉住**：自建 transport 会让 httpx 关掉 `HTTP_PROXY`/`HTTPS_PROXY`（`allow_env_proxies` 是 `trust_env and transport is None`），所以环境变量代理映射在 `composition.py` 里重建并挂载。钉住它的护栏是 `test_environment_routing_matches_native_httpx`（`tests/unit/server/test_http_client_build.py`），它对四个目的地逐个与**原生 httpx 的路由结果**比对。
 
-（本节初版点的是 `test_environment_proxies_are_still_honoured`。那个测试**已经不存在了**：`review-transport-keepalive.md` 判定它几乎没有分辨力——只设一个 `HTTPS_PROXY`、然后断言「有某个非空 transport 匹配上了」，这对大量错误答案同样成立——因而被删除重写。把一个被判无效的测试当作「已钉住」的证据挂在这里，是本文自己犯的同一类错误：**证据名要指向现在跑得起来的那一个**。）
+（本节初版点的是 `test_environment_proxies_are_still_honoured`。那个测试**已经不存在了**：`reports/review-transport-keepalive.md` 判定它几乎没有分辨力——只设一个 `HTTPS_PROXY`、然后断言「有某个非空 transport 匹配上了」，这对大量错误答案同样成立——因而被删除重写。把一个被判无效的测试当作「已钉住」的证据挂在这里，是本文自己犯的同一类错误：**证据名要指向现在跑得起来的那一个**。）
 
 **不新增任何配置键，也没有兼容范围要谈。** 这一点我先前搞错了，用户当场指出：所谓「连接池保留时长」**从来没有被裁决过**——它是这个 bug 的副产物，`tcp_keepalive_interval` 被错映射成 `keepalive_expiry`，于是碰巧产生了 15 秒。我却把这个副产物当成契约，为保住它新造了一个面向用户的键 `pool_idle_expiry`，还写了迁移规则。那是在给一个缺陷的意外行为立约，并擅自铸造配置面。
 
@@ -47,7 +47,7 @@ A1 那个已知陷阱**已补偿并钉住**：自建 transport 会让 httpx 关�
 
 ### D-7 proxy 优先级无法实现：三个来源在 `load_proxy_config()` 里被压平，没有 provenance
 
-**这一条被声称「已记入本文」三次，实际一次都没写进来。** 第一次是我在协调消息里说的，`review-transport-keepalive-r3.md` 的 R3-F2 查了 commit tree 与工作树、指出没有；第二次仍未落盘；第三次是生产测试 `tests/unit/server/test_http_client_build.py::test_an_explicit_proxy_reaching_httpx_shuts_the_environment_out` 的 docstring 里写着「Recorded in `deferred.md`」——而本文里依旧没有。现在写下来。
+**这一条被声称「已记入本文」三次，实际一次都没写进来。** 第一次是我在协调消息里说的，`reports/review-transport-keepalive-r3.md` 的 R3-F2 查了 commit tree 与工作树、指出没有；第二次仍未落盘；第三次是生产测试 `tests/unit/server/test_http_client_build.py::test_an_explicit_proxy_reaching_httpx_shuts_the_environment_out` 的 docstring 里写着「Recorded in `deferred.md`」——而本文里依旧没有。现在写下来。
 
 **缺口本身**：用户亲笔 `docs/.human-controlled/config.example.yaml` 规定的优先级是 CLI `--proxy` > `HTTP_PROXY`/`HTTPS_PROXY` > 配置文件 `proxy`。但 `load_proxy_config()` 把 CLI、`GHC_PROXY` 与 YAML 三个来源压平进同一个字段，**不保留任何来源信息**，于是下游无从分辨「这个 proxy 是命令行给的还是配置文件给的」，也就无法把环境变量插在两者中间。当前实际行为是：只要 `config.proxy` 非空就走它、且完全不看环境变量（httpx 语义下等于 `all://`），环境变量因此永远排在配置文件之后，与人写文档规定的顺序相反。
 
@@ -125,7 +125,7 @@ TCP keep-alive 是逐连接的，而代理会终结 TCP 连接。实测（`getpe
 
 ## 合入后复评查出的三条 —— 已修
 
-评审报告：`review-merged-upstream-keepalive.md`（异源模型，真实 socket 与真实连接池探针）。派这一轮的直接原因是：上游 slice 的代理修复机制在评审通过**之后**被换掉过（替换池 → 只补 `create_connection`），换掉的那一版没有任何人审过。逐参数比对的结论是新机制在 httpcore 1.0.9 上没有漏传或错传，但同时查出下面三条。
+评审报告：`reports/review-merged-upstream-keepalive.md`（异源模型，真实 socket 与真实连接池探针）。派这一轮的直接原因是：上游 slice 的代理修复机制在评审通过**之后**被换掉过（替换池 → 只补 `create_connection`），换掉的那一版没有任何人审过。逐参数比对的结论是新机制在 httpcore 1.0.9 上没有漏传或错传，但同时查出下面三条。
 
 ### D-8【中等，已修】同一个池按 `NO_PROXY` mount 数被反复包装，长列表触发 `RecursionError`
 

@@ -26,11 +26,11 @@
 | `archive/260820-upstream-keepalive-onmain` | `0176e93` | **一个 rebase 中转的 squash**，不是多提交源。项目规则「归档不得指向 squash 提交」针对的是集成 squash（这里是 `52d877c`），本分支是中间态；记在这里是因为同后缀在两个 slice 里不同义 |
 | `archive/260820-keepalive-followup` | `5116606` | 合入后复评修复的已评审源，5 个提交（`10da106` / `029bf0a` / `b472a03` / `bf1e3c1` / `5116606`）。集成 squash 是 `306bdb7`，按规则本分支不指向它 |
 
-评审：五路独立、异源。契约 3 轮判定 spec 可固定为规范；asyncio 正确性 8 轮判定可以合入；调和评审确认主线的清理语义、STR-04 与本分支七条保活性质全部保持，无忙等、无第八种替身量；传输层 3 轮加合入后复评 2 轮（`review-merged-upstream-keepalive.md`、`review-followup-cap-dedup.md`）；文档与裁决核对 2 轮（`reports/260820-review-keepalive-rulings.md`、`reports/260820-review-keepalive-doc-fixes.md`）。
+评审：五路独立、异源。契约 3 轮判定 spec 可固定为规范；asyncio 正确性 8 轮判定可以合入；调和评审确认主线的清理语义、STR-04 与本分支七条保活性质全部保持，无忙等、无第八种替身量；传输层 3 轮加合入后复评 2 轮（`reports/review-merged-upstream-keepalive.md`、`reports/review-followup-cap-dedup.md`）；文档与裁决核对 2 轮（`reports/260820-review-keepalive-rulings.md`、`reports/260820-review-keepalive-doc-fixes.md`）。
 
 第一轮文档核对判定八条裁决在实现里全部准确落实、两条提交信息无夸大，14 条问题全在文档侧；第二轮核对这次修订本身，判定 13/14 已处置，并查出修订过程**新引入**的 4 条假断言（D-5 主语写反、修复提交归错、e2e 红灯早已修好、`deferred.md` D-2 未跟上），均已改。
 
-**唯一未处置的是第一轮的 F-11，理由记在这里而不是略过**：F-11 指出 `review-transport-keepalive-r3.md` 的 `needs-fix` 裁决被无声关掉了——其后又落了三个提交却没有 R4。不补 R4 的理由是那三条前置条件已各自有归宿：① SOCKS 只告警由用户 S2 裁决消解；② 兼容范围与迁移规则随 `pool_idle_expiry` 整个撤销而自然消失，剩下的 proxy 优先级缺口已落成 D-7；③ HTTPS tunnel 的提交内 fd 回归由 `test_the_keepalive_is_on_the_socket_of_a_connect_tunnel` 补上，且已由合入后复评独立复验。**该补的是这段关闭说明本身，不是再跑一轮 R4**，现已补上。
+**唯一未处置的是第一轮的 F-11，理由记在这里而不是略过**：F-11 指出 `reports/review-transport-keepalive-r3.md` 的 `needs-fix` 裁决被无声关掉了——其后又落了三个提交却没有 R4。不补 R4 的理由是那三条前置条件已各自有归宿：① SOCKS 只告警由用户 S2 裁决消解；② 兼容范围与迁移规则随 `pool_idle_expiry` 整个撤销而自然消失，剩下的 proxy 优先级缺口已落成 D-7；③ HTTPS tunnel 的提交内 fd 回归由 `test_the_keepalive_is_on_the_socket_of_a_connect_tunnel` 补上，且已由合入后复评独立复验。**该补的是这段关闭说明本身，不是再跑一轮 R4**，现已补上。
 
 ## 合入是怎么完成的（这一段是给下一个撞上同样情况的人）
 
