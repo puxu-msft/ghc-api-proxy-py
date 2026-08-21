@@ -124,7 +124,35 @@
 
 ---
 
-## 八、一条推论（不是裁决，前提变了它就失效）
+## 八、`config.example.yaml` 里有五行需要你删（B 组落地后唯一的红）
+
+代码里的 `continuation` 策略已随 B 组删除（提交 `40d9c76`）。但 `docs/.human-controlled/config.example.yaml` 仍在第 341–346 行声明它，而 schema 是 `extra="forbid"`，于是 `tests/unit/config/test_config_schema.py::test_authoritative_example_config_parses` **持续为红**，直到这几行从你的文件里去掉。
+
+我不动你的文件，所以把要删的原文贴在这里：
+
+```yaml
+    # 续写：已经有块提交给客户端（非工具调用）后请求中断，代理合成续写轮直接重投（已提交块作 assistant + 续写 user）。
+    # Continuation: some block was committed to the client, a mid-stream RST occurs -- the proxy appends messages (the already-committed blocks as an assistant turn + this user message) so the model continues.
+    continuation:
+      enabled: true
+      max_retries: 10
+      message: "Please continue where you left off."
+```
+
+顺带两处**同一段落里的相邻文字**，删不删由你，它们描述的都是已放弃的方案：
+
+- 第 322 行 `# Includes both direct replay and continuation` —— 现在只剩 direct replay。
+- 第 383 行 `# This also allows us to implement a valuable "continuation" feature: blocks already seen by the client are not discarded, and can be sent to the model as context for continuation.` —— 「把已见块回送给模型作上下文」正是被放弃的那件事。块级交付本身的价值不受影响，只是这句举的例子换了。
+
+**`max_tokens_as_retryable: true`（第 350 行附近）保留**——用户裁决「其他未接线的功能不要动」，它不属于代理内续写机制。
+
+### 顺带发现：一处与本次无关的既有红
+
+同一条测试还报第二个 `extra_forbidden`：`config.example.yaml:450` 的 `hook_strip_anthropic_request_headers` 整段在 schema 里没有对应物。这在本次改动之前就存在（`app/hooks/` 是未挂载的 legacy 链路），**不是 B 组造成的**，也不在本次范围内。列在这里只为免得将来把两条红算成一条。
+
+---
+
+## 九、一条推论（不是裁决，前提变了它就失效）
 
 删掉 `client_delivery.synthesized_response_headers_after_sec` 之后，`stream.py:253-262` 那个唯一会单独发 `message_start` 的出口消失，于是 **`message_start` 只能与第一个完整块同批发出，半开状态不再可达**。
 
