@@ -138,12 +138,12 @@ def _load_spec_config(
     return config, inactive
 
 
-async def serve_inherited(config: ProxyConfig, fd: int, *, proxy_from_cli: bool) -> None:
+async def serve_inherited(config: ProxyConfig, fd: int) -> None:
     """Serve the chain on a listener systemd already opened.
 
     Not `run_standalone`: that owns the listener so it can hand it over, and here systemd does.
     """
-    http_client = build_http_client(config, proxy_from_cli=proxy_from_cli)
+    http_client = build_http_client(config)
     try:
         chain = build_chain(config, http_client=http_client)
         server = uvicorn.Server(
@@ -159,13 +159,13 @@ async def serve_inherited(config: ProxyConfig, fd: int, *, proxy_from_cli: bool)
         await http_client.aclose()
 
 
-async def _serve_pipeline(config: ProxyConfig, options: StandaloneOptions, *, proxy_from_cli: bool) -> None:
+async def _serve_pipeline(config: ProxyConfig, options: StandaloneOptions) -> None:
     """Build the chain and serve it, closing the outbound client on the way out.
 
     The client is created here rather than inside `build_chain` because whoever creates it has to
     close it, and the chain is handed to an app that outlives neither.
     """
-    http_client = build_http_client(config, proxy_from_cli=proxy_from_cli)
+    http_client = build_http_client(config)
     try:
         chain = build_chain(config, http_client=http_client)
         # Wired here because this is the one scope holding both the chain that owns the display and the server that learns the listener has stopped accepting.
@@ -285,7 +285,7 @@ def start(
         # escalating shutdown is written for the stand-alone section, which owns its own listener.
         # What this path serves is no longer the difference — it is the same chain `start` serves.
         # Ruled 2026-08-19; what the existing chain offered and this one does not is inventoried
-        # in `docs/agents/anthropic-responses-bridge/implementation.md`.
+        # in `.dev/docs/anthropic-responses-bridge/implementation.md`.
         proxy_config, _ = _load_spec_config(
             config_path=config,
             port=port,
@@ -300,7 +300,7 @@ def start(
             github_token=github_token,
             account_type=account_type,
         )
-        run(partial(serve_inherited, proxy_config, fd, proxy_from_cli=proxy is not None))
+        run(partial(serve_inherited, proxy_config, fd))
         return
 
     proxy_config, inactive = _load_spec_config(
@@ -335,7 +335,7 @@ def start(
         pidfile=pidfile,
         restart=restart,
     )
-    run(partial(_serve_pipeline, proxy_config, options, proxy_from_cli=proxy is not None))
+    run(partial(_serve_pipeline, proxy_config, options))
 
 
 def _authenticate() -> None:

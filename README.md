@@ -1,59 +1,41 @@
 # ghc-api-proxy
 
-Python 3.14 实现的高性能、多协议 GitHub Copilot API 代理。支持 Anthropic Messages、OpenAI Chat Completions / Responses / Embeddings、Azure OpenAI deployment 路径和 Gemini `/v1beta`，并提供认证、审批、历史审计、Prometheus 指标与可选 TUI。
+Python 实现的 GitHub Copilot API 代理，取代 JS 旧版（copilot-api-js）。
 
-Anthropic 请求支持 typed Hooks 扩展、局部相邻的 client tool-pair 修复，以及上游优先的 token counting。本地 fallback 使用按协议/模型/请求规模学习的校准因子；prompt-limit 错误仅用于观测，不会删除、压缩或摘要历史。代理不实现 Anthropic 原生 server-tool 执行、过滤或降级。
+## 作为服务器，提供
 
-## 安装
-
-```bash
-uv sync
-```
-
-## 认证与启动
-
-```bash
-uv run python -m app auth
-uv run python -m app start
-```
-
-也可以通过环境变量提供 GitHub token：`COPILOT_API_GITHUB_TOKEN`、`GH_TOKEN` 或 `GITHUB_TOKEN`。配置优先级为：defaults < YAML < environment < CLI。
-
-生成完整默认配置：
-
-```bash
-uv run python -m app start --config ./config.yaml --generate-config
-```
-
-## 主要端点
+### 主要模型端点
 
 - Anthropic：`POST /v1/messages`、`POST /v1/messages/count_tokens`
 - OpenAI：`POST /chat/completions`、`POST /responses`、`POST /embeddings`、`GET /models`
 - OpenAI 兼容前缀：同一组端点也注册在 `/v1` 和 `/openai/v1`
-- Responses WebSocket：`GET /responses`、`/v1/responses`、`/openai/v1/responses`
+- ~~Responses WebSocket：`GET /responses`、`/v1/responses`、`/openai/v1/responses`~~ 暂不支持
 - Azure：`POST /openai/deployments/{deployment}/{chat/completions|responses|embeddings}`
 - Gemini：`POST /v1beta/models/{model}:{generateContent|streamGenerateContent|countTokens}`
 
-## 运维端点
+这些端点可以指定具体的模型，根据 GHC API 的现状，提供直连路径或翻译路径。
+
+### 运维端点
 
 - 健康检查：`/health/liveness`、`/health/readiness`
 - 历史：`/history/api/*`、`/history/ws`
-- 审批：`/api/approval/*`、`/api/approval/ws`
 - 指标：`/metrics`
 - 状态与配置：`/api/status`、`/api/config`
-- Tokenization：`/api/tokenization/calibration`、`/api/tokenization/limits`
+- ~~审批：`/api/approval/*`、`/api/approval/ws`~~ 暂不支持
+- ~~Tokenization：`/api/tokenization/calibration`、`/api/tokenization/limits`~~ 暂不支持
 
 `/api/config` 会脱敏 GitHub token 和上游 API key。OpenTelemetry 自动 instrumentation 默认关闭，通过 `observability.tracing_enabled` 显式启用。
 
-## 开发验证
+## 使用
 
 ```bash
-uv run ruff check src tests
-uv run pyright src tests
-uv run pytest tests --cov=app --cov-report=term --cov-fail-under=80
+# 直接提供 GitHub token，从 GitHub 获取和启用
+GHC_API_PROXY_GITHUB_TOKEN=ghu_...
+uvx --from git+https://github.com/puxu-msft/ghc-api-proxy-py.git --refresh ghc-api-proxy start --port 4141
+
+# device-code 认证，会写入 ~/.local/share/ghc-api-proxy/github_token
+ghc-api-proxy auth
+
+# 生成完整默认配置（文件已存在时需二次确认）
+ghc-api-proxy gen-config ~/.local/share/ghc-api-proxy/config.yaml
 ```
-
-行为规范以 [docs/.human-controlled](docs/.human-controlled) 为准；各专题的开发文档在 [docs/agents](docs/agents)。
-
-> 本节此前指向 `docs/2604-rewrite/`。用户于 2026-08-20 裁定该目录整体过期——它是早期对参考项目 `copilot-api-js` 的学习笔记，不是本项目的设计规范，已移入开发记录仓 `.dev/docs/archived-2604-rewrite/` 仅供参考。Hooks 用法与计数校准的当前说明尚无替代入口，暂以代码与 `docs/agents/` 下相关话题为准。
-systemd socket activation、优雅退出与 cgroup v2 部署模板见 [docs/agents/deployment-systemd](docs/agents/deployment-systemd/README.md)。
