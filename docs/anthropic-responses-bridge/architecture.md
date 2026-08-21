@@ -4,7 +4,7 @@
 >
 > 用户在裁决时附加了一条授权范围说明，逐条实施时以它为准：本轮属于「在用户授权下、依用户提议实现补全」，并非所有细节都是用户已逐项知悉的实现；因此实现方可全面推进 B，**若将来发现与用户文档不一致，再讨论与修复，而不是停下来等裁决**。这条授权覆盖实现细节，不覆盖 `spec.md` 的可观察行为合同，也不覆盖 `docs/.human-controlled/`。
 >
-> 裁决前的旧状态记录（保留以便追溯）：本版裁决矩阵曾于 260807 经 `docs/tmp/260807-review-architecture-decision-matrix.md` 独立终审为 0 blocker、0 major，当时唯一门是用户阅读后分别裁决 `D-ARCH` 与 `D-MIGRATION`；该门已于 2026-08-19 关闭。
+> 裁决前的旧状态记录（保留以便追溯）：本版裁决矩阵曾于 260807 经 `reports/260807-review-architecture-decision-matrix.md` 独立终审为 0 blocker、0 major，当时唯一门是用户阅读后分别裁决 `D-ARCH` 与 `D-MIGRATION`；该门已于 2026-08-19 关闭。
 >
 > 历史设计基线：`/home/xp/src/ghc-api-proxy-py`，`main HEAD ed77c9d191df81c451c25161420515cca52ce6a4`。下文“生产事实”描述提案形成时的代码接缝，不是 current 状态；current 实现状态见 [implementation.md](implementation.md)。
 >
@@ -329,7 +329,7 @@ class UpstreamExchange(Protocol):
     async def aclose(self) -> CloseOutcome: ...
 ```
 
-Driver 必须以 `async with transport.exchange(...) as exchange` 使用 port。Exchange cleanup 采用 session-liveness 候选 `f27a8c04cd3470bd50d7194a30371ca5404f727e` 经 `docs/tmp/260806-review-code-liveness-r3.md` 独立复评验证的模式；这是目标合同的实证来源，不表示该候选已经进入当前 main。首次进入 close 路径时创建唯一 cleanup task，由它顺序 settle producer／active pull 并关闭底层 HTTP response、WebSocket 或 iterator；调用方只通过 `asyncio.shield()` 或等价不向内传播 cancellation 的机制观察该 task。cleanup 中再次到达的 cancellation 必须被记住，但调用方要在循环中继续观察同一 task，直到底层资源进入 terminal close state，再恢复应向外传播的 cancellation 或异常。不得以一次普通 `await aclose()` 让第二次 cancellation 截断 cleanup，也不得为每次取消创建新的 cleanup task。
+Driver 必须以 `async with transport.exchange(...) as exchange` 使用 port。Exchange cleanup 采用 session-liveness 候选 `f27a8c04cd3470bd50d7194a30371ca5404f727e` 经 `reports/260806-review-code-liveness-r3.md` 独立复评验证的模式；这是目标合同的实证来源，不表示该候选已经进入当前 main。首次进入 close 路径时创建唯一 cleanup task，由它顺序 settle producer／active pull 并关闭底层 HTTP response、WebSocket 或 iterator；调用方只通过 `asyncio.shield()` 或等价不向内传播 cancellation 的机制观察该 task。cleanup 中再次到达的 cancellation 必须被记住，但调用方要在循环中继续观察同一 task，直到底层资源进入 terminal close state，再恢复应向外传播的 cancellation 或异常。不得以一次普通 `await aclose()` 让第二次 cancellation 截断 cleanup，也不得为每次取消创建新的 cleanup task。
 
 退出原因按机械优先级裁决：进入 cleanup 前已有的 primary exception／cancellation 保持最终异常；cleanup 期间首次出现的 cancellation 在没有既有 primary 时成为 primary；secondary close failure 必须形成 typed close fact并被 metrics／journal 观察。存在 primary 时，最终仍传播 primary，并把 close failure 作为显式 `__cause__`；不存在 primary 时，close failure 才成为最终异常。`cancel()` 与 `aclose()` 都是幂等操作：第一次调用启动或观察同一个 cleanup task，后续调用返回同一个 typed outcome，不重复关闭底层资源。`CloseOutcome` 至少区分 clean、cancelled、already-closed 与 close-failed；`CancelOutcome` 至少说明是否首次发出取消、来源及最终 close 是否仍待完成。
 
@@ -489,7 +489,7 @@ History writer 的独立 receipt event stream 只承载 `history.durable`、`his
 
 History projection 必须在 assembler／buffer cleanup **之前**由 driver 从待冻结 journal 生成。Projection 是自包含 immutable value：需要保留既有客户端可见 response 时，在此阶段形成该 response 或把其 immutable ownership 移交给 History consumer；不得让异步 writer 在 cleanup 后回头读取 request buffer。History queue 必须按 job 数有界，避免大 response 在异步 writer queue 中无界堆积。History consumer 返回 `Accepted(projection_id)` 后，projection 归 History 所有，driver 发布 `history.projection_accepted`，request owner 只释放自己的引用；writer 等待 `request.finalized` barrier 后完成序列化／transaction，发布 `history.durable` 或 `history.persistence_failed` receipt，并恰好一次释放该 projection。返回 `Rejected(reason)` 时，driver 发布 `history.projection_rejected`，由 request owner 恰好一次释放该 projection 并完成 cleanup；未被 writer 接受的 projection 不得伪造 persistence receipt，也不能无限保留大 block。
 
-默认持久化严格遵守既有精简裁决：保留原始 Anthropic payload、既有客户端可见 response、original／resolved model、selected route／transport、`attempt_count`、`retry_strategies_applied`、必要的 conversion／commit／terminal 摘要、normalized usage 与 final error；**不持久化完整 request-local journal，不持久化连续逐-attempt 对象图，也不持久化 raw Responses event 序列。** 完整逐-attempt diagnostics 只可进入已另行裁决的可选 detailed mode／受限诊断附件。Bridge 架构不得借新增 journal 隐式重裁 `docs/2604-rewrite/history-system.md` 的轻量终态一次写入设计。
+默认持久化严格遵守既有精简裁决：保留原始 Anthropic payload、既有客户端可见 response、original／resolved model、selected route／transport、`attempt_count`、`retry_strategies_applied`、必要的 conversion／commit／terminal 摘要、normalized usage 与 final error；**不持久化完整 request-local journal，不持久化连续逐-attempt 对象图，也不持久化 raw Responses event 序列。** 完整逐-attempt diagnostics 只可进入已另行裁决的可选 detailed mode／受限诊断附件。Bridge 架构不得借新增 journal 隐式重裁 `../archived-2604-rewrite/history-system.md` 的轻量终态一次写入设计。
 
 非流式 History 可保存完整规范化 Anthropic response。流式 History projection 从 committed block ledger 与 immutable completed-block records 形成；它不得依赖 cleanup 后仍存活的 request buffer，也不得从 raw Responses events 重推导语义。只有所有 block 正常 committed 并且 terminal batch 完成时状态才是 completed；block conversion failure、capacity failure、sink uncertainty、client abort 或 upstream truncation分别保留明确终止原因。
 

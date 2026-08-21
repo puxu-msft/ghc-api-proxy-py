@@ -4,12 +4,12 @@
 
 调研与评审依据：
 
-- `docs/tmp/260821-httpx2-api-delta.md` —— httpx 0.28.1 → httpx2 2.12.0 的 API/行为差异。
-- `docs/tmp/260821-httpx-usage-inventory.md` —— 本仓库 httpx 使用面清单，含文件:行号。
-- `docs/tmp/260821-httpx2-ecosystem-compat.md` —— 周边库跟进情况。
-- `docs/tmp/260821-review-httpx2-plan-a.md` —— 第 1 稿评审（机制正确性、依赖约束），含逐条处置。
-- `docs/tmp/260821-review-httpx2-plan-b.md` —— 第 1 稿评审（覆盖面、可验证性、回滚、文档纪律）。
-- `docs/tmp/260821-review-httpx2-plan-r2.md` —— 第 2 稿复评，只攻 D3' 与 D7，处置见 §8。
+- `reports/260821-httpx2-api-delta.md` —— httpx 0.28.1 → httpx2 2.12.0 的 API/行为差异。
+- `reports/260821-httpx-usage-inventory.md` —— 本仓库 httpx 使用面清单，含文件:行号。
+- `reports/260821-httpx2-ecosystem-compat.md` —— 周边库跟进情况。
+- `reports/260821-review-httpx2-plan-a.md` —— 第 1 稿评审（机制正确性、依赖约束），含逐条处置。
+- `reports/260821-review-httpx2-plan-b.md` —— 第 1 稿评审（覆盖面、可验证性、回滚、文档纪律）。
+- `reports/260821-review-httpx2-plan-r2.md` —— 第 2 稿复评，只攻 D3' 与 D7，处置见 §8。
 
 ## 0. 实施状态（2026-08-21）
 
@@ -60,7 +60,7 @@ httpx2 是 Pydantic 接管维护后从 `httpx 0.28.1`（commit `b5addb6`）分�
 
 ### D3'：`stream_cap` 在发送时抛 `ConnectionNotAvailable`，`is_available()` 保留为分配时的提示
 
-**第 1 稿的 D3（把 cap 谓词挪进 `can_handle_request()`）已撤回**，理由见下表与 `docs/tmp/260821-review-httpx2-plan-a.md` B1/M1。
+**第 1 稿的 D3（把 cap 谓词挪进 `can_handle_request()`）已撤回**，理由见下表与 `reports/260821-review-httpx2-plan-a.md` B1/M1。
 
 httpcore2 2.3.0 把 `_assign_requests_to_connections` 重写成单趟循环（PR #974）：可复用连接集合在一趟分配开始时**快照一次**，`is_available()` 整趟只问一次。而 `StreamCappedConnection` 的全部机制就是覆盖 `is_available()`。
 

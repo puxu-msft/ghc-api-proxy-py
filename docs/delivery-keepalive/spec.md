@@ -2,8 +2,8 @@
 
 - 状态：规范。适用范围是 `src/app/pipeline/delivery/stream.py` 的下游交付，随该外部契约有效而有效。
 - 用户裁决：**「要清晰区分 client ↔ proxy ↔ upstream 这两侧的保活，它们是不同的，不可混为一谈。」**（2026-08-20）
-- 缺陷背景与实测证据：`docs/tmp/260820-downstream-keepalive-defect.md`（含独立证伪评审 `docs/tmp/260820-review-downstream-keepalive-defect.md`）与 `docs/tmp/260820-review-synthetic-start-fix.md`。**这三份连同 `docs/.human-controlled/` 目前都还不在 `main` 上**，由并行会话的 `53fec22` 一并提交；在它落到 `main` 之前，从 `main` 的干净 checkout 出发读不到本文引用的实测数字。
-- 本文所在主题共 19 份独立评审报告：`docs/agents/delivery-keepalive/` 下 17 份（asyncio 正确性 8 轮、契约 3 轮、传输层 3 轮、调和 1 份、合入后传输层复评 1 份、合入后 cap 去重复评 1 份），`docs/tmp/` 下 2 份文档与裁决核对（`260820-review-keepalive-rulings.md`、`260820-review-keepalive-doc-fixes.md`）。本文正文经契约评审 3 轮修订（F1–F11 出自第一轮）。**§3 是上游 slice 落地后重写的，未经代码评审以外的任何评审；§2.2 与 §4 在 2026-08-20 又整段重写过一次，那一次由文档核对的第二轮覆盖。**
+- 缺陷背景与实测证据：`reports/260820-downstream-keepalive-defect.md`（含独立证伪评审 `reports/260820-review-downstream-keepalive-defect.md`）与 `../empty-text-block/reports/260820-review-synthetic-start-fix.md`。**这三份连同 `docs/.human-controlled/` 目前都还不在 `main` 上**，由并行会话的 `53fec22` 一并提交；在它落到 `main` 之前，从 `main` 的干净 checkout 出发读不到本文引用的实测数字。
+- 本文所在主题共 19 份独立评审报告：`../delivery-keepalive/` 下 17 份（asyncio 正确性 8 轮、契约 3 轮、传输层 3 轮、调和 1 份、合入后传输层复评 1 份、合入后 cap 去重复评 1 份），`../tmp/` 下 2 份文档与裁决核对（`260820-review-keepalive-rulings.md`、`260820-review-keepalive-doc-fixes.md`）。本文正文经契约评审 3 轮修订（F1–F11 出自第一轮）。**§3 是上游 slice 落地后重写的，未经代码评审以外的任何评审；§2.2 与 §4 在 2026-08-20 又整段重写过一次，那一次由文档核对的第二轮覆盖。**
 - 未决事项集中在 `deferred.md`；**§2.2 尚有一条需要用户裁决，未裁之前不得当作已定**
 
 ---
@@ -59,13 +59,13 @@
 
 指 `_deliver` 里的 `client_has_bytes`：**客户端已经收到过至少一个字节**。本节判据涉及的三件事共用它——`_commit` 是否发过 `message_start`、保活是否可发、合成计时是否解除。（`DeliverySession.started` 是另一回事，它描述的是缓冲区有没有开始释放，不参与本节判据。）
 
-早先版本有两道门——保活看「有没有写过」，合成计时看「assembler 有没有组装出块」——在 `buffering_policy` 取 `full` 或 `until-tool-use` 时二者会分叉：块被扣住到流末才交付，于是合成计时被解除、而写出从未发生，**两道守卫同时熄灭，静默没有任何上界**。实测（`sse_ping_interval=1`、首块 0.2s 闭合、第二块 3s 不闭合）：`block` 策略 3 个 ping、首字节 0.20s；`full` 与 `until-tool-use` 各 0 个 ping、首字节 3.22s，即流结束的时刻。该缺陷由 `docs/tmp/260820-review-synthetic-start-fix.md` §7 首次指出，现已合并为一道门修掉，回归测试 `test_a_held_back_block_does_not_disarm_both_guards`。
+早先版本有两道门——保活看「有没有写过」，合成计时看「assembler 有没有组装出块」——在 `buffering_policy` 取 `full` 或 `until-tool-use` 时二者会分叉：块被扣住到流末才交付，于是合成计时被解除、而写出从未发生，**两道守卫同时熄灭，静默没有任何上界**。实测（`sse_ping_interval=1`、首块 0.2s 闭合、第二块 3s 不闭合）：`block` 策略 3 个 ping、首字节 0.20s；`full` 与 `until-tool-use` 各 0 个 ping、首字节 3.22s，即流结束的时刻。该缺陷由 `../empty-text-block/reports/260820-review-synthetic-start-fix.md` §7 首次指出，现已合并为一道门修掉，回归测试 `test_a_held_back_block_does_not_disarm_both_guards`。
 
 ### 2.2 交付开始之前
 
 首个字节交付之前不发保活帧。这一段的静默由另一个机制兜底：`client_delivery.synthesized_response_headers_after_sec` 到期时合成一个 `message_start`，它本身就是「第一个字节」，此后保活按 §2 正常工作。**该上界（默认 240s）现在对三种 `buffering_policy` 一致成立**（见 §2.1）。
 
-**选择 `message_start` 而不是注释帧，是评审比较三个方案后的现行选择**（`docs/tmp/260820-review-synthetic-start-fix.md` §7 逐条比较了「填非空文本的内容块」「只发一个 SSE 注释」「改发 `event: error`」），**不是用户裁决**——该报告原文是「我的偏好」，且其 §9 已把与人写文档的冲突原样交回，至今未裁。
+**选择 `message_start` 而不是注释帧，是评审比较三个方案后的现行选择**（`../empty-text-block/reports/260820-review-synthetic-start-fix.md` §7 逐条比较了「填非空文本的内容块」「只发一个 SSE 注释」「改发 `event: error`」），**不是用户裁决**——该报告原文是「我的偏好」，且其 §9 已把与人写文档的冲突原样交回，至今未裁。
 
 #### 【需用户裁决】实现与人写文档的窗口定义冲突
 

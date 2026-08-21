@@ -19,7 +19,7 @@
 
 SSE 信封那一半已闭合（`16dd68c`）。另一半没有：`context.reply` 仍 gate 在 `terminal.seen`，被截断的回复不进 `reply`。
 
-放宽那道门是 **hooks 与 History 的契约变更**（`reply is not None ⇒ 回复已完成` 是现有契约），`docs/agents/anthropic-responses-bridge/implementation.md` 的结构怪味登记明写这一项要与 STR-04 同一切片一并裁决。
+放宽那道门是 **hooks 与 History 的契约变更**（`reply is not None ⇒ 回复已完成` 是现有契约），`../../anthropic-responses-bridge/implementation.md` 的结构怪味登记明写这一项要与 STR-04 同一切片一并裁决。
 
 ## 已知未闭合
 

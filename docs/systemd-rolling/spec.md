@@ -5,7 +5,7 @@
 - **状态**：`FINALIZED`。独立终审输入快照SHA-256为`485163f8a7eabba007c7b5464d69d4ee35717adcbdf2993fb0e05fae7fc5ea0f`，结论为`0 blocker／0 major`。本文完整记录用户于2026-08-08已裁决的产品保证及其必需派生合同，后续实现不得自行改写行为。
 - **基线**：`main@a885715a53006a63f53775d6441cd1deba17e7b1`。
 - **范围**：新增正式的 systemd 动态 generation rolling 运行面，监听双栈 localhost `4144`。不修改、不停止、不重启、不接管现有 `4141` Bun 服务。
-- **与既有文档关系**：本文取代 `docs/agents/systemd-runtime/plan.md` 中 S7 的未决拓扑描述；既有 socket activation、S3 graceful timeout 与 S4 installer结论仍是历史基座，不覆盖本文新增的rolling合同。
+- **与既有文档关系**：本文取代 `../systemd-runtime/plan.md` 中 S7 的未决拓扑描述；既有 socket activation、S3 graceful timeout 与 S4 installer结论仍是历史基座，不覆盖本文新增的rolling合同。
 
 ## 用户已裁决事项
 

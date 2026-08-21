@@ -8,7 +8,7 @@
 - **作者基线**：`/home/xp/src/ghc-api-proxy-py` 的 current `main@c1de6bf800a062f0dbcb4ef9db507fdc5f323b62`。Tool与reasoning真实scoped canary分别绑定其已进入main且已归档的reviewed source，主线后继只保留等价squash语义。
 - **当前输入身份与状态**：Current cutover inventory SHA-256为`1f72038de99bbddc4a3c71243d5e20ce8d0db8783afe6d49dcf46f17e63481d9`；Spec为`FINALIZED@4c9beed…`，Acceptance为`FINALIZED_ACCEPTANCE_ORACLE@f99492a…`并绑定current Architecture `746adc7…`。Current main为`c1de6bf…`；纯文本、forced ordinary tool roundtrip与单item reasoning carrier echo均有scoped PASS。Unit未安装，S5保持`BLOCKED`；完整tool／reasoning矩阵、quota／backpressure、kernel partial-write、credential refresh与cutover仍未验证。
 - **证据时效**：持久inventory仍主要锚定`2026-08-07T07:02:27Z`。后续备用端口happy smoke在`ae84aa9…`上确认旧Bun不变；current-main R2在`e9fb277…`上确认旧Bun同一incarnation继续持有双栈`4141`，R3又在`d903d72…`的执行窗口内确认旧Bun完整identity不变、本轮signal数为零，且收口后`4142`／`4143`均释放。最新真实canary在`main@fb4272b…`的成功窗口内同样确认旧Bun PID／starttime／cwd／cgroup／listener快照不变且收到零signal，收口后`4142`零listener；这些动态证据只证明各自窗口内事实，未重取完整inventory资产集合。listener、PID、cgroup、unit、open fd、writer、资源与认证状态在任何后续smoke或cutover决策前都必须重取。
-- **验收边界**：`../anthropic-responses-bridge/spec.md` 定义行为，`../anthropic-responses-bridge/acceptance.md` 定义完整产品 gate，`../anthropic-responses-bridge/implementation.md` 记录易变实现状态，[service cutover plan](plan.md)定义接管顺序与运行门，[current inventory](../../tmp/260807-current-service-cutover-inventory.md)记录现场快照。本文汇总 readiness，不重新决定行为或架构。
+- **验收边界**：`../anthropic-responses-bridge/spec.md` 定义行为，`../anthropic-responses-bridge/acceptance.md` 定义完整产品 gate，`../anthropic-responses-bridge/implementation.md` 记录易变实现状态，[service cutover plan](plan.md)定义接管顺序与运行门，[current inventory](reports/260807-current-service-cutover-inventory.md)记录现场快照。本文汇总 readiness，不重新决定行为或架构。
 
 ## 硬边界
 

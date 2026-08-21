@@ -67,7 +67,7 @@ httpcore.RemoteProtocolError: <ConnectionTerminated error_code:0, last_stream_id
 
 **STR-04 的 SSE 信封一半**（`16dd68c`）。与本次故障相邻但独立：一个**已经发出 `message_start`**、却在 EOF 前没有收到合法终止事件的流，此前被 flush 成 `message_delta{stop_reason:"end_turn"}` + `message_stop`，把截断的 turn 伪装成干净结束存进客户端历史。现在发 Anthropic SSE `error`（`upstream_error` ／ `incomplete_responses_stream`），且不再跟发 `message_stop`。从 legacy 移植而非重新设计，**包括「未开始的流不发」这道门**——完全没开始的空流仍是 200 加空 body，那条路本切片没动。
 
-**未闭合的另一半**：failed History。`context.reply` 仍 gate 在 `terminal.seen`，需与该 gate 的放宽一同裁决——那是 hooks／History 的契约变更。见 `docs/agents/anthropic-responses-bridge/implementation.md` 结构怪味登记。
+**未闭合的另一半**：failed History。`context.reply` 仍 gate 在 `terminal.seen`，需与该 gate 的放宽一同裁决——那是 hooks／History 的契约变更。见 `../../anthropic-responses-bridge/implementation.md` 结构怪味登记。
 
 **结构化请求日志**（`10e4811`）。每条完成的请求写一行 JSON 到 `<user_data>/requests/requests-YYYYMMDD.jsonl`，按天分文件保留 14 天，派生路径不新增配置键。**连接标识零私有 API**：httpcore 把 `network_stream` 放进 `Response.extensions`、H2 另给 `stream_id`，`client_addr` 就是这条 TCP 连接在本机的名字，还能直接和 `ss -tnp` 对上。
 

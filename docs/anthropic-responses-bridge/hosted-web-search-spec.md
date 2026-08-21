@@ -8,11 +8,11 @@
   1. **D6 response presentation → 尽量还原成原生块。** 起草时的偏好是降级成单个 text block；用户裁决要求还原成 `server_tool_use` + `web_search_tool_result`。§5 已按此重写，并写明「尽量」的实际边界。
   2. **D1 域名限制 → 可配置。** 默认 `error`（大声报错），可选 `drop_unsupported_fields`（剥离降级）与 `drop_web_search`（整条声明剥离）。§3.4 已按此重写。
   3. **D4 capability gate → 配置项手动维护。** 用户先要求确认上游 `/models` 是否给出信号；已于 2026-08-20 对实时目录（42 模型、67,656 字节）全量重判，**确认没有任何信号**，故落到配置项。§9 已按此重写。
-- **开启的冻结裁决**：[`docs/tmp/260806-arbitrate-server-tool-contract.md`](../../tmp/260806-arbitrate-server-tool-contract.md) 要求「若未来用户决定引入 Responses hosted web search，应以独立产品规格一次性冻结 declaration、forced choice、response presentation、stream lifecycle、History／continuation、错误与 capability gate，不能借 request converter 映射表增量恢复」。用户 2026-08-20 的裁决（「anthropic 上游不支持，但 gpt 上游支持 websearch」「该路径要正确支持 server tool web_search」）是那道门的开启，本文件是它要求的那份规格，七个面在 §3～§9 逐面给出规范性行为。
-- **一手证据基线**：[`docs/tmp/260820-websearch-upstream-probe.md`](../../tmp/260820-websearch-upstream-probe.md)（本项目 19 次上游实测，gpt-5.5，2026-08-20，原始输出在 `exp/260820-websearch-probe/raw/`）；真实响应样本 `tests/cassettes/responses_web_search_nonstream.json` 与 `tests/cassettes/responses_web_search_stream.json`。参考项目的做法记录在 [`docs/tmp/260820-websearch-on-responses-leg.md`](../../tmp/260820-websearch-on-responses-leg.md)，其中「`web_search_call` 的 id 在事件间稳定」一条**已被本项目实测推翻**，不得引用。
+- **开启的冻结裁决**：[`reports/260806-arbitrate-server-tool-contract.md`](reports/260806-arbitrate-server-tool-contract.md) 要求「若未来用户决定引入 Responses hosted web search，应以独立产品规格一次性冻结 declaration、forced choice、response presentation、stream lifecycle、History／continuation、错误与 capability gate，不能借 request converter 映射表增量恢复」。用户 2026-08-20 的裁决（「anthropic 上游不支持，但 gpt 上游支持 websearch」「该路径要正确支持 server tool web_search」）是那道门的开启，本文件是它要求的那份规格，七个面在 §3～§9 逐面给出规范性行为。
+- **一手证据基线**：[`../hosted-web-search/reports/260820-websearch-upstream-probe.md`](../hosted-web-search/reports/260820-websearch-upstream-probe.md)（本项目 19 次上游实测，gpt-5.5，2026-08-20，原始输出在 `exp/260820-websearch-probe/raw/`）；真实响应样本 `tests/cassettes/responses_web_search_nonstream.json` 与 `tests/cassettes/responses_web_search_stream.json`。参考项目的做法记录在 [`../hosted-web-search/reports/260820-websearch-on-responses-leg.md`](../hosted-web-search/reports/260820-websearch-on-responses-leg.md)，其中「`web_search_call` 的 id 在事件间稳定」一条**已被本项目实测推翻**，不得引用。
 - **证据权重**：§12 逐条标注每项规范性要求的依据是实测、设计裁决，还是仍需探针。凡标注为「仍需探针」的行为，实现时必须按本规格给出的保守分支执行，不得按推断放开。
 - **索引待补**：[README.md](README.md) 的「权威边界」表需要新增本文件一行；本规格作者不代改该索引。
-- **剩余修订项（本文件尚未定稿）**：独立评审 [`docs/tmp/260820-review-hosted-web-search-spec.md`](../../tmp/260820-review-hosted-web-search-spec.md) 报 blocker 3、major 9、minor 7。**三条 blocker 与 MJ-3、MJ-6、MJ-9 已处置**（见 §6.3 的成块时点重写、§11 覆盖清单、§14 的裁决登记、§3.4 的 `tool_choice` 清理、配置键命名待对齐、error 裸对象）。**尚未处置**：MJ-1／MJ-2（§12 证据权重表与 §13 探针表未随裁决更新，P12 未登记）、MJ-4（§8.3 与 §3.4 的组合情形未定义）、MJ-5（§9.3 默认值「运行期谓词 vs 冻结字面量」两解并存待收敛）、MJ-7（§5.3 三分支条件不互斥，须改为有序判定）、MJ-8（派生 id 跨轮次重复的唯一性范围未声明）、以及全部 minor。**实现前必须先关闭这些项。**
+- **剩余修订项（本文件尚未定稿）**：独立评审 [`../hosted-web-search/reports/260820-review-hosted-web-search-spec.md`](../hosted-web-search/reports/260820-review-hosted-web-search-spec.md) 报 blocker 3、major 9、minor 7。**三条 blocker 与 MJ-3、MJ-6、MJ-9 已处置**（见 §6.3 的成块时点重写、§11 覆盖清单、§14 的裁决登记、§3.4 的 `tool_choice` 清理、配置键命名待对齐、error 裸对象）。**尚未处置**：MJ-1／MJ-2（§12 证据权重表与 §13 探针表未随裁决更新，P12 未登记）、MJ-4（§8.3 与 §3.4 的组合情形未定义）、MJ-5（§9.3 默认值「运行期谓词 vs 冻结字面量」两解并存待收敛）、MJ-7（§5.3 三分支条件不互斥，须改为有序判定）、MJ-8（派生 id 跨轮次重复的唯一性范围未声明）、以及全部 minor。**实现前必须先关闭这些项。**
 
 ## 1. 范围
 
@@ -219,7 +219,7 @@ Anthropic `tool_choice` 映射如下，**必须**按表执行：
 
 起草稿写的是「在 `web_search_call` 的 `done` 上一次性成块」。**该规则与 §5.3 的 content 判据互斥，已废止**：`url_citation` 只在后续 message 的 `content_part.done` 出现，**晚于** `web_search_call` 的 `done`；若在 `done` 上成块，§5.3 用 citation 填充 `content` 的那一分支永远走不到，且流式与非流式必然不等价。
 
-> **2026-08-21 证据更正。** 本条原写「cassette 实测表明」，那句话过强：本项目两份 web-search cassette 的 `annotations` 都是空数组，**它们说明不了 citation 的时序**——空数组里没有可排序的东西。这条规则当时靠的是协议结构推断。现在它有了直接证据，但来源不是 cassette：既有服务 history 库里的真实上游根帧显示 Copilot 会发 `response.output_text.annotation.added`，且 `content_part.done` 与 `output_item.done` 各带一份完整的 `annotations` 数组，均晚于 `web_search_call` 的 `done`。取证见 [`../../tmp/260821-responses-websearch-citation-evidence.md`](../../tmp/260821-responses-websearch-citation-evidence.md)。**结论不变，依据换了。**
+> **2026-08-21 证据更正。** 本条原写「cassette 实测表明」，那句话过强：本项目两份 web-search cassette 的 `annotations` 都是空数组，**它们说明不了 citation 的时序**——空数组里没有可排序的东西。这条规则当时靠的是协议结构推断。现在它有了直接证据，但来源不是 cassette：既有服务 history 库里的真实上游根帧显示 Copilot 会发 `response.output_text.annotation.added`，且 `content_part.done` 与 `output_item.done` 各带一份完整的 `annotations` 数组，均晚于 `web_search_call` 的 `done`。取证见 [`../hosted-web-search/reports/260821-responses-websearch-citation-evidence.md`](../hosted-web-search/reports/260821-responses-websearch-citation-evidence.md)。**结论不变，依据换了。**
 
 **冻结规则**：
 
@@ -275,7 +275,7 @@ Anthropic `tool_choice` 映射如下，**必须**按表执行：
 
 ### 8.2 不引入反应式路径
 
-- 本规格**不**在收到上述任何 400 后剥离并重试。这与 `docs/2604-rewrite/tool-use.md:23` 的既有裁决一致，本规格不重开。
+- 本规格**不**在收到上述任何 400 后剥离并重试。这与 `../archived-2604-rewrite/tool-use.md:23` 的既有裁决一致，本规格不重开。
 - 上游若仍返回上述任一 400，**必须**按 `spec.md` 既有 Error 契约归一为 `ApiError` 并映射为 Anthropic error envelope 透传给客户端。**不得**吞掉，**不得**静默降级为「去掉搜索再试一次」。理由：这三条 400 出现即意味着能力门（§9）判错了；静默重试会把判错藏起来，下一次仍然错，而且错得没有痕迹。
 
 ### 8.3 能力不可用时的行为
@@ -418,7 +418,7 @@ Anthropic `tool_choice` 映射如下，**必须**按表执行：
 | P6 | 同一响应内多个 `web_search_call` 的 `output_index` 与 id 行为 | §5.2 关联论证、§6.1 | 可后补 |
 | P7 | 是否真的存在「`done` 无 `added`」形态 | §6.3 的防御性分支 | 可后补；容忍成本为零，不阻塞 |
 | P8 | `status: searching / failed / incomplete` 的真实形态 | §5.3 状态文本 | 可后补 |
-| P9 | ~~流式带 `url_citation` 时是否发 `response.output_text.annotation.added`~~ | §6.2 事件清单是否完整 | **已结案 2026-08-21：发。** 且 `content_part.done` 与 `output_item.done` 各另带一份完整 `annotations` 数组，所以消费者有三个可选取点。证据来自 history 库里的真实上游根帧，非本项目 cassette（本项目两份 cassette 的 `annotations` 皆空）。见 [`../../tmp/260821-responses-websearch-citation-evidence.md`](../../tmp/260821-responses-websearch-citation-evidence.md) |
+| P9 | ~~流式带 `url_citation` 时是否发 `response.output_text.annotation.added`~~ | §6.2 事件清单是否完整 | **已结案 2026-08-21：发。** 且 `content_part.done` 与 `output_item.done` 各另带一份完整 `annotations` 数组，所以消费者有三个可选取点。证据来自 history 库里的真实上游根帧，非本项目 cassette（本项目两份 cassette 的 `annotations` 皆空）。见 [`../hosted-web-search/reports/260821-responses-websearch-citation-evidence.md`](../hosted-web-search/reports/260821-responses-websearch-citation-evidence.md) |
 | P10 | 引用是否**恒**同时以内联 markdown 与结构化 `annotations` 两种形式出现 | 决定 D5 | 实现前。**「恒」仍未证**；已知 `exp/260820-websearch-probe/raw/B7-*.txt` 一份样本里两种形式确实同时到达，这只证明可以共存，不证明必然 |
 | P11 | `{"type":"web_search_preview"}` 直发是否 200（别名推断未验证） | 无直接影响，用于确认上游归一化 | **优先级已升高 2026-08-21**：上游自己的 400 枚举把 `web_search_preview` / `web_search_preview_2025_03_11` 列为支持值而**未列**裸 `web_search`，且三份第三方实现都发前者。本项目仍在发裸 `web_search`（实测 gpt-5.5／gpt-5.6-sol 返 200）。改用广告值需重录两份 cassette（digest 覆盖整个请求体），**重录即探针** |
 
@@ -457,8 +457,8 @@ Anthropic `tool_choice` 映射如下，**必须**按表执行：
 ## 15. 相关文档
 
 - 行为 oracle 母体：[spec.md](spec.md)（本规格的定点覆盖见 §11）
-- 上游实测一手报告：[`docs/tmp/260820-websearch-upstream-probe.md`](../../tmp/260820-websearch-upstream-probe.md)
-- 合成与七面现状：[`docs/tmp/260820-websearch-fix-v2-design.md`](../../tmp/260820-websearch-fix-v2-design.md) §10、§11
-- 参考项目做法与不可照搬项：[`docs/tmp/260820-websearch-on-responses-leg.md`](../../tmp/260820-websearch-on-responses-leg.md)
-- 开启本规格的冻结裁决：[`docs/tmp/260806-arbitrate-server-tool-contract.md`](../../tmp/260806-arbitrate-server-tool-contract.md)
-- 当前已实现边界：[`docs/2604-rewrite/tool-use.md`](../../2604-rewrite/tool-use.md)、[`docs/2604-rewrite/anthropic-compat.md`](../../2604-rewrite/anthropic-compat.md)、[`docs/2604-rewrite/hooks-system.md`](../../2604-rewrite/hooks-system.md)
+- 上游实测一手报告：[`../hosted-web-search/reports/260820-websearch-upstream-probe.md`](../hosted-web-search/reports/260820-websearch-upstream-probe.md)
+- 合成与七面现状：[`../hosted-web-search/reports/260820-websearch-fix-v2-design.md`](../hosted-web-search/reports/260820-websearch-fix-v2-design.md) §10、§11
+- 参考项目做法与不可照搬项：[`../hosted-web-search/reports/260820-websearch-on-responses-leg.md`](../hosted-web-search/reports/260820-websearch-on-responses-leg.md)
+- 开启本规格的冻结裁决：[`reports/260806-arbitrate-server-tool-contract.md`](reports/260806-arbitrate-server-tool-contract.md)
+- 当前已实现边界：[`../archived-2604-rewrite/tool-use.md`](../archived-2604-rewrite/tool-use.md)、[`../archived-2604-rewrite/anthropic-compat.md`](../archived-2604-rewrite/anthropic-compat.md)、[`../archived-2604-rewrite/hooks-system.md`](../archived-2604-rewrite/hooks-system.md)

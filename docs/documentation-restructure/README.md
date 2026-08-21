@@ -5,9 +5,9 @@
 当前文档纪律由项目规则 [`.claude/rules/00-development-workflow.md`](../../../.claude/rules/00-development-workflow.md) 承载：
 
 - `docs/` 保存 live conclusions；
-- `docs/agents/<topic>/` 保存进行中的 Spec、Plan、Research、Acceptance 与状态文档；
-- `docs/agents/<topic>/archive-<date>/` 保存历史过程和 point-in-time evidence index；
-- `docs/tmp/` 只交换临时报告，新文件使用 `YYMMDD-` 前缀；结论及时归纳进 live docs；
+- `../<topic>/` 保存进行中的 Spec、Plan、Research、Acceptance 与状态文档；
+- `../<topic>/archive-<date>/` 保存历史过程和 point-in-time evidence index；
+- `../tmp/` 只交换临时报告，新文件使用 `YYMMDD-` 前缀；结论及时归纳进 live docs；
 - 先直接解决产品任务，不为普通文档整理建设 manifest、certificate、generation 或验证状态机；
 - 不批量重写历史评审报告，必要时只建立归档索引和当前结论载体。
 

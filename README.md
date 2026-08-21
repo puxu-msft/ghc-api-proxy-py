@@ -25,13 +25,15 @@
 ```
 .dev/
 ├── docs/
-│   └── <topic>/              一个话题一个目录
-│       ├── README.md         入口：本目录有什么、怎么读
-│       ├── spec.md           规范。行为契约，活文档
-│       ├── deferred.md       未决项：想到了但没做的事，及不做的理由
-│       └── archive-<subtopic>/   历史：已完成工作的知识沉淀
-│           ├── README.md     重写过的知识文档
-│           └── reports/      当时的 agent 报告原件，逐字保留
+│   ├── <topic>/              一个话题一个目录
+│   │   ├── README.md         入口：本目录有什么、怎么读
+│   │   ├── spec.md           规范。行为契约，活文档
+│   │   ├── deferred.md       未决项：想到了但没做的事，及不做的理由
+│   │   ├── reports/          本话题的 agent 报告原件，逐字保留
+│   │   └── archive-<subtopic>/   历史：已完成工作的知识沉淀
+│   │       ├── README.md     重写过的知识文档
+│   │       └── reports/      当时的 agent 报告原件，逐字保留
+│   └── tmp/                  未分类：判不进任何话题的报告，以及话题尚不明朗时的新报告
 └── exp/
     └── <name>/               实验脚本与探针，保留可跑
 ```
@@ -48,16 +50,21 @@
 
 ## 已有话题
 
+`docs/` 下每个目录是一个话题。下表只解释不能从目录名读出来的那些；其余顾名思义。
+
 | 目录 | 内容 |
 |---|---|
-| `docs/tui/` | 请求日志与实时 footer |
-| `exp/tui-footer/` | 上面那件事的实验脚本 |
-| `docs/graceful-shutdown/` | 关闭信号到进程退出之间的一切；目前只有 `client-side/` |
-| `exp/graceful-shutdown-client-side/` | 上面那件事的探针与复现脚本 |
+| `docs/anthropic-responses-bridge/` | 主产品链路：Anthropic Messages 入站 → OpenAI Responses 上游。本仓库最大的话题 |
+| `docs/documentation-restructure/` | 文档重组与迁移本身的计划、审计与评审 |
+| `docs/git-housekeeping/` | archive ref、分支与 worktree 的清理审计 |
+| `docs/pipeline-rewrite-parity/` | 新请求管道与 `copilot-api-js` 参考实现之间的能力差距分析 |
+| `docs/architecture-audit/` | 2026-08-14 那一轮七轴线独立体检（依赖图、重复实现、模块边界、类型泄漏等）及其综合 |
+| `docs/project-review-principles-skill/` | `project-review-principles` skill 本身的事实核查与形态评审 |
 | `docs/archived-2604-rewrite/` | 早期 peer 写的 `copilot-api-js` 学习笔记，用户 2026-08-20 裁定整体过期，**仅供参考、无权威地位** |
+| `docs/tmp/` | 未分类：判不进任何话题的报告，以及话题尚不明朗时的新报告 |
+| `docs/docs-tmp-migration/` | 2026-08-21 那次搬迁自身的记录：逐文件分类表、判据与批次报告 |
+| `exp/<name>/` | 对应话题的实验脚本与探针，保留可跑 |
 
-> 2026-08-20 追记：`docs/2604-rewrite/` 已按用户裁决整体搬入本目录（`docs/archived-2604-rewrite/`）。它与下面这条待办不是一回事——那条讲的是把仍然有效的开发文档搬进来，这一次搬的是被判定为过期的材料。
+## 主仓库 `docs/` 现在剩什么
 
-## 一件待办
-
-主仓库 `docs/agents/` 下还有其它话题目录（`anthropic-responses-bridge`、`deployment-systemd`、`history-forensics`、`service-cutover`、`systemd-*`、`documentation-restructure`）。按本目录的定位，它们同属开发过程文档，**逻辑上也该搬进来**——但本次只搬了 TUI，因为那是当时的指示范围，且其中几个正被并行会话改动。搬之前先确认各自没有活跃写者，并按上面「搬动文档时检查引用」那条办。
+只剩 `docs/.human-controlled/`——用户亲笔的文档。`docs/tmp/` 与 `docs/agents/` 已于 2026-08-21 整体搬入本目录，**不要再在主仓库重建它们**。这次搬了 417 份报告与 8 个话题目录，逐文件的分类结果与判据在 `docs/docs-tmp-migration/`。

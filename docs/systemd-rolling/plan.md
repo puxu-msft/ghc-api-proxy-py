@@ -20,7 +20,7 @@
 - `tests/unit/test_socket_activation.py`
 - `tests/integration/test_uvicorn_multi_socket.py`
 - `tests/integration/test_listener_quiesce_resume.py`
-- `docs/agents/systemd-rolling/copilot-api-js-comparison.md`
+- `../systemd-rolling/copilot-api-js-comparison.md`
 
 ### 测试
 
@@ -222,7 +222,7 @@ Rollout helper可按规范generation ID明确区分任意数量generation；私�
 
 ### 文件
 
-- `docs/agents/systemd-rolling/copilot-api-js-comparison.md`
+- `../systemd-rolling/copilot-api-js-comparison.md`
 - `tests/integration/test_rolling_behavioral_parity.py`
 
 ### 对照

@@ -1,6 +1,6 @@
 # 待办与已知缺口
 
-调查依据：`docs/tmp/260820-deferred-d3-d5-d6.md`（含实测探针与逐条读码）。
+调查依据：`reports/260820-deferred-d3-d5-d6.md`（含实测探针与逐条读码）。
 
 **分类口径**：「缺陷」= 正确做法唯一，不需要任何人裁决，排期做掉即可；「裁决」= 存在真实岔路，不同选择导向不同产品行为或不同代价。初版把若干缺陷错写成裁决项，已更正。
 
@@ -47,7 +47,7 @@ A1 那个已知陷阱**已补偿并钉住**：自建 transport 会让 httpx 关�
 
 ### D-7 proxy 优先级无法实现：三个来源在 `load_proxy_config()` 里被压平，没有 provenance
 
-**这一条被声称「已记入本文」三次，实际一次都没写进来。** 第一次是我在协调消息里说的，`review-transport-keepalive-r3.md` 的 R3-F2 查了 commit tree 与工作树、指出没有；第二次仍未落盘；第三次是生产测试 `tests/unit/server/test_http_client_build.py::test_an_explicit_proxy_reaching_httpx_shuts_the_environment_out` 的 docstring 里写着「Recorded in `docs/agents/delivery-keepalive/deferred.md`」——而本文里依旧没有。现在写下来。
+**这一条被声称「已记入本文」三次，实际一次都没写进来。** 第一次是我在协调消息里说的，`review-transport-keepalive-r3.md` 的 R3-F2 查了 commit tree 与工作树、指出没有；第二次仍未落盘；第三次是生产测试 `tests/unit/server/test_http_client_build.py::test_an_explicit_proxy_reaching_httpx_shuts_the_environment_out` 的 docstring 里写着「Recorded in `deferred.md`」——而本文里依旧没有。现在写下来。
 
 **缺口本身**：用户亲笔 `docs/.human-controlled/config.example.yaml` 规定的优先级是 CLI `--proxy` > `HTTP_PROXY`/`HTTPS_PROXY` > 配置文件 `proxy`。但 `load_proxy_config()` 把 CLI、`GHC_PROXY` 与 YAML 三个来源压平进同一个字段，**不保留任何来源信息**，于是下游无从分辨「这个 proxy 是命令行给的还是配置文件给的」，也就无法把环境变量插在两者中间。当前实际行为是：只要 `config.proxy` 非空就走它、且完全不看环境变量（httpx 语义下等于 `all://`），环境变量因此永远排在配置文件之后，与人写文档规定的顺序相反。
 
@@ -98,7 +98,7 @@ TCP keep-alive 是逐连接的，而代理会终结 TCP 连接。实测（`getpe
 - **D-5**（`064ba63 fix: refuse a search this endpoint cannot run…`，17:51）：`upstream_request_deadline` **被 `response_header_overrides` 解析**——运维给某个模型调低 header 等待，实际砍掉的是那个模型的整次尝试。`handler.py` 里的 `resolve_timeout(route.model_id, timeouts.upstream_request_deadline, timeouts.response_header_overrides)` 已改成直接读它自己那个字段。同一个提交也把 `stream_idle_seconds` 的 overrides 解析去掉了。
 - **D-6**（`783f023 fix: make each of the three upstream timeouts guard the phase it names`，18:09）：body 不在 deadline 之内。`attempt.deadline_at` 在 `direct_driver/base.py` 里被固定成整次尝试的一个时刻，header 等待与 `pipeline_app.py` 的 body 流读同一个值——**一个上界，两处执行**。这个提交同时删掉了 `schema.py` 里的两个 override 字段。
 
-**初版这里写反了主语**：把 D-5 写成「`response_header` 被 `response_header_overrides` 解析」。那按字面是覆盖表的正常用法、根本不是缺陷，而且与紧随的「等于用一个 header 守卫去砍整次尝试」自相矛盾——后半句只有在被覆盖的是 deadline 时才成立。权威定义见 `docs/tmp/260820-deferred-d3-d5-d6.md` §2 的标题。**`response_header` 无消费方是同一节里的另一件事**（一道从未实现的守卫），不要与 D-5 并成一条。
+**初版这里写反了主语**：把 D-5 写成「`response_header` 被 `response_header_overrides` 解析」。那按字面是覆盖表的正常用法、根本不是缺陷，而且与紧随的「等于用一个 header 守卫去砍整次尝试」自相矛盾——后半句只有在被覆盖的是 deadline 时才成立。权威定义见 `reports/260820-deferred-d3-d5-d6.md` §2 的标题。**`response_header` 无消费方是同一节里的另一件事**（一道从未实现的守卫），不要与 D-5 并成一条。
 
 **D-6 的修复推翻了 `spec.md` §2.2 的一整段断言**（它说 `upstream_request_deadline`「恰好且仅仅覆盖首字节前那一段」），spec 已同步更正。记这一笔是因为：D-6 修好之后 1200s 从「首字节前的静默上界」变成了「整次尝试的总时长上界」，任何据前者做出的调参判断都不再成立。
 

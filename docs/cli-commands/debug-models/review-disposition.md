@@ -57,7 +57,7 @@
 
 ## 用户裁决
 
-**全部已裁决，权威载体是 `.dev/docs/cli-commands/debug-models/decision.md`。** 本文件是 `docs/tmp/` 下的临时评审处置记录，不承载跨会话存活的裁决。
+**全部已裁决，权威载体是 `.dev/docs/cli-commands/debug-models/decision.md`。** 本文件是 `../../tmp/` 下的临时评审处置记录，不承载跨会话存活的裁决。
 
 用户 2026-08-20 的四条：现有选项保留；embeddings 不接入 LLM 入站路径（`outbound.to-openai-embeddings` 不做）；`outbound.to-openai-chat-completions` 由用户后续补；`completion` 类型端点由实测确立。
 
