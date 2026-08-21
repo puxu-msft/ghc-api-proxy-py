@@ -21,6 +21,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.requests import ClientDisconnect
 
 from app.observability.logging import get_logger
+from app.observability.metrics import ATTRIBUTION_LINES_STRIPPED, TRANSLATION_LOSSES
 from app.observability.rejection_capture import capture_rejection
 from app.observability.request_log import (
     LogStatus,
@@ -32,9 +33,11 @@ from app.observability.request_log import (
 )
 from app.observability.request_log_file import utc_timestamp, write_request_record
 from app.observability.tui import footer_tui_or_none
+from app.pipeline.anthropic_request_hook import strip_attribution_lines
 from app.pipeline.delivery.assembler import BlockAssembler, ReplyDialect, Terminal
 from app.pipeline.delivery.stream import stream_delivery
-from app.pipeline.request import RequestContext
+from app.pipeline.request import RequestContext, WireFormat
+from app.pipeline.translation_driver.semantic import Loss
 from app.server.admission import InFlightLimit
 from app.server.composition import Chain, refresh_catalogs
 from app.server.handler import (
@@ -151,6 +154,29 @@ def _alpn(ssl_object: Any) -> Any:
     return str(selected) if selected is not None else None
 
 
+# Where each half of a crossing leaves what it could not carry. Two keys rather than one because they are written at different times by different code; they are joined here, once, into the single list the record carries.
+LOSS_EXTRAS = (("request", "conversion_losses"), ("response", "response_conversion_losses"))
+
+
+def _translation_losses(context: RequestContext) -> tuple[dict[str, str], ...]:
+    """The losses translation recorded on this request, request half first.
+
+    Reads the two `extras` keys the handler writes. Those keys were the end of the road until this function existed: `Conversion` collected every loss, the handler copied them onto the context, and nothing anywhere read them — so a request that dropped `thinking`, `top_p` and `stop_sequences` on its way to a Responses upstream produced exactly the same console line, the same record and the same reply as one that lost nothing.
+
+    Entries that are not `Loss` objects are skipped rather than coerced. The key is `Any`-typed and written by one caller today; a future writer putting something else there should show up as a missing entry, not as a record field full of `str(...)` of whatever it was.
+    """
+    collected: list[dict[str, str]] = []
+    for direction, key in LOSS_EXTRAS:
+        recorded = context.extras.get(key)
+        if not isinstance(recorded, list):
+            continue
+        for loss in cast(list[Any], recorded):
+            if not isinstance(loss, Loss):
+                continue
+            collected.append({"direction": direction, "code": loss.code.value, "detail": loss.detail})
+    return tuple(collected)
+
+
 @dataclass(slots=True)
 class _Trace:
     """What is known about a request as it goes, gathered for its log line.
@@ -189,6 +215,7 @@ class _Trace:
     count_provider_reason: str = ""
     dialect: ReplyDialect = ReplyDialect.ANTHROPIC
     upstream_conn: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
+    losses: tuple[dict[str, str], ...] = ()
 
     def absorb(self, reply: Terminal) -> None:
         """Take the aggregated reply record onto the line.
@@ -202,6 +229,15 @@ class _Trace:
         self.tools = tuple(reply.tools)
         self.thinking = tuple(reply.thinking)
         self.dialect = reply.dialect
+
+    def absorb_losses(self, context: RequestContext) -> None:
+        """Take whatever translation has recorded so far onto the line.
+
+        Recomputes from `context.extras` rather than appending, so calling it again after more translation has happened is correct and calling it twice with nothing in between changes nothing. That is what lets it be called at each point a translation has just finished instead of at one point that would have to be the last.
+
+        Called at four such points because translation happens at two of them and the response half at a third; a single call site would have to sit after every `return` in `_dispatch`, which no single site does. The cost of the arrangement is that a `return` added later without a call here reports no losses — which is why `losses` says nothing rather than says none: an empty tuple is what a lossless crossing looks like too.
+        """
+        self.losses = _translation_losses(context)
 
 
 def _log_completion(chain: Chain, trace: _Trace, status_code: int | None, *, bytes_out: int | None) -> None:
@@ -238,8 +274,12 @@ def _log_completion(chain: Chain, trace: _Trace, status_code: int | None, *, byt
         attempts=trace.attempts,
         detail=trace.detail,
         upstream_conn=trace.upstream_conn,
+        losses=trace.losses,
     )
     status = status_for(status_code, override=trace.status_override)
+    for loss in line.losses:
+        # Counted here rather than where the loss is recorded, so the count and the record are produced from the same tuple and cannot disagree about what this request lost.
+        TRANSLATION_LOSSES.labels(direction=loss["direction"], code=loss["code"]).inc()
     write_request_record(line, status=status)
     get_logger(REQUEST_LOGGER).info(
         format_completion_line(line, status=status, unicode=chain.capabilities.unicode, color=chain.capabilities.color),
@@ -332,6 +372,12 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
         trace.detail = str(error)
         return JSONResponse(error_body(error), status_code=400)
 
+    # After parsing and before routing, which is where `docs/.human-controlled/message-format-sanitize.md` puts it: the line is addressed to Anthropic's billing rather than to any model, so nothing downstream — routing, translation, the token counter — should ever see it. Resident rather than configured, per the same document.
+    if route.wire_format is WireFormat.ANTHROPIC_MESSAGES:
+        stripped = strip_attribution_lines(context.payload)
+        if stripped:
+            ATTRIBUTION_LINES_STRIPPED.inc(stripped)
+
     # Recorded here rather than beside the resolved model, so every path below — the count endpoint, the failures, the ones that never route at all — reports what the client asked for even when nothing answered it.
     trace.message_id = context.id
     trace.requested_model = context.requested_model
@@ -383,6 +429,8 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
         came_back = context.extras.get("count_tokens_bytes_out")
         if isinstance(came_back, int):
             trace.received = came_back
+        # A count is translated too, and on the same terms — so a count whose `thinking` never crossed says so, exactly as a turn does.
+        trace.absorb_losses(context)
         return JSONResponse(counted)
 
     try:
@@ -391,6 +439,8 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
         trace.model = context.resolved_model
         trace.attempts = context.attempt_count
         trace.detail = str(error)
+        # A refused crossing is exactly where the losses matter: they name which field the request could not carry, and the error alone rarely does.
+        trace.absorb_losses(context)
         # Before the response is written, because `context.payload` is the body upstream refused and nothing downstream keeps it.
         capture_rejection(context, error, request_id=trace.request_id)
         return JSONResponse(
@@ -403,6 +453,8 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
     trace.model = context.resolved_model
     trace.requested_model = context.requested_model
     trace.attempts = context.attempt_count
+    # The request half has crossed by now whatever happens next, so this covers the three returns below. The buffered path calls again once the reply has crossed back.
+    trace.absorb_losses(context)
 
     response = handled.response
     if response is None:
@@ -478,6 +530,8 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
     context.reply = reply_summary(handled, payload)
     if context.reply is not None:
         trace.absorb(context.reply)
+    # Again, because the reply has only just crossed back: the response half of the translation records its losses during `response_payload` above, after the call that covered the request half.
+    trace.absorb_losses(context)
     return JSONResponse(payload, status_code=response.status_code)
 
 

@@ -106,6 +106,8 @@ class RequestLine:
     `bytes_in` / `bytes_out` are wire bytes in each direction; `usage` is the upstream's own token accounting, keyed as Anthropic reports it. The two are separate facts and a request can have either without the other — a rejected body has bytes and no tokens, a cached hit has tokens and almost no bytes.
 
     `count_provider` is set only on a token-counting request, and names the counting provider that produced the number; `count_provider_reason` carries what was tried before it, when anything was. See `format_count_provider`. `count_tokens` is the endpoint the request arrived at, which is the same fact one step earlier: it is true of a count that failed before any provider ran, where `count_provider` is empty.
+
+    `losses` is what translation could not carry, in the order it was recorded. It exists here rather than beside the translator because this record is the one place a per-request fact is written down once and read by everything downstream — the console line, the JSONL file, and whatever queries them later. `Conversion` has always collected these; until they reached this record nothing read them, so a translated request that dropped half its parameters looked identical on every surface to one that crossed intact.
     """
 
     method: str
@@ -138,6 +140,9 @@ class RequestLine:
     attempts: int = 1
     detail: str = ""
     upstream_conn: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
+    # What translation could not carry, one entry per recorded loss, in the order recorded. Each entry is `{"direction": "request"|"response", "code": …, "detail": …}`. Direction is a property of the loss rather than a second field, because "what did this request lose" is one question and answering it from two lists is how the two drift apart.
+    # `code` is the machine-readable half and `detail` the human one, which is the division `LossCode` was written for; both are kept because the code alone cannot say *which* extensions were dropped, and the detail alone cannot be counted.
+    losses: tuple[dict[str, str], ...] = ()
 
 
 def format_thinking(kinds: tuple[str, ...], dialect: ReplyDialect = ReplyDialect.ANTHROPIC) -> str:

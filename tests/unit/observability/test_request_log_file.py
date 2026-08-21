@@ -116,6 +116,7 @@ def test_a_successful_request_writes_one_complete_structured_record(tmp_path: Pa
         "attempts",
         "detail",
         "upstream_conn",
+        "losses",
     }
     assert record | {"at": "ignored", "duration_s": "ignored"} == {
         "at": "ignored",
@@ -150,6 +151,8 @@ def test_a_successful_request_writes_one_complete_structured_record(tmp_path: Pa
         "attempts": 2,
         "detail": "",
         "upstream_conn": {"local": "172.19.141.235:56822", "peer": "140.82.116.5:443", "alpn": "h2", "stream_id": 7},
+        # Empty on an untranslated turn, and empty rather than absent: a lossless crossing and a crossing nothing looked at have to be one shape here, because the record is written for requests that never reached a translator at all.
+        "losses": [],
     }
     assert record["at"].endswith("Z")
     assert cast(float, record["duration_s"]) >= 1.0

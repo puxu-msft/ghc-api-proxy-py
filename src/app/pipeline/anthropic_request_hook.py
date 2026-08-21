@@ -10,6 +10,7 @@ the spec asks for; what was missing is anything on the new chain calling them.
 """
 
 import logging
+import re
 from typing import Any, cast
 
 from app.anthropic.thinking.destack import DestackStrategy, destack_content
@@ -17,6 +18,72 @@ from app.anthropic.thinking.protection import sanitize_empty_thinking
 from app.config.schema import AssistantMessageLayout, FixAnthropicRequestHook
 
 logger = logging.getLogger(__name__)
+
+# A pseudo-HTTP header line, which is what a client-injected attribution line looks like once it has been put inside the prompt: a name, a colon, and the rest of the line.
+# The hyphen is the discriminator and the reason this can run unconditionally. Prose that opens a system prompt does use a leading colon — `Note:`, `Important:`, `Step 1:` — but a hyphenated single token before it is a header name and essentially never an English phrase. Matching `\S+:` instead would delete the first sentence of any prompt that began that way, which is the failure this pattern is shaped to avoid.
+# Anchored whole-line so a sentence that merely contains a hyphenated word and a colon cannot match.
+_ATTRIBUTION_LINE = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+:[^\n]*")
+
+
+def _without_leading_attribution(text: str) -> tuple[str, int]:
+    """`text` with any attribution lines removed from the front, and how many went.
+
+    Only from the front, and only while every line so far has matched. An attribution line is something a client prepended to a prompt it did not write; one appearing in the middle of a prompt is the author's own text and is left alone.
+    """
+    lines = text.split("\n")
+    removed = 0
+    while removed < len(lines) and _ATTRIBUTION_LINE.fullmatch(lines[removed].strip()):
+        removed += 1
+    return "\n".join(lines[removed:]), removed
+
+
+def strip_attribution_lines(payload: dict[str, Any]) -> int:
+    """Remove the attribution lines Claude Code prepends to `system`, returning how many.
+
+    Claude Code puts `x-anthropic-billing-header: cc_version=…; cc_entrypoint=…;` at the top of the first system block. It is addressed to Anthropic's billing, not to the model, and it reaches the model as ordinary prompt text.
+
+    **Upstream accepts it.** Measured against the live upstream on 2026-08-21 across fifteen shapes — this name, other header names, a real HTTP header name, in `instructions` and in `system[0]`, streamed and not, with `cache_control`, and on `count_tokens` — every one answered 200. So this is not a compatibility repair and must not be described as one. What it is measured to cost is tokens: the same system prompt counted 43 tokens without the line and 77 with it, on upstream's own counter.
+
+    In place, and unconditional. `hook_strip_anthropic_request_headers.strip_attribution_header` exists in the schema and has never had a consumer; `docs/.human-controlled/message-format-sanitize.md` rules that this should be resident rather than configured, so the switch is deliberately not read here — see that document for the standing decision.
+
+    Rebuilds rather than mutating the block it edits, so the body the caller parsed is left as the client sent it. That the original stays intact is what lets a forensic record of the inbound request mean what it says.
+    """
+    system = payload.get("system")
+    if isinstance(system, str):
+        stripped, removed = _without_leading_attribution(system)
+        if removed:
+            # An empty `system` is dropped rather than sent as `""`: it says nothing, and a blank system block is one of the shapes the Anthropic leg is known to reject.
+            if stripped.strip():
+                payload["system"] = stripped
+            else:
+                del payload["system"]
+        return removed
+
+    if not isinstance(system, list):
+        return 0
+    blocks = cast(list[Any], system)
+    if not blocks or not isinstance(blocks[0], dict):
+        return 0
+    first = cast(dict[str, Any], blocks[0])
+    text = first.get("text")
+    if not isinstance(text, str):
+        return 0
+
+    stripped, removed = _without_leading_attribution(text)
+    if not removed:
+        return 0
+    rebuilt = list(blocks)
+    if stripped.strip():
+        rebuilt[0] = {**first, "text": stripped}
+    else:
+        # Nothing but attribution was in there. Dropping the whole block rather than leaving an empty one, per the ruling in `message-format-sanitize.md`.
+        rebuilt = rebuilt[1:]
+    if rebuilt:
+        payload["system"] = rebuilt
+    else:
+        del payload["system"]
+    return removed
+
 
 # The spec names the outcome; the existing implementation names the manoeuvre.
 _LAYOUT_STRATEGY: dict[AssistantMessageLayout, DestackStrategy] = {
