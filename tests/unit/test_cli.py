@@ -8,6 +8,7 @@ import yaml
 from typer.testing import CliRunner
 
 from app.cli import app, serve_inherited
+from app.config.loading import bundled_config_text
 from app.config.schema import ProxyConfig
 from app.lifecycle.entry import StandaloneOptions
 
@@ -130,6 +131,44 @@ def test_gen_config_requires_a_destination() -> None:
     result = runner.invoke(app, ["gen-config"])
 
     assert result.exit_code != 0
+
+
+def test_gen_config_keeps_an_existing_file_when_the_answer_is_no(tmp_path: Path) -> None:
+    """Declining must leave the operator's file byte-for-byte, not merely exit non-zero.
+
+    The exit code alone would still pass if the file had already been truncated on the way to asking, which is the failure this guards: the whole value of the prompt is that the old bytes survive it.
+    """
+    config_path = tmp_path / "config.yaml"
+    theirs = "server:\n  port: 4321\n"
+    config_path.write_text(theirs, encoding="utf-8")
+
+    result = runner.invoke(app, ["gen-config", str(config_path)], input="n\n")
+
+    assert result.exit_code != 0
+    assert config_path.read_text(encoding="utf-8") == theirs
+
+
+def test_gen_config_replaces_an_existing_file_when_the_answer_is_yes(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("server:\n  port: 4321\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["gen-config", str(config_path)], input="y\n")
+
+    assert result.exit_code == 0
+    assert config_path.read_text(encoding="utf-8") == bundled_config_text()
+
+
+def test_gen_config_does_not_ask_about_a_path_that_is_free(tmp_path: Path) -> None:
+    """No stdin at all, so a prompt here would abort on EOF rather than hang.
+
+    Pinned because the check is `exists()`: a stray prompt on the ordinary first run is the way this lands on someone as a regression.
+    """
+    config_path = tmp_path / "fresh.yaml"
+
+    result = runner.invoke(app, ["gen-config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert config_path.is_file()
 
 
 def test_start_merges_cli_overrides_and_serves(monkeypatch: pytest.MonkeyPatch) -> None:

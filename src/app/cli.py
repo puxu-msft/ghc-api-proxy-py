@@ -55,7 +55,12 @@ def gen_config(
     A copy of the shipped file rather than a dump of the schema defaults: dumping every default would produce hundreds of lines the operator did not choose and would then have to maintain, and it would freeze today's defaults into their file, where a later change to a default would silently not reach them.
 
     Its own command rather than a flag on `start`: as `start --generate-config` it sat among two dozen options that shape how the server runs, then returned before starting one, and the path it wrote came from `--config` — the option that everywhere else means *read this one*. The destination is now said outright, which is also why it has no default: the flag's was `config_file_path()` under `$XDG_CONFIG_HOME`, while `load_proxy_config` reads `spec_config_file_path()` under `$XDG_DATA_HOME`, so generating without a path wrote a file the service would never pick up.
+
+    An existing file is confirmed before it is replaced. The command's whole output is a fixed document, so a second run destroys whatever the operator edited into the first and leaves nothing to recover it from — and the path most worth generating is the one the service actually reads, which is exactly the one most likely to already hold their settings. There is no `--force`: `yes | ghc-api-proxy gen-config <path>` answers it from a script, and declining exits non-zero, so nothing silently proceeds.
     """
+    if out_path.exists():
+        # Asked before `mkdir`, and before anything is opened for writing: a prompt that has already truncated the file is not a confirmation.
+        typer.confirm(f"{out_path} already exists. Replace it?", abort=True)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(bundled_config_text(), encoding="utf-8")
     typer.echo(f"Generated configuration: {out_path}")
