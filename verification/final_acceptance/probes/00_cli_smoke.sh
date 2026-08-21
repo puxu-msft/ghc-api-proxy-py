@@ -24,16 +24,16 @@ fi
 echo "✓ start --help shows --port option"
 
 # 3. 生成默认配置
-echo "[3/4] Testing --generate-config..."
+echo "[3/4] Testing gen-config..."
 TMPDIR=$(mktemp -d)
 CONFIG_FILE="$TMPDIR/test_config.yml"
-uv run python -m app start --config "$CONFIG_FILE" --generate-config
+uv run python -m app gen-config "$CONFIG_FILE"
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "FAIL: Config file not generated"
     rm -rf "$TMPDIR"
     exit 1
 fi
-echo "✓ --generate-config creates config file"
+echo "✓ gen-config creates config file"
 
 # 4. 配置文件 YAML 格式验证
 echo "[4/4] Validating config YAML format..."

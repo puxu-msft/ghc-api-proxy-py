@@ -49,6 +49,7 @@ def test_cli_smoke() -> None:
         "auth",
         "login",
         "logout",
+        "gen-config",
         "debug",
         "setup-claude-code",
         "setup-codex",
@@ -75,7 +76,6 @@ def test_start_subcommand_exposes_bootstrap_options() -> None:
         "--proxy",
         "--config",
         "--manual",
-        "--generate-config",
     ):
         assert option in result.stdout
 
@@ -102,18 +102,14 @@ def test_debug_subcommands_exist() -> None:
     assert "usage" in result.stdout
 
 
-def test_start_generates_config_and_exits(tmp_path: Path) -> None:
+def test_gen_config_writes_a_loadable_config(tmp_path: Path) -> None:
     """What is generated must be a config the service can actually start from.
 
-    Asserting on one key would only prove a file was written; validating it proves the generated
-    shape is the one the loader accepts, which is the reason to generate it at all.
+    Asserting on one key would only prove a file was written; validating it proves the generated shape is the one the loader accepts, which is the reason to generate it at all.
     """
-    config_path = tmp_path / "generated.yaml"
+    config_path = tmp_path / "nested" / "generated.yaml"
 
-    result = runner.invoke(
-        app,
-        ["start", "--config", str(config_path), "--generate-config"],
-    )
+    result = runner.invoke(app, ["gen-config", str(config_path)])
 
     assert result.exit_code == 0
     assert config_path.is_file()
@@ -124,6 +120,16 @@ def test_start_generates_config_and_exits(tmp_path: Path) -> None:
     )
     # Without a provider the catalog is empty and routing refuses every request.
     assert generated.default_model_provider in generated.model_providers
+
+
+def test_gen_config_requires_a_destination() -> None:
+    """The path is the whole argument, so omitting it must fail rather than pick a location.
+
+    The flag this replaced defaulted to `config_file_path()`, which is not where `load_proxy_config` looks; a generated file nobody reads is worse than a usage error.
+    """
+    result = runner.invoke(app, ["gen-config"])
+
+    assert result.exit_code != 0
 
 
 def test_start_merges_cli_overrides_and_serves(monkeypatch: pytest.MonkeyPatch) -> None:

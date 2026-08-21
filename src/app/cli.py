@@ -12,7 +12,7 @@ from yaml import YAMLError
 
 from app.auth.service import authenticate_device, clear_stored_token
 from app.config.loading import bundled_config_text, load_proxy_config
-from app.config.paths import config_file_path, tls_material_dir
+from app.config.paths import tls_material_dir
 from app.config.schema import ProxyConfig
 from app.debug.models import collect_catalogs, render_json, render_text
 from app.lifecycle.entry import StandaloneOptions, run_standalone
@@ -43,20 +43,22 @@ def _not_implemented(command: str) -> None:
     typer.echo(f"{command} is not implemented yet")
 
 
-def _write_default_config(path: Path) -> None:
+@app.command("gen-config")
+def gen_config(
+    out_path: Annotated[
+        Path,
+        typer.Argument(file_okay=True, dir_okay=False, help="Where to write the generated config."),
+    ],
+) -> None:
     """Write a starting config in the shape the spec defines.
 
-    A copy of the shipped file rather than a dump of the schema defaults: dumping every default
-    would produce hundreds of lines the operator did not choose and would then have to maintain,
-    and it would freeze today's defaults into their file, where a later change to a default would
-    silently not reach them.
+    A copy of the shipped file rather than a dump of the schema defaults: dumping every default would produce hundreds of lines the operator did not choose and would then have to maintain, and it would freeze today's defaults into their file, where a later change to a default would silently not reach them.
+
+    Its own command rather than a flag on `start`: as `start --generate-config` it sat among two dozen options that shape how the server runs, then returned before starting one, and the path it wrote came from `--config` — the option that everywhere else means *read this one*. The destination is now said outright, which is also why it has no default: the flag's was `config_file_path()` under `$XDG_CONFIG_HOME`, while `load_proxy_config` reads `spec_config_file_path()` under `$XDG_DATA_HOME`, so generating without a path wrote a file the service would never pick up.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(bundled_config_text(), encoding="utf-8")
-
-
-def _generate_config(path: Path) -> None:
-    _write_default_config(path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(bundled_config_text(), encoding="utf-8")
+    typer.echo(f"Generated configuration: {out_path}")
 
 
 
@@ -233,17 +235,10 @@ def start(
         typer.Option("--config", exists=False, file_okay=True, dir_okay=False),
     ] = None,
     manual: Annotated[bool, typer.Option("--manual")] = False,
-    generate_config: Annotated[bool, typer.Option("--generate-config")] = False,
     restart: Annotated[bool, typer.Option("--restart")] = False,
     pidfile: Annotated[Path | None, typer.Option("--pidfile")] = None,
 ) -> None:
     """Start the API proxy server."""
-    if generate_config:
-        output_path = config or config_file_path()
-        _generate_config(output_path)
-        typer.echo(f"Generated configuration: {output_path}")
-        return
-
     if fd is not None and (host is not None or port is not None):
         raise typer.BadParameter("--fd cannot be combined with --host or --port")
 
