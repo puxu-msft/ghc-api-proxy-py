@@ -127,4 +127,4 @@ def test_our_own_status_outranks_the_level_it_logged_at(capsys: pytest.CaptureFi
     get_logger("app.own").error("upstream_retried", status="retry")
     _flush_handlers()
 
-    assert capsys.readouterr().err.startswith("[RETRY] ")
+    assert capsys.readouterr().err.startswith("[RETY] ")

@@ -332,9 +332,13 @@ class ResponsesAssembler:
             reason = ""
             if isinstance(details, dict):
                 reason = str(cast(dict[str, Any], details).get("reason", ""))
-            # spec.md: the output-token limit is max_tokens downstream.
+            # spec.md: the output-token limit is max_tokens downstream. That one has an Anthropic spelling; nothing else does, so nothing else is translated.
+            #
+            # Everything upstream did not name `max_output_tokens` used to become `end_turn`, which reported a turn upstream had cut short as one it finished — the same defect `Terminal.stop_reason` was given an empty default to avoid, reintroduced one field further down. It is upstream's word that goes on the wire now, unmapped. Claude Code's own schema for this field is a nullable string with no enumeration and its readers compare against known values and skip the rest, so a word it does not know costs it nothing; a wrong word it does know costs a reader the truth.
+            #
+            # `"incomplete"` when upstream said the response was incomplete without saying why. That is still upstream's own word for it — the terminal event is `response.incomplete` and the response carries `status: "incomplete"` — and it keeps the one case with no reason out of `end_turn` as well. Leaving it empty would not: `stream_delivery` fills an empty reason with `end_turn`, which is right for a stream that ended cleanly and says nothing, and wrong here.
             self._terminal.stop_reason = (
-                "max_tokens" if reason == "max_output_tokens" else "end_turn"
+                "max_tokens" if reason == "max_output_tokens" else reason or "incomplete"
             )
             return
         self._terminal.stop_reason = TOOL_USE if self._saw_tool_call else "end_turn"

@@ -215,6 +215,28 @@ def test_responses_incomplete_maps_to_max_tokens() -> None:
     assert assembler.terminal.stop_reason == "max_tokens"
 
 
+def test_any_other_incomplete_reason_reaches_the_client_in_upstream_s_own_words() -> None:
+    """The output-token limit is the only reason with an Anthropic spelling, so it is the only one translated.
+
+    Every other reason used to become `end_turn`, which told the client a turn upstream had cut short was one it had finished. `spec.md` forbids exactly that: a content filter or an unknown reason must keep the reason as a fact rather than be flattened into a clean ending.
+    """
+    assembler = ResponsesAssembler()
+    assembler.push(SseEvent("response.incomplete", orjson.dumps(
+        {"response": {"incomplete_details": {"reason": "content_filter"}}}
+    ).decode()))
+    assert assembler.terminal.stop_reason == "content_filter"
+
+
+def test_an_incomplete_response_that_gives_no_reason_still_does_not_read_as_finished() -> None:
+    """Upstream said the response is incomplete and did not say why, which is not the same as ending cleanly.
+
+    An empty reason cannot be left empty here: `stream_delivery` fills an empty one with `end_turn`, which is right for a stream that finished without naming a reason and wrong for this. `incomplete` is upstream's own word — the event is `response.incomplete` and the response carries `status: "incomplete"` — so nothing is invented to say it.
+    """
+    assembler = ResponsesAssembler()
+    assembler.push(SseEvent("response.incomplete", orjson.dumps({"response": {}}).decode()))
+    assert assembler.terminal.stop_reason == "incomplete"
+
+
 def test_responses_tool_call_sets_the_tool_use_stop_reason() -> None:
     assembler = ResponsesAssembler()
     assembler.push(SseEvent("response.output_item.added", orjson.dumps(
