@@ -1,4 +1,4 @@
-import httpx
+import httpx2
 import pytest
 
 from app.config.settings import AppSettings
@@ -79,4 +79,4 @@ async def test_sdk_clients_share_http_pool_and_disable_retries() -> None:
 def test_http_client_has_no_transport_retry_wrapper() -> None:
     client = create_http_client(AppSettings())
 
-    assert isinstance(client, httpx.AsyncClient)
+    assert isinstance(client, httpx2.AsyncClient)

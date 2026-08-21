@@ -7,7 +7,7 @@ The two tests at the bottom are the ones that matter most. Everything above them
 
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 
 from app.config.schema import ProxyConfig
@@ -70,7 +70,7 @@ def test_the_chain_the_server_runs_on_actually_carries_them() -> None:
         {"model_providers": {"one": {"type": "github_copilot"}}},
     )
     # Constructing the chain opens no connection, so the client needs no teardown here.
-    chain = build_chain(config, http_client=httpx.AsyncClient())
+    chain = build_chain(config, http_client=httpx2.AsyncClient())
 
     assert frozen_by_event(chain.subscribers) == EXPECTED_BY_EVENT
 
@@ -106,20 +106,20 @@ class RecordingProvider:
         model_id: str,
         stream: bool = False,
         extra_headers: Any = None,
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         self.sent.append(dict(payload))
-        return httpx.Response(200)
+        return httpx2.Response(200)
 
-    async def count_tokens(self, payload: Any, *, model_id: str) -> httpx.Response:
+    async def count_tokens(self, payload: Any, *, model_id: str) -> httpx2.Response:
         # The real provider gates this on the Messages capability and raises `EndpointNotSupported` when it is absent. Mirrored here so a caller that asks anyway fails the same way it would in production, rather than quietly succeeding against a fake that has no opinion.
         if self._endpoint is not ModelEndpoint.ANTHROPIC_MESSAGES:
             raise EndpointNotSupported(self.name, model_id, ModelEndpoint.ANTHROPIC_MESSAGES.value)
         self.counted.append(dict(payload))
         # Carries a request because the caller calls `raise_for_status()`, which needs one. A bare response makes that raise, and the count then quietly falls back to the local estimate — a green assertion about `counted` would have hidden it.
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"input_tokens": 7},
-            request=httpx.Request("POST", "https://upstream.invalid/v1/messages/count_tokens"),
+            request=httpx2.Request("POST", "https://upstream.invalid/v1/messages/count_tokens"),
         )
 
 
@@ -232,7 +232,7 @@ async def test_a_translated_route_is_counted_from_the_body_it_would_actually_sen
     provider = RecordingProvider(endpoint=ModelEndpoint.OPENAI_RESPONSES)
     chain = build_chain(
         config,
-        http_client=httpx.AsyncClient(),
+        http_client=httpx2.AsyncClient(),
         providers={"ghc": provider},
     )
     body: dict[str, Any] = {
@@ -279,7 +279,7 @@ async def test_the_counted_body_is_the_repaired_one() -> None:
     provider = RecordingProvider()
     chain = build_chain(
         config,
-        http_client=httpx.AsyncClient(),
+        http_client=httpx2.AsyncClient(),
         providers={"ghc": provider},
     )
     context = RequestContext(
@@ -312,7 +312,7 @@ async def test_a_request_no_route_can_carry_is_refused_rather_than_estimated() -
     provider = RecordingProvider(endpoint=ModelEndpoint.OPENAI_EMBEDDINGS)
     chain = build_chain(
         config,
-        http_client=httpx.AsyncClient(),
+        http_client=httpx2.AsyncClient(),
         providers={"ghc": provider},
     )
     context = RequestContext(

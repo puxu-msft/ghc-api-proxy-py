@@ -6,7 +6,7 @@ from opentelemetry.instrumentation.fastapi import (
     FastAPIInstrumentor,
 )
 from opentelemetry.instrumentation.httpx import (
-    HTTPXClientInstrumentor,
+    HTTPX2ClientInstrumentor,
 )
 
 
@@ -14,8 +14,9 @@ def setup_tracing(app: FastAPI, *, enabled: bool) -> bool:
     if not enabled or getattr(app.state, "otel_instrumented", False):
         return False
     FastAPIInstrumentor.instrument_app(app)
-    if not HTTPXClientInstrumentor().is_instrumented_by_opentelemetry:
-        HTTPXClientInstrumentor().instrument()
+    # `HTTPX2ClientInstrumentor`, not `HTTPXClientInstrumentor`: the two are separate classes over the same package, each patching the transport of the module it is named for. The old one still imports and still instruments cleanly here — it would simply be patching a package nothing in this process uses, and every outbound span would disappear without a word.
+    if not HTTPX2ClientInstrumentor().is_instrumented_by_opentelemetry:
+        HTTPX2ClientInstrumentor().instrument()
     app.state.otel_instrumented = True
     return True
 

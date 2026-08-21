@@ -1,6 +1,6 @@
 from collections.abc import AsyncIterator
 
-import httpx
+import httpx2
 from fastapi.testclient import TestClient
 
 from app.config.settings import AppSettings
@@ -10,29 +10,29 @@ from app.models.openai import ChatCompletionRequest, EmbeddingsRequest, Response
 from app.server.app_factory import create_app
 
 
-class Stream(httpx.AsyncByteStream):
+class Stream(httpx2.AsyncByteStream):
     async def __aiter__(self) -> AsyncIterator[bytes]:
         yield b"data: chunk\n\n"
 
 
 class StubOpenAIClient:
-    async def chat(self, request: ChatCompletionRequest) -> httpx.Response:
+    async def chat(self, request: ChatCompletionRequest) -> httpx2.Response:
         if request.stream:
-            return httpx.Response(200, stream=Stream())
-        return httpx.Response(200, json={"id": "chat_1", "future": True})
+            return httpx2.Response(200, stream=Stream())
+        return httpx2.Response(200, json={"id": "chat_1", "future": True})
 
-    async def responses(self, request: ResponsesRequest) -> httpx.Response:
-        return httpx.Response(200, json={"id": "resp_1", "future": True})
+    async def responses(self, request: ResponsesRequest) -> httpx2.Response:
+        return httpx2.Response(200, json={"id": "resp_1", "future": True})
 
-    async def embeddings(self, request: EmbeddingsRequest) -> httpx.Response:
-        return httpx.Response(200, json={"object": "list", "data": []})
+    async def embeddings(self, request: EmbeddingsRequest) -> httpx2.Response:
+        return httpx2.Response(200, json={"object": "list", "data": []})
 
 
 class FailingStreamClient(StubOpenAIClient):
-    async def chat(self, request: ChatCompletionRequest) -> httpx.Response:
-        return httpx.Response(
+    async def chat(self, request: ChatCompletionRequest) -> httpx2.Response:
+        return httpx2.Response(
             429,
-            request=httpx.Request("POST", "https://upstream.test/chat/completions"),
+            request=httpx2.Request("POST", "https://upstream.test/chat/completions"),
             json={"error": {"type": "rate_limit_error"}},
         )
 

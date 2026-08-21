@@ -9,7 +9,7 @@ It wraps the library client as this project's `UpstreamTarget`.
 from collections.abc import Mapping
 from typing import Any
 
-import httpx
+import httpx2
 
 from app.auth.providers import GitHubTokenManager
 from app.config.settings import AppSettings
@@ -94,7 +94,7 @@ class CopilotUpstream:
         payload: Mapping[str, Any],
         *,
         stream: bool = False,
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         return await self._client.send_chat_completions(payload, stream=stream)
 
     async def send_anthropic(
@@ -103,7 +103,7 @@ class CopilotUpstream:
         *,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         return await self._client.send_anthropic_messages(
             payload,
             stream=stream,
@@ -113,7 +113,7 @@ class CopilotUpstream:
     async def send_anthropic_count_tokens(
         self,
         payload: Mapping[str, Any],
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         return await self._client.send_anthropic_count_tokens(payload)
 
     async def send_responses(
@@ -121,17 +121,17 @@ class CopilotUpstream:
         payload: Mapping[str, Any],
         *,
         stream: bool = False,
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         return await self._client.send_responses(payload, stream=stream)
 
     async def send_responses_headers(
         self,
         payload: Mapping[str, Any],
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         return await self._client.send_responses_headers(payload)
 
     async def send_embeddings(
         self,
         payload: Mapping[str, Any],
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         return await self._client.send_embeddings(payload)

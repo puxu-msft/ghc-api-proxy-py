@@ -1,7 +1,7 @@
 from collections.abc import Mapping
 from typing import Any, Protocol
 
-import httpx
+import httpx2
 from anyio.to_thread import run_sync
 
 from app.models.anthropic import MessagesRequest
@@ -15,7 +15,7 @@ class AnthropicCountTokensTarget(Protocol):
     async def send_anthropic_count_tokens(
         self,
         payload: Mapping[str, Any],
-    ) -> httpx.Response: ...
+    ) -> httpx2.Response: ...
 
 
 class AnthropicTokenCountingService:
@@ -43,7 +43,7 @@ class AnthropicTokenCountingService:
         if self._use_upstream:
             payload = request.model_dump(mode="json", exclude_none=True)
             payload.pop("stream", None)
-            response: httpx.Response | None = None
+            response: httpx2.Response | None = None
             try:
                 response = await self._target.send_anthropic_count_tokens(payload)
                 response.raise_for_status()
@@ -58,7 +58,7 @@ class AnthropicTokenCountingService:
                     input_tokens,
                 )
                 return data
-            except (httpx.HTTPError, OSError, ValueError):
+            except (httpx2.HTTPError, OSError, ValueError):
                 if response is not None and response.status_code >= 400:
                     raw = (await response.aread()).decode(errors="replace")
                     parsed = parse_prompt_limit_error(raw)

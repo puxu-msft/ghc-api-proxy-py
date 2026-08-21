@@ -1,6 +1,6 @@
 from collections.abc import AsyncIterator
 
-import httpx
+import httpx2
 import openai
 import pytest
 
@@ -13,7 +13,7 @@ from app.upstream.copilot import CopilotUpstream, GitHubTokenSourceAdapter
 from app.upstream.generic import GenericUpstream
 
 
-class RawByteStream(httpx.AsyncByteStream):
+class RawByteStream(httpx2.AsyncByteStream):
     async def __aiter__(self) -> AsyncIterator[bytes]:
         yield b"data: raw\n\n"
 
@@ -32,18 +32,18 @@ class StaticProvider(GitHubTokenProvider):
 
 @pytest.mark.asyncio
 async def test_copilot_upstream_returns_unconsumed_raw_anthropic_response() -> None:
-    seen: list[httpx.Request] = []
+    seen: list[httpx2.Request] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         seen.append(request)
         if request.url.host == "api.github.com":
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 json={"token": "copilot", "expires_at": 5000, "refresh_in": 1500},
             )
-        return httpx.Response(200, stream=RawByteStream())
+        return httpx2.Response(200, stream=RawByteStream())
 
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     settings = AppSettings.model_validate(
         {"upstream": {"ghc_api_base_url": "https://copilot.example"}}
     )
@@ -81,11 +81,11 @@ async def test_copilot_upstream_returns_unconsumed_raw_anthropic_response() -> N
 async def test_generic_upstream_uses_protocol_specific_sdk_base_urls() -> None:
     paths: list[str] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         paths.append(str(request.url))
-        return httpx.Response(200, json={"ok": True})
+        return httpx2.Response(200, json={"ok": True})
 
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     settings = AppSettings.model_validate(
         {
             "upstream": {
@@ -118,10 +118,10 @@ async def test_generic_upstream_uses_protocol_specific_sdk_base_urls() -> None:
 
 @pytest.mark.asyncio
 async def test_generic_responses_headers_returns_unconsumed_response() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, request=request, stream=RawByteStream())
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, request=request, stream=RawByteStream())
 
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     settings = AppSettings.model_validate(
         {
             "upstream": {
@@ -147,12 +147,12 @@ async def test_generic_responses_headers_returns_unconsumed_response() -> None:
 
 @pytest.mark.asyncio
 async def test_generic_responses_headers_wraps_connection_failure() -> None:
-    request = httpx.Request("POST", "https://openai.example/v1/responses")
+    request = httpx2.Request("POST", "https://openai.example/v1/responses")
 
-    def handler(_: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("connection failed", request=request)
+    def handler(_: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("connection failed", request=request)
 
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     settings = AppSettings.model_validate(
         {
             "upstream": {
@@ -177,14 +177,14 @@ async def test_generic_responses_headers_wraps_connection_failure() -> None:
 async def test_generic_responses_headers_returns_sdk_error_response(
     status_code: int,
 ) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             status_code,
             request=request,
             json={"error": {"message": "upstream failed"}},
         )
 
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     settings = AppSettings.model_validate(
         {
             "upstream": {

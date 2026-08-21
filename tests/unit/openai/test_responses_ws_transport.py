@@ -2,7 +2,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 
 from app.openai.responses_ws import ResponsesWebSocketClient
@@ -36,7 +36,7 @@ async def test_responses_ws_client_uses_bounded_queue_and_yields_frames() -> Non
         captured.update(kwargs)
         yield session
 
-    http_client = httpx.AsyncClient()
+    http_client = httpx2.AsyncClient()
     client = ResponsesWebSocketClient(
         http_client,
         "wss://copilot.example/responses",
@@ -58,4 +58,40 @@ async def test_responses_ws_client_uses_bounded_queue_and_yields_frames() -> Non
     ]
     assert captured["url"] == "wss://copilot.example/responses"
     assert captured["queue_size"] == 32
-    assert captured["client"] is http_client
+    assert "client" not in captured
+
+
+@pytest.mark.asyncio
+async def test_responses_ws_client_opens_the_socket_on_its_own_http_client() -> None:
+    """The default `connect` binds the shared client rather than passing it as `client=`.
+
+    That kwarg was httpx-ws's way in; `httpx2.AsyncClient.websocket` is a method on the client, so an injected replacement stops being able to see which client is in use. This pins the one thing the switch could have quietly dropped: the socket is opened on the client this object was given, not on a fresh one.
+    """
+    opened: dict[str, Any] = {}
+
+    class RecordingClient(httpx2.AsyncClient):
+        @asynccontextmanager
+        async def websocket(self, url: Any, **kwargs: Any) -> AsyncGenerator[FakeSession]:  # type: ignore[override]
+            opened["self"] = self
+            opened["url"] = url
+            opened.update(kwargs)
+            yield FakeSession()
+
+    http_client = RecordingClient()
+    client = ResponsesWebSocketClient(
+        http_client,
+        "wss://copilot.example/responses",
+        queue_size=7,
+    )
+    try:
+        frames = [
+            frame
+            async for frame in client.create_response({"type": "response.create"})
+        ]
+    finally:
+        await http_client.aclose()
+
+    assert frames == [{"type": "response.created"}, {"type": "response.completed"}]
+    assert opened["self"] is http_client
+    assert opened["url"] == "wss://copilot.example/responses"
+    assert opened["queue_size"] == 7

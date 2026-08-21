@@ -2,7 +2,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 
 from app.models.anthropic import MessagesRequest
@@ -12,14 +12,14 @@ from app.tokenization.state_store import TokenizationStateStore
 
 
 class StubTarget:
-    def __init__(self, response: httpx.Response | Exception) -> None:
+    def __init__(self, response: httpx2.Response | Exception) -> None:
         self.response = response
         self.payload: Mapping[str, Any] | None = None
 
     async def send_anthropic_count_tokens(
         self,
         payload: Mapping[str, Any],
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         self.payload = payload
         if isinstance(self.response, Exception):
             raise self.response
@@ -64,9 +64,9 @@ async def test_token_counter_prefers_upstream_result_and_learns(
 ) -> None:
     estimate = estimate_anthropic_input(_request())
     target = StubTarget(
-        httpx.Response(
+        httpx2.Response(
             200,
-            request=httpx.Request("POST", "https://example.test/count_tokens"),
+            request=httpx2.Request("POST", "https://example.test/count_tokens"),
             json={"input_tokens": estimate * 2, "future": True},
         )
     )
@@ -81,7 +81,7 @@ async def test_token_counter_prefers_upstream_result_and_learns(
 
 @pytest.mark.asyncio
 async def test_token_counter_falls_back_for_upstream_error(tmp_path: Path) -> None:
-    target = StubTarget(httpx.ConnectError("offline"))
+    target = StubTarget(httpx2.ConnectError("offline"))
     counter, _ = _counter(target, tmp_path)
 
     result = await counter.count(_request())
@@ -92,7 +92,7 @@ async def test_token_counter_falls_back_for_upstream_error(tmp_path: Path) -> No
 
 @pytest.mark.asyncio
 async def test_token_counter_fallback_consumes_calibration(tmp_path: Path) -> None:
-    target = StubTarget(httpx.ConnectError("offline"))
+    target = StubTarget(httpx2.ConnectError("offline"))
     counter, state = _counter(target, tmp_path)
     estimate = estimate_anthropic_input(_request())
     state.calibration.learn("anthropic", "claude-test", estimate, estimate * 2)
@@ -107,9 +107,9 @@ async def test_token_counter_records_limit_error_without_rewriting(
     tmp_path: Path,
 ) -> None:
     target = StubTarget(
-        httpx.Response(
+        httpx2.Response(
             400,
-            request=httpx.Request("POST", "https://example.test/count_tokens"),
+            request=httpx2.Request("POST", "https://example.test/count_tokens"),
             json={
                 "error": {
                     "message": "prompt is too long: 200000 tokens > 168000 maximum"

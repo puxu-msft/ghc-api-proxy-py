@@ -1,7 +1,7 @@
 from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 
 from app.models.openai import ChatCompletionRequest, EmbeddingsRequest, ResponsesRequest
@@ -9,7 +9,7 @@ from app.openai.client import OpenAIClient
 from app.transform.model_resolver import ModelResolver
 
 
-class RawStream(httpx.AsyncByteStream):
+class RawStream(httpx2.AsyncByteStream):
     async def __aiter__(self) -> AsyncIterator[bytes]:
         yield b"data: raw\n\n"
 
@@ -24,24 +24,24 @@ class Target:
         payload: Mapping[str, Any],
         *,
         stream: bool = False,
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         self.calls.append(("chat", dict(payload), stream))
-        return httpx.Response(200, stream=RawStream())
+        return httpx2.Response(200, stream=RawStream())
 
     async def send_responses(
         self,
         payload: Mapping[str, Any],
         *,
         stream: bool = False,
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         self.calls.append(("responses", dict(payload), stream))
         if self.responses_data is not None:
-            return httpx.Response(200, json=self.responses_data)
-        return httpx.Response(200, stream=RawStream())
+            return httpx2.Response(200, json=self.responses_data)
+        return httpx2.Response(200, stream=RawStream())
 
-    async def send_embeddings(self, payload: Mapping[str, Any]) -> httpx.Response:
+    async def send_embeddings(self, payload: Mapping[str, Any]) -> httpx2.Response:
         self.calls.append(("embeddings", dict(payload), False))
-        return httpx.Response(200, json={"object": "list", "data": []})
+        return httpx2.Response(200, json={"object": "list", "data": []})
 
 
 @pytest.mark.asyncio

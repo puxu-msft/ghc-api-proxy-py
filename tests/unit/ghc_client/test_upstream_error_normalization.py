@@ -7,7 +7,7 @@ set. So every configured retry budget was dead code on the path that serves requ
 upstream answer became a 502.
 """
 
-import httpx
+import httpx2
 import openai
 import pytest
 
@@ -31,8 +31,8 @@ def status_error(
     headers: dict[str, str] | None = None,
     body: str = "{}",
 ) -> Exception:
-    request = httpx.Request("POST", "https://upstream.example/responses")
-    response = httpx.Response(status, headers=headers or {}, text=body, request=request)
+    request = httpx2.Request("POST", "https://upstream.example/responses")
+    response = httpx2.Response(status, headers=headers or {}, text=body, request=request)
     return openai.APIStatusError("upstream said no", response=response, body=None)
 
 
@@ -79,7 +79,7 @@ def test_a_401_is_named_as_a_token_problem_rather_than_a_server_error() -> None:
 
 
 def test_a_timeout_becomes_a_network_retry() -> None:
-    request = httpx.Request("POST", "https://upstream.example/responses")
+    request = httpx2.Request("POST", "https://upstream.example/responses")
     normalized = normalize_upstream_error(openai.APITimeoutError(request=request))
 
     assert isinstance(normalized, UpstreamTimeout)
@@ -87,7 +87,7 @@ def test_a_timeout_becomes_a_network_retry() -> None:
 
 
 def test_a_transport_failure_becomes_a_network_retry() -> None:
-    normalized = normalize_upstream_error(httpx.ConnectError("refused"))
+    normalized = normalize_upstream_error(httpx2.ConnectError("refused"))
 
     assert isinstance(normalized, UpstreamError)
     assert normalized.status_code is None

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any, cast
 from uuid import uuid4
 
-import httpx
+import httpx2
 from pydantic import ValidationError
 
 from app.model_provider import ModelProvider, ProviderError
@@ -68,7 +68,7 @@ class HandledRequest:
     synthesized: bool = False
 
     @property
-    def response(self) -> httpx.Response | None:
+    def response(self) -> httpx2.Response | None:
         return self.outcome.response
 
 
@@ -161,7 +161,7 @@ def _answered_failed_search(context: RequestContext, route: Route) -> DriverOutc
     query = query_from_request(context.payload)
     message_id = f"msg_{uuid4().hex[:24]}"
     call_id = f"srvtoolu_{uuid4().hex[:24]}"
-    request = httpx.Request("POST", "https://synthesized.invalid/messages", content=b"")
+    request = httpx2.Request("POST", "https://synthesized.invalid/messages", content=b"")
     if context.stream:
         body = failed_search_sse(
             query, message_id=message_id, model=route.model_id, call_id=call_id
@@ -176,7 +176,7 @@ def _answered_failed_search(context: RequestContext, route: Route) -> DriverOutc
         headers = {"content-type": "application/json"}
     return DriverOutcome(
         context=context,
-        response=httpx.Response(200, content=body, headers=headers, request=request),
+        response=httpx2.Response(200, content=body, headers=headers, request=request),
         attempts=context.attempt_count,
     )
 

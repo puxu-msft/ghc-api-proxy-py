@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 
 from app.anthropic.client import AnthropicClient
@@ -41,7 +41,7 @@ class MarkerHook:
 
 
 class Target:
-    def __init__(self, responses: list[httpx.Response]) -> None:
+    def __init__(self, responses: list[httpx2.Response]) -> None:
         self.responses = responses
         self.payloads: list[dict[str, Any]] = []
 
@@ -51,7 +51,7 @@ class Target:
         *,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         del stream, extra_headers
         self.payloads.append(dict(payload))
         return self.responses.pop(0)
@@ -118,9 +118,9 @@ async def test_hooks_run_at_all_payload_phases_and_success_observer_learns(
     tmp_path: Path,
 ) -> None:
     estimate = estimate_anthropic_input(_request())
-    response = httpx.Response(
+    response = httpx2.Response(
         200,
-        request=httpx.Request("POST", "https://upstream.test/v1/messages"),
+        request=httpx2.Request("POST", "https://upstream.test/v1/messages"),
         json={
             "id": "msg",
             "type": "message",
@@ -166,9 +166,9 @@ async def test_hooks_run_at_all_payload_phases_and_success_observer_learns(
 async def test_prompt_limit_observer_records_error_without_changing_payload(
     tmp_path: Path,
 ) -> None:
-    response = httpx.Response(
+    response = httpx2.Response(
         400,
-        request=httpx.Request("POST", "https://upstream.test/v1/messages"),
+        request=httpx2.Request("POST", "https://upstream.test/v1/messages"),
         json={
             "error": {
                 "message": "prompt is too long: 200000 tokens > 168000 maximum"
@@ -193,9 +193,9 @@ async def test_prompt_limit_observer_records_error_without_changing_payload(
 async def test_disabled_poisoned_thinking_factory_does_not_retry(
     tmp_path: Path,
 ) -> None:
-    response = httpx.Response(
+    response = httpx2.Response(
         400,
-        request=httpx.Request("POST", "https://upstream.test/v1/messages"),
+        request=httpx2.Request("POST", "https://upstream.test/v1/messages"),
         text="thinking blocks cannot be modified",
     )
     target = Target([response])

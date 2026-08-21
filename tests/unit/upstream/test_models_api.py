@@ -1,6 +1,6 @@
 from collections.abc import Mapping
 
-import httpx
+import httpx2
 import pytest
 
 from app.upstream.models_api import ModelCatalog
@@ -8,10 +8,10 @@ from app.upstream.models_api import ModelCatalog
 
 @pytest.mark.asyncio
 async def test_models_api_fetches_preserves_and_indexes_catalog() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         assert request.url == "https://copilot.example/models"
         assert request.headers["authorization"] == "Bearer token"
-        return httpx.Response(
+        return httpx2.Response(
             200,
             headers={"ETag": '"catalog-v1"'},
             json={
@@ -29,7 +29,7 @@ async def test_models_api_fetches_preserves_and_indexes_catalog() -> None:
             },
         )
 
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     catalog = ModelCatalog(http_client, "https://copilot.example")
     try:
         changed = await catalog.refresh({"Authorization": "Bearer token"})
@@ -47,19 +47,19 @@ async def test_models_api_fetches_preserves_and_indexes_catalog() -> None:
 async def test_models_api_uses_etag_and_keeps_catalog_on_304() -> None:
     calls = 0
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
         if calls == 1:
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 headers={"ETag": '"v1"'},
                 json={"object": "list", "data": [{"id": "model-a"}]},
             )
         assert request.headers["if-none-match"] == '"v1"'
-        return httpx.Response(304)
+        return httpx2.Response(304)
 
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     catalog = ModelCatalog(http_client, "https://copilot.example")
     try:
         assert await catalog.refresh({}) is True

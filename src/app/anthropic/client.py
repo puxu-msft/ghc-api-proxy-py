@@ -5,7 +5,7 @@ from collections.abc import Mapping, Set
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
-import httpx
+import httpx2
 import orjson
 
 from app.anthropic.header_policy import normalize_responses_response_headers
@@ -47,14 +47,14 @@ class AnthropicTarget(Protocol):
         *,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
-    ) -> httpx.Response: ...
+    ) -> httpx2.Response: ...
 
 
 class ResponsesTarget(Protocol):
     async def send_responses_headers(
         self,
         payload: Mapping[str, Any],
-    ) -> httpx.Response: ...
+    ) -> httpx2.Response: ...
 
 
 class ModelCatalogView(Protocol):
@@ -76,7 +76,7 @@ class PreparedAnthropicRequest:
 
 @dataclass(frozen=True, slots=True)
 class AnthropicAttemptResult:
-    response: httpx.Response
+    response: httpx2.Response
     converted_request_facts: tuple[ConversionFact, ...] = ()
     converted_response: ConvertedResponse | None = None
 
@@ -172,7 +172,7 @@ class AnthropicClient:
     async def send_messages(
         self,
         request: MessagesRequest,
-    ) -> tuple[httpx.Response, PreparedAnthropicRequest]:
+    ) -> tuple[httpx2.Response, PreparedAnthropicRequest]:
         prepared = self.prepare(request)
         response = await self.send_prepared(prepared, stream=request.stream)
         return response, prepared
@@ -182,7 +182,7 @@ class AnthropicClient:
         prepared: PreparedAnthropicRequest,
         *,
         stream: bool,
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         result = await self.send_prepared_attempt(prepared, stream=stream)
         return result.response
 
@@ -284,7 +284,7 @@ class AnthropicClient:
             body = cast(dict[str, Any], parsed_body)
             converted = convert_responses_response_to_anthropic(body)
             return AnthropicAttemptResult(
-                response=httpx.Response(
+                response=httpx2.Response(
                     upstream.status_code,
                     headers=normalize_responses_response_headers(upstream.headers),
                     content=dumps(
@@ -423,7 +423,7 @@ class AnthropicClient:
         )
 
 
-async def _responses_error_response(upstream: httpx.Response) -> httpx.Response:
+async def _responses_error_response(upstream: httpx2.Response) -> httpx2.Response:
     raw = await upstream.aread()
     message = raw.decode(errors="replace") or (
         f"Responses upstream returned HTTP {upstream.status_code}"
@@ -445,7 +445,7 @@ async def _responses_error_response(upstream: httpx.Response) -> httpx.Response:
     except orjson.JSONDecodeError:
         pass
     api_error = ApiError(message, status_code=upstream.status_code, code=code)
-    response = httpx.Response(
+    response = httpx2.Response(
         upstream.status_code,
         headers=normalize_responses_response_headers(upstream.headers),
         content=dumps(

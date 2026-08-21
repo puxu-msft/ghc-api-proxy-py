@@ -23,7 +23,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any, cast
 
-import httpx
+import httpx2
 import orjson
 
 CASSETTE_VERSION = 1
@@ -206,7 +206,7 @@ SHAPE_FIELDS = ("model", "stream")
 RECORDED_EXTENSIONS = frozenset({"http_version"})
 
 
-def _request_shape(request: httpx.Request) -> dict[str, Any]:
+def _request_shape(request: httpx2.Request) -> dict[str, Any]:
     """What decides whether a recorded answer still applies to this request.
 
     A digest of the whole body rather than a chosen few fields. Naming fields meant the ones left
@@ -316,7 +316,7 @@ class Cassette:
         return cls(interactions=[Interaction.from_json(entry) for entry in entries])
 
 
-class _ReplayStream(httpx.AsyncByteStream):
+class _ReplayStream(httpx2.AsyncByteStream):
     """Yields the recorded chunks, one at a time, exactly as they arrived."""
 
     def __init__(self, chunks: list[bytes]) -> None:
@@ -342,7 +342,7 @@ class RequestShapeChanged(RuntimeError):
     """The request asks for something other than what the recording answers."""
 
 
-class ReplayTransport(httpx.MockTransport):
+class ReplayTransport(httpx2.MockTransport):
     """Answers from a cassette, in the order it was recorded.
 
     Matched on method and path in sequence rather than on the request body. Bodies carry a
@@ -355,7 +355,7 @@ class ReplayTransport(httpx.MockTransport):
         self._remaining = list(cassette.interactions)
         super().__init__(self._handle)
 
-    def _handle(self, request: httpx.Request) -> httpx.Response:
+    def _handle(self, request: httpx2.Request) -> httpx2.Response:
         path = request.url.path
         for index, interaction in enumerate(self._remaining):
             if interaction.method == request.method and interaction.path == path:
@@ -371,7 +371,7 @@ class ReplayTransport(httpx.MockTransport):
                         f"{request.method} {path} carried no Authorization, but the recording "
                         "was made with one — upstream would refuse this"
                     )
-                return httpx.Response(
+                return httpx2.Response(
                     interaction.status,
                     headers=interaction.headers,
                     stream=_ReplayStream(interaction.chunks),
@@ -385,14 +385,14 @@ class ReplayTransport(httpx.MockTransport):
         raise CassetteExhausted(f"cassette has no recorded {request.method} {path}")
 
 
-class RecordingTransport(httpx.AsyncBaseTransport):
+class RecordingTransport(httpx2.AsyncBaseTransport):
     """Passes traffic through to the real upstream and keeps what came back."""
 
-    def __init__(self, inner: httpx.AsyncBaseTransport | None = None) -> None:
-        self._inner = inner or httpx.AsyncHTTPTransport()
+    def __init__(self, inner: httpx2.AsyncBaseTransport | None = None) -> None:
+        self._inner = inner or httpx2.AsyncHTTPTransport()
         self.cassette = Cassette()
 
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         response = await self._inner.handle_async_request(request)
         chunks = [chunk async for chunk in response.aiter_raw()]
         await response.aclose()
@@ -424,7 +424,7 @@ class RecordingTransport(httpx.AsyncBaseTransport):
                 chunks=recorded,
             )
         )
-        return httpx.Response(
+        return httpx2.Response(
             response.status_code,
             headers=response.headers,
             stream=_ReplayStream(chunks),

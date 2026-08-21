@@ -13,7 +13,7 @@ import re
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
-import httpx
+import httpx2
 import orjson
 import pytest
 from recorded.cassettes import (
@@ -264,7 +264,7 @@ async def test_a_replay_refuses_a_request_that_stopped_authenticating() -> None:
     assert any(interaction.authenticated for interaction in cassette.interactions)
 
     transport = ReplayTransport(cassette)
-    async with httpx.AsyncClient(transport=transport) as client:
+    async with httpx2.AsyncClient(transport=transport) as client:
         with pytest.raises(UnauthenticatedRequest):
             await client.get("https://api.githubcopilot.com/copilot_internal/v2/token")
 
@@ -281,7 +281,7 @@ async def test_the_replayed_protocol_version_comes_from_the_cassette() -> None:
     for interaction in cassette.interactions:
         interaction.extensions["http_version"] = "HTTP/2"
 
-    async with httpx.AsyncClient(transport=ReplayTransport(cassette)) as client:
+    async with httpx2.AsyncClient(transport=ReplayTransport(cassette)) as client:
         response = await client.get(
             "https://api.githubcopilot.com/copilot_internal/v2/token",
             headers={"authorization": "Bearer test"},
@@ -290,17 +290,17 @@ async def test_the_replayed_protocol_version_comes_from_the_cassette() -> None:
     assert response.http_version == "HTTP/2"
 
 
-class _FakeUpstream(httpx.AsyncBaseTransport):
+class _FakeUpstream(httpx2.AsyncBaseTransport):
     """Answers with a fixed set of chunks, so the recorder can be driven without a network."""
 
     def __init__(self, chunks: list[bytes], headers: dict[str, str]) -> None:
         self._chunks = chunks
         self._headers = headers
 
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         del request
 
-        class _Stream(httpx.AsyncByteStream):
+        class _Stream(httpx2.AsyncByteStream):
             def __init__(self, chunks: list[bytes]) -> None:
                 self._chunks = chunks
 
@@ -308,7 +308,7 @@ class _FakeUpstream(httpx.AsyncBaseTransport):
                 for chunk in self._chunks:
                     yield chunk
 
-        return httpx.Response(200, headers=self._headers, stream=_Stream(list(self._chunks)))
+        return httpx2.Response(200, headers=self._headers, stream=_Stream(list(self._chunks)))
 
 
 @pytest.mark.asyncio
@@ -332,7 +332,7 @@ async def test_the_recorder_scrubs_an_sse_frame_that_spans_two_chunks() -> None:
         _FakeUpstream(chunks, {"content-type": "text/event-stream", "x-request-id": "trace-me"})
     )
     async with (
-        httpx.AsyncClient(transport=recorder) as client,
+        httpx2.AsyncClient(transport=recorder) as client,
         client.stream("POST", "https://upstream.test/responses") as response,
     ):
         [chunk async for chunk in response.aiter_raw()]
@@ -356,14 +356,14 @@ async def test_the_recorder_hands_downstream_what_upstream_sent() -> None:
     """
     upstream = _FakeUpstream([b'{"ok":true}'], {"content-type": "application/json"})
 
-    class _Http2(httpx.AsyncBaseTransport):
-        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+    class _Http2(httpx2.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
             response = await upstream.handle_async_request(request)
             response.extensions["http_version"] = b"HTTP/2"
             return response
 
     recorder = RecordingTransport(_Http2())
-    async with httpx.AsyncClient(transport=recorder) as client:
+    async with httpx2.AsyncClient(transport=recorder) as client:
         live = await client.get("https://upstream.test/probe")
 
     assert live.http_version == "HTTP/2", "the live response lost what upstream reported"

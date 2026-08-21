@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import anyio
-import httpx
+import httpx2
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,7 +18,7 @@ class ModelCatalogPage:
 
 
 async def fetch_models(
-    http_client: httpx.AsyncClient,
+    http_client: httpx2.AsyncClient,
     base_url: str,
     headers: Mapping[str, str],
     *,

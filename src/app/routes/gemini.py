@@ -1,7 +1,7 @@
 from collections.abc import AsyncGenerator
 from typing import Any, cast
 
-import httpx
+import httpx2
 from fastapi import APIRouter, Response
 
 from app.deps import ApprovalGateDependency, OpenAIClientDependency, RuntimeDependency
@@ -27,7 +27,7 @@ from app.wire_json import dumps, loads
 router = APIRouter(prefix="/v1beta/models", tags=["gemini"])
 
 
-async def _gemini_stream(response: httpx.Response) -> AsyncGenerator[bytes]:
+async def _gemini_stream(response: httpx2.Response) -> AsyncGenerator[bytes]:
     call_states: dict[int, dict[str, str]] = {}
     try:
         async for event in parse_sse_json(response.aiter_raw()):

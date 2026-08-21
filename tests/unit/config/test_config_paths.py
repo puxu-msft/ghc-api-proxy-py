@@ -7,7 +7,7 @@ A token would then be looked for somewhere nobody wrote it.
 
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 
 from app.auth.providers import FileTokenProvider
@@ -109,5 +109,5 @@ def test_build_chain_gives_each_provider_its_own_token_file(
         }
     )
     # Constructing the chain opens no connection, so the client needs no teardown here.
-    build_chain(config, http_client=httpx.AsyncClient())
+    build_chain(config, http_client=httpx2.AsyncClient())
     assert seen == [Path("/tokens/one"), Path("/tokens/two")]

@@ -13,7 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, cast
 
-import httpx
+import httpx2
 
 BASE_URL = "https://copilot.example"
 
@@ -68,21 +68,21 @@ class ScriptedUpstream:
     tested: the second reply is only reached if the client did something with the first.
     """
 
-    replies: list[Callable[[dict[str, Any]], httpx.Response]] = field(
-        default_factory=lambda: list[Callable[[dict[str, Any]], httpx.Response]]()
+    replies: list[Callable[[dict[str, Any]], httpx2.Response]] = field(
+        default_factory=lambda: list[Callable[[dict[str, Any]], httpx2.Response]]()
     )
     seen: list[Exchange] = field(default_factory=lambda: list[Exchange]())
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def handle(self, request: httpx.Request) -> httpx.Response:
+    def handle(self, request: httpx2.Request) -> httpx2.Response:
         path = request.url.path
         if request.url.host == "api.github.com" or path.endswith("/v2/token"):
-            return httpx.Response(
+            return httpx2.Response(
                 200, json={"token": "copilot", "expires_at": 5_000_000_000, "refresh_in": 1500}
             )
         if path.endswith("/models"):
             # Start-up, not the exchange under test, so it stays out of `seen`.
-            return httpx.Response(200, json=CATALOG)
+            return httpx2.Response(200, json=CATALOG)
 
         body: dict[str, Any] = {}
         raw = request.content
@@ -101,19 +101,19 @@ class ScriptedUpstream:
         if reply is None:
             # Loud rather than a default answer: a test that reaches an unscripted request has
             # discovered the client doing something it did not expect, and that is the finding.
-            return httpx.Response(
+            return httpx2.Response(
                 500,
                 json={"error": {"message": f"no scripted reply for upstream request #{index + 1}"}},
             )
         return reply(body)
 
 
-def anthropic_text(text: str, *, model: str = "claude-model") -> Callable[..., httpx.Response]:
+def anthropic_text(text: str, *, model: str = "claude-model") -> Callable[..., httpx2.Response]:
     """A finished Anthropic reply carrying one text block."""
 
-    def reply(body: dict[str, Any]) -> httpx.Response:
+    def reply(body: dict[str, Any]) -> httpx2.Response:
         if body.get("stream"):
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 headers={"content-type": "text/event-stream"},
                 content=_sse(
@@ -129,7 +129,7 @@ def anthropic_text(text: str, *, model: str = "claude-model") -> Callable[..., h
                     stop_reason="end_turn",
                 ),
             )
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "id": "msg_scripted",
@@ -148,17 +148,17 @@ def anthropic_text(text: str, *, model: str = "claude-model") -> Callable[..., h
 
 def anthropic_tool_call(
     name: str, tool_input: dict[str, Any], *, call_id: str = "toolu_scripted", model: str = "claude-model"
-) -> Callable[..., httpx.Response]:
+) -> Callable[..., httpx2.Response]:
     """A reply asking the client to run one of its own tools.
 
     This is how a test gets the client to do something: the proxy cannot make Claude Code issue a
     web search, and neither can the test — only a reply that calls `WebSearch` can.
     """
 
-    def reply(body: dict[str, Any]) -> httpx.Response:
+    def reply(body: dict[str, Any]) -> httpx2.Response:
         block = {"type": "tool_use", "id": call_id, "name": name, "input": tool_input}
         if body.get("stream"):
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 headers={"content-type": "text/event-stream"},
                 content=_sse(
@@ -183,7 +183,7 @@ def anthropic_tool_call(
                     stop_reason="tool_use",
                 ),
             )
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "id": "msg_scripted",

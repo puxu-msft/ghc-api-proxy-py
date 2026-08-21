@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-import httpx
+import httpx2
 import uvicorn
 from _upstream import BASE_URL, CATALOG, ScriptedUpstream
 
@@ -65,7 +65,7 @@ def running_proxy(
     from anthropic import AsyncAnthropic
     from openai import AsyncOpenAI
 
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream.handle))
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(upstream.handle))
     tokens = CopilotTokenManager(_StaticTokenSource(), http_client, clock=lambda: 1000)
     client = GhcApiClient(
         AsyncOpenAI(

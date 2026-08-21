@@ -1,6 +1,6 @@
 from typing import Any
 
-import httpx
+import httpx2
 from fastapi import APIRouter, Response
 
 from app.deps import ApprovalGateDependency, OpenAIClientDependency, RuntimeDependency
@@ -20,7 +20,7 @@ router = APIRouter(prefix="/openai/deployments", tags=["azure"])
 
 
 async def _response(
-    upstream: httpx.Response,
+    upstream: httpx2.Response,
     *,
     stream: bool = False,
     runtime: RuntimeState,

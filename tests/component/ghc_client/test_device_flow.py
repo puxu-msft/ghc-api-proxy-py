@@ -1,17 +1,17 @@
 from collections.abc import Awaitable, Callable
 
-import httpx
+import httpx2
 import pytest
 
 from app.ghc_client.device_flow import DeviceFlowClient, DeviceFlowError
 
 
 def _client(
-    handler: Callable[[httpx.Request], httpx.Response],
+    handler: Callable[[httpx2.Request], httpx2.Response],
     *,
     sleep: Callable[[float], Awaitable[None]],
-) -> tuple[DeviceFlowClient, httpx.AsyncClient]:
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+) -> tuple[DeviceFlowClient, httpx2.AsyncClient]:
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     return DeviceFlowClient(http_client, sleep=sleep), http_client
 
 
@@ -20,13 +20,13 @@ async def test_request_device_code_uses_github_oauth_contract() -> None:
     async def no_sleep(delay: float) -> None:
         del delay
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         assert request.url == "https://github.com/login/device/code"
         assert request.method == "POST"
         assert request.headers["accept"] == "application/json"
         assert request.headers["content-type"] == "application/json"
         assert request.read() == b'{"client_id":"Iv1.b507a08c87ecfe98","scope":"read:user"}'
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "device_code": "device",
@@ -60,9 +60,9 @@ async def test_poll_handles_pending_and_slow_down_before_success() -> None:
     async def record_sleep(delay: float) -> None:
         sleeps.append(delay)
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         assert request.url == "https://github.com/login/oauth/access_token"
-        return httpx.Response(200, json=next(responses))
+        return httpx2.Response(200, json=next(responses))
 
     client, http_client = _client(handler, sleep=record_sleep)
     device = client.parse_device_code(
@@ -88,9 +88,9 @@ async def test_poll_raises_for_access_denied() -> None:
     async def no_sleep(delay: float) -> None:
         del delay
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         del request
-        return httpx.Response(200, json={"error": "access_denied"})
+        return httpx2.Response(200, json={"error": "access_denied"})
 
     client, http_client = _client(handler, sleep=no_sleep)
     device = client.parse_device_code(

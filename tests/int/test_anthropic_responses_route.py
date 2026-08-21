@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
-import httpx
+import httpx2
 import orjson
 import pytest
 from fastapi.testclient import TestClient
@@ -49,18 +49,18 @@ class RecordingTarget:
         *,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         del stream
         self.anthropic_payloads.append(dict(payload))
         self.anthropic_headers.append(dict(extra_headers or {}))
-        return httpx.Response(
+        return httpx2.Response(
             200,
             headers={
                 "content-type": "application/json",
                 "request-id": "req_messages",
                 "x-messages-existing": "preserved",
             },
-            request=httpx.Request("POST", "https://upstream.test/v1/messages"),
+            request=httpx2.Request("POST", "https://upstream.test/v1/messages"),
             json={
                 "id": "msg_direct",
                 "type": "message",
@@ -75,17 +75,17 @@ class RecordingTarget:
     async def send_responses_headers(
         self,
         payload: Mapping[str, Any],
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         self.responses_payloads.append(dict(payload))
         if self.responses_status != 200:
-            return httpx.Response(
+            return httpx2.Response(
                 self.responses_status,
                 headers={
                     "content-type": "application/json",
                     "retry-after": "3",
                     "x-internal-openai": "must-not-forward",
                 },
-                request=httpx.Request("POST", "https://upstream.test/responses"),
+                request=httpx2.Request("POST", "https://upstream.test/responses"),
                 json={
                     "error": {
                         "message": "Responses quota exhausted",
@@ -124,7 +124,7 @@ class RecordingTarget:
                 },
             }
         )
-        return httpx.Response(
+        return httpx2.Response(
             200,
             headers={
                 "content-type": "application/json",
@@ -133,7 +133,7 @@ class RecordingTarget:
                 "x-ratelimit-remaining-requests": "8",
                 "x-internal-openai": "must-not-forward",
             },
-            request=httpx.Request("POST", "https://upstream.test/responses"),
+            request=httpx2.Request("POST", "https://upstream.test/responses"),
             json=body,
         )
 

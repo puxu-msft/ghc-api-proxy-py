@@ -1,6 +1,6 @@
 from collections.abc import AsyncIterator
 
-import httpx
+import httpx2
 from fastapi.testclient import TestClient
 
 from app.config.settings import AppSettings
@@ -9,7 +9,7 @@ from app.models.openai import ChatCompletionRequest
 from app.server.app_factory import create_app
 
 
-class Stream(httpx.AsyncByteStream):
+class Stream(httpx2.AsyncByteStream):
     async def __aiter__(self) -> AsyncIterator[bytes]:
         yield b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
         yield b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
@@ -17,10 +17,10 @@ class Stream(httpx.AsyncByteStream):
 
 
 class StubClient:
-    async def chat(self, request: ChatCompletionRequest) -> httpx.Response:
+    async def chat(self, request: ChatCompletionRequest) -> httpx2.Response:
         if request.stream:
-            return httpx.Response(200, stream=Stream())
-        return httpx.Response(
+            return httpx2.Response(200, stream=Stream())
+        return httpx2.Response(
             200,
             json={
                 "model": request.model,

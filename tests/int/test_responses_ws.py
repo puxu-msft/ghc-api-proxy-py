@@ -1,9 +1,9 @@
 from collections.abc import AsyncIterator
 from typing import Any
 
-import httpx
+import httpx2
 from fastapi.testclient import TestClient
-from httpx_ws import WebSocketNetworkError, WebSocketUpgradeError
+from httpx2.websockets import WebSocketNetworkError, WebSocketUpgradeError
 from starlette.websockets import WebSocketDisconnect
 
 from app.config.settings import AppSettings
@@ -49,9 +49,9 @@ class UpgradeFailingClient:
         frame: dict[str, Any],
     ) -> AsyncIterator[dict[str, Any]]:
         del frame
-        response = httpx.Response(
+        response = httpx2.Response(
             403,
-            request=httpx.Request("GET", "wss://upstream.test/responses"),
+            request=httpx2.Request("GET", "wss://upstream.test/responses"),
         )
         raise WebSocketUpgradeError(response)
         yield {}

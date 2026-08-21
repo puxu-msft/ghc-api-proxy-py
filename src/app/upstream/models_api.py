@@ -2,7 +2,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, cast
 
 import anyio
-import httpx
+import httpx2
 
 from app.ghc_client import fetch_models
 from app.models.common import ModelInfo
@@ -11,7 +11,7 @@ from app.models.common import ModelInfo
 class ModelCatalog:
     def __init__(
         self,
-        http_client: httpx.AsyncClient | None,
+        http_client: httpx2.AsyncClient | None,
         base_url: str,
         *,
         disabled_ids: set[str] | frozenset[str] = frozenset(),

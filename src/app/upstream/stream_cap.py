@@ -18,8 +18,8 @@ Two things make it work at the right moment, and getting either wrong produces a
 
 from typing import Any, Protocol, cast
 
-import httpx
-from httpcore import AsyncConnectionInterface, Origin, Request, Response
+import httpx2
+from httpcore2 import AsyncConnectionInterface, Origin, Request, Response
 
 
 class _PoolWithRequests(Protocol):
@@ -87,7 +87,7 @@ class StreamCappedConnection(AsyncConnectionInterface):
         return f"<StreamCappedConnection {self.info()}>"
 
 
-def cap_streams_per_connection(client: httpx.AsyncClient, max_streams: int) -> None:
+def cap_streams_per_connection(client: httpx2.AsyncClient, max_streams: int) -> None:
     """Make the client's pool refuse to put more than `max_streams` requests on one connection.
 
     Patches the live pool's `create_connection` rather than substituting a pool subclass, and that is the point: `httpx.AsyncHTTPTransport.__init__` builds its pool with ten-odd settings — `max_keepalive_connections`, `retries`, `socket_options`, `local_address`, `uds` among them — and a replacement pool has to reproduce every one of them. Anything forgotten is lost silently and stays lost as httpx gains settings. Wrapping the object httpx already configured keeps all of it, and works the same for `AsyncHTTPProxy` and `AsyncSOCKSProxy`, which are pools too and would otherwise need their own subclass each. That matters here: this client is built with `proxy=` when one is configured, and a cap that only knew about the plain pool would do nothing from the day a proxy was set.
@@ -102,7 +102,7 @@ def cap_streams_per_connection(client: httpx.AsyncClient, max_streams: int) -> N
     # Once per pool, not once per name that reaches it. The composition root deliberately gives every `NO_PROXY` rule the *same* direct transport, and that transport is usually `_transport` too, so a plain walk wraps one pool as many times as it is mentioned. The extra layers do not change the cap — the pool assigns each request to the outermost wrapper, so the inner ones count zero and only delegate — but they nest `create_connection` calls one deep per mention, and a legitimate `NO_PROXY` list long enough (measured: 1100 rules) raises `RecursionError` before any connection is attempted.
     #
     # Keyed by `id()` rather than put in a set, because identity is the property meant here and a set would spell it as equality. Transports have no `__eq__` today, so the two agree; a future httpx that gave them value equality *and* a matching `__hash__` would have a set fold two distinct pools into one and leave the second uncapped — silently, which is the failure this whole module is written against. (With `__eq__` alone the set would raise instead, which is at least loud.) Every transport is kept alive by `client` for the duration, so the ids cannot be reused underneath us.
-    pools_to_cap: dict[int, httpx.AsyncBaseTransport] = {}
+    pools_to_cap: dict[int, httpx2.AsyncBaseTransport] = {}
     for transport in (client._transport, *client._mounts.values()):
         if transport is not None:
             pools_to_cap.setdefault(id(transport), transport)
@@ -110,7 +110,7 @@ def cap_streams_per_connection(client: httpx.AsyncClient, max_streams: int) -> N
         _cap_one(transport, max_streams)
 
 
-def _cap_one(transport: httpx.AsyncBaseTransport, max_streams: int) -> None:
+def _cap_one(transport: httpx2.AsyncBaseTransport, max_streams: int) -> None:
     pool = getattr(transport, "_pool", None)
     if pool is None:
         raise TypeError(f"{type(transport).__name__} carries no connection pool to cap")

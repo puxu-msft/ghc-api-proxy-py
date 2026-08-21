@@ -1,7 +1,7 @@
 from collections.abc import AsyncIterator
 from typing import Any, Protocol
 
-import httpx
+import httpx2
 from fastapi.testclient import TestClient
 
 from app.config.settings import AppSettings
@@ -12,7 +12,7 @@ from app.pipeline.executor import PipelineResult, UpstreamResponseError
 from app.server.app_factory import create_app
 
 
-class BytesStream(httpx.AsyncByteStream):
+class BytesStream(httpx2.AsyncByteStream):
     async def __aiter__(self) -> AsyncIterator[bytes]:
         yield b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
 
@@ -37,9 +37,9 @@ class StubAnthropicClient:
             attempts=[Attempt(number=0, status_code=200)],
         )
         if self.streaming:
-            response = httpx.Response(200, stream=BytesStream())
+            response = httpx2.Response(200, stream=BytesStream())
         else:
-            response = httpx.Response(
+            response = httpx2.Response(
                 200,
                 json={
                     "id": "msg_1",
@@ -104,9 +104,9 @@ class FailingAnthropicClient:
             original_payload=request.model_dump(mode="json"),
             state=RequestState.FAILED,
         )
-        response = httpx.Response(
+        response = httpx2.Response(
             429,
-            request=httpx.Request("POST", "https://upstream.test/v1/messages"),
+            request=httpx2.Request("POST", "https://upstream.test/v1/messages"),
             json={"type": "error", "error": {"type": "rate_limit_error"}},
         )
         raise UpstreamResponseError(context, response)

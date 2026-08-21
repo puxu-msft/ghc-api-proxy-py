@@ -10,12 +10,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import httpcore
-import httpx
+import httpcore2
+import httpx2
 from anthropic import AsyncAnthropic
-from httpcore._async.http_proxy import AsyncForwardHTTPConnection, AsyncTunnelHTTPConnection
-from httpcore._async.interfaces import AsyncConnectionInterface
-from httpx._utils import get_environment_proxies
+from httpcore2._async.http_proxy import AsyncForwardHTTPConnection, AsyncTunnelHTTPConnection
+from httpcore2._async.interfaces import AsyncConnectionInterface
+from httpx2._utils import get_environment_proxies
 from openai import AsyncOpenAI
 
 from app.auth.providers import (
@@ -120,7 +120,7 @@ def transport_options(config: ProxyConfig) -> TransportOptions:
     )
 
 
-def build_http_client(config: ProxyConfig) -> httpx.AsyncClient:
+def build_http_client(config: ProxyConfig) -> httpx2.AsyncClient:
     """Build the outbound client, with the keep-alive the settings ask for.
 
     Socket options can only be given to a transport, and handing `AsyncClient` a transport is also how you switch off its own reading of `HTTP_PROXY` / `HTTPS_PROXY` — `allow_env_proxies` in `httpx/_client.py` is `trust_env and transport is None`. So the environment map is rebuilt here and mounted, because losing proxy support is exactly the kind of change that would not show up until someone behind a proxy could not reach upstream at all.
@@ -131,9 +131,9 @@ def build_http_client(config: ProxyConfig) -> httpx.AsyncClient:
     """
     options = transport_options(config)
 
-    def transport(proxy: str | None) -> httpx.AsyncHTTPTransport:
+    def transport(proxy: str | None) -> httpx2.AsyncHTTPTransport:
         # No `limits`. Pooling is httpx's to decide and always was; the previous code passed a `Limits` carrying only an expiry, which left the two connection caps at `None` and httpcore reads `None` as `sys.maxsize`. Naming one field of it had removed the caps httpx would otherwise have applied.
-        built = httpx.AsyncHTTPTransport(
+        built = httpx2.AsyncHTTPTransport(
             proxy=proxy,
             http2=options.http2,
             socket_options=options.socket_options,
@@ -144,7 +144,7 @@ def build_http_client(config: ProxyConfig) -> httpx.AsyncClient:
 
     direct = transport(None)
     _warn_about_socks(options)
-    client = httpx.AsyncClient(
+    client = httpx2.AsyncClient(
         transport=transport(options.proxy) if options.proxy is not None else direct,
         mounts=_proxy_mounts(options.proxy, transport, direct),
         http2=options.http2,
@@ -158,7 +158,7 @@ def build_http_client(config: ProxyConfig) -> httpx.AsyncClient:
 
 
 def _keep_proxy_connections_alive(
-    transport: httpx.AsyncHTTPTransport,
+    transport: httpx2.AsyncHTTPTransport,
     socket_options: tuple[tuple[int, int, int], ...],
 ) -> None:
     """Put the socket options back on the connections a proxy pool builds.
@@ -170,10 +170,10 @@ def _keep_proxy_connections_alive(
     `AsyncSOCKSProxy` is not helped: it has no `socket_options` parameter to forward. `_warn_about_socks` says so.
     """
     pool = getattr(transport, "_pool", None)
-    if not isinstance(pool, httpcore.AsyncHTTPProxy):
+    if not isinstance(pool, httpcore2.AsyncHTTPProxy):
         return
 
-    def create_connection(origin: httpcore.Origin) -> AsyncConnectionInterface:
+    def create_connection(origin: httpcore2.Origin) -> AsyncConnectionInterface:
         if origin.scheme == b"http":
             return AsyncForwardHTTPConnection(
                 proxy_origin=pool._proxy_url.origin,  # pyright: ignore[reportPrivateUsage]
@@ -229,7 +229,7 @@ def _origin_of(url: str) -> str:
 
     `is not None` rather than truthiness: httpx parses an explicit `:0` as the integer 0, and testing the port for truth would print it as though no port had been given.
     """
-    parsed = httpx.URL(url)
+    parsed = httpx2.URL(url)
     host = f"[{parsed.host}]" if ":" in parsed.host else parsed.host
     return f"{parsed.scheme}://{host}:{parsed.port}" if parsed.port is not None else f"{parsed.scheme}://{host}"
 
@@ -240,9 +240,9 @@ def _is_socks(proxy: str | None) -> bool:
 
 def _proxy_mounts(
     configured: str | None,
-    transport: Callable[[str | None], httpx.AsyncHTTPTransport],
-    direct: httpx.AsyncHTTPTransport,
-) -> dict[str, httpx.AsyncBaseTransport]:
+    transport: Callable[[str | None], httpx2.AsyncHTTPTransport],
+    direct: httpx2.AsyncHTTPTransport,
+) -> dict[str, httpx2.AsyncBaseTransport]:
     """The per-scheme proxies httpx would have read from the environment, as transports of ours.
 
     Empty when `proxy` is configured, which is what httpx does too: an explicit proxy is `all://` and the environment is not consulted. A `None` in the environment map is a `NO_PROXY` entry, and it maps to the one shared direct transport rather than being dropped — dropping it would send that host through whichever broader pattern matched next, and giving each rule a transport of its own would give each its own pool, multiplying the connection cap by the number of `NO_PROXY` rules.
@@ -265,7 +265,7 @@ class Chain:
     providers: ProviderRegistry
     translators: TranslatorRegistry
     subscribers: FrozenSubscribers[RequestContext]
-    http_client: httpx.AsyncClient
+    http_client: httpx2.AsyncClient
     rate_limiters: dict[str, RateLimiter] = field(default_factory=lambda: dict[str, RateLimiter]())
     # Who is in flight right now. Always maintained, whether or not anything renders it: the cost is one dict entry per request, and making it conditional would mean the footer shows an empty line for its first few seconds after being switched on.
     active_requests: ActiveRequestRegistry = field(default_factory=ActiveRequestRegistry)
@@ -317,7 +317,7 @@ def build_copilot_provider(
     name: str,
     config: ProxyConfig,
     *,
-    http_client: httpx.AsyncClient,
+    http_client: httpx2.AsyncClient,
     token_manager: CopilotTokenManager,
     interaction_id: str,
 ) -> GithubCopilotProvider:
@@ -356,7 +356,7 @@ def build_copilot_provider(
 def build_chain(
     config: ProxyConfig,
     *,
-    http_client: httpx.AsyncClient,
+    http_client: httpx2.AsyncClient,
     providers: dict[str, ModelProvider] | None = None,
     subscribers: SubscriberRegistry[RequestContext] | None = None,
     interaction_id: str = "interaction",

@@ -1,5 +1,5 @@
 import anyio
-import httpx
+import httpx2
 import pytest
 
 from app.ghc_client.tokens import CopilotTokenManager
@@ -29,11 +29,11 @@ class RefreshableTokenSource:
 
 @pytest.mark.asyncio
 async def test_copilot_token_exchange_preserves_raw_response() -> None:
-    requests: list[httpx.Request] = []
+    requests: list[httpx2.Request] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         requests.append(request)
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "token": "tid=copilot",
@@ -43,7 +43,7 @@ async def test_copilot_token_exchange_preserves_raw_response() -> None:
             },
         )
 
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     identity_headers = {
         "editor-version": "vscode/1.2.3",
         "editor-plugin-version": "copilot-chat/4.5.6",
@@ -75,16 +75,16 @@ async def test_copilot_token_exchange_preserves_raw_response() -> None:
 
 @pytest.mark.asyncio
 async def test_dynamic_token_headers_override_case_variant_identity_headers() -> None:
-    requests: list[httpx.Request] = []
+    requests: list[httpx2.Request] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         requests.append(request)
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={"token": "copilot", "expires_at": 5000, "refresh_in": 1500},
         )
 
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     manager = CopilotTokenManager(
         StaticTokenSource(),
         http_client,
@@ -108,13 +108,13 @@ async def test_dynamic_token_headers_override_case_variant_identity_headers() ->
 async def test_valid_copilot_token_is_cached() -> None:
     calls = 0
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         del request
         calls += 1
-        return httpx.Response(200, json={"token": "cached", "expires_at": 5000, "refresh_in": 1500})
+        return httpx2.Response(200, json={"token": "cached", "expires_at": 5000, "refresh_in": 1500})
 
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     manager = CopilotTokenManager(
         StaticTokenSource(),
         http_client,
@@ -133,14 +133,14 @@ async def test_valid_copilot_token_is_cached() -> None:
 async def test_concurrent_refresh_is_single_flight() -> None:
     calls = 0
 
-    async def handler(request: httpx.Request) -> httpx.Response:
+    async def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         del request
         calls += 1
         await anyio.sleep(0.01)
-        return httpx.Response(200, json={"token": "shared", "expires_at": 5000, "refresh_in": 1500})
+        return httpx2.Response(200, json={"token": "shared", "expires_at": 5000, "refresh_in": 1500})
 
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     manager = CopilotTokenManager(
         StaticTokenSource(),
         http_client,
@@ -170,18 +170,18 @@ async def test_exchange_retries_transient_server_error() -> None:
     async def no_sleep(delay: float) -> None:
         sleeps.append(delay)
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         del request
         calls += 1
         if calls == 1:
-            return httpx.Response(503, json={"error": "temporary"})
-        return httpx.Response(
+            return httpx2.Response(503, json={"error": "temporary"})
+        return httpx2.Response(
             200,
             json={"token": "recovered", "expires_at": 5000, "refresh_in": 1500},
         )
 
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     manager = CopilotTokenManager(
         StaticTokenSource(),
         http_client,
@@ -200,18 +200,18 @@ async def test_exchange_retries_transient_server_error() -> None:
 @pytest.mark.asyncio
 async def test_401_refreshes_github_token_before_retry() -> None:
     provider = RefreshableTokenSource()
-    seen_headers: list[httpx.Headers] = []
+    seen_headers: list[httpx2.Headers] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         seen_headers.append(request.headers)
         if len(seen_headers) == 1:
-            return httpx.Response(401, json={"error": "expired"})
-        return httpx.Response(
+            return httpx2.Response(401, json={"error": "expired"})
+        return httpx2.Response(
             200,
             json={"token": "copilot", "expires_at": 5000, "refresh_in": 1500},
         )
 
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     manager = CopilotTokenManager(
         provider,
         http_client,
@@ -247,7 +247,7 @@ async def test_401_refreshes_github_token_before_retry() -> None:
 
 
 def test_next_refresh_delay_uses_server_hint_with_safety_margin() -> None:
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(500)))
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(lambda _: httpx2.Response(500)))
     manager = CopilotTokenManager(
         StaticTokenSource(),
         http_client,
@@ -270,11 +270,11 @@ async def test_refresh_loop_survives_exhausted_refresh_failure() -> None:
         if calls >= 3:
             raise RuntimeError("stop")
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         del request
-        return httpx.Response(503, json={"error": "temporary"})
+        return httpx2.Response(503, json={"error": "temporary"})
 
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     manager = CopilotTokenManager(
         StaticTokenSource(),
         http_client,
@@ -301,8 +301,8 @@ async def test_refresh_loop_survives_invalid_success_payload() -> None:
         if sleeps >= 2:
             raise RuntimeError("stop")
 
-    http_client = httpx.AsyncClient(
-        transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"unexpected": True}))
+    http_client = httpx2.AsyncClient(
+        transport=httpx2.MockTransport(lambda _: httpx2.Response(200, json={"unexpected": True}))
     )
     manager = CopilotTokenManager(
         StaticTokenSource(),

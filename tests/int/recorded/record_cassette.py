@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 
 from app.config.schema import ProxyConfig
 from app.server.composition import build_chain, refresh_catalogs
@@ -53,7 +53,7 @@ async def record(name: str) -> None:
     body = SCENARIOS[name]
     config: ProxyConfig = pinned_config()
     recorder = RecordingTransport()
-    client = httpx.AsyncClient(transport=recorder, timeout=120)
+    client = httpx2.AsyncClient(transport=recorder, timeout=120)
     try:
         chain = build_chain(config, http_client=client)
         await refresh_catalogs(chain)

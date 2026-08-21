@@ -1,7 +1,7 @@
 from collections.abc import Coroutine, Mapping
 from typing import Any, cast
 
-import httpx
+import httpx2
 from anthropic import AsyncAnthropic
 from anthropic._types import Body as AnthropicBody
 from h2.exceptions import ProtocolError as H2ProtocolError
@@ -72,10 +72,10 @@ class GhcApiClient:
         *,
         stream: bool,
         extra_headers: Mapping[str, str] | None = None,
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         return await self._openai.post(
             path,
-            cast_to=httpx.Response,
+            cast_to=httpx2.Response,
             body=cast(OpenAIBody, dict(payload)),
             options={"headers": await self.request_headers(extra_headers=extra_headers)},
             stream=stream,
@@ -88,17 +88,17 @@ class GhcApiClient:
         *,
         stream: bool,
         extra_headers: Mapping[str, str] | None = None,
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         return await self._anthropic.post(
             path,
-            cast_to=httpx.Response,
+            cast_to=httpx2.Response,
             body=cast(AnthropicBody, dict(payload)),
             options={"headers": await self.request_headers(extra_headers=extra_headers)},
             stream=stream,
         )
 
     @staticmethod
-    async def _in_pipeline_terms(post: Coroutine[Any, Any, httpx.Response]) -> httpx.Response:
+    async def _in_pipeline_terms(post: Coroutine[Any, Any, httpx2.Response]) -> httpx2.Response:
         """Await one SDK call, raising the pipeline's error for an upstream failure.
 
         Applied per send method rather than inside `_post_*` because `send_responses_headers`
@@ -119,7 +119,7 @@ class GhcApiClient:
         *,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         return await self._in_pipeline_terms(
             self._post_openai(
                 "/chat/completions",
@@ -135,7 +135,7 @@ class GhcApiClient:
         *,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         return await self._in_pipeline_terms(
             self._post_anthropic(
                 "/v1/messages",
@@ -148,7 +148,7 @@ class GhcApiClient:
     async def send_anthropic_count_tokens(
         self,
         payload: Mapping[str, Any],
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         return await self._in_pipeline_terms(
             self._post_anthropic("/v1/messages/count_tokens", payload, stream=False)
         )
@@ -159,7 +159,7 @@ class GhcApiClient:
         *,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         return await self._in_pipeline_terms(
             self._post_openai(
                 "/responses",
@@ -172,7 +172,7 @@ class GhcApiClient:
     async def send_responses_headers(
         self,
         payload: Mapping[str, Any],
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         """A Responses request whose error status is returned rather than raised.
 
         The asymmetry with the other methods is deliberate: the caller reads the error headers.
@@ -182,7 +182,7 @@ class GhcApiClient:
             return await self._post_openai("/responses", payload, stream=True)
         except OpenAIAPIStatusError as error:
             return error.response
-        except (httpx.TransportError, OpenAIAPIConnectionError, H2ProtocolError) as error:
+        except (httpx2.TransportError, OpenAIAPIConnectionError, H2ProtocolError) as error:
             # `H2ProtocolError` is named here because it is not an httpx error and nothing wraps it: httpcore guards only the socket read, so a GOAWAY arriving in the same read as the frames after it raises straight through. Without this it would leave as an unhandled exception and never reach the classifier at all.
             if is_responses_headers_pending_transport_error(error):
                 raise ResponsesHeadersPendingTransportError(error) from error
@@ -191,7 +191,7 @@ class GhcApiClient:
     async def send_embeddings(
         self,
         payload: Mapping[str, Any],
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         return await self._in_pipeline_terms(
             self._post_openai("/embeddings", payload, stream=False)
         )

@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
-import httpx
+import httpx2
 import orjson
 import pytest
 from fastapi.testclient import TestClient
@@ -37,7 +37,7 @@ class _Chunk:
     consumed: asyncio.Event = field(default_factory=asyncio.Event)
 
 
-class ControlledResponsesStream(httpx.AsyncByteStream):
+class ControlledResponsesStream(httpx2.AsyncByteStream):
     def __init__(self, *, checkpoint_close: bool = False) -> None:
         self._queue = asyncio.Queue[_Chunk | None]()
         self.closed = False
@@ -70,7 +70,7 @@ class ControlledResponsesStream(httpx.AsyncByteStream):
         self.close_finished.set()
 
 
-class StaticResponsesStream(httpx.AsyncByteStream):
+class StaticResponsesStream(httpx2.AsyncByteStream):
     def __init__(self, chunks: tuple[bytes, ...]) -> None:
         self._chunks = chunks
         self.closed = False
@@ -85,7 +85,7 @@ class StaticResponsesStream(httpx.AsyncByteStream):
 
 @dataclass(slots=True)
 class RecordingTarget:
-    stream: httpx.AsyncByteStream
+    stream: httpx2.AsyncByteStream
     called: asyncio.Event = field(default_factory=asyncio.Event)
     responses_payloads: list[dict[str, Any]] = field(
         default_factory=lambda: list[dict[str, Any]]()
@@ -97,17 +97,17 @@ class RecordingTarget:
         *,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         del payload, stream, extra_headers
         raise AssertionError("Responses-only model must not use Messages upstream")
 
     async def send_responses_headers(
         self,
         payload: Mapping[str, Any],
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         self.responses_payloads.append(dict(payload))
         self.called.set()
-        return httpx.Response(
+        return httpx2.Response(
             200,
             headers={
                 "content-type": "text/event-stream",
@@ -117,7 +117,7 @@ class RecordingTarget:
                 "x-internal-openai": "must-not-forward",
                 "transfer-encoding": "chunked",
             },
-            request=httpx.Request("POST", "https://upstream.test/responses"),
+            request=httpx2.Request("POST", "https://upstream.test/responses"),
             stream=self.stream,
         )
 
@@ -222,7 +222,7 @@ class Harness:
 
 
 def _harness(
-    stream: httpx.AsyncByteStream,
+    stream: httpx2.AsyncByteStream,
     *,
     checkpoint_finalize: bool = False,
     route_upstream_type: Literal["copilot", "generic"] = "copilot",
@@ -1082,14 +1082,15 @@ async def test_prefetch_disconnect_waits_for_checkpoint_cleanup_after_recancella
     )
     await asyncio.wait_for(harness.target.called.wait(), timeout=1)
 
+    # The upstream close comes first, and that is a property of httpx2 rather than of this route: `Response.aiter_raw` releases the response from a `finally`, so tearing down the read chain closes it inline. Under httpx 0.28 the same `aclose()` ran after the loop instead, which left the release to generator finalisation and let the observer finalize before it. Nothing here changed to move it, and the socket-level effect is the same either way — only the point where a checkpoint can park is different, which is exactly what this test parks on.
     disconnect.set()
-    await asyncio.wait_for(harness.observer.finalize_started.wait(), timeout=1)
+    await asyncio.wait_for(upstream.close_started.wait(), timeout=1)
     app_task.cancel()
+    upstream.allow_close.set()
+    await asyncio.wait_for(harness.observer.finalize_started.wait(), timeout=1)
     harness.observer.allow_finalize.set()
     await asyncio.wait_for(harness.history.finalize_started.wait(), timeout=1)
     harness.history.allow_finalize.set()
-    await asyncio.wait_for(upstream.close_started.wait(), timeout=1)
-    upstream.allow_close.set()
 
     with pytest.raises(asyncio.CancelledError):
         await app_task

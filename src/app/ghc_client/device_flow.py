@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import anyio
-import httpx
+import httpx2
 
 GITHUB_CLIENT_ID = "Iv1.b507a08c87ecfe98"
 DEVICE_CODE_URL = "https://github.com/login/device/code"
@@ -27,7 +27,7 @@ class DeviceCode:
 class DeviceFlowClient:
     def __init__(
         self,
-        http_client: httpx.AsyncClient,
+        http_client: httpx2.AsyncClient,
         *,
         sleep: Callable[[float], Awaitable[None]] = anyio.sleep,
         monotonic: Callable[[], float] = time.monotonic,

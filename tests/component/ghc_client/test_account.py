@@ -1,4 +1,4 @@
-import httpx
+import httpx2
 import pytest
 
 from app.ghc_client.account import GitHubAccountClient, infer_account_type
@@ -23,14 +23,14 @@ def test_infer_account_type(payload: dict[str, object], expected: str | None) ->
 async def test_github_client_gets_user_and_usage_with_token_headers() -> None:
     paths: list[str] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         paths.append(request.url.path)
         assert request.headers["authorization"] == "token ghu_test"
         if request.url.path == "/user":
-            return httpx.Response(200, json={"login": "octocat", "future": True})
-        return httpx.Response(200, json={"copilot_plan": "business", "future": True})
+            return httpx2.Response(200, json={"login": "octocat", "future": True})
+        return httpx2.Response(200, json={"copilot_plan": "business", "future": True})
 
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     client = GitHubAccountClient(http_client)
     try:
         user = await client.get_user("ghu_test")
@@ -45,9 +45,9 @@ async def test_github_client_gets_user_and_usage_with_token_headers() -> None:
 
 @pytest.mark.asyncio
 async def test_copilot_usage_uses_internal_api_version() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         assert request.headers["x-github-api-version"] == "2025-04-01"
-        return httpx.Response(200, json={"copilot_plan": "individual"})
+        return httpx2.Response(200, json={"copilot_plan": "individual"})
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as http_client:
         await GitHubAccountClient(http_client).get_copilot_usage("ghu")

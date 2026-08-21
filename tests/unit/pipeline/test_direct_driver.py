@@ -1,6 +1,6 @@
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 
 from app.model_provider import (
@@ -74,15 +74,15 @@ class FakeProvider:
         model_id: str,
         stream: bool = False,
         extra_headers: Any = None,
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         self.sent.append((endpoint, dict(payload)))
         self.sent_headers.append(extra_headers)
-        outcome = self._responses.pop(0) if self._responses else httpx.Response(200)
+        outcome = self._responses.pop(0) if self._responses else httpx2.Response(200)
         if isinstance(outcome, BaseException):
             raise outcome
         return outcome
 
-    async def count_tokens(self, payload: Any, *, model_id: str) -> httpx.Response:
+    async def count_tokens(self, payload: Any, *, model_id: str) -> httpx2.Response:
         # Present so the fake really satisfies the protocol. Nothing here counts tokens, and a
         # silent stub would let a test think it had.
         raise NotImplementedError("this fake does not count tokens")
@@ -219,7 +219,7 @@ async def test_subscriber_edit_reaches_the_sent_payload() -> None:
 
 @pytest.mark.asyncio
 async def test_retryable_upstream_error_is_attempted_again() -> None:
-    provider = FakeProvider(responses=[UpstreamError("boom", status_code=502), httpx.Response(200)])
+    provider = FakeProvider(responses=[UpstreamError("boom", status_code=502), httpx2.Response(200)])
     outcome = await driver(provider).run(context())
     assert outcome.succeeded is True
     assert outcome.attempts == 2
@@ -228,7 +228,7 @@ async def test_retryable_upstream_error_is_attempted_again() -> None:
 
 @pytest.mark.asyncio
 async def test_abort_stops_without_another_attempt() -> None:
-    provider = FakeProvider(responses=[PipelineAbort("no"), httpx.Response(200)])
+    provider = FakeProvider(responses=[PipelineAbort("no"), httpx2.Response(200)])
     outcome = await driver(provider).run(context())
     assert outcome.succeeded is False
     assert outcome.attempts == 1
@@ -239,7 +239,7 @@ async def test_abort_stops_without_another_attempt() -> None:
 @pytest.mark.asyncio
 async def test_unknown_exception_aborts_rather_than_retrying() -> None:
     # A subscriber bug must not spend the retry budget on a defect.
-    provider = FakeProvider(responses=[KeyError("bug"), httpx.Response(200)])
+    provider = FakeProvider(responses=[KeyError("bug"), httpx2.Response(200)])
     outcome = await driver(provider).run(context())
     assert outcome.succeeded is False
     assert outcome.attempts == 1
@@ -323,7 +323,7 @@ async def test_named_strategies_bound_each_reason_separately() -> None:
     from app.pipeline.retry import RetryLedger
 
     provider = FakeProvider(
-        responses=[UpstreamError("expired", status_code=401), httpx.Response(200)]
+        responses=[UpstreamError("expired", status_code=401), httpx2.Response(200)]
     )
     ledger = RetryLedger(UpstreamRequestRetryConfig())
     frozen = SubscriberRegistry[RequestContext]().freeze()
@@ -345,7 +345,7 @@ async def test_named_strategies_allow_a_funded_reason() -> None:
     from app.pipeline.retry import RetryLedger
 
     provider = FakeProvider(
-        responses=[UpstreamError("gateway", status_code=503), httpx.Response(200)]
+        responses=[UpstreamError("gateway", status_code=503), httpx2.Response(200)]
     )
     driver_under_test = AnthropicMessagesDriver(
         provider,

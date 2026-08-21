@@ -7,8 +7,8 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
-import httpcore
-import httpx
+import httpcore2
+import httpx2
 import pytest
 
 from app.config.schema import ProxyConfig
@@ -16,7 +16,7 @@ from app.server.composition import build_http_client, transport_options
 from app.upstream.stream_cap import StreamCappedConnection, cap_streams_per_connection
 
 
-class FakeInner(httpcore.AsyncConnectionInterface):
+class FakeInner(httpcore2.AsyncConnectionInterface):
     """Whatever httpcore would have created, reduced to the two answers the wrapper reads."""
 
     def __init__(self, *, available: bool = True) -> None:
@@ -25,7 +25,7 @@ class FakeInner(httpcore.AsyncConnectionInterface):
     def is_available(self) -> bool:
         return self.available
 
-    def can_handle_request(self, origin: httpcore.Origin) -> bool:
+    def can_handle_request(self, origin: httpcore2.Origin) -> bool:
         return True
 
     def has_expired(self) -> bool:
@@ -71,11 +71,11 @@ def test_httpcore_still_exposes_the_bookkeeping_the_cap_counts() -> None:
 
     Nothing else notices: `assigned_request_count()` would return 0 for every connection, `is_available()` would answer True forever, and every request would go back to sharing one connection — with no exception, no log line, and a config key still claiming the protection is on. httpcore's CHANGELOG has never mentioned its pool internals, including in the release that rewrote them, so an upgrade will not tell you either. This test is the notification.
     """
-    pool = httpcore.AsyncConnectionPool()
+    pool = httpcore2.AsyncConnectionPool()
     assert isinstance(pool._requests, list), "httpcore.AsyncConnectionPool no longer keeps `_requests`"
 
     # The element type is only reachable through the module; the implementation deliberately does not import it, but a test may name it to assert its shape.
-    from httpcore._async.connection_pool import AsyncPoolRequest
+    from httpcore2._async.connection_pool import AsyncPoolRequest
 
     assert hasattr(AsyncPoolRequest(None), "connection"), (  # pyright: ignore[reportArgumentType]
         "httpcore pool requests no longer carry `.connection`"
@@ -129,9 +129,9 @@ def test_max_concurrent_requests_answers_rather_than_going_missing() -> None:
 
 
 def test_capping_wraps_what_the_pool_creates() -> None:
-    client = httpx.AsyncClient(http2=True)
+    client = httpx2.AsyncClient(http2=True)
     cap_streams_per_connection(client, 2)
-    created = client._transport._pool.create_connection(httpcore.Origin(b"https", b"example.invalid", 443))  # pyright: ignore[reportAttributeAccessIssue]
+    created = client._transport._pool.create_connection(httpcore2.Origin(b"https", b"example.invalid", 443))  # pyright: ignore[reportAttributeAccessIssue]
     assert isinstance(created, StreamCappedConnection)
 
 
@@ -140,9 +140,9 @@ def test_capping_reaches_the_proxy_pool_too() -> None:
 
     Patching the live object rather than substituting a pool subclass is what makes this work without a second implementation — and without it the cap would do nothing from the day a proxy was configured, which is exactly the kind of gap nobody goes looking for.
     """
-    client = httpx.AsyncClient(http2=True, proxy="http://127.0.0.1:1080")
+    client = httpx2.AsyncClient(http2=True, proxy="http://127.0.0.1:1080")
     cap_streams_per_connection(client, 1)
-    created = client._transport._pool.create_connection(httpcore.Origin(b"https", b"example.invalid", 443))  # pyright: ignore[reportAttributeAccessIssue]
+    created = client._transport._pool.create_connection(httpcore2.Origin(b"https", b"example.invalid", 443))  # pyright: ignore[reportAttributeAccessIssue]
     assert isinstance(created, StreamCappedConnection)
 
 
@@ -151,7 +151,7 @@ def _clear_proxy_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(name, raising=False)
 
 
-def _direct_mounts(client: httpx.AsyncClient) -> list[httpx.AsyncBaseTransport]:
+def _direct_mounts(client: httpx2.AsyncClient) -> list[httpx2.AsyncBaseTransport]:
     return [
         transport
         for transport in client._mounts.values()  # pyright: ignore[reportPrivateUsage]
@@ -159,13 +159,13 @@ def _direct_mounts(client: httpx.AsyncClient) -> list[httpx.AsyncBaseTransport]:
     ]
 
 
-def _connection_for(transport: httpx.AsyncBaseTransport, host: bytes) -> Any:
+def _connection_for(transport: httpx2.AsyncBaseTransport, host: bytes) -> Any:
     """What this transport's pool would build for an origin, without connecting.
 
     Typed `Any` deliberately: httpcore's pool attributes are untyped, so reading them at each call site spreads three unknown-type diagnostics per site instead of one place that says "this is third-party private state".
     """
     pool: Any = cast(Any, transport)._pool  # pyright: ignore[reportPrivateUsage]
-    return pool.create_connection(httpcore.Origin(b"https", host, 443))
+    return pool.create_connection(httpcore2.Origin(b"https", host, 443))
 
 
 def test_one_pool_is_capped_once_however_many_mounts_reach_it(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -207,7 +207,7 @@ def test_a_long_no_proxy_list_still_opens_a_connection(monkeypatch: pytest.Monke
 
 
 def test_a_transport_with_no_pool_is_refused_rather_than_silently_uncapped() -> None:
-    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200)))
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(lambda _: httpx2.Response(200)))
     with pytest.raises(TypeError, match="no connection pool"):
         cap_streams_per_connection(client, 2)
 
@@ -215,7 +215,7 @@ def test_a_transport_with_no_pool_is_refused_rather_than_silently_uncapped() -> 
 @pytest.mark.parametrize("value", [0, -1])
 def test_a_cap_below_one_is_refused(value: int) -> None:
     """0 means "off" to the config and never reaches here; arriving anyway is a wiring mistake, not a request to disable."""
-    client = httpx.AsyncClient()
+    client = httpx2.AsyncClient()
     with pytest.raises(ValueError, match=">= 1"):
         cap_streams_per_connection(client, value)
 
@@ -234,14 +234,14 @@ def test_the_configured_cap_reaches_the_client() -> None:
     config = ProxyConfig.model_validate({"upstream_transport": {"max_streams_per_connection": 2}})
     assert transport_options(config).max_streams_per_connection == 2
     client = build_http_client(config)
-    created = client._transport._pool.create_connection(httpcore.Origin(b"https", b"example.invalid", 443))  # pyright: ignore[reportAttributeAccessIssue]
+    created = client._transport._pool.create_connection(httpcore2.Origin(b"https", b"example.invalid", 443))  # pyright: ignore[reportAttributeAccessIssue]
     assert isinstance(created, StreamCappedConnection)
 
 
 def test_the_default_client_is_left_alone() -> None:
     """Off must mean untouched, not capped at some large number: an uncapped pool is httpx's own behaviour and should stay literally that."""
     created = build_http_client(ProxyConfig())._transport._pool.create_connection(  # pyright: ignore[reportAttributeAccessIssue]
-        httpcore.Origin(b"https", b"example.invalid", 443)
+        httpcore2.Origin(b"https", b"example.invalid", 443)
     )
     assert not isinstance(created, StreamCappedConnection)
 
@@ -251,7 +251,7 @@ def test_the_default_client_is_left_alone() -> None:
 # --------------------------------------------------------------------------------------
 
 
-class HeldOpenInner(httpcore.AsyncConnectionInterface):
+class HeldOpenInner(httpcore2.AsyncConnectionInterface):
     """A connection that answers, and whose response body never ends until released.
 
     Only the leaf is faked. The pool doing the assigning, the `_requests` list being counted, and the wrapper under test are all the real ones — which is the point: the predicate tests above prove the wrapper answers correctly, and only this proves httpcore acts on the answer.
@@ -260,17 +260,17 @@ class HeldOpenInner(httpcore.AsyncConnectionInterface):
     def __init__(self, release: asyncio.Event) -> None:
         self._release = release
 
-    async def handle_async_request(self, request: httpcore.Request) -> httpcore.Response:
+    async def handle_async_request(self, request: httpcore2.Request) -> httpcore2.Response:
         async def body() -> AsyncIterator[bytes]:
             await self._release.wait()
             yield b"done"
 
-        return httpcore.Response(200, content=body())
+        return httpcore2.Response(200, content=body())
 
     def is_available(self) -> bool:
         return True
 
-    def can_handle_request(self, origin: httpcore.Origin) -> bool:
+    def can_handle_request(self, origin: httpcore2.Origin) -> bool:
         return True
 
     def has_expired(self) -> bool:
@@ -298,9 +298,9 @@ async def test_the_real_pool_opens_another_connection_once_one_is_full(cap: int,
     """
     release = asyncio.Event()
     created: list[StreamCappedConnection] = []
-    pool = httpcore.AsyncConnectionPool()
+    pool = httpcore2.AsyncConnectionPool()
 
-    def create_connection(origin: httpcore.Origin) -> httpcore.AsyncConnectionInterface:
+    def create_connection(origin: httpcore2.Origin) -> httpcore2.AsyncConnectionInterface:
         connection = StreamCappedConnection(HeldOpenInner(release), pool, cap)  # pyright: ignore[reportArgumentType]
         created.append(connection)
         return connection
@@ -309,7 +309,7 @@ async def test_the_real_pool_opens_another_connection_once_one_is_full(cap: int,
 
     async def issue() -> None:
         response = await pool.handle_async_request(
-            httpcore.Request("GET", "https://example.invalid/", extensions={"timeout": {}})
+            httpcore2.Request("GET", "https://example.invalid/", extensions={"timeout": {}})
         )
         await response.aread()
         await response.aclose()

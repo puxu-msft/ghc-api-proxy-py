@@ -16,7 +16,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-import httpx
+import httpx2
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 
@@ -46,12 +46,12 @@ def cassette_path(name: str) -> Path:
     return CASSETTE_DIR / f"{name}.json"
 
 
-def replay_client(name: str) -> httpx.AsyncClient:
+def replay_client(name: str) -> httpx2.AsyncClient:
     """An httpx client that answers from the named cassette and never reaches the network."""
-    return httpx.AsyncClient(transport=ReplayTransport(Cassette.read(cassette_path(name))))
+    return httpx2.AsyncClient(transport=ReplayTransport(Cassette.read(cassette_path(name))))
 
 
-def recorded_provider(name: str, http_client: httpx.AsyncClient) -> GithubCopilotProvider:
+def recorded_provider(name: str, http_client: httpx2.AsyncClient) -> GithubCopilotProvider:
     """A real provider whose upstream is the recording.
 
     Built the way `composition.build_copilot_provider` builds it, minus the credential: the token

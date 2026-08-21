@@ -1,4 +1,4 @@
-import httpx
+import httpx2
 from h2.exceptions import ProtocolError as H2ProtocolError
 from openai import APIConnectionError as OpenAIAPIConnectionError
 
@@ -6,10 +6,10 @@ from openai import APIConnectionError as OpenAIAPIConnectionError
 #
 # `RemoteProtocolError` covers the connection being torn out from under a request — including an upstream GOAWAY, which httpcore reports this way for every stream that still needs to read. Added 2026-08-20 after four in-flight streams died on one graceful-shutdown GOAWAY. Cost is not a reason to leave it out: an upstream request that can no longer be used is already spent, and declining to retry does not refund it.
 _RESPONSES_PRE_HEADERS_HTTPX_ERRORS = (
-    httpx.ConnectError,
-    httpx.ConnectTimeout,
-    httpx.PoolTimeout,
-    httpx.RemoteProtocolError,
+    httpx2.ConnectError,
+    httpx2.ConnectTimeout,
+    httpx2.PoolTimeout,
+    httpx2.RemoteProtocolError,
 )
 
 
@@ -37,7 +37,7 @@ def is_responses_headers_pending_transport_error(error: Exception) -> bool:
     if cause is None:
         return False
     while cause is not None:
-        if isinstance(cause, httpx.TransportError | H2ProtocolError):
+        if isinstance(cause, httpx2.TransportError | H2ProtocolError):
             return isinstance(cause, (*_RESPONSES_PRE_HEADERS_HTTPX_ERRORS, H2ProtocolError))
         cause = cause.__cause__
     return False

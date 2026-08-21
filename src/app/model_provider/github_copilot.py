@@ -3,7 +3,7 @@
 from collections.abc import Mapping
 from typing import Any, cast
 
-import httpx
+import httpx2
 
 from app.config.schema import ModelProviderConfig
 from app.ghc_client import GhcApiClient, fetch_models
@@ -46,7 +46,7 @@ class GithubCopilotProvider:
         client: GhcApiClient,
         config: ModelProviderConfig,
         *,
-        http_client: httpx.AsyncClient,
+        http_client: httpx2.AsyncClient,
         base_url: str,
         headers: Mapping[str, str] | None = None,
     ) -> None:
@@ -142,7 +142,7 @@ class GithubCopilotProvider:
         model_id: str,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         descriptor = self.describe(model_id)
         if descriptor is None:
             raise UnknownModel(self._name, model_id)
@@ -175,7 +175,7 @@ class GithubCopilotProvider:
         payload: Mapping[str, Any],
         *,
         model_id: str,
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         """Anthropic token counting.
 
         The spec groups it with the Messages driver rather than giving it its own routing row.

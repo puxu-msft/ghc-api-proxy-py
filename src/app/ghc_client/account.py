@@ -1,6 +1,6 @@
 from collections.abc import Mapping
 
-import httpx
+import httpx2
 
 from app.ghc_client.config import GITHUB_AUTH_BASE_URL
 
@@ -29,7 +29,7 @@ class GitHubAccountClient:
 
     def __init__(
         self,
-        http_client: httpx.AsyncClient,
+        http_client: httpx2.AsyncClient,
         *,
         auth_base_url: str = GITHUB_AUTH_BASE_URL,
     ) -> None:

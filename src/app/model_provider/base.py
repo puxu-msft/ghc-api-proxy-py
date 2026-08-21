@@ -8,7 +8,7 @@ It does not translate formats, resolve aliases, orchestrate retries or decide ro
 from collections.abc import Mapping
 from typing import Any, Protocol
 
-import httpx
+import httpx2
 
 from app.model_provider.types import ModelDescriptor, ModelEndpoint
 
@@ -39,7 +39,7 @@ class ModelProvider(Protocol):
         model_id: str,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         """Send one request to one endpoint.
 
         Raises before touching the network when the model does not advertise the endpoint.
@@ -51,7 +51,7 @@ class ModelProvider(Protocol):
         payload: Mapping[str, Any],
         *,
         model_id: str,
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         """Ask upstream how many tokens an Anthropic Messages body comes to.
 
         On the protocol rather than on one implementation because the spec's

@@ -1,7 +1,7 @@
 from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 
 from app.anthropic.client import AnthropicClient
@@ -16,7 +16,7 @@ from app.pipeline.translation_driver.reasoning_carrier import (
 from app.transform.model_resolver import ModelResolver
 
 
-class RawStream(httpx.AsyncByteStream):
+class RawStream(httpx2.AsyncByteStream):
     async def __aiter__(self) -> AsyncIterator[bytes]:
         yield b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
 
@@ -32,10 +32,10 @@ class StubTarget:
         *,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         self.payload = dict(payload)
         self.headers = extra_headers
-        return httpx.Response(200, stream=RawStream())
+        return httpx2.Response(200, stream=RawStream())
 
 
 @pytest.mark.asyncio

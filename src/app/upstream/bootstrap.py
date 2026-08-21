@@ -5,7 +5,7 @@ from typing import Literal, Protocol, cast
 from uuid import uuid4
 
 import anyio
-import httpx
+import httpx2
 
 from app.anthropic.client import AnthropicClient
 from app.anthropic.thinking.quarantine import ThinkingQuarantineStore
@@ -54,7 +54,7 @@ class RefreshableModelCatalog(Protocol):
 
 @dataclass(slots=True)
 class UpstreamServices:
-    http_client: httpx.AsyncClient
+    http_client: httpx2.AsyncClient
     sdk_clients: SDKClients
     target: UpstreamTarget
     model_catalog: ModelCatalog
@@ -92,7 +92,7 @@ async def run_model_refresh_loop(
 async def initialize_upstream_services(
     runtime: RuntimeState,
     *,
-    http_client: httpx.AsyncClient | None = None,
+    http_client: httpx2.AsyncClient | None = None,
 ) -> UpstreamServices:
     settings = runtime.settings
     if runtime.tokenization_state is None:

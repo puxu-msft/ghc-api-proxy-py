@@ -1,4 +1,4 @@
-import httpx
+import httpx2
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 
@@ -24,7 +24,7 @@ router = APIRouter(tags=["openai"])
 
 
 async def _response(
-    upstream: httpx.Response,
+    upstream: httpx2.Response,
     *,
     stream: bool = False,
     runtime: RuntimeState,

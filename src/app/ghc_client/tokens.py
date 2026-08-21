@@ -5,7 +5,7 @@ from types import MappingProxyType
 from typing import Any, Protocol
 
 import anyio
-import httpx
+import httpx2
 
 from app.ghc_client.config import GITHUB_AUTH_BASE_URL
 
@@ -42,7 +42,7 @@ class CopilotTokenManager:
     def __init__(
         self,
         github_tokens: GitHubTokenSource,
-        http_client: httpx.AsyncClient,
+        http_client: httpx2.AsyncClient,
         *,
         auth_base_url: str = GITHUB_AUTH_BASE_URL,
         clock: Callable[[], float] = time.time,
@@ -125,7 +125,7 @@ class CopilotTokenManager:
         for attempt in range(self._max_exchange_attempts):
             github_token = await self._github_tokens.get_token()
             try:
-                headers = httpx.Headers(self._identity_headers)
+                headers = httpx2.Headers(self._identity_headers)
                 headers.update(
                     {
                         "Accept": "application/json",
@@ -139,11 +139,11 @@ class CopilotTokenManager:
                 response.raise_for_status()
                 raw: dict[str, Any] = response.json()
                 return raw
-            except (httpx.HTTPError, OSError) as error:
+            except (httpx2.HTTPError, OSError) as error:
                 last_error = error
                 status = (
                     error.response.status_code
-                    if isinstance(error, httpx.HTTPStatusError)
+                    if isinstance(error, httpx2.HTTPStatusError)
                     else None
                 )
                 if status == 401:

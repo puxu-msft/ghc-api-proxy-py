@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
-import httpx
+import httpx2
 import openai
 import orjson
 import pytest
@@ -43,7 +43,7 @@ from app.upstream.base import (
 from app.upstream.models_api import ModelCatalog
 
 
-class Stream(httpx.AsyncByteStream):
+class Stream(httpx2.AsyncByteStream):
     async def __aiter__(self) -> AsyncIterator[bytes]:
         yield b"data: event\n\n"
 
@@ -58,11 +58,11 @@ class Target:
         *,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         del payload, extra_headers
-        request = httpx.Request("POST", "https://upstream.test/v1/messages")
+        request = httpx2.Request("POST", "https://upstream.test/v1/messages")
         if self.status_code == 200 and not stream:
-            return httpx.Response(
+            return httpx2.Response(
                 self.status_code,
                 request=request,
                 json={
@@ -75,7 +75,7 @@ class Target:
                     "usage": {"input_tokens": 1, "output_tokens": 1},
                 },
             )
-        return httpx.Response(
+        return httpx2.Response(
             self.status_code,
             request=request,
             stream=Stream(),
@@ -93,19 +93,19 @@ class ResponsesTarget:
         *,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         del payload, stream, extra_headers
         raise AssertionError("Responses route must not call the Messages transport")
 
     async def send_responses_headers(
         self,
         payload: Mapping[str, Any],
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         del payload
         self.calls += 1
-        return httpx.Response(
+        return httpx2.Response(
             200,
-            request=httpx.Request("POST", "https://upstream.test/responses"),
+            request=httpx2.Request("POST", "https://upstream.test/responses"),
             json=self.response_body,
         )
 
@@ -114,17 +114,17 @@ class RetryingResponsesTarget(ResponsesTarget):
     async def send_responses_headers(
         self,
         payload: Mapping[str, Any],
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         del payload
         self.calls += 1
-        request = httpx.Request("POST", "https://upstream.test/responses")
+        request = httpx2.Request("POST", "https://upstream.test/responses")
         if self.calls == 1:
-            return httpx.Response(
+            return httpx2.Response(
                 429,
                 request=request,
                 json={"error": {"message": "retry", "code": "rate_limit"}},
             )
-        return httpx.Response(200, request=request, json=self.response_body)
+        return httpx2.Response(200, request=request, json=self.response_body)
 
 
 class FailingResponsesTarget(ResponsesTarget):
@@ -139,7 +139,7 @@ class FailingResponsesTarget(ResponsesTarget):
     async def send_responses_headers(
         self,
         payload: Mapping[str, Any],
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         del payload
         self.calls += 1
         if self.failures:
@@ -147,9 +147,9 @@ class FailingResponsesTarget(ResponsesTarget):
             if is_responses_headers_pending_transport_error(error):
                 raise ResponsesHeadersPendingTransportError(error) from error
             raise error
-        return httpx.Response(
+        return httpx2.Response(
             200,
-            request=httpx.Request("POST", "https://upstream.test/responses"),
+            request=httpx2.Request("POST", "https://upstream.test/responses"),
             json=self.response_body,
         )
 
@@ -165,7 +165,7 @@ class FailingMessagesTarget:
         *,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         del payload, stream, extra_headers
         self.calls += 1
         raise self.failure
@@ -414,9 +414,9 @@ class RecordingLimiter(AdaptiveRateLimiter):
         super().report_success()
 
 
-class FailingBodyStream(httpx.AsyncByteStream):
+class FailingBodyStream(httpx2.AsyncByteStream):
     async def __aiter__(self) -> AsyncIterator[bytes]:
-        raise httpx.ReadError("body read failed")
+        raise httpx2.ReadError("body read failed")
         yield b""  # pragma: no cover
 
 
@@ -427,11 +427,11 @@ class FailingBodyTarget:
         *,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         del payload, stream, extra_headers
-        return httpx.Response(
+        return httpx2.Response(
             200,
-            request=httpx.Request("POST", "https://upstream.test/v1/messages"),
+            request=httpx2.Request("POST", "https://upstream.test/v1/messages"),
             stream=FailingBodyStream(),
         )
 
@@ -1186,10 +1186,10 @@ async def test_responses_transport_failure_retries_once_before_headers() -> None
     history = RecordingHistory()
     observer = RecordingObserver()
     pre_send = RecordingPreSendHook()
-    request = httpx.Request("POST", "https://upstream.test/responses")
+    request = httpx2.Request("POST", "https://upstream.test/responses")
     target = FailingResponsesTarget(
         _responses_body(),
-        [httpx.ConnectError("connection failed", request=request)],
+        [httpx2.ConnectError("connection failed", request=request)],
     )
     client = _responses_client(
         target,
@@ -1230,12 +1230,12 @@ async def test_responses_connect_failures_exhaust_single_retry_budget() -> None:
     history = RecordingHistory()
     observer = RecordingObserver()
     pre_send = RecordingPreSendHook()
-    request = httpx.Request("POST", "https://upstream.test/responses")
+    request = httpx2.Request("POST", "https://upstream.test/responses")
     target = FailingResponsesTarget(
         _responses_body(),
         [
-            httpx.ConnectError("first connection failed", request=request),
-            httpx.ConnectError("second connection failed", request=request),
+            httpx2.ConnectError("first connection failed", request=request),
+            httpx2.ConnectError("second connection failed", request=request),
         ],
     )
     client = _responses_client(
@@ -1272,7 +1272,7 @@ async def test_responses_connect_failures_exhaust_single_retry_budget() -> None:
 async def test_responses_runtime_error_is_not_retried() -> None:
     history = RecordingHistory()
     observer = RecordingObserver()
-    request = httpx.Request("POST", "https://upstream.test/responses")
+    request = httpx2.Request("POST", "https://upstream.test/responses")
     failure = openai.APIConnectionError(request=request)
     failure.__cause__ = RuntimeError("programming defect")
     target = FailingResponsesTarget(
@@ -1303,7 +1303,7 @@ async def test_responses_runtime_error_is_not_retried() -> None:
 async def test_responses_bare_api_connection_error_is_not_retried() -> None:
     history = RecordingHistory()
     observer = RecordingObserver()
-    request = httpx.Request("POST", "https://upstream.test/responses")
+    request = httpx2.Request("POST", "https://upstream.test/responses")
     failure = openai.APIConnectionError(request=request)
     assert failure.__cause__ is None
     target = FailingResponsesTarget(
@@ -1334,10 +1334,10 @@ async def test_responses_bare_api_connection_error_is_not_retried() -> None:
 async def test_responses_direct_read_error_is_not_retried() -> None:
     history = RecordingHistory()
     observer = RecordingObserver()
-    request = httpx.Request("POST", "https://upstream.test/responses")
+    request = httpx2.Request("POST", "https://upstream.test/responses")
     target = FailingResponsesTarget(
         _responses_body(),
-        [httpx.ReadError("response headers failed", request=request)],
+        [httpx2.ReadError("response headers failed", request=request)],
     )
     client = _responses_client(
         target,
@@ -1361,9 +1361,9 @@ async def test_responses_direct_read_error_is_not_retried() -> None:
 
 @pytest.mark.asyncio
 async def test_messages_transport_failure_behavior_remains_single_attempt() -> None:
-    request = httpx.Request("POST", "https://upstream.test/v1/messages")
+    request = httpx2.Request("POST", "https://upstream.test/v1/messages")
     target = FailingMessagesTarget(
-        httpx.ConnectError("connection failed", request=request)
+        httpx2.ConnectError("connection failed", request=request)
     )
     client = AnthropicClient(
         target,

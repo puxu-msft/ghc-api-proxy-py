@@ -1,4 +1,4 @@
-import httpx
+import httpx2
 from fastapi.testclient import TestClient
 
 from app.config.settings import AppSettings
@@ -8,14 +8,14 @@ from app.server.app_factory import create_app
 
 
 class StubClient:
-    async def chat(self, request: ChatCompletionRequest) -> httpx.Response:
-        return httpx.Response(200, json={"model": request.model})
+    async def chat(self, request: ChatCompletionRequest) -> httpx2.Response:
+        return httpx2.Response(200, json={"model": request.model})
 
-    async def responses(self, request: ResponsesRequest) -> httpx.Response:
-        return httpx.Response(200, json={"model": request.model})
+    async def responses(self, request: ResponsesRequest) -> httpx2.Response:
+        return httpx2.Response(200, json={"model": request.model})
 
-    async def embeddings(self, request: EmbeddingsRequest) -> httpx.Response:
-        return httpx.Response(200, json={"model": request.model})
+    async def embeddings(self, request: EmbeddingsRequest) -> httpx2.Response:
+        return httpx2.Response(200, json={"model": request.model})
 
 
 def test_azure_classic_chat_uses_deployment_model() -> None:

@@ -1,7 +1,7 @@
 from collections.abc import Mapping
 from typing import Any, Protocol
 
-import httpx
+import httpx2
 
 from app.ghc_client.transport import (
     ResponsesHeadersPendingTransportError,
@@ -21,7 +21,7 @@ class UpstreamTarget(Protocol):
         payload: Mapping[str, Any],
         *,
         stream: bool = False,
-    ) -> httpx.Response: ...
+    ) -> httpx2.Response: ...
 
     async def send_anthropic(
         self,
@@ -29,26 +29,26 @@ class UpstreamTarget(Protocol):
         *,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
-    ) -> httpx.Response: ...
+    ) -> httpx2.Response: ...
 
     async def send_anthropic_count_tokens(
         self,
         payload: Mapping[str, Any],
-    ) -> httpx.Response: ...
+    ) -> httpx2.Response: ...
 
     async def send_responses(
         self,
         payload: Mapping[str, Any],
         *,
         stream: bool = False,
-    ) -> httpx.Response: ...
+    ) -> httpx2.Response: ...
 
     async def send_responses_headers(
         self,
         payload: Mapping[str, Any],
-    ) -> httpx.Response: ...
+    ) -> httpx2.Response: ...
 
     async def send_embeddings(
         self,
         payload: Mapping[str, Any],
-    ) -> httpx.Response: ...
+    ) -> httpx2.Response: ...

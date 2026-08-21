@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-import httpx
+import httpx2
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 
@@ -18,17 +18,17 @@ class SDKClients:
         await self.anthropic.close()
 
 
-def create_http_client(settings: AppSettings) -> httpx.AsyncClient:
+def create_http_client(settings: AppSettings) -> httpx2.AsyncClient:
     upstream = settings.upstream
-    return httpx.AsyncClient(
+    return httpx2.AsyncClient(
         http2=upstream.http2,
         proxy=upstream.proxy,
-        limits=httpx.Limits(
+        limits=httpx2.Limits(
             max_connections=upstream.max_connections,
             max_keepalive_connections=upstream.max_keepalive_connections,
             keepalive_expiry=upstream.keepalive_expiry,
         ),
-        timeout=httpx.Timeout(
+        timeout=httpx2.Timeout(
             connect=upstream.connect_timeout,
             read=upstream.read_timeout,
             write=upstream.read_timeout,
@@ -40,7 +40,7 @@ def create_http_client(settings: AppSettings) -> httpx.AsyncClient:
 def create_sdk_clients(
     settings: AppSettings,
     *,
-    http_client: httpx.AsyncClient,
+    http_client: httpx2.AsyncClient,
 ) -> SDKClients:
     upstream = settings.upstream
     openai_base_url = upstream.openai_base_url or "https://api.openai.com/v1"
@@ -65,7 +65,7 @@ def create_sdk_clients(
 def create_copilot_sdk_clients(
     settings: AppSettings,
     *,
-    http_client: httpx.AsyncClient,
+    http_client: httpx2.AsyncClient,
 ) -> SDKClients:
     base_url = resolve_copilot_base_url(settings)
     return SDKClients(

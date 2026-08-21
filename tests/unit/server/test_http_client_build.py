@@ -13,8 +13,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, cast
 
-import httpcore
-import httpx
+import httpcore2
+import httpx2
 import pytest
 
 from app.config.schema import ProxyConfig
@@ -22,19 +22,19 @@ from app.server.composition import build_http_client, transport_options
 from app.upstream.stream_cap import StreamCappedConnection
 
 
-def socket_options_of_transport(transport: httpx.AsyncBaseTransport) -> object:
-    assert isinstance(transport, httpx.AsyncHTTPTransport)
+def socket_options_of_transport(transport: httpx2.AsyncBaseTransport) -> object:
+    assert isinstance(transport, httpx2.AsyncHTTPTransport)
     return transport._pool._socket_options  # pyright: ignore[reportPrivateUsage]
 
 
-def socket_options_of(client: httpx.AsyncClient) -> object:
+def socket_options_of(client: httpx2.AsyncClient) -> object:
     """What the pool will actually set on each new connection."""
     return socket_options_of_transport(client._transport)  # pyright: ignore[reportPrivateUsage]
 
 
-def limits_of(client: httpx.AsyncClient) -> tuple[int, int, float | None]:
+def limits_of(client: httpx2.AsyncClient) -> tuple[int, int, float | None]:
     transport = client._transport  # pyright: ignore[reportPrivateUsage]
-    assert isinstance(transport, httpx.AsyncHTTPTransport)
+    assert isinstance(transport, httpx2.AsyncHTTPTransport)
     pool = transport._pool  # pyright: ignore[reportPrivateUsage]
     return (
         pool._max_connections,  # pyright: ignore[reportPrivateUsage]
@@ -115,12 +115,12 @@ def test_the_spec_defaults_produce_a_keepalive_and_http2() -> None:
     assert options.http2 is True
 
 
-def describe_route(client: httpx.AsyncClient, url: str) -> str:
+def describe_route(client: httpx2.AsyncClient, url: str) -> str:
     """Where a URL would go: the proxy's origin, or `direct`.
 
     Comparable across clients, which identity is not — and comparing against native httpx is the only way to show the environment handling is equivalent rather than merely present.
     """
-    transport = client._transport_for_url(httpx.URL(url))  # pyright: ignore[reportPrivateUsage]
+    transport = client._transport_for_url(httpx2.URL(url))  # pyright: ignore[reportPrivateUsage]
     pool = getattr(transport, "_pool", None)
     proxy_url = getattr(pool, "_proxy_url", None)
     return "direct" if proxy_url is None else str(proxy_url.origin)
@@ -146,7 +146,7 @@ def test_environment_routing_matches_native_httpx(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setenv("NO_PROXY", "internal.example.com,localhost")
 
     ours = build_http_client(ProxyConfig())
-    native = httpx.AsyncClient()
+    native = httpx2.AsyncClient()
 
     assert [describe_route(ours, url) for url in ROUTE_SAMPLES] == [
         describe_route(native, url) for url in ROUTE_SAMPLES
@@ -187,13 +187,13 @@ def test_a_socks_proxy_says_the_keepalive_will_not_apply(caplog: pytest.LogCaptu
     assert any("SOCKS" in record.message for record in caplog.records)
 
 
-def connection_the_pool_would_build(client: httpx.AsyncClient) -> Any:
+def connection_the_pool_would_build(client: httpx2.AsyncClient) -> Any:
     """What the pool builds for an HTTPS origin, without connecting.
 
     Typed `Any` deliberately: httpcore's pool attributes are untyped, and reading them at each call site spreads three unknown-type diagnostics per site instead of one place that says "this is third-party private state".
     """
     pool: Any = cast(Any, client._transport)._pool  # pyright: ignore[reportPrivateUsage]
-    return pool.create_connection(httpcore.Origin(b"https", b"example.invalid", 443))
+    return pool.create_connection(httpcore2.Origin(b"https", b"example.invalid", 443))
 
 
 def test_a_direct_proxy_says_nothing_of_the_sort(caplog: pytest.LogCaptureFixture) -> None:
@@ -215,7 +215,7 @@ def test_the_socks_warning_prints_an_ipv6_origin_that_can_be_read_back(caplog: p
     assert len(printed) == 1
     message = printed[0].getMessage()
     assert "hunter2" not in message
-    origin = httpx.URL(message.split(" ", 2)[1])
+    origin = httpx2.URL(message.split(" ", 2)[1])
     assert origin.host == "::1"
     assert origin.port == 1080
 

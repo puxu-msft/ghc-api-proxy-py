@@ -2,7 +2,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, cast
 
-import httpx
+import httpx2
 import orjson
 from pydantic import ValidationError
 
@@ -39,11 +39,11 @@ from app.upstream.base import ResponsesHeadersPendingTransportError
 @dataclass(slots=True)
 class PipelineResult:
     context: RequestContext
-    response: httpx.Response
+    response: httpx2.Response
 
 
 class UpstreamResponseError(Exception):
-    def __init__(self, context: RequestContext, response: httpx.Response) -> None:
+    def __init__(self, context: RequestContext, response: httpx2.Response) -> None:
         super().__init__(f"upstream returned HTTP {response.status_code}")
         self.context = context
         self.response = response
@@ -410,7 +410,7 @@ async def execute_anthropic_pipeline(
                 if client.hooks is not None:
                     assert hook_context is not None
                     original = response
-                    response = httpx.Response(
+                    response = httpx2.Response(
                         original.status_code,
                         headers=original.headers,
                         content=body,

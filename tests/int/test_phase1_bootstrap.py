@@ -1,6 +1,6 @@
 from collections.abc import Mapping
 
-import httpx
+import httpx2
 import pytest
 
 from app.config.settings import AppSettings
@@ -10,15 +10,15 @@ from app.upstream.bootstrap import close_upstream_services, initialize_upstream_
 
 @pytest.mark.asyncio
 async def test_copilot_bootstrap_initializes_typed_runtime_services() -> None:
-    requests: list[httpx.Request] = []
+    requests: list[httpx2.Request] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         requests.append(request)
         if (
             request.url.host == "api.github.com"
             and request.url.path == "/copilot_internal/v2/token"
         ):
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 json={
                     "token": "copilot-token",
@@ -27,9 +27,9 @@ async def test_copilot_bootstrap_initializes_typed_runtime_services() -> None:
                 },
             )
         if request.url.host == "api.github.com" and request.url.path == "/copilot_internal/user":
-            return httpx.Response(200, json={"copilot_plan": "business"})
+            return httpx2.Response(200, json={"copilot_plan": "business"})
         if request.url.host == "api.business.githubcopilot.com" and request.url.path == "/models":
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 json={"object": "list", "data": [{"id": "claude-test", "vendor": "Anthropic"}]},
             )
@@ -45,7 +45,7 @@ async def test_copilot_bootstrap_initializes_typed_runtime_services() -> None:
         }
     )
     runtime = RuntimeState(settings=settings)
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     try:
         services = await initialize_upstream_services(runtime, http_client=http_client)
 
@@ -86,7 +86,7 @@ async def test_model_refresh_loop_survives_catalog_failure() -> None:
     class FailingCatalog:
         async def refresh(self, headers: Mapping[str, str]) -> bool:
             del headers
-            raise httpx.ConnectError("temporary")
+            raise httpx2.ConnectError("temporary")
 
     sleeps = 0
 

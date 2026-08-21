@@ -3,7 +3,7 @@
 Everything this classifier sees is pre-header by construction: the `try` it serves wraps only the call that returns once upstream's response headers arrive. So the question it answers is not "is this error safe in general" but "does this error belong to the category that reached us before the client could see anything".
 """
 
-import httpx
+import httpx2
 import pytest
 from h2.exceptions import ProtocolError as H2ProtocolError
 from h2.settings import SettingCodes
@@ -12,13 +12,13 @@ from openai import APIConnectionError as OpenAIAPIConnectionError
 from app.ghc_client.transport import is_responses_headers_pending_transport_error
 
 
-def request() -> httpx.Request:
-    return httpx.Request("POST", "https://upstream.invalid/responses")
+def request() -> httpx2.Request:
+    return httpx2.Request("POST", "https://upstream.invalid/responses")
 
 
-def connection_terminated() -> httpx.RemoteProtocolError:
+def connection_terminated() -> httpx2.RemoteProtocolError:
     """What httpcore raises for every stream still reading when a GOAWAY lands."""
-    return httpx.RemoteProtocolError(
+    return httpx2.RemoteProtocolError(
         "<ConnectionTerminated error_code:0, last_stream_id:2147483647, additional_data:None>",
         request=request(),
     )
@@ -27,12 +27,12 @@ def connection_terminated() -> httpx.RemoteProtocolError:
 @pytest.mark.parametrize(
     "error",
     [
-        httpx.ConnectError("refused", request=request()),
-        httpx.ConnectTimeout("timed out", request=request()),
-        httpx.PoolTimeout("no connection", request=request()),
+        httpx2.ConnectError("refused", request=request()),
+        httpx2.ConnectTimeout("timed out", request=request()),
+        httpx2.PoolTimeout("no connection", request=request()),
     ],
 )
-def test_the_failures_that_were_always_retryable_still_are(error: httpx.TransportError) -> None:
+def test_the_failures_that_were_always_retryable_still_are(error: httpx2.TransportError) -> None:
     assert is_responses_headers_pending_transport_error(error) is True
 
 

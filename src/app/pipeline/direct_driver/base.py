@@ -11,7 +11,7 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-import httpx
+import httpx2
 
 from app.model_provider import ModelEndpoint, ModelProvider
 from app.pipeline.events import FrozenSubscribers
@@ -79,7 +79,7 @@ class Budget(Protocol):
 @dataclass(slots=True)
 class DriverOutcome:
     context: RequestContext
-    response: httpx.Response | None = None
+    response: httpx2.Response | None = None
     error: BaseException | None = None
     attempts: int = 0
     events: list[str] = field(default_factory=lambda: list[str]())
@@ -222,7 +222,7 @@ class DirectDriver:
         self,
         context: RequestContext,
         payload: dict[str, Any],
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         """Send one attempt under both upstream guards that can act from here.
 
         This await ends when the response headers arrive, not when the body has been read — measured 2026-08-20 on a server that held the body back two seconds after its headers. So `response_header` is bounded here in full, while the attempt deadline is one bound enforced from two places: a streaming body outlives this function, and the delivery chain holds it to the same instant.
@@ -239,7 +239,7 @@ class DirectDriver:
         attempt = context.current_attempt
         deadline_at = attempt.deadline_at if attempt is not None else None
 
-        async def under_header_guard() -> httpx.Response:
+        async def under_header_guard() -> httpx2.Response:
             if self._response_header_timeout <= 0:
                 return await send
             try:

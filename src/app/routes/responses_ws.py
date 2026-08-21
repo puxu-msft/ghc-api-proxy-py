@@ -1,6 +1,6 @@
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from httpx_ws import WebSocketDisconnect as UpstreamWebSocketDisconnect
-from httpx_ws import WebSocketNetworkError, WebSocketUpgradeError
+from httpx2.websockets import WebSocketDisconnect as UpstreamWebSocketDisconnect
+from httpx2.websockets import WebSocketNetworkError, WebSocketUpgradeError
 from pydantic import ValidationError
 
 from app.deps import (

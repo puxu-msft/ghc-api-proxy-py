@@ -1,7 +1,7 @@
 from collections.abc import Callable
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
@@ -47,21 +47,21 @@ class StaticTokenSource:
 
 
 def build_provider(
-    handler: Callable[[httpx.Request], httpx.Response],
+    handler: Callable[[httpx2.Request], httpx2.Response],
     *,
     disabled: list[str] | None = None,
-) -> tuple[GithubCopilotProvider, httpx.AsyncClient]:
-    def with_token_exchange(request: httpx.Request) -> httpx.Response:
+) -> tuple[GithubCopilotProvider, httpx2.AsyncClient]:
+    def with_token_exchange(request: httpx2.Request) -> httpx2.Response:
         # The real code exchanges the GitHub token for a Copilot one before every authenticated
         # call, so a stand-in that cannot answer this cannot stand in for the real thing.
         if request.url.host == "api.github.com":
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 json={"token": "copilot", "expires_at": 5000, "refresh_in": 1500},
             )
         return handler(request)
 
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(with_token_exchange))
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(with_token_exchange))
     tokens = CopilotTokenManager(StaticTokenSource(), http_client, clock=lambda: 1000)
     client = GhcApiClient(
         AsyncOpenAI(
@@ -91,10 +91,10 @@ def build_provider(
     return provider, http_client
 
 
-def upstream(response: httpx.Response) -> Callable[[httpx.Request], httpx.Response]:
-    def handler(request: httpx.Request) -> httpx.Response:
+def upstream(response: httpx2.Response) -> Callable[[httpx2.Request], httpx2.Response]:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         if request.url.host == "api.github.com":
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 json={"token": "copilot", "expires_at": 5000, "refresh_in": 1500},
             )
@@ -126,7 +126,7 @@ def test_capability_gate_rejects_an_unadvertised_endpoint() -> None:
 
 
 def test_disabled_model_is_not_on_offer() -> None:
-    provider, _ = build_provider(upstream(httpx.Response(200)), disabled=["banned-model"])
+    provider, _ = build_provider(upstream(httpx2.Response(200)), disabled=["banned-model"])
     assert provider.describe("banned-model") is None
     assert "banned-model" not in provider.available_ids
     assert "claude-model" in provider.available_ids
@@ -134,16 +134,16 @@ def test_disabled_model_is_not_on_offer() -> None:
 
 @pytest.mark.asyncio
 async def test_send_reaches_the_endpoint_the_model_advertises() -> None:
-    seen: list[httpx.Request] = []
+    seen: list[httpx2.Request] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         if request.url.host == "api.github.com":
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 json={"token": "copilot", "expires_at": 5000, "refresh_in": 1500},
             )
         seen.append(request)
-        return httpx.Response(200, json={"ok": True})
+        return httpx2.Response(200, json={"ok": True})
 
     provider, http_client = build_provider(handler)
     try:
@@ -160,11 +160,11 @@ async def test_send_reaches_the_endpoint_the_model_advertises() -> None:
 
 @pytest.mark.asyncio
 async def test_unadvertised_endpoint_is_refused_before_the_network() -> None:
-    seen: list[httpx.Request] = []
+    seen: list[httpx2.Request] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         seen.append(request)
-        return httpx.Response(200, json={"ok": True})
+        return httpx2.Response(200, json={"ok": True})
 
     provider, http_client = build_provider(handler)
     try:
@@ -183,11 +183,11 @@ async def test_unadvertised_endpoint_is_refused_before_the_network() -> None:
 
 @pytest.mark.asyncio
 async def test_model_with_empty_capabilities_is_refused_before_the_network() -> None:
-    seen: list[httpx.Request] = []
+    seen: list[httpx2.Request] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         seen.append(request)
-        return httpx.Response(200, json={"ok": True})
+        return httpx2.Response(200, json={"ok": True})
 
     provider, http_client = build_provider(handler)
     try:
@@ -205,11 +205,11 @@ async def test_model_with_empty_capabilities_is_refused_before_the_network() -> 
 
 @pytest.mark.asyncio
 async def test_disabled_model_is_refused_before_the_network() -> None:
-    seen: list[httpx.Request] = []
+    seen: list[httpx2.Request] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         seen.append(request)
-        return httpx.Response(200, json={"ok": True})
+        return httpx2.Response(200, json={"ok": True})
 
     provider, http_client = build_provider(handler, disabled=["banned-model"])
     try:
@@ -233,11 +233,11 @@ async def test_count_tokens_is_gated_on_the_messages_capability() -> None:
     `mute-model` advertises none, and the third is not in the catalog at all. A gate that only
     asked "is this model known" would let the first two through.
     """
-    seen: list[httpx.Request] = []
+    seen: list[httpx2.Request] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         seen.append(request)
-        return httpx.Response(200, json={"input_tokens": 1})
+        return httpx2.Response(200, json={"input_tokens": 1})
 
     provider, http_client = build_provider(handler)
     try:
@@ -258,16 +258,16 @@ async def test_count_tokens_is_gated_on_the_messages_capability() -> None:
 @pytest.mark.asyncio
 async def test_catalog_refresh_reports_no_change_on_304() -> None:
     responses = [
-        httpx.Response(200, json=CATALOG, headers={"etag": 'W/"v1"'}),
-        httpx.Response(304),
+        httpx2.Response(200, json=CATALOG, headers={"etag": 'W/"v1"'}),
+        httpx2.Response(304),
     ]
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         return responses.pop(0)
 
-    provider, http_client = build_provider(upstream(httpx.Response(200)))
+    provider, http_client = build_provider(upstream(httpx2.Response(200)))
     try:
-        provider._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))  # pyright: ignore[reportPrivateUsage]
+        provider._http = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))  # pyright: ignore[reportPrivateUsage]
         assert await provider.refresh_catalog() is True
         assert await provider.refresh_catalog() is False
         await provider._http.aclose()  # pyright: ignore[reportPrivateUsage]
@@ -326,7 +326,7 @@ def test_unknown_endpoint_does_not_count_as_a_capability() -> None:
 
 
 def test_descriptor_carries_per_model_request_headers() -> None:
-    provider, _ = build_provider(upstream(httpx.Response(200)))
+    provider, _ = build_provider(upstream(httpx2.Response(200)))
     provider.replace_catalog(
         {
             "data": [
@@ -344,7 +344,7 @@ def test_descriptor_carries_per_model_request_headers() -> None:
 
 
 def test_catalog_without_a_data_list_is_rejected() -> None:
-    provider, _ = build_provider(upstream(httpx.Response(200)))
+    provider, _ = build_provider(upstream(httpx2.Response(200)))
     with pytest.raises(ValueError, match="must be a list"):
         provider.replace_catalog({"data": "nope"})
 
@@ -354,7 +354,7 @@ def test_a_model_that_names_no_endpoints_gets_the_standard_one_for_its_kind() ->
 
     This is on the provider rather than only on the report because routing is what has to agree: a report calling a model routable while `require_endpoint` refuses it would be worse than no report.
     """
-    provider, _ = build_provider(upstream(httpx.Response(200)))
+    provider, _ = build_provider(upstream(httpx2.Response(200)))
     provider.replace_catalog(
         {
             "data": [
@@ -380,11 +380,11 @@ def test_a_model_that_names_no_endpoints_gets_the_standard_one_for_its_kind() ->
 
 async def test_a_model_with_an_unstated_endpoint_can_actually_be_sent_to() -> None:
     """The end of the change, not the middle: `require_endpoint` used to refuse these before the network."""
-    seen: list[httpx.Request] = []
+    seen: list[httpx2.Request] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         seen.append(request)
-        return httpx.Response(200, json={"ok": True})
+        return httpx2.Response(200, json={"ok": True})
 
     provider, http_client = build_provider(handler)
     provider.replace_catalog({"data": [{"id": "chatter", "capabilities": {"type": "chat"}}]})
@@ -405,7 +405,7 @@ def test_an_endpoint_upstream_did_name_is_never_replaced_by_the_default() -> Non
 
     The embeddings model has to name something *other* than `/embeddings` to be worth asserting: an embeddings model that named `/embeddings` would read the same whether the value was honoured or overwritten by the default for its kind.
     """
-    provider, _ = build_provider(upstream(httpx.Response(200)))
+    provider, _ = build_provider(upstream(httpx2.Response(200)))
     provider.replace_catalog(
         {
             "data": [
@@ -437,11 +437,11 @@ async def test_an_unreadable_endpoint_field_is_refused_before_the_network() -> N
 
     The string case is the sharp one — `"/responses"` names a path contradicting the default, so filling it in would have sent the request to `/chat/completions` on the strength of a field nobody could read.
     """
-    seen: list[httpx.Request] = []
+    seen: list[httpx2.Request] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         seen.append(request)
-        return httpx.Response(200, json={"ok": True})
+        return httpx2.Response(200, json={"ok": True})
 
     provider, http_client = build_provider(handler)
     provider.replace_catalog(
@@ -465,7 +465,7 @@ def test_the_catalog_is_kept_as_upstream_sent_it() -> None:
 
     Everything a catalog says beyond the endpoint list — vendor, family, limits, policy state — survives only here, and `debug models` reports on exactly that. Rebuilding it from the descriptors would report a catalog upstream never sent.
     """
-    provider, _ = build_provider(upstream(httpx.Response(200)))
+    provider, _ = build_provider(upstream(httpx2.Response(200)))
 
     assert provider.raw_catalog == CATALOG
     assert provider.base_url == BASE_URL
@@ -473,7 +473,7 @@ def test_the_catalog_is_kept_as_upstream_sent_it() -> None:
 
 def test_a_rejected_catalog_leaves_the_previous_one_standing() -> None:
     # Fail-closed applies to the report too: a payload that could not be read must not blank out the answer already held.
-    provider, _ = build_provider(upstream(httpx.Response(200)))
+    provider, _ = build_provider(upstream(httpx2.Response(200)))
 
     with pytest.raises(ValueError):
         provider.replace_catalog({"data": "nope"})
@@ -485,7 +485,7 @@ def test_send_signature_matches_the_protocol() -> None:
     # Structural check: the concrete provider must satisfy ModelProvider without inheritance.
     from app.model_provider.base import ModelProvider
 
-    provider, _ = build_provider(upstream(httpx.Response(200)))
+    provider, _ = build_provider(upstream(httpx2.Response(200)))
     typed: ModelProvider = provider
     assert typed.name == "ghc"
 
@@ -493,7 +493,7 @@ def test_send_signature_matches_the_protocol() -> None:
 def test_payload_is_not_mutated_by_send_preparation() -> None:
     payload: dict[str, Any] = {"model": "claude-model"}
     before = dict(payload)
-    provider, _ = build_provider(upstream(httpx.Response(200)))
+    provider, _ = build_provider(upstream(httpx2.Response(200)))
     assert provider.describe("claude-model") is not None
     assert payload == before
 
@@ -506,11 +506,11 @@ async def test_the_catalog_fetch_is_authenticated() -> None:
     The headers were held from construction and nothing ever put a token in them, so `/models`
     went out bare — meaning the service could not start even with valid credentials.
     """
-    seen: list[httpx.Request] = []
+    seen: list[httpx2.Request] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         seen.append(request)
-        return httpx.Response(200, json=CATALOG)
+        return httpx2.Response(200, json=CATALOG)
 
     provider, http_client = build_provider(handler)
     try:
@@ -529,12 +529,12 @@ async def test_each_catalog_refresh_authenticates_afresh() -> None:
     # and nothing after it. Two refreshes must each ask the token manager.
     asked: list[str] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         if request.url.path.endswith("/models"):
             asked.append(request.headers.get("authorization", ""))
             # No etag, so the second refresh is a full fetch rather than a 304.
-            return httpx.Response(200, json=CATALOG)
-        return httpx.Response(200, json={})
+            return httpx2.Response(200, json=CATALOG)
+        return httpx2.Response(200, json={})
 
     provider, http_client = build_provider(handler)
     try:

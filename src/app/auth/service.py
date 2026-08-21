@@ -2,7 +2,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
-import httpx
+import httpx2
 
 from app.auth.providers import FileTokenProvider
 from app.ghc_client.device_flow import DeviceCode, DeviceFlowClient
@@ -35,7 +35,7 @@ async def authenticate_device(
     token_path: Path | None = None,
 ) -> None:
     file_provider = FileTokenProvider(token_path)
-    async with httpx.AsyncClient(timeout=30.0) as http_client:
+    async with httpx2.AsyncClient(timeout=30.0) as http_client:
         device_flow = DeviceFlowClient(http_client)
         await run_device_authentication(device_flow, file_provider, notify=notify)
 

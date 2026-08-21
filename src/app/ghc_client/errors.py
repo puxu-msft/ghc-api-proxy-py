@@ -18,7 +18,7 @@ naming a field upstream will not accept answers the same way nine times over; a 
 from collections.abc import Mapping
 from typing import Any
 
-import httpx
+import httpx2
 from anthropic import APIConnectionError as AnthropicConnectionError
 from anthropic import APIStatusError as AnthropicStatusError
 from anthropic import APITimeoutError as AnthropicTimeoutError
@@ -41,7 +41,7 @@ RETRYABLE_STATUSES = frozenset({401, 408, 409, 425, 429, 500, 502, 503, 504})
 
 _STATUS_ERRORS = (OpenAIStatusError, AnthropicStatusError)
 _TIMEOUT_ERRORS = (OpenAITimeoutError, AnthropicTimeoutError)
-_CONNECTION_ERRORS = (OpenAIConnectionError, AnthropicConnectionError, httpx.TransportError)
+_CONNECTION_ERRORS = (OpenAIConnectionError, AnthropicConnectionError, httpx2.TransportError)
 
 
 def retry_after_seconds(headers: Mapping[str, str]) -> float | None:

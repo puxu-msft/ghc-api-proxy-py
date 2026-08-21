@@ -13,7 +13,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
-import httpx
+import httpx2
 import orjson
 import pytest
 import structlog
@@ -70,11 +70,11 @@ class StaticTokenSource:
 
 
 def make_provider(
-    handler: Callable[[httpx.Request], httpx.Response],
+    handler: Callable[[httpx2.Request], httpx2.Response],
     *,
     disabled: list[str] | None = None,
-) -> tuple[GithubCopilotProvider, httpx.AsyncClient]:
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+) -> tuple[GithubCopilotProvider, httpx2.AsyncClient]:
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     tokens = CopilotTokenManager(StaticTokenSource(), http_client, clock=lambda: 1000)
     client = GhcApiClient(
         AsyncOpenAI(
@@ -105,24 +105,24 @@ def make_provider(
 
 
 def make_client(
-    handler: Callable[[httpx.Request], httpx.Response],
+    handler: Callable[[httpx2.Request], httpx2.Response],
     *,
     mappings: dict[str, str] | None = None,
     tokenization_path: Path | None = None,
     overrides: dict[str, Any] | None = None,
-) -> tuple[TestClient, list[httpx.Request]]:
-    seen: list[httpx.Request] = []
+) -> tuple[TestClient, list[httpx2.Request]]:
+    seen: list[httpx2.Request] = []
 
-    def recording(request: httpx.Request) -> httpx.Response:
+    def recording(request: httpx2.Request) -> httpx2.Response:
         if request.url.host == "api.github.com":
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 json={"token": "copilot", "expires_at": 5000, "refresh_in": 1500},
             )
         if request.url.path.endswith("/models"):
             # The app refreshes the catalog before it accepts anything, so the stand-in has to
             # answer that too. Left out of `seen`: it is start-up, not the request under test.
-            return httpx.Response(200, json=CATALOG)
+            return httpx2.Response(200, json=CATALOG)
         seen.append(request)
         return handler(request)
 
@@ -145,7 +145,7 @@ def make_client(
 
 def test_anthropic_request_reaches_the_messages_endpoint_untranslated() -> None:
     client, seen = make_client(
-        lambda _: httpx.Response(200, json={"id": "msg_1", "content": []})
+        lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []})
     )
     response = client.post(
         "/v1/messages",
@@ -158,7 +158,7 @@ def test_anthropic_request_reaches_the_messages_endpoint_untranslated() -> None:
 
 
 def test_anthropic_request_for_a_responses_model_is_translated() -> None:
-    client, seen = make_client(lambda _: httpx.Response(200, json={"id": "resp_1"}))
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
     response = client.post(
         "/v1/messages",
         json={
@@ -187,7 +187,7 @@ def test_the_responses_leg_keeps_the_blank_blocks_it_was_given() -> None:
 
     This is the guard against putting it back too early. A revision that strips before translation passes every unit test of the subscriber and fails here, which is the only place the difference shows.
     """
-    client, seen = make_client(lambda _: httpx.Response(200, json={"id": "resp_1"}))
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
     response = client.post(
         "/v1/messages",
         json={
@@ -226,7 +226,7 @@ def test_an_anthropic_web_search_declaration_reaches_upstream_in_its_own_spellin
     The function tool beside it is the other half: translating the declaration must not disturb the client's real tools.
     """
     client, seen = make_client(
-        lambda _: httpx.Response(200, json={"id": "resp_1"}),
+        lambda _: httpx2.Response(200, json={"id": "resp_1"}),
         overrides={
             "model_providers": {
                 "ghc": {
@@ -274,7 +274,7 @@ def test_a_streamed_search_is_delivered_as_a_line_rather_than_an_empty_block() -
     sse = "".join(chunk["text"] for chunk in interaction["response"]["chunks"]).encode()
 
     client, _ = make_client(
-        lambda _: httpx.Response(
+        lambda _: httpx2.Response(
             200, content=sse, headers={"content-type": "text/event-stream"}
         ),
         overrides={
@@ -319,7 +319,7 @@ def test_a_search_that_cannot_run_is_answered_as_a_failed_tool_not_an_error() ->
     Asserted on upstream never being called as well, because the whole point is that nothing was asked to answer this from memory.
     """
     client, seen = make_client(
-        lambda _: httpx.Response(200, json={"id": "resp_1"}),
+        lambda _: httpx2.Response(200, json={"id": "resp_1"}),
         overrides={
             "model_providers": {
                 "ghc": {
@@ -363,7 +363,7 @@ def test_a_search_that_cannot_run_is_answered_as_a_failed_tool_not_an_error() ->
 def test_a_streamed_search_that_cannot_run_is_answered_the_same_way() -> None:
     """The sub-requests that carry a search are all `stream: true`, measured over 190 of them, so the synthesised reply has to survive the streaming path rather than only the buffered one."""
     client, seen = make_client(
-        lambda _: httpx.Response(200, json={"id": "resp_1"}),
+        lambda _: httpx2.Response(200, json={"id": "resp_1"}),
         overrides={
             "model_providers": {
                 "ghc": {
@@ -409,7 +409,7 @@ def test_the_shape_claude_code_really_sends_reaches_upstream_as_a_search() -> No
     The forced choice is asserted beside the tools because the sub-request has no other purpose: it carries a turn reading `Perform a web search for the query: X`, and a model no longer obliged to search may answer from memory while the client still labels the reply as search results.
     """
     client, seen = make_client(
-        lambda _: httpx.Response(200, json={"id": "resp_1"}),
+        lambda _: httpx2.Response(200, json={"id": "resp_1"}),
         overrides={
             "model_providers": {
                 "ghc": {
@@ -454,7 +454,7 @@ def test_a_domain_restriction_refuses_before_upstream_is_called() -> None:
     Asserted on `seen` being empty as much as on the status: the refusal is only worth anything if it happens *before* the call. A 400 raised after upstream had already searched would tell the client its restriction failed while the model had already read the pages — which is the one thing this setting exists to prevent.
     """
     client, seen = make_client(
-        lambda _: httpx.Response(200, json={"id": "resp_1"}),
+        lambda _: httpx2.Response(200, json={"id": "resp_1"}),
         overrides={
             "model_translation": {
                 "to_openai_responses": {"web_search_domain_restrictions": "error"}
@@ -495,7 +495,7 @@ def test_a_domain_restriction_refuses_before_upstream_is_called() -> None:
 
 def test_model_mapping_is_applied_before_the_upstream_call() -> None:
     client, seen = make_client(
-        lambda _: httpx.Response(200, json={"id": "msg_1"}),
+        lambda _: httpx2.Response(200, json={"id": "msg_1"}),
         mappings={"opus": "claude-model"},
     )
     response = client.post("/v1/messages", json={"model": "opus", "messages": []})
@@ -505,7 +505,7 @@ def test_model_mapping_is_applied_before_the_upstream_call() -> None:
 
 
 def test_openai_group_is_served_under_every_compatible_prefix() -> None:
-    client, seen = make_client(lambda _: httpx.Response(200, json={"id": "resp_1"}))
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
     for prefix in ("", "/v1", "/openai/v1"):
         response = client.post(f"{prefix}/responses", json={"model": "gpt-model", "input": []})
         assert response.status_code == 200
@@ -513,7 +513,7 @@ def test_openai_group_is_served_under_every_compatible_prefix() -> None:
 
 
 def test_model_without_the_capability_is_refused_before_the_network() -> None:
-    client, seen = make_client(lambda _: httpx.Response(200, json={}))
+    client, seen = make_client(lambda _: httpx2.Response(200, json={}))
     response = client.post("/v1/messages", json={"model": "mute-model", "messages": []})
 
     assert response.status_code == 400
@@ -523,7 +523,7 @@ def test_model_without_the_capability_is_refused_before_the_network() -> None:
 
 
 def test_unknown_model_is_refused_before_the_network() -> None:
-    client, seen = make_client(lambda _: httpx.Response(200, json={}))
+    client, seen = make_client(lambda _: httpx2.Response(200, json={}))
     response = client.post("/v1/messages", json={"model": "mystery", "messages": []})
 
     assert response.status_code == 400
@@ -532,7 +532,7 @@ def test_unknown_model_is_refused_before_the_network() -> None:
 
 
 def test_missing_model_is_rejected_by_inbound_parsing() -> None:
-    client, seen = make_client(lambda _: httpx.Response(200, json={}))
+    client, seen = make_client(lambda _: httpx2.Response(200, json={}))
     response = client.post("/v1/messages", json={"messages": []})
 
     assert response.status_code == 400
@@ -584,7 +584,7 @@ def sse_upstream_without_message_stop(*texts: str) -> bytes:
 def test_streaming_is_served_as_block_level_sse() -> None:
     # Each block is already whole before a frame is written; the SSE envelope carries them.
     client, _ = make_client(
-        lambda _: httpx.Response(
+        lambda _: httpx2.Response(
             200,
             content=sse_upstream("first", "second"),
             headers={"content-type": "text/event-stream"},
@@ -618,7 +618,7 @@ def test_streaming_is_served_as_block_level_sse() -> None:
 def test_streamed_delta_carries_the_whole_block() -> None:
     # A delta holds a finished block, not a fragment of one.
     client, _ = make_client(
-        lambda _: httpx.Response(
+        lambda _: httpx2.Response(
             200,
             content=sse_upstream("the whole thing"),
             headers={"content-type": "text/event-stream"},
@@ -638,19 +638,19 @@ def test_streamed_delta_carries_the_whole_block() -> None:
 
 
 def test_upstream_error_status_reaches_the_client_as_a_gateway_failure() -> None:
-    client, _ = make_client(lambda _: httpx.Response(500, json={"error": "upstream boom"}))
+    client, _ = make_client(lambda _: httpx2.Response(500, json={"error": "upstream boom"}))
     response = client.post("/v1/messages", json={"model": "claude-model", "messages": []})
     assert response.status_code == 502
 
 
 def test_unknown_path_is_not_served() -> None:
-    client, _ = make_client(lambda _: httpx.Response(200, json={}))
+    client, _ = make_client(lambda _: httpx2.Response(200, json={}))
     assert client.post("/nope", json={"model": "claude-model"}).status_code == 404
 
 
 @pytest.mark.parametrize("path", ["/embeddings", "/v1/embeddings", "/openai/v1/embeddings"])
 def test_embeddings_endpoint_is_served(path: str) -> None:
-    client, seen = make_client(lambda _: httpx.Response(200, json={"data": []}))
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"data": []}))
     response = client.post(path, json={"model": "embed-model", "input": "hi"})
     assert response.status_code == 200
     assert str(seen[-1].url) == f"{BASE_URL}/embeddings"
@@ -660,7 +660,7 @@ def test_translated_route_answers_in_the_format_the_client_asked_in() -> None:
     # The earlier translation test only checked the request. Half a crossing means the client
     # gets a Responses body it never asked for and cannot parse.
     client, _ = make_client(
-        lambda _: httpx.Response(
+        lambda _: httpx2.Response(
             200,
             json={
                 "id": "resp_1",
@@ -688,7 +688,7 @@ def test_translated_route_answers_in_the_format_the_client_asked_in() -> None:
 def test_max_output_tokens_becomes_the_anthropic_stop_reason() -> None:
     # spec.md: an incomplete response due to the output-token limit is max_tokens downstream.
     client, _ = make_client(
-        lambda _: httpx.Response(
+        lambda _: httpx2.Response(
             200,
             json={
                 "id": "resp_1",
@@ -713,7 +713,7 @@ def test_max_output_tokens_becomes_the_anthropic_stop_reason() -> None:
 
 def test_untranslated_route_body_is_returned_unchanged() -> None:
     client, _ = make_client(
-        lambda _: httpx.Response(200, json={"id": "msg_1", "custom": {"kept": True}})
+        lambda _: httpx2.Response(200, json={"id": "msg_1", "custom": {"kept": True}})
     )
     response = client.post("/v1/messages", json={"model": "claude-model", "messages": []})
     assert response.json()["custom"] == {"kept": True}
@@ -725,9 +725,9 @@ def test_upstream_429_is_seen_by_the_rate_limiter() -> None:
 
     provider, http_client = make_provider(
         lambda request: (
-            httpx.Response(200, json={"token": "c", "expires_at": 5000, "refresh_in": 1500})
+            httpx2.Response(200, json={"token": "c", "expires_at": 5000, "refresh_in": 1500})
             if request.url.host == "api.github.com"
-            else httpx.Response(429, json={"error": "slow down"})
+            else httpx2.Response(429, json={"error": "slow down"})
         )
     )
     config = ProxyConfig.model_validate(
@@ -754,9 +754,9 @@ def test_upstream_503_does_not_enter_limited_mode() -> None:
 
     provider, http_client = make_provider(
         lambda request: (
-            httpx.Response(200, json={"token": "c", "expires_at": 5000, "refresh_in": 1500})
+            httpx2.Response(200, json={"token": "c", "expires_at": 5000, "refresh_in": 1500})
             if request.url.host == "api.github.com"
-            else httpx.Response(503, json={"error": "unavailable"})
+            else httpx2.Response(503, json={"error": "unavailable"})
         )
     )
     config = ProxyConfig.model_validate(
@@ -776,7 +776,7 @@ def test_upstream_503_does_not_enter_limited_mode() -> None:
 
 
 def test_count_tokens_asks_upstream_and_returns_its_number() -> None:
-    client, seen = make_client(lambda _: httpx.Response(200, json={"input_tokens": 4242}))
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"input_tokens": 4242}))
     response = client.post(
         "/v1/messages/count_tokens",
         json={"model": "claude-model", "messages": [{"role": "user", "content": "hi"}]},
@@ -794,7 +794,7 @@ def test_count_tokens_falls_back_to_the_local_estimate() -> None:
     The reply says `estimated`, because an estimate presented as a measurement is worse than no
     answer: the caller sizes its request against it.
     """
-    client, _ = make_client(lambda _: httpx.Response(500, json={"error": "upstream is down"}))
+    client, _ = make_client(lambda _: httpx2.Response(500, json={"error": "upstream is down"}))
     response = client.post(
         "/v1/messages/count_tokens",
         json={"model": "claude-model", "messages": [{"role": "user", "content": "hello there"}]},
@@ -809,7 +809,7 @@ def test_count_tokens_falls_back_to_the_local_estimate() -> None:
 def test_count_tokens_asks_about_the_mapped_model() -> None:
     # A count that ignored model_mappings would answer about a model the request never reaches.
     client, seen = make_client(
-        lambda _: httpx.Response(200, json={"input_tokens": 7}),
+        lambda _: httpx2.Response(200, json={"input_tokens": 7}),
         mappings={"alias": "claude-model"},
     )
     response = client.post(
@@ -828,7 +828,7 @@ def test_count_tokens_accepts_a_body_without_max_tokens() -> None:
     only that the request succeeds cannot tell the two apart — a version that mutated the outbound
     payload passes that just as well.
     """
-    client, seen = make_client(lambda _: httpx.Response(200, json={"input_tokens": 11}))
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"input_tokens": 11}))
     response = client.post(
         "/v1/messages/count_tokens",
         json={"model": "claude-model", "messages": [{"role": "user", "content": "hi"}]},
@@ -846,7 +846,7 @@ def test_count_tokens_estimates_locally_for_a_model_with_no_upstream_counter() -
 
     So a 400 here told a client that a request it was about to make successfully could not be measured. The route now decides whether an upstream counter exists before one is called, and the answer falls to the local estimate, marked `estimated`.
     """
-    client, seen = make_client(lambda _: httpx.Response(200, json={"input_tokens": 99}))
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"input_tokens": 99}))
     response = client.post(
         "/v1/messages/count_tokens",
         json={"model": "gpt-model", "messages": [{"role": "user", "content": "hi"}]},
@@ -861,7 +861,7 @@ def test_count_tokens_estimates_locally_for_a_model_with_no_upstream_counter() -
 
 
 def test_count_tokens_rejects_a_body_that_is_not_countable() -> None:
-    client, seen = make_client(lambda _: httpx.Response(200, json={"input_tokens": 1}))
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"input_tokens": 1}))
     response = client.post(
         "/v1/messages/count_tokens",
         json={"model": "claude-model", "messages": "not a list of messages"},
@@ -878,7 +878,7 @@ def test_count_tokens_refuses_a_model_without_the_messages_capability() -> None:
     removes the provider check leaves this test green. The provider gate has its own test in
     `tests/unit/test_model_provider.py`.
     """
-    client, seen = make_client(lambda _: httpx.Response(200, json={"input_tokens": 1}))
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"input_tokens": 1}))
     response = client.post(
         "/v1/messages/count_tokens",
         json={"model": "mute-model", "messages": [{"role": "user", "content": "hi"}]},
@@ -898,14 +898,14 @@ def test_what_the_calibrator_learns_survives_a_restart(tmp_path: Path) -> None:
     body = {"model": "claude-model", "messages": [{"role": "user", "content": "hello there"}]}
 
     untaught, _ = make_client(
-        lambda _: httpx.Response(503, json={"error": "down"}),
+        lambda _: httpx2.Response(503, json={"error": "down"}),
         tokenization_path=tmp_path / "empty.json",
     )
     with untaught:
         before = untaught.post("/v1/messages/count_tokens", json=body).json()["input_tokens"]
 
     teacher, _ = make_client(
-        lambda _: httpx.Response(200, json={"input_tokens": before * 10}),
+        lambda _: httpx2.Response(200, json={"input_tokens": before * 10}),
         tokenization_path=state,
     )
     with teacher:
@@ -913,7 +913,7 @@ def test_what_the_calibrator_learns_survives_a_restart(tmp_path: Path) -> None:
     assert state.is_file(), "the lifespan must flush what was learnt"
 
     successor, seen = make_client(
-        lambda _: httpx.Response(503, json={"error": "down"}),
+        lambda _: httpx2.Response(503, json={"error": "down"}),
         tokenization_path=state,
     )
     with successor:
@@ -932,7 +932,7 @@ def test_a_refused_body_is_kept_where_someone_can_read_it(
     """
     monkeypatch.setattr(rejection_capture, "user_data_path", lambda: tmp_path)
     refusal = '{"type":"error","error":{"message":"messages: text content blocks must be non-empty"}}'
-    client, seen = make_client(lambda _: httpx.Response(400, text=refusal))
+    client, seen = make_client(lambda _: httpx2.Response(400, text=refusal))
 
     response = client.post(
         "/v1/messages",
@@ -966,7 +966,7 @@ def test_adjacent_thinking_blocks_are_separated_before_they_reach_upstream() -> 
     the fixup has to run *before* translation, and a test of the function alone cannot tell whether
     the wiring put it there or after.
     """
-    client, seen = make_client(lambda _: httpx.Response(200, json={"id": "msg_1", "content": []}))
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
     response = client.post(
         "/v1/messages",
         json={
@@ -990,7 +990,7 @@ def test_adjacent_thinking_blocks_are_separated_before_they_reach_upstream() -> 
 def test_a_thinking_block_with_nothing_in_it_is_dropped() -> None:
     # Neither signature nor text: it carries nothing upstream can use, and it would otherwise be
     # spent as a separator between two real ones.
-    client, seen = make_client(lambda _: httpx.Response(200, json={"id": "msg_1", "content": []}))
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
     response = client.post(
         "/v1/messages",
         json={
@@ -1017,7 +1017,7 @@ def test_a_user_turn_is_left_alone() -> None:
     on content with no adjacent thinking blocks, so a user turn carrying two text blocks passes
     this test whether the role is checked or not — it cannot tell the guard from its absence.
     """
-    client, seen = make_client(lambda _: httpx.Response(200, json={"id": "msg_1", "content": []}))
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
     original = [thinking("one"), thinking("two")]
     response = client.post(
         "/v1/messages",
@@ -1032,11 +1032,11 @@ def layout(value: object) -> dict[str, Any]:
     return {"hook_fix_anthropic_request": {"thinking": {"assistant_message_layout": value}}}
 
 
-def assistant_blocks(seen: list[httpx.Request]) -> list[dict[str, Any]]:
+def assistant_blocks(seen: list[httpx2.Request]) -> list[dict[str, Any]]:
     return cast(list[dict[str, Any]], orjson.loads(seen[-1].read())["messages"][0]["content"])
 
 
-def send_stacked(client: TestClient) -> httpx.Response:
+def send_stacked(client: TestClient) -> httpx2.Response:
     """Two adjacent thinking blocks with a real text block after them.
 
     The real block is what tells the two layouts apart: `move_and_synthetic` moves it between the
@@ -1059,7 +1059,7 @@ def send_stacked(client: TestClient) -> httpx.Response:
 
 def test_move_and_synthetic_separates_with_the_real_block() -> None:
     client, seen = make_client(
-        lambda _: httpx.Response(200, json={"id": "msg_1", "content": []}),
+        lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}),
         overrides=layout("move_and_synthetic"),
     )
     assert send_stacked(client).status_code == 200
@@ -1072,7 +1072,7 @@ def test_move_and_synthetic_separates_with_the_real_block() -> None:
 
 def test_synthetic_only_leaves_the_real_block_where_it_was() -> None:
     client, seen = make_client(
-        lambda _: httpx.Response(200, json={"id": "msg_1", "content": []}),
+        lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}),
         overrides=layout("synthetic_only"),
     )
     assert send_stacked(client).status_code == 200
@@ -1086,7 +1086,7 @@ def test_synthetic_only_leaves_the_real_block_where_it_was() -> None:
 def test_layout_false_passes_the_stack_through_untouched() -> None:
     # The opt-out: an operator who turns it off gets exactly what the client sent.
     client, seen = make_client(
-        lambda _: httpx.Response(200, json={"id": "msg_1", "content": []}),
+        lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}),
         overrides=layout(False),
     )
     assert send_stacked(client).status_code == 200
@@ -1123,7 +1123,7 @@ def sse_thinking_upstream(signature: str) -> bytes:
     ).encode()
 
 
-def stream_thinking(client: TestClient) -> httpx.Response:
+def stream_thinking(client: TestClient) -> httpx2.Response:
     return client.post(
         "/v1/messages",
         json={"model": "claude-model", "messages": [], "stream": True},
@@ -1140,9 +1140,9 @@ def test_the_signature_shim_is_driven_by_configuration() -> None:
     The shim's default matches `StreamSettings`' default, so a test that never sets a non-default
     value passes whether the config is read or ignored — which is exactly the wiring under test.
     """
-    def upstream(request: httpx.Request) -> httpx.Response:
+    def upstream(request: httpx2.Request) -> httpx2.Response:
         del request
-        return httpx.Response(
+        return httpx2.Response(
             200,
             content=sse_thinking_upstream("sig-abc"),
             headers={"content-type": "text/event-stream"},
@@ -1171,9 +1171,9 @@ def test_a_request_is_in_the_footer_registry_while_it_is_in_flight() -> None:
     # Observed from inside the upstream handler, the one point that runs while the request genuinely is in flight. Asserting after the response returns could only ever see an empty registry, and would pass just as happily if nothing were ever registered.
     inflight: list[str] = []
 
-    def upstream(_: httpx.Request) -> httpx.Response:
+    def upstream(_: httpx2.Request) -> httpx2.Response:
         inflight.extend(entry.model for entry in _registry(client).snapshot())
-        return httpx.Response(200, json={"id": "msg_1", "content": []})
+        return httpx2.Response(200, json={"id": "msg_1", "content": []})
 
     client, _ = make_client(upstream)
     client.post("/v1/messages", json={"model": "claude-model", "messages": []})
@@ -1207,7 +1207,7 @@ def test_a_streaming_request_stays_registered_until_its_body_is_finished() -> No
             super().remove(request_id)
 
     client, _ = make_client(
-        lambda _: httpx.Response(
+        lambda _: httpx2.Response(
             200,
             content=sse_upstream("first", "second"),
             headers={"content-type": "text/event-stream"},
@@ -1231,7 +1231,7 @@ def test_a_streaming_request_stays_registered_until_its_body_is_finished() -> No
 def test_a_client_that_stops_reading_still_releases_its_slot() -> None:
     # The release sits in a `finally` rather than after the loop: a request that only leaves the footer on the happy path leaves it stale exactly when something has gone wrong.
     client, _ = make_client(
-        lambda _: httpx.Response(
+        lambda _: httpx2.Response(
             200,
             content=sse_upstream("first", "second"),
             headers={"content-type": "text/event-stream"},
@@ -1312,7 +1312,7 @@ def test_a_request_still_arriving_is_already_in_the_footer(request_log: None) ->
 
     Registration used to happen after the body was read, so a client that announced a body and stopped sending did not exist as far as the display was concerned — the shutdown waited on it correctly and nothing said so. Asserted from inside `body()` because that is the window: any check after `_serve` returns sees an empty registry whether the fix is present or not.
     """
-    client, _ = make_client(lambda _: httpx.Response(200, json={"id": "msg_1", "content": []}))
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
     chain = _chain_of(client)
     seen_while_reading: list[list[str]] = []
 
@@ -1341,7 +1341,7 @@ def test_a_served_request_writes_exactly_one_log_line(request_log: None, caplog:
 
     Every part of the footer was tested and correct while the log stream it sits under did not exist: nothing in the served chain emitted a line, and nothing asserted that anything did. A component test cannot catch that — only one that watches the served path can.
     """
-    client, _ = make_client(lambda _: httpx.Response(200, json={"id": "msg_1", "content": []}))
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
 
     with caplog.at_level(logging.INFO):
         client.post("/v1/messages", json={"model": "claude-model", "messages": []})
@@ -1357,7 +1357,7 @@ def test_a_token_count_says_it_was_one_and_which_counter_answered(request_log: N
 
     Read at the console it looked like a delivered turn that had lost every reply field, and it was a count — which has no reply to lose. The count branch returns before anything is sent or received on the delivery path, so it filled in none of the fields that branch fills in, and the successful-line shape had already dropped the route that would have said so.
     """
-    client, _ = make_client(lambda _: httpx.Response(200, json={"input_tokens": 4242}))
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"input_tokens": 4242}))
 
     with caplog.at_level(logging.INFO):
         client.post(
@@ -1382,7 +1382,7 @@ def test_a_count_upstream_could_not_answer_is_reported_as_an_estimate(request_lo
 
     The counter's name and its reason are the whole of what says so. The upstream leg does not: `send_anthropic_count_tokens` raises an error status as a pipeline error, so no response reaches the code that records which leg was flown, and this line looks like one that never left the process. Without the `ghc-failed` in front of it, it would also read exactly like a route that has no upstream counter and was always going to estimate.
     """
-    client, _ = make_client(lambda _: httpx.Response(500, json={"error": "upstream is down"}))
+    client, _ = make_client(lambda _: httpx2.Response(500, json={"error": "upstream is down"}))
 
     with caplog.at_level(logging.INFO):
         response = client.post(
@@ -1402,7 +1402,7 @@ def test_a_count_with_no_upstream_counter_says_that_rather_than_a_failure(reques
 
     `gpt-model` is served by translating to `/responses`, which has no count endpoint at all, so this route estimates every time and is working as configured. It shares `provider(local)` with an upstream that was asked and broke, and the reason is the only thing that separates them — which is why the reason is on the line rather than only in the attempts trail nobody reads.
     """
-    client, seen = make_client(lambda _: httpx.Response(200, json={"input_tokens": 99}))
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"input_tokens": 99}))
 
     with caplog.at_level(logging.INFO):
         response = client.post(
@@ -1424,7 +1424,7 @@ def test_a_count_upstream_answered_uselessly_keeps_the_leg_it_flew(request_log: 
 
     A 200 carrying no usable `input_tokens` is a reply — it has a protocol, a size, and a round trip behind it — and the count still falls to the estimator. Reporting no leg here would say the request never left the process, which is the reading that sent somebody looking at the wrong end of the exchange in the first place.
     """
-    client, _ = make_client(lambda _: httpx.Response(200, json={"input_tokens": 0}))
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"input_tokens": 0}))
 
     with caplog.at_level(logging.INFO):
         response = client.post(
@@ -1443,7 +1443,7 @@ def test_a_count_upstream_answered_uselessly_keeps_the_leg_it_flew(request_log: 
 
 
 def test_a_refused_request_is_reported_with_its_route_and_reason(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
-    client, _ = make_client(lambda _: httpx.Response(200, json={"id": "msg_1", "content": []}))
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
 
     with caplog.at_level(logging.INFO):
         client.post("/v1/messages", json={"model": "no-such-model", "messages": []})
@@ -1458,7 +1458,7 @@ def test_a_refused_request_is_reported_with_its_route_and_reason(request_log: No
 def test_a_streaming_request_reports_what_it_actually_delivered(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
     # Written by the delivery generator, not by the handler: at the moment the handler returns a stream has sent nothing, so a line written there would report every stream as having delivered zero bytes.
     client, _ = make_client(
-        lambda _: httpx.Response(
+        lambda _: httpx2.Response(
             200,
             content=sse_upstream("first", "second"),
             headers={"content-type": "text/event-stream"},
@@ -1485,7 +1485,7 @@ def test_a_stream_that_never_terminated_is_not_reported_as_a_clean_finish(
     So the two halves are asserted separately. The prefix must say `fail`, and the line must name the truncation rather than leave it to be inferred from which fields are missing — an absence reads the same as a field this endpoint does not report.
     """
     client, _ = make_client(
-        lambda _: httpx.Response(
+        lambda _: httpx2.Response(
             200,
             content=truncated_sse_upstream("first", "second"),
             headers={"content-type": "text/event-stream"},
@@ -1513,7 +1513,7 @@ async def test_an_upstream_that_tore_says_so_and_says_what_broke(
 
     This and the disconnect test below reach past the HTTP layer this file is otherwise about, because neither ending can be produced through it — `TestClient` drains the body rather than disconnecting, and no upstream stand-in reachable from a request can tear mid-stream. They stay here rather than moving to a component file because they need this file's `make_client` and `_chain_of` to build a real chain, and duplicating that to satisfy the directory name would be the worse trade.
     """
-    client, _ = make_client(lambda _: httpx.Response(200, json={"id": "msg_1", "content": []}))
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
     chain = _chain_of(client)
     trace = _Trace(method="POST", path="/v1/messages", request_id="req_1", started=time.monotonic())
     assembler = AnthropicAssembler()
@@ -1525,7 +1525,7 @@ async def test_an_upstream_that_tore_says_so_and_says_what_broke(
     async def tears_after_the_first_block() -> AsyncIterator[bytes]:
         whole = sse_upstream("first", "second")
         yield whole[: whole.index(b'event: content_block_start\ndata: {"index":1', 1)]
-        raise httpx.ReadError("connection reset by peer")
+        raise httpx2.ReadError("connection reset by peer")
 
     delivery = _tracked_delivery(
         stream_delivery(
@@ -1542,7 +1542,7 @@ async def test_an_upstream_that_tore_says_so_and_says_what_broke(
     with caplog.at_level(logging.INFO):
         async with asyncio.timeout(10):
             assert await anext(delivery), "the first block should have reached the client"
-            with pytest.raises(httpx.ReadError):
+            with pytest.raises(httpx2.ReadError):
                 async for _ in delivery:
                     pass
 
@@ -1563,7 +1563,7 @@ async def test_a_tear_after_the_stop_reason_is_still_a_tear(
 
     The other tear test cannot catch it: that one breaks after the first block, so no reason was ever recorded and the gate is never reached.
     """
-    client, _ = make_client(lambda _: httpx.Response(200, json={"id": "msg_1", "content": []}))
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
     chain = _chain_of(client)
     trace = _Trace(method="POST", path="/v1/messages", request_id="req_1", started=time.monotonic())
     assembler = AnthropicAssembler()
@@ -1575,7 +1575,7 @@ async def test_a_tear_after_the_stop_reason_is_still_a_tear(
     async def tears_after_its_stop_reason() -> AsyncIterator[bytes]:
         # Everything including `message_delta`, so upstream's reason is on the record, and then nothing.
         yield sse_upstream_without_message_stop("first", "second")
-        raise httpx.ReadError("connection reset by peer")
+        raise httpx2.ReadError("connection reset by peer")
 
     delivery = _tracked_delivery(
         stream_delivery(
@@ -1591,7 +1591,7 @@ async def test_a_tear_after_the_stop_reason_is_still_a_tear(
 
     with caplog.at_level(logging.INFO):
         async with asyncio.timeout(10):
-            with pytest.raises(httpx.ReadError):
+            with pytest.raises(httpx2.ReadError):
                 async for _ in delivery:
                     pass
 
@@ -1611,7 +1611,7 @@ def test_a_stream_cut_after_its_stop_reason_is_not_called_truncated(
     Reported as truncated anyway, the line argued with itself: `end_turn` followed immediately by a note saying nothing ended. So the report is gated on whether a reason came back rather than on the closing frame, which is also why this cannot be folded into the truncation test above — on the Responses leg the two arrive together and the distinction is invisible.
     """
     client, _ = make_client(
-        lambda _: httpx.Response(
+        lambda _: httpx2.Response(
             200,
             content=sse_upstream_without_message_stop("first", "second"),
             headers={"content-type": "text/event-stream"},
@@ -1636,7 +1636,7 @@ async def test_a_client_that_walked_away_is_not_blamed_on_upstream(
 
     Driven through `_tracked_delivery` rather than `TestClient`, which cannot express this. Written the obvious way first — stream over HTTP, stop reading, assert — it passed while proving nothing: `TestClient` drains the response body on the way out, so upstream finished, the line said `end_turn`, and no disconnect was ever exercised. Closing the delivery generator is what a client going away does to this code, and it is reachable only from here.
     """
-    client, _ = make_client(lambda _: httpx.Response(200, json={"id": "msg_1", "content": []}))
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
     chain = _chain_of(client)
     trace = _Trace(method="POST", path="/v1/messages", request_id="req_1", started=time.monotonic())
     assembler = AnthropicAssembler()
@@ -1688,7 +1688,7 @@ def test_a_stream_that_did_terminate_is_still_reported_as_one(
     Without it, reporting *every* stream as truncated would pass — and the fields the fix restores are exactly the ones a clean stream has always carried, so nothing else would notice.
     """
     client, _ = make_client(
-        lambda _: httpx.Response(
+        lambda _: httpx2.Response(
             200,
             content=sse_upstream("first", "second"),
             headers={"content-type": "text/event-stream"},
@@ -1709,7 +1709,7 @@ def test_a_request_that_reached_upstream_reports_bytes_in_both_directions(reques
 
     `↑` is what went out on the wire to upstream — not the client's body, which translation rewrites — and `↓` is what came back. A request refused before it ever reached upstream therefore reports neither: it has no upstream exchange to describe, and printing the client-side sizes there would be inventing numbers about a conversation that never happened.
     """
-    client, _ = make_client(lambda _: httpx.Response(200, json={"id": "msg_1", "content": []}))
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
 
     with caplog.at_level(logging.INFO):
         client.post("/v1/messages", json={"model": "claude-model", "messages": []})
@@ -1726,7 +1726,7 @@ def test_the_count_endpoint_reports_its_model_and_its_number(request_log: None, 
     Its line reported neither, which made the endpoint most likely to be called in a loop the least legible one on the proxy. Routing happens inside the handler, so both facts only exist once it has returned.
     """
     client, _ = make_client(
-        lambda _: httpx.Response(200, json={"input_tokens": 4242}), mappings={"alias": "claude-model"}
+        lambda _: httpx2.Response(200, json={"input_tokens": 4242}), mappings={"alias": "claude-model"}
     )
 
     with caplog.at_level(logging.INFO):
@@ -1740,7 +1740,7 @@ def test_the_count_endpoint_reports_its_model_and_its_number(request_log: None, 
 def test_upstream_token_usage_reaches_the_line(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
     # Taken from the payload that goes downstream, so the numbers on the line are the ones the client was told.
     client, _ = make_client(
-        lambda _: httpx.Response(
+        lambda _: httpx2.Response(
             200,
             json={
                 "id": "msg_1",
@@ -1766,7 +1766,7 @@ def test_a_responses_upstream_is_logged_in_its_own_words(request_log: None, capl
     A buffered reply is read back *after* translation, by which point it is Anthropic-shaped whatever answered it — so nothing in the body still says a Responses API was on the other end. The route does, and that is where the wording comes from. Worth an end-to-end assertion rather than a unit one: every piece of this was already correct in isolation while the buffered path was the one deriving its own answer.
     """
     client, _ = make_client(
-        lambda _: httpx.Response(
+        lambda _: httpx2.Response(
             200,
             json={
                 "id": "resp_1",
@@ -1821,7 +1821,7 @@ def test_a_streamed_responses_reply_is_logged_in_its_own_words(
     Its dialect comes from the assembler that read the stream rather than from the route, so the two paths reach the same answer by different routes and both have to be held to it.
     """
     client, _ = make_client(
-        lambda _: httpx.Response(
+        lambda _: httpx2.Response(
             200, content=responses_sse_upstream(), headers={"content-type": "text/event-stream"}
         )
     )
@@ -1845,7 +1845,7 @@ def test_a_route_whose_reply_cannot_be_read_claims_nothing_about_it(
     Reporting nothing here is the honest state and also the pre-existing one; giving these routes a real summary is open work, tracked in `.dev/docs/tui/deferred.md`.
     """
     client, _ = make_client(
-        lambda _: httpx.Response(
+        lambda _: httpx2.Response(
             200,
             json={
                 "id": "resp_1",
@@ -1878,7 +1878,7 @@ def test_a_streamed_translated_reply_reports_what_the_prompt_actually_cost(
     Responses puts the cached portion in `input_tokens_details` and counts it *inside* `input_tokens`, so reading that usage with Anthropic keys reported a heavily cached prompt as having been sent whole — the one number on the line that decides whether a turn was expensive.
     """
     client, _ = make_client(
-        lambda _: httpx.Response(
+        lambda _: httpx2.Response(
             200,
             content=responses_sse_upstream({
                 "input_tokens": 138_500,
@@ -1948,7 +1948,7 @@ def test_a_buffered_translated_reply_hands_the_client_anthropic_token_keys(
     the same route was answering with two different usage contracts depending on one flag.
     """
     client, _ = make_client(
-        lambda _: httpx.Response(
+        lambda _: httpx2.Response(
             200,
             json={
                 "id": "resp_1",
@@ -1983,7 +1983,7 @@ def test_a_malformed_usage_costs_the_counts_and_not_the_buffered_reply(
 ) -> None:
     # The reply itself is complete and legal; refusing to deliver it over a count would trade the answer for its accounting.
     client, _ = make_client(
-        lambda _: httpx.Response(
+        lambda _: httpx2.Response(
             200,
             json={
                 "id": "resp_1",
@@ -2003,18 +2003,18 @@ def test_a_malformed_usage_costs_the_counts_and_not_the_buffered_reply(
     assert response.json()["usage"] == {"input_tokens": 0, "output_tokens": 0}
 
 
-def _upstream_that_goes_quiet(gap: float) -> Callable[[httpx.Request], httpx.Response]:
+def _upstream_that_goes_quiet(gap: float) -> Callable[[httpx2.Request], httpx2.Response]:
     """One whole block, then a silence longer than any guard under test, then the rest."""
     whole = sse_upstream("first")
     head, _, tail = whole.partition(b'event: message_delta')
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(_: httpx2.Request) -> httpx2.Response:
         async def body() -> AsyncIterator[bytes]:
             yield head
             await asyncio.sleep(gap)
             yield b'event: message_delta' + tail
 
-        return httpx.Response(200, content=body(), headers={"content-type": "text/event-stream"})
+        return httpx2.Response(200, content=body(), headers={"content-type": "text/event-stream"})
 
     return handler
 
@@ -2050,7 +2050,7 @@ def test_the_bundled_default_leaves_a_quiet_upstream_alone() -> None:
 
 
 
-def _upstream_that_trickles(rounds: int) -> Callable[[httpx.Request], httpx.Response]:
+def _upstream_that_trickles(rounds: int) -> Callable[[httpx2.Request], httpx2.Response]:
     """Never silent, and far too slow to finish: the shape neither phase guard can see.
 
     Ends on its own after `rounds`, so that a deadline which failed to fire shows up as a stream that ran to completion rather than as a test that never returns.
@@ -2058,7 +2058,7 @@ def _upstream_that_trickles(rounds: int) -> Callable[[httpx.Request], httpx.Resp
     whole = sse_upstream("first")
     head, _, tail = whole.partition(b"event: message_delta")
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(_: httpx2.Request) -> httpx2.Response:
         async def body() -> AsyncIterator[bytes]:
             yield head
             for _round in range(rounds):
@@ -2066,7 +2066,7 @@ def _upstream_that_trickles(rounds: int) -> Callable[[httpx.Request], httpx.Resp
                 yield b": ping\n\n"
             yield b"event: message_delta" + tail
 
-        return httpx.Response(200, content=body(), headers={"content-type": "text/event-stream"})
+        return httpx2.Response(200, content=body(), headers={"content-type": "text/event-stream"})
 
     return handler
 
@@ -2082,10 +2082,10 @@ def test_the_attempt_deadline_reaches_the_streamed_body() -> None:
         _delivered(client)
 
 
-def _upstream_slow_to_answer(delay: float) -> Callable[[httpx.Request], Any]:
-    async def handler(_: httpx.Request) -> httpx.Response:
+def _upstream_slow_to_answer(delay: float) -> Callable[[httpx2.Request], Any]:
+    async def handler(_: httpx2.Request) -> httpx2.Response:
         await asyncio.sleep(delay)
-        return httpx.Response(
+        return httpx2.Response(
             200,
             content=sse_upstream("first"),
             headers={"content-type": "text/event-stream"},
@@ -2116,11 +2116,11 @@ def test_a_slow_answer_is_left_alone_when_no_header_timeout_is_set() -> None:
     assert b'"text":"first"' in _delivered(client)
 
 
-def _upstream_slow_then_trickling(header_delay: float, rounds: int) -> Callable[[httpx.Request], Any]:
+def _upstream_slow_then_trickling(header_delay: float, rounds: int) -> Callable[[httpx2.Request], Any]:
     whole = sse_upstream("first")
     head, _, tail = whole.partition(b"event: message_delta")
 
-    async def handler(_: httpx.Request) -> httpx.Response:
+    async def handler(_: httpx2.Request) -> httpx2.Response:
         await asyncio.sleep(header_delay)
 
         async def body() -> AsyncIterator[bytes]:
@@ -2130,7 +2130,7 @@ def _upstream_slow_then_trickling(header_delay: float, rounds: int) -> Callable[
                 yield b": ping\n\n"
             yield b"event: message_delta" + tail
 
-        return httpx.Response(200, content=body(), headers={"content-type": "text/event-stream"})
+        return httpx2.Response(200, content=body(), headers={"content-type": "text/event-stream"})
 
     return handler
 

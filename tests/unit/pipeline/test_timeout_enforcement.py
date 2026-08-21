@@ -7,7 +7,7 @@ a generous one until an upstream hangs.
 import asyncio
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 
 from app.model_provider import ModelDescriptor, ModelEndpoint
@@ -45,12 +45,12 @@ class SlowProvider:
         model_id: str,
         stream: bool = False,
         extra_headers: Any = None,
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         self.calls += 1
         await asyncio.sleep(self._delay)
-        return httpx.Response(200, json={})
+        return httpx2.Response(200, json={})
 
-    async def count_tokens(self, payload: Any, *, model_id: str) -> httpx.Response:
+    async def count_tokens(self, payload: Any, *, model_id: str) -> httpx2.Response:
         # Present so the fake really satisfies the protocol. Nothing here counts tokens, and a
         # silent stub would let a test think it had.
         raise NotImplementedError("this fake does not count tokens")

@@ -8,7 +8,7 @@ supervisor pointed at the new chain had nothing to ask.
 from types import SimpleNamespace
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 from fastapi import FastAPI
 
@@ -34,10 +34,10 @@ class StubProvider:
     async def refresh_catalog(self) -> bool:
         return False
 
-    async def send(self, *args: Any, **kwargs: Any) -> httpx.Response:
+    async def send(self, *args: Any, **kwargs: Any) -> httpx2.Response:
         raise NotImplementedError
 
-    async def count_tokens(self, *args: Any, **kwargs: Any) -> httpx.Response:
+    async def count_tokens(self, *args: Any, **kwargs: Any) -> httpx2.Response:
         raise NotImplementedError
 
 
@@ -57,13 +57,13 @@ class StubRegistry:
         return self._providers[name]
 
 
-def client_for(ids: frozenset[str]) -> httpx.AsyncClient:
+def client_for(ids: frozenset[str]) -> httpx2.AsyncClient:
     app = FastAPI()
     app.include_router(ops_router)
     registry = StubRegistry({"ghc": StubProvider("ghc", ids)})
     # Only `providers` is read here; standing up a whole Chain would tie these to composition.
     setattr(app.state, CHAIN_STATE_KEY, SimpleNamespace(providers=registry))
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t")
+    return httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://t")
 
 
 @pytest.mark.asyncio

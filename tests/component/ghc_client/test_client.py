@@ -1,6 +1,6 @@
 from collections.abc import AsyncIterator, Callable
 
-import httpx
+import httpx2
 import openai
 import pytest
 from anthropic import AsyncAnthropic
@@ -21,15 +21,15 @@ class StaticTokenSource:
         return None
 
 
-class RawByteStream(httpx.AsyncByteStream):
+class RawByteStream(httpx2.AsyncByteStream):
     async def __aiter__(self) -> AsyncIterator[bytes]:
         yield b"data: raw\n\n"
 
 
 def build_client(
-    handler: Callable[[httpx.Request], httpx.Response],
-) -> tuple[GhcApiClient, httpx.AsyncClient]:
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    handler: Callable[[httpx2.Request], httpx2.Response],
+) -> tuple[GhcApiClient, httpx2.AsyncClient]:
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     tokens = CopilotTokenManager(StaticTokenSource(), http_client, clock=lambda: 1000)
     client = GhcApiClient(
         AsyncOpenAI(
@@ -51,10 +51,10 @@ def build_client(
     return client, http_client
 
 
-def token_or(response: httpx.Response) -> Callable[[httpx.Request], httpx.Response]:
-    def handler(request: httpx.Request) -> httpx.Response:
+def token_or(response: httpx2.Response) -> Callable[[httpx2.Request], httpx2.Response]:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         if request.url.host == "api.github.com":
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 json={"token": "copilot", "expires_at": 5000, "refresh_in": 1500},
             )
@@ -75,16 +75,16 @@ def token_or(response: httpx.Response) -> Callable[[httpx.Request], httpx.Respon
     ],
 )
 async def test_each_endpoint_is_posted_with_copilot_auth(method: str, path: str) -> None:
-    seen: list[httpx.Request] = []
+    seen: list[httpx2.Request] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         if request.url.host == "api.github.com":
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 json={"token": "copilot", "expires_at": 5000, "refresh_in": 1500},
             )
         seen.append(request)
-        return httpx.Response(200, json={"ok": True})
+        return httpx2.Response(200, json={"ok": True})
 
     client, http_client = build_client(handler)
     try:
@@ -101,7 +101,7 @@ async def test_each_endpoint_is_posted_with_copilot_auth(method: str, path: str)
 
 @pytest.mark.asyncio
 async def test_streaming_response_is_returned_unconsumed() -> None:
-    client, http_client = build_client(token_or(httpx.Response(200, stream=RawByteStream())))
+    client, http_client = build_client(token_or(httpx2.Response(200, stream=RawByteStream())))
     try:
         response = await client.send_anthropic_messages({"model": "m"}, stream=True)
         assert response.is_stream_consumed is False
@@ -115,16 +115,16 @@ async def test_streaming_response_is_returned_unconsumed() -> None:
 
 @pytest.mark.asyncio
 async def test_extra_headers_reach_the_anthropic_leg() -> None:
-    seen: list[httpx.Request] = []
+    seen: list[httpx2.Request] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         if request.url.host == "api.github.com":
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 json={"token": "copilot", "expires_at": 5000, "refresh_in": 1500},
             )
         seen.append(request)
-        return httpx.Response(200, json={"ok": True})
+        return httpx2.Response(200, json={"ok": True})
 
     client, http_client = build_client(handler)
     try:
@@ -147,7 +147,7 @@ async def test_ordinary_send_raises_in_the_pipelines_vocabulary() -> None:
     aborted and the 429 reached the client as a 502 with no retry ever considered.
     """
     client, http_client = build_client(
-        token_or(httpx.Response(429, json={"error": "slow down"}, headers={"retry-after": "7"}))
+        token_or(httpx2.Response(429, json={"error": "slow down"}, headers={"retry-after": "7"}))
     )
     try:
         with pytest.raises(UpstreamRateLimit) as raised:
@@ -163,7 +163,7 @@ async def test_ordinary_send_raises_in_the_pipelines_vocabulary() -> None:
 
 @pytest.mark.asyncio
 async def test_responses_headers_returns_the_error_response_instead_of_raising() -> None:
-    client, http_client = build_client(token_or(httpx.Response(429, json={"error": "slow down"})))
+    client, http_client = build_client(token_or(httpx2.Response(429, json={"error": "slow down"})))
     try:
         response = await client.send_responses_headers({"model": "m"})
     finally:

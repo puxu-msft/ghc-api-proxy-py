@@ -1,7 +1,7 @@
 from collections.abc import Mapping
 from typing import Any, Protocol
 
-import httpx
+import httpx2
 
 from app.models.openai import ChatCompletionRequest, EmbeddingsRequest, ResponsesRequest
 from app.openai.responses_conversion import normalize_call_ids
@@ -16,16 +16,16 @@ class OpenAITarget(Protocol):
         payload: Mapping[str, Any],
         *,
         stream: bool = False,
-    ) -> httpx.Response: ...
+    ) -> httpx2.Response: ...
 
     async def send_responses(
         self,
         payload: Mapping[str, Any],
         *,
         stream: bool = False,
-    ) -> httpx.Response: ...
+    ) -> httpx2.Response: ...
 
-    async def send_embeddings(self, payload: Mapping[str, Any]) -> httpx.Response: ...
+    async def send_embeddings(self, payload: Mapping[str, Any]) -> httpx2.Response: ...
 
 
 class OpenAIClient:
@@ -41,12 +41,12 @@ class OpenAIClient:
         wire["model"] = self._resolver.resolve(request.model)
         return wire
 
-    async def chat(self, request: ChatCompletionRequest) -> httpx.Response:
+    async def chat(self, request: ChatCompletionRequest) -> httpx2.Response:
         wire = self._wire(request)
         wire["messages"] = sanitize_chat_messages(wire["messages"])
         return await self._target.send_openai(wire, stream=request.stream)
 
-    async def responses(self, request: ResponsesRequest) -> httpx.Response:
+    async def responses(self, request: ResponsesRequest) -> httpx2.Response:
         response = await self._target.send_responses(self._wire(request), stream=request.stream)
         if request.stream or not response.is_success:
             return response
@@ -55,11 +55,11 @@ class OpenAIClient:
             normalized = normalize_call_ids(data)
         finally:
             await response.aclose()
-        return httpx.Response(
+        return httpx2.Response(
             response.status_code,
             headers=response.headers,
             content=dumps(normalized),
         )
 
-    async def embeddings(self, request: EmbeddingsRequest) -> httpx.Response:
+    async def embeddings(self, request: EmbeddingsRequest) -> httpx2.Response:
         return await self._target.send_embeddings(self._wire(request))
