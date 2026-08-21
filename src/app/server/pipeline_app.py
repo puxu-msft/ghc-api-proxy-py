@@ -202,6 +202,8 @@ class _Trace:
     started: float = 0.0
     started_at: str = ""
     first_upstream_byte_s: float | None = None
+    upstream_max_gap_s: float | None = None
+    upstream_chunks: int = 0
     bytes_in: int | None = None
     received: int = 0
     usage: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
@@ -260,6 +262,8 @@ def _log_completion(chain: Chain, trace: _Trace, status_code: int | None, *, byt
         started_at=trace.started_at,
         duration_s=time.monotonic() - trace.started,
         first_upstream_byte_s=trace.first_upstream_byte_s,
+        upstream_max_gap_s=trace.upstream_max_gap_s,
+        upstream_chunks=trace.upstream_chunks,
         bytes_in=trace.bytes_in,
         bytes_out=bytes_out,
         usage=trace.usage,
@@ -630,10 +634,23 @@ async def _counted_upstream(chunks: AsyncIterator[bytes], chain: Chain, request_
     """Count what upstream sends, as it arrives, and forward it untouched.
 
     This is the number both the footer and the completion line report, because what an operator is watching is the proxy's conversation with upstream. Bytes delivered onward to the client are a different quantity and a much worse indicator: block-level delivery holds a block until it is whole, so a downstream count sits at zero for most of a request and then jumps — which reads as a broken display rather than as the buffering it is.
+
+    The pacing is taken here too, and only as two derived numbers. Every arrival's timestamp would answer more, and a busy stream is thousands of arrivals per request against a record written one line per request — so what is kept is the longest silence and how many arrivals there were, which is what the incident of 2026-08-20 needed and could not get: upstream went quiet mid-stream for 242 seconds, and afterwards nothing on this side could say so. A total duration cannot distinguish that from a turn that was simply long.
+
+    The gap is measured between arrivals rather than from the start, because the wait before the first is already `first_upstream_byte_s` and folding them together would make every request's maximum the time it spent routing.
     """
+    previous: float | None = None
     async for chunk in chunks:
+        now = time.monotonic()
         if chunk and trace.first_upstream_byte_s is None:
-            trace.first_upstream_byte_s = time.monotonic() - trace.started
+            trace.first_upstream_byte_s = now - trace.started
+        if previous is not None:
+            gap = now - previous
+            if trace.upstream_max_gap_s is None or gap > trace.upstream_max_gap_s:
+                trace.upstream_max_gap_s = gap
+        previous = now
+        # Every arrival, not only the ones carrying bytes, so a gap here means what a gap means to `with_idle_timeout` underneath — that guard resets on any item, and a count using a different rule would put the two numbers on scales that cannot be compared. httpx's `aiter_bytes` drops empty chunks anyway, so on the production chain the two rules agree.
+        trace.upstream_chunks += 1
         trace.received += len(chunk)
         chain.active_requests.add_bytes(request_id, len(chunk))
         yield chunk

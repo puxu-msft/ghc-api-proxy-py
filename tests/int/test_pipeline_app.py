@@ -2492,3 +2492,19 @@ def test_a_count_resolves_reasoning_the_same_way_the_send_does() -> None:
     approximations = [entry for entry in losses if entry["code"] == "reasoning-intent-approximated"]
     assert len(approximations) == 1, losses
     assert "xhigh" in approximations[0]["detail"] and "high" in approximations[0]["detail"]
+
+
+def test_a_silence_in_the_middle_of_a_delivered_stream_reaches_the_record() -> None:
+    """The pacing numbers have to arrive on the record by the path a streamed request actually takes.
+
+    What they mean is pinned where they are taken, in `tests/unit/pipeline/delivery/test_stream_delivery.py`; what this adds is that `_counted_upstream` is still the layer production streams through and that both fields survive the trace, the line and the writer. A field added to `RequestLine` and never assigned from the trace is written on every request as its default, which reads exactly like a stream nobody had to wait for.
+    """
+    quiet = 0.4
+    client, _ = make_client(_upstream_that_goes_quiet(quiet))
+
+    assert _delivered(client), "this test is only meaningful if the stream was delivered"
+
+    records = _records()
+    assert len(records) == 1, records
+    assert records[0]["upstream_chunks"] >= 2, "a stream that arrived in one piece cannot have a gap in it"
+    assert cast(float, records[0]["upstream_max_gap_s"]) >= quiet

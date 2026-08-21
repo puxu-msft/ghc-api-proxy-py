@@ -1001,3 +1001,63 @@ async def test_the_deadline_guard_settles_the_stream_it_was_watching() -> None:
     await delivery.aclose()
 
     assert released == [True]
+
+
+# --- How the upstream stream was paced, which the duration alone cannot say ---
+
+
+@pytest.mark.asyncio
+async def test_a_silence_in_the_middle_of_the_stream_is_recorded_apart_from_the_wait_for_its_first_byte() -> None:
+    """On 2026-08-20 upstream went quiet mid-stream for 242 seconds and nothing on this side could say so afterwards.
+
+    Two mistakes are pinned here rather than one, because both produce a plausible-looking number. Timing from the start of the request folds the wait for the first byte into the answer, and then every request's maximum is the time it spent routing — so the long sleep before the first chunk is deliberately the longest wait in this stream, and the assertion refuses it. Keeping only the latest gap reports the last one, which here is nothing at all.
+
+    Real sleeps rather than a fake clock: `time.monotonic` is read through the `time` module, so substituting it would replace it for the whole process, and the interval needed is two hundred milliseconds.
+    """
+    before_first, mid_stream = 0.15, 0.06
+
+    async def source() -> AsyncIterator[bytes]:
+        await asyncio.sleep(before_first)
+        yield b"first"
+        await asyncio.sleep(mid_stream)
+        yield b"second"
+        yield b"third"
+
+    trace = _Trace(method="POST", path="/v1/messages", started=time.monotonic())
+    counted = _counted_upstream(
+        source(),
+        cast(Any, SimpleNamespace(active_requests=ActiveRequestRegistry())),
+        "req",
+        trace,
+    )
+
+    async with aclosing(counted):
+        received = [chunk async for chunk in counted]
+
+    assert received == [b"first", b"second", b"third"]
+    assert trace.upstream_chunks == 3
+    assert trace.first_upstream_byte_s is not None
+    assert trace.first_upstream_byte_s >= before_first
+    assert trace.upstream_max_gap_s is not None
+    assert mid_stream <= trace.upstream_max_gap_s < before_first
+
+
+@pytest.mark.asyncio
+async def test_a_stream_of_one_chunk_reports_no_gap_rather_than_a_gap_of_zero() -> None:
+    """There is no interval between two arrivals when there was only one arrival, and `0.0` would read as "upstream never paused" — a measurement nobody took."""
+    async def source() -> AsyncIterator[bytes]:
+        yield b"only"
+
+    trace = _Trace(method="POST", path="/v1/messages", started=time.monotonic())
+    counted = _counted_upstream(
+        source(),
+        cast(Any, SimpleNamespace(active_requests=ActiveRequestRegistry())),
+        "req",
+        trace,
+    )
+
+    async with aclosing(counted):
+        assert [chunk async for chunk in counted] == [b"only"]
+
+    assert trace.upstream_chunks == 1
+    assert trace.upstream_max_gap_s is None

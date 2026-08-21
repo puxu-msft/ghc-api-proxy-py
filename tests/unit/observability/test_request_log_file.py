@@ -77,6 +77,8 @@ def test_a_successful_request_writes_one_complete_structured_record(tmp_path: Pa
         started=time.monotonic() - 1.0,
         started_at="2026-08-20T15:01:53.580Z",
         first_upstream_byte_s=0.42,
+        upstream_max_gap_s=6.5,
+        upstream_chunks=214,
         bytes_in=1783221,
         upstream_conn={"local": "172.19.141.235:56822", "peer": "140.82.116.5:443", "alpn": "h2", "stream_id": 7},
     )
@@ -102,6 +104,8 @@ def test_a_successful_request_writes_one_complete_structured_record(tmp_path: Pa
         "started_at",
         "duration_s",
         "first_upstream_byte_s",
+        "upstream_max_gap_s",
+        "upstream_chunks",
         "bytes_in",
         "bytes_out",
         "usage",
@@ -136,6 +140,9 @@ def test_a_successful_request_writes_one_complete_structured_record(tmp_path: Pa
         "started_at": "2026-08-20T15:01:53.580Z",
         "duration_s": "ignored",
         "first_upstream_byte_s": 0.42,
+        # How the stream was paced. `None` is fewer than two arrivals from upstream, which is what a buffered reply looks like — and is not the same claim as "there was no silence".
+        "upstream_max_gap_s": 6.5,
+        "upstream_chunks": 214,
         "bytes_in": 1783221,
         "bytes_out": 2153,
         "usage": {"input_tokens": 10, "output_tokens": 4},

@@ -125,6 +125,11 @@ class RequestLine:
     started_at: str = ""
     duration_s: float | None = None
     first_upstream_byte_s: float | None = None
+    # How the upstream stream was paced, for the question the duration cannot answer: a request that took four minutes because upstream went quiet for most of one of them, and a request that took four minutes producing bytes throughout, are the same number here and different incidents. `upstream_max_gap_s` is the longest silence between two arrivals from upstream, measured only *between* them — the wait before the first is `first_upstream_byte_s` above, and the wait after the last is not a gap between anything. `None` means fewer than two arrivals, which is not the same as no silence.
+    # A gap is timed against what `with_idle_timeout` counts as activity, so the number can be read straight against `upstream_request_timeouts.stream_idle`: a max gap sitting just under the configured idle timeout is a request that nearly died, and nothing else on this record says so. The default for that setting is 0 — no terminator at all — which is exactly the configuration where this field is the only account of a silence anyone will ever get.
+    # **Not rendered on the console line**, following `first_upstream_byte_s` above, which is the same sort of fact and has never been on it. A line that already carries between eight and twelve fields pays for each new one on every request, and the case worth catching is rare and already visible there: a stalled turn shows up as a duration the colour scale escalates on its own. The gap is the *next* question — was it slow or was it silent — and the answer belongs where a reader who has decided to ask it goes, which is the record.
+    upstream_max_gap_s: float | None = None
+    upstream_chunks: int = 0
     bytes_in: int | None = None
     bytes_out: int | None = None
     usage: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
