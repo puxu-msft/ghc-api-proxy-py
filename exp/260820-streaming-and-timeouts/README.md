@@ -1,6 +1,6 @@
 # 2026-08-20 探针存档：块级交付的上游所有权与三个超时守卫
 
-本目录保存的是 8 份已提交报告所引用的探针脚本。报告在 `docs/tmp/` 下（主仓库），它们点名 `/tmp/rev-*`、`/tmp/smell-probe`、`/tmp/idle-research` 里的文件作为证据；`/tmp` 会随重启消失，脚本因此挪到这里，路径按原来的根目录名分组，文件名未改，报告里的引用照着 `<组名>/<文件名>` 就能对上。
+本目录保存的是 8 份已提交报告所引用的探针脚本。报告在 `.dev/docs/` 各话题的 `reports/` 下，它们点名 `/tmp/rev-*`、`/tmp/smell-probe`、`/tmp/idle-research` 里的文件作为证据；`/tmp` 会随重启消失，脚本因此挪到这里，路径按原来的根目录名分组，文件名未改，报告里的引用照着 `<组名>/<文件名>` 就能对上。
 
 **只保留了脚本（59 个）。** 每个根目录下还有为变异对照复制的整棵仓库树（三个根合计约 23000 个文件），那些是派生物：由 `git` 加上报告里记录的变异内容可以重建，不保留。
 
@@ -8,12 +8,12 @@
 
 | 组 | 问题 | 结论 | 主要载体 |
 |---|---|---|---|
-| `smell-probe` | 关闭 `stream_delivery` 时上游到底释放没有 | 改动前 pull 在途则永不释放且 GC 收不掉；`session_liveness_stream` 是确定性释放的正样本对照 | `docs/tmp/260820-smell-survey-streaming-pull.md` |
+| `smell-probe` | 关闭 `stream_delivery` 时上游到底释放没有 | 改动前 pull 在途则永不释放且 GC 收不掉；`session_liveness_stream` 是确定性释放的正样本对照 | `../../docs/delivery-keepalive/reports/260820-smell-survey-streaming-pull.md` |
 | `rev-shield` | `shield` + `wait_for` 超时后为什么会打 `StopAsyncIteration exception in shielded future` | CPython 在 outer 被取消时给 inner 挂模块级 `_log_on_exception`，后续 `shield()` 不摘掉它 | 提交 `7a51902` |
-| `rev-s1` | 上游所有权修复的七条退出路径、异常优先级、循环收尾 | 全部确定性关闭、零残留 task | `docs/tmp/260820-review-s1-upstream-ownership.md` |
-| `rev-s1-wiring` | 该修复落到真实 starlette/httpx 链路上的表现 | 弃流噪声、连接池排空时机、`_AccountedStreamingResponse` 不关 body | `docs/tmp/260820-review-s1-wiring.md` |
-| `idle-research` / `rev-idle` / `rev-idle-impl` / `rev-idle2` | idle 守卫该按字节还是按解析事件计时 | 注释保活下事件级会误杀（C1 不触发 / C2 触发的对照） | `docs/tmp/260820-research-pipeline-idle-timeout.md` |
-| `rev-timeouts` / `rev-tw` | `await provider.send()` 等到哪一刻返回 | 流式下响应头到达即返回（1.084s 发头 / 1.086s 返回 / 体 +2s）；httpx read timeout 量的是读间间隔而非等头总时长 | `docs/tmp/260820-research-upstream-timeout-wiring.md` |
+| `rev-s1` | 上游所有权修复的七条退出路径、异常优先级、循环收尾 | 全部确定性关闭、零残留 task | `../../docs/delivery-keepalive/reports/260820-review-s1-upstream-ownership.md` |
+| `rev-s1-wiring` | 该修复落到真实 starlette/httpx 链路上的表现 | 弃流噪声、连接池排空时机、`_AccountedStreamingResponse` 不关 body | `../../docs/delivery-keepalive/reports/260820-review-s1-wiring.md` |
+| `idle-research` / `rev-idle` / `rev-idle-impl` / `rev-idle2` | idle 守卫该按字节还是按解析事件计时 | 注释保活下事件级会误杀（C1 不触发 / C2 触发的对照） | `../../docs/delivery-keepalive/reports/260820-research-pipeline-idle-timeout.md` |
+| `rev-timeouts` / `rev-tw` | `await provider.send()` 等到哪一刻返回 | 流式下响应头到达即返回（1.084s 发头 / 1.086s 返回 / 体 +2s）；httpx read timeout 量的是读间间隔而非等头总时长 | `../../docs/delivery-keepalive/reports/260820-research-upstream-timeout-wiring.md` |
 
 ## 它们不证明什么
 
