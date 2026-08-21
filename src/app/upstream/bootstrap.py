@@ -9,17 +9,17 @@ import httpx2
 
 from app.anthropic.client import AnthropicClient
 from app.anthropic.thinking.quarantine import ThinkingQuarantineStore
-from app.auth.providers import (
-    CLITokenProvider,
-    EnvTokenProvider,
-    FileTokenProvider,
-    GitHubTokenManager,
-)
 from app.config.paths import user_data_path
 from app.ghc_client import (
     CopilotTokenManager,
     GitHubAccountClient,
     infer_account_type,
+)
+from app.ghc_client.auth.providers import (
+    CLITokenProvider,
+    EnvTokenProvider,
+    FileTokenProvider,
+    GitHubTokenManager,
 )
 from app.openai.client import OpenAIClient
 from app.openai.responses_ws import ResponsesWebSocketClient

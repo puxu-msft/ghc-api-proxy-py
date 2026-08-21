@@ -18,12 +18,6 @@ from httpcore2._async.interfaces import AsyncConnectionInterface
 from httpx2._utils import get_environment_proxies
 from openai import AsyncOpenAI
 
-from app.auth.providers import (
-    CLITokenProvider,
-    EnvTokenProvider,
-    FileTokenProvider,
-    GitHubTokenManager,
-)
 from app.config.paths import expand_user_path, tokenization_state_path
 from app.config.schema import ProxyConfig
 from app.ghc_client import (
@@ -32,6 +26,12 @@ from app.ghc_client import (
     GhcClientConfig,
     build_identity_headers,
     build_request_headers,
+)
+from app.ghc_client.auth.providers import (
+    CLITokenProvider,
+    EnvTokenProvider,
+    FileTokenProvider,
+    GitHubTokenManager,
 )
 from app.model_provider import (
     PROVIDER_TYPE,

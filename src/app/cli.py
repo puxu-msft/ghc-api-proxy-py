@@ -10,11 +10,11 @@ from anyio import run
 from pydantic import ValidationError
 from yaml import YAMLError
 
-from app.auth.service import authenticate_device, clear_stored_token
 from app.config.loading import bundled_config_text, load_proxy_config
 from app.config.paths import tls_material_dir
 from app.config.schema import ProxyConfig
 from app.debug.models import collect_catalogs, render_json, render_text
+from app.ghc_client.auth.service import authenticate_device, clear_stored_token
 from app.lifecycle.entry import StandaloneOptions, run_standalone
 from app.lifecycle.standalone import LIFECYCLE_LOGGER, ShutdownReport
 from app.model_provider import ProviderNotConfigured

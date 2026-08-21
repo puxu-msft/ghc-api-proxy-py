@@ -7,9 +7,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app import __version__
-from app.auth.providers import noninteractive_token_available
 from app.config.paths import user_data_path
 from app.config.settings import AppSettings
+from app.ghc_client.auth.providers import noninteractive_token_available
 from app.history.consumer import HistoryConsumer
 from app.history.store import HistoryStore
 from app.history.ws import WebSocketManager

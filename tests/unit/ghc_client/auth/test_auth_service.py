@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from app.auth.service import run_device_authentication
+from app.ghc_client.auth.service import run_device_authentication
 from app.ghc_client.device_flow import DeviceCode
 
 

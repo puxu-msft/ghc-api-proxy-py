@@ -4,9 +4,9 @@ import httpx2
 import openai
 import pytest
 
-from app.auth.providers import GitHubTokenManager, GitHubTokenProvider, TokenInfo
 from app.config.settings import AppSettings
 from app.ghc_client import CopilotTokenManager
+from app.ghc_client.auth.providers import GitHubTokenManager, GitHubTokenProvider, TokenInfo
 from app.upstream.base import ResponsesHeadersPendingTransportError
 from app.upstream.client import create_copilot_sdk_clients, create_sdk_clients
 from app.upstream.copilot import CopilotUpstream, GitHubTokenSourceAdapter

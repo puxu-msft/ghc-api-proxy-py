@@ -11,13 +11,13 @@ from typing import Any
 
 import httpx2
 
-from app.auth.providers import GitHubTokenManager
 from app.config.settings import AppSettings
 from app.ghc_client import (
     GhcApiClient,
     build_identity_headers,
     build_request_headers,
 )
+from app.ghc_client.auth.providers import GitHubTokenManager
 from app.ghc_client.tokens import CopilotTokenManager
 from app.upstream.client import SDKClients
 from app.upstream.ghc_settings import ghc_config_from_settings

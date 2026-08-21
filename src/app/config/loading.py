@@ -25,7 +25,7 @@ BUNDLED_CONFIG_RESOURCE = "bundled-config.yaml"
 # read as a top-level `config` key and `ProxyConfig` forbids unknown ones — the variable would
 # break start-up rather than select a file.
 CONFIG_PATH_VARIABLE = f"{ENV_PREFIX}CONFIG"
-# The GitHub token `app.auth.providers.EnvTokenProvider` reads. Excluded for the same reason as the one above and not a variation on it: it shares the `GHC_` prefix, so left in it arrives as a top-level `api_proxy_github_token` key and refuses to start. Named here rather than in the auth module because this is where the prefix that creates the collision is defined.
+# The GitHub token `app.ghc_client.auth.providers.EnvTokenProvider` reads. Excluded for the same reason as the one above and not a variation on it: it shares the `GHC_` prefix, so left in it arrives as a top-level `api_proxy_github_token` key and refuses to start. Named here rather than in the auth module because this is where the prefix that creates the collision is defined.
 GITHUB_TOKEN_VARIABLE = f"{ENV_PREFIX}API_PROXY_GITHUB_TOKEN"
 NON_SETTING_VARIABLES = frozenset({CONFIG_PATH_VARIABLE, GITHUB_TOKEN_VARIABLE})
 

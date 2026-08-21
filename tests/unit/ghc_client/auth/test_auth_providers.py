@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from app.auth.providers import (
+from app.ghc_client.auth.providers import (
     CLITokenProvider,
     DeviceAuthProvider,
     EnvTokenProvider,

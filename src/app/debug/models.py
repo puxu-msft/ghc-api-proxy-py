@@ -13,8 +13,8 @@ from typing import Any, cast
 
 from rich.cells import cell_len
 
-from app.auth.providers import NoGitHubToken
 from app.config.schema import ProxyConfig
+from app.ghc_client.auth.providers import NoGitHubToken
 from app.model_provider import GithubCopilotProvider, model_type_of, resolve_endpoints
 from app.model_provider.github_copilot import DRIVEN_ENDPOINTS
 from app.observability.footer import CONTROL_CHARS
