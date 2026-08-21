@@ -66,6 +66,24 @@ def test_a_refused_body_is_written_as_it_went_out(tmp_path: Path) -> None:
     assert record["request_id"] == "req-1"
 
 
+def test_the_wire_bytes_are_kept_beside_the_dict_they_cannot_be_derived_from(tmp_path: Path) -> None:
+    """Two forms of one body, because re-serializing the dict is a guess at what upstream read.
+
+    The bytes here say the same thing as the payload and are not the same string: key order and spacing are decided by whoever serialized them, which is the SDK and not this pipeline. That is the whole reason both are written — a refusal about how a body was spelled is unanswerable from a dict, and until now only the length of the real bytes was ever recorded.
+    """
+    payload: dict[str, Any] = {"model": "claude-opus-5", "messages": []}
+    sent = b'{"messages": [], "model": "claude-opus-5"}'
+    error = UpstreamRejected("refused", status_code=400, body="{}", sent=sent)
+
+    rejection_capture.capture_rejection(_context(payload), error, request_id="req-1")
+
+    record = _only_capture(tmp_path)
+    assert record["sent"] == sent.decode()
+    assert record["sent_bytes"] == len(sent)
+    assert json.loads(record["sent"]) == record["payload"], "the two must describe one request"
+    assert record["sent"] != json.dumps(record["payload"]), "if the dict re-serialized to the same string there would be nothing to keep"
+
+
 @pytest.mark.parametrize(
     "error",
     [

@@ -6,6 +6,8 @@ A rejection is upstream's verdict on a body, and the body is the one thing this 
 
 **Always on, and derived rather than configured.** These are supposed to be rare; the run where one first happens is the run whose evidence is wanted, and a switch that has to be turned on beforehand is a switch that is off when it matters. `config.example.yaml` has no key for this, and inventing one would put a decision in the operator's hands that they can only get wrong in one direction. The cost is bounded instead: the newest few are kept and the rest are pruned on the way in.
 
+**Two forms of the body, because they are two different facts.** `payload` is the dict the pipeline built, after translation and after every subscriber; `sent` is the bytes httpx put on the wire. They are usually the same request said twice, and the day they are not is the day one of them is the answer: a refusal about a duplicated key, a number's spelling, or an encoding cannot be read off a dict that was never serialized. See `UpstreamRejected.sent` for why the bytes have to be carried on the error rather than fetched here.
+
 **Headers are not written.** Not redaction — scope. What answers "why was this refused" is the body and upstream's own words about it; the request headers are the same on the request that succeeded a second earlier.
 """
 
@@ -49,6 +51,7 @@ def capture_rejection(context: RequestContext, error: BaseException, *, request_
     if not isinstance(error, UpstreamRejected):
         return None
 
+    sent = error.sent
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%f")[:-3]
     name = f"{stamp}-{error.status_code}-{request_id or context.id}.json"
     record: dict[str, Any] = {
@@ -68,6 +71,11 @@ def capture_rejection(context: RequestContext, error: BaseException, *, request_
         "attempts": context.attempt_count,
         # The point of the file. This is the payload as it stood when the attempt was made, which is after translation and after every `attempt.prepare` subscriber has had it.
         "payload": context.payload,
+        # And what actually crossed the wire. `payload` above is a dict that had yet to be serialized, so it cannot show key order, separators, or anything the SDK did on the way out — and upstream's verdict is a verdict on the bytes, not on the dict they were built from. Only the length of these was ever recorded before, which answers "was it big" and nothing else.
+        # Both halves are always written. `sent_bytes` is the exact length whatever happens to the text beside it, so a zero there says the failure reached us without a request attached — the SDK boundary is the only place these are read, and a refusal synthesised anywhere else has none — rather than saying upstream refused an empty body.
+        "sent_bytes": len(sent),
+        # `replace` rather than a strict decode: these are JSON bodies the SDK serialized and are UTF-8 by construction, and the substitution is there so a body that somehow is not still gets written instead of losing the whole capture to a decode error. `sent_bytes` stays exact, so a substitution shows up as a length that no longer matches the text.
+        "sent": sent.decode("utf-8", errors="replace"),
     }
 
     try:

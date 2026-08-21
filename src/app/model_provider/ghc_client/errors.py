@@ -77,6 +77,25 @@ def _response_parts(error: Exception) -> tuple[int | None, dict[str, str], str]:
     return status, headers, body
 
 
+def _sent_body(error: Exception) -> bytes:
+    """The bytes httpx actually put on the wire, taken off the request the SDK attached to its failed response.
+
+    Read here because this is the last point at which they exist. The response — and the request under it — is dropped with the SDK exception the moment it is translated, and everything downstream has only the payload dict, which is what the body looked like before it was serialized. `len()` of these bytes was already being reported on the completion line; the bytes themselves were never kept anywhere, so a refusal about how a body was encoded had nothing to be read against.
+
+    Taken only for a refusal, not for every SDK failure. A rejected body is as large as the conversation that produced it, and a 5xx or a rate limit is not answered by looking at it.
+    """
+    response: Any = getattr(error, "response", None)
+    request: Any = getattr(response, "request", None)
+    if request is None:
+        return b""
+    try:
+        content: Any = request.content
+    except Exception:
+        # `httpx.Request.content` raises when the body was a stream that was never read, which no send on this path uses. Guarded rather than assumed because this runs while an upstream failure is already on its way to the client: a second failure here would replace upstream's own verdict with a traceback about the note we were trying to take.
+        return b""
+    return content if isinstance(content, bytes) else b""
+
+
 def normalize_upstream_error(error: BaseException) -> PipelineError | None:
     """Map one SDK failure onto the closed set, or None when it is not one.
 
@@ -102,6 +121,7 @@ def normalize_upstream_error(error: BaseException) -> PipelineError | None:
                 status_code=status,
                 headers=headers,
                 body=body,
+                sent=_sent_body(error),
             )
         return UpstreamError(
             f"upstream returned {status}: {error}",

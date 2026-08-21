@@ -30,8 +30,9 @@ def status_error(
     *,
     headers: dict[str, str] | None = None,
     body: str = "{}",
+    sent: bytes = b"",
 ) -> Exception:
-    request = httpx2.Request("POST", "https://upstream.example/responses")
+    request = httpx2.Request("POST", "https://upstream.example/responses", content=sent)
     response = httpx2.Response(status, headers=headers or {}, text=body, request=request)
     return openai.APIStatusError("upstream said no", response=response, body=None)
 
@@ -139,3 +140,36 @@ def test_an_upstream_server_error_is_still_a_bad_gateway() -> None:
     failed = normalize_upstream_error(status_error(503))
     assert failed is not None
     assert error_status(failed) == 502
+
+
+def test_a_refusal_carries_the_bytes_it_was_a_refusal_of() -> None:
+    """This boundary is the last place the outbound body exists.
+
+    The SDK's exception holds the response, the response holds the request, and both are dropped as soon as the error becomes ours — after which only the payload dict survives, which is the body before it was serialized. The bytes are what upstream read, so they travel with the verdict on them.
+    """
+    sent = b'{"model":"gpt-5","input":"hi"}'
+    rejected = normalize_upstream_error(status_error(400, sent=sent))
+
+    assert isinstance(rejected, UpstreamRejected)
+    assert rejected.sent == sent
+
+
+def test_a_refusal_whose_body_cannot_be_read_back_is_still_a_refusal() -> None:
+    """Reading the request off the error must not become a second failure on top of the first.
+
+    `httpx.Request.content` raises for a body that was streamed rather than held, which no send on this path does today — but the client is already being told what upstream said, and a `RequestNotRead` raised while taking a note about it would replace that answer with a traceback.
+    """
+    assert UpstreamRejected("refused", status_code=400).sent == b"", "the field has to have a value when nothing supplied one"
+
+    unread = httpx2.Request("POST", "https://upstream.example/responses", content=iter([b"chunk"]))
+    error = openai.APIStatusError(
+        "upstream said no",
+        response=httpx2.Response(400, text="{}", request=unread),
+        body=None,
+    )
+
+    normalized = normalize_upstream_error(error)
+
+    assert isinstance(normalized, UpstreamRejected)
+    assert normalized.status_code == 400
+    assert normalized.sent == b""

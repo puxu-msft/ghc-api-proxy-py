@@ -963,6 +963,33 @@ def test_a_refused_body_is_kept_where_someone_can_read_it(
     assert record["payload"] == orjson.loads(seen[-1].read())
 
 
+def test_a_refused_body_is_kept_as_the_bytes_that_actually_crossed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The capture must hold the wire body, not only a dict that would have to be serialized again to become one.
+
+    `payload` beside it is the request as the pipeline built it, and re-encoding that dict is a guess at what went out: key order, separators and whatever the SDK did on the way are all decided after the pipeline is finished with it. Only the *length* of the real bytes was ever recorded, on the completion line, which cannot be compared against anything.
+
+    Asserted through the app for the same reason as the test above — the bytes are read at the SDK error boundary, and a boundary nobody reaches looks exactly like a working one — and against `seen`, which is httpx's own record of the request it sent.
+    """
+    monkeypatch.setattr(rejection_capture, "user_data_path", lambda: tmp_path)
+    client, seen = make_client(lambda _: httpx2.Response(400, text='{"error":"no"}'))
+
+    response = client.post(
+        "/v1/messages",
+        json={"model": "claude-model", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 400
+    captures = list((tmp_path / "rejected").glob("*.json"))
+    assert len(captures) == 1, f"nothing kept the refused body: {captures}"
+    record = orjson.loads(captures[0].read_bytes())
+    wire = seen[-1].read()
+    assert wire, "this test is only meaningful if a body really went out"
+    assert record["sent"].encode() == wire
+    assert record["sent_bytes"] == len(wire)
+
+
 def thinking(text: str = "t", signature: str = "sig") -> dict[str, Any]:
     return {"type": "thinking", "thinking": text, "signature": signature}
 
