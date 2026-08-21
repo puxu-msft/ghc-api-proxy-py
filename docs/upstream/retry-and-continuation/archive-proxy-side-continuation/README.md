@@ -8,7 +8,7 @@
 
 不是因为它做不出来，是因为它要付的代价在换了方案之后**整片消失**了。
 
-`reports/spec-stream-continuation.md` 经三轮独立评审（共 18 + 5 + 1 条发现全部采纳）之后，把启用它的前提收敛成四条，其中第 4.3 条**没有解**：
+`reports/spec-stream-continuation.md` 经三轮独立评审（11 + 7 + 1 条发现全部采纳；原文 `:3` 的「18」已是前两轮之和）之后，把启用它的前提收敛成四条，其中第 4.3 条**没有解**：
 
 > 不借助上游提供的 resume cursor 或幂等 generation identity，无法可靠区分「模型在重复前缀」与「模型有意重复同一句话」。
 
@@ -17,7 +17,7 @@
 用户的裁决没有停在「接受还是不接受这个代价」上，而是**换掉了承载续写的那一侧**。MCP-driven 方案下：
 
 - **4.1（可证明的 resume contract）作废**——续写请求由客户端构造，不需要代理证明自己能重建它。
-- **4.2（已提交 block ledger 的稳定身份、内容摘要、carrier digest）作废**——代理不再需要把已提交的块回放给上游，客户端的 transcript 本来就是权威。
+- **4.2 的一半作废**：稳定语义身份、内容摘要、carrier digest 是为了把已提交的块回放给上游并做去重，而客户端的 transcript 本来就是权威，这部分不再需要。**但「有一个可读的 committed frontier」不作废**——MCP-driven 的那道门（已交付过至少一个完整块）正要靠它，而它今天还读不出来（见 `../status.md` 的现状表）。原文 `:97` 把它称作「独立 commit state」。
 - **4.3（重复前缀 suppression）作废**——模型仍可能重述，但那是一次**正常对话里的正常重述**，发生在客户端可见的历史上，不是代理偷偷修补出来的产物。没有东西需要被抑制，也就没有那个无解的判据。
 - **4.4（tool/reasoning 安全条件）作废**——`tool_result` 一直在客户端手里，代理拿不到它才是原方案必须 ABANDON 的理由。
 
@@ -29,7 +29,12 @@
 - **本侧结束不等于上游失败**（原文的 `LOCAL_ABORT`）。客户端断开、进程退出、我方主动放弃，与上游截断的**位置事实完全可能相同**，所以位置事实不足以决定恢复资格，起因必须在发生处记下。用户 2026-08-21 已把这一条写进人写文档的「无法继续」一格。
 - **一次请求只有一个 `message_start`；中间 attempt 绝不向下游发终止性帧**（原文 5.1）。这条对无痕重试同样适用，与续写方案的取舍无关。
 - **每个 attempt 必须新建 assembler、`Terminal` 与 attempt-local buffer；已提交 frontier 不得回退。**
-- **`usage` 只取最终成功 attempt，不累加。**
+- **后续 attempt 的身份不得泄漏到 wire**：downstream `message_id`、model、HTTP status 与已提交 response headers 在首个可见 batch 后冻结，后续 attempt 的 response id、model、status、request id、rate-limit headers 只进 attempt diagnostics。否则一条 Anthropic message 会呈现为两条上游 response 的拼接。
+- **每个 attempt 有自己的 `deadline_at`**（`context.begin_attempt()`），不得沿用前一 attempt 已过期的 deadline。
+- **一条接线陷阱，原文明写「最容易在接线时踩」**：若把每个 attempt 分别交给现有 `stream_delivery`，它在第一次 EOF 就会发出 `error` 并返回，wire 从此不可恢复。原文强调**无痕重试同样会踩**，所以这条不能等到续写启用才生效——它现在就约束 D 阶段。
+- **`usage` 不累加**——这一半仍然成立。
+
+**下面这条不再成立，列在这里免得被当成仍然有效**：原文的「`usage` 只取最终成功 attempt」预设一次下游 message 可以横跨多个上游 attempt，而 MCP-driven 下每条下游 message 只对应一个 attempt，且它是失败的那个。新方向报的是**那次失败 attempt 上游实报的值**（见 `../status.md` 与 `../decisions.md`）。前提被拆掉了，结论跟着走。
 
 ## 目录
 

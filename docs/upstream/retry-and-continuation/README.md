@@ -24,6 +24,7 @@
 | 路径 | 是什么 |
 |---|---|
 | `status.md` | **活文档**。当前实现状态、分阶段路线、每阶段的验证方式 |
+| `decisions.md` | 裁决记录：哪条写进了人写文档、哪条只存在于讨论中、哪条其实是本项目的推论、哪条还没裁 |
 | `deferred.md` | 未闭合、待查、以及明确不做的 |
 | `archive-proxy-side-continuation/` | 被裁决放弃的代理内续写方案，及其三轮评审。原件逐字保留 |
 | `reports/` | 本主题的调查报告原件 |
@@ -34,8 +35,9 @@
 
 | 事实 | 证据等级 | 出处 |
 |---|---|---|
-| 撞 `max_output_tokens` 时，上游**一定**为被截断的 item 发出 `output_item.done`，且该 item 自己会被交付成一个完整块 | 录制，n=20，逐例 | `reports/260821-max-tokens-block-completeness.md` |
-| 被截断的 item 在 `output_item.done` 上带 `status:"incomplete"`，完整的带 `"completed"`；**reasoning item 没有这个字段**（与正常收尾的 reasoning item 键集逐字相同，已做正样本对照） | 录制 | 同上 + 本会话探针 |
+| 撞 `max_output_tokens` 时，上游为被截断的 item 发出 `output_item.done`——**观测到的 20/20 例皆如此** | 录制，n=20，逐例。**样本边界**：2026-08-04～08，模型 `gpt-5.6-sol`／`gpt-5.6-terra`，`incomplete_details.reason` 仅 `max_output_tokens` 一种。随时间或模型变化未排除 | `reports/260821-max-tokens-block-completeness.md` |
+| 因此被截断的那个 item 自己会被交付成一个完整块 | **代码事实**（`assembler.py:231-232` → `_close`：`output_item.done` 是块完成的唯一判据），在上一行成立的前提下 | 同上 |
+| 被截断的 item 在 `output_item.done` 上带 `status:"incomplete"`，完整的带 `"completed"`；**reasoning item 没有这个字段**（与正常收尾的 reasoning item 键集逐字相同，已做正样本对照） | 录制，`status:"incomplete"` 实测 15 次（4 次在 `function_call` 上） | 同上 + `evidence/probe-reasoning-item-control.py` |
 | Responses 腿的终止只有 `response.completed`(64351) 与 `response.incomplete`(20)；`response.failed`／`cancelled`／上游 `error` 帧**各 0 次** | 录制，134336 个 operation | `reports/260821-upstream-termination-reasons.md` |
 | `incomplete_details.reason` 20/20 全是 `max_output_tokens`，**没有第二个取值** | 录制 | 同上 |
 | Anthropic 腿实测到的 `stop_reason`：`tool_use`(124927)、`end_turn`(8290)、`max_tokens`(24)、`refusal`(1)。`model_context_window_exceeded` **零观测** | 录制 | 同上 |

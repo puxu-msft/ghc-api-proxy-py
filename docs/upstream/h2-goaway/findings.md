@@ -3,7 +3,7 @@
 **状态**：活文档。诊断已收敛；六处修复已落地；两处待裁决（见 [`deferred.md`](deferred.md)）。原本挂在这里的「一处接线待做」已于 2026-08-21 移交，见下。
 **本文是入口**：目录导览与证据地图在 [`README.md`](README.md)，过程产物在 `archive-260820/`（十份），只在需要证据时去读。
 
-> **2026-08-21 移交**：`decide_stream_ending()` 的接线，连同「截断之后怎么恢复」这整件事，已移交给 [`../retry-and-continuation/`](../retry-and-continuation/)。本文下面几处描述该函数**四条路**的段落是当时的设计记录，其中 **CONTINUE（代理内续写）已被用户裁决放弃**，`continuation_messages`／`RetryReason.CONTINUATION` 由待接线的孤儿件变为待删除的件；**R4（合成 `message_start` 而零块）那一格也随 `synthesized_response_headers_after_sec` 的删除而不再可达**。读那几段时按本注理解，段落本身不改写。
+> **2026-08-21 移交**：`decide_stream_ending()` 的接线，连同「截断之后怎么恢复」这整件事，已移交给 [`../retry-and-continuation/`](../retry-and-continuation/)。本文下面几处描述该函数**四条路**的段落是当时的设计记录，其中 **CONTINUE（代理内续写）已被用户裁决放弃**，`continuation_messages`／`RetryReason.CONTINUATION` 由待接线的孤儿件变为待删除的件。另有一格是**有条件的**：R4（合成 `message_start` 而零块）只在 `synthesized_response_headers_after_sec` 被删除之后才不再可达，而**该配置项在写下本注时仍然存在**（`src/app/config/schema.py:264`，默认 240 秒），删除属新主题的 D 阶段。读那几段时按本注理解，段落本身不改写。
 
 ---
 
