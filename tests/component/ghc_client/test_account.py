@@ -1,7 +1,7 @@
 import httpx2
 import pytest
 
-from app.ghc_client.account import GitHubAccountClient, infer_account_type
+from app.model_provider.ghc_client.account import GitHubAccountClient, infer_account_type
 
 
 @pytest.mark.parametrize(

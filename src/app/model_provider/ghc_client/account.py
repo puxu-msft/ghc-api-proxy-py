@@ -2,7 +2,7 @@ from collections.abc import Mapping
 
 import httpx2
 
-from app.ghc_client.config import GITHUB_AUTH_BASE_URL
+from app.model_provider.ghc_client.config import GITHUB_AUTH_BASE_URL
 
 USER_PATH = "/user"
 COPILOT_USER_PATH = "/copilot_internal/user"

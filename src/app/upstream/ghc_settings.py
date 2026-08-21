@@ -1,4 +1,4 @@
-"""Maps `AppSettings` onto the `app.ghc_client` configuration.
+"""Maps `AppSettings` onto the `app.model_provider.ghc_client` configuration.
 
 Kept in its own module to avoid an import cycle.
 Both `urls` and `copilot` need this mapping.
@@ -6,7 +6,7 @@ Both `urls` and `copilot` need this mapping.
 """
 
 from app.config.settings import AppSettings
-from app.ghc_client import GhcClientConfig
+from app.model_provider.ghc_client import GhcClientConfig
 
 
 def ghc_config_from_settings(settings: AppSettings) -> GhcClientConfig:

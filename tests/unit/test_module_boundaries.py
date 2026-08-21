@@ -60,11 +60,11 @@ def test_the_typed_kernel_is_a_leaf() -> None:
 
 
 def test_pipeline_exceptions_stay_importable_without_the_pipeline() -> None:
-    """`app.ghc_client` speaks this vocabulary, and the cycle it closed was a real outage.
+    """`app.model_provider.ghc_client` speaks this vocabulary, and the cycle it closed was a real outage.
 
     Normalising SDK errors needed the pipeline's exception names; importing them pulled in the
-    executor, then `app.upstream`, then `app.ghc_client` itself, and the process would not start.
+    executor, then `app.upstream`, then `app.model_provider.ghc_client` itself, and the process would not start.
     """
     errors = reachable_from("app.pipeline.exceptions")
 
-    assert not [name for name in errors if name.startswith(("app.upstream", "app.ghc_client"))]
+    assert not [name for name in errors if name.startswith(("app.upstream", "app.model_provider.ghc_client"))]

@@ -345,7 +345,7 @@ def error_status(error: BaseException) -> int:
     Nor must an upstream answer be flattened into one. A client that gets 429 can back off and a
     client that gets 400 can fix its body; both learn nothing from a 502, which says the proxy
     itself broke. Everything used to land on that 502 because the SDK's exceptions were outside
-    the closed set — see `app.ghc_client.errors`.
+    the closed set — see `app.model_provider.ghc_client.errors`.
     """
     if isinstance(
         error,

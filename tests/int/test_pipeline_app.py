@@ -26,9 +26,9 @@ from pydantic import ValidationError
 from starlette.requests import ClientDisconnect, Request
 
 from app.config.schema import ModelProviderConfig, ProxyConfig
-from app.ghc_client import GhcApiClient, GhcClientConfig
-from app.ghc_client.tokens import CopilotTokenManager
 from app.model_provider import GithubCopilotProvider, ModelProvider
+from app.model_provider.ghc_client import GhcApiClient, GhcClientConfig
+from app.model_provider.ghc_client.tokens import CopilotTokenManager
 from app.observability import rejection_capture
 from app.observability.active_requests import ActiveRequestRegistry
 from app.observability.logging import setup_logging

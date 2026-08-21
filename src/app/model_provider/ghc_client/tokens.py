@@ -7,7 +7,7 @@ from typing import Any, Protocol
 import anyio
 import httpx2
 
-from app.ghc_client.config import GITHUB_AUTH_BASE_URL
+from app.model_provider.ghc_client.config import GITHUB_AUTH_BASE_URL
 
 TOKEN_PATH = "/copilot_internal/v2/token"
 COPILOT_INTERNAL_API_VERSION = "2025-04-01"

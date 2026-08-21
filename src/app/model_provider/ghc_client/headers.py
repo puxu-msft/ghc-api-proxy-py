@@ -1,7 +1,7 @@
 from collections.abc import Mapping
 from uuid import uuid4
 
-from app.ghc_client.config import GhcClientConfig
+from app.model_provider.ghc_client.config import GhcClientConfig
 
 
 def build_identity_headers(config: GhcClientConfig) -> dict[str, str]:

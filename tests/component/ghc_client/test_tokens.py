@@ -2,7 +2,7 @@ import anyio
 import httpx2
 import pytest
 
-from app.ghc_client.tokens import CopilotTokenManager
+from app.model_provider.ghc_client.tokens import CopilotTokenManager
 
 
 class StaticTokenSource:

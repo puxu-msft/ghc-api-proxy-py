@@ -3,7 +3,7 @@ from collections.abc import Awaitable, Callable
 import httpx2
 import pytest
 
-from app.ghc_client.device_flow import DeviceFlowClient, DeviceFlowError
+from app.model_provider.ghc_client.device_flow import DeviceFlowClient, DeviceFlowError
 
 
 def _client(

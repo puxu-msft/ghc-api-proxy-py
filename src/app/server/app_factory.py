@@ -9,7 +9,6 @@ from fastapi.responses import JSONResponse
 from app import __version__
 from app.config.paths import user_data_path
 from app.config.settings import AppSettings
-from app.ghc_client.auth.providers import noninteractive_token_available
 from app.history.consumer import HistoryConsumer
 from app.history.store import HistoryStore
 from app.history.ws import WebSocketManager
@@ -17,6 +16,7 @@ from app.hooks.builtin import register_builtin_hooks
 from app.hooks.executor import HooksExecutor
 from app.hooks.loader import load_user_hook_modules
 from app.hooks.registry import HookRegistryBuilder
+from app.model_provider.ghc_client.auth.providers import noninteractive_token_available
 from app.observability.logging import setup_logging
 from app.observability.telemetry import setup_metrics
 from app.observability.tracing import setup_tracing

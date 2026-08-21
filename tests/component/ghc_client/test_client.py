@@ -6,8 +6,8 @@ import pytest
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 
-from app.ghc_client import GhcApiClient, GhcClientConfig
-from app.ghc_client.tokens import CopilotTokenManager
+from app.model_provider.ghc_client import GhcApiClient, GhcClientConfig
+from app.model_provider.ghc_client.tokens import CopilotTokenManager
 from app.pipeline.exceptions import UpstreamRateLimit
 
 BASE_URL = "https://copilot.example"

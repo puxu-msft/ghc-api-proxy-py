@@ -4,8 +4,8 @@ from typing import Protocol
 
 import httpx2
 
-from app.ghc_client.auth.providers import FileTokenProvider
-from app.ghc_client.device_flow import DeviceCode, DeviceFlowClient
+from app.model_provider.ghc_client.auth.providers import FileTokenProvider
+from app.model_provider.ghc_client.device_flow import DeviceCode, DeviceFlowClient
 
 
 class DeviceFlow(Protocol):

@@ -3,7 +3,7 @@ from typing import Any, Protocol
 
 import httpx2
 
-from app.ghc_client.transport import (
+from app.model_provider.ghc_client.transport import (
     ResponsesHeadersPendingTransportError,
     is_responses_headers_pending_transport_error,
 )

@@ -20,25 +20,25 @@ from openai import AsyncOpenAI
 
 from app.config.paths import expand_user_path, tokenization_state_path
 from app.config.schema import ProxyConfig
-from app.ghc_client import (
-    CopilotTokenManager,
-    GhcApiClient,
-    GhcClientConfig,
-    build_identity_headers,
-    build_request_headers,
-)
-from app.ghc_client.auth.providers import (
-    CLITokenProvider,
-    EnvTokenProvider,
-    FileTokenProvider,
-    GitHubTokenManager,
-)
 from app.model_provider import (
     PROVIDER_TYPE,
     GithubCopilotProvider,
     ModelProvider,
     ProviderRegistry,
     resolve_default_name,
+)
+from app.model_provider.ghc_client import (
+    CopilotTokenManager,
+    GhcApiClient,
+    GhcClientConfig,
+    build_identity_headers,
+    build_request_headers,
+)
+from app.model_provider.ghc_client.auth.providers import (
+    CLITokenProvider,
+    EnvTokenProvider,
+    FileTokenProvider,
+    GitHubTokenManager,
 )
 from app.observability.active_requests import ActiveRequestRegistry
 from app.observability.terminal import TerminalCapabilities, detect_terminal

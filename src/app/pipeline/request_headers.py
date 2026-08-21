@@ -13,7 +13,7 @@ and upstream answers 400 rather than ignoring it.
 from collections.abc import Mapping
 
 # Protocol negotiation the client owns. Everything else about the upstream request — identity,
-# credentials, content framing — belongs to `app.ghc_client.headers`.
+# credentials, content framing — belongs to `app.model_provider.ghc_client.headers`.
 FORWARDED_REQUEST_HEADERS = frozenset(
     {
         "anthropic-beta",

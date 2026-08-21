@@ -1,7 +1,7 @@
 """The unit in `contrib/systemd/` starting the chain it actually runs, with no real credentials.
 
 This is what `auth_base_url` was made configurable for. Until 2026-08-19 the GitHub token exchange
-was the module constant `app.ghc_client.tokens.TOKEN_URL`, so a process could redirect its
+was the module constant `app.model_provider.ghc_client.tokens.TOKEN_URL`, so a process could redirect its
 inference calls at a local server and its three auth calls at nothing: the chain could not be
 stood up end to end without a real GitHub token and the network, and `--fd` had no coverage at all.
 

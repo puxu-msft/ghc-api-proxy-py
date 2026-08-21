@@ -21,8 +21,8 @@ from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 
 from app.config.schema import ModelProviderConfig, ProxyConfig
-from app.ghc_client import CopilotTokenManager, GhcApiClient, GhcClientConfig
 from app.model_provider import GithubCopilotProvider, ModelProvider
+from app.model_provider.ghc_client import CopilotTokenManager, GhcApiClient, GhcClientConfig
 from app.server.composition import Chain, build_chain
 from recorded.cassettes import Cassette, ReplayTransport
 

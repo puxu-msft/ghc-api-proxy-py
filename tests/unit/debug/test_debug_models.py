@@ -449,7 +449,7 @@ def test_json_is_not_stripped_of_control_characters_like_the_table_is() -> None:
 
 
 def test_a_missing_token_is_reported_with_the_command_that_fixes_it() -> None:
-    from app.ghc_client.auth.providers import NoGitHubToken
+    from app.model_provider.ghc_client.auth.providers import NoGitHubToken
 
     assert "ghc-api-proxy auth" in describe_failure(NoGitHubToken("no token"))
     assert describe_failure(RuntimeError("upstream said 503")) == "upstream said 503"

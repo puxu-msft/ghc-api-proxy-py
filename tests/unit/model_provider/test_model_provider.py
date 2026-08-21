@@ -7,8 +7,6 @@ from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 
 from app.config.schema import ModelProviderConfig, ProxyConfig
-from app.ghc_client import GhcApiClient, GhcClientConfig
-from app.ghc_client.tokens import CopilotTokenManager
 from app.model_provider import (
     CapabilityMissing,
     EndpointNotSupported,
@@ -22,6 +20,8 @@ from app.model_provider import (
     require_endpoint,
     resolve_default_name,
 )
+from app.model_provider.ghc_client import GhcApiClient, GhcClientConfig
+from app.model_provider.ghc_client.tokens import CopilotTokenManager
 
 BASE_URL = "https://copilot.example"
 

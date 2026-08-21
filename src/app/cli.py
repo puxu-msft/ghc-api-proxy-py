@@ -14,10 +14,10 @@ from app.config.loading import bundled_config_text, load_proxy_config
 from app.config.paths import tls_material_dir
 from app.config.schema import ProxyConfig
 from app.debug.models import collect_catalogs, render_json, render_text
-from app.ghc_client.auth.service import authenticate_device, clear_stored_token
 from app.lifecycle.entry import StandaloneOptions, run_standalone
 from app.lifecycle.standalone import LIFECYCLE_LOGGER, ShutdownReport
 from app.model_provider import ProviderNotConfigured
+from app.model_provider.ghc_client.auth.service import authenticate_device, clear_stored_token
 from app.observability.logging import get_logger, setup_logging
 from app.server.composition import build_chain, build_http_client
 from app.server.pipeline_app import create_pipeline_app

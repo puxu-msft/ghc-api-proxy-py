@@ -10,11 +10,11 @@ from openai import APIStatusError as OpenAIAPIStatusError
 from openai import AsyncOpenAI
 from openai._types import Body as OpenAIBody
 
-from app.ghc_client.config import GhcClientConfig
-from app.ghc_client.errors import normalize_upstream_error
-from app.ghc_client.headers import build_request_headers
-from app.ghc_client.tokens import CopilotTokenManager
-from app.ghc_client.transport import (
+from app.model_provider.ghc_client.config import GhcClientConfig
+from app.model_provider.ghc_client.errors import normalize_upstream_error
+from app.model_provider.ghc_client.headers import build_request_headers
+from app.model_provider.ghc_client.tokens import CopilotTokenManager
+from app.model_provider.ghc_client.transport import (
     ResponsesHeadersPendingTransportError,
     is_responses_headers_pending_transport_error,
 )

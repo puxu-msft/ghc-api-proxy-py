@@ -1,6 +1,6 @@
 import pytest
 
-from app.ghc_client import GhcClientConfig, resolve_api_base_url
+from app.model_provider.ghc_client import GhcClientConfig, resolve_api_base_url
 
 
 @pytest.mark.parametrize(

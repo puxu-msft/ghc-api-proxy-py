@@ -1,6 +1,6 @@
 """Copilot upstream adapter.
 
-The actual Copilot API access lives in the standalone `app.ghc_client` library.
+The actual Copilot API access lives in the standalone `app.model_provider.ghc_client` library.
 This module maps `AppSettings` onto the library config.
 It adapts `GitHubTokenManager` to the library's token source protocol.
 It wraps the library client as this project's `UpstreamTarget`.
@@ -12,19 +12,19 @@ from typing import Any
 import httpx2
 
 from app.config.settings import AppSettings
-from app.ghc_client import (
+from app.model_provider.ghc_client import (
     GhcApiClient,
     build_identity_headers,
     build_request_headers,
 )
-from app.ghc_client.auth.providers import GitHubTokenManager
-from app.ghc_client.tokens import CopilotTokenManager
+from app.model_provider.ghc_client.auth.providers import GitHubTokenManager
+from app.model_provider.ghc_client.tokens import CopilotTokenManager
 from app.upstream.client import SDKClients
 from app.upstream.ghc_settings import ghc_config_from_settings
 
 
 class GitHubTokenSourceAdapter:
-    """Adapts `GitHubTokenManager` to the `GitHubTokenSource` protocol of `app.ghc_client`.
+    """Adapts `GitHubTokenManager` to the `GitHubTokenSource` protocol of `app.model_provider.ghc_client`.
 
     The library only needs the token string, not this project's `TokenInfo` or provider chain.
     """

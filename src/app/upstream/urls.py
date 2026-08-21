@@ -1,5 +1,5 @@
 from app.config.settings import AppSettings
-from app.ghc_client import resolve_api_base_url
+from app.model_provider.ghc_client import resolve_api_base_url
 from app.upstream.ghc_settings import ghc_config_from_settings
 
 

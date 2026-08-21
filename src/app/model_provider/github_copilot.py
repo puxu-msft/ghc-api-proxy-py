@@ -1,4 +1,4 @@
-"""GitHub Copilot as a model provider, backed by the `app.ghc_client` library."""
+"""GitHub Copilot as a model provider, backed by the `app.model_provider.ghc_client` library."""
 
 from collections.abc import Mapping
 from typing import Any, cast
@@ -6,7 +6,7 @@ from typing import Any, cast
 import httpx2
 
 from app.config.schema import ModelProviderConfig
-from app.ghc_client import GhcApiClient, fetch_models
+from app.model_provider.ghc_client import GhcApiClient, fetch_models
 from app.model_provider.types import (
     EndpointNotImplemented,
     ModelDescriptor,

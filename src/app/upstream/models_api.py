@@ -4,7 +4,7 @@ from typing import Any, cast
 import anyio
 import httpx2
 
-from app.ghc_client import fetch_models
+from app.model_provider.ghc_client import fetch_models
 from app.models.common import ModelInfo
 
 

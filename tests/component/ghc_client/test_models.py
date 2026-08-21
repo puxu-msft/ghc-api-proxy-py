@@ -1,7 +1,7 @@
 import httpx2
 import pytest
 
-from app.ghc_client import fetch_models
+from app.model_provider.ghc_client import fetch_models
 
 CATALOG = {"object": "list", "data": [{"id": "model-a"}, {"id": "model-b"}]}
 

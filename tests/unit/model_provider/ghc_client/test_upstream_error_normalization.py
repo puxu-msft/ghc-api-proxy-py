@@ -11,7 +11,7 @@ import httpx2
 import openai
 import pytest
 
-from app.ghc_client.errors import normalize_upstream_error, retry_after_seconds
+from app.model_provider.ghc_client.errors import normalize_upstream_error, retry_after_seconds
 from app.pipeline.exceptions import (
     Disposition,
     PipelineAbort,

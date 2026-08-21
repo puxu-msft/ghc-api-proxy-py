@@ -8,7 +8,7 @@ from anyio.to_thread import run_sync
 
 from app.config.loading import GITHUB_TOKEN_VARIABLE
 from app.config.paths import user_data_path
-from app.ghc_client.device_flow import DeviceCode
+from app.model_provider.ghc_client.device_flow import DeviceCode
 
 type TokenSource = Literal["cli", "env", "file", "device-auth"]
 

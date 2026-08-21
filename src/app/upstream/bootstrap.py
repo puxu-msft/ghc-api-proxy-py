@@ -10,12 +10,12 @@ import httpx2
 from app.anthropic.client import AnthropicClient
 from app.anthropic.thinking.quarantine import ThinkingQuarantineStore
 from app.config.paths import user_data_path
-from app.ghc_client import (
+from app.model_provider.ghc_client import (
     CopilotTokenManager,
     GitHubAccountClient,
     infer_account_type,
 )
-from app.ghc_client.auth.providers import (
+from app.model_provider.ghc_client.auth.providers import (
     CLITokenProvider,
     EnvTokenProvider,
     FileTokenProvider,

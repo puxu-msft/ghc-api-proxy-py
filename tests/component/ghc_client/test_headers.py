@@ -1,4 +1,8 @@
-from app.ghc_client import GhcClientConfig, build_identity_headers, build_request_headers
+from app.model_provider.ghc_client import (
+    GhcClientConfig,
+    build_identity_headers,
+    build_request_headers,
+)
 
 CONFIG = GhcClientConfig(
     vscode_version="1.2.3",

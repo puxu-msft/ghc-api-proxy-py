@@ -12,7 +12,7 @@ import pytest
 
 from app.config.paths import expand_user_path, user_data_path
 from app.config.schema import ProxyConfig
-from app.ghc_client.auth.providers import FileTokenProvider
+from app.model_provider.ghc_client.auth.providers import FileTokenProvider
 from app.server.composition import build_chain, github_token_path
 
 SPEC_TOKEN_PATH = "$XDG_DATA_HOME/ghc-api-proxy/github_token.txt"

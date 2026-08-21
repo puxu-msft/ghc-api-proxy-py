@@ -9,7 +9,7 @@ from h2.exceptions import ProtocolError as H2ProtocolError
 from h2.settings import SettingCodes
 from openai import APIConnectionError as OpenAIAPIConnectionError
 
-from app.ghc_client.transport import is_responses_headers_pending_transport_error
+from app.model_provider.ghc_client.transport import is_responses_headers_pending_transport_error
 
 
 def request() -> httpx2.Request:
