@@ -21,6 +21,7 @@ from anthropic import AsyncAnthropic
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from openai import AsyncOpenAI
+from prometheus_client import REGISTRY
 from pydantic import ValidationError
 from starlette.requests import ClientDisconnect, Request
 
@@ -31,6 +32,7 @@ from app.model_provider import GithubCopilotProvider, ModelProvider
 from app.observability import rejection_capture
 from app.observability.active_requests import ActiveRequestRegistry
 from app.observability.logging import setup_logging
+from app.observability.request_log_file import request_logs_dir
 from app.pipeline.delivery.assembler import AnthropicAssembler
 from app.pipeline.delivery.stream import stream_delivery
 from app.server.composition import Chain, build_chain
@@ -57,6 +59,12 @@ CATALOG: dict[str, Any] = {
         {"id": "gpt-model", "supported_endpoints": ["/responses"]},
         {"id": "embed-model", "supported_endpoints": ["/embeddings"]},
         {"id": "mute-model", "supported_endpoints": []},
+        # Effort names as the real catalog publishes them, under `capabilities.supports`. This one deliberately lacks `none` and `max`, which is the shape `gpt-5.3-codex` actually has — it is what makes "asked for something this model does not offer" reachable from a test.
+        {
+            "id": "reasoning-model",
+            "supported_endpoints": ["/responses"],
+            "capabilities": {"supports": {"reasoning_effort": ["low", "medium", "high"]}},
+        },
     ],
 }
 
@@ -2203,3 +2211,236 @@ def test_the_deadline_is_one_instant_and_not_a_duration_started_twice() -> None:
 
     # The headers alone cost two of the three seconds. Recomputing downstream would land near five.
     assert elapsed < 4.0, f"the deadline was restarted downstream: {elapsed:.1f}s"
+
+
+def _records() -> list[dict[str, Any]]:
+    """Every structured request record written so far, in order.
+
+    Reads the file the app actually wrote rather than intercepting the call, so a record that never
+    reached disk fails here. `tests/int/conftest.py` points the data home at a temporary directory.
+    """
+    files = sorted(request_logs_dir().glob("requests-*.jsonl"))
+    return [cast(dict[str, Any], orjson.loads(line)) for path in files for line in path.read_text().splitlines()]
+
+
+def test_a_translated_request_records_what_it_could_not_carry() -> None:
+    """The losses translation collects reach the record, instead of stopping at `context.extras`.
+
+    `Conversion` has always recorded these and `LossCode` was written so a metric could key on them, but nothing read either: a request whose `top_p` and `stop_sequences` never crossed produced the same record, the same console line and the same reply as one that crossed intact. So this asserts the whole way through — an inbound field nothing claims, translated to a format that cannot take it, named in the record on the way out.
+
+    Asserted on the detail as well as the code because the code alone cannot say *which* fields were dropped, and "something was lost" is not actionable.
+    """
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "gpt-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 64,
+            # Neither is modelled by `SemanticRequest`, so both land in `extensions` and are dropped at the format boundary.
+            "top_p": 0.5,
+            "stop_sequences": ["STOP"],
+        },
+    )
+    assert response.status_code == 200
+
+    records = _records()
+    assert len(records) == 1, records
+    losses = records[0]["losses"]
+    assert [entry["direction"] for entry in losses] == ["request"]
+    assert [entry["code"] for entry in losses] == ["extensions-not-carried"]
+    detail = losses[0]["detail"]
+    assert "top_p" in detail and "stop_sequences" in detail, detail
+
+
+def test_a_lossless_request_records_no_losses() -> None:
+    """The field says nothing rather than says none, and an untranslated request loses nothing.
+
+    Without this the previous test passes against an implementation that reports a loss on every request, which would make the field useless in exactly the way an always-on indicator is.
+    """
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
+    response = client.post(
+        "/v1/messages",
+        json={"model": "claude-model", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert response.status_code == 200
+
+    records = _records()
+    assert len(records) == 1, records
+    assert records[0]["losses"] == []
+
+
+def test_a_recorded_loss_is_also_counted() -> None:
+    """The counter and the record are produced from one tuple, so `/metrics` cannot disagree with the file.
+
+    A counter defined but never incremented is this repository's most common defect shape — a configuration surface with no consumer — so the increment is asserted rather than assumed from the fact that the line exists.
+    """
+    labels = {"direction": "request", "code": "extensions-not-carried"}
+    before = REGISTRY.get_sample_value("ghc_proxy_translation_losses_total", labels) or 0.0
+
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
+    response = client.post(
+        "/v1/messages",
+        json={"model": "gpt-model", "messages": [{"role": "user", "content": "hi"}], "top_p": 0.5},
+    )
+    assert response.status_code == 200
+
+    after = REGISTRY.get_sample_value("ghc_proxy_translation_losses_total", labels) or 0.0
+    assert after == before + 1
+
+
+ATTRIBUTION_LINE = "x-anthropic-billing-header: cc_version=1.0; cc_entrypoint=cli;"
+
+
+def test_the_attribution_line_never_reaches_a_translated_upstream() -> None:
+    """Asserted on the bytes that left, not on the function that removes it.
+
+    A unit test proves the stripper works; it cannot prove anything calls it. This repository's most common defect is a capability that exists and is never wired — so the check that matters is made against the request upstream actually received.
+    """
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "gpt-model",
+            "system": [{"type": "text", "text": f"{ATTRIBUTION_LINE}\nBe brief."}],
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 64,
+        },
+    )
+
+    assert response.status_code == 200
+    sent = seen[-1].read().decode()
+    assert "x-anthropic-billing-header" not in sent
+    assert "Be brief." in sent
+
+
+def test_the_attribution_line_never_reaches_a_direct_upstream() -> None:
+    """The untranslated leg carries `system` through untouched, so the removal has to happen before the routing decision rather than inside either translator."""
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "claude-model",
+            "system": [{"type": "text", "text": f"{ATTRIBUTION_LINE}\nBe brief."}],
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+
+    assert response.status_code == 200
+    sent = seen[-1].read().decode()
+    assert "x-anthropic-billing-header" not in sent
+    assert "Be brief." in sent
+
+
+def test_the_attribution_line_is_not_counted_as_prompt() -> None:
+    """`count_tokens` is named alongside `/v1/messages` in `message-format-sanitize.md`, and it is the endpoint where leaving the line in is measurable: upstream counted the same prompt at 43 tokens without it and 77 with it."""
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"input_tokens": 11}))
+    response = client.post(
+        "/v1/messages/count_tokens",
+        json={
+            "model": "claude-model",
+            "system": [{"type": "text", "text": f"{ATTRIBUTION_LINE}\nBe brief."}],
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+
+    assert response.status_code == 200
+    sent = seen[-1].read().decode()
+    assert "x-anthropic-billing-header" not in sent
+    assert "Be brief." in sent
+
+
+def test_a_thinking_budget_reaches_upstream_as_an_effort_the_model_offers() -> None:
+    """The whole channel: an Anthropic `thinking` budget, through routing, to the bytes upstream received.
+
+    Before this existed the field was dropped at the format boundary and `EXTENSIONS_NOT_CARRIED` was the only trace — so a client asking for deep reasoning got whatever the upstream defaulted to, and nothing said so.
+
+    20k asks for `xhigh`. This model publishes only low/medium/high, so `high` is the honest answer and `xhigh` would be a 400.
+    """
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "reasoning-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 64,
+            "thinking": {"type": "enabled", "budget_tokens": 20_000},
+        },
+    )
+
+    assert response.status_code == 200
+    sent = cast(dict[str, Any], orjson.loads(seen[-1].read()))
+    assert sent["reasoning"] == {"effort": "high"}
+
+
+def test_a_model_that_publishes_no_efforts_is_sent_none_rather_than_a_guess() -> None:
+    """`gpt-model` has no `capabilities` in the catalog at all. Inventing an effort for it would be asking for something upstream never said it takes; the request goes without one and the record says why."""
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "gpt-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "thinking": {"type": "enabled", "budget_tokens": 20_000},
+        },
+    )
+
+    assert response.status_code == 200
+    sent = cast(dict[str, Any], orjson.loads(seen[-1].read()))
+    assert "reasoning" not in sent
+
+    codes = [entry["code"] for entry in _records()[0]["losses"]]
+    assert "reasoning-intent-not-carried" in codes
+
+
+def test_an_approximated_effort_is_recorded_as_a_loss() -> None:
+    """Downgrading `xhigh` to `high` changes what the client asked for, so it is reported rather than done quietly."""
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "reasoning-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "thinking": {"type": "enabled", "budget_tokens": 20_000},
+        },
+    )
+
+    assert response.status_code == 200
+    losses = _records()[0]["losses"]
+    approximations = [entry for entry in losses if entry["code"] == "reasoning-intent-approximated"]
+    assert len(approximations) == 1
+    assert "xhigh" in approximations[0]["detail"] and "high" in approximations[0]["detail"]
+
+
+def test_an_unreadable_thinking_field_is_refused_by_name() -> None:
+    """A client error rather than a silent approximation: nothing can be chosen for a budget of `-1`, and guessing would send an effort the request never asked for."""
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "reasoning-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "thinking": {"type": "enabled", "budget_tokens": -1},
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["field_path"] == "thinking.budget_tokens"
+
+
+def test_a_count_resolves_reasoning_the_same_way_the_send_does() -> None:
+    """Counting measures the body that would be sent. A count that translated `thinking` differently would answer about a request nobody was going to make."""
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1", "usage": {"input_tokens": 7}}))
+    response = client.post(
+        "/v1/messages/count_tokens",
+        json={
+            "model": "reasoning-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "thinking": {"type": "enabled", "budget_tokens": 20_000},
+        },
+    )
+
+    assert response.status_code == 200
+    # No upstream counter serves the Responses family, so this is the local estimate and no request was sent.
+    assert response.json()["estimated"] is True
+    assert not [request for request in seen if "reasoning" in request.read().decode()]
