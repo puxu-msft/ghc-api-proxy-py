@@ -3,9 +3,7 @@
 Each reason draws on its own counter and on the shared `max_total`.
 One flapping cause therefore cannot consume the whole budget and starve the others.
 
-`continuation` is not a replay.
-It appends the committed blocks as an assistant turn plus a user message asking to continue.
-That is why it is allowed after commit, where a transparent replay of the generation is not.
+A retry here is only ever a replay. Once the client holds a complete block there is nothing left for this module to fund: carrying on from what was already delivered is the client's own next request, and it arrives as one. Ruled 2026-08-21 — see `docs/.human-controlled/upstream-retry-and-continuation.md`, and `.dev/docs/upstream/retry-and-continuation/archive-proxy-side-continuation/` for the design that was replaced and which of its findings survived.
 """
 
 from dataclasses import dataclass, field
@@ -27,7 +25,6 @@ class RetryReason(StrEnum):
     NETWORK = "network"
     SERVER_ERROR = "serverError"
     STREAM_REPLAY = "streamReplay"
-    CONTINUATION = "continuation"
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,11 +76,7 @@ class RetryLedger:
             return strategies.network.max_retries
         if reason is RetryReason.SERVER_ERROR:
             return strategies.serverError.max_retries
-        if reason is RetryReason.STREAM_REPLAY:
-            return strategies.streamReplay.max_retries
-        if not strategies.continuation.enabled:
-            return 0
-        return strategies.continuation.max_retries
+        return strategies.streamReplay.max_retries
 
     def spent(self, reason: RetryReason) -> int:
         return self.per_reason.get(reason, 0)
@@ -105,27 +98,11 @@ class RetryLedger:
         return verdict
 
 
-def continuation_messages(
-    committed: list[dict[str, object]],
-    config: UpstreamRequestRetryConfig,
-) -> list[dict[str, object]]:
-    """Build the turns that ask the model to carry on from what the client already saw.
-
-    The committed blocks become the assistant turn.
-    The model continues rather than repeating what the client already has.
-    """
-    return [
-        {"role": "assistant", "content": committed},
-        {"role": "user", "content": config.strategies.continuation.message},
-    ]
-
-
 class StreamEnding(StrEnum):
     """What to do about a stream that stopped, decided from what we received."""
 
     COMPLETE = "complete"
     REPLAY = "replay"
-    CONTINUE = "continue"
     ABANDON = "abandon"
 
 
@@ -143,13 +120,13 @@ def decide_stream_ending(
     committed_blocks: int,
     ledger: RetryLedger,
 ) -> EndingVerdict:
-    """Choose between finishing, replaying, continuing and giving up.
+    """Choose between finishing, replaying and giving up.
 
     Decided from what this side received and delivered, and from nothing else. Who sent the GOAWAY, and why, is not observable from here — our stack stops reading the moment the frame arrives — so a rule written in terms of the peer's intent would be a rule written about something we cannot see. Ruled 2026-08-20; see `.dev/docs/upstream/h2-goaway/findings.md`.
 
     The exception type is deliberately not an input. A clean EOF with no terminal event and a torn connection leave the client in the same place, and it is that place — not the manner of arrival — that decides what may legally happen next.
 
-    Four outcomes rather than the three the rule is usually stated in: a stream that may neither be replayed nor continued still has to end, and telling the client it was truncated is that ending.
+    Three outcomes, and only one of them starts another attempt: a stream that may not be replayed still has to end, and telling the client it was truncated is that ending. This function used to name a fourth, carrying on from the committed blocks, which was ruled out on 2026-08-21 — what happens after the client already holds content is now the client's own next request, and nothing this function decides.
 
     `downstream_opened` means a semantic event has already gone out — a `message_start`, whether it came with the first block or was synthesised during a long silence. Keep-alive comments do not count; they carry nothing a client stores.
 
@@ -166,13 +143,14 @@ def decide_stream_ending(
         return EndingVerdict(StreamEnding.ABANDON, RetryReason.STREAM_REPLAY, verdict.detail)
 
     if committed_blocks == 0:
-        # Opened but empty: the client holds a `message_start` and no content. Replay would send it a second `message_start`, and continuation would ask upstream to carry on from an assistant turn with nothing in it — a shape this upstream rejects outright. Neither is available, so this ends here.
+        # Opened but empty: the client holds a `message_start` and no content. A replay would send it a second one, so the only ending left is to say the stream was truncated. Kept apart from the case below because the two leave the client holding different things, and the detail is what a reader sees.
         return EndingVerdict(
             StreamEnding.ABANDON,
-            detail="response opened without a content block to continue from",
+            detail="response opened without a content block",
         )
 
-    verdict = ledger.take(RetryReason.CONTINUATION)
-    if verdict.allowed:
-        return EndingVerdict(StreamEnding.CONTINUE, RetryReason.CONTINUATION)
-    return EndingVerdict(StreamEnding.ABANDON, RetryReason.CONTINUATION, verdict.detail)
+    # The client holds content. Nothing here can replace it, and asking upstream to carry on is no longer this side's job.
+    return EndingVerdict(
+        StreamEnding.ABANDON,
+        detail="response opened with content already delivered",
+    )

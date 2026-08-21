@@ -11,7 +11,6 @@ from app.pipeline.exceptions import (
 from app.pipeline.retry import (
     RetryLedger,
     RetryReason,
-    continuation_messages,
     reason_for,
 )
 
@@ -26,7 +25,6 @@ def test_defaults_match_the_spec() -> None:
     assert ledger.limit_for(RetryReason.NETWORK) == 9
     assert ledger.limit_for(RetryReason.SERVER_ERROR) == 9
     assert ledger.limit_for(RetryReason.STREAM_REPLAY) == 100
-    assert ledger.limit_for(RetryReason.CONTINUATION) == 10
 
 
 @pytest.mark.parametrize(
@@ -89,23 +87,3 @@ def test_consider_does_not_spend() -> None:
     assert ledger.consider(RetryReason.NETWORK).allowed is True
     assert ledger.total_spent == 0
 
-
-def test_disabled_continuation_has_no_budget() -> None:
-    ledger = RetryLedger(config(strategies={"continuation": {"enabled": False}}))
-    assert ledger.limit_for(RetryReason.CONTINUATION) == 0
-    assert ledger.take(RetryReason.CONTINUATION).allowed is False
-
-
-def test_continuation_sends_the_committed_blocks_as_an_assistant_turn() -> None:
-    # Continuation is not a replay: the client keeps what it saw, and the model carries on.
-    committed: list[dict[str, object]] = [{"type": "text", "text": "first half"}]
-    messages = continuation_messages(committed, config())
-    assert messages[0]["role"] == "assistant"
-    assert messages[0]["content"] == committed
-    assert messages[1]["role"] == "user"
-    assert messages[1]["content"] == "Please continue where you left off."
-
-
-def test_continuation_message_is_configurable() -> None:
-    messages = continuation_messages([], config(strategies={"continuation": {"message": "go on"}}))
-    assert messages[1]["content"] == "go on"

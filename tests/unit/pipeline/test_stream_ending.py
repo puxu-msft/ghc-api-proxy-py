@@ -1,6 +1,6 @@
 """What to do about a stream that stopped short, decided from what we received.
 
-The rule these pin is the one `app/pipeline/retry.py` has stated since before anything called it: a replay is only legal while the client has seen nothing, and continuation is what is left once it has. What is new is that something now decides between them.
+The rule these pin is the one `app/pipeline/retry.py` has stated since before anything called it: a replay is only legal while the client has seen nothing. What is left once the client has seen something used to be a proxy-side continuation; since 2026-08-21 it is the client's own next request, so from here every one of those endings is simply an ending.
 """
 
 import pytest
@@ -48,21 +48,22 @@ def test_nothing_delivered_yet_may_be_replayed_transparently() -> None:
     assert verdict.reason is RetryReason.STREAM_REPLAY
 
 
-def test_delivered_content_is_continued_rather_than_replayed() -> None:
-    """Replay would send the client a second copy of what it already has, so the blocks become the assistant turn instead."""
+def test_delivered_content_is_never_replayed() -> None:
+    """Replay would send the client a second copy of what it already has, so this side stops rather than trying again."""
     verdict = decide(downstream_opened=True, committed_blocks=2)
-    assert verdict.ending is StreamEnding.CONTINUE
-    assert verdict.reason is RetryReason.CONTINUATION
+    assert verdict.ending is StreamEnding.ABANDON
+    assert verdict.reason is None
+    assert "already delivered" in verdict.detail
 
 
-def test_an_opened_but_empty_response_can_do_neither() -> None:
-    """The synthesized-start case, and the reason four outcomes are needed rather than three.
+def test_an_opened_but_empty_response_says_so_in_its_own_words() -> None:
+    """A long silence can put `message_start` on the wire before any block exists, and replaying would then send a second one.
 
-    A long silence puts `message_start` on the wire before any block exists. Replaying would then send a second `message_start`; continuing would ask upstream to carry on from an assistant turn with no content, which this upstream refuses outright. Both doors are shut, so the stream has to end as truncated.
+    Held apart from the case above even though both abandon, because the two leave the client holding different things and `detail` is what a reader gets.
     """
     verdict = decide(downstream_opened=True, committed_blocks=0)
     assert verdict.ending is StreamEnding.ABANDON
-    assert "content block" in verdict.detail
+    assert "without a content block" in verdict.detail
 
 
 def test_an_exhausted_budget_ends_the_stream_rather_than_looping() -> None:
@@ -73,22 +74,22 @@ def test_an_exhausted_budget_ends_the_stream_rather_than_looping() -> None:
     assert second.detail
 
 
-def test_continuation_switched_off_ends_the_stream() -> None:
-    """`enabled: false` is an operator saying not to ask upstream to carry on; it must not fall through to a replay the client would see twice."""
-    book = ledger(strategies={"continuation": {"enabled": False}})
-    verdict = decide(downstream_opened=True, committed_blocks=1, book=book)
-    assert verdict.ending is StreamEnding.ABANDON
-    assert verdict.reason is RetryReason.CONTINUATION
-
-
 def test_deciding_spends_the_budget_it_grants() -> None:
     """Otherwise a caller that asks twice for one stream is funded twice, and a torn stream can loop for as long as upstream keeps tearing."""
-    book = ledger(strategies={"continuation": {"max_retries": 5}})
-    decide(downstream_opened=True, committed_blocks=1, book=book)
-    assert book.spent(RetryReason.CONTINUATION) == 1
+    book = ledger(strategies={"streamReplay": {"max_retries": 5}})
+    decide(book=book)
+    assert book.spent(RetryReason.STREAM_REPLAY) == 1
+
+
+def test_an_ending_that_starts_no_attempt_spends_nothing() -> None:
+    """The abandoned routes must not draw on the budget: nothing is being retried, so nothing is owed."""
+    book = ledger()
+    decide(downstream_opened=True, committed_blocks=2, book=book)
+    decide(downstream_opened=True, committed_blocks=0, book=book)
+    assert book.total_spent == 0
 
 
 @pytest.mark.parametrize("blocks", [1, 7])
 def test_how_much_was_delivered_does_not_change_the_route(blocks: int) -> None:
     """One block or many, the client has seen something — that is the whole of the question."""
-    assert decide(downstream_opened=True, committed_blocks=blocks).ending is StreamEnding.CONTINUE
+    assert decide(downstream_opened=True, committed_blocks=blocks).ending is StreamEnding.ABANDON

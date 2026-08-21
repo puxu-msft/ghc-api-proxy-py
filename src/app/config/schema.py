@@ -156,12 +156,6 @@ class RetryStrategyConfig(Section):
     max_retries: int = Field(default=0, ge=0)
 
 
-class ContinuationStrategyConfig(Section):
-    enabled: bool = True
-    max_retries: int = Field(default=10, ge=0)
-    message: str = "Please continue where you left off."
-
-
 class RetryStrategiesConfig(Section):
     githubTokenExpired: RetryStrategyConfig = Field(
         default_factory=lambda: RetryStrategyConfig(max_retries=0)
@@ -174,9 +168,6 @@ class RetryStrategiesConfig(Section):
     )
     streamReplay: RetryStrategyConfig = Field(
         default_factory=lambda: RetryStrategyConfig(max_retries=100)
-    )
-    continuation: ContinuationStrategyConfig = Field(
-        default_factory=ContinuationStrategyConfig
     )
 
 
