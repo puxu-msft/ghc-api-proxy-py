@@ -25,10 +25,10 @@ from app.pipeline.translation_driver.responses import (
     to_anthropic_response,
     to_openai_responses_response,
 )
-from app.pipeline.translation_driver.semantic import SemanticRequest
+from app.pipeline.translation_driver.semantic import SemanticRequest, TranslationTarget
 
 type InboundTranslator = Callable[[Mapping[str, Any]], SemanticRequest]
-type OutboundTranslator = Callable[[SemanticRequest], dict[str, Any]]
+type OutboundTranslator = Callable[[SemanticRequest, TranslationTarget], dict[str, Any]]
 type ResponseReader = Callable[[Mapping[str, Any]], SemanticResponse]
 type ResponseWriter = Callable[[SemanticResponse], dict[str, Any]]
 
@@ -92,16 +92,19 @@ class TranslatorRegistry:
         *,
         source: WireFormat,
         target: WireFormat,
+        target_model: TranslationTarget | None = None,
     ) -> tuple[dict[str, Any], SemanticRequest]:
         """Carry a payload from one wire format to another through the intermediate form.
 
         Both translators are looked up before either runs.
         A missing pair therefore fails whole rather than after half a conversion.
+
+        `target_model` is what the resolved upstream model can do, and only the writer sees it: the reader is describing what the client said, which is the same whoever ends up answering. Omitting it yields the default — no published capabilities — so a writer declines to render anything it would have to guess at rather than rendering a guess.
         """
         to_semantic = self.inbound(source)
         to_wire = self.outbound(target)
         semantic = to_semantic(payload)
-        return to_wire(semantic), semantic
+        return to_wire(semantic, target_model or TranslationTarget()), semantic
 
     def translate_response(
         self,

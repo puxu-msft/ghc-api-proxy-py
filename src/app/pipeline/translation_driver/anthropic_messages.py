@@ -14,6 +14,10 @@ from app.pipeline.translation_driver.content import (
     ReasoningState,
     SemanticMessage,
 )
+from app.pipeline.translation_driver.reasoning import (
+    ReasoningIntentInvalid,
+    intent_from_thinking,
+)
 from app.pipeline.translation_driver.reasoning_carrier import (
     decode_reasoning_carrier,
     encode_reasoning_carrier,
@@ -23,13 +27,15 @@ from app.pipeline.translation_driver.semantic import (
     LossCode,
     SemanticRequest,
     SystemBlock,
+    TranslationRefused,
+    TranslationTarget,
     system_blocks_from_value,
 )
 
 WIRE_FORMAT = "anthropic-messages"
 
 _PASSTHROUGH_KEYS = frozenset(
-    {"model", "system", "messages", "tools", "stream", "max_tokens", "temperature"}
+    {"model", "system", "messages", "tools", "stream", "max_tokens", "temperature", "thinking"}
 )
 
 TEXT = "text"
@@ -137,6 +143,13 @@ def from_anthropic_messages(payload: Mapping[str, Any]) -> SemanticRequest:
     temperature = payload.get("temperature")
     if isinstance(temperature, int | float):
         request.temperature = float(temperature)
+    # Read into an intent here rather than left for the writer, so an unreadable `thinking` is refused while the client's own field name is still in scope to name in the error. What the intent then becomes on the wire depends on the target model and is not this side's business.
+    try:
+        request.reasoning = intent_from_thinking(payload.get("thinking"))
+    except ReasoningIntentInvalid as invalid:
+        raise TranslationRefused(
+            str(invalid), code="reasoning-intent-invalid", field_path=invalid.field_path
+        ) from invalid
 
     # Anything not claimed above is carried rather than dropped.
     # An unmodelled field therefore survives the round trip back to the same format.
@@ -209,7 +222,11 @@ def _reasoning_to_anthropic(block: ContentBlock, conversion: Conversion) -> dict
     return {"type": THINKING, THINKING: block.text, "signature": signature}
 
 
-def to_anthropic_messages(request: SemanticRequest) -> dict[str, Any]:
+def to_anthropic_messages(
+    request: SemanticRequest, target_model: TranslationTarget | None = None
+) -> dict[str, Any]:
+    # `target_model` is accepted and unused. Every outbound translator takes it so the registry can hand one to all of them alike; what a model can do only changes the rendering on the leg that has to choose an upstream-specific spelling, and Anthropic's own format has no such choice to make here.
+    del target_model
     messages: list[dict[str, Any]] = []
     for message in request.messages:
         rendered = [

@@ -29,12 +29,14 @@ from app.pipeline.translation_driver.content import (
     ReasoningState,
     SemanticMessage,
 )
+from app.pipeline.translation_driver.reasoning import resolve
 from app.pipeline.translation_driver.semantic import (
     Conversion,
     LossCode,
     SemanticRequest,
     SystemBlock,
     TranslationRefused,
+    TranslationTarget,
     system_blocks_from_value,
 )
 
@@ -703,6 +705,7 @@ def _drop_dangling_tool_choice(payload: dict[str, Any]) -> None:
 
 def to_openai_responses(
     request: SemanticRequest,
+    target_model: TranslationTarget | None = None,
     *,
     system_prompts: SystemPromptPlacement = "instructions-joint-string",
     web_search_domain_restrictions: WebSearchConstraintPolicy = "drop_fields",
@@ -728,6 +731,7 @@ def to_openai_responses(
         payload["max_output_tokens"] = request.max_output_tokens
     if request.temperature is not None:
         payload["temperature"] = request.temperature
+    _apply_reasoning(payload, request, target_model or TranslationTarget())
     payload.update(request.extensions_for(WIRE_FORMAT))
     # After the extensions, because that is where `tool_choice` arrives on the crossing where it survives at all. Repointing comes first: a choice that named a mapped declaration is not dangling, it just has a new spelling to follow.
     if mapped_names:
@@ -736,3 +740,28 @@ def to_openai_responses(
     if dropped_any:
         _drop_dangling_tool_choice(payload)
     return payload
+
+
+def _apply_reasoning(
+    payload: dict[str, Any], request: SemanticRequest, target_model: TranslationTarget
+) -> None:
+    """Write the `reasoning` object this request's intent resolves to, if any.
+
+    Nothing is written when the request expressed no intent. That is the pre-existing behaviour and it stays: a body that never mentioned `thinking` should not start carrying a reasoning policy because this function was added.
+
+    When there *is* an intent, the target's own published effort names decide what it becomes — `resolve` will not return a name this model does not offer. An intent that cannot be rendered at all is recorded as a loss rather than dropped in silence, because the request asked for something and did not get it.
+    """
+    intent = request.reasoning
+    if intent is None:
+        return
+    resolution = resolve(intent, target_model.reasoning_efforts)
+    if resolution.effort is None:
+        request.conversion.record(
+            LossCode.REASONING_INTENT_NOT_CARRIED,
+            f"{intent.mode} reasoning was not sent: {resolution.reason}",
+        )
+        return
+    payload["reasoning"] = {"effort": resolution.effort}
+    if resolution.approximated:
+        detail = resolution.reason or f"{intent.mode} reasoning was sent as effort {resolution.effort}"
+        request.conversion.record(LossCode.REASONING_INTENT_APPROXIMATED, detail)

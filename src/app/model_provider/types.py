@@ -66,15 +66,37 @@ class ModelDescriptor:
 
     `unknown_endpoints` keeps advertised paths we have no enum member for.
     They are preserved rather than dropped so a new upstream endpoint stays visible.
+
+    `reasoning_efforts` is `None` when the catalog said nothing about them and a tuple when it did, the empty tuple included. The distinction is the same one `resolve_endpoints` makes and it is load-bearing for the same reason: "this model publishes no efforts" and "we never learned" lead to different requests, and a single empty default would merge them.
     """
 
     id: str
     endpoints: frozenset[ModelEndpoint]
     unknown_endpoints: tuple[str, ...] = ()
     request_headers: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    reasoning_efforts: tuple[str, ...] | None = None
 
     def supports(self, endpoint: ModelEndpoint) -> bool:
         return endpoint in self.endpoints
+
+
+def parse_reasoning_efforts(model: Mapping[str, Any]) -> tuple[str, ...] | None:
+    """The effort names a catalog entry publishes under `capabilities.supports.reasoning_effort`.
+
+    `None` for every shape that is not a list of strings — the key absent, `null`, or a value of some other type. Only a list is upstream stating the set, and only then is it taken at its word. Order is preserved as given; nothing here treats it as ranked, because the catalog does not say it is.
+
+    Non-string entries are dropped rather than making the whole field unreadable: a list with one malformed member still tells us about its other members, and the alternative — discarding the lot — would take a model that publishes four usable efforts down to none.
+    """
+    capabilities = model.get("capabilities")
+    if not isinstance(capabilities, dict):
+        return None
+    supports = cast(dict[str, Any], capabilities).get("supports")
+    if not isinstance(supports, dict):
+        return None
+    efforts = cast(dict[str, Any], supports).get("reasoning_effort")
+    if not isinstance(efforts, list):
+        return None
+    return tuple(entry for entry in cast(list[Any], efforts) if isinstance(entry, str))
 
 
 def parse_endpoints(advertised: object) -> tuple[frozenset[ModelEndpoint], tuple[str, ...]]:

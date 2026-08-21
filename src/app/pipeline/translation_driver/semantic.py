@@ -14,6 +14,7 @@ from enum import StrEnum
 from typing import Any
 
 from app.pipeline.translation_driver.content import SemanticMessage
+from app.pipeline.translation_driver.reasoning import ReasoningIntent
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +47,8 @@ class LossCode(StrEnum):
     TOOL_RESULT_CONTENT_FLATTENED = "tool-result-content-flattened"
     SERVER_TOOL_NOT_CARRIED = "server-tool-not-carried"
     SERVER_TOOL_CONSTRAINT_DROPPED = "server-tool-constraint-dropped"
+    REASONING_INTENT_APPROXIMATED = "reasoning-intent-approximated"
+    REASONING_INTENT_NOT_CARRIED = "reasoning-intent-not-carried"
 
 
 class TranslationRefused(Exception):
@@ -93,6 +96,21 @@ class Conversion:
         return not self.losses
 
 
+@dataclass(frozen=True, slots=True)
+class TranslationTarget:
+    """What the model this request is about to be sent to can do.
+
+    Deliberately not part of `SemanticRequest`. That record is what the *client* asked for and must read the same whoever ends up serving it; this is a fact about the server that was chosen, and folding the two together would mean a request meant one thing before routing and another after.
+
+    Only what a writer needs to render correctly goes in. `reasoning_efforts` is `None` when the catalog said nothing, mirroring `ModelDescriptor` — a writer has to be able to tell "publishes none" from "we never learned", because the safe thing to send differs.
+
+    The default instance is what a translation with no resolved model gets: same-format round trips in tests, and any caller that has not been given a descriptor. Its `None` efforts mean a writer will decline to invent a reasoning field rather than guess one.
+    """
+
+    model_id: str = ""
+    reasoning_efforts: tuple[str, ...] | None = None
+
+
 @dataclass(slots=True)
 class SemanticRequest:
     """The intermediate form of an inbound model request."""
@@ -104,6 +122,8 @@ class SemanticRequest:
     stream: bool = False
     max_output_tokens: int | None = None
     temperature: float | None = None
+    # How much reasoning the request asked for, as an intent rather than either side's spelling. `None` means the request said nothing, which is not the same as asking for none — see `reasoning.resolve`, where omitting the field entirely is measured to give upstream's default rather than silence.
+    reasoning: ReasoningIntent | None = None
     # Which wire format the extensions below came off. A writer for a different format must not
     # replay them: an unclaimed key is unclaimed *in its own format*, and in another one it is at
     # best meaningless. Measured — sending Anthropic's `context_management` to the Responses

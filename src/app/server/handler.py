@@ -49,6 +49,7 @@ from app.pipeline.subscribers.counting import COUNTING_ONLY
 from app.pipeline.translation_driver.registry import TranslatorNotFound
 from app.pipeline.translation_driver.semantic import (
     TranslationRefused,
+    TranslationTarget,
     WebSearchNotExecutable,
 )
 from app.server.composition import Chain
@@ -110,6 +111,17 @@ def shape_request(
     return provider, route
 
 
+def translation_target(provider: ModelProvider, model_id: str) -> TranslationTarget:
+    """What the resolved model can do, in the form a writer reads.
+
+    Built from the same descriptor routing used, so the capabilities a translation renders against are the ones the request will actually be sent to. A model the provider does not describe yields the default — no published efforts — which makes a writer decline to render rather than guess, exactly as an absent catalog field does.
+    """
+    descriptor = provider.describe(model_id)
+    if descriptor is None:
+        return TranslationTarget(model_id=model_id)
+    return TranslationTarget(model_id=model_id, reasoning_efforts=descriptor.reasoning_efforts)
+
+
 async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[RequestContext], None] | None = None) -> HandledRequest:
     provider, route = shape_request(chain, context, on_routed)
 
@@ -118,6 +130,7 @@ async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[Req
             context.payload,
             source=route.inbound_format,
             target=route.target_format,
+            target_model=translation_target(provider, route.model_id),
         )
         context.payload = translated
         if not semantic.conversion.lossless:
@@ -201,6 +214,7 @@ async def handle_count_tokens(chain: Chain, context: RequestContext) -> dict[str
             context.payload,
             source=route.inbound_format,
             target=route.target_format,
+            target_model=translation_target(provider, route.model_id),
         )
         context.payload = translated
         if not semantic.conversion.lossless:
