@@ -1,0 +1,4 @@
+# history-v3-260807.db: scanned 71788 ops, 13 hits, 274.6s
+# history-v3-260809.db: scanned 39927 ops, 16 hits, 260.8s
+# history-v3-260811.db: scanned 6084 ops, 0 hits, 13.2s
+# history-v3.db: scanned 24544 ops, 0 hits, 63.3s

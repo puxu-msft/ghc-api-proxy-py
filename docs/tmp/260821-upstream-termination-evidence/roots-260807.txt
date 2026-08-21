@@ -1,0 +1,69 @@
+db=/home/xp/.local/share/copilot-api/history-v3-260807.db ops_with_roots=69586 root_frames=15259454
+
+ROOT FRAME EVENT TYPES
+  response.function_call_arguments.delta: 5743237
+  content_block_delta: 5456355
+  response.output_text.delta: 2060354
+  response.reasoning_summary_text.delta: 1213208
+  content_block_stop: 117659
+  content_block_start: 89145
+  response.output_item.added: 78440
+  response.output_item.done: 78293
+  message_stop: 69532
+  message_delta: 69516
+  response.function_call_arguments.done: 45975
+  message_start: 40751
+  response.created: 29182
+  response.in_progress: 29181
+  response.completed: 28904
+  response.reasoning_summary_part.added: 12925
+  response.reasoning_summary_text.done: 12923
+  response.reasoning_summary_part.done: 12923
+  response.content_part.added: 7023
+  response.output_text.done: 6935
+  response.content_part.done: 6934
+  response.output_text.annotation.added: 396
+  response.web_search_call.in_progress: 191
+  response.web_search_call.searching: 191
+  response.web_search_call.completed: 191
+  ping: 63
+  response.incomplete: 4
+  error: 2
+
+response.status by terminal event
+  ('response.created', 'in_progress'): 29182
+  ('response.in_progress', 'in_progress'): 29181
+  ('response.completed', 'completed'): 28904
+  ('response.incomplete', 'incomplete'): 4
+
+NON-NULL incomplete_details
+  {"reason": "max_output_tokens"}: 4
+
+ERRORS
+  ('frame:error', '{"error": {"message": "Upstream timed out before sending response headers", "type": "api_error"}, "type": "error"}'): 2
+
+message_delta.stop_reason (root frames)
+  tool_use: 65833
+  end_turn: 3673
+  max_tokens: 9
+  refusal: 1
+
+choices[].finish_reason
+
+output item (type,status)
+  ('reasoning', 'None'): 50408
+  ('function_call', 'in_progress'): 46019
+  ('function_call', 'completed'): 45969
+  ('message', 'in_progress'): 7012
+  ('message', 'completed'): 6940
+  ('web_search_call', 'in_progress'): 191
+  ('web_search_call', 'completed'): 191
+  ('function_call', 'incomplete'): 3
+
+refusals
+
+SAMPLES
+  err2 :: ('/home/xp/.local/share/copilot-api/history-v3-260807.db', 'req_1784308734092_205', 'error', '{"type": "error", "error": {"type": "api_error", "message": "Upstream timed out before sending response headers"}}')
+  err2 :: ('/home/xp/.local/share/copilot-api/history-v3-260807.db', 'req_1784308747894_207', 'error', '{"type": "error", "error": {"type": "api_error", "message": "Upstream timed out before sending response headers"}}')
+  incdet :: ('/home/xp/.local/share/copilot-api/history-v3-260807.db', 'req_1785710950261_5206', 'response.incomplete', '{"error": null, "id": "8M7JKC01y/QPV5s6iTIQGELvfE3yENXnDwnqHgPPgGM8ACZ9pla7bfBpt6NWL4YPHV5SWLf5eryBZA3nlvXn58Tx86MX3JESZX1vxrkIKqh+t++0Rp/IOEhwN8X8pHu4K94SOf1BGNlt6ZIanwlsnDR4fqQ3HovfBEk5XRqGth3uFJY9KvpM5Uz/iMrqX+TJedNQL8CRdMzoobMGD2kFABIvZys8CBjwzfUFvaycXRtgEOX9WTPXQgasfuwU3mZ/1PneqmCbgQsF1PzOSCgUvHBICfwC5gn4w5Ue5ZaZE+QtH7EugC+BY65XSOhrXSCVjZR/J75Sf2Ak4el6X110tm6mL9ynXPqiVtAd6Gxe0fpOmR7k06JHNiutpWVzJksmZDXoyV6Pg3Ko/kWSUOtliJwe+a1m1A==", "incomplete_details": {"reason": "max_output_tokens"}, "status": "incomplete", "usage": {"input_tokens": 296587, "input_tokens_details": {"cache_write_tokens": 3393, "cached_tokens": 293191}, "output_tokens": 32000, "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": 328587}}')
+  incdet :: ('/home/xp/.local/share/copilot-api/history-v3-260807.db', 'req_1786022323259_4450', 'response.incomplete', '{"error": null, "id": "ae0bO6smQHGMsU6RCnn742QHwXmu/vobqy+iLTLXtzgZvdejcFgDRdVxQltW9JNUV5lSYbzGYpwDNCYQZqS7ZnYeRLMm/AG0d+YF0Ww3qNQ8K9m+bJw8Miu+/S/9Eorvkp27EqZHrX0PMoPnGsceNS0wPFGJKP4KiZLh1/rqG9VIrUcKiRgensYnveF9h3ppRknazjqZxSy1IRgeQOJgUa88utsFOEVBnnQo9h0pSgfrcjEir4JDiSbQAsoy3+bBQv0z1peYrW0vTJPkjkGUCtX+ohAmIF1y7exAJk4AM7c29KybvbQyYK39maDXWpBPExO8XfrclRr4vzcCcNBSoBzAHWPJl2nMdlbp7/wtUSzIEPE0waw+9cFPojrkIIyPfRglRDT6dSj7Bw8j4VQkzxD7A5/5T9EZD3CX8beIoZk=", "incomplete_details": {"reason": "max_output_tokens"}, "status": "incomplete", "usage": {"input_tokens": 919839, "input_tokens_details": {"cache_write_tokens": 408, "cached_tokens": 919428}, "output_tokens": 1727, "output_tokens_details": {"reasoning_tokens": 807}, "total_tokens": 921566}}')
