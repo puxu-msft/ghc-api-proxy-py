@@ -61,15 +61,19 @@
 
 **明确不动**：`decide_stream_ending()` 本身（REPLAY／ABANDON 要接线）、`RetryBudget`、`buffered_retry.py`、`delayed_commit.py`、`streamReplay`、`hedge`、`max_tokens_as_retryable`。用户 2026-08-21 裁决：「现有代理内续写机制从代码中删除，其他未接线的功能不要动」。
 
-### C. 观测面与 `stop_reason` 原样透出
+### C. 观测面与 `stop_reason` 原样透出 —— **第 1、3 项已落地**（主仓 `696a786`），第 2 项移入 E
 
 三处彼此独立、各自可单独验证：
 
 1. `[RETRY]` → `[RETY]`。**这是在修一个既有 bug**：实测所有前缀 6 字符宽，只有它 7 字符。
 2. `LogStatus` 加第四格 `retry` + `STATUS_COLOURS` 黄色。`request_log.py:70` 的注释自己写明两张颜色表是「restated rather than imported……a change to either belongs in both」，工作项边界由代码自述。
-3. 停止把非 `max_output_tokens` 的 incomplete 改写成 `end_turn`；`stop_reason` 原样透出，已知值着色；让 `Terminal` 承载 `incomplete_details.reason`。会动到现有断言。
+   **→ 已移入 E 组**：请求行的 `retry` 状态**没有生产者**，要到合成落地才有人设它。放在这里就是造一个没人走的分支——本项目已经有六组那样的件。（通用日志器的 `[RETY]` 前缀是活的，`logging.py:42` 给任何带 `status` 的行贴前缀，所以第 1 项独立成立。）
+3. 停止把非 `max_output_tokens` 的 incomplete 改写成 `end_turn`，改为原样透出；没给原因的 `response.incomplete` 发 `"incomplete"` 而非落回 `end_turn`。
+   **未做 `Terminal` 承载 `incomplete_details.reason`**：`stop_reason` 现在已经原样携带该事实，桥 spec 要求的「保留原因事实」由它满足，再加一个无人读取的字段就是孤儿件。唯一被映射掉的是 `max_output_tokens` → `max_tokens`，而那是 spec 明令的映射、1:1 可还原。
 
-第 3 项与 G1（分支 `fix/upstream-error-events`）相邻，接线前先与该分支对账。
+**已与 G1 对账**（分支 `fix/upstream-error-events`，同伴在飞）：它对 `assembler.py` 是**纯新增 65 行**（`UpstreamFailure` / `Terminal.failure` / `_read_failure`），**没有动 `_read_terminal`**——它那份的第 380-382 行与 main 逐字相同。两处改动是同一文件的不同 hunk，不重叠。
+
+**变异检验**：把 `end_turn` 放回去，两条新测试都转红，还原后文件与变异前逐字节相同（sha256 一致）。
 
 ### D. 无痕重试
 
