@@ -13,7 +13,7 @@ dependencies = [
     # Floors here are compatibility facts, not taste.
     # anthropic 1.0 is the release that stopped accepting an `httpx.AsyncClient` at all; openai 3.0 made httpx2 its default and calls its remaining legacy path temporary; httpx2 2.6 is where `AsyncClient.websocket()` appears and 2.12 is the connection-pool behaviour `app.upstream.stream_cap` was measured against; opentelemetry-instrumentation-httpx 0.65b0 is where `HTTPX2ClientInstrumentor` appears.
     # starlette is named here even though fastapi pulls it in, because we import it directly and because its TestClient only prefers httpx2 from 1.2.0 — 1.2.1 fixed the type-checking branch that still said httpx. fastapi asks merely for `starlette>=0.46`, so leaving this implicit resolves to 0.52.1 and every TestClient dies on the missing httpx.
-    # See docs/agents/httpx2-migration/plan.md.
+    # See .dev/docs/httpx2-migration/plan.md.
     "anthropic>=1",
     "anyio",
     "fastapi>=0.141",

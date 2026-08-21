@@ -10,7 +10,7 @@ So the reply is synthesised instead, in the shape Anthropic defines for exactly 
 
 **What this is not.** It is not a search that returned nothing: `content: []` is the documented shape for that, and it would be a claim about the web rather than about us. It is not text explaining the situation either, because the client's heading would present that explanation as the search's findings. The error object is the only form that says "the search did not happen" in a vocabulary the client already parses.
 
-**Untested against the real client, and deliberately recorded as such.** The refusal path has a transcript behind it; this one has the protocol documentation and nothing else. If the client turns out to handle it worse, the evidence for the alternative is in `docs/tmp/260820-claude-code-websearch-request-forensics.md` §4.2.
+**Untested against the real client, and deliberately recorded as such.** The refusal path has a transcript behind it; this one has the protocol documentation and nothing else. If the client turns out to handle it worse, the evidence for the alternative is in `.dev/docs/hosted-web-search/reports/260820-claude-code-websearch-request-forensics.md` §4.2.
 """
 
 from typing import Any, cast

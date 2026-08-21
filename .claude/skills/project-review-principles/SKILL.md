@@ -299,7 +299,7 @@ rg -n -B20 -A2 -g '*.py' 'raise \w*Error\(|LOGGER\.\w+\(|detail=' src/ | rg -in 
 
 **权重：足以作为暂定复查项执行，但判据轴刚改过，尚未在真实复查中用过。**
 
-依据分两部分。**一次事故的四个面**（2026-08-20，同一上游成因：把中间带的话写到端点上）：向用户的 `config.example.yaml` 提议加入「双重身份」；driver docstring 断言 `which is retryable` 与 `nothing has been shown to the client yet`；被用户纠正后**过度修正**，把实现事实一并删掉（由用户 20:10:45 触发复原，非自查自纠）；以及**第四面——本条原文自己**曾写「我逐字转达子智能体的处方」，而两个源头都把动作留在我这边（`docs/tmp/260820-research-upstream-timeout-wiring.md:251` 指向注释，`260820-review-upstream-timeout-wiring.md:180/386` 明写不改用户文件），升级到契约面的是我。那句开脱出现在一句自陈「我没裁落点」的话里。
+依据分两部分。**一次事故的四个面**（2026-08-20，同一上游成因：把中间带的话写到端点上）：向用户的 `config.example.yaml` 提议加入「双重身份」；driver docstring 断言 `which is retryable` 与 `nothing has been shown to the client yet`；被用户纠正后**过度修正**，把实现事实一并删掉（由用户 20:10:45 触发复原，非自查自纠）；以及**第四面——本条原文自己**曾写「我逐字转达子智能体的处方」，而两个源头都把动作留在我这边（`.dev/docs/delivery-keepalive/reports/260820-research-upstream-timeout-wiring.md:251` 指向注释，`260820-review-upstream-timeout-wiring.md:180/386` 明写不改用户文件），升级到契约面的是我。那句开脱出现在一句自陈「我没裁落点」的话里。
 
 **一处独立实例**：`blocks.py:20`，2026-08-16，早四天、属另一片工作，由归属评审用变形命令找到——**不是本条命令找到的**。
 

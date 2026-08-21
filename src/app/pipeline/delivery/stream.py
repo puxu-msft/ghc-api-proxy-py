@@ -4,7 +4,7 @@ The client sees a block only once it is whole, and sees nothing at all before th
 Between blocks the connection is kept alive with SSE comments.
 They carry no content, so they cannot be mistaken for a block.
 
-The keep-alive here is the **client-facing** one, and its cadence hangs off the last byte written to the client — never off upstream activity. Block-level delivery decouples the two sides: an upstream sending a delta every 200ms still leaves the client without a byte for however long the block takes to close. Keying the cadence on upstream events installed the guard backwards — it fired while upstream was quiet, and stayed silent while upstream was busy, which is the window a client actually gives up in. The upstream-facing keep-alive is a separate mechanism with separate settings and shares no timer with this one; see `docs/agents/delivery-keepalive/spec.md`.
+The keep-alive here is the **client-facing** one, and its cadence hangs off the last byte written to the client — never off upstream activity. Block-level delivery decouples the two sides: an upstream sending a delta every 200ms still leaves the client without a byte for however long the block takes to close. Keying the cadence on upstream events installed the guard backwards — it fired while upstream was quiet, and stayed silent while upstream was busy, which is the window a client actually gives up in. The upstream-facing keep-alive is a separate mechanism with separate settings and shares no timer with this one; see `.dev/docs/delivery-keepalive/spec.md`.
 """
 
 import asyncio

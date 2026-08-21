@@ -147,7 +147,7 @@ def _function_tool(tool: dict[str, Any]) -> dict[str, Any]:
 #
 # `web_fetch_` is deliberately *not* here, and it is not the same case: this endpoint refuses `web_fetch` under every spelling tried, so there is nothing to map it to. `hosted-web-search-spec.md` §13 has that family refused locally rather than removed quietly, which is its own piece of work.
 #
-# Nor are `memory_`, `tool_search_`, `text_editor_`, `bash_` and `computer_`. Those are executed by the client, not by the model's host, so there is no hosted equivalent to name — they travel unchanged today and are recorded in `docs/tmp/260820-websearch-responses-leg-400-fix.md` §5.1 as the gap that leaves.
+# Nor are `memory_`, `tool_search_`, `text_editor_`, `bash_` and `computer_`. Those are executed by the client, not by the model's host, so there is no hosted equivalent to name — they travel unchanged today and are recorded in `.dev/docs/hosted-web-search/reports/260820-websearch-responses-leg-400-fix.md` §5.1 as the gap that leaves.
 _ANTHROPIC_SERVER_TOOL_FAMILIES: tuple[str, ...] = ("web_search_",)
 
 # The spelling this endpoint answers 200 to and actually executes. Upstream normalises it to `web_search_preview` in the tool echo of its reply, which is how we know the two are the same thing to it.

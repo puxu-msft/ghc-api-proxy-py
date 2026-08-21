@@ -4,7 +4,7 @@ Run by hand, never by the test suite: it needs credentials and it makes real cal
 
     PYTHONPATH=src uv run python exp/260820-empty-text-probe/probe.py
 
-The question this settles. `docs/tmp/260820-empty-text-block-synthesis.md` records that the Anthropic Messages leg refuses a blank text block outright — that is the 400 the whole investigation started from. Whether the Responses leg refuses the shape it translates into was never measured; the request-side strip was first gated on that not being known, and the gate was later removed by ruling. This probe replaces the unknown with an answer.
+The question this settles. `.dev/docs/empty-text-block/reports/260820-empty-text-block-synthesis.md` records that the Anthropic Messages leg refuses a blank text block outright — that is the 400 the whole investigation started from. Whether the Responses leg refuses the shape it translates into was never measured; the request-side strip was first gated on that not being known, and the gate was later removed by ruling. This probe replaces the unknown with an answer.
 
 E5 is the positive control and is not optional. A row of 200s means nothing on its own: it could equally mean the probe never reached anything that judges bodies. E5 sends the shape already known to be refused, on the leg already known to refuse it, in the same run and with the same credentials. If E5 does not come back 400, the whole run is uninformative and the 200s must not be read as acceptance.
 
