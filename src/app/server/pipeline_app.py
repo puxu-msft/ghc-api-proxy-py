@@ -235,7 +235,7 @@ class _Trace:
 
         Recomputes from `context.extras` rather than appending, so calling it again after more translation has happened is correct and calling it twice with nothing in between changes nothing. That is what lets it be called at each point a translation has just finished instead of at one point that would have to be the last.
 
-        Called at four such points because translation happens at two of them and the response half at a third; a single call site would have to sit after every `return` in `_dispatch`, which no single site does. The cost of the arrangement is that a `return` added later without a call here reports no losses — which is why `losses` says nothing rather than says none: an empty tuple is what a lossless crossing looks like too.
+        Called from every `return` in `_dispatch` that has a `context` to read, because no single site sits after all of them. That is the arrangement's cost and it has already been paid once: the count-tokens failure path was added to this list only after a review found it returning `losses: []` for a request whose translation had recorded some. A `return` added later without a call here reports nothing rather than reporting a lie — an empty tuple is also what a lossless crossing looks like — so the omission is invisible, which is why the rule is stated here rather than a count that drifts.
         """
         self.losses = _translation_losses(context)
 
@@ -277,9 +277,10 @@ def _log_completion(chain: Chain, trace: _Trace, status_code: int | None, *, byt
         losses=trace.losses,
     )
     status = status_for(status_code, override=trace.status_override)
-    for loss in line.losses:
-        # Counted here rather than where the loss is recorded, so the count and the record are produced from the same tuple and cannot disagree about what this request lost.
-        TRANSLATION_LOSSES.labels(direction=loss["direction"], code=loss["code"]).inc()
+    # Counted here rather than where the loss is recorded, so the count and the record are produced from the same tuple and cannot disagree about what this request lost.
+    # One increment per request per kind, not per loss. A request carrying screenshots records one `block-not-carried` per block -- 30 of them in a measured case -- and counting each would make the rate track how many blocks a conversation had rather than how often a crossing loses something. The record keeps every one; the counter answers "how many requests were affected".
+    for direction, code in sorted({(loss["direction"], loss["code"]) for loss in line.losses}):
+        TRANSLATION_LOSSES.labels(direction=direction, code=code).inc()
     write_request_record(line, status=status)
     get_logger(REQUEST_LOGGER).info(
         format_completion_line(line, status=status, unicode=chain.capabilities.unicode, color=chain.capabilities.color),
@@ -372,7 +373,7 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
         trace.detail = str(error)
         return JSONResponse(error_body(error), status_code=400)
 
-    # After parsing and before routing, which is where `docs/.human-controlled/message-format-sanitize.md` puts it: the line is addressed to Anthropic's billing rather than to any model, so nothing downstream — routing, translation, the token counter — should ever see it. Resident rather than configured, per the same document.
+    # After parsing and before routing, which is where `docs/.human-controlled/message-format-sanitize.md` puts it: the line is addressed to Anthropic's billing rather than to any model, so routing, translation and the token counter should not be reading it. Scope is what that document specifies — the leading lines of `system[0]` — so an attribution line placed anywhere else does still travel. Resident rather than configured, per the same document.
     if route.wire_format is WireFormat.ANTHROPIC_MESSAGES:
         stripped = strip_attribution_lines(context.payload)
         if stripped:
@@ -398,6 +399,8 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
             # Routing runs inside the handler, so a failure after it has a resolved model worth naming; before it, this is still empty and the field drops out.
             trace.model = context.resolved_model
             trace.detail = str(error)
+            # A count that failed still translated, and what the translation could not carry is part of why it may have failed.
+            trace.absorb_losses(context)
             # No capture here on purpose. `count_tokens` converts every upstream failure into `CountTokensUnavailable` before it reaches this line, so an `UpstreamRejected` never arrives and a call would be wiring that looks live and is not. That conversion also means a counting request refused over its body answers 503 rather than upstream's own verdict, which is a separate gap and not this one's to close.
             return JSONResponse(
                 error_body(error),

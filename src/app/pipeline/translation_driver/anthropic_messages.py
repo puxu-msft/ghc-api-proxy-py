@@ -17,6 +17,7 @@ from app.pipeline.translation_driver.content import (
 from app.pipeline.translation_driver.reasoning import (
     ReasoningIntentInvalid,
     intent_from_thinking,
+    unused_thinking_fields,
 )
 from app.pipeline.translation_driver.reasoning_carrier import (
     decode_reasoning_carrier,
@@ -144,12 +145,20 @@ def from_anthropic_messages(payload: Mapping[str, Any]) -> SemanticRequest:
     if isinstance(temperature, int | float):
         request.temperature = float(temperature)
     # Read into an intent here rather than left for the writer, so an unreadable `thinking` is refused while the client's own field name is still in scope to name in the error. What the intent then becomes on the wire depends on the target model and is not this side's business.
+    thinking = payload.get("thinking")
     try:
-        request.reasoning = intent_from_thinking(payload.get("thinking"))
+        request.reasoning = intent_from_thinking(thinking)
     except ReasoningIntentInvalid as invalid:
         raise TranslationRefused(
             str(invalid), code="reasoning-intent-invalid", field_path=invalid.field_path
         ) from invalid
+    # Claiming `thinking` took it out of `extensions`, which is where an unclaimed field's loss used to be reported. Whatever the mode did not read is named here instead, so `{"type": "disabled", "budget_tokens": 8000}` does not answer "nothing was lost" about a budget it ignored.
+    unread = unused_thinking_fields(thinking, request.reasoning)
+    if unread:
+        request.conversion.record(
+            LossCode.REASONING_INTENT_APPROXIMATED,
+            f"thinking fields not read by this intent: {', '.join(unread)}",
+        )
 
     # Anything not claimed above is carried rather than dropped.
     # An unmodelled field therefore survives the round trip back to the same format.
@@ -249,5 +258,33 @@ def to_anthropic_messages(
         payload["max_tokens"] = request.max_output_tokens
     if request.temperature is not None:
         payload["temperature"] = request.temperature
+    _restore_thinking(payload, request)
     payload.update(request.extensions_for(WIRE_FORMAT))
     return payload
+
+
+def _restore_thinking(payload: dict[str, Any], request: SemanticRequest) -> None:
+    """Put `thinking` back on the way out to this same format.
+
+    The reader claims `thinking` now, which takes it out of `extensions` — and `extensions` is what
+    used to carry an unclaimed field across a same-format round trip untouched. Claiming a field
+    without rebuilding it is therefore how a round trip starts losing it, and the loss is silent
+    because the field simply is not there on the other side.
+
+    `effort` has no Anthropic spelling: it is what a Responses request says, and there is no budget
+    that means the same thing. Reported rather than invented.
+    """
+    intent = request.reasoning
+    if intent is None:
+        return
+    if intent.mode == "disabled":
+        payload["thinking"] = {"type": "disabled"}
+    elif intent.mode == "adaptive":
+        payload["thinking"] = {"type": "adaptive"}
+    elif intent.mode == "budget" and intent.budget_tokens is not None:
+        payload["thinking"] = {"type": "enabled", "budget_tokens": intent.budget_tokens}
+    else:
+        request.conversion.record(
+            LossCode.REASONING_INTENT_NOT_CARRIED,
+            f"{intent.mode} reasoning has no Anthropic spelling",
+        )

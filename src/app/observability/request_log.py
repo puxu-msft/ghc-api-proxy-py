@@ -107,7 +107,7 @@ class RequestLine:
 
     `count_provider` is set only on a token-counting request, and names the counting provider that produced the number; `count_provider_reason` carries what was tried before it, when anything was. See `format_count_provider`. `count_tokens` is the endpoint the request arrived at, which is the same fact one step earlier: it is true of a count that failed before any provider ran, where `count_provider` is empty.
 
-    `losses` is what translation could not carry, in the order it was recorded. It exists here rather than beside the translator because this record is the one place a per-request fact is written down once and read by everything downstream — the console line, the JSONL file, and whatever queries them later. `Conversion` has always collected these; until they reached this record nothing read them, so a translated request that dropped half its parameters looked identical on every surface to one that crossed intact.
+    `losses` is what translation could not carry, in the order it was recorded. It exists here rather than beside the translator because this record is the one place a per-request fact is written down once, so anything that later wants it — the JSONL file today, a query over it tomorrow — reads the same tuple. **The rendered console line does not show it**: `extensions-not-carried` fires on most translated requests, and a field that appears on nearly every line has stopped telling anyone anything. Whether it is worth a column should be decided from the counter's frequency, not from this record's existence.
     """
 
     method: str

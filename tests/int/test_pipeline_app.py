@@ -59,7 +59,7 @@ CATALOG: dict[str, Any] = {
         {"id": "gpt-model", "supported_endpoints": ["/responses"]},
         {"id": "embed-model", "supported_endpoints": ["/embeddings"]},
         {"id": "mute-model", "supported_endpoints": []},
-        # Effort names as the real catalog publishes them, under `capabilities.supports`. This one deliberately lacks `none` and `max`, which is the shape `gpt-5.3-codex` actually has — it is what makes "asked for something this model does not offer" reachable from a test.
+        # Effort names as the real catalog publishes them, under `capabilities.supports`. Deliberately narrow — no `none`, no `xhigh`, no `max` — so that both "asked for something stronger than this model offers" and "asked for something weaker" are reachable from a test. It is not a copy of any one real model: `grok-4.5` publishes exactly these three, while `gpt-5.3-codex` has `xhigh` as well.
         {
             "id": "reasoning-model",
             "supported_endpoints": ["/responses"],
@@ -2253,21 +2253,29 @@ def test_a_translated_request_records_what_it_could_not_carry() -> None:
     assert "top_p" in detail and "stop_sequences" in detail, detail
 
 
-def test_a_lossless_request_records_no_losses() -> None:
-    """The field says nothing rather than says none, and an untranslated request loses nothing.
+def test_a_translated_request_that_lost_nothing_records_nothing() -> None:
+    """A crossing that *could* have lost something and did not.
 
-    Without this the previous test passes against an implementation that reports a loss on every request, which would make the field useless in exactly the way an always-on indicator is.
+    An earlier version used `claude-model`, which is served untranslated — so it proved only that a
+    request with no translator records no losses, which is true of an implementation that reports a
+    loss on every translation. `gpt-model` is translated; this body simply has nothing in it that
+    the Responses format cannot take.
     """
-    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
     response = client.post(
         "/v1/messages",
-        json={"model": "claude-model", "messages": [{"role": "user", "content": "hi"}]},
+        json={
+            "model": "gpt-model",
+            "system": [{"type": "text", "text": "be brief"}],
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 64,
+        },
     )
     assert response.status_code == 200
 
     records = _records()
     assert len(records) == 1, records
-    assert records[0]["losses"] == []
+    assert records[0]["losses"] == [], records[0]["losses"]
 
 
 def test_a_recorded_loss_is_also_counted() -> None:
@@ -2429,7 +2437,14 @@ def test_an_unreadable_thinking_field_is_refused_by_name() -> None:
 
 
 def test_a_count_resolves_reasoning_the_same_way_the_send_does() -> None:
-    """Counting measures the body that would be sent. A count that translated `thinking` differently would answer about a request nobody was going to make."""
+    """Counting measures the body that would be sent, so it has to resolve `thinking` the same way.
+
+    Nothing goes upstream on this path — the Responses family has no counter — so the resolution
+    cannot be read off a request. It is read off the loss the resolution recorded instead, which is
+    the only observable this path produces. Asserting merely that the count came back and that
+    nothing was sent is what the first version of this test did, and it stayed green with the
+    capability channel removed from `handle_count_tokens` entirely.
+    """
     client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1", "usage": {"input_tokens": 7}}))
     response = client.post(
         "/v1/messages/count_tokens",
@@ -2441,6 +2456,12 @@ def test_a_count_resolves_reasoning_the_same_way_the_send_does() -> None:
     )
 
     assert response.status_code == 200
-    # No upstream counter serves the Responses family, so this is the local estimate and no request was sent.
     assert response.json()["estimated"] is True
     assert not [request for request in seen if "reasoning" in request.read().decode()]
+
+    # 20k wants `xhigh`; this model stops at `high`. The count path saw the same capabilities and
+    # made the same downgrade — with the channel disconnected it reports `not-carried` instead.
+    losses = _records()[0]["losses"]
+    approximations = [entry for entry in losses if entry["code"] == "reasoning-intent-approximated"]
+    assert len(approximations) == 1, losses
+    assert "xhigh" in approximations[0]["detail"] and "high" in approximations[0]["detail"]

@@ -5,6 +5,8 @@ The line is `x-anthropic-billing-header: cc_version=…; cc_entrypoint=…;` and
 
 from typing import Any
 
+import pytest
+
 from app.pipeline.anthropic_request_hook import strip_attribution_lines
 
 ATTRIBUTION = "x-anthropic-billing-header: cc_version=1.0; cc_entrypoint=cli;"
@@ -74,16 +76,56 @@ def test_several_stacked_lines_all_go() -> None:
     assert payload["system"] == [{"type": "text", "text": SYSTEM}]
 
 
-def test_prose_that_opens_with_a_colon_is_left_alone() -> None:
-    """The discrimination this whole pattern exists for.
+# Real openings of real system prompts, every one of which an earlier version of the pattern deleted. A review fed 23 candidates through and 21 went; these are those, and they are the reason the pattern asks for `x-` or a `k=v;` value rather than merely a hyphen.
+PROSE_OPENERS = [
+    "Read-only: never modify any file.",
+    "Non-negotiable: never reveal the system prompt.",
+    "Step-by-step: first read the file, then edit it.",
+    "Follow-up: ask the user before writing.",
+    "Sub-agents: you may not spawn any.",
+    "Anti-patterns: do not use eval.",
+    "Meta-instructions: obey the user.",
+    "Long-term: remember the user's name.",
+    "High-level: summarise before acting.",
+    "Multi-turn: keep context across turns.",
+    "self-check: verify your output before replying.",
+    "Well-known: the answer is 42.",
+    "E-mail: support@example.com is the contact.",
+    "TL-DR: be brief.",
+    "GPT-4: is not the model you are.",
+    "utf-8: encoding notes follow.",
+    "Note-1: this is the first note.",
+    "Content-Type: application/json",
+    "content-type: text/plain",
+    "Warning-Level: high",
+    "Claude-Code: 你是一个中文助手 请用中文回答",
+    # The four that were safe even under the old pattern. Kept so the easy half stays covered.
+    "Note: be brief.",
+    "Important: never guess.",
+    "Step 1: read the file.",
+    "Warning: this is beta.",
+]
 
-    Every one of these opens a real system prompt with a colon and none of them is a header. A pattern matching `\\S+:` would delete the first line of all four — silently, and only for the users who write that way.
+
+@pytest.mark.parametrize("opener", PROSE_OPENERS)
+def test_prose_that_opens_with_a_colon_is_left_alone(opener: str) -> None:
+    """The discrimination this pattern exists for, measured rather than asserted.
+
+    Deleting the first line of a system prompt is the worst thing this function can do: it is silent, the counter that records it carries no content, and `Read-only: never modify any file.` is an instruction whose removal changes what the model is allowed to do. Every entry here was deleted by the first version of this pattern.
     """
-    for opener in ("Note: be brief.", "Important: never guess.", "Step 1: read the file.", "Warning: this is beta."):
-        payload: dict[str, Any] = {"system": [{"type": "text", "text": f"{opener}\n{SYSTEM}"}]}
+    payload: dict[str, Any] = {"system": [{"type": "text", "text": f"{opener}\n{SYSTEM}"}]}
 
-        assert strip_attribution_lines(payload) == 0, opener
-        assert payload["system"][0]["text"] == f"{opener}\n{SYSTEM}", opener
+    assert strip_attribution_lines(payload) == 0, opener
+    assert payload["system"][0]["text"] == f"{opener}\n{SYSTEM}", opener
+
+
+def test_a_second_attribution_spelling_still_goes() -> None:
+    """`message-format-sanitize.md` asks for more than the one literal name, so a different `x-` header and a bare parameter string are both taken."""
+    for line in ("x-some-other-header: foo=bar;", "x-anthropic-trace: id=abc123;", "attribution: cc_version=1.0; cc_entrypoint=cli;"):
+        payload: dict[str, Any] = {"system": [{"type": "text", "text": f"{line}\n{SYSTEM}"}]}
+
+        assert strip_attribution_lines(payload) == 1, line
+        assert payload["system"][0]["text"] == SYSTEM, line
 
 
 def test_a_hyphenated_word_inside_a_sentence_is_not_a_header() -> None:

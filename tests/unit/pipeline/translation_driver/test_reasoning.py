@@ -11,6 +11,7 @@ from app.pipeline.translation_driver.reasoning import (
     ReasoningIntentInvalid,
     intent_from_thinking,
     resolve,
+    unused_thinking_fields,
 )
 
 # The three shapes the real catalog actually shows, named for what distinguishes them.
@@ -83,11 +84,21 @@ def test_the_chosen_effort_is_always_one_the_model_offers(capabilities: tuple[st
 
 
 def test_every_rung_the_ladder_names_can_actually_be_chosen() -> None:
-    """Guards against a rung being added to `EFFORT_LADDER` and never selected — a name in the ladder that no intent reaches is dead weight that looks like coverage."""
-    reachable = {resolve(ReasoningIntent(mode="budget", budget_tokens=n), FULL).effort for n in (1, 3_000, 8_000, 16_000, 30_000)}
-    reachable.add(resolve(ReasoningIntent(mode="disabled"), FULL).effort)
+    """Each rung, pinned to the input that reaches it.
 
-    assert reachable == set(EFFORT_LADDER)
+    An earlier version compared the *set* of reachable efforts against `set(EFFORT_LADDER)`, which
+    is not a test: deleting `max` from the ladder shrinks both sides at once and it stayed green
+    while a 30k budget silently fell to a different rung. Pinning each pair means removing a rung
+    from the ladder, or moving a threshold, fails here with the pair that changed.
+    """
+    assert resolve(ReasoningIntent(mode="disabled"), FULL).effort == "none"
+    assert resolve(ReasoningIntent(mode="budget", budget_tokens=1), FULL).effort == "low"
+    assert resolve(ReasoningIntent(mode="budget", budget_tokens=3_000), FULL).effort == "medium"
+    assert resolve(ReasoningIntent(mode="budget", budget_tokens=8_000), FULL).effort == "high"
+    assert resolve(ReasoningIntent(mode="budget", budget_tokens=16_000), FULL).effort == "xhigh"
+    assert resolve(ReasoningIntent(mode="budget", budget_tokens=30_000), FULL).effort == "max"
+    # And the ladder names nothing this project cannot reach, which is the half the pairs above cannot say.
+    assert set(EFFORT_LADDER) == {"none", "low", "medium", "high", "xhigh", "max"}
 
 
 def test_thinking_is_read_into_the_three_modes() -> None:
@@ -132,3 +143,16 @@ def test_a_thinking_field_that_cannot_be_read_names_the_field_it_could_not_read(
         intent_from_thinking(thinking)
 
     assert raised.value.field_path == field_path
+
+
+def test_fields_a_mode_does_not_read_are_named() -> None:
+    """`disabled` ignores a budget the client meant. Answering "nothing was lost" about it would be false, and `thinking` no longer travels in `extensions` where the drop used to be reported."""
+    disabled = ReasoningIntent(mode="disabled")
+    assert unused_thinking_fields({"type": "disabled", "budget_tokens": 8000}, disabled) == ("budget_tokens",)
+    assert unused_thinking_fields({"type": "disabled"}, disabled) == ()
+
+    budget = ReasoningIntent(mode="budget", budget_tokens=5000)
+    assert unused_thinking_fields({"type": "enabled", "budget_tokens": 5000}, budget) == ()
+    assert unused_thinking_fields({"type": "enabled", "budget_tokens": 5000, "mode": "deep"}, budget) == ("mode",)
+
+    assert unused_thinking_fields({"type": "disabled"}, None) == ()

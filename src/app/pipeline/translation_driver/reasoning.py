@@ -10,6 +10,7 @@ The thresholds are this project's policy, not an upstream fact. Nothing in the c
 """
 
 from dataclasses import dataclass
+from typing import cast
 
 # Weakest to strongest. The catalog lists names but never says they are ordered, so the order is stated here as this project's own and used for every comparison — `supported[-1]` would be reading an order out of a list that does not promise one.
 EFFORT_LADDER: tuple[str, ...] = ("none", "low", "medium", "high", "xhigh", "max")
@@ -101,6 +102,25 @@ def intent_from_thinking(thinking: object) -> ReasoningIntent | None:
     return ReasoningIntent(mode="budget", budget_tokens=budget)
 
 
+# What each mode actually reads out of `thinking`. Anything else the client sent is not refused — Anthropic may add fields and refusing them would reject bodies it accepts — but it is not silently eaten either, because `thinking` is now claimed by the reader and a claimed field no longer travels in `extensions` where an unclaimed one would have been reported.
+_CONSUMED_BY_MODE = {
+    "disabled": frozenset({"type"}),
+    "adaptive": frozenset({"type"}),
+    "budget": frozenset({"type", "budget_tokens"}),
+}
+
+
+def unused_thinking_fields(thinking: object, intent: ReasoningIntent | None) -> tuple[str, ...]:
+    """The keys of `thinking` this intent did not read, sorted.
+
+    `{"type": "disabled", "budget_tokens": 8000}` is the case worth naming: the budget is real, the client meant it, and `disabled` ignores it entirely. Answering "nothing was lost" there would be false.
+    """
+    if intent is None or not isinstance(thinking, dict):
+        return ()
+    consumed = _CONSUMED_BY_MODE.get(intent.mode, frozenset({"type"}))
+    return tuple(sorted(key for key in cast(dict[str, object], thinking) if key not in consumed))
+
+
 def _desired(intent: ReasoningIntent) -> str:
     """The rung this intent asks for, before anything is known about what the target offers."""
     if intent.mode == "disabled":
@@ -119,7 +139,7 @@ def _desired(intent: ReasoningIntent) -> str:
 def _at_or_below(desired: str, supported: frozenset[str]) -> str | None:
     """The strongest supported rung no stronger than `desired`.
 
-    Downward rather than nearest: effort costs money and latency, so a request that cannot be met exactly is met with less rather than more. A desired rung this ladder does not know returns `None` here and is handled by the caller.
+    Downward rather than nearest: effort costs money and latency, so a request that cannot be met exactly is met with less rather than more — *where there is anything below it*. When there is not, the caller falls back to `_weakest`, which is the only path that can answer with something stronger than was asked for. A desired rung this ladder does not know returns `None` here and is handled by the caller.
     """
     if desired not in EFFORT_LADDER:
         return None
@@ -130,6 +150,10 @@ def _at_or_below(desired: str, supported: frozenset[str]) -> str | None:
 
 
 def _weakest(supported: frozenset[str]) -> str | None:
+    """The lowest rung on offer — the floor used when the request asked for *less* than any of them.
+
+    This is the one place the answer can come out stronger than what was asked for, and it is unavoidable rather than a preference: `disabled` against a model whose weakest published effort is `medium` has no downward option, and the alternative is sending nothing, which is measured to give upstream's default instead. Going up is reported as an approximation with both rungs named, so a request paying for more thinking than it asked for says so.
+    """
     for rung in EFFORT_LADDER:
         if rung in supported:
             return rung

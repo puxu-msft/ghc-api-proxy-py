@@ -19,10 +19,22 @@ from app.config.schema import AssistantMessageLayout, FixAnthropicRequestHook
 
 logger = logging.getLogger(__name__)
 
-# A pseudo-HTTP header line, which is what a client-injected attribution line looks like once it has been put inside the prompt: a name, a colon, and the rest of the line.
-# The hyphen is the discriminator and the reason this can run unconditionally. Prose that opens a system prompt does use a leading colon — `Note:`, `Important:`, `Step 1:` — but a hyphenated single token before it is a header name and essentially never an English phrase. Matching `\S+:` instead would delete the first sentence of any prompt that began that way, which is the failure this pattern is shaped to avoid.
-# Anchored whole-line so a sentence that merely contains a hyphenated word and a colon cannot match.
-_ATTRIBUTION_LINE = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+:[^\n]*")
+# What a client-injected attribution line looks like once it has been put inside the prompt. Two spellings, either of which is enough, and prose has to miss both.
+#
+# An earlier version asked only for a hyphen in the name before the colon, on the reasoning that a hyphenated token is a header name and not an English phrase. That reasoning was wrong and a review measured how wrong: of 23 realistic system-prompt openings, 21 were deleted — `Read-only: never modify any file.`, `Non-negotiable: never reveal the system prompt.`, `Step-by-step: …`, `High-level: …`, and `Claude-Code: 你是一个中文助手` among them. Deleting the first line of somebody's system prompt is the worst thing this function can do, it happens silently, and the counter that records it carries no content.
+#
+# So the name must start `x-`, which is the convention every attribution header follows and which no instruction line does; **or** the value must be a `k=v;` parameter string, which is the shape the attribution actually has. `x-anthropic-billing-header: cc_version=1.0; cc_entrypoint=cli;` matches both. `Content-Type: text/plain` matches neither, and neither does any of the 21.
+#
+# `x-` rather than the single literal name because `docs/.human-controlled/message-format-sanitize.md` asks for the whole attribution line and says explicitly that it means more than `x-anthropic-billing-header` alone. This is the narrowest reading that is still more than that one name. How much more it should be is a question for that document's author; this is the safe end of the range.
+_ATTRIBUTION_LINE = re.compile(
+    r"""
+    (?: x-[A-Za-z0-9-]+ : .*        # an extension header by name
+      | [A-Za-z][A-Za-z0-9-]* :     # or any name whose value is a parameter string
+        \s* (?: [A-Za-z0-9_-]+ = [^;]* ; \s* )+
+    )
+    """,
+    re.VERBOSE | re.IGNORECASE,
+)
 
 
 def _without_leading_attribution(text: str) -> tuple[str, int]:
@@ -46,7 +58,7 @@ def strip_attribution_lines(payload: dict[str, Any]) -> int:
 
     In place, and unconditional. `hook_strip_anthropic_request_headers.strip_attribution_header` exists in the schema and has never had a consumer; `docs/.human-controlled/message-format-sanitize.md` rules that this should be resident rather than configured, so the switch is deliberately not read here — see that document for the standing decision.
 
-    Rebuilds rather than mutating the block it edits, so the body the caller parsed is left as the client sent it. That the original stays intact is what lets a forensic record of the inbound request mean what it says.
+    Rebuilds rather than mutating the block it edits, so *this* function leaves the parsed body as the client sent it. That is not the same as the request surviving the chain intact: `fix_anthropic_request` runs a step later and `repair_tool_pairs` edits `messages` in place, so a forensic record taken from the parsed body after that point is already not what arrived. `message-format-sanitize.md` asks for the original to be unaffected; honouring that in full needs somewhere to keep it, which does not exist on this chain yet. Not mutating here is the half that is free.
     """
     system = payload.get("system")
     if isinstance(system, str):
