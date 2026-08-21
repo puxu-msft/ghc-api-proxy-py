@@ -3,7 +3,12 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from app.config.loading import environment_values, load_proxy_config, resolve_config_path
+from app.config.loading import (
+    GITHUB_TOKEN_VARIABLE,
+    environment_values,
+    load_proxy_config,
+    resolve_config_path,
+)
 from app.config.paths import spec_config_file_path
 from app.config.provider import ConfigProvider, pin_restart_only
 from app.config.schema import ProxyConfig
@@ -221,3 +226,16 @@ def test_the_config_path_variable_is_not_read_as_a_setting(
 
     assert environment_values() == {}
     assert load_proxy_config().server.port == 4321
+
+
+def test_the_github_token_variable_is_not_read_as_a_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`GHC_API_PROXY_GITHUB_TOKEN` is a credential, and it shares the settings prefix.
+
+    Measured, not anticipated: setting it made every start-up die on `api_proxy_github_token — Extra inputs are not permitted`, which reads as a bad config file rather than as the token the operator just exported. `load_proxy_config` is asserted alongside `environment_values` because the filter is only worth anything if the config it feeds still validates.
+    """
+    monkeypatch.setenv(GITHUB_TOKEN_VARIABLE, "ghu_probe")
+
+    assert environment_values() == {}
+    assert load_proxy_config() is not None

@@ -342,12 +342,7 @@ def test_inherited_listener_serves_ready_generic_upstream_and_persists_overrides
     backlog_client.settimeout(20)
 
     environment = os.environ.copy()
-    for name in (
-        "COPILOT_API_GITHUB_TOKEN",
-        "GH_TOKEN",
-        "GITHUB_TOKEN",
-        "GHC_CONFIG",
-    ):
+    for name in ("GHC_API_PROXY_GITHUB_TOKEN", "GHC_CONFIG"):
         environment.pop(name, None)
     # Re-added below with a fake value; popped first so the operator's real one cannot leak in.
     service = read_unit("ghc-api-proxy.service")
@@ -369,7 +364,7 @@ def test_inherited_listener_serves_ready_generic_upstream_and_persists_overrides
             "GHC_MODEL_PROVIDERS__GHC__MODEL_REFRESH_INTERVAL": "0",
             "GHC_DEFAULT_MODEL_PROVIDER": "ghc",
             # A GitHub token for `EnvTokenProvider`; the fake exchanges whatever it is given.
-            "GITHUB_TOKEN": "ghu_smoke",
+            "GHC_API_PROXY_GITHUB_TOKEN": "ghu_smoke",
         }
     )
     inherited_fd = listener.fileno()
@@ -457,12 +452,7 @@ def test_short_graceful_timeout_cancels_inflight_request_and_runs_lifespan(
     listener.listen(8)
     address = listener.getsockname()
     environment = os.environ.copy()
-    for name in (
-        "COPILOT_API_GITHUB_TOKEN",
-        "GH_TOKEN",
-        "GITHUB_TOKEN",
-        "GHC_CONFIG",
-    ):
+    for name in ("GHC_API_PROXY_GITHUB_TOKEN", "GHC_CONFIG"):
         environment.pop(name, None)
     environment.update(
         {

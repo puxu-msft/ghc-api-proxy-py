@@ -6,6 +6,7 @@ from typing import Literal, Protocol
 
 from anyio.to_thread import run_sync
 
+from app.config.loading import GITHUB_TOKEN_VARIABLE
 from app.config.paths import user_data_path
 from app.ghc_client.device_flow import DeviceCode
 
@@ -56,18 +57,17 @@ class EnvTokenProvider(GitHubTokenProvider):
     name = "Environment"
     priority = 2
     refreshable = False
-    variable_names = (
-        "COPILOT_API_GITHUB_TOKEN",
-        "GH_TOKEN",
-        "GITHUB_TOKEN",
-    )
+    variable_name = GITHUB_TOKEN_VARIABLE
+    """The one environment variable this proxy takes a GitHub token from.
+
+    It previously also read `COPILOT_API_GITHUB_TOKEN`, `GH_TOKEN` and `GITHUB_TOKEN`, in that order. The last two are not ours: `gh auth login` and most CI runners export them for whatever happens to run next, so the proxy would silently authenticate as whichever identity the surrounding shell had lying around, and nothing in its output said which of the three it picked. A name only this project sets means an env token is one somebody chose for it.
+
+    Taken from `app.config.loading` rather than spelled again here because the name shares the `GHC_` prefix that module reads settings from, and it has to be excluded there or the process refuses to start. Two spellings would let the exclusion and the read drift apart, and the failure that produces is the service not starting at all.
+    """
 
     def _find_token(self) -> str | None:
-        for name in self.variable_names:
-            value = os.environ.get(name, "").strip()
-            if value:
-                return value
-        return None
+        value = os.environ.get(self.variable_name, "").strip()
+        return value or None
 
     async def is_available(self) -> bool:
         return self._find_token() is not None

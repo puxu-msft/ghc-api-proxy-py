@@ -19,8 +19,7 @@ def no_ambient_credentials(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     groups have no business inheriting this environment.
     """
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
-    for name in ("COPILOT_API_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
-        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("GHC_API_PROXY_GITHUB_TOKEN", raising=False)
 
 
 def test_status_and_config_management_routes() -> None:

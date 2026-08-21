@@ -90,17 +90,25 @@ async def test_cli_provider_strips_and_returns_explicit_token() -> None:
 
 
 @pytest.mark.asyncio
-async def test_env_provider_uses_documented_variable_priority(
+async def test_env_provider_reads_only_this_projects_variable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """An ambient `GH_TOKEN` or `GITHUB_TOKEN` must not become the proxy's identity.
+
+    Both are set by `gh auth login` and by most CI runners for whatever runs next, so honouring them made the proxy authenticate as whoever the surrounding shell happened to be. Asserting they are ignored *while set* is the point: asserting only that the new name works would still pass if the old ones were also being read.
+    """
     monkeypatch.setenv("GITHUB_TOKEN", "github")
     monkeypatch.setenv("GH_TOKEN", "gh")
     monkeypatch.setenv("COPILOT_API_GITHUB_TOKEN", "copilot")
+    monkeypatch.delenv("GHC_API_PROXY_GITHUB_TOKEN", raising=False)
 
+    assert await EnvTokenProvider().get_token() is None
+
+    monkeypatch.setenv("GHC_API_PROXY_GITHUB_TOKEN", "ours")
     token = await EnvTokenProvider().get_token()
 
     assert token is not None
-    assert token.token == "copilot"
+    assert token.token == "ours"
     assert token.source == "env"
 
 
@@ -174,10 +182,12 @@ async def test_noninteractive_token_probe_checks_env_and_file(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     token_path = tmp_path / "github_token"
+    # The "nothing available" rung only reads as absence if the developer's own shell is not exporting one.
+    monkeypatch.delenv("GHC_API_PROXY_GITHUB_TOKEN", raising=False)
 
     assert await noninteractive_token_available(None, token_path) is False
-    monkeypatch.setenv("GITHUB_TOKEN", "from-env")
+    monkeypatch.setenv("GHC_API_PROXY_GITHUB_TOKEN", "from-env")
     assert await noninteractive_token_available(None, token_path) is True
-    monkeypatch.delenv("GITHUB_TOKEN")
+    monkeypatch.delenv("GHC_API_PROXY_GITHUB_TOKEN")
     token_path.write_text("from-file", encoding="utf-8")
     assert await noninteractive_token_available(None, token_path) is True
