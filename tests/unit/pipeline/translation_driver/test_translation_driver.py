@@ -1,6 +1,6 @@
 import json
 import re
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -900,11 +900,11 @@ def test_a_replayed_failed_search_still_says_it_happened() -> None:
         source=WireFormat.ANTHROPIC_MESSAGES,
         target=WireFormat.OPENAI_RESPONSES,
     )
-    texts = [
-        part["text"]
-        for item in payload["input"]
-        for part in item.get("content", [])
-        if isinstance(part, dict) and "text" in part
+    texts: list[str] = [
+        str(cast(dict[str, Any], part)["text"])
+        for item in cast(list[Any], payload["input"])
+        for part in cast(list[Any], cast(dict[str, Any], item).get("content", []))
+        if isinstance(part, dict) and "text" in cast(dict[str, Any], part)
     ]
     assert "[web_search] bun 1.3" in texts, texts
     assert "[web_search failed: unavailable]" in texts, texts
