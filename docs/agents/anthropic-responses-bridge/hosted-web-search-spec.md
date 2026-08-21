@@ -217,7 +217,9 @@ Anthropic `tool_choice` 映射如下，**必须**按表执行：
 
 ### 6.3 成块规则：在**后随文本块的完成边界**上成块
 
-起草稿写的是「在 `web_search_call` 的 `done` 上一次性成块」。**该规则与 §5.3 的 content 判据互斥，已废止**：cassette 实测表明 `url_citation` 只在后续 message 的 `content_part.done` 出现，**晚于** `web_search_call` 的 `done`；若在 `done` 上成块，§5.3 用 citation 填充 `content` 的那一分支永远走不到，且流式与非流式必然不等价。
+起草稿写的是「在 `web_search_call` 的 `done` 上一次性成块」。**该规则与 §5.3 的 content 判据互斥，已废止**：`url_citation` 只在后续 message 的 `content_part.done` 出现，**晚于** `web_search_call` 的 `done`；若在 `done` 上成块，§5.3 用 citation 填充 `content` 的那一分支永远走不到，且流式与非流式必然不等价。
+
+> **2026-08-21 证据更正。** 本条原写「cassette 实测表明」，那句话过强：本项目两份 web-search cassette 的 `annotations` 都是空数组，**它们说明不了 citation 的时序**——空数组里没有可排序的东西。这条规则当时靠的是协议结构推断。现在它有了直接证据，但来源不是 cassette：既有服务 history 库里的真实上游根帧显示 Copilot 会发 `response.output_text.annotation.added`，且 `content_part.done` 与 `output_item.done` 各带一份完整的 `annotations` 数组，均晚于 `web_search_call` 的 `done`。取证见 [`../../tmp/260821-responses-websearch-citation-evidence.md`](../../tmp/260821-responses-websearch-citation-evidence.md)。**结论不变，依据换了。**
 
 **冻结规则**：
 
@@ -416,9 +418,9 @@ Anthropic `tool_choice` 映射如下，**必须**按表执行：
 | P6 | 同一响应内多个 `web_search_call` 的 `output_index` 与 id 行为 | §5.2 关联论证、§6.1 | 可后补 |
 | P7 | 是否真的存在「`done` 无 `added`」形态 | §6.3 的防御性分支 | 可后补；容忍成本为零，不阻塞 |
 | P8 | `status: searching / failed / incomplete` 的真实形态 | §5.3 状态文本 | 可后补 |
-| P9 | 流式带 `url_citation` 时是否发 `response.output_text.annotation.added` | §6.2 事件清单是否完整 | 实现前，与 P10 同一次探针即可 |
-| P10 | 引用是否**恒**同时以内联 markdown 与结构化 `annotations` 两种形式出现 | 决定 D5 | 实现前 |
-| P11 | `{"type":"web_search_preview"}` 直发是否 200（别名推断未验证） | 无直接影响，用于确认上游归一化 | 可后补 |
+| P9 | ~~流式带 `url_citation` 时是否发 `response.output_text.annotation.added`~~ | §6.2 事件清单是否完整 | **已结案 2026-08-21：发。** 且 `content_part.done` 与 `output_item.done` 各另带一份完整 `annotations` 数组，所以消费者有三个可选取点。证据来自 history 库里的真实上游根帧，非本项目 cassette（本项目两份 cassette 的 `annotations` 皆空）。见 [`../../tmp/260821-responses-websearch-citation-evidence.md`](../../tmp/260821-responses-websearch-citation-evidence.md) |
+| P10 | 引用是否**恒**同时以内联 markdown 与结构化 `annotations` 两种形式出现 | 决定 D5 | 实现前。**「恒」仍未证**；已知 `exp/260820-websearch-probe/raw/B7-*.txt` 一份样本里两种形式确实同时到达，这只证明可以共存，不证明必然 |
+| P11 | `{"type":"web_search_preview"}` 直发是否 200（别名推断未验证） | 无直接影响，用于确认上游归一化 | **优先级已升高 2026-08-21**：上游自己的 400 枚举把 `web_search_preview` / `web_search_preview_2025_03_11` 列为支持值而**未列**裸 `web_search`，且三份第三方实现都发前者。本项目仍在发裸 `web_search`（实测 gpt-5.5／gpt-5.6-sol 返 200）。改用广告值需重录两份 cassette（digest 覆盖整个请求体），**重录即探针** |
 
 ### cassette 的现状与限定
 
