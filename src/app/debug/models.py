@@ -226,7 +226,8 @@ async def collect_catalogs(
     """
     catalogs: list[ProviderCatalog] = []
     failures: list[CatalogFailure] = []
-    http_client = build_http_client(config)
+    # `False` because this command has no `--proxy` of its own: whatever is in `config.proxy` came from the file, `GHC_PROXY` or the bundled defaults, all of which sit below the environment.
+    http_client = build_http_client(config, proxy_from_cli=False)
     try:
         chain = build_chain(config, http_client=http_client)
         names = [only] if only is not None else sorted(chain.providers.names)

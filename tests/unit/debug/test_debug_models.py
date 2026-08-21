@@ -524,7 +524,7 @@ def _patch_collection(
 ) -> _RecordingClient:
     client = _RecordingClient()
 
-    def build_client(config: ProxyConfig) -> _RecordingClient:
+    def build_client(config: ProxyConfig, *, proxy_from_cli: bool) -> _RecordingClient:
         return client
 
     def build_chain(config: ProxyConfig, *, http_client: object) -> SimpleNamespace:
@@ -599,7 +599,7 @@ async def test_the_outbound_client_is_closed_even_when_the_chain_cannot_be_built
     # The client is created before the chain, so the failure that happens most often — a config the composition root rejects — is the one that would leak it.
     client = _RecordingClient()
 
-    def build_client(config: ProxyConfig) -> _RecordingClient:
+    def build_client(config: ProxyConfig, *, proxy_from_cli: bool) -> _RecordingClient:
         return client
 
     def explode(config: ProxyConfig, *, http_client: object) -> object:

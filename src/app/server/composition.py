@@ -6,9 +6,9 @@ Everything is constructed once at startup and handed down, so nothing reaches fo
 
 import logging
 import socket
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.request import getproxies
 
 import httpcore2
 import httpx2
@@ -60,9 +60,16 @@ class TransportOptions:
 
     Kept separate from constructing the client so the decision can be asserted without reaching
     into a third-party object's private state.
+
+    The proxy arrives as three fields rather than one because `config.example.yaml` states three tiers — CLI `--proxy`, then `HTTP_PROXY` / `HTTPS_PROXY`, then this setting — and a single string cannot say which tier it came from. Everything below the environment (YAML, `GHC_PROXY`, bundled) is one tier, so one bit of provenance is all three tiers need.
     """
 
-    proxy: str | None
+    # True when `--proxy` was given at all — an empty value included. Tier 1 having been exercised is what shuts tiers 2 and 3 out, not the value being non-empty: `--proxy ""` is an operator overriding a configured proxy back to direct, ruled 2026-08-21, and reading it as "no tier 1 after all" would hand the decision back to the environment they were overriding.
+    proxy_from_cli: bool
+    # Tier 1's value. `None` with `proxy_from_cli` set means `--proxy ""`.
+    cli_proxy: str | None
+    # Tier 3. Mounted *under* the environment as `all://`, httpx's least specific pattern, so the environment's own entries win wherever they apply and this catches the schemes it does not name.
+    setting_proxy: str | None
     http2: bool
     socket_options: tuple[tuple[int, int, int], ...] | None
     # 0 = unlimited, which is httpx's own behaviour.
@@ -102,34 +109,41 @@ def _keepalive_socket_options(interval: int) -> tuple[tuple[int, int, int], ...]
     return tuple(options)
 
 
-def transport_options(config: ProxyConfig) -> TransportOptions:
+def transport_options(config: ProxyConfig, *, proxy_from_cli: bool) -> TransportOptions:
     """Read the transport settings.
 
     `proxy` applies to every outgoing request, not only the model ones, as the spec states.
 
+    `proxy_from_cli` is required rather than defaulted, because the two answers produce different routing and a caller that forgot it would silently get the environment overriding a proxy the operator passed on the command line. A `TypeError` is the cheaper failure. It says whether the value in `config.proxy` arrived through `--proxy`: `load_proxy_config` merges CLI, `GHC_PROXY` and YAML into that one field, so by the time it is a string its tier is no longer recoverable from it.
+
     `tcp_keepalive_interval` is a real TCP keep-alive: it was mapped to the connection pool's idle expiry until 2026-08-20, which never writes to the socket and does not apply while a request is in flight. Nothing here configures pooling any more — the 15 seconds that mapping produced was a side effect of the defect, not a setting anyone chose, and httpx's own defaults apply now.
 
-    `http2` is read straight from its own key. It used to be derived from `http2_ping_interval > 0`, so a key named after a ping interval silently decided which protocol we spoke — and an operator looking for the HTTP/1.1 switch had no reason to look there. `http2_ping_interval` is now inert: neither httpx 0.28.1 nor httpcore 1.0.9 offers a PING interval to set, so it never produced a ping in the first place.
+    `http2` is read straight from its own key. It used to be derived from `http2_ping_interval > 0`, so a key named after a ping interval silently decided which protocol we spoke — and an operator looking for the HTTP/1.1 switch had no reason to look there. `http2_ping_interval` is now inert: neither httpx nor httpcore offers a PING interval to set, so it never produced a ping in the first place.
     """
     transport = config.upstream_transport
+    proxy = config.proxy or None
     return TransportOptions(
-        proxy=config.proxy or None,
+        proxy_from_cli=proxy_from_cli,
+        cli_proxy=proxy if proxy_from_cli else None,
+        setting_proxy=None if proxy_from_cli else proxy,
         http2=transport.http2,
         socket_options=_keepalive_socket_options(transport.tcp_keepalive_interval),
         max_streams_per_connection=transport.max_streams_per_connection,
     )
 
 
-def build_http_client(config: ProxyConfig) -> httpx2.AsyncClient:
+def build_http_client(config: ProxyConfig, *, proxy_from_cli: bool) -> httpx2.AsyncClient:
     """Build the outbound client, with the keep-alive the settings ask for.
 
     Socket options can only be given to a transport, and handing `AsyncClient` a transport is also how you switch off its own reading of `HTTP_PROXY` / `HTTPS_PROXY` — `allow_env_proxies` in `httpx/_client.py` is `trust_env and transport is None`. So the environment map is rebuilt here and mounted, because losing proxy support is exactly the kind of change that would not show up until someone behind a proxy could not reach upstream at all.
+
+    That rebuild is also what makes the priority `config.example.yaml` states implementable at all. `--proxy` is explicit and shuts the environment out; the `proxy` setting instead becomes an `all://` mount underneath the environment's, so the environment wins for the schemes it names and the setting catches the rest. Ruled 2026-08-21: per-scheme, not whole-tier. See `proxy_from_cli` on `transport_options` for why one bit is enough.
 
     One path the keep-alive does not reach, and says so out loud: httpx builds a SOCKS proxy through `httpcore.AsyncSOCKSProxy`, which takes no `socket_options` at all — the gap is in httpcore, not in the wiring here. Measured on a real SOCKS5 connection: `SO_KEEPALIVE` reads back 0. Ruled 2026-08-20 to accept that and warn rather than take over the pool behind a network backend of our own.
 
     Worth being exact about what any of this buys with a proxy in the way. TCP keep-alive is per-connection and a proxy terminates the connection: measured, our socket's peer is the origin when direct and the proxy when tunnelling. So proxied, this probes the hop to the proxy — the proxy's own connection to upstream is a socket we neither see nor set options on. Only the direct case says anything about upstream itself, which is what this deployment uses.
     """
-    options = transport_options(config)
+    options = transport_options(config, proxy_from_cli=proxy_from_cli)
 
     def transport(proxy: str | None) -> httpx2.AsyncHTTPTransport:
         # No `limits`. Pooling is httpx's to decide and always was; the previous code passed a `Limits` carrying only an expiry, which left the two connection caps at `None` and httpcore reads `None` as `sys.maxsize`. Naming one field of it had removed the caps httpx would otherwise have applied.
@@ -143,10 +157,16 @@ def build_http_client(config: ProxyConfig) -> httpx2.AsyncClient:
         return built
 
     direct = transport(None)
-    _warn_about_socks(options)
+    # One resolved map decides both the routing and the warning. Deriving them separately is what made the warning describe proxies the routing had already shadowed.
+    resolved = _effective_proxies(options)
+    _warn_about_socks(options, resolved)
     client = httpx2.AsyncClient(
-        transport=transport(options.proxy) if options.proxy is not None else direct,
-        mounts=_proxy_mounts(options.proxy, transport, direct),
+        # Everything rides on mounts, including tier 1. `all://` matches every request, so this routes identically to handing the proxy to `transport=` — and it keeps one code path instead of a special case whose two halves drifted.
+        transport=direct,
+        mounts={
+            pattern: direct if url is None else transport(url)
+            for pattern, url in resolved.items()
+        },
         http2=options.http2,
     )
     if options.max_streams_per_connection > 0:
@@ -200,22 +220,22 @@ def _keep_proxy_connections_alive(
     pool.create_connection = create_connection
 
 
-def _warn_about_socks(options: TransportOptions) -> None:
+def _warn_about_socks(options: TransportOptions, resolved: dict[str, str | None]) -> None:
     """Say so when a SOCKS proxy is in play, because the keep-alive cannot reach it.
 
     `httpcore.AsyncSOCKSProxy` takes no `socket_options` at all — unlike the HTTP proxy, where the parameter exists and is merely dropped, so `_keep_proxy_connections_alive` can put it back. Measured on a real SOCKS5 connection: `SO_KEEPALIVE` reads back 0.
 
-    Looks at the environment as well as the config. Warning only about a configured proxy would have left `ALL_PROXY=socks5://…` failing in exactly the same way and saying nothing, which is the shape of defect this change exists to remove.
+    Reads the resolved map rather than the settings it came from, so a proxy the routing has already shadowed is not warned about. Warning only about a configured proxy would equally have left `ALL_PROXY=socks5://…` failing in exactly the same way and saying nothing, which is the shape of defect this change exists to remove.
+
+    One over-report survives and is accepted: an `all://` SOCKS entry is still named when `http://` and `https://` are both set, so nothing would actually route through it. Removing that needs reachability analysis over the mount patterns, and the cheap direction to be wrong in is naming a proxy that carries nothing rather than staying silent about one that carries traffic.
 
     Only the origin is logged. A proxy URL may carry credentials, and this line is not worth putting them in an operator's log to produce.
     """
     if options.socket_options is None:
         return
-    if options.proxy is not None:
-        candidates = [options.proxy]
-    else:
-        candidates = [url for url in get_environment_proxies().values() if url is not None]
-    for origin in sorted({_origin_of(url) for url in candidates if _is_socks(url)}):
+    for origin in sorted(
+        {_origin_of(url) for url in resolved.values() if url is not None and _is_socks(url)}
+    ):
         logger.warning(
             "proxy %s is SOCKS, and httpcore sets no socket options on that path: tcp_keepalive_interval does not apply to connections made through it",
             origin,
@@ -238,23 +258,35 @@ def _is_socks(proxy: str | None) -> bool:
     return proxy is not None and proxy.lower().startswith("socks")
 
 
-def _proxy_mounts(
-    configured: str | None,
-    transport: Callable[[str | None], httpx2.AsyncHTTPTransport],
-    direct: httpx2.AsyncHTTPTransport,
-) -> dict[str, httpx2.AsyncBaseTransport]:
-    """The per-scheme proxies httpx would have read from the environment, as transports of ours.
+def _environment_bypasses_everything() -> bool:
+    """Whether `NO_PROXY` contains `*`, which means "ignore every proxy and go direct".
 
-    Empty when `proxy` is configured, which is what httpx does too: an explicit proxy is `all://` and the environment is not consulted. A `None` in the environment map is a `NO_PROXY` entry, and it maps to the one shared direct transport rather than being dropped — dropping it would send that host through whichever broader pattern matched next, and giving each rule a transport of its own would give each its own pool, multiplying the connection cap by the number of `NO_PROXY` rules.
+    Asked separately because `get_environment_proxies()` expresses that by returning an empty map — the same value it returns when the environment names no proxy at all. The two mean opposite things for the tier below: an environment that said nothing leaves the `proxy` setting in charge, and an environment that said `*` has just overruled it. Reading the emptiness of the map as "the environment is silent" routed every request through the setting when the operator had asked for none, and no existing test saw it because `*` is the one `NO_PROXY` form that produces no `all://<host>` entry to be outranked by.
+
+    Reads the same source httpx does, so the two cannot disagree about what counts as `*`.
+    """
+    return any(host.strip() == "*" for host in getproxies().get("no", "").split(","))
+
+
+def _effective_proxies(options: TransportOptions) -> dict[str, str | None]:
+    """Which proxy each URL pattern resolves to, before any of it becomes a transport.
+
+    The single source for both the mounts and the SOCKS warning. Deriving them separately is what let the warning name a proxy the routing had already shadowed.
+
+    Tier 1 answers alone when it was given, `--proxy ""` included: an empty value is an operator overriding a configured proxy back to direct, and it must not fall through to the environment they were overriding.
+
+    Otherwise the environment's own map applies, with the `proxy` setting under it as `all://` — httpx's least specific pattern, so a named scheme is resolved ahead of it and the `all://<host>` entries `NO_PROXY` produces ahead of that again. `ALL_PROXY` lands on the same `all://` key and therefore replaces the setting outright. `NO_PROXY=*` is the exception that cannot be expressed as a mount at all, so it is asked about directly.
+
+    A `None` value is a `NO_PROXY` entry and becomes the one shared direct transport rather than being dropped — dropping it would send that host through whichever broader pattern matched next, and giving each rule a transport of its own would give each its own pool, multiplying the connection cap by the number of `NO_PROXY` rules.
 
     Reaches into `httpx._utils` for the environment map rather than reimplementing `NO_PROXY` matching. A httpx that moves it fails at import, so this cannot decay into quietly returning no mounts.
     """
-    if configured is not None:
-        return {}
-    return {
-        pattern: direct if url is None else transport(url)
-        for pattern, url in get_environment_proxies().items()
-    }
+    if options.proxy_from_cli:
+        return {} if options.cli_proxy is None else {"all://": options.cli_proxy}
+    environment = get_environment_proxies()
+    if options.setting_proxy is None or _environment_bypasses_everything():
+        return environment
+    return {"all://": options.setting_proxy, **environment}
 
 
 @dataclass(slots=True)

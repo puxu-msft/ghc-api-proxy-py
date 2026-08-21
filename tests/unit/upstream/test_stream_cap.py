@@ -178,7 +178,8 @@ def test_one_pool_is_capped_once_however_many_mounts_reach_it(monkeypatch: pytes
     monkeypatch.setenv("NO_PROXY", "a.example.com,b.example.com,c.example.com")
 
     client = build_http_client(
-        ProxyConfig.model_validate({"upstream_transport": {"max_streams_per_connection": 2}})
+        ProxyConfig.model_validate({"upstream_transport": {"max_streams_per_connection": 2}}),
+        proxy_from_cli=False,
     )
     direct = _direct_mounts(client)
     # Not vacuous: there really are several mounts, and they really are one object.
@@ -200,7 +201,8 @@ def test_a_long_no_proxy_list_still_opens_a_connection(monkeypatch: pytest.Monke
     monkeypatch.setenv("NO_PROXY", ",".join(f"h{index}.example.com" for index in range(1100)))
 
     client = build_http_client(
-        ProxyConfig.model_validate({"upstream_transport": {"max_streams_per_connection": 2}})
+        ProxyConfig.model_validate({"upstream_transport": {"max_streams_per_connection": 2}}),
+        proxy_from_cli=False,
     )
     created = _connection_for(_direct_mounts(client)[0], b"h0.example.com")
     assert isinstance(created, StreamCappedConnection)
@@ -227,20 +229,20 @@ def test_a_cap_below_one_is_refused(value: int) -> None:
 
 def test_the_cap_is_off_by_default() -> None:
     """No measurement here supports a particular number, so the default changes nothing."""
-    assert transport_options(ProxyConfig()).max_streams_per_connection == 0
+    assert transport_options(ProxyConfig(), proxy_from_cli=False).max_streams_per_connection == 0
 
 
 def test_the_configured_cap_reaches_the_client() -> None:
     config = ProxyConfig.model_validate({"upstream_transport": {"max_streams_per_connection": 2}})
-    assert transport_options(config).max_streams_per_connection == 2
-    client = build_http_client(config)
+    assert transport_options(config, proxy_from_cli=False).max_streams_per_connection == 2
+    client = build_http_client(config, proxy_from_cli=False)
     created = client._transport._pool.create_connection(httpcore2.Origin(b"https", b"example.invalid", 443))  # pyright: ignore[reportAttributeAccessIssue]
     assert isinstance(created, StreamCappedConnection)
 
 
 def test_the_default_client_is_left_alone() -> None:
     """Off must mean untouched, not capped at some large number: an uncapped pool is httpx's own behaviour and should stay literally that."""
-    created = build_http_client(ProxyConfig())._transport._pool.create_connection(  # pyright: ignore[reportAttributeAccessIssue]
+    created = build_http_client(ProxyConfig(), proxy_from_cli=False)._transport._pool.create_connection(  # pyright: ignore[reportAttributeAccessIssue]
         httpcore2.Origin(b"https", b"example.invalid", 443)
     )
     assert not isinstance(created, StreamCappedConnection)
