@@ -15,7 +15,7 @@
 1. **先判这次结束是不是上游造成的。** 客户端断开、进程优雅关闭、代理自己的保护机制触发，都不是上游失败，不进重试。
 2. **再判客户端已经看到了什么。**
    - **还没交付过完整块** → 代理端**无痕重试**。客户端一无所见，第二次尝试可以无痕替代第一次。全协议生效。
-   - **已经交付过至少一个完整块** → **MCP-driven 续写**。把错误合成为一个 `tool_use` 块，调用 MCP 工具 `upstream_error(num_messages, category, message)` 交回客户端；客户端执行它、拿到「继续」的指令、自然地发起下一轮。仅在 **anthropic-messages 客户端请求**上生效。
+   - **已经交付过至少一个完整块** → **MCP-driven 续写**。把错误合成为一个 `tool_use` 块，调用 MCP 工具 `turn_interrupted(num_messages, category, message)` 交回客户端；客户端执行它、拿到「继续」的指令、自然地发起下一轮。仅在 **anthropic-messages 客户端请求**上生效。
 
 第 2 层的关键取舍是：**承载续写的是客户端自己的对话历史，不是代理构造的请求。** 这一条决定了它和被放弃的代理内续写之间的全部差别——见 [`archive-proxy-side-continuation/README.md`](archive-proxy-side-continuation/README.md)。
 

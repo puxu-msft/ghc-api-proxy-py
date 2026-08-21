@@ -81,7 +81,7 @@
 ### E. MCP-driven 续写
 
 - `status:"incomplete"` 的块丢弃规则：**有任何完整块才丢；只有未完成块则保留**（保留半截内容优于给客户端一个空回答）。reasoning item 无此字段，不处理。
-- 合成 `tool_use` 块调用 `upstream_error(num_messages, category, message)`；`num_messages` 取**客户端请求**的 `messages` 长度。
+- 合成 `tool_use` 块调用 `turn_interrupted(num_messages, category, message)`；`num_messages` 取**客户端请求**的 `messages` 长度。
 - 检查入站 `tools[]` 是否含该工具；没有则**打 warning 但照发**。
 - 配置项 `client_delivery.auto_retry_tool_call_full_name` 可覆盖工具全名。
 - 仅在 **anthropic-messages 客户端请求**上生效；两条上游腿都适用。
