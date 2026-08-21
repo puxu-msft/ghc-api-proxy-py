@@ -25,7 +25,7 @@ from app.pipeline.subscribers import (
 )
 from app.pipeline.subscribers.counting import COUNTING_ONLY
 from app.pipeline.translation_driver.registry import TranslatorNotFound, default_registry
-from app.pipeline.translation_driver.semantic import TranslationRefused
+from app.pipeline.translation_driver.semantic import TranslationRefused, WebSearchNotExecutable
 from app.server.composition import build_chain
 from app.server.handler import handle_count_tokens
 from app.tokenization.estimators import estimate_anthropic_input, estimate_responses_input
@@ -343,6 +343,45 @@ async def test_the_web_search_gate_leaves_the_anthropic_leg_alone() -> None:
         target_format=WireFormat.ANTHROPIC_MESSAGES,
     )
 
-    await gate_hosted_web_search(context, frozenset())
+    await gate_hosted_web_search(context, ())
 
     assert payload["tools"] == [{"type": "web_search"}]
+
+
+async def test_a_supported_model_pattern_covers_the_family_it_names() -> None:
+    """The entries are regular expressions, so one line claims a version line rather than one model.
+
+    An id list had to be edited every time the catalog gained a model, and the edit is the kind nobody makes until a search has already been answered as failed for a model that could have run it.
+    """
+    from app.pipeline.subscribers.hosted_web_search import compile_supported, gate_hosted_web_search
+
+    supported = compile_supported([r"gpt-[5-9]\.\d+.*"])
+    for model in ("gpt-5.5", "gpt-5.4-mini", "gpt-5.6-sol", "gpt-5.7"):
+        context = RequestContext(
+            inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+            requested_model=model,
+            payload={"tools": [{"type": "web_search"}]},
+            resolved_model=model,
+            target_format=WireFormat.OPENAI_RESPONSES,
+        )
+        # Returning at all is the assertion: the gate raises for a model it does not recognise.
+        await gate_hosted_web_search(context, supported)
+
+
+async def test_a_pattern_is_anchored_and_the_dotted_minor_is_required() -> None:
+    """Two ways the gate must stay narrow, both of which a looser match would silently widen.
+
+    `gpt-5-mini` is vendor Azure OpenAI — a different supply chain from the `gpt-5.N` line — so a family pattern that did not require the dot would claim a model nobody has put to upstream. And matching is `fullmatch`, so `gpt-5.5-nonsense`-style names are not claimed by an entry written as a plain id: under `search` a list whose whole purpose is to say which models were checked would quietly cover models that were not.
+    """
+    from app.pipeline.subscribers.hosted_web_search import compile_supported, gate_hosted_web_search
+
+    for pattern, model in ((r"gpt-[5-9]\.\d+.*", "gpt-5-mini"), ("gpt-5.5", "prefix-gpt-5.5")):
+        context = RequestContext(
+            inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+            requested_model=model,
+            payload={"tools": [{"type": "web_search"}]},
+            resolved_model=model,
+            target_format=WireFormat.OPENAI_RESPONSES,
+        )
+        with pytest.raises(WebSearchNotExecutable):
+            await gate_hosted_web_search(context, compile_supported([pattern]))

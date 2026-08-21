@@ -17,6 +17,9 @@
 `tests/unit/test_builtin_subscribers.py` locks the registered set and the frozen order, so a subscriber added without a decision about where it goes fails there rather than in production.
 """
 
+import re
+from collections.abc import Sequence
+
 from app.pipeline.direct_driver.base import EVENT_ATTEMPT_PREPARE
 from app.pipeline.events import SubscriberRegistry
 from app.pipeline.request import RequestContext
@@ -31,7 +34,7 @@ from app.pipeline.subscribers.server_tools import adapt_server_tools
 def register_builtin_subscribers(
     registry: SubscriberRegistry[RequestContext],
     *,
-    web_search_models: frozenset[str] = frozenset(),
+    web_search_models: Sequence[re.Pattern[str]] = (),
 ) -> None:
     """Add every built-in subscriber to a registry that has not been frozen yet.
 

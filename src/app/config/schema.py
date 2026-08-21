@@ -93,12 +93,14 @@ class ModelProviderConfig(Section):
     github_token_file: str = ""
     model_refresh_interval: int = Field(default=3600, ge=0)
     disabled_models: list[str] = Field(default_factory=lambda: list[str]())
-    # Which models actually execute hosted web search, matched exactly against upstream `model.id`
-    # as `disabled_models` is. A declaration from the client is translated into this endpoint's own
-    # `{"type": "web_search"}` only for a model named here. For any other, the request is answered
-    # with a failed `web_search_tool_result` rather than sent on without the tool: a search
-    # sub-request stripped of its only tool succeeds by answering from memory, and the client
-    # labels that reply as search results.
+    # Which models actually execute hosted web search. Each entry is a **regular expression**,
+    # matched against upstream `model.id` with `fullmatch` — so a plain id like `gpt-5.5` still
+    # means what it says and needs no anchors, while `gpt-5\.\d+.*` covers a family. A declaration
+    # from the client is translated into this endpoint's own `{"type": "web_search"}` only for a
+    # model some pattern claims. For any other, the request is answered with a failed
+    # `web_search_tool_result` rather than sent on without the tool: a search sub-request stripped
+    # of its only tool succeeds by answering from memory, and the client labels that reply as
+    # search results.
     #
     # Maintained by hand because the catalog cannot answer the question. Measured 2026-08-20 across
     # the live catalog — 42 models, 67,656 bytes — the union of `capabilities.supports` keys holds
@@ -106,26 +108,22 @@ class ModelProviderConfig(Section):
     # the whole document returns nothing. The two models known to work cannot be told apart from
     # the rest on any advertised field.
     #
-    # The default is the catalog's OpenAI-vendor models that advertise `/responses`, as of that
-    # date. Taken by `vendor` rather than by a `gpt-` name prefix, which would sweep in `gpt-5-mini`
-    # — vendor `Azure OpenAI`, a different supply chain. Only `gpt-5.5` and `gpt-5.6-sol` have
-    # actually been put to upstream; the rest are inferred from sharing a vendor with them, and
-    # `gpt-5.3-codex` is the most doubtful of those.
+    # The default covers the `gpt-<major>.<minor>` line for majors 5 through 9, which is every
+    # OpenAI-vendor model advertising `/responses` in that catalog — `gpt-5.3-codex`, `gpt-5.4`,
+    # `gpt-5.4-mini`, `gpt-5.5`, and the three `gpt-5.6-*` — and claims their successors as they
+    # appear. Ruled a pattern rather than an id list on 2026-08-21, after an id list had to be
+    # hand-extended for exactly that reason.
     #
-    # Both ways of being wrong show up, and neither is silent. A model listed here that cannot
-    # search answers 400 and says which value it refused. A model left out that could search has
-    # its declaration removed, which is reported at INFO with the model named. Expect this list to
-    # drift as the catalog does.
+    # **The dot is load-bearing.** `gpt-5-mini` has no dotted minor and is vendor `Azure OpenAI`, a
+    # different supply chain; requiring `\.` is what keeps a family pattern from sweeping it in. A
+    # two-digit major (`gpt-10.0`) is deliberately not matched: inventing a naming scheme two
+    # majors ahead is a guess, and the failure is an operator adding one line, not a wrong answer.
+    #
+    # Both ways of being wrong show up, and neither is silent. A model claimed here that cannot
+    # search answers 400 and says which value it refused. A model no pattern claims has its search
+    # answered as failed, which is reported at INFO with the model named.
     models_support_web_search: list[str] = Field(
-        default_factory=lambda: [
-            "gpt-5.3-codex",
-            "gpt-5.4",
-            "gpt-5.4-mini",
-            "gpt-5.5",
-            "gpt-5.6-luna",
-            "gpt-5.6-sol",
-            "gpt-5.6-terra",
-        ]
+        default_factory=lambda: [r"gpt-[5-9]\.\d+.*"]
     )
 
 

@@ -53,10 +53,10 @@ model_providers:
   ghc:
     type: github_copilot
 
+    # 每条都是正则，用 fullmatch 匹配上游 `model.id`；写成裸模型 id 也仍然只匹配它自己。
+    # 下面这条覆盖 `gpt-<major>.<minor>` 系列（major 5–9），即目录里 vendor 为 OpenAI 且广告 `/responses` 的那批，并且新版本一出现就自动纳入。
+    # 那个点是关键：`gpt-5-mini` 没有点分小版本，vendor 是 Azure OpenAI，属另一条供应链。
     models_support_web_search:
-      - gpt-5.6-sol
-      - gpt-5.6-terra
-      - gpt-5.6-luna
-      - gpt-5.5
+      - gpt-[5-9]\.\d+.*
 
 default_model_provider: ghc

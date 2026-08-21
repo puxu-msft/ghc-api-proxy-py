@@ -46,6 +46,7 @@ from app.pipeline.events import FrozenSubscribers, SubscriberRegistry
 from app.pipeline.rate_limiting import RateLimiter
 from app.pipeline.request import RequestContext
 from app.pipeline.subscribers import register_builtin_subscribers
+from app.pipeline.subscribers.hosted_web_search import compile_supported
 from app.pipeline.translation_driver.registry import TranslatorRegistry, default_registry
 from app.tokenization.state_store import TokenizationStateStore
 from app.upstream.copilot import GitHubTokenSourceAdapter
@@ -392,13 +393,13 @@ def build_chain(
 
     # The built-ins go into whatever registry the caller brought, so their order is resolved together with anything a caller added rather than in a second, separate pass.
     subscriber_registry = subscribers if subscribers is not None else SubscriberRegistry[RequestContext]()
-    # Every provider's list, merged. Which provider serves a request is decided per request, and a
-    # model id is unique across the catalog, so there is nothing for a per-provider lookup to
-    # disambiguate here that this does not already answer.
-    web_search_models = frozenset(
-        model
+    # Every provider's patterns, merged. Which provider serves a request is decided per request, and a model id is unique across the catalog, so there is nothing for a per-provider lookup to disambiguate here that this does not already answer.
+    #
+    # Compiled here rather than per request, which also puts a pattern that does not compile at startup — in the config's own words — instead of inside whichever request first reached the gate.
+    web_search_models = compile_supported(
+        pattern
         for provider in config.model_providers.values()
-        for model in provider.models_support_web_search
+        for pattern in provider.models_support_web_search
     )
     register_builtin_subscribers(subscriber_registry, web_search_models=web_search_models)
 
