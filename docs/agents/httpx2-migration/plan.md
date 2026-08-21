@@ -9,6 +9,23 @@
 - `docs/tmp/260821-httpx2-ecosystem-compat.md` —— 周边库跟进情况。
 - `docs/tmp/260821-review-httpx2-plan-a.md` —— 第 1 稿评审（机制正确性、依赖约束），含逐条处置。
 - `docs/tmp/260821-review-httpx2-plan-b.md` —— 第 1 稿评审（覆盖面、可验证性、回滚、文档纪律）。
+- `docs/tmp/260821-review-httpx2-plan-r2.md` —— 第 2 稿复评，只攻 D3' 与 D7，处置见 §8。
+
+## 0. 实施状态（2026-08-21）
+
+| 步骤 | 状态 | 落点 |
+|---|---|---|
+| 步骤 0：V1 TLS 实测 | **完成，通过** | §4 V1 |
+| 步骤 1：可导入切片（依赖 + 机械改名 + WS + OTel + import 名单） | **完成** | `2924a8c` |
+| 步骤 2：`stream_cap` 按 D3' 改 + 饱和突发判别测试 + starlette floor 修正 | **完成** | `2b20be7` |
+| 步骤 3：判别性测试（OTel span 对照） | **完成** | `5aeb9d7` |
+| 步骤 3：判别性测试（WS 默认实现绑定共享 client） | **完成** | `2924a8c` 内 |
+| 步骤 4：散文与注释改名（约 51 处） | **进行中**，`idle_timeout.py` 那条失实注释已改，其余待做 | — |
+| 步骤 5：V2 h2 GOAWAY 缝隙复测 | **未做** | §4 V2 |
+| 步骤 6：全量回归 | 每步都跑了；当前 1567 passed / 2 skipped，`ruff check src tests` 干净，`pyright` 21 error 全部属于同伴未提交的 `stream_cap` 改动，本次零新增 | — |
+
+**端到端验证（这是本次任务的原始判据）**：从 `2924a8c` 全新 `uvx --refresh --from git+file://…` 安装并 `ghc-api-proxy start --port 41411`，服务启动、向 GitHub 换取 Copilot token（HTTP/2 200）、拉到 42 个模型、正常监听，SIGTERM 后优雅排空退出。用户报的那条命令的两级失败点（starlette 私有 API、anthropic 拒收 client）都不再出现。
+
 
 探针（可复跑，解释器用装了最新依赖的环境）：
 
@@ -247,3 +264,37 @@ httpx2 2.12.0 default ctx: truststore._api
 | **cassette 回放机制** | **查过，无需处理**。依赖面是 `MockTransport`/`AsyncBaseTransport`/`AsyncByteStream`/`Request`/`Response` 五个公共类，全部同名平移；匹配判据是请求体 sha256、不含 header，所以 User-Agent 从 `python-httpx/0.28.1` 变成 `python-httpx2/2.12.0` 不影响匹配；cassette 数据里没有任何包名。 |
 | **`extensions["network_stream"]` 探针** | **查过，无需处理**。httpcore2 的 `_models.py`、`_async/http11.py`、`_async/http2.py`、`_async/http_proxy.py` 仍然写 `network_stream`，键缺失会 `KeyError`（响的）。`test_http_client_build.py:314/335/471` 那组从内核 `getsockopt` 读回 `SO_KEEPALIVE` 的强测试迁移后仍有分辨力。 |
 | **`test_http_client_build.py:137 test_environment_routing_matches_native_httpx`** | **不是守卫，但不必改**。它拿 `httpx.AsyncClient()` 当 oracle，改名后变成同源对照；能抓「mounts 把 URL 送错地方」，抓不住「`allow_env_proxies` 变了导致代理挂两次而路由结果相同」。既然上面已证 `allow_env_proxies` 逐字未变，无实际风险 —— 但**不应把它当作那条风险的守卫**。 |
+
+## 8. 第 2 稿复评（r2）的逐条处置
+
+复评判 `needs-fix`，1 blocker、2 major、1 minor。全部采纳，处置如下。
+
+### F1（blocker）：`fastapi>=0.141` 不会把 starlette 抬到 1.x —— **采纳，已修**
+
+复评是对的，而且我在实施时独立撞到了同一件事：加了 `fastapi>=0.141` 之后重新 lock，starlette 仍停在 0.52.1（fastapi 0.141.1 只声明 `starlette>=0.46.0`）。已改为显式 floor。复评建议 `starlette>=1.2.1`（1.2.0 是 TestClient 运行期开始优先 httpx2 的版本，1.2.1 修了仍写 `httpx` 的类型分支），采纳该版本号——我最初写的 `starlette>=1` 语义不对，1.0/1.1 的 TestClient 仍需要旧 httpx。重新 lock 后实测 starlette 1.6.0、httpx 从依赖图消失。
+
+### F2（major）：D3' 在池饱和时的重排放大没被记录 —— **采纳，已补测并接受**
+
+复评在 `max_connections=2`、`burst=500` 下测到 57,873 次拒绝、5.3 秒。这个量级成立，但它的配置远低于本项目实际值：`max_connections` 走 httpx 默认 100，而 `max_streams_per_connection` 在 `docs/.human-controlled/config.example.yaml` 里是 1。按真实量级复测（cap=1、max_connections=100）：
+
+| 突发 | 现状代码 peak | D3' peak | D3' 尝试/拒绝 |
+|---|---|---|---|
+| 50（未饱和） | 1 | 1 | 50 / 0 |
+| 200 | **100** | 1 | 350 / 150 |
+| 500 | **400** | 1 | 1809 / 1309 |
+
+即：真实配置下的代价是 1.75~3.6 倍的内部重排（不新开 socket），换回的是一个否则完全失效的 cap——未修时 500 并发会把 400 个请求压在同一条连接上，正是这个模块存在的理由。**接受这个代价**，数字记进 `stream_cap.py` 的模块文档串。
+
+### F3（major）：测试不能验证 `>` 边界，`peak` 的计数点不精确 —— **采纳，已重写**
+
+两点都对，而且比复评说的更严重：我按「所有请求卡在一个事件上」写的第一版测试，连「删掉拒绝分支」这个主变异都打不红——因为那个工况从来不会进入「一趟释放多个排队请求」的状态。已按探针里真正复现问题的工况重写（响应自行完成、`max_connections=4`、cap=2、burst=60），计数点移到 inner handler 入口，断言收紧为 `peak == cap`，并加了 30 秒 deadline。两次变异实测：删掉拒绝分支 → 断言失败；`>` 改 `>=` → **挂起**。
+
+后者是复评没有预料到的发现：`is_available()` 与发送时的谓词必须对同一个 cap 位置达成一致，否则池会「分配→拒绝→重排→再分配」活锁。这条已写进 `stream_cap.py` 的注释。
+
+### F4（minor）：旧栈归因的措辞会淡化 D3 的回归 —— **采纳**
+
+改为：D3 会把 httpcore 1.0.9 可出现的旧分配缺陷重新带进 httpcore2；它不是该缺陷形态的首次出现，但对迁移后的目标栈仍是新引入的回归。旧栈的 `closed_in_use` 依赖 `inner.is_idle()` 恒为 `True` 这个夸张化构造，不证明生产上真的发生过。
+
+### 复评清单第 3 条：`test_prefetch_disconnect_waits_for_checkpoint_cleanup_after_recancellation`
+
+复评独立观察到了这条测试在迁移后失败并挂起，与我实施时撞到的是同一处。根因已定位：httpx2 把 `Response.aiter_raw` 的 `aclose()` 移进 `finally`，所以拆除读取链会**内联关闭上游 response**，而这条测试正在那个点上设了阻塞检查点，于是 observer finalize 永远等不到。单变量确认过不是 starlette 引起的（降到 0.52.1 照样挂）。该测试的编排已按新的关闭点重排，它要证的东西（重复取消落在清理停顿处时其余清理仍须跑完）不变，变异（去掉 `finish_stream_cleanup` 的 shield）仍能打红。

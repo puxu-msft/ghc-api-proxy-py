@@ -23,7 +23,7 @@ async def with_idle_timeout[T](
 
     Closing this closes the stream under it, including on the timeout: every other layer on this chain settles what it consumes, and a guard that gives up on an upstream without releasing what it was reading is the one that gets stepped on when the chain is next recomposed.
 
-    What that buys is this layer's link in the cascade, and no more. Measured 2026-08-20 against a real server: when the source is `httpx`'s `aiter_bytes()`, closing it does not close the response — `aiter_raw` runs `await self.aclose()` after its loop rather than in a `finally`, so the response is released by generator finalisation either way. A reader checking this at the socket sees no difference; the difference is at the generator.
+    What that buys is this layer's link in the cascade, and rather more than it used to. Measured 2026-08-20 against a real server on httpx 0.28.1: closing `aiter_bytes()` did not close the response, because `aiter_raw` ran `await self.aclose()` after its loop rather than in a `finally`, so the response was released by generator finalisation either way and a reader watching the socket saw no difference. httpx2 moved that `aclose()` into a `finally` and closes the inner stream with it, so closing here now releases the response at this point rather than whenever the generator is collected. Nothing in this function changed; where the upstream connection is released did.
     """
     close = getattr(stream, "aclose", None)
     try:
