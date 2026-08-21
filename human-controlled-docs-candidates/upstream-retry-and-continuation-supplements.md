@@ -78,11 +78,18 @@
 
 **实测已否证** stop_reason 路径：Responses 腿的值空间里根本没有 `model_context_window_exceeded`（`incomplete_details.reason` 20/20 全是 `max_output_tokens`）；Anthropic 腿 13 万次请求零观测——但那条腿上它是**可定义**的，所以是「未观测」不是「不可能」。
 
-正面形态是 **HTTP 400**，`error.message` 匹配 `prompt token count of N exceeds the limit of M`（旁证：本项目 `src/app/tokenization/limits.py:10-13` 已经抄了这对正则）。**`error.code` / `error.type` 的字面量仍未查清**，调查进行中。
+正面形态是 **HTTP 400**，已找到 **48 例一手录制**，而且**两条腿的表达是结构性不同的**：
+
+- **Anthropic 腿**（27 例）：`application/json`，`error.code = model_max_prompt_tokens_exceeded`，`error.type = invalid_request_error`，message 带数字（`prompt is too long: 1051542 tokens > 1000000 maximum`）。**靠 `error.code` 可靠区分**——其余 400 连 `code` 字段都不带。
+- **Responses 腿**（21 例，**这是主产品路径**）：`text/plain; charset=utf-8`，`error.code = invalid_request_body`，**没有 `error.type`、没有 `request_id`、message 里没有任何数字**（`Your input exceeds the context window of this model.`）。`error.code` **毫无区分力**——`Invalid 'input[1].id'` 用的是同一个值，只能匹配 message 文本。
 
 **建议措辞**：
 
-> - 400，**含输入超出模型上下文窗口**——上游以 400 + `prompt token count … exceeds the limit …` 表达，不是一个 `stop_reason`。（Anthropic 腿的 `model_context_window_exceeded` 在 13 万次请求中零观测，但该腿上它可定义，不排除将来出现。）
+> - 400，**含输入超出模型上下文窗口**。上游用 400 表达它，不是用 `stop_reason`；两条腿的形态不同：Anthropic 腿给 `error.code = model_max_prompt_tokens_exceeded` 且 message 带数字，Responses 腿给 `error.code = invalid_request_body`（与其他参数错误共用，不可据以区分）且 message 无数字，只能匹配 `exceeds the context window`。
+>
+>   （Anthropic 腿的 `model_context_window_exceeded` 在 13 万次请求中零观测，但该腿上它可定义，不排除将来出现。）
+
+**一件与本文档相邻、但属于另一个主题的事**（记在这里免得丢，处置由你）：把三条真实 body 喂给生产模块 `parse_prompt_limit_error` 实测——Anthropic 腿解出 `(1051542, 1000000)`，**Responses 腿返回 `None`**。主产品路径正是没覆盖的那条，而且**补正则也救不回来**，因为那条 message 里没有数字，`PromptLimitRegistry` 结构上喂不进去。要让 prompt-limit 观测在主路径上工作，需要的是另一个数据来源，不是一条正则。
 
 ---
 

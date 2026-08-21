@@ -4,15 +4,29 @@
 
 ## 已知未闭合
 
-### 1. 上下文超限的 400，其 `error.code` / `error.type` 字面量未查清
+### 1. 上下文超限的 400：形态已查清，但两条腿不一样，且主路径抽不出数字
 
 人写文档原本写的是 `SSE stop_reason = model_context_window_exceeded`。**该判据已被实测证伪**：Responses 腿的值空间里根本没有这个东西（`incomplete_details.reason` 20/20 全是 `max_output_tokens`），Anthropic 腿 13 万次请求零观测。
 
-正面形态是 **HTTP 400**，`error.message` 匹配 `prompt token count of N exceeds the limit of M`——但这一条目前只有**旁证**（本项目 `src/app/tokenization/limits.py:10-13` 已经抄了这对正则，两份参考实现也都只匹配 message 文本）。
+正面形态是 **HTTP 400**，**48 例一手录制**（`reports/260821-context-limit-400-examples.md`），**两条腿的表达是结构性不同的**：
 
-**未查清的是 `error.code` 与 `error.type` 的字面量。** 有一个已知的读反陷阱：`copilot-api-js` 里的 `context_length_exceeded` 是它**合成给下游**的值，不是从上游读到的。
+| | Anthropic 腿（27 例，2026-07-18～08-08） | Responses 腿（21 例，2026-08-06～08-08） |
+|---|---|---|
+| `Content-Type` | `application/json` | **`text/plain; charset=utf-8`**，body 末尾带 `\n` |
+| `error.code` | `model_max_prompt_tokens_exceeded` | `invalid_request_body` |
+| `error.type` | `invalid_request_error` | **没有** |
+| `request_id` | 顶层有，另有顶层 `type:"error"` | **没有** |
+| message | `prompt is too long: 1051542 tokens > 1000000 maximum`（`>` 在线上是 `>`） | `Your input exceeds the context window of this model. Please adjust your input and try again.` |
+| 靠 `error.code` 能否区分 | **能**——其余 400 连 `code` 字段都不带 | **不能**——`Invalid 'input[1].id'`、`Invalid 'max_output_tokens'` 用的是同一个 `invalid_request_body`。只能匹配 message 文本，建议匹配 `exceeds the context window` |
 
-调查进行中，结果将落到 `reports/`。
+**两条新的未闭合，都在主产品路径上**：
+
+1. **`parse_prompt_limit_error` 对主路径返回 `None`。** 把三条真实 body 喂给生产模块实测：Anthropic 腿 → `(1051542, 1000000)`，Responses 腿 → `None`。而主产品路径正是 Responses 腿。
+2. **而且补正则也救不回来**——Responses 腿的 message **里没有任何数字**，所以 `PromptLimitRegistry` 结构上就喂不进去。要让 prompt-limit 观测在主路径上工作，需要的不是一条正则，是另一个数据来源。参考实现 `copilot-api-js` 自己把这种响应分类成 `bad_request` 而非 `token_limit`，等于它的解析器也自认没认出来。
+
+**顺带证伪一条旧结论**：归档里同伴写过「没有任何一条当前两条正则漏掉的真实 token-limit body」——现在不成立。原因是那份的语料**全部早于 2026-07-18**，而当时没有把这个时间窗写下来。
+
+**仍未查清**：账户类型维度（history 库无此字段）；`/chat/completions` 腿只有 `vscode-copilot-chat` 2025-12 的第三方录制（第三种形态：OpenAI 措辞 + `model_max_prompt_tokens_exceeded`、无 `type`）。本项目自己不落盘上游 body，`~/.local/share/ghc-api-proxy/rejected/` 不存在，所以这两项只能等新的录制。
 
 ### 2. reasoning item 被截断时没有任何信号
 

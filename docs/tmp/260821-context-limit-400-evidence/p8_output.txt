@@ -1,4 +1,0 @@
-== history-v3-20260815-183721.db: successful ops with a chunk-0 scanned = 793; 4xx seen in them = {}
-== history-v3-20260816-160151.db: successful ops with a chunk-0 scanned = 901; 4xx seen in them = {}
-== history-v3-20260817-050754.db: successful ops with a chunk-0 scanned = 569; 4xx seen in them = {}
-== history-v3-20260818-044224.db: successful ops with a chunk-0 scanned = 1156; 4xx seen in them = {}

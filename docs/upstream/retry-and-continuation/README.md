@@ -39,6 +39,7 @@
 | Responses 腿的终止只有 `response.completed`(64351) 与 `response.incomplete`(20)；`response.failed`／`cancelled`／上游 `error` 帧**各 0 次** | 录制，134336 个 operation | `reports/260821-upstream-termination-reasons.md` |
 | `incomplete_details.reason` 20/20 全是 `max_output_tokens`，**没有第二个取值** | 录制 | 同上 |
 | Anthropic 腿实测到的 `stop_reason`：`tool_use`(124927)、`end_turn`(8290)、`max_tokens`(24)、`refusal`(1)。`model_context_window_exceeded` **零观测** | 录制 | 同上 |
+| 上下文超限走 HTTP 400，**两条腿形态不同**：Anthropic 腿 `error.code=model_max_prompt_tokens_exceeded` 且 message 带数字；Responses 腿 `error.code=invalid_request_body`（与其他参数错误共用，不可据以区分）且 message **无数字** | 录制，48 例一手 | `reports/260821-context-limit-400-examples.md` |
 | Claude Code 的 `stop_reason` schema 是 `string().nullable()` **无枚举**，未知值不报错、直接跳过 | 代码事实，CC 2.1.226 | 同上 |
 | Claude Code 对不认识的工具名发回 `No such tool available` 的 tool_result，**不崩溃**，对话继续 | 代码事实 | `~/.claude/skills/debugging-claude-agent-tools/reference/source-symbols.md:21` |
 | 前身 `copilot-api-js` 的 `max_tokens` 处理**只接在 Anthropic 直连腿**，Responses 腿的谓词零调用点；官方 `vscode-copilot-chat` 对被截断的 tool call 是静默丢弃 | 代码事实（八个参考仓） | `reports/260821-reference-projects-max-tokens.md` |
