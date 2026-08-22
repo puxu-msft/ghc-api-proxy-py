@@ -106,7 +106,20 @@
 
 > **一条推论，不是独立规则**：删掉 `synthesized_response_headers_after_sec` 之后，`stream.py:253-262` 那个唯一会单独发 `message_start` 的出口消失，于是 `message_start` 只能与第一个完整块同批发出，**半开状态不再可达**。前提是那个配置项确实被删；它若回来，这条推论随之失效。注意这是**构造性保证**——live 链路一条相关断言都没有（9 条 `DeliveryOrderError` 全在未挂载的 legacy 侧），将来谁再引入单发 `message_start` 的路径，不会有任何东西报错。
 
-### E. MCP-driven 续写
+### E. MCP-driven 续写 —— **已落地**
+
+| 提交 | 内容 |
+|---|---|
+| `66b63c9` | 丢弃上游标为 `status:"incomplete"` 的块——**有完整块在前才丢**，只有它时保留；reasoning 无该字段，不处理 |
+| `e81f07f` | 交接：合成 `tool_use` 调用 `turn_interrupted`；`num_messages` 取客户端 `messages` 长度；工具未声明只警告不阻断；仅 anthropic-messages 客户端请求；`max_tokens` 一律交接；请求行 `[RETY]` + 黄色 |
+
+**两个入口**：可续失败且已交付过块；以及上游干净收尾但 `stop_reason` 说它没写完（`max_tokens`）。后者不经异常路径，所以单独判。
+
+**category 从 `RetryReason` 映射**而非二次分类——`classify_error` 不认识 pipeline 的异常类型，传输撕裂在它那里是 `internal`，而重放路径看同一个事件叫 `network`。一件事两套分类必然打架。
+
+**三条既有测试原本断言这些结局会抛异常**，它们钉的是被文档改掉的行为；各自保留原主题（守卫有没有按时触发），改断言新的结局。
+
+原计划条目：
 
 本节每一条都有出处：写进人写文档的见该文档，只存在于 2026-08-21 讨论中的见 [`decisions.md`](decisions.md) 第二节，属本项目推论而非裁决的见其第三节（「两条上游腿都适用」是推论）。
 
