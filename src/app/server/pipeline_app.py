@@ -755,6 +755,13 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
     # What upstream sent us, not what we hand onward. A buffered reply is one read, so this is the whole of it.
     trace.received = len(response.content)
     payload = response_payload(chain, handled, body)
+    # Summarised before the hand-over is appended, so the line describes what *upstream* produced.
+    # The streaming path reads its summary off the assembler, which never sees the synthesised block;
+    # reading this one off the finished payload instead made the same upstream reply report two
+    # different things depending on which route carried it — one block and no tools, or two blocks
+    # and a tool the model never asked for. That divergence is the thing this whole area exists to
+    # remove, and it had been pushed back into the observability surface.
+    context.reply = reply_summary(handled, payload)
     handed = (
         _hand_back(None, str(payload.get("stop_reason", "")))
         if str(payload.get("stop_reason", "")) in _HANDED_OVER_STOP_REASONS
@@ -777,9 +784,7 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
             # than by an accounting object, because a buffered request settles its line inline.
             trace.status_override = "retry"
             trace.detail = "turn handed back to the client to continue"
-    # Read off what goes downstream rather than the upstream body, so the numbers on the line are the ones the client was actually told. Summarised once, into the same record the streaming path publishes, so this function never has to know what a `tool_use` block looks like.
     # Summarised by the route's own reader, which knows both what shape this payload is in and which upstream's words describe it. `None` means this route has no reader yet, and the line then reports nothing about the reply's contents rather than reporting emptiness as fact.
-    context.reply = reply_summary(handled, payload)
     if context.reply is not None:
         trace.absorb(context.reply)
     # Again, because the reply has only just crossed back: the response half of the translation records its losses during `response_payload` above, after the call that covered the request half.

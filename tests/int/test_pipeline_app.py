@@ -832,7 +832,15 @@ def test_max_output_tokens_becomes_the_anthropic_stop_reason() -> None:
     # The one block upstream produced is still there: dropping is only for a block upstream itself cut short, and only when something whole came before it.
     assert body["content"][0] == {"type": "text", "text": "cut"}
     # Neither a success nor a failure, the same as the streamed ending.
-    assert _records()[-1]["status"] == "retry"
+    record = _records()[-1]
+    assert record["status"] == "retry"
+    # And the line describes what *upstream* produced, not what this side appended to it. The streamed
+    # path reads its summary off the assembler, which never sees the synthesised block; reading this one
+    # off the finished payload made the same upstream reply report two different things depending on
+    # which route carried it — and report a tool the model never asked for.
+    assert record["stop_reason"] == "max_tokens"
+    assert record["blocks"] == 1
+    assert TOOL_NAME not in record.get("tools", [])
 
 
 def test_untranslated_route_body_is_returned_unchanged() -> None:
