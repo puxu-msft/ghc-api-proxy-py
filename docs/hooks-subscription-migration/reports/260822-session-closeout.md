@@ -63,7 +63,13 @@ rg -o '^\s*/home/xp/src/ghc-api-proxy-py/(\S+\.py)' -r '$1' <pyright 输出> | s
 | `configured` 取客户端拼写而非配置拼写 | `..._counted_under_the_configured_spelling`、`..._reported_as_configured` |
 | `REQUEST_FLOOR` 比对去掉 `.lower()` | `test_the_blacklist_is_case_insensitive_for_every_entry_the_document_names` |
 
-四轮全部恢复：`rg MUTATION-PROBE src tests` 无匹配，且与变异前备份 `diff` 逐字节一致。
+| `models=` → 只传 `resolved_model`（收尾复审用，隔离 strip） | 直连那条红、翻译腿那条**照绿**——据此判定后者在监视它看不见的机制 |
+| `owned` 去掉 `.lower()`（合并改回大小写敏感） | 第一次**没打红**（测试只走 Anthropic 腿，SDK 折叠救的）；改成两条腿参数化后 `send_responses` 那一档变红 |
+| `REQUEST_FLOOR` 去掉 `.lower()` | `test_the_blacklist_is_case_insensitive_...` |
+
+六轮全部恢复：`rg MUTATION-PROBE src tests` 无匹配，且与变异前备份 `diff` 逐字节一致。
+
+**其中两轮的价值在于它们没打红**：翻译腿那条与合并那条，各自暴露出一条以自己观测不到的机制命名的测试。变异不红不等于代码对，也不等于测试冗余——要先分清是「构造性保证」还是「测下错了地方」。
 
 **证明了**：配置 → `shape_request` → `client_headers` → 上游请求头这条接线是活的；键匹配按 resolved 生效；指标标签取配置拼写；floor 的大小写不敏感是有意为之而非构造性为真。
 **没有证明**：剥掉那四个 flag 之后上游真的不再 400——那是上游行为，只有实测能答。
@@ -102,6 +108,54 @@ rg -o '^\s*/home/xp/src/ghc-api-proxy-py/(\S+\.py)' -r '$1' <pyright 输出> | s
 - **评审与调查原件**（时点记录，不改写）：`../../tmp/260822-review-beta-flag-strip.md`、`../../tmp/260822-verify-beta-flag-strip-docs.md`、`../../tmp/260822-header-forwarding-surface.md`、`../../tmp/260822-review-disposition-manifest.md`、`../../tmp/260822-review-closeout-claims.md`
 - **对账过的活文档**：`../../hosted-web-search/status.md` §4.5 —— 该节曾说这条红「需要用户确认要不要实现」，已改写为指向实现报告。
 
+## 7.5 `project-review-principles` 复查（2026-08-22，锚点 `61f06a1`）
+
+**本该在合并后跑而没跑**，由用户指出后补做。它的触发条件明写着「一大块工作合并之后」；我直接走了 `closing-a-development-session` 就收口，把「证据与文档的处置」当成了「拿原则对代码」。两者不互相替代。
+
+五条原则逐条跑命令的结果：
+
+| 原则 | 结果 |
+|---|---|
+| `one-reply-fact-one-answer-across-both-reply-modes` | **未违背**。C2 只打出既存的 count 出口（`pipeline_app.py:461`），本会话没有新增绕开 `Terminal` 直接写记录字段的出口 |
+| `assertions-about-copilot-wire-need-a-recorded-counterpart` | **未违背**。本会话新增的断言，期望值都归本方所有（「代理的凭据必须是唯一一条」「翻译腿不转发」），不是在声称 Copilot 会发什么。**唯一在声称上游行为的那条已如实标为未测**：那四个 flag 是否仍会 `400 invalid beta flag`，见实现报告 §5 |
+| `declined-and-adopted-findings-can-share-one-blind-spot` | **违背，已修** |
+| `a-broken-test-needs-its-scenario-and-expectation-rechecked` | **违背，已修** |
+| `explanation-does-not-belong-on-a-surface-that-is-read-as-a-promise` | **违背，已修** |
+
+### 违背一：新增的计数器看不见被判「不修」的那个代价
+
+- 判**不修**：代码评审 minor-4「客户端发两个 `anthropic-beta` 头时第一个被丢」——缺陷在 `forwarded_client_headers` 的 dict 推导，先于本切片。
+- 判**采纳**：新增 `BETA_FLAGS_STRIPPED`，自述回答「哪个模型还在被拿掉哪个 flag」。
+
+两条分开看都成立。合起来：**被丢掉的那个头里的 flag 从不经过 strip，因此从不计数**。实测（探针每一句结论都由输出推出，不硬写）——客户端发 `flag-a,flag-b` + `flag-c` 两个头，配置里三个全点名要剥，计数器只为 `flag-c` 自增；运维读到 `flag-a` 计数为 0，这与「客户端没发过 flag-a」完全同形。
+
+按清单的修法方向处置：**不补探测点把量做成完备的，而是把边界写在它旁边**。`metrics.py` 现在写明零不意味着什么、非零意味着什么，以及关掉这个盲区是 header allowlist 上的另一件独立工作。
+
+### 违背二：一条测试跑在被 SDK 保护的那条腿上
+
+`test_a_forwarded_header_never_travels_beside_the_one_it_collides_with` 只走 Anthropic 腿，而那条腿上 `httpx2.Headers.__setitem__` 会把大小写冲突折叠掉——**安全来自 SDK，不来自我的修复**。实测：把修复还原成大小写敏感合并，Anthropic 腿仍是 1 条 `authorization`，Responses 腿是 **2** 条，而测试全绿。
+
+与收尾复审抓到的翻译腿那条同形，也同为本会话新加。已改成对两条腿参数化，重新变异确认 `send_responses` 那一档变红。
+
+**同一条原则的第二层**：`80068eb` 删掉的 `test_identity_and_credential_headers_are_not_forwarded` 守着两件事——credential（`authorization`）与 identity（`user-agent`）。我的新测试只接住了 credential 那半。查证全仓无任何测试再说「客户端的 `user-agent` 不得到达上游」，**守卫随夹具搬走了**。已补回断言。
+
+### 违背三：指标 HELP 断言了不归它管的结局
+
+`ghc_proxy_beta_flags_stripped_total` 的 HELP 原文：`… removed from a client request because the resolved model refuses them.`
+
+按两个必要条件判：可行动 ✓；**这个面有权作这项主张吗 ✗**——「模型拒绝这些 flag」若为假，错在运维的配置表或上游，不在这个计数器。它实际知道的只是「按配置表，这些 flag 被拿掉了」。与 `blocks.py:20` 的 `which is retryable` 同形。已改为陈述它实际计数的东西。
+
+### 顺带查出的先于本切片的缺陷
+
+Responses 腿上**同时发出两条 `User-Agent`**：`AsyncOpenAI/Python …` 与 `GitHubCopilotChat/0.38.0`，因为构造 `AsyncOpenAI` 时没传 `default_headers`。头转发调查（`../../tmp/260822-header-forwarding-surface.md`）曾作为「顺带发现」提过，本次由参数化测试撞出实证。**未改**——上游是否在意未测，且不属本切片。新测试的断言只钉「客户端的身份不得到达上游」这个保证，没有把这个缺陷钉成失败；理由写在断言旁边。
+
+### 对清单本身的召回反馈
+
+- 命令一（端点字符串里的实现推导）**抓到了**违背三，位置 `metrics.py:28`。这是该命令第二个有记录的真命中。
+- 命令三（越权 docstring）打出 18 处，全部为正当或他人代码；**没有抓到违背三**——它按 docstring 查，而违背三在 `Counter(...)` 的位置参数里。清单说这组命令是定位器不是过滤器，此次相符。
+- 原则 3 的 A/B 配对命令**没有配出**违背一：判「不修」的那条在评审 agent 的报告里、不在 `.dev/docs` 的活文档里，A 侧够不着。清单自己记着「首次真实复查应记下有没有该配对却没配出来的组合」——**这就是一个**。配出它靠的是人读处置表。
+- 原则 4 的命令**交出了**正确的提交（`80068eb`、`61f06a1`），但如清单所言只能交出提交、交不出位置；「守卫随夹具搬走」是点开 diff 才看见的。
+
 ## 8. 遗留给他人的、本会话未处置的
 
 均已在实现报告 §4 记录，此处只列指针：
@@ -110,3 +164,5 @@ rg -o '^\s*/home/xp/src/ghc-api-proxy-py/(\S+\.py)' -r '$1' <pyright 输出> | s
 - 客户端发两个 `anthropic-beta` 头时第一个会在 `forwarded_client_headers` 的 dict 推导里被丢掉（先于本切片）。
 - `upstream_request_retry.strategies.streamReplay` 是 HEAD 上那条红的成因，属 retry 主题且 `pipeline/retry.py` 正被同伴改动，本会话未碰。
 - legacy `config/settings.py` 的 `beta_strip_headers` 仍是零消费者的旧配置面，未动。
+- **Responses 腿同时发出两条 `User-Agent`**（`AsyncOpenAI/Python …` 与 `GitHubCopilotChat/0.38.0`），因构造 `AsyncOpenAI` 时未传 `default_headers`。见 §7.5 末。上游是否在意未测。
+- **`BETA_FLAGS_STRIPPED` 的盲区**：客户端发两个 `anthropic-beta` 头时，被折叠掉那个头里的 flag 从不计数。边界已写在指标旁边；关掉它是 header allowlist 上的独立工作。
