@@ -25,12 +25,12 @@
 
 ## 2. 验证：命令、结果、锚点
 
-**门跑在 `959e8d1`**（当时的 HEAD；本文件写定时 HEAD 已被同伴推进到 `1459320`，那之后的提交与本切片无交集）。三项均为本次会话**新产出**，不是复用的旧证据：
+**门跑过两轮**：第一轮在 `959e8d1`，第二轮在两位独立评审的修补落地后的 `61f06a1`（终态）。两轮均为本次会话**新产出**，不是复用的旧证据。锚点写成哈希而非 `HEAD`，因为共享树上 `HEAD` 在本次收尾期间被同伴推进过多次：
 
 | 命令 | 结果 |
 |---|---|
 | `uv run ruff check src tests` | **All checks passed** |
-| `uv run pytest tests --cov=app --cov-report=term --cov-fail-under=80` | **1787 passed / 2 skipped / 0 failed**，覆盖率 **89.33%** |
+| `uv run pytest tests --cov=app --cov-report=term --cov-fail-under=80` | 1787 passed / 2 skipped / 0 failed，覆盖率 89.33%（`959e8d1`）；两轮独立评审的修补落地后重跑 `uv run pytest tests`：**1797 passed / 2 skipped / 0 failed**（`61f06a1`，终态） |
 | `uv run pyright src tests` | **21 errors** |
 
 **那 21 个 pyright 错全部落在 `src/app/upstream/stream_cap.py` 与 `tests/unit/upstream/test_stream_cap.py`**，是同伴的区域（`stream_cap.py` committed at `2b20be7`，其测试当时有同伴未提交改动），我改动的文件零错。判定方法是把 pyright 输出里的路径抽出去重：
@@ -43,11 +43,14 @@ rg -o '^\s*/home/xp/src/ghc-api-proxy-py/(\S+\.py)' -r '$1' <pyright 输出> | s
 
 | 时刻 | 树 | 结果 | 说明 |
 |---|---|---|---|
-| 首轮 | 工作树（含同伴改动） | 1738 passed / 1 failed | 那条失败是瞬时的——同伴在那 105 秒内改树，单独重跑整个 int 文件 113 全绿 |
-| 裁决前 | 工作树 | 1757 passed / 0 failed / 91.13% | |
-| 裁决后 | 工作树 | 1768 passed / **5 failed** | 五条全在 `tests/unit/test_cli.py`，来自同伴进行中的 `pidfile` → `pidfile_dir` 重构（`StandaloneOptions` 无 `pidfile` 属性）；我的 diff 不含 `StandaloneOptions`，`cli.py` / `lifecycle/entry.py` 均在同伴的脏文件集里 |
+| 首轮 | 工作树（含同伴改动） | 1738 passed / 1 failed / 91.13% | 那条失败是瞬时的——同伴在那 105 秒内改树，单独重跑整个 int 文件 113 全绿 |
+| 裁决前 | 工作树 | 1757 passed / 0 failed / **91.16%** | |
+| 裁决后 | 工作树 | 1768 passed / **5 failed** / 91.15% | 五条全在 `tests/unit/test_cli.py`，来自同伴进行中的 `pidfile` → `pidfile_dir` 重构（`StandaloneOptions` 无 `pidfile` 属性）；我的 diff 不含 `StandaloneOptions`，`cli.py` / `lifecycle/entry.py` 均在同伴的脏文件集里 |
 | 干净 checkout `80068eb` | 一次性 worktree | 1771 passed / **1 failed** | `test_authoritative_example_config_parses`，**父提交 `1c91870` 上同样红**；成因是同伴的 `fa0b281` 提交了 `config.example.yaml` 的旧快照（仍带 `streamReplay`），用户工作树里的当前版本早已删掉它 |
-| 收尾 | 工作树（`959e8d1`） | **1787 passed / 0 failed / 89.33%** | 终态 |
+| 收尾 | 工作树（`959e8d1`） | 1787 passed / 0 failed / 89.33% | |
+| **复审修补后** | 工作树（`61f06a1`） | **1797 passed / 2 skipped / 0 failed** | **终态**。`ruff check src tests` 同轮全过 |
+
+> 上表每一行的 `passed / failed / 覆盖率` 三元组均**与源文件对读**得出（`tr -d '\000' < <file> | rg -o 'Total coverage: [0-9.]+%'` 与 `rg -o '[0-9]+ passed'` 各取一次），而不是靠在本文件里搜到该字符串就算数。初版把 `91.13%` 挂在了 1757 那一行——它属于 1738 那次；**而当时的复核方法（`rg -c -F '91.13%'` 命中即通过）对这个错误完全没有分辨力**，因为字符串确实在文件里。独立复审在为修正载体而建的这份文件上抓到了它。
 
 **一次门跑在过滤后的文件子集上**：14:57 那轮，因同伴的 `tests/int/test_standalone_lifecycle.py` 带有 `F821: Undefined name 'standalone_pidfile_path'`，我把 ruff 的目标缩到自己动过的文件。那一轮的 ruff 结论**只覆盖我的文件**，不是全仓结论；全仓结论由上表收尾那一行承担。
 
@@ -55,7 +58,7 @@ rg -o '^\s*/home/xp/src/ghc-api-proxy-py/(\S+\.py)' -r '$1' <pyright 输出> | s
 
 | 变异 | 打红的测试 |
 |---|---|
-| `denied_by_model=` → `{}`（接线断开） | `..._does_not_reach_upstream`、`..._translated_path_too` |
+| `denied_by_model=` → `{}`（接线断开） | `..._does_not_reach_upstream`；当时也记了 `..._translated_path_too`，**那一条是错的**——收尾复审用隔离变异证明该测试断言的头缺席来自路径白名单而非 strip，已改名重写为 `test_a_translated_request_carries_none_of_the_clients_headers` |
 | `models=` → 只传 `resolved_model` | `test_the_table_fires_on_the_alias_the_client_asked_for` |
 | `configured` 取客户端拼写而非配置拼写 | `..._counted_under_the_configured_spelling`、`..._reported_as_configured` |
 | `REQUEST_FLOOR` 比对去掉 `.lower()` | `test_the_blacklist_is_case_insensitive_for_every_entry_the_document_names` |
