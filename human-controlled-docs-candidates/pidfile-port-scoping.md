@@ -1,65 +1,69 @@
-# pidfile 与端口的绑定
+# pidfile 的目录、命名与端口来源
 
-覆盖 `docs/.human-controlled/config.example.yaml` 中 pidfile 一节与实现的**已知冲突**，以及一个尚未裁决的相邻问题。
+原名《pidfile 与端口的绑定》。2026-08-22 用户更新 `config.example.yaml` 并裁决了三条修法之后重写。
 
-冲突是 2026-08-22 的一次改动造成的，改动本身由用户当场裁决，但那份 spec 由用户亲笔控制，模型不改，所以在此提请更新。
+本文件现在只剩**一个**待裁决点（`GHC_API_PROXY_PORT` 这个拼写），其余部分是已落地事实的记录，供对照。
 
-## 现状
+## 已被采纳
 
-### 触发这次改动的事故
-
-2026-08-21 13:10 起，一个 `ghc-api-proxy start --port 4141 --restart` 实例在 4141 上正常服务。同日 13:37，另一个会话为了验证一个提交，跑了 `uvx --from git+file://...@2924a8c ghc-api-proxy start --port 41411`——端口不同，未带 `--pidfile`，未带 `--restart`。
-
-当时 pidfile 的默认路径与端口无关，两者落在同一个文件上。于是这个临时实例：开始服务时用 `write_pidfile` 把 4141 实例的记录覆盖成了自己；13:42:45 退出时 `remove_pidfile` 判断「文件记的正是我」，把文件 unlink 掉。4141 实例毫发无损地继续服务，但从此在磁盘上查无此人。
-
-次日 11:45，一个带 `--restart` 的新实例启动，`live_predecessor()` 读不到文件返回 `None`，**没有发出 SIGUSR2**；而 `SO_REUSEPORT` 让它照常 bind 成功。结果是两个进程并存服务 4141，内核在两者间分发连接，全程没有报错、没有失败的 bind、也没有一行日志。一次失败的平滑重启与一次成功的平滑重启，在操作者眼里完全同形。
-
-完整取证见 `.dev/docs/tmp/260822-pidfile-missing-forensics.md`。
-
-### 代码事实
-
-- `src/app/config/paths.py` 的 `standalone_pidfile_path(port)` 现在返回 `$XDG_DATA_HOME/ghc-api-proxy/standalone-<port>.pid`，签名多了 `port` 参数。
-- `src/app/lifecycle/entry.py` 的 `run_standalone` 把 pidfile 路径的解析推迟到 bind 之后，端口取自实际监听地址而非请求值。`--fd` 继承的监听器从不声明自己的端口，`--port 0` 由内核选端口，这两种情况下用请求值都会算出错误的文件名。
-- `src/app/lifecycle/entry.py` 在 `--restart` 找不到前任时打一行 `[WARN]`，说明找不到的原因（文件不存在 / 无法解析 / 记录的进程已退出或被替换 / 记录无身份可验证）以及后果（本进程将作为独立监听者服务，而非接管）。
-- `src/app/cli.py` 现在会读 `ProxyConfig.pidfile`，命令行 `--pidfile` 优先于配置文件。**在此之前该配置项没有任何消费者**：它被解析进 `ProxyConfig`（`src/app/config/schema.py`）、被登记进 `NOT_HOT_RELOADABLE`、被写进 `config.example.yaml`，然后从未被读取——设置它的人得到的是默认路径，且没有任何迹象表明设置被丢弃了。
-
-### 与现行 spec 的冲突
-
-`docs/.human-controlled/config.example.yaml` 中 pidfile 一节的中英两句都写着默认路径是 `$XDG_DATA_HOME/ghc-api-proxy/standalone.pid`。实现已不再产生这个路径。**这两句需要更新**，否则照 spec 设置的人会对不上实际文件名。
-
-同一节的示例值 `# pidfile: "/run/ghc-api-proxy/standalone.pid"` 不受影响：显式指定的路径原样使用，不追加端口。
-
-## 提案
-
-以下是替换文案的候选，可整段丢弃。措辞尽量贴合该文件既有的中英并列风格。
+用户于 2026-08-22 亲笔更新了 `docs/.human-controlled/config.example.yaml` 的 pidfile 一节，把配置项从 `pidfile`（文件）改为 `pidfile_dir`（目录）：
 
 ```yaml
-# 优雅重启使用的 pidfile，systemd/pm2 完全跳过 pidfile 机制。
-# 默认是 $XDG_DATA_HOME/ghc-api-proxy/standalone-<端口>.pid，按实际监听的端口区分：
-# 平滑重启接替的是同一个监听端点，跑在别的端口上的实例不是它的前任。
-# 显式指定时按原样使用，不追加端口。
-#
-# Pidfile used by graceful restart, not used by systemd/pm2.
-# Defaults to $XDG_DATA_HOME/ghc-api-proxy/standalone-<port>.pid, scoped to the port actually
-# listened on: a smooth restart replaces one listening endpoint, and a run on another port is
-# not its predecessor. An explicit path is used as given, with no port appended.
-#
-# NOT hot-reloadable (requires restart). / 不支持热重载（需重启）。
-#
-# pidfile: "/run/ghc-api-proxy/standalone.pid"
+# 优雅重启使用的 pidfile 所在目录，systemd/pm2 完全跳过 pidfile 机制。
+# 默认是 $XDG_DATA_HOME/ghc-api-proxy，pidfile 命名形如 standalone-${GHC_API_PROXY_PORT}.pid
 ```
 
-## 待裁决
+本目录早先提出的替换文案（保留 `pidfile` 文件语义）**未被采纳，已删除**：目录语义更好，一个设置覆盖操作者跑的所有端口，而文件名不必、也不应由操作者选——后继必须能只凭端口推导出它。
 
-### 一、切换到新版本时的一次性影响
+同日裁决并已实现的三条：
 
-**现场情况在 2026-08-22 13:15 复核过，比原先设想的更简单**：`~/.local/share/ghc-api-proxy/standalone.pid` **此刻已经不存在**，而 pid 2254087 仍在服务 4141。取证报告记录该进程曾在 11:45:44 写出过这个文件，如今没了——**同一个缺陷在取证报告写完之后、当天之内又击发了一次**（最可能是某个会话跑了一次 `start`，未取证到具体是哪一次，此句为推测）。
+| 裁决 | 实现 |
+|---|---|
+| pidfile 按端口区分 | `standalone_pidfile_path(port, directory)` 产出 `standalone-<port>.pid`；端口取自 bind 后的实际监听地址 |
+| `--restart` 找不到前任时告警 | `[WARN]` 一行，说明四种原因中的哪一种，以及「没有接管、旧进程可能仍在服务该端口」 |
+| `write_pidfile` 拒绝覆盖活进程的记录，`--force-write-pidfile` 可覆盖 | 不带 `--restart` 而记录指向一个活进程时，启动被拒绝并说明两条出路；`--restart` 的合法接替不受影响 |
+| `--fd` 遇矛盾选项报错中止 | `--fd` 与 `--host` / `--port` / `--restart` / `--pidfile-dir` / `--force-write-pidfile` 同时出现时 `typer.BadParameter`，并点名实际冲突的那几个 |
 
-也就是说：当前生产实例此刻正处在与事故当事人完全相同的状态——活着、在服务、但磁盘上查无此人。
+配置项 `ProxyConfig.pidfile_dir` 现在真的被读取了。改名之前它叫 `pidfile`，被解析进 schema、登记进 `NOT_HOT_RELOADABLE`、写进 `config.example.yaml`，然后**从未被任何代码读取**——设置它的人得到默认路径且毫无迹象。CLI `--pidfile-dir` 优先于配置文件。
 
-这件事顺带把「要不要做旧名兼容层」这个问题变成了没有争议的：一个回退去读 `standalone.pid` 的兼容层，今天读到的同样是「不存在」。它换不来任何东西，却会成为一份没人负责删除的永久残留。因此实现上没有加。
+## 待裁决：`GHC_API_PROXY_PORT` 这个拼写
 
-如果希望新版本第一次 `--restart` 就能接管当前这个 2254087，需要先为它补一份记录。**不能手写**——文件第二行是 `/proc/<pid>/stat` 的第 22 个字段（进程启动时刻），用于区分同一个 PID 的前后两任，而 `comm` 字段自身可能含空格，按列切分并不可靠。用项目自己的函数生成：
+新 spec 把默认文件名写作 `standalone-${GHC_API_PROXY_PORT}.pid`。作为「最终生效的那个端口」的占位记号，这没有歧义，实现也正是这么做的——文件名取自 bind 后从 socket 读回的实际端口，无论它来自 `server.port`、`--port` 还是别处。
+
+但 `GHC_API_PROXY_PORT` 同时**长得像一个真实的环境变量**，而它现在不是。实测（2026-08-22）：
+
+| 写法 | 结果 |
+|---|---|
+| `GHC_API_PROXY_SERVER__PORT=5001` | 生效，`server.port` = 5001 |
+| `GHC_API_PROXY_PORT=5000` | **进程启动失败** |
+
+原因是 `environment_values()` 以 `GHC_API_PROXY_` 为前缀、`__` 为分层符，所以 `GHC_API_PROXY_PORT` 映射到顶层键 `port`，而 `ProxyConfig` 是 `extra="forbid"`，顶层没有 `port` 字段：
+
+```
+pydantic_core._pydantic_core.ValidationError: 1 validation error for ProxyConfig
+port
+  Extra inputs are not permitted [type=extra_forbidden, input_value='5000', input_type=str]
+```
+
+也就是说，一个照着 spec 读的人如果去设 `GHC_API_PROXY_PORT`，得到的不是「端口没生效」，而是**服务起不来**。
+
+三条出路，**我倾向第一条**：
+
+1. **实现它**，让 `GHC_API_PROXY_PORT` 成为 `server.port` 的顶层别名。理由：`GHC_API_PROXY_` + `PORT` 是这个前缀下最自然的拼写，用户自己写文档时就这么写了，说明它符合直觉；而 `GHC_API_PROXY_SERVER__PORT` 拗口且容易把双下划线写成单个。代价是在扁平命名与嵌套命名之间开了一个特例，将来 `HOST` 之类会不会也要跟进，需要一并想清楚。
+2. **换记号**，文档改用 `standalone-<端口>.pid` 或 `${PORT}`，避免读者把它当环境变量。代价最小，但放弃了一个好拼写。
+3. **保持现状**。不推荐：踩中的人得到的是启动失败，而失败信息里只有 `port  Extra inputs are not permitted`，与 pidfile 毫无关联，很难自己走回来。
+
+若选第一条，另有一个次级问题需一并裁决：三个来源同时出现时的优先级。现有分层是 bundled < YAML < 环境 < CLI，`GHC_API_PROXY_PORT` 落在「环境」那一层最自然，即 `--port` 仍然压过它。
+
+## 切换到新版本时的一次性影响
+
+**现场在 2026-08-22 13:15 复核过**：`~/.local/share/ghc-api-proxy/standalone.pid` 已经不存在，而 pid 2254087 仍在服务 4141。取证报告记录该进程曾在 11:45:44 写出过这个文件，如今没了——同一个缺陷在取证报告写完之后、当天之内又击发了一次（最可能是某个会话跑了一次 `start`，未取证到具体哪一次，此句为推测）。
+
+也就是说，当前生产实例此刻正处在与事故当事人相同的状态：活着、在服务、磁盘上查无此人。
+
+这顺带让「要不要做旧名兼容层」失去了争议：一个回退去读 `standalone.pid` 的兼容层今天读到的同样是「不存在」，换不来任何东西，却会成为没人负责删除的永久残留。因此没有实现。
+
+如果希望新版本第一次 `--restart` 就能接管当前这个进程，先为它补一份记录。**不能手写**——文件第二行是 `/proc/<pid>/stat` 的第 22 个字段（进程启动时刻），用于区分同一 PID 的前后两任，而 `comm` 字段自身可能含空格，按列切分不可靠。用项目自己的函数：
 
 ```bash
 cd /home/xp/src/ghc-api-proxy-py
@@ -72,26 +76,4 @@ print(write_pidfile(Path.home() / '.local/share/ghc-api-proxy/standalone-4141.pi
 
 （`2254087` 换成届时 `ss -lntp | grep 4141` 报出的实际 pid。）
 
-不做这一步也可以：新版本会作为独立监听者启动，并打出一行 `[WARN]` 说明没有接管、旧进程可能仍在服务该端口。此时两个进程会同时服务 4141，需要手动停掉旧的。
-
-### 二、`write_pidfile` 是否该拒绝覆盖一个活进程的记录
-
-按端口区分堵住了本次事故的路径——两个端口不再共用一个文件。但它没有堵住另一条：**同一端口**上跑一个临时实例（例如为了复现问题而在 4141 上再起一个），仍然会覆盖并在退出时删掉生产实例的记录。
-
-`remove_pidfile` 现有的守卫（只在「文件仍记着我自己」时才删）防的是接替场景中后来者的记录被前任误删，防不住「先覆写、再自删」。
-
-上面「一、」里记录的那次复发说明这条路径不是理论上的：它当天就又发生了一次。
-
-可能的做法是让 `write_pidfile` 在即将覆盖一个「记录着活着且身份匹配的进程」的文件时拒绝或告警——判据是现成的，`look_up_predecessor()` 现在已经就位，在 `announce()` 里对不带 `--restart` 的启动做一次同样的查找并告警，就是这次改动对称的另一半，成本比事故当时低。这会改变对外行为（某些启动会失败或变吵），所以未实施，提请裁决。
-
-2026-08-22 用户裁决当时只涉及告警与按端口区分两条，此项不在其中。
-
-### 三、`--fd` 分支静默吞掉 `--restart` 与 `--pidfile`
-
-`ghc-api-proxy start --fd 3 --restart` 会完整接受 `--restart` 然后完全忽略它，一个字都不说。`--pidfile`、`--manual` 等同理。
-
-原因是 `--fd` 分支提前 `return` 走 `serve_inherited`，跳过了下方那个逐条播报「本路径上此选项无效」的循环——而那个循环旁边的注释恰好写着「一个被接受然后被忽略的选项比一个被拒绝的更糟，因为没有任何东西能把它和生效区分开」。
-
-这与本次为 `--restart` 修的是同一类失效，只是发生在另一条分支上。修法很小（一条 `typer.BadParameter`，或把那几个选项纳入既有的 inactive 播报），但它决定「传了无效选项该报错还是该警告」，属于对外行为，故提请裁决而非径直实施。
-
-两位独立评审中的一位在本次评审里发现此项。
+不做也可以，但要注意新的拒绝行为已经生效：**不带 `--restart` 直接起第二个实例现在会被拒绝**（记录指向活进程时）。当前这个进程没有记录，所以拒绝不会触发；补了记录之后，就必须用 `--restart` 接管，或 `--force-write-pidfile` 强行占用。

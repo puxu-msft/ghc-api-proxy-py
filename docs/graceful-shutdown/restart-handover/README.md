@@ -20,27 +20,53 @@
 
 ## 用户裁决（2026-08-22）
 
+分两批。第一批两条：
+
 1. `--restart` 找不到前任时打一行告警。
 2. pidfile 按监听端口区分，不同端口用不同 pidfile。
 
 实施者当时提议的是另一条（让 `write_pidfile` 拒绝覆盖活进程的记录），用户选了按端口区分。**用户的裁决更好**：平滑重启的语义本就是接替同一个监听端点，跑在别的端口上的实例不是它的前任，按端口分文件在语义上更正确，且天然堵住临时实例的污染面。实施者先前「绑定端口会让换端口重启失去接管能力」的保留意见是错的——换端口本来就不是接管，是起新服务。
 
+第一批落地并评审完毕后，用户更新了 `config.example.yaml`（把配置项从 `pidfile` 改为 `pidfile_dir`，目录语义），并把本文档「遗留」里当时登记的三条全部裁决为实现：
+
+3. 配置项改为 `pidfile_dir`，默认 `$XDG_DATA_HOME/ghc-api-proxy`，文件名 `standalone-<最终生效端口>.pid`。
+4. `write_pidfile` 拒绝覆盖活进程的记录，新增 `--force-write-pidfile` 强制覆盖。
+5. `--fd` 遇到矛盾选项报错中止，不再静默吞掉。
+
+所以「同端口的临时实例仍会顶掉记录」这条——第一批只解决了「换个端口」那一半——在第二批被补上了对称的另一半。
+
 ## 落地
 
 | 位置 | 改动 |
 |---|---|
-| `app/config/paths.py` | `standalone_pidfile_path(port)` 返回 `standalone-<port>.pid` |
+| `app/config/schema.py` | `pidfile: str` → `pidfile_dir: str`；`NOT_HOT_RELOADABLE` 同步改名 |
+| `app/config/paths.py` | `standalone_pidfile_path(port, directory=None)` 产出 `<dir>/standalone-<port>.pid` |
 | `app/lifecycle/pidfile.py` | 新增 `PredecessorLookup` 与 `look_up_predecessor()`，判断收在一处并附带原因；`live_predecessor()` 退化为 `return look_up_predecessor(path).entry` |
-| `app/lifecycle/entry.py` | pidfile 路径解析推迟到 bind 之后，端口取自实际监听地址；`--restart` 找不到前任时打 `[WARN]`；`signalled_predecessor` 只记录实际送达的 pid |
-| `app/cli.py` | 接上 `ProxyConfig.pidfile`，CLI `--pidfile` 优先于 config |
+| `app/lifecycle/entry.py` | pidfile 路径解析推迟到 bind 之后，端口取自实际监听地址；`--restart` 找不到前任时打 `[WARN]`；不带 `--restart` 而记录指向活进程时**拒绝启动**；`force_write_pidfile` 跳过拒绝；`signalled_predecessor` 只记录实际送达的 pid |
+| `app/cli.py` | `--pidfile` → `--pidfile-dir`；新增 `--force-write-pidfile`；接上 `ProxyConfig.pidfile_dir`；`--fd` 与五个矛盾选项冲突时 `typer.BadParameter` 并点名实际冲突项；配置加载与 inactive 播报提到两条 serve 路径分叉之前 |
 
-第四条是顺带修的第三个断点：该配置项被解析进 `ProxyConfig`、登记进 `NOT_HOT_RELOADABLE`、写进 `config.example.yaml`，然后**从未被任何代码读取**。设置它的人得到默认路径且毫无迹象。
+`--fd` 那两条改动针对的是**两类不同的失效**，混为一谈会修错：
+
+- **矛盾选项**（`--host`/`--port`/`--restart`/`--pidfile-dir`/`--force-write-pidfile`）与 systemd 拥有 listener 直接冲突——这个进程既没选择那个端点也不拥有它，无法重新绑定、交接或记录。**报错中止**。
+- **inactive 选项**（`--manual`/`--rate-limit`/`--github-token`）并不与 inherited listener 矛盾，只是 `ProxyConfig` 没有承载它们的位置。项目既有裁决要求**播报警告**而非拒绝。它们此前在 `--fd` 路径上完全静默，是因为该分支自己加载了一份配置并把第二个返回值丢掉了。
+
+第二轮评审用一手 CLI 探针确认了这个区分：`--graceful-timeout`/`--history`/`--proxy` 在 inherited 路径上**确实生效**（实测进入最终 `ProxyConfig`，`serve_inherited` 读 `graceful_cleanup_timeout`），所以不能把它们一并拒绝。
+
+配置项此前**没有任何消费者**：被解析进 `ProxyConfig`、登记进 `NOT_HOT_RELOADABLE`、写进 `config.example.yaml`，然后从未被读取。设置它的人得到默认路径且毫无迹象。
+
+### 拒绝的语义边界
+
+拒绝**不针对** `--restart` 的合法接替：那时覆盖前任的记录正是接替本身。拒绝针对的是「没说要接替，却有个活进程记在那里」。判据复用 `look_up_predecessor()`——记录必须指向一个活着**且身份令牌匹配**的进程，所以一份陈旧记录（进程已退出、或 PID 已被回收）不会挡住任何人。
+
+拒绝发生在 bind 之后（文件名要等实际端口）、开始服务之前，抛出前先 `listeners.close()`，否则异常会带着一个已绑定的监听器离开作用域。
+
+检查与写入之间存在一个窗口：检查时无人，`announce()` 时可能已有人。这里没有做 compare-and-swap，因为堵住的是「操作者手滑再起一个」这类顺序场景，不是并发争抢。真正的原子所有权需要进程间串行化，见「遗留」。
 
 ### 两个容易读错的设计点
 
 **端口取自 bind 之后的实际地址而非 `options.port`。** 今天两者在所有 CLI 路径上恒等（`--port` 与 `server.port` 都被约束在 1..65535，`--fd` 走 `serve_inherited` 根本不到这里）。保留这个写法是因为它是唯一在约束松动后仍正确的，且从 socket 读回来代价为零。**第一版的 docstring 把 `--fd` 和 `port 0` 写成了既成事实，那是错的**，已按评审改为诚实说法——这个项目的注释是设计记录，写成事实会让下一个读者在错误的位置排查。
 
-**`look_up_predecessor` 与 `live_predecessor` 的关系。** 意图是判断只存在一处，避免同一事实在两条路径各推导一遍而漂移。评审逐条核对了五个分支的等价性，唯一行为差异是 `entry is None` 时多一次 `path.exists()`，只影响 reason 字符串。
+**`look_up_predecessor` 与 `live_predecessor` 的关系。** 意图是判断只存在一处，避免同一事实在两条路径各推导一遍而漂移。评审逐条核对了五个分支的等价性，唯一行为差异是 `entry is None` 时多一次 `path.exists()`，只影响 reason 字符串。第二批加入拒绝逻辑时，这个单一判断点直接复用，没有第二份实现。
 
 ## 评审处置
 
@@ -85,15 +111,76 @@
 
 有一条**没有**独立验出分辨力，如实记录：「不带 `--restart` 时不告警」这条负控。能让它单独触发的变异（把告警挪出 `if options.restart:`）同时会改变 `predecessor` 的赋值，从而真的发出 SIGUSR2，于是先被更早的那条既有断言拦下。该负控目前只由代码结构保证。
 
+第二批（`pidfile_dir` / 拒绝覆盖 / `--fd` 报错）另做四次：
+
+| 变异 | 结果 |
+|---|---|
+| 从不拒绝（退回旧行为，**第一次写法**） | 红在 `subprocess.TimeoutExpired`——通用超时消息不说明问题，与第一批那条被评审批评的形态相同 |
+| 从不拒绝（**改进断言之后**） | 精确红在 `the second start was not refused: it is still serving, and the record is now its own` |
+| `--force-write-pidfile` 不被尊重 | 精确红在 `the forced start never claimed the record` |
+| `--fd` 不再拒绝新三项 | 三个参数化用例全红在 `assert 0 != 0`（退出码应非零） |
+
+「改进断言之后」那一条是本次唯一一处把评审教训直接用上的地方：一个红在超时上、且超时消息说不出所以然的测试，会让下一个人查错方向。
+
+第二轮评审后又补两次：
+
+| 变异 | 结果 |
+|---|---|
+| 拒绝判据放宽成「文件存在即拒绝」 | 两条新测试精确红在 `never came to name pid X; it holds Y` |
+| inactive 播报重新对 `--fd` 不可达 | 三个参数化用例全红 |
+
+第一条是第二轮评审 F2 点出的盲区：在补上「陈旧记录/回收 PID 不得误伤」这两个格子之前，把判据改宽**不会**让任何测试变红——四次变异只验了 false-negative 一侧。
+
+第三轮（两份第二批评审的处置）再做三次：
+
+| 变异 | 结果 |
+|---|---|
+| 拒绝重新以 traceback 逃逸 | 精确红；判据是 `not isinstance(result.exception, PidfileError)`，因为退出码 1 两种情形都会给出 |
+| 删掉 `listeners.close()`（**第一版测试**） | **全绿——测试无鉴别力** |
+| 删掉 `listeners.close()`（**持有异常之后**） | 精确红在 `Errno 98 Address already in use` |
+| 去掉「无法核实的记录」告警（**补测试前**） | 全绿 |
+| 去掉「无法核实的记录」告警（**补测试后**） | 精确红 |
+
+`listeners.close()` 那条值得记：第一版测试写成 `with pytest.raises(...)` 不带 `as`，异常在块结束后就没有强引用，帧随之释放、端口跟着释放——于是删不删 `close()` 结果一样，测试绿得毫无意义。改成 `as refusal` 并在 bind 前 `assert refusal.value.__traceback__ is not None`，才把「异常仍被持有」这个前提真正建立起来。**这一格是评审用探针先发现的，我照着写的第一版仍然没抓住，是变异验证把它揪出来的。**
+
+## 第二批评审处置
+
+两位异源评审再次独立并行，各 0 blocker。GPT 报 1 major 1 minor，Opus 报 1 major 6 minor 4 nit。Opus 把 8 个文件快照到 `/tmp` 并在报告开头列出 sha256，因为**实施者在它评审期间仍在改这些文件**（正在修 GPT 那两条）；采纳前已逐一对哈希，八个全部一致。
+
+### 已采纳并修复
+
+| 条目 | 内容 | 处置 |
+|---|---|---|
+| `--fd` 仍静默吞掉三个 inactive 选项 | 冲突检查只管矛盾选项，而 `--fd` 分支自己加载配置并丢掉第二个返回值，`--manual` / `--rate-limit` / `--github-token` 的播报仍不可达 | 配置加载与播报循环整体提到两条 serve 路径分叉之前，一处解决 |
+| 拒绝以 traceback 呈现 | `PidfileError` 一路穿到默认 excepthook，那句「pass `--restart` 或 `--force-write-pidfile`」被埋在十几行栈帧里，而这条拒绝的全部价值就是那句指示 | CLI 层捕获，`typer.echo` + `Exit(1)` |
+| 拒绝的 false-positive 一侧无保护 | 把判据改宽成「文件存在即拒绝」，原有测试全绿——而那正违反「陈旧记录不得挡住启动」 | 补两个测试：进程已退出、PID 被回收 |
+| 活着但无法核实身份的记录被静默覆盖 | 记录只有一行 PID（无身份令牌）时拒绝不触发，与「记录是垃圾」走同一条路 | 不拒绝（否则在读不到 `/proc` 的平台上每次启动都被挡），但打一行 `[WARN]` |
+| `entry.py` 里没交代检查与写入之间的窗口 | 那句承认只写在本文档里，代码注释没有 | 在拒绝处补一句，说明它挡的是先后两次启动、不是并发争抢 |
+| `listeners.close()` 的注释理由说反了一半 | 原写「进程即将退出」——但进程退出时内核本就回收 fd。评审用两个探针分出真机制：异常的 traceback 引着帧、帧引着 `listeners`，调用方多持有异常一会儿端口就多占一会儿 | 换成实测出的机制 |
+| `listeners.close()` 无测试 | 删掉它 137 passed 全绿 | 加进程内测试（详见变异表，第一版仍无鉴别力） |
+| 测试 docstring 描述了已不存在的结构 | 重构后 `--fd` 分支已排在播报循环之后，那句现在时描述成了假的 | 改写 |
+| `start_token="999999"` 可能撞真值 | 该字段是自开机的时钟节拍数，999999 约合 100Hz 下 2.78 小时 | 换成 `"not-a-real-start-time"`，走完全相同的分支 |
+| force 测试手写轮询 | 与 `wait_until_recorded` 逻辑重复且失败消息更弱 | 改用 helper |
+| 两处 `wait_until_recorded` 调用缺一句说明 | 为什么不用 `wait_until_serving` 的理由只在 helper 的 docstring 里 | 调用处各补一句 |
+
+### 未采纳，及理由
+
+- **给新选项加 `help=`**（Opus n-4）。`start` 的**全部**选项都没有 `help=`，只给新标志加会造出第二种风格。要么整个命令一起补，要么不动。评审自己也不建议在本批改。登记，交用户决定。
+- **把 `--manual` / `--rate-limit` / `--github-token` 加进 `--fd` 冲突列表**。两位评审独立给出同一判断：它们与 inherited listener 不矛盾，只是在 `ProxyConfig` 里没有落脚点，而项目 2026-08-17 的裁决是这类选项要播报而非拒绝。把同一个选项在一条路径上判致命、另一条判劝告是不自洽的。
+- **把 `--graceful-timeout` 加进冲突列表**。派发给评审的提示里说它「在 `--fd` 路径上同样被静默忽略」——**这个前提是我写错的**。评审查证：`serve_inherited` 把 `config.graceful_cleanup_timeout` 传给了 `uvicorn.Config(timeout_graceful_shutdown=...)`，而 `contrib/systemd/ghc-api-proxy.service` 出厂就写着 `--fd 3 --graceful-timeout 300`——加进去会当场打死自己发的 unit 文件。
+- **为 `pidfile_dir` 键名加权威 oracle 交叉验证**（Opus m-6）。评审自己也不建议：`test_authoritative_example_config_parses` 拿用户文档撞 `extra="forbid"`，但 `pidfile_dir` 在那份文件里是注释掉的，所以没有交叉验证到；剩下的风险只是「字段名与用户文档不一致」，而用户文档不允许我们碰，也不该由测试去强制。记录在此是为了让人知道这一格的判据来自哪里。
+
+### 越界观察（不属本批，建议单独立项）
+
+1. **`serve_inherited` 完全不读 `proxy_config.server.tls`**——没有 `ssl_certfile`/`ssl_keyfile`，也没有 `FirstByteRoutingAdapter`。而 `config.example.yaml` 出厂是 `tls.mode: both`。**用出厂配置跑 systemd socket activation 的人拿到的是纯明文，且没有一行提示。** 项目的部署目标正是 systemd，这条值得优先。
+2. `cli.py` 里那一整块 `cli_overrides` / `auth_overrides` / `upstream_overrides` 计算完之后**从未被消费**（`_load_spec_config` 不接受它）。本批把 `--fd` 分支移到它后面，让这块死代码更显眼了。属既有清理。
+
 ## 遗留
 
-三条已登记在 `.dev/human-controlled-docs-candidates/pidfile-port-scoping.md`，交用户裁决：
-
-1. **`config.example.yaml` 那两句默认路径描述现在是假的**，需用户亲自更新（人写文档权威，模型不改）。
-2. **同端口的临时实例仍会顶掉并删掉生产记录**——按端口区分只解决了「换个端口」那一半。对称的另一半是让 `write_pidfile` 在覆盖一个记录着活进程的文件时拒绝或告警，`look_up_predecessor` 已经就位，成本比事故当时低。
-3. **`--fd` 分支静默吞掉 `--restart` / `--pidfile`**——提前 `return` 跳过了 inactive 播报循环，与本次修的是同一类失效。
-
-另有两条本次未修的既有缺陷（信号处理器窗口、并发回滚），理由见上「未采纳」，建议各自单独立项。
+第一批留下的三条，用户已在第二批全部裁决为实现，不再是遗留。当前剩下的是：
+1. **`GHC_API_PROXY_PORT` 这个拼写**（交用户裁决，详见候选文档）。新 spec 把默认文件名写作 `standalone-${GHC_API_PROXY_PORT}.pid`，作为「最终生效端口」的占位记号没有歧义；但它长得像一个真实环境变量，而实测设置 `GHC_API_PROXY_PORT=5000` 会让**进程启动失败**——`environment_values()` 以 `__` 分层，该名字映射到顶层键 `port`，撞上 `extra="forbid"`。能设端口的是 `GHC_API_PROXY_SERVER__PORT`。三条出路（实现该别名 / 文档换记号 / 保持现状）与倾向写在候选文档里。
+2. **信号处理器安装窗口**（既有缺陷，建议单独立项）。`StandaloneServer.serve` 的顺序是 `arm()` → `on_serving()`（写 pidfile、发信号）→ 才安装 handler，所以从 pidfile 对外宣称「可接管」到 SIGUSR2 真正被接住之间有一个窗口，窗口内 SIGUSR2 走默认动作直接杀进程。评审用子进程探针证实（返回码 `-12`）。修它要动关闭阶梯的核心时序。
+3. **并发回滚覆盖后来者**（既有缺陷，建议单独立项）。A 找到前任 P 并发布 A，B 随后发布 B，若 A 的启动尾部抛异常，A 的回滚会把 P 原样写回，覆盖正在服务的 B。单后继场景正确。真正修它需要同端口的进程间串行化（「先 read 再 write」仍有 TOCTOU）——第二批加入的拒绝逻辑也共享这个窗口，见上「拒绝的语义边界」。
 
 ## 报告原件
 
