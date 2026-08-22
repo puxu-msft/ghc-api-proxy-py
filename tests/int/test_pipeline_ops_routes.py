@@ -9,10 +9,12 @@ from typing import Any
 import httpx2
 import pytest
 from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from app.model_provider.types import ModelDescriptor, ModelEndpoint
 from app.server.app_state import CHAIN_STATE_KEY
 from app.server.routes.ops import router as ops_router
+from app.server.routes.router import build_router
 
 
 class StubProvider:
@@ -107,3 +109,18 @@ async def test_metrics_are_served() -> None:
         response = await client.get("/metrics")
     assert response.status_code == 200
     assert b"python_gc_objects_collected_total" in response.content
+
+
+def test_the_ops_surface_is_mounted_on_the_router_production_builds() -> None:
+    """Every test above mounts `ops_router` itself, so none of them can see whether anything else does.
+
+    That gap is the shape this file was written for. Measured 2026-08-22: deleting `include_router(ops_router)` from `build_router` left all seven tests above green, while production went back to answering 404 on `/health/readiness` — the state the module docstring says was fixed on 2026-08-19. The mounting moved into `build_router` recently enough that its own docstring still explains why it used to live in the factory; nothing was watching it arrive.
+
+    Asked through a request rather than by reading the route table, because the table cannot answer it: `include_router` leaves a single `_IncludedRouter` with `path=None` in `routes`, and the paths behind it do not appear even after the router is mounted on an app. Liveness and metrics are used because they are the two that answer without a chain.
+    """
+    app = FastAPI()
+    app.include_router(build_router())
+    client = TestClient(app)
+
+    assert client.get("/health/liveness").status_code == 200
+    assert client.get("/metrics").status_code == 200
