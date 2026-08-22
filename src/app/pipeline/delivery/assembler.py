@@ -57,6 +57,10 @@ class Terminal:
     tools: list[str] = field(default_factory=lambda: list[str]())
     # Thinking blocks by kind: `txt` carried readable reasoning, `enc` carried only an opaque signature. The distinction is the interesting one — a turn that reasoned and a turn that was handed back sealed reasoning cost the same tokens and look identical from the outside.
     thinking: list[str] = field(default_factory=lambda: list[str]())
+    # Upstream's own usage object, kept beside the converted one rather than derived back from it. `usage` above has been through `_anthropic_usage`, which subtracts the cached part of the input and drops `reasoning_tokens` outright — a lossy pass that is right for an Anthropic client and has no inverse. A leg that has to report what upstream actually said needs the original, and reconstructing it would compose two lossy passes into a number neither side ever computed.
+    #
+    # Empty on every leg but the Responses one, including the buffered path. A reader must treat empty as "not observed" and say nothing, rather than filling in zeros: a usage of zero is a measurement, and this is the absence of one.
+    upstream_usage: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
 
     def record(self, block: CompletedBlock) -> None:
         """Take one finished block into the running summary of the reply.
@@ -336,6 +340,8 @@ class ResponsesAssembler:
         usage = response.get("usage")
         if isinstance(usage, dict):
             self._terminal.usage = _anthropic_usage(cast(dict[str, Any], usage))
+            # Kept as it arrived, for the leg that has to report it back in upstream's own shape. See `Terminal.upstream_usage`.
+            self._terminal.upstream_usage = dict[str, Any](cast(dict[str, Any], usage))
         if kind == "response.incomplete":
             details = response.get("incomplete_details")
             reason = ""

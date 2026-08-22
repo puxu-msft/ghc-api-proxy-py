@@ -1,0 +1,261 @@
+"""The Responses framer is checked against the client library that has to read it.
+
+Asserting our own bytes would only prove the framer agrees with whatever this file expects. What decides whether a stream is well-formed is the OpenAI SDK's own parser: it raises when `response.created` is missing, asserts on the snapshot's shape before applying a text delta, indexes `snapshot.output[output_index]` directly, and refuses a stream that never says it completed. So the frames go through `ResponseStreamState` and the assertions are made on the response it reconstructs.
+
+`tests/int/cassettes/anthropic_to_responses_stream.json` is where the wire envelope and the event payload shapes were read from; this file does not replay it, because what is under test is the direction that has no recording — ours, going out.
+"""
+
+from typing import Any, cast
+
+import orjson
+import pytest
+from openai._models import construct_type
+from openai._types import omit
+from openai.lib.streaming.responses import ResponseStreamState
+from openai.types.responses import ParsedResponse
+from openai.types.responses.response_stream_event import ResponseStreamEvent
+
+from app.pipeline.delivery.assembler import TEXT, THINKING, TOOL_USE, Terminal
+from app.pipeline.delivery.blocks import CompletedBlock
+from app.pipeline.delivery.responses_sse import ResponsesFramer
+
+
+def framer() -> ResponsesFramer:
+    return ResponsesFramer(response_id="resp_test", model="gpt-5.5", created_at=1_700_000_000)
+
+
+def events_of(frames: tuple[bytes, ...]) -> list[str]:
+    """The event names on the wire, in order, read off the `event:` line rather than the payload."""
+    names: list[str] = []
+    for frame in frames:
+        head = frame.decode().split("\n", 1)[0]
+        if head.startswith("event: "):
+            names.append(head.removeprefix("event: "))
+    return names
+
+
+def as_event(frame: bytes) -> Any:
+    """One frame decoded back into the SDK's own event object.
+
+    `construct_type` is the SDK's loose constructor and it answers `object`, so the cast is here once rather than at each call site. It is the same path the SDK's SSE decoder takes, which is the point — the events the parser sees under test are built the way it builds them.
+    """
+    payload = orjson.loads(frame.decode().split("data: ", 1)[1])
+    return cast(Any, construct_type(value=payload, type_=ResponseStreamEvent))
+
+
+def replay(frames: list[bytes]) -> ParsedResponse[Any]:
+    """Feed the frames to the SDK's parser and return the response it reconstructs.
+
+    Comments are skipped the way any SSE reader skips them — that is the assertion the keep-alive test makes, and it has to be made through this path rather than beside it.
+    """
+    state: ResponseStreamState[Any] = ResponseStreamState(input_tools=[], text_format=omit)
+    for frame in frames:
+        if frame.decode().startswith(":"):
+            continue
+        state.handle_event(as_event(frame))
+    completed = state._completed_response  # pyright: ignore[reportPrivateUsage]
+    assert completed is not None, "the stream never said it completed"
+    return completed
+
+
+def text_block(index: int, text: str) -> CompletedBlock:
+    return CompletedBlock(index=index, kind=TEXT, payload={"type": TEXT, TEXT: text})
+
+
+def whole(framer_: ResponsesFramer, blocks: list[CompletedBlock], terminal: Terminal) -> list[bytes]:
+    frames = list(framer_.preamble())
+    for block in blocks:
+        frames.extend(framer_.block(block))
+    frames.extend(framer_.terminal(terminal))
+    return frames
+
+
+def test_the_sdk_reconstructs_the_text_it_was_sent() -> None:
+    response = replay(
+        whole(
+            framer(),
+            [text_block(0, "Hello"), text_block(1, " world")],
+            Terminal(stop_reason="end_turn", seen=True, upstream_usage={"input_tokens": 7}),
+        )
+    )
+
+    assert response.status == "completed"
+    assert response.model == "gpt-5.5"
+    assert [item.type for item in response.output] == ["message", "message"]
+    assert response.output_text == "Hello world"
+    assert response.usage is not None
+    assert response.usage.input_tokens == 7
+
+
+def test_output_index_is_renumbered_rather_than_taken_from_the_block() -> None:
+    """The assembler's counter skips numbers, and the SDK's snapshot list cannot.
+
+    `CompletedBlock.index` advances for items the assembler later drops, so a delivered stream can carry blocks numbered 0 and 2. The SDK appends to `snapshot.output` and then indexes it by `output_index`; a gap is an IndexError, one frame after the block that skipped.
+    """
+    response = replay(
+        whole(
+            framer(),
+            [text_block(0, "first"), text_block(7, "second")],
+            Terminal(stop_reason="end_turn", seen=True),
+        )
+    )
+
+    assert len(response.output) == 2
+    assert response.output_text == "firstsecond"
+
+
+def test_a_tool_call_keeps_upstreams_call_id_and_its_arguments() -> None:
+    block = CompletedBlock(
+        index=0,
+        kind=TOOL_USE,
+        payload={"type": TOOL_USE, "id": "call_abc", "name": "get_weather", "input": {"city": "SF"}},
+    )
+    response = replay(
+        whole(framer(), [block], Terminal(stop_reason="tool_use", seen=True))
+    )
+
+    # The item types are a union; which member this is, is the assertion below.
+    call = cast(Any, response.output[0])
+    assert call.type == "function_call"
+    assert call.call_id == "call_abc"
+    assert call.name == "get_weather"
+    assert orjson.loads(call.arguments) == {"city": "SF"}
+    # `tool_use` is this proxy's word for a finished turn, not one Responses has.
+    assert response.status == "completed"
+
+
+def test_unparsable_tool_arguments_are_handed_back_as_they_arrived() -> None:
+    """The assembler wraps arguments it could not parse. The wrapper must not reach the client."""
+    block = CompletedBlock(
+        index=0,
+        kind=TOOL_USE,
+        payload={
+            "type": TOOL_USE,
+            "id": "call_x",
+            "name": "f",
+            "input": {"__raw": '{"city": "SF'},
+        },
+    )
+    frames = whole(framer(), [block], Terminal(stop_reason="tool_use", seen=True))
+    response = replay(frames)
+
+    assert cast(Any, response.output[0]).arguments == '{"city": "SF'
+
+
+def test_reasoning_carries_encrypted_content_only_when_there_was_some() -> None:
+    """An empty carrier is still a non-empty marker string, and emitting it would be a fabricated token."""
+    from app.pipeline.translation_driver.reasoning_carrier import encode_reasoning_carrier
+
+    with_content = CompletedBlock(
+        index=0,
+        kind=THINKING,
+        payload={
+            "type": THINKING,
+            THINKING: "thought about it",
+            "signature": encode_reasoning_carrier("sealed-bytes"),
+        },
+    )
+    without = CompletedBlock(
+        index=1,
+        kind=THINKING,
+        payload={"type": THINKING, THINKING: "", "signature": encode_reasoning_carrier(None)},
+    )
+    response = replay(
+        whole(framer(), [with_content, without], Terminal(stop_reason="end_turn", seen=True))
+    )
+
+    first, second = cast(Any, response.output[0]), cast(Any, response.output[1])
+    assert first.type == "reasoning"
+    assert [part.text for part in first.summary] == ["thought about it"]
+    assert first.encrypted_content == "sealed-bytes"
+    assert second.summary == []
+    assert second.encrypted_content is None
+
+
+def test_a_truncated_turn_completes_as_incomplete_with_upstreams_reason() -> None:
+    """Truncation ends the stream with `response.incomplete`, which is not a success and is not framed as one.
+
+    The SDK only ever fills its final response from `response.completed`, so a caller that asks for one here gets nothing — exactly what it gets from real upstream, which ends a truncated turn the same way. What a caller can read is the event itself, so that is what is asserted.
+    """
+    frames = whole(
+        framer(),
+        [text_block(0, "half a sen")],
+        Terminal(stop_reason="max_tokens", seen=True, upstream_usage={"output_tokens": 64}),
+    )
+    state: ResponseStreamState[Any] = ResponseStreamState(input_tools=[], text_format=omit)
+    for frame in frames:
+        state.handle_event(as_event(frame))
+
+    assert events_of(tuple(frames))[-1] == "response.incomplete"
+    last = orjson.loads(frames[-1].decode().split("data: ", 1)[1])["response"]
+    assert last["status"] == "incomplete"
+    assert last["incomplete_details"] == {"reason": "max_output_tokens"}
+    assert last["usage"] == {"output_tokens": 64}
+    # The text that did arrive is still in the output, because half an answer beats none.
+    assert last["output"][0]["content"][0]["text"] == "half a sen"
+
+
+def test_usage_is_absent_rather_than_zero_when_upstream_never_sent_it() -> None:
+    """A usage of zero is a measurement. Not having one is not."""
+    response = replay(
+        whole(framer(), [text_block(0, "hi")], Terminal(stop_reason="end_turn", seen=True))
+    )
+
+    assert response.usage is None
+
+
+def test_the_preamble_is_the_first_thing_and_names_the_response() -> None:
+    """`response.created` first is the SDK's one hard requirement; everything else it tolerates."""
+    frames = whole(framer(), [text_block(0, "hi")], Terminal(stop_reason="end_turn", seen=True))
+
+    assert events_of(tuple(frames))[:2] == ["response.created", "response.in_progress"]
+    assert events_of(tuple(frames))[-1] == "response.completed"
+
+
+def test_sequence_numbers_never_repeat_and_never_go_backwards() -> None:
+    frames = whole(
+        framer(),
+        [text_block(0, "a"), text_block(1, "b")],
+        Terminal(stop_reason="end_turn", seen=True),
+    )
+    numbers = [
+        orjson.loads(frame.decode().split("data: ", 1)[1])["sequence_number"] for frame in frames
+    ]
+
+    assert numbers == list(range(len(numbers)))
+
+
+def test_the_keepalive_is_a_comment_no_parser_turns_into_an_event() -> None:
+    one = framer()
+    frames = list(one.preamble())
+    frames.append(one.keepalive())
+    frames.extend(one.block(text_block(0, "hi")))
+    frames.extend(one.terminal(Terminal(stop_reason="end_turn", seen=True)))
+
+    response = replay(frames)
+    assert response.output_text == "hi"
+    # And it did not consume a sequence number, which would make the numbering lie.
+    assert one.keepalive() == b": ping\n\n"
+
+
+def test_an_error_frame_says_what_went_wrong_without_claiming_a_response() -> None:
+    """`response.failed` would have to carry a whole `Response`, and mid-stream there is not one to give."""
+    one = framer()
+    frames = list(one.preamble())
+    frames.extend(one.block(text_block(0, "partial")))
+    frames.append(
+        one.error(
+            error_type="api_error",
+            message="Responses stream ended before a successful terminal event",
+            code="incomplete_responses_stream",
+        )
+    )
+
+    assert events_of(tuple(frames))[-1] == "error"
+    payload = orjson.loads(frames[-1].decode().split("data: ", 1)[1])
+    assert payload["code"] == "incomplete_responses_stream"
+    assert payload["message"].startswith("api_error: ")
+
+    # The stream stopped without completing, which is exactly what the client must not be able to read as success.
+    with pytest.raises(AssertionError):
+        replay(frames)
