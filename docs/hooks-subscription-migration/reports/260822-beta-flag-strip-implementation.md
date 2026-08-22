@@ -144,6 +144,28 @@ flag 名比对两侧都 `strip()` + `casefold()`；保留下来的 flag 用客�
 
 `request_headers` 的合并改成**大小写不敏感**：任何与代理自有头同名（不论拼法）的转发头直接丢弃，不进 dict。此前 Anthropic 腿的安全依赖 SDK 内部的 `Headers.__setitem__` 折叠，不是任何代码声明的不变式——参考实现的注释专门写了「The guard is NOT the spread order」。新测试 `test_a_forwarded_header_never_travels_beside_the_one_it_collides_with` 断言在 `get_list()` 上而非 `headers[...]`，因为按名查找会折叠大小写、根本看不见第二条。
 
+#### 用户随后更新了权威文档，两条新增当时已经满足
+
+2026-08-22，本节实现落地之后，用户在 `message-format-reshape.md` 的直连黑名单上加了两处：
+
+```diff
+-直连路径的黑名单有：
++直连路径的黑名单有：（大小写不敏感）
+ - `Forwarded` chain
+-- `Cookie` `X-Api-Key`
++- `Authrization` `Cookie` `X-Api-Key`
+```
+
+也就是**追认了本节 §「照字面实现会造成一个凭据缺陷」提出的两点**：`Authorization` 必须进黑名单，且匹配大小写不敏感。两条在写下时就已成立，无需改代码：
+
+- `authorization` 本来就在 `REQUEST_FLOOR` 里（那张表照抄参考实现的 `SENSITIVE_DENYLIST`，本来就比文档那份摘要长）。
+- `forward_request_headers` 的三道判据——`REQUEST_FLOOR`、core key、`x-github-` / `openai-` 前缀——以及 `_matches` 的 fnmatch，**全部**两侧 `lower()`；`request_headers` 的合并也已在本切片改成大小写不敏感。
+- 实测（`PYTHONPATH=src uv run python` 探针）：`Authorization` / `AUTHORIZATION` / `AuThOrIzAtIoN` 三种拼法连同文档列的其余每一项都被剥掉，翻译腿零转发。
+
+新增回归测试 `test_the_blacklist_is_case_insensitive_for_every_entry_the_document_names` 把这条钉住——文档此前没明说大小写，所以也没有测试覆盖过混合拼法。变异验证：把 floor 的比对改成大小写敏感，该测试变红。
+
+> ⚠️ **文档里那个词拼错了**：写的是 `Authrization`（少一个 `o`）。当作真实头名它匹配不到任何东西——实测 `forwarded_client_headers({"Authrization": "x"})` 原样保留它。实现没有从文档逐字读这份清单（读的是 `REQUEST_FLOOR`），所以行为不受影响；但**任何照文档字面实现的人会在这里留一个洞**。已提请用户；`docs/.human-controlled/` 归用户亲笔，未代改。
+
 ### 2.5 断链与过时 docstring（裁决 3 + 6）
 
 - `docs/.human-controlled/message-format-sanitize.md` 已被用户改名为 `message-format-reshape.md`。指向旧名的 8 处引用全部改指新名：`anthropic_request_hook.py` 4、`pipeline_app.py` 1、`test_pipeline_app.py` 1、`test_attribution_stripping.py` 2。改完 `rg` 全仓无残留，并跑了正样本对照确认那条 grep 命令本身能命中新名字。
