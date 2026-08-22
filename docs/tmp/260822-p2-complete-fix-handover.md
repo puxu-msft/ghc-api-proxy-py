@@ -90,7 +90,20 @@ raise torn
 
 本分支的这一支落在那份 diff 没有触碰的区域，可直接取走折进重写。**唯一的硬要求是：这一支必须在 `_hand_over` 之前。**
 
-## 8. 评审状态
+## 8. 评审状态（两轮都已闭环）
 
-- GPT 异源评审：`260822-review-complete-fix-gpt.md`，判 `needs-fix`（生产代码正确、夹具纠正正确，测试分辨力不足）。**该意见已按 §5 闭环并复测。**
-- Opus 评审：派出后约 40 分钟未落盘，本文写作时仍在进行。若其结论落地且与本文冲突，以复跑证据为准。
+- **GPT 异源评审**：`260822-review-complete-fix-gpt.md`，判 `needs-fix`（生产代码正确、夹具纠正正确，测试分辨力不足）。**已按 §5 闭环并复测。**
+- **Opus 评审**：`260822-review-complete-fix-opus.md`，判 `needs-fix`，6 条发现（3 major / 3 minor），8 个受控变异，1 条必做。处置如下：
+
+| 发现 | 处置 |
+|---|---|
+| 「把守卫改软」—— **证伪** | 无需动作。它做了新旧夹具四格对照：在「修复前 + 破坏『客户端已持有内容不得 replay』规则」那一格里旧夹具**绿**、新夹具**红**，即旧测试**从来没守住过它 docstring 声称的规则**（靠 `COMPLETE is not REPLAY` 抛异常才绿）。改夹具是改硬不是改软 |
+| 位置载重性 | 已实测确认：合并进 `if torn is None` 会让三条 client-deadline 测试全红 |
+| **A（major）**：完成行对上游 reset 完全沉默 | **登记为待裁项**，`../upstream/retry-and-continuation/deferred.md` 第 12 条。归交付侧重写切片——留痕需要一条 `_deliver` → `_StreamAccounting` 的新通道 |
+| **B（major）**：`COMPLETE` 成孤儿件 | `1479025` 加回指注释，并补进 `deferred.md` 第 7 条。**不删**，**不**移进 verdict switch |
+| **C（major，必做）**：deadline 与 `terminal.seen` 次序未裁 | **已写进 `deferred.md` 第 11 条**，含三条 deadline 测试夹具已无法区分两种情形这一事实 |
+| **D（minor）**：注释「true by construction」说满了 | `1479025` 已收回到能证明的范围 |
+| **E（minor）**：`break` 吃掉所有 `Exception` | 仅存档，评审自判可达性低 |
+| **F（minor）**：`until-tool-use` 未参数化 | 不做。评审用探针实测三档逐帧一致，自己也不建议补 |
+
+**一条我要认的流程问题**：评审进行中我在同一棵树上改了测试文件并提交（11:42 改、11:47 提交 `c86712d`），导致该评审前半程的两条发现失效，还把我的变异检验误判成测试 flake、为此花掉约 5 分钟和 12 次重跑。**下次在同一棵树上边改边评，派发时应给固定的 commit 或 stash 引用，而不是「未提交的 `git diff`」。**

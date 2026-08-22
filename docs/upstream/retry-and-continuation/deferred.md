@@ -68,6 +68,10 @@ response 层有信号（`response.incomplete`），但它晚于 item 关闭到�
 
 **用户 2026-08-21 裁决：只删代理内续写机制，其他未接线的功能不要动。** 所以除 `continuation.*` 外一律保留。其中 `delayed_commit.py` 的形状恰好对得上第 2 条将来可能需要的延迟提交，`streamReplay.max_retries`（默认 100）在 D 组接线后会生效。
 
+**2026-08-22 补一条同族的新情况**：`decide_stream_ending()` 本身已接线（`8f654b4`），但 `c86712d` 之后它的 **`COMPLETE` 那一格从唯一生产调用点不可达**——`_deliver` 必须在问它之前先答完「上游说完了没有」，否则一个 `normalize_upstream_error` 不认识的异常（裸 `h2.ProtocolError`）会让完整回复照样被丢。异源评审实测：把该分支改坏，unit+int 1589 条里只有它自己的单测变红。
+
+按上述裁决**不删**，`1479025` 已在该分支加了回指注释。待裁的是形状：要么让这个纯函数只裁「未完成流」（去掉 `terminal_seen` 参数与 `COMPLETE`），要么重塑参数使调用者能在异常分类之前问出完整 verdict。**不要**改成在 verdict switch 里处理 `COMPLETE`——那条路对上述异常根本到不了。
+
 ### 8. 生命周期所有权：一处缺口与三条未接线的通道
 
 来源：`reports/260822-lifecycle-ownership-audit.md`（异源审计，11 条发现，10 个实测探针）。裁断是**不需要全面重写**——上游侧的模型自洽且实测有效，客户端侧只有一个原语且被安在最早结束的所有者上，修法是加法。
