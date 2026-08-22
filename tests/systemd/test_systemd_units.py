@@ -25,8 +25,6 @@ from app.graceful_timeout import (
     SYSTEMD_STOP_TIMEOUT_MARGIN_SECONDS,
     SYSTEMD_STOP_TIMEOUT_SECONDS,
 )
-from app.history.sqlite.writer import HistoryWriter
-from app.history.types import HistoryEntry, ModelRef
 from app.tokenization.state_store import TokenizationStateStore
 
 SYSTEMD_DIR = Path(__file__).parents[2] / "contrib" / "systemd"
@@ -202,6 +200,10 @@ async def test_service_permissions_restrict_real_state_writers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The unit's `StateDirectoryMode` and `UMask` reach the files a real writer leaves behind.
+
+    This used to exercise two writers. The other one was `app.history.sqlite.writer`, which asserted `0o600` on `history.db` and its `-wal` / `-shm` siblings; it moved to `src/.archived/` on 2026-08-22 with the rest of the chain no entry point reaches, and the assertion went with it rather than being kept against code this process no longer runs. What is left is the writer the service actually uses, and the invariant is unchanged: the temporary file an atomic replace goes through must not be readable by anyone else either, which is what `temporary_modes` pins.
+    """
     service = read_unit("ghc-api-proxy.service")
     directory_mode = int(service["Service"]["StateDirectoryMode"], 8)
     service_umask = int(service["Service"]["UMask"], 8)
@@ -218,52 +220,17 @@ async def test_service_permissions_restrict_real_state_writers(
     previous_umask = os.umask(service_umask)
     try:
         state_directory.mkdir(mode=directory_mode)
-        history_path = state_directory / "history.db"
-        writer = HistoryWriter(history_path)
-        await writer.start()
-        try:
-            await writer.submit(
-                HistoryEntry(
-                    id="permissions-smoke",
-                    session_id="session",
-                    agent_id="main",
-                    started_at=1,
-                    ended_at=2,
-                    endpoint="anthropic-messages",
-                    status="completed",
-                    model=ModelRef("claude-test", "claude-test"),
-                    request_payload={"message": "permissions"},
-                )
-            )
-            await writer.flush()
-            sqlite_paths = [
-                history_path,
-                history_path.with_name("history.db-wal"),
-                history_path.with_name("history.db-shm"),
-            ]
-            assert all(path.is_file() for path in sqlite_paths)
-            sqlite_modes = {
-                path.name: stat.S_IMODE(path.stat().st_mode) for path in sqlite_paths
-            }
-
-            tokenization_path = state_directory / "tokenization.json"
-            tokenization = TokenizationStateStore(tokenization_path)
-            tokenization.calibration.learn("anthropic", "claude-test", 10, 12)
-            assert await tokenization.flush() is True
-            assert tokenization_path.is_file()
-            tokenization_mode = stat.S_IMODE(tokenization_path.stat().st_mode)
-        finally:
-            await writer.close()
+        tokenization_path = state_directory / "tokenization.json"
+        tokenization = TokenizationStateStore(tokenization_path)
+        tokenization.calibration.learn("anthropic", "claude-test", 10, 12)
+        assert await tokenization.flush() is True
+        assert tokenization_path.is_file()
+        tokenization_mode = stat.S_IMODE(tokenization_path.stat().st_mode)
     finally:
         os.umask(previous_umask)
 
     assert stat.S_IMODE(state_directory.stat().st_mode) == 0o700
     assert temporary_modes == [0o600]
-    assert sqlite_modes == {
-        "history.db": 0o600,
-        "history.db-wal": 0o600,
-        "history.db-shm": 0o600,
-    }
     assert tokenization_mode == 0o600
 
 

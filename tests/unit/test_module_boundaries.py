@@ -31,27 +31,52 @@ def reachable_from(module: str) -> set[str]:
     return set(json.loads(finished.stdout.strip().splitlines()[-1]))
 
 
-def test_the_new_chain_does_not_drag_in_the_existing_one() -> None:
-    """The single fact that makes the reorganisation checkable rather than a matter of belief."""
-    new_chain = reachable_from("app.server.pipeline_app")
+_ARCHIVED = (
+    "app.routes",
+    "app.hooks",
+    "app.openai",
+    "app.history",
+    "app.delivery",
+    "app.context",
+    "app.deps",
+    "app.runtime",
+    "app.shutdown",
+    "app.server.app_factory",
+    "app.pipeline.executor",
+)
 
-    assert "app.server.app_factory" not in new_chain
-    assert "app.pipeline.executor" not in new_chain
-    assert not [name for name in new_chain if name.startswith("app.routes")]
+_RESOLVES = (
+    "import importlib.util, json, sys;"
+    "print(json.dumps([n for n in sys.argv[1:] if importlib.util.find_spec(n) is not None]))"
+)
+
+
+def test_the_archived_chain_is_not_importable_at_all() -> None:
+    """What used to be "the new chain does not drag in the old one", now that there is only one.
+
+    Until 2026-08-22 both chains lived under `src/app/` and this asserted that importing the live one did not pull the other in. The archived chain moved to `src/.archived/`, which is not on the path and whose leading dot keeps it out of the packaging and the type checker, so that weaker statement is now trivially true — and would stay true if someone copied a module back.
+
+    The assertion is the stronger one instead: these names do not resolve. It fails the moment a module returns to `src/app/` under an archived name, **including as an empty PEP 420 namespace package** — which is exactly what an emptied directory left behind, and what kept `import app.routes` succeeding after every one of its files had gone.
+    """
+    finished = subprocess.run(
+        [sys.executable, "-c", _RESOLVES, *_ARCHIVED],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(finished.stdout.strip().splitlines()[-1]) == []
 
 
 def test_the_typed_kernel_is_a_leaf() -> None:
     """The content model is what every codec meets at, so it must not import any of them.
 
     A kernel that reached back into a protocol would make "wire shapes live at the codec boundary" unenforceable: the boundary would run through the middle of the kernel.
+
+    `app.anthropic` and `app.upstream` are the two that still exist; `app.openai` and `app.routes` went to the archive on 2026-08-22 and the test above covers them.
     """
     kernel = reachable_from("app.pipeline.translation_driver.content")
 
-    assert not [
-        name
-        for name in kernel
-        if name.startswith(("app.anthropic", "app.openai", "app.upstream", "app.routes"))
-    ]
+    assert not [name for name in kernel if name.startswith(("app.anthropic", "app.upstream"))]
 
 
 def test_pipeline_exceptions_stay_importable_without_the_pipeline() -> None:

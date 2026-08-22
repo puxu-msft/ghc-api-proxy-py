@@ -64,6 +64,8 @@ testpaths = ["tests"]
 [tool.ruff]
 target-version = "py314"
 line-length = 100
+# `src/.archived` and `tests/.archived` hold the chain no entry point reaches, moved out of the source tree on 2026-08-22. pytest skips dot-directories and pyright excludes `**/.*` by default; ruff does not, so it is named here. Linting code that is kept as a record rather than run would only produce findings nobody can act on.
+extend-exclude = ["src/.archived", "tests/.archived"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
