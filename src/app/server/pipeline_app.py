@@ -10,6 +10,7 @@ import sys
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import ExitStack, aclosing, asynccontextmanager
+from copy import deepcopy
 from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any, cast
@@ -60,7 +61,12 @@ from app.server.handler import (
 )
 from app.server.inbound import ROUTES, InboundRequestError, build_context, route_for_path
 from app.server.ops_routes import router as ops_router
-from app.streaming.deadline import StreamDeadlineError, with_client_deadline_at, with_deadline_at
+from app.streaming.deadline import (
+    ClientDeadlineError,
+    StreamDeadlineError,
+    with_client_deadline_at,
+    with_deadline_at,
+)
 from app.streaming.idle_timeout import StreamIdleTimeoutError, with_idle_timeout
 
 CHAIN_STATE_KEY = "pipeline_chain"
@@ -452,8 +458,12 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
         trace.absorb_losses(context)
         return JSONResponse(counted)
 
+    # Taken before anything can rewrite it, because a replayed attempt has to send what the client sent. `handle` translates in place — `context.payload = translated`, and `fix_anthropic_request` edits the dict it is given — so a second pass over the same context would translate an already-translated body. Measured 2026-08-22 on the primary path: the second attempt went out as `{"model": "gpt-model", "input": [], "stream": true}` and the client was answered from an empty prompt with a clean 200.
+    #
+    # Deep, because the rewrites reach into nested structures. Cheap enough at once per request, and once more per replay, which is rare by construction.
+    inbound_payload = deepcopy(context.payload)
     try:
-        handled = await handle_bounded(chain, context, _routed)
+        handled = await handle_bounded(chain, context, _routed, deadline_at=client_deadline_at)
     except Exception as error:
         trace.model = context.resolved_model
         trace.attempts = context.attempt_count
@@ -515,8 +525,10 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
 
             The taxonomy lives here rather than in delivery, which has no business importing it. A transport tear and either of the two guards over the body are all failures another attempt could answer; a conversion error, a refusal and anything this proxy raised about itself are not. `normalize_upstream_error` is the same mapping the driver's own retries are decided by, so a body that tears is judged exactly as a connection that tears before the headers.
 
-            The client deadline is deliberately absent: delivery answers that one before it ever asks, because a replay cannot help a request that has run out of time.
+            The client deadline is named and refused rather than left out. Delivery does answer it before ever asking — but only once the response has opened, and that condition is not this function's to rely on. It held today because `normalize_upstream_error` happens not to recognise the type, which is a coincidence and not a design.
             """
+            if isinstance(error, ClientDeadlineError):
+                return None
             if isinstance(error, StreamIdleTimeoutError | StreamDeadlineError):
                 return RetryReason.NETWORK
             known = normalize_upstream_error(error)
@@ -529,6 +541,8 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
 
             The trace keeps the first attempt's connection identity and byte count. A reader comparing `upstream_conn` across failures is looking for the connection that broke, and overwriting it with the one that recovered erases the thing being looked for.
             """
+            # What the client sent, not what the last attempt turned it into. See `inbound_payload`.
+            context.payload = deepcopy(inbound_payload)
             try:
                 again = await handle(chain, context, _routed)
             except Exception:
@@ -539,20 +553,27 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
                 return None
             fresh_attempt = again.context.current_attempt
             fresh_assembler = assembler_for(again)
+            # Otherwise the one surface that can show a replay happened stays at 1, and a request the proxy quietly answered twice reads exactly like one it answered once.
+            trace.attempts = again.context.attempt_count
+            active.set_attempts(trace.request_id, again.context.attempt_count)
             # The accounting reads the terminal off whichever assembler is current, and after this the current one is this.
             accounting.assembler = fresh_assembler
             body = with_idle_timeout(
                 reopened.aiter_bytes(), timeout_seconds=stream_idle_seconds(chain)
             )
             return (
-                _counted_upstream(
-                    with_deadline_at(
-                        body,
-                        deadline_at=fresh_attempt.deadline_at if fresh_attempt is not None else None,
+                # The client's deadline wraps this one too. It is the same instant, so this is still one clock — but it is a *different iterator*, and the guard the first attempt was wrapped in went out with the stream it was wrapping. Without this a replayed body is bounded only by the attempt's own deadline: measured 2026-08-22, a 2-second client deadline let a replayed body run 6.1 seconds.
+                with_client_deadline_at(
+                    _counted_upstream(
+                        with_deadline_at(
+                            body,
+                            deadline_at=fresh_attempt.deadline_at if fresh_attempt is not None else None,
+                        ),
+                        chain,
+                        trace.request_id,
+                        trace,
                     ),
-                    chain,
-                    trace.request_id,
-                    trace,
+                    deadline_at=client_deadline_at,
                 ),
                 fresh_assembler,
                 delivery_buffer(chain),

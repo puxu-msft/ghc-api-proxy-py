@@ -266,10 +266,10 @@ async def _deliver(
             torn = error
         if torn is None:
             break
-        if isinstance(torn, ClientDeadlineError) and client_has_bytes.is_set():
+        if isinstance(torn, ClientDeadlineError):
             # The one ending that gets said out loud, and it is answered before anything else — a replay cannot help a request that has run out of time, and asking whether one is legal would put this branch behind a `replay` nobody has to configure.
             #
-            # By the time this can fire the response has been open for a while and its status is long settled, so an SSE error frame is the only way left to tell the client what happened. Without it this ending is byte-for-byte the same as upstream tearing, which is what an audit measured on 2026-08-22; ruled the same day.
+            # Not gated on a block having been delivered. `client-side-block-delivery.md` puts the condition at the response headers, and by the time this generator runs those have gone out: the response is built with upstream's own status once its headers arrive, and the framework sends `http.response.start` before pulling a chunk. Gating on a delivered block instead meant `full` and `until-tool-use` — which deliver nothing until the stream ends — timed out having sent the client zero bytes and no frame at all.
             #
             # Deliberately only this one. The other endings that reach here remain indistinguishable from each other on the wire, and widening the frame to cover them is a separate question with its own answer to find. Nothing is flushed first either: what is buffered but undelivered would make the size of this ending depend on the buffering policy, while the ending itself is a clock event.
             yield error_frame(

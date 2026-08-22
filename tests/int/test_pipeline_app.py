@@ -2644,3 +2644,138 @@ def test_a_torn_stream_the_client_never_saw_is_replayed_end_to_end() -> None:
     assert events[-1] == "message_stop"
     assert "kept" in response.text
     assert len(calls) == 2
+
+
+def test_a_replay_on_the_translation_leg_sends_the_conversation_again() -> None:
+    """The primary path, where a replayed attempt has to send what the *client* sent.
+
+    `handle` translates in place — it assigns the translated body back onto the context and edits the dict it was given — so a second pass over the same context translated an already-translated body. Measured before the fix: the second attempt went out as `{"model": "gpt-model", "input": [], "stream": true}`, and the client was answered from an empty prompt with a clean 200. The earlier end-to-end replay test uses `claude-model`, which needs no translation, so it was structurally unable to see this.
+
+    Asserted on the second request's bytes rather than on the reply, because that reply looked entirely healthy.
+    """
+    calls: list[int] = []
+
+    async def torn_body() -> AsyncIterator[bytes]:
+        yield (
+            b'event: response.output_item.added\n'
+            b'data: {"output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[],'
+            b'"encrypted_content":"sealed"}}\n\n'
+        )
+        raise httpx2.RemoteProtocolError("peer closed the connection")
+
+    def upstream(request: httpx2.Request) -> httpx2.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx2.Response(
+                200, content=torn_body(), headers={"content-type": "text/event-stream"}
+            )
+        return httpx2.Response(
+            200,
+            content=responses_sse_upstream(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client, seen = make_client(upstream)
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "gpt-model",
+            "messages": [{"role": "user", "content": "remember me"}],
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(calls) == 2
+    replayed = orjson.loads(seen[-1].content)
+    # The conversation is still there. An empty `input` is the whole defect.
+    assert replayed["input"], replayed
+    assert "remember me" in seen[-1].content.decode()
+    # And it was translated exactly once: a second pass would have wrapped the Responses body again.
+    assert "messages" not in replayed
+
+
+def test_a_replay_is_reported_on_the_request_line() -> None:
+    """A request the proxy quietly answered twice must not read like one it answered once.
+
+    The attempt count is the one surface that can show it, and the handler writes it when it returns — which for a streaming request is before any replay has happened. Refreshed by the reopen for that reason.
+
+    Read off the record the app actually wrote, so a count that never reached disk fails here.
+    """
+    calls: list[int] = []
+
+    async def torn_body() -> AsyncIterator[bytes]:
+        yield (
+            b'event: content_block_start\ndata: {"index":0,"content_block":{"type":"text"}}\n\n'
+        )
+        raise httpx2.RemoteProtocolError("peer closed the connection")
+
+    def upstream(request: httpx2.Request) -> httpx2.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx2.Response(
+                200, content=torn_body(), headers={"content-type": "text/event-stream"}
+            )
+        return httpx2.Response(
+            200,
+            content=sse_upstream("kept"),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client, _ = make_client(upstream)
+    response = client.post(
+        "/v1/messages",
+        json={"model": "claude-model", "messages": [], "stream": True},
+    )
+
+    assert response.status_code == 200
+    assert len(calls) == 2
+    assert _records()[-1]["attempts"] == 2
+
+
+def test_the_client_deadline_survives_a_replay() -> None:
+    """The guard the first attempt was wrapped in goes out with the stream it was wrapping.
+
+    Delivery swaps the byte stream when it replaces a torn attempt, so a replacement that is not wrapped again is bounded only by its own attempt's deadline. Measured before the fix: a two-second client deadline let a replayed body run for six.
+
+    The upstream deadline is left far above the client one, so what stops this can only be the client's.
+    """
+    calls: list[int] = []
+
+    async def torn_body() -> AsyncIterator[bytes]:
+        yield (
+            b'event: content_block_start\ndata: {"index":0,"content_block":{"type":"text"}}\n\n'
+        )
+        raise httpx2.RemoteProtocolError("peer closed the connection")
+
+    async def endless_body() -> AsyncIterator[bytes]:
+        while True:
+            await asyncio.sleep(0.05)
+            yield b": ping\n\n"
+
+    def upstream(request: httpx2.Request) -> httpx2.Response:
+        calls.append(1)
+        content = torn_body() if len(calls) == 1 else endless_body()
+        return httpx2.Response(
+            200, content=content, headers={"content-type": "text/event-stream"}
+        )
+
+    client, _ = make_client(
+        upstream,
+        overrides={
+            "client_delivery": {"client_request_deadline": 2},
+            "upstream_request_timeouts": {"upstream_request_deadline": 60},
+        },
+    )
+
+    started = time.monotonic()
+    response = client.post(
+        "/v1/messages",
+        json={"model": "claude-model", "messages": [], "stream": True},
+    )
+    body = response.text
+    elapsed = time.monotonic() - started
+
+    assert calls == [1, 1], "the torn attempt was not replaced"
+    assert elapsed < 5.0, f"the replayed body outlived the client deadline: {elapsed:.1f}s"
+    assert "client_deadline_exceeded" in body

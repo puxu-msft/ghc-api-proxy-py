@@ -335,19 +335,38 @@ def _countable(payload: Mapping[str, Any]) -> MessagesRequest:
         raise CountTokensRequestError(f"not a countable Messages body: {error}") from error
 
 
-async def handle_bounded(chain: Chain, context: RequestContext, on_routed: Callable[[RequestContext], None] | None = None) -> HandledRequest:
-    """Run a request under the client deadline.
+async def handle_bounded(
+    chain: Chain,
+    context: RequestContext,
+    on_routed: Callable[[RequestContext], None] | None = None,
+    *,
+    deadline_at: float | None = None,
+) -> HandledRequest:
+    """Run a request under the client deadline, up to the point upstream's response headers arrive.
 
-    Measured from admission and never reset by a retry, so it bounds the whole client-visible
-    operation rather than any one attempt.
+    It bounds the whole client-visible operation rather than any one attempt, and is never reset by
+    a retry — but only a caller that admitted the request knows when the request began. `deadline_at`
+    is how that caller says so; the fallback starts the clock here, which is later than admission by
+    however long the body took to read and the request took to be routed. Measured 2026-08-22: with
+    the clock started here, a body read, a JSON parse and a queue wait were all outside it.
+
+    This covers a non-streaming reply whole, because its body is read before `handle` returns. A
+    streaming body is not: `await send` returns at the response headers, so what arrives afterwards
+    is bounded by the same instant enforced a second time, over the body, in `pipeline_app`.
     """
     deadline = chain.config.client_delivery.client_request_deadline
     if deadline <= 0:
         return await handle(chain, context, on_routed)
+    bound = (
+        asyncio.timeout_at(deadline_at)
+        if deadline_at is not None
+        else asyncio.timeout(deadline)
+    )
     try:
-        async with asyncio.timeout(deadline):
+        async with bound:
             return await handle(chain, context, on_routed)
     except TimeoutError as error:
+        # 504 rather than 408, ruled 2026-08-22 and written into `client-side-block-delivery.md`.
         raise UpstreamTimeout(f"client request exceeded {deadline}s") from error
 
 

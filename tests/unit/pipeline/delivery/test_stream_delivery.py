@@ -1048,3 +1048,26 @@ async def test_an_upstream_tear_is_still_raised_rather_than_framed() -> None:
                 model="claude-model",
             )
         ]
+
+
+@pytest.mark.parametrize("policy", ["full", "until-tool-use"])
+@pytest.mark.asyncio
+async def test_a_held_back_policy_still_hears_the_client_deadline(policy: str) -> None:
+    """The frame is owed once the response headers are out, not once a block has been delivered.
+
+    `client-side-block-delivery.md` puts the condition at the headers, and those go out before this generator runs. Gated on a delivered block instead, these two policies — which hold every block until the stream ends — timed out having sent the client zero bytes and no frame at all.
+    """
+    chunks = [
+        chunk
+        async for chunk in stream_delivery(
+            _hits_the_client_deadline_after(anthropic_stream("one")),
+            AnthropicAssembler(),
+            buffer=BlockBuffer(policy=policy),  # pyright: ignore[reportArgumentType]
+            settings=StreamSettings(sse_ping_interval=0),
+            message_id="msg_1",
+            model="claude-model",
+        )
+    ]
+    assert b"client_deadline_exceeded" in b"".join(chunks)
+    # The buffered block is dropped rather than flushed first, which is what the document says to do.
+    assert b'"text":"one"' not in b"".join(chunks)
