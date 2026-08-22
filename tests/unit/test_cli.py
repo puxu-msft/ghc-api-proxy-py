@@ -69,7 +69,6 @@ def test_start_subcommand_exposes_bootstrap_options() -> None:
         "--fd",
         "--graceful-timeout",
         "--verbose",
-        "--account-type",
         "--rate-limit",
         "--history",
         "--github-token",
@@ -81,6 +80,10 @@ def test_start_subcommand_exposes_bootstrap_options() -> None:
     # Removed 2026-08-22. It set a field name that had not existed since the rename in a8a7f87, so it silently did nothing; the base URL now comes from `model_providers.<name>.api_base_url` or from probing the subscription.
     # Asserted absent so it cannot drift back in unnoticed.
     assert "--ghc-api-base-url" not in result.stdout
+    # Removed 2026-08-22 for the same reason and in the same round: it fed the legacy `AppSettings`,
+    # which the served chain does not read, so the served chain could never see it. Its sibling was
+    # deleted first and leaving this one behind made the pair inconsistent rather than principled.
+    assert "--account-type" not in result.stdout
 
 
 def test_auth_and_login_are_aliases() -> None:

@@ -1,5 +1,4 @@
 from collections.abc import Callable
-from enum import StrEnum
 from functools import partial
 from pathlib import Path
 from typing import Annotated
@@ -22,13 +21,6 @@ from app.observability.logging import get_logger, setup_logging
 from app.server.composition import build_chain, build_http_client, resolve_provider_base_urls
 from app.server.pipeline_app import create_pipeline_app
 from app.server.tls import resolve_tls_material
-
-
-class AccountType(StrEnum):
-    INDIVIDUAL = "individual"
-    BUSINESS = "business"
-    ENTERPRISE = "enterprise"
-
 
 app = typer.Typer(
     name="ghc-api-proxy",
@@ -74,7 +66,6 @@ _NO_HOME_IN_SPEC: dict[str, str] = {
     "--manual": "config.example.yaml has no `approval` section",
     "--rate-limit/--no-rate-limit": "the spec's `reactive_rate_limiter` has no `enabled` field",
     "--github-token": "the spec takes `model_providers.<name>.github_token_file`, not a token",
-    "--account-type": "config.example.yaml has no `auth` section",
 }
 
 
@@ -90,7 +81,6 @@ def _load_spec_config(
     manual: bool,
     rate_limit: bool | None,
     github_token: str | None,
-    account_type: AccountType | None,
 ) -> tuple[ProxyConfig, list[tuple[str, str]]]:
     """Read the spec's config and report which CLI options it cannot carry."""
     server: dict[str, object] = {}
@@ -116,7 +106,6 @@ def _load_spec_config(
         "--manual": manual,
         "--rate-limit/--no-rate-limit": rate_limit is not None,
         "--github-token": github_token is not None,
-        "--account-type": account_type is not None,
     }
     for option, was_given in supplied.items():
         if was_given:
@@ -215,10 +204,6 @@ def start(
         typer.Option("--graceful-timeout", min=1),
     ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
-    account_type: Annotated[
-        AccountType | None,
-        typer.Option("--account-type", "-a", case_sensitive=False),
-    ] = None,
     rate_limit: Annotated[bool | None, typer.Option("--rate-limit/--no-rate-limit")] = None,
     history: Annotated[bool | None, typer.Option("--history/--no-history")] = None,
     github_token: Annotated[str | None, typer.Option("--github-token", "-g")] = None,
@@ -247,8 +232,6 @@ def start(
         cli_overrides["host"] = host
     if graceful_timeout is not None:
         cli_overrides["shutdown"] = {"graceful_timeout": graceful_timeout}
-    if account_type is not None:
-        auth_overrides["account_type"] = account_type.value
     if rate_limit is not None:
         cli_overrides["rate_limiter"] = {"enabled": rate_limit}
     if history is not None:
@@ -283,7 +266,6 @@ def start(
             manual=manual,
             rate_limit=rate_limit,
             github_token=github_token,
-            account_type=account_type,
         )
         run(partial(serve_inherited, proxy_config, fd, proxy_from_cli=proxy is not None))
         return
@@ -299,7 +281,6 @@ def start(
         manual=manual,
         rate_limit=rate_limit,
         github_token=github_token,
-        account_type=account_type,
     )
     for option, reason in inactive:
         # Said out loud rather than dropped: an option that is accepted and then ignored is worse
