@@ -81,7 +81,7 @@ response 层有信号（`response.incomplete`），但它晚于 item 关闭到�
 
 **方法学副产品，比上面的数字更耐用**：该调查用 `origin.stage == "upstream-capture"` 取代了 `from_history.py:107` 的「取变换图的根」判据，从而**把 2026-07-17 那个已知盲区从静默污染变成显式排除**（那 366 个 operation 的帧全标 `recovery-projection`，整体落在分母外），并用这个独立判据逐库复现了 `260821-upstream-termination-reasons.md` 的数字（28904/4、30322/16、1222/0、3903/0，逐值相等）。**同样的改进适用于 `tests/int/recorded/from_history.py:107`，未动，待裁。**
 
-### 5之二. 新造的一条：干净 EOF 收尾把「没测过」写成了零
+### 5之二. ~~新造的一条：干净 EOF 收尾把「没测过」写成了零~~ —— 登记过头，已收窄（2026-08-22）
 
 **由上面这条细化引入（主仓 `78be0d4`），实现者自查发现，一手实测确凿。**
 
@@ -89,7 +89,15 @@ response 层有信号（`response.incomplete`），但它晚于 item 关闭到�
 
 **为什么这不是小事**：本仓已经在同一形状上打过三次——`Terminal.stop_reason` 的空默认（「upstream 说 end_turn」与「upstream 什么都没说」曾是同一个值）、`Terminal.upstream_usage` 坚持用 `None` 而非 `{}`（「零是一次测量，没测过不是」，原话在该字段注释里）、`_snapshot_upstream_connection` 宁可缺键也不写 `""`。这条是同一个错误在第四处出现，而且是本项目自己新造的。
 
-**改法未定**：省略该键会动到**正常路径**的 wire shape（正常路径传的 `terminal.usage` 可能是空 dict，现有 `or` 会把空 dict 也变成零），且 Anthropic 的 `message_delta` 里 `usage` 是否必填、客户端对缺键的反应都未核。已点名交给独立评审。
+**独立评审复核后收窄了这条，理由比原登记强，采纳**（`reports/260822-review-clean-eof-refinement.md` §1）：
+
+1. **协议把 `output_tokens` 定成必填**（anthropic SDK 1.0.0，`MessageDeltaUsage.output_tokens` 无默认），零是唯一合法占位。「诚实」在这条线上**没有合法拼写**——省略该键是把一个记录问题换成一个协议违规。
+2. 「零是一次测量，没测过不是」这条判据保护的资产是**我们自己的记录**，而这条链路上本方记录是干净的：`Terminal.usage` 保持 `{}` 不是零，`request_log` 用 `if "output_tokens" in usage` 判断。**这正是它与另外三例的实质差别**——那三例污染的都是本方记录。
+3. 想「不说谎」的操作员已有出口：`unterminated_stream_stop_reason` 留空 → 回到 error 帧，根本不发 `message_delta`。
+
+**所以改的是可见性不是 wire**（主仓 `de5a1ac`）：把 `or {"output_tokens": 0}` 从 `terminal_frames` 的默认参数提到两个调用点，与 `or "end_turn"` 一样显式；`usage` 参数改成必填，好让下一个调用方**必须说出它放的是什么**。
+
+**顺带一条不要将来被顺手「修齐」的**：两条腿对同一个「没测过」口径不同——`ResponsesFramer` 落 wire 上的 `null`（其 schema 允许），`AnthropicFramer` 落零（其 schema 不允许缺席）。**这个不对称是有原因的**，已写进代码注释。
 
 ### 5之三. 741 条 `NGHTTP2_CANCEL` 的腿间不对称（不属本题，登记以免丢）
 
