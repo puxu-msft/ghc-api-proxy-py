@@ -17,7 +17,13 @@ from app.model_provider import (
     UnknownModel,
 )
 from app.pipeline.model_resolution import ModelResolution, resolve_model
-from app.pipeline.request import ENDPOINT_FORMATS, FORMAT_ENDPOINTS, WireFormat
+from app.pipeline.request import (
+    ENDPOINT_FORMATS,
+    FORMAT_ENDPOINTS,
+    RequestContext,
+    WireFormat,
+)
+from app.pipeline.translation_driver.semantic import TranslationTarget
 
 FORMAT_SEPARATOR = "@"
 
@@ -126,3 +132,23 @@ def _first_supported(
             return endpoint
     # Endpoints exist but none has a driver, e.g. only ws:/responses.
     raise EndpointNotSupported(provider_name, model_id, ",".join(sorted(endpoints)))
+
+
+def apply_route(context: RequestContext, route: Route) -> None:
+    context.resolved_model = route.model_id
+    context.provider_name = route.provider_name
+    context.endpoint = route.endpoint
+    context.target_format = route.target_format
+    context.translation_required = route.translation_required
+    context.route_reason = route.reason
+
+
+def translation_target(provider: ModelProvider, model_id: str) -> TranslationTarget:
+    """What the resolved model can do, in the form a writer reads.
+
+    Built from the same descriptor routing used, so the capabilities a translation renders against are the ones the request will actually be sent to. A model the provider does not describe yields the default — no published efforts — which makes a writer decline to render rather than guess, exactly as an absent catalog field does.
+    """
+    descriptor = provider.describe(model_id)
+    if descriptor is None:
+        return TranslationTarget(model_id=model_id)
+    return TranslationTarget(model_id=model_id, reasoning_efforts=descriptor.reasoning_efforts)

@@ -1,8 +1,8 @@
-"""The request handler: inbound context to upstream response.
+"""The single owner of a request's life: route it, send it, and hand back what came.
 
-Order follows `docs/.human-controlled/request-pipeline.md`: route first, translate only when the formats differ, then drive.
+Split out of `app.server.handler` on 2026-08-22. `docs/.human-controlled/request-pipeline.md` gives `app.pipeline` the driving and `app.server` the inbound HTTP surface, and the driving had grown inside the surface. `D-ARCH = B` says the same thing from the other side: one owner for approval, attempt, retry, transport exchange and finalize, and nothing else starting a second request lifecycle.
 
-Streaming is served by block-level delivery: the upstream response is read whole, its blocks are put through the buffer, and only complete blocks are framed as Anthropic SSE. Nothing reaches the client while a block is still forming.
+What is *not* here is deliberate. Rendering a failure as HTTP belongs to the edge (`app.server.http_errors`), reading a finished reply back in the client's vocabulary is `app.pipeline.reply`, and choosing a framer or an assembler is `app.pipeline.delivery_policy`.
 """
 
 import asyncio
@@ -15,26 +15,16 @@ import httpx2
 from pydantic import ValidationError
 
 from app.core.chain import Chain
-from app.model_provider import ModelProvider, ProviderError
+from app.model_provider import ModelProvider
 from app.models.anthropic import MessagesRequest
 from app.observability.metrics import BETA_FLAGS_STRIPPED
 from app.pipeline.anthropic_request_hook import fix_anthropic_request
-from app.pipeline.count_tokens import CountTokensUnavailable, count_tokens
-from app.pipeline.delivery import BlockBuffer, CompletedBlock, DeliverySession
-from app.pipeline.delivery.assembling import BlockAssembler, ReplyDialect, Terminal
-from app.pipeline.delivery.formats.anthropic_messages import (
-    AnthropicAssembler,
-    AnthropicFramer,
-    terminal_from_anthropic,
-)
+from app.pipeline.count_tokens import count_tokens
 from app.pipeline.delivery.formats.anthropic_messages_synthetic_reply import (
     failed_search_body,
     failed_search_sse,
     query_from_request,
 )
-from app.pipeline.delivery.formats.openai_responses import ResponsesAssembler, ResponsesFramer
-from app.pipeline.delivery.framing import OutboundFramer
-from app.pipeline.delivery.stream import StreamSettings
 from app.pipeline.direct_driver import (
     DRIVERS,
     EVENT_ATTEMPT_PREPARE,
@@ -42,20 +32,14 @@ from app.pipeline.direct_driver import (
     LedgerBudget,
 )
 from app.pipeline.exceptions import (
-    PipelineAbort,
-    UpstreamRateLimit,
-    UpstreamRejected,
     UpstreamTimeout,
 )
 from app.pipeline.request import RequestContext, WireFormat
 from app.pipeline.request_headers import apply_path_header_policy, strip_denied_beta_flags
 from app.pipeline.retry import RetryLedger
-from app.pipeline.routing import Route, RoutingError, decide_route
+from app.pipeline.routing import Route, apply_route, decide_route, translation_target
 from app.pipeline.subscribers.counting import COUNTING_ONLY
-from app.pipeline.translation_driver.registry import TranslatorNotFound
 from app.pipeline.translation_driver.semantic import (
-    TranslationRefused,
-    TranslationTarget,
     WebSearchNotExecutable,
 )
 from app.tokenization.estimators import estimate_anthropic_input, estimate_responses_input
@@ -75,15 +59,14 @@ class HandledRequest:
     def response(self) -> httpx2.Response | None:
         return self.outcome.response
 
+def ledger_for(context: RequestContext, chain: Chain) -> RetryLedger:
+    """One budget for the whole client request, built on first use and kept on the request.
 
-def apply_route(context: RequestContext, route: Route) -> None:
-    context.resolved_model = route.model_id
-    context.provider_name = route.provider_name
-    context.endpoint = route.endpoint
-    context.target_format = route.target_format
-    context.translation_required = route.translation_required
-    context.route_reason = route.reason
-
+    It used to be built per call, which was the same thing while a request meant one call. It is not any more: delivery opens further attempts after a torn body, long after the driver that opened the first has returned, and each of those would have arrived with a full budget of its own — `max_total` would have bounded a call rather than a request, which is not what it is named for.
+    """
+    if context.retry_ledger is None:
+        context.retry_ledger = RetryLedger(chain.config.upstream_request_retry)
+    return context.retry_ledger
 
 def shape_request(
     chain: Chain,
@@ -127,28 +110,6 @@ def shape_request(
         fix_anthropic_request(context.payload, chain.config.hook_fix_anthropic_request)
     return provider, route
 
-
-def translation_target(provider: ModelProvider, model_id: str) -> TranslationTarget:
-    """What the resolved model can do, in the form a writer reads.
-
-    Built from the same descriptor routing used, so the capabilities a translation renders against are the ones the request will actually be sent to. A model the provider does not describe yields the default — no published efforts — which makes a writer decline to render rather than guess, exactly as an absent catalog field does.
-    """
-    descriptor = provider.describe(model_id)
-    if descriptor is None:
-        return TranslationTarget(model_id=model_id)
-    return TranslationTarget(model_id=model_id, reasoning_efforts=descriptor.reasoning_efforts)
-
-
-def _ledger_for(context: RequestContext, chain: Chain) -> RetryLedger:
-    """One budget for the whole client request, built on first use and kept on the request.
-
-    It used to be built per call, which was the same thing while a request meant one call. It is not any more: delivery opens further attempts after a torn body, long after the driver that opened the first has returned, and each of those would have arrived with a full budget of its own — `max_total` would have bounded a call rather than a request, which is not what it is named for.
-    """
-    if context.retry_ledger is None:
-        context.retry_ledger = RetryLedger(chain.config.upstream_request_retry)
-    return context.retry_ledger
-
-
 async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[RequestContext], None] | None = None) -> HandledRequest:
     provider, route = shape_request(chain, context, on_routed)
 
@@ -174,7 +135,7 @@ async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[Req
         provider,
         chain.subscribers,
         budget=LedgerBudget(
-            _ledger_for(context, chain),
+            ledger_for(context, chain),
             # Read at each refusal rather than sampled now: a drain that begins while this request is in flight has to stop the *next* attempt, and a value captured here would say "running" for the whole request.
             draining=lambda: chain.active_requests.draining,
         ),
@@ -192,7 +153,6 @@ async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[Req
             synthesized=True,
         )
     return HandledRequest(context=context, route=route, outcome=outcome)
-
 
 def _answered_failed_search(context: RequestContext, route: Route) -> DriverOutcome:
     """A reply this proxy writes, saying the search was attempted and did not run.
@@ -221,10 +181,8 @@ def _answered_failed_search(context: RequestContext, route: Route) -> DriverOutc
         attempts=context.attempt_count,
     )
 
-
 class CountTokensRequestError(ValueError):
     """The body cannot be read as an Anthropic Messages request, so there is nothing to count."""
-
 
 async def handle_count_tokens(chain: Chain, context: RequestContext) -> dict[str, Any]:
     """Serve `/v1/messages/count_tokens` through the provider chain the spec names.
@@ -329,7 +287,6 @@ async def handle_count_tokens(chain: Chain, context: RequestContext) -> dict[str
         return {"input_tokens": result.tokens}
     return {"input_tokens": result.tokens, "estimated": True}
 
-
 def _countable(payload: Mapping[str, Any]) -> MessagesRequest:
     """Read the body as a Messages request for estimation only.
 
@@ -341,7 +298,6 @@ def _countable(payload: Mapping[str, Any]) -> MessagesRequest:
         return MessagesRequest.model_validate(countable)
     except ValidationError as error:
         raise CountTokensRequestError(f"not a countable Messages body: {error}") from error
-
 
 async def handle_bounded(
     chain: Chain,
@@ -370,239 +326,3 @@ async def handle_bounded(
     except TimeoutError as error:
         # 504 rather than 408, ruled 2026-08-22 and written into `client-side-block-delivery.md`.
         raise UpstreamTimeout(f"client request exceeded {deadline}s") from error
-
-
-def error_status(error: BaseException) -> int:
-    """Map a failure to the status the client should see.
-
-    A routing or capability refusal means the request is unserviceable, not that upstream failed.
-    It must not be reported as a bad gateway.
-
-    Nor must an upstream answer be flattened into one. A client that gets 429 can back off and a client that gets 400 can fix its body; both learn nothing from a 502, which says the proxy itself broke. Everything used to land on that 502 because the SDK's exceptions were outside the closed set — see `app.model_provider.ghc_client.errors`.
-
-    An abort that ended a retry sequence is read through to the failure that ended it, for the same reason: running out of retries does not change what upstream said, and the client can still act on it. Without this every retryable failure that spent its budget arrived as that same 502.
-    """
-    if isinstance(error, PipelineAbort) and error.cause is not None:
-        return error_status(error.cause)
-    if isinstance(
-        error,
-        ProviderError
-        | RoutingError
-        | TranslatorNotFound
-        | CountTokensRequestError
-        | TranslationRefused,
-    ):
-        return 400
-    if isinstance(error, CountTokensUnavailable):
-        # Every configured counter failed. Reachable when `providers` names only `ghc`;
-        # with `local` in the list the estimate has no way to fail on the normal path.
-        return 503
-    if isinstance(error, UpstreamRateLimit):
-        return 429
-    if isinstance(error, UpstreamTimeout):
-        return 504
-    if isinstance(error, UpstreamRejected):
-        # Upstream's own verdict on the request. Passed through so the client is told what is wrong with what it sent, rather than that some gateway failed.
-        return error.status_code
-    return 502
-
-
-def error_headers(error: BaseException) -> dict[str, str]:
-    """The few upstream headers a client needs in order to act on a failure.
-
-    `Retry-After` only: it is the one that changes what a well-behaved client does next. An allowlist rather than forwarding upstream's set, which carries its own framing headers.
-
-    Read through an abort to the failure that ended the retries, so a rate limit that exhausted its budget still tells the client how long to wait.
-    """
-    if isinstance(error, PipelineAbort) and error.cause is not None:
-        return error_headers(error.cause)
-    if isinstance(error, UpstreamRateLimit) and error.retry_after is not None:
-        return {"retry-after": str(int(error.retry_after))}
-    return {}
-
-
-def error_body(error: BaseException) -> dict[str, Any]:
-    body: dict[str, Any] = {"type": type(error).__name__, "message": str(error)}
-    # The abort's own message already names both the budget that ran out and the failure that ran it out, so it stays as the message. What is read off the cause instead are the structured fields — upstream's code, the field it named, its own body — which say what the prose cannot be parsed for.
-    detail: BaseException = (
-        error.cause if isinstance(error, PipelineAbort) and error.cause is not None else error
-    )
-    code = getattr(detail, "code", "")
-    if isinstance(code, str) and code:
-        # A stable identifier for what went wrong, where the class name is only a category and the message is prose. A client that wants to react to one particular refusal — rather than matching on English that may be reworded — has this to key on.
-        body["code"] = code
-    field_path = getattr(detail, "field_path", "")
-    if isinstance(field_path, str) and field_path:
-        # Which part of the request caused it. A refusal that names the field is one the client can act on; one that does not leaves it to guess which of its tools was the problem.
-        body["field_path"] = field_path
-    upstream = getattr(detail, "body", "")
-    if isinstance(upstream, str) and upstream:
-        # What upstream actually said. Named as upstream's rather than merged, so nothing reads our wrapper's wording as though the model had produced it.
-        body["upstream"] = upstream
-    return {"error": body}
-
-
-def response_payload(chain: Chain, handled: HandledRequest, body: dict[str, Any]) -> dict[str, Any]:
-    """Bring an upstream body back to the format the client asked in.
-
-    Without this a translated route answers in the upstream's shape, which the client did not ask for and cannot parse.
-    """
-    route = handled.route
-    if handled.synthesized:
-        # Already in the client's format: this proxy wrote it, in the shape the client asked in.
-        # Translating it would carry an Anthropic body through the Responses reader, which has no `server_tool_use` to read and would hand back the reply with its two blocks missing.
-        return body
-    if not route.translation_required:
-        return body
-    translated, semantic = chain.translators.translate_response(
-        body,
-        source=route.target_format,
-        target=route.inbound_format,
-    )
-    if not semantic.conversion.lossless:
-        handled.context.extras["response_conversion_losses"] = list(semantic.conversion.losses)
-    return translated
-
-
-def blocks_from_anthropic(body: dict[str, Any]) -> list[CompletedBlock]:
-    """Read the content blocks out of an Anthropic-shaped response body."""
-    content = body.get("content")
-    if not isinstance(content, list):
-        return []
-    blocks: list[CompletedBlock] = []
-    for index, raw in enumerate(cast(list[object], content)):
-        if not isinstance(raw, dict):
-            continue
-        payload = cast(dict[str, Any], raw)
-        blocks.append(
-            CompletedBlock(index=index, kind=str(payload.get("type", "")), payload=payload)
-        )
-    return blocks
-
-
-def deliver_blocks(chain: Chain, blocks: list[CompletedBlock]) -> list[CompletedBlock]:
-    """Put blocks through the buffer so the configured policy and cap apply.
-
-    Every block here is already complete, so what the buffer decides is ordering and holding, not whether a block is whole.
-    """
-    delivery = chain.config.client_delivery
-    session = DeliverySession(
-        buffer=BlockBuffer(
-            policy=delivery.buffering_policy,
-            cap_bytes=delivery.buffer_cap_bytes,
-        )
-    )
-    committed: list[CompletedBlock] = []
-    for block in blocks:
-        committed.extend(session.offer(block))
-    committed.extend(session.finish())
-    return committed
-
-
-def dialect_for(handled: HandledRequest) -> ReplyDialect:
-    """Which upstream's vocabulary this route's reply came back in.
-
-    Taken from the route rather than from the reply, because a buffered reply is read back after translation and by then looks Anthropic-shaped whatever answered it. The route is the only thing that still knows which upstream was actually spoken to, which is what the console line reports.
-
-    Two dialects, not one per wire format: anything that is not a Responses upstream is assembled as Anthropic — `assembler_for` below dispatches on this very answer — so the pair describes what the code actually does rather than the whole `WireFormat` taxonomy. A third upstream would need its own assembler before it could need its own words.
-    """
-    if handled.synthesized:
-        # We wrote it, and we write Anthropic. The route below is about who *would* have answered.
-        return ReplyDialect.ANTHROPIC
-    if handled.route.target_format is WireFormat.OPENAI_RESPONSES:
-        return ReplyDialect.RESPONSES
-    return ReplyDialect.ANTHROPIC
-
-
-def reply_summary(handled: HandledRequest, payload: dict[str, Any]) -> Terminal | None:
-    """Summarise a buffered reply for the console line, or `None` when this route's shape cannot be read.
-
-    `payload` is in the **client's** format by the time it gets here, which is what decides whether it can be read at all: only an Anthropic-shaped body has the `content` blocks the reader wants. An inbound `/responses` or `/chat/completions` request keeps its own shape end to end, and reading one of those as Anthropic finds nothing — silently, since an absent `content` is indistinguishable from a reply that had none.
-
-    Returning `None` rather than an empty summary is the honest answer: those lines carry no reasoning or tool fields today, which is a gap worth closing but not one to paper over with a record that says a reply had nothing in it. See `.dev/docs/tui/deferred.md`.
-
-    The dialect is separate and comes from the route, because which *words* to use is about the upstream leg while which *reader* to use is about the client leg, and on a translated route those are two different formats.
-    """
-    if handled.route.inbound_format is not WireFormat.ANTHROPIC_MESSAGES:
-        return None
-    return terminal_from_anthropic(payload, blocks_from_anthropic(payload), dialect=dialect_for(handled))
-
-
-def delivers_blocks(handled: HandledRequest) -> bool:
-    """Whether this route's *client* leg can be written a block at a time.
-
-    Block delivery needs both halves: an assembler that finds a block's end in the upstream's events, and a framer that writes one in the client's. `assembler_for` above answers the first. This answers the second, and the two are separate questions — a route can have an assembler and still have nowhere to write what it produces.
-
-    Chat Completions has no framer. Its boundaries are inside `choices[].delta` and nothing here reads them, so a request whose client leg speaks that dialect is delivered whole by `one_shot_delivery`. Ruled 2026-08-22, after a measurement: those bytes were reaching `AnthropicAssembler`, matching none of its event names, and leaving the client a 200 with an empty body.
-
-    A synthesized reply is written by us and we write Anthropic, so it is deliverable whatever the route was — the same carve-out, for the same reason, that `dialect_for` makes.
-    """
-    if handled.synthesized:
-        return True
-    return handled.route.inbound_format is not WireFormat.OPENAI_CHAT_COMPLETIONS
-
-
-def framer_for(
-    handled: HandledRequest,
-    chain: Chain,
-    *,
-    message_id: str,
-    model: str,
-) -> OutboundFramer | None:
-    """The outbound framer for this route's client leg, or `None` when it has none and the stream is delivered whole.
-
-    Selected on `route.inbound_format` — the protocol the client asked in — and deliberately **not** on `dialect_for`, which answers which upstream replied. On the main product path those are different formats: a request arriving as Anthropic Messages and served by a Responses upstream has to be answered in Anthropic Messages, and framing it by the upstream's dialect would start sending `response.*` events to a client that cannot read them.
-
-    The pairing with `assembler_for` is the point. That one is chosen by the upstream leg, this one by the client leg, and a translated route uses one of each.
-    """
-    if not delivers_blocks(handled):
-        # One-shot delivery forwards upstream's bytes unchanged, so it is only correct while upstream is answering in the protocol the client asked in. Today that holds by construction — the translator registry has no Chat Completions leg, so such a route cannot be built — and this says so out loud rather than relying on it. Registering one would otherwise send a Responses body to a Chat Completions client, verbatim and silently.
-        if handled.route.translation_required:
-            raise ValueError(
-                f"no framer for {handled.route.inbound_format.value}, and its bytes were translated "
-                f"from {handled.route.target_format.value}, so they cannot be forwarded unchanged"
-            )
-        return None
-    if handled.route.inbound_format is WireFormat.OPENAI_RESPONSES:
-        return ResponsesFramer(response_id=message_id, model=model)
-    return AnthropicFramer(
-        message_id=message_id,
-        model=model,
-        # Read here rather than carried in on a delivery setting. It says how a thinking block's signature is spelled, which is a fact about the Anthropic wire format and therefore the
-        # Anthropic framer's business; routing it through `StreamSettings` put a framing knob in the one object that is meant to name no format at all.
-        signature_compat=chain.config.hook_fix_anthropic_sse.thinking.content_block_start_compat,
-    )
-
-
-def assembler_for(
-    handled: HandledRequest, *, hand_over_stop_reasons: frozenset[str] = frozenset({"max_tokens"})
-) -> BlockAssembler:
-    """Pick the assembler matching the upstream this route actually used.
-
-    Dispatched on `dialect_for` rather than testing the wire format again, so the streaming and buffered paths cannot come to disagree about which upstream answered — one branch decides it for both.
-    """
-    if dialect_for(handled) is ReplyDialect.RESPONSES:
-        # Only this one can see whether upstream cut an item short, and so only this one needs to know which endings will hand the turn back.
-        return ResponsesAssembler(hand_over_stop_reasons=hand_over_stop_reasons)
-    return AnthropicAssembler()
-
-
-def stream_settings(chain: Chain) -> StreamSettings:
-    delivery = chain.config.client_delivery
-    return StreamSettings(sse_ping_interval=delivery.sse_ping_interval)
-
-
-def delivery_buffer(chain: Chain) -> BlockBuffer:
-    delivery = chain.config.client_delivery
-    return BlockBuffer(
-        policy=delivery.buffering_policy,
-        cap_bytes=delivery.buffer_cap_bytes,
-    )
-
-
-def stream_idle_seconds(chain: Chain) -> int:
-    """How long upstream may go quiet mid-stream before the attempt is given up on.
-
-    0 disables it, and 0 is the bundled default. The frozen invariant is never to false-kill legitimate thinking — silence on a live connection has no provably safe bound, so an operator setting this is choosing bounded waiting rather than accepting a default.
-    """
-    return chain.config.upstream_request_timeouts.stream_idle

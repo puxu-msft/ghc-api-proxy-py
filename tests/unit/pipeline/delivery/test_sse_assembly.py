@@ -19,7 +19,7 @@ from app.pipeline.delivery.formats.anthropic_messages import (
 )
 from app.pipeline.delivery.formats.openai_responses import ResponsesAssembler
 from app.pipeline.delivery.sse_source import SseEvent, parse_frame, read_events
-from app.server.handler import blocks_from_anthropic
+from app.pipeline.reply import blocks_from_anthropic
 
 
 def frame(event: str, data: dict[str, Any], *, space: bool = True) -> bytes:

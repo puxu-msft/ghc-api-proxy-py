@@ -19,7 +19,7 @@ from app.pipeline.exceptions import (
     classify,
 )
 from app.pipeline.retry import RetryReason, reason_for
-from app.server.handler import error_body, error_headers, error_status
+from app.server.http_errors import error_body, error_headers, error_status
 
 
 def status_error(

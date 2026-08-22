@@ -37,8 +37,8 @@ from app.observability.request_log_file import request_logs_dir
 from app.observability.request_trace import REQUEST_LOGGER, RequestTrace
 from app.pipeline.delivery.formats.anthropic_messages import AnthropicAssembler, AnthropicFramer
 from app.pipeline.delivery.stream import stream_delivery
+from app.pipeline.delivery_policy import delivery_buffer, stream_settings
 from app.server.composition import build_chain
-from app.server.handler import delivery_buffer, stream_settings
 from app.server.pipeline_app import (
     CHAIN_STATE_KEY,
     _AccountedStreamingResponse,  # pyright: ignore[reportPrivateUsage]

@@ -15,6 +15,7 @@ from app.model_provider import EndpointNotSupported, ModelDescriptor, ModelEndpo
 from app.models.anthropic import MessagesRequest
 from app.pipeline.direct_driver import AnthropicMessagesDriver, RetryBudget
 from app.pipeline.direct_driver.base import EVENT_ATTEMPT_PREPARE
+from app.pipeline.driver import handle_count_tokens
 from app.pipeline.events import SubscriberRegistry
 from app.pipeline.request import RequestContext, WireFormat
 from app.pipeline.subscribers import (
@@ -27,7 +28,6 @@ from app.pipeline.subscribers.counting import COUNTING_ONLY
 from app.pipeline.translation_driver.registry import TranslatorNotFound, default_registry
 from app.pipeline.translation_driver.semantic import TranslationRefused, WebSearchNotExecutable
 from app.server.composition import build_chain
-from app.server.handler import handle_count_tokens
 from app.tokenization.estimators import estimate_anthropic_input, estimate_responses_input
 
 EXPECTED_ON_ATTEMPT_PREPARE = (

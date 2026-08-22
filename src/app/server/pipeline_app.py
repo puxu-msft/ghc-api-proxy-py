@@ -50,26 +50,20 @@ from app.pipeline.delivery.stream import (
     one_shot_delivery,
     stream_delivery,
 )
+from app.pipeline.delivery_policy import (
+    assembler_for,
+    delivery_buffer,
+    framer_for,
+    stream_idle_seconds,
+    stream_settings,
+)
+from app.pipeline.driver import handle, handle_bounded, handle_count_tokens, ledger_for
+from app.pipeline.reply import reply_summary, response_payload
 from app.pipeline.request import RequestContext, WireFormat
 from app.pipeline.retry import RetryReason, reason_for
 from app.server.admission import InFlightLimit
 from app.server.composition import refresh_catalogs
-from app.server.handler import (
-    _ledger_for,  # pyright: ignore[reportPrivateUsage]
-    assembler_for,
-    delivery_buffer,
-    error_body,
-    error_headers,
-    error_status,
-    framer_for,
-    handle,
-    handle_bounded,
-    handle_count_tokens,
-    reply_summary,
-    response_payload,
-    stream_idle_seconds,
-    stream_settings,
-)
+from app.server.http_errors import error_body, error_headers, error_status
 from app.server.inbound import ROUTES, InboundRequestError, build_context, route_for_path
 from app.server.ops_routes import router as ops_router
 from app.streaming.deadline import (
@@ -513,7 +507,7 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
 
         replay = ReplaySupport(
             # Built by `handle` on the first attempt and kept on the request, so every attempt this reopens draws on the same `max_total` as the ones the driver opened.
-            ledger=_ledger_for(context, chain),
+            ledger=ledger_for(context, chain),
             eligible=_replay_reason,
             reopen=_reopen,
         )
