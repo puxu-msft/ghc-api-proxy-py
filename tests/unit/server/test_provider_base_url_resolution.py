@@ -148,9 +148,9 @@ async def test_a_refused_probe_is_raised_rather_than_defaulted(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A token that exists and an answer we could not read is a fault, not a vote for the individual host.
+    """A token GitHub refuses is a fault, not a vote for the individual host.
 
-    Falling back here would send an enterprise account's traffic to `api.githubcopilot.com` and say nothing, which is the failure mode this whole change exists to remove.
+    Every request that followed would be refused the same way, so this says it once at startup instead of once per request. Ruled 2026-08-22, together with the transport case below — the two are deliberately not the same answer.
     """
     monkeypatch.setenv(GITHUB_TOKEN_VARIABLE, "ghu_from_env")
     http_client = httpx2.AsyncClient(
@@ -162,3 +162,50 @@ async def test_a_refused_probe_is_raised_rather_than_defaulted(
             await resolve_provider_base_urls(config, http_client=http_client)
     finally:
         await http_client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [429, 500, 503])
+async def test_a_probe_github_could_not_answer_leaves_the_server_startable(
+    status: int,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A moment in GitHub's day must not stop this process from starting.
+
+    Under socket activation the old process has already handed its listener over, so refusing to start is an outage rather than a hold. Degrading is logged and is not silent in effect either: an enterprise account left on the individual host fails loudly on its first request.
+    """
+    monkeypatch.setenv(GITHUB_TOKEN_VARIABLE, "ghu_from_env")
+    http_client = httpx2.AsyncClient(
+        transport=httpx2.MockTransport(lambda _: httpx2.Response(status, json={"message": "later"}))
+    )
+    config = config_with("", tmp_path / "absent-token")
+    try:
+        resolved = await resolve_provider_base_urls(config, http_client=http_client)
+        chain = build_chain(resolved, http_client=http_client)
+    finally:
+        await http_client.aclose()
+
+    assert resolved.model_providers["ghc"].api_base_url == ""
+    assert provider_base_url(chain) == INDIVIDUAL
+
+
+@pytest.mark.asyncio
+async def test_a_probe_that_could_not_reach_github_leaves_the_server_startable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(GITHUB_TOKEN_VARIABLE, "ghu_from_env")
+
+    def unreachable(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("no route to host", request=request)
+
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(unreachable))
+    config = config_with("", tmp_path / "absent-token")
+    try:
+        resolved = await resolve_provider_base_urls(config, http_client=http_client)
+    finally:
+        await http_client.aclose()
+
+    assert resolved.model_providers["ghc"].api_base_url == ""
+

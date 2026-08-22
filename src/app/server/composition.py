@@ -60,6 +60,11 @@ from app.upstream.stream_cap import cap_streams_per_connection
 
 logger = logging.getLogger(__name__)
 
+# The two answers that mean the credentials are wrong rather than that GitHub was briefly unreachable. Ruled 2026-08-22: these stop the process, because a token GitHub refuses will be refused by every request that follows and failing at startup says so once instead of once per request. Everything else — a timeout, a reset, a 5xx, a 429 — is a moment in GitHub's day, and a proxy that will not start because of one is worse than a proxy that starts on the default host: under socket activation the old process has already handed over its listener, so refusing to start is an outage rather than a hold.
+#
+# Degrading is not silent. It is logged, and an enterprise account left on the individual host fails loudly on its first request rather than answering wrongly.
+_CREDENTIALS_REFUSED = frozenset({401, 403})
+
 @dataclass(frozen=True, slots=True)
 class TransportOptions:
     """What the transport settings mean for the outbound client.
@@ -379,9 +384,27 @@ async def resolve_provider_base_urls(
                 "provider %s: no GitHub token yet, so the subscription was not probed", name
             )
             continue
-        usage = await GitHubAccountClient(
-            http_client, auth_base_url=auth_base_url
-        ).get_copilot_usage(token)
+        try:
+            usage = await GitHubAccountClient(
+                http_client, auth_base_url=auth_base_url
+            ).get_copilot_usage(token)
+        except httpx2.HTTPStatusError as error:
+            if error.response.status_code in _CREDENTIALS_REFUSED:
+                raise
+            logger.warning(
+                "provider %s: the subscription probe answered %s, so its API base URL stays at the default",
+                name,
+                error.response.status_code,
+            )
+            continue
+        except httpx2.TransportError as error:
+            logger.warning(
+                "provider %s: the subscription probe could not reach %s (%s), so its API base URL stays at the default",
+                name,
+                auth_base_url,
+                error,
+            )
+            continue
         inferred = infer_account_type(usage)
         if inferred is None:
             # Ambiguous rather than absent: the account answered, and nothing it said named a plan this maps. Said out loud because the default that follows is a guess, and a guess nobody was told about is how the wrong host stays wrong.
