@@ -1,0 +1,70 @@
+# 客户端腿的格式与交付
+
+**这个主题管什么**：客户端用哪种协议问，回复就用哪种协议答——以及这件事在 `src/app/pipeline/delivery/` 里是怎么落地的。
+
+用户 2026-08-22 在这一片下了四条裁决 + 一条命名裁决，此前它们只活在提交信息里。本文是当前状态的权威；分项调查与评审报告在 `reports/`，它们是时点记录，不要拿来当现状对账。
+
+## 一、两条腿，两个契约
+
+一次请求有**两条腿**，它们是不同的格式，判定它们的函数也不同：
+
+| | 问的是什么 | 由谁回答 | 代码 |
+|---|---|---|---|
+| **上游腿** | 是哪个上游答的 | `dialect_for` → `assembler_for` | `server/handler.py` |
+| **客户端腿** | 客户端在哪种协议里问的 | `route.inbound_format` → `framer_for` | `server/handler.py` |
+
+**主产品路径上这两者不同**：请求以 Anthropic Messages 进来、由 Responses 上游服务，于是用 **Responses 的 assembler** 读、用 **Anthropic 的 framer** 写。
+
+> ⚠️ **成帧器绝不能按 `dialect_for` 选。** 那样会让主路径开始向 Claude Code 发 `response.*` 事件。这条有两条 int 测试守着，变异验证过：把 `framer_for` 换成 `dialect_for`，两条都变红。
+
+## 二、每种客户端腿现在怎么答
+
+| 入站格式 | 出站 | 依据 |
+|---|---|---|
+| Anthropic Messages | `AnthropicFramer`，块级 | 既有行为 |
+| OpenAI Responses | `ResponsesFramer`，块级 `response.*` | 用户 2026-08-22 裁决 |
+| OpenAI Chat Completions | **一次性交付**：整段缓冲后原样转发 | 用户 2026-08-22 裁决 |
+
+Chat Completions 走一次性交付的原因：它的块边界藏在 `choices[].delta` 里，本项目没有任何东西读它。在此之前那些字节进了 `AnthropicAssembler`，一个事件名都匹配不上，客户端拿到 **200 + 0 字节 + 没有错误帧**。用户裁定「先缓冲，边界解析留待未来」。
+
+`delivers_blocks` 判的就是「这条客户端腿有没有出站成帧器」；`framer_for` 返回 `None` 即走一次性交付。
+
+## 三、`ResponsesFramer` 的几个非显然处
+
+都是实测逼出来的，改动前先读理由：
+
+- **`output_index` 自己重编号**，不用 `CompletedBlock.index`。后者来自 assembler 的计数器，而它对被丢弃的 item 也会前进；SDK 直接按下标取 `snapshot.output`，空洞就是 `IndexError`。
+- **id 一律自铸，不转发上游的**。实测三份 Responses 流式录制：每个事件里的每个 id 字段两两互不相同（12/12、16/16、125/125），`response.id` 在 created/in_progress/completed 三处都不同。唯一必须原样转发的是 `function_call.call_id`——客户端要用它回填。
+- **usage 取 `Terminal.upstream_usage`**，不是 `Terminal.usage`。后者已经过 Anthropic 化转换（减掉缓存部分、丢弃 `reasoning_tokens`），反向再转一次是两次有损转换的复合。
+- **截断发 `response.incomplete`**，与 `response.completed` 互斥。SDK 只从后者填最终响应，所以截断的流拿不到 `get_final_response()`——真实上游也是这个行为。
+
+## 四、包的结构：通用 vs 特定格式
+
+用户 2026-08-22 裁定「应该平等、正确区分通用、特定格式的」，形状如下：
+
+```
+delivery/
+  blocks.py  sse_frame.py  sse_source.py    # 通用：块，与线信封（写/读）
+  assembling.py  framing.py                 # 通用：入站/出站两个契约
+  stream.py                                 # 通用：交付循环
+  formats/
+    anthropic_messages.py                   # 该格式的 assembler + framer
+    anthropic_messages_synthetic.py         # 该格式的合成回复
+    openai_responses.py                     # 该格式的 assembler + framer
+```
+
+规矩：**通用件不带格式名；只服务一种格式的东西一律以该格式为前缀。** 两个格式模块互不导入。
+
+改之前的三类错配（都已消除）：`SseFrame` 这个两边共用的线信封住在 Anthropic 模块里，逼得 Responses 从它导入；`assembler.py` 名字通用却混放两种实现；`synthetic.py` 名字通用却只写 Anthropic。另外 `"tool_use"` 曾在三处各定义一次，现在只在 `blocks.py`。
+
+## 五、这一片之外，同日的三条裁决
+
+- **base URL 只有两条路**：按订阅探测（`composition.resolve_provider_base_urls`），或在 `model_providers.<name>.api_base_url` 手写完整 URL。**不设 `account_type` 配置项**。已配置就不探测。
+- **探测失败**：401/403 上抛（凭据不对，后续每个请求都会被拒）；其余 HTTP 状态与传输类失败记 warning 后继续。理由是 socket activation 下旧进程已交出 listener，因一次 GitHub 抖动起不来是服务中断。
+- **copilot token 无后台刷新循环**，只有 `get_token()` 的懒刷新。原循环只从 legacy app factory 启动，在实际服务的链路上从未跑过。
+- `--ghc-api-base-url` 已删除——它因字段改名遗漏，写的是不存在的字段名，是静默空操作。
+
+## 目录
+
+- `deferred.md` — 本轮已知但未做的缺口与怪味
+- `reports/` — 分项调查、探针、评审的原件（时点记录）
