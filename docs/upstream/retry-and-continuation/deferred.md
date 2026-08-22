@@ -86,6 +86,18 @@ response 层有信号（`response.incomplete`），但它晚于 item 关闭到�
 
 **明确不做全面重写**，理由见报告第 6 题：上游侧「一个时刻两处施加 + 六层一致的关闭契约」已由实测支持（客户端断连时上游 `is_closed=True`，断连中途与首 chunk 前两种情形都验证过）。
 
+### 9. 一次性交付路径的结局判定不接线（同伴切片）
+
+`one_shot_accounting`（`pipeline_app.py:541`）构造时**不带 `assembler`**，而 `_StreamAccounting.finish()` 把整段结局判定包在 `if self.assembler is not None:` 里。于是走一次性交付的 chat-completions 流，**撕流与客户端断开一律记 `[ OK ] 200`**。
+
+来源：`reports/260822-review-e-group.md` M3。**归同伴的切片**（`2769a64`，2026-08-22 10:38），且他们仍在改该文件（`630f7f3`，11:09），故本主题登记不动手。
+
+### 10. 缺一个 schema → example 的反向检查
+
+`tests/unit/config/test_config_schema.py` 只查「`config.example.yaml` 里的键 schema 认不认」，**不查反向**——schema 新增的键有没有写进 example。`client_delivery.auto_retry_tool_call_full_name` 正是这次从这个方向漏掉的。
+
+补不补由用户裁决：它是一道守卫，而本项目对「把守卫接成阻断」有明确态度。
+
 ## 明确不做
 
 - **发真实请求向上游补证。** 用户 2026-08-21 明确禁止：只查历史，历史没有就保持悬念。调查报告里那条「最低成本补证是发个超长 prompt 触发 400」的建议**不采纳**。
