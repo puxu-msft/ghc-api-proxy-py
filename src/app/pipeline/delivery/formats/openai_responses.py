@@ -1,6 +1,6 @@
 """Rendering completed blocks as OpenAI Responses SSE frames.
 
-The mirror of `anthropic_sse`, for the other client leg. Same envelope — `event: <type>` then `data: <json>`, verified against `tests/int/cassettes/anthropic_to_responses_stream.json` — and the same promise: every frame describes a block that is already whole.
+The mirror of `anthropic_messages` beside it, for the other client leg. Same envelope — `event: <type>` then `data: <json>`, verified against `tests/int/cassettes/anthropic_to_responses_stream.json` — and the same promise: every frame describes a block that is already whole.
 
 **This is a reverse translation, and that is the thing to keep in mind when reading it.** `CompletedBlock` is defined as "one fully materialised *Anthropic* content block" (`blocks.py`), so by the time a block reaches here the Responses item it came from has already been mapped into Anthropic's vocabulary by `ResponsesAssembler`. Everything below maps it back. Two consequences are visible in the code and neither is a bug in this module:
 
@@ -56,7 +56,7 @@ def _json_arguments(value: object) -> str:
 class ResponsesFramer:
     """Writes one response's frames. Stateful, and one per request.
 
-    The state is the whole reason this is an object where `anthropic_sse` is a set of functions: a Responses stream carries a sequence number that never repeats, an output index that must not skip, and item ids that have to agree between the event opening an item and the one closing it — none of which a pure function per block could hold.
+    The state is the whole reason this is an object where the Anthropic framer is a thin wrapper over pure functions: a Responses stream carries a sequence number that never repeats, an output index that must not skip, and item ids that have to agree between the event opening an item and the one closing it — none of which a pure function per block could hold.
     """
 
     def __init__(self, *, response_id: str, model: str, created_at: float | None = None) -> None:
@@ -348,7 +348,11 @@ class ResponsesAssembler:
     A block therefore completes on `output_item.done`, not on the deltas that preceded it.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, hand_over_stop_reasons: frozenset[str] = frozenset({"max_tokens"})) -> None:
+        # Which endings will hand the turn back to the client, and so which ones may drop the block upstream cut short. One setting, because dropping content is only defensible when the client is handed a way to get it back.
+        self._hand_over_stop_reasons = hand_over_stop_reasons
+        # The block upstream cut short, held rather than emitted or discarded, because at the moment it closes this side does not yet know *why* the response is incomplete — that arrives on the terminal event. Exactly one item can ever be in here: upstream cuts the last one short and then stops.
+        self._cut_short: CompletedBlock | None = None
         self._drafts: dict[str, Draft] = {}
         self._order = 0
         self._terminal = Terminal(dialect=ReplyDialect.RESPONSES)
@@ -375,6 +379,11 @@ class ResponsesAssembler:
             return self._close(data)
         if kind in {"response.completed", "response.incomplete"}:
             self._read_terminal(kind, data)
+            # Now the reason is known, the held block can be answered. Kept when this ending will not hand the turn back — the client would otherwise lose a passage it cannot ask for again — and dropped when it will, because the next turn produces it whole.
+            held, self._cut_short = self._cut_short, None
+            if held is not None and self._terminal.stop_reason not in self._hand_over_stop_reasons:
+                self._terminal.record(held)
+                return (held,)
             return ()
         return ()
 
@@ -435,7 +444,7 @@ class ResponsesAssembler:
             # nothing; the alternative costs the turn's search.
             draft = Draft(index=self._order, kind=WEB_SEARCH_CALL, payload=dict(item))
             self._order += 1
-        if _upstream_cut_this_item_short(data) and self._terminal.blocks > 0:
+        cut_short = _upstream_cut_this_item_short(data) and self._terminal.blocks > 0
             # Upstream says on the closing event whether this item is whole: `status: "incomplete"` on the one it cut short, `"completed"` on the rest. Measured 15 times, four of them on a `function_call`, whose `arguments` are then truncated JSON.
             #
             # Dropped only when something whole came before it. Half a sentence is not what the client asked for and the next turn will produce it again — but half a sentence is still better than an empty answer, so the rule reverses when this is all there is. Ruled 2026-08-21.
