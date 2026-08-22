@@ -47,6 +47,39 @@
 | 前身 `copilot-api-js` 的 `max_tokens` 处理**只接在 Anthropic 直连腿**，Responses 腿的谓词零调用点；官方 `vscode-copilot-chat` 对被截断的 tool call 是静默丢弃 | 代码事实（八个参考仓） | `reports/260821-reference-projects-max-tokens.md` |
 | live 链路的重试**只存在于上游响应头到达之前**，无退避无 jitter；**读流中断零重试** | 代码事实 | `reports/260821-upstream-error-handling-survey.md` |
 
+## 本仓实际发出的 MCP 工具调用（给改 MCP server 那一侧看）
+
+MCP server 在另一个仓（插件 `ghc-api-proxy-helper`），本会话够不到那位同伴。**本节是本仓发出方的一手契约，从代码直读，是两侧对齐的依据**——发出方的实际字节即权威，`decisions.md` 第四节第 1 条的「待对齐」在这里给出取值。
+
+合成点 `src/app/server/pipeline_app.py` 的 `_hand_back`，发出的块：
+
+```json
+{
+  "type": "tool_use",
+  "id": "toolu_<uuid4 前 24 个 hex 字符>",
+  "name": "<配置项 upstream_request_retry.auto_retry_tool_call_full_name 的值>",
+  "input": {"num_messages": 0, "category": "…", "message": "…"}
+}
+```
+
+`name` 的默认值是 `mcp__plugin_ghc-api-proxy-helper_auto-retry__turn_interrupted`（`src/app/config/schema.py:189-191`）。**这个字符串对接收端是载重的**：Claude Code 对插件提供的 MCP server 命名成 `mcp__plugin_<插件名>_<server 名>__<工具名>`，所以那一侧必须把插件叫 `ghc-api-proxy-helper`、server 叫 `auto-retry`、工具叫 `turn_interrupted`，三段全对才匹配得上。三段里任一段不同，线上表现是**每次交接都走「工具未声明」那条路**——不报错、不拦截、块照发，客户端回一个 `No such tool available`，对话继续但续写机制静默失效。
+
+| 字段 | 取值 |
+|---|---|
+| `num_messages` | 客户端入站 body 的 `messages` 长度（`_client_message_count(inbound_payload)`）。**不是**上游请求的长度——Responses 腿上一条 Anthropic 消息会变成若干 item。非 list 时（含缺键）为 `0` |
+| `category` | 上游把这一轮截短、并非错误时：**就是那个 `stop_reason`**，默认配置下唯一可能的值是 **`max_tokens`**。是错误时：`network` / `upstream` / `auth` **三者之一** |
+| `message` | 非错误时是那个 `stop_reason`（与 `category` 同值）；错误时是 `str(error)` |
+
+**`num_messages` 该怎么读（本仓建议，仍待对齐）**：按「**同一数值重复出现**」判无进展，**不要**按「数值有没有增长」判。每次交接后客户端会 +2（一条 assistant 轮次 + 一条 tool result），但**并行子智能体与主会话共享同一个 MCP server 进程，调用会交错**——A 会话的 12 后面可能跟着 B 会话的 6，按「有没有增长」判会把 B 的正常调用误判成无进展而中止，反过来 A 的重复 12 也可能被 B 的数值掩盖而漏判。见 `decisions.md` 第四节第 3 条，那是本节写下时仍打开的待对齐项。
+
+三条会绊到人的：
+
+- **`category` 的错误取值经过重试分类器，不是对异常原地分类。** 一次传输撕裂原地分类是 `internal`（它不是 `OSError`），而重试路径叫它 `network`——走同一个映射是为了让两边对同一个事件说同一个词。
+- **`internal` 今天发不出来，但接收端仍应兜住它。** `_CATEGORY_FOR_REASON`（`pipeline_app.py:372-376`）确实有一个落 `internal` 的默认分支，但 `RetryReason` 只有三个成员且三个全在表里，而 `stream.py:325-327` 保证「带 error 走到合成」之前 `reason` 必非 `None`——所以那一格结构上不可达，**不要因为它出现在这张表里就以为线上见过**。它是防御性的：将来谁给 `RetryReason` 加了成员却忘了改表，才会真的发出 `internal`。
+- **`max_tokens` 是 Anthropic 的拼法，不会出现 `max_output_tokens`；而且把配置改成 `max_output_tokens` 也不会生效。** 上游 Responses 说的是后者，两条路径都在**门之前**就归一了（`src/app/pipeline/delivery/formats/openai_responses.py:513-515`、`src/app/pipeline/translation_driver/responses.py:125-126`），所以那个原始拼法压根活不到比较的那一步。异源评审的一手实测（含证伪对照：把 `hand_over_stop_reasons` 配成 `{"max_output_tokens"}`，合成一次都没触发）见 `reports/260822-review-mcp-contract-and-deadline-order.md` F6/F11。
+
+**工具未声明时只告警不拦截**：客户端没在 `tools` 里声明这个名字，本仓打一条 `auto_retry_tool_not_declared` 警告日志，**照发不误**。用户 2026-08-21 裁决，人写权威原文在 `docs/.human-controlled/upstream-retry-and-continuation.md:37`。
+
 ## 相邻主题
 
 - [`../h2-goaway/`](../h2-goaway/) —— GOAWAY 打掉在飞流的机理诊断，已收口。它的「三条路的裁决」欠账由本主题接手。

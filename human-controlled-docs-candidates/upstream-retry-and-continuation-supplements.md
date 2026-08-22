@@ -207,3 +207,31 @@
 **没有危害**，多一个永不匹配的值不改变任何行为。**建议**：删掉 `max_output_tokens`，与 schema 默认 `["max_tokens"]` 一致；若想保留作提示，改成注释更准确，例如 `# 上游 Responses 的 max_output_tokens 已在翻译时归一为 max_tokens，此处不必列`。
 
 **证据等级：确凿**（一手实测 + 两处代码事实）。**是否要改属你的取舍。**
+
+### 补充（异源评审 2026-08-22 F6/F11 加强）
+
+评审自己跑了一组**证伪对照**，把 `hand_over_stop_reasons` 配成 `{"max_output_tokens"}`（即删掉 `max_tokens` 只留它），合成**一次都没被触发**。所以结论比上面写的更强：不只是「默认配置下不会出现」，而是「**配置成它也不会生效**」——归一化发生在比较之前，原始拼法压根活不到那一步。
+
+**因此这条从「无害的冗余」升级为值得处置**：这是一份**你亲笔的权威配置样例**，它现在在暗示 `max_output_tokens` 是一个有意义的取值。下一个读者（包括另一个仓改 MCP 的人）合理地推断「上游说的是 `max_output_tokens`，`max_tokens` 大概写错了或是别名」，把 `max_tokens` 删掉或替换掉——此后**所有撞上限的回合都不再交接**。而且不止不交接：`hand_over_stop_reasons` 同时决定「被截断的块丢不丢」（`formats/openai_responses.py:393`），门不中就走「保留被截断的块、正常收尾」，客户端拿到一个半截块 + `stop_reason: max_tokens`，**没有 tool call，也没有任何告警**。是静默失效，不是可见故障。
+
+---
+
+## 十一、`client-side-block-delivery.md:16` 的配置节名写错了
+
+**2026-08-22 追加，异源评审顺带发现，本会话已独立复核。**
+
+该行写的是：
+
+> - 一次上游请求的最大时长（`upstream_request_retry.upstream_request_deadline`）；
+
+**实际在 `upstream_request_timeouts` 节下**，不是 `upstream_request_retry`：
+
+- schema：`src/app/config/schema.py:152`，在 `class UpstreamRequestTimeoutsConfig` 里，与 `response_header`、`stream_idle` 同节；
+- 读取处：`src/app/server/handler.py:170` 的 `timeouts.upstream_request_deadline`；
+- **你自己的 `config.example.yaml` 是对的**：第 313 行那个 `upstream_request_deadline: 1200` 在 `upstream_request_retry:`（第 321 行）**之前**，属于上一节。
+
+同一行下面那个 `client_delivery.client_request_deadline` 的节名是对的。
+
+**分节其实是有道理的，不建议反过来改代码**：三个上游守卫（`response_header` 管首字节前、`stream_idle` 管帧间空档、`upstream_request_deadline` 管整个尝试的存活）是互补的一组，同在 `upstream_request_timeouts` 下才读得出这层关系；`upstream_request_retry` 装的是「再发一次的理由与预算」，是另一回事。**建议只改文档那一处节名。**
+
+**证据等级：确凿**（三处代码事实 + 你自己的样例文件互证）。

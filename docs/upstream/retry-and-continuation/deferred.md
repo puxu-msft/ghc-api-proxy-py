@@ -9,7 +9,7 @@
 **2026-08-22 更正**：本条原来的落点是「`parse_prompt_limit_error` 在主路径上返回 `None`，抽不出上下文上限的数字」。**用户质疑该理由是否成立，质疑成立，本项目撤回。**
 
 - 那个数**上游模型目录里就公布着**，逐模型：`limits.max_prompt_tokens: 936000`、`max_context_window_tokens: 1000000`（一手样本 `exp/260820-websearch-probe/raw/models-live.json`）。从一个 400 里反解它，只是对上游已公布事实做交叉验证，不是唯一来源。
-- 它的消费端也站不住：`parse_prompt_limit_error` 只有两个调用点——`app/hooks/builtin/token_calibration.py:87`（**未挂载的 legacy hooks 链**）与 `app/tokenization/service.py:64`，而后者服务的 `/api/tokenization/limits` 在 `docs/.human-controlled/api.md` 里已标为**暂不支持**。
+- 它的消费端也站不住：`parse_prompt_limit_error` 只有两个调用点——`app/hooks/builtin/token_calibration.py:87` 与 `app/tokenization/service.py:64`，而后者服务的 `/api/tokenization/limits` 在 `docs/.human-controlled/api.md:21` 里已标为**暂不支持**。前者在 **legacy 链路**上：它的两个 hook 只由 `hooks/builtin/__init__.py:17` 的 `register_builtin_hooks` 注册，而那只有一个调用点 `server/app_factory.py:110`，服务进程从 `cli.py:128`/`:154` 起**只构建 `create_pipeline_app(chain)`，从不走 `app_factory`**。措辞刻意不写成「这段代码没接线」——`ObserverEvent.ERROR` 带 `response_body` 的分发确实存在（`pipeline/executor.py:477-487`），准确的说法是**这条链路不被服务进程构建**（异源评审 F16 收紧）。
 
 **这次错在哪**：「抽不出数字」这个说法是从一份调研报告里继承来的，本项目**没问过这个数字是给谁用的**就把它登记成了未闭合项。同一形状值得记住——*继承一个缺口的描述时，先找它的消费端*。
 
@@ -127,6 +127,8 @@ response 层有信号（`response.incomplete`），但它晚于 item 关闭到�
 - **真实后果**：上游已发完 `message_delta` + `message_stop`，随后客户端时限到期 —— 当前发 `client_deadline_exceeded` error 帧，**丢掉一条已经攒齐的完整回复**。按上述裁决，这是对的。
 - **实测（评审）**：把该支合并进 `if torn is None:` 那一支（即让 terminal 压过 deadline），三条 client-deadline 测试全部转红。
 - **仍未闭合的那一条**：`test_the_client_deadline_is_the_one_ending_that_says_so` 与 `test_a_held_back_policy_still_hears_the_client_deadline` 的夹具都携带完整终结事件（`anthropic_stream(...)` 末尾自带 `message_delta` + `message_stop`），因此**它们已经无法区分「时限先到」与「上游已完成后时限才到」**。裁决落定后这两条测试实际钉的是后者，而名字说的是前者。按 `[:-2]` 模式改夹具（与 `c86712d` 对另外两条测试所做的相同）可让名字与内容对上，另加一条专测「上游已完成后时限才到 → 仍报时限」的正样本，才算把新裁决钉住。**这是本条唯一还要动手的部分。**
+
+  **2026-08-22 已完成，见主仓 `027698f`**（上面那段是完成前的原始分析，保留原样）。三件都做了：两条夹具改成 `[:-2]`、新增 `test_the_client_deadline_outranks_an_upstream_that_just_finished`、把裁决写在两处分支注释旁。异源评审用两轮受控变异复核（`reports/260822-review-mcp-contract-and-deadline-order.md` F12/F13），结论是**改夹具没有削弱那两条测试名义上的属性**：把整支禁掉时它们照样全红，说明「时限收尾必须是 error 帧」「不得冒充 `message_stop`」「held-back 策略下缓冲块被丢弃」三条仍被咬住，且最后一条在新夹具下**非平凡**（不触发时限时那个块确实被组装出来了）。被移走的只有「次序」那一层鉴别力，由新测试独家接手——次序变异之下，全套件里只有它转红。净增的是「时限落在回合中途」这个旧夹具**根本测不到**的位置。
 
 ### 12. 上游在终结事件之后 reset：完成行不再留痕
 
