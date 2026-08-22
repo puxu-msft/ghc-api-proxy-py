@@ -33,13 +33,27 @@
 
 修复后 `git diff --cached` 只剩同伴那 8 个文件；全量回归 1643 passed（唯一失败是与本次无关的 `test_authoritative_example_config_parses`）。
 
-## 这个备份 ref 还要不要留
+## 备份 ref 已删除
 
-它只是本次修复的保险。确认索引与工作树都符合预期之后可以删：
+`refs/backup/index-snapshot-260821`（`91f67a1`）已于同日删除。删除依据：修复后索引与 HEAD 差异归零、本次的 6 个提交全部仍是 HEAD 祖先、`loading.py` / `providers.py` / `test_cli.py` 在其后零次被改动，且干净检出的 HEAD 全量通过（`8469cfa`，1660 passed / 3 skipped / 0 failed）。保留它反而有害——它的 tree 是一份与 `2bcf03b` 相差 51 个文件的过期索引快照，任何人 `read-tree` 它都会把工作区拖回一个早已作废的状态。
+
+## 一个后续教训：这类回退不止发生在我身上
+
+同日稍晚，`1b0cdd2`（"feat: add project development instructions and update README"）把 `8703cad` 刚给 `cli.py` 加上的 `proxy_from_cli` 参数**又退了回去**，于是 `main` 上 `start` 与 `start --fd` 两条入口都会 `TypeError: build_http_client() missing 1 required keyword-only argument`，直到 `8469cfa` 才修好。
+
+它的 blob 是 `9ac78d4`，不是本次修复写进索引的 `b1f1e7a`，所以与上面那次修复无关——但**成因是同一类**：提交内容来自一份比 HEAD 更旧的索引/工作树快照。
+
+**这个坏状态在共享工作树里跑测试是看不见的**，因为工作树当时已经有修复了；只有把 HEAD 干净检出到别处才暴露：
 
 ```bash
-GIT_DISCIPLINE_OK=1 git update-ref -d refs/backup/index-snapshot-260821
+D=$(mktemp -d); git archive HEAD | tar -x -C "$D"
+cd "$D" && PYTHONPATH="$D/src" <venv>/bin/python -c "import app; print(app.__file__)"   # 先证明探针命中副本
+cd "$D" && PYTHONPATH="$D/src" <venv>/bin/python -m pytest tests -q -p no:cacheprovider
 ```
+
+第二行不能省：`app` 若通过 editable 安装解析回原树，整轮测试就在测你想排除的那棵树，而结果形状完全正常。
+
+也要注意**只有真拉起进程的测试能抓到它**：本次 1658 条里只有 `tests/systemd/test_systemd_pipeline_unit.py` 那条 `subprocess` 测试变红，其余在进程内构造依赖的测试全绿。
 
 ## 两处归因失误，一并记下
 
