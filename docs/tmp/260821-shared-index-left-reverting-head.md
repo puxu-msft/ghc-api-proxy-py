@@ -33,9 +33,15 @@
 
 修复后 `git diff --cached` 只剩同伴那 8 个文件；全量回归 1643 passed（唯一失败是与本次无关的 `test_authoritative_example_config_parses`）。
 
-## 备份 ref 已删除
+## 备份 ref：先删了，又恢复了（决定已修正）
 
-`refs/backup/index-snapshot-260821`（`91f67a1`）已于同日删除。删除依据：修复后索引与 HEAD 差异归零、本次的 6 个提交全部仍是 HEAD 祖先、`loading.py` / `providers.py` / `test_cli.py` 在其后零次被改动，且干净检出的 HEAD 全量通过（`8469cfa`，1660 passed / 3 skipped / 0 failed）。保留它反而有害——它的 tree 是一份与 `2bcf03b` 相差 51 个文件的过期索引快照，任何人 `read-tree` 它都会把工作区拖回一个早已作废的状态。
+`refs/backup/index-snapshot-260821`（`91f67a1`）曾于 2026-08-22 16:45 删除，理由是索引已修复、我的提交全部可达、留着一份过期索引快照反而可能被人 `read-tree` 拖回作废状态。
+
+**这个决定是错的，同日 16:5x 已撤销。** 删除时忽略了一件事：`91f67a1` 是**另一份已提交报告的证据锚点**——本文件与 `260822-audit-other-stale-blobs-committed.md` 合计引用它 24 次。删掉 ref 后它被 0 个 ref 可达，只是尚未 gc；再过一段时间那两份报告就会指向一个不存在的对象。
+
+现恢复为 **`refs/evidence/260821-stale-index-snapshot`**，改名而非还原原名，正是为了同时满足两件事：证据可达，且名字不再读作「还原点」。**不要 `read-tree` 它**——它是一份 2026-08-21 20:13 的索引切片，与当前状态相差甚远。
+
+**判据**：删除一个 ref 之前，先问「有没有已落盘的文档把它当证据引用」。`git for-each-ref --contains <oid>` 只回答可达性，回答不了这个；要 `rg` 文档树。**报告不能自证，它引用的对象必须一直可达**——这条对临时 ref 同样成立。
 
 ## 一个后续教训：这类回退不止发生在我身上
 
@@ -53,7 +59,18 @@ cd "$D" && PYTHONPATH="$D/src" <venv>/bin/python -m pytest tests -q -p no:cachep
 
 第二行不能省：`app` 若通过 editable 安装解析回原树，整轮测试就在测你想排除的那棵树，而结果形状完全正常。
 
+**副本树上出现红灯时，第一嫌疑是副本缺件，不是 HEAD 坏。** `git archive` 只导出**已跟踪**文件，所以副本天生没有本地 `.env`、未提交的 fixture、缓存。排除它的方式不是「证明副本完整」，而是**拿到具体报错、确认它指向代码而不是缺失的文件**——本次就是靠子进程的 `TypeError: build_http_client() missing 1 required keyword-only argument` 才敢把责任落到 HEAD 上。
+
+**副本树不是封闭沙箱。** 本仓库跟踪着符号链接 `refs/CLIProxyAPIPlus -> /home/xp/src/refs/CLIProxyAPIPlus`（`git ls-tree HEAD refs/` 显示 `120000`），`git archive` 会忠实还原它，于是副本里有一条通往仓库外真实目录的路。**范围声明**：`rm -rf <副本树>` 本身是安全的，`rm` 不跟随符号链接；危害只在**解引用**的工具上出现——`find -L`、`cp -rL`、不带 `--no-links` 的 `rsync`、`du -L`，以及任何按 `refs/…` 相对路径向副本内写文件的脚本。
+
 也要注意**只有真拉起进程的测试能抓到它**：本次 1658 条里只有 `tests/systemd/test_systemd_pipeline_unit.py` 那条 `subprocess` 测试变红，其余在进程内构造依赖的测试全绿。
+
+## 本会话七次 CAS 都没被触发过，别把它们读成「CAS 已验证」
+
+四次业务 `update-ref` 全部成功落地，没有一次收到 `is at X but expected Y` 的拒绝。其中一次的记述——「期间同伴往 `main` 提交了 `ae472f3`，CAS 正确地接在了它后面」——**不是 CAS 拒绝**，那是 `BEFORE=$(git rev-parse HEAD)` 在同伴提交之后才读的。另有一次还在 CAS 之前自己加了一道 `if [ "$NOW" != "$BEFORE" ]` 把冲突挡在前面。
+
+**权重档：本会话在「CAS 会不会拒绝」这一维度上没有分辨力。** CAS 的拒绝行为与报错文本有记载，但来自更早的会话，不是这七盏绿灯证明的。
+
 
 ### 补记（2026-08-22）：共享索引至少在两个时点陈旧，`91f67a1` 只是其中一个切片
 

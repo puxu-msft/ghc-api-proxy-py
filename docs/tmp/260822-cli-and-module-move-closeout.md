@@ -1,6 +1,8 @@
 # CLI 命令切分与模块迁移 —— 会话收尾记录（2026-08-21 → 08-22）
 
-会话窗口：`2026-08-21T17:40:18Z` → `2026-08-22T16:43Z`。主仓库本会话共 7 个提交（窗口内 84 个，其余为同伴）。未派遣 subagent，未创建 worktree。
+会话窗口：`2026-08-21T17:40:18Z` → `2026-08-22T16:43Z`。主仓库本会话共 7 个提交（窗口内 84 个，其余为同伴）。未创建 worktree。收尾阶段派遣了 2 个评审 subagent（`260822-review-closeout-facts.md`、`260822-review-closeout-omissions.md`）——本文最初写着「未派遣 subagent」，那句在写下时为真、两分钟后即失效，由遗漏评审的 m8 指出。
+
+`.dev` 侧本会话提交：`ccb1eba`、`a96b324`、`59543b1`（及本次修订）。
 
 ## 交付
 
@@ -43,6 +45,27 @@
 
 改用按明确锚点手工搬那一个 import 块，并用一句断言校验 `app.*` 的字母序。**判据**：import 分类依赖运行环境（已安装的包、`src` 布局），把文件搬出仓库再跑格式化工具，得到的顺序不是仓库里的顺序。
 
+**但「手工搬」只在重排时才必须。校验有正解，本会话 14 分钟后就用上了却没记下来**（遗漏评审 M1）：
+
+```bash
+cd /home/xp/src/ghc-api-proxy-py                       # 必须在仓库根
+uv run ruff check --stdin-filename src/app/cli.py - < <任意位置的重建文件>
+```
+
+`--stdin-filename <仓库内路径>` 让 ruff 按**仓库根**解析配置与第一方包分类，而内容从 stdin 来、可以躺在任何临时目录。它精确消灭了上面那个失效。所以：**校验重建内容用 `--stdin-filename`，只有重排才落回手工。**
+
+## 从 transcript 收割提交清单只能当候选集，两个方向都会失真
+
+本会话用 `rg -o '\[(main|dotdev|…) [0-9a-f]{7,10}\]'` 从 transcript 收割提交回执，两次都不完整：
+
+- **自定义回执没打印** → 漏掉 `5fc9dc4`（那次我没 echo `new commit:`）。
+- **`git -C <path>` 让子命令模式漏配** → `rg -o 'git (commit --only|…)'` 对 `git -C /home/xp/src/ghc-api-proxy-py commit --only …` 不匹配，因为 `-C <path>` 插在 `git` 与子命令之间。计数报 3 次，实际 4 次。
+
+第二条会在本项目**系统性重现**：用户规则 `root-each-bash-call` 要求每次 Bash 调用显式绑定目录，`git -C <绝对路径>` 正是推荐写法。所以任何「扫 transcript 里的 git 命令」的流程在这个项目上都会稳定漏掉一部分。
+
+**权威源是 `git log --since=<会话起点>` 加人工归属**，收割只用来交叉核对。会话起点取 transcript 首事件时间戳（`jq -r 'select(.timestamp).timestamp' <file> | head -1`），不要凭记忆重构——重构出来的起点会截断总体，而截断后的集合读起来仍然完整。
+
+
 ## 执行过的变异及其失败形状
 
 - **`src/app/cli.py` 删掉 `if out_path.exists(): typer.confirm(...)` 两行** → 只有 `tests/unit/test_cli.py::test_gen_config_keeps_an_existing_file_when_the_answer_is_no` 变红（断言 `exit_code != 0` 失败）。另两条 gen-config 新测试在无确认时行为本就不变，仍绿——这是预期，不是覆盖不足。
@@ -74,15 +97,26 @@ ln.bind(("127.0.0.1", 0)); ln.listen(8)
 launcher = ("import os, sys; source = int(sys.argv[1]); os.dup2(source, 3); "
             "os.set_inheritable(3, True); "
             "os.execv(sys.executable, [sys.executable, '-m', 'app', 'start', '--fd', '3'])")
+env = m._service_environment(state, url)
+print("PYTHONPATH =", env.get("PYTHONPATH"))          # 自证：确认子进程会加载你以为的那棵树
+print("TOKEN VARS:", {k: v for k, v in env.items() if "TOKEN" in k})   # 自证：确认注入的凭证名
 p = subprocess.Popen([sys.executable, "-c", launcher, str(ln.fileno())],
-                     cwd=Path("."), env=m._service_environment(state, url),
-                     pass_fds=(ln.fileno(),),
+                     cwd=Path("."), env=env, pass_fds=(ln.fileno(),),
                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 time.sleep(8)
 if p.poll() is None: p.kill()
 print(p.communicate(timeout=20)[0][-4000:])     # 这里才是真正的 traceback
 ```
 
-关键点是**复用测试模块自己的 `_service_environment`**，而不是手搓环境——手搓会漏掉 unit 文件里的 `Environment=` 条目，于是复现出来的是另一个场景。
+**调用方式**（不能省，两处都会咬人）：
+
+```bash
+cd "$D" && PYTHONPATH="$D/src" /home/xp/src/ghc-api-proxy-py/.venv/bin/python probe.py
+```
+
+`sys.path.insert(0, "tests/systemd")` 是 **cwd 相对**的，所以必须从被测树的根跑；而副本树（`git archive` 出来的）没有 `pyproject.toml`，`uv run` 起不来，只能直接用 `.venv/bin/python`。
+
+关键点是**复用测试模块自己的 `_service_environment`**，而不是手搓环境。**权重档：这是设计判断，未实测**——本会话两次探针都直接复用了它，从未手搓过一份来对照。理由是 unit 文件里的 `Environment=` 条目由该函数从 `ghc-api-proxy.service` 读出并逐条注入，手搓很容易漏，但「漏了会复现出另一个场景」这个后果没有被观测过。
 
 **它不证明什么**：这是单条用例的复现，不覆盖 `test_systemd_units.py` 里的 backlog/socket-handover 场景，也不测优雅退出。
+
