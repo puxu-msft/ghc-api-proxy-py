@@ -1,8 +1,8 @@
 # CLI 命令切分与模块迁移 —— 会话收尾记录（2026-08-21 → 08-22）
 
-会话窗口：`2026-08-21T17:40:18Z` → `2026-08-22T16:43Z`。主仓库本会话共 7 个提交（窗口内 84 个，其余为同伴）。未创建 worktree。收尾阶段派遣了 2 个评审 subagent（`260822-review-closeout-facts.md`、`260822-review-closeout-omissions.md`）——本文最初写着「未派遣 subagent」，那句在写下时为真、两分钟后即失效，由遗漏评审的 m8 指出。
+会话起点 `2026-08-21T17:40:18Z`（transcript 首事件）。本会话主仓库 7 个提交，最后一个 `5cb8dcf` 落在 `2026-08-22T16:46:17Z`。**不要用「窗口内 N 个提交」对账**——同伴持续推进，同一起点起算的总数在本文写下时是 84、复核时已是 94；它只能作规模参照。未创建 worktree。收尾阶段派遣了 2 个评审 subagent（`260822-review-closeout-facts.md`、`260822-review-closeout-omissions.md`）——本文最初写着「未派遣 subagent」，那句在写下时为真、两分钟后即失效，由遗漏评审的 m8 指出。
 
-`.dev` 侧本会话提交：`ccb1eba`、`a96b324`、`59543b1`（及本次修订）。
+`.dev` 侧本会话提交：`ccb1eba`、`a96b324`、`59543b1`、`66f5bd8`（及本次修订）。
 
 ## 交付
 
@@ -22,14 +22,26 @@
 
 - **`gen-config` 的路径必填，不给默认值。** 旧标志的默认值是 `config_file_path()`（`$XDG_CONFIG_HOME`），而 `load_proxy_config` 读的是 `spec_config_file_path()`（`$XDG_DATA_HOME`）——两者不是同一个位置，所以「不给路径」生成的是一个服务永远不会读的文件。承载于 `cli.py` 的 docstring。
 - **不加 `--force`。** `yes | ghc-api-proxy gen-config <path>` 已能在脚本中回答，且无 stdin 时 `typer.confirm` 是中止而非挂起（实测 `< /dev/null` 返回 1）。
-- **`GHC_API_PROXY_GITHUB_TOKEN` 必须在 `environment_values` 里排除。** 它与配置的 `GHC_` 前缀同名空间，不排除则被解析成顶层键 `api_proxy_github_token`，`ProxyConfig` 以 `extra="forbid"` 拒绝，**进程启动即死**。与既有的 `GHC_CONFIG` 同形，故复用同一处 `NON_SETTING_VARIABLES`。
+- **`GHC_API_PROXY_GITHUB_TOKEN` 必须在 `environment_values` 里排除。** 它落在配置读取环境变量所用的同一个前缀命名空间里，不排除则被解析成一个顶层键，`ProxyConfig` 以 `extra="forbid"` 拒绝，**进程启动即死**。与既有的 `GHC_CONFIG` 同形，故复用同一处 `NON_SETTING_VARIABLES`。
+    **现状注记（2026-08-22 复核）**：当时前缀是 `GHC_`，落成的顶层键是 `api_proxy_github_token`。同伴其后在 `c5b9875` 把 `ENV_PREFIX` 改成 `GHC_API_PROXY_`、常量改为 `f"{ENV_PREFIX}GITHUB_TOKEN"`，变量名不变，但**现在不排除会落成的键是 `github_token`**。核心判断不变，按本文复现时别期待旧的字段名。
+
 - **`ghc_client` 包 docstring 里「Imports nothing from `app.*`」被删除而非保留。** 该句在本次改动**之前**就已不成立（`errors.py` import `app.pipeline.exceptions`），且无任何测试执行它。改为陈述实际依赖。
 
 ## 改名的搜索范围：只扫 `src/` 和 `tests/` 会漏掉已跟踪的 `exp/`
 
 两次模块迁移（`d49fe23`、`5fc9dc4`）都把改名范围限定在 `src/` 与 `tests/`，因为脑子里想的是「代码和测试」。结果 `exp/` 下 **5 个已跟踪的**探针脚本仍 import `app.ghc_client`，下一个运行它们的人会在 import 处直接失败。收尾扫描才发现，`5cb8dcf` 修复。
 
-**判据**：改名的搜索范围是**整个仓库**，唯一该排除的是 `.git` 与生成物。「哪些目录会 import 这个模块」是个不能凭直觉回答的问题——`exp/`、`verification/`、`scripts/`、文档里的代码块都可能。做法是先 `rg -l <旧名> -g '!.git' .` 看完整清单再决定改哪些，而不是先决定范围再搜。
+**判据**：改名的搜索范围是**整个仓库**，唯一该排除的是 `.git` 与生成物。「哪些目录会 import 这个模块」是个不能凭直觉回答的问题——`exp/`、`verification/`、`scripts/`、`.github/`、文档里的代码块都可能。
+
+**但「整个仓库」不能写成 `rg -l '<旧名>' -g '!.git' .`**（事实核查评审 F9）。`rg` **默认跳过隐藏路径并遵守 ignore 文件**，`-g '!.git'` 不会打开这两个面。实测正样本：`.github/copilot-instructions.md` 是**已跟踪**文件且确实含目标串，而该命令返回退出码 1、零输出。正确形状是把两个面分开：
+
+```bash
+git grep -l '<旧名>'                              # 已跟踪面，权威；含隐藏与被 ignore 的文件
+rg -l --hidden --no-ignore '<旧名>' -g '!.git' .   # 需要覆盖未跟踪文件时再补；会扫进同伴 worktree，命中要人工分流
+```
+
+先跑 `git grep -l` 拿完整清单，再决定改哪些——不要先定范围再搜。
+
 
 ## 三处「命令跑了、输出真实、结论仍然错」
 
@@ -71,7 +83,10 @@ uv run ruff check --stdin-filename src/app/cli.py - < <任意位置的重建文�
 - **`src/app/cli.py` 删掉 `if out_path.exists(): typer.confirm(...)` 两行** → 只有 `tests/unit/test_cli.py::test_gen_config_keeps_an_existing_file_when_the_answer_is_no` 变红（断言 `exit_code != 0` 失败）。另两条 gen-config 新测试在无确认时行为本就不变，仍绿——这是预期，不是覆盖不足。
 - **`src/app/pipeline/exceptions.py` 顶部加 `from app.model_provider.ghc_client import GhcApiClient`** → `tests/unit/test_module_boundaries.py::test_pipeline_exceptions_stay_importable_without_the_pipeline` 变红，但**形式是 `subprocess.CalledProcessError`（探针子进程因循环导入崩溃），不是断言触发**。该测试用子进程测量可达模块集，任何进入该包的 import 都会先撞上循环导入。所以它确实有分辨力，但它证明的是「不可导入」，不是「前缀断言写对了」；前缀非空转另用一次实测确认（`import app.model_provider.github_copilot` 后有 10 个模块以该前缀开头）。
 
-两次变异均逐字节还原并以 `git status` 空输出确认。
+**两次变异的还原证据强度不同，本文最初把它们写成一样，那是假绿**（事实核查评审 F3）。第一次（`exceptions.py`）该文件原本干净，还原后 `git status` 对该路径确为空输出，逐字节成立。**第二次（`cli.py`）不成立**：变异发生在一份尚未提交的业务改动之上，还原后的 `git status` 是 `MM src/app/cli.py`，我当时只复查了 `typer.confirm` 那行还在、以及预期的业务 diff，**没有做 `cmp` 或哈希比对**。事后 `92725a4` 的 tree 里确认逻辑完整、5 条测试复跑通过，所以没有留下缺陷；错的是把一个从未出现过的「status 空输出」写成了验证证据。
+
+**判据**：在**脏文件**上做变异，`git status` 给不出任何信号——它对「有改动」和「有改动且我还原错了」是同一个输出。要么先把文件提交干净再变异，要么用 `cmp <备份> <文件>` 或哈希比对来验还原。
+
 
 ## 可复用：怎么看到 systemd 单元测试里那个子进程自己的报错
 
@@ -114,7 +129,8 @@ print(p.communicate(timeout=20)[0][-4000:])     # 这里才是真正的 tracebac
 cd "$D" && PYTHONPATH="$D/src" /home/xp/src/ghc-api-proxy-py/.venv/bin/python probe.py
 ```
 
-`sys.path.insert(0, "tests/systemd")` 是 **cwd 相对**的，所以必须从被测树的根跑；而副本树（`git archive` 出来的）没有 `pyproject.toml`，`uv run` 起不来，只能直接用 `.venv/bin/python`。
+`sys.path.insert(0, "tests/systemd")` 是 **cwd 相对**的，所以必须从被测树的根跑。用主仓库的 `.venv/bin/python` 而不是 `uv run`，是为了免去在副本里新建环境——**不是因为副本缺 `pyproject.toml`**（事实核查评审 F11 证否：`git archive` 含全部已跟踪文件，`pyproject.toml` 在其中；副本缺的是 `.venv`）。
+
 
 关键点是**复用测试模块自己的 `_service_environment`**，而不是手搓环境。**权重档：这是设计判断，未实测**——本会话两次探针都直接复用了它，从未手搓过一份来对照。理由是 unit 文件里的 `Environment=` 条目由该函数从 `ghc-api-proxy.service` 读出并逐条注入，手搓很容易漏，但「漏了会复现出另一个场景」这个后果没有被观测过。
 

@@ -27,7 +27,7 @@
    GIT_DISCIPLINE_OK=1 git update-ref refs/backup/index-snapshot-260821 "$BK"
    ```
 
-   结果为 `refs/backup/index-snapshot-260821` = `91f67a1`。**恢复办法：`git read-tree 91f67a1`。**
+   结果为 `refs/backup/index-snapshot-260821` = `91f67a1`（该 ref 后来改名，见下节）。**当时把 `git read-tree 91f67a1` 写成了「恢复办法」；那条指令现已作废，不要执行**——理由与替代做法见下节。
 
 2. 只刷新自己提交过的那 43 条：`git reset HEAD -- <paths…>`。带 pathspec 的 `reset` 只动索引，**绝不碰工作树**（`--hard` 配 pathspec 是被禁止的），同伴那 8 条原样保留。
 
@@ -37,11 +37,13 @@
 
 `refs/backup/index-snapshot-260821`（`91f67a1`）曾于 2026-08-22 16:45 删除，理由是索引已修复、我的提交全部可达、留着一份过期索引快照反而可能被人 `read-tree` 拖回作废状态。
 
-**这个决定是错的，同日 16:5x 已撤销。** 删除时忽略了一件事：`91f67a1` 是**另一份已提交报告的证据锚点**——本文件与 `260822-audit-other-stale-blobs-committed.md` 合计引用它 24 次。删掉 ref 后它被 0 个 ref 可达，只是尚未 gc；再过一段时间那两份报告就会指向一个不存在的对象。
+**这个决定是错的，同日 16:5x 已撤销。** 删除时忽略了一件事：`91f67a1` 是**另一份已提交报告的证据锚点**——本文件与 `260822-audit-other-stale-blobs-committed.md` 都多处引用它。删掉 ref 后它被 0 个 ref 可达，只是尚未 gc；再过一段时间那两份报告就会指向一个不存在的对象。
 
-现恢复为 **`refs/evidence/260821-stale-index-snapshot`**，改名而非还原原名，正是为了同时满足两件事：证据可达，且名字不再读作「还原点」。**不要 `read-tree` 它**——它是一份 2026-08-21 20:13 的索引切片，与当前状态相差甚远。
+现恢复为 **`refs/evidence/260821-stale-index-snapshot`**（2026-08-22 17:01:21 落地），改名而非还原原名，正是为了同时满足两件事：证据可达，且名字不再读作「还原点」。
 
-**判据**：删除一个 ref 之前，先问「有没有已落盘的文档把它当证据引用」。`git for-each-ref --contains <oid>` 只回答可达性，回答不了这个；要 `rg` 文档树。**报告不能自证，它引用的对象必须一直可达**——这条对临时 ref 同样成立。
+**⚠️ 不要 `git read-tree 91f67a1`。** 上一节最初把它写成「恢复办法」，那是错的，已作废：`read-tree` 会把**共享索引**整个替换成 2026-08-21 20:13 的 51 条过期切片，它不动工作树，所以同伴任何 staged-only 的内容都将无法从工作树重建。这个对象现在的唯一用途是**给两份已提交报告的引用做锚点**，用 `git show 91f67a1:<path>` / `git diff-tree` 只读查看即可。
+
+**判据**：删除一个 ref 之前，先问「有没有已落盘的文档把它当证据引用」。`git for-each-ref --contains <oid>` 只回答可达性，回答不了这个；要 `rg` 文档树。**报告不能自证，它引用的对象必须一直可达**——这条对临时 ref 同样成立。而恢复之后要立刻回头检查**旧文本里有没有留下与新裁决冲突的可执行指令**：本节写完后，上一节那句 `read-tree` 仍在原地，两条指令一条说做一条说别做，且危险的是较早那条。
 
 ## 一个后续教训：这类回退不止发生在我身上
 
@@ -63,13 +65,13 @@ cd "$D" && PYTHONPATH="$D/src" <venv>/bin/python -m pytest tests -q -p no:cachep
 
 **副本树不是封闭沙箱。** 本仓库跟踪着符号链接 `refs/CLIProxyAPIPlus -> /home/xp/src/refs/CLIProxyAPIPlus`（`git ls-tree HEAD refs/` 显示 `120000`），`git archive` 会忠实还原它，于是副本里有一条通往仓库外真实目录的路。**范围声明**：`rm -rf <副本树>` 本身是安全的，`rm` 不跟随符号链接；危害只在**解引用**的工具上出现——`find -L`、`cp -rL`、不带 `--no-links` 的 `rsync`、`du -L`，以及任何按 `refs/…` 相对路径向副本内写文件的脚本。
 
-也要注意**只有真拉起进程的测试能抓到它**：本次 1658 条里只有 `tests/systemd/test_systemd_pipeline_unit.py` 那条 `subprocess` 测试变红，其余在进程内构造依赖的测试全绿。
+也要注意**只有真拉起进程的测试能抓到它**：那一轮 `1 failed, 1658 passed, 3 skipped` 里只有 `tests/systemd/test_systemd_pipeline_unit.py` 那条 `subprocess` 测试变红（1658 是绿灯数，不是总条数），其余在进程内构造依赖的测试全绿。
 
-## 本会话七次 CAS 都没被触发过，别把它们读成「CAS 已验证」
+## 本会话真正执行的 CAS 只有四次，且一次都没被拒绝过
 
-四次业务 `update-ref` 全部成功落地，没有一次收到 `is at X but expected Y` 的拒绝。其中一次的记述——「期间同伴往 `main` 提交了 `ae472f3`，CAS 正确地接在了它后面」——**不是 CAS 拒绝**，那是 `BEFORE=$(git rev-parse HEAD)` 在同伴提交之后才读的。另有一次还在 CAS 之前自己加了一道 `if [ "$NOW" != "$BEFORE" ]` 把冲突挡在前面。
+本会话共发出 8 条 `update-ref`，其中带期望旧值（即真正的 CAS）的有 5 条、1 条被护栏在执行前拦下，**实际执行的 CAS 是 4 次**（`b9939ca` `d49fe23` `5fc9dc4` `92725a4`）；另外 3 条是创建备份 ref、删除它、以及恢复为证据 ref，都不带期望旧值，不是 CAS。四次全部成功落地，没有一次收到 `is at X but expected Y` 的拒绝。其中一次的记述——「期间同伴往 `main` 提交了 `ae472f3`，CAS 正确地接在了它后面」——**不是 CAS 拒绝**，那是 `BEFORE=$(git rev-parse HEAD)` 在同伴提交之后才读的。另有一次还在 CAS 之前自己加了一道 `if [ "$NOW" != "$BEFORE" ]` 把冲突挡在前面。
 
-**权重档：本会话在「CAS 会不会拒绝」这一维度上没有分辨力。** CAS 的拒绝行为与报错文本有记载，但来自更早的会话，不是这七盏绿灯证明的。
+**权重档：本会话在「CAS 会不会拒绝」这一维度上没有分辨力。** CAS 的拒绝行为与报错文本有记载，但来自更早的会话，不是这四盏绿灯证明的。
 
 
 ### 补记（2026-08-22）：共享索引至少在两个时点陈旧，`91f67a1` 只是其中一个切片
@@ -78,7 +80,7 @@ cd "$D" && PYTHONPATH="$D/src" <venv>/bin/python -m pytest tests -q -p no:cachep
 
 也就是说，**上面那份 51 条路径的快照不是一份权威风险清单**，它只是 20:13 那一刻的切片；把它当成「受损范围的全集」去核查，会漏掉 20:13 之后重新陈旧下来的条目。要判断「还有没有别的陈旧内容落进了提交」，必须对提交范围做全量扫描而不是只核这 51 条。
 
-该全量扫描已经做过：`2026-08-22-audit-other-stale-blobs-committed`（`docs/tmp/260822-audit-other-stale-blobs-committed.md`），范围 `2bcf03b..8f654b44`，22 个提交、72 个 commit-path 对、三个探测器加正样本对照，结论是**除 `1b0cdd2` 的 `cli.py` 外没有第二处**，且该处已由 `8469cfa` 修复。那份报告第 6 节列了六个盲区，其中两个值得在这里点名：扫描域不含 `2bcf03b` 之前与其它分支；以及它是静态核对，没有跑测试或类型检查（运行时证据由 `8469cfa` 落地时另行跑过——`tests/systemd/test_systemd_pipeline_unit.py` 由超时转为通过，`pyright src/app/cli.py` 由 8 个错误归零）。
+该全量扫描已经做过：`2026-08-22-audit-other-stale-blobs-committed`（`.dev/docs/tmp/260822-audit-other-stale-blobs-committed.md`——在 `.dev` 仓库内；主仓库的 `docs/tmp/` 已裁定不得重建），范围 `2bcf03b..8f654b44`，22 个提交、72 个 commit-path 对、三个探测器加正样本对照，**（2026-08-22 事实核查评审 F5 更正：22/72 是该报告较早的主扫描 `HEAD-A=51196e24` 的数字；`2bcf03b..8f654b44` 实测为 23 个提交、76 对，最后到达的那一个只补跑了探测器 1 与 2，未跑探测器 3。）**结论是**除 `1b0cdd2` 的 `cli.py` 外没有第二处**，且该处已由 `8469cfa` 修复。那份报告第 6 节列了六个盲区，其中两个值得在这里点名：扫描域不含 `2bcf03b` 之前与其它分支；以及它是静态核对，没有跑测试或类型检查（运行时证据由 `8469cfa` 落地时另行跑过——`tests/systemd/test_systemd_pipeline_unit.py` 由超时转为通过，`pyright src/app/cli.py` 由 8 个错误归零）。
 
 ## 两处归因失误，一并记下
 
