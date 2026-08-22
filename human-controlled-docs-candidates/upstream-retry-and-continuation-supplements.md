@@ -178,3 +178,28 @@ n=20 的结论本身仍然成立，收紧后是：**在流式、Responses 上游
 ### 2. 「不能续写时保留半截块」这一格，文档没明说
 
 「## 输出超长」的「不能续写 → 直接返回给客户端」可以读成「连同半截块一起返回」，但没有明说。这一格与上面第 1 条的出路 B 是同一件事的两面，一并裁决即可。
+
+---
+
+## 九、`config.example.yaml` 需要新增一个键：`client_delivery.unterminated_stream_stop_reason`
+
+**2026-08-22 追加。** 你当日裁决「上游干净 EOF 但无终止事件」这一格要细化——落在块边界就不发 SSE error、正常收尾——并要求「正常收尾时发什么 `stop_reason`」做成配置项。已实现，键在 `client_delivery` 节下，schema 默认 `"incomplete"`。
+
+**要加进你的 `config.example.yaml` 的片段**（我不动你的文件，贴在这里供摘取）：
+
+```yaml
+  # 上游干净关闭但从未发出终止事件、且停在块边界时，用什么 stop_reason 收尾。
+  # 上游没说它为什么停，所以这里填的是一次「合成」——配置项的意义就是让它被选择，而不是被默认继承。
+  # 默认 incomplete：上游自己的词，Responses 侧 `response.incomplete` 无原因时记的就是它。
+  # 可填 end_turn（但它会声称回合说完了，而上游从未这么说）。
+  # 留空 = 关掉这个细化，退回「一律发 SSE error」的旧行为。
+  # 只在块边界生效；切穿了某个块的流一律仍是截断。
+  #
+  # Stop reason used to close a message when upstream closed cleanly at a block boundary
+  # without ever sending its terminal event. Empty disables the refinement (SSE error instead).
+  unterminated_stream_stop_reason: "incomplete"
+```
+
+**为什么默认不是 `end_turn`**：那会把一个上游从未声称完成的回合说成完成，与你 2026-08-22 关于 `stop_reason` 的裁决（「绝不能改写成 `end_turn`」）同形。`incomplete` 的代价为零——已核实 Claude Code 的 `stop_reason` schema 是 `string().nullable()` 无枚举，未知值不报错、直接跳过（CC 2.1.226）。
+
+**证据等级：确凿**（一手实测 + 五次受控变异，见 `.dev/docs/upstream/retry-and-continuation/deferred.md` §5）。**默认值的取舍属你。**
