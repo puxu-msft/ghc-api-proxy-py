@@ -26,8 +26,8 @@ from typing import Any
 import httpx
 from probe import AUTH_URL, BASE_URL, CLAUDE_MODEL, GPT_MODEL, copilot_token, scrub
 
-from app.ghc_client.config import GhcClientConfig
-from app.ghc_client.headers import build_request_headers
+from app.model_provider.ghc_client.config import GhcClientConfig
+from app.model_provider.ghc_client.headers import build_request_headers
 
 del AUTH_URL  # Imported for provenance only; `copilot_token` uses it.
 

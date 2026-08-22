@@ -17,8 +17,8 @@ from typing import Any
 import httpx
 from recorded.cassettes import RecordingTransport
 
-from app.ghc_client.config import GhcClientConfig
-from app.ghc_client.headers import build_identity_headers, build_request_headers
+from app.model_provider.ghc_client.config import GhcClientConfig
+from app.model_provider.ghc_client.headers import build_identity_headers, build_request_headers
 
 CASSETTE_DIR = Path(__file__).resolve().parents[2] / "tests" / "cassettes"
 TOKEN_FILE = Path.home() / ".local/share/copilot-api/github_token"
