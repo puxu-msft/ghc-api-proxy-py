@@ -3030,3 +3030,75 @@ def test_a_handed_back_turn_is_neither_a_success_nor_a_failure_on_the_line() -> 
     assert record["status"] == "retry"
     # The status code is upstream's own and was settled long before this ending; it does not change.
     assert record["status_code"] == 200
+
+
+def test_a_turn_upstream_finished_is_not_handed_back_when_the_connection_goes_after() -> None:
+    """Nothing is missing, so nothing is handed over.
+
+    A tool call here would tell the client to carry on from an answer that is already whole, and it would look exactly like a real one — format-valid output that is simply wrong, which is worse than the visible failure it replaced. The three endings the decision names are not interchangeable: a finished turn folded in with an abandoned one is what produced this.
+    """
+
+    async def finished_then_torn() -> AsyncIterator[bytes]:
+        yield sse_upstream("complete")
+        raise httpx2.RemoteProtocolError("peer closed the connection")
+
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200, content=finished_then_torn(), headers={"content-type": "text/event-stream"}
+        ),
+        overrides={"upstream_request_retry": {"max_total": 0}},
+    )
+    delivered = _delivered(client)
+
+    assert b"turn_interrupted" not in delivered
+    assert b'"text":"complete"' in delivered
+    assert b'"stop_reason":"end_turn"' in delivered
+    assert b"message_stop" in delivered
+    assert _records()[-1]["status"] == "ok"
+
+
+def test_a_hand_back_on_the_translation_leg_counts_the_client_s_own_messages() -> None:
+    """The primary path, and the one number on the block that a stand-in sample cannot check.
+
+    `num_messages` is what the MCP server uses to notice a loop that is not advancing, and it only means that if it counts what the *client* counts: on this leg one Anthropic message becomes several Responses items, so the translated body gives a different number that advances by a different amount per turn.
+
+    Three messages in, three asserted. A fixture with an empty conversation makes the assertion vacuous — zero is what both readings produce.
+    """
+
+    async def torn_body() -> AsyncIterator[bytes]:
+        yield (
+            b'event: response.output_item.added\n'
+            b'data: {"output_index":0,"item":{"type":"message","id":"m1"}}\n\n'
+            b'event: response.output_text.delta\n'
+            b'data: {"output_index":0,"item_id":"m1","delta":"partial"}\n\n'
+            b'event: response.output_item.done\n'
+            b'data: {"output_index":0,"item":{"type":"message","id":"m1","status":"completed"}}\n\n'
+        )
+        raise httpx2.RemoteProtocolError("peer closed the connection")
+
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200, content=torn_body(), headers={"content-type": "text/event-stream"}
+        ),
+        overrides={"upstream_request_retry": {"max_total": 0}},
+    )
+    with client.stream(
+        "POST",
+        "/v1/messages",
+        json={
+            "model": "gpt-model",
+            "stream": True,
+            "messages": [
+                {"role": "user", "content": "one"},
+                {"role": "assistant", "content": "two"},
+                {"role": "user", "content": "three"},
+            ],
+        },
+    ) as response:
+        delivered = b"".join(response.iter_bytes())
+
+    handed = _handed_back(delivered)
+    assert handed["input"]["num_messages"] == 3
+    assert handed["input"]["category"] == "network"
+    # What the client had already been given survives the hand-over.
+    assert b'"text":"partial"' in delivered

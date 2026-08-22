@@ -967,8 +967,11 @@ async def test_a_stream_the_client_never_saw_is_replaced_without_a_trace() -> No
 
 @pytest.mark.asyncio
 async def test_a_stream_the_client_already_saw_is_not_replaced() -> None:
-    """Once a block has been delivered there is no traceless anything: a second attempt would send the client a second copy of what it holds."""
-    torn = _tears_after(anthropic_stream("first") + anthropic_stream("second")[:2])
+    """Once a block has been delivered there is no traceless anything: a second attempt would send the client a second copy of what it holds.
+
+    The sample stops before upstream's terminal event on purpose. `anthropic_stream` appends one, and a turn upstream *finished* before the connection went is not this case at all — it is complete, and this test used to pass on such a sample only because a finished ending was being folded in with an abandoned one.
+    """
+    torn = _tears_after(anthropic_stream("first")[:3] + anthropic_stream("second")[:2])
     with pytest.raises(ConnectionError):
         _ = [
             chunk

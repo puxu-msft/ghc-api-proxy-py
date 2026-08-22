@@ -327,6 +327,11 @@ async def _deliver(
             ledger=replay.ledger,
             reason=reason,
         )
+        if verdict.ending is StreamEnding.COMPLETE:
+            # Upstream finished this turn and *then* the connection went. Nothing is missing, so nothing is handed over — a tool call here would tell the client to carry on from an answer that is already whole, and it would look exactly like a real one. The ending below is the real one.
+            #
+            # Read before the replay, because `decide_stream_ending` answers all three and only one of them is a reason to do anything: folding COMPLETE in with ABANDON is what turned a finished turn into a synthesised interruption.
+            break
         if verdict.ending is StreamEnding.REPLAY:
             replacement = await replay.reopen()
             if replacement is not None:
@@ -355,6 +360,17 @@ async def _deliver(
             yield frame
 
     terminal = assembler.terminal
+    if terminal.seen and terminal.stop_reason in _HANDED_OVER_STOP_REASONS:
+        # Upstream finished cleanly and said it stopped because it ran out of room. Nothing failed, so nothing above catches it — but the turn is no more finished than a torn one, and the client is the only side that can carry it on. Ruled 2026-08-21: `max_tokens` always hands over.
+        #
+        # Asked before the empty-response return below, not after. A turn whose only block was itself the truncated one has nothing left after the drop, and that return would have answered it with a 200 and no bytes at all — which is the one outcome the keep-it-when-it-is-all-there-is rule exists to prevent, arrived at from the other side.
+        handed_over = _hand_over(
+            continuation, session, assembler, framing, stop_reason=terminal.stop_reason
+        )
+        if handed_over is not None:
+            for chunk in handed_over:
+                yield chunk
+            return
     if not client_has_bytes.is_set():
         # Nothing was ever committed downstream, so there is no started message to correct — the same case the legacy chain leaves to its caller (`render_error` there runs only `if session.frontier.message_start_accepted`). An upstream that produced no block and no terminal still leaves the client a 200 with an empty body; that is pre-existing behaviour on a path this slice does not touch, and widening it is a separate question from STR-04's flush.
         return
@@ -368,15 +384,6 @@ async def _deliver(
             code="incomplete_responses_stream",
         )
         return
-    if terminal.stop_reason in _HANDED_OVER_STOP_REASONS:
-        # Upstream finished cleanly and said it stopped because it ran out of room. Nothing failed, so nothing above catches it — but the turn is no more finished than a torn one, and the client is the only side that can carry it on. Ruled 2026-08-21: `max_tokens` always hands over.
-        handed_over = _hand_over(
-            continuation, session, assembler, framing, stop_reason=terminal.stop_reason
-        )
-        if handed_over is not None:
-            for chunk in handed_over:
-                yield chunk
-            return
     # `or "end_turn"` is still a synthesis, and still visible where it happens — but it now only ever runs on a stream that really did see a terminal event, so it fills in a field upstream left empty rather than inventing an ending upstream never reached. An upstream that sends an explicit empty `stop_reason` gets `end_turn`, because `""` is not a stop reason any Anthropic consumer accepts.
     for frame in framing.terminal(terminal):
         yield frame
@@ -410,14 +417,13 @@ def _hand_over(
     if payload is None:
         return None
     chunks: list[bytes] = []
+    # Read before the flush, because the flush is what sets it. Asked afterwards this is always true, so the preamble it guards never went out — and the one ending that reaches here with nothing yet delivered is precisely the one that needs it.
+    started = session.started
     remaining = session.finish()
-    if remaining and not session.started:
+    if not started:
         chunks.extend(framing.preamble())
     for block in remaining:
         chunks.extend(framing.block(block))
-    if session.committed_count == 0:
-        # Reachable only for a turn upstream cut short for want of room whose one block was itself truncated and dropped. The message still has to begin before a block can go out.
-        chunks.extend(framing.preamble())
     handed = CompletedBlock(index=session.committed_count, kind=TOOL_USE_KIND, payload=payload)
     chunks.extend(framing.block(handed))
     # `tool_use` as the ending, because that is what this turn now is. `synthesize` refuses any client that did not ask in Anthropic Messages, so only that framer is ever reached here.
