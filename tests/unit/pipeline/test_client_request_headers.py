@@ -32,8 +32,6 @@ def test_the_blacklist_is_case_insensitive_for_every_entry_the_document_names() 
     """`message-format-reshape.md` made this explicit on 2026-08-22, and it had never been pinned.
 
     A client picks its own case and HTTP does not care; a blacklist that did would leak on the first client that capitalised differently. Every spelling of every entry the document lists, plus the one it added in the same edit — `Authorization`, which is the one that would have travelled beside our own credential.
-
-    The document spells that entry `Authrization`. Taken literally it matches no real header at all, so the list here follows the header name rather than the document's spelling; raised with the config author.
     """
     probe = {
         "Authorization": "Bearer client-secret",
