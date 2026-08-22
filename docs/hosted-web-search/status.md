@@ -66,6 +66,11 @@
 
 `tests/unit/config/test_config_schema.py::test_authoritative_example_config_parses` 在 `767d0f2` 上失败，**先于本切片**（把 `schema.py` 还原成 HEAD 内容同样复现）。用户 2026-08-22 08:26 在 `docs/.human-controlled/config.example.yaml` 里新增了两个 schema 尚未实现的键：`upstream_request_retry.strategies.streamReplay` 与 `hook_strip_anthropic_request_headers.strip_anthropic_beta_flags`。**这是用户想要的功能的信号，不是配置笔误**——需要用户确认要不要实现。
 
+**2026-08-22 后续（本节到此为止的判断仍然成立，下面是它的去向）**：
+
+- `streamReplay` —— 用户已从 `config.example.yaml` 中撤下，这条不再是待办。
+- `strip_anthropic_beta_flags` —— 用户确认要实现，已落地：schema 建模、新链路接线、单元与端到端测试齐备。经过与未采纳项见 `../hooks-subscription-migration/reports/260822-beta-flag-strip-implementation.md`。
+
 ## 5. 证据在哪
 
 | 主题 | 文件 |
