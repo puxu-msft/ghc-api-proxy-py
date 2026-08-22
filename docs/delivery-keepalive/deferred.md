@@ -175,6 +175,10 @@ TCP keep-alive 是逐连接的，而代理会终结 TCP 连接。实测（`getpe
 
 该文档已被并行会话移到 `.dev/docs/archived-2604-rewrite/streaming-resilience.md`，属归档件。其 `:284-288` 的配置表用旧 `AppSettings` 键名，且 `upstream.keepalive_expiry = 30` 从来不是生效值——但归档件记录的是当时的设计意图，不是当前事实，**不必回头改它**。当前事实以 `schema.py` 的注释与本文件为准。
 
+**`stream.py` 的 `PING_FRAME` 现在是测试专用常量（2026-08-22 观察）**：客户端侧保活帧已随 framer 重构搬进 `framer.keepalive()`（`formats/anthropic_messages.py` 与 `formats/openai_responses.py` 各返回同样的 `b": ping\n\n"`），`rg PING_FRAME src/` 只剩 `stream.py` 里的那行定义、**零处使用**；仍在 import 它的只有 `tests/unit/pipeline/delivery/test_stream_delivery.py`。
+
+不是缺陷，也不建议顺手删——它是那批测试断言「这一帧不带内容」时的字面来源，删了要么让测试自己写死字节、要么去 import 某个 framer，两种都比现状差。记在这里只为一件事：**将来谁看到「生产代码零使用」就想清理它，先知道测试在用，且用的就是它字面上的那个值。** 两处 framer 各自写死同样的字节而不共享常量，是重构时的选择，不在本条讨论范围。
+
 ## 合入后复评查出的三条 —— 已修
 
 评审报告：`reports/review-merged-upstream-keepalive.md`（异源模型，真实 socket 与真实连接池探针）。派这一轮的直接原因是：上游 slice 的代理修复机制在评审通过**之后**被换掉过（替换池 → 只补 `create_connection`），换掉的那一版没有任何人审过。逐参数比对的结论是新机制在 httpcore 1.0.9 上没有漏传或错传，但同时查出下面三条。
