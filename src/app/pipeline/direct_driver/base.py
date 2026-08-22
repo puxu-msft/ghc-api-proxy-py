@@ -139,6 +139,9 @@ class DirectDriver:
                 if self._rate_limiter is not None:
                     context.extras["rate_limit_wait_s"] = await self._rate_limiter.acquire()
                 response = await self._send(context, attempt.payload)
+            except asyncio.CancelledError:
+                # Not a failure this loop gets to have an opinion about. A cancellation is the runtime saying this task stops now, and it is how the layers above express their own deadlines: `handle_bounded` wraps the whole request in `asyncio.timeout`, which fires by cancelling and then reads the cancellation back out to turn it into a `TimeoutError`. Catching it here consumed it, so that conversion never happened and the line meant to answer it — `raise UpstreamTimeout(f"client request exceeded {deadline}s")` — was dead code. The client was told 502 `CancelledError` with an empty message instead of 504. Measured 2026-08-22; see `.dev/docs/upstream/retry-and-continuation/deferred.md` 8a.
+                raise
             except BaseException as error:
                 attempt.error = str(error)
                 if not await self._handle_failure(error, context, outcome):
@@ -167,6 +170,10 @@ class DirectDriver:
             try:
                 await self._publish(EVENT_ATTEMPT_SUCCEEDED, context, outcome)
                 await self._publish(EVENT_REQUEST_SUCCEEDED, context, outcome)
+            except asyncio.CancelledError:
+                # Same reason as above, and the same consequence if it were caught: a subscriber's own await can be the one that observes the cancellation.
+                outcome.response = None
+                raise
             except BaseException as error:
                 outcome.response = None
                 attempt.error = str(error)

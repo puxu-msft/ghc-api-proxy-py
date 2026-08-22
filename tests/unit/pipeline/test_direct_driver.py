@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any
 
 import httpx2
@@ -385,3 +386,24 @@ async def test_no_client_headers_sends_none_rather_than_an_empty_mapping() -> No
     await driver(provider).run(context())
 
     assert provider.sent_headers == [None]
+
+
+@pytest.mark.asyncio
+async def test_a_cancellation_passes_through_rather_than_being_answered() -> None:
+    """A cancellation is not a failure this loop gets an opinion about, and catching it broke the layer above.
+
+    `handle_bounded` expresses the client deadline as `asyncio.timeout`, which fires by cancelling and then reads the cancellation back out to turn it into a `TimeoutError`. While this loop caught it, that conversion never happened: the line meant to answer it raised nothing, and the client was told 502 `CancelledError` with an empty message instead of 504.
+
+    Asserted through `asyncio.timeout` rather than on `CancelledError` directly, because the property that matters is not that the exception escapes — it is that the enclosing scope still recognises its own timeout.
+    """
+    registry = SubscriberRegistry[RequestContext]()
+
+    async def never_answers(ctx: RequestContext) -> None:
+        del ctx
+        await asyncio.sleep(60)
+
+    registry.subscribe(EVENT_ATTEMPT_PREPARE, "slow", never_answers)
+
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.05):
+            await driver(FakeProvider(), registry).run(context())
