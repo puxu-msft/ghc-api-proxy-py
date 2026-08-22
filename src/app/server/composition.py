@@ -433,7 +433,11 @@ def build_chain(
         for provider in config.model_providers.values()
         for pattern in provider.models_support_web_search
     )
-    register_builtin_subscribers(subscriber_registry, web_search_models=web_search_models)
+    register_builtin_subscribers(
+        subscriber_registry,
+        web_search_models=web_search_models,
+        web_search_enabled=config.model_translation.to_openai_responses.hosted_web_search,
+    )
 
     return Chain(
         config=config,

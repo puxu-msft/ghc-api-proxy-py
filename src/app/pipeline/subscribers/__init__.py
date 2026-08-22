@@ -35,6 +35,7 @@ def register_builtin_subscribers(
     registry: SubscriberRegistry[RequestContext],
     *,
     web_search_models: Sequence[re.Pattern[str]] = (),
+    web_search_enabled: bool = False,
 ) -> None:
     """Add every built-in subscriber to a registry that has not been frozen yet.
 
@@ -50,10 +51,10 @@ def register_builtin_subscribers(
     registry.subscribe(
         EVENT_ATTEMPT_PREPARE,
         HOSTED_WEB_SEARCH_GATE_ID,
-        # Bound at registration rather than read from the context: the list is configuration, fixed
-        # for the life of the chain, and threading it through every request would put a startup
-        # decision in a per-request field where something could change it mid-flight.
-        lambda context: gate_hosted_web_search(context, web_search_models),
+        # Bound at registration rather than read from the context: both are configuration, fixed for the life of the chain, and threading them through every request would put a startup decision in a per-request field where something could change it mid-flight.
+        lambda context: gate_hosted_web_search(
+            context, web_search_models, enabled=web_search_enabled
+        ),
     )
     registry.subscribe(
         EVENT_ATTEMPT_PREPARE,

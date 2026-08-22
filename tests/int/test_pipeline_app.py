@@ -236,6 +236,8 @@ def test_an_anthropic_web_search_declaration_reaches_upstream_in_its_own_spellin
     client, seen = make_client(
         lambda _: httpx2.Response(200, json={"id": "resp_1"}),
         overrides={
+            # Explicitly on: the switch defaults to off, so without this the gate refuses before the model list is ever consulted and the test stops discriminating what it names.
+            "model_translation": {"to_openai_responses": {"hosted_web_search": True}},
             "model_providers": {
                 "ghc": {
                     "type": "github_copilot",
@@ -286,6 +288,8 @@ def test_a_streamed_search_is_delivered_as_a_line_rather_than_an_empty_block() -
             200, content=sse, headers={"content-type": "text/event-stream"}
         ),
         overrides={
+            # Explicitly on: the switch defaults to off, so without this the gate refuses before the model list is ever consulted and the test stops discriminating what it names.
+            "model_translation": {"to_openai_responses": {"hosted_web_search": True}},
             "model_providers": {
                 "ghc": {
                     "type": "github_copilot",
@@ -319,6 +323,49 @@ def test_a_streamed_search_is_delivered_as_a_line_rather_than_an_empty_block() -
     assert all(text for text in deltas), deltas
 
 
+def test_hosted_web_search_is_off_until_the_config_says_otherwise() -> None:
+    """The default. A search declaration with nothing configured is answered as a failed tool, and upstream is never asked.
+
+    Ruled 2026-08-21: the Responses leg really does execute a search, but what this proxy does with the answer is partial — a line of text where the protocol defines a `server_tool_use` / `web_search_tool_result` pair, `url_citation` annotations unread, `max_uses` and the domain lists unsendable. Off is what keeps that from being what every request gets.
+
+    Off is not the same as removing the declaration and carrying on. A Claude Code search is its own sub-request carrying nothing but the search, so one stripped of it answers from memory under a heading the client reads as search results — which is why `seen == []` is half the assertion.
+
+    The model is put on the supported list on purpose, and `hosted_web_search` is the one thing left unset. Without that this test passes for the wrong reason: the default patterns do not claim `gpt-model`, so flipping the switch's default to on left it green — measured. The list has to say yes for the switch to be the only thing saying no.
+    """
+    client, seen = make_client(
+        lambda _: httpx2.Response(200, json={"id": "resp_1"}),
+        overrides={
+            "model_providers": {
+                "ghc": {
+                    "type": "github_copilot",
+                    "api_base_url": BASE_URL,
+                    "models_support_web_search": ["gpt-model"],
+                }
+            }
+        },
+    )
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "gpt-model",
+            "messages": [
+                {"role": "user", "content": "Perform a web search for the query: bun"}
+            ],
+            "max_tokens": 1024,
+            "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+        },
+    )
+
+    assert response.status_code == 200, "an HTTP error here is retried by the client"
+    assert seen == [], "a disabled search still reached upstream"
+    blocks = orjson.loads(response.content)["content"]
+    assert [block["type"] for block in blocks] == [
+        "server_tool_use",
+        "web_search_tool_result",
+    ]
+    assert blocks[1]["content"]["error_code"] == "unavailable"
+
+
 def test_a_search_that_cannot_run_is_answered_as_a_failed_tool_not_an_error() -> None:
     """The client issues a search as its own sub-request and treats an HTTP error as a transport problem worth retrying — three times, in the one case on record. A search this endpoint cannot run will not start working on the third attempt.
 
@@ -329,6 +376,8 @@ def test_a_search_that_cannot_run_is_answered_as_a_failed_tool_not_an_error() ->
     client, seen = make_client(
         lambda _: httpx2.Response(200, json={"id": "resp_1"}),
         overrides={
+            # Explicitly on: the switch defaults to off, so without this the gate refuses before the model list is ever consulted and the test stops discriminating what it names.
+            "model_translation": {"to_openai_responses": {"hosted_web_search": True}},
             "model_providers": {
                 "ghc": {
                     "type": "github_copilot",
@@ -373,6 +422,8 @@ def test_a_streamed_search_that_cannot_run_is_answered_the_same_way() -> None:
     client, seen = make_client(
         lambda _: httpx2.Response(200, json={"id": "resp_1"}),
         overrides={
+            # Explicitly on: the switch defaults to off, so without this the gate refuses before the model list is ever consulted and the test stops discriminating what it names.
+            "model_translation": {"to_openai_responses": {"hosted_web_search": True}},
             "model_providers": {
                 "ghc": {
                     "type": "github_copilot",
@@ -419,6 +470,8 @@ def test_the_shape_claude_code_really_sends_reaches_upstream_as_a_search() -> No
     client, seen = make_client(
         lambda _: httpx2.Response(200, json={"id": "resp_1"}),
         overrides={
+            # Explicitly on: the switch defaults to off, so without this the gate refuses before the model list is ever consulted and the test stops discriminating what it names.
+            "model_translation": {"to_openai_responses": {"hosted_web_search": True}},
             "model_providers": {
                 "ghc": {
                     "type": "github_copilot",
@@ -465,7 +518,10 @@ def test_a_domain_restriction_refuses_before_upstream_is_called() -> None:
         lambda _: httpx2.Response(200, json={"id": "resp_1"}),
         overrides={
             "model_translation": {
-                "to_openai_responses": {"web_search_domain_restrictions": "error"}
+                "to_openai_responses": {
+                    "hosted_web_search": True,
+                    "web_search_domain_restrictions": "error",
+                }
             },
             "model_providers": {
                 "ghc": {

@@ -1,6 +1,8 @@
-"""Hosted web search, refused for models that do not run it.
+"""Hosted web search, refused unless it is turned on and the model is known to run it.
 
-The Responses endpoint executes web search itself, and the request translator turns the client's Anthropic declaration into the `{"type": "web_search"}` that endpoint answers to. Whether the model behind it *actually runs* the search is a separate question, and the catalog cannot answer it: measured 2026-08-20 over the live catalog, no model advertises a web-search capability bit under any name, and the two models known to work are indistinguishable from the rest on every advertised field. So the answer is a list an operator maintains — `model_providers.<name>.models_support_web_search`.
+**Off by default, ruled 2026-08-21.** The Responses endpoint really does execute a search — measured — but what this proxy does with the answer is partial: an Anthropic client is handed a line of text where the protocol defines a `server_tool_use` / `web_search_tool_result` pair, the `url_citation` annotations upstream returns are not read, and `max_uses` and the domain lists cannot be sent at all. `model_translation.to_openai_responses.hosted_web_search` is the switch, and leaving it off is what keeps a half-built feature from being what every request gets.
+
+The request translator turns the client's Anthropic declaration into the `{"type": "web_search"}` that endpoint answers to. Whether the model behind it *actually runs* the search is a separate question, and the catalog cannot answer it: measured 2026-08-20 over the live catalog, no model advertises a web-search capability bit under any name, and the two models known to work are indistinguishable from the rest on every advertised field. So the answer is a list an operator maintains — `model_providers.<name>.models_support_web_search`.
 
 **The entries are regular expressions, ruled 2026-08-21.** A list of exact ids has to be edited every time the catalog gains a model, and the edit is the kind nobody makes until a search has already been answered as failed for a model that could have run it. A pattern covers the version family instead, so the next `gpt-5.7` is claimed on arrival. It stays a list rather than becoming a name-derived predicate — which is what a third-party patch of the official extension does, keying on `gpt` major version ≥ 5 — because the vendor split is not visible in the name: `gpt-5-mini` is Azure OpenAI, a different supply chain from the `gpt-5.N` line, and a predicate broad enough to be useful sweeps it in. An operator who knows better than the default can say so; a predicate compiled into the binary cannot be told.
 
@@ -63,15 +65,20 @@ def _is_supported(model: str, supported: Sequence[re.Pattern[str]]) -> bool:
 
 
 async def gate_hosted_web_search(
-    context: RequestContext, supported: Sequence[re.Pattern[str]]
+    context: RequestContext, supported: Sequence[re.Pattern[str]], *, enabled: bool = False
 ) -> None:
-    """Stop a search that this model is not known to run, so it is answered rather than invented."""
+    """Stop a search that will not run, so it is answered rather than invented.
+
+    Two reasons it will not run, kept apart all the way to the log line. `model_translation.to_openai_responses.hosted_web_search` being off is a decision nobody has revisited; a model no pattern claims is a list that needs a line. They call for different actions from whoever reads the log, and collapsing them — by expressing "off" as an empty pattern list, say — would make the more likely of the two invisible, because the default *is* off and an operator who never set the key would be told their model is unlisted.
+
+    Defaulting the keyword to `False` rather than `True` so a caller that forgets it refuses rather than searches: the wrong answer is then a search that did not happen and says so, not one that ran when nobody had asked for the feature.
+    """
     if context.target_format is not WireFormat.OPENAI_RESPONSES:
         return
     if context.extras.get(COUNTING_ONLY):
         # Measuring, not sending: no reply exists to be invented, so there is nothing to refuse for.
         return
-    if _is_supported(context.resolved_model, supported):
+    if enabled and _is_supported(context.resolved_model, supported):
         return
     tools = context.payload.get("tools")
     if not isinstance(tools, list):
@@ -79,7 +86,19 @@ async def gate_hosted_web_search(
     if not any(_is_hosted_web_search(tool) for tool in cast(list[Any], tools)):
         return
 
-    # Named at INFO before the refusal, because the error reaches the client and this reaches the operator — and it is the operator who can fix it, by adding the model to the list or finding out that it does not belong there.
+    # Named at INFO before the refusal, because the error reaches the client and this reaches the operator — and it is the operator who can fix it, by turning the feature on, adding a pattern, or finding out that this model does not belong there.
+    if not enabled:
+        logger.info(
+            "answering a web search for %r as failed: hosted web search is off"
+            " (model_translation.to_openai_responses.hosted_web_search)",
+            context.resolved_model,
+        )
+        raise WebSearchNotExecutable(
+            "hosted web search is not enabled on this proxy; set"
+            " model_translation.to_openai_responses.hosted_web_search to turn it on",
+            code="server_tool_disabled",
+            field_path="tools.web_search",
+        )
     logger.info(
         "answering a web search for %r as failed: no models_support_web_search pattern matches it",
         context.resolved_model,

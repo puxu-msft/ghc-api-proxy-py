@@ -365,7 +365,51 @@ async def test_a_supported_model_pattern_covers_the_family_it_names() -> None:
             target_format=WireFormat.OPENAI_RESPONSES,
         )
         # Returning at all is the assertion: the gate raises for a model it does not recognise.
-        await gate_hosted_web_search(context, supported)
+        await gate_hosted_web_search(context, supported, enabled=True)
+
+
+async def test_the_feature_is_off_until_someone_turns_it_on() -> None:
+    """Default-off, and off refuses even a model every pattern claims.
+
+    The support is real but partial — text where the protocol wants a block pair, citations unread, `max_uses` and the domain lists unsendable — so it is not what every request should get until someone has decided it is.
+
+    Asserted through `register_builtin_subscribers`' own default rather than by passing `enabled=False`, because what is being guarded is the default: a call that says nothing about web search must not search.
+    """
+    from app.pipeline.subscribers.hosted_web_search import compile_supported, gate_hosted_web_search
+
+    context = RequestContext(
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        requested_model="gpt-5.5",
+        payload={"tools": [{"type": "web_search"}]},
+        resolved_model="gpt-5.5",
+        target_format=WireFormat.OPENAI_RESPONSES,
+    )
+    with pytest.raises(WebSearchNotExecutable) as refusal:
+        await gate_hosted_web_search(context, compile_supported([r"gpt-[5-9]\.\d+.*"]))
+
+    # The two reasons a search does not run must stay distinguishable: an operator reading this has
+    # to know whether to turn the feature on or to add a pattern, and the default being off makes
+    # "nobody turned it on" the far likelier of the two.
+    assert refusal.value.code == "server_tool_disabled"
+
+
+async def test_the_switch_being_on_does_not_excuse_an_unlisted_model() -> None:
+    """Two axes, both of which must hold. On says the feature is offered; the list says which models run it."""
+    from app.pipeline.subscribers.hosted_web_search import compile_supported, gate_hosted_web_search
+
+    context = RequestContext(
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        requested_model="claude-sonnet-5",
+        payload={"tools": [{"type": "web_search"}]},
+        resolved_model="claude-sonnet-5",
+        target_format=WireFormat.OPENAI_RESPONSES,
+    )
+    with pytest.raises(WebSearchNotExecutable) as refusal:
+        await gate_hosted_web_search(
+            context, compile_supported([r"gpt-[5-9]\.\d+.*"]), enabled=True
+        )
+
+    assert refusal.value.code == "server_tool_capability_unavailable"
 
 
 async def test_a_pattern_is_anchored_and_the_dotted_minor_is_required() -> None:
@@ -384,4 +428,4 @@ async def test_a_pattern_is_anchored_and_the_dotted_minor_is_required() -> None:
             target_format=WireFormat.OPENAI_RESPONSES,
         )
         with pytest.raises(WebSearchNotExecutable):
-            await gate_hosted_web_search(context, compile_supported([pattern]))
+            await gate_hosted_web_search(context, compile_supported([pattern]), enabled=True)
