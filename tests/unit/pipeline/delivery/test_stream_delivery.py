@@ -18,6 +18,7 @@ from h2.exceptions import ProtocolError as H2ProtocolError
 from app.config.schema import ContentBlockStartCompat, UpstreamRequestRetryConfig
 from app.model_provider.ghc_client.errors import normalize_upstream_error
 from app.observability.active_requests import ActiveRequestRegistry
+from app.observability.request_trace import RequestTrace
 from app.pipeline.delivery.assembling import Terminal
 from app.pipeline.delivery.blocks import BlockBuffer, CompletedBlock
 from app.pipeline.delivery.formats.anthropic_messages import AnthropicAssembler, AnthropicFramer
@@ -34,7 +35,6 @@ from app.pipeline.delivery.stream import (
 from app.pipeline.retry import RetryLedger, RetryReason, reason_for
 from app.server.pipeline_app import (
     _counted_upstream,  # pyright: ignore[reportPrivateUsage]
-    _Trace,  # pyright: ignore[reportPrivateUsage]
 )
 from app.streaming.deadline import ClientDeadlineError, StreamDeadlineError, with_deadline_at
 from app.streaming.idle_timeout import StreamIdleTimeoutError, with_idle_timeout
@@ -516,7 +516,7 @@ async def test_the_idle_guard_settles_the_stream_it_was_watching() -> None:
         finally:
             released.append(True)
 
-    trace = _Trace(method="POST", path="/v1/messages")
+    trace = RequestTrace(method="POST", path="/v1/messages")
     counted = _counted_upstream(
         with_idle_timeout(source(), timeout_seconds=30),
         cast(Any, SimpleNamespace(active_requests=ActiveRequestRegistry())),
@@ -838,7 +838,7 @@ async def test_the_deadline_guard_settles_the_stream_it_was_watching() -> None:
         finally:
             released.append(True)
 
-    trace = _Trace(method="POST", path="/v1/messages")
+    trace = RequestTrace(method="POST", path="/v1/messages")
     counted = _counted_upstream(
         with_deadline_at(source(), deadline_at=asyncio.get_running_loop().time() + 30),
         cast(Any, SimpleNamespace(active_requests=ActiveRequestRegistry())),
@@ -874,7 +874,7 @@ async def test_a_silence_in_the_middle_of_the_stream_is_recorded_apart_from_the_
         yield b"second"
         yield b"third"
 
-    trace = _Trace(method="POST", path="/v1/messages", started=time.monotonic())
+    trace = RequestTrace(method="POST", path="/v1/messages", started=time.monotonic())
     counted = _counted_upstream(
         source(),
         cast(Any, SimpleNamespace(active_requests=ActiveRequestRegistry())),
@@ -899,7 +899,7 @@ async def test_a_stream_of_one_chunk_reports_no_gap_rather_than_a_gap_of_zero() 
     async def source() -> AsyncIterator[bytes]:
         yield b"only"
 
-    trace = _Trace(method="POST", path="/v1/messages", started=time.monotonic())
+    trace = RequestTrace(method="POST", path="/v1/messages", started=time.monotonic())
     counted = _counted_upstream(
         source(),
         cast(Any, SimpleNamespace(active_requests=ActiveRequestRegistry())),

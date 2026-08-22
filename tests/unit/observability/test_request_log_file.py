@@ -9,16 +9,16 @@ from typing import Any, cast
 
 import pytest
 
-from app.observability import request_log_file
+from app.observability import request_log_file, request_trace
+from app.observability.request_log import RequestLine
+from app.observability.request_trace import (
+    RequestTrace,
+    log_completion,
+    snapshot_upstream_connection,
+)
 from app.observability.terminal import TerminalCapabilities
 from app.pipeline.delivery.assembling import ReplyDialect, Terminal
 from app.pipeline.delivery.blocks import CompletedBlock
-from app.server import pipeline_app
-from app.server.pipeline_app import (
-    _log_completion,  # pyright: ignore[reportPrivateUsage]
-    _snapshot_upstream_connection,  # pyright: ignore[reportPrivateUsage]
-    _Trace,  # pyright: ignore[reportPrivateUsage]
-)
 
 
 @pytest.fixture(autouse=True)
@@ -40,7 +40,7 @@ def _capture_console(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
     def logger_for(_name: str) -> Logger:
         return Logger()
 
-    monkeypatch.setattr(pipeline_app, "get_logger", logger_for)
+    monkeypatch.setattr(request_trace, "get_logger", logger_for)
     return emitted
 
 
@@ -63,7 +63,7 @@ def test_a_successful_request_writes_one_complete_structured_record(tmp_path: Pa
     terminal.record(CompletedBlock(index=0, kind="text", payload={"type": "text", "text": "done"}))
     terminal.record(CompletedBlock(index=1, kind="tool_use", payload={"type": "tool_use", "name": "Bash"}))
     terminal.record(CompletedBlock(index=2, kind="thinking", payload={"type": "thinking", "thinking": ""}))
-    trace = _Trace(
+    trace = RequestTrace(
         method="POST",
         path="/v1/messages",
         request_id="req-1",
@@ -84,7 +84,7 @@ def test_a_successful_request_writes_one_complete_structured_record(tmp_path: Pa
     )
     trace.absorb(terminal)
 
-    _log_completion(_chain(), trace, 200, bytes_out=2153)
+    log_completion(_chain(), trace, 200, bytes_out=2153)
 
     record = _only_record(tmp_path)
     assert set(record) == {
@@ -171,7 +171,7 @@ def test_a_successful_request_writes_one_complete_structured_record(tmp_path: Pa
 def test_a_failed_request_keeps_detail_and_reports_no_terminal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     emitted = _capture_console(monkeypatch)
     detail = "stream failed before a terminal event: <ConnectionTerminated error_code:0, last_stream_id:2147483647>"
-    trace = _Trace(
+    trace = RequestTrace(
         method="POST",
         path="/v1/messages",
         request_id="req-fail",
@@ -185,7 +185,7 @@ def test_a_failed_request_keeps_detail_and_reports_no_terminal(tmp_path: Path, m
         terminal_seen=False,
     )
 
-    _log_completion(_chain(), trace, 200, bytes_out=trace.received)
+    log_completion(_chain(), trace, 200, bytes_out=trace.received)
 
     record = _only_record(tmp_path)
     assert record["status"] == "fail"
@@ -201,9 +201,9 @@ def test_a_failed_request_keeps_detail_and_reports_no_terminal(tmp_path: Path, m
 def test_a_write_failure_does_not_interrupt_request_completion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     emitted = _capture_console(monkeypatch)
     monkeypatch.setattr(request_log_file, "user_data_path", lambda: tmp_path / "nope" / "\0bad")
-    trace = _Trace(method="POST", path="/v1/messages", started=time.monotonic(), started_at="2026-08-20T15:01:53.580Z")
+    trace = RequestTrace(method="POST", path="/v1/messages", started=time.monotonic(), started_at="2026-08-20T15:01:53.580Z")
 
-    _log_completion(_chain(), trace, 200, bytes_out=0)
+    log_completion(_chain(), trace, 200, bytes_out=0)
 
     assert len(emitted) == 1
     assert emitted[0][1] == "ok"
@@ -225,12 +225,12 @@ def test_connection_identity_is_copied_while_the_transport_is_live() -> None:
     stream = NetworkStream()
     response = SimpleNamespace(extensions={"network_stream": stream, "stream_id": 7})
 
-    snapshot = _snapshot_upstream_connection(response)
+    snapshot = snapshot_upstream_connection(response)
     stream.closed = True
 
     assert snapshot == {"local": "172.19.141.235:56822", "peer": "140.82.116.5:443", "alpn": "h2", "stream_id": 7}
     # Once the socket is closed the addresses raise, and the row must say so rather than carry `""` in their place: a named reader compares `local` across rows and reads equal values as one shared connection, which every blanked-out row would satisfy. `stream_id` survives because it comes off the extensions mapping, not the socket — reporting the half that is known beside the reason the rest is missing beats reporting either alone.
-    assert _snapshot_upstream_connection(response) == {"stream_id": 7, "unavailable": "socket-unreadable"}
+    assert snapshot_upstream_connection(response) == {"stream_id": 7, "unavailable": "socket-unreadable"}
 
 
 def test_a_transport_with_no_identity_says_that_rather_than_going_blank() -> None:
@@ -238,13 +238,13 @@ def test_a_transport_with_no_identity_says_that_rather_than_going_blank() -> Non
 
     Every HTTP/1.1 exchange recorded so far, and every request served through a mock transport, lands here — 152 of 2527 rows on 2026-08-20. They used to be written as `{"local": "", "peer": "", "alpn": "", "stream_id": null}`, which is indistinguishable from a failed read and, worse, equal to every other such row.
     """
-    assert _snapshot_upstream_connection(SimpleNamespace(extensions={})) == {"unavailable": "no-transport-identity"}
+    assert snapshot_upstream_connection(SimpleNamespace(extensions={})) == {"unavailable": "no-transport-identity"}
     # An extensions mapping shaped unlike httpcore's is a third thing again, and it carries what went wrong.
-    broken = _snapshot_upstream_connection(SimpleNamespace())
+    broken = snapshot_upstream_connection(SimpleNamespace())
     assert list(broken) == ["unavailable"]
     assert broken["unavailable"].startswith("snapshot-failed: ")
-    # And none of the three is the empty dict, which `_Trace` uses to mean no snapshot was ever taken.
-    assert {} not in (broken, _snapshot_upstream_connection(SimpleNamespace(extensions={})))
+    # And none of the three is the empty dict, which `RequestTrace` uses to mean no snapshot was ever taken.
+    assert {} not in (broken, snapshot_upstream_connection(SimpleNamespace(extensions={})))
 
 
 def test_only_the_newest_utc_day_files_are_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -254,7 +254,7 @@ def test_only_the_newest_utc_day_files_are_kept(tmp_path: Path, monkeypatch: pyt
     for day in ("20260801", "20260802", "20260803"):
         (directory / f"requests-{day}.jsonl").write_text("{}\n", encoding="utf-8")
 
-    request_log_file.write_request_record(pipeline_app.RequestLine(method="POST", path="/v1/messages"), status="ok")
+    request_log_file.write_request_record(RequestLine(method="POST", path="/v1/messages"), status="ok")
 
     kept = sorted(path.name for path in directory.glob("requests-*.jsonl"))
     today = f"requests-{datetime.now(UTC):%Y%m%d}.jsonl"

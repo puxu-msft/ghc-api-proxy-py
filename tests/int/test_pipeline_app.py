@@ -34,16 +34,15 @@ from app.observability import rejection_capture
 from app.observability.active_requests import ActiveRequestRegistry
 from app.observability.logging import setup_logging
 from app.observability.request_log_file import request_logs_dir
+from app.observability.request_trace import REQUEST_LOGGER, RequestTrace
 from app.pipeline.delivery.formats.anthropic_messages import AnthropicAssembler, AnthropicFramer
 from app.pipeline.delivery.stream import stream_delivery
 from app.server.composition import build_chain
 from app.server.handler import delivery_buffer, stream_settings
 from app.server.pipeline_app import (
     CHAIN_STATE_KEY,
-    REQUEST_LOGGER,
     _AccountedStreamingResponse,  # pyright: ignore[reportPrivateUsage]
     _StreamAccounting,  # pyright: ignore[reportPrivateUsage]
-    _Trace,  # pyright: ignore[reportPrivateUsage]
     _tracked_delivery,  # pyright: ignore[reportPrivateUsage]
     create_pipeline_app,
 )
@@ -1816,7 +1815,7 @@ def test_a_refused_request_is_reported_with_its_route_and_reason(request_log: No
 def test_a_request_that_raised_on_its_way_out_still_writes_its_one_line(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
     """The exit that used to write nothing at all.
 
-    `_log_completion` says every exit path produces exactly one line, and every test around this one checks a path that reaches a `return`. An exception leaving `_dispatch` skipped all of them: the slot was released and the request vanished, and the only trace left was a traceback under the server's own logger with none of this request's identity on it.
+    `log_completion` says every exit path produces exactly one line, and every test around this one checks a path that reaches a `return`. An exception leaving `_dispatch` skipped all of them: the slot was released and the request vanished, and the only trace left was a traceback under the server's own logger with none of this request's identity on it.
 
     Reproduced without patching anything in the app. Upstream answers 200 and calls its body JSON; `response.json()` in the buffered branch is not inside a `try`, so the decode error goes straight out through `_serve`. That is the same shape as the paths a reader would sooner name — a client hanging up inside `await request.body()`, a translator raising on an input nobody anticipated — and this one needs no monkeypatching to produce.
     """
@@ -1926,7 +1925,7 @@ async def test_an_upstream_that_tore_says_so_and_says_what_broke(
     """
     client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
     chain = _chain_of(client)
-    trace = _Trace(method="POST", path="/v1/messages", request_id="req_1", started=time.monotonic())
+    trace = RequestTrace(method="POST", path="/v1/messages", request_id="req_1", started=time.monotonic())
     assembler = AnthropicAssembler()
     accounting = _StreamAccounting(
         chain=chain, request_id="req_1", trace=trace, status_code=200, assembler=assembler
@@ -1975,7 +1974,7 @@ async def test_a_tear_after_the_stop_reason_is_still_a_tear(
     """
     client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
     chain = _chain_of(client)
-    trace = _Trace(method="POST", path="/v1/messages", request_id="req_1", started=time.monotonic())
+    trace = RequestTrace(method="POST", path="/v1/messages", request_id="req_1", started=time.monotonic())
     assembler = AnthropicAssembler()
     accounting = _StreamAccounting(
         chain=chain, request_id="req_1", trace=trace, status_code=200, assembler=assembler
@@ -2047,7 +2046,7 @@ async def test_a_client_that_walked_away_is_not_blamed_on_upstream(
     """
     client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
     chain = _chain_of(client)
-    trace = _Trace(method="POST", path="/v1/messages", request_id="req_1", started=time.monotonic())
+    trace = RequestTrace(method="POST", path="/v1/messages", request_id="req_1", started=time.monotonic())
     assembler = AnthropicAssembler()
     accounting = _StreamAccounting(
         chain=chain, request_id="req_1", trace=trace, status_code=200, assembler=assembler
