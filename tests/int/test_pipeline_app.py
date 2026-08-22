@@ -2599,3 +2599,48 @@ def test_a_silence_in_the_middle_of_a_delivered_stream_reaches_the_record() -> N
     assert len(records) == 1, records
     assert records[0]["upstream_chunks"] >= 2, "a stream that arrived in one piece cannot have a gap in it"
     assert cast(float, records[0]["upstream_max_gap_s"]) >= quiet
+
+
+def test_a_torn_stream_the_client_never_saw_is_replayed_end_to_end() -> None:
+    """The whole point of the traceless retry, asserted through the real app rather than the seam.
+
+    The first attempt opens a block and the connection dies before it closes, so nothing was ever delivered — the preamble travels with the first complete block, which is what makes "the client has seen bytes" and "a block was delivered" the same fact. A second attempt answers the same request and the client cannot tell there were two: one `message_start`, one message, and none of the first attempt's text in it.
+
+    Asserted on upstream being asked twice as well, because a version that simply swallowed the tear and returned the second attempt's bytes would look identical on the wire without ever having replayed anything.
+    """
+    calls: list[int] = []
+
+    async def torn_body() -> AsyncIterator[bytes]:
+        yield (
+            b'event: content_block_start\ndata: {"index":0,"content_block":{"type":"text"}}\n\n'
+        )
+        raise httpx2.RemoteProtocolError("peer closed the connection")
+
+    def upstream(request: httpx2.Request) -> httpx2.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx2.Response(
+                200, content=torn_body(), headers={"content-type": "text/event-stream"}
+            )
+        return httpx2.Response(
+            200,
+            content=sse_upstream("kept"),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client, _ = make_client(upstream)
+    response = client.post(
+        "/v1/messages",
+        json={"model": "claude-model", "messages": [], "stream": True},
+    )
+
+    assert response.status_code == 200
+    events = [
+        line.removeprefix("event: ")
+        for line in response.text.splitlines()
+        if line.startswith("event: ")
+    ]
+    assert events.count("message_start") == 1
+    assert events[-1] == "message_stop"
+    assert "kept" in response.text
+    assert len(calls) == 2

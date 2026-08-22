@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from app.model_provider import ModelEndpoint
 from app.pipeline.delivery.assembler import Terminal
+from app.pipeline.retry import RetryLedger
 
 
 class WireFormat(StrEnum):
@@ -80,6 +81,8 @@ class RequestContext:
 
     # Anything a subscriber wants to carry between events.
     extras: MutableMapping[str, Any] = field(default_factory=lambda: dict[str, Any]())
+    # One budget for this client request, however many attempts it takes — including the ones delivery opens after a torn body, which happen long after the driver that opened the first has returned. Built lazily by `handle` and kept here rather than by the driver, because a driver built per call would hand each reopened attempt a fresh budget and `max_total` would stop being a bound on anything.
+    retry_ledger: RetryLedger | None = None
 
     def begin_attempt(self, *, payload: dict[str, Any] | None = None) -> Attempt:
         attempt = Attempt(

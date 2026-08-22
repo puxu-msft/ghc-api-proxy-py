@@ -127,6 +127,16 @@ def translation_target(provider: ModelProvider, model_id: str) -> TranslationTar
     return TranslationTarget(model_id=model_id, reasoning_efforts=descriptor.reasoning_efforts)
 
 
+def _ledger_for(context: RequestContext, chain: Chain) -> RetryLedger:
+    """One budget for the whole client request, built on first use and kept on the request.
+
+    It used to be built per call, which was the same thing while a request meant one call. It is not any more: delivery opens further attempts after a torn body, long after the driver that opened the first has returned, and each of those would have arrived with a full budget of its own — `max_total` would have bounded a call rather than a request, which is not what it is named for.
+    """
+    if context.retry_ledger is None:
+        context.retry_ledger = RetryLedger(chain.config.upstream_request_retry)
+    return context.retry_ledger
+
+
 async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[RequestContext], None] | None = None) -> HandledRequest:
     provider, route = shape_request(chain, context, on_routed)
 
@@ -151,7 +161,7 @@ async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[Req
     driver = driver_type(
         provider,
         chain.subscribers,
-        budget=LedgerBudget(RetryLedger(chain.config.upstream_request_retry)),
+        budget=LedgerBudget(_ledger_for(context, chain)),
         attempt_deadline=attempt_deadline,
         response_header_timeout=timeouts.response_header,
         rate_limiter=chain.rate_limiter_for(provider.name),

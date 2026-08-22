@@ -20,6 +20,7 @@ from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.requests import ClientDisconnect
 
+from app.model_provider.ghc_client.errors import normalize_upstream_error
 from app.observability.logging import get_logger
 from app.observability.metrics import ATTRIBUTION_LINES_STRIPPED, TRANSLATION_LOSSES
 from app.observability.rejection_capture import capture_rejection
@@ -35,17 +36,21 @@ from app.observability.request_log_file import utc_timestamp, write_request_reco
 from app.observability.tui import footer_tui_or_none
 from app.pipeline.anthropic_request_hook import strip_attribution_lines
 from app.pipeline.delivery.assembler import BlockAssembler, ReplyDialect, Terminal
-from app.pipeline.delivery.stream import stream_delivery
+from app.pipeline.delivery.blocks import BlockBuffer
+from app.pipeline.delivery.stream import ReplaySupport, stream_delivery
 from app.pipeline.request import RequestContext, WireFormat
+from app.pipeline.retry import RetryReason, reason_for
 from app.pipeline.translation_driver.semantic import Loss
 from app.server.admission import InFlightLimit
 from app.server.composition import Chain, refresh_catalogs
 from app.server.handler import (
+    _ledger_for,  # pyright: ignore[reportPrivateUsage]
     assembler_for,
     delivery_buffer,
     error_body,
     error_headers,
     error_status,
+    handle,
     handle_bounded,
     handle_count_tokens,
     reply_summary,
@@ -55,8 +60,8 @@ from app.server.handler import (
 )
 from app.server.inbound import ROUTES, InboundRequestError, build_context, route_for_path
 from app.server.ops_routes import router as ops_router
-from app.streaming.deadline import with_client_deadline_at, with_deadline_at
-from app.streaming.idle_timeout import with_idle_timeout
+from app.streaming.deadline import StreamDeadlineError, with_client_deadline_at, with_deadline_at
+from app.streaming.idle_timeout import StreamIdleTimeoutError, with_idle_timeout
 
 CHAIN_STATE_KEY = "pipeline_chain"
 
@@ -504,6 +509,61 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
             context=context,
             assembler=assembler,
         )
+
+        def _replay_reason(error: Exception) -> RetryReason | None:
+            """Which budget a torn body draws on, or `None` when no second attempt could answer it.
+
+            The taxonomy lives here rather than in delivery, which has no business importing it. A transport tear and either of the two guards over the body are all failures another attempt could answer; a conversion error, a refusal and anything this proxy raised about itself are not. `normalize_upstream_error` is the same mapping the driver's own retries are decided by, so a body that tears is judged exactly as a connection that tears before the headers.
+
+            The client deadline is deliberately absent: delivery answers that one before it ever asks, because a replay cannot help a request that has run out of time.
+            """
+            if isinstance(error, StreamIdleTimeoutError | StreamDeadlineError):
+                return RetryReason.NETWORK
+            known = normalize_upstream_error(error)
+            return reason_for(known) if known is not None else None
+
+        async def _reopen() -> tuple[AsyncIterator[bytes], BlockAssembler, BlockBuffer] | None:
+            """Another attempt at the same request, wrapped in the same guards as the first.
+
+            `handle` rather than `handle_bounded`: the client deadline is enforced over the body now, and a second `asyncio.timeout` around this would be a second clock for one lifetime — the exact defect the outer guard was added to fix.
+
+            The trace keeps the first attempt's connection identity and byte count. A reader comparing `upstream_conn` across failures is looking for the connection that broke, and overwriting it with the one that recovered erases the thing being looked for.
+            """
+            try:
+                again = await handle(chain, context, _routed)
+            except Exception:
+                # Whatever it was, it is now the reason this request ends rather than a second failure to recover from: delivery re-raises the tear that got us here, which is the failure the client should be told about.
+                return None
+            reopened = again.outcome.response
+            if reopened is None or not again.context.stream:
+                return None
+            fresh_attempt = again.context.current_attempt
+            fresh_assembler = assembler_for(again)
+            # The accounting reads the terminal off whichever assembler is current, and after this the current one is this.
+            accounting.assembler = fresh_assembler
+            body = with_idle_timeout(
+                reopened.aiter_bytes(), timeout_seconds=stream_idle_seconds(chain)
+            )
+            return (
+                _counted_upstream(
+                    with_deadline_at(
+                        body,
+                        deadline_at=fresh_attempt.deadline_at if fresh_attempt is not None else None,
+                    ),
+                    chain,
+                    trace.request_id,
+                    trace,
+                ),
+                fresh_assembler,
+                delivery_buffer(chain),
+            )
+
+        replay = ReplaySupport(
+            # Built by `handle` on the first attempt and kept on the request, so every attempt this reopens draws on the same `max_total` as the ones the driver opened.
+            ledger=_ledger_for(context, chain),
+            eligible=_replay_reason,
+            reopen=_reopen,
+        )
         return _AccountedStreamingResponse(
             _tracked_delivery(
                 stream_delivery(
@@ -531,6 +591,7 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
                     settings=stream_settings(chain),
                     message_id=context.id,
                     model=context.resolved_model,
+                    replay=replay,
                 ),
                 accounting,
             ),
