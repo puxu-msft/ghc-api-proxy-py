@@ -49,6 +49,8 @@
 - 客户端**已有**字节时，多发的是一枚 `: ping\n\n` 注释，落在流的尾部之前。
 - 客户端**尚无**字节且合成已到期时，多发的是 `message_start`。它会置位「客户端已有字节」，于是这条流不再是零字节，而要走完 STR-04 的尾部判定。**若下一次拉取就是 EOF 且上游从未发出合法终止事件，实测线形是 `message_start` → `error`（`incomplete_responses_stream`），并且按已冻结的 Spec 不得再补 `message_stop`。** 也就是说，被接受的代价不是「一个已正常封口的空 message」，而是**把一次原本零字节的请求变成一次客户端可见的截断报错**。不接受这个取舍时，同一请求是零字节、客户端什么也读不到。
 
+  > **2026-08-22 作废**：这一格随 §2.2 一起没有了——不再有合成，所以「客户端尚无字节」时多发的也是一枚 `: ping\n\n` 注释，与上一格相同。**因此那个被明示接受的代价（把零字节请求变成客户端可见的截断报错）也不复存在**：多发一枚注释不会置位「客户端已有字节」，零字节的流仍然是零字节的流。这一格的原文保留，因为它记录了当时为什么接受那个代价。
+
   （初版这里写的是 `message_start` → `message_delta` → `message_stop`「已正常封口」。那是主线落地 STR-04 截断语义**之前**的形态，现已作废——见 `reports/review-reconciliation.md` F1。这一处两次写错同一件事：第一次把代价说成注释，第二次把截断说成正常结束。）
 
 另外，若下一次拉取是失败而非 EOF，这次提示的下游写入仍可能先失败，从而使那个尚未取到的异常不被当前消费链观察到。这同样属于接受项。
@@ -59,9 +61,19 @@
 
 指 `_deliver` 里的 `client_has_bytes`：**客户端已经收到过至少一个字节**。本节判据涉及的三件事共用它——`_commit` 是否发过 `message_start`、保活是否可发、合成计时是否解除。（`DeliverySession.started` 是另一回事，它描述的是缓冲区有没有开始释放，不参与本节判据。）
 
+> **2026-08-22 更正**：上面这句现在只剩**一件**事。合成计时随 §2.2 整节作废（机制已删除）；保活也不再看它——现行实现在首块之前就无条件发保活。今天 `client_has_bytes` 只决定 `_commit` 是否发过 preamble，以及撕断后的位置判定（是否已向客户端交付过内容）。下面那段「两道门分叉」的实测记录仍然成立，但它记的是**历史缺陷及其修复**，不是现行判据。
+
 早先版本有两道门——保活看「有没有写过」，合成计时看「assembler 有没有组装出块」——在 `buffering_policy` 取 `full` 或 `until-tool-use` 时二者会分叉：块被扣住到流末才交付，于是合成计时被解除、而写出从未发生，**两道守卫同时熄灭，静默没有任何上界**。实测（`sse_ping_interval=1`、首块 0.2s 闭合、第二块 3s 不闭合）：`block` 策略 3 个 ping、首字节 0.20s；`full` 与 `until-tool-use` 各 0 个 ping、首字节 3.22s，即流结束的时刻。该缺陷由 `../empty-text-block/reports/260820-review-synthetic-start-fix.md` §7 首次指出，现已合并为一道门修掉，回归测试 `test_a_held_back_block_does_not_disarm_both_guards`。
 
 ### 2.2 交付开始之前
+
+> **2026-08-22 整节作废。** 用户在 MCP-driven 续写的裁决里定下：**不再合成 HTTP 响应头**，因而也**不再合成 `message_start`**。`client_delivery.synthesized_response_headers_after_sec` 已从 schema 删除（`rg synthesized_response_headers_after_sec src/` 零命中；人写文档 `docs/.human-controlled/upstream-retry-and-continuation.md` 记着这条裁决与理由：「这种情况下没有交付过完整块，也不再出现半开 `message_start` 需要考虑」）。`stream.py` 的注释同样写着「It used to gate a `message_start` synthesised on its own after a long silence. **That is gone**」。
+>
+> **现行行为与本节原文相反**：首个字节交付**之前也发**保活帧，且**无条件**。理由在 `_deliver` 的注释里——这个生成器开始跑时客户端已经握着 200（响应用上游自己的状态构造，框架在拉第一个 chunk 之前就发了 `http.response.start`），所以扣住保活换不来任何东西，只会把首块之前那段窗口整个花在沉默里，而在 `full` 与 `until-tool-use` 下那就是整个回合。一枚 SSE 注释不是事件，不会被误读成回合的一部分；**不提前发的是 preamble 本身**。
+>
+> 于是本节原本的两件事都没有了：没有「合成」这个机制，也没有「首块前的静默」这个需要兜底的窗口。**下面的 §2.2 原文与【需用户裁决】块一并保留为历史记录，不再具有规范效力。** 那条待裁的窗口定义冲突（用户说「若很久上游都没有响应头」vs 实现从响应头到达后起算）**随机制一起消失，不需要再裁**。
+
+**以下为作废前的原文，仅作记录：**
 
 首个字节交付之前不发保活帧。这一段的静默由另一个机制兜底：`client_delivery.synthesized_response_headers_after_sec` 到期时合成一个 `message_start`，它本身就是「第一个字节」，此后保活按 §2 正常工作。**该上界（默认 240s）现在对三种 `buffering_policy` 一致成立**（见 §2.1）。
 
