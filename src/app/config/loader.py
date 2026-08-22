@@ -15,7 +15,7 @@ from typing import Any, cast
 from pydantic_settings import EnvSettingsSource, YamlConfigSettingsSource
 
 from app.config.compat import migrate_compat
-from app.config.loading import CONFIG_PATH_VARIABLE
+from app.config.loading import CONFIG_PATH_VARIABLE, NON_ENVIRONMENT_SETTINGS
 from app.config.paths import config_file_path
 from app.config.settings import AppSettings
 
@@ -99,7 +99,12 @@ def load_settings(
             YamlConfigSettingsSource(AppSettings, yaml_file=resolved_path)()
         )
 
-    env_values = EnvSettingsSource(AppSettings)()
+    # The same exclusion the direct-run path applies. pydantic-settings will happily JSON-decode a mapping out of one variable, so without this the two chains disagree about whether a setting can come from the environment at all — and the one that says yes is the one nothing in production runs.
+    env_values = {
+        key: value
+        for key, value in EnvSettingsSource(AppSettings)().items()
+        if key not in NON_ENVIRONMENT_SETTINGS
+    }
     cli_values = {key: value for key, value in (cli_overrides or {}).items() if value is not None}
 
     merged = _merge_layers(defaults, yaml_values)

@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from app.config.loading import (
     CONFIG_PATH_VARIABLE,
+    ENV_PREFIX,
     GITHUB_TOKEN_VARIABLE,
     environment_values,
     load_proxy_config,
@@ -210,6 +211,28 @@ def test_tls_settings_stay_hot_reloadable() -> None:
     outcome = pin_restart_only(startup, candidate)
     assert outcome.config.server.tls.mode == "both"
     assert outcome.restart_required == ()
+
+
+def test_the_model_mappings_are_not_settable_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mapping belongs in the config file, and only there.
+
+    It fits in an environment only as JSON crammed into one variable: unreadable, un-mergeable per key with the file layer every other source merges with, and impossible to change one entry of without rewriting all of them.
+
+    Both chains are asserted because they refuse it in different places. The direct-run path drops it while reading the environment; `AppSettings` runs its own environment source during validation, which overrides values handed to it — so filtering where the layers are assembled leaves it working there. Checked with `--port`'s variable alongside, so a test that passed because nothing at all reached the settings would still fail.
+    """
+    monkeypatch.setenv(f"{ENV_PREFIX}MODEL_MAPPINGS", '{"env-model":"env-target"}')
+    monkeypatch.setenv(f"{ENV_PREFIX}PORT", "43999")
+
+    assert "model_mappings" not in environment_values()
+    assert load_proxy_config().model_mappings.get("env-model") is None
+    assert load_proxy_config().server.port == 43999
+
+    from app.config.loader import load_settings
+
+    assert load_settings().model_mappings == {}
+    assert load_settings().port == 43999
 
 
 def test_a_config_in_the_working_directory_is_not_consulted(

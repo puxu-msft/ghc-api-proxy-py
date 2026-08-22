@@ -26,6 +26,8 @@ CONFIG_PATH_VARIABLE = f"{ENV_PREFIX}CONFIG"
 # The GitHub token `app.model_provider.ghc_client.auth.providers.EnvTokenProvider` reads. Excluded for the same reason as the one above and not a variation on it: it shares the prefix, so left in it arrives as a top-level `github_token` key and refuses to start. Named here rather than in the auth module because this is where the prefix that creates the collision is defined.
 GITHUB_TOKEN_VARIABLE = f"{ENV_PREFIX}GITHUB_TOKEN"
 NON_SETTING_VARIABLES = frozenset({CONFIG_PATH_VARIABLE, GITHUB_TOKEN_VARIABLE})
+# Settings the environment layer does not carry, however they are spelled. A mapping only fits in an environment as JSON crammed into one variable, and what that buys is unreadable, cannot be merged per key with the file layer the way every other source is, and cannot have one entry changed without rewriting all of them. The config file is where this belongs. Ruled 2026-08-22.
+NON_ENVIRONMENT_SETTINGS = frozenset({"model_mappings"})
 
 # Flat spellings the prefix makes natural, pointed at where the schema actually keeps them. Nesting is by `__`, so `GHC_API_PROXY_PORT` would otherwise arrive as a top-level `port` key and hit the same collision the two variables above are excluded for, with the same result: the service refuses to start, naming a field nobody set. It is the obvious way to say it, and `config.example.yaml` uses that spelling when it names the pidfile — so it is going to be typed. `host` is aliased alongside it rather than on its own merit: the two are set together, and aliasing one would leave the other as exactly the trap this removes.
 ENV_ALIASES: Mapping[str, tuple[str, ...]] = {
@@ -139,6 +141,8 @@ def environment_values(environ: Mapping[str, str] | None = None) -> dict[str, An
         if not remainder:
             continue
         path = tuple(remainder.split(ENV_NESTED_DELIMITER))
+        if path[0] in NON_ENVIRONMENT_SETTINGS:
+            continue
         if len(path) == 1 and path[0] in ENV_ALIASES:
             _assign(aliased, ENV_ALIASES[path[0]], raw)
         else:

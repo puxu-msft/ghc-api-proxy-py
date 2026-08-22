@@ -3,9 +3,25 @@ from __future__ import annotations
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
+from pydantic_settings.sources import EnvSettingsSource
 
+from app.config.loading import NON_ENVIRONMENT_SETTINGS
 from app.graceful_timeout import DEFAULT_GRACEFUL_TIMEOUT_SECONDS
+
+
+class _EnvSourceWithoutFileOnlySettings(EnvSettingsSource):
+    """The environment source, minus the settings a config file alone may carry.
+
+    Filtering where `load_settings` assembles its layers is not enough, and that is worth stating because it looks like it should be: `BaseSettings` runs its own environment source during validation, and that source wins over the values passed in — `AppSettings.model_validate({"model_mappings": {}})` still comes back holding whatever the environment said. So the exclusion has to be made here, on the source itself.
+    """
+
+    def __call__(self) -> dict[str, object]:
+        return {
+            name: value
+            for name, value in super().__call__().items()
+            if name not in NON_ENVIRONMENT_SETTINGS
+        }
 
 
 class FrozenModel(BaseModel):
@@ -162,6 +178,23 @@ class AppSettings(BaseSettings):
         frozen=True,
         extra="forbid",
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        del env_settings  # Replaced rather than reordered; see the source's own docstring.
+        return (
+            init_settings,
+            _EnvSourceWithoutFileOnlySettings(settings_cls),
+            dotenv_settings,
+            file_secret_settings,
+        )
 
     host: str = "127.0.0.1"
     port: int = Field(default=4141, ge=1, le=65535)

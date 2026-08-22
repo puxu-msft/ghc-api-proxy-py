@@ -47,8 +47,7 @@ def test_per_key_merge_model_mappings(
         "    yaml-model: 500\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("GHC_API_PROXY_MODEL_MAPPINGS", '{"env-model":"env-target"}')
-
+    # No environment layer here: `model_mappings` is one of `NON_ENVIRONMENT_SETTINGS`, so the merge this asserts is between the file and the CLI.
     settings = load_settings(
         config_path=config_path,
         cli_overrides={
@@ -59,7 +58,6 @@ def test_per_key_merge_model_mappings(
 
     assert settings.model_mappings == {
         "yaml-model": "yaml-target",
-        "env-model": "env-target",
         "cli-model": "cli-target",
     }
     assert settings.timeouts.stream_idle_overrides == {
