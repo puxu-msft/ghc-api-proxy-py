@@ -1,199 +1,149 @@
 # 候选片段：`upstream-retry-and-continuation.md` 的补充
 
-**日期**：2026-08-21。**性质**：候选材料，供用户摘取，**不是裁决**。
-**目标文档**：`docs/.human-controlled/upstream-retry-and-continuation.md`（2026-08-21 21:xx 版，工具名已改为 `turn_interrupted`、`refusal` 已入「无法继续」、429 已入「一般可以继续」）。
-**证据出处**：`.dev/docs/upstream/retry-and-continuation/`（README 有证据表，reports/ 有四份完整报告）。
+**目标文档**：`docs/.human-controlled/upstream-retry-and-continuation.md`
+**性质**：候选材料，供用户摘取，**不是裁决**。
+**证据出处**：`.dev/docs/upstream/retry-and-continuation/`（README 有证据表，reports/ 有完整报告）。
 
-本文只写目标文档**尚未涵盖**的部分。已经写进去的不复述。
+**2026-08-22 全面刷新。** 用户当日多次更新目标文档，本文按逐条对账（`.dev/docs/tmp/260822-candidates-vs-user-updates-reconciliation.md`，81 条判定）重写：已采纳的撤下留记录，已否决的撤下留理由，走法不同的收紧适用域，仍然打开的保留。
+
+**一条关于行号的说明**：本文引用人写文档时只写小节标题与原文引句，**不写行号**。上一版写了行号，而那些行号取自同一天不同时刻的工作树快照、互不自洽，读者按图索骥会以为自己找错了地方。引用代码时写行号，因为那些当场核过。
 
 ---
 
-## 一、回答文档第 23 行的 TODO
+## 已采纳，撤下留记录
 
-> 特殊地，`max_tokens` 不应无痕重试。TODO：参考项目对 `max_tokens` 的处理方案是什么？一般是否已经交付过完整块，只是最后一个块被截断了？
+按 `record-what-not-adopted` 的同一条理由留记录：下一个读者要能看出这里曾经有过什么、结局如何，而不是发现一段凭空消失的历史。
 
-### 1a. 参考项目怎么做（八个仓库全查过）
+| 原节 | 内容 | 落点 |
+|---|---|---|
+| §三（核心） | 400 这一格点明涵盖上下文超限 | 「这些情况下无法继续」表里已改为「400，包括请求非法和输入超长」 |
+| §五 | 无痕重试不设间隔 | 已并入「如果业务可能可以继续」那段句末：「无痕重试不设冷却间隔」。429 的例外另有独立段落承载 |
+| §八（前半） | 删 `config.example.yaml` 里 `continuation` 的五行 | 已删 |
+| §八（追加） | 删 `config.example.yaml` 里 `streamReplay` 两行 | 已删 |
+| §十一 | `client-side-block-delivery.md` 的配置节名从 `upstream_request_retry` 改为 `upstream_request_timeouts` | 已逐字采纳 |
 
-| 项目 | 识别判据 | 处理 | 截断的 tool call | 重试 |
-|---|---|---|---|---|
-| `copilot-api-js`（前身） | `stopReason === "max_tokens"`，**只接在 Anthropic 直连腿**；Responses 腿的谓词零调用点 | 透传 + 记诊断，明确 observation-only | 无专门处理，走通用 `jsonrepair` | 否。`max_tokens_continuation` 默认 false 且无消费者 |
-| `vscode-copilot-chat`（官方） | Chat Completions 的 `Length`；**Responses 路径 `incomplete_details` 全仓 0 命中** | 多数消费者转成错误；codeMapper 做续写 | **静默丢弃**（emit 条件是 `ToolCalls \|\| Stop`，不含 `Length`） | codeMapper `while(true)`，按累计长度封顶，无轮数上限、无退避 |
-| `caozhiyuan/copilot-api` | `status === "incomplete" && reason === "max_output_tokens"` | 纯透传 → `max_tokens` | 原样发，仅补 `content_block_stop` | 否 |
-| `hooyao/copilot-bridge` | `response.incomplete` 或 `status == "incomplete"`，**不读 reason** | 透传；关未闭合块时拒绝伪造完成态 | 校验 JSON+schema，**默认 observe-only 原样转发** | 否 |
-| `sxwxs/ghc-api-py` | `status=="incomplete"` + `reason=="max_output_tokens"`，未知 reason 抛异常 | 透传 | 整条转换失败（fail-closed） | 否 |
-| `CLIProxyAPIPlus` / `awsl-maxx` | 只有 `"length"` ⇄ `max_tokens` | 映射透传；输出 Responses 时硬编码 `completed`/`null`，**信号丢失** | 未处理 | 否 |
-| `agent-maestro` | 无（`incomplete_details` 恒 `null`） | 不适用 | — | 否 |
+**§八d／§八e 两条已过期**，撤下不留待办：`max_tokens_as_retryable` 在 `config.example.yaml` 与 `src/app/config/schema.py` 里都已不存在（被 `hand_over_stop_reasons` 取代并接线）；`hook_strip_anthropic_request_headers` 现在有了 schema 对应物，当时报的那条红已经不存在。
 
-**三条值得注意的**：
+---
 
-1. **没有任何一个参考项目做我们要做的事。** 七个是纯透传，唯一做续写的 `vscode-copilot-chat` 的 codeMapper 是代码映射的特化场景，且无轮数上限。
-2. **前身仓的数据盖不到我们的主路径。** 它的 `max_tokens` 处理只接在 Anthropic 直连腿，而我们是 Anthropic 输入 → Responses 上游——恰是它 `isResponsesMaxTokensTerminal` 零调用点的那条腿。它那 5 例样本（约 0.4%）的分布结论不能搬。
-3. **`status === "incomplete"` 是别人已在用的判据**（`caozhiyuan`、`hooyao`、`ghc-api-py` 三家），不是我们发明的。
+## 已否决，撤下留理由
 
-### 1b. 是否已经交付过完整块（**成立，且比问句更强**）
+### 原 §九：半开 `message_start` 的「给实现者的提醒」
 
-**录制证据，n=20，逐例核对**（现网 history 的原始根帧）：
+原建议是往权威文档里补一句：该性质由构造保证、live 链路一条守卫都没有、将来谁再引入单发 `message_start` 的路径不会有任何东西报错。
 
-- 撞 `max_output_tokens` 时，上游**一定**为被截断的那个 item 发出 `response.output_item.done`——20/20 例中它就是 `response.incomplete` 的紧前一帧，`added` 与 `done` 计数逐例相等。
-- 本项目 block 完成的唯一判据正是 `output_item.done`（`assembler.py:231-232` → `_close`），`response.incomplete` 完全不碰未完成的草稿。
-- **所以被截断的那个块自己就会被完整交付。** 语料里**没有任何一例是零块交付**，包括最坏形态（只有 reasoning 中途撞顶，6 例）。
+**用户在同一段落里正面回答了**（那段现在是引用块）：
 
-分形态：纯文本单 message item（1 例）→ 1 个 text 块；reasoning+message（8 例）→ thinking 块 + 1 个 text 块；只有 reasoning（6 例）→ 若干 thinking 块；带工具调用（5 例）→ 前序块 + 1 个 `tool_use` 块。
+> ……也不再出现半开 `message_start` 需要考虑。**事实上目前不应该有半开 `message_start`，但这不属于本节讨论范围，是一条推论，不应由我们写死。**
 
-**样本边界（建议一并写进文档）**：该语料里 `incomplete_details.reason` **只有** `max_output_tokens` 一种，`content_filter` 等未观测到；时间窗 2026-08-04～08，模型 `gpt-5.6-sol` / `gpt-5.6-terra`；现有 cassette 一份都没覆盖这个场景。
+被否的不是事实判断——用户承认「目前不应该有」——而是**把一条由代码构造保证的性质固化成需求文档条款**这个动作，理由是两条：不属于本节范围，且推论不应由我们写死进权威文档。
 
-**建议措辞**（替换第 23 行的 TODO）：
+**因此这条不得以任何形式再送第二遍**（补 ADR、补 spec、补「守卫需求」都算再送一遍）。如果确实认为缺守卫是风险，那是实现侧的事，走代码与测试。
 
-> 特殊地，`max_tokens` 不应无痕重试，一律走 MCP-driven 合成续写。
+---
+
+## 走法不同：我们建议的与用户采纳的不是同一个形状
+
+这一类最要紧——候选材料若照原样留着，下一次会把同一个偏差再送一遍。
+
+### 一、`max_tokens` 的处理：我们要「一律」，用户要「二分」，**用户是对的**
+
+用户新起了一节「## 输出超长」：
+
+> 对于 SSE stop_reason = `max_tokens` (anthropic-messages) / `max_output_tokens` (openai-responses) 的情形，不应无痕重试。要么在能续写的情况下，丢弃未完成的块，走下文合成续写机制；要么在不能续写的情况下，直接返回给客户端。
+
+**采纳的**：「不应无痕重试」「走合成续写」。
+
+**走法不同的**：我们原来的措辞是无条件的——「`max_tokens` **一律**走合成续写」「**总是**落在已交付过完整块那一格」。用户写的是有条件的二分，而**这个形状更准确**：目标文档自己就规定了该机制「只给 anthropic-messages 客户端请求」，于是「不能续写」这一格真实存在。
+
+**我们那条全称是怎么错的**：n=20 的录制只覆盖「流式 + Responses 上游 + 撞 `max_output_tokens`」这一格，结论却写成了全称。**证据的适用域必须跟着写下来，否则它会被拿去推翻一个它根本没测到的分支。**
+
+n=20 的结论本身仍然成立，收紧后是：**在流式、Responses 上游、撞 `max_output_tokens` 这一格里，不存在零块交付的形态**——上游一定为被截断的 item 发出 `output_item.done`（20/20，`added` 与 `done` 计数逐例相等），而本项目块完成的唯一判据正是它。样本边界：2026-08-04～08，模型 `gpt-5.6-sol` / `gpt-5.6-terra`，该语料里 `incomplete_details.reason` 只有 `max_output_tokens` 一种。
+
+**参考项目综述（八个仓全查过）属于证据材料而非规格文本**，不再往人写文档送，留在 `.dev/docs/upstream/retry-and-continuation/reports/260821-reference-projects-max-tokens.md`。一句话结论：**没有任何一个参考项目做我们要做的事**，七个纯透传，唯一做续写的官方 `vscode-copilot-chat` 是代码映射的特化场景且无轮数上限。
+
+### 二、「丢弃被截断的块」：条件换了一套，且实现判据不必进文档
+
+原建议给了三条规则，绑的是「已经交付过几个完整块」。用户写的是「能不能续写」。
+
+**代码实际绑的是第三样东西**：`stop_reason ∈ hand_over_stop_reasons`（`src/app/pipeline/delivery/formats/openai_responses.py:393`）。三者在主路径上恰好重合，分叉的地方见下面「待裁决」第 1 条。
+
+两点澄清，都不是待办：
+
+- **`status: "incomplete"` 这个 wire 判据没进人写文档，也不该进**——用户文档写需求不写实现。它已经是实现事实（`formats/openai_responses.py` 的 `_upstream_cut_this_item_short`），候选材料不该继续把它当成「待用户采纳的措辞」。
+- **reasoning item 不带 `status` 字段**（正样本对照确认：正常收尾与被截断的键集逐字相同，`summary: []` 两侧都出现）。用户 2026-08-21 已裁决「历史里没有信号就保持悬念」，登记在 `deferred.md` §2。
+
+### 三、非流式：**这一条是我的过失，单独写**
+
+原 §四 的建议措辞是：
+
+> 非流式请求没有「块」的概念，整条响应是原子的，因此**只可能无痕重试，不可能续写**。
+
+**这是我 2026-08-22 被用户更正之前的旧立场。** 当天用户明确推翻了它（「非流式不可续写？用户肯定说错了，非流式应该找到最后一个 incomplete 块边界」），我据此实现了非流式的丢块 + 交接（主仓 `af84097`）——**但没有回头改这份候选材料**。
+
+随后用户写文档时，从这份过期材料里取了一句几乎同义的话写进权威文档（「非流式请求只接入适合无痕重试的情形，不支持合成续写」），于是权威文档与已落地的代码相反。经确认后用户已自行改正，现在那一节是：
+
+> ## 非流式请求
 >
-> 实测（n=20，2026-08-04～08 的现网录制）：撞顶时上游**一定**为被截断的 item 发出 `output_item.done`，因此被截断的那个块自己就会被交付成一个完整块，**不存在零块交付的形态**。所以 `max_tokens` 总是落在「已交付过完整块」那一格。「不无痕重试」这条因此是冗余保险而非必需分支，保留它是为了挡上游哪天改行为。
->
-> 参考项目无一做代理端续写：七个纯透传，唯一做续写的官方 `vscode-copilot-chat` 是代码映射的特化场景。
+> 非流式请求也支持无痕重试、合成续写机制。
+
+**这一格现在文档与代码一致，无待办。** 记录在这里是因为教训是可复用的：**一份过期的候选材料是一个把已被推翻的立场重新送进权威文档的通道**——它看起来像是我们的建议，而用户没有义务记得哪一条已经作废。所以「用户采纳了某条」与「用户推翻了某条」都必须当场回写候选材料，不能只改代码。
 
 ---
 
-## 二、被截断的那个块要不要交付（文档目前完全没有这一格）
+## 仍然打开
 
-**上游把答案标在 wire 上了**：`output_item.done` 的 item 带 `status` 字段——被截断的是 `"incomplete"`，完整的是 `"completed"`。实测 15 次（其中 4 次在 `function_call` 上）。而 `assembler.py` **一个字都没读**（该文件 `.status` / `"status"` 零命中）。
+### 四、一处措辞残留：「其他**上游请求**暂不使用该机制」
 
-**reasoning item 没有这个字段**——已做正样本对照：正常收尾的 reasoning item 与被截断的，键集逐字相同（`content, encrypted_content, id, summary, type`）；`summary: []` 在两侧都出现，也不是信号。
+「限制」那段结尾仍写着「其他上游请求暂不使用该机制」，而同句前半已改为**客户端请求**。
 
-**建议措辞**：
+按已确立的判据（决定能不能合成 `tool_use` 块的是发给客户端的格式，决定客户端会不会执行它的是客户端是什么），这里应统一为客户端请求，否则会被读成「只在 Anthropic 直连上游腿上做」——**那恰好排除掉主产品路径**（Anthropic 输入 → Responses 上游）。
 
-> 上游在 `output_item.done` 上标出该 item 是否被截断（`status: "incomplete"` / `"completed"`）。据此：
->
-> - **已经有任何完整块时，丢弃被截断的那个块**——不把半截语义交给客户端。
-> - **只有未完成块时，保留它**——给客户端半截内容优于给一个空回答。
-> - **reasoning item 上游不带这个字段**，无信号，暂不特殊处理。
->
-> 这条判断是零成本的：被截断的 item 永远是最后一个，处理它时前面发过几块是本地已知的，不需要缓冲或前瞻。
+**建议**：句尾改为「其他客户端请求格式暂不使用该机制」。
 
-**顺带解决的一件事**：撞顶落在工具调用上时，`arguments` 是残缺 JSON（4/4 例），现在会回退成 `input={"__raw": …}` 交给客户端。按上面的规则它正是 `status="incomplete"` 的那个，直接被丢掉。（另有旁证表明 Claude Code 自己有 `safeParseJSON` → `{}` → zod → `is_error` 的恢复链，所以这本来也不是必须修的危害，只是顺手更干净。）
-
----
-
-## 三、400 这一格建议点明它涵盖上下文超限
-
-文档第 9 行现在只写「400」。上下文超限**没有独立的一格**，而它是 400 里最需要被认出来的一种。
-
-**实测已否证** stop_reason 路径：Responses 腿的值空间里根本没有 `model_context_window_exceeded`（`incomplete_details.reason` 20/20 全是 `max_output_tokens`）；Anthropic 腿 13 万次请求零观测——但那条腿上它是**可定义**的，所以是「未观测」不是「不可能」。
-
-正面形态是 **HTTP 400**，已找到 **48 例一手录制**，而且**两条腿的表达是结构性不同的**：
-
-- **Anthropic 腿**（27 例）：`application/json`，`error.code = model_max_prompt_tokens_exceeded`，`error.type = invalid_request_error`，message 带数字（`prompt is too long: 1051542 tokens > 1000000 maximum`）。**靠 `error.code` 可靠区分**——其余 400 连 `code` 字段都不带。
-- **Responses 腿**（21 例，**这是主产品路径**）：`text/plain; charset=utf-8`，`error.code = invalid_request_body`，**没有 `error.type`、没有 `request_id`、message 里没有任何数字**（`Your input exceeds the context window of this model.`）。`error.code` **毫无区分力**——`Invalid 'input[1].id'` 用的是同一个值，只能匹配 message 文本。
-
-**建议措辞**：
-
-> - 400，**含输入超出模型上下文窗口**。上游用 400 表达它，不是用 `stop_reason`；两条腿的形态不同：Anthropic 腿给 `error.code = model_max_prompt_tokens_exceeded` 且 message 带数字，Responses 腿给 `error.code = invalid_request_body`（与其他参数错误共用，不可据以区分）且 message 无数字，只能匹配 `exceeds the context window`。
->
->   （Anthropic 腿的 `model_context_window_exceeded` 在 13 万次请求中零观测，但该腿上它可定义，不排除将来出现。）
-
-**一件与本文档相邻、但属于另一个主题的事**（记在这里免得丢，处置由你）：把三条真实 body 喂给生产模块 `parse_prompt_limit_error` 实测——Anthropic 腿解出 `(1051542, 1000000)`，**Responses 腿返回 `None`**。主产品路径正是没覆盖的那条，而且**补正则也救不回来**，因为那条 message 里没有数字，`PromptLimitRegistry` 结构上喂不进去。要让 prompt-limit 观测在主路径上工作，需要的是另一个数据来源，不是一条正则。
-
----
-
-## 四、非流式路径（文档没写；裁决已在 2026-08-21 的讨论中做出）
-
-出处：`.dev/docs/upstream/retry-and-continuation/decisions.md` 第二节第 4 条——该裁决此前只存在于对话中，`.dev` 里没有落点，独立评审因此查无此记录。现已补记。
-
-**建议措辞**：
-
-> 非流式请求没有「块」的概念，整条响应是原子的，因此**只可能无痕重试，不可能续写**。其中 `max_tokens` 两条都不适用（不能无痕重试，也没有可合成的位置），原样返回给客户端。
-
----
-
-## 五、无痕重试的间隔（文档没写）
-
-现状是 network / serverError 各 9 次、`max_total` 20，**无退避、无 jitter、无间隔**——连打。
-
-**建议措辞**：
-
-> 无痕重试不设间隔。唯一的例外是 HTTP 429 触发的反应式限流器，它自己给的间隔照旧生效。
-
----
-
-## 六、观测面（文档没写）
-
-**建议措辞**：
+### 五、观测面（文档仍无对应文字）
 
 > 合成续写之后，**客户端请求算成功**（我们有独特的 MCP 工具调用，不难判断），**但这次上游尝试算失败**。请求日志用 `[RETY]` 前缀 + 黄色。
 >
 > `usage` 报本次失败 attempt 上游实报的值——被交付的块确实进了客户端的 transcript，下一轮会带着它们发出去；这里报零会让客户端对上下文占用的估计持续偏低，压缩时机跟着错。
 
-（`[RETY]` 而非 `[RETRY]`：现有前缀实测全是 6 字符宽，只有 `[RETRY]` 是 7，把固定宽度那一列顶歪了。改成 `[RETY]` 顺带修掉这个既有 bug。）
+（`[RETY]` 而非 `[RETRY]`：现有前缀实测全是 6 字符宽，只有 `[RETRY]` 是 7，把固定宽度那一列顶歪了。改成 `[RETY]` 顺带修掉这个既有 bug。已实现。）
+
+### 六、400 两条腿形态差异的详细措辞（核心已采纳，这是余项）
+
+用户已把 400 那一格改成「400，包括请求非法和输入超长」，核心诉求达成。**下面这段更细的措辞放不放由你**，它的价值在于说明为什么不能只看 `error.code`：
+
+> 两条腿的形态不同：Anthropic 腿给 `error.code = model_max_prompt_tokens_exceeded` 且 message 带数字，Responses 腿给 `error.code = invalid_request_body`（与其他参数错误共用，**不可据以区分**）且 message 无数字，只能匹配 `exceeds the context window`。
+>
+> （Anthropic 腿的 `model_context_window_exceeded` 在 13 万次请求中零观测，但该腿上它可定义，不排除将来出现。）
+
+一手证据 48 例，见 `reports/260821-context-limit-400-examples.md`。
+
+**上一版这里还挂着一条「`parse_prompt_limit_error` 在主路径返回 `None`」的相邻问题，已于 2026-08-22 撤销**——那个数字上游模型目录里就公布着（`limits.max_prompt_tokens`），而它唯一的消费端 `/api/tokenization/limits` 在 `api.md` 里已标为暂不支持。理由不成立，详见 `deferred.md` §1。
+
+### 七、`config.example.yaml` 里两处描述已放弃方案的相邻注释
+
+删不删由你，功能无影响：
+
+- `# Includes both direct replay and continuation` —— 现在只剩 direct replay。
+- `# This also allows us to implement a valuable "continuation" feature: blocks already seen by the client are not discarded, and can be sent to the model as context for continuation.` —— 「把已见块回送给模型作上下文」正是被放弃的那件事。块级交付本身的价值不受影响，只是这句举的例子换了。
+
+### 八、两处文档自身的小不一致（对账时顺带发现）
+
+- **`README.md` 的索引指向不存在的 `observability.md`**，同时漏列已存在的 `release-and-deployment.md`。
+- **「## 输出超长」那句「走**下文**合成续写机制」方向写反了**——「## MCP-driven 合成续写」在它**上面**。改成「上文」或直接写小节名。
 
 ---
 
-## 七、一处措辞残留
+## 待裁决
 
-文档第 41 行结尾仍写着「其他**上游请求**暂不使用该机制」，而同句前半和第 31 行都已改为**客户端请求**。按已确立的判据（决定能不能合成 `tool_use` 块的是发给客户端的格式，决定客户端会不会执行它的是客户端是什么），这里应统一为客户端请求，否则会被读成「只在 Anthropic 直连上游腿上做」——那恰好排除掉主产品路径。
+### 1. `hand_over_stop_reasons` 里的 `max_output_tokens`：不是删不删的问题，是文档二分与代码三态不一致
 
-**建议**：把该句尾改为「其他客户端请求格式暂不使用该机制」。
+**上一版这里的诉求是「建议删掉 `max_output_tokens`」。该诉求已被你以一次正面书写驳回**——你保留了它，并在「## 输出超长」里把两个拼法并列成同一情形的两种协议写法。所以那个诉求撤下，**但它暴露的两件事不是被驳回的东西**：
 
----
+**（1）比较发生在归一化之后，所以 `max_output_tokens` 结构上永不匹配。**
 
-## 八、`config.example.yaml` 里有五行需要你删（B 组落地后唯一的红）
-
-代码里的 `continuation` 策略已随 B 组删除（提交 `40d9c76`）。但 `docs/.human-controlled/config.example.yaml` 仍在第 341–346 行声明它，而 schema 是 `extra="forbid"`，于是 `tests/unit/config/test_config_schema.py::test_authoritative_example_config_parses` **持续为红**，直到这几行从你的文件里去掉。
-
-我不动你的文件，所以把要删的原文贴在这里：
-
-```yaml
-    # 续写：已经有块提交给客户端（非工具调用）后请求中断，代理合成续写轮直接重投（已提交块作 assistant + 续写 user）。
-    # Continuation: some block was committed to the client, a mid-stream RST occurs -- the proxy appends messages (the already-committed blocks as an assistant turn + this user message) so the model continues.
-    continuation:
-      enabled: true
-      max_retries: 10
-      message: "Please continue where you left off."
-```
-
-**追加（2026-08-22）**：同一段里的 `streamReplay` 也要删——你已裁决删除它，代码侧已随之移除。要删的是第 339–340 行：
-
-```yaml
-    streamReplay:
-      max_retries: 100
-```
-
-理由记在 `.dev/docs/upstream/retry-and-continuation/decisions.md` 第四节：它是代理内续写方案的遗留，配对的另一半已经删了；断流重开现在走 `network` 的普通预算，`max_total` 成为整条客户端请求的总闸。
-
-顺带两处**同一段落里的相邻文字**，删不删由你，它们描述的都是已放弃的方案：
-
-- 第 322 行 `# Includes both direct replay and continuation` —— 现在只剩 direct replay。
-- 第 383 行 `# This also allows us to implement a valuable "continuation" feature: blocks already seen by the client are not discarded, and can be sent to the model as context for continuation.` —— 「把已见块回送给模型作上下文」正是被放弃的那件事。块级交付本身的价值不受影响，只是这句举的例子换了。
-
-**`max_tokens_as_retryable: true`（第 350 行附近）保留**——用户裁决「其他未接线的功能不要动」，它不属于代理内续写机制。
-
-### 顺带发现：一处与本次无关的既有红
-
-同一条测试还报第二个 `extra_forbidden`：`config.example.yaml:450` 的 `hook_strip_anthropic_request_headers` 整段在 schema 里没有对应物。这在本次改动之前就存在（`app/hooks/` 是未挂载的 legacy 链路），**不是 B 组造成的**，也不在本次范围内。列在这里只为免得将来把两条红算成一条。
-
----
-
-## 九、一条推论（不是裁决，前提变了它就失效）
-
-删掉 `client_delivery.synthesized_response_headers_after_sec` 之后，`stream.py:253-262` 那个唯一会单独发 `message_start` 的出口消失，于是 **`message_start` 只能与第一个完整块同批发出，半开状态不再可达**。
-
-文档第 27 行已经写了「也不再出现半开 `message_start` 需要考虑」，措辞已经正确。这里只补一条**给实现者的提醒**，可放可不放：
-
-> 该性质由构造保证，不由任何断言保证——live 链路一条相关守卫都没有（9 条 `DeliveryOrderError` 全在未挂载的 legacy 侧）。将来谁再引入单独发 `message_start` 的路径，不会有任何东西报错。
-
----
-
-## 十、`config.example.yaml` 里 `hand_over_stop_reasons` 的 `max_output_tokens` 是死条目
-
-**2026-08-22 追加。** 你在 `docs/.human-controlled/config.example.yaml:339` 写的是：
-
-```yaml
-  hand_over_stop_reasons: ["max_tokens", "max_output_tokens"]
-```
-
-`max_output_tokens` **永远不会匹配**。这个键的两个消费点比较的都是**翻译之后**的 Anthropic 拼法，而 `max_output_tokens` 恰好是唯一一个被翻译的值：
-
-- 流式：`src/app/pipeline/delivery/formats/openai_responses.py:513-514`，`"max_tokens" if reason == "max_output_tokens" else reason or "incomplete"`；
-- 非流式：`src/app/pipeline/translation_driver/responses.py:125-126`，`if reason == "max_output_tokens": return MAX_TOKENS, None`。
-
-实测（`ResponsesAssembler.push` 喂 `response.incomplete`，含正样本对照确认 push 确实执行）：
+两条路径都在**门之前**把它改写成 `max_tokens`：流式 `src/app/pipeline/delivery/formats/openai_responses.py:513-515`，非流式 `src/app/pipeline/translation_driver/responses.py:125-126`。实测（含证伪对照：把 `hand_over_stop_reasons` 配成 `{"max_output_tokens"}` 即删掉 `max_tokens` 只留它，合成**一次都没触发**）：
 
 | 上游 `incomplete_details.reason` | 记下的 `stop_reason` |
 |---|---|
@@ -202,36 +152,29 @@
 | 无 | `incomplete` |
 | （对照：`response.completed`） | `end_turn` |
 
-**为什么容易读错**：那两处代码的注释都写着「上游自己的词，不翻译」，而 `max_output_tokens` 正是那句话的**唯一例外**，例外写在紧挨着的一行。Anthropic 腿本来就用 `max_tokens`，所以两条腿在这个键上看到的都是 `max_tokens`。
+**容易读错的原因**：那两处代码的注释都写着「上游自己的词，不翻译」，而 `max_output_tokens` 正是那句话的**唯一例外**，例外就写在紧挨着的一行。
 
-**没有危害**，多一个永不匹配的值不改变任何行为。**建议**：删掉 `max_output_tokens`，与 schema 默认 `["max_tokens"]` 一致；若想保留作提示，改成注释更准确，例如 `# 上游 Responses 的 max_output_tokens 已在翻译时归一为 max_tokens，此处不必列`。
+**今天无害，明天的失效形态是静默的**：下一个读者（包括另一个仓改 MCP 的人）反向推断「上游明明说 `max_output_tokens`，`max_tokens` 大概写错了」，把 `max_tokens` 删掉——此后所有撞上限的回合既不交接，**同一个键还决定被截断的块丢不丢**（`formats/openai_responses.py:393`），于是保留半截块正常收尾，客户端拿到一个截断块 + `stop_reason: max_tokens`，没有 tool call、没有告警。
 
-**证据等级：确凿**（一手实测 + 两处代码事实）。**是否要改属你的取舍。**
+**（2）你的二分与代码的判据不是同一条，中间漏了一格。**
 
-### 补充（异源评审 2026-08-22 F6/F11 加强）
+文档说「能续写 → 丢弃未完成的块；不能续写 → 直接返回给客户端」。而代码里：
 
-评审自己跑了一组**证伪对照**，把 `hand_over_stop_reasons` 配成 `{"max_output_tokens"}`（即删掉 `max_tokens` 只留它），合成**一次都没被触发**。所以结论比上面写的更强：不只是「默认配置下不会出现」，而是「**配置成它也不会生效**」——归一化发生在比较之前，原始拼法压根活不到那一步。
+- **丢弃**只由 `stop_reason ∈ hand_over_stop_reasons` 决定（`formats/openai_responses.py:393`）；
+- **能不能续写**另有一道闸：`src/app/server/pipeline_app.py:552` 的 `if route.wire_format is not WireFormat.ANTHROPIC_MESSAGES: return None`；
+- 而 assembler 的选择只看**上游方言**，不看客户端格式（`src/app/server/handler.py` 的 `assembler_for` 依 `dialect_for`）。
 
-**因此这条从「无害的冗余」升级为值得处置**：这是一份**你亲笔的权威配置样例**，它现在在暗示 `max_output_tokens` 是一个有意义的取值。下一个读者（包括另一个仓改 MCP 的人）合理地推断「上游说的是 `max_output_tokens`，`max_tokens` 大概写错了或是别名」，把 `max_tokens` 删掉或替换掉——此后**所有撞上限的回合都不再交接**。而且不止不交接：`hand_over_stop_reasons` 同时决定「被截断的块丢不丢」（`formats/openai_responses.py:393`），门不中就走「保留被截断的块、正常收尾」，客户端拿到一个半截块 + `stop_reason: max_tokens`，**没有 tool call，也没有任何告警**。是静默失效，不是可见故障。
+于是存在第三种形态：**一个非 anthropic-messages 的客户端走 Responses 上游撞上限时，被截断的块被丢掉，而交接的 `tool_use` 块不会生成**——两条分支都没走成，客户端既没拿到半截内容，也没拿到续写入口，日志上也没有告警。
 
----
+**两条出路，请裁决**：
 
-## 十一、`client-side-block-delivery.md:16` 的配置节名写错了
+- **A. 让代码去迎合文档** —— 把「客户端格式」这道闸并进同一条判据，使「丢弃」与「交接」同生同死。这样第三种形态消失：非 anthropic-messages 客户端撞上限时保留半截块正常收尾。
+- **B. 让文档补一格** —— 承认三态，写明「客户端格式不支持续写时，保留被截断的块并原样返回」。
 
-**2026-08-22 追加，异源评审顺带发现，本会话已独立复核。**
+**本项目倾向 A**：`deferred.md` §15 已经记过一条不变量——「不交接就不丢」在任何配置下都成立，而「交接就一定丢」不是不变量、本项目也不需要它。A 是把这条不变量落到代码上，B 是把违反它的那一格写进规格。
 
-该行写的是：
+**证据等级：代码事实与一手实测，确凿**（异源评审 2026-08-22 F6/F11 + 本次对账独立复核）。**怎么选属你的取舍。**
 
-> - 一次上游请求的最大时长（`upstream_request_retry.upstream_request_deadline`）；
+### 2. 「不能续写时保留半截块」这一格，文档没明说
 
-**实际在 `upstream_request_timeouts` 节下**，不是 `upstream_request_retry`：
-
-- schema：`src/app/config/schema.py:152`，在 `class UpstreamRequestTimeoutsConfig` 里，与 `response_header`、`stream_idle` 同节；
-- 读取处：`src/app/server/handler.py:170` 的 `timeouts.upstream_request_deadline`；
-- **你自己的 `config.example.yaml` 是对的**：第 313 行那个 `upstream_request_deadline: 1200` 在 `upstream_request_retry:`（第 321 行）**之前**，属于上一节。
-
-同一行下面那个 `client_delivery.client_request_deadline` 的节名是对的。
-
-**分节其实是有道理的，不建议反过来改代码**：三个上游守卫（`response_header` 管首字节前、`stream_idle` 管帧间空档、`upstream_request_deadline` 管整个尝试的存活）是互补的一组，同在 `upstream_request_timeouts` 下才读得出这层关系；`upstream_request_retry` 装的是「再发一次的理由与预算」，是另一回事。**建议只改文档那一处节名。**
-
-**证据等级：确凿**（三处代码事实 + 你自己的样例文件互证）。
+「## 输出超长」的「不能续写 → 直接返回给客户端」可以读成「连同半截块一起返回」，但没有明说。这一格与上面第 1 条的出路 B 是同一件事的两面，一并裁决即可。
