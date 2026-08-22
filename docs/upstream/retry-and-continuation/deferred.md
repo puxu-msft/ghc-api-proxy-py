@@ -278,6 +278,30 @@ if replay is None or reason is None:
 
 **处置：登记，不动手。** 修法看似只是把 `_hand_over` 也前移，但它牵动「哪些失败算可继续」这条判据本身——分类器叫不出名字时默认可继续还是默认不可继续，是产品裁决而非实现选择。**证据等级：代码事实与实测前提均确凿；默认方向需用户裁决。**
 
+### 21. 交付链路上还有 10 处「已知不处理却零痕迹」的丢弃点
+
+来源：`../../tmp/260822-review-never-silent-failure-events.md` §2（异源评审，探针带正样本对照）。探针原件与边界说明在 `../../../exp/260822-silent-drop-probes/`。
+
+用户 2026-08-22 裁决「已知不处理的路径绝不能静默，应该打日志」。主仓 `f21d7f4` 只兑现了其中三个上游失败事件那一格。**同一条链路上还有 10 处，全部经实测确认在任何日志级别都不产出记录**：
+
+| # | 位置 | 触发条件 | 后果 |
+|---|---|---|---|
+| S1／S2 | `sse_source.py` `SseEvent.json()` | `data:` 不是合法 JSON，或是合法 JSON 但不是对象 | 整帧变成 `{}`，后续按事件名照常处理 |
+| **S3** | `openai_responses.py` `_close` | `output_item.done` 找不到对应 draft，且 item 不是 `web_search_call` | **整个 output item 消失** |
+| S4 | `openai_responses.py` `_accumulate` / `_accumulate_arguments` | delta 的 `output_index` 没有对应 draft | 该段文本／arguments 丢失 |
+| S5 | `anthropic_messages.py` `_close` | `content_block_stop` 的 index 没有 draft | 整个 content block 消失 |
+| S6 | `anthropic_messages.py` `_accumulate` | delta 的 index 没有 draft | 该段文本丢失 |
+| S7 | 两个 `push` 结尾的裸 `return ()` | 任何不认识的事件名 | 事件整个丢弃 |
+| S8 | `openai_responses.py` `_anthropic_usage` | usage 转换抛 `ResponseConversionError` | `Terminal.usage` 变 `{}`，与「从没设过」同值 |
+| S9 | `assembling.py` `decode_json` | tool call arguments 不是合法 JSON | 保留为 `{"__raw": …}`；**内容没丢**，只是无痕 |
+| S10 | `translation_driver/reasoning_carrier.py` | carrier 解不开（4 个 `except → return None`） | 推理载体降级 |
+
+**S3 该排在最前，理由不是严重度排序而是它已经真的伤过人**：Copilot 在 `output_item.added` 与 `output_item.done` 上发**不同的 `item.id``，早先按 id 找 draft 于是 `_close` 永远找不到，**整条回复装配成零字节**——这就是 `openai_responses.py` 里 `_item_key` 那段注释记录的事故。当时它是静默的，所以 1243 条测试全绿而生产上零字节。改判据（`output_index` 优先）之后这条路不再被那个原因走到，但**丢弃分支本身还在，仍然无痕**。
+
+对比之下，`f21d7f4` 修的那三个事件在 3000 万根帧里出现 **0 次**。**先修哪个是明摆着的。**
+
+**不在本次范围，登记而非动手**，理由与第 4 条同源：S7 那一格（任意未识别事件）要不吵就得有一份「明知故忽略」的词表，而本项目规矩是上游行为靠录制不靠想象；其余各格的日志级别与措辞该一并定，而不是各修各的。**证据等级：位置与「零痕迹」均为一手实测（21 组反例 + 正样本对照），确凿；排期与级别需裁决。**
+
 ## 明确不做
 
 - **发真实请求向上游补证。** 用户 2026-08-21 明确禁止：只查历史，历史没有就保持悬念。调查报告里那条「最低成本补证是发个超长 prompt 触发 400」的建议**不采纳**。
