@@ -6,6 +6,8 @@
 - **历史编写基线**：`ghc-api-proxy-py` commit `ed77c9d191df81c451c25161420515cca52ce6a4`。该 commit 只解释本规格形成时观察到的缺口，不表示 current 实现状态；current 状态见 [implementation.md](implementation.md)。
 - **总体 verdict**：`FINALIZED`。Carrier 双格式合同及其余行为已经冻结，可继续实施。规格维持“一 Responses reasoning item → 一 Anthropic thinking block”与普通模式下非空 encrypted-only no-loss；实现进度不得反向改写本规格。目标在 Anthropic pipeline 的单一生命周期内形成 direct bridge，不能复制 OpenAI route 的第二套 orchestration，也不能采用 raw passthrough、“超限后退化为 live forwarding”或参考实现的有损 non-stream reasoning 聚合行为。
 - **已裁决且不可重开**：semantic block 就是一个 Anthropic content block；block-level buffering 是基础能力；下游不提供 token/event 级 live streaming。上游可以增量读取，但完整 Anthropic content block 是最小可观察提交单元。buffer 与 carrier 是普通内存对象，统一服从全局内存预算、准入与背压，不 spill，也不因容量压力退化为 live forwarding。双 endpoint 模型默认走 Messages，Responses bridge 由明确 route policy／config 启用。reasoning signature 的 producer 固定使用本项目主 v1；consumer 同时接受本项目主 v1 与 `copilot-api-js` 当前 v1 合法主路径。不得加入 HMAC、keyring、domain binding 或泛化安全系统，也不得恢复 Anthropic 原生 server-tool 编排。
+- **2026-08-22 用户重裁，覆盖本文原「首块前零 HTTP success headers」**：HTTP success headers 在第一次得到上游 HTTP 200 的尝试时就转发给下游，不等待首个完整 block；`ping` 因此可以出现在首块之前。权威是用户亲笔的 `docs/.human-controlled/client-side-block-delivery.md`「客户端响应头」一节，理由是让 `sse_ping_interval` 的保活覆盖等待首块的长窗口。**被覆盖的只有 headers 那一半**：`message_start` 与首个完整 block 进入同一 sink batch 的绑定不变，body event 在首块前仍不可见。已按此改写「Downstream Anthropic SSE」第 1／2／3 条、retry 边界一节与不变量一节；当前新链实现的就是这个行为（`handle_bounded` 跑到上游响应头到达即返回，随后返回 `StreamingResponse`）。
+  **尚未跟进、需独立切片**：`acceptance.md` 的 `CAL-04-GRAMMAR-v1`（ping 转移行与冻结 fixtures，并需重新审视 R3-M1／R4-M1／R5-M1 三条已闭评审行）、本文第 579 行那条 M1 评审记录（点时记录，不回填）、以及 `architecture.md` 的 delayed response-start owner 一族（实测该机制及其测试只存在于已不可达的旧链）。
 
 ## 问题与意图
 
@@ -282,11 +284,13 @@ Consumer 对每个 thinking block 固定按以下顺序分类，首个命中即�
 
 当 Anthropic `stream=true` 时，下游协议仍是 Anthropic SSE：
 
-1. 首个 Anthropic content block 完整组装并通过 response hooks／limits 前，下游不得看到 HTTP success headers、`message_start` 或任何 body event。首个完整 block 可提交时，`message_start` 必须与该 block 的完整 envelope 进入同一个串行 sink batch，且至多一次。合法零 content 成功响应只有在 terminal 已确定且不存在待完成 block 时，才可用一个完整 terminal batch提交 headers、`message_start`、`message_delta` 与 `message_stop`。
-2. 每个已完成 semantic block 以连续 `content_block_start` → delta／signature delta → `content_block_stop` envelope 提交。
-3. block index 从零开始、连续单调，并与稀疏或重复的 Responses `output_index` 解耦。
-4. 所有 blocks 完成后，至多一个 `message_delta` 携带 stop reason 与 terminal usage，随后至多一个 `message_stop`。
-5. terminal error 在尚未提交 HTTP success 时使用 Anthropic HTTP error；已提交后使用 Anthropic SSE error event，且不得再发 `message_stop` 冒充成功。
+1. HTTP success headers 在**第一次得到上游 HTTP 200 的尝试**时转发给下游，不等待首个完整 block。用户裁决 2026-08-22，权威是 `docs/.human-controlled/client-side-block-delivery.md`「客户端响应头」一节；理由是它让 `client_delivery.sse_ping_interval` 的保活能覆盖等待首块的那段长窗口，而不是等到首块之后才开始。**headers 一旦提交就不能收回**，因此其后的失败只能走 SSE error event（见下面第 7 条），这与「response header commit policy 必须与 retry 边界一致」是同一条约束的两面。
+2. 首个 Anthropic content block 完整组装并通过 response hooks／limits 前，下游不得看到 `message_start` 或任何 body event。首个完整 block 可提交时，`message_start` 必须与该 block 的完整 envelope 进入同一个串行 sink batch，且至多一次。合法零 content 成功响应只有在 terminal 已确定且不存在待完成 block 时，才可用一个完整 terminal batch 提交 `message_start`、`message_delta` 与 `message_stop`。
+3. `ping` 不受第 2 条约束：它是 envelope 层的保活，可以在 headers 已提交、首个完整 block 尚未到达的窗口内出现。这正是第 1 条要换取的东西。
+4. 每个已完成 semantic block 以连续 `content_block_start` → delta／signature delta → `content_block_stop` envelope 提交。
+5. block index 从零开始、连续单调，并与稀疏或重复的 Responses `output_index` 解耦。
+6. 所有 blocks 完成后，至多一个 `message_delta` 携带 stop reason 与 terminal usage，随后至多一个 `message_stop`。
+7. terminal error 在尚未提交 HTTP success 时使用 Anthropic HTTP error；已提交后使用 Anthropic SSE error event，且不得再发 `message_stop` 冒充成功。
 
 block envelope 在网络层可能被 HTTP／TCP 任意分片；本规格保证的是“完整 block 已在代理内组装后才开始对下游可见”以及“同一 block envelope 连续、不与其他 block 交错”，不声称单次 socket write 原子性。
 
@@ -345,7 +349,7 @@ semantic block 固定等于一个 Anthropic content block，而不是 Responses 
 - 一旦首个 block 越过 commit frontier，禁止从头重放整个 generation；否则会产生重复或语义分叉。
 - post-commit continuation 不是透明 retry。只有存在可证明的 resume contract、已提交 block ledger、重复前缀 suppression 与 tool/reasoning 安全条件时，才能作为独立能力启用。
 - client cancel、server shutdown、approval rejection、capability error、deterministic conversion error 与 hard limit violation默认不可重试。
-- response header commit 与首 block commit固定绑定：首个完整block及其`message_start`进入同一sink batch前不得提交HTTP success headers。零content成功只在合法terminal batch准备完成后提交。失败 attempt 的body、usage、headers与blocks均不得泄漏。
+- response header commit 绑定的是**第一次上游 HTTP 200**，不是首 block commit（用户裁决 2026-08-22，见「Downstream Anthropic SSE」第 1 条）。由此得到的 retry 边界是：headers 提交之前的失败可以透明重试并仍返回真实 upstream HTTP error；提交之后一律只能走 SSE error event。`message_start` 与首个完整 block 仍进入同一 sink batch，该绑定不受本次裁决影响。失败 attempt 的 body、usage、headers 与 blocks 均不得泄漏。
 
 ## Ordering、no duplication、no loss 契约
 
@@ -524,7 +528,7 @@ semantic block 固定等于一个 Anthropic content block，而不是 Responses 
 - text、image、tool use／result、reasoning／signature与交错顺序在non-stream和stream归一化结果中一致。
 - 本项目主 v1 producer→client echo→consumer 对非空 `encrypted_content` value-exact 往返，version／tag／最小字段 gate 唯一；consumer 同时接受 `copilot-api-js` upstream v1 合法向量、bare prefix 与 legacy bare sentinel。识别顺序稳定，项目 unknown version、foreign 与代表性 malformed 不被误恢复且不泄漏裸异常；不要求所有 malformed 边界逐字节等同 Node。普通模式下 encrypted-only 与 multiple reasoning items 不丢失、不错配；显式 strip 时每 item 仍保留 block cardinality并记录有意 payload removal。
 - HTTP SSE与upstream WS的同一Responses lifecycle序列产生相同Anthropicblocks、usage、stop reason与error。
-- 任意上游chunk／frame切分下，首block完成前下游观察到零HTTP success headers、零`message_start`和零body events；任一block完成前观察到零个该block events，完成后只看到一个合法、连续、闭合的block envelope。
+- 任意上游chunk／frame切分下，首block完成前下游观察到零`message_start`和零body events（`ping` 除外，见「Downstream Anthropic SSE」第 3 条）；任一block完成前观察到零个该block events，完成后只看到一个合法、连续、闭合的block envelope。HTTP success headers 不在此列——按 2026-08-22 裁决它在第一次上游 200 时就已提交。
 - pre-commit可重试故障不会泄漏失败attempt；post-commit故障不会从头重放或重复已提交block。
 - failed attempt usage／headers／terminal不进入成功结果；真实upstream exchange数与`RequestContext.attempts`一致。
 - 任意普通内存 block 在全局 budget 内继续 memory-only 组装；global budget／queue 压力只产生普通 admission control、backpressure 或明确 capacity／timeout 终态，从不 spill 或切换到 live delta forwarding。
