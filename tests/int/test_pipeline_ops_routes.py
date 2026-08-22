@@ -11,7 +11,7 @@ import pytest
 from fastapi import FastAPI
 
 from app.model_provider.types import ModelDescriptor, ModelEndpoint
-from app.server.ops_routes import CHAIN_STATE_KEY
+from app.server.app_state import CHAIN_STATE_KEY
 from app.server.ops_routes import router as ops_router
 
 

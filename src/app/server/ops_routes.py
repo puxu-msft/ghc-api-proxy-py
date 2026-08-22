@@ -5,21 +5,14 @@ Written against `Chain` rather than adapted from `app.routes`. Those routers res
 Only what this chain can answer truthfully is here. Readiness is the catalog, because that is what decides whether a request can be served at all; the model list is the catalog routing actually consults, so a client reading it learns what routing will accept. History and the management API need state this chain does not own yet, and are absent rather than answered with a plausible stub.
 """
 
-from typing import cast
 
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 from prometheus_client import REGISTRY, generate_latest
 
-from app.core.chain import Chain
-
-CHAIN_STATE_KEY = "pipeline_chain"
+from app.server.app_state import chain_of
 
 router = APIRouter()
-
-
-def _chain(request: Request) -> Chain:
-    return cast(Chain, getattr(request.app.state, CHAIN_STATE_KEY))
 
 
 @router.get("/health/liveness")
@@ -35,7 +28,7 @@ async def readiness(request: Request) -> JSONResponse:
 
     An empty catalog is not readiness: routing fails closed on capability, so every request would be refused with a message saying the model does not exist. Answering 200 in that state is how a supervisor is told to send traffic to a process that will refuse all of it.
     """
-    chain = _chain(request)
+    chain = chain_of(request)
     providers = {
         name: {"models": len(chain.providers.get(name).available_ids)}
         for name in sorted(chain.providers.names)
@@ -52,7 +45,7 @@ async def readiness(request: Request) -> JSONResponse:
 @router.get("/openai/v1/models")
 async def list_models(request: Request) -> JSONResponse:
     """The catalog routing consults, in the OpenAI list shape clients expect."""
-    provider = _chain(request).providers.default
+    provider = chain_of(request).providers.default
     return JSONResponse(
         {
             "object": "list",

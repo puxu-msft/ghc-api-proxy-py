@@ -60,6 +60,7 @@ from app.pipeline.hand_over import hand_back_block, replay_reason
 from app.pipeline.reply import reply_summary, response_payload
 from app.pipeline.request import RequestContext, WireFormat
 from app.server.admission import InFlightLimit
+from app.server.app_state import chain_of, chain_of_app, set_chain
 from app.server.composition import refresh_catalogs
 from app.server.http_errors import error_body, error_headers, error_status
 from app.server.inbound import ROUTES, InboundRequestError, build_context, route_for_path
@@ -70,15 +71,9 @@ from app.streaming.deadline import (
 )
 from app.streaming.idle_timeout import with_idle_timeout
 
-CHAIN_STATE_KEY = "pipeline_chain"
-
 # What the calibrator has learnt is only worth keeping if it survives the process.
 # Not configurable: `config.example.yaml` has no `tokenization` section to put it in.
 TOKENIZATION_FLUSH_SECONDS = 5.0
-
-
-def _chain(request: Request) -> Chain:
-    return cast(Chain, getattr(request.app.state, CHAIN_STATE_KEY))
 
 
 async def _serve(request: Request) -> Response:
@@ -88,7 +83,7 @@ async def _serve(request: Request) -> Response:
 
     A streaming response is left alone on the way out: it has produced no bytes at this point and its own generator is what knows when it finished, so it owns both the release and the completion line.
     """
-    chain = _chain(request)
+    chain = chain_of(request)
     trace = RequestTrace(
         method=request.method,
         path=request.url.path,
@@ -676,7 +671,7 @@ def build_router() -> APIRouter:
 
 def create_pipeline_app(chain: Chain) -> FastAPI:
     app = FastAPI(title="ghc-api-proxy", lifespan=_lifespan)
-    setattr(app.state, CHAIN_STATE_KEY, chain)
+    set_chain(app, chain)
     app.include_router(build_router())
     # Health, the model list and metrics. A supervisor that cannot ask whether the process is ready has to guess, and the inference routes alone give it nothing to ask.
     app.include_router(ops_router)
@@ -705,7 +700,7 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     Without this the `local` token counter starts from nothing every time and throws away everything it learns, which makes its estimates worse the more the process is restarted — and says nothing about it, because an estimate is still returned.
     """
-    chain = cast(Chain, getattr(app.state, CHAIN_STATE_KEY))
+    chain = chain_of_app(app)
     logger = get_logger()
     logger.info(f"ghc-api-proxy v{_version()} pid={os.getpid()}", status="ok")
     # Attempted before accepting, because routing fails closed on capability: a request arriving first would otherwise be refused with a message saying the model does not exist.
