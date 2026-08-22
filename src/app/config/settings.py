@@ -6,21 +6,23 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 from pydantic_settings.sources import EnvSettingsSource
 
-from app.config.loading import NON_ENVIRONMENT_SETTINGS
+from app.config.loading import ENV_PREFIX, NO_WHOLE_VALUE_FROM_ENVIRONMENT
 from app.graceful_timeout import DEFAULT_GRACEFUL_TIMEOUT_SECONDS
 
 
-class _EnvSourceWithoutFileOnlySettings(EnvSettingsSource):
-    """The environment source, minus the settings a config file alone may carry.
+class EnvSourceWithoutWholeValues(EnvSettingsSource):
+    """The environment source, with the flat spelling of a few settings removed.
 
-    Filtering where `load_settings` assembles its layers is not enough, and that is worth stating because it looks like it should be: `BaseSettings` runs its own environment source during validation, and that source wins over the values passed in — `AppSettings.model_validate({"model_mappings": {}})` still comes back holding whatever the environment said. So the exclusion has to be made here, on the source itself.
+    Dropped by variable name rather than by settings key, because the two spellings arrive as the same key: `GHC_API_PROXY_MODEL_MAPPINGS` and `GHC_API_PROXY_MODEL_MAPPINGS__GPT` both land on `model_mappings`, and only the first is the one being refused.
+
+    Filtering where `load_settings` assembles its layers is not enough, and that is worth stating because it looks like it should be: `BaseSettings` runs its own environment source during validation, and that source wins over the values passed in — `AppSettings.model_validate({"model_mappings": {}})` still came back holding whatever the environment said. So the exclusion has to be made here, on the source itself.
     """
 
-    def __call__(self) -> dict[str, object]:
-        return {
-            name: value
-            for name, value in super().__call__().items()
-            if name not in NON_ENVIRONMENT_SETTINGS
+    def __init__(self, settings_cls: type[BaseSettings]) -> None:
+        super().__init__(settings_cls)
+        refused = {f"{ENV_PREFIX}{name}".lower() for name in NO_WHOLE_VALUE_FROM_ENVIRONMENT}
+        self.env_vars = {
+            name: value for name, value in self.env_vars.items() if name not in refused
         }
 
 
@@ -191,7 +193,7 @@ class AppSettings(BaseSettings):
         del env_settings  # Replaced rather than reordered; see the source's own docstring.
         return (
             init_settings,
-            _EnvSourceWithoutFileOnlySettings(settings_cls),
+            EnvSourceWithoutWholeValues(settings_cls),
             dotenv_settings,
             file_secret_settings,
         )

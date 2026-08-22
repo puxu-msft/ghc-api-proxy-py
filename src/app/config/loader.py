@@ -2,9 +2,7 @@
 
 This docstring used to say it served the `--fd` (systemd) path, and that stopped being true without anything noticing. `cli.py` reaches `--fd` through `_load_spec_config` -> `ProxyConfig` -> `serve_inherited`, the same as the direct-run path; `tests/systemd/test_systemd_units.py` already says as much in passing. As of 2026-08-22 `load_settings` has no caller in `src/` beyond `app.config.__init__` re-exporting it, and its only exercise is `tests/unit/config/test_config_loader.py`. It is kept because `AppSettings` still configures the legacy chain (`app.routes` / `AnthropicClient` / `app.deps`), which is present and not deleted; nothing on the new chain reads it.
 
-Not to be confused with `app.config.loading`, one letter away, which loads the spec's
-`ProxyConfig` and is what every entry point now uses. The names are close enough that this one was
-found first and its neighbour rewritten from scratch once; the two are not interchangeable.
+Not to be confused with `app.config.loading`, one letter away, which loads the spec's `ProxyConfig` and is what every entry point now uses. The names are close enough that this one was found first and its neighbour rewritten from scratch once; the two are not interchangeable.
 """
 
 import os
@@ -12,12 +10,12 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
-from pydantic_settings import EnvSettingsSource, YamlConfigSettingsSource
+from pydantic_settings import YamlConfigSettingsSource
 
 from app.config.compat import migrate_compat
-from app.config.loading import CONFIG_PATH_VARIABLE, NON_ENVIRONMENT_SETTINGS
+from app.config.loading import CONFIG_PATH_VARIABLE
 from app.config.paths import config_file_path
-from app.config.settings import AppSettings
+from app.config.settings import AppSettings, EnvSourceWithoutWholeValues
 
 PER_KEY_PATHS = frozenset(
     {
@@ -99,12 +97,8 @@ def load_settings(
             YamlConfigSettingsSource(AppSettings, yaml_file=resolved_path)()
         )
 
-    # The same exclusion the direct-run path applies. pydantic-settings will happily JSON-decode a mapping out of one variable, so without this the two chains disagree about whether a setting can come from the environment at all — and the one that says yes is the one nothing in production runs.
-    env_values = {
-        key: value
-        for key, value in EnvSettingsSource(AppSettings)().items()
-        if key not in NON_ENVIRONMENT_SETTINGS
-    }
+    # The source `AppSettings` itself validates through, so this layer and the validation below cannot disagree about which spellings the environment may carry.
+    env_values = EnvSourceWithoutWholeValues(AppSettings)()
     cli_values = {key: value for key, value in (cli_overrides or {}).items() if value is not None}
 
     merged = _merge_layers(defaults, yaml_values)

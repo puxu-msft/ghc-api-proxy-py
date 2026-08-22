@@ -213,26 +213,48 @@ def test_tls_settings_stay_hot_reloadable() -> None:
     assert outcome.restart_required == ()
 
 
-def test_the_model_mappings_are_not_settable_from_the_environment(
+def test_a_whole_mapping_from_the_environment_is_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A mapping belongs in the config file, and only there.
+    """The flat spelling holds every mapping in one variable as JSON, and the config file is where that belongs.
 
-    It fits in an environment only as JSON crammed into one variable: unreadable, un-mergeable per key with the file layer every other source merges with, and impossible to change one entry of without rewriting all of them.
+    Unreadable, un-mergeable per key with the file layer every other source merges with, and impossible to change one entry of without rewriting all of them.
 
-    Both chains are asserted because they refuse it in different places. The direct-run path drops it while reading the environment; `AppSettings` runs its own environment source during validation, which overrides values handed to it — so filtering where the layers are assembled leaves it working there. Checked with `--port`'s variable alongside, so a test that passed because nothing at all reached the settings would still fail.
+    Set on its own, not alongside the per-key spelling: the two arrive as the same settings key, so with both set the per-key one overwrites whatever the flat one produced and this passes whether or not anything refused it. Both chains are asserted because they refuse it in different places — the direct-run path drops it while reading the environment, while `AppSettings` runs its own environment source during validation which overrides the values handed to it, so filtering where the layers are assembled leaves it working there.
     """
-    monkeypatch.setenv(f"{ENV_PREFIX}MODEL_MAPPINGS", '{"env-model":"env-target"}')
-    monkeypatch.setenv(f"{ENV_PREFIX}PORT", "43999")
+    monkeypatch.setenv(f"{ENV_PREFIX}MODEL_MAPPINGS", '{"whole-mapping":"refused"}')
+    monkeypatch.delenv(f"{ENV_PREFIX}MODEL_MAPPINGS__GPT", raising=False)
 
     assert "model_mappings" not in environment_values()
-    assert load_proxy_config().model_mappings.get("env-model") is None
-    assert load_proxy_config().server.port == 43999
+    assert load_proxy_config().model_mappings.get("whole-mapping") is None
 
     from app.config.loader import load_settings
 
-    assert load_settings().model_mappings == {}
-    assert load_settings().port == 43999
+    assert load_settings().model_mappings.get("whole-mapping") is None
+
+
+def test_one_mapping_entry_from_the_environment_is_kept(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`…__MODEL_MAPPINGS__GPT=` names one entry and merges like anything else, so nothing refuses it.
+
+    The counterpart to the test above, and the reason the refusal is written against the variable name rather than the settings key: written against the key it would take this spelling too, and the two are indistinguishable by the time they reach the settings. `--port`'s variable rides along so a version of this that passed because nothing at all reached the settings would still fail.
+    """
+    monkeypatch.delenv(f"{ENV_PREFIX}MODEL_MAPPINGS", raising=False)
+    monkeypatch.setenv(f"{ENV_PREFIX}MODEL_MAPPINGS__GPT", "one-entry")
+    monkeypatch.setenv(f"{ENV_PREFIX}PORT", "43999")
+
+    assert environment_values()["model_mappings"] == {"gpt": "one-entry"}
+
+    direct = load_proxy_config()
+    assert direct.model_mappings["gpt"] == "one-entry"
+    assert direct.server.port == 43999
+
+    from app.config.loader import load_settings
+
+    legacy = load_settings()
+    assert legacy.model_mappings == {"gpt": "one-entry"}
+    assert legacy.port == 43999
 
 
 def test_a_config_in_the_working_directory_is_not_consulted(
