@@ -798,7 +798,10 @@ def test_translated_route_answers_in_the_format_the_client_asked_in() -> None:
 
 
 def test_max_output_tokens_becomes_the_anthropic_stop_reason() -> None:
-    # spec.md: an incomplete response due to the output-token limit is max_tokens downstream.
+    """spec.md: an incomplete response due to the output-token limit is max_tokens downstream — and then the turn is handed back, so `tool_use` is what reaches the wire.
+
+    The mapping itself is asserted where it happens, in `tests/unit/pipeline/translation_driver/test_responses_stop_reason.py`. What this holds is the ending a buffered reply gets once that mapping has said the turn ran out of room: the client is handed a way to carry it on, exactly as a streamed one is. Ruled 2026-08-22.
+    """
     client, _ = make_client(
         lambda _: httpx2.Response(
             200,
@@ -820,7 +823,16 @@ def test_max_output_tokens_becomes_the_anthropic_stop_reason() -> None:
     response = client.post("/v1/messages", json={"model": "gpt-model", "messages": []})
 
     assert response.status_code == 200
-    assert response.json()["stop_reason"] == "max_tokens"
+    body = response.json()
+    assert body["stop_reason"] == "tool_use"
+    handed = body["content"][-1]
+    assert handed["type"] == "tool_use"
+    assert handed["name"] == TOOL_NAME
+    assert handed["input"]["category"] == "max_tokens"
+    # The one block upstream produced is still there: dropping is only for a block upstream itself cut short, and only when something whole came before it.
+    assert body["content"][0] == {"type": "text", "text": "cut"}
+    # Neither a success nor a failure, the same as the streamed ending.
+    assert _records()[-1]["status"] == "retry"
 
 
 def test_untranslated_route_body_is_returned_unchanged() -> None:

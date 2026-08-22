@@ -145,6 +145,20 @@ def from_openai_responses_response(payload: Mapping[str, Any]) -> SemanticRespon
         response.usage = _anthropic_usage(cast(Mapping[str, Any], usage))
 
     for item in _mapping_list(payload.get("output")):
+        if str(item.get("status", "")) == "incomplete" and response.blocks:
+            # The item upstream cut short, dropped because something whole came before it. Same rule
+            # as the streaming assembler applies, and it has to live here rather than on the finished
+            # body: `status` is upstream's, and nothing carries it across the translation.
+            #
+            # Only when something whole came before. Half a sentence still beats an empty answer, so
+            # the rule reverses when this is all there is — which is why the test is on `response.blocks`
+            # rather than on the item's position. Ruled 2026-08-21 for the streaming path and extended
+            # here 2026-08-22, when the ruling that a non-streaming turn could not be continued was
+            # withdrawn: dropping it is only defensible because the client is handed a way to get it back.
+            response.conversion.record(
+                LossCode.ITEM_NOT_CARRIED, f"truncated {item.get('type')!r} dropped"
+            )
+            continue
         _, blocks = blocks_from_item(item)
         for block in blocks:
             if block.kind is BlockKind.UNKNOWN:

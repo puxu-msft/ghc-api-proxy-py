@@ -50,3 +50,43 @@ def test_a_complete_reply_is_unaffected() -> None:
     """The control. Without it the rule above would pass just as well if it never said `end_turn` at all."""
     whole = _reply("max_output_tokens") | {"status": "completed", "incomplete_details": None}
     assert from_openai_responses_response(whole).stop_reason == "end_turn"
+
+
+def _reply_with(*items: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": "resp_1",
+        "model": "gpt-model",
+        "status": "incomplete",
+        "incomplete_details": {"reason": "max_output_tokens"},
+        "output": list(items),
+    }
+
+
+def _message(text: str, status: str) -> dict[str, Any]:
+    return {
+        "type": "message",
+        "id": f"m_{text}",
+        "status": status,
+        "content": [{"type": "output_text", "text": text}],
+    }
+
+
+def test_the_item_upstream_cut_short_is_dropped_once_something_whole_came_before() -> None:
+    """The same boundary the streaming assembler finds, found here instead because this path never sees an event.
+
+    It has to be here rather than on the finished body: `status` is upstream's, and nothing carries it across the translation.
+    """
+    reply = from_openai_responses_response(_reply_with(_message("whole", "completed"), _message("half", "incomplete")))
+    assert [b.text for b in reply.blocks] == ["whole"]
+
+
+def test_the_item_upstream_cut_short_is_kept_when_it_is_all_there_is() -> None:
+    """Half a sentence still beats an empty answer, so the rule reverses when this is all there is."""
+    reply = from_openai_responses_response(_reply_with(_message("half", "incomplete")))
+    assert [b.text for b in reply.blocks] == ["half"]
+
+
+def test_a_whole_item_is_never_dropped_however_many_came_before() -> None:
+    """The control: without it, a rule that dropped on position alone would pass the first test too."""
+    reply = from_openai_responses_response(_reply_with(_message("one", "completed"), _message("two", "completed")))
+    assert [b.text for b in reply.blocks] == ["one", "two"]
