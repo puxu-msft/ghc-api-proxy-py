@@ -292,6 +292,15 @@ class ResponsesAssembler:
             # nothing; the alternative costs the turn's search.
             draft = _Draft(index=self._order, kind=WEB_SEARCH_CALL, payload=dict(item))
             self._order += 1
+        if _upstream_cut_this_item_short(data) and self._terminal.blocks > 0:
+            # Upstream says on the closing event whether this item is whole: `status: "incomplete"` on the one it cut short, `"completed"` on the rest. Measured 15 times, four of them on a `function_call`, whose `arguments` are then truncated JSON.
+            #
+            # Dropped only when something whole came before it. Half a sentence is not what the client asked for and the next turn will produce it again — but half a sentence is still better than an empty answer, so the rule reverses when this is all there is. Ruled 2026-08-21.
+            #
+            # Free: the item upstream cut short is always the last one, so how many blocks came before it is already known here. Nothing is buffered and nothing looks ahead.
+            #
+            # A `reasoning` item carries no `status` at all — verified against a completed one, whose key set is identical — so this cannot see a truncated one and does not try. Left open deliberately; `deferred.md` 2.
+            return ()
         kind = draft.kind
         if draft.kind == TOOL_USE:
             self._saw_tool_call = True
@@ -342,6 +351,17 @@ class ResponsesAssembler:
             )
             return
         self._terminal.stop_reason = TOOL_USE if self._saw_tool_call else "end_turn"
+
+
+def _upstream_cut_this_item_short(data: dict[str, Any]) -> bool:
+    """Whether upstream said, on this closing event, that the item it is closing is not whole.
+
+    `str()` is not used on the way in: an absent field and a null one both mean upstream said nothing, and `str(None)` is the four characters `None`, which is not `"incomplete"` but is also not a value upstream ever sent.
+    """
+    raw = data.get("item")
+    item = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+    status = item.get("status")
+    return status == "incomplete"
 
 
 def _reasoning_signature(draft: _Draft, closing: dict[str, Any]) -> str:

@@ -17,6 +17,7 @@ from app.pipeline.delivery.assembler import (
     ResponsesAssembler,
     terminal_from_anthropic,
 )
+from app.pipeline.delivery.blocks import CompletedBlock
 from app.pipeline.delivery.sse_source import SseEvent, parse_frame, read_events
 from app.server.handler import blocks_from_anthropic
 
@@ -417,3 +418,48 @@ def test_an_ordinary_item_that_closes_without_opening_is_still_ignored() -> None
         )
         == ()
     )
+
+
+def _responses_item(assembler: ResponsesAssembler, index: int, item: dict[str, object]) -> tuple[CompletedBlock, ...]:
+    """Open and close one Responses output item, returning whatever closing it produced."""
+    added = {"output_index": index, "item": {k: v for k, v in item.items() if k != "status"}}
+    assembler.push(SseEvent("response.output_item.added", orjson.dumps(added).decode()))
+    return assembler.push(
+        SseEvent("response.output_item.done", orjson.dumps({"output_index": index, "item": item}).decode())
+    )
+
+
+def test_an_item_upstream_cut_short_is_dropped_once_something_whole_came_before() -> None:
+    """Half a sentence is not what the client asked for, and the next turn produces it again.
+
+    Upstream says so on the closing event — `status: "incomplete"` on the item it cut short — and the truncated one is always the last, so how many whole blocks came before it is already known. Nothing is buffered and nothing looks ahead.
+    """
+    assembler = ResponsesAssembler()
+    whole = _responses_item(assembler, 0, {"type": "message", "id": "m1", "status": "completed"})
+    assert len(whole) == 1
+
+    cut = _responses_item(
+        assembler,
+        1,
+        {"type": "function_call", "id": "fc1", "call_id": "c1", "name": "Bash", "status": "incomplete"},
+    )
+    assert cut == ()
+    # And it is not counted either: a block nobody received is not a block delivered.
+    assert assembler.terminal.blocks == 1
+
+
+def test_an_item_upstream_cut_short_is_kept_when_it_is_all_there_is() -> None:
+    """The rule reverses when dropping would leave the client an empty answer: half a sentence beats nothing."""
+    assembler = ResponsesAssembler()
+    only = _responses_item(assembler, 0, {"type": "message", "id": "m1", "status": "incomplete"})
+    assert len(only) == 1
+    assert assembler.terminal.blocks == 1
+
+
+def test_a_whole_item_is_never_dropped_however_many_came_before() -> None:
+    """The control. Without it the rule above would pass just as well if it dropped on position alone."""
+    assembler = ResponsesAssembler()
+    _responses_item(assembler, 0, {"type": "message", "id": "m1", "status": "completed"})
+    second = _responses_item(assembler, 1, {"type": "message", "id": "m2", "status": "completed"})
+    assert len(second) == 1
+    assert assembler.terminal.blocks == 2
