@@ -181,7 +181,9 @@
 1. ~~**`GHC_API_PROXY_PORT` 这个拼写**~~ —— **2026-08-22 已裁决并实现**（提交 `1459320`）。`src/app/config/loading.py` 的 `ENV_ALIASES` 把无 `__` 的扁平名 `port` / `host` 指向 `server.port` / `server.host`。在此之前设 `GHC_API_PROXY_PORT` 不是「端口没生效」而是**进程起不来**：该名字映射到顶层键 `port`，撞上 `extra="forbid"`。`host` 是一并做的——两者总是一起设置，只给 `port` 加别名会让 `GHC_API_PROXY_HOST` 成为完全相同的陷阱。别名位于环境层，`--port` 仍压过它；两种拼写同时设置时嵌套写法确定性胜出（别名与显式名分开收集再合并，否则答案取决于环境变量遍历顺序）。详见候选文档同名一节。
 2. **信号处理器安装窗口**（既有缺陷，建议单独立项）。`StandaloneServer.serve` 的顺序是 `arm()` → `on_serving()`（写 pidfile、发信号）→ 才安装 handler，所以从 pidfile 对外宣称「可接管」到 SIGUSR2 真正被接住之间有一个窗口，窗口内 SIGUSR2 走默认动作直接杀进程。评审用子进程探针证实（返回码 `-12`）。修它要动关闭阶梯的核心时序。
 3. **并发回滚覆盖后来者**（既有缺陷，建议单独立项）。A 找到前任 P 并发布 A，B 随后发布 B，若 A 的启动尾部抛异常，A 的回滚会把 P 原样写回，覆盖正在服务的 B。单后继场景正确。真正修它需要同端口的进程间串行化（「先 read 再 write」仍有 TOCTOU）——第二批加入的拒绝逻辑也共享这个窗口，见上「拒绝的语义边界」。
-4. **`listening on http://{host}:{port}` 在 `--fd` 路径上是假的**（既有缺陷，`src/app/server/pipeline_app.py`）。协议硬编码 `http://`，地址取自配置而非实际监听的 socket，所以继承 fd 时端口和协议都不对。2026-08-22 给该路径加上 TLS（提交 `fb06150`）之后，这行从「端口错」变成「端口和协议都错」。未修：该文件当时正被同伴改动。
+4. ~~**`listening on http://{host}:{port}` 在 `--fd` 路径上是假的**~~ —— **2026-08-22 已修**（提交 `d21a9e6`）。这行原来在 ASGI app 层用 `server.host` / `server.port` 拼装、协议硬编码 `http://`，而那一层不拥有 listener，所以两半都是猜的：继承 fd 时地址归 socket 的创建者，协议对每个 TLS 部署都是错的。且 `log_config=None` 关掉了 uvicorn 自己那行，所以这里错就是处处错。现在由绑定 socket 的那一层说：`run_standalone` 用 bind 回来的地址与它即将构造 adapter 的模式，`serve_inherited` 从 fd 的 dup 上读地址、并把 `both` 报成它实际成为的 HTTPS。格式化收在 `app/lifecycle/listener.py` 的 `listening_urls()`。
+
+   **端口断言只在「请求端口 ≠ 实际端口」处才有分辨力**：继承监听器（配置默认 4142）与 `--port 0`（内核选）。其余场景两者恒等，从配置拼装的宣布与从 socket 读的宣布无法区分——变异验证暴露过这一点，standalone 那两条断言起初打不红。
 
 ## 报告原件
 
