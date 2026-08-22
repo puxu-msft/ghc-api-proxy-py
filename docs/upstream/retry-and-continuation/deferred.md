@@ -98,6 +98,46 @@ response 层有信号（`response.incomplete`），但它晚于 item 关闭到�
 
 补不补由用户裁决：它是一道守卫，而本项目对「把守卫接成阻断」有明确态度。
 
+### 11. 客户端时限与「上游已完成」谁先答，尚未裁决；且三条 deadline 测试的夹具已分辨不出这两种情形
+
+来源：`../../tmp/260822-review-complete-fix-opus.md` 问题 2（异源评审，8 个受控变异）。由 `c86712d` 引入的 `if assembler.terminal.seen: break` 带出。
+
+该支被**刻意**放在 `ClientDeadlineError` 分支之后，理由写在代码注释里：「跑超时了」与「上游已完成」是两个问题，重排属于新的 deadline policy 裁决。**这个理由只说明本次不裁，不说明该问题不存在。**
+
+- **有真实后果**：上游已发完 `message_delta` + `message_stop`，随后客户端时限到期 —— 当前发 `client_deadline_exceeded` error 帧，**丢掉一条已经攒齐的完整回复**。若次序对调，则交付该回复。哪个对，取决于「时限」保护的是「客户端还愿不愿意等」还是「这一轮总耗时」，人写文档 `client-side-block-delivery.md` 未区分。
+- **实测（评审）**：把该支合并进 `if torn is None:` 那一支（即让 terminal 压过 deadline），三条 client-deadline 测试全部转红——所以当前次序是**载重的**，不是风格选择。
+- **同时登记一条测试事实**：`test_the_client_deadline_is_the_one_ending_that_says_so` 与 `test_a_held_back_policy_still_hears_the_client_deadline` 的夹具都携带完整终结事件（`anthropic_stream(...)` 末尾自带 `message_delta` + `message_stop`），因此**它们已经无法区分「时限先到」与「上游已完成后时限才到」**。裁决次序时应一并把夹具按 `[:-2]` 模式改掉——与 `c86712d` 对另外两条测试所做的相同，理由见该提交。
+
+**证据等级：足以据此登记，不足以据此选一边。** 需要用户裁决时限的语义。
+
+### 12. 上游在终结事件之后 reset：完成行不再留痕（`c86712d` 引入）
+
+来源：同上，发现 A（正反两次实测，用项目自己的 `_StreamAccounting` + `_tracked_delivery`）。
+
+`c86712d` 之前，「上游发完终结事件后连接被 reset」打出的是一行**自相矛盾**的日志：
+
+```
+[FAIL] 200 POST /v1/messages … end_turn: stream failed before a terminal event: connection reset by peer
+```
+
+（`end_turn` 与「before a terminal event」并列。）修复后是一行**真话**：
+
+```
+[ OK ] 200 POST /v1/messages … end_turn
+```
+
+**但 `connection reset by peer` 这个事实现在不出现在任何地方**：`_tracked_delivery` 正常跑完所以 `accounting.failure` 是 `None`，局部变量 `torn` 在 `break` 之后被丢弃，没有日志、计数或 trace 字段承接它。而 `_ending()` 自己的 docstring 写着 failure「is the only account of what went wrong that exists anywhere」。
+
+**为什么这值得登记而不是忽略**：`../h2-goaway/findings.md` 的「未决」栏里有两项正需要这类样本——「上游响应被提前关闭的频率」与「本项目自身的传输失败频率（此前零生产数据，日志刚上线）」。一次修复静默削掉了刚建起来的观测面的一角。
+
+**反方向的先例也要一起权衡**：项目已有裁决 `test_a_stream_cut_after_its_stop_reason_is_not_called_truncated`（`tests/int/test_pipeline_app.py:1833`）说「`message_delta` 之后被切断的流已经把客户端应得的都说了，不算 truncated」。按同一逻辑，`message_stop` 之后被 reset 报 `[ OK ]` 是自洽的。所以这不是「显然要修」。
+
+**处置：归交付侧重写切片（同伴），本主题登记不动手。** 理由是留痕需要一条从 `_deliver` 到 `_StreamAccounting` 的新通道——`stream_delivery` 今天完全看不到 accounting——而同伴正在做的重写已经在加 `ContinuationSupport` 这类回调通道，也已认领第 8d 条。硬塞进 `c86712d` 会是与该提交语义无关的管道铺设。
+
+候选做法（评审倾向第一个，本会话同意）：① 给 `_StreamAccounting` 加一个与 `failure` 分开的字段（如 `tore_after_terminal`），完成行仍判 `ok` 但 detail 里附一句 —— `format_completion_line` 的 `if line.detail:` 对任何状态都渲染，**无需改日志格式**；② 只记一条 debug 日志；③ 明确裁决「这个事实不需要留痕」并写下理由（按 `record-what-not-adopted`，不采纳也要写）。
+
+**不要**为此加门禁或指标体系。
+
 ## 明确不做
 
 - **发真实请求向上游补证。** 用户 2026-08-21 明确禁止：只查历史，历史没有就保持悬念。调查报告里那条「最低成本补证是发个超长 prompt 触发 400」的建议**不采纳**。
