@@ -46,8 +46,6 @@ from app.server.pipeline_app import (
     _tracked_delivery,  # pyright: ignore[reportPrivateUsage]
     create_pipeline_app,
 )
-from app.streaming.deadline import StreamDeadlineError
-from app.streaming.idle_timeout import StreamIdleTimeoutError
 from app.tokenization.state_store import TokenizationStateStore
 
 BASE_URL = "https://copilot.example"
@@ -2262,10 +2260,16 @@ def test_an_upstream_that_goes_quiet_past_the_idle_timeout_is_given_up_on() -> N
         overrides={"upstream_request_timeouts": {"stream_idle": 1}},
     )
 
-    # Given up on the same way every other mid-stream upstream failure is: the turn ends by raising, rather than by quietly rounding off a stream upstream never finished. What that then looks like to a client is the truncation-reporting question — one contract for all of these, not this guard's to answer on its own.
-    # Only the raise is asserted. What the client keeps of a turn cut off mid-flight is a property of the wire, and this harness discards the body it had already sent once the app raises, so asserting it here would be asserting the harness.
-    with pytest.raises(StreamIdleTimeoutError):
-        _delivered(client)
+    # Given up on the same way every other mid-stream upstream failure is. What that looks like to the client is not this guard's to answer: a timeout is continuable and this upstream delivers a whole block before going quiet, so the turn is handed back as a tool call rather than torn off.
+    # The silence is 1.5s against a 1s guard, so a guard that never fired would run the full gap and then deliver upstream's own ending.
+    started = time.monotonic()
+    delivered = _delivered(client)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.4, f"the idle guard never fired: {elapsed:.1f}s"
+    assert b"turn_interrupted" in delivered
+    # What the client had already been given is still there.
+    assert b'"text":"first"' in delivered
 
 
 def test_the_bundled_default_leaves_a_quiet_upstream_alone() -> None:
@@ -2301,14 +2305,21 @@ def _upstream_that_trickles(rounds: int) -> Callable[[httpx2.Request], httpx2.Re
 
 
 def test_the_attempt_deadline_reaches_the_streamed_body() -> None:
-    # The deadline was enforced only up to the response headers, because that is where the driver's await ends on a streaming request. Everything after — the part the setting's own documentation says it exists for — ran unbounded.
+    """The deadline was enforced only up to the response headers, because that is where the driver's await ends on a streaming request. Everything after — the part the setting's own documentation says it exists for — ran unbounded.
+
+    Asserted on when the turn ends rather than on it raising. A timeout is a continuable failure and this upstream delivers a whole block before it starts trickling, so the turn is handed back to the client as a tool call instead of being torn off. Sixty rounds of 0.05s is three seconds of trickle against a one-second deadline: a deadline that did not reach the body would run all three.
+    """
     client, _ = make_client(
         _upstream_that_trickles(rounds=60),
         overrides={"upstream_request_timeouts": {"upstream_request_deadline": 1}},
     )
 
-    with pytest.raises(StreamDeadlineError):
-        _delivered(client)
+    started = time.monotonic()
+    delivered = _delivered(client)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 2.0, f"the deadline never reached the body: {elapsed:.1f}s"
+    assert b"turn_interrupted" in delivered
 
 
 def _upstream_slow_to_answer(delay: float) -> Callable[[httpx2.Request], Any]:
@@ -2373,12 +2384,13 @@ def test_the_deadline_is_one_instant_and_not_a_duration_started_twice() -> None:
     )
 
     started = time.monotonic()
-    with pytest.raises(StreamDeadlineError):
-        _delivered(client)
+    delivered = _delivered(client)
     elapsed = time.monotonic() - started
 
     # The headers alone cost two of the three seconds. Recomputing downstream would land near five.
     assert elapsed < 4.0, f"the deadline was restarted downstream: {elapsed:.1f}s"
+    # Ended by handing the turn back, not by tearing it off: a timeout is continuable and a whole block had already gone out.
+    assert b"turn_interrupted" in delivered
 
 
 def _records() -> list[dict[str, Any]]:
@@ -2829,3 +2841,132 @@ def test_the_client_deadline_survives_a_replay() -> None:
     assert calls == [1, 1], "the torn attempt was not replaced"
     assert elapsed < 5.0, f"the replayed body outlived the client deadline: {elapsed:.1f}s"
     assert "client_deadline_exceeded" in body
+
+
+TOOL_NAME = "mcp__plugin_ghc-api-proxy-helper_auto-retry__turn_interrupted"
+
+
+def _handed_back(delivered: bytes) -> dict[str, Any]:
+    """The synthesised tool call, reassembled from the frames it went out as."""
+    text = delivered.decode()
+    start = next(
+        orjson.loads(line.removeprefix("data: "))
+        for line in text.splitlines()
+        if line.startswith("data: ") and '"tool_use"' in line and '"content_block_start"' in line
+    )
+    partial = "".join(
+        orjson.loads(line.removeprefix("data: "))["delta"]["partial_json"]
+        for line in text.splitlines()
+        if line.startswith("data: ") and '"input_json_delta"' in line
+    )
+    block = cast(dict[str, Any], start["content_block"])
+    return {"name": block["name"], "id": block["id"], "input": orjson.loads(partial)}
+
+
+def test_an_interrupted_turn_is_handed_back_to_the_client_as_a_tool_call(
+    request_log: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The client holds content this side cannot take back, so the turn is handed over rather than torn off.
+
+    It goes out as a tool call because that is the one shape a client acts on by itself: it executes the tool, gets an instruction back, and asks again — carrying the turn on from its own transcript, which is the thing the proxy no longer has to reconstruct.
+    """
+
+    async def torn_body() -> AsyncIterator[bytes]:
+        yield sse_upstream("first").partition(b"event: message_delta")[0]
+        raise httpx2.RemoteProtocolError("peer closed the connection")
+
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200, content=torn_body(), headers={"content-type": "text/event-stream"}
+        ),
+        overrides={"upstream_request_retry": {"max_total": 0}},
+    )
+    with caplog.at_level(logging.WARNING):
+        delivered = _delivered(client)
+
+    handed = _handed_back(delivered)
+    assert handed["name"] == TOOL_NAME
+    assert handed["id"].startswith("toolu_")
+    assert handed["input"]["category"] == "network"
+    assert handed["input"]["num_messages"] == 0
+    assert handed["input"]["message"]
+    # A whole message, ending the way a turn that asks for a tool ends.
+    assert b'"stop_reason":"tool_use"' in delivered
+    assert b"message_stop" in delivered
+    # And what the client kept is still there: the hand-over adds an ending, it does not replace one.
+    assert b'"text":"first"' in delivered
+    # The client never declared the tool, which is said out loud rather than enforced.
+    assert any("auto_retry_tool_not_declared" in record.getMessage() for record in caplog.records)
+
+
+def test_a_turn_that_ran_out_of_room_is_handed_back_the_same_way() -> None:
+    """Nothing failed — upstream finished cleanly and said it stopped for want of room — but the turn is no more finished than a torn one.
+
+    So it takes the same ending. Ruled 2026-08-21: `max_tokens` always hands over, and never replays, since a second identical attempt would run out of room in the same place.
+    """
+    body = sse_upstream("first").partition(b"event: message_delta")[0] + (
+        b'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"max_tokens"},'
+        b'"usage":{"output_tokens":7}}\n\n'
+        b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+    )
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200, content=body, headers={"content-type": "text/event-stream"}
+        )
+    )
+    delivered = _delivered(client)
+
+    handed = _handed_back(delivered)
+    assert handed["input"]["category"] == "max_tokens"
+    assert b'"stop_reason":"tool_use"' in delivered
+    # The reason upstream gave is not what goes on the wire — the turn now ends in a tool call — but what it produced is still delivered.
+    assert b'"text":"first"' in delivered
+
+
+def test_a_client_request_in_another_format_is_not_handed_a_tool_call() -> None:
+    """The block is Anthropic's shape and the mechanism rests on a Claude Code behaviour. `upstream-retry-and-continuation.md` accepts that limit rather than guessing at other harnesses."""
+
+    async def torn_body() -> AsyncIterator[bytes]:
+        yield (
+            b'event: response.output_item.added\n'
+            b'data: {"output_index":0,"item":{"type":"message","id":"m1"}}\n\n'
+            b'event: response.output_item.done\n'
+            b'data: {"output_index":0,"item":{"type":"message","id":"m1","status":"completed"}}\n\n'
+        )
+        raise httpx2.RemoteProtocolError("peer closed the connection")
+
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200, content=torn_body(), headers={"content-type": "text/event-stream"}
+        ),
+        overrides={"upstream_request_retry": {"max_total": 0}},
+    )
+    # No hand-over means the ending is what it always was: the tear reaches the caller and the connection is cut, which is what this harness surfaces as the exception.
+    with pytest.raises(httpx2.RemoteProtocolError), client.stream(
+        "POST", "/responses", json={"model": "gpt-model", "input": [], "stream": True}
+    ) as response:
+        b"".join(response.iter_bytes())
+
+
+def test_a_handed_back_turn_is_neither_a_success_nor_a_failure_on_the_line() -> None:
+    """Both at once, which is why it has a tier of its own.
+
+    The client got a complete, well-formed reply and will act on it, so calling the line a failure says it got nothing. The upstream attempt behind it did not finish, so calling it a success hides every interrupted turn — and that count is the only thing that would ever show how often this is happening.
+    """
+
+    async def torn_body() -> AsyncIterator[bytes]:
+        yield sse_upstream("first").partition(b"event: message_delta")[0]
+        raise httpx2.RemoteProtocolError("peer closed the connection")
+
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200, content=torn_body(), headers={"content-type": "text/event-stream"}
+        ),
+        overrides={"upstream_request_retry": {"max_total": 0}},
+    )
+    _delivered(client)
+
+    record = _records()[-1]
+    assert record["status"] == "retry"
+    # The status code is upstream's own and was settled long before this ending; it does not change.
+    assert record["status_code"] == 200

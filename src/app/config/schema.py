@@ -269,6 +269,10 @@ class ClientDeliveryConfig(Section):
     buffering_policy: BufferingPolicy = "block"
     buffer_cap_bytes: int = Field(default=16_777_216, ge=0)
     sse_ping_interval: int = Field(default=15, ge=0)
+    # The tool a turn that cannot be finished is handed back as. The default is what Claude Code calls the one this project ships beside it — `mcp__plugin_<plugin>_<server>__<tool>` is that client's naming for a plugin-provided MCP server, so the same server configured directly, or a renamed plugin, is a different name and this is how it gets said.
+    auto_retry_tool_call_full_name: str = (
+        "mcp__plugin_ghc-api-proxy-helper_auto-retry__turn_interrupted"
+    )
     hedge: HedgeConfig = Field(default_factory=HedgeConfig)
 
 

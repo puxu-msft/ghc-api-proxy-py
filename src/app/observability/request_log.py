@@ -61,13 +61,15 @@ ATTENTION_TOOLS = frozenset({"AskUserQuestion"})
 # What a count adds to the format prefix on a successful line. Written as a suffix on the format rather than as a format of its own, because that is what it is: the same inbound body, asked a different question.
 COUNT_TOKENS_SUFFIX = "-count-tokens"
 
-# The three endings a request line can report, spelled as `STATUS_PREFIXES` keys because that is the one place they are turned into something a reader sees. `gone` is not a failure and not a success: nobody was left to receive the answer.
-type LogStatus = Literal["ok", "fail", "gone"]
+# The endings a request line can report, spelled as `STATUS_PREFIXES` keys because that is the one place they are turned into something a reader sees.
+#
+# `gone` is not a failure and not a success: nobody was left to receive the answer. `retry` is both at once, and that is the whole reason it exists: the client got a complete, well-formed reply and will act on it, while the upstream attempt behind it did not finish. Reporting it as `ok` would hide every interrupted turn; reporting it as `fail` would say the client got nothing.
+type LogStatus = Literal["ok", "fail", "gone", "retry"]
 
 # How the status code and the detail are painted, on the same three tiers the prefix uses rather than on the code's own value. A streamed reply's code is settled when upstream's headers arrive, so a torn stream carries a green-looking 200 that says nothing about how the next several minutes went; the verdict is what the colour has to follow.
 # `gone` is amber rather than red on the ruling `STATUS_PREFIXES` records for `[GONE]`: on a proxy fronting an interactive client, cancelling a turn is routine, and painting every Esc the same red as an upstream reset would bury the resets. Amber keeps it out of the green that means "nothing to look at" without claiming the proxy broke.
 # The same three tiers as `logging.PREFIX_COLOURS`, which paints the prefix on the far left of the same line. Restated rather than imported because the two answer different questions — that one colours a fixed word, this one a number and a sentence — but they are one judgement about how much of a problem each verdict is, and a change to either belongs in both.
-STATUS_COLOURS: dict[LogStatus, str] = {"ok": GREEN, "fail": RED, "gone": YELLOW}
+STATUS_COLOURS: dict[LogStatus, str] = {"ok": GREEN, "fail": RED, "gone": YELLOW, "retry": YELLOW}
 
 
 def http_label(version: str | None, *, websocket: bool = False) -> str:

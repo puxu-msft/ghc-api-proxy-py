@@ -13,6 +13,7 @@ import sys
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import aclosing
 from dataclasses import dataclass
+from typing import Any
 
 from app.config.schema import ContentBlockStartCompat
 from app.errors import WIRE_TYPES, ErrorCategory
@@ -30,6 +31,8 @@ from app.streaming.deadline import ClientDeadlineError
 from app.streaming.keepalive import finish_stream_cleanup
 
 PING_FRAME = b": ping\n\n"
+# The Anthropic name for both the block kind and the stop reason that goes with it.
+TOOL_USE_KIND = "tool_use"
 
 
 # What one replaced attempt hands over: a fresh byte stream, and the fresh assembler and buffer that go with it. Nothing from the attempt it replaces travels with them.
@@ -48,6 +51,20 @@ class ReplaySupport:
     ledger: RetryLedger
     eligible: Callable[[Exception], RetryReason | None]
     reopen: Callable[[], Awaitable[Attempt | None]]
+
+
+@dataclass(frozen=True, slots=True)
+class ContinuationSupport:
+    """Hands a turn that cannot be finished back to the client as a tool call it can act on.
+
+    Same division as `ReplaySupport`, for the same reason. Delivery knows *whether* the client is already holding content, which is what decides that this is the only ending left. It does not know what the tool is called, whether this client declared it, or how to name the failure in the vocabulary the tool expects — all of that belongs to the layer that read the client's request.
+
+    Returns the `tool_use` payload rather than a finished block, because the index is delivery's to assign: it is the next one after everything already committed, and nothing outside can know that.
+
+    `None` means do not synthesise — a client whose request cannot carry this, or a failure the caller does not want handed back. The ending then falls through to whatever it would have been.
+    """
+
+    synthesize: Callable[[BaseException | None, str], dict[str, Any] | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +213,7 @@ async def stream_delivery(
     message_id: str,
     model: str,
     replay: ReplaySupport | None = None,
+    continuation: ContinuationSupport | None = None,
 ) -> AsyncGenerator[bytes]:
     """Turn an upstream byte stream into Anthropic SSE, one complete block at a time.
 
@@ -218,6 +236,7 @@ async def stream_delivery(
             model=model,
             last_write=last_write,
             replay=replay,
+            continuation=continuation,
         )
     ) as inner:
         async for chunk in inner:
@@ -235,6 +254,7 @@ async def _deliver(
     model: str,
     last_write: _LastWrite,
     replay: ReplaySupport | None = None,
+    continuation: ContinuationSupport | None = None,
 ) -> AsyncGenerator[bytes]:
     """Assemble and frame the response. Wrapped by `stream_delivery`, which stamps the clock."""
     session = DeliverySession(buffer=buffer)
@@ -304,14 +324,22 @@ async def _deliver(
             ledger=replay.ledger,
             reason=reason,
         )
-        if verdict.ending is not StreamEnding.REPLAY:
-            raise torn
-        replacement = await replay.reopen()
-        if replacement is None:
-            raise torn
-        # Everything the failed attempt built is dropped, not carried: a fresh assembler so no draft of its survives, and a fresh buffer so a block it completed but never delivered cannot be delivered twice. `session` goes with the buffer. Legal only because the verdict above required nothing to have been committed — there is no frontier here to preserve, and none to roll back.
-        chunks, assembler, buffer = replacement
-        session = DeliverySession(buffer=buffer)
+        if verdict.ending is StreamEnding.REPLAY:
+            replacement = await replay.reopen()
+            if replacement is not None:
+                # Everything the failed attempt built is dropped, not carried: a fresh assembler so no draft of its survives, and a fresh buffer so a block it completed but never delivered cannot be delivered twice. `session` goes with the buffer. Legal only because the verdict required nothing to have been committed — there is no frontier here to preserve, and none to roll back.
+                chunks, assembler, buffer = replacement
+                session = DeliverySession(buffer=buffer)
+                continue
+        # No second attempt is available, and the client is holding content this side cannot take back. Handing the failure over as a tool call is the only ending that leaves the turn recoverable — by the client, in its own next request. Reached for a failure the caller called continuable and a position that refused a replay, which is exactly the pair the document divides on.
+        handed_over = _hand_over(
+            continuation, session, assembler, message_id, model, settings, error=torn
+        )
+        if handed_over is not None:
+            for chunk in handed_over:
+                yield chunk
+            return
+        raise torn
 
     remaining = session.finish()
     if remaining and not client_has_bytes.is_set():
@@ -336,12 +364,68 @@ async def _deliver(
             code="incomplete_responses_stream",
         ).encode()
         return
+    if terminal.stop_reason in _HANDED_OVER_STOP_REASONS:
+        # Upstream finished cleanly and said it stopped because it ran out of room. Nothing failed, so nothing above catches it — but the turn is no more finished than a torn one, and the client is the only side that can carry it on. Ruled 2026-08-21: `max_tokens` always hands over.
+        handed_over = _hand_over(
+            continuation, session, assembler, message_id, model, settings, stop_reason=terminal.stop_reason
+        )
+        if handed_over is not None:
+            for chunk in handed_over:
+                yield chunk
+            return
     # `or "end_turn"` is still a synthesis, and still visible where it happens — but it now only ever runs on a stream that really did see a terminal event, so it fills in a field upstream left empty rather than inventing an ending upstream never reached. An upstream that sends an explicit empty `stop_reason` gets `end_turn`, because `""` is not a stop reason any Anthropic consumer accepts.
     for frame in terminal_frames(
         stop_reason=terminal.stop_reason or "end_turn",
         usage=terminal.usage or None,
     ):
         yield frame.encode()
+
+
+# The clean endings that are not endings. Upstream said it stopped for want of room, which leaves the turn exactly as unfinished as a torn one does — the difference is only that nothing raised.
+_HANDED_OVER_STOP_REASONS = frozenset({"max_tokens"})
+
+
+def _hand_over(
+    continuation: ContinuationSupport | None,
+    session: DeliverySession,
+    assembler: BlockAssembler,
+    message_id: str,
+    model: str,
+    settings: StreamSettings,
+    *,
+    error: BaseException | None = None,
+    stop_reason: str = "",
+) -> list[bytes] | None:
+    """Frame the whole ending: whatever is still buffered, the synthesised call, and the close.
+
+    `None` when there is nothing to hand over — no support configured, nothing delivered for the client to carry on from, or a caller that declined. The ending then falls through to whatever it would have been, which is the point: this adds an ending, it does not replace the ones that were there.
+
+    The buffered blocks go out first. They are whole, the client is owed them, and holding them back would make the size of this ending depend on the buffering policy.
+    """
+    if continuation is None:
+        return None
+    if session.committed_count == 0 and stop_reason not in _HANDED_OVER_STOP_REASONS:
+        # Nothing whole ever reached the client, so there is nothing for it to carry on from and the tool call would be the entire turn. Asked before the caller is, so a hand-over it would have recorded is not recorded for an ending that does not happen. The exception is a turn upstream cut short for want of room, where the truncated block was kept precisely so this would not be empty.
+        return None
+    payload = continuation.synthesize(error, stop_reason)
+    if payload is None:
+        return None
+    chunks: list[bytes] = []
+    remaining = session.finish()
+    if remaining and not session.started:
+        chunks.append(message_start(message_id, model).encode())
+    for block in remaining:
+        for frame in block_frames(block, signature_compat=settings.signature_compat):
+            chunks.append(frame.encode())
+    if session.committed_count == 0:
+        # Reachable only for a turn upstream cut short for want of room whose one block was itself truncated and dropped. The message still has to begin before a block can go out.
+        chunks.append(message_start(message_id, model).encode())
+    handed = CompletedBlock(index=session.committed_count, kind=TOOL_USE_KIND, payload=payload)
+    for frame in block_frames(handed, signature_compat=settings.signature_compat):
+        chunks.append(frame.encode())
+    for frame in terminal_frames(stop_reason=TOOL_USE_KIND, usage=assembler.terminal.usage or None):
+        chunks.append(frame.encode())
+    return chunks
 
 
 def _commit(

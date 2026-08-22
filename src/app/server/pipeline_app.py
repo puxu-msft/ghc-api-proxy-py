@@ -21,6 +21,7 @@ from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.requests import ClientDisconnect
 
+from app.errors import ErrorCategory
 from app.model_provider.ghc_client.errors import normalize_upstream_error
 from app.observability.logging import get_logger
 from app.observability.metrics import ATTRIBUTION_LINES_STRIPPED, TRANSLATION_LOSSES
@@ -39,6 +40,7 @@ from app.pipeline.anthropic_request_hook import strip_attribution_lines
 from app.pipeline.delivery.assembler import BlockAssembler, ReplyDialect, Terminal
 from app.pipeline.delivery.blocks import BlockBuffer
 from app.pipeline.delivery.stream import (
+    ContinuationSupport,
     ReplaySupport,
     one_shot_delivery,
     stream_delivery,
@@ -366,6 +368,23 @@ def _aborted(failure: BaseException) -> tuple[LogStatus, str]:
     return "fail", f"request failed before a response: {failure!r}"
 
 
+# What a continuable failure is called when it is handed to the client. Keyed on the reason that decided it was continuable, rather than classified a second time: `classify_error` does not know the pipeline's own exception types, so a transport tear reached it as a statusless `UpstreamError` and came back `internal` — while the retry path, looking at the same event, called it `network`. Two taxonomies for one failure is two answers.
+_CATEGORY_FOR_REASON = {
+    RetryReason.NETWORK: ErrorCategory.NETWORK,
+    RetryReason.SERVER_ERROR: ErrorCategory.UPSTREAM,
+    RetryReason.GITHUB_TOKEN_EXPIRED: ErrorCategory.AUTH,
+}
+
+
+def _client_message_count(payload: dict[str, Any]) -> int:
+    """How many messages the client sent, as the client counted them.
+
+    Read off the inbound body rather than the translated one. On the Responses leg a single Anthropic message becomes several items — reasoning, message, function call, function call output — so the two numbers are not the same and only one of them advances by a fixed amount per turn.
+    """
+    messages = payload.get("messages")
+    return len(cast(list[Any], messages)) if isinstance(messages, list) else 0
+
+
 async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
     # Fixed before the body is read, because that read is inside the lifetime this bounds. `handle_bounded` starts its own clock later, when routing hands it the request, so the two do not agree on when the request began — and the one an operator means by "the client request" starts here. Measured 2026-08-22: body read, JSON parse and admission queueing were all outside the only clock there was.
     #
@@ -619,6 +638,57 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
                 delivery_buffer(chain),
             )
 
+        def _hand_back(error: BaseException | None, stop_reason: str) -> dict[str, Any] | None:
+            """The `tool_use` block that hands an unfinishable turn to the client, or `None` to leave the ending alone.
+
+            Only for a client that asked in Anthropic Messages. The block is that protocol's shape, and the whole mechanism rests on the client executing a tool and coming back — which is a Claude Code behaviour, and the only harness in use. `upstream-retry-and-continuation.md` accepts that limit rather than guessing at the others.
+
+            The tool's presence in the request is checked and **not** enforced. A client that never declared it answers with a `No such tool available` tool result and carries on, which is a worse turn than the one it asked for but a better one than a truncated stream — and the warning is what makes a missing plugin visible instead of silent. Ruled 2026-08-21.
+            """
+            if route.wire_format is not WireFormat.ANTHROPIC_MESSAGES:
+                return None
+            if accounting.handed_over:
+                # One per turn. A second would mean the first was not the ending it claimed to be.
+                return None
+            name = chain.config.client_delivery.auto_retry_tool_call_full_name
+            if not name:
+                return None
+            declared = context.payload.get("tools")
+            if not isinstance(declared, list) or not any(
+                isinstance(tool, dict) and cast(dict[str, Any], tool).get("name") == name
+                for tool in cast(list[Any], declared)
+            ):
+                get_logger().warning(
+                    "auto_retry_tool_not_declared",
+                    request_id=trace.request_id,
+                    tool=name,
+                )
+            # Category is what the MCP server keys its reply on, so it is read through the same mapping that decided this failure was continuable in the first place. Classified raw, a transport tear is `internal` — it is not an `OSError` — while the retry path calls the same failure `network`, and the two answers would have disagreed about one event.
+            #
+            # A turn upstream cut short for want of room is not an error and has no `ErrorCategory`. It travels under the stop reason upstream gave it, which is also what a reader of the MCP server's journal will recognise. **The value is provisional**: the user ruled that this case gets a category of its own but has not named it, and the server that reads it is being changed in another repository. See `decisions.md` 4.1.
+            if error is None:
+                category = stop_reason
+            else:
+                category = _CATEGORY_FOR_REASON.get(
+                    _replay_reason(error), ErrorCategory.INTERNAL
+                ).value
+            detail = stop_reason if error is None else str(error)
+            # Recorded here rather than in delivery, because this is the moment the decision is made and the request line has to say so: the client is about to get a complete reply it will act on, and the upstream attempt behind it did not finish.
+            accounting.handed_over = True
+            return {
+                "type": "tool_use",
+                "id": f"toolu_{uuid4().hex[:24]}",
+                "name": name,
+                "input": {
+                    # The client's own count, not the upstream request's: it advances by exactly two per hand-over — one assistant turn, one tool result — which is what makes "the same number twice" an exact answer rather than a heuristic. Ruled 2026-08-21.
+                    "num_messages": _client_message_count(inbound_payload),
+                    "category": category,
+                    "message": detail,
+                },
+            }
+
+        continuation = ContinuationSupport(synthesize=_hand_back)
+
         replay = ReplaySupport(
             # Built by `handle` on the first attempt and kept on the request, so every attempt this reopens draws on the same `max_total` as the ones the driver opened.
             ledger=_ledger_for(context, chain),
@@ -653,6 +723,7 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
                     message_id=context.id,
                     model=context.resolved_model,
                     replay=replay,
+                    continuation=continuation,
                 ),
                 accounting,
             ),
@@ -688,6 +759,8 @@ class _StreamAccounting:
     status_code: int
     context: RequestContext | None = None
     assembler: BlockAssembler | None = None
+    # Set when the turn was handed back to the client as a tool call. Neither `ok` nor `fail` on its own: the client holds a complete reply and will act on it, and the upstream attempt behind it did not finish.
+    handed_over: bool = False
     done: bool = False
     # How the delivery generator ended. Three endings arrive here indistinguishable — upstream's stream ran out, upstream tore, or delivery was cut short from this side — because none of them saw a terminal event and that is all the assembler records. Naming the wrong one sends whoever reads the line to the wrong half of the system, so each is recorded where it happens instead of guessed here.
     drained: bool = False
@@ -710,7 +783,8 @@ class _StreamAccounting:
             # Gating on the reason rather than on `seen` is what separates the one benign case from all of these — an Anthropic leg splits its ending, `message_delta` carrying the reason and usage and `message_stop` merely closing, and a stream that drained after the first has told us everything the client was owed. Reporting that as truncated produced a line arguing with itself: `end_turn` followed by a note saying nothing ended.
             # `failure is None` is there to keep this gate and `_ending()` asking the same question in the same order, not to cover a case anyone has produced: a review measured that `drained` and `failure` cannot both be set today, because an exception from the delivery chain surfaces inside the loop below and so never reaches the assignment that marks a drain. Do not go looking for the state — it needs an early `break` in that loop to exist. Without this term, adding one would silently reopen a gap `_ending()` still believes it is closing.
             delivered_whole = self.drained and self.failure is None
-            if not (delivered_whole and terminal.stop_reason):
+            # `handed_over` forces the question even on a stream that drained with a reason: a turn upstream ended for want of room drains cleanly and carries `max_tokens`, and would otherwise be reported as an ordinary success — which is the one reading the hand-over exists to prevent.
+            if self.handed_over or not (delivered_whole and terminal.stop_reason):
                 # Said outright, because absence is not readable. The status was fixed when the response headers arrived and stays 200 however the stream ends; the fields upstream never sent are simply gone; and a reader cannot tell a field this endpoint does not report from one this request never got.
                 self.trace.status_override, self.trace.detail = self._ending()
         _log_completion(self.chain, self.trace, self.status_code, bytes_out=self.trace.received)
@@ -724,6 +798,9 @@ class _StreamAccounting:
 
         The last branch also catches a shutdown cancelling its own in-flight streams, where the client had not gone anywhere and we are the ones leaving. `gone` and the wording both still hold — nobody received the answer, and delivery stopped before upstream finished — but nothing here can tell the two apart, and the line should not claim to.
         """
+        if self.handed_over:
+            # Both at once, on purpose. Read before the others because they are all true as well — upstream did fail, or drain, or stop — and none of them is what the client got.
+            return "retry", "turn handed back to the client to continue"
         if self.failure is not None:
             return "fail", f"stream failed before a terminal event: {self.failure}"
         if self.drained:
