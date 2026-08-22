@@ -537,7 +537,8 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
         )
         if framer is None:
             # This client leg has no outbound framer, so there is no block to deliver. The upstream stream is read whole and handed over in one write, in the client's own dialect, byte for byte. Ruled 2026-08-22; before this branch existed those bytes went into an assembler that recognised none of them and the client got a 200 with an empty body and no error frame.
-            # The same guards in the same order as the block path below, so an idle upstream, an expired attempt and an expired client deadline all still end this the way they end that one, and the byte counter still sees every byte.
+            # The same guards in the same order as the block path below, so an idle upstream, an expired attempt and an expired client deadline all still stop this the same way, and the byte counter still sees every byte.
+            # What is *not* the same is what the client is told when one fires. The block path writes an error frame; there is no framer for this leg, so nothing can be written and the guard's exception simply ends the response — 200, `text/event-stream`, and whatever had been buffered, which is nothing. Which is the same shape as the defect this branch removed, on a narrower path. Deliberate for now: naming an error in a dialect nobody here can write is the same piece of work as finding this dialect's block boundaries, and the ruling deferred that. See `.dev/docs/tmp/260822-ghc-api-conformance-summary.md`.
             one_shot_accounting = _StreamAccounting(
                 chain=chain,
                 request_id=trace.request_id,

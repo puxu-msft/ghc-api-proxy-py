@@ -165,11 +165,23 @@ class ResponsesFramer:
             # One delta carrying the finished text. The block is already whole, so this is not a piece of it — it is here because a client that renders only deltas would otherwise see nothing at all. The same reasoning as `_delta_for` on the Anthropic leg.
             self._frame(
                 "response.output_text.delta",
-                {"output_index": index, "item_id": item_id, "content_index": 0, "delta": text},
+                {
+                    "output_index": index,
+                    "item_id": item_id,
+                    "content_index": 0,
+                    "delta": text,
+                    "logprobs": [],
+                },
             ).encode(),
             self._frame(
                 "response.output_text.done",
-                {"output_index": index, "item_id": item_id, "content_index": 0, "text": text},
+                {
+                    "output_index": index,
+                    "item_id": item_id,
+                    "content_index": 0,
+                    "text": text,
+                    "logprobs": [],
+                },
             ).encode(),
             self._frame(
                 "response.content_part.done",
@@ -209,7 +221,12 @@ class ResponsesFramer:
             ).encode(),
             self._frame(
                 "response.function_call_arguments.done",
-                {"output_index": index, "item_id": item_id, "arguments": arguments},
+                {
+                    "output_index": index,
+                    "item_id": item_id,
+                    "name": opening["name"],
+                    "arguments": arguments,
+                },
             ).encode(),
             self._frame(
                 "response.output_item.done", {"output_index": index, "item": closing}
@@ -219,7 +236,8 @@ class ResponsesFramer:
     def _reasoning(self, block: CompletedBlock) -> tuple[bytes, ...]:
         """Reasoning, with no summary delta events.
 
-        Upstream sends none either — in all three recordings a reasoning item arrives as `added` then `done` with the summary already in place — so this copies that shape rather than inventing a finer-grained one.
+        Upstream sends none either: in the two recordings that carry a reasoning item at all, it arrives as `added` then `done` with no delta events between them, so this copies that shape rather than inventing a finer-grained one.
+        The `summary` list in those recordings is **empty**, so the `summary_text` part written below has the same standing as the `function_call` frames above — it follows the SDK's types, not a recording. Said plainly because the alternative is a reader taking it for measured.
 
         `encrypted_content` is written only when there was some. The assembler stores this project's own carrier in the block's `signature`, and an empty carrier is still a non-empty marker string, so decoding is what tells "upstream sealed some reasoning" apart from "upstream sent none". Emitting the marker itself would hand the client a token it cannot use.
         """
@@ -261,8 +279,13 @@ class ResponsesFramer:
                     },
                 ).encode(),
             )
+        # `incomplete` is what the assembler writes when upstream said the response was incomplete
+        # and gave no reason. Passing it on would put a word in `incomplete_details.reason` that the
+        # Responses vocabulary does not have; upstream's own shape for "no reason given" is null.
         reason = (
-            "max_output_tokens" if terminal.stop_reason == _MAX_TOKENS else terminal.stop_reason
+            "max_output_tokens"
+            if terminal.stop_reason == _MAX_TOKENS
+            else (None if terminal.stop_reason == "incomplete" else terminal.stop_reason)
         )
         return (
             self._frame(

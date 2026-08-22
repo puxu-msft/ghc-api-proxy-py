@@ -5,7 +5,7 @@ Asserting our own bytes would only prove the framer agrees with whatever this fi
 `tests/int/cassettes/anthropic_to_responses_stream.json` is where the wire envelope and the event payload shapes were read from; this file does not replay it, because what is under test is the direction that has no recording — ours, going out.
 """
 
-from typing import Any, cast
+from typing import Any, cast, get_args
 
 import orjson
 import pytest
@@ -223,6 +223,60 @@ def test_sequence_numbers_never_repeat_and_never_go_backwards() -> None:
     ]
 
     assert numbers == list(range(len(numbers)))
+
+
+def test_every_event_carries_the_fields_its_model_declares_required() -> None:
+    """The layer `ResponseStreamState` cannot see.
+
+    The SDK decodes events with `construct_type`, which coerces loosely and never validates, so a frame missing a required field parses fine, reconstructs fine, and passes every other test in this file.
+    It found `response.function_call_arguments.done` shipping without `name` and the two `output_text` events without `logprobs` — invisible to every other oracle here, and a rejection in any client that validates its input.
+
+    Read off the SDK's own models rather than a list written here, so a field the library adds later shows up as a failure instead of as nothing.
+    """
+    one = framer()
+    frames = list(one.preamble())
+    frames.extend(one.block(text_block(0, "hi")))
+    frames.extend(
+        one.block(
+            CompletedBlock(
+                index=1,
+                kind=TOOL_USE,
+                payload={"type": TOOL_USE, "id": "c", "name": "f", "input": {}},
+            )
+        )
+    )
+    frames.extend(
+        one.block(
+            CompletedBlock(
+                index=2, kind=THINKING, payload={"type": THINKING, THINKING: "t", "signature": ""}
+            )
+        )
+    )
+    frames.extend(one.terminal(Terminal(stop_reason="end_turn", seen=True)))
+    frames.append(one.error(error_type="api_error", message="boom", code="c"))
+
+    # `ResponseStreamEvent` is an annotated union; its members carry `type` as a Literal rather than
+    # as a default, so the discriminator is read out of the annotation.
+    members = get_args(get_args(ResponseStreamEvent)[0])
+    by_type: dict[str, Any] = {}
+    for member in members:
+        literal = get_args(member.model_fields["type"].annotation)
+        if literal:
+            by_type[literal[0]] = member
+    missing: dict[str, list[str]] = {}
+    for frame in frames:
+        payload = orjson.loads(frame.decode().split("data: ", 1)[1])
+        model = by_type.get(payload["type"])
+        assert model is not None, f"no SDK model declares type {payload['type']!r}"
+        absent = [
+            name
+            for name, field in model.model_fields.items()
+            if field.is_required() and name not in payload
+        ]
+        if absent:
+            missing[payload["type"]] = absent
+
+    assert missing == {}
 
 
 def test_the_keepalive_is_a_comment_no_parser_turns_into_an_event() -> None:

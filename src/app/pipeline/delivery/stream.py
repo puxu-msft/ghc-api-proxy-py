@@ -192,6 +192,8 @@ async def one_shot_delivery(chunks: AsyncIterator[bytes]) -> AsyncGenerator[byte
     The client asked for `stream: true` and gets its own protocol's SSE back, byte for byte, just not incrementally. That is a real loss of liveness and it is the point of the ruling — before this existed those bytes went into the Anthropic assembler, matched none of its event names, produced no block, and left the client holding a 200 with an empty body and no error frame.
 
     No replay and no keep-alive. Both are answers to questions block delivery raises — which block was already committed, and what to say during the silence between them — and neither has a meaning for a delivery that is a single write.
+
+    Nothing is written when a guard fires, either. An idle upstream, an expired attempt or an expired client deadline raises through the loop below and the client is left with the 200 it already has and no body. Saying more would mean framing an error in this client's dialect, which is the same missing half as the block boundaries.
     """
     body = bytearray()
     async for chunk in chunks:
