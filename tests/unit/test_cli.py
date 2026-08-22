@@ -70,7 +70,6 @@ def test_start_subcommand_exposes_bootstrap_options() -> None:
         "--graceful-timeout",
         "--verbose",
         "--account-type",
-        "--ghc-api-base-url",
         "--rate-limit",
         "--history",
         "--github-token",
@@ -79,6 +78,9 @@ def test_start_subcommand_exposes_bootstrap_options() -> None:
         "--manual",
     ):
         assert option in result.stdout
+    # Removed 2026-08-22. It set a field name that had not existed since the rename in a8a7f87, so it silently did nothing; the base URL now comes from `model_providers.<name>.api_base_url` or from probing the subscription.
+    # Asserted absent so it cannot drift back in unnoticed.
+    assert "--ghc-api-base-url" not in result.stdout
 
 
 def test_auth_and_login_are_aliases() -> None:

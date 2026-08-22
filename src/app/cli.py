@@ -86,7 +86,6 @@ def _load_spec_config(
     graceful_timeout: int | None,
     proxy: str | None,
     history: bool | None,
-    ghc_api_base_url: str | None,
     verbose: bool,
     manual: bool,
     rate_limit: bool | None,
@@ -123,18 +122,6 @@ def _load_spec_config(
         if was_given:
             inactive.append((option, _NO_HOME_IN_SPEC[option]))
 
-    if ghc_api_base_url is not None:
-        # Applied after loading rather than as an override: which provider it belongs to is only
-        # known once the config names a default.
-        name = config.default_model_provider
-        providers = dict(config.model_providers)
-        if name in providers:
-            providers[name] = providers[name].model_copy(update={"base_url": ghc_api_base_url})
-            config = config.model_copy(update={"model_providers": providers})
-        else:
-            inactive.append(
-                ("--ghc-api-base-url", f"no provider named {name!r} to apply it to")
-            )
     return config, inactive
 
 
@@ -230,7 +217,6 @@ def start(
         AccountType | None,
         typer.Option("--account-type", "-a", case_sensitive=False),
     ] = None,
-    ghc_api_base_url: Annotated[str | None, typer.Option("--ghc-api-base-url")] = None,
     rate_limit: Annotated[bool | None, typer.Option("--rate-limit/--no-rate-limit")] = None,
     history: Annotated[bool | None, typer.Option("--history/--no-history")] = None,
     github_token: Annotated[str | None, typer.Option("--github-token", "-g")] = None,
@@ -261,8 +247,6 @@ def start(
         cli_overrides["shutdown"] = {"graceful_timeout": graceful_timeout}
     if account_type is not None:
         auth_overrides["account_type"] = account_type.value
-    if ghc_api_base_url is not None:
-        upstream_overrides["ghc_api_base_url"] = ghc_api_base_url
     if rate_limit is not None:
         cli_overrides["rate_limiter"] = {"enabled": rate_limit}
     if history is not None:
@@ -293,7 +277,6 @@ def start(
             graceful_timeout=graceful_timeout,
             proxy=proxy,
             history=history,
-            ghc_api_base_url=ghc_api_base_url,
             verbose=verbose,
             manual=manual,
             rate_limit=rate_limit,
@@ -310,7 +293,6 @@ def start(
         graceful_timeout=graceful_timeout,
         proxy=proxy,
         history=history,
-        ghc_api_base_url=ghc_api_base_url,
         verbose=verbose,
         manual=manual,
         rate_limit=rate_limit,
