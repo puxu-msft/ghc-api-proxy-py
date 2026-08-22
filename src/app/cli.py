@@ -1,3 +1,5 @@
+import os
+import socket
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
@@ -15,9 +17,10 @@ from app.config.paths import tls_material_dir
 from app.config.schema import ProxyConfig
 from app.debug.models import collect_catalogs, render_json, render_text
 from app.lifecycle.entry import StandaloneOptions, run_standalone
+from app.lifecycle.listener import listening_urls
 from app.lifecycle.pidfile import PidfileError
 from app.lifecycle.standalone import LIFECYCLE_LOGGER, ShutdownReport
-from app.lifecycle.tls import resolve_tls_material
+from app.lifecycle.tls import resolve_tls_material, serves_tls
 from app.model_provider import ProviderNotConfigured
 from app.model_provider.ghc_client.auth.service import authenticate_device, clear_stored_token
 from app.observability.logging import get_logger, setup_logging
@@ -148,6 +151,14 @@ async def serve_inherited(config: ProxyConfig, fd: int, *, proxy_from_cli: bool)
             get_logger(LIFECYCLE_LOGGER).warning(
                 "server.tls.mode is `both`, which an inherited listener cannot serve; this listener answers HTTPS only"
             )
+        # Read off the socket, not off the config: the address belongs to whoever created it, and on this path that is systemd. `dup` because constructing a `socket` from a raw fd takes ownership of it, and closing that object would take uvicorn's listener with it.
+        with socket.socket(fileno=os.dup(fd)) as inherited:
+            host, port = inherited.getsockname()[:2]
+        # `both` is reported as the HTTPS it actually became, per the warning above; saying `both` here would repeat a promise the previous line just withdrew.
+        served_mode = serves_tls(config.server.tls.mode)
+        get_logger(LIFECYCLE_LOGGER).info(
+            f"listening on {listening_urls(str(host), int(port), served_mode)}", status="ok"
+        )
         server = _DrainAnnouncingServer(
             uvicorn.Config(
                 create_pipeline_app(chain),

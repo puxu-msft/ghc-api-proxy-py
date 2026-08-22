@@ -19,12 +19,26 @@ import socket
 import ssl
 from collections.abc import Callable
 
+from app.config.schema import TlsMode
 from app.lifecycle.activation import ActivatedSocketSet, ExpectedListener, ListenerIdentity
 from app.lifecycle.adapter import ListenerAdapterError, ListenerState, UvicornListenerAdapter
-from app.lifecycle.tls import is_tls_handshake
+from app.lifecycle.tls import is_tls_handshake, serves_tls
 
 LISTENER_NAME = "http"
 LOGGER = logging.getLogger(__name__)
+
+
+def listening_urls(host: str, port: int, tls_mode: TlsMode) -> str:
+    """How to reach this listener, in the scheme or schemes it actually answers.
+
+    Built from the address that was bound and the mode that was applied, because those are the two things the layer owning the listener knows and no other layer does. The line this feeds used to be assembled in the ASGI app from `server.host` / `server.port` with `http://` written in by hand: on an inherited listener the port belongs to whoever created the socket rather than to the config, and the scheme was wrong for every TLS deployment. Nothing else announces the endpoint — `log_config=None` silences uvicorn's own line — so being wrong here is being wrong everywhere.
+
+    `both` names two URLs rather than picking one, since a client may use either.
+    """
+    if tls_mode == "both":
+        return f"http://{host}:{port} and https://{host}:{port}"
+    scheme = "https" if serves_tls(tls_mode) else "http"
+    return f"{scheme}://{host}:{port}"
 
 
 class ListenerBindError(RuntimeError):

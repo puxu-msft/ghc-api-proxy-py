@@ -19,7 +19,12 @@ from uvicorn._types import ASGIApplication
 from app.config.paths import standalone_pidfile_path
 from app.config.schema import TlsMode
 from app.lifecycle.adapter import UvicornListenerAdapter
-from app.lifecycle.listener import FirstByteRoutingAdapter, adopt_listener, bind_listener
+from app.lifecycle.listener import (
+    FirstByteRoutingAdapter,
+    adopt_listener,
+    bind_listener,
+    listening_urls,
+)
 from app.lifecycle.pidfile import (
     PidfileEntry,
     PidfileError,
@@ -88,6 +93,10 @@ async def run_standalone(
         else bind_listener(options.host, options.port)
     )
     address = listeners.identities()[0].address
+    # Announced from here because this is the layer that knows both halves: the address that was actually bound, and the mode the adapter below is about to be built for. The ASGI app used to say this from `server.host` / `server.port` with the scheme written in by hand, which was wrong about the port whenever a listener was inherited and wrong about the scheme whenever TLS was on.
+    get_logger(LIFECYCLE_LOGGER).info(
+        f"listening on {listening_urls(address[0], address[1], options.tls_mode)}", status="ok"
+    )
 
     # Resolved after the bind, so the name comes from the endpoint that exists rather than the one that was requested. See `pidfile_path` for why that distinction is worth keeping even though the two agree on every route the CLI can take today.
     pidfile = options.pidfile_path(address[1])

@@ -242,6 +242,12 @@ def test_both_mode_serves_http_and_https_on_one_port(pidfile_dir: Path) -> None:
         wait_until_serving(pidfile)
         assert b"200 OK" in request_liveness(port)
         assert b"200 OK" in request_tls_liveness(port)
+
+        child.send_signal(signal.SIGTERM)
+        stdout, stderr = child.communicate(timeout=20)
+        said = stdout + stderr
+        # Both schemes are named, because a client may use either and this is the only line that says so — `log_config=None` silences uvicorn's own. It used to be assembled in the ASGI app with `http://` written in by hand, which said the wrong thing for every TLS deployment.
+        assert f"listening on http://127.0.0.1:{port} and https://127.0.0.1:{port}" in said, said
     finally:
         stop(child)
 
@@ -281,9 +287,13 @@ def test_sigterm_reaches_the_ladder_in_a_real_process(pidfile_dir: Path) -> None
     try:
         wait_until_serving(pidfile)
         child.send_signal(signal.SIGTERM)
-        stdout, _ = child.communicate(timeout=20)
+        stdout, stderr = child.communicate(timeout=20)
         assert "STOPPED DRAINING" in stdout
         assert child.returncode == 0
+        # The plaintext counterpart of the `both` assertion: scheme and port both come from the listener that was bound, not from configuration whose default port is 4142.
+        said = stdout + stderr
+        assert f"listening on http://127.0.0.1:{port}" in said, said
+        assert "https://" not in said, said
     finally:
         stop(child)
 
@@ -625,6 +635,14 @@ def test_the_pidfile_names_the_port_the_kernel_chose(
         assert not (directory / "standalone-0.pid").exists()
         # And the name is not merely plausible — that port is the one answering.
         assert b"200 OK" in request_liveness(chosen)
+
+        # The endpoint line has the same problem and the same fix: port 0 is the only place on this path where what was requested and what was bound differ, so it is the only place an announcement built from configuration can be told apart from one built from the socket.
+        child.send_signal(signal.SIGTERM)
+        stdout, stderr = child.communicate(timeout=20)
+        said = stdout + stderr
+        assert f"listening on http://127.0.0.1:{chosen}" in said, said
+        # Anchored to the host, not a bare `:0`: log lines carry timestamps, and a second like `18:39:05` contains that substring.
+        assert "127.0.0.1:0" not in said, said
     finally:
         stop(child)
 

@@ -331,6 +331,8 @@ def test_an_inherited_listener_serves_the_real_api_over_https(mode: str, tmp_pat
         process.send_signal(signal.SIGTERM)
         output, _ = process.communicate(timeout=30)
         assert process.returncode == -signal.SIGTERM, output
+        # The endpoint line has to name what is actually being served. It used to be built in the ASGI app from `server.host` / `server.port` with `http://` written in by hand, so on an inherited listener it was wrong about the port *and* the scheme — and nothing else announces the endpoint, because `log_config=None` silences uvicorn's own line. Asserting the real port here is what makes that irrecoverable: the config default is 4142 and this listener is on an ephemeral one.
+        assert f"listening on https://127.0.0.1:{address[1]}" in output, output
         # Said, not silently dropped: `both` asks for something this path cannot give, and the operator's config file will keep saying `both` afterwards.
         if mode == "both":
             assert "cannot serve" in output, output

@@ -714,8 +714,6 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
         provider = chain.providers.get(chain.providers.default_name)
         logger.info(f"{len(provider.available_ids)} models available from {chain.providers.default_name}", status="ok")
     await chain.tokenization.load()
-    # Said before the listener is announced by whoever owns it, so the operator sees which upstream and which port belong together even when the two lines come from different layers.
-    logger.info(f"listening on http://{chain.config.server.host}:{chain.config.server.port}", status="ok")
     # Probed, not configured: whether a live footer belongs on this stream is a fact about where the output goes, and the process can see that for itself. Nothing is logged when it comes back unsupported — a pipe or a CI job is the normal case, not a degradation worth a line in everybody's log.
     tui = footer_tui_or_none(chain.active_requests, chain.capabilities)
     async with anyio.create_task_group() as flushing:
