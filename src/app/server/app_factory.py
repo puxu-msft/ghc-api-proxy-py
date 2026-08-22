@@ -101,8 +101,6 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
                     runtime.anthropic_client.history = HistoryConsumer(runtime.history_store)
                 if runtime.anthropic_client is not None:
                     runtime.anthropic_client.approval_gate = runtime.approval_gate
-                if services.copilot_tokens is not None:
-                    task_group.start_soon(services.copilot_tokens.run_refresh_loop)
                 if settings.model_refresh_interval > 0:
                     task_group.start_soon(
                         services.run_model_refresh_loop,

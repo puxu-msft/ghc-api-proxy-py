@@ -36,6 +36,10 @@ class CopilotTokenInfo:
 class CopilotTokenManager:
     """Exchanges a GitHub token for a Copilot token and keeps it valid.
 
+    Refreshing is lazy: `get_token()` exchanges when the token it holds is within `validity_margin` of expiring, and not before.
+    There is no background loop, ruled 2026-08-22 — one existed and was started from the legacy app factory only, so on the chain actually served it had never run and the lazy path was already carrying the whole job.
+    The cost of the choice is that the exchange round-trip lands on whichever request first finds the token stale, rather than on a timer.
+
     Concurrent `get_token()` callers share a single exchange request via the internal lock.
     """
 
@@ -48,7 +52,6 @@ class CopilotTokenManager:
         clock: Callable[[], float] = time.time,
         sleep: Callable[[float], Awaitable[None]] = anyio.sleep,
         validity_margin: float = 60.0,
-        minimum_refresh_interval: float = 60.0,
         max_exchange_attempts: int = 3,
         identity_headers: Mapping[str, str] | None = None,
     ) -> None:
@@ -61,7 +64,6 @@ class CopilotTokenManager:
         self._clock = clock
         self._sleep = sleep
         self._validity_margin = validity_margin
-        self._minimum_refresh_interval = minimum_refresh_interval
         self._max_exchange_attempts = max_exchange_attempts
         self._identity_headers = MappingProxyType(dict(identity_headers or {}))
         self._current: CopilotTokenInfo | None = None
@@ -83,28 +85,9 @@ class CopilotTokenManager:
         if not self._is_valid():
             await self.refresh()
 
-    def next_refresh_delay(self, *, refresh_in: int) -> float:
-        return max(float(refresh_in) - self._validity_margin, self._minimum_refresh_interval)
-
-    async def run_refresh_loop(self) -> None:
-        info: CopilotTokenInfo | None = self._current
-        while True:
-            delay = (
-                self.next_refresh_delay(refresh_in=info.refresh_in)
-                if info is not None
-                else self._minimum_refresh_interval
-            )
-            await self._sleep(delay)
-            try:
-                info = await self.refresh(force=True)
-            except Exception:
-                # A failed background refresh must not end the loop.
-                # get_token() still refreshes synchronously and propagates the error to callers.
-                await self._sleep(self._minimum_refresh_interval)
-
-    async def refresh(self, *, force: bool = False) -> CopilotTokenInfo:
+    async def refresh(self) -> CopilotTokenInfo:
         async with self._lock:
-            if not force and self._is_valid():
+            if self._is_valid():
                 assert self._current is not None
                 return self._current
             raw = await self._exchange_with_retry()

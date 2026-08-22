@@ -58,7 +58,7 @@ async def test_copilot_token_exchange_preserves_raw_response() -> None:
     )
     identity_headers["editor-version"] = "vscode/changed"
     try:
-        info = await manager.refresh(force=True)
+        info = await manager.refresh()
     finally:
         await http_client.aclose()
 
@@ -96,7 +96,7 @@ async def test_dynamic_token_headers_override_case_variant_identity_headers() ->
         },
     )
     try:
-        await manager.refresh(force=True)
+        await manager.refresh()
     finally:
         await http_client.aclose()
 
@@ -246,73 +246,46 @@ async def test_401_refreshes_github_token_before_retry() -> None:
         assert headers["x-vscode-user-agent-library-version"] == "electron-fetch"
 
 
-def test_next_refresh_delay_uses_server_hint_with_safety_margin() -> None:
-    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(lambda _: httpx2.Response(500)))
-    manager = CopilotTokenManager(
-        StaticTokenSource(),
-        http_client,
-        clock=lambda: 1000,
-        minimum_refresh_interval=60,
-    )
-
-    assert manager.next_refresh_delay(refresh_in=1500) == 1440
-    assert manager.next_refresh_delay(refresh_in=30) == 60
-
-
 @pytest.mark.asyncio
-async def test_refresh_loop_survives_exhausted_refresh_failure() -> None:
-    calls = 0
-
-    async def stop_after_retry(delay: float) -> None:
-        nonlocal calls
-        del delay
-        calls += 1
-        if calls >= 3:
-            raise RuntimeError("stop")
+async def test_exhausted_exchange_reports_the_failure_to_the_caller() -> None:
+    """The lazy path propagates. There is no background loop left to swallow this."""
+    attempts = 0
 
     def handler(request: httpx2.Request) -> httpx2.Response:
+        nonlocal attempts
         del request
+        attempts += 1
         return httpx2.Response(503, json={"error": "temporary"})
+
+    async def no_sleep(delay: float) -> None:
+        del delay
 
     http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     manager = CopilotTokenManager(
         StaticTokenSource(),
         http_client,
-        sleep=stop_after_retry,
-        max_exchange_attempts=1,
+        sleep=no_sleep,
+        max_exchange_attempts=3,
     )
     try:
-        with pytest.raises(RuntimeError, match="stop"):
-            await manager.run_refresh_loop()
+        with pytest.raises(Exception):  # noqa: B017 - the category is the transport's, not ours
+            await manager.get_token()
     finally:
         await http_client.aclose()
 
-    assert calls == 3
+    assert attempts == 3
 
 
 @pytest.mark.asyncio
-async def test_refresh_loop_survives_invalid_success_payload() -> None:
-    sleeps = 0
-
-    async def stop(delay: float) -> None:
-        nonlocal sleeps
-        del delay
-        sleeps += 1
-        if sleeps >= 2:
-            raise RuntimeError("stop")
-
+async def test_invalid_success_payload_is_reported_to_the_caller() -> None:
+    """A 200 whose body is not a token is still a failed exchange, and the caller is the one who has to hear about it."""
     http_client = httpx2.AsyncClient(
         transport=httpx2.MockTransport(lambda _: httpx2.Response(200, json={"unexpected": True}))
     )
-    manager = CopilotTokenManager(
-        StaticTokenSource(),
-        http_client,
-        sleep=stop,
-    )
+    manager = CopilotTokenManager(StaticTokenSource(), http_client)
     try:
-        with pytest.raises(RuntimeError, match="stop"):
-            await manager.run_refresh_loop()
+        with pytest.raises(RuntimeError, match="invalid Copilot token response"):
+            await manager.get_token()
     finally:
         await http_client.aclose()
 
-    assert sleeps == 2
