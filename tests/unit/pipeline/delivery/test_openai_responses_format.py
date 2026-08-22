@@ -288,8 +288,15 @@ def test_the_keepalive_is_a_comment_no_parser_turns_into_an_event() -> None:
 
     response = replay(frames)
     assert response.output_text == "hi"
-    # And it did not consume a sequence number, which would make the numbering lie.
-    assert one.keepalive() == b": ping\n\n"
+
+    # And it consumed no sequence number, which the comment used to claim while asserting only the
+    # bytes. Read off the wire rather than off the framer: the numbers a client sees are the claim.
+    numbers = [
+        orjson.loads(f.decode().split("data: ", 1)[1])["sequence_number"]
+        for f in frames
+        if not f.startswith(b":")
+    ]
+    assert numbers == list(range(len(numbers)))
 
 
 def test_an_error_frame_says_what_went_wrong_without_claiming_a_response() -> None:
