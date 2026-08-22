@@ -340,6 +340,80 @@ async def test_named_strategies_bound_each_reason_separately() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_draining_process_does_not_open_another_upstream_attempt() -> None:
+    """A retry opens a new upstream request, and a process that has stopped accepting has promised not to take on new work.
+
+    The failure is one the budget would otherwise fund — the sibling test above proves a 503 buys a second attempt — so the refusal here is the drain's doing and nothing else's.
+
+    Budget is left untouched as well as unspent: the same ledger is read by the hand-over path this ending falls through to, and charging it for an attempt that was never made would narrow what that path is allowed to do.
+    """
+    from app.config.schema import UpstreamRequestRetryConfig
+    from app.pipeline.direct_driver import LedgerBudget
+    from app.pipeline.retry import RetryLedger
+
+    ledger = RetryLedger(UpstreamRequestRetryConfig())
+    provider = FakeProvider(
+        responses=[UpstreamError("gateway", status_code=503), httpx2.Response(200)]
+    )
+    driver_under_test = AnthropicMessagesDriver(
+        provider,
+        SubscriberRegistry[RequestContext]().freeze(),
+        budget=LedgerBudget(ledger, draining=lambda: True),
+    )
+
+    outcome = await driver_under_test.run(context())
+
+    assert outcome.succeeded is False
+    assert outcome.attempts == 1
+    assert "shutting down" in str(outcome.error)
+    assert ledger.total_spent == 0
+
+
+@pytest.mark.asyncio
+async def test_the_drain_is_read_at_each_refusal_rather_than_at_construction() -> None:
+    """A drain that begins while a request is already in flight has to stop that request's *next* attempt.
+
+    Sampled once when the budget was built, the answer would say "running" for the whole request — which is every request that matters here, since a drain waits for exactly the ones already running.
+    """
+    from app.config.schema import UpstreamRequestRetryConfig
+    from app.pipeline.direct_driver import LedgerBudget
+    from app.pipeline.retry import RetryLedger
+
+    draining = False
+    provider = FakeProvider(
+        responses=[
+            UpstreamError("gateway", status_code=503),
+            UpstreamError("gateway", status_code=503),
+            httpx2.Response(200),
+        ]
+    )
+    driver_under_test = AnthropicMessagesDriver(
+        provider,
+        SubscriberRegistry[RequestContext]().freeze(),
+        budget=LedgerBudget(RetryLedger(UpstreamRequestRetryConfig()), draining=lambda: draining),
+    )
+
+    # The first failure is funded, and the drain begins between it and the second.
+    original_send = provider.send
+
+    async def send_then_drain(*args: Any, **kwargs: Any) -> Any:
+        nonlocal draining
+        try:
+            return await original_send(*args, **kwargs)
+        finally:
+            draining = True
+
+    provider.send = send_then_drain  # pyright: ignore[reportAttributeAccessIssue]
+
+    outcome = await driver_under_test.run(context())
+
+    assert outcome.succeeded is False
+    # One attempt made, and the retry it had already earned refused because the world changed underneath it.
+    assert outcome.attempts == 1
+    assert "shutting down" in str(outcome.error)
+
+
+@pytest.mark.asyncio
 async def test_named_strategies_allow_a_funded_reason() -> None:
     from app.config.schema import UpstreamRequestRetryConfig
     from app.pipeline.direct_driver import LedgerBudget

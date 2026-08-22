@@ -656,7 +656,17 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
             `handle` rather than `handle_bounded`: the client deadline is enforced over the body now, and a second `asyncio.timeout` around this would be a second clock for one lifetime — the exact defect the outer guard was added to fix.
 
             The trace keeps the first attempt's connection identity and byte count. A reader comparing `upstream_conn` across failures is looking for the connection that broke, and overwriting it with the one that recovered erases the thing being looked for.
+
+            `None` while the process is draining. A replay opens a *new* upstream request, and a process that has stopped accepting has promised not to take work on: the attempt would extend the drain by its whole length, and if the drain gives up first the client is left with neither answer. `upstream-retry-and-continuation.md` rules it out.
+
+            **What the client gets instead is the truncated-stream ending, not a hand-over**, and that is worth stating because the neighbouring rule invites the opposite reading. This function is reached only from `StreamEnding.REPLAY`, which `decide_stream_ending` returns only when `downstream_opened` is false — so by construction nothing has been delivered here, and a hand-over needs delivered content to hand over. The drain cases that *do* end in a hand-over are the ones that never came through this door: they already hold a block, so they were never eligible for a replay to begin with.
             """
+            if chain.active_requests.draining:
+                get_logger().info(
+                    "upstream_replay_refused_while_draining",
+                    request_id=trace.request_id,
+                )
+                return None
             # What the client sent, not what the last attempt turned it into. See `inbound_payload`.
             context.payload = deepcopy(inbound_payload)
             try:

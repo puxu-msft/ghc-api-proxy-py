@@ -1,6 +1,7 @@
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
+from types import FrameType
 from typing import Annotated
 
 import typer
@@ -115,6 +116,23 @@ def _load_spec_config(
     return config, inactive
 
 
+class _DrainAnnouncingServer(uvicorn.Server):
+    """Uvicorn, plus one line saying the listener has stopped accepting.
+
+    The stand-alone path gets this for free: it owns its listener, so it knows the moment accepting stops and hands `begin_draining` down (`_serve_pipeline`). Under systemd the listener is uvicorn's, and until this class existed nothing on that path ever set the flag — so the footer never showed a drain, and, more consequentially, the retry paths could not tell a shutdown from ordinary running and would open a fresh upstream request in the middle of one.
+
+    `handle_exit` rather than a lifespan hook, because the flag has to be true for the whole drain and `shutdown` runs at the end of it. Uvicorn calls this from its own signal handler; a second signal (force quit) calls it again, which is harmless — `begin_draining` only sets a flag.
+    """
+
+    def __init__(self, config: uvicorn.Config, *, on_draining: Callable[[], None]) -> None:
+        super().__init__(config)
+        self._on_draining = on_draining
+
+    def handle_exit(self, sig: int, frame: FrameType | None) -> None:
+        self._on_draining()
+        super().handle_exit(sig, frame)
+
+
 async def serve_inherited(config: ProxyConfig, fd: int, *, proxy_from_cli: bool) -> None:
     """Serve the chain on a listener systemd already opened.
 
@@ -124,13 +142,14 @@ async def serve_inherited(config: ProxyConfig, fd: int, *, proxy_from_cli: bool)
     try:
         config = await resolve_provider_base_urls(config, http_client=http_client)
         chain = build_chain(config, http_client=http_client)
-        server = uvicorn.Server(
+        server = _DrainAnnouncingServer(
             uvicorn.Config(
                 create_pipeline_app(chain),
                 fd=fd,
                 log_config=None,
                 timeout_graceful_shutdown=config.graceful_cleanup_timeout,
-            )
+            ),
+            on_draining=chain.active_requests.begin_draining,
         )
         await server.serve()
     finally:

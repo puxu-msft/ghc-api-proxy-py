@@ -3133,6 +3133,41 @@ def test_an_interrupted_turn_is_handed_back_to_the_client_as_a_tool_call(
     assert any("auto_retry_tool_not_declared" in record.getMessage() for record in caplog.records)
 
 
+def test_a_draining_process_does_not_replay_a_stream_the_client_never_saw() -> None:
+    """A replay opens a new upstream request, and a process that has stopped accepting has promised not to take work on.
+
+    Deliberately the *same* scenario as `test_a_torn_stream_the_client_never_saw_is_replayed_end_to_end` — nothing delivered, a mid-block tear, budget at its default — so the only difference is that the drain began while the request was in flight. That test measures two upstream calls; this one measures one. Neither number means anything without the other.
+
+    The drain is begun from inside the upstream handler because that is when it happens in production: a drain waits for the requests already running, so the ones it has to stop are exactly the ones already past this point.
+
+    **What the client gets is the truncated ending, not a hand-over**, and asserting that is the point rather than an omission. A replay is only ever legal when nothing was delivered, so by the time this door is reached there is nothing to hand over. The drain failures that *do* end in a hand-over already hold a block and were never eligible for a replay — an earlier version of this test used that scenario, and passed identically with the drain gate removed.
+
+    That ending is a bare re-raise rather than an error frame, which is the shape `deferred.md` §5 already records as inconsistent. Pinned here as it is, not as it should be: this test is about the attempt that was not made, and dressing up the ending would make it a second test of something else.
+    """
+    calls: list[int] = []
+
+    async def torn_body() -> AsyncIterator[bytes]:
+        yield (
+            b'event: content_block_start\ndata: {"index":0,"content_block":{"type":"text"}}\n\n'
+        )
+        raise httpx2.RemoteProtocolError("peer closed the connection")
+
+    def draining_upstream(request: httpx2.Request) -> httpx2.Response:
+        calls.append(1)
+        # Resolved when upstream is first asked, by which point `make_client` has returned and bound it.
+        chain = getattr(cast(Any, client.app).state, CHAIN_STATE_KEY)
+        chain.active_requests.begin_draining()
+        return httpx2.Response(
+            200, content=torn_body(), headers={"content-type": "text/event-stream"}
+        )
+
+    client, _ = make_client(draining_upstream)
+    with pytest.raises(httpx2.RemoteProtocolError):
+        _ = _delivered(client)
+
+    assert len(calls) == 1, "a draining process opened another upstream request"
+
+
 def test_a_turn_that_ran_out_of_room_is_handed_back_the_same_way() -> None:
     """Nothing failed — upstream finished cleanly and said it stopped for want of room — but the turn is no more finished than a torn one.
 

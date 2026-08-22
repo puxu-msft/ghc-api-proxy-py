@@ -177,7 +177,11 @@ async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[Req
     driver = driver_type(
         provider,
         chain.subscribers,
-        budget=LedgerBudget(_ledger_for(context, chain)),
+        budget=LedgerBudget(
+            _ledger_for(context, chain),
+            # Read at each refusal rather than sampled now: a drain that begins while this request is in flight has to stop the *next* attempt, and a value captured here would say "running" for the whole request.
+            draining=lambda: chain.active_requests.draining,
+        ),
         attempt_deadline=attempt_deadline,
         response_header_timeout=timeouts.response_header,
         rate_limiter=chain.rate_limiter_for(provider.name),

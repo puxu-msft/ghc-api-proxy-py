@@ -8,6 +8,7 @@ Copying it per endpoint is how the four drift apart.
 """
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -63,8 +64,15 @@ class LedgerBudget:
     """Spends the named per-reason strategies alongside the shared total."""
 
     ledger: RetryLedger
+    # Whether the process has stopped accepting. `None` on the paths that have no listener to ask — a test harness, or a caller driving a driver directly — and those simply never refuse for this reason.
+    #
+    # A retry opens a *new* upstream request, and doing that while shutting down is work the process has already promised to stop taking on: it extends the drain by a whole attempt, and if the drain gives up first the client gets neither the retry's answer nor the one it was owed. `upstream-retry-and-continuation.md` rules it out and points the ending at the hand-over instead.
+    draining: Callable[[], bool] | None = None
 
     def take_for(self, error: BaseException) -> tuple[bool, str]:
+        if self.draining is not None and self.draining():
+            # Before the ledger, so a refused-for-shutdown attempt does not also spend budget it was never going to use — the same request may still be handed back to the client, and that path reads the same ledger.
+            return (False, "server is shutting down")
         reason = reason_for(error)
         if reason is None:
             return (False, "failure is not retryable")

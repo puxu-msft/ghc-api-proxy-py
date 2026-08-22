@@ -1,11 +1,14 @@
+import signal
 from pathlib import Path
 from typing import cast
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 import typer.rich_utils
+import uvicorn
 import yaml
 from typer.testing import CliRunner
+from uvicorn._types import ASGIReceiveCallable, ASGISendCallable, Scope
 
 from app.cli import app, serve_inherited
 from app.config.loading import bundled_config_text
@@ -240,6 +243,34 @@ def test_an_inherited_listener_serves_the_same_chain_as_start(
     assert served.func is serve_inherited
     assert served.args[1] == 3
     assert isinstance(served.args[0], ProxyConfig)
+
+
+def test_the_systemd_path_says_when_it_stops_accepting() -> None:
+    """Under systemd the listener is uvicorn's, so nothing in this process learns a drain has begun unless this class tells it.
+
+    That was the state until 2026-08-22: `begin_draining` was wired only on the stand-alone path, which owns its own listener. On the deployment target the flag stayed false for the whole shutdown, and the retry paths — which refuse to open a new upstream request during a drain — could not see one.
+
+    Asserted through `handle_exit` because that is what uvicorn installs as its signal handler, and the flag has to be true for the whole drain rather than at the end of it.
+    """
+    from app.cli import _DrainAnnouncingServer  # pyright: ignore[reportPrivateUsage]
+
+    async def never_called(
+        scope: Scope, receive: ASGIReceiveCallable, send: ASGISendCallable
+    ) -> None:
+        """Uvicorn wants an application to build a `Config` around. Nothing here serves a request."""
+        raise AssertionError("the app is never invoked by this test")
+
+    announced: list[int] = []
+    server = _DrainAnnouncingServer(
+        uvicorn.Config(never_called),
+        on_draining=lambda: announced.append(1),
+    )
+
+    server.handle_exit(signal.SIGTERM, None)
+
+    assert announced == [1]
+    # Uvicorn's own bookkeeping still happens: announcing must not replace the shutdown, only precede it.
+    assert server.should_exit is True
 
 
 def test_start_forwards_the_restart_request(monkeypatch: pytest.MonkeyPatch) -> None:
