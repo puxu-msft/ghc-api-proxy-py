@@ -70,7 +70,6 @@ async def collect(
     interval: int = 0,
     gap: float = 0.0,
     initial_delay: float = 0.0,
-    synthesized_response_headers_after_sec: int = 0,
     signature_compat: ContentBlockStartCompat = "signature_delta",
     assembler: str = "anthropic",
 ) -> list[bytes]:
@@ -88,7 +87,6 @@ async def collect(
             buffer=BlockBuffer(policy=policy),  # pyright: ignore[reportArgumentType]
             settings=StreamSettings(
                 sse_ping_interval=interval,
-                synthesized_response_headers_after_sec=synthesized_response_headers_after_sec,
                 signature_compat=signature_compat,
             ),
             message_id="msg_1",
@@ -138,69 +136,6 @@ async def test_nothing_is_written_before_the_first_block_closes() -> None:
         frame("content_block_delta", {"index": 0, "delta": {"type": "text_delta", "text": "hi"}}),
     ]
     assert await collect(partial) == []
-
-
-@pytest.mark.asyncio
-async def test_a_late_first_block_gets_a_message_start_and_no_placeholder_content() -> None:
-    """The client hears that a message began; it is not handed a block that says nothing.
-
-    This used to synthesise `{"type":"text","text":""}` as content block zero. The client stores it as part of the turn and replays it in its next request, and upstream refuses the whole body over it — `messages: text content blocks must be non-empty`, measured in production on 2026-08-20 after a 242-second wait. `message_start` puts the same bytes in front of the client and commits us to no content, so the real block still arrives as index zero.
-    """
-    chunks = await collect(
-        anthropic_stream("one"),
-        initial_delay=1.1,
-        synthesized_response_headers_after_sec=1,
-    )
-    assert events_of(chunks) == [
-        "message_start",
-        "content_block_start",
-        "content_block_delta",
-        "content_block_stop",
-        "message_delta",
-        "message_stop",
-    ]
-    assert b'"text":"one"' in b"".join(chunks)
-    assert block_start_indices(chunks) == [0]
-
-
-@pytest.mark.asyncio
-async def test_a_synthesized_start_that_never_gets_a_block_ends_in_an_error() -> None:
-    """The degenerate line: the deadline fires and upstream then produces nothing at all.
-
-    Pinned because it is the one shape this change alters that has no other witness. The client is left a message with no content blocks, where before it was left one that said nothing. With the deadline disabled the same silence produces no bytes at all, which is what makes "no content blocks" an existing shape rather than one introduced here.
-
-    The stream still closes rather than hanging — that was always this test's point, and an `error` event closes it just as a terminal does. What changed is which ending: upstream never sent a terminal event, so under STR-04 this is truncation, and the synthesized `message_start` must not be followed by frames claiming the turn finished. The earlier expectation here (`message_delta` + `message_stop`) encoded that claim.
-    """
-    chunks = await collect([], initial_delay=1.1, synthesized_response_headers_after_sec=1)
-
-    assert events_of(chunks) == ["message_start", "error"]
-    assert b"incomplete_responses_stream" in b"".join(chunks)
-
-    assert await collect([], initial_delay=1.1) == []
-
-
-@pytest.mark.asyncio
-async def test_real_block_before_synthesis_deadline_has_no_synthetic_block() -> None:
-    chunks = await collect(
-        anthropic_stream("one"),
-        synthesized_response_headers_after_sec=1,
-    )
-    assert events_of(chunks).count("content_block_stop") == 1
-    assert b'"text":"one"' in b"".join(chunks)
-    assert block_start_indices(chunks) == [0]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("after_sec", [0, -1])
-async def test_nonpositive_synthesis_timeout_is_disabled(after_sec: int) -> None:
-    chunks = await collect(
-        anthropic_stream("one"),
-        initial_delay=1.1,
-        synthesized_response_headers_after_sec=after_sec,
-    )
-    assert events_of(chunks).count("content_block_stop") == 1
-    assert b'"text":"one"' in b"".join(chunks)
-    assert block_start_indices(chunks) == [0]
 
 
 @pytest.mark.asyncio
@@ -367,41 +302,6 @@ async def test_a_truncated_stream_ends_in_an_error_event_and_never_claims_succes
     assert "incomplete_responses_stream" in body
     assert '"stop_reason":"end_turn"' not in body
     assert "message_stop" not in body
-
-
-@pytest.mark.asyncio
-async def test_the_synthesized_start_goes_out_while_the_policy_holds_everything_else() -> None:
-    """`full` holds content until the end — but this frame exists to arrive now.
-
-    Putting it through the buffer delays it for exactly as long as the wait that made it
-    necessary, which is the same as never synthesising it. Collecting the whole stream cannot
-    see that: the events come out in the same order either way. So this one pulls the first
-    chunk under a deadline while upstream is still silent.
-    """
-
-    async def silent_then_late() -> AsyncIterator[bytes]:
-        await asyncio.sleep(30)
-        for payload in anthropic_stream("one"):
-            yield payload
-
-    early: list[bytes] = []
-    async with aclosing(
-        stream_delivery(
-            silent_then_late(),
-            AnthropicAssembler(),
-            buffer=BlockBuffer(policy="full"),
-            settings=StreamSettings(synthesized_response_headers_after_sec=1),
-            message_id="msg_1",
-            model="claude-model",
-        )
-    ) as stream:
-        # Deliberately shorter than upstream's silence: anything arriving here cannot have come
-        # from upstream, and cannot have waited for the buffer to release.
-        async with asyncio.timeout(4):
-            while not any(b"message_start" in chunk for chunk in early):
-                early.append(await anext(stream))
-
-    assert events_of(early) == ["message_start"]
 
 
 def thinking_stream(signature: str) -> list[bytes]:
@@ -641,14 +541,21 @@ def delivery_of(chunks: AsyncIterator[bytes]) -> AsyncGenerator[bytes]:
 
 
 class SlowAssembler:
-    """Takes real time to assemble and never completes a block.
+    """Takes real time to assemble, and completes at most the one block it is asked for.
 
     A stand-in for the timing rather than for any upstream behaviour: `push` is synchronous and, on a large event or a busy machine, unbounded. The real assemblers are too fast to hold a deadline open.
+
+    `first_block` exists because the keep-alive is only observable once the client holds bytes, and the client holds no bytes until a block has been delivered. A stand-in that never completes one can no longer be used to watch the schedule at all.
     """
 
-    def __init__(self, *, seconds: float) -> None:
+    def __init__(self, *, seconds: float, first_block: bool = False) -> None:
         self._seconds = seconds
         self._terminal = Terminal()
+        self._pending = (
+            (CompletedBlock(index=0, kind="text", payload={"type": "text", "text": "one"}),)
+            if first_block
+            else ()
+        )
 
     @property
     def terminal(self) -> Terminal:
@@ -658,7 +565,8 @@ class SlowAssembler:
         deadline = time.monotonic() + self._seconds
         while time.monotonic() < deadline:
             pass
-        return ()
+        blocks, self._pending = self._pending, ()
+        return blocks
 
 
 async def run_with_a_talkative_upstream(*, deltas: int, gap: float) -> list[bytes]:
@@ -729,7 +637,6 @@ async def run_held_back(policy: str) -> list[bytes]:
             buffer=BlockBuffer(policy=policy),  # pyright: ignore[reportArgumentType]
             settings=StreamSettings(
                 sse_ping_interval=1,
-                synthesized_response_headers_after_sec=1,
             ),
             message_id="m",
             model="model",
@@ -739,11 +646,18 @@ async def run_held_back(policy: str) -> list[bytes]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("policy", ["full", "until-tool-use"])
-async def test_a_held_back_block_does_not_disarm_both_guards(policy: str) -> None:
-    # These two policies hold every block until the stream ends, so a block existing is not a byte delivered. Disarming the synthesis timer the moment the assembler produced a block turned off the preamble and the keep-alive together, and the client then had nothing at all for as long as upstream cared to talk — the one window here with no upper bound.
+async def test_a_held_back_policy_sends_nothing_at_all_until_the_stream_ends(policy: str) -> None:
+    """These two policies hold every block until the stream ends, and nothing may go out before the first one is delivered — so under them the client now hears nothing for the whole turn.
+
+    That is a real loss, recorded here rather than left to be discovered. It arrived with the removal of the synthesised preamble, which was the only thing that gave the client a byte before a block existed and, with it, the only thing that let a keep-alive follow. Both were paid for the same way: the first byte settles the response's status, so anything sent early makes an upstream 429 unanswerable as a 429.
+
+    Under the default `block` policy the window is one block long. Under these two it is the whole turn, bounded only by `upstream_request_deadline`. Anyone re-adding an early preamble will turn this test red, which is the point of it.
+    """
     chunks = await run_held_back(policy)
+    # Nothing during the turn: the keep-alive never fired, because it may not fire before the client holds bytes and no block was delivered to give it any.
+    assert PING_FRAME not in chunks
+    # Everything at the end, in one go, preamble included — the flush is where the client first hears anything at all.
     assert events_of(chunks)[0] == "message_start"
-    assert PING_FRAME in chunks
 
 
 @pytest.mark.asyncio
@@ -821,7 +735,6 @@ async def test_an_unassemblable_event_fails_before_the_preamble() -> None:
                 buffer=BlockBuffer(policy="block"),
                 settings=StreamSettings(
                     sse_ping_interval=0,
-                    synthesized_response_headers_after_sec=1,
                 ),
                 message_id="m",
                 model="model",
@@ -836,8 +749,10 @@ async def test_an_unassemblable_event_fails_before_the_preamble() -> None:
 @pytest.mark.asyncio
 async def test_a_deadline_that_falls_due_during_assembly_is_not_missed() -> None:
     # Assembling is synchronous and unbounded, so a deadline can come due while it runs. Reading the answer at pull time and acting on it after assembling asked the question before it could be answered: the keep-alive slipped by a whole assembly, which is one more interval the client spends with nothing.
+    #
+    # The first push completes a block, because a keep-alive cannot go out to a client that has received nothing: the first byte settles the response's status, and until a block exists there is nothing to settle it with. Three pushes rather than two, so there is still an assembly after the one that delivered.
     async def upstream() -> AsyncIterator[bytes]:
-        for _ in range(2):
+        for _ in range(3):
             yield frame("content_block_start", {"index": 0, "content_block": {"type": "text"}})
 
     start = time.monotonic()
@@ -845,11 +760,10 @@ async def test_a_deadline_that_falls_due_during_assembly_is_not_missed() -> None
     async with aclosing(
         stream_delivery(
             upstream(),
-            SlowAssembler(seconds=1.05),
+            SlowAssembler(seconds=1.05, first_block=True),
             buffer=BlockBuffer(policy="block"),
             settings=StreamSettings(
                 sse_ping_interval=1,
-                synthesized_response_headers_after_sec=1,
             ),
             message_id="m",
             model="model",
@@ -863,70 +777,6 @@ async def test_a_deadline_that_falls_due_during_assembly_is_not_missed() -> None
     assert at[0] < 2.0
 
 
-@pytest.mark.asyncio
-async def test_an_always_ready_upstream_does_not_starve_the_preamble() -> None:
-    # Same run of ready events, with keep-alives switched off and synthesis on. The preamble is owed on its own deadline, so settling only the keep-alive on the ready path left it starved too: the first byte of a reply whose block never closes arrived with the end of the stream.
-    finished = False
-
-    async def upstream() -> AsyncIterator[bytes]:
-        nonlocal finished
-        yield frame("content_block_start", {"index": 0, "content_block": {"type": "text"}})
-        deadline = time.monotonic() + 1.6
-        while time.monotonic() < deadline:
-            yield frame(
-                "content_block_delta",
-                {"index": 0, "delta": {"type": "text_delta", "text": "x"}},
-            )
-        finished = True
-
-    arrived_while_running: bool | None = None
-    async with aclosing(
-        stream_delivery(
-            upstream(),
-            AnthropicAssembler(),
-            buffer=BlockBuffer(policy="block"),
-            settings=StreamSettings(
-                sse_ping_interval=0,
-                synthesized_response_headers_after_sec=1,
-            ),
-            message_id="m",
-            model="model",
-        )
-    ) as delivery:
-        async for _ in delivery:
-            if arrived_while_running is None:
-                arrived_while_running = not finished
-
-    assert arrived_while_running is True
-
-
-@pytest.mark.asyncio
-async def test_a_due_preamble_goes_out_even_though_the_stream_is_already_over() -> None:
-    """Freezes the accepted half of the trade-off, in the shape it actually takes.
-
-    Whether the next pull ends the stream cannot be known without pulling, so a cue that is owed goes out first. Where the client already has bytes that costs one comment. Where it does not, the cue is `message_start`, which opens the response — and an opened response that never saw a terminal event is a truncation under STR-04. So the accepted cost is not a tidy empty message: it turns a request that would have been zero bytes into one the client sees fail. Written down here rather than discovered later.
-    """
-
-    async def upstream() -> AsyncIterator[bytes]:
-        yield frame("content_block_start", {"index": 0, "content_block": {"type": "text"}})
-
-    chunks = [
-        chunk
-        async for chunk in stream_delivery(
-            upstream(),
-            SlowAssembler(seconds=1.05),
-            buffer=BlockBuffer(policy="block"),
-            settings=StreamSettings(
-                sse_ping_interval=0,
-                synthesized_response_headers_after_sec=1,
-            ),
-            message_id="m",
-            model="model",
-        )
-    ]
-
-    assert PING_FRAME not in chunks
-    assert events_of(chunks) == ["message_start", "error"]
 async def _trickling_upstream() -> AsyncIterator[bytes]:
     """Never silent, never finished — the shape the two phase guards cannot see."""
     for payload in anthropic_stream("one")[:3]:

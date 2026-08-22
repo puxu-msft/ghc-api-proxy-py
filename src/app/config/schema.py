@@ -252,7 +252,6 @@ class ClientDeliveryConfig(Section):
     client_request_deadline: int = Field(default=3600, ge=0)
     buffering_policy: BufferingPolicy = "block"
     buffer_cap_bytes: int = Field(default=16_777_216, ge=0)
-    synthesized_response_headers_after_sec: int = Field(default=240, ge=0)
     sse_ping_interval: int = Field(default=15, ge=0)
     hedge: HedgeConfig = Field(default_factory=HedgeConfig)
 

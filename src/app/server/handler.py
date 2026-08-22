@@ -529,9 +529,6 @@ def stream_settings(chain: Chain) -> StreamSettings:
     return StreamSettings(
         signature_compat=chain.config.hook_fix_anthropic_sse.thinking.content_block_start_compat,
         sse_ping_interval=delivery.sse_ping_interval,
-        synthesized_response_headers_after_sec=(
-            delivery.synthesized_response_headers_after_sec
-        ),
     )
 
 

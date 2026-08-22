@@ -32,7 +32,6 @@ PING_FRAME = b": ping\n\n"
 @dataclass(frozen=True, slots=True)
 class StreamSettings:
     sse_ping_interval: int = 15
-    synthesized_response_headers_after_sec: int = 0
     signature_compat: ContentBlockStartCompat = "signature_delta"
 
 
@@ -62,18 +61,16 @@ async def _events_with_ping(
     interval: int,
     *,
     last_write: _LastWrite,
-    response_headers_deadline: float | None = None,
-    client_has_bytes: asyncio.Event | None = None,
 ) -> AsyncGenerator[_Pull]:
     """Pull upstream events, and offer a way to ask whether a deadline has come due.
 
-    A due cue asks the caller for a keep-alive, or for the response preamble while the client still has no bytes. Waiting on upstream in silence is what makes a client give up on a long thinking turn.
+    A due cue asks the caller for a keep-alive. Waiting on upstream in silence is what makes a client give up on a long thinking turn.
 
     Typed as a generator because the caller has to be able to close it, and an `AsyncIterator` is not required to offer that.
 
     The keep-alive deadline lives outside the pull loop, and only two things push it forward: firing, and the caller writing to the client. It used to be rebuilt for every upstream pull, which meant an upstream talking faster than the interval held it permanently in the future — no keep-alive was ever due, while the client waited on a block that had not closed and got nothing at all.
 
-    Both deadlines are answered by the same question, and the caller is the one that knows which of the two it answers. Answering only the keep-alive left the preamble starving under a run of ready events — with keep-alives switched off and synthesis on, a held-back reply's first byte was pushed to the end of the stream.
+    Both deadlines are answered by the same question, and the caller is the one that knows which of the two it answers. Answering only the keep-alive left the preamble starving under a run of ready events — with keep-alives switched off and synthesis on, a held-back reply's first byte was pushed to the end of the stream. One deadline is left now that the synthesised preamble is gone, and the shape is kept because the reason it had two was never about how many there were: the caller is still the only one that knows whether assembling wrote anything, so it is still the one that asks.
 
     Nothing here decides that a cue goes out. The scheduler hands over what upstream produced and a way to ask; the caller asks once it has assembled the event and knows whether that wrote anything. That ordering is what keeps an assembler failure, an end-of-stream and a run of ready events from each defeating the guard in its own way. A cue can still land immediately before an ending the next pull has not revealed yet — accepted rather than fixed, because missing an owed keep-alive breaks the contract and sending a spare one does not, and no amount of restructuring tells you what the next pull holds.
     """
@@ -81,12 +78,6 @@ async def _events_with_ping(
     loop = asyncio.get_running_loop()
     task: asyncio.Task[SseEvent] | None = None
     ping_deadline = loop.time() + interval if interval > 0 else None
-
-    def preamble_due() -> float | None:
-        """When the response preamble is owed, or `None` once the client has bytes or synthesis is off."""
-        if response_headers_deadline is None or client_has_bytes is None:
-            return None
-        return None if client_has_bytes.is_set() else response_headers_deadline
 
     def claim() -> bool:
         """Whether a cue is owed at this instant, advancing the keep-alive schedule if that is what came due."""
@@ -97,9 +88,6 @@ async def _events_with_ping(
         if keepalive is not None and now >= keepalive:
             ping_deadline = now + interval
             owed = True
-        preamble = preamble_due()
-        if preamble is not None and now >= preamble:
-            owed = True
         return owed
 
     try:
@@ -108,10 +96,7 @@ async def _events_with_ping(
             while True:
                 pending_deadlines = [
                     deadline
-                    for deadline in (
-                        _keepalive_due(ping_deadline, last_write, interval),
-                        preamble_due(),
-                    )
+                    for deadline in (_keepalive_due(ping_deadline, last_write, interval),)
                     if deadline is not None
                 ]
                 timeout = (
@@ -213,13 +198,10 @@ async def _deliver(
 ) -> AsyncGenerator[bytes]:
     """Assemble and frame the response. Wrapped by `stream_delivery`, which stamps the clock."""
     session = DeliverySession(buffer=buffer)
-    # One gate, not two. It used to be a local `started` flag for the keep-alive and a separate event for the synthesis timer, and they disagreed: the timer was disarmed the moment the assembler produced a block, while the flag waited for that block to actually be written. Under `full` and `until-tool-use` no block is written until the stream ends, so both guards went dark at once — no preamble, no keep-alive, and a silence bounded only by how long upstream cared to talk.
+    # Whether the client has seen a semantic event yet. It gates the keep-alive, which cannot be sent before the response has started, and the error frame at the end, which has nothing to correct if it has not.
+    #
+    # This used to gate a second thing: a `message_start` synthesised on its own after a long silence, so a client waiting on a slow turn saw something. That is gone. The preamble now leaves only alongside the first complete block, so `client_has_bytes` and "a block has been delivered" became the same fact — which is what lets a retry after a torn stream stay invisible, and what makes a half-opened response unreachable rather than a state to handle.
     client_has_bytes = asyncio.Event()
-    response_headers_deadline = (
-        asyncio.get_running_loop().time() + settings.synthesized_response_headers_after_sec
-        if settings.synthesized_response_headers_after_sec > 0
-        else None
-    )
 
     # `aclosing` for the same reason as above: the inner generator owns the upstream pull, and only closing it releases the response.
     async with aclosing(
@@ -227,8 +209,6 @@ async def _deliver(
             chunks,
             settings.sse_ping_interval,
             last_write=last_write,
-            response_headers_deadline=response_headers_deadline,
-            client_has_bytes=client_has_bytes,
         )
     ) as events:
         async for pull in events:
@@ -250,18 +230,9 @@ async def _deliver(
             # Asked here, and only here, because this is the first moment both answers exist: whether assembling wrote anything, and what the clock reads now that it has. Real bytes discharge the same obligation a cue would have answered, so `wrote` short-circuits and the schedule is left alone.
             if wrote or not pull.claim():
                 continue
-            if (
-                response_headers_deadline is not None
-                and not client_has_bytes.is_set()
-                and asyncio.get_running_loop().time() >= response_headers_deadline
-            ):
-                # `message_start` and nothing else. What this moment needs is bytes in front of a client that would otherwise time out, and `message_start` is the first thing every stream sends anyway — sending it early costs the client nothing and commits us to no content.
-                # It used to be a placeholder text block, which the client stores as part of the turn and replays in its next request. Measured on 2026-08-20: a 242-second wait put `{"type":"text","text":""}` into a session's history and upstream rejected the following request outright — `messages: text content blocks must be non-empty` — over a block that never carried anything.
-                # Written straight out rather than offered to the buffer, for the same reason as before: `full` or `until-tool-use` would hold it back for exactly as long as the wait that made it necessary, which is the same as not synthesising anything.
-                client_has_bytes.set()
-                yield message_start(message_id, model).encode()
-            elif client_has_bytes.is_set():
+            if client_has_bytes.is_set():
                 yield PING_FRAME
+            # Nothing is owed to a client that has seen no bytes. The alternative — a `message_start` on its own, so a slow turn shows something — was measured and removed: it settles the response's status long before upstream has said what it is, so a 429 arriving at second 300 can no longer be answered as one. A client that waits is told the truth late; a client told 200 early is told something that cannot be taken back.
 
     remaining = session.finish()
     if remaining and not client_has_bytes.is_set():
