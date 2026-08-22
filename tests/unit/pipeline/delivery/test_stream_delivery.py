@@ -20,7 +20,7 @@ from app.model_provider.ghc_client.errors import normalize_upstream_error
 from app.observability.active_requests import ActiveRequestRegistry
 from app.pipeline.delivery.assembling import Terminal
 from app.pipeline.delivery.blocks import BlockBuffer, CompletedBlock
-from app.pipeline.delivery.formats.anthropic_messages import AnthropicAssembler
+from app.pipeline.delivery.formats.anthropic_messages import AnthropicAssembler, AnthropicFramer
 from app.pipeline.delivery.formats.openai_responses import ResponsesAssembler
 from app.pipeline.delivery.sse_source import SseEvent
 from app.pipeline.delivery.stream import (
@@ -91,12 +91,12 @@ async def collect(
             delayed_feed(),
             ResponsesAssembler() if assembler == "responses" else AnthropicAssembler(),
             buffer=BlockBuffer(policy=policy),  # pyright: ignore[reportArgumentType]
-            settings=StreamSettings(
-                sse_ping_interval=interval,
+            settings=StreamSettings(sse_ping_interval=interval),
+            framer=AnthropicFramer(
+                message_id="msg_1",
+                model="claude-model",
                 signature_compat=signature_compat,
             ),
-            message_id="msg_1",
-            model="claude-model",
         )
     ]
 
@@ -177,8 +177,7 @@ async def run_with_gap(payloads_before: int, gap: float) -> list[bytes]:
             AnthropicAssembler(),
             buffer=BlockBuffer(policy="block"),
             settings=StreamSettings(sse_ping_interval=1),
-            message_id="m",
-            model="model",
+            framer=AnthropicFramer(message_id="m", model="model"),
         )
     ]
 
@@ -247,8 +246,7 @@ async def test_responses_upstream_is_delivered_as_anthropic_blocks() -> None:
             ResponsesAssembler(),
             buffer=BlockBuffer(policy="block"),
             settings=StreamSettings(sse_ping_interval=0),
-            message_id="m",
-            model="gpt-model",
+            framer=AnthropicFramer(message_id="m", model="gpt-model"),
         )
     ]
     body = b"".join(chunks).decode()
@@ -275,8 +273,7 @@ async def _truncated_delivery(assembler: AnthropicAssembler) -> str:
             assembler,
             buffer=BlockBuffer(policy="block"),
             settings=StreamSettings(sse_ping_interval=0),
-            message_id="msg_1",
-            model="claude-model",
+            framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
         )
     ) as stream:
         async for chunk in stream:
@@ -439,8 +436,7 @@ def _delivery(chunks: AsyncIterator[bytes]) -> AsyncGenerator[bytes]:
         AnthropicAssembler(),
         buffer=BlockBuffer(policy="block"),
         settings=StreamSettings(sse_ping_interval=0),
-        message_id="m",
-        model="model",
+        framer=AnthropicFramer(message_id="m", model="model"),
     )
 
 
@@ -546,8 +542,7 @@ def delivery_of(chunks: AsyncIterator[bytes]) -> AsyncGenerator[bytes]:
         AnthropicAssembler(),
         buffer=BlockBuffer(policy="block"),
         settings=StreamSettings(sse_ping_interval=1),
-        message_id="m",
-        model="model",
+        framer=AnthropicFramer(message_id="m", model="model"),
     )
 
 
@@ -649,8 +644,7 @@ async def run_held_back(policy: str) -> list[bytes]:
             settings=StreamSettings(
                 sse_ping_interval=1,
             ),
-            message_id="m",
-            model="model",
+            framer=AnthropicFramer(message_id="m", model="model"),
         )
     ]
 
@@ -745,8 +739,7 @@ async def test_an_unassemblable_event_fails_before_the_preamble() -> None:
                 settings=StreamSettings(
                     sse_ping_interval=0,
                 ),
-                message_id="m",
-                model="model",
+                framer=AnthropicFramer(message_id="m", model="model"),
             )
         ) as delivery:
             async for chunk in delivery:
@@ -774,8 +767,7 @@ async def test_a_deadline_that_falls_due_during_assembly_is_not_missed() -> None
             settings=StreamSettings(
                 sse_ping_interval=1,
             ),
-            message_id="m",
-            model="model",
+            framer=AnthropicFramer(message_id="m", model="model"),
         )
     ) as delivery:
         async for _ in delivery:
@@ -957,8 +949,7 @@ async def test_a_stream_the_client_never_saw_is_replaced_without_a_trace() -> No
             AnthropicAssembler(),
             buffer=BlockBuffer(policy="block"),
             settings=StreamSettings(sse_ping_interval=0),
-            message_id="msg_1",
-            model="claude-model",
+            framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
             replay=_replay_over([anthropic_stream("kept")]),
         )
     ]
@@ -984,8 +975,7 @@ async def test_a_stream_the_client_already_saw_is_not_replaced() -> None:
                 AnthropicAssembler(),
                 buffer=BlockBuffer(policy="block"),
                 settings=StreamSettings(sse_ping_interval=0),
-                message_id="msg_1",
-                model="claude-model",
+                framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
                 replay=_replay_over([anthropic_stream("kept")]),
             )
         ]
@@ -1004,8 +994,7 @@ async def test_a_failure_no_second_attempt_could_answer_is_not_replaced() -> Non
                 AnthropicAssembler(),
                 buffer=BlockBuffer(policy="block"),
                 settings=StreamSettings(sse_ping_interval=0),
-                message_id="msg_1",
-                model="claude-model",
+                framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
                 replay=refusing,
             )
         ]
@@ -1030,8 +1019,7 @@ async def test_the_client_deadline_is_the_one_ending_that_says_so() -> None:
             AnthropicAssembler(),
             buffer=BlockBuffer(policy="block"),
             settings=StreamSettings(sse_ping_interval=0),
-            message_id="msg_1",
-            model="claude-model",
+            framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
         )
     ]
     assert events_of(chunks)[-1] == "error"
@@ -1054,8 +1042,7 @@ async def test_an_upstream_tear_is_still_raised_rather_than_framed() -> None:
                 AnthropicAssembler(),
                 buffer=BlockBuffer(policy="block"),
                 settings=StreamSettings(sse_ping_interval=0),
-                message_id="msg_1",
-                model="claude-model",
+                framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
             )
         ]
 
@@ -1074,8 +1061,7 @@ async def test_a_held_back_policy_still_hears_the_client_deadline(policy: str) -
             AnthropicAssembler(),
             buffer=BlockBuffer(policy=policy),  # pyright: ignore[reportArgumentType]
             settings=StreamSettings(sse_ping_interval=0),
-            message_id="msg_1",
-            model="claude-model",
+            framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
         )
     ]
     assert b"client_deadline_exceeded" in b"".join(chunks)
@@ -1123,8 +1109,7 @@ async def test_a_finished_turn_survives_a_failure_nothing_recognises(policy: str
             AnthropicAssembler(),
             buffer=BlockBuffer(policy=policy),  # pyright: ignore[reportArgumentType]
             settings=StreamSettings(sse_ping_interval=0),
-            message_id="msg_1",
-            model="claude-model",
+            framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
             replay=ReplaySupport(
                 ledger=RetryLedger(UpstreamRequestRetryConfig.model_validate({})),
                 eligible=eligible,

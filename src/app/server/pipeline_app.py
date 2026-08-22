@@ -592,11 +592,12 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
     if context.stream:
         # The instant the driver fixed when it opened this attempt, read rather than recomputed: a second `now + deadline` here would start the clock at the moment the headers came back and quietly grant the attempt a second full lifetime.
         attempt = context.current_attempt
+        settings = stream_settings(chain)
         framer = framer_for(
             handled,
+            chain,
             message_id=context.id,
             model=context.resolved_model,
-            signature_compat=stream_settings(chain).signature_compat,
         )
         if framer is None:
             # This client leg has no outbound framer, so there is no block to deliver. The upstream stream is read whole and handed over in one write, in the client's own dialect, byte for byte. Ruled 2026-08-22; before this branch existed those bytes went into an assembler that recognised none of them and the client got a 200 with an empty body and no error frame.
@@ -747,9 +748,7 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
                     ),
                     assembler,
                     buffer=delivery_buffer(chain),
-                    settings=stream_settings(chain),
-                    message_id=context.id,
-                    model=context.resolved_model,
+                    settings=settings,
                     framer=framer,
                     replay=replay,
                     continuation=continuation,

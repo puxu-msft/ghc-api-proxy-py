@@ -33,7 +33,7 @@ from app.observability import rejection_capture
 from app.observability.active_requests import ActiveRequestRegistry
 from app.observability.logging import setup_logging
 from app.observability.request_log_file import request_logs_dir
-from app.pipeline.delivery.formats.anthropic_messages import AnthropicAssembler
+from app.pipeline.delivery.formats.anthropic_messages import AnthropicAssembler, AnthropicFramer
 from app.pipeline.delivery.stream import stream_delivery
 from app.server.composition import Chain, build_chain
 from app.server.handler import delivery_buffer, stream_settings
@@ -1931,8 +1931,7 @@ async def test_an_upstream_that_tore_says_so_and_says_what_broke(
             assembler,
             buffer=delivery_buffer(chain),
             settings=stream_settings(chain),
-            message_id="msg_1",
-            model="claude-model",
+            framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
         ),
         accounting,
     )
@@ -1981,8 +1980,7 @@ async def test_a_tear_after_the_stop_reason_is_still_a_tear(
             assembler,
             buffer=delivery_buffer(chain),
             settings=stream_settings(chain),
-            message_id="msg_1",
-            model="claude-model",
+            framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
         ),
         accounting,
     )
@@ -2056,8 +2054,7 @@ async def test_a_client_that_walked_away_is_not_blamed_on_upstream(
             assembler,
             buffer=delivery_buffer(chain),
             settings=stream_settings(chain),
-            message_id="msg_1",
-            model="claude-model",
+            framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
         ),
         accounting,
     )

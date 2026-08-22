@@ -25,6 +25,7 @@ from recorded.cassettes import (
 )
 from recorded.recorded_provider import cassette_path, recorded_chain
 
+from app.pipeline.delivery.formats.anthropic_messages import AnthropicFramer
 from app.pipeline.delivery.stream import stream_delivery
 from app.server.composition import refresh_catalogs
 from app.server.handler import assembler_for, delivery_buffer, handle_bounded, stream_settings
@@ -83,8 +84,7 @@ async def test_a_recorded_stream_assembles_into_anthropic_blocks() -> None:
                 assembler_for(handled),
                 buffer=delivery_buffer(chain),
                 settings=stream_settings(chain),
-                message_id=context.id,
-                model=context.resolved_model,
+                framer=AnthropicFramer(message_id=context.id, model=context.resolved_model),
             )
         ]
 

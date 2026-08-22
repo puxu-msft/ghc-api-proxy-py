@@ -16,7 +16,6 @@ from uuid import uuid4
 import httpx2
 from pydantic import ValidationError
 
-from app.config.schema import ContentBlockStartCompat
 from app.model_provider import ModelProvider, ProviderError
 from app.models.anthropic import MessagesRequest
 from app.observability.metrics import BETA_FLAGS_STRIPPED
@@ -571,10 +570,10 @@ def delivers_blocks(handled: HandledRequest) -> bool:
 
 def framer_for(
     handled: HandledRequest,
+    chain: Chain,
     *,
     message_id: str,
     model: str,
-    signature_compat: ContentBlockStartCompat,
 ) -> OutboundFramer | None:
     """The outbound framer for this route's client leg, or `None` when it has none and the stream is delivered whole.
 
@@ -583,10 +582,28 @@ def framer_for(
     The pairing with `assembler_for` is the point. That one is chosen by the upstream leg, this one by the client leg, and a translated route uses one of each.
     """
     if not delivers_blocks(handled):
+        # One-shot delivery forwards upstream's bytes unchanged, so it is only correct while
+        # upstream is answering in the protocol the client asked in. Today that holds by
+        # construction — the translator registry has no Chat Completions leg, so such a route
+        # cannot be built — and this says so out loud rather than relying on it. Registering one
+        # would otherwise send a Responses body to a Chat Completions client, verbatim and silently.
+        if handled.route.translation_required:
+            raise ValueError(
+                f"no framer for {handled.route.inbound_format.value}, and its bytes were translated "
+                f"from {handled.route.target_format.value}, so they cannot be forwarded unchanged"
+            )
         return None
     if handled.route.inbound_format is WireFormat.OPENAI_RESPONSES:
         return ResponsesFramer(response_id=message_id, model=model)
-    return AnthropicFramer(message_id=message_id, model=model, signature_compat=signature_compat)
+    return AnthropicFramer(
+        message_id=message_id,
+        model=model,
+        # Read here rather than carried in on a delivery setting. It says how a thinking block's
+        # signature is spelled, which is a fact about the Anthropic wire format and therefore the
+        # Anthropic framer's business; routing it through `StreamSettings` put a framing knob in
+        # the one object that is meant to name no format at all.
+        signature_compat=chain.config.hook_fix_anthropic_sse.thinking.content_block_start_compat,
+    )
 
 
 def assembler_for(
@@ -604,10 +621,7 @@ def assembler_for(
 
 def stream_settings(chain: Chain) -> StreamSettings:
     delivery = chain.config.client_delivery
-    return StreamSettings(
-        signature_compat=chain.config.hook_fix_anthropic_sse.thinking.content_block_start_compat,
-        sse_ping_interval=delivery.sse_ping_interval,
-    )
+    return StreamSettings(sse_ping_interval=delivery.sse_ping_interval)
 
 
 def delivery_buffer(chain: Chain) -> BlockBuffer:

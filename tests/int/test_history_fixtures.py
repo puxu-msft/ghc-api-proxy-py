@@ -24,7 +24,7 @@ from recorded.recorded_provider import cassette_path
 
 from app.pipeline.delivery.assembling import BlockAssembler
 from app.pipeline.delivery.blocks import BlockBuffer, CompletedBlock
-from app.pipeline.delivery.formats.anthropic_messages import AnthropicAssembler
+from app.pipeline.delivery.formats.anthropic_messages import AnthropicAssembler, AnthropicFramer
 from app.pipeline.delivery.formats.openai_responses import ResponsesAssembler
 from app.pipeline.delivery.sse_source import parse_frame
 from app.pipeline.delivery.stream import StreamSettings, stream_delivery
@@ -54,8 +54,7 @@ async def deliver(name: str, assembler: BlockAssembler) -> bytes:
                 assembler,
                 buffer=BlockBuffer(policy="block"),
                 settings=StreamSettings(),
-                message_id="msg_test",
-                model="test-model",
+                framer=AnthropicFramer(message_id="msg_test", model="test-model"),
             )
         ]
     )
