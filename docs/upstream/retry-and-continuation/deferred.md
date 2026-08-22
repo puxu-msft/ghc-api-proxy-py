@@ -69,6 +69,33 @@ response 层有信号（`response.incomplete`），但它晚于 item 关闭到�
 
 下面是本条仍然打开的部分。
 
+**一手证据（2026-08-22，`reports/260822-clean-eof-without-terminal.md`）——它对这条细化不客气，如实记下**：
+
+| 问题 | 数字 |
+|---|---|
+| 干净 EOF 且无合法终止事件 | **109 / 133 929 条上游 SSE 流 = 0.081%**（Anthropic 腿 32、Responses 腿 77）。本项目自己的生产日志 3 / 13 700 = 0.022%。**不是零观测** |
+| 其中落在**块边界** | **仅 4 条（3.7%），全在 Responses 腿**。块中途 100 条（91.7%），Anthropic 腿 **32/32 全在块中途** |
+| 边界那几条有没有别的线索能判「说完了 vs 被切断」 | **没有**。usage 0/109（它只搭 `response.completed` 走）、`[DONE]` 哨兵 0/109（Copilot 两条腿从不发，该判据恒假）、Anthropic 腿 `message_delta` 0/32。唯一存活的 `item.status == "completed"` 与正常流逐字相同，无鉴别力 |
+
+**所以这条细化改变的是 133 929 条里的 4 条（0.003%）。** 它不是止血；价值在于把「说完了」与「被切断了」分成两件事，不在命中率。**这个代价／收益比值得复核**——一个协议成员 + 一个配置项 + 一个新的合成 `stop_reason`，换 0.003%。已交独立评审评估。
+
+**方法学副产品，比上面的数字更耐用**：该调查用 `origin.stage == "upstream-capture"` 取代了 `from_history.py:107` 的「取变换图的根」判据，从而**把 2026-07-17 那个已知盲区从静默污染变成显式排除**（那 366 个 operation 的帧全标 `recovery-projection`，整体落在分母外），并用这个独立判据逐库复现了 `260821-upstream-termination-reasons.md` 的数字（28904/4、30322/16、1222/0、3903/0，逐值相等）。**同样的改进适用于 `tests/int/recorded/from_history.py:107`，未动，待裁。**
+
+### 5之二. 新造的一条：干净 EOF 收尾把「没测过」写成了零
+
+**由上面这条细化引入（主仓 `78be0d4`），实现者自查发现，一手实测确凿。**
+
+新的收尾帧发出 `"usage":{"output_tokens":0}`——**一个从未做过的测量被呈现成零**，而这个回合确实产出过块。来源是 `formats/anthropic_messages.py` 的 `terminal_frames` 里 `usage or {"output_tokens": 0}`；**那一行本身是既有的，但改动之前它只在真见过终止事件时才可达**（那时 usage 是真的）。改动让它在完全没有 usage 的情况下可达。
+
+**为什么这不是小事**：本仓已经在同一形状上打过三次——`Terminal.stop_reason` 的空默认（「upstream 说 end_turn」与「upstream 什么都没说」曾是同一个值）、`Terminal.upstream_usage` 坚持用 `None` 而非 `{}`（「零是一次测量，没测过不是」，原话在该字段注释里）、`_snapshot_upstream_connection` 宁可缺键也不写 `""`。这条是同一个错误在第四处出现，而且是本项目自己新造的。
+
+**改法未定**：省略该键会动到**正常路径**的 wire shape（正常路径传的 `terminal.usage` 可能是空 dict，现有 `or` 会把空 dict 也变成零），且 Anthropic 的 `message_delta` 里 `usage` 是否必填、客户端对缺键的反应都未核。已点名交给独立评审。
+
+### 5之三. 741 条 `NGHTTP2_CANCEL` 的腿间不对称（不属本题，登记以免丢）
+
+同一份调查顺带量到：741 条 `NGHTTP2_CANCEL` 里有 **237 条落在块边界，全部在 Responses 腿、全部恰好停在 `output_item.done` 之后，Anthropic 腿一条没有**。这种不对称不像随机的连接死亡。**归属未查清。** 它不属于本条（撕断走异常路径，到不了那个分支），但谁要拿这批数据做别的统计，得先解决归属。
+
+
 人写文档要求这两种都走同一个裁决点。**2026-08-22 已做到**，但下面第 2 格的「要不要为某些情形开口」仍待裁。
 
 **2026-08-22 补一条触发条件的更正（此前只活在会话里，是本条唯一的持久载体）**：曾把 `anthropic-responses-bridge/spec.md` 那条「commit 后发生错误 → 发一个 Anthropic SSE error terminal」理解为「MCP 合成续写**失败**时的兜底」。**这个提法是错的，而且会误导实现**——按它去写会实现一个几乎永不触发的分支。
