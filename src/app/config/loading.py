@@ -18,15 +18,14 @@ import yaml
 from app.config.paths import spec_config_file_path
 from app.config.schema import ProxyConfig
 
-ENV_PREFIX = "GHC_"
+# The distribution is `ghc-api-proxy`, and the prefix says so in full. `GHC_` alone named GitHub Copilot rather than this proxy, which put every setting of ours in the same namespace as anything else that talks to the same upstream. Ruled 2026-08-22.
+ENV_PREFIX = "GHC_API_PROXY_"
 ENV_NESTED_DELIMITER = "__"
 BUNDLED_CONFIG_RESOURCE = "bundled-config.yaml"
-# Names the file to read, so it is not one of the settings inside it. Left in, it would be
-# read as a top-level `config` key and `ProxyConfig` forbids unknown ones — the variable would
-# break start-up rather than select a file.
+# Names the file to read, so it is not one of the settings inside it. Left in, it would be read as a top-level `config` key and `ProxyConfig` forbids unknown ones — the variable would break start-up rather than select a file.
 CONFIG_PATH_VARIABLE = f"{ENV_PREFIX}CONFIG"
-# The GitHub token `app.model_provider.ghc_client.auth.providers.EnvTokenProvider` reads. Excluded for the same reason as the one above and not a variation on it: it shares the `GHC_` prefix, so left in it arrives as a top-level `api_proxy_github_token` key and refuses to start. Named here rather than in the auth module because this is where the prefix that creates the collision is defined.
-GITHUB_TOKEN_VARIABLE = f"{ENV_PREFIX}API_PROXY_GITHUB_TOKEN"
+# The GitHub token `app.model_provider.ghc_client.auth.providers.EnvTokenProvider` reads. Excluded for the same reason as the one above and not a variation on it: it shares the prefix, so left in it arrives as a top-level `github_token` key and refuses to start. Named here rather than in the auth module because this is where the prefix that creates the collision is defined.
+GITHUB_TOKEN_VARIABLE = f"{ENV_PREFIX}GITHUB_TOKEN"
 NON_SETTING_VARIABLES = frozenset({CONFIG_PATH_VARIABLE, GITHUB_TOKEN_VARIABLE})
 
 
@@ -81,14 +80,12 @@ def bundled_config_text() -> str:
 
 
 def resolve_config_path(explicit_path: Path | None) -> Path | None:
-    """Locate the user config file.
+    """Locate the user config file: `--config`, then the environment, then the spec's location.
 
     An explicitly named file that does not exist is an error.
     The default location simply being absent is not.
 
-    `GHC_CONFIG` and a `config.yaml` in the working directory are honoured because the path this
-    replaces honoured them. Dropping them would have been a change to how operators start the
-    service, arriving as a side effect of swapping the schema rather than as a decision.
+    **A `config.yaml` in the working directory is not consulted.** It was, because the path this replaced honoured it, and dropping it then would have changed how operators start the service as a side effect of swapping the schema rather than as a decision. Ruled 2026-08-22, and the decision is now made: which directory a service was launched from should not decide what it runs. It reads as a convenience and behaves as an ambush — starting the proxy from a checkout of some other project silently adopted that project's config, and the failure it produced named a key rather than a file.
     """
     if explicit_path is not None:
         if not explicit_path.is_file():
@@ -101,10 +98,6 @@ def resolve_config_path(explicit_path: Path | None) -> Path | None:
         if not resolved.is_file():
             raise FileNotFoundError(f"configuration file not found: {resolved}")
         return resolved
-
-    local_path = Path.cwd() / "config.yaml"
-    if local_path.is_file():
-        return local_path
 
     default_path = spec_config_file_path()
     return default_path if default_path.is_file() else None
@@ -122,7 +115,7 @@ def _assign(target: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
 
 
 def environment_values(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
-    """Read `GHC_`-prefixed variables, nesting on `__`.
+    """Read `GHC_API_PROXY_`-prefixed variables, nesting on `__`.
 
     Values stay strings; pydantic coerces them. YAML-ish parsing here would make `off` and `both`
     behave differently between the file and the environment.

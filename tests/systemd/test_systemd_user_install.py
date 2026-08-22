@@ -124,8 +124,8 @@ def test_user_installer_dry_run_check_and_apply_are_inert_and_idempotent(
     assert f"TimeoutStopSec={SYSTEMD_STOP_TIMEOUT_SECONDS}s" in service
     assert f"EnvironmentFile=-{str(environment_file).replace(' ', r'\x20')}" in service
     assert "StateDirectory=ghc-api-proxy" in service
-    assert "GHC_HISTORY__DB_PATH=%S/ghc-api-proxy/history.db" in service
-    assert "GHC_TOKENIZATION__STATE_PATH=%S/ghc-api-proxy/tokenization.json" in service
+    assert "GHC_API_PROXY_HISTORY__DB_PATH=%S/ghc-api-proxy/history.db" in service
+    assert "GHC_API_PROXY_TOKENIZATION__STATE_PATH=%S/ghc-api-proxy/tokenization.json" in service
     assert "WantedBy=default.target" not in service
     assert "WantedBy=sockets.target" in socket
     assert "ListenStream=127.0.0.1:4141" in socket

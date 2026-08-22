@@ -59,7 +59,7 @@ def test_the_setting_lands_in_the_tier_below_the_environment() -> None:
 def test_the_same_value_from_the_command_line_lands_in_the_tier_above_it() -> None:
     """The string is identical; only its tier differs, and nothing in it says which.
 
-    This is the whole reason `proxy_from_cli` exists: `load_proxy_config` merges CLI, `GHC_PROXY` and YAML into one field, so by the time anything downstream reads it the provenance is gone.
+    This is the whole reason `proxy_from_cli` exists: `load_proxy_config` merges CLI, `GHC_API_PROXY_PROXY` and YAML into one field, so by the time anything downstream reads it the provenance is gone.
     """
     config = ProxyConfig.model_validate({"proxy": "http://127.0.0.1:7890"})
     options = transport_options(config, proxy_from_cli=True)
@@ -106,7 +106,7 @@ def test_pooling_is_left_to_httpx() -> None:
 def test_the_command_line_proxy_shuts_the_environment_out(monkeypatch: pytest.MonkeyPatch) -> None:
     """Tier 1 of the priority `config.example.yaml` states: `--proxy` beats the environment.
 
-    Named for the product rule now that the rule is implementable. The earlier version of this test deliberately avoided the name, because `load_proxy_config` flattened CLI, `GHC_PROXY` and YAML into one field and nothing downstream could tell them apart — naming it then would have frozen the wrong half.
+    Named for the product rule now that the rule is implementable. The earlier version of this test deliberately avoided the name, because `load_proxy_config` flattened CLI, `GHC_API_PROXY_PROXY` and YAML into one field and nothing downstream could tell them apart — naming it then would have frozen the wrong half.
 
     Nothing from the environment reaches the mounts, which is what "shuts out" means here — a single `all://` and no per-scheme or `NO_PROXY` pattern beside it.
     """

@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.config.loading import (
+    CONFIG_PATH_VARIABLE,
     GITHUB_TOKEN_VARIABLE,
     environment_values,
     load_proxy_config,
@@ -40,14 +41,14 @@ def test_each_layer_beats_the_one_below(tmp_path: Path) -> None:
     config = load_proxy_config(
         config_path=path,
         bundled={"graceful_cleanup_timeout": 10},
-        environ={"GHC_GRACEFUL_CLEANUP_TIMEOUT": "40"},
+        environ={"GHC_API_PROXY_GRACEFUL_CLEANUP_TIMEOUT": "40"},
     )
     assert config.graceful_cleanup_timeout == 40
 
     config = load_proxy_config(
         config_path=path,
         bundled={"graceful_cleanup_timeout": 10},
-        environ={"GHC_GRACEFUL_CLEANUP_TIMEOUT": "40"},
+        environ={"GHC_API_PROXY_GRACEFUL_CLEANUP_TIMEOUT": "40"},
         cli_overrides={"graceful_cleanup_timeout": 50},
     )
     assert config.graceful_cleanup_timeout == 50
@@ -88,7 +89,7 @@ def test_lists_replace_rather_than_accumulate(tmp_path: Path) -> None:
 
 
 def test_environment_nests_on_double_underscore() -> None:
-    values = environment_values({"GHC_CLIENT_DELIVERY__SSE_PING_INTERVAL": "7", "OTHER": "x"})
+    values = environment_values({"GHC_API_PROXY_CLIENT_DELIVERY__SSE_PING_INTERVAL": "7", "OTHER": "x"})
     assert values == {"client_delivery": {"sse_ping_interval": "7"}}
 
 
@@ -211,18 +212,39 @@ def test_tls_settings_stay_hot_reloadable() -> None:
     assert outcome.restart_required == ()
 
 
+def test_a_config_in_the_working_directory_is_not_consulted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Which directory the service was launched from does not decide what it runs.
+
+    It did until 2026-08-22, inherited from the path this replaced. What that produced: the proxy started from a checkout of the sibling JS service picked up that project's `config.yaml`, and refused to start on a key the operator had never written for this one — a message naming a setting when the thing that was wrong was the file. Nothing had guarded the behaviour either way, so removing it needed a test more than keeping it did.
+    """
+    monkeypatch.delenv(CONFIG_PATH_VARIABLE, raising=False)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+
+    launch_dir = tmp_path / "somebody-elses-checkout"
+    launch_dir.mkdir()
+    write_config(launch_dir, "server:\n  port: 4321\n")
+    monkeypatch.chdir(launch_dir)
+
+    assert resolve_config_path(None) is None
+    assert load_proxy_config().server.port != 4321
+
+
 def test_the_config_path_variable_is_not_read_as_a_setting(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`GHC_CONFIG` names the file; it is not one of the settings inside it.
+    """`GHC_API_PROXY_CONFIG` names the file; it is not one of the settings inside it.
 
     Left in the value layer it arrives as a top-level `config` key, and `ProxyConfig` forbids
     unknown ones — so pointing at a config file would refuse to start rather than select it.
     """
     config = tmp_path / "config.yaml"
     config.write_text("server:\n  port: 4321\n", encoding="utf-8")
-    monkeypatch.setenv("GHC_CONFIG", str(config))
+    monkeypatch.setenv("GHC_API_PROXY_CONFIG", str(config))
 
     assert environment_values() == {}
     assert load_proxy_config().server.port == 4321

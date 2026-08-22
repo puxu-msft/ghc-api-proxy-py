@@ -75,7 +75,7 @@ def _service_environment(state_directory: Path, upstream_url: str) -> dict[str, 
     process exited at startup rather than ignoring them.
     """
     environment = os.environ.copy()
-    for name in ("GHC_API_PROXY_GITHUB_TOKEN", "GHC_CONFIG"):
+    for name in ("GHC_API_PROXY_GITHUB_TOKEN", "GHC_API_PROXY_CONFIG"):
         environment.pop(name, None)
     service = read_unit("ghc-api-proxy.service")
     for assignment in split(service["Service"]["Environment"]):
@@ -86,11 +86,11 @@ def _service_environment(state_directory: Path, upstream_url: str) -> dict[str, 
         {
             "HOME": "/nonexistent",
             "PYTHONPATH": str(SYSTEMD_DIR.parents[1] / "src"),
-            "GHC_MODEL_PROVIDERS__GHC__TYPE": "github_copilot",
-            "GHC_MODEL_PROVIDERS__GHC__API_BASE_URL": upstream_url,
-            "GHC_MODEL_PROVIDERS__GHC__AUTH_BASE_URL": upstream_url,
-            "GHC_MODEL_PROVIDERS__GHC__MODEL_REFRESH_INTERVAL": "0",
-            "GHC_DEFAULT_MODEL_PROVIDER": "ghc",
+            "GHC_API_PROXY_MODEL_PROVIDERS__GHC__TYPE": "github_copilot",
+            "GHC_API_PROXY_MODEL_PROVIDERS__GHC__API_BASE_URL": upstream_url,
+            "GHC_API_PROXY_MODEL_PROVIDERS__GHC__AUTH_BASE_URL": upstream_url,
+            "GHC_API_PROXY_MODEL_PROVIDERS__GHC__MODEL_REFRESH_INTERVAL": "0",
+            "GHC_API_PROXY_DEFAULT_MODEL_PROVIDER": "ghc",
             "GHC_API_PROXY_GITHUB_TOKEN": "ghu_smoke",
         }
     )

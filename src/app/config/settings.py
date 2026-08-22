@@ -156,7 +156,7 @@ class ShutdownConfig(FrozenModel):
 
 class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_prefix="GHC_",
+        env_prefix="GHC_API_PROXY_",
         env_nested_delimiter="__",
         case_sensitive=False,
         frozen=True,

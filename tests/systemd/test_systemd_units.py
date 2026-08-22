@@ -190,7 +190,7 @@ def test_service_state_environment_lands_in_the_state_directory(
     """The unit's `Environment=` has to actually decide where state is written.
 
     The invariant is unchanged; its consumer is not. It used to be asserted against
-    `load_settings()` and the two `GHC_*__*_PATH` keys, which belong to the chain `--fd` no longer
+    `load_settings()` and the two `GHC_API_PROXY_*__*_PATH` keys, which belong to the chain `--fd` no longer
     runs. `StateDirectory=ghc-api-proxy` makes systemd create `/var/lib/ghc-api-proxy`, and the
     assertion is that this is exactly where the chain then looks.
     """
@@ -305,7 +305,7 @@ RETIRED_CHAIN_CONTRACT = pytest.mark.skip(
         "chain's contract rather than the invariant they were written for. Liveness answering "
         "`{'status': 'ok'}` is now `alive`; readiness `healthy` is now `ready`; a written "
         "`history.db` presumes a history store the pipeline chain does not have; and the state "
-        "locations came from `GHC_HISTORY__DB_PATH` / `GHC_TOKENIZATION__STATE_PATH`, which the "
+        "locations came from `GHC_API_PROXY_HISTORY__DB_PATH` / `GHC_API_PROXY_TOKENIZATION__STATE_PATH`, which the "
         "current schema rejects outright. "
         "Superseded by `test_systemd_pipeline_unit.py`, which stands the same unit up on an "
         "inherited listener with both hosts pointed at a local fake and no real credentials — "
@@ -342,7 +342,7 @@ def test_inherited_listener_serves_ready_generic_upstream_and_persists_overrides
     backlog_client.settimeout(20)
 
     environment = os.environ.copy()
-    for name in ("GHC_API_PROXY_GITHUB_TOKEN", "GHC_CONFIG"):
+    for name in ("GHC_API_PROXY_GITHUB_TOKEN", "GHC_API_PROXY_CONFIG"):
         environment.pop(name, None)
     # Re-added below with a fake value; popped first so the operator's real one cannot leak in.
     service = read_unit("ghc-api-proxy.service")
@@ -358,11 +358,11 @@ def test_inherited_listener_serves_ready_generic_upstream_and_persists_overrides
             "PYTHONPATH": str(SYSTEMD_DIR.parents[1] / "src"),
             # Both hosts at the local fake. Configurable since 2026-08-19; before that the auth
             # host was a module constant and this could not be stood up without real credentials.
-            "GHC_MODEL_PROVIDERS__GHC__TYPE": "github_copilot",
-            "GHC_MODEL_PROVIDERS__GHC__API_BASE_URL": upstream_url,
-            "GHC_MODEL_PROVIDERS__GHC__AUTH_BASE_URL": upstream_url,
-            "GHC_MODEL_PROVIDERS__GHC__MODEL_REFRESH_INTERVAL": "0",
-            "GHC_DEFAULT_MODEL_PROVIDER": "ghc",
+            "GHC_API_PROXY_MODEL_PROVIDERS__GHC__TYPE": "github_copilot",
+            "GHC_API_PROXY_MODEL_PROVIDERS__GHC__API_BASE_URL": upstream_url,
+            "GHC_API_PROXY_MODEL_PROVIDERS__GHC__AUTH_BASE_URL": upstream_url,
+            "GHC_API_PROXY_MODEL_PROVIDERS__GHC__MODEL_REFRESH_INTERVAL": "0",
+            "GHC_API_PROXY_DEFAULT_MODEL_PROVIDER": "ghc",
             # A GitHub token for `EnvTokenProvider`; the fake exchanges whatever it is given.
             "GHC_API_PROXY_GITHUB_TOKEN": "ghu_smoke",
         }
@@ -452,19 +452,19 @@ def test_short_graceful_timeout_cancels_inflight_request_and_runs_lifespan(
     listener.listen(8)
     address = listener.getsockname()
     environment = os.environ.copy()
-    for name in ("GHC_API_PROXY_GITHUB_TOKEN", "GHC_CONFIG"):
+    for name in ("GHC_API_PROXY_GITHUB_TOKEN", "GHC_API_PROXY_CONFIG"):
         environment.pop(name, None)
     environment.update(
         {
             "HOME": "/nonexistent",
             "PYTHONPATH": str(SYSTEMD_DIR.parents[1] / "src"),
-            "GHC_HISTORY__ENABLED": "false",
-            "GHC_TOKENIZATION__STATE_PATH": str(tmp_path / "tokenization.json"),
-            "GHC_UPSTREAM__TYPE": "generic",
-            "GHC_UPSTREAM__OPENAI_BASE_URL": f"{upstream_url}/v1",
-            "GHC_UPSTREAM__ANTHROPIC_BASE_URL": upstream_url,
-            "GHC_UPSTREAM__API_KEY": "smoke-key",
-            "GHC_MODEL_REFRESH_INTERVAL": "0",
+            "GHC_API_PROXY_HISTORY__ENABLED": "false",
+            "GHC_API_PROXY_TOKENIZATION__STATE_PATH": str(tmp_path / "tokenization.json"),
+            "GHC_API_PROXY_UPSTREAM__TYPE": "generic",
+            "GHC_API_PROXY_UPSTREAM__OPENAI_BASE_URL": f"{upstream_url}/v1",
+            "GHC_API_PROXY_UPSTREAM__ANTHROPIC_BASE_URL": upstream_url,
+            "GHC_API_PROXY_UPSTREAM__API_KEY": "smoke-key",
+            "GHC_API_PROXY_MODEL_REFRESH_INTERVAL": "0",
         }
     )
     inherited_fd = listener.fileno()

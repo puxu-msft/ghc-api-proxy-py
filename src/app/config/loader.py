@@ -13,6 +13,7 @@ from typing import Any, cast
 from pydantic_settings import EnvSettingsSource, YamlConfigSettingsSource
 
 from app.config.compat import migrate_compat
+from app.config.loading import CONFIG_PATH_VARIABLE
 from app.config.paths import config_file_path
 from app.config.settings import AppSettings
 
@@ -70,17 +71,14 @@ def _resolve_config_path(explicit_path: Path | None) -> Path | None:
             raise FileNotFoundError(f"configuration file not found: {explicit_path}")
         return explicit_path
 
-    env_path = os.environ.get("GHC_CONFIG")
+    env_path = os.environ.get(CONFIG_PATH_VARIABLE)
     if env_path:
         resolved_env_path = Path(env_path)
         if not resolved_env_path.is_file():
             raise FileNotFoundError(f"configuration file not found: {resolved_env_path}")
         return resolved_env_path
 
-    local_path = Path.cwd() / "config.yaml"
-    if local_path.is_file():
-        return local_path
-
+    # No `config.yaml` from the working directory; see `app.config.loading.resolve_config_path`, which is where that ruling is written down and which this path has to agree with.
     default_path = config_file_path()
     return default_path if default_path.is_file() else None
 

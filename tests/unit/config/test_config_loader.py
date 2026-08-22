@@ -19,8 +19,8 @@ def test_four_layer_merge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
         "  log_level: WARNING\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("GHC_PORT", "4300")
-    monkeypatch.setenv("GHC_OBSERVABILITY__LOG_LEVEL", "ERROR")
+    monkeypatch.setenv("GHC_API_PROXY_PORT", "4300")
+    monkeypatch.setenv("GHC_API_PROXY_OBSERVABILITY__LOG_LEVEL", "ERROR")
 
     settings = load_settings(
         config_path=config_path,
@@ -47,7 +47,7 @@ def test_per_key_merge_model_mappings(
         "    yaml-model: 500\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("GHC_MODEL_MAPPINGS", '{"env-model":"env-target"}')
+    monkeypatch.setenv("GHC_API_PROXY_MODEL_MAPPINGS", '{"env-model":"env-target"}')
 
     settings = load_settings(
         config_path=config_path,
@@ -99,7 +99,7 @@ def test_shutdown_graceful_timeout_uses_normal_config_precedence(
         "  graceful_timeout: 11\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("GHC_SHUTDOWN__GRACEFUL_TIMEOUT", "12")
+    monkeypatch.setenv("GHC_API_PROXY_SHUTDOWN__GRACEFUL_TIMEOUT", "12")
 
     settings = load_settings(
         config_path=config_path,
@@ -134,7 +134,7 @@ def test_ghc_config_environment_selects_yaml(
 ) -> None:
     config_path = tmp_path / "from-env.yaml"
     config_path.write_text("port: 4567\n", encoding="utf-8")
-    monkeypatch.setenv("GHC_CONFIG", str(config_path))
+    monkeypatch.setenv("GHC_API_PROXY_CONFIG", str(config_path))
 
     assert load_settings().port == 4567
 
@@ -151,7 +151,7 @@ def test_missing_ghc_config_environment_is_an_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     missing_path = tmp_path / "missing-from-env.yaml"
-    monkeypatch.setenv("GHC_CONFIG", str(missing_path))
+    monkeypatch.setenv("GHC_API_PROXY_CONFIG", str(missing_path))
 
     with pytest.raises(FileNotFoundError, match=str(missing_path)):
         load_settings()

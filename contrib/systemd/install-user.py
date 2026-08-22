@@ -58,8 +58,8 @@ def _render_units(
     interpreter = _systemd_quote(str(python))
     environment = _systemd_path(str(environment_file))
     state_environment = (
-        '"GHC_HISTORY__DB_PATH=%S/ghc-api-proxy/history.db" '
-        '"GHC_TOKENIZATION__STATE_PATH=%S/ghc-api-proxy/tokenization.json"'
+        '"GHC_API_PROXY_HISTORY__DB_PATH=%S/ghc-api-proxy/history.db" '
+        '"GHC_API_PROXY_TOKENIZATION__STATE_PATH=%S/ghc-api-proxy/tokenization.json"'
     )
     service = f"""[Unit]
 Description=GitHub Copilot API proxy (user)
@@ -122,8 +122,8 @@ def _validate_text(units: Mapping[str, str]) -> None:
         raise ValueError("user service must not select a system account")
     required_service_lines = (
         "StateDirectory=ghc-api-proxy",
-        "GHC_HISTORY__DB_PATH=%S/ghc-api-proxy/history.db",
-        "GHC_TOKENIZATION__STATE_PATH=%S/ghc-api-proxy/tokenization.json",
+        "GHC_API_PROXY_HISTORY__DB_PATH=%S/ghc-api-proxy/history.db",
+        "GHC_API_PROXY_TOKENIZATION__STATE_PATH=%S/ghc-api-proxy/tokenization.json",
         "ExecStart=",
         " --fd 3",
         f" --graceful-timeout {DEFAULT_GRACEFUL_TIMEOUT_SECONDS}",
