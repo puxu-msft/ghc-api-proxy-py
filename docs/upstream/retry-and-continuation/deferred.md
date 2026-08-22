@@ -4,11 +4,16 @@
 
 ## 已知未闭合
 
-### 1. 上下文超限的 400：形态已查清，但两条腿不一样，且主路径抽不出数字
+### 1. 上下文超限的 400：两条腿的分类判据不同（原标题「主路径抽不出数字」已撤销）
 
-人写文档原本写的是 `SSE stop_reason = model_context_window_exceeded`。**该判据已被实测证伪**：Responses 腿的值空间里根本没有这个东西（`incomplete_details.reason` 20/20 全是 `max_output_tokens`），Anthropic 腿 13 万次请求零观测。
+**2026-08-22 更正**：本条原来的落点是「`parse_prompt_limit_error` 在主路径上返回 `None`，抽不出上下文上限的数字」。**用户质疑该理由是否成立，质疑成立，本项目撤回。**
 
-正面形态是 **HTTP 400**，**48 例一手录制**（`reports/260821-context-limit-400-examples.md`），**两条腿的表达是结构性不同的**：
+- 那个数**上游模型目录里就公布着**，逐模型：`limits.max_prompt_tokens: 936000`、`max_context_window_tokens: 1000000`（一手样本 `exp/260820-websearch-probe/raw/models-live.json`）。从一个 400 里反解它，只是对上游已公布事实做交叉验证，不是唯一来源。
+- 它的消费端也站不住：`parse_prompt_limit_error` 只有两个调用点——`app/hooks/builtin/token_calibration.py:87`（**未挂载的 legacy hooks 链**）与 `app/tokenization/service.py:64`，而后者服务的 `/api/tokenization/limits` 在 `docs/.human-controlled/api.md` 里已标为**暂不支持**。
+
+**这次错在哪**：「抽不出数字」这个说法是从一份调研报告里继承来的，本项目**没问过这个数字是给谁用的**就把它登记成了未闭合项。同一形状值得记住——*继承一个缺口的描述时，先找它的消费端*。
+
+下面是仍然成立的部分：**正面形态是 HTTP 400，48 例一手录制**（`reports/260821-context-limit-400-examples.md`），**两条腿的表达结构性不同**，这关系到重试分类（上下文超限不可重试），与上限数字无关：
 
 | | Anthropic 腿（27 例，2026-07-18～08-08） | Responses 腿（21 例，2026-08-06～08-08） |
 |---|---|---|
@@ -19,14 +24,11 @@
 | message | `prompt is too long: 1051542 tokens > 1000000 maximum`（`>` 在线上是 `>`） | `Your input exceeds the context window of this model. Please adjust your input and try again.` |
 | 靠 `error.code` 能否区分 | **能**——其余 400 连 `code` 字段都不带 | **不能**——`Invalid 'input[1].id'`、`Invalid 'max_output_tokens'` 用的是同一个 `invalid_request_body`。只能匹配 message 文本，建议匹配 `exceeds the context window` |
 
-**两条新的未闭合，都在主产品路径上**：
-
-1. **`parse_prompt_limit_error` 对主路径返回 `None`。** 把三条真实 body 喂给生产模块实测：Anthropic 腿 → `(1051542, 1000000)`，Responses 腿 → `None`。而主产品路径正是 Responses 腿。
-2. **而且补正则也救不回来**——Responses 腿的 message **里没有任何数字**，所以 `PromptLimitRegistry` 结构上就喂不进去。要让 prompt-limit 观测在主路径上工作，需要的不是一条正则，是另一个数据来源。参考实现 `copilot-api-js` 自己把这种响应分类成 `bad_request` 而非 `token_limit`，等于它的解析器也自认没认出来。
+**这条留作已查清的事实，不再是待办。** 人写文档原本写的是 `SSE stop_reason = model_context_window_exceeded`，**该判据已被实测证伪**：Responses 腿的值空间里没有这个东西（`incomplete_details.reason` 20/20 全是 `max_output_tokens`），Anthropic 腿 13 万次请求零观测（Anthropic 枚举里有该值，故属「未观测」而非「不可能」，见第 3 条）。
 
 **顺带证伪一条旧结论**：归档里同伴写过「没有任何一条当前两条正则漏掉的真实 token-limit body」——现在不成立。原因是那份的语料**全部早于 2026-07-18**，而当时没有把这个时间窗写下来。
 
-**仍未查清**：账户类型维度（history 库无此字段）；`/chat/completions` 腿只有 `vscode-copilot-chat` 2025-12 的第三方录制（第三种形态：OpenAI 措辞 + `model_max_prompt_tokens_exceeded`、无 `type`）。本项目自己不落盘上游 body，`~/.local/share/ghc-api-proxy/rejected/` 不存在，所以这两项只能等新的录制。
+**仍未查清**（低优先，无消费端）：账户类型维度（history 库无此字段）；`/chat/completions` 腿只有 `vscode-copilot-chat` 2025-12 的第三方录制（第三种形态：OpenAI 措辞 + `model_max_prompt_tokens_exceeded`、无 `type`）。本项目自己不落盘上游 body，`~/.local/share/ghc-api-proxy/rejected/` 不存在，所以这两项只能等新的录制。
 
 ### 2. reasoning item 被截断时没有任何信号
 
@@ -102,17 +104,17 @@ response 层有信号（`response.incomplete`），但它晚于 item 关闭到�
 
 补不补由用户裁决：它是一道守卫，而本项目对「把守卫接成阻断」有明确态度。
 
-### 11. 客户端时限与「上游已完成」谁先答，尚未裁决；且三条 deadline 测试的夹具已分辨不出这两种情形
+### 11. ~~客户端时限与「上游已完成」谁先答~~ —— 已裁决（2026-08-22），当前次序正确
 
-来源：`../../tmp/260822-review-complete-fix-opus.md` 问题 2（异源评审，8 个受控变异）。由 `bce8b0d` 引入（原始来源 `c86712d` 是一个不被任何 ref 引用的对象，`main` 上承载同一语义的是前者）的 `if assembler.terminal.seen: break` 带出。
+**裁决**：`client_request_deadline` 保护的是「这一轮总耗时」，所以**客户端时限先答、`terminal.seen` 后答**。见 `decisions.md` 第二之二节第 18 条。`stream.py` 当前次序已经是这个，无需改码。
 
-该支被**刻意**放在 `ClientDeadlineError` 分支之后，理由写在代码注释里：「跑超时了」与「上游已完成」是两个问题，重排属于新的 deadline policy 裁决。**这个理由只说明本次不裁，不说明该问题不存在。**
+保留下面的原始分析，因为它记录了这个次序**是载重的**（不是风格选择），以及一条仍然成立的测试缺陷：
 
-- **有真实后果**：上游已发完 `message_delta` + `message_stop`，随后客户端时限到期 —— 当前发 `client_deadline_exceeded` error 帧，**丢掉一条已经攒齐的完整回复**。若次序对调，则交付该回复。哪个对，取决于「时限」保护的是「客户端还愿不愿意等」还是「这一轮总耗时」，人写文档 `client-side-block-delivery.md` 未区分。
-- **实测（评审）**：把该支合并进 `if torn is None:` 那一支（即让 terminal 压过 deadline），三条 client-deadline 测试全部转红——所以当前次序是**载重的**，不是风格选择。
-- **同时登记一条测试事实**：`test_the_client_deadline_is_the_one_ending_that_says_so` 与 `test_a_held_back_policy_still_hears_the_client_deadline` 的夹具都携带完整终结事件（`anthropic_stream(...)` 末尾自带 `message_delta` + `message_stop`），因此**它们已经无法区分「时限先到」与「上游已完成后时限才到」**。裁决次序时应一并把夹具按 `[:-2]` 模式改掉——与 `c86712d` 对另外两条测试所做的相同，理由见该提交。
+来源：`../../tmp/260822-review-complete-fix-opus.md` 问题 2（异源评审，8 个受控变异）。由 `bce8b0d` 引入的 `if assembler.terminal.seen: break` 带出。
 
-**证据等级：足以据此登记，不足以据此选一边。** 需要用户裁决时限的语义。
+- **真实后果**：上游已发完 `message_delta` + `message_stop`，随后客户端时限到期 —— 当前发 `client_deadline_exceeded` error 帧，**丢掉一条已经攒齐的完整回复**。按上述裁决，这是对的。
+- **实测（评审）**：把该支合并进 `if torn is None:` 那一支（即让 terminal 压过 deadline），三条 client-deadline 测试全部转红。
+- **仍未闭合的那一条**：`test_the_client_deadline_is_the_one_ending_that_says_so` 与 `test_a_held_back_policy_still_hears_the_client_deadline` 的夹具都携带完整终结事件（`anthropic_stream(...)` 末尾自带 `message_delta` + `message_stop`），因此**它们已经无法区分「时限先到」与「上游已完成后时限才到」**。裁决落定后这两条测试实际钉的是后者，而名字说的是前者。按 `[:-2]` 模式改夹具（与 `c86712d` 对另外两条测试所做的相同）可让名字与内容对上，另加一条专测「上游已完成后时限才到 → 仍报时限」的正样本，才算把新裁决钉住。**这是本条唯一还要动手的部分。**
 
 ### 12. 上游在终结事件之后 reset：完成行不再留痕
 
