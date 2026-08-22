@@ -164,7 +164,7 @@ flag 名比对两侧都 `strip()` + `casefold()`；保留下来的 flag 用客�
 
 新增回归测试 `test_the_blacklist_is_case_insensitive_for_every_entry_the_document_names` 把这条钉住——文档此前没明说大小写，所以也没有测试覆盖过混合拼法。变异验证：把 floor 的比对改成大小写敏感，该测试变红。
 
-> ⚠️ **文档里那个词拼错了**：写的是 `Authrization`（少一个 `o`）。当作真实头名它匹配不到任何东西——实测 `forwarded_client_headers({"Authrization": "x"})` 原样保留它。实现没有从文档逐字读这份清单（读的是 `REQUEST_FLOOR`），所以行为不受影响；但**任何照文档字面实现的人会在这里留一个洞**。已提请用户；`docs/.human-controlled/` 归用户亲笔，未代改。
+> 该条目最初拼作 `Authrization`（少一个 `o`）。当作真实头名它匹配不到任何东西——实测 `forwarded_client_headers({"Authrization": "x"})` 原样保留它。实现没有从文档逐字读这份清单（读的是 `REQUEST_FLOOR`），所以行为从未受影响；但照文档字面实现的人会正好在凭据那一项上留一个洞。提请后**用户已于同日改正为 `Authorization`**。`docs/.human-controlled/` 归用户亲笔，全程未代改。
 
 ### 2.5 断链与过时 docstring（裁决 3 + 6）
 
