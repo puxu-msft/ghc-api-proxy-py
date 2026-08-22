@@ -1,6 +1,6 @@
 """OpenAI Responses translators.
 
-`model-translation.md` shows `instructions` as an array of role-bearing objects, and notes we do
+`docs/.human-controlled/message-translation.md` shows `instructions` as an array of role-bearing objects, and notes we do
 not need that flexibility yet. The Copilot upstream does not offer it either: measured on
 2026-08-18, it accepts `instructions` only as a string and answers `failed to parse request` to
 every array form tried — `[str]`, `[{role, content: str}]`, `[{role, content: [{type: text}]}]`,

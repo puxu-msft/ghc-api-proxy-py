@@ -1,6 +1,6 @@
 """The built-in subscribers, and the single place that registers them.
 
-`MAIN.md` asks the driver to provide subscription points that functional modules subscribe to, each with a unique id and an optional "before/after whom". This package is the first thing to take it up: what used to be a hardcoded call in the request path becomes a named subscriber that can be located, ordered, and tested on its own.
+`docs/.human-controlled/request-pipeline.md` asks the driver to provide subscription points that functional modules subscribe to, each with a unique id and an optional "before/after whom". This package is the first thing to take it up: what used to be a hardcoded call in the request path becomes a named subscriber that can be located, ordered, and tested on its own.
 
 **Why a registry rather than another function call.** The compatibility fixups are not one thing that grew — they are a family that keeps arriving one upstream rejection at a time, and each one that lands as a fresh call inside some existing function makes the next one harder to see, harder to order against its siblings, and impossible to exercise without standing up everything around it. A name and an event give each of them somewhere to live.
 

@@ -1,6 +1,6 @@
 """The intermediate representation translators meet at.
 
-MAIN.md routes translation through "inbound format <-> intermediate <-> upstream format".
+`docs/.human-controlled/message-translation.md` routes translation through "inbound format <-> intermediate <-> upstream format".
 No translator pair needs to know about any other.
 Adding a format means writing its two translators, not touching the ones already there.
 

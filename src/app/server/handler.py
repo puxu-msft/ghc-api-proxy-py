@@ -1,6 +1,6 @@
 """The request handler: inbound context to upstream response.
 
-Order follows MAIN.md: route first, translate only when the formats differ, then drive.
+Order follows `docs/.human-controlled/request-pipeline.md`: route first, translate only when the formats differ, then drive.
 
 Streaming is served by block-level delivery: the upstream response is read whole, its blocks are
 put through the buffer, and only complete blocks are framed as Anthropic SSE. Nothing reaches the
@@ -262,7 +262,7 @@ async def handle_count_tokens(chain: Chain, context: RequestContext) -> dict[str
     for subscription in chain.subscribers.for_event(EVENT_ATTEMPT_PREPARE):
         await subscription.handler(context)
 
-    # One estimator per wire contract, and the calibration key follows it. `tokenization.md` keeps the protocols' payload estimates separate so neither corrects the other with its own error; the same reason applies to the factor learnt from them.
+    # One estimator per wire contract, and the calibration key follows it. The protocols' payload estimates stay separate so neither corrects the other with its own error; the same reason applies to the factor learnt from them. The idea came from `.dev/docs/archived-2604-rewrite/tokenization.md`, which the user ruled obsolete on 2026-08-20 — it is kept on the reasoning, not on that document's authority.
     protocol = route.target_format.value
     if route.target_format is WireFormat.ANTHROPIC_MESSAGES:
         protocol = "anthropic"
@@ -298,7 +298,7 @@ async def handle_count_tokens(chain: Chain, context: RequestContext) -> dict[str
         del payload  # Already measured above; recomputing per attempt would only cost time.
         return calibration.calibrate(protocol, route.model_id, estimate)
 
-    # Whether upstream has a counter is a property of where this is going, not of whether the request is serviceable. `tokenization.md` makes token counting a per-protocol wire contract: `POST /v1/messages/count_tokens` serves the Anthropic protocol, and the OpenAI family has no count endpoint at all, reporting usage only on a finished response. A translated route is perfectly sendable and simply has no counter upstream, so it is answered from the estimator for its own protocol rather than refused.
+    # Whether upstream has a counter is a property of where this is going, not of whether the request is serviceable. Token counting is a per-protocol wire contract, and the endpoint list in `docs/.human-controlled/api.md` is where that shows: `POST /v1/messages/count_tokens` serves the Anthropic protocol, and the OpenAI family has no count endpoint at all, reporting usage only on a finished response. A translated route is perfectly sendable and simply has no counter upstream, so it is answered from the estimator for its own protocol rather than refused.
     #
     # Withholding the counter is how that is said: `count_tokens()` already understands a missing one as "hand over to the next", so this needs no new failure mode. The reason travels with it into the attempts trail, because `ghc:unconfigured` against a config file that configures `ghc` would send the next reader hunting a settings bug that does not exist.
     #

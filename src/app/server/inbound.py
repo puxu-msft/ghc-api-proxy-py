@@ -1,6 +1,6 @@
 """Inbound format parsing.
 
-MAIN.md gives the endpoint list, and each one fixes the wire format its body arrives in.
+`docs/.human-controlled/api.md` gives the endpoint list, and each one fixes the wire format its body arrives in.
 The format is therefore a property of the route rather than something to sniff from the body.
 
 Parsing here stays basic on purpose.
@@ -27,7 +27,7 @@ class InboundRoute:
     count_tokens: bool = False
 
 
-# The OpenAI-compatible group is also mounted under /v1 and /openai/v1, per MAIN.md.
+# The OpenAI-compatible group is also mounted under /v1 and /openai/v1, per `docs/.human-controlled/api.md`.
 OPENAI_PREFIXES = ("", "/v1", "/openai/v1")
 
 ROUTES: tuple[InboundRoute, ...] = (

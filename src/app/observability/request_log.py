@@ -1,6 +1,6 @@
 """The per-request console lines.
 
-`DESIGN.md` fixes the frame: `[PREFIX] HH:MM:SS METHOD /path ...`, with the fixed-width prefix and the timestamp supplied by the structlog processor chain. What this module builds is the part after them.
+The frame is `[PREFIX] HH:MM:SS METHOD /path ...`, with the fixed-width prefix and the timestamp supplied by the structlog processor chain. What this module builds is the part after them. That frame was taken from `.dev/docs/archived-2604-rewrite/DESIGN.md`, which the user ruled obsolete on 2026-08-20 — it is what this project shipped and has kept, not a standing decision, and no current document restates it.
 
 The field order follows `copilot-api-js`, whose real rendered lines look like `[ OK ] 14:25:36 200 anthropic/claude-opus-4-8 1.2s ↑1.0k+8.0k+1.0k ↻80% ↓456 end_turn`. Two things there are deliberate rather than incidental, and both are kept: a **successful** line collapses method and path into `<inbound-format>/<model>`, because once a request has worked, which model answered is the thing worth reading and the route is noise; a line that did **not** succeed keeps `METHOD /path`, because that is what has to be reproduced. Which of the two a line is comes from the verdict passed to `format_completion_line`, never from the status code: a streamed reply's code is settled when upstream's headers arrive, so a stream that tore an hour later still carries a 200 and would otherwise be dressed as an answer that arrived.
 
@@ -103,7 +103,7 @@ def format_protocols(client: str, upstream: str) -> str:
 class RequestLine:
     """Everything one request contributes to its own log line.
 
-    `model` empty means routing never resolved one — a rejected body, an unknown model. It is then left out rather than printed as a placeholder, which is what `DESIGN.md` means by not showing model or tokens for a non-model request.
+    `model` empty means routing never resolved one — a rejected body, an unknown model. It is then left out rather than printed as a placeholder, which is what "no model and no tokens for a non-model request" means.
 
     `bytes_in` / `bytes_out` are wire bytes in each direction; `usage` is the upstream's own token accounting, keyed as Anthropic reports it. The two are separate facts and a request can have either without the other — a rejected body has bytes and no tokens, a cached hit has tokens and almost no bytes.
 

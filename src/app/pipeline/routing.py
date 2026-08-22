@@ -1,6 +1,6 @@
 """Routing: which provider, which model, which endpoint, and whether to translate.
 
-MAIN.md calls this the pipeline's first task.
+`docs/.human-controlled/request-pipeline.md` calls this the pipeline's first task.
 Decide whether the inbound format and the model's endpoint differ, and so whether to translate.
 
 A model may name its target format explicitly as `model@format`.

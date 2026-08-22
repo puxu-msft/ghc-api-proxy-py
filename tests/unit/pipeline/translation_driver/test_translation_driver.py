@@ -21,7 +21,7 @@ from app.pipeline.translation_driver.semantic import (
     TranslationRefused,
 )
 
-# The worked example from model-translation.md.
+# The worked example from `docs/.human-controlled/message-translation.md`.
 ANTHROPIC_SYSTEM: list[dict[str, Any]] = [
     {
         "type": "text",
@@ -47,7 +47,7 @@ ANTHROPIC_REQUEST: dict[str, Any] = {
 def test_system_becomes_a_single_instructions_string() -> None:
     """The one shape the Copilot Responses endpoint accepts.
 
-    This assertion used to require `model-translation.md`'s worked example — one entry with
+    This assertion used to require `message-translation.md`'s worked example — one entry with
     `role: system` and a `content` list of blocks. Measured 2026-08-18, that shape and five other
     array forms all get `failed to parse request`; only a string is accepted. The conflict with
     the authored spec is written up in
@@ -757,7 +757,7 @@ def test_a_choice_that_still_names_a_declared_tool_is_left_alone() -> None:
 def test_web_fetch_is_left_for_its_own_repair() -> None:
     """This endpoint refuses `web_fetch` under every spelling tried, so unlike web search there is nothing to map it to.
 
-    `hosted-web-search-spec.md` §13 has that family refused locally rather than removed quietly, which is its own piece of work. Asserted rather than left implicit because the obvious edit is to add `web_fetch_` to the family list — it is one word and it looks like a completion.
+    `.dev/docs/anthropic-responses-bridge/hosted-web-search-spec.md` §13 has that family refused locally rather than removed quietly, which is its own piece of work. Asserted rather than left implicit because the obvious edit is to add `web_fetch_` to the family list — it is one word and it looks like a completion.
     """
     request = SemanticRequest(
         model="gpt-5.6-sol",

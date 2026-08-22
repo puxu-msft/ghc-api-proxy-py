@@ -1,6 +1,6 @@
 """The exception contract between subscribers and the driver.
 
-MAIN.md: known exceptions are handled by built-in logic, unknown ones always abort.
+`docs/.human-controlled/request-pipeline.md`: known exceptions are handled by built-in logic, unknown ones always abort.
 The closed set is the point.
 A subscriber's KeyError must not read as a control instruction.
 """

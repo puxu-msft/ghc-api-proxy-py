@@ -1,6 +1,6 @@
 """Translator registry.
 
-Translators register under the names MAIN.md uses.
+Translators register under the names `docs/.human-controlled/message-translation.md` uses.
 `inbound.from-<format>` and `outbound.to-<format>`, so a format is added by registering a pair.
 """
 

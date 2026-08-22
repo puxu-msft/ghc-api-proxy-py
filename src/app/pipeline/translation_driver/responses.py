@@ -3,7 +3,7 @@
 Request translation without this is only half a crossing.
 An Anthropic client asking for a Responses-backed model would receive a Responses-shaped body.
 
-`spec.md` fixes two mappings this must honour.
+`.dev/docs/anthropic-responses-bridge/spec.md` fixes two mappings this must honour.
 An `incomplete` response whose reason is the output-token limit carries `stop_reason: max_tokens`.
 A legal success with no content may produce an empty text block.
 
@@ -169,7 +169,7 @@ def from_openai_responses_response(
             # body: `status` is upstream's, and nothing carries it across the translation.
             #
             # The same blind spot comes with it: a `reasoning` item carries no `status` at all, so a
-            # truncated one is invisible here too. Left open deliberately; `deferred.md` §2.
+            # truncated one is invisible here too. Left open deliberately; `.dev/docs/upstream/retry-and-continuation/deferred.md` §2.
             #
             # Only when something whole came before. Half a sentence still beats an empty answer, so
             # the rule reverses when this is all there is — which is why the test is on `response.blocks`

@@ -219,7 +219,7 @@ def test_responses_incomplete_maps_to_max_tokens() -> None:
 def test_any_other_incomplete_reason_reaches_the_client_in_upstream_s_own_words() -> None:
     """The output-token limit is the only reason with an Anthropic spelling, so it is the only one translated.
 
-    Every other reason used to become `end_turn`, which told the client a turn upstream had cut short was one it had finished. `spec.md` forbids exactly that: a content filter or an unknown reason must keep the reason as a fact rather than be flattened into a clean ending.
+    Every other reason used to become `end_turn`, which told the client a turn upstream had cut short was one it had finished. `.dev/docs/anthropic-responses-bridge/spec.md` forbids exactly that: a content filter or an unknown reason must keep the reason as a fact rather than be flattened into a clean ending.
     """
     assembler = ResponsesAssembler()
     assembler.push(SseEvent("response.incomplete", orjson.dumps(

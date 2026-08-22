@@ -1,8 +1,10 @@
 """The object one request is described by.
 
-MAIN.md: every request is described by a RequestContext, and subscribers may modify it.
+`docs/.human-controlled/request-pipeline.md`: one object describes each request, and subscribers may modify it.
 Every field is writable by design.
 The user ruled that no ownership or permission rule applies, so this is a plain mutable record.
+
+That document now calls the object `ClientRequest` and gives each upstream try its own `UpstreamAttempt`. Here it is still `RequestContext` — the name the earlier single-document version of that spec used — holding its tries as `Attempt` records. Whether to follow the rename is that document's author's call, not this module's.
 """
 
 from collections.abc import Mapping, MutableMapping

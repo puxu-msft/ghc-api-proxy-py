@@ -457,7 +457,7 @@ class ResponsesAssembler:
         #
         # Held rather than dropped, and only when something whole came before it. Half a sentence is not what the client asked for, but it still beats an empty answer, so the rule reverses when this is all there is — and whether it is dropped at all depends on an ending this side has not been told about yet. Ruled 2026-08-21, narrowed 2026-08-22.
         #
-        # A `reasoning` item carries no `status` at all — verified against a completed one, whose key set is identical — so this cannot see a truncated one and does not try. Left open deliberately; `deferred.md` 2.
+        # A `reasoning` item carries no `status` at all — verified against a completed one, whose key set is identical — so this cannot see a truncated one and does not try. Left open deliberately; `.dev/docs/upstream/retry-and-continuation/deferred.md` §2.
         cut_short = _upstream_cut_this_item_short(data) and self._terminal.blocks > 0
         kind = draft.kind
         if draft.kind == TOOL_USE:
@@ -531,7 +531,7 @@ def _upstream_cut_this_item_short(data: dict[str, Any]) -> bool:
 def _reasoning_signature(draft: Draft, closing: dict[str, Any]) -> str:
     """The carrier for a Responses reasoning item, read from the event that closed it.
 
-    `spec.md` fixes both halves: a non-empty `encrypted_content` must survive value-exact so the
+    `.dev/docs/anthropic-responses-bridge/spec.md` fixes both halves: a non-empty `encrypted_content` must survive value-exact so the
     client can echo it back and the next turn can carry on, and a missing or empty one still emits
     the project's bare marker rather than nothing. This used to write `""`, which broke both.
 

@@ -1,7 +1,7 @@
 """Direct drivers: the paths where no format translation is needed.
 
-One module per upstream endpoint, as MAIN.md's driver table names them.
-`ws:/responses` has no driver, matching the spec's unsupported row.
+One module per upstream endpoint, as the driver table in `docs/.human-controlled/ghc-api.md` names them.
+`ws:/responses` has no driver, matching that table's unsupported row.
 """
 
 from typing import Protocol

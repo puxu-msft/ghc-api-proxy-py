@@ -1,6 +1,6 @@
 """Turn the SDKs' exceptions into the pipeline's closed set.
 
-`MAIN.md` has the driver abort on anything outside that set, and that is the right default — a
+`docs/.human-controlled/request-pipeline.md` has the driver abort on anything outside that set, and that is the right default — a
 subscriber's `KeyError` must not read as "retry". But the production send path calls
 `AsyncOpenAI.post` and `AsyncAnthropic.post` directly, and both raise their *own* status and
 connection exceptions on 4xx, 5xx and transport failure. Those are outside the set, so every real

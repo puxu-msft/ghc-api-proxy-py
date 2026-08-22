@@ -1,6 +1,6 @@
 """Ordered event subscription for the request driver.
 
-MAIN.md: the driver provides subscription points.
+`docs/.human-controlled/request-pipeline.md`: the driver provides subscription points.
 A subscriber gives a unique id and may say which ids it goes before or after.
 Order is resolved once, at freeze time, and never at dispatch.
 The same request sequence must not order differently under different concurrency.

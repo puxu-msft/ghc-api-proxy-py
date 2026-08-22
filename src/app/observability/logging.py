@@ -79,7 +79,7 @@ def _render_text(
     method_name: str,
     event_dict: EventDict,
 ) -> str:
-    """`[PREFIX] HH:MM:SS <message> <extras>`, the shape `DESIGN.md` records for console logs.
+    """`[PREFIX] HH:MM:SS <message> <extras>`, the console log shape this project has kept — `app.observability.request_log` records where the frame came from.
 
     No level column: the fixed-width prefix already says whether this went well, and repeating it in words pushes the part worth reading further right on every line.
 
