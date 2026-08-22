@@ -54,6 +54,8 @@ class GhcApiClient:
         library, and they have to be: the identity set makes the request look like Copilot Chat,
         and upstream rejects requests that do not. A caller forwarding a client's headers would
         otherwise replace `user-agent` — or `Authorization` — without anything failing loudly.
+
+        **Compared case-insensitively, which it was not until 2026-08-22.** `{**extra, **owned}` only lets the owned value win when the two spellings are byte-equal, and they are not: this library writes `Authorization`, `X-Interaction-Id`, `X-Interaction-Type` and `X-Agent-Task-Id` capitalised while a forwarded client header arrives lowercased. Two dict keys, both surviving. Measured 2026-08-22 under `httpx2.MockTransport`: on the Anthropic SDK path the collision is folded away by `httpx2.Headers.__setitem__` and the owned value does win, but on the OpenAI SDK path `_build_request` reads `headers.multi_items()` and **both `authorization` lines go out on the wire**. The safe behaviour there rested on one SDK's internals rather than on anything this function did, so it is now this function that does it.
         """
         token = await self._tokens.get_token()
         headers = build_request_headers(
@@ -62,7 +64,15 @@ class GhcApiClient:
             interaction_id=self._interaction_id,
         )
         if extra_headers:
-            headers = {**{str(k): str(v) for k, v in extra_headers.items()}, **headers}
+            owned = {name.lower() for name in headers}
+            headers = {
+                **{
+                    str(key): str(value)
+                    for key, value in extra_headers.items()
+                    if str(key).lower() not in owned
+                },
+                **headers,
+            }
         return headers
 
     async def _post_openai(

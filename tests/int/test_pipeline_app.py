@@ -235,28 +235,11 @@ def test_an_unconfigured_model_still_gets_the_whole_header() -> None:
     )
 
 
-def test_the_table_fires_on_the_alias_the_client_asked_for() -> None:
-    """The shape the authoritative config is in, and the one nothing else here would catch.
+def test_the_table_is_keyed_on_the_model_the_attempt_is_sent_to() -> None:
+    """Ruled 2026-08-22: the table matches the actual upstream attempt, so an alias is looked through.
 
-    `config.example.yaml` writes the table under `claude-sonnet-4.6` and *also* maps `claude-sonnet-4.6: claude-sonnet-5`. Keyed on the resolved id alone, the operator's whole measured table would be inert against their own config — and every other test here would stay green, because they all configure the table under a name no mapping touches.
+    The consequence is worth pinning rather than leaving implicit. An entry written under a name `model_mappings` maps away never fires — and nothing reports that it did not, which is why the counter in the sibling test exists.
     """
-    client, seen = make_client(
-        lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}),
-        mappings={"claude-alias": "claude-model"},
-        overrides=_beta_strip("claude-alias", "context-management-2025-06-27"),
-    )
-    response = client.post(
-        "/v1/messages",
-        json={"model": "claude-alias", "messages": [{"role": "user", "content": "hi"}]},
-        headers={"anthropic-beta": "context-management-2025-06-27,effort-2025-11-24"},
-    )
-
-    assert response.status_code == 200
-    assert seen[-1].headers["anthropic-beta"] == "effort-2025-11-24"
-
-
-def test_the_table_fires_on_the_resolved_id_when_the_client_used_an_alias() -> None:
-    """The other half of the union: the operator keys on the real model, the client on an alias."""
     client, seen = make_client(
         lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}),
         mappings={"claude-alias": "claude-model"},
@@ -270,6 +253,29 @@ def test_the_table_fires_on_the_resolved_id_when_the_client_used_an_alias() -> N
 
     assert response.status_code == 200
     assert seen[-1].headers["anthropic-beta"] == "effort-2025-11-24"
+
+
+def test_a_table_keyed_on_an_alias_does_not_fire() -> None:
+    """The other side of the same ruling, and the shape the authoritative config is currently in.
+
+    `config.example.yaml` writes the table under `claude-sonnet-4.6` and also maps `claude-sonnet-4.6: claude-sonnet-5`, so that entry is inert as written. That is the config's own question, not something to paper over here — but it must not be a surprise, so it is a test.
+    """
+    client, seen = make_client(
+        lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}),
+        mappings={"claude-alias": "claude-model"},
+        overrides=_beta_strip("claude-alias", "context-management-2025-06-27"),
+    )
+    response = client.post(
+        "/v1/messages",
+        json={"model": "claude-alias", "messages": [{"role": "user", "content": "hi"}]},
+        headers={"anthropic-beta": "context-management-2025-06-27,effort-2025-11-24"},
+    )
+
+    assert response.status_code == 200
+    assert (
+        seen[-1].headers["anthropic-beta"]
+        == "context-management-2025-06-27,effort-2025-11-24"
+    )
 
 
 def test_a_stripped_flag_is_counted_under_the_configured_spelling() -> None:
@@ -2749,7 +2755,7 @@ def test_the_attribution_line_never_reaches_a_direct_upstream() -> None:
 
 
 def test_the_attribution_line_is_not_counted_as_prompt() -> None:
-    """`count_tokens` is named alongside `/v1/messages` in `message-format-sanitize.md`, and it is the endpoint where leaving the line in is measurable: upstream counted the same prompt at 43 tokens without it and 77 with it."""
+    """`count_tokens` is named alongside `/v1/messages` in `message-format-reshape.md`, and it is the endpoint where leaving the line in is measurable: upstream counted the same prompt at 43 tokens without it and 77 with it."""
     client, seen = make_client(lambda _: httpx2.Response(200, json={"input_tokens": 11}))
     response = client.post(
         "/v1/messages/count_tokens",

@@ -120,7 +120,7 @@ def test_prose_that_opens_with_a_colon_is_left_alone(opener: str) -> None:
 
 
 def test_a_second_attribution_spelling_still_goes() -> None:
-    """`message-format-sanitize.md` asks for more than the one literal name, so a different `x-` header and a bare parameter string are both taken."""
+    """`message-format-reshape.md` asks for more than the one literal name, so a different `x-` header and a bare parameter string are both taken."""
     for line in ("x-some-other-header: foo=bar;", "x-anthropic-trace: id=abc123;", "attribution: cc_version=1.0; cc_entrypoint=cli;"):
         payload: dict[str, Any] = {"system": [{"type": "text", "text": f"{line}\n{SYSTEM}"}]}
 
@@ -147,7 +147,7 @@ def test_an_attribution_line_in_the_middle_of_a_prompt_stays() -> None:
 
 
 def test_the_body_the_caller_parsed_is_not_mutated() -> None:
-    """`message-format-sanitize.md` requires the record of the original client request to be unaffected by this. The payload is a shallow copy of the parsed body, so editing a block in place would reach back into it."""
+    """`message-format-reshape.md` requires the record of the original client request to be unaffected by this. The payload is a shallow copy of the parsed body, so editing a block in place would reach back into it."""
     original_block = {"type": "text", "text": f"{ATTRIBUTION}\n{SYSTEM}"}
     original_system = [original_block]
     payload: dict[str, Any] = {"system": original_system}

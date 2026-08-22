@@ -1,7 +1,9 @@
-"""Loading for the *old* `AppSettings`, which now serves only the `--fd` (systemd) path.
+"""Loading for the *old* `AppSettings`, which no longer serves any production path.
+
+This docstring used to say it served the `--fd` (systemd) path, and that stopped being true without anything noticing. `cli.py` reaches `--fd` through `_load_spec_config` -> `ProxyConfig` -> `serve_inherited`, the same as the direct-run path; `tests/systemd/test_systemd_units.py` already says as much in passing. As of 2026-08-22 `load_settings` has no caller in `src/` beyond `app.config.__init__` re-exporting it, and its only exercise is `tests/unit/config/test_config_loader.py`. It is kept because `AppSettings` still configures the legacy chain (`app.routes` / `AnthropicClient` / `app.deps`), which is present and not deleted; nothing on the new chain reads it.
 
 Not to be confused with `app.config.loading`, one letter away, which loads the spec's
-`ProxyConfig` and is what the direct-run path uses. The names are close enough that this one was
+`ProxyConfig` and is what every entry point now uses. The names are close enough that this one was
 found first and its neighbour rewritten from scratch once; the two are not interchangeable.
 """
 

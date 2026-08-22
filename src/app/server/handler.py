@@ -49,7 +49,7 @@ from app.pipeline.exceptions import (
     UpstreamTimeout,
 )
 from app.pipeline.request import RequestContext, WireFormat
-from app.pipeline.request_headers import strip_denied_beta_flags
+from app.pipeline.request_headers import apply_path_header_policy, strip_denied_beta_flags
 from app.pipeline.retry import RetryLedger
 from app.pipeline.routing import Route, RoutingError, decide_route
 from app.pipeline.subscribers.counting import COUNTING_ONLY
@@ -112,12 +112,17 @@ def shape_request(
         # Announced the moment the model is known rather than when the request finishes, because everything below this line can take tens of seconds and a display that waits for it reports "still deciding" for the whole upstream call. That is not slow feedback, it is wrong feedback.
         on_routed(context)
 
+    # Before anything reads `client_headers` for the attempt, and after `apply_route` because until routing decides there is no answer to which path this is. `build_context` has already applied the floor, so this is a policy question rather than a safety one: `message-format-reshape.md` gives the direct path a blacklist and the translation path a whitelist, and today that whitelist is empty — a translated request forwards none of the client's headers, `anthropic-beta` included.
+    context.client_headers = apply_path_header_policy(
+        context.client_headers, translated=context.translation_required
+    )
+
     if context.inbound_format is WireFormat.ANTHROPIC_MESSAGES:
-        # After `apply_route` because the flags are a property of the model that answers; keyed on the requested name as well because the authoritative config writes this table under an alias `model_mappings` maps away, so the resolved name alone would never match it. `message-format-reshape.md` scopes this to the Anthropic Messages endpoints, which is what the guard says.
+        # After `apply_route` because the flags belong to the model the attempt is actually sent to, not to the name the client asked for; before the driver because the driver forwards `client_headers` whole and has no way to know which of them this model refuses. `message-format-reshape.md` scopes this to the Anthropic Messages endpoints, which is what the guard says.
         context.client_headers, stripped_flags = strip_denied_beta_flags(
             context.client_headers,
-            models=(context.requested_model, context.resolved_model),
-            denied_by_model=chain.config.hook_strip_anthropic_request_headers.strip_anthropic_beta_flags,
+            model=context.resolved_model,
+            denials=chain.beta_flag_denials,
         )
         for flag in stripped_flags:
             BETA_FLAGS_STRIPPED.labels(model=context.resolved_model, flag=flag).inc()

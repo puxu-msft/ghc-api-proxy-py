@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 #
 # So the name must start `x-`, which is the convention every attribution header follows and which no instruction line does; **or** the value must be a `k=v;` parameter string, which is the shape the attribution actually has. `x-anthropic-billing-header: cc_version=1.0; cc_entrypoint=cli;` matches both. `Content-Type: text/plain` matches neither, and neither does any of the 21.
 #
-# `x-` rather than the single literal name because `docs/.human-controlled/message-format-sanitize.md` asks for the whole attribution line and says explicitly that it means more than `x-anthropic-billing-header` alone. This is the narrowest reading that is still more than that one name. How much more it should be is a question for that document's author; this is the safe end of the range.
+# `x-` rather than the single literal name because `docs/.human-controlled/message-format-reshape.md` asks for the whole attribution line and says explicitly that it means more than `x-anthropic-billing-header` alone. This is the narrowest reading that is still more than that one name. How much more it should be is a question for that document's author; this is the safe end of the range.
 _ATTRIBUTION_LINE = re.compile(
     r"""
     (?: x-[A-Za-z0-9-]+ : .*        # an extension header by name
@@ -56,9 +56,9 @@ def strip_attribution_lines(payload: dict[str, Any]) -> int:
 
     **Upstream accepts it.** Measured against the live upstream on 2026-08-21 across fifteen shapes — this name, other header names, a real HTTP header name, in `instructions` and in `system[0]`, streamed and not, with `cache_control`, and on `count_tokens` — every one answered 200. So this is not a compatibility repair and must not be described as one. What it is measured to cost is tokens: the same system prompt counted 43 tokens without the line and 77 with it, on upstream's own counter.
 
-    In place, and unconditional. `hook_strip_anthropic_request_headers.strip_attribution_header` exists in the schema and has never had a consumer; `docs/.human-controlled/message-format-sanitize.md` rules that this should be resident rather than configured, so the switch is deliberately not read here — see that document for the standing decision.
+    In place, and unconditional. `hook_strip_anthropic_request_headers.strip_attribution_header` exists in the schema and has never had a consumer; `docs/.human-controlled/message-format-reshape.md` rules that this should be resident rather than configured, so the switch is deliberately not read here — see that document for the standing decision.
 
-    Rebuilds rather than mutating the block it edits, so *this* function leaves the parsed body as the client sent it. That is not the same as the request surviving the chain intact: `fix_anthropic_request` runs a step later and `repair_tool_pairs` edits `messages` in place, so a forensic record taken from the parsed body after that point is already not what arrived. `message-format-sanitize.md` asks for the original to be unaffected; honouring that in full needs somewhere to keep it, which does not exist on this chain yet. Not mutating here is the half that is free.
+    Rebuilds rather than mutating the block it edits, so *this* function leaves the parsed body as the client sent it. That is not the same as the request surviving the chain intact: `fix_anthropic_request` runs a step later and `repair_tool_pairs` edits `messages` in place, so a forensic record taken from the parsed body after that point is already not what arrived. `message-format-reshape.md` asks for the original to be unaffected; honouring that in full needs somewhere to keep it, which does not exist on this chain yet. Not mutating here is the half that is free.
     """
     system = payload.get("system")
     if isinstance(system, str):
@@ -88,7 +88,7 @@ def strip_attribution_lines(payload: dict[str, Any]) -> int:
     if stripped.strip():
         rebuilt[0] = {**first, "text": stripped}
     else:
-        # Nothing but attribution was in there. Dropping the whole block rather than leaving an empty one, per the ruling in `message-format-sanitize.md`.
+        # Nothing but attribution was in there. Dropping the whole block rather than leaving an empty one, per the ruling in `message-format-reshape.md`.
         rebuilt = rebuilt[1:]
     if rebuilt:
         payload["system"] = rebuilt

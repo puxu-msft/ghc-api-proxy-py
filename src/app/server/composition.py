@@ -5,6 +5,7 @@ Everything is constructed once at startup and handed down, so nothing reaches fo
 """
 
 import logging
+import re
 import socket
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -51,6 +52,7 @@ from app.observability.terminal import TerminalCapabilities, detect_terminal
 from app.pipeline.events import FrozenSubscribers, SubscriberRegistry
 from app.pipeline.rate_limiting import RateLimiter
 from app.pipeline.request import RequestContext
+from app.pipeline.request_headers import compile_beta_flag_denials
 from app.pipeline.subscribers import register_builtin_subscribers
 from app.pipeline.subscribers.hosted_web_search import compile_supported_by_provider
 from app.pipeline.translation_driver.registry import TranslatorRegistry, default_registry
@@ -318,6 +320,8 @@ class Chain:
     tokenization: TokenizationStateStore = field(
         default_factory=lambda: TokenizationStateStore(tokenization_state_path())
     )
+    # `strip_anthropic_beta_flags` compiled, in the order the operator wrote it. Same reason as `web_search_models` above it: a pattern that does not compile belongs to the config, so it should stop start-up rather than the first request that happens to reach the table.
+    beta_flag_denials: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = ()
 
     def rate_limiter_for(self, provider_name: str) -> RateLimiter:
         return self.rate_limiters[provider_name]
@@ -532,6 +536,9 @@ def build_chain(
 
     return Chain(
         config=config,
+        beta_flag_denials=compile_beta_flag_denials(
+            config.hook_strip_anthropic_request_headers.strip_anthropic_beta_flags
+        ),
         providers=ProviderRegistry(providers, default=resolve_default_name(config)),
         translators=default_registry(config.model_translation),
         subscribers=subscriber_registry.freeze(),

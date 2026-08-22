@@ -139,6 +139,45 @@ async def test_extra_headers_reach_the_anthropic_leg() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_forwarded_header_never_travels_beside_the_one_it_collides_with() -> None:
+    """The proxy's own value wins, and the loser does not come along for the ride.
+
+    `request_headers` merged with `{**extra, **owned}`, which only lets the owned value win when the two spellings are byte-equal — and they are not. This library writes `Authorization` capitalised; a header forwarded from a client arrives lowercased. Two dict keys, both surviving, and on the Responses leg `_build_request` reads `multi_items()` and puts **both** on the wire. This asserts on `get_list`, not on `headers[...]`, because a lookup by name folds the case and reports the winner either way — it cannot see the second line at all.
+    """
+    seen: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.host == "api.github.com":
+            return httpx2.Response(
+                200,
+                json={"token": "copilot", "expires_at": 5000, "refresh_in": 1500},
+            )
+        seen.append(request)
+        return httpx2.Response(200, json={"ok": True})
+
+    client, http_client = build_client(handler)
+    try:
+        await client.send_anthropic_messages(
+            {"model": "m"},
+            extra_headers={
+                "authorization": "Bearer client-secret",
+                "x-interaction-id": "client-chosen",
+                "anthropic-beta": "probe",
+            },
+        )
+    finally:
+        await http_client.aclose()
+
+    sent = seen[0].headers
+    assert sent.get_list("authorization") == ["Bearer copilot"]
+    assert "client-secret" not in str(sent)
+    assert sent.get_list("x-interaction-id") == [sent["x-interaction-id"]]
+    assert sent["x-interaction-id"] != "client-chosen"
+    # The one that does not collide still travels; this drops colliding names, not forwarding.
+    assert sent["anthropic-beta"] == "probe"
+
+
+@pytest.mark.asyncio
 async def test_ordinary_send_raises_in_the_pipelines_vocabulary() -> None:
     """The asymmetry this guards is unchanged; the exception it raises is not.
 

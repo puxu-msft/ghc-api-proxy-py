@@ -11,7 +11,12 @@ from typing import Any
 
 from app.config.schema import FixAnthropicRequestHook
 from app.pipeline.anthropic_request_hook import fix_anthropic_request, normalize_context_management
-from app.pipeline.request_headers import forwarded_client_headers, strip_denied_beta_flags
+from app.pipeline.request_headers import (
+    apply_path_header_policy,
+    compile_beta_flag_denials,
+    forwarded_client_headers,
+    strip_denied_beta_flags,
+)
 from app.server.inbound import ROUTES, build_context
 
 
@@ -23,23 +28,59 @@ def test_the_beta_header_is_forwarded() -> None:
     assert forwarded == {"anthropic-beta": "context-management-2025-06-27,effort-2025-11-24"}
 
 
-def test_identity_and_credential_headers_are_not_forwarded() -> None:
-    """Upstream is addressed as Copilot Chat, so the client's identity must not replace it.
+def test_credentials_never_survive_the_floor() -> None:
+    """The floor's one job, and the reason it runs at parse time rather than at the send site.
 
-    `authorization` is the credential case and `user-agent` the identity one; forwarding either
-    would break the request rather than merely leak something, and the allowlist is what stops
-    both without anyone having to enumerate them.
+    `message-format-reshape.md` lists `Cookie` and `X-Api-Key` for the direct path and does not mention `authorization`, but the reference implementation the document's TODO points at guards that one twice — and it has to be guarded, because the upstream request carries a Copilot Chat credential of its own. After this returns, nothing downstream is holding anything the client authenticated with.
     """
     forwarded = forwarded_client_headers(
         {
             "authorization": "Bearer client-secret",
-            "user-agent": "claude-cli/2.0.0",
-            "x-stainless-timeout": "600",
-            "x-claude-code-session-id": "abc",
+            "x-api-key": "sk-client",
+            "cookie": "session=1",
+            "host": "proxy.local",
+            "content-length": "999",
+            "accept-encoding": "br",
+            "x-forwarded-for": "10.0.0.1",
             "anthropic-beta": "context-management-2025-06-27",
         }
     )
     assert forwarded == {"anthropic-beta": "context-management-2025-06-27"}
+
+
+def test_the_floor_is_a_blacklist_so_an_unknown_client_header_survives_it() -> None:
+    """Ruled 2026-08-22 and the opposite of what this module used to do.
+
+    Under the old allowlist only `anthropic-beta` and `anthropic-version` ever travelled. The document asks for a blacklist on the direct path, so a header nobody enumerated now reaches the next stage — which is the point, and also why the floor above it has to be right.
+
+    `user-agent` surviving *here* is not the same as it reaching upstream: it collides with a header the proxy owns, and `GhcApiClient.request_headers` is what drops it. That is a separate test, in a separate file, because it is a separate guarantee.
+    """
+    forwarded = forwarded_client_headers(
+        {
+            "user-agent": "claude-cli/2.0.0",
+            "x-stainless-timeout": "600",
+            "x-claude-code-session-id": "abc",
+        }
+    )
+    assert forwarded == {
+        "user-agent": "claude-cli/2.0.0",
+        "x-stainless-timeout": "600",
+        "x-claude-code-session-id": "abc",
+    }
+
+
+def test_a_translated_request_forwards_nothing_of_the_clients() -> None:
+    """`message-format-reshape.md` gives the translation path a whitelist and leaves it empty.
+
+    The header the client negotiated is about the Anthropic wire format; the request that answers is a Responses one. Until this ruling the Anthropic-to-Responses leg forwarded `anthropic-beta` to an endpoint that has no betas.
+    """
+    client = {
+        "anthropic-beta": "context-management-2025-06-27",
+        "anthropic-version": "2023-06-01",
+        "x-stainless-timeout": "600",
+    }
+    assert apply_path_header_policy(client, translated=True) == {}
+    assert apply_path_header_policy(client, translated=False) == client
 
 
 def test_header_names_are_matched_regardless_of_case() -> None:
@@ -64,14 +105,16 @@ def test_build_context_without_headers_carries_nothing() -> None:
 
 
 # What the example config configures, verbatim, and the model it configures it for.
-SONNET_46_DENIED = {
-    "claude-sonnet-4.6": [
-        "interleaved-thinking-2025-05-14",
-        "context-management-2025-06-27",
-        "prompt-caching-scope-2026-01-05",
-        "mid-conversation-system-2026-04-07",
-    ]
-}
+SONNET_46_DENIED = compile_beta_flag_denials(
+    {
+        "claude-sonnet-4.6": [
+            "interleaved-thinking-2025-05-14",
+            "context-management-2025-06-27",
+            "prompt-caching-scope-2026-01-05",
+            "mid-conversation-system-2026-04-07",
+        ]
+    }
+)
 
 
 def test_only_the_flags_named_for_this_model_are_removed() -> None:
@@ -81,8 +124,8 @@ def test_only_the_flags_named_for_this_model_are_removed() -> None:
             "anthropic-beta": "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14,context-management-2025-06-27",
             "anthropic-version": "2023-06-01",
         },
-        models=("claude-sonnet-4.6",),
-        denied_by_model=SONNET_46_DENIED,
+        model="claude-sonnet-4.6",
+        denials=SONNET_46_DENIED,
     )
 
     assert headers["anthropic-beta"] == "fine-grained-tool-streaming-2025-05-14"
@@ -98,35 +141,63 @@ def test_another_model_keeps_everything() -> None:
     value = "interleaved-thinking-2025-05-14,context-management-2025-06-27"
     headers, removed = strip_denied_beta_flags(
         {"anthropic-beta": value},
-        models=("claude-opus-5",),
-        denied_by_model=SONNET_46_DENIED,
+        model="claude-opus-5",
+        denials=SONNET_46_DENIED,
     )
 
     assert headers == {"anthropic-beta": value}
     assert removed == ()
 
 
-def test_the_model_key_folds_the_way_model_mappings_does() -> None:
-    """The operator writes `claude-sonnet-4.6`; what arrives is whatever the route resolved to.
+def test_a_key_is_a_regex_so_a_dot_is_a_wildcard() -> None:
+    """`claude-sonnet-4.6` also claims `claude-sonnet-4-6`, which here is wanted and still an accident.
 
-    Exact string equality would leave the one spelling the example config uses silently inert — the failure mode of a strip that never fires is a 400 nobody can trace back to this map.
+    The two spellings are one model under this config's own conventions, so the wildcard lands where a folding rule would have. It is worth pinning precisely because it is not a folding rule: nothing here folds `.` to `-`, and an operator who wants only the literal id writes `claude-sonnet-4\\.6`.
     """
-    for resolved in ("claude-sonnet-4-6", "Claude-Sonnet-4.6"):
-        headers, removed = strip_denied_beta_flags(
-            {"anthropic-beta": "context-management-2025-06-27"},
-            models=(resolved,),
-            denied_by_model=SONNET_46_DENIED,
-        )
-        assert headers == {}, resolved
-        assert removed == ("context-management-2025-06-27",), resolved
+    headers, removed = strip_denied_beta_flags(
+        {"anthropic-beta": "context-management-2025-06-27"},
+        model="claude-sonnet-4-6",
+        denials=SONNET_46_DENIED,
+    )
+    assert headers == {}
+    assert removed == ("context-management-2025-06-27",)
+
+
+def test_a_key_is_case_sensitive_unless_the_operator_says_otherwise() -> None:
+    """A regex means regex semantics, including this one. `(?i)` is how an operator opts out."""
+    value = "context-management-2025-06-27"
+    headers, removed = strip_denied_beta_flags(
+        {"anthropic-beta": value}, model="Claude-Sonnet-4.6", denials=SONNET_46_DENIED
+    )
+    assert headers == {"anthropic-beta": value}
+    assert removed == ()
+
+    insensitive = compile_beta_flag_denials({"(?i)claude-sonnet-4\\.6": [value]})
+    headers, removed = strip_denied_beta_flags(
+        {"anthropic-beta": value}, model="Claude-Sonnet-4.6", denials=insensitive
+    )
+    assert headers == {}
+    assert removed == (value,)
+
+
+def test_a_key_does_not_claim_a_longer_id_that_starts_with_it() -> None:
+    """`fullmatch`, not `search`: a list of model ids must not silently widen to a family."""
+    value = "context-management-2025-06-27"
+    headers, removed = strip_denied_beta_flags(
+        {"anthropic-beta": value},
+        model="claude-sonnet-4.6-experimental",
+        denials=SONNET_46_DENIED,
+    )
+    assert headers == {"anthropic-beta": value}
+    assert removed == ()
 
 
 def test_a_header_with_nothing_left_is_dropped_rather_than_sent_empty() -> None:
     """`anthropic-beta:` with an empty value is a third state neither side has a meaning for."""
     headers, _ = strip_denied_beta_flags(
         {"anthropic-beta": "context-management-2025-06-27", "anthropic-version": "2023-06-01"},
-        models=("claude-sonnet-4.6",),
-        denied_by_model=SONNET_46_DENIED,
+        model="claude-sonnet-4.6",
+        denials=SONNET_46_DENIED,
     )
     assert headers == {"anthropic-version": "2023-06-01"}
 
@@ -135,8 +206,8 @@ def test_surrounding_whitespace_does_not_hide_a_flag() -> None:
     """`a, b` is as legal a header value as `a,b`, and the kept flags keep their own spelling."""
     headers, removed = strip_denied_beta_flags(
         {"anthropic-beta": " context-management-2025-06-27 , effort-2025-11-24 "},
-        models=("claude-sonnet-4.6",),
-        denied_by_model=SONNET_46_DENIED,
+        model="claude-sonnet-4.6",
+        denials=SONNET_46_DENIED,
     )
     assert headers == {"anthropic-beta": "effort-2025-11-24"}
     assert removed == ("context-management-2025-06-27",)
@@ -146,7 +217,7 @@ def test_an_empty_map_is_the_identity() -> None:
     """The default. Nothing configured must mean nothing changed, header value included."""
     original = {"anthropic-beta": "context-management-2025-06-27"}
     headers, removed = strip_denied_beta_flags(
-        original, models=("claude-sonnet-4.6",), denied_by_model={}
+        original, model="claude-sonnet-4.6", denials=()
     )
     assert headers == original
     assert removed == ()
@@ -156,7 +227,7 @@ def test_the_callers_mapping_is_not_mutated() -> None:
     """A caller holding the client's headers for any other purpose still has what arrived."""
     original = {"anthropic-beta": "context-management-2025-06-27,effort-2025-11-24"}
     strip_denied_beta_flags(
-        original, models=("claude-sonnet-4.6",), denied_by_model=SONNET_46_DENIED
+        original, model="claude-sonnet-4.6", denials=SONNET_46_DENIED
     )
     assert original == {
         "anthropic-beta": "context-management-2025-06-27,effort-2025-11-24"
@@ -166,53 +237,46 @@ def test_the_callers_mapping_is_not_mutated() -> None:
 def test_a_request_without_the_header_is_left_alone() -> None:
     headers, removed = strip_denied_beta_flags(
         {"anthropic-version": "2023-06-01"},
-        models=("claude-sonnet-4.6",),
-        denied_by_model=SONNET_46_DENIED,
+        model="claude-sonnet-4.6",
+        denials=SONNET_46_DENIED,
     )
     assert headers == {"anthropic-version": "2023-06-01"}
     assert removed == ()
 
 
-def test_an_entry_under_the_requested_alias_fires_for_the_model_it_maps_to() -> None:
-    """The case the authoritative config is actually in, and the one that decides `models` is plural.
+def test_the_first_matching_entry_wins_and_the_rest_are_not_consulted() -> None:
+    """Ordered, so a narrow entry above a broad one is how an operator says which they meant.
 
-    `config.example.yaml` writes this table under `claude-sonnet-4.6` while `model_mappings` maps `claude-sonnet-4.6: claude-sonnet-5`, so no request ever *resolves* to the name the table is written under. Keyed on the resolved name alone, the operator's whole measured table is inert and nothing reports that it is.
+    Under a union the narrow entry could only ever *add* to what the broad one takes away; first-match-wins is what lets it take away less.
     """
-    headers, removed = strip_denied_beta_flags(
-        {"anthropic-beta": "context-management-2025-06-27"},
-        models=("claude-sonnet-4.6", "claude-sonnet-5"),
-        denied_by_model=SONNET_46_DENIED,
-    )
-    assert headers == {}
-    assert removed == ("context-management-2025-06-27",)
-
-
-def test_an_entry_under_the_resolved_id_fires_for_a_client_that_asked_for_it_directly() -> None:
-    """The other half of the union. A client naming the real id must be protected too."""
-    headers, removed = strip_denied_beta_flags(
-        {"anthropic-beta": "context-management-2025-06-27"},
-        models=("some-alias", "claude-sonnet-4.6"),
-        denied_by_model=SONNET_46_DENIED,
-    )
-    assert headers == {}
-    assert removed == ("context-management-2025-06-27",)
-
-
-def test_two_canonically_equal_keys_both_contribute() -> None:
-    """`claude-sonnet-4.6` and `claude-sonnet-4-6` are one model; neither entry may be dropped.
-
-    Taking the first match and returning made the flags under the second disappear with nothing saying so — the operator sees a key they wrote and a flag that still reaches upstream.
-    """
-    headers, removed = strip_denied_beta_flags(
-        {"anthropic-beta": "flag-a,flag-b,flag-c"},
-        models=("claude-sonnet-4.6",),
-        denied_by_model={
+    denials = compile_beta_flag_denials(
+        {
             "claude-sonnet-4.6": ["flag-a"],
-            "claude-sonnet-4-6": ["flag-b"],
-        },
+            "claude-sonnet-.*": ["flag-a", "flag-b"],
+        }
     )
-    assert headers == {"anthropic-beta": "flag-c"}
+    headers, removed = strip_denied_beta_flags(
+        {"anthropic-beta": "flag-a,flag-b"}, model="claude-sonnet-4.6", denials=denials
+    )
+    assert headers == {"anthropic-beta": "flag-b"}
+    assert removed == ("flag-a",)
+
+    # The same table, for a model only the broad entry claims.
+    headers, removed = strip_denied_beta_flags(
+        {"anthropic-beta": "flag-a,flag-b"}, model="claude-sonnet-9", denials=denials
+    )
+    assert headers == {}
     assert set(removed) == {"flag-a", "flag-b"}
+
+
+def test_a_key_that_is_not_a_valid_regex_fails_where_the_config_is_read() -> None:
+    """At start-up, naming the key. `re`'s own message gives a character offset and no key."""
+    try:
+        compile_beta_flag_denials({"claude-sonnet-4.6": [], "opus-[": ["flag-a"]})
+    except ValueError as error:
+        assert "opus-[" in str(error)
+    else:
+        raise AssertionError("an unparseable key must not be accepted")
 
 
 def test_a_flag_is_matched_regardless_of_case_and_reported_as_configured() -> None:
@@ -222,8 +286,8 @@ def test_a_flag_is_matched_regardless_of_case_and_reported_as_configured() -> No
     """
     headers, removed = strip_denied_beta_flags(
         {"anthropic-beta": "Context-Management-2025-06-27"},
-        models=("claude-sonnet-4.6",),
-        denied_by_model=SONNET_46_DENIED,
+        model="claude-sonnet-4.6",
+        denials=SONNET_46_DENIED,
     )
     assert headers == {}
     assert removed == ("context-management-2025-06-27",)
@@ -233,8 +297,8 @@ def test_a_repeated_flag_is_reported_once() -> None:
     """Both copies are removed; the metric hears about the flag once."""
     headers, removed = strip_denied_beta_flags(
         {"anthropic-beta": "context-management-2025-06-27,context-management-2025-06-27"},
-        models=("claude-sonnet-4.6",),
-        denied_by_model=SONNET_46_DENIED,
+        model="claude-sonnet-4.6",
+        denials=SONNET_46_DENIED,
     )
     assert headers == {}
     assert removed == ("context-management-2025-06-27",)
@@ -247,7 +311,7 @@ def test_a_configured_model_whose_flags_all_miss_keeps_the_value_byte_for_byte()
     """
     original = {"anthropic-beta": " effort-2025-11-24 ,  fine-grained-tool-streaming-2025-05-14"}
     headers, removed = strip_denied_beta_flags(
-        original, models=("claude-sonnet-4.6",), denied_by_model=SONNET_46_DENIED
+        original, model="claude-sonnet-4.6", denials=SONNET_46_DENIED
     )
     assert headers == original
     assert removed == ()
