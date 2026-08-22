@@ -2690,6 +2690,25 @@ def test_a_recorded_loss_is_also_counted() -> None:
 
 
 ATTRIBUTION_LINE = "x-anthropic-billing-header: cc_version=1.0; cc_entrypoint=cli;"
+# The strip is off unless asked for, so every test that wants it has to say so — which is itself the assertion that the switch is read.
+OVERRIDES_STRIP_ATTRIBUTION = {"hook_strip_anthropic_request_headers": {"strip_attribution_header": True}}
+
+
+def test_the_attribution_line_survives_when_the_operator_has_not_asked() -> None:
+    """Off by default, per `message-format-reshape.md`. Upstream accepts the line, so leaving it costs tokens rather than correctness — and a strip nobody switched on must not happen."""
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "gpt-model",
+            "system": [{"type": "text", "text": f"{ATTRIBUTION_LINE}\nBe brief."}],
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 64,
+        },
+    )
+
+    assert response.status_code == 200
+    assert "x-anthropic-billing-header" in seen[-1].read().decode()
 
 
 def test_the_attribution_line_never_reaches_a_translated_upstream() -> None:
@@ -2697,7 +2716,10 @@ def test_the_attribution_line_never_reaches_a_translated_upstream() -> None:
 
     A unit test proves the stripper works; it cannot prove anything calls it. This repository's most common defect is a capability that exists and is never wired — so the check that matters is made against the request upstream actually received.
     """
-    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
+    client, seen = make_client(
+        lambda _: httpx2.Response(200, json={"id": "resp_1"}),
+        overrides=OVERRIDES_STRIP_ATTRIBUTION,
+    )
     response = client.post(
         "/v1/messages",
         json={
@@ -2716,7 +2738,10 @@ def test_the_attribution_line_never_reaches_a_translated_upstream() -> None:
 
 def test_the_attribution_line_never_reaches_a_direct_upstream() -> None:
     """The untranslated leg carries `system` through untouched, so the removal has to happen before the routing decision rather than inside either translator."""
-    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
+    client, seen = make_client(
+        lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}),
+        overrides=OVERRIDES_STRIP_ATTRIBUTION,
+    )
     response = client.post(
         "/v1/messages",
         json={
@@ -2734,7 +2759,10 @@ def test_the_attribution_line_never_reaches_a_direct_upstream() -> None:
 
 def test_the_attribution_line_is_not_counted_as_prompt() -> None:
     """`count_tokens` is named alongside `/v1/messages` in `message-format-reshape.md`, and it is the endpoint where leaving the line in is measurable: upstream counted the same prompt at 43 tokens without it and 77 with it."""
-    client, seen = make_client(lambda _: httpx2.Response(200, json={"input_tokens": 11}))
+    client, seen = make_client(
+        lambda _: httpx2.Response(200, json={"input_tokens": 11}),
+        overrides=OVERRIDES_STRIP_ATTRIBUTION,
+    )
     response = client.post(
         "/v1/messages/count_tokens",
         json={

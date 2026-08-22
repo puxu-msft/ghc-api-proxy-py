@@ -8,6 +8,7 @@ It names the format, the model and whether streaming was asked for; the rest is 
 """
 
 from collections.abc import Mapping
+from copy import deepcopy
 from typing import Any
 
 from app.pipeline.request import RequestContext
@@ -44,7 +45,9 @@ def build_context(
     context = RequestContext(
         inbound_format=route.wire_format,
         requested_model=model.strip(),
-        payload=dict(payload),
+        # Deep rather than shallow, and that is the whole point of the pair. The fixups downstream edit `messages` and `system` in place; with a shallow copy those edits reached the caller's parsed body, so there was no version of the request left that said what the client actually sent.
+        payload=deepcopy(dict(payload)),
+        original_payload=payload,
         stream=stream,
         client_headers=forwarded_client_headers(headers or {}),
     )

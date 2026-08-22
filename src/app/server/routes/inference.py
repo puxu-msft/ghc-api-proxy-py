@@ -161,8 +161,12 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
         trace.detail = str(error)
         return JSONResponse(error_body(error), status_code=400)
 
-    # After parsing and before routing, which is where `docs/.human-controlled/message-format-reshape.md` puts it: the line is addressed to Anthropic's billing rather than to any model, so routing, translation and the token counter should not be reading it. Scope is what that document specifies — the leading lines of `system[0]` — so an attribution line placed anywhere else does still travel. Resident rather than configured, per the same document.
-    if route.wire_format is WireFormat.ANTHROPIC_MESSAGES:
+    # After parsing and before routing, which is where `docs/.human-controlled/message-format-reshape.md` puts it: the line is addressed to Anthropic's billing rather than to any model, so routing, translation and the token counter should not be reading it. Scope is what that document specifies — the leading lines of `system[0]` — so an attribution line placed anywhere else does still travel.
+    # Off unless the operator asks, per the same document. It was resident for one commit, under that document's previous revision.
+    if (
+        route.wire_format is WireFormat.ANTHROPIC_MESSAGES
+        and chain.config.hook_strip_anthropic_request_headers.strip_attribution_header
+    ):
         stripped = strip_attribution_lines(context.payload)
         if stripped:
             ATTRIBUTION_LINES_STRIPPED.inc(stripped)

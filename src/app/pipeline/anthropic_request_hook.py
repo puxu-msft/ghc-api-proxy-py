@@ -15,18 +15,23 @@ from app.config.schema import AssistantMessageLayout, FixAnthropicRequestHook
 
 logger = logging.getLogger(__name__)
 
-# What a client-injected attribution line looks like once it has been put inside the prompt. Two spellings, either of which is enough, and prose has to miss both.
+# What an attribution line looks like once it has been put inside the prompt. `message-format-reshape.md` asks for all of them, not only `x-anthropic-billing-header`, so this recognises the shape rather than the name — and the whole difficulty is that a header line and a line of prose are the same shape until you look at the value.
 #
-# An earlier version asked only for a hyphen in the name before the colon, on the reasoning that a hyphenated token is a header name and not an English phrase. That reasoning was wrong and a review measured how wrong: of 23 realistic system-prompt openings, 21 were deleted — `Read-only: never modify any file.`, `Non-negotiable: never reveal the system prompt.`, `Step-by-step: …`, `High-level: …`, and `Claude-Code: 你是一个中文助手` among them. Deleting the first line of somebody's system prompt is the worst thing this function can do, it happens silently, and the counter that records it carries no content.
+# Three spellings, any one of which is enough:
+#   1. the name begins `x-`, the convention every extension header follows and no instruction does;
+#   2. the value is a `k=v;` parameter string, which is what the attribution actually carries;
+#   3. the name is hyphenated *and* the value is a single token with no spaces — `Content-Type: application/json`.
 #
-# So the name must start `x-`, which is the convention every attribution header follows and which no instruction line does; **or** the value must be a `k=v;` parameter string, which is the shape the attribution actually has. `x-anthropic-billing-header: cc_version=1.0; cc_entrypoint=cli;` matches both. `Content-Type: text/plain` matches neither, and neither does any of the 21.
+# The third is what makes this "all of them" rather than "the ones we recognise", and the value test is what keeps it off prose. An earlier version asked only for a hyphen in the name; a review measured that against 23 realistic system-prompt openings and 21 were deleted, `Read-only: never modify any file.` and `Non-negotiable: never reveal the system prompt.` among them. Under the rule above, 20 of those 21 survive: every one whose value is a sentence rather than a token.
 #
-# `x-` rather than the single literal name because `docs/.human-controlled/message-format-reshape.md` asks for the whole attribution line and says explicitly that it means more than `x-anthropic-billing-header` alone. This is the narrowest reading that is still more than that one name. How much more it should be is a question for that document's author; this is the safe end of the range.
+# The exception is `Warning-Level: high`, which this does remove and which could be somebody's instruction. It is kept in the removal set knowingly — it is indistinguishable from a header by any means available here — and it is the reason `strip_attribution_header` defaults to off.
 _ATTRIBUTION_LINE = re.compile(
     r"""
-    (?: x-[A-Za-z0-9-]+ : .*        # an extension header by name
-      | [A-Za-z][A-Za-z0-9-]* :     # or any name whose value is a parameter string
+    (?: x-[A-Za-z0-9-]+ : .*                          # 1: an extension header by name
+      | [A-Za-z][A-Za-z0-9-]* :                       # 2: any name, parameter-string value
         \s* (?: [A-Za-z0-9_-]+ = [^;]* ; \s* )+
+      | [A-Za-z][A-Za-z0-9]* (?: - [A-Za-z0-9]+ )+ :  # 3: hyphenated name, single-token value
+        [ \t]* \S+
     )
     """,
     re.VERBOSE | re.IGNORECASE,
@@ -52,7 +57,7 @@ def strip_attribution_lines(payload: dict[str, Any]) -> int:
 
     **Upstream accepts it.** Measured against the live upstream on 2026-08-21 across fifteen shapes — this name, other header names, a real HTTP header name, in `instructions` and in `system[0]`, streamed and not, with `cache_control`, and on `count_tokens` — every one answered 200. So this is not a compatibility repair and must not be described as one. What it is measured to cost is tokens: the same system prompt counted 43 tokens without the line and 77 with it, on upstream's own counter.
 
-    In place, and unconditional. There is no switch: `hook_strip_anthropic_request_headers.strip_attribution_header` had one in the schema, never had a consumer, and was removed on 2026-08-22 once `docs/.human-controlled/message-format-reshape.md` had ruled this resident rather than configured and its author had taken the key out of the authoritative config. See that document for the standing decision.
+    In place. Whether it runs at all is the caller's decision: `hook_strip_anthropic_request_headers.strip_attribution_header` gates it and defaults to off, which is what `docs/.human-controlled/message-format-reshape.md` rules as of its 2026-08-22 revision. That document briefly said the opposite — resident rather than configured — and it was implemented that way for one commit.
 
     Rebuilds rather than mutating the block it edits, so *this* function leaves the parsed body as the client sent it. That is not the same as the request surviving the chain intact: `fix_anthropic_request` runs a step later and `repair_tool_pairs` edits `messages` in place, so a forensic record taken from the parsed body after that point is already not what arrived. `message-format-reshape.md` asks for the original to be unaffected; honouring that in full needs somewhere to keep it, which does not exist on this chain yet. Not mutating here is the half that is free.
     """

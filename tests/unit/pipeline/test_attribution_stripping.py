@@ -3,11 +3,15 @@
 The line is `x-anthropic-billing-header: cc_version=…; cc_entrypoint=…;` and it is addressed to Anthropic's billing rather than to any model. Upstream accepts it — measured 2026-08-21 across fifteen shapes, all 200 — so what these assert is not a compatibility repair. What they protect is the discrimination: the pattern has to catch a header line pasted into a prompt and has to leave prose alone, and the second half is where a careless pattern eats the first sentence of somebody's system prompt.
 """
 
+from copy import deepcopy
 from typing import Any
 
 import pytest
 
-from app.pipeline.anthropic_request_hook import strip_attribution_lines
+from app.config.schema import FixAnthropicRequestHook
+from app.pipeline.anthropic_request_hook import fix_anthropic_request, strip_attribution_lines
+from app.server.inbound import build_context
+from app.server.routes.table import route_for_path
 
 ATTRIBUTION = "x-anthropic-billing-header: cc_version=1.0; cc_entrypoint=cli;"
 SYSTEM = "You are Claude Code, Anthropic's official CLI for Claude."
@@ -95,9 +99,6 @@ PROSE_OPENERS = [
     "GPT-4: is not the model you are.",
     "utf-8: encoding notes follow.",
     "Note-1: this is the first note.",
-    "Content-Type: application/json",
-    "content-type: text/plain",
-    "Warning-Level: high",
     "Claude-Code: 你是一个中文助手 请用中文回答",
     # The four that were safe even under the old pattern. Kept so the easy half stays covered.
     "Note: be brief.",
@@ -117,6 +118,18 @@ def test_prose_that_opens_with_a_colon_is_left_alone(opener: str) -> None:
 
     assert strip_attribution_lines(payload) == 0, opener
     assert payload["system"][0]["text"] == f"{opener}\n{SYSTEM}", opener
+
+
+def test_a_header_shaped_line_with_a_token_value_goes() -> None:
+    """`message-format-reshape.md` asks for all attribution lines, not the one name, so a real HTTP header pasted into a prompt is taken too.
+
+    `Warning-Level: high` is in here and it is the accepted cost: it is a hyphenated name with a single-token value, which is exactly what a header looks like, and nothing available here tells it apart from one somebody meant as an instruction. It is why the switch defaults to off.
+    """
+    for line in ("Content-Type: application/json", "content-type: text/plain", "Warning-Level: high"):
+        payload: dict[str, Any] = {"system": [{"type": "text", "text": f"{line}\n{SYSTEM}"}]}
+
+        assert strip_attribution_lines(payload) == 1, line
+        assert payload["system"][0]["text"] == SYSTEM, line
 
 
 def test_a_second_attribution_spelling_still_goes() -> None:
@@ -163,3 +176,33 @@ def test_a_body_with_no_system_is_untouched() -> None:
 
     assert strip_attribution_lines(payload) == 0
     assert payload == {"messages": []}
+
+
+def test_the_original_payload_survives_the_whole_reshaping_chain() -> None:
+    """`message-format-reshape.md` requires the original client request kept for the history record to be unaffected by the reshaping.
+
+    `strip_attribution_lines` not mutating its own input was never enough on its own: `repair_tool_pairs` runs a step later and edits `messages` in place. So the guarantee has to be checked across both, against `RequestContext.original_payload`, which is the copy nothing is allowed to edit.
+    """
+    body: dict[str, Any] = {
+        "model": "claude-model",
+        "system": [{"type": "text", "text": f"{ATTRIBUTION}\n{SYSTEM}"}],
+        "messages": [
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "call_1", "name": "Bash", "input": {}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "nobody", "content": "x"}]},
+        ],
+    }
+    before = deepcopy(body)
+    route = route_for_path("/v1/messages")
+    assert route is not None
+
+    context = build_context(route, body, {})
+    strip_attribution_lines(context.payload)
+    fix_anthropic_request(context.payload, FixAnthropicRequestHook())
+
+    # The working copy was reshaped: the attribution went and the unmatched tool_result was repaired away.
+    assert ATTRIBUTION not in context.payload["system"][0]["text"]
+    assert context.payload["messages"] != before["messages"]
+
+    # The original did not move, and neither did the caller's own body.
+    assert context.original_payload == before
+    assert body == before

@@ -58,6 +58,11 @@ class RequestContext:
     requested_model: str
     payload: dict[str, Any]
 
+    # The body exactly as the client sent it, before anything in this proxy reshaped it. Read-only by contract: `payload` is the working copy and every fixup edits that one.
+    # `message-format-reshape.md` requires the original client request kept for the history record to be unaffected by the reshaping, and until this existed there was nowhere for it to live — `build_context` took a shallow copy, so `repair_tool_pairs` editing `messages` in place reached back into the parsed body and the "original" was already not what arrived.
+    # An empty mapping means nobody supplied one, which is what a context built directly in a test looks like; it is not a claim that the client sent an empty body.
+    original_payload: Mapping[str, Any] = field(default_factory=lambda: dict[str, Any]())
+
     id: str = field(default_factory=lambda: str(uuid4()))
     stream: bool = False
 
