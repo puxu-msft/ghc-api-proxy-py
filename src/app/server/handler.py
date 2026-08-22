@@ -543,6 +543,20 @@ def reply_summary(handled: HandledRequest, payload: dict[str, Any]) -> Terminal 
     return terminal_from_anthropic(payload, blocks_from_anthropic(payload), dialect=dialect_for(handled))
 
 
+def delivers_blocks(handled: HandledRequest) -> bool:
+    """Whether this route's *client* leg can be written a block at a time.
+
+    Block delivery needs both halves: an assembler that finds a block's end in the upstream's events, and a framer that writes one in the client's. `assembler_for` above answers the first. This answers the second, and the two are separate questions — a route can have an assembler and still have nowhere to write what it produces.
+
+    Chat Completions has no framer. Its boundaries are inside `choices[].delta` and nothing here reads them, so a request whose client leg speaks that dialect is delivered whole by `one_shot_delivery`. Ruled 2026-08-22, after a measurement: those bytes were reaching `AnthropicAssembler`, matching none of its event names, and leaving the client a 200 with an empty body.
+
+    A synthesized reply is written by us and we write Anthropic, so it is deliverable whatever the route was — the same carve-out, for the same reason, that `dialect_for` makes.
+    """
+    if handled.synthesized:
+        return True
+    return handled.route.inbound_format is not WireFormat.OPENAI_CHAT_COMPLETIONS
+
+
 def assembler_for(handled: HandledRequest) -> BlockAssembler:
     """Pick the assembler matching the upstream this route actually used.
 

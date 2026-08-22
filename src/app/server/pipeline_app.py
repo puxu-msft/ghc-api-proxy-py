@@ -38,7 +38,12 @@ from app.observability.tui import footer_tui_or_none
 from app.pipeline.anthropic_request_hook import strip_attribution_lines
 from app.pipeline.delivery.assembler import BlockAssembler, ReplyDialect, Terminal
 from app.pipeline.delivery.blocks import BlockBuffer
-from app.pipeline.delivery.stream import ReplaySupport, stream_delivery
+from app.pipeline.delivery.stream import (
+    ContinuationSupport,
+    ReplaySupport,
+    one_shot_delivery,
+    stream_delivery,
+)
 from app.pipeline.request import RequestContext, WireFormat
 from app.pipeline.retry import RetryReason, reason_for
 from app.pipeline.translation_driver.semantic import Loss
@@ -47,6 +52,7 @@ from app.server.composition import Chain, refresh_catalogs
 from app.server.handler import (
     _ledger_for,  # pyright: ignore[reportPrivateUsage]
     assembler_for,
+    delivers_blocks,
     delivery_buffer,
     error_body,
     error_headers,
@@ -503,14 +509,49 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
     trace.upstream_conn = _snapshot_upstream_connection(response)
 
     if context.stream:
+        # The instant the driver fixed when it opened this attempt, read rather than recomputed: a second `now + deadline` here would start the clock at the moment the headers came back and quietly grant the attempt a second full lifetime.
+        attempt = context.current_attempt
+        if not delivers_blocks(handled):
+            # This client leg has no outbound framer, so there is no block to deliver. The upstream stream is read whole and handed over in one write, in the client's own dialect, byte for byte. Ruled 2026-08-22; before this branch existed those bytes went into an assembler that recognised none of them and the client got a 200 with an empty body and no error frame.
+            # The same guards in the same order as the block path below, so an idle upstream, an expired attempt and an expired client deadline all still end this the way they end that one, and the byte counter still sees every byte.
+            one_shot_accounting = _StreamAccounting(
+                chain=chain,
+                request_id=trace.request_id,
+                trace=trace,
+                status_code=response.status_code,
+                context=context,
+            )
+            return _AccountedStreamingResponse(
+                _tracked_delivery(
+                    one_shot_delivery(
+                        with_client_deadline_at(
+                            _counted_upstream(
+                                with_deadline_at(
+                                    with_idle_timeout(
+                                        response.aiter_bytes(),
+                                        timeout_seconds=stream_idle_seconds(chain),
+                                    ),
+                                    deadline_at=attempt.deadline_at if attempt is not None else None,
+                                ),
+                                chain,
+                                trace.request_id,
+                                trace,
+                            ),
+                            deadline_at=client_deadline_at,
+                        )
+                    ),
+                    one_shot_accounting,
+                ),
+                one_shot_accounting,
+                status_code=response.status_code,
+                media_type="text/event-stream",
+            )
         # Block-level delivery over the live upstream.
         # The body is never read whole here, so a block goes out while the rest still arrives.
         #
         # The registration deliberately outlives this function. A streaming request has produced nothing at the moment the handler returns — the body is consumed after — so releasing here would drop it off the footer at exactly the point it becomes worth watching.
         # Held rather than passed straight through: the assembler is what reads the upstream's terminal event, so after the stream finishes it is the only thing that knows the token usage and the stop reason.
         assembler = assembler_for(handled)
-        # The instant the driver fixed when it opened this attempt, read rather than recomputed: a second `now + deadline` here would start the clock at the moment the headers came back and quietly grant the attempt a second full lifetime.
-        attempt = context.current_attempt
         accounting = _StreamAccounting(
             chain=chain,
             request_id=trace.request_id,

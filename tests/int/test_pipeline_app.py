@@ -57,6 +57,7 @@ CATALOG: dict[str, Any] = {
     "data": [
         {"id": "claude-model", "supported_endpoints": ["/v1/messages"]},
         {"id": "gpt-model", "supported_endpoints": ["/responses"]},
+        {"id": "cc-model", "supported_endpoints": ["/chat/completions"]},
         {"id": "embed-model", "supported_endpoints": ["/embeddings"]},
         {"id": "mute-model", "supported_endpoints": []},
         # Effort names as the real catalog publishes them, under `capabilities.supports`. Deliberately narrow — no `none`, no `xhigh`, no `max` — so that both "asked for something stronger than this model offers" and "asked for something weaker" are reachable from a test. It is not a copy of any one real model: `grok-4.5` publishes exactly these three, while `gpt-5.3-codex` has `xhigh` as well.
@@ -718,6 +719,55 @@ def test_embeddings_endpoint_is_served(path: str) -> None:
     response = client.post(path, json={"model": "embed-model", "input": "hi"})
     assert response.status_code == 200
     assert str(seen[-1].url) == f"{BASE_URL}/embeddings"
+
+
+CHAT_COMPLETIONS_SSE = (
+    b'data: {"id":"cc-1","object":"chat.completion.chunk","choices":'
+    b'[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}\n\n'
+    b'data: {"id":"cc-1","object":"chat.completion.chunk","choices":'
+    b'[{"index":0,"delta":{"content":" world"},"finish_reason":null}]}\n\n'
+    b'data: {"id":"cc-1","object":"chat.completion.chunk","choices":'
+    b'[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+    b"data: [DONE]\n\n"
+)
+
+
+@pytest.mark.parametrize(
+    "path", ["/chat/completions", "/v1/chat/completions", "/openai/v1/chat/completions"]
+)
+def test_chat_completions_endpoint_is_served(path: str) -> None:
+    client, seen = make_client(
+        lambda _: httpx2.Response(200, json={"id": "cc-1", "object": "chat.completion"})
+    )
+    response = client.post(path, json={"model": "cc-model", "messages": []})
+    assert response.status_code == 200
+    assert str(seen[-1].url) == f"{BASE_URL}/chat/completions"
+    assert response.json() == {"id": "cc-1", "object": "chat.completion"}
+
+
+def test_chat_completions_streams_are_delivered_whole_and_verbatim() -> None:
+    """Nothing here can find a block boundary in this dialect, so the whole stream is one delivery.
+
+    Before 2026-08-22 these bytes went into `AnthropicAssembler`, whose event names none of them match, so no block was ever completed and the client got a 200, a `text/event-stream` content type, and zero bytes — no error frame either, because delivery only writes one once a message has started. Measured, then ruled: buffer and forward until someone writes a framer for this dialect.
+
+    Byte-for-byte rather than event names, because the promise being kept is that nothing was reinterpreted on the way through — `data: [DONE]` included, which has no equivalent in any shape this proxy assembles.
+    """
+    client, seen = make_client(
+        lambda _: httpx2.Response(
+            200,
+            content=CHAT_COMPLETIONS_SSE,
+            headers={"content-type": "text/event-stream"},
+        )
+    )
+    response = client.post(
+        "/chat/completions",
+        json={"model": "cc-model", "messages": [], "stream": True},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert str(seen[-1].url) == f"{BASE_URL}/chat/completions"
+    assert response.content == CHAT_COMPLETIONS_SSE
 
 
 def test_translated_route_answers_in_the_format_the_client_asked_in() -> None:

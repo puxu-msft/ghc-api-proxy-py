@@ -171,6 +171,22 @@ def _keepalive_due(
     return max(ping_deadline, last_write.at + interval)
 
 
+async def one_shot_delivery(chunks: AsyncIterator[bytes]) -> AsyncGenerator[bytes]:
+    """Hand the upstream stream to the client whole, once all of it has arrived.
+
+    For a client leg this proxy has no outbound framer for. Block-level delivery needs two halves — something that knows where a block ends in the upstream's events, and something that writes one in the client's — and Chat Completions has neither: its boundaries live inside `choices[].delta`, which nothing here reads. Ruled 2026-08-22 to buffer rather than to invent them; parsing that shape is its own piece of work.
+
+    The client asked for `stream: true` and gets its own protocol's SSE back, byte for byte, just not incrementally. That is a real loss of liveness and it is the point of the ruling — before this existed those bytes went into the Anthropic assembler, matched none of its event names, produced no block, and left the client holding a 200 with an empty body and no error frame.
+
+    No replay and no keep-alive. Both are answers to questions block delivery raises — which block was already committed, and what to say during the silence between them — and neither has a meaning for a delivery that is a single write.
+    """
+    body = bytearray()
+    async for chunk in chunks:
+        body += chunk
+    if body:
+        yield bytes(body)
+
+
 async def stream_delivery(
     chunks: AsyncIterator[bytes],
     assembler: BlockAssembler,
