@@ -55,7 +55,7 @@ from app.server.handler import (
 )
 from app.server.inbound import ROUTES, InboundRequestError, build_context, route_for_path
 from app.server.ops_routes import router as ops_router
-from app.streaming.deadline import with_deadline_at
+from app.streaming.deadline import with_client_deadline_at, with_deadline_at
 from app.streaming.idle_timeout import with_idle_timeout
 
 CHAIN_STATE_KEY = "pipeline_chain"
@@ -351,6 +351,13 @@ def _aborted(failure: BaseException) -> tuple[LogStatus, str]:
 
 
 async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
+    # Fixed before the body is read, because that read is inside the lifetime this bounds. `handle_bounded` starts its own clock later, when routing hands it the request, so the two do not agree on when the request began — and the one an operator means by "the client request" starts here. Measured 2026-08-22: body read, JSON parse and admission queueing were all outside the only clock there was.
+    #
+    # An instant rather than a duration, for the same reason the attempt's is: the body outlives the function that admitted it, and a duration restarted downstream would grant a second lifetime.
+    client_deadline = chain.config.client_delivery.client_request_deadline
+    client_deadline_at = (
+        asyncio.get_running_loop().time() + client_deadline if client_deadline > 0 else None
+    )
     # Consumed here so the request is fully read before anything can return, which is what lets a rejected body be reported at all. Its size is deliberately **not** what `↑` reports — see `_log_completion`. The request is already registered, so a client that never finishes sending is visible for however long it takes.
     await request.body()
 
@@ -500,20 +507,24 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
         return _AccountedStreamingResponse(
             _tracked_delivery(
                 stream_delivery(
-                    # The guard measures upstream SSE activity, not the events parsed out of it. Ruled 2026-08-20: a comment frame and a large event still arriving both keep bytes moving while the parser yields nothing, so timing the parser would call a connection that is still transmitting silent — and never false-killing legitimate thinking is what `config.example.yaml` freezes.
-                    _counted_upstream(
-                        # Two guards on the same bytes, and the order decides which one gets to speak: the deadline is outermost so that an idle timeout raised beneath it arrives with its own name rather than being relabelled by whichever guard happens to wrap the other.
-                        # The second place `upstream_request_deadline` is enforced from — one bound, not two. `await send` returns when the response headers arrive — measured 2026-08-20 — so everything the body does afterwards happens with the driver already off the stack, and until this line nothing was holding the attempt to the life it was given.
-                        with_deadline_at(
-                            with_idle_timeout(
-                                response.aiter_bytes(),
-                                timeout_seconds=stream_idle_seconds(chain),
+                    # Outermost of the guards, because it is the longest-lived: an attempt's deadline may expire and be replaced by another attempt's, and this one does not move. Its own name on the way out, so the line an operator gets says which setting ended the stream. Until 2026-08-22 there was one clock here and it only reached as far as the response headers.
+                    with_client_deadline_at(
+                        # The guard measures upstream SSE activity, not the events parsed out of it. Ruled 2026-08-20: a comment frame and a large event still arriving both keep bytes moving while the parser yields nothing, so timing the parser would call a connection that is still transmitting silent — and never false-killing legitimate thinking is what `config.example.yaml` freezes.
+                        _counted_upstream(
+                            # Two guards on the same bytes, and the order decides which one gets to speak: the deadline is outermost so that an idle timeout raised beneath it arrives with its own name rather than being relabelled by whichever guard happens to wrap the other.
+                            # The second place `upstream_request_deadline` is enforced from — one bound, not two. `await send` returns when the response headers arrive — measured 2026-08-20 — so everything the body does afterwards happens with the driver already off the stack, and until this line nothing was holding the attempt to the life it was given.
+                            with_deadline_at(
+                                with_idle_timeout(
+                                    response.aiter_bytes(),
+                                    timeout_seconds=stream_idle_seconds(chain),
+                                ),
+                                deadline_at=attempt.deadline_at if attempt is not None else None,
                             ),
-                            deadline_at=attempt.deadline_at if attempt is not None else None,
+                            chain,
+                            trace.request_id,
+                            trace,
                         ),
-                        chain,
-                        trace.request_id,
-                        trace,
+                        deadline_at=client_deadline_at,
                     ),
                     assembler,
                     buffer=delivery_buffer(chain),

@@ -26,6 +26,7 @@ from app.pipeline.delivery.assembler import BlockAssembler
 from app.pipeline.delivery.blocks import BlockBuffer, CompletedBlock, DeliverySession
 from app.pipeline.delivery.sse_source import SseEvent, read_events
 from app.pipeline.retry import RetryLedger, RetryReason, StreamEnding, decide_stream_ending
+from app.streaming.deadline import ClientDeadlineError
 from app.streaming.keepalive import finish_stream_cleanup
 
 PING_FRAME = b": ping\n\n"
@@ -265,6 +266,18 @@ async def _deliver(
             torn = error
         if torn is None:
             break
+        if isinstance(torn, ClientDeadlineError) and client_has_bytes.is_set():
+            # The one ending that gets said out loud, and it is answered before anything else — a replay cannot help a request that has run out of time, and asking whether one is legal would put this branch behind a `replay` nobody has to configure.
+            #
+            # By the time this can fire the response has been open for a while and its status is long settled, so an SSE error frame is the only way left to tell the client what happened. Without it this ending is byte-for-byte the same as upstream tearing, which is what an audit measured on 2026-08-22; ruled the same day.
+            #
+            # Deliberately only this one. The other endings that reach here remain indistinguishable from each other on the wire, and widening the frame to cover them is a separate question with its own answer to find. Nothing is flushed first either: what is buffered but undelivered would make the size of this ending depend on the buffering policy, while the ending itself is a clock event.
+            yield error_frame(
+                error_type=WIRE_TYPES[ErrorCategory.INTERNAL],
+                message=str(torn) or "client request exceeded its deadline",
+                code="client_deadline_exceeded",
+            ).encode()
+            return
         reason = replay.eligible(torn) if replay is not None else None
         if replay is None or reason is None:
             raise torn

@@ -32,7 +32,7 @@ from app.server.pipeline_app import (
     _counted_upstream,  # pyright: ignore[reportPrivateUsage]
     _Trace,  # pyright: ignore[reportPrivateUsage]
 )
-from app.streaming.deadline import StreamDeadlineError, with_deadline_at
+from app.streaming.deadline import ClientDeadlineError, StreamDeadlineError, with_deadline_at
 from app.streaming.idle_timeout import StreamIdleTimeoutError, with_idle_timeout
 
 
@@ -1000,5 +1000,51 @@ async def test_a_failure_no_second_attempt_could_answer_is_not_replaced() -> Non
                 message_id="msg_1",
                 model="claude-model",
                 replay=refusing,
+            )
+        ]
+
+
+async def _hits_the_client_deadline_after(payloads: list[bytes]) -> AsyncIterator[bytes]:
+    for payload in payloads:
+        yield payload
+    raise ClientDeadlineError("client request exceeded its deadline")
+
+
+@pytest.mark.asyncio
+async def test_the_client_deadline_is_the_one_ending_that_says_so() -> None:
+    """By the time this can fire the response has been open a while and its status is long settled, so an SSE error frame is the only way left to say what happened.
+
+    Without it this ending is byte-for-byte the same as upstream tearing — measured 2026-08-22 — and only the proxy's own log could tell them apart. Ruled the same day.
+    """
+    chunks = [
+        chunk
+        async for chunk in stream_delivery(
+            _hits_the_client_deadline_after(anthropic_stream("one")),
+            AnthropicAssembler(),
+            buffer=BlockBuffer(policy="block"),
+            settings=StreamSettings(sse_ping_interval=0),
+            message_id="msg_1",
+            model="claude-model",
+        )
+    ]
+    assert events_of(chunks)[-1] == "error"
+    assert b"client_deadline_exceeded" in b"".join(chunks)
+    # Not a `message_stop`: the turn did not finish, and saying it did is the defect this whole area exists to avoid.
+    assert "message_stop" not in events_of(chunks)
+
+
+@pytest.mark.asyncio
+async def test_an_upstream_tear_is_still_raised_rather_than_framed() -> None:
+    """Deliberately narrow. The other endings that reach here remain indistinguishable from each other on the wire, and widening the frame to cover them is a separate question with its own answer to find."""
+    with pytest.raises(ConnectionError):
+        _ = [
+            chunk
+            async for chunk in stream_delivery(
+                _tears_after(anthropic_stream("one")),
+                AnthropicAssembler(),
+                buffer=BlockBuffer(policy="block"),
+                settings=StreamSettings(sse_ping_interval=0),
+                message_id="msg_1",
+                model="claude-model",
             )
         ]
