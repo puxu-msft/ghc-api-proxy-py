@@ -26,6 +26,7 @@ from pydantic import ValidationError
 from starlette.requests import ClientDisconnect, Request
 
 from app.config.schema import ModelProviderConfig, ProxyConfig
+from app.core.chain import Chain
 from app.model_provider import GithubCopilotProvider, ModelProvider
 from app.model_provider.ghc_client import GhcApiClient, GhcClientConfig
 from app.model_provider.ghc_client.tokens import CopilotTokenManager
@@ -35,7 +36,7 @@ from app.observability.logging import setup_logging
 from app.observability.request_log_file import request_logs_dir
 from app.pipeline.delivery.formats.anthropic_messages import AnthropicAssembler, AnthropicFramer
 from app.pipeline.delivery.stream import stream_delivery
-from app.server.composition import Chain, build_chain
+from app.server.composition import build_chain
 from app.server.handler import delivery_buffer, stream_settings
 from app.server.pipeline_app import (
     CHAIN_STATE_KEY,

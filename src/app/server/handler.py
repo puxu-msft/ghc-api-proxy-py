@@ -16,6 +16,7 @@ from uuid import uuid4
 import httpx2
 from pydantic import ValidationError
 
+from app.core.chain import Chain
 from app.model_provider import ModelProvider, ProviderError
 from app.models.anthropic import MessagesRequest
 from app.observability.metrics import BETA_FLAGS_STRIPPED
@@ -59,7 +60,6 @@ from app.pipeline.translation_driver.semantic import (
     TranslationTarget,
     WebSearchNotExecutable,
 )
-from app.server.composition import Chain
 from app.tokenization.estimators import estimate_anthropic_input, estimate_responses_input
 from app.wire_json import dumps
 

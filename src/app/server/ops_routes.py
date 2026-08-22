@@ -16,7 +16,7 @@ from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 from prometheus_client import REGISTRY, generate_latest
 
-from app.server.composition import Chain
+from app.core.chain import Chain
 
 CHAIN_STATE_KEY = "pipeline_chain"
 

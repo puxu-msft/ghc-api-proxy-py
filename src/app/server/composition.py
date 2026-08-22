@@ -5,9 +5,8 @@ Everything is constructed once at startup and handed down, so nothing reaches fo
 """
 
 import logging
-import re
 import socket
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 from urllib.request import getproxies
@@ -20,8 +19,9 @@ from httpcore2._async.interfaces import AsyncConnectionInterface
 from httpx2._utils import get_environment_proxies
 from openai import AsyncOpenAI
 
-from app.config.paths import expand_user_path, tokenization_state_path
+from app.config.paths import expand_user_path
 from app.config.schema import ProxyConfig
+from app.core.chain import Chain
 from app.model_provider import (
     PROVIDER_TYPE,
     GithubCopilotProvider,
@@ -47,16 +47,13 @@ from app.model_provider.ghc_client.auth.providers import (
     NoGitHubToken,
 )
 from app.model_provider.ghc_client.config import AccountType
-from app.observability.active_requests import ActiveRequestRegistry
-from app.observability.terminal import TerminalCapabilities, detect_terminal
-from app.pipeline.events import FrozenSubscribers, SubscriberRegistry
+from app.pipeline.events import SubscriberRegistry
 from app.pipeline.rate_limiting import RateLimiter
 from app.pipeline.request import RequestContext
 from app.pipeline.request_headers import compile_beta_flag_denials
 from app.pipeline.subscribers import register_builtin_subscribers
 from app.pipeline.subscribers.hosted_web_search import compile_supported_by_provider
-from app.pipeline.translation_driver.registry import TranslatorRegistry, default_registry
-from app.tokenization.state_store import TokenizationStateStore
+from app.pipeline.translation_driver.registry import default_registry
 from app.upstream.copilot import GitHubTokenSourceAdapter
 from app.upstream.stream_cap import cap_streams_per_connection
 
@@ -300,34 +297,6 @@ def _effective_proxies(options: TransportOptions) -> dict[str, str | None]:
     if options.setting_proxy is None or _environment_bypasses_everything():
         return environment
     return {"all://": options.setting_proxy, **environment}
-
-
-@dataclass(slots=True)
-class Chain:
-    """Everything a request handler needs, built once."""
-
-    config: ProxyConfig
-    providers: ProviderRegistry
-    translators: TranslatorRegistry
-    subscribers: FrozenSubscribers[RequestContext]
-    http_client: httpx2.AsyncClient
-    rate_limiters: dict[str, RateLimiter] = field(default_factory=lambda: dict[str, RateLimiter]())
-    # Who is in flight right now. Always maintained, whether or not anything renders it: the cost is one dict entry per request, and making it conditional would mean the footer shows an empty line for its first few seconds after being switched on.
-    active_requests: ActiveRequestRegistry = field(default_factory=ActiveRequestRegistry)
-    # Probed once, here, and shared by the footer and the log lines. Asking twice invites two answers that disagree, and a log stream that emits a glyph the footer has already decided this terminal cannot encode is exactly the kind of split nobody thinks to look for.
-    capabilities: TerminalCapabilities = field(default_factory=detect_terminal)
-    # What the `local` token counter has learnt. Constructing it touches nothing; `load()` does.
-    tokenization: TokenizationStateStore = field(
-        default_factory=lambda: TokenizationStateStore(tokenization_state_path())
-    )
-    # `strip_anthropic_beta_flags` compiled, in the order the operator wrote it. Same reason as `web_search_models` above it: a pattern that does not compile belongs to the config, so it should stop start-up rather than the first request that happens to reach the table.
-    beta_flag_denials: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = ()
-
-    def rate_limiter_for(self, provider_name: str) -> RateLimiter:
-        return self.rate_limiters[provider_name]
-
-    async def aclose(self) -> None:
-        await self.http_client.aclose()
 
 
 def github_token_path(config: ProxyConfig, provider_name: str = "") -> Path | None:

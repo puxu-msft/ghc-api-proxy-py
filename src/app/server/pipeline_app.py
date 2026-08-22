@@ -21,6 +21,7 @@ from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.requests import ClientDisconnect
 
+from app.core.chain import Chain
 from app.errors import ErrorCategory
 from app.model_provider.ghc_client.errors import normalize_upstream_error
 from app.observability.logging import get_logger
@@ -49,7 +50,7 @@ from app.pipeline.request import RequestContext, WireFormat
 from app.pipeline.retry import RetryReason, reason_for
 from app.pipeline.translation_driver.semantic import Loss
 from app.server.admission import InFlightLimit
-from app.server.composition import Chain, refresh_catalogs
+from app.server.composition import refresh_catalogs
 from app.server.handler import (
     _ledger_for,  # pyright: ignore[reportPrivateUsage]
     assembler_for,
