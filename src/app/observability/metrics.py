@@ -23,8 +23,12 @@ ATTRIBUTION_LINES_STRIPPED = Counter(
 )
 
 # Labelled, unlike its neighbour above, because there is no single reason this fires: an operator adds a flag to the map after upstream refused a request over it, and the question they come back with is which flag on which model is still being taken away. `flag` carries the **configured** spelling rather than the client's — a label whose value a client controls has no bound on its series count — and `model` is the resolved id, which the catalog bounds.
+#
+# **What zero does not mean.** This counts what the strip removed, which is a subset of what the client asked for. Two `anthropic-beta` headers on one request are folded into one by the dict comprehension in `forwarded_client_headers`, and the loser is gone before the strip runs — so a flag configured here, sent by the client, and never counted, is indistinguishable from a flag nobody sent. Measured 2026-08-22 against a two-header request: of three flags sent and three configured, one incremented. Closing that is a separate piece of work on the header allowlist, not a branch on this counter.
+#
+# The name says what it does rather than why: the counter knows the configured table removed these flags, and does not know whether the model would in fact have refused them. Which of the operator's entries are still earning their place is an upstream question nothing here has measured.
 BETA_FLAGS_STRIPPED = Counter(
     "ghc_proxy_beta_flags_stripped_total",
-    "`anthropic-beta` flags removed from a client request because the resolved model refuses them.",
+    "`anthropic-beta` flags removed from a client request because the configured table names them for the resolved model.",
     ("model", "flag"),
 )

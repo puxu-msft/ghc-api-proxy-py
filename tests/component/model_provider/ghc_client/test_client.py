@@ -139,10 +139,15 @@ async def test_extra_headers_reach_the_anthropic_leg() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_forwarded_header_never_travels_beside_the_one_it_collides_with() -> None:
+@pytest.mark.parametrize("leg", ["send_anthropic_messages", "send_responses"])
+async def test_a_forwarded_header_never_travels_beside_the_one_it_collides_with(leg: str) -> None:
     """The proxy's own value wins, and the loser does not come along for the ride.
 
-    `request_headers` merged with `{**extra, **owned}`, which only lets the owned value win when the two spellings are byte-equal — and they are not. This library writes `Authorization` capitalised; a header forwarded from a client arrives lowercased. Two dict keys, both surviving, and on the Responses leg `_build_request` reads `multi_items()` and puts **both** on the wire. This asserts on `get_list`, not on `headers[...]`, because a lookup by name folds the case and reports the winner either way — it cannot see the second line at all.
+    `request_headers` merged with `{**extra, **owned}`, which only lets the owned value win when the two spellings are byte-equal — and they are not. This library writes `Authorization` capitalised; a header forwarded from a client arrives lowercased. Two dict keys, both surviving.
+
+    **Both legs, and that is the whole point.** The first version of this test ran on the Anthropic leg only and was useless: `httpx2.Headers.__setitem__` folds the collision away inside that SDK, so the owned value won there whatever this function did. Measured 2026-08-22 with the fix reverted — Anthropic leg one `authorization`, Responses leg **two**. A test that only saw the leg the SDK protects is named for a guarantee it cannot observe, which is how a fix gets reported healthy after it breaks.
+
+    Asserting on `get_list`, not on `headers[...]`, because a lookup by name folds the case and reports the winner either way — it cannot see the second line at all.
     """
     seen: list[httpx2.Request] = []
 
@@ -157,10 +162,11 @@ async def test_a_forwarded_header_never_travels_beside_the_one_it_collides_with(
 
     client, http_client = build_client(handler)
     try:
-        await client.send_anthropic_messages(
+        await getattr(client, leg)(
             {"model": "m"},
             extra_headers={
                 "authorization": "Bearer client-secret",
+                "user-agent": "claude-cli/2.0.0",
                 "x-interaction-id": "client-chosen",
                 "anthropic-beta": "probe",
             },
@@ -171,6 +177,11 @@ async def test_a_forwarded_header_never_travels_beside_the_one_it_collides_with(
     sent = seen[0].headers
     assert sent.get_list("authorization") == ["Bearer copilot"]
     assert "client-secret" not in str(sent)
+    # The identity half. `test_identity_and_credential_headers_are_not_forwarded` used to guard both this and the credential above, from the allowlist end; the ruling of 2026-08-22 turned that end into a blacklist, `user-agent` now survives it, and this became the only layer that stops it. Rewriting that test without carrying this assertion across would have left the identity guarantee with nothing asserting it at any layer — verified 2026-08-22, no other test in the suite says a client's `user-agent` must not reach upstream.
+    identities = sent.get_list("user-agent")
+    assert "claude-cli/2.0.0" not in identities
+    assert "GitHubCopilotChat/0.38.0" in identities
+    # Not `== [ours]`, and the difference is a finding rather than a concession: on the Responses leg the SDK's own `AsyncOpenAI/Python …` travels beside ours, because `AsyncOpenAI` is constructed without `default_headers`. That predates this test and is nobody's ruling yet, so it is named here rather than pinned as a failure — the guarantee this test owns is that the *client's* identity does not reach upstream, and that holds on both legs.
     assert sent.get_list("x-interaction-id") == [sent["x-interaction-id"]]
     assert sent["x-interaction-id"] != "client-chosen"
     # The one that does not collide still travels; this drops colliding names, not forwarding.
