@@ -1,10 +1,7 @@
 """Whether an upstream failure reaches the driver as something it can act on.
 
-The defect these cover is not that a case was handled wrongly — it is that no case reached the
-handler at all. `GhcApiClient` posts through the SDKs, the SDKs raise their own exception types on
-4xx, 5xx and transport failure, and `classify` aborts on anything outside the pipeline's closed
-set. So every configured retry budget was dead code on the path that serves requests, and every
-upstream answer became a 502.
+The defect these cover is not that a case was handled wrongly — it is that no case reached the handler at all. `GhcApiClient` posts through the SDKs, the SDKs raise their own exception types on
+4xx, 5xx and transport failure, and `classify` aborts on anything outside the pipeline's closed set. So every configured retry budget was dead code on the path that serves requests, and every upstream answer became a 502.
 """
 
 import httpx2
@@ -40,9 +37,7 @@ def status_error(
 def test_a_deterministic_4xx_is_not_retried() -> None:
     """The measured case: a body field upstream will not accept.
 
-    Retrying it spends the server-error budget on nine identical rejections, delays the client's
-    answer, and asks upstream the same question nine times. `UpstreamRejected` is outside
-    `_RETRYABLE` so `classify` aborts, which is the whole point of it not being an `UpstreamError`.
+    Retrying it spends the server-error budget on nine identical rejections, delays the client's answer, and asks upstream the same question nine times. `UpstreamRejected` is outside `_RETRYABLE` so `classify` aborts, which is the whole point of it not being an `UpstreamError`.
     """
     normalized = normalize_upstream_error(
         status_error(400, body='{"error": {"message": "context_management: Extra inputs"}}')
@@ -98,8 +93,7 @@ def test_a_transport_failure_becomes_a_network_retry() -> None:
 def test_an_error_that_is_not_the_upstreams_is_left_alone() -> None:
     """A catch-all here would dress a bug in our own code as a retryable upstream failure.
 
-    Returning None rather than a generic `UpstreamError` is what keeps `classify`'s closed set
-    meaningful: an unrecognised exception still aborts, and still reads as a bug.
+    Returning None rather than a generic `UpstreamError` is what keeps `classify`'s closed set meaningful: an unrecognised exception still aborts, and still reads as a bug.
     """
     assert normalize_upstream_error(KeyError("subscriber bug")) is None
     assert normalize_upstream_error(PipelineAbort("already ours")) is None

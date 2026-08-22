@@ -86,10 +86,7 @@ def test_the_chosen_effort_is_always_one_the_model_offers(capabilities: tuple[st
 def test_every_rung_the_ladder_names_can_actually_be_chosen() -> None:
     """Each rung, pinned to the input that reaches it.
 
-    An earlier version compared the *set* of reachable efforts against `set(EFFORT_LADDER)`, which
-    is not a test: deleting `max` from the ladder shrinks both sides at once and it stayed green
-    while a 30k budget silently fell to a different rung. Pinning each pair means removing a rung
-    from the ladder, or moving a threshold, fails here with the pair that changed.
+    An earlier version compared the *set* of reachable efforts against `set(EFFORT_LADDER)`, which is not a test: deleting `max` from the ladder shrinks both sides at once and it stayed green while a 30k budget silently fell to a different rung. Pinning each pair means removing a rung from the ladder, or moving a threshold, fails here with the pair that changed.
     """
     assert resolve(ReasoningIntent(mode="disabled"), FULL).effort == "none"
     assert resolve(ReasoningIntent(mode="budget", budget_tokens=1), FULL).effort == "low"

@@ -20,12 +20,9 @@ type ContextEditingMode = bool | Literal["clear-thinking", "clear-tooluse", "cle
 type AssistantMessageLayout = Literal[False, "move_and_synthetic", "synthetic_only"]
 type ContentBlockStartCompat = Literal[False, "signature_delta", "redacted_thinking"]
 type RefusalAction = Literal["passthrough", "as_end_turn", "as_error"]
-# One value today. Named so the seam exists before the second placement does; `as-role-system`
-# would put the system prompt at the head of the conversation instead.
+# One value today. Named so the seam exists before the second placement does; `as-role-system` would put the system prompt at the head of the conversation instead.
 type SystemPromptPlacement = Literal["instructions-joint-string"]
-# What to do when a web search declaration carries a domain restriction this upstream has no
-# parameter for. Measured: `allowed_domains` and `blocked_domains` each earn `Unknown parameter`,
-# so they cannot be sent under any spelling, and the only question is what to do instead.
+# What to do when a web search declaration carries a domain restriction this upstream has no parameter for. Measured: `allowed_domains` and `blocked_domains` each earn `Unknown parameter`, so they cannot be sent under any spelling, and the only question is what to do instead.
 type WebSearchConstraintPolicy = Literal["error", "drop_fields"]
 
 # Dotted paths the spec marks as requiring a restart. Everything else is hot-reloadable.
@@ -85,43 +82,22 @@ class ModelProviderConfig(Section):
     # Where inference goes.
     api_base_url: str = ""
     # Where a GitHub token is exchanged for a Copilot one, and where the account is described.
-    # A separate host from the one above, and separately configurable: an enterprise install moves
-    # both, and leaving this one a module constant meant nothing could be stood up locally — the
-    # inference calls could be redirected and the three auth calls could not.
+    # A separate host from the one above, and separately configurable: an enterprise install moves both, and leaving this one a module constant meant nothing could be stood up locally — the inference calls could be redirected and the three auth calls could not.
     auth_base_url: str = ""
     # May contain `$XDG_DATA_HOME`; expanded by `app.config.paths.expand_user_path`.
     github_token_file: str = ""
     model_refresh_interval: int = Field(default=3600, ge=0)
     disabled_models: list[str] = Field(default_factory=lambda: list[str]())
-    # Which models actually execute hosted web search. Each entry is a **regular expression**,
-    # matched against upstream `model.id` with `fullmatch` — so a plain id like `gpt-5.5` still
-    # means what it says and needs no anchors, while `gpt-5\.\d+.*` covers a family. A declaration
-    # from the client is translated into this endpoint's own `{"type": "web_search"}` only for a
-    # model some pattern claims. For any other, the request is answered with a failed
-    # `web_search_tool_result` rather than sent on without the tool: a search sub-request stripped
-    # of its only tool succeeds by answering from memory, and the client labels that reply as
-    # search results.
+    # Which models actually execute hosted web search. Each entry is a **regular expression**, matched against upstream `model.id` with `fullmatch` — so a plain id like `gpt-5.5` still means what it says and needs no anchors, while `gpt-5\.\d+.*` covers a family. A declaration from the client is translated into this endpoint's own `{"type": "web_search"}` only for a model some pattern claims. For any other, the request is answered with a failed `web_search_tool_result` rather than sent on without the tool: a search sub-request stripped of its only tool succeeds by answering from memory, and the client labels that reply as search results.
     #
-    # Maintained by hand because the catalog cannot answer the question. Measured 2026-08-20 across
-    # the live catalog — 42 models, 67,656 bytes — the union of `capabilities.supports` keys holds
-    # no web-search bit of any kind, and a value-level scan for `search|web_|builtin|hosted` over
-    # the whole document returns nothing. The two models known to work cannot be told apart from
-    # the rest on any advertised field.
+    # Maintained by hand because the catalog cannot answer the question. Measured 2026-08-20 across the live catalog — 42 models, 67,656 bytes — the union of `capabilities.supports` keys holds no web-search bit of any kind, and a value-level scan for `search|web_|builtin|hosted` over the whole document returns nothing. The two models known to work cannot be told apart from the rest on any advertised field.
     #
     # The default covers the `gpt-<major>.<minor>` line for majors 5 through 9, which is every
-    # OpenAI-vendor model advertising `/responses` in that catalog — `gpt-5.3-codex`, `gpt-5.4`,
-    # `gpt-5.4-mini`, `gpt-5.5`, and the three `gpt-5.6-*` — and claims their successors as they
-    # appear. Ruled a pattern rather than an id list on 2026-08-21, after an id list had to be
-    # hand-extended for exactly that reason.
+    # OpenAI-vendor model advertising `/responses` in that catalog — `gpt-5.3-codex`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.5`, and the three `gpt-5.6-*` — and claims their successors as they appear. Ruled a pattern rather than an id list on 2026-08-21, after an id list had to be hand-extended for exactly that reason.
     #
-    # **The dot is load-bearing.** `gpt-5-mini` has no dotted minor and is vendor `Azure OpenAI`, a
-    # different supply chain; requiring `\.` is what keeps a family pattern from sweeping it in. A
-    # two-digit major (`gpt-10.0`) is deliberately not matched: inventing a naming scheme two
-    # majors ahead is a guess, and the failure is an operator adding one line, not a wrong answer.
+    # **The dot is load-bearing.** `gpt-5-mini` has no dotted minor and is vendor `Azure OpenAI`, a different supply chain; requiring `\.` is what keeps a family pattern from sweeping it in. A two-digit major (`gpt-10.0`) is deliberately not matched: inventing a naming scheme two majors ahead is a guess, and the failure is an operator adding one line, not a wrong answer.
     #
-    # Both ways of being wrong show up, and neither is silent. A model claimed here that cannot
-    # search answers 400 and says which value it refused. A model no pattern claims has its search
-    # answered as failed, which is reported at INFO with the model named.
+    # Both ways of being wrong show up, and neither is silent. A model claimed here that cannot search answers 400 and says which value it refused. A model no pattern claims has its search answered as failed, which is reported at INFO with the model named.
     models_support_web_search: list[str] = Field(
         default_factory=lambda: [r"gpt-[5-9]\.\d+.*"]
     )
@@ -171,19 +147,11 @@ class RetryStrategiesConfig(Section):
 class UpstreamRequestRetryConfig(Section):
     max_total: int = Field(default=20, ge=0)
     strategies: RetryStrategiesConfig = Field(default_factory=RetryStrategiesConfig)
-    # Which upstream stop reasons mean "this turn can be carried on", and so get handed back to the
-    # client as a tool call rather than simply ending.
+    # Which upstream stop reasons mean "this turn can be carried on", and so get handed back to the client as a tool call rather than simply ending.
     #
-    # The same list decides whether a block upstream cut short may be dropped. Those two are one
-    # setting on purpose: dropping content is only defensible when the client is handed a way to get
-    # it back, and separating them let a `content_filter` ending drop a block and hand over nothing —
-    # the client lost a passage it could not ask for again, on a line that read `[ OK ]`.
+    # The same list decides whether a block upstream cut short may be dropped. Those two are one setting on purpose: dropping content is only defensible when the client is handed a way to get it back, and separating them let a `content_filter` ending drop a block and hand over nothing — the client lost a passage it could not ask for again, on a line that read `[ OK ]`.
     #
-    # `max_tokens` alone by default. `content_filter` is the obvious candidate for the list and is
-    # deliberately not on it: `refusal` is ruled uncontinuable, a filtered turn is its neighbour, and
-    # carrying one on would most likely be filtered again. It has also never been observed — zero
-    # occurrences across 134,336 recorded operations — so this is a door left open, not a case
-    # anyone has met.
+    # `max_tokens` alone by default. `content_filter` is the obvious candidate for the list and is deliberately not on it: `refusal` is ruled uncontinuable, a filtered turn is its neighbour, and carrying one on would most likely be filtered again. It has also never been observed — zero occurrences across 134,336 recorded operations — so this is a door left open, not a case anyone has met.
     hand_over_stop_reasons: list[str] = Field(default_factory=lambda: ["max_tokens"])
     # The tool a turn that cannot be finished is handed back as. The default is what Claude Code calls the one this project ships beside it — `mcp__plugin_<plugin>_<server>__<tool>` is that client's naming for a plugin-provided MCP server, so the same server configured directly, or a renamed plugin, is a different name and this is how it gets said.
     auto_retry_tool_call_full_name: str = (
@@ -195,8 +163,7 @@ class ProactiveRateLimiterConfig(Section):
     """The bound that replaced byte-level memory accounting.
 
     Ruled 2026-08-19. 50 is a ceiling for a pathological client, not a throttle: real traffic is
-    429 requests across a whole day. A request over the limit waits rather than being refused —
-    see `app.server.admission` for why refusing is worse than waiting.
+    429 requests across a whole day. A request over the limit waits rather than being refused — see `app.server.admission` for why refusing is worse than waiting.
     """
 
     # 0 disables the gate.
@@ -223,53 +190,27 @@ class HedgeConfig(Section):
 class ToOpenAiResponsesConfig(Section):
     """How an Anthropic request is shaped for the Responses endpoint."""
 
-    # Where the system prompt goes. `instructions-joint-string` puts the blocks in the top-level
-    # `instructions` as one `\n\n`-joined string, which is the only form this upstream accepts
-    # today. Kept as a named setting rather than baked in so a second placement — `as-role-system`,
-    # a `role: system` message at the head of the conversation — can be added without the caller
-    # changing.
+    # Where the system prompt goes. `instructions-joint-string` puts the blocks in the top-level `instructions` as one `\n\n`-joined string, which is the only form this upstream accepts today. Kept as a named setting rather than baked in so a second placement — `as-role-system`, a `role: system` message at the head of the conversation — can be added without the caller changing.
     system_prompts: SystemPromptPlacement = "instructions-joint-string"
 
-    # Whether this leg offers hosted web search at all. **Off by default**, ruled 2026-08-21: the
-    # support is real but partial, and the parts that are missing are not visible to the client.
-    # A search runs upstream and really searches, but what comes back to an Anthropic client is a
-    # line of text rather than the `server_tool_use` / `web_search_tool_result` pair the protocol
-    # defines; `url_citation` annotations upstream does return are not read; `max_uses` cannot be
-    # sent; `allowed_domains` / `blocked_domains` cannot be sent either and are dropped by default.
+    # Whether this leg offers hosted web search at all. **Off by default**, ruled 2026-08-21: the support is real but partial, and the parts that are missing are not visible to the client.
+    # A search runs upstream and really searches, but what comes back to an Anthropic client is a line of text rather than the `server_tool_use` / `web_search_tool_result` pair the protocol defines; `url_citation` annotations upstream does return are not read; `max_uses` cannot be sent; `allowed_domains` / `blocked_domains` cannot be sent either and are dropped by default.
     # Shipping that on by default would make a half-built feature the thing every request gets.
     #
-    # Off does **not** mean the declaration is quietly removed. The request is answered with a
-    # failed `web_search_tool_result`, the same as for a model no pattern claims — because on this
-    # client a search is its own sub-request carrying nothing but the search, and one stripped of
-    # it answers from memory under a heading the client reads as search results. The two are
-    # distinguished in the log, which is where an operator has to be able to tell "nobody turned
-    # this on" from "this model is not on the list".
+    # Off does **not** mean the declaration is quietly removed. The request is answered with a failed `web_search_tool_result`, the same as for a model no pattern claims — because on this client a search is its own sub-request carrying nothing but the search, and one stripped of it answers from memory under a heading the client reads as search results. The two are distinguished in the log, which is where an operator has to be able to tell "nobody turned this on" from "this model is not on the list".
     #
-    # `models_support_web_search` is the other axis and still applies when this is on: this says
-    # whether the feature is offered, that says which models can run it.
+    # `models_support_web_search` is the other axis and still applies when this is on: this says whether the feature is offered, that says which models can run it.
     hosted_web_search: bool = False
 
-    # `allowed_domains` / `blocked_domains` cannot reach this upstream — measured `Unknown
-    # parameter` for each — and they are a *narrowing* the client asked for, whose loss cannot be
-    # detected afterwards: the search runs upstream and its results reach the model directly, so
-    # this proxy never sees which sites were read.
+    # `allowed_domains` / `blocked_domains` cannot reach this upstream — measured `Unknown parameter` for each — and they are a *narrowing* the client asked for, whose loss cannot be detected afterwards: the search runs upstream and its results reach the model directly, so this proxy never sees which sites were read.
     #
-    # `drop_fields` sends the search without them. The results may come from outside the requested
-    # set, and the widening is recorded but cannot be checked.
+    # `drop_fields` sends the search without them. The results may come from outside the requested set, and the widening is recorded but cannot be checked.
     # `error` refuses the request before calling upstream, naming the field.
     #
     # There is deliberately no setting that removes the declaration and lets the turn continue.
-    # On this client a web search is its own sub-request carrying nothing but the search, so a
-    # request stripped of it does not fail — the model answers from memory and the client labels
-    # the reply as search results. Refusing is the only honest way to not search.
+    # On this client a web search is its own sub-request carrying nothing but the search, so a request stripped of it does not fail — the model answers from memory and the client labels the reply as search results. Refusing is the only honest way to not search.
     #
-    # The default is `drop_fields`, which is *not* what the spec's D1 ruling wrote down. That
-    # ruling chose `error`, reading a domain list as a restriction the user had deliberately added
-    # for that search. Measured 2026-08-20 over 190 real Claude Code sub-requests, every single one
-    # carries a non-empty `allowed_domains` — the client sends it unconditionally, as part of how
-    # its WebSearch tool is built. Under `error` that makes web search permanently unavailable
-    # rather than occasionally refused, which is not the trade the ruling was making. Set `error`
-    # to have it back.
+    # The default is `drop_fields`, which is *not* what the spec's D1 ruling wrote down. That ruling chose `error`, reading a domain list as a restriction the user had deliberately added for that search. Measured 2026-08-20 over 190 real Claude Code sub-requests, every single one carries a non-empty `allowed_domains` — the client sends it unconditionally, as part of how its WebSearch tool is built. Under `error` that makes web search permanently unavailable rather than occasionally refused, which is not the trade the ruling was making. Set `error` to have it back.
     web_search_domain_restrictions: WebSearchConstraintPolicy = "drop_fields"
 
 

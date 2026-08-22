@@ -1,7 +1,6 @@
 """Anthropic Messages translators.
 
-Reads and writes the typed content model rather than moving `dict`s around. `D-ARCH = B`: wire
-shapes live at this boundary and nowhere inside.
+Reads and writes the typed content model rather than moving `dict`s around. `D-ARCH = B`: wire shapes live at this boundary and nowhere inside.
 """
 
 from collections.abc import Mapping
@@ -201,8 +200,7 @@ def _block_to_anthropic(block: ContentBlock, conversion: Conversion) -> dict[str
         if block.is_error:
             result["is_error"] = True
         return result
-    # Image and unknown blocks have no modelled fields; their original is the only faithful
-    # rendering, and returning it is what keeps a same-format crossing exact.
+    # Image and unknown blocks have no modelled fields; their original is the only faithful rendering, and returning it is what keeps a same-format crossing exact.
     if block.raw:
         return dict(block.raw)
     conversion.record(LossCode.BLOCK_NOT_CARRIED, f"{block.kind.value} into {WIRE_FORMAT}")
@@ -212,9 +210,7 @@ def _block_to_anthropic(block: ContentBlock, conversion: Conversion) -> dict[str
 def _reasoning_to_anthropic(block: ContentBlock, conversion: Conversion) -> dict[str, Any]:
     """Render a reasoning block as Anthropic thinking, issuing a carrier when the state is ours.
 
-    A Responses `encrypted_content` has no Anthropic spelling, so it travels inside a carrier this
-    proxy signs. That is the reverse of the refusal on the way out: encoding *our own* value is
-    honest, encoding Anthropic's would not be.
+    A Responses `encrypted_content` has no Anthropic spelling, so it travels inside a carrier this proxy signs. That is the reverse of the refusal on the way out: encoding *our own* value is honest, encoding Anthropic's would not be.
     """
     if block.redacted and block.reasoning is not None:
         return {"type": REDACTED_THINKING, "data": block.reasoning.value}
@@ -225,8 +221,7 @@ def _reasoning_to_anthropic(block: ContentBlock, conversion: Conversion) -> dict
             # Already an Anthropic-shaped signature — ours or theirs, it goes back as it came.
             signature = state.value
         else:
-            # A Responses payload has no Anthropic spelling, so it travels inside a carrier we
-            # sign. Encoding our own value is recovery; encoding Anthropic's would be invention.
+            # A Responses payload has no Anthropic spelling, so it travels inside a carrier we sign. Encoding our own value is recovery; encoding Anthropic's would be invention.
             signature = encode_reasoning_carrier(state.value)
     return {"type": THINKING, THINKING: block.text, "signature": signature}
 
@@ -266,13 +261,9 @@ def to_anthropic_messages(
 def _restore_thinking(payload: dict[str, Any], request: SemanticRequest) -> None:
     """Put `thinking` back on the way out to this same format.
 
-    The reader claims `thinking` now, which takes it out of `extensions` — and `extensions` is what
-    used to carry an unclaimed field across a same-format round trip untouched. Claiming a field
-    without rebuilding it is therefore how a round trip starts losing it, and the loss is silent
-    because the field simply is not there on the other side.
+    The reader claims `thinking` now, which takes it out of `extensions` — and `extensions` is what used to carry an unclaimed field across a same-format round trip untouched. Claiming a field without rebuilding it is therefore how a round trip starts losing it, and the loss is silent because the field simply is not there on the other side.
 
-    `effort` has no Anthropic spelling: it is what a Responses request says, and there is no budget
-    that means the same thing. Reported rather than invented.
+    `effort` has no Anthropic spelling: it is what a Responses request says, and there is no budget that means the same thing. Reported rather than invented.
     """
     intent = request.reasoning
     if intent is None:

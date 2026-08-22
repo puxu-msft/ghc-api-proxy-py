@@ -54,8 +54,7 @@ def _resolve(host: str, port: int) -> tuple[socket.AddressFamily, tuple[str, int
 def adopt_listener(fd: int) -> ActivatedSocketSet:
     """Wrap a listening socket this process was handed, without binding anything.
 
-    The address is read back off the socket rather than taken from configuration, so an inherited
-    listener cannot be described as something it is not.
+    The address is read back off the socket rather than taken from configuration, so an inherited listener cannot be described as something it is not.
     """
     try:
         sock = socket.socket(fileno=fd)

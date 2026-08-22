@@ -1,13 +1,8 @@
 """The non-inference surface the new chain serves.
 
-Written against `Chain` rather than adapted from `app.routes`. Those routers resolve their state
-through `app.deps`, which reaches the existing chain's settings and runtime, so mounting them here
-would have pulled that chain back in and undone the separation the module boundaries now assert.
+Written against `Chain` rather than adapted from `app.routes`. Those routers resolve their state through `app.deps`, which reaches the existing chain's settings and runtime, so mounting them here would have pulled that chain back in and undone the separation the module boundaries now assert.
 
-Only what this chain can answer truthfully is here. Readiness is the catalog, because that is what
-decides whether a request can be served at all; the model list is the catalog routing actually
-consults, so a client reading it learns what routing will accept. History and the management API
-need state this chain does not own yet, and are absent rather than answered with a plausible stub.
+Only what this chain can answer truthfully is here. Readiness is the catalog, because that is what decides whether a request can be served at all; the model list is the catalog routing actually consults, so a client reading it learns what routing will accept. History and the management API need state this chain does not own yet, and are absent rather than answered with a plausible stub.
 """
 
 from typing import cast
@@ -38,9 +33,7 @@ async def liveness() -> JSONResponse:
 async def readiness(request: Request) -> JSONResponse:
     """Whether a request would be served, judged by the same fact routing uses.
 
-    An empty catalog is not readiness: routing fails closed on capability, so every request would
-    be refused with a message saying the model does not exist. Answering 200 in that state is how
-    a supervisor is told to send traffic to a process that will refuse all of it.
+    An empty catalog is not readiness: routing fails closed on capability, so every request would be refused with a message saying the model does not exist. Answering 200 in that state is how a supervisor is told to send traffic to a process that will refuse all of it.
     """
     chain = _chain(request)
     providers = {

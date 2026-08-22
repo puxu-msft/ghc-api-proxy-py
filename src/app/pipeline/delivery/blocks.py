@@ -58,13 +58,9 @@ class CompletedBlock:
 class BlockBuffer:
     """Holds completed blocks until the policy says they may go out.
 
-    The cap is the only bound on how much this proxy holds for one response — byte-level global
-    accounting was removed on 2026-08-19 in favour of `proactive_rate_limiter.max_inflight`, which
-    bounds how many of these exist at once. So this one has to actually hold.
+    The cap is the only bound on how much this proxy holds for one response — byte-level global accounting was removed on 2026-08-19 in favour of `proactive_rate_limiter.max_inflight`, which bounds how many of these exist at once. So this one has to actually hold.
 
-    Nothing outside reads or writes it. It is set once at construction and kept private: a module
-    that could raise the cap, or add to `_held` directly, would be a second answer to "how much may
-    this request hold" and neither answer would be the enforced one.
+    Nothing outside reads or writes it. It is set once at construction and kept private: a module that could raise the cap, or add to `_held` directly, would be a second answer to "how much may this request hold" and neither answer would be the enforced one.
     """
 
     __slots__ = ("_cap_bytes", "_held", "_held_bytes", "_policy", "_released_after_tool_use")
@@ -73,8 +69,7 @@ class BlockBuffer:
         self._policy: BufferingPolicy = policy
         self._cap_bytes = cap_bytes
         self._held: list[CompletedBlock] = []
-        # Kept as a running total rather than summed on demand. Summing per `add` is quadratic
-        # over a response, and the cap has to be checked on every one of them.
+        # Kept as a running total rather than summed on demand. Summing per `add` is quadratic over a response, and the cap has to be checked on every one of them.
         self._held_bytes = 0
         self._released_after_tool_use = False
 
@@ -93,8 +88,7 @@ class BlockBuffer:
     def add(self, block: CompletedBlock) -> tuple[CompletedBlock, ...]:
         """Take one completed block and return whatever may now be delivered.
 
-        The cap is checked *before* the block goes in, so the buffer never holds more than it is
-        allowed to even for the instant before raising.
+        The cap is checked *before* the block goes in, so the buffer never holds more than it is allowed to even for the instant before raising.
         """
         self._enforce_cap(incoming=block.size_bytes)
         self._held.append(block)

@@ -84,9 +84,7 @@ def test_start_subcommand_exposes_bootstrap_options() -> None:
     # Removed 2026-08-22. It set a field name that had not existed since the rename in a8a7f87, so it silently did nothing; the base URL now comes from `model_providers.<name>.api_base_url` or from probing the subscription.
     # Asserted absent so it cannot drift back in unnoticed.
     assert "--ghc-api-base-url" not in result.stdout
-    # Removed 2026-08-22 for the same reason and in the same round: it fed the legacy `AppSettings`,
-    # which the served chain does not read, so the served chain could never see it. Its sibling was
-    # deleted first and leaving this one behind made the pair inconsistent rather than principled.
+    # Removed 2026-08-22 for the same reason and in the same round: it fed the legacy `AppSettings`, which the served chain does not read, so the served chain could never see it. Its sibling was deleted first and leaving this one behind made the pair inconsistent rather than principled.
     assert "--account-type" not in result.stdout
 
 
@@ -183,8 +181,7 @@ def test_gen_config_does_not_ask_about_a_path_that_is_free(tmp_path: Path) -> No
 def test_start_merges_cli_overrides_and_serves(monkeypatch: pytest.MonkeyPatch) -> None:
     """CLI options must reach both the settings and the server that binds the listener.
 
-    The target moved from `uvicorn.run` to `app.lifecycle`, which owns the listener and the
-    escalating shutdown. The guarded invariant is unchanged: these options must arrive.
+    The target moved from `uvicorn.run` to `app.lifecycle`, which owns the listener and the escalating shutdown. The guarded invariant is unchanged: these options must arrive.
     """
     run = Mock()
     monkeypatch.setattr("app.cli.run", run)
@@ -226,10 +223,8 @@ def test_an_inherited_listener_serves_the_same_chain_as_start(
 ) -> None:
     """`--fd` used to serve the existing chain while `start` served this one.
 
-    The docstring this replaces said `--fd` kept the old behaviour until the user answered whether
-    lifecycle.md's escalating shutdown governs the systemd path. Answered 2026-08-19: switch it.
-    Uvicorn keeps the listener here because systemd owns it, which is what makes the escalating
-    ladder — written for the section that owns its own listener — not apply.
+    The docstring this replaces said `--fd` kept the old behaviour until the user answered whether lifecycle.md's escalating shutdown governs the systemd path. Answered 2026-08-19: switch it.
+    Uvicorn keeps the listener here because systemd owns it, which is what makes the escalating ladder — written for the section that owns its own listener — not apply.
     """
     run = Mock()
     monkeypatch.setattr("app.cli.run", run)
@@ -238,8 +233,7 @@ def test_an_inherited_listener_serves_the_same_chain_as_start(
 
     assert result.exit_code == 0, result.output
     served = run.call_args.args[0]
-    # The whole point: the same helper, so the same chain. `--port` cannot be asserted alongside
-    # `--fd` — they are mutually exclusive, because the listener belongs to systemd here.
+    # The whole point: the same helper, so the same chain. `--port` cannot be asserted alongside `--fd` — they are mutually exclusive, because the listener belongs to systemd here.
     assert served.func is serve_inherited
     assert served.args[1] == 3
     assert isinstance(served.args[0], ProxyConfig)
@@ -382,9 +376,7 @@ def test_start_hands_the_configured_tls_mode_to_the_listener(
 ) -> None:
     """The config's TLS settings have to reach the thing that binds the socket.
 
-    Everything else about TLS is exercised against real sockets, but those tests build
-    `StandaloneOptions` directly. Nothing between the config file and that object was checked, and
-    a listener that quietly serves plaintext for a `mode: both` config looks entirely healthy.
+    Everything else about TLS is exercised against real sockets, but those tests build `StandaloneOptions` directly. Nothing between the config file and that object was checked, and a listener that quietly serves plaintext for a `mode: both` config looks entirely healthy.
     """
     config = tmp_path / "config.yaml"
     config.write_text(

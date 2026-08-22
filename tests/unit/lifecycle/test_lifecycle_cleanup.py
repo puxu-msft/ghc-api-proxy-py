@@ -4,8 +4,7 @@ The spec's last rung has to persist state and release resources.
 A budget that runs out is a reason to stop waiting, not a reason to cancel that teardown.
 A teardown that fails must not be reported as a clean stop.
 
-Driven through a stand-in adapter: the interesting cases are a cleanup that overruns and one that
-raises, neither of which a real listener produces on demand.
+Driven through a stand-in adapter: the interesting cases are a cleanup that overruns and one that raises, neither of which a real listener produces on demand.
 """
 
 import asyncio
@@ -20,8 +19,7 @@ from app.lifecycle.standalone import StandaloneServer
 class StubAdapter:
     """Enough of the adapter surface for the descent, with a controllable teardown.
 
-    Satisfies `ListenerLifecycle` structurally, so the type checker confirms this stand-in really
-    does mirror what the server asks for rather than that being taken on trust.
+    Satisfies `ListenerLifecycle` structurally, so the type checker confirms this stand-in really does mirror what the server asks for rather than that being taken on trust.
     """
 
     def __init__(
@@ -131,10 +129,7 @@ async def test_an_overrunning_cleanup_is_reported_and_still_completes() -> None:
 async def test_a_budget_that_expires_is_reported_and_the_teardown_still_finishes() -> None:
     """The budget marks that cleanup ran long; it never decides to skip it.
 
-    Returning while the teardown is merely pending would be no better than cancelling it: the
-    composition root's runner closes the loop on the way out and cancels it there instead. So the
-    guarded invariant is the stronger one — over budget is reported, and cleanup has still run by
-    the time `serve()` returns.
+    Returning while the teardown is merely pending would be no better than cancelling it: the composition root's runner closes the loop on the way out and cancels it there instead. So the guarded invariant is the stronger one — over budget is reported, and cleanup has still run by the time `serve()` returns.
     """
     started = asyncio.Event()
 
@@ -172,8 +167,7 @@ async def test_a_failing_cleanup_is_reported_rather_than_swallowed() -> None:
     report = await asyncio.wait_for(serving, 5)
     assert "lifespan teardown blew up" in report.cleanup_error
     assert report.stage is ShutdownStage.DRAINING
-    # A lifespan that raised is where the listener is most likely to be left open, so the release
-    # is attempted anyway rather than skipped along with the rest of the teardown.
+    # A lifespan that raised is where the listener is most likely to be left open, so the release is attempted anyway rather than skipped along with the rest of the teardown.
     assert adapter.masters_closed is True
 
 
@@ -210,8 +204,7 @@ async def test_a_clean_shutdown_reports_no_error() -> None:
 async def test_a_failing_serving_hook_releases_the_listener() -> None:
     """Past `arm()` the port is answering, so a failed start must not leave it that way.
 
-    Without the teardown the exception escapes with the listener still armed: a port that accepts
-    while nobody drives it, which is worse than the start having failed outright.
+    Without the teardown the exception escapes with the listener still armed: a port that accepts while nobody drives it, which is worse than the start having failed outright.
     """
     adapter = StubAdapter()
 
@@ -249,8 +242,7 @@ async def test_both_teardown_failures_are_reported_together() -> None:
 async def test_a_release_that_fails_during_a_failed_start_is_still_reported() -> None:
     """The start-up failure stays the exception; a leak underneath it must not vanish with it.
 
-    Suppressing these outright leaves a socket or a lifespan behind with nothing anywhere saying so,
-    which is the difference between a diagnosable leak and an invisible one.
+    Suppressing these outright leaves a socket or a lifespan behind with nothing anywhere saying so, which is the difference between a diagnosable leak and an invisible one.
     """
     adapter = StubAdapter(close_error=OSError("cannot close listener"))
 
@@ -270,8 +262,7 @@ async def test_a_release_that_fails_during_a_failed_start_is_still_reported() ->
 async def test_identical_failures_on_both_sides_stay_distinguishable() -> None:
     """The ambiguous case the "; " join alone cannot resolve.
 
-    Same type, same message, two different stages. Without the stage names the caller cannot tell
-    whether the listener is still open — which is the one thing it needs from this report.
+    Same type, same message, two different stages. Without the stage names the caller cannot tell whether the listener is still open — which is the one thing it needs from this report.
     """
     adapter = StubAdapter(
         cleanup_error=RuntimeError("same failure"),
@@ -291,9 +282,7 @@ async def test_identical_failures_on_both_sides_stay_distinguishable() -> None:
 async def test_a_lifespan_that_never_started_is_not_asked_to_shut_down() -> None:
     """A release that was never acquired must not be attempted.
 
-    Asking a failed lifespan to shut down waits for a reply that is never coming, and the timeout
-    it reports is not a real leak. Every failed start-up would then carry a note saying nothing,
-    which is how notes stop being read.
+    Asking a failed lifespan to shut down waits for a reply that is never coming, and the timeout it reports is not a real leak. Every failed start-up would then carry a note saying nothing, which is how notes stop being read.
     """
 
     class RefusingAdapter(StubAdapter):

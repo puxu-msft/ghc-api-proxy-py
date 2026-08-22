@@ -130,9 +130,7 @@ class TranslatorRegistry:
 def default_registry(config: ModelTranslationConfig | None = None) -> TranslatorRegistry:
     """Register every translator pair, with the configurable choices bound in.
 
-    Bound here rather than threaded through `translate` so the registry keeps handing out plain
-    `SemanticRequest -> dict` callables: a translator that needed config at call time would put
-    that argument on every pair, including the ones that have nothing to configure.
+    Bound here rather than threaded through `translate` so the registry keeps handing out plain `SemanticRequest -> dict` callables: a translator that needed config at call time would put that argument on every pair, including the ones that have nothing to configure.
     """
     settings = config or ModelTranslationConfig()
     registry = TranslatorRegistry()

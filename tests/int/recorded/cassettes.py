@@ -1,17 +1,12 @@
 """Recording real upstream traffic, and replaying it byte-for-byte.
 
 Hand-written rather than vcrpy: the PoC in `.dev/docs/test-infrastructure/reports/260818-vcrpy-poc.md` found that vcrpy merges
-the chunks of a streamed response, and no configuration prevents it. This project's delivery layer
-works a block at a time, so a recording that flattens the stream into one chunk cannot reproduce
-the timing the layer is built around — which is precisely the class of defect a recording is for.
+the chunks of a streamed response, and no configuration prevents it. This project's delivery layer works a block at a time, so a recording that flattens the stream into one chunk cannot reproduce the timing the layer is built around — which is precisely the class of defect a recording is for.
 
 The reason this exists at all: hand-written stand-ins mirrored what we assumed upstream does. Real
-Copilot sends a *different* `item.id` on `output_item.added` and `output_item.done` for the same
-item, and no fake ever did, so the assembler paired nothing and streaming returned zero bytes on
-the primary path. A recording cannot flatter us that way.
+Copilot sends a *different* `item.id` on `output_item.added` and `output_item.done` for the same item, and no fake ever did, so the assembler paired nothing and streaming returned zero bytes on the primary path. A recording cannot flatter us that way.
 
-Cassettes are plain JSON so a reviewer can read what upstream actually said. Bodies stay text when
-they decode as UTF-8, because the point is to be readable in a diff.
+Cassettes are plain JSON so a reviewer can read what upstream actually said. Bodies stay text when they decode as UTF-8, because the point is to be readable in a diff.
 """
 
 from __future__ import annotations
@@ -28,8 +23,7 @@ import orjson
 
 CASSETTE_VERSION = 1
 
-# Dropped before anything is written. `authorization` is the secret; the rest change on every
-# request, and a cassette that records them invites matching on values that can never match again.
+# Dropped before anything is written. `authorization` is the secret; the rest change on every request, and a cassette that records them invites matching on values that can never match again.
 VOLATILE_REQUEST_HEADERS = frozenset(
     {
         "authorization",
@@ -40,11 +34,7 @@ VOLATILE_REQUEST_HEADERS = frozenset(
     }
 )
 
-# Response headers kept in a cassette, by name. An allowlist rather than a denylist: three rounds
-# of reading a capture by hand each found an identifying header the round before had missed
-# (`x-oauth-client-id`, then `x-request-id`, then `copilot-edits-session`), which is what a
-# denylist does. Nothing downstream reads a response header, so keeping few costs nothing, and a
-# header that turns out to matter can be added deliberately.
+# Response headers kept in a cassette, by name. An allowlist rather than a denylist: three rounds of reading a capture by hand each found an identifying header the round before had missed (`x-oauth-client-id`, then `x-request-id`, then `copilot-edits-session`), which is what a denylist does. Nothing downstream reads a response header, so keeping few costs nothing, and a header that turns out to matter can be added deliberately.
 KEPT_RESPONSE_HEADERS = frozenset(
     {
         "content-type",
@@ -53,10 +43,7 @@ KEPT_RESPONSE_HEADERS = frozenset(
     }
 )
 
-# The token exchange answers with a live Copilot token and with fields that identify the account
-# it belongs to. A cassette is committed, so none of it may travel: `token` is the credential, and
-# the rest name the person and the organisations they belong to. Everything else in that response
-# describes capabilities, which is what makes the recording worth reading.
+# The token exchange answers with a live Copilot token and with fields that identify the account it belongs to. A cassette is committed, so none of it may travel: `token` is the credential, and the rest name the person and the organisations they belong to. Everything else in that response describes capabilities, which is what makes the recording worth reading.
 REDACTED_RESPONSE_FIELDS = frozenset(
     {
         "token",
@@ -70,11 +57,8 @@ REDACTED_RESPONSE_FIELDS = frozenset(
 
 REDACTION = "REDACTED"
 
-# The token exchange answers with a real expiry, and a cassette holding one stops working roughly
-# half an hour after it was recorded: the manager judges the cached token stale, exchanges again,
-# and the replay — which serves each recorded interaction once — reports the cassette exhausted.
-# Rewritten to a fixed far-future instant, which is a scrub rather than a lie: when the token
-# expires is not what any of these recordings are about, and leaving it real makes them expire too.
+# The token exchange answers with a real expiry, and a cassette holding one stops working roughly half an hour after it was recorded: the manager judges the cached token stale, exchanges again, and the replay — which serves each recorded interaction once — reports the cassette exhausted.
+# Rewritten to a fixed far-future instant, which is a scrub rather than a lie: when the token expires is not what any of these recordings are about, and leaving it real makes them expire too.
 FAR_FUTURE_EPOCH = 4102444800  # 2100-01-01T00:00:00Z
 PINNED_RESPONSE_FIELDS: dict[str, object] = {"expires_at": FAR_FUTURE_EPOCH}
 
@@ -97,9 +81,7 @@ def _decode_chunk(stored: dict[str, str]) -> bytes:
 def _scrub_value(value: object) -> object:
     """Redact the named fields wherever they appear, however deeply nested.
 
-    By field name at any depth rather than at the top level: `safety_identifier` rides inside the
-    `response` object of an SSE frame, and a scrubber that only looked at the outermost object
-    walked straight past it while reporting success.
+    By field name at any depth rather than at the top level: `safety_identifier` rides inside the `response` object of an SSE frame, and a scrubber that only looked at the outermost object walked straight past it while reporting success.
     """
     if isinstance(value, dict):
         entry = cast(dict[str, Any], value)
@@ -132,14 +114,9 @@ def _scrub_json(raw: bytes) -> bytes | None:
 def _scrub_sse(chunks: list[bytes]) -> list[bytes]:
     """Scrub every `data:` payload in a stream, then hand back the same chunk boundaries.
 
-    Joined first because a frame does not respect chunk boundaries: in a real capture only 9 of 26
-    chunks ended on a frame, so scrubbing chunk by chunk parsed truncated JSON, failed silently and
-    left the identifiers in place. Re-split by the original lengths afterwards, because those
-    boundaries are the one thing this recorder exists to preserve.
+    Joined first because a frame does not respect chunk boundaries: in a real capture only 9 of 26 chunks ended on a frame, so scrubbing chunk by chunk parsed truncated JSON, failed silently and left the identifiers in place. Re-split by the original lengths afterwards, because those boundaries are the one thing this recorder exists to preserve.
 
-    Redaction can change a payload's length, so the split follows each chunk's *share* of the
-    stream rather than its byte offset. Boundaries stay where a reader would expect them: at the
-    same point in the same frame.
+    Redaction can change a payload's length, so the split follows each chunk's *share* of the stream rather than its byte offset. Boundaries stay where a reader would expect them: at the same point in the same frame.
     """
     lengths = [len(chunk) for chunk in chunks]
     joined = b"".join(chunks)
@@ -182,17 +159,14 @@ def _scrub_response_body(chunks: list[bytes], content_type: str) -> list[bytes]:
     replacement = _scrub_json(b"".join(chunks))
     if replacement is None:
         return _without_empties(chunks)
-    # One chunk: a rewritten body is no longer the bytes that arrived, so pretending to preserve
-    # its framing would be a lie about something nothing depends on.
+    # One chunk: a rewritten body is no longer the bytes that arrived, so pretending to preserve its framing would be a lie about something nothing depends on.
     return [replacement]
 
 
 def _without_empties(chunks: list[bytes]) -> list[bytes]:
     """Drop zero-length chunks, in the one place both ways of producing one pass through.
 
-    A replay hands back only chunks with content, so a cassette holding an empty one claims a
-    boundary the replay can never reproduce. They arrive two ways: upstream ending the stream with
-    an empty read, and `_resplit` rounding a share down to nothing while redacting.
+    A replay hands back only chunks with content, so a cassette holding an empty one claims a boundary the replay can never reproduce. They arrive two ways: upstream ending the stream with an empty read, and `_resplit` rounding a share down to nothing while redacting.
     """
     return [chunk for chunk in chunks if chunk]
 
@@ -201,21 +175,16 @@ def _without_empties(chunks: list[bytes]) -> list[bytes]:
 SHAPE_FIELDS = ("model", "stream")
 
 # Extensions worth replaying. Only `http_version`: it is what product code reads, and it is text.
-# `reason_phrase` is bytes in httpx and carries nothing a test could assert on, so recording it
-# bought a round-trip conversion and no information.
+# `reason_phrase` is bytes in httpx and carries nothing a test could assert on, so recording it bought a round-trip conversion and no information.
 RECORDED_EXTENSIONS = frozenset({"http_version"})
 
 
 def _request_shape(request: httpx2.Request) -> dict[str, Any]:
     """What decides whether a recorded answer still applies to this request.
 
-    A digest of the whole body rather than a chosen few fields. Naming fields meant the ones left
-    unnamed went unchecked: emptying `input` entirely — losing every message — still matched a
-    recording that agreed on `model` and `stream`. The outbound body was measured to be identical
-    across runs, so the whole of it can be the criterion and nothing has to be judged unimportant.
+    A digest of the whole body rather than a chosen few fields. Naming fields meant the ones left unnamed went unchecked: emptying `input` entirely — losing every message — still matched a recording that agreed on `model` and `stream`. The outbound body was measured to be identical across runs, so the whole of it can be the criterion and nothing has to be judged unimportant.
 
-    `model` and `stream` are also kept in clear, so a mismatch reports something a reader can act
-    on rather than two hashes.
+    `model` and `stream` are also kept in clear, so a mismatch reports something a reader can act on rather than two hashes.
     """
     try:
         loaded: object = orjson.loads(request.content) if request.content else None
@@ -236,22 +205,14 @@ def _keep_response_header(name: str) -> bool:
 class Interaction:
     method: str
     path: str
-    # Whether the recorded request carried an Authorization header. The value is a secret and is
-    # never stored, but the *fact* is what makes a replay able to notice that the code under test
-    # stopped authenticating — which is how the catalog fetch went out bare and nothing said so.
+    # Whether the recorded request carried an Authorization header. The value is a secret and is never stored, but the *fact* is what makes a replay able to notice that the code under test stopped authenticating — which is how the catalog fetch went out bare and nothing said so.
     authenticated: bool
-    # `http_version` and the like. Product code propagates `response.extensions` — see
-    # `pipeline/executor.py` and `anthropic/client.py` — so a replay that dropped them would make
+    # `http_version` and the like. Product code propagates `response.extensions` — see `pipeline/executor.py` and `anthropic/client.py` — so a replay that dropped them would make
     # HTTP/2 traffic look like HTTP/1.1 to everything downstream.
     extensions: dict[str, str]
-    # Where these bytes came from, because it changes what they prove. A live recording carries
-    # the wire's own chunk boundaries; one rebuilt from the history database carries frame
-    # boundaries instead, and only a recording can settle how chunks actually fell.
+    # Where these bytes came from, because it changes what they prove. A live recording carries the wire's own chunk boundaries; one rebuilt from the history database carries frame boundaries instead, and only a recording can settle how chunks actually fell.
     source: str
-    # The few request fields whose change would make the recorded answer the wrong one. Matching on
-    # method and path alone let a request for a different model, or a non-streaming one, be served
-    # this recording without a word; matching on the whole body cannot work, because it carries a
-    # per-request id that can never be sent again.
+    # The few request fields whose change would make the recorded answer the wrong one. Matching on method and path alone let a request for a different model, or a non-streaming one, be served this recording without a word; matching on the whole body cannot work, because it carries a per-request id that can never be sent again.
     request_shape: dict[str, Any]
     status: int
     headers: dict[str, str]
@@ -345,10 +306,7 @@ class RequestShapeChanged(RuntimeError):
 class ReplayTransport(httpx2.MockTransport):
     """Answers from a cassette, in the order it was recorded.
 
-    Matched on method and path in sequence rather than on the request body. Bodies carry a
-    per-request id and the recorded one can never be sent again; sequence is the only thing that
-    both sides agree on. A request the cassette does not have is an error rather than a default
-    response, because a silent default is how a stand-in stops resembling the thing it stands for.
+    Matched on method and path in sequence rather than on the request body. Bodies carry a per-request id and the recorded one can never be sent again; sequence is the only thing that both sides agree on. A request the cassette does not have is an error rather than a default response, because a silent default is how a stand-in stops resembling the thing it stands for.
     """
 
     def __init__(self, cassette: Cassette) -> None:
@@ -375,8 +333,7 @@ class ReplayTransport(httpx2.MockTransport):
                     interaction.status,
                     headers=interaction.headers,
                     stream=_ReplayStream(interaction.chunks),
-                    # httpx reads these as bytes and a cassette holds text, so they go back as
-                    # bytes on the way out.
+                    # httpx reads these as bytes and a cassette holds text, so they go back as bytes on the way out.
                     extensions=cast(
                         dict[str, Any],
                         {name: value.encode() for name, value in interaction.extensions.items()},
@@ -397,17 +354,14 @@ class RecordingTransport(httpx2.AsyncBaseTransport):
         chunks = [chunk async for chunk in response.aiter_raw()]
         await response.aclose()
 
-        # Scrubbed for the cassette only. The live code downstream must receive what upstream
-        # actually sent: handing it the redacted body once made the token manager authenticate
-        # with the literal word REDACTED, and upstream said so.
+        # Scrubbed for the cassette only. The live code downstream must receive what upstream actually sent: handing it the redacted body once made the token manager authenticate with the literal word REDACTED, and upstream said so.
         recorded = _scrub_response_body(chunks, response.headers.get("content-type", ""))
         self.cassette.interactions.append(
             Interaction(
                 method=request.method,
                 path=request.url.path,
                 authenticated="authorization" in request.headers,
-                # Only the textual, reproducible ones. A network stream or a socket object means
-                # nothing on replay, and writing it to a cassette would be writing a live handle.
+                # Only the textual, reproducible ones. A network stream or a socket object means nothing on replay, and writing it to a cassette would be writing a live handle.
                 extensions={
                     name: value.decode() if isinstance(value, bytes) else str(value)
                     for name, value in response.extensions.items()
@@ -429,8 +383,7 @@ class RecordingTransport(httpx2.AsyncBaseTransport):
             headers=response.headers,
             stream=_ReplayStream(chunks),
             request=request,
-            # Passed through: the code below this transport is the real code, and dropping these
-            # made an HTTP/2 exchange look like HTTP/1.1 to it while recording.
+            # Passed through: the code below this transport is the real code, and dropping these made an HTTP/2 exchange look like HTTP/1.1 to it while recording.
             extensions=response.extensions,
         )
 

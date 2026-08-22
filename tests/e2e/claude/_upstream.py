@@ -17,9 +17,7 @@ import httpx2
 
 BASE_URL = "https://copilot.example"
 
-# Two models, because the routing decision under test depends on which endpoints a model
-# advertises: a Claude model has only the Messages endpoint, and a GPT model has `/responses`,
-# which is what makes one leg translate and the other not.
+# Two models, because the routing decision under test depends on which endpoints a model advertises: a Claude model has only the Messages endpoint, and a GPT model has `/responses`, which is what makes one leg translate and the other not.
 CATALOG: dict[str, Any] = {
     "object": "list",
     "data": [
@@ -64,8 +62,7 @@ class Exchange:
 class ScriptedUpstream:
     """Answers in a fixed order, and remembers everything it was asked.
 
-    A list rather than a mapping keyed on the request, because the sequence is the thing being
-    tested: the second reply is only reached if the client did something with the first.
+    A list rather than a mapping keyed on the request, because the sequence is the thing being tested: the second reply is only reached if the client did something with the first.
     """
 
     replies: list[Callable[[dict[str, Any]], httpx2.Response]] = field(
@@ -99,8 +96,7 @@ class ScriptedUpstream:
             index = len(self.seen) - 1
             reply = self.replies[index] if index < len(self.replies) else None
         if reply is None:
-            # Loud rather than a default answer: a test that reaches an unscripted request has
-            # discovered the client doing something it did not expect, and that is the finding.
+            # Loud rather than a default answer: a test that reaches an unscripted request has discovered the client doing something it did not expect, and that is the finding.
             return httpx2.Response(
                 500,
                 json={"error": {"message": f"no scripted reply for upstream request #{index + 1}"}},
@@ -151,8 +147,7 @@ def anthropic_tool_call(
 ) -> Callable[..., httpx2.Response]:
     """A reply asking the client to run one of its own tools.
 
-    This is how a test gets the client to do something: the proxy cannot make Claude Code issue a
-    web search, and neither can the test — only a reply that calls `WebSearch` can.
+    This is how a test gets the client to do something: the proxy cannot make Claude Code issue a web search, and neither can the test — only a reply that calls `WebSearch` can.
     """
 
     def reply(body: dict[str, Any]) -> httpx2.Response:

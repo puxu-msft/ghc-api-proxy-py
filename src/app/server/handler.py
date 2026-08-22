@@ -2,9 +2,7 @@
 
 Order follows `docs/.human-controlled/request-pipeline.md`: route first, translate only when the formats differ, then drive.
 
-Streaming is served by block-level delivery: the upstream response is read whole, its blocks are
-put through the buffer, and only complete blocks are framed as Anthropic SSE. Nothing reaches the
-client while a block is still forming.
+Streaming is served by block-level delivery: the upstream response is read whole, its blocks are put through the buffer, and only complete blocks are framed as Anthropic SSE. Nothing reaches the client while a block is still forming.
 """
 
 import asyncio
@@ -69,9 +67,7 @@ class HandledRequest:
     context: RequestContext
     route: Route
     outcome: DriverOutcome
-    # Written by this proxy rather than by an upstream. The route still names whichever upstream
-    # would have answered — that is what the console line reports — so the reply's own dialect has
-    # to be carried separately, or `dialect_for` would try to read Anthropic blocks with the
+    # Written by this proxy rather than by an upstream. The route still names whichever upstream would have answered — that is what the console line reports — so the reply's own dialect has to be carried separately, or `dialect_for` would try to read Anthropic blocks with the
     # Responses assembler.
     synthesized: bool = False
 
@@ -188,10 +184,7 @@ async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[Req
     )
     outcome = await driver.run(context)
     if isinstance(outcome.error, WebSearchNotExecutable):
-        # Answered rather than failed. The client issues a search as its own sub-request and treats
-        # an HTTP error as a transport problem worth retrying — three times, in the one case on
-        # record — while a search that cannot run will not start working on the third attempt. A
-        # failed *tool* is not retried, so the reply says so in the protocol's own words.
+        # Answered rather than failed. The client issues a search as its own sub-request and treats an HTTP error as a transport problem worth retrying — three times, in the one case on record — while a search that cannot run will not start working on the third attempt. A failed *tool* is not retried, so the reply says so in the protocol's own words.
         return HandledRequest(
             context=context,
             route=route,
@@ -257,11 +250,8 @@ async def handle_count_tokens(chain: Chain, context: RequestContext) -> dict[str
     context.payload["model"] = route.model_id
 
     context.begin_attempt()
-    # Counting measures a body; it does not send one. A subscriber that refuses a request this
-    # endpoint cannot serve is right to do so on the leg that would have served it, and wrong here:
-    # nothing is executed, no reply is produced, and there is therefore nothing that could come
-    # back invented. Refusing would only turn a question with an answer — how large is this — into
-    # an error, and push the client onto its local estimate for no gain.
+    # Counting measures a body; it does not send one. A subscriber that refuses a request this endpoint cannot serve is right to do so on the leg that would have served it, and wrong here:
+    # nothing is executed, no reply is produced, and there is therefore nothing that could come back invented. Refusing would only turn a question with an answer — how large is this — into an error, and push the client onto its local estimate for no gain.
     context.extras[COUNTING_ONLY] = True
     for subscription in chain.subscribers.for_event(EVENT_ATTEMPT_PREPARE):
         await subscription.handler(context)
@@ -343,9 +333,7 @@ async def handle_count_tokens(chain: Chain, context: RequestContext) -> dict[str
 def _countable(payload: Mapping[str, Any]) -> MessagesRequest:
     """Read the body as a Messages request for estimation only.
 
-    `max_tokens` is required to *send* a Messages request but means nothing when counting its
-    input, and Anthropic's own count_tokens endpoint does not ask for it. Supplying one here keeps
-    a legitimate body from being rejected; it is never sent anywhere.
+    `max_tokens` is required to *send* a Messages request but means nothing when counting its input, and Anthropic's own count_tokens endpoint does not ask for it. Supplying one here keeps a legitimate body from being rejected; it is never sent anywhere.
     """
     countable = dict(payload)
     countable.setdefault("max_tokens", 1)
@@ -364,15 +352,9 @@ async def handle_bounded(
 ) -> HandledRequest:
     """Run a request under the client deadline, up to the point upstream's response headers arrive.
 
-    It bounds the whole client-visible operation rather than any one attempt, and is never reset by
-    a retry — but only a caller that admitted the request knows when the request began. `deadline_at`
-    is how that caller says so; the fallback starts the clock here, which is later than admission by
-    however long the body took to read and the request took to be routed. Measured 2026-08-22: with
-    the clock started here, a body read, a JSON parse and a queue wait were all outside it.
+    It bounds the whole client-visible operation rather than any one attempt, and is never reset by a retry — but only a caller that admitted the request knows when the request began. `deadline_at` is how that caller says so; the fallback starts the clock here, which is later than admission by however long the body took to read and the request took to be routed. Measured 2026-08-22: with the clock started here, a body read, a JSON parse and a queue wait were all outside it.
 
-    This covers a non-streaming reply whole, because its body is read before `handle` returns. A
-    streaming body is not: `await send` returns at the response headers, so what arrives afterwards
-    is bounded by the same instant enforced a second time, over the body, in `pipeline_app`.
+    This covers a non-streaming reply whole, because its body is read before `handle` returns. A streaming body is not: `await send` returns at the response headers, so what arrives afterwards is bounded by the same instant enforced a second time, over the body, in `pipeline_app`.
     """
     deadline = chain.config.client_delivery.client_request_deadline
     if deadline <= 0:
@@ -396,14 +378,9 @@ def error_status(error: BaseException) -> int:
     A routing or capability refusal means the request is unserviceable, not that upstream failed.
     It must not be reported as a bad gateway.
 
-    Nor must an upstream answer be flattened into one. A client that gets 429 can back off and a
-    client that gets 400 can fix its body; both learn nothing from a 502, which says the proxy
-    itself broke. Everything used to land on that 502 because the SDK's exceptions were outside
-    the closed set — see `app.model_provider.ghc_client.errors`.
+    Nor must an upstream answer be flattened into one. A client that gets 429 can back off and a client that gets 400 can fix its body; both learn nothing from a 502, which says the proxy itself broke. Everything used to land on that 502 because the SDK's exceptions were outside the closed set — see `app.model_provider.ghc_client.errors`.
 
-    An abort that ended a retry sequence is read through to the failure that ended it, for the same
-    reason: running out of retries does not change what upstream said, and the client can still act
-    on it. Without this every retryable failure that spent its budget arrived as that same 502.
+    An abort that ended a retry sequence is read through to the failure that ended it, for the same reason: running out of retries does not change what upstream said, and the client can still act on it. Without this every retryable failure that spent its budget arrived as that same 502.
     """
     if isinstance(error, PipelineAbort) and error.cause is not None:
         return error_status(error.cause)
@@ -425,8 +402,7 @@ def error_status(error: BaseException) -> int:
     if isinstance(error, UpstreamTimeout):
         return 504
     if isinstance(error, UpstreamRejected):
-        # Upstream's own verdict on the request. Passed through so the client is told what is
-        # wrong with what it sent, rather than that some gateway failed.
+        # Upstream's own verdict on the request. Passed through so the client is told what is wrong with what it sent, rather than that some gateway failed.
         return error.status_code
     return 502
 
@@ -434,11 +410,9 @@ def error_status(error: BaseException) -> int:
 def error_headers(error: BaseException) -> dict[str, str]:
     """The few upstream headers a client needs in order to act on a failure.
 
-    `Retry-After` only: it is the one that changes what a well-behaved client does next. An
-    allowlist rather than forwarding upstream's set, which carries its own framing headers.
+    `Retry-After` only: it is the one that changes what a well-behaved client does next. An allowlist rather than forwarding upstream's set, which carries its own framing headers.
 
-    Read through an abort to the failure that ended the retries, so a rate limit that exhausted its
-    budget still tells the client how long to wait.
+    Read through an abort to the failure that ended the retries, so a rate limit that exhausted its budget still tells the client how long to wait.
     """
     if isinstance(error, PipelineAbort) and error.cause is not None:
         return error_headers(error.cause)
@@ -449,27 +423,21 @@ def error_headers(error: BaseException) -> dict[str, str]:
 
 def error_body(error: BaseException) -> dict[str, Any]:
     body: dict[str, Any] = {"type": type(error).__name__, "message": str(error)}
-    # The abort's own message already names both the budget that ran out and the failure that ran it
-    # out, so it stays as the message. What is read off the cause instead are the structured fields —
-    # upstream's code, the field it named, its own body — which say what the prose cannot be parsed for.
+    # The abort's own message already names both the budget that ran out and the failure that ran it out, so it stays as the message. What is read off the cause instead are the structured fields — upstream's code, the field it named, its own body — which say what the prose cannot be parsed for.
     detail: BaseException = (
         error.cause if isinstance(error, PipelineAbort) and error.cause is not None else error
     )
     code = getattr(detail, "code", "")
     if isinstance(code, str) and code:
-        # A stable identifier for what went wrong, where the class name is only a category and the
-        # message is prose. A client that wants to react to one particular refusal — rather than
-        # matching on English that may be reworded — has this to key on.
+        # A stable identifier for what went wrong, where the class name is only a category and the message is prose. A client that wants to react to one particular refusal — rather than matching on English that may be reworded — has this to key on.
         body["code"] = code
     field_path = getattr(detail, "field_path", "")
     if isinstance(field_path, str) and field_path:
-        # Which part of the request caused it. A refusal that names the field is one the client can
-        # act on; one that does not leaves it to guess which of its tools was the problem.
+        # Which part of the request caused it. A refusal that names the field is one the client can act on; one that does not leaves it to guess which of its tools was the problem.
         body["field_path"] = field_path
     upstream = getattr(detail, "body", "")
     if isinstance(upstream, str) and upstream:
-        # What upstream actually said. Named as upstream's rather than merged, so nothing reads
-        # our wrapper's wording as though the model had produced it.
+        # What upstream actually said. Named as upstream's rather than merged, so nothing reads our wrapper's wording as though the model had produced it.
         body["upstream"] = upstream
     return {"error": body}
 
@@ -477,14 +445,12 @@ def error_body(error: BaseException) -> dict[str, Any]:
 def response_payload(chain: Chain, handled: HandledRequest, body: dict[str, Any]) -> dict[str, Any]:
     """Bring an upstream body back to the format the client asked in.
 
-    Without this a translated route answers in the upstream's shape, which the client did not ask
-    for and cannot parse.
+    Without this a translated route answers in the upstream's shape, which the client did not ask for and cannot parse.
     """
     route = handled.route
     if handled.synthesized:
         # Already in the client's format: this proxy wrote it, in the shape the client asked in.
-        # Translating it would carry an Anthropic body through the Responses reader, which has no
-        # `server_tool_use` to read and would hand back the reply with its two blocks missing.
+        # Translating it would carry an Anthropic body through the Responses reader, which has no `server_tool_use` to read and would hand back the reply with its two blocks missing.
         return body
     if not route.translation_required:
         return body
@@ -517,8 +483,7 @@ def blocks_from_anthropic(body: dict[str, Any]) -> list[CompletedBlock]:
 def deliver_blocks(chain: Chain, blocks: list[CompletedBlock]) -> list[CompletedBlock]:
     """Put blocks through the buffer so the configured policy and cap apply.
 
-    Every block here is already complete, so what the buffer decides is ordering and holding, not
-    whether a block is whole.
+    Every block here is already complete, so what the buffer decides is ordering and holding, not whether a block is whole.
     """
     delivery = chain.config.client_delivery
     session = DeliverySession(
@@ -591,11 +556,7 @@ def framer_for(
     The pairing with `assembler_for` is the point. That one is chosen by the upstream leg, this one by the client leg, and a translated route uses one of each.
     """
     if not delivers_blocks(handled):
-        # One-shot delivery forwards upstream's bytes unchanged, so it is only correct while
-        # upstream is answering in the protocol the client asked in. Today that holds by
-        # construction — the translator registry has no Chat Completions leg, so such a route
-        # cannot be built — and this says so out loud rather than relying on it. Registering one
-        # would otherwise send a Responses body to a Chat Completions client, verbatim and silently.
+        # One-shot delivery forwards upstream's bytes unchanged, so it is only correct while upstream is answering in the protocol the client asked in. Today that holds by construction — the translator registry has no Chat Completions leg, so such a route cannot be built — and this says so out loud rather than relying on it. Registering one would otherwise send a Responses body to a Chat Completions client, verbatim and silently.
         if handled.route.translation_required:
             raise ValueError(
                 f"no framer for {handled.route.inbound_format.value}, and its bytes were translated "
@@ -607,10 +568,8 @@ def framer_for(
     return AnthropicFramer(
         message_id=message_id,
         model=model,
-        # Read here rather than carried in on a delivery setting. It says how a thinking block's
-        # signature is spelled, which is a fact about the Anthropic wire format and therefore the
-        # Anthropic framer's business; routing it through `StreamSettings` put a framing knob in
-        # the one object that is meant to name no format at all.
+        # Read here rather than carried in on a delivery setting. It says how a thinking block's signature is spelled, which is a fact about the Anthropic wire format and therefore the
+        # Anthropic framer's business; routing it through `StreamSettings` put a framing knob in the one object that is meant to name no format at all.
         signature_compat=chain.config.hook_fix_anthropic_sse.thinking.content_block_start_compat,
     )
 

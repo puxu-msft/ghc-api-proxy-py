@@ -7,8 +7,7 @@ The consequence of getting it wrong is signalling somebody else.
 
 PIDs are recycled, so a bare PID is not an identity.
 The file records the process start time alongside it, which the kernel never reuses for a PID.
-Both must match before anything is signalled, and the match is made against a process already
-pinned by a pidfd so that it cannot be replaced between the check and the signal.
+Both must match before anything is signalled, and the match is made against a process already pinned by a pidfd so that it cannot be replaced between the check and the signal.
 
 The first line stays a bare PID so `cat` and the usual tooling still work.
 The identity token is on the second line.
@@ -27,8 +26,7 @@ from pathlib import Path
 
 RESTART_SIGNAL = signal.SIGUSR2
 
-# `pidfd_send_signal`. Kernels since 5.x give new calls the same number on every architecture, and
-# the number is only reached when CPython has no binding for it; the probe below proves it is right.
+# `pidfd_send_signal`. Kernels since 5.x give new calls the same number on every architecture, and the number is only reached when CPython has no binding for it; the probe below proves it is right.
 _SYS_PIDFD_SEND_SIGNAL = 424
 
 
@@ -48,8 +46,7 @@ class PidfileEntry:
 def process_start_token(pid: int) -> str:
     """A value that distinguishes this process from a later one with the same PID.
 
-    Returns an empty string where /proc is unavailable, which callers must treat as "cannot verify"
-    rather than as "verified".
+    Returns an empty string where /proc is unavailable, which callers must treat as "cannot verify" rather than as "verified".
     """
     try:
         stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
@@ -100,10 +97,7 @@ def write_pidfile(path: Path, pid: int | None = None) -> PidfileEntry:
 def write_entry(path: Path, entry: PidfileEntry) -> PidfileEntry:
     """Write an already-formed record, token and all.
 
-    Restoring a record must not go through `write_pidfile`: that re-derives the token from whoever
-    holds the PID *now*, so putting back a process that has since exited would mint a fresh identity
-    for its replacement and certify a stranger. Writing the original bytes keeps the entry either
-    correct or provably stale, which the identity check can act on.
+    Restoring a record must not go through `write_pidfile`: that re-derives the token from whoever holds the PID *now*, so putting back a process that has since exited would mint a fresh identity for its replacement and certify a stranger. Writing the original bytes keeps the entry either correct or provably stale, which the identity check can act on.
 
     Written to a temporary name and renamed, so a reader never sees a half-written file.
     """
@@ -162,9 +156,7 @@ def live_predecessor(path: Path) -> PidfileEntry | None:
     Returns None when the file is missing or the process is gone.
     Also when the recorded identity does not match the process currently holding that PID.
 
-    The whole entry is returned rather than the PID, because the PID alone is not enough to signal
-    safely later: `signal_restart` re-checks the token against the process it has pinned, and this
-    answer can be minutes old by the time it does.
+    The whole entry is returned rather than the PID, because the PID alone is not enough to signal safely later: `signal_restart` re-checks the token against the process it has pinned, and this answer can be minutes old by the time it does.
     """
     return look_up_predecessor(path).entry
 
@@ -174,14 +166,9 @@ def signal_restart(entry: PidfileEntry) -> bool:
 
     SIGUSR2 means "from a smooth restart", so the receiver drains rather than dropping its work.
 
-    Checking the identity and then calling `os.kill` would be two decisions about two possibly
-    different processes: the predecessor can exit in between and its PID be handed to something
-    else, which would then receive the signal. So the order here is pin, verify, signal.
+    Checking the identity and then calling `os.kill` would be two decisions about two possibly different processes: the predecessor can exit in between and its PID be handed to something else, which would then receive the signal. So the order here is pin, verify, signal.
 
-    The pin is a directory descriptor on `/proc/<pid>`, which refers to that one process rather than
-    to the number. Should the process exit and its PID be handed out again, the descriptor does not
-    follow: reads through it and signals sent through it fail instead of reaching the newcomer. Both
-    later steps go through it, so neither can be answered by a stranger.
+    The pin is a directory descriptor on `/proc/<pid>`, which refers to that one process rather than to the number. Should the process exit and its PID be handed out again, the descriptor does not follow: reads through it and signals sent through it fail instead of reaching the newcomer. Both later steps go through it, so neither can be answered by a stranger.
     """
     if not entry.start_token:
         raise PidfileError(f"refusing to signal {entry.pid}: no recorded identity to verify")
@@ -213,8 +200,7 @@ def signal_restart(entry: PidfileEntry) -> bool:
 def _start_token_of(handle: int) -> str:
     """The start time of the process `handle` refers to, read through the descriptor itself.
 
-    Reading `/proc/<pid>/stat` by path again would reintroduce the very substitution the pin exists
-    to prevent.
+    Reading `/proc/<pid>/stat` by path again would reintroduce the very substitution the pin exists to prevent.
     """
     try:
         stat_fd = os.open("stat", os.O_RDONLY, dir_fd=handle)
@@ -231,11 +217,7 @@ def _start_token_of(handle: int) -> str:
 def _pidfd_signaller() -> Callable[[int, int], None] | None:
     """How to signal a pinned process, or None where that cannot be done at all.
 
-    CPython only exposes `signal.pidfd_send_signal` when the interpreter was built against headers
-    that had it, which is not the same question as whether the running kernel supports it — this
-    project's own interpreter is a build that lacks the binding on a kernel that has the call. So
-    the syscall is reached directly as a fallback, and the fallback proves itself against this
-    process before it is trusted with somebody else's.
+    CPython only exposes `signal.pidfd_send_signal` when the interpreter was built against headers that had it, which is not the same question as whether the running kernel supports it — this project's own interpreter is a build that lacks the binding on a kernel that has the call. So the syscall is reached directly as a fallback, and the fallback proves itself against this process before it is trusted with somebody else's.
     """
     native = getattr(signal, "pidfd_send_signal", None)
     if native is not None:

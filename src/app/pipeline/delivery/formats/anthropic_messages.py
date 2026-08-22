@@ -60,8 +60,7 @@ def signature_frame(block: CompletedBlock) -> SseFrame | None:
     """The `signature_delta` a standard client needs to keep a thinking block's signature.
 
     Upstream puts the signature inside `content_block_start` and never sends a delta for it, and
-    Claude Code reads it from the delta — so without this the signature is present on the wire and
-    still lost. `hook_fix_anthropic_sse.thinking.content_block_start_compat` names this shim.
+    Claude Code reads it from the delta — so without this the signature is present on the wire and still lost. `hook_fix_anthropic_sse.thinking.content_block_start_compat` names this shim.
     """
     if block.kind != "thinking":
         return None
@@ -89,9 +88,7 @@ def block_frames(
     A caller cannot obtain a partial group, which keeps a half-formed block off the wire.
     """
     if signature_compat == "redacted_thinking":
-        # Schema-valid but undefined: `config.example.yaml` documents only what `signature_delta`
-        # does. Refused at the point of use rather than quietly served as one of the other two —
-        # an operator who asked for a third behaviour should not be given a different one.
+        # Schema-valid but undefined: `config.example.yaml` documents only what `signature_delta` does. Refused at the point of use rather than quietly served as one of the other two — an operator who asked for a third behaviour should not be given a different one.
         raise ValueError(
             "content_block_start_compat='redacted_thinking' is not implemented; "
             "use 'signature_delta' (default) or false"

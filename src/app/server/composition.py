@@ -68,8 +68,7 @@ _CREDENTIALS_REFUSED = frozenset({401, 403})
 class TransportOptions:
     """What the transport settings mean for the outbound client.
 
-    Kept separate from constructing the client so the decision can be asserted without reaching
-    into a third-party object's private state.
+    Kept separate from constructing the client so the decision can be asserted without reaching into a third-party object's private state.
 
     The proxy arrives as three fields rather than one because `config.example.yaml` states three tiers — CLI `--proxy`, then `HTTP_PROXY` / `HTTPS_PROXY`, then this setting — and a single string cannot say which tier it came from. Everything below the environment (YAML, `GHC_API_PROXY_PROXY`, bundled) is one tier, so one bit of provenance is all three tiers need.
     """
@@ -395,10 +394,7 @@ async def resolve_provider_base_urls(
         changed = True
     if not changed:
         return config
-    # Revalidated for the same reason the per-provider write above is, and it is the same call that
-    # would otherwise sit twenty lines under a comment explaining why not to make it: `model_copy`
-    # does not check the name it is handed, so `model_provider` would return a config whose
-    # providers were never replaced, silently and with the right type.
+    # Revalidated for the same reason the per-provider write above is, and it is the same call that would otherwise sit twenty lines under a comment explaining why not to make it: `model_copy` does not check the name it is handed, so `model_provider` would return a config whose providers were never replaced, silently and with the right type.
     return ProxyConfig.model_validate(
         {
             **config.model_dump(),
@@ -487,10 +483,7 @@ def build_chain(
 
     # The built-ins go into whatever registry the caller brought, so their order is resolved together with anything a caller added rather than in a second, separate pass.
     subscriber_registry = subscribers if subscribers is not None else SubscriberRegistry[RequestContext]()
-    # Each provider's own patterns, kept apart rather than merged. The key lives under
-    # `model_providers.<name>` because the answer is that provider's, and a merge lets a provider
-    # whose list is empty inherit every other provider's — passing a gate its own configuration
-    # never opened.
+    # Each provider's own patterns, kept apart rather than merged. The key lives under `model_providers.<name>` because the answer is that provider's, and a merge lets a provider whose list is empty inherit every other provider's — passing a gate its own configuration never opened.
     #
     # Compiled here rather than per request, which also puts a pattern that does not compile at startup — in the config's own words — instead of inside whichever request first reached the gate.
     web_search_models = compile_supported_by_provider(
@@ -523,8 +516,7 @@ async def refresh_catalogs(chain: Chain) -> None:
     Routing fails closed on capability, so an empty catalog rejects every request until this runs.
 
     No headers parameter: each provider authenticates its own refresh from its own token manager.
-    One taken from a caller would be captured once and expire, and having the parameter at all
-    suggested authentication was the caller's job when nothing was in fact supplying it.
+    One taken from a caller would be captured once and expire, and having the parameter at all suggested authentication was the caller's job when nothing was in fact supplying it.
     """
     for name in chain.providers.names:
         await chain.providers.get(name).refresh_catalog()

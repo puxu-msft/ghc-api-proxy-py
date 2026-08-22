@@ -32,9 +32,7 @@ class SystemBlock:
 class LossCode(StrEnum):
     """Why something did not cross, as a value rather than a sentence.
 
-    Codes rather than prose because the reason is read by other code — a metric, a receipt, a
-    future degradation policy — and matching on English is how those quietly stop matching. The
-    detail string stays for a human reading a log; the code is what anything else keys on.
+    Codes rather than prose because the reason is read by other code — a metric, a receipt, a future degradation policy — and matching on English is how those quietly stop matching. The detail string stays for a human reading a log; the code is what anything else keys on.
     """
 
     EXTENSIONS_NOT_CARRIED = "extensions-not-carried"
@@ -124,10 +122,7 @@ class SemanticRequest:
     temperature: float | None = None
     # How much reasoning the request asked for, as an intent rather than either side's spelling. `None` means the request said nothing, which is not the same as asking for none — see `reasoning.resolve`, where omitting the field entirely is measured to give upstream's default rather than silence.
     reasoning: ReasoningIntent | None = None
-    # Which wire format the extensions below came off. A writer for a different format must not
-    # replay them: an unclaimed key is unclaimed *in its own format*, and in another one it is at
-    # best meaningless. Measured — sending Anthropic's `context_management` to the Responses
-    # endpoint gets `failed to parse request`, so replaying it is not merely untidy.
+    # Which wire format the extensions below came off. A writer for a different format must not replay them: an unclaimed key is unclaimed *in its own format*, and in another one it is at best meaningless. Measured — sending Anthropic's `context_management` to the Responses endpoint gets `failed to parse request`, so replaying it is not merely untidy.
     source_format: str = ""
     # Fields no translator claimed, kept so an unknown key is not silently dropped.
     extensions: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())

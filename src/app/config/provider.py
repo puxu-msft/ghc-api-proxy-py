@@ -65,8 +65,7 @@ def _write(values: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
 def pin_restart_only(startup: ProxyConfig, candidate: ProxyConfig) -> ReloadOutcome:
     """Keep restart-only values at what the process started with.
 
-    Returning the candidate untouched would make `current` report a proxy URL the process is
-    not using, since those values are read once while wiring startup.
+    Returning the candidate untouched would make `current` report a proxy URL the process is not using, since those values are read once while wiring startup.
     """
     startup_values = startup.model_dump(mode="python")
     candidate_values = candidate.model_dump(mode="python")

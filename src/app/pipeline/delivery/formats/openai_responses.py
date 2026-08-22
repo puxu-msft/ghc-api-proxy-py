@@ -35,11 +35,7 @@ from app.protocols.responses_anthropic import (
 # Stop reasons this proxy synthesises for the Anthropic leg. Responses has no equivalent of either — its vocabulary is completed / incomplete / failed — so both of ours mean the turn finished.
 _FINISHED = frozenset({"end_turn", "tool_use", ""})
 
-# Our word for a truncation → the Responses enumeration's word for it. A forward table rather than
-# a passthrough with exceptions: `incomplete_details.reason` is an enumeration, so anything not in
-# here has no legal spelling and must become null. `max_tokens` is what the assembler writes when
-# upstream said `max_output_tokens`; the round trip is deliberate — the record speaks this proxy's
-# vocabulary and each leg translates out of it.
+# Our word for a truncation → the Responses enumeration's word for it. A forward table rather than a passthrough with exceptions: `incomplete_details.reason` is an enumeration, so anything not in here has no legal spelling and must become null. `max_tokens` is what the assembler writes when upstream said `max_output_tokens`; the round trip is deliberate — the record speaks this proxy's vocabulary and each leg translates out of it.
 _INCOMPLETE_REASONS = {"max_tokens": "max_output_tokens"}
 
 
@@ -298,12 +294,8 @@ class ResponsesFramer:
                     },
                 ).encode(),
             )
-        # Only reasons this protocol has a word for travel. `incomplete_details.reason` is an
-        # enumeration, and everything else that can reach here is either our own synthesis
-        # (`incomplete`, written by the assembler when upstream gave no reason) or Anthropic's
-        # (`stop_sequence`, `pause_turn`, `refusal`) — none of which a Responses client can read.
-        # Upstream's own shape for "incomplete, no reason given" is a null, so that is what an
-        # unmapped reason becomes rather than a word from the wrong vocabulary.
+        # Only reasons this protocol has a word for travel. `incomplete_details.reason` is an enumeration, and everything else that can reach here is either our own synthesis (`incomplete`, written by the assembler when upstream gave no reason) or Anthropic's (`stop_sequence`, `pause_turn`, `refusal`) — none of which a Responses client can read.
+        # Upstream's own shape for "incomplete, no reason given" is a null, so that is what an unmapped reason becomes rather than a word from the wrong vocabulary.
         reason = _INCOMPLETE_REASONS.get(terminal.stop_reason)
         return (
             self._frame(
@@ -399,11 +391,7 @@ class ResponsesAssembler:
     def _item_key(self, data: dict[str, Any]) -> str:
         """Which draft an event belongs to.
 
-        `output_index` first, because it is the only identifier this upstream keeps stable: Copilot
-        sends a *different* `item.id` on `output_item.added` and `output_item.done` for the same
-        item, so keying on the id meant `_close` never found what `_open` had created and the whole
-        response assembled into nothing. The ids are kept as a fallback for upstreams that omit the
-        index; between the two, only the index is load-bearing.
+        `output_index` first, because it is the only identifier this upstream keeps stable: Copilot sends a *different* `item.id` on `output_item.added` and `output_item.done` for the same item, so keying on the id meant `_close` never found what `_open` had created and the whole response assembled into nothing. The ids are kept as a fallback for upstreams that omit the index; between the two, only the index is load-bearing.
         """
         index = data.get("output_index")
         if index is not None:
@@ -445,12 +433,7 @@ class ResponsesAssembler:
             item = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
             if str(item.get("type", "")) != WEB_SEARCH_CALL:
                 return ()
-            # A `web_search_call` that closes without ever having opened. This item is whole on
-            # `done` — it has no deltas and nothing to accumulate — so the `added` it skipped
-            # carried nothing this needs, and refusing to close it would throw away a search that
-            # actually ran, silently. The same regression is on record in the reference project,
-            # where the item vanished with no observation of any kind. Registering it late costs
-            # nothing; the alternative costs the turn's search.
+            # A `web_search_call` that closes without ever having opened. This item is whole on `done` — it has no deltas and nothing to accumulate — so the `added` it skipped carried nothing this needs, and refusing to close it would throw away a search that actually ran, silently. The same regression is on record in the reference project, where the item vanished with no observation of any kind. Registering it late costs nothing; the alternative costs the turn's search.
             draft = Draft(index=self._order, kind=WEB_SEARCH_CALL, payload=dict(item))
             self._order += 1
         # Upstream says on the closing event whether this item is whole: `status: "incomplete"` on the one it cut short, `"completed"` on the rest. Measured 15 times, four of them on a `function_call`, whose `arguments` are then truncated JSON.
@@ -532,12 +515,9 @@ def _reasoning_signature(draft: Draft, closing: dict[str, Any]) -> str:
     """The carrier for a Responses reasoning item, read from the event that closed it.
 
     `.dev/docs/anthropic-responses-bridge/spec.md` fixes both halves: a non-empty `encrypted_content` must survive value-exact so the
-    client can echo it back and the next turn can carry on, and a missing or empty one still emits
-    the project's bare marker rather than nothing. This used to write `""`, which broke both.
+    client can echo it back and the next turn can carry on, and a missing or empty one still emits the project's bare marker rather than nothing. This used to write `""`, which broke both.
 
-    Read from the closing item rather than the draft: `output_item.added` and `output_item.done`
-    do not carry the same content — that is the same asymmetry that made the assembler pair
-    nothing when it keyed drafts on `item.id`. The draft is the fallback, not the source.
+    Read from the closing item rather than the draft: `output_item.added` and `output_item.done` do not carry the same content — that is the same asymmetry that made the assembler pair nothing when it keyed drafts on `item.id`. The draft is the fallback, not the source.
     """
     raw = closing.get("item")
     item = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}

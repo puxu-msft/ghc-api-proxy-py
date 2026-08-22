@@ -139,8 +139,7 @@ def run_claude(
 ) -> ClaudeResult:
     """Drive the real binary against the proxy, with nothing of the developer's in reach.
 
-    `stdin` is closed rather than inherited: left open the CLI waits three seconds for piped input
-    before every run, and under pytest that wait is spent against a terminal nobody is typing at.
+    `stdin` is closed rather than inherited: left open the CLI waits three seconds for piped input before every run, and under pytest that wait is spent against a terminal nobody is typing at.
     """
     env = dict(os.environ)
     env.update(
@@ -148,9 +147,7 @@ def run_claude(
             "CLAUDE_CONFIG_DIR": str(config_dir),
             "ANTHROPIC_BASE_URL": proxy.base_url,
             "ANTHROPIC_API_KEY": "sk-ant-test-not-a-real-key",
-            # Nothing in this group should reach the network. If a future version of the CLI grows
-            # a call that ignores `ANTHROPIC_BASE_URL`, the failure should be a refused connection
-            # rather than a silent packet leaving the machine.
+            # Nothing in this group should reach the network. If a future version of the CLI grows a call that ignores `ANTHROPIC_BASE_URL`, the failure should be a refused connection rather than a silent packet leaving the machine.
             "no_proxy": "*",
             "DISABLE_TELEMETRY": "1",
             "DISABLE_ERROR_REPORTING": "1",
@@ -175,8 +172,7 @@ def run_claude(
 def claude_available() -> bool:
     """Whether the binary this group drives is installed.
 
-    Checked rather than assumed so the group skips on a machine without it instead of failing with
-    a `FileNotFoundError` that says nothing about why.
+    Checked rather than assumed so the group skips on a machine without it instead of failing with a `FileNotFoundError` that says nothing about why.
     """
     try:
         subprocess.run(
@@ -194,9 +190,7 @@ def claude_available() -> bool:
 def written_transcript(config_dir: Path) -> list[dict[str, Any]]:
     """Every JSONL record the CLI wrote for this run, in order.
 
-    The transcript is where the client records what it made of a reply — a `tool_result` and
-    whether it was flagged as an error, which is exactly the thing a proxy cannot see from its own
-    side of the wire.
+    The transcript is where the client records what it made of a reply — a `tool_result` and whether it was flagged as an error, which is exactly the thing a proxy cannot see from its own side of the wire.
     """
     records: list[dict[str, Any]] = []
     for path in sorted(config_dir.rglob("*.jsonl")):

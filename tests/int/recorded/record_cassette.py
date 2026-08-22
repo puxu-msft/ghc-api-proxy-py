@@ -5,17 +5,11 @@ Run by hand, never by the test suite: it needs credentials and it makes real cal
     PYTHONPATH=src:tests/int uv run python \\
         tests/int/recorded/record_cassette.py anthropic_to_responses_stream
 
-The prompts are deliberately trivial ("Reply with exactly: PONG") because a cassette is committed
-and read by people. Nothing here should ever carry a real conversation.
+The prompts are deliberately trivial ("Reply with exactly: PONG") because a cassette is committed and read by people. Nothing here should ever carry a real conversation.
 
-Secrets are removed on the way to disk, not on the way through: the live code below this transport
-must receive what upstream actually sent. Handing it a redacted token once made it authenticate
-with the literal word REDACTED, and upstream said so.
+Secrets are removed on the way to disk, not on the way through: the live code below this transport must receive what upstream actually sent. Handing it a redacted token once made it authenticate with the literal word REDACTED, and upstream said so.
 
-The config is pinned rather than loaded. Recording once used `load_proxy_config()` and picked up
-whichever `model_mappings` happened to be on the machine, so `gpt-5.5` went out as `gpt-5.6-terra`
-while the replay — which pins its own config — still asked for `gpt-5.5`, and the shape guard fired
-on a cassette that had just been recorded. Only credentials may come from the environment.
+The config is pinned rather than loaded. Recording once used `load_proxy_config()` and picked up whichever `model_mappings` happened to be on the machine, so `gpt-5.5` went out as `gpt-5.6-terra` while the replay — which pins its own config — still asked for `gpt-5.5`, and the shape guard fired on a cassette that had just been recorded. Only credentials may come from the environment.
 """
 
 from __future__ import annotations
@@ -34,8 +28,7 @@ from app.server.inbound import build_context, route_for_path
 from recorded.cassettes import RecordingTransport
 from recorded.recorded_provider import pinned_config
 
-# Data, not code: cassettes stay under `tests/` so they are easy to find and diff, while
-# the harness lives with the one group that imports it.
+# Data, not code: cassettes stay under `tests/` so they are easy to find and diff, while the harness lives with the one group that imports it.
 CASSETTE_DIR = Path(__file__).resolve().parents[1] / "cassettes"
 
 # Each scenario is one recorded session: whatever requests it makes, in the order it makes them.

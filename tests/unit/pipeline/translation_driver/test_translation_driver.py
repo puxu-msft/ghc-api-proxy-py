@@ -47,12 +47,8 @@ ANTHROPIC_REQUEST: dict[str, Any] = {
 def test_system_becomes_a_single_instructions_string() -> None:
     """The one shape the Copilot Responses endpoint accepts.
 
-    This assertion used to require `message-translation.md`'s worked example — one entry with
-    `role: system` and a `content` list of blocks. Measured 2026-08-18, that shape and five other
-    array forms all get `failed to parse request`; only a string is accepted. The conflict with
-    the authored spec is written up in
-    `.dev/human-controlled-docs-candidates/instructions-shape-conflict.md` and is the user's to rule
-    on — this test records what upstream does, not a preference.
+    This assertion used to require `message-translation.md`'s worked example — one entry with `role: system` and a `content` list of blocks. Measured 2026-08-18, that shape and five other array forms all get `failed to parse request`; only a string is accepted. The conflict with the authored spec is written up in
+    `.dev/human-controlled-docs-candidates/instructions-shape-conflict.md` and is the user's to rule on — this test records what upstream does, not a preference.
     """
     payload, _ = default_registry().translate(
         ANTHROPIC_REQUEST,
@@ -68,11 +64,7 @@ def test_system_becomes_a_single_instructions_string() -> None:
 def test_the_lost_block_metadata_is_named_rather_than_dropped() -> None:
     """`cache_control` cannot survive the string form, so it has to be reported.
 
-    The guard this replaces asserted the metadata crossed intact. It cannot any more. What is
-    worth guarding instead is that the loss is visible — not because caching breaks, which was
-    measured and does not (the endpoint caches by prefix on its own: the same 24082-token body
-    sent twice reported `cached_tokens` 0 then 24079), but because a field that silently vanishes
-    at a format boundary is how the next one gets missed.
+    The guard this replaces asserted the metadata crossed intact. It cannot any more. What is worth guarding instead is that the loss is visible — not because caching breaks, which was measured and does not (the endpoint caches by prefix on its own: the same 24082-token body sent twice reported `cached_tokens` 0 then 24079), but because a field that silently vanishes at a format boundary is how the next one gets missed.
     """
     _, semantic = default_registry().translate(
         ANTHROPIC_REQUEST,
@@ -112,9 +104,7 @@ def test_anthropic_tools_become_responses_function_tools() -> None:
 def test_anthropic_only_fields_do_not_reach_a_responses_body() -> None:
     """An unclaimed key is unclaimed *in its own format*, and elsewhere it is a parse error.
 
-    `context_management` is the measured case: the Responses endpoint answers
-    `failed to parse request` to a body carrying it, so replaying every extension into whatever
-    format is being written is not merely untidy.
+    `context_management` is the measured case: the Responses endpoint answers `failed to parse request` to a body carrying it, so replaying every extension into whatever format is being written is not merely untidy.
     """
     payload, semantic = default_registry().translate(
         {**ANTHROPIC_REQUEST, "context_management": {"edits": []}},
@@ -157,16 +147,13 @@ def test_round_trip_through_the_intermediate_preserves_the_request() -> None:
         target=WireFormat.ANTHROPIC_MESSAGES,
     )
     assert back["model"] == ANTHROPIC_REQUEST["model"]
-    # The string content comes back as an explicit text block, which is the same message said in
-    # the spelling the typed model round-trips through.
+    # The string content comes back as an explicit text block, which is the same message said in the spelling the typed model round-trips through.
     assert back["messages"] == [
         {"role": "user", "content": [{"type": "text", "text": "hi"}]}
     ]
     assert back["max_tokens"] == 100
     assert back["stream"] is True
-    # The system prompt returns as one block rather than two. That is the string `instructions`
-    # form doing what it must — the block boundary has nowhere to live in it. Asserted as a
-    # single joined block rather than dropped from the test, so a future change that loses the
+    # The system prompt returns as one block rather than two. That is the string `instructions` form doing what it must — the block boundary has nowhere to live in it. Asserted as a single joined block rather than dropped from the test, so a future change that loses the
     # *text* still fails.
     assert [block["text"] for block in back["system"]] == [
         "You are Claude Code, Anthropic's official CLI for Claude.\n\n"
@@ -265,10 +252,7 @@ def test_unregistered_inbound_format_is_reported() -> None:
 def test_the_system_prompt_placement_is_configurable() -> None:
     """The seam exists before the second placement does.
 
-    `instructions-joint-string` is the only value today; the point of naming it is that adding
-    `as-role-system` later changes a mapping entry rather than the shape of every call site. The
-    setting is bound into the registry, so this asserts the wiring reaches the translator rather
-    than that the default happens to be right.
+    `instructions-joint-string` is the only value today; the point of naming it is that adding `as-role-system` later changes a mapping entry rather than the shape of every call site. The setting is bound into the registry, so this asserts the wiring reaches the translator rather than that the default happens to be right.
     """
     from app.config.schema import ModelTranslationConfig, ToOpenAiResponsesConfig
     configured = default_registry(
@@ -289,16 +273,14 @@ def test_the_system_prompt_placement_is_configurable() -> None:
 def test_an_unregistered_placement_fails_loudly() -> None:
     """A fallback would silently reshape the request instead.
 
-    Same reasoning as `layout_strategy`: the config admits exactly the spellings the schema
-    defines, so an unmapped one is a bug in this module, not an operator's typo.
+    Same reasoning as `layout_strategy`: the config admits exactly the spellings the schema defines, so an unmapped one is a bug in this module, not an operator's typo.
     """
     request = from_anthropic_messages(ANTHROPIC_REQUEST)
     with pytest.raises(KeyError):
         to_openai_responses(request, system_prompts="as-role-system")  # type: ignore[arg-type]
 
 
-# A conversation with the block types real traffic actually carries. Counted from three rehydrated
-# production requests on 2026-08-18: 856 tool_use, 856 tool_result, 490 thinking, 450 text.
+# A conversation with the block types real traffic actually carries. Counted from three rehydrated production requests on 2026-08-18: 856 tool_use, 856 tool_result, 490 thinking, 450 text.
 CONVERSATION: dict[str, Any] = {
     "model": "m",
     "max_tokens": 100,
@@ -329,8 +311,7 @@ CONVERSATION: dict[str, Any] = {
 def test_a_real_conversation_becomes_responses_input_items() -> None:
     """The shapes measured off the existing service for the same conversation.
 
-    Anthropic's own block spelling reaching upstream is what produced
-    `Invalid value: 'text'. Supported values are: 'input_text', ...` on every real request.
+    Anthropic's own block spelling reaching upstream is what produced `Invalid value: 'text'. Supported values are: 'input_text', ...` on every real request.
     """
     payload, _ = default_registry().translate(
         CONVERSATION,
@@ -368,9 +349,7 @@ def test_tool_arguments_cross_as_a_json_string() -> None:
 def test_a_real_anthropic_signature_is_refused_rather_than_forged() -> None:
     """The safety property, not a formatting one.
 
-    `encrypted_content` is a value only the Responses endpoint can produce. Writing Anthropic's
-    signature into it would hand upstream something it never issued and cannot verify, so the
-    reasoning item is dropped and the refusal is recorded instead.
+    `encrypted_content` is a value only the Responses endpoint can produce. Writing Anthropic's signature into it would hand upstream something it never issued and cannot verify, so the reasoning item is dropped and the refusal is recorded instead.
     """
     payload, semantic = default_registry().translate(
         CONVERSATION,
@@ -478,9 +457,7 @@ RESPONSES_RESPONSE: dict[str, Any] = {
 def test_a_responses_reasoning_item_reaches_anthropic_with_its_state_intact() -> None:
     """The signature used to be written as `""`, which threw the continuation state away.
 
-    `encrypted_content` has no Anthropic spelling, so it rides inside a carrier this proxy signs —
-    the reverse of the refusal on the way out, and legitimate for the same reason: the value is
-    upstream's own, recovered rather than invented.
+    `encrypted_content` has no Anthropic spelling, so it rides inside a carrier this proxy signs — the reverse of the refusal on the way out, and legitimate for the same reason: the value is upstream's own, recovered rather than invented.
     """
     payload, _ = default_registry().translate_response(
         RESPONSES_RESPONSE,
@@ -635,8 +612,7 @@ def test_a_user_location_travels_but_an_unknown_sub_key_does_not() -> None:
 
 
 # The declaration every real Claude Code web search sub-request sends. Measured over 190 of them on
-# 2026-08-20: the shape is identical every time, and `allowed_domains` is non-empty in all 190 —
-# the client attaches it unconditionally, as part of how its WebSearch tool is built.
+# 2026-08-20: the shape is identical every time, and `allowed_domains` is non-empty in all 190 — the client attaches it unconditionally, as part of how its WebSearch tool is built.
 REAL_WEB_SEARCH_DECLARATION: dict[str, Any] = {
     "type": "web_search_20250305",
     "name": "web_search",
@@ -798,8 +774,7 @@ def test_a_search_the_upstream_ran_is_reported_rather_than_dropped() -> None:
         {"type": "text", "text": "[web_search] bun release notes"},
         {"type": "text", "text": "Bun 1.3 is out."},
     ]
-    # The 416-character upstream handle must not reach the client: it means nothing to the model, it
-    # inflates every later request, and this project carries no continuation that could spend it.
+    # The 416-character upstream handle must not reach the client: it means nothing to the model, it inflates every later request, and this project carries no continuation that could spend it.
     assert "x" * 32 not in json.dumps(payload)
     assert semantic.conversion.lossless, semantic.conversion.losses
 

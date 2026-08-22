@@ -193,8 +193,7 @@ async def test_ordinary_send_raises_in_the_pipelines_vocabulary() -> None:
     """The asymmetry this guards is unchanged; the exception it raises is not.
 
     An ordinary send still raises where `send_responses_headers` returns. It used to raise the
-    SDK's own `openai.RateLimitError`, which is outside the driver's closed set, so `classify`
-    aborted and the 429 reached the client as a 502 with no retry ever considered.
+    SDK's own `openai.RateLimitError`, which is outside the driver's closed set, so `classify` aborted and the 429 reached the client as a 502 with no retry ever considered.
     """
     client, http_client = build_client(
         token_or(httpx2.Response(429, json={"error": "slow down"}, headers={"retry-after": "7"}))

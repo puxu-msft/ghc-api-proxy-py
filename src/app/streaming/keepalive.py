@@ -129,8 +129,7 @@ async def _cancel_and_observe[T](pending: asyncio.Task[T]) -> BaseException | No
     except asyncio.CancelledError:
         if current is not None and current.cancelling() > cancelling_before:
             raise
-        # The pull task's own cancellation is expected during cleanup. An outer
-        # cancellation already in flight resumes after this finally block.
+        # The pull task's own cancellation is expected during cleanup. An outer cancellation already in flight resumes after this finally block.
     except Exception as error:
         return error
     return None

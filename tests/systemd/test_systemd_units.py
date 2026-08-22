@@ -83,13 +83,10 @@ class _GenericUpstreamHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         self.requests.append(self.path)
-        # Both hosts land here: the service is configured with `api_base_url` and `auth_base_url`
-        # pointing at this one server, which is the whole reason those two are configurable.
+        # Both hosts land here: the service is configured with `api_base_url` and `auth_base_url` pointing at this one server, which is the whole reason those two are configurable.
         if self.path == "/copilot_internal/v2/token":
             # The exchange the proxy performs before it can talk to the inference host at all.
-            # `refresh_in` is what upstream sends, so the stand-in sends it too. It is no longer
-            # required — nothing reads it since the background refresh loop went — but a fixture
-            # that quietly drifts from the real response shape stops being evidence about it.
+            # `refresh_in` is what upstream sends, so the stand-in sends it too. It is no longer required — nothing reads it since the background refresh loop went — but a fixture that quietly drifts from the real response shape stops being evidence about it.
             self._respond(
                 {
                     "token": "copilot-smoke-token",
@@ -177,10 +174,7 @@ def test_service_provisions_and_configures_writable_state_directory() -> None:
     assert service["Service"]["StateDirectory"] == "ghc-api-proxy"
     assert service["Service"]["StateDirectoryMode"] == "0700"
     assert service["Service"]["UMask"] == "0077"
-    # One variable, not two paths. The chain derives every state location from XDG_DATA_HOME, so
-    # pointing that at the directory systemd already creates covers the config, the token file and
-    # the calibration state at once. The two keys that stood here named the retired chain's paths,
-    # and the current schema rejects them — the process exits at startup rather than ignoring them.
+    # One variable, not two paths. The chain derives every state location from XDG_DATA_HOME, so pointing that at the directory systemd already creates covers the config, the token file and the calibration state at once. The two keys that stood here named the retired chain's paths, and the current schema rejects them — the process exits at startup rather than ignoring them.
     environment = set(split(service["Service"]["Environment"]))
     assert environment == {"XDG_DATA_HOME=/var/lib"}
 
@@ -190,10 +184,7 @@ def test_service_state_environment_lands_in_the_state_directory(
 ) -> None:
     """The unit's `Environment=` has to actually decide where state is written.
 
-    The invariant is unchanged; its consumer is not. It used to be asserted against
-    `load_settings()` and the two `GHC_API_PROXY_*__*_PATH` keys, which belong to the chain `--fd` no longer
-    runs. `StateDirectory=ghc-api-proxy` makes systemd create `/var/lib/ghc-api-proxy`, and the
-    assertion is that this is exactly where the chain then looks.
+    The invariant is unchanged; its consumer is not. It used to be asserted against `load_settings()` and the two `GHC_API_PROXY_*__*_PATH` keys, which belong to the chain `--fd` no longer runs. `StateDirectory=ghc-api-proxy` makes systemd create `/var/lib/ghc-api-proxy`, and the assertion is that this is exactly where the chain then looks.
     """
     service = read_unit("ghc-api-proxy.service")
     for assignment in split(service["Service"]["Environment"]):
@@ -357,8 +348,7 @@ def test_inherited_listener_serves_ready_generic_upstream_and_persists_overrides
         {
             "HOME": "/nonexistent",
             "PYTHONPATH": str(SYSTEMD_DIR.parents[1] / "src"),
-            # Both hosts at the local fake. Configurable since 2026-08-19; before that the auth
-            # host was a module constant and this could not be stood up without real credentials.
+            # Both hosts at the local fake. Configurable since 2026-08-19; before that the auth host was a module constant and this could not be stood up without real credentials.
             "GHC_API_PROXY_MODEL_PROVIDERS__GHC__TYPE": "github_copilot",
             "GHC_API_PROXY_MODEL_PROVIDERS__GHC__API_BASE_URL": upstream_url,
             "GHC_API_PROXY_MODEL_PROVIDERS__GHC__AUTH_BASE_URL": upstream_url,

@@ -262,8 +262,7 @@ def test_the_config_path_variable_is_not_read_as_a_setting(
 ) -> None:
     """`GHC_API_PROXY_CONFIG` names the file; it is not one of the settings inside it.
 
-    Left in the value layer it arrives as a top-level `config` key, and `ProxyConfig` forbids
-    unknown ones — so pointing at a config file would refuse to start rather than select it.
+    Left in the value layer it arrives as a top-level `config` key, and `ProxyConfig` forbids unknown ones — so pointing at a config file would refuse to start rather than select it.
     """
     config = tmp_path / "config.yaml"
     config.write_text("server:\n  port: 4321\n", encoding="utf-8")

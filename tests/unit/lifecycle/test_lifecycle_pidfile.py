@@ -202,9 +202,7 @@ def test_the_predecessor_receives_the_restart_signal(tmp_path: Path) -> None:
 def test_a_recycled_pid_is_not_signalled(tmp_path: Path) -> None:
     """The failure this whole mechanism exists to prevent: signalling somebody else.
 
-    A live process wearing a PID we recorded earlier must not be signalled just for holding the
-    number. Standing in for the recycled process is a live one whose recorded token is wrong, which
-    is the same thing as far as the check is concerned — and it would die of SIGUSR2 if signalled.
+    A live process wearing a PID we recorded earlier must not be signalled just for holding the number. Standing in for the recycled process is a live one whose recorded token is wrong, which is the same thing as far as the check is concerned — and it would die of SIGUSR2 if signalled.
     """
     del tmp_path
     with subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"]) as other:
@@ -252,10 +250,7 @@ def test_removing_an_absent_file_reports_false(tmp_path: Path) -> None:
 def test_restoring_a_record_keeps_its_original_token(tmp_path: Path) -> None:
     """Putting a record back must not re-derive its identity from whoever holds the PID now.
 
-    A predecessor that exited during a failed handover may have had its PID reused. Recomputing the
-    token would then certify the stranger, and the next `--restart` would signal it — the very
-    accident the token exists to prevent. Writing the original bytes leaves it provably stale
-    instead, which the identity check refuses.
+    A predecessor that exited during a failed handover may have had its PID reused. Recomputing the token would then certify the stranger, and the next `--restart` would signal it — the very accident the token exists to prevent. Writing the original bytes leaves it provably stale instead, which the identity check refuses.
     """
     path = tmp_path / "standalone.pid"
     with subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"]) as other:

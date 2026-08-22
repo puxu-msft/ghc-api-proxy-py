@@ -76,16 +76,11 @@ async def run_standalone(
     """Serve until the shutdown ladder finishes, then release everything.
 
     The predecessor is signalled only once this process is listening.
-    Signalling first would ask it to stop while nothing else could accept yet, opening the very gap
-    the restart exists to avoid.
+    Signalling first would ask it to stop while nothing else could accept yet, opening the very gap the restart exists to avoid.
 
-    `on_draining` is a parameter rather than a field of `StandaloneOptions` because the options
-    describe the listener; this is a hook for whoever is watching, and the two have no reason to
-    travel together.
+    `on_draining` is a parameter rather than a field of `StandaloneOptions` because the options describe the listener; this is a hook for whoever is watching, and the two have no reason to travel together.
 
-    `on_observable` is handed the live connection count once the adapter exists. A number rather
-    than a snapshot, because a display reads it on its own schedule and a value copied out here
-    would be stale before it was drawn.
+    `on_observable` is handed the live connection count once the adapter exists. A number rather than a snapshot, because a display reads it on its own schedule and a value copied out here would be stale before it was drawn.
     """
     listeners = (
         adopt_listener(options.fd)
@@ -168,10 +163,8 @@ async def run_standalone(
     try:
         report = await server.serve()
     except BaseException:
-        # A start that never became a running server must not leave the predecessor without the
-        # pidfile it is still the rightful owner of; it is the live process, and we are not.
-        # The original record goes back verbatim: re-deriving its token would read whoever holds
-        # that PID now, which is the one case the token exists to catch.
+        # A start that never became a running server must not leave the predecessor without the pidfile it is still the rightful owner of; it is the live process, and we are not.
+        # The original record goes back verbatim: re-deriving its token would read whoever holds that PID now, which is the one case the token exists to catch.
         if announced and predecessor is not None:
             write_entry(pidfile, predecessor)
         elif announced:

@@ -34,8 +34,7 @@ class UpstreamError(PipelineError):
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
-        # Carried because the rate limiter reads `Retry-After` and the client deserves upstream's
-        # own words. Both are lost the moment an SDK exception is flattened to a string.
+        # Carried because the rate limiter reads `Retry-After` and the client deserves upstream's own words. Both are lost the moment an SDK exception is flattened to a string.
         self.headers: Mapping[str, str] = dict(headers or {})
         self.body = body
 
@@ -60,13 +59,9 @@ class UpstreamRateLimit(UpstreamError):
 class UpstreamRejected(PipelineError):
     """Upstream refused the request itself; sending the same body again cannot help.
 
-    Deliberately *not* an `UpstreamError`, so `classify` aborts rather than retries. A malformed
-    body, an unsupported field, an unknown tool — these are deterministic. Spending the server-error
-    budget on nine identical rejections wastes the budget, delays the client's answer by the
-    backoff, and asks upstream the same question nine times.
+    Deliberately *not* an `UpstreamError`, so `classify` aborts rather than retries. A malformed body, an unsupported field, an unknown tool — these are deterministic. Spending the server-error budget on nine identical rejections wastes the budget, delays the client's answer by the backoff, and asks upstream the same question nine times.
 
-    The status and body travel so the client is told what upstream actually said, rather than a
-    bare 502 that reads like the proxy failed.
+    The status and body travel so the client is told what upstream actually said, rather than a bare 502 that reads like the proxy failed.
 
     `sent` travels for the same reason one level further back: upstream's verdict is a verdict on a particular string of bytes, and that string exists nowhere else. The payload dict survives on the context, but it is the body *before* serialization and so cannot answer a refusal about key order, separators, or anything an SDK did on the way out. The bytes are read off the response the SDK attached to its own exception, which is discarded the moment the error is handled, so they are carried on the error rather than fetched later. Empty when the failure arrived without a request to read them off.
     """

@@ -1,18 +1,11 @@
 """Turn the SDKs' exceptions into the pipeline's closed set.
 
 `docs/.human-controlled/request-pipeline.md` has the driver abort on anything outside that set, and that is the right default — a
-subscriber's `KeyError` must not read as "retry". But the production send path calls
-`AsyncOpenAI.post` and `AsyncAnthropic.post` directly, and both raise their *own* status and
-connection exceptions on 4xx, 5xx and transport failure. Those are outside the set, so every real
-upstream failure aborted and surfaced as a bare 502, and the configured 429, 5xx and network retry
-budgets were never once consulted on the path that serves requests.
+subscriber's `KeyError` must not read as "retry". But the production send path calls `AsyncOpenAI.post` and `AsyncAnthropic.post` directly, and both raise their *own* status and connection exceptions on 4xx, 5xx and transport failure. Those are outside the set, so every real upstream failure aborted and surfaced as a bare 502, and the configured 429, 5xx and network retry budgets were never once consulted on the path that serves requests.
 
-The fix belongs here rather than in `classify`: widening the closed set would let genuine bugs read
-as retryable. This is the one boundary where the SDKs' vocabulary becomes ours, so it is where the
-translation goes — every caller of `GhcApiClient` gets it, not just the driver that noticed.
+The fix belongs here rather than in `classify`: widening the closed set would let genuine bugs read as retryable. This is the one boundary where the SDKs' vocabulary becomes ours, so it is where the translation goes — every caller of `GhcApiClient` gets it, not just the driver that noticed.
 
-Which statuses come back retryable is a judgement about determinism, not about severity. A 400
-naming a field upstream will not accept answers the same way nine times over; a 503 does not.
+Which statuses come back retryable is a judgement about determinism, not about severity. A 400 naming a field upstream will not accept answers the same way nine times over; a 503 does not.
 """
 
 from collections.abc import Mapping
@@ -35,8 +28,7 @@ from app.pipeline.exceptions import (
 )
 
 # Statuses where the same request, sent again, can plausibly get a different answer.
-# 401 is here because the token can be re-minted; whether it *is* retried is the budget's call,
-# and `githubTokenExpired.max_retries` defaults to 0.
+# 401 is here because the token can be re-minted; whether it *is* retried is the budget's call, and `githubTokenExpired.max_retries` defaults to 0.
 RETRYABLE_STATUSES = frozenset({401, 408, 409, 425, 429, 500, 502, 503, 504})
 
 _STATUS_ERRORS = (OpenAIStatusError, AnthropicStatusError)
@@ -47,8 +39,7 @@ _CONNECTION_ERRORS = (OpenAIConnectionError, AnthropicConnectionError, httpx2.Tr
 def retry_after_seconds(headers: Mapping[str, str]) -> float | None:
     """Read `Retry-After` as seconds, ignoring the HTTP-date form.
 
-    The date form is legal and upstream does not use it; parsing it here would be code with no
-    way to tell whether it works.
+    The date form is legal and upstream does not use it; parsing it here would be code with no way to tell whether it works.
     """
     raw = next((v for k, v in headers.items() if k.lower() == "retry-after"), None)
     if raw is None:
@@ -99,8 +90,7 @@ def _sent_body(error: Exception) -> bytes:
 def normalize_upstream_error(error: BaseException) -> PipelineError | None:
     """Map one SDK failure onto the closed set, or None when it is not one.
 
-    None rather than a catch-all: an exception this does not recognise is not an upstream failure,
-    and dressing it as one would hide a bug in our own code behind a retry.
+    None rather than a catch-all: an exception this does not recognise is not an upstream failure, and dressing it as one would hide a bug in our own code behind a retry.
     """
     if isinstance(error, PipelineError):
         return None

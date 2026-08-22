@@ -48,8 +48,7 @@ def slow_app(
             await hold.wait()
         except asyncio.CancelledError:
             # The handler observing cancellation is the only proof the request was interrupted.
-            # A count of connections told to shut down proves nothing: Uvicorn leaves a running
-            # handler alone and merely clears keep_alive.
+            # A count of connections told to shut down proves nothing: Uvicorn leaves a running handler alone and merely clears keep_alive.
             interrupted.set()
             if stubborn.is_set():
                 # Refuses to unwind, which is what makes rung 3 distinguishable from rung 2.
@@ -228,8 +227,7 @@ async def test_a_restart_signal_alone_never_interrupts_the_request(harness: Harn
 async def test_a_second_signal_actually_interrupts_the_running_request(harness: Harness) -> None:
     """Rung 2 must reach the handler, not merely the connection.
 
-    The handler is never released, so the only way the shutdown can finish is if the request was
-    genuinely interrupted. Counting connections would not show that.
+    The handler is never released, so the only way the shutdown can finish is if the request was genuinely interrupted. Counting connections would not show that.
     """
     serving = await run_until_serving(harness)
     in_flight = asyncio.create_task(harness.request("/slow"))
@@ -499,9 +497,7 @@ async def test_a_failed_handover_leaves_the_predecessor_its_pidfile(
 ) -> None:
     """A start that never became a server must not strip the live process of its record.
 
-    The successor overwrites the pidfile before signalling, so a failure in between would otherwise
-    leave the predecessor — still serving — with no file naming it, and the next `--restart` with
-    nothing to find.
+    The successor overwrites the pidfile before signalling, so a failure in between would otherwise leave the predecessor — still serving — with no file naming it, and the next `--restart` with nothing to find.
     """
     predecessor = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     port = free_port()
@@ -513,8 +509,7 @@ async def test_a_failed_handover_leaves_the_predecessor_its_pidfile(
         recorded = pidfile.read_text(encoding="utf-8")
 
         def refuse(entry: PidfileEntry) -> bool:
-            # Standing in for the predecessor having exited and its PID been reused: from here on,
-            # re-deriving the token yields somebody else's. Restoring must not do that.
+            # Standing in for the predecessor having exited and its PID been reused: from here on, re-deriving the token yields somebody else's. Restoring must not do that.
             def foreign_token(pid: int) -> str:
                 del pid
                 return "999999"

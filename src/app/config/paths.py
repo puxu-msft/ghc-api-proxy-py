@@ -42,9 +42,7 @@ def standalone_pidfile_path(port: int, directory: Path | None = None) -> Path:
 def tokenization_state_path() -> Path:
     """Where the calibration and prompt-limit state lives.
 
-    Derived rather than configured: `config.example.yaml` has no `tokenization` section, and the
-    `local` token counter is useless without somewhere to keep what it has learnt. Naming the
-    location here keeps that working without inventing a config key the spec does not have.
+    Derived rather than configured: `config.example.yaml` has no `tokenization` section, and the `local` token counter is useless without somewhere to keep what it has learnt. Naming the location here keeps that working without inventing a config key the spec does not have.
     """
     return user_data_path() / "tokenization.json"
 
@@ -53,10 +51,7 @@ def tokenization_state_path() -> Path:
 def tls_material_dir() -> Path:
     """Where a generated self-signed pair is kept.
 
-    `config.example.yaml` says `<config-dir>/tls/`, and the config directory is the one holding
-    the config file — which the user placed under `$XDG_DATA_HOME`. A fixed location rather than
-    the directory the config happened to be read from: a `config.yaml` picked up from the working
-    directory would otherwise scatter key material into whatever tree the service was started in.
+    `config.example.yaml` says `<config-dir>/tls/`, and the config directory is the one holding the config file — which the user placed under `$XDG_DATA_HOME`. A fixed location rather than the directory the config happened to be read from: a `config.yaml` picked up from the working directory would otherwise scatter key material into whatever tree the service was started in.
     """
     return user_data_path() / "tls"
 

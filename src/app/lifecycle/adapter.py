@@ -207,8 +207,7 @@ class UvicornListenerAdapter:
     def cancel_requests(self) -> int:
         """Cancel the request tasks still running, and report how many were cancelled.
 
-        `interrupt_connections` alone does not reach a handler that is mid-request: Uvicorn only
-        clears `keep_alive` there and lets the response finish.
+        `interrupt_connections` alone does not reach a handler that is mid-request: Uvicorn only clears `keep_alive` there and lets the response finish.
         Actually interrupting a request therefore means cancelling the task running it.
         Idempotent, so a caller may call it again without counting the same work twice.
         """

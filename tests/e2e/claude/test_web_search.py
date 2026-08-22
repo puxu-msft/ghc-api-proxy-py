@@ -16,14 +16,9 @@ SEARCH_TOOLS = ["--allowedTools", "WebSearch"]
 def test_a_search_the_proxy_cannot_run_never_reaches_upstream(config_dir: Path) -> None:
     """The failure this whole design exists to prevent, checked at the only place it is visible.
 
-    Upstream is scripted with exactly two replies and sees exactly two requests, while the proxy
-    handles three: the middle one is the search sub-request, answered by the proxy and never
-    forwarded. If it *had* been forwarded with its tool stripped, upstream would have been asked a
-    third time — and would have answered from memory, under a heading the client attaches whether a
-    search happened or not.
+    Upstream is scripted with exactly two replies and sees exactly two requests, while the proxy handles three: the middle one is the search sub-request, answered by the proxy and never forwarded. If it *had* been forwarded with its tool stripped, upstream would have been asked a third time — and would have answered from memory, under a heading the client attaches whether a search happened or not.
 
-    Asserted on the count rather than on the absence of a `web_search_` type, because a stripped
-    declaration and an intercepted request look identical from upstream's side except for this.
+    Asserted on the count rather than on the absence of a `web_search_` type, because a stripped declaration and an intercepted request look identical from upstream's side except for this.
     """
     upstream = ScriptedUpstream(
         replies=[
@@ -50,9 +45,7 @@ def test_a_search_the_proxy_cannot_run_never_reaches_upstream(config_dir: Path) 
 def test_the_conversation_survives_the_failed_search(config_dir: Path) -> None:
     """The other half: refusing is only better than fabricating if the turn still finishes.
 
-    A synthesised reply the client could not parse would show up here as a non-zero exit or a run
-    that never reaches the scripted final answer — both of which the proxy's own tests would call
-    a success.
+    A synthesised reply the client could not parse would show up here as a non-zero exit or a run that never reaches the scripted final answer — both of which the proxy's own tests would call a success.
     """
     final = "e2e-after-search-Zx91"
     upstream = ScriptedUpstream(
@@ -79,15 +72,9 @@ def test_the_model_is_told_the_search_failed_rather_than_shown_invented_findings
 ) -> None:
     """The fact the entire choice turns on, read off what the client sent back on the next turn.
 
-    The client renders the synthesised error itself, into the same block it would have put results
-    in: `Web search results for query: "..."` followed by `Web search error: unavailable`. So the
-    model is told, in the client's own words, that the search did not produce anything — under the
-    heading that would otherwise have introduced findings.
+    The client renders the synthesised error itself, into the same block it would have put results in: `Web search results for query: "..."` followed by `Web search error: unavailable`. So the model is told, in the client's own words, that the search did not produce anything — under the heading that would otherwise have introduced findings.
 
-    That heading is why removing the declaration was unacceptable. It is attached whether or not a
-    search happened, so a model answering from memory has its recollection presented beneath it as
-    though searched. Here the same heading is followed by an error, and nothing is passed off as a
-    finding.
+    That heading is why removing the declaration was unacceptable. It is attached whether or not a search happened, so a model answering from memory has its recollection presented beneath it as though searched. Here the same heading is followed by an error, and nothing is passed off as a finding.
 
     Asserted on the rendered text rather than on `is_error`, which the client does not set for this:
     a search that fails is a result it knows how to describe, not a tool that broke.

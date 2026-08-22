@@ -13,11 +13,7 @@ class GhcClientConfig:
 
     Deliberately not the host's `AppSettings`: a library should not know the host's config model.
 
-    Two hosts, not one. `api_base_url` is where inference goes; `auth_base_url` is where a GitHub
-    token is exchanged for a Copilot one and where the account is described. They differ per
-    deployment — an enterprise install moves both — and they used to be a settable field and a
-    module constant respectively, which meant nothing could stand this library up against a local
-    server: the inference calls could be redirected and the three auth calls could not.
+    Two hosts, not one. `api_base_url` is where inference goes; `auth_base_url` is where a GitHub token is exchanged for a Copilot one and where the account is described. They differ per deployment — an enterprise install moves both — and they used to be a settable field and a module constant respectively, which meant nothing could stand this library up against a local server: the inference calls could be redirected and the three auth calls could not.
     """
 
     account_type: AccountType = "individual"

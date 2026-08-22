@@ -1,10 +1,6 @@
 """What the client's headers and `context_management` look like by the time upstream sees them.
 
-Both cover the same defect from opposite ends. Claude Code sends `anthropic-beta` with ten tokens
-and `context_management: {"edits": null}` on every request; the chain forwarded neither correctly,
-so upstream refused a field the beta would have enabled and the client saw a 502. Measured against
-the live upstream on 2026-08-18: `{"edits": null}` is refused, `{"edits": []}` is accepted, and
-without the beta header the field is not recognised at all.
+Both cover the same defect from opposite ends. Claude Code sends `anthropic-beta` with ten tokens and `context_management: {"edits": null}` on every request; the chain forwarded neither correctly, so upstream refused a field the beta would have enabled and the client saw a 502. Measured against the live upstream on 2026-08-18: `{"edits": null}` is refused, `{"edits": []}` is accepted, and without the beta header the field is not recognised at all.
 """
 
 from typing import Any
@@ -365,9 +361,7 @@ def test_a_body_without_context_management_is_untouched() -> None:
 def test_normalisation_happens_even_when_there_are_no_messages() -> None:
     """`fix_anthropic_request` returns early on a body with no message list.
 
-    `context_management` is a top-level field and survives that shape, so running the two in the
-    wrong order would leave the production body unfixed while every messages-based test stayed
-    green.
+    `context_management` is a top-level field and survives that shape, so running the two in the wrong order would leave the production body unfixed while every messages-based test stayed green.
     """
     payload: dict[str, Any] = {"context_management": {"edits": None}}
     fix_anthropic_request(payload, FixAnthropicRequestHook())

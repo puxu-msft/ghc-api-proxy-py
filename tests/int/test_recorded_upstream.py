@@ -1,12 +1,8 @@
 """The primary path against a recording of what upstream actually said.
 
-Everything here runs on real bytes captured from Copilot: the token exchange, the model catalog,
-and a streamed Responses reply to an Anthropic Messages request. Only the network is absent.
+Everything here runs on real bytes captured from Copilot: the token exchange, the model catalog, and a streamed Responses reply to an Anthropic Messages request. Only the network is absent.
 
-Why this file exists rather than another hand-written stand-in: streaming on this exact path
-returned HTTP 200 and zero bytes in production while every test was green, because no fake
-reproduced upstream's habit of changing an item's id between `added` and `done`. A recording
-cannot make that mistake — it does not know what we expected.
+Why this file exists rather than another hand-written stand-in: streaming on this exact path returned HTTP 200 and zero bytes in production while every test was green, because no fake reproduced upstream's habit of changing an item's id between `added` and `done`. A recording cannot make that mistake — it does not know what we expected.
 """
 
 import re
@@ -48,8 +44,7 @@ def messages_body(**extra: Any) -> dict[str, Any]:
 async def test_the_recorded_catalog_loads_and_offers_a_responses_model() -> None:
     """The catalog request in the cassette is the real one, authentication and all.
 
-    A recording that could be read without authenticating would not have caught the catalog fetch
-    going out with no Authorization header at all, which stopped the service from starting.
+    A recording that could be read without authenticating would not have caught the catalog fetch going out with no Authorization header at all, which stopped the service from starting.
     """
     async with recorded_chain(CASSETTE) as chain:
         await refresh_catalogs(chain)
@@ -65,8 +60,7 @@ async def test_the_recorded_catalog_loads_and_offers_a_responses_model() -> None
 async def test_a_recorded_stream_assembles_into_anthropic_blocks() -> None:
     """The regression the recording exists for.
 
-    The captured stream carries a different `item.id` on `output_item.added` and
-    `output_item.done`. Paired by id, nothing closes and the client receives nothing at all.
+    The captured stream carries a different `item.id` on `output_item.added` and `output_item.done`. Paired by id, nothing closes and the client receives nothing at all.
     """
     async with recorded_chain(CASSETTE) as chain:
         await refresh_catalogs(chain)
@@ -104,9 +98,7 @@ async def test_a_recorded_stream_assembles_into_anthropic_blocks() -> None:
 def test_the_cassette_carries_nothing_that_identifies_the_account() -> None:
     """A cassette is committed, so what it keeps is published.
 
-    Asserted here rather than left to whoever records the next one: the scrub list is a list, and a
-    list is exactly the kind of thing that gets one entry short. Two rounds of reading this file by
-    hand each found a field the round before had missed.
+    Asserted here rather than left to whoever records the next one: the scrub list is a list, and a list is exactly the kind of thing that gets one entry short. Two rounds of reading this file by hand each found a field the round before had missed.
     """
     raw = cassette_path(CASSETTE).read_text(encoding="utf-8")
 
@@ -115,15 +107,12 @@ def test_the_cassette_carries_nothing_that_identifies_the_account() -> None:
 
     cassette = Cassette.read(cassette_path(CASSETTE))
 
-    # Checked against the allowlist rather than against a list of things to avoid: a denylist is
-    # what let three separate identifying headers through, one per round of reading this by hand.
+    # Checked against the allowlist rather than against a list of things to avoid: a denylist is what let three separate identifying headers through, one per round of reading this by hand.
     for interaction in cassette.interactions:
         unexpected = set(interaction.headers) - KEPT_RESPONSE_HEADERS
         assert not unexpected, f"{sorted(unexpected)} were kept without being allowed"
 
-    # A 64-hex value is what an account hash looks like. The request digests we write ourselves
-    # are the same shape, so they are excluded by name rather than by loosening the pattern —
-    # the point is that nothing hash-shaped arrived from upstream.
+    # A 64-hex value is what an account hash looks like. The request digests we write ourselves are the same shape, so they are excluded by name rather than by loosening the pattern — the point is that nothing hash-shaped arrived from upstream.
     ours = {interaction.request_shape.get("digest") for interaction in cassette.interactions}
     found = set(re.findall(r"\b[0-9a-f]{64}\b", raw)) - ours
     assert not found, f"something hash-shaped reached the cassette: {sorted(found)[:1]}"
@@ -133,9 +122,7 @@ def test_the_cassette_carries_nothing_that_identifies_the_account() -> None:
 async def test_replay_hands_back_the_recorded_chunk_boundaries() -> None:
     """The property this whole harness was built for, asserted rather than assumed.
 
-    vcrpy was rejected because it merges a streamed response into one chunk. Nothing was stopping
-    this replayer from drifting the same way: collapsing every chunk into one left the other tests
-    green, because they only read the assembled result.
+    vcrpy was rejected because it merges a streamed response into one chunk. Nothing was stopping this replayer from drifting the same way: collapsing every chunk into one left the other tests green, because they only read the assembled result.
     """
     cassette = Cassette.read(cassette_path(CASSETTE))
     recorded = next(
@@ -150,8 +137,7 @@ async def test_replay_hands_back_the_recorded_chunk_boundaries() -> None:
         handled = await handle_bounded(chain, build_context(route, messages_body(stream=True)))
         response = handled.response
         assert response is not None
-        # `aiter_raw` rather than `aiter_bytes`: the question is what the transport handed over,
-        # before any decoding had a chance to re-chunk it.
+        # `aiter_raw` rather than `aiter_bytes`: the question is what the transport handed over, before any decoding had a chance to re-chunk it.
         replayed = [chunk async for chunk in response.aiter_raw()]
 
     assert replayed == recorded.chunks
@@ -161,9 +147,7 @@ async def test_replay_hands_back_the_recorded_chunk_boundaries() -> None:
 async def test_the_recorded_upstream_changes_the_id_of_the_same_item() -> None:
     """The recording's own premise, paired the way the assembler pairs.
 
-    Comparing the two id *lists* was not enough: a recording whose ids were stable but whose
-    `done` events arrived out of order also made those lists differ, so the assertion passed
-    while the defect it stands for was absent.
+    Comparing the two id *lists* was not enough: a recording whose ids were stable but whose `done` events arrived out of order also made those lists differ, so the assertion passed while the defect it stands for was absent.
     """
     async with recorded_chain(CASSETTE) as chain:
         await refresh_catalogs(chain)
@@ -206,9 +190,7 @@ async def test_the_recorded_upstream_changes_the_id_of_the_same_item() -> None:
 async def test_a_request_for_something_else_is_not_served_this_recording() -> None:
     """Method and path alone are not enough to say a recorded answer still applies.
 
-    A recording made for a streaming `gpt-5.5` request was being served to any POST of the same
-    path, so a regression that changed the model, or stopped asking for a stream, was answered
-    with the old recording and nothing noticed.
+    A recording made for a streaming `gpt-5.5` request was being served to any POST of the same path, so a regression that changed the model, or stopped asking for a stream, was answered with the old recording and nothing noticed.
     """
     async with recorded_chain(CASSETTE) as chain:
         await refresh_catalogs(chain)
@@ -217,9 +199,7 @@ async def test_a_request_for_something_else_is_not_served_this_recording() -> No
         # Non-streaming: the recording answers a streamed request, so it must not be served.
         handled = await handle_bounded(chain, build_context(route, messages_body()))
 
-    # Asserted on the outcome rather than on the exception type: the SDK wraps a transport error
-    # as APIConnectionError and the driver records it, so the observable fact is that no answer
-    # came back — which is exactly what should happen when the recording does not apply.
+    # Asserted on the outcome rather than on the exception type: the SDK wraps a transport error as APIConnectionError and the driver records it, so the observable fact is that no answer came back — which is exactly what should happen when the recording does not apply.
     assert handled.response is None
     assert handled.outcome.error is not None
 
@@ -228,9 +208,7 @@ async def test_a_request_for_something_else_is_not_served_this_recording() -> No
 async def test_replay_reports_the_recorded_http_version() -> None:
     """Product code propagates `response.extensions`, so a replay that dropped them would lie.
 
-    `pipeline/executor.py` and `anthropic/client.py` both pass the upstream extensions through, so
-    a recording of an HTTP/2 exchange replayed without them would look like HTTP/1.1 to everything
-    downstream, and any path that depends on the version would be tested against the wrong answer.
+    `pipeline/executor.py` and `anthropic/client.py` both pass the upstream extensions through, so a recording of an HTTP/2 exchange replayed without them would look like HTTP/1.1 to everything downstream, and any path that depends on the version would be tested against the wrong answer.
     """
     cassette = Cassette.read(cassette_path(CASSETTE))
     recorded = next(
@@ -256,9 +234,7 @@ async def test_replay_reports_the_recorded_http_version() -> None:
 async def test_a_replay_refuses_a_request_that_stopped_authenticating() -> None:
     """The guard that caught the bare catalog fetch, exercised directly.
 
-    Every other test here authenticates, so nothing reached this branch: removing the check left
-    them all green. A stand-in that cannot tell an authenticated request from a bare one is how
-    the catalog went out with no Authorization and the service could not start.
+    Every other test here authenticates, so nothing reached this branch: removing the check left them all green. A stand-in that cannot tell an authenticated request from a bare one is how the catalog went out with no Authorization and the service could not start.
     """
     cassette = Cassette.read(cassette_path(CASSETTE))
     assert any(interaction.authenticated for interaction in cassette.interactions)
@@ -273,9 +249,7 @@ async def test_a_replay_refuses_a_request_that_stopped_authenticating() -> None:
 async def test_the_replayed_protocol_version_comes_from_the_cassette() -> None:
     """Asserted against a version httpx would not invent.
 
-    The captured exchange is HTTP/1.1, which is also what httpx reports when a response carries no
-    version at all — so a cassette-versus-replay comparison passes whether the extension was
-    replayed or dropped. Recording HTTP/2 makes the two answers differ.
+    The captured exchange is HTTP/1.1, which is also what httpx reports when a response carries no version at all — so a cassette-versus-replay comparison passes whether the extension was replayed or dropped. Recording HTTP/2 makes the two answers differ.
     """
     cassette = Cassette.read(cassette_path(CASSETTE))
     for interaction in cassette.interactions:
@@ -315,11 +289,7 @@ class _FakeUpstream(httpx2.AsyncBaseTransport):
 async def test_the_recorder_scrubs_an_sse_frame_that_spans_two_chunks() -> None:
     """Drives the scrubber rather than inspecting its past output.
 
-    The other guard reads the cassette that is already committed, so making the scrubber a no-op
-    left it green — and the next re-record would have published identity data again. This one
-    records, and it splits a frame across chunks because that is what a real capture does: only 9
-    of 26 chunks ended on a frame boundary, and a scrubber that worked chunk by chunk parsed
-    truncated JSON, failed silently and left the identifiers in place.
+    The other guard reads the cassette that is already committed, so making the scrubber a no-op left it green — and the next re-record would have published identity data again. This one records, and it splits a frame across chunks because that is what a real capture does: only 9 of 26 chunks ended on a frame boundary, and a scrubber that worked chunk by chunk parsed truncated JSON, failed silently and left the identifiers in place.
     """
     frame = (
         b'event: response.created\n'
@@ -350,9 +320,7 @@ async def test_the_recorder_scrubs_an_sse_frame_that_spans_two_chunks() -> None:
 async def test_the_recorder_hands_downstream_what_upstream_sent() -> None:
     """The recorder is transparent, not just faithful to disk.
 
-    The first fix preserved extensions from cassette to replay but not from upstream to the live
-    code during recording, so a recording session saw HTTP/1.1 for an HTTP/2 exchange — and any
-    behaviour that depends on the version would have been recorded from the wrong branch.
+    The first fix preserved extensions from cassette to replay but not from upstream to the live code during recording, so a recording session saw HTTP/1.1 for an HTTP/2 exchange — and any behaviour that depends on the version would have been recorded from the wrong branch.
     """
     upstream = _FakeUpstream([b'{"ok":true}'], {"content-type": "application/json"})
 

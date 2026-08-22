@@ -10,8 +10,7 @@ Each rung is a different action, and the operator picks how far to go by how man
 `graceful_cleanup_timeout` bounds only what happens *after* the drain, which is what it measures.
 The drain itself is deliberately unbounded.
 A request already carries its own deadline.
-A second wall-clock limit stacked on top would cut off legitimate long work, while the operator
-still has escalation available anyway.
+A second wall-clock limit stacked on top would cut off legitimate long work, while the operator still has escalation available anyway.
 
 Nothing here calls `sys.exit` or `os._exit`.
 `serve()` returns and the caller unwinds normally; a forced stop is SIGKILL and the operator's call.
@@ -46,10 +45,7 @@ type Hook = Callable[[], Awaitable[None]]
 class ListenerLifecycle(Protocol):
     """What driving a listener through serve and shutdown actually requires.
 
-    A protocol rather than the concrete adapter because `both` mode puts a first-byte router in
-    front of it, and that router is not a `UvicornListenerAdapter`. Asserting otherwise with a cast
-    would have told the type checker something untrue in order to keep a name; naming the nine
-    methods that are really used costs less and lets a stand-in satisfy it honestly.
+    A protocol rather than the concrete adapter because `both` mode puts a first-byte router in front of it, and that router is not a `UvicornListenerAdapter`. Asserting otherwise with a cast would have told the type checker something untrue in order to keep a name; naming the nine methods that are really used costs less and lets a stand-in satisfy it honestly.
     """
 
     async def startup_lifespan(self) -> None: ...
@@ -156,8 +152,7 @@ class StandaloneServer:
             if self._on_serving is not None:
                 await self._on_serving()
         except BaseException as failure:
-            # Past `arm()` the listener is accepting, so an escaping failure would leave a port
-            # answering with nobody driving it. Tear down before the exception continues outward.
+            # Past `arm()` the listener is accepting, so an escaping failure would leave a port answering with nobody driving it. Tear down before the exception continues outward.
             for note in await self._abandon_startup(acquired):
                 failure.add_note(note)
             raise
@@ -175,15 +170,10 @@ class StandaloneServer:
     async def _abandon_startup(self, acquired: set[str]) -> list[str]:
         """Release what start-up actually acquired, and report what would not release.
 
-        Driven by what was acquired rather than by the full list, because releasing something that
-        was never taken does not merely waste time: asking a lifespan that failed to start to shut
-        down waits for a reply that is never coming, and the timeout it reports is not a real leak.
-        Every failed start-up would then carry a note that says nothing, which is how notes stop
-        being read.
+        Driven by what was acquired rather than by the full list, because releasing something that was never taken does not merely waste time: asking a lifespan that failed to start to shut down waits for a reply that is never coming, and the timeout it reports is not a real leak.
+        Every failed start-up would then carry a note that says nothing, which is how notes stop being read.
 
-        The original failure is what the caller must see, so nothing raised here may replace it —
-        but a release that genuinely fails leaves a socket or a lifespan behind, and dropping that
-        silently makes the leak undiagnosable. Each one is returned for the caller to attach.
+        The original failure is what the caller must see, so nothing raised here may replace it — but a release that genuinely fails leaves a socket or a lifespan behind, and dropping that silently makes the leak undiagnosable. Each one is returned for the caller to attach.
         """
         releases: list[tuple[str, Callable[[], Awaitable[None]]]] = []
         if "registrations" in acquired:
@@ -222,8 +212,7 @@ class StandaloneServer:
                 break
             if stage is ShutdownStage.INTERRUPTING and interrupted == 0:
                 # Interrupt the requests, then wait for the interruption to land.
-                # Closing the connection is not enough: Uvicorn leaves a running handler alone,
-                # so the request is only actually interrupted by cancelling its task.
+                # Closing the connection is not enough: Uvicorn leaves a running handler alone, so the request is only actually interrupted by cancelling its task.
                 interrupted = self._adapter.interrupt_connections()
                 cancelled += self._adapter.cancel_requests()
             if await self._drained_before_advance(stage):
@@ -245,13 +234,10 @@ class StandaloneServer:
     async def _finalize(self) -> CleanupOutcome:
         """Run lifespan shutdown and release the listener.
 
-        The spec's last rung must persist state and release resources *before* exiting, and it hands
-        the operator SIGKILL as the way to cut that short. So the budget cannot abandon cleanup: it
-        only marks that cleanup ran long. Exceeding it is reported and then still awaited.
+        The spec's last rung must persist state and release resources *before* exiting, and it hands the operator SIGKILL as the way to cut that short. So the budget cannot abandon cleanup: it only marks that cleanup ran long. Exceeding it is reported and then still awaited.
 
         Leaving a pending cleanup task behind would be worse than an inline await rather than safer.
-        `asyncio.shield` protects a task from *its awaiter's* cancellation, not from the event loop
-        closing underneath it, so the composition root's `anyio.run` would cancel it on the way out.
+        `asyncio.shield` protects a task from *its awaiter's* cancellation, not from the event loop closing underneath it, so the composition root's `anyio.run` would cancel it on the way out.
         """
         cleanup = asyncio.ensure_future(self._adapter.shutdown_lifespan(drain_timeout=None))
         timed_out = False
@@ -271,16 +257,12 @@ class StandaloneServer:
         failure = cleanup.exception() if cleanup.done() and not cleanup.cancelled() else None
         if failure is not None:
             errors.append(f"shutdown_lifespan: {type(failure).__name__}: {failure}")
-        # Attempted either way: a lifespan that raised is the case where the listener is most likely
-        # to be left open, so skipping the release there would strand exactly the resource the last
-        # rung exists to give back.
+        # Attempted either way: a lifespan that raised is the case where the listener is most likely to be left open, so skipping the release there would strand exactly the resource the last rung exists to give back.
         try:
             await self._adapter.close_masters()
         except Exception as release_failure:
             errors.append(f"close_masters: {type(release_failure).__name__}: {release_failure}")
-        # Each carries the stage it came from. Two failures of the same type and message would
-        # otherwise be indistinguishable, and whether the listener is still open is precisely what
-        # the caller needs to know.
+        # Each carries the stage it came from. Two failures of the same type and message would otherwise be indistinguishable, and whether the listener is still open is precisely what the caller needs to know.
         return CleanupOutcome(
             timed_out=timed_out,
             completed=cleanup.done(),
@@ -297,8 +279,7 @@ class StandaloneServer:
         """Return once the ladder has moved off `stage`.
 
         The rung to compare against is passed in rather than read here.
-        Reading it here would re-anchor to whatever the ladder has already reached, and the wait
-        would then be for an advance that has happened, which nothing is left to announce.
+        Reading it here would re-anchor to whatever the ladder has already reached, and the wait would then be for an advance that has happened, which nothing is left to announce.
         """
         while self._ladder.stage is stage:
             self._advanced.clear()

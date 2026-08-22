@@ -217,10 +217,7 @@ async def test_a_fatal_history_write_poisons_the_store(
 ) -> None:
     """A write that fails fatally must not be followed by a clean close.
 
-    This used to also assert that the failure marked the rolling generation failed, so the
-    controller could keep the previous one serving. That mechanism was removed on 2026-08-19; what
-    survives is the store's own refusal to pretend it shut down cleanly, which is what stops a
-    caller treating a lost write as a successful one.
+    This used to also assert that the failure marked the rolling generation failed, so the controller could keep the previous one serving. That mechanism was removed on 2026-08-19; what survives is the store's own refusal to pretend it shut down cleanly, which is what stops a caller treating a lost write as a successful one.
     """
     store = HistoryStore(tmp_path / "history.db")
     await store.start()

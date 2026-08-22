@@ -50,8 +50,7 @@ def exported_spans() -> Iterator[InMemorySpanExporter]:
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
-    # The raw global, not `get_tracer_provider()`: that returns a proxy which reads this same
-    # global, so restoring it would point the global at something that resolves to itself.
+    # The raw global, not `get_tracer_provider()`: that returns a proxy which reads this same global, so restoring it would point the global at something that resolves to itself.
     previous = trace._TRACER_PROVIDER  # pyright: ignore[reportPrivateUsage]
     trace._TRACER_PROVIDER = provider  # pyright: ignore[reportPrivateUsage]
     try:

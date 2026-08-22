@@ -1,8 +1,6 @@
 """The non-inference surface, on the chain that actually serves requests.
 
-Until 2026-08-19 the new chain answered 404 to `/health/readiness` while the existing chain
-answered it — and the existing chain is the one two of the three entry points still run. A
-supervisor pointed at the new chain had nothing to ask.
+Until 2026-08-19 the new chain answered 404 to `/health/readiness` while the existing chain answered it — and the existing chain is the one two of the three entry points still run. A supervisor pointed at the new chain had nothing to ask.
 """
 
 from types import SimpleNamespace

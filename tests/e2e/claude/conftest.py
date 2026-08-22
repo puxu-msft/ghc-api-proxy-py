@@ -1,11 +1,8 @@
 """Entry for the client end-to-end group.
 
-Excluded from the default sweep in `pyproject.toml`, for the same reason `tests/tui` is: these
-drive a real binary and a real socket, they take seconds rather than milliseconds each, and they
-depend on something the repository does not install. Run them with `uv run pytest tests/e2e`.
+Excluded from the default sweep in `pyproject.toml`, for the same reason `tests/tui` is: these drive a real binary and a real socket, they take seconds rather than milliseconds each, and they depend on something the repository does not install. Run them with `uv run pytest tests/e2e`.
 
-The isolation lives here rather than at the root because only this group needs it — and a root-level
-`CLAUDE_CONFIG_DIR` would silently take that choice away from every other group.
+The isolation lives here rather than at the root because only this group needs it — and a root-level `CLAUDE_CONFIG_DIR` would silently take that choice away from every other group.
 """
 
 from collections.abc import Generator

@@ -1,7 +1,6 @@
 """TLS material and the same-port dispatch decision.
 
-`server.tls.mode` is three-valued: false serves HTTP only, true serves HTTPS only, and "both"
-accepts either on one port by looking at the first byte a client sends.
+`server.tls.mode` is three-valued: false serves HTTP only, true serves HTTPS only, and "both" accepts either on one port by looking at the first byte a client sends.
 
 Cert and key are set together or not at all.
 Omitting both generates a self-signed pair once and reuses it.

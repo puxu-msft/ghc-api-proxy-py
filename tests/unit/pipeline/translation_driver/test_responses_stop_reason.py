@@ -1,8 +1,6 @@
 """What a non-streaming Responses reply says about why it stopped.
 
-The same rule the streaming assembler follows, held here so the two paths cannot describe one
-fact differently: the output-token limit is the only reason with an Anthropic spelling, and it is
-the only one translated.
+The same rule the streaming assembler follows, held here so the two paths cannot describe one fact differently: the output-token limit is the only reason with an Anthropic spelling, and it is the only one translated.
 """
 
 from typing import Any

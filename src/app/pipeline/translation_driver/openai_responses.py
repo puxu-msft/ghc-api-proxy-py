@@ -1,15 +1,9 @@
 """OpenAI Responses translators.
 
-`docs/.human-controlled/message-translation.md` shows `instructions` as an array of role-bearing objects, and notes we do
-not need that flexibility yet. The Copilot upstream does not offer it either: measured on
-2026-08-18, it accepts `instructions` only as a string and answers `failed to parse request` to
-every array form tried — `[str]`, `[{role, content: str}]`, `[{role, content: [{type: text}]}]`,
-the same with `input_text`, and with an explicit `type: message`. So the blocks are joined here.
+`docs/.human-controlled/message-translation.md` shows `instructions` as an array of role-bearing objects, and notes we do not need that flexibility yet. The Copilot upstream does not offer it either: measured on
+2026-08-18, it accepts `instructions` only as a string and answers `failed to parse request` to every array form tried — `[str]`, `[{role, content: str}]`, `[{role, content: [{type: text}]}]`, the same with `input_text`, and with an explicit `type: message`. So the blocks are joined here.
 
-That drops the per-block `cache_control` marker, which `Conversion` records — but it does not drop
-prompt caching. Measured on 2026-08-18: the same 24082-token body sent twice with a plain string
-`instructions` and no cache field at all reported `cached_tokens` 0 then 24079. This endpoint
-caches by prefix on its own, so the marker Anthropic needs has nothing to do here. Sending the
+That drops the per-block `cache_control` marker, which `Conversion` records — but it does not drop prompt caching. Measured on 2026-08-18: the same 24082-token body sent twice with a plain string `instructions` and no cache field at all reported `cached_tokens` 0 then 24079. This endpoint caches by prefix on its own, so the marker Anthropic needs has nothing to do here. Sending the
 Anthropic field anyway is refused — `Unknown parameter: 'input[0].content[0].cache_control'`.
 
 The Anthropic passthrough path keeps the blocks and their markers intact.
@@ -112,9 +106,7 @@ def from_openai_responses(payload: Mapping[str, Any]) -> SemanticRequest:
 def _instructions_value(blocks: list[SystemBlock], request: SemanticRequest) -> str:
     """Join the system blocks into the one shape this upstream accepts.
 
-    Blank-line separated so two blocks do not run into one sentence. Per-block metadata is named
-    rather than dropped in silence — `cache_control` in practice, which this endpoint neither takes
-    nor needs, since it caches by prefix without being told where the boundaries are.
+    Blank-line separated so two blocks do not run into one sentence. Per-block metadata is named rather than dropped in silence — `cache_control` in practice, which this endpoint neither takes nor needs, since it caches by prefix without being told where the boundaries are.
     """
     dropped = sorted({key for block in blocks for key in block.metadata})
     if dropped:
@@ -128,12 +120,9 @@ def _instructions_value(blocks: list[SystemBlock], request: SemanticRequest) -> 
 def _function_tool(tool: dict[str, Any]) -> dict[str, Any]:
     """Put one tool in the shape the Responses endpoint takes.
 
-    Anthropic names the schema `input_schema` and carries no `type`; Responses wants a flat
-    function tool with `parameters`. Passing the Anthropic shape through earns
-    `One of the tools requested is invalid.` — measured 2026-08-18.
+    Anthropic names the schema `input_schema` and carries no `type`; Responses wants a flat function tool with `parameters`. Passing the Anthropic shape through earns `One of the tools requested is invalid.` — measured 2026-08-18.
 
-    A tool that already looks like a Responses tool is left alone, so a Responses-to-Responses
-    round trip does not get rewritten.
+    A tool that already looks like a Responses tool is left alone, so a Responses-to-Responses round trip does not get rewritten.
     """
     if "input_schema" not in tool:
         return tool
@@ -321,8 +310,7 @@ def _tools_for_upstream(
 def blocks_from_item(item: dict[str, Any]) -> tuple[str, tuple[ContentBlock, ...]]:
     """Read one Responses item as the role it belongs to and the blocks it holds.
 
-    Shared by the request `input` reader and the response `output` reader: an item means the same
-    thing in both, and two copies of this would drift the moment one gained an item type.
+    Shared by the request `input` reader and the response `output` reader: an item means the same thing in both, and two copies of this would drift the moment one gained an item type.
     """
     kind = str(item.get("type", ""))
     if kind == "message":
@@ -374,8 +362,7 @@ def blocks_from_item(item: dict[str, Any]) -> tuple[str, tuple[ContentBlock, ...
 def _messages_from_input(value: object) -> list[SemanticMessage]:
     """Read Responses `input` items back into typed messages.
 
-    Each item becomes its own message, because Responses has no message grouping to preserve: a
-    `function_call` is a top-level item, not a block inside an assistant turn.
+    Each item becomes its own message, because Responses has no message grouping to preserve: a `function_call` is a top-level item, not a block inside an assistant turn.
     """
     messages: list[SemanticMessage] = []
     for item in _dict_list(value):
@@ -400,8 +387,7 @@ def _summary_text(value: object) -> str:
 def _decoded_arguments(value: object) -> Any:
     """`arguments` is a JSON string on the wire; the model holds the decoded value.
 
-    A string that does not parse is kept as-is rather than discarded — a malformed tool call is
-    still what the model produced, and losing it would hide the defect.
+    A string that does not parse is kept as-is rather than discarded — a malformed tool call is still what the model produced, and losing it would hide the defect.
     """
     if not isinstance(value, str):
         return value
@@ -411,10 +397,7 @@ def _decoded_arguments(value: object) -> Any:
         return value
 
 
-# Measured against real traffic on 2026-08-18: the existing service sends exactly these item
-# shapes for the same conversation — `message` with `input_text`, `function_call` whose
-# `arguments` is a JSON *string*, `function_call_output` whose `output` is a string, and
-# `reasoning` carrying `encrypted_content`.
+# Measured against real traffic on 2026-08-18: the existing service sends exactly these item shapes for the same conversation — `message` with `input_text`, `function_call` whose `arguments` is a JSON *string*, `function_call_output` whose `output` is a string, and `reasoning` carrying `encrypted_content`.
 def _input_from_messages(
     messages: list[SemanticMessage],
     conversion: Conversion,
@@ -425,9 +408,7 @@ def _input_from_messages(
         for block in message.blocks:
             item = _item_from_block(block, message.role, conversion)
             if item is not None:
-                # Text and images belong inside one message item; everything else is top-level,
-                # so an accumulated message must be flushed before the standalone item goes out
-                # or the conversation order changes.
+                # Text and images belong inside one message item; everything else is top-level, so an accumulated message must be flushed before the standalone item goes out or the conversation order changes.
                 if "type" in item and item["type"] in {"input_text", "output_text", "input_image"}:
                     parts.append(item)
                     continue
@@ -459,8 +440,7 @@ def _item_from_block(
     conversion: Conversion,
 ) -> dict[str, Any] | None:
     if block.kind is BlockKind.TEXT:
-        # `output_text` is the assistant's own words; anything the model is being *given* is
-        # `input_text`, which is why the role decides rather than the block.
+        # `output_text` is the assistant's own words; anything the model is being *given* is `input_text`, which is why the role decides rather than the block.
         part_type = "output_text" if role == "assistant" else "input_text"
         return {"type": part_type, "text": block.text}
     if block.kind is BlockKind.IMAGE:
@@ -534,8 +514,7 @@ def _encoded_arguments(value: Any) -> str:
 def _flattened_output(block: ContentBlock, conversion: Conversion) -> str:
     """`function_call_output.output` is a string, while Anthropic's `content` may be blocks.
 
-    Text blocks join; anything else has no slot here and is recorded rather than silently
-    swallowed, which is what happens to an image inside a tool result.
+    Text blocks join; anything else has no slot here and is recorded rather than silently swallowed, which is what happens to an image inside a tool result.
     """
     output = block.output
     if isinstance(output, str):
@@ -564,10 +543,8 @@ def _flattened_output(block: ContentBlock, conversion: Conversion) -> str:
 def _reasoning_item(block: ContentBlock, conversion: Conversion) -> dict[str, Any] | None:
     """Render reasoning, or refuse and say so.
 
-    Refusing matters more than rendering. Anthropic's signature is a value only Anthropic can
-    produce; writing it into `encrypted_content` would hand upstream something it never issued.
-    A carrier this proxy signed is different — the Responses payload is inside it, and taking it
-    back out is recovery, not invention.
+    Refusing matters more than rendering. Anthropic's signature is a value only Anthropic can produce; writing it into `encrypted_content` would hand upstream something it never issued.
+    A carrier this proxy signed is different — the Responses payload is inside it, and taking it back out is recovery, not invention.
     """
     state = block.reasoning
     if state is None:
@@ -579,8 +556,7 @@ def _reasoning_item(block: ContentBlock, conversion: Conversion) -> dict[str, An
             "encrypted_content": state.value,
         }
     if state.format is OpaqueFormat.PROXY_CARRIER:
-        # A carrier this proxy issued. With a payload it round-trips value-exact; bare,
-        # `.dev/docs/anthropic-responses-bridge/spec.md` says TRANSFORM — restore a summary-only reasoning item rather than drop the block. It
+        # A carrier this proxy issued. With a payload it round-trips value-exact; bare, `.dev/docs/anthropic-responses-bridge/spec.md` says TRANSFORM — restore a summary-only reasoning item rather than drop the block. It
         # used to be dropped, which lost the turn's reasoning entirely on the way back.
         item: dict[str, Any] = {
             "type": "reasoning",
@@ -605,12 +581,9 @@ def _place_in_instructions(payload: dict[str, Any], request: SemanticRequest) ->
     payload["instructions"] = _instructions_value(request.system, request)
 
 
-# Total rather than defaulted, the same reasoning as `layout_strategy` in the request hook: the
-# schema admits exactly the spellings the config defines, so a missing case is a bug here rather
-# than an operator's typo, and a fallback would silently reshape the request.
+# Total rather than defaulted, the same reasoning as `layout_strategy` in the request hook: the schema admits exactly the spellings the config defines, so a missing case is a bug here rather than an operator's typo, and a fallback would silently reshape the request.
 #
-# One entry today. A second — `as-role-system`, the prompt as a `role: system` message at the head
-# of `input` — adds a function and a line; the endpoint was measured to accept that shape.
+# One entry today. A second — `as-role-system`, the prompt as a `role: system` message at the head of `input` — adds a function and a line; the endpoint was measured to accept that shape.
 _SYSTEM_PROMPT_PLACEMENTS: dict[
     SystemPromptPlacement, Callable[[dict[str, Any], SemanticRequest], None]
 ] = {
@@ -642,8 +615,7 @@ def _carry_forced_search(
     if not isinstance(named, str) or named not in mapped_names:
         return
     if named in function_names:
-        # Ambiguous: the name is also an ordinary function tool's. Forcing a hosted search would be
-        # answering a question only the client can answer.
+        # Ambiguous: the name is also an ordinary function tool's. Forcing a hosted search would be answering a question only the client can answer.
         return
     payload["tool_choice"] = {"type": _WEB_SEARCH_TYPE}
 
@@ -667,9 +639,7 @@ def _repoint_tool_choice(
     if not isinstance(named, str) or named not in mapped_names:
         return
     if named in function_names:
-        # The name resolves to an ordinary function tool as well. Which one the client meant is its
-        # own ambiguity to own, and answering it by forcing a hosted search would be this proxy
-        # inventing the answer — so the choice is left exactly as it arrived.
+        # The name resolves to an ordinary function tool as well. Which one the client meant is its own ambiguity to own, and answering it by forcing a hosted search would be this proxy inventing the answer — so the choice is left exactly as it arrived.
         return
     payload["tool_choice"] = {"type": _WEB_SEARCH_TYPE}
 

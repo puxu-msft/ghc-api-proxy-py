@@ -8,10 +8,7 @@ An `incomplete` response whose reason is the output-token limit carries `stop_re
 A legal success with no content may produce an empty text block.
 
 Blocks are the same `ContentBlock` the request side uses, read and written by the same functions.
-`D-ARCH = B` asks for one typed truth, and two block models would have been two. This file used to
-hold Anthropic-shaped dicts under a `kind`, which is why the Responses writer sent `arguments` as
-an object where the wire wants a JSON string, and why a reasoning block crossing to Anthropic
-arrived with an empty signature.
+`D-ARCH = B` asks for one typed truth, and two block models would have been two. This file used to hold Anthropic-shaped dicts under a `kind`, which is why the Responses writer sent `arguments` as an object where the wire wants a JSON string, and why a reasoning block crossing to Anthropic arrived with an empty signature.
 """
 
 from collections.abc import Mapping, Sequence
@@ -148,15 +145,9 @@ def from_openai_responses_response(
     if isinstance(usage, Mapping):
         response.usage = _anthropic_usage(cast(Mapping[str, Any], usage))
 
-    # Whether this ending will hand the turn back, which is what decides whether the block upstream
-    # cut short may be dropped at all. One setting for both, since dropping content is only
-    # defensible when the client is handed a way to get it back — separating them let a
-    # `content_filter` ending drop a block and hand over nothing, and the client lost a passage it
-    # could not ask for again on a line that read `[ OK ]`.
+    # Whether this ending will hand the turn back, which is what decides whether the block upstream cut short may be dropped at all. One setting for both, since dropping content is only defensible when the client is handed a way to get it back — separating them let a `content_filter` ending drop a block and hand over nothing, and the client lost a passage it could not ask for again on a line that read `[ OK ]`.
     #
-    # Read here rather than after the loop because the drop happens inside it. The streaming
-    # assembler cannot do this: its items close before the terminal event says why, so it holds the
-    # one it cut short instead and answers the same question a moment later.
+    # Read here rather than after the loop because the drop happens inside it. The streaming assembler cannot do this: its items close before the terminal event says why, so it holds the one it cut short instead and answers the same question a moment later.
     will_hand_over, _ = _responses_stop_reason(payload, has_tool_call=False)
     for item in _mapping_list(payload.get("output")):
         if (
@@ -164,18 +155,11 @@ def from_openai_responses_response(
             and response.blocks
             and will_hand_over in hand_over_stop_reasons
         ):
-            # The item upstream cut short, dropped because something whole came before it. Same rule
-            # as the streaming assembler applies, and it has to live here rather than on the finished
-            # body: `status` is upstream's, and nothing carries it across the translation.
+            # The item upstream cut short, dropped because something whole came before it. Same rule as the streaming assembler applies, and it has to live here rather than on the finished body: `status` is upstream's, and nothing carries it across the translation.
             #
-            # The same blind spot comes with it: a `reasoning` item carries no `status` at all, so a
-            # truncated one is invisible here too. Left open deliberately; `.dev/docs/upstream/retry-and-continuation/deferred.md` §2.
+            # The same blind spot comes with it: a `reasoning` item carries no `status` at all, so a truncated one is invisible here too. Left open deliberately; `.dev/docs/upstream/retry-and-continuation/deferred.md` §2.
             #
-            # Only when something whole came before. Half a sentence still beats an empty answer, so
-            # the rule reverses when this is all there is — which is why the test is on `response.blocks`
-            # rather than on the item's position. Ruled 2026-08-21 for the streaming path and extended
-            # here 2026-08-22, when the ruling that a non-streaming turn could not be continued was
-            # withdrawn: dropping it is only defensible because the client is handed a way to get it back.
+            # Only when something whole came before. Half a sentence still beats an empty answer, so the rule reverses when this is all there is — which is why the test is on `response.blocks` rather than on the item's position. Ruled 2026-08-21 for the streaming path and extended here 2026-08-22, when the ruling that a non-streaming turn could not be continued was withdrawn: dropping it is only defensible because the client is handed a way to get it back.
             response.conversion.record(
                 LossCode.ITEM_NOT_CARRIED, f"truncated {item.get('type')!r} dropped"
             )
@@ -223,9 +207,7 @@ def to_openai_responses_response(response: SemanticResponse) -> dict[str, Any]:
 def _as_output_item(item: dict[str, Any]) -> dict[str, Any]:
     """Wrap a bare content part in the message item a Responses `output` expects.
 
-    The shared writer produces content parts, because in a request they sit inside a message. In a
-    response each one is its own item, so the wrapping happens here rather than by giving the
-    writer a second mode.
+    The shared writer produces content parts, because in a request they sit inside a message. In a response each one is its own item, so the wrapping happens here rather than by giving the writer a second mode.
     """
     if str(item.get("type", "")) in {"output_text", "input_text", "input_image"}:
         return {"type": "message", "role": "assistant", "content": [item]}

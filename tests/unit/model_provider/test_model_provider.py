@@ -52,8 +52,7 @@ def build_provider(
     disabled: list[str] | None = None,
 ) -> tuple[GithubCopilotProvider, httpx2.AsyncClient]:
     def with_token_exchange(request: httpx2.Request) -> httpx2.Response:
-        # The real code exchanges the GitHub token for a Copilot one before every authenticated
-        # call, so a stand-in that cannot answer this cannot stand in for the real thing.
+        # The real code exchanges the GitHub token for a Copilot one before every authenticated call, so a stand-in that cannot answer this cannot stand in for the real thing.
         if request.url.host == "api.github.com":
             return httpx2.Response(
                 200,
@@ -229,9 +228,7 @@ async def test_disabled_model_is_refused_before_the_network() -> None:
 async def test_count_tokens_is_gated_on_the_messages_capability() -> None:
     """Counting a body is refused wherever sending it would be, and before the network.
 
-    Three ways to be refused, and they are not the same: `gpt-model` advertises other endpoints,
-    `mute-model` advertises none, and the third is not in the catalog at all. A gate that only
-    asked "is this model known" would let the first two through.
+    Three ways to be refused, and they are not the same: `gpt-model` advertises other endpoints, `mute-model` advertises none, and the third is not in the catalog at all. A gate that only asked "is this model known" would let the first two through.
     """
     seen: list[httpx2.Request] = []
 
@@ -503,8 +500,7 @@ def test_payload_is_not_mutated_by_send_preparation() -> None:
 async def test_the_catalog_fetch_is_authenticated() -> None:
     """An unauthenticated catalog request is refused, and the service cannot start without one.
 
-    The headers were held from construction and nothing ever put a token in them, so `/models`
-    went out bare — meaning the service could not start even with valid credentials.
+    The headers were held from construction and nothing ever put a token in them, so `/models` went out bare — meaning the service could not start even with valid credentials.
     """
     seen: list[httpx2.Request] = []
 
@@ -525,8 +521,7 @@ async def test_the_catalog_fetch_is_authenticated() -> None:
 
 @pytest.mark.asyncio
 async def test_each_catalog_refresh_authenticates_afresh() -> None:
-    # The Copilot token expires, so headers captured once would authenticate the first refresh
-    # and nothing after it. Two refreshes must each ask the token manager.
+    # The Copilot token expires, so headers captured once would authenticate the first refresh and nothing after it. Two refreshes must each ask the token manager.
     asked: list[str] = []
 
     def handler(request: httpx2.Request) -> httpx2.Response:

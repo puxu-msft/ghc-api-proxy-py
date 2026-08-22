@@ -1,7 +1,6 @@
 """Timeouts must actually fire.
 
-The defect being fixed is a configured timeout that never takes effect, which looks identical to
-a generous one until an upstream hangs.
+The defect being fixed is a configured timeout that never takes effect, which looks identical to a generous one until an upstream hangs.
 """
 
 import asyncio
@@ -51,8 +50,7 @@ class SlowProvider:
         return httpx2.Response(200, json={})
 
     async def count_tokens(self, payload: Any, *, model_id: str) -> httpx2.Response:
-        # Present so the fake really satisfies the protocol. Nothing here counts tokens, and a
-        # silent stub would let a test think it had.
+        # Present so the fake really satisfies the protocol. Nothing here counts tokens, and a silent stub would let a test think it had.
         raise NotImplementedError("this fake does not count tokens")
 
 

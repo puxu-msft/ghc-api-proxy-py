@@ -218,8 +218,7 @@ def fix_anthropic_request(payload: dict[str, Any], config: FixAnthropicRequestHo
     In place because the caller owns the payload and the next step reads it from the same context;
     returning a copy would leave two versions and no rule about which one travels.
     """
-    # Before the messages guard below: this one is about a top-level field, and a body with no
-    # `messages` list still carries it.
+    # Before the messages guard below: this one is about a top-level field, and a body with no `messages` list still carries it.
     normalize_context_management(payload)
 
     messages_value = payload.get("messages")
@@ -251,8 +250,7 @@ def fix_anthropic_request(payload: dict[str, Any], config: FixAnthropicRequestHo
         content = cast(list[dict[str, Any]], content_value)
 
         if strip_empty:
-            # Before the layout pass: a block with neither signature nor text carries nothing, so
-            # letting it separate two real thinking blocks would spend a separator on a placeholder.
+            # Before the layout pass: a block with neither signature nor text carries nothing, so letting it separate two real thinking blocks would spend a separator on a placeholder.
             content, _ = sanitize_empty_thinking(content, "all_empty")
 
         # Only assistant turns can hit the adjacency rejection the layout exists to avoid.
