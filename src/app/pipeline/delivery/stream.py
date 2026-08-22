@@ -427,7 +427,10 @@ async def _deliver(
             # The reason on the wire is a synthesis and stays configurable so that it is chosen rather than inherited: `client_delivery.unterminated_stream_stop_reason` carries it, defaults to upstream's own `incomplete`, and going empty puts this ending back to the error below. What it must not silently become is `end_turn` — that is what `framer.terminal` fills an empty reason with, and it would claim a turn upstream never claimed.
             #
             # `cut_mid_block` rather than "did the client get whole blocks": the latter is always true under block-level delivery and so discriminates nothing.
-            for frame in framer.terminal(replace(terminal, stop_reason=settings.unterminated_stop_reason)):
+            # Upstream's own word wins when it gave one. An Anthropic leg splits its ending — `message_delta` carries the reason, `message_stop` merely closes — so a stream that lost only the second still told us why it stopped, and overwriting that with the configured synthesis replaced an observation with an invention. The caller already ruled this way for the completion line (`inference.py`, on `terminal.stop_reason` being set), and this used to disagree with it: the log said `max_tokens` while the client was told `incomplete`.
+            for frame in framer.terminal(
+                replace(terminal, stop_reason=terminal.stop_reason or settings.unterminated_stop_reason)
+            ):
                 yield frame
             return
         # An EOF that cut through a block, or the refinement switched off: this is truncation, and saying so is the only honest ending.

@@ -264,13 +264,26 @@ async def test_the_terminal_reports_what_upstream_said() -> None:
     assert '"stop_reason":"max_tokens"' in body.replace(" ", "")
 
 
+def _closing_stop_reason(body: str) -> str | None:
+    """The `stop_reason` on the one `message_delta` a close emits, or `None` if there was no close."""
+    for line in body.splitlines():
+        if line.startswith("data:") and '"message_delta"' in line:
+            return cast(str | None, orjson.loads(line.removeprefix("data:"))["delta"]["stop_reason"])
+    return None
+
+
 async def _truncated_delivery(assembler: AnthropicAssembler) -> str:
     """Deliver a stream that stops after its blocks and before upstream says how it ended."""
+    # Everything upstream sent before it stopped: the blocks, and neither `message_delta` nor `message_stop`.
+    return await _truncated_delivery_of(anthropic_stream("one")[:-2], assembler)
+
+
+async def _truncated_delivery_of(payloads: list[bytes], assembler: AnthropicAssembler) -> str:
+    """The same, for a caller that chooses how much of the ending upstream managed to send."""
     delivered: list[bytes] = []
     async with aclosing(
         stream_delivery(
-            # Everything upstream sent before it stopped: the blocks, and neither `message_delta` nor `message_stop`.
-            feed(anthropic_stream("one")[:-2]),
+            feed(payloads),
             assembler,
             buffer=BlockBuffer(policy="block"),
             settings=StreamSettings(sse_ping_interval=0),
@@ -307,10 +320,9 @@ async def test_an_eof_between_blocks_closes_the_message_without_claiming_success
 
     assert '"type":"error"' not in body
     assert "incomplete_responses_stream" not in body
-    assert '"stop_reason":"incomplete"' in body
     assert "message_stop" in body
-    # The whole point of not reverting: a reason upstream never gave must not be the one that means "finished".
-    assert '"stop_reason":"end_turn"' not in body
+    # Read off the frame rather than matched as a substring. Asserting `"incomplete" in body` and then `"end_turn" not in body` looked like two checks and was one: only one `stop_reason` is ever emitted, so the second was strictly implied by the first and could never fail on its own. An equality pins both directions at once — the reason it must be, and every reason it must not be, `end_turn` above all.
+    assert _closing_stop_reason(body) == "incomplete"
 
 
 @pytest.mark.asyncio
@@ -361,6 +373,97 @@ async def test_an_empty_stop_reason_puts_the_clean_eof_back_to_an_error() -> Non
 
     assert "incomplete_responses_stream" in body
     assert "message_stop" not in body
+
+
+@pytest.mark.asyncio
+async def test_a_reason_upstream_gave_survives_the_clean_close() -> None:
+    """An Anthropic leg splits its ending: `message_delta` carries the reason, `message_stop` merely closes. A stream that loses only the second still told us why it stopped.
+
+    The configured reason is for the case where upstream said *nothing*. Applying it unconditionally replaced an observation with an invention — and disagreed with this project's own completion line, which already treats a set `stop_reason` as the turn having said what it needed to. Measured before the fix: the log read `max_tokens` while the client was told `incomplete`, out of one turn.
+    """
+    # `max_tokens` rather than `end_turn`, which the framer also synthesises for an empty reason — a test whose expected value collides with the fallback cannot tell a passthrough from a coincidence.
+    upstream = [
+        *anthropic_stream("one")[:-2],
+        frame("message_delta", {"delta": {"stop_reason": "max_tokens"}}),
+    ]
+    body = await _truncated_delivery_of(upstream, AnthropicAssembler())
+
+    assert _closing_stop_reason(body) == "max_tokens"
+    assert '"type":"error"' not in body
+
+
+def _responses_item(index: int, item_id: str, *, status: str) -> list[bytes]:
+    """One Responses text item, opened and closed, with upstream's own verdict on whether it finished."""
+    return [
+        frame(
+            "response.output_item.added",
+            {"output_index": index, "item": {"type": "message", "id": item_id, "content": []}},
+        ),
+        frame(
+            "response.output_text.delta",
+            {"output_index": index, "item_id": item_id, "delta": f"part{index}"},
+        ),
+        frame(
+            "response.output_item.done",
+            {
+                "output_index": index,
+                "item": {
+                    "type": "message",
+                    "id": item_id,
+                    "status": status,
+                    "content": [{"type": "output_text", "text": f"part{index}"}],
+                },
+            },
+        ),
+    ]
+
+
+async def _responses_delivery(payloads: list[bytes]) -> str:
+    delivered: list[bytes] = []
+    async with aclosing(
+        stream_delivery(
+            feed(payloads),
+            ResponsesAssembler(),
+            buffer=BlockBuffer(policy="block"),
+            settings=StreamSettings(sse_ping_interval=0),
+            framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
+        )
+    ) as stream:
+        async for chunk in stream:
+            delivered.append(chunk)
+    return b"".join(delivered).decode().replace(" ", "")
+
+
+@pytest.mark.asyncio
+async def test_a_responses_eof_between_whole_items_closes_the_message() -> None:
+    """The same ruling on the leg it actually fires on.
+
+    Measured over 133 929 recorded upstream streams: of the 109 that ended without a terminal event, the four that stopped at a block boundary were **all** on this leg — the Anthropic leg's 32 were every one of them mid-block. So the refinement's only real-world trigger had no test at all until this one, and both formats' `cut_mid_block` needs its own.
+    """
+    body = await _responses_delivery(
+        _responses_item(0, "msg_a", status="completed") + _responses_item(1, "msg_b", status="completed")
+    )
+
+    assert '"type":"error"' not in body
+    assert _closing_stop_reason(body) == "incomplete"
+    assert '"text":"part0"' in body
+    assert '"text":"part1"' in body
+
+
+@pytest.mark.asyncio
+async def test_a_responses_item_upstream_called_incomplete_is_not_a_block_boundary() -> None:
+    """Upstream said in so many words that it cut this item short, and then the connection ended without a terminal event.
+
+    This leg has a state the other does not: `output_item.done` pops the draft and, when the item is marked `incomplete`, parks the block rather than releasing it. So `_drafts` is empty while a block sits cut short and undelivered, and a `cut_mid_block` reading only `_drafts` answered "boundary" here — the clean close then dropped that block in silence, where the old ending had at least been loud. **Turning a loud truncation into quiet content loss is the worst direction this could have failed in**, and it is why this test exists rather than being folded into the one above.
+    """
+    body = await _responses_delivery(
+        _responses_item(0, "msg_a", status="completed") + _responses_item(1, "msg_b", status="incomplete")
+    )
+
+    assert "incomplete_responses_stream" in body
+    assert "message_stop" not in body
+    # What upstream did finish is still delivered; only the ending changes.
+    assert '"text":"part0"' in body
 
 
 def thinking_stream(signature: str) -> list[bytes]:

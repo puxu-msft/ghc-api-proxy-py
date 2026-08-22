@@ -150,16 +150,19 @@ def error_frame(*, error_type: str, message: str, code: str | None = None) -> Ss
 def terminal_frames(
     *,
     stop_reason: str,
-    usage: dict[str, Any] | None = None,
+    usage: dict[str, Any],
 ) -> tuple[SseFrame, ...]:
-    """Close the message. Only valid after every block has been framed."""
+    """Close the message. Only valid after every block has been framed.
+
+    `usage` is required rather than defaulted, so that a caller with nothing to report has to say what it is putting there instead of inheriting a zero from this signature. See `AnthropicFramer.terminal`.
+    """
     return (
         SseFrame(
             "message_delta",
             {
                 "type": "message_delta",
                 "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-                "usage": usage or {"output_tokens": 0},
+                "usage": usage,
             },
         ),
         SseFrame("message_stop", {"type": "message_stop"}),
@@ -186,7 +189,8 @@ def render(
     for block in materialised:
         for frame in block_frames(block):
             yield frame.encode()
-    for frame in terminal_frames(stop_reason=stop_reason, usage=usage):
+    # Same synthesis as `AnthropicFramer.terminal`, and written out for the same reason: the protocol has no spelling for an absent count, so a caller with nothing to report says so here rather than inheriting it from a signature.
+    for frame in terminal_frames(stop_reason=stop_reason, usage=usage or {"output_tokens": 0}):
         yield frame.encode()
 
 
@@ -225,12 +229,18 @@ class AnthropicFramer:
 
         `or "end_turn"` is a synthesis and stays visible rather than being written into the record: it only ever runs on a stream that did see a terminal event, so it fills in a field upstream left empty rather than inventing an ending upstream never reached.
         An explicit empty `stop_reason` gets it too, because `""` is not a stop reason any Anthropic consumer accepts.
+
+        `or {"output_tokens": 0}` is the other synthesis, and it is written here for the same reason: so that it is read rather than inherited. It fires when the message is closed without upstream ever reporting usage, which the clean-EOF ending made reachable in 2026-08-22.
+
+        **A zero here is not a measurement, and there is no legal way to say so.** `MessageDeltaUsage.output_tokens` is required with no default in the Anthropic SDK, so omitting the key is a protocol violation rather than an honest absence. What that judgement protects — this side's own records — is unpolluted regardless: `Terminal.usage` stays `{}` rather than zero, and readers of it test for the key rather than its value. An operator who would rather say nothing than say zero empties `client_delivery.unterminated_stream_stop_reason`, which restores the error frame and sends no `message_delta` at all.
+
+        The Responses framer answers the same absence with a `null`, because its own schema permits one. The two legs therefore differ on this, with a reason; it is not a mismatch to tidy away.
         """
         return tuple(
             frame.encode()
             for frame in terminal_frames(
                 stop_reason=terminal.stop_reason or "end_turn",
-                usage=terminal.usage or None,
+                usage=terminal.usage or {"output_tokens": 0},
             )
         )
 

@@ -399,8 +399,13 @@ class ResponsesAssembler:
 
     @property
     def cut_mid_block(self) -> bool:
-        """A draft still open means the events stopped part-way through a block. See `BlockAssembler`."""
-        return bool(self._drafts)
+        """A draft still open, **or one upstream already told us it cut short**. See `BlockAssembler`.
+
+        The second half is what this leg needs and the other does not. `_close` pops the draft the moment `output_item.done` arrives and, when upstream marked that item `status: "incomplete"`, parks the block in `_cut_short` instead of releasing it — so `_drafts` is empty while a block sits cut short and undelivered. Reading only `_drafts` there answered "stopped at a block boundary" for a stream upstream had explicitly said was severed, and the clean close that followed dropped that block in silence where the old ending had at least been loud. Measured 2026-08-22.
+
+        Anthropic has no equivalent state: a `content_block_stop` closes and delivers in one step, so `_drafts` and "was anything cut" are the same question there.
+        """
+        return bool(self._drafts) or self._cut_short is not None
 
     def push(self, event: SseEvent) -> tuple[CompletedBlock, ...]:
         data = event.json()
