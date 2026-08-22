@@ -72,7 +72,7 @@ class TransportOptions:
     Kept separate from constructing the client so the decision can be asserted without reaching
     into a third-party object's private state.
 
-    The proxy arrives as three fields rather than one because `config.example.yaml` states three tiers — CLI `--proxy`, then `HTTP_PROXY` / `HTTPS_PROXY`, then this setting — and a single string cannot say which tier it came from. Everything below the environment (YAML, `GHC_PROXY`, bundled) is one tier, so one bit of provenance is all three tiers need.
+    The proxy arrives as three fields rather than one because `config.example.yaml` states three tiers — CLI `--proxy`, then `HTTP_PROXY` / `HTTPS_PROXY`, then this setting — and a single string cannot say which tier it came from. Everything below the environment (YAML, `GHC_API_PROXY_PROXY`, bundled) is one tier, so one bit of provenance is all three tiers need.
     """
 
     # True when `--proxy` was given at all — an empty value included. Tier 1 having been exercised is what shuts tiers 2 and 3 out, not the value being non-empty: `--proxy ""` is an operator overriding a configured proxy back to direct, ruled 2026-08-21, and reading it as "no tier 1 after all" would hand the decision back to the environment they were overriding.
@@ -125,7 +125,7 @@ def transport_options(config: ProxyConfig, *, proxy_from_cli: bool) -> Transport
 
     `proxy` applies to every outgoing request, not only the model ones, as the spec states.
 
-    `proxy_from_cli` is required rather than defaulted, because the two answers produce different routing and a caller that forgot it would silently get the environment overriding a proxy the operator passed on the command line. A `TypeError` is the cheaper failure. It says whether the value in `config.proxy` arrived through `--proxy`: `load_proxy_config` merges CLI, `GHC_PROXY` and YAML into that one field, so by the time it is a string its tier is no longer recoverable from it.
+    `proxy_from_cli` is required rather than defaulted, because the two answers produce different routing and a caller that forgot it would silently get the environment overriding a proxy the operator passed on the command line. A `TypeError` is the cheaper failure. It says whether the value in `config.proxy` arrived through `--proxy`: `load_proxy_config` merges CLI, `GHC_API_PROXY_PROXY` and YAML into that one field, so by the time it is a string its tier is no longer recoverable from it.
 
     `tcp_keepalive_interval` is a real TCP keep-alive: it was mapped to the connection pool's idle expiry until 2026-08-20, which never writes to the socket and does not apply while a request is in flight. Nothing here configures pooling any more — the 15 seconds that mapping produced was a side effect of the defect, not a setting anyone chose, and httpx's own defaults apply now.
 

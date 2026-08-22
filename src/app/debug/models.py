@@ -226,7 +226,7 @@ async def collect_catalogs(
     """
     catalogs: list[ProviderCatalog] = []
     failures: list[CatalogFailure] = []
-    # `False` because this command has no `--proxy` of its own: whatever is in `config.proxy` came from the file, `GHC_PROXY` or the bundled defaults, all of which sit below the environment.
+    # `False` because this command has no `--proxy` of its own: whatever is in `config.proxy` came from the file, `GHC_API_PROXY_PROXY` or the bundled defaults, all of which sit below the environment.
     http_client = build_http_client(config, proxy_from_cli=False)
     try:
         # Probed here for the same reason the chain is built here: a report that named a different base URL from the one the server resolves would be worse than no report.

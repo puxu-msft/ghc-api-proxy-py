@@ -62,7 +62,7 @@ class EnvTokenProvider(GitHubTokenProvider):
 
     It previously also read `COPILOT_API_GITHUB_TOKEN`, `GH_TOKEN` and `GITHUB_TOKEN`, in that order. The last two are not ours: `gh auth login` and most CI runners export them for whatever happens to run next, so the proxy would silently authenticate as whichever identity the surrounding shell had lying around, and nothing in its output said which of the three it picked. A name only this project sets means an env token is one somebody chose for it.
 
-    Taken from `app.config.loading` rather than spelled again here because the name shares the `GHC_` prefix that module reads settings from, and it has to be excluded there or the process refuses to start. Two spellings would let the exclusion and the read drift apart, and the failure that produces is the service not starting at all.
+    Taken from `app.config.loading` rather than spelled again here because the name shares the `GHC_API_PROXY_` prefix that module reads settings from, and it has to be excluded there or the process refuses to start. Two spellings would let the exclusion and the read drift apart, and the failure that produces is the service not starting at all.
     """
 
     def _find_token(self) -> str | None:
