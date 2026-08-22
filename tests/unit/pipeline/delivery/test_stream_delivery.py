@@ -302,7 +302,7 @@ async def test_a_truncated_stream_ends_in_an_error_event_and_never_claims_succes
 
     This test replaces one that pinned the opposite — the chain used to flush `message_delta{stop_reason: "end_turn"}` + `message_stop` here, dressing a truncated turn as a clean one and storing it in the client's history as a complete answer. That predecessor said in its own docstring that it existed to be reversed rather than preserved; this is the reversal.
 
-    Both halves are asserted, because either alone lets the regression back. Emitting the error event while still flushing the terminal would satisfy the first half and tell the client two contradictory things; the frozen Spec rules the two mutually exclusive — 不得再发 `message_stop` 冒充成功.
+    Both halves are asserted, because either alone lets the regression back. Emitting the error event while still flushing the terminal would satisfy the first half and tell the client two contradictory things; `.dev/docs/anthropic-responses-bridge/spec.md`, "Downstream Anthropic SSE" item 5, rules the two mutually exclusive — 不得再发 `message_stop` 冒充成功.
     """
     body = await _truncated_delivery(AnthropicAssembler())
 

@@ -103,7 +103,7 @@ def format_protocols(client: str, upstream: str) -> str:
 class RequestLine:
     """Everything one request contributes to its own log line.
 
-    `model` empty means routing never resolved one — a rejected body, an unknown model. It is then left out rather than printed as a placeholder, which is what "no model and no tokens for a non-model request" means.
+    `model` empty means routing never resolved one — a rejected body, an unknown model. It is then left out rather than printed as a placeholder, because a placeholder reads as a model actually named that.
 
     `bytes_in` / `bytes_out` are wire bytes in each direction; `usage` is the upstream's own token accounting, keyed as Anthropic reports it. The two are separate facts and a request can have either without the other — a rejected body has bytes and no tokens, a cached hit has tokens and almost no bytes.
 

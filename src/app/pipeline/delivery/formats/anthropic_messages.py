@@ -139,7 +139,7 @@ def error_frame(*, error_type: str, message: str, code: str | None = None) -> Ss
 
     Its shape is the legacy chain's, byte for byte (`app/delivery/anthropic_sse.py::render_error`), because the wire contract is the same one and two spellings of it would be two things to keep in step. `code` is omitted rather than sent as null when absent, for the same reason.
 
-    Mutually exclusive with `terminal_frames`: the frozen Spec rules that a terminal error past committed headers uses this event 且不得再发 `message_stop` 冒充成功. Nothing here enforces that — the caller picks one.
+    Mutually exclusive with `terminal_frames`: `.dev/docs/anthropic-responses-bridge/spec.md`, "Downstream Anthropic SSE" item 5, rules that a terminal error past committed headers uses this event 且不得再发 `message_stop` 冒充成功. Nothing here enforces that — the caller picks one.
     """
     detail: dict[str, Any] = {"type": error_type, "message": message}
     if code is not None:

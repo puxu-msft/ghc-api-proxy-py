@@ -505,7 +505,7 @@ class ResponsesAssembler:
             reason = ""
             if isinstance(details, dict):
                 reason = str(cast(dict[str, Any], details).get("reason", ""))
-            # spec.md: the output-token limit is max_tokens downstream. That one has an Anthropic spelling; nothing else does, so nothing else is translated.
+            # `.dev/docs/anthropic-responses-bridge/spec.md`: the output-token limit is max_tokens downstream. That one has an Anthropic spelling; nothing else does, so nothing else is translated.
             #
             # Everything upstream did not name `max_output_tokens` used to become `end_turn`, which reported a turn upstream had cut short as one it finished — the same defect `Terminal.stop_reason` was given an empty default to avoid, reintroduced one field further down. It is upstream's word that goes on the wire now, unmapped. Claude Code's own schema for this field is a nullable string with no enumeration and its readers compare against known values and skip the rest, so a word it does not know costs it nothing; a wrong word it does know costs a reader the truth.
             #

@@ -145,7 +145,7 @@ def _function_tool(tool: dict[str, Any]) -> dict[str, Any]:
 
 # The family this endpoint executes itself, under its own name. Anthropic spells the declaration `web_search_20250305`; sending that spelling costs the whole turn — `Invalid value: 'web_search_20250305'`, measured 2026-08-20 against gpt-5.6-sol — while `{"type": "web_search"}` returns 200 and really does run the search.
 #
-# `web_fetch_` is deliberately *not* here, and it is not the same case: this endpoint refuses `web_fetch` under every spelling tried, so there is nothing to map it to. `hosted-web-search-spec.md` §13 has that family refused locally rather than removed quietly, which is its own piece of work.
+# `web_fetch_` is deliberately *not* here, and it is not the same case: this endpoint refuses `web_fetch` under every spelling tried, so there is nothing to map it to. `.dev/docs/anthropic-responses-bridge/hosted-web-search-spec.md` §13 has that family refused locally rather than removed quietly, which is its own piece of work.
 #
 # Nor are `memory_`, `tool_search_`, `text_editor_`, `bash_` and `computer_`. Those are executed by the client, not by the model's host, so there is no hosted equivalent to name — they travel unchanged today and are recorded in `.dev/docs/hosted-web-search/reports/260820-websearch-responses-leg-400-fix.md` §5.1 as the gap that leaves.
 _ANTHROPIC_SERVER_TOOL_FAMILIES: tuple[str, ...] = ("web_search_",)
@@ -579,8 +579,8 @@ def _reasoning_item(block: ContentBlock, conversion: Conversion) -> dict[str, An
             "encrypted_content": state.value,
         }
     if state.format is OpaqueFormat.PROXY_CARRIER:
-        # A carrier this proxy issued. With a payload it round-trips value-exact; bare, `spec.md`
-        # says TRANSFORM — restore a summary-only reasoning item rather than drop the block. It
+        # A carrier this proxy issued. With a payload it round-trips value-exact; bare,
+        # `.dev/docs/anthropic-responses-bridge/spec.md` says TRANSFORM — restore a summary-only reasoning item rather than drop the block. It
         # used to be dropped, which lost the turn's reasoning entirely on the way back.
         item: dict[str, Any] = {
             "type": "reasoning",

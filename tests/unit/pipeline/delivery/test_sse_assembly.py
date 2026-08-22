@@ -208,7 +208,7 @@ def test_responses_function_call_becomes_a_tool_use_block() -> None:
 
 
 def test_responses_incomplete_maps_to_max_tokens() -> None:
-    # spec.md fixes this direction.
+    # `.dev/docs/anthropic-responses-bridge/spec.md` fixes this direction.
     assembler = ResponsesAssembler()
     assembler.push(SseEvent("response.incomplete", orjson.dumps(
         {"response": {"incomplete_details": {"reason": "max_output_tokens"}}}

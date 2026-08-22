@@ -566,7 +566,7 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
             )
         # Category is what the MCP server keys its reply on, so it is read through the same mapping that decided this failure was continuable in the first place. Classified raw, a transport tear is `internal` — it is not an `OSError` — while the retry path calls the same failure `network`, and the two answers would have disagreed about one event.
         #
-        # A turn upstream cut short for want of room is not an error and has no `ErrorCategory`. It travels under the stop reason upstream gave it, which is also what a reader of the MCP server's journal will recognise. **The value is provisional**: the user ruled that this case gets a category of its own but has not named it, and the server that reads it is being changed in another repository. See `decisions.md` 4.1.
+        # A turn upstream cut short for want of room is not an error and has no `ErrorCategory`. It travels under the stop reason upstream gave it, which is also what a reader of the MCP server's journal will recognise. **The value is provisional**: the user ruled that this case gets a category of its own but has not named it, and the server that reads it is being changed in another repository. See `.dev/docs/upstream/retry-and-continuation/decisions.md` 4.1.
         if error is None:
             category = stop_reason
         else:
@@ -835,7 +835,7 @@ class _StreamAccounting:
             terminal = self.assembler.terminal
             # Absorbed either way. Every field on the record was put there by an event that actually arrived, so a stream cut off mid-turn still has a true account of the blocks it did produce — which tools were asked for, how much reasoning came back — and withholding those said nothing about the truncation while losing everything else. What upstream never said is now simply absent from the record rather than standing at a default that reads like an answer.
             self.trace.absorb(terminal)
-            # Deliberately still gated on `seen` while the line above is not, and conservatively rather than undecidedly: `reply is not None` currently means the reply finished, hooks and History are written against that, and widening it is a contract change that belongs with the STR-04 slice which needs a failed History anyway. Registered in `implementation.md`'s 结构怪味登记 so it is reconsidered there rather than rediscovered.
+            # Deliberately still gated on `seen` while the line above is not, and conservatively rather than undecidedly: `reply is not None` currently means the reply finished, hooks and History are written against that, and widening it is a contract change that belongs with the STR-04 slice which needs a failed History anyway. Registered in `.dev/docs/anthropic-responses-bridge/implementation.md`'s 结构怪味登记 so it is reconsidered there rather than rediscovered.
             if terminal.seen and self.context is not None:
                 self.context.reply = terminal
             # Two conditions, because either one alone lets a real incident through. Upstream's reason is not enough: `stream_delivery` writes its terminal frames after its event loop, so a tear or a disconnect unwinds straight past them and the client gets neither `message_delta` nor `message_stop` even when the assembler recorded upstream's. And a clean drain is not enough either: that is exactly the truncation this whole path exists to report.

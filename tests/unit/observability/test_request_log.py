@@ -112,7 +112,7 @@ def test_the_verdict_rather_than_the_status_code_decides_how_the_line_reads() ->
 
 
 def test_a_request_that_never_resolved_a_model_omits_it() -> None:
-    # A non-model request shows no model and no tokens — see `app.observability.request_log`. A placeholder would read as a model actually named that.
+    # A non-model request shows no model and no tokens. A placeholder would read as a model actually named that.
     line = format_completion_line(
         RequestLine(method="POST", path="/v1/messages", status_code=400, duration_s=0.002, detail="body must be an object"),
         status="fail",

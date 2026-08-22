@@ -381,8 +381,8 @@ async def _deliver(
         return
     if not terminal.seen:
         # STR-04: an EOF with no legal terminal event is truncation, not success.
-        # Ported from the legacy chain rather than redesigned, as `implementation.md` directs: `app/delivery/responses_anthropic_stream.py`, on `not frontier.terminal_accepted`, raises `incomplete_responses_stream` and renders an SSE error. Same code, same wire shape, same message, same gate on the message having started — a client that already learned to read one of these does not have to learn a second.
-        # `message_stop` deliberately does not follow. The frozen Spec rules these two mutually exclusive: 不得再发 `message_stop` 冒充成功.
+        # Ported from the legacy chain rather than redesigned, as `.dev/docs/anthropic-responses-bridge/implementation.md` directs: `app/delivery/responses_anthropic_stream.py`, on `not frontier.terminal_accepted`, raises `incomplete_responses_stream` and renders an SSE error. Same code, same wire shape, same message, same gate on the message having started — a client that already learned to read one of these does not have to learn a second.
+        # `message_stop` deliberately does not follow. `.dev/docs/anthropic-responses-bridge/spec.md`, "Downstream Anthropic SSE" item 5, rules these two mutually exclusive: 不得再发 `message_stop` 冒充成功.
         yield framer.error(
             error_type=WIRE_TYPES[ErrorCategory.UPSTREAM],
             message="Responses stream ended before a successful terminal event",

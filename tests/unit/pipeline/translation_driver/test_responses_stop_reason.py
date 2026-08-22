@@ -29,7 +29,7 @@ def _reply(reason: str | None) -> dict[str, Any]:
 
 
 def test_the_output_token_limit_is_translated() -> None:
-    # spec.md fixes this direction, and it is the only one it fixes.
+    # `.dev/docs/anthropic-responses-bridge/spec.md` fixes this direction, and it is the only one it fixes.
     assert from_openai_responses_response(_reply("max_output_tokens")).stop_reason == "max_tokens"
 
 

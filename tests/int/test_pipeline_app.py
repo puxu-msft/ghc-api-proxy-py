@@ -943,7 +943,7 @@ def test_translated_route_answers_in_the_format_the_client_asked_in() -> None:
 
 
 def test_max_output_tokens_becomes_the_anthropic_stop_reason() -> None:
-    """spec.md: an incomplete response due to the output-token limit is max_tokens downstream — and then the turn is handed back, so `tool_use` is what reaches the wire.
+    """`.dev/docs/anthropic-responses-bridge/spec.md`: an incomplete response due to the output-token limit is max_tokens downstream — and then the turn is handed back, so `tool_use` is what reaches the wire.
 
     The mapping itself is asserted where it happens, in `tests/unit/pipeline/translation_driver/test_responses_stop_reason.py`. What this holds is the ending a buffered reply gets once that mapping has said the turn ran out of room: the client is handed a way to carry it on, exactly as a streamed one is. Ruled 2026-08-22.
     """
