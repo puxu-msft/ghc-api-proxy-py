@@ -148,6 +148,15 @@
       message: "Please continue where you left off."
 ```
 
+**追加（2026-08-22）**：同一段里的 `streamReplay` 也要删——你已裁决删除它，代码侧已随之移除。要删的是第 339–340 行：
+
+```yaml
+    streamReplay:
+      max_retries: 100
+```
+
+理由记在 `.dev/docs/upstream/retry-and-continuation/decisions.md` 第四节：它是代理内续写方案的遗留，配对的另一半已经删了；断流重开现在走 `network` 的普通预算，`max_total` 成为整条客户端请求的总闸。
+
 顺带两处**同一段落里的相邻文字**，删不删由你，它们描述的都是已放弃的方案：
 
 - 第 322 行 `# Includes both direct replay and continuation` —— 现在只剩 direct replay。
