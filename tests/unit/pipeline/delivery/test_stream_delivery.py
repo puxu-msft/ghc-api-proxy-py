@@ -27,7 +27,7 @@ from app.pipeline.delivery.stream import (
     _LastWrite,  # pyright: ignore[reportPrivateUsage]
     stream_delivery,
 )
-from app.pipeline.retry import RetryLedger
+from app.pipeline.retry import RetryLedger, RetryReason
 from app.server.pipeline_app import (
     _counted_upstream,  # pyright: ignore[reportPrivateUsage]
     _Trace,  # pyright: ignore[reportPrivateUsage]
@@ -929,7 +929,7 @@ def _replay_over(attempts: list[list[bytes]]) -> ReplaySupport:
 
     return ReplaySupport(
         ledger=RetryLedger(UpstreamRequestRetryConfig.model_validate({})),
-        eligible=lambda error: isinstance(error, ConnectionError),
+        eligible=lambda error: RetryReason.NETWORK if isinstance(error, ConnectionError) else None,
         reopen=reopen,
     )
 
@@ -988,7 +988,7 @@ async def test_a_stream_the_client_already_saw_is_not_replaced() -> None:
 async def test_a_failure_no_second_attempt_could_answer_is_not_replaced() -> None:
     """Eligibility is the caller's to answer, and a failure it refuses is raised even though the position would allow a replay."""
     replay = _replay_over([anthropic_stream("kept")])
-    refusing = ReplaySupport(ledger=replay.ledger, eligible=lambda _error: False, reopen=replay.reopen)
+    refusing = ReplaySupport(ledger=replay.ledger, eligible=lambda _error: None, reopen=replay.reopen)
     with pytest.raises(ConnectionError):
         _ = [
             chunk

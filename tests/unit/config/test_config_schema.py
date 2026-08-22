@@ -25,7 +25,7 @@ def test_authoritative_example_config_parses() -> None:
     assert config.model_mappings["opus"] == "claude-opus-5"
     assert config.upstream_request_timeouts.upstream_request_deadline == 1200
     assert config.client_delivery.client_request_deadline == 3600
-    assert config.upstream_request_retry.strategies.streamReplay.max_retries == 100
+    assert config.upstream_request_retry.strategies.network.max_retries == 9
     assert config.hooks.on_client_request_parsed == []
     assert config.history.enabled is True
 

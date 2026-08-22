@@ -24,7 +24,6 @@ class RetryReason(StrEnum):
     GITHUB_TOKEN_EXPIRED = "githubTokenExpired"
     NETWORK = "network"
     SERVER_ERROR = "serverError"
-    STREAM_REPLAY = "streamReplay"
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,7 +38,8 @@ def reason_for(error: BaseException, *, status_code: int | None = None) -> Retry
     if classify(error) is not Disposition.RETRY:
         return None
     if isinstance(error, PipelineRetry):
-        return RetryReason.STREAM_REPLAY
+        # A subscriber asking for another attempt is not an upstream failure, and it used to draw on a counter of its own. It does not need one: the reasons here exist so that one flapping cause cannot starve the others, and a mechanism with no production caller cannot flap. `network` is where anything transient and statusless already goes.
+        return RetryReason.NETWORK
     if isinstance(error, UpstreamTimeout):
         return RetryReason.NETWORK
     if isinstance(error, UpstreamRateLimit):
@@ -74,9 +74,7 @@ class RetryLedger:
             return strategies.githubTokenExpired.max_retries
         if reason is RetryReason.NETWORK:
             return strategies.network.max_retries
-        if reason is RetryReason.SERVER_ERROR:
-            return strategies.serverError.max_retries
-        return strategies.streamReplay.max_retries
+        return strategies.serverError.max_retries
 
     def spent(self, reason: RetryReason) -> int:
         return self.per_reason.get(reason, 0)
@@ -119,6 +117,7 @@ def decide_stream_ending(
     downstream_opened: bool,
     committed_blocks: int,
     ledger: RetryLedger,
+    reason: RetryReason,
 ) -> EndingVerdict:
     """Choose between finishing, replaying and giving up.
 
@@ -130,17 +129,17 @@ def decide_stream_ending(
 
     `downstream_opened` means a semantic event has already gone out — a `message_start`, whether it came with the first block or was synthesised during a long silence. Keep-alive comments do not count; they carry nothing a client stores.
 
-    Budget is spent here, not merely consulted: choosing to replay is what consumes a replay. A caller that decides twice for one stream would otherwise be funded twice.
+    Budget is spent here, not merely consulted: choosing to replay is what consumes an attempt. A caller that decides twice for one stream would otherwise be funded twice. It is spent under the reason the failure itself draws on, passed in by the caller — a torn body is a network failure at a later instant than a torn connection, not a different kind of thing, and it used to have a counter of its own for no better reason than that the design it came from paired it with a proxy-side continuation. That pairing is gone.
     """
     if terminal_seen:
         return EndingVerdict(StreamEnding.COMPLETE)
 
     if not downstream_opened:
         # Nothing the client can see, so the second attempt can stand in for the first with no trace. This is the only place a transparent replay is legal.
-        verdict = ledger.take(RetryReason.STREAM_REPLAY)
+        verdict = ledger.take(reason)
         if verdict.allowed:
-            return EndingVerdict(StreamEnding.REPLAY, RetryReason.STREAM_REPLAY)
-        return EndingVerdict(StreamEnding.ABANDON, RetryReason.STREAM_REPLAY, verdict.detail)
+            return EndingVerdict(StreamEnding.REPLAY, reason)
+        return EndingVerdict(StreamEnding.ABANDON, reason, verdict.detail)
 
     if committed_blocks == 0:
         # Opened but empty: the client holds a `message_start` and no content. A replay would send it a second one, so the only ending left is to say the stream was truncated. Kept apart from the case below because the two leave the client holding different things, and the detail is what a reader sees.

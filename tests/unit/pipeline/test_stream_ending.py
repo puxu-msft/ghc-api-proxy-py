@@ -31,6 +31,7 @@ def decide(
         downstream_opened=downstream_opened,
         committed_blocks=committed_blocks,
         ledger=book if book is not None else ledger(),
+        reason=RetryReason.NETWORK,
     )
 
 
@@ -45,7 +46,7 @@ def test_nothing_delivered_yet_may_be_replayed_transparently() -> None:
     """The one place a replay is legal: there is no client-visible trace for a second attempt to contradict."""
     verdict = decide()
     assert verdict.ending is StreamEnding.REPLAY
-    assert verdict.reason is RetryReason.STREAM_REPLAY
+    assert verdict.reason is RetryReason.NETWORK
 
 
 def test_delivered_content_is_never_replayed() -> None:
@@ -57,9 +58,9 @@ def test_delivered_content_is_never_replayed() -> None:
 
 
 def test_an_opened_but_empty_response_says_so_in_its_own_words() -> None:
-    """A long silence can put `message_start` on the wire before any block exists, and replaying would then send a second one.
+    """Opened with nothing in it: the client holds a `message_start` and no content, so a replay would send it a second one.
 
-    Held apart from the case above even though both abandon, because the two leave the client holding different things and `detail` is what a reader gets.
+    **No caller can reach this today.** The one thing that put a `message_start` on the wire before a block existed was the synthesised preamble, and that is gone — the preamble now travels with the first block, which makes "opened" and "a block was delivered" the same instant. Kept because this function is pure and a caller is free to ask, and because the two abandoned routes leave the client holding different things: `detail` is what a reader gets, and flattening them would cost that.
     """
     verdict = decide(downstream_opened=True, committed_blocks=0)
     assert verdict.ending is StreamEnding.ABANDON
@@ -67,7 +68,7 @@ def test_an_opened_but_empty_response_says_so_in_its_own_words() -> None:
 
 
 def test_an_exhausted_budget_ends_the_stream_rather_than_looping() -> None:
-    book = ledger(max_total=1, strategies={"streamReplay": {"max_retries": 1}})
+    book = ledger(max_total=1, strategies={"network": {"max_retries": 1}})
     assert decide(book=book).ending is StreamEnding.REPLAY
     second = decide(book=book)
     assert second.ending is StreamEnding.ABANDON
@@ -76,9 +77,9 @@ def test_an_exhausted_budget_ends_the_stream_rather_than_looping() -> None:
 
 def test_deciding_spends_the_budget_it_grants() -> None:
     """Otherwise a caller that asks twice for one stream is funded twice, and a torn stream can loop for as long as upstream keeps tearing."""
-    book = ledger(strategies={"streamReplay": {"max_retries": 5}})
+    book = ledger(strategies={"network": {"max_retries": 5}})
     decide(book=book)
-    assert book.spent(RetryReason.STREAM_REPLAY) == 1
+    assert book.spent(RetryReason.NETWORK) == 1
 
 
 def test_an_ending_that_starts_no_attempt_spends_nothing() -> None:

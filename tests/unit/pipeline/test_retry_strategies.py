@@ -24,7 +24,6 @@ def test_defaults_match_the_spec() -> None:
     assert ledger.limit_for(RetryReason.GITHUB_TOKEN_EXPIRED) == 0
     assert ledger.limit_for(RetryReason.NETWORK) == 9
     assert ledger.limit_for(RetryReason.SERVER_ERROR) == 9
-    assert ledger.limit_for(RetryReason.STREAM_REPLAY) == 100
 
 
 @pytest.mark.parametrize(
@@ -32,7 +31,8 @@ def test_defaults_match_the_spec() -> None:
     [
         (UpstreamTimeout("slow"), RetryReason.NETWORK),
         (UpstreamRateLimit("429"), RetryReason.SERVER_ERROR),
-        (PipelineRetry("again"), RetryReason.STREAM_REPLAY),
+        # A subscriber asking for another attempt has no counter of its own; it draws on the transient one.
+        (PipelineRetry("again"), RetryReason.NETWORK),
         (UpstreamError("gone", status_code=401), RetryReason.GITHUB_TOKEN_EXPIRED),
         (UpstreamError("boom", status_code=503), RetryReason.SERVER_ERROR),
         (UpstreamError("no status"), RetryReason.NETWORK),

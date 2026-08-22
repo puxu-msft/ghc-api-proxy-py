@@ -25,7 +25,7 @@ from app.pipeline.delivery.anthropic_sse import (
 from app.pipeline.delivery.assembler import BlockAssembler
 from app.pipeline.delivery.blocks import BlockBuffer, CompletedBlock, DeliverySession
 from app.pipeline.delivery.sse_source import SseEvent, read_events
-from app.pipeline.retry import RetryLedger, StreamEnding, decide_stream_ending
+from app.pipeline.retry import RetryLedger, RetryReason, StreamEnding, decide_stream_ending
 from app.streaming.keepalive import finish_stream_cleanup
 
 PING_FRAME = b": ping\n\n"
@@ -41,11 +41,11 @@ class ReplaySupport:
 
     The two halves of the decision are deliberately on opposite sides of this boundary, because they are answers to different questions and only one of them is delivery's to answer. **Whether a replay is legal at all** is a fact about position — has the client seen anything, is there a committed block, is there budget — and delivery is the only thing that knows it. **Whether this particular failure is one another attempt could answer** is a fact about upstream's error taxonomy, which delivery has no business importing: a transport tear may be replaced, a conversion error and a refusal may not, and that vocabulary belongs to the layer that speaks to upstream.
 
-    `eligible` is asked first and costs nothing, so a failure no attempt can answer never spends budget on being told so.
+    `eligible` is asked first and costs nothing, so a failure no attempt can answer never spends budget on being told so. It answers with the reason the failure draws on rather than a yes, because the budget it will spend is the ordinary one for that reason — a torn body is a network failure at a later instant, not a kind of its own.
     """
 
     ledger: RetryLedger
-    eligible: Callable[[Exception], bool]
+    eligible: Callable[[Exception], RetryReason | None]
     reopen: Callable[[], Awaitable[Attempt | None]]
 
 
@@ -265,13 +265,15 @@ async def _deliver(
             torn = error
         if torn is None:
             break
-        if replay is None or not replay.eligible(torn):
+        reason = replay.eligible(torn) if replay is not None else None
+        if replay is None or reason is None:
             raise torn
         verdict = decide_stream_ending(
             terminal_seen=assembler.terminal.seen,
             downstream_opened=client_has_bytes.is_set(),
             committed_blocks=session.committed_count,
             ledger=replay.ledger,
+            reason=reason,
         )
         if verdict.ending is not StreamEnding.REPLAY:
             raise torn
