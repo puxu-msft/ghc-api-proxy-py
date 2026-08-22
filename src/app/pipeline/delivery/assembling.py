@@ -67,6 +67,16 @@ class BlockAssembler(Protocol):
     @property
     def terminal(self) -> Terminal: ...
 
+    @property
+    def cut_mid_block(self) -> bool:
+        """Whether a block was still being accumulated when the events stopped.
+
+        The one observable that tells a stream cut *between* blocks from one cut *through* one. Both leave `terminal.seen` false, and until this existed the two were answered identically — an upstream that closed cleanly after finishing its last block was reported to the client as a truncation, the same as one severed mid-sentence.
+
+        Deliberately not "did the client get whole blocks". Under block-level delivery that question is always yes: a half-built block is never handed downstream, so it cannot discriminate anything. What is being asked here is about the *assembler's* state, which is the only place the difference survives.
+        """
+        ...
+
 
 @dataclass(slots=True)
 class Draft:

@@ -227,6 +227,16 @@ class ClientDeliveryConfig(Section):
     buffering_policy: BufferingPolicy = "block"
     buffer_cap_bytes: int = Field(default=16_777_216, ge=0)
     sse_ping_interval: int = Field(default=15, ge=0)
+    # What to put on the wire when upstream closed cleanly at a block boundary without ever sending its terminal event. There is no true answer to report — upstream never said why it stopped — so this names the synthesis rather than hiding it.
+    #
+    # Default `incomplete`, which is upstream's own word for a reply that stopped without finishing and is already what the Responses assembler records when upstream says `response.incomplete` with no reason. Claude Code's schema for this field is a nullable string with no enumeration and its readers compare against known values and skip the rest, so a word it does not know costs it nothing.
+    #
+    # `end_turn` is available and is what this used to fall back to, but it claims a turn upstream never claimed.
+    #
+    # **Empty turns the whole refinement off**: a clean EOF with no terminal event goes back to being an SSE error, which is what this did before 2026-08-22 and what an operator who would rather see a loud truncation than a quiet one should set. It is an off-switch rather than a third wire shape because the alternative — closing the message with no `message_delta` at all — needs a framing path neither format has, and buying one for a case nobody has asked for is the wrong trade.
+    #
+    # Only reached at a block boundary. A stream cut *through* a block is a truncation whatever this says, and still ends in an error.
+    unterminated_stream_stop_reason: str = "incomplete"
     hedge: HedgeConfig = Field(default_factory=HedgeConfig)
 
 

@@ -91,7 +91,10 @@ def assembler_for(
 
 def stream_settings(chain: Chain) -> StreamSettings:
     delivery = chain.config.client_delivery
-    return StreamSettings(sse_ping_interval=delivery.sse_ping_interval)
+    return StreamSettings(
+        sse_ping_interval=delivery.sse_ping_interval,
+        unterminated_stop_reason=delivery.unterminated_stream_stop_reason,
+    )
 
 def delivery_buffer(chain: Chain) -> BlockBuffer:
     delivery = chain.config.client_delivery

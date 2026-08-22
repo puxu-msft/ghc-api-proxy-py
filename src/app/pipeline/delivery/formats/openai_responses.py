@@ -363,6 +363,11 @@ class ResponsesAssembler:
     def terminal(self) -> Terminal:
         return self._terminal
 
+    @property
+    def cut_mid_block(self) -> bool:
+        """A draft still open means the events stopped part-way through a block. See `BlockAssembler`."""
+        return bool(self._drafts)
+
     def push(self, event: SseEvent) -> tuple[CompletedBlock, ...]:
         data = event.json()
         kind = event.event or str(data.get("type", ""))

@@ -26,6 +26,7 @@ from app.pipeline.delivery.formats.openai_responses import ResponsesAssembler
 from app.pipeline.delivery.sse_source import SseEvent
 from app.pipeline.delivery.stream import (
     PING_FRAME,
+    ContinuationSupport,
     ReplaySupport,
     StreamSettings,
     _events_with_ping,  # pyright: ignore[reportPrivateUsage]
@@ -297,18 +298,68 @@ async def test_delivering_a_truncated_stream_does_not_make_its_record_look_finis
 
 
 @pytest.mark.asyncio
-async def test_a_truncated_stream_ends_in_an_error_event_and_never_claims_success() -> None:
-    """STR-04: an EOF with no legal terminal event is truncation, and the client must be told so.
+async def test_an_eof_between_blocks_closes_the_message_without_claiming_success() -> None:
+    """Upstream stopped at a block boundary without saying why. Every block it produced is whole, so nothing the client holds is damaged and an error frame would call a reply truncated when nothing was cut. Ruled 2026-08-22.
 
-    This test replaces one that pinned the opposite — the chain used to flush `message_delta{stop_reason: "end_turn"}` + `message_stop` here, dressing a truncated turn as a clean one and storing it in the client's history as a complete answer. That predecessor said in its own docstring that it existed to be reversed rather than preserved; this is the reversal.
-
-    Both halves are asserted, because either alone lets the regression back. Emitting the error event while still flushing the terminal would satisfy the first half and tell the client two contradictory things; `.dev/docs/anthropic-responses-bridge/spec.md`, "Downstream Anthropic SSE" item 5, rules the two mutually exclusive — 不得再发 `message_stop` 冒充成功.
+    The invariant that outlives the ruling is the one this test has carried through two rewrites: **never dress a turn upstream did not finish as one it did.** The chain originally flushed `end_turn` here, which stored a truncated answer in the client's history as a complete one; the fix made it an error; this makes it a clean close under upstream's own word for it. `end_turn` staying absent is what makes the third version a refinement of the second rather than a reversion to the first, and it is asserted for that reason.
     """
     body = await _truncated_delivery(AnthropicAssembler())
 
+    assert '"type":"error"' not in body
+    assert "incomplete_responses_stream" not in body
+    assert '"stop_reason":"incomplete"' in body
+    assert "message_stop" in body
+    # The whole point of not reverting: a reason upstream never gave must not be the one that means "finished".
+    assert '"stop_reason":"end_turn"' not in body
+
+
+@pytest.mark.asyncio
+async def test_an_eof_through_a_block_is_still_a_truncation() -> None:
+    """The other side of the same judgement, and the pair is what gives either one meaning.
+
+    Cut here with a block still open, so the assembler is holding a draft. That is a reply severed mid-sentence rather than one that simply stopped being explained, and it keeps the ending it always had.
+    """
+    # Everything up to and including the delta, but not the `content_block_stop`: a draft is left open.
+    delivered: list[bytes] = []
+    async with aclosing(
+        stream_delivery(
+            feed(anthropic_stream("one", "two")[:4]),
+            AnthropicAssembler(),
+            buffer=BlockBuffer(policy="block"),
+            settings=StreamSettings(sse_ping_interval=0),
+            framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
+        )
+    ) as stream:
+        async for chunk in stream:
+            delivered.append(chunk)
+    body = b"".join(delivered).decode().replace(" ", "")
+
     assert '"type":"error"' in body
     assert "incomplete_responses_stream" in body
-    assert '"stop_reason":"end_turn"' not in body
+    assert "message_stop" not in body
+
+
+@pytest.mark.asyncio
+async def test_an_empty_stop_reason_puts_the_clean_eof_back_to_an_error() -> None:
+    """The off-switch, asserted because a setting nobody exercises is a setting nobody can trust.
+
+    An operator who would rather see a loud truncation than a quiet close sets `client_delivery.unterminated_stream_stop_reason` empty and gets the pre-2026-08-22 ending back.
+    """
+    delivered: list[bytes] = []
+    async with aclosing(
+        stream_delivery(
+            feed(anthropic_stream("one")[:-2]),
+            AnthropicAssembler(),
+            buffer=BlockBuffer(policy="block"),
+            settings=StreamSettings(sse_ping_interval=0, unterminated_stop_reason=""),
+            framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
+        )
+    ) as stream:
+        async for chunk in stream:
+            delivered.append(chunk)
+    body = b"".join(delivered).decode().replace(" ", "")
+
+    assert "incomplete_responses_stream" in body
     assert "message_stop" not in body
 
 
@@ -552,6 +603,11 @@ class SlowAssembler:
     `first_block` exists because the keep-alive is only observable once the client holds bytes, and the client holds no bytes until a block has been delivered. A stand-in that never completes one can no longer be used to watch the schedule at all.
     """
 
+    @property
+    def cut_mid_block(self) -> bool:
+        """Never mid-block: this stand-in exists for the timing, and completes its block or nothing."""
+        return False
+
     def __init__(self, *, seconds: float, first_block: bool = False) -> None:
         self._seconds = seconds
         self._terminal = Terminal()
@@ -743,7 +799,12 @@ async def test_an_unassemblable_event_fails_before_the_preamble() -> None:
             async for chunk in delivery:
                 chunks.append(chunk)
 
-    assert chunks == []
+    body = b"".join(chunks).decode()
+    # The invariant is unchanged: no message is opened for a stream that failed before it had content.
+    assert "message_start" not in body
+    # What is new is that the client is told at all. It used to get a 200 whose body simply stopped.
+    # `proxy_delivery_failed`, not an upstream code: a bad index out of our own assembler is this side's bug, and the one word a client can read must not blame upstream for it.
+    assert "proxy_delivery_failed" in body
 
 
 @pytest.mark.asyncio
@@ -981,7 +1042,10 @@ async def test_a_stream_the_client_already_saw_is_not_replaced() -> None:
 
 @pytest.mark.asyncio
 async def test_a_failure_no_second_attempt_could_answer_is_not_replaced() -> None:
-    """Eligibility is the caller's to answer, and a failure it refuses is raised even though the position would allow a replay."""
+    """Eligibility is the caller's to answer, and a failure it refuses buys no second attempt even though the position would allow one.
+
+    The raise is still asserted, and it is now the *second* half of the ending rather than the whole of it: the client is framed first and the caller learns the failure after. With no `continuation` configured there is nothing between the two.
+    """
     replay = _replay_over([anthropic_stream("kept")])
     refusing = ReplaySupport(ledger=replay.ledger, eligible=lambda _error: None, reopen=replay.reopen)
     with pytest.raises(ConnectionError):
@@ -996,6 +1060,44 @@ async def test_a_failure_no_second_attempt_could_answer_is_not_replaced() -> Non
                 replay=refusing,
             )
         ]
+
+
+@pytest.mark.asyncio
+async def test_a_failure_nobody_can_name_still_reaches_the_hand_over() -> None:
+    """Whether a failure can be *named* decides whether another attempt is worth funding. It says nothing about whether the client can carry the turn on, and only the second question belongs at this door.
+
+    Before 2026-08-22 the two were one: `eligible` returning `None` sent the stream straight out on a bare raise, so a failure the caller's taxonomy has no word for — a naked `h2.ProtocolError` is the one on record — skipped the hand-over entirely and took the client's turn with it. The client held a whole block and got no way to continue from it.
+
+    Asserted through a refusing `eligible`, which is the same shape an unrecognised exception produces and does not depend on which exception types the caller happens to recognise this week.
+    """
+    synthesised: list[BaseException | None] = []
+
+    def synthesize(error: BaseException | None, _stop_reason: str) -> dict[str, Any]:
+        synthesised.append(error)
+        return {"type": "tool_use", "id": "toolu_x", "name": "carry_on", "input": {}}
+
+    replay = _replay_over([anthropic_stream("kept")])
+    refusing = ReplaySupport(ledger=replay.ledger, eligible=lambda _error: None, reopen=replay.reopen)
+    chunks = [
+        chunk
+        async for chunk in stream_delivery(
+            _tears_after(anthropic_stream("held")[:3]),
+            AnthropicAssembler(),
+            buffer=BlockBuffer(policy="block"),
+            settings=StreamSettings(sse_ping_interval=0),
+            framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
+            replay=refusing,
+            continuation=ContinuationSupport(synthesize=synthesize),
+        )
+    ]
+    body = b"".join(chunks).decode()
+
+    assert len(synthesised) == 1, "the hand-over was never consulted"
+    assert "carry_on" in body
+    # A hand-over is an ending, not a failure: nothing is raised and no error frame goes out.
+    assert '"type":"error"' not in body
+    # And what the client already held is still there.
+    assert '"text":"held"' in body
 
 
 async def _hits_the_client_deadline_after(payloads: list[bytes]) -> AsyncIterator[bytes]:
@@ -1052,22 +1154,35 @@ async def test_the_client_deadline_outranks_an_upstream_that_just_finished() -> 
 
 
 @pytest.mark.asyncio
-async def test_an_upstream_tear_is_still_raised_rather_than_framed() -> None:
-    """Deliberately narrow. The other endings that reach here remain indistinguishable from each other on the wire, and widening the frame to cover them is a separate question with its own answer to find.
+async def test_an_upstream_tear_is_framed_and_then_raised() -> None:
+    """Both halves, because either alone is a defect this project has already shipped once.
+
+    The frame alone would leave the caller with nothing: it reads this exception to decide the request's verdict and to put a reason on the completion line, so a stream that framed and returned cleanly logged `ok` with the failure recorded nowhere.
+
+    The raise alone is what the client used to get — a 200 whose body simply stopped, byte-for-byte identical to an idle timeout, a deadline, or the proxy abandoning the response. Ruled 2026-08-22: every ending that reaches here gets a frame. This test's predecessor was named for the opposite and said in its own docstring that widening the frame was "a separate question with its own answer to find"; the answer arrived.
 
     The sample stops before upstream's terminal event: a turn upstream finished is not torn, whatever happens to the connection afterwards.
     """
+    chunks: list[bytes] = []
     with pytest.raises(ConnectionError):
-        _ = [
-            chunk
-            async for chunk in stream_delivery(
+        async with aclosing(
+            stream_delivery(
                 _tears_after(anthropic_stream("one")[:3]),
                 AnthropicAssembler(),
                 buffer=BlockBuffer(policy="block"),
                 settings=StreamSettings(sse_ping_interval=0),
                 framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
             )
-        ]
+        ) as delivery:
+            async for chunk in delivery:
+                chunks.append(chunk)
+
+    body = b"".join(chunks).decode()
+    assert '"type":"error"' in body
+    # Upstream's, not this side's: the party named on the wire is the one the client can act on.
+    assert "upstream_stream_failed" in body
+    # And the block the client had already been given is not taken back.
+    assert '"text":"one"' in body
 
 
 @pytest.mark.parametrize("policy", ["full", "until-tool-use"])

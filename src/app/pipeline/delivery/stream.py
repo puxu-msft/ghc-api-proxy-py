@@ -17,7 +17,13 @@ from typing import Any
 
 from app.errors import WIRE_TYPES, ErrorCategory
 from app.pipeline.delivery.assembling import BlockAssembler
-from app.pipeline.delivery.blocks import TOOL_USE, BlockBuffer, CompletedBlock, DeliverySession
+from app.pipeline.delivery.blocks import (
+    TOOL_USE,
+    BlockBuffer,
+    CompletedBlock,
+    DeliveryError,
+    DeliverySession,
+)
 from app.pipeline.delivery.framing import OutboundFramer
 from app.pipeline.delivery.sse_source import SseEvent, read_events
 from app.pipeline.retry import RetryLedger, RetryReason, StreamEnding, decide_stream_ending
@@ -66,6 +72,8 @@ class StreamSettings:
     """What the delivery loop itself needs. Framing settings belong to the framer, which owns framer."""
 
     sse_ping_interval: int = 15
+    # What to close a message with when upstream stopped at a block boundary without ever sending its terminal event. Empty puts that ending back to an SSE error. See `client_delivery.unterminated_stream_stop_reason`, which is where the reasoning lives; carried here because it is an operator's setting and delivery is not where settings live.
+    unterminated_stop_reason: str = "incomplete"
 
 
 @dataclass(slots=True)
@@ -266,6 +274,10 @@ async def _deliver(
 
     while True:
         torn: Exception | None = None
+        # Which exception, if any, came out of *assembling* rather than out of reading upstream. Compared by identity rather than by type, because the point is where it was raised: the same `ValueError` means opposite things depending on whether this side produced it or upstream's bytes did, and only the raise site can tell them apart. Reset per attempt so a replayed one does not inherit the last one's verdict.
+        #
+        # Covers `assembler.push` and nothing else. A bug in framing would still be attributed to upstream — a known limit, kept because widening the region means wrapping a `yield`, and a `try` around one also catches whatever a consumer throws in.
+        from_assembly: Exception | None = None
         # `aclosing` for the same reason as above: the inner generator owns the upstream pull, and only closing it releases the response. On the way out of a torn attempt this is what hands the old response back before another is opened.
         try:
             async with aclosing(
@@ -279,7 +291,13 @@ async def _deliver(
                     wrote = False
                     if pull.event is not None:
                         # Assembled before any cue is answered. A pull that came back with an event has not shown that the event can be delivered: a malformed one makes the assembler raise right here, and that has to reach the caller ahead of a comment claiming everything is fine.
-                        for block in assembler.push(pull.event):
+                        try:
+                            completed = assembler.push(pull.event)
+                        except Exception as bug:
+                            # Tagged, then re-raised untouched: the caller's `pytest.raises` and its own handling both key off the original type, and wrapping it would change what everything downstream sees in order to record one fact.
+                            from_assembly = bug
+                            raise
+                        for block in completed:
                             for chunk in _commit(
                                 session,
                                 block,
@@ -324,34 +342,57 @@ async def _deliver(
             #
             # Still below the client deadline, and that is now a ruling rather than a deferral: see the branch above. Above the attempt deadline, though, which reaches here as an ordinary tear rather than a branch of its own — that one ends only this attempt, so a finished turn must not be handed to it as something to retry.
             break
-        reason = replay.eligible(torn) if replay is not None else None
-        if replay is None or reason is None:
-            raise torn
-        verdict = decide_stream_ending(
-            terminal_seen=assembler.terminal.seen,
-            downstream_opened=client_has_bytes.is_set(),
-            committed_blocks=session.committed_count,
-            ledger=replay.ledger,
-            reason=reason,
+        # Whether this failure is one this side inflicted rather than suffered. Two ways to be ours, both positively detected: `BufferCapExceeded` and its siblings are the proxy's own protections firing, which `upstream-retry-and-continuation.md` lists under "无法继续" — another attempt would hit the same cap, and handing the turn back would invite the client to re-run something this side has already refused to hold; and anything raised out of assembling is a bug here.
+        #
+        # Everything else defaults to upstream's, and that default is load-bearing. It used to be the other way round — upstream was only recognised when the *caller* had named the failure — and with no `replay` configured the caller names nothing, so an ordinary `ConnectionError` from a torn socket reached the client as `internal_error`, the proxy taking the blame for upstream's connection. Naming the wrong party in the one word a client can read is worse than naming a vaguer right one.
+        ours = isinstance(torn, DeliveryError) or torn is from_assembly
+        reason = None if ours else (replay.eligible(torn) if replay is not None else None)
+        if replay is not None and reason is not None:
+            verdict = decide_stream_ending(
+                terminal_seen=assembler.terminal.seen,
+                downstream_opened=client_has_bytes.is_set(),
+                committed_blocks=session.committed_count,
+                ledger=replay.ledger,
+                reason=reason,
+            )
+            if verdict.ending is StreamEnding.COMPLETE:
+                # Unreachable from here now that the same question is answered above, and kept because this is a switch over everything the verdict can say — a branch that silently fell through to the hand-over is what turned a finished turn into a synthesised interruption in the first place.
+                break
+            if verdict.ending is StreamEnding.REPLAY:
+                replacement = await replay.reopen()
+                if replacement is not None:
+                    # Everything the failed attempt built is dropped, not carried: a fresh assembler so no draft of its survives, and a fresh buffer so a block it completed but never delivered cannot be delivered twice. `session` goes with the buffer. Legal only because the verdict required nothing to have been committed — there is no frontier here to preserve, and none to roll back.
+                    chunks, assembler, buffer = replacement
+                    session = DeliverySession(buffer=buffer)
+                    continue
+        if not ours:
+            # Asked whether or not the failure could be *named*, which is the half that used to be missing: `reason is None` sent the stream straight out of this function on a bare `raise`, so a failure the caller's taxonomy has no word for — a naked `h2.ProtocolError` is the one on record — skipped the hand-over entirely and took the client's turn with it. Naming a failure decides whether another *attempt* is worth funding; it says nothing about whether the client can carry the turn on, and only the second question belongs here.
+            #
+            # An unnamed failure is still not replayed. That is the narrower of the two readings and it is deliberate: a replay spends budget on a guess, while a hand-over spends nothing and leaves the decision with the client. Whether unnamed should also mean retryable is a product question, and it stays in `deferred.md` §20 rather than being answered by this edit.
+            handed_over = _hand_over(continuation, session, assembler, framer, error=torn)
+            if handed_over is not None:
+                for chunk in handed_over:
+                    yield chunk
+                return
+        # Every remaining ending gets a frame *and* still reaches the caller. Until 2026-08-22 it was a bare `raise`, which the client received as a 200 whose body simply stopped — byte-for-byte the same as an idle timeout, a deadline, or the proxy abandoning the response, with only the server's own log able to tell them apart (`deferred.md` 8d). The response has been open since before the first chunk, so a frame is the only channel left.
+        #
+        # The `raise` stays, and that pairing is the whole design rather than belt-and-braces. Swapping it for the frame was tried first and is wrong: the caller reads this exception to decide the request's verdict and to put the reason on the completion line, so a stream that framed and returned cleanly logged `ok` and left no record of the failure anywhere. That is `deferred.md` §12's defect manufactured on purpose. Yielding first and raising second gives the client the frame — a generator's chunk is written as it is yielded — and leaves the caller's account intact.
+        #
+        # Nothing is flushed first, for the same reason the client deadline flushes nothing: what is buffered but undelivered would make the size of this ending depend on the buffering policy, while the ending itself is a failure.
+        #
+        # Three codes, one per way this can end, so that a reader of a client transcript can tell them apart without the server's log beside them.
+        yield framer.error(
+            error_type=WIRE_TYPES[ErrorCategory.INTERNAL if ours else ErrorCategory.UPSTREAM],
+            # Upstream's own words, or this side's. Either way the distinguishing detail lives here rather than nowhere.
+            message=str(torn) or torn.__class__.__name__,
+            code=(
+                "proxy_delivery_aborted"
+                if isinstance(torn, DeliveryError)
+                else "proxy_delivery_failed"
+                if ours
+                else "upstream_stream_failed"
+            ),
         )
-        if verdict.ending is StreamEnding.COMPLETE:
-            # Unreachable from here now that the same question is answered above, and kept because this is a switch over everything the verdict can say — a branch that silently fell through to the hand-over is what turned a finished turn into a synthesised interruption in the first place.
-            break
-        if verdict.ending is StreamEnding.REPLAY:
-            replacement = await replay.reopen()
-            if replacement is not None:
-                # Everything the failed attempt built is dropped, not carried: a fresh assembler so no draft of its survives, and a fresh buffer so a block it completed but never delivered cannot be delivered twice. `session` goes with the buffer. Legal only because the verdict required nothing to have been committed — there is no frontier here to preserve, and none to roll back.
-                chunks, assembler, buffer = replacement
-                session = DeliverySession(buffer=buffer)
-                continue
-        # No second attempt is available, and the client is holding content this side cannot take back. Handing the failure over as a tool call is the only ending that leaves the turn recoverable — by the client, in its own next request. Reached for a failure the caller called continuable and a position that refused a replay, which is exactly the pair the document divides on.
-        handed_over = _hand_over(
-            continuation, session, assembler, framer, error=torn
-        )
-        if handed_over is not None:
-            for chunk in handed_over:
-                yield chunk
-            return
         raise torn
 
     remaining = session.finish()
@@ -380,12 +421,23 @@ async def _deliver(
         # Nothing was ever committed downstream, so there is no started message to correct — the same case the legacy chain leaves to its caller (`render_error` there runs only `if session.frontier.message_start_accepted`). An upstream that produced no block and no terminal still leaves the client a 200 with an empty body; that is pre-existing behaviour on a path this slice does not touch, and widening it is a separate question from STR-04's flush.
         return
     if not terminal.seen:
-        # STR-04: an EOF with no legal terminal event is truncation, not success.
-        # Ported from the legacy chain rather than redesigned, as `.dev/docs/anthropic-responses-bridge/implementation.md` directs: `app/delivery/responses_anthropic_stream.py`, on `not frontier.terminal_accepted`, raises `incomplete_responses_stream` and renders an SSE error. Same code, same wire shape, same message, same gate on the message having started — a client that already learned to read one of these does not have to learn a second.
-        # `message_stop` deliberately does not follow. `.dev/docs/anthropic-responses-bridge/spec.md`, "Downstream Anthropic SSE" item 5, rules these two mutually exclusive: 不得再发 `message_stop` 冒充成功.
+        if not assembler.cut_mid_block and settings.unterminated_stop_reason:
+            # Upstream closed cleanly *between* blocks. Every block it produced is whole and already delivered, so nothing the client holds is damaged — the only thing missing is upstream's own word for why it stopped, and an error frame answers that by calling a reply truncated when nothing was cut. Ruled 2026-08-22.
+            #
+            # The reason on the wire is a synthesis and stays configurable so that it is chosen rather than inherited: `client_delivery.unterminated_stream_stop_reason` carries it, defaults to upstream's own `incomplete`, and going empty puts this ending back to the error below. What it must not silently become is `end_turn` — that is what `framer.terminal` fills an empty reason with, and it would claim a turn upstream never claimed.
+            #
+            # `cut_mid_block` rather than "did the client get whole blocks": the latter is always true under block-level delivery and so discriminates nothing.
+            for frame in framer.terminal(replace(terminal, stop_reason=settings.unterminated_stop_reason)):
+                yield frame
+            return
+        # An EOF that cut through a block, or the refinement switched off: this is truncation, and saying so is the only honest ending.
+        #
+        # Ported from the legacy chain rather than redesigned, as `.dev/docs/anthropic-responses-bridge/implementation.md` directs: `app/delivery/responses_anthropic_stream.py`, on `not frontier.terminal_accepted`, raises `incomplete_responses_stream` and renders an SSE error. Same code, same wire shape, same gate on the message having started — a client that already learned to read one of these does not have to learn a second.
+        # `message_stop` deliberately does not follow. `.dev/docs/anthropic-responses-bridge/spec.md`, "Downstream Anthropic SSE" item 7, rules these two mutually exclusive: 不得再发 `message_stop` 冒充成功. Note that item 7 constrains what may follow an *error*; it does not make every terminal-less EOF one, which is what the branch above turns on.
         yield framer.error(
             error_type=WIRE_TYPES[ErrorCategory.UPSTREAM],
-            message="Responses stream ended before a successful terminal event",
+            # Names no upstream dialect. This function serves both legs — `framer` is the caller's — so the old wording claimed the reply came from Responses even on an Anthropic-direct turn, which is the leg the 2026-08-22 production incident was on. `deferred.md` §19.
+            message="upstream stream ended before a terminal event",
             code="incomplete_responses_stream",
         )
         return
