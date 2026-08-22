@@ -7,7 +7,7 @@ The mirror of `anthropic_messages` beside it, for the other client leg. Same env
 - A `web_search_call` item does not survive the round trip. The assembler rewrites it into a text block with prose describing the search, deliberately, because Anthropic has no spelling for it. A Responses client that could have read the real item gets that prose instead. Recorded as a known loss rather than worked around, because undoing it means changing what `CompletedBlock` is.
 - A tool call's `arguments` are re-serialised from the parsed object, so whitespace and key order are this proxy's, not upstream's. The `call_id` is upstream's and is forwarded exactly, because the client needs it to answer.
 
-Ids are minted here rather than forwarded, and that is deliberate. Measured across three cassettes on 2026-08-22: every id field in every event differed from every other — 12 of 12, 16 of 16, 125 of 125 — including `response.id` itself, which changed between `created`, `in_progress` and `completed`. Upstream's ids identify nothing stable, so passing them through would hand the client an instability it cannot do anything with. What is minted here is consistent within one response, which is what the client's snapshot actually needs.
+Ids are minted here rather than forwarded, and that is deliberate. Measured on 2026-08-22 across the three cassettes that carry a Responses stream — `anthropic_to_responses_stream`, `history_responses_stream`, `responses_web_search_stream`, out of five in the repository — where every id field in every event differed from every other: 12 of 12, 16 of 16, 125 of 125, including `response.id` itself, which changed between `created`, `in_progress` and `completed`. Upstream's ids identify nothing stable, so passing them through would hand the client an instability it cannot do anything with. What is minted here is consistent within one response, which is what the client's snapshot actually needs.
 
 The sequence is shaped by what the OpenAI SDK's stream parser requires, read from `openai/lib/streaming/responses/_responses.py` at version 3.3.1: `response.created` must arrive first or it raises; `output_index` must equal the current length of the snapshot's output list, because that list is only ever appended to; a text item needs its `content_part.added` before any `output_text` event; and a stream that ends without `response.completed` raises in `get_final_response()`.
 `output_index` is therefore counted here and **not** taken from `CompletedBlock.index`, which comes from a counter the assembler also advances for items it later drops — a hole in it would be an IndexError in the client.
@@ -117,7 +117,7 @@ class ResponsesFramer:
         """Open the response.
 
         Sent with the first block rather than on its own, the same way `message_start` is, so a turn that never produces one never looks to the client like a turn that began.
-        `response.in_progress` follows immediately because upstream sends it in all three recordings and clients use it to mark a request accepted; it costs one frame and the SDK passes it straight through.
+        `response.in_progress` follows immediately because upstream sends it in all three of those recordings and clients use it to mark a request accepted; it costs one frame and the SDK passes it straight through.
         """
         return (
             self._frame(
@@ -204,7 +204,7 @@ class ResponsesFramer:
     def _function_call(self, block: CompletedBlock) -> tuple[bytes, ...]:
         """A tool call.
 
-        The frame shape here is the one part of this module not read off a recording: none of the three cassettes in this repository carries a `function_call`, so this follows the SDK's own types and parser instead.
+        The frame shape here is the one part of this module not read off a recording: not one of the five cassettes in this repository carries a `function_call` — the three with a Responses stream included — so this follows the SDK's own types and parser instead.
         `arguments` starts empty and arrives in a single delta because the parser accumulates it with `+=` — giving it in full on the opening item *and* in a delta would double it.
         """
         index = self._output_index
@@ -245,7 +245,7 @@ class ResponsesFramer:
     def _reasoning(self, block: CompletedBlock) -> tuple[bytes, ...]:
         """Reasoning, with no summary delta events.
 
-        Upstream sends none either: in the two recordings that carry a reasoning item at all, it arrives as `added` then `done` with no delta events between them, so this copies that shape rather than inventing a finer-grained one.
+        Upstream sends none either: in the two of those three that carry a reasoning item at all, it arrives as `added` then `done` with no delta events between them, so this copies that shape rather than inventing a finer-grained one.
         The `summary` list in those recordings is **empty**, so the `summary_text` part written below has the same standing as the `function_call` frames above — it follows the SDK's types, not a recording. Said plainly because the alternative is a reader taking it for measured.
 
         `encrypted_content` is written only when there was some. The assembler stores this project's own carrier in the block's `signature`, and an empty carrier is still a non-empty marker string, so decoding is what tells "upstream sealed some reasoning" apart from "upstream sent none". Emitting the marker itself would hand the client a token it cannot use.
