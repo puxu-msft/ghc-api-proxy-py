@@ -137,17 +137,28 @@ async def serve_inherited(config: ProxyConfig, fd: int, *, proxy_from_cli: bool)
     """Serve the chain on a listener systemd already opened.
 
     Not `run_standalone`: that owns the listener so it can hand it over, and here systemd does.
+
+    TLS is handed to uvicorn as a certificate pair rather than built into an adapter. `both` — the shipped default — cannot be honoured here: serving two protocols on one port means inspecting the first byte of each accepted connection before handing it on, and that requires owning the accepts, which on this path uvicorn does. Until this existed the whole `server.tls` section was simply not read, so a socket-activated deployment using the shipped config served plaintext with nothing said about it. Answering HTTPS and saying what was dropped beats answering neither.
     """
     http_client = build_http_client(config, proxy_from_cli=proxy_from_cli)
     try:
         config = await resolve_provider_base_urls(config, http_client=http_client)
         chain = build_chain(config, http_client=http_client)
+        # None for an HTTP-only deployment, in which case uvicorn is handed no certificate and serves plaintext exactly as before.
+        material = resolve_tls_material(config, tls_dir=tls_material_dir())
+        if config.server.tls.mode == "both":
+            get_logger(LIFECYCLE_LOGGER).warning(
+                "server.tls.mode is `both`, which an inherited listener cannot serve; this listener answers HTTPS only"
+            )
         server = _DrainAnnouncingServer(
             uvicorn.Config(
                 create_pipeline_app(chain),
                 fd=fd,
                 log_config=None,
                 timeout_graceful_shutdown=config.graceful_cleanup_timeout,
+                # Uvicorn treats `None` here as "no TLS", so an HTTP-only deployment passes through unchanged.
+                ssl_certfile=material.cert_path if material is not None else None,
+                ssl_keyfile=material.key_path if material is not None else None,
             ),
             on_draining=chain.active_requests.begin_draining,
         )
