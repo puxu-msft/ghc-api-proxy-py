@@ -114,7 +114,9 @@ response 层有信号（`response.incomplete`），但它晚于 item 关闭到�
 
 **证据等级：足以据此登记，不足以据此选一边。** 需要用户裁决时限的语义。
 
-### 12. 上游在终结事件之后 reset：完成行不再留痕（`bce8b0d` 引入（原始来源 `c86712d` 是一个不被任何 ref 引用的对象，`main` 上承载同一语义的是前者））
+### 12. 上游在终结事件之后 reset：完成行不再留痕
+
+**这条的归属被改错过一次，改正记在这里而不是抹掉**：标题一度写着「原始来源 `c86712d` 是一个不被任何 ref 引用的对象」。**该断言不成立**——2026-08-22 收尾时逐 ref 复核，`c86712d` 可达自 `archive/260822-complete-not-abandon`（命令：对 `git for-each-ref` 的每个 ref 跑 `git merge-base --is-ancestor c86712d <ref>`）。准确的时间线是三步，全部在 `main` 上或归档 ref 上可查：`bce8b0d`（同伴，在 verdict switch 里判 `COMPLETE`）→ `1743a0b`（同伴，采纳评审意见把判断前移到异常分类之前）→ `f0527e5`（守卫加硬）。本条描述的观测面缺口由这三步共同引入，不归任何单一提交。
 
 来源：同上，发现 A（正反两次实测，用项目自己的 `_StreamAccounting` + `_tracked_delivery`）。
 
@@ -173,6 +175,16 @@ anthropic stop_reason='stop_sequence'  -> responses status='completed'   incompl
 ### 18. 一条提交信息缺字
 
 `696a786` 的正文里 `A response that says it is incomplete without saying why gets , which is…` 缺了 `incomplete` 一词（`cat -A` 确认，非渲染问题）。历史已发布，不重写；`fef7d96` 的同一句是完整的，可作对照。登记以免后来者读到一句没有主语的话。
+
+### 19. 截断 error 帧的 message 在 Anthropic 腿上字面是错的
+
+`_deliver` 末尾那条帧写死了 `message="Responses stream ended before a successful terminal event"`（`src/app/pipeline/delivery/stream.py`，`code="incomplete_responses_stream"` 那处）。而 `_deliver` 是**两条腿共用**的——`framing` 由调用方给，`AnthropicFramer` 与 Responses 侧走同一段代码。所以一次走 Anthropic 上游腿的截断，客户端收到的是一句声称上游是 Responses 的话。
+
+2026-08-22 那次生产事故正是 Anthropic 腿（判据：日志行上是 `think` 而非 `reason`，`REASONING_WORD` + `dialect_for` + `assembler_for` 三处共同决定；见 `../../tmp/260822-h2-streamreset-cancel-diagnosis.md` §1.2）。
+
+**代价很小，但不是零**：`code` 不能动——它被 2 处测试断言，并被 `../../delivery-keepalive/spec.md` 逐字复述（这一条是 `../../tmp/260821-plan-g1-upstream-error-events.md` 的 G4 已经查清的）。`message` 则**零断言、零消费**，可以改。
+
+**为什么登记在这里而不是顺手改**：改 message 属于对客户端可见的措辞变更，且与第 5 条（已交付之后两条失败路径不一致）、G1 那份方案是同一片区域，应当一并裁决而不是各改各的。**证据等级：代码事实，确凿；是否值得改属措辞取舍，需裁决。**
 
 ## 明确不做
 
