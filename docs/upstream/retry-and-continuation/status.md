@@ -24,7 +24,7 @@
 | 请求行区分「上游尝试失败」 | `LogStatus` 只有 `ok`／`fail`／`gone` 三值；`[RETRY]` 前缀已存在但**是 7 字符，其余全是 6**，把固定宽度那一列顶歪了 | `request_log.py:65,70`；`logging.py:22,69` |
 | 合成工具调用 | 不存在 | — |
 
-**已存在但零生产调用点的件**（`decide_stream_ending()`、`RetryBudget`、`buffered_retry.py`、`delayed_commit.py` 等 6 组，以及 `continuation.*`／`streamReplay`／`max_tokens_as_retryable`／`hedge` 4 个死配置项）见 `deferred.md`。
+**已存在但零生产调用点的件**（`decide_stream_ending()`、`RetryBudget`、`buffered_retry.py`、`delayed_commit.py` 等 6 组，以及 `continuation.*`／`streamReplay`／`max_tokens_as_retryable`／`hedge` 4 个死配置项）见 `deferred.md`。**前三个已分别按用户裁决删除**（B 组、`9aa31f9`、`fef7d96`）；`hedge` 仍在。
 
 ## 一条决定分类表形状的结构事实
 
@@ -59,7 +59,9 @@
 
 删 `continuation_messages()`、`RetryReason.CONTINUATION`、`decide_stream_ending()` 的 CONTINUE 分支、`continuation.*` 配置及其测试。
 
-**明确不动**：`decide_stream_ending()` 本身（REPLAY／ABANDON 要接线）、`RetryBudget`、`buffered_retry.py`、`delayed_commit.py`、`streamReplay`、`hedge`、`max_tokens_as_retryable`。用户 2026-08-21 裁决：「现有代理内续写机制从代码中删除，其他未接线的功能不要动」。
+**当时明确不动**：`decide_stream_ending()` 本身（REPLAY／ABANDON 要接线）、`RetryBudget`、`buffered_retry.py`、`delayed_commit.py`、`streamReplay`、`hedge`、`max_tokens_as_retryable`。用户 2026-08-21 裁决：「现有代理内续写机制从代码中删除，其他未接线的功能不要动」。
+
+**后续两次局部推翻**（均由用户，记在 `decisions.md` 第 15、15之三 条）：`streamReplay` 随「断流走标准上游重试预算」删除（`9aa31f9`），`max_tokens_as_retryable` 随配置迁移删除（`fef7d96`）。其余仍然不动。
 
 ### C. 观测面与 `stop_reason` 原样透出 —— **第 1、3 项已落地**（主仓 `696a786`），第 2 项移入 E
 
@@ -112,6 +114,9 @@
 |---|---|
 | `66b63c9` | 丢弃上游标为 `status:"incomplete"` 的块——**有完整块在前才丢**，只有它时保留；reasoning 无该字段，不处理 |
 | `e81f07f` | 交接：合成 `tool_use` 调用 `turn_interrupted`；`num_messages` 取客户端 `messages` 长度；工具未声明只警告不阻断；仅 anthropic-messages 客户端请求；`max_tokens` 一律交接；请求行 `[RETY]` + 黄色 |
+| `bce8b0d` | 按独立评审修 1 blocker + 3 major：**已完成的回合不再被伪造成中断**（COMPLETE 曾被折进 ABANDON）；`max_tokens` 丢空时不再交付零字节；补主路径测试 |
+| `fef7d96` | 非流式 `stop_reason` 不再抹平成 `end_turn`（C 组只修了流式那侧，两条路曾对同一事实给出不同答案）；配置项迁移 |
+| `af84097` | **非流式续写**：翻译时找被截断 item 的边界 + 缓冲回复末尾追加合成块。推翻了「非流式不可能续写」 |
 
 **两个入口**：可续失败且已交付过块；以及上游干净收尾但 `stop_reason` 说它没写完（`max_tokens`）。后者不经异常路径，所以单独判。
 
@@ -126,7 +131,7 @@
 - `status:"incomplete"` 的块丢弃规则：**有任何完整块才丢；只有未完成块则保留**（保留半截内容优于给客户端一个空回答）。reasoning item 无此字段，不处理。
 - 合成 `tool_use` 块调用 `turn_interrupted(num_messages, category, message)`；`num_messages` 取**客户端请求**的 `messages` 长度。
 - 检查入站 `tools[]` 是否含该工具；没有则**打 warning 但照发**。
-- 配置项 `client_delivery.auto_retry_tool_call_full_name` 可覆盖工具全名。
+- 配置项 `upstream_request_retry.auto_retry_tool_call_full_name` 可覆盖工具全名。
 - 仅在 **anthropic-messages 客户端请求**上生效；两条上游腿都适用。
 - `max_tokens` 一律走合成，不回落到无痕重试。
 - 观测面：**客户端请求算成功，本次上游尝试算失败**，请求行记 `[RETY]` + 黄色。

@@ -26,7 +26,7 @@
 | 优雅关闭不无痕重试，改走 MCP-driven 合成续写 | 第 25 行 |
 | 429 走反应式限流器；预算耗尽后返回 429 + `Retry-After`；删除 `client_delivery.synthesized_response_headers_after_sec` | 第 27 行 |
 | 已交付过完整块 → 合成 `tool_use` 调用 `turn_interrupted(num_messages, category, message)` | 第 31 行 |
-| 工具全名可由 `client_delivery.auto_retry_tool_call_full_name` 覆盖 | 第 35 行 |
+| 工具全名可由 `upstream_request_retry.auto_retry_tool_call_full_name` 覆盖 | 第 35 行 |
 | 工具定义缺失时打 warning 但照发 | 第 37 行 |
 | MCP-driven 续写不设次数上限 | 第 39 行 |
 | 仅 anthropic-messages 客户端请求适用 | 第 41 行 |
@@ -47,7 +47,7 @@
 9. **`refusal` 归「无法继续」。**
 10. **区分请求断开原因要增强**，理由是有助于调试。
 11. **归档去向**：新开主题 `upstream/retry-and-continuation/` 承载归档与后续实现，而非原地归档在 `h2-goaway/` 下。
-12. **删码范围**：只删代理内续写机制本身，**其他未接线的功能不要动**。
+12. **删码范围**：只删代理内续写机制本身，**其他未接线的功能不要动**。（**2026-08-22 被第 15之三 条局部推翻**：`max_tokens_as_retryable` 已按用户口述删除。`streamReplay` 亦已由第 15 条推翻。其余仍然有效。）
 13. **不向上游发真实请求补证**：只查历史，历史没有就保持悬念。
 14. **实施顺序**：按 A（文档归档）→ B（删码）→ C（观测面）→ D（无痕重试）→ E（MCP 续写）逐阶段完成，每阶段提交一部分。
 
@@ -55,6 +55,7 @@
 
 15. **删除 `streamReplay`**：断流重开走 `network` 的普通预算，不设专属计数器。（用户质疑「一条客户端请求最多重开多少次上游流」为什么需要专门配置；本项目答不出好理由——那是代理内续写方案的遗留。）
 15之二. **非流式也要交接**，并在翻译时按同一条规则找到被截断 item 的边界（有完整块在前才丢，只有它时保留）。推翻上面第 4 条。
+15之三. **配置项 `auto_retry_tool_call_full_name` 从 `client_delivery` 移到 `upstream_request_retry`；`max_tokens_as_retryable` 删除。**（2026-08-22 用户口述，未写进人写文档。**这条局部推翻了第二节第 12 条「其他未接线的功能不要动」**——`max_tokens_as_retryable` 正是那批之一，独立评审据此判为与已记录裁决冲突，因为当时 `.dev` 里查不到这次推翻。此处补记，那条冲突随之解除。）
 16. **客户端时限在 body 阶段触发时，发一个 SSE error 帧再收尾**，不直接截断，也不先 flush 缓冲块。（响应头早已发出，状态码改不了；`error_frame` 通道现成、只是没接上。）
 17. **D 组照做在 main 上，与同伴的 `fix/upstream-error-events` 分支的冲突留给该分支自己解。**（G1 已停 8 小时、落后 19 个提交、且其独立评审结论为 needs-fix。）
 
