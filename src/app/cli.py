@@ -17,12 +17,12 @@ from app.debug.models import collect_catalogs, render_json, render_text
 from app.lifecycle.entry import StandaloneOptions, run_standalone
 from app.lifecycle.pidfile import PidfileError
 from app.lifecycle.standalone import LIFECYCLE_LOGGER, ShutdownReport
+from app.lifecycle.tls import resolve_tls_material
 from app.model_provider import ProviderNotConfigured
 from app.model_provider.ghc_client.auth.service import authenticate_device, clear_stored_token
 from app.observability.logging import get_logger, setup_logging
 from app.server.composition import build_chain, build_http_client, resolve_provider_base_urls
 from app.server.pipeline_app import create_pipeline_app
-from app.server.tls import resolve_tls_material
 
 app = typer.Typer(
     name="ghc-api-proxy",

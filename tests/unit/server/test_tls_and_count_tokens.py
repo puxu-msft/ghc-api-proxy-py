@@ -6,8 +6,7 @@ from typing import Any
 import pytest
 
 from app.config.schema import ProxyConfig
-from app.pipeline.count_tokens import CountTokensUnavailable, count_tokens
-from app.server.tls import (
+from app.lifecycle.tls import (
     TLS_HANDSHAKE_BYTE,
     TlsConfigurationError,
     is_tls_handshake,
@@ -15,6 +14,7 @@ from app.server.tls import (
     serves_plaintext,
     serves_tls,
 )
+from app.pipeline.count_tokens import CountTokensUnavailable, count_tokens
 
 
 def config(**tls: object) -> ProxyConfig:

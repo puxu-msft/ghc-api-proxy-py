@@ -16,7 +16,7 @@ from uvicorn import Config
 from app.lifecycle.activation import ActivatedSocketSet, ExpectedListener, SocketActivationError
 from app.lifecycle.adapter import ListenerState, UvicornListenerAdapter
 from app.lifecycle.listener import FirstByteRoutingAdapter
-from app.server.tls import build_server_ssl_context, generate_self_signed
+from app.lifecycle.tls import build_server_ssl_context, generate_self_signed
 
 
 def _listeners() -> tuple[socket.socket, socket.socket]:

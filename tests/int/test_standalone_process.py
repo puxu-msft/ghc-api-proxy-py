@@ -69,7 +69,7 @@ def child_script() -> str:
             tls_material = None
             requested_tls_mode = os.environ.get("TLS_MODE")
             if requested_tls_mode is not None:
-                from app.server.tls import generate_self_signed
+                from app.lifecycle.tls import generate_self_signed
 
                 configured_tls_mode = True if requested_tls_mode == "true" else requested_tls_mode
                 tls_material = generate_self_signed(Path(os.environ["TLS_DIR"]))

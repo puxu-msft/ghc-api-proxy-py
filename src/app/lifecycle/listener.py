@@ -21,7 +21,7 @@ from collections.abc import Callable
 
 from app.lifecycle.activation import ActivatedSocketSet, ExpectedListener, ListenerIdentity
 from app.lifecycle.adapter import ListenerAdapterError, ListenerState, UvicornListenerAdapter
-from app.server.tls import is_tls_handshake
+from app.lifecycle.tls import is_tls_handshake
 
 LISTENER_NAME = "http"
 LOGGER = logging.getLogger(__name__)

@@ -31,8 +31,8 @@ from app.lifecycle.pidfile import (
     write_pidfile,
 )
 from app.lifecycle.standalone import LIFECYCLE_LOGGER, ShutdownReport, StandaloneServer
+from app.lifecycle.tls import TlsMaterial, build_server_ssl_context
 from app.observability.logging import get_logger
-from app.server.tls import TlsMaterial, build_server_ssl_context
 
 # Mirrors what `uvicorn.Config` accepts, so a FastAPI instance passes without a cast.
 type Application = ASGIApplication | Callable[..., Any]
