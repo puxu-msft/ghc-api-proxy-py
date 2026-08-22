@@ -8,6 +8,7 @@ import logging
 import socket
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 from urllib.request import getproxies
 
 import httpcore2
@@ -31,15 +32,20 @@ from app.model_provider.ghc_client import (
     CopilotTokenManager,
     GhcApiClient,
     GhcClientConfig,
+    GitHubAccountClient,
     build_identity_headers,
     build_request_headers,
+    infer_account_type,
+    resolve_api_base_url,
 )
 from app.model_provider.ghc_client.auth.providers import (
     CLITokenProvider,
     EnvTokenProvider,
     FileTokenProvider,
     GitHubTokenManager,
+    NoGitHubToken,
 )
+from app.model_provider.ghc_client.config import AccountType
 from app.observability.active_requests import ActiveRequestRegistry
 from app.observability.terminal import TerminalCapabilities, detect_terminal
 from app.pipeline.events import FrozenSubscribers, SubscriberRegistry
@@ -345,6 +351,57 @@ def build_github_token_source(
     )
 
 
+async def resolve_provider_base_urls(
+    config: ProxyConfig,
+    *,
+    http_client: httpx2.AsyncClient,
+) -> ProxyConfig:
+    """Fill in the API base URL of every provider that did not name one, by asking GitHub what the subscription is.
+
+    Two ways to reach a base URL and no third, ruled 2026-08-22: an operator writes the whole URL into `model_providers.<name>.api_base_url`, or this probes `/copilot_internal/user` and derives it from the plan. There is deliberately no `account_type` key — a name for the plan, kept in sync by hand with a subscription GitHub already knows about, is a third source of truth for the same fact.
+
+    Here rather than inside `build_chain` because building a chain is otherwise pure — config in, wiring out — and all dozen of its callers, tests included, would have had to become async to carry a probe that only the two entry points serving real traffic need. What gets handed down is the resolved config, so nothing below this line learns that a probe happened.
+
+    A missing GitHub token is not a failure. This chain starts without credentials and asks for them at the first request, so refusing to start because nobody has logged in yet would be this function inventing a startup gate that did not exist. Everything else the probe raises propagates: a token that exists and an answer we could not read is a real fault, and quietly falling back to the individual host would send an enterprise account's traffic to the wrong place — silently, which is the failure this change exists to remove.
+    """
+    resolved = dict(config.model_providers)
+    changed = False
+    for name, provider_config in config.model_providers.items():
+        if provider_config.type != PROVIDER_TYPE or provider_config.api_base_url:
+            continue
+        auth_base_url = GhcClientConfig(
+            auth_base_url_override=provider_config.auth_base_url
+        ).auth_base_url
+        try:
+            token = await build_github_token_source(config, name).get_token()
+        except NoGitHubToken:
+            logger.info(
+                "provider %s: no GitHub token yet, so the subscription was not probed", name
+            )
+            continue
+        usage = await GitHubAccountClient(
+            http_client, auth_base_url=auth_base_url
+        ).get_copilot_usage(token)
+        inferred = infer_account_type(usage)
+        if inferred is None:
+            # Ambiguous rather than absent: the account answered, and nothing it said named a plan this maps. Said out loud because the default that follows is a guess, and a guess nobody was told about is how the wrong host stays wrong.
+            logger.warning(
+                "provider %s: the subscription named no plan this recognises, so its API base URL stays at the default",
+                name,
+            )
+            continue
+        base_url = resolve_api_base_url(GhcClientConfig(account_type=cast(AccountType, inferred)))
+        logger.info("provider %s: subscription reads %s, so its API base URL is %s", name, inferred, base_url)
+        # Revalidated rather than `model_copy(update=...)`. That call does not check the name it is given, which is exactly how `--ghc-api-base-url` spent three days writing a field that no longer existed and reporting nothing — the defect this function replaces. A misspelling here fails at startup instead.
+        resolved[name] = type(provider_config).model_validate(
+            {**provider_config.model_dump(), "api_base_url": base_url}
+        )
+        changed = True
+    if not changed:
+        return config
+    return config.model_copy(update={"model_providers": resolved})
+
+
 def build_copilot_provider(
     name: str,
     config: ProxyConfig,
@@ -475,5 +532,6 @@ __all__ = [
     "build_request_headers",
     "github_token_path",
     "refresh_catalogs",
+    "resolve_provider_base_urls",
     "transport_options",
 ]

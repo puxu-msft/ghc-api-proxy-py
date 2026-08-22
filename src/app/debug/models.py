@@ -18,7 +18,7 @@ from app.model_provider import GithubCopilotProvider, model_type_of, resolve_end
 from app.model_provider.ghc_client.auth.providers import NoGitHubToken
 from app.model_provider.github_copilot import DRIVEN_ENDPOINTS
 from app.observability.footer import CONTROL_CHARS
-from app.server.composition import build_chain, build_http_client
+from app.server.composition import build_chain, build_http_client, resolve_provider_base_urls
 
 # The one status that means a request naming this model would be routed.
 ROUTABLE = "ok"
@@ -229,6 +229,8 @@ async def collect_catalogs(
     # `False` because this command has no `--proxy` of its own: whatever is in `config.proxy` came from the file, `GHC_PROXY` or the bundled defaults, all of which sit below the environment.
     http_client = build_http_client(config, proxy_from_cli=False)
     try:
+        # Probed here for the same reason the chain is built here: a report that named a different base URL from the one the server resolves would be worse than no report.
+        config = await resolve_provider_base_urls(config, http_client=http_client)
         chain = build_chain(config, http_client=http_client)
         names = [only] if only is not None else sorted(chain.providers.names)
         for name in names:

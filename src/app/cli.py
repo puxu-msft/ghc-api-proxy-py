@@ -19,7 +19,7 @@ from app.lifecycle.standalone import LIFECYCLE_LOGGER, ShutdownReport
 from app.model_provider import ProviderNotConfigured
 from app.model_provider.ghc_client.auth.service import authenticate_device, clear_stored_token
 from app.observability.logging import get_logger, setup_logging
-from app.server.composition import build_chain, build_http_client
+from app.server.composition import build_chain, build_http_client, resolve_provider_base_urls
 from app.server.pipeline_app import create_pipeline_app
 from app.server.tls import resolve_tls_material
 
@@ -132,6 +132,7 @@ async def serve_inherited(config: ProxyConfig, fd: int, *, proxy_from_cli: bool)
     """
     http_client = build_http_client(config, proxy_from_cli=proxy_from_cli)
     try:
+        config = await resolve_provider_base_urls(config, http_client=http_client)
         chain = build_chain(config, http_client=http_client)
         server = uvicorn.Server(
             uvicorn.Config(
@@ -154,6 +155,7 @@ async def _serve_pipeline(config: ProxyConfig, options: StandaloneOptions, *, pr
     """
     http_client = build_http_client(config, proxy_from_cli=proxy_from_cli)
     try:
+        config = await resolve_provider_base_urls(config, http_client=http_client)
         chain = build_chain(config, http_client=http_client)
         # Wired here because this is the one scope holding both the chain that owns the display and the server that learns the listener has stopped accepting.
         def publish_connections(source: Callable[[], int]) -> None:
