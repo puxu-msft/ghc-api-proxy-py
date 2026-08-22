@@ -132,6 +132,7 @@ def decide_stream_ending(
     Budget is spent here, not merely consulted: choosing to replay is what consumes an attempt. A caller that decides twice for one stream would otherwise be funded twice. It is spent under the reason the failure itself draws on, passed in by the caller — a torn body is a network failure at a later instant than a torn connection, not a different kind of thing, and it used to have a counter of its own for no better reason than that the design it came from paired it with a proxy-side continuation. That pairing is gone.
     """
     if terminal_seen:
+        # **No caller reaches this today**, for the same reason the branch below records and a different one besides. `_deliver` answers this question before it asks anything about the failure, because it has to: this function is consulted only once the failure has been named, and a reply upstream had already finished must not be discarded over one nothing can name — a bare `h2.ProtocolError` is exactly that. The caller's own `break` is a restatement of this branch, not a competitor to it, and points back here for the rule.
         return EndingVerdict(StreamEnding.COMPLETE)
 
     if not downstream_opened:

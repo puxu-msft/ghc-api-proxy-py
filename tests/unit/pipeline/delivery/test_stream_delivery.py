@@ -13,8 +13,10 @@ from typing import Any, cast
 
 import orjson
 import pytest
+from h2.exceptions import ProtocolError as H2ProtocolError
 
 from app.config.schema import ContentBlockStartCompat, UpstreamRequestRetryConfig
+from app.model_provider.ghc_client.errors import normalize_upstream_error
 from app.observability.active_requests import ActiveRequestRegistry
 from app.pipeline.delivery.assembling import Terminal
 from app.pipeline.delivery.blocks import BlockBuffer, CompletedBlock
@@ -29,7 +31,7 @@ from app.pipeline.delivery.stream import (
     _LastWrite,  # pyright: ignore[reportPrivateUsage]
     stream_delivery,
 )
-from app.pipeline.retry import RetryLedger, RetryReason
+from app.pipeline.retry import RetryLedger, RetryReason, reason_for
 from app.server.pipeline_app import (
     _counted_upstream,  # pyright: ignore[reportPrivateUsage]
     _Trace,  # pyright: ignore[reportPrivateUsage]
@@ -1081,35 +1083,64 @@ async def test_a_held_back_policy_still_hears_the_client_deadline(policy: str) -
     assert b'"text":"one"' not in b"".join(chunks)
 
 
-class _UnrecognisedTear(Exception):
-    """A transport failure the caller's taxonomy does not know — a bare `h2.ProtocolError` is one."""
-
-
-async def _finishes_then_tears_unrecognisably() -> AsyncIterator[bytes]:
+async def _finishes_then_tears(error: Exception) -> AsyncIterator[bytes]:
     for payload in anthropic_stream("complete"):
         yield payload
-    raise _UnrecognisedTear("nothing upstream of here knows what this is")
+    raise error
 
 
+@pytest.mark.parametrize("policy", ["block", "full"])
 @pytest.mark.asyncio
-async def test_a_finished_turn_survives_a_failure_nothing_recognises() -> None:
+async def test_a_finished_turn_survives_a_failure_nothing_recognises(policy: str) -> None:
     """Whether upstream finished does not depend on what the failure was, so it has to be answered before anything asks.
 
     Answered from the verdict instead, this was one door short: a failure the caller's taxonomy refuses never reaches the verdict at all — it is raised first, and a complete reply goes with it. The client loses an answer it was owed, over an exception classifier that had never heard of the exception.
+
+    The classifier is production's own, and the failure is the real `h2.ProtocolError` hyper-h2 raises through the gap in httpcore's guard when a GOAWAY and the frames after it land in one read (`.dev/docs/upstream/h2-goaway/archive-260820/260820-h2-goaway-poc.md`). A stand-in exception paired with a stand-in taxonomy would assert the premise rather than prove it, and would keep passing if `normalize_upstream_error` ever learned to name this one — at which point the case being guarded no longer exists. So the premise is asserted out loud, first.
+
+    Both policies, because they lose different amounts through different code. Under `block` the client already holds the content and only the ending goes; under `full` nothing has been delivered yet, so the whole reply does — and recovering it runs the flush after the loop, which `block` never exercises because it has nothing held back.
+
+    `reopen` counts rather than serves: reaching it would mean a second attempt was opened for a turn that was already whole, which no assertion on the bytes would show.
     """
-    replay = _replay_over([])
+    reopened = 0
+
+    async def reopen() -> tuple[AsyncIterator[bytes], AnthropicAssembler, BlockBuffer] | None:
+        nonlocal reopened
+        reopened += 1
+        return None
+
+    def eligible(error: Exception) -> RetryReason | None:
+        known = normalize_upstream_error(error)
+        return reason_for(known) if known is not None else None
+
+    torn = H2ProtocolError("nothing upstream of here knows what this is")
+    assert eligible(torn) is None, "the premise: production cannot name this failure"
+
     chunks = [
         chunk
         async for chunk in stream_delivery(
-            _finishes_then_tears_unrecognisably(),
+            _finishes_then_tears(torn),
             AnthropicAssembler(),
-            buffer=BlockBuffer(policy="block"),
+            buffer=BlockBuffer(policy=policy),  # pyright: ignore[reportArgumentType]
             settings=StreamSettings(sse_ping_interval=0),
             message_id="msg_1",
             model="claude-model",
-            replay=replay,
+            replay=ReplaySupport(
+                ledger=RetryLedger(UpstreamRequestRetryConfig.model_validate({})),
+                eligible=eligible,
+                reopen=reopen,
+            ),
         )
     ]
-    body = b"".join(chunks)
-    assert b'"text":"complete"' in body
-    assert events_of(chunks)[-1] == "message_stop"
+
+    assert reopened == 0, "a reply that is already whole needs no second attempt"
+    # Exact, because the claim is that the whole of it arrived and nothing else did.
+    assert events_of(chunks) == [
+        "message_start",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+        "message_delta",
+        "message_stop",
+    ]
+    assert b'"text":"complete"' in b"".join(chunks)
