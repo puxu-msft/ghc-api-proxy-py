@@ -117,13 +117,34 @@ def _instructions_value(blocks: list[SystemBlock], request: SemanticRequest) -> 
     return "\n\n".join(block.text for block in blocks)
 
 
-def _function_tool(tool: dict[str, Any]) -> dict[str, Any]:
+def _coerced_description(tool: dict[str, Any], conversion: Conversion) -> dict[str, Any]:
+    """A copy of `tool` whose `description`, if present, is a string.
+
+    Upstream type-checks this one field and nothing else about it. Measured against the live endpoint on 2026-08-21: absent, `""`, `"   "` and `null` all answer 200 — `null` is treated as not provided — while an integer answers 400 `Invalid type for 'tools[0].description': expected a string, but got an integer instead.` with `code: invalid_request_body`.
+
+    So `null` is left alone and anything else non-string is rendered rather than refused. A whole turn dies over a field that only ever reaches the model as prose, and the client that sent `42` meant something by it; `"42"` is the closest thing to that meaning this endpoint will take.
+
+    JSON rather than `str()`, because this is the wire layer and `str()` renders `True` as `True` and a mapping in Python's own repr with single quotes — neither of which is a spelling anything downstream reads.
+    """
+    description = tool.get("description")
+    if description is None or isinstance(description, str):
+        return tool
+    rendered = json.dumps(description, ensure_ascii=False, sort_keys=True)
+    conversion.record(
+        LossCode.TOOL_DESCRIPTION_COERCED,
+        f"{tool.get('name') or 'a tool'}: description was {type(description).__name__}, sent as a string",
+    )
+    return {**tool, "description": rendered}
+
+
+def _function_tool(tool: dict[str, Any], conversion: Conversion) -> dict[str, Any]:
     """Put one tool in the shape the Responses endpoint takes.
 
     Anthropic names the schema `input_schema` and carries no `type`; Responses wants a flat function tool with `parameters`. Passing the Anthropic shape through earns `One of the tools requested is invalid.` — measured 2026-08-18.
 
-    A tool that already looks like a Responses tool is left alone, so a Responses-to-Responses round trip does not get rewritten.
+    A tool that already looks like a Responses tool is left alone apart from the description, so a Responses-to-Responses round trip does not get rewritten. The description is checked on both shapes because upstream type-checks it on both.
     """
+    tool = _coerced_description(tool, conversion)
     if "input_schema" not in tool:
         return tool
     converted = {key: value for key, value in tool.items() if key != "input_schema"}
@@ -295,7 +316,7 @@ def _tools_for_upstream(
         ordinary = tool.get("name")
         if isinstance(ordinary, str):
             function_names.add(ordinary)
-        kept.append(_function_tool(tool))
+        kept.append(_function_tool(tool, request.conversion))
     if mapped:
         # INFO rather than DEBUG: a client with web search switched on triggers this every request, so it is a setting and not a warning — but it is also the only place an operator can see that the declaration they sent is not the one that went out.
         logger.info(

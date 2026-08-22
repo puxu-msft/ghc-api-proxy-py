@@ -47,6 +47,7 @@ class LossCode(StrEnum):
     SERVER_TOOL_CONSTRAINT_DROPPED = "server-tool-constraint-dropped"
     REASONING_INTENT_APPROXIMATED = "reasoning-intent-approximated"
     REASONING_INTENT_NOT_CARRIED = "reasoning-intent-not-carried"
+    TOOL_DESCRIPTION_COERCED = "tool-description-coerced"
 
 
 class TranslationRefused(Exception):
