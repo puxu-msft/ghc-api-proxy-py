@@ -1,0 +1,597 @@
+# ghc-api-proxy 配置文档 / Configuration
+#
+# 配置生效的典型优先级：
+#   1. CLI 参数（如有）
+#   2. 环境变量（如有）
+#   3. 配置文件中的值。配置文件的路径来自
+#      1. CLI --config 参数
+#      2. $XDG_DATA_HOME/ghc-api-proxy/config.yaml (默认是 ~/.local/share/ghc-api-proxy/config.yaml)
+#   4. 发布包内置的 config.yaml
+#   5. 代码中内置的默认值
+#
+# Typical priority of effective configuration:
+#   1. CLI options (if any)
+#   2. Environment variables (if any)
+#   3. Config file. Path comes from
+#      1. CLI --config option
+#      2. $XDG_DATA_HOME/ghc-api-proxy/config.yaml (Default: ~/.local/share/ghc-api-proxy/config.yaml)
+#   4. Bundled config.yaml in the dist package
+#   5. Hard-coded defaults in the code
+#
+# 本文件中的是作者调优的值，尽可能只摘取、覆盖你需要的部分到用户配置中。
+# Values in this file are author-tuned; try to only copy/override what you need into your user config.
+#
+# 除非另有说明，所有设置均支持热重载。 / All settings are hot-reloadable unless noted otherwise.
+
+# ============================================================================
+# 客户端入站 / Client, inbound, ingress
+# ============================================================================
+
+server:
+
+  # 监听地址与端口。默认仅本机可访问。
+  # Listen address and port. Default is localhost-only.
+  #
+  # 不支持热重载（需重启） / Not hot-reloadable (requires restart).
+  #
+  host: 127.0.0.1
+  port: 4142
+
+  tls:
+    # 模式
+    #   false  = 仅 HTTP
+    #   true   = 仅 HTTPS
+    #   "both" = 同一端口同时接受 HTTP 与 HTTPS（按连接首字节分流，0x16 = TLS ClientHello）
+    #
+    # Mode
+    #   false  = HTTP only
+    #   true   = HTTPS only
+    #   "both" = Accept both HTTP and HTTPS on the SAME port (first-byte peek, 0x16 = TLS ClientHello)
+    #
+    mode: both
+
+    # PEM 证书与私钥文件路径，必须成对给出。
+    # 两者都省略时会在 <配置目录>/tls/ 下生成一份自签名证书并复用（删掉该目录即重新生成）。
+    #
+    # PEM certificate + private key files. Must be set together.
+    # Omit both and a self-signed pair is generated once into <config-dir>/tls/ and reused (delete that directory to regenerate).
+    # cert: /path/to/cert.pem
+    # key: /path/to/key.pem
+
+    # 是否真的校验证书？默认除了「能读到」之外不对证书做任何校验——这是本地开发用代理，不构成拒绝启动的理由。
+    # Whether to actually verify certificates. Default is to only "be able to read" without any cert validation — this is a local dev proxy, not a reason to refuse startup.
+    strict: false
+
+inbound:
+  # GHC API 提供分词计数器 `POST /v1/messages/count_tokens`，这里控制是否使用它。
+  # The GHC API provides a token counter `POST /v1/messages/count_tokens`, this controls whether to use it.
+  anthropic_count_tokens:
+    # local = 本地 calibrated tiktoken 估算。
+    # local = local calibrated tiktoken estimate.
+    providers: [ghc, local]
+    max_retries: 2
+
+# 模型名映射：请求模型 → 目标模型。
+# Model name mappings: request model → target model.
+#
+# 注意：这是模型名映射的唯一来源——没有任何内置默认值。
+# This is the SOLE source of model-name mapping — there are no built-in defaults.
+#
+# 大小写不敏感。 / Keys/values are spelling-insensitive.
+#
+# Anthropic 模型名兼容处理："." 与 "-" 可互换。
+#   例如，入站 "claude-opus-4-5" 可命中下述规则：
+#     claude-opus-4.5: claude-opus-4.8
+#
+# Anthropic 模型名兼容处理：剥离 "[1m]" 后缀。
+#   例如，入站 "opus[1m]" 可命中下述规则（按顺序尝试）：
+#     opus-1m: claude-opus-4.8
+#     opus: claude-opus-4.8
+#
+# Anthropic-compatible model name resolver: "." and "-" are interchangeable
+#   For example, ingress "claude-opus-4-5" can hit the following rule:
+#     claude-opus-4.5: claude-opus-4.8
+#
+# Anthropic-compatible model name resolver: strip "[1m]" suffix
+#   For example, ingress "opus[1m]" can hit the following rules (in order):
+#     opus-1m: claude-opus-4.8
+#     opus: claude-opus-4.8
+#
+# 若目标在可用模型列表中，直接解析命中；否则，当作别名再次尝试解析；仍不可用则放弃映射、直接透传（上游随后拒绝它）。
+# If a target is in the available models list, it is resolved directly; otherwise, it is treated as an alias and resolved again;
+# if still unavailable, the mapping is abandoned and passed through (the upstream then rejects it).
+#
+model_mappings:
+
+  # 短别名必须指定，否则会被直接透传给上游并被拒绝。
+  # Short aliases must be set; an unmapped alias is sent upstream as-is and rejected.
+
+  # 使用最新版本 / Use latest version
+  #
+
+  fable: claude-opus-5
+  claude-fable-5: claude-opus-5
+
+  opus: claude-opus-5
+  claude-opus-4.1: claude-opus-5
+  claude-opus-4.5: claude-opus-5
+  claude-opus-4.6: claude-opus-5
+  claude-opus-4.7: claude-opus-5
+
+  sonnet: claude-sonnet-5
+  claude-sonnet-4.5: claude-sonnet-5
+  claude-sonnet-4.6: claude-sonnet-5
+
+  # haiku: claude-haiku-4.5
+
+  # 使用 GPT 系列 / Use GPT series
+  #
+
+  gpt: gpt-5.6-sol
+  gpt-5.5: gpt-5.6-terra
+
+  haiku: gpt-5.6-luna
+  claude-haiku-4.5: gpt-5.6-luna
+
+  # Anthropic 模型名兼容处理：日期后缀 / Anthropic-compatible model name resolver: date-suffix
+  #
+  # 自 2026/07/16 起，不再自动剥离日期后缀 "-YYYYMMDD"，必须显式配置。
+  # Since 2026/07/16, date-suffix "-YYYYMMDD" is no longer internally stripped; must be explicitly set.
+  #
+  claude-opus-4-5-20251101: claude-opus-5
+  claude-opus-4-1-20250805: claude-opus-5
+  claude-haiku-4-5-20251001: gpt-5.6-luna
+  claude-sonnet-4-5-20250929: claude-sonnet-5
+
+# ============================================================================
+# 模型提供者 / Model Providers
+# ============================================================================
+
+model_providers:
+  ghc:
+    type: github_copilot
+
+    # 显式指定上游 GitHub Copilot API 基础 URL。
+    # Explicit upstream GitHub Copilot API base URL.
+    # api_base_url: "https://api.githubcopilot.com"
+
+    # GitHub Token 文件路径。
+    # GitHub Token file path.
+    #
+    # 不支持热重载（需重启）。 / Not hot-reloadable (requires restart).
+    #
+    github_token_file: "$XDG_DATA_HOME/ghc-api-proxy/github_token.txt"
+
+    # 后台刷新模型列表（保持 `GET /models` 缓存新鲜）的间隔秒数（0 = 禁用）。
+    # Seconds between background model list refreshes (To keep `GET /models` cache fresh) (0 = disabled).
+    model_refresh_interval: 3600
+
+    # 禁用模型，即便上游仍在对外提供它们。只匹配上游 `model.id`。
+    # Disable models even if upstream still advertises them. Match is exact against `model.id`.
+    #
+    disabled_models:
+      - claude-opus-4.6
+      # - claude-opus-4.7
+      # - claude-opus-4.8
+      # - claude-opus-5
+      # - clause-sonnet-4.6
+      # - clause-sonnet-5
+      # - gemini-3.1-pro-preview
+      # - gemini-3.5-flash
+      - gpt-5.3-codex
+      # - gpt-5.4-mini
+      # - gpt-5.4
+      # - gpt-5.5
+      # - gpt-5.6-luna
+      # - gpt-5.6-sol
+      # - gpt-5.6-terra
+      # - mai-code-1-flash-picker
+      # - trajectory-compaction
+      - gpt-5-mini
+      - gpt-4o-mini-2024-07-18
+      - gpt-4o-2024-11-20
+      - gpt-4o-2024-08-06
+      # - text-embedding-3-small
+      # - text-embedding-3-small-inference
+      - claude-sonnet-4.5
+      - claude-opus-4.5
+      # - claude-haiku-4.5
+      - gemini-3-flash-preview
+      - gemini-2.5-pro
+      - gpt-4.1-2025-04-14
+      - gpt-41-copilot
+      - gpt-3.5-turbo-0613
+      - gpt-4
+      - gpt-4-0613
+      - gpt-4-0125-preview
+      - gpt-4o-2024-05-13
+      - gpt-4-o-preview
+      - gpt-4.1
+      - gpt-3.5-turbo
+      - gpt-4o-mini
+      - gpt-4o
+      - text-embedding-ada-002
+
+    models_support_web_search:
+      - gpt-5.6-sol
+      - gpt-5.6-terra
+      - gpt-5.6-luna
+      - gpt-5.5
+
+default_model_provider: ghc
+
+# ============================================================================
+# 独立模式 / Stand-alone mode
+# ============================================================================
+
+# 优雅重启使用的 pidfile，systemd/pm2 完全跳过 pidfile 机制。
+# 默认是 $XDG_DATA_HOME/ghc-api-proxy/standalone.pid。
+#
+# Pidfile used by graceful restart, not used by systemd/pm2.
+# Defaults to $XDG_DATA_HOME/ghc-api-proxy/standalone.pid when unset.
+#
+# NOT hot-reloadable (requires restart). / 不支持热重载（需重启）。
+#
+# pidfile: "/run/ghc-api-proxy/standalone.pid"
+
+# 在请求排空阶段后，等待的秒数（0 = 无限等）。
+# systemd TimeoutStopSec / pm2 kill_timeout 必须大于它和 client_request_timeout 之和。
+#
+# Seconds to wait AFTER the request drain. (0 = wait forever).
+# systemd TimeoutStopSec / pm2 kill_timeout must be greater than this plus client_request_timeout.
+#
+graceful_cleanup_timeout: 60
+
+# ============================================================================
+# 出站请求 / Outbound requests
+# ============================================================================
+
+# 为所有出站请求配置网络代理。支持 http://、https://、socks5://、socks5h://。
+# Network proxy URL for all outgoing requests. Supports http://, https://, socks5://, socks5h://.
+#
+# 生效的优先级：
+#   1. CLI --proxy 参数
+#   2. HTTP_PROXY/HTTPS_PROXY 环境变量
+#   3. 本设置
+#
+# Priority of effective configuration:
+#   1. CLI --proxy flag
+#   2. HTTP_PROXY/HTTPS_PROXY env vars
+#   3. This setting
+#
+# 不支持热重载（需重启）。 / Not hot-reloadable (requires restart).
+#
+# proxy: "http://127.0.0.1:7890"
+# proxy: "socks5h://127.0.0.1:1080"
+# proxy: "socks5h://user:pass@proxy.example.com:1080"
+
+# ======================================================================================================================
+# 出站模型请求的连接管理 / Outbound connection for model requests
+# ======================================================================================================================
+
+upstream_transport:
+  # 是否启用 HTTP/2。默认 true。
+  # Enable HTTP/2. Default is true.
+  http2: false
+
+  # 每个 HTTP/2 上游连接的最大并发流数（0 = 不限制）。
+  # Max concurrent streams per HTTP/2 upstream connection (0 = unlimited).
+  max_streams_per_connection: 1
+
+  # TCP 保活间隔（0 = 禁用）。
+  # TCP keepalive interval in seconds (0 = disable).
+  #
+  tcp_keepalive_interval: 15
+
+  # HTTP/2 PING 保活间隔（0 = 禁用）。
+  # HTTP/2 PING keepalive interval in seconds (0 = disabled).
+  http2_ping_interval: 15
+
+upstream_request_timeouts:
+  # 单次尝试上游，从请求发起到开始收到 HTTP 响应头的最大秒数（0 = 不超时）。
+  #
+  # 用户冻结的不变量是绝不误杀合法长思考：活连接上的静默没有可证明安全的 wall-clock 上界，因此 bundled defaults 全部禁用此类终止器。
+  # 运维可显式配置非零值以选择有界等待，但那是对该不变量的主动覆盖。
+  #
+  # Each upstream attempt: Max seconds from request start to receiving HTTP response headers (0 = no timeout).
+  #
+  # The frozen invariant is never to false-kill legitimate thinking: silence on a live connection has no provably safe wall-clock bound, so bundled defaults disable these terminators.
+  # Operators may explicitly configure nonzero values to choose bounded waiting, which is an intentional override of that invariant.
+  #
+  response_header: 0
+
+  # 单次尝试上游，SSE 活动之间的最大间隔秒数（0 = 不超时）。适用于所有流式路径。
+  # Each upstream attempt: Max seconds between SSE events (0 = no timeout). Applies to all streaming paths.
+  stream_idle: 0
+
+  # 单次上游尝试的最大存活秒数（0 = 禁用）。
+  # 与另外两个上游守卫互补：response_header 只管首字节前，stream_idle 只管帧间空档，两者都拦不住「一直滴水但永不结束」的尝试。
+  #
+  # Max seconds ONE upstream attempt can live (0 = disabled).
+  # Complements the two phase-scoped guards: response_header covers only the pre-header wait and stream_idle only the gap between frames — neither bounds an attempt that trickles forever.
+  #
+  upstream_request_deadline: 1200
+
+# 包括网络抖动、上游 5xx、部分 400 协商重试等所有「再发一次上游请求」的原因。
+# 包括直接重放与续写两种方案
+#
+# For all reasons that cause "send another request to GHC": network blip, upstream 5xx, some 400-class negotiation retries, etc.
+# Includes both direct replay and continuation
+#
+upstream_request_retry:
+  # 所有策略下，一条客户端请求的最大重试次数（0 = 禁用）。
+  # For any strategy, max retries per client request (0 = disabled).
+  #
+  # 不支持热重载（需重启） / Not hot-reloadable (requires restart).
+  #
+  max_total: 20
+
+  strategies:
+    githubTokenExpired:
+      max_retries: 0
+    network:
+      max_retries: 9
+    serverError:
+      max_retries: 9
+    streamReplay:
+      max_retries: 100
+
+  auto_retry_tool_call_full_name: mcp__plugin_ghc-api-proxy-helper_auto-retry__turn_interrupted
+
+# # 主动式速率限制 / Proactive rate limiting
+# proactive_rate_limiter:
+#   max_inflight: 5
+
+# 反应式速率限制仅在上游返回 HTTP 429 / 502 时触发；不影响上游返回 503/504 的重试行为。
+# Reactive rate limiting is only triggered on upstream HTTP 429 / 502; does not affect upstream 503/504 retry behavior.
+#
+# 不支持热重载（需重启） / Not hot-reloadable (requires restart).
+#
+reactive_rate_limiter:
+  # 速率限制错误后重试前的等待秒数
+  # Seconds to wait before retrying after rate limit error
+  retry_interval: 10
+  # 受限模式下请求之间的间隔秒数
+  # Seconds between requests in rate-limited mode
+  request_interval: 10
+  # 受限模式下尝试恢复前的等待秒数
+  # Seconds before attempting recovery from rate-limited mode
+  recovery_interval: 600
+  # Consecutive successes needed to exit rate-limited mode
+  # 退出受限模式所需的连续成功次数
+  consecutive_successes: 5
+
+# ============================================================================
+# 客户端的按块交付 / Client-side block delivery
+# ============================================================================
+
+# 我们强制实现“客户端按块交付”以保证数据有效性，观点是：流式字符展示毫无意义，成块的语义才有价值。
+# 这也允许我们实现有价值的“续写”功能：客户端已经看到的块不会被丢弃，续写时可以把它们作为上下文传给模型。
+#
+# We enforces "block-level delivery" to the client to guarantee data integrity: streaming character display is meaningless, only block semantics have value.
+# This also allows us to implement a valuable "continuation" feature: blocks already seen by the client are not discarded, and can be sent to the model as context for continuation.
+#
+client_delivery:
+  # 一次客户端请求的最大存活秒数（0 = 禁用）。从受理开始计，任何重试都不重置它，所以它是整个请求的外层上限。
+  # Max seconds one CLIENT request can live (0 = disabled). Measured from admission and never reset by retries, so it bounds the whole client-visible operation.
+  client_request_deadline: 3600
+
+  # 缓冲策略
+  #   block = 按块交付（默认）
+  #   until-tool-use = 直到工具调用前缓冲所有块，工具调用后才按块交付
+  #   full = 缓冲所有块，直到响应结束才交付
+  #
+  # Buffering policy
+  #   block = block-level delivery (default)
+  #   until-tool-use = buffer all blocks until the first tool call, then deliver block-level
+  #   full = buffer all blocks until the response ends, then deliver
+  #
+  buffering_policy: block
+
+  # 缓冲路径内存守卫：累计缓冲超此字节即放弃该响应。0 = 无限制。默认 16MiB。
+  # Buffered-path memory guard: max bytes to buffer before ABANDONING this response. 0 = unlimited. Default 16MiB.
+  buffer_cap_bytes: 16777216
+
+  # SSE ping 发送间隔（秒）。0 = 禁用。默认 15。
+  # SSE ping cadence (seconds). 0 = disabled. Default 15.
+  sse_ping_interval: 15
+
+  # 如果客户端请求在此秒数内没有任何块被交付，则开始“对冲”：发起一次重复请求，谁先返回有效块就继续用谁的（中止被淘汰的）。
+  # Start a "hedge" if no blocks are delivered to the client within this many seconds: send a duplicate request, and continue with whichever returns valid blocks first (abandon the other).
+  hedge:
+    # 保守默认 300 秒用于兜住 Claude Code 的 no-real-content watchdog 尾部，不是普通低延迟竞速。
+    # The conservative 300s default targets the Claude Code no-real-content watchdog tail; this is not an ordinary low-latency hedge.
+    threshold_sec: 300
+    # 每个客户端请求最多允许同时存在的对冲请求数（0 = 禁用）。默认 1。
+    # Max concurrent hedges per client request (0 = disabled). Default 1.
+    max_secondary_candidates: 1
+
+# ============================================================================
+# 日志、历史、指标 / Logging, history, metrics
+# ============================================================================
+
+history:
+  enabled: true
+
+# ============================================================================
+# 模块化与钩子 / Modularization & Hooks
+# ============================================================================
+
+hooks:
+  # 当客户端请求被解析、已知路由模型后触发。
+  on_client_request_parsed: []
+
+  # 当发往上游的请求已准备好（但还没发）时触发。
+  on_upstream_request_ready: []
+
+  # 当上游 SSE 流式响应的完整块已准备好时触发。
+  on_upstream_sse_block_ready: []
+
+  # 当发往客户端的 SSE 流式响应的完整块已准备好（但还没发）时触发。
+  on_client_sse_block_ready: []
+
+  # 当上游请求结束时触发。
+  on_upstream_request_closed: []
+
+  # 当客户端请求结束时触发。
+  on_client_request_closed: []
+
+hook_strip_anthropic_request_headers:
+  # 特定能力请求头只针对特定模型有效，按需剥离。
+  # Certain capability request headers are only valid for certain models. Strip them as needed.
+  strip_anthropic_beta_flags:
+    claude-sonnet-4.6:
+      - interleaved-thinking-2025-05-14
+      - context-management-2025-06-27
+      - prompt-caching-scope-2026-01-05
+      - mid-conversation-system-2026-04-07
+
+# hook_strip_anthropic_response_headers:
+#   # 两模式都先强制剥除 proxy-controlled 头（content-length / content-type / content-encoding / transfer-encoding / connection / hop-by-hop / cache-control / date / set-cookie）
+#   mode: blacklist
+
+#   # 黑名单模式：剥除这些响应头（glob 语法）
+#   # BLACKLIST-mode : upstream headers (in glob syntax) stripped.
+#   response_header_blacklist: []
+
+#   # 白名单模式：除必须的响应头外，仅转发这些响应头（glob 语法）
+#   # WHITELIST-mode : except for the required core headers, only these upstream headers (in glob syntax) are forwarded.
+#   response_header_whitelist:
+#     - request-id
+#     - x-request-id
+#     - anthropic-ratelimit-*
+#     - anthropic-organization-id
+#     - retry-after
+
+# anthropic 请求处理
+hook_fix_anthropic_request:
+  # # advanced-tool-use-2025-11-20
+  # # tool-search-tool-2025-10-19
+  # tool_search:
+  #   enabled: false
+
+  # Cache control mode for prompt caching. / prompt 缓存的 cache control 模式。
+  #   disabled:    strip all cache_control fields (no caching) / 剥离所有 cache_control 字段（不缓存）
+  #   passthrough: forward client cache_control as-is (default) — clients like Claude Code send / 原样转发客户端 cache_control（默认）——Claude Code 等客户端
+  #                their own well-tuned conversation breakpoints; the proxy stays out of the way / 自带调优过的对话断点，代理不插手
+  #   sanitize:    forward but normalize to { type: "ephemeral" } (strip non-standard fields like scope) / 转发但归一化为 { type: "ephemeral" }（剥离 scope 等非标准字段）
+  #   proxied:     proxy controls injection — strip client breakpoints, then re-inject GHC-style: / 代理控制注入——剥光客户端断点后再注入 GHC 风格：
+  #                message-level breakpoints (last tool_result per round + current user message + / 消息级断点（每轮最后一个 tool_result + 当前 user 消息 +
+  #                terminal assistant) caching the conversation, then tools/system on spare slots. / 终态 assistant）缓存对话，再用余位给 tools/system
+  #                Use for clients that don't send their own cache_control. / 适用于不自带 cache_control 的客户端
+  cache_control: passthrough
+
+  # Extended prompt-cache TTL (extended-cache-ttl-2025-04-11): upgrade the cache_control breakpoints the
+  # proxy WRITES from Anthropic's default 5m to 1h. Only takes effect when the proxy owns breakpoints —
+  # i.e. cache_control: proxied (injects) or sanitize (upgrades existing client breakpoints); passthrough
+  # / disabled ignore it. Also gated by model support (model_capabilities.extended_cache_ttl above) and an
+  # agent-style request (an assistant message is present — mirrors GHC's Agent-location gate; first-turn
+  # calls get no 1h). The extended-cache-ttl-2025-04-11 beta header is sent iff a 1h ttl actually lands in
+  # the body. tools_system_ttl / messages_ttl pick 5m|1h per layer; messages is clamped ≤ tools_system
+  # (Anthropic requires longer TTLs earlier in the tools→system→messages prefix order).
+  # 扩展 prompt-cache TTL：把代理写入的 cache_control 断点从默认 5m 提到 1h。仅当代理自己写断点时生效——即 cache_control:
+  # proxied（注入）或 sanitize（升级既有客户端断点）；passthrough / disabled 忽略。还受模型支持（上方 model_capabilities.
+  # extended_cache_ttl）与 agent 式请求（存在 assistant 消息，镜像 GHC Agent 门；首轮无 1h）门控。beta 头当且仅当 body 真
+  # 落了 1h ttl 才发。tools_system_ttl / messages_ttl 逐层选 5m|1h；messages 夹到 ≤ tools_system（Anthropic 要求长 TTL 在前）。
+  extended_cache_ttl:
+    enabled: false
+    tools_system_ttl: 1h
+    messages_ttl: 5m
+
+  context_editing:
+    # 服务端上下文编辑模式。控制输入增大时 Anthropic 的 context_management 如何修剪旧上下文。
+    # Server-side context editing mode. Controls how Anthropic's context_management trims older context when input grows large.
+    #   off: disabled (default). No context_management sent. / 禁用（默认），不发送 context_management。
+    #   clear-thinking: clear old thinking blocks. / 清除旧 thinking 块。
+    #   clear-tooluse: clear old tool_use/result pairs. / 清除旧 tool_use/result 对。
+    #   clear-both: apply both clear-thinking and clear-tooluse. / 同时应用 clear-thinking 与 clear-tooluse。
+    enabled: off
+
+    # Input token threshold that triggers clear_tool_uses when context_editing includes tool clearing.
+    # context_editing 含工具清理时触发 clear_tool_uses 的输入 token 阈值。
+    trigger: 100000
+
+    # Number of most recent tool_use pairs to keep after clear_tool_uses runs. / clear_tool_uses 运行后保留的最近 tool_use 对数量。
+    keep_tools: 3
+
+    # Number of most recent thinking turns to keep after clear_thinking runs. / clear_thinking 运行后保留的最近 thinking turn 数量。
+    keep_thinking: 1
+
+  # # 有的模型会拒绝 messages 中包含 role: "system" 的消息，实测 GHC API claude-sonnet-4.6 / claude-haiku-4.5 报 `Unexpected role "system"` 400，claude-opus-4.6 则接受。
+  # # Some models reject messages with role: "system" in messages; empirically, GHC API claude-sonnet-4.6 / claude-haiku-4.5 return `Unexpected role "system"` 400, while claude-opus-4.6 accepts it.
+  # message_role_system:
+
+  #   # 是否主动改写
+  #   #
+  #   # 有如下选项：
+  #   #   as_role_assistant: 尝试保持原位，改为 "assistant" 消息（有一定约束，不保证成功）/ try to keep in place, rewrite role to "assistant" (best-effort, not guaranteed)
+  #   #   as_role_user:      保持原位，改为 "user" 消息 / rewrite role to "user" and keep conversation position
+  #   #   drop_invalid:      删除该消息 / remove the message entirely
+  #   #   false:             透传 / passthrough unchanged
+  #   #
+  #   proactive: false
+
+  #   # 是否反应式学习？当 HTTP 400 是因为该原因，标记该模型、改写、重试
+  #   reactive: as_role_assistant
+
+  thinking:
+    # assistant 消息的 thinking/redacted_thinking 块不允许相邻（400 "thinking blocks cannot be modified"），怎么办？
+    # thinking/redacted_thinking blocks in assistant messages cannot be adjacent (400 "thinking blocks cannot be modified"), what to do?
+    #   false: 透传 / passthrough
+    #   move_and_synthetic: 与真实非 thinking 块交错（保序），不足时插入合成标记 / interleave with real non-thinking blocks (order-preserving), insert synthetic marker when insufficient
+    #   synthetic_only: 仅插入合成标记 / insert synthetic marker only
+    #
+    assistant_message_layout: move_and_synthetic
+
+    # 兜底处理 400 "thinking ... cannot be modified"，去除所有 thinking/redacted_thinking 块并重试一次。
+    # 一旦剥离成功，记忆该 (session, agent) 会话，使后续轮次提前剥离已知出问题的 thinking 块。
+    #
+    # Fallback for 400 "thinking ... cannot be modified": strip all thinking/redacted_thinking blocks and retry once.
+    # Once the strip-all succeeds, remember the (session, agent) conversation so that later turns proactively strip known-bad thinking blocks.
+    strip_all_thinking_blocks_on_reject:
+      enabled: true
+
+      # 记录的条目多久失效（分钟）。0 = 永久记忆。
+      # How long the remembered entry is valid (minutes). 0 = permanent memory.
+      poisoned_ttl_minutes: 4320
+
+# anthropic 响应处理
+hook_fix_anthropic_sse:
+  thinking:
+    # 部分上游发出的流式 thinking 帧，其 signature 嵌在 content_block_start、无 signature_delta，重整形使标准客户端保留签名。
+    # Claude Code expects signature_delta in content_block_start, but some upstreams (e.g. Copilot) emit signature embedded in content_block_start with no signature_delta. This shim reshapes the thinking frame so standard clients keep the signature.
+    #   signature_delta (default) | redacted_thinking | false
+    content_block_start_compat: signature_delta
+
+  # AskUserQuestion 可能返回了 `questions: "[{...}]"` 但客户端需要 `questions: [{...}]`，这里控制是否解码。
+  # fix_AskUserQuestion_questions_is_string: false
+
+  # fix_AskUserQuestion_question_missing: false
+
+  # e.g. `\u9 ed8` → 默
+  fix_malformed_unicode_escape: true
+
+  # 上游降级成纯文本（`call<invoke>…`）的工具调用，透明重建为标准 tool_use block。
+  # Transparently reconstruct standard tool_use block from upstream degraded pure-text (`call<invoke>…`) tool calls.
+  # fix_invoke_in_text: false
+
+  # 改写 end_reason=refusal 的拒绝响应。
+  #    passthrough = 原样透传
+  #    as_end_turn = 合成 text 块 + 把 stop_reason 改成 end_turn + 补 message_stop。
+  #    as_error    = 合成 `event: error` SSE 帧
+  #
+  # Rewrite refusal responses with end_reason=refusal.
+  #
+  rewrite_refusal:
+    action: as_end_turn
+    text: "Please rephrase your request with a more safe statement."
+
+# hook_fix_responses_request:
+#   # 从 Chat Completions 格式的`call_xxx` ID 转为 Responses API 的 `fc_xxx`。
+#   # Convert Chat Completions `call_xxx` IDs to Responses API `fc_xxx`.
+#   rename_call_id_as_fc_id: true
+
+# hook_fix_responses_sse:
+#   # 修复上游流在 `output_item.added` / `output_item.done` 间不一致的 item ID。`@ai-sdk/openai` 校验 ID 连续性需要。
+#   # Fix inconsistent item IDs across `output_item.added` / `output_item.done` events from Copilot's upstream stream. Required by `@ai-sdk/openai` which validates ID continuity.
+#   fix_stream_ids: true

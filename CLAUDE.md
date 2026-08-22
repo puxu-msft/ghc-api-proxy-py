@@ -4,7 +4,7 @@
 
 本项目主要由你（LLM）和你的同伴们共同开发。
 
-用户会编写、追认“用户控制的文档”（位于 `docs/.human-controlled/`）。你可以将你提供的候选材料写入 `.dev/human-controlled-docs-candidates/` 目录，供用户参考。用户会不定期摘取。
+用户会编写需求、追认功能到[用户控制的需求约束与认知文档](docs/.human-controlled/README.md)。你可以将你提供的候选材料写入 `.dev/human-controlled-docs-candidates/` 目录，供用户参考。用户会不定期摘取。
 
 你和你的同伴共同维护开发文档协作。最新的开发文档位于 `.dev/docs/` 目录下。曾经用户选用过 `docs/agents/`，你可以逐步按主体迁移。早期同伴对旧项目 copilot-api-js 的学习笔记、重写想法位于 `.dev/docs/archived-2604-rewrite/`，仅供参考。
 
