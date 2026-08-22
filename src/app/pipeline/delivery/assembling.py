@@ -44,8 +44,8 @@ class Terminal:
     thinking: list[str] = field(default_factory=lambda: list[str]())
     # Upstream's own usage object, kept beside the converted one rather than derived back from it. `usage` above has been through `_anthropic_usage`, which subtracts the cached part of the input and drops `reasoning_tokens` outright — a lossy pass that is right for an Anthropic client and has no inverse. A leg that has to report what upstream actually said needs the original, and reconstructing it would compose two lossy passes into a number neither side ever computed.
     #
-    # Empty on every leg but the Responses one, including the buffered path. A reader must treat empty as "not observed" and say nothing, rather than filling in zeros: a usage of zero is a measurement, and this is the absence of one.
-    upstream_usage: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
+    # `None` on every leg but the Responses streaming one, the buffered path included — and `None` rather than an empty mapping, because those are different answers. A usage of zero is a measurement; not having asked is not. An empty default would have made "upstream reported nothing" and "nobody looked" the same value, which is the defect `stop_reason`'s empty default exists to avoid, one field further down.
+    upstream_usage: dict[str, Any] | None = None
 
     def record(self, block: CompletedBlock) -> None:
         """Take one finished block into the running summary of the reply.

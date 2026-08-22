@@ -35,8 +35,12 @@ from app.protocols.responses_anthropic import (
 # Stop reasons this proxy synthesises for the Anthropic leg. Responses has no equivalent of either — its vocabulary is completed / incomplete / failed — so both of ours mean the turn finished.
 _FINISHED = frozenset({"end_turn", "tool_use", ""})
 
-# What `stop_reason` says when the assembler saw upstream cut the turn off at the token limit.
-_MAX_TOKENS = "max_tokens"
+# Our word for a truncation → the Responses enumeration's word for it. A forward table rather than
+# a passthrough with exceptions: `incomplete_details.reason` is an enumeration, so anything not in
+# here has no legal spelling and must become null. `max_tokens` is what the assembler writes when
+# upstream said `max_output_tokens`; the round trip is deliberate — the record speaks this proxy's
+# vocabulary and each leg translates out of it.
+_INCOMPLETE_REASONS = {"max_tokens": "max_output_tokens"}
 
 
 def _json_arguments(value: object) -> str:
@@ -129,13 +133,18 @@ class ResponsesFramer:
         )
 
     def block(self, block: CompletedBlock) -> tuple[bytes, ...]:
-        """The closing frame group for one whole block. A caller never gets half of one."""
+        """The closing frame group for one whole block. A caller never gets half of one.
+
+        A kind this does not know is refused rather than served as something else — the same choice `block_frames` makes for a compat mode it does not implement, and for the same reason. The `else` used to fall through to `_message`, which reads `payload[TEXT]`; an unknown kind has no such key, so the client was handed an empty assistant turn and "we did not recognise this" became indistinguishable from "upstream sent nothing". It can only fire if a block kind is added without this switch being updated, which is a mistake worth hearing about.
+        """
         if block.kind == TOOL_USE:
             frames = self._function_call(block)
         elif block.kind == THINKING:
             frames = self._reasoning(block)
-        else:
+        elif block.kind == TEXT:
             frames = self._message(block)
+        else:
+            raise ValueError(f"no Responses item shape for block kind {block.kind!r}")
         self._output_index += 1
         return frames
 
@@ -276,7 +285,8 @@ class ResponsesFramer:
         `usage` is upstream's own, carried through untouched, and absent rather than zeroed when it was never seen.
         The `Terminal.usage` beside it has been through the Anthropic conversion — which subtracts the cached part of the input and discards `reasoning_tokens` — so converting it back would compose two lossy passes and report a number no side ever computed.
         """
-        usage = terminal.upstream_usage or None
+        # Passed through as-is: `None` here means nobody observed one, and that is what the wire's own null says.
+        usage = terminal.upstream_usage
         if terminal.stop_reason in _FINISHED:
             return (
                 self._frame(
@@ -288,14 +298,13 @@ class ResponsesFramer:
                     },
                 ).encode(),
             )
-        # `incomplete` is what the assembler writes when upstream said the response was incomplete
-        # and gave no reason. Passing it on would put a word in `incomplete_details.reason` that the
-        # Responses vocabulary does not have; upstream's own shape for "no reason given" is null.
-        reason = (
-            "max_output_tokens"
-            if terminal.stop_reason == _MAX_TOKENS
-            else (None if terminal.stop_reason == "incomplete" else terminal.stop_reason)
-        )
+        # Only reasons this protocol has a word for travel. `incomplete_details.reason` is an
+        # enumeration, and everything else that can reach here is either our own synthesis
+        # (`incomplete`, written by the assembler when upstream gave no reason) or Anthropic's
+        # (`stop_sequence`, `pause_turn`, `refusal`) — none of which a Responses client can read.
+        # Upstream's own shape for "incomplete, no reason given" is a null, so that is what an
+        # unmapped reason becomes rather than a word from the wrong vocabulary.
+        reason = _INCOMPLETE_REASONS.get(terminal.stop_reason)
         return (
             self._frame(
                 "response.incomplete",

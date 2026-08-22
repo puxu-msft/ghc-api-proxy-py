@@ -313,3 +313,39 @@ def test_an_error_frame_says_what_went_wrong_without_claiming_a_response() -> No
     # The stream stopped without completing, which is exactly what the client must not be able to read as success.
     with pytest.raises(AssertionError):
         replay(frames)
+
+
+def test_a_block_kind_this_does_not_know_is_refused_rather_than_emptied() -> None:
+    """An unrecognised kind used to become an empty message item.
+
+    `_message` reads `payload[TEXT]`, which an unknown kind has no key for, so the client was handed an empty assistant turn — and "we did not recognise this" was delivered as "upstream produced nothing". It can only happen if a block kind is added without this switch, so it fails where that mistake is, the same way `block_frames` refuses a compat mode it does not implement.
+    """
+    one = framer()
+    with pytest.raises(ValueError, match="no Responses item shape"):
+        one.block(CompletedBlock(index=0, kind="server_tool_use", payload={"type": "x"}))
+
+
+@pytest.mark.parametrize(
+    ("stop_reason", "expected"),
+    [
+        ("max_tokens", "max_output_tokens"),
+        # Written by the assembler when upstream said incomplete and gave no reason.
+        ("incomplete", None),
+        # Anthropic's vocabulary. Reachable only through a route this proxy cannot build today, but
+        # the passthrough that used to send them had no way of knowing that.
+        ("stop_sequence", None),
+        ("refusal", None),
+    ],
+)
+def test_only_reasons_the_protocol_has_a_word_for_reach_incomplete_details(
+    stop_reason: str, expected: str | None
+) -> None:
+    """`incomplete_details.reason` is an enumeration, so an unmapped reason is a null, not our word."""
+    one = framer()
+    one.preamble()
+    one.block(text_block(0, "partial"))
+    frames = one.terminal(Terminal(stop_reason=stop_reason, seen=True))
+
+    payload = orjson.loads(frames[-1].decode().split("data: ", 1)[1])["response"]
+    assert payload["status"] == "incomplete"
+    assert payload["incomplete_details"] == ({"reason": expected} if expected else None)
