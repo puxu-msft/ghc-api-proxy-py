@@ -191,10 +191,12 @@ def test_a_beta_flag_the_resolved_model_refuses_does_not_reach_upstream() -> Non
     assert seen[-1].headers["anthropic-beta"] == "effort-2025-11-24"
 
 
-def test_the_strip_applies_on_the_translated_path_too() -> None:
-    """The primary product path. Which model answers is what decides, not which leg carries it.
+def test_a_translated_request_carries_none_of_the_clients_headers() -> None:
+    """The whitelist `message-format-reshape.md` gives the translation path, end to end.
 
-    This pins current behaviour and not a settled contract: `message-format-reshape.md` says the translation path forwards headers by whitelist and that the whitelist is currently empty, which would mean `anthropic-beta` should not reach `/responses` at all. `forwarded_client_headers` is format-agnostic today and sends it. That divergence predates this strip; the point here is only that while the header does travel, the strip travels with it.
+    This test used to be called `test_the_strip_applies_on_the_translated_path_too` and asserted the same absent header, which was wrong in a way worth recording: once the whitelist landed, the header was gone before the beta strip ever looked at it, so **disabling the strip in isolation left this green while the direct-path test went red** — measured. It was named for a mechanism it could not observe, and would have gone on reporting that mechanism healthy after it broke.
+
+    There is nothing to fix by re-pointing it at the strip, because on this leg the strip genuinely has nothing to act on. What is left is the whitelist, which is what it now says.
     """
     client, seen = make_client(
         lambda _: httpx2.Response(200, json={"id": "resp_1"}),
@@ -207,13 +209,17 @@ def test_the_strip_applies_on_the_translated_path_too() -> None:
             "messages": [{"role": "user", "content": "hi"}],
             "max_tokens": 64,
         },
-        headers={"anthropic-beta": "context-management-2025-06-27"},
+        headers={
+            "anthropic-beta": "context-management-2025-06-27,effort-2025-11-24",
+            "anthropic-version": "2023-06-01",
+        },
     )
 
     assert response.status_code == 200
     assert str(seen[-1].url) == f"{BASE_URL}/responses"
-    # Nothing was left in it, so the header goes rather than travelling empty.
     assert "anthropic-beta" not in seen[-1].headers
+    # Not just the beta header — the whitelist is empty, so none of the client's negotiation travels.
+    assert seen[-1].headers.get("anthropic-version") != "2023-06-01"
 
 
 def test_an_unconfigured_model_still_gets_the_whole_header() -> None:

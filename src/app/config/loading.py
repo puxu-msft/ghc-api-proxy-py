@@ -3,8 +3,7 @@
 Priority, highest first: CLI options, environment variables, the user config file.
 Then the bundled config shipped with the distribution, then the schema defaults.
 
-This is the loader the direct-run path uses. `app.config.loader`, one letter away, loads the old
-`AppSettings` for the `--fd` path and is not interchangeable with it.
+This is the loader **every** entry point uses, `--fd` included: `cli.py` reaches the socket-activated path through `_load_spec_config` and `serve_inherited`, the same as the direct run. `app.config.loader`, one letter away, loads the old `AppSettings` — which as of 2026-08-22 configures only the legacy chain and has no caller in `src/` beyond a re-export. The two are not interchangeable, and this docstring used to hand `--fd` to the other one.
 """
 
 import os
