@@ -117,6 +117,45 @@ def write_entry(path: Path, entry: PidfileEntry) -> PidfileEntry:
     return entry
 
 
+@dataclass(frozen=True, slots=True)
+class PredecessorLookup:
+    """What the pidfile yielded, and — when it named nobody worth signalling — why not.
+
+    The reason exists because `--restart` states an intention that can fail silently.
+    Finding no predecessor is indistinguishable from a first run at the level of the return value, yet the operator who typed `--restart` meant "take over from the one that is already there", and a start that quietly serves alongside it instead is the outcome they most need told about.
+    So the refusal is carried out rather than reconstructed by the caller: re-deriving it from the file would put the same judgement in two places, and the copy is what drifts.
+    """
+
+    entry: PidfileEntry | None
+    reason: str = ""
+
+
+def look_up_predecessor(path: Path) -> PredecessorLookup:
+    """Resolve `path` to a signalable predecessor, or to the reason there is none.
+
+    This is the single place the decision is made; `live_predecessor` is the answer with the reason dropped.
+    """
+    entry = read_pidfile(path)
+    if entry is None:
+        # `exists` is only shaping a log line, so a race here costs a word, not a decision.
+        detail = "unreadable record" if path.exists() else "no record"
+        return PredecessorLookup(None, f"{detail} at {path}")
+    if entry.pid == os.getpid():
+        return PredecessorLookup(None, f"the record at {path} names this process")
+    if not entry.start_token:
+        # Nothing to compare against, so the claim cannot be verified. Refuse rather than guess.
+        return PredecessorLookup(
+            None, f"the record at {path} names pid {entry.pid} but carries no identity to verify"
+        )
+    if entry.start_token != process_start_token(entry.pid):
+        # "No longer matches" rather than "has exited": `process_start_token` also returns an empty string when `/proc/<pid>/stat` cannot be read at all, and that is a failure to verify, not evidence of departure. The process may well still be there.
+        return PredecessorLookup(
+            None,
+            f"the record at {path} names pid {entry.pid}, which no longer matches the process holding that pid",
+        )
+    return PredecessorLookup(entry)
+
+
 def live_predecessor(path: Path) -> PidfileEntry | None:
     """The entry recorded in `path`, if that exact process is still running.
 
@@ -127,15 +166,7 @@ def live_predecessor(path: Path) -> PidfileEntry | None:
     safely later: `signal_restart` re-checks the token against the process it has pinned, and this
     answer can be minutes old by the time it does.
     """
-    entry = read_pidfile(path)
-    if entry is None or entry.pid == os.getpid():
-        return None
-    if not entry.start_token:
-        # Nothing to compare against, so the claim cannot be verified. Refuse rather than guess.
-        return None
-    if entry.start_token != process_start_token(entry.pid):
-        return None
-    return entry
+    return look_up_predecessor(path).entry
 
 
 def signal_restart(entry: PidfileEntry) -> bool:

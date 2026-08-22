@@ -10,7 +10,7 @@ from pathlib import Path
 import httpx2
 import pytest
 
-from app.config.paths import expand_user_path, user_data_path
+from app.config.paths import expand_user_path, standalone_pidfile_path, user_data_path
 from app.config.schema import ProxyConfig
 from app.model_provider.ghc_client.auth.providers import FileTokenProvider
 from app.server.composition import build_chain, github_token_path
@@ -111,3 +111,17 @@ def test_build_chain_gives_each_provider_its_own_token_file(
     # Constructing the chain opens no connection, so the client needs no teardown here.
     build_chain(config, http_client=httpx2.AsyncClient())
     assert seen == [Path("/tokens/one"), Path("/tokens/two")]
+
+
+def test_the_pidfile_is_named_after_the_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("XDG_DATA_HOME", "/custom/data")
+    assert standalone_pidfile_path(4141) == Path("/custom/data/ghc-api-proxy/standalone-4141.pid")
+
+
+def test_two_ports_do_not_share_one_pidfile(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Why the port is in the name at all.
+
+    Under one shared name a throwaway `start` on another port claimed the same record: it overwrote the incumbent's entry on its way up and deleted it on its way down, leaving a process that was still serving but that no later `--restart` could find.
+    """
+    monkeypatch.setenv("XDG_DATA_HOME", "/custom/data")
+    assert standalone_pidfile_path(4141) != standalone_pidfile_path(41411)

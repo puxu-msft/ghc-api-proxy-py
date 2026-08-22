@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from app.config.paths import standalone_pidfile_path, user_data_path
 from app.lifecycle.pidfile import live_predecessor, read_pidfile
 
 SRC = Path(__file__).resolve().parents[2] / "src"
@@ -33,6 +34,10 @@ def child_script() -> str:
         from pathlib import Path
         from fastapi import FastAPI, Request
         from app.lifecycle.entry import StandaloneOptions, run_standalone
+        from app.observability.logging import setup_logging
+
+        # Configured here because the lifecycle now says something at start-up that a test needs to read, and an unconfigured structlog would not put it anywhere this process's captured streams can see.
+        setup_logging(log_format="text", log_level="INFO")
 
         app = FastAPI()
 
@@ -62,13 +67,15 @@ def child_script() -> str:
 
                 configured_tls_mode = True if requested_tls_mode == "true" else requested_tls_mode
                 tls_material = generate_self_signed(Path(os.environ["TLS_DIR"]))
+            pidfile_env = os.environ.get("PIDFILE")
             options = StandaloneOptions(
                 host="127.0.0.1",
                 port=int(os.environ["PORT"]),
                 tls_mode=configured_tls_mode,
                 tls_material=tls_material,
                 cleanup_timeout=5,
-                pidfile=Path(os.environ["PIDFILE"]),
+                # Left unset when the test wants the default location, which is the one named after the port.
+                pidfile=Path(pidfile_env) if pidfile_env else None,
                 restart=os.environ.get("RESTART") == "1",
             )
             print("STARTING", flush=True)
@@ -88,19 +95,28 @@ def free_port() -> int:
 
 def start_child(
     port: int,
-    pidfile: Path,
+    pidfile: Path | None,
     *,
     restart: bool = False,
     tls_mode: bool | str | None = None,
     entered_marker: Path | None = None,
+    data_home: Path | None = None,
 ) -> subprocess.Popen[str]:
     env = os.environ.copy()
-    env.update({"PYTHONPATH": str(SRC), "PORT": str(port), "PIDFILE": str(pidfile)})
+    env.update({"PYTHONPATH": str(SRC), "PORT": str(port)})
+    if pidfile is not None:
+        env["PIDFILE"] = str(pidfile)
+    else:
+        # No explicit path, so the child resolves the default one — which is what the port-naming is about. `XDG_DATA_HOME` keeps that default inside the test's own directory instead of the developer's.
+        env.pop("PIDFILE", None)
+    if data_home is not None:
+        env["XDG_DATA_HOME"] = str(data_home)
     if entered_marker is not None:
         env["ENTERED_MARKER"] = str(entered_marker)
     if restart:
         env["RESTART"] = "1"
     if tls_mode is not None:
+        assert pidfile is not None, "the TLS material directory is derived from the pidfile's parent"
         env["TLS_MODE"] = "true" if tls_mode is True else str(tls_mode)
         env["TLS_DIR"] = str(pidfile.parent / "tls")
     return subprocess.Popen(
@@ -362,6 +378,11 @@ def test_a_replacement_takes_the_port_and_retires_its_predecessor(pidfile: Path)
 
         # The port still answers, now from the successor.
         assert b"200 OK" in request_liveness(port)
+
+        # The successor found a real predecessor, so it must not have complained about missing one. A warning that also fires on the happy path teaches the operator to scroll past it, which costs more than saying nothing would.
+        second.send_signal(signal.SIGTERM)
+        successor_said = "".join(second.communicate(timeout=20))
+        assert "found no predecessor" not in successor_said, successor_said
     finally:
         stop(first)
         if second is not None:
@@ -378,7 +399,113 @@ def test_a_start_without_restart_leaves_the_incumbent_alone(pidfile: Path) -> No
         second = start_child(port, pidfile)
         time.sleep(1.5)
         assert first.poll() is None, "the incumbent must not be retired without --restart"
+
+        # And it stays quiet: the warning belongs to `--restart` alone. A plain second start is a deliberate act, not a handover that failed.
+        second.send_signal(signal.SIGTERM)
+        said = "".join(second.communicate(timeout=20))
+        assert "found no predecessor" not in said, said
     finally:
         stop(first)
         if second is not None:
             stop(second)
+
+
+def test_a_restart_that_finds_no_predecessor_says_so(pidfile: Path) -> None:
+    """The cell this matrix was missing, and the one where intention and outcome diverge.
+
+    `--restart` means "take over from the one already there". When the record naming that process is gone, nothing is signalled — and `SO_REUSEPORT` then lets the bind succeed anyway, so the operator gets two processes serving one port with no error, no failed bind, and until now no line of output either. A silent success and a silent failure looked identical.
+    """
+    port = free_port()
+    # `restart` is asked for against a pidfile that was never written, which is exactly the state a throwaway run on another port used to leave behind.
+    child = start_child(port, pidfile, restart=True)
+    try:
+        wait_until_serving(pidfile)
+        # It still serves: the warning reports the handover, it does not refuse the start.
+        assert b"200 OK" in request_liveness(port)
+
+        child.send_signal(signal.SIGTERM)
+        stdout, stderr = child.communicate(timeout=20)
+        said = stdout + stderr
+        assert "found no predecessor" in said, said
+        assert "no record" in said, said
+        # Rendered at the warning tier. An explicit `status=` would select from `STATUS_PREFIXES`, which has no warning entry, and an unrecognised value falls through to `[....]` — the dimmed prefix that means "a request has just started". The text would still be there, and the one line reporting a failed handover would be dressed as routine.
+        assert "[WARN]" in said, said
+    finally:
+        stop(child)
+
+
+def test_the_pidfile_names_the_port_the_kernel_chose(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default path is derived from the bound address, not from the port that was asked for.
+
+    Those two are the same number everywhere else, and today they are the same number on every route the CLI can take: `--port` is constrained to 1..65535, `server.port` likewise, and `--fd` goes through `serve_inherited`, which owns no pidfile at all. So this exercises `run_standalone`'s own call surface rather than a reachable CLI path.
+
+    Kept anyway, because it is the only thing standing between `address[1]` and somebody simplifying it to `options.port` — a change nothing else here would notice, and one that would name the file after a port no successor could find the moment either constraint is relaxed.
+    """
+    data_home = tmp_path / "data"
+    monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
+    child = start_child(0, None, data_home=data_home)
+    try:
+        directory = user_data_path()
+        deadline = time.monotonic() + 20
+        found: list[Path] = []
+        while time.monotonic() < deadline:
+            found = sorted(directory.glob("standalone-*.pid")) if directory.exists() else []
+            if found:
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError(f"no pidfile appeared under {directory}")
+
+        assert len(found) == 1, found
+        chosen = int(found[0].stem.removeprefix("standalone-"))
+        # The negative assertion is the whole point: 0 is what was requested, never what was bound.
+        assert chosen != 0
+        assert not (directory / "standalone-0.pid").exists()
+        # And the name is not merely plausible — that port is the one answering.
+        assert b"200 OK" in request_liveness(chosen)
+    finally:
+        stop(child)
+
+
+def test_a_run_on_another_port_leaves_the_incumbent_its_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The regression this naming exists for, end to end.
+
+    One shared default file made every `start` a claimant to the same record regardless of port: the throwaway overwrote the incumbent's entry as it came up and unlinked it as it went down. The incumbent kept serving and never heard about it, and the next `--restart` had nothing to find. Both children here resolve the *default* path — passing one explicitly would test the very thing that was never broken.
+
+    The expected paths come from the production function rather than being formatted here. Spelling them out locally would make the "two ports, two files" assertion compare two strings this test built itself, which no change to the code under test could ever falsify.
+    """
+    data_home = tmp_path / "data"
+    monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
+    incumbent_port = free_port()
+    throwaway_port = free_port()
+    # Constrains the fixture, not the code: two `bind(0)` probes may hand back the same port.
+    assert incumbent_port != throwaway_port
+    incumbent_pidfile = standalone_pidfile_path(incumbent_port)
+    throwaway_pidfile = standalone_pidfile_path(throwaway_port)
+
+    incumbent = start_child(incumbent_port, None, data_home=data_home)
+    throwaway: subprocess.Popen[str] | None = None
+    try:
+        incumbent_pid = wait_until_serving(incumbent_pidfile)
+
+        throwaway = start_child(throwaway_port, None, data_home=data_home)
+        wait_until_serving(throwaway_pidfile)
+        # Two ports, two files. Under the old shared name both children resolved to one path, and this second start had already destroyed the first one's record by now.
+        assert incumbent_pidfile != throwaway_pidfile
+
+        throwaway.send_signal(signal.SIGTERM)
+        throwaway.communicate(timeout=20)
+        assert throwaway_pidfile.exists() is False, "a departing run must clean up after itself"
+
+        # The point of the whole change: the incumbent is still findable by the process that comes next.
+        surviving = read_pidfile(incumbent_pidfile)
+        assert surviving is not None and surviving.pid == incumbent_pid
+        assert live_predecessor(incumbent_pidfile) is not None
+    finally:
+        stop(incumbent)
+        if throwaway is not None:
+            stop(throwaway)

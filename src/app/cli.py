@@ -306,6 +306,11 @@ def start(
         # than one that is refused, because nothing distinguishes it from having worked.
         typer.echo(f"warning: {option} has no effect on this path — {reason}", err=True)
 
+    # `--pidfile` beats the config key: both name the same file, and the one typed on the command line is the more immediate statement of intent. Resolved here because the config key had no consumer at all — it was parsed into `ProxyConfig`, pinned in `NOT_HOT_RELOADABLE`, documented in `config.example.yaml`, and then never read, so an operator who set it got the default and no indication why.
+    resolved_pidfile = pidfile
+    if resolved_pidfile is None and proxy_config.pidfile:
+        resolved_pidfile = Path(proxy_config.pidfile)
+
     # Served through app.lifecycle rather than uvicorn.run: the escalating shutdown and the
     # SO_REUSEPORT handover both need to own the listener, which uvicorn.run does not give up.
     options = StandaloneOptions(
@@ -316,7 +321,7 @@ def start(
         # material for; generated once and reused when the operator named no cert.
         tls_material=resolve_tls_material(proxy_config, tls_dir=tls_material_dir()),
         cleanup_timeout=proxy_config.graceful_cleanup_timeout,
-        pidfile=pidfile,
+        pidfile=resolved_pidfile,
         restart=restart,
     )
     run(partial(_serve_pipeline, proxy_config, options, proxy_from_cli=proxy is not None))

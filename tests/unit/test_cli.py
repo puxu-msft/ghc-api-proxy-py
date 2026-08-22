@@ -339,3 +339,47 @@ def test_start_asks_for_no_tls_material_when_the_config_wants_none(
     assert options.tls_mode is False
     assert options.tls_material is None
     assert not (tmp_path / "tls").exists()
+
+
+def test_the_configured_pidfile_reaches_the_options(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`config.example.yaml` documents a `pidfile` key, so setting it has to do something.
+
+    It was parsed into `ProxyConfig` and pinned in `NOT_HOT_RELOADABLE`, but nothing ever read it: an operator who set the key got the default path and no indication that their setting had been dropped.
+    """
+    config = tmp_path / "config.yaml"
+    config.write_text('pidfile: "/run/ghc-api-proxy/named.pid"\n', encoding="utf-8")
+    run = Mock()
+    monkeypatch.setattr("app.cli.run", run)
+
+    assert runner.invoke(app, ["start", "--config", str(config)]).exit_code == 0
+    assert serve_options(run).pidfile == Path("/run/ghc-api-proxy/named.pid")
+
+
+def test_the_command_line_pidfile_beats_the_configured_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text('pidfile: "/run/ghc-api-proxy/named.pid"\n', encoding="utf-8")
+    run = Mock()
+    monkeypatch.setattr("app.cli.run", run)
+
+    result = runner.invoke(
+        app, ["start", "--config", str(config), "--pidfile", str(tmp_path / "typed.pid")]
+    )
+
+    assert result.exit_code == 0
+    assert serve_options(run).pidfile == tmp_path / "typed.pid"
+
+
+def test_an_unset_pidfile_is_left_for_the_bind_to_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """None rather than a resolved path, and that is load-bearing.
+
+    The default is named after the port actually bound, which `--fd` never states and port 0 leaves to the kernel. Resolving it this early would put a guess in the file name.
+    """
+    run = Mock()
+    monkeypatch.setattr("app.cli.run", run)
+
+    assert runner.invoke(app, ["start"]).exit_code == 0
+    assert serve_options(run).pidfile is None

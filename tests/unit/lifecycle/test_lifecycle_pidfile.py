@@ -18,6 +18,7 @@ from app.lifecycle.pidfile import (
     PidfileEntry,
     PidfileError,
     live_predecessor,
+    look_up_predecessor,
     process_start_token,
     read_pidfile,
     remove_pidfile,
@@ -125,6 +126,56 @@ def test_a_dead_process_is_not_a_predecessor(tmp_path: Path) -> None:
     other.kill()
     other.wait()
     assert live_predecessor(path) is None
+
+
+def test_a_missing_file_says_there_is_no_record(tmp_path: Path) -> None:
+    """`--restart` states an intention, so its refusal has to be sayable.
+
+    The entry alone cannot carry that: `None` reads the same whether the file was absent, unparsable, or naming a process that has since died, and those tell an operator very different things about what just happened.
+    """
+    lookup = look_up_predecessor(tmp_path / "absent.pid")
+    assert lookup.entry is None
+    assert "no record" in lookup.reason
+
+
+def test_an_unparsable_file_is_distinguished_from_an_absent_one(tmp_path: Path) -> None:
+    path = tmp_path / "standalone.pid"
+    path.write_text("not a pid\n", encoding="utf-8")
+    assert "unreadable record" in look_up_predecessor(path).reason
+
+
+def test_a_record_without_a_token_says_it_cannot_be_verified(tmp_path: Path) -> None:
+    path = tmp_path / "standalone.pid"
+    path.write_text("4242\n", encoding="utf-8")
+    reason = look_up_predecessor(path).reason
+    assert "no identity to verify" in reason
+    # The pid is named, because an operator reading this wants to know who was claimed.
+    assert "4242" in reason
+
+
+def test_a_dead_process_says_the_record_is_stale(tmp_path: Path) -> None:
+    path = tmp_path / "standalone.pid"
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    write_pidfile(path, other.pid)
+    other.kill()
+    other.wait()
+    reason = look_up_predecessor(path).reason
+    # Deliberately not "has exited": the same branch is taken when `/proc` cannot be read, where the process may still be alive and it is only the check that failed.
+    assert "no longer matches" in reason
+    assert str(other.pid) in reason
+
+
+def test_a_found_predecessor_carries_no_reason(tmp_path: Path) -> None:
+    # The positive control: the reason field must stay empty when there is nothing to explain, or "did it find one" becomes unanswerable from the lookup alone.
+    path = tmp_path / "standalone.pid"
+    with subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"]) as other:
+        try:
+            write_pidfile(path, other.pid)
+            lookup = look_up_predecessor(path)
+            assert lookup.entry is not None and lookup.entry.pid == other.pid
+            assert lookup.reason == ""
+        finally:
+            other.kill()
 
 
 def test_the_predecessor_receives_the_restart_signal(tmp_path: Path) -> None:

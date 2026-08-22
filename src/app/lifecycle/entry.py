@@ -21,13 +21,15 @@ from app.config.schema import TlsMode
 from app.lifecycle.adapter import UvicornListenerAdapter
 from app.lifecycle.listener import FirstByteRoutingAdapter, adopt_listener, bind_listener
 from app.lifecycle.pidfile import (
-    live_predecessor,
+    PidfileEntry,
+    look_up_predecessor,
     remove_pidfile,
     signal_restart,
     write_entry,
     write_pidfile,
 )
-from app.lifecycle.standalone import ShutdownReport, StandaloneServer
+from app.lifecycle.standalone import LIFECYCLE_LOGGER, ShutdownReport, StandaloneServer
+from app.observability.logging import get_logger
 from app.server.tls import TlsMaterial, build_server_ssl_context
 
 # Mirrors what `uvicorn.Config` accepts, so a FastAPI instance passes without a cast.
@@ -46,8 +48,12 @@ class StandaloneOptions:
     pidfile: Path | None = None
     restart: bool = False
 
-    def pidfile_path(self) -> Path:
-        return self.pidfile if self.pidfile is not None else standalone_pidfile_path()
+    def pidfile_path(self, port: int) -> Path:
+        """Where this process records itself, given the port it actually ended up listening on.
+
+        The port is a parameter rather than read off `self.port` because that field is a request and this one is the result. Today the two always agree: `--port` and `server.port` are both constrained to 1..65535, and `--fd` never reaches here at all — systemd's listener is driven by `serve_inherited`, which owns no pidfile. Naming the file after the address that was actually bound is nonetheless the only spelling that stays correct if either of those constraints is relaxed, and it costs nothing to read the number back from the socket instead of trusting what was asked for.
+        """
+        return self.pidfile if self.pidfile is not None else standalone_pidfile_path(port)
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,15 +83,25 @@ async def run_standalone(
     than a snapshot, because a display reads it on its own schedule and a value copied out here
     would be stale before it was drawn.
     """
-    pidfile = options.pidfile_path()
-    predecessor = live_predecessor(pidfile) if options.restart else None
-
     listeners = (
         adopt_listener(options.fd)
         if options.fd is not None
         else bind_listener(options.host, options.port)
     )
     address = listeners.identities()[0].address
+
+    # Resolved after the bind, so the name comes from the endpoint that exists rather than the one that was requested. See `pidfile_path` for why that distinction is worth keeping even though the two agree on every route the CLI can take today.
+    pidfile = options.pidfile_path(address[1])
+    predecessor: PidfileEntry | None = None
+    if options.restart:
+        lookup = look_up_predecessor(pidfile)
+        predecessor = lookup.entry
+        if predecessor is None:
+            # `--restart` is an intention, and until now its failure was indistinguishable from its success: nothing was signalled, `SO_REUSEPORT` let the bind succeed anyway, and the result was two processes serving one port with neither of them told. Said at start-up rather than folded into the shutdown report, because by then the operator has already gone away believing the handover happened.
+            # No `status=`: that field selects from `STATUS_PREFIXES`, which has no warning tier, and an unrecognised value falls to `[....]` — the dimmed prefix meaning "a request has just started". Left off, the level itself reaches `LEVEL_PREFIXES` and renders `[WARN]`.
+            get_logger(LIFECYCLE_LOGGER).warning(
+                f"--restart found no predecessor to take over from: {lookup.reason}; no handover happened, and another process may still be serving this port"
+            )
 
     adapter: UvicornListenerAdapter | FirstByteRoutingAdapter
     if options.tls_mode is True:
@@ -111,17 +127,19 @@ async def run_standalone(
                 build_server_ssl_context(material),
             )
     announced = False
+    signalled: int | None = None
 
     if on_observable is not None:
         on_observable(adapter.connection_count)
 
     async def announce() -> None:
-        nonlocal announced
+        nonlocal announced, signalled
         # Recorded only once accepting, so the file never names a process that cannot serve.
         write_pidfile(pidfile)
         announced = True
-        if predecessor is not None:
-            signal_restart(predecessor)
+        # Only what was actually delivered is reported. `signal_restart` returns False when the process it pinned turned out to have exited between the lookup and the signal, and recording the intent instead would have the outcome claim a handover that never reached anybody. No warning for that case: a predecessor that left on its own is not one still holding the port.
+        if predecessor is not None and signal_restart(predecessor):
+            signalled = predecessor.pid
 
     server = StandaloneServer(
         adapter,
@@ -147,5 +165,5 @@ async def run_standalone(
     return StandaloneOutcome(
         report=report,
         address=address,
-        signalled_predecessor=predecessor.pid if predecessor is not None else None,
+        signalled_predecessor=signalled,
     )
