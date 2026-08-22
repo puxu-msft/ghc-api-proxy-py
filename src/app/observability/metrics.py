@@ -21,3 +21,10 @@ ATTRIBUTION_LINES_STRIPPED = Counter(
     "ghc_proxy_attribution_lines_stripped_total",
     "Client-injected attribution lines removed from an inbound Anthropic system prompt.",
 )
+
+# Labelled, unlike its neighbour above, because there is no single reason this fires: an operator adds a flag to the map after upstream refused a request over it, and the question they come back with is which flag on which model is still being taken away. `flag` carries the **configured** spelling rather than the client's — a label whose value a client controls has no bound on its series count — and `model` is the resolved id, which the catalog bounds.
+BETA_FLAGS_STRIPPED = Counter(
+    "ghc_proxy_beta_flags_stripped_total",
+    "`anthropic-beta` flags removed from a client request because the resolved model refuses them.",
+    ("model", "flag"),
+)

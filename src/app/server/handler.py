@@ -19,6 +19,7 @@ from pydantic import ValidationError
 from app.config.schema import ContentBlockStartCompat
 from app.model_provider import ModelProvider, ProviderError
 from app.models.anthropic import MessagesRequest
+from app.observability.metrics import BETA_FLAGS_STRIPPED
 from app.pipeline.anthropic_request_hook import fix_anthropic_request
 from app.pipeline.count_tokens import CountTokensUnavailable, count_tokens
 from app.pipeline.delivery import BlockBuffer, CompletedBlock, DeliverySession
@@ -49,6 +50,7 @@ from app.pipeline.exceptions import (
     UpstreamTimeout,
 )
 from app.pipeline.request import RequestContext, WireFormat
+from app.pipeline.request_headers import strip_denied_beta_flags
 from app.pipeline.retry import RetryLedger
 from app.pipeline.routing import Route, RoutingError, decide_route
 from app.pipeline.subscribers.counting import COUNTING_ONLY
@@ -112,6 +114,15 @@ def shape_request(
         on_routed(context)
 
     if context.inbound_format is WireFormat.ANTHROPIC_MESSAGES:
+        # After `apply_route` because the flags are a property of the model that answers; keyed on the requested name as well because the authoritative config writes this table under an alias `model_mappings` maps away, so the resolved name alone would never match it. `message-format-reshape.md` scopes this to the Anthropic Messages endpoints, which is what the guard says.
+        context.client_headers, stripped_flags = strip_denied_beta_flags(
+            context.client_headers,
+            models=(context.requested_model, context.resolved_model),
+            denied_by_model=chain.config.hook_strip_anthropic_request_headers.strip_anthropic_beta_flags,
+        )
+        for flag in stripped_flags:
+            BETA_FLAGS_STRIPPED.labels(model=context.resolved_model, flag=flag).inc()
+
         # Before translation on purpose: these fixups read `messages`, which the target format may not have. The spec calls this point `on_client_request_parsed`.
         fix_anthropic_request(context.payload, chain.config.hook_fix_anthropic_request)
     return provider, route

@@ -309,8 +309,11 @@ class HooksConfig(Section):
 
 
 class StripRequestHeadersHook(Section):
+    # Read by nothing, and no longer in the example config either — `message-format-reshape.md` rules the attribution strip resident rather than configured. Kept because removing it would turn an operator's existing `strip_attribution_header: false` into a startup error under `extra="forbid"`, which is a louder failure than the switch being inert. Whether to drop it is the config author's call, not this file's.
     strip_attribution_header: bool = True
-    beta_strip_headers: dict[str, list[str]] = Field(
+    # Keyed by model, valued by the `anthropic-beta` flags that model must not be asked for. A capability beta is not a global switch: upstream answers `400 invalid beta flag` when a model is asked for one it does not have, so the whole request dies over a header the client sent to every model alike. Per-model because that is the granularity of the rejection.
+    # Key matching folds case and treats `.` and `-` as the same character, the way `model_mappings` does — `claude-sonnet-4.6` and `claude-sonnet-4-6` are one key.
+    strip_anthropic_beta_flags: dict[str, list[str]] = Field(
         default_factory=lambda: dict[str, list[str]]()
     )
 

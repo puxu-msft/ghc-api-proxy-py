@@ -192,7 +192,10 @@ def test_a_beta_flag_the_resolved_model_refuses_does_not_reach_upstream() -> Non
 
 
 def test_the_strip_applies_on_the_translated_path_too() -> None:
-    """The primary product path. Which model answers is what decides, not which leg carries it."""
+    """The primary product path. Which model answers is what decides, not which leg carries it.
+
+    This pins current behaviour and not a settled contract: `message-format-reshape.md` says the translation path forwards headers by whitelist and that the whitelist is currently empty, which would mean `anthropic-beta` should not reach `/responses` at all. `forwarded_client_headers` is format-agnostic today and sends it. That divergence predates this strip; the point here is only that while the header does travel, the strip travels with it.
+    """
     client, seen = make_client(
         lambda _: httpx2.Response(200, json={"id": "resp_1"}),
         overrides=_beta_strip("gpt-model", "context-management-2025-06-27"),
@@ -230,6 +233,74 @@ def test_an_unconfigured_model_still_gets_the_whole_header() -> None:
         seen[-1].headers["anthropic-beta"]
         == "context-management-2025-06-27,effort-2025-11-24"
     )
+
+
+def test_the_table_fires_on_the_alias_the_client_asked_for() -> None:
+    """The shape the authoritative config is in, and the one nothing else here would catch.
+
+    `config.example.yaml` writes the table under `claude-sonnet-4.6` and *also* maps `claude-sonnet-4.6: claude-sonnet-5`. Keyed on the resolved id alone, the operator's whole measured table would be inert against their own config — and every other test here would stay green, because they all configure the table under a name no mapping touches.
+    """
+    client, seen = make_client(
+        lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}),
+        mappings={"claude-alias": "claude-model"},
+        overrides=_beta_strip("claude-alias", "context-management-2025-06-27"),
+    )
+    response = client.post(
+        "/v1/messages",
+        json={"model": "claude-alias", "messages": [{"role": "user", "content": "hi"}]},
+        headers={"anthropic-beta": "context-management-2025-06-27,effort-2025-11-24"},
+    )
+
+    assert response.status_code == 200
+    assert seen[-1].headers["anthropic-beta"] == "effort-2025-11-24"
+
+
+def test_the_table_fires_on_the_resolved_id_when_the_client_used_an_alias() -> None:
+    """The other half of the union: the operator keys on the real model, the client on an alias."""
+    client, seen = make_client(
+        lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}),
+        mappings={"claude-alias": "claude-model"},
+        overrides=_beta_strip("claude-model", "context-management-2025-06-27"),
+    )
+    response = client.post(
+        "/v1/messages",
+        json={"model": "claude-alias", "messages": [{"role": "user", "content": "hi"}]},
+        headers={"anthropic-beta": "context-management-2025-06-27,effort-2025-11-24"},
+    )
+
+    assert response.status_code == 200
+    assert seen[-1].headers["anthropic-beta"] == "effort-2025-11-24"
+
+
+def test_a_stripped_flag_is_counted_under_the_configured_spelling() -> None:
+    """Removing a capability silently is what an operator has no way to notice. The counter is the notice.
+
+    The label carries the operator's spelling rather than the client's: a client-controlled label value has no bound on its series count.
+    """
+    before = (
+        REGISTRY.get_sample_value(
+            "ghc_proxy_beta_flags_stripped_total",
+            {"model": "claude-model", "flag": "context-management-2025-06-27"},
+        )
+        or 0.0
+    )
+    client, _ = make_client(
+        lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}),
+        overrides=_beta_strip("claude-model", "context-management-2025-06-27"),
+    )
+    response = client.post(
+        "/v1/messages",
+        json={"model": "claude-model", "messages": [{"role": "user", "content": "hi"}]},
+        # Spelled differently from the config on purpose: the label must still be the config's.
+        headers={"anthropic-beta": "Context-Management-2025-06-27"},
+    )
+
+    assert response.status_code == 200
+    after = REGISTRY.get_sample_value(
+        "ghc_proxy_beta_flags_stripped_total",
+        {"model": "claude-model", "flag": "context-management-2025-06-27"},
+    )
+    assert after == before + 1
 
 
 def test_anthropic_request_for_a_responses_model_is_translated() -> None:
