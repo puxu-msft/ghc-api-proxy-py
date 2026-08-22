@@ -183,7 +183,7 @@ flag 名比对两侧都 `strip()` + `casefold()`；保留下来的 flag 用客�
 
 ### 3.1 单元：`tests/unit/pipeline/test_client_request_headers.py`
 
-14 条，覆盖：只剥点名的 flag、未配置的模型原样通过、模型键的三种拼法都命中、剩空了删头、`a, b` 带空格不漏、空表是恒等、不改调用方的 mapping、没有该头时不动，以及评审后补的六条——按 requested 别名命中、按 resolved id 命中、两个 canonical 等价键都参与、flag 名大小写不敏感且按配置拼写上报、重复 flag 只报一次、配置了但一个都没命中时头值逐字节不变。
+23 条（该文件另有 4 条 `context_management` 测试不属本切片），覆盖：只剥点名的 flag、未配置的模型原样通过、模型键的三种拼法都命中、剩空了删头、`a, b` 带空格不漏、空表是恒等、不改调用方的 mapping、没有该头时不动，以及评审后补的六条——按 requested 别名命中、按 resolved id 命中、两个 canonical 等价键都参与、flag 名大小写不敏感且按配置拼写上报、重复 flag 只报一次、配置了但一个都没命中时头值逐字节不变。
 
 ### 3.2 接线：`tests/int/test_pipeline_app.py`
 
@@ -226,11 +226,20 @@ flag 名比对两侧都 `strip()` + `casefold()`；保留下来的 flag 用客�
 
 ## 4. 未采纳与已知边界
 
-- **不支持 `*` 通配键，也不支持 glob。** 用户亲笔配置里只出现按具体模型名的键，需求正文也只说「按需剥离」。`stream_idle_overrides` 用的是子串匹配，那是它自己的历史，没有依据推广到这里。加通配是廉价的，但没人要求，且一旦加了，「哪条键赢」就成了要定的规则。**记为 deferred，不静默实现。**
-- **不改 legacy 链路。** `app/anthropic/features.py::build_anthropic_beta_headers` 早就有 `strip: Iterable[str]` 形参，而**唯一的生产调用方 `request_preparation.py:58` 从不传它**（`tests/unit/anthropic/test_feature_negotiation.py:55` 传了，那是单测直接调的）。那条链路（`app.routes` / `app_factory` / `AnthropicClient`）不是主产品路径，本切片不扩到那里。该形参保持原样。
-- **`strip_attribution_header` 仍是空转开关。** 见 §2.1，是刻意保留的，且已提请用户裁决要不要删。
-- **`config/loader.py:1` 的 docstring 已过时**（见 §2.1 的警告块）。发现于本切片但不属于本切片，未改，记在这里。
-- **`docs/.human-controlled/message-format-sanitize.md` 已被用户改名为 `message-format-reshape.md`**，而 `src/app/pipeline/anthropic_request_hook.py`（5 处）与 `src/app/server/pipeline_app.py:422`（1 处）的注释仍指向旧名，现在是断链。本切片只改正了自己新写的那一处（`config/schema.py`），其余 6 处未动——`pipeline_app.py` 当时有同伴的未提交改动，按 pathspec 提交它会连同伴的工作树改动一起带走。记在这里，另行提请。
+> **本节曾整节过期。** 初版写于裁决之前，四条里有四条被用户 2026-08-22 的裁决推翻，却以现时态留在文中——独立评审（`../../tmp/260822-review-closeout-claims.md` major-1）指出，维护者照它办会把已删的开关加回去、把已实现的通配重新记成 deferred。下表先记推翻，再写当前边界。
+
+| 初版写的 | 现在 |
+|---|---|
+| 「不支持 `*` 通配键，也不支持 glob…**记为 deferred，不静默实现**」 | **推翻（裁决 7）**。键就是正则，`fullmatch`，按配置顺序先匹配者赢，启动时编译。见 §2.2 |
+| 「`strip_attribution_header` 仍是空转开关…刻意保留」 | **推翻（裁决 2）**。字段已删；剥离行为本身常驻未动 |
+| 「`config/loader.py:1` 的 docstring 已过时…未改，记在这里」 | **推翻（裁决 6）**。已改写；同族的 `config/loading.py` docstring（同样把 `--fd` 说成走 `AppSettings`）在收尾复审中一并改正 |
+| 「旧文档名 6 处未动…另行提请」 | **推翻（裁决 3）**。全部改正，且实际是 **8 处**不是 6 处——初版只数了 `src/`，漏了 `tests/` 里的 3 处 |
+
+当前仍成立的边界：
+
+- **不改 legacy 链路。** `app/anthropic/features.py::build_anthropic_beta_headers` 早就有 `strip: Iterable[str]` 形参，而**唯一的生产调用方 `src/app/anthropic/request_preparation.py` 从不传它**（`tests/unit/anthropic/test_feature_negotiation.py` 传了，那是单测直接调的）。那条链路（`app.routes` / `app_factory` / `AnthropicClient`）不是主产品路径，本切片不扩到那里。
+- **legacy `src/app/config/settings.py` 的 `beta_strip_headers` 未动**，仍是零消费者的旧配置面。
+- **同伴分支上的旧文档名残留。** 主树 `src/` 与 `tests/` 已零残留，但 `.claude/worktrees/delivery-keepalive/` 里仍有 8 处指向 `message-format-sanitize.md`。那是同伴的分支，不属本切片；**整合该分支时会静默把断链带回来**，squash 取的是它的树，不会冲突也不会报错。
 
 ## 5. 需要实测才能关闭的问题
 
@@ -250,16 +259,16 @@ flag 名比对两侧都 `strip()` + `casefold()`；保留下来的 flag 用客�
 
 | 发现 | 处置 |
 |---|---|
-| major-1 按 `resolved_model` 匹配使用户配置整表空转 | **已改**：改为 requested ∪ resolved，并标注待用户裁决（§2.2） |
+| major-1 按 `resolved_model` 匹配使用户配置整表空转 | 当时改为 requested ∪ resolved 并标注待裁决；**用户裁决 1 推翻，最终按 `resolved_model` 单键**（§2.2） |
 | major-2 无测试能区分 requested 与 resolved | **已补**：单元 2 条 + 端到端 2 条，变异可红 |
 | minor-1 metric 标签取客户端拼写、基数无界 | **已改**：改为上报配置拼写，`metrics.py` 注释同步改正 |
 | minor-2 重复 flag 让计数器重复自增 | **已改**：同请求内同一 flag 只上报一次 |
-| minor-3 canonical 等价的第二个键被静默丢弃 | **已改**：所有等价键合并 |
+| minor-3 canonical 等价的第二个键被静默丢弃 | 当时改为所有等价键合并；**裁决 7 推翻**——键改成正则后是先匹配者赢，不合并（§2.2 说明了为什么合并会让窄条目失去意义） |
 | minor-6/7/8 指标发射、大小写、早退三处无测试 | **已补** |
 | minor-9 docstring 理由指向不存在的消费者 | **已改**：改成「任何还持有客户端原始 headers 的调用方」 |
 | nit-1 隐含要求 header 键已小写 | **已改**：写进 docstring 的前置条件 |
 | minor-5 count_tokens 腿是空覆盖 | **未改行为，改了说法**（§2.3 的警告块）。既有行为，本切片不扩 |
-| nit-3 翻译腿本不该转发 `anthropic-beta` | **未改行为，改了测试 docstring**，标明是固化现状而非契约。分歧先于本切片，已提请用户 |
+| nit-3 翻译腿本不该转发 `anthropic-beta` | 当时只改了测试 docstring；**裁决 5 要求改行为**，翻译腿现在按空白名单零转发（§2.4）。那条测试后来被收尾复审判为「断言的缺席由白名单造成、与 strip 无关」，已改名重写为 `test_a_translated_request_carries_none_of_the_clients_headers` |
 | minor-4 客户端发两个 `anthropic-beta` 头时第一个被丢 | **未改**。缺陷在 `forwarded_client_headers` 的 dict 推导，先于本切片，不属于本切片 |
 | minor-10 权威配置文件缺席时那道 gate 静默 skip | **未改**。先于本切片，是另一个话题（`making-a-gate-actually-fire` 的形态），记在此 |
-| 保留 `strip_attribution_header`（评审判「可接受但方向可辩」） | **保留**，理由与代价都写进字段注释，并提请用户裁决 |
+| 保留 `strip_attribution_header`（评审判「可接受但方向可辩」） | **裁决 2：删掉。** 已删 |
