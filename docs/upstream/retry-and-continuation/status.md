@@ -87,8 +87,9 @@
 | `a68672c` | driver 不再吞掉取消（504 而非 502 `CancelledError`） |
 | `51196e2` | 客户端时限真正罩住 body，到点发 SSE error 帧 |
 | `8f654b4` | 接线，并让一条客户端请求共用一个 `RetryLedger` |
+| `1018e3a` | 按独立评审修 1 blocker + 6 major：重开不再二次翻译 payload、客户端时限跟着新迭代器走、error 帧的门改回响应头、attempt 数刷新、两处时限同起点 |
 
-**每一处新行为都做过变异检验**，且还原后逐字节校验。端到端那条（`test_a_torn_stream_the_client_never_saw_is_replayed_end_to_end`）在去掉 `replay=replay` 后转红——它钉的是接线，不是接缝。
+**每一处有测试的新行为都做过变异检验**，且还原后逐字节校验。措辞是评审收窄的：变异检验只能证明「有测试的地方测试是活的」，对**没有测试的地方一言不发**——D 组的 blocker 正是藏在那里。端到端那条（`test_a_torn_stream_the_client_never_saw_is_replayed_end_to_end`）在去掉 `replay=replay` 后转红——它钉的是接线，不是接缝。
 
 原计划条目：
 
