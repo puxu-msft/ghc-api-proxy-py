@@ -656,7 +656,7 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
             if accounting.handed_over:
                 # One per turn. A second would mean the first was not the ending it claimed to be.
                 return None
-            name = chain.config.client_delivery.auto_retry_tool_call_full_name
+            name = chain.config.upstream_request_retry.auto_retry_tool_call_full_name
             if not name:
                 return None
             declared = context.payload.get("tools")

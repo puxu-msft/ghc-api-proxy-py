@@ -124,7 +124,12 @@ def _responses_stop_reason(
             reason = str(cast(Mapping[str, Any], details).get("reason", ""))
         if reason == "max_output_tokens":
             return MAX_TOKENS, None
-        return END_TURN, f"incomplete response with reason {reason!r}"
+        # Upstream's own word, unmapped, exactly as the streaming path does it. The output-token limit is the only reason with an Anthropic spelling, so it is the only one translated; everything else used to become `end_turn`, which reported a turn upstream had cut short as one it finished. The two paths described the same fact differently until this line, which is worse than either answer on its own.
+        #
+        # `"incomplete"` when upstream said the response was incomplete without saying why — still its own word, since that is the `status` it sent — and it keeps that case out of `end_turn` too.
+        #
+        # No longer recorded as a conversion loss: nothing is lost now that the reason reaches the client.
+        return reason or "incomplete", None
     if has_tool_call:
         return TOOL_USE_STOP, None
     return END_TURN, None
