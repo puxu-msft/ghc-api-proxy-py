@@ -177,3 +177,33 @@
 文档第 27 行已经写了「也不再出现半开 `message_start` 需要考虑」，措辞已经正确。这里只补一条**给实现者的提醒**，可放可不放：
 
 > 该性质由构造保证，不由任何断言保证——live 链路一条相关守卫都没有（9 条 `DeliveryOrderError` 全在未挂载的 legacy 侧）。将来谁再引入单独发 `message_start` 的路径，不会有任何东西报错。
+
+---
+
+## 十、`config.example.yaml` 里 `hand_over_stop_reasons` 的 `max_output_tokens` 是死条目
+
+**2026-08-22 追加。** 你在 `docs/.human-controlled/config.example.yaml:339` 写的是：
+
+```yaml
+  hand_over_stop_reasons: ["max_tokens", "max_output_tokens"]
+```
+
+`max_output_tokens` **永远不会匹配**。这个键的两个消费点比较的都是**翻译之后**的 Anthropic 拼法，而 `max_output_tokens` 恰好是唯一一个被翻译的值：
+
+- 流式：`src/app/pipeline/delivery/formats/openai_responses.py:513-514`，`"max_tokens" if reason == "max_output_tokens" else reason or "incomplete"`；
+- 非流式：`src/app/pipeline/translation_driver/responses.py:125-126`，`if reason == "max_output_tokens": return MAX_TOKENS, None`。
+
+实测（`ResponsesAssembler.push` 喂 `response.incomplete`，含正样本对照确认 push 确实执行）：
+
+| 上游 `incomplete_details.reason` | 记下的 `stop_reason` |
+|---|---|
+| `max_output_tokens` | **`max_tokens`** |
+| `content_filter` | `content_filter` |
+| 无 | `incomplete` |
+| （对照：`response.completed`） | `end_turn` |
+
+**为什么容易读错**：那两处代码的注释都写着「上游自己的词，不翻译」，而 `max_output_tokens` 正是那句话的**唯一例外**，例外写在紧挨着的一行。Anthropic 腿本来就用 `max_tokens`，所以两条腿在这个键上看到的都是 `max_tokens`。
+
+**没有危害**，多一个永不匹配的值不改变任何行为。**建议**：删掉 `max_output_tokens`，与 schema 默认 `["max_tokens"]` 一致；若想保留作提示，改成注释更准确，例如 `# 上游 Responses 的 max_output_tokens 已在翻译时归一为 max_tokens，此处不必列`。
+
+**证据等级：确凿**（一手实测 + 两处代码事实）。**是否要改属你的取舍。**
