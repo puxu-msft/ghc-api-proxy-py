@@ -4,6 +4,8 @@
 **本文是入口**：目录导览与证据地图在 [`README.md`](README.md)，过程产物在 `archive-260820/`（十份），只在需要证据时去读。
 
 > **2026-08-21 移交**：`decide_stream_ending()` 的接线，连同「截断之后怎么恢复」这整件事，已移交给 [`../retry-and-continuation/`](../retry-and-continuation/)。本文下面几处描述该函数**四条路**的段落是当时的设计记录，其中 **CONTINUE（代理内续写）已被用户裁决放弃**，`continuation_messages`／`RetryReason.CONTINUATION` 由待接线的孤儿件变为待删除的件。另有一格是**有条件的**：R4（合成 `message_start` 而零块）只在 `synthesized_response_headers_after_sec` 被删除之后才不再可达，而**该配置项在写下本注时仍然存在**（`src/app/config/schema.py:264`，默认 240 秒），删除属新主题的 D 阶段。读那几段时按本注理解，段落本身不改写。
+>
+> **2026-08-22 后记：那个条件已经满足。** 用户在 MCP-driven 续写的裁决里定下不再合成 HTTP 响应头、因而也不再合成 `message_start`；配置项与整条合成前导帧管路已随主仓 `0b57645`（「stop opening a response before upstream has said what it is」）删除，`rg synthesized_response_headers_after_sec src/` 现为零命中，覆盖那条退化线的测试也在同一笔里去掉了。**所以 R4 现在确实不可达**，下面第 82 行「四条路而非三条」那段连同它举的理由，一并退为设计记录。段落仍不改写。
 
 ---
 
