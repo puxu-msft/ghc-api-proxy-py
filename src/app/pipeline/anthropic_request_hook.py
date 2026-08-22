@@ -1,12 +1,8 @@
 """The `hook_fix_anthropic_request` fixups, applied while the body is still Anthropic-shaped.
 
-Order matters and it is the reason this runs where it does. `handler.handle()` translates before it
-drives, so by the time the driver publishes `attempt.prepare` the payload is in the *target* format
-— Responses on the primary path. An Anthropic-request fixup applied there would be looking at a
-body that no longer has `messages` at all. This is the spec's `on_client_request_parsed` moment.
+Order matters and it is the reason this runs where it does. `handler.handle()` translates before it drives, so by the time the driver publishes `attempt.prepare` the payload is in the *target* format — Responses on the primary path. An Anthropic-request fixup applied there would be looking at a body that no longer has `messages` at all. This is the spec's `on_client_request_parsed` moment.
 
-Nothing here is new logic. `destack_content` and `sanitize_empty_thinking` already implement what
-the spec asks for; what was missing is anything on the new chain calling them.
+Nothing here is new logic. `destack_content` and `sanitize_empty_thinking` already implement what the spec asks for; what was missing is anything on the new chain calling them.
 """
 
 import logging
@@ -108,9 +104,7 @@ _LAYOUT_STRATEGY: dict[AssistantMessageLayout, DestackStrategy] = {
 def layout_strategy(layout: AssistantMessageLayout) -> DestackStrategy:
     """Map the configured layout onto the destack strategy that produces it.
 
-    Total rather than defaulted: the schema now admits exactly the three spellings the spec
-    defines, so a missing case would be a bug here rather than an operator's typo. A fallback
-    would have turned an unhandled value into a silent rewrite of the request body.
+    Total rather than defaulted: the schema now admits exactly the three spellings the spec defines, so a missing case would be a bug here rather than an operator's typo. A fallback would have turned an unhandled value into a silent rewrite of the request body.
     """
     return _LAYOUT_STRATEGY[layout]
 
@@ -118,11 +112,7 @@ def layout_strategy(layout: AssistantMessageLayout) -> DestackStrategy:
 def normalize_context_management(payload: dict[str, Any]) -> None:
     """Make `context_management` say "no edits" in the spelling upstream accepts.
 
-    Claude Code sends `{"edits": null}` on every request. Upstream rejects that outright — with
-    the `context-management-2025-06-27` beta it answers `context_management.edits: Input should be
-    a valid array`, and without the beta it does not recognise the field at all. `{"edits": []}`
-    is accepted, and so is dropping the key; the empty list is used because it preserves what the
-    client actually said rather than pretending it said nothing.
+    Claude Code sends `{"edits": null}` on every request. Upstream rejects that outright — with the `context-management-2025-06-27` beta it answers `context_management.edits: Input should be a valid array`, and without the beta it does not recognise the field at all. `{"edits": []}` is accepted, and so is dropping the key; the empty list is used because it preserves what the client actually said rather than pretending it said nothing.
 
     Measured against the live upstream on 2026-08-18, all three spellings.
     """

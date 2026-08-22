@@ -50,10 +50,7 @@ class GhcApiClient:
     ) -> dict[str, str]:
         """The upstream headers, with anything the caller adds underneath rather than on top.
 
-        `build_request_headers` already says the protocol and identity fields are owned by this
-        library, and they have to be: the identity set makes the request look like Copilot Chat,
-        and upstream rejects requests that do not. A caller forwarding a client's headers would
-        otherwise replace `user-agent` — or `Authorization` — without anything failing loudly.
+        `build_request_headers` already says the protocol and identity fields are owned by this library, and they have to be: the identity set makes the request look like Copilot Chat, and upstream rejects requests that do not. A caller forwarding a client's headers would otherwise replace `user-agent` — or `Authorization` — without anything failing loudly.
 
         **Compared case-insensitively, which it was not until 2026-08-22.** `{**extra, **owned}` only lets the owned value win when the two spellings are byte-equal, and they are not: this library writes `Authorization`, `X-Interaction-Id`, `X-Interaction-Type` and `X-Agent-Task-Id` capitalised while a forwarded client header arrives lowercased. Two dict keys, both surviving. Measured 2026-08-22 under `httpx2.MockTransport`: on the Anthropic SDK path the collision is folded away by `httpx2.Headers.__setitem__` and the owned value does win, but on the OpenAI SDK path `_build_request` reads `headers.multi_items()` and **both `authorization` lines go out on the wire**. The safe behaviour there rested on one SDK's internals rather than on anything this function did, so it is now this function that does it.
         """
@@ -111,9 +108,7 @@ class GhcApiClient:
     async def _in_pipeline_terms(post: Coroutine[Any, Any, httpx2.Response]) -> httpx2.Response:
         """Await one SDK call, raising the pipeline's error for an upstream failure.
 
-        Applied per send method rather than inside `_post_*` because `send_responses_headers`
-        deliberately catches the SDK's own status error to read the response off it, and that
-        contract belongs to the existing chain.
+        Applied per send method rather than inside `_post_*` because `send_responses_headers` deliberately catches the SDK's own status error to read the response off it, and that contract belongs to the existing chain.
         """
         try:
             return await post
