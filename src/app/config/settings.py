@@ -3,27 +3,9 @@ from __future__ import annotations
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
-from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
-from pydantic_settings.sources import EnvSettingsSource
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.config.loading import ENV_PREFIX, NO_WHOLE_VALUE_FROM_ENVIRONMENT
 from app.graceful_timeout import DEFAULT_GRACEFUL_TIMEOUT_SECONDS
-
-
-class EnvSourceWithoutWholeValues(EnvSettingsSource):
-    """The environment source, with the flat spelling of a few settings removed.
-
-    Dropped by variable name rather than by settings key, because the two spellings arrive as the same key: `GHC_API_PROXY_MODEL_MAPPINGS` and `GHC_API_PROXY_MODEL_MAPPINGS__GPT` both land on `model_mappings`, and only the first is the one being refused.
-
-    Filtering where `load_settings` assembles its layers is not enough, and that is worth stating because it looks like it should be: `BaseSettings` runs its own environment source during validation, and that source wins over the values passed in — `AppSettings.model_validate({"model_mappings": {}})` still came back holding whatever the environment said. So the exclusion has to be made here, on the source itself.
-    """
-
-    def __init__(self, settings_cls: type[BaseSettings]) -> None:
-        super().__init__(settings_cls)
-        refused = {f"{ENV_PREFIX}{name}".lower() for name in NO_WHOLE_VALUE_FROM_ENVIRONMENT}
-        self.env_vars = {
-            name: value for name, value in self.env_vars.items() if name not in refused
-        }
 
 
 class FrozenModel(BaseModel):
@@ -180,23 +162,6 @@ class AppSettings(BaseSettings):
         frozen=True,
         extra="forbid",
     )
-
-    @classmethod
-    def settings_customise_sources(
-        cls,
-        settings_cls: type[BaseSettings],
-        init_settings: PydanticBaseSettingsSource,
-        env_settings: PydanticBaseSettingsSource,
-        dotenv_settings: PydanticBaseSettingsSource,
-        file_secret_settings: PydanticBaseSettingsSource,
-    ) -> tuple[PydanticBaseSettingsSource, ...]:
-        del env_settings  # Replaced rather than reordered; see the source's own docstring.
-        return (
-            init_settings,
-            EnvSourceWithoutWholeValues(settings_cls),
-            dotenv_settings,
-            file_secret_settings,
-        )
 
     host: str = "127.0.0.1"
     port: int = Field(default=4141, ge=1, le=65535)

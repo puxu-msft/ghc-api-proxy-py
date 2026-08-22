@@ -261,10 +261,13 @@ class HooksConfig(Section):
 
 class StripRequestHeadersHook(Section):
     # Keyed by model, valued by the `anthropic-beta` flags that model must not be asked for. A capability beta is not a global switch: upstream answers `400 invalid beta flag` when a model is asked for one it does not have, so the whole request dies over a header the client sent to every model alike. Per-model because that is the granularity of the rejection.
-    # A key is a **regular expression** matched with `fullmatch` against the resolved model, and the first entry that matches wins. `strip_attribution_header` used to sit beside this and was removed on 2026-08-22: `message-format-reshape.md` rules that strip resident rather than configured, and the config author had already taken the key out of the authoritative file.
+    # A key is a **regular expression** matched with `fullmatch` against the resolved model, and the first entry that matches wins.
     strip_anthropic_beta_flags: dict[str, list[str]] = Field(
         default_factory=lambda: dict[str, list[str]]()
     )
+    # Whether to remove the attribution line Claude Code puts at the top of `system[0]`. Off by default, which is the ruling in `message-format-reshape.md` as of its 2026-08-22 revision — an earlier revision called the same strip resident, and it was briefly implemented that way.
+    # Off is the safe default for a reason this project measured rather than assumed: upstream accepts the line in all fifteen shapes tried, so nothing breaks by leaving it, while the strip itself has a false-positive surface — a line has to be recognised as attribution, and prose that opens `Read-only: …` is not far from one that opens `x-something: …`. What it buys is 34 tokens per request on upstream's own counter, which is worth having and not worth defaulting to.
+    strip_attribution_header: bool = False
 
 
 class ExtendedCacheTtlConfig(Section):

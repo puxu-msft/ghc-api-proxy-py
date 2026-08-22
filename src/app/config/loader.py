@@ -10,12 +10,12 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
-from pydantic_settings import YamlConfigSettingsSource
+from pydantic_settings import EnvSettingsSource, YamlConfigSettingsSource
 
 from app.config.compat import migrate_compat
 from app.config.loading import CONFIG_PATH_VARIABLE
 from app.config.paths import config_file_path
-from app.config.settings import AppSettings, EnvSourceWithoutWholeValues
+from app.config.settings import AppSettings
 
 PER_KEY_PATHS = frozenset(
     {
@@ -97,8 +97,7 @@ def load_settings(
             YamlConfigSettingsSource(AppSettings, yaml_file=resolved_path)()
         )
 
-    # The source `AppSettings` itself validates through, so this layer and the validation below cannot disagree about which spellings the environment may carry.
-    env_values = EnvSourceWithoutWholeValues(AppSettings)()
+    env_values = EnvSettingsSource(AppSettings)()
     cli_values = {key: value for key, value in (cli_overrides or {}).items() if value is not None}
 
     merged = _merge_layers(defaults, yaml_values)
