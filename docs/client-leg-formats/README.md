@@ -75,6 +75,7 @@ delivery/
 - **探测失败**：401/403 上抛（凭据不对，后续每个请求都会被拒）；其余 HTTP 状态与传输类失败记 warning 后继续。理由是 socket activation 下旧进程已交出 listener，因一次 GitHub 抖动起不来是服务中断。
 - **copilot token 无后台刷新循环**，只有 `get_token()` 的懒刷新。原循环只从 legacy app factory 启动，在实际服务的链路上从未跑过。
 - `--ghc-api-base-url` 已删除——它因字段改名遗漏，写的是不存在的字段名，是静默空操作。
+- `--account-type` 随后一并删除（用户 2026-08-22 裁决）。它写进 legacy `AppSettings.auth`，而 `app_factory` 在 `src/` 下零调用者，服务的那条链读不到它。两者同族，只删一个会让处置无从解释。
 
 ## 目录
 
