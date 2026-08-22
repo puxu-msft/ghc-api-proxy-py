@@ -18,9 +18,6 @@
 
 
 
-### U-4 `synthetic` 一词在仓库里指三件事
-
-`formats/anthropic_messages_synthetic.py`（搜索失败时合成的回复）、`handler.HandledRequest.synthesized`（整条回复由本代理写）、`stream.ContinuationSupport.synthesize`（流中途合成工具调用收尾）。本轮只给第一个加了格式前缀，没碰这层歧义。
 
 ---
 
@@ -29,6 +26,10 @@
 - **n-1** `response.id` 是裸 UUID，没有 `resp_` 前缀。上游真实值是 416 字符的 base64 串，我们本来就不模仿它；但 OpenAI 生态里 `resp_` 前缀是惯例。未修：它是兼容性口味问题，不是缺陷，改不改取决于要不要迁就按前缀识别 id 的客户端。
 
 ## 已在本轮修掉的（不要重复处理）
+
+**2026-08-22 第三批**：
+
+- U-4 `anthropic_messages_synthetic.py` → `anthropic_messages_synthetic_reply.py` —— `30f251c`。定案理由见 README 第四·五节：不按住户（`failed_search`）命名，因为模块存在的理由是通用的；保留「合成」，因为那是项目自己的词，评审报的「三处重名」是误判。`ContinuationSupport.synthesize` 不搬。
 
 **2026-08-22 第二批**（用户裁决「缺陷类问题都要修复」之后）：
 

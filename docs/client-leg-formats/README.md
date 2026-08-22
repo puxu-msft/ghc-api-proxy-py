@@ -49,13 +49,25 @@ delivery/
   stream.py                                 # 通用：交付循环
   formats/
     anthropic_messages.py                   # 该格式的 assembler + framer
-    anthropic_messages_synthetic.py         # 该格式的合成回复
+    anthropic_messages_synthetic_reply.py   # 该格式的合成回复
     openai_responses.py                     # 该格式的 assembler + framer
 ```
 
-规矩：**通用件不带格式名；只服务一种格式的东西一律以该格式为前缀。** 两个格式模块互不导入。
+规矩：**通用件不带格式名；只服务一种格式的东西一律以该格式为前缀，并说明它产出什么。** 两个格式模块互不导入。
+
+「说明产出什么」这半条是 2026-08-22 补的。`anthropic_messages_synthetic` 说了格式却漏了名词——这个包在不同尺度上合成好几种东西（一整条回复、一个块、消息内部的一个标记），光说「合成的」等于只说了它会合成。也不按住户命名：搜索跑不了只是当前唯一的住户，模块存在的理由是通用的（见下）。
 
 改之前的三类错配（都已消除）：`SseFrame` 这个两边共用的线信封住在 Anthropic 模块里，逼得 Responses 从它导入；`assembler.py` 名字通用却混放两种实现；`synthetic.py` 名字通用却只写 Anthropic。另外 `"tool_use"` 曾在三处各定义一次，现在只在 `blocks.py`。
+
+## 四·五、「合成」是一个类别，不是一次特例
+
+`anthropic_messages_synthetic_reply` 存在的理由，不是「搜索会失败」，而是：**代理无法转发一个请求时，在客户端协议内自答，比在传输层失败得到的客户端行为更好。** 实测依据——Claude Code 把 HTTP 错误当传输问题重试三次，而跑不起来的搜索不会在第三次开始工作；一个失败的**工具**则不会被重试。
+
+这个类别**已经有第二个成员**，只是尺度不同、因而不在这个模块里：`ContinuationSupport.synthesize` 合成的是单个 `tool_use` **块**，用来把完不成的回合交还客户端——也就是 `docs/.human-controlled/upstream-retry-and-continuation.md` 里的「MCP-driven 合成续写」。
+
+它留在原地是有理由的，别急着搬：它的主体是**请求策略**（客户端有没有声明那个工具、失败归到哪个类别、还有一个待用户命名的暂定值），只有末尾几行是这个格式的形状；搬进格式模块会把策略一起拖过去。等第二个整条回复出现、或那个类别被命名之后，再看要不要收拢。
+
+「合成」是项目自己的词，与推理载体、`assistant_message_layout` 里的用法同义——**代理造出来的，不是从上游收到的**。2026-08-22 一份评审曾把它报为「三处重名」，那是错的：那是同一个意思的多个实例。
 
 ## 五、这一片之外，同日的三条裁决
 
