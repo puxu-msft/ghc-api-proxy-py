@@ -104,7 +104,7 @@ response 层有信号（`response.incomplete`），但它晚于 item 关闭到�
 
 ### 11. 客户端时限与「上游已完成」谁先答，尚未裁决；且三条 deadline 测试的夹具已分辨不出这两种情形
 
-来源：`../../tmp/260822-review-complete-fix-opus.md` 问题 2（异源评审，8 个受控变异）。由 `c86712d` 引入的 `if assembler.terminal.seen: break` 带出。
+来源：`../../tmp/260822-review-complete-fix-opus.md` 问题 2（异源评审，8 个受控变异）。由 `bce8b0d` 引入（原始来源 `c86712d` 是一个不被任何 ref 引用的对象，`main` 上承载同一语义的是前者）的 `if assembler.terminal.seen: break` 带出。
 
 该支被**刻意**放在 `ClientDeadlineError` 分支之后，理由写在代码注释里：「跑超时了」与「上游已完成」是两个问题，重排属于新的 deadline policy 裁决。**这个理由只说明本次不裁，不说明该问题不存在。**
 
@@ -114,7 +114,7 @@ response 层有信号（`response.incomplete`），但它晚于 item 关闭到�
 
 **证据等级：足以据此登记，不足以据此选一边。** 需要用户裁决时限的语义。
 
-### 12. 上游在终结事件之后 reset：完成行不再留痕（`c86712d` 引入）
+### 12. 上游在终结事件之后 reset：完成行不再留痕（`bce8b0d` 引入（原始来源 `c86712d` 是一个不被任何 ref 引用的对象，`main` 上承载同一语义的是前者））
 
 来源：同上，发现 A（正反两次实测，用项目自己的 `_StreamAccounting` + `_tracked_delivery`）。
 
@@ -149,6 +149,30 @@ response 层有信号（`response.incomplete`），但它晚于 item 关闭到�
 **危害有界**：默认值两边一致；而且「不交接就不丢」这条不变量**在任何配置下都成立**——把 `content_filter` 加进配置时，非流式会**保留**半截块**并且**交接（内容不丢，客户端也能续），只是比流式多留一块。反过来的「交接就一定丢」不是不变量，本项目不需要它。
 
 补法：改 reader 协议让它接受一个上下文，或把丢弃从翻译器挪到调用方。两条都比现在这个不一致贵，等它真的碍事再做。
+
+### 12. 反方向（`/responses` 客户端 + Anthropic 上游）仍在抹平
+
+`fef7d96` 只修了一个方向。实测 `to_openai_responses_response`：
+
+```
+anthropic stop_reason='max_tokens'     -> responses status='incomplete'  incomplete_details=None
+anthropic stop_reason='refusal'        -> responses status='completed'   incomplete_details=None
+anthropic stop_reason='stop_sequence'  -> responses status='completed'   incomplete_details=None
+```
+
+`refusal` 被报成 `completed`——与 `fef7d96` 消灭的形态同构；`max_tokens` 虽报 `incomplete`，但 `incomplete_details` 从不生成，客户端读不到原因。**该路由是 served 的**（`/responses` + `claude-model`），只是不在主产品路径上。
+
+来源：`reports/260822-review-unreviewed-span.md` minor-8。
+
+### 13. 重开不重建 framer
+
+`_reopen` 刷新了 assembler、buffer、attempt 计数，但 `framer` 是循环外用**第一次**的 `context.id` / `context.resolved_model` 建的。若重开时路由解析到不同的模型，客户端收到的 `message_start.model` 仍是第一次那个。
+
+今天路由对同一请求是确定的，所以不可达。**登记以免将来加入模型回退时无声出错。** 来源：同上 minor-12。
+
+### 14. 一条提交信息缺字
+
+`696a786` 的正文里 `A response that says it is incomplete without saying why gets , which is…` 缺了 `incomplete` 一词（`cat -A` 确认，非渲染问题）。历史已发布，不重写；`fef7d96` 的同一句是完整的，可作对照。登记以免后来者读到一句没有主语的话。
 
 ## 明确不做
 
