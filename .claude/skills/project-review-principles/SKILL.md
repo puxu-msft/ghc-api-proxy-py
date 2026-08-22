@@ -32,8 +32,8 @@ description: "本项目的定期复查清单：拿几条已经付过代价的原
 **范围限定在当前 CLI 所用的 `pipeline_app`**，它对正常上游回复有两种处理模式：
 
 - **live upstream 上的 block-level delivery**（对应请求的 `stream=true`）——经 `assembler.py` 的 `Terminal`。注意术语：下游交付单位是完整的 Anthropic content block，SSE 只是信封，别把它写成语义上的「流式交付」。
-- **whole-body 回复**——`pipeline_app.py:417` 先 `response_payload()`（内部走 translator registry 做响应翻译），`:420` 再由 `handler.reply_summary()` 汇总（行号取于 2026-08-20 收尾时；本节其余行号同批）。**顺序是先翻译后汇总**，`reply_summary` 调用的是 `terminal_from_anthropic`，不会下行到 `translation_driver/responses.py`。
-- **token 计数**——`/v1/messages/count_tokens`，`pipeline_app.py:308` 直接 `trace.usage = {"input_tokens": tokens}`。它**不经过 `Terminal`**，是第三个写入同一条记录的出口。纳入范围的理由：`provider(ghc)` 那一档，行上那个数字**就是上游答的**，与另两种模式描述的是同一件事、由同一个 `format_tokens` 渲染；`provider(local)` 那一档不是上游的数，而这正是 `provider(...)` 这个字段存在的原因（见 `.dev/docs/tui/archive-count-tokens-line/`）。**它没有 `absorb`，所以下面命令 C 结构上看不见它**——2026-08-20 首次真实复查发现的召回缺口。
+- **whole-body 回复**——`pipeline_app.py:534` 先 `response_payload()`（内部走 translator registry 做响应翻译），`:537` 再由 `handler.reply_summary()` 汇总（行号重指于 2026-08-22；本节其余行号取于 2026-08-20 收尾时）。**顺序是先翻译后汇总**，`reply_summary` 调用的是 `terminal_from_anthropic`，不会下行到 `translation_driver/responses.py`。
+- **token 计数**——`/v1/messages/count_tokens`，`pipeline_app.py:419`（重指于 2026-08-22）直接 `trace.usage = {"input_tokens": tokens}`。它**不经过 `Terminal`**，是第三个写入同一条记录的出口。纳入范围的理由：`provider(ghc)` 那一档，行上那个数字**就是上游答的**，与另两种模式描述的是同一件事、由同一个 `format_tokens` 渲染；`provider(local)` 那一档不是上游的数，而这正是 `provider(...)` 这个字段存在的原因（见 `.dev/docs/tui/archive-count-tokens-line/`）。**它没有 `absorb`，所以下面命令 C 结构上看不见它**——2026-08-20 首次真实复查发现的召回缺口。
 
 仓库里还有一条 legacy 交付链（`src/app/routes/anthropic.py`、`src/app/delivery/`），**本条不覆盖它**——它不在当前 CLI 的正常回复路径上。若哪天它重新上线，这条原则的事实清单与命令都要先扩，不能默认适用。
 
@@ -269,11 +269,20 @@ done
 1. **可行动**：读者据这句能做什么？做不了任何事就是解释。这一条挡的是**实现推导**（某段代码为何在这一层返回、某次测量得到了什么），不挡正当的「为什么」。
 2. **这个面有权作这项主张**：它说的结局，归不归它管。这一条挡的是**越权承诺**——异常类断言重试策略、交付层断言 wire 保证或下游状态（`nothing has been shown to the client yet`）。
 
+   ⚠️ 「归不归它管」有一处软：**主张的主语可以换着框**。`composition.py:105` 那句 `the system's own timing applies` 字面上断言的是**操作系统的行为**，与 `blocks.py:20` 断言重试策略结构同形；判它正当靠的是把主语框成「本模块在报告自己」，换个框法就翻成越权。**用一句话把主语钉死**——「**这句话若是假的，错在谁？**」错在本符号 → 归它管；错在别处 → 越权。
+   - `blocks.py:20`「upstream failure is retryable」为假 → 错在重试策略的拥有者 → ✗
+   - `composition.py:105`「你填的值此刻没被应用」为假 → 错就在这段代码自己，它正是那个没设上选项的 → ✓
+   - `server_tools.py:255`「upstream would have rejected them」为假 → 错在上游契约/翻译层 → ✗
+
+   **条件 2 的分辨力有一个现成反例对照**：`exceptions.py:99` 的 `PipelineAbort` docstring 写着 `without retrying`——同为异常 docstring、同谈重试，却正当。因为 `PipelineAbort` **就是那个「不重试」的决定本身**，而 `DeliveryError` 只是在描述别人的重试策略。这两句话摆在一起，是这条判据最短的说明。
+
 两条一起，才解释得了既有的判定：`TranslationRefused` 把 `code` 与 `field_path` 送进客户端 400（`semantic.py:54-60`，行号为 2026-08-22 重指后）——可行动 ✓，且指出哪个字段有问题正是这个契约面自己的事 ✓，正当。`composition.py:105` 告诉运维他填的值此刻不生效——可行动 ✓，报告自己当前的实际行为归它管 ✓，正当。`blocks.py:20`——可行动 ✓，但重试策略不归它管 ✗，违背。
 
 上位形态由用户 2026-08-20 归纳：信息有层次，中间层丰富，**两端则可能是精炼的、克制的**。通用形态已落在 user 级 `organizing-project-docs` 的「Axis 2 — claim role」一节，那里列了**三个**方向的误置，其中「中间层 → 任一端」就是本条抓的形状，且那一节末尾按名字回指本条。**「两端／中间带」是这套判据在本仓的本地叫法**——user 级已裁定该措辞为 project-local，由需求层／中间层／产物层替代，并注明在项目级文档里遇到旧叫法是同一件事的本地名，不是第二套体系。**本条只在需要时引它，不搬它的分层表**，只做本仓这一端的落地与检索；两边允许重叠，见文末「归属」。
 
 `docs/.human-controlled/` 那一端我不得修改，也无从事后 diff（该目录未被 git 追踪），复查跑到那里没有动作可做，因此**本条的检索只覆盖实现面这一端**。
+
+⚠️ **这个前提正在松动，下次复查先验它**：2026-08-22 观察到该目录的 10 个文件已被 `git add` 进索引（HEAD 的 `docs/` 树当时仍为空，未提交，是同伴的暂存，我未动）。一旦落进历史，「未被 git 追踪、无从事后 diff」就不成立，上面那句「只覆盖实现面这一端」的全部理由随之失效，第 5 条违背「这一条查不了」也跟着松动——那时该重判这两处，并给那一端补检索。验法：`git -C <repo> ls-tree HEAD docs/`，非空即已落定。
 
 ### 怎么查
 
@@ -296,13 +305,13 @@ rg -n --pcre2 -U -g '*.py' --only-matching --replace HIT \
   '(?m)^[ \t]*"""(?:(?!""")[\s\S])*?\b(?:retryable|retried|not retried|nothing has been shown|already been shown|the client (?:sees|has seen|got)|downstream (?:sees|has))\b(?:(?!""")[\s\S])*?"""' src/
 ```
 
-**实测过，双向对照都跑了**：2026-08-22 打出 15 处 / 12 个文件；正样本 `blocks.py:20` 在，负样本 `stream.py:199` 不在。开头那个 `^[ \t]*` 是对照逼出来的——没有它时命令会从一行式 docstring 的**收尾** `"""` 起匹配，把两个 docstring 之间的代码和注释整段吃进去（`stream.py:199` 就是这样被打出的），正则分不清开头和结尾的 `"""`。**精度仍然差，它是定位器不是过滤器**：`retry.py:38`、`blocks.py:1` 这类命中是**正当**的——retry 模块谈重试、块交付模块谈块交付契约，正是条件 2 说的「归它管」。词表也必然会漏（`exceptions.py:99` 的 `without retrying` 就不在表内，且它同样正当）。
+**实测过，双向对照都跑了**：2026-08-22 打出 15 处 / 10 个文件；正样本 `blocks.py:20` 在，负样本 `stream.py:199` 不在。开头那个 `^[ \t]*` 是对照逼出来的——没有它时命令会从一行式 docstring 的**收尾** `"""` 起匹配，把两个 docstring 之间的代码和注释整段吃进去（`stream.py:199` 就是这样被打出的），正则分不清开头和结尾的 `"""`。**精度仍然差，它是定位器不是过滤器**：`retry.py:38`、`blocks.py:1` 这类命中是**正当**的——retry 模块谈重试、块交付模块谈块交付契约，正是条件 2 说的「归它管」。词表也必然会漏（`exceptions.py:99` 的 `without retrying` 就不在表内，且它同样正当）。
 
 ### 什么算违背
 
 - **端点字符串里出现实现推导**：「因为上游会拒绝」「httpcore 在这条路径上不设置」「实测为 N」。判据是问一句：读者据这句能做什么？做不了任何事就是解释。
-- **同一句「为什么」在附近注释里已经有了**——端点那句是复制过去的。这是三处真违背的共同形状。
-- **把执行点数量说成语义**（「双重身份」「两种角色」）。执行点是实现；一个键的语义只有一条。
+- **同一句「为什么」在附近注释里已经有了**——端点那句是复制过去的。这是三处真违背的共同形状。⚠️ **这一条不由两条件导出**：它是**检出形状**不是判定条件，一句复制过去的话完全可能两条都过。独立查。
+- **把执行点数量说成语义**（「双重身份」「两种角色」）。执行点是实现；一个键的语义只有一条。⚠️ **这一条也不由两条件导出**：它既不是不可行动、也不是越权，它是**主张本身就错了**。独立查。
 - **docstring 断言了这个符号不拥有的结局**：异常类说重试策略、交付层说 wire 保证或下游状态。这是条件 2 的形态，命令三对应它。注意它与上一条的区别——**这一条不要求那句话不可行动**，`which is retryable` 完全可行动，仍是违背。
 - **往 `docs/.human-controlled/` 提议加入「击发之后会怎样」的句子**。这一条查不了，只能在提议的当下自问。
 
@@ -332,7 +341,7 @@ rg -n --pcre2 -U -g '*.py' --only-matching --replace HIT \
 
 **该 blocker 已由用户 2026-08-22 裁决解除**：两个家本身不是缺陷。逐字原话与出处锚在上面的**门槛 2**，包括那句限定词「一般地」——不要凭这里的转述行事。
 
-同时它建议的**拆分方向仍然被采纳**，因为通用那半确实值得在项目之外复用：通用形态已写入 `~/.claude/skills/organizing-project-docs`「Axis 2 — claim role」。**本条保留，不缩写**——它承载的是通用判据在本仓的具体落法：本仓的承诺面具体是哪三类（运维填的配置值、客户端收到的错误体、调用方当契约读的 docstring）、两个必要条件怎么落到这三类上、三条命令怎么查、命令的已知精度与漏检。按门槛 2 的搬家检验：这几样搬走即失效，残余非空。
+同时它建议的**拆分方向仍然被采纳**，因为通用那半确实值得在项目之外复用：通用形态已写入 `~/.claude/skills/organizing-project-docs`「Axis 2 — claim role」。**本条保留，不缩写**——它承载的是通用判据在本仓的具体落法：本仓的承诺面具体是哪三类（运维填的配置值、客户端收到的错误体、调用方当契约读的 docstring）、两个必要条件在这些面上各判出什么（上面逐例列了）、三条命令怎么查、命令的已知精度与漏检。按门槛 2 的搬家检验：这几样搬走即失效，残余非空。
 
 **两边不一致时，先判是哪一侧漏了，再决定改哪边**——不预设 user 级永远为准。2026-08-22 的实例正好是反向的：评审报「两份对 code comment 判定相反」，核下来不是矛盾，是 **user 级的 carrier 表漏了一整类面**（表里全是 `.md` 文件与目录，一格运行时字符串都没有），于是改的是 user 级，补入客户端错误体与运维 warning 两类运行时面。仅仅「听着像同一件事」仍然不是修改任何一边的理由。
 
@@ -395,6 +404,14 @@ rg -n --pcre2 -U -g '*.py' --only-matching --replace HIT \
 
 本文写下的任何计数、行号、文件路径都是**当时的快照**，会腐坏。规范面向**全文**：写的时候要么标注取数时间，要么在数字本身没有判据作用时干脆不写——一个没有时点的数字，下一个人会拿它当现状对账，然后得出错误结论。
 
-**合规现状**：`declined-and-adopted-…` 与 `a-broken-test-…` 两条按此办。**`one-reply-fact-…`、`assertions-about-copilot-wire-…` 立于本节之前，行号是导航用途、未带时点，不作对账依据。`explanation-…` 混着**——它的成因与命中记录带日期，但 L265 那几处引用（`semantic.py`、`composition.py`）此前不带，2026-08-22 已重指并补上时点标注。
+**合规现状**：`one-reply-fact-…`、`declined-and-adopted-…`、`a-broken-test-…`、`explanation-…` 四条的具名行号都带时点。`assertions-about-copilot-wire-…` 未带，其中行号是导航用途、不作对账依据。
 
-**已实测腐坏三处**：`one-reply-fact-…` 写的 `pipeline_app.py:313/:316`，当天就已移到 `:417/:420`（**未修，待办**）；`explanation-…` 写的 `composition.py:98/:217` → `:105/:239`、`semantic.py:51-57` → `:54-60`（**均已于 2026-08-22 修复**）。下次动到 `one-reply-fact-…` 与 `assertions-…` 时顺手补齐，不必为此单开一次改动。
+**腐坏实测（2026-08-22 全部重指）**：
+
+| 条目 | 原值 | 当前值 | 说明 |
+|---|---|---|---|
+| `one-reply-fact-…` | `pipeline_app.py:313/:316`、`:308` | `:534/:537`、`:419` | **腐坏过两轮**。`:313/:316` 在 2026-08-20 当天即重指为 `:417/:420`，两天后又全部移位 |
+| `explanation-…` | `composition.py:98/:217` | `:105/:239` | |
+| `explanation-…` | `semantic.py:51-57` | `:54-60` | |
+
+⚠️ **本节此前把 `one-reply-fact-…` 记成「未修，待办」且「未带时点」，两句都是假的**——它当天就修过，L35 的括注也明写着「行号取于 2026-08-20 收尾时」。而它真正的问题（修过之后又腐坏一轮、当前三个数字全错）反倒没记。这是本节第二次报错自己的现状（第一次见上面「当前状态」的六条），形状一致：**规范自己那一节，是最不常被拿去对账的一节。**
