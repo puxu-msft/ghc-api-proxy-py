@@ -211,7 +211,7 @@ class DirectDriver:
             funded, detail = self._budget.take_for(error)
             if funded:
                 return True
-            outcome.error = PipelineAbort(f"{detail}: {error}")
+            outcome.error = PipelineAbort(f"{detail}: {error}", cause=error)
             await self._publish(EVENT_REQUEST_FAILED, context, outcome)
             return False
         outcome.error = error

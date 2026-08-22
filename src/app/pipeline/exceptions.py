@@ -98,9 +98,13 @@ class PipelineRetry(PipelineError):
 class PipelineAbort(PipelineError):
     """Explicit request to stop this request without retrying."""
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, *, cause: BaseException | None = None) -> None:
         super().__init__(reason)
         self.reason = reason
+        # The failure that ran out of retries, when the abort is the end of a retry sequence rather than a refusal in its own right.
+        #
+        # Two facts, and they belong to different readers. The abort explains why this side stopped trying, which is what an operator reading a log line needs. Upstream's own answer — a 429 with a `Retry-After`, a 400 naming the field — is what the *client* can act on, and it used to be flattened into the abort's message on its way out: every retryable failure that exhausted its budget reached the client as a 502 with no headers, which says the proxy broke and offers nothing to do about it. Carried rather than merged, so each reader gets the one it needs.
+        self.cause = cause
 
 
 _RETRYABLE: tuple[type[PipelineError], ...] = (UpstreamError, PipelineRetry)

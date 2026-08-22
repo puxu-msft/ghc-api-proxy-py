@@ -752,7 +752,42 @@ def test_upstream_429_is_seen_by_the_rate_limiter() -> None:
 
     response = client.post("/v1/messages", json={"model": "claude-model", "messages": []})
 
-    assert response.status_code == 502
+    assert response.status_code == 429
+    assert chain.rate_limiter_for("ghc").mode is RateLimitMode.LIMITED
+
+
+def test_a_rate_limit_that_runs_out_of_retries_still_reaches_the_client_as_one() -> None:
+    """Running out of retries does not change what upstream said, and the client can still act on it.
+
+    This used to be a 502 with no headers: the abort that ended the retry sequence replaced the failure that ended it, so a client that could have backed off for the named interval was told the proxy had broken instead. The budget is set to zero here so the first failure is also the last one.
+    """
+    from app.pipeline.rate_limiting import RateLimitMode
+
+    provider, http_client = make_provider(
+        lambda request: (
+            httpx2.Response(200, json={"token": "c", "expires_at": 5000, "refresh_in": 1500})
+            if request.url.host == "api.github.com"
+            else httpx2.Response(429, json={"error": "slow down"}, headers={"retry-after": "17"})
+        )
+    )
+    config = ProxyConfig.model_validate(
+        {
+            "model_providers": {"ghc": {"type": "github_copilot", "api_base_url": BASE_URL}},
+            "default_model_provider": "ghc",
+            "reactive_rate_limiter": {"retry_interval": 0, "request_interval": 0},
+            "upstream_request_retry": {"max_total": 0},
+        }
+    )
+    providers: dict[str, ModelProvider] = {"ghc": provider}
+    chain = build_chain(config, http_client=http_client, providers=providers)
+    client = TestClient(create_pipeline_app(chain))
+
+    response = client.post("/v1/messages", json={"model": "claude-model", "messages": []})
+
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "17"
+    # The abort's own words survive too: an operator reading the line still learns which budget ran out.
+    assert "budget" in response.json()["error"]["message"]
     assert chain.rate_limiter_for("ghc").mode is RateLimitMode.LIMITED
 
 
