@@ -28,7 +28,7 @@ from app.pipeline.delivery.formats.anthropic_messages import (
     AnthropicFramer,
     terminal_from_anthropic,
 )
-from app.pipeline.delivery.formats.anthropic_messages_synthetic import (
+from app.pipeline.delivery.formats.anthropic_messages_synthetic_reply import (
     failed_search_body,
     failed_search_sse,
     query_from_request,

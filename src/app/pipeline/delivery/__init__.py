@@ -3,7 +3,7 @@
 The package is split along two axes, and keeping them apart is the point:
 
 - **Generic**, naming no wire format — `blocks` (what a block is and how many are held), `sse_frame` and `sse_source` (the wire envelope, written and read), `assembling` and `framing` (the two contracts), `stream` (the delivery loop).
-- **Format-specific**, under `formats`, named for the wire format they speak. Each format's assembler and its framer live together — `anthropic_messages` and `openai_responses` are peers and neither imports from the other — and anything else that writes one format and only that format is named for it too, which is why the synthesized reply is `anthropic_messages_synthetic` rather than `synthetic`.
+- **Format-specific**, under `formats`, named for the wire format they speak *and for what they make of it*. Each format's assembler and its framer live together — `anthropic_messages` and `openai_responses` are peers and neither imports from the other. Anything else specific to one format carries that format's name and says what it produces, which is why `anthropic_messages_synthetic_reply` is spelled out in full: the package manufactures several different things at different scales, and a file called `synthetic` would only have said that it manufactures.
 
 The split used to be blurred in both directions — the generic `SseFrame` lived inside the Anthropic module, which made the Responses framer import from it; the generically-named `assembler` held both formats' implementations; and the generically-named `synthetic` wrote Anthropic and nothing else. Restructured 2026-08-22.
 """

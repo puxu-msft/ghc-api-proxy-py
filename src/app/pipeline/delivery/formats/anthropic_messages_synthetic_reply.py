@@ -1,6 +1,12 @@
 """A reply this proxy writes itself, when a search cannot be run but must still be answered.
 
-Anthropic Messages, and only that — every shape below is that format's. It sat under a name that said nothing about which format it wrote until 2026-08-22.
+Anthropic Messages, and only that — every shape below is that format's.
+
+**A search that cannot run is the occupant, not the reason.** The reason is general: when this proxy cannot forward a request, answering *in the client's own protocol* gets better behaviour out of the client than failing at the transport layer, and the two are different channels with different consequences. A second reply of this kind belongs here; the name says `synthetic_reply` rather than `failed_search` so that it can arrive without the file having to be renamed around it.
+
+The category has another member already, at a different scale and so not here: `ContinuationSupport.synthesize` builds a single `tool_use` *block* to hand an unfinishable turn back — 「MCP-driven 合成续写」 in `docs/.human-controlled/upstream-retry-and-continuation.md`. It stays where it is because most of it is request policy (which tool the client declared, which category the failure maps to) and only its last few lines are this format's shape. Ruled 2026-08-22: name each scale for what it makes rather than collapsing them because they share a verb.
+
+That verb is the project's own. `synthetic` here means what it means in the reasoning carrier and in `assistant_message_layout` — something this proxy manufactured rather than received. The noun is what this file adds: synthetic *what*.
 
 The alternative to answering is refusing, and both are honest — neither claims a search happened. What decides between them is what the client does next with each.
 
