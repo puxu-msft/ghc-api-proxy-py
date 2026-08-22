@@ -10,7 +10,7 @@ The keep-alive here is the **client-facing** one, and its cadence hangs off the 
 
 import asyncio
 import sys
-from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import aclosing
 from dataclasses import dataclass
 
@@ -25,9 +25,28 @@ from app.pipeline.delivery.anthropic_sse import (
 from app.pipeline.delivery.assembler import BlockAssembler
 from app.pipeline.delivery.blocks import BlockBuffer, CompletedBlock, DeliverySession
 from app.pipeline.delivery.sse_source import SseEvent, read_events
+from app.pipeline.retry import RetryLedger, StreamEnding, decide_stream_ending
 from app.streaming.keepalive import finish_stream_cleanup
 
 PING_FRAME = b": ping\n\n"
+
+
+# What one replaced attempt hands over: a fresh byte stream, and the fresh assembler and buffer that go with it. Nothing from the attempt it replaces travels with them.
+type Attempt = tuple[AsyncIterator[bytes], BlockAssembler, BlockBuffer]
+
+
+@dataclass(frozen=True, slots=True)
+class ReplaySupport:
+    """What delivery needs in order to replace a torn attempt, and nothing more.
+
+    The two halves of the decision are deliberately on opposite sides of this boundary, because they are answers to different questions and only one of them is delivery's to answer. **Whether a replay is legal at all** is a fact about position — has the client seen anything, is there a committed block, is there budget — and delivery is the only thing that knows it. **Whether this particular failure is one another attempt could answer** is a fact about upstream's error taxonomy, which delivery has no business importing: a transport tear may be replaced, a conversion error and a refusal may not, and that vocabulary belongs to the layer that speaks to upstream.
+
+    `eligible` is asked first and costs nothing, so a failure no attempt can answer never spends budget on being told so.
+    """
+
+    ledger: RetryLedger
+    eligible: Callable[[Exception], bool]
+    reopen: Callable[[], Awaitable[Attempt | None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +178,7 @@ async def stream_delivery(
     settings: StreamSettings,
     message_id: str,
     model: str,
+    replay: ReplaySupport | None = None,
 ) -> AsyncGenerator[bytes]:
     """Turn an upstream byte stream into Anthropic SSE, one complete block at a time.
 
@@ -180,6 +200,7 @@ async def stream_delivery(
             message_id=message_id,
             model=model,
             last_write=last_write,
+            replay=replay,
         )
     ) as inner:
         async for chunk in inner:
@@ -196,45 +217,70 @@ async def _deliver(
     message_id: str,
     model: str,
     last_write: _LastWrite,
+    replay: ReplaySupport | None = None,
 ) -> AsyncGenerator[bytes]:
     """Assemble and frame the response. Wrapped by `stream_delivery`, which stamps the clock."""
     session = DeliverySession(buffer=buffer)
-    # Whether the client has seen a semantic event yet. It gates the keep-alive, which cannot be sent before the response has started, and the error frame at the end, which has nothing to correct if it has not.
+    # Whether the client has seen a semantic event yet. It gates the error frame at the end, which has nothing to correct if the message never started, and it is half of what decides whether a torn stream may be replayed.
     #
-    # This used to gate a second thing: a `message_start` synthesised on its own after a long silence, so a client waiting on a slow turn saw something. That is gone. The preamble now leaves only alongside the first complete block, so `client_has_bytes` and "a block has been delivered" became the same fact — which is what lets a retry after a torn stream stay invisible, and what makes a half-opened response unreachable rather than a state to handle.
+    # It used to gate a `message_start` synthesised on its own after a long silence. That is gone, so the preamble now leaves only alongside the first complete block and this became the same fact as "a block has been delivered" — which is exactly what makes a replay invisible when it is legal, and what keeps a half-opened response from being a state every decision has to carry a case for.
     client_has_bytes = asyncio.Event()
 
-    # `aclosing` for the same reason as above: the inner generator owns the upstream pull, and only closing it releases the response.
-    async with aclosing(
-        _events_with_ping(
-            chunks,
-            settings.sse_ping_interval,
-            last_write=last_write,
+    while True:
+        torn: Exception | None = None
+        # `aclosing` for the same reason as above: the inner generator owns the upstream pull, and only closing it releases the response. On the way out of a torn attempt this is what hands the old response back before another is opened.
+        try:
+            async with aclosing(
+                _events_with_ping(
+                    chunks,
+                    settings.sse_ping_interval,
+                    last_write=last_write,
+                )
+            ) as events:
+                async for pull in events:
+                    wrote = False
+                    if pull.event is not None:
+                        # Assembled before any cue is answered. A pull that came back with an event has not shown that the event can be delivered: a malformed one makes the assembler raise right here, and that has to reach the caller ahead of a comment claiming everything is fine.
+                        for block in assembler.push(pull.event):
+                            for chunk in _commit(
+                                session,
+                                block,
+                                message_id,
+                                model,
+                                client_has_bytes.is_set(),
+                                settings.signature_compat,
+                            ):
+                                client_has_bytes.set()
+                                wrote = True
+                                yield chunk
+                    # Asked here, and only here, because this is the first moment both answers exist: whether assembling wrote anything, and what the clock reads now that it has. Real bytes discharge the same obligation a cue would have answered, so `wrote` short-circuits and the schedule is left alone.
+                    if wrote or not pull.claim():
+                        continue
+                    # Unconditional, because by the time this generator runs the client already holds a 200: the response is built with upstream's own status once its headers have arrived, and the framework sends `http.response.start` before it pulls the first chunk. Nothing here can change what the client was told, so holding the keep-alive back until a block exists buys nothing and spends the whole pre-first-block window in silence — which under `full` and `until-tool-use` is the entire turn.
+                    #
+                    # An SSE comment before `message_start` is still legal SSE and carries no content, so it cannot be mistaken for part of the turn. What is *not* sent early is the preamble itself: a `message_start` on its own leaves a message opened with nothing in it, and every decision after a torn stream then has to carry a case for that state.
+                    yield PING_FRAME
+        except Exception as error:
+            # `Exception`, not `BaseException`, and that is the whole of how this side's own endings stay out. A client that goes away and a process that is shutting down both arrive as `CancelledError`, and a generator being closed arrives as `GeneratorExit`; neither derives from `Exception`, so neither reaches here and neither can be mistaken for upstream tearing. The spec calls that distinction `LOCAL_ABORT` and warns that the *position* facts of the two are identical — this is the one place the difference is still visible, so it is read here rather than inferred later.
+            torn = error
+        if torn is None:
+            break
+        if replay is None or not replay.eligible(torn):
+            raise torn
+        verdict = decide_stream_ending(
+            terminal_seen=assembler.terminal.seen,
+            downstream_opened=client_has_bytes.is_set(),
+            committed_blocks=session.committed_count,
+            ledger=replay.ledger,
         )
-    ) as events:
-        async for pull in events:
-            wrote = False
-            if pull.event is not None:
-                # Assembled before any cue is answered. A pull that came back with an event has not shown that the event can be delivered: a malformed one makes the assembler raise right here, and that has to reach the caller ahead of a comment claiming everything is fine.
-                for block in assembler.push(pull.event):
-                    for chunk in _commit(
-                        session,
-                        block,
-                        message_id,
-                        model,
-                        client_has_bytes.is_set(),
-                        settings.signature_compat,
-                    ):
-                        client_has_bytes.set()
-                        wrote = True
-                        yield chunk
-            # Asked here, and only here, because this is the first moment both answers exist: whether assembling wrote anything, and what the clock reads now that it has. Real bytes discharge the same obligation a cue would have answered, so `wrote` short-circuits and the schedule is left alone.
-            if wrote or not pull.claim():
-                continue
-            # Unconditional, because by the time this generator runs the client already holds a 200: the response is built with upstream's own status once its headers have arrived, and the framework sends `http.response.start` before it pulls the first chunk. Nothing here can change what the client was told, so holding the keep-alive back until a block exists buys nothing and spends the whole pre-first-block window in silence — which under `full` and `until-tool-use` is the entire turn.
-            #
-            # An SSE comment before `message_start` is still legal SSE and carries no content, so it cannot be mistaken for part of the turn. What is *not* sent early is the preamble itself: a `message_start` on its own leaves a message opened with nothing in it, and every decision after a torn stream then has to carry a case for that state.
-            yield PING_FRAME
+        if verdict.ending is not StreamEnding.REPLAY:
+            raise torn
+        replacement = await replay.reopen()
+        if replacement is None:
+            raise torn
+        # Everything the failed attempt built is dropped, not carried: a fresh assembler so no draft of its survives, and a fresh buffer so a block it completed but never delivered cannot be delivered twice. `session` goes with the buffer. Legal only because the verdict above required nothing to have been committed — there is no frontier here to preserve, and none to roll back.
+        chunks, assembler, buffer = replacement
+        session = DeliverySession(buffer=buffer)
 
     remaining = session.finish()
     if remaining and not client_has_bytes.is_set():

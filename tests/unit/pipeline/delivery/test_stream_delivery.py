@@ -14,18 +14,20 @@ from typing import Any, cast
 import orjson
 import pytest
 
-from app.config.schema import ContentBlockStartCompat
+from app.config.schema import ContentBlockStartCompat, UpstreamRequestRetryConfig
 from app.observability.active_requests import ActiveRequestRegistry
 from app.pipeline.delivery.assembler import AnthropicAssembler, ResponsesAssembler, Terminal
 from app.pipeline.delivery.blocks import BlockBuffer, CompletedBlock
 from app.pipeline.delivery.sse_source import SseEvent
 from app.pipeline.delivery.stream import (
     PING_FRAME,
+    ReplaySupport,
     StreamSettings,
     _events_with_ping,  # pyright: ignore[reportPrivateUsage]
     _LastWrite,  # pyright: ignore[reportPrivateUsage]
     stream_delivery,
 )
+from app.pipeline.retry import RetryLedger
 from app.server.pipeline_app import (
     _counted_upstream,  # pyright: ignore[reportPrivateUsage]
     _Trace,  # pyright: ignore[reportPrivateUsage]
@@ -914,3 +916,89 @@ async def test_a_stream_of_one_chunk_reports_no_gap_rather_than_a_gap_of_zero() 
 
     assert trace.upstream_chunks == 1
     assert trace.upstream_max_gap_s is None
+
+
+def _replay_over(attempts: list[list[bytes]]) -> ReplaySupport:
+    """Hand out one fresh attempt per call, each with its own assembler and buffer."""
+    remaining = list(attempts)
+
+    async def reopen() -> tuple[AsyncIterator[bytes], AnthropicAssembler, BlockBuffer] | None:
+        if not remaining:
+            return None
+        return (feed(remaining.pop(0)), AnthropicAssembler(), BlockBuffer(policy="block"))
+
+    return ReplaySupport(
+        ledger=RetryLedger(UpstreamRequestRetryConfig.model_validate({})),
+        eligible=lambda error: isinstance(error, ConnectionError),
+        reopen=reopen,
+    )
+
+
+async def _tears_after(payloads: list[bytes]) -> AsyncIterator[bytes]:
+    for payload in payloads:
+        yield payload
+    raise ConnectionError("upstream tore")
+
+
+@pytest.mark.asyncio
+async def test_a_stream_the_client_never_saw_is_replaced_without_a_trace() -> None:
+    """The whole of what a traceless retry means: one message on the wire, one preamble, and the failed attempt's output nowhere in it.
+
+    The first attempt tears after opening a block it never closes, so nothing was ever delivered. A second attempt answers the same request and the client cannot tell there were two.
+    """
+    chunks = [
+        chunk
+        async for chunk in stream_delivery(
+            _tears_after(anthropic_stream("lost")[:2]),
+            AnthropicAssembler(),
+            buffer=BlockBuffer(policy="block"),
+            settings=StreamSettings(sse_ping_interval=0),
+            message_id="msg_1",
+            model="claude-model",
+            replay=_replay_over([anthropic_stream("kept")]),
+        )
+    ]
+    body = b"".join(chunks)
+    assert events_of(chunks).count("message_start") == 1
+    assert b'"text":"kept"' in body
+    assert b"lost" not in body
+    assert events_of(chunks)[-1] == "message_stop"
+
+
+@pytest.mark.asyncio
+async def test_a_stream_the_client_already_saw_is_not_replaced() -> None:
+    """Once a block has been delivered there is no traceless anything: a second attempt would send the client a second copy of what it holds."""
+    torn = _tears_after(anthropic_stream("first") + anthropic_stream("second")[:2])
+    with pytest.raises(ConnectionError):
+        _ = [
+            chunk
+            async for chunk in stream_delivery(
+                torn,
+                AnthropicAssembler(),
+                buffer=BlockBuffer(policy="block"),
+                settings=StreamSettings(sse_ping_interval=0),
+                message_id="msg_1",
+                model="claude-model",
+                replay=_replay_over([anthropic_stream("kept")]),
+            )
+        ]
+
+
+@pytest.mark.asyncio
+async def test_a_failure_no_second_attempt_could_answer_is_not_replaced() -> None:
+    """Eligibility is the caller's to answer, and a failure it refuses is raised even though the position would allow a replay."""
+    replay = _replay_over([anthropic_stream("kept")])
+    refusing = ReplaySupport(ledger=replay.ledger, eligible=lambda _error: False, reopen=replay.reopen)
+    with pytest.raises(ConnectionError):
+        _ = [
+            chunk
+            async for chunk in stream_delivery(
+                _tears_after(anthropic_stream("lost")[:2]),
+                AnthropicAssembler(),
+                buffer=BlockBuffer(policy="block"),
+                settings=StreamSettings(sse_ping_interval=0),
+                message_id="msg_1",
+                model="claude-model",
+                replay=refusing,
+            )
+        ]
