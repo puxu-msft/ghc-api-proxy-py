@@ -66,12 +66,14 @@ class LedgerBudget:
     ledger: RetryLedger
     # Whether the process has stopped accepting. `None` on the paths that have no listener to ask — a test harness, or a caller driving a driver directly — and those simply never refuse for this reason.
     #
-    # A retry opens a *new* upstream request, and doing that while shutting down is work the process has already promised to stop taking on: it extends the drain by a whole attempt, and if the drain gives up first the client gets neither the retry's answer nor the one it was owed. `upstream-retry-and-continuation.md` rules it out and points the ending at the hand-over instead.
+    # A retry opens a *new* upstream request, and doing that while shutting down is work the process has already promised to stop taking on: it extends the drain by a whole attempt, and if the drain gives up first the client gets neither the retry's answer nor the one it was owed. `upstream-retry-and-continuation.md` rules it out.
+    #
+    # This door refuses before upstream's headers are in hand, so what the client gets is an ordinary HTTP error response carrying upstream's own status — the hand-over lives on the SSE delivery path and is not reachable from here at all. The sibling gate in `pipeline_app._reopen` is the one where that question arises.
     draining: Callable[[], bool] | None = None
 
     def take_for(self, error: BaseException) -> tuple[bool, str]:
+        # Before the ledger, so a shutdown does not also show up as budget exhaustion in whatever reads the counters next. Not because anything downstream needs the budget intact — checked: nothing on the hand-over path reads `RetryLedger` — and the delivery-side replay spends its own attempt *before* its drain check, so the two doors differ on this. Refusing first is the honest report of why, not a resource decision.
         if self.draining is not None and self.draining():
-            # Before the ledger, so a refused-for-shutdown attempt does not also spend budget it was never going to use — the same request may still be handed back to the client, and that path reads the same ledger.
             return (False, "server is shutting down")
         reason = reason_for(error)
         if reason is None:

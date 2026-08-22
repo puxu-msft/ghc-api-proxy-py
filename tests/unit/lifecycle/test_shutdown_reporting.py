@@ -5,6 +5,7 @@ The gap these guard is the one the request log had: the machinery worked and rep
 
 import logging
 import signal
+import threading
 from typing import Any, cast
 
 import pytest
@@ -133,6 +134,27 @@ def test_the_registry_reports_draining_once_told(captured: object) -> None:
     assert registry.draining is False
     registry.begin_draining()
     assert registry.draining is True
+
+
+def test_the_drain_flag_is_reachable_while_the_registry_lock_is_held(captured: object) -> None:
+    """`begin_draining` runs inside a real signal handler under systemd, so it must not wait on a lock.
+
+    Uvicorn registers `handle_exit` with `signal.signal`, which means the handler is inserted at an arbitrary bytecode boundary in the main thread. If it took the registry's non-reentrant lock and the signal landed inside any other critical section on this object, it would block for a lock held by the very thread it interrupted. Measured 2026-08-22: the process went permanently silent and would not answer a second SIGTERM either, because the handler is itself what is stuck — only SIGKILL ended it. That is exactly the "the drain never finishes" failure the drain flag exists to prevent.
+
+    Driven from another thread rather than reentrantly, so a reintroduced lock fails this assertion instead of hanging the suite — a non-reentrant lock blocks any other thread just as surely.
+    """
+    registry = ActiveRequestRegistry()
+    finished = threading.Event()
+
+    def announce() -> None:
+        registry.begin_draining()
+        finished.set()
+
+    with registry._lock:  # pyright: ignore[reportPrivateUsage]
+        threading.Thread(target=announce, daemon=True).start()
+        assert finished.wait(2.0), "begin_draining waited on the registry lock"
+        # The read side too: the retry paths ask this on every refusal, and one of them runs under the same handler's shadow.
+        assert registry.draining is True
 
 
 def test_a_clean_stop_is_one_short_line(captured: object, caplog: pytest.LogCaptureFixture) -> None:

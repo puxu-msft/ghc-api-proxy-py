@@ -30,6 +30,10 @@ class ActiveRequestRegistry:
     # Uncontended in practice — the critical sections are a dict write or a short copy — so the cost is a few tens of nanoseconds on a path that is already doing network I/O.
     _lock: threading.Lock = field(default_factory=threading.Lock)
     # Set once the listener stops accepting. Held here rather than passed to each render because the renderer runs on its own thread and needs somewhere to read it from that is not a moving argument.
+    #
+    # **Deliberately outside `_lock`, and that is a correctness requirement rather than an optimisation.** `begin_draining` is called from a real signal handler under systemd — uvicorn registers `handle_exit` with `signal.signal`, so it is inserted at an arbitrary bytecode boundary in the main thread. Taking a non-reentrant lock there deadlocks whenever the signal lands inside any other critical section on this object, and the thread it would be waiting on is the one it interrupted. Measured 2026-08-22: the process went permanently silent and would not answer a second SIGTERM either, because the handler is itself what is stuck.
+    #
+    # Safe without the lock because this flag is write-once and monotonic: one writer sets it true, nothing ever sets it false, and a bool read or write is a single bytecode under the GIL. A reader therefore sees either the old value or the new one, never a torn one, and the only cost of the old one is that one more request is treated as running. Everything else on this object is a dict or a list and still needs `_lock`.
     _draining: bool = False
     # Read on demand rather than stored, because the count changes without this class being told and a copy would be stale before it was drawn. `None` until the listener exists, and on the inherited-descriptor path where nobody owns a count to publish.
     connection_count: Callable[[], int] | None = None
@@ -44,13 +48,17 @@ class ActiveRequestRegistry:
         """Whether new requests are no longer being accepted while old ones finish.
 
         A distinct state from both running and stopped, and the one an operator most needs named: the process is still busy, but nothing further will arrive, so the list on screen can only shrink.
+
+        Read without `_lock`. See `_draining` for why that is required rather than merely allowed.
         """
-        with self._lock:
-            return self._draining
+        return self._draining
 
     def begin_draining(self) -> None:
-        with self._lock:
-            self._draining = True
+        """Say the listener has stopped accepting. Idempotent, and safe to call from a signal handler.
+
+        No lock, deliberately: this is called from one under systemd. See `_draining`.
+        """
+        self._draining = True
 
     def snapshot(self) -> list[ActiveRequest]:
         """A detached view for the renderer, so a mutation mid-render cannot change what it is drawing.

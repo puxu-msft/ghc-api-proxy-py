@@ -341,7 +341,7 @@ async def test_named_strategies_bound_each_reason_separately() -> None:
 
 @pytest.mark.asyncio
 async def test_a_draining_process_does_not_open_another_upstream_attempt() -> None:
-    """A retry opens a new upstream request, and a process that has stopped accepting has promised not to take on new work.
+    """A retry opens a new upstream attempt, and a process that has stopped accepting has promised not to take on new work.
 
     The failure is one the budget would otherwise fund — the sibling test above proves a 503 buys a second attempt — so the refusal here is the drain's doing and nothing else's.
 

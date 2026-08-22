@@ -658,9 +658,13 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
 
             The trace keeps the first attempt's connection identity and byte count. A reader comparing `upstream_conn` across failures is looking for the connection that broke, and overwriting it with the one that recovered erases the thing being looked for.
 
-            `None` while the process is draining. A replay opens a *new* upstream request, and a process that has stopped accepting has promised not to take work on: the attempt would extend the drain by its whole length, and if the drain gives up first the client is left with neither answer. `upstream-retry-and-continuation.md` rules it out.
+            `None` while the process is draining. A replay opens a *new* upstream attempt, and a process that has stopped accepting has promised not to take work on: the attempt would extend the drain by its whole length, and if the drain gives up first the client is left with neither answer. `upstream-retry-and-continuation.md` rules it out.
 
-            **What the client gets instead is the truncated-stream ending, not a hand-over**, and that is worth stating because the neighbouring rule invites the opposite reading. This function is reached only from `StreamEnding.REPLAY`, which `decide_stream_ending` returns only when `downstream_opened` is false — so by construction nothing has been delivered here, and a hand-over needs delivered content to hand over. The drain cases that *do* end in a hand-over are the ones that never came through this door: they already hold a block, so they were never eligible for a replay to begin with.
+            Scoped to retries and replays, which is narrower than "no new upstream requests": a client request already admitted still opens its *first* attempt during a drain, whether it was queued behind `InFlightLimit` or arrived just before the listener closed. That is what a drain is for — finishing what was accepted — so it is deliberate rather than a gap.
+
+            **What the client gets today is the truncated-stream ending, not a hand-over — and the reason is a gate, not a limitation.** An earlier version of this comment said a hand-over "needs delivered content to hand over"; that is false, and the false reason is what made this look settled. `_hand_over` synthesises its own preamble when the session has not started, so it can perfectly well end a turn nothing was delivered on. What stops it here is its own `committed_count == 0` gate, which a review lifted in an experiment and got a clean hand-over out of exactly this path.
+
+            So whether a drain should be a case that gate lets through is an open product question, not an answered one — and it matters more than it looks: under `full` or `until-tool-use` a whole turn's worth of complete blocks can be sitting in the buffer with `committed_count` still zero, and this ending throws them away where a replay used to recover them. Registered in `deferred.md` §5; do not read the current behaviour here as a decision.
             """
             if chain.active_requests.draining:
                 get_logger().info(

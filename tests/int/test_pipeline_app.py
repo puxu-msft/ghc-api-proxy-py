@@ -3141,13 +3141,13 @@ def test_an_interrupted_turn_is_handed_back_to_the_client_as_a_tool_call(
 
 
 def test_a_draining_process_does_not_replay_a_stream_the_client_never_saw() -> None:
-    """A replay opens a new upstream request, and a process that has stopped accepting has promised not to take work on.
+    """A replay opens a new upstream attempt, and a process that has stopped accepting has promised not to take work on.
 
     Deliberately the *same* scenario as `test_a_torn_stream_the_client_never_saw_is_replayed_end_to_end` — nothing delivered, a mid-block tear, budget at its default — so the only difference is that the drain began while the request was in flight. That test measures two upstream calls; this one measures one. Neither number means anything without the other.
 
     The drain is begun from inside the upstream handler because that is when it happens in production: a drain waits for the requests already running, so the ones it has to stop are exactly the ones already past this point.
 
-    **What the client gets is the truncated ending, not a hand-over**, and asserting that is the point rather than an omission. A replay is only ever legal when nothing was delivered, so by the time this door is reached there is nothing to hand over. The drain failures that *do* end in a hand-over already hold a block and were never eligible for a replay — an earlier version of this test used that scenario, and passed identically with the drain gate removed.
+    **What the client gets is the truncated ending, not a hand-over**, and asserting that is the point rather than an omission. It is not that a hand-over is impossible here — `_hand_over` builds its own preamble when nothing has started — but that its `committed_count == 0` gate does not let this case through. Whether it should is open; see `deferred.md` §5. An earlier version of this test used a scenario where a block had already been delivered, and passed identically with the drain gate removed.
 
     That ending is a bare re-raise rather than an error frame, which is the shape `deferred.md` §5 already records as inconsistent. Pinned here as it is, not as it should be: this test is about the attempt that was not made, and dressing up the ending would make it a second test of something else.
     """
