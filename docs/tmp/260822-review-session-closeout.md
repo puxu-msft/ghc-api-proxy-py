@@ -460,3 +460,172 @@ docs/tui/archive-count-tokens-line/reports/260820-closeout-count-tokens-log-line
 **本项目禁止的东西我一条都没建议**：没有覆盖率目标，没有门禁/投票/验证状态机，没有安全加固建议，没有跑 `ruff format`。上面每一条 major 的修法都是改一到两句话，或补一行。
 
 **我自己在本次评审中犯的两个错，都留在正文里没有抹掉**：① §1.6 那次探针跑对了、对照也过了，数字仍然错，因为快照早于被观测的动作（§1.6bis）；② §1.4 的归因第一版写反了，是逐提交 diff 才纠正的。两条都指向同一件事——**正样本对照能证明命令有效，不能证明观测时刻正确，也不能替代逐提交核对**。
+
+
+---
+
+# 整改复核（第二轮）
+
+**复核基线（全部 `git rev-parse` 固化）**：`.dev` HEAD = `5ff8d0ff49e80117809607856ce9e4324b4093ee`（整改提交，13:54:49）；其前另有三个同伴提交 `460998b`(13:40:15)、`d99e25b`(13:43:02)、`01b7c73`(13:45:07)。主仓 HEAD = `027698f1adac0d24e91e2aeeeb466c0b09239c9d`，主仓无新提交（`f0527e5` 仍是本会话唯一进入 `main` 的提交）。
+
+**范围**：只看整改差异（`5ff8d0f` 的三个文件）+ 它触碰到的相邻契约。上一轮已核实成立的 12 条不重跑。
+
+## 一、七条 major 的闭合判定
+
+### R1 第 11 条那句假话 —— **闭合**，但要把闭合者说准
+
+提交态复核（`.dev` HEAD `5ff8d0f`）：
+
+```
+git grep -n '不被任何 ref' HEAD -- docs/upstream/retry-and-continuation/deferred.md
+HEAD:…/deferred.md:133:**这条的归属被改错过一次…**：标题一度写着「原始来源 `c86712d` 是一个不被任何 ref 引用的对象」。**该断言不成立**……
+```
+
+只剩第 12 条那一处**引文**，第 11 条已无。正样本对照：同文件 `rg -c -F 'c86712d'` = 5，命令有效。全 `.dev` 提交态另有两处，都**正确地没有动**——`260822-review-unreviewed-span.md:212`（同伴的报告原件，点时记录）与 `graceful-shutdown/.../260820-closeout-review.md:60`（讲的是另外两个哈希，无关）。
+
+**但「你的快照早于终态」这个说法要修一下。** 我 13:30 那次 grep 打的是**提交态** `.dev` HEAD（`64aeb59` / `1fb2341`），那时它**确实在提交态里**——我上一轮的报告也写明了工作树里有一份未提交改写。查残留就该 grep 提交态而不是工作树（否则同伴一份未提交的重写能把 HEAD 里的残留凭空洗白），所以那次判定不是快照失误。
+
+准确的闭合者是同伴的 `d99e25b`（13:43:02，`docs(upstream/retry-and-continuation): rule the deadline order, retract the prompt-limit gap`），**不是本次整改 `5ff8d0f`**：
+
+```
+git log -S'不被任何 ref 引用的对象' -- docs/upstream/retry-and-continuation/deferred.md
+d99e25b 2026-08-22 13:43:02  （删除）
+2aa0cad 2026-08-22 13:03:58  （写入，同伴）
+```
+
+**判定：闭合。** 第 12 条保留引文是对的，应当保留。**权重：够据此行动。**
+
+### R2 第 19 条低估改 message 的代价 —— **真闭合，不是换措辞**
+
+我自数复核（主仓 HEAD `027698f`，`sed -n '378,392p' src/app/pipeline/delivery/stream.py`）：
+
+| 新文本的声明 | 实测 | 判定 |
+|---|---|---|
+| message 在 `stream.py:386` | 第 386 行正是 `message="Responses stream ended before a successful terminal event",` | ✓ |
+| 契约注释在 `stream.py:382` | 第 382 行正是 `# Ported from the legacy chain … Same code, same wire shape, same message, same gate …` | ✓ |
+| 第二个产出点 `responses_anthropic_stream.py:349` | ✓（上一轮已核） | ✓ |
+| 原「零消费」的说法**明确标为错** | 新文本原句：「`message` **不是「零消费」**。初稿这么写，错了。」 | ✓ |
+
+结论从「代价很小」改成了「牵动一条跨链路的措辞契约，要么两处一起改、要么明确裁决让两条链路发散」——**这是代价重估，不是换词**。**判定：闭合。**
+
+**一条 minor 提醒（新引入的保质期）**：`stream.py:386` / `:382` 是**绝对行号**，写进活文档就带上了保质期。这两个数字今天（HEAD `027698f`）逐行对，但主仓 HEAD 今天已经动过多次。这不是错，是需要读者知道的时效属性——建议在行号旁标一句「行号锚在 `027698f`」，或者改用「`code="incomplete_responses_stream"` 那处」这类内容锚点（原文本用的正是后者）。
+
+### R3 第 19 条用错了轴 —— **真闭合，论证方向正确**
+
+新论证：「`_deliver` **对两条上游腿共用**——它收的是 `assembler`（`AnthropicAssembler` 或 `ResponsesAssembler`，即上游轴），而这条 message 是常量。」**轴是对的**，且带删除线保留了原错误论证并引用 `framing.py` 的模块 docstring（我核过原文，第 3 段确为「Getting that backwards is the specific mistake this type exists to make hard」）。符合 `record-what-not-adopted`。**判定：闭合。**
+
+**一条 minor 增强建议**：「它收的是 `assembler`」严格说只证明 `_deliver` 对 assembler 是泛型的；真正把「两条上游腿都走这里」钉死的是接线——`assembler_for`（`handler.py:609-619`，按 `dialect_for` 分派，返回 `ResponsesAssembler` 或 `AnthropicAssembler`）→ `pipeline_app.py:643` 取它 → `:729` 交给同一个 `stream_delivery`。补这半句，论证就从「类型泛型」升级到「实际接线」。**权重：倾向，不补也不致误。**
+
+### R4 `DISPOSITION.md` 自我证伪 —— **真闭合**
+
+现文（13:54:27 重写）：
+
+> **清点时刻（2026-08-22 13:37 之前）的 population = 0。……**
+> **本文件自己是此目录里唯一的文件，写于清点之后。** 它不是被清点的对象，是清点的记录……（初稿把「population = 0」写成无时刻限定的陈述，落盘后该句即被本文件自身证伪；评审指出，此处已限定。）
+
+时刻限定到位，「记录 vs 对象」的区分点明，初稿的错也没抹掉。目录实测仍是 1 个文件（`DISPOSITION.md`，2538 字节）。**判定：闭合。**
+
+**一条 minor**：底下「枚举方法与交叉核对」那个代码块里两行 `-> 0` 仍然没带时刻，和上面那段限定隔了一节。单独看那个块还是会读成「现在是 0」。把时刻写进块内（例如 `# 13:37 前` 注释）更保险。
+
+### R5 §9 终态错误 —— **真闭合**
+
+新 §10 三行更正，逐条对上我上一轮的实测：工作树已移除（且附了移除前四项验证，含那次 `/proc/*/cwd` 假阳性探针的自陈）；分支保留 + `-d` 拒绝理由 + 不升级 `-D`；§7 硬要求已闭合。§9 原文保留，符合「点时记录不改」。**判定：闭合。**
+
+### R6 / R7 两条只活在会话里的结论 —— **落地了；第 19 条那段无新缺陷，第 5 条那段引入一处新缺陷**
+
+- §7 硬要求闭环（我上一轮的 O2）→ §10 第三行，**闭合**。
+- 「续写没接手时的 ending」（O1）→ `deferred.md` 第 5 条，**落地了**，但见下面的 N1。
+
+## 二、新写文字自身的缺陷
+
+### N1【major】第 5 条第 3 格把一条**机制**写成了一组**裁决**
+
+新文本第 3 格原话：
+
+> 3. **不可继续的失败类别**——人写文档的前提是「如果业务可能可以继续」。上游拒绝、转换错误、prompt-limit 不在内；多数发生在 commit 前（还能用 HTTP 错误），但**已交付一块之后**的转换／assembler 错误就落在这里。
+
+列的三样（上游拒绝、转换错误、prompt-limit）**全是有意的裁决**。但它们落地靠的是同一条分支，而那条分支还会吞掉另一类东西。控制流（主仓 HEAD `027698f`，`src/app/pipeline/delivery/stream.py`）：
+
+```python
+reason = replay.eligible(torn) if replay is not None else None
+if replay is None or reason is None:
+    raise torn                      # ← _hand_over 根本不被咨询
+verdict = decide_stream_ending(...)
+...
+handed_over = _hand_over(continuation, session, assembler, framer, error=torn)
+```
+
+而 `replay.eligible` 就是 `_replay_reason`（`src/app/server/pipeline_app.py:531-543`），它最后一步是：
+
+```python
+known = normalize_upstream_error(error)
+return reason_for(known) if known is not None else None
+```
+
+**裸 `h2.ProtocolError` 命中的正是这一条**——它在种类上是传输撕断（本项目在别处明确称之为可继续），只是分类器从没见过它。**本会话自己的测试就断言这个前提**：`tests/unit/pipeline/delivery/test_stream_delivery.py` 的 `test_a_finished_turn_survives_a_failure_nothing_recognises` 里写着
+
+```python
+assert eligible(torn) is None, "the premise: production cannot name this failure"
+```
+
+实跑（只读）：
+
+```
+uv run pytest '…::test_a_finished_turn_survives_a_failure_nothing_recognises' -q
+2 passed in 2.26s
+（负样本对照：同一条命令换成不存在的测试名 → `no tests ran`，说明它会区分「跑了并通过」与「什么都没跑」）
+```
+
+**于是有一格现实**：Anthropic Messages 客户端、已交付 ≥1 个完整块、`terminal.seen == False`、异常是裸 `h2.ProtocolError` → `raise torn`，客户端拿到半截 SSE，**既没有 `incomplete_responses_stream` 帧，也没有 `turn_interrupted` 交接**。
+
+**为什么这是缺陷而不是吹毛求疵**：按第 3 格现在的写法，读者会把它归档成「我们决定不续写的那些」，于是这个**有一手证据的洞**（`../h2-goaway/findings.md` 把「裸 `h2.ProtocolError` 绕开我方全部包装边界」列在**确凿**栏）永远不会被人回头看。而它与本会话刚修好的那扇门是**同一扇门的另一半**：`f0527e5` 那条 `retry.py` 注释说的是「`_deliver` 必须在问失败之前先答完上游说完了没有」——`terminal.seen` 那半已经前移了，`_hand_over` 这半仍然排在分类之后。
+
+**修法（一句话）**：把第 3 格拆成两句——「① 有意裁决为不可继续（上游拒绝、转换错误、prompt-limit）；② **分类器叫不出名字的失败**，种类上本可继续但 `normalize_upstream_error` 返回 `None`（裸 `h2.ProtocolError` 是已知一例），它在 `_hand_over` **之上**就 `raise` 了，与 ① 同分支但成因完全不同」。
+
+**证据等级：代码事实（5 行控制流 + `_replay_reason` 全文）+ 一条现存通过的测试断言其前提。权重：够据此行动。**
+
+### N2【minor】第 5 条第 2 格把默认值写成了条件
+
+新文本：「`_hand_over` 里已显式写了这一格返回 `None`（`committed_count == 0`，`max_tokens` 除外）」。
+
+代码判的是 `stop_reason not in continuation.stop_reasons`（`stream.py:412`），而 `stop_reasons` 由 `pipeline_app.py:718` 用 `_hand_over_reasons` 注入，来源是配置 `hand_over_stop_reasons`（`src/app/config/schema.py:187`，默认 `["max_tokens"]`）。**`max_tokens` 是默认值，不是条件。** 写成「配置的 `hand_over_stop_reasons` 除外（默认只有 `max_tokens`）」即可——同一份 `deferred.md` 第 15 条谈的正是这个配置项，两处会打架。
+
+### N3【minor】第 5 条整段没声明作用域是**流式**路径
+
+三格全部是 `stream.py` 里 `_deliver` 的路径。缓冲（非流式）路径另有一处交接（`pipeline_app.py:778` 的 `_hand_back(None, …)`），**只在 `stop_reason ∈ hand_over_stop_reasons` 且 `content` 是 list 时才触发，没有任何 error 驱动的交接**。缓冲路径的失败发生在交付之前、答的是 HTTP 错误，所以不落在「客户端读不出东西」里——但读者需要被告知这三格谈的是流式，否则会去缓冲路径找第四格。加一句限定即可。
+
+### N4【仅存档】另有三条真实的 `None` 路径，都不值得单列一格，值半句
+
+- `if not name: return None`（`pipeline_app.py:554-556`）——运维把 `auto_retry_tool_call_full_name` 置空。默认**非空**（`schema.py:189-191`），所以只有显式清空才触发。
+- `if accounting.handed_over: return None`（`pipeline_app.py:705-710`）——一轮一次的守卫，按它自己的注释今天不可达（两个调用点都 `return`）。
+- `continuation is None`（`stream.py:410-411`）——流式路径**今天恒不为 `None`**（`pipeline_app.py:717` 无条件构造 `ContinuationSupport`）。所以第 1 格实际是由 `synthesize` 里的 `route.wire_format` 判据实现的，**不是**由 `continuation is None`。文本没说错，但把机制说准会让「哪里能改」一目了然。
+
+## 三、核对为对、无需动作（列出来，让「没提到」不等于「没查」）
+
+- **第 1 格的轴是对的，本轮没有重犯上一轮那类轴错。** `_hand_back` 判的 `route.wire_format` 确系**客户端轴**：它是 `InboundRoute.wire_format`（`src/app/server/inbound.py:22-25`，`/v1/messages` → `ANTHROPIC_MESSAGES`、`/chat/completions` → `OPENAI_CHAT_COMPLETIONS`、`/responses` → `OPENAI_RESPONSES`），`inbound.py:81` 用它填 `inbound_format`，`pipeline_app.py:403` 用它填 `trace.inbound_format`。所以「`/v1/chat/completions`、`/v1/responses` 一格都没有」成立。
+- **第 2 格的机制描述正确**：`committed_count == 0` 时 verdict 走 `REPLAY`（有预算）或 `ABANDON`，`ABANDON` 落到 `_hand_over` → `None` → `raise torn`；「重试预算耗尽或 `reopen()` 自己也失败」确实是这一格的两条入口。
+- **「合成本身不会失败」的论证成立**：`_hand_back`（`pipeline_app.py:545-590`）是纯本地构造，无 `await`、无上游调用；工具未声明那一格只 `warning` 不拦截（`:562-566`），与人写文档的裁决一致。所以把「合成本身失败」从格子里删掉是**对的更正**。
+- §10 三行、第 19 条的两个产出点与契约注释、`framing.py` docstring 引文，均逐字核过。
+
+## 四、上一轮的 minor 里，本轮**未闭合**的（只点名，不重审）
+
+- `deferred.md` 编号仍是 `…12 → 15`，13、14 空号（`git show HEAD:… | rg '^### [0-9]'` 复核）。上一轮 O3 未处理。
+- 第 12 条更正的措辞（没说是谁写的、没说写下时即为假）未改。上一轮 minor 10。
+- §9:148「15 个暂存文件」未加来源注记。上一轮 minor 9。
+
+三条都是一行的事，**权重：倾向**，不构成阻断。
+
+## 五、第二轮结论
+
+**Verdict：needs-fix**（仅因 N1 一条 major）。
+
+| 项 | 数 |
+|---|---|
+| 上一轮 major | 7 |
+| 本轮判定**已闭合** | **7**（其中 R1 的闭合者是同伴 `d99e25b`，非本次整改） |
+| 只换措辞、未真闭合 | **0** |
+| 新写文字引入的 **major** | **1**（N1） |
+| 新写文字引入的 minor | 3（N2、N3、R2/R4 的两条时效提醒）+ 1 条仅存档（N4） |
+| 上一轮 minor 未闭合 | 3（点名未重审） |
+
+N1 修完即可收口。没有建议加门禁、矩阵或验证状态机；没有跑 `ruff format`；本轮唯一运行的是一条已存在的单测（读操作），且配了负样本对照。

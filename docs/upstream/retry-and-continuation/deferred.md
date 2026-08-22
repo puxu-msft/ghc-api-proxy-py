@@ -64,13 +64,14 @@ response 层有信号（`response.incomplete`），但它晚于 item 关闭到�
 
 合成本身**不会失败**：它是纯本地构造（读客户端请求 `messages` 的长度、拼一个 `tool_use` 块、走已有的 block/terminal framing），不发任何上游请求；而人写文档已把最像失败的那一格堵死——「检查客户端请求是否包含该工具调用的定义，如果没有，打印警告日志，但**仍然依样返回给客户端**」。唯一能让它抛的是我方 bug，那种情况按项目规矩就该抛、留 traceback，不该被 error 帧盖住。
 
-**正确的提法是「续写没接手时的 ending」**，至少三格，今天全部落在「撕断／空 200」上：
+**正确的提法是「续写没接手时的 ending」**。**作用域限于流式交付路径**（`_deliver`）；非流式另有其路，见第 6 条。至少三格，今天全部落在「撕断／空 200」上：
 
-1. **非 anthropic-messages 客户端请求**——用户已限定「其他上游请求暂不使用该机制」，`/v1/chat/completions`、`/v1/responses` 一格都没有。
-2. **一个完整块都没交付过**——门是「已交付过至少一个完整块」。没交付走无痕重试；但重试预算耗尽或 `reopen()` 自己也失败时，既无内容也无续写。`_hand_over` 里已显式写了这一格返回 `None`（`committed_count == 0`，`max_tokens` 除外）。
-3. **不可继续的失败类别**——人写文档的前提是「如果业务可能可以继续」。上游拒绝、转换错误、prompt-limit 不在内；多数发生在 commit 前（还能用 HTTP 错误），但**已交付一块之后**的转换／assembler 错误就落在这里。
+1. **非 anthropic-messages 客户端请求**——用户已限定「其他上游请求暂不使用该机制」。判据在**客户端轴**（`route.wire_format` / `inbound_format`），不是上游轴。
+2. **一个完整块都没交付过**——门是「已交付过至少一个完整块」。没交付走无痕重试；但重试预算耗尽或 `reopen()` 自己也失败时，既无内容也无续写。`_hand_over` 里已显式写了这一格返回 `None`（`committed_count == 0`），唯一的例外是 `ContinuationSupport.stop_reasons` 里的停止原因——**那是配置项，默认值是 `{"max_tokens"}`，不是硬编码条件**。
+3. **有意裁决为不可继续的失败**——人写文档的前提是「如果业务可能可以继续」。上游拒绝、转换错误、prompt-limit 不在内；多数发生在 commit 前（还能用 HTTP 错误），但已交付一块之后的转换／assembler 错误落在这里。
+4. **种类上本可继续、只是分类器叫不出名字的失败**——**这一格与第 3 格形似而神不同，初稿把两者混写成一格，是错的**。机制是：`_replay_reason` 返回 `None` 时 `_deliver` 直接 `raise torn`，`_hand_over` **根本不被咨询**。于是一个本该续写的网络类失败，只因 `normalize_upstream_error` 没有它的名字（裸 `h2.ProtocolError` 就是），走的却是「不可继续」那条路。**这不是裁决，是漏网。** 详见第 20 条。
 
-**证据等级：够据此写实现范围**（依据是人写文档原文与 `_hand_over` 的现有分支）；**是否现在就接这条兜底，需裁决**。
+**证据等级：够据此写实现范围**（依据是人写文档原文与 `_hand_over`／`_replay_reason` 的现有分支）；**是否现在就接这条兜底，需裁决**。
 
 ### 6. 流式与非流式对同一事实给出不同答案
 
@@ -206,6 +207,28 @@ anthropic stop_reason='stop_sequence'  -> responses status='completed'   incompl
 - `message` **不是「零消费」**。初稿这么写，错了。它有**两个产出点**：`src/app/delivery/responses_anthropic_stream.py:349`（legacy 链路）与 `stream.py:386`（活链路）。而且 `stream.py:382` 的注释把这件事写成**有意契约**：「Same code, same wire shape, **same message**, same gate on the message having started — a client that already learned to read one of these does not have to learn a second.」所以改 message 要么两处一起改、要么明确裁决让两条链路发散，不是顺手改一个字符串。
 
 **为什么登记而不是顺手改**：它与第 5 条（已交付之后两条失败路径不一致）、G1 那份方案是同一片区域，且牵动一条跨链路的措辞契约，应当一并裁决。**证据等级：代码事实，确凿；是否值得改属措辞与契约取舍，需裁决。**
+
+### 20. `_hand_over` 仍排在异常分类之后 —— `f0527e5` 修好的那扇门只修了一半
+
+来源：`../../tmp/260822-review-session-closeout.md` 整改复核 N1（异源评审，配负样本对照）。
+
+**形态**：客户端已收到 ≥1 个完整块、`terminal.seen` 为假、而失败是一个 `normalize_upstream_error` **叫不出名字**的异常时——
+
+```python
+reason = replay.eligible(torn) if replay is not None else None
+if replay is None or reason is None:
+    raise torn          # ← 裸抛。既不发 error 帧，也不咨询 _hand_over
+```
+
+客户端拿到的是 HTTP 200 + 半截 SSE + 连接撕断，**什么都读不出来**；而按人写文档，这一格本该合成 `turn_interrupted` 交给客户端续写。
+
+**这正是 `1743a0b` / `f0527e5` 刚处理过的那扇门的另一半**：那次把「上游是否已完成」（`terminal.seen`）前移到了分类之前，理由是「完成与否是位置事实，不该由异常 taxonomy 决定」。**同一条理由原样适用于「客户端手里有没有内容」**——`committed_count` 也是位置事实。但 `_hand_over` 至今仍排在 `replay.eligible` 之后。
+
+**这个异常不是假想的**：裸 `h2.ProtocolError` 会从 httpcore 的守卫缝隙里抛出，绕开所有包装边界（`../h2-goaway/archive-260820/260820-h2-goaway-poc.md` 端到端实测）。`tests/unit/pipeline/delivery/test_stream_delivery.py::test_a_finished_turn_survives_a_failure_nothing_recognises` 里那句 `assert eligible(torn) is None` 正是这条前提的显式断言，评审实跑 2 passed 并配了负样本对照。
+
+**与第 5 条的关系**：第 5 条第 4 格描述的是同一件事在「续写没接手」这个分类下的位置；本条是它的代码落点。两条一并裁决。
+
+**处置：登记，不动手。** 修法看似只是把 `_hand_over` 也前移，但它牵动「哪些失败算可继续」这条判据本身——分类器叫不出名字时默认可继续还是默认不可继续，是产品裁决而非实现选择。**证据等级：代码事实与实测前提均确凿；默认方向需用户裁决。**
 
 ## 明确不做
 
