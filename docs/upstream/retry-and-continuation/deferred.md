@@ -68,6 +68,16 @@ response 层有信号（`response.incomplete`），但它晚于 item 关闭到�
 
 1. **非 anthropic-messages 客户端请求**——用户已限定「其他上游请求暂不使用该机制」。判据在**客户端轴**（`route.wire_format` / `inbound_format`），不是上游轴。
 2. **一个完整块都没交付过**——门是「已交付过至少一个完整块」。没交付走无痕重试；但重试预算耗尽或 `reopen()` 自己也失败时，既无内容也无续写。`_hand_over` 里已显式写了这一格返回 `None`（`committed_count == 0`），唯一的例外是 `ContinuationSupport.stop_reasons` 里的停止原因——**那是配置项，默认值是 `{"max_tokens"}`，不是硬编码条件**。
+
+   **2026-08-22 补第三个触发条件，且它比另外两个常见得多：排空主动拒绝重开**（主仓 `db49581`）。每一次带在途流式请求的优雅重启都可能撞上，而不是「预算恰好耗尽」这种偶发。
+
+   **同时更正一条本项目自己写错的机制陈述。** 落地 `db49581` 时，提交信息与两处 docstring 都称「交接需要已交付的内容，所以这一格结构上不可能交接」——**这句话是假的**，异源评审实测证伪（`reports/260822-review-drain-suppression.md` major-2）：`_hand_over` 在 `if not started:` 时会自己补 `framer.preamble()`，只把 `committed_count == 0` 那道门短路掉，排空被拒的那条流立刻产出一次干净的交接（日志 `upstream_replay_refused_while_draining` → `turn handed back to the client to continue`，`status=retry`）。挡住它的是**一道可配置的闸**，不是机制的固有属性。已改正代码注释与 `status.md`；此处登记的是那个假理由掩盖掉的真问题。
+
+   **真问题：排空这一格要不要为交接开口？** 人写文档「特别地，优雅关闭时报错不再考虑无痕重试，**可以**走下文合成续写机制」这句，承接的正是它上一句「如果还没交付过完整块」——**说的就是这扇门**。措辞是许可式（「可以走」）而非命令式，所以现状（不开口）并不违反文档；但也谈不上被文档裁定过。
+
+   **不开口的代价已量化，是真的丢东西**（评审 major-3，代码事实，推理链每环已核）：`client_delivery.buffering_policy` 取 `full` 或 `until-tool-use` 时，缓冲策略把整轮的完整块全压在 `BlockBuffer` 里不释放（`stream.py` 自己的注释写明这两种策略下「首块前的窗口就是整个回合」），于是 `committed_count` 恒为 0、`client_has_bytes` 未 set。此时关机 + 撕流 → `decide_stream_ending` 返回 REPLAY → 排空闸拒绝 → `_hand_over` 因 `committed_count == 0` 返回 `None` → 裸抛，**缓冲区里那一整份已经算完的回答被整批丢弃**。`db49581` **之前**这一格会重放并大概率成功（排空本来就在等这个请求）。即：本项目的改动让一条既有的丢失式结局在非默认配置下变得常态可达。
+
+   开口的做法是现成的：`_hand_over` 一旦被允许在 `committed_count == 0` 时动作，它做的第一件事就是 `session.finish()` 把缓冲块冲出去再附上 `tool_use`，这一格自动补上。**证据等级：机制与代价均为确凿（一手实测 + 代码事实）；开不开口是产品裁决，需用户定。**
 3. **有意裁决为不可继续的失败**——人写文档的前提是「如果业务可能可以继续」。上游拒绝、转换错误、prompt-limit 不在内；多数发生在 commit 前（还能用 HTTP 错误），但已交付一块之后的转换／assembler 错误落在这里。
 4. **种类上本可继续、只是分类器叫不出名字的失败**——**这一格与第 3 格形似而神不同，初稿把两者混写成一格，是错的**。机制是：`_replay_reason` 返回 `None` 时 `_deliver` 直接 `raise torn`，`_hand_over` **根本不被咨询**。于是一个本该续写的网络类失败，只因 `normalize_upstream_error` 没有它的名字（裸 `h2.ProtocolError` 就是），走的却是「不可继续」那条路。**这不是裁决，是漏网。** 详见第 20 条。
 
