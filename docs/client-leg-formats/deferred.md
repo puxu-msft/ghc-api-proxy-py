@@ -29,22 +29,22 @@
 
 **2026-08-22 第三批**：
 
-- U-4 `anthropic_messages_synthetic.py` → `anthropic_messages_synthetic_reply.py` —— `53dd99c`。定案理由见 README 第四·五节：不按住户（`failed_search`）命名，因为模块存在的理由是通用的；保留「合成」，因为那是项目自己的词，评审报的「三处重名」是误判。`ContinuationSupport.synthesize` 不搬。
+- U-4 `anthropic_messages_synthetic.py` → `anthropic_messages_synthetic_reply.py` —— `1c91870`。定案理由见 README 第四·五节：不按住户（`failed_search`）命名，因为模块存在的理由是通用的；保留「合成」，因为那是项目自己的词，评审报的「三处重名」是误判。`ContinuationSupport.synthesize` 不搬。
 
 **2026-08-22 第二批**（用户裁决「缺陷类问题都要修复」之后）：
 
 - U-2 删除 `--account-type` —— `e7cf57a`
-- U-3 `stream_delivery` 的 framer 改为必填，`signature_compat` 从 `StreamSettings` 移到成帧器 —— `36e303d`
+- U-3 `stream_delivery` 的 framer 改为必填，`signature_compat` 从 `StreamSettings` 移到成帧器 —— `800eb5b`
 - D-1 未识别的 stop reason 不再进 `incomplete_details.reason`（改为正向映射表，无合法拼法即 null）—— `75273e1`
 - D-2 未知 block kind 当场 `raise`，不再静默降级成空 message item —— `75273e1`
 - D-3 `Terminal.upstream_usage` 默认值由 `{}` 改为 `None`，「没观测」与「观测到空」分开 —— `75273e1`
 - D-4 `refresh_in` 不再解析、不再必填 —— `1d1e45b`
-- D-5 一次性交付的前提写成断言（路由被翻译过就 raise）—— `36e303d`
-- D-6 守卫触发时交出已缓冲的字节再抛 —— `36e303d`；新增 `test_one_shot_delivery.py`，此前该路径零覆盖
-- n-2 保活测试改为断言线上的序号，而不是只断言注释帧的字节 —— `13bc1c3`
+- D-5 一次性交付的前提写成断言（路由被翻译过就 raise）—— `800eb5b`
+- D-6 守卫触发时交出已缓冲的字节再抛 —— `800eb5b`；新增 `test_one_shot_delivery.py`，此前该路径零覆盖
+- n-2 保活测试改为断言线上的序号，而不是只断言注释帧的字节 —— `57d5b0e`
 - n-3 `pytest.raises(Exception)` 收窄为 `httpx2.HTTPStatusError` —— `1d1e45b`
 - n-4 `resolve_provider_base_urls` 的返回值改走 `model_validate` —— `285af55`
-- n-5 `stream_settings(chain)` 每请求只读一次 —— `36e303d`
+- n-5 `stream_settings(chain)` 每请求只读一次 —— `800eb5b`
 
 **第一批**：
 
