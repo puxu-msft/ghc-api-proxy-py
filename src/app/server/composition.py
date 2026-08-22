@@ -422,7 +422,16 @@ async def resolve_provider_base_urls(
         changed = True
     if not changed:
         return config
-    return config.model_copy(update={"model_providers": resolved})
+    # Revalidated for the same reason the per-provider write above is, and it is the same call that
+    # would otherwise sit twenty lines under a comment explaining why not to make it: `model_copy`
+    # does not check the name it is handed, so `model_provider` would return a config whose
+    # providers were never replaced, silently and with the right type.
+    return ProxyConfig.model_validate(
+        {
+            **config.model_dump(),
+            "model_providers": {name: p.model_dump() for name, p in resolved.items()},
+        }
+    )
 
 
 def build_copilot_provider(
