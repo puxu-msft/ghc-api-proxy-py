@@ -4,6 +4,15 @@
 
 - **类型**：独立产品规格。它是 [spec.md](spec.md) 的**增补与定点覆盖**，不是它的替代品。凡本文件未提及的行为，一律回到 `spec.md`。凡本文件与 `spec.md` 冲突的条款，本文件在其明确列出的范围内优先，冲突点在 §11 逐条列名。
 - **状态**：`DRAFT — D1／D4／D6 已裁决，其余待裁决`。用户 2026-08-20 第三批裁决已定案三项，见下条；§14 剩余的 D2／D3／D5／D7 未获裁决前，对应条款按本规格给出的保守分支执行。
+
+> ## ⚠️ 2026-08-22：本规格与在产实现已分叉，读之前先读这一节
+>
+> 独立对账见 [`../hosted-web-search/reports/260822-websearch-doc-reconciliation.md`](../hosted-web-search/reports/260822-websearch-doc-reconciliation.md)；实现的当前状态见 [`../hosted-web-search/status.md`](../hosted-web-search/status.md)。三处差异**已按用户后续裁决更正在下文各节**，一处**尚待用户裁决、下文原文未动**：
+>
+> 1. **多了一条本规格没有的轴：功能总开关。** 用户 2026-08-21 裁决 hosted web search **默认关闭**，键是 `model_translation.to_openai_responses.hosted_web_search`。本规格 §2／§9 定义的能力门只谈模型与路由，按它写出来的门在默认配置下永远判通过，而实现永远判不通过。§9 已补这一轴。
+> 2. **能力门不通过时不是「剥离声明」。** §8.3 起草时写的「必须剥离、不得 REJECT」已被用户 2026-08-20「去除 drop 策略，drop 远不如 mock_result」的裁决推翻：实现合成一个失败的 `web_search_tool_result`。§8.3 已改。
+> 3. **配置键名与取值语义已落地。** 不再「待定」，不再是模型 id 列表；用户 2026-08-21 裁决「能力门采用版本清单，清单接受正则表达式」。§9.3 已改。
+> 4. **⏳ 待裁决：域名限制的默认值。** §3.4 与 D1 冻结「默认 `error`，三取值」，实现是「默认 `drop_fields`，两取值」。**这是实现单方面偏离了用户已下的裁决**，理由（190/190 真实子请求都带非空 `allowed_domains`，取 `error` 等于永久禁用）写在 `src/app/config/schema.py` 的注释里，但**没有回到用户手上重裁**。下文 §3.4 与 §14 D1 保持原文不动，等用户裁决后再改。
 - **2026-08-20 用户第三批裁决（推翻本规格起草时的三处偏好）**：
   1. **D6 response presentation → 尽量还原成原生块。** 起草时的偏好是降级成单个 text block；用户裁决要求还原成 `server_tool_use` + `web_search_tool_result`。§5 已按此重写，并写明「尽量」的实际边界。
   2. **D1 域名限制 → 可配置。** 默认 `error`（大声报错），可选 `drop_unsupported_fields`（剥离降级）与 `drop_web_search`（整条声明剥离）。§3.4 已按此重写。
@@ -281,7 +290,9 @@ Anthropic `tool_choice` 映射如下，**必须**按表执行：
 ### 8.3 能力不可用时的行为
 
 - 路由到 **Anthropic Messages 腿**时：`builtin:server-tool-capability` 继续剥离声明、清理悬空 `tool_choice`、摊平历史块。行为完全不变（§10）。
-- 路由到 **Responses 腿但能力门未通过**时：**必须**剥离 web search 声明、同步清理指向它的 `tool_choice`、记一条 `DEGRADE` fact（`server_tool_capability_unavailable`）并输出 INFO 级日志（说明模型不被判定为支持，以便运维不必开 debug 就能查到搜索为何从不执行）。**不得** `REJECT` 整个请求。理由：与 Anthropic 腿保持同一取舍——剥掉一个能力，好过整轮失败。
+- 路由到 **Responses 腿但门未通过**时（功能开关关闭，或模型不被任何一条模式认领）：**必须**合成一个失败的搜索结果——`server_tool_use` 配对 `web_search_tool_result`，后者 `content` 为单个 `{"type":"web_search_tool_result_error","error_code":"unavailable"}` 对象——并输出 INFO 级日志，日志**必须**区分「功能未开启」与「模型未被认领」两种原因。**不得** `REJECT` 整个请求，也**不得**剥离声明后照发。
+
+  > **2026-08-22 更正。** 本条起草时写的是「**必须**剥离 web search 声明、同步清理指向它的 `tool_choice`……理由：与 Anthropic 腿保持同一取舍——剥掉一个能力，好过整轮失败」。用户 2026-08-20 裁决「去除 drop 策略，drop 在这里行为远不如 mock_result」推翻了它，理由是 Claude Code 把 web search 发成独立子请求（`tools` 只有搜索一项，190/190 实测），剥掉它唯一的工具后请求**不会失败**——模型凭记忆作答，而客户端无条件把回复拼上 `Web search results for query:` 抬头。剥离在这条腿上产出的不是「少一个能力」，是**把记忆当搜索结果交付**。
 - **例外且优先**：§3.4 的 `allowed_domains` / `blocked_domains` 非空时走 `REJECT`，该条优先于本节。它拒绝的原因不是能力缺失，而是语义反转：继续执行会把一条明确的收紧约束变成 no-op。
 
 ### 8.4 上游返回未请求的 `web_search_call`
@@ -305,6 +316,14 @@ Anthropic `tool_choice` 映射如下，**必须**按表执行：
 - `supported_endpoints` 含 `/responses` 或 `ws:/responses` 是**必要**条件。所有 `claude-*` 都不广告 `/responses`，这正是生产 400 的根因。
 - 它**不充分**，而且比过去更不充分：实时目录里 `/responses` 集合现已包含**非 GPT 模型** `grok-4.5`、`grok-4.6`、`mai-code-1.1-flash`、`mai-code-1-flash-picker`，**全部未探针**。`web_search` 是 OpenAI Responses 的原生 builtin，非 OpenAI 血统的模型经 Copilot 的 `/responses` 兼容层转发时是否也真的执行它，没有任何证据。
 
+### 9.0 功能总开关（2026-08-22 补入）
+
+在本节其余所有条件**之前**还有一道：`model_translation.to_openai_responses.hosted_web_search`，**默认 `false`**（用户 2026-08-21 裁决）。关闭时这条腿不提供 hosted web search，声明一律按 §8.3 合成失败结果，§9.1～§9.3 的模型判定根本不会被求值。
+
+关闭的理由是支持**不完整**，且缺的部分对客户端不可见：交给 Anthropic 客户端的是一行文本而非 §5.3 冻结的原生块对；上游确实返回的 `url_citation` 零处读取；`max_uses` 与域名清单都发不出去。把半成品设成每个请求的默认，是这条裁决要避免的事。
+
+日志与 error code **必须**把「功能未开启」（`server_tool_disabled`）与「模型未被认领」（`server_tool_capability_unavailable`）分开——默认是关的，所以前者是两者中更可能的那个，运维必须分得清自己看的是哪一种。
+
 ### 9.3 冻结的保守判定（2026-08-20 用户裁决 D4：配置项手动维护）
 
 用户要求先确认上游 `/models` 是否给得出信号。**已确认：给不出。** 2026-08-20 对实时目录做了全量重判（42 个模型、67,656 字节，原始件 `exp/260820-websearch-probe/raw/models-live.json`）：
@@ -320,9 +339,13 @@ Anthropic `tool_choice` 映射如下，**必须**按表执行：
 2. resolved model 的 `supported_endpoints` 含 `/responses` 或 `ws:/responses`；且
 3. resolved model id 在**配置维护的允许清单**内。
 
-配置键**名待定**（同 §3.4 的理由：须与人写 `config.example.yaml` 的扁平键词汇对齐），下文以 `<hosted_web_search_models>` 指代。取值为模型 id 列表。**默认值**由目录派生：`vendor == "OpenAI"` **且** `supported_endpoints` 含 `/responses`，2026-08-20 的实时目录下即 `gpt-5.3-codex`、`gpt-5.4`、`gpt-5.4-mini`、`gpt-5.5`、`gpt-5.6-luna`、`gpt-5.6-sol`、`gpt-5.6-terra` 七个。
+配置键是 `model_providers.<name>.models_support_web_search`（用户 2026-08-20 裁决的键名）。取值为**正则表达式列表**，用 `fullmatch` 匹配上游 `model.id`（用户 2026-08-21 裁决「能力门采用版本清单，清单接受正则表达式」）。模式在启动时统一编译，不合法的模式带着条目原文与键名抛 `ValueError`。**默认值是一条** `gpt-[5-9]\.\d+.*`，覆盖 2026-08-20 实时目录里 `vendor == "OpenAI"` 且 `supported_endpoints` 含 `/responses` 的那七个（`gpt-5.3-codex`、`gpt-5.4`、`gpt-5.4-mini`、`gpt-5.5`、`gpt-5.6-luna`、`gpt-5.6-sol`、`gpt-5.6-terra`），并自动纳入后继版本。
 
-- 取 `vendor` 而**不**取 `gpt-` 名字前缀，理由必须写在默认值旁边：前缀会卷进 `gpt-5-mini`，而它的 `vendor` 实为 `Azure OpenAI`，是另一条供给链。
+> **2026-08-22 更正。** 本节起草时写的是「配置键**名待定**……取值为模型 id 列表……**默认值**由目录派生：`vendor == "OpenAI"` 且……七个」，并说「取 `vendor` 而**不**取 `gpt-` 名字前缀」。三处都已被落地实现取代：键名不待定，取值是正则不是 id 列表，默认是一条模式不是七个字面量。**判据也反了**——实现取的正是名字，靠**点分小版本**排除 `gpt-5-mini`（它没有点分小版本，vendor 为 `Azure OpenAI`），而不是靠 `vendor` 字段。
+>
+> **一个必须写下来的后果**：条目是正则，所以写成裸模型 id 的条目**不等价于字面匹配**——`.` 是通配符，`gpt-5.5` 也会认领 `gpt-5x5`。要精确钉住一个 id 必须转义：`gpt-5\.5`。
+
+- 每个 provider 的清单**只对它自己生效**，不得跨 provider 合并：键在 `model_providers.<name>` 之下，答案就是那个 provider 的。合并会让一个自身清单为空的 provider 继承别人的许可。
 - **已知误判，必须记录而不是掩盖**：假阳性最可疑的是 `gpt-5.3-codex`（codex 专用，工具面不同），其次 `gpt-5.4-mini`／`gpt-5.6-luna`（lightweight 档）；假阴性是 `grok-4.5`／`grok-4.6`（xAI 自带搜索，是否透出未知）、`mai-code-*`、`gpt-5-mini`。
 - **两类误判的代价不对称**，这决定了清单宁窄勿宽：假阳性是一次可见的 400，人能看到并改配置；假阴性是「用户以为搜了、其实没搜」的**静默降级**，没有任何人会发现。
 - 判定失败时的行为见 §8.3，**不得**失败整个请求。
