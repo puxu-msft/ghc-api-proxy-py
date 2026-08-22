@@ -79,7 +79,7 @@
 
 **选择 `message_start` 而不是注释帧，是评审比较三个方案后的现行选择**（`../empty-text-block/reports/260820-review-synthetic-start-fix.md` §7 逐条比较了「填非空文本的内容块」「只发一个 SSE 注释」「改发 `event: error`」），**不是用户裁决**——该报告原文是「我的偏好」，且其 §9 已把与人写文档的冲突原样交回，至今未裁。
 
-#### 【需用户裁决】实现与人写文档的窗口定义冲突
+#### ~~【需用户裁决】实现与人写文档的窗口定义冲突~~ —— 已随机制消失，不需要再裁（2026-08-22）
 
 `docs/.human-controlled/config.example.yaml` 的 `synthesized_response_headers_after_sec` 一节（用户亲笔，按项目约定压过一切我方推导的 ADR 与 spec）。**不引行号**：该文件正被用户持续修订，行号引用已经失效过一次。
 
