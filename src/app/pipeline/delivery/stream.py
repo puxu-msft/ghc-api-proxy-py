@@ -307,6 +307,8 @@ async def _deliver(
             # Not gated on a block having been delivered. `client-side-block-delivery.md` puts the condition at the response headers, and by the time this generator runs those have gone out: the response is built with upstream's own status once its headers arrive, and the framework sends `http.response.start` before pulling a chunk. Gating on a delivered block instead meant `full` and `until-tool-use` — which deliver nothing until the stream ends — timed out having sent the client zero bytes and no frame at all.
             #
             # Deliberately only this one. The other endings that reach here remain indistinguishable from each other on the wire, and widening the frame to cover them is a separate question with its own answer to find. Nothing is flushed first either: what is buffered but undelivered would make the size of this ending depend on the buffering policy, while the ending itself is a clock event.
+            #
+            # Ahead of `terminal.seen` on purpose, and that ordering is a ruling rather than an accident of writing order: `client_request_deadline` bounds this round's total elapsed time, so once it fires the round is over whether or not upstream happened to finish first. A complete reply may be sitting assembled in the buffer, and it is dropped. Ruled 2026-08-22. The attempt deadline just below is ordered the other way for the opposite reason — it ends only *this attempt*, so a finished turn has to be recognised before anything asks what went wrong.
             yield framer.error(
                 error_type=WIRE_TYPES[ErrorCategory.INTERNAL],
                 message=str(torn) or "client request exceeded its deadline",
@@ -314,20 +316,11 @@ async def _deliver(
             )
             return
         if assembler.terminal.seen:
-            # Upstream finished this turn and *then* the connection went. Nothing is missing, so the
-            # ending below is the real one.
+            # Upstream finished this turn and *then* the connection went. Nothing is missing, so the ending below is the real one.
             #
-            # Answered here rather than from the verdict, which is where it used to be — and that was
-            # one door short. A failure the caller's taxonomy does not recognise, a bare
-            # `h2.ProtocolError` among them, never reaches the verdict at all: it is refused two
-            # lines down and raised, taking a complete reply with it. The question "did upstream
-            # finish" has to be answered before any question about the failure, because the answer
-            # does not depend on the failure.
+            # Answered here rather than from the verdict, which is where it used to be — and that was one door short. A failure the caller's taxonomy does not recognise, a bare `h2.ProtocolError` among them, never reaches the verdict at all: it is refused two lines down and raised, taking a complete reply with it. The question "did upstream finish" has to be answered before any question about the failure, because the answer does not depend on the failure.
             #
-            # Deliberately still below the client deadline. Which of those two wins is a real
-            # question with a real consequence — a turn upstream completed just before the clock ran
-            # out is currently answered with an error frame rather than delivered — and it is
-            # recorded as needing a ruling rather than settled here; `deferred.md` 11.
+            # Still below the client deadline, and that is now a ruling rather than a deferral: see the branch above. Above the attempt deadline, though, which reaches here as an ordinary tear — that one ends only this attempt, so a finished turn must not be handed to it as something to retry.
             break
         reason = replay.eligible(torn) if replay is not None else None
         if replay is None or reason is None:
@@ -340,10 +333,7 @@ async def _deliver(
             reason=reason,
         )
         if verdict.ending is StreamEnding.COMPLETE:
-            # Unreachable from here now that the same question is answered above, and kept because
-            # this is a switch over everything the verdict can say — a branch that silently fell
-            # through to the hand-over is what turned a finished turn into a synthesised
-            # interruption in the first place.
+            # Unreachable from here now that the same question is answered above, and kept because this is a switch over everything the verdict can say — a branch that silently fell through to the hand-over is what turned a finished turn into a synthesised interruption in the first place.
             break
         if verdict.ending is StreamEnding.REPLAY:
             replacement = await replay.reopen()

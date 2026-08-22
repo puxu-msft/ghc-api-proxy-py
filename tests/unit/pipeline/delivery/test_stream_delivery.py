@@ -1011,6 +1011,32 @@ async def test_the_client_deadline_is_the_one_ending_that_says_so() -> None:
     """By the time this can fire the response has been open a while and its status is long settled, so an SSE error frame is the only way left to say what happened.
 
     Without it this ending is byte-for-byte the same as upstream tearing — measured 2026-08-22 — and only the proxy's own log could tell them apart. Ruled the same day.
+
+    The sample stops two events short of upstream's terminal so this is a deadline landing mid-turn, which is what the name claims. Whether a deadline landing *after* upstream finished ends the same way is the sibling test's question, and it is a separate ruling.
+    """
+    chunks = [
+        chunk
+        async for chunk in stream_delivery(
+            _hits_the_client_deadline_after(anthropic_stream("one")[:-2]),
+            AnthropicAssembler(),
+            buffer=BlockBuffer(policy="block"),
+            settings=StreamSettings(sse_ping_interval=0),
+            framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
+        )
+    ]
+    assert events_of(chunks)[-1] == "error"
+    assert b"client_deadline_exceeded" in b"".join(chunks)
+    # Not a `message_stop`: the turn did not finish, and saying it did is the defect this whole area exists to avoid.
+    assert "message_stop" not in events_of(chunks)
+
+
+@pytest.mark.asyncio
+async def test_the_client_deadline_outranks_an_upstream_that_just_finished() -> None:
+    """`client_request_deadline` bounds this round's total elapsed time, so once it fires the round is over — whether or not upstream happened to write its last byte first. Ruled 2026-08-22.
+
+    The cost is real and accepted: a complete reply sits assembled in the buffer and is dropped in favour of the error frame. The upstream deadline is ordered the other way round for the opposite reason — it ends only *this attempt*, so a finished turn has to be recognised before anything asks what went wrong.
+
+    Pins the ordering directly. The two tests above it also go red if the branches are swapped, but they say nothing about ordering in their names, and an ordering nobody named is an ordering the next reader will reshuffle.
     """
     chunks = [
         chunk
@@ -1024,7 +1050,6 @@ async def test_the_client_deadline_is_the_one_ending_that_says_so() -> None:
     ]
     assert events_of(chunks)[-1] == "error"
     assert b"client_deadline_exceeded" in b"".join(chunks)
-    # Not a `message_stop`: the turn did not finish, and saying it did is the defect this whole area exists to avoid.
     assert "message_stop" not in events_of(chunks)
 
 
@@ -1053,11 +1078,13 @@ async def test_a_held_back_policy_still_hears_the_client_deadline(policy: str) -
     """The frame is owed once the response headers are out, not once a block has been delivered.
 
     `client-side-block-delivery.md` puts the condition at the headers, and those go out before this generator runs. Gated on a delivered block instead, these two policies — which hold every block until the stream ends — timed out having sent the client zero bytes and no frame at all.
+
+    Mid-turn sample on purpose: this is about the policies, so it should not also depend on how a finished turn is ranked against the deadline.
     """
     chunks = [
         chunk
         async for chunk in stream_delivery(
-            _hits_the_client_deadline_after(anthropic_stream("one")),
+            _hits_the_client_deadline_after(anthropic_stream("one")[:-2]),
             AnthropicAssembler(),
             buffer=BlockBuffer(policy=policy),  # pyright: ignore[reportArgumentType]
             settings=StreamSettings(sse_ping_interval=0),
