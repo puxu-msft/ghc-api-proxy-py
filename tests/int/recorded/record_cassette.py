@@ -24,7 +24,8 @@ import httpx2
 from app.config.schema import ProxyConfig
 from app.pipeline.driver import handle_bounded
 from app.server.composition import build_chain, refresh_catalogs
-from app.server.inbound import build_context, route_for_path
+from app.server.inbound import build_context
+from app.server.routes.table import route_for_path
 from recorded.cassettes import RecordingTransport
 from recorded.recorded_provider import pinned_config
 

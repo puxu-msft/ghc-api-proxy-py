@@ -26,7 +26,8 @@ from app.pipeline.delivery.stream import stream_delivery
 from app.pipeline.delivery_policy import assembler_for, delivery_buffer, stream_settings
 from app.pipeline.driver import handle_bounded
 from app.server.composition import refresh_catalogs
-from app.server.inbound import build_context, route_for_path
+from app.server.inbound import build_context
+from app.server.routes.table import route_for_path
 
 CASSETTE = "anthropic_to_responses_stream"
 

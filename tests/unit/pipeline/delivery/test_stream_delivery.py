@@ -33,7 +33,7 @@ from app.pipeline.delivery.stream import (
     stream_delivery,
 )
 from app.pipeline.retry import RetryLedger, RetryReason, reason_for
-from app.server.pipeline_app import (
+from app.server.routes.inference import (
     _counted_upstream,  # pyright: ignore[reportPrivateUsage]
 )
 from app.streaming.deadline import ClientDeadlineError, StreamDeadlineError, with_deadline_at

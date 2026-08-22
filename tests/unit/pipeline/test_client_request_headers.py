@@ -13,7 +13,8 @@ from app.pipeline.request_headers import (
     forwarded_client_headers,
     strip_denied_beta_flags,
 )
-from app.server.inbound import ROUTES, build_context
+from app.server.inbound import build_context
+from app.server.routes.table import ROUTES
 
 
 def test_the_beta_header_is_forwarded() -> None:

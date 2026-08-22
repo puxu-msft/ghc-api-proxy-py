@@ -41,10 +41,12 @@ from app.pipeline.delivery_policy import delivery_buffer, stream_settings
 from app.server.app_state import CHAIN_STATE_KEY
 from app.server.composition import build_chain
 from app.server.pipeline_app import (
+    create_pipeline_app,
+)
+from app.server.routes.inference import (
     _AccountedStreamingResponse,  # pyright: ignore[reportPrivateUsage]
     _StreamAccounting,  # pyright: ignore[reportPrivateUsage]
     _tracked_delivery,  # pyright: ignore[reportPrivateUsage]
-    create_pipeline_app,
 )
 from app.tokenization.state_store import TokenizationStateStore
 
