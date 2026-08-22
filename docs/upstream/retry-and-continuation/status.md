@@ -26,6 +26,8 @@
 
 **已存在但零生产调用点的件**（`decide_stream_ending()`、`RetryBudget`、`buffered_retry.py`、`delayed_commit.py` 等 6 组，以及 `continuation.*`／`streamReplay`／`max_tokens_as_retryable`／`hedge` 4 个死配置项）见 `deferred.md`。**前三个已分别按用户裁决删除**（B 组、`9aa31f9`、`fef7d96`）；`hedge` 仍在。
 
+> **2026-08-22 更正**：上面这句把 `decide_stream_ending()` 列为「零生产调用点」，**当天已不成立**——`8f654b4` 接线，`1743a0b` 把「上游是否已完成」前移到异常分类之前，`f0527e5` 补守卫。它现在是活件；不可达的只剩它内部的 `COMPLETE` 那一格（调用者先答完了这一问）。见 `deferred.md` 第 7、11、12 条。
+
 ## 一条决定分类表形状的结构事实
 
 **上游 HTTP 状态码随上游响应头到达，早于任何 body 字节；而块要装配出来至少得有 body。** 加上「已交付」分支不发起任何新的上游 attempt，两头一夹，得到：
