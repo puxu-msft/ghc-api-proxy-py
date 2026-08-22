@@ -28,6 +28,12 @@ CONFIG_PATH_VARIABLE = f"{ENV_PREFIX}CONFIG"
 GITHUB_TOKEN_VARIABLE = f"{ENV_PREFIX}GITHUB_TOKEN"
 NON_SETTING_VARIABLES = frozenset({CONFIG_PATH_VARIABLE, GITHUB_TOKEN_VARIABLE})
 
+# Flat spellings the prefix makes natural, pointed at where the schema actually keeps them. Nesting is by `__`, so `GHC_API_PROXY_PORT` would otherwise arrive as a top-level `port` key and hit the same collision the two variables above are excluded for, with the same result: the service refuses to start, naming a field nobody set. It is the obvious way to say it, and `config.example.yaml` uses that spelling when it names the pidfile — so it is going to be typed. `host` is aliased alongside it rather than on its own merit: the two are set together, and aliasing one would leave the other as exactly the trap this removes.
+ENV_ALIASES: Mapping[str, tuple[str, ...]] = {
+    "host": ("server", "host"),
+    "port": ("server", "port"),
+}
+
 
 def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
     """Merge mappings key by key; anything else replaces wholesale.
@@ -119,17 +125,26 @@ def environment_values(environ: Mapping[str, str] | None = None) -> dict[str, An
 
     Values stay strings; pydantic coerces them. YAML-ish parsing here would make `off` and `both`
     behave differently between the file and the environment.
+
+    A name with no `__` in it is looked up in `ENV_ALIASES` first, so the flat spellings an operator reaches for land where the schema keeps them instead of on a top-level key it forbids.
+
+    Aliased names are collected separately and merged under the explicit ones, so setting both spellings of the same setting resolves the same way every time. Merging them in one pass would let the answer depend on which name the environment happened to yield first.
     """
     source = environ if environ is not None else os.environ
-    values: dict[str, Any] = {}
+    aliased: dict[str, Any] = {}
+    explicit: dict[str, Any] = {}
     for name, raw in source.items():
         if not name.startswith(ENV_PREFIX) or name in NON_SETTING_VARIABLES:
             continue
         remainder = name[len(ENV_PREFIX) :].lower()
         if not remainder:
             continue
-        _assign(values, tuple(remainder.split(ENV_NESTED_DELIMITER)), raw)
-    return values
+        path = tuple(remainder.split(ENV_NESTED_DELIMITER))
+        if len(path) == 1 and path[0] in ENV_ALIASES:
+            _assign(aliased, ENV_ALIASES[path[0]], raw)
+        else:
+            _assign(explicit, path, raw)
+    return _deep_merge(aliased, explicit)
 
 
 def load_proxy_config(

@@ -261,3 +261,36 @@ def test_the_github_token_variable_is_not_read_as_a_setting(
 
     assert environment_values() == {}
     assert load_proxy_config() is not None
+
+
+def test_the_flat_port_spelling_reaches_the_server_section() -> None:
+    """`GHC_API_PROXY_PORT` is the spelling the prefix invites, and it used to break start-up.
+
+    Nesting is by `__`, so it arrived as a top-level `port` key and `ProxyConfig` forbids unknown ones. The operator got `port — Extra inputs are not permitted` and a service that would not start, from a variable named exactly what it looks like it should be. `config.example.yaml` uses this spelling when it names the pidfile, so it is going to be typed.
+    """
+    assert environment_values({"GHC_API_PROXY_PORT": "5000"}) == {"server": {"port": "5000"}}
+    assert load_proxy_config(environ={"GHC_API_PROXY_PORT": "5000"}).server.port == 5000
+
+
+def test_the_flat_host_spelling_travels_with_it() -> None:
+    # Aliased alongside `port` rather than on its own merit: the two are set together, and aliasing one would leave the other as exactly the trap this removes.
+    assert environment_values({"GHC_API_PROXY_HOST": "0.0.0.0"}) == {"server": {"host": "0.0.0.0"}}
+    assert load_proxy_config(environ={"GHC_API_PROXY_HOST": "0.0.0.0"}).server.host == "0.0.0.0"
+
+
+def test_the_nested_spelling_still_works_and_wins_over_the_alias() -> None:
+    """Both spellings set at once resolves the same way every time.
+
+    Merged in one pass the answer would depend on which name the environment yielded first, which is the kind of thing that reads as flaky rather than as a rule.
+    """
+    both = {"GHC_API_PROXY_PORT": "5000", "GHC_API_PROXY_SERVER__PORT": "5001"}
+    assert load_proxy_config(environ=both).server.port == 5001
+    assert load_proxy_config(environ={"GHC_API_PROXY_SERVER__PORT": "5001"}).server.port == 5001
+
+
+def test_the_command_line_still_beats_the_flat_spelling() -> None:
+    # The alias sits in the environment tier, so `--port` overrides it like any other variable.
+    config = load_proxy_config(
+        environ={"GHC_API_PROXY_PORT": "5000"}, cli_overrides={"server": {"port": 4242}}
+    )
+    assert config.server.port == 4242
