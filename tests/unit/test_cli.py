@@ -11,6 +11,7 @@ from app.cli import app, serve_inherited
 from app.config.loading import bundled_config_text
 from app.config.schema import ProxyConfig
 from app.lifecycle.entry import StandaloneOptions
+from app.lifecycle.pidfile import PidfileError
 
 runner = CliRunner()
 
@@ -284,8 +285,54 @@ def test_start_rejects_fd_with_explicit_bind_option(
     result = runner.invoke(app, ["start", "--fd", "3", *bind_option])
 
     assert result.exit_code == 2
-    assert "--fd cannot be combined with --host or --port" in result.output
+    # Names the option actually given rather than the whole set: the message is built from what conflicted, so an operator who passed one is not left scanning a list for which of them was theirs.
+    assert f"--fd cannot be combined with {bind_option[0]}" in result.output
     run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "option", [("--manual",), ("--rate-limit",), ("--github-token", "t")]
+)
+def test_fd_still_reports_the_options_the_config_cannot_carry(
+    option: tuple[str, ...], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Warned about, not refused — and the `--fd` path used to do neither.
+
+    These differ from the ones above: they do not contradict an inherited listener, they simply have nowhere to live in `ProxyConfig`, and the project's ruling is that such an option is announced rather than rejected. The inherited-listener branch loaded its own config and threw the second return value away, so on that one path the announcement never happened. Serving still proceeds; that is what makes silence here indistinguishable from the option having worked.
+    """
+    run = Mock()
+    monkeypatch.setattr("app.cli.run", run)
+
+    result = runner.invoke(app, ["start", "--fd", "3", *option])
+
+    assert result.exit_code == 0, result.output
+    assert option[0] in result.output, result.output
+    assert run.called is True, "an inactive option is a warning, not a refusal"
+
+
+def test_a_refused_start_reports_cleanly_rather_than_as_a_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refusal's whole value is the instruction it carries; a traceback buries it.
+
+    `PidfileError` is a `RuntimeError`, and nothing between `run_standalone` and click catches it, so it used to reach the default excepthook: a dozen frames, with `pass --restart to take over from it` at the bottom. Starting twice on one port is an ordinary operator action, not a program failure, and it should not read like one.
+
+    The sharp assertion is the last one. Exit code 1 alone cannot tell the two apart — an unhandled exception produces it too.
+    """
+    message = "/run/x/standalone-4141.pid still records pid 4242, which is running; pass --restart"
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise PidfileError(message)
+
+    monkeypatch.setattr("app.cli.run", refuse)
+
+    result = runner.invoke(app, ["start"])
+
+    assert result.exit_code == 1
+    assert message in result.output, result.output
+    assert not isinstance(result.exception, PidfileError), (
+        "the refusal escaped unhandled, so the operator sees a traceback"
+    )
 
 
 def test_logout_clears_stored_token(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -344,45 +391,79 @@ def test_start_asks_for_no_tls_material_when_the_config_wants_none(
     assert not (tmp_path / "tls").exists()
 
 
-def test_the_configured_pidfile_reaches_the_options(
+def test_the_configured_pidfile_dir_reaches_the_options(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """`config.example.yaml` documents a `pidfile` key, so setting it has to do something.
+    """`config.example.yaml` documents a `pidfile_dir` key, so setting it has to do something.
 
-    It was parsed into `ProxyConfig` and pinned in `NOT_HOT_RELOADABLE`, but nothing ever read it: an operator who set the key got the default path and no indication that their setting had been dropped.
+    It was parsed into `ProxyConfig` and pinned in `NOT_HOT_RELOADABLE`, but nothing ever read it: an operator who set the key got the default directory and no indication that their setting had been dropped.
     """
     config = tmp_path / "config.yaml"
-    config.write_text('pidfile: "/run/ghc-api-proxy/named.pid"\n', encoding="utf-8")
+    config.write_text('pidfile_dir: "/run/ghc-api-proxy"\n', encoding="utf-8")
     run = Mock()
     monkeypatch.setattr("app.cli.run", run)
 
     assert runner.invoke(app, ["start", "--config", str(config)]).exit_code == 0
-    assert serve_options(run).pidfile == Path("/run/ghc-api-proxy/named.pid")
+    assert serve_options(run).pidfile_dir == Path("/run/ghc-api-proxy")
 
 
-def test_the_command_line_pidfile_beats_the_configured_one(
+def test_the_command_line_pidfile_dir_beats_the_configured_one(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     config = tmp_path / "config.yaml"
-    config.write_text('pidfile: "/run/ghc-api-proxy/named.pid"\n', encoding="utf-8")
+    config.write_text('pidfile_dir: "/run/ghc-api-proxy"\n', encoding="utf-8")
     run = Mock()
     monkeypatch.setattr("app.cli.run", run)
 
     result = runner.invoke(
-        app, ["start", "--config", str(config), "--pidfile", str(tmp_path / "typed.pid")]
+        app, ["start", "--config", str(config), "--pidfile-dir", str(tmp_path / "typed")]
     )
 
     assert result.exit_code == 0
-    assert serve_options(run).pidfile == tmp_path / "typed.pid"
+    assert serve_options(run).pidfile_dir == tmp_path / "typed"
 
 
-def test_an_unset_pidfile_is_left_for_the_bind_to_name(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_unset_pidfile_dir_is_left_for_the_lifecycle_to_resolve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """None rather than a resolved path, and that is load-bearing.
 
-    The default is named after the port actually bound, which `--fd` never states and port 0 leaves to the kernel. Resolving it this early would put a guess in the file name.
+    The name inside the directory is derived from the port actually bound, which `--fd` never states and port 0 leaves to the kernel. Resolving the location this early would put a guess in the file name.
     """
     run = Mock()
     monkeypatch.setattr("app.cli.run", run)
 
     assert runner.invoke(app, ["start"]).exit_code == 0
-    assert serve_options(run).pidfile is None
+    assert serve_options(run).pidfile_dir is None
+
+
+def test_forcing_the_pidfile_is_off_unless_asked_for(monkeypatch: pytest.MonkeyPatch) -> None:
+    run = Mock()
+    monkeypatch.setattr("app.cli.run", run)
+
+    assert runner.invoke(app, ["start"]).exit_code == 0
+    assert serve_options(run).force_write_pidfile is False
+
+    run.reset_mock()
+    assert runner.invoke(app, ["start", "--force-write-pidfile"]).exit_code == 0
+    assert serve_options(run).force_write_pidfile is True
+
+
+@pytest.mark.parametrize(
+    "option", ["--restart", "--force-write-pidfile", "--pidfile-dir=/tmp/x"]
+)
+def test_fd_refuses_the_lifecycle_options_it_cannot_honour(
+    option: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refused, not reported as inactive.
+
+    systemd owns the listener here: nothing in this process can hand it over or record it, so each of these asks for something that cannot happen on this path. That is what separates them from the ones the next test covers, which are merely homeless in `ProxyConfig` and get a warning. (`--host` and `--port` were already refused; `test_start_rejects_fd_with_explicit_bind_option` keeps that.)
+    """
+    run = Mock()
+    monkeypatch.setattr("app.cli.run", run)
+
+    result = runner.invoke(app, ["start", "--fd", "3", option])
+
+    assert result.exit_code != 0
+    assert option.split("=")[0] in result.output
+    assert run.called is False, "nothing may be served once an option was refused"

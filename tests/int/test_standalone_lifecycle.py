@@ -19,6 +19,7 @@ from fastapi import FastAPI
 from starlette.responses import StreamingResponse
 from uvicorn import Config
 
+from app.config.paths import standalone_pidfile_path
 from app.lifecycle.adapter import UvicornListenerAdapter
 from app.lifecycle.entry import StandaloneOptions, run_standalone
 from app.lifecycle.listener import LISTENER_NAME, bind_listener
@@ -503,7 +504,9 @@ async def test_a_failed_handover_leaves_the_predecessor_its_pidfile(
     nothing to find.
     """
     predecessor = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
-    pidfile = tmp_path / "standalone.pid"
+    port = free_port()
+    # Derived rather than spelled: the name inside the directory belongs to the code, and a copy of the rule here would keep passing after the rule changed.
+    pidfile = standalone_pidfile_path(port, tmp_path)
     try:
         await asyncio.sleep(0.5)
         write_pidfile(pidfile, predecessor.pid)
@@ -520,7 +523,7 @@ async def test_a_failed_handover_leaves_the_predecessor_its_pidfile(
             raise PidfileError("handover failed")
 
         monkeypatch.setattr("app.lifecycle.entry.signal_restart", refuse)
-        options = StandaloneOptions(port=free_port(), pidfile=pidfile, restart=True)
+        options = StandaloneOptions(port=port, pidfile_dir=tmp_path, restart=True)
 
         with pytest.raises(PidfileError, match="handover failed"):
             await run_standalone(FastAPI(), options)
@@ -530,6 +533,33 @@ async def test_a_failed_handover_leaves_the_predecessor_its_pidfile(
     finally:
         predecessor.kill()
         predecessor.wait(timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_start_releases_the_listener_it_had_bound(tmp_path: Path) -> None:
+    """The refusal happens after the bind, so it has to give the port back.
+
+    Scope exit alone does not: the exception keeps its traceback, the traceback keeps `run_standalone`'s frame, and the frame keeps the listener — so for as long as any caller still holds the exception, the port stays held. `pytest.raises` holding it here is exactly that situation, and it is also the ordinary one, since a caller that logs or retries holds it too.
+
+    A child-process test cannot see this. There the kernel reclaims the fds at exit, so the leak is invisible from outside and stays invisible whether or not the listener was released. The bind below deliberately omits `SO_REUSEPORT`, which is what makes it a real question — with it, the second bind would succeed either way.
+    """
+    holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    port = free_port()
+    pidfile = standalone_pidfile_path(port, tmp_path)
+    try:
+        await asyncio.sleep(0.5)
+        write_pidfile(pidfile, holder.pid)
+
+        with pytest.raises(PidfileError, match="still records pid") as refusal:
+            await run_standalone(FastAPI(), StandaloneOptions(port=port, pidfile_dir=tmp_path))
+
+        # `refusal` has to still be holding the exception when the bind below runs — that is the whole situation under test. Let it go first and the frame drops, the listener with it, and the bind then succeeds whether or not anything was released on purpose.
+        assert refusal.value.__traceback__ is not None
+        replacement = bind_listener("127.0.0.1", port, reuse_port=False)
+        replacement.close()
+    finally:
+        holder.kill()
+        holder.wait(timeout=5)
 
 
 def free_port() -> int:

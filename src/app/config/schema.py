@@ -39,7 +39,7 @@ NOT_HOT_RELOADABLE = frozenset(
         "model_providers.*.api_base_url",
         "model_providers.*.auth_base_url",
         "model_providers.*.github_token_file",
-        "pidfile",
+        "pidfile_dir",
         "proxy",
         "reactive_rate_limiter",
         "server.host",
@@ -379,7 +379,8 @@ class ProxyConfig(Section):
     )
     default_model_provider: str = ""
 
-    pidfile: str = ""
+    # A directory, not a file: the name inside it carries the port, so one setting covers every instance an operator runs rather than having to be re-stated per port.
+    pidfile_dir: str = ""
     graceful_cleanup_timeout: int = Field(default=60, ge=0)
     proxy: str = ""
 

@@ -118,6 +118,19 @@ def test_the_pidfile_is_named_after_the_port(monkeypatch: pytest.MonkeyPatch) ->
     assert standalone_pidfile_path(4141) == Path("/custom/data/ghc-api-proxy/standalone-4141.pid")
 
 
+def test_a_named_directory_holds_the_same_port_derived_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The operator chooses the directory; the name inside it is not theirs to choose.
+
+    A successor has to derive the file from nothing but the port it is taking over, so letting the setting name the file would break the one thing the file exists for.
+    """
+    monkeypatch.setenv("XDG_DATA_HOME", "/custom/data")
+    assert standalone_pidfile_path(4141, Path("/run/ghc-api-proxy")) == Path(
+        "/run/ghc-api-proxy/standalone-4141.pid"
+    )
+
+
 def test_two_ports_do_not_share_one_pidfile(monkeypatch: pytest.MonkeyPatch) -> None:
     """Why the port is in the name at all.
 
@@ -125,3 +138,6 @@ def test_two_ports_do_not_share_one_pidfile(monkeypatch: pytest.MonkeyPatch) -> 
     """
     monkeypatch.setenv("XDG_DATA_HOME", "/custom/data")
     assert standalone_pidfile_path(4141) != standalone_pidfile_path(41411)
+    # And a chosen directory does not collapse them either.
+    named = Path("/run/ghc-api-proxy")
+    assert standalone_pidfile_path(4141, named) != standalone_pidfile_path(41411, named)

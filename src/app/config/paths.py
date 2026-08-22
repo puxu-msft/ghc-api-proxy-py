@@ -27,14 +27,16 @@ def spec_config_file_path() -> Path:
     return user_data_path() / "config.yaml"
 
 
-def standalone_pidfile_path(port: int) -> Path:
-    """Where the stand-alone pidfile lives when the operator names none.
+def standalone_pidfile_path(port: int, directory: Path | None = None) -> Path:
+    """Where the stand-alone pidfile lives, inside `directory` or the default data directory.
 
     Named after the port because the file identifies one listening endpoint, not one installation.
     A single shared name made every `start` a claimant to the same record regardless of what it was listening on: a throwaway run on another port overwrote the incumbent's entry on its way up and deleted it on its way down, after which the incumbent existed but could no longer be found.
     The next `--restart` then had no predecessor to signal and quietly became a second listener on the same port instead of a replacement, which is the one failure that looks exactly like success.
+
+    The operator configures the directory rather than the file, so that one setting covers however many ports they run; the name inside it is not theirs to choose, because a successor has to be able to derive it from nothing but the port it is taking over.
     """
-    return user_data_path() / f"standalone-{port}.pid"
+    return (directory if directory is not None else user_data_path()) / f"standalone-{port}.pid"
 
 
 def tokenization_state_path() -> Path:

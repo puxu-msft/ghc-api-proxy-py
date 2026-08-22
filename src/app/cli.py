@@ -14,6 +14,7 @@ from app.config.paths import tls_material_dir
 from app.config.schema import ProxyConfig
 from app.debug.models import collect_catalogs, render_json, render_text
 from app.lifecycle.entry import StandaloneOptions, run_standalone
+from app.lifecycle.pidfile import PidfileError
 from app.lifecycle.standalone import LIFECYCLE_LOGGER, ShutdownReport
 from app.model_provider import ProviderNotConfigured
 from app.model_provider.ghc_client.auth.service import authenticate_device, clear_stored_token
@@ -214,62 +215,30 @@ def start(
     ] = None,
     manual: Annotated[bool, typer.Option("--manual")] = False,
     restart: Annotated[bool, typer.Option("--restart")] = False,
-    pidfile: Annotated[Path | None, typer.Option("--pidfile")] = None,
+    pidfile_dir: Annotated[Path | None, typer.Option("--pidfile-dir")] = None,
+    force_write_pidfile: Annotated[bool, typer.Option("--force-write-pidfile")] = False,
 ) -> None:
     """Start the API proxy server."""
-    if fd is not None and (host is not None or port is not None):
-        raise typer.BadParameter("--fd cannot be combined with --host or --port")
+    if fd is not None:
+        # An inherited listener belongs to systemd: this process neither chose the endpoint nor owns it, so nothing here can rebind it, hand it over, or record it. Each of these options asks for one of those. Refused rather than reported as inactive, because the option that gets silently dropped is the one whose absence nobody notices — which is the same failure `--restart` itself was just fixed for.
+        conflicting = [
+            name
+            for name, given in (
+                ("--host", host is not None),
+                ("--port", port is not None),
+                ("--restart", restart),
+                ("--pidfile-dir", pidfile_dir is not None),
+                ("--force-write-pidfile", force_write_pidfile),
+            )
+            if given
+        ]
+        if conflicting:
+            raise typer.BadParameter(f"--fd cannot be combined with {', '.join(conflicting)}")
 
     # Before anything that might log. Both serve paths hand uvicorn `log_config=None`, so nothing else installs a handler and, without this call, every line the process produces — its own and uvicorn's — is dropped by the root logger's default level and never reaches the terminal at all.
     setup_logging(log_format="text", log_level="DEBUG" if verbose else "INFO")
 
-    cli_overrides: dict[str, object] = {}
-    auth_overrides: dict[str, object] = {}
-    upstream_overrides: dict[str, object] = {}
-    if port is not None:
-        cli_overrides["port"] = port
-    if host is not None:
-        cli_overrides["host"] = host
-    if graceful_timeout is not None:
-        cli_overrides["shutdown"] = {"graceful_timeout": graceful_timeout}
-    if rate_limit is not None:
-        cli_overrides["rate_limiter"] = {"enabled": rate_limit}
-    if history is not None:
-        cli_overrides["history"] = {"enabled": history}
-    if github_token is not None:
-        auth_overrides["github_token"] = github_token
-    if proxy is not None:
-        upstream_overrides["proxy"] = proxy
-    if manual:
-        cli_overrides["approval"] = {"enabled": True}
-    if verbose:
-        cli_overrides["observability"] = {"log_level": "DEBUG"}
-    if auth_overrides:
-        cli_overrides["auth"] = auth_overrides
-    if upstream_overrides:
-        cli_overrides["upstream"] = upstream_overrides
-
-    if fd is not None:
-        # An inherited listener means systemd owns it, so uvicorn may keep it: lifecycle.md's
-        # escalating shutdown is written for the stand-alone section, which owns its own listener.
-        # What this path serves is no longer the difference — it is the same chain `start` serves.
-        # Ruled 2026-08-19; what the existing chain offered and this one does not is inventoried
-        # in `.dev/docs/anthropic-responses-bridge/implementation.md`.
-        proxy_config, _ = _load_spec_config(
-            config_path=config,
-            port=port,
-            host=host,
-            graceful_timeout=graceful_timeout,
-            proxy=proxy,
-            history=history,
-            verbose=verbose,
-            manual=manual,
-            rate_limit=rate_limit,
-            github_token=github_token,
-        )
-        run(partial(serve_inherited, proxy_config, fd, proxy_from_cli=proxy is not None))
-        return
-
+    # Loaded and reported before the paths diverge. The inherited-listener branch used to load its own copy and discard the second return value, so every option this config cannot carry was accepted and then dropped without a word on that path — the same failure `--restart` was just fixed for, and the one the loop below exists to prevent.
     proxy_config, inactive = _load_spec_config(
         config_path=config,
         port=port,
@@ -287,10 +256,19 @@ def start(
         # than one that is refused, because nothing distinguishes it from having worked.
         typer.echo(f"warning: {option} has no effect on this path — {reason}", err=True)
 
-    # `--pidfile` beats the config key: both name the same file, and the one typed on the command line is the more immediate statement of intent. Resolved here because the config key had no consumer at all — it was parsed into `ProxyConfig`, pinned in `NOT_HOT_RELOADABLE`, documented in `config.example.yaml`, and then never read, so an operator who set it got the default and no indication why.
-    resolved_pidfile = pidfile
-    if resolved_pidfile is None and proxy_config.pidfile:
-        resolved_pidfile = Path(proxy_config.pidfile)
+    if fd is not None:
+        # An inherited listener means systemd owns it, so uvicorn may keep it: lifecycle.md's
+        # escalating shutdown is written for the stand-alone section, which owns its own listener.
+        # What this path serves is no longer the difference — it is the same chain `start` serves.
+        # Ruled 2026-08-19; what the existing chain offered and this one does not is inventoried
+        # in `.dev/docs/anthropic-responses-bridge/implementation.md`.
+        run(partial(serve_inherited, proxy_config, fd, proxy_from_cli=proxy is not None))
+        return
+
+    # `--pidfile-dir` beats the config key: both name the same directory, and the one typed on the command line is the more immediate statement of intent. Resolved here because the config key had no consumer at all — it was parsed into `ProxyConfig`, pinned in `NOT_HOT_RELOADABLE`, documented in `config.example.yaml`, and then never read, so an operator who set it got the default and no indication why.
+    resolved_pidfile_dir = pidfile_dir
+    if resolved_pidfile_dir is None and proxy_config.pidfile_dir:
+        resolved_pidfile_dir = Path(proxy_config.pidfile_dir)
 
     # Served through app.lifecycle rather than uvicorn.run: the escalating shutdown and the
     # SO_REUSEPORT handover both need to own the listener, which uvicorn.run does not give up.
@@ -302,10 +280,16 @@ def start(
         # material for; generated once and reused when the operator named no cert.
         tls_material=resolve_tls_material(proxy_config, tls_dir=tls_material_dir()),
         cleanup_timeout=proxy_config.graceful_cleanup_timeout,
-        pidfile=resolved_pidfile,
+        pidfile_dir=resolved_pidfile_dir,
         restart=restart,
+        force_write_pidfile=force_write_pidfile,
     )
-    run(partial(_serve_pipeline, proxy_config, options, proxy_from_cli=proxy is not None))
+    try:
+        run(partial(_serve_pipeline, proxy_config, options, proxy_from_cli=proxy is not None))
+    except PidfileError as error:
+        # Turned into a message rather than left to the default excepthook. This one is not a crash: it is the ordinary case of starting a second time on a port that is already taken, and what it carries is an instruction — which of `--restart` and `--force-write-pidfile` the operator wants. A traceback buries that under a dozen frames and makes a routine refusal read as a failure of the program.
+        typer.echo(f"error: {error}", err=True)
+        raise typer.Exit(code=1) from error
 
 
 def _authenticate() -> None:

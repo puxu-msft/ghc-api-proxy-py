@@ -22,7 +22,13 @@ from pathlib import Path
 import pytest
 
 from app.config.paths import standalone_pidfile_path, user_data_path
-from app.lifecycle.pidfile import live_predecessor, read_pidfile
+from app.lifecycle.pidfile import (
+    PidfileEntry,
+    live_predecessor,
+    read_pidfile,
+    write_entry,
+    write_pidfile,
+)
 
 SRC = Path(__file__).resolve().parents[2] / "src"
 
@@ -67,16 +73,17 @@ def child_script() -> str:
 
                 configured_tls_mode = True if requested_tls_mode == "true" else requested_tls_mode
                 tls_material = generate_self_signed(Path(os.environ["TLS_DIR"]))
-            pidfile_env = os.environ.get("PIDFILE")
+            pidfile_dir_env = os.environ.get("PIDFILE_DIR")
             options = StandaloneOptions(
                 host="127.0.0.1",
                 port=int(os.environ["PORT"]),
                 tls_mode=configured_tls_mode,
                 tls_material=tls_material,
                 cleanup_timeout=5,
-                # Left unset when the test wants the default location, which is the one named after the port.
-                pidfile=Path(pidfile_env) if pidfile_env else None,
+                # Left unset when the test wants the default location, which is the one derived from XDG_DATA_HOME.
+                pidfile_dir=Path(pidfile_dir_env) if pidfile_dir_env else None,
                 restart=os.environ.get("RESTART") == "1",
+                force_write_pidfile=os.environ.get("FORCE_WRITE_PIDFILE") == "1",
             )
             print("STARTING", flush=True)
             outcome = await run_standalone(app, options)
@@ -95,30 +102,33 @@ def free_port() -> int:
 
 def start_child(
     port: int,
-    pidfile: Path | None,
+    pidfile_dir: Path | None,
     *,
     restart: bool = False,
     tls_mode: bool | str | None = None,
     entered_marker: Path | None = None,
     data_home: Path | None = None,
+    force_write_pidfile: bool = False,
 ) -> subprocess.Popen[str]:
     env = os.environ.copy()
     env.update({"PYTHONPATH": str(SRC), "PORT": str(port)})
-    if pidfile is not None:
-        env["PIDFILE"] = str(pidfile)
+    if pidfile_dir is not None:
+        env["PIDFILE_DIR"] = str(pidfile_dir)
     else:
-        # No explicit path, so the child resolves the default one — which is what the port-naming is about. `XDG_DATA_HOME` keeps that default inside the test's own directory instead of the developer's.
-        env.pop("PIDFILE", None)
+        # No explicit directory, so the child resolves the default one under `XDG_DATA_HOME`, which is what the port-naming is about. `data_home` keeps that inside the test's own tree instead of the developer's.
+        env.pop("PIDFILE_DIR", None)
     if data_home is not None:
         env["XDG_DATA_HOME"] = str(data_home)
     if entered_marker is not None:
         env["ENTERED_MARKER"] = str(entered_marker)
     if restart:
         env["RESTART"] = "1"
+    if force_write_pidfile:
+        env["FORCE_WRITE_PIDFILE"] = "1"
     if tls_mode is not None:
-        assert pidfile is not None, "the TLS material directory is derived from the pidfile's parent"
+        assert pidfile_dir is not None, "the TLS material directory is derived from the pidfile directory"
         env["TLS_MODE"] = "true" if tls_mode is True else str(tls_mode)
-        env["TLS_DIR"] = str(pidfile.parent / "tls")
+        env["TLS_DIR"] = str(pidfile_dir / "tls")
     return subprocess.Popen(
         [sys.executable, "-c", child_script()],
         env=env,
@@ -137,6 +147,23 @@ def wait_until_serving(pidfile: Path, timeout: float = 20.0) -> int:
             return entry.pid
         time.sleep(0.05)
     raise AssertionError(f"child never started serving: {pidfile}")
+
+
+def wait_until_recorded(pidfile: Path, pid: int, timeout: float = 20.0) -> None:
+    """Wait for the record to name `pid`, when some other record is already in place.
+
+    `wait_until_serving` reads presence, which only means "started" when the file was absent to begin with. Where a predecessor's or a leftover's entry is already there, presence is true from the outset and would be mistaken for the new process having started.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        entry = read_pidfile(pidfile)
+        if entry is not None and entry.pid == pid:
+            return
+        time.sleep(0.05)
+    recorded = read_pidfile(pidfile)
+    raise AssertionError(
+        f"{pidfile} never came to name pid {pid}; it holds {recorded.pid if recorded else 'nothing'}"
+    )
 
 
 def request_liveness(port: int, timeout: float = 5.0) -> bytes:
@@ -188,13 +215,18 @@ def stop(process: subprocess.Popen[str]) -> None:
 
 
 @pytest.fixture
-def pidfile(tmp_path: Path) -> Path:
-    return tmp_path / "standalone.pid"
+def pidfile_dir(tmp_path: Path) -> Path:
+    """The directory a child records itself in; the name inside it belongs to the code.
+
+    A test that needs the file asks `standalone_pidfile_path` for it rather than spelling it, so that a change to the naming rule reaches these tests instead of leaving them asserting against a copy of the old one.
+    """
+    return tmp_path / "run"
 
 
-def test_a_real_process_serves_and_records_its_pid(pidfile: Path) -> None:
+def test_a_real_process_serves_and_records_its_pid(pidfile_dir: Path) -> None:
     port = free_port()
-    child = start_child(port, pidfile)
+    pidfile = standalone_pidfile_path(port, pidfile_dir)
+    child = start_child(port, pidfile_dir)
     try:
         pid = wait_until_serving(pidfile)
         assert pid == child.pid
@@ -203,9 +235,10 @@ def test_a_real_process_serves_and_records_its_pid(pidfile: Path) -> None:
         stop(child)
 
 
-def test_both_mode_serves_http_and_https_on_one_port(pidfile: Path) -> None:
+def test_both_mode_serves_http_and_https_on_one_port(pidfile_dir: Path) -> None:
     port = free_port()
-    child = start_child(port, pidfile, tls_mode="both")
+    pidfile = standalone_pidfile_path(port, pidfile_dir)
+    child = start_child(port, pidfile_dir, tls_mode="both")
     try:
         wait_until_serving(pidfile)
         assert b"200 OK" in request_liveness(port)
@@ -214,9 +247,10 @@ def test_both_mode_serves_http_and_https_on_one_port(pidfile: Path) -> None:
         stop(child)
 
 
-def test_tls_only_naturally_closes_a_plaintext_connection(pidfile: Path) -> None:
+def test_tls_only_naturally_closes_a_plaintext_connection(pidfile_dir: Path) -> None:
     port = free_port()
-    child = start_child(port, pidfile, tls_mode=True)
+    pidfile = standalone_pidfile_path(port, pidfile_dir)
+    child = start_child(port, pidfile_dir, tls_mode=True)
     try:
         wait_until_serving(pidfile)
         try:
@@ -228,9 +262,10 @@ def test_tls_only_naturally_closes_a_plaintext_connection(pidfile: Path) -> None
         stop(child)
 
 
-def test_plaintext_only_does_not_complete_a_tls_handshake(pidfile: Path) -> None:
+def test_plaintext_only_does_not_complete_a_tls_handshake(pidfile_dir: Path) -> None:
     port = free_port()
-    child = start_child(port, pidfile)
+    pidfile = standalone_pidfile_path(port, pidfile_dir)
+    child = start_child(port, pidfile_dir)
     try:
         wait_until_serving(pidfile)
         with pytest.raises((ssl.SSLError, ConnectionError, OSError)):
@@ -239,10 +274,11 @@ def test_plaintext_only_does_not_complete_a_tls_handshake(pidfile: Path) -> None
         stop(child)
 
 
-def test_sigterm_reaches_the_ladder_in_a_real_process(pidfile: Path) -> None:
+def test_sigterm_reaches_the_ladder_in_a_real_process(pidfile_dir: Path) -> None:
     """Proves the handlers are installed, which every in-process test bypasses."""
     port = free_port()
-    child = start_child(port, pidfile)
+    pidfile = standalone_pidfile_path(port, pidfile_dir)
+    child = start_child(port, pidfile_dir)
     try:
         wait_until_serving(pidfile)
         child.send_signal(signal.SIGTERM)
@@ -253,7 +289,7 @@ def test_sigterm_reaches_the_ladder_in_a_real_process(pidfile: Path) -> None:
         stop(child)
 
 
-def test_a_half_sent_request_holds_the_drain_until_the_operator_escalates(pidfile: Path) -> None:
+def test_a_half_sent_request_holds_the_drain_until_the_operator_escalates(pidfile_dir: Path) -> None:
     """A request still arriving is a real request, and the drain is right to wait for it.
 
     This pins that on purpose. The module docstring rules the drain unbounded because a second wall-clock limit would cut off legitimate work while the operator still has escalation available, and a client that has not finished sending is no different: nothing here can know whether the rest is one packet away. What was wrong was never the waiting — it was that the display said nothing, because the proxy used to register a request only after reading its body. It registers on arrival now, so the footer shows it as `(resolving)` with a climbing clock for exactly as long as this test keeps it waiting.
@@ -263,8 +299,9 @@ def test_a_half_sent_request_holds_the_drain_until_the_operator_escalates(pidfil
     No upstream is involved and none is needed: the request never gets far enough to route.
     """
     port = free_port()
-    marker = pidfile.parent / "entered"
-    child = start_child(port, pidfile, entered_marker=marker)
+    pidfile = standalone_pidfile_path(port, pidfile_dir)
+    marker = pidfile_dir / "entered"
+    child = start_child(port, pidfile_dir, entered_marker=marker)
     held: list[socket.socket] = []
     try:
         wait_until_serving(pidfile)
@@ -297,7 +334,7 @@ def test_a_half_sent_request_holds_the_drain_until_the_operator_escalates(pidfil
 
 
 def test_a_pooled_client_that_races_the_signal_is_answered_rather_than_wedging_the_process(
-    pidfile: Path,
+    pidfile_dir: Path,
 ) -> None:
     """The incident itself, in a real process under a real signal, with the right expectation.
 
@@ -308,7 +345,8 @@ def test_a_pooled_client_that_races_the_signal_is_answered_rather_than_wedging_t
     **A probabilistic guard, and worth knowing which way.** The race it depends on is the one being tested, so how often it fires depends on what broke. Measured over ten isolated runs each: clean code 0/10 (it raises no false alarms), the whole of `stop_admitting` removed 10/10, the deadlock mechanism revived on its own 4/10, the refusal alone removed 2/10. So one green run does not mean the guard held, and one red run is always real. Treat it as a net that catches a returning deadlock eventually rather than immediately, and do not read a single pass as coverage.
     """
     port = free_port()
-    child = start_child(port, pidfile)
+    pidfile = standalone_pidfile_path(port, pidfile_dir)
+    child = start_child(port, pidfile_dir)
     held: list[socket.socket] = []
     try:
         wait_until_serving(pidfile)
@@ -334,9 +372,10 @@ def test_a_pooled_client_that_races_the_signal_is_answered_rather_than_wedging_t
         stop(child)
 
 
-def test_the_pidfile_is_removed_when_the_process_stops(pidfile: Path) -> None:
+def test_the_pidfile_is_removed_when_the_process_stops(pidfile_dir: Path) -> None:
     port = free_port()
-    child = start_child(port, pidfile)
+    pidfile = standalone_pidfile_path(port, pidfile_dir)
+    child = start_child(port, pidfile_dir)
     try:
         wait_until_serving(pidfile)
         child.send_signal(signal.SIGTERM)
@@ -346,21 +385,22 @@ def test_the_pidfile_is_removed_when_the_process_stops(pidfile: Path) -> None:
         stop(child)
 
 
-def test_a_replacement_takes_the_port_and_retires_its_predecessor(pidfile: Path) -> None:
+def test_a_replacement_takes_the_port_and_retires_its_predecessor(pidfile_dir: Path) -> None:
     """The whole point of the restart: both processes hold the port during the handover.
 
     The successor binds under SO_REUSEPORT while the old one is still listening.
     Only then does it signal, so the port never stops answering.
     """
     port = free_port()
-    first = start_child(port, pidfile)
+    pidfile = standalone_pidfile_path(port, pidfile_dir)
+    first = start_child(port, pidfile_dir)
     second: subprocess.Popen[str] | None = None
     try:
         first_pid = wait_until_serving(pidfile)
         found = live_predecessor(pidfile)
         assert found is not None and found.pid == first_pid
 
-        second = start_child(port, pidfile, restart=True)
+        second = start_child(port, pidfile_dir, restart=True)
         # The pidfile now names the successor, which is how we know it took over.
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
@@ -389,20 +429,42 @@ def test_a_replacement_takes_the_port_and_retires_its_predecessor(pidfile: Path)
             stop(second)
 
 
-def test_a_start_without_restart_leaves_the_incumbent_alone(pidfile: Path) -> None:
-    # The negative control: SO_REUSEPORT lets both bind, but nothing is signalled without --restart.
+def test_a_start_without_restart_refuses_to_erase_the_incumbents_record(pidfile_dir: Path) -> None:
+    """A second start on the same port is refused rather than allowed to claim the record.
+
+    This used to be permitted, and permitting it is what left a serving process unfindable: the newcomer overwrote the entry on its way up and unlinked it on its way down, after which no `--restart` could locate the one still serving. `SO_REUSEPORT` means the bind itself cannot object, so the refusal has to come from the record.
+
+    The incumbent is untouched either way — no signal is sent, and it never learns this happened. What changed is that the newcomer stops instead of quietly taking the record with it.
+    """
     port = free_port()
-    first = start_child(port, pidfile)
+    pidfile = standalone_pidfile_path(port, pidfile_dir)
+    first = start_child(port, pidfile_dir)
     second: subprocess.Popen[str] | None = None
     try:
-        wait_until_serving(pidfile)
-        second = start_child(port, pidfile)
-        time.sleep(1.5)
-        assert first.poll() is None, "the incumbent must not be retired without --restart"
+        first_pid = wait_until_serving(pidfile)
 
-        # And it stays quiet: the warning belongs to `--restart` alone. A plain second start is a deliberate act, not a handover that failed.
-        second.send_signal(signal.SIGTERM)
-        said = "".join(second.communicate(timeout=20))
+        second = start_child(port, pidfile_dir)
+        try:
+            stdout, stderr = second.communicate(timeout=20)
+        except subprocess.TimeoutExpired:
+            # A refused start exits at once. Still running means it was allowed through, and saying so beats letting a bare `TimeoutExpired` stand in for the diagnosis.
+            raise AssertionError(
+                "the second start was not refused: it is still serving, and the record is now its own"
+            ) from None
+        said = stdout + stderr
+        assert second.returncode != 0, said
+        assert "still records pid" in said, said
+        assert str(first_pid) in said, said
+        # Both ways out are named, because a refusal that does not say what to do instead is one the operator works around with the nearest blunt instrument.
+        assert "--restart" in said, said
+        assert "--force-write-pidfile" in said, said
+
+        # The incumbent is alive and still findable — the point of refusing at all.
+        assert first.poll() is None, "the incumbent must not be retired without --restart"
+        surviving = read_pidfile(pidfile)
+        assert surviving is not None and surviving.pid == first_pid
+
+        # And no handover warning: the newcomer never asked for one. A warning that fires here would teach the operator to scroll past the one that matters.
         assert "found no predecessor" not in said, said
     finally:
         stop(first)
@@ -410,14 +472,113 @@ def test_a_start_without_restart_leaves_the_incumbent_alone(pidfile: Path) -> No
             stop(second)
 
 
-def test_a_restart_that_finds_no_predecessor_says_so(pidfile: Path) -> None:
+def test_force_write_pidfile_claims_the_record_anyway(pidfile_dir: Path) -> None:
+    """The escape hatch, and what it costs.
+
+    Someone who means to run a second instance beside the first can say so. The record then names the newcomer, which is precisely the state the refusal exists to prevent — so this is worth being able to reach deliberately and impossible to reach by accident.
+    """
+    port = free_port()
+    pidfile = standalone_pidfile_path(port, pidfile_dir)
+    first = start_child(port, pidfile_dir)
+    second: subprocess.Popen[str] | None = None
+    try:
+        first_pid = wait_until_serving(pidfile)
+
+        second = start_child(port, pidfile_dir, force_write_pidfile=True)
+        wait_until_recorded(pidfile, second.pid)
+
+        assert second.poll() is None, "the forced start must actually serve"
+        assert first.poll() is None, "forcing the record must not disturb the incumbent"
+        assert first_pid != second.pid
+    finally:
+        stop(first)
+        if second is not None:
+            stop(second)
+
+
+def test_a_record_whose_process_has_gone_does_not_block_a_start(pidfile_dir: Path) -> None:
+    """The refusal must not be over-broad, and this is the cheap way to get it wrong.
+
+    A crashed or SIGKILLed process leaves its record behind — nothing removes it on the way out. If the check were "a file is here" rather than "a live process with a matching identity is named in it", that leftover would lock the port out of use until somebody deleted the file by hand, and the first thing an operator would reach for is `--force-write-pidfile`, which is the habit this refusal must not create.
+    """
+    port = free_port()
+    pidfile = standalone_pidfile_path(port, pidfile_dir)
+    departed = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    write_pidfile(pidfile, departed.pid)
+    departed.kill()
+    departed.wait(timeout=5)
+
+    child = start_child(port, pidfile_dir)
+    try:
+        # Not `wait_until_serving`: the departed process's record is still on disk, so presence would be true immediately and would hand back its pid rather than this child's.
+        wait_until_recorded(pidfile, child.pid)
+        assert b"200 OK" in request_liveness(port)
+    finally:
+        stop(child)
+
+
+def test_a_record_whose_pid_was_recycled_does_not_block_a_start(pidfile_dir: Path) -> None:
+    """The other half: the pid is alive, but it is not the process that wrote the record.
+
+    PIDs are reused, which is the whole reason the second line exists. A refusal that stopped at "is something running under this number" would be wrong exactly when the number has been handed to an unrelated process — and on a busy machine that is not rare.
+    """
+    port = free_port()
+    pidfile = standalone_pidfile_path(port, pidfile_dir)
+    with subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"]) as stranger:
+        try:
+            # A live pid carrying somebody else's start time, which is what a recycled pid looks like from the outside. Deliberately not a plausible tick count: field 22 of `/proc/<pid>/stat` counts ticks since boot, so a number like 999999 is roughly three hours' uptime at 100Hz and could in principle be somebody's real value.
+            write_entry(pidfile, PidfileEntry(pid=stranger.pid, start_token="not-a-real-start-time"))
+
+            child = start_child(port, pidfile_dir)
+            try:
+                # Not `wait_until_serving`: a record is already present, so presence would be true from the outset and would read as the new process having started.
+                wait_until_recorded(pidfile, child.pid)
+                assert b"200 OK" in request_liveness(port)
+            finally:
+                stop(child)
+        finally:
+            stranger.kill()
+
+
+def test_an_unverifiable_record_is_claimed_but_not_in_silence(pidfile_dir: Path) -> None:
+    """A record naming a process with nothing to check the claim against.
+
+    The refusal cannot fire here: without the identity line, nothing can confirm that pid is still the process that wrote this, and refusing on an unverifiable claim would lock the port out anywhere `/proc` is unreadable. So it is claimed — but this is the one remaining shape of the original incident (a live process losing its record), so it does not happen quietly.
+
+    Reachable mainly through a hand-written file or a foreign format; `write_pidfile` always records an identity on Linux.
+    """
+    port = free_port()
+    pidfile = standalone_pidfile_path(port, pidfile_dir)
+    with subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"]) as holder:
+        try:
+            # First line only, the way `cat`-friendly pidfiles have always been written.
+            write_entry(pidfile, PidfileEntry(pid=holder.pid))
+
+            child = start_child(port, pidfile_dir)
+            try:
+                wait_until_recorded(pidfile, child.pid)
+                child.send_signal(signal.SIGTERM)
+                stdout, stderr = child.communicate(timeout=20)
+                said = stdout + stderr
+                assert "[WARN]" in said, said
+                assert "claiming" in said, said
+                assert "no identity to verify" in said, said
+                assert str(holder.pid) in said, said
+            finally:
+                stop(child)
+        finally:
+            holder.kill()
+
+
+def test_a_restart_that_finds_no_predecessor_says_so(pidfile_dir: Path) -> None:
     """The cell this matrix was missing, and the one where intention and outcome diverge.
 
     `--restart` means "take over from the one already there". When the record naming that process is gone, nothing is signalled — and `SO_REUSEPORT` then lets the bind succeed anyway, so the operator gets two processes serving one port with no error, no failed bind, and until now no line of output either. A silent success and a silent failure looked identical.
     """
     port = free_port()
+    pidfile = standalone_pidfile_path(port, pidfile_dir)
     # `restart` is asked for against a pidfile that was never written, which is exactly the state a throwaway run on another port used to leave behind.
-    child = start_child(port, pidfile, restart=True)
+    child = start_child(port, pidfile_dir, restart=True)
     try:
         wait_until_serving(pidfile)
         # It still serves: the warning reports the handover, it does not refuse the start.

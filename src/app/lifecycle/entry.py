@@ -22,7 +22,9 @@ from app.lifecycle.adapter import UvicornListenerAdapter
 from app.lifecycle.listener import FirstByteRoutingAdapter, adopt_listener, bind_listener
 from app.lifecycle.pidfile import (
     PidfileEntry,
+    PidfileError,
     look_up_predecessor,
+    read_pidfile,
     remove_pidfile,
     signal_restart,
     write_entry,
@@ -45,15 +47,17 @@ class StandaloneOptions:
     tls_mode: TlsMode = False
     tls_material: TlsMaterial | None = None
     cleanup_timeout: int = 0
-    pidfile: Path | None = None
+    pidfile_dir: Path | None = None
     restart: bool = False
+    # Overwrite a record that still names a live process. Off by default: doing that is what left a serving process unfindable in the first place.
+    force_write_pidfile: bool = False
 
     def pidfile_path(self, port: int) -> Path:
         """Where this process records itself, given the port it actually ended up listening on.
 
         The port is a parameter rather than read off `self.port` because that field is a request and this one is the result. Today the two always agree: `--port` and `server.port` are both constrained to 1..65535, and `--fd` never reaches here at all — systemd's listener is driven by `serve_inherited`, which owns no pidfile. Naming the file after the address that was actually bound is nonetheless the only spelling that stays correct if either of those constraints is relaxed, and it costs nothing to read the number back from the socket instead of trusting what was asked for.
         """
-        return self.pidfile if self.pidfile is not None else standalone_pidfile_path(port)
+        return standalone_pidfile_path(port, self.pidfile_dir)
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,16 +96,29 @@ async def run_standalone(
 
     # Resolved after the bind, so the name comes from the endpoint that exists rather than the one that was requested. See `pidfile_path` for why that distinction is worth keeping even though the two agree on every route the CLI can take today.
     pidfile = options.pidfile_path(address[1])
-    predecessor: PidfileEntry | None = None
+    # Looked up unconditionally, because both questions are asked of the same record: `--restart` wants to know who to hand over from, and every other start wants to know whether it is about to erase somebody.
+    lookup = look_up_predecessor(pidfile)
+    predecessor: PidfileEntry | None = lookup.entry if options.restart else None
+
     if options.restart:
-        lookup = look_up_predecessor(pidfile)
-        predecessor = lookup.entry
         if predecessor is None:
             # `--restart` is an intention, and until now its failure was indistinguishable from its success: nothing was signalled, `SO_REUSEPORT` let the bind succeed anyway, and the result was two processes serving one port with neither of them told. Said at start-up rather than folded into the shutdown report, because by then the operator has already gone away believing the handover happened.
             # No `status=`: that field selects from `STATUS_PREFIXES`, which has no warning tier, and an unrecognised value falls to `[....]` — the dimmed prefix meaning "a request has just started". Left off, the level itself reaches `LEVEL_PREFIXES` and renders `[WARN]`.
             get_logger(LIFECYCLE_LOGGER).warning(
                 f"--restart found no predecessor to take over from: {lookup.reason}; no handover happened, and another process may still be serving this port"
             )
+    elif lookup.entry is not None and not options.force_write_pidfile:
+        # Refused rather than overwritten. Overwriting is exactly what left a live process unfindable: a second start claimed the record on its way up and unlinked it on its way down, after which no `--restart` could locate the one still serving. A start that means to replace that process says `--restart`; one that means to run beside it anyway says `--force-write-pidfile` and accepts that the record will name the newcomer.
+        # What this does *not* do is settle ownership. It compares against what the file said a moment ago and writes later, from the serving hook — two starts racing each other can both read an empty record and both go on. What it catches is the ordinary case of two starts one after another, where the gap is a human's and the window is milliseconds. Real atomic ownership needs serialisation between processes, which this is not.
+        # The listener is released first. It is bound by this point, and scope exit alone does not free it: the exception keeps its traceback, the traceback keeps this frame, and the frame keeps `listeners` — so for as long as any caller holds the exception, the port stays held.
+        listeners.close()
+        raise PidfileError(
+            f"{pidfile} still records pid {lookup.entry.pid}, which is running; "
+            f"pass --restart to take over from it, or --force-write-pidfile to claim the record anyway"
+        )
+    elif (recorded := read_pidfile(pidfile)) is not None and not recorded.start_token:
+        # A record naming a process but carrying no identity to check it against. The refusal above cannot fire, because nothing can confirm that pid is still the process that wrote this — and refusing on an unverifiable claim would lock the port out wherever `/proc` is unavailable. So it is claimed, but not in silence: the one case this leaves open is a hand-written or foreign record whose process is in fact alive.
+        get_logger(LIFECYCLE_LOGGER).warning(f"claiming {pidfile}: {lookup.reason}")
 
     adapter: UvicornListenerAdapter | FirstByteRoutingAdapter
     if options.tls_mode is True:
