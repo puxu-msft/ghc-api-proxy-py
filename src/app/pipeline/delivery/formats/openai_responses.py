@@ -348,11 +348,7 @@ class ResponsesAssembler:
     A block therefore completes on `output_item.done`, not on the deltas that preceded it.
     """
 
-    def __init__(self, *, hand_over_stop_reasons: frozenset[str] = frozenset({"max_tokens"})) -> None:
-        # Which endings will hand the turn back to the client, and so which ones may drop the block upstream cut short. One setting, because dropping content is only defensible when the client is handed a way to get it back.
-        self._hand_over_stop_reasons = hand_over_stop_reasons
-        # The block upstream cut short, held rather than emitted or discarded, because at the moment it closes this side does not yet know *why* the response is incomplete — that arrives on the terminal event. Exactly one item can ever be in here: upstream cuts the last one short and then stops.
-        self._cut_short: CompletedBlock | None = None
+    def __init__(self) -> None:
         self._drafts: dict[str, Draft] = {}
         self._order = 0
         self._terminal = Terminal(dialect=ReplyDialect.RESPONSES)
@@ -379,11 +375,6 @@ class ResponsesAssembler:
             return self._close(data)
         if kind in {"response.completed", "response.incomplete"}:
             self._read_terminal(kind, data)
-            # Now the reason is known, the held block can be answered. Kept when this ending will not hand the turn back — the client would otherwise lose a passage it cannot ask for again — and dropped when it will, because the next turn produces it whole.
-            held, self._cut_short = self._cut_short, None
-            if held is not None and self._terminal.stop_reason not in self._hand_over_stop_reasons:
-                self._terminal.record(held)
-                return (held,)
             return ()
         return ()
 
@@ -444,7 +435,7 @@ class ResponsesAssembler:
             # nothing; the alternative costs the turn's search.
             draft = Draft(index=self._order, kind=WEB_SEARCH_CALL, payload=dict(item))
             self._order += 1
-        cut_short = _upstream_cut_this_item_short(data) and self._terminal.blocks > 0
+        if _upstream_cut_this_item_short(data) and self._terminal.blocks > 0:
             # Upstream says on the closing event whether this item is whole: `status: "incomplete"` on the one it cut short, `"completed"` on the rest. Measured 15 times, four of them on a `function_call`, whose `arguments` are then truncated JSON.
             #
             # Dropped only when something whole came before it. Half a sentence is not what the client asked for and the next turn will produce it again — but half a sentence is still better than an empty answer, so the rule reverses when this is all there is. Ruled 2026-08-21.
