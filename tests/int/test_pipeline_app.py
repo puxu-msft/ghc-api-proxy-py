@@ -33,7 +33,7 @@ from app.observability import rejection_capture
 from app.observability.active_requests import ActiveRequestRegistry
 from app.observability.logging import setup_logging
 from app.observability.request_log_file import request_logs_dir
-from app.pipeline.delivery.assembler import AnthropicAssembler
+from app.pipeline.delivery.formats.anthropic_messages import AnthropicAssembler
 from app.pipeline.delivery.stream import stream_delivery
 from app.server.composition import Chain, build_chain
 from app.server.handler import delivery_buffer, stream_settings

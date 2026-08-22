@@ -1,31 +1,26 @@
-"""Rendering completed blocks as Anthropic SSE frames.
+"""The Anthropic Messages wire format: reading one, and writing one.
 
-SSE is the envelope the client expects, not a delivery semantic.
-Every frame describes a block that is already whole; nothing is written while one is forming.
+Both directions for this format live together, because they are two halves of the same contract and drifting apart is what they do when they are apart. The generic contracts they satisfy are `BlockAssembler` in `assembling` and `OutboundFramer` in `framing`; `openai_responses` beside this file is the same pair for the other format.
 
-The frame sequence per block is start, one delta carrying the finished content, then stop.
-The delta exists because the wire format has one, not because content arrives in pieces.
+SSE is the envelope the client expects, not a delivery semantic. Every frame describes a block that is already whole; nothing is written while one is forming.
+The frame sequence per block is start, one delta carrying the finished content, then stop. The delta exists because the wire format has one, not because content arrives in pieces.
 """
 
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import orjson
 
 from app.config.schema import ContentBlockStartCompat
-from app.pipeline.delivery.assembler import Terminal
-from app.pipeline.delivery.blocks import CompletedBlock
-
-
-@dataclass(frozen=True, slots=True)
-class SseFrame:
-    event: str
-    data: dict[str, Any]
-
-    def encode(self) -> bytes:
-        body = orjson.dumps(self.data).decode()
-        return f"event: {self.event}\ndata: {body}\n\n".encode()
+from app.pipeline.delivery.assembling import (
+    Draft,
+    ReplyDialect,
+    Terminal,
+    decode_json,
+)
+from app.pipeline.delivery.blocks import TEXT, THINKING, TOOL_USE, CompletedBlock
+from app.pipeline.delivery.sse_frame import SseFrame
+from app.pipeline.delivery.sse_source import SseEvent
 
 
 def message_start(message_id: str, model: str) -> SseFrame:
@@ -244,3 +239,113 @@ class AnthropicFramer:
 
     def keepalive(self) -> bytes:
         return b": ping\n\n"
+
+
+class AnthropicAssembler:
+    """Assembles blocks from an Anthropic SSE stream."""
+
+    def __init__(self) -> None:
+        self._drafts: dict[int, Draft] = {}
+        self._terminal = Terminal()
+
+    @property
+    def terminal(self) -> Terminal:
+        return self._terminal
+
+    def push(self, event: SseEvent) -> tuple[CompletedBlock, ...]:
+        data = event.json()
+        kind = event.event or str(data.get("type", ""))
+
+        if kind == "content_block_start":
+            self._open(data)
+            return ()
+        if kind == "content_block_delta":
+            self._accumulate(data)
+            return ()
+        if kind == "content_block_stop":
+            return self._close(data)
+        if kind == "message_delta":
+            self._read_terminal(data)
+            return ()
+        if kind == "message_stop":
+            self._terminal.seen = True
+            return ()
+        return ()
+
+    def _open(self, data: dict[str, Any]) -> None:
+        index = int(data.get("index", len(self._drafts)))
+        raw = data.get("content_block")
+        block = dict[str, Any](cast(dict[str, Any], raw)) if isinstance(raw, dict) else {}
+        self._drafts[index] = Draft(
+            index=index,
+            kind=str(block.get("type", "")),
+            payload=block,
+        )
+
+    def _accumulate(self, data: dict[str, Any]) -> None:
+        index = int(data.get("index", -1))
+        draft = self._drafts.get(index)
+        if draft is None:
+            return
+        raw = data.get("delta")
+        delta = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+        delta_type = str(delta.get("type", ""))
+        if delta_type == "text_delta":
+            draft.text += str(delta.get(TEXT, ""))
+        elif delta_type == "thinking_delta":
+            draft.text += str(delta.get(THINKING, ""))
+        elif delta_type == "input_json_delta":
+            draft.partial_json += str(delta.get("partial_json", ""))
+        elif delta_type == "signature_delta":
+            draft.payload["signature"] = str(delta.get("signature", ""))
+
+    def _close(self, data: dict[str, Any]) -> tuple[CompletedBlock, ...]:
+        index = int(data.get("index", -1))
+        draft = self._drafts.pop(index, None)
+        if draft is None:
+            return ()
+        payload = dict(draft.payload)
+        if draft.kind == TEXT:
+            payload[TEXT] = draft.text
+        elif draft.kind == THINKING:
+            payload[THINKING] = draft.text
+        elif draft.kind == TOOL_USE and draft.partial_json:
+            payload["input"] = decode_json(draft.partial_json)
+        block = CompletedBlock(index=draft.index, kind=draft.kind, payload=payload)
+        self._terminal.record(block)
+        return (block,)
+
+    def _read_terminal(self, data: dict[str, Any]) -> None:
+        raw = data.get("delta")
+        delta = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+        reason = delta.get("stop_reason")
+        if isinstance(reason, str):
+            self._terminal.stop_reason = reason
+        usage = data.get("usage")
+        if isinstance(usage, dict):
+            self._terminal.usage = dict[str, Any](cast(dict[str, Any], usage))
+
+
+def terminal_from_anthropic(
+    body: dict[str, Any], blocks: Iterable[CompletedBlock], *, dialect: ReplyDialect = ReplyDialect.ANTHROPIC
+) -> Terminal:
+    """The same summary, for a reply that arrived whole instead of in events.
+
+    A buffered request never runs an assembler, so without this the facts a finished reply carries — which tools were asked for, how much reasoning came back, what it cost — had to be dug back out of the response payload at whatever place happened to want them. That is how the same reply came to be described by two different pieces of code, and why only one of them was ever fixed when the description was wrong.
+
+    Reads an **Anthropic-shaped** body. It has no way to notice one that is not, so a caller holding some other shape must not reach for this — `handler.reply_summary` is where that decision is made.
+
+    `seen` is true by construction: a body read whole is a reply that finished, which is exactly what the flag means on the streaming side.
+
+    The stop reason starts empty rather than at the class default. A stream that never sent its terminal event still has a reason to be called `end_turn` by the code that synthesises one; a body simply not carrying the field means nobody said, and printing `end_turn` there would claim a clean finish on no evidence at all.
+    """
+    terminal = Terminal(seen=True, dialect=dialect, stop_reason="")
+    stop_reason = body.get("stop_reason")
+    if isinstance(stop_reason, str) and stop_reason:
+        terminal.stop_reason = stop_reason
+    usage = body.get("usage")
+    if isinstance(usage, dict):
+        terminal.usage = dict[str, Any](cast(dict[str, Any], usage))
+    for block in blocks:
+        terminal.record(block)
+    return terminal

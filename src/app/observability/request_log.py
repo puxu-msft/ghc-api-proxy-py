@@ -25,7 +25,7 @@ from app.observability.terminal import (
     paint,
     volume_colour,
 )
-from app.pipeline.delivery.assembler import ReplyDialect
+from app.pipeline.delivery.assembling import ReplyDialect
 
 # What to call the same two things under each upstream, abbreviated to fit a line. Held here, in the layer that renders, because which word to print is a display decision; what happened is the record's business and it says only which upstream described it.
 # `tool_use` is the Anthropic stop reason the Responses assembler synthesises for the client's benefit. Recognised by name so the line can put back what upstream actually sent.

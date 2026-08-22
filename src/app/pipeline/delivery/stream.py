@@ -17,9 +17,9 @@ from typing import Any
 
 from app.config.schema import ContentBlockStartCompat
 from app.errors import WIRE_TYPES, ErrorCategory
-from app.pipeline.delivery.anthropic_sse import AnthropicFramer
-from app.pipeline.delivery.assembler import BlockAssembler
-from app.pipeline.delivery.blocks import BlockBuffer, CompletedBlock, DeliverySession
+from app.pipeline.delivery.assembling import BlockAssembler
+from app.pipeline.delivery.blocks import TOOL_USE, BlockBuffer, CompletedBlock, DeliverySession
+from app.pipeline.delivery.formats.anthropic_messages import AnthropicFramer
 from app.pipeline.delivery.framing import OutboundFramer
 from app.pipeline.delivery.sse_source import SseEvent, read_events
 from app.pipeline.retry import RetryLedger, RetryReason, StreamEnding, decide_stream_ending
@@ -27,8 +27,6 @@ from app.streaming.deadline import ClientDeadlineError
 from app.streaming.keepalive import finish_stream_cleanup
 
 PING_FRAME = b": ping\n\n"
-# The Anthropic name for both the block kind and the stop reason that goes with it.
-TOOL_USE_KIND = "tool_use"
 
 
 # What one replaced attempt hands over: a fresh byte stream, and the fresh assembler and buffer that go with it. Nothing from the attempt it replaces travels with them.
@@ -426,10 +424,10 @@ def _hand_over(
         chunks.extend(framing.preamble())
     for block in remaining:
         chunks.extend(framing.block(block))
-    handed = CompletedBlock(index=session.committed_count, kind=TOOL_USE_KIND, payload=payload)
+    handed = CompletedBlock(index=session.committed_count, kind=TOOL_USE, payload=payload)
     chunks.extend(framing.block(handed))
     # `tool_use` as the ending, because that is what this turn now is. `synthesize` refuses any client that did not ask in Anthropic Messages, so only that framer is ever reached here.
-    chunks.extend(framing.terminal(replace(assembler.terminal, stop_reason=TOOL_USE_KIND)))
+    chunks.extend(framing.terminal(replace(assembler.terminal, stop_reason=TOOL_USE)))
     return chunks
 
 

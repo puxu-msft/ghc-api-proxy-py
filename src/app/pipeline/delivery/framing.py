@@ -9,7 +9,7 @@ Stateful by necessity rather than by preference. The Anthropic side could be pur
 
 from typing import Protocol
 
-from app.pipeline.delivery.assembler import Terminal
+from app.pipeline.delivery.assembling import Terminal
 from app.pipeline.delivery.blocks import CompletedBlock
 
 

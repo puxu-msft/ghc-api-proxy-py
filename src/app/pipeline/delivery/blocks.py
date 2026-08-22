@@ -13,7 +13,12 @@ from typing import Any
 
 from app.config.schema import BufferingPolicy
 
-TOOL_USE_KIND = "tool_use"
+# The kinds a `CompletedBlock` can be. Anthropic's words, because a block *is* an Anthropic content block by definition (see `CompletedBlock`) whichever upstream it was assembled from — so these are the internal vocabulary rather than one format's, and they belong beside the type they describe.
+#
+# `TOOL_USE` used to be spelled three times: here as `TOOL_USE_KIND`, in the assembler as `TOOL_USE`, and again in `stream`. Three names for one string is three places for them to drift.
+TEXT = "text"
+THINKING = "thinking"
+TOOL_USE = "tool_use"
 
 
 class DeliveryError(RuntimeError):
@@ -102,7 +107,7 @@ class BlockBuffer:
         # until-tool-use: hold everything until a tool call appears, then stream per block.
         if self._released_after_tool_use:
             return self._drain()
-        if block.kind == TOOL_USE_KIND:
+        if block.kind == TOOL_USE:
             self._released_after_tool_use = True
             return self._drain()
         return ()

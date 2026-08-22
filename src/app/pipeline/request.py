@@ -12,7 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 from app.model_provider import ModelEndpoint
-from app.pipeline.delivery.assembler import Terminal
+from app.pipeline.delivery.assembling import Terminal
 from app.pipeline.retry import RetryLedger
 
 

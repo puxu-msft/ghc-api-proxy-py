@@ -15,9 +15,9 @@ from openai.lib.streaming.responses import ResponseStreamState
 from openai.types.responses import ParsedResponse
 from openai.types.responses.response_stream_event import ResponseStreamEvent
 
-from app.pipeline.delivery.assembler import TEXT, THINKING, TOOL_USE, Terminal
-from app.pipeline.delivery.blocks import CompletedBlock
-from app.pipeline.delivery.responses_sse import ResponsesFramer
+from app.pipeline.delivery.assembling import Terminal
+from app.pipeline.delivery.blocks import TEXT, THINKING, TOOL_USE, CompletedBlock
+from app.pipeline.delivery.formats.openai_responses import ResponsesFramer
 
 
 def framer() -> ResponsesFramer:

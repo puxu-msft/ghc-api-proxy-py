@@ -22,23 +22,20 @@ from app.models.anthropic import MessagesRequest
 from app.pipeline.anthropic_request_hook import fix_anthropic_request
 from app.pipeline.count_tokens import CountTokensUnavailable, count_tokens
 from app.pipeline.delivery import BlockBuffer, CompletedBlock, DeliverySession
-from app.pipeline.delivery.anthropic_sse import AnthropicFramer
-from app.pipeline.delivery.assembler import (
+from app.pipeline.delivery.assembling import BlockAssembler, ReplyDialect, Terminal
+from app.pipeline.delivery.formats.anthropic_messages import (
     AnthropicAssembler,
-    BlockAssembler,
-    ReplyDialect,
-    ResponsesAssembler,
-    Terminal,
+    AnthropicFramer,
     terminal_from_anthropic,
 )
-from app.pipeline.delivery.framing import OutboundFramer
-from app.pipeline.delivery.responses_sse import ResponsesFramer
-from app.pipeline.delivery.stream import StreamSettings
-from app.pipeline.delivery.synthetic import (
+from app.pipeline.delivery.formats.anthropic_messages_synthetic import (
     failed_search_body,
     failed_search_sse,
     query_from_request,
 )
+from app.pipeline.delivery.formats.openai_responses import ResponsesAssembler, ResponsesFramer
+from app.pipeline.delivery.framing import OutboundFramer
+from app.pipeline.delivery.stream import StreamSettings
 from app.pipeline.direct_driver import (
     DRIVERS,
     EVENT_ATTEMPT_PREPARE,

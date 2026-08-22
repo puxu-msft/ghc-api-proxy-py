@@ -1,5 +1,7 @@
 """A reply this proxy writes itself, when a search cannot be run but must still be answered.
 
+Anthropic Messages, and only that — every shape below is that format's. It sat under a name that said nothing about which format it wrote until 2026-08-22.
+
 The alternative to answering is refusing, and both are honest — neither claims a search happened. What decides between them is what the client does next with each.
 
 Claude Code issues a web search as its own sub-request: `tools` holds nothing but the search, the user turn reads `Perform a web search for the query: X`, and whatever comes back is rendered into the main conversation under a `Web search results for query:` heading attached unconditionally. A refusal reaches that conversation as `tool_result` with `is_error: true` and the model handles it well — measured. But it reaches it *after the client has retried*, three times in the one case on record, because an HTTP error is a transport failure as far as the client is concerned and transport failures are worth retrying. A search that cannot run is not going to start working on the third attempt.

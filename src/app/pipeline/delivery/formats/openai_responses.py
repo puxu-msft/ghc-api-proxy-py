@@ -14,14 +14,23 @@ The sequence is shaped by what the OpenAI SDK's stream parser requires, read fro
 """
 
 import time
-from typing import Any
+from typing import Any, cast
 
 import orjson
 
-from app.pipeline.delivery.anthropic_sse import SseFrame
-from app.pipeline.delivery.assembler import TEXT, THINKING, TOOL_USE, Terminal
-from app.pipeline.delivery.blocks import CompletedBlock
-from app.pipeline.translation_driver.reasoning_carrier import decode_reasoning_carrier
+from app.pipeline.delivery.assembling import Draft, ReplyDialect, Terminal, decode_json
+from app.pipeline.delivery.blocks import TEXT, THINKING, TOOL_USE, CompletedBlock
+from app.pipeline.delivery.sse_frame import SseFrame
+from app.pipeline.delivery.sse_source import SseEvent
+from app.pipeline.server_tool_text import web_search_call_text
+from app.pipeline.translation_driver.reasoning_carrier import (
+    decode_reasoning_carrier,
+    encode_reasoning_carrier,
+)
+from app.protocols.responses_anthropic import (
+    ResponseConversionError,
+    anthropic_usage_from_responses,
+)
 
 # Stop reasons this proxy synthesises for the Anthropic leg. Responses has no equivalent of either — its vocabulary is completed / incomplete / failed — so both of ours mean the turn finished.
 _FINISHED = frozenset({"end_turn", "tool_use", ""})
@@ -326,3 +335,207 @@ class ResponsesFramer:
         Deliberately not `response.in_progress`: the SDK hands that one to the application, and repeating it through a long wait would turn "your request was accepted" into noise and make the sequence numbers say something they do not mean.
         """
         return b": ping\n\n"
+
+
+# The item type upstream reports a search it ran itself under. Carried as its own draft kind so `_close` can tell it from a message and render it, rather than falling through to the empty-text default.
+WEB_SEARCH_CALL = "web_search_call"
+
+
+class ResponsesAssembler:
+    """Assembles blocks from an OpenAI Responses SSE stream.
+
+    An output item is the unit that closes.
+    A block therefore completes on `output_item.done`, not on the deltas that preceded it.
+    """
+
+    def __init__(self) -> None:
+        self._drafts: dict[str, Draft] = {}
+        self._order = 0
+        self._terminal = Terminal(dialect=ReplyDialect.RESPONSES)
+        self._saw_tool_call = False
+
+    @property
+    def terminal(self) -> Terminal:
+        return self._terminal
+
+    def push(self, event: SseEvent) -> tuple[CompletedBlock, ...]:
+        data = event.json()
+        kind = event.event or str(data.get("type", ""))
+
+        if kind == "response.output_item.added":
+            self._open(data)
+            return ()
+        if kind in {"response.output_text.delta", "response.reasoning_summary_text.delta"}:
+            self._accumulate(data, str(data.get("delta", "")))
+            return ()
+        if kind == "response.function_call_arguments.delta":
+            self._accumulate_arguments(data, str(data.get("delta", "")))
+            return ()
+        if kind == "response.output_item.done":
+            return self._close(data)
+        if kind in {"response.completed", "response.incomplete"}:
+            self._read_terminal(kind, data)
+            return ()
+        return ()
+
+    def _item_key(self, data: dict[str, Any]) -> str:
+        """Which draft an event belongs to.
+
+        `output_index` first, because it is the only identifier this upstream keeps stable: Copilot
+        sends a *different* `item.id` on `output_item.added` and `output_item.done` for the same
+        item, so keying on the id meant `_close` never found what `_open` had created and the whole
+        response assembled into nothing. The ids are kept as a fallback for upstreams that omit the
+        index; between the two, only the index is load-bearing.
+        """
+        index = data.get("output_index")
+        if index is not None:
+            return f"index:{index}"
+        raw = data.get("item")
+        if isinstance(raw, dict):
+            item = cast(dict[str, Any], raw)
+            return str(item.get("id") or data.get("item_id") or "")
+        return str(data.get("item_id") or "")
+
+    def _open(self, data: dict[str, Any]) -> None:
+        raw = data.get("item")
+        item = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+        item_type = str(item.get("type", ""))
+        kind = {
+            "message": TEXT,
+            "function_call": TOOL_USE,
+            "reasoning": THINKING,
+        }.get(item_type, item_type)
+        key = self._item_key(data)
+        self._drafts[key] = Draft(index=self._order, kind=kind, payload=dict(item))
+        self._order += 1
+
+    def _accumulate(self, data: dict[str, Any], delta: str) -> None:
+        draft = self._drafts.get(self._item_key(data))
+        if draft is not None:
+            draft.text += delta
+
+    def _accumulate_arguments(self, data: dict[str, Any], delta: str) -> None:
+        draft = self._drafts.get(self._item_key(data))
+        if draft is not None:
+            draft.partial_json += delta
+
+    def _close(self, data: dict[str, Any]) -> tuple[CompletedBlock, ...]:
+        key = self._item_key(data)
+        draft = self._drafts.pop(key, None)
+        if draft is None:
+            raw = data.get("item")
+            item = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+            if str(item.get("type", "")) != WEB_SEARCH_CALL:
+                return ()
+            # A `web_search_call` that closes without ever having opened. This item is whole on
+            # `done` — it has no deltas and nothing to accumulate — so the `added` it skipped
+            # carried nothing this needs, and refusing to close it would throw away a search that
+            # actually ran, silently. The same regression is on record in the reference project,
+            # where the item vanished with no observation of any kind. Registering it late costs
+            # nothing; the alternative costs the turn's search.
+            draft = Draft(index=self._order, kind=WEB_SEARCH_CALL, payload=dict(item))
+            self._order += 1
+        if _upstream_cut_this_item_short(data) and self._terminal.blocks > 0:
+            # Upstream says on the closing event whether this item is whole: `status: "incomplete"` on the one it cut short, `"completed"` on the rest. Measured 15 times, four of them on a `function_call`, whose `arguments` are then truncated JSON.
+            #
+            # Dropped only when something whole came before it. Half a sentence is not what the client asked for and the next turn will produce it again — but half a sentence is still better than an empty answer, so the rule reverses when this is all there is. Ruled 2026-08-21.
+            #
+            # Free: the item upstream cut short is always the last one, so how many blocks came before it is already known here. Nothing is buffered and nothing looks ahead.
+            #
+            # A `reasoning` item carries no `status` at all — verified against a completed one, whose key set is identical — so this cannot see a truncated one and does not try. Left open deliberately; `deferred.md` 2.
+            return ()
+        kind = draft.kind
+        if draft.kind == TOOL_USE:
+            self._saw_tool_call = True
+            payload: dict[str, Any] = {
+                "type": TOOL_USE,
+                "id": str(draft.payload.get("call_id") or draft.payload.get("id", "")),
+                "name": str(draft.payload.get("name", "")),
+                "input": decode_json(draft.partial_json or "{}"),
+            }
+        elif draft.kind == THINKING:
+            payload = {
+                "type": THINKING,
+                THINKING: draft.text,
+                "signature": _reasoning_signature(draft, data),
+            }
+        elif draft.kind == WEB_SEARCH_CALL:
+            # Read off the closing event, not the draft. `output_item.added` carries this item with only an id, a status and a type — the query appears for the first time on `done`, and this item has no delta events at all, so the draft has nothing in it to render. Assembling from the draft is what produced an empty text block on every search.
+            raw = data.get("item")
+            item = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+            payload = {"type": TEXT, TEXT: web_search_call_text(item.get("action"))}
+            # Text from here on. The item type is upstream's, and it has no Anthropic spelling to keep.
+            kind = TEXT
+        else:
+            payload = {"type": TEXT, TEXT: draft.text}
+        block = CompletedBlock(index=draft.index, kind=kind, payload=payload)
+        self._terminal.record(block)
+        return (block,)
+
+    def _read_terminal(self, kind: str, data: dict[str, Any]) -> None:
+        self._terminal.seen = True
+        raw = data.get("response")
+        response = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+        usage = response.get("usage")
+        if isinstance(usage, dict):
+            self._terminal.usage = _anthropic_usage(cast(dict[str, Any], usage))
+            # Kept as it arrived, for the leg that has to report it back in upstream's own shape. See `Terminal.upstream_usage`.
+            self._terminal.upstream_usage = dict[str, Any](cast(dict[str, Any], usage))
+        if kind == "response.incomplete":
+            details = response.get("incomplete_details")
+            reason = ""
+            if isinstance(details, dict):
+                reason = str(cast(dict[str, Any], details).get("reason", ""))
+            # spec.md: the output-token limit is max_tokens downstream. That one has an Anthropic spelling; nothing else does, so nothing else is translated.
+            #
+            # Everything upstream did not name `max_output_tokens` used to become `end_turn`, which reported a turn upstream had cut short as one it finished — the same defect `Terminal.stop_reason` was given an empty default to avoid, reintroduced one field further down. It is upstream's word that goes on the wire now, unmapped. Claude Code's own schema for this field is a nullable string with no enumeration and its readers compare against known values and skip the rest, so a word it does not know costs it nothing; a wrong word it does know costs a reader the truth.
+            #
+            # `"incomplete"` when upstream said the response was incomplete without saying why. That is still upstream's own word for it — the terminal event is `response.incomplete` and the response carries `status: "incomplete"` — and it keeps the one case with no reason out of `end_turn` as well. Leaving it empty would not: `stream_delivery` fills an empty reason with `end_turn`, which is right for a stream that ended cleanly and says nothing, and wrong here.
+            self._terminal.stop_reason = (
+                "max_tokens" if reason == "max_output_tokens" else reason or "incomplete"
+            )
+            return
+        self._terminal.stop_reason = TOOL_USE if self._saw_tool_call else "end_turn"
+
+
+def _upstream_cut_this_item_short(data: dict[str, Any]) -> bool:
+    """Whether upstream said, on this closing event, that the item it is closing is not whole.
+
+    `str()` is not used on the way in: an absent field and a null one both mean upstream said nothing, and `str(None)` is the four characters `None`, which is not `"incomplete"` but is also not a value upstream ever sent.
+    """
+    raw = data.get("item")
+    item = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+    status = item.get("status")
+    return status == "incomplete"
+
+
+def _reasoning_signature(draft: Draft, closing: dict[str, Any]) -> str:
+    """The carrier for a Responses reasoning item, read from the event that closed it.
+
+    `spec.md` fixes both halves: a non-empty `encrypted_content` must survive value-exact so the
+    client can echo it back and the next turn can carry on, and a missing or empty one still emits
+    the project's bare marker rather than nothing. This used to write `""`, which broke both.
+
+    Read from the closing item rather than the draft: `output_item.added` and `output_item.done`
+    do not carry the same content — that is the same asymmetry that made the assembler pair
+    nothing when it keyed drafts on `item.id`. The draft is the fallback, not the source.
+    """
+    raw = closing.get("item")
+    item = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+    encrypted = str(item.get("encrypted_content", "")) or str(
+        draft.payload.get("encrypted_content", "")
+    )
+    return encode_reasoning_carrier(encrypted or None)
+
+
+def _anthropic_usage(usage: dict[str, Any]) -> dict[str, Any]:
+    """Responses token counts in the keys every reader of this record already expects.
+
+    Stored converted rather than raw because `Terminal.usage` is read as Anthropic reports it, and a Responses usage read that way is not merely missing the cache fields: its `input_tokens` *includes* what came from cache, so a mostly-cached prompt is reported as having been sent whole. The conversion is the one the buffered path already does, reused rather than repeated — the subtraction is the load-bearing part and two copies of it would drift.
+
+    A malformed usage yields no counts instead of propagating. This runs on the terminal event of a stream whose blocks have already been delivered, and the numbers it produces are for a log line: aborting a delivered response over a field nobody is waiting on would trade a working reply for a cosmetic one.
+    """
+    try:
+        return dict[str, Any](anthropic_usage_from_responses(usage))
+    except ResponseConversionError:
+        return {}

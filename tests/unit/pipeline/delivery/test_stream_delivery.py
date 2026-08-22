@@ -16,8 +16,10 @@ import pytest
 
 from app.config.schema import ContentBlockStartCompat, UpstreamRequestRetryConfig
 from app.observability.active_requests import ActiveRequestRegistry
-from app.pipeline.delivery.assembler import AnthropicAssembler, ResponsesAssembler, Terminal
+from app.pipeline.delivery.assembling import Terminal
 from app.pipeline.delivery.blocks import BlockBuffer, CompletedBlock
+from app.pipeline.delivery.formats.anthropic_messages import AnthropicAssembler
+from app.pipeline.delivery.formats.openai_responses import ResponsesAssembler
 from app.pipeline.delivery.sse_source import SseEvent
 from app.pipeline.delivery.stream import (
     PING_FRAME,

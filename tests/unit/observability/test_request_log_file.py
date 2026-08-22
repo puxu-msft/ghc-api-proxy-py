@@ -11,7 +11,7 @@ import pytest
 
 from app.observability import request_log_file
 from app.observability.terminal import TerminalCapabilities
-from app.pipeline.delivery.assembler import ReplyDialect, Terminal
+from app.pipeline.delivery.assembling import ReplyDialect, Terminal
 from app.pipeline.delivery.blocks import CompletedBlock
 from app.server import pipeline_app
 from app.server.pipeline_app import (

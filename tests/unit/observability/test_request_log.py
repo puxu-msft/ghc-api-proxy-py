@@ -16,7 +16,7 @@ from app.observability.request_log import (
     status_for,
 )
 from app.observability.terminal import BOLD_RED, CYAN, DIM, GREEN, RED, RESET, WHITE, YELLOW
-from app.pipeline.delivery.assembler import ReplyDialect
+from app.pipeline.delivery.assembling import ReplyDialect
 
 
 def test_a_successful_request_names_the_model_rather_than_the_route() -> None:

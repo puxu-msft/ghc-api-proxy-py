@@ -37,11 +37,10 @@ from app.observability.request_log import (
 from app.observability.request_log_file import utc_timestamp, write_request_record
 from app.observability.tui import footer_tui_or_none
 from app.pipeline.anthropic_request_hook import strip_attribution_lines
-from app.pipeline.delivery.assembler import BlockAssembler, ReplyDialect, Terminal
-from app.pipeline.delivery.blocks import BlockBuffer
+from app.pipeline.delivery.assembling import BlockAssembler, ReplyDialect, Terminal
+from app.pipeline.delivery.blocks import TOOL_USE, BlockBuffer
 from app.pipeline.delivery.stream import (
     _HANDED_OVER_STOP_REASONS,  # pyright: ignore[reportPrivateUsage]
-    TOOL_USE_KIND,
     ContinuationSupport,
     ReplaySupport,
     one_shot_delivery,
@@ -773,7 +772,7 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
         content = payload.get("content")
         if isinstance(content, list):
             cast(list[Any], content).append(handed)
-            payload["stop_reason"] = TOOL_USE_KIND
+            payload["stop_reason"] = TOOL_USE
             # Neither `ok` nor `fail`, for the same reason as the streaming path. Set here rather
             # than by an accounting object, because a buffered request settles its line inline.
             trace.status_override = "retry"

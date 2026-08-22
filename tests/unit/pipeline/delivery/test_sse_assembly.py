@@ -11,13 +11,13 @@ from typing import Any
 import orjson
 import pytest
 
-from app.pipeline.delivery.assembler import (
+from app.pipeline.delivery.assembling import ReplyDialect
+from app.pipeline.delivery.blocks import CompletedBlock
+from app.pipeline.delivery.formats.anthropic_messages import (
     AnthropicAssembler,
-    ReplyDialect,
-    ResponsesAssembler,
     terminal_from_anthropic,
 )
-from app.pipeline.delivery.blocks import CompletedBlock
+from app.pipeline.delivery.formats.openai_responses import ResponsesAssembler
 from app.pipeline.delivery.sse_source import SseEvent, parse_frame, read_events
 from app.server.handler import blocks_from_anthropic
 
