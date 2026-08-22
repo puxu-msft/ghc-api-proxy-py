@@ -187,11 +187,15 @@ async def test_silence_after_a_block_produces_a_keep_alive() -> None:
 
 
 @pytest.mark.asyncio
-async def test_silence_before_the_first_block_produces_no_keep_alive() -> None:
-    # Nothing may reach the client before the first whole block, a ping included: a comment
-    # arriving first still opens the response.
+async def test_silence_before_the_first_block_is_still_kept_alive() -> None:
+    """A comment goes out while the client waits on a block that has not closed yet.
+
+    This used to assert the opposite, on the grounds that a comment arriving first would open the response. It does not: `StreamingResponse.stream_response` sends `http.response.start` before it pulls a single chunk, so the client already holds the status — upstream's own, since the response is built with it once its headers arrive. Nothing written here can change what the client was told, and withholding the keep-alive only spends the wait in silence.
+
+    What still may not go out early is `message_start`, which would open a message with no content in it. A comment is not an event and cannot be mistaken for one.
+    """
     chunks = await run_with_gap(1, 1.2)
-    assert PING_FRAME not in chunks
+    assert PING_FRAME in chunks
     assert events_of(chunks)[0] == "message_start"
 
 
@@ -208,7 +212,8 @@ def test_a_keep_alive_wait_leaves_no_asyncio_noise() -> None:
         asyncio.get_running_loop().set_exception_handler(
             lambda _loop, context: reported.append(str(context.get("message")))
         )
-        assert await collect([], interval=1, initial_delay=1.2) == []
+        # The keep-alive is what makes the pull outlive its wait, which is the whole subject here; upstream then ends without ever producing a block.
+        assert await collect([], interval=1, initial_delay=1.2) == [PING_FRAME]
         await asyncio.sleep(0)
 
     asyncio.run(run())
@@ -646,18 +651,16 @@ async def run_held_back(policy: str) -> list[bytes]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("policy", ["full", "until-tool-use"])
-async def test_a_held_back_policy_sends_nothing_at_all_until_the_stream_ends(policy: str) -> None:
-    """These two policies hold every block until the stream ends, and nothing may go out before the first one is delivered — so under them the client now hears nothing for the whole turn.
+async def test_a_held_back_policy_is_still_kept_alive_before_its_first_block(policy: str) -> None:
+    """These two policies hold every block until the stream ends, so a block existing is not a byte delivered — and the keep-alive is the only thing standing between the client and the whole turn in silence.
 
-    That is a real loss, recorded here rather than left to be discovered. It arrived with the removal of the synthesised preamble, which was the only thing that gave the client a byte before a block existed and, with it, the only thing that let a keep-alive follow. Both were paid for the same way: the first byte settles the response's status, so anything sent early makes an upstream 429 unanswerable as a 429.
-
-    Under the default `block` policy the window is one block long. Under these two it is the whole turn, bounded only by `upstream_request_deadline`. Anyone re-adding an early preamble will turn this test red, which is the point of it.
+    It goes out before `message_start` here, and that is the point: the client already holds a 200, so a comment costs nothing and changes nothing. What does not go out early is the preamble, which would open a message with nothing in it.
     """
     chunks = await run_held_back(policy)
-    # Nothing during the turn: the keep-alive never fired, because it may not fire before the client holds bytes and no block was delivered to give it any.
-    assert PING_FRAME not in chunks
-    # Everything at the end, in one go, preamble included — the flush is where the client first hears anything at all.
+    assert PING_FRAME in chunks
+    # The preamble still travels with the flush at the end, and the comment before it is not an event.
     assert events_of(chunks)[0] == "message_start"
+    assert chunks.index(PING_FRAME) < chunks.index(next(c for c in chunks if b"message_start" in c))
 
 
 @pytest.mark.asyncio

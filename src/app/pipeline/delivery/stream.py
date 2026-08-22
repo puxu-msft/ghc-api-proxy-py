@@ -1,8 +1,9 @@
 """Streaming delivery: read upstream, release each block as it completes.
 
-The client sees a block only once it is whole, and sees nothing at all before the first one.
-Between blocks the connection is kept alive with SSE comments.
+The client sees a block only once it is whole, and sees no *content* before the first one.
+Between blocks, and before the first, the connection is kept alive with SSE comments.
 They carry no content, so they cannot be mistaken for a block.
+The response itself is already open by then: it is built with upstream's own status once its headers arrive, and the framework sends `http.response.start` before pulling a single chunk. So a comment changes nothing about what the client was told, while withholding one only spends the wait in silence.
 
 The keep-alive here is the **client-facing** one, and its cadence hangs off the last byte written to the client — never off upstream activity. Block-level delivery decouples the two sides: an upstream sending a delta every 200ms still leaves the client without a byte for however long the block takes to close. Keying the cadence on upstream events installed the guard backwards — it fired while upstream was quiet, and stayed silent while upstream was busy, which is the window a client actually gives up in. The upstream-facing keep-alive is a separate mechanism with separate settings and shares no timer with this one; see `.dev/docs/delivery-keepalive/spec.md`.
 """
@@ -230,9 +231,10 @@ async def _deliver(
             # Asked here, and only here, because this is the first moment both answers exist: whether assembling wrote anything, and what the clock reads now that it has. Real bytes discharge the same obligation a cue would have answered, so `wrote` short-circuits and the schedule is left alone.
             if wrote or not pull.claim():
                 continue
-            if client_has_bytes.is_set():
-                yield PING_FRAME
-            # Nothing is owed to a client that has seen no bytes. The alternative — a `message_start` on its own, so a slow turn shows something — was measured and removed: it settles the response's status long before upstream has said what it is, so a 429 arriving at second 300 can no longer be answered as one. A client that waits is told the truth late; a client told 200 early is told something that cannot be taken back.
+            # Unconditional, because by the time this generator runs the client already holds a 200: the response is built with upstream's own status once its headers have arrived, and the framework sends `http.response.start` before it pulls the first chunk. Nothing here can change what the client was told, so holding the keep-alive back until a block exists buys nothing and spends the whole pre-first-block window in silence — which under `full` and `until-tool-use` is the entire turn.
+            #
+            # An SSE comment before `message_start` is still legal SSE and carries no content, so it cannot be mistaken for part of the turn. What is *not* sent early is the preamble itself: a `message_start` on its own leaves a message opened with nothing in it, and every decision after a torn stream then has to carry a case for that state.
+            yield PING_FRAME
 
     remaining = session.finish()
     if remaining and not client_has_bytes.is_set():
