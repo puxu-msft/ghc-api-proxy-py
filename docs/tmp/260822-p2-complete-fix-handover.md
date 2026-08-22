@@ -148,3 +148,20 @@ raise torn
 `1743a0b` 起 main 在 HEAD 上带 3 个失败：`tests/int/test_pipeline_app.py` 的三条引用了 `hook_strip_anthropic_request_headers.strip_anthropic_beta_flags`，而该键在 schema 里尚不存在——同伴正在主树里加（`schema.py` 未提交）。按项目规矩，提交边界由语义定而非绿灯定，这是允许的状态。**本会话的 `f0527e5` 与之无关**：改动只有 `retry.py` 一行注释和测试文件，且落盘前已核实两文件在主树干净、在 `1743a0b..64bff1e` 之间无变化。落盘用 `git checkout <branch> -- <2 files>` + pathspec 提交，主树索引里同伴暂存的 15 个文件全程未被卷入（提交后复核为恰好 2 个文件）。
 
 门禁（`f0527e5` 之后，主树）：`ruff check` 两文件通过；`pyright` 两文件 0 错误；`tests/unit/pipeline` 468 passed；`tests/unit/pipeline/delivery` 115 passed。
+
+---
+
+## 10. 收尾更正（2026-08-22，经独立评审 `260822-review-session-closeout.md` 指出）
+
+§9 写作时的三处状态已变或写错，更正如下。**§9 原文保留**，因为它是当时的记录。
+
+| §9 的说法 | 更正 |
+|---|---|
+| 「工作树 `.claude/worktrees/260822-complete-not-abandon` 保留」 | **已移除**。移除前逐项验过：`git status --porcelain` 空；`22c7e8d` 的两个文件与主仓 HEAD **blob 哈希逐字节相同**（`33b85bf` / `99db3e8`）；`22c7e8d` 由 `archive/260822-finished-turn-guard` 保住；无 `index.lock`；无进程 cwd 驻留（该探针先用「命令看得见本 shell 自己的 cwd」做了正样本对照——第一版探针 `rg /proc/*/cwd` 会顺符号链接递归搜目录正文，给出的是假命中） |
+| （未提及分支） | 分支 **`worktree-260822-complete-not-abandon` 保留**。`git branch -d` 拒绝（「not fully merged」——集成走的是文件落盘 + pathspec 提交，不是 merge），按收尾纪律**不升级为 `-D`**。它与 `archive/260822-finished-turn-guard` 指向同一提交 `22c7e8d`，属冗余但无害；要清掉需人工用 `-D` |
+| §7 对下一棒提的硬要求「这一支必须在 `_hand_over` 之前」 | **已闭合**。`1743a0b` 把 `if assembler.terminal.seen: break` 放在 `ClientDeadlineError` 之后、`replay.eligible` 之前，即在 `_hand_over` 之前；评审独立复测确认。§7 提出时它未兑现，现已兑现 |
+
+另有两条本会话结论已从对话移入活文档，不再只存在于会话记录：
+
+- 「spec 那条 error terminal 的触发条件是**续写没接手**、不是续写失败」——`../upstream/retry-and-continuation/deferred.md` 第 5 条。
+- 「截断 error 帧的 message 在 Anthropic **上游**腿上字面是错的」及其**被更正过的论证与代价**（初稿用错了轴、且把 message 误判为零消费）——同文件第 19 条。

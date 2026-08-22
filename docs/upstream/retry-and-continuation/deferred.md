@@ -60,6 +60,18 @@ response 层有信号（`response.incomplete`），但它晚于 item 关闭到�
 
 人写文档要求这两种都走同一个裁决点，所以后者现在连「有机会合成工具调用」都做不到。归 D 组。
 
+**2026-08-22 补一条触发条件的更正（此前只活在会话里，是本条唯一的持久载体）**：曾把 `anthropic-responses-bridge/spec.md` 那条「commit 后发生错误 → 发一个 Anthropic SSE error terminal」理解为「MCP 合成续写**失败**时的兜底」。**这个提法是错的，而且会误导实现**——按它去写会实现一个几乎永不触发的分支。
+
+合成本身**不会失败**：它是纯本地构造（读客户端请求 `messages` 的长度、拼一个 `tool_use` 块、走已有的 block/terminal framing），不发任何上游请求；而人写文档已把最像失败的那一格堵死——「检查客户端请求是否包含该工具调用的定义，如果没有，打印警告日志，但**仍然依样返回给客户端**」。唯一能让它抛的是我方 bug，那种情况按项目规矩就该抛、留 traceback，不该被 error 帧盖住。
+
+**正确的提法是「续写没接手时的 ending」**，至少三格，今天全部落在「撕断／空 200」上：
+
+1. **非 anthropic-messages 客户端请求**——用户已限定「其他上游请求暂不使用该机制」，`/v1/chat/completions`、`/v1/responses` 一格都没有。
+2. **一个完整块都没交付过**——门是「已交付过至少一个完整块」。没交付走无痕重试；但重试预算耗尽或 `reopen()` 自己也失败时，既无内容也无续写。`_hand_over` 里已显式写了这一格返回 `None`（`committed_count == 0`，`max_tokens` 除外）。
+3. **不可继续的失败类别**——人写文档的前提是「如果业务可能可以继续」。上游拒绝、转换错误、prompt-limit 不在内；多数发生在 commit 前（还能用 HTTP 错误），但**已交付一块之后**的转换／assembler 错误就落在这里。
+
+**证据等级：够据此写实现范围**（依据是人写文档原文与 `_hand_over` 的现有分支）；**是否现在就接这条兜底，需裁决**。
+
 ### 6. 流式与非流式对同一事实给出不同答案
 
 非 `max_output_tokens` 的 `incomplete_details.reason`：流式路径读进局部变量后**不写任何地方**；非流式路径（`translation_driver/responses.py:114-130`）会记进 `conversion.losses` → `handler.py:425-426`。流式那条还违反 `../../anthropic-responses-bridge/spec.md:264-265`。归 C 组。
@@ -178,15 +190,20 @@ anthropic stop_reason='stop_sequence'  -> responses status='completed'   incompl
 
 `696a786` 的正文里 `A response that says it is incomplete without saying why gets , which is…` 缺了 `incomplete` 一词（`cat -A` 确认，非渲染问题）。历史已发布，不重写；`fef7d96` 的同一句是完整的，可作对照。登记以免后来者读到一句没有主语的话。
 
-### 19. 截断 error 帧的 message 在 Anthropic 腿上字面是错的
+### 19. 截断 error 帧的 message 在 Anthropic 上游腿上字面是错的
 
-`_deliver` 末尾那条帧写死了 `message="Responses stream ended before a successful terminal event"`（`src/app/pipeline/delivery/stream.py`，`code="incomplete_responses_stream"` 那处）。而 `_deliver` 是**两条腿共用**的——`framing` 由调用方给，`AnthropicFramer` 与 Responses 侧走同一段代码。所以一次走 Anthropic 上游腿的截断，客户端收到的是一句声称上游是 Responses 的话。
+`_deliver` 末尾那条帧写死了 `message="Responses stream ended before a successful terminal event"`（`src/app/pipeline/delivery/stream.py:386`，`code="incomplete_responses_stream"` 那处）。而 `_deliver` **对两条上游腿共用**——它收的是 `assembler`（`AnthropicAssembler` 或 `ResponsesAssembler`，即上游轴），而这条 message 是常量。所以一次走 Anthropic 上游腿的截断，客户端收到的是一句声称上游是 Responses 的话。
 
-2026-08-22 那次生产事故正是 Anthropic 腿（判据：日志行上是 `think` 而非 `reason`，`REASONING_WORD` + `dialect_for` + `assembler_for` 三处共同决定；见 `../../tmp/260822-h2-streamreset-cancel-diagnosis.md` §1.2）。
+> **本条初稿的论证是错的，记在这里而不是抹掉**：初稿写「`framing` 由调用方给，两条腿共用同一段代码」。**用错了轴**——`framing.py` 的模块 docstring 开宗明义警告：framer 选的是**客户端**协议（`route.inbound_format`），`dialect_for` 才回答「哪个上游说了话」，「把这两者搞反正是这个类型存在的理由」。主产品路径恰恰是 Anthropic 客户端 + Responses 上游，两轴不同向。结论不变，但成立的理由是 `assembler` 那条轴，不是 framer。
 
-**代价很小，但不是零**：`code` 不能动——它被 2 处测试断言，并被 `../../delivery-keepalive/spec.md` 逐字复述（这一条是 `../../tmp/260821-plan-g1-upstream-error-events.md` 的 G4 已经查清的）。`message` 则**零断言、零消费**，可以改。
+2026-08-22 那次生产事故正是 Anthropic **上游**腿（判据：日志行上是 `think` 而非 `reason`，`REASONING_WORD` + `dialect_for` + `assembler_for` 三处共同决定；见 `../../tmp/260822-h2-streamreset-cancel-diagnosis.md` §1.2）。
 
-**为什么登记在这里而不是顺手改**：改 message 属于对客户端可见的措辞变更，且与第 5 条（已交付之后两条失败路径不一致）、G1 那份方案是同一片区域，应当一并裁决而不是各改各的。**证据等级：代码事实，确凿；是否值得改属措辞取舍，需裁决。**
+**代价比初稿估的高，这一段也已更正**：
+
+- `code` 不能动——被 2 处测试断言，并被 `../../delivery-keepalive/spec.md` 逐字复述（`../../tmp/260821-plan-g1-upstream-error-events.md` 的 G4 已查清）。
+- `message` **不是「零消费」**。初稿这么写，错了。它有**两个产出点**：`src/app/delivery/responses_anthropic_stream.py:349`（legacy 链路）与 `stream.py:386`（活链路）。而且 `stream.py:382` 的注释把这件事写成**有意契约**：「Same code, same wire shape, **same message**, same gate on the message having started — a client that already learned to read one of these does not have to learn a second.」所以改 message 要么两处一起改、要么明确裁决让两条链路发散，不是顺手改一个字符串。
+
+**为什么登记而不是顺手改**：它与第 5 条（已交付之后两条失败路径不一致）、G1 那份方案是同一片区域，且牵动一条跨链路的措辞契约，应当一并裁决。**证据等级：代码事实，确凿；是否值得改属措辞与契约取舍，需裁决。**
 
 ## 明确不做
 
