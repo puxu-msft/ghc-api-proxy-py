@@ -75,7 +75,22 @@
 
 **变异检验**：把 `end_turn` 放回去，两条新测试都转红，还原后文件与变异前逐字节相同（sha256 一致）。
 
-### D. 无痕重试
+### D. 无痕重试 —— **已落地**
+
+| 提交 | 内容 |
+|---|---|
+| `361a7b9` | 预算耗尽保留上游真实状态（429 + `Retry-After`、超时 504）；`PipelineAbort` 带 `cause`，三个 `error_*` 读穿它 |
+| `0b57645` | 删 `synthesized_response_headers_after_sec` 与整条合成前导帧管路 |
+| `a2c9b77` | 更正：200 早于第一个 chunk 发出（`starlette/responses.py:249` 实证），SSE ping 不再被「有没有交付过块」拦 |
+| `96eb2fa` | `ReplaySupport` 接缝：位置判定在交付层，可重试性判定在调用方 |
+| `9aa31f9` | 删 `streamReplay`，断流走 `network` 普通预算 |
+| `a68672c` | driver 不再吞掉取消（504 而非 502 `CancelledError`） |
+| `51196e2` | 客户端时限真正罩住 body，到点发 SSE error 帧 |
+| `8f654b4` | 接线，并让一条客户端请求共用一个 `RetryLedger` |
+
+**每一处新行为都做过变异检验**，且还原后逐字节校验。端到端那条（`test_a_torn_stream_the_client_never_saw_is_replayed_end_to_end`）在去掉 `replay=replay` 后转红——它钉的是接线，不是接缝。
+
+原计划条目：
 
 - 读流中断纳入重试——**今天零重试，这是最大的新能力**。
 - 接 `decide_stream_ending` 的 REPLAY／ABANDON。
