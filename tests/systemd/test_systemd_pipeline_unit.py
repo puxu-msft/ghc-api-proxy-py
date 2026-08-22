@@ -39,8 +39,9 @@ class _CopilotFake(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         self.requests.append(self.path)
         if self.path == "/copilot_internal/v2/token":
-            # `refresh_in` is not optional: without it the exchange is rejected as an invalid
-            # response, the catalog stays empty, and the failure reads as an unreachable upstream.
+            # `refresh_in` is what upstream sends, so the stand-in sends it too. It is no longer
+            # required — nothing reads it since the background refresh loop went — but a fixture
+            # that quietly drifts from the real response shape stops being evidence about it.
             self._respond(
                 {"token": "copilot-smoke", "expires_at": 4102444800, "refresh_in": 1500}
             )

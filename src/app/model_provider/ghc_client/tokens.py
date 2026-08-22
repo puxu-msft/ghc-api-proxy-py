@@ -27,9 +27,13 @@ class GitHubTokenSource(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class CopilotTokenInfo:
+    """A Copilot token and when it stops being usable.
+
+    Two fields, because two are read. Upstream also sends `refresh_in`, which this used to parse and require; it was the background loop's schedule, and when that loop went nothing read it any more. Requiring it after that meant an upstream that stopped sending a field we do not use would have failed every exchange — and `raw` keeps the whole response anyway, so nothing is lost by not naming it here.
+    """
+
     token: str
     expires_at: float
-    refresh_in: int
     raw: dict[str, Any]
 
 
@@ -95,7 +99,6 @@ class CopilotTokenManager:
                 info = CopilotTokenInfo(
                     token=str(raw["token"]),
                     expires_at=float(raw["expires_at"]),
-                    refresh_in=int(raw["refresh_in"]),
                     raw=raw,
                 )
             except (KeyError, TypeError, ValueError) as error:

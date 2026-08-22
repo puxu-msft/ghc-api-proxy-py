@@ -87,8 +87,9 @@ class _GenericUpstreamHandler(BaseHTTPRequestHandler):
         # pointing at this one server, which is the whole reason those two are configurable.
         if self.path == "/copilot_internal/v2/token":
             # The exchange the proxy performs before it can talk to the inference host at all.
-            # `refresh_in` is required: without it the exchange is rejected as an invalid
-            # response and the catalog stays empty, which reads as an unreachable upstream.
+            # `refresh_in` is what upstream sends, so the stand-in sends it too. It is no longer
+            # required — nothing reads it since the background refresh loop went — but a fixture
+            # that quietly drifts from the real response shape stops being evidence about it.
             self._respond(
                 {
                     "token": "copilot-smoke-token",
