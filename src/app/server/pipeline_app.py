@@ -39,7 +39,6 @@ from app.pipeline.anthropic_request_hook import strip_attribution_lines
 from app.pipeline.delivery.assembler import BlockAssembler, ReplyDialect, Terminal
 from app.pipeline.delivery.blocks import BlockBuffer
 from app.pipeline.delivery.stream import (
-    ContinuationSupport,
     ReplaySupport,
     one_shot_delivery,
     stream_delivery,
