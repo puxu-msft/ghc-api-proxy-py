@@ -2783,7 +2783,7 @@ def test_a_thinking_budget_reaches_upstream_as_an_effort_the_model_offers() -> N
 
     Before this existed the field was dropped at the format boundary and `EXTENSIONS_NOT_CARRIED` was the only trace — so a client asking for deep reasoning got whatever the upstream defaulted to, and nothing said so.
 
-    20k asks for `xhigh`. This model publishes only low/medium/high, so `high` is the honest answer and `xhigh` would be a 400.
+    32k asks for `max`. This model publishes only low/medium/high, so `high` is the honest answer and `max` would be a 400.
     """
     client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
     response = client.post(
@@ -2792,7 +2792,7 @@ def test_a_thinking_budget_reaches_upstream_as_an_effort_the_model_offers() -> N
             "model": "reasoning-model",
             "messages": [{"role": "user", "content": "hi"}],
             "max_tokens": 64,
-            "thinking": {"type": "enabled", "budget_tokens": 20_000},
+            "thinking": {"type": "enabled", "budget_tokens": 32_000},
         },
     )
 
@@ -2809,7 +2809,7 @@ def test_a_model_that_publishes_no_efforts_is_sent_none_rather_than_a_guess() ->
         json={
             "model": "gpt-model",
             "messages": [{"role": "user", "content": "hi"}],
-            "thinking": {"type": "enabled", "budget_tokens": 20_000},
+            "thinking": {"type": "enabled", "budget_tokens": 32_000},
         },
     )
 
@@ -2822,14 +2822,14 @@ def test_a_model_that_publishes_no_efforts_is_sent_none_rather_than_a_guess() ->
 
 
 def test_an_approximated_effort_is_recorded_as_a_loss() -> None:
-    """Downgrading `xhigh` to `high` changes what the client asked for, so it is reported rather than done quietly."""
+    """Downgrading `max` to `high` changes what the client asked for, so it is reported rather than done quietly."""
     client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
     response = client.post(
         "/v1/messages",
         json={
             "model": "reasoning-model",
             "messages": [{"role": "user", "content": "hi"}],
-            "thinking": {"type": "enabled", "budget_tokens": 20_000},
+            "thinking": {"type": "enabled", "budget_tokens": 32_000},
         },
     )
 
@@ -2837,7 +2837,7 @@ def test_an_approximated_effort_is_recorded_as_a_loss() -> None:
     losses = _records()[0]["losses"]
     approximations = [entry for entry in losses if entry["code"] == "reasoning-intent-approximated"]
     assert len(approximations) == 1
-    assert "xhigh" in approximations[0]["detail"] and "high" in approximations[0]["detail"]
+    assert "max" in approximations[0]["detail"] and "high" in approximations[0]["detail"]
 
 
 def test_an_unreadable_thinking_field_is_refused_by_name() -> None:
@@ -2867,7 +2867,7 @@ def test_a_count_resolves_reasoning_the_same_way_the_send_does() -> None:
         json={
             "model": "reasoning-model",
             "messages": [{"role": "user", "content": "hi"}],
-            "thinking": {"type": "enabled", "budget_tokens": 20_000},
+            "thinking": {"type": "enabled", "budget_tokens": 32_000},
         },
     )
 
@@ -2879,7 +2879,7 @@ def test_a_count_resolves_reasoning_the_same_way_the_send_does() -> None:
     losses = _records()[0]["losses"]
     approximations = [entry for entry in losses if entry["code"] == "reasoning-intent-approximated"]
     assert len(approximations) == 1, losses
-    assert "xhigh" in approximations[0]["detail"] and "high" in approximations[0]["detail"]
+    assert "max" in approximations[0]["detail"] and "high" in approximations[0]["detail"]
 
 
 def test_a_silence_in_the_middle_of_a_delivered_stream_reaches_the_record() -> None:

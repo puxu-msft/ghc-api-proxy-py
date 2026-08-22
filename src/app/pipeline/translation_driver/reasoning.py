@@ -1,26 +1,32 @@
 """Turning a request's reasoning intent into an effort the target model actually offers.
 
-Two facts meet here and neither is negotiable. The client says how much thinking it wants, in Anthropic's vocabulary — off, adaptive, or a token budget. The catalog says which effort names this particular model accepts, and **that set differs per model**: the real Copilot catalog recorded in `tests/int/cassettes/anthropic_to_responses_stream.json` gives `gpt-5.3-codex` four names without `none`, `gpt-5.5` five with it, `gpt-5.6-terra` six including `max`, and `grok-4.5` only three. A mapping that hard-codes any name is a mapping that eventually sends one the model does not take.
+Two facts meet here and neither is negotiable. The client says how much thinking it wants, in Anthropic's vocabulary — off, adaptive, or a token budget. The catalog says which effort names this particular model accepts, and **that set differs per model**: the real Copilot catalog recorded in `tests/int/cassettes/anthropic_to_responses_stream.json` gives `gpt-5.3-codex` four names without `none`, `gpt-5.5` five with it, `gpt-5.6-terra` six including `max`, `grok-4.5` only three, and the gemini flash models a `minimal` that appears nowhere else. A mapping that hard-codes any name is a mapping that eventually sends one the model does not take.
 
 So the one hard invariant is `resolution.effort is None or resolution.effort in capabilities`. It is asserted at the end of `resolve` rather than trusted, because the failure it prevents is silent: an unsupported effort name is a 400 from the gateway on a request that looked fine here. The reference implementation this was compared against checks its capability list on two of its five branches and hard-codes the other three; the three that are hard-coded happen to be supported by every model in today's catalog, which is exactly why nobody notices until a catalog changes.
 
 Omission is not "off". Measured on a real `gpt-5.5` exchange: a request carrying no `reasoning` at all comes back with `"reasoning":{"effort":"medium",...}` — the upstream default. So `thinking: {"type": "disabled"}` has to be *said*, and saying it means finding a name for it.
 
-The thresholds are this project's policy, not an upstream fact. Nothing in the catalog publishes a budget-to-effort correspondence, and the Responses models publish no `min_thinking_budget`/`max_thinking_budget` at all — those belong to the Claude models on the other endpoint and borrowing them would be inventing a contract.
+The thresholds are this project's policy, not an upstream fact, and a reading of the first-party client settled that there is no upstream rule to adopt: `vscode-copilot-chat` never converts a budget into an effort on either leg — on the Anthropic side it sends `thinking.budget_tokens` and `output_config.effort` as independent fields. Nothing in the catalog publishes a correspondence either, and the Responses models publish no `min_thinking_budget`/`max_thinking_budget` at all — those belong to the Claude models on the other endpoint and borrowing them would be inventing a contract.
+
+Two things that client *does* settle, and both are followed here: the effort set comes from the catalog and is never hard-coded (its own type for it is an open `string[]`, and it passes names it does not recognise straight through), and `reasoning` carries only `effort` and `summary` — `context` and `mode` appear nowhere in it.
 """
 
 from dataclasses import dataclass
 from typing import cast
 
 # Weakest to strongest. The catalog lists names but never says they are ordered, so the order is stated here as this project's own and used for every comparison — `supported[-1]` would be reading an order out of a list that does not promise one.
-EFFORT_LADDER: tuple[str, ...] = ("none", "low", "medium", "high", "xhigh", "max")
+#
+# `minimal` is on this ladder because it is on the wire, not because anything documents it: it appears in the catalog recorded at `tests/int/cassettes/anthropic_to_responses_stream.json` on the gemini flash models. The official first-party client does not recognise the name either — it passes unknown levels through untouched — so a name missing from *this* ladder is not merely unranked, it is invisible: `_weakest` iterates the ladder, so a model publishing `["minimal", "low", …]` would have `disabled` answered with `low` while the reason said "weaker than anything this model offers", which is false. The assertion cannot catch that, because `low` really is on offer.
+EFFORT_LADDER: tuple[str, ...] = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
-# Which rung a `thinking.budget_tokens` asks for. Lower bounds, read as "this many tokens or more". Policy, not measurement: see the module docstring.
+# Which rung a `thinking.budget_tokens` asks for. Lower bounds, read as "this many tokens or more". Policy, not measurement — and a search of the first-party client established that there is no upstream rule to find: it never converts a budget into an effort at all, sending `thinking.budget_tokens` and `output_config.effort` side by side as independent fields.
+#
+# The one external datum that bears on the numbers is the official client's default budget of 16000. A user who configured nothing should not land in the second-strongest rung, so 16000 sits at `high` rather than at `xhigh`, and the rest are spaced around it. That is a sanity check against a default, not a rule anybody published.
 BUDGET_LADDER: tuple[tuple[int, str], ...] = (
-    (30_000, "max"),
-    (16_000, "xhigh"),
-    (8_000, "high"),
-    (3_000, "medium"),
+    (32_000, "max"),
+    (24_000, "xhigh"),
+    (16_000, "high"),
+    (8_000, "medium"),
 )
 BUDGET_FLOOR = "low"
 

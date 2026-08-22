@@ -18,11 +18,13 @@ from app.pipeline.translation_driver.reasoning import (
 NO_NONE = ("low", "medium", "high", "xhigh")
 WITH_NONE = ("none", "low", "medium", "high", "xhigh")
 NARROW = ("low", "medium", "high")
-FULL = ("none", "low", "medium", "high", "xhigh", "max")
+FULL = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+# The gemini flash shape from the recorded catalog: it publishes `minimal` and no `none`, which is the pair that made a missing ladder entry answer wrongly and say so untruthfully.
+WITH_MINIMAL = ("minimal", "low", "medium", "high")
 
 
 def test_a_budget_lands_on_a_rung_the_model_offers() -> None:
-    for budget, expected in ((1_000, "low"), (5_000, "medium"), (10_000, "high"), (20_000, "xhigh"), (50_000, "max")):
+    for budget, expected in ((1_000, "low"), (10_000, "medium"), (20_000, "high"), (30_000, "xhigh"), (50_000, "max")):
         resolution = resolve(ReasoningIntent(mode="budget", budget_tokens=budget), FULL)
         assert resolution.effort == expected, budget
 
@@ -72,7 +74,7 @@ def test_an_unknown_catalog_and_an_empty_one_are_different_answers_and_neither_g
     assert "advertises no" in empty.reason
 
 
-@pytest.mark.parametrize("capabilities", [NO_NONE, WITH_NONE, NARROW, FULL, ("max",), ("none",)])
+@pytest.mark.parametrize("capabilities", [NO_NONE, WITH_NONE, NARROW, FULL, WITH_MINIMAL, ("max",), ("none",)])
 def test_the_chosen_effort_is_always_one_the_model_offers(capabilities: tuple[str, ...]) -> None:
     """The one invariant. Swept over every intent this project can form, against every capability shape the real catalog shows."""
     intents = [ReasoningIntent(mode="disabled"), ReasoningIntent(mode="adaptive")]
@@ -90,12 +92,14 @@ def test_every_rung_the_ladder_names_can_actually_be_chosen() -> None:
     """
     assert resolve(ReasoningIntent(mode="disabled"), FULL).effort == "none"
     assert resolve(ReasoningIntent(mode="budget", budget_tokens=1), FULL).effort == "low"
-    assert resolve(ReasoningIntent(mode="budget", budget_tokens=3_000), FULL).effort == "medium"
-    assert resolve(ReasoningIntent(mode="budget", budget_tokens=8_000), FULL).effort == "high"
-    assert resolve(ReasoningIntent(mode="budget", budget_tokens=16_000), FULL).effort == "xhigh"
-    assert resolve(ReasoningIntent(mode="budget", budget_tokens=30_000), FULL).effort == "max"
+    assert resolve(ReasoningIntent(mode="budget", budget_tokens=8_000), FULL).effort == "medium"
+    assert resolve(ReasoningIntent(mode="budget", budget_tokens=16_000), FULL).effort == "high"
+    assert resolve(ReasoningIntent(mode="budget", budget_tokens=24_000), FULL).effort == "xhigh"
+    assert resolve(ReasoningIntent(mode="budget", budget_tokens=32_000), FULL).effort == "max"
+    # `minimal` is reached from below rather than by a budget: no budget asks for it, but a model that offers it and not `none` must get it for `disabled`.
+    assert resolve(ReasoningIntent(mode="disabled"), WITH_MINIMAL).effort == "minimal"
     # And the ladder names nothing this project cannot reach, which is the half the pairs above cannot say.
-    assert set(EFFORT_LADDER) == {"none", "low", "medium", "high", "xhigh", "max"}
+    assert set(EFFORT_LADDER) == {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 
 
 def test_thinking_is_read_into_the_three_modes() -> None:
@@ -153,3 +157,22 @@ def test_fields_a_mode_does_not_read_are_named() -> None:
     assert unused_thinking_fields({"type": "enabled", "budget_tokens": 5000, "mode": "deep"}, budget) == ("mode",)
 
     assert unused_thinking_fields({"type": "disabled"}, None) == ()
+
+
+def test_disabled_reaches_minimal_where_a_model_offers_it() -> None:
+    """The gemini flash shape: `minimal` on offer, no `none`.
+
+    With `minimal` missing from the ladder this answered `low` — one rung more thinking than the request asked for — and said "weaker than anything this model offers", which was untrue while `minimal` sat right there. `resolve`'s assertion could not catch it, because `low` genuinely is on offer: a wrong answer, not an invalid one.
+    """
+    resolution = resolve(ReasoningIntent(mode="disabled"), WITH_MINIMAL)
+
+    assert resolution.effort == "minimal"
+    assert resolution.approximated
+
+
+def test_the_official_default_budget_does_not_land_in_the_second_strongest_rung() -> None:
+    """16000 is `vscode-copilot-chat`'s own default `thinking.budget_tokens`.
+
+    It is the only external number that bears on these thresholds — the first-party client performs no budget-to-effort conversion at all, so there is no rule to copy. What it does say is that 16000 is what an unconfigured user sends, and an unconfigured user should not be buying the second-strongest reasoning tier.
+    """
+    assert resolve(ReasoningIntent(mode="budget", budget_tokens=16_000), FULL).effort == "high"
