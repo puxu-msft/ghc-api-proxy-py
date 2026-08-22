@@ -28,6 +28,32 @@ def test_the_beta_header_is_forwarded() -> None:
     assert forwarded == {"anthropic-beta": "context-management-2025-06-27,effort-2025-11-24"}
 
 
+def test_the_blacklist_is_case_insensitive_for_every_entry_the_document_names() -> None:
+    """`message-format-reshape.md` made this explicit on 2026-08-22, and it had never been pinned.
+
+    A client picks its own case and HTTP does not care; a blacklist that did would leak on the first client that capitalised differently. Every spelling of every entry the document lists, plus the one it added in the same edit — `Authorization`, which is the one that would have travelled beside our own credential.
+
+    The document spells that entry `Authrization`. Taken literally it matches no real header at all, so the list here follows the header name rather than the document's spelling; raised with the config author.
+    """
+    probe = {
+        "Authorization": "Bearer client-secret",
+        "AUTHORIZATION": "Bearer shouty",
+        "AuThOrIzAtIoN": "Bearer mixed",
+        "Cookie": "session=1",
+        "X-Api-Key": "sk-client",
+        "HOST": "proxy.local",
+        "Content-Length": "999",
+        "Content-Encoding": "gzip",
+        "Accept-Encoding": "br",
+        "X-Forwarded-For": "10.0.0.1",
+        "Forwarded": "for=10.0.0.1",
+        "Anthropic-Beta": "context-management-2025-06-27",
+    }
+    assert forwarded_client_headers(probe) == {
+        "anthropic-beta": "context-management-2025-06-27"
+    }
+
+
 def test_credentials_never_survive_the_floor() -> None:
     """The floor's one job, and the reason it runs at parse time rather than at the send site.
 
