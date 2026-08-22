@@ -142,7 +142,7 @@ response 层有信号（`response.incomplete`），但它晚于 item 关闭到�
 
 **不要**为此加门禁或指标体系。
 
-### 11. `hand_over_stop_reasons` 在非流式的丢弃上不生效
+### 15. `hand_over_stop_reasons` 在非流式的丢弃上不生效
 
 配置项 `upstream_request_retry.hand_over_stop_reasons` 接到了三处中的两处：流式 assembler、以及两条路的**交接**判断。**没接到非流式的丢弃**——`from_openai_responses_response` 是通过翻译器注册表按格式调用的（`registry.py:120` 的 `reader(payload)`），穿一个配置进去要改所有格式的 reader 协议，而同伴正在那片工作。
 
@@ -150,7 +150,7 @@ response 层有信号（`response.incomplete`），但它晚于 item 关闭到�
 
 补法：改 reader 协议让它接受一个上下文，或把丢弃从翻译器挪到调用方。两条都比现在这个不一致贵，等它真的碍事再做。
 
-### 12. 反方向（`/responses` 客户端 + Anthropic 上游）仍在抹平
+### 16. 反方向（`/responses` 客户端 + Anthropic 上游）仍在抹平
 
 `fef7d96` 只修了一个方向。实测 `to_openai_responses_response`：
 
@@ -164,13 +164,13 @@ anthropic stop_reason='stop_sequence'  -> responses status='completed'   incompl
 
 来源：`reports/260822-review-unreviewed-span.md` minor-8。
 
-### 13. 重开不重建 framer
+### 17. 重开不重建 framer
 
 `_reopen` 刷新了 assembler、buffer、attempt 计数，但 `framer` 是循环外用**第一次**的 `context.id` / `context.resolved_model` 建的。若重开时路由解析到不同的模型，客户端收到的 `message_start.model` 仍是第一次那个。
 
 今天路由对同一请求是确定的，所以不可达。**登记以免将来加入模型回退时无声出错。** 来源：同上 minor-12。
 
-### 14. 一条提交信息缺字
+### 18. 一条提交信息缺字
 
 `696a786` 的正文里 `A response that says it is incomplete without saying why gets , which is…` 缺了 `incomplete` 一词（`cat -A` 确认，非渲染问题）。历史已发布，不重写；`fef7d96` 的同一句是完整的，可作对照。登记以免后来者读到一句没有主语的话。
 
