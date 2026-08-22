@@ -2040,6 +2040,66 @@ def responses_sse_upstream(usage: dict[str, Any] | None = None) -> bytes:
     return "".join(frames).encode()
 
 
+def test_a_direct_responses_stream_is_answered_in_responses_events() -> None:
+    """A client that asked on `/responses` gets `response.*`, not Anthropic event names.
+
+    Until 2026-08-22 it got the Anthropic ones: delivery had a single outbound framer and used it whatever the client had asked in. `assembler_for` was already choosing correctly for the upstream leg, which is the half that made this easy to miss — the stream parsed fine and came out in the wrong protocol.
+
+    Asserted on the event names because that is the part a client dispatches on, and on the absence of the Anthropic ones because "also emits" would be just as broken as "emits instead".
+    """
+    client, seen = make_client(
+        lambda _: httpx2.Response(
+            200,
+            content=responses_sse_upstream(),
+            headers={"content-type": "text/event-stream"},
+        )
+    )
+    response = client.post(
+        "/responses",
+        json={"model": "gpt-model", "input": [], "stream": True},
+    )
+
+    assert response.status_code == 200
+    assert str(seen[-1].url) == f"{BASE_URL}/responses"
+    names = [
+        line.removeprefix("event: ")
+        for line in response.text.splitlines()
+        if line.startswith("event: ")
+    ]
+    assert names[0] == "response.created"
+    assert names[-1] == "response.completed"
+    assert "response.output_item.done" in names
+    assert not [name for name in names if name.startswith(("message_", "content_block_"))]
+
+
+def test_an_anthropic_client_on_a_responses_upstream_still_gets_anthropic_events() -> None:
+    """The other half of the same decision, and the one that would break the main product path.
+
+    This route is assembled by the Responses assembler because that is what answered, and framed by the Anthropic framer because that is what the client asked in. Selecting the framer by the upstream's dialect would send `response.*` to Claude Code.
+    """
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200,
+            content=responses_sse_upstream(),
+            headers={"content-type": "text/event-stream"},
+        )
+    )
+    response = client.post(
+        "/v1/messages",
+        json={"model": "gpt-model", "messages": [], "stream": True},
+    )
+
+    assert response.status_code == 200
+    names = [
+        line.removeprefix("event: ")
+        for line in response.text.splitlines()
+        if line.startswith("event: ")
+    ]
+    assert names[0] == "message_start"
+    assert names[-1] == "message_stop"
+    assert not [name for name in names if name.startswith("response.")]
+
+
 def test_a_streamed_responses_reply_is_logged_in_its_own_words(
     request_log: None, caplog: pytest.LogCaptureFixture
 ) -> None:

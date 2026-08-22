@@ -14,6 +14,7 @@ from typing import Any
 import orjson
 
 from app.config.schema import ContentBlockStartCompat
+from app.pipeline.delivery.assembler import Terminal
 from app.pipeline.delivery.blocks import CompletedBlock
 
 
@@ -192,3 +193,54 @@ def render(
             yield frame.encode()
     for frame in terminal_frames(stop_reason=stop_reason, usage=usage):
         yield frame.encode()
+
+
+class AnthropicFramer:
+    """The `OutboundFramer` for a client that asked in Anthropic Messages.
+
+    A wrapper over the functions above, which stay exactly as they are: this leg needs no state, and holding what it is given at construction only spares three parameters a trip through four call frames.
+
+    The default leg. Anything that is not a Responses client is framed by this one, which is what keeps a translated route — Anthropic in, Responses upstream — answering in the protocol it was asked in.
+    """
+
+    __slots__ = ("_message_id", "_model", "_signature_compat")
+
+    def __init__(
+        self,
+        *,
+        message_id: str,
+        model: str,
+        signature_compat: ContentBlockStartCompat = "signature_delta",
+    ) -> None:
+        self._message_id = message_id
+        self._model = model
+        # Annotated because `__slots__` leaves the attribute's type to be inferred from this assignment, and `Literal[False, …]` widens to `bool | str` on the way in.
+        self._signature_compat: ContentBlockStartCompat = signature_compat
+
+    def preamble(self) -> tuple[bytes, ...]:
+        return (message_start(self._message_id, self._model).encode(),)
+
+    def block(self, block: CompletedBlock) -> tuple[bytes, ...]:
+        return tuple(
+            frame.encode() for frame in block_frames(block, signature_compat=self._signature_compat)
+        )
+
+    def terminal(self, terminal: Terminal) -> tuple[bytes, ...]:
+        """Close the message.
+
+        `or "end_turn"` is a synthesis and stays visible rather than being written into the record: it only ever runs on a stream that did see a terminal event, so it fills in a field upstream left empty rather than inventing an ending upstream never reached.
+        An explicit empty `stop_reason` gets it too, because `""` is not a stop reason any Anthropic consumer accepts.
+        """
+        return tuple(
+            frame.encode()
+            for frame in terminal_frames(
+                stop_reason=terminal.stop_reason or "end_turn",
+                usage=terminal.usage or None,
+            )
+        )
+
+    def error(self, *, error_type: str, message: str, code: str | None = None) -> bytes:
+        return error_frame(error_type=error_type, message=message, code=code).encode()
+
+    def keepalive(self) -> bytes:
+        return b": ping\n\n"

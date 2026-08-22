@@ -12,19 +12,15 @@ import asyncio
 import sys
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import aclosing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from app.config.schema import ContentBlockStartCompat
 from app.errors import WIRE_TYPES, ErrorCategory
-from app.pipeline.delivery.anthropic_sse import (
-    block_frames,
-    error_frame,
-    message_start,
-    terminal_frames,
-)
+from app.pipeline.delivery.anthropic_sse import AnthropicFramer
 from app.pipeline.delivery.assembler import BlockAssembler
 from app.pipeline.delivery.blocks import BlockBuffer, CompletedBlock, DeliverySession
+from app.pipeline.delivery.framing import OutboundFramer
 from app.pipeline.delivery.sse_source import SseEvent, read_events
 from app.pipeline.retry import RetryLedger, RetryReason, StreamEnding, decide_stream_ending
 from app.streaming.deadline import ClientDeadlineError
@@ -212,10 +208,14 @@ async def stream_delivery(
     settings: StreamSettings,
     message_id: str,
     model: str,
+    framer: OutboundFramer | None = None,
     replay: ReplaySupport | None = None,
     continuation: ContinuationSupport | None = None,
 ) -> AsyncGenerator[bytes]:
-    """Turn an upstream byte stream into Anthropic SSE, one complete block at a time.
+    """Turn an upstream byte stream into the client's SSE, one complete block at a time.
+
+    `framer` decides which protocol that is. Absent, it is Anthropic built from `message_id`, `model` and `settings.signature_compat` — the shape every caller had before there was a second client leg, and why those three parameters are still here.
+    A caller whose client asked on `/responses` passes a `ResponsesFramer` instead; see `framer_for`, which selects on the *inbound* format rather than on which upstream answered.
 
     Typed as a generator rather than a plain iterator so a caller that stops early can close it: abandoning it mid-stream otherwise leaves the upstream response open until the loop is collected.
 
@@ -234,6 +234,7 @@ async def stream_delivery(
             settings=settings,
             message_id=message_id,
             model=model,
+            framer=framer,
             last_write=last_write,
             replay=replay,
             continuation=continuation,
@@ -252,11 +253,15 @@ async def _deliver(
     settings: StreamSettings,
     message_id: str,
     model: str,
+    framer: OutboundFramer | None,
     last_write: _LastWrite,
     replay: ReplaySupport | None = None,
     continuation: ContinuationSupport | None = None,
 ) -> AsyncGenerator[bytes]:
     """Assemble and frame the response. Wrapped by `stream_delivery`, which stamps the clock."""
+    framing = framer or AnthropicFramer(
+        message_id=message_id, model=model, signature_compat=settings.signature_compat
+    )
     session = DeliverySession(buffer=buffer)
     # Whether the client has seen a semantic event yet. It gates the error frame at the end, which has nothing to correct if the message never started, and it is half of what decides whether a torn stream may be replayed.
     #
@@ -282,10 +287,8 @@ async def _deliver(
                             for chunk in _commit(
                                 session,
                                 block,
-                                message_id,
-                                model,
+                                framing,
                                 client_has_bytes.is_set(),
-                                settings.signature_compat,
                             ):
                                 client_has_bytes.set()
                                 wrote = True
@@ -296,7 +299,7 @@ async def _deliver(
                     # Unconditional, because by the time this generator runs the client already holds a 200: the response is built with upstream's own status once its headers have arrived, and the framework sends `http.response.start` before it pulls the first chunk. Nothing here can change what the client was told, so holding the keep-alive back until a block exists buys nothing and spends the whole pre-first-block window in silence — which under `full` and `until-tool-use` is the entire turn.
                     #
                     # An SSE comment before `message_start` is still legal SSE and carries no content, so it cannot be mistaken for part of the turn. What is *not* sent early is the preamble itself: a `message_start` on its own leaves a message opened with nothing in it, and every decision after a torn stream then has to carry a case for that state.
-                    yield PING_FRAME
+                    yield framing.keepalive()
         except Exception as error:
             # `Exception`, not `BaseException`, and that is the whole of how this side's own endings stay out. A client that goes away and a process that is shutting down both arrive as `CancelledError`, and a generator being closed arrives as `GeneratorExit`; neither derives from `Exception`, so neither reaches here and neither can be mistaken for upstream tearing. The spec calls that distinction `LOCAL_ABORT` and warns that the *position* facts of the two are identical — this is the one place the difference is still visible, so it is read here rather than inferred later.
             torn = error
@@ -308,11 +311,11 @@ async def _deliver(
             # Not gated on a block having been delivered. `client-side-block-delivery.md` puts the condition at the response headers, and by the time this generator runs those have gone out: the response is built with upstream's own status once its headers arrive, and the framework sends `http.response.start` before pulling a chunk. Gating on a delivered block instead meant `full` and `until-tool-use` — which deliver nothing until the stream ends — timed out having sent the client zero bytes and no frame at all.
             #
             # Deliberately only this one. The other endings that reach here remain indistinguishable from each other on the wire, and widening the frame to cover them is a separate question with its own answer to find. Nothing is flushed first either: what is buffered but undelivered would make the size of this ending depend on the buffering policy, while the ending itself is a clock event.
-            yield error_frame(
+            yield framing.error(
                 error_type=WIRE_TYPES[ErrorCategory.INTERNAL],
                 message=str(torn) or "client request exceeded its deadline",
                 code="client_deadline_exceeded",
-            ).encode()
+            )
             return
         reason = replay.eligible(torn) if replay is not None else None
         if replay is None or reason is None:
@@ -333,7 +336,7 @@ async def _deliver(
                 continue
         # No second attempt is available, and the client is holding content this side cannot take back. Handing the failure over as a tool call is the only ending that leaves the turn recoverable — by the client, in its own next request. Reached for a failure the caller called continuable and a position that refused a replay, which is exactly the pair the document divides on.
         handed_over = _hand_over(
-            continuation, session, assembler, message_id, model, settings, error=torn
+            continuation, session, assembler, framing, error=torn
         )
         if handed_over is not None:
             for chunk in handed_over:
@@ -344,11 +347,12 @@ async def _deliver(
     remaining = session.finish()
     if remaining and not client_has_bytes.is_set():
         # The held-back path needs the same preamble as the incremental one.
-        yield message_start(message_id, model).encode()
+        for frame in framing.preamble():
+            yield frame
         client_has_bytes.set()
     for block in remaining:
-        for frame in block_frames(block, signature_compat=settings.signature_compat):
-            yield frame.encode()
+        for frame in framing.block(block):
+            yield frame
 
     terminal = assembler.terminal
     if not client_has_bytes.is_set():
@@ -358,27 +362,24 @@ async def _deliver(
         # STR-04: an EOF with no legal terminal event is truncation, not success.
         # Ported from the legacy chain rather than redesigned, as `implementation.md` directs: `app/delivery/responses_anthropic_stream.py`, on `not frontier.terminal_accepted`, raises `incomplete_responses_stream` and renders an SSE error. Same code, same wire shape, same message, same gate on the message having started — a client that already learned to read one of these does not have to learn a second.
         # `message_stop` deliberately does not follow. The frozen Spec rules these two mutually exclusive: 不得再发 `message_stop` 冒充成功.
-        yield error_frame(
+        yield framing.error(
             error_type=WIRE_TYPES[ErrorCategory.UPSTREAM],
             message="Responses stream ended before a successful terminal event",
             code="incomplete_responses_stream",
-        ).encode()
+        )
         return
     if terminal.stop_reason in _HANDED_OVER_STOP_REASONS:
         # Upstream finished cleanly and said it stopped because it ran out of room. Nothing failed, so nothing above catches it — but the turn is no more finished than a torn one, and the client is the only side that can carry it on. Ruled 2026-08-21: `max_tokens` always hands over.
         handed_over = _hand_over(
-            continuation, session, assembler, message_id, model, settings, stop_reason=terminal.stop_reason
+            continuation, session, assembler, framing, stop_reason=terminal.stop_reason
         )
         if handed_over is not None:
             for chunk in handed_over:
                 yield chunk
             return
     # `or "end_turn"` is still a synthesis, and still visible where it happens — but it now only ever runs on a stream that really did see a terminal event, so it fills in a field upstream left empty rather than inventing an ending upstream never reached. An upstream that sends an explicit empty `stop_reason` gets `end_turn`, because `""` is not a stop reason any Anthropic consumer accepts.
-    for frame in terminal_frames(
-        stop_reason=terminal.stop_reason or "end_turn",
-        usage=terminal.usage or None,
-    ):
-        yield frame.encode()
+    for frame in framing.terminal(terminal):
+        yield frame
 
 
 # The clean endings that are not endings. Upstream said it stopped for want of room, which leaves the turn exactly as unfinished as a torn one does — the difference is only that nothing raised.
@@ -389,9 +390,7 @@ def _hand_over(
     continuation: ContinuationSupport | None,
     session: DeliverySession,
     assembler: BlockAssembler,
-    message_id: str,
-    model: str,
-    settings: StreamSettings,
+    framing: OutboundFramer,
     *,
     error: BaseException | None = None,
     stop_reason: str = "",
@@ -413,28 +412,24 @@ def _hand_over(
     chunks: list[bytes] = []
     remaining = session.finish()
     if remaining and not session.started:
-        chunks.append(message_start(message_id, model).encode())
+        chunks.extend(framing.preamble())
     for block in remaining:
-        for frame in block_frames(block, signature_compat=settings.signature_compat):
-            chunks.append(frame.encode())
+        chunks.extend(framing.block(block))
     if session.committed_count == 0:
         # Reachable only for a turn upstream cut short for want of room whose one block was itself truncated and dropped. The message still has to begin before a block can go out.
-        chunks.append(message_start(message_id, model).encode())
+        chunks.extend(framing.preamble())
     handed = CompletedBlock(index=session.committed_count, kind=TOOL_USE_KIND, payload=payload)
-    for frame in block_frames(handed, signature_compat=settings.signature_compat):
-        chunks.append(frame.encode())
-    for frame in terminal_frames(stop_reason=TOOL_USE_KIND, usage=assembler.terminal.usage or None):
-        chunks.append(frame.encode())
+    chunks.extend(framing.block(handed))
+    # `tool_use` as the ending, because that is what this turn now is. `synthesize` refuses any client that did not ask in Anthropic Messages, so only that framer is ever reached here.
+    chunks.extend(framing.terminal(replace(assembler.terminal, stop_reason=TOOL_USE_KIND)))
     return chunks
 
 
 def _commit(
     session: DeliverySession,
     block: CompletedBlock,
-    message_id: str,
-    model: str,
+    framing: OutboundFramer,
     started: bool,
-    signature_compat: ContentBlockStartCompat,
 ) -> list[bytes]:
     """Offer one block and frame whatever the buffer released."""
     released = session.offer(block)
@@ -442,10 +437,9 @@ def _commit(
         return []
     chunks: list[bytes] = []
     if not started:
-        # message_start waits for the first block.
+        # The preamble waits for the first block.
         # A response that never produces one never looks like a message that began.
-        chunks.append(message_start(message_id, model).encode())
+        chunks.extend(framing.preamble())
     for ready in released:
-        for frame in block_frames(ready, signature_compat=signature_compat):
-            chunks.append(frame.encode())
+        chunks.extend(framing.block(ready))
     return chunks

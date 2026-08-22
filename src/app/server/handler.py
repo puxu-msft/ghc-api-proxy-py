@@ -16,11 +16,13 @@ from uuid import uuid4
 import httpx2
 from pydantic import ValidationError
 
+from app.config.schema import ContentBlockStartCompat
 from app.model_provider import ModelProvider, ProviderError
 from app.models.anthropic import MessagesRequest
 from app.pipeline.anthropic_request_hook import fix_anthropic_request
 from app.pipeline.count_tokens import CountTokensUnavailable, count_tokens
 from app.pipeline.delivery import BlockBuffer, CompletedBlock, DeliverySession
+from app.pipeline.delivery.anthropic_sse import AnthropicFramer
 from app.pipeline.delivery.assembler import (
     AnthropicAssembler,
     BlockAssembler,
@@ -29,6 +31,8 @@ from app.pipeline.delivery.assembler import (
     Terminal,
     terminal_from_anthropic,
 )
+from app.pipeline.delivery.framing import OutboundFramer
+from app.pipeline.delivery.responses_sse import ResponsesFramer
 from app.pipeline.delivery.stream import StreamSettings
 from app.pipeline.delivery.synthetic import (
     failed_search_body,
@@ -555,6 +559,26 @@ def delivers_blocks(handled: HandledRequest) -> bool:
     if handled.synthesized:
         return True
     return handled.route.inbound_format is not WireFormat.OPENAI_CHAT_COMPLETIONS
+
+
+def framer_for(
+    handled: HandledRequest,
+    *,
+    message_id: str,
+    model: str,
+    signature_compat: ContentBlockStartCompat,
+) -> OutboundFramer | None:
+    """The outbound framer for this route's client leg, or `None` when it has none and the stream is delivered whole.
+
+    Selected on `route.inbound_format` — the protocol the client asked in — and deliberately **not** on `dialect_for`, which answers which upstream replied. On the main product path those are different formats: a request arriving as Anthropic Messages and served by a Responses upstream has to be answered in Anthropic Messages, and framing it by the upstream's dialect would start sending `response.*` events to a client that cannot read them.
+
+    The pairing with `assembler_for` is the point. That one is chosen by the upstream leg, this one by the client leg, and a translated route uses one of each.
+    """
+    if not delivers_blocks(handled):
+        return None
+    if handled.route.inbound_format is WireFormat.OPENAI_RESPONSES:
+        return ResponsesFramer(response_id=message_id, model=model)
+    return AnthropicFramer(message_id=message_id, model=model, signature_compat=signature_compat)
 
 
 def assembler_for(handled: HandledRequest) -> BlockAssembler:
