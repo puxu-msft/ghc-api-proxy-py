@@ -33,6 +33,7 @@
 | [systemd-shutdown.md](systemd-shutdown.md) | **回答 `lifecycle.md:52` 的 TODO**——systemd 支不支持三级关闭、代价是什么、以及与 C-1 时限公式的冲突 |
 | [pipeline-subscriptions.md](pipeline-subscriptions.md) | `RequestContext` 事件订阅如何吸收现有 hooks |
 | [proactive-rate-limiter.md](proactive-rate-limiter.md) | **`proactive_rate_limiter` 那三行的表述**——已生效却仍被注释、示例值与默认值不符、未写明超限行为是等待；附一个待裁决点（排队时间不计入任何 deadline） |
+| [pidfile-port-scoping.md](pidfile-port-scoping.md) | **pidfile 默认路径已改为按端口区分**，`config.example.yaml` 那两句需更新；附切换时的一次性影响与一个待裁决点（`write_pidfile` 是否该拒绝覆盖活进程的记录） |
 | [uncovered-modules.md](uncovered-modules.md) | 其余未被用户文档描述的包，各一行 |
 
 ## 已被采纳的部分
