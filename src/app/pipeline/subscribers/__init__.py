@@ -18,7 +18,7 @@
 """
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from app.pipeline.direct_driver.base import EVENT_ATTEMPT_PREPARE
 from app.pipeline.events import SubscriberRegistry
@@ -34,8 +34,9 @@ from app.pipeline.subscribers.server_tools import adapt_server_tools
 def register_builtin_subscribers(
     registry: SubscriberRegistry[RequestContext],
     *,
-    web_search_models: Sequence[re.Pattern[str]] = (),
+    web_search_models: Mapping[str, Sequence[re.Pattern[str]]] | None = None,
     web_search_enabled: bool = False,
+    default_provider: str = "",
 ) -> None:
     """Add every built-in subscriber to a registry that has not been frozen yet.
 
@@ -53,7 +54,10 @@ def register_builtin_subscribers(
         HOSTED_WEB_SEARCH_GATE_ID,
         # Bound at registration rather than read from the context: both are configuration, fixed for the life of the chain, and threading them through every request would put a startup decision in a per-request field where something could change it mid-flight.
         lambda context: gate_hosted_web_search(
-            context, web_search_models, enabled=web_search_enabled
+            context,
+            web_search_models or {},
+            enabled=web_search_enabled,
+            default_provider=default_provider,
         ),
     )
     registry.subscribe(

@@ -15,7 +15,7 @@ So this raises instead, and `handle()` answers it: the reply becomes a `server_t
 
 import logging
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, cast
 
 from app.pipeline.request import RequestContext, WireFormat
@@ -31,11 +31,13 @@ _HOSTED_WEB_SEARCH = "web_search"
 
 
 def compile_supported(patterns: Iterable[str]) -> tuple[re.Pattern[str], ...]:
-    """Compile the configured entries once, at startup, so a bad one is a startup failure.
+    """Compile one provider's entries once, at startup, so a bad one is a startup failure.
 
     Left uncompiled they would be compiled per request, and a pattern that does not compile would raise from inside a request rather than from the config that holds it. Worse, catching that per request would turn a typo into a model that silently never matches — the gate would answer every search as failed and name a model that is in fact listed.
 
-    Anchored by using `fullmatch` at the call site rather than by wrapping each pattern in `\\A…\\Z` here: an entry written as a plain model id (`gpt-5.5`), which is what this key held before it took patterns, then keeps meaning what its author meant. A wrapper would also have to reason about alternation — `a|b` wrapped naively binds the anchors to one branch each.
+    Anchored by using `fullmatch` at the call site rather than by wrapping each pattern in `\\A…\\Z` here, which would have to reason about alternation: `a|b` wrapped naively binds one anchor to each branch.
+
+    **An entry is a regular expression, including the ones that look like plain model ids.** This docstring used to promise that `gpt-5.5` "keeps meaning what its author meant"; it does not, because `.` is a wildcard, and `re.fullmatch("gpt-5.5", "gpt-5x5")` is true. Model ids in this catalog are full of dots, so that is the likely spelling for someone pinning one model — and the over-match sends an unvetted model's search upstream. To pin an id exactly, escape it: `gpt-5\\.5`.
 
     A pattern that does not compile is re-raised naming itself and the key it came from. `re`'s own message says only what is wrong and at which character offset, which for a list of several entries leaves the operator to work out *which* entry the offset belongs to.
     """
@@ -48,6 +50,16 @@ def compile_supported(patterns: Iterable[str]) -> tuple[re.Pattern[str], ...]:
                 f"models_support_web_search entry {pattern!r} is not a valid regular expression: {exc}"
             ) from exc
     return tuple(compiled)
+
+
+def compile_supported_by_provider(
+    providers: Mapping[str, Iterable[str]],
+) -> dict[str, tuple[re.Pattern[str], ...]]:
+    """Each provider's own list, kept apart.
+
+    Merging them into one set was wrong, and the comment that justified it — model ids are unique across the catalog, so there is nothing to disambiguate — answers a question nobody asked. Uniqueness of the *id* says nothing about whether two providers **run** that model the same way, and the key lives under `model_providers.<name>` precisely because the answer is the provider's. Under a merge, a provider whose list is empty inherits every other provider's, so a request routed to it passes a gate its own configuration never opened.
+    """
+    return {name: compile_supported(patterns) for name, patterns in providers.items()}
 
 
 def _is_hosted_web_search(tool: Any) -> bool:
@@ -65,11 +77,17 @@ def _is_supported(model: str, supported: Sequence[re.Pattern[str]]) -> bool:
 
 
 async def gate_hosted_web_search(
-    context: RequestContext, supported: Sequence[re.Pattern[str]], *, enabled: bool = False
+    context: RequestContext,
+    supported: Mapping[str, Sequence[re.Pattern[str]]],
+    *,
+    enabled: bool = False,
+    default_provider: str = "",
 ) -> None:
     """Stop a search that will not run, so it is answered rather than invented.
 
     Two reasons it will not run, kept apart all the way to the log line. `model_translation.to_openai_responses.hosted_web_search` being off is a decision nobody has revisited; a model no pattern claims is a list that needs a line. They call for different actions from whoever reads the log, and collapsing them — by expressing "off" as an empty pattern list, say — would make the more likely of the two invisible, because the default *is* off and an operator who never set the key would be told their model is unlisted.
+
+    The patterns are looked up **by the provider serving this request**, matching where the key lives in the config. `context.provider_name` is set from the route before the attempt begins (`server/handler.py`), and falls back to the chain's default provider the same way the provider lookup itself does. A provider name with no entry gets an empty tuple and so refuses — the fail-closed direction, and the one that does not hand an unconfigured provider somebody else's permissions.
 
     Defaulting the keyword to `False` rather than `True` so a caller that forgets it refuses rather than searches: the wrong answer is then a search that did not happen and says so, not one that ran when nobody had asked for the feature.
     """
@@ -78,7 +96,8 @@ async def gate_hosted_web_search(
     if context.extras.get(COUNTING_ONLY):
         # Measuring, not sending: no reply exists to be invented, so there is nothing to refuse for.
         return
-    if enabled and _is_supported(context.resolved_model, supported):
+    patterns = supported.get(context.provider_name or default_provider, ())
+    if enabled and _is_supported(context.resolved_model, patterns):
         return
     tools = context.payload.get("tools")
     if not isinstance(tools, list):

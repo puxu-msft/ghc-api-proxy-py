@@ -343,7 +343,7 @@ async def test_the_web_search_gate_leaves_the_anthropic_leg_alone() -> None:
         target_format=WireFormat.ANTHROPIC_MESSAGES,
     )
 
-    await gate_hosted_web_search(context, ())
+    await gate_hosted_web_search(context, {})
 
     assert payload["tools"] == [{"type": "web_search"}]
 
@@ -365,7 +365,7 @@ async def test_a_supported_model_pattern_covers_the_family_it_names() -> None:
             target_format=WireFormat.OPENAI_RESPONSES,
         )
         # Returning at all is the assertion: the gate raises for a model it does not recognise.
-        await gate_hosted_web_search(context, supported, enabled=True)
+        await gate_hosted_web_search(context, {"p": supported}, enabled=True, default_provider="p")
 
 
 async def test_the_feature_is_off_until_someone_turns_it_on() -> None:
@@ -373,7 +373,7 @@ async def test_the_feature_is_off_until_someone_turns_it_on() -> None:
 
     The support is real but partial — text where the protocol wants a block pair, citations unread, `max_uses` and the domain lists unsendable — so it is not what every request should get until someone has decided it is.
 
-    Asserted through `register_builtin_subscribers`' own default rather than by passing `enabled=False`, because what is being guarded is the default: a call that says nothing about web search must not search.
+    Asserted here through the *function's* keyword default — this calls `gate_hosted_web_search` directly, so it does not exercise the schema default at all. That one is guarded by `tests/int/test_pipeline_app.py::test_hosted_web_search_is_off_until_the_config_says_otherwise`, which goes through config and composition. Both defaults have to be off and neither test covers the other.
     """
     from app.pipeline.subscribers.hosted_web_search import compile_supported, gate_hosted_web_search
 
@@ -385,7 +385,7 @@ async def test_the_feature_is_off_until_someone_turns_it_on() -> None:
         target_format=WireFormat.OPENAI_RESPONSES,
     )
     with pytest.raises(WebSearchNotExecutable) as refusal:
-        await gate_hosted_web_search(context, compile_supported([r"gpt-[5-9]\.\d+.*"]))
+        await gate_hosted_web_search(context, {"": compile_supported([r"gpt-[5-9]\.\d+.*"])})
 
     # The two reasons a search does not run must stay distinguishable: an operator reading this has
     # to know whether to turn the feature on or to add a pattern, and the default being off makes
@@ -406,10 +406,118 @@ async def test_the_switch_being_on_does_not_excuse_an_unlisted_model() -> None:
     )
     with pytest.raises(WebSearchNotExecutable) as refusal:
         await gate_hosted_web_search(
-            context, compile_supported([r"gpt-[5-9]\.\d+.*"]), enabled=True
+            context, {"": compile_supported([r"gpt-[5-9]\.\d+.*"])}, enabled=True
         )
 
     assert refusal.value.code == "server_tool_capability_unavailable"
+
+
+async def test_a_provider_does_not_inherit_another_provider_s_permission() -> None:
+    """The key lives under `model_providers.<name>`, so the answer is that provider's alone.
+
+    This was merged into one set across every provider, justified by model ids being unique across the catalog — which answers a different question. Uniqueness of the id says nothing about whether two providers *run* that model the same way, and under the merge a provider whose own list is empty inherited everyone else's: a request routed to it passed a gate its configuration never opened.
+    """
+    from app.pipeline.subscribers.hosted_web_search import (
+        compile_supported_by_provider,
+        gate_hosted_web_search,
+    )
+
+    supported = compile_supported_by_provider({"a": [], "b": [r"gpt-5\.5"]})
+    context = RequestContext(
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        requested_model="gpt-5.5",
+        payload={"tools": [{"type": "web_search"}]},
+        resolved_model="gpt-5.5",
+        target_format=WireFormat.OPENAI_RESPONSES,
+    )
+    context.provider_name = "a"
+
+    with pytest.raises(WebSearchNotExecutable):
+        await gate_hosted_web_search(context, supported, enabled=True)
+
+    # And the provider that did list it is unaffected — otherwise this would pass by refusing
+    # everything, which is not the same thing as scoping.
+    context.provider_name = "b"
+    await gate_hosted_web_search(context, supported, enabled=True)
+
+
+async def test_an_unknown_provider_refuses_rather_than_falling_back_to_someone_s_list() -> None:
+    """Fail closed. A name with no entry gets an empty tuple, not the default provider's permissions."""
+    from app.pipeline.subscribers.hosted_web_search import (
+        compile_supported_by_provider,
+        gate_hosted_web_search,
+    )
+
+    supported = compile_supported_by_provider({"known": [r"gpt-5\.5"]})
+    context = RequestContext(
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        requested_model="gpt-5.5",
+        payload={"tools": [{"type": "web_search"}]},
+        resolved_model="gpt-5.5",
+        target_format=WireFormat.OPENAI_RESPONSES,
+    )
+    context.provider_name = "never-configured"
+
+    with pytest.raises(WebSearchNotExecutable):
+        await gate_hosted_web_search(
+            context, supported, enabled=True, default_provider="known"
+        )
+
+
+async def test_an_entry_is_a_regex_even_when_it_looks_like_a_model_id() -> None:
+    """A dot is a wildcard, and model ids here are full of dots.
+
+    Recorded rather than papered over: `gpt-5.5` written as an entry also claims `gpt-5x5`, which would send an unvetted model's search upstream. The escape is `gpt-5\\.5`, and both docstrings that promised a plain id "means what it says" were wrong until this test existed.
+    """
+    from app.pipeline.subscribers.hosted_web_search import (
+        compile_supported_by_provider,
+        gate_hosted_web_search,
+    )
+
+    def gate_for(pattern: str) -> RequestContext:
+        context = RequestContext(
+            inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+            requested_model="gpt-5x5",
+            payload={"tools": [{"type": "web_search"}]},
+            resolved_model="gpt-5x5",
+            target_format=WireFormat.OPENAI_RESPONSES,
+        )
+        context.provider_name = "p"
+        return context
+
+    unescaped = compile_supported_by_provider({"p": ["gpt-5.5"]})
+    # No raise: the unescaped dot matches `x`. This is the behaviour, not the wish.
+    await gate_hosted_web_search(gate_for("gpt-5.5"), unescaped, enabled=True)
+
+    escaped = compile_supported_by_provider({"p": [r"gpt-5\.5"]})
+    with pytest.raises(WebSearchNotExecutable):
+        await gate_hosted_web_search(gate_for(r"gpt-5\.5"), escaped, enabled=True)
+
+
+async def test_the_counting_leg_measures_rather_than_refusing_on_the_responses_leg_too() -> None:
+    """The hosted gate's own exemption, which its sibling's test cannot reach.
+
+    `test_the_counting_leg_measures_rather_than_refusing` targets Anthropic Messages, so this gate returns at its route check before the `COUNTING_ONLY` branch is ever evaluated — delete that branch and the test stays green. Counting a request that translates to Responses is the only shape that exercises it.
+    """
+    from app.pipeline.subscribers.hosted_web_search import (
+        compile_supported_by_provider,
+        gate_hosted_web_search,
+    )
+
+    context = RequestContext(
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        requested_model="gpt-model",
+        payload={"tools": [{"type": "web_search"}]},
+        resolved_model="gpt-model",
+        target_format=WireFormat.OPENAI_RESPONSES,
+    )
+    context.provider_name = "p"
+    context.extras[COUNTING_ONLY] = True
+
+    # Off, and the model claimed by nothing: both refusal reasons hold, and counting still returns.
+    await gate_hosted_web_search(context, compile_supported_by_provider({"p": []}))
+
+    assert context.payload["tools"] == [{"type": "web_search"}], "counting must not edit the body"
 
 
 async def test_a_pattern_is_anchored_and_the_dotted_minor_is_required() -> None:
@@ -428,4 +536,4 @@ async def test_a_pattern_is_anchored_and_the_dotted_minor_is_required() -> None:
             target_format=WireFormat.OPENAI_RESPONSES,
         )
         with pytest.raises(WebSearchNotExecutable):
-            await gate_hosted_web_search(context, compile_supported([pattern]), enabled=True)
+            await gate_hosted_web_search(context, {"": compile_supported([pattern])}, enabled=True)

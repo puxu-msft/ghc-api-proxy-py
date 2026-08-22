@@ -46,7 +46,7 @@ from app.pipeline.events import FrozenSubscribers, SubscriberRegistry
 from app.pipeline.rate_limiting import RateLimiter
 from app.pipeline.request import RequestContext
 from app.pipeline.subscribers import register_builtin_subscribers
-from app.pipeline.subscribers.hosted_web_search import compile_supported
+from app.pipeline.subscribers.hosted_web_search import compile_supported_by_provider
 from app.pipeline.translation_driver.registry import TranslatorRegistry, default_registry
 from app.tokenization.state_store import TokenizationStateStore
 from app.upstream.copilot import GitHubTokenSourceAdapter
@@ -425,18 +425,20 @@ def build_chain(
 
     # The built-ins go into whatever registry the caller brought, so their order is resolved together with anything a caller added rather than in a second, separate pass.
     subscriber_registry = subscribers if subscribers is not None else SubscriberRegistry[RequestContext]()
-    # Every provider's patterns, merged. Which provider serves a request is decided per request, and a model id is unique across the catalog, so there is nothing for a per-provider lookup to disambiguate here that this does not already answer.
+    # Each provider's own patterns, kept apart rather than merged. The key lives under
+    # `model_providers.<name>` because the answer is that provider's, and a merge lets a provider
+    # whose list is empty inherit every other provider's — passing a gate its own configuration
+    # never opened.
     #
     # Compiled here rather than per request, which also puts a pattern that does not compile at startup — in the config's own words — instead of inside whichever request first reached the gate.
-    web_search_models = compile_supported(
-        pattern
-        for provider in config.model_providers.values()
-        for pattern in provider.models_support_web_search
+    web_search_models = compile_supported_by_provider(
+        {name: provider.models_support_web_search for name, provider in config.model_providers.items()}
     )
     register_builtin_subscribers(
         subscriber_registry,
         web_search_models=web_search_models,
         web_search_enabled=config.model_translation.to_openai_responses.hosted_web_search,
+        default_provider=resolve_default_name(config),
     )
 
     return Chain(
