@@ -9,7 +9,9 @@
 >
 > 本文原为回答 `lifecycle.md:52` 的 `（TODO systemd 是否支持三级处理？）`——该问题现已回答：**不支持，故不做**。
 >
-> 事实依据：`docs/tmp/260817-systemd-escalation-research.md`，本机 systemd 255 实测（一次性 transient user unit，已清理；未触碰任何既有 unit）。
+> 事实依据：`.dev/docs/systemd-runtime/reports/260817-systemd-escalation-research.md`（原路径 `docs/tmp/260817-systemd-escalation-research.md`，2026-08-21 随 `docs/tmp/` 整体迁入 `.dev/docs/`），本机 systemd 255 实测（一次性 transient user unit，已清理；未触碰任何既有 unit）。
+>
+> **2026-08-22 核对**：第五节四条不一致**全部仍然打开**，行号已按当前文件重新核准（多处与旧版不同）；第二、四、六节里依赖 `lifecycle/rolling/runtime.py` 的顺带收益已随 rolling 删除而失效，就地标注。
 
 ## 一、结论先行
 
@@ -28,20 +30,22 @@
 
 **一句话：systemd 侧复用直接运行侧的同一个 `ShutdownLadder`，只是多一个「没有新信号就按时限自己推进」的驱动。**
 
-| | 直接运行（现状，已实现） | systemd（现状） | systemd（提议） |
+| | 直接运行（现状，已实现） | systemd（2026-08-17 时的现状） | systemd（提议） |
 |---|---|---|---|
 | 第 1 级触发 | SIGINT/SIGTERM/SIGUSR2 | SIGTERM | 同左 |
 | 第 2 级触发 | 再一次 SIGINT/SIGTERM | 再一次信号 → **`os._exit`** | 再一次信号 **或** 第 1 级预算到期 |
 | 第 3 级触发 | 再一次 SIGINT/SIGTERM | 无 | 再一次信号 **或** 第 2 级预算到期 |
 | 退出方式 | 正常返回、不 `sys.exit` | `os._exit(128+sig)` | 正常返回、不 `sys.exit` |
 
+> **2026-08-22 注**：中间那一列描述的是 `lifecycle/rolling/runtime.py`，它已随 rolling 于 2026-08-19 删除。`--fd` 路径现在没有自己的信号阶梯，走的是 uvicorn 的 handler（`src/app/cli.py` 的 `_DrainAnnouncingServer`），因此表中的 `os._exit` 一格已不再描述任何现存代码。
+
 三个后果：
 
 1. **`systemctl stop` 单独一条命令就能走完三级**——在预算成立且 event loop 未被阻塞的前提下，于 `TimeoutStopSec` 到期前完成持久化与资源清理。**这不是无条件保证**：内部计时器跑在 event loop 上，阻塞、死锁或进程停顿会让第 2、3 级根本来不及执行，最终仍只剩 systemd 的强制终止。
 2. **操作者仍可加速**——补发一次信号即跳一级，语义与直接运行侧完全相同，不需要另学一套。
-3. **`os._exit` 消失**。`lifecycle.md:26` 的「无论如何，不直接 `sys.exit` 等无防护强制退出」写在 standalone 小节内，字面作用域可争；但它读起来像全局约束，且当前 systemd 路径是唯一违反它的地方。若你认为该句只管 standalone，这一条就只是顺带收益、不是必须。
+3. **`os._exit` 消失**。`lifecycle.md:26` 的「无论如何，不直接 `sys.exit` 等无防护强制退出」写在 standalone 小节内，字面作用域可争；但它读起来像全局约束，而当时的 systemd 路径是唯一违反它的地方。**这一条已自行解决**：违反它的那段代码随 rolling 一起删掉了。
 
-顺带：两条路径合用同一个阶梯，`rolling/runtime.py` 里那套独立的两级逻辑可以退役，关闭语义只剩一处定义。
+顺带：两条路径合用同一个阶梯，`rolling/runtime.py` 里那套独立的两级逻辑可以退役，关闭语义只剩一处定义。（**2026-08-22 注**：该收益已不存在——`rolling/` 于 2026-08-19 整体删除，那套两级逻辑随之消失。`--fd` 路径现在的关闭由 `src/app/cli.py` 的 `_DrainAnnouncingServer` 加 uvicorn 自己的 graceful 收尾承担。）
 
 ## 三、时限预算
 
@@ -62,8 +66,8 @@ E + D + I + F + δ < T_stop
 
 我原先把 C-1 写成等式 `T_stop = D + F` 并令 `F = 收尾时限`，代入得 `I + δ < 0`，据此认为第 2 级没有位置。**这个冲突是我自设的等式造出来的**，权威文档并不这么说：
 
-- `config.example.yaml:235`（中）／`:238`（英）：「systemd TimeoutStopSec … **必须大于**它和 `client_request_timeout` 之和」——是**下界**，不是等式。
-- `config.example.yaml:234`：`graceful_cleanup_timeout` 是「**在请求排空阶段后**，等待的秒数」。第 2、3 级**都在排空之后**，所以 `I` 与 `F` 天然共用这一个预算。
+- `config.example.yaml:238`（中）／`:241`（英）：「systemd TimeoutStopSec … **必须大于**它和 `client_request_timeout` 之和」——是**下界**，不是等式。
+- `config.example.yaml:237`：`graceful_cleanup_timeout` 是「**在请求排空阶段后**，等待的秒数」。第 2、3 级**都在排空之后**，所以 `I` 与 `F` 天然共用这一个预算。
 
 于是有：
 
@@ -82,8 +86,8 @@ drain 拿满 `upstream_request_deadline`，`I + F ≤ graceful_cleanup_timeout`�
 
 | | 值 | 来源 |
 |---|---|---|
-| 本机 systemd 默认 | 90s | `/etc/systemd/system.conf:49` |
-| 当前 unit | 330s | `contrib/systemd/ghc-api-proxy.service:23` |
+| 本机 systemd 默认 | 90s | `/etc/systemd/system.conf:49`（`#DefaultTimeoutStopSec=90s`） |
+| 当前 unit | 330s | `contrib/systemd/ghc-api-proxy.service:28` |
 | 按 C-1 新公式 | **≈ 1230–1260s（约 21 分钟）** | 1200 + 收尾时限（30 或 60，见第五节第 1 条）+ δ |
 
 **后果**：任何 reboot／shutdown 事务，以及 `Restart=on-failure` 的每个重启周期，都可能在这个 unit 上**静默挂起最长 21 分钟**——只要 drain 期间恰好有长请求在跑，就必然发生。
@@ -107,26 +111,32 @@ drain 拿满 `upstream_request_deadline`，`I + F ≤ graceful_cleanup_timeout`�
 
 ## 五、需要你确认的几处文档
 
-1. ~~收尾时限到底是 30 还是 60？~~ **已裁决：60s**（2026-08-17）。`config.example.yaml:240` 无需改动；**`docs/.human-controlled/lifecycle.md:59` 正文的「（30s）」与之矛盾，需要你改成 60s**。
+> **2026-08-22 复核：以下四条全部仍然打开，行号已重新核准。** 原文写的 `config.example.yaml:235`／`:238`／`:240` 与 `existing-rulings.md:92` 都取自更早的快照，现已不指向对应内容。
 
-2. **公式的基数在三处文档里写的都是 `client_request_timeout`，而该键已不存在**：`docs/.human-controlled/lifecycle.md:59`、`docs/.human-controlled/config.example.yaml:235`、同文件 `:238`。**三处都要改**，只改前一处仍会留下矛盾。
+1. ~~收尾时限到底是 30 还是 60？~~ **已裁决：60s**（2026-08-17）。`config.example.yaml:243` 的 `graceful_cleanup_timeout: 60` 无需改动；**`docs/.human-controlled/lifecycle.md:59` 正文的「（30s）」与之矛盾，需要你改成 60s**。该行至今未改。
+
+2. **公式的基数在三处文档里写的都是 `client_request_timeout`，而该键已不存在**：`docs/.human-controlled/lifecycle.md:59`、`docs/.human-controlled/config.example.yaml:238`、同文件 `:241`。**三处都要改**，只改前一处仍会留下矛盾。（现行键名是 `client_delivery.client_request_deadline`，见 `config.example.yaml:377`。）
 
 3. **基数究竟是哪一个？两份会话记录互相矛盾，我不敢替你选**：
 
    | 记录 | 内容 |
    |---|---|
-   | `existing-rulings.md:92`（2026-08-16） | 「`client_request_timeout` 的定名 → 定为 `client_delivery.client_request_deadline`，默认 **3600**」 |
+   | [existing-rulings.md](existing-rulings.md) 第三节「`client_request_timeout` 的定名」一行（2026-08-16） | 「定为 `client_delivery.client_request_deadline`，默认 **3600**」 |
    | 你 2026-08-17 的口述 | C-1 的基数是「单次上游上限（默认 **1200**）」＝ `upstream_request_deadline` |
 
    两条都只有「会话」来源、仓库内无一手出处。可能它们并不冲突——08-16 那条是给**配置键改名**，08-17 这条是定**停止公式的基数**，两件事。但也可能是同一件事被我记岔了。**在你确认之前，本文一律按 1200 计算，并在此标明该前提未经一手核实。**
 
-4. **`lifecycle.md:52-55` 的两级流程**：若采纳本提案，那两行应改为三级、并删掉那句 TODO。该文件受你控制，我不擅改。
+   （改用行名而非行号引用 `existing-rulings.md`：那份文档 2026-08-22 重排过，行号已变，而行名不变。）
+
+4. **`lifecycle.md:52-55` 的两级流程**：`:52` 的「（TODO systemd 是否支持三级处理？）」至今仍在。既然裁决是只做两级，那句 TODO 可以删掉、或改写成「已裁决只做两级」。该文件受你控制，我不擅改。
 
 ## 六、落地顺序（若采纳）
 
+> **本节整体不适用**——提案已被否决。保留仅为记录当时设想的顺序。**2026-08-22 注**：第 4 步的对象（`rolling/runtime.py`）已随 rolling 删除而不存在。
+
 1. 建 `start --systemd` 入口（`lifecycle.md:42` 已定此写法），走 socket activation ＋ `sd_notify`，服务于新处理链。
 2. 让该入口使用同一个 `ShutdownLadder`，加时间驱动。
-3. 重写 `graceful_timeout.py`：不再是三个写死的常量，而是从 `ProxyConfig` 推出 `TimeoutStopSec`，unit 模板与 smoke 测试随之对齐。
-4. `rolling/runtime.py` 的两级强杀与 `os._exit` 退役，改用同一阶梯。
+3. 重写 `graceful_timeout.py`：不再是三个写死的常量，而是从 `ProxyConfig` 推出 `TimeoutStopSec`，unit 模板与测试随之对齐（测试现在在 `tests/systemd/`，原文写的 `tests/smoke/` 已不存在）。
+4. ~~`rolling/runtime.py` 的两级强杀与 `os._exit` 退役，改用同一阶梯。~~ 对象已删除。
 
-第 1、2 步可在你回答第四节的缓解选择后开始；第 3 步还需要第五节第 1、3 条的答案。
+第 1 步本身与本文的提案无关，**它仍然是一件待做的事**——`lifecycle.md:42` 要求 `start --systemd`，而 `src/app/cli.py` 至今只有 `--fd`，见 [existing-rulings.md](existing-rulings.md) 第二节。
