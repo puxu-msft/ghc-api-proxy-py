@@ -107,3 +107,44 @@ raise torn
 | **F（minor）**：`until-tool-use` 未参数化 | 不做。评审用探针实测三档逐帧一致，自己也不建议补 |
 
 **一条我要认的流程问题**：评审进行中我在同一棵树上改了测试文件并提交（11:42 改、11:47 提交 `c86712d`），导致该评审前半程的两条发现失效，还把我的变异检验误判成测试 flake、为此花掉约 5 分钟和 12 次重跑。**下次在同一棵树上边改边评，派发时应给固定的 commit 或 stash 引用，而不是「未提交的 `git diff`」。**
+
+---
+
+## 9. 集成结局（2026-08-22 收尾，本节是本文最终状态）
+
+**这份分支的代码修复没有被合并，因为同伴先做完了同一件事。** 时间线，全部经 `git log` / `git show` 核实：
+
+| 时刻 | 提交 | 内容 |
+|---|---|---|
+| 11:20 | `bce8b0d` | 同伴独立发现并修复：在 verdict switch 里 `if verdict.ending is StreamEnding.COMPLETE: break`。同时修正了 `test_a_stream_the_client_already_saw_is_not_replaced` 的夹具（用 `[:3]`） |
+| 11:47 | `c86712d`（分支） | 本会话的修复：判断前移到 `replay.eligible` 之前 |
+| 13:03 | `1743a0b` | 同伴采纳本会话经评审提出的意见（提交信息原文：「A peer's review of the previous fix found it one door short」），把判断前移，并补了 `h2.ProtocolError` 那一档的测试与另一条夹具修正 |
+| — | `f0527e5` | **本会话最终并入 main 的部分**：只有测试加固 + `retry.py` 一行注释 |
+
+**所以「合并」的实际结果是**：语义早已在 main（经同伴之手），本会话最终贡献的是把守卫加硬。
+
+### `f0527e5` 加硬了什么，以及各自的依据
+
+同伴的 `test_a_finished_turn_survives_a_failure_nothing_recognises` 有三处可以「守卫失效而测试仍绿」：
+
+| 弱点 | 加固 | 依据档位 |
+|---|---|---|
+| 用自造的 `_UnrecognisedTear` + 桩 taxonomy，断言的是前提而非发现；若 `normalize_upstream_error` 将来学会命名它，测试照绿而被守护的情形已不存在 | 换成生产分类器 + 真实 `h2.ProtocolError`，并**显式断言前提** `eligible(torn) is None` | 前提卫生，非变异所证 |
+| 只跑 `block` | 加 `full`。`full` 下撕裂到达时一个字节都没交付，整条回复在险，且恢复它要走**循环之后的 flush**，`block` 因为没有扣留块根本不经过 | **实测**：把 held-back preamble 那支置假，`full` 打红、`block` 仍绿 |
+| 包含式断言（`in body` / `[-1] == "message_stop"`），重复交付或多一个生命周期都能过；`reopen` 未被计数 | 精确事件序列 + `assert reopened == 0` | 构造性；重复交付这一形态由精确序列覆盖 |
+
+对照变异（证明测试仍咬得住原 bug）：把 `if assembler.terminal.seen:` 置假，两档均打红（`h2.exceptions.ProtocolError`）。
+
+### 归档
+
+- `archive/260822-complete-not-abandon` → `1479025`（第一版，基线 `4c7129a`，两轮评审的对象；**未合并，语义已由 `bce8b0d`+`1743a0b` 覆盖**）
+- `archive/260822-finished-turn-unnamed-failure` → `2230852`（第二版，基线 `f191e4d`；**未合并，同上**）
+- `archive/260822-finished-turn-guard` → `22c7e8d`（第三版，即 `f0527e5` 的已评审源）
+
+工作树 `.claude/worktrees/260822-complete-not-abandon` 保留。
+
+### 集成时 main 的状态（如实记录，不是本会话造成的）
+
+`1743a0b` 起 main 在 HEAD 上带 3 个失败：`tests/int/test_pipeline_app.py` 的三条引用了 `hook_strip_anthropic_request_headers.strip_anthropic_beta_flags`，而该键在 schema 里尚不存在——同伴正在主树里加（`schema.py` 未提交）。按项目规矩，提交边界由语义定而非绿灯定，这是允许的状态。**本会话的 `f0527e5` 与之无关**：改动只有 `retry.py` 一行注释和测试文件，且落盘前已核实两文件在主树干净、在 `1743a0b..64bff1e` 之间无变化。落盘用 `git checkout <branch> -- <2 files>` + pathspec 提交，主树索引里同伴暂存的 15 个文件全程未被卷入（提交后复核为恰好 2 个文件）。
+
+门禁（`f0527e5` 之后，主树）：`ruff check` 两文件通过；`pyright` 两文件 0 错误；`tests/unit/pipeline` 468 passed；`tests/unit/pipeline/delivery` 115 passed。
