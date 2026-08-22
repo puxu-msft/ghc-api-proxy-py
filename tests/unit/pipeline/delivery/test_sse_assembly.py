@@ -498,3 +498,81 @@ def test_a_whole_item_is_never_dropped_however_many_came_before() -> None:
     second = _responses_item(assembler, 1, {"type": "message", "id": "m2", "status": "completed"})
     assert len(second) == 1
     assert assembler.terminal.blocks == 2
+
+
+# --- upstream failure events must not pass unseen ---------------------------
+#
+# Neither leg acts on these yet: the client still receives the same truncation frame a torn connection produces. What is pinned here is only that they are *reported* — ruled 2026-08-22, because a path we knowingly do not handle must still be observable, or "this never happens" and "it happens and we cannot tell" stay the same observation.
+
+
+def test_an_anthropic_error_event_is_reported_with_upstream_s_own_words(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    assembler = AnthropicAssembler()
+    payload = {"type": "error", "error": {"type": "overloaded_error", "message": "slow down"}}
+    with caplog.at_level("WARNING"):
+        assert assembler.push(SseEvent(event="error", data=orjson.dumps(payload).decode())) == ()
+
+    assert "overloaded_error" in caplog.text, "upstream's own code"
+    assert "slow down" in caplog.text, "and its own message"
+    # The half deliberately left unimplemented: this is still not a terminal event.
+    assert assembler.terminal.seen is False
+
+
+@pytest.mark.parametrize(
+    ("kind", "payload", "code"),
+    [
+        # CAPI's shape, and the one we actually expect: the words are nested under `error`.
+        ("error", {"error": {"code": "rate_limited", "message": "boom"}}, "rate_limited"),
+        # OpenAI's public SDK declares the same event flat. Both are read; nothing sends both.
+        ("error", {"code": "server_error", "message": "boom"}, "server_error"),
+        (
+            "response.failed",
+            {"response": {"error": {"code": "rate_limit_exceeded", "message": "boom"}}},
+            "rate_limit_exceeded",
+        ),
+        (
+            "response.cancelled",
+            {"response": {"error": {"code": "cancelled", "message": "boom"}}},
+            "cancelled",
+        ),
+    ],
+)
+def test_a_responses_failure_event_is_reported_with_upstream_s_own_words(
+    caplog: pytest.LogCaptureFixture, kind: str, payload: dict[str, Any], code: str
+) -> None:
+    """Three events, three places upstream puts the words — nested under `error` for CAPI, flat for the public SDK, and under `response.error` for the other two.
+
+    The first case is the load-bearing one: reading only the flat shape printed `code='' message=''` on the shape this upstream actually sends, which is the whole of what the line carries. `response.cancelled`'s `code` is invented — no recording of one exists — so that row pins dispatch and extraction position, not the value upstream would really use.
+    """
+    assembler = ResponsesAssembler()
+    with caplog.at_level("WARNING"):
+        assert assembler.push(SseEvent(event=kind, data=orjson.dumps(payload).decode())) == ()
+
+    assert code in caplog.text
+    assert "boom" in caplog.text
+    assert assembler.terminal.seen is False
+
+
+def test_a_null_code_reads_as_absent_rather_than_as_the_word_none(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`code` is `str | None` in the SDK's own model, so a null is an ordinary value, not a malformed one."""
+    assembler = ResponsesAssembler()
+    payload = {"error": {"code": None, "message": "boom"}}
+    with caplog.at_level("WARNING"):
+        assembler.push(SseEvent(event="error", data=orjson.dumps(payload).decode()))
+
+    assert "None" not in caplog.text
+    assert "boom" in caplog.text
+
+
+def test_a_failure_event_that_says_nothing_still_gets_reported(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The shapes above are second-hand — no cassette in this repository contains one — so reporting must not depend on upstream having filled them in."""
+    assembler = ResponsesAssembler()
+    with caplog.at_level("WARNING"):
+        assert assembler.push(SseEvent(event="response.failed", data="{}")) == ()
+
+    assert "response.failed" in caplog.text

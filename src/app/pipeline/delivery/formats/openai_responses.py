@@ -13,6 +13,7 @@ The sequence is shaped by what the OpenAI SDK's stream parser requires, read fro
 `output_index` is therefore counted here and **not** taken from `CompletedBlock.index`, which comes from a counter the assembler also advances for items it later drops — a hole in it would be an IndexError in the client.
 """
 
+import logging
 import time
 from typing import Any, cast
 
@@ -31,6 +32,39 @@ from app.protocols.responses_anthropic import (
     ResponseConversionError,
     anthropic_usage_from_responses,
 )
+
+logger = logging.getLogger(__name__)
+
+# The three ways this upstream says a stream failed, and the two places it puts the words.
+# The vocabulary is the official client's own table (`chatWebSocketManager.ts`), minus its two successful terminals. `response.failed` and `response.cancelled` carry a whole response object with the words nested under `response.error`; `error` is the one that differs by upstream, and both spellings are read — see `_failure_words`.
+# **Not from a recording**: all five cassettes in this repository contain zero of these events, so the shapes are second-hand and the extraction is written to survive being wrong about them (missing keys read as empty, never raise). `response.cancelled` in particular is recorded in `.dev/docs/upstream/retry-and-continuation/deferred.md` 第 4 条 and `reports/260821-upstream-termination-reasons.md`.
+_FAILURE_EVENTS = frozenset({"error", "response.failed", "response.cancelled"})
+
+
+def _words(holder: dict[str, Any]) -> tuple[str, str]:
+    """`code` and `message` out of whichever object carries them.
+
+    `code` is `str | None` in the SDK's own model, so a null is a normal value here rather than a malformed one; it must read as absent and not as the string `None`.
+    """
+    code = holder.get("code")
+    message = holder.get("message")
+    return (str(code) if code is not None else ""), (str(message) if message is not None else "")
+
+
+def _failure_words(kind: str, data: dict[str, Any]) -> tuple[str, str]:
+    """Upstream's own code and message for a failure event, or empty strings if it did not say.
+
+    Two shapes for `error`, and this upstream uses the second. OpenAI's public SDK declares `ResponseErrorEvent` flat — `{type, code, message}` — but CAPI wraps them: `{type: "error", error: {code, message}}`, which `chatWebSocketManager.ts` documents by name precisely because the two differ. Reading only the flat one printed `code='' message=''` on the shape we are most likely to meet, which is the whole of what this log line exists to carry. The nested object is preferred and the flat one is the fallback; nothing sends both, so no precedence question arises.
+    """
+    if kind == "error":
+        nested = data.get("error")
+        if isinstance(nested, dict):
+            return _words(cast(dict[str, Any], nested))
+        return _words(data)
+    raw = data.get("response")
+    response = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+    nested = response.get("error")
+    return _words(cast(dict[str, Any], nested) if isinstance(nested, dict) else {})
 
 # Stop reasons this proxy synthesises for the Anthropic leg. Responses has no equivalent of either — its vocabulary is completed / incomplete / failed — so both of ours mean the turn finished.
 _FINISHED = frozenset({"end_turn", "tool_use", ""})
@@ -390,6 +424,20 @@ class ResponsesAssembler:
             if held is not None and self._terminal.stop_reason not in self._hand_over_stop_reasons:
                 self._terminal.record(held)
                 return (held,)
+            return ()
+        if kind in _FAILURE_EVENTS:
+            # Upstream said this turn failed. **Nothing here acts on it yet** — `seen` stays false, so the client receives the same `incomplete_responses_stream` frame a torn connection produces, and the two remain indistinguishable on the wire. Acting on that is `.dev/docs/upstream/retry-and-continuation/deferred.md` 第 4 条, and it is not this line's job.
+            #
+            # What this line does is refuse to let the event pass unseen. Ruled 2026-08-22: a path we knowingly do not handle must still be logged, because silence makes "this never happens" and "it happens and we cannot tell" the same observation.
+            #
+            # `warning` rather than something quieter, because the zero in 第 4 条 is a **discriminating** zero: the same sweep over the same 134336 operations counted 64351 `response.completed`, so the measurement could see this class of event and did not find one. A frame that arrives despite that is worth an operator's attention, not a debug line. (The one way it could become routine is an upstream that ends cancelled turns this way; no path on this SSE leg does, and that is the condition to re-check if these ever start appearing in numbers.)
+            code, message = _failure_words(kind, data)
+            logger.warning(
+                "upstream sent %r mid-stream; it is not acted on yet: code=%r message=%r",
+                kind,
+                code,
+                message,
+            )
             return ()
         return ()
 

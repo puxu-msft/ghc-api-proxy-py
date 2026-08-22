@@ -6,6 +6,7 @@ SSE is the envelope the client expects, not a delivery semantic. Every frame des
 The frame sequence per block is start, one delta carrying the finished content, then stop. The delta exists because the wire format has one, not because content arrives in pieces.
 """
 
+import logging
 from collections.abc import Iterable, Iterator
 from typing import Any, cast
 
@@ -21,6 +22,8 @@ from app.pipeline.delivery.assembling import (
 from app.pipeline.delivery.blocks import TEXT, THINKING, TOOL_USE, CompletedBlock
 from app.pipeline.delivery.sse_frame import SseFrame
 from app.pipeline.delivery.sse_source import SseEvent
+
+logger = logging.getLogger(__name__)
 
 
 def message_start(message_id: str, model: str) -> SseFrame:
@@ -271,6 +274,20 @@ class AnthropicAssembler:
             return ()
         if kind == "message_stop":
             self._terminal.seen = True
+            return ()
+        if kind == "error":
+            # Upstream said this turn failed. **Nothing here acts on it yet** — `seen` stays false, so the client receives the same `incomplete_responses_stream` frame a torn connection produces, and the two remain indistinguishable on the wire. Acting on that is `.dev/docs/upstream/retry-and-continuation/deferred.md` 第 4 条, and it is not this line's job.
+            #
+            # What this line does is refuse to let the event pass unseen. Ruled 2026-08-22: a path we knowingly do not handle must still be logged, because silence makes "this never happens" and "it happens and we cannot tell" the same observation — and that is exactly the state the frequency question in `.dev/docs/upstream/h2-goaway/findings.md` is stuck in. Upstream's own words go in the line, since they are the only account of what it thought went wrong and nothing downstream will carry them.
+            #
+            # The shape is `{"type": "error", "error": {"type", "message"}}`, from the reference implementation's own declaration; `kind` is read from the event line first, which is what keeps this reachable when upstream sends `event: error` with no `type` in the payload.
+            raw = data.get("error")
+            detail = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+            logger.warning(
+                "upstream sent an error event mid-stream; it is not acted on yet: type=%r message=%r",
+                detail.get("type", ""),
+                detail.get("message", ""),
+            )
             return ()
         return ()
 
