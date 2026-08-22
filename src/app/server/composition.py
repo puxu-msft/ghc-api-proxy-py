@@ -245,8 +245,9 @@ def _warn_about_socks(options: TransportOptions, resolved: dict[str, str | None]
     for origin in sorted(
         {_origin_of(url) for url in resolved.values() if url is not None and _is_socks(url)}
     ):
+        # Why it does not apply belongs here rather than in the line: httpcore sets no socket options on the SOCKS path, which is an implementation fact the operator can do nothing with. What reaches them is which proxy and which setting, because that is what they can act on.
         logger.warning(
-            "proxy %s is SOCKS, and httpcore sets no socket options on that path: tcp_keepalive_interval does not apply to connections made through it",
+            "proxy %s is SOCKS: tcp_keepalive_interval does not apply to connections made through it",
             origin,
         )
 
