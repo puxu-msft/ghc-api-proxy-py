@@ -222,8 +222,7 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
         trace.model = routed.resolved_model
 
     if route.count_tokens:
-        # Answered here rather than driven: the reply is a count, not an upstream response to
-        # deliver, so none of the block buffering below applies to it.
+        # Answered here rather than driven: the reply is a count, not an upstream response to deliver, so none of the block buffering below applies to it.
         try:
             counted = await handle_count_tokens(chain, context)
         except Exception as error:
@@ -357,9 +356,7 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
         else:
             # `Exception`, because that is what decided the failure was continuable in the first place — the endings that are not exceptions never reach here with one.
             reason = _replay_reason(error) if isinstance(error, Exception) else None
-            # `.get` rather than a subscript: this runs inside the delivery generator, so a
-            # `RetryReason` someone adds later without touching the table would kill the client's
-            # turn rather than mislabel one field.
+            # `.get` rather than a subscript: this runs inside the delivery generator, so a `RetryReason` someone adds later without touching the table would kill the client's turn rather than mislabel one field.
             category = _CATEGORY_FOR_REASON.get(reason, ErrorCategory.INTERNAL).value if reason else ErrorCategory.INTERNAL.value
         detail = stop_reason if error is None else str(error)
         return {
@@ -502,10 +499,7 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
             The recording is here rather than inside it because the two paths mark the same fact in different places: a streaming request's verdict is decided by the accounting object long after this returns, while a buffered one settles its line inline.
             """
             if accounting.handed_over:
-                # One per turn. Today the two call sites in `_deliver` each return, so a second call
-                # cannot happen — but that is a property of control flow somewhere else, and the
-                # guard's whole value is surviving a change to it. This project has already found
-                # guards stranded on a path nobody takes.
+                # One per turn. Today the two call sites in `_deliver` each return, so a second call cannot happen — but that is a property of control flow somewhere else, and the guard's whole value is surviving a change to it. This project has already found guards stranded on a path nobody takes.
                 return None
             payload = _hand_back(error, stop_reason)
             if payload is not None:
@@ -565,14 +559,9 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
     payload = response_payload(chain, handled, body)
     # Summarised before the hand-over is appended, so the line describes what *upstream* produced.
     # The streaming path reads its summary off the assembler, which never sees the synthesised block;
-    # reading this one off the finished payload instead made the same upstream reply report two
-    # different things depending on which route carried it — one block and no tools, or two blocks
-    # and a tool the model never asked for. That divergence is the thing this whole area exists to
-    # remove, and it had been pushed back into the observability surface.
+    # reading this one off the finished payload instead made the same upstream reply report two different things depending on which route carried it — one block and no tools, or two blocks and a tool the model never asked for. That divergence is the thing this whole area exists to remove, and it had been pushed back into the observability surface.
     context.reply = reply_summary(handled, payload)
-    # The shape is checked before the block is built, not after. Built first, a body whose `content`
-    # was not a list left a warning logged, an id spent and a hand-over silently not happening —
-    # the reply going out unchanged with nothing saying so.
+    # The shape is checked before the block is built, not after. Built first, a body whose `content` was not a list left a warning logged, an id spent and a hand-over silently not happening — the reply going out unchanged with nothing saying so.
     handed = (
         _hand_back(None, str(payload.get("stop_reason", "")))
         if str(payload.get("stop_reason", "")) in _hand_over_reasons
@@ -581,19 +570,14 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
     )
     if handed is not None:
         # A buffered reply is delivered whole, so there is no position to be in and nothing to replay
-        # — but the turn is no more finished than a streamed one upstream cut short, and the client
-        # is still the only side that can carry it on. Ruled 2026-08-22, withdrawing the earlier
-        # ruling that a non-streaming turn could not be continued.
+        # — but the turn is no more finished than a streamed one upstream cut short, and the client is still the only side that can carry it on. Ruled 2026-08-22, withdrawing the earlier ruling that a non-streaming turn could not be continued.
         #
-        # The truncated block was already dropped during translation, where upstream's `status` is
-        # still readable. This is the other half of that: dropping content is only defensible
-        # because the client is handed a way to get it back.
+        # The truncated block was already dropped during translation, where upstream's `status` is still readable. This is the other half of that: dropping content is only defensible because the client is handed a way to get it back.
         content = payload.get("content")
         if isinstance(content, list):
             cast(list[Any], content).append(handed)
             payload["stop_reason"] = TOOL_USE
-            # Neither `ok` nor `fail`, for the same reason as the streaming path. Set here rather
-            # than by an accounting object, because a buffered request settles its line inline.
+            # Neither `ok` nor `fail`, for the same reason as the streaming path. Set here rather than by an accounting object, because a buffered request settles its line inline.
             trace.status_override = "retry"
             trace.detail = "turn handed back to the client to continue"
     # Summarised by the route's own reader, which knows both what shape this payload is in and which upstream's words describe it. `None` means this route has no reader yet, and the line then reports nothing about the reply's contents rather than reporting emptiness as fact.
@@ -768,12 +752,9 @@ def create_pipeline_app(chain: Chain) -> FastAPI:
     app = FastAPI(title="ghc-api-proxy", lifespan=_lifespan)
     setattr(app.state, CHAIN_STATE_KEY, chain)
     app.include_router(build_router())
-    # Health, the model list and metrics. A supervisor that cannot ask whether the process is
-    # ready has to guess, and the inference routes alone give it nothing to ask.
+    # Health, the model list and metrics. A supervisor that cannot ask whether the process is ready has to guess, and the inference routes alone give it nothing to ask.
     app.include_router(ops_router)
-    # Outermost, so the bound counts a request from the moment it arrives rather than from the
-    # moment routing finishes. Over the limit a request waits; it is never refused and its
-    # connection is never closed — see `app.server.admission`.
+    # Outermost, so the bound counts a request from the moment it arrives rather than from the moment routing finishes. Over the limit a request waits; it is never refused and its connection is never closed — see `app.server.admission`.
     app.add_middleware(
         InFlightLimit,
         max_inflight=chain.config.proactive_rate_limiter.max_inflight,
@@ -796,21 +777,14 @@ def _version() -> str:
 async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
     """Carry the calibrator's state across restarts.
 
-    Without this the `local` token counter starts from nothing every time and throws away
-    everything it learns, which makes its estimates worse the more the process is restarted —
-    and says nothing about it, because an estimate is still returned.
+    Without this the `local` token counter starts from nothing every time and throws away everything it learns, which makes its estimates worse the more the process is restarted — and says nothing about it, because an estimate is still returned.
     """
     chain = cast(Chain, getattr(app.state, CHAIN_STATE_KEY))
     logger = get_logger()
     logger.info(f"ghc-api-proxy v{_version()} pid={os.getpid()}", status="ok")
-    # Attempted before accepting, because routing fails closed on capability: a request arriving
-    # first would otherwise be refused with a message saying the model does not exist.
+    # Attempted before accepting, because routing fails closed on capability: a request arriving first would otherwise be refused with a message saying the model does not exist.
     #
-    # Not fatal, though. A supervised service that cannot reach upstream at boot — no credential
-    # yet, network not up — must still start and say it is not ready, which is what
-    # `/health/readiness` answers from the same empty catalog. Raising here instead turns a
-    # degraded start into a service that never comes up at all, and the socket systemd already
-    # opened would hold the client's connection open against a process that is dying.
+    # Not fatal, though. A supervised service that cannot reach upstream at boot — no credential yet, network not up — must still start and say it is not ready, which is what `/health/readiness` answers from the same empty catalog. Raising here instead turns a degraded start into a service that never comes up at all, and the socket systemd already opened would hold the client's connection open against a process that is dying.
     try:
         await refresh_catalogs(chain)
     except Exception as error:

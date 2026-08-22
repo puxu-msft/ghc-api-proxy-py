@@ -1,15 +1,10 @@
 """The unit in `contrib/systemd/` starting the chain it actually runs, with no real credentials.
 
-This is what `auth_base_url` was made configurable for. Until 2026-08-19 the GitHub token exchange
-was the module constant `app.model_provider.ghc_client.tokens.TOKEN_URL`, so a process could redirect its
-inference calls at a local server and its three auth calls at nothing: the chain could not be
-stood up end to end without a real GitHub token and the network, and `--fd` had no coverage at all.
+This is what `auth_base_url` was made configurable for. Until 2026-08-19 the GitHub token exchange was the module constant `app.model_provider.ghc_client.tokens.TOKEN_URL`, so a process could redirect its inference calls at a local server and its three auth calls at nothing: the chain could not be stood up end to end without a real GitHub token and the network, and `--fd` had no coverage at all.
 
-Both hosts point at one fake here, which is the whole point — the exchange, the catalog and the
-inference all land somewhere a test controls.
+Both hosts point at one fake here, which is the whole point — the exchange, the catalog and the inference all land somewhere a test controls.
 
-The two tests in `test_systemd_units.py` cover the same ground for the chain this unit no longer
-runs; see their skip reason.
+The two tests in `test_systemd_units.py` cover the same ground for the chain this unit no longer runs; see their skip reason.
 """
 
 import json
@@ -42,9 +37,7 @@ class _CopilotFake(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         self.requests.append(self.path)
         if self.path == "/copilot_internal/v2/token":
-            # `refresh_in` is what upstream sends, so the stand-in sends it too. It is no longer
-            # required — nothing reads it since the background refresh loop went — but a fixture
-            # that quietly drifts from the real response shape stops being evidence about it.
+            # `refresh_in` is what upstream sends, so the stand-in sends it too. It is no longer required — nothing reads it since the background refresh loop went — but a fixture that quietly drifts from the real response shape stops being evidence about it.
             self._respond(
                 {"token": "copilot-smoke", "expires_at": 4102444800, "refresh_in": 1500}
             )
@@ -140,9 +133,7 @@ class _CassetteUpstream(BaseHTTPRequestHandler):
 def _service_environment(state_directory: Path, upstream_url: str) -> dict[str, str]:
     """The unit's own `Environment=`, plus what points this run at the fake.
 
-    Read from the unit rather than restated, so a unit that sets a key the schema rejects fails
-    here. That is not hypothetical: it set two keys belonging to the retired chain, and the
-    process exited at startup rather than ignoring them.
+    Read from the unit rather than restated, so a unit that sets a key the schema rejects fails here. That is not hypothetical: it set two keys belonging to the retired chain, and the process exited at startup rather than ignoring them.
     """
     environment = os.environ.copy()
     for name in ("GHC_API_PROXY_GITHUB_TOKEN", "GHC_API_PROXY_CONFIG"):
@@ -182,8 +173,7 @@ def test_the_unit_starts_the_chain_on_an_inherited_listener_without_real_credent
     listener.bind(("127.0.0.1", 0))
     listener.listen(8)
     address = listener.getsockname()
-    # Connected before the process exists: a socket-activated service must answer what was already
-    # queued, which is the property socket activation is chosen for.
+    # Connected before the process exists: a socket-activated service must answer what was already queued, which is the property socket activation is chosen for.
     backlog_client = socket.create_connection(address, timeout=10)
     backlog_client.settimeout(30)
 
@@ -211,8 +201,7 @@ def test_the_unit_starts_the_chain_on_an_inherited_listener_without_real_credent
         with socket.create_connection(address, timeout=10) as readiness_client:
             readiness_client.settimeout(10)
             readiness = http_request(readiness_client, "/health/readiness")
-        # Ready means the catalog loaded, which is the fact routing uses. The fake offers one
-        # model, so anything else here means the exchange or the catalog fetch did not happen.
+        # Ready means the catalog loaded, which is the fact routing uses. The fake offers one model, so anything else here means the exchange or the catalog fetch did not happen.
         assert b"HTTP/1.1 200 OK" in readiness
         assert b'"status":"ready"' in readiness
         assert b'"models":1' in readiness
@@ -221,13 +210,9 @@ def test_the_unit_starts_the_chain_on_an_inherited_listener_without_real_credent
         output, _ = process.communicate(timeout=30)
         assert process.returncode == -signal.SIGTERM, output
 
-        # The order is the contract: nothing can be asked of the inference host until the token
-        # exchange has happened, because the catalog request carries the token it returns.
+        # The order is the contract: nothing can be asked of the inference host until the token exchange has happened, because the catalog request carries the token it returns.
         assert _CopilotFake.requests == ["/copilot_internal/v2/token", "/models"]
-        # No assertion on written state: the calibration store writes nothing when it has
-        # learnt nothing, and this run learns nothing. What the unit's `Environment=` is worth
-        # checking for is covered above — it is applied verbatim, so a key the schema rejects
-        # would have stopped the process before readiness ever answered.
+        # No assertion on written state: the calibration store writes nothing when it has learnt nothing, and this run learns nothing. What the unit's `Environment=` is worth checking for is covered above — it is applied verbatim, so a key the schema rejects would have stopped the process before readiness ever answered.
     finally:
         backlog_client.close()
         listener.close()
@@ -335,8 +320,7 @@ def test_an_inherited_listener_serves_the_real_api_over_https(mode: str, tmp_pat
         )
 
         assert b"HTTP/1.1 200 OK" in response, (response[:400], _CassetteUpstream.requests)
-        # The reply is Anthropic's stream, translated from the recorded Responses one. Asserting on
-        # its events rather than on the status alone is what separates "the port answered" from
+        # The reply is Anthropic's stream, translated from the recorded Responses one. Asserting on its events rather than on the status alone is what separates "the port answered" from
         # "a request body was read, the chain ran, and blocks came back".
         assert b"event: message_start" in response, response
         assert b"event: content_block_delta" in response, response

@@ -353,8 +353,7 @@ def signature_deltas(chunks: list[bytes]) -> list[str]:
 async def test_a_thinking_signature_reaches_the_client_as_a_delta() -> None:
     """Claude Code reads the signature from a delta, and upstream never sends one.
 
-    Without this the signature is on the wire — inside content_block_start — and still lost,
-    which is the failure `content_block_start_compat: signature_delta` names.
+    Without this the signature is on the wire — inside content_block_start — and still lost, which is the failure `content_block_start_compat: signature_delta` names.
     """
     chunks = await collect(thinking_stream("sig-abc"))
     assert signature_deltas(chunks) == ["sig-abc"]
@@ -377,8 +376,7 @@ async def test_a_thinking_block_without_a_signature_gets_no_delta() -> None:
 def responses_stream_with_unstable_ids() -> list[bytes]:
     """A Responses stream shaped like Copilot's: `added` and `done` carry *different* item ids.
 
-    Taken from a live capture. `output_index` is the only identifier that pairs the two, so an
-    assembler keyed on the id closes nothing and the whole response renders as zero bytes.
+    Taken from a live capture. `output_index` is the only identifier that pairs the two, so an assembler keyed on the id closes nothing and the whole response renders as zero bytes.
     """
     events: list[tuple[str, dict[str, Any]]] = [
         (

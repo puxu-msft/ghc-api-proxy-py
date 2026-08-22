@@ -61,9 +61,7 @@ def gen_config(
 
 
 
-# Options the old `AppSettings` served that the spec's `ProxyConfig` has nowhere to put. The user
-# ruled on 2026-08-17 that the entry switch goes ahead with these inactive; naming each one and why
-# is what keeps "temporarily inactive" from turning into "quietly gone".
+# Options the old `AppSettings` served that the spec's `ProxyConfig` has nowhere to put. The user ruled on 2026-08-17 that the entry switch goes ahead with these inactive; naming each one and why is what keeps "temporarily inactive" from turning into "quietly gone".
 _NO_HOME_IN_SPEC: dict[str, str] = {
     "--manual": "config.example.yaml has no `approval` section",
     "--rate-limit/--no-rate-limit": "the spec's `reactive_rate_limiter` has no `enabled` field",
@@ -170,8 +168,7 @@ async def serve_inherited(config: ProxyConfig, fd: int, *, proxy_from_cli: bool)
 async def _serve_pipeline(config: ProxyConfig, options: StandaloneOptions, *, proxy_from_cli: bool) -> None:
     """Build the chain and serve it, closing the outbound client on the way out.
 
-    The client is created here rather than inside `build_chain` because whoever creates it has to
-    close it, and the chain is handed to an app that outlives neither.
+    The client is created here rather than inside `build_chain` because whoever creates it has to close it, and the chain is handed to an app that outlives neither.
     """
     http_client = build_http_client(config, proxy_from_cli=proxy_from_cli)
     try:
@@ -282,16 +279,13 @@ def start(
         github_token=github_token,
     )
     for option, reason in inactive:
-        # Said out loud rather than dropped: an option that is accepted and then ignored is worse
-        # than one that is refused, because nothing distinguishes it from having worked.
+        # Said out loud rather than dropped: an option that is accepted and then ignored is worse than one that is refused, because nothing distinguishes it from having worked.
         typer.echo(f"warning: {option} has no effect on this path — {reason}", err=True)
 
     if fd is not None:
-        # An inherited listener means systemd owns it, so uvicorn may keep it: lifecycle.md's
-        # escalating shutdown is written for the stand-alone section, which owns its own listener.
+        # An inherited listener means systemd owns it, so uvicorn may keep it: lifecycle.md's escalating shutdown is written for the stand-alone section, which owns its own listener.
         # What this path serves is no longer the difference — it is the same chain `start` serves.
-        # Ruled 2026-08-19; what the existing chain offered and this one does not is inventoried
-        # in `.dev/docs/anthropic-responses-bridge/implementation.md`.
+        # Ruled 2026-08-19; what the existing chain offered and this one does not is inventoried in `.dev/docs/anthropic-responses-bridge/implementation.md`.
         run(partial(serve_inherited, proxy_config, fd, proxy_from_cli=proxy is not None))
         return
 
@@ -306,8 +300,7 @@ def start(
         host=proxy_config.server.host,
         port=proxy_config.server.port,
         tls_mode=proxy_config.server.tls.mode,
-        # None for an HTTP-only deployment, so a listener cannot be built with TLS it has no
-        # material for; generated once and reused when the operator named no cert.
+        # None for an HTTP-only deployment, so a listener cannot be built with TLS it has no material for; generated once and reused when the operator named no cert.
         tls_material=resolve_tls_material(proxy_config, tls_dir=tls_material_dir()),
         cleanup_timeout=proxy_config.graceful_cleanup_timeout,
         pidfile_dir=resolved_pidfile_dir,

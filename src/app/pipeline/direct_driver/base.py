@@ -196,9 +196,7 @@ class DirectDriver:
     def _upstream_status(error: BaseException) -> tuple[int | None, dict[str, str]]:
         """Read the status and headers off a failure.
 
-        The SDKs raise on 4xx and 5xx rather than returning a response, so a limited status
-        arrives here as an exception. Reading it only from a returned response would leave the
-        limiter blind to every 429.
+        The SDKs raise on 4xx and 5xx rather than returning a response, so a limited status arrives here as an exception. Reading it only from a returned response would leave the limiter blind to every 429.
         """
         status = getattr(error, "status_code", None)
         headers: dict[str, str] = {}

@@ -51,9 +51,7 @@ class FakeProvider:
     def __init__(self, *, responses: list[Any] | None = None) -> None:
         self.name = "ghc"
         self.sent: list[tuple[ModelEndpoint, dict[str, Any]]] = []
-        # Recorded rather than discarded: the header path existed as a parameter on every layer
-        # for a long time with nothing ever filling it, and a fake that drops the value cannot
-        # tell that state apart from a working one.
+        # Recorded rather than discarded: the header path existed as a parameter on every layer for a long time with nothing ever filling it, and a fake that drops the value cannot tell that state apart from a working one.
         self.sent_headers: list[Any] = []
         self._responses = responses or []
 
@@ -84,8 +82,7 @@ class FakeProvider:
         return outcome
 
     async def count_tokens(self, payload: Any, *, model_id: str) -> httpx2.Response:
-        # Present so the fake really satisfies the protocol. Nothing here counts tokens, and a
-        # silent stub would let a test think it had.
+        # Present so the fake really satisfies the protocol. Nothing here counts tokens, and a silent stub would let a test think it had.
         raise NotImplementedError("this fake does not count tokens")
 
 
@@ -317,8 +314,7 @@ async def test_late_subscriber_abort_discards_the_response() -> None:
 
 @pytest.mark.asyncio
 async def test_named_strategies_bound_each_reason_separately() -> None:
-    # A 401 draws on githubTokenExpired, which the spec caps at 0, so it must not be retried even
-    # though the shared total has room.
+    # A 401 draws on githubTokenExpired, which the spec caps at 0, so it must not be retried even though the shared total has room.
     from app.config.schema import UpstreamRequestRetryConfig
     from app.pipeline.direct_driver import LedgerBudget
     from app.pipeline.retry import RetryLedger
@@ -438,9 +434,7 @@ async def test_named_strategies_allow_a_funded_reason() -> None:
 async def test_the_driver_hands_the_clients_headers_to_the_provider() -> None:
     """Every layer accepted `extra_headers` and nobody ever passed one.
 
-    The signature was there from the start, so the gap was invisible to type checking and to any
-    test that only looked at the payload: production dropped `anthropic-beta`, and upstream then
-    refused body fields that beta enables. Asserting the value rather than the parameter.
+    The signature was there from the start, so the gap was invisible to type checking and to any test that only looked at the payload: production dropped `anthropic-beta`, and upstream then refused body fields that beta enables. Asserting the value rather than the parameter.
     """
     provider = FakeProvider()
     ctx = context()

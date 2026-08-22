@@ -127,8 +127,7 @@ def make_client(
                 json={"token": "copilot", "expires_at": 5000, "refresh_in": 1500},
             )
         if request.url.path.endswith("/models"):
-            # The app refreshes the catalog before it accepts anything, so the stand-in has to
-            # answer that too. Left out of `seen`: it is start-up, not the request under test.
+            # The app refreshes the catalog before it accepts anything, so the stand-in has to answer that too. Left out of `seen`: it is start-up, not the request under test.
             return httpx2.Response(200, json=CATALOG)
         seen.append(request)
         return handler(request)
@@ -468,8 +467,7 @@ def test_a_streamed_search_is_delivered_as_a_line_rather_than_an_empty_block() -
     ]
     assert deltas[0].startswith("[web_search] "), deltas
     assert "Thursday, August 20, 2026" in deltas[1]
-    # No block may be delivered empty: that was the symptom, and it is invisible in a test that
-    # only checks the answer arrived.
+    # No block may be delivered empty: that was the symptom, and it is invisible in a test that only checks the answer arrived.
     assert all(text for text in deltas), deltas
 
 
@@ -559,8 +557,7 @@ def test_a_search_that_cannot_run_is_answered_as_a_failed_tool_not_an_error() ->
     assert blocks[0]["name"] == "web_search"
     # The result references its call, or it refers to nothing.
     assert blocks[1]["tool_use_id"] == blocks[0]["id"]
-    # A single object, not a list: `content: []` is the documented shape for a search that ran and
-    # matched nothing, which would be a claim about the web rather than about us.
+    # A single object, not a list: `content: []` is the documented shape for a search that ran and matched nothing, which would be a claim about the web rather than about us.
     assert blocks[1]["content"] == {
         "type": "web_search_tool_result_error",
         "error_code": "unavailable",
@@ -701,8 +698,7 @@ def test_a_domain_restriction_refuses_before_upstream_is_called() -> None:
     assert response.status_code == 400
     assert seen == [], "upstream was called despite the request being unserviceable"
     body = orjson.loads(response.content)["error"]
-    # A stable code and the field that caused it: a client matching on the English would break the
-    # first time the wording changed, and one told only "bad request" cannot find which tool it was.
+    # A stable code and the field that caused it: a client matching on the English would break the first time the wording changed, and one told only "bad request" cannot find which tool it was.
     assert body["code"] == "server_tool_constraint_not_representable"
     assert body["field_path"] == "tools.web_search_20250305.allowed_domains"
 
@@ -920,8 +916,7 @@ def test_chat_completions_streams_are_delivered_whole_and_verbatim() -> None:
 
 
 def test_translated_route_answers_in_the_format_the_client_asked_in() -> None:
-    # The earlier translation test only checked the request. Half a crossing means the client
-    # gets a Responses body it never asked for and cannot parse.
+    # The earlier translation test only checked the request. Half a crossing means the client gets a Responses body it never asked for and cannot parse.
     client, _ = make_client(
         lambda _: httpx2.Response(
             200,
@@ -997,10 +992,7 @@ def test_max_output_tokens_becomes_the_anthropic_stop_reason() -> None:
     # Neither a success nor a failure, the same as the streamed ending.
     record = _records()[-1]
     assert record["status"] == "retry"
-    # And the line describes what *upstream* produced, not what this side appended to it. The streamed
-    # path reads its summary off the assembler, which never sees the synthesised block; reading this one
-    # off the finished payload made the same upstream reply report two different things depending on
-    # which route carried it — and report a tool the model never asked for.
+    # And the line describes what *upstream* produced, not what this side appended to it. The streamed path reads its summary off the assembler, which never sees the synthesised block; reading this one off the finished payload made the same upstream reply report two different things depending on which route carried it — and report a tool the model never asked for.
     assert record["stop_reason"] == "max_tokens"
     assert record["blocks"] == 1
     assert TOOL_NAME not in record.get("tools", [])
@@ -1121,8 +1113,7 @@ def test_count_tokens_asks_upstream_and_returns_its_number() -> None:
 def test_count_tokens_falls_back_to_the_local_estimate() -> None:
     """A provider that fails hands over to the next, so a broken upstream degrades rather than 502s.
 
-    The reply says `estimated`, because an estimate presented as a measurement is worse than no
-    answer: the caller sizes its request against it.
+    The reply says `estimated`, because an estimate presented as a measurement is worse than no answer: the caller sizes its request against it.
     """
     client, _ = make_client(lambda _: httpx2.Response(500, json={"error": "upstream is down"}))
     response = client.post(
@@ -1154,9 +1145,7 @@ def test_count_tokens_asks_about_the_mapped_model() -> None:
 def test_count_tokens_accepts_a_body_without_max_tokens() -> None:
     """Anthropic's own count_tokens does not require it; requiring it would reject valid bodies.
 
-    The default supplied to make the body countable must stay on this side of the wire. Asserting
-    only that the request succeeds cannot tell the two apart — a version that mutated the outbound
-    payload passes that just as well.
+    The default supplied to make the body countable must stay on this side of the wire. Asserting only that the request succeeds cannot tell the two apart — a version that mutated the outbound payload passes that just as well.
     """
     client, seen = make_client(lambda _: httpx2.Response(200, json={"input_tokens": 11}))
     response = client.post(
@@ -1204,9 +1193,7 @@ def test_count_tokens_rejects_a_body_that_is_not_countable() -> None:
 def test_count_tokens_refuses_a_model_without_the_messages_capability() -> None:
     """Refused by routing, before any counter is chosen.
 
-    The refusal here comes from `decide_route`, not from the provider's own gate — a mutation that
-    removes the provider check leaves this test green. The provider gate has its own test in
-    `tests/unit/test_model_provider.py`.
+    The refusal here comes from `decide_route`, not from the provider's own gate — a mutation that removes the provider check leaves this test green. The provider gate has its own test in `tests/unit/test_model_provider.py`.
     """
     client, seen = make_client(lambda _: httpx2.Response(200, json={"input_tokens": 1}))
     response = client.post(
@@ -1221,8 +1208,7 @@ def test_count_tokens_refuses_a_model_without_the_messages_capability() -> None:
 def test_what_the_calibrator_learns_survives_a_restart(tmp_path: Path) -> None:
     """Learning that dies with the process makes `local` worse the more the service restarts.
 
-    Two apps over the same state file. The first is taught by a real upstream count; the second
-    never reaches upstream at all, so the number it returns can only have come from disk.
+    Two apps over the same state file. The first is taught by a real upstream count; the second never reaches upstream at all, so the number it returns can only have come from disk.
     """
     state = tmp_path / "tokenization.json"
     body = {"model": "claude-model", "messages": [{"role": "user", "content": "hello there"}]}
@@ -1320,8 +1306,7 @@ def test_adjacent_thinking_blocks_are_separated_before_they_reach_upstream() -> 
     """Upstream rejects adjacent thinking blocks with a 400 the client cannot act on.
 
     Asserted against the body that actually went out rather than against the fixup in isolation:
-    the fixup has to run *before* translation, and a test of the function alone cannot tell whether
-    the wiring put it there or after.
+    the fixup has to run *before* translation, and a test of the function alone cannot tell whether the wiring put it there or after.
     """
     client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
     response = client.post(
@@ -1345,8 +1330,7 @@ def test_adjacent_thinking_blocks_are_separated_before_they_reach_upstream() -> 
 
 
 def test_a_thinking_block_with_nothing_in_it_is_dropped() -> None:
-    # Neither signature nor text: it carries nothing upstream can use, and it would otherwise be
-    # spent as a separator between two real ones.
+    # Neither signature nor text: it carries nothing upstream can use, and it would otherwise be spent as a separator between two real ones.
     client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
     response = client.post(
         "/v1/messages",
@@ -1370,9 +1354,7 @@ def test_a_thinking_block_with_nothing_in_it_is_dropped() -> None:
 def test_a_user_turn_is_left_alone() -> None:
     """The negative control: the adjacency rule the spec states is about *assistant* turns.
 
-    Uses adjacent thinking blocks rather than text ones on purpose. `destack_content` is a no-op
-    on content with no adjacent thinking blocks, so a user turn carrying two text blocks passes
-    this test whether the role is checked or not — it cannot tell the guard from its absence.
+    Uses adjacent thinking blocks rather than text ones on purpose. `destack_content` is a no-op on content with no adjacent thinking blocks, so a user turn carrying two text blocks passes this test whether the role is checked or not — it cannot tell the guard from its absence.
     """
     client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
     original = [thinking("one"), thinking("two")]
@@ -1396,9 +1378,7 @@ def assistant_blocks(seen: list[httpx2.Request]) -> list[dict[str, Any]]:
 def send_stacked(client: TestClient) -> httpx2.Response:
     """Two adjacent thinking blocks with a real text block after them.
 
-    The real block is what tells the two layouts apart: `move_and_synthetic` moves it between the
-    thinking blocks, `synthetic_only` leaves it where it is and inserts a marker. Without it both
-    layouts produce the same three blocks and no test can distinguish them.
+    The real block is what tells the two layouts apart: `move_and_synthetic` moves it between the thinking blocks, `synthetic_only` leaves it where it is and inserts a marker. Without it both layouts produce the same three blocks and no test can distinguish them.
     """
     return client.post(
         "/v1/messages",
@@ -1451,8 +1431,7 @@ def test_layout_false_passes_the_stack_through_untouched() -> None:
 
 
 def test_an_undefined_layout_value_is_refused() -> None:
-    # `true` is not one of the three spellings the spec defines; accepting it would silently
-    # rewrite request bodies under a config the operator got wrong.
+    # `true` is not one of the three spellings the spec defines; accepting it would silently rewrite request bodies under a config the operator got wrong.
     with pytest.raises(ValidationError):
         ProxyConfig.model_validate(layout(True))
 
@@ -1494,8 +1473,7 @@ def signature_compat(value: object) -> dict[str, Any]:
 def test_the_signature_shim_is_driven_by_configuration() -> None:
     """Turning it off in the config must reach the frames the client receives.
 
-    The shim's default matches `StreamSettings`' default, so a test that never sets a non-default
-    value passes whether the config is read or ignored — which is exactly the wiring under test.
+    The shim's default matches `StreamSettings`' default, so a test that never sets a non-default value passes whether the config is read or ignored — which is exactly the wiring under test.
     """
     def upstream(request: httpx2.Request) -> httpx2.Response:
         del request
@@ -2408,11 +2386,7 @@ def test_a_buffered_translated_reply_hands_the_client_anthropic_token_keys(
 ) -> None:
     """The body, not just the line. Nothing asserted this contract before, which is how it went wrong.
 
-    Responses counts the cached portion inside `input_tokens` and puts the breakdown in
-    `input_tokens_details`. Copied across untouched, the client got keys it has no schema for, no
-    `cache_read_input_tokens` at all, and an `input_tokens` meaning the opposite of what Anthropic's
-    means — a cached prompt arriving downstream as a full-price one. The streaming path converts, so
-    the same route was answering with two different usage contracts depending on one flag.
+    Responses counts the cached portion inside `input_tokens` and puts the breakdown in `input_tokens_details`. Copied across untouched, the client got keys it has no schema for, no `cache_read_input_tokens` at all, and an `input_tokens` meaning the opposite of what Anthropic's means — a cached prompt arriving downstream as a full-price one. The streaming path converts, so the same route was answering with two different usage contracts depending on one flag.
     """
     client, _ = make_client(
         lambda _: httpx2.Response(
@@ -2636,8 +2610,7 @@ def test_the_deadline_is_one_instant_and_not_a_duration_started_twice() -> None:
 def _records() -> list[dict[str, Any]]:
     """Every structured request record written so far, in order.
 
-    Reads the file the app actually wrote rather than intercepting the call, so a record that never
-    reached disk fails here. `tests/int/conftest.py` points the data home at a temporary directory.
+    Reads the file the app actually wrote rather than intercepting the call, so a record that never reached disk fails here. `tests/int/conftest.py` points the data home at a temporary directory.
     """
     files = sorted(request_logs_dir().glob("requests-*.jsonl"))
     return [cast(dict[str, Any], orjson.loads(line)) for path in files for line in path.read_text().splitlines()]
@@ -2676,10 +2649,7 @@ def test_a_translated_request_records_what_it_could_not_carry() -> None:
 def test_a_translated_request_that_lost_nothing_records_nothing() -> None:
     """A crossing that *could* have lost something and did not.
 
-    An earlier version used `claude-model`, which is served untranslated — so it proved only that a
-    request with no translator records no losses, which is true of an implementation that reports a
-    loss on every translation. `gpt-model` is translated; this body simply has nothing in it that
-    the Responses format cannot take.
+    An earlier version used `claude-model`, which is served untranslated — so it proved only that a request with no translator records no losses, which is true of an implementation that reports a loss on every translation. `gpt-model` is translated; this body simply has nothing in it that the Responses format cannot take.
     """
     client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
     response = client.post(
@@ -2859,11 +2829,7 @@ def test_an_unreadable_thinking_field_is_refused_by_name() -> None:
 def test_a_count_resolves_reasoning_the_same_way_the_send_does() -> None:
     """Counting measures the body that would be sent, so it has to resolve `thinking` the same way.
 
-    Nothing goes upstream on this path — the Responses family has no counter — so the resolution
-    cannot be read off a request. It is read off the loss the resolution recorded instead, which is
-    the only observable this path produces. Asserting merely that the count came back and that
-    nothing was sent is what the first version of this test did, and it stayed green with the
-    capability channel removed from `handle_count_tokens` entirely.
+    Nothing goes upstream on this path — the Responses family has no counter — so the resolution cannot be read off a request. It is read off the loss the resolution recorded instead, which is the only observable this path produces. Asserting merely that the count came back and that nothing was sent is what the first version of this test did, and it stayed green with the capability channel removed from `handle_count_tokens` entirely.
     """
     client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1", "usage": {"input_tokens": 7}}))
     response = client.post(
@@ -2879,8 +2845,7 @@ def test_a_count_resolves_reasoning_the_same_way_the_send_does() -> None:
     assert response.json()["estimated"] is True
     assert not [request for request in seen if "reasoning" in request.read().decode()]
 
-    # 20k wants `xhigh`; this model stops at `high`. The count path saw the same capabilities and
-    # made the same downgrade — with the channel disconnected it reports `not-carried` instead.
+    # 20k wants `xhigh`; this model stops at `high`. The count path saw the same capabilities and made the same downgrade — with the channel disconnected it reports `not-carried` instead.
     losses = _records()[0]["losses"]
     approximations = [entry for entry in losses if entry["code"] == "reasoning-intent-approximated"]
     assert len(approximations) == 1, losses
