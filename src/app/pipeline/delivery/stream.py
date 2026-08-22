@@ -308,7 +308,9 @@ async def _deliver(
             #
             # Deliberately only this one. The other endings that reach here remain indistinguishable from each other on the wire, and widening the frame to cover them is a separate question with its own answer to find. Nothing is flushed first either: what is buffered but undelivered would make the size of this ending depend on the buffering policy, while the ending itself is a clock event.
             #
-            # Ahead of `terminal.seen` on purpose, and that ordering is a ruling rather than an accident of writing order: `client_request_deadline` bounds this round's total elapsed time, so once it fires the round is over whether or not upstream happened to finish first. A complete reply may be sitting assembled in the buffer, and it is dropped. Ruled 2026-08-22. The attempt deadline just below is ordered the other way for the opposite reason — it ends only *this attempt*, so a finished turn has to be recognised before anything asks what went wrong.
+            # Ahead of `terminal.seen` on purpose, and that ordering is a ruling rather than an accident of writing order: `client_request_deadline` bounds this round's total elapsed time, so once it fires the round is over whether or not upstream happened to finish first. A complete reply may be sitting assembled in the buffer, and it is dropped. Ruled 2026-08-22.
+            #
+            # The attempt deadline (`upstream_request_deadline`, raised by `pipeline_app`'s `with_deadline_at`) has no branch of its own here — it arrives as an ordinary tear and is classified below. It is ordered the other way round, *after* `terminal.seen`, for the opposite reason: it ends only this attempt, so a turn upstream finished must not be handed to it as something to retry.
             yield framer.error(
                 error_type=WIRE_TYPES[ErrorCategory.INTERNAL],
                 message=str(torn) or "client request exceeded its deadline",
@@ -320,7 +322,7 @@ async def _deliver(
             #
             # Answered here rather than from the verdict, which is where it used to be — and that was one door short. A failure the caller's taxonomy does not recognise, a bare `h2.ProtocolError` among them, never reaches the verdict at all: it is refused two lines down and raised, taking a complete reply with it. The question "did upstream finish" has to be answered before any question about the failure, because the answer does not depend on the failure.
             #
-            # Still below the client deadline, and that is now a ruling rather than a deferral: see the branch above. Above the attempt deadline, though, which reaches here as an ordinary tear — that one ends only this attempt, so a finished turn must not be handed to it as something to retry.
+            # Still below the client deadline, and that is now a ruling rather than a deferral: see the branch above. Above the attempt deadline, though, which reaches here as an ordinary tear rather than a branch of its own — that one ends only this attempt, so a finished turn must not be handed to it as something to retry.
             break
         reason = replay.eligible(torn) if replay is not None else None
         if replay is None or reason is None:
