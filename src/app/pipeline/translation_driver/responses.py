@@ -135,7 +135,11 @@ def _responses_stop_reason(
     return END_TURN, None
 
 
-def from_openai_responses_response(payload: Mapping[str, Any]) -> SemanticResponse:
+def from_openai_responses_response(
+    payload: Mapping[str, Any],
+    *,
+    hand_over_stop_reasons: frozenset[str] = frozenset({"max_tokens"}),
+) -> SemanticResponse:
     response = SemanticResponse(
         id=str(payload.get("id", "")),
         model=str(payload.get("model", "")),
@@ -144,8 +148,22 @@ def from_openai_responses_response(payload: Mapping[str, Any]) -> SemanticRespon
     if isinstance(usage, Mapping):
         response.usage = _anthropic_usage(cast(Mapping[str, Any], usage))
 
+    # Whether this ending will hand the turn back, which is what decides whether the block upstream
+    # cut short may be dropped at all. One setting for both, since dropping content is only
+    # defensible when the client is handed a way to get it back — separating them let a
+    # `content_filter` ending drop a block and hand over nothing, and the client lost a passage it
+    # could not ask for again on a line that read `[ OK ]`.
+    #
+    # Read here rather than after the loop because the drop happens inside it. The streaming
+    # assembler cannot do this: its items close before the terminal event says why, so it holds the
+    # one it cut short instead and answers the same question a moment later.
+    will_hand_over, _ = _responses_stop_reason(payload, has_tool_call=False)
     for item in _mapping_list(payload.get("output")):
-        if str(item.get("status", "")) == "incomplete" and response.blocks:
+        if (
+            str(item.get("status", "")) == "incomplete"
+            and response.blocks
+            and will_hand_over in hand_over_stop_reasons
+        ):
             # The item upstream cut short, dropped because something whole came before it. Same rule
             # as the streaming assembler applies, and it has to live here rather than on the finished
             # body: `status` is upstream's, and nothing carries it across the translation.

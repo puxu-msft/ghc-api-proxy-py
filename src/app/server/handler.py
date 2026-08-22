@@ -578,13 +578,16 @@ def framer_for(
     return AnthropicFramer(message_id=message_id, model=model, signature_compat=signature_compat)
 
 
-def assembler_for(handled: HandledRequest) -> BlockAssembler:
+def assembler_for(
+    handled: HandledRequest, *, hand_over_stop_reasons: frozenset[str] = frozenset({"max_tokens"})
+) -> BlockAssembler:
     """Pick the assembler matching the upstream this route actually used.
 
     Dispatched on `dialect_for` rather than testing the wire format again, so the streaming and buffered paths cannot come to disagree about which upstream answered — one branch decides it for both.
     """
     if dialect_for(handled) is ReplyDialect.RESPONSES:
-        return ResponsesAssembler()
+        # Only this one can see whether upstream cut an item short, and so only this one needs to know which endings will hand the turn back.
+        return ResponsesAssembler(hand_over_stop_reasons=hand_over_stop_reasons)
     return AnthropicAssembler()
 
 

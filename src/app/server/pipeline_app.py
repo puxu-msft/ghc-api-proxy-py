@@ -40,7 +40,6 @@ from app.pipeline.anthropic_request_hook import strip_attribution_lines
 from app.pipeline.delivery.assembling import BlockAssembler, ReplyDialect, Terminal
 from app.pipeline.delivery.blocks import TOOL_USE, BlockBuffer
 from app.pipeline.delivery.stream import (
-    _HANDED_OVER_STOP_REASONS,  # pyright: ignore[reportPrivateUsage]
     ContinuationSupport,
     ReplaySupport,
     one_shot_delivery,
@@ -527,6 +526,8 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
     # Snapshot the live socket now. `_log_completion` intentionally runs only after the response is released, when httpcore's `client_addr` lookup can already raise `OSError: [Errno 9] Bad file descriptor`.
     trace.upstream_conn = _snapshot_upstream_connection(response)
 
+    _hand_over_reasons = frozenset(chain.config.upstream_request_retry.hand_over_stop_reasons)
+
     def _replay_reason(error: Exception) -> RetryReason | None:
         """Which budget a torn body draws on, or `None` when no second attempt could answer it.
 
@@ -637,7 +638,7 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
         #
         # The registration deliberately outlives this function. A streaming request has produced nothing at the moment the handler returns — the body is consumed after — so releasing here would drop it off the footer at exactly the point it becomes worth watching.
         # Held rather than passed straight through: the assembler is what reads the upstream's terminal event, so after the stream finishes it is the only thing that knows the token usage and the stop reason.
-        assembler = assembler_for(handled)
+        assembler = assembler_for(handled, hand_over_stop_reasons=_hand_over_reasons)
         accounting = _StreamAccounting(
             chain=chain,
             request_id=trace.request_id,
@@ -665,7 +666,7 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
             if reopened is None or not again.context.stream:
                 return None
             fresh_attempt = again.context.current_attempt
-            fresh_assembler = assembler_for(again)
+            fresh_assembler = assembler_for(again, hand_over_stop_reasons=_hand_over_reasons)
             # Otherwise the one surface that can show a replay happened stays at 1, and a request the proxy quietly answered twice reads exactly like one it answered once.
             trace.attempts = again.context.attempt_count
             active.set_attempts(trace.request_id, again.context.attempt_count)
@@ -705,7 +706,9 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
                 accounting.handed_over = True
             return payload
 
-        continuation = ContinuationSupport(synthesize=_hand_back_streaming)
+        continuation = ContinuationSupport(
+            synthesize=_hand_back_streaming, stop_reasons=_hand_over_reasons
+        )
 
         replay = ReplaySupport(
             # Built by `handle` on the first attempt and kept on the request, so every attempt this reopens draws on the same `max_total` as the ones the driver opened.
@@ -764,7 +767,7 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
     context.reply = reply_summary(handled, payload)
     handed = (
         _hand_back(None, str(payload.get("stop_reason", "")))
-        if str(payload.get("stop_reason", "")) in _HANDED_OVER_STOP_REASONS
+        if str(payload.get("stop_reason", "")) in _hand_over_reasons
         else None
     )
     if handed is not None:

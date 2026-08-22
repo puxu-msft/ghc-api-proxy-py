@@ -429,10 +429,19 @@ def _responses_item(assembler: ResponsesAssembler, index: int, item: dict[str, o
     )
 
 
-def test_an_item_upstream_cut_short_is_dropped_once_something_whole_came_before() -> None:
-    """Half a sentence is not what the client asked for, and the next turn produces it again.
+def _terminal(assembler: ResponsesAssembler, reason: str) -> tuple[CompletedBlock, ...]:
+    return assembler.push(
+        SseEvent(
+            "response.incomplete",
+            orjson.dumps({"response": {"incomplete_details": {"reason": reason}}}).decode(),
+        )
+    )
 
-    Upstream says so on the closing event — `status: "incomplete"` on the item it cut short — and the truncated one is always the last, so how many whole blocks came before it is already known. Nothing is buffered and nothing looks ahead.
+
+def test_an_item_upstream_cut_short_is_dropped_when_the_turn_will_be_handed_back() -> None:
+    """Half a sentence is not what the client asked for, and the next turn produces it again — but only because there *is* a next turn.
+
+    Upstream says so on the closing event, `status: "incomplete"` on the item it cut short. It cannot be answered there, though: at that moment this side does not yet know why the response is incomplete, and that is what decides whether anything will bring the passage back. So it is held, and answered on the terminal event.
     """
     assembler = ResponsesAssembler()
     whole = _responses_item(assembler, 0, {"type": "message", "id": "m1", "status": "completed"})
@@ -444,7 +453,31 @@ def test_an_item_upstream_cut_short_is_dropped_once_something_whole_came_before(
         {"type": "function_call", "id": "fc1", "call_id": "c1", "name": "Bash", "status": "incomplete"},
     )
     assert cut == ()
-    # And it is not counted either: a block nobody received is not a block delivered.
+    assert _terminal(assembler, "max_output_tokens") == ()
+    # Not counted either: a block nobody received is not a block delivered.
+    assert assembler.terminal.blocks == 1
+
+
+def test_an_item_upstream_cut_short_is_given_back_when_nothing_will_hand_the_turn_over() -> None:
+    """The other half of the same rule, and the reason it is one setting rather than two.
+
+    A `content_filter` ending is not carried on by default, so dropping the passage would lose it for good — the client could not ask for it again, and the line would read as an ordinary success. Held and then released, so nothing is lost.
+    """
+    assembler = ResponsesAssembler()
+    _responses_item(assembler, 0, {"type": "message", "id": "m1", "status": "completed"})
+    assert _responses_item(assembler, 1, {"type": "message", "id": "m2", "status": "incomplete"}) == ()
+
+    released = _terminal(assembler, "content_filter")
+    assert len(released) == 1
+    assert assembler.terminal.blocks == 2
+
+
+def test_the_endings_that_hand_over_are_an_operator_s_to_choose() -> None:
+    """Configured, so an operator who decides a filtered turn *is* worth carrying on gets the drop that goes with it."""
+    assembler = ResponsesAssembler(hand_over_stop_reasons=frozenset({"content_filter"}))
+    _responses_item(assembler, 0, {"type": "message", "id": "m1", "status": "completed"})
+    _responses_item(assembler, 1, {"type": "message", "id": "m2", "status": "incomplete"})
+    assert _terminal(assembler, "content_filter") == ()
     assert assembler.terminal.blocks == 1
 
 
@@ -454,6 +487,8 @@ def test_an_item_upstream_cut_short_is_kept_when_it_is_all_there_is() -> None:
     only = _responses_item(assembler, 0, {"type": "message", "id": "m1", "status": "incomplete"})
     assert len(only) == 1
     assert assembler.terminal.blocks == 1
+    # Nothing held, so the terminal has nothing to give back.
+    assert _terminal(assembler, "max_output_tokens") == ()
 
 
 def test_a_whole_item_is_never_dropped_however_many_came_before() -> None:

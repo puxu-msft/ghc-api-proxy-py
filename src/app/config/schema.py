@@ -171,6 +171,20 @@ class RetryStrategiesConfig(Section):
 class UpstreamRequestRetryConfig(Section):
     max_total: int = Field(default=20, ge=0)
     strategies: RetryStrategiesConfig = Field(default_factory=RetryStrategiesConfig)
+    # Which upstream stop reasons mean "this turn can be carried on", and so get handed back to the
+    # client as a tool call rather than simply ending.
+    #
+    # The same list decides whether a block upstream cut short may be dropped. Those two are one
+    # setting on purpose: dropping content is only defensible when the client is handed a way to get
+    # it back, and separating them let a `content_filter` ending drop a block and hand over nothing —
+    # the client lost a passage it could not ask for again, on a line that read `[ OK ]`.
+    #
+    # `max_tokens` alone by default. `content_filter` is the obvious candidate for the list and is
+    # deliberately not on it: `refusal` is ruled uncontinuable, a filtered turn is its neighbour, and
+    # carrying one on would most likely be filtered again. It has also never been observed — zero
+    # occurrences across 134,336 recorded operations — so this is a door left open, not a case
+    # anyone has met.
+    hand_over_stop_reasons: list[str] = Field(default_factory=lambda: ["max_tokens"])
     # The tool a turn that cannot be finished is handed back as. The default is what Claude Code calls the one this project ships beside it — `mcp__plugin_<plugin>_<server>__<tool>` is that client's naming for a plugin-provided MCP server, so the same server configured directly, or a renamed plugin, is a different name and this is how it gets said.
     auto_retry_tool_call_full_name: str = (
         "mcp__plugin_ghc-api-proxy-helper_auto-retry__turn_interrupted"

@@ -59,6 +59,8 @@ class ContinuationSupport:
     """
 
     synthesize: Callable[[BaseException | None, str], dict[str, Any] | None]
+    # Which upstream stop reasons mean the turn can be carried on. Carried here rather than read from a module constant, because it is an operator's setting and delivery is not where settings live. The same set decides whether the block upstream cut short may be dropped — one setting, since dropping content is only defensible when the client is handed a way to get it back.
+    stop_reasons: frozenset[str] = frozenset({"max_tokens"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,7 +362,7 @@ async def _deliver(
             yield frame
 
     terminal = assembler.terminal
-    if terminal.seen and terminal.stop_reason in _HANDED_OVER_STOP_REASONS:
+    if continuation is not None and terminal.seen and terminal.stop_reason in continuation.stop_reasons:
         # Upstream finished cleanly and said it stopped because it ran out of room. Nothing failed, so nothing above catches it — but the turn is no more finished than a torn one, and the client is the only side that can carry it on. Ruled 2026-08-21: `max_tokens` always hands over.
         #
         # Asked before the empty-response return below, not after. A turn whose only block was itself the truncated one has nothing left after the drop, and that return would have answered it with a 200 and no bytes at all — which is the one outcome the keep-it-when-it-is-all-there-is rule exists to prevent, arrived at from the other side.
@@ -389,10 +391,6 @@ async def _deliver(
         yield frame
 
 
-# The clean endings that are not endings. Upstream said it stopped for want of room, which leaves the turn exactly as unfinished as a torn one does — the difference is only that nothing raised.
-_HANDED_OVER_STOP_REASONS = frozenset({"max_tokens"})
-
-
 def _hand_over(
     continuation: ContinuationSupport | None,
     session: DeliverySession,
@@ -410,7 +408,7 @@ def _hand_over(
     """
     if continuation is None:
         return None
-    if session.committed_count == 0 and stop_reason not in _HANDED_OVER_STOP_REASONS:
+    if session.committed_count == 0 and stop_reason not in continuation.stop_reasons:
         # Nothing whole ever reached the client, so there is nothing for it to carry on from and the tool call would be the entire turn. Asked before the caller is, so a hand-over it would have recorded is not recorded for an ending that does not happen. The exception is a turn upstream cut short for want of room, where the truncated block was kept precisely so this would not be empty.
         return None
     payload = continuation.synthesize(error, stop_reason)

@@ -90,3 +90,23 @@ def test_a_whole_item_is_never_dropped_however_many_came_before() -> None:
     """The control: without it, a rule that dropped on position alone would pass the first test too."""
     reply = from_openai_responses_response(_reply_with(_message("one", "completed"), _message("two", "completed")))
     assert [b.text for b in reply.blocks] == ["one", "two"]
+
+
+def test_a_buffered_ending_that_hands_over_nothing_keeps_the_block_it_cut_short() -> None:
+    """The same rule as the streaming assembler reaches by a different route, because this path already knows why the reply is incomplete.
+
+    Dropping a passage is only defensible when the client is handed a way to get it back. A `content_filter` ending is not carried on by default, so the passage stays — otherwise the client loses it for good, on a reply that looks like an ordinary one.
+    """
+    reply = _reply_with(_message("whole", "completed"), _message("half", "incomplete"))
+    reply["incomplete_details"] = {"reason": "content_filter"}
+    assert [b.text for b in from_openai_responses_response(reply).blocks] == ["whole", "half"]
+
+
+def test_an_operator_can_say_a_filtered_turn_is_worth_carrying_on() -> None:
+    """And then the drop comes with it, because the two are one setting."""
+    reply = _reply_with(_message("whole", "completed"), _message("half", "incomplete"))
+    reply["incomplete_details"] = {"reason": "content_filter"}
+    translated = from_openai_responses_response(
+        reply, hand_over_stop_reasons=frozenset({"content_filter"})
+    )
+    assert [b.text for b in translated.blocks] == ["whole"]
