@@ -30,18 +30,20 @@
 
 配置项 `ProxyConfig.pidfile_dir`（`src/app/config/schema.py:383`，并登记在 `:42` 的 `NOT_HOT_RELOADABLE`）现在真的被读取了。改名之前它叫 `pidfile`，被解析进 schema、登记进 `NOT_HOT_RELOADABLE`、写进 `config.example.yaml`，然后**从未被任何代码读取**——设置它的人得到默认路径且毫无迹象。CLI `--pidfile-dir` 优先于配置文件。
 
-## 待裁决：`GHC_API_PROXY_PORT` 这个拼写
+## 已裁决并实现：`GHC_API_PROXY_PORT` 这个拼写
 
-新 spec 把默认文件名写作 `standalone-${GHC_API_PROXY_PORT}.pid`。作为「最终生效的那个端口」的占位记号，这没有歧义，实现也正是这么做的——文件名取自 bind 后从 socket 读回的实际端口，无论它来自 `server.port`、`--port` 还是别处。
+**2026-08-22 用户裁决：实现该别名。已落地（提交 `1459320`）。** 本节保留为记录，不再是待裁决点。
 
-但 `GHC_API_PROXY_PORT` 同时**长得像一个真实的环境变量**，而它现在不是。实测（2026-08-22）：
+新 spec 把默认文件名写作 `standalone-${GHC_API_PROXY_PORT}.pid`。作为「最终生效的那个端口」的占位记号，这没有歧义，实现也正是这么做的——文件名取自 bind 后从 socket 读回的实际端口，无论它来自 `server.port`、`--port` 还是环境变量。
 
-| 写法 | 结果 |
-|---|---|
-| `GHC_API_PROXY_SERVER__PORT=5001` | 生效，`server.port` = 5001 |
-| `GHC_API_PROXY_PORT=5000` | **进程启动失败** |
+问题在于 `GHC_API_PROXY_PORT` 同时**长得像一个真实的环境变量**，而在裁决之前它不是。实测：
 
-原因是 `environment_values()` 以 `GHC_API_PROXY_` 为前缀、`__` 为分层符，所以 `GHC_API_PROXY_PORT` 映射到顶层键 `port`，而 `ProxyConfig` 是 `extra="forbid"`，顶层没有 `port` 字段：
+| 写法 | 裁决前 | 裁决后 |
+|---|---|---|
+| `GHC_API_PROXY_SERVER__PORT=5001` | 生效 | 生效（不变） |
+| `GHC_API_PROXY_PORT=5000` | **进程启动失败** | 生效 |
+
+失败的原因是 `environment_values()` 以 `__` 为分层符，所以这个名字映射到顶层键 `port`，而 `ProxyConfig` 是 `extra="forbid"`：
 
 ```
 pydantic_core._pydantic_core.ValidationError: 1 validation error for ProxyConfig
@@ -49,15 +51,20 @@ port
   Extra inputs are not permitted [type=extra_forbidden, input_value='5000', input_type=str]
 ```
 
-也就是说，一个照着 spec 读的人如果去设 `GHC_API_PROXY_PORT`，得到的不是「端口没生效」，而是**服务起不来**。
+照着 spec 读的人去设它，得到的不是「端口没生效」，而是服务起不来，而错误信息里只有一个与 pidfile 毫无关联的 `port`。
 
-三条出路，**我倾向第一条**：
+### 实现要点
 
-1. **实现它**，让 `GHC_API_PROXY_PORT` 成为 `server.port` 的顶层别名。理由：`GHC_API_PROXY_` + `PORT` 是这个前缀下最自然的拼写，用户自己写文档时就这么写了，说明它符合直觉；而 `GHC_API_PROXY_SERVER__PORT` 拗口且容易把双下划线写成单个。代价是在扁平命名与嵌套命名之间开了一个特例，将来 `HOST` 之类会不会也要跟进，需要一并想清楚。
-2. **换记号**，文档改用 `standalone-<端口>.pid` 或 `${PORT}`，避免读者把它当环境变量。代价最小，但放弃了一个好拼写。
-3. **保持现状**。不推荐：踩中的人得到的是启动失败，而失败信息里只有 `port  Extra inputs are not permitted`，与 pidfile 毫无关联，很难自己走回来。
+`src/app/config/loading.py` 新增 `ENV_ALIASES`，把无 `__` 的扁平名指向 schema 里的实际位置：
 
-若选第一条，另有一个次级问题需一并裁决：三个来源同时出现时的优先级。现有分层是 bundled < YAML < 环境 < CLI，`GHC_API_PROXY_PORT` 落在「环境」那一层最自然，即 `--port` 仍然压过它。
+- `port` → `server.port`
+- `host` → `server.host`
+
+**`host` 是一并做的，不是因为它本身被要求**：两者总是一起设置，只给 `port` 加别名会让 `GHC_API_PROXY_HOST` 成为完全相同的陷阱。
+
+优先级按次级问题的建议落地：别名位于「环境」那一层，所以 `--port` 仍然压过它。两种拼写同时设置时，**嵌套写法确定性地胜出**——别名与显式名分开收集再合并，否则答案取决于环境变量的遍历顺序，那种不确定性在测试里表现为 flaky、在现场表现为几小时的困惑。
+
+这是这个前缀下第三个撞上「扁平名 + `extra=forbid`」的变量。另外两个（`GHC_API_PROXY_CONFIG`、`GHC_API_PROXY_GITHUB_TOKEN`）的处置相反：它们被排除在设置之外，因为它们本来就不是设置。
 
 ## 切换到新版本时的一次性影响
 

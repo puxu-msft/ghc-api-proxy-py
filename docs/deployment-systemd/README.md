@@ -92,6 +92,44 @@ user service 不含 system service 的 `User=`／`Group=`，也不使用 `/opt`�
 - `Restart=on-failure` 会在异常退出后重启；正常停止不会形成重启循环。socket 保持 active 时，新连接也可再次激活 service。
 - `.slice` 的限制作用于该 slice 下的工作负载。`MemoryHigh` 是回收压力阈值，`MemoryMax` 是硬上限；触及硬上限可能触发 cgroup OOM，随后由 `Restart=on-failure` 恢复进程，但在途连接仍会中断。
 
+## TLS（2026-08-22 加入，提交 `fb06150`）
+
+> 本节是当日核实过的现状。**本文件其余部分含大面积过期内容**，见文末「已知过期」。
+
+在此之前 `serve_inherited` **完全不读 `server.tls`**——没有 `ssl_certfile`／`ssl_keyfile`，也没有首字节路由。于是用出厂 `config.example.yaml`（`tls.mode: both`）跑 socket activation 的人得到的是纯明文，而且没有一行提示。项目的部署目标正是 systemd，所以这条影响的恰好是主路径。
+
+现在证书对会交给 uvicorn：
+
+| `server.tls.mode` | 继承监听器上的行为 |
+|---|---|
+| `false` | 明文，与之前完全一致（uvicorn 拿到 `None`） |
+| `true` | HTTPS |
+| `both` | **HTTPS，并打一行 `[WARN]` 说明降级** |
+
+`both` 在这条路径上无法兑现：同端口双协议要读每个已接受连接的第一个字节再决定交给谁，那需要拥有 accept，而这条路上 accept 归 uvicorn（standalone 路径用 `FirstByteRoutingAdapter` 做这件事，它由 `StandaloneServer` 驱动，与这里不是同一套）。答 HTTPS 并说清丢掉了哪一半，好过两边都不答。
+
+未指定 `cert`／`key` 时材料是自签名的，生成到 `tls_material_dir()`。**用户裁决（2026-08-22）：只要能接受 HTTPS 输入即可，不要求实际的安全验证。**
+
+### 验证方式
+
+`tests/systemd/test_systemd_pipeline_unit.py::test_an_inherited_listener_serves_the_real_api_over_https` 真起进程、真继承 fd、真握手，并且走的是 `POST /v1/messages` 而非健康检查——健康检查答在 headers 上、只回几个字节，证明不了请求体被读取、链被进入、流被写回，而那正是 TLS 之下会变的部分。
+
+这需要一个比 `_CopilotFake` 更完整的上游：后者只手写了协议的两个 GET 部分。新增的 `_CassetteUpstream` **回放** `tests/int/cassettes/anthropic_to_responses_stream.json`，而不是手写第三部分——手写的替身编码的是「我们以为上游会发什么」，而那个信念正是藏缺陷的地方；回放还保住了录制时的块边界，这对块级交付有意义。
+
+一个容易踩的点：入站模型必须落在支持 `/responses` 的上游模型上（cassette 目录里有 12 个，录制用的是 `gpt-5.5`）。用 `claude-*` 会走 Anthropic 透传，打到上游的是 `POST /v1/messages`，根本不经过 Responses 路径。
+
+`test_systemd_units.py:303-318` 那两个 skip 的退出条件是「教它 `POST /v1/messages`」——这个能力现在有了，把它们的断言移过去并删掉旧的，尚未做。
+
+## 已知过期（2026-08-22 实测，未修）
+
+本文件写于早期，以下内容与当前代码不符，接手前请勿直接采信：
+
+- 环境变量前缀已是 `GHC_API_PROXY_`，不是文中的 `GHC_`。文中示例 `GHC_CONFIG` / `GHC_OBSERVABILITY__LOG_LEVEL` / `GHC_HISTORY__DB_PATH` / `GHC_TOKENIZATION__STATE_PATH` 都不再成立，后两个对应的配置节也已不在 schema 里。
+- graceful timeout 的配置键是 `graceful_cleanup_timeout`，不是文中的 `shutdown.graceful_timeout`。
+- 测试路径是 `tests/systemd/`，不是文中的 `tests/smoke/`。
+- 自 2026-08-22 起 `--fd` 拒绝的选项不止 `--host` / `--port`，还包括 `--restart` / `--pidfile-dir` / `--force-write-pidfile`；`--manual` / `--rate-limit` / `--github-token` 则改为播报警告而非拒绝。
+
 ## 无需 root 的仓库验证
+
 
 `tests/smoke/test_systemd_units.py` 解析 system 模板并核对 socket fd 接线、状态目录、最小权限、关闭合同与 cgroup 关键字段；它从 `ExecStart` 反解 application timeout，并与 Python 默认常量、`TimeoutStopSec` 和 `30s` manager 余量机械对账。它还以 unit 声明的 mode／umask 运行真实 History 与 tokenization writer，核对状态目录、数据库、WAL／SHM、原子写临时文件和最终文件的实际 mode。运行态 smoke 由父进程创建真实 TCP listener 和预连接 backlog，在无可写 HOME 的环境中把 listener 交给应用 fd 3，并连接受控 generic upstream，验证 readiness 200、真实 Anthropic 请求、EnvironmentFile 等价路径覆盖、SIGTERM 清理，以及 History 与 tokenization 状态均落到覆盖目录。独立短 timeout probe 使用 `--graceful-timeout 1` 阻塞一个真实在途请求，发送 SIGTERM，并断言 Uvicorn timeout 分支、lifespan cleanup 和进程退出均发生。`tests/smoke/test_systemd_user_install.py` 使用临时 HOME／XDG 根验证 rootless helper 的 dry-run 零写入、apply 精确三文件、幂等、路径转义、真实 `systemd-analyze --user verify`、与 system template 相同的 graceful／manager deadlines，以及零 `systemctl` 调用。`tests/unit/test_cli.py` 核对 `--fd` 与 graceful timeout 被传给 Uvicorn，并拒绝 fd 0。测试不安装真实 unit、不连接 systemd manager，也不需要 root。

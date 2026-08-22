@@ -178,9 +178,10 @@
 ## 遗留
 
 第一批留下的三条，用户已在第二批全部裁决为实现，不再是遗留。当前剩下的是：
-1. **`GHC_API_PROXY_PORT` 这个拼写**（交用户裁决，详见候选文档）。新 spec 把默认文件名写作 `standalone-${GHC_API_PROXY_PORT}.pid`，作为「最终生效端口」的占位记号没有歧义；但它长得像一个真实环境变量，而实测设置 `GHC_API_PROXY_PORT=5000` 会让**进程启动失败**——`environment_values()` 以 `__` 分层，该名字映射到顶层键 `port`，撞上 `extra="forbid"`。能设端口的是 `GHC_API_PROXY_SERVER__PORT`。三条出路（实现该别名 / 文档换记号 / 保持现状）与倾向写在候选文档里。
+1. ~~**`GHC_API_PROXY_PORT` 这个拼写**~~ —— **2026-08-22 已裁决并实现**（提交 `1459320`）。`src/app/config/loading.py` 的 `ENV_ALIASES` 把无 `__` 的扁平名 `port` / `host` 指向 `server.port` / `server.host`。在此之前设 `GHC_API_PROXY_PORT` 不是「端口没生效」而是**进程起不来**：该名字映射到顶层键 `port`，撞上 `extra="forbid"`。`host` 是一并做的——两者总是一起设置，只给 `port` 加别名会让 `GHC_API_PROXY_HOST` 成为完全相同的陷阱。别名位于环境层，`--port` 仍压过它；两种拼写同时设置时嵌套写法确定性胜出（别名与显式名分开收集再合并，否则答案取决于环境变量遍历顺序）。详见候选文档同名一节。
 2. **信号处理器安装窗口**（既有缺陷，建议单独立项）。`StandaloneServer.serve` 的顺序是 `arm()` → `on_serving()`（写 pidfile、发信号）→ 才安装 handler，所以从 pidfile 对外宣称「可接管」到 SIGUSR2 真正被接住之间有一个窗口，窗口内 SIGUSR2 走默认动作直接杀进程。评审用子进程探针证实（返回码 `-12`）。修它要动关闭阶梯的核心时序。
 3. **并发回滚覆盖后来者**（既有缺陷，建议单独立项）。A 找到前任 P 并发布 A，B 随后发布 B，若 A 的启动尾部抛异常，A 的回滚会把 P 原样写回，覆盖正在服务的 B。单后继场景正确。真正修它需要同端口的进程间串行化（「先 read 再 write」仍有 TOCTOU）——第二批加入的拒绝逻辑也共享这个窗口，见上「拒绝的语义边界」。
+4. **`listening on http://{host}:{port}` 在 `--fd` 路径上是假的**（既有缺陷，`src/app/server/pipeline_app.py`）。协议硬编码 `http://`，地址取自配置而非实际监听的 socket，所以继承 fd 时端口和协议都不对。2026-08-22 给该路径加上 TLS（提交 `fb06150`）之后，这行从「端口错」变成「端口和协议都错」。未修：该文件当时正被同伴改动。
 
 ## 报告原件
 
