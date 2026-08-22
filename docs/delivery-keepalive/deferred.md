@@ -12,12 +12,18 @@
 
 ## 归用户
 
-### D-2 合成窗口与人写文档的冲突 —— 两条里已消解一条
+### ~~D-2 合成窗口与人写文档的冲突~~ —— **已随机制消失，无需裁决（2026-08-22）**
 
-权威表述在 `spec.md` §2.2 的【需用户裁决】块，本条只作索引。**不引行号**：该文件正被用户持续修订，行号已失效过一次。
+**用户在 MCP-driven 续写的裁决里定下：不再合成 HTTP 响应头，因而也不再合成 `message_start`。** `client_delivery.synthesized_response_headers_after_sec` 已从 schema 删除（`rg synthesized_response_headers_after_sec src/` 零命中），`stream.py` 的注释写着「It used to gate a `message_start` synthesised on its own after a long silence. **That is gone**」。裁决与理由记在人写文档 `docs/.human-controlled/upstream-retry-and-continuation.md`：「这种情况下没有交付过完整块，也不再出现半开 `message_start` 需要考虑」。
 
-- **窗口定义仍冲突。** 人写文档说的是「若很久上游都没有响应头」，实现的计时从响应头**到达之后**才起算。**待用户裁决**，未裁之前实现维持现状。
-- **合成物已不冲突。** 用户 2026-08-20 已把中文原文改成「合成 HTTP 200 以及一个 `message_start`」，与实现一致。（英文半句仍写 `half-block`，见下方「交还用户的文档问题」一节。）
+于是本条原来的两个分支都不再存在：
+
+- ~~**窗口定义仍冲突**（人写文档说「若很久上游都没有响应头」，实现从响应头到达之后才起算）~~ —— **没有窗口了，不需要裁。**
+- ~~**合成物已不冲突**~~ —— 没有合成物了。
+
+**顺带作废一条现行行为描述**：`spec.md` §2.2 原文写「首个字节交付之前不发保活帧」，**现行实现恰好相反**——首块之前也发，且无条件（理由在 `_deliver` 的注释里：该生成器开始跑时客户端已握着 200，扣住保活只是把首块前那段窗口花在沉默里，而 `full` / `until-tool-use` 下那就是整个回合）。`spec.md` 的 §2.2、§2.1 与「多发一次提示」那一格已于同日标注作废并保留原文。
+
+权威表述仍在 `spec.md`，本条只作索引。**不引行号**：该文件正被持续修订，行号已失效过一次。
 
 ## 已实现（`main` 上的 `52d877c`，本轮）
 
@@ -43,23 +49,69 @@ A1 那个已知陷阱**已补偿并钉住**：自建 transport 会让 httpx 关�
 
 根因是「只传了一个字段的 `Limits`」：`httpx.Limits(keepalive_expiry=...)` 让另外两个值留成 `None`，httpcore 读成 `sys.maxsize`。现在**根本不传 `limits`**，httpx 自己的 100 / 20 / 5.0 就是生效值。不为此立任何配置项，也不写死任何数字。
 
-## 未解决（缺陷，无岔路，排期做掉）
+## 已实现（2026-08-21）
 
-### D-7 proxy 优先级无法实现：三个来源在 `load_proxy_config()` 里被压平，没有 provenance
+### D-7 proxy 优先级 —— 已实现，含两处用户裁决
 
-**这一条被声称「已记入本文」三次，实际一次都没写进来。** 第一次是我在协调消息里说的，`reports/review-transport-keepalive-r3.md` 的 R3-F2 查了 commit tree 与工作树、指出没有；第二次仍未落盘；第三次是生产测试 `tests/unit/server/test_http_client_build.py::test_an_explicit_proxy_reaching_httpx_shuts_the_environment_out` 的 docstring 里写着「Recorded in `deferred.md`」——而本文里依旧没有。现在写下来。
+**这一条曾被声称「已记入本文」三次而实际一次都没写。** 第一次是我在协调消息里说的，`reports/review-transport-keepalive-r3.md` 的 R3-F2 查了 commit tree 与工作树、指出没有；第二次仍未落盘；第三次是生产测试的 docstring 里写着「Recorded in `deferred.md`」——而本文里依旧没有。落盘之后随即实现。
 
-**缺口本身**：用户亲笔 `docs/.human-controlled/config.example.yaml` 规定的优先级是 CLI `--proxy` > `HTTP_PROXY`/`HTTPS_PROXY` > 配置文件 `proxy`。但 `load_proxy_config()` 把 CLI、`GHC_PROXY` 与 YAML 三个来源压平进同一个字段，**不保留任何来源信息**，于是下游无从分辨「这个 proxy 是命令行给的还是配置文件给的」，也就无法把环境变量插在两者中间。当前实际行为是：只要 `config.proxy` 非空就走它、且完全不看环境变量（httpx 语义下等于 `all://`），环境变量因此永远排在配置文件之后，与人写文档规定的顺序相反。
+**缺口本身**：用户亲笔 `docs/.human-controlled/config.example.yaml` 规定的优先级是 CLI `--proxy` > `HTTP_PROXY`/`HTTPS_PROXY` > 配置文件 `proxy`。但 `load_proxy_config()` 把 CLI、`GHC_PROXY` 与 YAML 三个来源压平进同一个字段，**不保留任何来源信息**。改之前的实际行为是：只要 `config.proxy` 非空就走它、且完全不看环境变量，环境变量因此永远排在配置文件之后，与人写文档规定的顺序相反。
 
-**它先于本轮改动存在**，本轮没有引入也没有修复。之所以不顺手修：修它要改的是配置加载的数据形状（给 proxy 带上来源标记），那是另一条链路的接口改动，与保活无关；而 `test_an_explicit_proxy_reaching_httpx_shuts_the_environment_out` 之所以刻意**不**按那条产品规则命名，正是为了避免把「httpx 面向的行为」冻结成「产品优先级规则已实现」。
+**关键判断：三档规则只需要一个比特的来源信息。** 第 1 档是 CLI，第 3 档是「本设置」——而 YAML、`GHC_PROXY`、bundled 全都属于第 3 档，它们内部的相对顺序与其他所有配置键一致、不需要动。所以不必给整个配置系统加 provenance，只要知道「`proxy` 是不是 `--proxy` 给的」。而 CLI 本来就知道这件事，只是被 `_deep_merge` 压平时丢掉了。
 
-**分类**：缺陷，不是裁决点——正确做法唯一（让优先级与人写文档一致），只是要排期。
+**实现形态**（`main` 上的 `8703cad`）：`TransportOptions.proxy` 一拆为三——`proxy_from_cli`（provenance 位）、`cli_proxy`（第 1 档）、`setting_proxy`（第 3 档，作为 `all://` 挂在环境映射**之下**）。`transport_options` 与 `build_http_client` 各加一个**必填**关键字参数 `proxy_from_cli`。
+
+**必填而非默认，是刻意的。** 漏传默认值会静默产生「环境压过命令行」，正是本项目反复中招的形态；必填则漏传即 `TypeError`。这个选择当场就有回报：加上它之后，测试里立刻暴露出 6 个我用默认值会漏掉的调用点。
+
+**不放在 `ProxyConfig` 上，也是刻意的。** `PrivateAttr` 过不了 `pin_restart_only` 的 `model_dump` → `model_validate` 往返，每次热重载都会重置成默认值。`proxy` 在 `NOT_HOT_RELOADABLE` 里、client 又只在启动时建一次，所以今天读不到那个重置——但那正是「守卫在特定路径上静默失效」的形态，不留。
+
+### 用户裁决一（2026-08-21）：环境只设一部分时，逐 scheme 合并
+
+`proxy` 覆盖全部 scheme，而 `HTTP_PROXY`/`HTTPS_PROXY` 分 scheme，两者不同构，所以「第 2 档压过第 3 档」是欠定的。**用户裁决：逐 scheme 合并**——环境点名了哪个 scheme 就覆盖哪个，其余 scheme 仍回落到配置文件的 `proxy`。两档同时生效。
+
+（我当时倾向「整档覆盖」，理由是更贴合「优先级」这个措辞、且能整段复用 httpx 自己的环境解析。用户选了逐 scheme，理由上更有用：继承了一个只管 HTTPS 的环境时，HTTP 仍能走自己配置的代理。**记下未采纳的选项及其理由，而不是只记结论。**）
+
+**这个选择反而不需要我写任何路由逻辑**：`all://` 是 httpx 最不具体的 mount 模式，所以把设置档挂成 `all://`、环境映射盖在其上，httpx 自己的 mount 解析就会把「环境点名的 scheme」排在前面，把 `NO_PROXY` 产生的 `all://<host>` 排在更前面。
+
+一并判定的三处（未单独占用裁决，理由是最小意外）：**`ALL_PROXY` 算第 2 档**（它落在同一个 `all://` 键上，因此是整体替换设置档；把它排除在外，等于让唯一一个宣称「管全部」的环境变量成为唯一一个被设置档压过的）；**`GHC_PROXY` 算第 3 档**，即「本设置」的环境写法；**`NO_PROXY` 维持 httpx 现有语义**。
+
+### 用户裁决二（2026-08-21）：`--proxy ""` 就是「第 1 档说不要代理」
+
+**用户裁决：保持「空 = 显式直连」。** `--proxy ""` 使配置文件的 `proxy` 与 `HTTP_PROXY`/`HTTPS_PROXY` 全部不生效，请求一律直连。
+
+**未采纳的选项：拒绝空值、启动即报错。** 我与独立评审都倾向这一个，理由记在这里以免下次重提：原生 `httpx.AsyncClient(proxy="")` 直接抛 `ValueError`；人写文档描述的是一个 proxy URL，空字符串不属于它列出的任何 scheme；最实际的一条是 `--proxy "$UNSET_VARIABLE"`——变量没展开时当前行为**静默变成全部直连**，写错启动参数与故意直连同形；而且「CLI 可以把代理关掉」这个能力是实现过程中推演出来的，人写文档从未要求过。
+
+**用户选择接受这个取舍**，理由是运维不改配置文件就能临时跑一次直连。**因此那条 `$UNSET_VARIABLE` 的失败面是明示接受的**，不是未被发现的缺口。
+
+### 初版的三条缺陷 —— 独立评审查出，已修
+
+初版通过了全部回归，但独立评审（异源模型，逐目的地对照原生 httpx）查出三条。**其中一条是 Major，而且整套测试都看不见它**——我自己复验过：修复前只有新加的那条 wildcard 回归会红，其余 33 条照常通过。
+
+- **【Major】`NO_PROXY=*` 被设置档吞掉。** httpx 用**返回空映射**表达「忽略一切代理、全部直连」，而这与「环境里根本没有代理」**完全同形**。初版据「映射为空」判定环境没说话、于是挂上设置档兜底，把「全部直连」反转成「全部走设置档代理」。原生 httpx 是 `direct`，我们是代理。
+  **这是本项目那个反复出现的缺陷家族的又一例**：判据读的是一个替身量（映射是否为空），而不是它真正关心的事实（环境有没有点名代理）。上一轮刚在下游保活里清掉七次同形错误，这里又踩了一次；`*` 恰好是唯一不产生 `all://<host>` 条目的 `NO_PROXY` 形式，所以「更具体的条目会盖过 `all://`」这条论证覆盖不到它——论证自洽，射程不够。
+  已加 `_environment_bypasses_everything()`，读 httpx 自己用的那个来源（`urllib.request.getproxies()` 的 `no` 项）直接问 `*` 在不在。评审复核确认二者**是同一个函数对象**，且列表中间的 `*`、两侧空格、小写变量名、大小写混用变量名等形式均与 httpx 结果一致。
+- **【Medium】`--proxy ""` 会让环境重新渗回来。** 初版用 `cli_proxy is not None` 决定要不要屏蔽环境——即拿到了 provenance 位之后，又用「值非空」把 tier 重新推导了一遍。现改为由 `proxy_from_cli` 这个位本身决定。
+- **【Low】SOCKS 告警会报已被路由盖掉的代理。** 初版的候选集是「环境值 + 设置值」之和，未经最终解析。现在告警与路由**读同一张已解析的映射**（`_effective_proxies`）。**残留一处已知误报并接受**：`http://` 与 `https://` 都设了时，`all://` 上的 SOCKS 条目仍会被报告，尽管没有请求会走它——消除它需要对 mount 模式做可达性分析，而「报了一个不承载流量的代理」是便宜的错误方向。
+
+同一轮顺带把结构简化了：**tier 1 也走 mounts**，不再有「显式代理走 `transport=`、其余走 `mounts=`」这个特例。`all://` 匹配一切，路由完全等价，而两条路径正是让告警与路由推导分家、进而产生上面第三条的原因。
+
+**回归**：七条 priority 回归 + wildcard、空 CLI 值、SOCKS 遮蔽正反控。分辨力用五处定向变异验证过：去掉设置档兜底 → 3 条红；把设置档挂到环境之上 → `ALL_PROXY` 那条红；把 CLI 档并进设置档 → CLI 那两条红；去掉 `NO_PROXY=*` 判断 → **仅** wildcard 那条红；把屏蔽判断退回按值非空 → 空 CLI 那条红。
+
+`test_an_explicit_proxy_reaching_httpx_shuts_the_environment_out` 已改名为 `test_the_command_line_proxy_shuts_the_environment_out` 并补上真正的优先级断言——它的旧 docstring 明写着「刻意不按产品规则命名，以免冻结错的那一半」，规则实现之后那条自我限制到期了。
+
+### 一个非本提交回归、但不得对外声称的事
+
+评审实测：**httpx 不把 `10.1.2.3` 判为 `NO_PROXY=10.0.0.0/8` 的 bypass**，尽管其源码注释提到 CIDR。我们沿用原生结果，但**不得对外声称当前依赖支持 CIDR bypass**。
+
+### 落地与跨越 httpx2 迁移
+
+本 slice 初次实现时基于 httpx；提交前主线完成了 `httpx` → `httpx2` / `httpcore` → `httpcore2` 迁移（`2924a8c`），且把 `docs/agents/` 整体移到了 `.dev/docs/`。语义改动已在新主线上重放并复跑全部闸门：`uv run pytest -q` **1653 passed / 3 skipped**，`ruff check` 通过，`pyright src tests` **21 errors = 主线基线、增量 0**。评审报告见 `reports/review-proxy-priority.md`。
 
 ## 交还用户的文档问题（我方不改人写文档）
 
 按裁决 2，`docs/.human-controlled/` 由用户自行修订，我方不改。以下两处是我方在核对时发现、但**不属于我方能改的范围**，记在这里而不是默认用户会自己发现：
 
-1. **`synthesized_response_headers_after_sec` 的中英不一致。** 用户已把中文改成「合成 HTTP 200 以及一个 `message_start`」（与实现一致），但同一条目的英文半句仍是 `synthesize a half-block to the client`。
+1. ~~**`synthesized_response_headers_after_sec` 的中英不一致。**~~ —— **已作废（2026-08-22）**：该键已按用户裁决从 schema 删除，人写文档里也已无此条目（`rg 'synthesized_response_headers|half-block' docs/.human-controlled/` 零命中）。没有条目就没有中英不一致，这条无须再交还。见上方 D-2。
 2. **`http2_ping_interval` 仍被描述成一个生效的保活。** 该键在人写配置文档里写作「HTTP/2 PING 保活间隔（0 = 禁用）」，默认 15，没有任何未实现标注，读起来就是开着的。我方 `schema.py` 的注释已把「做不到、为什么做不到」写清楚，但那是我方 schema，不是用户会读的那一份。见下方 D-3d。
 
 ## 已裁决
