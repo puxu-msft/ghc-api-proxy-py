@@ -168,6 +168,9 @@ def from_openai_responses_response(
             # as the streaming assembler applies, and it has to live here rather than on the finished
             # body: `status` is upstream's, and nothing carries it across the translation.
             #
+            # The same blind spot comes with it: a `reasoning` item carries no `status` at all, so a
+            # truncated one is invisible here too. Left open deliberately; `deferred.md` §2.
+            #
             # Only when something whole came before. Half a sentence still beats an empty answer, so
             # the rule reverses when this is all there is — which is why the test is on `response.blocks`
             # rather than on the item's position. Ruled 2026-08-21 for the streaming path and extended

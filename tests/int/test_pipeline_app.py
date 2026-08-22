@@ -164,6 +164,74 @@ def test_anthropic_request_reaches_the_messages_endpoint_untranslated() -> None:
     assert str(seen[-1].url) == f"{BASE_URL}/v1/messages"
 
 
+def _beta_strip(model: str, *flags: str) -> dict[str, Any]:
+    return {
+        "hook_strip_anthropic_request_headers": {
+            "strip_anthropic_beta_flags": {model: list(flags)}
+        }
+    }
+
+
+def test_a_beta_flag_the_resolved_model_refuses_does_not_reach_upstream() -> None:
+    """The config key had no consumer at all until this test existed.
+
+    `hook_strip_anthropic_request_headers` sat in the schema with the operator's measured flag list in `config.example.yaml` and nothing anywhere reading it — the same shape as the guards that were left behind on the legacy chain and only surfaced as production 400s. So the assertion is on the bytes the upstream request carries, not on the function being called.
+    """
+    client, seen = make_client(
+        lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}),
+        overrides=_beta_strip("claude-model", "context-management-2025-06-27"),
+    )
+    response = client.post(
+        "/v1/messages",
+        json={"model": "claude-model", "messages": [{"role": "user", "content": "hi"}]},
+        headers={"anthropic-beta": "context-management-2025-06-27,effort-2025-11-24"},
+    )
+
+    assert response.status_code == 200
+    assert seen[-1].headers["anthropic-beta"] == "effort-2025-11-24"
+
+
+def test_the_strip_applies_on_the_translated_path_too() -> None:
+    """The primary product path. Which model answers is what decides, not which leg carries it."""
+    client, seen = make_client(
+        lambda _: httpx2.Response(200, json={"id": "resp_1"}),
+        overrides=_beta_strip("gpt-model", "context-management-2025-06-27"),
+    )
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "gpt-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 64,
+        },
+        headers={"anthropic-beta": "context-management-2025-06-27"},
+    )
+
+    assert response.status_code == 200
+    assert str(seen[-1].url) == f"{BASE_URL}/responses"
+    # Nothing was left in it, so the header goes rather than travelling empty.
+    assert "anthropic-beta" not in seen[-1].headers
+
+
+def test_an_unconfigured_model_still_gets_the_whole_header() -> None:
+    """The default has to be inert: this map exists to remove four flags, not to become a gate."""
+    client, seen = make_client(
+        lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}),
+        overrides=_beta_strip("some-other-model", "context-management-2025-06-27"),
+    )
+    response = client.post(
+        "/v1/messages",
+        json={"model": "claude-model", "messages": [{"role": "user", "content": "hi"}]},
+        headers={"anthropic-beta": "context-management-2025-06-27,effort-2025-11-24"},
+    )
+
+    assert response.status_code == 200
+    assert (
+        seen[-1].headers["anthropic-beta"]
+        == "context-management-2025-06-27,effort-2025-11-24"
+    )
+
+
 def test_anthropic_request_for_a_responses_model_is_translated() -> None:
     client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
     response = client.post(
@@ -820,7 +888,17 @@ def test_max_output_tokens_becomes_the_anthropic_stop_reason() -> None:
             },
         )
     )
-    response = client.post("/v1/messages", json={"model": "gpt-model", "messages": []})
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "gpt-model",
+            "messages": [
+                {"role": "user", "content": "one"},
+                {"role": "assistant", "content": "two"},
+                {"role": "user", "content": "three"},
+            ],
+        },
+    )
 
     assert response.status_code == 200
     body = response.json()
@@ -829,6 +907,8 @@ def test_max_output_tokens_becomes_the_anthropic_stop_reason() -> None:
     assert handed["type"] == "tool_use"
     assert handed["name"] == TOOL_NAME
     assert handed["input"]["category"] == "max_tokens"
+    # Three, not zero. An empty conversation makes this assertion vacuous — both the client's count and the translated body's agree on nothing at all — which is the shape that let the same defect through on the streamed side.
+    assert handed["input"]["num_messages"] == 3
     # The one block upstream produced is still there: dropping is only for a block upstream itself cut short, and only when something whole came before it.
     assert body["content"][0] == {"type": "text", "text": "cut"}
     # Neither a success nor a failure, the same as the streamed ending.
@@ -3122,3 +3202,31 @@ def test_a_hand_back_on_the_translation_leg_counts_the_client_s_own_messages() -
     assert handed["input"]["category"] == "network"
     # What the client had already been given survives the hand-over.
     assert b'"text":"partial"' in delivered
+
+
+def test_a_finished_turn_on_the_translation_leg_is_not_handed_back_either() -> None:
+    """The same rule as the Anthropic-direct case, asserted on the primary path.
+
+    The other test of this uses a leg that needs no translation, and the previous two blockers in this area were each hidden by a sample that skipped the step that broke. A rule worth having is worth asserting where the product actually runs.
+    """
+
+    async def finished_then_torn() -> AsyncIterator[bytes]:
+        yield responses_sse_upstream()
+        raise httpx2.RemoteProtocolError("peer closed the connection")
+
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200, content=finished_then_torn(), headers={"content-type": "text/event-stream"}
+        ),
+        overrides={"upstream_request_retry": {"max_total": 0}},
+    )
+    with client.stream(
+        "POST",
+        "/v1/messages",
+        json={"model": "gpt-model", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+    ) as response:
+        delivered = b"".join(response.iter_bytes())
+
+    assert b"turn_interrupted" not in delivered
+    assert b"message_stop" in delivered
+    assert _records()[-1]["status"] == "ok"

@@ -319,6 +319,22 @@ async def _deliver(
                 code="client_deadline_exceeded",
             )
             return
+        if assembler.terminal.seen:
+            # Upstream finished this turn and *then* the connection went. Nothing is missing, so the
+            # ending below is the real one.
+            #
+            # Answered here rather than from the verdict, which is where it used to be — and that was
+            # one door short. A failure the caller's taxonomy does not recognise, a bare
+            # `h2.ProtocolError` among them, never reaches the verdict at all: it is refused two
+            # lines down and raised, taking a complete reply with it. The question "did upstream
+            # finish" has to be answered before any question about the failure, because the answer
+            # does not depend on the failure.
+            #
+            # Deliberately still below the client deadline. Which of those two wins is a real
+            # question with a real consequence — a turn upstream completed just before the clock ran
+            # out is currently answered with an error frame rather than delivered — and it is
+            # recorded as needing a ruling rather than settled here; `deferred.md` 11.
+            break
         reason = replay.eligible(torn) if replay is not None else None
         if replay is None or reason is None:
             raise torn
@@ -330,9 +346,10 @@ async def _deliver(
             reason=reason,
         )
         if verdict.ending is StreamEnding.COMPLETE:
-            # Upstream finished this turn and *then* the connection went. Nothing is missing, so nothing is handed over — a tool call here would tell the client to carry on from an answer that is already whole, and it would look exactly like a real one. The ending below is the real one.
-            #
-            # Read before the replay, because `decide_stream_ending` answers all three and only one of them is a reason to do anything: folding COMPLETE in with ABANDON is what turned a finished turn into a synthesised interruption.
+            # Unreachable from here now that the same question is answered above, and kept because
+            # this is a switch over everything the verdict can say — a branch that silently fell
+            # through to the hand-over is what turned a finished turn into a synthesised
+            # interruption in the first place.
             break
         if verdict.ending is StreamEnding.REPLAY:
             replacement = await replay.reopen()

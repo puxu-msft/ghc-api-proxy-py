@@ -572,9 +572,10 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
         else:
             # `Exception`, because that is what decided the failure was continuable in the first place — the endings that are not exceptions never reach here with one.
             reason = _replay_reason(error) if isinstance(error, Exception) else None
-            category = (
-                _CATEGORY_FOR_REASON[reason] if reason is not None else ErrorCategory.INTERNAL
-            ).value
+            # `.get` rather than a subscript: this runs inside the delivery generator, so a
+            # `RetryReason` someone adds later without touching the table would kill the client's
+            # turn rather than mislabel one field.
+            category = _CATEGORY_FOR_REASON.get(reason, ErrorCategory.INTERNAL).value if reason else ErrorCategory.INTERNAL.value
         detail = stop_reason if error is None else str(error)
         return {
             "type": "tool_use",
@@ -700,6 +701,12 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
 
             The recording is here rather than inside it because the two paths mark the same fact in different places: a streaming request's verdict is decided by the accounting object long after this returns, while a buffered one settles its line inline.
             """
+            if accounting.handed_over:
+                # One per turn. Today the two call sites in `_deliver` each return, so a second call
+                # cannot happen — but that is a property of control flow somewhere else, and the
+                # guard's whole value is surviving a change to it. This project has already found
+                # guards stranded on a path nobody takes.
+                return None
             payload = _hand_back(error, stop_reason)
             if payload is not None:
                 # The client is about to get a complete reply it will act on, and the upstream attempt behind it did not finish.
@@ -765,9 +772,13 @@ async def _dispatch(request: Request, chain: Chain, trace: _Trace) -> Response:
     # and a tool the model never asked for. That divergence is the thing this whole area exists to
     # remove, and it had been pushed back into the observability surface.
     context.reply = reply_summary(handled, payload)
+    # The shape is checked before the block is built, not after. Built first, a body whose `content`
+    # was not a list left a warning logged, an id spent and a hand-over silently not happening —
+    # the reply going out unchanged with nothing saying so.
     handed = (
         _hand_back(None, str(payload.get("stop_reason", "")))
         if str(payload.get("stop_reason", "")) in _hand_over_reasons
+        and isinstance(payload.get("content"), list)
         else None
     )
     if handed is not None:

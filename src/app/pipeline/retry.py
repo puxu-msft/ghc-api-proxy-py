@@ -143,6 +143,8 @@ def decide_stream_ending(
 
     if committed_blocks == 0:
         # Opened but empty: the client holds a `message_start` and no content. A replay would send it a second one, so the only ending left is to say the stream was truncated. Kept apart from the case below because the two leave the client holding different things, and the detail is what a reader sees.
+        #
+        # **No caller reaches this today.** `downstream_opened` is fed by the delivery session's own gate, which is only set when a block is written, so "opened with nothing in it" stopped existing when the synthesised preamble was removed. Kept because this function is pure, has its own tests, and the wiring above it is still moving — but a reader should not have to re-derive that. If a `message_start` is ever sent on its own again, this branch is live again with it.
         return EndingVerdict(
             StreamEnding.ABANDON,
             detail="response opened without a content block",

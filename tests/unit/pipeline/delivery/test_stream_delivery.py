@@ -1040,12 +1040,15 @@ async def test_the_client_deadline_is_the_one_ending_that_says_so() -> None:
 
 @pytest.mark.asyncio
 async def test_an_upstream_tear_is_still_raised_rather_than_framed() -> None:
-    """Deliberately narrow. The other endings that reach here remain indistinguishable from each other on the wire, and widening the frame to cover them is a separate question with its own answer to find."""
+    """Deliberately narrow. The other endings that reach here remain indistinguishable from each other on the wire, and widening the frame to cover them is a separate question with its own answer to find.
+
+    The sample stops before upstream's terminal event: a turn upstream finished is not torn, whatever happens to the connection afterwards.
+    """
     with pytest.raises(ConnectionError):
         _ = [
             chunk
             async for chunk in stream_delivery(
-                _tears_after(anthropic_stream("one")),
+                _tears_after(anthropic_stream("one")[:3]),
                 AnthropicAssembler(),
                 buffer=BlockBuffer(policy="block"),
                 settings=StreamSettings(sse_ping_interval=0),
@@ -1076,3 +1079,37 @@ async def test_a_held_back_policy_still_hears_the_client_deadline(policy: str) -
     assert b"client_deadline_exceeded" in b"".join(chunks)
     # The buffered block is dropped rather than flushed first, which is what the document says to do.
     assert b'"text":"one"' not in b"".join(chunks)
+
+
+class _UnrecognisedTear(Exception):
+    """A transport failure the caller's taxonomy does not know — a bare `h2.ProtocolError` is one."""
+
+
+async def _finishes_then_tears_unrecognisably() -> AsyncIterator[bytes]:
+    for payload in anthropic_stream("complete"):
+        yield payload
+    raise _UnrecognisedTear("nothing upstream of here knows what this is")
+
+
+@pytest.mark.asyncio
+async def test_a_finished_turn_survives_a_failure_nothing_recognises() -> None:
+    """Whether upstream finished does not depend on what the failure was, so it has to be answered before anything asks.
+
+    Answered from the verdict instead, this was one door short: a failure the caller's taxonomy refuses never reaches the verdict at all — it is raised first, and a complete reply goes with it. The client loses an answer it was owed, over an exception classifier that had never heard of the exception.
+    """
+    replay = _replay_over([])
+    chunks = [
+        chunk
+        async for chunk in stream_delivery(
+            _finishes_then_tears_unrecognisably(),
+            AnthropicAssembler(),
+            buffer=BlockBuffer(policy="block"),
+            settings=StreamSettings(sse_ping_interval=0),
+            message_id="msg_1",
+            model="claude-model",
+            replay=replay,
+        )
+    ]
+    body = b"".join(chunks)
+    assert b'"text":"complete"' in body
+    assert events_of(chunks)[-1] == "message_stop"
