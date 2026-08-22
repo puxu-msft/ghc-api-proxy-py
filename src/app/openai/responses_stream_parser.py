@@ -142,8 +142,7 @@ class _ItemDraft:
 class ResponsesStreamParser:
     """Assemble Responses lifecycle events into immutable semantic facts.
 
-    The parser owns attempt-local drafts only. It does not render Anthropic wire data,
-    sequence completed blocks for a sink, advance a delivery frontier, or retry.
+    The parser owns attempt-local drafts only. It does not render Anthropic wire data, sequence completed blocks for a sink, advance a delivery frontier, or retry.
     """
 
     def __init__(

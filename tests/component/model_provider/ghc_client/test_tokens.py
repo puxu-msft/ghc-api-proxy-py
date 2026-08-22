@@ -268,9 +268,7 @@ async def test_exhausted_exchange_reports_the_failure_to_the_caller() -> None:
         max_exchange_attempts=3,
     )
     try:
-        # The transport's own error, not one of ours: the exchange gives up and whatever the last
-        # attempt raised is what the caller sees. Named rather than caught as `Exception`, so a
-        # failure that started arriving as something else would show up here instead of passing.
+        # The transport's own error, not one of ours: the exchange gives up and whatever the last attempt raised is what the caller sees. Named rather than caught as `Exception`, so a failure that started arriving as something else would show up here instead of passing.
         with pytest.raises(httpx2.HTTPStatusError):
             await manager.get_token()
     finally:

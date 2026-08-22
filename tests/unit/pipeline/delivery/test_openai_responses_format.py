@@ -255,8 +255,7 @@ def test_every_event_carries_the_fields_its_model_declares_required() -> None:
     frames.extend(one.terminal(Terminal(stop_reason="end_turn", seen=True)))
     frames.append(one.error(error_type="api_error", message="boom", code="c"))
 
-    # `ResponseStreamEvent` is an annotated union; its members carry `type` as a Literal rather than
-    # as a default, so the discriminator is read out of the annotation.
+    # `ResponseStreamEvent` is an annotated union; its members carry `type` as a Literal rather than as a default, so the discriminator is read out of the annotation.
     members = get_args(get_args(ResponseStreamEvent)[0])
     by_type: dict[str, Any] = {}
     for member in members:
@@ -289,8 +288,7 @@ def test_the_keepalive_is_a_comment_no_parser_turns_into_an_event() -> None:
     response = replay(frames)
     assert response.output_text == "hi"
 
-    # And it consumed no sequence number, which the comment used to claim while asserting only the
-    # bytes. Read off the wire rather than off the framer: the numbers a client sees are the claim.
+    # And it consumed no sequence number, which the comment used to claim while asserting only the bytes. Read off the wire rather than off the framer: the numbers a client sees are the claim.
     numbers = [
         orjson.loads(f.decode().split("data: ", 1)[1])["sequence_number"]
         for f in frames
@@ -338,8 +336,7 @@ def test_a_block_kind_this_does_not_know_is_refused_rather_than_emptied() -> Non
         ("max_tokens", "max_output_tokens"),
         # Written by the assembler when upstream said incomplete and gave no reason.
         ("incomplete", None),
-        # Anthropic's vocabulary. Reachable only through a route this proxy cannot build today, but
-        # the passthrough that used to send them had no way of knowing that.
+        # Anthropic's vocabulary. Reachable only through a route this proxy cannot build today, but the passthrough that used to send them had no way of knowing that.
         ("stop_sequence", None),
         ("refusal", None),
     ],

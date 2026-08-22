@@ -244,9 +244,7 @@ async def adapt_server_tools(context: RequestContext) -> None:
     payload = context.payload
 
     if not context.extras.get(COUNTING_ONLY):
-        # Measuring is exempt: nothing is executed, so nothing can come back invented. The history
-        # is still flattened below, because that is what makes the measured body the one that would
-        # actually be sent.
+        # Measuring is exempt: nothing is executed, so nothing can come back invented. The history is still flattened below, because that is what makes the measured body the one that would actually be sent.
         _refuse_declarations(payload)
     flattened = _flatten_history(payload)
     if flattened:

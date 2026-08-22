@@ -61,9 +61,7 @@ class CopilotTokenManager:
     ) -> None:
         self._github_tokens = github_tokens
         self._http = http_client
-        # Where the GitHub token is exchanged for a Copilot one. Configurable because an
-        # enterprise install moves it, and because a hardcoded host made this library impossible
-        # to stand up against a local server for testing.
+        # Where the GitHub token is exchanged for a Copilot one. Configurable because an enterprise install moves it, and because a hardcoded host made this library impossible to stand up against a local server for testing.
         self._auth_base_url = auth_base_url.rstrip("/")
         self._clock = clock
         self._sleep = sleep

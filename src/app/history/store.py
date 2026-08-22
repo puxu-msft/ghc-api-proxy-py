@@ -14,9 +14,7 @@ class HistoryStore:
         db_path: Path,
     ) -> None:
         async def on_fatal(error: BaseException) -> None:
-            # Nothing to escalate to. A fatal write error used to fail the rolling generation so
-            # the controller could keep the previous one serving; that mechanism is gone, and
-            # inventing a substitute here would be a second answer to a question nobody asks.
+            # Nothing to escalate to. A fatal write error used to fail the rolling generation so the controller could keep the previous one serving; that mechanism is gone, and inventing a substitute here would be a second answer to a question nobody asks.
             del error
 
         self.writer = HistoryWriter(db_path, on_fatal=on_fatal)

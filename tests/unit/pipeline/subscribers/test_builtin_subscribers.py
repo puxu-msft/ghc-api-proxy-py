@@ -387,8 +387,7 @@ async def test_the_feature_is_off_until_someone_turns_it_on() -> None:
     with pytest.raises(WebSearchNotExecutable) as refusal:
         await gate_hosted_web_search(context, {"": compile_supported([r"gpt-[5-9]\.\d+.*"])})
 
-    # The two reasons a search does not run must stay distinguishable: an operator reading this has
-    # to know whether to turn the feature on or to add a pattern, and the default being off makes
+    # The two reasons a search does not run must stay distinguishable: an operator reading this has to know whether to turn the feature on or to add a pattern, and the default being off makes
     # "nobody turned it on" the far likelier of the two.
     assert refusal.value.code == "server_tool_disabled"
 
@@ -435,8 +434,7 @@ async def test_a_provider_does_not_inherit_another_provider_s_permission() -> No
     with pytest.raises(WebSearchNotExecutable):
         await gate_hosted_web_search(context, supported, enabled=True)
 
-    # And the provider that did list it is unaffected — otherwise this would pass by refusing
-    # everything, which is not the same thing as scoping.
+    # And the provider that did list it is unaffected — otherwise this would pass by refusing everything, which is not the same thing as scoping.
     context.provider_name = "b"
     await gate_hosted_web_search(context, supported, enabled=True)
 

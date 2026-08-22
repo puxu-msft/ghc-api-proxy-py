@@ -2,8 +2,7 @@
 
 Every other test calls `receive_signal` directly, which bypasses handler installation entirely.
 Only a real process can show that SIGTERM and SIGUSR2 reach the ladder at all.
-The same goes for the pidfile naming something a successor can find, and for two processes really
-overlapping on one port.
+The same goes for the pidfile naming something a successor can find, and for two processes really overlapping on one port.
 
 The child builds a minimal app rather than the production one.
 What is under test is the lifecycle, not the proxy's dependencies.

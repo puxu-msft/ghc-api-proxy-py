@@ -25,8 +25,7 @@ from typing import Any, cast
 
 import orjson
 
-# The documented error code for "an internal error occurred", which is what a proxy that cannot
-# reach the tool at all amounts to from the client's side.
+# The documented error code for "an internal error occurred", which is what a proxy that cannot reach the tool at all amounts to from the client's side.
 ERROR_CODE = "unavailable"
 
 _MAX_QUERY = 400
@@ -87,8 +86,7 @@ def failed_search_blocks(query: str, *, call_id: str) -> list[dict[str, Any]]:
         {
             "type": "web_search_tool_result",
             "tool_use_id": call_id,
-            # A single object, not a list. The documented shape for an error, and the same
-            # discriminator `subscribers/server_tools.py` reads when flattening one of these later.
+            # A single object, not a list. The documented shape for an error, and the same discriminator `subscribers/server_tools.py` reads when flattening one of these later.
             "content": {"type": "web_search_tool_result_error", "error_code": ERROR_CODE},
         },
     ]
@@ -102,8 +100,7 @@ def failed_search_body(query: str, *, message_id: str, model: str, call_id: str)
         "role": "assistant",
         "model": model,
         "content": failed_search_blocks(query, call_id=call_id),
-        # `end_turn`, not `tool_use`: there is nothing here for the client to execute. The search
-        # was the model's host's to run, and it is already over.
+        # `end_turn`, not `tool_use`: there is nothing here for the client to execute. The search was the model's host's to run, and it is already over.
         "stop_reason": "end_turn",
         "stop_sequence": None,
         "usage": {"input_tokens": 0, "output_tokens": 0},

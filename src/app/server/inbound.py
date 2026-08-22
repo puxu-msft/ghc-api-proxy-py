@@ -66,8 +66,7 @@ def build_context(
     A missing or non-string model is rejected here rather than downstream.
     Routing cannot fail closed on a capability if it never learned which model to ask about.
 
-    Headers are filtered here rather than at the send site so that nothing downstream ever holds
-    the client's credentials.
+    Headers are filtered here rather than at the send site so that nothing downstream ever holds the client's credentials.
     """
     model = payload.get("model")
     if not isinstance(model, str) or not model.strip():
