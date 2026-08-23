@@ -57,10 +57,10 @@
 
 | 端点 | 旧链位置 | 初步判断（待逐个核实后定） |
 |---|---|---|
-| Azure `POST /openai/deployments/…` | `routes/azure.py` | 已追认，倾向迁移 |
-| Gemini `POST /v1beta/models/…` | `routes/gemini.py` | 已追认，倾向迁移 |
+| Azure `POST /openai/deployments/…` | `routes/azure.py` | **2026-08-23 已迁移**，见 [status.md](status.md) 与 [deferred.md](deferred.md) |
+| Gemini `POST /v1beta/models/…` | `routes/gemini.py` | **2026-08-23 路由入口已迁移**，wire 翻译按用户裁决「留空」，三条路径答 501；未闭合项在 [deferred.md](deferred.md) §D-A、§D-B |
 | 历史 `/history/api/*`、`/history/ws` | `routes/history.py`、`protocol_history.py` | 已追认，倾向迁移；`app.history` 整包目前生产不可达，需一并判断 |
-| 状态与配置 `/api/status`、`/api/config` | `routes/management.py` | 已追认，倾向迁移 |
+| 状态与配置 `/api/status`、`/api/config` | `routes/management.py` | **2026-08-23 已由同伴 `7525f76` 迁移** |
 | 审批、Responses WS、Tokenization | 各处 | **已裁决暂不支持**，不迁移；但按项目记忆「暂不支持不是删代码授权」，删旧链时要单独确认这几处的处置 |
 
 ⚠️ **`/api/status`、`/api/config`（已追认）与两个 tokenization 端点（已裁决暂不支持）同在 `src/app/routes/management.py`**——这个文件不能整体搬也不能整体删。
