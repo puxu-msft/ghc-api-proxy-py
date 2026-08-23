@@ -2,7 +2,7 @@
 
 **日期**：2026-08-22。**基线**：主仓 `main` = `1f29d0a`（数字快照时点），`.dev` = `58663b5` 之后。
 **第二版**：初版经两轮独立评审（事实核查 0 blocker／3 major，设计评审 2 blocker／6 major）后重写。逐条处置见 [处置表](reports/260822-layout-proposal-disposition.md)。**初版第 5 节六个落点里两个是错的**，本版已改。
-**性质**：分析与提案，不是裁决。第 9 节列出**三个**必须由用户裁决的分叉。
+**性质**：分析与提案，不是裁决，且是**提案时点的记录**——现在实际做成什么样，读 [status.md](status.md)。第 9 节列出**三个**必须由用户裁决的分叉。
 
 **支撑报告**（原始记录，不回填）：[链路可达性](reports/260822-server-layout-chain-map.md)、[既有结论与权威分级](reports/260822-server-layout-prior-art.md)、[事实核查](reports/260822-review-layout-proposal-facts.md)、[设计评审](reports/260822-review-layout-proposal-design.md)、[架构约束补读](reports/260822-architecture-constraints-readthrough.md)
 
@@ -292,7 +292,7 @@ app/
 
 ## 11. 能力边界
 
-- **未执行任何搬迁**，全文为静态分析与设计。
+- **本文写作时未执行任何搬迁**，全文为静态分析与设计。六步此后全部落地——**当前实施状态见 [status.md](status.md)**，本节其余各条仍是对写作当时的限定。
 - 可达性结论基于静态 import 闭包，**看不见**动态 import（全仓唯一一处在 `hooks/loader.py`，只挂旧链）、字符串反射、第三方插件入口。所有可达性探针均先做过正样本对照。
 - 行数与职责划分来自 AST 与人工阅读，未做调用图或覆盖率验证。
 - `architecture.md` 679 行、`spec.md` 全文由补读者分段读完，我本人只读了裁决相关区段；5.3 与 9.3 的结论**依赖补读报告**，其原文与行号见该报告。
