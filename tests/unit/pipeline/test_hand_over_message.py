@@ -10,6 +10,8 @@ Most cases here are shapes the investigation measured (`.dev/docs/upstream/retry
 They pin the distinctions a reader has to be able to draw, not the exact sentence: an assertion on the whole string would go red every time the wording is improved, which is the opposite of what this field needs.
 """
 
+import asyncio
+
 import h2.errors
 import h2.events
 import httpcore2
@@ -21,6 +23,8 @@ from h2.exceptions import StreamClosedError
 from openai import APIConnectionError
 
 from app.pipeline.hand_over import interruption_message
+from app.streaming.deadline import StreamDeadlineError
+from app.streaming.idle_timeout import StreamIdleTimeoutError
 
 REQUEST_ID = "a1b2c3d4"
 
@@ -169,6 +173,37 @@ def test_an_explicit_cause_is_followed_even_when_it_is_falsy() -> None:
     text = message(outer)
     assert "the actual cause" in text
     assert "incidental context" not in text
+
+
+@pytest.mark.parametrize(
+    ("error_type", "own_message"),
+    [
+        (StreamDeadlineError, "attempt exceeded its deadline"),
+        (StreamIdleTimeoutError, "No stream item received for 300s"),
+    ],
+)
+def test_a_guard_that_named_itself_does_not_get_recast_as_a_cancellation(
+    error_type: type[Exception], own_message: str
+) -> None:
+    """Both deadline guards arrive wrapped in `TimeoutError() -> CancelledError()`.
+
+    That is how `asyncio.timeout` is built, not something that happened to this turn (`260823-handover-error-shapes.md` §2.2(a)/(b), measured). The outer link has already said which guard fired; appending `CancelledError` invites reading a named timeout as a cancellation, which is a different failure with a different owner.
+    """
+    try:
+        try:
+            try:
+                raise asyncio.CancelledError
+            except asyncio.CancelledError as cancelled:
+                raise TimeoutError from cancelled
+        except TimeoutError as timed_out:
+            raise error_type(own_message) from timed_out
+    except Exception as guard:
+        text = message(guard)
+    assert own_message in text
+    # Fully qualified, because `StreamIdleTimeoutError` contains `TimeoutError` as a substring and a bare name would pass on its own class.
+    assert "asyncio.exceptions.CancelledError" not in text
+    assert "builtins.TimeoutError" not in text
+    assert "; caused by" not in text
 
 
 def test_a_chain_cut_short_says_it_was_cut() -> None:

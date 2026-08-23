@@ -134,23 +134,34 @@ def describe_error(error: BaseException) -> str:
     - **A guarantee of content.** A real connection reset arrives as `httpx2.ReadError` whose `str()` is empty, and a bare `h2.ProtocolError()` is empty too — an empty `message` is the one value that tells a reader nothing at all.
     - **The chain.** The link that carries the reason is routinely not the one that was caught: for that same reset it is the fourth.
 
-    A link earns its place by contributing either text or a class name not already shown. Both halves are load-bearing. Without the text half, every transport tear prints the same event `repr` twice, because httpx re-raises httpcore's message unchanged. Without the class-name half, `RuntimeError('permission denied') from PermissionError('permission denied')` comes out as the `RuntimeError` alone, dropping the one word that says what kind of failure it was — an independent review built that counterexample against an earlier version of this function that kept only new text.
+    A link earns its place by saying something not already said. Three cases, and each was decided by a failure the other two do not cover:
+
+    - **Fresh text** → shown with its type. The ordinary case.
+    - **Text already shown, by a different class** → the type alone. Otherwise `RuntimeError('permission denied') from PermissionError('permission denied')` comes out as the `RuntimeError` and loses the one word saying what kind of failure it was, which an independent review built as a counterexample. When an h2 event is mapped through httpcore into httpx the text repeats too, but there the class name repeats with it, so that link is dropped entirely.
+    - **No text at all** → the type, but only while nothing shown so far has carried any. The two deadline guards are wrapped in `TimeoutError() -> CancelledError()`, which is how `asyncio.timeout` is built rather than anything that happened to the turn; printing it invites reading a timeout that already named itself as a cancellation. Where the outer links are silent — a real connection reset opens with two — the inner types are all there is until the `OSError` at the bottom.
+
+    Freshness of a class is judged on `__qualname__`, not on the full dotted path: `httpx2.ReadError` wrapping `httpcore2.ReadError` is one failure described twice by two libraries, and that is the case worth collapsing. Two same-named exceptions from genuinely unrelated modules would collapse too. That is deliberate, and it has only ever been produced by construction.
     """
     links, truncated = _chain(error)
     rendered: list[str] = []
     seen_text: set[str] = set()
     seen_class: set[str] = set()
+    carried_text = False
     for link in links:
         text = _link_text(link)
         name = f"{type(link).__module__}.{type(link).__qualname__}"
         fresh_class = type(link).__qualname__ not in seen_class
         fresh_text = bool(text) and text not in seen_text
-        if not fresh_class and not fresh_text:
+        if fresh_text:
+            rendered.append(f"{name}: {text}")
+            carried_text = True
+        elif fresh_class and (text or not carried_text):
+            rendered.append(name)
+        else:
             continue
         seen_class.add(type(link).__qualname__)
         if text:
             seen_text.add(text)
-        rendered.append(f"{name}: {text}" if fresh_text else name)
     described = "; caused by ".join(rendered)
     if truncated:
         # Named rather than left to trail off, for the same reason a cut message says how much it lost: a chain that ended and a chain that was cut are otherwise the same string.

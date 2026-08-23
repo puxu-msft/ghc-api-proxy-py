@@ -13,6 +13,9 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
+import h2.errors
+import h2.events
+import httpcore2
 import httpx2
 import orjson
 import pytest
@@ -3108,7 +3111,14 @@ def test_an_interrupted_turn_is_handed_back_to_the_client_as_a_tool_call(
 
     async def torn_body() -> AsyncIterator[bytes]:
         yield sse_upstream("first").partition(b"event: message_delta")[0]
-        raise httpx2.RemoteProtocolError("peer closed the connection")
+        # Assembled the way the installed stack assembles a real tear: httpcore raises `RemoteProtocolError(event)` holding the h2 event object, and httpx re-raises its text `from` that. This fixture used to raise a hand-built exception with a message and no cause, and a review showed that a formatter which never walked the chain — no cause, no HTTP/2 gloss, no request id — satisfied every assertion below.
+        event = h2.events.ConnectionTerminated()
+        event.error_code = h2.errors.ErrorCodes.NO_ERROR
+        event.last_stream_id = 2147483647
+        try:
+            raise httpcore2.RemoteProtocolError(event)
+        except httpcore2.RemoteProtocolError as from_core:
+            raise httpx2.RemoteProtocolError(str(from_core)) from from_core
 
     client, _ = make_client(
         lambda _: httpx2.Response(
@@ -3124,18 +3134,23 @@ def test_an_interrupted_turn_is_handed_back_to_the_client_as_a_tool_call(
     assert handed["id"].startswith("toolu_")
     assert handed["input"]["category"] == "network"
     assert handed["input"]["num_messages"] == 0
-    # Through the real wiring, not just the formatter: `interruption_message` has its own unit tests, and they all stayed green when a review cut this call site back to `str(error)`. What is pinned here is that the block the client actually receives was built by it — the type name and the request id are both things the old wiring could not produce.
+    # The client never declared the tool, which is said out loud rather than enforced.
+    warned = [record.getMessage() for record in caplog.records if "auto_retry_tool_not_declared" in record.getMessage()]
+    assert warned
+    # Through the real wiring, not just the formatter. `interruption_message` has its own unit tests and they all stayed green through two separate cuts of this call site — first back to `str(error)`, then to a hand-rolled type-and-text string. What is pinned here is that the block the client receives carries the three things only the real formatter produces: the type it arrived as, the HTTP/2 error code decoded off the event one link down, and a request id that matches the one the proxy logged for this same turn.
     message = cast(str, handed["input"]["message"])
     assert "httpx2.RemoteProtocolError" in message
-    assert "peer closed the connection" in message
-    assert "attempt 1" in message
+    assert "NO_ERROR" in message
+    carried = re.search(r"\[request ([0-9a-f-]{36}), attempt (\d+)\]", message)
+    assert carried is not None
+    # Cross-checked against a value this side produced independently, so a literal cannot satisfy it.
+    assert carried.group(1) in warned[0]
+    assert carried.group(2) == "1"
     # A whole message, ending the way a turn that asks for a tool ends.
     assert b'"stop_reason":"tool_use"' in delivered
     assert b"message_stop" in delivered
     # And what the client kept is still there: the hand-over adds an ending, it does not replace one.
     assert b'"text":"first"' in delivered
-    # The client never declared the tool, which is said out loud rather than enforced.
-    assert any("auto_retry_tool_not_declared" in record.getMessage() for record in caplog.records)
 
 
 def test_a_draining_process_does_not_replay_a_stream_the_client_never_saw() -> None:
