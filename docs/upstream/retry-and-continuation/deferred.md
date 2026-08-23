@@ -324,6 +324,26 @@ if replay is None or reason is None:
 
 **未处置，需裁决**：归档／删除，还是写出保留它们的外部契约。本次不擅自动手（`never-delete-implemented-functionality-unsolicited`），也不因为「顺手」就扩大上一次裁决的范围。
 
+### 22 之六. 本侧的 `_counted_upstream` bug 仍被标成上游
+
+反转后的判据正向识别上游：`_UpstreamSource` 包住交给 `stream_delivery` 的字节迭代器，`torn is upstream.tear` 即上游。**但那个迭代器是调用方给的，生产里它不是 raw response**——`inference.py` 交过来的是 `with_client_deadline_at(_counted_upstream(with_deadline_at(with_idle_timeout(response.aiter_bytes()))))`。其中两个 guard 存在的意义就是代表上游状况（超时、空闲），归到上游侧是对的；而 `_counted_upstream` 是本侧记账（更新时间、`RequestTrace`、`ActiveRequestRegistry`），它的 bug 被标成上游。
+
+评审用**真实的 `_counted_upstream`** 让 `active_requests.add_bytes` 在第 4 个 chunk 抛错（前三个已凑成一个完整块，交接门可达），实测：本侧计数器的 bug 被交接成 upstream，调用方既拿不到原异常、也不留 proxy failure 的痕迹。反方向做了正样本对照：raw source 抛的异常穿过真实 `_counted_upstream` 后，交接拿到的仍是同一个对象。
+
+**这不是本次引入的回归。** 反转之前判据是 `ours = isinstance(torn, DeliveryError) or torn is raised_here`，`_counted_upstream` 的 bug 两者都不是，同样落 `not ours`。反转改的是标记的方向，没有改这条接缝的结局。本次真正引入的是**注释里的过度断言**（说上游产生的每个字节从这个迭代器进来、别无他途），已收窄。
+
+**修法需裁决，因为它改 `stream_delivery` 的签名**：正确做法是让调用方指出 raw source（在 `inference.py` 里先包 `_UpstreamSource(response.aiter_bytes())`，再套 guard，把 marker 一并传进来），而不是由 `stream_delivery` 猜它拿到的是什么。代价是两个 guard 的异常此时落在 marker 之外，需要显式认定它们代表上游状况——那会引入一张小类型表，而反转的初衷正是消灭类型表。**两种取舍都要用户点头**，本次不擅自决定。
+
+### 22 之七. 裸 `H2Error` 里有一小撮不是对端造成的
+
+`_CONNECTION_ERRORS` 映射整个 `h2.exceptions` 族，依据写在 `errors.py` 那段注释里的两个条件。**第二条曾被我写成全称，评审推翻了**：httpcore 的 body 路径除了 `receive_data`，还对每个 `DataReceived` 调 `acknowledge_received_data`（`httpcore2/_async/http2.py:286-300`），它同样不在任何 converter 里。评审用真实的 `_receive_response_body` 加一份故意不一致的 event ledger，造出了裸的本地 `NoSuchStreamError`，当前 normalizer 把它写成 `network` 重试。
+
+残留**是什么**比它多大更要紧：那是**依赖自己的记账不变量被破坏**，不是本仓的代码。把它当网络故障重试，代价是花掉重试预算然后浮出来；这与模块 docstring 真正防的那件事（把**我们自己的** bug 装成可重试，于是永远不浮出来）不是同一种失败。注释已按这个说法收窄。
+
+`tests/unit/test_module_boundaries.py::test_no_live_module_drives_h2_itself` 守的是第一条件（本仓不驱动 h2）。它最初写成五个模块名的黑名单，评审用 `from h2 import connection` 走了过去；现已改为白名单，四种拼法（`from h2 import connection`、`import h2.settings`、`import h2 as _h`、`from h2.utilities import ...`）实测全部拦住。**但它证明不了 httpcore body 里每一次 h2 调用的归因**——不 import h2、经 httpcore 的 `_h2_state` 调用，import 检查看不见。
+
+**未处置**：要么接受这个残留并保留当前说法，要么把归因搬到能看见来源的边界（与 §22之六 是同一类修法，可一并裁决）。
+
 ### 22 之四. 一条状态断言在写下时就已经过期
 
 不是待办，是登记形态。`README.md` 那句「`internal` 结构上不可达」的两个前提，第二个在**它被写下的前一晚**就被拆掉了（`78be0d4` 18:57 → `a8862e6` 次日 06:26）。所以这不是常见的「代码改了文档没跟上」——**文档是照着一份自己已经过期的心智模型写的**，而它读起来与一条刚核实过的结论毫无差别。
