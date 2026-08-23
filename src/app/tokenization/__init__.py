@@ -1,7 +1,6 @@
 from app.tokenization.calibration import CalibrationEngine
 from app.tokenization.estimators import (
     estimate_anthropic_input,
-    estimate_gemini_input,
     preload_tokenizer,
 )
 from app.tokenization.limits import PromptLimitRegistry, parse_prompt_limit_error
@@ -14,7 +13,6 @@ __all__ = [
     "PromptLimitRegistry",
     "TokenizationStateStore",
     "estimate_anthropic_input",
-    "estimate_gemini_input",
     "parse_prompt_limit_error",
     "preload_tokenizer",
 ]

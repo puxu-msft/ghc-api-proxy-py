@@ -5,7 +5,6 @@ import tiktoken
 from anyio.to_thread import run_sync
 
 from app.models.anthropic import ContentBlock, MessagesRequest
-from app.models.gemini import CountTokensRequest, GenerateContentRequest
 from app.wire_json import dumps
 
 _TOKENIZER_NAME = "o200k_base"
@@ -65,50 +64,6 @@ def estimate_anthropic_input(request: MessagesRequest) -> int:
         )
         total += 4
     return max(total, 1)
-
-
-def _gemini_request(request: CountTokensRequest | GenerateContentRequest) -> GenerateContentRequest:
-    if isinstance(request, GenerateContentRequest):
-        return request
-    if request.generate_content_request is not None:
-        return request.generate_content_request
-    return GenerateContentRequest(contents=request.contents or [])
-
-
-def estimate_gemini_input(request: CountTokensRequest | GenerateContentRequest) -> int:
-    payload = _gemini_request(request)
-    values: list[str] = []
-    if payload.system_instruction is not None:
-        values.extend(_gemini_part_values(payload.system_instruction.parts))
-    for content in payload.contents:
-        if content.role:
-            values.append(content.role)
-        values.extend(_gemini_part_values(content.parts))
-    if payload.tools:
-        values.append(
-            dumps(
-                [
-                    tool.model_dump(mode="json", by_alias=True, exclude_none=True)
-                    for tool in payload.tools
-                ]
-            ).decode()
-        )
-    encoding = tiktoken.get_encoding(_TOKENIZER_NAME)
-    return max(len(encoding.encode("\n".join(values))), 1)
-
-
-def _gemini_part_values(parts: list[Any]) -> list[str]:
-    values: list[str] = []
-    for part in parts:
-        if part.text is not None:
-            values.append(part.text)
-        elif part.function_call is not None:
-            values.append(dumps(part.function_call).decode())
-        elif part.function_response is not None:
-            values.append(dumps(part.function_response).decode())
-        elif part.inline_data is not None:
-            values.append(dumps(part.inline_data).decode())
-    return values
 
 
 def _responses_item_text(item: Mapping[str, Any]) -> str:

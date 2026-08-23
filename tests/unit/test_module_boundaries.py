@@ -43,6 +43,9 @@ _ARCHIVED = (
     "app.shutdown",
     "app.server.app_factory",
     "app.pipeline.executor",
+    # Archived 2026-08-23, and the two submodules here are why this tuple holds names rather than top-level packages: `app.protocols` and `app.models` are both live, and only the Gemini modules under them went. A name that resolves again means one came back.
+    "app.protocols.gemini",
+    "app.models.gemini",
 )
 
 _RESOLVES = (
