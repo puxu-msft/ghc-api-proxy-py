@@ -1,8 +1,8 @@
 """What the hand-over tells the client a turn ended of.
 
-The field had one assertion before this file — `assert handed["input"]["message"]` at `tests/int/test_pipeline_app.py:3127`, a truthiness check whose fixture raises a hand-built exception that carries a message. Nothing had discriminating power over the *content*, which is how the field stayed at `str(error)` long enough for a user to read one in a transcript and ask for better.
+The field had one assertion before this file — a bare `assert handed["input"]["message"]` in `test_an_interrupted_turn_is_handed_back_to_the_client_as_a_tool_call`, satisfied by a fixture that raised a hand-built exception carrying a message. Nothing had discriminating power over the *content*, which is how the field stayed at `str(error)` long enough for a user to read one in a transcript and ask for better.
 
-Most cases here are shapes the investigation measured (`.dev/docs/upstream/retry-and-continuation/reports/260823-handover-error-shapes.md`); the two that are not say so in their own docstrings.
+Some cases here are shapes the investigation measured (`.dev/docs/upstream/retry-and-continuation/reports/260823-handover-error-shapes.md`) and some are constructed — the constructed ones exist because a review built them as counterexamples, and each says so where it stands. Do not read a case in this file as evidence that its shape reaches production; the report is what answers that.
 
 - The two h2 `repr`s are the only two the MCP server's journal held when it was read on 2026-08-23 (`~/.claude/plugins/data/ghc-api-proxy-helper-my-marketplace/auto-retry.jsonl`, 4 records: three `ConnectionTerminated`, one `StreamReset`). That is a snapshot of one file, not a frequency.
 - The chain is built the way the installed stack builds it: httpcore raises `RemoteProtocolError(event)` with the h2 event object itself (`httpcore2/_async/http2.py:314`), and httpx re-raises `mapped_exc(str(exc)) from exc` (`httpx2/_transports/default.py:113-114`), so the object survives one link down while only its text reaches the top.
@@ -65,7 +65,10 @@ def stream_reset() -> httpx2.RemoteProtocolError:
 
 
 def test_goaway_says_what_the_error_code_meant() -> None:
-    """The old field ended at `error_code:0`. The word that number stands for is on the event, just not in its `repr`."""
+    """The old field showed the error code as the number `0` and never as the name `NO_ERROR`.
+
+    The name is on the event object the whole time; `IntEnum.__str__` is what reduces it to a digit in the `repr`.
+    """
     text = message(goaway())
     assert "NO_ERROR" in text
     assert "GOAWAY" in text
@@ -91,6 +94,10 @@ def test_stream_reset_is_distinguishable_from_a_graceful_shutdown() -> None:
 
 
 def test_a_reset_this_proxy_sent_is_not_reported_as_upstreams() -> None:
+    """The other value of `remote_reset`, constructed — the journal has only ever held the remote one.
+
+    What is asserted is the direction of the frame and nothing beyond it. h2 raises `remote_reset=False` when it terminates a stream itself over a protocol or flow-control error the peer provoked, so this does not report whose decision it was.
+    """
     event = h2.events.StreamReset(stream_id=7)
     event.error_code = h2.errors.ErrorCodes.CANCEL
     event.remote_reset = False
