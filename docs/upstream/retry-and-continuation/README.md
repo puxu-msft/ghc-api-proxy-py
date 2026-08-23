@@ -51,7 +51,7 @@
 
 MCP server 在另一个仓（插件 `ghc-api-proxy-helper`），本会话够不到那位同伴。**本节是本仓发出方的一手契约，从代码直读，是两侧对齐的依据**——发出方的实际字节即权威，`decisions.md` 第四节第 1 条的「待对齐」在这里给出取值。
 
-合成点 `src/app/server/pipeline_app.py` 的 `_hand_back`，发出的块：
+合成点 `src/app/pipeline/hand_over.py` 的 `hand_back_block`（2026-08-22 由 `b973ed0` 从 `src/app/server/pipeline_app.py` 移出），发出的块：
 
 ```json
 {
@@ -62,21 +62,49 @@ MCP server 在另一个仓（插件 `ghc-api-proxy-helper`），本会话够不�
 }
 ```
 
-`name` 的默认值是 `mcp__plugin_ghc-api-proxy-helper_auto-retry__turn_interrupted`（`src/app/config/schema.py:189-191`）。**这个字符串对接收端是载重的**：Claude Code 对插件提供的 MCP server 命名成 `mcp__plugin_<插件名>_<server 名>__<工具名>`，所以那一侧必须把插件叫 `ghc-api-proxy-helper`、server 叫 `auto-retry`、工具叫 `turn_interrupted`，三段全对才匹配得上。三段里任一段不同，线上表现是**每次交接都走「工具未声明」那条路**——不报错、不拦截、块照发，客户端回一个 `No such tool available`，对话继续但续写机制静默失效。
+`name` 的默认值是 `mcp__plugin_ghc-api-proxy-helper_auto-retry__turn_interrupted`（`src/app/config/schema.py:157-159`）。**这个字符串对接收端是载重的**：Claude Code 对插件提供的 MCP server 命名成 `mcp__plugin_<插件名>_<server 名>__<工具名>`，所以那一侧必须把插件叫 `ghc-api-proxy-helper`、server 叫 `auto-retry`、工具叫 `turn_interrupted`，三段全对才匹配得上。三段里任一段不同，线上表现是**每次交接都走「工具未声明」那条路**——不报错、不拦截、块照发，客户端回一个 `No such tool available`，对话继续但续写机制静默失效。
 
 | 字段 | 取值 |
 |---|---|
-| `num_messages` | 客户端入站 body 的 `messages` 长度（`_client_message_count(inbound_payload)`）。**不是**上游请求的长度——Responses 腿上一条 Anthropic 消息会变成若干 item。非 list 时（含缺键）为 `0` |
-| `category` | 上游把这一轮截短、并非错误时：**就是那个 `stop_reason`**，默认配置下唯一可能的值是 **`max_tokens`**。是错误时：`network` / `upstream` / `auth` **三者之一** |
-| `message` | 非错误时是那个 `stop_reason`（与 `category` 同值）；错误时是 `str(error)` |
+| `num_messages` | 客户端入站 body 的 `messages` 长度（`client_message_count(inbound_payload)`）。**不是**上游请求的长度——Responses 腿上一条 Anthropic 消息会变成若干 item。非 list 时（含缺键）为 `0` |
+| `category` | 上游把这一轮截短、并非错误时：**就是那个 `stop_reason`**，默认配置下唯一可能的值是 **`max_tokens`**。是错误时：`network` / `upstream` / `auth` **三者之一**，外加结构上今天不可达的 `internal` |
+| `message` | **一句代理合成的诊断，不是异常原文**（2026-08-23 起，提交 `aac348e`）。格式与取值见下 |
+
+### `message` 的格式（2026-08-23 起）
+
+改之前它是 `str(error)`（非错误时是 `stop_reason`，与 `category` 逐字同值）。**那个值在真实流量里读不出东西**：MCP server 日志当时积累的 4 条记录全部是 h2 事件的裸 `repr`，其中 3 条 `error_code:0`、1 条 `error_code:8`，而区分二者的那个词是一个 `IntEnum`，`str()` 打出来是数字。同一轮调查还测出另外三种更糟的形态（`.dev/docs/upstream/retry-and-continuation/reports/260823-handover-error-shapes.md`）：真实连接重置的 `httpx2.ReadError` 的 `str()` **是空串**，裸 `h2.ProtocolError()` 也是空串，而 `h2.StreamClosedError(3)` 的 `str()` 是裸数字 `'3'`——看着像一条真消息。
+
+现在的形状是 `<对失败的描述> [request <request_id>, attempt <N>]`。错误分支的描述由 `describe_error` 生成：沿 `__cause__`（`__cause__` 缺席且未被 suppress 时退到 `__context__`）自外向内走，每一环写成 `module.QualName: 文本`；**文本与前面某一环重复的丢弃**（httpx 原样转抛 httpcore 的消息，不丢就会把同一个事件 repr 印两遍），**内层无文本的丢弃**，最外层无论有没有文本都保留。链上出现 `h2.events.ConnectionTerminated` / `StreamReset` 对象时（httpcore 是 `RemoteProtocolError(event)`，对象比文本多活一环），额外附一段括注，`error_code` 读事件自己的枚举而不是本仓维护的表。
+
+实测输出（每一种都对应报告里判定为可达的形态）：
+
+| 触发 | `message` |
+|---|---|
+| h2 GOAWAY（日志里 3 条） | `httpx2.RemoteProtocolError: <ConnectionTerminated error_code:0, last_stream_id:2147483647, additional_data:None> (HTTP/2 GOAWAY from upstream, error_code=NO_ERROR) [request a1b2c3d4, attempt 1]` |
+| h2 RST_STREAM（日志里 1 条） | `httpx2.RemoteProtocolError: <StreamReset stream_id:1011, error_code:8, remote_reset:True> (HTTP/2 RST_STREAM from upstream on stream 1011, error_code=CANCEL) [request a1b2c3d4, attempt 1]` |
+| 真实连接重置 | `httpx2.ReadError; caused by builtins.ConnectionResetError: [Errno 104] Connection reset by peer [request a1b2c3d4, attempt 1]` |
+| HTTP/1.1 提前关闭 | `httpx2.RemoteProtocolError: peer closed connection without sending complete message body (received 19 bytes, expected 1000) [request a1b2c3d4, attempt 1]` |
+| attempt 时限 | `app.streaming.deadline.StreamDeadlineError: attempt exceeded its deadline [request a1b2c3d4, attempt 1]` |
+| 空闲超时 | `app.streaming.idle_timeout.StreamIdleTimeoutError: No stream item received for 300s [request a1b2c3d4, attempt 1]` |
+| 裸 `h2.ProtocolError` | `h2.exceptions.ProtocolError [request a1b2c3d4, attempt 1]` |
+| `h2.StreamClosedError(3)` | `h2.exceptions.StreamClosedError: stream 3 [request a1b2c3d4, attempt 1]` |
+| `max_tokens` 交接（非错误） | `upstream ended the turn before it was finished: stop_reason=max_tokens [request a1b2c3d4, attempt 1]` |
+
+**给接收端的三点**：
+
+- **`message` 现在恒为非空**。改之前它可以是空串，那是接收端最难处理的取值。
+- **方括号里那两项是代理侧的身份，不是上游说的话。** `request_id` 是本仓请求追踪的主键——本仓的日志按它记着模型、字节数与上游连接标识（`upstream_conn`），而 MCP 日志此前没有任何字段能连回来。**刻意只带这把钥匙、不复制它指向的事实**，免得两处各存一份漂移。`attempt` 是例外，因为它单独改变这条线的读法，而客户端那侧根本看不见它（那边的打转判据只有 `num_messages`）。
+- **单行、有长度上限。** 每一环文本超过 240 字符时截断并写明还剩多少（`… (+N more chars)`），链最多走 6 环。
+
+对应的插件侧工具描述（`~/.claude/my/ghc-api-proxy-helper/src/auto_retry/server.py`）原先写的是「上游错误消息原文，verbatim」，与上面这个形状已经不符，2026-08-23 一并改掉。
 
 **`num_messages` 该怎么读（本仓建议，仍待对齐）**：按「**同一数值重复出现**」判无进展，**不要**按「数值有没有增长」判。每次交接后客户端会 +2（一条 assistant 轮次 + 一条 tool result），但**并行子智能体与主会话共享同一个 MCP server 进程，调用会交错**——A 会话的 12 后面可能跟着 B 会话的 6，按「有没有增长」判会把 B 的正常调用误判成无进展而中止，反过来 A 的重复 12 也可能被 B 的数值掩盖而漏判。见 `decisions.md` 第四节第 3 条，那是本节写下时仍打开的待对齐项。
 
 三条会绊到人的：
 
 - **`category` 的错误取值经过重试分类器，不是对异常原地分类。** 一次传输撕裂原地分类是 `internal`（它不是 `OSError`），而重试路径叫它 `network`——走同一个映射是为了让两边对同一个事件说同一个词。
-- **`internal` 今天发不出来，但接收端仍应兜住它。** `_CATEGORY_FOR_REASON`（`pipeline_app.py:372-376`）确实有一个落 `internal` 的默认分支，但 `RetryReason` 只有三个成员且三个全在表里，而 `stream.py:325-327` 保证「带 error 走到合成」之前 `reason` 必非 `None`——所以那一格结构上不可达，**不要因为它出现在这张表里就以为线上见过**。它是防御性的：将来谁给 `RetryReason` 加了成员却忘了改表，才会真的发出 `internal`。
-- **`max_tokens` 是 Anthropic 的拼法，不会出现 `max_output_tokens`；而且把配置改成 `max_output_tokens` 也不会生效。** 上游 Responses 说的是后者，两条路径都在**门之前**就归一了（`src/app/pipeline/delivery/formats/openai_responses.py:513-515`、`src/app/pipeline/translation_driver/responses.py:125-126`），所以那个原始拼法压根活不到比较的那一步。异源评审的一手实测（含证伪对照：把 `hand_over_stop_reasons` 配成 `{"max_output_tokens"}`，合成一次都没触发）见 `reports/260822-review-mcp-contract-and-deadline-order.md` F6/F11。
+- **`internal` 今天发不出来，但接收端仍应兜住它。** `CATEGORY_FOR_REASON`（`hand_over.py:21-25`）确实有一个落 `internal` 的默认分支，但 `RetryReason` 只有三个成员且三个全在表里，而 `stream.py` 保证「带 error 走到合成」之前 `reason` 必非 `None`——所以那一格结构上不可达，**不要因为它出现在这张表里就以为线上见过**。它是防御性的：将来谁给 `RetryReason` 加了成员却忘了改表，才会真的发出 `internal`。（**2026-08-23 存疑**：`260823-handover-error-shapes.md` §2.2(g) 认为裸 `h2.exceptions.ProtocolError` 与 framing 层 bug 都能带着 `reason is None` 走到合成，那样 `internal` 就是可达的。两说未对账，以报告的代码直读为准去复核，本条留作待查。）
+- **`max_tokens` 是 Anthropic 的拼法，不会出现 `max_output_tokens`；而且把配置改成 `max_output_tokens` 也不会生效。** 上游 Responses 说的是后者，两条路径都在**门之前**就归一了（`src/app/pipeline/delivery/formats/openai_responses.py`、`src/app/pipeline/translation_driver/responses.py`），所以那个原始拼法压根活不到比较的那一步。异源评审的一手实测（含证伪对照：把 `hand_over_stop_reasons` 配成 `{"max_output_tokens"}`，合成一次都没触发）见 `reports/260822-review-mcp-contract-and-deadline-order.md` F6/F11。
 
 **工具未声明时只告警不拦截**：客户端没在 `tools` 里声明这个名字，本仓打一条 `auto_retry_tool_not_declared` 警告日志，**照发不误**。用户 2026-08-21 裁决，人写权威原文在 `docs/.human-controlled/upstream-retry-and-continuation.md:37`。
 

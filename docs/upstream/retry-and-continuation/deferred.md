@@ -310,6 +310,32 @@ if replay is None or reason is None:
 
 **不在本次范围，登记而非动手**，理由与第 4 条同源：S7 那一格（任意未识别事件）要不吵就得有一份「明知故忽略」的词表，而本项目规矩是上游行为靠录制不靠想象；其余各格的日志级别与措辞该一并定，而不是各修各的。**证据等级：位置与「零痕迹」均为一手实测（21 组反例 + 正样本对照），确凿；排期与级别需裁决。**
 
+### 22. `internal` 到底可不可达 —— 两份文档互相打架
+
+`README.md`「本仓实际发出的 MCP 工具调用」一节长期写着：`category` 落到 `internal` 的那一格**结构上不可达**，理由是 `RetryReason` 只有三个成员且三个全在 `CATEGORY_FOR_REASON` 里，而带 error 走到合成之前 `reason` 必非 `None`。
+
+`reports/260823-handover-error-shapes.md` §2.2(g)/(h) 的代码直读得出相反结论，给出两条可达路径：
+
+- **裸 `h2.exceptions.ProtocolError`。** httpcore2 的 `_read_incoming_data` 只把 `try` 包在 socket 读上，`self._h2_state.receive_data(data)` 在 `try` 之外（`httpcore2/_async/http2.py:401-431`）；httpx2 的 `map_httpcore_exceptions` 对映射表外的异常裸 `raise`（`httpx2/_transports/default.py:111-112`）。于是它以原类型抵达交付层，`normalize_upstream_error` 不认它 → `replay_reason` 给 `None` → 落 `internal`。而 `stream.py:368` 的 `if not ours:` 是无条件的（2026-08-22 修的洞），**不会**因为 `reason is None` 就拦住它。
+- **framing 层的 bug。** `stream.py:279` 的注释自己承认 `from_assembly` 只覆盖 `assembler.push`，`framer.block(...)` 抛出的 `TypeError`/`KeyError` 之类 `ours=False`，同样走交接、同样落 `internal`。
+
+两说的差别在于「`reason` 必非 `None`」这个前提是否还成立——它引的是 2026-08-22 之前的 `stream.py:325-327`，而那个洞已经被修了。**没有实测对账，`README.md` 里那句已标注存疑但未撤销。**
+
+有两件事要办，都还没办：**其一**，实地复核哪一说对（构造一个裸 `h2.ProtocolError` 走完交付链，看发出的 `category`）。**其二**，若确认可达，那么一次**上游协议故障**会被报成 `internal`（代理内部错误），这是分类本身报错了对象——而接收端对 `internal` 该回什么，两侧都还没定。
+
+**不在本次（2026-08-23 `message` 字段增强）范围内**：那次只动 `message`，`category` 一个字节没改。证据等级：代码直读，双方各有出处，**未实测**。
+
+### 23. 代理发 `max_tokens`，插件按 `truncated` 配回复 —— 两侧从未对上
+
+`decisions.md` 第四节第 1 条把这件事记成「待对齐项」，2026-08-22 的补记说「本会话联系不到那位同伴，改为把发出方的一手契约写进 README，那一侧照着对即可」。**2026-08-23 核对，那一侧没有对。**
+
+- 本仓发出的 `category` 就是 `stop_reason` 原值，默认配置下恒为 `"max_tokens"`（`src/app/config/schema.py:155`、`hand_over.py`）。
+- 插件 `~/.claude/my/ghc-api-proxy-helper/src/auto_retry/config.py` 的 `DEFAULT_REPLIES_BY_CATEGORY` 只有一个键，是 `"truncated"`；其 `config.toml` 与 README 里也一路写的 `truncated`。
+
+于是**输出超长的交接拿到的是 `reply.default`**，也就是 `network issue occurred, please continue`，而不是为它准备的 `the previous response hit the output token limit, please continue from where it stopped`。行为上不致命（模型照样会继续），但发出的是一句与实情不符的指令——它说的是网络故障，实际是写满了。
+
+**这一条不属于 `message` 字段，也不在本仓**：修法要么插件把键改成 `max_tokens`，要么两侧约定一个中立词。**归属与措辞需用户裁决**，本仓单方面改配置只会把不一致换个方向。证据等级：两侧代码直读，确凿。
+
 ## 明确不做
 
 - **发真实请求向上游补证。** 用户 2026-08-21 明确禁止：只查历史，历史没有就保持悬念。调查报告里那条「最低成本补证是发个超长 prompt 触发 400」的建议**不采纳**。
