@@ -1,6 +1,8 @@
 # 复现探针：`app.server` 布局六步的那几个数字
 
-status.md 里写着 106 → 83、247 → 169、77 + 48 这些数，但只写了「实测」。这个目录放的是**实际跑出那些数的脚本原件**，从会话临时目录逐字复制过来，一个字没改。留脚本而弃派生数据（`sets.json`、399K 的 wheel、几份模块集合 JSON）是有意的：脚本三五百字节，能把整个数据集再生成一遍。
+status.md 里写着 106 → 83、247 → 169、77 + 48 这些数，但只写了「实测」。这个目录放的是**实际跑出那些数的脚本原件**，从会话临时目录逐字复制过来，一个字没改。留脚本而弃派生数据（`sets.json`、399K 的 wheel、几份模块集合 JSON）是有意的：脚本三五百字节，而数据是它们的输出。
+
+**但「脚本在就一定能再生成」这句要打个折**，独立评审指出得对：`reach.py`／`count.py`／`importable.py` 在当前树上照跑无碍，**`sets.py` 不行**——它 import 的入口已随第 6 步归档，得先回到 `2248a69^` 的检出（方法见下面它自己那一节）。所以它那八份输出**在当前树上不可再生**，只是复现路径仍然存在且今天仍走得通。
 
 **基线**：脚本产出于 2026-08-22 的六步实施期间。下表「当前复现值」一栏是 2026-08-23 06:35 在主仓 `7525f76`（工作树另有同伴未提交改动）上重跑的结果。
 
@@ -26,9 +28,9 @@ PYTHONPATH=src uv run --no-project python -c "import app; print(app.__file__)"
 
 并且**永远不要用退出码之外的东西判断探针是否跑过**——要么让失败直接冒出来（不写 `else []` 这类兜底），要么先跑一个已知应该非空的正样本，看它是不是真的非空。
 
-## 这套可达性判据被击穿过四次，四次的盲区各不相同
+## 这套判据被击穿过五次，五次的盲区各不相同
 
-第 6 步移动 125 个文件，全部建立在「谁从哪个入口可达」这组数字上。**同一个判据在 2026-08-22 一天之内被四个不同的盲区各击穿一次**，四次都是数字真实、命令 rc=0、结论错。单独看每一次都像偶发，四次放在一起才是这套方法的边界说明——**按 import 图分割一棵树时，图上至少有四类东西不在默认视野里**：
+第 6 步移动 125 个文件，全部建立在「谁从哪个入口可达」这组数字上。**同一个判据在 2026-08-22 一天之内被四个不同的盲区各击穿一次**，四次都是数字真实、命令 rc=0、结论错；第五类是同一天另一位评审在「会不会成环」那张静态图上撞到的。单独看每一次都像偶发，放在一起才是这套方法的边界说明——**按 import 图分割一棵树时，图上至少有五类东西不在默认视野里**：
 
 | # | 盲区 | 怎么发现的 | 后果 |
 |---|---|---|---|
@@ -37,7 +39,22 @@ PYTHONPATH=src uv run --no-project python -c "import app; print(app.__file__)"
 | 3 | **探针看不见入口自身** | `app/__main__.py` 在三分类里显示「两条链都不可达」，而它正是 `python -m app` 的入口 | 这是这套数字**唯一已知会系统性给错**的位置。不能机械按数字搬 |
 | 4 | **图上没有「测试之间的相互 import」这类边** | 归档 49 个测试之后 pytest 收集直接报错：`tests/systemd/test_systemd_pipeline_unit.py` import 了被归档的兄弟模块 `test_systemd_units`（取的是共享夹具 `SYSTEMD_DIR`／`http_request`／`read_unit`） | 取回 1 个文件。全仓只有这一条这样的边，但判据里原本没有这类边 |
 
-还有第五件事不属于「盲区」而属于「守卫失效」，记在这里因为它同源：归档之后，`tests/unit/test_module_boundaries.py` 原本那条「新链不得 import 旧链」**变成了恒真断言**——旧链的名字已经不在 `src/` 里，这条断言从此什么都不证明，而它照样是绿的。改成「这些名字解析不到」（`importlib.util.find_spec` 在全新解释器里返回 `None`）之后才重新有内容。**一条断言的意义会被它所守护的代码的移动悄悄抽空，而测试全绿正是这件事发生时的表现。**
+还有第五类盲区，机制与上面四条不同——**上面四条讲的是「谁可达」这个判据，这一条讲的是「会不会成环」那张静态图本身**（第三轮评审读 subagent 日志时查到，`a656a8f` 的两次运行都在日志里）：
+
+设计评审为判断「新建 `pipeline/delivery/selection.py`、`observability/wire_accounting.py` 会不会造成 import 环」，写了一个 AST import 图做假想模块注入。**第一次只连显式 `import` 边，五个候选全部报「no cycle」，命令正常、退出码 0、格式正确。** 第二次补上两类边之后，结论反转：
+
+| 候选 | 只有显式边 | 补边之后 |
+|---|---|---|
+| `pipeline/delivery/selection.py` | no | **父包再导出时成环**：`composition → translation_driver.registry → pipeline.request → delivery.assembling → delivery.sse_source → delivery → delivery.selection` |
+| `observability/wire_accounting.py` | no | **父包再导出时成环**：`composition → observability.terminal → observability → observability.wire_accounting` |
+
+要补的两类边是：**「import `a.b.c` 会先初始化它的每一级祖先包」**，以及**「该模块是否被父包 `__init__` 再导出」这个开关**。后者把同一个落点从「无环」翻成「硬 ImportError」。这条发现最后成了那次评审的 blocker 之一。
+
+**它不能证明什么**（原报告自己写明，一并带走）：那是**静态推导**，不是一手证据。要变成一手证据得在树里真写一个 `selection.py` 并改 `delivery/__init__.py`，该评审按只读约束没做。
+
+**与 status.md 第 3 步那句「经查无环」的关系**：那句靠的**不是**这张静态图，而是 `handler.py` 溶解**已经落地并跑通全量测试**——真 import 成环会直接 ImportError，跑得起来就是一手证据。**这个区别是这条盲区的实用出口**：静态图适合在动手前筛掉明显的坏落点，**但它报「无环」不足以下结论**；真正的判据是把模块写出来 import 一次。
+
+最后还有一件事既不属于「可达性判据的盲区」也不属于「静态图的盲区」，而是**守卫失效**，记在这里因为它同源：归档之后，`tests/unit/test_module_boundaries.py` 原本那条「新链不得 import 旧链」**变成了恒真断言**——旧链的名字已经不在 `src/` 里，这条断言从此什么都不证明，而它照样是绿的。改成「这些名字解析不到」（`importlib.util.find_spec` 在全新解释器里返回 `None`）之后才重新有内容。**一条断言的意义会被它所守护的代码的移动悄悄抽空，而测试全绿正是这件事发生时的表现。**
 
 ## 逐个探针
 
@@ -60,6 +77,8 @@ PYTHONPATH=src uv run --no-project python probes/reach.py app.core.chain | \
 `app.pipeline.* = 25` 是驳倒「把 `Chain` 搬走它就退化成薄记录」那条评审意见的数：这 25 个依赖来自 `Chain` 的字段类型，搬到哪儿都跟着走。
 
 **它不能证明什么**：这是 import 时的静态可达性，不是运行时实际用到的集合；延迟 import（函数体内的 `import`）它一概看不见。
+
+**计数口径写死在这里，因为它已经造成过一次分歧**：`reach.py` 数的是 `sys.modules` 里 `n.startswith("app.")` 的项，**带点，所以不含裸 `app` 这个顶层包本身**。第三轮评审发现三个 agent 独立测同一件事得出 139 与 140，差的正是这一个；同样的 ±1／±2 分歧也出现在 104/81 与 106/83 那一组（那组差 2，是 `app.core` 与 `app.core.chain`）。**本目录所有数字一律按「`app.` 前缀、不含裸 `app`」口径**，`src/.archived/README.md` 里的 151 与 status.md 里的 83／106／25 都是这个口径。读到别处的 139／140／104／81 时，先问它数没数裸包、以及是在搬迁前还是搬迁后测的。
 
 ### `importable.py` —— 剩下的模块是不是每个都还能 import
 
@@ -84,17 +103,21 @@ cd /tmp/pre-archive && PYTHONPATH=src uv run --no-project python <probes>/sets.p
 
 **它不能证明什么**：两个入口的差集给出的是「旧链独有」，而第 6 步实际用的判据更严——还加了「整个顶层包没有一个模块活链可达」，才把 `context`、`delivery`、`history`、`hooks`、`openai`、`routes` 六个包整体搬走。差集本身不足以支持删整个包。
 
-### `drop_emptied_dirs.py` —— 删掉被搬空的包目录
+### `drop_emptied_dirs.py` + `delete-manifest.json` —— 删掉被搬空的包目录
 
-一次性操作，已执行完毕（那六个目录现在都不存在，脚本会逐个打印 `absent, skipped`）。留下它是因为两点值得复用的写法：
+一次性操作，已执行完毕（那六个目录现在都不存在，脚本会逐个打印 `absent, skipped`）。**两个文件是一对：脚本是执行者，清单是授权书**，分开留任何一个都读不出当时到底删了什么、凭什么删。
+
+留下它们是因为三点值得复用的写法：
 
 - **目标是字面路径、一行一个**，不跑脚本也能读出它会删什么；
-- **删之前 `assert` 拒绝删非空目录**（排除 `__pycache__` 之后仍有文件就中止）。
+- **删之前 `assert` 拒绝删非空目录**（排除 `__pycache__` 之后仍有文件就中止）；
+- **清单里 `allow_unenumerated_targets` 是打开的，而 `note` 字段说明了为什么**——删除护栏读不出被调用的 Python 脚本内容，这个开关是唯一的出路。**但开关关掉的是护栏的检查，不是自己的**：同一份清单仍然把六个目标逐条列明，`preserved` 字段记下「46 个 `.py` 已由 `git mv` 迁走、rename 检测保留历史」与那条 `assert`。一份写成这样的清单，事后可以独立于脚本被审。
 
-保留它的真正理由是它记录了一个反直觉的事实：**把包目录下的 `.py` 全部删光并不等于该包不可 import**。PEP 420 命名空间包让一个只剩 `__pycache__` 的目录照样满足 `import app.routes` 并返回一个空模块——实测确认，所以才需要连目录一起删。
+保留它们的真正理由是记录了一个反直觉的事实（清单 `note` 里也写着）：**把包目录下的 `.py` 全部删光并不等于该包不可 import**。PEP 420 命名空间包让一个只剩 `__pycache__` 的目录照样满足 `import app.routes` 并返回一个空模块——实测确认，所以才需要连目录一起删。**这正是删除动机本身**：那六个目录留着会让「旧链是否还可达」这类判断给出错误答案。
 
 ## 没有保留的东西，以及为什么
 
 - `probe_chain.py` —— `core/chain.py` 落地前的前瞻探测（试算「只 import `Chain` 字段类型所需的那些模块」会拉进多少）。结论已经变成 `chain.py` 本身和它的 docstring，探针没有二次价值。
-- `A.json` / `B.json` / `sets.json` / `legacy_files.txt` / `legacy_tests.txt` / `move.txt` / `delete-manifest.json` —— 上面几个脚本的派生数据。脚本在，数据可再生；而且这批的最终形态已经是 `2248a69` 里 125 条 100% 相似度的 rename 记录。
+- `A.json` / `B.json` / `sets.json` / `legacy_files.txt` / `legacy_tests.txt` / `tests_only_legacy.txt` / `tests_archive.txt` / `move.txt` —— `sets.py` 那条差集流水线的输出。**它们的最终形态已经是 `2248a69` 里 125 条 100% 相似度的 rename 记录**，比任何中间清单都权威；要重跑那条流水线得先回到 `2248a69^`（见 `sets.py` 一节）。
+- **`delete-manifest.json` 原本也在这个「没保留」清单里，评审指出那是误判——它不是任何脚本的输出，而是手写的删除授权书。已保留**，见上面 `drop_emptied_dirs.py` 那一节。
 - `dist/app-0.1.0-py3-none-any.whl`（399K）—— 构建实测的产物。结论（wheel 174 个条目、不含 `.archived`、正样本对照确认 `app/cli.py` 在内）已写进 status.md，重建一次 `uv build` 即可。
