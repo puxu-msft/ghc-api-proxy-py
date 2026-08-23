@@ -126,14 +126,26 @@ def _link_text(link: BaseException) -> str:
     return _one_line(text)
 
 
-def _asyncio_timeout_plumbing(link: BaseException, named_a_timeout: bool) -> bool:
-    """Whether this silent link is one of the two `asyncio.timeout` raises around a guard that already spoke.
+def _asyncio_timeout_plumbing(links: list[BaseException]) -> set[int]:
+    """Which links are the two `asyncio.timeout` raises around a guard, by position in the chain.
 
-    `asyncio.timeout` ends its scope by cancelling the task and converting that into `TimeoutError`, so a guard built on it arrives as `guard -> TimeoutError() -> CancelledError()` with both inner links empty — measured for `StreamDeadlineError` and `StreamIdleTimeoutError` in `.dev/docs/upstream/retry-and-continuation/reports/260823-handover-error-shapes.md` §2.2(a)/(b).
+    `asyncio.timeout` ends its scope by cancelling the task and converting that into `TimeoutError`, so a guard built on it arrives as exactly three adjacent links — a `TimeoutError` subclass carrying its own message, then a bare `builtins.TimeoutError()`, then an empty `asyncio.CancelledError()`. Measured for `StreamDeadlineError` and `StreamIdleTimeoutError` in `.dev/docs/upstream/retry-and-continuation/reports/260823-handover-error-shapes.md` §2.2(a)/(b). Only the second and third are suppressed; the guard itself is the account.
 
-    Deliberately narrow. It fires only under a link that is itself a `TimeoutError`, which both guards are, so a silent `CancelledError` reached any other way still gets its name — and no other silent type is touched at all.
+    Matched as that adjacency and nothing looser. A review took an earlier version — a flag reading "some `TimeoutError` was rendered earlier" — and showed it wrong in both directions at once: it swallowed a `CancelledError` three links below an unrelated timeout, and it *failed* to suppress the real plumbing when a wrapper repeated the guard's message, because the guard then rendered as a bare type and never set the flag. Reading each link's own text rather than whether that text was fresh is what closes the second half.
     """
-    return named_a_timeout and isinstance(link, TimeoutError | CancelledError)
+    found: set[int] = set()
+    for index in range(len(links) - 2):
+        guard, converted, cancelled = links[index], links[index + 1], links[index + 2]
+        if (
+            isinstance(guard, TimeoutError)
+            and _link_text(guard)
+            and type(converted) is TimeoutError
+            and not _link_text(converted)
+            and type(cancelled) is CancelledError
+            and not _link_text(cancelled)
+        ):
+            found.update({index + 1, index + 2})
+    return found
 
 
 def describe_error(error: BaseException) -> str:
@@ -149,26 +161,25 @@ def describe_error(error: BaseException) -> str:
 
     - **Fresh text** → shown with its type. The ordinary case.
     - **Text already shown, by a different class** → the type alone. Otherwise `RuntimeError('permission denied') from PermissionError('permission denied')` comes out as the `RuntimeError` and loses the one word saying what kind of failure it was, which an independent review built as a counterexample. An h2 event mapped through httpcore into httpx repeats its text too, and there the class name repeats with it, so that link is dropped entirely. That is the one repetition measured so far; a torn HTTP/1.1 body repeats h11's text instead, and a real reset repeats nothing because the outer links are empty.
-    - **No text at all** → the type, unless it is part of the wrapper `asyncio.timeout` builds. Both deadline guards arrive as `StreamDeadlineError -> TimeoutError() -> CancelledError()`, and those two inner links are how the guard is implemented rather than anything that happened to the turn; printing them invites reading a timeout that already named itself as a cancellation. Everything else keeps its type, because where the outer links are silent — a real connection reset opens with two — the inner types are all there is until the `OSError` at the bottom.
+    - **No text at all** → the type, unless it is one of the two links `asyncio.timeout` inserts under a guard that already named itself. Both deadline guards arrive as `StreamDeadlineError -> TimeoutError() -> CancelledError()`, and those two inner links are how the guard is implemented rather than anything that happened to the turn; printing them invites reading a timeout that already named itself as a cancellation. Everything else keeps its type, because where the outer links are silent — a real connection reset opens with two — the inner types are all there is until the `OSError` at the bottom.
 
-    That last suppression is deliberately tied to the one mechanism that was measured. An earlier version generalised it to "drop every silent link once anything has spoken", and a review answered with `RuntimeError('wrapper failed') from PermissionError()`, where the inner type is the whole of what the second link had to offer.
+    That last suppression is deliberately tied to the one mechanism that was measured, matched as an adjacency rather than a mood — see `_asyncio_timeout_plumbing`. Two earlier versions were both answered with counterexamples: dropping every silent link once anything had spoken loses the `PermissionError` in `RuntimeError('wrapper failed') from PermissionError()`, and remembering merely that *a* timeout was rendered swallows a genuine `CancelledError` several links below an unrelated one.
 
     Freshness of a class is judged on `__qualname__`, not on the full dotted path: `httpx2.ReadError` wrapping `httpcore2.ReadError` is one failure described twice by two libraries, and that is the case worth collapsing. Two same-named exceptions from genuinely unrelated modules would collapse too. That is deliberate, and it has only ever been produced by construction.
     """
     links, truncated = _chain(error)
+    plumbing = _asyncio_timeout_plumbing(links)
     rendered: list[str] = []
     seen_text: set[str] = set()
     seen_class: set[str] = set()
-    named_a_timeout = False
-    for link in links:
+    for position, link in enumerate(links):
         text = _link_text(link)
         name = f"{type(link).__module__}.{type(link).__qualname__}"
         fresh_class = type(link).__qualname__ not in seen_class
         fresh_text = bool(text) and text not in seen_text
         if fresh_text:
             rendered.append(f"{name}: {text}")
-            named_a_timeout = named_a_timeout or isinstance(link, TimeoutError)
-        elif fresh_class and not (not text and _asyncio_timeout_plumbing(link, named_a_timeout)):
+        elif fresh_class and position not in plumbing:
             rendered.append(name)
         else:
             continue

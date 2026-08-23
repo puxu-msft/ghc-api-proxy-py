@@ -11,6 +11,7 @@ They pin the distinctions a reader has to be able to draw, not the exact sentenc
 """
 
 import asyncio
+from itertools import pairwise
 
 import h2.errors
 import h2.events
@@ -227,11 +228,63 @@ def test_a_silent_cause_keeps_its_name_when_it_is_not_timeout_plumbing() -> None
     assert "h2.exceptions.ProtocolError" in message(fixed_text)
 
 
-def test_a_cancellation_that_did_not_come_from_a_timeout_guard_keeps_its_name() -> None:
-    """`CancelledError` is only plumbing under a link that is itself a `TimeoutError`. Reached any other way it is the failure."""
-    wrapper = RuntimeError("something else")
-    wrapper.__cause__ = asyncio.CancelledError()
-    assert "CancelledError" in message(wrapper)
+def chained(*layers: BaseException) -> BaseException:
+    """Link the given exceptions outermost-first through `__cause__`, and return the outermost."""
+    for outer, inner in pairwise(layers):
+        outer.__cause__ = inner
+    return layers[0]
+
+
+class DatabaseTimeout(TimeoutError):
+    """A silent `TimeoutError` subclass that is the failure rather than the plumbing."""
+
+
+@pytest.mark.parametrize(
+    ("label", "error", "must_keep"),
+    [
+        (
+            "a cancellation directly under a timeout is not the three-link wrapper",
+            chained(TimeoutError("outer timeout"), asyncio.CancelledError()),
+            "CancelledError",
+        ),
+        (
+            "a cancellation separated from the timeout is not under it at all",
+            chained(TimeoutError("outer timeout"), RuntimeError("middle failure"), asyncio.CancelledError()),
+            "CancelledError",
+        ),
+        (
+            "a silent TimeoutError subclass is a distinct failure, not the converted one",
+            chained(TimeoutError("outer timeout"), DatabaseTimeout()),
+            "DatabaseTimeout",
+        ),
+    ],
+)
+def test_only_the_measured_adjacency_counts_as_timeout_plumbing(
+    label: str, error: BaseException, must_keep: str
+) -> None:
+    """A review answered "some timeout appeared earlier" with all three of these.
+
+    `asyncio.timeout` produces exactly `guard-with-a-message -> TimeoutError() -> CancelledError()`, adjacent. Anything looser suppresses links that may be the only account of the failure.
+    """
+    assert must_keep in message(error), label
+
+
+def test_the_wrapper_is_still_recognised_when_something_repeats_the_guards_words() -> None:
+    """The same review showed the flag failing in the other direction too.
+
+    If an outer link repeats the guard's message, the guard renders as a bare type — so a predicate keyed on "was fresh text rendered" stops recognising it, and the plumbing it exists to hide comes back out. The predicate reads each link's own text instead.
+    """
+    text = message(
+        chained(
+            RuntimeError("attempt exceeded its deadline"),
+            StreamDeadlineError("attempt exceeded its deadline"),
+            TimeoutError(),
+            asyncio.CancelledError(),
+        )
+    )
+    assert "StreamDeadlineError" in text
+    assert "asyncio.exceptions.CancelledError" not in text
+    assert "builtins.TimeoutError" not in text
 
 
 def test_a_chain_cut_short_says_it_was_cut() -> None:
