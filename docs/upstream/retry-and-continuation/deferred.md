@@ -179,19 +179,15 @@ response 层有信号（`response.incomplete`），但它晚于 item 关闭到�
 
 补不补由用户裁决：它是一道守卫，而本项目对「把守卫接成阻断」有明确态度。
 
-### 11. ~~客户端时限与「上游已完成」谁先答~~ —— 已裁决（2026-08-22），当前次序正确
+### 11. ~~客户端时限与「上游已完成」谁先答~~ —— 已闭合，已移出（2026-08-22）
 
-**裁决**：`client_request_deadline` 保护的是「这一轮总耗时」，所以**客户端时限先答、`terminal.seen` 后答**。见 `decisions.md` 第二之二节第 18 条。`stream.py` 当前次序已经是这个，无需改码。
+两半都完成了，本条不再是待办：
 
-保留下面的原始分析，因为它记录了这个次序**是载重的**（不是风格选择），以及一条仍然成立的测试缺陷：
+- **裁决**（`client_request_deadline` 保护的是「这一轮总耗时」，故时限先答、`terminal.seen` 后答）→ `decisions.md` 第二之二节第 18 条。
+- **实现与验证**（夹具改 `[:-2]`、新增 `test_the_client_deadline_outranks_an_upstream_that_just_finished`、裁决写进两处分支注释）→ 主仓 `08f3c29`，状态见 `status.md`。
+- **为什么这个次序是载重的**，以及两轮受控变异的证据 → `reports/260822-review-complete-fix-opus.md` 问题 2 与 `reports/260822-review-mcp-contract-and-deadline-order.md` F12／F13。
 
-来源：`../../tmp/260822-review-complete-fix-opus.md` 问题 2（异源评审，8 个受控变异）。由 `bce8b0d` 引入的 `if assembler.terminal.seen: break` 带出。
-
-- **真实后果**：上游已发完 `message_delta` + `message_stop`，随后客户端时限到期 —— 当前发 `client_deadline_exceeded` error 帧，**丢掉一条已经攒齐的完整回复**。按上述裁决，这是对的。
-- **实测（评审）**：把该支合并进 `if torn is None:` 那一支（即让 terminal 压过 deadline），三条 client-deadline 测试全部转红。
-- **仍未闭合的那一条**：`test_the_client_deadline_is_the_one_ending_that_says_so` 与 `test_a_held_back_policy_still_hears_the_client_deadline` 的夹具都携带完整终结事件（`anthropic_stream(...)` 末尾自带 `message_delta` + `message_stop`），因此**它们已经无法区分「时限先到」与「上游已完成后时限才到」**。裁决落定后这两条测试实际钉的是后者，而名字说的是前者。按 `[:-2]` 模式改夹具（与 `c86712d` 对另外两条测试所做的相同）可让名字与内容对上，另加一条专测「上游已完成后时限才到 → 仍报时限」的正样本，才算把新裁决钉住。**这是本条唯一还要动手的部分。**
-
-  **2026-08-22 已完成，见主仓 `08f3c29`**（上面那段是完成前的原始分析，保留原样）。三件都做了：两条夹具改成 `[:-2]`、新增 `test_the_client_deadline_outranks_an_upstream_that_just_finished`、把裁决写在两处分支注释旁。异源评审用两轮受控变异复核（`reports/260822-review-mcp-contract-and-deadline-order.md` F12/F13），结论是**改夹具没有削弱那两条测试名义上的属性**：把整支禁掉时它们照样全红，说明「时限收尾必须是 error 帧」「不得冒充 `message_stop`」「held-back 策略下缓冲块被丢弃」三条仍被咬住，且最后一条在新夹具下**非平凡**（不触发时限时那个块确实被组装出来了）。被移走的只有「次序」那一层鉴别力，由新测试独家接手——次序变异之下，全套件里只有它转红。净增的是「时限落在回合中途」这个旧夹具**根本测不到**的位置。
+编号保留：`decisions.md:64`、`status.md:29`、`../h2-goaway/deferred.md:30` 三处活文档按「第 11 条」引用本条。
 
 ### 12. 上游在终结事件之后 reset：完成行不再留痕
 
@@ -397,10 +393,7 @@ anthropic stop_reason='stop_sequence'  -> responses status='completed'   incompl
 
 ## 明确不做
 
-- **发真实请求向上游补证。** 用户 2026-08-21 明确禁止：只查历史，历史没有就保持悬念。调查报告里那条「最低成本补证是发个超长 prompt 触发 400」的建议**不采纳**。
-- **代理内续写。** 已裁决放弃，见 `archive-proxy-side-continuation/`。
-- **MCP-driven 续写的次数上限。** 已裁决不设，理由在 `status.md`。
-- **为非 anthropic-messages 客户端合成工具调用。** 用户接受当前只支持这一种；将来用上别的 harness 再补。这是范围边界，不是遗漏。
+→ **已移入 `decisions.md` 第五节**（2026-08-22）。「不做」是裁决，属于那里；本文件按宪章只收未闭合与待裁项。四条分别是：不发真实请求向上游补证、不做代理内续写、MCP-driven 续写不设次数上限、不为非 anthropic-messages 客户端合成工具调用。
 
 ## 方法学警告（给后来查 history 的人）
 
