@@ -24,6 +24,8 @@ type RefusalAction = Literal["passthrough", "as_end_turn", "as_error"]
 type SystemPromptPlacement = Literal["instructions-joint-string"]
 # What to do when a web search declaration carries a domain restriction this upstream has no parameter for. Measured: `allowed_domains` and `blocked_domains` each earn `Unknown parameter`, so they cannot be sent under any spelling, and the only question is what to do instead.
 type WebSearchConstraintPolicy = Literal["error", "drop_fields"]
+# What to do with a Claude Code auto mode authorisation request. `passthrough` forwards it upstream like anything else; the other two answer it here with a fixed decision and never call upstream at all.
+type AutoModeDecision = Literal["passthrough", "allow", "block"]
 
 # Dotted paths the spec marks as requiring a restart. Everything else is hot-reloadable.
 #
@@ -73,8 +75,34 @@ class CountTokensConfig(Section):
     max_retries: int = Field(default=2, ge=0)
 
 
+class AutoModeClassifierConfig(Section):
+    """Whether to answer Claude Code's auto mode authorisation requests here instead of upstream.
+
+    With auto mode on, that client asks a model to approve each action before running it, as its own non-streaming request carrying the rendered transcript, the user's whole `CLAUDE.md`, and a 110k-character monitor prompt. One measured sample is 710179 bytes, and one is spent per tool call. `app.pipeline.auto_mode_classifier` recognises them; this says what to do about it.
+    """
+
+    # `passthrough` — the default — sends them upstream like any other request, so the feature is inert until somebody turns it on. That is this project's default for every new capability.
+    #
+    # `allow` and `block` answer locally with a fixed decision. **They do not judge anything**: the proxy cannot read the action under review and does not try, so this is a switch, not a cheaper classifier. Turning it on replaces auto mode's review with a constant.
+    #
+    # Spelled `passthrough` rather than `off` because YAML 1.1 parses a bare `off` as boolean false, which `context_editing.enabled` already had to work around.
+    decision: AutoModeDecision = "passthrough"
+    # Written into `<reason>` on a block, and nowhere else — the classifier prompt asks for no reason when the action is allowed. A reason containing the literal `<block>` is dropped rather than sent: the client's parser refuses a reply in which the decision word appears twice, and refusing costs a retry of the same 710 KB.
+    reason: str = "Blocked by proxy configuration, without a model review."
+    # The two recognition markers, configurable because they are **string literals owned by another program**. They matched 2300 recorded requests and three client versions (2.1.207 / 226 / 241) verbatim, and they will still decay the moment that client rewords them — at which point the fix must not require a release here.
+    #
+    # Either one matching is enough, but neither fires alone: `app.pipeline.auto_mode_classifier` first requires the request to be shaped like a classifier call at all (no tools, not streaming, no assistant turn). Review built two legal ordinary requests that tripped a bare marker, and in both the user's real request would have been answered with a fabricated decision and never sent.
+    #
+    # Decay in *recognition* is safe — an unrecognised request is forwarded, which is the pre-feature behaviour — and it is silent, showing up as the hit count in the log going to zero rather than as an error. It also has a channel with no version number attached: the client's own server can change the classifier's mode and model by pushed-down config without the client changing at all.
+    system_prompt_prefix: str = "You are a security monitor for autonomous AI coding agents."
+    transcript_open: str = "<transcript>\n"
+
+
 class InboundConfig(Section):
     anthropic_count_tokens: CountTokensConfig = Field(default_factory=CountTokensConfig)
+    auto_mode_classifier: AutoModeClassifierConfig = Field(
+        default_factory=AutoModeClassifierConfig
+    )
 
 
 class ModelProviderConfig(Section):

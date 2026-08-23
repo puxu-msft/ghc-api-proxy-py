@@ -19,8 +19,11 @@ from app.model_provider import ModelProvider
 from app.models.anthropic import MessagesRequest
 from app.observability.metrics import BETA_FLAGS_STRIPPED
 from app.pipeline.anthropic_request_hook import fix_anthropic_request
+from app.pipeline.auto_mode_classifier import AutoModeVerdict, classify, log_hit, verdict_text
 from app.pipeline.count_tokens import count_tokens
 from app.pipeline.delivery.formats.anthropic_messages_synthetic_reply import (
+    auto_mode_body,
+    auto_mode_sse,
     failed_search_body,
     failed_search_sse,
     query_from_request,
@@ -28,6 +31,7 @@ from app.pipeline.delivery.formats.anthropic_messages_synthetic_reply import (
 from app.pipeline.direct_driver import (
     DRIVERS,
     EVENT_ATTEMPT_PREPARE,
+    EVENT_REQUEST_SUCCEEDED,
     DriverOutcome,
     LedgerBudget,
 )
@@ -113,6 +117,26 @@ def shape_request(
 async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[RequestContext], None] | None = None) -> HandledRequest:
     provider, route = shape_request(chain, context, on_routed)
 
+    # Before translation, because the predicates read `system` and `messages` and the target format has neither. Before the driver, because the whole point is that no upstream call happens: this is the one path where the reply is decided without an attempt.
+    #
+    # **Gated on the inbound format, not only on the body.** The reply this synthesises is an Anthropic Message, and the request it recognises is defined as a non-streaming `/v1/messages`. Without this guard a Chat Completions request whose content parts happened to match the markers was answered with an Anthropic body on the `/chat/completions` path — a protocol the caller has no reason to be able to read, for a request that never reached upstream. The predicates are the wrong tool for deciding which endpoint a body arrived on; the route already knows.
+    if context.inbound_format is WireFormat.ANTHROPIC_MESSAGES:
+        verdict = classify(context.payload, chain.config.inbound.auto_mode_classifier)
+        if verdict is not None:
+            outcome = _answered_auto_mode(context, route, verdict, chain)
+            # The client request succeeded, so the request-level event fires even though no attempt did. The attempt-level ones deliberately do not: there was no upstream leg for them to describe, and `attempt.prepare` subscribers exist to shape a body that is about to be sent.
+            #
+            # Published here rather than inside the driver because the driver is never built on this path. A subscriber raising propagates, which is the same contract it has inside the driver — there it steers the retry loop, and here there is no loop to steer, so it reaches the caller.
+            outcome.events.append(EVENT_REQUEST_SUCCEEDED)
+            for subscription in chain.subscribers.for_event(EVENT_REQUEST_SUCCEEDED):
+                await subscription.handler(context)
+            return HandledRequest(
+                context=context,
+                route=route,
+                outcome=outcome,
+                synthesized=True,
+            )
+
     if route.translation_required:
         translated, semantic = chain.translators.translate(
             context.payload,
@@ -174,6 +198,33 @@ def _answered_failed_search(context: RequestContext, route: Route) -> DriverOutc
                 query, message_id=message_id, model=route.model_id, call_id=call_id
             )
         )
+        headers = {"content-type": "application/json"}
+    return DriverOutcome(
+        context=context,
+        response=httpx2.Response(200, content=body, headers=headers, request=request),
+        attempts=context.attempt_count,
+    )
+
+def _answered_auto_mode(
+    context: RequestContext, route: Route, verdict: AutoModeVerdict, chain: Chain
+) -> DriverOutcome:
+    """The authorisation decision this proxy made, dressed as the reply upstream would have sent.
+
+    Built as an upstream reply rather than as finished client bytes, for the reason its sibling above gives: it then travels the same assembler, buffer and delivery path as everything else, instead of being the one response in the system whose framing nothing has exercised. `synthesized` tells the delivery side to read it as Anthropic while the route keeps naming the upstream that would have answered, so the console line still reports where this request was headed.
+
+    The size is measured off `original_payload` — the body as the client sent it, before the fixups — because that is the request this feature exists to not send. It is **a re-serialisation, not the received byte count**: whitespace, key order and Unicode escaping may all differ from what arrived, and the received length is not kept anywhere (`inference.py` reads the body and does not record how long it was). Close enough to say what was saved, and not the same number as `content-length`.
+    """
+    text = verdict_text(verdict, chain.config.inbound.auto_mode_classifier.reason)
+    source = context.original_payload or context.payload
+    log_hit(verdict, request_bytes=len(dumps(source)))
+
+    message_id = f"msg_{uuid4().hex[:24]}"
+    request = httpx2.Request("POST", "https://synthesized.invalid/messages", content=b"")
+    if context.stream:
+        body = auto_mode_sse(text, message_id=message_id, model=route.model_id)
+        headers = {"content-type": "text/event-stream"}
+    else:
+        body = dumps(auto_mode_body(text, message_id=message_id, model=route.model_id))
         headers = {"content-type": "application/json"}
     return DriverOutcome(
         context=context,

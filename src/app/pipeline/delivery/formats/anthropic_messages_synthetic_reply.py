@@ -156,3 +156,85 @@ def failed_search_sse(query: str, *, message_id: str, model: str, call_id: str) 
 
 def _frame(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {orjson.dumps(data).decode()}\n\n"
+
+
+# ---------------------------------------------------------------------------
+# The second member: an auto mode authorisation answered by this proxy.
+#
+# Same reasoning as above at the level that matters — answering in the client's own protocol beats failing at the transport layer — but the client's reaction is what makes it necessary rather than merely nicer. Claude Code validates this reply by parsing it, and **retries when it cannot** (`p1m`, `app.pretty.js:368542` in 2.1.241). A malformed answer therefore does not degrade to one wasted request; it costs the retry budget times the 710 KB that this whole feature exists to avoid sending. Every shape below is chosen against that parser rather than against the format's general rules.
+
+
+def auto_mode_body(text: str, *, message_id: str, model: str) -> dict[str, Any]:
+    """The whole non-streaming reply carrying an auto mode decision.
+
+    `stop_reason` is `end_turn`, which is load-bearing for one of the two parsers: the severity reader refuses anything whose `stop_reason` is neither `stop_sequence` nor `end_turn` (`QRl`, 368418), while the block reader does not look at it. `end_turn` satisfies both, so the field does not have to be decided per protocol.
+
+    It is honest as well as convenient. `stop_sequence` would claim the reply was cut short by the client's `["</block>"]`, and nothing cut this one short — it was written whole.
+
+    `usage` is zero because no tokens were spent. The client adds these into what it reports as auto mode's cost, and zero is the true number.
+    """
+    return {
+        "id": message_id,
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": [{"type": "text", "text": text}],
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": {"input_tokens": 0, "output_tokens": 0},
+    }
+
+
+def auto_mode_sse(text: str, *, message_id: str, model: str) -> bytes:
+    """The same decision as an Anthropic SSE stream.
+
+    Every recorded classifier request was non-streaming, so nothing has been observed taking this path. It exists because the alternative to writing it is a branch that answers a streaming request with a JSON body — a shape neither side would know what to do with — and because the client deciding to stream its classifier one day should cost this project a config note, not an incident.
+
+    Written as upstream frames rather than as finished client bytes, for the same reason the failed-search stream is: it then goes through the same assembler, buffer and delivery path as every real reply.
+    """
+    return "".join(
+        [
+            _frame(
+                "message_start",
+                {
+                    "type": "message_start",
+                    "message": {
+                        "id": message_id,
+                        "type": "message",
+                        "role": "assistant",
+                        "model": model,
+                        "content": [],
+                        "stop_reason": None,
+                        "usage": {"input_tokens": 0, "output_tokens": 0},
+                    },
+                },
+            ),
+            _frame(
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "text", "text": ""},
+                },
+            ),
+            # One delta carrying the whole decision. The text is a few dozen bytes and this project delivers a block at a time regardless, so splitting it would invent granularity that nothing downstream reads.
+            _frame(
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": text},
+                },
+            ),
+            _frame("content_block_stop", {"type": "content_block_stop", "index": 0}),
+            _frame(
+                "message_delta",
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                    "usage": {"output_tokens": 0},
+                },
+            ),
+            _frame("message_stop", {"type": "message_stop"}),
+        ]
+    ).encode()
