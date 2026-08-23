@@ -11,6 +11,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.config.schema import ProxyConfig
 from app.model_provider.types import ModelDescriptor, ModelEndpoint
 from app.server.app_state import CHAIN_STATE_KEY
 from app.server.routes.ops import router as ops_router
@@ -57,12 +58,12 @@ class StubRegistry:
         return self._providers[name]
 
 
-def client_for(ids: frozenset[str]) -> httpx2.AsyncClient:
+def client_for(ids: frozenset[str], config: ProxyConfig | None = None) -> httpx2.AsyncClient:
     app = FastAPI()
     app.include_router(ops_router)
     registry = StubRegistry({"ghc": StubProvider("ghc", ids)})
-    # Only `providers` is read here; standing up a whole Chain would tie these to composition.
-    setattr(app.state, CHAIN_STATE_KEY, SimpleNamespace(providers=registry))
+    # Only what the route under test reads; standing up a whole Chain would tie these to composition. `config` is left `None` for the routes that never touch it, so a route that starts reading it fails here rather than passing on a stub nobody meant to supply.
+    setattr(app.state, CHAIN_STATE_KEY, SimpleNamespace(providers=registry, config=config))
     return httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://t")
 
 
@@ -109,6 +110,51 @@ async def test_metrics_are_served() -> None:
         response = await client.get("/metrics")
     assert response.status_code == 200
     assert b"python_gc_objects_collected_total" in response.content
+
+
+@pytest.mark.asyncio
+async def test_api_status_answers_from_the_same_judgement_as_readiness() -> None:
+    """`api.md` ratifies both paths; they ask one question, so they must not be able to disagree.
+
+    The chain this replaces answered `/api/status` from a readiness flag of its own, separate from the health endpoint — the arrangement where one fact gets two answers and they drift. Asserted as equality of the whole body rather than of a status field, because that is what forbids a second derivation from being added later.
+    """
+    for ids in (frozenset[str](), frozenset({"claude-opus-5"})):
+        async with client_for(ids) as client:
+            health = await client.get("/health/readiness")
+            status = await client.get("/api/status")
+        assert status.status_code == health.status_code
+        assert status.json() == health.json()
+
+
+@pytest.mark.asyncio
+async def test_api_config_reports_the_snapshot_in_effect() -> None:
+    """Not the file: five layers feed the snapshot, so the file alone cannot answer what is running."""
+    config = ProxyConfig.model_validate({"server": {"port": 4199}, "graceful_cleanup_timeout": 7})
+    async with client_for(frozenset({"m"}), config) as client:
+        response = await client.get("/api/config")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["server"]["port"] == 4199
+    assert body["graceful_cleanup_timeout"] == 7
+
+
+@pytest.mark.asyncio
+async def test_api_config_redacts_only_the_userinfo_of_the_proxy() -> None:
+    """Which proxy is in use is the thing this is read to check; the password in it is not.
+
+    Both directions are asserted. A proxy without credentials must come back untouched — otherwise "the secret is gone" would also be satisfied by blanking the field, and the test could not tell redaction from erasure.
+    """
+    with_credentials = ProxyConfig.model_validate({"proxy": "http://bob:hunter2@proxy.internal:8080"})
+    async with client_for(frozenset({"m"}), with_credentials) as client:
+        redacted = (await client.get("/api/config")).json()["proxy"]
+    assert "hunter2" not in redacted
+    assert "bob" not in redacted
+    assert redacted == "http://***@proxy.internal:8080"
+
+    plain = ProxyConfig.model_validate({"proxy": "http://proxy.internal:8080"})
+    async with client_for(frozenset({"m"}), plain) as client:
+        untouched = (await client.get("/api/config")).json()["proxy"]
+    assert untouched == "http://proxy.internal:8080"
 
 
 def test_the_ops_surface_is_mounted_on_the_router_production_builds() -> None:
