@@ -40,11 +40,27 @@
 ## 已知的债与遗留
 
 - **`28c1a7a` 的提交信息残缺**：8 处反引号包裹的符号名被 shell 当命令替换吃空。发现时同伴已在其上提交，无法 amend；为一条信息改写同伴正在推进的分支不成比例。内容与验证无误。教训已入项目记忆。
+- **历史里有两个同名的归档提交，其中一个是空的**：`git log --oneline | rg 'move the chain no entry point reaches'` 返回 **`2248a69`** 与 **`f7121ca`** 两条。带内容的是 `2248a69`（130 个文件），`f7121ca` 相对其父 `123f03d` **变更文件数为 0**——是同伴 rebase 时留下的空提交。**按信息文本找这次归档会命中两个，且先到的那个（`f7121ca`，19:16）是错的那个。** 认准 `2248a69`；用 `git show --stat` 一眼可分（空的那个 stat 为空）。
 - **一个测试丢了一半**：`tests/systemd/test_systemd_units.py::test_service_permissions_restrict_real_state_writers` 原本同时断言 `history.db` 与 `tokenization.json` 的权限位；history writer 随链归档，保留了 tokenization 那一半，docstring 写明去向。该文件整体**未**归档——它是 systemd 部署路径的测试，且 `test_systemd_pipeline_unit.py` 从它取共享夹具。
-- **`api.md` 追认但无人服务的端点**：Azure、Gemini、`/history/api/*`、`/history/ws`、`/api/status`、`/api/config`。唯一实现现在在 `src/.archived/`。这在归档之前就已成立（那条链本就不可达），归档只是让它从潜伏变为可读。`src/.archived/README.md` 记录了这一点，以及 `management.py` 混装已追认与已裁决暂不支持端点、不能整体搬也不能整体删的障碍。
+- **`api.md` 追认但无人服务的端点**：~~Azure、Gemini、`/history/api/*`、`/history/ws`、`/api/status`、`/api/config`~~ → **2026-08-23 收窄为四个：Azure、Gemini、`/history/api/*`、`/history/ws`**。同伴的 `7525f76`（`feat: answer the ratified status and config endpoints on the new chain`）已把 `/api/status` 与 `/api/config` 接到新链，现在活在 `src/app/server/routes/ops.py:30` 与 `:88`。剩下四个的唯一实现仍在 `src/.archived/`。这在归档之前就已成立（那条链本就不可达），归档只是让它从潜伏变为可读。`src/.archived/README.md` 记录了这一点，以及 `management.py` 混装已追认与已裁决暂不支持端点、不能整体搬也不能整体删的障碍。
 
   **归档前排除过一条反对意见，值得留档**：一位事实核查评审主张「前身 `copilot-api-js` 仍在 `4141` 上服务这些端点」，据此反对归档。**该主张被进程表推翻**——`ss -ltnp` 与 `ps -eo pid,lstart,args` 显示 `4141` 由本项目占用（`uv run --directory /home/xp/src/ghc-api-proxy-py ghc-api-proxy start --port 4141 --restart`），两次观测分别是 pid 2254087（08-22 11:45:40）与 pid 3733161（08-23 06:06:51，会话期间被重启过，非本会话所为）。**这个观测能支持的只有一件事：那位评审所设想的「另一个进程正在服务这些端点」不成立，因此归档不会让任何在跑的东西失去实现。** 它**不**证明生产切换已获授权或已完成——按项目约束，替换前身需要用户单独的明确指令，本会话全程未信号、停止或重启该服务，只做了读取。
 - **`spec.md` 与 `acceptance.md` 的跟进**：D-1 裁决后 `spec.md` 四处规范条款已改，但 `acceptance.md` 的 `CAL-04-GRAMMAR-v1` 只做了推翻标注、未升版，`architecture.md` 的 delayed-response-start owner 一族也只登记未改。两者都在 `spec.md`「文档状态」与本表登记，属独立切片。
+
+## 验证（2026-08-23 06:4x，主仓 `79428bb`）
+
+⚠️ **归因前提**：跑这轮时工作树带着同伴 7 个未提交文件（`request.py`、`inbound.py`、`routes/*`、两个测试），所以结果反映的是「HEAD 加同伴中途状态」，不是一个干净检出。
+
+| 项 | 结果 |
+|---|---|
+| `uv run pytest tests --cov=app --cov-fail-under=80` | **1494 passed, 2 skipped**，覆盖率 **89.53%** |
+| `uv run ruff check src tests` | All checks passed |
+| `uv run pytest tests/unit/test_module_boundaries.py` | 3 passed（归档不可解析的守卫） |
+| `uv run pyright src tests` | **21 errors**，全部在 `src/app/upstream/stream_cap.py` 与 `tests/unit/upstream/test_stream_cap.py` |
+
+那 21 个 pyright 错误**不属于本主题**：两个文件本会话一次都没碰过，最近提交是 08-21（`2b20be7`、`8703cad`，早于本会话开始的 08-22 14:40），属同伴的 httpx2／httpcore2 迁移，与归档链不相交。
+
+**ruff 那一行需要一个正样本对照才读得出来**：`ruff check src tests` 全过，可能是因为 `extend-exclude` 生效，也可能是因为别的原因导致那些文件根本没被考察。显式指定 `ruff check --statistics src/.archived` 报 **32 个 I001**——归档文件确实有问题而常规扫描不报，这才证明排除是真的在起作用。
 
 ## 未采纳的方案（记录理由）
 
