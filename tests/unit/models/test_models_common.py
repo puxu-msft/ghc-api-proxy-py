@@ -60,7 +60,7 @@ def test_error_response_serializes_api_error() -> None:
 
     assert response.model_dump() == {
         "error": {
-            "type": "upstream_error",
+            "type": "api_error",
             "message": "upstream unavailable",
             "code": "upstream_unavailable",
             "request_id": "req-1",

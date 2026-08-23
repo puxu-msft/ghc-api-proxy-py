@@ -22,11 +22,17 @@ type LocalCounter = Callable[[Mapping[str, Any]], int]
 
 
 class CountTokensUnavailable(RuntimeError):
-    """Every configured provider failed."""
+    """Every configured provider failed.
 
-    def __init__(self, attempts: Sequence[str]) -> None:
+    `cause` is the **last** counter's failure, and last rather than first on purpose: the providers are tried in the operator's configured order, so the one that ran out is the one whose verdict stands. It travels because without it this exception flattens every reason into one — measured, an upstream 400 and an upstream 500 both reached the client as a 503 carrying none of upstream's body, which are two entirely different things for a client to be told.
+
+    `attempts` stays as the human-readable trail of everything that was tried; `cause` is what anything downstream classifies from.
+    """
+
+    def __init__(self, attempts: Sequence[str], *, cause: BaseException | None = None) -> None:
         super().__init__(f"no token counter succeeded: {', '.join(attempts)}")
         self.attempts = tuple(attempts)
+        self.cause = cause
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +56,8 @@ async def count_tokens(
     `upstream_absent_reason` names *why* there is no upstream counter, for the attempts trail. It defaults to the historical answer — nobody supplied one — but a caller that withheld it deliberately should say so, because `ghc:unconfigured` read against a config file that plainly configures `ghc` sends the next reader looking for a settings bug that is not there.
     """
     attempts: list[str] = []
+    # The failure the last counter raised, kept so `CountTokensUnavailable` can carry it. Only the last one: the trail in `attempts` records that the earlier ones happened, and a client is owed one verdict rather than a list it cannot act on.
+    last_failure: BaseException | None = None
     for provider in providers:
         for attempt in range(max_retries + 1):
             try:
@@ -74,5 +82,6 @@ async def count_tokens(
                 # Unserviceable, not unlucky: retrying or degrading would both answer the wrong question. The caller turns this into a 400.
                 raise
             except Exception as error:
+                last_failure = error
                 attempts.append(f"{provider}:{attempt}:{type(error).__name__}")
-    raise CountTokensUnavailable(attempts)
+    raise CountTokensUnavailable(attempts, cause=last_failure)

@@ -16,7 +16,7 @@ import orjson
 import pytest
 
 from app.config.schema import ContentBlockStartCompat, UpstreamRequestRetryConfig
-from app.errors import WIRE_TYPES, ErrorCategory
+from app.errors import ANTHROPIC_ERROR_TYPES, ErrorCategory
 from app.model_provider.ghc_client.errors import normalize_upstream_error
 from app.observability.active_requests import ActiveRequestRegistry
 from app.observability.request_trace import RequestTrace
@@ -1224,9 +1224,12 @@ async def test_a_bug_in_framing_says_so_on_the_frame_it_does_send() -> None:
         await collect()
 
     body = b"".join(chunks).decode()
+    # `code` is what names the party, and on this path it is the *only* thing that can.
+    # It used to be `type`: `WIRE_TYPES` spelled `INTERNAL` as `internal_error` and `UPSTREAM` as `upstream_error`, so `"upstream_error" not in body` was a real discriminator. Both of those are inventions — neither is in Anthropic's declared vocabulary — and correcting the table collapses both onto `api_error`, because Anthropic draws no such distinction.
+    # Elsewhere the HTTP status carries what the dialect cannot (`.dev/docs/error-envelope/spec.md` §6.2). Not here: the status was fixed at 200 when the response headers went out, long before this failure existed. So a mid-stream frame has exactly one channel for "whose fault", and it is this extension field.
     assert '"code":"proxy_delivery_failed"' in body
-    assert f'"type":"{WIRE_TYPES[ErrorCategory.INTERNAL]}"' in body
-    assert WIRE_TYPES[ErrorCategory.UPSTREAM] not in body
+    assert '"code":"upstream_stream_failed"' not in body
+    assert f'"type":"{ANTHROPIC_ERROR_TYPES[ErrorCategory.INTERNAL]}"' in body
 
 
 class _FramerWhoseKeepaliveFails(AnthropicFramer):
@@ -1265,8 +1268,9 @@ async def test_a_bug_in_the_keepalive_is_this_sides_too() -> None:
             chunks.append(chunk)
 
     body = b"".join(chunks).decode()
+    # See the note in `test_a_bug_in_framing_says_so_on_the_frame_it_does_send`: `type` cannot tell these apart in Anthropic's own vocabulary, and on a mid-stream frame the status is already spent.
     assert '"code":"proxy_delivery_failed"' in body
-    assert WIRE_TYPES[ErrorCategory.UPSTREAM] not in body
+    assert '"code":"upstream_stream_failed"' not in body
 
 
 @pytest.mark.asyncio

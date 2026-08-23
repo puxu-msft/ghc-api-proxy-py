@@ -15,7 +15,7 @@ from contextlib import aclosing
 from dataclasses import dataclass, replace
 from typing import Any
 
-from app.errors import WIRE_TYPES, ErrorCategory
+from app.errors import ANTHROPIC_ERROR_TYPES, ErrorCategory
 from app.pipeline.delivery.assembling import BlockAssembler
 from app.pipeline.delivery.blocks import (
     TOOL_USE,
@@ -357,7 +357,7 @@ async def _deliver(
             #
             # The attempt deadline (`upstream_request_deadline`, raised by `pipeline_app`'s `with_deadline_at`) has no branch of its own here — it arrives as an ordinary tear and is classified below. It is ordered the other way round, *after* `terminal.seen`, for the opposite reason: it ends only this attempt, so a turn upstream finished must not be handed to it as something to retry.
             yield framer.error(
-                error_type=WIRE_TYPES[ErrorCategory.INTERNAL],
+                error_type=ANTHROPIC_ERROR_TYPES[ErrorCategory.INTERNAL],
                 message=str(torn) or "client request exceeded its deadline",
                 code="client_deadline_exceeded",
             )
@@ -415,7 +415,7 @@ async def _deliver(
         #
         # Three codes, one per way this can end, so that a reader of a client transcript can tell them apart without the server's log beside them.
         yield framer.error(
-            error_type=WIRE_TYPES[ErrorCategory.INTERNAL if ours else ErrorCategory.UPSTREAM],
+            error_type=ANTHROPIC_ERROR_TYPES[ErrorCategory.INTERNAL if ours else ErrorCategory.UPSTREAM],
             # Upstream's own words, or this side's. Either way the distinguishing detail lives here rather than nowhere.
             message=str(torn) or torn.__class__.__name__,
             code=(
@@ -471,7 +471,7 @@ async def _deliver(
         # Ported from the legacy chain rather than redesigned, as `.dev/docs/anthropic-responses-bridge/implementation.md` directs: `app/delivery/responses_anthropic_stream.py`, on `not frontier.terminal_accepted`, raises `incomplete_responses_stream` and renders an SSE error. Same code, same wire shape, same gate on the message having started — a client that already learned to read one of these does not have to learn a second.
         # `message_stop` deliberately does not follow. `.dev/docs/anthropic-responses-bridge/spec.md`, "Downstream Anthropic SSE" item 7, rules these two mutually exclusive: 不得再发 `message_stop` 冒充成功. Note that item 7 constrains what may follow an *error*; it does not make every terminal-less EOF one, which is what the branch above turns on.
         yield framer.error(
-            error_type=WIRE_TYPES[ErrorCategory.UPSTREAM],
+            error_type=ANTHROPIC_ERROR_TYPES[ErrorCategory.UPSTREAM],
             # Names no upstream dialect. This function serves both legs — `framer` is the caller's — so the old wording claimed the reply came from Responses even on an Anthropic-direct turn, which is the leg the 2026-08-22 production incident was on. `deferred.md` §19.
             message="upstream stream ended before a terminal event",
             code="incomplete_responses_stream",
