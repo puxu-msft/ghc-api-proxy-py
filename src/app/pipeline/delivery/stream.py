@@ -274,10 +274,10 @@ async def _deliver(
 
     while True:
         torn: Exception | None = None
-        # Which exception, if any, came out of *assembling* rather than out of reading upstream. Compared by identity rather than by type, because the point is where it was raised: the same `ValueError` means opposite things depending on whether this side produced it or upstream's bytes did, and only the raise site can tell them apart. Reset per attempt so a replayed one does not inherit the last one's verdict.
+        # Which exception, if any, this side raised rather than suffered from reading upstream. Compared by identity rather than by type, because the point is where it was raised: the same `ValueError` means opposite things depending on whether this side produced it or upstream's bytes did, and only the raise site can tell them apart. Reset per attempt so a replayed one does not inherit the last one's verdict.
         #
-        # Covers `assembler.push` and nothing else. A bug in framing would still be attributed to upstream — a known limit, kept because widening the region means wrapping a `yield`, and a `try` around one also catches whatever a consumer throws in.
-        from_assembly: Exception | None = None
+        # Covers all three places this side runs code inside the loop: assembling, committing (the buffer and the framer's block and preamble), and the keep-alive. Until 2026-08-23 it covered assembling alone, and the stated reason for the limit was that widening it "means wrapping a `yield`". That was not true of this code — `_commit` returns a `list`, so every framer call inside it has already happened by the time the first chunk is yielded — and for the keep-alive it was avoidable by naming the chunk before yielding it. A bug in framing was therefore reported to the client as upstream's, and reported twice over in two contradictory ways: `upstream_stream_failed` on the error frame, `internal` on the hand-over block. `deferred.md` §22之二.
+        raised_here: Exception | None = None
         # `aclosing` for the same reason as above: the inner generator owns the upstream pull, and only closing it releases the response. On the way out of a torn attempt this is what hands the old response back before another is opened.
         try:
             async with aclosing(
@@ -295,15 +295,21 @@ async def _deliver(
                             completed = assembler.push(pull.event)
                         except Exception as bug:
                             # Tagged, then re-raised untouched: the caller's `pytest.raises` and its own handling both key off the original type, and wrapping it would change what everything downstream sees in order to record one fact.
-                            from_assembly = bug
+                            raised_here = bug
                             raise
                         for block in completed:
-                            for chunk in _commit(
-                                session,
-                                block,
-                                framer,
-                                client_has_bytes.is_set(),
-                            ):
+                            # `_commit` returns a list, so the buffer and every framer call inside it run to completion here — before the loop below yields anything. That is what makes this `try` narrow enough to tag without also catching what a consumer throws into the `yield`.
+                            try:
+                                framed = _commit(
+                                    session,
+                                    block,
+                                    framer,
+                                    client_has_bytes.is_set(),
+                                )
+                            except Exception as bug:
+                                raised_here = bug
+                                raise
+                            for chunk in framed:
                                 client_has_bytes.set()
                                 wrote = True
                                 yield chunk
@@ -313,7 +319,13 @@ async def _deliver(
                     # Unconditional, because by the time this generator runs the client already holds a 200: the response is built with upstream's own status once its headers have arrived, and the framework sends `http.response.start` before it pulls the first chunk. Nothing here can change what the client was told, so holding the keep-alive back until a block exists buys nothing and spends the whole pre-first-block window in silence — which under `full` and `until-tool-use` is the entire turn.
                     #
                     # An SSE comment before `message_start` is still legal SSE and carries no content, so it cannot be mistaken for part of the turn. What is *not* sent early is the preamble itself: a `message_start` on its own leaves a message opened with nothing in it, and every decision after a torn stream then has to carry a case for that state.
-                    yield framer.keepalive()
+                    # Named before it is yielded, so the `try` covers the framer call and not the suspension: a `try` around `yield` also catches whatever the consumer throws in, which is how this call escaped being tagged until 2026-08-23.
+                    try:
+                        cue = framer.keepalive()
+                    except Exception as bug:
+                        raised_here = bug
+                        raise
+                    yield cue
         except Exception as error:
             # `Exception`, not `BaseException`, and that is the whole of how this side's own endings stay out. A client that goes away and a process that is shutting down both arrive as `CancelledError`, and a generator being closed arrives as `GeneratorExit`; neither derives from `Exception`, so neither reaches here and neither can be mistaken for upstream tearing. The spec calls that distinction `LOCAL_ABORT` and warns that the *position* facts of the two are identical — this is the one place the difference is still visible, so it is read here rather than inferred later.
             torn = error
@@ -342,10 +354,12 @@ async def _deliver(
             #
             # Still below the client deadline, and that is now a ruling rather than a deferral: see the branch above. Above the attempt deadline, though, which reaches here as an ordinary tear rather than a branch of its own — that one ends only this attempt, so a finished turn must not be handed to it as something to retry.
             break
-        # Whether this failure is one this side inflicted rather than suffered. Two ways to be ours, both positively detected: `BufferCapExceeded` and its siblings are the proxy's own protections firing, which `upstream-retry-and-continuation.md` lists under "无法继续" — another attempt would hit the same cap, and handing the turn back would invite the client to re-run something this side has already refused to hold; and anything raised out of assembling is a bug here.
+        # Whether this failure is one this side inflicted rather than suffered. Two ways to be ours, both positively detected: `BufferCapExceeded` and its siblings are the proxy's own protections firing, which `upstream-retry-and-continuation.md` lists under "无法继续" — another attempt would hit the same cap, and handing the turn back would invite the client to re-run something this side has already refused to hold; and anything raised out of this side's own code inside the loop — assembling, committing, the keep-alive — is a bug here.
         #
         # Everything else defaults to upstream's, and that default is load-bearing. It used to be the other way round — upstream was only recognised when the *caller* had named the failure — and with no `replay` configured the caller names nothing, so an ordinary `ConnectionError` from a torn socket reached the client as `internal_error`, the proxy taking the blame for upstream's connection. Naming the wrong party in the one word a client can read is worse than naming a vaguer right one.
-        ours = isinstance(torn, DeliveryError) or torn is from_assembly
+        #
+        # This is also the gate that decides the hand-over's `category`, though not by being read there: only `not ours` reaches `_hand_over`, so an error that gets as far as a hand-over block is by construction one this side did not inflict. `hand_over.py` says the same thing from its end.
+        ours = isinstance(torn, DeliveryError) or torn is raised_here
         reason = None if ours else (replay.eligible(torn) if replay is not None else None)
         if replay is not None and reason is not None:
             verdict = decide_stream_ending(

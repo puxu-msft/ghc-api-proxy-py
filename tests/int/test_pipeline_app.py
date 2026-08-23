@@ -3245,6 +3245,30 @@ def test_an_interrupted_turn_is_handed_back_to_the_client_as_a_tool_call(
     assert b'"text":"first"' in delivered
 
 
+def test_a_failure_the_taxonomy_cannot_name_is_still_upstreams() -> None:
+    """The hand-over used to call an unnameable failure `internal`, which says the proxy broke.
+
+    Whether the retry taxonomy has a word for a failure and whose failure it was are different questions, and only the first has a table here. The second is already answered by the gate that lets a hand-over happen at all: `stream.py` reaches one only on `not ours`, having positively identified this side's own protections and anything raised out of its own code.
+
+    `httpx2.DecodingError` is the carrier because it is real — nine call sites in `httpx2/_decoders.py`, raised when upstream's compressed body will not decompress — and because `normalize_upstream_error` genuinely cannot name it: it descends from `RequestError`, not `TransportError`. `deferred.md` §22.
+    """
+
+    async def torn_body() -> AsyncIterator[bytes]:
+        yield sse_upstream("first").partition(b"event: message_delta")[0]
+        raise httpx2.DecodingError("Error -3 while decompressing data")
+
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200, content=torn_body(), headers={"content-type": "text/event-stream"}
+        ),
+        overrides={"upstream_request_retry": {"max_total": 0}},
+    )
+    handed = _handed_back(_delivered(client))
+
+    assert handed["input"]["category"] == "upstream"
+    assert "DecodingError" in cast(str, handed["input"]["message"])
+
+
 def test_a_draining_process_does_not_replay_a_stream_the_client_never_saw() -> None:
     """A replay opens a new upstream attempt, and a process that has stopped accepting has promised not to take work on.
 

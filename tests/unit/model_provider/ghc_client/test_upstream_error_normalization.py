@@ -7,6 +7,8 @@ The defect these cover is not that a case was handled wrongly — it is that no 
 import httpx2
 import openai
 import pytest
+from h2.exceptions import NoSuchStreamError, RFC1122Error, StreamClosedError
+from h2.exceptions import ProtocolError as H2ProtocolError
 
 from app.model_provider.ghc_client.errors import normalize_upstream_error, retry_after_seconds
 from app.pipeline.exceptions import (
@@ -88,6 +90,45 @@ def test_a_transport_failure_becomes_a_network_retry() -> None:
     assert isinstance(normalized, UpstreamError)
     assert normalized.status_code is None
     assert reason_for(normalized) is RetryReason.NETWORK
+
+
+def test_one_goaway_has_one_fate_whichever_shape_it_arrives_in() -> None:
+    """The same upstream event used to be retried or not depending on the kernel's read boundary.
+
+    httpcore guards only the socket read; `receive_data` is outside that `try` (`httpcore2/_async/http2.py:425`), and httpx re-raises what its map does not know. So a GOAWAY whose following frames land in a *separate* read surfaces as `httpx2.RemoteProtocolError`, and the very same GOAWAY batched into *one* read surfaces as a bare `h2.exceptions.ProtocolError`. Measured 4/4 in `.dev/docs/upstream/h2-goaway/archive-260820/260820-h2-goaway-poc.md`.
+
+    Before `H2Error` joined `_CONNECTION_ERRORS` the second shape was neither retried nor called an upstream failure, while the first was both. Asserted as an equality between the two rather than as a value for each, because the defect was the divergence.
+    """
+    wrapped = normalize_upstream_error(
+        httpx2.RemoteProtocolError("<ConnectionTerminated error_code:0, last_stream_id:2147483647>")
+    )
+    bare = normalize_upstream_error(
+        H2ProtocolError("Invalid input ConnectionInputs.RECV_DATA in state ConnectionState.CLOSED")
+    )
+
+    assert isinstance(bare, UpstreamError)
+    assert isinstance(wrapped, UpstreamError)
+    assert reason_for(bare) is reason_for(wrapped) is RetryReason.NETWORK
+    assert classify(bare) is classify(wrapped) is Disposition.RETRY
+
+
+def test_the_whole_h2_family_is_named_not_just_the_one_that_was_measured() -> None:
+    """`transport.py` names `ProtocolError` because everything it sees arrived before the headers; on the body path that limit does not apply.
+
+    `StreamClosedError` is the one worth naming explicitly: it stringifies to a bare stream id, so left unnamed it produced a `message` reading `3` — which looks like something upstream said.
+    """
+    for error in (StreamClosedError(3), NoSuchStreamError(7), RFC1122Error("legal but unusual")):
+        normalized = normalize_upstream_error(error)
+        assert isinstance(normalized, UpstreamError), type(error).__name__
+        assert reason_for(normalized) is RetryReason.NETWORK, type(error).__name__
+
+
+def test_a_body_upstream_compressed_wrongly_is_still_not_ours_to_name() -> None:
+    """The counterpart, and the reason the h2 entry is a family rather than a catch-all.
+
+    `httpx2.DecodingError` descends from `RequestError`, not `TransportError`, so it stays unnamed — which is what `tests/unit/pipeline/delivery/test_stream_delivery.py` now uses to carry its premise. If this ever starts returning an `UpstreamError`, that test's premise assertion is the thing that will say so.
+    """
+    assert normalize_upstream_error(httpx2.DecodingError("Error -3 while decompressing data")) is None
 
 
 def test_an_error_that_is_not_the_upstreams_is_left_alone() -> None:

@@ -11,11 +11,12 @@ from contextlib import aclosing, suppress
 from types import SimpleNamespace
 from typing import Any, cast
 
+import httpx2
 import orjson
 import pytest
-from h2.exceptions import ProtocolError as H2ProtocolError
 
 from app.config.schema import ContentBlockStartCompat, UpstreamRequestRetryConfig
+from app.errors import WIRE_TYPES, ErrorCategory
 from app.model_provider.ghc_client.errors import normalize_upstream_error
 from app.observability.active_requests import ActiveRequestRegistry
 from app.observability.request_trace import RequestTrace
@@ -1165,6 +1166,68 @@ async def test_a_failure_no_second_attempt_could_answer_is_not_replaced() -> Non
         ]
 
 
+class _FramerWithABug(AnthropicFramer):
+    """A framer whose `block` raises, which is the one way this side's own code fails mid-delivery."""
+
+    def block(self, block: CompletedBlock) -> tuple[bytes, ...]:
+        raise TypeError("OutboundFramer.block() bug")
+
+
+@pytest.mark.asyncio
+async def test_a_bug_in_framing_is_not_charged_to_upstream() -> None:
+    """The proxy's own bug used to reach the client wearing upstream's name, and wearing two names at once.
+
+    `from_assembly` tagged `assembler.push` and nothing else, so an exception out of the framer fell through to the `not ours` default: the error frame called it `upstream_stream_failed` and the hand-over block called it `internal`. Two exits, opposite answers, one bug — and the client can only read the frame.
+
+    The stated reason for the limit was that widening the tagged region "means wrapping a `yield`". It did not: `_commit` returns a list, so every framer call inside it has already run by the time the first chunk leaves. `deferred.md` §22之二.
+    """
+    handed: list[BaseException | None] = []
+
+    def synthesize(error: BaseException | None, _stop_reason: str) -> dict[str, Any]:
+        handed.append(error)
+        return {"type": "tool_use", "id": "toolu_x", "name": "carry_on", "input": {}}
+
+    with pytest.raises(TypeError):
+        _ = [
+            chunk
+            async for chunk in stream_delivery(
+                feed(anthropic_stream("first")),
+                AnthropicAssembler(),
+                buffer=BlockBuffer(policy="block"),
+                settings=StreamSettings(sse_ping_interval=0),
+                framer=_FramerWithABug(message_id="msg_1", model="claude-model"),
+                continuation=ContinuationSupport(synthesize=synthesize),
+            )
+        ]
+
+    # Not handed back either: another attempt at a turn this side cannot frame would fail the same way, which is why `ours` gates the hand-over rather than only the wording.
+    assert handed == [], "a bug here is not the client's to carry on from"
+
+
+@pytest.mark.asyncio
+async def test_a_bug_in_framing_says_so_on_the_frame_it_does_send() -> None:
+    """The other half of the same fix: the frame the client can read must name the right party."""
+    chunks: list[bytes] = []
+
+    async def collect() -> None:
+        async for chunk in stream_delivery(
+            feed(anthropic_stream("first")),
+            AnthropicAssembler(),
+            buffer=BlockBuffer(policy="block"),
+            settings=StreamSettings(sse_ping_interval=0),
+            framer=_FramerWithABug(message_id="msg_1", model="claude-model"),
+        ):
+            chunks.append(chunk)
+
+    with pytest.raises(TypeError):
+        await collect()
+
+    body = b"".join(chunks).decode()
+    assert '"code":"proxy_delivery_failed"' in body
+    assert f'"type":"{WIRE_TYPES[ErrorCategory.INTERNAL]}"' in body
+    assert WIRE_TYPES[ErrorCategory.UPSTREAM] not in body
+
+
 @pytest.mark.asyncio
 async def test_a_failure_nobody_can_name_still_reaches_the_hand_over() -> None:
     """Whether a failure can be *named* decides whether another attempt is worth funding. It says nothing about whether the client can carry the turn on, and only the second question belongs at this door.
@@ -1325,7 +1388,9 @@ async def test_a_finished_turn_survives_a_failure_nothing_recognises(policy: str
 
     Answered from the verdict instead, this was one door short: a failure the caller's taxonomy refuses never reaches the verdict at all — it is raised first, and a complete reply goes with it. The client loses an answer it was owed, over an exception classifier that had never heard of the exception.
 
-    The classifier is production's own, and the failure is the real `h2.ProtocolError` hyper-h2 raises through the gap in httpcore's guard when a GOAWAY and the frames after it land in one read (`.dev/docs/upstream/h2-goaway/archive-260820/260820-h2-goaway-poc.md`). A stand-in exception paired with a stand-in taxonomy would assert the premise rather than prove it, and would keep passing if `normalize_upstream_error` ever learned to name this one — at which point the case being guarded no longer exists. So the premise is asserted out loud, first.
+    The classifier is production's own, and the failure is a real one it cannot name: `httpx2.DecodingError`, raised from nine places in `httpx2/_decoders.py` when upstream's gzip, br, zstd or deflate body will not decompress. It reaches this loop as itself — `DecodingError` descends from `RequestError`, not `TransportError`, so the `_CONNECTION_ERRORS` tuple does not catch it. A stand-in exception paired with a stand-in taxonomy would assert the premise rather than prove it, and would keep passing once `normalize_upstream_error` learned to name the carrier — so the premise is asserted out loud, first.
+
+    That is not hypothetical: the carrier used to be the bare `h2.ProtocolError` hyper-h2 raises through the gap in httpcore's guard, and on 2026-08-23 production learned to name it (`H2Error` joined `_CONNECTION_ERRORS`, closing `deferred.md` §22). The premise assertion is what said so, on the same day, instead of leaving this test passing for a reason that no longer held. **The subject has not changed** — it is still that `terminal.seen` must be answered before the taxonomy is consulted — only the exception carrying it.
 
     Both policies, because they lose different amounts through different code. Under `block` the client already holds the content and only the ending goes; under `full` nothing has been delivered yet, so the whole reply does — and recovering it runs the flush after the loop, which `block` never exercises because it has nothing held back.
 
@@ -1342,7 +1407,7 @@ async def test_a_finished_turn_survives_a_failure_nothing_recognises(policy: str
         known = normalize_upstream_error(error)
         return reason_for(known) if known is not None else None
 
-    torn = H2ProtocolError("nothing upstream of here knows what this is")
+    torn = httpx2.DecodingError("nothing upstream of here knows what this is")
     assert eligible(torn) is None, "the premise: production cannot name this failure"
 
     chunks = [

@@ -256,7 +256,13 @@ def hand_back_block(
         # `Exception`, because that is what decided the failure was continuable in the first place — the endings that are not exceptions never reach here with one.
         reason = replay_reason(error) if isinstance(error, Exception) else None
         # `.get` rather than a subscript: this runs inside the delivery generator, so a `RetryReason` someone adds later without touching the table would kill the client's turn rather than mislabel one field.
-        category = CATEGORY_FOR_REASON.get(reason, ErrorCategory.INTERNAL).value if reason else ErrorCategory.INTERNAL.value
+        #
+        # `UPSTREAM` when the retry taxonomy has no word for the failure, not `INTERNAL`. The two questions are different — "would another attempt help" is not "whose failure was this" — and only the first one has a taxonomy here. What answers the second is the caller's gate: `stream.py` reaches a hand-over only on `not ours`, having positively identified this side's own protections and anything raised out of its own code, so an error arriving here is one this side did not inflict. Until 2026-08-23 an unnamed failure was called `internal`, which told the client the proxy had broken when what had actually happened was an upstream protocol error nobody had taught the classifier to name. It also disagreed with the error frame the very same failure produced on the other exit, which said `upstream_stream_failed`. `deferred.md` §22, §22之二.
+        category = (
+            CATEGORY_FOR_REASON.get(reason, ErrorCategory.UPSTREAM).value
+            if reason
+            else ErrorCategory.UPSTREAM.value
+        )
     detail = interruption_message(
         error=error,
         stop_reason=stop_reason,

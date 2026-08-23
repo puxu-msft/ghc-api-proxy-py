@@ -15,6 +15,7 @@ import httpx2
 from anthropic import APIConnectionError as AnthropicConnectionError
 from anthropic import APIStatusError as AnthropicStatusError
 from anthropic import APITimeoutError as AnthropicTimeoutError
+from h2.exceptions import H2Error
 from openai import APIConnectionError as OpenAIConnectionError
 from openai import APIStatusError as OpenAIStatusError
 from openai import APITimeoutError as OpenAITimeoutError
@@ -33,7 +34,17 @@ RETRYABLE_STATUSES = frozenset({401, 408, 409, 425, 429, 500, 502, 503, 504})
 
 _STATUS_ERRORS = (OpenAIStatusError, AnthropicStatusError)
 _TIMEOUT_ERRORS = (OpenAITimeoutError, AnthropicTimeoutError)
-_CONNECTION_ERRORS = (OpenAIConnectionError, AnthropicConnectionError, httpx2.TransportError)
+# `H2Error` is here because nothing wraps it on the body path, and its absence made one upstream event have two fates. httpcore guards only the socket read — `receive_data` sits outside that `try` (`httpcore2/_async/http2.py:425`) — and httpx re-raises what its map does not know. So a GOAWAY whose following frames land in a *separate* read arrives as `httpx2.RemoteProtocolError` and is retried, while the same GOAWAY batched into *one* read arrives as a bare `h2.exceptions.ProtocolError` and was neither retried nor called an upstream failure. Which one happened was decided by the kernel's read boundary. Measured 2026-08-23, `.dev/docs/upstream/retry-and-continuation/reports/260823-h2-protocolerror-category.md`.
+#
+# The family rather than `ProtocolError`: `transport.py` names the narrower one because everything it sees arrived before the headers, and that limit does not apply here.
+#
+# This does not widen the closed set towards "unknown means retry" — the concern the module docstring opens with. An h2 exception is the HTTP/2 state machine's account of frames the peer sent; it is upstream's failure by construction, which is exactly what this tuple is for.
+_CONNECTION_ERRORS = (
+    OpenAIConnectionError,
+    AnthropicConnectionError,
+    httpx2.TransportError,
+    H2Error,
+)
 
 
 def retry_after_seconds(headers: Mapping[str, str]) -> float | None:
