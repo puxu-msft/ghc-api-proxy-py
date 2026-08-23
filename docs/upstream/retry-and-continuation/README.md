@@ -67,7 +67,7 @@ MCP server 在另一个仓（插件 `ghc-api-proxy-helper`），本会话够不�
 | 字段 | 取值 |
 |---|---|
 | `num_messages` | 客户端入站 body 的 `messages` 长度（`client_message_count(inbound_payload)`）。**不是**上游请求的长度——Responses 腿上一条 Anthropic 消息会变成若干 item。非 list 时（含缺键）为 `0` |
-| `category` | 上游把这一轮截短、并非错误时：**就是那个 `stop_reason`**，默认配置下唯一可能的值是 **`max_tokens`**。是错误时：`network` / `upstream` / `auth` **三者之一**，外加结构上今天不可达的 `internal` |
+| `category` | 上游把这一轮截短、并非错误时：**就是那个 `stop_reason`**，默认配置下唯一可能的值是 **`max_tokens`**。是错误时：`network` / `upstream` / `auth` / `internal` **四者之一，四个都可达**——`internal` 的可达性 2026-08-23 实测确认，见下 |
 | `message` | **一句代理合成的诊断，不是异常原文**（2026-08-23 起，提交 `aac348e`）。格式与取值见下 |
 
 ### `message` 的格式（2026-08-23 起，本节对应 `2d6b878`）
@@ -124,7 +124,16 @@ MCP server 在另一个仓（插件 `ghc-api-proxy-helper`），本会话够不�
 三条会绊到人的：
 
 - **`category` 的错误取值经过重试分类器，不是对异常原地分类。** 一次传输撕裂原地分类是 `internal`（它不是 `OSError`），而重试路径叫它 `network`——走同一个映射是为了让两边对同一个事件说同一个词。
-- **`internal` 今天发不出来，但接收端仍应兜住它。** `CATEGORY_FOR_REASON`（`hand_over.py:21-25`）确实有一个落 `internal` 的默认分支，但 `RetryReason` 只有三个成员且三个全在表里，而 `stream.py` 保证「带 error 走到合成」之前 `reason` 必非 `None`——所以那一格结构上不可达，**不要因为它出现在这张表里就以为线上见过**。它是防御性的：将来谁给 `RetryReason` 加了成员却忘了改表，才会真的发出 `internal`。（**2026-08-23 存疑**：`260823-handover-error-shapes.md` §2.2(g) 认为裸 `h2.exceptions.ProtocolError` 与 framing 层 bug 都能带着 `reason is None` 走到合成，那样 `internal` 就是可达的。两说未对账，以报告的代码直读为准去复核，本条留作待查。）
+- **`internal` 是可达的，而且它今天同时盖着两件不同的事。** 本节曾长期声称它「结构上不可达」，理由是 `RetryReason` 三个成员全在 `CATEGORY_FOR_REASON` 里、且带 error 走到合成前 `reason` 必非 `None`。**第二个前提已经垮了**：`78be0d4`（2026-08-22 18:57）把 `stream.py` 的交接判据从 `reason` 上解耦，改成无条件的 `if not ours:`，于是 `reason is None` 照样合成、照样落 `internal`。那句「不可达」是次日 `a8862e6` 才写下的，引的是一份当时已经过期的心智模型——**不是文档没跟上代码，是文档写下时就已经错了**。2026-08-23 端到端实测（`reports/260823-h2-protocolerror-category.md` §1.5，附 `network` 阴性对照）实际收到 `"category": "internal"`。
+
+    接收端要知道的是**这个值今天不区分两种相反的事**：
+
+    | 来源 | 是什么 | 报 `internal` 对不对 |
+    |---|---|---|
+    | 裸 `h2.exceptions.H2Error` 全族（GOAWAY 与其后的帧落进同一次 socket 读时从 httpcore 的缺口裸奔上来）、`httpx2.DecodingError` | **上游/传输的真实故障** | **错**。同一个 GOAWAY 若分开到达就是 `network` 且可重放 |
+    | framing 层的 bug（`framer.block()` 抛的 `TypeError`/`KeyError` 等） | **本仓自己的 bug** | 对 |
+
+    修不修、怎么修在 [`deferred.md`](deferred.md) 第 22 条。**在它闭合之前，接收端不应把 `internal` 读成「代理内部出错」**——它有一半概率是上游协议故障。
 - **`max_tokens` 是 Anthropic 的拼法，不会出现 `max_output_tokens`；而且把配置改成 `max_output_tokens` 也不会生效。** 上游 Responses 说的是后者，两条路径都在**门之前**就归一了（`src/app/pipeline/delivery/formats/openai_responses.py`、`src/app/pipeline/translation_driver/responses.py`），所以那个原始拼法压根活不到比较的那一步。异源评审的一手实测（含证伪对照：把 `hand_over_stop_reasons` 配成 `{"max_output_tokens"}`，合成一次都没触发）见 `reports/260822-review-mcp-contract-and-deadline-order.md` F6/F11。
 
 **工具未声明时只告警不拦截**：客户端没在 `tools` 里声明这个名字，本仓打一条 `auto_retry_tool_not_declared` 警告日志，**照发不误**。用户 2026-08-21 裁决，人写权威原文在 `docs/.human-controlled/upstream-retry-and-continuation.md:37`。

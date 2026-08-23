@@ -310,31 +310,64 @@ if replay is None or reason is None:
 
 **不在本次范围，登记而非动手**，理由与第 4 条同源：S7 那一格（任意未识别事件）要不吵就得有一份「明知故忽略」的词表，而本项目规矩是上游行为靠录制不靠想象；其余各格的日志级别与措辞该一并定，而不是各修各的。**证据等级：位置与「零痕迹」均为一手实测（21 组反例 + 正样本对照），确凿；排期与级别需裁决。**
 
-### 22. `internal` 到底可不可达 —— 两份文档互相打架
+### 22. `internal` 同时盖着「上游协议故障」与「本仓 bug」两件相反的事 —— 待裁决要不要修
 
-`README.md`「本仓实际发出的 MCP 工具调用」一节长期写着：`category` 落到 `internal` 的那一格**结构上不可达**，理由是 `RetryReason` 只有三个成员且三个全在 `CATEGORY_FOR_REASON` 里，而带 error 走到合成之前 `reason` 必非 `None`。
+**「可不可达」这一半已经查实，不再是开放项。** 2026-08-23 端到端实测（`reports/260823-h2-protocolerror-category.md`，探针接生产的 `replay_reason` 与 `hand_back_block`，附 `httpx2.RemoteProtocolError → network` 的阴性对照）：
 
-`reports/260823-handover-error-shapes.md` §2.2(g)/(h) 的代码直读得出相反结论，给出两条可达路径：
+```
+h2.exceptions.ProtocolError   -> {'category': 'internal', ...}
+httpx2.DecodingError          -> {'category': 'internal', ...}
+framing-bug TypeError         -> {'category': 'internal', ...}
+httpx2.RemoteProtocolError    -> {'category': 'network',  ...}   ← 阴性对照
+```
 
-- **裸 `h2.exceptions.ProtocolError`。** httpcore2 的 `_read_incoming_data` 只把 `try` 包在 socket 读上，`self._h2_state.receive_data(data)` 在 `try` 之外（`httpcore2/_async/http2.py:401-431`）；httpx2 的 `map_httpcore_exceptions` 对映射表外的异常裸 `raise`（`httpx2/_transports/default.py:111-112`）。于是它以原类型抵达交付层，`normalize_upstream_error` 不认它 → `replay_reason` 给 `None` → 落 `internal`。而 `stream.py:368` 的 `if not ours:` 是无条件的（2026-08-22 修的洞），**不会**因为 `reason is None` 就拦住它。
-- **framing 层的 bug。** `stream.py:279` 的注释自己承认 `from_assembly` 只覆盖 `assembler.push`，`framer.block(...)` 抛出的 `TypeError`/`KeyError` 之类 `ours=False`，同样走交接、同样落 `internal`。
+`README.md` 那句「结构上不可达」**是错的，且写下时就已经错了**：它的前提「带 error 走到合成前 `reason` 必非 `None`」被 `78be0d4`（2026-08-22 18:57）解耦掉，而那句话是次日 `a8862e6`（06:26）才写的。README 已更正。
 
-两说的差别在于「`reason` 必非 `None`」这个前提是否还成立——它引的是 2026-08-22 之前的 `stream.py:325-327`，而那个洞已经被修了。**没有实测对账，`README.md` 里那句已标注存疑但未撤销。**
+### 仍待裁决的是：要不要修，以及怎么修
 
-有两件事要办，都还没办：**其一**，实地复核哪一说对（构造一个裸 `h2.ProtocolError` 走完交付链，看发出的 `category`）。**其二**，若确认可达，那么一次**上游协议故障**会被报成 `internal`（代理内部错误），这是分类本身报错了对象——而接收端对 `internal` 该回什么，两侧都还没定。
+`internal` 今天盖着方向相反的两件事：
 
-**不在本次（2026-08-23 `message` 字段增强）范围内**：那次只动 `message`，`category` 一个字节没改。证据等级：代码直读，双方各有出处，**未实测**。
+| 来源 | 是什么 | 报 `internal` 对不对 |
+|---|---|---|
+| 裸 `h2.exceptions.H2Error` 全族、`httpx2.DecodingError` | 上游/传输的真实故障 | **错** |
+| framing 层 bug（`framer.block()` 抛的异常） | 本仓自己的 bug | 对 |
 
-### 23. 代理发 `max_tokens`，插件按 `truncated` 配回复 —— 两侧从未对上
+**错报那一半的代价不止是个标签。** 同一个缺口让它在 body 阶段**既不可重放、也被归错类**；而**同一个 GOAWAY 事件**若 httpcore 恰好包住了它（GOAWAY 与后续帧分开到达），就是 `network` 且可重放。决定命运的是操作系统那一次 `read()` 的分包——见 `../h2-goaway/archive-260820/260820-h2-goaway-poc.md` 第 34 条（源码确定 + 4/4 实测）。
 
-`decisions.md` 第四节第 1 条把这件事记成「待对齐项」，2026-08-22 的补记说「本会话联系不到那位同伴，改为把发出方的一手契约写进 README，那一侧照着对即可」。**2026-08-23 核对，那一侧没有对。**
+**候选修法（报告 §4 有完整影响面）**：
 
-- 本仓发出的 `category` 就是 `stop_reason` 原值，默认配置下恒为 `"max_tokens"`（`src/app/config/schema.py:155`、`hand_over.py`）。
-- 插件 `~/.claude/my/ghc-api-proxy-helper/src/auto_retry/config.py` 的 `DEFAULT_REPLIES_BY_CATEGORY` 只有一个键，是 `"truncated"`；其 `config.toml` 与 README 里也一路写的 `truncated`。
+- **(a) 把 `h2.exceptions.H2Error` 加进 `errors.py` 的 `_CONNECTION_ERRORS`。** 一行。body 阶段的 h2 与 headers 阶段的 h2 拉齐（headers 阶段今天由 openai SDK 的 `except Exception → APIConnectionError` 兜住，早就是 `network`）。**唯一不新增分类表的改法。** 实测只红 2 个测试点，且红的是 `test_a_finished_turn_survives_a_failure_nothing_recognises` 的**前提断言**——那条测试的 docstring 自己写明了「若 `normalize_upstream_error` 学会命名这一个，本用例守的洞就不存在了」。所以要连带给它换一个「生产叫不出名字」的载具，或把断言反过来写。**报告推荐这一条，本会话同意。**
+- **(b) 只在 `replay_reason` 里特判。** 「影响面更小」是**错觉**：因为 `replay_reason` 同时喂着 `ReplaySupport.eligible` 与交接分类，它改的行为与 (a) 一样多，只是测试打不到（那条测试用的是自建的 stand-in `eligible`，不是生产接线）。而且会让 `replay_reason` 的文档串「`normalize_upstream_error` is the same mapping the driver's own retries are decided by」变成假话。**不推荐。**
+- **(c) 只改 `hand_back_block` 的分类，不动可重放性。** 等于把分裂搬进同一个函数——那里第 250 行的注释正是在说「所以它读的是同一张表」。**不推荐。**
 
-于是**输出超长的交接拿到的是 `reply.default`**，也就是 `network issue occurred, please continue`，而不是为它准备的 `the previous response hit the output token limit, please continue from where it stopped`。行为上不致命（模型照样会继续），但发出的是一句与实情不符的指令——它说的是网络故障，实际是写满了。
+**为什么要用户裁决**：(a) 会让上游协议层故障开始花网络重试预算。本会话判断这**符合**用户亲笔的 `docs/.human-controlled/upstream-retry-and-continuation.md`（「这些情况下一般可以继续：网络中断」），是把代码拉回既有裁决而非新立规矩；但它确实改动重试行为，且要改写别人的一条回归守卫，所以不擅自动手。
 
-**这一条不属于 `message` 字段，也不在本仓**：修法要么插件把键改成 `max_tokens`，要么两侧约定一个中立词。**归属与措辞需用户裁决**，本仓单方面改配置只会把不一致换个方向。证据等级：两侧代码直读，确凿。
+**连带**：修法一旦定下，`README.md` 那一格与「给接收端的四点」要跟着改口径——若采纳 (a)，`internal` 就只剩本仓 bug 一种来源，接收端的含义随之收紧。
+
+### 22 之二. 同一个失败，两条出口给两个相反的答案
+
+同一个裸 h2 异常：
+
+- `committed_count >= 1` → 走交接块 → `category: "internal"`（甩锅自己）
+- `committed_count == 0` → 走 SSE 错误帧（`stream.py:385`，`ours=False` 那一侧）→ `type: "upstream_error"`（甩锅上游）
+
+**方向正好相反，而分岔点只是缓冲策略放行了几个块。** framing bug 上同样成立且同样错：错误帧会把本仓的 bug 标成 `upstream_error`。
+
+这正是 `hand_over.py` 开头那条注释想消灭的东西（「Two taxonomies for one failure is two answers」），只是它当时消灭的是「`classify_error` vs 重试路径」那一对，没看见这一对。证据等级：本次实测（两个变体各跑一次）。**与第 22 条一起裁决为宜**——单修一边只会把不一致换个方向。
+
+### 22 之三. `transport.py` 的 h2 识别挂在没有活调用者的链上
+
+`is_responses_headers_pending_transport_error`（`transport.py:32`，专门点名 `H2ProtocolError` 并附了机理注释）唯一被 `client.py:192` 调用；`client.py:177` 的 `send_responses_headers` 唯一被 `src/app/upstream/copilot.py:131` 调用；而 **`CopilotUpstream` 在 `src/` 与 `tests/` 里没有任何实例化点**。现役 provider 走的是 `github_copilot.py:167-172` 的 `send_responses`。
+
+**没有造成行为缺口**——headers 阶段由 openai SDK 兜住了。但它是一份**读起来像在保护现役路径、实际不在现役路径上**的守卫，而且它是全仓唯一一处写着「h2 异常不被包装」这个知识的地方。第 22 条那个缺口能存在这么久，一部分原因就是这份守卫让知识看起来已经在场。
+
+处置需裁决：随 legacy 链一起移进 `src/.archived/`，还是在现役链上重新接线。**不建议顺手删**——按 `never-delete-implemented-functionality-unsolicited`，孤儿模块可以留着。证据等级：代码直读。
+
+### 23. ~~代理发 `max_tokens`，插件按 `truncated` 配回复~~ —— 已修复（2026-08-23）
+
+插件侧已把 `DEFAULT_REPLIES_BY_CATEGORY` 的键从 `truncated` 改成 `max_tokens`，并加了一段说明「词表由发出方决定，不是这边命名的」；同时新增 `reply_source` 字段（`by_category` / `default` / `loop`）写进 JSONL，**下次再对不上，记录里一眼看得见**——那正是这次三个月没被发现的原因：落回 `reply.default` 是静默的。
+
+改动在 `~/.claude/my/ghc-api-proxy-helper/`，本会话核对时尚未提交。本条留作记录：**一个「有才生效」的查表，对不上时与「没配这一项」同形**，与第 16 条「日志行上的缺席读不出来」是同一族。
 
 ## 明确不做
 
