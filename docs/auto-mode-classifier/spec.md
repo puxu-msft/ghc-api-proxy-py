@@ -191,8 +191,8 @@ allow 侧没有这个问题：`0 > 阈值` 对范围内的每个阈值都为假�
 
 ## 8. 证据出处
 
-- 代码侧（Claude Code 2.1.241 / 226 / 207 静态提取）：`.dev/docs/tmp/260823-cc-auto-mode-request-shape.md`
-- 流量侧（2300 条真实上行 body，2026-07-25 ～ 08-13）：`.dev/docs/tmp/260823-auto-mode-traffic-samples.md`
+- 代码侧（Claude Code 2.1.241 / 226 / 207 静态提取）：`reports/260823-cc-auto-mode-request-shape.md`
+- 流量侧（2300 条真实上行 body，2026-07-25 ～ 08-13）：`reports/260823-auto-mode-traffic-samples.md`
 - 本文引用的 `app.pretty.js` 行号均指 `~/.claude/refs/claude-code-2.1.241/app.pretty.js`。行号是该版本的快照，版本一换即失效。
 
 ## 9. 已知的适用性限制

@@ -50,13 +50,13 @@
 
 **状态**：未修，与本特性相邻但不属于它。
 
-`tests/int/recorded/from_history.py:210` 的注释写着 `# Left empty: history records no request body, so there is nothing to project.`，而本次取证证明历史库完整保存了入站 body——`payload-skeleton` + `payloadSequences` + `v3_sequence_nodes` 三段可以拼回完整请求（重建路径见 `../tmp/260823-auto-mode-traffic-samples.md` §2.2）。
+`tests/int/recorded/from_history.py:210` 的注释写着 `# Left empty: history records no request body, so there is nothing to project.`，而本次取证证明历史库完整保存了入站 body——`payload-skeleton` + `payloadSequences` + `v3_sequence_nodes` 三段可以拼回完整请求（重建路径见 `reports/260823-auto-mode-traffic-samples.md` §2.2）。
 
 影响的不只是一句注释：如果将来要给**上行方向**建 cassette（比如给分类器请求做夹具），现状的注释会让人以为必须真实调用上游或手写，而实际上可以从历史库导出真实骨架——那正是本项目「Upstream behaviour is recorded, not imagined」想要的东西。
 
 需要主会话或接手者裁决：是否修正注释并扩展 `from_history.py` 支持请求侧投影。
 
-出处：`../tmp/260823-auto-mode-traffic-samples.md` §7.1。
+出处：`reports/260823-auto-mode-traffic-samples.md` §7.1。
 
 ## D4 — 内嵌的网关契约文档值得单独立项
 
@@ -70,4 +70,4 @@ Claude Code bundle 里内嵌了一份写给**网关/代理实现方**的契约�
 
 这与本项目的错误语义设计直接相关——我们现在如何把上游错误映射成客户端能正确恢复的形状，很可能可以对着这张表校准。**本次不展开**，建议单独立一个 topic。
 
-出处：`../tmp/260823-cc-auto-mode-request-shape.md` §9。
+出处：`reports/260823-cc-auto-mode-request-shape.md` §9。
