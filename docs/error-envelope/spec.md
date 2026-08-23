@@ -1,6 +1,14 @@
 # 错误信封：直连透传 / 翻译过 IR
 
-**这份是 Spec**，答「应该是什么样」，规范性。**当前为 v3 草稿，未冻结**——§10 有两项待用户裁决。
+**这份是 Spec**，答「应该是什么样」，规范性。**2026-08-23 冻结**——§10 的两项已由用户裁决，本文的规范条款自此为实施的判据。变更需要新的裁决或新的评审共识。
+
+**冻结后的修订**：
+
+| 日期 | 条款 | 变化 | 依据 |
+|---|---|---|---|
+| 2026-08-23 | §5.1 | 补全 `ProviderError` 家族五个子类；冻结时的表只列了其中两个，而 `EndpointNotSupported` 已被实测证明可达 | 计划评审 [reports/260823-plan-review.md](reports/260823-plan-review.md) F-04，我方独立复现 |
+
+冻结后的修订走评审共识而非用户裁决，因为改的是我推导出的映射表，不是用户裁定的那两条原则。
 
 ## 修订记录
 
@@ -148,7 +156,11 @@ v2 把「枚举已存在」当成「IR 已存在」，是从 v1「在错误的�
 | 请求体不是合法 JSON / 不是对象 | `CLIENT` | 400 | |
 | `InboundRequestError`（缺 model、路径段为空、不可流式端点请求 stream） | `CLIENT` | 400 | |
 | `UnknownModel` | `NOT_FOUND` | **404** | **行为变更**：今天是 400。理由是本代理自己的语义——请求指名的模型在目录里不存在，这是「没找到」而不是「你的 body 写错了」；`CapabilityMissing` 与它的区别正在于此。两个 SDK 对 400 与 404 都不重试，客户端的重试动作不变，改变的是它拿到的异常类。**不以「Anthropic 真实 API 也这样答」为据**——仓库里没有那个观测，我未验证 |
-| `CapabilityMissing` | `CLIENT` | 400 | 模型存在但不能做这件事，是请求与模型不匹配 |
+| `CapabilityMissing` | `CLIENT` | 400 | 目录对该模型的端点集为空。模型在，但没说它能做什么，按拒绝处理 |
+| `EndpointNotSupported` | `CLIENT` | 400 | 模型不宣称支持这个端点。**冻结时漏了这一格**，而它已被实测证明可达（`POST /v1/messages` 请求 `claude-model@openai-responses` → 400，上游请求数 0） |
+| `EndpointNotImplemented` | `NOT_IMPLEMENTED` | 501 | 它的 docstring 就写着「模型宣称支持这个端点，但**本代理**没有驱动它」——这是代理的能力缺口，与 `TranslatorNotFound` 同格，不该说成客户端 body 有错 |
+| `ProviderNotConfigured` | `INTERNAL` | 500 | 运营方配置问题（`default_model_provider` 指向未配置的名字）。客户端改什么都没用 |
+| 其它 `ProviderError`（基类或未列出的子类） | `CLIENT` | 400 | **保持今天的行为，不猜**。已命名的子类优先。为一个尚不存在的失败改变客户端动作，比留着现状更糟；要求一条测试钉住 `ProviderError` 的子类集合，新增一个子类必须显式分类才能通过——这是「枚举加成员会给每张以它为键的表造缺项」在类层级上的同一形状 |
 | `RoutingError` | `CLIENT` | 400 | |
 | `TranslatorNotFound` | `NOT_IMPLEMENTED` | **501** | **行为变更**：今天是 400，那是把「代理没建这个能力」说成「客户端 body 有错」。与 `route.implemented=False` 同格 |
 | `TranslationRefused` | `CLIENT` | 400 | 带 `code` 与 `param` |
@@ -282,45 +294,39 @@ inbound 是 Chat Completions 且流式时，那条腿没有 framer，写不出�
 
 v3 纳入：**Gemini 的 501 用 Gemini 的错误信封**。这不要求实现成功请求的翻译，只要求已有端点用它自己声明的错误格式。
 
-## 10. 待用户裁决
+## 10. 用户已裁决的两项
 
-### 10.1 翻译路径上读不动的上游错误
+### 10.1 翻译路径上读不动的上游错误 —— 裁决：候选 A
 
 裁决第 1 条的前提是直连，不适用；第 2 条的前提是「有判断力、需要支持」，也不适用；`message-translation.md` 的「**按需**理解和处理」把这一格留空。生产上会真的发生（上游改版、新错误码、供应商特有的失败）。
 
-三个候选，以 Anthropic 客户端 + 未知 Responses 错误为例，给出完整 wire：
+**用户 2026-08-23 裁决：取候选 A。** 规范条款如下。
 
-**候选 A —— 渲染 `UPSTREAM`，原文进一个命名扩展字段**
+翻译路径上，上游的错误既不属于本项目已建 IR 的任何概念、也读不出可靠的 `category` 时：
+
+- `category` 取 `UPSTREAM`，按 §6.1 / §6.2 渲染成客户端方言的类型、状态与 `code`；
+- **上游原文原样放进一个命名扩展字段**，保持其结构而不是压成字符串。字段名 `upstream_error`，值是上游 body 解析出的 JSON 值本身；解析不出 JSON 时，放它的原始文本（`ErrorInfo.source_bytes` 按其 `source_content_type` 解码，解不出时用 `latin-1` 兜底以保证不丢字节）。
+
+以 Anthropic 客户端 + 未知 Responses 错误为例，完整 wire：
 
 ```json
 {"type":"error","error":{"type":"api_error","message":"upstream failed and this proxy could not interpret its error","code":"upstream_failure","upstream_error":{"type":"vendor_specific_thing","detail":"…"}}}
 ```
 
-客户端 SDK 一定能解析（`type`/`message` 齐备，多余字段留在 `.body` 里）。代价：`upstream_error` 是本项目扩展，Anthropic 的 `ErrorObject` 没声明它，**typed 属性拿不到**，客户端要读 raw body。
+**已知代价，明写而非回避**：`upstream_error` 是本项目的扩展，Anthropic 的 `ErrorObject` 没有声明它，所以客户端**拿不到 typed 属性**，要读 raw body（Python SDK 会把整个 dict 留在 `APIStatusError.body` 里）。这是取 A 而非 C 换来的：原文保持结构化，机器不必二次解析一段人读的字符串。
 
-**候选 B —— 原样透传上游的错误体**
+**未采纳的两个，记录理由**：
 
-```json
-{"error":{"code":"vendor_specific_thing","message":"…"}}
-```
+- **候选 B（原样透传上游错误体）**：零信息损失、零维护，但 Anthropic 客户端会拿到一个没有顶层 `type` 的形状，SDK 的 `.type` 取不到；且与「翻译路径理应翻译」相抵触。
+- **候选 C（原文只进 `message`）**：完全落在方言声明的字段内，任何客户端都读得到全部信息，但原文变成人读的字符串，机器要二次解析，`message` 长度也不可控。
 
-零信息损失、零维护。代价：Anthropic 客户端拿到一个没有顶层 `type` 的形状，SDK 的 `.type` 会是 `None` 或解析失败；与「翻译路径理应翻译」相抵触。
+### 10.2 Chat Completions 流式腿缺少合法的 error carrier —— 裁决：推迟
 
-**候选 C —— 渲染 `UPSTREAM`，原文只进 `message`**
+**用户 2026-08-23 裁决：推迟，不在本切片内实现。**
 
-```json
-{"type":"error","error":{"type":"api_error","message":"upstream failed and this proxy could not interpret its error: {\"code\":\"vendor_specific_thing\",\"message\":\"…\"}","code":"upstream_failure"}}
-```
+见 §8。§7 的不变量对这条腿**带例外**，此处是该例外的授权来源。这条腿在守卫触发或上游撕裂时，客户端拿到的仍然是已到达的上游字节 + 连接裸断，没有任何错误帧。它与「给 Chat Completions 找块边界」是同一件工作，那件此前已被推迟过。
 
-完全在方言的声明字段内，任何客户端都能读到全部信息。代价：原文变成一段人读的字符串，机器要二次解析；`message` 长度不可控。
-
-**倾向 A**，理由是与既有的「翻译路径采用白名单」一致，且原文保持结构化。但三者的客户端可见后果不同，**请用户裁**。
-
-**在裁决到达之前，不实施依赖这一格的任何公共行为。** 不依赖它的结构性部分（`ErrorInfo`、source → IR 表、各方言 writer、直连透传）可以先做。
-
-### 10.2 Chat Completions 流式腿缺少合法的 error carrier
-
-见 §8。它不是本 Spec 造成的，但 §7 的不变量因它而带例外。是否在本切片内为该腿实现错误表达，请用户裁。
+**登记去向**：`.dev/docs/error-envelope/deferred.md`，实施时建立。
 
 ## 11. 不在本 Spec 范围内（每条都登记，不静默排除）
 
