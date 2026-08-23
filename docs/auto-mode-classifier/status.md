@@ -14,7 +14,7 @@
 
 ## 配置项归属与形状
 
-用户 2026-08-23 分两次裁定，**均亲笔写进** `docs/.human-controlled/config.example.yaml`：先把它从 `inbound.auto_mode_classifier` 移到 `hook_fix_anthropic_request.intercept_auto_mode_classifier`，随后定下结构化的最终形状与键名：
+用户 2026-08-23 分三次裁定，**均亲笔写进** `docs/.human-controlled/config.example.yaml`。最终形态（该文件当前内容，三个键）：
 
 ```yaml
   # 拦截并直接响应 auto mode 分类器的请求。
@@ -24,20 +24,22 @@
     #   block: 直接拒绝
     decision: allow
 
-    # 两种匹配方式：
     match_system_prompt_prefix: "You are a security monitor for autonomous AI coding agents."
-    match_transcript_open: "<transcript>\n"
 
     block_reason_str: "Blocked by proxy, without a model review."
 ```
 
+三次分别是：① 从 `inbound.auto_mode_classifier` 移到 `hook_fix_anthropic_request.intercept_auto_mode_classifier`；② 定下结构化形状与键名（我曾据其第一版误读为标量，见下）；③ 把 `match_transcript_open` 从配置项降为常量。
+
 **归属**比原来的 `inbound` 贴切：这一族就是 `on_client_request_parsed` 那一刻，作用域本来就限定在 Anthropic Messages 那条腿，而短路点正是在 `fix_anthropic_request()` 返回之后、翻译之前。它也把评审挑出的那道入口边界（B-06）从「代码里的一个 if」变成了配置结构本身表达的东西。
 
-**键名**比我原来的好，而且省掉了本来要靠注释解释的事：`match_` 前缀直说这两个是识别用的、不影响答什么；`block_reason_str` 直说它只在拦截时用。
+**键名**比我原来的好，而且省掉了本来要靠注释解释的事：`match_` 前缀直说它是识别用的、不影响答什么；`block_reason_str` 直说它只在拦截时用。
 
 中间我有一处推断错了并已纠正：从用户第一版写的标量加 `false: 透传` 那行注释，我推断禁用态该用布尔（理由是 YAML 1.1 把裸 `off` 读成布尔，本项目 `assistant_message_layout` 等正是为此用 bool）。用户第二版写的是 `passthrough`——而 `passthrough` 根本不在那个坑里，所以那条论证在此不适用。以用户的为准。
 
-**已实测**：用户那份 config 解析通过、四个键的值都被读到生效位置、一条分类器形状的请求拿到 allow verdict、`block` 时 `<reason>` 里是用户写的那句话、schema 默认 `passthrough` 返回 `None`。
+**第三次裁定（同日）**：`match_transcript_open` 不该是配置项，写死。理由用户给的是「`<transcript>` 不是会常变的内容」，成立——两条标记的**易变性不对等**，M1 是一句会被润色的英文散文，M2 是结构标签。另有一条更硬的理由：M2 的值必须精确到尾部 `\n`，容易配错且配错无声（只表现为命中数为零）。钉死不削弱兜底，反而更纯粹：易变的那条给旋钮，稳定的那条接住它。
+
+**已实测**：用户那份 config 解析通过、三个键的值都被读到生效位置、一条分类器形状的请求拿到 allow verdict、`block` 时 `<reason>` 里是用户写的那句话、schema 默认 `passthrough` 返回 `None`。
 
 ### 落地清单
 
@@ -47,13 +49,13 @@
 | `src/app/pipeline/delivery/formats/anthropic_messages_synthetic_reply.py` | 新增 `auto_mode_body` / `auto_mode_sse` |
 | `src/app/pipeline/driver.py` | `handle()` 内短路 + `_answered_auto_mode` + 发布 `request.succeeded` |
 | `src/app/config/schema.py` | `AutoModeDecision` 类型、`FixAnthropicRequestHook.intercept_auto_mode_classifier` |
-| `tests/unit/pipeline/test_auto_mode_classifier.py` | 41 个测试 |
+| `tests/unit/pipeline/test_auto_mode_classifier.py` | 42 个测试 |
 
 ### 验证
 
 - `ruff check src tests` 全过；`pyright` 在上述五个文件上 0 错误（仓库既有的 `stream_cap.py` 相关错误与本改动无关，未触碰）
 - 全量回归通过，覆盖率 89.56%（门槛 80）
-- **变异验证**：六个不变量逐个回退，对应测试全部变红（4/2/2/2/1/2 条），基线字节级还原后仍 41 passed。第六个是配置改为标量后新增的——把 `decision is False` 短路拆掉，两条测试变红，所以「默认关闭」是被守住的而不是碰巧成立的。脚本一次性，未收编
+- **变异验证**：七个不变量逐个回退，对应测试全部变红（4/2/2/2/1/2/2 条），基线字节级还原后仍 42 passed。第六个是配置改为标量后新增的——把 `decision is False` 短路拆掉，两条测试变红，所以「默认关闭」是被守住的而不是碰巧成立的。脚本一次性，未收编
 
 ## 评审处置表
 

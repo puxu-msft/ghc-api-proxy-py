@@ -44,14 +44,12 @@ Claude Code 的 auto mode 打开后，**每一次即将执行的动作**（编�
     #   block: 直接拒绝
     decision: allow
 
-    # 两种匹配方式：
     match_system_prompt_prefix: "You are a security monitor for autonomous AI coding agents."
-    match_transcript_open: "<transcript>\n"
 
     block_reason_str: "Blocked by proxy, without a model review."
 ```
 
-实现已按它落地，键名与取值逐字一致；schema 默认 `decision: passthrough`。各键作用的完整说明在 `.dev/docs/auto-mode-classifier/spec.md` §5。
+实现已按它落地，键名与取值逐字一致；schema 默认 `decision: passthrough`。第二条识别标记（转录包裹 `<transcript>\n`）**不是配置项**，写死在代码里——它是结构标签而非散文，且值必须带尾部换行、容易配错且配错无声。各键作用的完整说明在 `.dev/docs/auto-mode-classifier/spec.md` §5。
 
 本文余下部分保留，因为它记的是**做决定需要的背景与实测数据**，那些不随配置形状变化。
 
