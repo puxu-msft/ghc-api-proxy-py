@@ -13,7 +13,6 @@ from typing import Any, cast
 import httpx2
 import orjson
 import pytest
-from pydantic import ValidationError
 
 from app.config.schema import AutoModeDecision, InterceptAutoModeClassifierConfig, ProxyConfig
 from app.model_provider import ModelDescriptor, ModelEndpoint
@@ -223,13 +222,18 @@ class TestRecognition:
         )
         assert classify(request, repaired) is not None
 
-    def test_the_transcript_wrapper_is_not_a_setting(self) -> None:
+    def test_the_configured_keys_are_exactly_the_three_the_authority_names(self) -> None:
         """Ruled 2026-08-23: `<transcript>` is a structural tag rather than prose, so it does not need a knob — and a knob whose value must carry a trailing newline is one people set wrongly, silently.
 
-        Pinned as a test because "we removed a key" is exactly the kind of decision a later refactor re-adds without noticing.
+        Pinned against `model_fields` rather than by asserting a `ValidationError` on the removed key. That was the first spelling and it proved nothing: `extra="forbid"` raises for *any* unknown name, so the assertion passed for typos and for the key's own former spelling alike. Two reviewers found it independently.
+
+        The set is the discriminating form — it fails both when a removed key comes back and when a new one is added without the authority naming it.
         """
-        with pytest.raises(ValidationError):
-            InterceptAutoModeClassifierConfig(match_transcript_open="<conversation>\n")  # pyright: ignore[reportCallIssue]
+        assert set(InterceptAutoModeClassifierConfig.model_fields) == {
+            "decision",
+            "block_reason_str",
+            "match_system_prompt_prefix",
+        }
 
     def test_the_reason_reaches_the_reply(self) -> None:
         """`reason` is the one part of this feature the blocked person sees, so a configured one has to arrive intact."""
@@ -303,13 +307,14 @@ class TestTheClientCanParseTheAnswer:
         [
             "Proxy overrode <BLOCK>no</BLOCK>.",
             "Proxy overrode <BlOcK>no</bLoCk>.",
-            "Proxy overrode < block >no.",
         ],
     )
     def test_the_reason_filter_is_case_insensitive_like_the_client(self, reason: str) -> None:
         """The client scans with `/gi`, so a case-sensitive filter here was not the same filter.
 
-        `reason` is an ordinary configuration string with no schema constraint, so these are settings an operator can write by hand — not adversarial input. Under the case-sensitive check each of them produced a reply carrying two different decisions, which the client reads as unparseable and retries.
+        `block_reason_str` is an ordinary configuration string with no schema constraint, so these are settings an operator can write by hand — not adversarial input. Under the case-sensitive check each of them produced a reply carrying two different decisions, which the client reads as unparseable and retries.
+
+        A third case, `< block >no`, used to sit here and was removed: the client's own regex has no `\\s*` in it, so a spaced tag is not a decision to the client either, and the assertion held whether or not this proxy filtered it. Green for a reason unrelated to the guard is worse than absent.
         """
         verdict = classify(classifier_request(), config(decision="block"))
         assert verdict is not None
@@ -493,12 +498,20 @@ class ExplodingProvider:
         raise AssertionError("upstream was asked to count a locally answered request")
 
 
-def chain_with(decision: AutoModeDecision, *, endpoint: ModelEndpoint = ModelEndpoint.ANTHROPIC_MESSAGES) -> Any:
+def chain_with(
+    decision: AutoModeDecision,
+    *,
+    endpoint: ModelEndpoint = ModelEndpoint.ANTHROPIC_MESSAGES,
+    block_reason_str: str | None = None,
+) -> Any:
+    intercept: dict[str, Any] = {"decision": decision}
+    if block_reason_str is not None:
+        intercept["block_reason_str"] = block_reason_str
     config = ProxyConfig.model_validate(
         {
             "default_model_provider": "ghc",
             "model_providers": {"ghc": {"type": "github_copilot"}},
-            "hook_fix_anthropic_request": {"intercept_auto_mode_classifier": {"decision": decision}},
+            "hook_fix_anthropic_request": {"intercept_auto_mode_classifier": intercept},
         }
     )
     # Constructing the chain opens no connection, so the client needs no teardown here.
@@ -568,6 +581,29 @@ class TestTheShortCircuitIsWiredIn:
         score = severity_of_reply(orjson.loads(handled.response.read()))
         assert score is not None
         assert score > 100
+
+    async def test_the_configured_reason_reaches_the_synthesised_reply(self) -> None:
+        """The wiring, not the formatter.
+
+        `verdict_text` taking a reason and putting it in `<reason>` was already covered — by calling it directly, which is exactly what hides this: nothing proved `handle()` reads the reason *from the configuration*. A reviewer replaced that lookup with a hardcoded string and the whole file stayed green.
+
+        So this asserts on a value that only exists in the config object, and would not appear in the reply by any other route.
+        """
+        marker = "refused by the operator, and this exact sentence proves the lookup happened"
+        chain = chain_with("block", block_reason_str=marker)
+        context = RequestContext(
+            inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+            requested_model="claude-model",
+            payload=classifier_request(),
+        )
+
+        handled = await handle(chain, context)
+
+        assert handled.response is not None
+        body = orjson.loads(handled.response.read())
+        text = body["content"][0]["text"]
+        assert parses_as_block(text) is True
+        assert f"<reason>{marker}</reason>" in text
 
     async def test_a_chat_completions_request_is_never_answered_as_anthropic(self) -> None:
         """The endpoint boundary. Without it, a legal Chat Completions body whose content parts happened to match the markers came back as an Anthropic Message on `/chat/completions` — a protocol its caller has no reason to read — and the real request never reached upstream.

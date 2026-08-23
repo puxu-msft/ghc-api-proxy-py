@@ -321,7 +321,7 @@ class InterceptAutoModeClassifierConfig(Section):
     # Written on a block only. The classifier prompt asks for no `<reason>` when the action is allowed, and an allow needs no explanation to a client that is about to proceed anyway.
     #
     # **It must not contain a `<block>` tag in any casing.** The client scans the whole reply with `/<block>(yes|no)\\b/gi` before reading anything, and returns "unparseable" the moment it sees two different decisions — so a reason quoting `<BLOCK>no</BLOCK>` under `decision: block` would make the reply unreadable, and unreadable costs a **retry** of the original 710 KB rather than one wrong answer. The implementation checks for it and drops the whole reason instead: better an unexplained block than a broken reply.
-    block_reason_str: str = "Blocked by proxy configuration, without a model review."
+    block_reason_str: str = "Blocked by proxy, without a model review."
 
     # One of two **independent** recognition markers; either matching is enough, though both still sit behind the structural floor in `app.pipeline.auto_mode_classifier`. The other marker — the `<transcript>` wrapper the client puts around the rendered conversation — is a module constant there rather than a setting.
     #

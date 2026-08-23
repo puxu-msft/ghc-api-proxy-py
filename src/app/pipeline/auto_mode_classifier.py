@@ -81,10 +81,10 @@ def _matches_transcript_wrapper(payload: Mapping[str, Any], opener: str) -> bool
 
     Both ends, not just the opener. A request whose last user turn merely begins with a `<transcript>\\n` text block is an ordinary thing for a client to send — "summarise the transcript below" has exactly that shape — and answering it with `<block>no</block>` would swap out a real request for a decision nobody asked for, invisibly. Requiring the closing block too asks for the whole envelope, which is what the classifier actually builds (`app.pretty.js:368454-368460`) and what all 2300 recorded samples carry.
 
-    The closer is derived from the opener rather than configured separately: they are one wrapper, and a configuration that let them disagree would only ever be a mistake.
+    The closer is derived from the opener rather than named separately: they are one wrapper, and letting them disagree could only ever be a mistake.
+
+    `opener` stays a parameter although its only caller passes the module constant — it keeps this a pure function of its input, which is what lets the tests exercise the open/close pairing on a wrapper other than the real one.
     """
-    if not opener:
-        return False
     messages = payload.get("messages")
     if not isinstance(messages, list) or not messages:
         return False
