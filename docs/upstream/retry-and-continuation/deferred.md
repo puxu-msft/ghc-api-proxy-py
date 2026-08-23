@@ -338,11 +338,17 @@ if replay is None or reason is None:
 
 `_CONNECTION_ERRORS` 映射整个 `h2.exceptions` 族，依据写在 `errors.py` 那段注释里的两个条件。**第二条曾被我写成全称，评审推翻了**：httpcore 的 body 路径除了 `receive_data`，还对每个 `DataReceived` 调 `acknowledge_received_data`（`httpcore2/_async/http2.py:286-300`），它同样不在任何 converter 里。评审用真实的 `_receive_response_body` 加一份故意不一致的 event ledger，造出了裸的本地 `NoSuchStreamError`，当前 normalizer 把它写成 `network` 重试。
 
-残留**是什么**比它多大更要紧：那是**依赖自己的记账不变量被破坏**，不是本仓的代码。把它当网络故障重试，代价是花掉重试预算然后浮出来；这与模块 docstring 真正防的那件事（把**我们自己的** bug 装成可重试，于是永远不浮出来）不是同一种失败。注释已按这个说法收窄。
+**我为保留族级映射给出的理由被第三轮推翻了。** 我写的是「残留是依赖自己的记账不变量、不是本仓代码，映射成网络重试的代价是花掉预算然后浮出来」——**控制流里没有这个「然后浮出来」**：`decide_stream_ending` 只在 `downstream_opened=False` 时才 `ledger.take()`（`src/app/pipeline/retry.py:138-143`），已交付过块就直接 `ABANDON`、不花预算，随后 `ours=False` 进交接、clean return，异常既不上抛也不留 proxy failure。评审把第二轮那个真实反例延长到「已提交一个块」的场景实测：`handed_count=1`、`returned_cleanly=True`、`contains_proxy_failure=False`。
 
-`tests/unit/test_module_boundaries.py::test_no_live_module_drives_h2_itself` 守的是第一条件（本仓不驱动 h2）。它最初写成五个模块名的黑名单，评审用 `from h2 import connection` 走了过去；现已改为白名单，四种拼法（`from h2 import connection`、`import h2.settings`、`import h2 as _h`、`from h2.utilities import ...`）实测全部拦住。**但它证明不了 httpcore body 里每一次 h2 调用的归因**——不 import h2、经 httpcore 的 `_h2_state` 调用，import 检查看不见。
+所以**代价由位置决定，不由错误的种类决定**：没交付过就买一次透明重放、预算耗尽后浮出；交付过就被吞成 `upstream`。而这与 §22之六 那条本侧计数器 bug 的结局**逐字同形**。
 
-**未处置**：要么接受这个残留并保留当前说法，要么把归因搬到能看见来源的边界（与 §22之六 是同一类修法，可一并裁决）。
+注释已改成如实写代价，不再用那个被推翻的比较。
+
+那道守卫**也被推翻过两次**，现已按它实际能做的事改名为 `test_h2_is_imported_only_for_its_types`：最初是五个模块名的黑名单，评审用 `from h2 import connection` 走过去；改成白名单后四种拼法全拦住，但评审又指出白名单允许 `h2.exceptions`，于是本仓自己 `raise H2Error(...)` 照样绿——**那正好造出这个映射当作对端来源的那种裸异常**，而且 `importlib.import_module` 这类动态导入根本不产生 AST 节点。所以它不再被 `errors.py` 当作成立条件，只当一个廉价信号：**新增一个静态 h2 import 得先被争论过**。
+
+**未处置，且与 §22之六 是同一个问题的两半**：交接现在没有任何拼法能说「这不是上游的」，于是本侧 wrapper 的 bug 与依赖内部的不变量破坏都会以 `upstream` 抵达并被吞掉。
+
+**给用户的裁决题目**：要不要让归因从「猜」变成「调用方指明」。候选（各有代价，不是唯一路径）——(i) 在 `inference.py` 先包 raw source 再套 guard、marker 传进 `stream_delivery`（改签名，且需显式认定两个 guard 代表上游状况，会引入一张小类型表）；(ii) 让 `_counted_upstream` 自己把本侧 coding error 包上明确的本地来源（不改外层入口）；(iii) 让带 marker 的 source record 穿过 wrapper。**不裁决也是一个选择**——那意味着接受「交接一律说 upstream」这个现状，接收端据此理解即可。
 
 ### 22 之四. 一条状态断言在写下时就已经过期
 

@@ -130,7 +130,7 @@ MCP server 在另一个仓（插件 `ghc-api-proxy-helper`），本会话够不�
 
     **第二次**：`0ca87b9` 把兜底从 `INTERNAL` 改成 `UPSTREAM`，判据是「`stream.py` 只在 `not ours` 时走交接」。于是错误分支的值域收成 `network` / `upstream` / `auth` 三个，`internal` 再也发不出来。**接收端可以据此简化，但要知道它换来了什么**：这个字段现在没有任何拼法能说「是代理自己坏了」，而本仓与上游之间还有一处接缝（`_counted_upstream` 那类本侧 wrapper 的 bug 仍被标成上游），那类失败现在会以 `upstream` 抵达而不再有别的说法。见 [`deferred.md`](deferred.md) §22之六。
 
-    这一格在一天之内两次让一份「刚核实过」的描述失效。对策不是写得更小心，是给这类断言配提交锚点——本节开头那条就是。
+    **两次不是同一种错，把它们并成一句是把教训改写反了**（评审 R3-m2 查出，这段总结的前一版就是这么写的）。第一次是**写下时就已经是假的**——前提在前一晚被拆掉，作者引的是自己过期的心智模型；第二次才是**写下时为真、几小时后被自己的下一个改动作废**。前者靠「写得更小心」防不住，得靠动手前重读被引用的代码；后者靠提交锚点，本节开头那条就是。
 
 - **`max_tokens` 是 Anthropic 的拼法，不会出现 `max_output_tokens`；而且把配置改成 `max_output_tokens` 也不会生效。** 上游 Responses 说的是后者，两条路径都在**门之前**就归一了（`src/app/pipeline/delivery/formats/openai_responses.py`、`src/app/pipeline/translation_driver/responses.py`），所以那个原始拼法压根活不到比较的那一步。异源评审的一手实测（含证伪对照：把 `hand_over_stop_reasons` 配成 `{"max_output_tokens"}`，合成一次都没触发）见 `reports/260822-review-mcp-contract-and-deadline-order.md` F6/F11。
 
