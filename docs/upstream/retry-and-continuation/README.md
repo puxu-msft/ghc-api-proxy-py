@@ -70,9 +70,11 @@ MCP server 在另一个仓（插件 `ghc-api-proxy-helper`），本会话够不�
 | `category` | 上游把这一轮截短、并非错误时：**就是那个 `stop_reason`**，默认配置下唯一可能的值是 **`max_tokens`**。是错误时：`network` / `upstream` / `auth` **三者之一**，外加结构上今天不可达的 `internal` |
 | `message` | **一句代理合成的诊断，不是异常原文**（2026-08-23 起，提交 `aac348e`）。格式与取值见下 |
 
-### `message` 的格式（2026-08-23 起，本节对应 `e2cb70b`）
+### `message` 的格式（2026-08-23 起，本节对应 `2d6b878`）
 
-> **本节与代码的同步点是提交 `e2cb70b`。** 前一版本节写于 `aac348e` 时点，`79428bb` 改了筛选规则之后就过期了，独立复评（`260823-review-handover-message-delta.md` M2）指出「命名为跨仓权威的文档逐字描述旧算法、并给出三条已不成立的示例」。**改 `describe_error` 的人必须同时改本节，并把这行锚点换成新提交。**
+> **本节与代码的同步点是 `src/app/pipeline/hand_over.py` 的 `describe_error` 在提交 `2d6b878` 时的状态。**
+>
+> **这一行已经过期过两次**：写于 `aac348e`，`79428bb` 改规则后过期一次，补上锚点之后 `8de0d3c` 又改规则、又过期一次——两次都是独立评审查出来的（`260823-review-handover-message-delta.md` M2、`260823-review-handover-message-final.md` M3）。**动 `describe_error` 的人必须同时改本节的规则表并把这一行换成新提交**；只改代码不改这里，接收端就会照着一份描述着旧算法的「权威」去写测试。
 
 改之前它是 `str(error)`（非错误时是 `stop_reason`，与 `category` 逐字同值）。**那个值在真实流量里读不出东西**：MCP server 日志当时积累的 4 条记录全部是 h2 事件的裸 `repr`，其中 3 条 `error_code:0`、1 条 `error_code:8`，而区分二者的那个词是一个 `IntEnum`，`str()` 打出来是数字。同一轮调查还测出另外三种更糟的形态（`.dev/docs/upstream/retry-and-continuation/reports/260823-handover-error-shapes.md`）：真实连接重置的 `httpx2.ReadError` 的 `str()` **是空串**，裸 `h2.ProtocolError()` 也是空串，而 `h2.StreamClosedError(3)` 的 `str()` 是裸数字 `'3'`——看着像一条真消息。
 
@@ -84,7 +86,11 @@ MCP server 在另一个仓（插件 `ghc-api-proxy-helper`），本会话够不�
 |---|---|---|
 | 文本是新的 | `module.QualName: 文本` | 常规情形 |
 | 文本已出现过，但类名是新的 | 只有 `module.QualName` | 否则 `RuntimeError('denied') from PermissionError('denied')` 只剩外层，丢掉唯一说明「哪一类失败」的词。h2 事件经 httpcore→httpx 映射时文本也重复，但类名一并重复，那一环整个丢弃 |
-| 没有文本 | 只有 `module.QualName`，且**仅当此前还没有任何一环带过文本** | 两个 deadline 守卫外面裹着 `TimeoutError() -> CancelledError()`，那是 `asyncio.timeout` 的构造方式而不是这一轮发生的事；外层已经点名是哪道守卫了，再附上 `CancelledError` 会把一个已明确的超时读成取消。而真实连接重置的外两环是静默的，那时内层类名就是仅有的线索 |
+| 没有文本 | 只有 `module.QualName`，**除非它是 `asyncio.timeout` 那段包装的第二、三环** | 见下 |
+
+**`asyncio.timeout` 包装的判据是一个相邻三环结构**：某一环是 `TimeoutError` 的子类**且自身带文本**，紧接着是恰好 `builtins.TimeoutError()` 且无文本，再紧接着是 `asyncio.CancelledError()` 且无文本——只压后两环。两个 deadline 守卫正是这个形状（实测见报告 §2.2(a)/(b)），而它们外层已经点名是哪道守卫，再附上 `CancelledError` 会把一个已明确的超时读成取消。
+
+判据刻意钉死在相邻结构上，**不是「链上早先出现过某个 timeout」**：后者被评审用四个反例打掉——它会吞掉直接挂在 timeout 下的真实 `CancelledError`、隔了一环的 `CancelledError`、以及一个静默的 `TimeoutError` 子类（那可能才是失败本身）；反方向上，只要有个 wrapper 复制了守卫的文本，守卫就走 type-only 分支、判据反而失效，该压的全漏出来。现在读每一环自己的文本而不是「这段文本是否新鲜」，两个方向都关上了。
 
 类名的「新鲜」按 `__qualname__` 判，不按完整点分路径——`httpx2.ReadError` 套 `httpcore2.ReadError` 是同一个失败被两个库各描述一遍，正是该合并的情形。两个真正无关模块里的同名异常也会被合并，这是有意取舍，且迄今只在构造反例里出现过。
 

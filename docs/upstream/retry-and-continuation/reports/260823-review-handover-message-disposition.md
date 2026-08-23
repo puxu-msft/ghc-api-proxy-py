@@ -1,9 +1,45 @@
-# `aac348e` / `79428bb` / `e2cb70b` / `9645293` hand-over `message` 评审处置
+# hand-over `message` 评审处置（四轮）
 
 - 日期：2026-08-23
-- 两轮评审原件：[`260823-review-handover-message.md`](260823-review-handover-message.md)（第一轮，**needs-fix**，blocker 0 / major 1 / minor 4）、[`260823-review-handover-message-delta.md`](260823-review-handover-message-delta.md)（复评，**needs-fix**，blocker 0 / major 2 / minor 2）
-- 处置结果：**九条全部采纳**，落地为 `79428bb`、`e2cb70b`、`9645293`
+- 起始提交 `aac348e`，修复提交 `79428bb`、`e2cb70b`、`9645293`、`8de0d3c`、`2d6b878`
+- 四轮评审原件：[`260823-review-handover-message.md`](260823-review-handover-message.md)（第一轮，**needs-fix**，major 1 / minor 4）、[`260823-review-handover-message-delta.md`](260823-review-handover-message-delta.md)（第二轮，**needs-fix**，major 2 / minor 2）、[`260823-review-handover-message-final.md`](260823-review-handover-message-final.md)（第三、四轮各一节，**needs-fix**，minor 2 / major 1 + minor 1）
+- 处置结果：**十四条全部采纳**
 - 支撑调查：[`260823-handover-error-shapes.md`](260823-handover-error-shapes.md)
+
+> **本文件不写「已同步」这类无锚点的状态断言。** 第二轮的 M2 正是这么复发的：处置文档说三处已同步，而那句话在下一个提交之后就不成立了，反倒掩盖了漂移。跨仓契约当前的同步锚点写在 `README.md` 那一节的开头，以那里为准。
+
+## 第三、四轮
+
+| # | 严重度 | 结论 | 落点 |
+|---|---|---|---|
+| m1（三轮） | minor | 采纳 | `8de0d3c`：`max_tokens` 真实入口开始读 `input.message` |
+| m2（三轮） | minor | 采纳 | `8de0d3c`：静默环的抑制从「此前有过文本」收窄到 timeout 包装 |
+| M3（四轮） | **major** | 采纳 | `2d6b878` + `README.md` 锚点更新到 `2d6b878` |
+| m3（四轮） | minor | 采纳（评审说可 defer，选择当场修） | `2d6b878`：判据改为相邻三环结构 |
+
+### M3 —— 我自己定的规则，第一个违反的人是我
+
+第二轮的 M2 让我在 `README.md` 那一节加了同步锚点，并写下「改 `describe_error` 的人必须同时改本节并更新锚点」。**下一个改 `describe_error` 的提交就是我的 `8de0d3c`，我没有执行它。** 第四轮当场查出。
+
+一条写给未来读者的规则，如果作者在写完它的下一个提交里就没照做，那它约束不了任何人。现在那段锚点里明写了「这一行已经过期过两次」以及各是哪个提交、哪一轮查出来的——**把违反记录留在规则旁边**，比再重申一遍语气更强的要求有用。
+
+### m3 —— 一个布尔同时太宽和太窄
+
+第三轮我为了消掉 `CancelledError` 噪声，写了 `named_a_timeout`：只要链上早先渲染过一个 `TimeoutError`，后面的静默 `TimeoutError` / `CancelledError` 就压掉。第四轮用四个反例打掉了它，两个方向各两个：
+
+**太宽**（吞掉可能是失败本身的东西）：
+
+| 输入 | 旧输出 | 现输出 |
+|---|---|---|
+| `TimeoutError("outer") -> CancelledError()` | 只剩外层 | `builtins.TimeoutError: outer timeout; caused by asyncio.exceptions.CancelledError` |
+| `TimeoutError("outer") -> RuntimeError("middle") -> CancelledError()` | 丢掉最内 | 三环齐全 |
+| `TimeoutError("outer") -> DatabaseTimeout()`（静默子类） | 丢掉子类名 | `; caused by DatabaseTimeout` |
+
+**太窄**（该压的漏出来）：一个 wrapper 复制了守卫的文本时，守卫自己走 type-only 分支，`named_a_timeout` 从未被置真，于是实测过的那两环全部漏出。
+
+根因是**用一个跨越整条链的状态位，去表达一个局部的相邻关系**。现在的 `_asyncio_timeout_plumbing` 在原始 `links` 上找那一个结构：带文本的 `TimeoutError` 子类 → 恰好 `builtins.TimeoutError()` 无文本 → `asyncio.CancelledError()` 无文本，只压后两环；并且读每一环**自己的**文本而不是「这段文本是否新鲜」，这样复制文本的 wrapper 不会让守卫失去资格。四个反例全部固化成测试。
+
+值得记的一般形态：**当你想表达「A 紧挨着 B」时，不要用「见过 A 了吗」这样的标志位**。标志位一旦置真就再也不描述位置，于是它在链上越走越宽；而它的置真条件如果又挂在别的展示逻辑上（这里是 `fresh_text`），它同时还会在那条逻辑变化时静默失效。
 
 ## 第一轮
 
@@ -66,7 +102,7 @@ app.streaming.deadline.StreamDeadlineError: attempt exceeded its deadline; cause
 
 而那个 `CancelledError` 只是 `asyncio.timeout` 的实现机制，不是这一轮发生的事。**给人和模型读的一句话里出现它，会把一个已经点名的超时读成取消**——那是另一种失败、另一个责任方。这比噪声更糟。
 
-最终规则是三分支（见本主题 `README.md` 的表）：新文本 → 类型 + 文本；文本重复但类名新 → 只给类型；**无文本 → 只给类型，且仅当此前还没有任何一环带过文本**。最后那个条件同时保住了两头：deadline 的外层已经把话说完，内层不再出现；真实 reset 的外两环是静默的，内层类名与最底下的 `OSError` 都还在。
+第二轮的修法是三分支，第三个分支写成「无文本 → 只给类型，且仅当此前还没有任何一环带过文本」。**那一版后来又被第四轮打掉了**（见本文件「第三、四轮」的 m3）。**规则的当前形态不在本节复述**——它是活的，唯一权威在本主题 `README.md` 那一节，那里带同步锚点。本节只保留「第二轮当时改成了什么、为什么」这一历史记录。
 
 复评另指出 `__qualname__` 去重会合并两个无关模块里的同名异常（构造反例 `outer_library.CollisionError from inner_library.CollisionError`）。它自己判定这是本轮明确接受的去噪取舍、不足以单列 major，只要求在 docstring 里说明。已照做——**写清楚一个取舍，和消除它，是两件事，这里选前者**。
 
@@ -84,7 +120,9 @@ app.streaming.deadline.StreamDeadlineError: attempt exceeded its deadline; cause
 
 更值得记的是它的第二句：**我在处置文档里写下「三处已同步」，这句话本身掩盖了后续的再次过期**。「已同步」是一个有保质期的状态断言，写下时为真，`79428bb` 之后为假，而读者会把它当成持续为真。
 
-修法两条：README 那一节现在带**同步锚点**（「本节与代码的同步点是提交 `e2cb70b`」），并明写「改 `describe_error` 的人必须同时改本节并更新锚点」；示例表由当前代码直接生成而不是手抄。本文件标题也改成列出四个提交，而不是笼统说「已同步」。
+修法两条：README 那一节加了**同步锚点**并明写「改 `describe_error` 的人必须同时改本节并更新锚点」；示例表由当前代码直接生成而不是手抄。本文件标题也改成列出提交，而不是笼统说「已同步」。
+
+**这个修法当轮就失效了一次**——下一个改 `describe_error` 的提交是我的 `8de0d3c`，我没有更新锚点，第四轮的 M3 当场查出。锚点的当前值以 README 为准，本节不复述。
 
 ## F4 与 m2 —— 接收端契约
 
