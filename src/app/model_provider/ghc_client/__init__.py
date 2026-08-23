@@ -26,10 +26,6 @@ from app.model_provider.ghc_client.tokens import (
     CopilotTokenManager,
     GitHubTokenSource,
 )
-from app.model_provider.ghc_client.transport import (
-    ResponsesHeadersPendingTransportError,
-    is_responses_headers_pending_transport_error,
-)
 
 __all__ = [
     "CopilotTokenInfo",
@@ -42,11 +38,9 @@ __all__ = [
     "GitHubAccountClient",
     "GitHubTokenSource",
     "ModelCatalogPage",
-    "ResponsesHeadersPendingTransportError",
     "build_identity_headers",
     "build_request_headers",
     "fetch_models",
     "infer_account_type",
-    "is_responses_headers_pending_transport_error",
     "resolve_api_base_url",
 ]

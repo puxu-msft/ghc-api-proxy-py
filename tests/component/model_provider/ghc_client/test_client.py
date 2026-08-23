@@ -190,10 +190,11 @@ async def test_a_forwarded_header_never_travels_beside_the_one_it_collides_with(
 
 @pytest.mark.asyncio
 async def test_ordinary_send_raises_in_the_pipelines_vocabulary() -> None:
-    """The asymmetry this guards is unchanged; the exception it raises is not.
+    """A 429 has to arrive in the driver's own vocabulary, or its budget is never consulted.
 
-    An ordinary send still raises where `send_responses_headers` returns. It used to raise the
-    SDK's own `openai.RateLimitError`, which is outside the driver's closed set, so `classify` aborted and the 429 reached the client as a 502 with no retry ever considered.
+    It used to raise the SDK's own `openai.RateLimitError`, which is outside the closed set, so `classify` aborted and the 429 reached the client as a 502 with no retry ever considered.
+
+    This test used to be half of a pair: the other half asserted that `send_responses_headers` *returned* the error response instead of raising, which is the asymmetry that method existed for. That method was archived on 2026-08-23 with the rest of the chain nothing instantiates, and its half went with it — leaving this one, whose subject is the live path.
     """
     client, http_client = build_client(
         token_or(httpx2.Response(429, json={"error": "slow down"}, headers={"retry-after": "7"}))
@@ -209,13 +210,3 @@ async def test_ordinary_send_raises_in_the_pipelines_vocabulary() -> None:
     # The SDK error is still reachable, so nothing about the cause is lost in translation.
     assert isinstance(raised.value.__cause__, openai.RateLimitError)
 
-
-@pytest.mark.asyncio
-async def test_responses_headers_returns_the_error_response_instead_of_raising() -> None:
-    client, http_client = build_client(token_or(httpx2.Response(429, json={"error": "slow down"})))
-    try:
-        response = await client.send_responses_headers({"model": "m"})
-    finally:
-        await http_client.aclose()
-
-    assert response.status_code == 429

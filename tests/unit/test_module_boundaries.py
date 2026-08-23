@@ -43,9 +43,11 @@ _ARCHIVED = (
     "app.shutdown",
     "app.server.app_factory",
     "app.pipeline.executor",
-    # Archived 2026-08-23, and the two submodules here are why this tuple holds names rather than top-level packages: `app.protocols` and `app.models` are both live, and only the Gemini modules under them went. A name that resolves again means one came back.
+    # Archived 2026-08-23, and the submodules here are why this tuple holds names rather than top-level packages: `app.protocols`, `app.models` and `app.model_provider.ghc_client` are all live, and only these modules under them went. A name that resolves again means one came back.
     "app.protocols.gemini",
     "app.models.gemini",
+    # The pre-header transport guard. Its only caller was `GhcApiClient.send_responses_headers`, whose only caller was `CopilotUpstream` — an adapter to a protocol that had already been archived, and one nothing in `src/` or `tests/` ever instantiated. What it knew (a bare `h2.exceptions.ProtocolError` reaches callers unwrapped) now lives on the live path in `app/model_provider/ghc_client/errors.py`, which is what made it safe to move rather than rewire.
+    "app.model_provider.ghc_client.transport",
 )
 
 _RESOLVES = (

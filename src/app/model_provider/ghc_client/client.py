@@ -4,9 +4,6 @@ from typing import Any, cast
 import httpx2
 from anthropic import AsyncAnthropic
 from anthropic._types import Body as AnthropicBody
-from h2.exceptions import ProtocolError as H2ProtocolError
-from openai import APIConnectionError as OpenAIAPIConnectionError
-from openai import APIStatusError as OpenAIAPIStatusError
 from openai import AsyncOpenAI
 from openai._types import Body as OpenAIBody
 
@@ -14,10 +11,6 @@ from app.model_provider.ghc_client.config import GhcClientConfig
 from app.model_provider.ghc_client.errors import normalize_upstream_error
 from app.model_provider.ghc_client.headers import build_request_headers
 from app.model_provider.ghc_client.tokens import CopilotTokenManager
-from app.model_provider.ghc_client.transport import (
-    ResponsesHeadersPendingTransportError,
-    is_responses_headers_pending_transport_error,
-)
 
 
 class GhcApiClient:
@@ -108,7 +101,7 @@ class GhcApiClient:
     async def _in_pipeline_terms(post: Coroutine[Any, Any, httpx2.Response]) -> httpx2.Response:
         """Await one SDK call, raising the pipeline's error for an upstream failure.
 
-        Applied per send method rather than inside `_post_*` because `send_responses_headers` deliberately catches the SDK's own status error to read the response off it, and that contract belongs to the existing chain.
+        Applied per send method rather than inside `_post_*`. The reason used to be `send_responses_headers`, which deliberately caught the SDK's own status error to read the response off it; that method was archived on 2026-08-23 with the chain nothing instantiates. The shape is kept because it is the seam where a send method may still opt out — nothing does today.
         """
         try:
             return await post
@@ -173,25 +166,6 @@ class GhcApiClient:
                 extra_headers=extra_headers,
             )
         )
-
-    async def send_responses_headers(
-        self,
-        payload: Mapping[str, Any],
-    ) -> httpx2.Response:
-        """A Responses request whose error status is returned rather than raised.
-
-        The asymmetry with the other methods is deliberate: the caller reads the error headers.
-        A transport failure before headers arrive is normalised into a retryable category.
-        """
-        try:
-            return await self._post_openai("/responses", payload, stream=True)
-        except OpenAIAPIStatusError as error:
-            return error.response
-        except (httpx2.TransportError, OpenAIAPIConnectionError, H2ProtocolError) as error:
-            # `H2ProtocolError` is named here because it is not an httpx error and nothing wraps it: httpcore guards only the socket read, so a GOAWAY arriving in the same read as the frames after it raises straight through. Without this it would leave as an unhandled exception and never reach the classifier at all.
-            if is_responses_headers_pending_transport_error(error):
-                raise ResponsesHeadersPendingTransportError(error) from error
-            raise
 
     async def send_embeddings(
         self,

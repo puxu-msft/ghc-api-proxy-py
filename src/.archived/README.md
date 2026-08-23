@@ -26,6 +26,22 @@ Gemini is the case to read carefully: the paths are served and the wire translat
 
 One test lost half its coverage rather than moving: `tests/systemd/test_systemd_units.py::test_service_permissions_restrict_real_state_writers` asserted `0o600` on `history.db` and its siblings *and* on `tokenization.json`. The history half went with the chain; the tokenization half is what the service actually writes and still runs. The docstring there says so.
 
+## Added 2026-08-23: the pre-header transport guard
+
+Three things arrived here together, each the sole caller of the next:
+
+| What | Was reached from |
+|---|---|
+| `app/upstream/copilot_upstream.py` (`CopilotUpstream`) | nothing — cut out of the live `app/upstream/copilot.py`, whose other contents stay live |
+| `GhcApiClient.send_responses_headers` | `CopilotUpstream` only; deleted from the live `client.py` rather than moved, since the archived `app/upstream/generic.py` already holds its twin |
+| `app/model_provider/ghc_client/transport.py` | `send_responses_headers` only |
+
+`CopilotUpstream` adapted the live library to `UpstreamTarget` — a protocol that had *already* been archived in the 2026-08-22 move, which is what made it dead: an adapter whose target interface had gone. It was missed then because the criterion was reachability from `app.server.app_factory`, and this class is not reachable from there either. **Nothing reaches it at all**, which the earlier sweep had no question for.
+
+**The cost of it sitting here is worth recording, because it is not "dead code takes up space".** `transport.py` was the only place in the tree that wrote down a real defect in the dependencies — that httpcore guards only the socket read, so a bare `h2.exceptions.ProtocolError` reaches callers unwrapped — and it names `H2ProtocolError` in a `except` clause to handle it. Read casually, the tree therefore looked as though it already handled that case. It did not: the guard was on a chain nobody calls, and the live body path had no equivalent until 2026-08-23, when the same GOAWAY was found to be retried or not depending on whether the kernel had batched two frames into one read. The knowledge now lives on the live path in `app/model_provider/ghc_client/errors.py`, which is what made moving this safe rather than a loss. See `.dev/docs/upstream/retry-and-continuation/deferred.md` §22 and §22之三.
+
+One test came with them (`tests/.archived/unit/model_provider/ghc_client/test_pre_header_retry.py`) and one lost a case rather than moving: `tests/component/model_provider/ghc_client/test_client.py` kept the half whose subject is the live path and says so in its docstring, the same way `tests/systemd/test_systemd_units.py` did in the first move.
+
 ## Reading it
 
 The tree keeps its original layout under `app/`, so relative imports inside the archive still line up. It is not importable as-is and is not meant to be: to run any of it you would put `src/.archived` on the path yourself, deliberately.
