@@ -23,7 +23,7 @@ type ClassifierProtocol = Literal["block", "severity"]
 
 # The wrapper the client puts around the rendered conversation, and the second of the two recognition markers. A constant rather than a setting, unlike its sibling `match_system_prompt_prefix`: that one is a sentence of English and gets reworded, this is a structural tag. Ruled 2026-08-23.
 #
-# The trailing newline is part of the value and is why this is better off not being configurable — a hand-written `"<transcript>"` would never match anything, and would fail silently as a hit count of zero.
+# The trailing newline is part of the value, so a hand-written `"<transcript>"` would never match anything and would fail silently as a hit count of zero. That is a reason to be careful with it, **not** the reason it is pinned: review showed the same hazard applies to `match_system_prompt_prefix`, which stayed configurable. The volatility asymmetry above is the whole argument.
 _TRANSCRIPT_OPEN = "<transcript>\n"
 
 # What the client asks for when it wants a score rather than a yes/no. Read off `stop_sequences`, which is one of the two places the protocols differ observably.
