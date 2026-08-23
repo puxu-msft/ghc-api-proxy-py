@@ -325,7 +325,9 @@ class InterceptAutoModeClassifierConfig(Section):
 
     # One of two **independent** recognition markers; either matching is enough, though both still sit behind the structural floor in `app.pipeline.auto_mode_classifier`. The other marker — the `<transcript>` wrapper the client puts around the rendered conversation — is a module constant there rather than a setting.
     #
-    # **Why this one is configurable and that one is not.** They are both string literals owned by another program, but they are not equally likely to change. This is a sentence of English prose and gets reworded; the wrapper is a structural tag. A key nobody will ever need to set is noise on the configuration surface, and that one is worse than noise — its value has to carry the trailing newline exactly, so it is easy to set wrongly, and setting it wrongly fails silently as a hit count of zero.
+    # **Why this one is configurable and that one is not.** They are both string literals owned by another program, but they are not equally likely to change: this is a sentence of English prose and gets reworded, while the wrapper is a structural tag. That asymmetry is the whole argument.
+    #
+    # A second reason was offered when the wrapper was pinned — its value must carry the trailing newline exactly, so it is easy to set wrongly and fails silently — and review showed it does **not** discriminate: setting *this* key wrongly fails just as silently. It is recorded as the minor point it is rather than dropped, so the next reader does not re-derive it as decisive.
     #
     # This is the opening line of the classifier's own system prompt, copied verbatim. A request matches when **any** of its system blocks starts with it — any block rather than `system[0]`, because the client puts its billing attribution in a system block too and which one comes first has already differed between recorded traffic and the current client source.
     match_system_prompt_prefix: str = "You are a security monitor for autonomous AI coding agents."
