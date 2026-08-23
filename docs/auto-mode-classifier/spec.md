@@ -53,7 +53,7 @@ M2「2300 条全中」**不能**单独作为召回率的独立测量：那 2300 
 
 ### 失效方向
 
-**识别的衰减是安全的**：标记认不出 → 返回 `None` → 请求照常转发，即启用本特性之前的行为。代价是省不下那 710 KB，不是答错。
+**识别的衰减是安全的**：标记认不出 → 返回 `None` → 请求照常转发，即启用本特性之前的行为。代价是省不下那 710 KB，不是答错。标记是模块常量（见 §5「判据字面量不可配置」），所以修复衰减要改代码。
 
 **这条只覆盖识别。** 一旦请求被识别，本特性仍可能答错，评审各自独立找到两条路径：把 severity 运行读成 block 协议，以及给出一个被客户端阈值比较判到反面的分值。两条都已修（见 §4.1），但被它们证伪的那句一般性承诺不再写——早期版本在四处写过「衰减只会漏判、绝不答错」，那句话对标记成立、对被标记门控的代码不成立。
 
@@ -78,7 +78,8 @@ M2「2300 条全中」**不能**单独作为召回率的独立测量：那 2300 
 
 三条硬约束，违反任一条都会让客户端**重试**（`p1m` 的 `while (count <= maxRetries && !parseable && iLl(u) === "unparseable")`，`368542`），而每次重试又是一次 700 KB 上行：
 
-1. **闭合标签可选，但决定词必须只出现一次。** `oLl` 先做一次全局扫描，若文本里同时出现 `<block>yes` 与 `<block>no` 直接返回 `null`。所以 `<reason>` 正文里**不得**出现另一个 `<block>…` 串。该扫描是 `/gi`，**大小写不敏感**，因此代理侧的过滤也必须如此——早期版本用大小写敏感的子串检查，`<BLOCK>no</BLOCK>` 与 `<BlOcK>no</bLoCk>` 都能穿过它并制造出一个带两个相反决定的回复。`reason` 是无 schema 约束的普通配置字段，这不需要恶意输入就能到达。
+1. **闭合标签可选，但决定词必须只出现一次。** `oLl` 先做一次全局扫描，若文本里同时出现 `<block>yes` 与 `<block>no` 直接返回 `null`。所以 `<reason>` 正文里**不得**出现另一个 `<block>…` 串。该扫描是 `/gi`，**大小写不敏感**，因此代理侧的过滤也必须如此——早期版本用大小写敏感的子串检查，`<BLOCK>no</BLOCK>` 与 `<BlOcK>no</bLoCk>` 都能穿过它并制造出一个带两个相反决定的回复。
+   `reason` 现在是模块常量而不再是配置字段，所以今天没有输入能到达这条路径；过滤仍然保留，因为它成本为零、由测试钉住，且下一个改动那个常量（或按 D5 把它加回配置）的人不必重新发现这条约束。
 2. **severity 路径要求 `stop_reason ∈ {stop_sequence, end_turn}`**（`QRl`，`368418`）。block 路径不看 `stop_reason`。统一用 `end_turn` 同时满足两者。
 3. **`content` 文本不得为空**，否则 `iLl` 判为 `policy_refusal`，走的是另一条失败路径。
 
@@ -103,20 +104,34 @@ M2「2300 条全中」**不能**单独作为召回率的独立测量：那 2300 
 
 ## 5. 配置
 
+形状由用户在 `docs/.human-controlled/config.example.yaml` 亲笔定下（2026-08-23），本节只是复述那份权威：
+
 ```yaml
-inbound:
-  auto_mode_classifier:
-    decision: passthrough   # passthrough | allow | block
-    reason: "Decided by the proxy, not by a model."
-    system_prompt_prefix: "You are a security monitor for autonomous AI coding agents."
-    transcript_open: "<transcript>\n"
+hook_fix_anthropic_request:
+  # 拦截并直接响应 auto mode 分类器的请求。
+  #   false: 透传 / passthrough
+  #   allow: 直接允许 / allow directly
+  #   block: 直接拒绝 / block directly
+  intercept_auto_mode_classifier: allow
 ```
 
-- `decision` 默认 `passthrough`，即**本特性默认完全不生效**，请求照旧转发上游。这是本项目对新能力的一贯默认（`hosted_web_search`、`strip_attribution_header` 同）。
-  - 拼写用 `passthrough` 而非 `off`：YAML 1.1 把裸 `off` 解析为布尔 `false`，schema 里已有同类注记。
-  - `allow` → `<block>no</block>`，severity 协议下输出一个低于阈值的分数。
-  - `block` → `<block>yes</block>` + `<reason>`，severity 协议下输出一个高于阈值的分数。
-- 判据字面量可配置，理由见 §3：它们是字面量，会随客户端版本静默失效，写死则无法在不改代码的情况下修复。
+**一个标量，不是一个 section。** 取值 `false | allow | block`，schema 默认 `false`。
+
+- 禁用态是布尔 `false` 而不是 `passthrough` 这类词：YAML 1.1 把裸 `off` 读成布尔，本项目 `assistant_message_layout` 与 `context_editing.enabled` 已经是这个惯例，再引入一个词等于让「禁用」有两种拼法。
+- `allow` → block 协议下 `<block>no</block>`，severity 协议下 `0`。
+- `block` → `<block>yes</block>` + `<reason>`，severity 协议下 `101`（为什么不是 100，见 §5.1）。
+
+### 为什么挂在 `hook_fix_anthropic_request` 下
+
+这一族就是 `on_client_request_parsed` 那一刻，作用域限定在 Anthropic Messages 那条腿——正是本拦截的作用域：判据读 `system` 与 `messages`，答复是一个 Anthropic Message，短路点在 `fix_anthropic_request()` 返回之后、翻译之前。归属本身就表达了 §2 的入口边界。
+
+与同族其余项的差别：别的项都在**修整一个将要发出的 body**，这一项是**不发了，就地作答**。所以 `fix_anthropic_request()` 不读它，读它的是 `handle()`。section 表达的是「何时、对什么生效」，不是「由哪个函数实现」。
+
+### 判据字面量不可配置
+
+`system_prompt_prefix` / `transcript_open` / `reason` 曾是配置子键，随本次改为标量而变成模块常量（`app/pipeline/auto_mode_classifier.py`）。
+
+代价是真实的：判据是别人程序里的字面量，客户端改写措辞时修复它要改代码而不是改配置。这个取舍记在 `deferred.md` D5，若日后需要旋钮，加键是用户的裁决。
 
 ### 5.1 severity 的分值：为什么是 101 而不是 100
 

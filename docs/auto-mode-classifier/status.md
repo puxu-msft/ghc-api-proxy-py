@@ -6,9 +6,38 @@
 
 ## 当前状态
 
-实现完成，两轮独立评审的全部 blocker 与 major 已处置（C-02 除外，见下）。默认 `passthrough`，即不打开就完全不改变现有行为。
+实现完成，两轮独立评审的全部 blocker 与 major 已处置（C-02 除外，见下）。默认 `false`，即不打开就完全不改变现有行为。
 
-**尚未提交，尚未在真实流量上验证过一次命中**——本机 `~/.claude/settings.json` 当前是 `defaultMode: "bypassPermissions"`，该模式下客户端不调用分类器，所以没有可用于端到端验证的真实请求。全部验证是单元级 + 对客户端源码的静态核对。
+已提交：主仓 `2b28d07`（特性）、`.dev` 仓 `27000a8`（文档），随后一次配置项改名（见「配置项归属」）。**未推送。**
+
+**尚未在真实流量上验证过一次命中**——本机 `~/.claude/settings.json` 当前是 `defaultMode: "bypassPermissions"`，该模式下客户端不调用分类器，所以没有可用于端到端验证的真实请求。全部验证是单元级 + 对客户端源码的静态核对。详见 `deferred.md` D2。
+
+## 配置项归属
+
+用户 2026-08-23 裁定，并**亲笔写进** `docs/.human-controlled/config.example.yaml`：
+
+```yaml
+hook_fix_anthropic_request:
+  # 拦截并直接响应 auto mode 分类器的请求。
+  #   false: 透传 / passthrough
+  #   allow: 直接允许 / allow directly
+  #   block: 直接拒绝 / block directly
+  intercept_auto_mode_classifier: allow
+```
+
+这份权威定的不只是路径，是**形状**，三处与我原来的实现不同，全部以它为准：
+
+1. **一个标量，不是一个 section**。原来的 `decision` / `reason` / `system_prompt_prefix` / `transcript_open` 四个子键没有位置了——后三个成为模块常量，代价记在 `deferred.md` D5。
+2. **禁用态是 `false` 而不是 `passthrough`**。这与本项目 `assistant_message_layout`、`context_editing.enabled` 的既有惯例一致：YAML 1.1 把裸 `off` 读成布尔，所以禁用态就用 bool，再引入一个词等于让「禁用」有两种拼法。
+3. **挂在 `hook_fix_anthropic_request` 下**，而不是 `inbound`。
+
+第 3 点比我原来的归属贴切：这一族就是 `on_client_request_parsed` 那一刻，作用域本来就限定在 Anthropic Messages 那条腿，而短路点正是在 `fix_anthropic_request()` 返回之后、翻译之前。它也把 B-06 那道入口边界从「代码里的一个 if」变成了配置结构本身表达的东西。
+
+与同族其余项的差别记在 schema 注释里：别的项都是「修整一个将要发出的 body」，这一项是「不发了，就地作答」，所以 `fix_anthropic_request()` 不读它，读它的是 `handle()`。
+
+**已实测**：用户那份 example config 解析通过、值 `allow` 被读到生效位置、一条分类器形状的请求确实拿到 allow verdict、schema 默认 `false` 返回 `None`。旧路径 `inbound.auto_mode_classifier` 因 `extra="forbid"` 被明确拒绝并指名键，不存在写了旧键却静默空转的情况。
+
+一个测试随之删除：`test_the_predicates_are_configurable`——它测的能力已经不存在，改绿它就会变成一条恒真断言。
 
 ### 落地清单
 
@@ -17,14 +46,14 @@
 | `src/app/pipeline/auto_mode_classifier.py` | 新增。识别谓词、协议判别、决定文本生成 |
 | `src/app/pipeline/delivery/formats/anthropic_messages_synthetic_reply.py` | 新增 `auto_mode_body` / `auto_mode_sse` |
 | `src/app/pipeline/driver.py` | `handle()` 内短路 + `_answered_auto_mode` + 发布 `request.succeeded` |
-| `src/app/config/schema.py` | `AutoModeDecision` 类型、`InboundConfig.auto_mode_classifier` |
-| `tests/unit/pipeline/test_auto_mode_classifier.py` | 39 个测试 |
+| `src/app/config/schema.py` | `AutoModeDecision` 类型、`FixAnthropicRequestHook.intercept_auto_mode_classifier` |
+| `tests/unit/pipeline/test_auto_mode_classifier.py` | 38 个测试 |
 
 ### 验证
 
 - `ruff check src tests` 全过；`pyright` 在上述五个文件上 0 错误（仓库既有的 `stream_cap.py` 相关错误与本改动无关，未触碰）
 - 全量回归通过，覆盖率 89.56%（门槛 80）
-- **变异验证**：五个修复逐个回退，对应测试全部变红（4/2/2/2/1 条），基线字节级还原后仍 39 passed。脚本一次性，未收编
+- **变异验证**：六个不变量逐个回退，对应测试全部变红（4/2/2/2/1/2 条），基线字节级还原后仍 38 passed。第六个是配置改为标量后新增的——把 `decision is False` 短路拆掉，两条测试变红，所以「默认关闭」是被守住的而不是碰巧成立的。脚本一次性，未收编
 
 ## 评审处置表
 
