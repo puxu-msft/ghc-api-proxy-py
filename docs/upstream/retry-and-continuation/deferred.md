@@ -1,6 +1,14 @@
-# 未闭合、待查、与明确不做
+# 未闭合、待查、已查清未修、与明确不做
 
-本文件只列**需要用户裁决**或**已知未闭合**的项。已经定下来的在 `status.md`。
+本文件收三类，**每一条必须属于其中之一**：
+
+1. **需用户裁决** —— 有岔路，本项目不自行选。
+2. **已知未闭合** —— 还没查清，或查清了但修法本身是开放问题。
+3. **已查清未修（无岔路）** —— 事实清楚、修法唯一，只是没排期。**每条必须写明为什么没做。**
+
+**查清并落地的内容不留在这里**，按它回答的问题移出：裁决进 `decisions.md`，支撑性实测证据进 `README.md` 的证据表，当下实现状态进 `status.md`。用户 2026-08-22 裁决：「已经查清的内容应该移出，归入常规文档的适当位置」。
+
+> **编号是公共接口，永不回收，也不重新编号。** 清点实测：**6 个生产源文件 + 1 个集成测试 + 3 处活文档**按号引用本文件（`stream.py` 引 §12／§19／§20／8d，`openai_responses.py` 与 `responses.py` 引 §2，`inference.py` 与 `test_pipeline_app.py` 引 §5，`base.py` 引 8a）。重新编号**不会报错，只会静默指错人**。所以条目移出后原位留墓碑，空号（13、14）不补——用户 2026-08-22 第 2 条裁决：不必强求序号连续。清点全文见 `../../tmp/260822-deferred-md-inventory.md`。
 
 ## 已知未闭合
 
@@ -163,9 +171,7 @@ response 层有信号（`response.incomplete`），但它晚于 item 关闭到�
 
 ### 9. 一次性交付路径的结局判定不接线（同伴切片）
 
-`one_shot_accounting`（`pipeline_app.py:541`）构造时**不带 `assembler`**，而 `_StreamAccounting.finish()` 把整段结局判定包在 `if self.assembler is not None:` 里。于是走一次性交付的 chat-completions 流，**撕流与客户端断开一律记 `[ OK ] 200`**。
-
-来源：`reports/260822-review-e-group.md` M3。**归同伴的切片**（`2769a64`，2026-08-22 10:38），且他们仍在改该文件（`630f7f3`，11:09），故本主题登记不动手。
+→ **已移入「已查清未修（无岔路）」栏**（2026-08-22）。编号保留，正文见下方该栏。
 
 ### 10. 缺一个 schema → example 的反向检查
 
@@ -227,23 +233,11 @@ response 层有信号（`response.incomplete`），但它晚于 item 关闭到�
 
 ### 16. 反方向（`/responses` 客户端 + Anthropic 上游）仍在抹平
 
-`fef7d96` 只修了一个方向。实测 `to_openai_responses_response`：
-
-```
-anthropic stop_reason='max_tokens'     -> responses status='incomplete'  incomplete_details=None
-anthropic stop_reason='refusal'        -> responses status='completed'   incomplete_details=None
-anthropic stop_reason='stop_sequence'  -> responses status='completed'   incomplete_details=None
-```
-
-`refusal` 被报成 `completed`——与 `fef7d96` 消灭的形态同构；`max_tokens` 虽报 `incomplete`，但 `incomplete_details` 从不生成，客户端读不到原因。**该路由是 served 的**（`/responses` + `claude-model`），只是不在主产品路径上。
-
-来源：`reports/260822-review-unreviewed-span.md` minor-8。
+→ **已移入「已查清未修（无岔路）」栏**（2026-08-22）。编号保留，正文见下方该栏。
 
 ### 17. 重开不重建 framer
 
-`_reopen` 刷新了 assembler、buffer、attempt 计数，但 `framer` 是循环外用**第一次**的 `context.id` / `context.resolved_model` 建的。若重开时路由解析到不同的模型，客户端收到的 `message_start.model` 仍是第一次那个。
-
-今天路由对同一请求是确定的，所以不可达。**登记以免将来加入模型回退时无声出错。** 来源：同上 minor-12。
+→ **已移入「已查清未修（无岔路）」栏**（2026-08-22）。编号保留，正文见下方该栏。
 
 ### 18. 一条提交信息缺字
 
@@ -364,6 +358,42 @@ if replay is None or reason is None:
 插件侧已把 `DEFAULT_REPLIES_BY_CATEGORY` 的键从 `truncated` 改成 `max_tokens`，并加了一段说明「词表由发出方决定，不是这边命名的」；同时新增 `reply_source` 字段（`by_category` / `default` / `loop`）写进 JSONL，**下次再对不上，记录里一眼看得见**——那正是这次三个月没被发现的原因：落回 `reply.default` 是静默的。
 
 改动在 `~/.claude/my/ghc-api-proxy-helper/`，本会话核对时尚未提交。本条留作记录：**一个「有才生效」的查表，对不上时与「没配这一项」同形**，与第 16 条「日志行上的缺席读不出来」是同一族。
+
+## 已查清未修（无岔路）
+
+事实清楚、修法唯一、只是没排期。**每条都写了为什么没做**——没有那一句，这一栏就会退化成一个谁也不敢删的许愿池。编号沿用原编号，不重新编。
+
+### 9. 一次性交付路径的结局判定不接线
+
+`one_shot_accounting`（`pipeline_app.py`）构造时**不带 `assembler`**，而 `_StreamAccounting.finish()` 把整段结局判定包在 `if self.assembler is not None:` 里。于是走一次性交付的 chat-completions 流，**撕流与客户端断开一律记 `[ OK ] 200`**。
+
+**为什么没做**：归同伴的切片（`2769a64`，2026-08-22 10:38），且他们当时仍在改该文件（`630f7f3`，11:09）。本主题登记不动手。
+
+来源：`reports/260822-review-e-group.md` M3。
+
+### 16. 反方向（`/responses` 客户端 + Anthropic 上游）仍在抹平
+
+`fef7d96` 只修了一个方向。实测 `to_openai_responses_response`：
+
+```
+anthropic stop_reason='max_tokens'     -> responses status='incomplete'  incomplete_details=None
+anthropic stop_reason='refusal'        -> responses status='completed'   incomplete_details=None
+anthropic stop_reason='stop_sequence'  -> responses status='completed'   incomplete_details=None
+```
+
+`refusal` 被报成 `completed`——与 `fef7d96` 消灭的形态同构；`max_tokens` 虽报 `incomplete`，但 `incomplete_details` 从不生成，客户端读不到原因。
+
+**为什么没做**：该路由是 served 的（`/responses` + `claude-model`），但**不在主产品路径上**（主路径是 Anthropic 客户端 + Responses 上游）。修法与 `fef7d96` 同构，无岔路。
+
+来源：`reports/260822-review-unreviewed-span.md` minor-8。**点时观测**：上表是 `fef7d96` 之后的实测。
+
+### 17. 重开不重建 framer
+
+`_reopen` 刷新了 assembler、buffer、attempt 计数，但 `framer` 是循环外用**第一次**的 `context.id` / `context.resolved_model` 建的。若重开时路由解析到不同的模型，客户端收到的 `message_start.model` 仍是第一次那个。
+
+**为什么没做**：今天路由对同一请求是确定的，所以**这条路不可达**。登记只为一件事——将来加入模型回退时，它会无声出错。
+
+来源：`reports/260822-review-unreviewed-span.md` minor-12。
 
 ## 明确不做
 
