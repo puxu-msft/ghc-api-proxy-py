@@ -21,6 +21,11 @@ logger = logging.getLogger(__name__)
 
 type ClassifierProtocol = Literal["block", "severity"]
 
+# The wrapper the client puts around the rendered conversation, and the second of the two recognition markers. A constant rather than a setting, unlike its sibling `match_system_prompt_prefix`: that one is a sentence of English and gets reworded, this is a structural tag. Ruled 2026-08-23.
+#
+# The trailing newline is part of the value and is why this is better off not being configurable — a hand-written `"<transcript>"` would never match anything, and would fail silently as a hit count of zero.
+_TRANSCRIPT_OPEN = "<transcript>\n"
+
 # What the client asks for when it wants a score rather than a yes/no. Read off `stop_sequences`, which is one of the two places the protocols differ observably.
 _SEVERITY_STOP = "</severity>"
 # The other place, and the one that matters for stage 2 — which carries no `stop_sequences` at all. `OGw()` rewrites the prompt's `## Output Format` section into the severity wording (app.pretty.js:368332), and `$Gw` is that wording. Recognising it is what keeps a severity stage 2 from being answered in the block protocol, which the client would find unparseable and retry.
@@ -171,7 +176,7 @@ def classify(payload: Mapping[str, Any], config: InterceptAutoModeClassifierConf
 
     if _matches_system_prompt(payload, config.match_system_prompt_prefix):
         matched: Literal["system-prompt", "transcript-open"] = "system-prompt"
-    elif _matches_transcript_wrapper(payload, config.match_transcript_open):
+    elif _matches_transcript_wrapper(payload, _TRANSCRIPT_OPEN):
         matched = "transcript-open"
     else:
         return None

@@ -323,21 +323,13 @@ class InterceptAutoModeClassifierConfig(Section):
     # **It must not contain a `<block>` tag in any casing.** The client scans the whole reply with `/<block>(yes|no)\\b/gi` before reading anything, and returns "unparseable" the moment it sees two different decisions — so a reason quoting `<BLOCK>no</BLOCK>` under `decision: block` would make the reply unreadable, and unreadable costs a **retry** of the original 710 KB rather than one wrong answer. The implementation checks for it and drops the whole reason instead: better an unexplained block than a broken reply.
     block_reason_str: str = "Blocked by proxy configuration, without a model review."
 
-    # The first of two **independent** recognition markers. Either one matching is enough — see the note on redundancy below.
+    # One of two **independent** recognition markers; either matching is enough, though both still sit behind the structural floor in `app.pipeline.auto_mode_classifier`. The other marker — the `<transcript>` wrapper the client puts around the rendered conversation — is a module constant there rather than a setting.
+    #
+    # **Why this one is configurable and that one is not.** They are both string literals owned by another program, but they are not equally likely to change. This is a sentence of English prose and gets reworded; the wrapper is a structural tag. A key nobody will ever need to set is noise on the configuration surface, and that one is worse than noise — its value has to carry the trailing newline exactly, so it is easy to set wrongly, and setting it wrongly fails silently as a hit count of zero.
     #
     # This is the opening line of the classifier's own system prompt, copied verbatim. A request matches when **any** of its system blocks starts with it — any block rather than `system[0]`, because the client puts its billing attribution in a system block too and which one comes first has already differed between recorded traffic and the current client source.
     match_system_prompt_prefix: str = "You are a security monitor for autonomous AI coding agents."
 
-    # The second marker. Claude Code renders the conversation so far into plain text and wraps it; this is that wrapper's **opening tag**. A request matches when the last user message's `content[0]` is a text block equal to exactly this string, *and* a later block in the same message closes it.
-    #
-    # The closing tag is derived from this one rather than configured separately: they are one wrapper, and a configuration that let them disagree could only ever be a mistake.
-    #
-    # **Why two markers rather than one.** Both are string literals owned by another program, so each will decay when that program rewords it — and the failure is silent, showing up as the hit count going to zero rather than as an error. They are unlikely to decay together: a rewritten monitor prompt usually leaves the transcript wrapper alone, and vice versa. Keeping both means one rewording costs nothing.
-    #
-    # **Why they are settings at all.** Decay is safe in direction — an unrecognised request is simply forwarded, which is the pre-feature behaviour, so the cost is the 710 KB rather than a wrong answer — but without these keys, fixing it would mean editing this project and cutting a release. With them it is one line of configuration.
-    #
-    # Neither marker fires on its own: `app.pipeline.auto_mode_classifier` first requires the request to be shaped like a classifier call at all (no tools, not streaming, no assistant turn). Review built two legal ordinary requests that tripped a bare marker, and in both the user's real request would have been answered with a fabricated decision and never sent.
-    match_transcript_open: str = "<transcript>\n"
 
 
 class FixAnthropicRequestHook(Section):

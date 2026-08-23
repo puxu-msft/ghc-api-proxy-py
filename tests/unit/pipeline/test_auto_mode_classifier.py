@@ -13,6 +13,7 @@ from typing import Any, cast
 import httpx2
 import orjson
 import pytest
+from pydantic import ValidationError
 
 from app.config.schema import AutoModeDecision, InterceptAutoModeClassifierConfig, ProxyConfig
 from app.model_provider import ModelDescriptor, ModelEndpoint
@@ -206,10 +207,10 @@ class TestRecognition:
         wrapper_reworded = classifier_request(transcript_open="<conversation>\n")
         assert classify(wrapper_reworded, config(decision="allow")) is not None
 
-    def test_the_markers_are_configurable(self) -> None:
-        """Why they are settings rather than constants: a client-side rewording must be fixable without cutting a release here.
+    def test_the_prompt_marker_is_configurable(self) -> None:
+        """Why this one is a setting: it is a sentence of English prose owned by another program, so it gets reworded, and fixing that must not need a release here.
 
-        The request below has had *both* markers reworded, so it is unrecognisable by default — and one configuration edit brings it back.
+        The request below has had *both* markers reworded, so it is unrecognisable by default. Only one of the two can be repaired by configuration — which is enough, because either marker matching is enough.
         """
         request = classifier_request(
             system_text="Nouvelle formulation du moniteur.", transcript_open="<conversation>\n"
@@ -219,9 +220,16 @@ class TestRecognition:
         repaired = config(
             decision="allow",
             match_system_prompt_prefix="Nouvelle formulation du moniteur.",
-            match_transcript_open="<conversation>\n",
         )
         assert classify(request, repaired) is not None
+
+    def test_the_transcript_wrapper_is_not_a_setting(self) -> None:
+        """Ruled 2026-08-23: `<transcript>` is a structural tag rather than prose, so it does not need a knob — and a knob whose value must carry a trailing newline is one people set wrongly, silently.
+
+        Pinned as a test because "we removed a key" is exactly the kind of decision a later refactor re-adds without noticing.
+        """
+        with pytest.raises(ValidationError):
+            InterceptAutoModeClassifierConfig(match_transcript_open="<conversation>\n")  # pyright: ignore[reportCallIssue]
 
     def test_the_reason_reaches_the_reply(self) -> None:
         """`reason` is the one part of this feature the blocked person sees, so a configured one has to arrive intact."""
