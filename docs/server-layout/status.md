@@ -2,6 +2,8 @@
 
 **这份是活文档**，答「现在实际是什么样」。设计与当时的分析在 [README.md](README.md)（那份是提案时点的记录，其第 11 节的能力边界只对提案当时成立）；三条用户裁决在 [decisions.md](decisions.md)，冲突时以 decisions 为准。
 
+**第二轮（步骤 3～5 之后）的支撑分析**，同样是点时点记录：[模块职责与依赖方向](reports/260822-app-server-structure-deps.md)、[死代码与文档漂移审计](reports/260822-app-server-dead-and-drift.md)、[两个大模块的内聚性](reports/260822-large-modules-after-step5.md)。
+
 **最后更新**：2026-08-22 会话收尾。**基线**：主仓 `main` 当时为 `8a47534`（同伴随后仍在推进）。⚠️ 同伴在此期间 rebase 过 `main`，所以早先文档里引用的部分 SHA 已失效；下表是重新核对过的当前值。
 
 ## 六步：全部落地
