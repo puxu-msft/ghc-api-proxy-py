@@ -70,19 +70,33 @@ MCP server 在另一个仓（插件 `ghc-api-proxy-helper`），本会话够不�
 | `category` | 上游把这一轮截短、并非错误时：**就是那个 `stop_reason`**，默认配置下唯一可能的值是 **`max_tokens`**。是错误时：`network` / `upstream` / `auth` **三者之一**，外加结构上今天不可达的 `internal` |
 | `message` | **一句代理合成的诊断，不是异常原文**（2026-08-23 起，提交 `aac348e`）。格式与取值见下 |
 
-### `message` 的格式（2026-08-23 起）
+### `message` 的格式（2026-08-23 起，本节对应 `e2cb70b`）
+
+> **本节与代码的同步点是提交 `e2cb70b`。** 前一版本节写于 `aac348e` 时点，`79428bb` 改了筛选规则之后就过期了，独立复评（`260823-review-handover-message-delta.md` M2）指出「命名为跨仓权威的文档逐字描述旧算法、并给出三条已不成立的示例」。**改 `describe_error` 的人必须同时改本节，并把这行锚点换成新提交。**
 
 改之前它是 `str(error)`（非错误时是 `stop_reason`，与 `category` 逐字同值）。**那个值在真实流量里读不出东西**：MCP server 日志当时积累的 4 条记录全部是 h2 事件的裸 `repr`，其中 3 条 `error_code:0`、1 条 `error_code:8`，而区分二者的那个词是一个 `IntEnum`，`str()` 打出来是数字。同一轮调查还测出另外三种更糟的形态（`.dev/docs/upstream/retry-and-continuation/reports/260823-handover-error-shapes.md`）：真实连接重置的 `httpx2.ReadError` 的 `str()` **是空串**，裸 `h2.ProtocolError()` 也是空串，而 `h2.StreamClosedError(3)` 的 `str()` 是裸数字 `'3'`——看着像一条真消息。
 
-现在的形状是 `<对失败的描述> [request <request_id>, attempt <N>]`。错误分支的描述由 `describe_error` 生成：沿 `__cause__`（`__cause__` 缺席且未被 suppress 时退到 `__context__`）自外向内走，每一环写成 `module.QualName: 文本`；**文本与前面某一环重复的丢弃**（httpx 原样转抛 httpcore 的消息，不丢就会把同一个事件 repr 印两遍），**内层无文本的丢弃**，最外层无论有没有文本都保留。链上出现 `h2.events.ConnectionTerminated` / `StreamReset` 对象时（httpcore 是 `RemoteProtocolError(event)`，对象比文本多活一环），额外附一段括注，`error_code` 读事件自己的枚举而不是本仓维护的表。
+现在的形状是 `<对失败的描述> [request <request_id>, attempt <N>]`。
 
-实测输出（每一种都对应报告里判定为可达的形态）：
+错误分支的描述由 `describe_error` 生成，沿 `__cause__` 自外向内走（`__cause__` 为 `None` 且未被 suppress 时才退到 `__context__`；判据是 `is not None` 而非真值，因为异常子类可以定义 `__bool__`）。**一环是否出现，按它有没有说出新东西决定**，三种情形：
+
+| 这一环 | 输出 | 为什么 |
+|---|---|---|
+| 文本是新的 | `module.QualName: 文本` | 常规情形 |
+| 文本已出现过，但类名是新的 | 只有 `module.QualName` | 否则 `RuntimeError('denied') from PermissionError('denied')` 只剩外层，丢掉唯一说明「哪一类失败」的词。h2 事件经 httpcore→httpx 映射时文本也重复，但类名一并重复，那一环整个丢弃 |
+| 没有文本 | 只有 `module.QualName`，且**仅当此前还没有任何一环带过文本** | 两个 deadline 守卫外面裹着 `TimeoutError() -> CancelledError()`，那是 `asyncio.timeout` 的构造方式而不是这一轮发生的事；外层已经点名是哪道守卫了，再附上 `CancelledError` 会把一个已明确的超时读成取消。而真实连接重置的外两环是静默的，那时内层类名就是仅有的线索 |
+
+类名的「新鲜」按 `__qualname__` 判，不按完整点分路径——`httpx2.ReadError` 套 `httpcore2.ReadError` 是同一个失败被两个库各描述一遍，正是该合并的情形。两个真正无关模块里的同名异常也会被合并，这是有意取舍，且迄今只在构造反例里出现过。
+
+链上出现 `h2.events.ConnectionTerminated` / `StreamReset` 对象时（httpcore 是 `RemoteProtocolError(event)`，对象比文本多活一环），额外附一段括注，`error_code` 读事件自己的枚举而不是本仓维护的表。**这条依赖是静默降级的**：复评实测把 event 在进入 httpcore2 异常前转成字符串（模拟未来依赖不再把对象放进 `args`），结果括注消失而原始 repr 完整保留。
+
+实测输出（每一种都对应报告里判定为可达的形态，由当前代码直接生成）：
 
 | 触发 | `message` |
 |---|---|
 | h2 GOAWAY（日志里 3 条） | `httpx2.RemoteProtocolError: <ConnectionTerminated error_code:0, last_stream_id:2147483647, additional_data:None> (HTTP/2 GOAWAY from upstream, error_code=NO_ERROR) [request a1b2c3d4, attempt 1]` |
 | h2 RST_STREAM（日志里 1 条） | `httpx2.RemoteProtocolError: <StreamReset stream_id:1011, error_code:8, remote_reset:True> (HTTP/2 RST_STREAM from upstream on stream 1011, error_code=CANCEL) [request a1b2c3d4, attempt 1]` |
-| 真实连接重置 | `httpx2.ReadError; caused by builtins.ConnectionResetError: [Errno 104] Connection reset by peer [request a1b2c3d4, attempt 1]` |
+| 真实连接重置 | `httpx2.ReadError; caused by anyio.BrokenResourceError; caused by builtins.ConnectionResetError: [Errno 104] Connection reset by peer [request a1b2c3d4, attempt 1]` |
 | HTTP/1.1 提前关闭 | `httpx2.RemoteProtocolError: peer closed connection without sending complete message body (received 19 bytes, expected 1000) [request a1b2c3d4, attempt 1]` |
 | attempt 时限 | `app.streaming.deadline.StreamDeadlineError: attempt exceeded its deadline [request a1b2c3d4, attempt 1]` |
 | 空闲超时 | `app.streaming.idle_timeout.StreamIdleTimeoutError: No stream item received for 300s [request a1b2c3d4, attempt 1]` |
@@ -90,11 +104,12 @@ MCP server 在另一个仓（插件 `ghc-api-proxy-helper`），本会话够不�
 | `h2.StreamClosedError(3)` | `h2.exceptions.StreamClosedError: stream 3 [request a1b2c3d4, attempt 1]` |
 | `max_tokens` 交接（非错误） | `upstream ended the turn before it was finished: stop_reason=max_tokens [request a1b2c3d4, attempt 1]` |
 
-**给接收端的三点**：
+**给接收端的四点**：
 
 - **`message` 现在恒为非空**。改之前它可以是空串，那是接收端最难处理的取值。
 - **方括号里那两项是代理侧的身份，不是上游说的话。** `request_id` 是本仓请求追踪的主键——本仓的日志按它记着模型、字节数与上游连接标识（`upstream_conn`），而 MCP 日志此前没有任何字段能连回来。**刻意只带这把钥匙、不复制它指向的事实**，免得两处各存一份漂移。`attempt` 是例外，因为它单独改变这条线的读法，而客户端那侧根本看不见它（那边的打转判据只有 `num_messages`）。
-- **单行、有长度上限。** 每一环文本超过 240 字符时截断并写明还剩多少（`… (+N more chars)`），链最多走 6 环。
+- **单行、有长度上限。** 每一环文本超过 240 字符时截断并写明还剩多少（`… (+N more chars)`）；链最多走 6 环，**走满即截断并追加 `; caused by … (chain continues past 6 links)`**——不静默，因为「链到此为止」和「链被砍断」否则同形。
+- **`message` 不供解析。** 措辞会随可读性改良而变；接收端的行为只应依赖 `category` 与 `num_messages`。复评逐行核过接收端确实如此（`server.py:65-68` 只用这两项驱动 loop 与 reply，`message` 仅在 `:69-75` 传给 `build_record`、`:103` 写进 JSONL），所以本次改动不可能改变 retry 行为。
 
 对应的插件侧工具描述（`~/.claude/my/ghc-api-proxy-helper/src/auto_retry/server.py`）原先写的是「上游错误消息原文，verbatim」，与上面这个形状已经不符，2026-08-23 一并改掉。
 
