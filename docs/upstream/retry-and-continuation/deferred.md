@@ -12,31 +12,15 @@
 
 ## 已知未闭合
 
-### 1. 上下文超限的 400：两条腿的分类判据不同（原标题「主路径抽不出数字」已撤销）
+### 1. 上下文超限的 400 —— 已查清的部分已移出，只剩一条等录制
 
-**2026-08-22 更正**：本条原来的落点是「`parse_prompt_limit_error` 在主路径上返回 `None`，抽不出上下文上限的数字」。**用户质疑该理由是否成立，质疑成立，本项目撤回。**
+**已查清、已移出**（2026-08-22）：
 
-- 那个数**上游模型目录里就公布着**，逐模型：`limits.max_prompt_tokens: 936000`、`max_context_window_tokens: 1000000`（一手样本 `exp/260820-websearch-probe/raw/models-live.json`）。从一个 400 里反解它，只是对上游已公布事实做交叉验证，不是唯一来源。
-- 它的消费端也站不住：`parse_prompt_limit_error` 只有两个调用点——`app/hooks/builtin/token_calibration.py:87` 与 `app/tokenization/service.py:64`，而后者服务的 `/api/tokenization/limits` 在 `docs/.human-controlled/api.md:21` 里已标为**暂不支持**。前者在 **legacy 链路**上：它的两个 hook 只由 `hooks/builtin/__init__.py:17` 的 `register_builtin_hooks` 注册，而那只有一个调用点 `server/app_factory.py:110`，服务进程从 `cli.py:128`/`:154` 起**只构建 `create_pipeline_app(chain)`，从不走 `app_factory`**。措辞刻意不写成「这段代码没接线」——`ObserverEvent.ERROR` 带 `response_body` 的分发确实存在（`pipeline/executor.py:477-487`），准确的说法是**这条链路不被服务进程构建**（异源评审 F16 收紧）。
+- **两条腿的 400 形态结构性不同**，以及 `error.code` 在 Anthropic 腿可作判据、在 Responses 腿不可（与其他参数错误共用 `invalid_request_body`，只能匹配 message 文本）→ `README.md` 证据表已有该行，细节 48 例在 `reports/260821-context-limit-400-examples.md`。
+- **`model_context_window_exceeded` 的两腿权重差异** → 同表另一行（并入了「未观测 ≠ 不可能」那句解读）。
+- **本条原标题「主路径抽不出数字」已被用户质疑并撤回**，理由（那个数上游模型目录就公布着；其消费端在不被服务进程构建的 legacy 链路上）与教训（*继承一个缺口的描述时，先找它的消费端*）→ 记在 `../../tmp/260822-deferred-md-inventory.md` 与本条的历史版本里，不再占本文件篇幅。
 
-**这次错在哪**：「抽不出数字」这个说法是从一份调研报告里继承来的，本项目**没问过这个数字是给谁用的**就把它登记成了未闭合项。同一形状值得记住——*继承一个缺口的描述时，先找它的消费端*。
-
-下面是仍然成立的部分：**正面形态是 HTTP 400，48 例一手录制**（`reports/260821-context-limit-400-examples.md`），**两条腿的表达结构性不同**，这关系到重试分类（上下文超限不可重试），与上限数字无关：
-
-| | Anthropic 腿（27 例，2026-07-18～08-08） | Responses 腿（21 例，2026-08-06～08-08） |
-|---|---|---|
-| `Content-Type` | `application/json` | **`text/plain; charset=utf-8`**，body 末尾带 `\n` |
-| `error.code` | `model_max_prompt_tokens_exceeded` | `invalid_request_body` |
-| `error.type` | `invalid_request_error` | **没有** |
-| `request_id` | 顶层有，另有顶层 `type:"error"` | **没有** |
-| message | `prompt is too long: 1051542 tokens > 1000000 maximum`（`>` 在线上是 `>`） | `Your input exceeds the context window of this model. Please adjust your input and try again.` |
-| 靠 `error.code` 能否区分 | **能**——其余 400 连 `code` 字段都不带 | **不能**——`Invalid 'input[1].id'`、`Invalid 'max_output_tokens'` 用的是同一个 `invalid_request_body`。只能匹配 message 文本，建议匹配 `exceeds the context window` |
-
-**这条留作已查清的事实，不再是待办。** 人写文档原本写的是 `SSE stop_reason = model_context_window_exceeded`，**该判据已被实测证伪**：Responses 腿的值空间里没有这个东西（`incomplete_details.reason` 20/20 全是 `max_output_tokens`），Anthropic 腿 13 万次请求零观测（Anthropic 枚举里有该值，故属「未观测」而非「不可能」，见第 3 条）。
-
-**顺带证伪一条旧结论**：归档里同伴写过「没有任何一条当前两条正则漏掉的真实 token-limit body」——现在不成立。原因是那份的语料**全部早于 2026-07-18**，而当时没有把这个时间窗写下来。
-
-**仍未查清**（低优先，无消费端）：账户类型维度（history 库无此字段）；`/chat/completions` 腿只有 `vscode-copilot-chat` 2025-12 的第三方录制（第三种形态：OpenAI 措辞 + `model_max_prompt_tokens_exceeded`、无 `type`）。本项目自己不落盘上游 body，`~/.local/share/ghc-api-proxy/rejected/` 不存在，所以这两项只能等新的录制。
+**仍未查清**（低优先，**无消费端**）：账户类型维度（history 库无此字段）；`/chat/completions` 腿只有 `vscode-copilot-chat` 2025-12 的第三方录制（第三种形态：OpenAI 措辞 + `model_max_prompt_tokens_exceeded`、无 `type`）。本项目自己不落盘上游 body，`~/.local/share/ghc-api-proxy/rejected/` 不存在，所以这两项**只能等新的录制**——不是没排期，是没有可查的东西。
 
 ### 2. reasoning item 被截断时没有任何信号
 
@@ -397,4 +381,6 @@ anthropic stop_reason='stop_sequence'  -> responses status='completed'   incompl
 
 ## 方法学警告（给后来查 history 的人）
 
-`from_history.py` 的「只取变换图的根」判据，在 **2026-07-17 19:41 之前的 366 个 operation 上恒真失效**——那批完全没有 transform 记录，代理自造帧与上游帧无法区分。涉及那段时间窗的样本必须标注这个限制，否则会把代理改写过的帧当成上游事实。
+→ **已移入 `tests/int/recorded/from_history.py` 的模块 docstring**（2026-08-22，主仓 `f0459f2`）。
+
+那份 docstring 自己写着「两条限制，都是载重的，**都编码在下面而不是留给读者的记忆**」，而这第三条（「只取变换图的根」在 2026-07-17 19:41 之前的 366 个 operation 上恒真失效）正被留在本文件里——**造夹具的人不会来这儿看**。判据的限制归判据所在的地方。

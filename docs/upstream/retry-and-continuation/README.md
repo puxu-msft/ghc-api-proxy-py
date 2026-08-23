@@ -40,7 +40,7 @@
 | 被截断的 item 在 `output_item.done` 上带 `status:"incomplete"`，完整的带 `"completed"`；**reasoning item 没有这个字段**（与正常收尾的 reasoning item 键集逐字相同，已做正样本对照） | 录制，`status:"incomplete"` 实测 15 次（4 次在 `function_call` 上） | 同上 + `evidence/probe-reasoning-item-control.py` |
 | Responses 腿的终止只有 `response.completed`(64351) 与 `response.incomplete`(20)；`response.failed`／`cancelled`／上游 `error` 帧**各 0 次** | 录制，134336 个 operation | `reports/260821-upstream-termination-reasons.md` |
 | `incomplete_details.reason` 20/20 全是 `max_output_tokens`，**没有第二个取值** | 录制 | 同上 |
-| Anthropic 腿实测到的 `stop_reason`：`tool_use`(124927)、`end_turn`(8290)、`max_tokens`(24)、`refusal`(1)。`model_context_window_exceeded` **零观测** | 录制 | 同上 |
+| Anthropic 腿实测到的 `stop_reason`：`tool_use`(124927)、`end_turn`(8290)、`max_tokens`(24)、`refusal`(1)。`model_context_window_exceeded` **零观测** | 录制。**这是「未观测」不是「不可能」**——Anthropic 的枚举里有这个值，只是这批语料里没出现；Responses 腿则是结构性不存在（值空间里没有它）。两条腿的权重不同，分类表里不要把 Anthropic 腿那格写成已排除 | 同上 |
 | 上下文超限走 HTTP 400，**两条腿形态不同**：Anthropic 腿 `error.code=model_max_prompt_tokens_exceeded` 且 message 带数字；Responses 腿 `error.code=invalid_request_body`（与其他参数错误共用，不可据以区分）且 message **无数字** | 录制，48 例一手 | `reports/260821-context-limit-400-examples.md` |
 | Claude Code 的 `stop_reason` schema 是 `string().nullable()` **无枚举**，未知值不报错、直接跳过 | 代码事实，CC 2.1.226 | 同上 |
 | Claude Code 对不认识的工具名发回 `No such tool available` 的 tool_result，**不崩溃**，对话继续 | 代码事实 | `~/.claude/skills/debugging-claude-agent-tools/reference/source-symbols.md:21` |
