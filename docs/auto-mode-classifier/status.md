@@ -55,7 +55,20 @@
 
 - `ruff check src tests` 全过；`pyright` 在上述五个文件上 0 错误（仓库既有的 `stream_cap.py` 相关错误与本改动无关，未触碰）
 - 全量回归通过，覆盖率 89.56%（门槛 80）
-- **变异验证**：八个不变量逐个回退，对应测试全部变红（4/2/2/2/1/2/1/2 条），基线字节级还原后仍 42 passed。其中一个是把 `decision == "passthrough"` 的短路拆掉，两条测试变红，所以「默认关闭」是被守住的而不是碰巧成立的。脚本一次性，未收编
+- **变异验证**：八个不变量逐个回退，对应测试全部变红，基线字节级还原后仍 42 passed。驱动脚本是一次性的、未收编，因此变异表记在这里——有它就能重建，没有它脚本本身才是证据：
+
+| 改坏什么（符号） | 变成什么 | 变红条数 |
+|---|---|---|
+| `classify` 里 `_has_classifier_shape` 那道守卫 | 整段删除 | 4 |
+| `_SEVERITY_BLOCK` | `101` → `100` | 2 |
+| `_protocol_of` 读 system 文本 `<severity>` 的分支 | 整段删除 | 2 |
+| `verdict_text` 的 `_DECISION_TAG.search(reason)` | 换回大小写敏感的 `"<block>" not in reason` | 2 |
+| `driver.handle` 的 `inbound_format is ANTHROPIC_MESSAGES` | 换成 `if True` | 1 |
+| `_TRANSCRIPT_OPEN` | 换成永不匹配的值 | 2 |
+| `driver._answered_auto_mode` 读 `block_reason_str` 的那次 config 查找 | 换成字面量 | 1 |
+| `classify` 的 `decision == "passthrough"` 短路 | 换成 `if False` | 2 |
+
+最后两行是第二轮评审的产物：倒数第二条此前**不会**变红，那正是被发现的接线盲区。其中一个是把 `decision == "passthrough"` 的短路拆掉，两条测试变红，所以「默认关闭」是被守住的而不是碰巧成立的。脚本一次性，未收编
 
 ## 第二轮评审（配置改动，2026-08-23）
 
