@@ -209,3 +209,49 @@ builtins.RuntimeError: attempt exceeded its deadline; caused by app.streaming.de
 - 当前实现探针：第三轮两个 silent-cause 反例、非-timeout cancellation、deadline/idle/reset 均得到协调者列出的预期输出；另得到 m3 的 false-positive/false-negative 输出。
 - 协调者报告 Ruff、targeted Pyright 已通过；本轮未重复全量测试。
 - 本轮没有修改主工作树源码或测试，只按要求追加本报告。
+
+## 第五轮：`2d6b878` / `.dev@2d4c38c` 收口确认
+
+> 本节是这份报告的最终 verdict，覆盖前文各轮的历史 verdict。
+
+- 评审对象：主仓 `2d6b8780b844e09f91ceeac09ba9f155abb56192`；开发文档仓 `2d4c38c63b2a66028ef998825fb6032f63ef7d26`
+- Verdict：**pass**
+- 本轮计数：blocker 0，major 0，minor 0，nit 1
+
+### 第五轮结论
+
+M3 与 m3 均已闭合。timeout suppression 现在只匹配调查实际记录的相邻三环，并在原始 link 自身文本上判定，不再用跨链状态推测位置；第四轮的三个误伤反例与一个漏压反例全部有直接回归测试。跨仓 README 已锚到 `2d6b878`，规则表逐项对应当前 helper，违反锚点两次的历史也留在规则旁；处置文档不再复制可变规则。M1 的 error 与 max-tokens 两个真实入口断言均保持有效。
+
+没有发现 blocker、major 或应在本轮继续修复／登记 deferred 的 minor。唯一 nit 是发现数量的台账口径：前三轮明确计为 11 条，第四轮新增 M3/m3 两条，按报告标签应为 **13 条**而非处置文档和本轮提示中的“14 条”；这不影响任何实现或 finding 处置结论。
+
+### 1. 相邻三环判据
+
+当前 `_asyncio_timeout_plumbing` 只在原始 `links` 中匹配：
+
+```text
+TimeoutError 子类且自身文本非空
+  -> type(x) is builtins.TimeoutError 且自身文本为空
+  -> type(x) is asyncio.CancelledError 且自身文本为空
+```
+
+只压后两环。四个第四轮反例逐项核对：直接挂在 timeout 下的 `CancelledError` 保留；隔着 `RuntimeError` 的 `CancelledError` 保留；静默 `TimeoutError` 子类保留；复制 guard 文本的 outer wrapper 不再妨碍识别真实 plumbing。两个实测 guard 仍只输出已点名的 outer；reset、fixed-text wrapper、silent cause 等前几轮反例不变。
+
+还能手工构造一条语义上声称“不是 asyncio.timeout”、字节与类型却完全等于上述三环的链，但 formatter 没有可观察事实可以区分它；要求它猜隐藏 provenance 不是可实施判据，不据此列 finding。判据对 exact builtins `TimeoutError` 与 exact `asyncio.CancelledError` 的要求是保守的：未来 runtime 若改用子类只会多显示类型，不会再静默吞掉原因。
+
+### 2. m1 真实入口断言
+
+`test_a_turn_that_ran_out_of_room_is_handed_back_the_same_way` 现在读取客户端实收的 `input.message`，同时钉住“不是裸 `max_tokens`”、`stop_reason=max_tokens` 与 request/attempt 结构。第四轮已验证的裸 `stop_reason` 变异现在会在 `message != "max_tokens"` 处变红；`2d6b878` 未改动该入口或调用接线，本轮基线再次通过。
+
+error 入口继续钉 `NO_ERROR` 与同日志交叉核对的 request id。两个入口配合 helper 单测后，没有发现仍能丢掉本次 message 契约而属于合理回归的绕过。
+
+### 3. 前四轮 finding 闭合状态
+
+按报告中实际编号，前四轮共有 13 条：第一轮 F1～F5 五条，第二轮 M1/M2/m1/m2 四条，第三轮 m1/m2 两条，第四轮 M3/m3 两条。它们的具体反例、生产接线、跨仓描述和同步锚点均已闭合；`__qualname__` 合并不同 module 同名异常是已明确接受并写入权威文档的产品取舍，不是未处置 finding。
+
+### 第五轮验证摘要
+
+- 精确 `2d6b878` 副本：26 条 unit + error/max-tokens 两条 integration，共 `28 passed in 2.81s`。
+- 主仓 `2d6b878` 后的 `tests/int/test_pipeline_app.py` 有同伴新增改动，但提交副本验证隔离了它们；`hand_over.py` 与本次 unit 文件在当前 HEAD 与 `2d6b878` 一致。
+- 开发文档仓 `2d4c38c`：README 锚点为 `2d6b878`，规则表与代码相符；处置文档只指向该锚点，不再充当第二份可变规则。
+- 协调者报告 Ruff、targeted Pyright 与全量 `1506 passed / 2 skipped` 均通过；本轮未重复全量。
+- 本轮没有修改主工作树源码或测试，只按要求追加本报告。

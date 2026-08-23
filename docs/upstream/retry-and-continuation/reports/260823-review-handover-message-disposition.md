@@ -1,9 +1,9 @@
-# hand-over `message` 评审处置（四轮）
+# hand-over `message` 评审处置（五轮，终局 pass）
 
 - 日期：2026-08-23
 - 起始提交 `aac348e`，修复提交 `79428bb`、`e2cb70b`、`9645293`、`8de0d3c`、`2d6b878`
-- 四轮评审原件：[`260823-review-handover-message.md`](260823-review-handover-message.md)（第一轮，**needs-fix**，major 1 / minor 4）、[`260823-review-handover-message-delta.md`](260823-review-handover-message-delta.md)（第二轮，**needs-fix**，major 2 / minor 2）、[`260823-review-handover-message-final.md`](260823-review-handover-message-final.md)（第三、四轮各一节，**needs-fix**，minor 2 / major 1 + minor 1）
-- 处置结果：**十四条全部采纳**
+- 五轮评审原件：[`260823-review-handover-message.md`](260823-review-handover-message.md)（第一轮，**needs-fix**，major 1 / minor 4）、[`260823-review-handover-message-delta.md`](260823-review-handover-message-delta.md)（第二轮，**needs-fix**，major 2 / minor 2）、[`260823-review-handover-message-final.md`](260823-review-handover-message-final.md)（第三～五轮各一节，**needs-fix** / **needs-fix** / **pass**）
+- 处置结果：**十三条全部采纳**（第一轮 5 + 第二轮 4 + 第三轮 2 + 第四轮 2），第五轮 **pass**，无 blocker/major/minor，仅一条 nit（本行原先把条数记成十四，已更正）
 - 支撑调查：[`260823-handover-error-shapes.md`](260823-handover-error-shapes.md)
 
 > **本文件不写「已同步」这类无锚点的状态断言。** 第二轮的 M2 正是这么复发的：处置文档说三处已同步，而那句话在下一个提交之后就不成立了，反倒掩盖了漂移。跨仓契约当前的同步锚点写在 `README.md` 那一节的开头，以那里为准。
