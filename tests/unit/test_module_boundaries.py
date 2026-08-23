@@ -8,9 +8,11 @@ This is a structural assertion, not a style one. `D-ARCH = B` puts the wire shap
 Each measurement runs in its own interpreter. It used to unload `app*` from this one and import again, which answered the question but left every later test in the process holding classes from a superseded import: `assert x is SomeEnum.MEMBER` then compares two objects that print the same and are not the same. Two rate-limiter tests failed that way whenever the run happened to order them after this file. A subprocess also measures the thing the test is named for — what a *fresh* interpreter drags in — rather than what is left after a partial unload inside a process that has already imported a thousand other things.
 """
 
+import ast
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 # Printed on the last line so the reader tolerates anything a plugin or a package init writes to stdout on the way past.
 _PROBE = (
@@ -92,3 +94,23 @@ def test_pipeline_exceptions_stay_importable_without_the_pipeline() -> None:
     errors = reachable_from("app.pipeline.exceptions")
 
     assert not [name for name in errors if name.startswith(("app.upstream", "app.model_provider.ghc_client"))]
+
+
+def test_no_live_module_drives_h2_itself() -> None:
+    """`_CONNECTION_ERRORS` maps the whole `h2.exceptions` family, and that mapping rests on this.
+
+    The hierarchy carries no attribution — a review raised ten of its members through h2's public API, all from caller actions. What makes the mapping sound is that nothing here makes those calls: every h2 interaction in this process happens inside httpcore, which converts what it raises itself, so a *bare* `H2Error` has escaped through the one gap in that conversion and came from parsing the peer's bytes.
+
+    Imports of `h2.events` and `h2.exceptions` are types being named — the gloss in `app.pipeline.hand_over` and the tuple in `app.model_provider.ghc_client.errors`. `h2.connection`, `h2.config` and `h2.stream` are the modules you reach for to drive a connection, and reaching for one of them is what would quietly turn that tuple into a claim nobody checked.
+    """
+    driving = {"h2.connection", "h2.config", "h2.stream", "h2.frame_buffer", "h2.windows"}
+    offenders: list[str] = []
+    for path in sorted(Path("src/app").rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                offenders += [f"{path}: import {a.name}" for a in node.names if a.name in driving]
+            elif isinstance(node, ast.ImportFrom) and node.module in driving:
+                offenders.append(f"{path}: from {node.module} import ...")
+
+    assert offenders == [], "\n".join(offenders)

@@ -20,6 +20,7 @@ from app.errors import WIRE_TYPES, ErrorCategory
 from app.model_provider.ghc_client.errors import normalize_upstream_error
 from app.observability.active_requests import ActiveRequestRegistry
 from app.observability.request_trace import RequestTrace
+from app.pipeline.delivery import stream as stream_module
 from app.pipeline.delivery.assembling import Terminal
 from app.pipeline.delivery.blocks import BlockBuffer, CompletedBlock
 from app.pipeline.delivery.formats.anthropic_messages import AnthropicAssembler, AnthropicFramer
@@ -1226,6 +1227,89 @@ async def test_a_bug_in_framing_says_so_on_the_frame_it_does_send() -> None:
     assert '"code":"proxy_delivery_failed"' in body
     assert f'"type":"{WIRE_TYPES[ErrorCategory.INTERNAL]}"' in body
     assert WIRE_TYPES[ErrorCategory.UPSTREAM] not in body
+
+
+class _FramerWhoseKeepaliveFails(AnthropicFramer):
+    """The keep-alive is this side's code too, and it runs where nothing had marked it."""
+
+    def keepalive(self) -> bytes:
+        raise TypeError("OutboundFramer.keepalive() bug")
+
+
+@pytest.mark.asyncio
+async def test_a_bug_in_the_keepalive_is_this_sides_too() -> None:
+    """One of the places the old marker-per-site approach had missed, kept as a case after the predicate was inverted.
+
+    It is here because the list of places this side runs code is what proved unbounded: framing was left out on a stated reason that did not hold, and the keep-alive was left out after that was fixed. Nothing is marked now — upstream is what is identified — so this passes for a structural reason rather than because someone remembered.
+    """
+    chunks: list[bytes] = []
+
+    payloads = anthropic_stream("one")
+
+    async def silent_after_a_block() -> AsyncIterator[bytes]:
+        # Three frames is one whole block, then a gap longer than the interval — the same shape `run_with_gap` uses, because a cue is only owed once one is due.
+        for payload in payloads[:3]:
+            yield payload
+        await asyncio.sleep(1.2)
+        for payload in payloads[3:]:
+            yield payload
+
+    with pytest.raises(TypeError):
+        async for chunk in stream_delivery(
+            silent_after_a_block(),
+            AnthropicAssembler(),
+            buffer=BlockBuffer(policy="block"),
+            settings=StreamSettings(sse_ping_interval=1),
+            framer=_FramerWhoseKeepaliveFails(message_id="msg_1", model="claude-model"),
+        ):
+            chunks.append(chunk)
+
+    body = b"".join(chunks).decode()
+    assert '"code":"proxy_delivery_failed"' in body
+    assert WIRE_TYPES[ErrorCategory.UPSTREAM] not in body
+
+
+@pytest.mark.asyncio
+async def test_a_bug_in_this_sides_sse_reader_is_not_handed_over_as_upstreams(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reader between the socket and the assembler is this side's, and marking each of this side's places had missed it.
+
+    An independent review built this against the marker-per-site version: the reader raised after a whole block had gone out, and the client received a hand-over blaming upstream for a bug in this proxy. Reproduced here through the same production wiring, with the reader replaced rather than the exception injected from outside — a `raise` from the upstream iterator would be upstream's by definition and would prove nothing.
+    """
+    handed: list[BaseException | None] = []
+
+    def synthesize(error: BaseException | None, _stop_reason: str) -> dict[str, Any]:
+        handed.append(error)
+        return {"type": "tool_use", "id": "toolu_x", "name": "carry_on", "input": {}}
+
+    real_read_events = stream_module.read_events
+
+    def failing_reader(source: AsyncIterator[bytes]) -> AsyncIterator[SseEvent]:
+        async def reader() -> AsyncIterator[SseEvent]:
+            seen = 0
+            async for event in real_read_events(source):
+                seen += 1
+                if seen > 3:
+                    raise LookupError("bug in this side's SSE reader")
+                yield event
+
+        return reader()
+
+    monkeypatch.setattr(stream_module, "read_events", failing_reader)
+
+    with pytest.raises(LookupError):
+        async for _ in stream_delivery(
+            feed(anthropic_stream("first", "second")),
+            AnthropicAssembler(),
+            buffer=BlockBuffer(policy="block"),
+            settings=StreamSettings(sse_ping_interval=0),
+            framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
+            continuation=ContinuationSupport(synthesize=synthesize),
+        ):
+            pass
+
+    assert handed == [], "this side's bug is not the client's to carry on from"
 
 
 @pytest.mark.asyncio

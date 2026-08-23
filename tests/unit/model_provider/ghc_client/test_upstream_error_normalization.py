@@ -7,7 +7,7 @@ The defect these cover is not that a case was handled wrongly — it is that no 
 import httpx2
 import openai
 import pytest
-from h2.exceptions import NoSuchStreamError, RFC1122Error, StreamClosedError
+from h2.exceptions import NoSuchStreamError, StreamClosedError
 from h2.exceptions import ProtocolError as H2ProtocolError
 
 from app.model_provider.ghc_client.errors import normalize_upstream_error, retry_after_seconds
@@ -112,12 +112,14 @@ def test_one_goaway_has_one_fate_whichever_shape_it_arrives_in() -> None:
     assert classify(bare) is classify(wrapped) is Disposition.RETRY
 
 
-def test_the_whole_h2_family_is_named_not_just_the_one_that_was_measured() -> None:
-    """`transport.py` names `ProtocolError` because everything it sees arrived before the headers; on the body path that limit does not apply.
+def test_the_h2_family_is_named_because_of_where_a_bare_one_can_come_from() -> None:
+    """Not because the hierarchy means "upstream" — it does not, and asserting that would pin a false claim.
 
-    `StreamClosedError` is the one worth naming explicitly: it stringifies to a bare stream id, so left unnamed it produced a `message` reading `3` — which looks like something upstream said.
+    A review built ten `H2Error` subclasses through h2's own public API, all from caller actions: `RFC1122Error` is raised only for the caller's misuse, and `StreamIDTooLowError`, `NoSuchStreamError`, `StreamClosedError` and `FlowControlError` are each reachable from both sides. The family is mapped here on the two conditions named in `errors.py`, not on the type meaning anything by itself.
+
+    So what is asserted is the shape that actually arrives — a subclass with no message of its own, which is what a bare `receive_data` failure looks like and what used to reach the client as a `message` reading `3`. `test_no_live_module_drives_h2_itself` in `tests/unit/test_module_boundaries.py` is what holds up the first condition.
     """
-    for error in (StreamClosedError(3), NoSuchStreamError(7), RFC1122Error("legal but unusual")):
+    for error in (StreamClosedError(3), NoSuchStreamError(7)):
         normalized = normalize_upstream_error(error)
         assert isinstance(normalized, UpstreamError), type(error).__name__
         assert reason_for(normalized) is RetryReason.NETWORK, type(error).__name__

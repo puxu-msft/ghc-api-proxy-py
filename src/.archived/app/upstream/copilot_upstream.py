@@ -1,6 +1,8 @@
 """`CopilotUpstream` — the adapter that put `GhcApiClient` into the shape of `UpstreamTarget`.
 
-Cut out of the live `app/upstream/copilot.py` on 2026-08-23 and landed here under a name that never existed upstream of the cut, the same way `app/tokenization/gemini_estimator.py` did. The rest of that file is live: `GitHubTokenSourceAdapter` is built by `app/server/composition.py` and the two header builders are used by the live client.
+Cut out of `app/upstream/copilot.py` on 2026-08-23 and landed here under a name that never existed upstream of the cut, the same way `app/tokenization/gemini_estimator.py` did.
+
+Only one thing in that file is measurably live: `GitHubTokenSourceAdapter`, built by `app/server/composition.py`. An earlier version of this docstring claimed the two header builders were live as well; a review checked and they are not. `build_copilot_identity_headers` has no caller anywhere, and `build_copilot_headers` has one test and no production caller — the live paths call the layer beneath them (`build_request_headers`, `build_identity_headers`) directly. They stayed in `src/app/` rather than coming here because nobody has ruled on them; registered in `deferred.md` §22之五.
 
 `UpstreamTarget` is the protocol in `app/upstream/base.py` *in this directory* — so this class adapted the live library to an already-archived interface, and nothing in `src/` or `tests/` ever instantiated it. The live provider reaches `GhcApiClient` directly through `app/model_provider/github_copilot.py`.
 

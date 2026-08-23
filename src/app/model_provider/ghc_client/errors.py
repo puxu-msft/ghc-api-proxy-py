@@ -36,9 +36,14 @@ _STATUS_ERRORS = (OpenAIStatusError, AnthropicStatusError)
 _TIMEOUT_ERRORS = (OpenAITimeoutError, AnthropicTimeoutError)
 # `H2Error` is here because nothing wraps it on the body path, and its absence made one upstream event have two fates. httpcore guards only the socket read — `receive_data` sits outside that `try` (`httpcore2/_async/http2.py:425`) — and httpx re-raises what its map does not know. So a GOAWAY whose following frames land in a *separate* read arrives as `httpx2.RemoteProtocolError` and is retried, while the same GOAWAY batched into *one* read arrives as a bare `h2.exceptions.ProtocolError` and was neither retried nor called an upstream failure. Which one happened was decided by the kernel's read boundary. Measured 2026-08-23, `.dev/docs/upstream/retry-and-continuation/reports/260823-h2-protocolerror-category.md`.
 #
-# The family rather than `ProtocolError`: `transport.py` names the narrower one because everything it sees arrived before the headers, and that limit does not apply here.
+# The family rather than one class, and the reason is not that every `H2Error` is upstream's — it is not. h2's hierarchy carries no attribution: `ProtocolError` is raised for a peer's bad preamble and for a local `send_data` over the window alike, `RFC1122Error` only ever for the caller's own misuse, and `StreamIDTooLowError`, `NoSuchStreamError`, `StreamClosedError` and `FlowControlError` are all reachable from both sides. An independent review built ten of them through h2's public API.
 #
-# This does not widen the closed set towards "unknown means retry" — the concern the module docstring opens with. An h2 exception is the HTTP/2 state machine's account of frames the peer sent; it is upstream's failure by construction, which is exactly what this tuple is for.
+# What makes the mapping sound is where a *bare* one can come from **in this process**, which is two facts that must both hold:
+#
+#   1. Nothing here drives h2. The only live imports are types — `h2.events` for the gloss in `app.pipeline.hand_over`, and this one — and `tests/unit/test_module_boundaries.py` pins that, so a future module that starts calling `H2Connection` makes a test say so rather than silently widening this tuple.
+#   2. httpcore converts the h2 errors it raises itself: the request phase catches `ProtocolError` and re-raises it as `RemoteProtocolError` or `LocalProtocolError` (`httpcore2/_async/http2.py:151-166`). The one gap is `receive_data` on the body stream, which sits outside that `try` (`:425`) and whose byte stream re-raises unchanged.
+#
+# So a bare `H2Error` arriving here has come through the gap, from parsing bytes the peer sent. If either fact stops holding, this entry stops being sound — which is why they are named rather than summarised as "h2 means upstream".
 _CONNECTION_ERRORS = (
     OpenAIConnectionError,
     AnthropicConnectionError,
