@@ -8,6 +8,8 @@ Frame boundaries, not chunk boundaries. History keeps one object per SSE event, 
 
 Only the frames upstream actually sent. History stores the same event several times over — once as it arrived, then once per client-side transform that rewrote it — and taking all of them yields a stream where every event repeats three or four times, none of them upstream's. Worse, the copies are *repaired*: `rewrite-out:responses-fix-stream-ids` is the existing service's own fix for the id instability these fixtures exist to capture, so the derived copies show stability that the wire did not have. `_upstream_frames` keeps the roots of the transform graph and nothing else.
 
+And that last predicate has a window where it is silently vacuous. Before 2026-07-17 19:41 the database carries **no transform records at all** — 366 operations — so every frame is a root and "the roots of the transform graph" selects the whole set, proxy-rewritten frames included, without failing or warning. A fixture derived from that window cannot distinguish what upstream sent from what the proxy wrote, and must say so. This limit is a fact about the data rather than about the code, which is why it cannot be enforced here; it is written down instead. (Recorded 2026-08-22; it lived in `.dev/docs/upstream/retry-and-continuation/deferred.md` until then, which is not where someone building a fixture would look.)
+
 The text is somebody's real conversation. These databases hold the operator's own prompts, source code and tool output, so every free-text field is replaced with a placeholder of the same shape.
 What survives is the protocol: event order, field structure, ids, indices, block types. That is exactly what a fixture is for, and it is the part that cannot be imagined correctly.
 """
