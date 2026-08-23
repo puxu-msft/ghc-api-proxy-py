@@ -1,7 +1,6 @@
 """Turn the SDKs' exceptions into the pipeline's closed set.
 
-`docs/.human-controlled/request-pipeline.md` has the driver abort on anything outside that set, and that is the right default — a
-subscriber's `KeyError` must not read as "retry". But the production send path calls `AsyncOpenAI.post` and `AsyncAnthropic.post` directly, and both raise their *own* status and connection exceptions on 4xx, 5xx and transport failure. Those are outside the set, so every real upstream failure aborted and surfaced as a bare 502, and the configured 429, 5xx and network retry budgets were never once consulted on the path that serves requests.
+`docs/.human-controlled/request-pipeline.md` has the driver abort on anything outside that set, and that is the right default — a subscriber's `KeyError` must not read as "retry". But the production send path calls `AsyncOpenAI.post` and `AsyncAnthropic.post` directly, and both raise their *own* status and connection exceptions on 4xx, 5xx and transport failure. Those are outside the set, so every real upstream failure aborted and surfaced as a bare 502, and the configured 429, 5xx and network retry budgets were never once consulted on the path that serves requests.
 
 The fix belongs here rather than in `classify`: widening the closed set would let genuine bugs read as retryable. This is the one boundary where the SDKs' vocabulary becomes ours, so it is where the translation goes — every caller of `GhcApiClient` gets it, not just the driver that noticed.
 
@@ -9,6 +8,7 @@ Which statuses come back retryable is a judgement about determinism, not about s
 """
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 import httpx2
@@ -72,10 +72,27 @@ def retry_after_seconds(headers: Mapping[str, str]) -> float | None:
         return None
 
 
-def _response_parts(error: Exception) -> tuple[int | None, dict[str, str], str]:
+@dataclass(frozen=True, slots=True)
+class UpstreamResponseParts:
+    """What is worth keeping off a failed upstream response, before the SDK's exception discards it.
+
+    A record rather than a wider tuple: `body` and `body_bytes` are the same content at two fidelities and a positional pair invites reading one for the other.
+
+    `body_bytes` exists because `body` cannot answer for the direct path. `docs/.human-controlled/` rules that a direct-path client gets upstream's own answer, and `response.text` is already a charset decision — measured, an upstream body of `b"\\xffraw-body"` reaches the client as `\\ufffdraw-body`, so the bytes are unrecoverable from this point on. For a JSON upstream the two agree; for a non-UTF-8 one, a BOM, or anything malformed they do not, and those are exactly the cases "even if we do not know it, it can still be passed on" is about.
+    """
+
+    status: int | None
+    headers: dict[str, str]
+    body: str
+    body_bytes: bytes
+    content_type: str
+
+
+def _response_parts(error: Exception) -> UpstreamResponseParts:
     status: int | None = getattr(error, "status_code", None)
     headers: dict[str, str] = {}
     body = ""
+    body_bytes = b""
     response: Any = getattr(error, "response", None)
     if response is not None:
         raw = getattr(response, "headers", None)
@@ -87,7 +104,18 @@ def _response_parts(error: Exception) -> tuple[int | None, dict[str, str], str]:
         text = getattr(response, "text", None)
         if isinstance(text, str):
             body = text
-    return status, headers, body
+        # Read after `text` rather than instead of it: both are properties over the same already-read buffer, so this costs nothing, and `body` has consumers that predate this record.
+        content = getattr(response, "content", None)
+        if isinstance(content, bytes):
+            body_bytes = content
+    return UpstreamResponseParts(
+        status=status,
+        headers=headers,
+        body=body,
+        body_bytes=body_bytes,
+        # Off the headers rather than guessed from the payload: what the client is told this content is has to be what upstream said it is, including when upstream was wrong about it.
+        content_type=headers.get("content-type", ""),
+    )
 
 
 def _sent_body(error: Exception) -> bytes:
@@ -119,27 +147,34 @@ def normalize_upstream_error(error: BaseException) -> PipelineError | None:
     if isinstance(error, _TIMEOUT_ERRORS):
         return UpstreamTimeout(f"upstream timed out: {error}")
     if isinstance(error, _STATUS_ERRORS):
-        status, headers, body = _response_parts(error)
+        parts = _response_parts(error)
+        status = parts.status
         if status == 429:
             return UpstreamRateLimit(
                 f"upstream rate limited: {error}",
-                retry_after=retry_after_seconds(headers),
-                headers=headers,
-                body=body,
+                retry_after=retry_after_seconds(parts.headers),
+                headers=parts.headers,
+                body=parts.body,
+                body_bytes=parts.body_bytes,
+                content_type=parts.content_type,
             )
         if status is not None and status not in RETRYABLE_STATUSES and 400 <= status < 500:
             return UpstreamRejected(
                 f"upstream rejected the request: {error}",
                 status_code=status,
-                headers=headers,
-                body=body,
+                headers=parts.headers,
+                body=parts.body,
+                body_bytes=parts.body_bytes,
+                content_type=parts.content_type,
                 sent=_sent_body(error),
             )
         return UpstreamError(
             f"upstream returned {status}: {error}",
             status_code=status,
-            headers=headers,
-            body=body,
+            headers=parts.headers,
+            body=parts.body,
+            body_bytes=parts.body_bytes,
+            content_type=parts.content_type,
         )
     if isinstance(error, _CONNECTION_ERRORS):
         # No response exists yet, so there is no status to carry and nothing to reject over.

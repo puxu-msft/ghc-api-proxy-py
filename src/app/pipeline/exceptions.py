@@ -31,12 +31,17 @@ class UpstreamError(PipelineError):
         status_code: int | None = None,
         headers: Mapping[str, str] | None = None,
         body: str = "",
+        body_bytes: bytes = b"",
+        content_type: str = "",
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         # Carried because the rate limiter reads `Retry-After` and the client deserves upstream's own words. Both are lost the moment an SDK exception is flattened to a string.
         self.headers: Mapping[str, str] = dict(headers or {})
         self.body = body
+        # The same content one fidelity up, and the pair is deliberate. `body` is `response.text`, which has already made a charset decision; on a direct path the client is owed upstream's own bytes, and a decode that replaced a byte cannot be undone. Empty when the failure arrived without a response to read them off.
+        self.body_bytes = body_bytes
+        self.content_type = content_type
 
 
 class UpstreamTimeout(UpstreamError):
@@ -51,8 +56,17 @@ class UpstreamRateLimit(UpstreamError):
         retry_after: float | None = None,
         headers: Mapping[str, str] | None = None,
         body: str = "",
+        body_bytes: bytes = b"",
+        content_type: str = "",
     ) -> None:
-        super().__init__(message, status_code=429, headers=headers, body=body)
+        super().__init__(
+            message,
+            status_code=429,
+            headers=headers,
+            body=body,
+            body_bytes=body_bytes,
+            content_type=content_type,
+        )
         self.retry_after = retry_after
 
 
@@ -73,12 +87,17 @@ class UpstreamRejected(PipelineError):
         status_code: int,
         headers: Mapping[str, str] | None = None,
         body: str = "",
+        body_bytes: bytes = b"",
+        content_type: str = "",
         sent: bytes = b"",
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.headers: Mapping[str, str] = dict(headers or {})
         self.body = body
+        # See `UpstreamError`. Not the same thing as `sent` below, which is the *request*.
+        self.body_bytes = body_bytes
+        self.content_type = content_type
         self.sent = sent
 
 

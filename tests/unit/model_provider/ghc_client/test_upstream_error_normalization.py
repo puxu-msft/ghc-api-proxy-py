@@ -1,7 +1,6 @@
 """Whether an upstream failure reaches the driver as something it can act on.
 
-The defect these cover is not that a case was handled wrongly — it is that no case reached the handler at all. `GhcApiClient` posts through the SDKs, the SDKs raise their own exception types on
-4xx, 5xx and transport failure, and `classify` aborts on anything outside the pipeline's closed set. So every configured retry budget was dead code on the path that serves requests, and every upstream answer became a 502.
+The defect these cover is not that a case was handled wrongly — it is that no case reached the handler at all. `GhcApiClient` posts through the SDKs, the SDKs raise their own exception types on 4xx, 5xx and transport failure, and `classify` aborts on anything outside the pipeline's closed set. So every configured retry budget was dead code on the path that serves requests, and every upstream answer became a 502.
 """
 
 import httpx2
@@ -29,10 +28,19 @@ def status_error(
     *,
     headers: dict[str, str] | None = None,
     body: str = "{}",
+    raw: bytes | None = None,
     sent: bytes = b"",
 ) -> Exception:
+    """One upstream failure, as the SDK would raise it.
+
+    `raw` sends the body as bytes rather than as text, which is the only way to build the case that decoding destroys — `text=` would encode a `str` this side already holds and the round trip could never lose anything.
+    """
     request = httpx2.Request("POST", "https://upstream.example/responses", content=sent)
-    response = httpx2.Response(status, headers=headers or {}, text=body, request=request)
+    response = (
+        httpx2.Response(status, headers=headers or {}, content=raw, request=request)
+        if raw is not None
+        else httpx2.Response(status, headers=headers or {}, text=body, request=request)
+    )
     return openai.APIStatusError("upstream said no", response=response, body=None)
 
 
@@ -210,3 +218,75 @@ def test_a_refusal_whose_body_cannot_be_read_back_is_still_a_refusal() -> None:
     assert isinstance(normalized, UpstreamRejected)
     assert normalized.status_code == 400
     assert normalized.sent == b""
+
+
+@pytest.mark.parametrize(
+    "content_type, decoded",
+    [
+        # No charset, so `text` decodes as UTF-8 and the byte has no representation: it becomes U+FFFD and is gone.
+        ("application/json", "\ufffdraw-body"),
+        # A charset where the byte *does* decode, which is the more interesting half — the decode looks lossless and still is not the bytes: `"ÿ".encode()` is two bytes, not one.
+        ("text/html; charset=iso-8859-1", "ÿraw-body"),
+    ],
+)
+def test_upstreams_own_bytes_survive_the_decode_that_text_performs(
+    content_type: str, decoded: str
+) -> None:
+    """The direct path owes the client upstream's answer, and `response.text` is already a charset decision.
+
+    Two charsets because the first draft only had the U+FFFD one, and that one alone makes the property look like it is about invalid input. It is not: the second case decodes cleanly and the bytes still differ, so what `body` cannot carry is not "malformed data" but "the bytes upstream actually sent". The relationship is asserted directly — `body.encode()` is not `body_bytes` — rather than only through the two literals, because the literals are what a reader checks and the relationship is what the direct path depends on.
+
+    The SDK's response object is dropped the moment the error becomes ours, so if the bytes are not taken here they are unrecoverable.
+    """
+    rejected = normalize_upstream_error(
+        status_error(400, raw=b"\xffraw-body", headers={"content-type": content_type})
+    )
+
+    assert isinstance(rejected, UpstreamRejected)
+    assert rejected.body_bytes == b"\xffraw-body"
+    assert rejected.body == decoded
+    assert rejected.body.encode() != rejected.body_bytes, "the pair only earns its keep if the two differ"
+    # Carried through rather than invented. A first draft asserted `application/json` only, and a mutation proved it had no discriminating power: hard-coding the field to that string left the test green.
+    assert rejected.content_type == content_type
+
+
+def test_an_upstream_that_declared_no_content_type_gets_no_invented_one() -> None:
+    """Absence is not readable unless it survives as absence.
+
+    The direct path decides how to hand upstream's bytes onward partly from what upstream said they are; an invented `application/json` would make a client parse something upstream never claimed was JSON.
+    """
+    rejected = normalize_upstream_error(status_error(400, raw=b"\xffraw-body"))
+
+    assert isinstance(rejected, UpstreamRejected)
+    assert rejected.content_type == ""
+
+
+@pytest.mark.parametrize(
+    "status, kind",
+    [(400, UpstreamRejected), (500, UpstreamError), (429, UpstreamRateLimit)],
+)
+def test_every_upstream_failure_that_has_a_body_carries_its_bytes(
+    status: int, kind: type[Exception]
+) -> None:
+    """All three branches of the normaliser, because each builds its exception separately.
+
+    The 429 and 5xx branches were the ones a first draft forgot: they take the same `parts` record and it is one keyword argument per branch to drop.
+    """
+    normalized = normalize_upstream_error(status_error(status, raw=b'{"e":1}'))
+
+    assert isinstance(normalized, kind)
+    # Narrowed a second time against the union rather than against `kind`, which is a variable and narrows nothing. Both members carry the field, so this reads it without a `getattr` that would also pass on a class that has no such attribute.
+    assert isinstance(normalized, UpstreamError | UpstreamRejected)
+    assert normalized.body_bytes == b'{"e":1}'
+
+
+def test_a_failure_with_no_response_has_empty_bytes_rather_than_a_guess() -> None:
+    """A connection that never got an answer has no upstream body, and an empty one is the honest record of that.
+
+    Not a detail: the direct path decides whether to pass upstream's answer through by asking whether there is one, so "no response" and "a response with an empty body" have to be distinguishable from each other somewhere — today by `status_code is None`, which this pins alongside.
+    """
+    normalized = normalize_upstream_error(openai.APIConnectionError(request=httpx2.Request("POST", "https://upstream.example/responses")))
+
+    assert isinstance(normalized, UpstreamError)
+    assert normalized.body_bytes == b""
+    assert normalized.status_code is None
