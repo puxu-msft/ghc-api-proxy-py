@@ -7,18 +7,25 @@
 ## D-A. Gemini 实现时必须先看的四件事
 
 **登记时间**：2026-08-23，随 Azure/Gemini 路由入口切片。
-**为什么在这里**：用户裁定「实际处理尚未实现，可以留空」，所以 501 本身不是缺口。但旧链在这件事上已有的东西现在**无处可查**——归档树里的代码不会被下一位实现者读到，活树里那几个文件没有任何指路。这是「不得静默缩小范围」意义上的登记义务。
+**为什么在这里**：用户裁定「实际处理尚未实现，可以留空」，所以 501 本身不是缺口。但旧链在这件事上已有的东西**无处可查**——这份台账就是那个指路。2026-08-23 用户另行指示把旧实现整体归档，第 1 条因此从「有一半还在活树」改写为「全部在哪、哪一件不是整文件搬迁」。
 **来源**：[reports/260823-azure-gemini-route-entry-review-regression.md](reports/260823-azure-gemini-route-entry-review-regression.md) §4.2、§5.4，路径与引用关系我逐条复核过。
 
-1. **旧 Gemini 实现的一部分还活在 `src/app/` 里，没跟着 `2248a69` 归档走**，且当前没有任何生产调用方：
-   - `src/app/protocols/gemini.py` —— `GEMINI_METHODS`、`parse_model_with_method`、`gemini_to_openai`、`openai_to_gemini`；由 `src/app/protocols/__init__.py` 对外导出。
-   - `src/app/models/gemini.py` —— 请求/响应模型。
-   - `src/app/tokenization/estimators.py:78` 的 `estimate_gemini_input`；由 `src/app/tokenization/__init__.py` 导出，除导出外无调用方（2026-08-23 `rg` 确认）。
-   - `tests/unit/protocols/test_gemini_protocol.py` —— 仍在默认测试集里跑。
+1. **旧 Gemini 实现现在全部在 `src/.archived/` 里**，2026-08-23 由用户指示归档。归档前它有一半活在 `src/app/` 且无任何生产调用方——这才是登记它的理由：搬进归档树是为了让「它在哪」有一个确定答案，不是为了让它消失。
+
+   | 现在的位置 | 归档前 | 备注 |
+   |---|---|---|
+   | `src/.archived/app/protocols/gemini.py` | `src/app/protocols/gemini.py` | `GEMINI_METHODS`、`parse_model_with_method`、`gemini_to_openai`、`openai_to_gemini`；整文件搬迁，`git log --follow` 可追 |
+   | `src/.archived/app/models/gemini.py` | `src/app/models/gemini.py` | 请求/响应 Pydantic 模型；整文件搬迁 |
+   | `src/.archived/app/tokenization/gemini_estimator.py` | `src/app/tokenization/estimators.py` 中的三段 | **不是整文件搬迁**：`estimate_gemini_input` 与两个私有辅助函数、以及只有它用的 `app.models.gemini` import 被从一个仍在服役的共享文件里切出来；该文件的 Anthropic 与 Responses 估算器还在活树。`git` 不会把它识别为重命名 |
+   | `tests/.archived/unit/protocols/test_gemini_protocol.py` | `tests/unit/protocols/test_gemini_protocol.py` | 整文件搬迁 |
+
+   同时清掉的两处出口：`src/app/protocols/__init__.py` 原本全部内容就是 `parse_model_with_method` 的再导出，现在只剩一段说明；`src/app/tokenization/__init__.py` 不再导出 `estimate_gemini_input`。
+
+   `tests/unit/test_module_boundaries.py` 的 `_ARCHIVED` 加了 `app.protocols.gemini` 与 `app.models.gemini`——**这两条是该元组里第一次出现的子模块名**，因为 `app.protocols` 和 `app.models` 本身都是活包，只有它们底下的 Gemini 模块走了。已实测该守卫有鉴别力：把归档件复制回活树立刻打红，还原后转绿。
 
    实现时**优先复用而不是重写**。特别是 `parse_model_with_method`，它的 `rpartition(":")` 语义与本次路由模板的贪婪段一致（含冒号的模型名如 `vendor:family` 仍是一个模型），三方（旧链、`copilot-api-js` 的 `lastIndexOf`、Starlette 的 `[^/]+` 回溯）已交叉印证。
 
-2. **方法白名单现在有两份独立表达**：`src/app/server/routes/table.py` 里三条模板字面量，与 `src/app/protocols/gemini.py:6` 的 `GEMINI_METHODS`。内容相同、来源无关。实现时择一为准，另一份改为派生或引用。
+2. **方法白名单现在有两份独立表达**：`src/app/server/routes/table.py` 里三条模板字面量，与 `src/.archived/app/protocols/gemini.py:6` 的 `GEMINI_METHODS`。内容相同、来源无关。实现时择一为准，另一份改为派生或引用。
 
 3. **`countTokens` 旧链走本地估算**（`estimate_gemini_input`，不打上游），与新链 `/v1/messages/count_tokens` 的 `provider(local)` 那一档是同一类事。当前 501 是对的，但「它该走本地估算而不是上游」这条知识只存在于归档代码里。
 
