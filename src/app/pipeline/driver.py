@@ -125,7 +125,7 @@ async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[Req
             context.payload, chain.config.hook_fix_anthropic_request.intercept_auto_mode_classifier
         )
         if verdict is not None:
-            outcome = _answered_auto_mode(context, route, verdict)
+            outcome = _answered_auto_mode(context, route, verdict, chain)
             # The client request succeeded, so the request-level event fires even though no attempt did. The attempt-level ones deliberately do not: there was no upstream leg for them to describe, and `attempt.prepare` subscribers exist to shape a body that is about to be sent.
             #
             # Published here rather than inside the driver because the driver is never built on this path. A subscriber raising propagates, which is the same contract it has inside the driver — there it steers the retry loop, and here there is no loop to steer, so it reaches the caller.
@@ -208,7 +208,7 @@ def _answered_failed_search(context: RequestContext, route: Route) -> DriverOutc
     )
 
 def _answered_auto_mode(
-    context: RequestContext, route: Route, verdict: AutoModeVerdict
+    context: RequestContext, route: Route, verdict: AutoModeVerdict, chain: Chain
 ) -> DriverOutcome:
     """The authorisation decision this proxy made, dressed as the reply upstream would have sent.
 
@@ -216,7 +216,7 @@ def _answered_auto_mode(
 
     The size is measured off `original_payload` — the body as the client sent it, before the fixups — because that is the request this feature exists to not send. It is **a re-serialisation, not the received byte count**: whitespace, key order and Unicode escaping may all differ from what arrived, and the received length is not kept anywhere (`inference.py` reads the body and does not record how long it was). Close enough to say what was saved, and not the same number as `content-length`.
     """
-    text = verdict_text(verdict)
+    text = verdict_text(verdict, chain.config.hook_fix_anthropic_request.intercept_auto_mode_classifier.block_reason_str)
     source = context.original_payload or context.payload
     log_hit(verdict, request_bytes=len(dumps(source)))
 

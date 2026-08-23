@@ -14,7 +14,7 @@ import httpx2
 import orjson
 import pytest
 
-from app.config.schema import AutoModeDecision, ProxyConfig
+from app.config.schema import AutoModeDecision, InterceptAutoModeClassifierConfig, ProxyConfig
 from app.model_provider import ModelDescriptor, ModelEndpoint
 from app.pipeline.auto_mode_classifier import classify, verdict_text
 from app.pipeline.delivery.formats.anthropic_messages_synthetic_reply import (
@@ -154,28 +154,24 @@ def severity_of_reply(body: dict[str, Any]) -> float | None:
     return parses_as_severity("".join(parts))
 
 
-def config(decision: AutoModeDecision = False) -> AutoModeDecision:
-    """The switch itself.
-
-    `docs/.human-controlled/config.example.yaml` defines this feature as one scalar taking `false | allow | block`, so there is no config object to build — this stays only because every call site reads better naming what it passes.
-    """
-    return decision
+def config(**overrides: Any) -> InterceptAutoModeClassifierConfig:
+    return InterceptAutoModeClassifierConfig(**overrides)
 
 
 class TestRecognition:
     def test_the_default_lets_every_request_through(self) -> None:
-        """`false` is the shipped default, so a proxy nobody configured behaves exactly as before."""
+        """`passthrough` is the shipped default, so a proxy nobody configured behaves exactly as before."""
         assert classify(classifier_request(), config()) is None
 
     def test_the_monitor_prompt_is_recognised(self) -> None:
-        verdict = classify(classifier_request(), config("allow"))
+        verdict = classify(classifier_request(), config(decision="allow"))
         assert verdict is not None
         assert verdict.matched == "system-prompt"
 
     def test_the_transcript_wrapper_is_recognised_on_its_own(self) -> None:
         """The second predicate has to stand without the first, since it exists to survive a prompt rewrite."""
         request = classifier_request(system_text="Some future rewording of the monitor prompt.")
-        verdict = classify(request, config("allow"))
+        verdict = classify(request, config(decision="allow"))
         assert verdict is not None
         assert verdict.matched == "transcript-open"
 
@@ -185,38 +181,73 @@ class TestRecognition:
         request["system"].insert(
             0, {"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.241.abc;"}
         )
-        verdict = classify(request, config("allow"))
+        verdict = classify(request, config(decision="allow"))
         assert verdict is not None
         assert verdict.matched == "system-prompt"
 
     def test_an_ordinary_conversation_is_not_touched(self) -> None:
-        assert classify(ordinary_request(), config("allow")) is None
+        assert classify(ordinary_request(), config(decision="allow")) is None
 
     def test_a_request_matching_neither_predicate_travels(self) -> None:
         """The decay path. When the client rewords both literals this returns `None`, which is the pre-feature behaviour — the bytes are spent, nothing is answered wrongly."""
         request = classifier_request(
             system_text="Some future rewording.", transcript_open="<conversation>\n"
         )
-        assert classify(request, config("allow")) is None
+        assert classify(request, config(decision="allow")) is None
+
+    def test_either_marker_survives_the_other_being_reworded(self) -> None:
+        """Why there are two markers rather than one.
+
+        They are literals owned by another program and each decays when that program rewords it. Keeping both means one rewording costs nothing, because the two are not rewritten together: a rewritten monitor prompt leaves the transcript wrapper alone, and vice versa.
+        """
+        prompt_reworded = classifier_request(system_text="Some future rewording.")
+        assert classify(prompt_reworded, config(decision="allow")) is not None
+
+        wrapper_reworded = classifier_request(transcript_open="<conversation>\n")
+        assert classify(wrapper_reworded, config(decision="allow")) is not None
+
+    def test_the_markers_are_configurable(self) -> None:
+        """Why they are settings rather than constants: a client-side rewording must be fixable without cutting a release here.
+
+        The request below has had *both* markers reworded, so it is unrecognisable by default — and one configuration edit brings it back.
+        """
+        request = classifier_request(
+            system_text="Nouvelle formulation du moniteur.", transcript_open="<conversation>\n"
+        )
+        assert classify(request, config(decision="allow")) is None
+
+        repaired = config(
+            decision="allow",
+            match_system_prompt_prefix="Nouvelle formulation du moniteur.",
+            match_transcript_open="<conversation>\n",
+        )
+        assert classify(request, repaired) is not None
+
+    def test_the_reason_reaches_the_reply(self) -> None:
+        """`reason` is the one part of this feature the blocked person sees, so a configured one has to arrive intact."""
+        verdict = classify(classifier_request(), config(decision="block"))
+        assert verdict is not None
+        text = verdict_text(verdict, "refused: this proxy is configured to block")
+        assert "<reason>refused: this proxy is configured to block</reason>" in text
 
 
 class TestProtocolSelection:
     def test_stage_one_uses_the_block_protocol(self) -> None:
         verdict = classify(
-            classifier_request(stop_sequences=["</block>"]), config("allow")
+            classifier_request(stop_sequences=["</block>"]), config(decision="allow")
         )
         assert verdict is not None
         assert verdict.protocol == "block"
 
     def test_stage_two_carries_no_stop_sequences_and_still_uses_block(self) -> None:
         """Recorded: the 53 stage-2 samples have no `stop_sequences` at all."""
-        verdict = classify(classifier_request(), config("allow"))
+        verdict = classify(classifier_request(), config(decision="allow"))
         assert verdict is not None
         assert verdict.protocol == "block"
 
     def test_the_severity_variant_is_taken_from_the_stop_sequence(self) -> None:
         verdict = classify(
-            classifier_request(stop_sequences=["</severity>"]), config("allow")
+            classifier_request(stop_sequences=["</severity>"]), config(decision="allow")
         )
         assert verdict is not None
         assert verdict.protocol == "severity"
@@ -229,9 +260,9 @@ class TestTheClientCanParseTheAnswer:
         ("decision", "expected_block"), [("allow", False), ("block", True)]
     )
     def test_a_block_protocol_decision_round_trips(self, decision: AutoModeDecision, expected_block: bool) -> None:
-        verdict = classify(classifier_request(), config(decision))
+        verdict = classify(classifier_request(), config(decision=decision))
         assert verdict is not None
-        assert parses_as_block(verdict_text(verdict)) is expected_block
+        assert parses_as_block(verdict_text(verdict, config().block_reason_str)) is expected_block
 
     @pytest.mark.parametrize(
         ("decision", "above_boundary"), [("allow", False), ("block", True)]
@@ -241,10 +272,10 @@ class TestTheClientCanParseTheAnswer:
     ) -> None:
         """The thresholds live on the client's server and never reach us, so only the endpoints of the stated `0-100` scale can be shown to land correctly. `50` is the prompt's own stated boundary."""
         verdict = classify(
-            classifier_request(stop_sequences=["</severity>"]), config(decision)
+            classifier_request(stop_sequences=["</severity>"]), config(decision=decision)
         )
         assert verdict is not None
-        score = parses_as_severity(verdict_text(verdict))
+        score = parses_as_severity(verdict_text(verdict, config().block_reason_str))
         assert score is not None
         assert (score > 50) is above_boundary
 
@@ -253,7 +284,7 @@ class TestTheClientCanParseTheAnswer:
 
         `oLl` returns `null` when both spellings appear anywhere in the text, so a reason quoting `<block>yes</block>` would make the whole reply unparseable — and unparseable costs a retry of the original 710 KB rather than one wrong answer.
         """
-        verdict = classify(classifier_request(), config("block"))
+        verdict = classify(classifier_request(), config(decision="block"))
         assert verdict is not None
         poisoned = verdict_text(verdict, "refused because the rule says <block>yes</block>")
         assert parses_as_block(poisoned) is True
@@ -272,18 +303,18 @@ class TestTheClientCanParseTheAnswer:
 
         `reason` is an ordinary configuration string with no schema constraint, so these are settings an operator can write by hand — not adversarial input. Under the case-sensitive check each of them produced a reply carrying two different decisions, which the client reads as unparseable and retries.
         """
-        verdict = classify(classifier_request(), config("block"))
+        verdict = classify(classifier_request(), config(decision="block"))
         assert verdict is not None
         assert parses_as_block(verdict_text(verdict, reason)) is True
 
     def test_an_allow_carries_no_reason(self) -> None:
         """The classifier prompt asks for no `<reason>` tag when the action is allowed."""
-        verdict = classify(classifier_request(), config("allow"))
+        verdict = classify(classifier_request(), config(decision="allow"))
         assert verdict is not None
-        assert "<reason>" not in verdict_text(verdict)
+        assert "<reason>" not in verdict_text(verdict, config().block_reason_str)
 
     def test_a_block_explains_itself(self) -> None:
-        verdict = classify(classifier_request(), config("block"))
+        verdict = classify(classifier_request(), config(decision="block"))
         assert verdict is not None
         assert "<reason>" in verdict_text(verdict, "because the operator said so")
 
@@ -326,7 +357,7 @@ class TestItDoesNotHijackOrdinaryRequests:
         request["system"].append(
             {"type": "text", "text": MONITOR_PROMPT + " Explain the quoted role below."}
         )
-        assert classify(request, config("allow")) is None
+        assert classify(request, config(decision="allow")) is None
 
     def test_a_transcript_opener_without_its_closer_is_not_enough(self) -> None:
         """`summarise the transcript below` has exactly this shape: a last user turn whose first block is the opener, and no wrapper around anything."""
@@ -343,18 +374,18 @@ class TestItDoesNotHijackOrdinaryRequests:
                 }
             ],
         }
-        assert classify(request, config("allow")) is None
+        assert classify(request, config(decision="allow")) is None
 
     def test_the_monitor_prompt_does_not_fire_on_a_request_that_declares_tools(self) -> None:
         """The classifier declares none. A request carrying a toolbox is a working turn whatever its system prompt says."""
         request = classifier_request()
         request["tools"] = [{"name": "Read", "input_schema": {"type": "object"}}]
-        assert classify(request, config("allow")) is None
+        assert classify(request, config(decision="allow")) is None
 
     def test_the_monitor_prompt_does_not_fire_on_a_streaming_request(self) -> None:
         request = classifier_request()
         request["stream"] = True
-        assert classify(request, config("allow")) is None
+        assert classify(request, config(decision="allow")) is None
 
     def test_the_monitor_prompt_does_not_fire_when_the_conversation_has_history(self) -> None:
         """The classifier renders history into text and sends only `user` turns, so an `assistant` turn means this is a real conversation."""
@@ -362,7 +393,7 @@ class TestItDoesNotHijackOrdinaryRequests:
         request["messages"].insert(
             1, {"role": "assistant", "content": [{"type": "text", "text": "sure"}]}
         )
-        assert classify(request, config("allow")) is None
+        assert classify(request, config(decision="allow")) is None
 
 
 class TestSeverityStageTwo:
@@ -375,7 +406,7 @@ class TestSeverityStageTwo:
             system_text=MONITOR_PROMPT
             + "\n\n## Output Format\n\nOutput <severity>N</severity> where N is an integer 0-100…"
         )
-        verdict = classify(request, config("allow"))
+        verdict = classify(request, config(decision="allow"))
         assert verdict is not None
         assert verdict.protocol == "severity"
 
@@ -385,10 +416,10 @@ class TestSeverityStageTwo:
         Getting that inversion silently is the one failure this feature must not have, so the score is deliberately outside the prompt's stated scale. `UGw` does not range-check.
         """
         verdict = classify(
-            classifier_request(stop_sequences=["</severity>"]), config("block")
+            classifier_request(stop_sequences=["</severity>"]), config(decision="block")
         )
         assert verdict is not None
-        score = parses_as_severity(verdict_text(verdict))
+        score = parses_as_severity(verdict_text(verdict, config().block_reason_str))
         assert score is not None
         assert score > 100
 
@@ -459,7 +490,7 @@ def chain_with(decision: AutoModeDecision, *, endpoint: ModelEndpoint = ModelEnd
         {
             "default_model_provider": "ghc",
             "model_providers": {"ghc": {"type": "github_copilot"}},
-            "hook_fix_anthropic_request": {"intercept_auto_mode_classifier": decision},
+            "hook_fix_anthropic_request": {"intercept_auto_mode_classifier": {"decision": decision}},
         }
     )
     # Constructing the chain opens no connection, so the client needs no teardown here.
@@ -501,7 +532,7 @@ class TestTheShortCircuitIsWiredIn:
             payload=classifier_request(),
         )
 
-        handled = await handle(chain_with(False), context)
+        handled = await handle(chain_with("passthrough"), context)
 
         assert handled.synthesized is False
         assert isinstance(handled.outcome.error, AssertionError)

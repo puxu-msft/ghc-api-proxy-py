@@ -24,9 +24,9 @@ type RefusalAction = Literal["passthrough", "as_end_turn", "as_error"]
 type SystemPromptPlacement = Literal["instructions-joint-string"]
 # What to do when a web search declaration carries a domain restriction this upstream has no parameter for. Measured: `allowed_domains` and `blocked_domains` each earn `Unknown parameter`, so they cannot be sent under any spelling, and the only question is what to do instead.
 type WebSearchConstraintPolicy = Literal["error", "drop_fields"]
-# What to do with a Claude Code auto mode authorisation request. `false` forwards it upstream like anything else; the other two answer it here with a fixed decision and never call upstream at all.
-# The disabled state is the bool, matching `AssistantMessageLayout` and `ContextEditingMode`: YAML 1.1 parses a bare `off` as boolean false, so a project that spells "disabled" as a word ends up with two spellings of it.
-type AutoModeDecision = Literal[False, "allow", "block"]
+# What to do with a Claude Code auto mode authorisation request. `passthrough` forwards it upstream like anything else; the other two answer it here with a fixed decision and never call upstream at all.
+# Spelled out rather than using `false` for the disabled state, per `config.example.yaml`. The bool spelling that `assistant_message_layout` and `context_editing.enabled` use exists to dodge YAML 1.1 reading a bare `off` as boolean false; `passthrough` is not a word that trap applies to, so it can say what it means.
+type AutoModeDecision = Literal["passthrough", "allow", "block"]
 
 # Dotted paths the spec marks as requiring a restart. Everything else is hot-reloadable.
 #
@@ -300,21 +300,54 @@ class RequestThinkingConfig(Section):
     )
 
 
+class InterceptAutoModeClassifierConfig(Section):
+    """Answer Claude Code's auto mode authorisation requests here instead of forwarding them.
+
+    With auto mode on, that client asks a model to approve each action before running it, as its own non-streaming request carrying the rendered transcript, the user's whole `CLAUDE.md`, and a 110k-character monitor prompt. One measured sample is 710179 bytes, and one is spent per tool call. `app.pipeline.auto_mode_classifier` recognises them; this section says how to recognise them and what to answer.
+
+    **Why it lives under this hook.** This section is the `on_client_request_parsed` moment and its scope is the Anthropic Messages leg — exactly the scope of this interception: the markers read `system` and `messages`, and the reply is an Anthropic Message. The short circuit fires immediately after `fix_anthropic_request()` returns, before translation.
+
+    **What is different from its siblings.** Everything else in this hook reshapes a body that is then sent; this one answers instead of sending, so `fix_anthropic_request()` does not read it — `handle()` does. The section says when and to what this applies, not which function implements it.
+    """
+
+    # What to answer. `passthrough` — the default — forwards the request upstream like any other, so the feature is inert until somebody turns it on.
+    #
+    # `allow` and `block` answer locally with a fixed decision. **They do not judge anything**: the proxy cannot read the action under review and does not try, so this is a switch, not a cheaper classifier. Turning it on replaces auto mode's review with a constant, and the client still presents each answer as a model's — it renders an allow as `Allowed by fast classifier` and counts it in auto mode's telemetry.
+    #
+    decision: AutoModeDecision = "passthrough"
+
+    # What the `<reason>` block says on a block. Not a recognition setting — this one is *output*, and it is the only part of this feature the person being blocked ever sees: Claude Code renders it as the explanation for why the action was refused.
+    #
+    # Written on a block only. The classifier prompt asks for no `<reason>` when the action is allowed, and an allow needs no explanation to a client that is about to proceed anyway.
+    #
+    # **It must not contain a `<block>` tag in any casing.** The client scans the whole reply with `/<block>(yes|no)\\b/gi` before reading anything, and returns "unparseable" the moment it sees two different decisions — so a reason quoting `<BLOCK>no</BLOCK>` under `decision: block` would make the reply unreadable, and unreadable costs a **retry** of the original 710 KB rather than one wrong answer. The implementation checks for it and drops the whole reason instead: better an unexplained block than a broken reply.
+    block_reason_str: str = "Blocked by proxy configuration, without a model review."
+
+    # The first of two **independent** recognition markers. Either one matching is enough — see the note on redundancy below.
+    #
+    # This is the opening line of the classifier's own system prompt, copied verbatim. A request matches when **any** of its system blocks starts with it — any block rather than `system[0]`, because the client puts its billing attribution in a system block too and which one comes first has already differed between recorded traffic and the current client source.
+    match_system_prompt_prefix: str = "You are a security monitor for autonomous AI coding agents."
+
+    # The second marker. Claude Code renders the conversation so far into plain text and wraps it; this is that wrapper's **opening tag**. A request matches when the last user message's `content[0]` is a text block equal to exactly this string, *and* a later block in the same message closes it.
+    #
+    # The closing tag is derived from this one rather than configured separately: they are one wrapper, and a configuration that let them disagree could only ever be a mistake.
+    #
+    # **Why two markers rather than one.** Both are string literals owned by another program, so each will decay when that program rewords it — and the failure is silent, showing up as the hit count going to zero rather than as an error. They are unlikely to decay together: a rewritten monitor prompt usually leaves the transcript wrapper alone, and vice versa. Keeping both means one rewording costs nothing.
+    #
+    # **Why they are settings at all.** Decay is safe in direction — an unrecognised request is simply forwarded, which is the pre-feature behaviour, so the cost is the 710 KB rather than a wrong answer — but without these keys, fixing it would mean editing this project and cutting a release. With them it is one line of configuration.
+    #
+    # Neither marker fires on its own: `app.pipeline.auto_mode_classifier` first requires the request to be shaped like a classifier call at all (no tools, not streaming, no assistant turn). Review built two legal ordinary requests that tripped a bare marker, and in both the user's real request would have been answered with a fabricated decision and never sent.
+    match_transcript_open: str = "<transcript>\n"
+
+
 class FixAnthropicRequestHook(Section):
     cache_control: CacheControlMode = "passthrough"
     extended_cache_ttl: ExtendedCacheTtlConfig = Field(default_factory=ExtendedCacheTtlConfig)
     context_editing: ContextEditingConfig = Field(default_factory=ContextEditingConfig)
     thinking: RequestThinkingConfig = Field(default_factory=RequestThinkingConfig)
-    # Whether to answer Claude Code's auto mode authorisation requests here instead of upstream.
-    #
-    # With auto mode on, that client asks a model to approve each action before running it, as its own non-streaming request carrying the rendered transcript, the user's whole `CLAUDE.md`, and a 110k-character monitor prompt. One measured sample is 710179 bytes, and one is spent per tool call. `app.pipeline.auto_mode_classifier` recognises them; this says what to do about it.
-    #
-    # `allow` and `block` answer locally with a fixed decision. **They do not judge anything**: the proxy cannot read the action under review and does not try, so this is a switch, not a cheaper classifier. Turning it on replaces auto mode's review with a constant, and the client will still present each answer as a model's — it renders an allow as `Allowed by fast classifier` and counts it in auto mode's telemetry.
-    #
-    # **Why it lives under this hook.** This section is the `on_client_request_parsed` moment and its scope is the Anthropic Messages leg — which is exactly the scope of this interception: the predicates read `system` and `messages`, and the reply is an Anthropic Message. The short circuit fires immediately after `fix_anthropic_request()` returns, before translation.
-    #
-    # **What is different from its siblings.** Everything else here reshapes a body that is then sent; this one answers instead of sending, so `fix_anthropic_request()` does not read it — `handle()` does. The section says when and to what this applies, not which function implements it.
-    intercept_auto_mode_classifier: AutoModeDecision = False
+    intercept_auto_mode_classifier: InterceptAutoModeClassifierConfig = Field(
+        default_factory=InterceptAutoModeClassifierConfig
+    )
 
 
 class SseThinkingConfig(Section):

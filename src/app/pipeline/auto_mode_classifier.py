@@ -15,22 +15,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
-from app.config.schema import AutoModeDecision
+from app.config.schema import InterceptAutoModeClassifierConfig
 
 logger = logging.getLogger(__name__)
 
 type ClassifierProtocol = Literal["block", "severity"]
-
-# The two recognition markers. Constants rather than settings, because `docs/.human-controlled/config.example.yaml` defines this feature as a single scalar switch and there is no key under it for them to live in.
-#
-# They are **string literals owned by another program**, so they will decay when that program rewords them, and fixing that then means editing this file rather than a config. That trade is the user's ruling; what it costs is written down in `.dev/docs/auto-mode-classifier/deferred.md` D5.
-#
-# Both matched 2300 recorded requests and three client versions (2.1.207 / 226 / 241) verbatim.
-_MONITOR_PROMPT = "You are a security monitor for autonomous AI coding agents."
-_TRANSCRIPT_OPEN = "<transcript>\n"
-
-# Written into `<reason>` on a block, and nowhere else — the classifier prompt asks for no reason when the action is allowed.
-_BLOCK_REASON = "Blocked by proxy configuration, without a model review."
 
 # What the client asks for when it wants a score rather than a yes/no. Read off `stop_sequences`, which is one of the two places the protocols differ observably.
 _SEVERITY_STOP = "</severity>"
@@ -164,7 +153,7 @@ def _protocol_of(payload: Mapping[str, Any]) -> ClassifierProtocol:
     return "block"
 
 
-def classify(payload: Mapping[str, Any], decision: AutoModeDecision) -> AutoModeVerdict | None:
+def classify(payload: Mapping[str, Any], config: InterceptAutoModeClassifierConfig) -> AutoModeVerdict | None:
     """The verdict to answer with, or `None` to send the request upstream as usual.
 
     `None` is the disabled path and also every failure path. The markers are string literals belonging to another program, so they will eventually stop matching — and when they do, this returns `None` and the request travels, which is exactly what happens today with the feature off.
@@ -175,26 +164,26 @@ def classify(payload: Mapping[str, Any], decision: AutoModeDecision) -> AutoMode
 
     The structural floor is checked **first and always**. Recognition is not "either marker fired"; it is "shaped like the classifier, *and* carrying one of its markers". The markers alone were enough in the first version of this, and two legal ordinary requests were built that each tripped one.
     """
-    if decision is False:
+    if config.decision == "passthrough":
         return None
     if not _has_classifier_shape(payload):
         return None
 
-    if _matches_system_prompt(payload, _MONITOR_PROMPT):
+    if _matches_system_prompt(payload, config.match_system_prompt_prefix):
         matched: Literal["system-prompt", "transcript-open"] = "system-prompt"
-    elif _matches_transcript_wrapper(payload, _TRANSCRIPT_OPEN):
+    elif _matches_transcript_wrapper(payload, config.match_transcript_open):
         matched = "transcript-open"
     else:
         return None
 
     return AutoModeVerdict(
         protocol=_protocol_of(payload),
-        should_block=decision == "block",
+        should_block=config.decision == "block",
         matched=matched,
     )
 
 
-def verdict_text(verdict: AutoModeVerdict, reason: str = _BLOCK_REASON) -> str:
+def verdict_text(verdict: AutoModeVerdict, reason: str) -> str:
     """The assistant text that carries the decision, in the protocol the request asked for.
 
     Three constraints, each of which the client punishes by **retrying** — and a retry is another 710 KB. `p1m` loops while the reply is unparseable and the retry budget holds (`app.pretty.js:368542`).
