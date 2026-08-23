@@ -7,6 +7,7 @@
 | 日期 | 条款 | 变化 | 依据 |
 |---|---|---|---|
 | 2026-08-23 | §5.1 | 补全 `ProviderError` 家族五个子类；冻结时的表只列了其中两个，而 `EndpointNotSupported` 已被实测证明可达 | 计划评审 [reports/260823-plan-review.md](reports/260823-plan-review.md) F-04，我方独立复现 |
+| 2026-08-23 | §6.4 | 补上一条例外：**流式帧上 `code` 是唯一能承载「谁的错」的通道**。§6.4 原文说「真正保住客户端动作差异的是 status 与 `x-should-retry`，不是 `code`」——那对非流式成立，对流式不成立，因为 status 在响应头发出时就已定死 | 实施 I 片时由既有测试暴露：两条流式测试原本靠 `internal_error` / `upstream_error` 的区分，而 Anthropic 的真实词汇表把两者都写作 `api_error` |
 
 冻结后的修订走评审共识而非用户裁决，因为改的是我推导出的映射表，不是用户裁定的那两条原则。
 
@@ -273,6 +274,8 @@ Anthropic 的九个 `ErrorObject` 成员都只声明 `message` 与 `type`；`err
 
 - `code` 标为**版本化的本项目扩展**，在 §6.2 里定义默认值。
 - **不得用它来论证 §6.1 的分辨率损失已被补回**（v2 那样做了）。`NETWORK` / `UPSTREAM` / `INTERNAL` / `NOT_IMPLEMENTED` 在 Anthropic 侧都塌成 `api_error`，客户端要区分它们只能读这个扩展字段，而**目前没有已知消费者在读**。真正保住客户端动作差异的是 §6.2 的 status 与 `x-should-retry`，不是 `code`。
+- **但流式帧是例外，`code` 在那里是唯一的通道。** 一个在响应头之后发生的失败，其 status 早在头发出时就定死为 200，`x-should-retry` 同样已经送出——两条通道都不可用。所以「这是本代理的 bug」与「这是上游断的」在 SSE 错误帧上只能靠 `code`（`proxy_delivery_failed` 对 `upstream_stream_failed`）区分。
+  这不是推论：`tests/unit/pipeline/delivery/test_stream_delivery.py` 里两条测试原本就靠 `internal_error` / `upstream_error` 的区分，把表改成 Anthropic 的真实词汇后它们立刻变红——**仓库里确实有东西在依赖这个区分**，而它现在只能落在 `code` 上。
 - 若将来有已知客户端解析它，在此列出该解析器与解析失败的后果。
 
 ## 7. 流式与非流式必须表达同一件事
