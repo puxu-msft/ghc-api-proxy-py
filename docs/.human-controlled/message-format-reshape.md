@@ -10,9 +10,9 @@ GHC API 虽然声称支持 anthropic `/messages` `/messages/count_tokens` 和 op
 
 一般地，**直连路径上**，客户端请求头值得原样转发给上游，仅部分请求头是需要剥离的，即采用黑名单机制。翻译路径不遵循这一点，翻译路径采用白名单机制。
 
-直连路径的黑名单有：
+直连路径的黑名单有：（大小写不敏感）
 - `Forwarded` chain
-- `Cookie` `X-Api-Key`
+- `Authorization` `Cookie` `X-Api-Key`
 - `Host`
 - `Content-Length` `Content-Encoding` `Accept-Encoding`
 （TODO：这些条目来自 `copilot-api-js` 项目，需要了解原因）
@@ -24,11 +24,11 @@ GHC API 虽然声称支持 anthropic `/messages` `/messages/count_tokens` 和 op
 
 问题：Claude Code 把 attribution header `x-anthropic-billing-header: cc_version=…; cc_entrypoint=…;` 放在请求体 `system[0]`，GHC API 不认，需要剥离。
 
-处置：在路由前剥离整个属性行（不仅是 `x-anthropic-billing-header`），如果剥离后该 `system[0]` 为空或纯空白字符，删除该项。
+处置：在路由前剥离整个属性行（不仅是 `x-anthropic-billing-header`，全部剥离），如果剥离后该 `system[0]` 为空或纯空白字符，删除该项。
 
 TODO：用户想知道 GHC API 不认 `x-anthropic-billing-header:` 还是 GHC API 不认 `system[0]` 中的任何 attribution？
 
-曾经用 `hook_strip_anthropic_request_headers.strip_attribution_header` 配置控制生效，现在我认为这是应该常驻的。额外提醒，历史记录中的原始客户端请求不应受此处理影响。
+用 `hook_strip_anthropic_request_headers.strip_attribution_header` 配置控制生效，默认禁用。额外提醒，保存历史记录时的原始客户端请求不应受此处理影响。
 
 用户也可以给 Claude Code 配置环境变量 `CLAUDE_CODE_ATTRIBUTION_HEADER=0`，同样剥离所有 attribution headers。但这属于客户端行为，我们作为代理层做好剥离防护即可。
 

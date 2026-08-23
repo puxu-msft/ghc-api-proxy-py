@@ -15,7 +15,8 @@ app
     model_provider      # 上游模型提供方，提供抽象层。未来可能有其他提供方，提供不同的模型端点。
         ghc_client          # [GHC API 提供方](./ghc-api.md)
     observability
-    pipeline
+    pipeline            # 模型请求的处理管线
+        delivery            # 客户端侧的块级交付机制
     server
         routes
 ```

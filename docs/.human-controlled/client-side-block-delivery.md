@@ -13,7 +13,7 @@
 当客户端响应头提交后，按配置 `client_delivery.sse_ping_interval` 的时间间隔发送 SSE ping。
 
 配置有两个最大时长保底：
-- 一次上游请求的最大时长（`upstream_request_retry.upstream_request_deadline`）；
+- 一次上游请求的最大时长（`upstream_request_timeouts.upstream_request_deadline`）；
 - 一次客户端请求的最大时长（`client_delivery.client_request_deadline`）。
 
 当客户端请求超时，如果已发 HTTP 200 响应头，则放弃当前缓冲块，发 SSE error 再收尾；如果还没发 HTTP 200 响应头，则直接返回 HTTP 504 Gateway Timeout。

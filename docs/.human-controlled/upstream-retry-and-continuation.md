@@ -1,14 +1,14 @@
 # 上游请求的重试
 
-建立在“客户端块级交付”的基础上，当上游问题造成请求失败时，先区分业务是否因此无法继续。如果无法继续，直接返回给客户端。
+流式请求建立在“客户端块级交付”的基础上，当上游问题造成请求失败时，先区分业务是否因此无法继续。如果无法继续，直接返回给客户端。
 
 这些情况下无法继续：
 
 - 客户端已断开，取消上游请求
 - 代理的保护机制触发（如块的内存缓存超限）
-- 400
+- 400，包括请求非法和输入超长
 - 401，如凭据过期
-- SSE stop_reason = refusal
+- SSE stop_reason = `refusal`
 
 这些情况下一般可以继续：
 
@@ -16,15 +16,14 @@
 - 请求超时
 - 429 Too Many Requests
 - 5xx
-- SSE stop_reason = max_tokens / max_output_tokens
 
-如果业务可能可以继续，区分是否已经向客户端交付过完整块。如果还没交付过完整块，直接在代理端无痕重试。
+如果业务可能可以继续，区分是否已经向客户端交付过完整块。如果还没交付过完整块，直接在代理端无痕重试。无痕重试不设冷却间隔。
 
-特殊地，`max_tokens` 不应无痕重试。TODO：参考项目对 `max_tokens` 的处理方案是什么？一般是否已经交付过完整块，只是最后一个块被截断了？
+特别地，优雅关闭时报错不再考虑无痕重试，可以走下文合成续写机制。
 
-特殊地，优雅关闭时不应无痕重试，走下文“MCP-driven 合成续写”机制。
+特别地，HTTP 429 会启用“反应式限流器”，而不是立即重试，如果预算耗尽，最后一次尝试是限流重试，返回给客户端的应该是 429 + Retry-After。
 
-其中，HTTP 429 会启用“反应式限流器”，而不是立即重试，如果预算耗尽，最后一次尝试是限流重试，返回给客户端的应该是 429 + Retry-After。（用户已裁决删除 `client_delivery.synthesized_response_headers_after_sec`，因为这种情况下没有交付过完整块，也不再出现半开 `message_start` 需要考虑。）
+> 用户已裁决删除 `client_delivery.synthesized_response_headers_after_sec`，因为这种情况下没有交付过完整块，也不再出现半开 `message_start` 需要考虑。事实上目前不应该有半开 `message_start`，但这不属于本节讨论范围，是一条推论，不应由我们写死。
 
 ## MCP-driven 合成续写
 
@@ -55,3 +54,11 @@ upstream_request_retry:
       max_retries: 10
       message: "Please continue where you left off."
 ```
+
+## 输出超长
+
+对于 SSE stop_reason = `max_tokens` (anthropic-messages) / `max_output_tokens` (openai-responses) 的情形，不应无痕重试。要么在能续写的情况下，丢弃未完成的块，走下文合成续写机制；要么在不能续写的情况下，直接返回给客户端。
+
+## 非流式请求
+
+非流式请求也支持无痕重试、合成续写机制。

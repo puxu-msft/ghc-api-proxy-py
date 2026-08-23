@@ -224,15 +224,15 @@ default_model_provider: ghc
 # 独立模式 / Stand-alone mode
 # ============================================================================
 
-# 优雅重启使用的 pidfile，systemd/pm2 完全跳过 pidfile 机制。
-# 默认是 $XDG_DATA_HOME/ghc-api-proxy/standalone.pid。
+# 优雅重启使用的 pidfile 所在目录，systemd/pm2 完全跳过 pidfile 机制。
+# 默认是 $XDG_DATA_HOME/ghc-api-proxy，pidfile 命名形如 standalone-${GHC_API_PROXY_PORT}.pid
 #
-# Pidfile used by graceful restart, not used by systemd/pm2.
-# Defaults to $XDG_DATA_HOME/ghc-api-proxy/standalone.pid when unset.
+# Directory of pidfile used by graceful restart, not used by systemd/pm2.
+# Defaults to $XDG_DATA_HOME/ghc-api-proxy, pidfile is named like standalone-${GHC_API_PROXY_PORT}.pid
 #
 # NOT hot-reloadable (requires restart). / 不支持热重载（需重启）。
 #
-# pidfile: "/run/ghc-api-proxy/standalone.pid"
+# pidfile_dir: "/run/ghc-api-proxy"
 
 # 在请求排空阶段后，等待的秒数（0 = 无限等）。
 # systemd TimeoutStopSec / pm2 kill_timeout 必须大于它和 client_request_timeout 之和。
@@ -333,10 +333,10 @@ upstream_request_retry:
       max_retries: 9
     serverError:
       max_retries: 9
-    streamReplay:
-      max_retries: 100
 
   auto_retry_tool_call_full_name: mcp__plugin_ghc-api-proxy-helper_auto-retry__turn_interrupted
+
+  hand_over_stop_reasons: ["max_tokens", "max_output_tokens"]
 
 # # 主动式速率限制 / Proactive rate limiting
 # proactive_rate_limiter:
