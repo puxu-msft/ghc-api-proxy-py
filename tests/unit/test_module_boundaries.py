@@ -96,14 +96,14 @@ def test_pipeline_exceptions_stay_importable_without_the_pipeline() -> None:
     assert not [name for name in errors if name.startswith(("app.upstream", "app.model_provider.ghc_client"))]
 
 
-def test_no_live_module_drives_h2_itself() -> None:
-    """`_CONNECTION_ERRORS` maps the whole `h2.exceptions` family, and that mapping rests on this.
+def test_h2_is_imported_only_for_its_types() -> None:
+    """A cheap architecture signal, named for what it checks rather than for what it would be nice to know.
 
-    The hierarchy carries no attribution — a review raised ten of its members through h2's public API, all from caller actions. What keeps the mapping sound is that nothing here makes those calls: every h2 interaction in this process happens inside httpcore.
+    It reads static imports and nothing else. An earlier name said "no live module drives h2 itself", which a review answered without importing anything new: `h2.exceptions` is allowed, so `raise H2Error(...)` from this side's own code passes and produces exactly the bare `H2Error` the mapping in `app.model_provider.ghc_client.errors` treats as the peer's. `importlib.import_module("h2.connection")` passes too — a dynamic import is not an `ast.Import`.
 
-    An **allowlist**, after the first version of this test was written as a denylist of five module names and the same review walked through it with `from h2 import connection`. A denylist here has the shape this project has already been bitten by: it looks like a guard, it passes, and what it misses is every spelling nobody thought of. Naming what may be imported means a new spelling fails by default and has to be argued for.
+    So this is **not** a condition that mapping can rest on, and `errors.py` no longer cites it as one. What it is worth: a new static import of h2 has to be argued for rather than noticed later.
 
-    What is allowed is types being named — the gloss in `app.pipeline.hand_over`, the tuple in `app.model_provider.ghc_client.errors`. What this still cannot see is a module reaching h2 without importing it, through httpcore's `_h2_state`; that is `deferred.md` §22之七's residue and not something an import check answers.
+    An **allowlist**, after the first version was a denylist of five module names and the same review walked through it with `from h2 import connection`. A denylist here has the shape this project has already been bitten by: it looks like a guard, it passes, and what it misses is every spelling nobody thought of.
     """
     allowed = {"h2.events", "h2.exceptions", "h2.errors"}
     allowed_names = {name.removeprefix("h2.") for name in allowed}
