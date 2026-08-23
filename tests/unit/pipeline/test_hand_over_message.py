@@ -1,10 +1,11 @@
 """What the hand-over tells the client a turn ended of.
 
-The field these cover had no test at all until now, which is how it stayed at `str(error)` long enough for a user to read one in a transcript and ask for better. Every case here is a shape that was measured rather than imagined:
+The field had one assertion before this file — `assert handed["input"]["message"]` at `tests/int/test_pipeline_app.py:3127`, a truthiness check whose fixture raises a hand-built exception that carries a message. Nothing had discriminating power over the *content*, which is how the field stayed at `str(error)` long enough for a user to read one in a transcript and ask for better.
 
-- The two `repr`s are the only two the MCP server's journal has ever recorded (`~/.claude/plugins/data/ghc-api-proxy-helper-my-marketplace/auto-retry.jsonl`, 4 records on 2026-08-23: three `ConnectionTerminated`, one `StreamReset`).
+Most cases here are shapes the investigation measured (`.dev/docs/upstream/retry-and-continuation/reports/260823-handover-error-shapes.md`); the two that are not say so in their own docstrings.
+
+- The two h2 `repr`s are the only two the MCP server's journal held when it was read on 2026-08-23 (`~/.claude/plugins/data/ghc-api-proxy-helper-my-marketplace/auto-retry.jsonl`, 4 records: three `ConnectionTerminated`, one `StreamReset`). That is a snapshot of one file, not a frequency.
 - The chain is built the way the installed stack builds it: httpcore raises `RemoteProtocolError(event)` with the h2 event object itself (`httpcore2/_async/http2.py:314`), and httpx re-raises `mapped_exc(str(exc)) from exc` (`httpx2/_transports/default.py:113-114`), so the object survives one link down while only its text reaches the top.
-- `openai.APIConnectionError` stringifies to a fixed `Connection error.`; that was checked against the installed package rather than assumed.
 
 They pin the distinctions a reader has to be able to draw, not the exact sentence: an assertion on the whole string would go red every time the wording is improved, which is the opposite of what this field needs.
 """
@@ -60,7 +61,7 @@ def stream_reset() -> httpx2.RemoteProtocolError:
 
 
 def test_goaway_says_what_the_error_code_meant() -> None:
-    """`error_code:0` is the whole of what the old field said. The word for it is on the event."""
+    """The old field ended at `error_code:0`. The word that number stands for is on the event, just not in its `repr`."""
     text = message(goaway())
     assert "NO_ERROR" in text
     assert "GOAWAY" in text
@@ -70,7 +71,7 @@ def test_goaway_says_what_the_error_code_meant() -> None:
 
 
 def test_stream_reset_is_distinguishable_from_a_graceful_shutdown() -> None:
-    """The two shapes in the journal differ only by a number the reader cannot decode.
+    """The two shapes in the journal are told apart by an `error_code` the reader cannot decode.
 
     A remote `CANCEL` on one stream is upstream dropping this request; a `NO_ERROR` GOAWAY is upstream closing the whole connection politely. Both used to arrive as an opaque `repr`.
     """
@@ -114,7 +115,7 @@ def test_an_error_with_no_text_still_says_what_it_was(error: httpx2.HTTPError) -
 def test_a_real_connection_reset_reports_the_link_that_knows_why() -> None:
     """The shape a reset actually has: four links, and only the last one says anything.
 
-    Measured against a real socket on 2026-08-23 (`260823-handover-error-shapes.md` §2.2(d)): `httpx2.ReadError('')` → `httpcore2.ReadError('')` → `anyio.BrokenResourceError('')` → `ConnectionResetError('[Errno 104] Connection reset by peer')`. `str(error)` on its own produced an empty field for this, which is the most common tear there is.
+    Measured against a real socket on 2026-08-23 (`260823-handover-error-shapes.md` §2.2(d)): `httpx2.ReadError('')` → `httpcore2.ReadError('')` → `anyio.BrokenResourceError('')` → `ConnectionResetError('[Errno 104] Connection reset by peer')`. `str(error)` on its own produced an empty field for this. How often it happens is not something this file knows — the report records the shape, not a rate.
     """
     try:
         try:
@@ -131,9 +132,59 @@ def test_a_real_connection_reset_reports_the_link_that_knows_why() -> None:
         text = message(read_error)
     assert "httpx2.ReadError" in text
     assert "Connection reset by peer" in text
-    # The two silent links in between are not worth a reader's attention, and printing them buries the one that matters.
-    assert "anyio" not in text
+    # `httpcore2.ReadError` is the one link that earns nothing: same class name as the link above it, and no text of its own.
     assert "httpcore2" not in text
+
+
+def test_a_link_that_only_has_a_type_to_offer_still_offers_it() -> None:
+    """Dropping a link because its text was already shown drops its class name with it.
+
+    `RuntimeError('permission denied') from PermissionError('permission denied')` — an independent review built this against a version that kept only new text, and got the `RuntimeError` alone. The word that says what kind of failure it was is the inner class name, and it is the only thing that link had.
+    """
+    try:
+        try:
+            raise PermissionError("permission denied")
+        except PermissionError as denied:
+            raise RuntimeError("permission denied") from denied
+    except RuntimeError as outer:
+        text = message(outer)
+    assert "RuntimeError" in text
+    assert "PermissionError" in text
+    assert text.count("permission denied") == 1
+
+
+def test_an_explicit_cause_is_followed_even_when_it_is_falsy() -> None:
+    """Python's rule for an explicit cause is `is not None`, not truthiness, and an exception may define `__bool__`.
+
+    Constructed, not observed — but the delivery `try` catches whatever a framer raises, so a custom exception type is not structurally excluded.
+    """
+
+    class FalsyCause(Exception):
+        def __bool__(self) -> bool:
+            return False
+
+    outer = RuntimeError("outer")
+    outer.__cause__ = FalsyCause("the actual cause")
+    outer.__context__ = LookupError("incidental context")
+    text = message(outer)
+    assert "the actual cause" in text
+    assert "incidental context" not in text
+
+
+def test_a_chain_cut_short_says_it_was_cut() -> None:
+    """A chain that ended and a chain that hit the bound read the same otherwise."""
+    deepest: BaseException = ConnectionResetError(104, "Connection reset by peer")
+    for _ in range(6):
+        try:
+            try:
+                raise deepest
+            except BaseException as inner:
+                raise RuntimeError from inner
+        except RuntimeError as wrapped:
+            deepest = wrapped
+    text = message(deepest)
+    assert "chain continues" in text
+    assert "Connection reset by peer" not in text
 
 
 def test_a_wrapper_with_a_fixed_message_does_not_hide_the_cause() -> None:

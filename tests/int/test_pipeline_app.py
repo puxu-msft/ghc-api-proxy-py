@@ -3124,7 +3124,11 @@ def test_an_interrupted_turn_is_handed_back_to_the_client_as_a_tool_call(
     assert handed["id"].startswith("toolu_")
     assert handed["input"]["category"] == "network"
     assert handed["input"]["num_messages"] == 0
-    assert handed["input"]["message"]
+    # Through the real wiring, not just the formatter: `interruption_message` has its own unit tests, and they all stayed green when a review cut this call site back to `str(error)`. What is pinned here is that the block the client actually receives was built by it — the type name and the request id are both things the old wiring could not produce.
+    message = cast(str, handed["input"]["message"])
+    assert "httpx2.RemoteProtocolError" in message
+    assert "peer closed the connection" in message
+    assert "attempt 1" in message
     # A whole message, ending the way a turn that asks for a tool ends.
     assert b'"stop_reason":"tool_use"' in delivered
     assert b"message_stop" in delivered

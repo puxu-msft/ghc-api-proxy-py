@@ -67,25 +67,32 @@ def _one_line(text: str) -> str:
     return f"{flat[:_MAX_LINK_CHARS]}… (+{len(flat) - _MAX_LINK_CHARS} more chars)"
 
 
-def _chain(error: BaseException) -> list[BaseException]:
-    """The exception and what it was raised from, outermost first.
+def _chain(error: BaseException) -> tuple[list[BaseException], bool]:
+    """The exception and what it was raised from, outermost first, and whether the walk stopped short.
 
     `__context__` is followed only where `__cause__` is absent and the context was not suppressed, which is the same reading `app.streaming.sse` already applies. It matters here because the informative link is often not the outermost one: a real connection reset arrives as `httpx2.ReadError('')` and says nothing until the fourth link, an `OSError` reading `[Errno 104] Connection reset by peer`.
+
+    `is not None` rather than truthiness. Python's own rule for an explicit cause is `__cause__ is not None`, and an exception subclass may define `__bool__` — `raise X from falsy_cause` would otherwise skip the cause the author named and follow the incidental context instead, or stop dead where the context was suppressed. Nothing structurally excludes a custom exception type here: the delivery `try` catches whatever a framer raises.
     """
     links: list[BaseException] = []
     seen: set[int] = set()
     current: BaseException | None = error
-    while current is not None and len(links) < _MAX_LINKS and id(current) not in seen:
+    while current is not None and id(current) not in seen:
+        if len(links) == _MAX_LINKS:
+            return links, True
         seen.add(id(current))
         links.append(current)
-        current = current.__cause__ or (None if current.__suppress_context__ else current.__context__)
-    return links
+        if current.__cause__ is not None:
+            current = current.__cause__
+        else:
+            current = None if current.__suppress_context__ else current.__context__
+    return links, False
 
 
 def _h2_gloss(links: list[BaseException]) -> str | None:
     """What an HTTP/2 event in the chain actually says, in words.
 
-    httpcore raises `RemoteProtocolError(event)` for these, and httpx re-raises `mapped(str(exc)) from exc`, so the event object itself survives one link down as `args[0]` while only its `repr` reaches the top. That `repr` prints `error_code` through `IntEnum.__str__`, i.e. as a bare number — so the one word that distinguishes an upstream graceful shutdown from an upstream cancelling this very stream is on the object and invisible in the text. Every record in the MCP server's journal so far has been one of those two reprs.
+    httpcore raises `RemoteProtocolError(event)` for these, and httpx re-raises `mapped(str(exc)) from exc`, so the event object itself survives one link down as `args[0]` while only its `repr` reaches the top. That `repr` prints `error_code` through `IntEnum.__str__`, i.e. as a bare number — so the one word that distinguishes an upstream graceful shutdown from an upstream cancelling this very stream is on the object and invisible in the text. Read on 2026-08-23, all four records the MCP server's journal then held were one of those two reprs; that is a snapshot of one file, not a rate.
 
     Read off the event's own enum rather than a table kept here, so a code this project has never seen still comes out named. Absent or unrecognised, the gloss is simply omitted: it is an explanation of the text beside it, never the only account of what happened.
     """
@@ -94,7 +101,7 @@ def _h2_gloss(links: list[BaseException]) -> str | None:
             if isinstance(argument, ConnectionTerminated):
                 return f"HTTP/2 GOAWAY from upstream, error_code={_code_name(argument.error_code)}"
             if isinstance(argument, StreamReset):
-                # `remote_reset` distinguishes upstream dropping this stream from this process dropping it, which is the difference between an upstream decision and our own — and the `repr` is the only place it appears today.
+                # `remote_reset` says which side put the RST_STREAM frame on the wire, and that is all it is read as here. It is not attribution of the decision: h2 also raises `remote_reset=False` when it terminates a stream itself over a protocol or flow-control error the peer provoked (`h2/stream.py`, the `FLOW_CONTROL_ERROR` path).
                 who = "from upstream" if argument.remote_reset else "sent by this proxy"
                 return f"HTTP/2 RST_STREAM {who} on stream {argument.stream_id}, error_code={_code_name(argument.error_code)}"
     return None
@@ -127,24 +134,27 @@ def describe_error(error: BaseException) -> str:
     - **A guarantee of content.** A real connection reset arrives as `httpx2.ReadError` whose `str()` is empty, and a bare `h2.ProtocolError()` is empty too — an empty `message` is the one value that tells a reader nothing at all.
     - **The chain.** The link that carries the reason is routinely not the one that was caught: for that same reset it is the fourth.
 
-    Links whose text repeats an earlier link's, and interior links carrying no text at all, are dropped. Both are the ordinary shape here rather than edge cases: httpx re-raises httpcore's message unchanged, so every transport tear carries the same event `repr` twice, and a real connection reset arrives as four links of which the first three are empty. What survives is the type the code actually caught and the first link that had something to say — measured, those are `httpx2.ReadError` and `ConnectionResetError('[Errno 104] Connection reset by peer')`.
+    A link earns its place by contributing either text or a class name not already shown. Both halves are load-bearing. Without the text half, every transport tear prints the same event `repr` twice, because httpx re-raises httpcore's message unchanged. Without the class-name half, `RuntimeError('permission denied') from PermissionError('permission denied')` comes out as the `RuntimeError` alone, dropping the one word that says what kind of failure it was — an independent review built that counterexample against an earlier version of this function that kept only new text.
     """
-    links = _chain(error)
+    links, truncated = _chain(error)
     rendered: list[str] = []
     seen_text: set[str] = set()
-    for position, link in enumerate(links):
+    seen_class: set[str] = set()
+    for link in links:
         text = _link_text(link)
         name = f"{type(link).__module__}.{type(link).__qualname__}"
-        if not text:
-            # The outermost link is kept even when it says nothing, because its type is what the code caught and is the only account of the failure when the whole chain is silent.
-            if position == 0:
-                rendered.append(name)
+        fresh_class = type(link).__qualname__ not in seen_class
+        fresh_text = bool(text) and text not in seen_text
+        if not fresh_class and not fresh_text:
             continue
-        if text in seen_text:
-            continue
-        seen_text.add(text)
-        rendered.append(f"{name}: {text}")
+        seen_class.add(type(link).__qualname__)
+        if text:
+            seen_text.add(text)
+        rendered.append(f"{name}: {text}" if fresh_text else name)
     described = "; caused by ".join(rendered)
+    if truncated:
+        # Named rather than left to trail off, for the same reason a cut message says how much it lost: a chain that ended and a chain that was cut are otherwise the same string.
+        described = f"{described}; caused by … (chain continues past {_MAX_LINKS} links)"
     # Scanned over every link, including the ones dropped just above: the event object rides on httpcore's exception, which is exactly the link whose text was a duplicate.
     gloss = _h2_gloss(links)
     return f"{described} ({gloss})" if gloss else described
