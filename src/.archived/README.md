@@ -18,7 +18,9 @@ Three of those packages were not the retired chain but dead in both — `context
 
 ## What is unfinished, and what it costs
 
-`api.md` ratifies Azure, Gemini, `/history/api/*`, `/history/ws`, `/api/status` and `/api/config`. **The live chain serves none of them**, and the only implementations are in here. That was already true before this move — the chain holding them was unreachable — but the move makes it visible instead of latent.
+`api.md` ratifies Azure, Gemini, `/history/api/*`, `/history/ws`, `/api/status` and `/api/config`. When this move happened the live chain served none of them and the only implementations were in here. **Two slices have since closed most of that**: `/api/status` and `/api/config` are answered by `app/server/routes/ops.py` as of `7525f76`, and on 2026-08-23 the three Azure paths became live routes while the three Gemini ones became registered routes answering 501. What is left in here with no live equivalent is `/history/api/*` and `/history/ws`, together with the `app.history` package behind them.
+
+Gemini is the case to read carefully: the paths are served, the wire translation is not, and part of the old implementation never came in here at all — `app/protocols/gemini.py`, `app/models/gemini.py` and `estimate_gemini_input` are still in the live tree with no caller. `.dev/docs/server-layout/deferred.md` §D-A names them.
 
 `src/.archived/app/routes/management.py` mixes the two: `/api/status` and `/api/config` are ratified, while the two `/api/tokenization/*` endpoints beside them are ruled **暂不支持**. Whoever migrates that file cannot take or leave it whole.
 

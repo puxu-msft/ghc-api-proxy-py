@@ -7,21 +7,20 @@ from fastapi import APIRouter
 
 from app.server.routes.inference import serve
 from app.server.routes.ops import router as ops_router
-from app.server.routes.table import OPENAI_PREFIXES, ROUTES
+from app.server.routes.table import ROUTES, expanded_paths
 
 
 def build_router() -> APIRouter:
     """Register every inbound path: the model endpoints, their OpenAI-compatible prefixes, and the non-inference surface.
 
     One router rather than two handed separately to the factory. What this app answers on is a fact about the routes package, and splitting it across a caller meant the answer could only be read by looking in two places — which is how the ops endpoints came to be mounted by the factory while the inference ones were assembled here.
+
+    Which paths a route expands to is `expanded_paths`, shared with the lookup rather than reproduced here, so the two cannot disagree about what is mounted.
     """
     router = APIRouter()
     seen: set[str] = set()
     for route in ROUTES:
-        paths = [route.path]
-        if route.wire_format.value.startswith("openai-"):
-            paths = [f"{prefix}{route.path}" for prefix in OPENAI_PREFIXES]
-        for path in paths:
+        for path in expanded_paths(route):
             if path in seen:
                 continue
             seen.add(path)

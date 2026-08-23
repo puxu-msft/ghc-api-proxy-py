@@ -22,6 +22,7 @@ import pytest
 import structlog
 from anthropic import AsyncAnthropic
 from fastapi import FastAPI
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from openai import AsyncOpenAI
 from prometheus_client import REGISTRY
@@ -51,6 +52,8 @@ from app.server.routes.inference import (
     _StreamAccounting,  # pyright: ignore[reportPrivateUsage]
     _tracked_delivery,  # pyright: ignore[reportPrivateUsage]
 )
+from app.server.routes.router import build_router
+from app.server.routes.table import route_for_path
 from app.tokenization.state_store import TokenizationStateStore
 
 BASE_URL = "https://copilot.example"
@@ -918,6 +921,95 @@ def test_chat_completions_streams_are_delivered_whole_and_verbatim() -> None:
     assert response.headers["content-type"].startswith("text/event-stream")
     assert str(seen[-1].url) == f"{BASE_URL}/chat/completions"
     assert response.content == CHAT_COMPLETIONS_SSE
+
+
+@pytest.mark.parametrize(
+    ("path", "model", "upstream", "body"),
+    [
+        ("chat/completions", "cc-model", "/chat/completions", {"messages": []}),
+        ("responses", "gpt-model", "/responses", {"input": []}),
+        ("embeddings", "embed-model", "/embeddings", {"input": "hi"}),
+    ],
+)
+def test_an_azure_deployment_path_names_the_model(
+    path: str, model: str, upstream: str, body: dict[str, Any]
+) -> None:
+    """Azure sends an OpenAI body with no model in it and names the deployment in the URL instead.
+
+    The assertion is on the bytes that crossed rather than on a 200, because a route that reached upstream with the wrong model would pass either way — and "which model" is the entire content of what these three paths add over the ones above them.
+    """
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "ok", "data": []}))
+    response = client.post(f"/openai/deployments/{model}/{path}", json=body)
+
+    assert response.status_code == 200
+    assert str(seen[-1].url) == f"{BASE_URL}{upstream}"
+    assert orjson.loads(seen[-1].read())["model"] == model
+
+
+def test_the_azure_paths_are_not_mounted_under_the_openai_prefixes() -> None:
+    """They are already fully qualified, so `/v1` and `/openai/v1` in front would be a second spelling nothing serves.
+
+    Both layers are asserted separately, and that separation is the point. A 404 alone cannot tell "never registered" from "registered but missing from the lookup" — the second answers 404 too, from `_dispatch`'s defensive branch, having gone all the way through `serve`. A review reproduced exactly that by mounting the wrong template on a real app and leaving `_BY_PATH` alone: HTTP 404, no upstream request, and this test green.
+    """
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "ok"}))
+    for prefix in ("/v1", "/openai/v1"):
+        wrong = f"{prefix}/openai/deployments/gpt-model/responses"
+        assert client.post(wrong, json={"input": []}).status_code == 404
+        assert route_for_path(f"{prefix}/openai/deployments/{{deployment}}/responses") is None
+    assert seen == []
+
+
+def test_what_is_mounted_and_what_can_be_looked_up_are_the_same_set() -> None:
+    """The one failure neither side can report on its own.
+
+    `build_router` registers paths and `route_for_path` maps them back, and until `expanded_paths` existed each applied its own rule. A path in the first set but not the second reaches `serve` and comes back 404 as if it were never served; one in the second but not the first is a lookup for something nobody can reach. Both are silent, so the guard is the equality rather than a probe of either side.
+
+    Read off the router's own POST routes rather than off `ROUTES`, because the registration is what a client meets. The ops surface arrives through `include_router` and leaves a single object with `path=None` behind, which is why it is filtered out rather than expected to appear.
+    """
+    mounted = {
+        route.path
+        for route in build_router().routes
+        if isinstance(route, APIRoute) and "POST" in (route.methods or set())
+    }
+    assert mounted
+    assert {path for path in mounted if route_for_path(path) is not None} == mounted
+
+
+def test_a_gemini_path_says_not_implemented_rather_than_not_found() -> None:
+    """`api.md` ratifies the path and no translator answers to its format yet.
+
+    Three codes are distinguishable here and only one is right. 404 would make a ratified endpoint indistinguishable from one this proxy does not have. 400 is what a missing translator produces on its own, and that blames the client's body for a capability this proxy has not built. 501 is the one that says what is true, and the request is refused before the body is parsed — asserted by sending a body that is not valid JSON, which would be a 400 on any implemented route.
+    """
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "ok"}))
+    for suffix in ("generateContent", "streamGenerateContent", "countTokens"):
+        response = client.post(f"/v1beta/models/gemini-pro:{suffix}", content=b"{not json")
+        assert response.status_code == 501
+        said = response.json()["error"]["message"]
+        assert "not implemented" in said
+        # The URL the client used, not the route table's own template. A message naming `{model}` hands back a spelling only this repository understands.
+        assert f"/v1beta/models/gemini-pro:{suffix}" in said
+        assert "{" not in said
+    # A model that contains colons is still one model. The greedy segment takes everything up to the method, so this must not be the price of bounding the method set.
+    assert client.post("/v1beta/models/vendor:family:countTokens", json={}).status_code == 501
+    assert seen == []
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/v1beta/models/gemini-pro:unknownMethod",
+        "/v1beta/models/gemini-pro",
+        "/v1beta/models/something-else",
+    ],
+)
+def test_a_gemini_method_api_md_does_not_name_is_not_served_at_all(path: str) -> None:
+    """The boundary the three explicit templates exist to draw, and the reason a catch-all was wrong.
+
+    `api.md` names three methods. Registered as one `{model_and_method}` segment, all of these answered 501 — the proxy claiming a ratified endpoint it has none of, and the method set ceasing to be a boundary anything enforced. The positives above cannot see this: three legal suffixes are three samples of the same catch-all.
+    """
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "ok"}))
+    assert client.post(path, json={}).status_code == 404
+    assert seen == []
 
 
 def test_translated_route_answers_in_the_format_the_client_asked_in() -> None:

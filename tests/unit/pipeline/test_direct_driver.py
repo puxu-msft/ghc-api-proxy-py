@@ -21,7 +21,7 @@ from app.pipeline.direct_driver import (
 )
 from app.pipeline.events import SubscriberRegistry
 from app.pipeline.exceptions import PipelineAbort, PipelineRetry, UpstreamError
-from app.pipeline.request import RequestContext, WireFormat
+from app.pipeline.request import FORMAT_ENDPOINTS, RequestContext, WireFormat
 from app.pipeline.routing import RoutingError, decide_route, split_format_suffix
 
 CATALOG: dict[str, ModelDescriptor] = {
@@ -155,6 +155,24 @@ def test_explicit_format_the_model_lacks_is_refused() -> None:
 def test_unknown_format_suffix_is_an_error_not_part_of_the_name() -> None:
     with pytest.raises(RoutingError, match="unknown target format"):
         split_format_suffix("some-model@no-such-format")
+
+
+@pytest.mark.parametrize(
+    "unroutable", sorted(set(WireFormat) - set(FORMAT_ENDPOINTS), key=str) or [None]
+)
+def test_a_named_format_with_no_endpoint_is_refused_rather_than_crashing(
+    unroutable: WireFormat | None,
+) -> None:
+    """The gap a route table opens when it has to name a format nothing can route to.
+
+    `WireFormat` carries a member per wire shape the routes know about, and `FORMAT_ENDPOINTS` maps only the ones an upstream endpoint answers to. Judged on the enum alone, `split_format_suffix` accepted the difference between those two sets and `decide_route` then died on a `KeyError` — which reached the client on `/v1/messages` as a 502 whose body was the `repr` of an enum member. Measured 2026-08-23, the day `GEMINI_GENERATE_CONTENT` was added.
+
+    Parametrized over the set difference rather than over `gemini-generate-content` by name, because that name will move into `FORMAT_ENDPOINTS` the day Gemini is implemented and a test naming it would then be asserting something else while still passing. `[None]` keeps this collectable when the difference is empty — there is nothing to refuse then, which is a legitimate state and not a reason to fail.
+    """
+    if unroutable is None:
+        pytest.skip("every WireFormat currently maps to an endpoint")
+    with pytest.raises(RoutingError, match="has no endpoint"):
+        split_format_suffix(f"some-model@{unroutable.value}")
 
 
 def test_model_with_only_an_undriveable_endpoint_is_refused() -> None:

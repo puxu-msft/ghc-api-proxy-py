@@ -138,12 +138,22 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
     # Consumed here so the request is fully read before anything can return, which is what lets a rejected body be reported at all. Its size is deliberately **not** what `↑` reports — see `log_completion`. The request is already registered, so a client that never finishes sending is visible for however long it takes.
     await request.body()
 
-    route = route_for_path(request.url.path)
+    # The template rather than the URL: once a path carries parameters the two differ, and only the template identifies the route. The router records which of its own paths answered, so this is that answer rather than a second match of our own. Reading it also survives a mount prefix — measured, `--root-path /api` made `route_for_path(request.url.path)` miss on every route and answer 404 from the branch below.
+    matched = request.scope.get("route")
+    route = route_for_path(getattr(matched, "path", None) or request.url.path)
     if route is None:
         # Defensive rather than reachable: `build_router` registers only paths `route_for_path` knows, so a request that got here has one. An unregistered URL is answered by FastAPI's own router and never reaches this function, which is why no completion line is written for it — that is a deliberate boundary, not an oversight: a 404 for a path this proxy does not serve is not a proxied request.
         return JSONResponse({"error": {"message": "unknown endpoint"}}, status_code=404)
     trace.inbound_format = route.wire_format.value
     trace.count_tokens = route.count_tokens
+
+    if not route.implemented:
+        # 501, not 404 and not 400. The path is one `api.md` ratifies, and a 404 would make it indistinguishable from an endpoint this proxy does not have; 400 is what a missing translator would otherwise produce, and that blames the client's body for a capability this proxy has not built. Answered before the body is *parsed* — it has already been read, a line above — because nothing here can judge a format it cannot read.
+        # The URL rather than `route.path`, which is this repository's own spelling: a client told that `/v1beta/models/{model}:generateContent` is unimplemented has been handed a template it cannot act on. The envelope is this proxy's general one; whether an unimplemented endpoint should answer in its own dialect's error shape is registered in `deferred.md` rather than decided here.
+        trace.detail = f"{route.wire_format.value} is routed but not implemented"
+        return JSONResponse(
+            {"error": {"message": f"{request.url.path} is not implemented yet"}}, status_code=501
+        )
 
     try:
         parsed: object = await request.json()
@@ -156,7 +166,8 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
     body = cast(dict[str, Any], parsed)
 
     try:
-        context = build_context(route, body, request.headers)
+        # The path parameters go with the body because for some routes they are part of it: Azure names the deployment in the URL and sends a body with no model, so what the client asked for can only be read from the two together.
+        context = build_context(route, body, request.headers, request.path_params)
     except InboundRequestError as error:
         trace.detail = str(error)
         return JSONResponse(error_body(error), status_code=400)
@@ -483,8 +494,7 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
         else None
     )
     if handed is not None:
-        # A buffered reply is delivered whole, so there is no position to be in and nothing to replay
-        # — but the turn is no more finished than a streamed one upstream cut short, and the client is still the only side that can carry it on. Ruled 2026-08-22, withdrawing the earlier ruling that a non-streaming turn could not be continued.
+        # A buffered reply is delivered whole, so there is no position to be in and nothing to replay — but the turn is no more finished than a streamed one upstream cut short, and the client is still the only side that can carry it on. Ruled 2026-08-22, withdrawing the earlier ruling that a non-streaming turn could not be continued.
         #
         # The truncated block was already dropped during translation, where upstream's `status` is still readable. This is the other half of that: dropping content is only defensible because the client is handed a way to get it back.
         content = payload.get("content")

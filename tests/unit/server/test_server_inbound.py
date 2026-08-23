@@ -87,3 +87,39 @@ def test_body_is_copied_into_the_context() -> None:
     context = build_context(route, body)
     context.payload["added"] = True
     assert "added" not in body
+
+
+def test_a_path_named_model_reaches_the_pipeline_without_reaching_the_record() -> None:
+    """Both halves of the substitution, because each fails in a different direction.
+
+    Downstream reads `payload`, so the deployment has to be in there or nothing knows which model to route to. `original_payload` is the record of what the client sent, which `message-format-reshape.md` requires to be unaffected by anything this proxy does to the request — and putting the model there would make the record claim the client sent a field it never sent.
+    """
+    route = route_for_path("/openai/deployments/{deployment}/responses")
+    assert route is not None
+    body: dict[str, Any] = {"input": []}
+    context = build_context(route, body, None, {"deployment": "gpt-model"})
+
+    assert context.requested_model == "gpt-model"
+    assert context.payload["model"] == "gpt-model"
+    assert "model" not in context.original_payload
+    assert "model" not in body
+
+
+def test_the_deployment_in_the_path_wins_over_a_model_in_the_body() -> None:
+    """A body that disagrees with the URL it was sent to does not get to redirect the request."""
+    route = route_for_path("/openai/deployments/{deployment}/chat/completions")
+    assert route is not None
+    context = build_context(route, {"model": "somewhere-else", "messages": []}, None, {"deployment": "cc-model"})
+    assert context.requested_model == "cc-model"
+    assert context.payload["model"] == "cc-model"
+
+
+@pytest.mark.parametrize("params", [None, {}, {"deployment": "  "}, {"deployment": 7}])
+def test_a_route_that_takes_its_model_from_the_path_is_refused_without_one(
+    params: dict[str, Any] | None,
+) -> None:
+    """Refused rather than falling back to the body: the fallback is what would make an unrouted path answer as if it had been routed."""
+    route = route_for_path("/openai/deployments/{deployment}/responses")
+    assert route is not None
+    with pytest.raises(InboundRequestError, match="from the path"):
+        build_context(route, {"model": "gpt-model", "input": []}, None, params)

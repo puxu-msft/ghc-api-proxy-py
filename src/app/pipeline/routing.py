@@ -57,6 +57,8 @@ def split_format_suffix(name: str) -> tuple[str, WireFormat | None]:
 
     An unrecognised format after `@` is an error rather than part of the model name.
     Treating it as a name would send a request the operator never asked for.
+
+    "Unrecognised" is decided against `FORMAT_ENDPOINTS` rather than against the enum, and the difference is not academic: a format may be named — because the route table has to say which shape a path carries — while no endpoint answers to it. `WireFormat.GEMINI_GENERATE_CONTENT` is exactly that today. Judged on the enum alone, `claude-model@gemini-generate-content` passed this function and died on `FORMAT_ENDPOINTS[...]` in `decide_route`, reaching the client as a 502 whose body was the Python `repr` of an enum member — measured on `/v1/messages`, the primary path. Keeping the judgement on the same table the lookup uses means a format added for routing purposes cannot open that hole again.
     """
     if FORMAT_SEPARATOR not in name:
         return name, None
@@ -64,9 +66,13 @@ def split_format_suffix(name: str) -> tuple[str, WireFormat | None]:
     if not model:
         return name, None
     try:
-        return model, WireFormat(suffix)
+        wire = WireFormat(suffix)
     except ValueError:
         raise RoutingError(f"unknown target format {suffix!r} in {name!r}") from None
+    if wire not in FORMAT_ENDPOINTS:
+        # Named but unroutable. Said in its own words rather than folded into the branch above, because the two send an operator to different places: one is a typo, the other is a capability this proxy has not built.
+        raise RoutingError(f"target format {suffix!r} in {name!r} has no endpoint on this proxy")
+    return model, wire
 
 
 def decide_route(
