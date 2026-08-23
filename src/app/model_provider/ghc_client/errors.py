@@ -41,9 +41,11 @@ _TIMEOUT_ERRORS = (OpenAITimeoutError, AnthropicTimeoutError)
 # What makes the mapping sound is where a *bare* one can come from **in this process**, which is two facts that must both hold:
 #
 #   1. Nothing here drives h2. The only live imports are types — `h2.events` for the gloss in `app.pipeline.hand_over`, and this one — and `tests/unit/test_module_boundaries.py` pins that, so a future module that starts calling `H2Connection` makes a test say so rather than silently widening this tuple.
-#   2. httpcore converts the h2 errors it raises itself: the request phase catches `ProtocolError` and re-raises it as `RemoteProtocolError` or `LocalProtocolError` (`httpcore2/_async/http2.py:151-166`). The one gap is `receive_data` on the body stream, which sits outside that `try` (`:425`) and whose byte stream re-raises unchanged.
+#   2. httpcore converts the h2 errors *it* raises during the request phase, into `RemoteProtocolError` or `LocalProtocolError` (`httpcore2/_async/http2.py:151-166`). Nothing converts what the body path raises: `receive_data` sits outside every `try` (`:425`), and the byte stream re-raises unchanged.
 #
-# So a bare `H2Error` arriving here has come through the gap, from parsing bytes the peer sent. If either fact stops holding, this entry stops being sound — which is why they are named rather than summarised as "h2 means upstream".
+# So a bare `H2Error` arriving here came out of httpcore's body path. **That is not the same as saying the peer caused it, and this comment said so until a review showed otherwise.** httpcore also calls `acknowledge_received_data` per `DataReceived` on that path (`:286-300`), and the review drove a real `_receive_response_body` into a bare local `NoSuchStreamError` through it. What the residue actually is matters more than its size: a dependency's own bookkeeping invariant, not this proxy's code. Mapping it to a network retry spends the budget and then surfaces, which is a different failure from the one the module docstring guards against — dressing *our* bug as retryable so it never surfaces at all. Registered in `deferred.md` §22之七.
+#
+# If either fact stops holding, this entry stops being sound — which is why they are named rather than summarised as "h2 means upstream".
 _CONNECTION_ERRORS = (
     OpenAIConnectionError,
     AnthropicConnectionError,

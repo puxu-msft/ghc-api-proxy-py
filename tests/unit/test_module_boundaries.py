@@ -99,18 +99,33 @@ def test_pipeline_exceptions_stay_importable_without_the_pipeline() -> None:
 def test_no_live_module_drives_h2_itself() -> None:
     """`_CONNECTION_ERRORS` maps the whole `h2.exceptions` family, and that mapping rests on this.
 
-    The hierarchy carries no attribution — a review raised ten of its members through h2's public API, all from caller actions. What makes the mapping sound is that nothing here makes those calls: every h2 interaction in this process happens inside httpcore, which converts what it raises itself, so a *bare* `H2Error` has escaped through the one gap in that conversion and came from parsing the peer's bytes.
+    The hierarchy carries no attribution — a review raised ten of its members through h2's public API, all from caller actions. What keeps the mapping sound is that nothing here makes those calls: every h2 interaction in this process happens inside httpcore.
 
-    Imports of `h2.events` and `h2.exceptions` are types being named — the gloss in `app.pipeline.hand_over` and the tuple in `app.model_provider.ghc_client.errors`. `h2.connection`, `h2.config` and `h2.stream` are the modules you reach for to drive a connection, and reaching for one of them is what would quietly turn that tuple into a claim nobody checked.
+    An **allowlist**, after the first version of this test was written as a denylist of five module names and the same review walked through it with `from h2 import connection`. A denylist here has the shape this project has already been bitten by: it looks like a guard, it passes, and what it misses is every spelling nobody thought of. Naming what may be imported means a new spelling fails by default and has to be argued for.
+
+    What is allowed is types being named — the gloss in `app.pipeline.hand_over`, the tuple in `app.model_provider.ghc_client.errors`. What this still cannot see is a module reaching h2 without importing it, through httpcore's `_h2_state`; that is `deferred.md` §22之七's residue and not something an import check answers.
     """
-    driving = {"h2.connection", "h2.config", "h2.stream", "h2.frame_buffer", "h2.windows"}
+    allowed = {"h2.events", "h2.exceptions", "h2.errors"}
+    allowed_names = {name.removeprefix("h2.") for name in allowed}
     offenders: list[str] = []
     for path in sorted(Path("src/app").rglob("*.py")):
-        tree = ast.parse(path.read_text(), filename=str(path))
-        for node in ast.walk(tree):
+        for node in ast.walk(ast.parse(path.read_text(), filename=str(path))):
             if isinstance(node, ast.Import):
-                offenders += [f"{path}: import {a.name}" for a in node.names if a.name in driving]
-            elif isinstance(node, ast.ImportFrom) and node.module in driving:
-                offenders.append(f"{path}: from {node.module} import ...")
+                offenders += [
+                    f"{path}: import {alias.name}"
+                    for alias in node.names
+                    if alias.name == "h2" or alias.name.startswith("h2.")
+                    if alias.name not in allowed
+                ]
+            elif isinstance(node, ast.ImportFrom) and node.module is not None:
+                if node.module == "h2":
+                    # `from h2 import connection` names a submodule, not a symbol, and reads nothing like the module-level form.
+                    offenders += [
+                        f"{path}: from h2 import {alias.name}"
+                        for alias in node.names
+                        if alias.name not in allowed_names
+                    ]
+                elif node.module.startswith("h2.") and node.module not in allowed:
+                    offenders.append(f"{path}: from {node.module} import ...")
 
     assert offenders == [], "\n".join(offenders)

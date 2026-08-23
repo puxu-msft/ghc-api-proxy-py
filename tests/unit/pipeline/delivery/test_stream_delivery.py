@@ -1240,7 +1240,7 @@ class _FramerWhoseKeepaliveFails(AnthropicFramer):
 async def test_a_bug_in_the_keepalive_is_this_sides_too() -> None:
     """One of the places the old marker-per-site approach had missed, kept as a case after the predicate was inverted.
 
-    It is here because the list of places this side runs code is what proved unbounded: framing was left out on a stated reason that did not hold, and the keep-alive was left out after that was fixed. Nothing is marked now — upstream is what is identified — so this passes for a structural reason rather than because someone remembered.
+    It is here because the list of places this side runs code is what proved unbounded. Framing was left out of the old marker on a stated reason that did not hold; the keep-alive was marked in the same commit that fixed framing, and what was missing was this test — a review found it by mutating the marker away and watching the suite stay green. Nothing is marked now, upstream is what is identified, so this passes for a structural reason rather than because someone remembered.
     """
     chunks: list[bytes] = []
 
