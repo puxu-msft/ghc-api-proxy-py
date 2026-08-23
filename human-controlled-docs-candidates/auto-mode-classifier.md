@@ -49,7 +49,7 @@ Claude Code 的 auto mode 打开后，**每一次即将执行的动作**（编�
     block_reason_str: "Blocked by proxy, without a model review."
 ```
 
-实现已按它落地：三个键名逐字一致，`block_reason_str` 的 schema 默认值也已对齐成这一句（评审实测发现原先多了一个 `configuration`），`decision` 的 schema 默认是 `passthrough`。第二条识别标记（转录包裹 `<transcript>\n`）**不是配置项**，写死在代码里——理由是它是结构标签而非会被润色的散文；代价是它没有单独关闭的开关，记在 `spec.md` §5 与 `deferred.md` D6。各键作用的完整说明在 `.dev/docs/auto-mode-classifier/spec.md` §5。
+实现已按它落地：三个键名逐字一致，`block_reason_str` 的 schema 默认值也已对齐成这一句（评审实测发现原先多了一个 `configuration`），`decision` 的 schema 默认是 `passthrough`。第二条识别标记（转录包裹 `<transcript>\n`）**不是配置项**，写死在代码里——理由是它是结构标签而非会被润色的散文；代价是它没有单独关闭的开关，记在 `.dev/docs/auto-mode-classifier/spec.md` §5 与 `.dev/docs/auto-mode-classifier/deferred.md` D6。各键作用的完整说明在 `.dev/docs/auto-mode-classifier/spec.md` §5。
 
 本文余下部分保留，因为它记的是**做决定需要的背景与实测数据**，那些不随配置形状变化。
 
@@ -57,7 +57,8 @@ Claude Code 的 auto mode 打开后，**每一次即将执行的动作**（编�
 
 两条判据在两个独立方向上验证过：
 
-- **流量侧**：2300 条真实请求全中；在 145781 条 operation 的库里，`You are a security monitor for autonomous AI coding agents.` 这句话只出现在分类器请求里，零误报。
+- **流量侧**：在 145781 条 operation 的库里，`You are a security monitor for autonomous AI coding agents.` 这句话**只出现在分类器请求里**，零误报——这一条是独立测量。
+  转录包裹那条**不能**这样说：那 2300 条样本正是用 `previewText LIKE '<transcript>%'` 选出来的，拿它证明自己的召回率是恒真的。非循环的论证是「包裹 ⊆ 首行 ⊆ 分类器」，完整推理链见 `.dev/docs/auto-mode-classifier/spec.md` §3。
 - **代码侧**：Claude Code 2.1.207 / 2.1.226 / 2.1.241 三个版本的静态提取源码里逐字一致；用户自定义 auto mode 规则只替换 prompt 中部的占位槽，severity 模式只重写 Output Format 段，**都不动首行**。
 
 明确**不可用**的判据（写在这里免得日后有人再试一遍）：`anthropic-beta: auto-mode-classifier-2026-07-16` 在反代场景下永远收不到——客户端只在 base URL 是 `api.anthropic.com` 时才发送它。`x-app: cli-bg` 判别力接近零（同期 6084 条里 5274 条是它）。其余请求头与主对话逐字相同。
