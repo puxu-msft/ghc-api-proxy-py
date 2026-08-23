@@ -8,7 +8,7 @@
 
 实现完成，两轮独立评审的全部 blocker 与 major 已处置（C-02 除外，见下）。默认 `passthrough`，即不打开就完全不改变现有行为。
 
-已提交：主仓 `2b28d07`（特性）、`.dev` 仓 `27000a8`（文档），随后一次配置项改名（见「配置项归属」）。**未推送。**
+已全部提交，**未推送**。特性与其后的三次配置改动、两轮评审的处置都在主仓；文档、四份取证与评审报告在 `.dev` 仓。此处不再列举哈希——这一节被评审抓到过两次陈旧，每提交一次就要改一次的清单没人会维护。要当前范围就跑 `git log --oneline 2b28d07^..HEAD -- src/app/pipeline/auto_mode_classifier.py src/app/config/schema.py src/app/pipeline/driver.py tests/unit/pipeline/test_auto_mode_classifier.py`。
 
 **尚未在真实流量上验证过一次命中**——本机 `~/.claude/settings.json` 当前是 `defaultMode: "bypassPermissions"`，该模式下客户端不调用分类器，所以没有可用于端到端验证的真实请求。全部验证是单元级 + 对客户端源码的静态核对。详见 `deferred.md` D2。
 
