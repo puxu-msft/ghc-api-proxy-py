@@ -22,22 +22,17 @@
 
 **仍未查清**（低优先，**无消费端**）：账户类型维度（history 库无此字段）；`/chat/completions` 腿只有 `vscode-copilot-chat` 2025-12 的第三方录制（第三种形态：OpenAI 措辞 + `model_max_prompt_tokens_exceeded`、无 `type`）。本项目自己不落盘上游 body，`~/.local/share/ghc-api-proxy/rejected/` 不存在，所以这两项**只能等新的录制**——不是没排期，是没有可查的东西。
 
-### 2. reasoning item 被截断时没有任何信号
+### 2. ~~reasoning item 被截断时没有任何信号~~ —— 已闭合，已移出（2026-08-22）
 
-`message` 与 `function_call` 的 `output_item.done` 带 `status`，被截断的是 `"incomplete"`。**reasoning item 没有这个字段**——已用正样本对照确认：正常收尾的 reasoning item 与被截断的，键集逐字相同（`content, encrypted_content, id, summary, type`），`summary: []` 在两侧都出现，也不是信号。
+**裁决**「历史里没有信号就保持悬念，暂不特殊处理」→ `decisions.md` 第二节第 3 条（本条是它的重复副本，已删）。
+**支撑事实**（reasoning item 的 `output_item.done` 没有 `status` 字段，与正常收尾的键集逐字相同，已做正样本对照）→ `README.md` 证据表。
+**代价**（20 例样本里 6 例的半截 thinking 块会照常交付）随该裁决一并记在 `decisions.md`。
 
-response 层有信号（`response.incomplete`），但它晚于 item 关闭到达，要用就得把块扣住——那是延迟提交，会往交付路径塞状态。
+编号保留：`openai_responses.py` 与 `translation_driver/responses.py` 两处生产代码按「§2」引用本条。
 
-**用户 2026-08-21 裁决：历史里没有信号就保持悬念，暂不特殊处理。** 于是 20 例样本里有 6 例（只有 reasoning 中途撞顶）的半截 thinking 块会照常交付。哪天它造成可观测的麻烦，再考虑延迟提交。
+### 3. ~~`model_context_window_exceeded` 在 Anthropic 腿仍是可能的~~ —— 已闭合，已移出（2026-08-22）
 
-### 3. `model_context_window_exceeded` 在 Anthropic 腿仍是可能的
-
-两条腿的权重不同，别混为一谈：
-
-- **Responses 腿**：结构性不存在，值空间里没有。权重强，可据此行动。
-- **Anthropic 腿**：Anthropic 枚举里**有**这个值，只是 13 万次请求零观测。这是「未观测」，不是「不可能」。
-
-所以分类表里不要把它写成已排除。
+→ `README.md` 证据表的 `stop_reason` 那一行，「未观测 ≠ 不可能」这句解读已并入该行。本条是它的重复副本，已删。
 
 ### 4. 上游 SSE 中途的 `error` 帧：零观测
 
@@ -221,7 +216,7 @@ response 层有信号（`response.incomplete`），但它晚于 item 关闭到�
 
 ### 18. 一条提交信息缺字
 
-`696a786` 的正文里 `A response that says it is incomplete without saying why gets , which is…` 缺了 `incomplete` 一词（`cat -A` 确认，非渲染问题）。历史已发布，不重写；`fef7d96` 的同一句是完整的，可作对照。登记以免后来者读到一句没有主语的话。
+→ **已移入「已查清未修（无岔路）」栏**（2026-08-22）。编号保留，正文见下方该栏。
 
 ### 19. 截断 error 帧的 message 在 Anthropic 上游腿上字面是错的
 
@@ -374,6 +369,12 @@ anthropic stop_reason='stop_sequence'  -> responses status='completed'   incompl
 **为什么没做**：今天路由对同一请求是确定的，所以**这条路不可达**。登记只为一件事——将来加入模型回退时，它会无声出错。
 
 来源：`reports/260822-review-unreviewed-span.md` minor-12。
+
+### 18. 一条提交信息缺字
+
+`696a786` 的正文里 `A response that says it is incomplete without saying why gets , which is…` 缺了 `incomplete` 一词（`cat -A` 确认，非渲染问题）；`fef7d96` 的同一句是完整的，可作对照。
+
+**为什么没做**：历史已发布，**不重写**。登记只为一件事——后来者读到那句没有主语的话时，知道它是缺字而不是自己没读懂。这一条永远停在这里，不会有人去做它。
 
 ## 明确不做
 
