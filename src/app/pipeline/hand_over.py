@@ -5,6 +5,7 @@ Split out of `app.server.pipeline_app` on 2026-08-22. Both decisions here are do
 `replay_reason` closed over nothing at all, which is the clearest sign it never belonged to a request handler. `hand_back_block` closed over five locals; they are parameters now, which is also what makes it testable without an ASGI request.
 """
 
+from asyncio import CancelledError
 from typing import Any, cast
 from uuid import uuid4
 
@@ -125,6 +126,16 @@ def _link_text(link: BaseException) -> str:
     return _one_line(text)
 
 
+def _asyncio_timeout_plumbing(link: BaseException, named_a_timeout: bool) -> bool:
+    """Whether this silent link is one of the two `asyncio.timeout` raises around a guard that already spoke.
+
+    `asyncio.timeout` ends its scope by cancelling the task and converting that into `TimeoutError`, so a guard built on it arrives as `guard -> TimeoutError() -> CancelledError()` with both inner links empty — measured for `StreamDeadlineError` and `StreamIdleTimeoutError` in `.dev/docs/upstream/retry-and-continuation/reports/260823-handover-error-shapes.md` §2.2(a)/(b).
+
+    Deliberately narrow. It fires only under a link that is itself a `TimeoutError`, which both guards are, so a silent `CancelledError` reached any other way still gets its name — and no other silent type is touched at all.
+    """
+    return named_a_timeout and isinstance(link, TimeoutError | CancelledError)
+
+
 def describe_error(error: BaseException) -> str:
     """One line naming what broke, why, and — for the transport failures this actually sees — what the protocol event meant.
 
@@ -138,7 +149,9 @@ def describe_error(error: BaseException) -> str:
 
     - **Fresh text** → shown with its type. The ordinary case.
     - **Text already shown, by a different class** → the type alone. Otherwise `RuntimeError('permission denied') from PermissionError('permission denied')` comes out as the `RuntimeError` and loses the one word saying what kind of failure it was, which an independent review built as a counterexample. An h2 event mapped through httpcore into httpx repeats its text too, and there the class name repeats with it, so that link is dropped entirely. That is the one repetition measured so far; a torn HTTP/1.1 body repeats h11's text instead, and a real reset repeats nothing because the outer links are empty.
-    - **No text at all** → the type, but only while nothing shown so far has carried any. The two deadline guards are wrapped in `TimeoutError() -> CancelledError()`, which is how `asyncio.timeout` is built rather than anything that happened to the turn; printing it invites reading a timeout that already named itself as a cancellation. Where the outer links are silent — a real connection reset opens with two — the inner types are all there is until the `OSError` at the bottom.
+    - **No text at all** → the type, unless it is part of the wrapper `asyncio.timeout` builds. Both deadline guards arrive as `StreamDeadlineError -> TimeoutError() -> CancelledError()`, and those two inner links are how the guard is implemented rather than anything that happened to the turn; printing them invites reading a timeout that already named itself as a cancellation. Everything else keeps its type, because where the outer links are silent — a real connection reset opens with two — the inner types are all there is until the `OSError` at the bottom.
+
+    That last suppression is deliberately tied to the one mechanism that was measured. An earlier version generalised it to "drop every silent link once anything has spoken", and a review answered with `RuntimeError('wrapper failed') from PermissionError()`, where the inner type is the whole of what the second link had to offer.
 
     Freshness of a class is judged on `__qualname__`, not on the full dotted path: `httpx2.ReadError` wrapping `httpcore2.ReadError` is one failure described twice by two libraries, and that is the case worth collapsing. Two same-named exceptions from genuinely unrelated modules would collapse too. That is deliberate, and it has only ever been produced by construction.
     """
@@ -146,7 +159,7 @@ def describe_error(error: BaseException) -> str:
     rendered: list[str] = []
     seen_text: set[str] = set()
     seen_class: set[str] = set()
-    carried_text = False
+    named_a_timeout = False
     for link in links:
         text = _link_text(link)
         name = f"{type(link).__module__}.{type(link).__qualname__}"
@@ -154,8 +167,8 @@ def describe_error(error: BaseException) -> str:
         fresh_text = bool(text) and text not in seen_text
         if fresh_text:
             rendered.append(f"{name}: {text}")
-            carried_text = True
-        elif fresh_class and (text or not carried_text):
+            named_a_timeout = named_a_timeout or isinstance(link, TimeoutError)
+        elif fresh_class and not (not text and _asyncio_timeout_plumbing(link, named_a_timeout)):
             rendered.append(name)
         else:
             continue

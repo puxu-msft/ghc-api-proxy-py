@@ -213,6 +213,27 @@ def test_a_guard_that_named_itself_does_not_get_recast_as_a_cancellation(
     assert "; caused by" not in text
 
 
+def test_a_silent_cause_keeps_its_name_when_it_is_not_timeout_plumbing() -> None:
+    """The suppression above is tied to one measured mechanism and must not spread.
+
+    An earlier version dropped every silent link once anything had spoken, and a review answered with these two: in both, the inner type is the whole of what that link had. The second is the shape this file elsewhere calls the sharpest defensive case — a wrapper whose own text is a constant — with the one word explaining it underneath.
+    """
+    wrapper = RuntimeError("wrapper failed")
+    wrapper.__cause__ = PermissionError()
+    assert "PermissionError" in message(wrapper)
+
+    fixed_text = APIConnectionError(request=httpx2.Request("POST", "https://upstream.invalid/x"))
+    fixed_text.__cause__ = H2ProtocolError()
+    assert "h2.exceptions.ProtocolError" in message(fixed_text)
+
+
+def test_a_cancellation_that_did_not_come_from_a_timeout_guard_keeps_its_name() -> None:
+    """`CancelledError` is only plumbing under a link that is itself a `TimeoutError`. Reached any other way it is the failure."""
+    wrapper = RuntimeError("something else")
+    wrapper.__cause__ = asyncio.CancelledError()
+    assert "CancelledError" in message(wrapper)
+
+
 def test_a_chain_cut_short_says_it_was_cut() -> None:
     """A chain that ended and a chain that hit the bound read the same otherwise."""
     deepest: BaseException = ConnectionResetError(104, "Connection reset by peer")

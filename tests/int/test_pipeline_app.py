@@ -3207,6 +3207,11 @@ def test_a_turn_that_ran_out_of_room_is_handed_back_the_same_way() -> None:
 
     handed = _handed_back(delivered)
     assert handed["input"]["category"] == "max_tokens"
+    # The other half of the same wiring. `category` already carries the stop reason, so a `message` equal to it — which is what this field used to be — spends a field repeating one. A review cut this branch back to the bare `stop_reason` and every test above stayed green, because none of them looked at it.
+    message = cast(str, handed["input"]["message"])
+    assert message != "max_tokens"
+    assert "stop_reason=max_tokens" in message
+    assert re.search(r"\[request [0-9a-f-]{36}, attempt 1\]", message) is not None
     assert b'"stop_reason":"tool_use"' in delivered
     # The reason upstream gave is not what goes on the wire — the turn now ends in a tool call — but what it produced is still delivered.
     assert b'"text":"first"' in delivered
