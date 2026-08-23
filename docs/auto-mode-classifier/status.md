@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-实现完成，两轮独立评审的全部 blocker 与 major 已处置（C-02 除外，见下）。默认 `false`，即不打开就完全不改变现有行为。
+实现完成，两轮独立评审的全部 blocker 与 major 已处置（C-02 除外，见下）。默认 `passthrough`，即不打开就完全不改变现有行为。
 
 已提交：主仓 `2b28d07`（特性）、`.dev` 仓 `27000a8`（文档），随后一次配置项改名（见「配置项归属」）。**未推送。**
 
@@ -55,7 +55,27 @@
 
 - `ruff check src tests` 全过；`pyright` 在上述五个文件上 0 错误（仓库既有的 `stream_cap.py` 相关错误与本改动无关，未触碰）
 - 全量回归通过，覆盖率 89.56%（门槛 80）
-- **变异验证**：七个不变量逐个回退，对应测试全部变红（4/2/2/2/1/2/2 条），基线字节级还原后仍 42 passed。第六个是配置改为标量后新增的——把 `decision is False` 短路拆掉，两条测试变红，所以「默认关闭」是被守住的而不是碰巧成立的。脚本一次性，未收编
+- **变异验证**：八个不变量逐个回退，对应测试全部变红（4/2/2/2/1/2/1/2 条），基线字节级还原后仍 42 passed。其中一个是把 `decision == "passthrough"` 的短路拆掉，两条测试变红，所以「默认关闭」是被守住的而不是碰巧成立的。脚本一次性，未收编
+
+## 第二轮评审（配置改动，2026-08-23）
+
+三次配置改动（`d6edd1a` 改名+标量化、`2ba08e2` 结构化、`4087a86` M2 降常量）当时**未经评审**，事后补做两轮独立评审：`reports/260823-review-2-claude.md`、`reports/260823-review-2-gpt.md`。
+
+**核心结论：零回归。** 第一轮修好的八个缺陷（severity 双信号判别、severity 分值 >100、`<block>` 大小写过滤、入口格式边界、结构门槛先行、ECMAScript 语义转写、`request.succeeded`、删除被证伪的一般性承诺）在当前 HEAD 上**全部仍修着**，两份报告各自给出行号证据，异源那份还逐条构造输入实跑验证。
+
+异源评审另有一条反向验证值得记：实测 2.1.241 里 block 模式的 `## Output Format` 全文**不含 `<severity>` 标签形态**，所以「system 文本含 `<severity>` 即判 severity 协议」这条修法在两个方向都成立，不会把 block 请求误判成 severity。
+
+| 发现 | 报告编号 | 处置 |
+|---|---|---|
+| 配置里的 `block_reason_str` 到达输出这条**接线无测试保护**（改成硬编码后全绿） | gpt major-2 | **已修**，新增经 `handle()` 的接线测试，并加入常设变异集 |
+| `block_reason_str` 的 schema 默认值与用户权威文件不一致（多一个 `configuration`） | gpt major-1 / claude minor-2 | **已修**，改为逐字一致 |
+| `test_the_transcript_wrapper_is_not_a_setting` 对键名零鉴别力 | 两份独立发现 | **已修**，改为断言 `model_fields` 集合 |
+| `< block >no` 参数用例恒绿 | gpt minor | **已删**，并写明为何它证明不了任何事 |
+| M2 降常量的论证有一条腿不具鉴别力；且丢失了单独关闭能力 | claude minor-3 | **已修措辞**，代价记入 `deferred.md` D6 |
+| `_matches_transcript_wrapper` 死守卫 + 过期 docstring | claude nit-4 | **已修** |
+| `status.md` 标量时代残留 | gpt minor | **已修** |
+
+未采纳的：claude nit-1（`test_either_marker_survives_the_other_being_reworded` 上半重复）保留——它与下半分别覆盖两条标记各自失效的方向，读起来对称，删掉省不了什么。nit-2/nit-3（空行数、单行长度）不改，本项目无此格式约定且已裁决禁用 `ruff format`。
 
 ## 评审处置表
 
