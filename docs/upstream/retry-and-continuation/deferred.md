@@ -116,9 +116,11 @@
 
 **证据等级：够据此写实现范围**（依据是人写文档原文与 `_hand_over`／`_replay_reason` 的现有分支）；**是否现在就接这条兜底，需裁决**。
 
-### 6. 流式与非流式对同一事实给出不同答案
+### 6. ~~流式与非流式对同一事实给出不同答案~~ —— 已闭合，已移出（2026-08-22）
 
-非 `max_output_tokens` 的 `incomplete_details.reason`：流式路径读进局部变量后**不写任何地方**；非流式路径（`translation_driver/responses.py:114-130`）会记进 `conversion.losses` → `handler.py:425-426`。流式那条还违反 `../../anthropic-responses-bridge/spec.md:264-265`。归 C 组。
+**闭合方式与本条原来设想的不同，所以值得写一句**：不是给 `Terminal` 加一个承载 `incomplete_details.reason` 的字段，而是裁决**不加**——`stop_reason` 现在已原样携带该事实（C 组停止了把非 `max_output_tokens` 的 incomplete 改写成 `end_turn`），桥 spec 要的「保留原因事实」由它满足，再加一个无人读取的字段就是孤儿件。
+
+→ 决定与理由在 `status.md` C 组第 3 项；代码里那个刻意的往返写在 `formats/openai_responses.py` 的 `_INCOMPLETE_REASONS` 注释旁。
 
 ### 7. 孤儿件与死配置项的处置
 
