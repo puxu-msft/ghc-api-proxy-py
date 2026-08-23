@@ -339,6 +339,20 @@ if replay is None or reason is None:
 
 **代价值得单独记住，它不是「死代码占地方」**：`transport.py` 是全仓唯一写下「httpcore 只把 try 包在 socket 读上、裸 h2 异常会逃出来」这个依赖缺陷的地方，还在 `except` 子句里点名了 `H2ProtocolError`。**于是这棵树读起来像是已经处理了这一格。** 实际没有——那份守卫在没人调用的链上，而活链路的 body 段直到 2026-08-23 才补上。先做 (a) 再归档的顺序是刻意的：知识先落到活路径上，搬走才不是丢失。
 
+### 22 之五. `copilot.py` 剩下的两个 header wrapper 是 production-zero
+
+归档 `CopilotUpstream` 之后独立评审顺手核了同一文件的其余符号，结果与我归档时写下的不符（我写的是「两个 header builder 由活链路使用」，那是**未观测写成事实**，已更正）：
+
+| 符号 | 实际 |
+|---|---|
+| `GitHubTokenSourceAdapter` | **活的**，`src/app/server/composition.py:57,312-329` 构造它 |
+| `build_copilot_identity_headers` | `src/` 与 `tests/` 里**零调用者** |
+| `build_copilot_headers` | `src/` 里零调用者，唯一调用者是 `tests/unit/upstream/test_upstream_client.py` |
+
+活链路直接调下一层：`client.py` 用 `build_request_headers`，`composition.py` 用 `build_identity_headers`。**有测试在保它，不等于产品在用它**——这正是本项目已经付过一次代价的形状（第 1 条那个 `parse_prompt_limit_error`）。
+
+**未处置，需裁决**：归档／删除，还是写出保留它们的外部契约。本次不擅自动手（`never-delete-implemented-functionality-unsolicited`），也不因为「顺手」就扩大上一次裁决的范围。
+
 ### 22 之四. 一条状态断言在写下时就已经过期
 
 不是待办，是登记形态。`README.md` 那句「`internal` 结构上不可达」的两个前提，第二个在**它被写下的前一晚**就被拆掉了（`78be0d4` 18:57 → `a8862e6` 次日 06:26）。所以这不是常见的「代码改了文档没跟上」——**文档是照着一份自己已经过期的心智模型写的**，而它读起来与一条刚核实过的结论毫无差别。
