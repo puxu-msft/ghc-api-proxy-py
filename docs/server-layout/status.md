@@ -11,7 +11,7 @@
 | 步 | 内容 | 当前 SHA | 备注 |
 |---|---|---|---|
 | 1 | `server/tls.py` → `lifecycle/tls.py` | `928b355` | 重命名相似度 100% |
-| 0 | `Chain` 记录 → `core/chain.py`，建造者留在 `composition` | `c170f0f` | 实测：只需该类型的代码不再拖进 23 个模块，含 `app.server` 本身（106 → 83） |
+| 0 | `Chain` 记录 → `core/chain.py`，建造者留在 `composition` | `c170f0f` | 实测：只需该类型的代码不再拖进 23 个模块，含 `app.server` 本身（106 → 83）。**这组数有两个版本，都是真测量**：搬迁前量得 104 → 81，搬迁后量得 106 → 83，差值恒为 2，因为搬迁后多出 `app.core` 与 `app.core.chain` 两个模块名（已逐项核对）。**能复现的是 83／106**，用 [probes/reach.py](probes/reach.py)；`chain.py` 的 docstring 已改用这一组并注明另一组的来历。**顺带证伪了一条评审意见**：设计评审主张「`Chain` 搬走后会退化成薄记录、任何层 import 都不再拖进一堆 pipeline」——不成立，`Chain` 的字段类型本身就是 pipeline 类型，25 个 `app.pipeline` 模块搬到哪都跟着 |
 | 2 | 可观测性移出 `pipeline_app` → `observability/request_trace.py` | `28c1a7a` | ⚠️ 该提交的信息有 8 处符号名被 shell 反引号吃空，已无法 amend，见下 |
 | 3 | `handler.py` 溶解为四个模块并删除原文件 | `1b34815` | `driver` / `delivery_policy` / `reply` / `server.http_errors`；分层 `routing ← driver ← delivery_policy ← reply`，经查无环 |
 | 4 | 续写决策移出 HTTP 表面 → `pipeline/hand_over.py` | `b973ed0` | 流式分支的 181 行**有意未动**，见「门控」 |
@@ -27,6 +27,10 @@
 
 77 个源文件入 `src/.archived/`、48 个测试入 `tests/.archived/`（移了 49、取回 1，见下）。判据是机械的：从 `app.server.app_factory` 可达且从 `app.cli` 不可达，加上「整个顶层包没有一个模块活链可达」。做过反向自检（无活模块被卷走）与正向自检（剩余 169 个模块逐个 import 成功）。
 
+**测试那一半能整体归档，靠的是一条被修正过的判据**，这一点单独记，因为动作完全取决于它：第一版判据把「活模块」定义成 `app.cli` 可达，**而那里面含 72 个共享模块**，于是任何 import 了 `app.config.schema` 的纯旧链测试都被算成「混装」，数出 50 个。换成有鉴别力的问法——**它有没有 import 新链独占的模块**——结论翻转为「**没有一个测试横跨两条链**」。50 个混装会让整体归档不可行；0 个横跨才是它的授权依据。**AST 没解析错，50 这个数是真的，错的是判据里「活」的定义。**
+
+**这套可达性判据一天之内被四个不同的盲区各击穿一次**（「活」的定义没有鉴别力、差集漏掉第三类「两条链都到不了的」27 个、探针看不见入口自身 `app/__main__.py`、图上没有测试之间相互 import 这类边）。四次都是数字真实、命令 rc=0、结论错。逐条见 [probes/README.md](probes/README.md) 的「这套可达性判据被击穿过四次」一节——**按 import 图分割一棵树的人应该先读那一节，而不是先读这里的结论。**
+
 **空目录一并删除**，因为一个只剩 `__pycache__` 的包目录仍是 PEP 420 命名空间包，`import app.routes` 照样成功并返回空模块——实测确认。`tests/unit/test_module_boundaries.py` 已改为断言归档名**不可解析**，比原先「新链没 import 旧链」更强，且不因有人复制回来而失效。
 
 工具链：pytest 不递归点目录、pyright 默认排除 `**/.*`、**ruff 不排除**（已在 `pyproject.toml` 显式写明）。构建实测 wheel 174 个条目、不含 archived，正样本对照确认 `app/cli.py` 在内。
@@ -40,7 +44,13 @@
 ## 已知的债与遗留
 
 - **`28c1a7a` 的提交信息残缺**：8 处反引号包裹的符号名被 shell 当命令替换吃空。发现时同伴已在其上提交，无法 amend；为一条信息改写同伴正在推进的分支不成比例。内容与验证无误。教训已入项目记忆。
-- **历史里有两个同名的归档提交，其中一个是空的**：`git log --oneline | rg 'move the chain no entry point reaches'` 返回 **`2248a69`** 与 **`f7121ca`** 两条。带内容的是 `2248a69`（130 个文件），`f7121ca` 相对其父 `123f03d` **变更文件数为 0**——是同伴 rebase 时留下的空提交。**按信息文本找这次归档会命中两个，且先到的那个（`f7121ca`，19:16）是错的那个。** 认准 `2248a69`；用 `git show --stat` 一眼可分（空的那个 stat 为空）。
+- **历史里有两个同名的归档提交，其中一个是空的，而它是一次改写事故的痕迹**：`git log --oneline | rg 'move the chain no entry point reaches'` 返回 **`2248a69`** 与 **`f7121ca`** 两条。带内容的是 `2248a69`（130 个文件）；`f7121ca` 的 tree 与其父 `123f03d` **逐字相同**，是个空提交。
+
+  **成因不是 rebase**（本文档一度这样写，是错的）。真相：另一个会话要剔除自己提交 `123f03d` 里误带的一处改动，脚本用 `git rev-parse HEAD` 指认「我刚才那个提交」，而在它的两条命令之间，本主题的归档提交 `56da22a` 落了地。于是它改写的是**别人的提交**——CAS `update-ref` 顺利通过，因为传进去的 `<old>` 正是那个刚落地的提交，**CAS 保护的是「尖端有没有动」，不是「你在改写谁」**。替换后的树等于父的树，所以留下一个套着本主题标题的空壳。
+
+  **归档内容没有丢**：原提交对象 `56da22a` 仍在（无 ref 指向），`git diff 56da22a 2248a69 -- src/.archived tests/.archived` **为空**，恢复是干净的。早期文档里引用 `56da22a` 的地方，指的就是现在的 `2248a69`。
+
+  **认准 `2248a69`**；用 `git show --stat` 一眼可分（空的那个 stat 为空）。完整教训在项目记忆 `pin-the-commit-you-rewrite-not-head`。
 - **一个测试丢了一半**：`tests/systemd/test_systemd_units.py::test_service_permissions_restrict_real_state_writers` 原本同时断言 `history.db` 与 `tokenization.json` 的权限位；history writer 随链归档，保留了 tokenization 那一半，docstring 写明去向。该文件整体**未**归档——它是 systemd 部署路径的测试，且 `test_systemd_pipeline_unit.py` 从它取共享夹具。
 - **`api.md` 追认但无人服务的端点**：~~Azure、Gemini、`/history/api/*`、`/history/ws`、`/api/status`、`/api/config`~~ → **2026-08-23 收窄为四个：Azure、Gemini、`/history/api/*`、`/history/ws`**。同伴的 `7525f76`（`feat: answer the ratified status and config endpoints on the new chain`）已把 `/api/status` 与 `/api/config` 接到新链，现在活在 `src/app/server/routes/ops.py:30` 与 `:88`。剩下四个的唯一实现仍在 `src/.archived/`。这在归档之前就已成立（那条链本就不可达），归档只是让它从潜伏变为可读。`src/.archived/README.md` 记录了这一点，以及 `management.py` 混装已追认与已裁决暂不支持端点、不能整体搬也不能整体删的障碍。
 
@@ -65,5 +75,5 @@
 ## 未采纳的方案（记录理由）
 
 - **`pipeline/delivery/selection.py`** 作为选帧／选装配器的家：**否决**。`src/app/pipeline/request.py:17` 就 import `delivery.assembling`，delivery 在图上位于 `RequestContext` 之下，放进去就是把分层倒过来。落点改为与 `routing.py` 平级的 `delivery_policy.py`。
-- **新增顶层 `app/chain.py` + `app/composition/`**：**否决**，因为它自身就是本文档第 3.4 节当作缺陷来数的那种「顶层包不在追认清单里」。改用追认过的 `core`（其 `__init__.py` 自述正是这条论证）。
+- **新增顶层 `app/chain.py` + `app/composition/`**：**否决**，因为它自身就是 [README.md](README.md) 第 3.4 节当作缺陷来数的那种「顶层包不在追认清单里」。改用追认过的 `core`（其 `__init__.py` 自述正是这条论证）。**注意这句话的出处**：它原本写在一份以 README 为「本文档」的清单里，搬到这里时「本文档」的指代跟着变了却没改——本文档没有 3.4 节。
 - **方案 3「只改文档与命名」**：未采纳，但对它的反对理由被修正过一次——原理由「记录下来的现状没人回头看」被本主题自己的触发来源证伪（正是读 `server/__init__.py` 的 docstring 才发现整件事）。
