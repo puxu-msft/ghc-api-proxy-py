@@ -310,58 +310,40 @@ if replay is None or reason is None:
 
 **不在本次范围，登记而非动手**，理由与第 4 条同源：S7 那一格（任意未识别事件）要不吵就得有一份「明知故忽略」的词表，而本项目规矩是上游行为靠录制不靠想象；其余各格的日志级别与措辞该一并定，而不是各修各的。**证据等级：位置与「零痕迹」均为一手实测（21 组反例 + 正样本对照），确凿；排期与级别需裁决。**
 
-### 22. `internal` 同时盖着「上游协议故障」与「本仓 bug」两件相反的事 —— 待裁决要不要修
+### 22. ~~`internal` 同时盖着「上游协议故障」与「本仓 bug」两件相反的事~~ —— 已裁决并落地（2026-08-23，主仓 `0ca87b9`）
 
-**「可不可达」这一半已经查实，不再是开放项。** 2026-08-23 端到端实测（`reports/260823-h2-protocolerror-category.md`，探针接生产的 `replay_reason` 与 `hand_back_block`，附 `httpx2.RemoteProtocolError → network` 的阴性对照）：
+**用户裁决：采用方案 (a)**，把 `h2.exceptions.H2Error` 加进 `errors.py` 的 `_CONNECTION_ERRORS`。理由是这不是新立规矩，而是把代码拉回用户亲笔 `docs/.human-controlled/upstream-retry-and-continuation.md` 已有的「网络中断一般可以继续」。
 
-```
-h2.exceptions.ProtocolError   -> {'category': 'internal', ...}
-httpx2.DecodingError          -> {'category': 'internal', ...}
-framing-bug TypeError         -> {'category': 'internal', ...}
-httpx2.RemoteProtocolError    -> {'category': 'network',  ...}   ← 阴性对照
-```
+调查与影响面全文在 [`reports/260823-h2-protocolerror-category.md`](reports/260823-h2-protocolerror-category.md)。留下三条值得记的：
 
-`README.md` 那句「结构上不可达」**是错的，且写下时就已经错了**：它的前提「带 error 走到合成前 `reason` 必非 `None`」被 `78be0d4`（2026-08-22 18:57）解耦掉，而那句话是次日 `a8862e6`（06:26）才写的。README 已更正。
+1. **决定命运的是内核那一次 `read()` 的分包。** GOAWAY 与其后的帧分开到达 → `httpx2.RemoteProtocolError` → `network` 且可重放；落进同一次 `read()` → 裸 `h2.ProtocolError` → 当时是 `internal` 且不可重放。同一个上游事件，两种结局，而分岔点在操作系统。这是本条从「标签不好看」升格为缺陷的原因。
+2. **`internal` 的「结构上不可达」是错的，而且写下时就错了。** 前提被 `78be0d4`（2026-08-22 18:57）解耦，那句话是次日 `a8862e6`（06:26）写的。形态记在 [`22 之四`](#22-之四-一条状态断言在写下时就已经过期) 。
+3. **(b)「只在 `replay_reason` 里特判」的「影响面更小」是错觉**，已记进报告 §4.2：它改的行为与 (a) 一样多，只是当时的测试打不到——因为那条测试用的是自建的 stand-in `eligible`，不是生产接线 `replay_reason`。
 
-### 仍待裁决的是：要不要修，以及怎么修
+**未随本条解决的**：`httpx2.DecodingError`（上游把 body 压坏）现在归因正确（`upstream`）但**仍不可重放**，因为 `normalize_upstream_error` 仍叫不出它的名字。「叫不出名字的失败该不该可重试」是第 20 条的产品问题，本次没有替它作答。它同时是 `test_a_finished_turn_survives_a_failure_nothing_recognises` 的载具——那条测试的前提断言会在它哪天被命名时出声。
 
-`internal` 今天盖着方向相反的两件事：
+### 22 之二. ~~同一个失败，两条出口给两个相反的答案~~ —— 已修（2026-08-23，主仓 `0ca87b9`）
 
-| 来源 | 是什么 | 报 `internal` 对不对 |
-|---|---|---|
-| 裸 `h2.exceptions.H2Error` 全族、`httpx2.DecodingError` | 上游/传输的真实故障 | **错** |
-| framing 层 bug（`framer.block()` 抛的异常） | 本仓自己的 bug | 对 |
+两处一起改，缺一处都会把不一致换个方向而不是消掉：
 
-**错报那一半的代价不止是个标签。** 同一个缺口让它在 body 阶段**既不可重放、也被归错类**；而**同一个 GOAWAY 事件**若 httpcore 恰好包住了它（GOAWAY 与后续帧分开到达），就是 `network` 且可重放。决定命运的是操作系统那一次 `read()` 的分包——见 `../h2-goaway/archive-260820/260820-h2-goaway-poc.md` 第 34 条（源码确定 + 4/4 实测）。
+- **标记区从「只覆盖 `assembler.push`」扩到「本侧在循环里跑的每一处代码」**（装配、提交、保活）。原先的限制理由是「扩大标记区要把 `yield` 包进 try」，**那对当前代码不成立**：`_commit` 返回的是 `list`，里面每一次 framer 调用在第一个 chunk 被 yield 之前就已经跑完；保活那一处则只需先给 chunk 命名再 yield。于是 framer 的 bug 不再被甩给上游，也不再被交接（另开一次尝试会撞同一个 bug）。
+- **交接分类的兜底从 `INTERNAL` 改成 `UPSTREAM`。** 判据不是又加一张表，而是**调用方的门**：`stream.py` 只在 `not ours` 时走交接，所以能带着 error 走到 `hand_back_block` 的失败，按构造就不是本侧造成的。
 
-**候选修法（报告 §4 有完整影响面）**：
+两条各有变异验证：把标记区改窄，新测试在 `'"code":"proxy_delivery_failed"' in body` 变红并印出旧的 `"type":"upstream_error"`；把兜底改回 `INTERNAL`，集成测试在 `assert 'internal' == 'upstream'` 变红。
 
-- **(a) 把 `h2.exceptions.H2Error` 加进 `errors.py` 的 `_CONNECTION_ERRORS`。** 一行。body 阶段的 h2 与 headers 阶段的 h2 拉齐（headers 阶段今天由 openai SDK 的 `except Exception → APIConnectionError` 兜住，早就是 `network`）。**唯一不新增分类表的改法。** 实测只红 2 个测试点，且红的是 `test_a_finished_turn_survives_a_failure_nothing_recognises` 的**前提断言**——那条测试的 docstring 自己写明了「若 `normalize_upstream_error` 学会命名这一个，本用例守的洞就不存在了」。所以要连带给它换一个「生产叫不出名字」的载具，或把断言反过来写。**报告推荐这一条，本会话同意。**
-- **(b) 只在 `replay_reason` 里特判。** 「影响面更小」是**错觉**：因为 `replay_reason` 同时喂着 `ReplaySupport.eligible` 与交接分类，它改的行为与 (a) 一样多，只是测试打不到（那条测试用的是自建的 stand-in `eligible`，不是生产接线）。而且会让 `replay_reason` 的文档串「`normalize_upstream_error` is the same mapping the driver's own retries are decided by」变成假话。**不推荐。**
-- **(c) 只改 `hand_back_block` 的分类，不动可重放性。** 等于把分裂搬进同一个函数——那里第 250 行的注释正是在说「所以它读的是同一张表」。**不推荐。**
+### 22 之三. ~~`transport.py` 的 h2 识别挂在没有活调用者的链上~~ —— 已归档（2026-08-23）
 
-**为什么要用户裁决**：(a) 会让上游协议层故障开始花网络重试预算。本会话判断这**符合**用户亲笔的 `docs/.human-controlled/upstream-retry-and-continuation.md`（「这些情况下一般可以继续：网络中断」），是把代码拉回既有裁决而非新立规矩；但它确实改动重试行为，且要改写别人的一条回归守卫，所以不擅自动手。
+三件东西按「各自是下一件的唯一调用者」一起移进 `src/.archived/`：`CopilotUpstream`（切出 `app/upstream/copilot.py`，落成 `copilot_upstream.py`）、`GhcApiClient.send_responses_headers`（直接删除，归档树的 `app/upstream/generic.py` 已有孪生）、`app/model_provider/ghc_client/transport.py`（整文件）。名字已加进 `tests/unit/test_module_boundaries.py` 的 `_ARCHIVED`，理由与经过写进 `src/.archived/README.md`。
 
-**连带**：修法一旦定下，`README.md` 那一格与「给接收端的四点」要跟着改口径——若采纳 (a)，`internal` 就只剩本仓 bug 一种来源，接收端的含义随之收紧。
+**它为什么被 2026-08-22 那次清理漏掉**：那次的判据是「能从 `app.server.app_factory` 到达、不能从 `app.cli` 到达」。`CopilotUpstream` 两边都到达不了——它适配的 `UpstreamTarget` 协议**在那次就已经被归档了**，于是它成了一个目标接口已经消失的适配器。**「两条链都到不了」这个格子，那次的判据没有问题去问它。**
 
-### 22 之二. 同一个失败，两条出口给两个相反的答案
+**代价值得单独记住，它不是「死代码占地方」**：`transport.py` 是全仓唯一写下「httpcore 只把 try 包在 socket 读上、裸 h2 异常会逃出来」这个依赖缺陷的地方，还在 `except` 子句里点名了 `H2ProtocolError`。**于是这棵树读起来像是已经处理了这一格。** 实际没有——那份守卫在没人调用的链上，而活链路的 body 段直到 2026-08-23 才补上。先做 (a) 再归档的顺序是刻意的：知识先落到活路径上，搬走才不是丢失。
 
-同一个裸 h2 异常：
+### 22 之四. 一条状态断言在写下时就已经过期
 
-- `committed_count >= 1` → 走交接块 → `category: "internal"`（甩锅自己）
-- `committed_count == 0` → 走 SSE 错误帧（`stream.py:385`，`ours=False` 那一侧）→ `type: "upstream_error"`（甩锅上游）
+不是待办，是登记形态。`README.md` 那句「`internal` 结构上不可达」的两个前提，第二个在**它被写下的前一晚**就被拆掉了（`78be0d4` 18:57 → `a8862e6` 次日 06:26）。所以这不是常见的「代码改了文档没跟上」——**文档是照着一份自己已经过期的心智模型写的**，而它读起来与一条刚核实过的结论毫无差别。
 
-**方向正好相反，而分岔点只是缓冲策略放行了几个块。** framing bug 上同样成立且同样错：错误帧会把本仓的 bug 标成 `upstream_error`。
-
-这正是 `hand_over.py` 开头那条注释想消灭的东西（「Two taxonomies for one failure is two answers」），只是它当时消灭的是「`classify_error` vs 重试路径」那一对，没看见这一对。证据等级：本次实测（两个变体各跑一次）。**与第 22 条一起裁决为宜**——单修一边只会把不一致换个方向。
-
-### 22 之三. `transport.py` 的 h2 识别挂在没有活调用者的链上
-
-`is_responses_headers_pending_transport_error`（`transport.py:32`，专门点名 `H2ProtocolError` 并附了机理注释）唯一被 `client.py:192` 调用；`client.py:177` 的 `send_responses_headers` 唯一被 `src/app/upstream/copilot.py:131` 调用；而 **`CopilotUpstream` 在 `src/` 与 `tests/` 里没有任何实例化点**。现役 provider 走的是 `github_copilot.py:167-172` 的 `send_responses`。
-
-**没有造成行为缺口**——headers 阶段由 openai SDK 兜住了。但它是一份**读起来像在保护现役路径、实际不在现役路径上**的守卫，而且它是全仓唯一一处写着「h2 异常不被包装」这个知识的地方。第 22 条那个缺口能存在这么久，一部分原因就是这份守卫让知识看起来已经在场。
-
-处置需裁决：随 legacy 链一起移进 `src/.archived/`，还是在现役链上重新接线。**不建议顺手删**——按 `never-delete-implemented-functionality-unsolicited`，孤儿模块可以留着。证据等级：代码直读。
+同一族的两条已经付过代价：本主题 `README.md` 的同步锚点两次在下一个提交就失效（`260823-review-handover-message-final.md` M3），以及处置文档里那句「三处已同步」反而掩盖了后续漂移（同报告 M2）。**共同点是：写下的那一刻为真，而读者没有任何线索知道它有保质期。** 现行对策是给这类断言配一个提交锚点，并把违反记录留在锚点旁边。
 
 ### 23. ~~代理发 `max_tokens`，插件按 `truncated` 配回复~~ —— 已修复（2026-08-23）
 
