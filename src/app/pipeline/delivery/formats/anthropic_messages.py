@@ -13,10 +13,11 @@ from typing import Any, cast
 import orjson
 
 from app.config.schema import ContentBlockStartCompat
-from app.errors import ErrorInfo
+from app.errors import STATUS_FOR_CATEGORY, ErrorCategory, ErrorInfo
 from app.pipeline.delivery.assembling import (
     Draft,
     ReplyDialect,
+    StreamFailure,
     Terminal,
     decode_json,
 )
@@ -138,6 +139,25 @@ def block_frames(
         SseFrame("content_block_stop", {"type": "content_block_stop", "index": block.index})
     )
     return tuple(frames)
+
+
+# Anthropic's vocabulary read back into ours. **Not the inverse of `ANTHROPIC_ERROR_TYPES`** — that map is not injective, four categories share `api_error` — so this names one canonical answer per word and says which.
+# Anything unlisted is `UPSTREAM`: upstream reported a failure and this side has no finer reading of it, which is exactly what that category means.
+_CATEGORY_OF_TYPE: dict[str, ErrorCategory] = {
+    "invalid_request_error": ErrorCategory.CLIENT,
+    "authentication_error": ErrorCategory.AUTH,
+    "permission_error": ErrorCategory.PERMISSION,
+    "billing_error": ErrorCategory.BILLING,
+    "not_found_error": ErrorCategory.NOT_FOUND,
+    "rate_limit_error": ErrorCategory.RATE_LIMIT,
+    "overloaded_error": ErrorCategory.OVERLOADED,
+    "timeout_error": ErrorCategory.TIMEOUT,
+    "api_error": ErrorCategory.UPSTREAM,
+}
+
+
+def _category_of(spelled: str) -> ErrorCategory:
+    return _CATEGORY_OF_TYPE.get(spelled, ErrorCategory.UPSTREAM)
 
 
 def error_frame(info: ErrorInfo) -> SseFrame:
@@ -262,10 +282,15 @@ class AnthropicAssembler:
     def __init__(self) -> None:
         self._drafts: dict[int, Draft] = {}
         self._terminal = Terminal()
+        self._failure: StreamFailure | None = None
 
     @property
     def terminal(self) -> Terminal:
         return self._terminal
+
+    @property
+    def failure(self) -> StreamFailure | None:
+        return self._failure
 
     @property
     def cut_mid_block(self) -> bool:
@@ -291,16 +316,32 @@ class AnthropicAssembler:
             self._terminal.seen = True
             return ()
         if kind == "error":
-            # Upstream said this turn failed. **Nothing here acts on it yet** — `seen` stays false, so the client receives the same `incomplete_responses_stream` frame a torn connection produces, and the two remain indistinguishable on the wire. Acting on that is `.dev/docs/upstream/retry-and-continuation/deferred.md` 第 4 条, and it is not this line's job.
+            # Upstream said this turn failed, and since 2026-08-24 that is carried rather than logged and dropped.
             #
-            # What this line does is refuse to let the event pass unseen. Ruled 2026-08-22: a path we knowingly do not handle must still be logged, because silence makes "this never happens" and "it happens and we cannot tell" the same observation — and that is exactly the state the frequency question in `.dev/docs/upstream/h2-goaway/findings.md` is stuck in. Upstream's own words go in the line, since they are the only account of what it thought went wrong and nothing downstream will carry them.
+            # **The comment this replaces was already wrong when it was written, and wrong in the direction that mattered.** It said the client received the same `incomplete_responses_stream` frame a torn connection produces, "and the two remain indistinguishable on the wire". After the clean-EOF change of 2026-08-22 the terminal-less path stopped producing that frame: a stream that stopped at a block boundary got `message_delta` with a stop reason and then `message_stop`. So an upstream failure was not indistinguishable from a tear — it was indistinguishable from a **completed turn**. Measured across both legs; `.dev/docs/error-envelope/spec.md` §3.5.
+            #
+            # The log line stays. Ruled 2026-08-22: a path we knowingly do not handle must still be logged, because silence makes "this never happens" and "it happens and we cannot tell" the same observation. It is no longer the only record — the client gets one now too — but it is still the only one an operator reads.
             #
             # The shape is `{"type": "error", "error": {"type", "message"}}`, from the reference implementation's own declaration; `kind` is read from the event line first, which is what keeps this reachable when upstream sends `event: error` with no `type` in the payload.
             raw = data.get("error")
             detail = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+            spelled = str(detail.get("type", ""))
+            self._failure = StreamFailure(
+                event="error",
+                # Upstream's payload as it arrived. A direct leg replays exactly this.
+                raw_data=event.data,
+                info=ErrorInfo(
+                    category=_category_of(spelled),
+                    message=str(detail.get("message", "")) or "upstream reported a failure",
+                    status_code=STATUS_FOR_CATEGORY[_category_of(spelled)],
+                    code=spelled or "upstream_error_event",
+                    source_format=ANTHROPIC_MESSAGES,
+                    source_bytes=event.data.encode(),
+                ),
+            )
             logger.warning(
-                "upstream sent an error event mid-stream; it is not acted on yet: type=%r message=%r",
-                detail.get("type", ""),
+                "upstream sent an error event mid-stream: type=%r message=%r",
+                spelled,
                 detail.get("message", ""),
             )
             return ()

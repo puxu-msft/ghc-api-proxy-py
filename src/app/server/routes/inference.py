@@ -507,6 +507,8 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
                     replay=replay,
                     continuation=continuation,
                     on_tear_after_terminal=accounting.note_tear_after_terminal,
+                    # The client and upstream speak the same dialect exactly when nothing had to be translated. Delivery cannot work this out for itself: one assembler serves both a Responses client directly and a Responses upstream on its way to Anthropic, and the framer is the client's either way.
+                    passthrough=not context.translation_required,
                 ),
                 accounting,
             ),

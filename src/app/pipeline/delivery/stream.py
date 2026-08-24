@@ -16,7 +16,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from app.errors import STATUS_FOR_CATEGORY, ErrorCategory, ErrorInfo
-from app.pipeline.delivery.assembling import BlockAssembler
+from app.pipeline.delivery.assembling import BlockAssembler, StreamFailure
 from app.pipeline.delivery.blocks import (
     TOOL_USE,
     BlockBuffer,
@@ -279,6 +279,20 @@ def _stream_error(category: ErrorCategory, message: str, *, code: str) -> ErrorI
     )
 
 
+def _report_failure(
+    failure: StreamFailure, *, framer: OutboundFramer, passthrough: bool
+) -> bytes:
+    """Upstream's own failure, in whichever terms this client can read.
+
+    On a direct leg the client speaks upstream's dialect, so upstream's event name and payload go back out **as they arrived** — including the fields nothing here recognises, which is the whole of "even if we do not know it, it can still be passed on". Only the SSE wrapper is rebuilt, because frame boundaries are this side's to draw. `raw_data` rather than a re-serialised dict for the same reason: a round trip through a JSON encoder keeps the fields and not the bytes.
+
+    On a translated leg it cannot: the client does not speak that dialect. The failure crosses the same record everything else does and the client's framer spells it.
+    """
+    if passthrough:
+        return f"event: {failure.event}\ndata: {failure.raw_data}\n\n".encode()
+    return framer.error(failure.info)
+
+
 async def stream_delivery(
     chunks: AsyncIterator[bytes],
     assembler: BlockAssembler,
@@ -290,8 +304,11 @@ async def stream_delivery(
     replay: ReplaySupport | None = None,
     continuation: ContinuationSupport | None = None,
     on_tear_after_terminal: Callable[[Exception], None] | None = None,
+    passthrough: bool = False,
 ) -> AsyncGenerator[bytes]:
     """Turn an upstream byte stream into the client's SSE, one complete block at a time.
+
+    `passthrough` says the client and upstream speak the same dialect, which is the caller's fact to supply: this loop cannot derive it. The same `ResponsesAssembler` serves a Responses client directly and a Responses upstream being translated to Anthropic, and the framer is the *client's* either way, so neither object knows. It changes exactly one thing — what happens when upstream reports a failure mid-stream, `.dev/docs/error-envelope/spec.md` §3.4.
 
     `framer` decides which protocol that is, and it is required. It briefly defaulted to Anthropic, built here from a `message_id`, a `model` and a setting — which meant this supposedly format-agnostic loop named one of the two formats and every caller that forgot got it. A caller has to say which client leg it is answering; `framer_for` is what answers that, selecting on the *inbound* format rather than on which upstream replied.
 
@@ -316,6 +333,7 @@ async def stream_delivery(
             replay=replay,
             continuation=continuation,
             on_tear_after_terminal=on_tear_after_terminal,
+            passthrough=passthrough,
         )
     ) as inner:
         async for chunk in inner:
@@ -335,6 +353,7 @@ async def _deliver(
     replay: ReplaySupport | None = None,
     continuation: ContinuationSupport | None = None,
     on_tear_after_terminal: Callable[[Exception], None] | None = None,
+    passthrough: bool = False,
 ) -> AsyncGenerator[bytes]:
     """Assemble and frame the response. Wrapped by `stream_delivery`, which stamps the clock."""
     session = DeliverySession(buffer=buffer)
@@ -370,6 +389,14 @@ async def _deliver(
                                 client_has_bytes.set()
                                 wrote = True
                                 yield chunk
+                        failure = assembler.failure
+                        if failure is not None:
+                            # Upstream said this turn failed. Until 2026-08-24 both assemblers logged it and returned nothing, so the loop ran on to a terminal-less ending — which, since the clean-EOF change of 2026-08-22, *looks like success*: a `message_delta` carrying a stop reason and then `message_stop`. Upstream said it failed and the client could not tell.
+                            #
+                            # Blocks completed by this same event go out first, above: they arrived, and dropping them would make what a client received depend on when the failure landed.
+                            yield _report_failure(failure, framer=framer, passthrough=passthrough)
+                            # No terminal, and that is the point rather than an omission. `.dev/docs/error-envelope/spec.md` §3.5: a turn upstream reported as failed must not end with an event that reads as a completed one.
+                            return
                     # Asked here, and only here, because this is the first moment both answers exist: whether assembling wrote anything, and what the clock reads now that it has. Real bytes discharge the same obligation a cue would have answered, so `wrote` short-circuits and the schedule is left alone.
                     if wrote or not pull.claim():
                         continue

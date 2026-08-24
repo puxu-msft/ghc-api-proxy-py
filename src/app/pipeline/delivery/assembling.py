@@ -11,6 +11,7 @@ from typing import Any, Protocol
 
 import orjson
 
+from app.errors import ErrorInfo
 from app.pipeline.delivery.blocks import THINKING, TOOL_USE, CompletedBlock
 from app.pipeline.delivery.sse_source import SseEvent
 
@@ -59,6 +60,22 @@ class Terminal:
             self.thinking.append("txt" if block.payload.get(THINKING) else "enc")
 
 
+@dataclass(frozen=True, slots=True)
+class StreamFailure:
+    """Upstream said, mid-stream, that this turn failed.
+
+    Carried rather than returned from `push`, for the same reason `terminal` is: it is a fact about the stream so far, not a block that just completed, and threading it through the return type would make every caller destructure a tuple to ask a question most of them do not have.
+
+    Both halves travel because the two legs need different ones. A direct leg replays `event` and `raw_data` as they arrived — upstream's own event name, upstream's own payload, including the fields nothing here recognises — and only the SSE wrapper is rebuilt. A translated leg cannot: the client does not speak that dialect, so it gets `info` spelled in its own.
+
+    `raw_data` is the undecoded payload text, not a re-serialised dict. Round-tripping through `orjson` preserves the fields and not the bytes, and "even if we do not know it, it can still be passed on" is about the bytes.
+    """
+
+    event: str
+    raw_data: str
+    info: ErrorInfo
+
+
 class BlockAssembler(Protocol):
     def push(self, event: SseEvent) -> tuple[CompletedBlock, ...]:
         """Take one event; return blocks that just became complete."""
@@ -66,6 +83,16 @@ class BlockAssembler(Protocol):
 
     @property
     def terminal(self) -> Terminal: ...
+
+    @property
+    def failure(self) -> StreamFailure | None:
+        """Upstream's own report that the turn failed, when one arrived.
+
+        `None` on every stream that did not carry one, which includes a stream that simply stopped — that is a different ending and `cut_mid_block` is what tells those apart. This one is upstream saying so.
+
+        Until 2026-08-24 both assemblers logged such an event and returned nothing, so `terminal.seen` stayed false and the client received whatever the terminal-less path produces. Since the clean-EOF change of 2026-08-22 that path is a *successful-looking* ending, which made an upstream failure indistinguishable from a completed turn.
+        """
+        ...
 
     @property
     def cut_mid_block(self) -> bool:

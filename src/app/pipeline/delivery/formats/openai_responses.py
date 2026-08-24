@@ -19,8 +19,14 @@ from typing import Any, cast
 
 import orjson
 
-from app.errors import OPENAI_ERROR_TYPES, ErrorInfo
-from app.pipeline.delivery.assembling import Draft, ReplyDialect, Terminal, decode_json
+from app.errors import OPENAI_ERROR_TYPES, STATUS_FOR_CATEGORY, ErrorCategory, ErrorInfo
+from app.pipeline.delivery.assembling import (
+    Draft,
+    ReplyDialect,
+    StreamFailure,
+    Terminal,
+    decode_json,
+)
 from app.pipeline.delivery.blocks import TEXT, THINKING, TOOL_USE, CompletedBlock
 from app.pipeline.delivery.sse_frame import SseFrame
 from app.pipeline.delivery.sse_source import SseEvent
@@ -39,6 +45,9 @@ logger = logging.getLogger(__name__)
 # The three ways this upstream says a stream failed, and the two places it puts the words.
 # The vocabulary is the official client's own table (`chatWebSocketManager.ts`), minus its two successful terminals. `response.failed` and `response.cancelled` carry a whole response object with the words nested under `response.error`; `error` is the one that differs by upstream, and both spellings are read — see `_failure_words`.
 # **Not from a recording**: all five cassettes in this repository contain zero of these events, so the shapes are second-hand and the extraction is written to survive being wrong about them (missing keys read as empty, never raise). `response.cancelled` in particular is recorded in `.dev/docs/upstream/retry-and-continuation/deferred.md` 第 4 条 and `reports/260821-upstream-termination-reasons.md`.
+# This leg's own name, as `WireFormat` spells it.
+OPENAI_RESPONSES = "openai-responses"
+
 _FAILURE_EVENTS = frozenset({"error", "response.failed", "response.cancelled"})
 
 
@@ -394,6 +403,11 @@ class ResponsesAssembler:
         self._order = 0
         self._terminal = Terminal(dialect=ReplyDialect.RESPONSES)
         self._saw_tool_call = False
+        self._failure: StreamFailure | None = None
+
+    @property
+    def failure(self) -> StreamFailure | None:
+        return self._failure
 
     @property
     def terminal(self) -> Terminal:
@@ -433,14 +447,29 @@ class ResponsesAssembler:
                 return (held,)
             return ()
         if kind in _FAILURE_EVENTS:
-            # Upstream said this turn failed. **Nothing here acts on it yet** — `seen` stays false, so the client receives the same `incomplete_responses_stream` frame a torn connection produces, and the two remain indistinguishable on the wire. Acting on that is `.dev/docs/upstream/retry-and-continuation/deferred.md` 第 4 条, and it is not this line's job.
+            # Upstream said this turn failed, and since 2026-08-24 that is carried rather than logged and dropped.
             #
-            # What this line does is refuse to let the event pass unseen. Ruled 2026-08-22: a path we knowingly do not handle must still be logged, because silence makes "this never happens" and "it happens and we cannot tell" the same observation.
+            # **The comment this replaces was already wrong.** It said the client received the same `incomplete_responses_stream` frame a tear produces, "and the two remain indistinguishable on the wire". After the clean-EOF change of 2026-08-22 that path stopped producing an error frame at all: the client got `response.incomplete` with `error: null` — a terminal event that reads as an orderly ending. An upstream failure was indistinguishable from success, not from a tear. `.dev/docs/error-envelope/spec.md` §3.5.
+            #
+            # The log line stays, for the reason ruled 2026-08-22: a path we knowingly do not handle must still be logged. It is no longer the only record, but it is still the only one an operator reads.
             #
             # `warning` rather than something quieter, because the zero in 第 4 条 is a **discriminating** zero: the same sweep over the same 134336 operations counted 64351 `response.completed`, so the measurement could see this class of event and did not find one. A frame that arrives despite that is worth an operator's attention, not a debug line. (The one way it could become routine is an upstream that ends cancelled turns this way; no path on this SSE leg does, and that is the condition to re-check if these ever start appearing in numbers.)
             code, message = _failure_words(kind, data)
+            self._failure = StreamFailure(
+                # Upstream's own event name, kept rather than normalised to `error`. `response.failed` and `response.cancelled` are different things to a client of that API, and a direct leg replays whichever arrived.
+                event=kind,
+                raw_data=event.data,
+                info=ErrorInfo(
+                    category=ErrorCategory.UPSTREAM,
+                    message=message or f"upstream sent {kind}",
+                    status_code=STATUS_FOR_CATEGORY[ErrorCategory.UPSTREAM],
+                    code=code or kind,
+                    source_format=OPENAI_RESPONSES,
+                    source_bytes=event.data.encode(),
+                ),
+            )
             logger.warning(
-                "upstream sent %r mid-stream; it is not acted on yet: code=%r message=%r",
+                "upstream sent %r mid-stream: code=%r message=%r",
                 kind,
                 code,
                 message,

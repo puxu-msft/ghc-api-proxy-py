@@ -403,3 +403,123 @@ def test_a_buffer_cap_this_side_blew_is_named_as_this_sides() -> None:
     payload = frames[-1]
     assert payload["error"]["type"] == "api_error"
     assert payload["error"]["code"] == "proxy_delivery_aborted"
+
+
+# ---------------------------------------------------------------------------
+# Upstream saying, mid-stream, that the turn failed.
+#
+# Until 2026-08-24 both assemblers logged such an event and returned nothing, so the loop
+# ran on to a terminal-less ending — which, since the clean-EOF change of 2026-08-22, looks
+# like success. Upstream said it failed and the client could not tell it from a completed turn.
+# ---------------------------------------------------------------------------
+
+
+def _upstream_that_reports_failure(event: str, payload: str) -> Any:
+    """One whole block, then upstream's own failure event, then EOF."""
+    whole = sse_upstream("first")
+    prefix = whole.split(b"event: message_delta", 1)[0]
+    body = prefix + f"event: {event}\ndata: {payload}\n\n".encode()
+
+    def handler(_: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+    return handler
+
+
+def _events(delivered: bytes) -> list[str]:
+    return [
+        chunk.split(b"event: ", 1)[1].split(b"\n", 1)[0].decode()
+        for chunk in delivered.split(b"\n\n")
+        if chunk.startswith(b"event: ")
+    ]
+
+
+ANTHROPIC_FAILURE = (
+    '{"type":"error","error":{"type":"overloaded_error","message":"upstream is overloaded",'
+    '"vendor_hint":"a field nothing here knows"}}'
+)
+
+
+def test_a_direct_leg_replays_upstreams_failure_event_untouched() -> None:
+    """The client speaks upstream's dialect, so it gets upstream's own words — unknown fields included.
+
+    `vendor_hint` is the assertion that matters. Anything that read this into a record and wrote it back out would drop it, and dropping it is exactly what "even if we do not know it, it can still be passed on" forbids.
+    """
+    client, _ = make_client(_upstream_that_reports_failure("error", ANTHROPIC_FAILURE))
+
+    delivered = _streamed(client, {"model": "claude-model", "messages": []})
+    frames = _error_frames(delivered)
+
+    assert frames, f"the failure event never reached the client: {delivered!r}"
+    assert frames[-1]["error"]["type"] == "overloaded_error"
+    assert frames[-1]["error"]["vendor_hint"] == "a field nothing here knows"
+
+
+def test_a_reported_failure_does_not_end_with_a_terminal_that_reads_as_success() -> None:
+    """The defect this slice exists for, stated as what must **not** be on the wire.
+
+    Before this, the client received `message_delta` with a stop reason and then `message_stop` — a syntactically complete turn. Not merely indistinguishable from a torn connection, which is what the code comments claimed: indistinguishable from a turn that finished.
+    """
+    client, _ = make_client(_upstream_that_reports_failure("error", ANTHROPIC_FAILURE))
+
+    delivered = _streamed(client, {"model": "claude-model", "messages": []})
+    events = _events(delivered)
+
+    assert "error" in events
+    assert "message_stop" not in events, f"a failed turn ended as a completed one: {events}"
+    assert "message_delta" not in events
+    # What had already been delivered still is. The failure ends the turn; it does not retract what arrived.
+    assert b'"text":"first"' in delivered
+
+
+RESPONSES_FAILED = '{"type":"response.failed","response":{"error":{"code":"server_error","message":"boom"}}}'
+RESPONSES_CANCELLED = '{"type":"response.cancelled","response":{"error":{"code":"cancelled","message":"stopped"}}}'
+
+
+@pytest.mark.parametrize(
+    "event, payload", [("response.failed", RESPONSES_FAILED), ("response.cancelled", RESPONSES_CANCELLED)]
+)
+def test_a_direct_responses_leg_keeps_upstreams_own_event_name(event: str, payload: str) -> None:
+    """`response.failed` and `response.cancelled` are different things to a client of that API.
+
+    Normalising both to `error` would be this proxy deciding they are the same, which it is not entitled to do on a leg it is only carrying.
+    """
+    from test_pipeline_app import responses_sse_upstream
+
+    whole = responses_sse_upstream()
+    prefix = whole.split(b"event: response.completed", 1)[0]
+    body = prefix + f"event: {event}\ndata: {payload}\n\n".encode()
+
+    def handler(_: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+    client, _ = make_client(handler)
+    with client.stream("POST", "/v1/responses", json={"model": "gpt-model", "input": [], "stream": True}) as response:
+        delivered = b"".join(response.iter_bytes())
+
+    assert event in _events(delivered), f"upstream's own event name was lost: {_events(delivered)}"
+
+
+def test_a_translated_leg_spells_upstreams_failure_in_the_clients_dialect() -> None:
+    """Anthropic client, Responses upstream: the client cannot read `response.failed`.
+
+    So the failure crosses the record and comes out as this client's own error frame. The other direction of the same ruling — the direct test above asserts upstream's words survive; this one asserts they are translated when they must be.
+    """
+    from test_pipeline_app import responses_sse_upstream
+
+    whole = responses_sse_upstream()
+    prefix = whole.split(b"event: response.completed", 1)[0]
+    body = prefix + f"event: response.failed\ndata: {RESPONSES_FAILED}\n\n".encode()
+
+    def handler(_: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+    client, _ = make_client(handler)
+    delivered = _streamed(client, {"model": "gpt-model", "messages": []})
+    events = _events(delivered)
+
+    assert "response.failed" not in events, "a dialect the client does not speak reached it"
+    assert "error" in events
+    assert "message_stop" not in events
+    frames = _error_frames(delivered)
+    assert frames[-1]["error"]["code"] == "server_error"

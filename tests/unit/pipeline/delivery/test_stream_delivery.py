@@ -21,7 +21,7 @@ from app.model_provider.ghc_client.errors import normalize_upstream_error
 from app.observability.active_requests import ActiveRequestRegistry
 from app.observability.request_trace import RequestTrace
 from app.pipeline.delivery import stream as stream_module
-from app.pipeline.delivery.assembling import BlockAssembler, Terminal
+from app.pipeline.delivery.assembling import BlockAssembler, StreamFailure, Terminal
 from app.pipeline.delivery.blocks import BlockBuffer, CompletedBlock
 from app.pipeline.delivery.formats.anthropic_messages import AnthropicAssembler, AnthropicFramer
 from app.pipeline.delivery.formats.openai_responses import ResponsesAssembler
@@ -734,6 +734,14 @@ class SlowAssembler:
     @property
     def terminal(self) -> Terminal:
         return self._terminal
+
+    @property
+    def failure(self) -> StreamFailure | None:
+        """Never: this stand-in exists to be slow, not to report an upstream failure.
+
+        Present because `BlockAssembler` requires it. A stand-in that omitted it would fail at the call rather than at the type, which is the shape a protocol is supposed to prevent.
+        """
+        return None
 
     def push(self, event: SseEvent) -> tuple[CompletedBlock, ...]:
         deadline = time.monotonic() + self._seconds
