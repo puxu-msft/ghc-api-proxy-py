@@ -47,7 +47,8 @@
 | 前身 `copilot-api-js` 的 `max_tokens` 处理**只接在 Anthropic 直连腿**，Responses 腿的谓词零调用点；官方 `vscode-copilot-chat` 对被截断的 tool call 是静默丢弃 | 代码事实（八个参考仓） | `reports/260821-reference-projects-max-tokens.md` |
 | live 链路的重试**只存在于上游响应头到达之前**，无退避无 jitter；**读流中断零重试** | 代码事实 | `reports/260821-upstream-error-handling-survey.md` |
 | 交付层的「这是谁的失败」按**上游侧正向识别**：`inference.py` 把 `UpstreamSource` 构造在四层 wrapper 的中间——两道陈述上游状况的守卫在它之下，本侧的字节计数器在它之上 | 本次实测（真实 `_counted_upstream`，让 registry 在第 4 个 chunk 抛错）：`handed_local_counter_bug` 从 `True`（`62a457f`）变 `False`（`1a34042`），异常改为如实抛给调用方。接线另由服务端真实入口的集成测试钉住，变异回「包住整条 composite」即变红 | `deferred.md` §22之六 |
-| 交接是唯一会吞掉异常的结局，其原因现在记在完成行上 | 本次实测：不记录它，集成测试在 `assert 'RemoteProtocolError' in ...` 变红，印出旧那行 `turn handed back to the client to continue`（无 cause） | `deferred.md` §22之七 |
+| 两处会让异常消失的结局现在都留下原因：**交接**（不 re-raise，`failure` 恒 `None`）与**透明重放成功**（既不交接也不 re-raise，只留 `retries=N`） | 本次实测：各自撤掉记录，对应测试变红，印出旧那行 `turn handed back to the client to continue`（无 cause）与只有计数的 `retries=1` | `deferred.md` §22之七 |
+| **仍有第三处**：上游终止事件已见之后再撕裂，`stream.py` 直接 `break`，不 re-raise 也不记原因 | 代码直读，评审 R4-M2 指出。本项目此前已把它登记为「post-terminal failure 无痕」，**未修** | `deferred.md`（既有条目） |
 
 ## 本仓实际发出的 MCP 工具调用（给改 MCP server 那一侧看）
 
