@@ -14,7 +14,7 @@
 | effort 与目录能力对齐 | `pipeline/translation_driver/reasoning.py` 的 `align_effort`，与翻译腿共用同一条 `EFFORT_LADDER` |
 | 配置 | 顶层 `model_thinking_effort`；`hook_fix_anthropic_request.thinking.display`（`config/schema.py`），经 `server/composition.py` 绑定到订阅者 |
 | `messages` 末尾角色 | `src/app/pipeline/subscribers/anthropic_trailing_assistant.py`，id `builtin:anthropic-trailing-assistant`，以 `after=` 显式排在 `builtin:blank-text-blocks` 之后 |
-| `cache_control` 子字段白名单 | `src/app/pipeline/subscribers/anthropic_cache_control.py`，id `builtin:anthropic-cache-control-vocabulary`，以 `after=` 显式排在 `builtin:server-tool-capability` 之后（那一步会把 `cache_control` 搬进它重写出来的文本块）。只保留 `type` 与 `ttl`，位置集合按官方请求 schema 覆盖七处：顶层、`system[]`、`messages[].content[]`、`tool_result.content[]`、`search_result.content[]`、`document.source.content[]`、`tools[]`。**首版只做了中间三处**，顶层与嵌套是评审 CCBIR-02 补的 |
+| `cache_control` 子字段按模型点名剥离 | `src/app/pipeline/subscribers/anthropic_cache_control.py`，id `builtin:anthropic-cache-control-vocabulary`，以 `after=` 显式排在 `builtin:server-tool-capability` 之后（那一步会把 `cache_control` 搬进它重写出来的文本块）。**默认档 `sanitize`**，删掉 `hook_fix_anthropic_request.cache_control_sanitize` 为该模型点名的字段（随包表在 `src/app/config/bundled-config.yaml`，今天只有 Claude 一族的 `scope`），位置集合按官方请求 schema 覆盖七处：顶层、`system[]`、`messages[].content[]`、`tool_result.content[]`、`search_result.content[]`、`document.source.content[]`、`tools[]`。**首版只做了中间三处**，顶层与嵌套是评审 CCBIR-02 补的 |
 | 网关 beta 词汇表剥离 | `src/app/pipeline/request_headers.py` 的 `GATEWAY_UNSUPPORTED_BETAS` 与 `strip_gateway_unsupported_betas`，在 `pipeline/driver.py` 的 `shape_request` 里排在按模型剥离之前。**与用户那张 per-model 表并列而非合并**——两者回答的是不同的问题，规范条款见 spec §7.6～§7.8 |
 | 新增损失码 | `LossCode.SYNTHETIC_TURN_ADDED`——唯一记录「加了东西」而非「丢了东西」的一个；`LossCode.CACHE_CONTROL_FIELD_NOT_CARRIED`——剥掉 `scope` 是真实的语义损失（它决定缓存共享范围），不是清噪音 |
 | 测试 | `tests/unit/pipeline/subscribers/test_anthropic_thinking.py`、`test_anthropic_trailing_assistant.py`、`test_anthropic_cache_control.py`；beta 两层与其组合在 `tests/unit/pipeline/test_client_request_headers.py`；顺序锁定表在 `test_builtin_subscribers.py` |
@@ -30,6 +30,9 @@
 | 把 `after=(BLANK_TEXT_BLOCKS_ID,)` 改成 `before=` | 若这条顺序约束真的承重，行为测试应变红而不只是顺序锁定表 | 变红 6 条，**其中 3 条是行为测试**。已还原 |
 | 把 `builtin:anthropic-cache-control-vocabulary` 的注册整段关掉（`if False:`） | 若有测试真的在守「接线」而不只是守函数，端到端那条应变红、直接调函数的那批应照绿 | 与预期一致：1 failed / 8 passed，且红在正确的位置（`scope` 仍出现在 wire 上）。用快照还原，`rg '_unregistered|if False'` 确认无残留 |
 | 删掉 `shape_request` 里 `strip_gateway_unsupported_betas` 的调用 | 走 `shape_request` 的那条应变红 | 与预期一致：1 failed / 32 passed。用快照还原，`rg` 确认两处引用都在 |
+
+| 清空 `bundled-config.yaml` 里的 `cache_control_sanitize` | 「开箱即用」与「随包表内容」两条应变红，其余照绿 | 与预期一致：2 failed / 20 passed。快照还原 |
+| 把 schema 默认值改回 `passthrough` | 「开箱即用」那条应变红 | 与预期一致：1 failed / 21 passed。快照还原 |
 
 每次还原后都 `rg MUTATION-PROBE` 确认无残留（exit 1），并重跑受影响测试。**后两条用文件快照还原而不是 `git checkout`**：本次改动尚未提交，`git checkout` 会连修复一起抹掉。
 
@@ -67,14 +70,14 @@
 
 异源模型独立评审一轮：[reports/260824-implementation-review.md](reports/260824-implementation-review.md)，0 blocker / 3 major / 4 minor，**7 条全部采纳**。逐条处置与「只采纳一半」的那条的理由见 [review-disposition.md](review-disposition.md)。
 
-`cache_control` 与 beta 词汇表这一片另有一轮异源独立评审：[reports/260824-cache-control-and-beta-implementation-review.md](reports/260824-cache-control-and-beta-implementation-review.md)，**1 blocker / 2 major / 4 minor**。逐条处置见 [review-disposition-cache-control-and-beta.md](review-disposition-cache-control-and-beta.md)；其中 blocker（`passthrough` 档下也剥未知键）**不由本方处置，已交回用户裁决**，见 spec §9 A-8。
+`cache_control` 与 beta 词汇表这一片另有一轮异源独立评审：[reports/260824-cache-control-and-beta-implementation-review.md](reports/260824-cache-control-and-beta-implementation-review.md)，**1 blocker / 2 major / 4 minor**。逐条处置见 [review-disposition-cache-control-and-beta.md](review-disposition-cache-control-and-beta.md)；其中 blocker（`passthrough` 档下也剥未知键）不由本方处置、交回用户，**用户随后两次裁定**：`passthrough` 字面成立，默认档改为 `sanitize`，同时把 `sanitize` 从白名单收窄为「只剥配置表为该模型点名的字段」并把表放进随包配置。条款见 spec §7.1～§7.3。
 
 ## 验证命令与结果（本快照）
 
 ```
 uv run ruff check src tests          -> All checks passed
 uv run pyright src tests             -> 0 errors, 0 warnings
-uv run pytest tests --cov=app ...    -> 1779 passed, 2 skipped, 覆盖率 90.49%
+uv run pytest tests --cov=app ...    -> 1788 passed, 2 skipped
 ```
 
 ## 未落地 / 开着的
@@ -82,7 +85,7 @@ uv run pytest tests --cov=app ...    -> 1779 passed, 2 skipped, 覆盖率 90.49%
 见 [spec.md](spec.md) §9 的 A-1 ～ A-10。三条需要用户裁决或追认的：
 
 - **A-5**（落进用户亲笔文档）是唯一一条会改变本文档权威性的：**在用户从 [`anthropic-thinking-capability.md`](../../human-controlled-docs-candidates/anthropic-thinking-capability.md) 摘取之前，spec.md 是我方推导，不是用户裁决。**
-- **A-8**：`passthrough` 档下也剥 `cache_control` 的未知键，需要用户追认。理由在 spec §7.3，但用户亲笔 `config.example.yaml:476-477` 那句「forward client cache_control as-is」没有明示这一层区分。
-- **A-9**：`hook_fix_anthropic_request.cache_control` 四档与 `extended_cache_ttl` **至今零实现**，本次只做了与之正交的子字段白名单。这是既有缺口，不是本次削减的范围。
+- ~~**A-8**~~ **已闭合**：用户 2026-08-24 两次裁定——`passthrough` 字面成立，同日默认档改为 `sanitize`，且 `sanitize` 收窄为「只剥配置表点名的字段」。条款见 spec §7.1～§7.3。
+- **A-9**：四档中 `proxied` 仍未实现（配置到它启动即拒），`extended_cache_ttl` 仍零实现。
 
 原先第 62 行「顺带指出」的那条已经不再是纯旁观：`strip_anthropic_beta_flags` 那张表按 `resolved_model` 匹配，而表里唯一的键 `claude-sonnet-4.6` 在同一份 `config.example.yaml` 里被 `model_mappings` 映走，两段配置同时生效时整张表匹配不到东西（2026-08-22 评审记于 `.dev/docs/tmp/260822-review-beta-flag-strip.md:6`，用户已在工作树里给那张表加了一条说明该现象的注释）。那仍是用户的文件。**本次新增的网关剥离不受这个缺陷影响**，因为它不查那张表——这正是两者不合并的实际收益之一。

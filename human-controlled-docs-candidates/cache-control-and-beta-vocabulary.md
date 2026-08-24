@@ -4,25 +4,43 @@
 
 **建议摘取到**：
 
-- `docs/.human-controlled/config.example.yaml`：`hook_fix_anthropic_request.cache_control` 那段注释（今天 474-483 行）补一句 `proxied` 未实现；无需改四档语义。
+- `docs/.human-controlled/config.example.yaml`：`hook_fix_anthropic_request.cache_control` 那段注释（今天 474-483 行）——**`sanitize` 那行的描述需要改**（见下面第 0 条），`(default)` 标注要从 `passthrough` 挪到 `sanitize`，另补一句 `proxied` 未实现。
 - `docs/.human-controlled/message-format-reshape.md`「按需剥离 `anthropic-beta` 请求头的部分 flag」一节（今天第 37 行起），补一个并列的第二层。
 
 ---
 
 ## 一、你已经裁决、但还没写进你文件的两条
 
+### 0. 你 config.example.yaml 里 `sanitize` 那句话现在与实现不符（需要你改一句）
+
+你写的是：
+
+> `sanitize`: forward but normalize to `{ type: "ephemeral" }` (strip non-standard fields like scope)
+
+实现后来收窄了（也是你裁的，见下一条）：它**不做归一化**，只删掉 `cache_control_sanitize` 表为该模型点名的字段。差别是实的——按你原文，`{type: ephemeral, ttl: "1h"}` 会被归一化成 `{type: ephemeral}`，`ttl` 丢掉；按现在的实现，`ttl` 不在表里所以原样保留，而实测上游是接受 `ttl` 的。
+
+建议改成：
+
+```
+#   sanitize:    forward, minus the subfields `cache_control_sanitize` names for the
+#                answering model (default; the shipped table names `scope` for Claude)
+#                / 转发，但删掉 `cache_control_sanitize` 为该模型点名的子字段
+#                （默认档；随包表为 Claude 一族点了 `scope`）
+```
+
+同时 `passthrough` 那行的 `(default)` 标注要挪到 `sanitize` 上。
+
 ### 1. `passthrough` 是字面的（2026-08-24 会话裁决）
 
 背景：新版 Claude Code 会发 `cache_control: {"type":"ephemeral","scope":…}`，这个上游整条请求拒绝。
 
-我最初把「剥掉上游不认的键」做成了**常驻**行为，在四档之下都跑，理由是「四档管断点位置，这条管键的词汇表，两者正交」。**你裁定这个做法不成立**：`passthrough` 就按你写的那句 `forward client cache_control as-is` 理解，白名单只在 `sanitize` / `disabled` 下运行，默认值仍是 `passthrough`。
+我最初把「剥掉上游不认的键」做成了**常驻**行为，在四档之下都跑，理由是「四档管断点位置，这条管键的词汇表，两者正交」。**你裁定这个做法不成立**：`passthrough` 就按你写的那句 `forward client cache_control as-is` 理解，剥离只在 `sanitize` / `disabled` 下运行。（当时默认值还是 `passthrough`，下一段是它后来的变化。）
 
-**这条裁决的直接后果，写出来供你确认它确实是你要的**：默认配置下，一个会发 `scope` 的客户端，它的**每一个**请求都会拿到上游的 400。要让它工作，那台机器的 `config.yaml` 需要有：
+**这一条后来被你同日的第二次裁决补上了另一半**：默认档从 `passthrough` 改成了 `sanitize`，所以**开箱不再需要任何配置**。两次裁决并不矛盾——第一次说的是「`passthrough` 这一档做什么」，第二次说的是「不写配置时用哪一档」。合起来：开箱即用，而想要字面原样转发的人显式写 `passthrough` 仍然得到它（那时 `scope` 会照发并吃 400，这是该档的定义）。
 
-```yaml
-hook_fix_anthropic_request:
-  cache_control: sanitize
-```
+改默认的前提是你同时要求的第三件事：`sanitize` 的拦截范围从「白名单，剥掉一切没列的键」收窄成「只剥配置表为这个模型点名的字段」，表放进 `src/app/config/bundled-config.yaml`。默认档去做一件范围明确、能被一行配置关掉的事，与默认档去做无差别改写，不是同一个决定。
+
+**这次取舍赔掉的东西，写出来供你确认**：下一个被上游拒绝的新字段**不会**被这张表挡住，它会一路发到上游并让整条请求 400，直到有人往表里加一行。白名单本来能挡住它。止血成本是一行配置而不是一次发布——这也是把表放进配置而不是代码的直接理由。
 
 ### 2. tool search 不是本代理提供的能力（2026-08-24 会话裁决）
 
