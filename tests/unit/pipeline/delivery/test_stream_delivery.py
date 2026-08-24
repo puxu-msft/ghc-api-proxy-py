@@ -34,6 +34,7 @@ from app.pipeline.delivery.stream import (
     ReplaySupport,
     StreamSettings,
     UpstreamSource,
+    UpstreamStreamUnterminated,
     _events_with_ping,  # pyright: ignore[reportPrivateUsage]
     _LastWrite,  # pyright: ignore[reportPrivateUsage]
     stream_delivery,
@@ -1785,3 +1786,106 @@ def delivering(
         replay=replay,
         continuation=continuation,
     )
+
+
+def _whole_block_then_a_severed_one() -> list[bytes]:
+    """The shape of production incident req=75ccdf6f: one block delivered whole, the next one cut open, then nothing.
+
+    No `message_delta` and no `message_stop`, so `terminal.seen` stays false; the second block's `content_block_start` with no `content_block_stop` is what leaves a draft open and makes `cut_mid_block` true. The two together are the only ending on this leg that reached a client as a bare `API Error` while it was holding whole content.
+    """
+    return [
+        frame("content_block_start", {"index": 0, "content_block": {"type": "text"}}),
+        frame("content_block_delta", {"index": 0, "delta": {"type": "text_delta", "text": "kept"}}),
+        frame("content_block_stop", {"index": 0}),
+        frame("content_block_start", {"index": 1, "content_block": {"type": "text"}}),
+        frame("content_block_delta", {"index": 1, "delta": {"type": "text_delta", "text": "cut"}}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_severed_stream_with_content_delivered_is_handed_back_not_errored() -> None:
+    """A clean EOF that cut through a block is handed to the client, on the same terms as a tear.
+
+    `docs/.human-controlled/upstream-retry-and-continuation.md` line 30 gates the hand-over on having delivered at least one whole block and on the failure not being one of its 无法继续 cases; a stream that stopped without its terminal event is neither. Only the tear path asked, so the manner of arrival decided the client's ending — which is exactly what `retry.py` says must not decide it.
+    """
+    handed: list[BaseException | None] = []
+
+    def synthesize(error: BaseException | None, _stop_reason: str) -> dict[str, Any]:
+        handed.append(error)
+        return {"type": "tool_use", "id": "toolu_x", "name": "carry_on", "input": {}}
+
+    chunks = [
+        chunk
+        async for chunk in delivering(
+            feed(_whole_block_then_a_severed_one()),
+            AnthropicAssembler(),
+            buffer=BlockBuffer(policy="block"),
+            settings=StreamSettings(sse_ping_interval=0),
+            framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
+            continuation=ContinuationSupport(synthesize=synthesize),
+        )
+    ]
+    body = b"".join(chunks).decode()
+
+    assert "incomplete_responses_stream" not in body, "the client was told to give up on a turn it can carry on"
+    assert '"name":"carry_on"' in body, "no hand-over block reached the client"
+    # What upstream did finish is still delivered; only the ending changes.
+    assert '"text":"kept"' in body
+    assert '"text":"cut"' not in body, "a block upstream never closed is not the client's to receive"
+    # The ending is named to the hand-over rather than left to `error=None`, which would have reported a stop reason upstream never gave.
+    assert len(handed) == 1
+    assert isinstance(handed[0], UpstreamStreamUnterminated)
+
+
+@pytest.mark.asyncio
+async def test_a_severed_stream_still_errors_when_no_hand_over_is_configured() -> None:
+    """The control for the test above, and the reason its green means anything.
+
+    Same bytes, same assembler, only `continuation` removed. Without this, a hand-over that never fired and an ending that never changed would look identical from the other test alone — every assertion there would also pass if `_hand_over` had simply been unreachable.
+    """
+    chunks = [
+        chunk
+        async for chunk in delivering(
+            feed(_whole_block_then_a_severed_one()),
+            AnthropicAssembler(),
+            buffer=BlockBuffer(policy="block"),
+            settings=StreamSettings(sse_ping_interval=0),
+            framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
+        )
+    ]
+    body = b"".join(chunks).decode()
+
+    assert "incomplete_responses_stream" in body
+    assert "message_stop" not in body, "an error and a successful close are mutually exclusive"
+    assert '"text":"kept"' in body
+
+
+@pytest.mark.asyncio
+async def test_an_eof_at_a_block_boundary_is_still_closed_rather_than_handed_back() -> None:
+    """The 2026-08-22 ruling is untouched by the hand-over above.
+
+    That ending reports no error, so line 30's 将报错合成为 never reaches it. Asked with a continuation configured, because that is the only arrangement in which the two rulings could have collided.
+    """
+    handed: list[BaseException | None] = []
+
+    def synthesize(error: BaseException | None, _stop_reason: str) -> dict[str, Any]:
+        handed.append(error)
+        return {"type": "tool_use", "id": "toolu_x", "name": "carry_on", "input": {}}
+
+    chunks = [
+        chunk
+        async for chunk in delivering(
+            feed(_whole_block_then_a_severed_one()[:3]),
+            AnthropicAssembler(),
+            buffer=BlockBuffer(policy="block"),
+            settings=StreamSettings(sse_ping_interval=0),
+            framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
+            continuation=ContinuationSupport(synthesize=synthesize),
+        )
+    ]
+    body = b"".join(chunks).decode()
+
+    assert handed == [], "a boundary close is not an error, so nothing is handed back"
+    assert "incomplete_responses_stream" not in body
+    assert '"stop_reason":"incomplete"' in body
+    assert '"text":"kept"' in body

@@ -106,6 +106,15 @@ class ContinuationSupport:
     stop_reasons: frozenset[str] = frozenset({"max_tokens"})
 
 
+class UpstreamStreamUnterminated(Exception):
+    """Upstream's stream ended without ever sending its terminal event.
+
+    **Constructed, never raised.** This ending arrives as a clean end of iteration, so there is no exception carrying it — and the hand-over needs one. Passing `error=None` instead would take the other branch of `interruption_message`, which reports `stop_reason=<x>`: on this ending upstream named no reason, so the only value available there is a synthesis, and putting it in upstream's mouth is what this project refuses to do everywhere else.
+
+    Deliberately outside two taxonomies. Not a `DeliveryError`, which would mark this side as the one that failed. Not in `normalize_upstream_error`'s either, so `replay_reason` returns `None` and the hand-over labels it `upstream` — the right answer, and by the route `hand_over.py` already documents for a failure the retry taxonomy has no word for. Retryability is not the question here anyway: nothing re-raises this.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class StreamSettings:
     """What the delivery loop itself needs. Framing settings belong to the framer, which owns framer."""
@@ -484,8 +493,24 @@ async def _deliver(
             ):
                 yield frame
             return
-        # An EOF that cut through a block, or the refinement switched off: this is truncation, and saying so is the only honest ending.
+        # An EOF that cut through a block, or the refinement switched off. Either way this reports an error, and an error with content already in the client's hands is what the hand-over exists for.
         #
+        # Asked here on exactly the same terms as the torn path above, which is the whole point: the two endings leave the client in the same place, and `retry.py` already states that it is that place — not the manner of arrival — that decides what may legally happen next. Until this branch existed, being killed by this side's own idle guard produced a *better* client outcome than upstream closing cleanly, because the guard raises and a clean EOF does not. Authority is `docs/.human-controlled/upstream-retry-and-continuation.md` line 30, which gates on 已经交付过至少一个完整块 and then prescribes 将报错合成为自制的 `tool_use` 返回给客户端; a terminal-less stream appears on neither of that document's 无法继续 lists. Spec item 7, amended 2026-08-24. Production incident req=75ccdf6f.
+        #
+        # **Not** asked before the block-boundary close above. That ending reports no error, so line 30's 将报错合成为 never reaches it, and the 2026-08-22 ruling that made it a clean close stands untouched.
+        #
+        # `_hand_over` re-asks `session.finish()`, which already ran above; it returns nothing the second time and the call is kept for the ending that reaches it having flushed nothing. It answers `None` when nothing whole was ever committed — the same gate line 30 states — and this then falls through to the error frame below, which is the ending it always had.
+        handed_over = _hand_over(
+            continuation,
+            session,
+            assembler,
+            framer,
+            error=UpstreamStreamUnterminated("upstream stream ended without a terminal event"),
+        )
+        if handed_over is not None:
+            for chunk in handed_over:
+                yield chunk
+            return
         # Ported from the legacy chain rather than redesigned, as `.dev/docs/anthropic-responses-bridge/implementation.md` directs: `app/delivery/responses_anthropic_stream.py`, on `not frontier.terminal_accepted`, raises `incomplete_responses_stream` and renders an SSE error. Same code, same wire shape, same gate on the message having started — a client that already learned to read one of these does not have to learn a second.
         # `message_stop` deliberately does not follow. `.dev/docs/anthropic-responses-bridge/spec.md`, "Downstream Anthropic SSE" item 7, rules these two mutually exclusive: 不得再发 `message_stop` 冒充成功. Note that item 7 constrains what may follow an *error*; it does not make every terminal-less EOF one, which is what the branch above turns on.
         yield framer.error(
