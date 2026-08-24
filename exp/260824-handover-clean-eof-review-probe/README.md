@@ -23,7 +23,7 @@
 ## 它**不能**证明什么
 
 - **不是回归测试，也没有接进任何 gate。** 它是一次点时取证，跑一次、读输出、写进报告。
-- **钉死在 `a7a0e05`**：第 11 行 `assert` 会拒绝在任何别的提交上运行。它证明的是那个提交的行为，不是当前 HEAD 的。
+- **源码钉死在 `a7a0e05`，依赖环境不是**：第 11 行 `assert` 会拒绝在任何别的提交上运行，但下面的重跑配方用的是**当前项目的依赖环境**（`uv run --project`），不是 `a7a0e05` 当时那套。所以它证明的是「`a7a0e05` 的源码在今天的依赖下如此表现」，**不是历史运行环境的完全复刻**。依赖若发生过不兼容变更，重跑失败要先怀疑这一层。
 - **上游全是手写字节**，不是 cassette。它证明的是「给定这样的 SSE 序列，本侧如此反应」，**不证明 Copilot 真的会发出这样的序列**。真实上游行为要看 `tests/int/cassettes/`。
 - **每格只有一条路径**。例如「零完整块」只试了 Anthropic 腿一种缓冲策略，没有遍历 `buffering_policy` 的其他取值。
 - 断言的是**结果字段**，不是全字段等价。
@@ -33,19 +33,24 @@
 它依赖一棵位于 `a7a0e05` 的树，且树根要有写着该 SHA 的 `.review-commit`：
 
 ```bash
+PROBE_DIR=/home/xp/src/ghc-api-proxy-py/.dev/exp/260824-handover-clean-eof-review-probe
+REPO=/home/xp/src/ghc-api-proxy-py
+
 # 1. 造一棵一次性的树（别在共享工作树里跑——它会 import 生产代码）
 T=$(mktemp -d)
-git -C /home/xp/src/ghc-api-proxy-py archive a7a0e058fc1940c188626e8d3f4aa38e0393ea9c | tar -x -C "$T"
+git -C "$REPO" archive a7a0e058fc1940c188626e8d3f4aa38e0393ea9c | tar -x -C "$T"
 printf 'a7a0e058fc1940c188626e8d3f4aa38e0393ea9c\n' > "$T/.review-commit"
 
 # 2. 放进探针
-cp <本目录>/review_probe.py "$T/review_probe.py"
+cp "$PROBE_DIR/review_probe.py" "$T/review_probe.py"
 
-# 3. 跑（需要 httpx2 与 orjson，用主仓的环境即可）
-cd "$T" && uv run --project /home/xp/src/ghc-api-proxy-py python review_probe.py
+# 3. 跑（需要 httpx2 与 orjson，取自当前项目环境——见上文的限定）
+cd "$T" && uv run --project "$REPO" python review_probe.py
 ```
 
-预期是七行 `print`，任何一条 assert 失败即为行为已变。**assert 失败不等于回归**——先确认 `a7a0e05` 之后的裁决有没有故意改掉那一格。
+预期是七行 `print`，任何一条 assert 失败即为行为已变。**assert 失败不等于回归**——先确认 `a7a0e05` 之后的裁决有没有故意改掉那一格，再确认不是依赖环境漂移。
+
+第三轮评审于 2026-08-24 在一次性 tmpfs（`bwrap`）中按本配方实跑过一次：七项输出全部出现、全部 assert 通过、宿主无残留。
 
 ## 来源
 
