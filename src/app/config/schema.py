@@ -124,7 +124,7 @@ class UpstreamTransportConfig(Section):
 
 class UpstreamRequestTimeoutsConfig(Section):
     # 0 disables each terminator.
-    # The spec's frozen invariant is never to false-kill legitimate thinking.
+    # The user's frozen invariant is never to false-kill legitimate thinking.
     # Silence on a live connection has no provably safe wall-clock bound.
     response_header: int = Field(default=0, ge=0)
     stream_idle: int = Field(default=0, ge=0)
