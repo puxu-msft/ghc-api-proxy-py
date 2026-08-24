@@ -387,7 +387,7 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
             assembler=assembler,
         )
 
-        async def _reopen() -> Attempt | None:
+        async def _reopen(replacing: Exception) -> Attempt | None:
             """Another attempt at the same request, wrapped in the same guards as the first.
 
             `handle` rather than `handle_bounded`: the client deadline is enforced over the body now, and a second `asyncio.timeout` around this would be a second clock for one lifetime — the exact defect the outer guard was added to fix.
@@ -422,6 +422,9 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
             fresh_assembler = assembler_for(again, hand_over_stop_reasons=_hand_over_reasons)
             # Otherwise the one surface that can show a replay happened stays at 1, and a request the proxy quietly answered twice reads exactly like one it answered once.
             trace.attempts = again.context.attempt_count
+            # And what it was replacing. A transparent replay that succeeds neither hands over nor re-raises, so `attempts=2` was the whole of what an operator got — a count with no cause. Being invisible to the *client* is the point; being invisible to the record is not. Kept as the first one, because the failure that started the replaying is the one that explains it.
+            if trace.replaced_failure is None:
+                trace.replaced_failure = repr(replacing)
             active.set_attempts(trace.request_id, again.context.attempt_count)
             # The accounting reads the terminal off whichever assembler is current, and after this the current one is this.
             accounting.assembler = fresh_assembler
@@ -650,22 +653,29 @@ async def _counted_upstream(chunks: AsyncIterator[bytes], chain: Chain, request_
     The pacing is taken here too, and only as two derived numbers. Every arrival's timestamp would answer more, and a busy stream is thousands of arrivals per request against a record written one line per request — so what is kept is the longest silence and how many arrivals there were, which is what the incident of 2026-08-20 needed and could not get: upstream went quiet mid-stream for 242 seconds, and afterwards nothing on this side could say so. A total duration cannot distinguish that from a turn that was simply long.
 
     The gap is measured between arrivals rather than from the start, because the wait before the first is already `first_upstream_byte_s` and folding them together would make every request's maximum the time it spent routing.
+
+    **Closing this closes the stream under it**, the same way `with_idle_timeout` and `read_events` do. This was the one layer of the production chain that did not, and it was the layer everything else releases through: `read_events` closes the outermost composite and the client deadline closes this one, and the chain stopped here. A client that went away mid-turn therefore left the marker, both guards and the upstream response open until the collector reached them — measured 2026-08-24 against the real four-layer composition, where the raw source stayed open across a tick and only an explicit close released it. A cancellation still propagates all the way down, which is why the client deadline's own path was never the one that leaked; an ordinary early close is.
     """
+    close = getattr(chunks, "aclose", None)
     previous: float | None = None
-    async for chunk in chunks:
-        now = time.monotonic()
-        if chunk and trace.first_upstream_byte_s is None:
-            trace.first_upstream_byte_s = now - trace.started
-        if previous is not None:
-            gap = now - previous
-            if trace.upstream_max_gap_s is None or gap > trace.upstream_max_gap_s:
-                trace.upstream_max_gap_s = gap
-        previous = now
-        # Every arrival, not only the ones carrying bytes, so a gap here means what a gap means to `with_idle_timeout` underneath — that guard resets on any item, and a count using a different rule would put the two numbers on scales that cannot be compared. httpx's `aiter_bytes` drops empty chunks anyway, so on the production chain the two rules agree.
-        trace.upstream_chunks += 1
-        trace.received += len(chunk)
-        chain.active_requests.add_bytes(request_id, len(chunk))
-        yield chunk
+    try:
+        async for chunk in chunks:
+            now = time.monotonic()
+            if chunk and trace.first_upstream_byte_s is None:
+                trace.first_upstream_byte_s = now - trace.started
+            if previous is not None:
+                gap = now - previous
+                if trace.upstream_max_gap_s is None or gap > trace.upstream_max_gap_s:
+                    trace.upstream_max_gap_s = gap
+            previous = now
+            # Every arrival, not only the ones carrying bytes, so a gap here means what a gap means to `with_idle_timeout` underneath — that guard resets on any item, and a count using a different rule would put the two numbers on scales that cannot be compared. httpx's `aiter_bytes` drops empty chunks anyway, so on the production chain the two rules agree.
+            trace.upstream_chunks += 1
+            trace.received += len(chunk)
+            chain.active_requests.add_bytes(request_id, len(chunk))
+            yield chunk
+    finally:
+        if close is not None:
+            await close()
 
 
 async def _tracked_delivery(chunks: AsyncGenerator[bytes], accounting: _StreamAccounting) -> AsyncGenerator[bytes]:

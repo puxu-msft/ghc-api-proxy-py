@@ -145,6 +145,8 @@ class RequestLine:
     # Whose words to use for the reasoning and tool-call fields. See `ReplyDialect`; it travels with the reply summary the line is built from.
     dialect: ReplyDialect = ReplyDialect.ANTHROPIC
     attempts: int = 1
+    # What the first replayed attempt was replacing. A transparent replay is invisible to the client by design; it used to be invisible here too, leaving `retries=N` as a count with no cause.
+    replaced_failure: str | None = None
     detail: str = ""
     upstream_conn: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
     # What translation could not carry, one entry per recorded loss, in the order recorded. Each entry is `{"direction": "request"|"response", "code": …, "detail": …}`. Direction is a property of the loss rather than a second field, because "what did this request lose" is one question and answering it from two lists is how the two drift apart.
@@ -381,7 +383,11 @@ def format_completion_line(line: RequestLine, *, status: LogStatus, unicode: boo
         parts.append(format_pending_tools(line.tools, color=color))
     if line.attempts > 1:
         # Named on the line that reports the outcome, where the count is final. A retry still in progress is the footer's job.
-        parts.append(paint(f"retries={line.attempts - 1}", YELLOW, color=color))
+        retries = f"retries={line.attempts - 1}"
+        if line.replaced_failure is not None:
+            # The count says a replay happened; this says what it replaced. Read together they are the whole of what a transparent replay leaves behind, and the count on its own was not.
+            retries = f"{retries} after {line.replaced_failure}"
+        parts.append(paint(retries, YELLOW, color=color))
 
     rendered = " ".join(parts)
     thinking = format_thinking(line.thinking, line.dialect)

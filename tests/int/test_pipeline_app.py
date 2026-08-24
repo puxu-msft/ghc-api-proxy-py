@@ -3140,7 +3140,11 @@ def test_a_replay_is_reported_on_the_request_line() -> None:
 
     assert response.status_code == 200
     assert len(calls) == 2
-    assert _records()[-1]["attempts"] == 2
+    record = _records()[-1]
+    assert record["attempts"] == 2
+    # And what it replaced. A transparent replay that succeeds neither hands over nor re-raises, so `attempts` was the whole account and the exception that caused it was gone — invisible to the client by design, invisible to the record by accident.
+    assert "RemoteProtocolError" in cast(str, record["replaced_failure"])
+    assert "peer closed the connection" in cast(str, record["replaced_failure"])
 
 
 def test_the_client_deadline_survives_a_replay() -> None:

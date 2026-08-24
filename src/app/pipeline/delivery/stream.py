@@ -33,8 +33,46 @@ from app.streaming.keepalive import finish_stream_cleanup
 PING_FRAME = b": ping\n\n"
 
 
+class UpstreamSource:
+    """The upstream side of the byte stream, named by the caller so that what it raises can be told from what this side raises.
+
+    Positive identification, and on the *upstream* side rather than this one. It used to be the other way round: a marker set at each place this side ran code, so that everything unmarked defaulted to upstream's. That list is unbounded by construction — a review made this loop's own SSE reader raise and watched the bug get handed to the client as upstream's — while everything upstream produces passes through one point.
+
+    **Which point that is, is the caller's to say, and it is not the iterator delivery receives.** `inference.py` composes four layers over `response.aiter_bytes()`, and the line does not fall at either end of them: the attempt deadline and the idle timeout are guards that exist to state an upstream condition, so they belong below it, while `_counted_upstream` is this side's bookkeeping and belongs above. Constructed here in the middle of that stack rather than around the whole of it, delivery is handed the composite and this object separately, and asks only this object what it raised. A bug in the byte counter is this side's again — measured, `handed_local_counter_bug` is now `False` where it was `True` at `62a457f`.
+
+    A class rather than a generator. A generator could be written safely — `await source.__anext__()` inside the `try`, the `yield` outside it, the same shape `_commit` and the keep-alive use — but the safe and the unsafe spellings look alike, and the unsafe one records a consumer's `athrow` as upstream's. `__anext__` has no window to get wrong. `CancelledError` is not an `Exception` and is not tagged, which is what keeps `finish_stream_cleanup` cancelling the in-flight pull from reading as an upstream tear.
+    """
+
+    def __init__(self, source: AsyncIterator[bytes]) -> None:
+        self._source = source.__aiter__()
+        # The exception this iterator raised, if it has. Compared by identity downstream, so a later attempt's tear cannot be mistaken for this one's.
+        self.tear: Exception | None = None
+
+    def __aiter__(self) -> AsyncIterator[bytes]:
+        return self
+
+    async def __anext__(self) -> bytes:
+        try:
+            return await self._source.__anext__()
+        except StopAsyncIteration:
+            raise
+        except Exception as tear:
+            self.tear = tear
+            raise
+
+    async def aclose(self) -> None:
+        """Delegated, because `read_events` closes the byte stream under it and that is what releases the upstream response."""
+        closer = getattr(self._source, "aclose", None)
+        if closer is not None:
+            await closer()
+
+
 # What one replaced attempt hands over: a fresh byte stream, the marker naming its upstream side, and the fresh assembler and buffer that go with it. Nothing from the attempt it replaces travels with them — including the marker, so a tear recorded by the previous attempt's cannot be mistaken for this one's.
-type Attempt = tuple[AsyncIterator[bytes], "UpstreamSource", BlockAssembler, BlockBuffer]
+# Declared here rather than beside the other contracts because it names `UpstreamSource`, and a forward reference in a `type` alias leaves the tuple partially unknown to the type checker — which then cannot see the unpack that consumes it.
+Attempt = tuple[AsyncIterator[bytes], UpstreamSource, BlockAssembler, BlockBuffer]
+
+
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,7 +86,8 @@ class ReplaySupport:
 
     ledger: RetryLedger
     eligible: Callable[[Exception], RetryReason | None]
-    reopen: Callable[[], Awaitable[Attempt | None]]
+    # Given the failure it is replacing. The caller decided this one was replayable and is the only place that can record what it was: a transparent replay that succeeds neither hands over nor re-raises, so without this the exception is gone and the completion line carries an attempt count and nothing else. Being invisible to the *client* is the point of a transparent replay; being invisible to the operator is not.
+    reopen: Callable[[Exception], Awaitable[Attempt | None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,40 +253,6 @@ async def one_shot_delivery(chunks: AsyncIterator[bytes]) -> AsyncGenerator[byte
         yield bytes(body)
 
 
-class UpstreamSource:
-    """The upstream side of the byte stream, named by the caller so that what it raises can be told from what this side raises.
-
-    Positive identification, and on the *upstream* side rather than this one. It used to be the other way round: a marker set at each place this side ran code, so that everything unmarked defaulted to upstream's. That list is unbounded by construction — a review made this loop's own SSE reader raise and watched the bug get handed to the client as upstream's — while everything upstream produces passes through one point.
-
-    **Which point that is, is the caller's to say, and it is not the iterator delivery receives.** `inference.py` composes four layers over `response.aiter_bytes()`, and the line does not fall at either end of them: the attempt deadline and the idle timeout are guards that exist to state an upstream condition, so they belong below it, while `_counted_upstream` is this side's bookkeeping and belongs above. Constructed here in the middle of that stack rather than around the whole of it, delivery is handed the composite and this object separately, and asks only this object what it raised. A bug in the byte counter is this side's again — measured, `handed_local_counter_bug` is now `False` where it was `True` at `62a457f`.
-
-    A class rather than a generator. A generator could be written safely — `await source.__anext__()` inside the `try`, the `yield` outside it, the same shape `_commit` and the keep-alive use — but the safe and the unsafe spellings look alike, and the unsafe one records a consumer's `athrow` as upstream's. `__anext__` has no window to get wrong. `CancelledError` is not an `Exception` and is not tagged, which is what keeps `finish_stream_cleanup` cancelling the in-flight pull from reading as an upstream tear.
-    """
-
-    def __init__(self, source: AsyncIterator[bytes]) -> None:
-        self._source = source.__aiter__()
-        # The exception this iterator raised, if it has. Compared by identity downstream, so a later attempt's tear cannot be mistaken for this one's.
-        self.tear: Exception | None = None
-
-    def __aiter__(self) -> AsyncIterator[bytes]:
-        return self
-
-    async def __anext__(self) -> bytes:
-        try:
-            return await self._source.__anext__()
-        except StopAsyncIteration:
-            raise
-        except Exception as tear:
-            self.tear = tear
-            raise
-
-    async def aclose(self) -> None:
-        """Delegated, because `read_events` closes the byte stream under it and that is what releases the upstream response."""
-        closer = getattr(self._source, "aclose", None)
-        if closer is not None:
-            await closer()
-
-
 async def stream_delivery(
     chunks: AsyncIterator[bytes],
     assembler: BlockAssembler,
@@ -394,7 +399,7 @@ async def _deliver(
                 # Unreachable from here now that the same question is answered above, and kept because this is a switch over everything the verdict can say — a branch that silently fell through to the hand-over is what turned a finished turn into a synthesised interruption in the first place.
                 break
             if verdict.ending is StreamEnding.REPLAY:
-                replacement = await replay.reopen()
+                replacement = await replay.reopen(torn)
                 if replacement is not None:
                     # Everything the failed attempt built is dropped, not carried: a fresh assembler so no draft of its survives, and a fresh buffer so a block it completed but never delivered cannot be delivered twice. `session` goes with the buffer. Legal only because the verdict required nothing to have been committed — there is no frontier here to preserve, and none to roll back.
                     chunks, upstream, assembler, buffer = replacement

@@ -151,6 +151,8 @@ class RequestTrace:
     requested_model: str = ""
     model: str = ""
     attempts: int = 1
+    # What the first replayed attempt was replacing, when there was one. A transparent replay is invisible to the client by design, and until this existed it was invisible to the record too: a successful second attempt neither hands over nor re-raises, so `retries=1` was the whole account and the exception that caused it was gone. `None` means nothing was replayed.
+    replaced_failure: str | None = None
     detail: str = ""
     # What the HTTP status cannot say. A streaming status is fixed the moment the response headers arrive, so everything that happens over the next several minutes — the stream stopping mid-turn, upstream tearing, the client leaving — leaves it at 200. `None` means the status code is the whole story.
     status_override: LogStatus | None = None
@@ -231,6 +233,7 @@ def log_completion(chain: Chain, trace: RequestTrace, status_code: int | None, *
         count_provider_reason=trace.count_provider_reason,
         dialect=trace.dialect,
         attempts=trace.attempts,
+        replaced_failure=trace.replaced_failure,
         detail=trace.detail,
         upstream_conn=trace.upstream_conn,
         losses=trace.losses,

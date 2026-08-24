@@ -1085,7 +1085,7 @@ def _replay_over(attempts: list[list[bytes]]) -> ReplaySupport:
     """Hand out one fresh attempt per call, each with its own assembler and buffer."""
     remaining = list(attempts)
 
-    async def reopen() -> Attempt | None:
+    async def reopen(_replacing: Exception) -> Attempt | None:
         if not remaining:
             return None
         # Its own marker, as production gives a replayed attempt: a tear the previous attempt recorded must not read as this one's.
@@ -1321,6 +1321,50 @@ async def test_a_bug_in_this_sides_sse_reader_is_not_handed_over_as_upstreams(
     assert handed == [], "this side's bug is not the client's to carry on from"
 
 
+@pytest.mark.asyncio
+async def test_a_client_that_leaves_releases_the_upstream_through_every_layer() -> None:
+    """The release chain has to survive the composition production actually uses, not the one tests find convenient.
+
+    `delivering(...)` makes the marker and the composite the same object, so every existing close test walks a one-layer chain and cannot see this. Production stacks four, and `_counted_upstream` was the one that consumed its iterator with a bare `async for` — it closed itself and released nothing under it. `read_events` closes the outermost, the client deadline closes the counter, and the chain stopped there: the marker, both guards and the upstream response stayed open until the collector reached them.
+
+    Measured at `1a34042` and at its parent alike, so it was not introduced by naming the marker — but the docstring on `UpstreamSource.aclose` claimed `read_events` closed the byte stream under it, and in this composition it did not.
+    """
+    closed: list[bool] = []
+
+    async def raw() -> AsyncIterator[bytes]:
+        try:
+            for payload in anthropic_stream("first")[:3]:
+                yield payload
+            # Still open as far as upstream is concerned, which is the state a client leaves behind.
+            await asyncio.sleep(30)
+        finally:
+            closed.append(True)
+
+    def counted(request_id: str, count: int) -> None:
+        """The registry call `_counted_upstream` makes; this test is about the close chain, not the counting."""
+
+    chain = cast(Any, SimpleNamespace(active_requests=SimpleNamespace(add_bytes=counted)))
+    trace = RequestTrace(method="POST", path="/v1/messages", request_id="probe", started=time.monotonic())
+    marker = UpstreamSource(
+        with_deadline_at(with_idle_timeout(raw(), timeout_seconds=0), deadline_at=None)
+    )
+    delivery = stream_delivery(
+        _counted_upstream(marker, chain, "probe", trace),
+        AnthropicAssembler(),
+        upstream=marker,
+        buffer=BlockBuffer(policy="block"),
+        settings=StreamSettings(sse_ping_interval=0),
+        framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
+    )
+    async for _ in delivery:
+        break
+    assert closed == [], "the premise: upstream is still open while the client is reading"
+
+    await delivery.aclose()
+    # Immediately, not after a tick: an owner still holding the source keeps it open for as long as it holds it, so a collector cannot be what releases the connection.
+    assert closed == [True]
+
+
 class _ExplodingRegistry:
     """Stands in for `ActiveRequestRegistry` so the real `_counted_upstream` can be driven into a bug."""
 
@@ -1537,7 +1581,7 @@ async def test_a_finished_turn_survives_a_failure_nothing_recognises(policy: str
     """
     reopened = 0
 
-    async def reopen() -> Attempt | None:
+    async def reopen(_replacing: Exception) -> Attempt | None:
         nonlocal reopened
         reopened += 1
         return None
