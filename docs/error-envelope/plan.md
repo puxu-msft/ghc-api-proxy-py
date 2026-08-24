@@ -1,6 +1,6 @@
 # 错误信封：实施计划
 
-**这份是活文档**。规范判据在 [spec.md](spec.md)（2026-08-23 冻结，含一处冻结后修订）；本文只答「按什么顺序做、每片怎么验」。
+**这份是活文档**。规范判据在 [spec.md](spec.md)——**它同样是活文档，不冻结**，随新裁定与新发现当场修订，某条何时因何而变见它的条款修订记录；本文只答「按什么顺序做、每片怎么验」。
 
 **v2**，采纳计划评审 [reports/260823-plan-review.md](reports/260823-plan-review.md) 的 4 条 blocker、10 条 major、1 条 minor，**全部**。处置见 [reports/260823-plan-review-disposition.md](reports/260823-plan-review-disposition.md)。v1 的切片划分（S0～S6）**不再使用**——它的 S1、S2、S6 都不是自洽的语义单位。
 
@@ -95,6 +95,8 @@ Spec §6.1、§6.3、§7。
 - 静态：同时断言 `set(anthropic_mapping) == set(ErrorCategory)` 与 `set(values) <= sdk_union`。**union 从 `anthropic.types.shared.error_type.ErrorType` 取，不扫目录做正则**。两种变异——删一行、改坏一个值——都必须红。
 - 行为：从真实入口分别触发客户端截止、上游撕裂、本侧 `BufferCapExceeded`，断言实际收到的 Anthropic `error.type` 对应 Spec 的 `TIMEOUT` / `NETWORK` / `INTERNAL`。这同时证明接线与分类，不只证明表的内容。
 - module-boundary：断言 generic `stream.py` 不直接 import `formats.*`。
+- **信封形状护栏**（2026-08-24 新增，依据 Spec §6.3 的两条硬约束）：断言 anthropic-messages 流式 error 帧的 payload **顶层没有 `message` 键**、且 `error.type` 在嵌套的 `error` 对象里。判据不要写成「等于某个字面串」，而要钉住结构——扁平化是唯一要拦的变异。正样本对照：把 framer 改成扁平输出，该断言必须变红。理由与实测见 [reports/260824-claude-code-sse-retry-behavior.md](reports/260824-claude-code-sse-retry-behavior.md)；形状判定可用同目录探针复现。
+  - **不在本片内**：Spec §6.3 第 2 条的「错误帧必须早于第一个非 thinking 内容块」是**交付时机**约束，不是成帧约束，落点在块级交付那一侧而非 framer。本片只固化形状，时机留待 `.dev/docs/delivery-keepalive/` 那边排期，**在此登记以免被静默漏掉**。
 
 ### R　流内失败事件：typed seam、直连原样重放、翻译过 IR
 

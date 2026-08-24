@@ -1,15 +1,16 @@
 # 错误信封：直连透传 / 翻译过 IR
 
-**这份是 Spec**，答「应该是什么样」，规范性。**2026-08-23 冻结**——§10 的两项已由用户裁决，本文的规范条款自此为实施的判据。变更需要新的裁决或新的评审共识。
+**这份是 Spec**，答「应该是什么样」，规范性。**这是活文档，不冻结。** 新的用户裁决、实测或发现一旦与本文任何一处冲突或限定它，**当场修订本文**——不把已知错误的条款留在原地，也不把修正寄存到延后台账或评审报告里。§10 的两项已由用户裁决。权威永远是本文的当前版本；某条何时因何而变，读下面的条款修订记录。
 
-**冻结后的修订**：
+> **2026-08-24 用户裁定**：全面废除「spec 冻结」规则，spec 必须按新裁定不断更新。此前本文第 3 行声明「**2026-08-23 冻结**——本文的规范条款自此为实施的判据。变更需要新的裁决或新的评审共识」，**该声明作废**。下表原名「冻结后的修订」，现名「条款修订记录」；**表内条目原文一字未动**——它们记录的是发生过的事实，作废的是「冻结」这个框架，不是这些记录本身。同期改写的规则正文见 `.claude/rules/00-development-workflow.md` 与 `.github/copilot-instructions.md`。
+
+**条款修订记录**：
 
 | 日期 | 条款 | 变化 | 依据 |
 |---|---|---|---|
 | 2026-08-23 | §5.1 | 补全 `ProviderError` 家族五个子类；冻结时的表只列了其中两个，而 `EndpointNotSupported` 已被实测证明可达 | 计划评审 [reports/260823-plan-review.md](reports/260823-plan-review.md) F-04，我方独立复现 |
 | 2026-08-23 | §6.4 | 补上一条例外：**流式帧上 `code` 是唯一能承载「谁的错」的通道**。§6.4 原文说「真正保住客户端动作差异的是 status 与 `x-should-retry`，不是 `code`」——那对非流式成立，对流式不成立，因为 status 在响应头发出时就已定死 | 实施 I 片时由既有测试暴露：两条流式测试原本靠 `internal_error` / `upstream_error` 的区分，而 Anthropic 的真实词汇表把两者都写作 `api_error` |
-
-冻结后的修订走评审共识而非用户裁决，因为改的是我推导出的映射表，不是用户裁定的那两条原则。
+| 2026-08-24 | §6.2、§6.3 | **§6.2 的重试依据只覆盖两个 SDK，不覆盖主产品路径上的客户端。** 补上「按腿分列」的限定与 Claude Code 一列；§6.3 补上 anthropic-messages 流式必须用**嵌套**信封的客户端侧理由，以及错误帧**时机**决定客户端重不重试这一条 | 实测 Claude Code 2.1.241 反编译源码，[reports/260824-claude-code-sse-retry-behavior.md](reports/260824-claude-code-sse-retry-behavior.md)，形状判定可用同目录探针复现。原登记为延后项 E-9 待裁；2026-08-24 裁定废除冻结后，按新规则「台账不得存放已知错误的 Spec 条款」直接并入正文，E-9 撤销 |
 
 ## 修订记录
 
@@ -236,6 +237,8 @@ v2 把「枚举已存在」当成「IR 已存在」，是从 v1「在错误的�
 
 **只定义 `type` 字符串不足以定义客户端动作。** 两个 SDK 都按 HTTP status 选异常类，且都默认重试 **408 / 409 / 429 / ≥500**，都识别 `x-should-retry`（实测四条，`_base_client.py` 逐条核对）。
 
+⚠️ **上一句只覆盖 anthropic-sdk-python / typescript，且只覆盖非流式腿。** 主产品路径上的客户端是第三个——Claude Code——它不走那套：构造 SDK client 时传 `maxRetries: 0`（`app.pretty.js:429164`、`428607`），SDK 自带重试整个不生效，改由自己的判据驱动（`Ftw`，`273461`）。下表**在非流式腿上对它同样成立**（`Ftw` 重试 408/409/429/≥500、识别 `x-should-retry`），**但在流式腿上这张表的两个杠杆都够不着**：status 在响应头发出时就已定死（§6.4 已就 `code` 认过这一点），而 `x-should-retry` 对流内 error 帧同样无效——流内错误不经过 `Ftw`。流式腿的实际判据见 §6.3。实测 Claude Code 2.1.241，证据与可复现探针见 [reports/260824-claude-code-sse-retry-behavior.md](reports/260824-claude-code-sse-retry-behavior.md)。
+
 | `ErrorCategory` | status | 默认 `code` | `x-should-retry` |
 |---|---|---|---|
 | `CLIENT` | 400 | `invalid_request` | —（400 本就不重试） |
@@ -253,6 +256,8 @@ v2 把「枚举已存在」当成「IR 已存在」，是从 v1「在错误的�
 
 **直连路径上，status 来自上游而不是这张表**（§3.1）。这张表管的是本代理产生的错误，以及翻译路径上重新渲染的错误。
 
+**`x-should-retry` 那一列只对非流式腿有意义。** 流式腿上响应头早已发出，该列写什么都不影响客户端动作。特别是 `RATE_LIMIT` 行的「保留 SDK 默认重试」——非流式腿的 429 确实被重试，但**流内 `rate_limit_error` 帧不会让 Claude Code 发起任何重试**（它的 `rate_limit_error` 谓词只被状态码归一化函数消费，重试判据从不引用）。同一 category 两条腿行为不同，这张表只描述其中一条。
+
 ### 6.3 各方言的 carrier：JSON 与流式分别列
 
 **v2 说「SSE 的 error 帧与 JSON body 是同一个信封的两种包装」，对 OpenAI Responses 不成立**——它的 `ResponseErrorEvent` 是**扁平**的 `{"type":"error","code","message","param","sequence_number"}`，事件 `type` 固定为字面量 `"error"`，没有嵌套 `error` 对象，也没有独立的 category 字段。现有 `ResponsesFramer.error()` 正是因此把 category 放进 `message` 而不是复用 JSON 信封。
@@ -265,6 +270,11 @@ v2 把「枚举已存在」当成「IR 已存在」，是从 v1「在错误的�
 | `openai-chat-completions` / `openai-embeddings` | `{"error":{"message":…,"type":<vocab>,"param":…,"code":…}}` | 该腿今天没有 framer，见 §8 |
 | `openai-responses` | 同上 | `event: error` + **扁平** `{"type":"error","code":…,"message":…,"param":…,"sequence_number":…}`；category 走 `code` |
 | `gemini-generate-content` | `{"error":{"code":<int>,"message":…,"status":<VOCAB>}}` | 未实现（§11） |
+
+**anthropic-messages 流式腿的两条硬约束**（实测 Claude Code 2.1.241，[reports/260824-claude-code-sse-retry-behavior.md](reports/260824-claude-code-sse-retry-behavior.md)）。这条腿上客户端是否重试，只由错误帧的**形状**与**时机**决定，与 status、与 `x-should-retry` 都无关：
+
+1. **信封必须嵌套，顶层不得带 `message` 字段。** 上表已经是这个形状，但此前没有写下理由，属于巧合正确、无护栏。Claude Code 的判据是对错误对象序列化后的整串做子串匹配 `'"type":"overloaded_error"'`；扁平信封（如 Responses 的 `ResponseErrorEvent` 那种 `{"type":"overloaded_error","message":…}`）会让它的 `makeMessage` 取到顶层 `message` 而不拼整串 JSON，匹配必然失败，重试静默失效。**因此本腿不得为了向 Responses 的扁平形状对齐而改动此信封。** 线上字节的空格与缩进不影响判定（客户端先 parse 再重新序列化），起作用的只有嵌套结构本身。
+2. **`OVERLOADED` 是本腿唯一能触发客户端重试的类别，且必须赶在第一个非 thinking 内容块之前发出。** 一旦已有正文块交付，任何流内错误都只会被定格成 partial 并追加一句「可能不完整」，客户端不再重试。这意味着「发什么」之外还有「什么时候发」——与块级交付直接相关，见 `.dev/docs/delivery-keepalive/`。本 Spec 只登记这条约束，**是否加守卫测试固化它，由 [plan.md](plan.md) 排期**。
 
 ### 6.4 `code` 是本项目的扩展，不是方言天然提供的通道
 
