@@ -499,7 +499,9 @@ async def _deliver(
         #
         # **Not** asked before the block-boundary close above. That ending reports no error, so line 30's 将报错合成为 never reaches it, and the 2026-08-22 ruling that made it a clean close stands untouched.
         #
-        # `_hand_over` re-asks `session.finish()`, which already ran above; it returns nothing the second time and the call is kept for the ending that reaches it having flushed nothing. It answers `None` when nothing whole was ever committed — the same gate line 30 states — and this then falls through to the error frame below, which is the ending it always had.
+        # `_hand_over` re-asks `session.finish()`, which already ran above; it returns nothing the second time, and the call is kept rather than special-cased because the torn path reaches the same function having flushed nothing.
+        #
+        # Its `committed_count == 0` gate — the same one line 30 states — cannot fire from here, and the first draft of this comment claimed it could. Reaching this line means `client_has_bytes` is set, and the only thing that sets it is a block going out; a turn that committed nothing returned a dozen lines above, with an empty body and no frame of any kind. That ending is pre-existing and this change does not touch it. Measured by an independent review, 2026-08-24.
         handed_over = _hand_over(
             continuation,
             session,

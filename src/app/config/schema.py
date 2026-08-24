@@ -236,9 +236,11 @@ class ClientDeliveryConfig(Section):
     #
     # `end_turn` is available and is what this used to fall back to, but it claims a turn upstream never claimed.
     #
-    # **Empty turns the whole refinement off**: a clean EOF with no terminal event goes back to being an SSE error, which is what this did before 2026-08-22 and what an operator who would rather see a loud truncation than a quiet one should set. It is an off-switch rather than a third wire shape because the alternative — closing the message with no `message_delta` at all — needs a framing path neither format has, and buying one for a case nobody has asked for is the wrong trade.
+    # **Empty turns the whole refinement off**: a clean EOF with no terminal event goes back to being reported as a failure, which is what this did before 2026-08-22 and what an operator who would rather see a loud truncation than a quiet one should set. It is an off-switch rather than a third wire shape because the alternative — closing the message with no `message_delta` at all — needs a framing path neither format has, and buying one for a case nobody has asked for is the wrong trade.
     #
-    # Only reached at a block boundary. A stream cut *through* a block is a truncation whatever this says, and still ends in an error.
+    # **What that failure looks like on the wire stopped being only an SSE error on 2026-08-24.** Since then a reported failure with a whole block already delivered is offered to the hand-over first, so on the production shape — an Anthropic Messages client with the continuation tool configured — emptying this yields a `turn_interrupted` tool call rather than `incomplete_responses_stream`. The SSE error is what remains when the hand-over does not apply. Loud either way, which is what an operator setting this is asking for; but it is not the same frame, and this comment used to promise the frame.
+    #
+    # Only reached at a block boundary. A stream cut *through* a block is a truncation whatever this says, and still ends in a reported failure — which, by the same 2026-08-24 change, is a hand-over where one applies.
     unterminated_stream_stop_reason: str = "incomplete"
     hedge: HedgeConfig = Field(default_factory=HedgeConfig)
 
