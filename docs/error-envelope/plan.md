@@ -53,7 +53,7 @@ Spec §4、§5。**评审 F-06 指出 v1 的致命问题**：`ErrorCategory` 从
 - 断言 `set(每张方言表) == set(ErrorCategory)`；变异：删一行、改坏一个值，都必须红。
 - module-boundary：新解释器导入 `app.errors` 仍只加载它自己。
 
-### J　JSON 出口：统一工厂、直连透传、全部早期出口、Gemini 501
+### J　JSON 出口：统一工厂、直连透传、全部早期出口、Gemini 501 —— **已完成**，主仓 `c4216f7`
 
 Spec §2、§3.1、§3.3、§5.1、§6.1～§6.4、§9、§10.1。**第一个改变可观测行为的切片，也是必须一次做完的那个。**
 
@@ -67,6 +67,13 @@ Spec §2、§3.1、§3.3、§5.1、§6.1～§6.4、§9、§10.1。**第一个改
 - JSON writers（Anthropic / OpenAI 三种 / Gemini）随本片落地——**按首个生产消费者切，不提前建**（评审 F-07：本项目已为「原语留在没人调用的链路上」付过代价）。
 - `UnknownModel → 404`、`TranslatorNotFound → 501` 的行为变更在本片发生（评审 F-08：接了 `describe` 就必然发生，不可能推到后面）。
 - `x-should-retry: false` 的**唯一生产者**写死：classifier 决定 category/status/default code，HTTP 边缘只在代理自产的 `INTERNAL` / `NOT_IMPLEMENTED` 上合成该头；**直连上游错误不得覆盖上游原头**。
+
+**落地后的三条修正**（都由变异暴露，三条变异原本没打红）：
+1. `headers["content-type"] = ...` 是**死代码**——`Response(media_type=...)` 已经在做，那行看起来像机制而不是。已删。
+2. `x-should-retry` 条件里的 `not direct` **今天不可达**：没有任何上游状态码映射到 `INTERNAL`／`NOT_IMPLEMENTED`（`category_for_status` 把所有 ≥500 送到 `UPSTREAM`）。保留该项并在注释里写明它是结构性而非可达的，同时把那条假装在检查它的测试改名、改成它真能观察的事。
+3. writer 原本可以**无条件**附上 `upstream_error` 而所有断言照样通过——缺一条「能读懂时它不出现」的缺席断言。已补。
+
+**另外补了一个真实遗漏**：`CountTokensRequestError` 没有分类分支，落到 `INTERNAL`／500 而 Spec 说 `CLIENT`／400。它已从 `driver` 搬到 `count_tokens`，这样分类器能指名它而不必把整条请求管线拖进来。
 
 **验**（评审 F-12：现有判据分不出「真透传」与「解析后重新序列化成相同 JSON」）：
 - 真实 ASGI 入口 + MockTransport。直连样本用 `b"\xffraw-body"` 或带 BOM 的字节，**普通 JSON 样本不行**——错误实现 parse 再 dump 也能相同。
