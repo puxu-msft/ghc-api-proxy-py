@@ -46,6 +46,8 @@
 | Claude Code 对不认识的工具名发回 `No such tool available` 的 tool_result，**不崩溃**，对话继续 | 代码事实 | `~/.claude/skills/debugging-claude-agent-tools/reference/source-symbols.md:21` |
 | 前身 `copilot-api-js` 的 `max_tokens` 处理**只接在 Anthropic 直连腿**，Responses 腿的谓词零调用点；官方 `vscode-copilot-chat` 对被截断的 tool call 是静默丢弃 | 代码事实（八个参考仓） | `reports/260821-reference-projects-max-tokens.md` |
 | live 链路的重试**只存在于上游响应头到达之前**，无退避无 jitter；**读流中断零重试** | 代码事实 | `reports/260821-upstream-error-handling-survey.md` |
+| 交付层的「这是谁的失败」按**上游侧正向识别**：`inference.py` 把 `UpstreamSource` 构造在四层 wrapper 的中间——两道陈述上游状况的守卫在它之下，本侧的字节计数器在它之上 | 本次实测（真实 `_counted_upstream`，让 registry 在第 4 个 chunk 抛错）：`handed_local_counter_bug` 从 `True`（`62a457f`）变 `False`（`1a34042`），异常改为如实抛给调用方。接线另由服务端真实入口的集成测试钉住，变异回「包住整条 composite」即变红 | `deferred.md` §22之六 |
+| 交接是唯一会吞掉异常的结局，其原因现在记在完成行上 | 本次实测：不记录它，集成测试在 `assert 'RemoteProtocolError' in ...` 变红，印出旧那行 `turn handed back to the client to continue`（无 cause） | `deferred.md` §22之七 |
 
 ## 本仓实际发出的 MCP 工具调用（给改 MCP server 那一侧看）
 

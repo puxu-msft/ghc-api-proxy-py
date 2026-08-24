@@ -324,31 +324,29 @@ if replay is None or reason is None:
 
 **未处置，需裁决**：归档／删除，还是写出保留它们的外部契约。本次不擅自动手（`never-delete-implemented-functionality-unsolicited`），也不因为「顺手」就扩大上一次裁决的范围。
 
-### 22 之六. 本侧的 `_counted_upstream` bug 仍被标成上游
+### 22 之六. ~~本侧的 `_counted_upstream` bug 仍被标成上游~~ —— 已修（2026-08-24，主仓 `1a34042`）
 
-反转后的判据正向识别上游：`_UpstreamSource` 包住交给 `stream_delivery` 的字节迭代器，`torn is upstream.tear` 即上游。**但那个迭代器是调用方给的，生产里它不是 raw response**——`inference.py` 交过来的是 `with_client_deadline_at(_counted_upstream(with_deadline_at(with_idle_timeout(response.aiter_bytes()))))`。其中两个 guard 存在的意义就是代表上游状况（超时、空闲），归到上游侧是对的；而 `_counted_upstream` 是本侧记账（更新时间、`RequestTrace`、`ActiveRequestRegistry`），它的 bug 被标成上游。
+**修法是「让调用方指明」，不是再加一张表。** `UpstreamSource` 不再由 `stream_delivery` 包住它收到的任何东西，而是由 `inference.py` 构造在那四层的**中间**：attempt 时限与空闲超时在它之下（这两道守卫存在的意义就是陈述上游状况），`_counted_upstream` 在它之上（本侧记账）。交付层拿到 composite 与这个对象两样，只问后者「你抛过什么」。重放的那次拿自己的新 marker。
 
-评审用**真实的 `_counted_upstream`** 让 `active_requests.add_bytes` 在第 4 个 chunk 抛错（前三个已凑成一个完整块，交接门可达），实测：本侧计数器的 bug 被交接成 upstream，调用方既拿不到原异常、也不留 proxy failure 的痕迹。反方向做了正样本对照：raw source 抛的异常穿过真实 `_counted_upstream` 后，交接拿到的仍是同一个对象。
+实测（用**真实的** `_counted_upstream`，让 `active_requests.add_bytes` 在第 4 个 chunk 抛错）：
 
-**这不是本次引入的回归。** 反转之前判据是 `ours = isinstance(torn, DeliveryError) or torn is raised_here`，`_counted_upstream` 的 bug 两者都不是，同样落 `not ours`。反转改的是标记的方向，没有改这条接缝的结局。本次真正引入的是**注释里的过度断言**（说上游产生的每个字节从这个迭代器进来、别无他途），已收窄。
+| | `62a457f` | `1a34042` |
+|---|---|---|
+| `handed_count` | 1 | **0** |
+| `handed_local_counter_bug` | True | **False** |
+| `returned_cleanly` | True | **False**（异常如实抛给调用方） |
 
-**修法需裁决，因为它改 `stream_delivery` 的签名**：正确做法是让调用方指出 raw source（在 `inference.py` 里先包 `_UpstreamSource(response.aiter_bytes())`，再套 guard，把 marker 一并传进来），而不是由 `stream_delivery` 猜它拿到的是什么。代价是两个 guard 的异常此时落在 marker 之外，需要显式认定它们代表上游状况——那会引入一张小类型表，而反转的初衷正是消灭类型表。**两种取舍都要用户点头**，本次不擅自决定。
+**接线单独验过。** 判据的单测自己摆放 marker，所以它证明不了生产摆对了——这正是本项目栽过两次的形状。另加一条集成测试，把真实 `_counted_upstream` 调用的那个 registry 换成会抛错的，走服务端真实入口；把 marker 变异回「包住整条 composite」，该测试变红，并在日志里印出缺陷本身：`turn handed back to the client to continue after LookupError("bug in this side's byte counter")`。
 
-### 22 之七. 裸 `H2Error` 里有一小撮不是对端造成的
+**代价如实记**：`stream_delivery` 的签名变了（多一个 `upstream` 关键字参数），30 处测试调用点改为经一个夹具函数 `delivering(...)`，该夹具的 docstring 写明「测试里没有 wrapper，所以 marker 就是整条链——而对每个测试都正确的那个默认值，恰恰是生产里错的那个」。这是刻意不给默认值的理由。
 
-`_CONNECTION_ERRORS` 映射整个 `h2.exceptions` 族，依据写在 `errors.py` 那段注释里的两个条件。**第二条曾被我写成全称，评审推翻了**：httpcore 的 body 路径除了 `receive_data`，还对每个 `DataReceived` 调 `acknowledge_received_data`（`httpcore2/_async/http2.py:286-300`），它同样不在任何 converter 里。评审用真实的 `_receive_response_body` 加一份故意不一致的 event ledger，造出了裸的本地 `NoSuchStreamError`，当前 normalizer 把它写成 `network` 重试。
+### 22 之七. h2 残留：归因仍在，**但不再是静默的**（2026-08-24 部分处置，主仓 `1a34042`）
 
-**我为保留族级映射给出的理由被第三轮推翻了。** 我写的是「残留是依赖自己的记账不变量、不是本仓代码，映射成网络重试的代价是花掉预算然后浮出来」——**控制流里没有这个「然后浮出来」**：`decide_stream_ending` 只在 `downstream_opened=False` 时才 `ledger.take()`（`src/app/pipeline/retry.py:138-143`），已交付过块就直接 `ABANDON`、不花预算，随后 `ours=False` 进交接、clean return，异常既不上抛也不留 proxy failure。评审把第二轮那个真实反例延长到「已提交一个块」的场景实测：`handed_count=1`、`returned_cleanly=True`、`contains_proxy_failure=False`。
+**已闭合的一半**：交接此前是唯一会把异常吞掉、且不留任何记录的结局——它不 re-raise，于是 `_StreamAccounting.failure` 永远是 `None`，完成行只说「turn handed back」而不说从什么手里接过来的。现在被吞掉的异常记在 `handed_over_error` 上，完成行照这条路径上其他每一种结局的做法把它引出来。变异验证：不记录它，集成测试在 `assert 'RemoteProtocolError' in ...` 变红，印出的正是旧那行。
 
-所以**代价由位置决定，不由错误的种类决定**：没交付过就买一次透明重放、预算耗尽后浮出；交付过就被吞成 `upstream`。而这与 §22之六 那条本侧计数器 bug 的结局**逐字同形**。
+**仍然存在的一半**：httpcore 在 body 路径上除了 `receive_data` 还调 `acknowledge_received_data`，那里抛出的裸 `H2Error` 是**依赖自己的记账不变量**被破坏，而它在 marker **之下**，所以仍被归为上游。这一格从外部看不进去——除非放弃族级映射，而那会把本项目已经付过代价的那个真实故障（GOAWAY 从缺口裸奔）重新打回 `internal` 且不可重放。
 
-注释已改成如实写代价，不再用那个被推翻的比较。
-
-那道守卫**也被推翻过两次**，现已按它实际能做的事改名为 `test_h2_is_imported_only_for_its_types`：最初是五个模块名的黑名单，评审用 `from h2 import connection` 走过去；改成白名单后四种拼法全拦住，但评审又指出白名单允许 `h2.exceptions`，于是本仓自己 `raise H2Error(...)` 照样绿——**那正好造出这个映射当作对端来源的那种裸异常**，而且 `importlib.import_module` 这类动态导入根本不产生 AST 节点。所以它不再被 `errors.py` 当作成立条件，只当一个廉价信号：**新增一个静态 h2 import 得先被争论过**。
-
-**未处置，且与 §22之六 是同一个问题的两半**：交接现在没有任何拼法能说「这不是上游的」，于是本侧 wrapper 的 bug 与依赖内部的不变量破坏都会以 `upstream` 抵达并被吞掉。
-
-**给用户的裁决题目**：要不要让归因从「猜」变成「调用方指明」。候选（各有代价，不是唯一路径）——(i) 在 `inference.py` 先包 raw source 再套 guard、marker 传进 `stream_delivery`（改签名，且需显式认定两个 guard 代表上游状况，会引入一张小类型表）；(ii) 让 `_counted_upstream` 自己把本侧 coding error 包上明确的本地来源（不改外层入口）；(iii) 让带 marker 的 source record 穿过 wrapper。**不裁决也是一个选择**——那意味着接受「交接一律说 upstream」这个现状，接收端据此理解即可。
+**取舍现在是明账**：这类失败会被当成网络故障，且——这是新的——**会在完成行上留下它的类型与消息**。此前它既被误归因、又无声无息；现在只剩前者。要不要为消除前者放弃族级映射，仍是产品裁决，但它不再是一个看不见的问题。
 
 ### 22 之四. 一条状态断言在写下时就已经过期
 
