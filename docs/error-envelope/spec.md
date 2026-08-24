@@ -11,6 +11,7 @@
 | 2026-08-23 | §5.1 | 补全 `ProviderError` 家族五个子类；冻结时的表只列了其中两个，而 `EndpointNotSupported` 已被实测证明可达 | 计划评审 [reports/260823-plan-review.md](reports/260823-plan-review.md) F-04，我方独立复现 |
 | 2026-08-23 | §6.4 | 补上一条例外：**流式帧上 `code` 是唯一能承载「谁的错」的通道**。§6.4 原文说「真正保住客户端动作差异的是 status 与 `x-should-retry`，不是 `code`」——那对非流式成立，对流式不成立，因为 status 在响应头发出时就已定死 | 实施 I 片时由既有测试暴露：两条流式测试原本靠 `internal_error` / `upstream_error` 的区分，而 Anthropic 的真实词汇表把两者都写作 `api_error` |
 | 2026-08-24 | §6.2、§6.3 | **§6.2 的重试依据只覆盖两个 SDK，不覆盖主产品路径上的客户端。** 补上「按腿分列」的限定与 Claude Code 一列；§6.3 补上 anthropic-messages 流式必须用**嵌套**信封的客户端侧理由，以及错误帧**时机**决定客户端重不重试这一条 | 实测 Claude Code 2.1.241 反编译源码，[reports/260824-claude-code-sse-retry-behavior.md](reports/260824-claude-code-sse-retry-behavior.md)，形状判定可用同目录探针复现。原登记为延后项 E-9 待裁；2026-08-24 裁定废除冻结后，按新规则「台账不得存放已知错误的 Spec 条款」直接并入正文，E-9 撤销 |
+| 2026-08-24 | **新增 §5.5** | **IR 只按状态码分类，做的是转发而不是翻译。** 新增与 `category` 正交的闭集字段 `condition`，首个成员 `CONTEXT_WINDOW_EXCEEDED`：认出上游在说「输入超出上下文窗口」时，`message` 改用 Anthropic 的措辞 `prompt is too long: …`，`code` 按方言拼写。**这不是文案改良**——Claude Code 的识别判据是子串 `prompt is too long`，而它那条 `context window` 判据被 HTTP 413 挡住，于是上游 Responses 腿的 400 在主产品路径上一直认不出，客户端因此不压缩、不重发 | 用户 2026-08-24 提出该场景并要求翻译路径改用 anthropic-messages 的表达。上游形态依据 48 例一手记录 [../upstream/retry-and-continuation/reports/260821-context-limit-400-examples.md](../upstream/retry-and-continuation/reports/260821-context-limit-400-examples.md)；客户端判据依据三版本反编译实测 [reports/260824-claude-code-context-limit-detection.md](reports/260824-claude-code-context-limit-detection.md) |
 
 ## 修订记录
 
@@ -120,6 +121,7 @@ v2 把「枚举已存在」当成「IR 已存在」，是从 v1「在错误的�
 | 字段 | 含义 |
 |---|---|
 | `category` | `ErrorCategory`，见 §4.3。**保留现有 6 个成员的拼写不变**，只新增——`hand_over.py` 与 MCP 侧已在读这些值（契约见 `.dev/docs/upstream/retry-and-continuation/decisions.md` 4.1） |
+| `condition` | `UpstreamCondition`，可为空，见 §5.5。与 `category` 正交：`category` 答「客户端该做什么动作」，`condition` 答「上游具体在说哪件事」。认不出时为空 |
 | `message` | 给人读的一句话。**不得包含 SDK 的实现细节**，见 §4.5 |
 | `status_code` | 告诉客户端的 HTTP 状态。由 §5 的表决定，不是从异常类名猜 |
 | `code` | 稳定标识符。本项目自己的扩展，见 §6.4 |
@@ -204,6 +206,78 @@ v2 把「枚举已存在」当成「IR 已存在」，是从 v1「在错误的�
 
 读穿到 `cause`，按上表判定。今天 `error_status` 已经这样做了一半——它对 `cause` 递归，但递归的终点仍然是那张会把 401/503 打成 502 的表。
 
+### 5.5 上游报告的具体条件：认得的，要说成本代理自己的话
+
+§5.2 只把状态码变成 `category`，那是「客户端该做什么动作」这一层。**它下面还有一层：上游具体在说哪件事。** 用户裁决第 2 条对翻译路径的要求是「有判断力、需要支持的情况，都要先映射到内部已知概念，再按需转出实际格式」——一条只按状态码分类、把上游原句照抄进 `message` 的实现，做的是转发而不是翻译。
+
+因此 IR 增加一个正交于 `category` 的字段 `condition`，取值是一个**闭集**，登记本代理认得的上游条件。**它不改变 `category`、`status_code`，只改变 `message` 与 `code`。** 今天只有一个成员：
+
+| `condition` | 含义 |
+|---|---|
+| `CONTEXT_WINDOW_EXCEEDED` | 请求的输入超出了该模型的上下文窗口 |
+
+#### 5.5.1 判据：怎么认出 `CONTEXT_WINDOW_EXCEEDED`
+
+**恰好三条，命中任一即成立。** 依据是 48 例一手记录，[../upstream/retry-and-continuation/reports/260821-context-limit-400-examples.md](../upstream/retry-and-continuation/reports/260821-context-limit-400-examples.md)：
+
+1. `error.code == "model_max_prompt_tokens_exceeded"`（Copilot 的 Anthropic 腿 27 例，以及 vscode-copilot-chat 录到的 `/chat/completions` 腿）。**强判据**：同腿其余 400 连 `code` 字段都不带。
+2. `error.message` 含片段 `exceeds the context window`（不区分大小写）。这是 Copilot 的 Responses 腿唯一可用的判据——**该腿的 `error.code` 恒为 `invalid_request_body`，与「参数写错」「id 前缀不对」完全同码，零区分力**。
+3. `error.message` 匹配 `prompt is too long: N tokens > M maximum` 或 `prompt token count of N exceeds the limit of M`，且这对数满足 `N > M > 0`。它们同时给出数字，因此这一条由取数函数本身回答，而不是另立一份模式清单——「这句话说的是超限」与「它的数字是这两个」必须不可能各说各话。
+
+**只匹配片段，不匹配整句。** 2026-08-24 用户实测到的上游原句是 `Your input exceeds the context window of this model. Please adjust your input and try again again.`——比 2026-08 记录的 48 例多一个 `again`。上游文案会漂，末句 `Please adjust your input and try again.` 本就是通用尾巴。
+
+**裸片段 `prompt is too long` 不是第四条判据，这是裁决而非疏漏。** 上游会把请求派生的字符串回显进 `error.message`——48 例报告 §3.1／§3.2 的对照组里就有回显工具名与回显 id 两例——所以片段判据是对「客户端能部分左右的文本」下判断。而误判的代价不是文案问题：客户端会压缩历史并重发，上游真正的错误话被整句替换。已记录的每一条含该短语的样本都同时带着 `code` 或数字，因此排除它不损失任何已观测形态。
+
+> **残留风险，写下来而不是回避。** 排除裸片段**并不能**阻止误触发：条件未命中时本代理仍会把上游原句逐字引用进 `message`（`upstream returned 400: …`），于是一条恰好含 `prompt is too long` 的无关上游错误，其字节仍会到达客户端并被它的子串判据命中。判据在这里管的是**本代理是否主张这是一次超限**——不改写、不贴 `model_max_prompt_tokens_exceeded`、保留上游原话——**仅此而已**。这条是 2026-08-24 写那条负控测试时才发现的：两份评审都没有指出它，因为它出现在「不识别」那一侧。不为此裁剪上游原文：那会让代理编辑它唯一被要求原样带过的东西。
+
+**判据只读上游 body；但条件只在 `category` 为 `CLIENT` 时成立。** 这两句不矛盾，答的是两个问题：body 说了什么，与这个状态码上「超限」还能不能是真的。一个 401、429 或 5xx 无论正文写什么都不是超限，而这个区分不是学理上的——客户端对该短语**没有自己的状态码门**，所以一个被改写成超限的 429 会让它立刻压缩并重发，这是被限流时最糟的动作。`CLIENT` 覆盖 400、413、422 与其余 4xx，够用且不含 `AUTH` / `RATE_LIMIT` / `PERMISSION`。
+
+#### 5.5.2 写出：`message` 用 Anthropic 的措辞，`code` 按方言拼写
+
+`condition` 命中时：
+
+- **`message` 由本代理构造，且不带 `upstream returned <status>: ` 前缀。** 认出来了就用自己的话说，前缀是「我在转述别人」的标记，与已经写在 `status_code` 里的数字也重复。
+- 上游给了数字（判据 3，或判据 1 的 Anthropic 腿）时写 `prompt is too long: {current} tokens > {limit} maximum`；上游没给数字（Responses 腿，body 里一个数字都没有）时写 `prompt is too long: the input exceeds this model's context window`。
+- **不得合成数字。** 上限可以从模型目录的 `max_prompt_tokens` 取，当前值只能靠本地估算器猜——一个猜出来的 token 数会被客户端当作实测值显示给用户，比不写更糟。这条是禁令，不是暂缓。
+
+`message` 是**方言中立**的，即 OpenAI 与 Gemini 信封上也写这句 Anthropic 措辞。这是明知而为：把 `message` 变成按方言渲染，就等于把「说什么」搬进只负责「怎么拼」的 writer，而本项目的主产品路径是 anthropic-messages。机器可读的那一半由 `code` 按方言拼写承担：
+
+| `condition` | Anthropic `code` | OpenAI `code` | Gemini `code` |
+|---|---|---|---|
+| `CONTEXT_WINDOW_EXCEEDED` | `model_max_prompt_tokens_exceeded` | `context_length_exceeded` | 不适用，Gemini 信封无 `code` 字段 |
+
+Anthropic 那一列取自 Copilot 自己在 Anthropic 腿上发的原值（27 例一手），OpenAI 那一列是该生态的通行拼写。两者都覆盖 `UpstreamCondition` 全集，要求测试断言 `set(表) == set(UpstreamCondition)`——新增一个成员必须显式拼写才能通过。
+
+#### 5.5.3 为什么必须含 `prompt is too long`：判据是客户端的解析器
+
+**这不是文案偏好，是主产品路径上客户端行为的开关。** 实测 Claude Code 2.1.207 / 2.1.226 / 2.1.241 反编译源码，证据与可复现探针见 [reports/260824-claude-code-context-limit-detection.md](reports/260824-claude-code-context-limit-detection.md)：
+
+- 它的判据是把错误对象整串序列化后 `toLowerCase()`，再 `.includes("prompt is too long")`（2.1.241 的 `Eci`）。**`error.type` 与 `error.code` 完全不参与判定，也没有状态码门。**
+- 它确实另有一条 `context window` 判据，但**被 `status === 413` 挡住**，三个版本都一样。所以上游那句 `exceeds the context window` 在 400 上**永远认不出**。
+- 认出来 ⇒ 触发反应式自动压缩并**重发**请求（`trigger: "ptl"` → `reactive_compact_retry`），用户看到的是压缩后继续；认不出 ⇒ 会话里贴一条 `API Error: 400 {整串 JSON}`，不压缩、不重试、不换模型。
+- 数字是**可选**的：只在「会话不足两组、压无可压」的兜底解释里用 `/prompt is too long[^0-9]*(\d+)\s*tokens?\s*>\s*(\d+)/i` 抠一次；抠不到退化成不带数字的解释，不影响压缩。这正是 §5.5.2 允许无数字写法的依据。
+- `prompt is too long` 是三个版本唯一的最大公约数。`input is too long for requested model` 只对 ≥ 2.1.226 有效；`capability_rejected: prompt_too_long` 是 Claude Code 网关侧的内部协议，**本代理不得伪造**。
+
+**适用限度**：这是未文档化的内部实现，不是稳定契约。本条把它当作「当前实测的兼容目标」，复测锚点是字面量 `prompt is too long`。
+
+**验收时不得用界面文案作判据。** Claude Code 还有一条**本地按 token 估算直接拒发**的路径（`blocking_limit`，2.1.241 `L312326`），一个字节都不上行，却产出与真实识别**逐字相同**的 `Prompt is too long`。所以在界面上看到这句话，推不出代理返回过 4xx，也推不出本条改写生效。要验证识别，判据是**代理侧是否收到紧随其后的第二个（压缩后的）请求**。
+
+**本条采用后代理必须能承受的流量形态**：压缩内部另有两层自愈（摘要请求自身超限则丢历史重发，上限 3 次；反应式摘要逐步退让），代理侧会观察到同一轮里连续多个请求。
+
+§6.3 对 anthropic-messages 的嵌套信封要求在本条上**不**是承重结构，这一点必须写清楚，因为初稿写反了：客户端的 `makeMessage` 在顶层有 `message` 字段时取那一个字段，而扁平信封恰好会把这句话放在那里，所以它照样命中（同目录探针 case I 实测）。嵌套之所以保留，是 §6.3 自己的两条理由——Anthropic carrier 的合法形状，以及 `overloaded_error` 那条判据要求关键词落在会被丢弃的字段里。**不得借用一条被证伪的因果去支撑另一条正确的规范。**
+
+#### 5.5.4 定义域：只覆盖建流前的 HTTP 错误 body
+
+本节只管**上游以非 2xx HTTP 响应报告的失败**，也就是 `_from_upstream` 读到的那一格。上游在流内报告的失败（Anthropic 的 `event: error`、Responses 的 `response.failed` / `response.cancelled`）**不产生 `condition`**。
+
+这不是 §7 的例外，而是它的定义域尚未到达那里：48 例全部是建流前 400，**没有任何一例上下文超限以流内事件到达**。为一个从未观测到的形态建映射，等于替上游发明它会怎么说话——与 [deferred.md](deferred.md) E-10 拒绝为 `max_tokens` 溢出建映射是同一条理由。登记在 E-12，重开条件是拿到一份真实的流内样本。
+
+**这一条是评审逼出来的**：Spec 初稿说 `condition` 命中时「只改变 `message` 与 `code`」而没有说定义域，于是它读起来覆盖全部翻译路径，而实现只覆盖 HTTP 那一格。要么收窄要么补实现，唯独不能沉默。
+
+#### 5.5.5 直连路径不适用
+
+裁决第 1 条优先：直连腿原样透传，上游说什么客户端收到什么。Copilot 的 Anthropic 腿本来就发 `prompt is too long`，客户端在那条腿上一直是好的——**坏的只有翻译腿**，也就是 anthropic-messages 进、openai-responses 出这条主产品路径。
+
 ## 6. IR → 各方言：完整的输出行为
 
 ### 6.1 类别 → 各方言的类型拼写
@@ -253,6 +327,8 @@ v2 把「枚举已存在」当成「IR 已存在」，是从 v1「在错误的�
 | `UPSTREAM` | 502 | `upstream_failure` | 不设 |
 | `INTERNAL` | 500 | `proxy_internal_error` | **`false`** —— 代理自己的 bug，重试同一请求不会好 |
 | `NOT_IMPLEMENTED` | 501 | `not_implemented` | **`false`** —— 否则两个 SDK 都会把它当 ≥500 自动重试，而这个类别存在的理由正是「重试没用」 |
+
+**这张表给的是默认值，`condition` 命中时 `code` 由 §5.5.2 的按方言表覆盖**，`status` 与 `category` 不变。
 
 **直连路径上，status 来自上游而不是这张表**（§3.1）。这张表管的是本代理产生的错误，以及翻译路径上重新渲染的错误。
 

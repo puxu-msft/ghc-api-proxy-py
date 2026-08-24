@@ -20,6 +20,8 @@
 
 **既有的 `test_module_boundaries.py` 四条断言看不见这些性质**（评审实测：新落点下它们仍全绿）。所以要新增两条：`reachable_from("app.errors") == {"app.errors"}`，以及 AST 断言 `app.pipeline` 不导入 `app.server`。
 
+⚠️ **第一条计划在 I 片、实际到 K 片才落地**（`test_the_error_vocabulary_is_a_leaf`），中间三个切片里 `app/errors.py` 的模块 docstring 一直写着「and a test asserts it」而那测试并不存在。叶子性质本身从未被破坏——是**守卫**不存在。同一形状在 `write_error` 的 docstring 上又发生一次（「`_WRITERS` covers every `WireFormat` member, and a test asserts it does」，而 `formats_with_writers()` 零调用者），一并在 K 片补上 `test_every_wire_format_can_be_spelled`。**第二条至今仍未落地。**
+
 ## 切片
 
 顺序即依赖顺序。每片单独提交，每片自身是自洽的语义单位。
@@ -137,8 +139,28 @@ Spec §5.1（清点 E18）。今天异常逃出 `_dispatch`，客户端拿到 `5
 
 **副作用**：`test_a_request_that_raised_on_its_way_out_still_writes_its_one_line` 原本正是拿这个未被保护的 `response.json()` 当「让异常逃出 `_dispatch`」的载体，现在没有自然载体了（另试了四种畸形回复，全部被答复而不是抛出），改为注入。它检查的性质不变。
 
-## 推迟项
+### K　上游条件：认得的说成本代理自己的话 —— **已完成**（待提交）
 
+Spec §5.5。**第一个把「上游具体在说哪件事」纳入 IR 的切片**，此前 IR 只按状态码分类，翻译路径上做的是转发而非翻译。
+
+触发是用户 2026-08-24 报来的一条真实失败：`claude-opus-5 → gpt-5.6-sol`，上游 400 说 `Your input exceeds the context window of this model.`，而主产品路径上的客户端**认不出**它——Claude Code 的 `context window` 判据被 HTTP 413 挡住，于是不压缩、不重发，会话就停在一条 `API Error: 400 {…}` 上。
+
+- `app/errors.py`：`UpstreamCondition`（一个成员 `CONTEXT_WINDOW_EXCEEDED`）、`ErrorInfo.condition`、按方言的 `code` 表与 `condition_code()`、`PROMPT_TOO_LONG_*` 三个常量，以及识别用的正则与 `is_context_window_exceeded()` / `prompt_limit_counts()`。
+- `app/tokenization/limits.py`：`parse_prompt_limit_error` 改为复用上面那份，**删掉本地第二份正则**——同一组措辞此前在两个模块各有一份，而它们服务的正是同一件事。
+- `app/pipeline/error_classify.py`：读 `error.code`，判定条件，命中时 `message` 换成 Anthropic 措辞且**去掉 `upstream returned <status>: ` 前缀**（那个前缀标记的是转述）。
+- `app/pipeline/delivery/formats/errors.py`：三个 writer 收 `wire_format`，`_code()` 让条件的拼写盖过类别默认。
+
+**验**（判据钉的是客户端那条谓词，不是本代理写出的句子）：
+- 真实入口 + MockTransport，上游 body 逐字取自 48 例记录，两种措辞（2026-08 录制的与用户实测漂移过的）都断言**序列化后整串**小写含 `prompt is too long`——客户端就是这么判的。
+- **负控**：同腿、同 `error.code`（`invalid_request_body`）、不相干的 `max_output_tokens` 400，必须不被改写。这条控制是全批里最要紧的一条，因为该 `code` 在这条腿上零区分力。
+- 信封形状：顶层无 `message` 键，即 Anthropic carrier 的合法形状（§6.3）。**这条不是 context matcher 的必要条件**——初稿这么写，被探针 case I 证伪：扁平信封会把这句话放进顶层 `message`，客户端照样命中。保留是因为 §6.3 自己的两条理由。
+- 直连腿仍然逐字节透传上游原文。
+- 数字只来自上游：给了就写 `N tokens > M maximum`，没给就写不带数字的那句，并断言该句**不含任何数字字符**。
+- 变异六条全部打红：分类器不认条件、判据退化成只看 `code`、writer 忽略 `condition`、信封压扁、合成数字、恢复旧措辞。
+
+**没做、已登记**：`input length and \`max_tokens\` exceed context limit` 这条上游条件（客户端对它另有「改参重发」的自愈）在本机 145,781 个 operation 里零命中，**不凭空造映射**，见 [deferred.md](deferred.md) E-10。
+
+## 推迟项
 **都进 D 片建的台账**，本节只是索引：
 
 - **Chat Completions 流式腿的 error carrier**（Spec §10.2，用户 2026-08-23 裁决推迟）。它使 Spec §7 的不变量带例外。`inference.py` 里那句说该腿给出空 body 的注释与实测不符（实测给出的是已到达的上游字节），随 J 片或 F 片修正。

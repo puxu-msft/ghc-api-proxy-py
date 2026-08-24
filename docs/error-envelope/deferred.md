@@ -67,3 +67,35 @@
 **为什么仍值得裁**：两种失败对客户端的价值不同——一个能继续，一个只能重来——而区分它们的是「上游有没有说话」，不是「客户端能不能继续」。翻译腿上没有原样重放的约束，那一侧尤其可以两者兼得。
 
 **闭合条件**：用户裁定上游报告的失败是否也应先经 hand-over；若是，需同时裁定直连腿上它与 §3.4 的优先级。
+
+## E-10　上游条件「input length and max_tokens exceed context limit」未映射
+
+**状态**：新登记，2026-08-24，随 K 片。**未闭合**，等一份真实样本。
+
+**事实**：主产品路径上的客户端对这条措辞另有一套自愈——不是压缩历史，而是**算出可用余量后改小 `max_tokens` 重发**，且要求 HTTP status 恰为 400 并从消息里抠出 `A + B > C` 三个数字（实测 Claude Code 2.1.241 `B9f`，见 [reports/260824-claude-code-context-limit-detection.md](reports/260824-claude-code-context-limit-detection.md) §5.2）。它与 `CONTEXT_WINDOW_EXCEEDED` 是**两件不同的事**：一件是历史太长，一件是「历史 + 你要的输出长度」加起来太长，后者改个参数就能过。
+
+**为什么现在不做**：本机 145,781 个 operation 里这条措辞**零命中**，Copilot 两条腿都没观察到等价条件。凭一份客户端能力去反推一个上游从没发过的条件，等于替上游发明错误——而三个数字里的 `A`（当前输入）本代理拿不到，只能估，`app/errors.py` 的 `prompt_limit_counts` 旁边那条禁令同样适用。
+
+**闭合条件**：拿到一份真实上游 body（Copilot 或其它上游）确实这样报告；届时它是 `UpstreamCondition` 的第二个成员，并需要同时为它补上 §5.5.2 的按方言拼写。
+
+## E-11　完成日志行与线路对同一次失败给出两种说法
+
+**状态**：新登记，2026-08-24，随 K 片。**未闭合**，需要决定改不改可观测性面。
+
+**事实**：`[FAIL] … 400 POST /v1/messages` 那一行的尾巴取自 `str(UpstreamRejected)`，也就是 `model_provider/ghc_client/errors.py` 里 `f"upstream rejected the request: {error}"` —— `{error}` 是 SDK 的 `__str__`，形如 `Error code: 400 - {'error': {...}}`（Python `dict` 的 repr，单引号、不可解析）。而客户端收到的 `message` 自 J 片起就由本项目自己构造，K 片之后在上下文超限这一格更是**完全不同的句子**（`prompt is too long: …`）。
+
+**为什么值得留着**：Spec §4.5 花了力气把 wire 上的 `message` 从 SDK 的 `__str__` 里拆出来，理由是「本项目没有一处代码知道自己在往里放什么」——那个理由对日志行同样成立，而日志行至今还在用它。**这正是用户 2026-08-24 报来的那条记录的形态**：用户看到的是 SDK repr，客户端拿到的是另一句话，两者都为真却读不出对方。
+
+**与 E-6 的关系**：同一类问题的第二例（E-6 是客户端截止那一格）。若要一并处理，判据应当是「完成行的失败说明取自 `ErrorInfo.message`」，而不是逐格打补丁。
+
+## E-12　流内报告的失败不产生 `condition`
+
+**状态**：新登记，2026-08-24，随 K 片与两份评审。**未闭合**，等一份真实样本。
+
+**事实**：`condition` 只由 `_from_upstream` 产生，也就是上游以非 2xx HTTP 响应报告失败的那一格。两个流内 reader（`anthropic_messages` 的 `event: error`、`openai_responses` 的 `response.failed` / `response.cancelled`）各自直接构造 `ErrorInfo`，不经过条件判定；`OpenAIResponsesFramer.error()` 也直接写 `info.code`，不走按方言的条件拼写。
+
+**为什么现在不做**：48 例上下文超限**全部**是建流前 400，没有任何一例以流内事件到达。客户端那一侧倒是够得着——它的 `prompt is too long` 判据没有状态码门，流内错误帧上同样生效（实测，`reports/260824-claude-code-context-limit-detection.md` §2.2）——但「客户端认得」不等于「上游会这么发」，据后者建映射就是替上游发明错误。与 E-10 同一条理由。
+
+**Spec 侧已处理**：§5.5.4 明确把定义域收窄到 HTTP 错误 body，所以这不是 Spec 与实现不一致，而是一处**已登记的范围限制**。两份评审（`reports/260824-context-condition-spec-review.md` CCSR-03、`reports/260824-context-condition-code-review.md` F-12）对它的定级不同（major 对 nit），分歧点正是「Spec 该不该主张全路径覆盖」——收窄 Spec 使两者归一。
+
+**闭合条件**：拿到一份真实的流内上下文超限样本；届时两个 reader 复用同一条件判定，`OpenAIResponsesFramer.error()` 复用同一按方言拼写。
