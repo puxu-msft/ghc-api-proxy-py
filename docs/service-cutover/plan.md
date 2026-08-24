@@ -7,11 +7,11 @@
 - **目标**：在 Anthropic Messages → OpenAI Responses 路径通过完整替代验收后，以可回滚方式让 `ghc-api-proxy-py` 接管当前由 `copilot-api-js` 提供的 `localhost:4141` 前门，随后观察并退役旧裸进程。
 - **作者基线**：`/home/xp/src/ghc-api-proxy-py` 的 current `main@c1de6bf800a062f0dbcb4ef9db507fdc5f323b62`。本轮每次 shell 调用均要求在同一调用内验证物理仓库根、`main` 分支和 `HEAD == refs/heads/main`，并读取当次 current HEAD；未来 `main` 前进后必须先更新本文，不能把该完整 hash 当作永久 gate。
 - **权威边界**：Anthropic Responses bridge 的用户可观察行为来自 `../anthropic-responses-bridge/spec.md` 与 `../anthropic-responses-bridge/acceptance.md`，**按 `.dev` 提交锚定**：两者的当前基线是 `.dev@66811b1`（2026-08-24）；易变实现状态来自持续更新且不收口的 `../anthropic-responses-bridge/implementation.md` 与 `readiness.md`。Current main已线性包含 foundations、systemd runtime、bridge主路径、retry、Copilot identity及tool／reasoning最小纵向切片（同期的 resident wiring 已于 2026-08-19 按用户裁决删除，进程级改由 `proactive_rate_limiter.max_inflight` 等待式在途上限承接）；真实canary取得纯文本、forced ordinary tool roundtrip与单item reasoning carrier echo scoped PASS。完整产品、P2、P3与真实manager／cgroup仍未闭合。不得把living文档、定稿oracle、局部checkpoint、main-side回归或canary 200当成完整产品`PASS`。本文只定义服务接管、部署、数据处置和回滚顺序，不重新决定 bridge 行为或内部架构。
-- **⚠️ 上一条的内容哈希绑定已失效，需要用户裁决换用什么机制**（2026-08-24 记录）。两件事，分开看：
+- **上一条的机制已于 2026-08-24 更换：内容哈希 → 提交锚定。** 记录原委：
   1. **它早就失配了，不是被本次解冻改坏的。** `.dev` 历史逐版核对：`FINALIZED@4c9beed…` 与 `FINALIZED_ACCEPTANCE_ORACLE@f99492a…` 在 `5e94b75`（2026-08-21）成立，在 `1197da7`（2026-08-22「land the three rulings」）失配。失配后两天里没有任何东西报警——**这条门从来没有人执行过**，它只是写在文里。
   2. **用户 2026-08-24 裁定 spec 不再冻结**，于是「按内容哈希钉死一份 spec」这个机制本身不再成立：spec 会随裁定持续修订，每次修订都让绑定失配，而失配与「有人偷改了行为」不可区分。
   
-  **未擅自更换机制。** 可选方向（供裁决，不是既定）：改按 `.dev` 提交锚定（`spec.md@<commit>`，可解析、可 diff、随修订自然前进），或保留内容哈希但改为「切换前重算并要求人复核 diff」。**在裁决之前，本文第 9 行那两个哈希只应读作「2026-08-21 那一版的历史身份记录」，不得当作 current 授权判据。** 当前执行状态仍为 `NO_CUTOVER`，本条不改变任何授权。
+  **已换为 `.dev` 提交锚定**（基线 `.dev@66811b1`）：同一仓库内可解析、可 diff、随修订自然前进，复核方式是一条能真跑的命令而不是一个要人手算的摘要。上文第 11 条里的 `4c9beed…` / `f99492a…` 只作历史记录保留。当前执行状态仍为 `NO_CUTOVER`，本次不改变任何授权。
 - **评审状态**：`LIVING`。既有Plan R2／R3已确认实施节奏、逐项数据 disposition、旧 `--restart` supervisor／listener／writer fence以及首次切换与回滚的配置化时间门可继续；本轮只同步current main与运行态事实，不改变已冻结设计。任何历史0 major只表示当时bytes可继续living implementation，不代表计划封存、候选`PASS`、生产切换获授权或本文不再动态更新。
 - **文件范围约束**：本轮只修改本文件。Kick-off 提示词内嵌在文末，不另建文件。
 
