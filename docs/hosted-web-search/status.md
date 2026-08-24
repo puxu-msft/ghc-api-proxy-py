@@ -70,6 +70,21 @@
 
 - `streamReplay` —— 用户已从 `config.example.yaml` 中撤下，这条不再是待办。
 - `strip_anthropic_beta_flags` —— 用户确认要实现，已落地：schema 建模、新链路接线、单元与端到端测试齐备。经过与未采纳项见 `../hooks-subscription-migration/reports/260822-beta-flag-strip-implementation.md`。
+## 4.5 待实现：第三取值 `empty_result`（2026-08-24 用户裁决）
+
+规范已改，实现未动。规范见 [`../anthropic-responses-bridge/hosted-web-search-spec.md`](../anthropic-responses-bridge/hosted-web-search-spec.md) §3.4 与其修订记录。
+
+**要做的**：`web_search_domain_restrictions` 增加第三取值 `empty_result`——不调上游，合成 `server_tool_use` + `web_search_tool_result` 且 `content` 为**空列表** `[]`（协议里「搜了、零结果」的形态，**不是** `web_search_tool_result_error`），记 `DEGRADE` fact，并同步删除指向该声明的 `tool_choice`。
+
+**⚠️ 加这个取值会被一个 `else` 静默吞掉。** 当前分支在 `src/app/pipeline/translation_driver/openai_responses.py:231` 是 `if policy == "error": ... ` 加一个兜底 else；`Literal` 扩到三个值之后，`empty_result` 会落进那个 else 去执行 `drop_fields` 的行为——**类型检查不会报，测试也不会红，因为没有任何测试断言过第三个取值**。落地时必须把该处改成穷尽分支（三个取值各自显式），并加一条「取值集合与 `Literal` 相等」的断言，否则下次再加取值还会同样静默。
+
+**波及面**（`Literal` 定义在 `src/app/config/schema.py:26`）：
+- `schema.py:219` 默认值
+- `registry.py:145` 接线
+- `openai_responses.py:702` 形参、`:714` 调用、`:231` 分支
+- 测试：`tests/int/test_pipeline_app.py:679,689`、`tests/unit/pipeline/translation_driver/test_translation_driver.py:639`——两处都只覆盖 `error`，新取值需要各自的用例
+
+**未裁决、不要顺手一起做**：默认值取 `error` 还是 `drop_fields` 仍待用户裁决（见规范文档状态第 4 条）。本条只加取值，**不动默认值**。
 
 ## 5. 证据在哪
 

@@ -12,16 +12,26 @@
 > 1. **多了一条本规格没有的轴：功能总开关。** 用户 2026-08-21 裁决 hosted web search **默认关闭**，键是 `model_translation.to_openai_responses.hosted_web_search`。本规格 §2／§9 定义的能力门只谈模型与路由，按它写出来的门在默认配置下永远判通过，而实现永远判不通过。§9 已补这一轴。
 > 2. **能力门不通过时不是「剥离声明」。** §8.3 起草时写的「必须剥离、不得 REJECT」已被用户 2026-08-20「去除 drop 策略，drop 远不如 mock_result」的裁决推翻：实现合成一个失败的 `web_search_tool_result`。§8.3 已改。
 > 3. **配置键名与取值语义已落地。** 不再「待定」，不再是模型 id 列表；用户 2026-08-21 裁决「能力门采用版本清单，清单接受正则表达式」。§9.3 已改。
-> 4. **⏳ 待裁决：域名限制的默认值。** §3.4 与 D1 冻结「默认 `error`，三取值」，实现是「默认 `drop_fields`，两取值」。**这是实现单方面偏离了用户已下的裁决**，理由（190/190 真实子请求都带非空 `allowed_domains`，取 `error` 等于永久禁用）写在 `src/app/config/schema.py` 的注释里，但**没有回到用户手上重裁**。下文 §3.4 与 §14 D1 保持原文不动，等用户裁决后再改。
+> 4. **⏳ 部分待裁决：域名限制。** 两件事，**只剩一件开着**：**（已裁，2026-08-24）**第三取值由 `drop_web_search` 改为 `empty_result`——合成 `content: []` 的有效结果，不再剥离声明，详见修订记录与 §3.4。**（仍待裁）默认值**：§3.4 与 §14 D1 写「默认 `error`」，实现是「默认 `drop_fields`」，且实现只有两个取值。**这是实现单方面偏离了用户已下的裁决**，理由（190 个真实子请求 `allowed_domains` 全部非空、且值来自主对话模型而非人，取 `error` 等于对本客户端永久禁用）写在 `src/app/config/schema.py` 的注释里，**至今没有回到用户手上重裁**。
 - **2026-08-20 用户第三批裁决（推翻本规格起草时的三处偏好）**：
   1. **D6 response presentation → 尽量还原成原生块。** 起草时的偏好是降级成单个 text block；用户裁决要求还原成 `server_tool_use` + `web_search_tool_result`。§5 已按此重写，并写明「尽量」的实际边界。
-  2. **D1 域名限制 → 可配置。** 默认 `error`（大声报错），可选 `drop_unsupported_fields`（剥离降级）与 `drop_web_search`（整条声明剥离）。§3.4 已按此重写。
+  2. **D1 域名限制 → 可配置。** 默认 `error`（大声报错），可选 `drop_unsupported_fields`（剥离降级）与 `drop_web_search`（整条声明剥离）。§3.4 当时按此重写。⚠️ **第三取值已于 2026-08-24 被用户修订为 `empty_result`**（见修订记录与 §3.4）；本行保留的是 2026-08-20 那次裁决的原貌，不是现行规范。
   3. **D4 capability gate → 配置项手动维护。** 用户先要求确认上游 `/models` 是否给出信号；已于 2026-08-20 对实时目录（42 模型、67,656 字节）全量重判，**确认没有任何信号**，故落到配置项。§9 已按此重写。
 - **开启的冻结裁决**：[`reports/260806-arbitrate-server-tool-contract.md`](reports/260806-arbitrate-server-tool-contract.md) 要求「若未来用户决定引入 Responses hosted web search，应以独立产品规格一次性冻结 declaration、forced choice、response presentation、stream lifecycle、History／continuation、错误与 capability gate，不能借 request converter 映射表增量恢复」。用户 2026-08-20 的裁决（「anthropic 上游不支持，但 gpt 上游支持 websearch」「该路径要正确支持 server tool web_search」）是那道门的开启，本文件是它要求的那份规格，七个面在 §3～§9 逐面给出规范性行为。
 - **一手证据基线**：[`../hosted-web-search/reports/260820-websearch-upstream-probe.md`](../hosted-web-search/reports/260820-websearch-upstream-probe.md)（本项目 19 次上游实测，gpt-5.5，2026-08-20，原始输出在 `exp/260820-websearch-probe/raw/`）；真实响应样本 `tests/cassettes/responses_web_search_nonstream.json` 与 `tests/cassettes/responses_web_search_stream.json`。参考项目的做法记录在 [`../hosted-web-search/reports/260820-websearch-on-responses-leg.md`](../hosted-web-search/reports/260820-websearch-on-responses-leg.md)，其中「`web_search_call` 的 id 在事件间稳定」一条**已被本项目实测推翻**，不得引用。
 - **证据权重**：§12 逐条标注每项规范性要求的依据是实测、设计裁决，还是仍需探针。凡标注为「仍需探针」的行为，实现时必须按本规格给出的保守分支执行，不得按推断放开。
 - **索引待补**：[README.md](README.md) 的「权威边界」表需要新增本文件一行；本规格作者不代改该索引。
 - **剩余修订项（本文件尚未定稿）**：独立评审 [`../hosted-web-search/reports/260820-review-hosted-web-search-spec.md`](../hosted-web-search/reports/260820-review-hosted-web-search-spec.md) 报 blocker 3、major 9、minor 7。**三条 blocker 与 MJ-3、MJ-6、MJ-9 已处置**（见 §6.3 的成块时点重写、§11 覆盖清单、§14 的裁决登记、§3.4 的 `tool_choice` 清理、配置键命名待对齐、error 裸对象）。**尚未处置**：MJ-1／MJ-2（§12 证据权重表与 §13 探针表未随裁决更新，P12 未登记）、MJ-4（§8.3 与 §3.4 的组合情形未定义）、MJ-5（§9.3 默认值「运行期谓词 vs 冻结字面量」两解并存待收敛）、MJ-7（§5.3 三分支条件不互斥，须改为有序判定）、MJ-8（派生 id 跨轮次重复的唯一性范围未声明）、以及全部 minor。**实现前必须先关闭这些项。**
+
+## 修订记录
+
+**本文是活文档，不冻结**（2026-08-24 用户裁定全面废除 spec 冻结）。新裁决、实测或发现与本文冲突时当场修订，每次修订记入下表。
+
+| 日期 | 条款 | 变化 | 触发 |
+|---|---|---|---|
+| 2026-08-24 | §3.4、§14 D1 | 第三取值由 `drop_web_search`（整条声明剥离）改为 `empty_result`（合成 `content: []` 的有效结果）。原取值在本客户端上做不到它承诺的事——剥离后模型凭记忆作答而客户端标为搜索结果 | 用户裁决 |
+| 2026-08-24 | 本表 | 建立修订记录 | 用户裁定 spec 不冻结，修订须可审计 |
+
 
 ## 1. 范围
 
@@ -81,7 +91,13 @@
 |---|---|
 | `error`（默认） | 声明含**非空** `allowed_domains` 或**非空** `blocked_domains` 时，请求**必须**在调用上游前失败，返回稳定 incompatibility error，错误码固定 `server_tool_constraint_not_representable`，字段路径精确到该字段 |
 | `drop_unsupported_fields` | 剥离这些字段后继续搜索，并记一条 `DEGRADE` fact（`server_tool_constraint_dropped`），日志级别 INFO。**用户已知情并接受搜索范围比其要求更宽** |
-| `drop_web_search` | 整条 `web_search` 声明剥离，搜索不发生，记 `DEGRADE` fact（`server_tool_dropped_for_unrepresentable_constraint`）。语义上等于「这个能力在这次用不了」，而不是「放宽了去搜」。**必须**同步删除指向该声明的 `tool_choice`（同 §4 与 §8.3 的规则），否则留下 dangling forced choice 会把整轮打挂 |
+| `empty_result`（2026-08-24 用户裁决，取代原 `drop_web_search`） | **合成一个空的有效结果返回**：`server_tool_use` + `web_search_tool_result`，`content` 为**空列表** `[]`——即协议里「搜索跑了、零结果」的形态，不是错误。不调上游，记 `DEGRADE` fact （`server_tool_constraint_yielded_empty_result`）。**必须**同步删除指向该声明的 `tool_choice`（同 §4 与 §8.3），否则 dangling forced choice 会把整轮打挂 |
+
+**为什么由「整条声明剥离」改成「返回空的有效结构」**：原取值在本客户端上做不到它承诺的事。Claude Code 的 web search 是**独立子请求**，`tools` 里只有搜索；剥掉声明后这一轮**不会失败**——模型凭记忆作答，而客户端把回答无条件挂在 `Web search results for query:` 标题下呈现，无 `is_error`、无任何标记。**记忆被贴上「搜到的事实」的标签送到人眼前。** 返回空的有效结果则留在协议词汇里：客户端拿到形状完整的结果、模型知道自己什么都没拿到，且它是 200 携带一个正常工具结果，**不会触发客户端重试**。
+
+> ⚠️ **一处我认为你应当知道的代价，不阻断实施**：`content: []` 在协议里读作「搜过了，没找到」，而事实是**没搜**。模型可能据此形成「网上没有这个」的错误结论，而既有的 `web_search_tool_result_error` 形态会明确告诉它「搜索没能进行」。两者的区别在能力门那条路径上你已经选了后者（§8.3，2026-08-20「drop 远不如 mock_result」）。若你希望这里也用错误形态而非空结果，说一声即改；**在此之前按你 2026-08-24 的裁决实施空结果**。
+
+**取值改名**：行为已不再是「剥离」，继续叫 `drop_web_search` 会主动误导，故改为 `empty_result`。§3.4 原就写明「键名待定，语义已定」，取值名同理属实现前与 `config.example.yaml` 对齐的范围，**此处的改名是我的推导，不是你的裁决**。
 
 - 该键**只**管 `allowed_domains` / `blocked_domains` 这类**收紧型**约束。`max_uses` 不归它管，见下条。
 - 三种取值之下，这些字段**都不得**以任何形式写入上游——上游对它们一律 400，这一点没有裁决余地。
@@ -469,7 +485,7 @@ Anthropic `tool_choice` 映射如下，**必须**按表执行：
 
 | # | 裁决点 | 选项 | 我的偏好与理由 |
 |---|---|---|---|
-| D1 | ~~声明带非空 `allowed_domains` / `blocked_domains` 时~~ | — | **已裁决（2026-08-20，用户）：做成可配置。** 默认 `error` 大声报错，可选 `drop_unsupported_fields` 与 `drop_web_search`。规范文本见 §3.4 |
+| D1 | ~~声明带非空 `allowed_domains` / `blocked_domains` 时~~ | — | **已裁决（2026-08-20，用户）：做成可配置。** 默认 `error` 大声报错，可选 `drop_unsupported_fields` 与 `drop_web_search`。规范文本见 §3.4。**2026-08-24 用户修订第三取值**：`drop_web_search`（整条剥离）→ `empty_result`（返回空的有效结构），理由见 §3.4。**默认值仍待裁决**——实现是 `drop_fields`，本表与 §3.4 是 `error`，见文档状态第 4 条 |
 | D2 | 声明带 `max_uses` 时 | (a) 同 D1 `REJECT`；(b) 剥离 + `DEGRADE` | **(b)**。它是成本上界不是语义约束，放开的代价是费用与延迟，且上游回报 `num_requests` 事后可观测。为一个成本上界拒绝整轮对话，代价明显大于收益 |
 | D3 | 上游返回**未请求**的 `web_search_call` | (a) 按 §5.3 降级成文本；(b) 保持 `spec.md:136`／`:181`／`:261` 的显式失败 | **(a)**。降级是无损的（即使请求了也只拿到 query），把上游的行为变化变成整轮失败对客户端没有价值。但它确实覆盖了一条冻结条款，需要用户点头 |
 | D4 | ~~能力门清单的形态~~ | — | **已裁决（2026-08-20，用户）：配置项手动维护。** 用户要求先确认上游 `/models` 是否给得出信号；已对实时目录全量重判，**确认没有**，故落到配置项。规范文本见 §9.3。键名仍待与人写 `config.example.yaml` 的词汇对齐 |
