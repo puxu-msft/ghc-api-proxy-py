@@ -33,13 +33,37 @@ CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000
 
 ## 现场判据：`/context`
 
-`:372555` 直接把窗口与来源印出来，不需要开 debug：
+**更正（2026-08-24，实测 `/context` 输出后）**：本节初稿引用的是 `:372555`，那不是 `/context` 用的渲染器——实测输出里没有它承诺的来源括号与 `capped to` 后缀。`/context` 走的是 `:497107`：
 
-- `Auto-compact window: 1M tokens (from CLAUDE_CODE_AUTO_COMPACT_WINDOW)` —— 没有 `· capped to … by model` 后缀，说明模型窗口本身就 ≥ 1e6，阈值 96.7 万，**等于不压**；
-- 同一行带 `· capped to 200k by model` —— 模型窗口是 20 万，阈值 16.7 万，正常；
-- `Auto-compact is currently disabled (see /config)` —— `mL()` 为 false，另找原因。
+```js
+$8t = IHo !== "auto" && ("Auto-compact window: " + (
+  IHo === "experiment" || IHo === "clientdata" ? `auto (${ic(kde)} tokens)` :
+  IHo === "unknown-model"                      ? `${ic(kde)} tokens (default for an unrecognized model)` :
+                                                 `${ic(kde)} tokens`))
+```
 
-`capped to` 后缀的条件是 `configured > window`（`:372555` 的 `i`），所以它的**有无**恰好就是这两种情形的判别式。
+两点与初稿不同，都要紧：
+
+1. **来源是 `"auto"` 时整行不渲染**（`IHo !== "auto" &&`）。所以「`Auto-compact window:` 这一行压根不出现」才是「本会话永不主动压缩」的判据，而不是某个后缀。
+2. `env` / `settings` / `model-default` 三种来源都印**光秃秃的 `N tokens`**，没有任何标注，且 `kde` 是 `configured` 而非夹过的 `window`。所以这一行本身**分不出**是哪种来源，也不告诉你模型有没有把它夹低。
+
+真正给出有效窗口的是仪表本身。实测本机（`claude-opus-5[1m]`）：
+
+```
+920.9k/1m tokens (92%)
+⛝ Autocompact buffer: 33k tokens (3.3%)
+Auto-compact window: 1m tokens
+```
+
+`33k = 20,000 + 13,000`，即 `min(Hlr, 2e4)` 的输出预留加 `lyi` 的 13,000——**与本文第 4、5 步的推导逐项吻合**，阈值确为 967,000。所以判读顺序是：
+
+| 看什么 | 读法 |
+|---|---|
+| `Auto-compact window:` 这一行**有没有** | 没有 → 来源是 `"auto"`，该会话永不主动压缩 |
+| 仪表分母（`/1m` 还是 `/200k`） | 模型实际拿到的窗口 |
+| `Autocompact buffer:` 的值 | 窗口减阈值；`33k` 对应 1m 窗口 |
+| `Auto-compact is currently disabled (see /config)` | `mL()` 为 false |
+
 
 ## 「settings.json 一致」推不出「环境变量一致」
 
