@@ -54,3 +54,19 @@
 **状态**：已在 Spec §3.5 与计划 R 片内，**本条只登记「另一处台账的定级过时了」**。
 **事实**：`.dev/docs/upstream/retry-and-continuation/deferred.md` 第 4 条登记的是同一件事，但登记时的描述是「客户端收到的与撕裂产生的帧不可区分」。自 2026-08-22 干净 EOF 改动落地后，现状是**与成功不可区分**——代价变了，定级要跟着变。
 **闭合条件**：R 片落地后，回去更新那条台账并把本条移出。
+
+## E-9　Spec §6.2 的重试依据不覆盖主客户端的流式腿
+
+**状态**：新登记，2026-08-24。**需要用户裁决是否修订冻结的 Spec**，本条不自行改规范。
+
+**事实**（实测 Claude Code 2.1.241，证据见 [reports/260824-claude-code-sse-retry-behavior.md](reports/260824-claude-code-sse-retry-behavior.md)，形状判定可用同目录探针 `260824-claude-code-sse-retry-envelope-probe.mjs` 复现）：
+
+Spec §6.2 那句「两个 SDK 都按 HTTP status 选异常类，且都默认重试 408/409/429/≥500，都识别 `x-should-retry`（实测四条，`_base_client.py` 逐条核对）」，测的是 anthropic-sdk-python / typescript。**本项目主产品路径上的客户端是第三个——Claude Code，它不走那套**：它构造 SDK client 时传 `maxRetries: 0`（`app.pretty.js:429164`、`428607`），SDK 自带重试整个不生效，改由自己的 `IOi` 驱动（判据 `Ftw`，`273461`）。三条后果：
+
+1. **流式腿上 §6.2 的两个杠杆都够不着。** status 在响应头发出时已定死（§6.4 修订记录已经就 `code` 认过这一点）；而 `x-should-retry` 对流内 error 帧同样无效——`IOi` 的尝试函数在 `429194` 就把 stream 对象 return 了，流的消费在 `429280` 的外层循环里，**流内 error 帧根本不经过 `Ftw`**。
+2. **流式腿上唯一被重试的是 `overloaded_error`**，靠 `e.message.includes('"type":"overloaded_error"')` 匹配（`273469`/`155911`）。§6.1 把 `OVERLOADED` 映射成 `overloaded_error`、§6.3 把 anthropic-messages 流式定成嵌套信封——**两条都恰好正确**，但 Spec 没有写下「必须嵌套」这个客户端侧的理由：扁平信封会让 `makeMessage`（`8357`）取到顶层 `message` 而不拼整串 JSON，匹配必然失败（探针 D 行）。这条现在只是巧合正确，改动时没有护栏。
+3. **`RATE_LIMIT` 那一行的「保留 SDK 默认重试」在流式腿上不成立。** 流内 `rate_limit_error` 帧不触发 Claude Code 任何重试（谓词 `I5v` 存在但只被状态码归一化函数 `ZFa` 消费，重试判据从不引用），而非流式腿的 429 是重试的。同一 category 两条腿行为不同，Spec 现在按一行描述。
+
+**另有一条 Spec 无处安放的新约束**：Claude Code 是否重试还取决于**时机**——已产出非 thinking 内容后，任何流内错误只会被定格成 partial 并追加一句 `…may be incomplete.`，不再重试（`429515`）。也就是说「发什么」之外还有「什么时候发」，而 §6.x 只规定了前者。这与块级交付直接相关（见 `.dev/docs/delivery-keepalive/`）。
+
+**闭合条件**：用户裁决 §6.2 是否补一条「按腿分列」的限定、以及是否把「嵌套信封」与「首个内容块之前」写成规范约束。裁决前不改代码，也不改 Spec。
