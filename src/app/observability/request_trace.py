@@ -151,8 +151,10 @@ class RequestTrace:
     requested_model: str = ""
     model: str = ""
     attempts: int = 1
-    # What the first replayed attempt was replacing, when there was one. A transparent replay is invisible to the client by design, and until this existed it was invisible to the record too: a successful second attempt neither hands over nor re-raises, so `retries=1` was the whole account and the exception that caused it was gone. `None` means nothing was replayed.
-    replaced_failure: str | None = None
+    # What each replayed attempt was replacing, in the order the replays were opened. A transparent replay is invisible to the client by design, and until this existed it was invisible to the record too: a successful replacement neither hands over nor re-raises, so `retries=N` was the whole account and the exceptions that caused it were gone.
+    #
+    # A list rather than the first one. A review put three attempts on the wire with a different failure in the second position and watched it disappear behind the first — and "the later ones failed the same way" was an assumption nothing checked. Empty means no replacement was ever opened; it does **not** mean no second upstream request was made, because a replacement that fails to produce a stream is appended here and then returns.
+    replaced_failures: list[str] = field(default_factory=list[str])
     detail: str = ""
     # What the HTTP status cannot say. A streaming status is fixed the moment the response headers arrive, so everything that happens over the next several minutes — the stream stopping mid-turn, upstream tearing, the client leaving — leaves it at 200. `None` means the status code is the whole story.
     status_override: LogStatus | None = None
@@ -233,7 +235,7 @@ def log_completion(chain: Chain, trace: RequestTrace, status_code: int | None, *
         count_provider_reason=trace.count_provider_reason,
         dialect=trace.dialect,
         attempts=trace.attempts,
-        replaced_failure=trace.replaced_failure,
+        replaced_failures=tuple(trace.replaced_failures),
         detail=trace.detail,
         upstream_conn=trace.upstream_conn,
         losses=trace.losses,

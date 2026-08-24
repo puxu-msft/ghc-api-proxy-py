@@ -3105,7 +3105,9 @@ def test_a_replay_on_the_translation_leg_sends_the_conversation_again() -> None:
     assert "messages" not in replayed
 
 
-def test_a_replay_is_reported_on_the_request_line() -> None:
+def test_a_replay_is_reported_on_the_request_line(
+    request_log: None, caplog: pytest.LogCaptureFixture
+) -> None:
     """A request the proxy quietly answered twice must not read like one it answered once.
 
     The attempt count is the one surface that can show it, and the handler writes it when it returns — which for a streaming request is before any replay has happened. Refreshed by the reopen for that reason.
@@ -3133,18 +3135,95 @@ def test_a_replay_is_reported_on_the_request_line() -> None:
         )
 
     client, _ = make_client(upstream)
-    response = client.post(
-        "/v1/messages",
-        json={"model": "claude-model", "messages": [], "stream": True},
-    )
+    with caplog.at_level(logging.INFO):
+        response = client.post(
+            "/v1/messages",
+            json={"model": "claude-model", "messages": [], "stream": True},
+        )
 
     assert response.status_code == 200
     assert len(calls) == 2
     record = _records()[-1]
     assert record["attempts"] == 2
     # And what it replaced. A transparent replay that succeeds neither hands over nor re-raises, so `attempts` was the whole account and the exception that caused it was gone — invisible to the client by design, invisible to the record by accident.
-    assert "RemoteProtocolError" in cast(str, record["replaced_failure"])
-    assert "peer closed the connection" in cast(str, record["replaced_failure"])
+    replaced = cast(list[str], record["replaced_failures"])
+    assert len(replaced) == 1
+    assert "RemoteProtocolError" in replaced[0]
+    assert "peer closed the connection" in replaced[0]
+    # And on the line this test is named for. A review deleted the rendering branch and every test here stayed green, because they all read the structured record instead.
+    line = next(item for item in _request_lines(caplog.records) if "retries=" in item)
+    assert "RemoteProtocolError" in line
+    assert "peer closed the connection" in line
+
+
+def test_a_long_upstream_failure_is_cut_before_it_reaches_the_line(
+    request_log: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The bound has to hold from `_reopen` all the way to the rendered line, not just in the helper.
+
+    `one_line` has its own tests and this path has its own tests, and a review cut the production call back to a bare `repr` with both sides staying green — the seam between them was what nothing crossed. Upstream chooses this text, `repr` has no limit, and the completion line is one line.
+    """
+    calls: list[int] = []
+    huge = "x" * 10_000
+
+    async def torn_body() -> AsyncIterator[bytes]:
+        # Opened but nothing completed, so the ending is a transparent replay rather than a hand-over — the two put a cause on the line through different fields, and this one is about the replay.
+        yield (
+            b'event: content_block_start\ndata: {"index":0,"content_block":{"type":"text"}}\n\n'
+        )
+        raise httpx2.RemoteProtocolError(huge)
+
+    def upstream(request: httpx2.Request) -> httpx2.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx2.Response(
+                200, content=torn_body(), headers={"content-type": "text/event-stream"}
+            )
+        return httpx2.Response(
+            200, content=sse_upstream("kept"), headers={"content-type": "text/event-stream"}
+        )
+
+    client, _ = make_client(upstream)
+    with caplog.at_level(logging.INFO):
+        _delivered(client)
+
+    replaced = cast(list[str], _records()[-1]["replaced_failures"])
+    assert len(replaced) == 1
+    # Cut, and saying so rather than trailing off — the same shape the hand-over message uses.
+    assert len(replaced[0]) < 400
+    assert "more chars" in replaced[0]
+    line = next(item for item in _request_lines(caplog.records) if "retries=" in item)
+    assert len(line) < 800
+    assert huge not in line
+
+
+def test_a_long_failure_is_cut_on_the_hand_over_line_too(
+    request_log: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Two endings put an exception on this line, through two fields, and only one of them was bounded.
+
+    Found by the replay test above: written first against a hand-over scenario by mistake, it printed ten thousand characters of upstream's own text on the completion line. `repr` has no limit of its own and the text is upstream's to choose, so the cut belongs at both.
+    """
+    huge = "y" * 10_000
+
+    async def torn_body() -> AsyncIterator[bytes]:
+        yield sse_upstream("first").partition(b"event: message_delta")[0]
+        raise httpx2.RemoteProtocolError(huge)
+
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200, content=torn_body(), headers={"content-type": "text/event-stream"}
+        ),
+        overrides={"upstream_request_retry": {"max_total": 0}},
+    )
+    with caplog.at_level(logging.INFO):
+        _delivered(client)
+
+    line = next(item for item in _request_lines(caplog.records) if "handed back" in item)
+    assert "RemoteProtocolError" in line
+    assert "more chars" in line
+    assert huge not in line
+    assert len(line) < 800
 
 
 def test_the_client_deadline_survives_a_replay() -> None:

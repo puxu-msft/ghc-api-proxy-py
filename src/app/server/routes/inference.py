@@ -408,26 +408,21 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
                     request_id=trace.request_id,
                 )
                 return None
+            # Recorded before the attempt rather than after it succeeds. A replacement that fails still sent a request upstream, and a review measured what "after" cost: two upstream calls, and a record reading `attempts=1` with nothing replaced. Every one of them, not the first — the same review put a bare `h2.ProtocolError` in the second position of three and watched it vanish behind the first attempt's `RemoteProtocolError`, which is the exact class of failure this whole slice exists to make visible.
+            trace.replaced_failures.append(one_line(repr(replacing)))
             # What the client sent, not what the last attempt turned it into. See `inbound_payload`.
             context.payload = deepcopy(inbound_payload)
             try:
                 again = await handle(chain, context, _routed)
-            except Exception:
-                # Whatever it was, it is now the reason this request ends rather than a second failure to recover from: delivery re-raises the tear that got us here, which is the failure the client should be told about.
-                return None
+            finally:
+                # Read off the context whatever happened, because the attempt was opened either way. Left until after `handle`, it reported one attempt for a request that made two.
+                trace.attempts = context.attempt_count
+                active.set_attempts(trace.request_id, context.attempt_count)
             reopened = again.outcome.response
             if reopened is None or not again.context.stream:
                 return None
             fresh_attempt = again.context.current_attempt
             fresh_assembler = assembler_for(again, hand_over_stop_reasons=_hand_over_reasons)
-            # Otherwise the one surface that can show a replay happened stays at 1, and a request the proxy quietly answered twice reads exactly like one it answered once.
-            trace.attempts = again.context.attempt_count
-            # And what it was replacing. A transparent replay that succeeds neither hands over nor re-raises, so `attempts=2` was the whole of what an operator got — a count with no cause. Being invisible to the *client* is the point; being invisible to the record is not.
-            #
-            # The first one, not the last: the failure that started the replaying is the one that explains the count, and a later attempt failing the same way says nothing new. Bounded for the same reason `interruption_message` bounds its links — an upstream error carries whatever text upstream sent, `repr` has no limit of its own, and this one is rendered inline on a single completion line.
-            if trace.replaced_failure is None:
-                trace.replaced_failure = one_line(repr(replacing))
-            active.set_attempts(trace.request_id, again.context.attempt_count)
             # The accounting reads the terminal off whichever assembler is current, and after this the current one is this.
             accounting.assembler = fresh_assembler
             # Its own marker, at the same line as the first attempt's: below the counter, above the guards that speak for upstream. A fresh one rather than the first attempt's, so a tear that attempt recorded cannot be read as this one's.
@@ -606,7 +601,8 @@ class _StreamAccounting:
             #
             # The cause is quoted when there was one, for the same reason the branch below quotes it: this line is the only account of it that exists anywhere. A hand-over does not re-raise, so nothing downstream ever sees the exception, and `retry` on its own says a turn was handed back without saying what it was handed back from.
             if self.handed_over_error is not None:
-                return "retry", f"turn handed back to the client to continue after {self.handed_over_error!r}"
+                # Bounded for the same reason the replayed failure is, and it was not until a test that asserted the *rendered* line found ten thousand characters of upstream's own text on one of them. `repr` has no limit and upstream chooses the text; both places that put an exception on this line go through the same cut.
+                return "retry", f"turn handed back to the client to continue after {one_line(repr(self.handed_over_error))}"
             return "retry", "turn handed back to the client to continue"
         if self.failure is not None:
             return "fail", f"stream failed before a terminal event: {self.failure}"
@@ -656,7 +652,7 @@ async def _counted_upstream(chunks: AsyncIterator[bytes], chain: Chain, request_
 
     The gap is measured between arrivals rather than from the start, because the wait before the first is already `first_upstream_byte_s` and folding them together would make every request's maximum the time it spent routing.
 
-    **Closing this closes the stream under it**, the same way `with_idle_timeout` and `read_events` do. This was the one layer of the production chain that did not, and it was the layer everything else releases through: `read_events` closes the outermost composite and the client deadline closes this one, and the chain stopped here. A client that went away mid-turn therefore left the marker, both guards and the upstream response open until the collector reached them — measured 2026-08-24 against the real four-layer composition, where the raw source stayed open across a tick and only an explicit close released it. A cancellation still propagates all the way down, which is why the client deadline's own path was never the one that leaked; an ordinary early close is.
+    **Closing this closes the stream under it**, the same way `with_idle_timeout` and `read_events` do. This was the one layer of the production chain that did not, and it was the layer everything else releases through: `read_events` closes the outermost composite and the client deadline closes this one, and the chain stopped here. A client that went away mid-turn therefore left the marker, both guards and the upstream response open until the collector reached them — measured 2026-08-24 against the real four-layer composition, where the raw source stayed open across a tick and only an explicit close released it. A cancellation propagates all the way down **when the close succeeds**, which is why the client deadline's own path was never the one that leaked and an ordinary early close was. A close that itself fails is handled above rather than assumed away.
     """
     close = getattr(chunks, "aclose", None)
     previous: float | None = None
@@ -676,8 +672,15 @@ async def _counted_upstream(chunks: AsyncIterator[bytes], chain: Chain, request_
             chain.active_requests.add_bytes(request_id, len(chunk))
             yield chunk
     finally:
+        # Same order as `_AccountedStreamingResponse.__call__` above and `finish_stream_cleanup`: the exit that got us here is the one that propagates, with the close failure chained under it. Raising straight from a `finally` replaces it, and a review measured what that costs on the real composition — the byte counter's own bug did not merely lose priority, it left the chain entirely, because the generator below raises its close error with *its* `GeneratorExit` as context rather than with what was propagating. A cancellation is the same story: replaced by a close failure, the task is no longer cancelled.
         if close is not None:
-            await close()
+            primary = sys.exception()
+            try:
+                await close()
+            except BaseException as close_error:
+                if primary is None:
+                    raise
+                raise primary from close_error
 
 
 async def _tracked_delivery(chunks: AsyncGenerator[bytes], accounting: _StreamAccounting) -> AsyncGenerator[bytes]:

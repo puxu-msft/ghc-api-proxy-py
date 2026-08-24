@@ -42,7 +42,12 @@ from app.pipeline.retry import RetryLedger, RetryReason, reason_for
 from app.server.routes.inference import (
     _counted_upstream,  # pyright: ignore[reportPrivateUsage]
 )
-from app.streaming.deadline import ClientDeadlineError, StreamDeadlineError, with_deadline_at
+from app.streaming.deadline import (
+    ClientDeadlineError,
+    StreamDeadlineError,
+    with_client_deadline_at,
+    with_deadline_at,
+)
 from app.streaming.idle_timeout import StreamIdleTimeoutError, with_idle_timeout
 
 
@@ -1325,7 +1330,7 @@ async def test_a_bug_in_this_sides_sse_reader_is_not_handed_over_as_upstreams(
 async def test_a_client_that_leaves_releases_the_upstream_through_every_layer() -> None:
     """The release chain has to survive the composition production actually uses, not the one tests find convenient.
 
-    `delivering(...)` makes the marker and the composite the same object, so every existing close test walks a one-layer chain and cannot see this. Production stacks four, and `_counted_upstream` was the one that consumed its iterator with a bare `async for` — it closed itself and released nothing under it. `read_events` closes the outermost, the client deadline closes the counter, and the chain stopped there: the marker, both guards and the upstream response stayed open until the collector reached them.
+    `delivering(...)` makes the marker and the composite the same object, so every existing close test walks a one-layer chain and cannot see this. Production stacks four — client deadline, counter, marker, then the two guards over the raw response — and `_counted_upstream` was the one that consumed its iterator with a bare `async for` — it closed itself and released nothing under it. `read_events` closes the outermost, the client deadline closes the counter, and the chain stopped there: the marker, both guards and the upstream response stayed open until the collector reached them.
 
     Measured at `1a34042` and at its parent alike, so it was not introduced by naming the marker — but the docstring on `UpstreamSource.aclose` claimed `read_events` closed the byte stream under it, and in this composition it did not.
     """
@@ -1349,7 +1354,10 @@ async def test_a_client_that_leaves_releases_the_upstream_through_every_layer() 
         with_deadline_at(with_idle_timeout(raw(), timeout_seconds=0), deadline_at=None)
     )
     delivery = stream_delivery(
-        _counted_upstream(marker, chain, "probe", trace),
+        # All four layers, in production's order. An earlier version of this test stopped at the counter and its docstring still claimed to compose what production composes; a review counted them.
+        with_client_deadline_at(
+            _counted_upstream(marker, chain, "probe", trace), deadline_at=None
+        ),
         AnthropicAssembler(),
         upstream=marker,
         buffer=BlockBuffer(policy="block"),

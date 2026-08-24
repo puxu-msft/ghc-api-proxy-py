@@ -26,6 +26,7 @@ from app.observability.terminal import (
     volume_colour,
 )
 from app.pipeline.delivery.assembling import ReplyDialect
+from app.pipeline.hand_over import one_line
 
 # What to call the same two things under each upstream, abbreviated to fit a line. Held here, in the layer that renders, because which word to print is a display decision; what happened is the record's business and it says only which upstream described it.
 # `tool_use` is the Anthropic stop reason the Responses assembler synthesises for the client's benefit. Recognised by name so the line can put back what upstream actually sent.
@@ -145,8 +146,8 @@ class RequestLine:
     # Whose words to use for the reasoning and tool-call fields. See `ReplyDialect`; it travels with the reply summary the line is built from.
     dialect: ReplyDialect = ReplyDialect.ANTHROPIC
     attempts: int = 1
-    # What the first replayed attempt was replacing. A transparent replay is invisible to the client by design; it used to be invisible here too, leaving `retries=N` as a count with no cause.
-    replaced_failure: str | None = None
+    # What each replayed attempt was replacing, in order. A transparent replay is invisible to the client by design; it used to be invisible here too, leaving `retries=N` as a count with no cause.
+    replaced_failures: tuple[str, ...] = ()
     detail: str = ""
     upstream_conn: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
     # What translation could not carry, one entry per recorded loss, in the order recorded. Each entry is `{"direction": "request"|"response", "code": …, "detail": …}`. Direction is a property of the loss rather than a second field, because "what did this request lose" is one question and answering it from two lists is how the two drift apart.
@@ -384,9 +385,9 @@ def format_completion_line(line: RequestLine, *, status: LogStatus, unicode: boo
     if line.attempts > 1:
         # Named on the line that reports the outcome, where the count is final. A retry still in progress is the footer's job.
         retries = f"retries={line.attempts - 1}"
-        if line.replaced_failure is not None:
-            # The count says a replay happened; this says what it replaced. Read together they are the whole of what a transparent replay leaves behind, and the count on its own was not.
-            retries = f"{retries} after {line.replaced_failure}"
+        if line.replaced_failures:
+            # The count says a replay happened; these say what each one replaced. All of them, because a review put a different failure in the second of three attempts and the first one did not describe it. Bounded as a whole, not per entry: each is already cut to the same limit the hand-over message uses, and three of them side by side would still outrun a line.
+            retries = f"{retries} after {one_line('; '.join(line.replaced_failures))}"
         parts.append(paint(retries, YELLOW, color=color))
 
     rendered = " ".join(parts)

@@ -118,7 +118,7 @@ def test_a_successful_request_writes_one_complete_structured_record(tmp_path: Pa
         "count_provider_reason",
         "dialect",
         "attempts",
-        "replaced_failure",
+        "replaced_failures",
         "detail",
         "upstream_conn",
         "losses",
@@ -157,8 +157,8 @@ def test_a_successful_request_writes_one_complete_structured_record(tmp_path: Pa
         "count_provider_reason": "",
         "dialect": "responses",
         "attempts": 2,
-        # `None` because this record is of a request that was answered on its first attempt after the retry count was set by hand; a replay records what it replaced.
-        "replaced_failure": None,
+        # Empty because this record is of a request whose retry count was set by hand without any replacement being opened; a replay appends what each one replaced.
+        "replaced_failures": [],
         "detail": "",
         "upstream_conn": {"local": "172.19.141.235:56822", "peer": "140.82.116.5:443", "alpn": "h2", "stream_id": 7},
         # Empty on an untranslated turn, and empty rather than absent: a lossless crossing and a crossing nothing looked at have to be one shape here, because the record is written for requests that never reached a translator at all.
