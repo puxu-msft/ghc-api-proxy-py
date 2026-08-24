@@ -1,6 +1,6 @@
 # Anthropic Messages ↔ OpenAI Responses bridge 独立验收规范
 
-> Current authority：本文件当前状态是 `LIVING_ACCEPTANCE_ORACLE`——它与所验收的 [spec.md](spec.md) 同为活文档，随 Spec 条款修订同步更新，候选产品及完整 bridge 为 `UNVERIFIED`。2026-08-08 最终输入为 Spec `4c9beed133b80e1c03d46db50b25bcbb43df505c29174a68fab566fc671e1f8f` 与 Architecture `746adc7aaa14e3c8775fbabad8d316d5d88cc83ec793956c3e966f42702bd5e2`。Current Architecture 已与 Spec 的“双格式 carrier”方向一致，但仍是非规范提案，不产生 Acceptance expected。下文出现的旧 hash、`upstream-only`、`READY_FOR_FINAL_REVIEW`、“待复评”或 R2～R7 verdict 只属于历史处置记录，均被本段 current 声明覆盖，不是 current gate。
+> Current authority：本文件当前状态是 `LIVING_ACCEPTANCE_ORACLE`——它与所验收的 [spec.md](spec.md) 同为活文档，随 Spec 条款修订同步更新，候选产品及完整 bridge 为 `UNVERIFIED`。**判据以 [spec.md](spec.md) 的当前内容为准**，按 `.dev` 提交锚定（基线 `.dev@66811b1`）；本文此前钉的那两个 2026-08-08 内容哈希已于 `5e94b75` 之后失配，2026-08-24 一并撤下，历史事实见 [reports/260807-acceptance-review-disposition.md](reports/260807-acceptance-review-disposition.md)。Current Architecture 已与 Spec 的“双格式 carrier”方向一致，但仍是非规范提案，不产生 Acceptance expected。下文出现的旧 hash、`upstream-only`、`READY_FOR_FINAL_REVIEW`、“待复评”或 R2～R7 verdict 只属于历史处置记录，均被本段 current 声明覆盖，不是 current gate。
 
 ## 用户可观察合同
 
@@ -32,6 +32,27 @@
 | `LOCAL-FAULT` | 在 loopback server／TCP proxy／sink fault injector 里确定性制造 truncation、RST、partial write、backpressure | **只证明本地处理机制，不冒充真实上游异常的 provenance** |
 
 判据本身怎么写才不会真空通过（双向控制、判据独立性、异源 oracle），见 skill `writing-acceptance-criteria-that-can-fail`。
+
+**三个状态词的判据**（原定义随「状态与判定」删去，此处只留判据）：
+
+- `PASS`——正确样本绿，且该 gate 的缺陷注入确实变红、红的原因出自目标不变量。
+- `BLOCKED`——正确样本红，或注入后仍绿，或已证实存在丢失／重排。**这是实现缺陷。**
+- `UNVERIFIED`——证据未取得、corpus 过期、或政策未裁决。**不得误报成实现缺陷，也不得折算为通过。** 这两个方向都会错：把没跑过写成有缺陷，和把没跑过写成通过，一样是假信息。
+
+## Spec 章节 → 本文件哪几条 gate
+
+本文的存续条件是「随 Spec 条款修订同步更新」。下表是它的执行入口——Spec 某节改了，回来重做对应的 gate。（原 `POLICY-MANIFEST-v1` 的对账结论与身份门已删，只留这份映射。）
+
+| Policy 域 | Spec 规范来源章节 | 对应 gate |
+|---|---|---|
+| route | Route selection 与 model capability 契约、route precedence、Route 真值表、Compatibility 契约 | `REQ-01`、`TR-HTTP`、`TR-WS`、`TR-PARITY` |
+| request | Request conversion 契约、双向字段处置矩阵、Reasoning 与 signature 契约 | `REQ-02`～`REQ-06` |
+| response | Response conversion 契约、Non-stream contract、SSE／WS envelope 契约、Usage 契约、Error 契约、Header 契约 | `NS-01`～`NS-05`、`STR-01`、`STR-04`～`STR-05` |
+| buffering | Downstream Anthropic SSE、Block-level buffering 与 commit 契约、Ordering／no duplication／no loss 契约 | `STR-02`～`STR-03`、`REL-03B`、`CAL-04` |
+| retry | Retry ownership 与 delivery semantics、唯一 owner、推荐 retry 边界 | `REL-01`～`REL-04` |
+| lifecycle | Approval／hooks／History／tokenization 契约、Shutdown／cancel 部分 | `LIFE-01`～`LIFE-04`、`REQ-06`、`REL-05` |
+| limits | Backpressure／memory-only 政策／Limits 与非功能要求 | `REL-06` |
+
 
 ## 请求与路由 gate
 
@@ -310,7 +331,7 @@ Raw capture的provenance图固定为：真实upstream是producer→独立raw HTT
 
 > ⚠️ **`ping` 的位置约束已被 2026-08-22 用户裁决推翻，本表与下面的 fixture 集合尚未跟进。** 裁决：HTTP success headers 在第一次上游 200 时就提交，`ping` 因此可以出现在首个完整 block **之前**——那正是该裁决要换取的保活窗口。见 `spec.md`「文档状态」与「Downstream Anthropic SSE」第 1／3 条。
 >
-> 本表是版本化的冻结语法 `CAL-04-GRAMMAR-v1`，其 `ping` 转移行、下面「不得把`ping`放在首批之前」那句、以及已闭评审行 R3-M1／R4-M1／R5-M1（它们正是历次裁 `ping` 位置的记录，其中 R4-M1 曾采纳过与本次同向的修订、后被 R5 推翻）需要作为**一次独立切片**一起重做并升版，而不是就地改一行。**该语法目前只存在于文档，主仓测试中没有实现**（`rg CAL-04 tests/` 无命中），因此不阻塞运行时行为。
+> 本表是版本化的冻结语法 `CAL-04-GRAMMAR-v1`，其 `ping` 转移行、下面「不得把`ping`放在首批之前」那句、以及已闭评审行 R3-M1／R4-M1／R5-M1（**已于 2026-08-24 移出本文件**，原文见 [reports/260807-acceptance-review-disposition.md](reports/260807-acceptance-review-disposition.md)；那份是点时记录**不得修改**，升版时在本文件另写一条 `CAL-04-GRAMMAR-v2` 的裁决记录）（它们正是历次裁 `ping` 位置的记录，其中 R4-M1 曾采纳过与本次同向的修订、后被 R5 推翻）需要作为**一次独立切片**一起重做并升版，而不是就地改一行。**该语法目前只存在于文档，主仓测试中没有实现**（`rg CAL-04 tests/` 无命中），因此不阻塞运行时行为。
 
 - **完整最小正向fixture集合**：必须至少物化并冻结以下5条batch序列及其最终message：单一零content terminal batch `[message_start → message_delta → message_stop]`；首批 `[message_start → text block的两个text_delta → block stop]`；首批含tool block的两个可拼成object的`input_json_delta`；首批含thinking block的两个`thinking_delta → signature_delta → stop`；首批含omitted thinking的`signature_delta → stop`而无`thinking_delta`。有content的四类都另有“首个完整block batch已接受 → `ping` batch → terminal batch”的必需正样本，并可在后续完整block batches之间插入多个`ping`而最终message不变；零content fixture不得有`ping`变体。不得把`ping`放在首批之前、`message_start`与首个`content_block_stop`之间、任一后续block batch内部或terminal batch内部。所有fixture的index从0连续分配，成功路径恰好一个`message_delta`与一个`message_stop`，event name与JSON type逐项相等。
 - **正确样本**：测试侧独立state machine只按`CAL-04-GRAMMAR-v1`和上述最小fixtures判定合法序列，覆盖连续index、start→delta→stop、各block允许的delta、signature位置、零content、ping无状态效果、唯一success terminal与error互斥；合法feed必须累积为各fixture冻结message。产品parser、renderer、官方SDK和候选实现均不得生成expected。
