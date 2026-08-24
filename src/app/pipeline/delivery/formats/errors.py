@@ -15,6 +15,7 @@ from app.errors import (
     GEMINI_ERROR_STATUSES,
     OPENAI_ERROR_TYPES,
     ErrorInfo,
+    condition_code,
 )
 from app.pipeline.translation_driver.semantic import LossCode
 
@@ -22,6 +23,19 @@ from app.pipeline.translation_driver.semantic import LossCode
 #
 # It is this project's extension. No dialect declares it, so a client's SDK will not surface it as a typed attribute — the Python SDKs keep the whole body on the exception, which is where it can be read from.
 UPSTREAM_ERROR_KEY = "upstream_error"
+
+# The dialect an unknown one falls back to. A literal rather than an import of `WireFormat` or of `anthropic_messages`: the latter imports *this* module, and the tables in `app.errors` are keyed on these strings anyway. `test_every_wire_format_can_be_spelled` is what stops it drifting from the enum.
+ANTHROPIC_MESSAGES = "anthropic-messages"
+
+
+def _code(info: ErrorInfo, *, wire_format: str) -> str:
+    """The identifier this dialect puts on this failure.
+
+    A recognised condition wins over the category's default, because it is the narrower true answer to the same question — spec §5.5.2. Still a spelling rather than a decision: which condition it is was settled by the classifier, and a dialect with no spelling for it keeps the default.
+    """
+    if info.condition is None:
+        return info.code
+    return condition_code(info.condition, wire_format=wire_format) or info.code
 
 
 def _upstream_remains(info: ErrorInfo) -> Any:
@@ -44,13 +58,14 @@ def _upstream_remains(info: ErrorInfo) -> Any:
             return info.source_bytes.decode("latin-1")
 
 
-def _anthropic(info: ErrorInfo) -> dict[str, Any]:
+def _anthropic(info: ErrorInfo, wire_format: str) -> dict[str, Any]:
     detail: dict[str, Any] = {
         "type": ANTHROPIC_ERROR_TYPES[info.category],
         "message": info.message,
     }
-    if info.code:
-        detail["code"] = info.code
+    code = _code(info, wire_format=wire_format)
+    if code:
+        detail["code"] = code
     if info.param:
         detail["param"] = info.param
     remains = _upstream_remains(info)
@@ -60,13 +75,13 @@ def _anthropic(info: ErrorInfo) -> dict[str, Any]:
     return {"type": "error", "error": detail}
 
 
-def _openai(info: ErrorInfo) -> dict[str, Any]:
+def _openai(info: ErrorInfo, wire_format: str) -> dict[str, Any]:
     detail: dict[str, Any] = {
         "message": info.message,
         "type": OPENAI_ERROR_TYPES[info.category],
         # Declared by the SDK as `Optional[str]`, so `None` is the shape for "not applicable" rather than an omission — a client reading `.param` gets a value either way.
         "param": info.param or None,
-        "code": info.code or None,
+        "code": _code(info, wire_format=wire_format) or None,
     }
     remains = _upstream_remains(info)
     if remains is not None:
@@ -74,7 +89,12 @@ def _openai(info: ErrorInfo) -> dict[str, Any]:
     return {"error": detail}
 
 
-def _gemini(info: ErrorInfo) -> dict[str, Any]:
+def _gemini(info: ErrorInfo, wire_format: str) -> dict[str, Any]:
+    """Google's shape, which has no string identifier to put a condition in.
+
+    `wire_format` is accepted and ignored, and that is the point of taking it: `_WRITERS` dispatches all three writers through one signature, and a Gemini-shaped exception to that would have to be read as a decision every time. Its `code` is the HTTP status and its identifier is `status`, both of which the category already supplies — so a condition adds nothing here, and `CONDITION_CODES_BY_FORMAT` has no Gemini row for the same reason.
+    """
+    _ = wire_format
     detail: dict[str, Any] = {
         # Google puts the HTTP status here, not a string identifier; `status` below is the canonical name.
         "code": info.status_code,
@@ -88,7 +108,7 @@ def _gemini(info: ErrorInfo) -> dict[str, Any]:
 
 
 _WRITERS = {
-    "anthropic-messages": _anthropic,
+    ANTHROPIC_MESSAGES: _anthropic,
     "openai-chat-completions": _openai,
     "openai-responses": _openai,
     "openai-embeddings": _openai,
@@ -101,9 +121,14 @@ def write_error(info: ErrorInfo, *, wire_format: str) -> dict[str, Any]:
 
     An unknown format falls back to Anthropic's shape rather than raising. The alternative is a `KeyError` on the one path whose job is to report failures, which would replace a client's answer with a traceback — and this proxy's primary product path is Anthropic, so the fallback is the one most clients can read.
 
-    That fallback is unreachable today: `_WRITERS` covers every `WireFormat` member, and a test asserts it does. It exists for the version of this file where someone adds a member and not a writer.
+    The writer is resolved first and then told which dialect it is actually writing, rather than being handed the caller's unknown name. Passing the name through would fall back to Anthropic's *shape* while looking the condition up under a dialect that has no row — an envelope that claims to be Anthropic's and is missing the one spelling an Anthropic client reads.
+
+    `formats_with_writers` and `test_every_wire_format_can_be_spelled` are what keep the fallback unreachable. Until 2026-08-24 this docstring asserted that a test did so and none existed; the guard is real now, and the sentence is no longer load-bearing on trust.
     """
-    return _WRITERS.get(wire_format, _anthropic)(info)
+    writer = _WRITERS.get(wire_format)
+    if writer is None:
+        return _anthropic(info, ANTHROPIC_MESSAGES)
+    return writer(info, wire_format)
 
 
 def formats_with_writers() -> frozenset[str]:

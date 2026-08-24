@@ -1,6 +1,6 @@
 """One failure, one HTTP response.
 
-Split out of `app.server.handler` on 2026-08-22 and rewritten on 2026-08-23, when `.dev/docs/error-envelope/spec.md` froze. It was three functions — a status, some headers, a body dict — and every caller handed the third to `JSONResponse`. That arrangement **cannot** express what the spec requires of a direct path: `JSONResponse` takes an object to serialize and picks its own content type, so upstream's own bytes have nowhere to go. So it is one factory that returns a `Response`, and it decides between two entirely different answers.
+Split out of `app.server.handler` on 2026-08-22 and rewritten on 2026-08-23, when `.dev/docs/error-envelope/spec.md` first became the criterion this is built against. That Spec is a living document and is amended whenever a ruling or a measurement changes what it should say; read its revision record rather than treating any date as the version this was written for. It was three functions — a status, some headers, a body dict — and every caller handed the third to `JSONResponse`. That arrangement **cannot** express what the spec requires of a direct path: `JSONResponse` takes an object to serialize and picks its own content type, so upstream's own bytes have nowhere to go. So it is one factory that returns a `Response`, and it decides between two entirely different answers.
 
 The two answers, from the user's ruling of 2026-08-23:
 

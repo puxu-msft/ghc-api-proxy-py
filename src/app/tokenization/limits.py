@@ -1,16 +1,11 @@
 import json
-import re
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from typing import Any, cast
 
+from app.errors import prompt_limit_counts
 from app.transform.model_resolver import normalize_for_matching
-
-_LIMIT_PATTERNS = (
-    re.compile(r"prompt token count of\s+(\d+)\s+exceeds the limit of\s+(\d+)", re.I),
-    re.compile(r"prompt is too long:\s*(\d+)\s+tokens\s*>\s*(\d+)\s+maximum", re.I),
-)
 
 
 def _error_message(raw: str) -> str:
@@ -28,15 +23,11 @@ def _error_message(raw: str) -> str:
 
 
 def parse_prompt_limit_error(raw: str) -> tuple[int, int] | None:
-    message = _error_message(raw)
-    for pattern in _LIMIT_PATTERNS:
-        match = pattern.search(message)
-        if match is None:
-            continue
-        current, limit = (int(value) for value in match.groups())
-        if current > limit > 0:
-            return current, limit
-    return None
+    """The counts in an upstream error body, for learning what a model's real limit is.
+
+    The patterns themselves live in `app.errors` beside the rest of the error vocabulary, because the error classifier recognises the same condition by the same wordings — see `.dev/docs/error-envelope/spec.md` §5.5.1. This end adds only the unwrapping: it is handed a whole body rather than a message.
+    """
+    return prompt_limit_counts(_error_message(raw))
 
 
 @dataclass(slots=True)

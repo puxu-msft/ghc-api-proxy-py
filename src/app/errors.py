@@ -1,21 +1,35 @@
 """The vocabulary a failure is described in, and the tables that spell it in each dialect.
 
-`.dev/docs/error-envelope/spec.md` is the authority. It is a living document — read its revision record for what changed and when, rather than pinning to a date here. Two things live here and nothing else:
+`.dev/docs/error-envelope/spec.md` is the authority. It is a living document — read its revision record for what changed and when, rather than pinning to a date here. What lives here:
 
-- `ErrorCategory`, the closed set of *what kind of failure this is* — this proxy's own concept, not any dialect's spelling.
-- `ErrorInfo`, the record one failure travels as, and the per-dialect tables that render its category.
+- `ErrorCategory`, the closed set of *what kind of failure this is* — this proxy's own concept, not any dialect's spelling. `UpstreamCondition` sits beside it for the narrower question of *which failure upstream is describing*.
+- `ErrorInfo`, the record one failure travels as, and the per-dialect tables that render its category and its condition.
+- The wordings a condition is **recognised** by, beside the wordings it is **spelled** in. `prompt_limit_counts` is the odd one — its return value is `app.tokenization`'s currency, not this module's — and it is here because it reads the same three patterns the predicate does; the reason is on the function.
 
-Deliberately a leaf: importing this module loads nothing else under `app.`, and a test asserts it. That is what lets both the HTTP edge and the delivery chain describe a failure in the same terms without either importing the other. `conversion` is annotated rather than constructed for the same reason — a `default_factory=Conversion` would make this leaf import `app.pipeline.translation_driver` at runtime.
+Deliberately a leaf: importing this module loads nothing else under `app.`, and `tests/unit/test_module_boundaries.py` asserts it. That is what lets both the HTTP edge and the delivery chain describe a failure in the same terms without either importing the other. `conversion` is annotated rather than constructed for the same reason — a `default_factory=Conversion` would make this leaf import `app.pipeline.translation_driver` at runtime.
 
 The dialect tables are keyed on the wire-format *string* rather than on `WireFormat`, which lives in `app.pipeline.request`. `WireFormat` is a `StrEnum`, so a caller holding a member indexes these directly and nothing has to convert.
 """
 
+import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from app.pipeline.translation_driver.semantic import Conversion
+
+
+class UpstreamCondition(StrEnum):
+    """What upstream said it was, when this proxy recognises the thing well enough to say it in its own words.
+
+    Orthogonal to `ErrorCategory`, and the split is what each answers. A category answers *what a client can do differently* and is decided by the status; a condition answers *which failure upstream is describing* and is decided by reading its body. A context-window overflow and a malformed field are both `CLIENT`/400 — the category is right and is not the whole story.
+
+    A closed set on purpose. `.dev/docs/error-envelope/spec.md` §5.5 is the authority for what may join it and for how each member is spelled per dialect; nothing goes in without a spelling in every dialect table below, which is what stops a new member from silently rendering as its category's default.
+    """
+
+    # Copilot spells this three different ways depending on which upstream leg answers (48 first-hand samples, `.dev/docs/upstream/retry-and-continuation/reports/260821-context-limit-400-examples.md`), and only one of them is a spelling a client recognises.
+    CONTEXT_WINDOW_EXCEEDED = "context_window_exceeded"
 
 
 class ErrorCategory(StrEnum):
@@ -54,6 +68,8 @@ class ErrorInfo:
     category: ErrorCategory
     message: str
     status_code: int
+    # Which failure upstream was describing, when it was one this proxy recognises. `None` is the ordinary case and is not a defect: reading upstream's body far enough to name the condition is done for the few that change what a client does, not for every failure.
+    condition: UpstreamCondition | None = None
     # This proxy's own stable identifier for the failure. A dialect's declared fields rarely include it — Anthropic's `ErrorObject` declares only `type` and `message` — so treat it as a versioned extension rather than as something a client's SDK surfaces as a typed attribute.
     code: str = ""
     # Which field of the request the failure is about, when one is named. `TranslationRefused.field_path` is the source that already exists.
@@ -163,6 +179,111 @@ DEFAULT_CODE_FOR_CATEGORY: dict[ErrorCategory, str] = {
 NO_RETRY_CATEGORIES: frozenset[ErrorCategory] = frozenset(
     {ErrorCategory.INTERNAL, ErrorCategory.NOT_IMPLEMENTED}
 )
+
+
+# What this proxy calls a recognised condition, per dialect. Spec §5.5.2.
+# These *replace* the category's default `code` rather than sitting beside it: a client reading `code` is asking one question, and answering it with `invalid_request` when the answer is known to be narrower throws away the only machine-readable channel this envelope has.
+# Anthropic's spelling is upstream's own on its Anthropic leg — 27 first-hand samples — rather than one invented here.
+ANTHROPIC_CONDITION_CODES: dict[UpstreamCondition, str] = {
+    UpstreamCondition.CONTEXT_WINDOW_EXCEEDED: "model_max_prompt_tokens_exceeded",
+}
+
+OPENAI_CONDITION_CODES: dict[UpstreamCondition, str] = {
+    UpstreamCondition.CONTEXT_WINDOW_EXCEEDED: "context_length_exceeded",
+}
+
+# Gemini's error object has no `code` string — its `code` is the HTTP status and its identifier is `status`, which is the category's. So a condition adds nothing there, and the absence is the entry rather than an omission.
+CONDITION_CODES_BY_FORMAT: dict[str, dict[UpstreamCondition, str]] = {
+    "anthropic-messages": ANTHROPIC_CONDITION_CODES,
+    "openai-chat-completions": OPENAI_CONDITION_CODES,
+    "openai-responses": OPENAI_CONDITION_CODES,
+    "openai-embeddings": OPENAI_CONDITION_CODES,
+}
+
+# The one sentence a client is known to key on, and the reason this whole condition exists. Spec §5.5.3.
+# Claude Code lowercases the serialised error object and asks whether it contains this substring — no status gate, and neither `type` nor `code` participates. Measured across 2.1.207 / 2.1.226 / 2.1.241; it is the common denominator of the three.
+# Kept as a constant so the guard test and the two message forms below cannot drift apart from one another.
+PROMPT_TOO_LONG_PHRASE = "prompt is too long"
+
+# Used when upstream stated the numbers. The client's optional extraction is `/prompt is too long[^0-9]*(\d+)\s*tokens?\s*>\s*(\d+)/i`, so nothing numeric may come between the phrase and the first count.
+PROMPT_TOO_LONG_WITH_COUNTS = PROMPT_TOO_LONG_PHRASE + ": {current} tokens > {limit} maximum"
+
+# Used when it did not. Copilot's Responses leg states the condition in a sentence with no digits in it at all, and a count invented here would be shown to a user as though it had been measured. Spec §5.5.2 forbids that outright.
+PROMPT_TOO_LONG_WITHOUT_COUNTS = PROMPT_TOO_LONG_PHRASE + ": the input exceeds this model's context window"
+
+
+def condition_code(condition: UpstreamCondition, *, wire_format: str) -> str:
+    """How one dialect spells a recognised condition, or empty when it has no channel for one.
+
+    Empty rather than a fallback spelling: a dialect with no `code` field would be handed a value it cannot carry, and the caller's own default is the right answer there.
+    """
+    return CONDITION_CODES_BY_FORMAT.get(wire_format, {}).get(condition, "")
+
+
+# The wordings upstream uses for a context overflow, which is the other half of this module's vocabulary: what a failure is *recognised* by, beside what it is *spelled* as. Both sides live here so that the reader who changes one is looking at the other, and so `app.tokenization.limits` can learn a model's limit from the same patterns the classifier recognises the condition by, rather than keeping a second copy that drifts.
+# Spec §5.5.1 is the authority, and these are the whole of it — a predicate here and a row there must be changed together.
+# Evidence tiers differ and are not flattened: 48 first-hand local recordings cover the two active legs, and one third-party capture covers `/chat/completions`. The third is a real recorded response rather than a fixture, but it is not this machine's and its leg is not one this proxy drives today.
+_CONTEXT_LIMIT_COUNT_PATTERNS = (
+    # The `/chat/completions` wording, from the third-party capture. Zero hits in 145,781 local operations.
+    re.compile(r"prompt token count of\s+(\d+)\s+exceeds the limit of\s+(\d+)", re.I),
+    # The Anthropic leg's wording, and the one this proxy re-emits. 27 first-hand samples.
+    re.compile(r"prompt is too long:\s*(\d+)\s+tokens\s*>\s*(\d+)\s+maximum", re.I),
+)
+
+# Matched as a fragment rather than a whole sentence, deliberately. Upstream's wording drifts: this sentence was measured as `… try again.` in August and reached a user as `… try again again.` on 2026-08-24, and its trailing `Please adjust your input and try again.` is a generic tail shared with unrelated failures.
+# **Exactly one fragment, and the bare phrase `prompt is too long` is deliberately not a second one.** Upstream is observed to echo request-derived strings into `error.message` — a tool name, an id — so a fragment predicate is a predicate over text a client can partly control, and a false positive here is not cosmetic: it makes the client discard history, compact and resend, with upstream's real complaint replaced. This fragment is kept because the Responses leg offers nothing else; the bare phrase is not, because every recording that contains it also carries either the code or the counts.
+_CONTEXT_LIMIT_PHRASES = ("exceeds the context window",)
+
+# The Anthropic leg's `error.code`, and the strongest of the three signals: every other 400 on that leg carries no `code` field whatsoever.
+_CONTEXT_LIMIT_CODES = frozenset({"model_max_prompt_tokens_exceeded"})
+
+
+def prompt_limit_counts(message: str) -> tuple[int, int] | None:
+    """The token count and the limit upstream stated, when it stated them.
+
+    Lives here rather than in `app.tokenization` although its return value is that module's currency, because the patterns it reads are the same ones `is_context_window_exceeded` recognises the condition by. Splitting them put the same three wordings in two modules with two reasons to change; keeping the extractor beside the predicate is what makes it impossible for one to accept a sentence the other rejects — which is exactly the state this replaced.
+
+    `None` covers two different situations that need the same handling — upstream named no numbers, and upstream named numbers that do not describe an overflow. The second is the reason for the `current > limit > 0` test: a pair that fails it is being read wrong, and acting on it would report a limit that is not one.
+    """
+    for pattern in _CONTEXT_LIMIT_COUNT_PATTERNS:
+        match = pattern.search(message)
+        if match is None:
+            continue
+        current, limit = (int(value) for value in match.groups())
+        if current > limit > 0:
+            return current, limit
+    return None
+
+
+def is_context_window_exceeded(*, message: str, code: str) -> bool:
+    """Whether upstream's body is describing an input that does not fit the model's context window.
+
+    Spec §5.5.1's three predicates and nothing else: upstream's own `code`, the one fragment the Responses leg leaves us, and either counted wording. The third is asked by way of `prompt_limit_counts` rather than by a fourth pattern list, so that "this sentence states an overflow" and "these are its numbers" can never disagree.
+
+    Reads upstream's body only. Whether a failure at *this* status can be an overflow at all is a separate question with a separate answer — see `_from_upstream`, which is where a 429 that happens to contain these words is stopped.
+    """
+    if code in _CONTEXT_LIMIT_CODES:
+        return True
+    lowered = message.lower()
+    if any(phrase in lowered for phrase in _CONTEXT_LIMIT_PHRASES):
+        return True
+    return prompt_limit_counts(message) is not None
+
+
+def condition_message(condition: UpstreamCondition, counts: tuple[int, int] | None) -> str:
+    """The sentence a recognised condition is stated in.
+
+    Here rather than in the classifier so that every site building an `ErrorInfo` with a condition words it the same way. The alternative — each construction site rendering its own — is how a record ends up carrying a condition and a message that disagree, and nothing in the type would say so.
+
+    Not per dialect, and Spec §5.5.2 records that as a decision rather than an oversight: making it per dialect means rendering in the writer, which would leave `ErrorInfo.message` saying something different from what the client is sent — the same split already registered as a defect on the observability side.
+    """
+    if condition is UpstreamCondition.CONTEXT_WINDOW_EXCEEDED:
+        if counts is not None:
+            current, limit = counts
+            return PROMPT_TOO_LONG_WITH_COUNTS.format(current=current, limit=limit)
+        return PROMPT_TOO_LONG_WITHOUT_COUNTS
+    # Unreachable while the closed set has one member, and a `raise` rather than a fallback string: a condition with no sentence is a gap in this function, not something to paper over on the wire.
+    raise AssertionError(f"no message defined for {condition}")
 
 
 def category_for_status(status_code: int, *, upstream_type: str = "") -> ErrorCategory:

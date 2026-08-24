@@ -6,19 +6,23 @@ Fields are asserted whole rather than category-only. A row that lands the right 
 """
 
 from collections.abc import Callable
-from typing import get_args
+from typing import cast, get_args
 
 import pytest
 from anthropic.types.shared.error_type import ErrorType
 
 from app.errors import (
+    ANTHROPIC_CONDITION_CODES,
     ANTHROPIC_ERROR_TYPES,
+    CONDITION_CODES_BY_FORMAT,
     DEFAULT_CODE_FOR_CATEGORY,
     GEMINI_ERROR_STATUSES,
+    OPENAI_CONDITION_CODES,
     OPENAI_ERROR_TYPES,
     STATUS_FOR_CATEGORY,
     ErrorCategory,
     ErrorInfo,
+    UpstreamCondition,
     category_for_status,
 )
 from app.model_provider.registry import ProviderNotConfigured
@@ -30,6 +34,7 @@ from app.model_provider.types import (
     UnknownModel,
 )
 from app.pipeline.count_tokens import CountTokensRequestError, CountTokensUnavailable
+from app.pipeline.delivery.formats.errors import formats_with_writers, write_error
 from app.pipeline.error_classify import describe
 from app.pipeline.exceptions import (
     PipelineAbort,
@@ -38,6 +43,7 @@ from app.pipeline.exceptions import (
     UpstreamRejected,
     UpstreamTimeout,
 )
+from app.pipeline.request import WireFormat
 from app.pipeline.routing import RoutingError
 from app.pipeline.translation_driver.registry import TranslatorNotFound
 from app.pipeline.translation_driver.semantic import TranslationRefused
@@ -320,3 +326,231 @@ def test_error_info_defaults_are_absences_rather_than_values() -> None:
     assert info.conversion is None
     assert info.headers == {}
     assert info.source_bytes == b""
+
+
+# Upstream's own bytes, verbatim from `.dev/docs/upstream/retry-and-continuation/reports/260821-context-limit-400-examples.md`. Transcribed rather than constructed for the same reason as `CASES` above: a body assembled from what this side expects to find in it cannot disagree with this side.
+# The trailing newline on the Responses-leg bodies is on the wire — `content-length: 147` matches only with it.
+RESPONSES_LEG_OVERFLOW = '{"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","code":"invalid_request_body"}}\n'
+# The same failure as reported to a user on 2026-08-24, with upstream's wording drifted by one word. It is the reason the predicate matches a fragment and not the sentence.
+RESPONSES_LEG_OVERFLOW_DRIFTED = '{"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again again.","code":"invalid_request_body"}}\n'
+ANTHROPIC_LEG_OVERFLOW = '{"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1051542 tokens > 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqwDkJy9YDgyzVF2fixv","type":"error"}'
+# The control that matters most: same leg, same `error.code`, an entirely unrelated failure. On this leg `invalid_request_body` is shared by a malformed field, a bad id prefix and the overflow, so a classifier keying on it would restate all three as an overflow.
+RESPONSES_LEG_UNRELATED = '{"error":{"message":"Invalid \'max_output_tokens\': integer below minimum value. Expected a value >= 16, but got 8 instead.","code":"invalid_request_body"}}\n'
+
+# One body per spec predicate, each carrying **only** that predicate's signal. The recorded samples above cannot do this job: the Anthropic-leg one carries the code, the counts and the phrase at once, so deleting any one predicate leaves the other two to catch it and the deletion goes unnoticed. Measured — a reviewer removed the code lookup entirely and 302 tests stayed green.
+# Constructed, and labelled as such. They are not claims about what upstream sends; they are the only way to ask about one predicate at a time.
+ONLY_THE_CODE = '{"error":{"code":"model_max_prompt_tokens_exceeded","message":"the model could not accept this request"}}'
+ONLY_THE_FRAGMENT = '{"error":{"message":"Your input exceeds the context window of this model.","code":"invalid_request_body"}}'
+ONLY_THE_ANTHROPIC_COUNTS = '{"error":{"message":"prompt is too long: 210000 tokens > 200000 maximum"}}'
+ONLY_THE_CHAT_COMPLETIONS_COUNTS = '{"error":{"message":"prompt token count of 13613 exceeds the limit of 12288"}}'
+# The wording that was accepted for one afternoon and is now rejected: the bare phrase, no counts, no code. Upstream is observed to echo request-derived strings into `error.message`, so a bare fragment is a predicate over text a client can partly influence — and a false positive makes the client throw away history and resend.
+BARE_PHRASE_ONLY = '{"error":{"message":"prompt is too long"}}'
+
+
+def _overflow_rejection(body: str, *, status: int = 400) -> UpstreamRejected:
+    """Upstream's 400 as this proxy receives it, with the bytes and the content type it really carried.
+
+    Deliberately not `_rejected` above: that one takes a status and defaults its body, and these cases turn on the body.
+    """
+    return UpstreamRejected(
+        "upstream rejected the request",
+        status_code=status,
+        body=body,
+        body_bytes=body.encode(),
+        content_type="text/plain; charset=utf-8",
+    )
+
+
+@pytest.mark.parametrize(
+    "case, body",
+    [
+        ("responses leg", RESPONSES_LEG_OVERFLOW),
+        ("responses leg, wording drifted", RESPONSES_LEG_OVERFLOW_DRIFTED),
+        ("anthropic leg", ANTHROPIC_LEG_OVERFLOW),
+    ],
+)
+def test_an_upstream_context_overflow_is_recognised_on_every_leg_that_reports_one(
+    case: str, body: str
+) -> None:
+    """The recorded wordings, each as it really arrived. Spec §5.5.1.
+
+    These three prove the recorded corpus is covered. They do **not** isolate the predicates — the Anthropic-leg body carries all three signals at once — which is what the single-signal cases below are for.
+    """
+    info = describe(_overflow_rejection(body), source_format="openai-responses")
+
+    assert info.condition is UpstreamCondition.CONTEXT_WINDOW_EXCEEDED, case
+    # The category is still decided by the status, and the condition does not touch it.
+    assert info.category is ErrorCategory.CLIENT
+    assert info.status_code == 400
+
+
+@pytest.mark.parametrize(
+    "predicate, body",
+    [
+        ("upstream's own code", ONLY_THE_CODE),
+        ("the responses leg's fragment", ONLY_THE_FRAGMENT),
+        ("the anthropic counted wording", ONLY_THE_ANTHROPIC_COUNTS),
+        ("the chat-completions counted wording", ONLY_THE_CHAT_COMPLETIONS_COUNTS),
+    ],
+)
+def test_each_predicate_the_spec_names_recognises_the_condition_on_its_own(
+    predicate: str, body: str
+) -> None:
+    """One signal per case, so that deleting any one predicate fails exactly one of these.
+
+    The fourth case is the one the first version of this file got wrong in the other direction: `prompt_limit_counts` read `(13613, 12288)` out of that sentence while `is_context_window_exceeded` said it was not an overflow — two functions fifteen lines apart disagreeing about the same words.
+    """
+    info = describe(_overflow_rejection(body), source_format="openai-responses")
+
+    assert info.condition is UpstreamCondition.CONTEXT_WINDOW_EXCEEDED, predicate
+
+
+@pytest.mark.parametrize(
+    "case, body",
+    [
+        ("unrelated failure, same upstream code", RESPONSES_LEG_UNRELATED),
+        ("the bare phrase with nothing to corroborate it", BARE_PHRASE_ONLY),
+    ],
+)
+def test_what_the_predicate_deliberately_does_not_accept(case: str, body: str) -> None:
+    """Two controls. Without the first, the predicate could be `code == "invalid_request_body"` and every case above would still pass.
+
+    The second pins a decision rather than an accident: the bare phrase is *not* a sufficient signal, because upstream echoes request-derived text into `error.message` — a tool name, an id, both recorded.
+
+    What this does **not** buy is worth stating, because writing this test is how it was noticed: upstream's sentence is still quoted into `message` verbatim, so a client keying on that phrase acts on it either way. Declining to recognise the condition keeps this proxy from *asserting* an overflow — no restatement, no `model_max_prompt_tokens_exceeded`, upstream's real complaint intact — and that is the whole of what it keeps. Spec §5.5.1 records the residual.
+    """
+    info = describe(_overflow_rejection(body), source_format="openai-responses")
+
+    assert info.condition is None, case
+    # Quoted rather than restated, which is what the prefix marks, and the category's own code rather than the condition's.
+    assert info.message.startswith("upstream returned")
+    assert info.code == DEFAULT_CODE_FOR_CATEGORY[ErrorCategory.CLIENT]
+
+
+@pytest.mark.parametrize(
+    "status, expected",
+    [
+        # Every 4xx this proxy calls `CLIENT` can carry an overflow. 413 is the one upstream might plausibly use and nothing here depends on 400 in particular — a mutation adding a `status == 400` gate left 302 tests green.
+        (400, UpstreamCondition.CONTEXT_WINDOW_EXCEEDED),
+        (413, UpstreamCondition.CONTEXT_WINDOW_EXCEEDED),
+        (422, UpstreamCondition.CONTEXT_WINDOW_EXCEEDED),
+        # And these cannot, whatever the body says. A 429 restated as an overflow is the worst case in the set: the client acts on the phrase with no status gate of its own, so it would compact and resend immediately — the one thing not to do when rate limited.
+        (429, None),
+        (401, None),
+        (403, None),
+        (500, None),
+    ],
+)
+def test_only_a_client_error_can_be_an_overflow_whatever_the_body_says(
+    status: int, expected: UpstreamCondition | None
+) -> None:
+    """Spec §5.5.1's second half. The body is one question and the status is another, and this is where the second is asked."""
+    info = describe(
+        _overflow_rejection(ANTHROPIC_LEG_OVERFLOW, status=status),
+        source_format="openai-responses",
+    )
+
+    assert info.condition is expected
+
+
+def test_the_counts_are_upstreams_own_or_are_not_there_at_all() -> None:
+    """Spec §5.5.2's prohibition, stated as two assertions because one of them is about an absence.
+
+    The limit is reachable from the model catalogue and the current count is reachable from a local estimator, so a version of this that fills the numbers in is easy to write and is forbidden: the client extracts them from this sentence and shows them to a user as measurements.
+    """
+    stated = describe(
+        _overflow_rejection(ANTHROPIC_LEG_OVERFLOW), source_format="anthropic-messages"
+    )
+    assert stated.message == "prompt is too long: 1051542 tokens > 1000000 maximum"
+
+    silent = describe(
+        _overflow_rejection(RESPONSES_LEG_OVERFLOW), source_format="openai-responses"
+    )
+    assert silent.message == "prompt is too long: the input exceeds this model's context window"
+    assert not any(character.isdigit() for character in silent.message)
+
+
+def test_a_restated_condition_drops_the_prefix_that_marks_a_quotation() -> None:
+    """`upstream returned 400: ` in front of a restatement would be this proxy attributing its own words to upstream, and the status it repeats is already on the response."""
+    info = describe(_overflow_rejection(RESPONSES_LEG_OVERFLOW), source_format="openai-responses")
+
+    assert "upstream returned" not in info.message
+
+
+# The spec's per-dialect table, transcribed by hand and *not* read off the production mapping. Written as expected wire output rather than as table entries, so it fails for a wrong value and for a writer that stops consulting the table alike — a reviewer changed the OpenAI spelling to nonsense and 302 tests stayed green.
+CONDITION_CODE_CASES: tuple[tuple[str, str | None], ...] = (
+    ("anthropic-messages", "model_max_prompt_tokens_exceeded"),
+    ("openai-chat-completions", "context_length_exceeded"),
+    ("openai-responses", "context_length_exceeded"),
+    ("openai-embeddings", "context_length_exceeded"),
+    # Google's error object has no string identifier — `code` is the HTTP status — so the expectation is an absence rather than a spelling.
+    ("gemini-generate-content", None),
+)
+
+
+@pytest.mark.parametrize("wire_format, expected", CONDITION_CODE_CASES)
+def test_each_dialect_spells_the_condition_the_way_the_spec_says(
+    wire_format: str, expected: str | None
+) -> None:
+    info = describe(_overflow_rejection(RESPONSES_LEG_OVERFLOW), source_format="openai-responses")
+
+    body = write_error(info, wire_format=wire_format)
+    detail = cast(dict[str, object], body["error"])
+
+    if expected is None:
+        assert detail["code"] == info.status_code
+    else:
+        assert detail["code"] == expected
+
+
+def test_the_dialect_code_cases_cover_every_wire_format() -> None:
+    """The transcription is only an oracle if a missing row fails. Adding a `WireFormat` member without a row here is what this catches."""
+    assert {case[0] for case in CONDITION_CODE_CASES} == {member.value for member in WireFormat}
+
+
+@pytest.mark.parametrize(
+    "name, table",
+    [("anthropic", ANTHROPIC_CONDITION_CODES), ("openai", OPENAI_CONDITION_CODES)],
+)
+def test_every_dialect_that_has_a_code_spells_every_condition(
+    name: str, table: dict[UpstreamCondition, str]
+) -> None:
+    """Same failure mode as the category tables, one enum over. A condition with no spelling silently renders as its category's default, which reads as "we did not recognise this"."""
+    assert set(table) == set(UpstreamCondition), (
+        f"{name} is missing {set(UpstreamCondition) - set(table)}"
+    )
+
+
+def test_the_condition_table_accounts_for_every_wire_format() -> None:
+    """Keyed on `WireFormat` rather than on a literal list, which is the difference between this and the version it replaces.
+
+    Gemini's absence is an entry, not an omission: its error object's `code` is the HTTP status and its identifier is `status`, which the category already supplies. Spelling that out as a named exclusion is what makes a *new* dialect fail here instead of silently losing its condition spelling — the exact shape that once left `FORMAT_ENDPOINTS` a member short.
+    """
+    no_code_field = {WireFormat.GEMINI_GENERATE_CONTENT.value}
+
+    assert set(CONDITION_CODES_BY_FORMAT) | no_code_field == {
+        member.value for member in WireFormat
+    }
+    assert set(CONDITION_CODES_BY_FORMAT) & no_code_field == set()
+
+
+def test_every_wire_format_can_be_spelled() -> None:
+    """The guard `write_error`'s docstring claimed for a day and did not have.
+
+    It says the Anthropic fallback is unreachable because every `WireFormat` has a writer. Nothing asserted that: `formats_with_writers` had no caller at all, so the sentence was a promise about a test that did not exist — and this change made it load-bearing by adding a second table on the same key.
+    """
+    assert formats_with_writers() == {member.value for member in WireFormat}
+
+
+def test_an_unknown_dialect_gets_anthropics_shape_and_anthropics_vocabulary() -> None:
+    """The fallback's own property, which is not the same as the fallback existing.
+
+    Unreachable today — every `WireFormat` has a writer and the test above pins that — so this is asked directly rather than through a route. It is worth asking because the shape and the vocabulary can come apart: handing the caller's unknown name to the Anthropic writer produces an envelope that says it is Anthropic's while looking the condition up under a dialect with no row, and the one spelling an Anthropic client reads goes missing. That version passed every other assertion in this file.
+    """
+    info = describe(_overflow_rejection(RESPONSES_LEG_OVERFLOW), source_format="openai-responses")
+
+    body = write_error(info, wire_format="some-future-dialect")
+    detail = cast(dict[str, object], body["error"])
+
+    assert body["type"] == "error"
+    assert detail["code"] == "model_max_prompt_tokens_exceeded"

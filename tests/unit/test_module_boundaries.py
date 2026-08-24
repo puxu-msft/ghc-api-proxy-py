@@ -86,6 +86,16 @@ def test_the_typed_kernel_is_a_leaf() -> None:
     assert not [name for name in kernel if name.startswith(("app.anthropic", "app.upstream"))]
 
 
+def test_the_error_vocabulary_is_a_leaf() -> None:
+    """`app.errors` is what the HTTP edge and the delivery chain both describe a failure in, and it only works because neither has to pull the other in to use it.
+
+    Its own docstring has asserted this since 2026-08-23 with the words "and a test asserts it", and until 2026-08-24 no such test existed — noticed when a change added a second dialect table to that module and started relying on the property. The leaf-ness held the whole time; nothing was checking that it would go on holding.
+
+    Equality rather than a substring exclusion: the failure this catches is importing *anything* under `app.`, and naming the packages that would be bad today is a list that goes stale. A `default_factory=Conversion` on `ErrorInfo` is the concrete way it would break, and that is not a package this test could have guessed.
+    """
+    assert reachable_from("app.errors") == {"app.errors"}
+
+
 def test_pipeline_exceptions_stay_importable_without_the_pipeline() -> None:
     """`app.model_provider.ghc_client` speaks this vocabulary, and the cycle it closed was a real outage.
 

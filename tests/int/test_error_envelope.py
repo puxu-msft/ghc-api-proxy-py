@@ -1,6 +1,6 @@
 """What a client actually receives when a request fails, through the real app.
 
-The ruling these serve is the user's of 2026-08-23: on a direct path the client gets upstream's own answer, including the parts this proxy does not understand; on a translated path the failure crosses an internal representation and is written in the client's dialect. `.dev/docs/error-envelope/spec.md` is the frozen form of it.
+The ruling these serve is the user's of 2026-08-23: on a direct path the client gets upstream's own answer, including the parts this proxy does not understand; on a translated path the failure crosses an internal representation and is written in the client's dialect. `.dev/docs/error-envelope/spec.md` is the current normative form of it, and it is a living document.
 
 Two things about how these are written, both from a plan review:
 
@@ -600,3 +600,84 @@ def test_upstream_sending_json_that_is_not_an_object_is_caught_too() -> None:
 
     assert response.status_code == 502
     assert orjson.loads(response.content)["error"]["type"] == "api_error"
+
+
+# Upstream's own bytes, verbatim from `.dev/docs/upstream/retry-and-continuation/reports/260821-context-limit-400-examples.md` §1.2, trailing newline and all. This leg declares `text/plain` over a JSON body, which is itself part of what a reader here has to survive.
+RESPONSES_LEG_OVERFLOW = b'{"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","code":"invalid_request_body"}}\n'
+# Same failure as it reached a user on 2026-08-24. One word of upstream's sentence drifted.
+RESPONSES_LEG_OVERFLOW_DRIFTED = b'{"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again again.","code":"invalid_request_body"}}\n'
+# Same leg, same `error.code`, unrelated failure. `invalid_request_body` carries no discriminating power here, which is why this control is the one that decides whether the predicate is real.
+RESPONSES_LEG_UNRELATED = b'{"error":{"message":"Invalid \'max_output_tokens\': integer below minimum value. Expected a value >= 16, but got 8 instead.","code":"invalid_request_body"}}\n'
+
+PLAIN_JSON = {"content-type": "text/plain; charset=utf-8"}
+
+
+@pytest.mark.parametrize(
+    "body", [RESPONSES_LEG_OVERFLOW, RESPONSES_LEG_OVERFLOW_DRIFTED], ids=["recorded", "drifted"]
+)
+def test_a_translated_context_overflow_reaches_the_client_in_the_idiom_it_acts_on(
+    body: bytes,
+) -> None:
+    """Spec §5.5.3, asserted as the client's own predicate rather than as the sentence this proxy happens to write.
+
+    Claude Code lowercases the whole serialised error object and asks whether it contains this substring — measured across 2.1.207 / 2.1.226 / 2.1.241, `reports/260824-claude-code-context-limit-detection.md`. So the assertion is made against the serialised bytes, the way the client makes it. Pinning the exact sentence instead would go green for a rewrite that moved the phrase somewhere the client never looks.
+
+    Recognising it is what makes the client compact and resend. Not recognising it leaves an `API Error: 400 {…}` in the transcript and the turn stops there.
+    """
+    client, _ = make_client(failing_upstream(400, content=body, headers=PLAIN_JSON))
+
+    response = client.post("/v1/messages", json={"model": "gpt-model", "messages": []})
+
+    assert response.status_code == 400
+    assert "prompt is too long" in response.content.decode().lower()
+
+
+def test_the_overflow_envelope_keeps_anthropics_own_shape() -> None:
+    """Anthropic's error body is a tagged union at the top level, and this is that shape.
+
+    **Not** a context-matcher test, although the first version of this file said it was: the claim was that a flattened envelope would carry the right words and go unrecognised, and the probe beside the client report disproves it — with a top-level `message`, the client searches that field, and the phrase is in it either way. The nesting is required by §6.3 for its own two reasons (the carrier's legal shape, and the `overloaded_error` predicate whose keyword sits in a field a flat envelope would discard), and borrowing a disproved cause to support a correct rule is how a spec starts being wrong in the places nobody re-reads.
+    """
+    client, _ = make_client(
+        failing_upstream(400, content=RESPONSES_LEG_OVERFLOW, headers=PLAIN_JSON)
+    )
+
+    response = client.post("/v1/messages", json={"model": "gpt-model", "messages": []})
+
+    body = orjson.loads(response.content)
+    assert "message" not in body
+    assert "prompt is too long" in body["error"]["message"]
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["code"] == "model_max_prompt_tokens_exceeded"
+
+
+def test_an_unrelated_400_on_the_same_leg_is_not_dressed_as_an_overflow() -> None:
+    """Without this, `code == "invalid_request_body"` would pass every assertion above while telling a client to throw away a conversation over a malformed field."""
+    client, _ = make_client(
+        failing_upstream(400, content=RESPONSES_LEG_UNRELATED, headers=PLAIN_JSON)
+    )
+
+    response = client.post("/v1/messages", json={"model": "gpt-model", "messages": []})
+
+    body = orjson.loads(response.content)
+    assert "prompt is too long" not in response.content.decode().lower()
+    assert body["error"]["code"] == "invalid_request"
+    assert "max_output_tokens" in body["error"]["message"]
+
+
+def test_a_direct_leg_still_hands_on_upstreams_own_overflow_untouched() -> None:
+    """The ruling's first clause outranks the restatement: on a direct leg the client and upstream share a dialect, so this proxy has no business rewording either one.
+
+    It costs nothing here — Copilot's Anthropic leg already says `prompt is too long`, with the counts — which is exactly why only the translated leg was ever broken.
+    """
+    native = (
+        b'{"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: '
+        b'1051542 tokens > 1000000 maximum","type":"invalid_request_error"},'
+        b'"request_id":"req_011CdqwDkJy9YDgyzVF2fixv","type":"error"}'
+    )
+    client, _ = make_client(
+        failing_upstream(400, content=native, headers={"content-type": "application/json"})
+    )
+
+    response = client.post("/v1/messages", json={"model": "claude-model", "messages": []})
+
+    assert response.content == native
