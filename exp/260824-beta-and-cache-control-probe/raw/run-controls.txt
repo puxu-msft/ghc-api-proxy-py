@@ -1,0 +1,7 @@
+[OK ] D0-control-two-plain-tools: 
+[OK ] D1-defer-loading-mixed-no-beta: 
+[400] D2-defer-loading-mixed-with-1019-beta: unsupported beta header(s): tool-search-tool-2025-10-19
+[OK ] E1-accepted-beta-set-together: 
+[400] E2-accepted-set-plus-1019: unsupported beta header(s): tool-search-tool-2025-10-19
+[400] E3-scope-value-session: system.1.cache_control.ephemeral.scope: Extra inputs are not permitted
+[400] E4-ttl-and-scope-together: system.1.cache_control.ephemeral.scope: Extra inputs are not permitted

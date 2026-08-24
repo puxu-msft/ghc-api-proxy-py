@@ -39,7 +39,11 @@ from app.pipeline.exceptions import (
     UpstreamTimeout,
 )
 from app.pipeline.request import RequestContext, WireFormat
-from app.pipeline.request_headers import apply_path_header_policy, strip_denied_beta_flags
+from app.pipeline.request_headers import (
+    apply_path_header_policy,
+    strip_denied_beta_flags,
+    strip_gateway_unsupported_betas,
+)
 from app.pipeline.retry import RetryLedger
 from app.pipeline.routing import Route, apply_route, decide_route, translation_target
 from app.pipeline.subscribers.counting import COUNTING_ONLY
@@ -101,6 +105,13 @@ def shape_request(
     )
 
     if context.inbound_format is WireFormat.ANTHROPIC_MESSAGES:
+        # Before the per-model strip below, though nothing forces the order: the two tables are disjoint by construction and a flag in both would be removed by whichever ran first. First because it is the coarser question — the gateway refuses these names before any model is consulted, so a reader following the header's fate meets the deployment-wide filter before the per-model one.
+        context.client_headers, gateway_stripped = strip_gateway_unsupported_betas(
+            context.client_headers
+        )
+        for flag in gateway_stripped:
+            BETA_FLAGS_STRIPPED.labels(model=context.resolved_model, flag=flag).inc()
+
         # After `apply_route` because the flags belong to the model the attempt is actually sent to, not to the name the client asked for; before the driver because the driver forwards `client_headers` whole and has no way to know which of them this model refuses. `message-format-reshape.md` scopes this to the Anthropic Messages endpoints, which is what the guard says.
         context.client_headers, stripped_flags = strip_denied_beta_flags(
             context.client_headers,

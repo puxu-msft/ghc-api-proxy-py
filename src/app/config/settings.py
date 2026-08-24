@@ -87,8 +87,6 @@ class AnthropicConfig(FrozenModel):
     thinking_destack_strategy: Literal["passthrough", "insert_text", "move_blocks"] = "move_blocks"
     poisoned_thinking_quarantine: bool = True
     poisoned_thinking_ttl_hours: float = 72
-    tool_search: bool = True
-    tool_search_non_deferred: list[str] = Field(default_factory=list)
     warmup: Literal["allow", "reject", "drop", "fake"] = "allow"
     strict_request_headers: bool = False
     strict_response_headers: bool = False

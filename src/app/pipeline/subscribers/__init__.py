@@ -13,19 +13,24 @@
 | `builtin:server-tool-capability` | `attempt.prepare` | — | Reads and edits `tools`. Anything else that comes to read `tools` has to say whether it wants the client's list or the one that will actually be sent, and answer it here rather than by landing at whatever position happens to work. |
 | `builtin:hosted-web-search-gate` | `attempt.prepare` | after `builtin:server-tool-capability` | Nothing forces it — the two are mutually exclusive by route, one acting only when the target is Anthropic Messages and the other only when it is Responses, so neither can see what the other wrote. Registered next to it because they answer the same question for the two legs, and a reader looking for "where is web search decided" should find both in one place rather than at either end of the list. |
 | `builtin:anthropic-thinking-capability` | `attempt.prepare` | — | Nothing forces its position: `thinking` and `output_config` are touched by nothing else on this event, and its two neighbours read `tools` and `content`. Registered here, after the pair above, because it is the third capability gate and they belong together — all three answer "will the model this is going to actually take this field". |
-| `builtin:blank-text-blocks` | `attempt.prepare` | registered last, by convention | Nothing forces it. It does read what that pass writes — `server_tools.py` rewrites a message's `content` and this reads the same list — but every text block that pass emits carries a `[family]` prefix and `_render_results` has no branch returning an empty string, so none of it can trigger this rule. Last among the rewriters on purpose all the same: this one only removes, and a remover placed after them sees the shape that will actually be sent, so a future pass that does emit a blank block is covered without anyone having to remember to reorder. The order comes from registration order rather than a `before=`/`after=` constraint, and the tuple in `tests/unit/test_builtin_subscribers.py` is what holds it. |
+| `builtin:blank-text-blocks` | `attempt.prepare` | registered last, by convention | Nothing forces it. It does read what that pass writes — `server_tools.py` rewrites a message's `content` and this reads the same list — but every text block that pass emits carries a `[family]` prefix and `_render_results` has no branch returning an empty string, so none of it can trigger this rule. Last among the rewriters on purpose all the same: this one only removes, and a remover placed after them sees the shape that will actually be sent, so a future pass that does emit a blank block is covered without anyone having to remember to reorder. The order comes from registration order rather than a `before=`/`after=` constraint, and the tuple in `tests/unit/pipeline/subscribers/test_builtin_subscribers.py` is what holds it. |
 | `builtin:anthropic-trailing-assistant` | `attempt.prepare` | **after `builtin:blank-text-blocks`, by an explicit constraint** | The one ordering here that is not convention. It asserts an invariant over the finished message list — that the conversation ends on a user turn — and the pass above is the last thing on this event that can remove a message. Run before it and the guard checks a list that is not the one going out, which is the failure it exists to catch. Stated with `after=` rather than by registration order because a constraint that matters should not be recoverable only by reading this table. |
+| `builtin:anthropic-cache-control-vocabulary` | `attempt.prepare` | **after `builtin:server-tool-capability`, by an explicit constraint** | The second one that is not convention, and for the same kind of reason: it removes the `cache_control` keys upstream refuses from every marker in the body, and `server_tools.py` **puts a marker back** — when it rewrites a server-tool result into a text block it deliberately carries the block's `cache_control` across, so a breakpoint keeps marking the same boundary. Run before that pass and the one marker it re-emits is the one that goes out unpruned. Registered last among the rewriters otherwise: it only deletes keys, never blocks or messages, so nothing downstream depends on where it sits relative to the two removers. |
 
-`tests/unit/test_builtin_subscribers.py` locks the registered set and the frozen order, so a subscriber added without a decision about where it goes fails there rather than in production.
+`tests/unit/pipeline/subscribers/test_builtin_subscribers.py` locks the registered set and the frozen order, so a subscriber added without a decision about where it goes fails there rather than in production.
 """
 
 import re
 from collections.abc import Mapping, Sequence
 
-from app.config.schema import ThinkingDisplayPolicy
+from app.config.schema import CacheControlMode, ThinkingDisplayPolicy
 from app.pipeline.direct_driver.base import EVENT_ATTEMPT_PREPARE
 from app.pipeline.events import SubscriberRegistry
 from app.pipeline.request import RequestContext
+from app.pipeline.subscribers.anthropic_cache_control import (
+    SUBSCRIBER_ID as ANTHROPIC_CACHE_CONTROL_ID,
+)
+from app.pipeline.subscribers.anthropic_cache_control import prune_cache_control_fields
 from app.pipeline.subscribers.anthropic_thinking import (
     SUBSCRIBER_ID as ANTHROPIC_THINKING_CAPABILITY_ID,
 )
@@ -50,6 +55,7 @@ def register_builtin_subscribers(
     default_provider: str = "",
     thinking_efforts: Mapping[str, str] | None = None,
     thinking_display: ThinkingDisplayPolicy = "passthrough",
+    cache_control: CacheControlMode = "passthrough",
 ) -> None:
     """Add every built-in subscriber to a registry that has not been frozen yet.
 
@@ -95,9 +101,18 @@ def register_builtin_subscribers(
         # The one ordering constraint on this event, and it is load-bearing rather than tidy: this reads the finished message list, and the pass above is the last one that can shorten it.
         after=(BLANK_TEXT_BLOCKS_ID,),
     )
+    registry.subscribe(
+        EVENT_ATTEMPT_PREPARE,
+        ANTHROPIC_CACHE_CONTROL_ID,
+        # Bound at registration for the reason its neighbours give: it is a startup decision, and a per-request field holding one is a field something can change mid-flight.
+        lambda context: prune_cache_control_fields(context, mode=cache_control),
+        # The second load-bearing constraint. `server_tools.py` carries a `cache_control` across when it rewrites a server-tool result into a text block, so it can put a marker back into the body after this pass would already have walked past it.
+        after=(SERVER_TOOL_CAPABILITY_ID,),
+    )
 
 
 __all__ = [
+    "ANTHROPIC_CACHE_CONTROL_ID",
     "ANTHROPIC_THINKING_CAPABILITY_ID",
     "ANTHROPIC_TRAILING_ASSISTANT_ID",
     "BLANK_TEXT_BLOCKS_ID",
@@ -107,6 +122,7 @@ __all__ = [
     "adapt_thinking_capability",
     "drop_blank_text_blocks",
     "gate_hosted_web_search",
+    "prune_cache_control_fields",
     "register_builtin_subscribers",
     "repair_trailing_assistant",
 ]

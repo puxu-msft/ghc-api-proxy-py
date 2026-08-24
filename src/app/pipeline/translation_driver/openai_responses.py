@@ -137,20 +137,63 @@ def _coerced_description(tool: dict[str, Any], conversion: Conversion) -> dict[s
     return {**tool, "description": rendered}
 
 
+# What a Responses function tool may carry, taken from `FunctionToolParam` in the openai SDK — the wire's own type rather than our reading of it. Regenerate this from the SDK rather than adding to it by hand when a tool field turns up missing.
+#
+# **A whitelist, and that is the point of the whole function below.** The version this replaced copied every key except `input_schema`, so anything a client put on a tool travelled to an endpoint that never agreed to it. That is not a list of fields to fix one at a time: each unknown key is a candidate 400 on the entire request, they arrive one client release at a time, and each is only discovered by a user losing a turn. `defer_loading` is the one that was reported (`req=fcc0bebc`, `gpt-5.6-sol`); `eager_input_streaming` and `cache_control` were riding the same line unnoticed.
+_RESPONSES_FUNCTION_TOOL_FIELDS = frozenset(
+    {"type", "name", "description", "parameters", "strict", "allowed_callers", "output_schema"}
+)
+
+# Deliberately **not** in the set above, though the SDK does list it as a function-tool field.
+#
+# It is not an unknown key — upstream knows it well enough to enforce its precondition: `Invalid Value: 'tools.defer_loading'. Deferred tools require tools.tool_search.` The precondition is a `{"type": "tool_search"}` builtin in the same array, and that is a server tool the bridge spec's Server-tool no-revive forbids this layer from introducing on its own. So the reason it goes is not "upstream does not take it" but "we are not allowed to satisfy what it needs" — which, unlike the first reason, does not expire when the endpoint changes.
+#
+# Measured 2026-08-24: `defer_loading: true` alone is refused; `false` alone is accepted; `{"type": "tool_search"}` beside it is accepted. Mapping to that builtin would have kept the token saving the client asked for — **the user ruled on 2026-08-24 that tool search is not a capability this proxy adds**, so that mapping is not on the table and the field simply goes. The ruling is recorded in the bridge spec's "Tools 与 tool choice"; the same ruling removed the never-wired `tool_search` switch from the legacy `AppSettings`.
+_DEFERRED_LOADING = "defer_loading"
+
+
 def _function_tool(tool: dict[str, Any], conversion: Conversion) -> dict[str, Any]:
-    """Put one tool in the shape the Responses endpoint takes.
+    """Put one tool in the shape the Responses endpoint takes, carrying only what that shape has.
 
     Anthropic names the schema `input_schema` and carries no `type`; Responses wants a flat function tool with `parameters`. Passing the Anthropic shape through earns `One of the tools requested is invalid.` — measured 2026-08-18.
 
-    A tool that already looks like a Responses tool is left alone apart from the description, so a Responses-to-Responses round trip does not get rewritten. The description is checked on both shapes because upstream type-checks it on both.
+    **The whitelist applies to function tools only, and that limit is load-bearing.** It is `FunctionToolParam`'s field list, while this function is handed every entry of `tools` that is not an Anthropic server tool — including things already in Responses shape: `web_search`, `mcp`, `custom`, `file_search`. Those are different members of the `ToolParam` union with fields of their own, and running a function tool's whitelist over them silently ate `web_search.user_location`, `mcp.server_url` and `custom.format`. The first version claimed "a tool already in Responses shape carries only whitelisted keys by construction", which was simply false; an independent review measured all three. So anything declaring a `type` this whitelist does not own is returned as it arrived, and stays the responsibility of whatever knows that member's shape.
+
+    Today no production route reaches here with a Responses-shaped builtin — `routing.py` does not translate Responses to Responses — but the test suite crosses it, and "unreachable" is not a property worth encoding as a silent data loss.
     """
     tool = _coerced_description(tool, conversion)
-    if "input_schema" not in tool:
+    declared = tool.get("type")
+    if "input_schema" not in tool and declared not in (None, "function"):
+        # A different member of the tool union. Not ours to whitelist; passed through as it arrived.
         return tool
-    converted = {key: value for key, value in tool.items() if key != "input_schema"}
-    converted["type"] = tool.get("type", "function")
-    converted["parameters"] = tool["input_schema"]
-    return converted
+    if "input_schema" in tool:
+        tool = {
+            **{key: value for key, value in tool.items() if key != "input_schema"},
+            "type": tool.get("type", "function"),
+            "parameters": tool["input_schema"],
+        }
+
+    dropped = sorted(key for key in tool if key not in _RESPONSES_FUNCTION_TOOL_FIELDS)
+    if not dropped:
+        return tool
+
+    name = tool.get("name") or "a tool"
+    for key in dropped:
+        if key == _DEFERRED_LOADING and tool[key] is not True:
+            # An explicit `false` says the tool was never deferred. Removing it takes nothing away, so recording a degradation would be reporting a loss that did not happen — and Claude Code sends the false ones by the hundred.
+            continue
+        if key == _DEFERRED_LOADING:
+            # `SERVER_TOOL_CONSTRAINT_DROPPED` rather than the generic code below, because what is lost here is a capability constraint tied to a server tool — the same family as web search's `max_uses` — and not an unrecognised extension.
+            conversion.record(
+                LossCode.SERVER_TOOL_CONSTRAINT_DROPPED,
+                f"{name}: deferred tool loading not carried into {WIRE_FORMAT}; the full definition is in context",
+            )
+            continue
+        conversion.record(
+            LossCode.EXTENSIONS_NOT_CARRIED,
+            f"{name}: {key} not carried into {WIRE_FORMAT}",
+        )
+    return {key: value for key, value in tool.items() if key in _RESPONSES_FUNCTION_TOOL_FIELDS}
 
 
 # The family this endpoint executes itself, under its own name. Anthropic spells the declaration `web_search_20250305`; sending that spelling costs the whole turn — `Invalid value: 'web_search_20250305'`, measured 2026-08-20 against gpt-5.6-sol — while `{"type": "web_search"}` returns 200 and really does run the search.

@@ -5,14 +5,22 @@ Both cover the same defect from opposite ends. Claude Code sends `anthropic-beta
 
 from typing import Any
 
-from app.config.schema import FixAnthropicRequestHook
+import httpx2
+
+from app.config.schema import FixAnthropicRequestHook, ProxyConfig
+from app.model_provider import ModelDescriptor, ModelEndpoint
 from app.pipeline.anthropic_request_hook import fix_anthropic_request, normalize_context_management
+from app.pipeline.driver import shape_request
+from app.pipeline.request import RequestContext, WireFormat
 from app.pipeline.request_headers import (
+    GATEWAY_UNSUPPORTED_BETAS,
     apply_path_header_policy,
     compile_beta_flag_denials,
     forwarded_client_headers,
     strip_denied_beta_flags,
+    strip_gateway_unsupported_betas,
 )
+from app.server.composition import build_chain
 from app.server.inbound import build_context
 from app.server.routes.table import ROUTES
 
@@ -367,3 +375,151 @@ def test_normalisation_happens_even_when_there_are_no_messages() -> None:
     payload: dict[str, Any] = {"context_management": {"edits": None}}
     fix_anthropic_request(payload, FixAnthropicRequestHook())
     assert payload["context_management"] == {"edits": []}
+
+
+def test_the_flag_the_gateway_refuses_is_removed_and_the_rest_travel() -> None:
+    """The measured failure: one unknown name kills a set that is otherwise fine.
+
+    Sent as the client sends it — the whole negotiated header, with the refused flag in the middle. Upstream names only the bad one and refuses the request whole, so the repair has to remove that flag and leave the other twelve exactly as spelled.
+    """
+    headers, removed = strip_gateway_unsupported_betas(
+        {
+            "anthropic-beta": "claude-code-20250219,tool-search-tool-2025-10-19,context-management-2025-06-27",
+            "anthropic-version": "2023-06-01",
+        }
+    )
+
+    assert headers["anthropic-beta"] == "claude-code-20250219,context-management-2025-06-27"
+    assert headers["anthropic-version"] == "2023-06-01"
+    assert removed == ("tool-search-tool-2025-10-19",)
+
+
+def test_the_accepted_neighbour_one_digit_away_is_not_removed() -> None:
+    """`tool-search-tool-2025-11-19` is accepted by the same gateway that refuses `…-10-19`.
+
+    The negative control on the list, and not a hypothetical: the two differ by one digit, so a repair written as a prefix or substring match would take the working one away with the broken one. Measured 2026-08-24, both.
+    """
+    value = "tool-search-tool-2025-11-19,advanced-tool-use-2025-11-20"
+    headers, removed = strip_gateway_unsupported_betas({"anthropic-beta": value})
+
+    assert headers == {"anthropic-beta": value}
+    assert removed == ()
+
+
+class _DescribingProvider:
+    """Enough of a provider for routing to resolve a model; nothing here ever sends."""
+
+    name = "ghc"
+
+    @property
+    def available_ids(self) -> frozenset[str]:
+        return frozenset({"claude-sonnet-5"})
+
+    def describe(self, model_id: str) -> ModelDescriptor | None:
+        if model_id != "claude-sonnet-5":
+            return None
+        return ModelDescriptor(
+            id="claude-sonnet-5",
+            endpoints=frozenset({ModelEndpoint.ANTHROPIC_MESSAGES}),
+            adaptive_thinking=True,
+        )
+
+    async def refresh_catalog(self) -> bool:
+        return False
+
+    async def send(
+        self,
+        endpoint: ModelEndpoint,
+        payload: Any,
+        *,
+        model_id: str,
+        stream: bool = False,
+        extra_headers: Any = None,
+    ) -> httpx2.Response:
+        # `shape_request` stops before any attempt, so reaching this means the test under it grew a leg it did not mean to have.
+        raise AssertionError("this test shapes a request; it never sends one")
+
+    async def count_tokens(self, payload: Any, *, model_id: str) -> httpx2.Response:
+        raise AssertionError("this test shapes a request; it never counts one")
+
+
+def test_the_driver_strips_the_gateway_flag_with_no_table_configured() -> None:
+    """The one here that fails if nobody wired the gateway strip into the request path.
+
+    Deliberately configured with **no** `strip_anthropic_beta_flags` at all, because that is the shape of the machine the failure was reported from and because it is what separates the two mechanisms: if this passed only when a table existed, the built-in list would be decoration on top of the operator's table rather than a layer of its own.
+
+    Asserted through `shape_request` rather than by calling the strip, for the reason the subscriber tests give: being written is not being called.
+    """
+    config = ProxyConfig.model_validate(
+        {
+            "default_model_provider": "ghc",
+            "model_providers": {"ghc": {"type": "github_copilot"}},
+            "model_mappings": {"claude-sonnet-4-5": "claude-sonnet-5"},
+        }
+    )
+    chain = build_chain(
+        config, http_client=httpx2.AsyncClient(), providers={"ghc": _DescribingProvider()}
+    )
+    context = RequestContext(
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        requested_model="claude-sonnet-4-5",
+        payload={"model": "claude-sonnet-4-5", "max_tokens": 16, "messages": []},
+        client_headers={
+            "anthropic-beta": "claude-code-20250219,tool-search-tool-2025-10-19",
+        },
+    )
+
+    shape_request(chain, context)
+
+    assert context.client_headers["anthropic-beta"] == "claude-code-20250219"
+
+
+def test_a_header_left_with_nothing_is_dropped_rather_than_sent_blank() -> None:
+    """`anthropic-beta:` with an empty value is a third state neither side has a meaning for."""
+    headers, removed = strip_gateway_unsupported_betas(
+        {"anthropic-beta": "tool-search-tool-2025-10-19", "anthropic-version": "2023-06-01"}
+    )
+
+    assert "anthropic-beta" not in headers
+    assert headers == {"anthropic-version": "2023-06-01"}
+    assert removed == ("tool-search-tool-2025-10-19",)
+
+
+def test_a_request_with_no_beta_header_is_untouched() -> None:
+    headers, removed = strip_gateway_unsupported_betas({"anthropic-version": "2023-06-01"})
+
+    assert headers == {"anthropic-version": "2023-06-01"}
+    assert removed == ()
+
+
+def test_both_strips_compose_on_one_header() -> None:
+    """A request can carry a name the gateway never heard of *and* a capability this model lacks.
+
+    The two answer different questions and neither subsumes the other, so this pins that running both leaves only the flags that survive both — the shape the driver actually applies.
+    """
+    after_gateway, gateway_removed = strip_gateway_unsupported_betas(
+        {
+            "anthropic-beta": "tool-search-tool-2025-10-19,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14"
+        }
+    )
+    final, model_removed = strip_denied_beta_flags(
+        after_gateway, model="claude-sonnet-4.6", denials=SONNET_46_DENIED
+    )
+
+    assert gateway_removed == ("tool-search-tool-2025-10-19",)
+    assert model_removed == ("interleaved-thinking-2025-05-14",)
+    assert final["anthropic-beta"] == "fine-grained-tool-streaming-2025-05-14"
+
+
+def test_every_flag_in_the_built_in_list_is_actually_stripped() -> None:
+    """Each member asserted on its own, because the list is the whole feature.
+
+    Removing an entry from `GATEWAY_UNSUPPORTED_BETAS` used to leave every test green — the other cases all happen to use `tool-search-tool-2025-10-19` — while a client sending the dropped flag went back to the measured gateway 400. Iterating the tuple keeps a future addition covered without anyone remembering to write a case for it.
+    """
+    assert GATEWAY_UNSUPPORTED_BETAS, "an empty list would make every assertion below vacuous"
+    for flag in GATEWAY_UNSUPPORTED_BETAS:
+        headers, removed = strip_gateway_unsupported_betas(
+            {"anthropic-beta": f"claude-code-20250219,{flag}"}
+        )
+        assert removed == (flag,), flag
+        assert headers["anthropic-beta"] == "claude-code-20250219", flag

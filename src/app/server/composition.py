@@ -490,6 +490,15 @@ def build_chain(
     web_search_models = compile_supported_by_provider(
         {name: provider.models_support_web_search for name, provider in config.model_providers.items()}
     )
+    # `proxied` is a spelling `config.example.yaml` defines and this project has not built: it asks the proxy to strip the client's breakpoints and inject its own, and only the stripping half exists. Refusing at startup rather than treating it as `passthrough`, because the quiet version of this is an operator who configured the proxy to own prompt caching, sees no error, and is billed as though nobody owned it. A config value that cannot be honoured belongs in the same class as a pattern that does not compile — it stops start-up, not the first request that reaches it.
+    if config.hook_fix_anthropic_request.cache_control == "proxied":
+        raise ValueError(
+            "hook_fix_anthropic_request.cache_control: 'proxied' is not implemented "
+            "(it would inject the proxy's own breakpoints; only stripping exists). "
+            "Use 'sanitize' to remove keys this upstream refuses, 'passthrough' to forward as-is, "
+            "or 'disabled' to send no cache_control at all."
+        )
+
     register_builtin_subscribers(
         subscriber_registry,
         web_search_models=web_search_models,
@@ -498,6 +507,7 @@ def build_chain(
         # Keyed on the resolved model id, which is the name upstream receives. Passed straight through rather than pre-processed: unlike the web-search patterns there is nothing to compile, and the only thing that could be checked here — whether the value is an effort the model publishes — is a question about the live catalog rather than about the config, so it is answered per request.
         thinking_efforts=config.model_thinking_effort,
         thinking_display=config.hook_fix_anthropic_request.thinking.display,
+        cache_control=config.hook_fix_anthropic_request.cache_control,
     )
 
     return Chain(

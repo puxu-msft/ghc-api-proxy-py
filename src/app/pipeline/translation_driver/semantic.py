@@ -48,6 +48,8 @@ class LossCode(StrEnum):
     REASONING_INTENT_APPROXIMATED = "reasoning-intent-approximated"
     REASONING_INTENT_NOT_CARRIED = "reasoning-intent-not-carried"
     TOOL_DESCRIPTION_COERCED = "tool-description-coerced"
+    # A `cache_control` key upstream does not accept, removed so the rest of the request can be sent. Its own member rather than `EXTENSIONS_NOT_CARRIED` because what was lost is specific and consequential: `scope` decides how widely a cached prefix is shared, so dropping it changes what the cache does rather than dropping decoration. Spec §7.1.
+    CACHE_CONTROL_FIELD_NOT_CARRIED = "cache-control-field-not-carried"
     # This proxy put something in the body that the client did not write. The only member that records an *addition* rather than something dropped, and it is here for the same reason as the rest: a body that no longer says what the client said has to say so somewhere a reader will see it.
     SYNTHETIC_TURN_ADDED = "synthetic-turn-added"
     # Upstream answered with an error this proxy could not read as one. Recorded rather than silently dropped, because it is what decides whether the client is handed upstream's original alongside our envelope — spec §10.1.

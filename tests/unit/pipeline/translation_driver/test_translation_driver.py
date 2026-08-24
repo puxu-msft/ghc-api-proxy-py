@@ -884,3 +884,124 @@ def test_a_replayed_failed_search_still_says_it_happened() -> None:
     assert "[web_search] bun 1.3" in texts, texts
     assert "[web_search failed: unavailable]" in texts, texts
     assert semantic.conversion.has(LossCode.SERVER_TOOL_NOT_CARRIED)
+
+
+def _translated_tools(tool: dict[str, Any]) -> tuple[list[dict[str, Any]], Any]:
+    payload, semantic = default_registry().translate(
+        {**ANTHROPIC_REQUEST, "tools": [tool]},
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    return payload["tools"], semantic.conversion
+
+
+def test_a_deferred_tool_does_not_reach_the_responses_wire() -> None:
+    """The body that earned `req=fcc0bebc`'s 400, and the reason it is not a one-field patch.
+
+    Upstream: `Invalid Value: 'tools.defer_loading'. Deferred tools require tools.tool_search.` The precondition is a server tool the bridge spec forbids this layer from introducing, so the field cannot travel.
+    """
+    tools, conversion = _translated_tools(
+        {
+            "name": "get_time",
+            "description": "Return the current time.",
+            "input_schema": {"type": "object", "properties": {}},
+            "defer_loading": True,
+        }
+    )
+
+    assert tools == [
+        {
+            "type": "function",
+            "name": "get_time",
+            "description": "Return the current time.",
+            "parameters": {"type": "object", "properties": {}},
+        }
+    ]
+    assert conversion.has(LossCode.SERVER_TOOL_CONSTRAINT_DROPPED), conversion.losses
+
+
+def test_an_explicitly_undeferred_tool_reports_no_loss() -> None:
+    """`defer_loading: false` says the tool was never deferred, so removing it takes nothing away.
+
+    The control on the branch above. Claude Code sends the false ones in bulk — the frozen history capture holds 345 of them beside 4671 true — so recording a degradation for each would bury the ones that mean something.
+    """
+    tools, conversion = _translated_tools(
+        {
+            "name": "get_time",
+            "input_schema": {"type": "object"},
+            "defer_loading": False,
+        }
+    )
+
+    assert "defer_loading" not in tools[0]
+    assert not conversion.has(LossCode.SERVER_TOOL_CONSTRAINT_DROPPED), conversion.losses
+
+
+def test_a_field_this_wire_never_agreed_to_is_not_forwarded() -> None:
+    """The class the reported 400 belongs to, rather than the one field that revealed it.
+
+    The rewrite this replaces copied every key but `input_schema`, so `cache_control` and `eager_input_streaming` were travelling too — unnoticed, because this endpoint happens to accept them today. A whitelist is what stops the next one arriving as a user's lost turn.
+    """
+    tools, conversion = _translated_tools(
+        {
+            "name": "get_time",
+            "input_schema": {"type": "object"},
+            "cache_control": {"type": "ephemeral"},
+            "eager_input_streaming": True,
+        }
+    )
+
+    assert tools[0] == {"type": "function", "name": "get_time", "parameters": {"type": "object"}}
+    assert conversion.has(LossCode.EXTENSIONS_NOT_CARRIED), conversion.losses
+    assert any("cache_control" in loss.detail for loss in conversion.losses)
+    assert any("eager_input_streaming" in loss.detail for loss in conversion.losses)
+
+
+def test_the_fields_this_wire_does_take_survive_the_whitelist() -> None:
+    """The negative control. A whitelist that dropped these would trade one broken request for a quieter one.
+
+    Every name here is from `FunctionToolParam` in the openai SDK, which is this wire's own type rather than our reading of it.
+    """
+    tools, conversion = _translated_tools(
+        {
+            "name": "get_time",
+            "description": "Return the current time.",
+            "input_schema": {"type": "object"},
+            "strict": True,
+            "allowed_callers": ["direct"],
+            "output_schema": {"type": "string"},
+        }
+    )
+
+    assert tools[0] == {
+        "type": "function",
+        "name": "get_time",
+        "description": "Return the current time.",
+        "parameters": {"type": "object"},
+        "strict": True,
+        "allowed_callers": ["direct"],
+        "output_schema": {"type": "string"},
+    }
+    # Scoped to the two codes this whitelist can produce, not `lossless`: the shared request fixture carries a `cache_control` on its system block, which records a loss of its own and has nothing to do with tools.
+    assert not conversion.has(LossCode.EXTENSIONS_NOT_CARRIED), conversion.losses
+    assert not conversion.has(LossCode.SERVER_TOOL_CONSTRAINT_DROPPED), conversion.losses
+
+
+def test_a_responses_builtin_tool_keeps_the_fields_of_its_own_union_member() -> None:
+    """The whitelist belongs to `FunctionToolParam`, and only function tools may be measured against it.
+
+    `_function_tool` receives every entry that is not an Anthropic server tool, which includes tools already in Responses shape. Those are other members of the `ToolParam` union with fields of their own; running a function tool's whitelist over them ate `web_search.user_location`, `mcp.server_url` and `custom.format`. No production route reaches this today — Responses is not translated to Responses — but the crossing exists, and a silent field drop is not something to leave standing on the strength of "unreachable".
+    """
+    builtins: list[dict[str, Any]] = [
+        {"type": "web_search", "user_location": {"type": "approximate", "city": "Paris"}},
+        {"type": "mcp", "server_label": "docs", "server_url": "https://mcp.invalid/sse"},
+        {"type": "custom", "name": "freeform", "format": {"type": "grammar"}},
+    ]
+    payload, semantic = default_registry().translate(
+        {**ANTHROPIC_REQUEST, "tools": builtins},
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+
+    assert payload["tools"] == builtins
+    assert not semantic.conversion.has(LossCode.EXTENSIONS_NOT_CARRIED), semantic.conversion.losses
