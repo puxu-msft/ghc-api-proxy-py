@@ -10,7 +10,7 @@
   **尚未跟进、需独立切片**：`acceptance.md` 的 `CAL-04-GRAMMAR-v1`（ping 转移行与冻结 fixtures，并需重新审视 R3-M1／R4-M1／R5-M1 三条已闭评审行）、本文第 579 行那条 M1 评审记录（点时记录，不回填）、以及 `architecture.md` 的 delayed response-start owner 一族（实测该机制及其测试只存在于已不可达的旧链）。
 - **2026-08-24 修订「Downstream Anthropic SSE」第 7 条：SSE error event 之前必须先咨询合成续写。** 触发是一次生产事故 req=`75ccdf6f`（诊断见 `../upstream/retry-and-continuation/reports/260824-silent-eof-after-thinking-diagnosis.md`）：上游交付一个完整 thinking 块后静默、随后切穿块中干净 EOF，客户端只拿到一句 `API Error`，而它本可以拿到一个可续写的 `tool_use`。
   **本条不是新裁决，是把一条既有的用户裁决补进本文。** 权威是用户亲笔的 `docs/.human-controlled/upstream-retry-and-continuation.md` 第 30 行：「如果已经交付过至少一个完整块，则将报错合成为自制的 `tool_use` / `function_call` 块……返回给客户端」。该文第 5–11 行的「无法继续」清单未列入「上游流无终止事件」，最接近的第 15 行「网络中断」属「一般可以继续」，故本格落在第 30 行的处方之内。实现此前只在**撕裂**路径上执行了它，干净 EOF 路径从不咨询——两条路把客户端留在同一个位置（`src/app/pipeline/retry.py` 该处注释明文如此），出口却不同。
-  **范围限定，不要读宽**：本条只约束**本来就要发 SSE error event 的那些结局**。上游停在块边界、按 2026-08-22 裁决以合成 stop reason 正常收尾的那一格**不报错**，因此不在第 30 行的触发条件内，行为不变。
+  **范围限定，不要读宽**：本条只约束**本来就要发 SSE error event、且失败属于人写文档「业务可继续」那一类**的结局。上游停在块边界、按 2026-08-22 裁决以合成 stop reason 正常收尾的那一格**不报错**，因此不在第 30 行的触发条件内，行为不变；代理自我保护（`DeliveryError`）、客户端已断开、400／401／`refusal` 与本侧 bug 属该文第 5–11 行的「无法继续」，同样不咨询。**修订初稿把义务写成「凡发 SSE error event 之前」，比实现和人写文档都宽，会要求把明确不可继续的保护性错误也合成为续写；异源评审 2026-08-24 判为 major，已按此收窄。**
 
 ## 问题与意图
 
@@ -293,7 +293,7 @@ Consumer 对每个 thinking block 固定按以下顺序分类，首个命中即�
 4. 每个已完成 semantic block 以连续 `content_block_start` → delta／signature delta → `content_block_stop` envelope 提交。
 5. block index 从零开始、连续单调，并与稀疏或重复的 Responses `output_index` 解耦。
 6. 所有 blocks 完成后，至多一个 `message_delta` 携带 stop reason 与 terminal usage，随后至多一个 `message_stop`。
-7. terminal error 在尚未提交 HTTP success 时使用 Anthropic HTTP error；已提交后使用 Anthropic SSE error event，且不得再发 `message_stop` 冒充成功。**发出该 SSE error event 之前必须先咨询合成续写**：若本回合已向下游提交过至少一个完整 block，则按 `docs/.human-controlled/upstream-retry-and-continuation.md` 第 30 行把这次报错合成为 `turn_interrupted` 的 `tool_use` 块交给客户端，只有在续写不适用或被拒（非 anthropic-messages 客户端、工具名配置为空、本回合已接管过）时才落到 error event。**这一条对失败的到达方式不作区分**——上游撕裂与上游干净 EOF 而无终止事件把客户端留在同一个位置，决定下一步合法性的是那个位置而不是到达方式。**它不改变停在块边界、以合成 stop reason 正常收尾的那一格**：那一格不报错，因此不触发本条。
+7. terminal error 在尚未提交 HTTP success 时使用 Anthropic HTTP error；已提交后使用 Anthropic SSE error event，且不得再发 `message_stop` 冒充成功。**当这次失败属于「业务可继续」且本回合已向下游提交过至少一个完整 block 时，发出该 SSE error event 之前必须先咨询合成续写**，按 `docs/.human-controlled/upstream-retry-and-continuation.md` 第 30 行把它合成为 `turn_interrupted` 的 `tool_use` 块交给客户端；只有在续写不适用或被拒（非 anthropic-messages 客户端、工具名配置为空、本回合已接管过）时才落到 error event。**「业务可继续」按人写文档第 3–18 行判定，不是「凡 SSE error 皆咨询」**——该文第 5–11 行列举的「无法继续」各格（代理保护机制触发、客户端已断开、400、401、`refusal`）以及本侧自身的 bug 一律**不**咨询，直接发 error event；实现上这对应 `DeliveryError` 与 `ours` 两道判别，交付链路上共有三个 error event 出口而只有上游截断那一个受本条约束。**这一条对失败的到达方式不作区分**——上游撕裂与上游干净 EOF 而无终止事件把客户端留在同一个位置，决定下一步合法性的是那个位置而不是到达方式。**它不改变停在块边界、以合成 stop reason 正常收尾的那一格**：那一格不报错，因此不触发本条。
 
 block envelope 在网络层可能被 HTTP／TCP 任意分片；本规格保证的是“完整 block 已在代理内组装后才开始对下游可见”以及“同一 block envelope 连续、不与其他 block 交错”，不声称单次 socket write 原子性。
 
