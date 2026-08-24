@@ -48,6 +48,8 @@ class LossCode(StrEnum):
     REASONING_INTENT_APPROXIMATED = "reasoning-intent-approximated"
     REASONING_INTENT_NOT_CARRIED = "reasoning-intent-not-carried"
     TOOL_DESCRIPTION_COERCED = "tool-description-coerced"
+    # Upstream answered with an error this proxy could not read as one. Recorded rather than silently dropped, because it is what decides whether the client is handed upstream's original alongside our envelope — spec §10.1.
+    UPSTREAM_ERROR_NOT_INTERPRETED = "upstream-error-not-interpreted"
 
 
 class TranslationRefused(Exception):

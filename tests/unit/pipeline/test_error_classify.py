@@ -29,7 +29,7 @@ from app.model_provider.types import (
     ProviderError,
     UnknownModel,
 )
-from app.pipeline.count_tokens import CountTokensUnavailable
+from app.pipeline.count_tokens import CountTokensRequestError, CountTokensUnavailable
 from app.pipeline.error_classify import describe
 from app.pipeline.exceptions import (
     PipelineAbort,
@@ -115,6 +115,12 @@ CASES: tuple[tuple[str, Callable[[], BaseException], ErrorCategory, int], ...] =
         ErrorCategory.NOT_IMPLEMENTED,
         501,
     ),
+    (
+        "count-tokens-request-error",
+        lambda: CountTokensRequestError("not a countable Messages body"),
+        ErrorCategory.CLIENT,
+        400,
+    ),
     ("routing-error", lambda: RoutingError("bad"), ErrorCategory.CLIENT, 400),
     ("outside-the-closed-set", lambda: KeyError("model"), ErrorCategory.INTERNAL, 500),
 )
@@ -142,6 +148,7 @@ EXPECTED_CASE_IDS = frozenset(
         "provider-error-base",
         "translation-refused",
         "translator-not-found",
+        "count-tokens-request-error",
         "routing-error",
         "outside-the-closed-set",
     }

@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.requests import ClientDisconnect
 
 from app.core.chain import Chain
+from app.errors import ErrorCategory
 from app.observability.logging import get_logger
 from app.observability.metrics import ATTRIBUTION_LINES_STRIPPED
 from app.observability.rejection_capture import capture_rejection
@@ -57,7 +58,7 @@ from app.pipeline.hand_over import hand_back_block, replay_reason
 from app.pipeline.reply import reply_summary, response_payload
 from app.pipeline.request import RequestContext, WireFormat
 from app.server.app_state import chain_of
-from app.server.http_errors import error_body, error_headers, error_status
+from app.server.http_errors import error_response, proxy_error
 from app.server.inbound import InboundRequestError, build_context
 from app.server.routes.table import route_for_path
 from app.streaming.deadline import (
@@ -145,7 +146,11 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
     route = route_for_path(getattr(matched, "path", None) or request.url.path)
     if route is None:
         # Defensive rather than reachable: `build_router` registers only paths `route_for_path` knows, so a request that got here has one. An unregistered URL is answered by FastAPI's own router and never reaches this function, which is why no completion line is written for it — that is a deliberate boundary, not an oversight: a 404 for a path this proxy does not serve is not a proxied request.
-        return JSONResponse({"error": {"message": "unknown endpoint"}}, status_code=404)
+        # `INTERNAL` rather than the 404 this used to answer. Reaching here means the router and the lookup table disagree about what is mounted, which is this proxy's own inconsistency; telling the client "not found" would send it to check its URL, and the URL is fine. The dialect is Anthropic's because without a route there is no inbound format to read.
+        return error_response(
+            proxy_error(ErrorCategory.INTERNAL, "this proxy's route table and router disagree"),
+            inbound_format=WireFormat.ANTHROPIC_MESSAGES.value,
+        )
     trace.inbound_format = route.wire_format.value
     trace.count_tokens = route.count_tokens
 
@@ -153,18 +158,27 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
         # 501, not 404 and not 400. The path is one `api.md` ratifies, and a 404 would make it indistinguishable from an endpoint this proxy does not have; 400 is what a missing translator would otherwise produce, and that blames the client's body for a capability this proxy has not built. Answered before the body is *parsed* — it has already been read, a line above — because nothing here can judge a format it cannot read.
         # The URL rather than `route.path`, which is this repository's own spelling: a client told that `/v1beta/models/{model}:generateContent` is unimplemented has been handed a template it cannot act on. The envelope is this proxy's general one; whether an unimplemented endpoint should answer in its own dialect's error shape is registered in `deferred.md` rather than decided here.
         trace.detail = f"{route.wire_format.value} is routed but not implemented"
-        return JSONResponse(
-            {"error": {"message": f"{request.url.path} is not implemented yet"}}, status_code=501
+        return error_response(
+            proxy_error(
+                ErrorCategory.NOT_IMPLEMENTED, f"{request.url.path} is not implemented yet"
+            ),
+            inbound_format=route.wire_format.value,
         )
 
     try:
         parsed: object = await request.json()
     except ValueError:
         trace.detail = "body is not valid JSON"
-        return JSONResponse({"error": {"message": "body is not valid JSON"}}, status_code=400)
+        return error_response(
+            proxy_error(ErrorCategory.CLIENT, "body is not valid JSON"),
+            inbound_format=route.wire_format.value,
+        )
     if not isinstance(parsed, dict):
         trace.detail = "body must be an object"
-        return JSONResponse({"error": {"message": "body must be an object"}}, status_code=400)
+        return error_response(
+            proxy_error(ErrorCategory.CLIENT, "body must be an object"),
+            inbound_format=route.wire_format.value,
+        )
     body = cast(dict[str, Any], parsed)
 
     try:
@@ -172,7 +186,10 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
         context = build_context(route, body, request.headers, request.path_params)
     except InboundRequestError as error:
         trace.detail = str(error)
-        return JSONResponse(error_body(error), status_code=400)
+        return error_response(
+            proxy_error(ErrorCategory.CLIENT, str(error)),
+            inbound_format=route.wire_format.value,
+        )
 
     # After parsing and before routing, which is where `docs/.human-controlled/message-format-reshape.md` puts it: the line is addressed to Anthropic's billing rather than to any model, so routing, translation and the token counter should not be reading it. Scope is what that document specifies — the leading lines of `system[0]` — so an attribution line placed anywhere else does still travel.
     # Off unless the operator asks, per the same document. It was resident for one commit, under that document's previous revision.
@@ -206,10 +223,10 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
             # A count that failed still translated, and what the translation could not carry is part of why it may have failed.
             trace.absorb_losses(context)
             # No capture here on purpose. `count_tokens` converts every upstream failure into `CountTokensUnavailable` before it reaches this line, so an `UpstreamRejected` never arrives and a call would be wiring that looks live and is not. That conversion also means a counting request refused over its body answers 503 rather than upstream's own verdict, which is a separate gap and not this one's to close.
-            return JSONResponse(
-                error_body(error),
-                status_code=error_status(error),
-                headers=error_headers(error),
+            return error_response(
+                error,
+                inbound_format=route.wire_format.value,
+                translated=context.translation_required,
             )
         # A count is a model request like any other: it resolves a model and it produces a token number, and a line that reported neither made the busiest endpoint on the proxy the least legible one.
         trace.model = context.resolved_model
@@ -254,10 +271,10 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
         trace.absorb_losses(context)
         # Before the response is written, because `context.payload` is the body upstream refused and nothing downstream keeps it.
         capture_rejection(context, error, request_id=trace.request_id)
-        return JSONResponse(
-            error_body(error),
-            status_code=error_status(error),
-            headers=error_headers(error),
+        return error_response(
+            error,
+            inbound_format=route.wire_format.value,
+            translated=context.translation_required,
         )
     active.set_model(trace.request_id, context.resolved_model)
     active.set_attempts(trace.request_id, context.attempt_count)
@@ -273,10 +290,10 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
         trace.detail = str(error)
         # The branch an upstream refusal actually takes: the driver reports it in the outcome rather than raising, so the exception path above never sees one.
         capture_rejection(context, error, request_id=trace.request_id)
-        return JSONResponse(
-            error_body(error),
-            status_code=error_status(error),
-            headers=error_headers(error),
+        return error_response(
+            error,
+            inbound_format=route.wire_format.value,
+            translated=context.translation_required,
         )
     # Exactly what went out to upstream, taken off the request httpx actually sent rather than re-serialized from the payload. It is not the client's body size: translation rewrites the payload, and the version upstream is billed and tokenized for is the one worth reporting.
     trace.bytes_in = len(response.request.content)

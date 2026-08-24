@@ -717,7 +717,7 @@ def test_a_domain_restriction_refuses_before_upstream_is_called() -> None:
     body = orjson.loads(response.content)["error"]
     # A stable code and the field that caused it: a client matching on the English would break the first time the wording changed, and one told only "bad request" cannot find which tool it was.
     assert body["code"] == "server_tool_constraint_not_representable"
-    assert body["field_path"] == "tools.web_search_20250305.allowed_domains"
+    assert body["param"] == "tools.web_search_20250305.allowed_domains"
 
 
 def test_model_mapping_is_applied_before_the_upstream_call() -> None:
@@ -744,7 +744,9 @@ def test_model_without_the_capability_is_refused_before_the_network() -> None:
     response = client.post("/v1/messages", json={"model": "mute-model", "messages": []})
 
     assert response.status_code == 400
-    assert response.json()["error"]["type"] == "CapabilityMissing"
+    # The dialect's own vocabulary, not this project's class name. `CapabilityMissing` used to reach the wire, which made an exception's name part of the public contract — renaming the class would have been a wire change.
+    assert response.json()["error"]["type"] == "invalid_request_error"
+    assert response.json()["error"]["code"] == "invalid_request"
     # Fail closed means nothing was sent, not that upstream rejected it.
     assert seen == []
 
@@ -753,8 +755,9 @@ def test_unknown_model_is_refused_before_the_network() -> None:
     client, seen = make_client(lambda _: httpx2.Response(200, json={}))
     response = client.post("/v1/messages", json={"model": "mystery", "messages": []})
 
-    assert response.status_code == 400
-    assert response.json()["error"]["type"] == "UnknownModel"
+    # **404 rather than 400.** The model named is not in the catalog, which is "no such thing" and not "your body is malformed" — and `CapabilityMissing` above is exactly the distinction 400 was blurring. Neither SDK retries either status, so what changes is the exception class the client catches.
+    assert response.status_code == 404
+    assert response.json()["error"]["type"] == "not_found_error"
     assert seen == []
 
 
@@ -864,10 +867,15 @@ def test_streamed_delta_carries_the_whole_block() -> None:
     assert text_deltas == ["the whole thing"]
 
 
-def test_upstream_error_status_reaches_the_client_as_a_gateway_failure() -> None:
+def test_upstream_error_status_reaches_the_client_as_upstream_sent_it() -> None:
+    """**Behaviour change**: this used to answer 502 whatever upstream said.
+
+    502 means the gateway itself broke. Upstream said 500, which means upstream broke — and on a direct path the client is owed upstream's own answer, body included. The old name of this test asserted the very thing that was wrong with it.
+    """
     client, _ = make_client(lambda _: httpx2.Response(500, json={"error": "upstream boom"}))
     response = client.post("/v1/messages", json={"model": "claude-model", "messages": []})
-    assert response.status_code == 502
+    assert response.status_code == 500
+    assert response.json() == {"error": "upstream boom"}
 
 
 def test_unknown_path_is_not_served() -> None:
@@ -1171,8 +1179,8 @@ def test_a_rate_limit_that_runs_out_of_retries_still_reaches_the_client_as_one()
 
     assert response.status_code == 429
     assert response.headers["retry-after"] == "17"
-    # The abort's own words survive too: an operator reading the line still learns which budget ran out.
-    assert "budget" in response.json()["error"]["message"]
+    # Upstream's own body, because this is a direct path. It used to be this proxy's envelope with the abort's wording inside — which said which *budget* ran out, an operator's fact that the client could do nothing with. The operator still gets it: it is on the completion line, which is where a reader of budgets looks.
+    assert response.json() == {"error": "slow down"}
     assert chain.rate_limiter_for("ghc").mode is RateLimitMode.LIMITED
 
 
@@ -1892,7 +1900,7 @@ def test_a_refused_request_is_reported_with_its_route_and_reason(request_log: No
     lines = _request_lines(caplog.records)
     assert len(lines) == 1
     # A failure keeps `METHOD /path`, because that is what has to be reproduced, and ends in the reason. One protocol label rather than a pair: this request never reached upstream, so there is no second leg to name.
-    assert lines[0].startswith("H1 400 POST /v1/messages ")
+    assert lines[0].startswith("H1 404 POST /v1/messages ")
     assert "no-such-model" in lines[0]
 
 
@@ -2957,7 +2965,8 @@ def test_an_unreadable_thinking_field_is_refused_by_name() -> None:
     )
 
     assert response.status_code == 400
-    assert response.json()["error"]["field_path"] == "thinking.budget_tokens"
+    # `param` rather than `field_path`: the field that names which part of the request is at fault now uses the spelling OpenAI declares and Anthropic tolerates, instead of one only this project used.
+    assert response.json()["error"]["param"] == "thinking.budget_tokens"
 
 
 def test_a_count_resolves_reasoning_the_same_way_the_send_does() -> None:

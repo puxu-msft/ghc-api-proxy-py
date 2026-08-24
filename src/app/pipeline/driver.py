@@ -20,7 +20,7 @@ from app.models.anthropic import MessagesRequest
 from app.observability.metrics import BETA_FLAGS_STRIPPED
 from app.pipeline.anthropic_request_hook import fix_anthropic_request
 from app.pipeline.auto_mode_classifier import AutoModeVerdict, classify, log_hit, verdict_text
-from app.pipeline.count_tokens import count_tokens
+from app.pipeline.count_tokens import CountTokensRequestError, count_tokens
 from app.pipeline.delivery.formats.anthropic_messages_synthetic_reply import (
     auto_mode_body,
     auto_mode_sse,
@@ -233,9 +233,6 @@ def _answered_auto_mode(
         response=httpx2.Response(200, content=body, headers=headers, request=request),
         attempts=context.attempt_count,
     )
-
-class CountTokensRequestError(ValueError):
-    """The body cannot be read as an Anthropic Messages request, so there is nothing to count."""
 
 async def handle_count_tokens(chain: Chain, context: RequestContext) -> dict[str, Any]:
     """Serve `/v1/messages/count_tokens` through the provider chain the spec names.

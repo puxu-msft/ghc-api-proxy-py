@@ -5,6 +5,7 @@ The defect these cover is not that a case was handled wrongly — it is that no 
 
 import httpx2
 import openai
+import orjson
 import pytest
 from h2.exceptions import NoSuchStreamError, StreamClosedError
 from h2.exceptions import ProtocolError as H2ProtocolError
@@ -20,7 +21,7 @@ from app.pipeline.exceptions import (
     classify,
 )
 from app.pipeline.retry import RetryReason, reason_for
-from app.server.http_errors import error_body, error_headers, error_status
+from app.server.http_errors import error_response, error_status
 
 
 def status_error(
@@ -158,33 +159,71 @@ def test_retry_after_ignores_the_http_date_form() -> None:
 
 
 def test_the_client_is_told_what_upstream_said() -> None:
-    """A 400 answered as 502 says the proxy broke — both wrong and useless to the client."""
+    """A 400 answered as 502 says the proxy broke — both wrong and useless to the client.
+
+    On a **direct** path upstream's own bytes are what the client gets, so the assertion is that they arrive whole rather than that they appear inside a field of ours. That field is gone: `error_body`'s `upstream` key nested upstream's JSON as a *string*, which a client had to parse a second time.
+    """
     rejected = normalize_upstream_error(
         status_error(400, body='{"error": {"message": "context_management: Extra inputs"}}')
     )
     assert rejected is not None
 
-    assert error_status(rejected) == 400
-    assert "context_management" in error_body(rejected)["error"]["upstream"]
+    response = error_response(rejected, inbound_format="anthropic-messages", translated=False)
+
+    assert response.status_code == 400
+    assert b"context_management" in response.body
+    assert response.body == b'{"error": {"message": "context_management: Extra inputs"}}'
+
+
+def test_a_translated_path_gets_our_envelope_rather_than_upstreams() -> None:
+    """The other half of the same ruling, asserted against the same upstream answer.
+
+    Same failure, two paths, two shapes — which is the point. The client here is speaking a dialect upstream does not, so handing on upstream's bytes would give it something its parser does not know.
+    """
+    rejected = normalize_upstream_error(
+        status_error(400, body='{"error": {"message": "context_management: Extra inputs"}}')
+    )
+    assert rejected is not None
+
+    response = error_response(rejected, inbound_format="anthropic-messages", translated=True)
+
+    assert response.status_code == 400
+    assert orjson.loads(response.body) == {
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "message": "upstream returned 400: context_management: Extra inputs",
+            "code": "invalid_request",
+        },
+    }
 
 
 def test_a_rate_limit_reaches_the_client_as_429_with_its_retry_after() -> None:
+    """Upstream's own header, in upstream's own spelling.
+
+    It used to be reformatted — parsed to a float and printed back as an int — and it was the *only* header that survived at all. Everything else upstream said, including `x-request-id`, was dropped.
+    """
     limited = normalize_upstream_error(status_error(429, headers={"retry-after": "12"}))
     assert limited is not None
 
-    assert error_status(limited) == 429
-    assert error_headers(limited) == {"retry-after": "12"}
+    response = error_response(limited, inbound_format="anthropic-messages", translated=False)
+
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "12"
 
 
 def test_a_timeout_reaches_the_client_as_504() -> None:
     assert error_status(UpstreamTimeout("upstream took too long")) == 504
 
 
-def test_an_upstream_server_error_is_still_a_bad_gateway() -> None:
-    """502 is right here — the proxy really could not get an answer out of upstream."""
+def test_an_upstream_server_error_keeps_upstreams_own_status() -> None:
+    """**Behaviour change**, and the reason for it is what the old name got wrong.
+
+    This used to answer 502 — "the proxy could not get an answer out of upstream" — for every retryable status whose budget ran out. But there *was* an answer: upstream said 503, which means overloaded and is worth retrying, while 502 means the gateway itself broke. A client acts differently on the two, and both SDKs pick their exception class from the status.
+    """
     failed = normalize_upstream_error(status_error(503))
     assert failed is not None
-    assert error_status(failed) == 502
+    assert error_status(failed) == 503
 
 
 def test_a_refusal_carries_the_bytes_it_was_a_refusal_of() -> None:

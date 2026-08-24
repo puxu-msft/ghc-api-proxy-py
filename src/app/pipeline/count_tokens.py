@@ -21,6 +21,13 @@ type UpstreamCounter = Callable[[Mapping[str, Any]], Awaitable[int]]
 type LocalCounter = Callable[[Mapping[str, Any]], int]
 
 
+class CountTokensRequestError(ValueError):
+    """The body cannot be read as an Anthropic Messages request, so there is nothing to count.
+
+    Defined here rather than in `driver`, where it was until 2026-08-23, because it is about counting and because `app.pipeline.error_classify` has to name it. Classifying it from `driver` would pull the whole request pipeline into a module whose job is to answer "what kind of failure is this" — and that module is imported by the HTTP edge on every failure.
+    """
+
+
 class CountTokensUnavailable(RuntimeError):
     """Every configured provider failed.
 

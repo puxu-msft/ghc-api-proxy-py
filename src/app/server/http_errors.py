@@ -1,89 +1,113 @@
-"""How a failure from the pipeline is spelled as HTTP.
+"""One failure, one HTTP response.
 
-Split out of `app.server.handler` on 2026-08-22. This is the edge's half of that module: it maps the pipeline's closed exception set onto a status, a few headers and a body. Named `http_errors` rather than `errors` because `app.errors` already exists and means something else.
+Split out of `app.server.handler` on 2026-08-22 and rewritten on 2026-08-23, when `.dev/docs/error-envelope/spec.md` froze. It was three functions — a status, some headers, a body dict — and every caller handed the third to `JSONResponse`. That arrangement **cannot** express what the spec requires of a direct path: `JSONResponse` takes an object to serialize and picks its own content type, so upstream's own bytes have nowhere to go. So it is one factory that returns a `Response`, and it decides between two entirely different answers.
+
+The two answers, from the user's ruling of 2026-08-23:
+
+- **Direct path, failure from upstream** — the client and upstream speak the same dialect, so this proxy has no business having an opinion. Upstream's bytes, status and semantic headers go out untouched, including the fields nobody here recognises.
+- **Everything else** — the failure becomes an `ErrorInfo` and a writer spells it in the client's dialect.
+
+Classification of what the *pipeline* raises lives in `app.pipeline.error_classify`. What is classified here is the handful of sources only the edge ever holds: a body that will not parse, a body that is not an object, a route registered but not implemented, and `InboundRequestError` — which is defined one module over and would cost a `pipeline -> server` edge to classify from the other side.
 """
 
-from typing import Any
+from collections.abc import Mapping
 
-from app.model_provider import ProviderError
-from app.pipeline.count_tokens import CountTokensUnavailable
-from app.pipeline.driver import CountTokensRequestError
-from app.pipeline.exceptions import (
-    PipelineAbort,
-    UpstreamRateLimit,
-    UpstreamRejected,
-    UpstreamTimeout,
+from fastapi.responses import JSONResponse, Response
+
+from app.errors import (
+    DEFAULT_CODE_FOR_CATEGORY,
+    NO_RETRY_CATEGORIES,
+    STATUS_FOR_CATEGORY,
+    ErrorCategory,
+    ErrorInfo,
 )
-from app.pipeline.routing import RoutingError
-from app.pipeline.translation_driver.registry import TranslatorNotFound
-from app.pipeline.translation_driver.semantic import (
-    TranslationRefused,
+from app.pipeline.delivery.formats.errors import write_error
+from app.pipeline.error_classify import describe
+
+# Headers that describe *this* response rather than upstream's. `content-length` is the dangerous one — it is upstream's byte count and Starlette computes its own — and the rest frame a connection this response is not on.
+# Narrower than the floor `error_classify` already applied, and applied again here because a caller may hand in an `ErrorInfo` this edge built rather than one that came through there.
+_NEVER_FORWARDED = frozenset(
+    {
+        "content-length",
+        "content-encoding",
+        "transfer-encoding",
+        "connection",
+        "keep-alive",
+        "te",
+        "trailer",
+        "upgrade",
+    }
 )
+
+
+def proxy_error(
+    category: ErrorCategory, message: str, *, code: str = "", param: str = ""
+) -> ErrorInfo:
+    """An `ErrorInfo` for a failure the edge holds without an exception to classify.
+
+    Three of the spec's rows arrive this way — an unparseable body, a body that is not an object, a route whose `implemented` is false — because each is a `return` rather than a `raise`. Building the record here is what lets them share one envelope with everything else instead of each inventing its own.
+    """
+    return ErrorInfo(
+        category=category,
+        message=message,
+        status_code=STATUS_FOR_CATEGORY[category],
+        code=code or DEFAULT_CODE_FOR_CATEGORY[category],
+        param=param,
+    )
+
+
+def _outbound_headers(info: ErrorInfo, *, direct: bool) -> dict[str, str]:
+    """What goes on the wire beside the body.
+
+    On a direct path these are upstream's own, minus this response's framing — the rate-limit counters, the request id, `Retry-After` in whatever form upstream wrote it. Until this landed the only header a client ever saw was a `Retry-After` reformatted from a parsed float, and only on a 429; everything else, including `x-request-id`, was dropped.
+
+    `x-should-retry` is synthesised **only** for the two categories where an SDK's default would be actively wrong. Both SDKs read the header and both retry every `>= 500` by default, so a 501 meaning "nobody built this" would otherwise be asked for again and again.
+
+    The `not direct` term is **structural rather than reachable**, and saying so is the point: no upstream status maps to `INTERNAL` or `NOT_IMPLEMENTED` — `category_for_status` sends every `>= 500` to `UPSTREAM` — so a direct answer can never satisfy the second condition today. A mutation removing this term left every test green, which is how that was established rather than assumed. It stays because it states the rule that would otherwise have to be rediscovered: on a direct path upstream's headers are the answer, and appending to them would be this proxy having an opinion about a conversation it is only carrying.
+    """
+    headers = {
+        name: value for name, value in info.headers.items() if name.lower() not in _NEVER_FORWARDED
+    }
+    if not direct and info.category in NO_RETRY_CATEGORIES:
+        headers["x-should-retry"] = "false"
+    return headers
+
+
+def error_response(
+    source: BaseException | ErrorInfo,
+    *,
+    inbound_format: str,
+    translated: bool = True,
+) -> Response:
+    """The response one failure becomes.
+
+    `translated` defaults to `True` — the answer that renders — because that is the one that is safe when a caller does not know. Passing upstream's bytes on requires knowing the client speaks upstream's dialect; rendering does not require knowing anything.
+
+    A direct-path answer is only possible when there are bytes to pass on. A failure that happened before upstream answered has none, and falls through to the writer even on a direct path — which is the spec's §3.3, not an exception to §3.1.
+    """
+    info = source if isinstance(source, ErrorInfo) else describe(source, source_format=inbound_format)
+    direct = not translated and bool(info.source_bytes)
+    if direct:
+        return Response(
+            content=info.source_bytes,
+            status_code=info.status_code,
+            headers=_outbound_headers(info, direct=True),
+            # Upstream's own declaration. `None` when it made none, which leaves Starlette's default rather than this proxy asserting what upstream's bytes are.
+            # Set here rather than as a `content-type` header: a first draft did both, and a mutation showed the header line was dead — `media_type` wins, so the extra assignment looked like the mechanism and was not.
+            media_type=info.source_content_type or None,
+        )
+    return JSONResponse(
+        write_error(info, wire_format=inbound_format),
+        status_code=info.status_code,
+        headers=_outbound_headers(info, direct=False),
+    )
 
 
 def error_status(error: BaseException) -> int:
-    """Map a failure to the status the client should see.
+    """Kept for callers that only want the number. `error_response` is what serves a client."""
+    return describe(error).status_code
 
-    A routing or capability refusal means the request is unserviceable, not that upstream failed.
-    It must not be reported as a bad gateway.
 
-    Nor must an upstream answer be flattened into one. A client that gets 429 can back off and a client that gets 400 can fix its body; both learn nothing from a 502, which says the proxy itself broke. Everything used to land on that 502 because the SDK's exceptions were outside the closed set — see `app.model_provider.ghc_client.errors`.
-
-    An abort that ended a retry sequence is read through to the failure that ended it, for the same reason: running out of retries does not change what upstream said, and the client can still act on it. Without this every retryable failure that spent its budget arrived as that same 502.
-    """
-    if isinstance(error, PipelineAbort) and error.cause is not None:
-        return error_status(error.cause)
-    if isinstance(
-        error,
-        ProviderError
-        | RoutingError
-        | TranslatorNotFound
-        | CountTokensRequestError
-        | TranslationRefused,
-    ):
-        return 400
-    if isinstance(error, CountTokensUnavailable):
-        # Every configured counter failed. Reachable when `providers` names only `ghc`;
-        # with `local` in the list the estimate has no way to fail on the normal path.
-        return 503
-    if isinstance(error, UpstreamRateLimit):
-        return 429
-    if isinstance(error, UpstreamTimeout):
-        return 504
-    if isinstance(error, UpstreamRejected):
-        # Upstream's own verdict on the request. Passed through so the client is told what is wrong with what it sent, rather than that some gateway failed.
-        return error.status_code
-    return 502
-
-def error_headers(error: BaseException) -> dict[str, str]:
-    """The few upstream headers a client needs in order to act on a failure.
-
-    `Retry-After` only: it is the one that changes what a well-behaved client does next. An allowlist rather than forwarding upstream's set, which carries its own framing headers.
-
-    Read through an abort to the failure that ended the retries, so a rate limit that exhausted its budget still tells the client how long to wait.
-    """
-    if isinstance(error, PipelineAbort) and error.cause is not None:
-        return error_headers(error.cause)
-    if isinstance(error, UpstreamRateLimit) and error.retry_after is not None:
-        return {"retry-after": str(int(error.retry_after))}
-    return {}
-
-def error_body(error: BaseException) -> dict[str, Any]:
-    body: dict[str, Any] = {"type": type(error).__name__, "message": str(error)}
-    # The abort's own message already names both the budget that ran out and the failure that ran it out, so it stays as the message. What is read off the cause instead are the structured fields — upstream's code, the field it named, its own body — which say what the prose cannot be parsed for.
-    detail: BaseException = (
-        error.cause if isinstance(error, PipelineAbort) and error.cause is not None else error
-    )
-    code = getattr(detail, "code", "")
-    if isinstance(code, str) and code:
-        # A stable identifier for what went wrong, where the class name is only a category and the message is prose. A client that wants to react to one particular refusal — rather than matching on English that may be reworded — has this to key on.
-        body["code"] = code
-    field_path = getattr(detail, "field_path", "")
-    if isinstance(field_path, str) and field_path:
-        # Which part of the request caused it. A refusal that names the field is one the client can act on; one that does not leaves it to guess which of its tools was the problem.
-        body["field_path"] = field_path
-    upstream = getattr(detail, "body", "")
-    if isinstance(upstream, str) and upstream:
-        # What upstream actually said. Named as upstream's rather than merged, so nothing reads our wrapper's wording as though the model had produced it.
-        body["upstream"] = upstream
-    return {"error": body}
+def error_headers(error: BaseException) -> Mapping[str, str]:
+    """Kept for the same reason as `error_status`."""
+    return _outbound_headers(describe(error), direct=False)

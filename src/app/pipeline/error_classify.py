@@ -9,6 +9,7 @@ What is *not* split is the vocabulary: both sides produce the same `ErrorInfo` a
 
 import json
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, cast
 
 from app.anthropic.header_policy import RESPONSE_FLOOR
@@ -27,7 +28,7 @@ from app.model_provider.types import (
     ProviderError,
     UnknownModel,
 )
-from app.pipeline.count_tokens import CountTokensUnavailable
+from app.pipeline.count_tokens import CountTokensRequestError, CountTokensUnavailable
 from app.pipeline.exceptions import (
     PipelineAbort,
     UpstreamError,
@@ -37,7 +38,7 @@ from app.pipeline.exceptions import (
 )
 from app.pipeline.routing import RoutingError
 from app.pipeline.translation_driver.registry import TranslatorNotFound
-from app.pipeline.translation_driver.semantic import TranslationRefused
+from app.pipeline.translation_driver.semantic import Conversion, LossCode, TranslationRefused
 
 # The `ProviderError` subclasses the spec names, most specific first. A `dict` keyed on the class would answer only for an exact type; this is walked in order so a future subclass of, say, `UnknownModel` still lands on its parent's row rather than on the base's.
 _PROVIDER_ROWS: tuple[tuple[type[ProviderError], ErrorCategory], ...] = (
@@ -70,9 +71,10 @@ def _from_upstream(error: UpstreamError | UpstreamRejected, *, source_format: st
     """
     status = error.status_code
     if status is None:
+        # Nothing came back, so there is nothing to have failed to interpret.
         return ErrorInfo(
             category=ErrorCategory.NETWORK,
-            message=str(error),
+            message="upstream could not be reached",
             status_code=STATUS_FOR_CATEGORY[ErrorCategory.NETWORK],
             code=DEFAULT_CODE_FOR_CATEGORY[ErrorCategory.NETWORK],
             headers=_forwardable(dict(error.headers)),
@@ -80,37 +82,71 @@ def _from_upstream(error: UpstreamError | UpstreamRejected, *, source_format: st
             source_bytes=error.body_bytes,
             source_content_type=error.content_type,
         )
-    category = category_for_status(status, upstream_type=_upstream_error_type(error.body))
+    read = _read_upstream_error(error.body)
+    category = category_for_status(status, upstream_type=read.kind)
+    conversion = Conversion()
+    if not read.interpreted:
+        conversion.record(
+            LossCode.UPSTREAM_ERROR_NOT_INTERPRETED,
+            f"{error.content_type or 'no content-type'} at {status}",
+        )
     return ErrorInfo(
         category=category,
-        message=str(error),
+        # Built here rather than taken from `str(error)`, which is the SDK's `__str__` and changes shape with upstream's content type: a Python `dict` repr for JSON, the raw text with no prefix for HTML, and just `Error code: 400` for an empty body. Nothing in this project knew what it was putting on the wire.
+        message=(
+            f"upstream returned {status}: {read.message}"
+            if read.message
+            else f"upstream returned {status}"
+        ),
         status_code=status,
         code=DEFAULT_CODE_FOR_CATEGORY[category],
         headers=_forwardable(dict(error.headers)),
         source_format=source_format,
         source_bytes=error.body_bytes,
         source_content_type=error.content_type,
+        conversion=conversion,
     )
 
 
-def _upstream_error_type(body: str) -> str:
-    """Upstream's own `error.type`, when the body is JSON and says one.
+@dataclass(frozen=True, slots=True)
+class _UpstreamRead:
+    """What could be got out of upstream's error body, and whether anything could.
 
-    Read for a single decision — whether a 403 is billing rather than permission — so it stays a shallow probe rather than a parse. Anything unexpected answers with an empty string, which `category_for_status` treats as "not billing".
+    `interpreted` is the field that matters downstream: it is what decides whether the client is handed upstream's original alongside this proxy's envelope (spec §10.1). It is deliberately not derived from `message` being non-empty — an error object with an empty message is still an error object we read.
     """
-    if not body or '"type"' not in body:
-        return ""
+
+    interpreted: bool
+    message: str = ""
+    kind: str = ""
+
+
+def _read_upstream_error(body: str) -> _UpstreamRead:
+    """Upstream's error body, read as far as the three dialects agree.
+
+    All three nest under `error`: Anthropic gives `{type, message}`, OpenAI `{message, type, param, code}`, Gemini `{code, message, status}`. So `error.message` and `error.type` are the two fields worth asking for, and a body that has neither shape is one this proxy did not interpret.
+
+    Shallow on purpose. The point is not to mirror upstream's error model — it is to decide two things: whether a 403 is billing, and whether the original has to travel because we could not read it.
+    """
+    if not body:
+        # No body at all is not the same as a body we could not read: there is nothing to hand on either way, so it is not worth telling the client we failed to interpret nothing.
+        return _UpstreamRead(interpreted=True)
     try:
         parsed: object = json.loads(body)
     except ValueError:
-        return ""
+        return _UpstreamRead(interpreted=False)
     if not isinstance(parsed, Mapping):
-        return ""
+        return _UpstreamRead(interpreted=False)
     nested: object = cast(Mapping[str, Any], parsed).get("error")
     if not isinstance(nested, Mapping):
-        return ""
-    kind: object = cast(Mapping[str, Any], nested).get("type")
-    return kind if isinstance(kind, str) else ""
+        return _UpstreamRead(interpreted=False)
+    detail = cast(Mapping[str, Any], nested)
+    message: object = detail.get("message")
+    kind: object = detail.get("type")
+    return _UpstreamRead(
+        interpreted=True,
+        message=message if isinstance(message, str) else "",
+        kind=kind if isinstance(kind, str) else "",
+    )
 
 
 def _proxy_error(category: ErrorCategory, message: str, *, code: str = "", param: str = "") -> ErrorInfo:
@@ -157,6 +193,9 @@ def describe(error: BaseException, *, source_format: str = "") -> ErrorInfo:
     if isinstance(error, TranslatorNotFound):
         # Not `CLIENT`. There is nothing wrong with the client's body; this proxy has not built the crossing it asked for.
         return _proxy_error(ErrorCategory.NOT_IMPLEMENTED, str(error))
+    if isinstance(error, CountTokensRequestError):
+        # A body that cannot be read as a countable request. The client's, not this proxy's — and it was landing on `INTERNAL`/500 until a test caught the omission, which is what an unlisted branch costs.
+        return _proxy_error(ErrorCategory.CLIENT, str(error))
     if isinstance(error, RoutingError):
         return _proxy_error(ErrorCategory.CLIENT, str(error))
 
