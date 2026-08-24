@@ -98,7 +98,7 @@ Spec §6.1、§6.3、§7。
 - **信封形状护栏**（2026-08-24 新增，依据 Spec §6.3 的两条硬约束）：断言 anthropic-messages 流式 error 帧的 payload **顶层没有 `message` 键**、且 `error.type` 在嵌套的 `error` 对象里。判据不要写成「等于某个字面串」，而要钉住结构——扁平化是唯一要拦的变异。正样本对照：把 framer 改成扁平输出，该断言必须变红。理由与实测见 [reports/260824-claude-code-sse-retry-behavior.md](reports/260824-claude-code-sse-retry-behavior.md)；形状判定可用同目录探针复现。
   - **不在本片内**：Spec §6.3 第 2 条的「错误帧必须早于第一个非 thinking 内容块」是**交付时机**约束，不是成帧约束，落点在块级交付那一侧而非 framer。本片只固化形状。**时机已于 2026-08-24 移交给 `delivery-keepalive`**——接收端登记在 [`../delivery-keepalive/spec.md`](../delivery-keepalive/spec.md) §3.5（事实）与 [`../delivery-keepalive/deferred.md`](../delivery-keepalive/deferred.md)（未裁决项）。⚠️ 本句原文只写「留待那边排期」而**从未通知过那边**，那边一无所知达数小时——搬走内容不留转发地址不报错，只是此后没人找得到。
 
-### R　流内失败事件：typed seam、直连原样重放、翻译过 IR
+### R　流内失败事件：typed seam、直连原样重放、翻译过 IR —— **已完成**，主仓 `f12f76d`
 
 Spec §3.4、§3.5、§5.3、§7、§10.1。**清点里唯一「把失败伪装成成功」的出口。**
 
@@ -119,17 +119,23 @@ Spec §3.4、§3.5、§5.3、§7、§10.1。**清点里唯一「把失败伪装�
 
 每组都断言失败之后**没有**正常 terminal。另选一个能在响应头前／后都出现的同义上游失败，比较两侧最终的语义投影——这才是 §7 的判据，只比较 writer 函数不是。
 
-### C　count_tokens 读穿到成因
+### C　count_tokens 读穿到成因 —— **已完成**（判据随 `436dc46`）
 
 Spec §5.1（清点 E6）。上游 400 与 500 今天都被压成 503，上游 body 一字节不到。cause 的保留在 I 片已完成，本片只接 wire。
 
+**落地时发现它已经好了**：I 片让 `describe` 读穿 `CountTokensUnavailable.cause`，J 片让该出口走统一工厂，两者合起来就闭合了这一格。本片只补判据。
+
+**另外更正一处转述**：清点说的「上游 400 与 500 都被压成 503」只在 `providers: ["ghc"]` 下成立——默认配置里 `local` 在列，端点会回落到本地估算并答 200，根本到不了那条失败路径。判据因此配了 `providers: ["ghc"]`，并另留一条对照钉住估算器仍然工作，否则「是配置在起作用还是读穿在起作用」分不开。
+
 **验**：上游 400 与上游 500 分别到达客户端时状态与信封不同；直连路径上拿到上游原生 body。
 
-### N　上游 200 但 body 不是 JSON
+### N　上游 200 但 body 不是 JSON —— **已完成**，主仓 `436dc46`
 
 Spec §5.1（清点 E18）。今天异常逃出 `_dispatch`，客户端拿到 `500` + `text/plain` + `Internal Server Error` 五个字。改为显式捕获 → `UPSTREAM` / 502 + 方言信封。
 
-**验**：真实入口，上游答 200 + `<html>`，客户端拿到 502 与方言信封而非 `text/plain`。
+**验**：真实入口，上游答 200 + `<html>`，客户端拿到 502 与方言信封而非 `text/plain`；另加一条「合法 JSON 但不是对象」——裸列表能解码成功，只包解码会让它漏到下一个 `body["..."]` 处，答案更差。
+
+**副作用**：`test_a_request_that_raised_on_its_way_out_still_writes_its_one_line` 原本正是拿这个未被保护的 `response.json()` 当「让异常逃出 `_dispatch`」的载体，现在没有自然载体了（另试了四种畸形回复，全部被答复而不是抛出），改为注入。它检查的性质不变。
 
 ## 推迟项
 
