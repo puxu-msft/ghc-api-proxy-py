@@ -12,11 +12,16 @@ from typing import Any
 import httpx2
 import pytest
 
+from app.config.loading import bundled_config_values
 from app.config.schema import ProxyConfig
 from app.model_provider import ModelDescriptor, ModelEndpoint
 from app.pipeline.driver import handle, handle_count_tokens
 from app.pipeline.request import RequestContext, WireFormat
-from app.pipeline.subscribers.anthropic_cache_control import prune_cache_control_fields
+from app.pipeline.subscribers.anthropic_cache_control import (
+    compile_sanitize_table,
+    prune_cache_control_fields,
+    refused_fields_for,
+)
 from app.pipeline.translation_driver.semantic import LossCode
 from app.server.composition import build_chain
 
@@ -24,6 +29,9 @@ from app.server.composition import build_chain
 REFUSED: dict[str, Any] = {"type": "ephemeral", "scope": "organization"}
 # What upstream accepts. `ttl` is in here because it was sent and accepted, not because it looked harmless.
 ACCEPTED: dict[str, Any] = {"type": "ephemeral", "ttl": "1h"}
+
+# What `bundled-config.yaml` ships, compiled. The direct-call tests pass this explicitly rather than leaning on a default, because an empty table makes `sanitize` a no-op and a test that forgot it would pass for the wrong reason.
+TABLE = compile_sanitize_table({"claude-.*": ["scope"]})
 
 SONNET = ModelDescriptor(
     id="claude-sonnet-5",
@@ -72,7 +80,7 @@ async def test_the_key_that_earned_the_400_is_removed_from_all_three_layers() ->
     """The whole repair, on the input that is measured rather than imagined."""
     context = context_for(marked_body())
 
-    await prune_cache_control_fields(context, mode="sanitize")
+    await prune_cache_control_fields(context, mode="sanitize", table=TABLE)
 
     payload = context.payload
     assert payload["system"][1]["cache_control"] == {"type": "ephemeral"}
@@ -87,7 +95,7 @@ async def test_the_breakpoint_itself_survives_everywhere_it_was_placed() -> None
     """
     context = context_for(marked_body())
 
-    await prune_cache_control_fields(context, mode="sanitize")
+    await prune_cache_control_fields(context, mode="sanitize", table=TABLE)
 
     payload = context.payload
     assert "cache_control" in payload["system"][1]
@@ -98,13 +106,13 @@ async def test_the_breakpoint_itself_survives_everywhere_it_was_placed() -> None
 async def test_a_ttl_upstream_accepts_is_not_taken_away() -> None:
     """Measured: `{type: ephemeral, ttl: "1h"}` answers 200, with or without its own beta.
 
-    This is the negative control on the whitelist. A pass that normalised every marker to a bare `{"type": "ephemeral"}` would satisfy the test above and quietly shorten every cache the client asked to keep for an hour.
+    The negative control on the shipped table. `ttl` is not in it, so it must survive — a pass that normalised every marker to a bare `{"type": "ephemeral"}` would satisfy the test above and quietly shorten every cache the client asked to keep for an hour.
     """
     context = context_for(
         {"model": "claude-sonnet-5", "system": [{"type": "text", "text": "x", "cache_control": dict(ACCEPTED)}]}
     )
 
-    await prune_cache_control_fields(context, mode="sanitize")
+    await prune_cache_control_fields(context, mode="sanitize", table=TABLE)
 
     assert context.payload["system"][0]["cache_control"] == ACCEPTED
     assert "conversion_losses" not in context.extras
@@ -119,7 +127,7 @@ async def test_each_removal_is_recorded_with_its_path_where_the_log_line_reads_i
     """
     context = context_for(marked_body())
 
-    await prune_cache_control_fields(context, mode="sanitize")
+    await prune_cache_control_fields(context, mode="sanitize", table=TABLE)
 
     losses = context.extras["conversion_losses"]
     assert {loss.code for loss in losses} == {LossCode.CACHE_CONTROL_FIELD_NOT_CARRIED}
@@ -134,7 +142,7 @@ async def test_a_marker_with_nothing_upstream_accepts_goes_away_whole() -> None:
         {"model": "claude-sonnet-5", "system": [{"type": "text", "text": "x", "cache_control": {"scope": "organization"}}]}
     )
 
-    await prune_cache_control_fields(context, mode="sanitize")
+    await prune_cache_control_fields(context, mode="sanitize", table=TABLE)
 
     assert "cache_control" not in context.payload["system"][0]
 
@@ -147,7 +155,7 @@ async def test_a_body_bound_for_responses_is_left_alone() -> None:
     }
     context = context_for(body, target=WireFormat.OPENAI_RESPONSES)
 
-    await prune_cache_control_fields(context, mode="sanitize")
+    await prune_cache_control_fields(context, mode="sanitize", table=TABLE)
 
     assert context.payload["system"][0]["cache_control"] == REFUSED
 
@@ -156,10 +164,10 @@ async def test_running_it_twice_changes_nothing_and_records_nothing_new() -> Non
     """`attempt.prepare` fires once per attempt, so a retry re-runs this over the body the last pass already edited."""
     context = context_for(marked_body())
 
-    await prune_cache_control_fields(context, mode="sanitize")
+    await prune_cache_control_fields(context, mode="sanitize", table=TABLE)
     after_first = context.payload["system"][1]["cache_control"]
     recorded = len(context.extras["conversion_losses"])
-    await prune_cache_control_fields(context, mode="sanitize")
+    await prune_cache_control_fields(context, mode="sanitize", table=TABLE)
 
     assert context.payload["system"][1]["cache_control"] == after_first
     assert len(context.extras["conversion_losses"]) == recorded
@@ -175,7 +183,7 @@ async def test_a_string_system_and_a_string_content_are_not_walked_into() -> Non
         }
     )
 
-    await prune_cache_control_fields(context, mode="sanitize")
+    await prune_cache_control_fields(context, mode="sanitize", table=TABLE)
 
     assert context.payload["system"] == "You are helpful."
     assert "conversion_losses" not in context.extras
@@ -233,7 +241,10 @@ async def test_the_refused_key_does_not_reach_the_wire_through_the_real_chain() 
             "model_providers": {"ghc": {"type": "github_copilot"}},
             "model_mappings": {"claude-sonnet-4-5": "claude-sonnet-5"},
             # Explicit, because the default is `passthrough` and the user ruled that literal: without this line the request goes out carrying `scope`, which is the configured behaviour rather than a bug.
-            "hook_fix_anthropic_request": {"cache_control": "sanitize"},
+            "hook_fix_anthropic_request": {
+                "cache_control": "sanitize",
+                "cache_control_sanitize": {"claude-.*": ["scope"]},
+            },
         }
     )
     provider = CapableProvider()
@@ -265,7 +276,7 @@ async def test_the_request_s_own_cache_control_is_pruned_too() -> None:
     """
     context = context_for({"model": "claude-sonnet-5", "cache_control": dict(REFUSED), "messages": []})
 
-    await prune_cache_control_fields(context, mode="sanitize")
+    await prune_cache_control_fields(context, mode="sanitize", table=TABLE)
 
     assert context.payload["cache_control"] == {"type": "ephemeral"}
     assert any("(request)" in loss.detail for loss in context.extras["conversion_losses"])
@@ -296,7 +307,7 @@ async def test_a_marker_nested_inside_a_tool_result_is_pruned() -> None:
         }
     )
 
-    await prune_cache_control_fields(context, mode="sanitize")
+    await prune_cache_control_fields(context, mode="sanitize", table=TABLE)
 
     nested = context.payload["messages"][0]["content"][0]["content"][0]
     assert nested["cache_control"] == {"type": "ephemeral"}
@@ -306,10 +317,10 @@ async def test_a_marker_nested_inside_a_tool_result_is_pruned() -> None:
     )
 
 
-async def test_a_key_that_is_not_scope_is_pruned_too() -> None:
-    """The whitelist is a whitelist, not "remove `scope`".
+async def test_a_field_no_entry_names_is_left_alone() -> None:
+    """The ruled shape: name what is known to fail, leave the rest.
 
-    Every other case here uses `scope`, so an implementation that degraded to a one-field blacklist would keep them all green — and then the next field Anthropic adds travels to a strict-schema endpoint and costs the whole request.
+    This is the price of the 2026-08-24 denylist ruling stated as a test rather than left implicit. A field Anthropic invents tomorrow travels to a strict-schema endpoint and costs the whole request until someone adds a line to `cache_control_sanitize`. An allowlist would have caught it; the ruling took the other side, and the reason it did is in spec §7.2. Asserting it here means the day that behaviour is questioned, the answer is a test with a name rather than an archaeology exercise.
     """
     context = context_for(
         {
@@ -320,10 +331,58 @@ async def test_a_key_that_is_not_scope_is_pruned_too() -> None:
         }
     )
 
-    await prune_cache_control_fields(context, mode="sanitize")
+    await prune_cache_control_fields(context, mode="sanitize", table=TABLE)
+
+    assert context.payload["system"][0]["cache_control"] == {
+        "type": "ephemeral",
+        "invented_2027": "x",
+    }
+    assert "conversion_losses" not in context.extras
+
+
+async def test_a_field_the_table_does_name_is_removed_even_if_it_is_not_scope() -> None:
+    """And the other half: nothing here is hardcoded to `scope`.
+
+    Every other case in this file uses `scope`, so an implementation that ignored the table and removed that one key by name would keep them all green. This one names a different field and expects it gone.
+    """
+    context = context_for(
+        {
+            "model": "claude-sonnet-5",
+            "system": [
+                {"type": "text", "text": "x", "cache_control": {"type": "ephemeral", "invented_2027": "x"}}
+            ],
+        }
+    )
+
+    await prune_cache_control_fields(
+        context, mode="sanitize", table=compile_sanitize_table({"claude-.*": ["invented_2027"]})
+    )
 
     assert context.payload["system"][0]["cache_control"] == {"type": "ephemeral"}
     assert any("invented_2027" in loss.detail for loss in context.extras["conversion_losses"])
+
+
+async def test_a_model_no_entry_names_keeps_everything() -> None:
+    """Per-model is the other half of the ruling, and the table is keyed on the **resolved** model.
+
+    A capability belongs to the model that answers, so the entry is matched against what upstream receives rather than the alias the client asked for. This context resolves to a model the table does not name.
+    """
+    context = RequestContext(
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        requested_model="opus",
+        payload={
+            "model": "gpt-5.6-sol",
+            "system": [{"type": "text", "text": "x", "cache_control": dict(REFUSED)}],
+        },
+        resolved_model="gpt-5.6-sol",
+        target_format=WireFormat.ANTHROPIC_MESSAGES,
+        model_descriptor=SONNET,
+    )
+
+    await prune_cache_control_fields(context, mode="sanitize", table=TABLE)
+
+    assert context.payload["system"][0]["cache_control"] == REFUSED
+    assert "conversion_losses" not in context.extras
 
 
 async def test_a_translated_request_bound_for_anthropic_is_pruned() -> None:
@@ -343,7 +402,7 @@ async def test_a_translated_request_bound_for_anthropic_is_pruned() -> None:
         model_descriptor=SONNET,
     )
 
-    await prune_cache_control_fields(context, mode="sanitize")
+    await prune_cache_control_fields(context, mode="sanitize", table=TABLE)
 
     assert context.payload["system"][0]["cache_control"] == {"type": "ephemeral"}
 
@@ -359,7 +418,10 @@ async def test_the_counting_leg_measures_the_body_that_would_actually_be_sent() 
             "model_providers": {"ghc": {"type": "github_copilot"}},
             "model_mappings": {"claude-sonnet-4-5": "claude-sonnet-5"},
             # Explicit, because the default is `passthrough` and the user ruled that literal: without this line the request goes out carrying `scope`, which is the configured behaviour rather than a bug.
-            "hook_fix_anthropic_request": {"cache_control": "sanitize"},
+            "hook_fix_anthropic_request": {
+                "cache_control": "sanitize",
+                "cache_control_sanitize": {"claude-.*": ["scope"]},
+            },
         }
     )
     provider = CapableProvider()
@@ -396,10 +458,10 @@ async def test_passthrough_forwards_the_refused_key_untouched() -> None:
     assert "conversion_losses" not in context.extras
 
 
-async def test_passthrough_is_the_default_the_chain_runs_with() -> None:
-    """The default is part of the ruling, not an implementation detail of the subscriber.
+async def test_an_empty_table_makes_the_default_a_no_op() -> None:
+    """`sanitize` with nothing configured touches nothing, and that is by design.
 
-    Asserted through `build_chain` with no `hook_fix_anthropic_request` section at all, because that is the configuration the reported failure came from. If the default ever flips, this fails here rather than in somebody's prompt-cache bill.
+    The table names models known to refuse a field; with no table there is no such model, so the mode has nothing to do. This matters because `ProxyConfig.model_validate` does not read `bundled-config.yaml` — every test that builds a config by hand gets the empty table, and would quietly prove nothing about the shipped behaviour. The test below is the one that covers what an operator actually gets.
     """
     config = ProxyConfig.model_validate(
         {
@@ -467,3 +529,53 @@ def test_the_unimplemented_mode_is_refused_at_startup() -> None:
 
     with pytest.raises(ValueError, match="proxied"):
         build_chain(config, http_client=httpx2.AsyncClient(), providers={"ghc": CapableProvider()})
+
+
+async def test_out_of_the_box_the_shipped_config_strips_scope_from_a_claude_model() -> None:
+    """What an operator gets with no config file at all — the case the whole ruling is about.
+
+    Every other chain-level test here builds its config with `ProxyConfig.model_validate`, which does **not** read `bundled-config.yaml`; they therefore exercise an empty table and cannot see whether the shipped one is right, present, or even syntactically valid. This one layers the real bundled values, so it fails if the table is deleted, renamed, its regex stops matching Claude models, or the default mode is moved off `sanitize`.
+    """
+    bundled = bundled_config_values()
+    config = ProxyConfig.model_validate(
+        {
+            **bundled,
+            "default_model_provider": "ghc",
+            "model_providers": {"ghc": {"type": "github_copilot"}},
+            "model_mappings": {"claude-sonnet-4-5": "claude-sonnet-5"},
+        }
+    )
+    assert config.hook_fix_anthropic_request.cache_control == "sanitize"
+
+    provider = CapableProvider()
+    chain = build_chain(config, http_client=httpx2.AsyncClient(), providers={"ghc": provider})
+    context = RequestContext(
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        requested_model="claude-sonnet-4-5",
+        payload={
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 64,
+            "system": [{"type": "text", "text": "x", "cache_control": dict(REFUSED)}],
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+
+    await handle(chain, context)
+
+    [sent] = provider.sent
+    assert sent["system"][0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_the_shipped_table_names_scope_for_claude_and_nothing_for_the_rest() -> None:
+    """The table's contents, asserted where a reader can find them.
+
+    Not a restatement of the YAML for its own sake: `claude-.*` is a *regular expression*, and the failure mode worth guarding is an entry that looks right and matches nothing — which is exactly what happened to the neighbouring `strip_anthropic_beta_flags` table, whose only key is mapped away by `model_mappings` and therefore never fires.
+    """
+    table = compile_sanitize_table(
+        ProxyConfig.model_validate(bundled_config_values()).hook_fix_anthropic_request.cache_control_sanitize
+    )
+
+    for model in ("claude-opus-5", "claude-sonnet-5", "claude-haiku-4.5", "claude-sonnet-4.6"):
+        assert refused_fields_for(model, table) == frozenset({"scope"}), model
+    for model in ("gpt-5.6-sol", "gpt-5.6-luna", "grok-4.6"):
+        assert refused_fields_for(model, table) == frozenset(), model

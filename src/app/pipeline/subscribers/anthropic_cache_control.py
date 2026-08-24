@@ -18,6 +18,8 @@ Spec: `.dev/docs/anthropic-direct-request-shape/spec.md` §7.
 """
 
 import logging
+import re
+from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
 from app.config.schema import CacheControlMode
@@ -31,8 +33,42 @@ SUBSCRIBER_ID = "builtin:anthropic-cache-control-vocabulary"
 # How the request's own `cache_control` is spelled in a loss path. It has no index and no block, so it needs a name of its own rather than an empty prefix that would render as `.cache_control.scope`.
 TOP_LEVEL = "(request)"
 
-# What upstream accepts inside a `cache_control`, measured rather than derived. `type` because a marker without it is not a marker; `ttl` because it was sent and accepted, so removing it would cost a longer cache for nothing.
-ACCEPTED_FIELDS = frozenset({"type", "ttl"})
+def compile_sanitize_table(
+    refused_by_model: Mapping[str, Sequence[str]],
+) -> tuple[tuple[re.Pattern[str], frozenset[str]], ...]:
+    """The configured table as compiled patterns, in the order the operator wrote them.
+
+    Compiled once at startup for the reason its sibling `compile_beta_flag_denials` gives about the other model-pattern table: left uncompiled, a pattern that does not compile raises from inside whichever request first reached it rather than from the config that holds it, and catching it per request would turn a typo into a model whose fields are silently never removed.
+
+    **An entry is a regular expression, including the ones that look like plain model ids** — `.` is a wildcard, so `claude-sonnet-4.6` also claims `claude-sonnet-4-6`. `fullmatch` at the call site, not `search`, and first match wins, so a specific entry above a broad one is how an operator says which of the two they meant.
+
+    Field names are **not** case-folded, which is where this parts company with the beta table it otherwise mirrors. Those are HTTP header values and case-insensitive; these are JSON object keys and are not. Folding them here would remove `Scope` from a body that spelled it that way, which is a different key that upstream would have refused on its own terms.
+    """
+    compiled: list[tuple[re.Pattern[str], frozenset[str]]] = []
+    for pattern, fields in refused_by_model.items():
+        try:
+            expression = re.compile(pattern)
+        except re.error as exc:
+            raise ValueError(
+                f"cache_control_sanitize key {pattern!r} is not a valid regular expression: {exc}"
+            ) from exc
+        compiled.append(
+            (expression, frozenset(name.strip() for name in fields if name.strip()))
+        )
+    return tuple(compiled)
+
+
+def refused_fields_for(
+    model: str, table: Sequence[tuple[re.Pattern[str], frozenset[str]]]
+) -> frozenset[str]:
+    """The first matching entry's fields, or nothing at all.
+
+    Nothing at all is the common case and the safe one: a model no entry names keeps every key the client sent, which is the whole point of naming what is known to fail instead of allowing what is known to work.
+    """
+    for expression, fields in table:
+        if expression.fullmatch(model):
+            return fields
+    return frozenset()
 
 # Same channel `anthropic_thinking` writes to, and for the same reason: `observability/request_trace.py` reads this key, so a loss recorded here reaches the console line and the record, while one recorded anywhere else reaches nobody.
 _REQUEST_LOSSES = "conversion_losses"
@@ -48,24 +84,28 @@ def _record_loss(context: RequestContext, detail: str) -> None:
     )
 
 
-def _prune(entry: dict[str, Any], path: str, accepted: frozenset[str]) -> tuple[str, ...]:
-    """Remove the keys not in `accepted` from `entry`'s marker, returning their names.
+def _prune(
+    entry: dict[str, Any], path: str, refused: frozenset[str], *, everything: bool
+) -> tuple[str, ...]:
+    """Remove the named keys from `entry`'s marker, returning what went.
 
-    `accepted` carries the mode: the whitelist under `sanitize`, and empty under `disabled` — where every key is unacceptable, nothing is kept, and the branch below removes the marker outright. One rule, two modes, rather than a second walk that could drift from this one.
+    Two modes share this one walk. Under `sanitize`, `refused` is what the table names for the answering model and nothing else is touched — a key nobody named survives, which is the whole point of the denylist ruling. Under `disabled`, `everything` is set and the marker goes regardless of what it holds.
+
+    `everything` is a flag rather than "pass a `refused` containing every key", because the two say different things to a reader and only one of them is true: `disabled` does not claim the fields are refused, it claims the operator wants no markers.
 
     In place, because by `attempt.prepare` the payload is the outbound body rather than the client's own — `repair_tool_pairs` has already edited `messages` in place a step earlier, and rebuilding here would only make this one pass look careful about something the chain does not preserve.
 
-    A marker left with nothing but unknown keys is removed whole rather than sent as `{}`. That case needs `type` to have been absent, which no client is known to do; an empty marker says nothing, and whether upstream accepts one has not been measured, so the shape that is known to be safe is no marker at all.
+    A marker left empty is removed whole rather than sent as `{}`. An empty marker says nothing, and whether upstream accepts one has not been measured, so the shape that is known to be safe is no marker at all.
     """
     marker = entry.get("cache_control")
     if not isinstance(marker, dict):
-        # Absent, or present as something that is not an object — `null`, a string. Left for upstream to name: this pass knows which *keys* are acceptable, not what a non-object marker was meant to be.
+        # Absent, or present as something that is not an object — `null`, a string. Left for upstream to name: this pass knows which *keys* are unacceptable, not what a non-object marker was meant to be.
         return ()
     fields = cast(dict[str, Any], marker)
-    removed = tuple(sorted(name for name in fields if name not in accepted))
+    removed = tuple(sorted(fields if everything else (n for n in fields if n in refused)))
     if not removed:
         return ()
-    kept = {name: value for name, value in fields.items() if name in accepted}
+    kept = {} if everything else {n: v for n, v in fields.items() if n not in refused}
     if kept:
         entry["cache_control"] = kept
     else:
@@ -78,7 +118,9 @@ def _prune(entry: dict[str, Any], path: str, accepted: frozenset[str]) -> tuple[
 _NESTED_CONTENT_BLOCKS = frozenset({"tool_result", "search_result"})
 
 
-def _prune_blocks(blocks: Any, path: str, accepted: frozenset[str]) -> list[tuple[str, str]]:
+def _prune_blocks(
+    blocks: Any, path: str, refused: frozenset[str], *, everything: bool
+) -> list[tuple[str, str]]:
     """Every block in a content list, and the nested lists the schema says are cacheable too."""
     if not isinstance(blocks, list):
         # A string `content` or `system` carries no marker at all — there is nowhere to put one.
@@ -89,11 +131,13 @@ def _prune_blocks(blocks: Any, path: str, accepted: frozenset[str]) -> list[tupl
             continue
         entry = cast(dict[str, Any], block)
         where = f"{path}.{index}"
-        found.extend((where, name) for name in _prune(entry, where, accepted))
+        found.extend((where, name) for name in _prune(entry, where, refused, everything=everything))
 
         kind = entry.get("type")
         if kind in _NESTED_CONTENT_BLOCKS:
-            found.extend(_prune_blocks(entry.get("content"), f"{where}.content", accepted))
+            found.extend(
+                _prune_blocks(entry.get("content"), f"{where}.content", refused, everything=everything)
+            )
         elif kind == "document":
             # Only the `ContentBlockSourceParam` branch nests; the base64/url/file/text sources carry no blocks.
             source = entry.get("source")
@@ -102,14 +146,18 @@ def _prune_blocks(blocks: Any, path: str, accepted: frozenset[str]) -> list[tupl
                     _prune_blocks(
                         cast(dict[str, Any], source).get("content"),
                         f"{where}.source.content",
-                        accepted,
+                        refused,
+                        everything=everything,
                     )
                 )
     return found
 
 
 async def prune_cache_control_fields(
-    context: RequestContext, *, mode: CacheControlMode = "sanitize"
+    context: RequestContext,
+    *,
+    mode: CacheControlMode = "sanitize",
+    table: Sequence[tuple[re.Pattern[str], frozenset[str]]] = (),
 ) -> None:
     """Apply the operator's `cache_control` mode to the outbound body.
 
@@ -119,10 +167,12 @@ async def prune_cache_control_fields(
 
     | mode | what happens here |
     |---|---|
-    | `passthrough` (default) | nothing at all |
-    | `sanitize` | every marker keeps only the keys upstream accepts |
+    | `passthrough` | nothing at all |
+    | `sanitize` (default) | removes the fields `table` names for the answering model, and nothing else |
     | `disabled` | every marker is removed outright |
     | `proxied` | rejected at startup; the injection half is not implemented |
+
+    **An empty `table` makes `sanitize` a no-op, and that is correct rather than a misconfiguration.** The table names models known to refuse a field; a model nobody named keeps everything the client sent.
 
     Reads the route rather than the inbound format, for the reason its siblings give: what upstream accepts is a property of the endpoint being spoken to, so a request translated *into* Anthropic shape belongs here too and one translated *out* of it does not.
 
@@ -142,11 +192,17 @@ async def prune_cache_control_fields(
     found: list[tuple[str, str]] = []
 
     # The top level first, and it is the one with no block to hang off: `cache_control` on the request itself means "put a marker on the last cacheable block". Nothing else here would reach it, which is exactly why it was the position this pass originally missed.
-    accepted = ACCEPTED_FIELDS if mode == "sanitize" else frozenset[str]()
+    everything = mode == "disabled"
+    refused = frozenset[str]() if everything else refused_fields_for(context.resolved_model, table)
+    if not everything and not refused:
+        # No entry names this model, so `sanitize` has nothing to do for it. Returning here rather than walking the body is not only cheaper — it is the denylist ruling made visible: a model nobody named is a model this pass does not touch.
+        return
 
-    found.extend((TOP_LEVEL, name) for name in _prune(payload, TOP_LEVEL, accepted))
+    found.extend(
+        (TOP_LEVEL, name) for name in _prune(payload, TOP_LEVEL, refused, everything=everything)
+    )
 
-    found.extend(_prune_blocks(payload.get("system"), "system", accepted))
+    found.extend(_prune_blocks(payload.get("system"), "system", refused, everything=everything))
 
     messages = payload.get("messages")
     if isinstance(messages, list):
@@ -157,7 +213,8 @@ async def prune_cache_control_fields(
                 _prune_blocks(
                     cast(dict[str, Any], message).get("content"),
                     f"messages.{index}.content",
-                    accepted,
+                    refused,
+                    everything=everything,
                 )
             )
 
@@ -168,7 +225,8 @@ async def prune_cache_control_fields(
                 continue
             where = f"tools.{index}"
             found.extend(
-                (where, name) for name in _prune(cast(dict[str, Any], tool), where, accepted)
+                (where, name)
+                for name in _prune(cast(dict[str, Any], tool), where, refused, everything=everything)
             )
 
     if not found:

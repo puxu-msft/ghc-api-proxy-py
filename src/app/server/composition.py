@@ -52,6 +52,7 @@ from app.pipeline.rate_limiting import RateLimiter
 from app.pipeline.request import RequestContext
 from app.pipeline.request_headers import compile_beta_flag_denials
 from app.pipeline.subscribers import register_builtin_subscribers
+from app.pipeline.subscribers.anthropic_cache_control import compile_sanitize_table
 from app.pipeline.subscribers.hosted_web_search import compile_supported_by_provider
 from app.pipeline.translation_driver.registry import default_registry
 from app.upstream.copilot import GitHubTokenSourceAdapter
@@ -508,6 +509,10 @@ def build_chain(
         thinking_efforts=config.model_thinking_effort,
         thinking_display=config.hook_fix_anthropic_request.thinking.display,
         cache_control=config.hook_fix_anthropic_request.cache_control,
+        # Compiled here rather than per request, for the same reason as the beta table above it: a pattern that does not compile should stop start-up, in the config's own words, rather than raise from inside whichever request first reached it.
+        cache_control_sanitize=compile_sanitize_table(
+            config.hook_fix_anthropic_request.cache_control_sanitize
+        ),
     )
 
     return Chain(

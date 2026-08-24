@@ -341,7 +341,19 @@ class InterceptAutoModeClassifierConfig(Section):
 
 
 class FixAnthropicRequestHook(Section):
-    cache_control: CacheControlMode = "passthrough"
+    # `sanitize` by default, ruled 2026-08-24. The mode's *meaning* was ruled separately and earlier — `passthrough` forwards the client's markers literally, refused keys included — and both rulings stand: this one only decides which mode applies when nobody wrote one down.
+    #
+    # Defaulting to a mode that edits the body is only defensible because of what `sanitize` became in the same ruling: it removes the fields `cache_control_sanitize` names for the answering model and nothing else, so the default's reach is a table an operator can read, narrow, or empty — not a blanket rewrite.
+    cache_control: CacheControlMode = "sanitize"
+
+    # Keyed by model, valued by the `cache_control` subfields that model refuses. A key is a **regular expression** matched with `fullmatch` against the resolved model, first entry wins — the same shape and the same caveats as `strip_anthropic_beta_flags`, including that `.` is a wildcard.
+    #
+    # **Deliberately a denylist rather than an allowlist**, ruled 2026-08-24. An allowlist would also catch the next field Anthropic invents, since upstream's schema is strict and refuses anything it does not know; the cost is that it strips fields upstream does accept, now or later, and cannot express "this model refuses it but that one does not". The ruling took the other side: name what is known to fail, leave everything else alone, and pay for a genuinely new field with one line of config rather than a release. `.dev/docs/anthropic-direct-request-shape/spec.md` §7.2 carries the full accounting.
+    #
+    # Empty here on purpose. The shipped table lives in `bundled-config.yaml`, which is where operational knowledge belongs — repeating it as a schema default would put the same fact in two places to drift apart.
+    cache_control_sanitize: dict[str, list[str]] = Field(
+        default_factory=lambda: dict[str, list[str]]()
+    )
     extended_cache_ttl: ExtendedCacheTtlConfig = Field(default_factory=ExtendedCacheTtlConfig)
     context_editing: ContextEditingConfig = Field(default_factory=ContextEditingConfig)
     thinking: RequestThinkingConfig = Field(default_factory=RequestThinkingConfig)

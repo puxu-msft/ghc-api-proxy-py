@@ -4,9 +4,12 @@ Unit tests prove the subscriber does the right thing; this proves the config
 reaches it and the body that leaves is the one upstream accepts. Three cases,
 each a real call:
 
-  1. default (`passthrough`)      -> must still 400. That is the ruling.
-  2. `cache_control: sanitize`    -> must 200.
-  3. sanitize + the refused beta  -> must 200; the gateway strip is unconditional.
+  1. shipped config, nothing set  -> must 200. `sanitize` is the default and
+                                     `bundled-config.yaml` names `scope` for Claude.
+  2. explicit `passthrough`       -> must 400. That mode is literal, by ruling,
+                                     and this is the case that proves the probe
+                                     can fail at all.
+  3. shipped config + refused beta -> must 200; the gateway strip is unconditional.
 """
 from __future__ import annotations
 
@@ -18,7 +21,8 @@ import httpx2
 from app.config.schema import ProxyConfig
 from app.pipeline.request import RequestContext, WireFormat
 from app.pipeline.driver import handle
-from app.server.composition import build_chain, build_copilot_provider, refresh_catalogs
+from app.config.loading import bundled_config_values
+from app.server.composition import build_chain, refresh_catalogs
 
 SCOPE = {"type": "ephemeral", "scope": "organization"}
 
@@ -36,13 +40,17 @@ def body() -> dict[str, Any]:
 
 
 async def run_case(label: str, mode: str, beta: str | None) -> None:
+    # Layered on the real shipped values, so this exercises what an operator gets rather than what a hand-built config happens to say.
     raw: dict[str, Any] = {
+        **bundled_config_values(),
         "default_model_provider": "ghc",
         "model_providers": {"ghc": {"type": "github_copilot"}},
         "model_mappings": {"opus": "claude-opus-4.6"},
     }
-    if mode != "default":
-        raw["hook_fix_anthropic_request"] = {"cache_control": mode}
+    if mode != "shipped":
+        hook = dict(raw.get("hook_fix_anthropic_request") or {})
+        hook["cache_control"] = mode
+        raw["hook_fix_anthropic_request"] = hook
     config = ProxyConfig.model_validate(raw)
     async with httpx2.AsyncClient(timeout=120.0) as client:
         chain = build_chain(config, http_client=client)
@@ -68,9 +76,9 @@ async def run_case(label: str, mode: str, beta: str | None) -> None:
 
 
 async def main() -> None:
-    await run_case("1 default passthrough + scope (must FAIL, that is the ruling)", "default", None)
-    await run_case("2 sanitize + scope (must be OK)", "sanitize", None)
-    await run_case("3 sanitize + scope + refused beta (must be OK)", "sanitize",
+    await run_case("1 shipped config + scope (must be OK, out of the box)", "shipped", None)
+    await run_case("2 explicit passthrough + scope (must FAIL, the mode is literal)", "passthrough", None)
+    await run_case("3 shipped config + scope + refused beta (must be OK)", "shipped",
                    "claude-code-20250219,tool-search-tool-2025-10-19")
 
 

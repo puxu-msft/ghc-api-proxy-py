@@ -54,3 +54,21 @@ model_providers:
     type: github_copilot
 
 default_model_provider: ghc
+
+# 上游会拒收、因此必须在发出前删掉的 `cache_control` 子字段，按模型点名。
+# `cache_control` subfields this upstream refuses, named per model.
+#
+# 它写在这里而不是 schema 默认值里，理由和上面 `model_mappings` 一样：这是**运维知识**（某个部署的某些模型拒收某些字段），不是代码的默认行为。上游哪天开始支持了，删掉一行即可，不必等一次发布。
+#
+# 键是**正则**，`fullmatch` 匹配 resolved model，首个命中者生效——与 `strip_anthropic_beta_flags` 同构，注意 `.` 是通配符。值是该模型拒收的字段名，**大小写敏感**（它们是 JSON 键，不是 HTTP 头）。
+#
+# **点名拦截，不是白名单**：没被点到的字段一律原样发出。代价是下一个新字段不会被这张表挡住，会一路发到上游并让整条请求 400——止血是在这里加一行，而不是改代码。
+# 完整的取舍记录见 `.dev/docs/anthropic-direct-request-shape/spec.md` §7.2。
+#
+# `scope`：由 `prompt-caching-scope-2026-01-05` beta 引入，新版 Claude Code 会发。
+# 2026-08-24 实测，目录里 7 个 Claude 模型（opus-5 / 4.8 / 4.7 / 4.6、sonnet-5 / 4.6、haiku-4.5）**全部**拒收它，每个模型的正控制都是 200；同一轮里 `ttl` 全部被接受，所以 `ttl` 不在表里。
+# 补发那个 beta 头也救不回来——网关收下 beta，后端 schema 仍然拒收它启用的字段。
+hook_fix_anthropic_request:
+  cache_control_sanitize:
+    claude-.*:
+      - scope

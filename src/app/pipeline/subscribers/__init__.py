@@ -55,7 +55,8 @@ def register_builtin_subscribers(
     default_provider: str = "",
     thinking_efforts: Mapping[str, str] | None = None,
     thinking_display: ThinkingDisplayPolicy = "passthrough",
-    cache_control: CacheControlMode = "passthrough",
+    cache_control: CacheControlMode = "sanitize",
+    cache_control_sanitize: Sequence[tuple[re.Pattern[str], frozenset[str]]] = (),
 ) -> None:
     """Add every built-in subscriber to a registry that has not been frozen yet.
 
@@ -105,7 +106,9 @@ def register_builtin_subscribers(
         EVENT_ATTEMPT_PREPARE,
         ANTHROPIC_CACHE_CONTROL_ID,
         # Bound at registration for the reason its neighbours give: it is a startup decision, and a per-request field holding one is a field something can change mid-flight.
-        lambda context: prune_cache_control_fields(context, mode=cache_control),
+        lambda context: prune_cache_control_fields(
+            context, mode=cache_control, table=cache_control_sanitize
+        ),
         # The second load-bearing constraint. `server_tools.py` carries a `cache_control` across when it rewrites a server-tool result into a text block, so it can put a marker back into the body after this pass would already have walked past it.
         after=(SERVER_TOOL_CAPABILITY_ID,),
     )
