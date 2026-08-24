@@ -6,7 +6,7 @@
 - **当前执行状态**：`NO_CUTOVER`。本文只规划，不授权或执行 `localhost:4141` 接管、旧进程停止、user unit 安装、systemd reload、数据迁移、数据删除或 `cc-daemon` 重启。
 - **目标**：在 Anthropic Messages → OpenAI Responses 路径通过完整替代验收后，以可回滚方式让 `ghc-api-proxy-py` 接管当前由 `copilot-api-js` 提供的 `localhost:4141` 前门，随后观察并退役旧裸进程。
 - **作者基线**：`/home/xp/src/ghc-api-proxy-py` 的 current `main@c1de6bf800a062f0dbcb4ef9db507fdc5f323b62`。本轮每次 shell 调用均要求在同一调用内验证物理仓库根、`main` 分支和 `HEAD == refs/heads/main`，并读取当次 current HEAD；未来 `main` 前进后必须先更新本文，不能把该完整 hash 当作永久 gate。
-- **权威边界**：Anthropic Responses bridge 的用户可观察行为来自 `../anthropic-responses-bridge/spec.md` 的 `FINALIZED@4c9beed…` 与 `../anthropic-responses-bridge/acceptance.md` 的 `FINALIZED_ACCEPTANCE_ORACLE@f99492a…`；易变实现状态来自持续更新且不收口的 `../anthropic-responses-bridge/implementation.md` 与 `readiness.md`。Current main已线性包含 foundations、systemd runtime、bridge主路径、retry、Copilot identity及tool／reasoning最小纵向切片（同期的 resident wiring 已于 2026-08-19 按用户裁决删除，进程级改由 `proactive_rate_limiter.max_inflight` 等待式在途上限承接）；真实canary取得纯文本、forced ordinary tool roundtrip与单item reasoning carrier echo scoped PASS。完整产品、P2、P3与真实manager／cgroup仍未闭合。不得把living文档、定稿oracle、局部checkpoint、main-side回归或canary 200当成完整产品`PASS`。本文只定义服务接管、部署、数据处置和回滚顺序，不重新决定 bridge 行为或内部架构。
+- **权威边界**：Anthropic Responses bridge 的用户可观察行为来自 `../anthropic-responses-bridge/spec.md` 与 `../anthropic-responses-bridge/acceptance.md`，**按 `.dev` 提交锚定**：两者的当前基线是 `.dev@66811b1`（2026-08-24）；易变实现状态来自持续更新且不收口的 `../anthropic-responses-bridge/implementation.md` 与 `readiness.md`。Current main已线性包含 foundations、systemd runtime、bridge主路径、retry、Copilot identity及tool／reasoning最小纵向切片（同期的 resident wiring 已于 2026-08-19 按用户裁决删除，进程级改由 `proactive_rate_limiter.max_inflight` 等待式在途上限承接）；真实canary取得纯文本、forced ordinary tool roundtrip与单item reasoning carrier echo scoped PASS。完整产品、P2、P3与真实manager／cgroup仍未闭合。不得把living文档、定稿oracle、局部checkpoint、main-side回归或canary 200当成完整产品`PASS`。本文只定义服务接管、部署、数据处置和回滚顺序，不重新决定 bridge 行为或内部架构。
 - **⚠️ 上一条的内容哈希绑定已失效，需要用户裁决换用什么机制**（2026-08-24 记录）。两件事，分开看：
   1. **它早就失配了，不是被本次解冻改坏的。** `.dev` 历史逐版核对：`FINALIZED@4c9beed…` 与 `FINALIZED_ACCEPTANCE_ORACLE@f99492a…` 在 `5e94b75`（2026-08-21）成立，在 `1197da7`（2026-08-22「land the three rulings」）失配。失配后两天里没有任何东西报警——**这条门从来没有人执行过**，它只是写在文里。
   2. **用户 2026-08-24 裁定 spec 不再冻结**，于是「按内容哈希钉死一份 spec」这个机制本身不再成立：spec 会随裁定持续修订，每次修订都让绑定失配，而失配与「有人偷改了行为」不可区分。
@@ -329,7 +329,7 @@ Ledger ID 必须由 current inventory 生成；当前冻结的 `CUTOVER-ASSET-IN
 
 | 门 | 必须证据 |
 |---|---|
-| Spec／Acceptance一致性 | Current Spec `FINALIZED@4c9beed…`与Acceptance `FINALIZED_ACCEPTANCE_ORACLE@f99492a…`保持内容绑定，且Acceptance首屏绑定current Architecture `746adc7…`并声明其不产生expected；任一内容身份变化都会使本门恢复为`UNVERIFIED`并重新对账，不得沿用旧hash verdict |
+| Spec／Acceptance一致性 | Current Spec 与 Acceptance 按 `.dev` 提交锚定（基线 `.dev@66811b1`），切换前 `git -C .dev diff 66811b1..HEAD -- docs/anthropic-responses-bridge/` 须经人复核，且Acceptance首屏绑定current Architecture `746adc7…`并声明其不产生expected；任一内容身份变化都会使本门恢复为`UNVERIFIED`并重新对账，不得沿用旧hash verdict |
 | 完整 bridge产品 | `acceptance.md` 的全部 current required gates按同一候选执行，正确样本绿、目标缺陷注入按目标原因红 |
 | 真实入口 | 备用端口真实 ASGI／HTTP／socket／WS路径通过，不是 helper-only |
 | live与fault | 可确定 live canary通过；必要 capture corpus provenance有效；local fault覆盖RST、EOF、slow consumer、partial write、cancel和shutdown |
