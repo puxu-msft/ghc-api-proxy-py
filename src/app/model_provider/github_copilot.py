@@ -13,6 +13,7 @@ from app.model_provider.types import (
     ModelEndpoint,
     UnknownModel,
     model_type_of,
+    parse_adaptive_thinking,
     parse_reasoning_efforts,
     require_endpoint,
     resolve_endpoints,
@@ -112,6 +113,7 @@ class GithubCopilotProvider:
                 request_headers=_string_mapping(model.get("request_headers")),
                 # Read here for the same reason the endpoints are: the raw catalog is kept, but anything that reads it a second time to answer the same question is a second answer waiting to disagree with this one.
                 reasoning_efforts=parse_reasoning_efforts(model),
+                adaptive_thinking=parse_adaptive_thinking(model),
             )
         self._descriptors = descriptors
         self._raw_catalog = dict(raw)

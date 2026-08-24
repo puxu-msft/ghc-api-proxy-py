@@ -19,6 +19,7 @@ from app.pipeline.driver import handle_count_tokens
 from app.pipeline.events import SubscriberRegistry
 from app.pipeline.request import RequestContext, WireFormat
 from app.pipeline.subscribers import (
+    ANTHROPIC_THINKING_CAPABILITY_ID,
     BLANK_TEXT_BLOCKS_ID,
     HOSTED_WEB_SEARCH_GATE_ID,
     SERVER_TOOL_CAPABILITY_ID,
@@ -33,6 +34,7 @@ from app.tokenization.estimators import estimate_anthropic_input, estimate_respo
 EXPECTED_ON_ATTEMPT_PREPARE = (
     SERVER_TOOL_CAPABILITY_ID,
     HOSTED_WEB_SEARCH_GATE_ID,
+    ANTHROPIC_THINKING_CAPABILITY_ID,
     BLANK_TEXT_BLOCKS_ID,
 )
 # Keyed by event, so a subscriber added on a *different* event fails here too. Asserting one bucket would have let the next one land on `attempt.failed` with both assertions still green — a lock that only covers the door it was hung on.

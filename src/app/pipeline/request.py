@@ -13,7 +13,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
-from app.model_provider import ModelEndpoint
+from app.model_provider import ModelDescriptor, ModelEndpoint
 from app.pipeline.delivery.assembling import Terminal
 from app.pipeline.retry import RetryLedger
 
@@ -78,6 +78,8 @@ class RequestContext:
     target_format: WireFormat | None = None
     translation_required: bool = False
     route_reason: str = ""
+    # What the catalog publishes about the model this attempt is going to, carried straight off the route so a subscriber reads the same descriptor routing decided on. `None` means routing has not run, or ran against a provider that does not describe the model — a subscriber reading a capability off it must treat that as "the catalog said nothing", never as permission.
+    model_descriptor: ModelDescriptor | None = None
 
     attempts: list[Attempt] = field(default_factory=lambda: list[Attempt]())
 

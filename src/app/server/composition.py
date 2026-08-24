@@ -495,6 +495,9 @@ def build_chain(
         web_search_models=web_search_models,
         web_search_enabled=config.model_translation.to_openai_responses.hosted_web_search,
         default_provider=resolve_default_name(config),
+        # Keyed on the resolved model id, which is the name upstream receives. Passed straight through rather than pre-processed: unlike the web-search patterns there is nothing to compile, and the only thing that could be checked here — whether the value is an effort the model publishes — is a question about the live catalog rather than about the config, so it is answered per request.
+        thinking_efforts=config.model_thinking_effort,
+        thinking_display=config.hook_fix_anthropic_request.thinking.display,
     )
 
     return Chain(

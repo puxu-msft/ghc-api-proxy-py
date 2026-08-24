@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from app.model_provider import (
     CapabilityMissing,
     EndpointNotSupported,
+    ModelDescriptor,
     ModelEndpoint,
     ModelProvider,
     UnknownModel,
@@ -50,6 +51,10 @@ class Route:
     translation_required: bool
     reason: str
     resolution: ModelResolution
+    # What the catalog says the model answering this request can do. Carried rather than looked up again downstream: `decide_route` has already asked the provider for it, and a second lookup is a second answer waiting to disagree with the one routing was decided on — the same argument `translation_target` makes for the translation leg.
+    #
+    # `None` only where no descriptor was available, which today means a `Route` a test built by hand; every route `decide_route` returns has one, because it raises `UnknownModel` when the provider does not describe the model.
+    descriptor: ModelDescriptor | None = None
 
 
 def split_format_suffix(name: str) -> tuple[str, WireFormat | None]:
@@ -119,6 +124,7 @@ def decide_route(
         translation_required=target_format is not inbound_format,
         reason=reason,
         resolution=resolution,
+        descriptor=descriptor,
     )
 
 
@@ -147,6 +153,7 @@ def apply_route(context: RequestContext, route: Route) -> None:
     context.target_format = route.target_format
     context.translation_required = route.translation_required
     context.route_reason = route.reason
+    context.model_descriptor = route.descriptor
 
 
 def translation_target(provider: ModelProvider, model_id: str) -> TranslationTarget:

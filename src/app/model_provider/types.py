@@ -68,6 +68,8 @@ class ModelDescriptor:
     They are preserved rather than dropped so a new upstream endpoint stays visible.
 
     `reasoning_efforts` is `None` when the catalog said nothing about them and a tuple when it did, the empty tuple included. The distinction is the same one `resolve_endpoints` makes and it is load-bearing for the same reason: "this model publishes no efforts" and "we never learned" lead to different requests, and a single empty default would merge them.
+
+    `adaptive_thinking` needs no such distinction, and that is a property of the catalog rather than a simplification here: it is a **positive** bit, published as `true` on the models that have it and absent on the ones that do not. A bool therefore says everything the catalog says. See `parse_adaptive_thinking` for why the neighbouring budget fields cannot answer this question.
     """
 
     id: str
@@ -75,9 +77,21 @@ class ModelDescriptor:
     unknown_endpoints: tuple[str, ...] = ()
     request_headers: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
     reasoning_efforts: tuple[str, ...] | None = None
+    adaptive_thinking: bool = False
 
     def supports(self, endpoint: ModelEndpoint) -> bool:
         return endpoint in self.endpoints
+
+
+def _supports(model: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The `capabilities.supports` object, or `None` when the entry has none to read."""
+    capabilities = model.get("capabilities")
+    if not isinstance(capabilities, dict):
+        return None
+    supports = cast(dict[str, Any], capabilities).get("supports")
+    if not isinstance(supports, dict):
+        return None
+    return cast(dict[str, Any], supports)
 
 
 def parse_reasoning_efforts(model: Mapping[str, Any]) -> tuple[str, ...] | None:
@@ -87,16 +101,26 @@ def parse_reasoning_efforts(model: Mapping[str, Any]) -> tuple[str, ...] | None:
 
     Non-string entries are dropped rather than making the whole field unreadable: a list with one malformed member still tells us about its other members, and the alternative — discarding the lot — would take a model that publishes four usable efforts down to none.
     """
-    capabilities = model.get("capabilities")
-    if not isinstance(capabilities, dict):
+    supports = _supports(model)
+    if supports is None:
         return None
-    supports = cast(dict[str, Any], capabilities).get("supports")
-    if not isinstance(supports, dict):
-        return None
-    efforts = cast(dict[str, Any], supports).get("reasoning_effort")
+    efforts = supports.get("reasoning_effort")
     if not isinstance(efforts, list):
         return None
     return tuple(entry for entry in cast(list[Any], efforts) if isinstance(entry, str))
+
+
+def parse_adaptive_thinking(model: Mapping[str, Any]) -> bool:
+    """Whether the catalog says this model takes `thinking: {"type": "adaptive"}`.
+
+    Read strictly: only the literal `True` counts. Anything else — absent, `null`, `"true"`, `1` — is not upstream saying yes, and this bit decides which of two mutually exclusive request shapes goes out.
+
+    **It is the only field that can answer the question.** The obvious neighbours cannot: `min_thinking_budget` and `max_thinking_budget` are published at 1024/32000 on `claude-sonnet-5`, which *rejects* `budget_tokens` outright, and on `claude-sonnet-4.5`, which requires it. Reading a budget limit as evidence that budgets are accepted is how the 400 of 2026-08-24 would have survived a first attempt at fixing it. See `.dev/docs/anthropic-direct-request-shape/spec.md` §2.2.
+    """
+    supports = _supports(model)
+    if supports is None:
+        return False
+    return supports.get("adaptive_thinking") is True
 
 
 def parse_endpoints(advertised: object) -> tuple[frozenset[ModelEndpoint], tuple[str, ...]]:

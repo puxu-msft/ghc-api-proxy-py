@@ -27,6 +27,8 @@ type WebSearchConstraintPolicy = Literal["error", "drop_fields"]
 # What to do with a Claude Code auto mode authorisation request. `passthrough` forwards it upstream like anything else; the other two answer it here with a fixed decision and never call upstream at all.
 # Spelled out rather than using `false` for the disabled state, per `config.example.yaml`. The bool spelling that `assistant_message_layout` and `context_editing.enabled` use exists to dodge YAML 1.1 reading a bare `off` as boolean false; `passthrough` is not a word that trap applies to, so it can say what it means.
 type AutoModeDecision = Literal["passthrough", "allow", "block"]
+# What to do with `thinking.display` on the way to an Anthropic Messages upstream. `passthrough` — the default — sends whatever the client said and adds nothing; `drop` removes the key; the two remaining values rewrite it. `omitted` streams `thinking` blocks with empty text and is the upstream default on the Claude 5 family, `summarized` asks for a readable summary of the reasoning instead.
+type ThinkingDisplayPolicy = Literal["passthrough", "drop", "omitted", "summarized"]
 
 # Dotted paths the spec marks as requiring a restart. Everything else is hot-reloadable.
 #
@@ -297,6 +299,8 @@ class StripAllThinkingOnRejectConfig(Section):
 class RequestThinkingConfig(Section):
     assistant_message_layout: AssistantMessageLayout = "move_and_synthetic"
     strip_both_empty_thinking_blocks: bool = True
+    # Default `passthrough`, ruled 2026-08-24. `display` is a legal field on the adaptive shape rather than something this proxy has to repair, and the value Claude Code sends — `omitted` — is already the upstream default for the Claude 5 family, so forwarding it neither adds risk nor changes what the client said. The switch exists because `summarized` has a real use: it is what makes upstream return readable reasoning instead of `thinking` blocks whose text is empty.
+    display: ThinkingDisplayPolicy = "passthrough"
     strip_all_thinking_blocks_on_reject: StripAllThinkingOnRejectConfig = Field(
         default_factory=StripAllThinkingOnRejectConfig
     )
@@ -367,6 +371,13 @@ class ProxyConfig(Section):
 
     # The sole source of model-name mapping; the spec forbids built-in defaults.
     model_mappings: dict[str, str] = Field(default_factory=lambda: dict[str, str]())
+
+    # Which `output_config.effort` to ask an Anthropic Messages upstream for, per model.
+    #
+    # **Keyed on the resolved model id — the name upstream actually receives — not on the name the client asked for and not on a `model_mappings` key.** An effort is a capability of the model that answers, so an alias is looked through, exactly as `strip_denied_beta_flags` looks through one. That sibling is why this is stated here rather than left implied: its table in `config.example.yaml` is keyed `claude-sonnet-4.6`, which is a `model_mappings` *key* in the same file, so with both sections in force the whole table matches nothing. The request shape that produced this feature is the same one — `claude-sonnet-4-5` mapping to `claude-sonnet-5`.
+    #
+    # Empty by default, and an absent entry means **send no `output_config` at all**, which upstream reads as its own default of `high`. There is deliberately no fallback value: a default here would put every request on a cost dial nobody set. Whatever is configured is aligned against the effort names the catalog publishes for that model before it is sent — see `app.pipeline.subscribers.anthropic_thinking`.
+    model_thinking_effort: dict[str, str] = Field(default_factory=lambda: dict[str, str]())
 
     model_translation: ModelTranslationConfig = Field(default_factory=ModelTranslationConfig)
 

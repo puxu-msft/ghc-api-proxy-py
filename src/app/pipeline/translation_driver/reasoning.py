@@ -166,6 +166,58 @@ def _weakest(supported: frozenset[str]) -> str | None:
     return None
 
 
+def align_effort(desired: str, capabilities: tuple[str, ...] | None) -> ReasoningResolution:
+    """Fit an effort name somebody already chose onto what this model publishes.
+
+    Different question from `resolve`, same ladder and the same direction. `resolve` starts from what the *request* asked for in Anthropic's vocabulary; this starts from a name an operator wrote in `model_thinking_effort` and only has to make it acceptable to the model that will answer. Both are asked "does this model take this rung", and two ladders would eventually give two answers.
+
+    **A name the catalog publishes is sent verbatim, ranked or not.** That branch is first on purpose: `EFFORT_LADDER` is this project's ordering and the catalog is the authority on membership, so a model publishing an effort nobody here has heard of still gets it. Skipping that check is precisely the defect in the first-party client, which compares against a hardcoded `low|medium|high` and therefore silently sends no `output_config` at all when configured with `xhigh` or `max` — both of which `claude-sonnet-5` publishes today. See `.dev/docs/anthropic-direct-request-shape/spec.md` §2.4.
+
+    **Where this parts company with `resolve`, and why it may.** When nothing can be fitted, `resolve` goes *up* to the weakest rung on offer; this answers `None` and sends no field. That is not a second opinion about the same question — the two legs disagree about what silence means. On the Responses leg omission is measured to give upstream's own default, so "off" has to be said out loud and going up is the only way to say anything at all. On this leg omission *is* the documented default (`high`), so declining to choose is a real answer rather than an absence of one. Guessing at a rung this ladder cannot place would be picking a cost for the operator out of names nobody here can order.
+    """
+    if capabilities is None:
+        return ReasoningResolution(
+            effort=None,
+            approximated=True,
+            reason="the catalog publishes no reasoning efforts for this model",
+        )
+    supported = frozenset(capabilities)
+    if not supported:
+        return ReasoningResolution(
+            effort=None,
+            approximated=True,
+            reason="this model advertises no reasoning efforts",
+        )
+    if desired in supported:
+        return ReasoningResolution(effort=desired)
+    chosen = _at_or_below(desired, supported)
+    if chosen is not None:
+        return ReasoningResolution(
+            effort=chosen,
+            approximated=True,
+            reason=f"asked for {desired}, which this model does not offer; sent {chosen}",
+        )
+    floor = _weakest(supported)
+    if floor is None:
+        # Everything this model publishes is a name `EFFORT_LADDER` cannot place, so there is no "weakest" to fall back to — `_weakest` walks the ladder and sees none of them.
+        # Answering `None` here rather than picking one is the point: an unrankable name could be cheaper or far more expensive than what was asked for, and there is nothing to tell which.
+        published = ", ".join(sorted(supported))
+        return ReasoningResolution(
+            effort=None,
+            approximated=True,
+            reason=(
+                f"asked for {desired}; this model publishes only effort names this proxy cannot"
+                f" rank ({published}), so none was chosen"
+            ),
+        )
+    if desired in EFFORT_LADDER:
+        reason = f"asked for {desired}, which is weaker than anything this model offers; sent {floor}"
+    else:
+        # The other way to reach the floor, and it used to be reported as the one above — which said the request asked for less than everything on offer, about a name nothing here can compare.
+        reason = f"asked for {desired}, which this proxy cannot rank and this model does not publish; sent its weakest, {floor}"
+    return ReasoningResolution(effort=floor, approximated=True, reason=reason)
+
+
 def resolve(intent: ReasoningIntent, capabilities: tuple[str, ...] | None) -> ReasoningResolution:
     """Choose the effort to send for this intent against this model's published names.
 
