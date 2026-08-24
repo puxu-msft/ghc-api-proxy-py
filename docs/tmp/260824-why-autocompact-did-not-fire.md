@@ -1,5 +1,13 @@
 # 为什么同一份 settings.json，一台机器不触发自动压缩
 
+> **2026-08-24 更正（本文写成当天）**：用户随后告知两台机器**都是 2.1.241**，且其 `settings.json` 的 `env` 块设了 `CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000`。这两件事各废掉本文主线的一半——
+> 1. 版本差异不成立（两台同版本）；
+> 2. 更根本的是，`_9` 的**第一个分支**就是 `process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW`（`:155278`），命中即 `return { …, source: "env" }`。来源既然不是 `"auto"`，下文那道 `X3e` 门根本拦不住，未知模型名那整套推理对该用户不适用。
+>
+> 该用户的实际情形写在 `260824-autocompact-window-is-one-million.md`：`CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000` 只对不以 `claude-` 开头的模型名生效（`FBd:73406`），加上模型名带 `[1m]` 同样走 1e6（`IA:73330`），使 `gpt-5.6-*` 会话的 compact 阈值变成 967,000 tokens。
+>
+> **本文以下内容仍然正确，但只适用于没有设 `CLAUDE_CODE_AUTO_COMPACT_WINDOW` 的环境。** 保留原文不改写，作为该条件下的机制记录。
+
 日期：2026-08-24
 作者：主会话（Claude Opus 5），基于 `.dev/docs/tmp/260824-cc-autocompact-trigger-forensics.md`（general-opus 取证）并逐条复核
 性质：客户端行为取证。结论对 Claude Code 2.1.207 / 2.1.226 / 2.1.241 三个抽出版本成立。
