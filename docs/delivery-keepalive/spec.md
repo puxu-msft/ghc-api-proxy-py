@@ -142,6 +142,16 @@ httpcore 1.0.9 不提供发送 PING 的接口，h2 库有 `ping()` 但 httpcore 
 
 `src/app/config/settings.py` 的 `upstream_keepalive` / `upstream_h2_ping` 是这两项的 legacy 拼写，均已被上述键取代并删除。
 
+## 3.5 交付时机会决定客户端还能不能重试（2026-08-24 补记）
+
+**这条不是本主题推导出来的，是外部实测强加的约束**，权威在 [`../error-envelope/spec.md`](../error-envelope/spec.md) §6.3 第 2 条与 [`../error-envelope/reports/260824-claude-code-sse-retry-behavior.md`](../error-envelope/reports/260824-claude-code-sse-retry-behavior.md)（实测 Claude Code 2.1.241）。此处按 provenance 复述，**不在这里改写它的含义**。
+
+事实：anthropic-messages 流式腿上，客户端**一旦收到第一个非 thinking 内容块，此后任何流内错误都不再触发重试**——它只会把已交付的块定格成 partial，追加一句「可能不完整」交给用户。只有在首个正文块之前发出的 `overloaded_error` 才会被重试（上限 3 次）。
+
+**为什么这归本主题管**：块级交付决定「第一个正文块什么时候出去」，而那一刻正是客户端重试窗口关闭的时刻。**保活与交付时机在这里耦合**——任何让首块更早出去的做法（包括为保活而提前发 `message_start`，见 §2）都在缩短那个窗口。§2 已经记载了「客户端尚无字节时多发 `message_start` 会把零字节请求变成一次可见截断」，本条是它的同族：**同一个动作，代价从「可见的截断」扩大到「客户端不再重试」**。
+
+**未裁决**：是否要把「错误帧必须早于首个非 thinking 内容块」做成守卫、以及守卫落在交付链的哪一层，见 [deferred.md](deferred.md) 的对应条目。本条只记录约束存在，不预设做法。
+
 ## 4. 相邻但不属于本规范的
 
 **上游空闲检测**（「上游多久不说话就判定它死了」）是终止条件，不是保活：一个是让连接活着，一个是决定放弃它。

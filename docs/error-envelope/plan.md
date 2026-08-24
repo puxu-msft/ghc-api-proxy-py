@@ -96,7 +96,7 @@ Spec §6.1、§6.3、§7。
 - 行为：从真实入口分别触发客户端截止、上游撕裂、本侧 `BufferCapExceeded`，断言实际收到的 Anthropic `error.type` 对应 Spec 的 `TIMEOUT` / `NETWORK` / `INTERNAL`。这同时证明接线与分类，不只证明表的内容。
 - module-boundary：断言 generic `stream.py` 不直接 import `formats.*`。
 - **信封形状护栏**（2026-08-24 新增，依据 Spec §6.3 的两条硬约束）：断言 anthropic-messages 流式 error 帧的 payload **顶层没有 `message` 键**、且 `error.type` 在嵌套的 `error` 对象里。判据不要写成「等于某个字面串」，而要钉住结构——扁平化是唯一要拦的变异。正样本对照：把 framer 改成扁平输出，该断言必须变红。理由与实测见 [reports/260824-claude-code-sse-retry-behavior.md](reports/260824-claude-code-sse-retry-behavior.md)；形状判定可用同目录探针复现。
-  - **不在本片内**：Spec §6.3 第 2 条的「错误帧必须早于第一个非 thinking 内容块」是**交付时机**约束，不是成帧约束，落点在块级交付那一侧而非 framer。本片只固化形状，时机留待 `.dev/docs/delivery-keepalive/` 那边排期，**在此登记以免被静默漏掉**。
+  - **不在本片内**：Spec §6.3 第 2 条的「错误帧必须早于第一个非 thinking 内容块」是**交付时机**约束，不是成帧约束，落点在块级交付那一侧而非 framer。本片只固化形状。**时机已于 2026-08-24 移交给 `delivery-keepalive`**——接收端登记在 [`../delivery-keepalive/spec.md`](../delivery-keepalive/spec.md) §3.5（事实）与 [`../delivery-keepalive/deferred.md`](../delivery-keepalive/deferred.md)（未裁决项）。⚠️ 本句原文只写「留待那边排期」而**从未通知过那边**，那边一无所知达数小时——搬走内容不留转发地址不报错，只是此后没人找得到。
 
 ### R　流内失败事件：typed seam、直连原样重放、翻译过 IR
 

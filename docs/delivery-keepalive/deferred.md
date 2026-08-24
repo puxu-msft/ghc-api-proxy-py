@@ -214,3 +214,14 @@ D-9 要防的是「两行被调换」。就这一个目标而言，`create_conne
 **但 wrapper 形状断言与真实并发上界不是同一个性质，这一点我先前写错了。** 复评逐条列出了并发断言**额外**能抓、而当前判据抓不到的四种失效形态：① `build_http_client` 仍装 wrapper 但把错误的 cap 数值传下去（配 2 传 999，只看类型仍会通过）；② wrapper 还在，但 `assigned_request_count()` 与真实 `AsyncHTTPProxy` 池的 bookkeeping 脱节，或未来 httpcore 让代理池走另一条分配路径；③ 被检查的池仍产出 wrapper，但请求路由以后改走别的 transport 或池（当前显式 proxy 下 `_mounts == {}`，所以今天不存在这个缺口）；④ wrapper 与 socket options 都在，但 CONNECT / TLS / ALPN / H2 multiplexing 的接缝变化使池不再按 wrapper 的 availability 答案控制每条隧道的并发数。
 
 不新建 fixture 的理由因此是：**这四种形态里，核心调度机制已由 `test_the_real_pool_opens_another_connection_once_one_is_full` 这条真实池并发测试覆盖，剩下的是代理特化路径的未来漂移；在本次任务里为它新建一套 CONNECT 并发 fixture，额外收益不足以抵偿复杂度。** 这是范围取舍，不是证明力等价——若将来代理路径的接线真的改动，应当补这条 fixture。评审给出的真实连接数分布（当前顺序 `[2,1,1,1]`、反序 `[5]`）记在这里备查。
+
+## 错误帧的交付时机要不要做成守卫 —— 未裁决（2026-08-24 登记）
+
+**来源**：`error-envelope` 主题实测 Claude Code 2.1.241 后，在其 spec.md §6.3 立了两条硬约束，其中「形状」那条已由 `error-envelope/plan.md` 的 F 片排进守卫；**「时机」那条明确写了「不在本片内，落点在块级交付这一侧」**——也就是本主题。本条是那次移交的接收端登记，此前该移交只写在发出方、本主题一无所知。
+
+**事实**：见 [spec.md](spec.md) §3.5（权威在 `../error-envelope/spec.md` §6.3）。
+
+**未裁决的是**：① 要不要真的加一道守卫，强制错误帧早于首个非 thinking 内容块；② 若要，它落在交付链的哪一层——framer 管不了时机，候选是 `stream.py` 的交付点或块提交处；③ 与保活提前发 `message_start` 的既有取舍怎么排序，因为两者争的是同一个窗口。
+
+**闭合条件**：用户裁决 ①，或本主题下一次动交付时机时一并处理。
+
