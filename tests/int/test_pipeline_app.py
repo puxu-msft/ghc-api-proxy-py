@@ -3205,12 +3205,14 @@ def test_a_tear_after_the_turn_finished_is_recorded_without_being_called_a_failu
     assert "end_turn" in line
 
 
-def test_a_replacement_that_never_reached_upstream_is_not_recorded_as_one(
+def test_a_replacement_that_never_opened_an_attempt_is_not_recorded_as_one(
     request_log: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The entry and the attempt count are written off the same fact, so neither can appear without the other.
 
-    `context.attempt_count` advances in `begin_attempt`, deep inside the driver, and `handle` can fail well before reaching it — `shape_request` and translation both run first. Recording the replacement on the way in was the fix for losing a replacement that failed *after* opening its attempt, and it overshot in the other direction: measured, one upstream call, `attempts=1`, and a `replaced_failures` entry claiming a replay that never sent a byte.
+    `context.attempt_count` advances in `RequestContext.begin_attempt`, which `DirectDriver.run` calls on the way in, and `handle` can fail well before reaching it — `shape_request` and translation both run first. Recording the replacement on the way in was the fix for losing a replacement that failed *after* opening its attempt, and it overshot in the other direction: measured, one upstream call, `attempts=1`, and a `replaced_failures` entry for a replay that had not opened one.
+
+    **"Opened an attempt", not "reached upstream" — a review narrowed this and the distinction is real.** `begin_attempt` runs before the prepare subscribers, before the rate limiter and before `_send`, so a replacement that fails between them advances the count with no upstream I/O and *is* recorded. The injection point below sits in `shape_request`, which satisfies both readings, so this test cannot tell them apart and does not claim to. If "a byte actually left" is ever the fact wanted, `attempt_count` is the wrong oracle for it and a new one belongs at the provider-send boundary — that is a product question, not something a test's wording should settle quietly.
 
     A phantom here is worse than a missing entry, because the field exists to answer "what did this proxy quietly do" and an invented answer is unfalsifiable from the record.
     """
@@ -3245,7 +3247,7 @@ def test_a_replacement_that_never_reached_upstream_is_not_recorded_as_one(
         client.post("/v1/messages", json={"model": "claude-model", "messages": [], "stream": True})
 
     assert len(shaped) == 2, "the premise: a replay was attempted"
-    assert calls == [1], "and it never reached upstream"
+    assert calls == [1], "and it failed before the driver could open an attempt for it"
     record = _records()[-1]
     assert record["attempts"] == 1
     assert record["replaced_failures"] == []

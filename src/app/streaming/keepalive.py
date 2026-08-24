@@ -56,27 +56,66 @@ async def session_liveness_stream[T](
         cleanup_error, cleanup_cancellation = await finish_stream_cleanup(
             pending, stream, primary=primary
         )
-        primary = primary or cleanup_cancellation
+        # `is None` rather than `or`, which conflates "is there one" with "which wins". A `BaseException` subclass may define a falsey `__bool__`, and `or` then picks the cleanup failure — measured on the real `_counted_upstream`: a falsey primary came out as `CleanupError` with the primary demoted to its context, which is precisely the exit-priority this comment claims to state.
+        if primary is None:
+            primary = cleanup_cancellation
         if primary is not None:
             if cleanup_error is not None:
-                raise primary from cleanup_error
+                raise_with_cleanup_under(primary, cleanup_error)
             if cleanup_cancellation is not None:
                 raise primary
         elif cleanup_error is not None:
             raise cleanup_error
 
 
+def _reaches(start: BaseException, target: BaseException) -> bool:
+    """Whether `target` is already somewhere under `start`, following both links.
+
+    Asked before writing a link, because the chain is walked by readers that do not all guard against cycles — this module's own `one_line` does, `traceback` does, and a hand-written loop in a log formatter is exactly the kind of thing that does not.
+    """
+    seen: set[int] = set()
+    stack = [start]
+    while stack:
+        current = stack.pop()
+        if current is target:
+            return True
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        stack.extend(link for link in (current.__cause__, current.__context__) if link is not None)
+    return False
+
+
 def raise_with_cleanup_under(primary: BaseException, cleanup_error: BaseException) -> None:
-    """Re-raise the exit that started cleanup, with the cleanup failure recorded under it and nothing already there lost.
+    """Re-raise the exit that started cleanup, with the cleanup failure recorded under it and nothing already reachable lost.
 
     `raise primary from cleanup_error` is the obvious spelling and it overwrites `primary.__cause__`. A review constructed `PrimaryError from RootError`, let the close fail, and found `RootError` no longer reachable from the chain at all — the explicit cause an author had chosen, replaced by a consequence of the ending it described.
 
     So the cleanup failure goes on `__cause__` only when nothing is there, and on `__context__` otherwise. `__context__` is the weaker link and the right one for "this also happened while unwinding"; overwriting it is what Python's own implicit chaining does anyway.
 
-    One implementation because three call sites had grown three spellings of this pairing, and the reason each of them exists is the same reason.
+    **Three cases the first version got wrong, all found by a review probing the helper rather than its callers.**
+
+    *The same object on both sides.* `raise primary from primary` is accepted by Python and produces an exception that is its own cause; a reader following the chain then walks in place. Nothing is being recorded in that case anyway — the cleanup failure *is* the exit — so it is simply raised.
+
+    *An existing `__context__`.* Overwriting it dropped the earlier one entirely, which a second cleanup failure on the same primary reproduced: the first became unreachable. It is now carried under the new one instead, so both stay in the chain in the order they happened.
+
+    *A link that would close a loop.* Only the carry is checked with `_reaches`, because only the carry is a link that did not exist before. The two writes onto `primary` are deliberately unguarded: a close that fails while the primary is being handled gets `primary` as its own implicit `__context__`, so `raise primary from cleanup_error` closes a loop **every time** — that is ordinary Python, `traceback` walks it with a seen-set, and refusing to write the link was measured to drop the cleanup failure from three existing tests entirely. A guard that fires on the normal case is not a guard.
+
+    One implementation because the same pairing had grown five spellings across this repository, and the reason each exists is the same reason.
     """
+    if cleanup_error is primary:
+        raise primary
     if primary.__cause__ is None:
         raise primary from cleanup_error
+    displaced = primary.__context__
+    if (
+        displaced is not None
+        and displaced is not cleanup_error
+        and cleanup_error.__context__ is None
+        and not _reaches(displaced, cleanup_error)
+    ):
+        # Carried rather than dropped: the earlier cleanup failure keeps its place under the newer one. Guarded because this link is a new one — unlike the two below, which only restate a shape Python already makes.
+        cleanup_error.__context__ = displaced
     primary.__context__ = cleanup_error
     raise primary
 
@@ -111,7 +150,10 @@ async def finish_stream_cleanup[T](
 
     while not cleanup_task.done():
         try:
-            await asyncio.shield(cleanup_task)
+            # `asyncio.wait` rather than `asyncio.shield`, which both keep the cleanup running through a cancellation — but a cancelled `shield` leaves its outer future behind, and when the inner task later *fails*, that abandoned future reports the failure as unconsumed: `RuntimeError exception in shielded future` on stderr, alongside the very same exception this function is about to return properly chained. A review caught it by cancelling during a close that then failed. `asyncio.wait` registers a done-callback and removes it, so nothing is left holding a result nobody read.
+            #
+            # `_events_with_ping` already avoids the same trap for its pull, and says so where it does.
+            await asyncio.wait({cleanup_task})
         except asyncio.CancelledError as exc:
             cancelling_now = current.cancelling() if current is not None else cancelling_seen
             if cancelling_now > cancelling_seen:

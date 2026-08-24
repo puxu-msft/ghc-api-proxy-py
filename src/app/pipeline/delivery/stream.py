@@ -206,7 +206,9 @@ async def _events_with_ping(
         cleanup_error, cleanup_cancellation = await finish_stream_cleanup(
             task, events, primary=primary
         )
-        primary = primary or cleanup_cancellation
+        # `is None` rather than `or`; see `raise_with_cleanup_under`'s neighbour in `keepalive.py` for the falsey-`__bool__` measurement.
+        if primary is None:
+            primary = cleanup_cancellation
         if primary is not None:
             if cleanup_error is not None:
                 raise_with_cleanup_under(primary, cleanup_error)
@@ -389,7 +391,7 @@ async def _deliver(
         #
         # **Upstream is what is positively identified**, and it is the only half that can be bounded. Everything upstream produces arrives through `_UpstreamSource`, while the other half — everything this side runs — has no finite list: assembling, committing, framing, the keep-alive, the SSE reader, the pull scheduler, and whatever is added next. Marking that side is what this used to do, and it was incomplete twice over: framing was left out with a stated reason that did not hold, and after that was fixed an independent review made the SSE reader raise and watched the bug reach the client as upstream's.
         #
-        # The converse does not hold yet, and the docstring on `_UpstreamSource` says where: what the caller wraps around the raw response is inside the marked region too, so a bug in `_counted_upstream` still reads as upstream's. `deferred.md` §22之六.
+        # The converse holds as far as the marker reaches, and where the caller puts it is what decides that. `inference.py` constructs it with the two guards that speak for upstream below it and this side's byte counter above, so a bug in `_counted_upstream` is `ours` — it was not, and `deferred.md` §22之六 is the entry that closed when it stopped being true. What is left below the marker and outside this repository is httpcore's own bookkeeping, which is §22之七 and is a different question.
         #
         # `DeliveryError` and its siblings are ours by type rather than by origin: they are the proxy's own protections firing, which `upstream-retry-and-continuation.md` lists under "无法继续". Another attempt would hit the same cap, and handing the turn back would invite the client to re-run something this side has already refused to hold. They are named here because a protection that fires while reading upstream would otherwise be tagged as upstream's tear.
         #

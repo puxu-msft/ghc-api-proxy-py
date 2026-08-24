@@ -1381,9 +1381,13 @@ async def test_a_second_cancellation_does_not_interrupt_the_release_it_arrives_d
 
     `finish_stream_cleanup` already runs cleanup in its own task behind `asyncio.shield` for exactly this reason, so this delegates to it rather than growing a second implementation of the same care. The task still ends cancelled; what changes is that the release completes first.
 
-    `aclosing` here because that is what `_tracked_delivery` does in production. Without it the generator is left suspended and finalized later by the loop's async-generator hook, outside the cancelled task — which is a different path, and one where the probe cannot see this at all.
+    `aclosing` here because that is what `_tracked_delivery` does in production. Without it the generator is left suspended and finalized later by the loop's async-generator hook, outside the cancelled task — a different path, and one where the defect is invisible. Measured: with `aclosing` the raw `finally` is entered before the consumer resumes; with a bare `async for` the consumer records first and the `finally` runs three loop ticks later in another task.
+
+    Events rather than sleeps, on a review's suggestion. "The second cancellation landed inside the release" is then a precondition the test waits for rather than a 300ms window it hopes for, and the wall-clock cost goes to nothing. The earlier version passed 25 consecutive runs, so this is not a fix for an observed flake — it is not putting the scheduler's speed inside a conclusion about the product.
     """
     events: list[str] = []
+    close_entered = asyncio.Event()
+    allow_close = asyncio.Event()
 
     async def slow_to_release() -> AsyncIterator[bytes]:
         try:
@@ -1391,9 +1395,10 @@ async def test_a_second_cancellation_does_not_interrupt_the_release_it_arrives_d
             await asyncio.sleep(30)
         finally:
             events.append("close-entered")
+            close_entered.set()
             try:
                 # Stands in for a real release that awaits — returning a connection to a pool, draining a socket.
-                await asyncio.sleep(0.3)
+                await allow_close.wait()
             except BaseException as exc:
                 events.append(f"close-interrupted:{type(exc).__name__}")
                 raise
@@ -1412,11 +1417,13 @@ async def test_a_second_cancellation_does_not_interrupt_the_release_it_arrives_d
                 await asyncio.sleep(30)
 
     task = asyncio.create_task(read_until_cancelled())
-    await asyncio.sleep(0.05)
+    # One tick is enough to get the consumer suspended at its own `sleep`; nothing here depends on how long that takes.
+    await asyncio.sleep(0)
     assert task.cancel(), "the first cancellation, which starts the release"
-    await asyncio.sleep(0.05)
+    await asyncio.wait_for(close_entered.wait(), timeout=5)
     assert events == ["close-entered"], "the premise: the release is in flight when the second one arrives"
     assert task.cancel(), "the second cancellation, landing inside the release"
+    allow_close.set()
 
     with suppress(asyncio.CancelledError):
         await task
@@ -1457,6 +1464,45 @@ async def test_a_body_that_cannot_be_closed_says_so_when_nothing_else_is_ending(
     assert closed == [True]
 
 
+@pytest.mark.asyncio
+async def test_a_falsey_upstream_failure_is_still_the_one_reported() -> None:
+    """`primary or cleanup_cancellation` reads a truthiness question as a priority question.
+
+    Nothing in the standard library defines a falsey `BaseException`, which is exactly why this survives review: the `or` is correct for every exception anyone tries. A subclass with `__bool__` returning `False` is legal, and on this path it flips the stated exit priority — the failure that ended the stream is demoted to the context of the close failure, and the caller reports the wrong one.
+
+    Driven through the real `_counted_upstream` rather than the helper it shares the shape with, because a review measured this instance specifically, and because a mutation of the live path passed all 1591 tests: the other three sites' guards do not cover this one.
+    """
+
+    class Falsey(Exception):
+        def __bool__(self) -> bool:
+            return False
+
+    class TearsFalselyAndCannotClose(AsyncIterator[bytes]):
+        """A class, not a generator: a generator whose `finally` raises replaces the body's exception at the source, so the two failures would never be independent — which is the whole of what this test needs them to be."""
+
+        def __aiter__(self) -> AsyncIterator[bytes]:
+            return self
+
+        async def __anext__(self) -> bytes:
+            raise Falsey("upstream tore the stream")
+
+        async def aclose(self) -> None:
+            # The close that also fails, which is what the `or` would hand the exit to.
+            raise RuntimeError("and the body could not be closed")
+
+    def counted(request_id: str, count: int) -> None:
+        """This test is about which exception propagates, not about the counting."""
+
+    chain = cast(Any, SimpleNamespace(active_requests=SimpleNamespace(add_bytes=counted)))
+    trace = RequestTrace(method="POST", path="/v1/messages", request_id="probe", started=time.monotonic())
+
+    with pytest.raises(Falsey) as caught:
+        async for _ in _counted_upstream(TearsFalselyAndCannotClose(), chain, "probe", trace):
+            pass
+
+    assert isinstance(caught.value.__cause__, RuntimeError), "the close failure is recorded under it, not over it"
+
+
 class _ExplodingRegistry:
     """Stands in for `ActiveRequestRegistry` so the real `_counted_upstream` can be driven into a bug."""
 
@@ -1474,7 +1520,7 @@ class _ExplodingRegistry:
 async def test_a_bug_below_the_marker_but_above_the_source_is_still_ours() -> None:
     """The seam two reviews found, closed by where the marker sits rather than by another list of places.
 
-    Production composes four wrappers over the raw response with the marker among them, and `_counted_upstream` is one of the wrappers — this side's bookkeeping, not upstream's. While the marker wrapped the whole composite, a `LookupError` raised by the byte counter was tagged as upstream's tear and handed to the client, which returned cleanly with the exception gone. Measured at `62a457f`: `handed_count=1`, `returned_cleanly=True`.
+    Production stacks five objects over the raw response — idle timeout, attempt deadline, marker, `_counted_upstream`, client deadline — and `_counted_upstream` is this side's bookkeeping rather than upstream's — this side's bookkeeping, not upstream's. While the marker wrapped the whole composite, a `LookupError` raised by the byte counter was tagged as upstream's tear and handed to the client, which returned cleanly with the exception gone. Measured at `62a457f`: `handed_count=1`, `returned_cleanly=True`.
 
     Driven through the real `_counted_upstream`, not a stand-in for it: the defect was that the marker sat on the wrong side of that exact function.
     """

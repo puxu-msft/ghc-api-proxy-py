@@ -18,7 +18,7 @@ from starlette.requests import ClientDisconnect
 from starlette.types import Receive, Scope, Send
 
 from app.errors import ApiError
-from app.streaming.keepalive import finish_stream_cleanup
+from app.streaming.keepalive import finish_stream_cleanup, raise_with_cleanup_under
 from app.wire_json import dumps
 
 type StreamingChunk = str | bytes | memoryview[Any]
@@ -222,10 +222,12 @@ class DelayedStartStreamingResponse(StreamingResponse):
             cleanup_error, cleanup_cancellation = await finish_stream_cleanup(
                 pending, body_iterator, primary=primary
             )
-            primary = primary or cleanup_cancellation
+            # `is None` rather than `or`, and the shared helper rather than a fifth spelling of the pairing: both were measured wrong here by a review, and this path is no less entitled to keep an explicit cause than the ones that are wired up today.
+            if primary is None:
+                primary = cleanup_cancellation
             if primary is not None:
                 if cleanup_error is not None:
-                    raise primary from cleanup_error
+                    raise_with_cleanup_under(primary, cleanup_error)
                 if cleanup_cancellation is not None:
                     raise primary
             elif cleanup_error is not None:

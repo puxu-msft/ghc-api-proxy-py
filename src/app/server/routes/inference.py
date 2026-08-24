@@ -704,7 +704,9 @@ async def _counted_upstream(chunks: AsyncIterator[bytes], chain: Chain, request_
         cleanup_error, cleanup_cancellation = await finish_stream_cleanup(
             None, chunks, primary=primary
         )
-        primary = primary or cleanup_cancellation
+        # `is None` rather than `or`, which conflates "is there one" with "which one wins". A `BaseException` subclass may define a falsey `__bool__`, and `or` then hands the exit to the cleanup failure or to a cancellation instead — measured right here: a falsey primary came out of this generator as the `CleanupError`, demoted to its own context. `keepalive.py` states the same priority and had the same bug.
+        if primary is None:
+            primary = cleanup_cancellation
         if primary is not None:
             if cleanup_error is not None:
                 raise_with_cleanup_under(primary, cleanup_error)

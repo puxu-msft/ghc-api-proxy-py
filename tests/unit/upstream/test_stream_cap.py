@@ -133,11 +133,15 @@ def _connection_the_pool_creates(client: httpx2.AsyncClient) -> httpcore2.AsyncC
 
     `_transport._pool` is private on both hops and httpx offers no public equivalent — `cap_streams_per_connection` patches that exact path, so a test reaching it some other way would not be testing the thing. Written once here rather than at four call sites: pyright reports the pool as unknown, and an unknown spreads into every local it touches, which is what turned one deliberate private access into eleven diagnostics.
 
-    Two hops needing two different answers, which is why one `# pyright: ignore` never worked here. `client._transport` is private, so it is ignored; it is declared `AsyncBaseTransport`, which has no `_pool` at all, so an *explicit* `Any` is what lets the second hop through — an ignore there would silence the access and still leave the result Unknown, and Unknown spreads into every local it touches. The call sites used to name `reportAttributeAccessIssue` alone and suppressed nothing at all: eleven of this repository's twenty-one diagnostics came from four lines each carrying a comment that read like a decision.
+    Two hops needing two different answers, which is why one `# pyright: ignore` never worked here. `client._transport` is private, so it is ignored; it is declared `AsyncBaseTransport`, which has no `_pool` at all, so the second hop goes through `getattr`. The call sites used to name `reportAttributeAccessIssue` alone and suppressed nothing at all: eleven of this repository's twenty-one diagnostics came from four lines each carrying a comment that read like a decision.
+
+    `getattr` plus `isinstance` rather than a `cast` through `Any`, on a review's suggestion. A `cast` is a promise to the type checker and nothing at runtime, so a pool that changed shape would be reported wherever it happened to break; this asserts the shape at the reach itself, which is where the reader is being told what is assumed. It costs one line and closes the gap the `Any` opened.
     """
-    # Two hops, two spellings, because the reach breaks two different ways and each needs its own answer.
-    transport: Any = client._transport  # pyright: ignore[reportPrivateUsage]
-    pool = cast(httpcore2.AsyncConnectionPool, transport._pool)
+    transport = client._transport  # pyright: ignore[reportPrivateUsage]
+    pool = getattr(transport, "_pool", None)
+    assert isinstance(pool, httpcore2.AsyncConnectionPool), (
+        f"{type(transport).__name__} no longer carries an `AsyncConnectionPool`, which is the path the cap patches"
+    )
     return pool.create_connection(httpcore2.Origin(b"https", b"example.invalid", 443))
 
 

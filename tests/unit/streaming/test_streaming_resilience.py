@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import AsyncIterator, Coroutine, Generator
+from contextlib import suppress
 from typing import Any, Literal
 
 import anyio
@@ -9,6 +10,7 @@ from app.streaming.buffered_retry import BufferLimitExceeded, collect_with_limit
 from app.streaming.delayed_commit import delayed_first_item
 from app.streaming.idle_timeout import StreamIdleTimeoutError
 from app.streaming.keepalive import (
+    finish_stream_cleanup,
     keepalive_stream,
     raise_with_cleanup_under,
     session_liveness_stream,
@@ -374,9 +376,15 @@ async def test_session_liveness_chains_pull_unwind_failure_after_cancellation() 
 
 @pytest.mark.asyncio
 async def test_session_liveness_keeps_upstream_error_primary_when_close_fails() -> None:
+    """And keeps the cause the pull already had, which this used to assert away.
+
+    A review pointed out that asserting the close failure *becomes* `__cause__` pins the exact loss `raise_with_cleanup_under` exists to prevent: with a pull that carried its own explicit cause, that spelling made the root unreachable. The pull here now carries one, so the assertion says both — the root the author chose, and the close failure recorded under it.
+    """
+    root = OSError("[Errno 104] Connection reset by peer")
+
     class PullAndCloseFail(AsyncIterator[bytes]):
         async def __anext__(self) -> bytes:
-            raise ValueError("pull failed")
+            raise ValueError("pull failed") from root
 
         async def aclose(self) -> None:
             raise RuntimeError("close failed")
@@ -391,8 +399,9 @@ async def test_session_liveness_keeps_upstream_error_primary_when_close_fails() 
     with pytest.raises(ValueError, match="pull failed") as exc_info:
         await anext(stream)
 
-    assert isinstance(exc_info.value.__cause__, RuntimeError)
-    assert str(exc_info.value.__cause__) == "close failed"
+    assert exc_info.value.__cause__ is root, "the reason the pull failed is still the reason"
+    assert isinstance(exc_info.value.__context__, RuntimeError)
+    assert str(exc_info.value.__context__) == "close failed"
 
 
 @pytest.mark.asyncio
@@ -542,3 +551,115 @@ def test_a_cleanup_failure_becomes_the_cause_when_nothing_is_there() -> None:
 
     assert caught.value is primary
     assert caught.value.__cause__ is cleanup
+
+
+def test_a_cleanup_failure_does_not_displace_an_earlier_one() -> None:
+    """Two cleanup failures on one primary. The first used to vanish from the chain entirely.
+
+    `__context__` holds one link, so writing the second over the first is a loss rather than an update. The second now carries the first, which keeps both reachable and in the order they happened.
+    """
+    primary = RuntimeError("upstream tore the stream")
+    primary.__cause__ = OSError("[Errno 104] Connection reset by peer")
+    first = RuntimeError("the body could not be closed")
+    second = RuntimeError("and neither could the pull")
+
+    with pytest.raises(RuntimeError):
+        raise_with_cleanup_under(primary, first)
+    with pytest.raises(RuntimeError):
+        raise_with_cleanup_under(primary, second)
+
+    assert primary.__context__ is second
+    assert second.__context__ is first, "the earlier cleanup failure is still reachable"
+
+
+def test_pairing_an_exception_with_itself_does_not_make_it_its_own_cause() -> None:
+    """Python accepts `raise x from x`; a reader following the chain then walks in place.
+
+    Nothing is being recorded when the two are the same object — the cleanup failure *is* the exit — so it is raised as it stands.
+    """
+    only = RuntimeError("the same object on both sides")
+
+    with pytest.raises(RuntimeError) as caught:
+        raise_with_cleanup_under(only, only)
+
+    assert caught.value is only
+    assert caught.value.__cause__ is not only
+    assert caught.value.__context__ is not only
+
+
+@pytest.mark.asyncio
+async def test_a_falsey_primary_is_still_the_exit_that_propagates() -> None:
+    """`primary or cleanup_cancellation` conflates "is there one" with "which one wins".
+
+    A `BaseException` subclass may define `__bool__`, and `or` then silently promotes the cleanup failure over the exception that actually ended the stream — inverting the exit priority the comment beside it claims to state. Nothing in the standard library does this, which is exactly why it would not be noticed.
+    """
+
+    class Falsey(Exception):
+        def __bool__(self) -> bool:
+            return False
+
+    class FalseyPullAndCloseFail(AsyncIterator[bytes]):
+        """Shaped like `PullAndCloseFail` above; only the pull's truthiness differs."""
+
+        async def __anext__(self) -> bytes:
+            raise Falsey("upstream tore the stream")
+
+        async def aclose(self) -> None:
+            raise RuntimeError("and the body could not be closed")
+
+    stream = session_liveness_stream(
+        FalseyPullAndCloseFail(),
+        heartbeat_interval_seconds=0,
+        heartbeat=b"heartbeat",
+        upstream_idle_timeout_seconds=1,
+    )
+    with pytest.raises(Falsey) as caught:
+        await anext(stream)
+
+    assert isinstance(caught.value.__cause__, RuntimeError), "the close failure is recorded under it"
+    assert str(caught.value.__cause__) == "and the body could not be closed"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_that_fails_after_a_cancellation_leaves_no_unconsumed_future() -> None:
+    """The chained exception was right, and the operator got a second, contradictory line beside it.
+
+    `asyncio.shield` keeps cleanup running through a cancellation and abandons its outer future doing so. When the cleanup then *fails*, that abandoned future reports the failure as never consumed — `RuntimeError exception in shielded future` on stderr — while this function is at the same moment returning the same exception for the caller to chain properly. Two accounts of one failure, one of them reading like a bug in the proxy, in the middle of a slice whose whole subject is diagnostic clarity.
+
+    Both halves are needed to see it: a cancellation *and* a cleanup that fails afterwards. A cancel-then-succeed leaves nothing to report, which is why the second-cancel regression next door stayed green through this.
+
+    Driven with events rather than sleeps so "the cancellation landed inside the close" is a precondition rather than a race.
+    """
+    reports: list[dict[str, Any]] = []
+    asyncio.get_running_loop().set_exception_handler(lambda loop, context: reports.append(context))
+
+    release = asyncio.Event()
+    entered = asyncio.Event()
+
+    class SlowFailingClose(AsyncIterator[bytes]):
+        async def __anext__(self) -> bytes:
+            raise StopAsyncIteration
+
+        async def aclose(self) -> None:
+            entered.set()
+            await release.wait()
+            raise RuntimeError("close failed")
+
+    stream = SlowFailingClose()
+
+    async def cleanup() -> None:
+        await finish_stream_cleanup(None, stream)
+
+    task = asyncio.create_task(cleanup())
+    await entered.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    # Only now does the close fail, which is the half that produces the report.
+    release.set()
+    with suppress(BaseException):
+        await task
+    # The abandoned future reports from a callback, so give the loop room to run them.
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    assert reports == [], f"the loop was told about an exception nobody read: {reports}"
