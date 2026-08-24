@@ -131,7 +131,7 @@ MCP server 在另一个仓（插件 `ghc-api-proxy-helper`），本会话够不�
 
     **第一次**：本节曾长期声称 `internal`「结构上不可达」。那不是「代码改了文档没跟上」——它的第二个前提（带 error 走到合成前 `reason` 必非 `None`）被 `78be0d4`（2026-08-22 18:57）解耦掉，而那句话是次日 `a8862e6`（06:26）才写的。**文档写下时就已经错了。** 2026-08-23 端到端实测（`reports/260823-h2-protocolerror-category.md` §1.5，附 `network` 阴性对照）实际收到 `"category": "internal"`。
 
-    **第二次**：`0ca87b9` 把兜底从 `INTERNAL` 改成 `UPSTREAM`，判据是「`stream.py` 只在 `not ours` 时走交接」。于是错误分支的值域收成 `network` / `upstream` / `auth` 三个，`internal` 再也发不出来。**接收端可以据此简化，但要知道它换来了什么**：这个字段现在没有任何拼法能说「是代理自己坏了」，而本仓与上游之间还有一处接缝（`_counted_upstream` 那类本侧 wrapper 的 bug 仍被标成上游），那类失败现在会以 `upstream` 抵达而不再有别的说法。见 [`deferred.md`](deferred.md) §22之六。
+    **第二次**：`0ca87b9` 把兜底从 `INTERNAL` 改成 `UPSTREAM`，判据是「`stream.py` 只在 `not ours` 时走交接」。于是错误分支的值域收成 `network` / `upstream` / `auth` 三个，`internal` 再也发不出来。**接收端可以据此简化，但要知道它换来了什么**：这个字段现在没有任何拼法能说「是代理自己坏了」。当时还附了一条更糟的推论——本侧 wrapper（`_counted_upstream` 那类）的 bug 会被标成上游，于是代理自己的故障以 `upstream` 抵达。**那一半已经不成立了**：`1a34042` 把 `UpstreamSource` 这个标记下移到 `_counted_upstream` 之下，本侧的 bug 因此判为 `ours`，根本不走交接，而是原样上抛。所以今天的准确说法是：**能发出的 category 都确实描述上游，代价是代理自己的故障没有 category 可发**——它以截断连接而非交接抵达客户端。见 [`deferred.md`](deferred.md) §22之六（已闭合）。
 
     **两次不是同一种错，把它们并成一句是把教训改写反了**（评审 R3-m2 查出，这段总结的前一版就是这么写的）。第一次是**写下时就已经是假的**——前提在前一晚被拆掉，作者引的是自己过期的心智模型；第二次才是**写下时为真、几小时后被自己的下一个改动作废**。前者靠「写得更小心」防不住，得靠动手前重读被引用的代码；后者靠提交锚点，本节开头那条就是。
 
