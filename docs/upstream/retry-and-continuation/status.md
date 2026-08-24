@@ -139,6 +139,8 @@
 | `0062b67` | 被重放的失败与交接信息用同一个界限截断（`repr` 无上限，完成行只有一行） |
 | `da0c4b5` | 关闭失败不再顶掉正在传播的异常；每一次重放都记，而不只是第一次 |
 | `0f2e7f1` | cleanup 先做完再上报：委托 `finish_stream_cleanup`（第二次取消不再打断释放；`GeneratorExit` 之下的关闭失败不再被吞）；`raise_with_cleanup_under` 统一三处配对；`replaced_failures` 与 attempt 数同条件写出，不再造幽灵重放 |
+| `b5bc8f9` | 上游写完终结事件之后再断连，不再无痕：交付层 `on_tear_after_terminal` 回调 + 完成行一句 note，状态仍为 `ok`（客户端拿到了完整回合）。这是 `deferred.md` §22之七 表里最后一格 |
+| `bb17558` | 按第七轮评审修 5 minor + 2 nit + 2 条建议：异常配对的五处拼法统一到一个 helper；`or` 改 `is None`（falsey 异常会翻转退出优先级）；`asyncio.shield` 改 `asyncio.wait`（取消后 cleanup 再失败会多报一条「未消费」）；一条已过期的归因注释 |
 
 **交接信息现在写的是异常链，不是最外层那一个。** 真实的连接重置以 `httpx2.ReadError('')` 抵达，一路到第四环才出现 `OSError: [Errno 104] Connection reset by peer`——只印最外层等于什么都没说。链的走法与 `app.streaming.sse` 一致（`__cause__` 优先，`__context__` 仅在未被抑制时跟进），环数与每环字符数都有上限。
 
