@@ -517,9 +517,27 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
             media_type="text/event-stream",
         )
 
-    body = cast(dict[str, Any], response.json())
     # What upstream sent us, not what we hand onward. A buffered reply is one read, so this is the whole of it.
     trace.received = len(response.content)
+    try:
+        parsed_reply: object = response.json()
+    except ValueError as error:
+        # Upstream answered 200 and called it JSON, and it is not. Until this branch existed the decode error left `_dispatch` entirely: Starlette's error middleware answered `500 text/plain` with the five words `Internal Server Error`, which is the one non-JSON error response the whole proxy produced and carries nothing a client or an operator can act on.
+        #
+        # `UPSTREAM`, not `INTERNAL`. Nothing here is broken — upstream sent something it should not have — and a 502 sends a reader to the right side of the connection.
+        trace.detail = f"upstream answered {response.status_code} with a body that is not JSON"
+        return error_response(
+            proxy_error(ErrorCategory.UPSTREAM, f"upstream sent a body that is not JSON: {error}"),
+            inbound_format=route.wire_format.value,
+        )
+    if not isinstance(parsed_reply, dict):
+        # JSON, but not an object — a bare list or string cannot be a reply on any of these protocols.
+        trace.detail = f"upstream answered {response.status_code} with JSON that is not an object"
+        return error_response(
+            proxy_error(ErrorCategory.UPSTREAM, "upstream sent JSON that is not an object"),
+            inbound_format=route.wire_format.value,
+        )
+    body = cast(dict[str, Any], parsed_reply)
     payload = response_payload(chain, handled, body)
     # Summarised before the hand-over is appended, so the line describes what *upstream* produced.
     # The streaming path reads its summary off the assembler, which never sees the synthesised block;

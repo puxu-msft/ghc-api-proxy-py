@@ -523,3 +523,80 @@ def test_a_translated_leg_spells_upstreams_failure_in_the_clients_dialect() -> N
     assert "message_stop" not in events
     frames = _error_frames(delivered)
     assert frames[-1]["error"]["code"] == "server_error"
+
+
+# ---------------------------------------------------------------------------
+# The two remaining exits from the inventory.
+# ---------------------------------------------------------------------------
+
+ONLY_UPSTREAM_COUNTER = {"inbound": {"anthropic_count_tokens": {"providers": ["ghc"], "max_retries": 0}}}
+
+
+@pytest.mark.parametrize("status", [400, 500])
+def test_a_failed_count_reports_what_upstream_said_rather_than_one_flat_503(status: int) -> None:
+    """Upstream's 400 and its 500 are different things, and both used to arrive as 503 with none of its body.
+
+    Parametrised over both rather than asserting one, because the defect was that they were *the same*: `CountTokensUnavailable` flattened every reason into one status and kept no cause to read back.
+
+    The local estimator is configured out. With it in the list this endpoint answers 200 with an estimate and never reaches the failure at all — which is the right default and also means a test using it would prove nothing about this path.
+    """
+    client, _ = make_client(
+        failing_upstream(status, content=b'{"error":{"message":"upstream says"}}',
+                         headers={"content-type": "application/json"}),
+        overrides=ONLY_UPSTREAM_COUNTER,
+    )
+
+    response = client.post(
+        "/v1/messages/count_tokens",
+        json={"model": "claude-model", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == status
+    # Upstream's own body: this is a direct path, and a count is not exempt from that.
+    assert response.json() == {"error": {"message": "upstream says"}}
+
+
+def test_the_local_estimator_still_answers_when_it_is_configured() -> None:
+    """The control for the test above. Without it, `providers: ["ghc"]` could be doing the work rather than the read-through."""
+    client, _ = make_client(failing_upstream(500))
+
+    response = client.post(
+        "/v1/messages/count_tokens",
+        json={"model": "claude-model", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["estimated"] is True
+
+
+def test_upstream_calling_a_non_json_body_json_is_not_this_proxys_fault() -> None:
+    """The only non-JSON error response the whole proxy used to produce.
+
+    `response.json()` was not inside a `try`, so the decode error left `_dispatch` and Starlette answered `500 text/plain` with the five words `Internal Server Error` — nothing a client can parse and nothing an operator can act on.
+
+    502 rather than 500: nothing here is broken. Upstream answered 200 and called something JSON that is not.
+    """
+    client, _ = make_client(
+        failing_upstream(200, content=b"<html>not json</html>", headers={"content-type": "text/html"})
+    )
+
+    response = client.post("/v1/messages", json={"model": "claude-model", "messages": []})
+
+    assert response.status_code == 502
+    assert response.headers["content-type"].startswith("application/json")
+    body = orjson.loads(response.content)
+    assert body["type"] == "error"
+    assert body["error"]["type"] == "api_error"
+
+
+def test_upstream_sending_json_that_is_not_an_object_is_caught_too() -> None:
+    """The neighbouring case, which the first branch does not cover: valid JSON, wrong shape.
+
+    A bare list decodes without raising, so a `try` around the decode alone would let it through to whatever reads `body["..."]` next — one `KeyError` further along, with a worse answer.
+    """
+    client, _ = make_client(failing_upstream(200, content=b"[1,2,3]", headers={"content-type": "application/json"}))
+
+    response = client.post("/v1/messages", json={"model": "claude-model", "messages": []})
+
+    assert response.status_code == 502
+    assert orjson.loads(response.content)["error"]["type"] == "api_error"

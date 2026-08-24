@@ -1906,27 +1906,34 @@ def test_a_refused_request_is_reported_with_its_route_and_reason(request_log: No
     assert "no-such-model" in lines[0]
 
 
-def test_a_request_that_raised_on_its_way_out_still_writes_its_one_line(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
+def test_a_request_that_raised_on_its_way_out_still_writes_its_one_line(
+    request_log: None, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The exit that used to write nothing at all.
 
     `log_completion` says every exit path produces exactly one line, and every test around this one checks a path that reaches a `return`. An exception leaving `_dispatch` skipped all of them: the slot was released and the request vanished, and the only trace left was a traceback under the server's own logger with none of this request's identity on it.
 
-    Reproduced without patching anything in the app. Upstream answers 200 and calls its body JSON; `response.json()` in the buffered branch is not inside a `try`, so the decode error goes straight out through `_serve`. That is the same shape as the paths a reader would sooner name — a client hanging up inside `await request.body()`, a translator raising on an input nobody anticipated — and this one needs no monkeypatching to produce.
+    **The vehicle changed on 2026-08-24, and why is worth keeping.** This used to need no patching: upstream answered 200 and called a non-JSON body JSON, and `response.json()` in the buffered branch was not inside a `try`, so the decode error went straight out. That is now caught and answered as a 502 in the client's own dialect, which is the right behaviour and leaves this property without a naturally-occurring vehicle — four other malformed replies were tried and all of them are answered rather than raised.
+
+    So the failure is injected, at the one place that still stands for "something nobody anticipated". What is being checked is unchanged and is not about which exception it is: an exit by exception is an exit, and it owes the same one line as a `return`.
     """
-    client, _ = make_client(
-        lambda _: httpx2.Response(200, content=b"<html>bad gateway</html>", headers={"content-type": "application/json"})
-    )
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
+
+    def exploding(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("nobody anticipated this")
+
+    monkeypatch.setattr("app.server.routes.inference.response_payload", exploding)
 
     # Still raised, never swallowed: the completion line is a record of the failure, not a handler for it.
-    with caplog.at_level(logging.INFO), pytest.raises(ValueError):
+    with caplog.at_level(logging.INFO), pytest.raises(RuntimeError):
         client.post("/v1/messages", json={"model": "claude-model", "messages": []})
 
     outcomes = _request_outcomes(caplog.records)
     assert len(outcomes) == 1, "an exception on the way out is an exit path and owes exactly one line"
     line, status = outcomes[0]
     assert status == "fail"
-    # The exception is named, not merely alluded to. `str` on a decode error happens to say something, but `str(RuntimeError())` is empty and would leave the detail as a colon with nothing after it, so the line quotes the `repr`.
-    assert "request failed before a response: JSONDecodeError" in line
+    # The exception is named, not merely alluded to. `str(RuntimeError())` is empty and would leave the detail as a colon with nothing after it, so the line quotes the `repr` — which is why the class name appears here even though this one does have a message.
+    assert "request failed before a response: RuntimeError" in line
     assert _registry(client).snapshot() == [], "and the slot is still released"
 
 
