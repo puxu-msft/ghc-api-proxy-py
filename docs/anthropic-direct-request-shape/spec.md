@@ -1,8 +1,12 @@
-# Anthropic 出站请求体：`thinking`、`output_config` 与 `messages` 末尾角色的构造
+# Anthropic 出站请求体：`thinking`、`output_config`、`messages` 末尾角色与 `cache_control` 子字段的构造
 
 **这份是 Spec**，答「应该是什么样」，规范性。**这是活文档，不冻结。** 新的用户裁决、实测或发现一旦与本文任何一处冲突或限定它，**当场修订本文**——不把已知错误的条款留在原地，也不把修正寄存到延后台账或评审报告里。权威永远是本文的当前版本。
 
-**范围**：**所有出站目标格式为 Anthropic Messages 的请求**，在 translation 之后的最终形状里，这几处字段：`thinking`、`output_config`、以及 `messages` 的**末尾角色**。其余字段不在本文范围内。
+**范围**：**所有出站目标格式为 Anthropic Messages 的请求**，在 translation 之后的最终形状里，这几处：`thinking`、`output_config`、`messages` 的**末尾角色**、每个 `cache_control` 对象里**允许出现的键**、以及 `anthropic-beta` 请求头里**这个部署认识的 flag**。其余字段不在本文范围内。
+
+**为什么一个请求头会进一份「请求体」的 Spec。** `anthropic-beta` 与 body 是同一件事的两面：一个 flag 的作用就是让某个 body 字段合法，而 §7.5 记的正是这两面对不上的那次实测。把它放进别处会让「上游不认这个键」和「上游不认这个 flag」这两条互相解释的条款分居两地。§7 因此是「上游的词汇表」，不是「body 的白名单」。
+
+**`cache_control` 只管键，不管断点——而且只在运维选了对应档位时才管。** 断点放在哪里、放几个、归客户端还是归代理控制，那是 `hook_fix_anthropic_request.cache_control` 四档配置的管辖。本文只回答「一个 `cache_control` 对象里可以有哪些键」，并且**用户 2026-08-24 裁定这件事只在 `sanitize` / `disabled` 两档下发生，默认档 `passthrough` 是字面的原样转发**。四档中 `proxied` 仍未实现（启动即拒），见 §7.3 与 §9 A-9。
 
 **为什么范围不是「直连腿」。** 首稿写的是 `translation_required == False`，而实现从第一天起就按 target format 判断——这不是实现越界，是首稿把范围写窄了。判据在于：能不能收 `thinking.type: enabled` 是**回答请求的那个模型**的属性，与这个请求体是客户端原样送来的还是翻译出来的无关。翻译到 Anthropic 的那条路今天真的会写出 `{"type":"enabled","budget_tokens":N}`（`pipeline/translation_driver/anthropic_messages.py` 的 `_restore_thinking`），它到了同一个端点会吃同一个 400。按腿切会让那半边无人认领，而 `attempt.prepare` 与 count 腿本来就都在 translation 之后运行，target format 才是它们共同的边界。
 
@@ -16,8 +20,10 @@
 | 2026-08-24 | §2.1 | 补上正向实测：本文规定要发的那个请求体**被上游接受**。首稿只有「旧形状被拒」这一半，据以推断新形状可用——那是从上游的建议里读出来的，不是量出来的 | 双向探针（§2.1），负控制与正样本各一次真实调用 |
 | 2026-08-24 | 范围声明 | 从「直连腿」改为「所有出站目标格式为 Anthropic Messages 的请求」。首稿把范围写窄了，而实现一直按 target format 判断，两者矛盾 | 实施评审 [reports/260824-implementation-review.md](reports/260824-implementation-review.md) ADTR-03 |
 | 2026-08-24 | §4.0、§4.2 | 补上「客户端省略 `thinking` 时仍附 effort」，并给规则 4 补上目录只发布本地阶梯无法排序的名字时该怎么办——首稿两处都没说，实现于是各自替它做了决定 | 同上，ADTR-01 与 ADTR-02；`output_config` 单独发出被实测接受（§2.1） |
-| 2026-08-24 | §8 A-1 | 原文说「当前实现按透传」，这在生产里不可达：`decide_route` 在 `describe` 返回 `None` 时直接抛 `UnknownModel`，根本不会生成 Route。改写为它实际是什么 | 同上，ADTR-05 |
+| 2026-08-24 | §9 A-1（当时编号 §8） | 原文说「当前实现按透传」，这在生产里不可达：`decide_route` 在 `describe` 返回 `None` 时直接抛 `UnknownModel`，根本不会生成 Route。改写为它实际是什么 | 同上，ADTR-05 |
 | 2026-08-24 | 范围、新增 §6、§2.5 | 纳入 `messages` 末尾角色：**上游拒收以 assistant 结尾的对话，而本代理自己的两处修复会把请求改成那样**。同时记下一次**反向**实测——官方文档说 Claude 5 一族移除了 `temperature`/`top_p`/`top_k`，经 Copilot 实测**不成立**，不要为它们建守卫 | 字段探针矩阵（§2.5），以及对本项目 `repair_tool_pairs` / `drop_blank_text_blocks` 的可达性实测 |
+| 2026-08-24 | §7.3 改写、§7.1 位置集合补全、§7.6～§7.8 新增 | **用户裁定 `passthrough` 字面成立**：白名单只在 `sanitize` / `disabled` 下运行，默认档一个字节都不动，因此默认配置面对 `scope` 仍会吃上游 400——那是被裁定的行为。首稿让白名单在每一档下都跑，论证是「四档管断点、本条管词汇表」，异源评审判为 blocker（「不要用当前 Spec 自己提出的解释代替裁决」），用户裁向字面一侧。同轮把位置集合从「三处」按官方 schema 补到七处（顶层与三处嵌套原先全漏），并把 `anthropic-beta` 的网关词汇表从待裁决条目升为正文条款 | 用户裁决 2026-08-24；异源评审 [reports/260824-cache-control-and-beta-implementation-review.md](reports/260824-cache-control-and-beta-implementation-review.md) CCBIR-01/02/03；跨模型实测（7 个 Claude 模型对 `scope` 全拒、对 `ttl` 全收，正控制全 200） |
+| 2026-08-24 | 标题、范围、新增 §7，原 §7～§9 顺延为 §8～§10 | 纳入 `cache_control` 的**子字段白名单**：客户端发的 `cache_control.scope` 让上游整条请求 400，而**补发对应的 beta 救不回来**（网关收下该 beta，后端 schema 却不认它启用的字段）。同时记下一条防止误读的实测——`defer_loading` 与 `tool_search_tool_regex_*` 上游**不带 beta 也收**，所以剥掉那个 beta flag 不会引发二次 400 | 线上 400（§7）、[reports/260824-cache-control-scope-and-gateway-beta-vocabulary.md](reports/260824-cache-control-scope-and-gateway-beta-vocabulary.md)（正控制 + 反向对照各跑两遍） |
 
 ## 0. 一句话
 
@@ -159,7 +165,7 @@ thinking: thinkingConfig,
 
 `docs/.human-controlled/upstream-retry-and-continuation.md:9` 把 400 列进「无法继续」。若做成「收到这个 400 → 改写 → 重试」，字面上撞这一条；用户亲笔的 `config.example.yaml:315`（「部分 400 协商重试」）、`:546`（`strip_all_thinking_blocks_on_reject`）与 `:520-535`（注释态的 `message_role_system`，`proactive` + `reactive` 双开关）之间本就存在一处需要用户澄清的张力，**但那处张力不是本条引入的，也不需要本条去解决**：主动式在发送前就把请求构造对，根本不产生这个 400，于是完全不触碰那一条。第一方客户端也是主动式。
 
-反应式（学习 + 重试）作为增强留在 §8 延后项里。
+反应式（学习 + 重试）作为增强留在 §9 延后项里。
 
 ### 3.3 授权来源
 
@@ -201,7 +207,7 @@ thinking: thinkingConfig,
 
 ### 4.4 `disabled` 不附 effort
 
-`thinking.type == "disabled"` 时不写 `output_config`。文档说 effort 也影响整体 token 花销，但没有任何实测说明「关掉思考还要给 effort」是必要的，缺一个具体失败面。见 §8。
+`thinking.type == "disabled"` 时不写 `output_config`。文档说 effort 也影响整体 token 花销，但没有任何实测说明「关掉思考还要给 effort」是必要的，缺一个具体失败面。见 §9。
 
 ### 4.5 客户端省略 `thinking` 时仍附 effort
 
@@ -278,26 +284,120 @@ prefill 是 Anthropic 有文档的特性。客户端**故意**用它，是在要
 
 要闭合它，需要的是一个**跨协议的显式来源标记**（在 translation 之前由对应协议的 reader 读出「客户端末尾的语义角色」，随 context 传到出站阶段），而不是在这里给 `input` 再写一个读取器——Responses 的 `input` 里 `function_call`、`reasoning` 等多种 item 都会翻成 assistant，一个只看 `role` 的读取器会带来新的误判。登记为 A-7。
 
-## 7. 不做什么
+## 7. 上游的词汇表：`cache_control` 子字段与 `anthropic-beta` flag
+
+### 7.1 条款
+
+出站目标格式为 Anthropic Messages 的请求体里，**每一个 `cache_control` 对象只保留 `type` 与 `ttl`，其余键一律删除**。
+
+**位置集合取自 Anthropic 官方请求 schema，不是从线上那条 400 的路径反推的。** 线上只报了 `system.1`，按它去写会漏掉其余每一处：
+
+| 位置 | 说明 |
+|---|---|
+| 顶层 `cache_control` | 自动缓存，SDK 原话「applies a cache_control marker to the last cacheable block」。**这一处没有 block 承载，最容易漏** |
+| `system[]` 的块 | 上游报错路径 `system.1.cache_control.ephemeral.scope` |
+| `messages[].content[]` 的块 | `messages.0.content.0.text.cache_control.ephemeral.scope` |
+| `tool_result.content[]` 的块 | `content` 是 `Union[str, Iterable[Content]]`，是列表时每个块都可带 marker |
+| `search_result.content[]` 的块 | `content` 是 `Iterable[TextBlockParam]` |
+| `document.source.content[]` 的块 | 仅当 source 是 `ContentBlockSourceParam` 那一支 |
+| `tools[]` 的工具 | `tools.0.custom.cache_control.ephemeral.scope` |
+
+**`thinking` 与 `redacted_thinking` 不在其列**——官方 schema 不允许它们直接带 `cache_control`，所以它们不是「漏掉的又一处」。
+
+**按 schema 分派，不做盲递归。** 对任意 dict 递归去找 `cache_control` 会走进 `tool_use.input`、工具的 JSON Schema、以及普通工具输出的业务数据——那些地方一个恰好叫 `cache_control` 的键是客户端的数据，删掉它是在改用户的载荷。所以只对上表列出的块类型下钻。
+
+白名单 `{type, ttl}` 有两条互相独立的来源：上游实测（§7.2），以及 Anthropic 官方 SDK 的 `CacheControlEphemeralParam` 逐字就是这两个字段。两条来源独立给出同一个答案，这是它可以据以行动的理由。**该 SDK 里没有 `scope`**，与「`scope` 是更新的 beta 引入的字段」一致。
+
+`cache_control` 不是对象、或不存在时不碰。删空之后 `cache_control` 至少还剩 `type`，所以不会产生空对象；真收到一个只有未知键的 `cache_control`，删完剩下 `{}` 就把整个 `cache_control` 一并删掉——一个空断点对象不表达任何东西，而它是不是合法形状我们没测过。
+
+**每一处删除记一条 loss，并带上它的路径**，走 §3.1 同一个 `context.extras["conversion_losses"]` 通道，于是它出现在请求日志行与记录里，而不是无声消失。逐处而不是一次 pass 聚合成一条：读者要判断的是「哪几个断点被动过」，一条写着「3 处」的记录回答不了这个问题。**这一条是承重的**：`scope` 表达的是缓存的作用域，剥掉它会改变缓存的实际行为（很可能是让缓存不再跨会话共享），这是一次真实的语义损失，不是清理噪声。
+
+### 7.2 为什么是白名单，不是「剥掉 `scope`」
+
+上游是 strict schema——它的原话是 `Extra inputs are not permitted`，即**任何**它不认识的键都会让整个请求死。黑名单要求我们每次 Anthropic 加新字段都抢在客户端前面更新一次，而错过一次的代价是整条链路对该客户端完全不可用；白名单错的方向只是「少送一个上游其实已支持的优化」。两边代价不对称，所以取白名单。
+
+`ttl` 在白名单里是**实测**结果而不是推测：`{type: ephemeral, ttl: "1h"}` 上游收（带不带 `extended-cache-ttl-2025-04-11` 都收），而同一个对象里的 `scope` 单独被点名拒绝。剥掉 `ttl` 是净损失，所以不剥。
+
+### 7.3 这一条只在运维要求时运行，`passthrough` 是字面的
+
+**用户 2026-08-24 裁定**：`passthrough` 就是 `config.example.yaml` 写的那个意思——原样转发客户端的 marker，**包括这个上游会拒绝的键**。默认值仍是 `passthrough`。所以一个客户端会发 `cache_control.scope` 的部署，需要在配置里显式写 `cache_control: sanitize`；不写，那些请求就带着 `scope` 发出去并吃上游的 400。**这是被裁定的行为，不是缺陷。**
+
+四档与本条的关系：
+
+| 档 | 本条做什么 |
+|---|---|
+| `passthrough`（默认） | 什么都不做，一个字节都不动 |
+| `sanitize` | 按 §7.1 的白名单，每个 marker 只留 `type` 与 `ttl` |
+| `disabled` | 每个 marker 整个删除 |
+| `proxied` | **启动时拒绝**，注入那一半没有实现 |
+
+`proxied` 的处理是本文的推导而非用户裁决：它在 `config.example.yaml` 里有定义，而这里只实现了「剥」没有实现「注」。静默当成 `passthrough` 的后果是——运维配置了「代理接管 prompt caching」，没有收到任何错误，然后按「没人接管」被计费。配置值无法兑现时停止启动，与一条编译不过的正则同类。
+
+**这里原先写的是相反的东西，记下来是因为那个错法很自然。** 首稿让白名单在**每一档**下都跑，论证是：四档管的是断点（放哪、放几个、归谁），本条管的是词汇表（一个 marker 里能有哪些键），两者正交，所以 `passthrough` 承诺的「不插手客户端精调过的断点」并没有被违反——位置、数量、归属一个都没动，动的只是一个上游根本不认识的键。
+
+这个区分本身没有被否定。被否定的是**据此单方面改掉一个用户定义的默认档**。异源评审 2026-08-24 判为 blocker，措辞是「不要用当前 Spec 自己提出的解释代替裁决」，而那句话说中了：首稿引用的授权是 `message-translation.md:7`「当我们需要理解和处理时，才分析和处理对应部分」，以及用户亲笔把空 thinking 块的剥离从可配置升级为常驻的先例。**两条都成立，但都不覆盖本格**——空 thinking 块**没有**用户定义的配置档，而 `cache_control` 有，用户还亲笔把「strip non-standard fields like scope」写进了 `sanitize` 那一档。当一个字段已经有了用户写下的语义分档，那句通用授权就不再是在空白处授权，而是要去覆盖一处已经有人做过的划分。
+
+前身 `copilot-api-js` 在 `passthrough` 下同样剥 `scope`（`request-preparation.ts:1019-1025`，内置地雷清单 `:298-299` 就是 `["scope"]`）。这条旁证在裁决前就写在这里，裁决后仍然只是旁证——CLAUDE.md 明令不得把它的默认值当本项目契约。
+
+
+### 7.4 为什么是主动式，不是反应式
+
+与 §3.2 同一个论证，原样成立：`upstream-retry-and-continuation.md:9` 把 400 列进「无法继续」，而发送前就把请求构造对根本不产生这个 400。前身项目另有一条反应式重试（`cache-control-subfield-rejection-retry.ts`，其正则逐字匹配本次这条 400），它作为增强留在延后项里，不作为本条的实现方式。
+
+### 7.5 加上那个 beta 也救不回来
+
+这一条单独写出来，是因为它排掉的是一个方向完全相反、而且非常自然的第一猜想：既然 `scope` 由 `prompt-caching-scope-2026-01-05` 引入，那是不是补发这个 beta 就行？**实测：不行。** 带上该 beta 重发同一个 body，错误一字不差。而单独发这个 beta、body 不用它，上游返回 200——**网关收下了这个 beta，后端 schema 却不认它启用的字段**，上游自身两层不一致。所以「补 header」这条路是死的，只能剥字段。证据见 [reports/260824-cache-control-scope-and-gateway-beta-vocabulary.md](reports/260824-cache-control-scope-and-gateway-beta-vocabulary.md) §2 的 C3。
+
+### 7.6 `anthropic-beta`：两层剥离，两个不同的问题
+
+出站前，客户端的 `anthropic-beta` 依次经过两道剥离，**两者并列，互不包含**：
+
+| 层 | 问的是什么 | 拒绝方 | 错误信封 | 清单归谁 |
+|---|---|---|---|---|
+| 网关词汇表 | 「这个部署认不认识这个名字」 | Copilot 网关，在任何模型看到请求之前 | `{"error":{"message":"unsupported beta header(s): …","code":"invalid_request_body"}}` | **本文，内置** |
+| per-model 能力 | 「回答的那个模型有没有这个能力」 | Anthropic | `400 invalid beta flag` | **用户**，`strip_anthropic_beta_flags`，见 §8 与 §9 A-4 |
+
+**内置清单（2026-08-24 实测）**：`tool-search-tool-2025-10-19`、`output-128k-2025-02-19`。同一轮里被接受的 12 个见证据报告 §3，其中 `tool-search-tool-2025-11-19` 与被拒的那个只差一位数字——所以判据必须是**精确逐字匹配**，前缀或子串匹配会把能用的那个一起拿掉。
+
+**为什么不塞进用户那张表。** 那张表按 `resolved_model` 正则匹配，语义是模型能力；网关的拒绝与模型无关。用 `.*` 键机械上可行，但会把两个不同的命题混进同一张表，而且 §8 与 §9 A-4 已把那张表的**内容**判给用户裁决——往里放我方推导就是把我们的判断塞进用户的决定。并列的另一个实际收益：那张表今天有一处已知缺陷（唯一的键 `claude-sonnet-4.6` 被同一份配置的 `model_mappings` 映走，整张表匹配不到东西），而网关剥离不查那张表，因此不受它影响。
+
+### 7.7 剥掉一个 flag 之后，body 必须仍然合法
+
+这是本条最容易出错的地方，也是 §7.5 那条实测的反面。`request_headers.py` 的模块说明写着：剥 header 不会优雅降级，flag 启用的 body 字段会变成未识别字段而再吃一次 400。**所以每往内置清单加一个 flag，都要先测「不带这个 flag、但带它启用的 body」是否仍被接受**，而且要覆盖该特性的完整生命周期，不是只测第一轮。
+
+`tool-search-tool-2025-10-19` 这一格已经这样测过（证据报告 §4）：`tools[].defer_loading` 混合 true/false、`tool_search_tool_regex_20251119` 服务端工具、以及第二轮 `tool_result.content[]` 里的 `{"type":"tool_reference"}` 块，**各自在完全不带 beta 时都返回 200**。第三项是承重的——Claude Code 用的是客户端自定义 tool search，`tool_reference` 只在第二轮出现，只测第一轮会漏掉「第一轮成功、第二轮 400」这个失败形状。
+
+### 7.8 这份清单的适用范围与过期行为
+
+**限定**：清单实测于 `api.enterprise.githubcopilot.com`、`claude-opus-5`、非流式。本项目的 API base url 由账号探测或 `api_base_url` 覆写决定，**其它 host 是否同样拒绝这两个 flag 没有测过**。实现今天对所有 Anthropic 直连请求无条件生效，这是一处**明知的过宽**，接受它的理由是代价不对称：按 §7.7，剥掉后 body 仍然合法，所以在一个其实接受该 flag 的 host 上多剥一个，损失是一次没人在用的能力协商；而少剥一个，损失是那个客户端的每一个请求。
+
+**过期时怎么办**：若将来该网关学会了这两个 flag，清单不会自动失效，也不需要紧急处理——按上一段，继续剥的代价仍然只是一次协商。发现后从清单里删掉即可。**反过来，若发现某个 host 因为被剥而行为变差，那才是要立刻收窄的信号**，收窄的方式是把清单挂到 provider 上，而不是放宽判据。
+
+**谁能改这张清单**：这是我方从实测推导的表，按本文头部的规则，clause 级修订走评审共识即可，不需要用户裁决——它与用户那张表的区别正在于此。
+
+## 8. 不做什么
 
 - **不做反应式的 400 学习与重试**（§3.2）。
 - **不改 `min_thinking_budget` / `max_thinking_budget` 相关的任何行为**。本次那个 `budget_tokens: 63999` 也超出目录发布的 32000 上限，但没有任何实测说明上游会因此拒绝——它先撞上了 `thinking.type`。缺一个具体失败面，不预建。
 - **不把 `adaptive_thinking` 与 `strip_anthropic_beta_flags` 合并。** 第一方客户端在 `chatEndpoint.ts:193-197` 把「支持 adaptive」与「不发 `interleaved-thinking-2025-05-14`」绑成同一个判据，用户亲笔的 `config.example.yaml:443-444` 恰好也在给 `claude-sonnet-4.6` 剥这个 flag——**这两件事很可能是同一个能力位的两个后果**，但那张表是用户手写的，合并与否是用户的决定，不是这里的。记在此处以便用户裁决。
-- **不做 `adaptive` → `enabled` 的反向降级。** 一个不支持 adaptive 的模型收到 `{type: "adaptive"}` 同样会 400，且这条路径今天可达（`translation_driver/anthropic_messages.py:274` 在 intent 为 adaptive 时就写出这个形状）。不做的理由不是它不重要，而是**降级需要一个 budget 数字，而没有任何非虚构的来源提供它**：第一方客户端取自用户配置，我们没有对应的配置，凭空造一个就是发明契约。见 §8。
+- **不做 `adaptive` → `enabled` 的反向降级。** 一个不支持 adaptive 的模型收到 `{type: "adaptive"}` 同样会 400，且这条路径今天可达（`translation_driver/anthropic_messages.py:274` 在 intent 为 adaptive 时就写出这个形状）。不做的理由不是它不重要，而是**降级需要一个 budget 数字，而没有任何非虚构的来源提供它**：第一方客户端取自用户配置，我们没有对应的配置，凭空造一个就是发明契约。见 §9。
 
-## 8. 待裁决与延后
+## 9. 待裁决与延后
 
 | 编号 | 是什么 | 状态 |
 |---|---|---|
 | A-1 | **目录查不到该模型（`describe` 返回 `None`）时怎么办**——**这一格今天在生产里到不了**，首稿说「当前实现按透传」是错的：`decide_route` 在 `describe` 返回 `None` 时直接抛 `UnknownModel`，请求在路由阶段就被本地拒绝，根本不会生成 Route、不会执行 `apply_route`，订阅者也就永远看不到 `None`。订阅者里那条读作「非 adaptive」的分支是给手工构造的 context 用的防御性读法，不是现行系统行为。真正的开口是**未知模型该本地拒绝还是透传给上游拒绝**，那是路由的产品裁决，不属于本 topic；此处仅记指路。 |
-| A-2 | `adaptive` → `enabled` 的反向降级（§7 末条）。需要先有一个非虚构的 budget 来源，或者一条实测证明它可达且确实 400。**2026-08-24 实测降低了它的紧迫性**：活目录当天只剩 `claude-haiku-4.5`、`claude-opus-4.6/4.7/4.8`、`claude-opus-5`、`claude-sonnet-4.6`、`claude-sonnet-5` 七个 Claude 模型，`claude-sonnet-4.5` 与 `claude-opus-4.5` **已从目录消失**（`refs/available_models.json` 那份快照过期了）；余下唯一非 adaptive 的 `claude-haiku-4.5` 在用户配置里被映到 `gpt-5.6-luna`。也就是说**今天经这份配置到不了任何非 adaptive 的 Claude 模型**。这是配置与目录的当下状态，不是代码性质——目录随时会变，判据仍必须运行时读。 |
+| A-2 | `adaptive` → `enabled` 的反向降级（§8 末条）。需要先有一个非虚构的 budget 来源，或者一条实测证明它可达且确实 400。**2026-08-24 实测降低了它的紧迫性**：活目录当天只剩 `claude-haiku-4.5`、`claude-opus-4.6/4.7/4.8`、`claude-opus-5`、`claude-sonnet-4.6`、`claude-sonnet-5` 七个 Claude 模型，`claude-sonnet-4.5` 与 `claude-opus-4.5` **已从目录消失**（`refs/available_models.json` 那份快照过期了）；余下唯一非 adaptive 的 `claude-haiku-4.5` 在用户配置里被映到 `gpt-5.6-luna`。也就是说**今天经这份配置到不了任何非 adaptive 的 Claude 模型**。这是配置与目录的当下状态，不是代码性质——目录随时会变，判据仍必须运行时读。 |
 | A-3 | `thinking.type == "disabled"` 时是否也附 `output_config.effort`（§4.4）。 |
-| A-4 | `adaptive_thinking` 能力位与 `strip_anthropic_beta_flags` 表是否为同一决策的两半（§7）。用户的表，用户裁决。 |
+| A-4 | `adaptive_thinking` 能力位与 `strip_anthropic_beta_flags` 表是否为同一决策的两半（§8）。用户的表，用户裁决。 |
 | A-5 | 本文的规范条款要落进用户亲笔的 `docs/.human-controlled/message-format-reshape.md`「向上游输出 Anthropic Messages」一节（该节今天只有两条 thinking **块布局**的整形，`thinking.type` 取值零命中）。候选片段见 [`.dev/human-controlled-docs-candidates/anthropic-thinking-capability.md`](../../human-controlled-docs-candidates/anthropic-thinking-capability.md)，**用户追认前，本文是我方推导，不是用户裁决**。 |
 | A-6 | **两个新配置键在 `build_chain` 时被闭包捕获，因此改了要重启才生效**，而用户亲笔 `config.example.yaml` 的默认承诺是热重载，`NOT_HOT_RELOADABLE` 里也没有它们。这不是本次引入的形状——同一事件上的 `builtin:hosted-web-search-gate` 与它的 `models_support_web_search` 一模一样，而且全仓今天**没有任何生产代码调用 `ConfigProvider.reload()`**，热重载在实现上是一处更宽的既有缺口。**因此没有为这两个新键单独改架构**：单独给它们做请求级快照会造出「同一个 registry 里两种时效语义」，比缺口本身更难读。已在候选片段里向用户点明，等热重载整体接线时一并处理。依据：实施评审 ADTR-06。 |
 | A-7 | **跨协议的「客户端末尾语义角色」没有显式来源标记**，于是 §6.5 那个缺口存在：翻译成 Anthropic 的请求体若被 `drop_blank_text_blocks` 削掉末尾 user 轮，会以未修复状态发出并吃 400。闭合它要在 translation 之前由对应协议的 reader 读出该事实并随 context 传下去，而不是在出站端再写一个 `input` 读取器——Responses 的 `input` 里 `function_call`、`reasoning` 等多种 item 都会翻成 assistant，只看 `role` 会引入新的误判。没有实测样本，优先级低。依据：实施评审 ATRA-01。 |
+| A-8 | ~~`passthrough` 档下也剥未知键，需要用户追认~~ **已裁决，2026-08-24：`passthrough` 字面成立**，白名单只在 `sanitize` / `disabled` 两档下运行，默认档一个字节都不动。条款见 §7.3。当时的问法与被否决的论证一并留在 §7.3 末尾，不删——那个错法（用本文自己新写的解释去覆盖用户定义的默认档）比结论更值得下一个人看见。 |
+| A-9 | **`proxied` 档与 `extended_cache_ttl` 仍未实现。** 2026-08-24 已实现四档中的三档（`passthrough` 什么都不做、`sanitize` 走白名单、`disabled` 全删）；`proxied` 要求代理剥掉客户端断点后注入自己的，只有「剥」这一半存在，因此配置到它时**启动即拒**而不是静默当作 `passthrough`。原条目：**`hook_fix_anthropic_request.cache_control` 四档与 `extended_cache_ttl` 至今零实现**，配置项存在、注释齐全、消费者一个都没有（`src/app/config/schema.py:16,344`，实测四种取值走完 `fix_anthropic_request` 请求体逐字节不变）。本次只实现了与之正交的子字段白名单，**四档本身仍然没做**，这不是本次静默削减，而是一处此前从未进过任何台账的既有缺口，在此登记。`extended_cache_ttl` 另有一个前置问题：它注释里引用的门控 `model_capabilities.extended_cache_ttl` 在配置样例里从来不是一个真实的键，只存在于那两行注释本身。依据：[reports/../tmp/260824-cache-control-scope-400-investigation.md](../tmp/260824-cache-control-scope-400-investigation.md) F-1、F-2。 |
+| A-10 | ~~网关 beta 词汇表与用户 per-model 表未分开~~ **已闭合，2026-08-24**：两者已分为并列的两层，规范条款见 §7.6～§7.8，实现是 `request_headers.py` 的 `GATEWAY_UNSUPPORTED_BETAS` 与 `strip_gateway_unsupported_betas`。**留在表里而不是删除，是因为编号是标识不是序号**；仍开着的那一半——清单只在 enterprise host 实测过而实现对所有 host 生效——已作为限定写进 §7.8，不作为待裁决项。 |
 
-## 9. 证据来源
+## 10. 证据来源
 
 | 来源 | 权重 | 限定 |
 |---|---|---|

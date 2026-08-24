@@ -11,9 +11,11 @@
 - **2026-08-24 修订「Downstream Anthropic SSE」第 7 条：SSE error event 之前必须先咨询合成续写。** 触发是一次生产事故 req=`75ccdf6f`（诊断见 `../upstream/retry-and-continuation/reports/260824-silent-eof-after-thinking-diagnosis.md`）：上游交付一个完整 thinking 块后静默、随后切穿块中干净 EOF，客户端只拿到一句 `API Error`，而它本可以拿到一个可续写的 `tool_use`。
   **本条不是新裁决，是把一条既有的用户裁决补进本文。** 权威是用户亲笔的 `docs/.human-controlled/upstream-retry-and-continuation.md` 第 30 行：「如果已经交付过至少一个完整块，则将报错合成为自制的 `tool_use` / `function_call` 块……返回给客户端」。该文第 5–11 行的「无法继续」清单未列入「上游流无终止事件」，最接近的第 15 行「网络中断」属「一般可以继续」，故本格落在第 30 行的处方之内。实现此前只在**撕裂**路径上执行了它，干净 EOF 路径从不咨询——两条路把客户端留在同一个位置（`src/app/pipeline/retry.py` 该处注释明文如此），出口却不同。
   **范围限定，不要读宽**：本条只约束**本来就要发 SSE error event、且失败属于人写文档「业务可继续」那一类**的结局。上游停在块边界、按 2026-08-22 裁决以合成 stop reason 正常收尾的那一格**不报错**，因此不在第 30 行的触发条件内，行为不变；代理自我保护（`DeliveryError`）、客户端已断开、400／401／`refusal` 与本侧 bug 属该文第 5–11 行的「无法继续」，同样不咨询。**修订初稿把义务写成「凡发 SSE error event 之前」，比实现和人写文档都宽，会要求把明确不可继续的保护性错误也合成为续写；异源评审 2026-08-24 判为 major，已按此收窄。**
+- **2026-08-24 修订「Tools 与 tool choice」与请求字段矩阵：tool 声明改为白名单重建，`defer_loading` 不进 wire。** 触发是一次线上 400，`req=fcc0bebc`、模型 `gpt-5.6-sol`：`Invalid Value: 'tools.defer_loading'. Deferred tools require tools.tool_search.` 根因不是漏了一个字段的处置，而是 `translation_driver/openai_responses.py` 的 `_function_tool` **按黑名单复制**（只排除 `input_schema`），于是客户端放在 tool 上的任何键都会到达一个从未同意过它的 endpoint。本文原有的矩阵对 `tools[]` 内字段没有任何条目，而本文自己写着「unknown 不自动继承 permissive」——**实现在这里事实上是 permissive 的，与本文的默认原则相反**，这次把缺口补上而不是只补 `defer_loading` 一格。
+  实测依据 [reports/260824-responses-leg-tool-field-measurements.md](reports/260824-responses-leg-tool-field-measurements.md)（正控制先跑，逐格一次真实调用）；字段白名单取自本仓 `.venv` 里 openai SDK 3.3.1 的 `FunctionToolParam`，那是这条 wire 的权威而不是我方推断。前身 `copilot-api-js` 与 `CLIProxyAPIPlus` 分别以白名单重建和显式删除处理同一件事，两者都不做 tool_search 映射——**旁证而非判据**。
+  **范围限定**：本条只移除字段并记 `DEGRADE`，**不**引入任何 tool_search 能力——**用户 2026-08-24 裁定 tool search 不是本代理提供的能力**，该裁决同时删除了 legacy `AppSettings` 里两个从未接线的 `tool_search` 开关。另外，`tools[].cache_control` 经实测**是被该 endpoint 接受的**（含 `scope`），所以它进白名单外侧的理由是「无等价语义」而不是「会 400」——不要把这两个理由混起来读。
 
 ## 问题与意图
-
 本规格形成时，`/v1/messages` 只把 Anthropic 请求发到 Messages upstream，并把流式响应原字节透传；该描述是历史问题背景，不是 current 实现状态。规格目标是在不改变 Anthropic 客户端公共协议、不复制 lifecycle owner 的前提下，让符合路由与模型能力条件的 Anthropic Messages 请求选择 OpenAI Responses upstream，完成双向语义转换，并仍由 Anthropic pipeline 统一拥有 approval、hooks、retry、History、tokenization、取消与终态。Current 实现状态见 [implementation.md](implementation.md)。
 
 这不是 Anthropic→Chat Completions→Responses 的中转桥。请求与响应都必须在 Anthropic 与 Responses 之间直接转换；Chat Completions 不得成为语义中间表示。
@@ -139,6 +141,14 @@ Protocol leg 必须只在一个 route-policy 接缝按以下顺序决定；后�
 - tool declaration、历史 tool call、tool result、forced `tool_choice` 和响应 name restore 必须共享同一个双向 name mapping。开启 sanitization 后，所有引用必须原子地共同变换；禁止只改声明或只改 choice。
 - `auto`、`any`／required、`none` 与 named tool choice 必须映射到对应 Responses category。若目标声明被 capability policy 剥离或拒绝，关联 choice 必须同步处理，不得产生 dangling forced choice。
 - **Server-tool no-revive**：基础规格只支持 client-executed function tools。Anthropic 原生 server tools／typed tools（包括 web fetch、web search、code execution、tool search 及未来 server-executed 类型）在 request capability gate 显式拒绝，不执行、不合成、不转成普通 function tool、不从 Responses server-tool result 合成 Anthropic 原生 block，也不触发专用降级 retry。若 upstream 在未请求时返回这类 item，response conversion 显式失败；已经提交 block 时按 post-commit partial failure 终止。任何白名单都是新的产品能力与单独用户裁决，不能通过扩充 converter 映射表暗中恢复。
+- **白名单只管 function tool。** 上面那张字段表是 `FunctionToolParam` 的；`tools[]` 里其它 union 成员（`web_search`、`mcp`、`custom`、`file_search` 等）各有自己的字段，**不得拿 function tool 的白名单去量它们**——实测那样会静默吃掉 `web_search.user_location`、`mcp.server_url` 与 `custom.format`。声明了本白名单不认领的 `type` 的条目原样通过，由认领该成员形状的那一层负责。
+- **Tool 声明按白名单重建，不按黑名单复制。** 出站 Responses function tool 只携带该 wire 承认的字段：`type`、`name`、`description`、`parameters`、`strict`、`allowed_callers`、`output_schema`（取自 openai SDK 3.3.1 的 `FunctionToolParam`）。客户端 tool 上的其余键一律不进 wire，并按 `DEGRADE` 记录字段路径。**这是结构性要求而不是逐字段修补**：黑名单式复制（「除了 `input_schema` 都带过去」）会把客户端此刻和将来放在 tool 上的任何键都送到一个从未同意过它的 endpoint，每一个都可能是下一个整请求 400，而且它们逐个到达、逐个才被发现。
+- **`defer_loading` 不进 wire。** 它是 Responses 承认的字段（`FunctionToolParam` 里就有），但它的前置条件是同一个 `tools` 数组里存在 `{"type": "tool_search"}` ——上游原话 `Invalid Value: 'tools.defer_loading'. Deferred tools require tools.tool_search.` **用户 2026-08-24 裁定：tool search 不是本代理提供的能力。** 因此那个前置条件不会被满足，`defer_loading` 也就不可能合法出现在出站 wire 上。值为 `true` 时记 `DEGRADE`（客户端要的 token 节省没做到，工具定义全部进上下文，功能仍正确）；值为 `false` 时静默移除，它不表达任何被丢弃的意图。
+  **这条裁决同时关掉了一个曾被列为候选的方向**：把 Anthropic 侧的 tool search 映射成 Responses hosted `{"type": "tool_search"}`。实测上它是可行的（该组合返回 200，且上游拒绝 Anthropic 拼法时列出的支持枚举里就有 `tool_search`，见 [reports/260824-responses-leg-tool-field-measurements.md](reports/260824-responses-leg-tool-field-measurements.md) P5／P6），**可行不是要做的理由**——它落在上一条 Server-tool no-revive 之内，用户已裁定不做。同一裁决下，legacy `AppSettings` 里那两个从未接线的开关 `tool_search` / `tool_search_non_deferred` 已删除。
+  顺带更正一条既有注释：`translation_driver/openai_responses.py` 里「`memory_`、`tool_search_`、`text_editor_`、`bash_`、`computer_` 没有 hosted 对应物」的说法，被上面那份枚举证伪了至少 `tool_search_` 与 `computer_` 两族。**「endpoint 认识这个 type」不等于「我们应该去用它」**，所以被证伪的是那句理由，不是那条不映射的结论。**注意用户裁决只覆盖 `tool_search_` 这一族**——`memory_`、`text_editor_`、`bash_`、`computer_` 四族不在裁决范围内，它们不映射的依据仍然只是本节开头那条 Server-tool no-revive，与本次裁决无关。把一句关于 tool search 的裁决读成对五族的授权，是本文首稿犯过的错，异源评审 2026-08-24 判为 major 并已按此收窄。
+- **移除 `defer_loading` 之后仍开着的两个面，写在这里而不是留在调查报告里。** 两者都不阻断本条，但都是本条造成的可观察后果，**不得只活在 `docs/tmp/` 的报告中**——本项目已经为「事实只活在报告里」付过一次代价。
+  1. **`tool_reference` 被压成空输出。** 客户端自定义 tool search 的第二轮会在 `tool_result.content[]` 里回传 `{"type":"tool_reference","tool_name":…}`；本腿的 `function_call_output` 只承载文本，非文本 part 被丢弃并记 `TOOL_RESULT_CONTENT_FLATTENED`，于是 `output` 变成 `""`。已实测。**这不是本次引入的**（既有的 flatten 行为），但本次把一个响亮的失败（整请求 400）换成了一个安静的失败（模型收到一次空的工具搜索结果）。剥掉 `defer_loading` 后所有工具定义都在上下文里，模型通常没有理由再去调 `ToolSearch`，所以这一格的实际触发率未知——**未知不等于不存在**，需要真实客户端流量才能量。
+  2. **`tool_search_tool_regex_*` 必然 400。** Anthropic 的 typed server tool 到了本腿会原样发出并被上游拒绝（枚举里没有这个拼法）。按 Server-tool no-revive 它本应在 capability gate 就被拒绝，而 `subscribers/server_tools.py` 今天不拦这一族。Claude Code 2.1.241 不发它，VS Code Copilot Chat 会发。这是既有缺口，不是本次引入。
 - parallel tool calls 只有在模型能力与 Anthropic client contract 同时允许时才可启用。
 - malformed tool arguments 不得静默变成空对象。基础规格固定严格失败；deterministic repair 是下方标记的低概率扩展项，未获裁决前不得启用。
 
@@ -161,6 +171,9 @@ Protocol leg 必须只在一个 route-policy 接缝按以下顺序决定；后�
 | user `tool_result` 文本／结构内容 | `TRANSFORM` | 映射为 `function_call_output`，保留 call id、内容与 `is_error` 事实 |
 | multimodal `tool_result` | `REJECT` | 未冻结等价 Responses 表达，不得只保留文本子集 |
 | function tool declaration、`input_schema` | `TRANSFORM` | 映射为 Responses function tool 与 `parameters`；名称 mapper 同时作用于声明、choice、历史 call 与 response restore |
+| `tools[]` 上 Responses 不承认的键 | `DEGRADE` | 按白名单重建声明，其余键不进 wire 并记录字段路径；不得黑名单式复制。白名单见「Tools 与 tool choice」一节 |
+| `tools[].defer_loading` | `DEGRADE` | 不进 wire。`true` 记录 degradation（工具定义不再延迟加载，token 节省丢失，功能仍正确）；`false` 静默移除。理由是它的前置条件 `{"type":"tool_search"}` 落在 Server-tool no-revive 内，不是上游不认识该字段 |
+| `tools[].cache_control` | `DEGRADE` | 同上按白名单移除并记录。**注意这一格与 `system`／content block 那格的理由不同**：实测该 endpoint 对 tool 上的 `cache_control`（含 `scope`）返回 200，所以移除它不是兼容性修复，而是「Responses 无等价语义、不把客户端的断点意图伪装成已生效」 |
 | Anthropic 原生 server／typed tool | `REJECT` | 执行本规格 server-tool no-revive，不进入 upstream |
 | `tool_choice` auto／any／none／named、parallel flag | `TRANSFORM` | 映射到 Responses 对应类别；目标缺失或 capability 不满足时拒绝，不产生 dangling choice |
 | 本项目主 v1 reasoning carrier | `TRANSFORM` | 先按本项目 namespace、version、tag 与最小 payload schema 恢复 visible summary 和可选 `encrypted_content`；普通 echo 路径必须 value-exact 恢复 payload，细则见双格式合同 |

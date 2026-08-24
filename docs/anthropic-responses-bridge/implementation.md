@@ -203,6 +203,14 @@ request 切片基于 reasoning squash：`cb286059b656d960225c2afff84f204b9123810
 2. R2 复评与重新验收只处理其余有效发现，并明确以主仓当前 Spec 的 no-revive 合同为 expected。
 3. 未来若要支持 Responses hosted server tools，必须先形成独立产品规格与用户裁决，完整覆盖 request、response、stream lifecycle、History／continuation、error 与 capability gate；不得从 converter 映射表增量偷渡。
 
+**2026-08-24 追加，tool search：用户裁定它不是本代理提供的能力。** 触发是线上 400 `req=fcc0bebc`（`gpt-5.6-sol`）：`Invalid Value: 'tools.defer_loading'. Deferred tools require tools.tool_search.`。这一格恰好把上面第 3 条的「不得增量偷渡」摆到了眼前——实测表明偷渡在技术上是通的（`{"type":"tool_search"}` 与 `defer_loading: true` 同发返回 200，且上游拒绝 Anthropic 拼法时列出的支持枚举里就有 `tool_search`，见 [reports/260824-responses-leg-tool-field-measurements.md](reports/260824-responses-leg-tool-field-measurements.md)），**而技术上通不是做的理由**。已落地的是相反方向的三件事：
+
+1. `translation_driver/openai_responses.py` 的 `_function_tool` 由黑名单复制改为**按白名单重建**（字段表取自 openai SDK 3.3.1 的 `FunctionToolParam`）。根因不是漏了 `defer_loading` 一格，而是「除了 `input_schema` 都带过去」会把客户端此刻与将来放在 tool 上的任何键都送给一个从未同意过它的 endpoint；`cache_control` 与 `eager_input_streaming` 当时也在漏，只是这条腿恰好接受它们。
+2. `defer_loading` 不进 wire：`true` 记 `SERVER_TOOL_CONSTRAINT_DROPPED`，`false` 静默移除。
+3. legacy `AppSettings` 里两个从未接线的开关 `tool_search` / `tool_search_non_deferred` 已删除。它们零消费者，且 `AppSettings` 整体已不服务生产路径。
+
+规范条款见 [spec.md](spec.md) 的「Tools 与 tool choice」与请求字段矩阵。
+
 ### 历史评审与主树结果
 
 [Request R2 代码复评](reports/260806-review-code-request-r2.md)在 `028f1f2…` 上关闭首轮四项 major，但新增 1 major：unknown budget limits 与明确无界被混同；同 HEAD 的[独立行为复验](reports/260806-verify-request-r2.md)为 PASS。[Request R3](reports/260806-review-code-request-r3.md)已在 `fdd2f75…` 上确认该 major 关闭，结论为 blocker 0、major 0；其reviewed source已归档，净语义已进入main。
