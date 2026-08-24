@@ -2,16 +2,6 @@
 
 > Current authority：本文件当前状态是 `LIVING_ACCEPTANCE_ORACLE`——它与所验收的 [spec.md](spec.md) 同为活文档，随 Spec 条款修订同步更新，候选产品及完整 bridge 为 `UNVERIFIED`。2026-08-08 最终输入为 Spec `4c9beed133b80e1c03d46db50b25bcbb43df505c29174a68fab566fc671e1f8f` 与 Architecture `746adc7aaa14e3c8775fbabad8d316d5d88cc83ec793956c3e966f42702bd5e2`。Current Architecture 已与 Spec 的“双格式 carrier”方向一致，但仍是非规范提案，不产生 Acceptance expected。下文出现的旧 hash、`upstream-only`、`READY_FOR_FINAL_REVIEW`、“待复评”或 R2～R7 verdict 只属于历史处置记录，均被本段 current 声明覆盖，不是 current gate。
 
-## 状态与判定
-
-- **仓库根目录**：`/home/xp/src/ghc-api-proxy-py`。
-- **历史修订锚点**：本轮 oracle 内容对账曾在 `main@80bc8f252b46c511f428af1d97159a5980ee9dc9` 执行。该 commit 不是 current main 状态；current 实现见 [implementation.md](implementation.md)。
-- **行为 oracle**：`spec.md`，本轮在 `main@80bc8f252b46c511f428af1d97159a5980ee9dc9` 现场以 `sha256sum` 与 Python `hashlib.sha256` 交叉复核的 current SHA-256 均为 `5e3628226238a2c271824bc47d0f2fd67db9a6eb36224ee088984c96eb62a5f1`。该内容保留 D1～D3、route precedence、strict compatibility、server-tool no-revive、usage、post-commit partial failure与普通 per-request aggregate＋global reservation／backpressure，并以 2026-08-07 用户最新重裁覆盖旧 D4及 2026-08-06 upstream-only／全 malformed byte-exact 范围：本项目主 v1 是默认 producer，consumer 兼容固定 `copilot-api-js` v1 合法主路径，不要求所有 malformed 边界逐字节等同 Node；一 Responses reasoning item 一 Anthropic thinking block、普通模式 encrypted-only no-loss、unknown／foreign／malformed 最小止血保持不变。以下 required gate 只能按该内容版本与本文件 `POLICY-MANIFEST-v1` 给出 expected。Spec 内容 hash 改变后，本规范必须先重做 route／request／response／buffering／retry／lifecycle／limits 七域逐项 policy 对账，不能沿用旧 verdict或只替换 hash。
-- **架构参考而非行为 oracle**：`architecture.md`，本轮现场以 `sha256sum` 复核的 current SHA-256 为 `c6088a2d2ce89e2355627372d10973bea6a0794ddc45b84b33b4aaa5a9f29b8d`。该文件仍明确标记为“非规范架构提案，尚未获用户接受”：`D-ARCH` 只推荐目标内部架构，`D-MIGRATION` 只推荐迁移节奏，两者均不产生、覆盖或扩张 Acceptance expected。其完整 block、capacity、unknown endpoint、post-commit failure、delivery与History承载仍可帮助定位非 carrier 接缝；但其 `ADR-BRIDGE-06` reasoning carrier 仍记录旧 upstream-only producer 口径，已被 current Spec 的双格式重裁覆盖，不能进入 REQ-05／NS-03 expected，也不能据此判双格式 Acceptance 为不一致。Architecture 的 typed semantic kernel、`PolicyOutcome`、History receipt owner、adapter 退出条件与 route 启用门同样只可帮助定位内部接缝或未来实施门。
-- **评审输入**：首轮 `reports/review-bridge-acceptance.md`，读取时 SHA-256 为 `b619e7ce5636ec1bf8010099047fe2559d60efbfe75b31918a4dfb5842a8f32d`；独立复评 R2 `reports/260806-review-bridge-acceptance-r2.md`，读取时 SHA-256 为 `b9c6bee01e7707365fd0e6e2872c15851b4617f5823f2f5a0ab432a03956b18f`；独立复评 R3 `reports/260806-review-bridge-acceptance-r3.md`，读取时 SHA-256 为 `a32ca0fad8af900e977f272819779752add9b322b38d8059a9a548c045799f50`；独立最终复评 R4 `reports/260806-review-bridge-acceptance-r4.md`，读取时 SHA-256 为 `6df6575996e00f669df515959de1061e37bdf5070ccc28f9dd3aca7f23b0aa6e`；独立最终复评 R5 `reports/260806-review-bridge-acceptance-r5.md`，读取时 SHA-256 为 `d66958bb95beba1e1a74d043fc31e14c40ba948a24a8ce06a2eea8967ba59716`；独立最终定向复评 R6 `reports/260806-review-bridge-acceptance-r6.md`，读取时 SHA-256 为 `2e1b11598470fbf3342582e854571901e2b624b112dac6ef5501222c885ce22b`；Architecture 用户裁决矩阵独立终审 `reports/260807-review-architecture-decision-matrix.md`，读取时 SHA-256 为 `6922a93038b9e80677c8d6482c7236ec729facff3d8b3b69d53397f193d17a93`；Acceptance 独立终审 R7 `reports/260807-review-bridge-acceptance-r7.md`，读取时 SHA-256 为 `9ab0fb3c35d1506a31f3a4fb789d6b03e02ebd27a6f2e1f880f2dc7148c988be`，结论为 blocker 0、major 0；正式文档 merged-state 最终评审 R2 `reports/260807-review-docs-merged-r2.md`，读取时 SHA-256 为 `b62711635cdcfd34adcf406073bae9ef2f156e4378b1a999920b7e0e0dc7c2d9`；carrier 双格式定向评审 `reports/260807-review-spec-carrier-dual-format.md`，本轮现场以 `sha256sum` 复核的 SHA-256 为 `1d51e1a8dde27493503adb9701544ef8e35b75404420a4516732d06074addd05`，结论为 blocker 0、major 0、minor 0，并明确只放行 current Spec 的项目主 v1＋upstream v1 compatibility、识别顺序、最小止血与一 item一 block／no-loss合同，不替代实现证据；空 reasoning 语义独立裁决 `reports/260807-arbitrate-empty-reasoning.md`，本轮以 `sha256sum` 与 Python `hashlib.sha256` 交叉复核的 SHA-256 均为 `8f12e0703a925a511fad3188f54a89a7a1d6056096fde05520a1c21cb5e6c568`，唯一裁决为 `summary=[]` 且 `encrypted_content` absent／empty 时仍生成恰好一个 `thinking=""`＋项目 bare marker block，但不得恢复或伪造 `encrypted_content`。R6／R7与双 carrier 定向复评只保留为旧 Acceptance bytes 的历史 verdict；本次 Acceptance bytes 必须经过新的独立定向复评，旧 0／0不得沿用。
-- **未决政策处理**：Spec “仍需用户选择的低概率扩展”当前均已有确定基础行为：malformed tool arguments与multimodal tool result固定`REJECT`；foreign／unsigned thinking按固定upstream兼容合同记录`DEGRADE`并从Responses wire丢弃，不恢复opaque signature；公开model suffix不存在。Required gate只验这些最小止血行为，不为扩展形态建立专门能力gate。将来若启用任何扩展而尚无新的 Spec 内容版本，对应扩展项只能记为`UNVERIFIED`，不得由候选实现、自带测试或本规范临时创造expected，也不得据此宣称整体符合扩展合同。
-- **本规范状态**：**`LIVING_ACCEPTANCE_ORACLE`。** 2026-08-24 由 `FINALIZED_ACCEPTANCE_ORACLE` 改名——用户当日裁定绝不绕开 Spec、Spec 为活文档，一份封版的 oracle 必然落后于它声称在验收的行为。**Spec 条款修订时本文必须同改**，这是本文唯一的存续条件。下文「评审问题处置表」里的 `FINALIZED_*` 是当轮的点时记录，保留原字面量不动——用户当日裁定全面废除 spec 冻结，本文与它所对账的 [spec.md](spec.md) 同为活文档，Spec 条款修订时**本文必须同改**，否则 oracle 会静默落后于它声称在验收的行为。**字面量本身未改名**：`../service-cutover/plan.md` 与 `readiness.md` 按「状态字面量 @ 内容哈希」硬引用了它，改名属机制变更，待用户裁决（那两处的哈希绑定已于 `1197da7` 失配，详见 `../service-cutover/plan.md` 权威边界条下的说明）。 本次仅按 current Spec `5e362822…` 与空 reasoning 独立裁决澄清 NS-03：`summary=[]` 且 `encrypted_content` absent／empty 必须保留一 item一 block cardinality，生成恰好一个 `thinking=""`＋项目 bare marker block；bare marker 不承载可恢复 opaque payload，consumer不得添加或伪造`encrypted_content`；non-empty encrypted-only仍必须通过payload carrier value-exact no-loss。Spec、其他policy域与其他gate expected均未改。空 reasoning 定向独立复评 `reports/260807-review-acceptance-empty-reasoning.md` 绑定修订候选 SHA-256 `a4b9e31fd1d237ca8038573320809305e0ac567eb2d56d5c967716cc8cdbfac8`，报告 SHA-256 `5d9ad16e371f14544dfe2d5b7e84070cf8e851aa73343b6893d344b75cd1f623`，结论为0 blocker／0 major／0 minor，故本规范恢复最终标记。候选产品及完整bridge仍为`UNVERIFIED`；基础integration的`PASS`、Spec carrier评审0／0、Acceptance文档复评0／0或旧Acceptance R6／R7 verdict均不等于产品通过。正确样本失败、缺陷注入未按目标原因变红，或出现已证实的丢失／重复／重排属于`BLOCKED`；必需证据尚未取得、capture corpus过期或政策仍未冻结属于`UNVERIFIED`，不得误报成实现缺陷。只有全部已决required gate通过、每个缺陷注入控制均以预期原因失败、确定性live canary通过、所依赖capture corpus provenance有效且本地fault injection通过，基础合同verdict才能升级为`PASS`。
-
 ## 用户可观察合同
 
 本 bridge 的外部合同不是“内部 converter 返回了某个对象”，而是 Anthropic 客户端经 `POST /v1/messages` 或 Anthropic 兼容 transport 发出请求后，无须知道上游实际使用 OpenAI Responses HTTP 或 WebSocket，即可观察到合法且语义等价的 Anthropic Messages 非流响应或 SSE 流。请求生命周期只能有一个 owner；approval、hooks、retry、History 与 tokenization 必须继续表现为同一次 Anthropic 请求，而不是桥接后产生第二个平行请求。
@@ -26,52 +16,22 @@
 - HTTP 与 WebSocket upstream transport 只能改变传输方式，不能改变 Anthropic 请求、响应、History、hooks、approval、retry 或 tokenization 的含义。
 - 不支持或无法无损表达的字段必须按已声明策略显式降级或报错；禁止无记录地静默丢弃。
 
-## `POLICY-MANIFEST-v1`：current Spec 逐节对账
+## 证据分级：本项目用哪几层
 
-本 manifest 与“状态与判定”中的 Spec／Architecture SHA-256 来自本轮 current 输入。本轮先读取 current Spec 的规范章节与双向字段矩阵，再逐域核对全部 required gate 的 expected、错误路径和边界，最后只用 current Architecture 查找承载接缝。七域均已完成内容对账：route、buffering、retry、lifecycle、limits 全域 expected 不变；request、response 仅 carrier producer ownership、合法 compatibility 范围与 malformed expected 改为双格式合同，其他 expected 不变。Architecture `c6088a…` 的 carrier 段落仍是旧 upstream-only口径，该已知陈旧参考被明确排除，不能覆盖 current Spec或生成 expected；它的其他承载内容仍不产生第二套政策。Carrier双格式Spec定向评审为0 blocker／0 major；空 reasoning 定向独立复评 `reports/260807-review-acceptance-empty-reasoning.md` 为0 blocker／0 major／0 minor并覆盖本次NS-03修订bytes，故本规范恢复`FINALIZED_ACCEPTANCE_ORACLE`。任一manifest行所引Spec语义或Spec内容hash改变时，该行及依赖gate立即回到`UNVERIFIED`，必须重做内容对账，不得仅刷新数字。
+下面每条判据都标了它要求的证据层。**每一层都写明了它不能冒充什么**——这是分级唯一的用途，否则「用 fake 测过了」会被读成「已验证」。
 
-| Policy 域 | current Spec 规范来源 | 本规范 gate／expected 对账 | 结论 |
-|---|---|---|---|
-| route | “Route selection 与 model capability 契约”“冻结的 route precedence”“Route 真值表”“Compatibility 契约” | `REQ-01`、`TR-HTTP`、`TR-WS`、`TR-PARITY`固定 resolved-model lookup、显式 override优先且不可用不fall through、双支持默认Messages、Responses-only选Responses、unknown fail closed、protocol leg与physical transport正交；Architecture的ADR-BRIDGE-04与ADR-BRIDGE-06只承载这些Spec已决约束，`D-ARCH`／`D-MIGRATION`不改变route expected | 一致 |
-| request | “Request conversion 契约”“双向字段处置矩阵”“Reasoning 与 signature 契约” | `REQ-02`～`REQ-06`逐项冻结system／envelope、原序、tool identity与no-revive、approval后重新prepare及每attempt `PRE_SEND`后转换；REQ-05固定项目主v1为默认producer，consumer按first-match顺序接受项目主v1、项目bare marker、`copilot-api-js` v1合法主路径／bare／legacy，并对project unknown／project malformed／upstream malformed／foreign执行稳定最小止血；不要求全malformed Node byte-exact。Architecture `c6088a…` 的旧upstream-only carrier段落不产生expected | 一致；carrier expected已按current Spec更新，其余request expected不变 |
-| response | “Response conversion 契约”“Non-stream contract”“SSE／WS envelope 契约”“Usage 契约”“Error 契约”“Header 契约” | `NS-01`～`NS-05`、`STR-01`、`STR-04`～`STR-05`固定content／reasoning一对一、tool优先stop reason、terminal与error互斥、usage算式、Anthropic error／header envelope及stream／nonstream等价；reasoning响应新增项目主v1 producer exact vector与value-exact echo，仍保持一item一block、普通模式encrypted-only no-loss、显式strip有意去除与authoritative `.done`；Architecture旧carrier文字被排除 | 一致；carrier producer expected已按current Spec更新，其余response expected不变 |
-| buffering | “Downstream Anthropic SSE”“Block-level buffering 与 commit 契约”“Ordering、no duplication、no loss 契约” | `STR-02`～`STR-03`、`REL-03B`与`CAL-04`固定完整Anthropic content block为最小提交单元、首个完整block前零headers／`message_start`／body event、首批同batch、连续完成前缀、sink uncertainty及零content完整terminal batch；Architecture的ADR-BRIDGE-02、03、06与delivery chain只提供内部承载和观测点，不把Python yield、TCP packet、durable ack或推荐sink调用粒度变成产品保证 | 一致 |
-| retry | “Retry ownership 与 delivery semantics”“唯一 owner”“推荐 retry 边界” | `REL-01`～`REL-04`固定application pipeline唯一retry owner、SDK retry关闭、pre-commit可按预算重试、attempt-local state全量reset、post-commit禁止full replay且默认partial failure、真实exchange数等于attempts；Architecture的ADR-BRIDGE-05只承载该已决frontier，`PolicyOutcome`与未来continuation接缝不产生expected | 一致 |
-| lifecycle | “Approval、hooks、History 与 tokenization 契约”“Shutdown、cancel、backpressure 与 limits 契约”中的Shutdown／Client cancel | `LIFE-01`～`LIFE-04`、`REQ-06`、`REL-05`固定single RequestContext／History／approval／finalize、Anthropic hook语义、cancel／shutdown不retry、资源关闭与token calibration；Architecture的ADR-BRIDGE-06、typed journal、History projection与独立durability receipt仅作承载参考，未提升为行为expected | 一致 |
-| limits | “Shutdown、cancel、backpressure 与 limits 契约”中的Backpressure／一般memory-only政策／Limits及“非功能要求” | `REL-06`固定普通per-request aggregate＋global resident reservation、有限queue、charge-before-read、两级可观测计账、capacity／deadline／cancel终态与拒绝新admission最小止血；Architecture的ADR-BRIDGE-03与容量章节和Spec一致，但不新增16 MiB专门gate、single-block阈值、spill、live forwarding、victim policy或其他未裁决expected | 一致 |
+| 标签 | 是什么 | 不能冒充什么 |
+|---|---|---|
+| `AUTO-UNIT` | 纯转换、状态机或 property-based 测试，无网络可跑 | 不证明接线 |
+| `AUTO-COMPONENT` | 真实 pipeline owner + fake upstream + History／hooks／approval／tokenization | 不证明 wire 字节 |
+| `AUTO-HTTP` | 真实 ASGI route 与真实字节流消费 | 不证明上游真实行为 |
+| `AUTO-WS` | 真实本地 WebSocket client/server、有限 queue 与 close code | 同上 |
+| `AUTO-SOCKET` | 经 loopback socket 注入分帧、RST、half-close、慢读与取消 | **不得用直接调用 async generator 代替真实 transport 流控** |
+| `LIVE-CANARY` | 每轮可确定调用的真上游正常请求，以及上游官方提供的触发器 | **不得要求托管上游在本轮偶发 5xx／truncation／特定 close code** |
+| `CAPTURE-CORPUS` | 真实历史事件或官方 fixture，经 SDK 前 raw recorder 捕获、脱敏、版本化 | **不冒充本轮 live 事件** |
+| `LOCAL-FAULT` | 在 loopback server／TCP proxy／sink fault injector 里确定性制造 truncation、RST、partial write、backpressure | **只证明本地处理机制，不冒充真实上游异常的 provenance** |
 
-Manifest 绑定的是上述政策语义与 gate 映射，不是文件名清单或“已阅读”声明。逐项复核结果为：ADR-BRIDGE-02与response／buffering一致，ADR-BRIDGE-03与limits一致，ADR-BRIDGE-04与route一致，ADR-BRIDGE-05与retry一致；ADR-BRIDGE-06的block／route／delivery／History承载仍可作接缝参考，但其旧upstream-only reasoning carrier已被current Spec双格式合同覆盖，不参与expected。Architecture中与Spec一致的delayed start、continuous-prefix、sink outcome只帮助选择`AUTO-HTTP`／`AUTO-SOCKET`观测点；`D-ARCH`、`D-MIGRATION`、推荐方案、内部类型、History持久化时点或未来独立ADR即使变化，也不能自动改写本manifest的expected。
-
-## Gate 执行规则
-
-### 双向控制
-
-每个 gate 都必须在同一测试入口上执行两种控制：
-
-- **正确样本控制**：已知合法输入走真实生产入口，断言完整用户可观察结果为绿。不得只调用测试 helper、私有 converter 或 fake-only shortcut。
-- **缺陷注入控制**：只注入该 gate 要捕获的一个目标缺陷，确认同一断言必然变红，并核对失败原因确实来自目标不变量，而不是 fixture 解析失败、未接线或另一条旁路断言。注入必须使用冻结的 exact patch、可替换策略对象或测试专用 fault injector；恢复后复跑正确样本。
-
-缺陷注入控制是 gate 的组成部分，不是可选 mutation campaign。正确样本不绿属于 false-red；注入后仍绿属于 false-green；两者都阻断验收。
-
-### 判据独立性
-
-- wire 层使用完整对象 equality、字段明确缺失断言和 item 顺序断言；不得只检查“包含某字段”。
-- 流层除逐 event 断言外，必须由真实 Anthropic Python SDK streaming consumer 或与产品 parser 不同源的严格 consumer 重新消费，并比较最终累积 message。
-- stream/nonstream 等价比较先归一化 transport-only 字段，再比较 content blocks、tool input、thinking/signature、stop reason 与 usage；不得由同一个产品 serializer 同时生成 expected 与 actual。
-- no-dup/no-loss/order 以输入语义 item 的唯一 marker 与有序序列为 oracle。每个 marker 必须在最终 Anthropic 累积结果中恰好出现一次，且顺序精确相等；只比较拼接字符串长度不够。
-- 所有自动化 gate 都要记录候选 commit、测试命令、退出码和失败注入的目标。未执行项标记为 `UNVERIFIED`，不得折算为通过。
-- policy-dependent expected 必须在测试 manifest 中记录上述 Spec SHA-256、对应章节／矩阵行和 policy 配置。Manifest 与执行时 Spec hash 不同则该 gate 为 `UNVERIFIED`，不能自动挑选另一 expected 继续跑绿。
-
-### 自动化与证据标记
-
-- `AUTO-UNIT`：纯转换、状态机或 property-based 测试，可在无网络环境自动执行。
-- `AUTO-COMPONENT`：真实 pipeline owner、fake upstream、History、hooks、approval、tokenization 的组件测试。
-- `AUTO-HTTP`：真实 ASGI HTTP route 与真实字节流消费测试。
-- `AUTO-WS`：真实本地 WebSocket client/server、有限 queue 与 close code 测试。
-- `AUTO-SOCKET`：通过 loopback socket 注入分帧、RST、half-close、慢读与取消；不能用直接调用 async generator 代替真实 transport flow control。
-- `LIVE-CANARY`：每轮可确定调用的真 OpenAI Responses／Copilot upstream 正常请求和上游明确提供的官方触发器；不得要求托管上游在本轮偶发 5xx、truncation、特定 close code 或 queue pressure。
-- `CAPTURE-CORPUS`：真实历史事件或上游官方 fixture 经 SDK 前 raw recorder 捕获、脱敏、版本化后的 corpus。它提供不可控异常的协议样本，但不冒充本轮 live 事件。
-- `LOCAL-FAULT`：在 loopback HTTP／WS server、TCP proxy 或 sink fault injector 中确定性制造 truncation、RST、partial write、close 和 backpressure，并验证产品错误路径。它证明本地处理机制，不冒充真实 upstream 异常 provenance。
+判据本身怎么写才不会真空通过（双向控制、判据独立性、异源 oracle），见 skill `writing-acceptance-criteria-that-can-fail`。
 
 ## 请求与路由 gate
 
@@ -391,56 +351,3 @@ oracle 写完后仅为判断自动化落点读取了当前实现。以下事实�
 - `src/app/routes/responses_ws.py` 当前拥有原生 Responses WS route 的独立 approval／History；Anthropic bridge 若使用 WS upstream，验收必须证明它只复用 transport client，而不复用这条 route lifecycle。
 
 本次没有运行候选实现测试、mutation 或真 upstream PoC。原因不是成本或 YAGNI，而是本次唯一授权产物是本规范，且尚未指定已实现的 bridge 候选与可写验证资产位置。上述全部 oracle 均保留为必需项，没有因当前代码尚缺接缝而删除或降级。
-
-## 最终放行清单
-
-放行报告必须逐项列出每个gate的candidate commit、绑定Spec SHA-256／章节、执行层级、正确样本结果、缺陷注入结果、失败原因核对、`LIVE-CANARY`结果、SDK前raw capture provenance、`LOCAL-FAULT`结果，以及未验证项。最终判定规则如下：
-
-- 任一正确样本红：`BLOCKED`。
-- 任一缺陷注入后仍绿，或因非目标原因变红：`BLOCKED`。
-- 任一 gate 的 policy expected 未绑定当前冻结Spec、或仍未裁决：该项`UNVERIFIED`；不得由实现选择expected，也不得把未决本身写成实现缺陷。
-- 任一可确定`LIVE-CANARY`未运行、fake无SDK前raw provenance、依赖的`CAPTURE-CORPUS`缺失／过期，或必需`LOCAL-FAULT`未运行：受影响项及整体基础合同为`UNVERIFIED`，不是`BLOCKED`。不可控真上游异常没有在本轮自然出现不构成缺陷，也不要求每轮重现。
-- 任一no-dup/no-loss/order、连续前缀commit、sink delivery-uncertain、error terminal、cancel cleanup、History exactly-once不变量未获得route-level实证：`UNVERIFIED`；若实证显示违反则`BLOCKED`。
-- 只有所有已决required项都具有可复现实证时：基础合同`PASS`。未启用且未裁决的低概率扩展保持`UNVERIFIED`，不借机扩张required范围；其已冻结最小止血默认行为必须通过。
-
-**当前验收规范状态：`LIVING_ACCEPTANCE_ORACLE`（见文首「本规范状态」条）；候选产品及完整 bridge verdict：`UNVERIFIED`。本轮只按 current Spec `5e362822…` 与空 reasoning 独立裁决澄清NS-03的三条正交断言：absent／empty仍为恰好一个bare marker block、bare marker不得伪造`encrypted_content`、non-empty encrypted-only payload必须value-exact no-loss；其他expected不变。`reports/260807-review-acceptance-empty-reasoning.md` 已对本次bytes给出0 blocker／0 major／0 minor，故恢复最终标记；该文档checkpoint不构成产品符合性证据。候选产品尚未经过本规范的完整验收；基础 integration 的 `PASS` 不等于全规格通过。**
-
-## 评审问题处置表
-
-**处置总状态：`FINALIZED_ACCEPTANCE_ORACLE`。** 来源：首轮`reports/review-bridge-acceptance.md`、独立复评 R2 `reports/260806-review-bridge-acceptance-r2.md`、独立复评 R3 `reports/260806-review-bridge-acceptance-r3.md`、独立最终复评 R4 `reports/260806-review-bridge-acceptance-r4.md`、独立最终复评 R5 `reports/260806-review-bridge-acceptance-r5.md`、独立最终定向复评 R6 `reports/260806-review-bridge-acceptance-r6.md`、Acceptance 独立终审 R7 `reports/260807-review-bridge-acceptance-r7.md`、Architecture 用户裁决矩阵独立终审 `reports/260807-review-architecture-decision-matrix.md`、正式文档 merged-state 最终评审 R2 `reports/260807-review-docs-merged-r2.md`、carrier 双格式 Spec 定向评审 `reports/260807-review-spec-carrier-dual-format.md`、空 reasoning 独立裁决 `reports/260807-arbitrate-empty-reasoning.md`，以及空 reasoning 定向独立复评 `reports/260807-review-acceptance-empty-reasoning.md`。最新复评绑定本轮NS-03修订候选bytes并给出0 blocker／0 major／0 minor，故本规范恢复最终标记。以下修订绑定current Spec `5e362822…`与`POLICY-MANIFEST-v1`；没有以Architecture提案、官方consumer宽松行为、基础integration结果或候选实现反向创造产品政策。
-
-| ID | 级别 | 原发现 | 处置 | 修订落点与关闭依据 |
-|---|---|---|---|---|
-| B1 | blocker | oracle宣称完整，但expected受未裁决政策影响 | **采纳并关闭** | “状态与判定”绑定最新Spec SHA-256；required gate写死route／字段矩阵／strict malformed args／no-revive／post-commit partial failure／普通per-request aggregate＋global reservation与拒绝新admission最小止血；未来未冻结扩展只记`UNVERIFIED` |
-| B2 | blocker | 必需真上游异常不可按需制造，`PASS`永久不可达 | **采纳并关闭** | 校准拆为`LIVE-CANARY`、`CAPTURE-CORPUS`、`LOCAL-FAULT`；每轮live只要求确定性触发，不可控异常由版本化corpus＋本地注入覆盖，缺证据为`UNVERIFIED`而非假缺陷 |
-| M1 | major | signature producer→consumer可能共享codec而同源全绿 | **采纳并按双格式合同继续关闭** | REQ-05分别固定current Spec项目主v1 exact bytes与`copilot-api-js@8d5c861…`合法compatibility vectors，执行producer-only／consumer-only变异，并要求“项目exact→producer”“静态项目vectors→consumer”“固定upstream bytes→consumer”“Responses corpus→normalizer”四链provenance；共享helper同步变异不算有效控制 |
-| M2 | major | “完成即立即可见”与semantic order冲突 | **采纳并关闭** | STR-02把“立即”限定为从最早未提交位置开始的连续已完成前缀；新增A未完成、B先完成时零写入，A完成后按A、B提交的正负控制 |
-| M3 | major | 漏掉完整batch sink partial-write／ack不确定 | **采纳并关闭** | 新增REL-03B，在response-start、首batch、block多个byte offset与terminal注入短写／RST；要求`delivery-uncertain`、禁止重发与success terminal并核对客户端bytes和代理认知 |
-| M4 | major | raw capture可能位于产品SDK之后而与实现同源 | **采纳并关闭** | 校准总则及CAL-01～03强制SDK／retry／parser之前的独立raw HTTP／WS recorder，记录完整provenance、关闭自动retry并把SDK结果降为第二条兼容观察 |
-| M5 | major | 官方SDK兼容性不能独自定义strict grammar | **采纳并关闭** | CAL-04以冻结grammar state machine判严格合法性，CAL-05单独验证官方SDK兼容；SDK宽松接受非法feed不得覆盖strict verdict |
-| R2-M1 | major | CAL-04引用的冻结grammar table／fixture不存在且未绑定独立来源 | **采纳并关闭** | CAL-04内嵌`CAL-04-GRAMMAR-v1`完整最小表，绑定`anthropic-version: 2023-06-01`、官方streaming／thinking文档URL与读取日期，冻结5类最小正向fixture及逐项负向变异；未来fixture路径明确标为规划且尚不存在，落地后必须绑定内容hash并与本文表逐行等价 |
-| R2-M2 | major | 移除16 MiB专门gate时漏掉普通per-request aggregate buffered-bytes gate | **采纳并关闭** | REL-06新增配置化request/global两级预算、跨多个普通block与resident owner的request聚合charge／wait／release／capacity终态、其他请求隔离和两级可观测计数；分别注入global-only与single-block／16 MiB分支两种相反缺陷，仍禁止任何16 MiB语义边界 |
-| R3-M1 | major | CAL-04允许多个`message_delta`及`message_start`前／open block中的`ping`，违反冻结 producer／commit 合同 | **采纳；R4证伪旧关闭后转R4-M1最终关闭** | R3修订已关闭duplicate `message_delta`、pre-start与open-block `ping`，但错误保留了紧随`message_start`的`ping`；R4-M1继续收紧首批与零content batch边界，故不沿用R3的旧关闭声明 |
-| R3-m1 | minor | 当前 HEAD 声明陈旧 | **采纳并持续关闭** | “状态与判定”已用本次同一shell的物理root／branch／HEAD gate更新current `main`为`80bc8f252b46c511f428af1d97159a5980ee9dc9`；不再把历史编写基线写成当前状态 |
-| R3-m2 | minor | 容量摘要只写global reservation，与REL-06的per-request aggregate gate冲突 | **采纳并关闭** | 行为oracle摘要同步为普通per-request aggregate＋global reservation／backpressure，并继续明确不设16 MiB专门产品／架构阈值 |
-| R4-M1 | major | `message_start`后、首个完整block提交前及零content terminal batch内仍允许`ping` | **采纳行为修订；R5证伪旧控制后转R5-M1最终关闭** | CAL-04已改为batch-aware grammar并禁止两个内部瞬态中的`ping`与旁路body write；但R4修订把`[message_start]`单独拆成首批，导致目标`ping`mutation不可达。R5-M1改用完整单batch目标fixture并把split-batch另立控制轴，故不沿用R4的旧控制关闭声明 |
-| R4-M2 | major | current Spec／Architecture hash漂移，旧policy对账和`READY_FOR_FINAL_REVIEW`不可沿用 | **采纳policy manifest；R5证伪旧同快照绑定后转R5-M2最终关闭** | R4修订已建立`POLICY-MANIFEST-v1`及七域对账，但Architecture随后修改了ADR-BRIDGE-04分类并改变hash。R5-M2按current Architecture重做参考边界对账与同快照绑定，故不沿用R4的旧hash关闭声明 |
-| R5-M1 | major | 两条`ping`负fixture先因拆分`message_start` batch失败，放宽目标`ping`转移也不能转绿 | **采纳并关闭** | CAL-04把首content与零content的`ping`fixture改为各自单一完整batch，除目标`ping`转移外所有字段、envelope、terminal与batch规则合法；split-batch另用两条无`ping`fixture及独立mutation。每个单侧放宽都必须先使目标fixture转绿，再使外层mutation gate因非法fixture被接受而红，并在恢复后复跑合法正样本为绿 |
-| R5-M2 | major | Architecture hash再次漂移，route manifest仍把ADR-BRIDGE-04误写为Architecture待确认项 | **采纳并关闭** | 在与current Spec相同的最终输入快照重读Architecture，复核其ADR-BRIDGE-04只承载Spec已决的unknown capability fail-closed，不把typed kernel、History receipt owner或其余待确认ADR提升为expected；Spec hash复核为`a193da7179fbdab2464ee3ae987477ffd6b334e38041a6481994f4cd69c99694`，Architecture hash更新为`7bd98a384ccb313f2e72a598dc876766a1044a9bfcef4685ba09412895ea7679`，route manifest同步声明Architecture不产生expected |
-| R6-FINAL | final review | R6 定向复核 R5 的 2 个 major，并检查 current Spec／Architecture 同快照绑定与非规范参考边界 | **采纳最终 verdict 并定稿** | R6 报告为 0 blocker／0 major，确认 acceptance oracle 可定稿；该结论只定稿验收 oracle，不是候选产品符合性证据。候选产品及完整 bridge 仍为`UNVERIFIED`，基础 integration 的`PASS`不等于全规格通过 |
-| ARCH-MATRIX-FINAL | architecture review | Architecture 收敛为仅含 `D-ARCH`／`D-MIGRATION` 两项未接受的用户裁决，并把ADR-BRIDGE-02～06归入已决Spec输入与历史承载记录；需确认current Architecture不会反向改变Acceptance expected | **采纳历史终审输入；current carrier漂移由Spec覆盖** | `reports/260807-review-architecture-decision-matrix.md` 为0 blocker／0 major，其终审快照Architecture hash为`6de919d…`。Current Architecture为`c6088a2d…`且仍非行为oracle；其block／capacity／route／retry／delivery／History接缝可作参考，但ADR-BRIDGE-06旧upstream-only carrier已被current Spec双格式重裁覆盖，明确不得进入REQ-05／NS-03 expected |
-| R7-FINAL | final review | R7 复核 Spec／Architecture hash、七域manifest、ADR-BRIDGE-02～06非扩张边界及oracle／产品状态分工 | **采纳终审 verdict；明确绑定历史快照** | `reports/260807-review-bridge-acceptance-r7.md` 为0 blocker／0 major，允许其绑定的current Acceptance提交；其Architecture输入为`6de919…`。该报告仍是最近一次Acceptance独立终审，但不覆盖随后仅涉及Architecture current review provenance／状态与处置表的`c6088a…`变化，也不构成产品符合性证据 |
-| MERGED-R2-M1 | merged-state major | Architecture 已记录裁决矩阵终审0／0，Acceptance却仍以旧R6／R7绑定快照作为current状态依据，造成current review provenance矛盾 | **历史修订已关闭；本轮不沿用旧内容结论** | 旧轮曾绑定Spec `a193da…`与Architecture `c6088a…`并确认当时expected不变。本轮Spec已变为`5e362822…`，故重新执行七域内容对账：carrier expected改变，其他expected不变；旧轮“全部不变”与最终状态不得沿用，产品继续`UNVERIFIED` |
-| D4-R2-SPEC-REVIEW | targeted spec review | 用户最新双carrier重裁是否充分冻结项目主v1、upstream合法主路径compatibility、识别顺序、最小止血与一item一block／no-loss | **采纳0／0 verdict；只放行Spec输入** | `reports/260807-review-spec-carrier-dual-format.md` SHA-256为`1d51e1a8dde27493503adb9701544ef8e35b75404420a4516732d06074addd05`，blocker 0、major 0、minor 0；该报告允许current Spec恢复`FINALIZED`，但不替代Acceptance新bytes复评或产品实现证据 |
-| ACCEPTANCE-DUAL-CARRIER-REREVIEW | targeted acceptance review | 新Acceptance是否忠实把七域manifest、REQ-05、NS-03、状态与provenance改为双格式合同，并保持其他expected不变 | **采纳0／0 verdict并关闭** | 独立复评绑定READY候选SHA-256 `787b5c386dd6c623d66e47e2c26d2b84bb605db66dc0db97a6ee9dc1a2379afb`，核对current Spec／Architecture／carrier评审输入、七域manifest、项目exact vector、upstream合法兼容、最小止血、一item一block／no-loss及旧口径残留，结果blocker 0、major 0；随后只恢复状态与本处置记录，产品保持`UNVERIFIED` |
-| EMPTY-REASONING-ARBITRATION | current targeted clarification | NS-03中“empty payload且无summary不凭空制造可恢复block”被误读为零block，与FINALIZED Spec的一item一block、bare marker与non-empty encrypted-only no-loss合同冲突 | **采纳裁决、修订并经0／0定向复评关闭** | `reports/260807-arbitrate-empty-reasoning.md` SHA-256 `8f12e0703a925a511fad3188f54a89a7a1d6056096fde05520a1c21cb5e6c568`冻结唯一解释：absent／empty必须生成恰好一个`thinking=""`＋项目bare marker block，echo恢复`summary=[]`且不添加`encrypted_content`；non-empty encrypted-only必须生成payload carrier并value-exact no-loss。`reports/260807-review-acceptance-empty-reasoning.md` 绑定修订候选 SHA-256 `a4b9e31fd1d237ca8038573320809305e0ac567eb2d56d5c967716cc8cdbfac8`，报告 SHA-256 `5d9ad16e371f14544dfe2d5b7e84070cf8e851aa73343b6893d344b75cd1f623`，结论为0 blocker／0 major／0 minor；Acceptance恢复`FINALIZED_ACCEPTANCE_ORACLE`，产品保持`UNVERIFIED` |
-
-### 用户最新约束的额外落实
-
-- 低概率扩展只验证当前冻结的最小止血默认行为，不为malformed repair、multimodal tool result、foreign thinking forwarding或公开model suffix建立扩展能力gate。
-- REL-06不建立`>16 MiB`专门gate、fixture类别、metric阈值或状态分支；容量只验普通per-request aggregate／global reservation、backpressure与拒绝新admission的最小止血。
-- REL-06同时验证Spec已冻结的普通per-request aggregate buffered-bytes预算；该预算跨多个resident owner聚合，不以单block大小或16 MiB为语义边界。
-- REQ-05以current Spec项目主v1 exact bytes作为默认producer oracle，以`copilot-api-js@8d5c861…`的v1合法canonical主路径／bare／legacy作为consumer compatibility oracle；验证authoritative `.done`、strip、识别顺序、unknown／foreign／代表性malformed最小止血及producer-only／consumer-only变异，不要求全malformed Node byte-exact。
-- REQ-05与NS-03共同证明一Responses reasoning item一Anthropic thinking block、普通模式encrypted-only no-loss和多item不聚合／不错配；显式strip保持block cardinality并记录有意payload removal。
-- CAL-04服从冻结Spec中比官方consumer合同更严格的producer／commit边界：首个content成功批次必须把`message_start`与首个完整block envelope同batch提交，零content成功必须提交无`ping`的完整terminal batch；只有首个完整block已接受后的batch边界允许`ping`。成功路径恰好一个`message_delta`和一个`message_stop`；官方SDK若接受更宽松feed，不得覆盖strict verdict。
-- CAL-04的`ping`转移与batch完整性是两个独立控制轴：目标`ping`fixture始终保持单一完整batch，split-batch fixture始终不含`ping`；任何mutation只有在目标fixture先转绿、外层mutation gate再因非法接受而红、恢复后合法正样本仍绿时才算有效正控。
