@@ -15,6 +15,14 @@
 - **异常分类主张成立**：`UpstreamStreamUnterminated` 不是 `DeliveryError`，`normalize_upstream_error` 与 `replay_reason` 均返回 `None`，生产 E2E 实测 `hand_back_block` 输出 category=`upstream`。只构造不抛出，未进入本侧／上游 tear 判定。
 - **修法取舍成立**：评审**不建议**把两处接管机械合并到 `terminal.seen` 分叉之前——`max_tokens` 路径携带 `error=None + stop_reason`，clean EOF 路径携带合成异常，且块边界正常收尾必须先排除；合并只是重编码同一组条件并扩大改动面。
 - **测试有分辨力，无假绿**。评审自跑两轮变异：① 把新增 `_hand_over` 调用置空 → 正例转红、两个对照仍绿；② **把 `error=` 改成 `error=None`**（我没做的那个）→ 正例在异常类型断言处转红、对照仍绿。每轮均先证明运行时加载的是快照里那份文件，并在退出 trap 下还原，还原后 SHA-256 回到 `e8d7641a…`。
+
+> **但这次改动确实先产生过一个假绿，而它差点被当成通过。**（2026-08-24 收尾时补写，此前只活在会话里）
+>
+> 实现改完后我跑既有的 `test_stream_delivery.py`，**60 passed，一条不红**。这按常理是好消息，但可疑：我刚改掉 `cut_mid_block` 那一格的结局，原本断言 `incomplete_responses_stream` 的三个用例**应该**变红。
+>
+> 查下去：那三个用例（`:360`、`:384`、`:473`）**都没有传 `continuation`**，于是 `_hand_over` 返回 `None`、控制流照旧落到 error 帧——**我的新分支在整个套件里一次都没被执行到。** 那个绿证明的是「fallback 仍然正确」，与新行为无关。三个新用例和变异验证都是在这之后才做的。
+>
+> 提交信息只写了「变异转红、对照保绿」，没写「既有测试为什么会全绿」，而后者才是可复用的那一半。判据形状：**改了一条分支的行为，就去问「原来钉这条分支的用例现在为什么还绿」——绿得理所当然反而要查。**
 - **`78be0d4` 归因成立**，但范围需收窄（见 M2）。
 - 门禁：Ruff 通过、Pyright `0 errors`、`1652 passed, 2 skipped`、coverage `90.19%`。
 
