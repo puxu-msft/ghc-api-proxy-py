@@ -1,6 +1,6 @@
 """The vocabulary a failure is described in, and the tables that spell it in each dialect.
 
-`.dev/docs/error-envelope/spec.md` (frozen 2026-08-23) is the authority. Two things live here and nothing else:
+`.dev/docs/error-envelope/spec.md` is the authority. It is a living document — read its revision record for what changed and when, rather than pinning to a date here. Two things live here and nothing else:
 
 - `ErrorCategory`, the closed set of *what kind of failure this is* — this proxy's own concept, not any dialect's spelling.
 - `ErrorInfo`, the record one failure travels as, and the per-dialect tables that render its category.

@@ -5,7 +5,7 @@ The detailed project workflow is maintained in [`.claude/rules/00-development-wo
 Critical always-on points:
 
 - Develop new functionality as small incremental slices: runnable skeleton and happy path first, discriminating smoke test, prompt squash integration, then targeted hardening.
-- Finish and freeze observable behavior in the Spec before implementation. Implementation plans are living documents and evolve alongside code; starting implementation does not close a plan or require another approval cycle.
+- The Spec must be complete before implementation changes observable behavior, and it is **never frozen**: amend it the moment a new ruling, measurement, or finding contradicts or qualifies it, and log the amendment in the Spec's own revision record. Never call a Spec "frozen" or cite one as authority by its freeze date — the authority is the current Spec. A deferred ledger never holds a known-wrong Spec sentence. Implementation plans are living documents on the same terms; starting implementation does not close a plan or a Spec, or require another approval cycle.
 - Keep no more than 10 subagents in flight. Parallelize independent work, but reuse existing context and avoid resource contention.
 - Test only the critical path, happy path, and failure mechanism actually changed. Add tests for newly observed failures; do not prebuild exhaustive proof matrices or verification governance.
 - Solve the user task before building proof infrastructure. Do not introduce manifests, voting/graduation protocols, evidence control planes, or validation state machines unless explicitly requested or they are the deliverable.
