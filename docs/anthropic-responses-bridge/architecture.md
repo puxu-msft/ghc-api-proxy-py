@@ -306,7 +306,7 @@ HistoryDurabilityReceipt(
 
 推荐 route policy 的输入是 resolved model、`ModelInfo.vendor`、`supported_endpoints`、显式 route override 和配置事实；输出是具名 `SelectProtocolLeg` action。已决默认优先级是：显式且通过 capability gate 的 override 优先；无 override 时，只支持 Messages 则选 Messages，只支持 Responses 则选 Responses，同时明确支持两者时选 Messages；其他 leg 仅在独立规格定义其语义与 loss policy 后加入，不在本 bridge 中暗中回退。Physical transport availability 只能在选定 protocol leg 内选择 HTTP／WebSocket，不得反向改变“双端点默认 Messages”。
 
-`supported_endpoints` 缺失、model catalog miss 或广告互相矛盾时，必须遵守正式 Spec 已冻结的 fail-closed 行为：自动路由只依据明确 capability，unknown／missing capability 在网络请求前返回可审计的 route／capability error，不得把“未知”解释成“全部支持”，route override 也不得伪造 capability。该行为是目标架构的输入约束，不是本文待用户重裁的架构选项；任何 legacy permissive policy 都会改变 Spec，不能通过 `is_supported()` 默认值或本文 ADR 草案暗中引入。
+`supported_endpoints` 缺失、model catalog miss 或广告互相矛盾时，必须遵守正式 Spec 已裁决的 fail-closed 行为：自动路由只依据明确 capability，unknown／missing capability 在网络请求前返回可审计的 route／capability error，不得把“未知”解释成“全部支持”，route override 也不得伪造 capability。该行为是目标架构的输入约束，不是本文待用户重裁的架构选项；任何 legacy permissive policy 都会改变 Spec，不能通过 `is_supported()` 默认值或本文 ADR 草案暗中引入。
 
 ### Responses transport port
 
@@ -458,7 +458,7 @@ Frontier 是 request-scoped、append-only、由 delayed response-start owner 与
 
 Continuation 是独立 recovery protocol，不是普通 retry。它只有在具备以下 typed proof 时才可进入：可表达的 resume contract、已提交 prefix ledger、上游能避免或可验证去重、block index remap、interactive tool boundary 安全规则，以及独立预算。缺任一条件时，默认结果是明确的 partial failure。
 
-“无已证明 resume contract 时显式 partial failure”已经由 Spec 冻结，不是本文投票项。基础版本不建立 speculative typed continuation port，也不把 prompt-based suffix generation 冒充透明恢复；未来若提出 continuation，必须以独立 ADR 定义 identity、dedup、tool boundary、budget、失败语义与验收 oracle，再决定如何扩展 `PolicyOutcome`、transport 和 ledger。该未来 ADR 不改变当前方案 B 的可扩展性，也不阻断基础 bridge。
+“无已证明 resume contract 时显式 partial failure”已经由 Spec 规定，不是本文投票项。基础版本不建立 speculative typed continuation port，也不把 prompt-based suffix generation 冒充透明恢复；未来若提出 continuation，必须以独立 ADR 定义 identity、dedup、tool boundary、budget、失败语义与验收 oracle，再决定如何扩展 `PolicyOutcome`、transport 和 ledger。该未来 ADR 不改变当前方案 B 的可扩展性，也不阻断基础 bridge。
 
 ## History 与 observer
 
@@ -551,7 +551,7 @@ History projection 必须在 assembler／buffer cleanup **之前**由 driver 从
 
 ### ADR-BRIDGE-04：未知 endpoint capability
 
-- **已决约束：** 正式 Spec 已冻结 unknown／missing endpoint capability fail closed。自动路由只依据明确 capability；catalog miss、`supported_endpoints` 缺失或 capability 互相矛盾时，在网络请求前返回可审计的 route／capability error，显式 override 也不得伪造 capability。
+- **已决约束：** 正式 Spec 已规定 unknown／missing endpoint capability fail closed。自动路由只依据明确 capability；catalog miss、`supported_endpoints` 缺失或 capability 互相矛盾时，在网络请求前返回可审计的 route／capability error，显式 override 也不得伪造 capability。
 - **架构承载：** Route policy 将 capability 来源与拒绝原因发布为 typed facts；driver 在打开 transport 前执行该 gate。不得把 legacy permissive behavior 藏入 capability helper 默认值，也不得由 transport failure 代替 route validation。
 - **裁决状态：** 本项仅记录并承载 Spec 约束，不在本 Architecture 的用户待裁决列表内；改变它必须先重裁正式 Spec，不能通过接受或拒绝本文架构提案来改变。
 

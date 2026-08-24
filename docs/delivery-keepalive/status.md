@@ -66,7 +66,7 @@
 
 到期的提示仍会发出，即使下一次拉取会立刻结束或失败——不拉是不可能知道下一次拉取返回什么的。按 `spec.md` §2 裁定：**漏掉一次该发的保活是违约，多发一次不是。**
 
-代价的完整形态写在 `spec.md` §2，不是「一枚注释」那么简单：客户端尚无字节时多发的是 `message_start`，它把原本零字节的请求变成一次**客户端可见的截断报错**——`message_start` → `error`（`incomplete_responses_stream`），按已冻结的 Spec 不得再补 `message_stop`。回归 `test_a_due_preamble_goes_out_even_though_the_stream_is_already_over` 钉住了这个线形。
+代价的完整形态写在 `spec.md` §2，不是「一枚注释」那么简单：客户端尚无字节时多发的是 `message_start`，它把原本零字节的请求变成一次**客户端可见的截断报错**——`message_start` → `error`（`incomplete_responses_stream`），按 Spec 当前版本 不得再补 `message_stop`。回归 `test_a_due_preamble_goes_out_even_though_the_stream_is_already_over` 钉住了这个线形。
 
 **这一处我连着写错两次**：先把代价说成「一枚注释」（被契约评审判 major），改对之后又写成「已正常封口的空 message」——那是主线落地 STR-04 截断语义之前的形态，被调和评审再判 major。同一个位置、同一种错误：把代价往轻里说。
 

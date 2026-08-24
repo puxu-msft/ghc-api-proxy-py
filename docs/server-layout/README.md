@@ -249,7 +249,7 @@ app/
 
 权威记录在 [decisions.md](decisions.md)，本节保留提问时的分析作为背景，**结论以 decisions.md 为准**：
 
-- **9.3 → D-1**：以用户亲笔文档为准，headers 在第一次上游 200 时转发，换取更长的 SSE ping 保活窗口。`spec.md` 已改；`acceptance.md` 的冻结语法与 `architecture.md` 的 delayed-start owner 留作独立切片。**代码无需改动——本次是文档错、代码对。**
+- **9.3 → D-1**：以用户亲笔文档为准，headers 在第一次上游 200 时转发，换取更长的 SSE ping 保活窗口。`spec.md` 已改；`acceptance.md` 的固定语法与 `architecture.md` 的 delayed-start owner 留作独立切片。**代码无需改动——本次是文档错、代码对。**
 - **9.1 → D-2**：使用 `app.server.routes`。新增顶层落点的问题已被更好的解法消除：`Chain` 记录进追认的 `app/core/`，建造者进入口层。
 - **9.2 → D-3**：先接新链，值得迁移的主动迁移；判断权在实施方。
 
@@ -272,9 +272,9 @@ app/
 ### 9.3 【新增，且优先级高于前两条】响应头转发时机：两份权威文档正面冲突
 
 - **你亲笔的** `docs/.human-controlled/client-side-block-delivery.md:9`（工作树中，mtime 今天 15:06:48）：「**不等到出现完整块才转发上游响应头给客户端**……只在第一次 HTTP 200 尝试时转发响应头」
-- **冻结的** `spec.md:285`：「首个 content block 完整组装并通过 hooks／limits 前，**下游不得看到 HTTP success headers**」；`:348` 把 header commit 与首块 commit **固定绑定**
+- **规范的** `spec.md:285`：「首个 content block 完整组装并通过 hooks／limits 前，**下游不得看到 HTTP success headers**」；`:348` 把 header commit 与首块 commit **固定绑定**
 
-两者方向相反，**当前新链实现的是你那一侧**。按「人写文档是最终权威」，你的文档赢；但 `spec.md` 是被其它工作依赖的冻结行为合同，`architecture.md:397/442` 也建在它上面。**这不是布局问题，是行为合同问题**，且它比本文其余部分都更该先解决——第 5.3 节那个被门控的落点、以及 STR-04 切片都压在它上面。
+两者方向相反，**当前新链实现的是你那一侧**。按「人写文档是最终权威」，你的文档赢；但 `spec.md` 是被其它工作依赖的现行行为合同，`architecture.md:397/442` 也建在它上面。**这不是布局问题，是行为合同问题**，且它比本文其余部分都更该先解决——第 5.3 节那个被门控的落点、以及 STR-04 切片都压在它上面。
 
 我不替你选。需要的是：以哪一份为准，另一份怎么改。
 

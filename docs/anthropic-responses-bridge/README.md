@@ -22,7 +22,7 @@
 4. 阅读 [acceptance.md](acceptance.md)，确认如何证伪实现。
 5. 最后阅读 [implementation.md](implementation.md)，核对 current main、活动切片与下一动作。
 
-不要只读 Architecture 的推荐结论或 A／B／C 对比表后直接裁决。Spec 已冻结的产品行为不是 Architecture 的附加投票项。
+不要只读 Architecture 的推荐结论或 A／B／C 对比表后直接裁决。Spec 已裁决的产品行为不是 Architecture 的附加投票项。
 
 ## 当前状态入口
 

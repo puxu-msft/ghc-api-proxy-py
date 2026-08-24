@@ -24,7 +24,7 @@
 
 支持是真的，但**不完整**，而缺的部分对客户端不可见：
 
-- 交给 Anthropic 客户端的是**一行文本**，而协议定义的是 `server_tool_use` + `web_search_tool_result` 块对（规格 §5.3 已冻结形态，用户 2026-08-20 裁决 D6 要求还原成原生块，**未实现**）。
+- 交给 Anthropic 客户端的是**一行文本**，而协议定义的是 `server_tool_use` + `web_search_tool_result` 块对（规格 §5.3 已规定形态，用户 2026-08-20 裁决 D6 要求还原成原生块，**未实现**）。
 - 上游**确实**返回 `url_citation`（`output[].content[].annotations[]`，字段 `{type,url,title,start_index,end_index}`），我们**零处读取**。一手样本：`exp/260820-websearch-probe/raw/B7-responses-tool-choice-builtin-response.txt`。
 - `max_uses` 无法发送（上游 `Unknown parameter`），剥离并记 loss。
 - `allowed_domains` / `blocked_domains` 同样无法发送，默认丢弃——而实测 190/190 真实子请求都带非空 `allowed_domains`。
@@ -46,7 +46,7 @@
 
 ### 4.2 D6（原生块对）已裁决未实现
 
-规格 §5.3 冻结了形态，§6.3 冻结了流式成块时点。当前实现产出一行文本，正是 §5.2 里被用户推翻的那个起草偏好。
+规格 §5.3 规定了形态，§6.3 规定了流式成块时点。当前实现产出一行文本，正是 §5.2 里被用户推翻的那个起草偏好。
 
 原料比原先认定的充足：`url_citation` 可填 `{type, url, title}`。仍缺摘要、`page_age`、`encrypted_content`，所以必须记 `DEGRADE`，且 §5.3「省略而非伪造」的裁决不变。
 
@@ -80,4 +80,4 @@
 | 上游确实返回 citation 的取证 | `reports/260821-responses-websearch-citation-evidence.md` |
 | 客户端两段式架构取证 | `reports/260820-claude-code-websearch-request-forensics.md` |
 | 上游实测探针原始记录 | `exp/260820-websearch-probe/raw/` |
-| 冻结的目标形态与流式时点 | `../anthropic-responses-bridge/hosted-web-search-spec.md` §5、§6.3 |
+| 规定的目标形态与流式时点 | `../anthropic-responses-bridge/hosted-web-search-spec.md` §5、§6.3 |

@@ -28,7 +28,7 @@
 
 Spec §10.2 明写「实施时建立」，§11 要求七项逐项登记，而 `deferred.md` 至今不存在。计划的「推迟项」一节不等于台账——计划会关闭，台账只保留未闭合项。
 
-**做**：建 `error-envelope/deferred.md`，收 §10.2 与 §11 的全部条目，各自引冻结 Spec 为权威。后续闭合的从台账移出并更新对应活文档。
+**做**：建 `error-envelope/deferred.md`，收 §10.2 与 §11 的全部条目，各自引 Spec 当前版本为权威。后续闭合的从台账移出并更新对应活文档。
 
 ### S0　保住上游的原始字节 —— **已完成**
 
@@ -40,13 +40,13 @@ Spec §4、§5。**评审 F-06 指出 v1 的致命问题**：`ErrorCategory` 从
 
 - `app/errors.py`：`ErrorCategory` 扩到 12（现有 6 个拼写不动）；`ErrorInfo` 的 **10 个字段**（`category`、`message`、`status_code`、`code`、`param`、`headers`、`source_format`、`source_bytes`、`source_content_type`、`conversion`——Spec §4.2 的表是 9 行，但 `source_bytes / source_content_type` 那行命名了两个）；`category_for_status`（Spec §5.2）。
 - **同一提交内**让每一张以 `ErrorCategory` 为键的表覆盖全部 12 键，或让它退场。`WIRE_TYPES` 在此片就换成按方言分层的表，不留窗口。
-- `app/pipeline/error_classify.py`：`describe`，覆盖 pipeline 侧来源与 `ProviderError` 家族五个子类（Spec 冻结后修订）。
+- `app/pipeline/error_classify.py`：`describe`，覆盖 pipeline 侧来源与 `ProviderError` 家族五个子类（Spec 2026-08-23 条款修订记录第 1 条）。
 - `pipeline/count_tokens.py`：`CountTokensUnavailable` **保留 cause**。今天它只存字符串 attempts，不存任何异常对象，所以「读穿到成因」在它现在的形状下做不到。哪一条失败作为 cause 要写进代码注释。
 
 **落地后新增的一条事实**（由既有测试暴露，已写回 Spec §6.4）：把 Anthropic 那一列改成真实词汇后，`INTERNAL` 与 `UPSTREAM` 都塌成 `api_error`，而 `tests/unit/pipeline/delivery/test_stream_delivery.py` 里两条测试原本正是靠 `internal_error` / `upstream_error` 区分「本代理的 bug」与「上游断了」。**流式帧上 status 早已发出，所以 `code` 是那里唯一的通道**——两条测试已改钉 `code`。
 
 **验**：
-- **测试侧手工转录**冻结 Spec 的每一行，每 case 一个稳定 id、一个 source constructor、一份完整 expected 投影（`category`/`status`/`code`/`param`/`source_*` 全断，不只断 `category`）。**不得从生产表生成 expected**——评审 F-11 说得对，那是同源恒真：删一行则参数数也少一行，写错值则 expected 同时变错，测试仍绿。
+- **测试侧手工转录** Spec 当前版本的每一行（**Spec 是活文档：条款修订时必须同改本转录，否则测试会静默落后于 Spec 且仍然全绿**），每 case 一个稳定 id、一个 source constructor、一份完整 expected 投影（`category`/`status`/`code`/`param`/`source_*` 全断，不只断 `category`）。**不得从生产表生成 expected**——评审 F-11 说得对，那是同源恒真：删一行则参数数也少一行，写错值则 expected 同时变错，测试仍绿。
 - 另设独立字面量 `EXPECTED_CASE_IDS`，断言 `set(CASES) == EXPECTED_CASE_IDS`；生产侧若用 registry，再断言 registry 的键与这组 id 相等。
 - §5.2 另用测试侧字面 status→category cases，**至少含** 403 的 billing 分支、catch-all 的 418 与 599、以及边界值。
 - 钉 `ProviderError` 的子类集合：新增一个子类必须被显式分类才能通过。

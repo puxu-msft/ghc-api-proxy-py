@@ -141,5 +141,5 @@ MCP server 在另一个仓（插件 `ghc-api-proxy-helper`），本会话够不�
 ## 相邻主题
 
 - [`../h2-goaway/`](../h2-goaway/) —— GOAWAY 打掉在飞流的机理诊断，已收口。它的「三条路的裁决」欠账由本主题接手。
-- [`../../anthropic-responses-bridge/`](../../anthropic-responses-bridge/) —— 桥 spec，冻结中。本主题的 wire 不变量指回它。
+- [`../../anthropic-responses-bridge/`](../../anthropic-responses-bridge/) —— 桥 spec，现行规范。本主题的 wire 不变量指回它。
 - G1「让活跃链路认出上游发来的错误事件」（分支 `fix/upstream-error-events`，同伴在飞）—— 本主题依赖它：`stop_reason` 原样透出与上游 `error` 帧不再静默丢弃，都要它先落地。
