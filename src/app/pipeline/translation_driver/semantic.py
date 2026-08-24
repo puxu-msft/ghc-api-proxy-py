@@ -48,6 +48,8 @@ class LossCode(StrEnum):
     REASONING_INTENT_APPROXIMATED = "reasoning-intent-approximated"
     REASONING_INTENT_NOT_CARRIED = "reasoning-intent-not-carried"
     TOOL_DESCRIPTION_COERCED = "tool-description-coerced"
+    # This proxy put something in the body that the client did not write. The only member that records an *addition* rather than something dropped, and it is here for the same reason as the rest: a body that no longer says what the client said has to say so somewhere a reader will see it.
+    SYNTHETIC_TURN_ADDED = "synthetic-turn-added"
     # Upstream answered with an error this proxy could not read as one. Recorded rather than silently dropped, because it is what decides whether the client is handed upstream's original alongside our envelope — spec §10.1.
     UPSTREAM_ERROR_NOT_INTERPRETED = "upstream-error-not-interpreted"
 

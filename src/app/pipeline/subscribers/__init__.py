@@ -13,7 +13,8 @@
 | `builtin:server-tool-capability` | `attempt.prepare` | — | Reads and edits `tools`. Anything else that comes to read `tools` has to say whether it wants the client's list or the one that will actually be sent, and answer it here rather than by landing at whatever position happens to work. |
 | `builtin:hosted-web-search-gate` | `attempt.prepare` | after `builtin:server-tool-capability` | Nothing forces it — the two are mutually exclusive by route, one acting only when the target is Anthropic Messages and the other only when it is Responses, so neither can see what the other wrote. Registered next to it because they answer the same question for the two legs, and a reader looking for "where is web search decided" should find both in one place rather than at either end of the list. |
 | `builtin:anthropic-thinking-capability` | `attempt.prepare` | — | Nothing forces its position: `thinking` and `output_config` are touched by nothing else on this event, and its two neighbours read `tools` and `content`. Registered here, after the pair above, because it is the third capability gate and they belong together — all three answer "will the model this is going to actually take this field". |
-| `builtin:blank-text-blocks` | `attempt.prepare` | registered last, by convention | Nothing forces it. It does read what that pass writes — `server_tools.py` rewrites a message's `content` and this reads the same list — but every text block that pass emits carries a `[family]` prefix and `_render_results` has no branch returning an empty string, so none of it can trigger this rule. Last on purpose all the same: this one only removes, and a remover placed after the rewriters sees the shape that will actually be sent, so a future pass that does emit a blank block is covered without anyone having to remember to reorder. The order comes from registration order rather than a `before=`/`after=` constraint, and the tuple in `tests/unit/test_builtin_subscribers.py` is what holds it. |
+| `builtin:blank-text-blocks` | `attempt.prepare` | registered last, by convention | Nothing forces it. It does read what that pass writes — `server_tools.py` rewrites a message's `content` and this reads the same list — but every text block that pass emits carries a `[family]` prefix and `_render_results` has no branch returning an empty string, so none of it can trigger this rule. Last among the rewriters on purpose all the same: this one only removes, and a remover placed after them sees the shape that will actually be sent, so a future pass that does emit a blank block is covered without anyone having to remember to reorder. The order comes from registration order rather than a `before=`/`after=` constraint, and the tuple in `tests/unit/test_builtin_subscribers.py` is what holds it. |
+| `builtin:anthropic-trailing-assistant` | `attempt.prepare` | **after `builtin:blank-text-blocks`, by an explicit constraint** | The one ordering here that is not convention. It asserts an invariant over the finished message list — that the conversation ends on a user turn — and the pass above is the last thing on this event that can remove a message. Run before it and the guard checks a list that is not the one going out, which is the failure it exists to catch. Stated with `after=` rather than by registration order because a constraint that matters should not be recoverable only by reading this table. |
 
 `tests/unit/test_builtin_subscribers.py` locks the registered set and the frozen order, so a subscriber added without a decision about where it goes fails there rather than in production.
 """
@@ -29,6 +30,10 @@ from app.pipeline.subscribers.anthropic_thinking import (
     SUBSCRIBER_ID as ANTHROPIC_THINKING_CAPABILITY_ID,
 )
 from app.pipeline.subscribers.anthropic_thinking import adapt_thinking_capability
+from app.pipeline.subscribers.anthropic_trailing_assistant import (
+    SUBSCRIBER_ID as ANTHROPIC_TRAILING_ASSISTANT_ID,
+)
+from app.pipeline.subscribers.anthropic_trailing_assistant import repair_trailing_assistant
 from app.pipeline.subscribers.blank_text import SUBSCRIBER_ID as BLANK_TEXT_BLOCKS_ID
 from app.pipeline.subscribers.blank_text import drop_blank_text_blocks
 from app.pipeline.subscribers.hosted_web_search import SUBSCRIBER_ID as HOSTED_WEB_SEARCH_GATE_ID
@@ -83,10 +88,18 @@ def register_builtin_subscribers(
         BLANK_TEXT_BLOCKS_ID,
         drop_blank_text_blocks,
     )
+    registry.subscribe(
+        EVENT_ATTEMPT_PREPARE,
+        ANTHROPIC_TRAILING_ASSISTANT_ID,
+        repair_trailing_assistant,
+        # The one ordering constraint on this event, and it is load-bearing rather than tidy: this reads the finished message list, and the pass above is the last one that can shorten it.
+        after=(BLANK_TEXT_BLOCKS_ID,),
+    )
 
 
 __all__ = [
     "ANTHROPIC_THINKING_CAPABILITY_ID",
+    "ANTHROPIC_TRAILING_ASSISTANT_ID",
     "BLANK_TEXT_BLOCKS_ID",
     "HOSTED_WEB_SEARCH_GATE_ID",
     "SERVER_TOOL_CAPABILITY_ID",
@@ -95,4 +108,5 @@ __all__ = [
     "drop_blank_text_blocks",
     "gate_hosted_web_search",
     "register_builtin_subscribers",
+    "repair_trailing_assistant",
 ]
