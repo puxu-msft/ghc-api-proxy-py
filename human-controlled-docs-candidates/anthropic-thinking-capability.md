@@ -75,6 +75,28 @@ Use "thinking.type.adaptive" and "output_config.effort" to control thinking beha
 >
 > 客户端自己发了 `output_config` 时不覆盖它。`thinking.type` 为 `disabled` 时不附 effort。`thinking` 存在但读不懂（`null`、字符串、数字）时两件事都不做。
 >
+> ### `messages` 不得以「带内容的 assistant 轮」结尾（400 `does not support assistant message prefill`）
+>
+> 上游拒收以**带内容的** assistant 消息结尾的对话。**而本代理自己会把请求改成那样**：`repair_tool_pairs` 会丢弃被孤儿清除清空的那一轮，`drop_blank_text_blocks` 会丢弃只剩空白文本块的 user 轮——两处都能删掉最后一条。实测：一条合法的、以 user 结尾的三轮对话，经这两处任一之后都变成以 assistant 结尾。
+>
+> 出站前检查末尾：若是**带内容的** assistant 轮，**而客户端原始请求体的末尾是 user**，追加一条合成 user 消息（文本 `Please continue.`），并记为一条转换损失。
+>
+> 三种情况不动它：
+>
+> - **末尾 assistant 的 `content` 是空列表**——上游接受它（本仓 `exp/260820-empty-text-probe/` 的 F4、F6 实测 200），它不是 prefill，没有东西可以被续写。而这恰恰是 `drop_blank_text_blocks` 亲手造出来的形状。
+> - **客户端原始请求体的末尾本来就是 assistant**——那是客户端自己写的 prefill，是 Anthropic 有文档的特性，上游的拒绝信息把这件事说得很清楚。替它补一条 user 消息会返回一个正常答案，而那个答案悄悄忽略了客户端要求的约束，客户端无从得知。
+> - **读不出客户端原件的末尾角色**——比如一个 `/responses` 请求，它的原件里没有 `messages` 键。只有正面读到「客户端自己的对话没有在这里结束」才追加。这留下一个已知缺口（翻译过来的请求体仍可能未修复地吃 400），知情地留着：没修的请求会得到一个把问题说清楚的 400，猜错则是把客户端从没写过的一句话摆到模型面前并报告成功。
+
+## 四点五、实测澄清：**有三个字段其实不用管**
+
+官方 Anthropic 文档说 Claude 5 一族移除了 `temperature` / `top_p` / `top_k`，发即 400。**经 Copilot 这条路实测，三个都收 200**——单独发、三个一起发、配 adaptive thinking 发、发 `temperature: 0` 都收。
+
+**这次实测覆盖到哪里为止**：只有 `claude-sonnet-5` 这一个 resolved model、只有非流式、每格一次调用。**它不是对 Copilot 上全部 Claude 5 系模型或流式形态的结论。** 另一层限定：一个 200 只说明**上游收下了这个字段**，不说明它照做了——参数有没有生效是另一个问题，这次没测。
+
+所以这段的用途是**防止有人照着那张官方表去建三个没用的守卫**，射程仅限已测路径。将来若另一个 resolved model 或流式路径真的对这些字段返回 400，按那个模型的能力另行处理，不要拿本段当全局否决。
+
+同一批探针另外确认了两件已落地设计的必要性：`{type:"adaptive", budget_tokens:N}` 会 400（`Extra inputs are not permitted`，所以删 budget 是必须的），未发布的 effort 名会 400，**且上游的拒绝信息直接列出它支持的值**，与目录 `reasoning_effort` 逐字一致。
+>
 > ### `thinking.display`
 >
 > `display` 是 adaptive 形态上的合法字段（`{type: "adaptive", display: "summarized"|"omitted"}`），不是需要修的东西。用 `hook_fix_anthropic_request.thinking.display` 控制：`passthrough`（默认，客户端说什么就发什么）、`drop`、`omitted`、`summarized`。改写值只在 `thinking` 非 `disabled` 时生效。
@@ -120,7 +142,7 @@ hook_fix_anthropic_request:
 
 ## 五、留给你裁决的开口
 
-按 `.dev/docs/anthropic-direct-request-shape/spec.md` §7 编号：
+按 `.dev/docs/anthropic-direct-request-shape/spec.md` §8 编号：
 
 | 编号 | 问题 | 当前实现取了哪一侧 |
 |---|---|---|

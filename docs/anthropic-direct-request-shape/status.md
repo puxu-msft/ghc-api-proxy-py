@@ -13,7 +13,9 @@
 | 请求体构造 | `src/app/pipeline/subscribers/anthropic_thinking.py`，跑在 `attempt.prepare` 上，id `builtin:anthropic-thinking-capability` |
 | effort 与目录能力对齐 | `pipeline/translation_driver/reasoning.py` 的 `align_effort`，与翻译腿共用同一条 `EFFORT_LADDER` |
 | 配置 | 顶层 `model_thinking_effort`；`hook_fix_anthropic_request.thinking.display`（`config/schema.py`），经 `server/composition.py` 绑定到订阅者 |
-| 测试 | `tests/unit/pipeline/subscribers/test_anthropic_thinking.py`；顺序锁定表在 `test_builtin_subscribers.py` |
+| `messages` 末尾角色 | `src/app/pipeline/subscribers/anthropic_trailing_assistant.py`，id `builtin:anthropic-trailing-assistant`，以 `after=` 显式排在 `builtin:blank-text-blocks` 之后 |
+| 新增损失码 | `LossCode.SYNTHETIC_TURN_ADDED`——唯一记录「加了东西」而非「丢了东西」的一个 |
+| 测试 | `tests/unit/pipeline/subscribers/test_anthropic_thinking.py`、`test_anthropic_trailing_assistant.py`；顺序锁定表在 `test_builtin_subscribers.py` |
 
 ## 判据的鉴别力：做过什么变异
 
@@ -22,6 +24,8 @@
 | `apply_route` 里 `context.model_descriptor = route.descriptor` 改为 `= None` | 只有端到端那条变红，手工设 descriptor 的那批照绿 | 与预期一致：1 failed / 20 passed。已还原 |
 | 删掉 `align_effort` 的 `if desired in supported` 分支 | 若测试锁住了「目录发布即原样发出」，应变红 | **评审时全绿——假绿**；补 `('turbo',)` 用例后重做，变红。已还原 |
 | 订阅者开头加 `if context.extras.get("counting_only"): return` | 若测试覆盖了 count 腿的刻意接线，应变红 | **评审时 39 项全绿——假绿**；补走 `handle_count_tokens` 的测试后重做，变红。已还原 |
+| 拿掉 `repair_trailing_assistant` 的 `original_payload` 判别器 | 「客户端自己的 prefill 不修」那条应变红 | 变红 2 条（含 `test_a_blank_block_is_gone_from_what_the_driver_actually_sends`，它现在真的在守着这个判别器）。已还原 |
+| 把 `after=(BLANK_TEXT_BLOCKS_ID,)` 改成 `before=` | 若这条顺序约束真的承重，行为测试应变红而不只是顺序锁定表 | 变红 6 条，**其中 3 条是行为测试**。已还原 |
 
 每次还原后都 `rg MUTATION-PROBE` 确认无残留（exit 1），并重跑受影响测试。
 
