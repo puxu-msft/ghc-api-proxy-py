@@ -3195,8 +3195,10 @@ def test_a_tear_after_the_turn_finished_is_recorded_without_being_called_a_failu
     assert calls == [1], "and nothing was replayed — there was nothing left to replay"
 
     record = _records()[-1]
-    assert "RemoteProtocolError" in record["detail"]
-    assert "peer reset the connection after its last frame" in record["detail"]
+    # Its own field rather than `detail`: `detail` says how the turn came out, and this says what the connection did afterwards. They are not alternatives — see the `max_tokens` case above, where both are set.
+    assert "RemoteProtocolError" in record["tore_after_terminal"]
+    assert "peer reset the connection after its last frame" in record["tore_after_terminal"]
+    assert record["detail"] == "", "nothing went wrong with the turn itself"
     # Matched on the note, not on the route: a line that succeeded names the model instead, which is what this one does.
     line = next(item for item in _request_lines(caplog.records) if "closed abruptly" in item)
     assert "RemoteProtocolError" in line
@@ -3572,6 +3574,49 @@ def test_a_draining_process_does_not_replay_a_stream_the_client_never_saw() -> N
         _ = _delivered(client)
 
     assert len(calls) == 1, "a draining process opened another upstream request"
+
+
+def test_a_tear_after_a_turn_that_ran_out_of_room_is_reported_alongside_the_hand_over(
+    request_log: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The two are not alternatives, and writing them as one killed the newer of them.
+
+    `assembler.terminal.seen` does not mean the client is owed nothing: `max_tokens` is precisely a turn whose terminal event arrived and whose work is unfinished. So a tear afterwards makes *both* facts true — the turn is handed back, and the connection dropped — and the first version put them in an `if/elif` against a single `detail`. A review measured the result through the real app: `status=retry`, the hand-over's detail on the line, and the tear reported nowhere at all.
+
+    Its own field for that reason. It is not an ending and it does not set the status; a `max_tokens` that tears is still `retry`, because the client still holds a turn to carry on.
+    """
+    body = sse_upstream("first").partition(b"event: message_delta")[0] + (
+        b'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"max_tokens"},'
+        b'"usage":{"output_tokens":7}}\n\n'
+        b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+    )
+
+    async def finishes_short_then_breaks() -> AsyncIterator[bytes]:
+        yield body
+        raise httpx2.RemoteProtocolError("peer reset after the last frame")
+
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200,
+            content=finishes_short_then_breaks(),
+            headers={"content-type": "text/event-stream"},
+        )
+    )
+    with caplog.at_level(logging.INFO):
+        delivered = _delivered(client)
+
+    # The hand-over still happens and still reaches the client — none of that changes.
+    assert _handed_back(delivered)["input"]["category"] == "max_tokens"
+    record = _records()[-1]
+    assert record["status"] == "retry", "the ending is still the hand-over"
+    assert "handed back" in record["detail"]
+    # And the tear is on the record too, in a field of its own rather than competing for `detail`.
+    assert "RemoteProtocolError" in record["tore_after_terminal"]
+    assert "peer reset after the last frame" in record["tore_after_terminal"]
+    line = next(item for item in _request_lines(caplog.records) if "handed back" in item)
+    assert "upstream closed abruptly after finishing the turn" in line, (
+        "the hand-over detail took the whole line and the tear was reported nowhere"
+    )
 
 
 def test_a_turn_that_ran_out_of_room_is_handed_back_the_same_way() -> None:

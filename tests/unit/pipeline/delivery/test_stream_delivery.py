@@ -1380,7 +1380,7 @@ async def test_a_second_cancellation_does_not_interrupt_the_release_it_arrives_d
 
     `_counted_upstream`'s cleanup closed the stream under it with a bare `await close()`, which is an ordinary await point: a cancellation delivered while it was in flight interrupted the release itself, so the upstream response stayed open. Measured with the close held open for 300ms and a second `cancel()` landing inside it — `close-interrupted:CancelledError`, and the source never finished releasing.
 
-    `finish_stream_cleanup` already runs cleanup in its own task behind `asyncio.shield` for exactly this reason, so this delegates to it rather than growing a second implementation of the same care. The task still ends cancelled; what changes is that the release completes first.
+    `finish_stream_cleanup` already runs cleanup in a task of its own and waits on it without cancelling it, for exactly this reason, so this delegates rather than growing a second implementation of the same care. (It used `asyncio.shield` when this test was written; a later review found that a cleanup which then *fails* is reported twice through the abandoned shield future, and it now waits with `asyncio.wait`.) The task still ends cancelled; what changes is that the release completes first.
 
     `aclosing` here because that is what `_tracked_delivery` does in production. Without it the generator is left suspended and finalized later by the loop's async-generator hook, outside the cancelled task — a different path, and one where the defect is invisible. Measured: with `aclosing` the raw `finally` is entered before the consumer resumes; with a bare `async for` the consumer records first and the `finally` runs three loop ticks later in another task.
 
@@ -1469,7 +1469,7 @@ async def test_a_body_that_cannot_be_closed_says_so_when_nothing_else_is_ending(
 async def test_a_falsey_upstream_failure_is_still_the_one_reported() -> None:
     """`primary or cleanup_cancellation` reads a truthiness question as a priority question.
 
-    Nothing in the standard library defines a falsey `BaseException`, which is exactly why this survives review: the `or` is correct for every exception anyone tries. A subclass with `__bool__` returning `False` is legal, and on this path it flips the stated exit priority — the failure that ended the stream is demoted to the context of the close failure, and the caller reports the wrong one.
+    Every exception exercised in this repository is truthy, which is exactly why this survives review: the `or` is correct for every exception anyone tries here. That is a statement about the sample, not about the standard library — no exhaustive scan was done, and none is needed, because the contract `BaseException` offers is what this code has to hold to. A subclass with `__bool__` returning `False` is legal, and on this path it flips the stated exit priority — the failure that ended the stream is demoted to the context of the close failure, and the caller reports the wrong one.
 
     Driven through the real `_counted_upstream` rather than the helper it shares the shape with, because a review measured this instance specifically, and because a mutation of the live path passed all 1591 tests: the other three sites' guards do not cover this one.
     """
@@ -1521,7 +1521,7 @@ class _ExplodingRegistry:
 async def test_a_bug_below_the_marker_but_above_the_source_is_still_ours() -> None:
     """The seam two reviews found, closed by where the marker sits rather than by another list of places.
 
-    Production stacks five objects over the raw response — idle timeout, attempt deadline, marker, `_counted_upstream`, client deadline — and `_counted_upstream` is this side's bookkeeping rather than upstream's — this side's bookkeeping, not upstream's. While the marker wrapped the whole composite, a `LookupError` raised by the byte counter was tagged as upstream's tear and handed to the client, which returned cleanly with the exception gone. Measured at `62a457f`: `handed_count=1`, `returned_cleanly=True`.
+    Production stacks five objects over the raw response — idle timeout, attempt deadline, marker, `_counted_upstream`, client deadline — and `_counted_upstream` is this side's bookkeeping rather than upstream's. While the marker wrapped the whole composite, a `LookupError` raised by the byte counter was tagged as upstream's tear and handed to the client, which returned cleanly with the exception gone. Measured at `62a457f`: `handed_count=1`, `returned_cleanly=True`.
 
     Driven through the real `_counted_upstream`, not a stand-in for it: the defect was that the marker sat on the wrong side of that exact function.
     """

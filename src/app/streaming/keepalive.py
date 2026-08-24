@@ -97,16 +97,27 @@ def raise_with_cleanup_under(primary: BaseException, cleanup_error: BaseExceptio
 
     *The same object on both sides.* `raise primary from primary` is accepted by Python and produces an exception that is its own cause; a reader following the chain then walks in place. Nothing is being recorded in that case anyway — the cleanup failure *is* the exit — so it is simply raised.
 
-    *An existing `__context__`.* Overwriting it dropped the earlier one entirely, which a second cleanup failure on the same primary reproduced: the first became unreachable. It is now carried under the new one instead, so both stay in the chain in the order they happened.
+    *An existing `__context__`.* Overwriting it dropped the earlier one entirely, which a second cleanup failure on the same primary reproduced: the first became unreachable. It is now carried under the new one instead, so both stay in the chain in the order they happened. A test that calls this helper twice in a row proves only the quiet case — a review measured that the live one, where the second cleanup is raised *while the primary is propagating*, took a different branch and lost the first anyway.
 
-    *A link that would close a loop.* Only the carry is checked with `_reaches`, because only the carry is a link that did not exist before. The two writes onto `primary` are deliberately unguarded: a close that fails while the primary is being handled gets `primary` as its own implicit `__context__`, so `raise primary from cleanup_error` closes a loop **every time** — that is ordinary Python, `traceback` walks it with a seen-set, and refusing to write the link was measured to drop the cleanup failure from three existing tests entirely. A guard that fires on the normal case is not a guard.
+    *A link that would close a loop.* This one took two attempts and both failures are worth keeping. The first version checked `_reaches` before every write, and fired on the **normal** path — a close that fails while the primary is being handled gets `primary` as its own implicit `__context__`, so the cleanup failure always appears to reach the primary — which discarded the cleanup failure outright and turned three existing tests red. Narrowing the check to the carry then went too far the other way, as a second review showed: that same temporary edge also made `cleanup_error.__context__ is None` false, so the carry never ran in the one shape it exists for, and an explicit `cleanup_error.__cause__ = primary` could still close a two-object cycle. The rule is not "guard everything" or "guard nothing" — it is **clear the temporary edge first, then ask**, and record a note rather than a link when what remains is a back-edge Python will not undo.
 
     One implementation because the same pairing had grown five spellings across this repository, and the reason each exists is the same reason.
     """
     if cleanup_error is primary:
         raise primary
+
+    # Python's implicit chaining has *already* pointed the cleanup failure back at the primary, because at every call site here the close ran while the primary was being handled. That edge is temporary — re-raising drops it, and a review measured it gone from the final object graph — but while it is set, a `__context__ is None` test cannot tell it from a slot that is genuinely occupied. That is what made the carry below skip the one shape it was written for and keep only the quiet one.
+    if cleanup_error.__context__ is primary:
+        cleanup_error.__context__ = None
+
+    if _reaches(cleanup_error, primary):
+        # Something stronger than that temporary edge leads from the cleanup failure back to the primary — an explicit `__cause__`, or a longer chain. Python will not undo those, so linking the other direction closes a real cycle. The pairing is recorded as a note instead, which says the same thing and cannot be walked in circles.
+        primary.add_note(f"cleanup also failed: {cleanup_error!r}")
+        raise primary
+
     if primary.__cause__ is None:
         raise primary from cleanup_error
+
     displaced = primary.__context__
     if (
         displaced is not None
@@ -114,7 +125,7 @@ def raise_with_cleanup_under(primary: BaseException, cleanup_error: BaseExceptio
         and cleanup_error.__context__ is None
         and not _reaches(displaced, cleanup_error)
     ):
-        # Carried rather than dropped: the earlier cleanup failure keeps its place under the newer one. Guarded because this link is a new one — unlike the two below, which only restate a shape Python already makes.
+        # Carried rather than dropped: the earlier cleanup failure keeps its place under the newer one.
         cleanup_error.__context__ = displaced
     primary.__context__ = cleanup_error
     raise primary

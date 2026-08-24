@@ -594,17 +594,19 @@ class _StreamAccounting:
             if self.handed_over or not (delivered_whole and terminal.stop_reason):
                 # Said outright, because absence is not readable. The status was fixed when the response headers arrived and stays 200 however the stream ends; the fields upstream never sent are simply gone; and a reader cannot tell a field this endpoint does not report from one this request never got.
                 self.trace.status_override, self.trace.detail = self._ending()
-            elif self.tore_after_terminal is not None:
-                # The request succeeded and stays `ok`: upstream said everything it had to say and the client holds all of it. Only the note is added, and no status override, because painting this red would put a turn nothing went wrong with next to the ones that failed.
+            if self.tore_after_terminal is not None:
+                # `if`, not `elif`. It was an `elif` against the ending above, and the two are not alternatives: a `max_tokens` hand-over sees the terminal event *and* hands the turn back, so both were true and the hand-over's detail took the slot — a review measured the tear reported nowhere on the primary path.
                 #
-                # Bounded like the other two exceptions that reach this line, and for the same reason — upstream chooses the text and `repr` has no limit.
-                self.trace.detail = f"upstream closed abruptly after finishing the turn: {one_line(repr(self.tore_after_terminal))}"
+                # No status override either way. This does not decide how the turn came out: an `end_turn` that tears afterwards is still `ok` because the client holds the whole reply, and a `max_tokens` that tears afterwards is still `retry` because the client still has a turn to carry on. What it decides is nothing; it only says what the connection did.
+                #
+                # Bounded like the other exceptions that reach this line, and for the same reason — upstream chooses the text and `repr` has no limit.
+                self.trace.tore_after_terminal = one_line(repr(self.tore_after_terminal))
         log_completion(self.chain, self.trace, self.status_code, bytes_out=self.trace.received)
 
     def note_tear_after_terminal(self, error: Exception) -> None:
         """Passed to delivery as `on_tear_after_terminal`; see the branch there for when it fires.
 
-        First one wins, which only matters if a replayed attempt could also tear after its own terminal — it cannot today, because the ending that sees a terminal breaks the loop. Written as a rule rather than as an assumption so a later replay path cannot quietly overwrite the earlier account.
+        First one wins. An earlier version of this docstring said that only mattered because "a replayed attempt cannot tear after its own terminal", and a review refuted it directly: a replayed attempt reaches this branch and is recorded, with the first attempt's draft discarded as it should be. What actually cannot happen is a *second* one — the branch that calls this breaks the delivery loop, so once a post-terminal tear is recorded no further attempt is opened. The rule is kept anyway, so that a later change to that loop cannot quietly overwrite the earlier account.
         """
         if self.tore_after_terminal is None:
             self.tore_after_terminal = error

@@ -155,6 +155,8 @@ class RequestTrace:
     #
     # A list rather than the first one. A review put three attempts on the wire with a different failure in the second position and watched it disappear behind the first — and "the later ones failed the same way" was an assumption nothing checked. Empty means no replacement was ever opened; it does **not** mean no second upstream request was made, because a replacement that fails to produce a stream is appended here and then returns.
     replaced_failures: list[str] = field(default_factory=list[str])
+    # Upstream dropped the connection after finishing the turn, already cut to the line's bound. Its own field rather than a case inside `detail`, because it is not an ending — it coexists with whatever the ending turns out to be, and a `max_tokens` hand-over is the case that proved it: a review measured the tear vanishing behind the hand-over's detail on the primary path.
+    tore_after_terminal: str = ""
     detail: str = ""
     # What the HTTP status cannot say. A streaming status is fixed the moment the response headers arrive, so everything that happens over the next several minutes — the stream stopping mid-turn, upstream tearing, the client leaving — leaves it at 200. `None` means the status code is the whole story.
     status_override: LogStatus | None = None
@@ -236,6 +238,7 @@ def log_completion(chain: Chain, trace: RequestTrace, status_code: int | None, *
         dialect=trace.dialect,
         attempts=trace.attempts,
         replaced_failures=tuple(trace.replaced_failures),
+        tore_after_terminal=trace.tore_after_terminal,
         detail=trace.detail,
         upstream_conn=trace.upstream_conn,
         losses=trace.losses,

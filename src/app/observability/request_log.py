@@ -148,6 +148,8 @@ class RequestLine:
     attempts: int = 1
     # What each replayed attempt was replacing, in order. A transparent replay is invisible to the client by design; it used to be invisible here too, leaving `retries=N` as a count with no cause.
     replaced_failures: tuple[str, ...] = ()
+    # What upstream did *after* saying everything it had to say. Not an ending and not a failure, so it neither sets the status nor competes with `detail` — both of those describe how the turn came out, and this describes the connection it came out over.
+    tore_after_terminal: str = ""
     detail: str = ""
     upstream_conn: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
     # What translation could not carry, one entry per recorded loss, in the order recorded. Each entry is `{"direction": "request"|"response", "code": …, "detail": …}`. Direction is a property of the loss rather than a second field, because "what did this request lose" is one question and answering it from two lists is how the two drift apart.
@@ -389,6 +391,9 @@ def format_completion_line(line: RequestLine, *, status: LogStatus, unicode: boo
             # The count says a replay happened; these say what each one replaced. All of them, because a review put a different failure in the second of three attempts and the first one did not describe it. Bounded as a whole, not per entry: each is already cut to the same limit the hand-over message uses, and three of them side by side would still outrun a line.
             retries = f"{retries} after {one_line('; '.join(line.replaced_failures))}"
         parts.append(paint(retries, YELLOW, color=color))
+    if line.tore_after_terminal:
+        # Its own segment, added whatever the ending was. Written first as a case inside `detail`, which put it in an `elif` against the ending — and a `max_tokens` hand-over is both at once, so the hand-over's detail silently took the slot and the tear was reported nowhere at all.
+        parts.append(paint(f"upstream closed abruptly after finishing the turn: {line.tore_after_terminal}", YELLOW, color=color))
 
     rendered = " ".join(parts)
     thinking = format_thinking(line.thinking, line.dialect)

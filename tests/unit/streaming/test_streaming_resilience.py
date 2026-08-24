@@ -572,6 +572,72 @@ def test_a_cleanup_failure_does_not_displace_an_earlier_one() -> None:
     assert second.__context__ is first, "the earlier cleanup failure is still reachable"
 
 
+def _reachable(error: BaseException) -> list[str]:
+    """Everything reachable from `error` by either link.
+
+    Both links, because the question these tests ask is reachability. Following `__cause__` in preference — which is what a printer does, and what `hand_over.one_line` does — hid the entire result of one of them while it was being written.
+    """
+    found: list[str] = []
+    seen: set[int] = set()
+    stack: list[BaseException | None] = [error]
+    while stack:
+        current = stack.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        found.append(str(current))
+        stack.extend([current.__cause__, current.__context__])
+    return found
+
+
+def test_an_earlier_cleanup_survives_a_second_one_raised_while_the_primary_propagates() -> None:
+    """The shape the call sites actually produce, which the quiet two-calls-in-a-row test could not reach.
+
+    A close that fails inside `except primary` gets `primary` as its own implicit `__context__` before this helper sees it. That made `cleanup_error.__context__ is None` false, so the carry — written for exactly this case — skipped it, and the earlier cleanup failure was dropped after all. A review measured `earlier_reachable=False` on the version that had a passing test for the quiet case.
+
+    Clearing that temporary edge first is what makes the slot readable. Re-raising drops it anyway, so nothing is lost by doing it here.
+    """
+    root = Exception("root")
+    earlier = Exception("earlier cleanup")
+    primary = Exception("primary")
+    primary.__cause__ = root
+    primary.__context__ = earlier
+
+    with pytest.raises(Exception) as caught:
+        try:
+            raise primary
+        except Exception:
+            try:
+                raise Exception("new cleanup")
+            except Exception as new_cleanup:
+                raise_with_cleanup_under(primary, new_cleanup)
+
+    reachable = _reachable(caught.value)
+    assert "new cleanup" in reachable
+    assert "earlier cleanup" in reachable, "the earlier cleanup failure is still reachable"
+    assert "root" in reachable, "and so is the cause the author chose"
+
+
+def test_a_cleanup_that_already_points_at_the_primary_is_noted_rather_than_linked() -> None:
+    """`cleanup.__cause__ = primary` is a back-edge Python will not undo, unlike the implicit one.
+
+    Linking the other direction would close a two-object cycle that survives the re-raise — a real one, not the temporary shape above. The pairing still has to be recorded, so it goes in a note, which says the same thing and cannot be walked in circles.
+    """
+    primary = Exception("primary")
+    cleanup = Exception("cleanup")
+    cleanup.__cause__ = primary
+
+    with pytest.raises(Exception) as caught:
+        raise_with_cleanup_under(primary, cleanup)
+
+    assert caught.value is primary
+    assert caught.value.__cause__ is None, "no link back, because that one would be a cycle"
+    assert caught.value.__context__ is None
+    assert any("cleanup" in note for note in getattr(caught.value, "__notes__", [])), (
+        "and the cleanup failure is still on the record"
+    )
+
+
 def test_pairing_an_exception_with_itself_does_not_make_it_its_own_cause() -> None:
     """Python accepts `raise x from x`; a reader following the chain then walks in place.
 
@@ -591,7 +657,7 @@ def test_pairing_an_exception_with_itself_does_not_make_it_its_own_cause() -> No
 async def test_a_falsey_primary_is_still_the_exit_that_propagates() -> None:
     """`primary or cleanup_cancellation` conflates "is there one" with "which one wins".
 
-    A `BaseException` subclass may define `__bool__`, and `or` then silently promotes the cleanup failure over the exception that actually ended the stream — inverting the exit priority the comment beside it claims to state. Nothing in the standard library does this, which is exactly why it would not be noticed.
+    A `BaseException` subclass may define `__bool__`, and `or` then silently promotes the cleanup failure over the exception that actually ended the stream — inverting the exit priority the comment beside it claims to state. No exception exercised in this repository does this, which is exactly why it would not be noticed — that is a claim about the sample, not an exhaustive statement about the standard library.
     """
 
     class Falsey(Exception):
