@@ -54,7 +54,7 @@ from app.pipeline.delivery_policy import (
     stream_settings,
 )
 from app.pipeline.driver import handle, handle_bounded, handle_count_tokens, ledger_for
-from app.pipeline.hand_over import hand_back_block, replay_reason
+from app.pipeline.hand_over import hand_back_block, one_line, replay_reason
 from app.pipeline.reply import reply_summary, response_payload
 from app.pipeline.request import RequestContext, WireFormat
 from app.server.app_state import chain_of
@@ -422,9 +422,11 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
             fresh_assembler = assembler_for(again, hand_over_stop_reasons=_hand_over_reasons)
             # Otherwise the one surface that can show a replay happened stays at 1, and a request the proxy quietly answered twice reads exactly like one it answered once.
             trace.attempts = again.context.attempt_count
-            # And what it was replacing. A transparent replay that succeeds neither hands over nor re-raises, so `attempts=2` was the whole of what an operator got — a count with no cause. Being invisible to the *client* is the point; being invisible to the record is not. Kept as the first one, because the failure that started the replaying is the one that explains it.
+            # And what it was replacing. A transparent replay that succeeds neither hands over nor re-raises, so `attempts=2` was the whole of what an operator got — a count with no cause. Being invisible to the *client* is the point; being invisible to the record is not.
+            #
+            # The first one, not the last: the failure that started the replaying is the one that explains the count, and a later attempt failing the same way says nothing new. Bounded for the same reason `interruption_message` bounds its links — an upstream error carries whatever text upstream sent, `repr` has no limit of its own, and this one is rendered inline on a single completion line.
             if trace.replaced_failure is None:
-                trace.replaced_failure = repr(replacing)
+                trace.replaced_failure = one_line(repr(replacing))
             active.set_attempts(trace.request_id, again.context.attempt_count)
             # The accounting reads the terminal off whichever assembler is current, and after this the current one is this.
             accounting.assembler = fresh_assembler

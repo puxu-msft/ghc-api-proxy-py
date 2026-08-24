@@ -60,8 +60,11 @@ _MAX_LINK_CHARS = 240
 _MAX_LINKS = 6
 
 
-def _one_line(text: str) -> str:
-    """Collapse whitespace, and say so when the text was cut rather than letting it trail off."""
+def one_line(text: str) -> str:
+    """Collapse whitespace, and say so when the text was cut rather than letting it trail off.
+
+    Public because the completion line needs the same bound for the same reason: it renders a replayed failure's `repr` inline, and an upstream error carries whatever text upstream chose to send.
+    """
     flat = " ".join(text.split())
     if len(flat) <= _MAX_LINK_CHARS:
         return flat
@@ -123,7 +126,7 @@ def _link_text(link: BaseException) -> str:
     stream_id = getattr(link, "stream_id", None)
     if isinstance(link, H2Error) and isinstance(stream_id, int) and text == str(stream_id):
         return f"stream {stream_id}"
-    return _one_line(text)
+    return one_line(text)
 
 
 def _asyncio_timeout_plumbing(links: list[BaseException]) -> set[int]:
