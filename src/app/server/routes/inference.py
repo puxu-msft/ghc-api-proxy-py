@@ -36,10 +36,12 @@ from app.observability.request_trace import (
 )
 from app.pipeline.anthropic_request_hook import strip_attribution_lines
 from app.pipeline.delivery.assembling import BlockAssembler
-from app.pipeline.delivery.blocks import TOOL_USE, BlockBuffer
+from app.pipeline.delivery.blocks import TOOL_USE
 from app.pipeline.delivery.stream import (
+    Attempt,
     ContinuationSupport,
     ReplaySupport,
+    UpstreamSource,
     one_shot_delivery,
     stream_delivery,
 )
@@ -347,6 +349,17 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
         #
         # The registration deliberately outlives this function. A streaming request has produced nothing at the moment the handler returns — the body is consumed after — so releasing here would drop it off the footer at exactly the point it becomes worth watching.
         # Held rather than passed straight through: the assembler is what reads the upstream's terminal event, so after the stream finishes it is the only thing that knows the token usage and the stop reason.
+        # Two guards on the same bytes, and the order decides which one gets to speak: the deadline is outermost so that an idle timeout raised beneath it arrives with its own name rather than being relabelled by whichever guard happens to wrap the other.
+        # The second place `upstream_request_deadline` is enforced from — one bound, not two. `await send` returns when the response headers arrive — measured 2026-08-20 — so everything the body does afterwards happens with the driver already off the stack, and until this line nothing was holding the attempt to the life it was given.
+        upstream_side = UpstreamSource(
+            with_deadline_at(
+                with_idle_timeout(
+                    response.aiter_bytes(),
+                    timeout_seconds=stream_idle_seconds(chain),
+                ),
+                deadline_at=attempt.deadline_at if attempt is not None else None,
+            )
+        )
         assembler = assembler_for(handled, hand_over_stop_reasons=_hand_over_reasons)
         accounting = _StreamAccounting(
             chain=chain,
@@ -357,7 +370,7 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
             assembler=assembler,
         )
 
-        async def _reopen() -> tuple[AsyncIterator[bytes], BlockAssembler, BlockBuffer] | None:
+        async def _reopen() -> Attempt | None:
             """Another attempt at the same request, wrapped in the same guards as the first.
 
             `handle` rather than `handle_bounded`: the client deadline is enforced over the body now, and a second `asyncio.timeout` around this would be a second clock for one lifetime — the exact defect the outer guard was added to fix.
@@ -395,23 +408,27 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
             active.set_attempts(trace.request_id, again.context.attempt_count)
             # The accounting reads the terminal off whichever assembler is current, and after this the current one is this.
             accounting.assembler = fresh_assembler
-            body = with_idle_timeout(
-                reopened.aiter_bytes(), timeout_seconds=stream_idle_seconds(chain)
+            # Its own marker, at the same line as the first attempt's: below the counter, above the guards that speak for upstream. A fresh one rather than the first attempt's, so a tear that attempt recorded cannot be read as this one's.
+            fresh_upstream = UpstreamSource(
+                with_deadline_at(
+                    with_idle_timeout(
+                        reopened.aiter_bytes(), timeout_seconds=stream_idle_seconds(chain)
+                    ),
+                    deadline_at=fresh_attempt.deadline_at if fresh_attempt is not None else None,
+                )
             )
             return (
                 # The client's deadline wraps this one too. It is the same instant, so this is still one clock — but it is a *different iterator*, and the guard the first attempt was wrapped in went out with the stream it was wrapping. Without this a replayed body is bounded only by the attempt's own deadline: measured 2026-08-22, a 2-second client deadline let a replayed body run 6.1 seconds.
                 with_client_deadline_at(
                     _counted_upstream(
-                        with_deadline_at(
-                            body,
-                            deadline_at=fresh_attempt.deadline_at if fresh_attempt is not None else None,
-                        ),
+                        fresh_upstream,
                         chain,
                         trace.request_id,
                         trace,
                     ),
                     deadline_at=client_deadline_at,
                 ),
+                fresh_upstream,
                 fresh_assembler,
                 delivery_buffer(chain),
             )
@@ -430,6 +447,8 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
             if payload is not None:
                 # The client is about to get a complete reply it will act on, and the upstream attempt behind it did not finish.
                 accounting.handed_over = True
+                # Kept because a hand-over is the one ending that swallows its cause: the exception never leaves the delivery generator, so `_StreamAccounting.failure` — which is set from what propagates — stays `None` and the completion line had nothing to say about *why* the turn was handed back. Two reviews found failures reaching the client as a clean `retry` line with no account of them anywhere.
+                accounting.handed_over_error = error
             return payload
 
         continuation = ContinuationSupport(
@@ -449,15 +468,8 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
                     with_client_deadline_at(
                         # The guard measures upstream SSE activity, not the events parsed out of it. Ruled 2026-08-20: a comment frame and a large event still arriving both keep bytes moving while the parser yields nothing, so timing the parser would call a connection that is still transmitting silent — and never false-killing legitimate thinking is what `config.example.yaml` freezes.
                         _counted_upstream(
-                            # Two guards on the same bytes, and the order decides which one gets to speak: the deadline is outermost so that an idle timeout raised beneath it arrives with its own name rather than being relabelled by whichever guard happens to wrap the other.
-                            # The second place `upstream_request_deadline` is enforced from — one bound, not two. `await send` returns when the response headers arrive — measured 2026-08-20 — so everything the body does afterwards happens with the driver already off the stack, and until this line nothing was holding the attempt to the life it was given.
-                            with_deadline_at(
-                                with_idle_timeout(
-                                    response.aiter_bytes(),
-                                    timeout_seconds=stream_idle_seconds(chain),
-                                ),
-                                deadline_at=attempt.deadline_at if attempt is not None else None,
-                            ),
+                            # **The attribution line, and this is why it is here rather than around the whole chain.** Everything below states something about upstream — the raw bytes, and two guards whose entire purpose is to say upstream went quiet or ran out of time. Everything above is this side: `_counted_upstream` is bookkeeping, and a bug in it is ours. Delivery is handed this object alongside the composite and asks it, and only it, what raised. Wrapped around the composite instead, a `KeyError` in the byte counter reached the client as upstream's failure — measured, and the reason this parameter exists.
+                            upstream_side,
                             chain,
                             trace.request_id,
                             trace,
@@ -465,6 +477,7 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
                         deadline_at=client_deadline_at,
                     ),
                     assembler,
+                    upstream=upstream_side,
                     buffer=delivery_buffer(chain),
                     settings=settings,
                     framer=framer,
@@ -527,6 +540,8 @@ class _StreamAccounting:
     assembler: BlockAssembler | None = None
     # Set when the turn was handed back to the client as a tool call. Neither `ok` nor `fail` on its own: the client holds a complete reply and will act on it, and the upstream attempt behind it did not finish.
     handed_over: bool = False
+    # What the hand-over swallowed, when it swallowed one. `None` on the endings that are not failures — a turn upstream cut short for want of room is handed back without anything having gone wrong.
+    handed_over_error: BaseException | None = None
     done: bool = False
     # How the delivery generator ended. Three endings arrive here indistinguishable — upstream's stream ran out, upstream tore, or delivery was cut short from this side — because none of them saw a terminal event and that is all the assembler records. Naming the wrong one sends whoever reads the line to the wrong half of the system, so each is recorded where it happens instead of guessed here.
     drained: bool = False
@@ -566,6 +581,10 @@ class _StreamAccounting:
         """
         if self.handed_over:
             # Both at once, on purpose. Read before the others because they are all true as well — upstream did fail, or drain, or stop — and none of them is what the client got.
+            #
+            # The cause is quoted when there was one, for the same reason the branch below quotes it: this line is the only account of it that exists anywhere. A hand-over does not re-raise, so nothing downstream ever sees the exception, and `retry` on its own says a turn was handed back without saying what it was handed back from.
+            if self.handed_over_error is not None:
+                return "retry", f"turn handed back to the client to continue after {self.handed_over_error!r}"
             return "retry", "turn handed back to the client to continue"
         if self.failure is not None:
             return "fail", f"stream failed before a terminal event: {self.failure}"

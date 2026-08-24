@@ -33,8 +33,8 @@ from app.streaming.keepalive import finish_stream_cleanup
 PING_FRAME = b": ping\n\n"
 
 
-# What one replaced attempt hands over: a fresh byte stream, and the fresh assembler and buffer that go with it. Nothing from the attempt it replaces travels with them.
-type Attempt = tuple[AsyncIterator[bytes], BlockAssembler, BlockBuffer]
+# What one replaced attempt hands over: a fresh byte stream, the marker naming its upstream side, and the fresh assembler and buffer that go with it. Nothing from the attempt it replaces travels with them — including the marker, so a tear recorded by the previous attempt's cannot be mistaken for this one's.
+type Attempt = tuple[AsyncIterator[bytes], "UpstreamSource", BlockAssembler, BlockBuffer]
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,12 +214,12 @@ async def one_shot_delivery(chunks: AsyncIterator[bytes]) -> AsyncGenerator[byte
         yield bytes(body)
 
 
-class _UpstreamSource:
-    """The upstream byte stream, wrapped so that what it raises can be told from what this side raises.
+class UpstreamSource:
+    """The upstream side of the byte stream, named by the caller so that what it raises can be told from what this side raises.
 
-    Positive identification, and on the *upstream* side rather than this one. It used to be the other way round: a marker set at each place this side ran code, so that everything unmarked defaulted to upstream's. That list is unbounded by construction — an independent review made this loop's own SSE reader raise and watched the bug get handed to the client as upstream's — while everything upstream produces arrives through one iterator.
+    Positive identification, and on the *upstream* side rather than this one. It used to be the other way round: a marker set at each place this side ran code, so that everything unmarked defaulted to upstream's. That list is unbounded by construction — a review made this loop's own SSE reader raise and watched the bug get handed to the client as upstream's — while everything upstream produces passes through one point.
 
-    **What that iterator is, is the caller's answer, and in production it is not the raw response.** `inference.py` hands over `response.aiter_bytes()` under four layers: the client deadline (answered by its own branch before this predicate is reached), the attempt deadline and the idle timeout (guards that exist to represent an upstream condition, and belong on that side of the line), and `_counted_upstream`, which is bookkeeping and does not. A bug in the counter is therefore tagged here as upstream's — the same misattribution the marker-per-site version made, confirmed against that commit rather than assumed, so this is a seam the inversion did not reach rather than one it opened. Candidates for closing it, and what each costs, are in `deferred.md` §22之六; none of them is picked here.
+    **Which point that is, is the caller's to say, and it is not the iterator delivery receives.** `inference.py` composes four layers over `response.aiter_bytes()`, and the line does not fall at either end of them: the attempt deadline and the idle timeout are guards that exist to state an upstream condition, so they belong below it, while `_counted_upstream` is this side's bookkeeping and belongs above. Constructed here in the middle of that stack rather than around the whole of it, delivery is handed the composite and this object separately, and asks only this object what it raised. A bug in the byte counter is this side's again — measured, `handed_local_counter_bug` is now `False` where it was `True` at `62a457f`.
 
     A class rather than a generator. A generator could be written safely — `await source.__anext__()` inside the `try`, the `yield` outside it, the same shape `_commit` and the keep-alive use — but the safe and the unsafe spellings look alike, and the unsafe one records a consumer's `athrow` as upstream's. `__anext__` has no window to get wrong. `CancelledError` is not an `Exception` and is not tagged, which is what keeps `finish_stream_cleanup` cancelling the in-flight pull from reading as an upstream tear.
     """
@@ -252,6 +252,7 @@ async def stream_delivery(
     chunks: AsyncIterator[bytes],
     assembler: BlockAssembler,
     *,
+    upstream: UpstreamSource,
     buffer: BlockBuffer,
     settings: StreamSettings,
     framer: OutboundFramer,
@@ -275,6 +276,7 @@ async def stream_delivery(
         _deliver(
             chunks,
             assembler,
+            upstream=upstream,
             buffer=buffer,
             settings=settings,
             framer=framer,
@@ -292,6 +294,7 @@ async def _deliver(
     chunks: AsyncIterator[bytes],
     assembler: BlockAssembler,
     *,
+    upstream: UpstreamSource,
     buffer: BlockBuffer,
     settings: StreamSettings,
     framer: OutboundFramer,
@@ -308,13 +311,12 @@ async def _deliver(
 
     while True:
         torn: Exception | None = None
-        # Wrapped per attempt, so a replayed tear cannot be mistaken for the previous attempt's. Everything upstream produces enters through this and nothing else does, which is what makes "was this ours" answerable by identity rather than by a list of places to remember.
-        upstream = _UpstreamSource(chunks)
         # `aclosing` for the same reason as above: the inner generator owns the upstream pull, and only closing it releases the response. On the way out of a torn attempt this is what hands the old response back before another is opened.
         try:
             async with aclosing(
                 _events_with_ping(
-                    upstream,
+                    # The composite the caller built, not the marker inside it: this loop has to read every layer, including the ones above the marker. The marker is asked one question and never iterated.
+                    chunks,
                     settings.sse_ping_interval,
                     last_write=last_write,
                 )
@@ -395,7 +397,7 @@ async def _deliver(
                 replacement = await replay.reopen()
                 if replacement is not None:
                     # Everything the failed attempt built is dropped, not carried: a fresh assembler so no draft of its survives, and a fresh buffer so a block it completed but never delivered cannot be delivered twice. `session` goes with the buffer. Legal only because the verdict required nothing to have been committed — there is no frontier here to preserve, and none to roll back.
-                    chunks, assembler, buffer = replacement
+                    chunks, upstream, assembler, buffer = replacement
                     session = DeliverySession(buffer=buffer)
                     continue
         if not ours:

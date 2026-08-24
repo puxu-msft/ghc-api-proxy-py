@@ -20,9 +20,9 @@ from recorded.cassettes import (
     UnauthenticatedRequest,
 )
 from recorded.recorded_provider import cassette_path, recorded_chain
+from test_pipeline_app import delivering
 
 from app.pipeline.delivery.formats.anthropic_messages import AnthropicFramer
-from app.pipeline.delivery.stream import stream_delivery
 from app.pipeline.delivery_policy import assembler_for, delivery_buffer, stream_settings
 from app.pipeline.driver import handle_bounded
 from app.server.composition import refresh_catalogs
@@ -75,7 +75,7 @@ async def test_a_recorded_stream_assembles_into_anthropic_blocks() -> None:
 
         chunks = [
             chunk
-            async for chunk in stream_delivery(
+            async for chunk in delivering(
                 response.aiter_bytes(),
                 assembler_for(handled),
                 buffer=delivery_buffer(chain),

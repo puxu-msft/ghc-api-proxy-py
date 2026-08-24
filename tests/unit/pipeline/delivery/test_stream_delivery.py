@@ -21,16 +21,19 @@ from app.model_provider.ghc_client.errors import normalize_upstream_error
 from app.observability.active_requests import ActiveRequestRegistry
 from app.observability.request_trace import RequestTrace
 from app.pipeline.delivery import stream as stream_module
-from app.pipeline.delivery.assembling import Terminal
+from app.pipeline.delivery.assembling import BlockAssembler, Terminal
 from app.pipeline.delivery.blocks import BlockBuffer, CompletedBlock
 from app.pipeline.delivery.formats.anthropic_messages import AnthropicAssembler, AnthropicFramer
 from app.pipeline.delivery.formats.openai_responses import ResponsesAssembler
+from app.pipeline.delivery.framing import OutboundFramer
 from app.pipeline.delivery.sse_source import SseEvent
 from app.pipeline.delivery.stream import (
     PING_FRAME,
+    Attempt,
     ContinuationSupport,
     ReplaySupport,
     StreamSettings,
+    UpstreamSource,
     _events_with_ping,  # pyright: ignore[reportPrivateUsage]
     _LastWrite,  # pyright: ignore[reportPrivateUsage]
     stream_delivery,
@@ -90,7 +93,7 @@ async def collect(
 
     return [
         chunk
-        async for chunk in stream_delivery(
+        async for chunk in delivering(
             delayed_feed(),
             ResponsesAssembler() if assembler == "responses" else AnthropicAssembler(),
             buffer=BlockBuffer(policy=policy),  # pyright: ignore[reportArgumentType]
@@ -175,7 +178,7 @@ async def run_with_gap(payloads_before: int, gap: float) -> list[bytes]:
 
     return [
         chunk
-        async for chunk in stream_delivery(
+        async for chunk in delivering(
             trickle(),
             AnthropicAssembler(),
             buffer=BlockBuffer(policy="block"),
@@ -244,7 +247,7 @@ async def test_responses_upstream_is_delivered_as_anthropic_blocks() -> None:
     ]
     chunks = [
         chunk
-        async for chunk in stream_delivery(
+        async for chunk in delivering(
             feed(payloads),
             ResponsesAssembler(),
             buffer=BlockBuffer(policy="block"),
@@ -284,7 +287,7 @@ async def _truncated_delivery_of(payloads: list[bytes], assembler: AnthropicAsse
     """The same, for a caller that chooses how much of the ending upstream managed to send."""
     delivered: list[bytes] = []
     async with aclosing(
-        stream_delivery(
+        delivering(
             feed(payloads),
             assembler,
             buffer=BlockBuffer(policy="block"),
@@ -336,7 +339,7 @@ async def test_an_eof_through_a_block_is_still_a_truncation() -> None:
     # Everything up to and including the delta, but not the `content_block_stop`: a draft is left open.
     delivered: list[bytes] = []
     async with aclosing(
-        stream_delivery(
+        delivering(
             feed(anthropic_stream("one", "two")[:4]),
             AnthropicAssembler(),
             buffer=BlockBuffer(policy="block"),
@@ -361,7 +364,7 @@ async def test_an_empty_stop_reason_puts_the_clean_eof_back_to_an_error() -> Non
     """
     delivered: list[bytes] = []
     async with aclosing(
-        stream_delivery(
+        delivering(
             feed(anthropic_stream("one")[:-2]),
             AnthropicAssembler(),
             buffer=BlockBuffer(policy="block"),
@@ -423,7 +426,7 @@ def _responses_item(index: int, item_id: str, *, status: str) -> list[bytes]:
 async def _responses_delivery(payloads: list[bytes]) -> str:
     delivered: list[bytes] = []
     async with aclosing(
-        stream_delivery(
+        delivering(
             feed(payloads),
             ResponsesAssembler(),
             buffer=BlockBuffer(policy="block"),
@@ -585,7 +588,7 @@ async def _hanging_upstream(closed: list[bool], reached: asyncio.Event) -> Async
 
 
 def _delivery(chunks: AsyncIterator[bytes]) -> AsyncGenerator[bytes]:
-    return stream_delivery(
+    return delivering(
         chunks,
         AnthropicAssembler(),
         buffer=BlockBuffer(policy="block"),
@@ -691,7 +694,7 @@ async def test_the_idle_guard_settles_the_stream_it_was_watching() -> None:
 
 def delivery_of(chunks: AsyncIterator[bytes]) -> AsyncGenerator[bytes]:
     """`stream_delivery` over a caller-supplied upstream, for the paths `collect` cannot reach."""
-    return stream_delivery(
+    return delivering(
         chunks,
         AnthropicAssembler(),
         buffer=BlockBuffer(policy="block"),
@@ -796,7 +799,7 @@ async def run_held_back(policy: str) -> list[bytes]:
 
     return [
         chunk
-        async for chunk in stream_delivery(
+        async for chunk in delivering(
             trickle(),
             AnthropicAssembler(),
             buffer=BlockBuffer(policy=policy),  # pyright: ignore[reportArgumentType]
@@ -891,7 +894,7 @@ async def test_an_unassemblable_event_fails_before_the_preamble() -> None:
 
     with pytest.raises(ValueError):
         async with aclosing(
-            stream_delivery(
+            delivering(
                 upstream(),
                 AnthropicAssembler(),
                 buffer=BlockBuffer(policy="block"),
@@ -924,7 +927,7 @@ async def test_a_deadline_that_falls_due_during_assembly_is_not_missed() -> None
     start = time.monotonic()
     at: list[float] = []
     async with aclosing(
-        stream_delivery(
+        delivering(
             upstream(),
             SlowAssembler(seconds=1.05, first_block=True),
             buffer=BlockBuffer(policy="block"),
@@ -1082,10 +1085,12 @@ def _replay_over(attempts: list[list[bytes]]) -> ReplaySupport:
     """Hand out one fresh attempt per call, each with its own assembler and buffer."""
     remaining = list(attempts)
 
-    async def reopen() -> tuple[AsyncIterator[bytes], AnthropicAssembler, BlockBuffer] | None:
+    async def reopen() -> Attempt | None:
         if not remaining:
             return None
-        return (feed(remaining.pop(0)), AnthropicAssembler(), BlockBuffer(policy="block"))
+        # Its own marker, as production gives a replayed attempt: a tear the previous attempt recorded must not read as this one's.
+        source = UpstreamSource(feed(remaining.pop(0)))
+        return (source, source, AnthropicAssembler(), BlockBuffer(policy="block"))
 
     return ReplaySupport(
         ledger=RetryLedger(UpstreamRequestRetryConfig.model_validate({})),
@@ -1108,7 +1113,7 @@ async def test_a_stream_the_client_never_saw_is_replaced_without_a_trace() -> No
     """
     chunks = [
         chunk
-        async for chunk in stream_delivery(
+        async for chunk in delivering(
             _tears_after(anthropic_stream("lost")[:2]),
             AnthropicAssembler(),
             buffer=BlockBuffer(policy="block"),
@@ -1134,7 +1139,7 @@ async def test_a_stream_the_client_already_saw_is_not_replaced() -> None:
     with pytest.raises(ConnectionError):
         _ = [
             chunk
-            async for chunk in stream_delivery(
+            async for chunk in delivering(
                 torn,
                 AnthropicAssembler(),
                 buffer=BlockBuffer(policy="block"),
@@ -1156,7 +1161,7 @@ async def test_a_failure_no_second_attempt_could_answer_is_not_replaced() -> Non
     with pytest.raises(ConnectionError):
         _ = [
             chunk
-            async for chunk in stream_delivery(
+            async for chunk in delivering(
                 _tears_after(anthropic_stream("lost")[:2]),
                 AnthropicAssembler(),
                 buffer=BlockBuffer(policy="block"),
@@ -1191,7 +1196,7 @@ async def test_a_bug_in_framing_is_not_charged_to_upstream() -> None:
     with pytest.raises(TypeError):
         _ = [
             chunk
-            async for chunk in stream_delivery(
+            async for chunk in delivering(
                 feed(anthropic_stream("first")),
                 AnthropicAssembler(),
                 buffer=BlockBuffer(policy="block"),
@@ -1211,7 +1216,7 @@ async def test_a_bug_in_framing_says_so_on_the_frame_it_does_send() -> None:
     chunks: list[bytes] = []
 
     async def collect() -> None:
-        async for chunk in stream_delivery(
+        async for chunk in delivering(
             feed(anthropic_stream("first")),
             AnthropicAssembler(),
             buffer=BlockBuffer(policy="block"),
@@ -1258,7 +1263,7 @@ async def test_a_bug_in_the_keepalive_is_this_sides_too() -> None:
             yield payload
 
     with pytest.raises(TypeError):
-        async for chunk in stream_delivery(
+        async for chunk in delivering(
             silent_after_a_block(),
             AnthropicAssembler(),
             buffer=BlockBuffer(policy="block"),
@@ -1303,7 +1308,7 @@ async def test_a_bug_in_this_sides_sse_reader_is_not_handed_over_as_upstreams(
     monkeypatch.setattr(stream_module, "read_events", failing_reader)
 
     with pytest.raises(LookupError):
-        async for _ in stream_delivery(
+        async for _ in delivering(
             feed(anthropic_stream("first", "second")),
             AnthropicAssembler(),
             buffer=BlockBuffer(policy="block"),
@@ -1314,6 +1319,52 @@ async def test_a_bug_in_this_sides_sse_reader_is_not_handed_over_as_upstreams(
             pass
 
     assert handed == [], "this side's bug is not the client's to carry on from"
+
+
+class _ExplodingRegistry:
+    """Stands in for `ActiveRequestRegistry` so the real `_counted_upstream` can be driven into a bug."""
+
+    def __init__(self, boom_at: int) -> None:
+        self.seen = 0
+        self.boom_at = boom_at
+
+    def add_bytes(self, request_id: str, count: int) -> None:
+        self.seen += 1
+        if self.seen >= self.boom_at:
+            raise LookupError("bug in this side's byte counter")
+
+
+@pytest.mark.asyncio
+async def test_a_bug_below_the_marker_but_above_the_source_is_still_ours() -> None:
+    """The seam two reviews found, closed by where the marker sits rather than by another list of places.
+
+    Production composes four layers over the raw response, and `_counted_upstream` is one of them — this side's bookkeeping, not upstream's. While the marker wrapped the whole composite, a `LookupError` raised by the byte counter was tagged as upstream's tear and handed to the client, which returned cleanly with the exception gone. Measured at `62a457f`: `handed_count=1`, `returned_cleanly=True`.
+
+    Driven through the real `_counted_upstream`, not a stand-in for it: the defect was that the marker sat on the wrong side of that exact function.
+    """
+    handed: list[BaseException | None] = []
+
+    def synthesize(error: BaseException | None, _stop_reason: str) -> dict[str, Any]:
+        handed.append(error)
+        return {"type": "tool_use", "id": "toolu_x", "name": "carry_on", "input": {}}
+
+    chain = cast(Any, SimpleNamespace(active_requests=_ExplodingRegistry(boom_at=4)))
+    trace = RequestTrace(method="POST", path="/v1/messages", request_id="probe", started=time.monotonic())
+    source = UpstreamSource(feed(anthropic_stream("first")))
+
+    with pytest.raises(LookupError):
+        async for _ in stream_delivery(
+            _counted_upstream(source, chain, "probe", trace),
+            AnthropicAssembler(),
+            upstream=source,
+            buffer=BlockBuffer(policy="block"),
+            settings=StreamSettings(sse_ping_interval=0),
+            framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
+            continuation=ContinuationSupport(synthesize=synthesize),
+        ):
+            pass
+
+    assert handed == [], "this side's counter is not upstream, and its bug is not the client's to carry on from"
 
 
 @pytest.mark.asyncio
@@ -1334,7 +1385,7 @@ async def test_a_failure_nobody_can_name_still_reaches_the_hand_over() -> None:
     refusing = ReplaySupport(ledger=replay.ledger, eligible=lambda _error: None, reopen=replay.reopen)
     chunks = [
         chunk
-        async for chunk in stream_delivery(
+        async for chunk in delivering(
             _tears_after(anthropic_stream("held")[:3]),
             AnthropicAssembler(),
             buffer=BlockBuffer(policy="block"),
@@ -1370,7 +1421,7 @@ async def test_the_client_deadline_is_the_one_ending_that_says_so() -> None:
     """
     chunks = [
         chunk
-        async for chunk in stream_delivery(
+        async for chunk in delivering(
             _hits_the_client_deadline_after(anthropic_stream("one")[:-2]),
             AnthropicAssembler(),
             buffer=BlockBuffer(policy="block"),
@@ -1394,7 +1445,7 @@ async def test_the_client_deadline_outranks_an_upstream_that_just_finished() -> 
     """
     chunks = [
         chunk
-        async for chunk in stream_delivery(
+        async for chunk in delivering(
             _hits_the_client_deadline_after(anthropic_stream("one")),
             AnthropicAssembler(),
             buffer=BlockBuffer(policy="block"),
@@ -1420,7 +1471,7 @@ async def test_an_upstream_tear_is_framed_and_then_raised() -> None:
     chunks: list[bytes] = []
     with pytest.raises(ConnectionError):
         async with aclosing(
-            stream_delivery(
+            delivering(
                 _tears_after(anthropic_stream("one")[:3]),
                 AnthropicAssembler(),
                 buffer=BlockBuffer(policy="block"),
@@ -1450,7 +1501,7 @@ async def test_a_held_back_policy_still_hears_the_client_deadline(policy: str) -
     """
     chunks = [
         chunk
-        async for chunk in stream_delivery(
+        async for chunk in delivering(
             _hits_the_client_deadline_after(anthropic_stream("one")[:-2]),
             AnthropicAssembler(),
             buffer=BlockBuffer(policy=policy),  # pyright: ignore[reportArgumentType]
@@ -1486,7 +1537,7 @@ async def test_a_finished_turn_survives_a_failure_nothing_recognises(policy: str
     """
     reopened = 0
 
-    async def reopen() -> tuple[AsyncIterator[bytes], AnthropicAssembler, BlockBuffer] | None:
+    async def reopen() -> Attempt | None:
         nonlocal reopened
         reopened += 1
         return None
@@ -1500,7 +1551,7 @@ async def test_a_finished_turn_survives_a_failure_nothing_recognises(policy: str
 
     chunks = [
         chunk
-        async for chunk in stream_delivery(
+        async for chunk in delivering(
             _finishes_then_tears(torn),
             AnthropicAssembler(),
             buffer=BlockBuffer(policy=policy),  # pyright: ignore[reportArgumentType]
@@ -1525,3 +1576,30 @@ async def test_a_finished_turn_survives_a_failure_nothing_recognises(policy: str
         "message_stop",
     ]
     assert b'"text":"complete"' in b"".join(chunks)
+
+
+def delivering(
+    chunks: AsyncIterator[bytes],
+    assembler: BlockAssembler,
+    *,
+    buffer: BlockBuffer,
+    settings: StreamSettings,
+    framer: OutboundFramer,
+    replay: ReplaySupport | None = None,
+    continuation: ContinuationSupport | None = None,
+) -> AsyncGenerator[bytes]:
+    """`stream_delivery` with the upstream side named, which in a test is the whole of what was passed.
+
+    Production composes four layers over the raw response and puts the marker in the middle of them, because `_counted_upstream` above it is this side's bookkeeping. A test hands over one iterator and nothing wraps it, so the marker is that iterator — which is exactly why it is spelled out here rather than defaulted inside `stream_delivery`: the default that is right for every test is the one that was wrong in production.
+    """
+    source = UpstreamSource(chunks)
+    return stream_delivery(
+        source,
+        assembler,
+        upstream=source,
+        buffer=buffer,
+        settings=settings,
+        framer=framer,
+        replay=replay,
+        continuation=continuation,
+    )

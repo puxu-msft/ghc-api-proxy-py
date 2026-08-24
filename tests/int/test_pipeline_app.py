@@ -39,8 +39,17 @@ from app.observability.active_requests import ActiveRequestRegistry
 from app.observability.logging import setup_logging
 from app.observability.request_log_file import request_logs_dir
 from app.observability.request_trace import REQUEST_LOGGER, RequestTrace
+from app.pipeline.delivery.assembling import BlockAssembler
+from app.pipeline.delivery.blocks import BlockBuffer
 from app.pipeline.delivery.formats.anthropic_messages import AnthropicAssembler, AnthropicFramer
-from app.pipeline.delivery.stream import stream_delivery
+from app.pipeline.delivery.framing import OutboundFramer
+from app.pipeline.delivery.stream import (
+    ContinuationSupport,
+    ReplaySupport,
+    StreamSettings,
+    UpstreamSource,
+    stream_delivery,
+)
 from app.pipeline.delivery_policy import delivery_buffer, stream_settings
 from app.server.app_state import CHAIN_STATE_KEY
 from app.server.composition import build_chain
@@ -2013,7 +2022,7 @@ async def test_an_upstream_that_tore_says_so_and_says_what_broke(
         raise httpx2.ReadError("connection reset by peer")
 
     delivery = _tracked_delivery(
-        stream_delivery(
+        delivering(
             tears_after_the_first_block(),
             assembler,
             buffer=delivery_buffer(chain),
@@ -2062,7 +2071,7 @@ async def test_a_tear_after_the_stop_reason_is_still_a_tear(
         raise httpx2.ReadError("connection reset by peer")
 
     delivery = _tracked_delivery(
-        stream_delivery(
+        delivering(
             tears_after_its_stop_reason(),
             assembler,
             buffer=delivery_buffer(chain),
@@ -2136,7 +2145,7 @@ async def test_a_client_that_walked_away_is_not_blamed_on_upstream(
         await asyncio.Event().wait()
 
     delivery = _tracked_delivery(
-        stream_delivery(
+        delivering(
             still_sending(),
             assembler,
             buffer=delivery_buffer(chain),
@@ -3245,6 +3254,78 @@ def test_an_interrupted_turn_is_handed_back_to_the_client_as_a_tool_call(
     assert b'"text":"first"' in delivered
 
 
+def test_the_marker_sits_below_this_sides_bookkeeping_in_production(
+    request_log: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Where the attribution marker is placed is a fact about `inference.py`, and only the served path can show it.
+
+    The unit test beside `_counted_upstream` composes its own layers, so it proves the predicate and not the wiring — the shape this project has been bitten by twice. Here the registry the real `_counted_upstream` calls is replaced with one that raises after a block has gone out, so the failure originates *between* the marker and the client.
+
+    Two reviews measured the wrong placement: with the marker around the whole composite, this bug was tagged as upstream's, handed to the client as a `tool_use`, and the delivery returned cleanly with the exception gone. What it must do instead is reach the caller.
+    """
+
+    class Exploding(ActiveRequestRegistry):
+        def __init__(self) -> None:
+            super().__init__()
+            self.seen = 0
+
+        def add_bytes(self, request_id: str, count: int) -> None:
+            self.seen += 1
+            if self.seen >= 4:
+                raise LookupError("bug in this side's byte counter")
+            super().add_bytes(request_id, count)
+
+    async def frame_by_frame() -> AsyncIterator[bytes]:
+        # One chunk per frame, so the counter is called several times and the bug lands after a block has already gone out.
+        for frame in sse_upstream("first", "second").split(b"\n\n"):
+            if frame:
+                yield frame + b"\n\n"
+
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200,
+            content=frame_by_frame(),
+            headers={"content-type": "text/event-stream"},
+        ),
+        overrides={"upstream_request_retry": {"max_total": 0}},
+    )
+    chain = _chain_of(client)
+    setattr(cast(FastAPI, client.app).state, CHAIN_STATE_KEY, replace(chain, active_requests=Exploding()))
+
+    with caplog.at_level(logging.INFO), pytest.raises(LookupError):
+        _delivered(client)
+
+    # And it is not dressed up as a turn the client can carry on from.
+    assert not any("handed back" in line for line in _request_lines(caplog.records))
+
+
+def test_a_hand_over_says_what_it_swallowed(
+    request_log: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A hand-over is the one ending whose cause has nowhere else to go.
+
+    It does not re-raise: the exception stops inside the delivery generator, so the accounting's `failure` — set from what propagates — stays `None`, and the completion line said only that a turn had been handed back. Every other ending on this path quotes its cause for exactly this reason, and two reviews found failures reaching the client through this one with no account of them anywhere.
+    """
+
+    async def torn_body() -> AsyncIterator[bytes]:
+        yield sse_upstream("first").partition(b"event: message_delta")[0]
+        raise httpx2.RemoteProtocolError("peer closed the connection")
+
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200, content=torn_body(), headers={"content-type": "text/event-stream"}
+        ),
+        overrides={"upstream_request_retry": {"max_total": 0}},
+    )
+    with caplog.at_level(logging.INFO):
+        _delivered(client)
+
+    handed_lines = [line for line in _request_lines(caplog.records) if "handed back" in line]
+    assert len(handed_lines) == 1
+    assert "RemoteProtocolError" in handed_lines[0]
+    assert "peer closed the connection" in handed_lines[0]
+
+
 def test_a_failure_the_taxonomy_cannot_name_is_still_upstreams() -> None:
     """The hand-over used to call an unnameable failure `internal`, which says the proxy broke.
 
@@ -3480,3 +3561,30 @@ def test_a_finished_turn_on_the_translation_leg_is_not_handed_back_either() -> N
     assert b"turn_interrupted" not in delivered
     assert b"message_stop" in delivered
     assert _records()[-1]["status"] == "ok"
+
+
+def delivering(
+    chunks: AsyncIterator[bytes],
+    assembler: BlockAssembler,
+    *,
+    buffer: BlockBuffer,
+    settings: StreamSettings,
+    framer: OutboundFramer,
+    replay: ReplaySupport | None = None,
+    continuation: ContinuationSupport | None = None,
+) -> AsyncGenerator[bytes]:
+    """`stream_delivery` with the upstream side named, which in a test is the whole of what was passed.
+
+    Production composes four layers over the raw response and puts the marker in the middle of them, because `_counted_upstream` above it is this side's bookkeeping. A test hands over one iterator and nothing wraps it, so the marker is that iterator — which is exactly why it is spelled out here rather than defaulted inside `stream_delivery`: the default that is right for every test is the one that was wrong in production.
+    """
+    source = UpstreamSource(chunks)
+    return stream_delivery(
+        source,
+        assembler,
+        upstream=source,
+        buffer=buffer,
+        settings=settings,
+        framer=framer,
+        replay=replay,
+        continuation=continuation,
+    )

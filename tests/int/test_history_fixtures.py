@@ -14,13 +14,14 @@ import orjson
 import pytest
 from recorded.cassettes import Cassette
 from recorded.recorded_provider import cassette_path
+from test_pipeline_app import delivering
 
 from app.pipeline.delivery.assembling import BlockAssembler
 from app.pipeline.delivery.blocks import BlockBuffer, CompletedBlock
 from app.pipeline.delivery.formats.anthropic_messages import AnthropicAssembler, AnthropicFramer
 from app.pipeline.delivery.formats.openai_responses import ResponsesAssembler
 from app.pipeline.delivery.sse_source import parse_frame
-from app.pipeline.delivery.stream import StreamSettings, stream_delivery
+from app.pipeline.delivery.stream import StreamSettings
 
 RESPONSES = "history_responses_stream"
 ANTHROPIC = "history_anthropic_stream"
@@ -42,7 +43,7 @@ async def deliver(name: str, assembler: BlockAssembler) -> bytes:
     return b"".join(
         [
             chunk
-            async for chunk in stream_delivery(
+            async for chunk in delivering(
                 feed(),
                 assembler,
                 buffer=BlockBuffer(policy="block"),
