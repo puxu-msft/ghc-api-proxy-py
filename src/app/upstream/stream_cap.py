@@ -56,7 +56,8 @@ class StreamCappedConnection(AsyncConnectionInterface):
 
     def assigned_request_count(self) -> int:
         """How many accepted requests the pool has assigned to this connection right now."""
-        return sum(1 for request in self._pool._requests if request.connection is self)
+        # The private name is the whole point of `_PoolWithRequests`, whose docstring says so; the module header says which httpcore releases it has survived and what an upgrade has to check.
+        return sum(1 for request in self._pool._requests if request.connection is self)  # pyright: ignore[reportPrivateUsage]
 
     def is_available(self) -> bool:
         """The one answer that differs: full means unavailable, however the inner connection feels about it."""
@@ -126,7 +127,8 @@ def cap_streams_per_connection(client: httpx2.AsyncClient, max_streams: int) -> 
     #
     # Keyed by `id()` rather than put in a set, because identity is the property meant here and a set would spell it as equality. Transports have no `__eq__` today, so the two agree; a future httpx that gave them value equality *and* a matching `__hash__` would have a set fold two distinct pools into one and leave the second uncapped — silently, which is the failure this whole module is written against. (With `__eq__` alone the set would raise instead, which is at least loud.) Every transport is kept alive by `client` for the duration, so the ids cannot be reused underneath us.
     pools_to_cap: dict[int, httpx2.AsyncBaseTransport] = {}
-    for transport in (client._transport, *client._mounts.values()):
+    # Private on both names, and httpx offers no public way to reach either. The comment above says why both are needed; there is no reading of this module under which it stops touching them.
+    for transport in (client._transport, *client._mounts.values()):  # pyright: ignore[reportPrivateUsage]
         if transport is not None:
             pools_to_cap.setdefault(id(transport), transport)
     for transport in pools_to_cap.values():

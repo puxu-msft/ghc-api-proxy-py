@@ -17,6 +17,7 @@ from app.observability.request_log import (
 )
 from app.observability.terminal import BOLD_RED, CYAN, DIM, GREEN, RED, RESET, WHITE, YELLOW
 from app.pipeline.delivery.assembling import ReplyDialect
+from app.pipeline.hand_over import one_line
 
 
 def test_a_successful_request_names_the_model_rather_than_the_route() -> None:
@@ -187,6 +188,25 @@ def test_retries_are_reported_once_the_count_is_final() -> None:
         status="ok",
     )
     assert "retries=2" in line
+
+
+def test_what_each_replay_replaced_is_named_and_the_whole_set_is_bounded() -> None:
+    """Three entries, each individually short enough to pass, whose sum is not.
+
+    The bound is applied to the joined string rather than to each entry, and the two are only the same thing when there is one replay. Every entry here is already within `one_line`'s per-entry limit — they arrive that way, cut in `_reopen` — so a per-entry bound would let all three through and put roughly 500 characters on one console line.
+    """
+    entries = tuple(f"RemoteProtocolError('peer closed connection while receiving attempt {n} of the response body')" for n in (1, 2, 3))
+    assert all(one_line(entry) == entry for entry in entries), "the premise: no single entry is over the limit"
+
+    line = format_completion_line(
+        RequestLine(method="POST", path="/p", inbound_format="f", model="m", status_code=200, duration_s=1.0, attempts=4, replaced_failures=entries),
+        status="ok",
+    )
+    assert "retries=3" in line
+    # The first is what the reader wants most, and it survives the cut.
+    assert "attempt 1 of the response body" in line
+    assert "more chars)" in line, "the set was cut"
+    assert "attempt 3" not in line, "and the cut is what dropped the tail, not a shorter join"
 
 
 def test_the_byte_marker_degrades_where_the_glyph_cannot_be_encoded() -> None:

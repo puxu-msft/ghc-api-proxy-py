@@ -72,7 +72,7 @@ def test_httpcore_still_exposes_the_bookkeeping_the_cap_counts() -> None:
     Nothing else notices: `assigned_request_count()` would return 0 for every connection, `is_available()` would answer True forever, and every request would go back to sharing one connection — with no exception, no log line, and a config key still claiming the protection is on. httpcore's CHANGELOG has never mentioned its pool internals, including in the release that rewrote them, so an upgrade will not tell you either. This test is the notification.
     """
     pool = httpcore2.AsyncConnectionPool()
-    assert isinstance(pool._requests, list), "httpcore.AsyncConnectionPool no longer keeps `_requests`"
+    assert isinstance(pool._requests, list), "httpcore.AsyncConnectionPool no longer keeps `_requests`"  # pyright: ignore[reportPrivateUsage]
 
     # The element type is only reachable through the module; the implementation deliberately does not import it, but a test may name it to assert its shape.
     from httpcore2._async.connection_pool import AsyncPoolRequest
@@ -128,10 +128,23 @@ def test_max_concurrent_requests_answers_rather_than_going_missing() -> None:
 # --------------------------------------------------------------------------------------
 
 
+def _connection_the_pool_creates(client: httpx2.AsyncClient) -> httpcore2.AsyncConnectionInterface:
+    """Ask the client's own pool for a connection, which is the only way to see what the cap installed.
+
+    `_transport._pool` is private on both hops and httpx offers no public equivalent — `cap_streams_per_connection` patches that exact path, so a test reaching it some other way would not be testing the thing. Written once here rather than at four call sites: pyright reports the pool as unknown, and an unknown spreads into every local it touches, which is what turned one deliberate private access into eleven diagnostics.
+
+    Two hops needing two different answers, which is why one `# pyright: ignore` never worked here. `client._transport` is private, so it is ignored; it is declared `AsyncBaseTransport`, which has no `_pool` at all, so an *explicit* `Any` is what lets the second hop through — an ignore there would silence the access and still leave the result Unknown, and Unknown spreads into every local it touches. The call sites used to name `reportAttributeAccessIssue` alone and suppressed nothing at all: eleven of this repository's twenty-one diagnostics came from four lines each carrying a comment that read like a decision.
+    """
+    # Two hops, two spellings, because the reach breaks two different ways and each needs its own answer.
+    transport: Any = client._transport  # pyright: ignore[reportPrivateUsage]
+    pool = cast(httpcore2.AsyncConnectionPool, transport._pool)
+    return pool.create_connection(httpcore2.Origin(b"https", b"example.invalid", 443))
+
+
 def test_capping_wraps_what_the_pool_creates() -> None:
     client = httpx2.AsyncClient(http2=True)
     cap_streams_per_connection(client, 2)
-    created = client._transport._pool.create_connection(httpcore2.Origin(b"https", b"example.invalid", 443))  # pyright: ignore[reportAttributeAccessIssue]
+    created = _connection_the_pool_creates(client)
     assert isinstance(created, StreamCappedConnection)
 
 
@@ -142,7 +155,7 @@ def test_capping_reaches_the_proxy_pool_too() -> None:
     """
     client = httpx2.AsyncClient(http2=True, proxy="http://127.0.0.1:1080")
     cap_streams_per_connection(client, 1)
-    created = client._transport._pool.create_connection(httpcore2.Origin(b"https", b"example.invalid", 443))  # pyright: ignore[reportAttributeAccessIssue]
+    created = _connection_the_pool_creates(client)
     assert isinstance(created, StreamCappedConnection)
 
 
@@ -236,15 +249,13 @@ def test_the_configured_cap_reaches_the_client() -> None:
     config = ProxyConfig.model_validate({"upstream_transport": {"max_streams_per_connection": 2}})
     assert transport_options(config, proxy_from_cli=False).max_streams_per_connection == 2
     client = build_http_client(config, proxy_from_cli=False)
-    created = client._transport._pool.create_connection(httpcore2.Origin(b"https", b"example.invalid", 443))  # pyright: ignore[reportAttributeAccessIssue]
+    created = _connection_the_pool_creates(client)
     assert isinstance(created, StreamCappedConnection)
 
 
 def test_the_default_client_is_left_alone() -> None:
     """Off must mean untouched, not capped at some large number: an uncapped pool is httpx's own behaviour and should stay literally that."""
-    created = build_http_client(ProxyConfig(), proxy_from_cli=False)._transport._pool.create_connection(  # pyright: ignore[reportAttributeAccessIssue]
-        httpcore2.Origin(b"https", b"example.invalid", 443)
-    )
+    created = _connection_the_pool_creates(build_http_client(ProxyConfig(), proxy_from_cli=False))
     assert not isinstance(created, StreamCappedConnection)
 
 
@@ -400,7 +411,7 @@ async def test_the_real_pool_opens_another_connection_once_one_is_full(cap: int,
     async with asyncio.TaskGroup() as group:
         tasks = [group.create_task(issue()) for _ in range(6)]
         # Every request is assigned before any finishes, which is what makes the count a statement about concurrency rather than about reuse over time.
-        while sum(1 for request in pool._requests if request.connection is not None) < 6:
+        while sum(1 for request in pool._requests if request.connection is not None) < 6:  # pyright: ignore[reportPrivateUsage]
             await asyncio.sleep(0)
         assert len(created) == expected
         release.set()

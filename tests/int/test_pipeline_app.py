@@ -5,6 +5,7 @@ Upstream protocol behaviour is therefore the real thing rather than a friendlier
 """
 
 import asyncio
+import contextlib
 import logging
 import re
 import time
@@ -39,6 +40,7 @@ from app.observability.active_requests import ActiveRequestRegistry
 from app.observability.logging import setup_logging
 from app.observability.request_log_file import request_logs_dir
 from app.observability.request_trace import REQUEST_LOGGER, RequestTrace
+from app.pipeline import driver
 from app.pipeline.delivery.assembling import BlockAssembler
 from app.pipeline.delivery.blocks import BlockBuffer
 from app.pipeline.delivery.formats.anthropic_messages import AnthropicAssembler, AnthropicFramer
@@ -3156,6 +3158,52 @@ def test_a_replay_is_reported_on_the_request_line(
     assert "peer closed the connection" in line
 
 
+def test_a_replacement_that_never_reached_upstream_is_not_recorded_as_one(
+    request_log: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The entry and the attempt count are written off the same fact, so neither can appear without the other.
+
+    `context.attempt_count` advances in `begin_attempt`, deep inside the driver, and `handle` can fail well before reaching it — `shape_request` and translation both run first. Recording the replacement on the way in was the fix for losing a replacement that failed *after* opening its attempt, and it overshot in the other direction: measured, one upstream call, `attempts=1`, and a `replaced_failures` entry claiming a replay that never sent a byte.
+
+    A phantom here is worse than a missing entry, because the field exists to answer "what did this proxy quietly do" and an invented answer is unfalsifiable from the record.
+    """
+    calls: list[int] = []
+
+    async def torn_body() -> AsyncIterator[bytes]:
+        yield (
+            b'event: content_block_start\ndata: {"index":0,"content_block":{"type":"text"}}\n\n'
+        )
+        raise httpx2.RemoteProtocolError("peer closed the connection")
+
+    def upstream(request: httpx2.Request) -> httpx2.Response:
+        calls.append(1)
+        return httpx2.Response(
+            200, content=torn_body(), headers={"content-type": "text/event-stream"}
+        )
+
+    real_shape = driver.shape_request
+    shaped: list[int] = []
+
+    def shape_once(*args: Any, **kwargs: Any) -> Any:
+        shaped.append(1)
+        if len(shaped) > 1:
+            # Before the driver exists, let alone `begin_attempt` — the same position a routing or translation failure occupies.
+            raise RuntimeError("the replay could not even be shaped")
+        return real_shape(*args, **kwargs)
+
+    monkeypatch.setattr(driver, "shape_request", shape_once)
+
+    client, _ = make_client(upstream)
+    with contextlib.suppress(Exception):
+        client.post("/v1/messages", json={"model": "claude-model", "messages": [], "stream": True})
+
+    assert len(shaped) == 2, "the premise: a replay was attempted"
+    assert calls == [1], "and it never reached upstream"
+    record = _records()[-1]
+    assert record["attempts"] == 1
+    assert record["replaced_failures"] == []
+
+
 def test_a_long_upstream_failure_is_cut_before_it_reaches_the_line(
     request_log: None, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -3667,7 +3715,7 @@ def delivering(
 ) -> AsyncGenerator[bytes]:
     """`stream_delivery` with the upstream side named, which in a test is the whole of what was passed.
 
-    Production composes four layers over the raw response and puts the marker in the middle of them, because `_counted_upstream` above it is this side's bookkeeping. A test hands over one iterator and nothing wraps it, so the marker is that iterator — which is exactly why it is spelled out here rather than defaulted inside `stream_delivery`: the default that is right for every test is the one that was wrong in production.
+    Production composes four wrappers over the raw response and puts the marker in the middle of them — five objects in all — because `_counted_upstream` above it is this side's bookkeeping. A test hands over one iterator and nothing wraps it, so the marker is that iterator — which is exactly why it is spelled out here rather than defaulted inside `stream_delivery`: the default that is right for every test is the one that was wrong in production.
     """
     source = UpstreamSource(chunks)
     return stream_delivery(

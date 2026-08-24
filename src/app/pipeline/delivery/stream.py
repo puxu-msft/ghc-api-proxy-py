@@ -28,7 +28,7 @@ from app.pipeline.delivery.framing import OutboundFramer
 from app.pipeline.delivery.sse_source import SseEvent, read_events
 from app.pipeline.retry import RetryLedger, RetryReason, StreamEnding, decide_stream_ending
 from app.streaming.deadline import ClientDeadlineError
-from app.streaming.keepalive import finish_stream_cleanup
+from app.streaming.keepalive import finish_stream_cleanup, raise_with_cleanup_under
 
 PING_FRAME = b": ping\n\n"
 
@@ -38,7 +38,7 @@ class UpstreamSource:
 
     Positive identification, and on the *upstream* side rather than this one. It used to be the other way round: a marker set at each place this side ran code, so that everything unmarked defaulted to upstream's. That list is unbounded by construction — a review made this loop's own SSE reader raise and watched the bug get handed to the client as upstream's — while everything upstream produces passes through one point.
 
-    **Which point that is, is the caller's to say, and it is not the iterator delivery receives.** `inference.py` composes four layers over `response.aiter_bytes()`, and the line does not fall at either end of them: the attempt deadline and the idle timeout are guards that exist to state an upstream condition, so they belong below it, while `_counted_upstream` is this side's bookkeeping and belongs above. Constructed here in the middle of that stack rather than around the whole of it, delivery is handed the composite and this object separately, and asks only this object what it raised. A bug in the byte counter is this side's again — measured, `handed_local_counter_bug` is now `False` where it was `True` at `62a457f`.
+    **Which point that is, is the caller's to say, and it is not the iterator delivery receives.** `inference.py` composes four wrappers over `response.aiter_bytes()` — five objects in the stack once this one is in it — and the line does not fall at either end: the attempt deadline and the idle timeout are guards that exist to state an upstream condition, so they belong below it, while `_counted_upstream` is this side's bookkeeping and belongs above. Constructed here in the middle of that stack rather than around the whole of it, delivery is handed the composite and this object separately, and asks only this object what it raised. A bug in the byte counter is this side's again — measured, `handed_local_counter_bug` is now `False` where it was `True` at `62a457f`.
 
     A class rather than a generator. A generator could be written safely — `await source.__anext__()` inside the `try`, the `yield` outside it, the same shape `_commit` and the keep-alive use — but the safe and the unsafe spellings look alike, and the unsafe one records a consumer's `athrow` as upstream's. `__anext__` has no window to get wrong. `CancelledError` is not an `Exception` and is not tagged, which is what keeps `finish_stream_cleanup` cancelling the in-flight pull from reading as an upstream tear.
     """
@@ -209,7 +209,7 @@ async def _events_with_ping(
         primary = primary or cleanup_cancellation
         if primary is not None:
             if cleanup_error is not None:
-                raise primary from cleanup_error
+                raise_with_cleanup_under(primary, cleanup_error)
             if cleanup_cancellation is not None:
                 raise primary
         elif cleanup_error is not None:

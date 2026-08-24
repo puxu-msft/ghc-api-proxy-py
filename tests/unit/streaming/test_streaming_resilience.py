@@ -8,7 +8,11 @@ import pytest
 from app.streaming.buffered_retry import BufferLimitExceeded, collect_with_limit
 from app.streaming.delayed_commit import delayed_first_item
 from app.streaming.idle_timeout import StreamIdleTimeoutError
-from app.streaming.keepalive import keepalive_stream, session_liveness_stream
+from app.streaming.keepalive import (
+    keepalive_stream,
+    raise_with_cleanup_under,
+    session_liveness_stream,
+)
 
 
 @pytest.mark.asyncio
@@ -506,3 +510,35 @@ async def test_buffered_retry_enforces_memory_cap() -> None:
 
     with pytest.raises(BufferLimitExceeded):
         await collect_with_limit(source(), cap_bytes=7)
+
+
+def test_a_cleanup_failure_never_displaces_a_cause_the_author_chose() -> None:
+    """`raise primary from cleanup_error` is the obvious spelling, and it silently deletes an explicit `__cause__`.
+
+    The exit that started cleanup often already carries the reason it happened — `raise UpstreamError(...) from OSError(...)` is the shape this proxy's own normalisation produces. Overwriting that with "and then the close also failed" trades the cause an operator needs for a consequence of it. Measured before this helper existed: the root was no longer reachable from the chain at all.
+
+    Both fields are used because they mean different things. `__cause__` is "this is why", which belongs to whoever raised the primary; `__context__` is "this also happened while unwinding", which is what a cleanup failure is.
+    """
+    root = OSError("[Errno 104] Connection reset by peer")
+    primary = RuntimeError("upstream tore the stream")
+    primary.__cause__ = root
+    cleanup = RuntimeError("and the body could not be closed")
+
+    with pytest.raises(RuntimeError) as caught:
+        raise_with_cleanup_under(primary, cleanup)
+
+    assert caught.value is primary
+    assert caught.value.__cause__ is root, "the author's cause survives"
+    assert caught.value.__context__ is cleanup, "and the cleanup failure is still recorded"
+
+
+def test_a_cleanup_failure_becomes_the_cause_when_nothing_is_there() -> None:
+    """With no cause of its own, the primary gets one — which is what makes the pair readable at all."""
+    primary = RuntimeError("upstream tore the stream")
+    cleanup = RuntimeError("and the body could not be closed")
+
+    with pytest.raises(RuntimeError) as caught:
+        raise_with_cleanup_under(primary, cleanup)
+
+    assert caught.value is primary
+    assert caught.value.__cause__ is cleanup

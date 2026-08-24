@@ -66,6 +66,7 @@ from app.streaming.deadline import (
     with_deadline_at,
 )
 from app.streaming.idle_timeout import with_idle_timeout
+from app.streaming.keepalive import finish_stream_cleanup, raise_with_cleanup_under
 
 
 async def serve(request: Request) -> Response:
@@ -408,16 +409,21 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
                     request_id=trace.request_id,
                 )
                 return None
-            # Recorded before the attempt rather than after it succeeds. A replacement that fails still sent a request upstream, and a review measured what "after" cost: two upstream calls, and a record reading `attempts=1` with nothing replaced. Every one of them, not the first — the same review put a bare `h2.ProtocolError` in the second position of three and watched it vanish behind the first attempt's `RemoteProtocolError`, which is the exact class of failure this whole slice exists to make visible.
-            trace.replaced_failures.append(one_line(repr(replacing)))
             # What the client sent, not what the last attempt turned it into. See `inbound_payload`.
             context.payload = deepcopy(inbound_payload)
+            opened_before = context.attempt_count
             try:
                 again = await handle(chain, context, _routed)
             finally:
-                # Read off the context whatever happened, because the attempt was opened either way. Left until after `handle`, it reported one attempt for a request that made two.
-                trace.attempts = context.attempt_count
-                active.set_attempts(trace.request_id, context.attempt_count)
+                # Both written off the same fact — whether `begin_attempt` ran — so an entry here always means an upstream attempt was opened for it, and never the reverse.
+                #
+                # Not "after `handle` returned", which loses a replacement that opened an attempt and then failed: a review measured two upstream calls recorded as `attempts=1` with nothing replaced. Not "before `handle`" either, which was the fix for that and overshot: `handle` can fail in `shape_request` or translation, before `DirectDriver.run` reaches `begin_attempt`, and the same review measured one upstream call carrying a phantom replacement entry.
+                #
+                # Every failure, not the first. The same review put a bare `h2.ProtocolError` in the second position of three and watched it vanish behind the first attempt's `RemoteProtocolError`, which is the exact class of failure this whole slice exists to make visible.
+                if context.attempt_count > opened_before:
+                    trace.attempts = context.attempt_count
+                    active.set_attempts(trace.request_id, context.attempt_count)
+                    trace.replaced_failures.append(one_line(repr(replacing)))
             reopened = again.outcome.response
             if reopened is None or not again.context.stream:
                 return None
@@ -638,7 +644,7 @@ class _AccountedStreamingResponse(StreamingResponse):
             except BaseException as close_error:
                 if primary is None:
                     raise
-                raise primary from close_error
+                raise_with_cleanup_under(primary, close_error)
             finally:
                 self._accounting.finish()
 
@@ -652,9 +658,8 @@ async def _counted_upstream(chunks: AsyncIterator[bytes], chain: Chain, request_
 
     The gap is measured between arrivals rather than from the start, because the wait before the first is already `first_upstream_byte_s` and folding them together would make every request's maximum the time it spent routing.
 
-    **Closing this closes the stream under it**, the same way `with_idle_timeout` and `read_events` do. This was the one layer of the production chain that did not, and it was the layer everything else releases through: `read_events` closes the outermost composite and the client deadline closes this one, and the chain stopped here. A client that went away mid-turn therefore left the marker, both guards and the upstream response open until the collector reached them — measured 2026-08-24 against the real four-layer composition, where the raw source stayed open across a tick and only an explicit close released it. A cancellation propagates all the way down **when the close succeeds**, which is why the client deadline's own path was never the one that leaked and an ordinary early close was. A close that itself fails is handled above rather than assumed away.
+    **Closing this closes the stream under it**, the same way `with_idle_timeout` and `read_events` do. This was the one layer of the production chain that did not, and it was the layer everything else releases through: `read_events` closes the outermost composite and the client deadline closes this one, and the chain stopped here. A client that went away mid-turn therefore left the marker, both guards and the upstream response open until the collector reached them — measured 2026-08-24 against the real five-object composition, where the raw source stayed open across a tick and only an explicit close released it. A cancellation propagates all the way down **when the close succeeds**, which is why the client deadline's own path was never the one that leaked and an ordinary early close was. A source with no `aclose` is left alone, and a close that itself fails is ordered against whatever was already propagating — both by `finish_stream_cleanup`, which is what this delegates the whole of cleanup to.
     """
-    close = getattr(chunks, "aclose", None)
     previous: float | None = None
     try:
         async for chunk in chunks:
@@ -672,15 +677,25 @@ async def _counted_upstream(chunks: AsyncIterator[bytes], chain: Chain, request_
             chain.active_requests.add_bytes(request_id, len(chunk))
             yield chunk
     finally:
-        # Same order as `_AccountedStreamingResponse.__call__` above and `finish_stream_cleanup`: the exit that got us here is the one that propagates, with the close failure chained under it. Raising straight from a `finally` replaces it, and a review measured what that costs on the real composition — the byte counter's own bug did not merely lose priority, it left the chain entirely, because the generator below raises its close error with *its* `GeneratorExit` as context rather than with what was propagating. A cancellation is the same story: replaced by a close failure, the task is no longer cancelled.
-        if close is not None:
-            primary = sys.exception()
-            try:
-                await close()
-            except BaseException as close_error:
-                if primary is None:
-                    raise
-                raise primary from close_error
+        # Same order as `_AccountedStreamingResponse.__call__` above, and by the same call rather than by a second copy of the reasoning: the exit that got us here is the one that propagates, with the close failure chained under it. Raising straight from a `finally` replaces it, and a review measured what that costs on the real composition — the byte counter's own bug did not merely lose priority, it left the chain entirely, because the generator below raises its close error with *its* `GeneratorExit` as context rather than with what was propagating. A cancellation is the same story: replaced by a close failure, the task is no longer cancelled.
+        #
+        # `GeneratorExit` is normalised to no primary at all, exactly as `_events_with_ping` does. It is not an ending anyone needs reported — it *is* the close — and treating it as the primary hands it back to the async-generator machinery, which swallows whatever is chained under it: measured, a close failure under a `GeneratorExit` arrived at the caller as `raised=None`.
+        #
+        # Delegated rather than hand-rolled so that cleanup is shielded from a *second* cancellation the way `finish_stream_cleanup` shields it. Cancelling a task twice while this close is in flight otherwise interrupts the close itself, and the release this whole `finally` exists for does not happen.
+        primary = sys.exception()
+        if isinstance(primary, GeneratorExit):
+            primary = None
+        cleanup_error, cleanup_cancellation = await finish_stream_cleanup(
+            None, chunks, primary=primary
+        )
+        primary = primary or cleanup_cancellation
+        if primary is not None:
+            if cleanup_error is not None:
+                raise_with_cleanup_under(primary, cleanup_error)
+            if cleanup_cancellation is not None:
+                raise primary
+        elif cleanup_error is not None:
+            raise cleanup_error
 
 
 async def _tracked_delivery(chunks: AsyncGenerator[bytes], accounting: _StreamAccounting) -> AsyncGenerator[bytes]:

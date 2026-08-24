@@ -66,6 +66,21 @@ async def session_liveness_stream[T](
             raise cleanup_error
 
 
+def raise_with_cleanup_under(primary: BaseException, cleanup_error: BaseException) -> None:
+    """Re-raise the exit that started cleanup, with the cleanup failure recorded under it and nothing already there lost.
+
+    `raise primary from cleanup_error` is the obvious spelling and it overwrites `primary.__cause__`. A review constructed `PrimaryError from RootError`, let the close fail, and found `RootError` no longer reachable from the chain at all — the explicit cause an author had chosen, replaced by a consequence of the ending it described.
+
+    So the cleanup failure goes on `__cause__` only when nothing is there, and on `__context__` otherwise. `__context__` is the weaker link and the right one for "this also happened while unwinding"; overwriting it is what Python's own implicit chaining does anyway.
+
+    One implementation because three call sites had grown three spellings of this pairing, and the reason each of them exists is the same reason.
+    """
+    if primary.__cause__ is None:
+        raise primary from cleanup_error
+    primary.__context__ = cleanup_error
+    raise primary
+
+
 async def finish_stream_cleanup[T](
     pending: asyncio.Task[T] | None,
     stream: AsyncIterator[T],
