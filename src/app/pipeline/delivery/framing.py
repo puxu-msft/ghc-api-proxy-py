@@ -9,6 +9,7 @@ Stateful by necessity rather than by preference. The Anthropic side could be pur
 
 from typing import Protocol
 
+from app.errors import ErrorInfo
 from app.pipeline.delivery.assembling import Terminal
 from app.pipeline.delivery.blocks import CompletedBlock
 
@@ -29,8 +30,11 @@ class OutboundFramer(Protocol):
         """Close the response cleanly. Mutually exclusive with `error`."""
         ...
 
-    def error(self, *, error_type: str, message: str, code: str | None = None) -> bytes:
-        """The one frame that says a started stream will not end successfully."""
+    def error(self, info: ErrorInfo) -> bytes:
+        """The one frame that says a started stream will not end successfully.
+
+        Takes the record rather than a pre-spelled type, and that is the whole of the change: the caller is generic delivery, which serves every leg, and it was reaching into `ANTHROPIC_ERROR_TYPES` to decide what to say. On a Responses leg that produced a category name from another dialect. Each framer now spells its own.
+        """
         ...
 
     def keepalive(self) -> bytes:

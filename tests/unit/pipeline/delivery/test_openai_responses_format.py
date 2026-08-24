@@ -15,6 +15,7 @@ from openai.lib.streaming.responses import ResponseStreamState
 from openai.types.responses import ParsedResponse
 from openai.types.responses.response_stream_event import ResponseStreamEvent
 
+from app.errors import ErrorCategory, ErrorInfo
 from app.pipeline.delivery.assembling import Terminal
 from app.pipeline.delivery.blocks import TEXT, THINKING, TOOL_USE, CompletedBlock
 from app.pipeline.delivery.formats.openai_responses import ResponsesFramer
@@ -253,7 +254,7 @@ def test_every_event_carries_the_fields_its_model_declares_required() -> None:
         )
     )
     frames.extend(one.terminal(Terminal(stop_reason="end_turn", seen=True)))
-    frames.append(one.error(error_type="api_error", message="boom", code="c"))
+    frames.append(one.error(ErrorInfo(category=ErrorCategory.UPSTREAM, message="boom", status_code=502, code="c")))
 
     # `ResponseStreamEvent` is an annotated union; its members carry `type` as a Literal rather than as a default, so the discriminator is read out of the annotation.
     members = get_args(get_args(ResponseStreamEvent)[0])
@@ -304,16 +305,23 @@ def test_an_error_frame_says_what_went_wrong_without_claiming_a_response() -> No
     frames.extend(one.block(text_block(0, "partial")))
     frames.append(
         one.error(
-            error_type="api_error",
-            message="Responses stream ended before a successful terminal event",
-            code="incomplete_responses_stream",
+            ErrorInfo(
+                category=ErrorCategory.UPSTREAM,
+                message="Responses stream ended before a successful terminal event",
+                status_code=502,
+                code="incomplete_responses_stream",
+            )
         )
     )
 
     assert events_of(tuple(frames))[-1] == "error"
     payload = orjson.loads(frames[-1].decode().split("data: ", 1)[1])
     assert payload["code"] == "incomplete_responses_stream"
-    assert payload["message"].startswith("api_error: ")
+    # This leg spells the category itself now; the caller names it and nothing else. `server_error` is what `UPSTREAM` reads as here — an assertion on the prefix would have passed whatever the leg chose.
+    assert payload["message"].startswith("server_error: ")
+    # Flat, and that is the contract: `ResponseErrorEvent` has no nested `error` object, so the Anthropic leg's shape must not leak across.
+    assert "error" not in payload
+    assert payload["param"] is None
 
     # The stream stopped without completing, which is exactly what the client must not be able to read as success.
     with pytest.raises(AssertionError):

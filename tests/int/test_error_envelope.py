@@ -14,9 +14,10 @@ from typing import Any
 import httpx2
 import orjson
 import pytest
+from fastapi.testclient import TestClient
 
 # Same directory, so pytest's default `prepend` import mode puts it on the path. There is no `tests` package to import through — `tests/__init__.py` does not exist, deliberately.
-from test_pipeline_app import make_client
+from test_pipeline_app import make_client, sse_upstream
 
 from app.errors import ErrorCategory, ErrorInfo
 from app.server.http_errors import _outbound_headers  # pyright: ignore[reportPrivateUsage]
@@ -297,3 +298,108 @@ def test_no_framing_header_of_upstreams_rides_along(header: str) -> None:
 
     assert header not in forwarded
     assert forwarded["x-request-id"] == "req_abc", "the filter must be a denial, not an allowlist of one"
+
+
+# ---------------------------------------------------------------------------
+# Streaming: what the client actually receives when a turn fails mid-flight.
+#
+# A mapping can be correct and unused. `tests/unit/pipeline/delivery/test_error_frames.py`
+# pins the table and the frame's shape; these drive real failures through the real app and
+# read the bytes, which is the only thing that says the two are connected.
+# ---------------------------------------------------------------------------
+
+
+def _streamed(client: Any, body: dict[str, Any]) -> bytes:
+    """Everything that reached the client, recorded by a tee around the app.
+
+    **Not read off the response object**, and that is the whole reason this exists. Starlette's test client only rewinds its buffer when it sees `more_body=False`; a stream that ends by raising never reaches that line, so the response reads from the tail and reports `b""`. Every ending examined here frames the error and *then* re-raises — deliberately: the frame tells the client, the exception tells this side's own accounting — so reading the response would report zero bytes for exactly the cases in question. Measured; `.dev/docs/server-layout/reports/260823-error-surface-inventory.md` §6 records the same trap costing a whole round of readings.
+
+    A tee rather than driving the ASGI app by hand: constructing a scope by hand skips whatever the test client sets up around it, and a first attempt at that hung instead of failing.
+    """
+    chunks: list[bytes] = []
+    app = client.app
+
+    async def tee(scope: Any, receive: Any, send: Any) -> None:
+        async def recording(message: dict[str, Any]) -> None:
+            if message["type"] == "http.response.body":
+                chunks.append(message.get("body", b""))
+            await send(message)
+
+        await app(scope, receive, recording)
+
+    teed = TestClient(tee, base_url="http://t")
+    try:
+        with teed.stream("POST", "/v1/messages", json={**body, "stream": True}) as response:
+            for _ in response.iter_bytes():
+                pass
+    except Exception:
+        pass
+    return b"".join(chunks)
+
+
+def _error_frames(delivered: bytes) -> list[dict[str, Any]]:
+    return [
+        orjson.loads(chunk.split(b"data: ", 1)[1])
+        for chunk in delivered.split(b"\n\n")
+        if chunk.startswith(b"event: error")
+    ]
+
+
+def _upstream_that_stops_after_a_block() -> Any:
+    """A whole block, then EOF with no terminal event. Upstream's stream simply ends."""
+    whole = sse_upstream("first")
+    cut = whole.split(b"event: message_delta", 1)[0]
+
+    def handler(_: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, content=cut, headers={"content-type": "text/event-stream"})
+
+    return handler
+
+
+def test_an_upstream_that_ends_without_a_terminal_says_so_in_anthropics_words() -> None:
+    """The wiring, driven through the app so the mapping, the framer and the call site have to agree.
+
+    The unit test one directory over would still pass if `stream_delivery` had stopped calling any of them; this is what says they are connected.
+
+    **What it cannot check is the category.** A mutation swapping `UPSTREAM` for `INTERNAL` at that call site left this green, and correctly so: Anthropic spells both `api_error` and OpenAI spells both `server_error`, so the choice is unobservable on every leg this proxy serves. `code` is the discriminator and it is set independently — which is the same loss §6.4 records, met here rather than in the abstract. Asserting the type anyway would be asserting something no implementation could get wrong.
+    """
+    # Both switches, and the second one is the trap. Emptying `unterminated_stream_stop_reason` alone does **not** produce an error frame any more: since 2026-08-24 a reported failure with a block already delivered is offered to the hand-over first, so on the production shape it comes out as a `turn_interrupted` tool call. The SSE error is what remains when the hand-over does not apply — measured, not assumed.
+    client, _ = make_client(
+        _upstream_that_stops_after_a_block(),
+        overrides={
+            "client_delivery": {"unterminated_stream_stop_reason": ""},
+            "upstream_request_retry": {"auto_retry_tool_call_full_name": ""},
+        },
+    )
+
+    delivered = _streamed(client, {"model": "claude-model", "messages": []})
+    frames = _error_frames(delivered)
+
+    assert frames, f"no error frame in {delivered!r}"
+    payload = frames[-1]
+    assert payload["type"] == "error"
+    assert "message" not in payload, "the nested shape has to survive the whole delivery chain"
+    assert payload["error"]["type"] == "api_error"
+    assert payload["error"]["code"] == "incomplete_responses_stream"
+
+
+def test_a_buffer_cap_this_side_blew_is_named_as_this_sides() -> None:
+    """`INTERNAL`, and the only thing that says so is `code` — the type is `api_error` either way.
+
+    The cap is this proxy's own limit, so a client transcript showing `upstream_stream_failed` here would send a reader to the wrong system entirely.
+    """
+    client, _ = make_client(
+        _upstream_that_stops_after_a_block(),
+        overrides={
+            "client_delivery": {"buffering_policy": "full", "buffer_cap_bytes": 8},
+            "upstream_request_retry": {"auto_retry_tool_call_full_name": ""},
+        },
+    )
+
+    delivered = _streamed(client, {"model": "claude-model", "messages": []})
+    frames = _error_frames(delivered)
+
+    assert frames, f"no error frame in {delivered!r}"
+    payload = frames[-1]
+    assert payload["error"]["type"] == "api_error"
+    assert payload["error"]["code"] == "proxy_delivery_aborted"

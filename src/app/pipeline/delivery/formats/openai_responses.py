@@ -19,6 +19,7 @@ from typing import Any, cast
 
 import orjson
 
+from app.errors import OPENAI_ERROR_TYPES, ErrorInfo
 from app.pipeline.delivery.assembling import Draft, ReplyDialect, Terminal, decode_json
 from app.pipeline.delivery.blocks import TEXT, THINKING, TOOL_USE, CompletedBlock
 from app.pipeline.delivery.sse_frame import SseFrame
@@ -345,21 +346,22 @@ class ResponsesFramer:
             ).encode(),
         )
 
-    def error(self, *, error_type: str, message: str, code: str | None = None) -> bytes:
+    def error(self, info: ErrorInfo) -> bytes:
         """The one frame that says a started stream will not end successfully.
 
         `error`, not `response.failed`. The latter has to carry a whole `Response` object, and at the point this is sent that object is half-built — no usage, output cut off mid-turn — so filling one in would be stating things that are not so. The SDK passes `error` through without asserting anything about it.
 
-        Responses' error event has `code`, `message` and `param` and no field for a category, while the Anthropic leg's has `type`. The category is prefixed onto the message rather than overwriting `code`, because `code` is the stable machine-readable half and callers already match on values like `incomplete_responses_stream`.
+        **Flat, and deliberately not the shape the Anthropic leg uses.** `ResponseErrorEvent` declares `code`, `message` and `param`, with the event's own `type` fixed to the literal `"error"` and no field for a category. So the category is prefixed onto the message — `code` is the stable machine-readable half and callers already match on values like `incomplete_responses_stream`, so overwriting it would cost more than it buys. `.dev/docs/error-envelope/spec.md` §6.3 is where the two shapes are set out side by side; they are not two spellings of one envelope.
 
         Mutually exclusive with `terminal`, the same as on the Anthropic leg. Nothing here enforces that; the caller picks one.
         """
+        spelled = OPENAI_ERROR_TYPES[info.category]
         return self._frame(
             "error",
             {
-                "code": code,
-                "message": f"{error_type}: {message}" if error_type else message,
-                "param": None,
+                "code": info.code or None,
+                "message": f"{spelled}: {info.message}" if spelled else info.message,
+                "param": info.param or None,
             },
         ).encode()
 

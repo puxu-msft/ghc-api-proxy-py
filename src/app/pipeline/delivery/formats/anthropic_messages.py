@@ -13,6 +13,7 @@ from typing import Any, cast
 import orjson
 
 from app.config.schema import ContentBlockStartCompat
+from app.errors import ErrorInfo
 from app.pipeline.delivery.assembling import (
     Draft,
     ReplyDialect,
@@ -20,8 +21,13 @@ from app.pipeline.delivery.assembling import (
     decode_json,
 )
 from app.pipeline.delivery.blocks import TEXT, THINKING, TOOL_USE, CompletedBlock
+from app.pipeline.delivery.formats.errors import write_error
 from app.pipeline.delivery.sse_frame import SseFrame
 from app.pipeline.delivery.sse_source import SseEvent
+
+# This leg's own name, as `WireFormat` spells it. A literal here and a literal in the route table would be two spellings of one fact.
+ANTHROPIC_MESSAGES = "anthropic-messages"
+
 
 logger = logging.getLogger(__name__)
 
@@ -134,17 +140,16 @@ def block_frames(
     return tuple(frames)
 
 
-def error_frame(*, error_type: str, message: str, code: str | None = None) -> SseFrame:
+def error_frame(info: ErrorInfo) -> SseFrame:
     """The one frame that says a started stream is not going to end successfully.
 
-    Its shape is the legacy chain's, byte for byte (`app/delivery/anthropic_sse.py::render_error`), because the wire contract is the same one and two spellings of it would be two things to keep in step. `code` is omitted rather than sent as null when absent, for the same reason.
+    Its payload is `write_error`'s, not a second spelling of it. This leg is the one dialect whose JSON body and SSE frame really are the same object, so building it twice would be two things to keep in step — and the shape is load-bearing beyond tidiness, see below.
+
+    **The envelope must stay nested, with no `message` at the top level.** Claude Code decides whether to retry a mid-stream error by substring-matching `'"type":"overloaded_error"'` against the *serialised* error object, and it only builds that string when the object has no top-level `message` to take instead. Flattening this — for symmetry with the Responses leg, say — makes the match fail and the retry disappear with nothing to show for it. Measured against Claude Code 2.1.241; `.dev/docs/error-envelope/spec.md` §6.3 holds the reasoning and the probe.
 
     Mutually exclusive with `terminal_frames`: `.dev/docs/anthropic-responses-bridge/spec.md`, "Downstream Anthropic SSE" item 5, rules that a terminal error past committed headers uses this event 且不得再发 `message_stop` 冒充成功. Nothing here enforces that — the caller picks one.
     """
-    detail: dict[str, Any] = {"type": error_type, "message": message}
-    if code is not None:
-        detail["code"] = code
-    return SseFrame("error", {"type": "error", "error": detail})
+    return SseFrame("error", write_error(info, wire_format=ANTHROPIC_MESSAGES))
 
 
 def terminal_frames(
@@ -244,8 +249,8 @@ class AnthropicFramer:
             )
         )
 
-    def error(self, *, error_type: str, message: str, code: str | None = None) -> bytes:
-        return error_frame(error_type=error_type, message=message, code=code).encode()
+    def error(self, info: ErrorInfo) -> bytes:
+        return error_frame(info).encode()
 
     def keepalive(self) -> bytes:
         return b": ping\n\n"
