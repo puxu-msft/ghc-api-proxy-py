@@ -506,6 +506,7 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
                     framer=framer,
                     replay=replay,
                     continuation=continuation,
+                    on_tear_after_terminal=accounting.note_tear_after_terminal,
                 ),
                 accounting,
             ),
@@ -565,6 +566,8 @@ class _StreamAccounting:
     handed_over: bool = False
     # What the hand-over swallowed, when it swallowed one. `None` on the endings that are not failures — a turn upstream cut short for want of room is handed back without anything having gone wrong.
     handed_over_error: BaseException | None = None
+    # Upstream finished the turn and then the connection went. Not a failure — the client holds the whole reply — and recorded anyway, because until this field existed the exception was discarded where it was caught and the request was accounted a plain success. An operator watching a peer that resets every connection after its last frame had nothing at all to look at.
+    tore_after_terminal: BaseException | None = None
     done: bool = False
     # How the delivery generator ended. Three endings arrive here indistinguishable — upstream's stream ran out, upstream tore, or delivery was cut short from this side — because none of them saw a terminal event and that is all the assembler records. Naming the wrong one sends whoever reads the line to the wrong half of the system, so each is recorded where it happens instead of guessed here.
     drained: bool = False
@@ -591,7 +594,20 @@ class _StreamAccounting:
             if self.handed_over or not (delivered_whole and terminal.stop_reason):
                 # Said outright, because absence is not readable. The status was fixed when the response headers arrived and stays 200 however the stream ends; the fields upstream never sent are simply gone; and a reader cannot tell a field this endpoint does not report from one this request never got.
                 self.trace.status_override, self.trace.detail = self._ending()
+            elif self.tore_after_terminal is not None:
+                # The request succeeded and stays `ok`: upstream said everything it had to say and the client holds all of it. Only the note is added, and no status override, because painting this red would put a turn nothing went wrong with next to the ones that failed.
+                #
+                # Bounded like the other two exceptions that reach this line, and for the same reason — upstream chooses the text and `repr` has no limit.
+                self.trace.detail = f"upstream closed abruptly after finishing the turn: {one_line(repr(self.tore_after_terminal))}"
         log_completion(self.chain, self.trace, self.status_code, bytes_out=self.trace.received)
+
+    def note_tear_after_terminal(self, error: Exception) -> None:
+        """Passed to delivery as `on_tear_after_terminal`; see the branch there for when it fires.
+
+        First one wins, which only matters if a replayed attempt could also tear after its own terminal — it cannot today, because the ending that sees a terminal breaks the loop. Written as a rule rather than as an assumption so a later replay path cannot quietly overwrite the earlier account.
+        """
+        if self.tore_after_terminal is None:
+            self.tore_after_terminal = error
 
     def _ending(self) -> tuple[LogStatus, str]:
         """Which of the three ways this stream stopped short, and how much of a problem each is.

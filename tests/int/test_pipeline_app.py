@@ -3158,6 +3158,53 @@ def test_a_replay_is_reported_on_the_request_line(
     assert "peer closed the connection" in line
 
 
+def test_a_tear_after_the_turn_finished_is_recorded_without_being_called_a_failure(
+    request_log: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The one ending that discarded its exception and left no trace of it anywhere.
+
+    Upstream sends its terminal event and *then* the connection goes. The client is owed nothing more, so delivery breaks out of its loop, writes the terminal frames and returns cleanly — and `torn` was dropped where it was caught. The request was accounted a plain success, which it is, with nothing to say a peer had just reset the connection under it.
+
+    Found while a review refuted a claim that the hand-over was the only ending that swallowed its cause. It was the second, and the worse of the two: the hand-over at least had a field to be read from.
+
+    `ok`, deliberately. Painting this red would put a turn nothing went wrong with beside the ones that failed, and the whole point of the status column is that the two look different.
+    """
+    calls: list[int] = []
+
+    async def finishes_then_breaks() -> AsyncIterator[bytes]:
+        # One block, not one byte at a time: `sse_upstream` returns the whole stream as `bytes`, and iterating that yields ints.
+        yield sse_upstream("done")
+        # Everything the client was owed has been delivered; only the socket is left.
+        raise httpx2.RemoteProtocolError("peer reset the connection after its last frame")
+
+    def upstream(request: httpx2.Request) -> httpx2.Response:
+        calls.append(1)
+        return httpx2.Response(
+            200, content=finishes_then_breaks(), headers={"content-type": "text/event-stream"}
+        )
+
+    client, _ = make_client(upstream)
+    with caplog.at_level(logging.INFO):
+        response = client.post(
+            "/v1/messages",
+            json={"model": "claude-model", "messages": [], "stream": True},
+        )
+
+    assert response.status_code == 200
+    assert "message_stop" in response.text, "the premise: the client got the whole turn"
+    assert calls == [1], "and nothing was replayed — there was nothing left to replay"
+
+    record = _records()[-1]
+    assert "RemoteProtocolError" in record["detail"]
+    assert "peer reset the connection after its last frame" in record["detail"]
+    # Matched on the note, not on the route: a line that succeeded names the model instead, which is what this one does.
+    line = next(item for item in _request_lines(caplog.records) if "closed abruptly" in item)
+    assert "RemoteProtocolError" in line
+    # Not painted as a failure: the turn is complete and the client has it.
+    assert record["status"] == "ok"
+    assert "end_turn" in line
+
+
 def test_a_replacement_that_never_reached_upstream_is_not_recorded_as_one(
     request_log: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

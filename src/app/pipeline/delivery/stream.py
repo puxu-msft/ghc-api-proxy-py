@@ -263,6 +263,7 @@ async def stream_delivery(
     framer: OutboundFramer,
     replay: ReplaySupport | None = None,
     continuation: ContinuationSupport | None = None,
+    on_tear_after_terminal: Callable[[Exception], None] | None = None,
 ) -> AsyncGenerator[bytes]:
     """Turn an upstream byte stream into the client's SSE, one complete block at a time.
 
@@ -288,6 +289,7 @@ async def stream_delivery(
             last_write=last_write,
             replay=replay,
             continuation=continuation,
+            on_tear_after_terminal=on_tear_after_terminal,
         )
     ) as inner:
         async for chunk in inner:
@@ -306,6 +308,7 @@ async def _deliver(
     last_write: _LastWrite,
     replay: ReplaySupport | None = None,
     continuation: ContinuationSupport | None = None,
+    on_tear_after_terminal: Callable[[Exception], None] | None = None,
 ) -> AsyncGenerator[bytes]:
     """Assemble and frame the response. Wrapped by `stream_delivery`, which stamps the clock."""
     session = DeliverySession(buffer=buffer)
@@ -375,6 +378,12 @@ async def _deliver(
             # Answered here rather than from the verdict, which is where it used to be — and that was one door short. A failure the caller's taxonomy does not recognise, a bare `h2.ProtocolError` among them, never reaches the verdict at all: it is refused two lines down and raised, taking a complete reply with it. The question "did upstream finish" has to be answered before any question about the failure, because the answer does not depend on the failure.
             #
             # Still below the client deadline, and that is now a ruling rather than a deferral: see the branch above. Above the attempt deadline, though, which reaches here as an ordinary tear rather than a branch of its own — that one ends only this attempt, so a finished turn must not be handed to it as something to retry.
+            #
+            # Reported before breaking, because this was the one ending that discarded its exception without a word. The reply is whole and the client is owed nothing more, so nothing downstream ever sees `torn`: the loop leaves normally, the terminal frames go out, and the request is accounted a clean success. A review found this branch while refuting a claim that the hand-over was the only ending that swallowed its cause — it was the second one, and unlike the hand-over it had no field to be read from either.
+            #
+            # A callback rather than a field on this generator, for the same reason `ReplaySupport` and `ContinuationSupport` are callbacks: what to *do* with the fact belongs to the caller that owns the request's account, and delivery does not know there is one.
+            if on_tear_after_terminal is not None:
+                on_tear_after_terminal(torn)
             break
         # Whether this failure is one this side inflicted rather than suffered — the word the client reads depends on it, and so does whether the turn is handed back at all.
         #
