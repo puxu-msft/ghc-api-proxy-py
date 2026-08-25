@@ -96,25 +96,30 @@ def resolve_client_search_tool(
     return named[0] if len(named) == 1 else ""
 
 
-def as_client_search_tool(tool: Mapping[str, Any]) -> dict[str, Any]:
+def as_client_search_tool(tool: Mapping[str, Any]) -> tuple[dict[str, Any], tuple[str, ...]]:
     """The client's search tool, in the shape the Responses leg spells it.
+
+    Returns the tool and **the names of any fields this proxy had to invent**. Inventing one is defensible — upstream refuses a client-executed search with no description — but it puts words in the body the client never wrote, and `SYNTHETIC_TURN_ADDED` exists precisely so an addition is visible to whoever reads the record.
 
     `description` is required rather than optional decoration — upstream refuses a client-executed search without one (`Client-executed tool_search requires a description.`), so an empty description would trade this request's 400 for another. The client's own text is carried across; a tool that arrived without any gets a sentence describing what the model is being offered, because the alternative is a refusal.
 
     `parameters` carries the client's `input_schema` so the model's `arguments` come back in the shape that tool expects — which is what lets the response side hand them straight back as the tool's own input.
     """
+    invented: list[str] = []
     described = tool.get("description")
+    if not (isinstance(described, str) and described.strip()):
+        described = "Search for tools that are available but not yet loaded."
+        invented.append("description")
     schema = tool.get("input_schema")
     if not isinstance(schema, Mapping) or not schema:
         schema = {"type": "object", "properties": {"query": {"type": "string"}}}
+        invented.append("parameters")
     return {
         "type": "tool_search",
         "execution": "client",
-        "description": described
-        if isinstance(described, str) and described.strip()
-        else "Search for tools that are available but not yet loaded.",
+        "description": described,
         "parameters": dict(cast(Mapping[str, Any], schema)),
-    }
+    }, tuple(invented)
 
 
 HOSTED_SEARCH_TOOL: dict[str, Any] = {"type": "tool_search", "execution": "server"}

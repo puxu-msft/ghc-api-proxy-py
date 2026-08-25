@@ -118,20 +118,37 @@ def test_the_hosted_declaration_is_recognised_by_family_not_by_date() -> None:
 
 def test_promotion_carries_the_description_upstream_insists_on() -> None:
     """Upstream refuses a client-executed search with no description, so this cannot be optional."""
-    promoted = as_client_search_tool(SEARCH_TOOL)
+    promoted, invented = as_client_search_tool(SEARCH_TOOL)
 
     assert promoted["type"] == "tool_search"
     assert promoted["execution"] == "client"
     assert promoted["description"] == SEARCH_TOOL["description"]
     assert promoted["parameters"] == SEARCH_TOOL["input_schema"]
+    # The client wrote both, so the proxy invented nothing.
+    assert invented == ()
 
 
-def test_a_tool_with_no_description_still_gets_one() -> None:
-    """The alternative is trading this request's 400 for a different 400."""
-    promoted = as_client_search_tool({"name": "FindTools", "input_schema": {"type": "object"}})
+def test_a_tool_with_no_description_still_gets_one_and_says_so() -> None:
+    """The alternative is trading this request's 400 for a different 400 — but the words are ours.
+
+    The model reads an invented description as the client's own, and nothing else in the record would say otherwise, which is what `SYNTHETIC_TURN_ADDED` exists for.
+    """
+    promoted, invented = as_client_search_tool({"name": "FindTools"})
 
     assert isinstance(promoted["description"], str)
     assert promoted["description"].strip()
+    assert set(invented) == {"description", "parameters"}
+
+
+def test_an_explicitly_undeferred_tool_does_not_open_the_gate() -> None:
+    """`defer_loading: false` means the client is *not* deferring, and Claude Code sends it in bulk.
+
+    The gate tests `is True` for that reason. Relaxing it to `is not None` would let an ordinary request containing a tool named `ToolSearch` be promoted — the tool would leave the array and the client would lose it, which is the failure this module is built against.
+    """
+    tools: list[dict[str, Any]] = [SEARCH_TOOL, {**DEFERRED, "defer_loading": False}]
+
+    assert has_deferred_tool(tools) is False
+    assert resolve_client_search_tool(tools, []) == ""
 
 
 def test_the_known_names_are_the_two_first_party_clients_hardcode() -> None:

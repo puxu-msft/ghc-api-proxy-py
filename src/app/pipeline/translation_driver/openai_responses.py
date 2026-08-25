@@ -37,6 +37,7 @@ from app.pipeline.translation_driver.tool_search import (
     HOSTED_SEARCH_TOOL,
     SearchContext,
     as_client_search_tool,
+    has_deferred_tool,
     is_hosted_search_tool,
     resolve_client_search_tool,
 )
@@ -343,7 +344,7 @@ def _user_location(value: Any, conversion: Conversion) -> Any:
 def _tools_for_upstream(
     request: SemanticRequest,
     policy: WebSearchConstraintPolicy,
-    search: SearchContext | None = None,
+    search: SearchContext,
 ) -> tuple[list[dict[str, Any]], set[str], set[str]]:
     """The declarations to send, with web search in the spelling this endpoint runs.
 
@@ -359,7 +360,7 @@ def _tools_for_upstream(
     function_names: set[str] = set()
     seen_web_search = False
     # Which of the client's own tools performs its tool search, or "" when it cannot be identified. Resolved once for the whole array because promotion is a *replacement* — the tool named here leaves `tools` and comes back as the `tool_search` builtin — and because the same answer decides how the history's calls and results are written further down.
-    search_tool = search.tool_name if search is not None else resolve_client_search_tool(request.tools, request.messages)
+    search_tool = search.tool_name
     # Whether the outgoing array will carry a `tool_search` at all, decided before the loop because it is what makes `defer_loading` legal — upstream refuses a deferred tool without one.
     #
     # **The identified name is not enough: it has to still be declared here.** History can name a search tool this request no longer sends — and then nothing in the loop promotes anything, while `defer_loading` has already been kept on every tool. That combination is exactly the 400 this whole feature exists to prevent, produced by the feature itself.
@@ -369,6 +370,12 @@ def _tools_for_upstream(
     will_search = promotes_client_search or any(
         is_hosted_search_tool(tool) for tool in request.tools
     )
+    if not will_search and has_deferred_tool(request.tools):
+        # The declined path, said in its own words. The `defer_loading` loss recorded per tool below reads as settled behaviour; this one is the actionable half — an operator whose client uses a name this proxy does not know can only learn it here. Spec's step 4 asks for exactly this.
+        request.conversion.record(
+            LossCode.SERVER_TOOL_CONSTRAINT_DROPPED,
+            f"into {WIRE_FORMAT}: no tool search could be identified, so deferred loading is not carried",
+        )
     seen_tool_search = False
     for tool in request.tools:
         if is_hosted_search_tool(tool):
@@ -392,7 +399,14 @@ def _tools_for_upstream(
             # `seen_tool_search` can only already be set here if two tools carry the same name, since the hosted case cleared `search_tool` above. Recorded rather than dropped in silence: a tool leaving the request without a trace is the failure this module's own docstring is written against.
             if not seen_tool_search:
                 seen_tool_search = True
-                kept.append(as_client_search_tool(tool))
+                promoted, invented = as_client_search_tool(tool)
+                kept.append(promoted)
+                if invented:
+                    # Words this proxy wrote into the body. Upstream refuses a client-executed search without a description, so inventing one buys the request — but the model reads it as the client's, and nothing else would say otherwise.
+                    request.conversion.record(
+                        LossCode.SYNTHETIC_TURN_ADDED,
+                        f"{search_tool} into {WIRE_FORMAT}: {', '.join(invented)} written by the proxy",
+                    )
             else:
                 request.conversion.record(
                     LossCode.SERVER_TOOL_CONSTRAINT_DROPPED,
@@ -452,7 +466,8 @@ def blocks_from_item(
                 BlockKind.TOOL_USE,
                 call_id=str(item.get("call_id") or item.get("id", "")),
                 name=client_search_tool,
-                arguments=arguments if arguments is not None else {},
+                # `isinstance` rather than a null check, and the same test the streaming path uses. The SDK types this as an object, so anything else is malformed — but Anthropic's `tool_use.input` is an object too, and handing a client a string there is a shape its parser will not take. The two delivery paths agreeing on one answer matters more than which answer, and this project has paid for them disagreeing before.
+                arguments=arguments if isinstance(arguments, dict) else {},
                 raw=item,
             ),
         )

@@ -387,6 +387,8 @@ class ResponsesFramer:
 WEB_SEARCH_CALL = "web_search_call"
 TOOL_SEARCH_CALL = "tool_search_call"
 TOOL_SEARCH_OUTPUT = "tool_search_output"
+# A draft kind meaning "recognised, and deliberately not delivered". Distinct from an unrecognised item, which falls through to the text fallback and reaches the client as an empty block — a shape upstream refuses when the turn is replayed.
+DISCARDED = "discarded"
 
 
 class ResponsesAssembler:
@@ -508,10 +510,10 @@ class ResponsesAssembler:
             "message": TEXT,
             "function_call": TOOL_USE,
             "reasoning": THINKING,
-            # Only when a name is known to deliver it under; otherwise it falls through unmapped and is handled as any other unrecognised item, which is the honest outcome rather than a call the client cannot answer.
-            **({TOOL_SEARCH_CALL: TOOL_USE} if self._client_search_tool else {}),
-            # The upstream's own account of a **hosted** search: it ran the search and is reporting what it loaded. There is no Anthropic block for that, and the client did not ask for one — it asked for a hosted search, whose whole point is that it happens elsewhere. Named here so it is *dropped deliberately* rather than falling through to the unknown branch, which turns it into an empty text block — a shape upstream then refuses when the client replays the turn.
-            TOOL_SEARCH_OUTPUT: TOOL_SEARCH_OUTPUT,
+            # Delivered as a call on the client's own tool when a name is known. **Without one it is discarded rather than left to fall through**: the fallback renders an empty text block, and an assistant turn carrying one is refused when the client replays it. Discarding loses the model's search request either way; the difference is whether the turn stays replayable.
+            TOOL_SEARCH_CALL: TOOL_USE if self._client_search_tool else DISCARDED,
+            # The upstream's own account of a **hosted** search: it ran the search and is reporting what it loaded. There is no Anthropic block for that, and the client did not ask for one — it asked for a hosted search, whose whole point is that it happens elsewhere.
+            TOOL_SEARCH_OUTPUT: DISCARDED,
         }.get(item_type, item_type)
         key = self._item_key(data)
         self._drafts[key] = Draft(index=self._order, kind=kind, payload=dict(item))
@@ -554,8 +556,8 @@ class ResponsesAssembler:
         # A `reasoning` item carries no `status` at all — verified against a completed one, whose key set is identical — so this cannot see a truncated one and does not try. Left open deliberately; `.dev/docs/upstream/retry-and-continuation/deferred.md` §2.
         cut_short = _upstream_cut_this_item_short(data) and self._terminal.blocks > 0
         kind = draft.kind
-        if draft.kind == TOOL_SEARCH_OUTPUT:
-            # The upstream's own report of a hosted search. Dropped on purpose: Anthropic has no block for "the server searched and loaded these", and the client that asked for a hosted search asked precisely for that to happen out of sight. Dropping it *here* rather than letting it reach the fallback is the whole point — the fallback renders an empty text block, which upstream refuses when the client replays the turn.
+        if draft.kind == DISCARDED:
+            # Recognised and deliberately not delivered — see the item map for which items land here and why. The point of naming them is that they never reach the text fallback, which would turn each into an empty block.
             return ()
         if draft.kind == TOOL_USE:
             self._saw_tool_call = True

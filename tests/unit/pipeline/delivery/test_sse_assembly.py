@@ -620,7 +620,7 @@ def test_a_search_call_streams_out_as_a_call_on_the_clients_own_tool() -> None:
 def test_without_a_name_a_search_call_is_not_delivered_as_some_other_tool() -> None:
     """No name means this request translated no search, so there is nothing to deliver it as.
 
-    It stays unmapped and takes whatever path an unrecognised item takes. That is worse than the branch above, but it is not *wrong* the way handing the client a call on an invented tool name would be.
+    Asserted as **nothing delivered** rather than as "no block happens to be named ToolSearch": the weaker form passed while the item was becoming an empty text block, which is a shape upstream refuses when the client replays the turn. A test that cannot tell those two apart is not guarding this.
     """
     assembler = ResponsesAssembler()
     assembler.push(
@@ -638,4 +638,4 @@ def test_without_a_name_a_search_call_is_not_delivered_as_some_other_tool() -> N
         )
     )
 
-    assert not any(block.payload.get("name") == "ToolSearch" for block in blocks)
+    assert blocks == ()

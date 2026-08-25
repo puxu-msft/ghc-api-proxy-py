@@ -1140,6 +1140,13 @@ def test_the_search_call_and_its_references_cross_as_search_items() -> None:
     assert call["arguments"] == {"query": "weather"}
     assert output["call_id"] == "toolu_1"
     assert [tool["name"] for tool in output["tools"]] == ["get_weather"]
+    # `execution` is not decoration: server and client are the two mutually exclusive paths, and
+    # upstream runs the search itself under the first. Writing "server" here would hand the model a
+    # history claiming a search happened elsewhere.
+    assert call["execution"] == "client"
+    assert output["execution"] == "client"
+    assert call["status"] == "completed"
+    assert output["status"] == "completed"
     # The definition being loaded must not still say it is deferred.
     assert "defer_loading" not in output["tools"][0]
 
