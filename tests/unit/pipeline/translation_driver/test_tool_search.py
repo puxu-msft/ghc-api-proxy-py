@@ -77,7 +77,7 @@ def test_history_wins_over_a_tool_that_merely_carries_a_known_name() -> None:
             blocks=(tool_result("call_1", [{"type": "tool_reference", "tool_name": "get_weather"}]),),
         ),
     ]
-    tools = [SEARCH_TOOL, {"name": "FindTools", "input_schema": {}}, DEFERRED]
+    tools: list[dict[str, Any]] = [SEARCH_TOOL, {"name": "FindTools", "input_schema": {}}, DEFERRED]
 
     assert resolve_client_search_tool(tools, messages) == "FindTools"
 
@@ -92,7 +92,7 @@ def test_an_unrecognised_name_with_no_history_declines() -> None:
 
 def test_two_known_names_decline_rather_than_pick_one() -> None:
     """Nobody has been observed sending this, so any tie-break would be invented."""
-    both = [SEARCH_TOOL, {"name": "tool_search", "input_schema": {}}, DEFERRED]
+    both: list[dict[str, Any]] = [SEARCH_TOOL, {"name": "tool_search", "input_schema": {}}, DEFERRED]
 
     assert resolve_client_search_tool(both, []) == ""
 
