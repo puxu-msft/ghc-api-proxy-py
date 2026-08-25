@@ -131,6 +131,8 @@ class SemanticRequest:
     reasoning: ReasoningIntent | None = None
     # Which wire format the extensions below came off. A writer for a different format must not replay them: an unclaimed key is unclaimed *in its own format*, and in another one it is at best meaningless. Measured — sending Anthropic's `context_management` to the Responses endpoint gets `failed to parse request`, so replaying it is not merely untidy.
     source_format: str = ""
+    # The client's own tool-search tool, when one was identified. Written by the outbound writer rather than read off the wire, because identification depends on what that writer decided to do — and the *response* half needs the same answer to turn a `tool_search_call` back into a call on that tool. Empty means no search was translated, which is also the answer when identification declined.
+    client_search_tool: str = ""
     # Fields no translator claimed, kept so an unknown key is not silently dropped.
     extensions: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
     conversion: Conversion = field(default_factory=Conversion)

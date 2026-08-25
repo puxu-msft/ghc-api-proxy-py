@@ -53,7 +53,13 @@ def _mapping_list(value: object) -> list[dict[str, Any]]:
     ]
 
 
-def from_anthropic_response(payload: Mapping[str, Any]) -> SemanticResponse:
+def from_anthropic_response(
+    payload: Mapping[str, Any], *, client_search_tool: str = ""
+) -> SemanticResponse:
+    """`client_search_tool` is accepted and unused: this wire has no `tool_search_call` to hand back.
+
+    Present because `ResponseReader` is one protocol for every format. Silently ignoring an argument is the right answer here rather than a smell — the Anthropic side is where the client's search tool already lives, so there is nothing to restore.
+    """
     response = SemanticResponse(
         id=str(payload.get("id", "")),
         model=str(payload.get("model", "")),
@@ -136,7 +142,12 @@ def from_openai_responses_response(
     payload: Mapping[str, Any],
     *,
     hand_over_stop_reasons: frozenset[str] = frozenset({"max_tokens"}),
+    client_search_tool: str = "",
 ) -> SemanticResponse:
+    """`client_search_tool` names the tool a `tool_search_call` should be handed back as.
+
+    It cannot be read off this payload: on the Responses wire the search *is* the tool, so the item names nothing. The request half identified it, and without that name a `tool_search_call` has nowhere to go — the client would be told the model said nothing while the model was in fact waiting for a search.
+    """
     response = SemanticResponse(
         id=str(payload.get("id", "")),
         model=str(payload.get("model", "")),
@@ -164,7 +175,7 @@ def from_openai_responses_response(
                 LossCode.ITEM_NOT_CARRIED, f"truncated {item.get('type')!r} dropped"
             )
             continue
-        _, blocks = blocks_from_item(item)
+        _, blocks = blocks_from_item(item, client_search_tool=client_search_tool)
         for block in blocks:
             if block.kind is BlockKind.UNKNOWN:
                 response.conversion.record(

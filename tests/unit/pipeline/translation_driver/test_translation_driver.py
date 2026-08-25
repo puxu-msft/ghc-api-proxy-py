@@ -1005,3 +1005,231 @@ def test_a_responses_builtin_tool_keeps_the_fields_of_its_own_union_member() -> 
 
     assert payload["tools"] == builtins
     assert not semantic.conversion.has(LossCode.EXTENSIONS_NOT_CARRIED), semantic.conversion.losses
+
+
+CC_SEARCH_TOOL: dict[str, Any] = {
+    "name": "ToolSearch",
+    "description": "Fetches full schema definitions for deferred tools so they can be called.",
+    "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}},
+}
+CC_DEFERRED: dict[str, Any] = {
+    "name": "get_weather",
+    "description": "Get the weather.",
+    "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}},
+    "defer_loading": True,
+}
+
+
+def test_the_clients_search_tool_is_promoted_and_the_deferred_flag_survives() -> None:
+    """The repair for `req=fcc0bebc`, in the shape the user ruled for: translate, do not strip.
+
+    `defer_loading` is only legal beside a `tool_search`, so the two halves stand or fall together — promoting the search tool is what makes keeping the flag legal.
+    """
+    payload, _ = default_registry().translate(
+        {**ANTHROPIC_REQUEST, "tools": [CC_SEARCH_TOOL, CC_DEFERRED]},
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+
+    assert payload["tools"] == [
+        {
+            "type": "tool_search",
+            "execution": "client",
+            "description": CC_SEARCH_TOOL["description"],
+            "parameters": CC_SEARCH_TOOL["input_schema"],
+        },
+        {
+            "type": "function",
+            "name": "get_weather",
+            "description": "Get the weather.",
+            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+            "defer_loading": True,
+        },
+    ]
+
+
+def test_promotion_removes_the_original_rather_than_adding_beside_it() -> None:
+    """Measured: leaving it in place makes the model call it instead, so the builtin does nothing.
+
+    Asserted as an absence because that is the failure mode — an implementation that appended the builtin without removing the original would satisfy every other assertion here.
+    """
+    payload, _ = default_registry().translate(
+        {**ANTHROPIC_REQUEST, "tools": [CC_SEARCH_TOOL, CC_DEFERRED]},
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+
+    assert not any(tool.get("name") == "ToolSearch" for tool in payload["tools"])
+    assert sum(1 for tool in payload["tools"] if tool.get("type") == "tool_search") == 1
+
+
+def test_without_a_search_tool_the_deferred_flag_is_still_stripped() -> None:
+    """The decline path, unchanged from before this feature: a legal request minus the token saving.
+
+    `defer_loading` with no `tool_search` is the 400 this whole thread started from, so leaving the flag on here would turn "could not identify" into "broke the request".
+    """
+    payload, semantic = default_registry().translate(
+        {**ANTHROPIC_REQUEST, "tools": [{"name": "FindTools", "input_schema": {}}, CC_DEFERRED]},
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+
+    assert not any("defer_loading" in tool for tool in payload["tools"])
+    assert not any(tool.get("type") == "tool_search" for tool in payload["tools"])
+    assert semantic.conversion.has(LossCode.SERVER_TOOL_CONSTRAINT_DROPPED), semantic.conversion.losses
+
+
+def test_the_hosted_declaration_becomes_a_server_executed_search() -> None:
+    """The unambiguous half: this one identifies itself, so no heuristic is involved."""
+    payload, _ = default_registry().translate(
+        {
+            **ANTHROPIC_REQUEST,
+            "tools": [
+                {"type": "tool_search_tool_regex_20251119", "name": "tool_search_tool_regex"},
+                CC_DEFERRED,
+            ],
+        },
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+
+    assert payload["tools"][0] == {"type": "tool_search", "execution": "server"}
+    assert payload["tools"][1]["defer_loading"] is True
+
+
+def test_the_search_call_and_its_references_cross_as_search_items() -> None:
+    """The second turn: the call the client answered, and the references it answered with.
+
+    `tool_reference` names a tool; this wire wants the definition, and the definition is in the same request. Rendering the result as an ordinary `function_call_output` would hand the model an empty string where a schema belongs — which is what happened before this translation existed.
+    """
+    payload, _ = default_registry().translate(
+        {
+            **ANTHROPIC_REQUEST,
+            "tools": [CC_SEARCH_TOOL, CC_DEFERRED],
+            "messages": [
+                {"role": "user", "content": "What is the weather in Paris?"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": "toolu_1", "name": "ToolSearch", "input": {"query": "weather"}}
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_1",
+                            "content": [{"type": "tool_reference", "tool_name": "get_weather"}],
+                        }
+                    ],
+                },
+            ],
+        },
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+
+    kinds = [item.get("type") for item in payload["input"]]
+    assert "tool_search_call" in kinds
+    assert "tool_search_output" in kinds
+    call = next(item for item in payload["input"] if item["type"] == "tool_search_call")
+    output = next(item for item in payload["input"] if item["type"] == "tool_search_output")
+    assert call["call_id"] == "toolu_1"
+    # An object, not a JSON string — `function_call` spells arguments the other way and these two must not be confused.
+    assert call["arguments"] == {"query": "weather"}
+    assert output["call_id"] == "toolu_1"
+    assert [tool["name"] for tool in output["tools"]] == ["get_weather"]
+    # The definition being loaded must not still say it is deferred.
+    assert "defer_loading" not in output["tools"][0]
+
+
+def test_a_search_tool_the_history_names_is_used_even_without_a_known_name() -> None:
+    """From the second turn on, identification stops being a guess.
+
+    A client whose search tool is called something nobody hardcoded is identified by what it did — returning `tool_reference` — which is the protocol's own definition of the thing.
+    """
+    payload, _ = default_registry().translate(
+        {
+            **ANTHROPIC_REQUEST,
+            "tools": [{"name": "FindTools", "description": "find", "input_schema": {"type": "object"}}, CC_DEFERRED],
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "toolu_9", "name": "FindTools", "input": {}}],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_9",
+                            "content": [{"type": "tool_reference", "tool_name": "get_weather"}],
+                        }
+                    ],
+                },
+            ],
+        },
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+
+    assert payload["tools"][0]["type"] == "tool_search"
+    assert not any(tool.get("name") == "FindTools" for tool in payload["tools"])
+    assert any(item.get("type") == "tool_search_call" for item in payload["input"])
+
+
+def test_a_search_call_comes_back_as_a_call_on_the_clients_own_tool() -> None:
+    """The response half. Without it the model's search request reaches nobody.
+
+    On the Responses wire the search *is* the tool, so `tool_search_call` names nothing — the name has to travel from the request half. Handing it back under the client's own tool name is what lets the client recognise the call as one it knows how to answer.
+    """
+    payload, _ = default_registry().translate_response(
+        {
+            "id": "resp_1",
+            "model": "gpt-5.6-sol",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "tool_search_call",
+                    "id": "ts_1",
+                    "call_id": "call_abc",
+                    "arguments": {"query": "weather"},
+                    "execution": "client",
+                    "status": "completed",
+                }
+            ],
+        },
+        source=WireFormat.OPENAI_RESPONSES,
+        target=WireFormat.ANTHROPIC_MESSAGES,
+        client_search_tool="ToolSearch",
+    )
+
+    [block] = payload["content"]
+    assert block["type"] == "tool_use"
+    assert block["name"] == "ToolSearch"
+    assert block["id"] == "call_abc"
+    assert block["input"] == {"query": "weather"}
+    assert payload["stop_reason"] == "tool_use"
+
+
+def test_without_the_name_a_search_call_is_not_invented_into_some_other_tool() -> None:
+    """No name means no search was translated, so there is nothing this could honestly become.
+
+    Recorded as a loss rather than guessed at: handing it back under a made-up name would have the client answer a tool it never declared.
+    """
+    _, semantic = default_registry().translate_response(
+        {
+            "id": "resp_1",
+            "model": "gpt-5.6-sol",
+            "status": "completed",
+            "output": [
+                {"type": "tool_search_call", "id": "ts_1", "call_id": "call_abc", "arguments": {}, "execution": "client", "status": "completed"}
+            ],
+        },
+        source=WireFormat.OPENAI_RESPONSES,
+        target=WireFormat.ANTHROPIC_MESSAGES,
+    )
+
+    assert semantic.conversion.has(LossCode.ITEM_NOT_CARRIED), semantic.conversion.losses

@@ -33,6 +33,13 @@ from app.pipeline.translation_driver.semantic import (
     TranslationTarget,
     system_blocks_from_value,
 )
+from app.pipeline.translation_driver.tool_search import (
+    HOSTED_SEARCH_TOOL,
+    SearchContext,
+    as_client_search_tool,
+    is_hosted_search_tool,
+    resolve_client_search_tool,
+)
 
 WIRE_FORMAT = "openai-responses"
 
@@ -152,7 +159,9 @@ _RESPONSES_FUNCTION_TOOL_FIELDS = frozenset(
 _DEFERRED_LOADING = "defer_loading"
 
 
-def _function_tool(tool: dict[str, Any], conversion: Conversion) -> dict[str, Any]:
+def _function_tool(
+    tool: dict[str, Any], conversion: Conversion, *, keep_defer_loading: bool = False
+) -> dict[str, Any]:
     """Put one tool in the shape the Responses endpoint takes, carrying only what that shape has.
 
     Anthropic names the schema `input_schema` and carries no `type`; Responses wants a flat function tool with `parameters`. Passing the Anthropic shape through earns `One of the tools requested is invalid.` — measured 2026-08-18.
@@ -173,7 +182,12 @@ def _function_tool(tool: dict[str, Any], conversion: Conversion) -> dict[str, An
             "parameters": tool["input_schema"],
         }
 
-    dropped = sorted(key for key in tool if key not in _RESPONSES_FUNCTION_TOOL_FIELDS)
+    allowed = (
+        _RESPONSES_FUNCTION_TOOL_FIELDS | {_DEFERRED_LOADING}
+        if keep_defer_loading
+        else _RESPONSES_FUNCTION_TOOL_FIELDS
+    )
+    dropped = sorted(key for key in tool if key not in allowed)
     if not dropped:
         return tool
 
@@ -193,7 +207,7 @@ def _function_tool(tool: dict[str, Any], conversion: Conversion) -> dict[str, An
             LossCode.EXTENSIONS_NOT_CARRIED,
             f"{name}: {key} not carried into {WIRE_FORMAT}",
         )
-    return {key: value for key, value in tool.items() if key in _RESPONSES_FUNCTION_TOOL_FIELDS}
+    return {key: value for key, value in tool.items() if key in allowed}
 
 
 # The family this endpoint executes itself, under its own name. Anthropic spells the declaration `web_search_20250305`; sending that spelling costs the whole turn — `Invalid value: 'web_search_20250305'`, measured 2026-08-20 against gpt-5.6-sol — while `{"type": "web_search"}` returns 200 and really does run the search.
@@ -323,7 +337,9 @@ def _user_location(value: Any, conversion: Conversion) -> Any:
 
 
 def _tools_for_upstream(
-    request: SemanticRequest, policy: WebSearchConstraintPolicy
+    request: SemanticRequest,
+    policy: WebSearchConstraintPolicy,
+    search: SearchContext | None = None,
 ) -> tuple[list[dict[str, Any]], set[str], set[str]]:
     """The declarations to send, with web search in the spelling this endpoint runs.
 
@@ -338,7 +354,33 @@ def _tools_for_upstream(
     mapped_names: set[str] = set()
     function_names: set[str] = set()
     seen_web_search = False
+    # Which of the client's own tools performs its tool search, or "" when it cannot be identified. Resolved once for the whole array because promotion is a *replacement* — the tool named here leaves `tools` and comes back as the `tool_search` builtin — and because the same answer decides how the history's calls and results are written further down.
+    search_tool = search.tool_name if search is not None else resolve_client_search_tool(request.tools, request.messages)
+    # Whether the outgoing array will carry a `tool_search` at all, decided before the loop because it is what makes `defer_loading` legal — upstream refuses a deferred tool without one. Either the client's own search tool was identified, or it declared a hosted search that maps to the builtin.
+    will_search = bool(search_tool) or any(is_hosted_search_tool(tool) for tool in request.tools)
+    seen_tool_search = False
     for tool in request.tools:
+        if is_hosted_search_tool(tool):
+            # Anthropic's hosted search, which identifies itself. `execution: "server"` is the honest translation: the client asked for a search it does not run, and this endpoint runs it.
+            if not seen_tool_search:
+                seen_tool_search = True
+                kept.append(dict(HOSTED_SEARCH_TOOL))
+            else:
+                # Upstream allows exactly one: `Only one tool_search tool is allowed in 'tools' parameter.`
+                request.conversion.record(
+                    LossCode.SERVER_TOOL_CONSTRAINT_DROPPED,
+                    f"{tool.get('type')} into {WIRE_FORMAT}: merged into the tool search already declared",
+                )
+            name = tool.get("name")
+            if isinstance(name, str):
+                mapped_names.add(name)
+            continue
+        if search_tool and tool.get("name") == search_tool:
+            # The client's own search tool, promoted rather than forwarded. Leaving it in place is measured to make the model call it instead of searching, which leaves every deferred tool unloadable.
+            if not seen_tool_search:
+                seen_tool_search = True
+                kept.append(as_client_search_tool(tool))
+            continue
         if _is_anthropic_server_tool(tool):
             mapped.append(cast(str, tool["type"]))
             name = tool.get("name")
@@ -359,7 +401,7 @@ def _tools_for_upstream(
         ordinary = tool.get("name")
         if isinstance(ordinary, str):
             function_names.add(ordinary)
-        kept.append(_function_tool(tool, request.conversion))
+        kept.append(_function_tool(tool, request.conversion, keep_defer_loading=will_search))
     if mapped:
         # INFO rather than DEBUG: a client with web search switched on triggers this every request, so it is a setting and not a warning — but it is also the only place an operator can see that the declaration they sent is not the one that went out.
         logger.info(
@@ -371,12 +413,28 @@ def _tools_for_upstream(
     return kept, mapped_names, function_names
 
 
-def blocks_from_item(item: dict[str, Any]) -> tuple[str, tuple[ContentBlock, ...]]:
+def blocks_from_item(
+    item: dict[str, Any], *, client_search_tool: str = ""
+) -> tuple[str, tuple[ContentBlock, ...]]:
     """Read one Responses item as the role it belongs to and the blocks it holds.
 
     Shared by the request `input` reader and the response `output` reader: an item means the same thing in both, and two copies of this would drift the moment one gained an item type.
+
+    `client_search_tool` is the name a `tool_search_call` is handed back under. Empty when this request translated no search, in which case such an item is not expected and falls through to the unknown branch — which is the honest outcome: without a name there is no call to hand back.
     """
     kind = str(item.get("type", ""))
+    if kind == "tool_search_call" and client_search_tool:
+        # Back to an ordinary call on the client's own tool. `arguments` needs no decoding here: this wire spells them as an object, unlike `function_call`, whose arguments are a JSON string.
+        arguments = item.get("arguments")
+        return "assistant", (
+            ContentBlock(
+                BlockKind.TOOL_USE,
+                call_id=str(item.get("call_id") or item.get("id", "")),
+                name=client_search_tool,
+                arguments=arguments if arguments is not None else {},
+                raw=item,
+            ),
+        )
     if kind == "message":
         return (
             str(item.get("role", "user")),
@@ -465,12 +523,13 @@ def _decoded_arguments(value: object) -> Any:
 def _input_from_messages(
     messages: list[SemanticMessage],
     conversion: Conversion,
+    search: SearchContext | None = None,
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for message in messages:
         parts: list[dict[str, Any]] = []
         for block in message.blocks:
-            item = _item_from_block(block, message.role, conversion)
+            item = _item_from_block(block, message.role, conversion, search)
             if item is not None:
                 # Text and images belong inside one message item; everything else is top-level, so an accumulated message must be flushed before the standalone item goes out or the conversation order changes.
                 if "type" in item and item["type"] in {"input_text", "output_text", "input_image"}:
@@ -502,7 +561,28 @@ def _item_from_block(
     block: ContentBlock,
     role: str,
     conversion: Conversion,
+    search: SearchContext | None = None,
 ) -> dict[str, Any] | None:
+    if search is not None and search.active:
+        # The two history shapes a client-executed tool search leaves behind. Both are recognised by `call_id` rather than by content: the call is the one that went to the search tool, and the result is the one answering it — a result that came back empty is still a search result, and rendering it as an ordinary `function_call_output` would tell the model a tool it never called had returned.
+        if block.kind is BlockKind.TOOL_USE and block.name == search.tool_name:
+            return {
+                "type": "tool_search_call",
+                "call_id": block.call_id,
+                # An object, unlike `function_call.arguments`, which this wire spells as a JSON string. The types differ and so does the rendering.
+                "arguments": block.arguments if block.arguments is not None else {},
+                "execution": "client",
+                "status": "completed",
+            }
+        if block.kind is BlockKind.TOOL_RESULT and search.is_search_call(block.call_id):
+            return {
+                "type": "tool_search_output",
+                "call_id": block.call_id,
+                "execution": "client",
+                "status": "completed",
+                # `tool_reference` names a tool; this wire wants the definition. Both are in this request, so the expansion is a lookup rather than an invention.
+                "tools": search.loaded_tools(block.output),
+            }
     if block.kind is BlockKind.TEXT:
         # `output_text` is the assistant's own words; anything the model is being *given* is `input_text`, which is why the role decides rather than the block.
         part_type = "output_text" if role == "assistant" else "input_text"
@@ -744,9 +824,13 @@ def to_openai_responses(
     system_prompts: SystemPromptPlacement = "instructions-joint-string",
     web_search_domain_restrictions: WebSearchConstraintPolicy = "drop_fields",
 ) -> dict[str, Any]:
+    # Resolved before anything is written, because the same answer shapes both halves: which tool becomes the `tool_search` builtin, and how the history's calls to it are rendered. Passed to both rather than computed twice — two independent answers to "is there a search here" is how the tools array and the history come to disagree.
+    search = _search_context(request)
+    # Recorded on the request so the response half can find it. It is not readable from the Responses body: a `tool_search_call` names no tool, because on that wire the search *is* the tool.
+    request.client_search_tool = search.tool_name
     payload: dict[str, Any] = {
         "model": request.model,
-        "input": _input_from_messages(request.messages, request.conversion),
+        "input": _input_from_messages(request.messages, request.conversion, search),
     }
     if request.system:
         _SYSTEM_PROMPT_PLACEMENTS[system_prompts](payload, request)
@@ -754,7 +838,9 @@ def to_openai_responses(
     mapped_names: set[str] = set()
     function_names: set[str] = set()
     if request.tools:
-        tools, mapped_names, function_names = _tools_for_upstream(request, web_search_domain_restrictions)
+        tools, mapped_names, function_names = _tools_for_upstream(
+            request, web_search_domain_restrictions, search
+        )
         dropped_any = len(tools) != len(request.tools)
         if tools:
             # Not `[]` when everything was removed. An empty array is a different thing to say than saying nothing, and absent is the spelling every request without tools already uses.
@@ -774,6 +860,37 @@ def to_openai_responses(
     if dropped_any:
         _drop_dangling_tool_choice(payload)
     return payload
+
+
+def _search_context(request: SemanticRequest) -> SearchContext:
+    """Everything the writers need to render this request's tool search, resolved once.
+
+    Empty unless a client search tool was identified — and an empty context makes every branch that consults it inert, which is exactly what "declined to identify" should mean downstream.
+
+    The definitions are built with a throwaway `Conversion`: they are a *lookup table* for expanding `tool_reference`, not tools being sent, so any field dropped while shaping them has already been recorded against the real tools array or does not apply. Recording it twice would report losses this request never took.
+    """
+    name = resolve_client_search_tool(request.tools, request.messages)
+    if not name:
+        return SearchContext()
+    call_ids = frozenset(
+        block.call_id
+        for message in request.messages
+        for block in message.blocks
+        if block.kind is BlockKind.TOOL_USE and block.name == name and block.call_id
+    )
+    scratch = Conversion()
+    definitions: dict[str, dict[str, Any]] = {}
+    for tool in request.tools:
+        tool_name = tool.get("name")
+        if not isinstance(tool_name, str) or tool_name == name or is_hosted_search_tool(tool):
+            continue
+        # Without `defer_loading`: these are the definitions being *loaded*, and a definition that still says it is deferred describes the state the search just ended.
+        definitions[tool_name] = {
+            key: value
+            for key, value in _function_tool(dict(tool), scratch).items()
+            if key != _DEFERRED_LOADING
+        }
+    return SearchContext(tool_name=name, call_ids=call_ids, definitions=definitions)
 
 
 def _apply_reasoning(

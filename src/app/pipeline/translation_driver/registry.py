@@ -6,7 +6,7 @@ Translators register under the names `docs/.human-controlled/message-translation
 
 from collections.abc import Callable, Mapping
 from functools import partial
-from typing import Any
+from typing import Any, Protocol
 
 from app.config.schema import ModelTranslationConfig
 from app.pipeline.request import WireFormat
@@ -29,7 +29,15 @@ from app.pipeline.translation_driver.semantic import SemanticRequest, Translatio
 
 type InboundTranslator = Callable[[Mapping[str, Any]], SemanticRequest]
 type OutboundTranslator = Callable[[SemanticRequest, TranslationTarget], dict[str, Any]]
-type ResponseReader = Callable[[Mapping[str, Any]], SemanticResponse]
+class ResponseReader(Protocol):
+    """Reads an upstream response body into the intermediate form.
+
+    `client_search_tool` is accepted by every reader and used by the one whose wire has a tool search to hand back. A `Callable` alias could not express an argument only some readers care about without either putting it on none of them — leaving the Responses reader unable to name the tool a `tool_search_call` belongs to — or forcing every future reader to grow a parameter about a format it does not speak.
+    """
+
+    def __call__(
+        self, payload: Mapping[str, Any], *, client_search_tool: str = ""
+    ) -> SemanticResponse: ...
 type ResponseWriter = Callable[[SemanticResponse], dict[str, Any]]
 
 INBOUND_PREFIX = "inbound.from-"
@@ -112,6 +120,7 @@ class TranslatorRegistry:
         *,
         source: WireFormat,
         target: WireFormat,
+        client_search_tool: str = "",
     ) -> tuple[dict[str, Any], SemanticResponse]:
         """Carry a response back across, so the client sees the format it asked in.
 
@@ -123,7 +132,7 @@ class TranslatorRegistry:
         writer = self._write_response.get(target)
         if writer is None:
             raise TranslatorNotFound(f"no response writer registered for {target.value}")
-        semantic = reader(payload)
+        semantic = reader(payload, client_search_tool=client_search_tool)
         return writer(semantic), semantic
 
 

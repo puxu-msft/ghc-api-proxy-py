@@ -394,7 +394,14 @@ class ResponsesAssembler:
     A block therefore completes on `output_item.done`, not on the deltas that preceded it.
     """
 
-    def __init__(self, *, hand_over_stop_reasons: frozenset[str] = frozenset({"max_tokens"})) -> None:
+    def __init__(
+        self,
+        *,
+        hand_over_stop_reasons: frozenset[str] = frozenset({"max_tokens"}),
+        client_search_tool: str = "",
+    ) -> None:
+        # The name a `tool_search_call` is delivered under. It cannot be read from the stream — on this wire the search *is* the tool, so the item names nothing — and without it such an item would fall through to the unknown branch and reach the client as an empty text block. Empty here means this request translated no tool search, in which case no such item is expected.
+        self._client_search_tool = client_search_tool
         # Which endings will hand the turn back to the client, and so which ones may drop the block upstream cut short. One setting, because dropping content is only defensible when the client is handed a way to get it back.
         self._hand_over_stop_reasons = hand_over_stop_reasons
         # The block upstream cut short, held rather than emitted or discarded, because at the moment it closes this side does not yet know *why* the response is incomplete — that arrives on the terminal event. Exactly one item can ever be in here: upstream cuts the last one short and then stops.
@@ -499,6 +506,8 @@ class ResponsesAssembler:
             "message": TEXT,
             "function_call": TOOL_USE,
             "reasoning": THINKING,
+            # Only when a name is known to deliver it under; otherwise it falls through unmapped and is handled as any other unrecognised item, which is the honest outcome rather than a call the client cannot answer.
+            **({"tool_search_call": TOOL_USE} if self._client_search_tool else {}),
         }.get(item_type, item_type)
         key = self._item_key(data)
         self._drafts[key] = Draft(index=self._order, kind=kind, payload=dict(item))
@@ -534,12 +543,31 @@ class ResponsesAssembler:
         kind = draft.kind
         if draft.kind == TOOL_USE:
             self._saw_tool_call = True
-            payload: dict[str, Any] = {
-                "type": TOOL_USE,
-                "id": str(draft.payload.get("call_id") or draft.payload.get("id", "")),
-                "name": str(draft.payload.get("name", "")),
-                "input": decode_json(draft.partial_json or "{}"),
-            }
+            item_kind = str(draft.payload.get("type", ""))
+            if item_kind == "tool_search_call":
+                # Two differences from a `function_call`, both of them wire facts rather than preferences: the item carries no name, and its `arguments` are already an object where a function call spells them as a JSON string.
+                #
+                # **Read off the closing event, not the draft** — the same trap the web-search branch below documents. `output_item.added` carries this item with only an id, a type and a call id; the arguments appear for the first time on `done`, and there are no delta events to accumulate. Reading the draft yields an empty object, which is what the first version of this did.
+                closing = data.get("item")
+                arguments = (
+                    cast(dict[str, Any], closing).get("arguments")
+                    if isinstance(closing, dict)
+                    else draft.payload.get("arguments")
+                )
+                source = cast(dict[str, Any], closing) if isinstance(closing, dict) else draft.payload
+                payload: dict[str, Any] = {
+                    "type": TOOL_USE,
+                    "id": str(source.get("call_id") or source.get("id", "")),
+                    "name": self._client_search_tool,
+                    "input": arguments if isinstance(arguments, dict) else {},
+                }
+            else:
+                payload = {
+                    "type": TOOL_USE,
+                    "id": str(draft.payload.get("call_id") or draft.payload.get("id", "")),
+                    "name": str(draft.payload.get("name", "")),
+                    "input": decode_json(draft.partial_json or "{}"),
+                }
         elif draft.kind == THINKING:
             payload = {
                 "type": THINKING,

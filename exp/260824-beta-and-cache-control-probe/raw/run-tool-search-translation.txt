@@ -1,0 +1,3 @@
+identified search tool: 'ToolSearch'
+[turn1 200] client would see: thinking | tool_use:ToolSearch  stop_reason=tool_use
+[turn2 200] client would see: tool_use:get_weather  stop_reason=tool_use

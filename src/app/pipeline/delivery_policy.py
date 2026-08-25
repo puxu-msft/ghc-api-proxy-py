@@ -15,7 +15,7 @@ from app.pipeline.delivery.formats.anthropic_messages import (
 from app.pipeline.delivery.formats.openai_responses import ResponsesAssembler, ResponsesFramer
 from app.pipeline.delivery.framing import OutboundFramer
 from app.pipeline.delivery.stream import StreamSettings
-from app.pipeline.driver import HandledRequest
+from app.pipeline.driver import CLIENT_SEARCH_TOOL, HandledRequest
 from app.pipeline.request import WireFormat
 
 
@@ -86,7 +86,11 @@ def assembler_for(
     """
     if dialect_for(handled) is ReplyDialect.RESPONSES:
         # Only this one can see whether upstream cut an item short, and so only this one needs to know which endings will hand the turn back.
-        return ResponsesAssembler(hand_over_stop_reasons=hand_over_stop_reasons)
+        return ResponsesAssembler(
+            hand_over_stop_reasons=hand_over_stop_reasons,
+            # Put on the context by the request translation. The streaming path needs it for the same reason the buffered one does — a `tool_search_call` names no tool — and reads it from the same place, so the two cannot come to deliver the model's search request under different names.
+            client_search_tool=str(handled.context.extras.get(CLIENT_SEARCH_TOOL, "")),
+        )
     return AnthropicAssembler()
 
 def stream_settings(chain: Chain) -> StreamSettings:

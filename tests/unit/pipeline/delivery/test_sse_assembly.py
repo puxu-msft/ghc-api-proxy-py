@@ -576,3 +576,66 @@ def test_a_failure_event_that_says_nothing_still_gets_reported(
         assert assembler.push(SseEvent(event="response.failed", data="{}")) == ()
 
     assert "response.failed" in caplog.text
+
+
+def test_a_search_call_streams_out_as_a_call_on_the_clients_own_tool() -> None:
+    """The streaming half of the tool-search translation.
+
+    Without it the item falls through unmapped and reaches the client as an empty text block — the model's search request silently becoming nothing, on the path production actually uses. The two spellings that differ from a `function_call` are both exercised here: the item carries no `name`, and its `arguments` arrive as an object rather than as a JSON string in deltas.
+    """
+    assembler = ResponsesAssembler(client_search_tool="ToolSearch")
+    assembler.push(
+        SseEvent(
+            "response.output_item.added",
+            orjson.dumps({"item": {"id": "ts1", "type": "tool_search_call", "call_id": "call_a"}}).decode(),
+        )
+    )
+    blocks = assembler.push(
+        SseEvent(
+            "response.output_item.done",
+            orjson.dumps(
+                {
+                    "item": {
+                        "id": "ts1",
+                        "type": "tool_search_call",
+                        "call_id": "call_a",
+                        "arguments": {"query": "weather"},
+                        "execution": "client",
+                        "status": "completed",
+                    }
+                }
+            ).decode(),
+        )
+    )
+
+    [block] = blocks
+    assert block.payload == {
+        "type": "tool_use",
+        "id": "call_a",
+        "name": "ToolSearch",
+        "input": {"query": "weather"},
+    }
+
+
+def test_without_a_name_a_search_call_is_not_delivered_as_some_other_tool() -> None:
+    """No name means this request translated no search, so there is nothing to deliver it as.
+
+    It stays unmapped and takes whatever path an unrecognised item takes. That is worse than the branch above, but it is not *wrong* the way handing the client a call on an invented tool name would be.
+    """
+    assembler = ResponsesAssembler()
+    assembler.push(
+        SseEvent(
+            "response.output_item.added",
+            orjson.dumps({"item": {"id": "ts1", "type": "tool_search_call", "call_id": "call_a"}}).decode(),
+        )
+    )
+    blocks = assembler.push(
+        SseEvent(
+            "response.output_item.done",
+            orjson.dumps(
+                {"item": {"id": "ts1", "type": "tool_search_call", "call_id": "call_a", "arguments": {}}}
+            ).decode(),
+        )
+    )
+
+    assert not any(block.payload.get("name") == "ToolSearch" for block in blocks)

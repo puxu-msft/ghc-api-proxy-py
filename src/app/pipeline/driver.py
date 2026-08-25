@@ -53,6 +53,8 @@ from app.pipeline.translation_driver.semantic import (
 from app.tokenization.estimators import estimate_anthropic_input, estimate_responses_input
 from app.wire_json import dumps
 
+# Where the identified client tool-search tool is kept between the request and response halves. A `tool_search_call` names no tool — on that wire the search *is* the tool — so this is the only way the name survives the crossing.
+CLIENT_SEARCH_TOOL = "client_search_tool"
 
 @dataclass(slots=True)
 class HandledRequest:
@@ -158,6 +160,9 @@ async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[Req
             target_model=translation_target(provider, route.model_id),
         )
         context.payload = translated
+        if semantic.client_search_tool:
+            # Kept for the response half, which cannot recover it: a `tool_search_call` names no tool, so without this the model's search request has no name to come back under.
+            context.extras[CLIENT_SEARCH_TOOL] = semantic.client_search_tool
         if not semantic.conversion.lossless:
             context.extras["conversion_losses"] = list(semantic.conversion.losses)
 
