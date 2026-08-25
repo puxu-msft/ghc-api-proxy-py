@@ -211,6 +211,16 @@ request 切片基于 reasoning squash：`cb286059b656d960225c2afff84f204b9123810
 
 规范条款见 [spec.md](spec.md) 的「Tools 与 tool choice」与请求字段矩阵。
 
+**2026-08-25 再次追加：用户裁定客户端声明的 tool search 要翻译，推翻上面第 2 条。** 两条裁决其实针对不同的事——8-24 禁止的是代理**主动注入**（那一半仍然有效，删掉的两个 legacy 开关不恢复），8-25 要求的是把**客户端已声明的**搜索翻到本腿。推翻旧条款的依据是一次「读类型定义 + 看模型产出」的实测：`ToolSearchToolParam.execution` 有 `"client"` 一档，语义与 Anthropic 侧的自定义 tool search 对应，双向完整往返实测跑通。**8-24 暂缓映射时给的理由（「Responses 的 tool_search 是 host 执行的，语义不等价」）由此被证伪**——那个判断只看了「加上它请求变 200」，没读类型也没看 output items。
+
+已落地（`main@5eaef9d`）：
+
+1. 请求侧——客户端的搜索工具提升为 `{type: tool_search, execution: client}` 并**从 `tools` 移除**（实测：留着它模型会去调它，builtin 形同虚设）；`defer_loading` 因前置条件满足而保留；历史里对该工具的 `tool_use` 变成 `tool_search_call`，回答它的 `tool_reference` 变成 `tool_search_output` 并把工具名展开成完整定义（定义就在同一请求的 `tools` 里）。托管声明 `tool_search_tool_regex/bm25_*` 映射为 `execution: server`。
+2. 响应侧——`tool_search_call` 还原为对客户端自有工具的 `tool_use`，缓冲与流式两条路都做了；流式此前会把它变成一个空 text 块。
+3. 识别只有启发式（Anthropic 协议零标记，两个一线客户端硬编码了不同名字），因此结构是「闸门 → 协议级校正 → 内置名字 → 认不出就不提升」，最后一档退回剥离，即 8-24 的行为。误判代价是被错认的工具从请求里消失，所以最后一档是「不做」而不是「猜」。
+
+实测与判据调查见 [reports/260825-tool-search-translation-measurements.md](reports/260825-tool-search-translation-measurements.md) 与 [reports/260825-tool-search-translation-shapes.md](reports/260825-tool-search-translation-shapes.md)。
+
 ### 历史评审与主树结果
 
 [Request R2 代码复评](reports/260806-review-code-request-r2.md)在 `028f1f2…` 上关闭首轮四项 major，但新增 1 major：unknown budget limits 与明确无界被混同；同 HEAD 的[独立行为复验](reports/260806-verify-request-r2.md)为 PASS。[Request R3](reports/260806-review-code-request-r3.md)已在 `fdd2f75…` 上确认该 major 关闭，结论为 blocker 0、major 0；其reviewed source已归档，净语义已进入main。
