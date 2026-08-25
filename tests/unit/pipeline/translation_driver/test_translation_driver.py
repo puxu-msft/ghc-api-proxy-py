@@ -1233,3 +1233,132 @@ def test_without_the_name_a_search_call_is_not_invented_into_some_other_tool() -
     )
 
     assert semantic.conversion.has(LossCode.ITEM_NOT_CARRIED), semantic.conversion.losses
+
+
+def test_a_search_tool_the_history_names_but_the_request_no_longer_declares() -> None:
+    """The gap that produced the very 400 this feature exists to prevent.
+
+    History can name a search tool the current request does not send. Identification succeeds, nothing in the tools loop promotes anything — and if `defer_loading` had been kept on the strength of the *name* rather than of an actual `tool_search`, the outgoing body would carry deferred tools with no search beside them: `Invalid Value: 'tools.defer_loading'. Deferred tools require tools.tool_search.`
+    """
+    payload, _ = default_registry().translate(
+        {
+            **ANTHROPIC_REQUEST,
+            "tools": [CC_DEFERRED],
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "FindTools", "input": {}}]},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_1",
+                            "content": [{"type": "tool_reference", "tool_name": "get_weather"}],
+                        }
+                    ],
+                },
+            ],
+        },
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+
+    assert not any(tool.get("type") == "tool_search" for tool in payload["tools"])
+    # The load-bearing half: no search means the flag cannot stay.
+    assert not any("defer_loading" in tool for tool in payload["tools"])
+
+
+def test_the_hosted_search_wins_over_the_clients_own_whatever_the_array_order() -> None:
+    """Only one may travel, so the winner must not depend on which was declared first.
+
+    Hosted wins because it is the unambiguous one — it identifies itself by `type` while the client's is a heuristic — and the losing declaration is recorded rather than vanishing.
+    """
+    hosted: dict[str, Any] = {"type": "tool_search_tool_regex_20251119", "name": "tool_search_tool_regex"}
+    for order in ([hosted, CC_SEARCH_TOOL, CC_DEFERRED], [CC_SEARCH_TOOL, hosted, CC_DEFERRED]):
+        payload, semantic = default_registry().translate(
+            {**ANTHROPIC_REQUEST, "tools": order},
+            source=WireFormat.ANTHROPIC_MESSAGES,
+            target=WireFormat.OPENAI_RESPONSES,
+        )
+        searches = [tool for tool in payload["tools"] if tool.get("type") == "tool_search"]
+        assert searches == [{"type": "tool_search", "execution": "server"}], order
+        # Not promoted — but **not deleted either**. Removing a tool the client declared, to make room for a mechanism it also declared, is the silent capability loss this whole module is shaped against; it travels as the ordinary function tool it already is.
+        assert any(tool.get("name") == "ToolSearch" for tool in payload["tools"]), order
+        assert semantic.conversion.has(LossCode.SERVER_TOOL_CONSTRAINT_DROPPED), order
+        # And the response half must not be told a client search is in flight.
+        assert semantic.client_search_tool == "", order
+
+
+def test_a_forced_choice_on_the_hosted_search_is_not_repointed_at_web_search() -> None:
+    """`mapped_names` means "became the web search builtin", and a hosted search did not.
+
+    Putting it there earns `tool_choice: {"type": "web_search"}` on a request whose `tools` contain no web search — a forced call on a tool nobody declared.
+    """
+    payload, _ = default_registry().translate(
+        {
+            **ANTHROPIC_REQUEST,
+            "tools": [{"type": "tool_search_tool_regex_20251119", "name": "tool_search_tool_regex"}, CC_DEFERRED],
+            "tool_choice": {"type": "tool", "name": "tool_search_tool_regex"},
+        },
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+
+    assert payload.get("tool_choice") != {"type": "web_search"}
+
+
+def test_a_failed_search_is_not_reported_to_the_model_as_a_completed_one() -> None:
+    """The client said the search failed; saying "completed, found nothing" is a different claim.
+
+    Before this branch existed the text reached the model through `function_call_output`. Rendering it as a successful empty search is a regression that reads as success.
+    """
+    payload, semantic = default_registry().translate(
+        {
+            **ANTHROPIC_REQUEST,
+            "tools": [CC_SEARCH_TOOL, CC_DEFERRED],
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_2", "name": "ToolSearch", "input": {}}]},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_2",
+                            "is_error": True,
+                            "content": [{"type": "text", "text": "tool search failed: index unavailable"}],
+                        }
+                    ],
+                },
+            ],
+        },
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+
+    output = next(item for item in payload["input"] if item["type"] == "tool_search_output")
+    assert output["status"] == "incomplete"
+    assert semantic.conversion.has(LossCode.TOOL_RESULT_CONTENT_FLATTENED), semantic.conversion.losses
+
+
+def test_the_upstreams_own_hosted_search_report_is_dropped_rather_than_blanked() -> None:
+    """A hosted search makes upstream emit `tool_search_output`. Anthropic has no block for it.
+
+    Dropped deliberately, not left to the unknown-item path — that one renders an empty text block, and an assistant turn carrying one is refused when the client replays it.
+    """
+    payload, semantic = default_registry().translate_response(
+        {
+            "id": "resp_1",
+            "model": "gpt-5.6-sol",
+            "status": "completed",
+            "output": [
+                {"type": "tool_search_output", "id": "tso_1", "call_id": "c1", "execution": "server", "status": "completed", "tools": []},
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "done"}]},
+            ],
+        },
+        source=WireFormat.OPENAI_RESPONSES,
+        target=WireFormat.ANTHROPIC_MESSAGES,
+    )
+
+    assert [block["type"] for block in payload["content"]] == ["text"]
+    assert not semantic.conversion.has(LossCode.ITEM_NOT_CARRIED), semantic.conversion.losses

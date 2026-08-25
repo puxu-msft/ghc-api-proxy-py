@@ -385,6 +385,8 @@ class ResponsesFramer:
 
 # The item type upstream reports a search it ran itself under. Carried as its own draft kind so `_close` can tell it from a message and render it, rather than falling through to the empty-text default.
 WEB_SEARCH_CALL = "web_search_call"
+TOOL_SEARCH_CALL = "tool_search_call"
+TOOL_SEARCH_OUTPUT = "tool_search_output"
 
 
 class ResponsesAssembler:
@@ -507,7 +509,9 @@ class ResponsesAssembler:
             "function_call": TOOL_USE,
             "reasoning": THINKING,
             # Only when a name is known to deliver it under; otherwise it falls through unmapped and is handled as any other unrecognised item, which is the honest outcome rather than a call the client cannot answer.
-            **({"tool_search_call": TOOL_USE} if self._client_search_tool else {}),
+            **({TOOL_SEARCH_CALL: TOOL_USE} if self._client_search_tool else {}),
+            # The upstream's own account of a **hosted** search: it ran the search and is reporting what it loaded. There is no Anthropic block for that, and the client did not ask for one — it asked for a hosted search, whose whole point is that it happens elsewhere. Named here so it is *dropped deliberately* rather than falling through to the unknown branch, which turns it into an empty text block — a shape upstream then refuses when the client replays the turn.
+            TOOL_SEARCH_OUTPUT: TOOL_SEARCH_OUTPUT,
         }.get(item_type, item_type)
         key = self._item_key(data)
         self._drafts[key] = Draft(index=self._order, kind=kind, payload=dict(item))
@@ -529,10 +533,19 @@ class ResponsesAssembler:
         if draft is None:
             raw = data.get("item")
             item = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
-            if str(item.get("type", "")) != WEB_SEARCH_CALL:
+            late = str(item.get("type", ""))
+            # `tool_search_call` joins `web_search_call` here because the two are structurally the same on this wire: whole on `done`, no deltas, nothing for `added` to have carried. Only when a name is known to deliver it under — without one there is nothing to build.
+            rescuable = late == WEB_SEARCH_CALL or (
+                late == TOOL_SEARCH_CALL and bool(self._client_search_tool)
+            )
+            if not rescuable:
                 return ()
-            # A `web_search_call` that closes without ever having opened. This item is whole on `done` — it has no deltas and nothing to accumulate — so the `added` it skipped carried nothing this needs, and refusing to close it would throw away a search that actually ran, silently. The same regression is on record in the reference project, where the item vanished with no observation of any kind. Registering it late costs nothing; the alternative costs the turn's search.
-            draft = Draft(index=self._order, kind=WEB_SEARCH_CALL, payload=dict(item))
+            # An item that closes without ever having opened. This item is whole on `done` — it has no deltas and nothing to accumulate — so the `added` it skipped carried nothing this needs, and refusing to close it would throw away a search that actually ran, silently. The same regression is on record in the reference project, where the item vanished with no observation of any kind. Registering it late costs nothing; the alternative costs the turn's search.
+            draft = Draft(
+                index=self._order,
+                kind=TOOL_USE if late == TOOL_SEARCH_CALL else WEB_SEARCH_CALL,
+                payload=dict(item),
+            )
             self._order += 1
         # Upstream says on the closing event whether this item is whole: `status: "incomplete"` on the one it cut short, `"completed"` on the rest. Measured 15 times, four of them on a `function_call`, whose `arguments` are then truncated JSON.
         #
@@ -541,10 +554,13 @@ class ResponsesAssembler:
         # A `reasoning` item carries no `status` at all — verified against a completed one, whose key set is identical — so this cannot see a truncated one and does not try. Left open deliberately; `.dev/docs/upstream/retry-and-continuation/deferred.md` §2.
         cut_short = _upstream_cut_this_item_short(data) and self._terminal.blocks > 0
         kind = draft.kind
+        if draft.kind == TOOL_SEARCH_OUTPUT:
+            # The upstream's own report of a hosted search. Dropped on purpose: Anthropic has no block for "the server searched and loaded these", and the client that asked for a hosted search asked precisely for that to happen out of sight. Dropping it *here* rather than letting it reach the fallback is the whole point — the fallback renders an empty text block, which upstream refuses when the client replays the turn.
+            return ()
         if draft.kind == TOOL_USE:
             self._saw_tool_call = True
             item_kind = str(draft.payload.get("type", ""))
-            if item_kind == "tool_search_call":
+            if item_kind == TOOL_SEARCH_CALL:
                 # Two differences from a `function_call`, both of them wire facts rather than preferences: the item carries no name, and its `arguments` are already an object where a function call spells them as a JSON string.
                 #
                 # **Read off the closing event, not the draft** — the same trap the web-search branch below documents. `output_item.added` carries this item with only an id, a type and a call id; the arguments appear for the first time on `done`, and there are no delta events to accumulate. Reading the draft yields an empty object, which is what the first version of this did.

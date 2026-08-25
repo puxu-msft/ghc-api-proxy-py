@@ -155,7 +155,9 @@ _RESPONSES_FUNCTION_TOOL_FIELDS = frozenset(
 #
 # It is not an unknown key — upstream knows it well enough to enforce its precondition: `Invalid Value: 'tools.defer_loading'. Deferred tools require tools.tool_search.` The precondition is a `{"type": "tool_search"}` builtin in the same array, and that is a server tool the bridge spec's Server-tool no-revive forbids this layer from introducing on its own. So the reason it goes is not "upstream does not take it" but "we are not allowed to satisfy what it needs" — which, unlike the first reason, does not expire when the endpoint changes.
 #
-# Measured 2026-08-24: `defer_loading: true` alone is refused; `false` alone is accepted; `{"type": "tool_search"}` beside it is accepted. Mapping to that builtin would have kept the token saving the client asked for — **the user ruled on 2026-08-24 that tool search is not a capability this proxy adds**, so that mapping is not on the table and the field simply goes. The ruling is recorded in the bridge spec's "Tools 与 tool choice"; the same ruling removed the never-wired `tool_search` switch from the legacy `AppSettings`.
+# Measured 2026-08-24: `defer_loading: true` alone is refused; `false` alone is accepted; `{"type": "tool_search"}` beside it is accepted.
+#
+# **The 2026-08-25 ruling reversed what this field's absence used to mean.** It is kept now whenever the outgoing array will carry a `tool_search` — see `_tools_for_upstream` — and removed only when no search could be translated. An earlier version of this comment cited the 2026-08-24 ruling ("tool search is not a capability this proxy adds") as current; that half was superseded the next day, while the half forbidding the proxy to *inject* a search nobody asked for still stands.
 _DEFERRED_LOADING = "defer_loading"
 
 
@@ -214,7 +216,9 @@ def _function_tool(
 #
 # `web_fetch_` is deliberately *not* here, and it is not the same case: this endpoint refuses `web_fetch` under every spelling tried, so there is nothing to map it to. `.dev/docs/anthropic-responses-bridge/hosted-web-search-spec.md` §13 has that family refused locally rather than removed quietly, which is its own piece of work.
 #
-# Nor are `memory_`, `tool_search_`, `text_editor_`, `bash_` and `computer_`. Those are executed by the client, not by the model's host, so there is no hosted equivalent to name — they travel unchanged today and are recorded in `.dev/docs/hosted-web-search/reports/260820-websearch-responses-leg-400-fix.md` §5.1 as the gap that leaves.
+# Nor are `memory_`, `text_editor_`, `bash_` and `computer_`. Those are executed by the client, not by the model's host, so there is no hosted equivalent to name — they travel unchanged today and are recorded in `.dev/docs/hosted-web-search/reports/260820-websearch-responses-leg-400-fix.md` §5.1 as the gap that leaves.
+#
+# **`tool_search_` left this list on 2026-08-25** and is now translated — see `tool_search.is_hosted_search_tool`, which intercepts it before this family test is reached. The remaining four are untouched by that ruling.
 _ANTHROPIC_SERVER_TOOL_FAMILIES: tuple[str, ...] = ("web_search_",)
 
 # The spelling this endpoint answers 200 to and actually executes. Upstream normalises it to `web_search_preview` in the tool echo of its reply, which is how we know the two are the same thing to it.
@@ -356,8 +360,15 @@ def _tools_for_upstream(
     seen_web_search = False
     # Which of the client's own tools performs its tool search, or "" when it cannot be identified. Resolved once for the whole array because promotion is a *replacement* — the tool named here leaves `tools` and comes back as the `tool_search` builtin — and because the same answer decides how the history's calls and results are written further down.
     search_tool = search.tool_name if search is not None else resolve_client_search_tool(request.tools, request.messages)
-    # Whether the outgoing array will carry a `tool_search` at all, decided before the loop because it is what makes `defer_loading` legal — upstream refuses a deferred tool without one. Either the client's own search tool was identified, or it declared a hosted search that maps to the builtin.
-    will_search = bool(search_tool) or any(is_hosted_search_tool(tool) for tool in request.tools)
+    # Whether the outgoing array will carry a `tool_search` at all, decided before the loop because it is what makes `defer_loading` legal — upstream refuses a deferred tool without one.
+    #
+    # **The identified name is not enough: it has to still be declared here.** History can name a search tool this request no longer sends — and then nothing in the loop promotes anything, while `defer_loading` has already been kept on every tool. That combination is exactly the 400 this whole feature exists to prevent, produced by the feature itself.
+    promotes_client_search = any(
+        tool.get("name") == search_tool for tool in request.tools if search_tool
+    )
+    will_search = promotes_client_search or any(
+        is_hosted_search_tool(tool) for tool in request.tools
+    )
     seen_tool_search = False
     for tool in request.tools:
         if is_hosted_search_tool(tool):
@@ -371,15 +382,22 @@ def _tools_for_upstream(
                     LossCode.SERVER_TOOL_CONSTRAINT_DROPPED,
                     f"{tool.get('type')} into {WIRE_FORMAT}: merged into the tool search already declared",
                 )
-            name = tool.get("name")
-            if isinstance(name, str):
-                mapped_names.add(name)
+            # Deliberately **not** added to `mapped_names`: that set means "declarations that became the web search builtin", and both of its consumers rewrite a matching `tool_choice` to `{"type": "web_search"}`. A hosted search added there earns a forced choice pointing at a builtin this request does not declare.
+            #
+            # The cost of leaving it out is a `tool_choice` naming the hosted search going stale, which `_drop_dangling_tool_choice` already removes — a lost forced choice rather than a forced call on the wrong tool.
             continue
         if search_tool and tool.get("name") == search_tool:
             # The client's own search tool, promoted rather than forwarded. Leaving it in place is measured to make the model call it instead of searching, which leaves every deferred tool unloadable.
+            #
+            # `seen_tool_search` can only already be set here if two tools carry the same name, since the hosted case cleared `search_tool` above. Recorded rather than dropped in silence: a tool leaving the request without a trace is the failure this module's own docstring is written against.
             if not seen_tool_search:
                 seen_tool_search = True
                 kept.append(as_client_search_tool(tool))
+            else:
+                request.conversion.record(
+                    LossCode.SERVER_TOOL_CONSTRAINT_DROPPED,
+                    f"{search_tool} into {WIRE_FORMAT}: merged into the tool search already declared",
+                )
             continue
         if _is_anthropic_server_tool(tool):
             mapped.append(cast(str, tool["type"]))
@@ -423,6 +441,9 @@ def blocks_from_item(
     `client_search_tool` is the name a `tool_search_call` is handed back under. Empty when this request translated no search, in which case such an item is not expected and falls through to the unknown branch — which is the honest outcome: without a name there is no call to hand back.
     """
     kind = str(item.get("type", ""))
+    if kind == "tool_search_output":
+        # The upstream's own report of a **hosted** search — it ran the search and is saying what it loaded. Anthropic has no block for that, and a client that declared a hosted search asked for exactly this to happen out of sight. An empty block list is "nothing to carry", which is different from the unknown branch's "we did not recognise this".
+        return "assistant", ()
     if kind == "tool_search_call" and client_search_tool:
         # Back to an ordinary call on the client's own tool. `arguments` needs no decoding here: this wire spells them as an object, unlike `function_call`, whose arguments are a JSON string.
         arguments = item.get("arguments")
@@ -575,13 +596,20 @@ def _item_from_block(
                 "status": "completed",
             }
         if block.kind is BlockKind.TOOL_RESULT and search.is_search_call(block.call_id):
+            # `tool_reference` names a tool; this wire wants the definition. Both are in this request, so the expansion is a lookup rather than an invention.
+            loaded, uncarried = search.loaded_tools(block.output)
+            for detail in uncarried:
+                conversion.record(
+                    LossCode.TOOL_RESULT_CONTENT_FLATTENED,
+                    f"tool search result for {block.call_id}: {detail}",
+                )
             return {
                 "type": "tool_search_output",
                 "call_id": block.call_id,
                 "execution": "client",
-                "status": "completed",
-                # `tool_reference` names a tool; this wire wants the definition. Both are in this request, so the expansion is a lookup rather than an invention.
-                "tools": search.loaded_tools(block.output),
+                # **`completed` is a claim, not a formality.** A search the client reported as failed, or one whose references named nothing this request declares, did not complete — and rendering it as though it did tells the model the search succeeded and found nothing, which is a different and more misleading answer than "the search did not work".
+                "status": "incomplete" if block.is_error or (uncarried and not loaded) else "completed",
+                "tools": loaded,
             }
     if block.kind is BlockKind.TEXT:
         # `output_text` is the assistant's own words; anything the model is being *given* is `input_text`, which is why the role decides rather than the block.
@@ -827,6 +855,7 @@ def to_openai_responses(
     # Resolved before anything is written, because the same answer shapes both halves: which tool becomes the `tool_search` builtin, and how the history's calls to it are rendered. Passed to both rather than computed twice — two independent answers to "is there a search here" is how the tools array and the history come to disagree.
     search = _search_context(request)
     # Recorded on the request so the response half can find it. It is not readable from the Responses body: a `tool_search_call` names no tool, because on that wire the search *is* the tool.
+    # The name the *response* half should hand a `tool_search_call` back under. Written after the tools array is built, because that is where it may be cleared: a hosted search wins over the client's, and in that case the search is the upstream's own and belongs to nobody on this side.
     request.client_search_tool = search.tool_name
     payload: dict[str, Any] = {
         "model": request.model,
@@ -871,6 +900,16 @@ def _search_context(request: SemanticRequest) -> SearchContext:
     """
     name = resolve_client_search_tool(request.tools, request.messages)
     if not name:
+        return SearchContext()
+    # **Hosted wins, and it wins regardless of array order.** Only one `tool_search` may travel, and letting the winner depend on which declaration came first made the same request translate two different ways. Hosted is the deterministic choice because it is the unambiguous one — it identifies itself by `type`, while the client's is a heuristic.
+    #
+    # Decided here rather than in the tools loop so that one answer shapes the tools array, the history, *and* the name handed to the response half. With a hosted search the upstream runs the search itself; telling the response half a client search is in flight would have it ask the client to answer one that already happened.
+    if any(is_hosted_search_tool(tool) for tool in request.tools):
+        # The client declared both kinds. Only one `tool_search` may travel, so the hosted one takes the slot and this tool is *not* promoted — but neither is it removed: dropping a tool the client declared, to make room for a mechanism it also declared, would be exactly the silent deletion this module is built to avoid. It travels as the ordinary function tool it already is, and the deferred tools are loaded by the hosted search instead.
+        request.conversion.record(
+            LossCode.SERVER_TOOL_CONSTRAINT_DROPPED,
+            f"{name} into {WIRE_FORMAT}: the hosted tool search takes the single tool_search slot; this one travels as an ordinary function tool",
+        )
         return SearchContext()
     call_ids = frozenset(
         block.call_id

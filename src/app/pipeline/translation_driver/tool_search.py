@@ -140,21 +140,29 @@ class SearchContext:
     def is_search_call(self, call_id: str) -> bool:
         return bool(call_id) and call_id in self.call_ids
 
-    def loaded_tools(self, output: Any) -> list[dict[str, Any]]:
-        """The definitions a `tool_result` full of `tool_reference` blocks is asking for.
+    def loaded_tools(self, output: Any) -> tuple[list[dict[str, Any]], tuple[str, ...]]:
+        """The definitions a `tool_result` full of `tool_reference` blocks is asking for, and what it could not carry.
 
         A `tool_reference` is an instruction — load this tool's schema — so the honest rendering is the tool's definition, not a sentence saying a tool was found. A name this request does not declare is skipped rather than invented: the client asked for something that is not on the table, and a fabricated schema is worse than a shorter list.
+
+        **But skipping without a trace is its own defect**, which is why the second half of the return exists. A result carrying text, an error, or a name this request no longer declares would otherwise render as a search that completed and found nothing — the model told a comfortable falsehood while the client said something else entirely. The caller records these; nothing here is dropped in silence.
         """
         if not isinstance(output, list):
-            return []
+            # A string result — the shape a client uses to say something in prose. Nothing to load, and the caller needs to know the difference between this and an empty search.
+            return [], ("non-reference tool result content",) if output else ()
         loaded: list[dict[str, Any]] = []
+        uncarried: list[str] = []
         for part in cast(list[Any], output):
             if not isinstance(part, Mapping):
+                uncarried.append("non-object tool result part")
                 continue
             entry = cast(Mapping[str, Any], part)
             if entry.get("type") != "tool_reference":
+                uncarried.append(f"{entry.get('type') or 'untyped'} part")
                 continue
             name = entry.get("tool_name")
             if isinstance(name, str) and name in self.definitions:
                 loaded.append(dict(self.definitions[name]))
-        return loaded
+            else:
+                uncarried.append(f"reference to undeclared tool {name!r}")
+        return loaded, tuple(uncarried)
