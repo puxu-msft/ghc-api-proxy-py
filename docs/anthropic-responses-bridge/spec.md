@@ -156,7 +156,14 @@ Protocol leg 必须只在一个 route-policy 接缝按以下顺序决定；后�
   | `tools[].defer_loading` | 原样保留 | `PRESERVE`（前置条件由上面两行满足） |
   | 历史 `tool_use{id, name=搜索工具, input}` | `tool_search_call{call_id: id, arguments: input}` | `TRANSFORM` |
   | 历史 `tool_result{tool_use_id, content:[tool_reference{tool_name}…]}` | `tool_search_output{call_id, execution:"client", tools:[按名字取出的完整定义]}` | `TRANSFORM`，定义从本请求 `tools[]` 里取 |
-  | 响应里的 `tool_search_call{call_id, arguments}` | `tool_use{id: call_id, name: 搜索工具名, input: arguments}` | `TRANSFORM` |
+  | 响应里的 `tool_search_call{call_id, arguments}` | `tool_use{id: call_id, name: 搜索工具名, input: arguments}` | `TRANSFORM`；名字未知时**丢弃**，见下 |
+  | 响应里的 `tool_search_output` | 不进 Anthropic wire | `DEGRADE`，**丢弃而非降级成文本**。它是上游对**托管**搜索的自述，Anthropic 无对应块，而客户端要的正是这件事发生在别处 |
+
+  **两处「丢弃」都必须是显式的，不能落到未识别项的兜底上**：那条兜底在流式路径上会渲染成一个空 text 块，而带空 text 块的 assistant 轮被上游拒收（`text content blocks must be non-empty`），于是客户端把这一轮存进历史再回放就 400。丢弃丢的是模型的一次搜索请求，兜底丢的是整轮的可回放性——后者更贵。
+
+  **代理补写的字段要记 `SYNTHETIC_TURN_ADDED`。** 上游拒收没有 `description` 的 client-executed 搜索，所以客户端的搜索工具若没写描述，代理会补一句（`parameters` 缺失时同理补一个最小 schema）。这买下了这次请求，但模型读到的那句话是代理写的、客户端从没写过——按该 loss code 自己的定义，凭空添加的东西必须留痕。
+
+  **认不出搜索工具时，要记的是「没认出」这件事本身。** 每个工具上那条 `defer_loading` 未携带的记录读起来像既定行为；运维需要的是另一句——「这个客户端的搜索工具名不在清单里」，那才是可行动的一条。
 
   **提升是替换，不是添加。** 被认定为搜索工具的那个 function tool 必须从 `tools[]` 里移除。实测：留着它，模型会去调它而不是发 `tool_search_call`，`tool_search` 形同虚设，被 deferred 的工具也就无从装载；而且一个请求**只允许一个** `tool_search`（`Only one tool_search tool is allowed in 'tools' parameter.`），所以托管与自定义两条路互斥。
 
