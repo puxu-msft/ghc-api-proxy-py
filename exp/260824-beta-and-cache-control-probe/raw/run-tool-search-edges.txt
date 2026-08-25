@@ -1,0 +1,4 @@
+[400] E1 both server and client tool_search -> Only one tool_search tool is allowed in 'tools' parameter.
+[ 200] E2 client tool_search + the original function tool still present -> reasoning | function_call:ToolSearch
+[ 200] E3 output carrying two tool definitions -> reasoning | tool_search_call
+        second leg with two definitions -> function_call:get_weather

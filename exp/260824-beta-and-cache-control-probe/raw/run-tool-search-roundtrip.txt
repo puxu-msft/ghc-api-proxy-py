@@ -1,0 +1,3 @@
+[R1 200] first leg -> reasoning | tool_search_call
+        call_id='call_3tWroR0meKjFjqWGk5bvCbxA' arguments={"pattern": "weather|forecast|temperature"}
+[R2 200] second leg -> function_call:get_weather
