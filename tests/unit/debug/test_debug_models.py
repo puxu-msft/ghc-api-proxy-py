@@ -528,7 +528,11 @@ def _patch_collection(
         return client
 
     def build_chain(config: ProxyConfig, *, http_client: object) -> SimpleNamespace:
-        return SimpleNamespace(providers=_FakeRegistry(providers))
+        # `aclose` because `collect_catalogs` now closes the chain it built: a chain owns one outbound client per provider, and this command's `finally` used to close only the bootstrap client — the one that never issued the catalogue requests.
+        async def aclose() -> None:
+            return None
+
+        return SimpleNamespace(providers=_FakeRegistry(providers), aclose=aclose)
 
     monkeypatch.setattr("app.debug.models.build_http_client", build_client)
     monkeypatch.setattr("app.debug.models.build_chain", build_chain)

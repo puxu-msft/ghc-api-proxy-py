@@ -30,6 +30,19 @@ class SlowProvider:
     def available_ids(self) -> frozenset[str]:
         return frozenset({"claude-model"})
 
+    # Reporting-only members of the provider protocol, here so this stub satisfies it. Nothing on this test's path reads them; `/api/status` does.
+    @property
+    def disabled_ids(self) -> frozenset[str]:
+        return frozenset()
+
+    @property
+    def base_url(self) -> str:
+        return "https://stub.invalid"
+
+    @property
+    def catalog_refreshed_at(self) -> str:
+        return "2026-08-27T00:00:00+00:00"
+
     def describe(self, model_id: str) -> ModelDescriptor | None:
         return DESCRIPTOR if model_id == "claude-model" else None
 

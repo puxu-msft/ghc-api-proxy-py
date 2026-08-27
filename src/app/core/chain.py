@@ -36,6 +36,10 @@ class Chain:
     subscribers: FrozenSubscribers[RequestContext]
     http_client: httpx2.AsyncClient
     rate_limiters: dict[str, RateLimiter] = field(default_factory=lambda: dict[str, RateLimiter]())
+    # One outbound client per provider, held here so shutdown can reach them. Not an optimisation in reverse — sharing one client shares its **connection pool**, and two providers pointed at the same host (which is the default: both are `api.githubcopilot.com`) then ride the same TCP connections. A GOAWAY raised by one account's traffic ends the other's in-flight streams, and `max_streams_per_connection` does not help, because it bounds how many requests share a connection rather than whose they are. Spec §8.1.
+    provider_clients: dict[str, httpx2.AsyncClient] = field(
+        default_factory=lambda: dict[str, httpx2.AsyncClient]()
+    )
     # Who is in flight right now. Always maintained, whether or not anything renders it: the cost is one dict entry per request, and making it conditional would mean the footer shows an empty line for its first few seconds after being switched on.
     active_requests: ActiveRequestRegistry = field(default_factory=ActiveRequestRegistry)
     # Probed once, here, and shared by the footer and the log lines. Asking twice invites two answers that disagree, and a log stream that emits a glyph the footer has already decided this terminal cannot encode is exactly the kind of split nobody thinks to look for.
@@ -51,4 +55,9 @@ class Chain:
         return self.rate_limiters[provider_name]
 
     async def aclose(self) -> None:
-        await self.http_client.aclose()
+        """Release what this chain created, which is the per-provider clients and nothing else.
+
+        `http_client` is **not** closed here. It is built by the caller — to resolve base URLs before this chain exists — and closing it from both sides is how one of them ends up closing a client the other still holds. Whoever built it closes it; `cli.py` does, in the same `finally` that calls this.
+        """
+        for client in self.provider_clients.values():
+            await client.aclose()

@@ -14,6 +14,7 @@ from typing import Any, cast
 from rich.cells import cell_len
 
 from app.config.schema import ProxyConfig
+from app.core.chain import Chain
 from app.model_provider import GithubCopilotProvider, model_type_of, resolve_endpoints
 from app.model_provider.ghc_client.auth.providers import NoGitHubToken
 from app.model_provider.github_copilot import DRIVEN_ENDPOINTS
@@ -228,6 +229,7 @@ async def collect_catalogs(
     failures: list[CatalogFailure] = []
     # `False` because this command has no `--proxy` of its own: whatever is in `config.proxy` came from the file, `GHC_API_PROXY_PROXY` or the bundled defaults, all of which sit below the environment.
     http_client = build_http_client(config, proxy_from_cli=False)
+    chain: Chain | None = None
     try:
         # Probed here for the same reason the chain is built here: a report that named a different base URL from the one the server resolves would be worse than no report.
         config = await resolve_provider_base_urls(config, http_client=http_client)
@@ -257,6 +259,9 @@ async def collect_catalogs(
                 )
             )
     finally:
+        # The chain built one outbound client per provider; this function built the one used to probe base URLs. Each is closed by whoever created it.
+        if chain is not None:
+            await chain.aclose()
         await http_client.aclose()
     return tuple(catalogs), tuple(failures)
 

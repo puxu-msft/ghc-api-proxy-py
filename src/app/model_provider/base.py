@@ -18,7 +18,33 @@ class ModelProvider(Protocol):
     def name(self) -> str: ...
 
     @property
+    def base_url(self) -> str:
+        """Where this provider's requests actually go, after any per-account resolution.
+
+        On the protocol because `/api/status` reports it, and reporting it from configuration instead would print what was *asked for* — while `resolve_provider_base_urls` may have derived something else from the account's subscription. Those differ exactly when an operator most wants to look.
+        """
+        ...
+
+    @property
+    def catalog_refreshed_at(self) -> str:
+        """ISO timestamp of the last **successful** catalog load, or `""` if there has not been one.
+
+        Empty rather than a sentinel date: "never" is a state an operator acts on, and any date chosen to mean it would eventually be mistaken for a real one.
+        """
+        ...
+
+    @property
     def available_ids(self) -> frozenset[str]: ...
+
+    @property
+    def disabled_ids(self) -> frozenset[str]:
+        """Ids the catalog advertises that this deployment switched off.
+
+        Exists so a report can tell "upstream has no such model" from "you turned it off" — two states `describe()` deliberately merges into `None`, because routing must refuse both, and two states an operator must **not** have merged, because the fix for one is to wait on upstream and the fix for the other is to edit a list. Spec §4.2.2.
+
+        Intersected with the catalog, not the raw configured list: a `disabled_models` entry naming a model this upstream never offered is not a disabled model, it is a stale line in the config, and counting it would make the arithmetic in `/api/status` (`models + disabled` = catalog size) stop holding.
+        """
+        ...
 
     def describe(self, model_id: str) -> ModelDescriptor | None:
         """Return what is known about a model, or `None` when it is not on offer.
@@ -54,7 +80,7 @@ class ModelProvider(Protocol):
     ) -> httpx2.Response:
         """Ask upstream how many tokens an Anthropic Messages body comes to.
 
-        On the protocol rather than on one implementation because the spec's `inbound.anthropic_count_tokens.providers` names `ghc` as one provider among others; a counter that only some providers offered could not be selected by name.
+        On the protocol rather than on one implementation because the spec's `inbound.anthropic_count_tokens.providers` names `upstream` as one leg among others; a counter that only some providers offered could not be selected that way.
 
         Gated on the Messages capability, the same as sending that body would be.
         """

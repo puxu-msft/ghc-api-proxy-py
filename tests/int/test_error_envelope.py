@@ -529,7 +529,7 @@ def test_a_translated_leg_spells_upstreams_failure_in_the_clients_dialect() -> N
 # The two remaining exits from the inventory.
 # ---------------------------------------------------------------------------
 
-ONLY_UPSTREAM_COUNTER = {"inbound": {"anthropic_count_tokens": {"providers": ["ghc"], "max_retries": 0}}}
+ONLY_UPSTREAM_COUNTER = {"inbound": {"anthropic_count_tokens": {"providers": ["upstream"], "max_retries": 0}}}
 
 
 @pytest.mark.parametrize("status", [400, 500])
@@ -557,7 +557,7 @@ def test_a_failed_count_reports_what_upstream_said_rather_than_one_flat_503(stat
 
 
 def test_the_local_estimator_still_answers_when_it_is_configured() -> None:
-    """The control for the test above. Without it, `providers: ["ghc"]` could be doing the work rather than the read-through."""
+    """The control for the test above. Without it, `providers: ["upstream"]` could be doing the work rather than the read-through."""
     client, _ = make_client(failing_upstream(500))
 
     response = client.post(

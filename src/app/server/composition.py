@@ -26,6 +26,7 @@ from app.model_provider import (
     PROVIDER_TYPE,
     GithubCopilotProvider,
     ModelProvider,
+    ProviderNotConfigured,
     ProviderRegistry,
     resolve_default_name,
 )
@@ -48,6 +49,7 @@ from app.model_provider.ghc_client.auth.providers import (
 )
 from app.model_provider.ghc_client.config import AccountType
 from app.pipeline.events import SubscriberRegistry
+from app.pipeline.model_resolution import inspect_mappings
 from app.pipeline.rate_limiting import RateLimiter
 from app.pipeline.request import RequestContext
 from app.pipeline.request_headers import compile_beta_flag_denials
@@ -142,7 +144,9 @@ def transport_options(config: ProxyConfig, *, proxy_from_cli: bool) -> Transport
     )
 
 
-def build_http_client(config: ProxyConfig, *, proxy_from_cli: bool) -> httpx2.AsyncClient:
+def build_http_client(
+    config: ProxyConfig, *, proxy_from_cli: bool, warn_about_proxies: bool = True
+) -> httpx2.AsyncClient:
     """Build the outbound client, with the keep-alive the settings ask for.
 
     Socket options can only be given to a transport, and handing `AsyncClient` a transport is also how you switch off its own reading of `HTTP_PROXY` / `HTTPS_PROXY` — `allow_env_proxies` in `httpx/_client.py` is `trust_env and transport is None`. So the environment map is rebuilt here and mounted, because losing proxy support is exactly the kind of change that would not show up until someone behind a proxy could not reach upstream at all.
@@ -169,7 +173,9 @@ def build_http_client(config: ProxyConfig, *, proxy_from_cli: bool) -> httpx2.As
     direct = transport(None)
     # One resolved map decides both the routing and the warning. Deriving them separately is what made the warning describe proxies the routing had already shadowed.
     resolved = _effective_proxies(options)
-    _warn_about_socks(options, resolved)
+    # Once per process, not once per client. `_warn_about_socks` reasons about the environment's proxy map, which is the same for every client this process builds; its own docstring accepts over-reporting on the basis of one call per process, and that premise stopped holding when providers started getting a client each. The caller that builds the bootstrap client keeps the warning; the per-provider loop switches it off.
+    if warn_about_proxies:
+        _warn_about_socks(options, resolved)
     client = httpx2.AsyncClient(
         # Everything rides on mounts, including tier 1. `all://` matches every request, so this routes identically to handing the proxy to `transport=` — and it keeps one code path instead of a special case whose two halves drifted.
         transport=direct,
@@ -452,16 +458,34 @@ def build_chain(
     providers: dict[str, ModelProvider] | None = None,
     subscribers: SubscriberRegistry[RequestContext] | None = None,
     interaction_id: str = "interaction",
+    proxy_from_cli: bool = False,
 ) -> Chain:
     """Assemble the chain.
 
-    `providers` is injectable so a test can drive the whole path without reaching the network.
+    `providers` is injectable so a test can drive the whole path without reaching the network. When it is supplied, no per-provider clients are built either — the caller owns whatever those providers talk through.
+
+    `http_client` is still taken because the caller built one to resolve base URLs before this ran, and closing it stays the caller's business. It is no longer what the providers use.
     """
+    # Everything that can be rejected without constructing anything, before anything is constructed. Two of these used to sit *after* the provider loop — `resolve_default_name` inside the `Chain(...)` call, and the registry's own name validation — so a one-letter typo in `fallback_model_provider` built one client per provider and then threw, leaving them with no reference and no way to close them. `build_chain` is synchronous and `AsyncClient.aclose()` is not, so there is no cleanup to write here; moving the checks in front of the allocation is the fix that a sync function can actually make.
+    #
+    # What that leaves: a failure *inside* the loop (an unreadable token path, say) still abandons the clients built so far. Those clients have never issued a request — nothing in this function does — so their connection pools are empty and no socket is open; what leaks is a Python object that the collector takes. That is why this is worth reordering rather than restructuring.
+    default_name = resolve_default_name(config)
+    for chosen in (default_name, config.fallback_model_provider):
+        if chosen and chosen not in config.model_providers:
+            raise ProviderNotConfigured(chosen)
+    for name, provider_config in config.model_providers.items():
+        if provider_config.type != PROVIDER_TYPE:
+            raise ValueError(f"unsupported provider type {provider_config.type!r} for {name!r}")
+
+    provider_clients: dict[str, httpx2.AsyncClient] = {}
     if providers is None:
         built: dict[str, ModelProvider] = {}
         for name, provider_config in config.model_providers.items():
-            if provider_config.type != PROVIDER_TYPE:
-                raise ValueError(f"unsupported provider type {provider_config.type!r}")
+            # One client per provider, not the shared one. Sharing means sharing the connection pool, and two providers resolving to the same origin — which two accounts of the same subscription type do — then ride the same TCP connections: a GOAWAY earned by one account's traffic ends the other's in-flight streams. `max_streams_per_connection` does not help, because it bounds how many requests share a connection rather than whose. Spec §8.1.
+            #
+            # `warn_about_proxies=False`: `build_http_client` reports unusable SOCKS proxies, and that report is about the environment rather than about this provider. Left on, it would repeat verbatim once per provider on top of the caller's own.
+            client = build_http_client(config, proxy_from_cli=proxy_from_cli, warn_about_proxies=False)
+            provider_clients[name] = client
             # Per provider: each may name its own token file.
             token_source = build_github_token_source(config, name)
             ghc_config = GhcClientConfig(
@@ -470,18 +494,26 @@ def build_chain(
             )
             token_manager = CopilotTokenManager(
                 token_source,
-                http_client,
+                client,
                 auth_base_url=ghc_config.auth_base_url,
                 identity_headers=build_identity_headers(ghc_config),
             )
             built[name] = build_copilot_provider(
                 name,
                 config,
-                http_client=http_client,
+                http_client=client,
                 token_manager=token_manager,
                 interaction_id=interaction_id,
             )
         providers = built
+
+    # Static mapping checks, here rather than after `refresh_catalogs` because none of them consults a catalog — that is exactly the property the user's ruling selected for. Warned, never raised: a typo'd qualifier still leaves every other model routable, and failing start-up over it was explicitly ruled against. Spec §5.1.
+    for problem in inspect_mappings(
+        config.model_mappings,
+        frozenset(config.model_providers),
+        fallback=config.fallback_model_provider,
+    ):
+        logger.warning("model_mappings %s: %s", problem.kind, problem.detail)
 
     # The built-ins go into whatever registry the caller brought, so their order is resolved together with anything a caller added rather than in a second, separate pass.
     subscriber_registry = subscribers if subscribers is not None else SubscriberRegistry[RequestContext]()
@@ -520,25 +552,39 @@ def build_chain(
         beta_flag_denials=compile_beta_flag_denials(
             config.hook_strip_anthropic_request_headers.strip_anthropic_beta_flags
         ),
-        providers=ProviderRegistry(providers, default=resolve_default_name(config)),
+        providers=ProviderRegistry(
+            providers,
+            default=default_name,
+            fallback=config.fallback_model_provider,
+        ),
         translators=default_registry(config.model_translation),
         subscribers=subscriber_registry.freeze(),
         http_client=http_client,
+        provider_clients=provider_clients,
         # One limiter per provider: a limit on one upstream must not throttle another.
         rate_limiters={name: RateLimiter(config.reactive_rate_limiter) for name in providers},
     )
 
 
 async def refresh_catalogs(chain: Chain) -> None:
-    """Populate every provider's catalog.
+    """Populate every provider's catalog, letting one provider's failure be one provider's failure.
 
     Routing fails closed on capability, so an empty catalog rejects every request until this runs.
 
-    No headers parameter: each provider authenticates its own refresh from its own token manager.
-    One taken from a caller would be captured once and expire, and having the parameter at all suggested authentication was the caller's job when nothing was in fact supplying it.
+    **Each provider is refreshed inside its own guard, and that is not defensive padding.** `refresh_catalog` raises when a token file is missing or upstream is unreachable; `chain.providers.names` is a `frozenset`, so iteration order comes from hashing rather than from anything an operator chose; and this runs exactly once — `run_model_refresh_loop` has no caller and `model_refresh_interval` has no consumer on this chain, so nothing retries. Ungurded, a secondary provider with a stale token could end the loop before the **default** provider was ever refreshed, and `/health/readiness` would then answer 503 for the entire life of the process while the account that serves almost all traffic sat there healthy. Measured 2026-08-27 with a two-provider configuration: whether the default loaded depended on which name the set happened to yield first.
+
+    That failure would also have contradicted the ruling behind `_is_ready`. Spec §4.3 chose "the default provider has a catalogue" over `all(...)` on the grounds that a secondary provider going down is a degradation rather than an outage — true of routing, and false of loading until this guard existed.
+
+    Sorted rather than in set order: the guard is what makes order stop mattering, but leaving a start-up sequence that varies between runs of the same deployment is not worth the line it saves. The sibling loop in `resolve_provider_base_urls` already had both properties.
+
+    No headers parameter: each provider authenticates its own refresh from its own token manager. One taken from a caller would be captured once and expire, and having the parameter at all suggested authentication was the caller's job when nothing was in fact supplying it.
     """
-    for name in chain.providers.names:
-        await chain.providers.get(name).refresh_catalog()
+    for name in sorted(chain.providers.names):
+        try:
+            await chain.providers.get(name).refresh_catalog()
+        except Exception as error:
+            # Reported and stepped over, not swallowed: an unloaded catalogue is already visible as `catalog: "empty"` in `/api/status` and as `serviceable: "unknown"` on every route that names this provider, and readiness answers for the default provider on its own. What must not happen is one provider's credentials deciding whether any other provider gets loaded.
+            logger.warning("model provider %r: catalog refresh failed: %s", name, error)
 
 
 __all__ = [

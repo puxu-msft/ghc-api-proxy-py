@@ -24,10 +24,19 @@ class ProviderError(RuntimeError):
 
 
 class UnknownModel(ProviderError):
-    def __init__(self, provider: str, model_id: str) -> None:
-        super().__init__(f"{provider} does not offer model {model_id!r}")
+    """No such model on this provider.
+
+    `target` is the name the mapping chain ended on, when that differs from `model_id`. It is worth carrying because `model_id` is the **request's** name on a passthrough — resolution hands back the original when it cannot place the chain's end — so an operator who wrote `claude-opus-4.8: A/claude-opus-5` and got the model name wrong would otherwise be told that `claude-opus-4.8` does not exist, and go looking for a typo in the mapping key rather than in its value. Spec §5.2.
+    """
+
+    def __init__(self, provider: str, model_id: str, target: str = "") -> None:
+        detail = f"{provider} does not offer model {model_id!r}"
+        if target and target != model_id:
+            detail = f"{detail} (its mapping resolves to {target!r}, which {provider} does not offer either)"
+        super().__init__(detail)
         self.provider = provider
         self.model_id = model_id
+        self.target = target
 
 
 class CapabilityMissing(ProviderError):

@@ -1,7 +1,7 @@
 """Anthropic token counting through a provider chain.
 
 `inbound.anthropic_count_tokens.providers` names the order to try.
-`ghc` asks upstream; `local` uses the calibrated estimate.
+`upstream` asks upstream; `local` uses the calibrated estimate.
 A provider that fails hands over to the next, so a transient problem degrades to an estimate.
 
 `max_retries` applies per provider, not to the chain.
@@ -60,7 +60,7 @@ async def count_tokens(
 ) -> CountTokensResult:
     """Try each provider in order, retrying within one before moving on.
 
-    `upstream_absent_reason` names *why* there is no upstream counter, for the attempts trail. It defaults to the historical answer — nobody supplied one — but a caller that withheld it deliberately should say so, because `ghc:unconfigured` read against a config file that plainly configures `ghc` sends the next reader looking for a settings bug that is not there.
+    `upstream_absent_reason` names *why* there is no upstream counter, for the attempts trail. It defaults to the historical answer — nobody supplied one — but a caller that withheld it deliberately should say so, because `upstream:unconfigured` read against a config file that plainly lists `upstream` sends the next reader looking for a settings bug that is not there.
     """
     attempts: list[str] = []
     # The failure the last counter raised, kept so `CountTokensUnavailable` can carry it. Only the last one: the trail in `attempts` records that the earlier ones happened, and a client is owed one verdict rather than a list it cannot act on.
@@ -68,9 +68,9 @@ async def count_tokens(
     for provider in providers:
         for attempt in range(max_retries + 1):
             try:
-                if provider == "ghc":
+                if provider == "upstream":
                     if upstream is None:
-                        attempts.append(f"ghc:{upstream_absent_reason}")
+                        attempts.append(f"upstream:{upstream_absent_reason}")
                         break
                     return CountTokensResult(
                         tokens=await upstream(payload),

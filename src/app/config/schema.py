@@ -6,12 +6,13 @@ A request that started under one version keeps seeing it.
 `NOT_HOT_RELOADABLE` lists the dotted paths the spec marks as requiring a restart.
 """
 
-from typing import Literal
+from typing import Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 type TlsMode = bool | Literal["both"]
-type CountTokensProvider = Literal["ghc", "local"]
+# `upstream`, not `ghc`. The value names the **leg** that produced the number — upstream's own count against this proxy's estimate — and never a `model_providers` key. Those two coincided while exactly one provider could be configured and it was conventionally called `ghc`; once two can be, a value that looks like a provider name sends its reader to `model_providers` to find one, and there is nothing there. Renamed 2026-08-27, spec §1.3.
+type CountTokensProvider = Literal["upstream", "local"]
 type BufferingPolicy = Literal["block", "until-tool-use", "full"]
 type CacheControlMode = Literal["disabled", "passthrough", "sanitize", "proxied"]
 type CacheTtl = Literal["5m", "1h"]
@@ -73,9 +74,31 @@ class ServerConfig(Section):
     tls: TlsConfig = Field(default_factory=TlsConfig)
 
 
+def _reject_renamed_counter(value: object) -> None:
+    """Raise with the rename spelled out if `providers` still says `ghc`.
+
+    A bare enum error reads as "you typed something invalid", and the operator's next move is to go looking for what the valid provider names are — in `model_providers`, which is the wrong place and will not contain `upstream` either. Naming the rename costs one branch and puts the answer in the message. `config.example.yaml` shipped `[ghc, local]`, so anyone who copied it hits this exactly once. Spec §1.3.
+
+    Separate from the validator so the `isinstance` narrowing stays here; inline, it leaks into the validator's return type.
+    """
+    if isinstance(value, list) and any(entry == "ghc" for entry in cast(list[object], value)):
+        raise ValueError(
+            "inbound.anthropic_count_tokens.providers: 'ghc' was renamed to 'upstream' on "
+            "2026-08-27. The value names the leg that counts (upstream's own number, or this "
+            "proxy's local estimate), not a model_providers key — the two only looked alike "
+            "while a single provider could be configured. Write 'upstream'."
+        )
+
+
 class CountTokensConfig(Section):
-    providers: list[CountTokensProvider] = Field(default_factory=lambda: ["ghc", "local"])
+    providers: list[CountTokensProvider] = Field(default_factory=lambda: ["upstream", "local"])
     max_retries: int = Field(default=2, ge=0)
+
+    @field_validator("providers", mode="before")
+    @classmethod
+    def _name_the_rename(cls, value: object) -> object:
+        _reject_renamed_counter(value)
+        return value
 
 
 class InboundConfig(Section):
@@ -377,6 +400,36 @@ class FixAnthropicSseHook(Section):
     rewrite_refusal: RewriteRefusalConfig = Field(default_factory=RewriteRefusalConfig)
 
 
+def _reject_unaddressable_provider_names(value: object) -> None:
+    """Refuse a `model_providers` key that the qualifier syntax cannot name.
+
+    Two shapes, both of which the schema accepted until 2026-08-27 and neither of which can be routed to:
+
+    - **Containing `/`**: qualifiers split on the *first* separator, so a provider called `A/B` referenced as `A/B/model` is read as the unknown provider `A` and sent to the fallback. The configuration is accepted, the service starts, and the provider is reachable only as the default — every mapping value and request prefix naming it silently means something else.
+    - **Empty or blank**: `/model` has an empty head, which the spec defines as an *unrecognised* provider precisely so a dropped provider name takes the fallback path. Configure a provider named `""` and that definition inverts — the typo becomes a hit.
+
+    Raised at the configuration boundary rather than repaired at request time: both are static properties of the name, and a deployment that has to discover them from a routing error has already been serving traffic to the wrong place.
+
+    The `/` here is the same character as `app.pipeline.model_resolution.QUALIFIER_SEPARATOR`, written literally rather than imported to keep the config schema from depending on the pipeline. `test_the_qualifier_separator_matches_the_config_boundary` is what keeps the two from drifting.
+    """
+    if not isinstance(value, dict):
+        return
+    for name in cast(dict[object, object], value):
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(
+                "model_providers: a provider name may not be empty or blank. The empty name "
+                "cannot be written in a `provider/model` qualifier, and `/model` is defined to "
+                "mean an *unrecognised* provider so that a dropped name takes the fallback path."
+            )
+        if "/" in name:
+            raise ValueError(
+                f"model_providers: provider name {name!r} contains '/', which is reserved as the "
+                "separator in `provider/model` qualifiers. A provider named this way cannot be "
+                "addressed by any mapping value or request prefix — the part before the first "
+                "'/' would be read as the provider name."
+            )
+
+
 class ProxyConfig(Section):
     server: ServerConfig = Field(default_factory=ServerConfig)
     inbound: InboundConfig = Field(default_factory=InboundConfig)
@@ -397,6 +450,19 @@ class ProxyConfig(Section):
         default_factory=lambda: dict[str, ModelProviderConfig]()
     )
     default_model_provider: str = ""
+
+    # Where a request goes when its mapping value **named** a provider that is not configured — `x: typo/claude-opus-5`. Deliberately a second key rather than a reuse of the one above, because "the operator wrote no qualifier" and "the operator wrote one and got it wrong" are different facts and only the second is a defect. Folding them together would make a typo indistinguishable from the ordinary case, which is precisely the state this key exists to end.
+    #
+    # May be left unset, and then such a request is **refused** rather than quietly served by the default. Refusing is the fail-closed direction: the alternative sends a request to an upstream nobody named, and the operator's evidence that anything was wrong is a bill on the wrong account.
+    #
+    # Naming a provider that does not exist stops start-up, exactly as `default_model_provider` does. Spec §1.2.
+    fallback_model_provider: str = ""
+
+    @field_validator("model_providers", mode="before")
+    @classmethod
+    def _names_must_be_addressable(cls, value: object) -> object:
+        _reject_unaddressable_provider_names(value)
+        return value
 
     # A directory, not a file: the name inside it carries the port, so one setting covers every instance an operator runs rather than having to be re-stated per port.
     pidfile_dir: str = ""

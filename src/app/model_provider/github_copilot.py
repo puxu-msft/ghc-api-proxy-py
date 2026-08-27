@@ -1,6 +1,7 @@
 """GitHub Copilot as a model provider, backed by the `app.model_provider.ghc_client` library."""
 
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from typing import Any, cast
 
 import httpx2
@@ -62,6 +63,7 @@ class GithubCopilotProvider:
         self._descriptors: dict[str, ModelDescriptor] = {}
         self._raw_catalog: dict[str, Any] = {"object": "list", "data": []}
         self._etag: str | None = None
+        self._refreshed_at: str = ""
 
     @property
     def name(self) -> str:
@@ -71,6 +73,11 @@ class GithubCopilotProvider:
     def base_url(self) -> str:
         """Where this provider's inference and catalog calls go. Reported, never reconstructed from config by a caller."""
         return self._base_url
+
+    @property
+    def catalog_refreshed_at(self) -> str:
+        """When the descriptors below were last replaced from upstream. `""` until that has happened once."""
+        return self._refreshed_at
 
     @property
     def raw_catalog(self) -> Mapping[str, Any]:
@@ -83,6 +90,11 @@ class GithubCopilotProvider:
     @property
     def available_ids(self) -> frozenset[str]:
         return frozenset(self._descriptors) - self._disabled
+
+    @property
+    def disabled_ids(self) -> frozenset[str]:
+        # Intersected with the catalog: a `disabled_models` entry for a model this upstream never offered is a stale config line, not a disabled model, and counting it would break `models + disabled == catalog size`.
+        return frozenset(self._descriptors) & self._disabled
 
     def describe(self, model_id: str) -> ModelDescriptor | None:
         if model_id in self._disabled:
@@ -117,6 +129,8 @@ class GithubCopilotProvider:
             )
         self._descriptors = descriptors
         self._raw_catalog = dict(raw)
+        # Stamped only here, so it marks a successful replacement rather than an attempt. A refresh that raised, or one upstream answered 304 to, leaves the previous stamp standing — which is correct: the descriptors it describes are still the ones in hand.
+        self._refreshed_at = datetime.now(UTC).isoformat(timespec="seconds")
 
     async def refresh_catalog(self) -> bool:
         """Refetch the catalog, authenticating as of now.

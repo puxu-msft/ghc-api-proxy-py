@@ -8,6 +8,7 @@ from app.model_provider import (
     EndpointNotSupported,
     ModelDescriptor,
     ModelEndpoint,
+    ProviderRegistry,
     UnknownModel,
 )
 from app.pipeline.direct_driver import (
@@ -59,6 +60,18 @@ class FakeProvider:
     def available_ids(self) -> frozenset[str]:
         return frozenset(CATALOG)
 
+    @property
+    def disabled_ids(self) -> frozenset[str]:
+        return frozenset()
+
+    @property
+    def base_url(self) -> str:
+        return "https://fake.invalid"
+
+    @property
+    def catalog_refreshed_at(self) -> str:
+        return "2026-08-27T00:00:00+00:00"
+
     def describe(self, model_id: str) -> ModelDescriptor | None:
         return CATALOG.get(model_id)
 
@@ -106,11 +119,49 @@ def driver(
     return AnthropicMessagesDriver(provider, frozen, budget=RetryBudget(max_total=max_total))
 
 
+def routing_registry(provider: FakeProvider | None = None) -> ProviderRegistry:
+    """A one-provider registry, which is what these routing tests are about.
+
+    `decide_route` takes the registry rather than a provider since routing began choosing between providers: the choice is part of the routing decision, so handing it a single provider would test a function that no longer exists.
+    """
+    return ProviderRegistry({"ghc": provider or FakeProvider()}, default="ghc")
+
+
+def test_an_unroutable_qualifier_names_the_value_not_the_key() -> None:
+    """The key names the alias; the **value** is what names a provider that does not exist.
+
+    Reporting the key sends an operator to check whether `claude-opus-4.8` is spelled right, when the misspelling is on the other side of the colon — the same failure `UnknownModel` carries `target` to avoid. An independent reviewer found this message saying `'claude-opus-4.8' names a model provider this deployment does not configure`, which is not true of the key.
+    """
+    with pytest.raises(RoutingError) as raised:
+        decide_route(
+            requested_model="claude-opus-4.8",
+            inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+            providers=routing_registry(),
+            mappings={"claude-opus-4.8": "typo/claude-model"},
+        )
+    message = str(raised.value)
+    assert "typo/claude-model" in message
+    assert "'typo'" in message
+    assert "claude-opus-4.8" in message
+
+
+def test_a_request_side_qualifier_still_names_the_requested_model() -> None:
+    """The control for the test above: on this path the client's own name carries the bad prefix."""
+    with pytest.raises(RoutingError) as raised:
+        decide_route(
+            requested_model="typo/claude-model",
+            inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+            providers=routing_registry(),
+            mappings={},
+        )
+    assert "typo/claude-model" in str(raised.value)
+
+
 def test_route_needs_no_translation_when_the_model_speaks_the_inbound_format() -> None:
     route = decide_route(
         requested_model="claude-model",
         inbound_format=WireFormat.ANTHROPIC_MESSAGES,
-        provider=FakeProvider(),
+        providers=routing_registry(),
         mappings={},
     )
     assert route.endpoint is ModelEndpoint.ANTHROPIC_MESSAGES
@@ -122,7 +173,7 @@ def test_route_requires_translation_when_the_model_speaks_another_format() -> No
     route = decide_route(
         requested_model="gpt-model",
         inbound_format=WireFormat.ANTHROPIC_MESSAGES,
-        provider=FakeProvider(),
+        providers=routing_registry(),
         mappings={},
     )
     assert route.endpoint is ModelEndpoint.OPENAI_RESPONSES
@@ -134,7 +185,7 @@ def test_explicit_format_suffix_selects_the_endpoint() -> None:
     route = decide_route(
         requested_model="dual-model@openai-responses",
         inbound_format=WireFormat.ANTHROPIC_MESSAGES,
-        provider=FakeProvider(),
+        providers=routing_registry(),
         mappings={},
     )
     assert route.endpoint is ModelEndpoint.OPENAI_RESPONSES
@@ -147,7 +198,7 @@ def test_explicit_format_the_model_lacks_is_refused() -> None:
         decide_route(
             requested_model="claude-model@openai-responses",
             inbound_format=WireFormat.ANTHROPIC_MESSAGES,
-            provider=FakeProvider(),
+            providers=routing_registry(),
             mappings={},
         )
 
@@ -181,7 +232,7 @@ def test_model_with_only_an_undriveable_endpoint_is_refused() -> None:
         decide_route(
             requested_model="ws-only-model",
             inbound_format=WireFormat.ANTHROPIC_MESSAGES,
-            provider=FakeProvider(),
+            providers=routing_registry(),
             mappings={},
         )
 
@@ -190,7 +241,7 @@ def test_route_applies_model_mappings() -> None:
     route = decide_route(
         requested_model="opus",
         inbound_format=WireFormat.ANTHROPIC_MESSAGES,
-        provider=FakeProvider(),
+        providers=routing_registry(),
         mappings={"opus": "claude-model"},
     )
     assert route.model_id == "claude-model"
@@ -201,7 +252,7 @@ def test_route_rejects_an_unmapped_unknown_model() -> None:
         decide_route(
             requested_model="mystery",
             inbound_format=WireFormat.ANTHROPIC_MESSAGES,
-            provider=FakeProvider(),
+            providers=routing_registry(),
             mappings={},
         )
 

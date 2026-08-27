@@ -8,12 +8,15 @@ Only what this chain can answer truthfully is here. Readiness is the catalog, be
 """
 
 
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 from prometheus_client import REGISTRY, generate_latest
 
+from app.core.chain import Chain
+from app.pipeline.routing import route_table
 from app.server.app_state import chain_of
 
 router = APIRouter()
@@ -25,25 +28,82 @@ async def liveness() -> JSONResponse:
     return JSONResponse({"status": "alive"})
 
 
+def _is_ready(chain: Chain) -> bool:
+    """Whether traffic should be sent here at all.
+
+    **The default provider's catalog, not any provider's.** `any(...)` was right while one provider existed and lies as soon as two do: with default=B and B's catalog unloaded, a healthy A makes `any` answer 200 while every request that names no qualifier — which is nearly all of them — dies as `UnknownModel`. `all(...)` errs the other way, retiring the whole instance because a secondary upstream is down, when only requests explicitly qualified to it are affected. Spec §4.3.
+
+    One function, read by both `/health/readiness` and `/api/status`'s `ready` field. Splitting the handlers was safe (see the module docstring); splitting the *judgement* would reintroduce the drift that keeping them as one handler was avoiding.
+    """
+    return bool(chain.providers.default.available_ids)
+
+
 @router.get("/health")
 @router.get("/health/readiness")
-@router.get("/api/status")
 async def readiness(request: Request) -> JSONResponse:
-    """Whether a request would be served, judged by the same fact routing uses.
+    """Whether a request would be served, judged by the fact routing depends on.
 
     An empty catalog is not readiness: routing fails closed on capability, so every request would be refused with a message saying the model does not exist. Answering 200 in that state is how a supervisor is told to send traffic to a process that will refuse all of it.
 
-    `/api/status` is the same handler rather than a second one. `api.md` ratifies both paths and says nothing about their bodies, and they ask the same question — the old chain answered `/api/status` from a readiness flag of its own, which is exactly the arrangement where two answers to one question drift apart. The shape follows readiness rather than the old `{ready, checks}` because this chain's answer is the catalog, and a boolean would drop the per-provider detail a supervisor needs to act on.
+    `/api/status` used to be this same handler. It is not any more — `api.md` files it under "状态与配置" rather than under health checks, and once more than one provider can be configured there is a great deal of status to report that has nothing to do with readiness. Splitting also settles an inconsistency that went unnoticed while they were one: `admission.py`'s `UNGATED_PATHS` exempts `/health/readiness` and not `/api/status`, so the same handler was reachable both inside and outside the admission gate.
     """
     chain = chain_of(request)
-    providers = {
-        name: {"models": len(chain.providers.get(name).available_ids)}
-        for name in sorted(chain.providers.names)
-    }
-    ready = any(entry["models"] for entry in providers.values())
+    ready = _is_ready(chain)
     return JSONResponse(
-        {"status": "ready" if ready else "uninitialized", "providers": providers},
+        {
+            "status": "ready" if ready else "uninitialized",
+            "default_model_provider": chain.providers.default_name,
+            "models": len(chain.providers.default.available_ids),
+        },
         status_code=200 if ready else 503,
+    )
+
+
+@router.get("/api/status")
+async def status(request: Request) -> JSONResponse:
+    """What this process resolved the configuration to, and what it can serve right now.
+
+    The division of labour with `/api/config` is that the other one reports the configuration's fields as they were resolved — what is written down — while this reports what those fields *mean* once the catalogs are in hand. `claude-opus-4.8: A/claude-opus-5` appears verbatim there and as a resolved route here.
+
+    Always 200. Readiness moved out to `/health/readiness`; a status document that refuses to be read when the news is bad is a status document nobody can use.
+    """
+    chain = chain_of(request)
+
+    providers: dict[str, Any] = {}
+    for name in sorted(chain.providers.names):
+        provider = chain.providers.get(name)
+        available = provider.available_ids
+        disabled = provider.disabled_ids
+        providers[name] = {
+            # `models` is what is usable; `disabled` is what the catalog carries but this deployment switched off. They sum to the catalog's size. Spec §4.2.3.
+            "models": len(available),
+            "disabled": len(disabled),
+            "base_url": provider.base_url,
+            "catalog": "ok" if available or disabled else "empty",
+            "catalog_refreshed_at": provider.catalog_refreshed_at or None,
+        }
+
+    routes: dict[str, Any] = {}
+    for row in route_table(providers=chain.providers, mappings=chain.config.model_mappings):
+        entry: dict[str, Any] = {
+            "provider": row.provider,
+            "model": row.model,
+            "origin": row.origin,
+            "serviceable": row.serviceable,
+        }
+        if row.intended:
+            # Only when the chain's target and the name that would actually be sent disagree — i.e. the mapping was abandoned and resolution fell back to the client's own name. Present rather than always-on because an always-on field that usually equals its neighbour trains readers to skip it.
+            entry["intended"] = row.intended
+        routes[row.name] = entry
+
+    return JSONResponse(
+        {
+            "ready": _is_ready(chain),
+            "default_model_provider": chain.providers.default_name,
+            "fallback_model_provider": chain.providers.fallback_name or None,
+            "providers": providers,
+            "routes": routes,
+        }
     )
 
 
@@ -51,14 +111,22 @@ async def readiness(request: Request) -> JSONResponse:
 @router.get("/v1/models")
 @router.get("/openai/v1/models")
 async def list_models(request: Request) -> JSONResponse:
-    """The catalog routing consults, in the OpenAI list shape clients expect."""
-    provider = chain_of(request).providers.default
+    """The catalog routing consults, in the OpenAI list shape clients expect.
+
+    Every name a client could send and get served — catalog ids **and** mapping keys, each run through the routing rules. Listing only the default provider's ids was right while routing had only one provider to consult; with two, it hides whatever the second one serves. Listing the union without routing them would do the opposite, promising models that resolve to a provider which does not offer them.
+
+    `owned_by` therefore names the provider that would actually answer, which is the first time it has said anything — it used to be the default provider's name on every row, i.e. a constant. Spec §4.1.
+    """
+    chain = chain_of(request)
     return JSONResponse(
         {
             "object": "list",
             "data": [
-                {"id": model_id, "object": "model", "owned_by": provider.name}
-                for model_id in sorted(provider.available_ids)
+                {"id": row.name, "object": "model", "owned_by": row.provider}
+                for row in route_table(
+                    providers=chain.providers, mappings=chain.config.model_mappings
+                )
+                if row.serviceable == "yes"
             ],
         }
     )

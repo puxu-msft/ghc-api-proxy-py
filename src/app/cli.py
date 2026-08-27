@@ -15,6 +15,7 @@ from yaml import YAMLError
 from app.config.loading import bundled_config_text, load_proxy_config
 from app.config.paths import tls_material_dir
 from app.config.schema import ProxyConfig
+from app.core.chain import Chain
 from app.debug.models import collect_catalogs, render_json, render_text
 from app.lifecycle.entry import StandaloneOptions, run_standalone
 from app.lifecycle.listener import listening_urls
@@ -142,9 +143,10 @@ async def serve_inherited(config: ProxyConfig, fd: int, *, proxy_from_cli: bool)
     TLS is handed to uvicorn as a certificate pair rather than built into an adapter. `both` — the shipped default — cannot be honoured here: serving two protocols on one port means inspecting the first byte of each accepted connection before handing it on, and that requires owning the accepts, which on this path uvicorn does. Until this existed the whole `server.tls` section was simply not read, so a socket-activated deployment using the shipped config served plaintext with nothing said about it. Answering HTTPS and saying what was dropped beats answering neither.
     """
     http_client = build_http_client(config, proxy_from_cli=proxy_from_cli)
+    chain: Chain | None = None
     try:
         config = await resolve_provider_base_urls(config, http_client=http_client)
-        chain = build_chain(config, http_client=http_client)
+        chain = build_chain(config, http_client=http_client, proxy_from_cli=proxy_from_cli)
         # None for an HTTP-only deployment, in which case uvicorn is handed no certificate and serves plaintext exactly as before.
         material = resolve_tls_material(config, tls_dir=tls_material_dir())
         if config.server.tls.mode == "both":
@@ -173,6 +175,9 @@ async def serve_inherited(config: ProxyConfig, fd: int, *, proxy_from_cli: bool)
         )
         await server.serve()
     finally:
+        # The chain owns one outbound client per provider and nothing else closes them; `http_client` is this function's, built before the chain existed. Both, in that order, and the chain only if it got as far as being built.
+        if chain is not None:
+            await chain.aclose()
         await http_client.aclose()
 
 
@@ -182,9 +187,10 @@ async def _serve_pipeline(config: ProxyConfig, options: StandaloneOptions, *, pr
     The client is created here rather than inside `build_chain` because whoever creates it has to close it, and the chain is handed to an app that outlives neither.
     """
     http_client = build_http_client(config, proxy_from_cli=proxy_from_cli)
+    chain: Chain | None = None
     try:
         config = await resolve_provider_base_urls(config, http_client=http_client)
-        chain = build_chain(config, http_client=http_client)
+        chain = build_chain(config, http_client=http_client, proxy_from_cli=proxy_from_cli)
         # Wired here because this is the one scope holding both the chain that owns the display and the server that learns the listener has stopped accepting.
         def publish_connections(source: Callable[[], int]) -> None:
             chain.active_requests.connection_count = source
@@ -195,6 +201,9 @@ async def _serve_pipeline(config: ProxyConfig, options: StandaloneOptions, *, pr
         # `ShutdownReport` says of itself that it exists "so a caller can log it rather than guess", and until now every caller discarded it — the process simply stopped, and whether it drained cleanly or gave up on live requests was unknowable from the terminal.
         report_shutdown(outcome.report)
     finally:
+        # Same ownership split as `serve_inherited`: the chain closes the per-provider clients it built, and this function closes the one it built itself.
+        if chain is not None:
+            await chain.aclose()
         await http_client.aclose()
 
 
