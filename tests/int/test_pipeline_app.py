@@ -6,6 +6,7 @@ Upstream protocol behaviour is therefore the real thing rather than a friendlier
 
 import asyncio
 import contextlib
+import inspect
 import logging
 import re
 import time
@@ -30,6 +31,7 @@ from prometheus_client import REGISTRY
 from pydantic import ValidationError
 from starlette.requests import ClientDisconnect, Request
 
+import app.server.routes.inference as inference_route
 from app.config.schema import ModelProviderConfig, ProxyConfig
 from app.core.chain import Chain
 from app.model_provider import GithubCopilotProvider, ModelProvider
@@ -65,6 +67,7 @@ from app.server.routes.inference import (
 )
 from app.server.routes.router import build_router
 from app.server.routes.table import route_for_path
+from app.streaming.deadline import ClientDeadlineError
 from app.tokenization.state_store import TokenizationStateStore
 
 BASE_URL = "https://copilot.example"
@@ -940,6 +943,22 @@ def test_chat_completions_streams_are_delivered_whole_and_verbatim() -> None:
     assert response.headers["content-type"].startswith("text/event-stream")
     assert str(seen[-1].url) == f"{BASE_URL}/chat/completions"
     assert response.content == CHAT_COMPLETIONS_SSE
+
+
+def test_the_one_shot_guard_comment_says_that_arrived_bytes_are_delivered() -> None:
+    """This path has no error carrier, but it does send the upstream bytes that arrived before the guard fired.
+
+    A source assertion is intentional here: the defect is a false source comment, so reverting only that comment cannot be detected through runtime behaviour — a test of what the code *does* stays green while the code's description of itself goes back to being wrong.
+
+    The two assertions do different jobs, and only the second one is allowed to be strict. The first pins the *claim* rather than any particular sentence, so the comment can be rewritten freely as long as it still says bytes arrive; wording this one as an exact phrase would make every honest edit look like a regression. The second names the false sentence itself, because that is the one string this comment must never contain again.
+    """
+    source = inspect.getsource(inference_route)
+    guard_comment = next(
+        line for line in source.splitlines() if "no framer for this leg" in line
+    )
+
+    assert "arrived" in guard_comment and "bytes" in guard_comment
+    assert "whatever had been buffered, which is nothing" not in source
 
 
 @pytest.mark.parametrize(
@@ -1906,6 +1925,32 @@ def test_a_refused_request_is_reported_with_its_route_and_reason(request_log: No
     assert "no-such-model" in lines[0]
 
 
+def test_an_upstream_refusal_is_described_by_the_same_error_info_on_the_line_and_wire(
+    request_log: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The completion line and the client response are two presentations of the same failure, so both must read the message from the same `ErrorInfo`.
+
+    The SDK exception has another true but incompatible string representation: Python dict repr with single quotes and an `Error code` prefix. Reading that on one surface and `ErrorInfo.message` on the other made the two accounts impossible to compare.
+    """
+    upstream_message = "Invalid 'max_output_tokens': expected at least 16"
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            400,
+            json={"error": {"message": upstream_message, "code": "invalid_request_body"}},
+        )
+    )
+
+    with caplog.at_level(logging.INFO):
+        response = client.post("/v1/messages", json={"model": "gpt-model", "messages": []})
+
+    message = cast(str, response.json()["error"]["message"])
+    (line, status), = _request_outcomes(caplog.records)
+    assert status == "fail"
+    assert message == f"upstream returned 400: {upstream_message}"
+    assert f": {message} req=" in line
+    assert "Error code: 400" not in line
+
+
 def test_a_request_that_raised_on_its_way_out_still_writes_its_one_line(
     request_log: None, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1984,6 +2029,121 @@ def test_a_streaming_request_reports_what_it_actually_delivered(request_log: Non
     assert lines[0].startswith("H1/H1 200 anthropic-messages/claude-model ")
     assert "↓" in lines[0], "a delivered stream must report its byte count"
     assert "↓0B" not in lines[0]
+
+
+@pytest.mark.parametrize(
+    ("failure", "drained", "expected_status", "expected_detail"),
+    [
+        pytest.param(
+            ConnectionError("upstream tore"),
+            False,
+            "fail",
+            "stream failed before a terminal event: upstream tore",
+            id="upstream-tear",
+        ),
+        pytest.param(
+            None,
+            False,
+            "gone",
+            "delivery stopped before upstream finished",
+            id="client-left",
+        ),
+        pytest.param(None, True, "ok", None, id="clean-drain"),
+    ],
+)
+def test_one_shot_accounting_reports_how_delivery_actually_ended(
+    request_log: None,
+    caplog: pytest.LogCaptureFixture,
+    failure: BaseException | None,
+    drained: bool,
+    expected_status: str,
+    expected_detail: str | None,
+) -> None:
+    """A leg without an assembler still knows whether delivery tore, was abandoned, or drained cleanly.
+
+    The assembler gate used to suppress this entire decision, making the first two rows indistinguishable from the clean control as `[ OK ] 200`.
+    """
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "unused"}))
+    chain = _chain_of(client)
+    trace = RequestTrace(
+        method="POST",
+        path="/chat/completions",
+        request_id="req-one-shot",
+        started=time.monotonic(),
+    )
+    accounting = _StreamAccounting(
+        chain=chain,
+        request_id=trace.request_id,
+        trace=trace,
+        status_code=200,
+        drained=drained,
+        failure=failure,
+    )
+    chain.active_requests.add(trace.request_id)
+
+    with caplog.at_level(logging.INFO):
+        accounting.finish()
+
+    (line, status), = _request_outcomes(caplog.records)
+    assert status == expected_status
+    if expected_detail is None:
+        assert "stream failed before a terminal event" not in line
+        assert "delivery stopped before upstream finished" not in line
+    else:
+        assert expected_detail in line
+
+
+@pytest.mark.asyncio
+async def test_a_client_deadline_is_accounted_as_the_failure_its_frame_reports(
+    request_log: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Writing the deadline frame does not turn the deadline into a clean drain.
+
+    The original exception must continue into `_tracked_delivery`, which is the layer that records the completion-line verdict.
+    """
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "unused"}))
+    chain = _chain_of(client)
+    trace = RequestTrace(
+        method="POST",
+        path="/v1/messages",
+        request_id="req-client-deadline",
+        started=time.monotonic(),
+    )
+    assembler = AnthropicAssembler()
+    accounting = _StreamAccounting(
+        chain=chain,
+        request_id=trace.request_id,
+        trace=trace,
+        status_code=200,
+        assembler=assembler,
+    )
+    chain.active_requests.add(trace.request_id)
+
+    async def deadline_after_one_block() -> AsyncIterator[bytes]:
+        yield sse_upstream("first").partition(b"event: message_delta")[0]
+        raise ClientDeadlineError("client request exceeded its deadline")
+
+    delivery = _tracked_delivery(
+        delivering(
+            deadline_after_one_block(),
+            assembler,
+            buffer=delivery_buffer(chain),
+            settings=stream_settings(chain),
+            framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
+        ),
+        accounting,
+    )
+    chunks: list[bytes] = []
+
+    with caplog.at_level(logging.INFO), pytest.raises(ClientDeadlineError):
+        async for chunk in delivery:
+            chunks.append(chunk)
+
+    assert b"client_deadline_exceeded" in b"".join(chunks)
+    (line, status), = _request_outcomes(caplog.records)
+    assert status == "fail"
+    assert "client request exceeded its deadline" in line
+    assert "upstream stream ended without a terminal event" not in line
 
 
 def test_a_stream_that_never_terminated_is_not_reported_as_a_clean_finish(
@@ -3338,6 +3498,8 @@ def test_the_client_deadline_survives_a_replay() -> None:
     Delivery swaps the byte stream when it replaces a torn attempt, so a replacement that is not wrapped again is bounded only by its own attempt's deadline. Measured before the fix: a two-second client deadline let a replayed body run for six.
 
     The upstream deadline is left far above the client one, so what stops this can only be the client's.
+
+    The deadline now propagates after writing its error frame so accounting can see the same failure. The frame itself is pinned by the delivery tests; this test keeps its original subject, whether the replacement attempt is still bounded by the client's one clock.
     """
     calls: list[int] = []
 
@@ -3368,16 +3530,15 @@ def test_the_client_deadline_survives_a_replay() -> None:
     )
 
     started = time.monotonic()
-    response = client.post(
-        "/v1/messages",
-        json={"model": "claude-model", "messages": [], "stream": True},
-    )
-    body = response.text
+    with pytest.raises(ClientDeadlineError, match="client request exceeded its deadline"):
+        client.post(
+            "/v1/messages",
+            json={"model": "claude-model", "messages": [], "stream": True},
+        )
     elapsed = time.monotonic() - started
 
     assert calls == [1, 1], "the torn attempt was not replaced"
     assert elapsed < 5.0, f"the replayed body outlived the client deadline: {elapsed:.1f}s"
-    assert "client_deadline_exceeded" in body
 
 
 TOOL_NAME = "mcp__plugin_ghc-api-proxy-helper_auto-retry__turn_interrupted"

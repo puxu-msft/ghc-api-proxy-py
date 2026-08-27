@@ -1602,6 +1602,15 @@ async def _hits_the_client_deadline_after(payloads: list[bytes]) -> AsyncIterato
     raise ClientDeadlineError("client request exceeded its deadline")
 
 
+async def _collect_until_client_deadline(delivery: AsyncIterator[bytes]) -> list[bytes]:
+    """Keep the frame written before the deadline propagates, and require both halves of that ending."""
+    chunks: list[bytes] = []
+    with pytest.raises(ClientDeadlineError):
+        async for chunk in delivery:
+            chunks.append(chunk)
+    return chunks
+
+
 @pytest.mark.asyncio
 async def test_the_client_deadline_is_the_one_ending_that_says_so() -> None:
     """By the time this can fire the response has been open a while and its status is long settled, so an SSE error frame is the only way left to say what happened.
@@ -1610,16 +1619,15 @@ async def test_the_client_deadline_is_the_one_ending_that_says_so() -> None:
 
     The sample stops two events short of upstream's terminal so this is a deadline landing mid-turn, which is what the name claims. Whether a deadline landing *after* upstream finished ends the same way is the sibling test's question, and it is a separate ruling.
     """
-    chunks = [
-        chunk
-        async for chunk in delivering(
+    chunks = await _collect_until_client_deadline(
+        delivering(
             _hits_the_client_deadline_after(anthropic_stream("one")[:-2]),
             AnthropicAssembler(),
             buffer=BlockBuffer(policy="block"),
             settings=StreamSettings(sse_ping_interval=0),
             framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
         )
-    ]
+    )
     assert events_of(chunks)[-1] == "error"
     assert b"client_deadline_exceeded" in b"".join(chunks)
     # Not a `message_stop`: the turn did not finish, and saying it did is the defect this whole area exists to avoid.
@@ -1634,16 +1642,15 @@ async def test_the_client_deadline_outranks_an_upstream_that_just_finished() -> 
 
     Pins the ordering directly. The two tests above it also go red if the branches are swapped, but they say nothing about ordering in their names, and an ordering nobody named is an ordering the next reader will reshuffle.
     """
-    chunks = [
-        chunk
-        async for chunk in delivering(
+    chunks = await _collect_until_client_deadline(
+        delivering(
             _hits_the_client_deadline_after(anthropic_stream("one")),
             AnthropicAssembler(),
             buffer=BlockBuffer(policy="block"),
             settings=StreamSettings(sse_ping_interval=0),
             framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
         )
-    ]
+    )
     assert events_of(chunks)[-1] == "error"
     assert b"client_deadline_exceeded" in b"".join(chunks)
     assert "message_stop" not in events_of(chunks)
@@ -1690,16 +1697,15 @@ async def test_a_held_back_policy_still_hears_the_client_deadline(policy: str) -
 
     Mid-turn sample on purpose: this is about the policies, so it should not also depend on how a finished turn is ranked against the deadline.
     """
-    chunks = [
-        chunk
-        async for chunk in delivering(
+    chunks = await _collect_until_client_deadline(
+        delivering(
             _hits_the_client_deadline_after(anthropic_stream("one")[:-2]),
             AnthropicAssembler(),
             buffer=BlockBuffer(policy=policy),  # pyright: ignore[reportArgumentType]
             settings=StreamSettings(sse_ping_interval=0),
             framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
         )
-    ]
+    )
     assert b"client_deadline_exceeded" in b"".join(chunks)
     # The buffered block is dropped rather than flushed first, which is what the document says to do.
     assert b'"text":"one"' not in b"".join(chunks)

@@ -426,7 +426,7 @@ async def _deliver(
                     code="client_deadline_exceeded",
                 )
             )
-            return
+            raise torn
         if assembler.terminal.seen:
             # Upstream finished this turn and *then* the connection went. Nothing is missing, so the ending below is the real one.
             #

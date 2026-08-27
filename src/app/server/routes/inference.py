@@ -54,6 +54,7 @@ from app.pipeline.delivery_policy import (
     stream_settings,
 )
 from app.pipeline.driver import handle, handle_bounded, handle_count_tokens, ledger_for
+from app.pipeline.error_classify import describe
 from app.pipeline.hand_over import hand_back_block, one_line, replay_reason
 from app.pipeline.reply import reply_summary, response_payload
 from app.pipeline.request import RequestContext, WireFormat
@@ -288,11 +289,13 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
     response = handled.response
     if response is None:
         error = handled.outcome.error or RuntimeError("request produced no response")
-        trace.detail = str(error)
+        # Build the record once and give both presentations its message. Classifying again inside `error_response` left the wire on `ErrorInfo.message` while the completion line read the SDK exception's incompatible `__str__`.
+        info = describe(error, source_format=route.wire_format.value)
+        trace.detail = info.message
         # The branch an upstream refusal actually takes: the driver reports it in the outcome rather than raising, so the exception path above never sees one.
         capture_rejection(context, error, request_id=trace.request_id)
         return error_response(
-            error,
+            info,
             inbound_format=route.wire_format.value,
             translated=context.translation_required,
         )
@@ -329,7 +332,8 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
         if framer is None:
             # This client leg has no outbound framer, so there is no block to deliver. The upstream stream is read whole and handed over in one write, in the client's own dialect, byte for byte. Ruled 2026-08-22; before this branch existed those bytes went into an assembler that recognised none of them and the client got a 200 with an empty body and no error frame.
             # The same guards in the same order as the block path below, so an idle upstream, an expired attempt and an expired client deadline all still stop this the same way, and the byte counter still sees every byte.
-            # What is *not* the same is what the client is told when one fires. The block path writes an error frame; there is no framer for this leg, so nothing can be written and the guard's exception simply ends the response — 200, `text/event-stream`, and whatever had been buffered, which is nothing. Which is the same shape as the defect this branch removed, on a narrower path. Deliberate for now: naming an error in a dialect nobody here can write is the same piece of work as finding this dialect's block boundaries, and the ruling deferred that. See `.dev/docs/tmp/260822-ghc-api-conformance-summary.md`.
+            # What is *not* the same is what the client is told when one fires. The block path writes an error frame; there is no framer for this leg, so the guard's exception ends the response after `one_shot_delivery` sends the upstream bytes that had already arrived — 200, `text/event-stream`, those bytes, and no error frame.
+            # This is the same shape as the defect this branch removed, on a narrower path. Deliberate for now: naming an error in a dialect nobody here can write is the same piece of work as finding this dialect's block boundaries, and the ruling deferred that. See `.dev/docs/tmp/260822-ghc-api-conformance-summary.md`.
             one_shot_accounting = _StreamAccounting(
                 chain=chain,
                 request_id=trace.request_id,
@@ -598,6 +602,9 @@ class _StreamAccounting:
             return
         self.done = True
         self.chain.active_requests.remove(self.request_id)
+        # A one-shot leg has no assembler and therefore no terminal record. A clean drain is its successful ending; a propagated failure or a local abort still has to reach the same verdict machinery instead of disappearing behind the assembler gate.
+        if self.assembler is None and (self.failure is not None or not self.drained):
+            self.trace.status_override, self.trace.detail = self._ending()
         # Read at the end because that is when the upstream's terminal event has either been seen or failed to arrive.
         if self.assembler is not None:
             terminal = self.assembler.terminal
