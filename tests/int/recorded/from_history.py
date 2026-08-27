@@ -209,7 +209,7 @@ def build(selection: Selection, path: str) -> Cassette:
                         method="POST",
                         path=path,
                         authenticated=True,
-                        # Left empty: history records no request body, so there is nothing to project. A replay of this cassette checks order and path, not shape.
+                        # Left empty because projecting the request side is not built, **not** because the history database lacks it. It has the inbound body in full — `payload-skeleton`, `payloadSequences` and `v3_sequence_nodes` reassemble into it — and this comment claimed otherwise until 2026-08-27, which would have sent the next person to make real upstream calls or hand-write a fixture for something already on disk. A replay of this cassette checks order and path, not shape.
                         request_shape={},
                         status=200,
                         headers={"content-type": "text/event-stream"},

@@ -235,7 +235,8 @@ class ModelTranslationConfig(Section):
 
 class ClientDeliveryConfig(Section):
     # Measured from admission and never reset by retries, so it bounds the whole operation.
-    # Also the base for the systemd stop timeout.
+    #
+    # **Not** the base for the systemd stop timeout, which this comment claimed until 2026-08-27. That number is `SYSTEMD_STOP_TIMEOUT_SECONDS` in `contrib/systemd/install-user.py`, which is `DEFAULT_GRACEFUL_TIMEOUT_SECONDS + 30` — 330s against this key's default of 3600. Nothing anywhere derives one from the other, and an operator who raised this expecting the unit file to follow would have changed neither.
     client_request_deadline: int = Field(default=3600, ge=0)
     buffering_policy: BufferingPolicy = "block"
     buffer_cap_bytes: int = Field(default=16_777_216, ge=0)
