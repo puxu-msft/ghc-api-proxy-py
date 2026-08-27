@@ -24,6 +24,18 @@ Spec §8.1 要求每个 provider 一个 httpx client，理由是连接级故障�
 
 **下一步**：若将来要验，最小手段写在 Spec §10.2：同账号配成两个 provider 能覆盖除凭据隔离外的一切；凭据隔离只有两份真 token 才能证明。
 
+## D-4 · 计数腿的配置名不真正选择 provider
+
+**状态**：开着。**来源**：Spec §1.3 收尾，2026-08-27。
+
+`inbound.anthropic_count_tokens.providers` 里的 provider 名**不选择**由谁计数：`driver.py` 的 `ask_upstream` 闭包捕获的是 `shape_request` 定下的那个 provider。所以 `providers: [A, local]` 而某请求路由到了 B 时，问的是 B。
+
+配置里那个名字实际只起两个作用：**是不是要问上游**，以及**与 local 的先后顺序**。
+
+单 provider 下两种读法行为完全一致，所以这个偏差一直不可见。多 provider 让它可见了，但它是**既有行为**，不是本次引入的，因此没有顺手改。
+
+**要改的话得先回答一个真问题**：token 计数是模型相关的，只能问服务这个模型的那个 provider。所以「让配置真正选择计数用的 provider」要么退化成「哪些 provider 被允许用于计数」（路由到不在列表里的 provider 就跳过上游、用 local），要么就得接受「用 A 去数 B 才有的模型」这种没有意义的组合。前者语义清晰且单 provider 完全兼容，是我倾向的方向，但它改变行为，需要用户裁。
+
 ## D-3 · 四处越出用户原裁决边界的推导待确认
 
 **状态**：开着。**来源**：Spec §12。

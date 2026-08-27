@@ -7,23 +7,17 @@
 > - 触发：实现「配两个 GHC provider 并按模型路由」，见该 Spec §0
 > - 第 2 条由规则评审 F-08 发现，其余由 Spec 自身推导。除第 1 条外，首版 Spec 都漏掉了。
 
-## 1. `config.example.yaml:71` — 计数腿改名
+## 1. ~~`config.example.yaml:71` — 计数腿改名~~ 已撤销
 
-**现状**：
+**这一条作废，`config.example.yaml:71` 不需要任何改动。**
 
-```yaml
-    providers: [ghc, local]
-```
+原提案是把 `providers: [ghc, local]` 改成 `[upstream, local]`，依据是「这个值命名的是上游那条腿，不是 provider 名」。**那个依据是错的**——用户 2026-08-27 指出：`ghc` 有效正是因为 `model_providers` 里有一个叫 `ghc` 的 provider。
 
-**建议**：
+顺带被撤销的还有一条更糟的东西：我曾在 schema 里加静态校验去拒绝 `ghc`。那等于把「只有 provider 恰好叫 ghc 的部署能问上游要计数」写成了纪律，而这条规则没有人定过。
 
-```yaml
-    providers: [upstream, local]
-```
+现在的实现：该字段类型是 `list[str]`，每项要么 `local`、要么一个已配置的 `model_providers` 键，校验相对本份配置进行。所以你这份示例配置**原样合法**，且把 provider 改名成别的之后写 `[<新名字>, local]` 也合法——那是原本表达不出来的。
 
-**理由**（Spec §1.3）：这个值命名的是**计数的那条腿**——上游自己的数字，还是本代理的本地估算——它与 `model_providers` 的键没有任何关系。单 provider 时它恰好和唯一那个 provider 同名，所以两种读法都对；能配两个之后，一个长得像 provider 名的值会把读者送去 `model_providers` 里找一个不存在的条目。
-
-**这一条是有后果的，且用户已知情裁决**：改名是硬切，不保留 `ghc` 作为同义词。照抄本示例的部署在升级后会**启动失败一次**，错误信息会直说「'ghc' was renamed to 'upstream'」。
+详见 `.dev/docs/multi-provider-routing/spec.md` §1.3。
 
 ## 2. `config.example.yaml:100-102` — 解析算法的描述已被取代
 

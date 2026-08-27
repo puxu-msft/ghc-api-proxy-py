@@ -27,6 +27,7 @@
 | 2026-08-27 | §10.1 | 验收清单补上五项：§3 全部、§2.4 的 passthrough、§2.5 的行为变更、§5.2 的错误消息、§4.1 的候选集 | 规则评审 F-09 |
 | 2026-08-27 | §11 | 候选材料清单从一处扩到五处。最要紧的是 `config.example.yaml:100-102`——用户亲笔的解析算法描述正在描述代码已经不做的事 | 规则评审 F-08 |
 | 2026-08-27 | **新增 §12** | 把四处「越出用户原裁决边界」的推导集中列出，便于用户单独推翻其中任何一条 | 本次自查 |
+| 2026-08-27 | **§1.3 整节推翻重写** | **首版把这个字段读反了。** 它断言 `inbound.anthropic_count_tokens.providers` 里的 `ghc` 命名的是「上游那条腿」、与 `model_providers` 无关，据此改名为 `upstream` 并加静态校验拒绝 `ghc`。用户裁定：`ghc` 有效正是因为配置里有个叫 `ghc` 的 provider，`Literal["ghc","local"]` 这个类型本身就错——它等于宣布只有 provider 恰好叫 `ghc` 的部署能问上游要计数。改名与那条静态校验一并撤销；类型改 `list[str]`，校验改为相对 `model_providers` 的跨字段检查 | 用户 2026-08-27 直接纠正 |
 | 2026-08-27 | §2.1 | 补上「provider 名不得含 `/`、不得为空」**由配置边界强制**。首版写了规则却没有任何地方执行它：`A/B` 与 `""` 都能通过校验并启动，前者对每条指名它的限定都悄悄指向别处，后者反转了 §5.1.2 对空 head 的定义 | 实现评审 CFG-08（major） |
 | 2026-08-27 | **新增 §8.4** | 目录加载必须逐 provider 隔离。`refresh_catalogs` 原本一个 provider 抛出就终止整趟，而迭代顺序来自 `frozenset` 哈希，于是次要 provider 的过期 token 能让 **default** 的目录永不加载、readiness 终身 503——§4.3 那条「降级不是不可用」的理由正好被这条路推翻 | 实现评审 MPR-03（major） |
 | 2026-08-27 | §4.2.2 | `serviceable` 的 `disabled` 判定改用 `canonical` 折叠比较。周围每一处模型名比较都折叠，只有这一处是精确匹配，于是 `A/gpt-5-6-terra` 对着目录里的 `gpt-5.6-terra` 报 `absent`——正是这个取值存在的理由所要消灭的那句话 | 实现评审 MPR-05 |
@@ -78,21 +79,37 @@ model_mappings:
 
 `fallback_model_provider` 若配置了一个 `model_providers` 里不存在的名字，**启动失败**——与 `default_model_provider` 今天的行为一致（`ProviderRegistry.__init__` 对 `default not in providers` 抛 `ProviderNotConfigured`）。**本次推导**，理由是两个键的失效后果同构，没有理由一个拦在启动、一个拖到运行时。
 
-### 1.3 `CountTokensProvider` 的 `ghc` 更名为 `upstream`
+### 1.3 计数腿的取值是 provider 名，校验相对配置而非静态枚举
 
-**用户裁决，硬切，不保留同义词。**
+**用户裁决**（2026-08-27，纠正本 Spec 作者的一处根本误读）。
 
-`CountTokensProvider = Literal["ghc", "local"]`（`src/app/config/schema.py:14`）里的 `ghc` 语义是**「上游」**，与 `model_providers` 的键没有任何关系——单 provider 时它恰好和唯一那个 provider 同名，所以「上游」和「那个叫 ghc 的 provider」两种读法都对。多 provider 之后两种读法分叉，而代码里是前者。
+`inbound.anthropic_count_tokens.providers` 里的每一项，要么是 `local`（本代理的校准估算），**要么是一个已配置的 `model_providers` 键**。`ghc` 之所以合法，是因为随包配置里有一个叫 `ghc` 的 provider——不是因为这个字符串特殊。
 
-改为 `Literal["upstream", "local"]`。`inbound.anthropic_count_tokens.providers` 的默认值同步改为 `["upstream", "local"]`。
+#### 首版在这里错得很彻底，记下来是因为错的方式有普遍性
 
-**显式写了 `providers: [ghc, local]` 的配置将启动失败**，且错误信息必须直说「`ghc` 已更名为 `upstream`」，而不是留一个 pydantic 的原始枚举报错。注意 `docs/.human-controlled/config.example.yaml:71` 正是这么写的，所以照抄示例的部署会被挡下一次——这是用户知情的选择。
+首版断言：这个值命名的是「上游那条腿」，与 `model_providers` 的键无关，单 provider 时两者恰好同名。据此把它改名为 `upstream`，并加了一个**静态校验**去拒绝 `ghc`。
 
-连带要改的四处字面量在 `src/app/pipeline/driver.py`：`result.provider != "ghc"`、`f"ghc:{absent_reason}"`、`entry.startswith("ghc:")`、`result.provider == "ghc"`。`src/app/pipeline/count_tokens.py` 里另有三处（`provider == "ghc"`、写入 trail 的 `f"ghc:{…}"`，以及模块 docstring）。
+用户的原话：「这不是静态的，是因为有个 model_provider 是 ghc，所以才有效，为什么要静态验证？」
 
-那段注释里的「neither test has to guess at an entry's shape」说的是紧随其后的**两个运行时判定**——`f"ghc:{absent_reason}" in trail` 与 `entry.startswith("ghc:")`——它们不必猜测 trail 条目的形状，因为写入方就在同一个文件里。首版 Spec 把这句读成了「测试套件依赖该前缀」，是误读；测试当然也要跟着改，但那是因为它们断言了这些字符串，不是因为那句注释这么说。
+三层错：
 
-日志行的 `provider(ghc-failed,local)` 相应变为 `provider(upstream-failed,local)`。
+1. **读反了因果。** 不是「碰巧同名所以两种读法都对」，是它本来就在引用那个 provider。用户亲笔的 `config.example.yaml` 只给 `local` 写了注释、`ghc` 没写——因为在那份文件里 `ghc` 不需要注释，上面 `model_providers:` 就是它。
+2. **`Literal["ghc", "local"]` 这个类型本身就是错的**，而首版只想着改里面的字符串。把它钉成静态枚举，等于宣布「只有 provider 恰好叫 `ghc` 的部署才能问上游要计数」——这条规则没有任何人定过，它是类型选择的副产品。多 provider 让它现形：运维把 provider 叫 `A`、`B` 时，这个字段**写不出 `[A, local]`**。
+3. **然后我在错误的类型上加了静态校验**，去拒绝一个在有 `ghc` provider 的部署里完全合法的值。那是把缺陷固化成了纪律。
+
+#### 规范
+
+- 类型是 `list[str]`，不是 `Literal`。
+- 校验在 `ProxyConfig` 层（跨字段），判据是「`local`，或本配置 `model_providers` 里存在的键」。
+- **不校验默认值。** `["ghc", "local"]` 是随包配置的 provider 名；运维改了 provider 名却没动这个键，什么错也没犯——上游那条腿问的是**路由选中的** provider，所以默认值里那个字符串只需要「不是 local」就能正确工作。运维**写下**的才是声明，才检查；继承来的不是。
+- **不校验没有任何 provider 的配置。** 那种 `ProxyConfig` 在 `resolve_default_name` 就会失败，且失败信息指向真正缺的东西；在这里报错只会用后果盖住原因。
+- 运行时判据从「等于某个字面量」改成「不是 `local`」。trail 条目与日志标签用**实际的 provider 名**，于是两个 provider 的部署里 `provider(ghc-failed,local)` 说的是哪个上游没答上，而不只是「有一个没答上」。
+
+#### 一处已知的名实不符，本次不动
+
+配置里的名字**不选择** provider，路由选择：`driver.py` 的 `ask_upstream` 闭包捕获的是 `shape_request` 定下的那个 provider。所以 `providers: [A, local]` 而某请求路由到了 B 时，问的是 B。
+
+单 provider 下两种读法行为完全一致，这个偏差一直不可见；多 provider 让它可见了，但它是**既有行为**，不是本次引入的。要不要让配置真正选择计数用的 provider（并处理「用 A 数 B 的模型」是否有意义），是一个独立问题。**记入 `deferred.md` D-4。**
 
 ## 2. 解析规则
 
@@ -610,7 +627,7 @@ token 走 header 不走连接，所以共享连接不会串号——这一点不
 
   **候选材料清单**（首版只点名了第 1 条，其余由规则评审 F-08 补出）：
 
-  1. **`config.example.yaml:71`** — `providers: [ghc, local]` 里的 `ghc` 改名为 `upstream`（§1.3）。照抄示例的部署会被启动校验挡下一次。
+  1. ~~`config.example.yaml:71` 的 `ghc` 改名为 `upstream`~~ — **已撤销**，2026-08-27。改名本身建立在对该字段的误读上，见 §1.3。这一行不需要任何改动。
   2. **`config.example.yaml:100-102`** — 用户亲笔的解析算法描述「若目标在可用模型列表中，直接解析命中；否则，当作别名再次尝试解析；仍不可用则放弃映射、直接透传」。§2.5 取代了它的第一句：新算法全程不查目录，走到链末才查一次。**这一条最要紧**——一份用户亲笔的文档正在描述代码已经不做的事。
   3. **`config.example.yaml:74-78`** — 「模型名映射：请求模型 → 目标模型」「这是模型名映射的唯一来源」。§1.1 让**值**多承担一个 provider 限定，「目标模型」这个说法不再完整。
   4. **新增顶层键 `fallback_model_provider`**（§1.2）——`config.example.yaml` 是带注释的完整样例，新键不在里面，运维无从知道它存在，而 §5.3 让它成为一整类请求能不能工作的开关。
