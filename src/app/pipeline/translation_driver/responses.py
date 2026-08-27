@@ -32,6 +32,21 @@ TEXT = "text"
 MAX_TOKENS = "max_tokens"
 END_TURN = "end_turn"
 TOOL_USE_STOP = "tool_use"
+CONTENT_FILTER = "content_filter"
+
+# Stop reasons that mean the turn finished, said in the Responses vocabulary of completed / incomplete / failed. `tool_use` belongs here: a turn that ends by calling a tool is one the model chose to end, not one that was cut short. The empty string is here because `SemanticResponse.stop_reason` is a bare `str`, and an unset one means nobody said — reading that as a truncation would report an observation that was never made.
+#
+# **This is the one copy.** The streaming framer for the same client leg (`app/pipeline/delivery/formats/openai_responses.py`) imports it from here rather than keeping its own. These two are the buffered and the streaming half of one leg, and `fef7d96` is the record of what it costs when the two halves describe one fact differently: which answer a reader sees then depends on something the reply itself does not carry. It lived here as a duplicate until 2026-08-27, kept in step by a comment; the import is what makes "the same set" checkable instead of remembered. The direction works because `delivery` already imports from `translation_driver` and never the reverse.
+FINISHED_STOP_REASONS = frozenset({END_TURN, TOOL_USE_STOP, ""})
+
+# This proxy's word for a truncation → the Responses enumeration's word for it. A forward table rather than a passthrough: `incomplete_details.reason` is an enumeration — `max_output_tokens` or `content_filter`, or null (openai SDK 3.3.1, `openai.types.responses.response.IncompleteDetails`) — so a reason not in here has no legal spelling and must become null, which is upstream's own shape for "incomplete, no reason given".
+#
+# Everything else that can arrive is Anthropic's own (`stop_sequence`, `pause_turn`, `refusal`, `model_context_window_exceeded`) or this proxy's synthesis (`incomplete`, written when upstream said the response was incomplete and gave no reason). A Responses client can read none of those, so they travel as `status: "incomplete"` with a null reason: the fact that the turn was cut short is the part it can act on, and a word from the wrong vocabulary would be worse than no word at all.
+#
+# `refusal` is deliberately not mapped onto `content_filter`. The two are neighbours, not synonyms — `config/schema.py` says so where it keeps `content_filter` off `hand_over_stop_reasons` — and this project does not invent a mapping for a shape upstream has never sent. Shared with the streaming framer the same way `FINISHED_STOP_REASONS` is, and for the same reason.
+#
+# `content_filter` maps to itself, and that is a different kind of entry from the one above. The reader keeps upstream's own word when it has no Anthropic spelling (`from_openai_responses_response` returns `reason or "incomplete"`), so a filtered turn arrives here already carrying the Responses enumeration's own term. Without the identity row the forward table dropped it to null on the way out, and a client that had been told *why* its turn was cut short got back only *that* it was — a round trip losing a word it never had to translate. Added 2026-08-27; this is upstream's term going home, not a mapping invented for it.
+INCOMPLETE_REASONS = {MAX_TOKENS: "max_output_tokens", CONTENT_FILTER: CONTENT_FILTER}
 
 
 @dataclass(slots=True)
@@ -196,6 +211,8 @@ def to_openai_responses_response(response: SemanticResponse) -> dict[str, Any]:
     """Render the blocks as Responses `output` items.
 
     Every block in a response is the assistant's, which is what makes text `output_text`.
+
+    The terminal state is `FINISHED_STOP_REASONS` and `INCOMPLETE_REASONS`, the two tables the streaming framer for this leg imports from here. This used to be a single comparison against `max_tokens`, which said `completed` for every other way a turn can be cut short — a `refusal` reached the client as a turn the model finished, which is the shape `fef7d96` removed from the other direction. `incomplete_details` was not emitted at all, so even the one ending that did say `incomplete` never said why.
     """
     rendered = [
         item
@@ -205,11 +222,15 @@ def to_openai_responses_response(response: SemanticResponse) -> dict[str, Any]:
         )
         if item is not None
     ]
+    finished = response.stop_reason in FINISHED_STOP_REASONS
+    reason = None if finished else INCOMPLETE_REASONS.get(response.stop_reason)
     return {
         "id": response.id,
         "object": "response",
         "model": response.model,
-        "status": "incomplete" if response.stop_reason == MAX_TOKENS else "completed",
+        "status": "completed" if finished else "incomplete",
+        # Always present, null when there is nothing legal to put in it — that is the key's shape on the wire, and it is how a client tells "no reason given" from a field this proxy forgot to write.
+        "incomplete_details": {"reason": reason} if reason is not None else None,
         "output": [_as_output_item(item) for item in rendered],
         "usage": response.usage,
     }

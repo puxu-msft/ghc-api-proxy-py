@@ -35,6 +35,12 @@ from app.pipeline.translation_driver.reasoning_carrier import (
     decode_reasoning_carrier,
     encode_reasoning_carrier,
 )
+
+# The buffered half of this same client leg owns these two tables; this is the streaming half. They were duplicated until 2026-08-27 and kept in step by a comment on each — `fef7d96` is the record of what it costs when the two halves describe one ending differently, so "the same set" is worth making checkable rather than remembered. The import runs `delivery` → `translation_driver`, which is the direction this module already depends in.
+from app.pipeline.translation_driver.responses import (
+    FINISHED_STOP_REASONS,
+    INCOMPLETE_REASONS,
+)
 from app.protocols.responses_anthropic import (
     ResponseConversionError,
     anthropic_usage_from_responses,
@@ -75,12 +81,6 @@ def _failure_words(kind: str, data: dict[str, Any]) -> tuple[str, str]:
     response = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
     nested = response.get("error")
     return _words(cast(dict[str, Any], nested) if isinstance(nested, dict) else {})
-
-# Stop reasons this proxy synthesises for the Anthropic leg. Responses has no equivalent of either — its vocabulary is completed / incomplete / failed — so both of ours mean the turn finished.
-_FINISHED = frozenset({"end_turn", "tool_use", ""})
-
-# Our word for a truncation → the Responses enumeration's word for it. A forward table rather than a passthrough with exceptions: `incomplete_details.reason` is an enumeration, so anything not in here has no legal spelling and must become null. `max_tokens` is what the assembler writes when upstream said `max_output_tokens`; the round trip is deliberate — the record speaks this proxy's vocabulary and each leg translates out of it.
-_INCOMPLETE_REASONS = {"max_tokens": "max_output_tokens"}
 
 
 def _json_arguments(value: object) -> str:
@@ -327,7 +327,7 @@ class ResponsesFramer:
         """
         # Passed through as-is: `None` here means nobody observed one, and that is what the wire's own null says.
         usage = terminal.upstream_usage
-        if terminal.stop_reason in _FINISHED:
+        if terminal.stop_reason in FINISHED_STOP_REASONS:
             return (
                 self._frame(
                     "response.completed",
@@ -340,7 +340,7 @@ class ResponsesFramer:
             )
         # Only reasons this protocol has a word for travel. `incomplete_details.reason` is an enumeration, and everything else that can reach here is either our own synthesis (`incomplete`, written by the assembler when upstream gave no reason) or Anthropic's (`stop_sequence`, `pause_turn`, `refusal`) — none of which a Responses client can read.
         # Upstream's own shape for "incomplete, no reason given" is a null, so that is what an unmapped reason becomes rather than a word from the wrong vocabulary.
-        reason = _INCOMPLETE_REASONS.get(terminal.stop_reason)
+        reason = INCOMPLETE_REASONS.get(terminal.stop_reason)
         return (
             self._frame(
                 "response.incomplete",
@@ -541,6 +541,16 @@ class ResponsesAssembler:
                 late == TOOL_SEARCH_CALL and bool(self._client_search_tool)
             )
             if not rescuable:
+                # The one discard on this leg that has already cost a whole response, and it was silent while it did it: Copilot sends a different `item.id` on `added` and `done`, so keying drafts on that id meant no close ever found what its open had created, and the reply assembled into zero bytes with 1243 tests green. `_item_key` prefers `output_index` now and that particular cause is gone, but "a close with no draft" still means an output item disappears, and it disappears because an invariant this side holds was broken by an upstream this side cannot see into.
+                # `warning` and not something quieter, for the same reason the failure events above are: this is not a skip anyone planned, and every occurrence is content the client asked for and did not get. Reported rather than raised, because the rest of the turn is still deliverable and refusing it would cost more than the item.
+                # The open keys are the "why" half — they are what the lookup was compared against, so a key reading `index:7` beside drafts holding `index:0` says which of the two identifiers moved. The item's payload is deliberately not logged; its type and its id are what identify it.
+                logger.warning(
+                    "dropping an output item that closed without ever opening: type=%r item_id=%r key=%r open_drafts=%r",
+                    late,
+                    str(item.get("id", "")),
+                    key,
+                    sorted(self._drafts),
+                )
                 return ()
             # An item that closes without ever having opened. This item is whole on `done` — it has no deltas and nothing to accumulate — so the `added` it skipped carried nothing this needs, and refusing to close it would throw away a search that actually ran, silently. The same regression is on record in the reference project, where the item vanished with no observation of any kind. Registering it late costs nothing; the alternative costs the turn's search.
             draft = Draft(

@@ -420,6 +420,37 @@ def test_an_ordinary_item_that_closes_without_opening_is_still_ignored() -> None
     )
 
 
+def test_an_item_that_closes_without_opening_is_ignored_out_loud(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Ignored, yes — silently, no. This is the shape that once assembled a whole reply into zero bytes while every test stayed green, because Copilot sends a different `item.id` on `added` and `done`; the keying was fixed, the drop was not, and a drop nobody can observe makes "this never happens" and "it happens and we cannot tell" the same reading.
+
+    Both halves of the line are pinned: which item went missing, and what its key was compared against — that second one is what says which of the two identifiers moved.
+    """
+    assembler = ResponsesAssembler()
+    assembler.push(
+        SseEvent(
+            "response.output_item.added",
+            orjson.dumps({"output_index": 0, "item": {"type": "message", "id": "msg_opened"}}).decode(),
+        )
+    )
+    with caplog.at_level("WARNING"):
+        assert (
+            assembler.push(
+                SseEvent(
+                    "response.output_item.done",
+                    orjson.dumps(
+                        {"output_index": 7, "item": {"type": "message", "id": "msg_closed"}}
+                    ).decode(),
+                )
+            )
+            == ()
+        )
+
+    assert "msg_closed" in caplog.text, "which item was dropped"
+    assert "index:0" in caplog.text, "and what its key found instead"
+
+
 def _responses_item(assembler: ResponsesAssembler, index: int, item: dict[str, object]) -> tuple[CompletedBlock, ...]:
     """Open and close one Responses output item, returning whatever closing it produced."""
     added = {"output_index": index, "item": {k: v for k, v in item.items() if k != "status"}}
