@@ -92,3 +92,53 @@
 2. **代理内续写。** 已裁决放弃，材料归档在 `archive-proxy-side-continuation/`。
 3. **MCP-driven 续写的次数上限。** 已裁决不设。理由：会触发这条路就说明事情有进展；门本身（已交付过至少一个完整块）保证零进展的一轮到不了这里。详见 `status.md`。
 4. **为非 anthropic-messages 客户端合成工具调用。** 用户接受当前只支持这一种；将来用上别的 harness 再补。**这是范围边界，不是遗漏**——把它读成待办会让人去实现一个用户没有要的东西。
+
+## 六、2026-08-27 从台账迁入的裁决与教训
+
+以下内容的裁决权威仍是本文件开头指向的人写文档与用户后续明确裁决。本节只承接已闭合记录，使 `deferred.md` 继续只放未闭合项。
+
+### 7. 孤儿件与死配置项的处置
+
+`decide_stream_ending()` 之外，还有 5 组零生产调用点的件与 4 个无人读取的配置项：`RetryBudget`、`buffered_retry.py`、`delayed_commit.py`、`continuation.*`、`streamReplay.max_retries`、`max_tokens_as_retryable`、`hedge`。
+
+**用户 2026-08-21 裁决：只删代理内续写机制，其他未接线的功能不要动。** 所以除 `continuation.*` 外一律保留。其中 `delayed_commit.py` 的形状恰好对得上第 2 条将来可能需要的延迟提交，`streamReplay.max_retries`（默认 100）在 D 组接线后会生效。
+
+**2026-08-22 补一条同族的新情况**：`decide_stream_ending()` 本身已接线（`8f654b4`），但 `c86712d` 之后它的 **`COMPLETE` 那一格从唯一生产调用点不可达**——`_deliver` 必须在问它之前先答完「上游说完了没有」，否则一个 `normalize_upstream_error` 不认识的异常（裸 `h2.ProtocolError`）会让完整回复照样被丢。异源评审实测：把该分支改坏，unit+int 1589 条里只有它自己的单测变红。
+
+按上述裁决**不删**，`1479025` 已在该分支加了回指注释。待裁的是形状：要么让这个纯函数只裁「未完成流」（去掉 `terminal_seen` 参数与 `COMPLETE`），要么重塑参数使调用者能在异常分类之前问出完整 verdict。**不要**改成在 verdict switch 里处理 `COMPLETE`——那条路对上述异常根本到不了。
+
+### 22. ~~`internal` 同时盖着「上游协议故障」与「本仓 bug」两件相反的事~~ —— 已裁决并落地（2026-08-23，主仓 `0ca87b9`）
+
+**用户裁决：采用方案 (a)**，把 `h2.exceptions.H2Error` 加进 `errors.py` 的 `_CONNECTION_ERRORS`。理由是这不是新立规矩，而是把代码拉回用户亲笔 `docs/.human-controlled/upstream-retry-and-continuation.md` 已有的「网络中断一般可以继续」。
+
+调查与影响面全文在 [`reports/260823-h2-protocolerror-category.md`](reports/260823-h2-protocolerror-category.md)。留下三条值得记的：
+
+1. **决定命运的是内核那一次 `read()` 的分包。** GOAWAY 与其后的帧分开到达 → `httpx2.RemoteProtocolError` → `network` 且可重放；落进同一次 `read()` → 裸 `h2.ProtocolError` → 当时是 `internal` 且不可重放。同一个上游事件，两种结局，而分岔点在操作系统。这是本条从「标签不好看」升格为缺陷的原因。
+2. **`internal` 的「结构上不可达」是错的，而且写下时就错了。** 前提被 `78be0d4`（2026-08-22 18:57）解耦，那句话是次日 `a8862e6`（06:26）写的。形态记在 [`22 之四`](#22-之四-一条状态断言在写下时就已经过期) 。
+3. **(b)「只在 `replay_reason` 里特判」的「影响面更小」是错觉**，已记进报告 §4.2：它改的行为与 (a) 一样多，只是当时的测试打不到——因为那条测试用的是自建的 stand-in `eligible`，不是生产接线 `replay_reason`。
+
+**未随本条解决的**：`httpx2.DecodingError`（上游把 body 压坏）现在归因正确（`upstream`）但**仍不可重放**，因为 `normalize_upstream_error` 仍叫不出它的名字。「叫不出名字的失败该不该可重试」是第 20 条的产品问题，本次没有替它作答。它同时是 `test_a_finished_turn_survives_a_failure_nothing_recognises` 的载具——那条测试的前提断言会在它哪天被命名时出声。
+
+### 优雅关闭排空期间拒绝重开后，零提交不为交接开口
+
+#### 原问题与已经量化的取舍
+
+**2026-08-22 补第三个触发条件，且它比另外两个常见得多：排空主动拒绝重开**（主仓 `db49581`）。每一次带在途流式请求的优雅重启都可能撞上，而不是「预算恰好耗尽」这种偶发。
+
+   **同时更正一条本项目自己写错的机制陈述。** 落地 `db49581` 时，提交信息与两处 docstring 都称「交接需要已交付的内容，所以这一格结构上不可能交接」——**这句话是假的**，异源评审实测证伪（`reports/260822-review-drain-suppression.md` major-2）：`_hand_over` 在 `if not started:` 时会自己补 `framer.preamble()`，只把 `committed_count == 0` 那道门短路掉，排空被拒的那条流立刻产出一次干净的交接（日志 `upstream_replay_refused_while_draining` → `turn handed back to the client to continue`，`status=retry`）。挡住它的是**一道可配置的闸**，不是机制的固有属性。已改正代码注释与 `status.md`；此处登记的是那个假理由掩盖掉的真问题。
+
+   **真问题：排空这一格要不要为交接开口？** 人写文档「特别地，优雅关闭时报错不再考虑无痕重试，**可以**走下文合成续写机制」这句，承接的正是它上一句「如果还没交付过完整块」——**说的就是这扇门**。措辞是许可式（「可以走」）而非命令式，所以现状（不开口）并不违反文档；但也谈不上被文档裁定过。
+
+   **不开口的代价已量化，是真的丢东西**（评审 major-3，代码事实，推理链每环已核）：`client_delivery.buffering_policy` 取 `full` 或 `until-tool-use` 时，缓冲策略把整轮的完整块全压在 `BlockBuffer` 里不释放（`stream.py` 自己的注释写明这两种策略下「首块前的窗口就是整个回合」），于是 `committed_count` 恒为 0、`client_has_bytes` 未 set。此时关机 + 撕流 → `decide_stream_ending` 返回 REPLAY → 排空闸拒绝 → `_hand_over` 因 `committed_count == 0` 返回 `None` → 裸抛，**缓冲区里那一整份已经算完的回答被整批丢弃**。`db49581` **之前**这一格会重放并大概率成功（排空本来就在等这个请求）。即：本项目的改动让一条既有的丢失式结局在非默认配置下变得常态可达。
+
+   开口的做法是现成的：`_hand_over` 一旦被允许在 `committed_count == 0` 时动作，它做的第一件事就是 `session.finish()` 把缓冲块冲出去再附上 `tool_use`，这一格自动补上。**证据等级：机制与代价均为确凿（一手实测 + 代码事实）；开不开口是产品裁决，需用户定。**
+
+#### 用户裁决（2026-08-27）
+
+**维持现状，整批丢弃，不为交接开口。** 用户原话：「根据你的描述，这种情况就应该整批丢弃」。
+
+`committed_count == 0` 意味着客户端一个字节都没收到，这一轮在客户端看来从未开始。hand-over 机制（`turn_interrupted`）的意义是「你已经收到一半了，这是继续的信号」；零提交时没有「一半」这回事，硬造一个交接等于协调一个不存在的部分状态。丢弃后由客户端重发，语义更干净。
+
+**这是知情取舍，不是遗漏。** 那一轮的上游 token 已经计费，丢弃意味着客户端重发时再花一次；`client_delivery.buffering_policy` 取 `full` 时，代价是一整份完整回复的费用。允许交接本可保住这笔费用，但会引入上述「协调不存在的部分状态」的复杂语义；用户在知晓两边代价后选择不开口。
+
+现行代码已经是该行为，不需为本裁决改代码。该格于 2026-08-27 从 `deferred.md` §5 移出；§5 的其它格继续按各自状态留在台账。

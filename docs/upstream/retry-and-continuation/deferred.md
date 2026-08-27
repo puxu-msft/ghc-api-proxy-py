@@ -34,11 +34,9 @@
 
 → `README.md` 证据表的 `stop_reason` 那一行，「未观测 ≠ 不可能」这句解读已并入该行。本条是它的重复副本，已删。
 
-### 4. 上游 SSE 中途的 `error` 帧：零观测
+### 4. ~~上游 SSE 中途的 `error` 帧：零观测~~ —— 已闭合，已移出（2026-08-27）
 
-134336 个 operation、约 3000 万根帧里，`response.failed`、`response.cancelled`、上游 `error` 帧**各 0 次**。参考实现枚举过的完整词表（含 Copilot 专有的嵌套 `{"type":"error","error":{code,message}}`）只有旁证。
-
-现状的处置是坏的：这些帧被 `push` 静默丢弃，`terminal.seen` 保持 False，最终发出一条**与「连接被掐断」完全同形**的 `incomplete_responses_stream`。G1（分支 `fix/upstream-error-events`）正是在补这个。
+R 片 `f12f76d` 已让 Responses 与 Anthropic 两条腿承接上游流内失败事件；当前源码中的 failure-event reader 已复核。完整的点时记录与「形状来自二手证据」这一限制迁入 [`status.md`](status.md)「2026-08-27 从台账迁入的闭合记录」。编号保留：当前生产源码仍按第 4 条回指这段历史。
 
 ### 5. ~~已交付之后的两条失败路径行为不一致~~ —— 已裁决并落地（2026-08-22）
 
@@ -102,15 +100,7 @@
 1. **非 anthropic-messages 客户端请求**——用户已限定「其他上游请求暂不使用该机制」。判据在**客户端轴**（`route.wire_format` / `inbound_format`），不是上游轴。
 2. **一个完整块都没交付过**——门是「已交付过至少一个完整块」。没交付走无痕重试；但重试预算耗尽或 `reopen()` 自己也失败时，既无内容也无续写。`_hand_over` 里已显式写了这一格返回 `None`（`committed_count == 0`），唯一的例外是 `ContinuationSupport.stop_reasons` 里的停止原因——**那是配置项，默认值是 `{"max_tokens"}`，不是硬编码条件**。
 
-   **2026-08-22 补第三个触发条件，且它比另外两个常见得多：排空主动拒绝重开**（主仓 `db49581`）。每一次带在途流式请求的优雅重启都可能撞上，而不是「预算恰好耗尽」这种偶发。
-
-   **同时更正一条本项目自己写错的机制陈述。** 落地 `db49581` 时，提交信息与两处 docstring 都称「交接需要已交付的内容，所以这一格结构上不可能交接」——**这句话是假的**，异源评审实测证伪（`reports/260822-review-drain-suppression.md` major-2）：`_hand_over` 在 `if not started:` 时会自己补 `framer.preamble()`，只把 `committed_count == 0` 那道门短路掉，排空被拒的那条流立刻产出一次干净的交接（日志 `upstream_replay_refused_while_draining` → `turn handed back to the client to continue`，`status=retry`）。挡住它的是**一道可配置的闸**，不是机制的固有属性。已改正代码注释与 `status.md`；此处登记的是那个假理由掩盖掉的真问题。
-
-   **真问题：排空这一格要不要为交接开口？** 人写文档「特别地，优雅关闭时报错不再考虑无痕重试，**可以**走下文合成续写机制」这句，承接的正是它上一句「如果还没交付过完整块」——**说的就是这扇门**。措辞是许可式（「可以走」）而非命令式，所以现状（不开口）并不违反文档；但也谈不上被文档裁定过。
-
-   **不开口的代价已量化，是真的丢东西**（评审 major-3，代码事实，推理链每环已核）：`client_delivery.buffering_policy` 取 `full` 或 `until-tool-use` 时，缓冲策略把整轮的完整块全压在 `BlockBuffer` 里不释放（`stream.py` 自己的注释写明这两种策略下「首块前的窗口就是整个回合」），于是 `committed_count` 恒为 0、`client_has_bytes` 未 set。此时关机 + 撕流 → `decide_stream_ending` 返回 REPLAY → 排空闸拒绝 → `_hand_over` 因 `committed_count == 0` 返回 `None` → 裸抛，**缓冲区里那一整份已经算完的回答被整批丢弃**。`db49581` **之前**这一格会重放并大概率成功（排空本来就在等这个请求）。即：本项目的改动让一条既有的丢失式结局在非默认配置下变得常态可达。
-
-   开口的做法是现成的：`_hand_over` 一旦被允许在 `committed_count == 0` 时动作，它做的第一件事就是 `session.finish()` 把缓冲块冲出去再附上 `tool_use`，这一格自动补上。**证据等级：机制与代价均为确凿（一手实测 + 代码事实）；开不开口是产品裁决，需用户定。**
+   **排空主动拒绝重开的格子已裁决并移出（2026-08-27）**：维持现状，`committed_count == 0` 时整批丢弃，不为交接开口。客户端一个字节都没收到时，这一轮在它看来从未开始，没有「已收到一半」的部分状态可协调；由客户端重发语义更干净。用户同时接受已计费 token 会丢失、`buffering_policy: full` 时可能重付整份回复费用的代价。完整理由与被否决选项见 [`decisions.md`](decisions.md) 第六节。
 3. **有意裁决为不可继续的失败**——人写文档的前提是「如果业务可能可以继续」。上游拒绝、转换错误、prompt-limit 不在内；多数发生在 commit 前（还能用 HTTP 错误），但已交付一块之后的转换／assembler 错误落在这里。
 4. **种类上本可继续、只是分类器叫不出名字的失败**——**这一格与第 3 格形似而神不同，初稿把两者混写成一格，是错的**。机制是：`_replay_reason` 返回 `None` 时 `_deliver` 直接 `raise torn`，`_hand_over` **根本不被咨询**。于是一个本该续写的网络类失败，只因 `normalize_upstream_error` 没有它的名字（裸 `h2.ProtocolError` 就是），走的却是「不可继续」那条路。**这不是裁决，是漏网。** 详见第 20 条。
 
@@ -124,13 +114,11 @@
 
 ### 7. 孤儿件与死配置项的处置
 
-`decide_stream_ending()` 之外，还有 5 组零生产调用点的件与 4 个无人读取的配置项：`RetryBudget`、`buffered_retry.py`、`delayed_commit.py`、`continuation.*`、`streamReplay.max_retries`、`max_tokens_as_retryable`、`hedge`。
+2026-08-27 当前源码仍保留 `RetryBudget`、`streaming/buffered_retry.py`、`streaming/delayed_commit.py` 与 `client_delivery.hedge`。用户 2026-08-21 裁决「只删代理内续写机制，其他未接线的功能不要动」，所以这些件不因生产调用面窄而删除；`hedge` 的排期另见 `delivery-keepalive/deferred.md` D-4。
 
-**用户 2026-08-21 裁决：只删代理内续写机制，其他未接线的功能不要动。** 所以除 `continuation.*` 外一律保留。其中 `delayed_commit.py` 的形状恰好对得上第 2 条将来可能需要的延迟提交，`streamReplay.max_retries`（默认 100）在 D 组接线后会生效。
+`decide_stream_ending()` 已接线，但它的 `COMPLETE` 分支仍从唯一生产调用点不可达。待裁的是形状：要么让这个纯函数只裁「未完成流」（去掉 `terminal_seen` 参数与 `COMPLETE`），要么重塑参数使调用者能在异常分类之前问出完整 verdict。**不要**改成在 verdict switch 里处理 `COMPLETE`——那条路对裸 `h2.ProtocolError` 根本到不了。
 
-**2026-08-22 补一条同族的新情况**：`decide_stream_ending()` 本身已接线（`8f654b4`），但 `c86712d` 之后它的 **`COMPLETE` 那一格从唯一生产调用点不可达**——`_deliver` 必须在问它之前先答完「上游说完了没有」，否则一个 `normalize_upstream_error` 不认识的异常（裸 `h2.ProtocolError`）会让完整回复照样被丢。异源评审实测：把该分支改坏，unit+int 1589 条里只有它自己的单测变红。
-
-按上述裁决**不删**，`1479025` 已在该分支加了回指注释。待裁的是形状：要么让这个纯函数只裁「未完成流」（去掉 `terminal_seen` 参数与 `COMPLETE`），要么重塑参数使调用者能在异常分类之前问出完整 verdict。**不要**改成在 verdict switch 里处理 `COMPLETE`——那条路对上述异常根本到不了。
+原条目里已经删除的 `continuation.*`、`streamReplay.max_retries` 与 `max_tokens_as_retryable`，以及它们被局部推翻的时间线，已于 2026-08-27 迁入 [`decisions.md`](decisions.md) 第六节，不再冒充当前成员。清点报告曾称 `streamReplay.max_retries` 仍在；当前 `src/`、`tests/` 与人写文档的检索不支持该说法，因此本条按当前源码收窄。
 
 ### 8. 生命周期所有权：一处缺口与三条未接线的通道
 
@@ -140,7 +128,7 @@
 
 | # | 事实 | 证据等级 | 处置 |
 |---|---|---|---|
-| 8a | **`client_request_deadline` 触发时，客户端拿到 502 `{"type":"CancelledError","message":""}` 而非 504。** driver 的 `except BaseException` 吞掉了 `asyncio.timeout` 的取消，那句 `raise UpstreamTimeout` 是死代码 | 实测 | **跨层所有权错误，要修。** 上层用取消表达「时间到了」，下层把取消当普通异常吃掉 |
+| 8a | **已闭合，已移出（2026-08-27）** | 当前 `direct_driver/base.py` 对 `asyncio.CancelledError` 直接 `raise`，完成记录迁入 `status.md` | 编号保留：生产源码仍按 8a 回指本台账 |
 | 8b | 该时限只覆盖「进入 `handle_bounded` → 上游响应头」，**流式 body 完全在外**；也不是「从受理开始计」——body 读取、JSON 解析、准入排队都在外 | 实测（1 秒时限下 3 秒 body 完整交付） | 要修：把 `with_deadline_at` 的模式复用到客户端时限 |
 | 8c | 流式 body 的兜底者只有 `upstream_request_deadline`（1200）是真的；`stream_idle` 与 `response_header` 默认 0（关）；另有一个**没人选过、没文档的 httpx `read=600`**。把 1200 设 0 就只剩那 600 | 实测（`read=600` 随每个请求到达 transport） | 登记。那个 600 秒是隐式契约，值得写进配置文档 |
 | 8d | **上游撕裂 / idle 触发 / deadline 触发，三者对客户端逐字节相同**——同样的事件序列、无 error 帧、chunked body 不完整。只有代理日志能分辨。另一对：「EOF 什么都没有」与「成功但零内容块」都是 200 + 空 body + clean EOF，日志一个 `fail` 一个 `ok` | 实测 | `error_frame` 通道**存在但没接到终止路径上**。用户 2026-08-22 已裁决：客户端时限在 body 阶段触发时发 SSE error 帧 |
@@ -150,9 +138,9 @@
 
 **明确不做全面重写**，理由见报告第 6 题：上游侧「一个时刻两处施加 + 六层一致的关闭契约」已由实测支持（客户端断连时上游 `is_closed=True`，断连中途与首 chunk 前两种情形都验证过）。
 
-### 9. 一次性交付路径的结局判定不接线（同伴切片）
+### 9. ~~一次性交付路径的结局判定不接线~~ —— 已闭合，已移出（2026-08-27）
 
-→ **已移入「已查清未修（无岔路）」栏**（2026-08-22）。编号保留，正文见下方该栏。
+`_StreamAccounting.finish()` 已为无 assembler 的 one-shot 路径补上结局判断；完成记录、三格测试与变异证据迁入 [`status.md`](status.md)。编号保留。
 
 ### 10. 缺一个 schema → example 的反向检查
 
@@ -170,35 +158,9 @@
 
 编号保留：`decisions.md:64`、`status.md:29`、`../h2-goaway/deferred.md:30` 三处活文档按「第 11 条」引用本条。
 
-### 12. 上游在终结事件之后 reset：完成行不再留痕
+### 12. ~~上游在终结事件之后 reset：完成行不再留痕~~ —— 已闭合，已移出（2026-08-27）
 
-**这条的归属被改错过一次，改正记在这里而不是抹掉**：标题一度写着「原始来源 `c86712d` 是一个不被任何 ref 引用的对象」。**该断言不成立**——2026-08-22 收尾时逐 ref 复核，`c86712d` 可达自 `archive/260822-complete-not-abandon`（命令：对 `git for-each-ref` 的每个 ref 跑 `git merge-base --is-ancestor c86712d <ref>`）。准确的时间线是三步，全部在 `main` 上或归档 ref 上可查：`bce8b0d`（同伴，在 verdict switch 里判 `COMPLETE`）→ `1743a0b`（同伴，采纳评审意见把判断前移到异常分类之前）→ `f0527e5`（守卫加硬）。本条描述的观测面缺口由这三步共同引入，不归任何单一提交。
-
-来源：同上，发现 A（正反两次实测，用项目自己的 `_StreamAccounting` + `_tracked_delivery`）。
-
-`c86712d` 之前，「上游发完终结事件后连接被 reset」打出的是一行**自相矛盾**的日志：
-
-```
-[FAIL] 200 POST /v1/messages … end_turn: stream failed before a terminal event: connection reset by peer
-```
-
-（`end_turn` 与「before a terminal event」并列。）修复后是一行**真话**：
-
-```
-[ OK ] 200 POST /v1/messages … end_turn
-```
-
-**但 `connection reset by peer` 这个事实现在不出现在任何地方**：`_tracked_delivery` 正常跑完所以 `accounting.failure` 是 `None`，局部变量 `torn` 在 `break` 之后被丢弃，没有日志、计数或 trace 字段承接它。而 `_ending()` 自己的 docstring 写着 failure「is the only account of what went wrong that exists anywhere」。
-
-**为什么这值得登记而不是忽略**：`../h2-goaway/findings.md` 的「未决」栏里有两项正需要这类样本——「上游响应被提前关闭的频率」与「本项目自身的传输失败频率（此前零生产数据，日志刚上线）」。一次修复静默削掉了刚建起来的观测面的一角。
-
-**反方向的先例也要一起权衡**：项目已有裁决 `test_a_stream_cut_after_its_stop_reason_is_not_called_truncated`（`tests/int/test_pipeline_app.py:1833`）说「`message_delta` 之后被切断的流已经把客户端应得的都说了，不算 truncated」。按同一逻辑，`message_stop` 之后被 reset 报 `[ OK ]` 是自洽的。所以这不是「显然要修」。
-
-**处置：归交付侧重写切片（同伴），本主题登记不动手。** 理由是留痕需要一条从 `_deliver` 到 `_StreamAccounting` 的新通道——`stream_delivery` 今天完全看不到 accounting——而同伴正在做的重写已经在加 `ContinuationSupport` 这类回调通道，也已认领第 8d 条。硬塞进 `c86712d` 会是与该提交语义无关的管道铺设。
-
-候选做法（评审倾向第一个，本会话同意）：① 给 `_StreamAccounting` 加一个与 `failure` 分开的字段（如 `tore_after_terminal`），完成行仍判 `ok` 但 detail 里附一句 —— `format_completion_line` 的 `if line.detail:` 对任何状态都渲染，**无需改日志格式**；② 只记一条 debug 日志；③ 明确裁决「这个事实不需要留痕」并写下理由（按 `record-what-not-adopted`，不采纳也要写）。
-
-**不要**为此加门禁或指标体系。
+当前实现已有 `on_tear_after_terminal`、`_StreamAccounting.tore_after_terminal` 与 `RequestLine.tore_after_terminal` 的完整通路；完成行保留该事实。完整的归属更正、候选做法与当时的取舍迁入 [`status.md`](status.md)。编号保留：生产源码仍按 §12 回指。
 
 ### 15. `hand_over_stop_reasons` 在非流式的丢弃上不生效
 
@@ -216,24 +178,13 @@
 
 → **已移入「已查清未修（无岔路）」栏**（2026-08-22）。编号保留，正文见下方该栏。
 
-### 18. 一条提交信息缺字
+### 18. 一条提交信息缺字 —— 已移入读史提示（2026-08-27）
 
-→ **已移入「已查清未修（无岔路）」栏**（2026-08-22）。编号保留，正文见下方该栏。
+这件事按定义不会执行，完整记录迁入 [`README.md`](README.md)「读史提示：不会执行的旧记录」。编号保留，不再把它列作未修工作。
 
-### 19. 截断 error 帧的 message 在 Anthropic 上游腿上字面是错的
+### 19. ~~截断 error 帧的 message 在 Anthropic 上游腿上字面是错的~~ —— 已闭合，已移出（2026-08-27）
 
-`_deliver` 末尾那条帧写死了 `message="Responses stream ended before a successful terminal event"`（`src/app/pipeline/delivery/stream.py:386`，`code="incomplete_responses_stream"` 那处）。而 `_deliver` **对两条上游腿共用**——它收的是 `assembler`（`AnthropicAssembler` 或 `ResponsesAssembler`，即上游轴），而这条 message 是常量。所以一次走 Anthropic 上游腿的截断，客户端收到的是一句声称上游是 Responses 的话。
-
-> **本条初稿的论证是错的，记在这里而不是抹掉**：初稿写「`framing` 由调用方给，两条腿共用同一段代码」。**用错了轴**——`framing.py` 的模块 docstring 开宗明义警告：framer 选的是**客户端**协议（`route.inbound_format`），`dialect_for` 才回答「哪个上游说了话」，「把这两者搞反正是这个类型存在的理由」。主产品路径恰恰是 Anthropic 客户端 + Responses 上游，两轴不同向。结论不变，但成立的理由是 `assembler` 那条轴，不是 framer。
-
-2026-08-22 那次生产事故正是 Anthropic **上游**腿（判据：日志行上是 `think` 而非 `reason`，`REASONING_WORD` + `dialect_for` + `assembler_for` 三处共同决定；见 `../../tmp/260822-h2-streamreset-cancel-diagnosis.md` §1.2）。
-
-**代价比初稿估的高，这一段也已更正**：
-
-- `code` 不能动——被 2 处测试断言，并被 `../../delivery-keepalive/spec.md` 逐字复述（`../../tmp/260821-plan-g1-upstream-error-events.md` 的 G4 已查清）。
-- `message` **不是「零消费」**。初稿这么写，错了。它有**两个产出点**：`src/app/delivery/responses_anthropic_stream.py:349`（legacy 链路）与 `stream.py:386`（活链路）。而且 `stream.py:382` 的注释把这件事写成**有意契约**：「Same code, same wire shape, **same message**, same gate on the message having started — a client that already learned to read one of these does not have to learn a second.」所以改 message 要么两处一起改、要么明确裁决让两条链路发散，不是顺手改一个字符串。
-
-**为什么登记而不是顺手改**：它与第 5 条（已交付之后两条失败路径不一致）、G1 那份方案是同一片区域，且牵动一条跨链路的措辞契约，应当一并裁决。**证据等级：代码事实，确凿；是否值得改属措辞与契约取舍，需裁决。**
+当前 `stream.py` 使用不点名上游方言的 `upstream stream ended before a terminal event`，并保留原 `code`。完整的轴线更正与消费面辨析迁入 [`status.md`](status.md)。编号保留：生产源码仍按 §19 回指。
 
 ### 20. `_hand_over` 排在异常分类之后 —— **交接那一半已闭合；「叫不出名字的失败该不该可重放」仍开着**
 
@@ -292,34 +243,17 @@ if replay is None or reason is None:
 
 **不在本次范围，登记而非动手**，理由与第 4 条同源：S7 那一格（任意未识别事件）要不吵就得有一份「明知故忽略」的词表，而本项目规矩是上游行为靠录制不靠想象；其余各格的日志级别与措辞该一并定，而不是各修各的。**证据等级：位置与「零痕迹」均为一手实测（21 组反例 + 正样本对照），确凿；排期与级别需裁决。**
 
-### 22. ~~`internal` 同时盖着「上游协议故障」与「本仓 bug」两件相反的事~~ —— 已裁决并落地（2026-08-23，主仓 `0ca87b9`）
+### 22. ~~`internal` 同时盖着「上游协议故障」与「本仓 bug」两件相反的事~~ —— 已闭合，已移出（2026-08-27）
 
-**用户裁决：采用方案 (a)**，把 `h2.exceptions.H2Error` 加进 `errors.py` 的 `_CONNECTION_ERRORS`。理由是这不是新立规矩，而是把代码拉回用户亲笔 `docs/.human-controlled/upstream-retry-and-continuation.md` 已有的「网络中断一般可以继续」。
+用户裁决与 `0ca87b9` 的落地记录已迁入 [`decisions.md`](decisions.md) 第六节；未随它解决的「叫不出名字的失败是否可重放」仍由第 20 条单独跟踪。编号保留，不把含两个问题的条目按其中一半整体结案。
 
-调查与影响面全文在 [`reports/260823-h2-protocolerror-category.md`](reports/260823-h2-protocolerror-category.md)。留下三条值得记的：
+### 22 之二. ~~同一个失败，两条出口给两个相反的答案~~ —— 已闭合，已移出（2026-08-27）
 
-1. **决定命运的是内核那一次 `read()` 的分包。** GOAWAY 与其后的帧分开到达 → `httpx2.RemoteProtocolError` → `network` 且可重放；落进同一次 `read()` → 裸 `h2.ProtocolError` → 当时是 `internal` 且不可重放。同一个上游事件，两种结局，而分岔点在操作系统。这是本条从「标签不好看」升格为缺陷的原因。
-2. **`internal` 的「结构上不可达」是错的，而且写下时就错了。** 前提被 `78be0d4`（2026-08-22 18:57）解耦，那句话是次日 `a8862e6`（06:26）写的。形态记在 [`22 之四`](#22-之四-一条状态断言在写下时就已经过期) 。
-3. **(b)「只在 `replay_reason` 里特判」的「影响面更小」是错觉**，已记进报告 §4.2：它改的行为与 (a) 一样多，只是当时的测试打不到——因为那条测试用的是自建的 stand-in `eligible`，不是生产接线 `replay_reason`。
+完成记录迁入 [`status.md`](status.md)「2026-08-27 从台账迁入的闭合记录」。编号保留。
 
-**未随本条解决的**：`httpx2.DecodingError`（上游把 body 压坏）现在归因正确（`upstream`）但**仍不可重放**，因为 `normalize_upstream_error` 仍叫不出它的名字。「叫不出名字的失败该不该可重试」是第 20 条的产品问题，本次没有替它作答。它同时是 `test_a_finished_turn_survives_a_failure_nothing_recognises` 的载具——那条测试的前提断言会在它哪天被命名时出声。
+### 22 之三. ~~`transport.py` 的 h2 识别挂在没有活调用者的链上~~ —— 已闭合，已移出（2026-08-27）
 
-### 22 之二. ~~同一个失败，两条出口给两个相反的答案~~ —— 已修（2026-08-23，主仓 `0ca87b9`）
-
-两处一起改，缺一处都会把不一致换个方向而不是消掉：
-
-- **标记区从「只覆盖 `assembler.push`」扩到「本侧在循环里跑的每一处代码」**（装配、提交、保活）。原先的限制理由是「扩大标记区要把 `yield` 包进 try」，**那对当前代码不成立**：`_commit` 返回的是 `list`，里面每一次 framer 调用在第一个 chunk 被 yield 之前就已经跑完；保活那一处则只需先给 chunk 命名再 yield。于是 framer 的 bug 不再被甩给上游，也不再被交接（另开一次尝试会撞同一个 bug）。
-- **交接分类的兜底从 `INTERNAL` 改成 `UPSTREAM`。** 判据不是又加一张表，而是**调用方的门**：`stream.py` 只在 `not ours` 时走交接，所以能带着 error 走到 `hand_back_block` 的失败，按构造就不是本侧造成的。
-
-两条各有变异验证：把标记区改窄，新测试在 `'"code":"proxy_delivery_failed"' in body` 变红并印出旧的 `"type":"upstream_error"`；把兜底改回 `INTERNAL`，集成测试在 `assert 'internal' == 'upstream'` 变红。
-
-### 22 之三. ~~`transport.py` 的 h2 识别挂在没有活调用者的链上~~ —— 已归档（2026-08-23）
-
-三件东西按「各自是下一件的唯一调用者」一起移进 `src/.archived/`：`CopilotUpstream`（切出 `app/upstream/copilot.py`，落成 `copilot_upstream.py`）、`GhcApiClient.send_responses_headers`（直接删除，归档树的 `app/upstream/generic.py` 已有孪生）、`app/model_provider/ghc_client/transport.py`（整文件）。名字已加进 `tests/unit/test_module_boundaries.py` 的 `_ARCHIVED`，理由与经过写进 `src/.archived/README.md`。
-
-**它为什么被 2026-08-22 那次清理漏掉**：那次的判据是「能从 `app.server.app_factory` 到达、不能从 `app.cli` 到达」。`CopilotUpstream` 两边都到达不了——它适配的 `UpstreamTarget` 协议**在那次就已经被归档了**，于是它成了一个目标接口已经消失的适配器。**「两条链都到不了」这个格子，那次的判据没有问题去问它。**
-
-**代价值得单独记住，它不是「死代码占地方」**：`transport.py` 是全仓唯一写下「httpcore 只把 try 包在 socket 读上、裸 h2 异常会逃出来」这个依赖缺陷的地方，还在 `except` 子句里点名了 `H2ProtocolError`。**于是这棵树读起来像是已经处理了这一格。** 实际没有——那份守卫在没人调用的链上，而活链路的 body 段直到 2026-08-23 才补上。先做 (a) 再归档的顺序是刻意的：知识先落到活路径上，搬走才不是丢失。
+归档经过与「守卫留在无调用者链上」的教训迁入 [`status.md`](status.md)「2026-08-27 从台账迁入的闭合记录」。编号保留。
 
 ### 22 之五. `copilot.py` 剩下的两个 header wrapper 是 production-zero
 
@@ -335,21 +269,9 @@ if replay is None or reason is None:
 
 **未处置，需裁决**：归档／删除，还是写出保留它们的外部契约。本次不擅自动手（`never-delete-implemented-functionality-unsolicited`），也不因为「顺手」就扩大上一次裁决的范围。
 
-### 22 之六. ~~本侧的 `_counted_upstream` bug 仍被标成上游~~ —— 已修（2026-08-24，主仓 `1a34042`）
+### 22 之六. ~~本侧的 `_counted_upstream` bug 仍被标成上游~~ —— 已闭合，已移出（2026-08-27）
 
-**修法是「让调用方指明」，不是再加一张表。** `UpstreamSource` 不再由 `stream_delivery` 包住它收到的任何东西，而是由 `inference.py` 构造在那四层的**中间**：attempt 时限与空闲超时在它之下（这两道守卫存在的意义就是陈述上游状况），`_counted_upstream` 在它之上（本侧记账）。交付层拿到 composite 与这个对象两样，只问后者「你抛过什么」。重放的那次拿自己的新 marker。
-
-实测（用**真实的** `_counted_upstream`，让 `active_requests.add_bytes` 在第 4 个 chunk 抛错）：
-
-| | `62a457f` | `1a34042` |
-|---|---|---|
-| `handed_count` | 1 | **0** |
-| `handed_local_counter_bug` | True | **False** |
-| `returned_cleanly` | True | **False**（异常如实抛给调用方） |
-
-**接线单独验过。** 判据的单测自己摆放 marker，所以它证明不了生产摆对了——这正是本项目栽过两次的形状。另加一条集成测试，把真实 `_counted_upstream` 调用的那个 registry 换成会抛错的，走服务端真实入口；把 marker 变异回「包住整条 composite」，该测试变红，并在日志里印出缺陷本身：`turn handed back to the client to continue after LookupError("bug in this side's byte counter")`。
-
-**代价如实记**：`stream_delivery` 的签名变了（多一个 `upstream` 关键字参数），30 处测试调用点改为经一个夹具函数 `delivering(...)`，该夹具的 docstring 写明「测试里没有 wrapper，所以 marker 就是整条链——而对每个测试都正确的那个默认值，恰恰是生产里错的那个」。这是刻意不给默认值的理由。
+`UpstreamSource` 的边界与生产接线已复核，完成记录迁入 [`status.md`](status.md)「2026-08-27 从台账迁入的闭合记录」。编号保留：生产源码仍按 §22之六 回指。
 
 ### 22 之七. h2 残留：归因仍在，**但不再是静默的**（2026-08-24 处置，主仓 `1a34042` + 后续；只剩一条产品裁决）
 
@@ -378,11 +300,9 @@ if replay is None or reason is None:
 
 要不要为消除**误归因**放弃族级映射，仍是产品裁决——这是本条**唯一**还开着的部分。四格现在都留痕；「都不再是看不见的问题」这句在 `max_tokens` 共存那条路径上曾经是假的，见上。
 
-### 22 之四. 一条状态断言在写下时就已经过期
+### 22 之四. 一条状态断言在写下时就已经过期 —— 已移入教训文档（2026-08-27）
 
-不是待办，是登记形态。`README.md` 那句「`internal` 结构上不可达」的两个前提，第二个在**它被写下的前一晚**就被拆掉了（`78be0d4` 18:57 → `a8862e6` 次日 06:26）。所以这不是常见的「代码改了文档没跟上」——**文档是照着一份自己已经过期的心智模型写的**，而它读起来与一条刚核实过的结论毫无差别。
-
-同一族的两条已经付过代价：本主题 `README.md` 的同步锚点两次在下一个提交就失效（`260823-review-handover-message-final.md` M3），以及处置文档里那句「三处已同步」反而掩盖了后续漂移（同报告 M2）。**共同点是：写下的那一刻为真，而读者没有任何线索知道它有保质期。** 现行对策是给这类断言配一个提交锚点，并把违反记录留在锚点旁边。
+这不是待办，而是一族错误的形状。正文已并入 [`README.md`](README.md)「三条会绊到人的」一节，那里区分「写下时已经是假的」与「写下后才过期」；本处只留编号墓碑。
 
 ### 23. ~~代理发 `max_tokens`，插件按 `truncated` 配回复~~ —— 已修复（2026-08-23）
 
@@ -393,14 +313,6 @@ if replay is None or reason is None:
 ## 已查清未修（无岔路）
 
 事实清楚、修法唯一、只是没排期。**每条都写了为什么没做**——没有那一句，这一栏就会退化成一个谁也不敢删的许愿池。编号沿用原编号，不重新编。
-
-### 9. 一次性交付路径的结局判定不接线
-
-`one_shot_accounting`（`pipeline_app.py`）构造时**不带 `assembler`**，而 `_StreamAccounting.finish()` 把整段结局判定包在 `if self.assembler is not None:` 里。于是走一次性交付的 chat-completions 流，**撕流与客户端断开一律记 `[ OK ] 200`**。
-
-**为什么没做**：归同伴的切片（`2769a64`，2026-08-22 10:38），且他们当时仍在改该文件（`630f7f3`，11:09）。本主题登记不动手。
-
-来源：`reports/260822-review-e-group.md` M3。
 
 ### 16. 反方向（`/responses` 客户端 + Anthropic 上游）仍在抹平
 
@@ -425,12 +337,6 @@ anthropic stop_reason='stop_sequence'  -> responses status='completed'   incompl
 **为什么没做**：今天路由对同一请求是确定的，所以**这条路不可达**。登记只为一件事——将来加入模型回退时，它会无声出错。
 
 来源：`reports/260822-review-unreviewed-span.md` minor-12。
-
-### 18. 一条提交信息缺字
-
-`696a786` 的正文里 `A response that says it is incomplete without saying why gets , which is…` 缺了 `incomplete` 一词（`cat -A` 确认，非渲染问题）；`fef7d96` 的同一句是完整的，可作对照。
-
-**为什么没做**：历史已发布，**不重写**。登记只为一件事——后来者读到那句没有主语的话时，知道它是缺字而不是自己没读懂。这一条永远停在这里，不会有人去做它。
 
 ## 明确不做
 

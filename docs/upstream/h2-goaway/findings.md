@@ -79,6 +79,8 @@ httpcore.RemoteProtocolError: <ConnectionTerminated error_code:0, last_stream_id
 
 记录是既有聚合记录 `RequestLine` 的序列化，**不是同一批事实的第二次抽取**；状态词与控制台前缀共用同一个 `status_for` 调用。调研见 `archive-260820/260820-structured-log-survey.md`。
 
+**2026-08-27 关闭一条旧问题**：`HistoryConsumer` 没接活链路不是待确认的疏漏。当前 `src/` 与 `tests/` 均无 `HistoryConsumer` 命中，整条旧 history 链已归档到 `src/.archived/app/history/`；新的取证记录能力由 `.dev/docs/history/` 主题承接。这个结论只关闭「是否有意为之」的问句，不替本项目补出生产数据，也不改变本主题仍无自身中断频率基线的事实。
+
 **三条路的裁决**（`5c1afbe`）。`decide_stream_ending()`：读 `terminal_seen` / `downstream_opened` / `committed_blocks` 与重试预算，返回 COMPLETE / REPLAY / CONTINUE / ABANDON。规则本就写在 `retry.py` 的 docstring 里（「replay 只在客户端一无所见时合法，之后只剩 continuation」），机器也早就有（`continuation_messages`、`RetryReason.CONTINUATION`、配置项）——**缺的一直是裁决本身，那些件此前只被测试引用**。
 
 三个刻意的设计：**异常类型不是输入**（干净 EOF 与连接撕裂把客户端留在同一位置，决定合法性的是位置而非到达方式）；**当场扣预算**而非只查询（否则同一条流问两次被资助两次）；**四条路而非三条**——客户端只见过合成 `message_start` 而零块时，重放会发第二个 `message_start`、续写会造出上游拒收的空 assistant turn，两扇门都关着。

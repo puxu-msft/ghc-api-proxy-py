@@ -92,7 +92,7 @@
 
 **用户描述的那个窗口（请求受理 → 上游首字节）目前确实没有任何保活**，但它落在一个更大的上界之内：`upstream_request_timeouts.upstream_request_deadline`（默认 **1200**，由 `src/app/server/handler.py` 的 `attempt_deadline` 读出，`src/app/pipeline/direct_driver/base.py` 在开始一次尝试时把它固定成一个时刻）。1200s 远高于背景文档 §4 实测的客户端 300s 天花板，**所以指望它替客户端兜底是没有意义的**。
 
-**注意这个上界的射程在 2026-08-20 当天变过，本文初版的描述已作废。** 初版写的是它「恰好且仅仅覆盖首字节前那一段」，理由是 `asyncio.timeout` 只包住 `await send`、body 在上下文之外消费——那正是 `deferred.md` D-6 记的缺陷。`783f023 fix: make each of the three upstream timeouts guard the phase it names` 已经修掉它：header 等待与 `pipeline_app.py` 的 body 流现在读同一个 `attempt.deadline_at`（后者经 `with_deadline_at`），**一个上界，两处执行**。
+**注意这个上界的射程在 2026-08-20 当天变过，本文初版的描述已作废。** 初版写的是它「恰好且仅仅覆盖首字节前那一段」，理由是 `asyncio.timeout` 只包住 `await send`、body 在上下文之外消费——那正是 `decisions.md` D-6 记的缺陷。`783f023 fix: make each of the three upstream timeouts guard the phase it names` 已经修掉它：header 等待与 `pipeline_app.py` 的 body 流现在读同一个 `attempt.deadline_at`（后者经 `with_deadline_at`），**一个上界，两处执行**。
 
 **它管到哪里，要说三点精度边界**：`with_deadline_at` 只在每次拉取的边界上判定，不打断正在进行的下游消费；上游流结束之后的下游交付（块级缓冲的释放、终止帧）不在界内；而且它是**每次尝试**的界——重试与续写各自 `begin_attempt()` 一次、各得一份新的 1200s，整个请求的墙钟不受它约束。所以它现在是整次尝试的总时长上界，包括流式正文。
 
@@ -164,4 +164,4 @@ httpcore 1.0.9 不提供发送 PING 的接口，h2 库有 `ping()` 但 httpcore 
 
 记这一笔不是为了记录一次配置变更，而是因为它示范了本规范的一个使用限制：**本文里每一条关于「某处有没有接线」的断言都有保质期**，主线在动，读到时请重新核实，不要把它当成当前事实引用。这条警告目前已击发五次：本节两次、§2.2 一次、§3 关于 `http2_ping_interval` 兼职协议开关一次，以及用户改写人写文档使 §2.2 的引文作废一次。
 
-`upstream_request_deadline` **被 `response_header_overrides` 解析**（`deferred.md` D-5）由 `064ba63` 修掉，body 未被 deadline 约束（D-6）由 `783f023` 修掉。**注意 D-5 的主语是 deadline 不是 `response_header`**；`response_header` 无消费方是另一件事，一道从未实现的守卫。
+`upstream_request_deadline` **被 `response_header_overrides` 解析**（`decisions.md` D-5）由 `064ba63` 修掉，body 未被 deadline 约束（D-6）由 `783f023` 修掉。**注意 D-5 的主语是 deadline 不是 `response_header`**；`response_header` 无消费方是另一件事，一道从未实现的守卫。

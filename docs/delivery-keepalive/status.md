@@ -6,7 +6,7 @@
 |---|---|---|
 | 下游保活 | `dbb6104 fix: keep the client alive on our own writes, not on upstream's pace` | 面向客户端的保活，判据不再取自替身量（七副面孔，见下） |
 | 上游保活 | `52d877c feat: give the upstream connection the keep-alive its setting promised` | `tcp_keepalive_interval` 实现成真的 `SO_KEEPALIVE`；环境变量代理重建挂载；SOCKS 告警；删两个 legacy 键 |
-| 合入后复评修复 | `306bdb7 fix: cap each connection pool once, and get the keep-alive docs' provenance right` | `NO_PROXY` 重复包装导致的 `RecursionError`、两个补丁的顺序回归、SOCKS IPv6 origin 与端口 0，以及两轮文档核对查出的全部失效断言。见 `deferred.md` D-8 / D-9 / D-10 |
+| 合入后复评修复 | `306bdb7 fix: cap each connection pool once, and get the keep-alive docs' provenance right` | `NO_PROXY` 重复包装导致的 `RecursionError`、两个补丁的顺序回归、SOCKS IPv6 origin 与端口 0，以及两轮文档核对查出的全部失效断言。见 `decisions.md` D-8 / D-9 / D-10 |
 
 闸门（各自合入时点实测，不是同一个数）：`dbb6104` 时 1504 passed / 3 skipped；`52d877c` 时 1550 passed / 3 skipped；`306bdb7` **合入后在 `main` 上实测 1557 passed / 3 skipped**（`uv run pytest -q`，本 slice 新增 5 条回归；比隔离树里的 1555 多 2 条，那 2 条来自同伴同期的提交）。`ruff check src tests` 通过。Pyright **净增 0**：集成前的 `f025e3c` 与集成后的 `306bdb7` 都是 22 errors。
 
@@ -115,14 +115,14 @@
 
 ### 原待裁项
 
-`deferred.md` D-3a：`upstream_transport.tcp_keepalive_interval` 的名字承诺「TCP 保活」，实际是连接池空闲过期时长，从不往 socket 写字节、请求在飞期间根本不生效。三选一：**A1 实现成真的 `SO_KEEPALIVE`**（代价是自建 transport 会关掉环境变量代理支持，须自己补回，且要新增一个配置键）、**A2 只改名**（改的是人写文档，只能由用户做）、**A3 保留现状加注释**。调查方偏好 A1，理由是上游腿三道守卫当前全部失效，它是唯一默认开启的活性探测；判 A3 不可接受。
+`decisions.md` D-3a：`upstream_transport.tcp_keepalive_interval` 的名字承诺「TCP 保活」，实际是连接池空闲过期时长，从不往 socket 写字节、请求在飞期间根本不生效。三选一：**A1 实现成真的 `SO_KEEPALIVE`**（代价是自建 transport 会关掉环境变量代理支持，须自己补回，且要新增一个配置键）、**A2 只改名**（改的是人写文档，只能由用户做）、**A3 保留现状加注释**。调查方偏好 A1，理由是上游腿三道守卫当前全部失效，它是唯一默认开启的活性探测；判 A3 不可接受。
 
-其余原 D-3 内容已重新分类为**无岔路的缺陷**，见 `deferred.md`：`0 = 禁用` 语义反转、出站连接数无上限、HTTP/2 PING 在 httpcore 上不可实现（应固化为结论）、`settings.py` 两个死键。
+其余原 D-3 内容已重新分类为**无岔路的缺陷**，现已闭合并迁入 `decisions.md`：`0 = 禁用` 语义反转、出站连接数无上限、HTTP/2 PING 在 httpcore 上不可实现（应固化为结论）、`settings.py` 两个死键。
 
 ## 排期修：本主题内已全部做完
 
-本节此前列着「D-3b、D-3c、D-3d、D-3e、D-5、D-6，以及 `streaming-resilience.md` 配置表的顺手更正」。**这六条现在一条不剩全都完成了**——D-3b/c 随错映射的删除一并消失，D-3d 由并行会话加上 NOT IMPLEMENTED 标注，D-3e 两个 legacy 键已删（`52d877c`），D-5 由并行会话的 `064ba63` 修掉、D-6 由 `783f023` 修掉。`streaming-resilience.md` 已判定为归档件、不必回头改（见 `deferred.md`「文档侧顺手项」一节）。照旧清单接手会去重做六件已完成的事，故改写为现状。
+本节此前列着「D-3b、D-3c、D-3d、D-3e、D-5、D-6，以及 `streaming-resilience.md` 配置表的顺手更正」。**这六条现在一条不剩全都完成了**——D-3b/c 随错映射的删除一并消失，D-3d 由并行会话加上 NOT IMPLEMENTED 标注，D-3e 两个 legacy 键已删（`52d877c`），D-5 由并行会话的 `064ba63` 修掉、D-6 由 `783f023` 修掉。`streaming-resilience.md` 已判定为归档件、不必回头改（见 `decisions.md`「文档侧顺手项」一节）。照旧清单接手会去重做六件已完成的事，故改写为现状。
 
-**当前真正未完成的只有一条**：`deferred.md` D-7，proxy 优先级三来源被压平、无 provenance，因而无法实现人写文档规定的优先级。缺陷，无岔路，排期做掉。
+**当前真正未完成的只有两条**：`deferred.md` D-4（`client_delivery.hedge` 未来做、目前暂缓），以及「错误帧的交付时机要不要做成守卫」（未裁决）。D-7 已于 2026-08-21 落地，其完成记录与当时查出的教训现已迁入 `decisions.md`。
 
-另有交还用户的两条文档问题（人写文档中英不一致、`http2_ping_interval` 仍被描述成生效的保活），见 `deferred.md`「交还用户的文档问题」一节——我方不改那份文件。
+另有交还用户的一条文档问题：`http2_ping_interval` 仍在人写文档中被描述成生效的保活，见 `deferred.md`「交还用户的文档问题」一节——我方不改那份文件。

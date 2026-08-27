@@ -25,14 +25,7 @@ SSE 信封那一半已闭合（`16dd68c`）。另一半没有：`context.reply` 
 
 ### 3. 三条路的裁决还没有调用者 —— 已移交，且 CONTINUE 那一格已作废
 
-`decide_stream_ending()`（`5c1afbe`）是纯函数、已测、已做变异检验，但**生产链路无人调用**。
-
-> **2026-08-22 更正（这一句当天已不成立，保留原文以免读者以为记错）**：`8f654b4` 把它接进了 `_deliver`，`1743a0b` 又把「上游是否已完成」这一问前移到异常分类之前，`f0527e5` 补了守卫。所以下面「REPLAY / ABANDON 仍然要接」也已兑现。**新的状态是反过来的**：`COMPLETE` 那一格从唯一生产调用点已不可达（调用者先答完了）。现状与待裁项一律以 `../retry-and-continuation/deferred.md` 第 7、11、12 条为准，本主题仍不跟踪。
-
-**这笔欠账 2026-08-21 移交给 `../retry-and-continuation/`**，本主题不再跟踪它。移交时状态有变，两点：
-
-- **REPLAY / ABANDON 仍然要接**，就是人写文档里的「无痕重试」。
-- **CONTINUE 那一格已被用户裁决作废**——代理内续写整体放弃，改由客户端经 MCP 工具驱动续写。`continuation_messages()` 与 `RetryReason.CONTINUATION` 因此**不再是待接线的孤儿件，而是待删除的件**。见 `../retry-and-continuation/archive-proxy-side-continuation/README.md`。
+**2026-08-21 已移交，本主题不再跟踪。** 现状、后续更正与仍未闭合的部分以 [`../retry-and-continuation/`](../retry-and-continuation/) 为准；本主题的点时记录见 [`README.md`](README.md) 与 [`findings.md`](findings.md)。
 
 ### 4. 「上游响应被提前关闭」的频率没有数
 
@@ -42,9 +35,9 @@ SSE 信封那一半已闭合（`16dd68c`）。另一半没有：`context.reply` 
 
 ### 5. 本项目自身的中断频率仍无历史基线
 
-取证只覆盖到现网 Bun 服务。本项目当时零生产数据：History 未接活链路（`HistoryConsumer` 只在 legacy 的 `app_factory` 里构造）、日志不落盘、不在 systemd 下所以 journald 也空。
+取证仍只覆盖到现网 Bun 服务，本项目自身的生产基线没有出现。结构化日志已经具备落盘能力，但服务仍不在 systemd 下，journald 仍无记录；没有本项目的生产流量，就没有可据以计算中断频率的样本。
 
-结构化日志补上的是**第二项「日志不落盘」**。**第一项与第三项仍然成立**——服务仍不在 systemd 下，journald 仍无记录；`HistoryConsumer` 没接活链路这一条尤其值得单独确认是否有意为之。
+`HistoryConsumer` 没接活链路是否有意为之已于 2026-08-27 核清并移入 [`findings.md`](findings.md)：旧 history 链已整体归档，新的取证记录能力由 `.dev/docs/history/` 主题承接。它不再构成本条的未闭合部分。
 
 ## 明确不做
 

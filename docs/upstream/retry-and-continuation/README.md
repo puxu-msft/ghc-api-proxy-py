@@ -46,7 +46,7 @@
 | Claude Code 对不认识的工具名发回 `No such tool available` 的 tool_result，**不崩溃**，对话继续 | 代码事实 | `~/.claude/skills/debugging-claude-agent-tools/reference/source-symbols.md:21` |
 | 前身 `copilot-api-js` 的 `max_tokens` 处理**只接在 Anthropic 直连腿**，Responses 腿的谓词零调用点；官方 `vscode-copilot-chat` 对被截断的 tool call 是静默丢弃 | 代码事实（八个参考仓） | `reports/260821-reference-projects-max-tokens.md` |
 | live 链路的重试**只存在于上游响应头到达之前**，无退避无 jitter；**读流中断零重试** | 代码事实 | `reports/260821-upstream-error-handling-survey.md` |
-| 交付层的「这是谁的失败」按**上游侧正向识别**：`inference.py` 把 `UpstreamSource` 构造在四层 wrapper 的中间（连它自己共五个对象）——两道陈述上游状况的守卫在它之下，本侧的字节计数器在它之上 | 本次实测（真实 `_counted_upstream`，让 registry 在第 4 个 chunk 抛错）：`handed_local_counter_bug` 从 `True`（`62a457f`）变 `False`（`1a34042`），异常改为如实抛给调用方。接线另由服务端真实入口的集成测试钉住，变异回「包住整条 composite」即变红 | `deferred.md` §22之六 |
+| 交付层的「这是谁的失败」按**上游侧正向识别**：`inference.py` 把 `UpstreamSource` 构造在四层 wrapper 的中间（连它自己共五个对象）——两道陈述上游状况的守卫在它之下，本侧的字节计数器在它之上 | 本次实测（真实 `_counted_upstream`，让 registry 在第 4 个 chunk 抛错）：`handed_local_counter_bug` 从 `True`（`62a457f`）变 `False`（`1a34042`），异常改为如实抛给调用方。接线另由服务端真实入口的集成测试钉住，变异回「包住整条 composite」即变红 | `status.md`「2026-08-27 从台账迁入的闭合记录」中的 §22之六 |
 | 两处会让异常消失的结局现在都留下原因：**交接**（不 re-raise，`failure` 恒 `None`）与**透明重放成功**（既不交接也不 re-raise，只留 `retries=N`） | 本次实测：各自撤掉记录，对应测试变红，印出旧那行 `turn handed back to the client to continue`（无 cause）与只有计数的 `retries=1` | `deferred.md` §22之七 |
 | **第三处已修**（2026-08-24，主仓 `b5bc8f9` + `bb17558` 后续）：上游终止事件已见之后再撕裂，此前 `stream.py` 直接 `break`，不 re-raise 也不记原因 | 交付层 `on_tear_after_terminal` 回调 → `trace.tore_after_terminal`，**自成一格而不是塞进 `detail`**：`max_tokens` 是「终结事件已见且回合未完成」，于是交接与撕裂同时成立，写成 `if/elif` 时交接的 detail 把撕裂整个吃掉（评审复评实测：`status=retry`、`tear_persisted=False`）。**撕裂不决定状态**——`end_turn` 后撕裂仍是 `ok`，`max_tokens` 后撕裂仍是 `retry` | `deferred.md` §22之七 |
 
@@ -131,9 +131,11 @@ MCP server 在另一个仓（插件 `ghc-api-proxy-helper`），本会话够不�
 
     **第一次**：本节曾长期声称 `internal`「结构上不可达」。那不是「代码改了文档没跟上」——它的第二个前提（带 error 走到合成前 `reason` 必非 `None`）被 `78be0d4`（2026-08-22 18:57）解耦掉，而那句话是次日 `a8862e6`（06:26）才写的。**文档写下时就已经错了。** 2026-08-23 端到端实测（`reports/260823-h2-protocolerror-category.md` §1.5，附 `network` 阴性对照）实际收到 `"category": "internal"`。
 
-    **第二次**：`0ca87b9` 把兜底从 `INTERNAL` 改成 `UPSTREAM`，判据是「`stream.py` 只在 `not ours` 时走交接」。于是错误分支的值域收成 `network` / `upstream` / `auth` 三个，`internal` 再也发不出来。**接收端可以据此简化，但要知道它换来了什么**：这个字段现在没有任何拼法能说「是代理自己坏了」。当时还附了一条更糟的推论——本侧 wrapper（`_counted_upstream` 那类）的 bug 会被标成上游，于是代理自己的故障以 `upstream` 抵达。**那一半已经不成立了**：`1a34042` 把 `UpstreamSource` 这个标记下移到 `_counted_upstream` 之下，本侧的 bug 因此判为 `ours`，根本不走交接，而是原样上抛。所以今天的准确说法是：**能发出的 category 都确实描述上游，代价是代理自己的故障没有 category 可发**——它以截断连接而非交接抵达客户端。见 [`deferred.md`](deferred.md) §22之六（已闭合）。
+    **第二次**：`0ca87b9` 把兜底从 `INTERNAL` 改成 `UPSTREAM`，判据是「`stream.py` 只在 `not ours` 时走交接」。于是错误分支的值域收成 `network` / `upstream` / `auth` 三个，`internal` 再也发不出来。**接收端可以据此简化，但要知道它换来了什么**：这个字段现在没有任何拼法能说「是代理自己坏了」。当时还附了一条更糟的推论——本侧 wrapper（`_counted_upstream` 那类）的 bug 会被标成上游，于是代理自己的故障以 `upstream` 抵达。**那一半已经不成立了**：`1a34042` 把 `UpstreamSource` 这个标记下移到 `_counted_upstream` 之下，本侧的 bug 因此判为 `ours`，根本不走交接，而是原样上抛。所以今天的准确说法是：**能发出的 category 都确实描述上游，代价是代理自己的故障没有 category 可发**——它以截断连接而非交接抵达客户端。见 [`status.md`](status.md)「2026-08-27 从台账迁入的闭合记录」§22之六。
 
     **两次不是同一种错，把它们并成一句是把教训改写反了**（评审 R3-m2 查出，这段总结的前一版就是这么写的）。第一次是**写下时就已经是假的**——前提在前一晚被拆掉，作者引的是自己过期的心智模型；第二次才是**写下时为真、几小时后被自己的下一个改动作废**。前者靠「写得更小心」防不住，得靠动手前重读被引用的代码；后者靠提交锚点，本节开头那条就是。
+
+    **迁移 provenance**：这组教训原先还以「22 之四」完整登记在 `deferred.md`。2026-08-27 清理台账时确认它描述的是一族错误的形状而非待办，因此正文以本节为教训载体，原编号只在台账留下墓碑，不删除这份知识。
 
 - **`max_tokens` 是 Anthropic 的拼法，不会出现 `max_output_tokens`；而且把配置改成 `max_output_tokens` 也不会生效。** 上游 Responses 说的是后者，两条路径都在**门之前**就归一了（`src/app/pipeline/delivery/formats/openai_responses.py`、`src/app/pipeline/translation_driver/responses.py`），所以那个原始拼法压根活不到比较的那一步。异源评审的一手实测（含证伪对照：把 `hand_over_stop_reasons` 配成 `{"max_output_tokens"}`，合成一次都没触发）见 `reports/260822-review-mcp-contract-and-deadline-order.md` F6/F11。
 
@@ -144,3 +146,11 @@ MCP server 在另一个仓（插件 `ghc-api-proxy-helper`），本会话够不�
 - [`../h2-goaway/`](../h2-goaway/) —— GOAWAY 打掉在飞流的机理诊断，已收口。它的「三条路的裁决」欠账由本主题接手。
 - [`../../anthropic-responses-bridge/`](../../anthropic-responses-bridge/) —— 桥 spec，现行规范。本主题的 wire 不变量指回它。
 - G1「让活跃链路认出上游发来的错误事件」（分支 `fix/upstream-error-events`，同伴在飞）—— 本主题依赖它：`stop_reason` 原样透出与上游 `error` 帧不再静默丢弃，都要它先落地。
+
+## 读史提示：不会执行的旧记录
+
+以下记录于 2026-08-27 从 `deferred.md` 迁入。它解释一处已发布历史里的缺字，不代表任何待执行工作。
+
+### 18. 一条提交信息缺字
+
+→ **已移入「已查清未修（无岔路）」栏**（2026-08-22）。编号保留，正文见下方该栏。

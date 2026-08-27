@@ -25,33 +25,9 @@
 
 - **n-1** `response.id` 是裸 UUID，没有 `resp_` 前缀。上游真实值是 416 字符的 base64 串，我们本来就不模仿它；但 OpenAI 生态里 `resp_` 前缀是惯例。未修：它是兼容性口味问题，不是缺陷，改不改取决于要不要迁就按前缀识别 id 的客户端。
 
-## 已在本轮修掉的（不要重复处理）
+## 报告建议关闭、但当前源码不支持原完成声明的
 
-**2026-08-22 第三批**：
+以下两条不是重新打开的产品功能，而是尚未完成的文档对账。2026-08-27 按 `../../tmp/260827-deferred-survey.md` 复核时，当前源码不支持原先的「已修掉」表述，因此没有迁入 `README.md` 的完成记录。
 
-- U-4 `anthropic_messages_synthetic.py` → `anthropic_messages_synthetic_reply.py` —— `1c91870`。定案理由见 README 第四·五节：不按住户（`failed_search`）命名，因为模块存在的理由是通用的；保留「合成」，因为那是项目自己的词，评审报的「三处重名」是误判。`ContinuationSupport.synthesize` 不搬。
-
-**2026-08-22 第二批**（用户裁决「缺陷类问题都要修复」之后）：
-
-- U-2 删除 `--account-type` —— `e7cf57a`
-- U-3 `stream_delivery` 的 framer 改为必填，`signature_compat` 从 `StreamSettings` 移到成帧器 —— `800eb5b`
-- D-1 未识别的 stop reason 不再进 `incomplete_details.reason`（改为正向映射表，无合法拼法即 null）—— `75273e1`
-- D-2 未知 block kind 当场 `raise`，不再静默降级成空 message item —— `75273e1`
-- D-3 `Terminal.upstream_usage` 默认值由 `{}` 改为 `None`，「没观测」与「观测到空」分开 —— `75273e1`
-- D-4 `refresh_in` 不再解析、不再必填 —— `1d1e45b`
-- D-5 一次性交付的前提写成断言（路由被翻译过就 raise）—— `800eb5b`
-- D-6 守卫触发时交出已缓冲的字节再抛 —— `800eb5b`；新增 `test_one_shot_delivery.py`，此前该路径零覆盖
-- n-2 保活测试改为断言线上的序号，而不是只断言注释帧的字节 —— `57d5b0e`
-- n-3 `pytest.raises(Exception)` 收窄为 `httpx2.HTTPStatusError` —— `1d1e45b`
-- n-4 `resolve_provider_base_urls` 的返回值改走 `model_validate` —— `285af55`
-- n-5 `stream_settings(chain)` 每请求只读一次 —— `800eb5b`
-
-**第一批**：
-
-- `response.function_call_arguments.done` 缺 SDK 必填的 `name`、两个 `output_text` 事件缺 `logprobs` —— `db6f549`
-- `incomplete` 透传进 `incomplete_details.reason` —— `db6f549`
-- reasoning docstring 声称「照三份录制抄」而实际 summary 全为空 —— `db6f549`
-- 一次性交付路径自称「以同样方式收尾」 —— `db6f549`
-- 启动期探测失败一律阻止启动 —— `44fa576`（用户裁决后）
-- `openai_responses.py` docstring 里的陈旧模块名、两处 `__init__` 的「一个格式一个模块」 —— `3e70ee8`
-- 语料基数写成「三份 cassette」而仓库有五份 —— 本轮
+- **D-5 一次性交付的前提写成断言（路由被翻译过就 raise）——原记录指向 `800eb5b`。** 当前 `src/app/server/routes/inference.py` 的 `if framer is None:` 分支没有该断言；全 `src/` 搜索 `translation_required` 与 `raise`/`assert` 的组合也没有相符实现。需要核对这是后来重构时移除了守卫，还是前提已由别的构造性约束承接；核清前不按完成项处理。
+- **启动期探测失败一律阻止启动——原记录指向 `44fa576`（用户裁决后）。** 当前源码明确不是「一律阻止」：`resolve_provider_base_urls()` 对 401/403 继续上抛，但对其它 HTTP 状态与 `httpx2.TransportError` 记 warning 后继续；`pipeline_app.py` 还会捕获 `refresh_catalogs()` 的异常并以 not-ready 状态启动。现行 `README.md` 第五节也记录了这一较窄行为。需要核对原记录被哪次后续裁决或改动取代；核清前不把这句作为完成事实迁出。

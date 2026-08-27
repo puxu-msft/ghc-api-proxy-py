@@ -30,9 +30,9 @@
 
 **同类的第二个缺口**：usage 格式非法时（`ResponseConversionError`），两处都返回 `{}` 并继续交付。这在优先级上是对的——不能为一个没人在等的计数中断已交付的响应——但运行时**没有任何信号**，「上游没报 usage」与「上游报了坏数据」在日志上完全一样。异常本身带着 `code` 与 `field_path`，现在被丢弃。
 
-**为什么本次没做**：修法需要把 facts 挂到某处并让有 request context 的层去消费，或者在 pipeline 层直接打日志。后者是新的依赖方向——**当前 `src/app/pipeline/` 下没有任何模块 import `app.observability.logging`**，为一个 minor 引入这个方向不划算。前者是独立切片。评审同样评为 minor，且明确不建议为此中断响应。
+**为什么本次没做（2026-08-27 更正）**：修法仍有两路——把 facts 挂到某处并让有 request context 的层去消费，或者在 pipeline 层直接打日志。初版用「`src/app/pipeline/` 下没有任何模块 import `app.observability.logging`」论证后一条路会新建不划算的依赖方向；这个前提已被 `b973ed0` 之后的源码证伪，`src/app/pipeline/hand_over.py` 现在就从 `app.observability.logging` import `get_logger`。因此「要新开依赖方向」不再是推迟理由，但这不自动回答两种做法该选哪一种，也不自动改变优先级。
 
-**倾向**：值得做，优先级低于第 0 条。做的时候应当一并处理，别只补一半。
+**倾向**：值得做，优先级低于第 0 条。做的时候应当一并处理，别只补一半。**本条仍未闭合；旧成本论证失效后，是否做与怎么做需要按当前接线重新评估，本文不替用户作出重估。**
 
 ## 1. Responses 上游的 stop reason 仍是合成词
 
@@ -48,14 +48,6 @@
 **留下的不一致**：一条 Responses 行现在可能读作 `function_call(Bash)`（上游真名）紧邻 `end_turn`（合成词），词汇是一半一半的。这是已知的、有意接受的状态，不是疏漏。
 
 **决定时需要的信息**：`end_turn` 出现在几乎每一行上，改词的影响面远大于 `tool_use`；而 `tool_use` 只在工具轮出现。两者 ROI 不同，值得分开裁决。
-
-## 2. `enc` / `txt` 两个计数标签未按上游改名
-
-**现状**：`think(enc:1,txt:2)` 里的 `enc` / `txt` 在两种上游下用同一组词。真实名称在 Anthropic 侧是 thinking 块有无正文，在 Responses 侧是 `encrypted_content` 与 reasoning summary。
-
-**为什么没做**：同上，用户未指定；且这两个标签是**分类**而非上游的字段名，`enc` / `txt` 在两侧表达的语义是同一个（有没有可读的推理正文），改名的收益不明显，而宽度成本是每行都付。
-
-**倾向**：不建议改。若要改，更值得先确认的是这个分类本身是否还有人在用。
 
 ## 3. `[GONE]` 分不出「客户端走了」与「我们自己关停了」
 

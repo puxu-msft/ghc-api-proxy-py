@@ -175,3 +175,115 @@
 - **`usage` 排除在 token 校准之外**——不需要，而且理由比原先写的更强。live 链路的校准在 `server/handler.py:301-303`（`pipeline_app.py:43` 引入），它**只在 `count_tokens` 端点里学**：拿本地估算配上游 `count_tokens` 的答案，**根本不读消息响应的 `usage`**。读 `usage` 的那个 `TokenCalibrationSuccessObserver`（`app/hooks/builtin/token_calibration.py:53-65`）在未挂载的 legacy 侧，不参与。加之用户已裁决 `count_tokens` 不走续写，应用侧也没被碰到。
 - **MCP-driven 续写的次数上限**——不设。用户 2026-08-21 裁决：会触发这条路就说明事情有进展。门本身（已交付过至少一个完整块）保证零进展的一轮到不了这里。
 - **被截断 tool call 的 `{"__raw": …}` 参数**——由 E 的丢弃规则顺手解决。另有实测旁证表明 Claude Code 自己有 `safeParseJSON` → `{}` → zod → `is_error` 的原生恢复链，所以它本来也不是必须修的危害。
+
+## 2026-08-27 从台账迁入的闭合记录
+
+以下各项在 2026-08-27 对照当前源码后确认已闭合，故从 `deferred.md` 迁入。原段落保留其点时证据与更正历史；每节末尾的迁移不改变其中提交与日期的原意。
+
+### 4. 上游 SSE 中途的 `error` 帧：零观测
+
+134336 个 operation、约 3000 万根帧里，`response.failed`、`response.cancelled`、上游 `error` 帧**各 0 次**。参考实现枚举过的完整词表（含 Copilot 专有的嵌套 `{"type":"error","error":{code,message}}`）只有旁证。
+
+现状的处置是坏的：这些帧被 `push` 静默丢弃，`terminal.seen` 保持 False，最终发出一条**与「连接被掐断」完全同形**的 `incomplete_responses_stream`。G1（分支 `fix/upstream-error-events`）正是在补这个。
+
+**闭合核实（2026-08-27）**：上段是修复前的点时记录。R 片 `f12f76d` 已落地；当前 `openai_responses.py` 的 `_FAILURE_EVENTS` 承接 `error`、`response.failed` 与 `response.cancelled`，`anthropic_messages.py` 也承接 `event: error`。事件形状仍来自二手证据、语料仍为零观测，但那是证据边界，不是未完成实现。
+
+### 8a. 客户端时限触发时不再被 driver 吞掉取消
+
+| # | 事实 | 证据等级 | 原处置 |
+|---|---|---|---|
+| 8a | **`client_request_deadline` 触发时，客户端拿到 502 `{"type":"CancelledError","message":""}` 而非 504。** driver 的 `except BaseException` 吞掉了 `asyncio.timeout` 的取消，那句 `raise UpstreamTimeout` 是死代码 | 实测 | **跨层所有权错误，要修。** 上层用取消表达「时间到了」，下层把取消当普通异常吃掉 |
+
+**闭合核实（2026-08-27）**：上表保留的是修复前事实。当前 `direct_driver/base.py` 对 `asyncio.CancelledError` 直接重新抛出，注释明确记录它曾把客户端时限从 504 反转成空消息的 502；8a 因此已闭合。
+
+### 12. 上游在终结事件之后 reset：完成行不再留痕
+
+**这条的归属被改错过一次，改正记在这里而不是抹掉**：标题一度写着「原始来源 `c86712d` 是一个不被任何 ref 引用的对象」。**该断言不成立**——2026-08-22 收尾时逐 ref 复核，`c86712d` 可达自 `archive/260822-complete-not-abandon`（命令：对 `git for-each-ref` 的每个 ref 跑 `git merge-base --is-ancestor c86712d <ref>`）。准确的时间线是三步，全部在 `main` 上或归档 ref 上可查：`bce8b0d`（同伴，在 verdict switch 里判 `COMPLETE`）→ `1743a0b`（同伴，采纳评审意见把判断前移到异常分类之前）→ `f0527e5`（守卫加硬）。本条描述的观测面缺口由这三步共同引入，不归任何单一提交。
+
+来源：同上，发现 A（正反两次实测，用项目自己的 `_StreamAccounting` + `_tracked_delivery`）。
+
+`c86712d` 之前，「上游发完终结事件后连接被 reset」打出的是一行**自相矛盾**的日志：
+
+```
+[FAIL] 200 POST /v1/messages … end_turn: stream failed before a terminal event: connection reset by peer
+```
+
+（`end_turn` 与「before a terminal event」并列。）修复后是一行**真话**：
+
+```
+[ OK ] 200 POST /v1/messages … end_turn
+```
+
+**但 `connection reset by peer` 这个事实现在不出现在任何地方**：`_tracked_delivery` 正常跑完所以 `accounting.failure` 是 `None`，局部变量 `torn` 在 `break` 之后被丢弃，没有日志、计数或 trace 字段承接它。而 `_ending()` 自己的 docstring 写着 failure「is the only account of what went wrong that exists anywhere」。
+
+**为什么这值得登记而不是忽略**：`../h2-goaway/findings.md` 的「未决」栏里有两项正需要这类样本——「上游响应被提前关闭的频率」与「本项目自身的传输失败频率（此前零生产数据，日志刚上线）」。一次修复静默削掉了刚建起来的观测面的一角。
+
+**反方向的先例也要一起权衡**：项目已有裁决 `test_a_stream_cut_after_its_stop_reason_is_not_called_truncated`（`tests/int/test_pipeline_app.py:1833`）说「`message_delta` 之后被切断的流已经把客户端应得的都说了，不算 truncated」。按同一逻辑，`message_stop` 之后被 reset 报 `[ OK ]` 是自洽的。所以这不是「显然要修」。
+
+**处置：归交付侧重写切片（同伴），本主题登记不动手。** 理由是留痕需要一条从 `_deliver` 到 `_StreamAccounting` 的新通道——`stream_delivery` 今天完全看不到 accounting——而同伴正在做的重写已经在加 `ContinuationSupport` 这类回调通道，也已认领第 8d 条。硬塞进 `c86712d` 会是与该提交语义无关的管道铺设。
+
+候选做法（评审倾向第一个，本会话同意）：① 给 `_StreamAccounting` 加一个与 `failure` 分开的字段（如 `tore_after_terminal`），完成行仍判 `ok` 但 detail 里附一句 —— `format_completion_line` 的 `if line.detail:` 对任何状态都渲染，**无需改日志格式**；② 只记一条 debug 日志；③ 明确裁决「这个事实不需要留痕」并写下理由（按 `record-what-not-adopted`，不采纳也要写）。
+
+**不要**为此加门禁或指标体系。
+
+**闭合核实（2026-08-27）**：候选做法①已经落地。当前 `inference.py` 构造 `tore_after_terminal`、接入 `on_tear_after_terminal` 并写进 trace，`request_trace.py` 与 `request_log.py` 都有同名字段；这条不再由「同伴切片」悬空承接。
+
+### 19. 截断 error 帧的 message 在 Anthropic 上游腿上字面是错的
+
+`_deliver` 末尾那条帧写死了 `message="Responses stream ended before a successful terminal event"`（`src/app/pipeline/delivery/stream.py:386`，`code="incomplete_responses_stream"` 那处）。而 `_deliver` **对两条上游腿共用**——它收的是 `assembler`（`AnthropicAssembler` 或 `ResponsesAssembler`，即上游轴），而这条 message 是常量。所以一次走 Anthropic 上游腿的截断，客户端收到的是一句声称上游是 Responses 的话。
+
+> **本条初稿的论证是错的，记在这里而不是抹掉**：初稿写「`framing` 由调用方给，两条腿共用同一段代码」。**用错了轴**——`framing.py` 的模块 docstring 开宗明义警告：framer 选的是**客户端**协议（`route.inbound_format`），`dialect_for` 才回答「哪个上游说了话」，「把这两者搞反正是这个类型存在的理由」。主产品路径恰恰是 Anthropic 客户端 + Responses 上游，两轴不同向。结论不变，但成立的理由是 `assembler` 那条轴，不是 framer。
+
+2026-08-22 那次生产事故正是 Anthropic **上游**腿（判据：日志行上是 `think` 而非 `reason`，`REASONING_WORD` + `dialect_for` + `assembler_for` 三处共同决定；见 `../../tmp/260822-h2-streamreset-cancel-diagnosis.md` §1.2）。
+
+**代价比初稿估的高，这一段也已更正**：
+
+- `code` 不能动——被 2 处测试断言，并被 `../../delivery-keepalive/spec.md` 逐字复述（`../../tmp/260821-plan-g1-upstream-error-events.md` 的 G4 已查清）。
+- `message` **不是「零消费」**。初稿这么写，错了。它有**两个产出点**：`src/app/delivery/responses_anthropic_stream.py:349`（legacy 链路）与 `stream.py:386`（活链路）。而且 `stream.py:382` 的注释把这件事写成**有意契约**：「Same code, same wire shape, **same message**, same gate on the message having started — a client that already learned to read one of these does not have to learn a second.」所以改 message 要么两处一起改、要么明确裁决让两条链路发散，不是顺手改一个字符串。
+
+**为什么登记而不是顺手改**：它与第 5 条（已交付之后两条失败路径不一致）、G1 那份方案是同一片区域，且牵动一条跨链路的措辞契约，应当一并裁决。**证据等级：代码事实，确凿；是否值得改属措辞与契约取舍，需裁决。**
+
+**闭合核实（2026-08-27）**：当前 `stream.py` 已改用不点名上游方言的 `upstream stream ended before a terminal event`，相邻注释点名 `deferred.md` §19 并解释两条上游腿共用；原 `code="incomplete_responses_stream"` 未改。本条已按原先要求的边界闭合。
+
+### 22 之二. ~~同一个失败，两条出口给两个相反的答案~~ —— 已修（2026-08-23，主仓 `0ca87b9`）
+
+两处一起改，缺一处都会把不一致换个方向而不是消掉：
+
+- **标记区从「只覆盖 `assembler.push`」扩到「本侧在循环里跑的每一处代码」**（装配、提交、保活）。原先的限制理由是「扩大标记区要把 `yield` 包进 try」，**那对当前代码不成立**：`_commit` 返回的是 `list`，里面每一次 framer 调用在第一个 chunk 被 yield 之前就已经跑完；保活那一处则只需先给 chunk 命名再 yield。于是 framer 的 bug 不再被甩给上游，也不再被交接（另开一次尝试会撞同一个 bug）。
+- **交接分类的兜底从 `INTERNAL` 改成 `UPSTREAM`。** 判据不是又加一张表，而是**调用方的门**：`stream.py` 只在 `not ours` 时走交接，所以能带着 error 走到 `hand_back_block` 的失败，按构造就不是本侧造成的。
+
+两条各有变异验证：把标记区改窄，新测试在 `'"code":"proxy_delivery_failed"' in body` 变红并印出旧的 `"type":"upstream_error"`；把兜底改回 `INTERNAL`，集成测试在 `assert 'internal' == 'upstream'` 变红。
+
+### 22 之三. ~~`transport.py` 的 h2 识别挂在没有活调用者的链上~~ —— 已归档（2026-08-23）
+
+三件东西按「各自是下一件的唯一调用者」一起移进 `src/.archived/`：`CopilotUpstream`（切出 `app/upstream/copilot.py`，落成 `copilot_upstream.py`）、`GhcApiClient.send_responses_headers`（直接删除，归档树的 `app/upstream/generic.py` 已有孪生）、`app/model_provider/ghc_client/transport.py`（整文件）。名字已加进 `tests/unit/test_module_boundaries.py` 的 `_ARCHIVED`，理由与经过写进 `src/.archived/README.md`。
+
+**它为什么被 2026-08-22 那次清理漏掉**：那次的判据是「能从 `app.server.app_factory` 到达、不能从 `app.cli` 到达」。`CopilotUpstream` 两边都到达不了——它适配的 `UpstreamTarget` 协议**在那次就已经被归档了**，于是它成了一个目标接口已经消失的适配器。**「两条链都到不了」这个格子，那次的判据没有问题去问它。**
+
+**代价值得单独记住，它不是「死代码占地方」**：`transport.py` 是全仓唯一写下「httpcore 只把 try 包在 socket 读上、裸 h2 异常会逃出来」这个依赖缺陷的地方，还在 `except` 子句里点名了 `H2ProtocolError`。**于是这棵树读起来像是已经处理了这一格。** 实际没有——那份守卫在没人调用的链上，而活链路的 body 段直到 2026-08-23 才补上。先做 (a) 再归档的顺序是刻意的：知识先落到活路径上，搬走才不是丢失。
+
+### 22 之六. ~~本侧的 `_counted_upstream` bug 仍被标成上游~~ —— 已修（2026-08-24，主仓 `1a34042`）
+
+**修法是「让调用方指明」，不是再加一张表。** `UpstreamSource` 不再由 `stream_delivery` 包住它收到的任何东西，而是由 `inference.py` 构造在那四层的**中间**：attempt 时限与空闲超时在它之下（这两道守卫存在的意义就是陈述上游状况），`_counted_upstream` 在它之上（本侧记账）。交付层拿到 composite 与这个对象两样，只问后者「你抛过什么」。重放的那次拿自己的新 marker。
+
+实测（用**真实的** `_counted_upstream`，让 `active_requests.add_bytes` 在第 4 个 chunk 抛错）：
+
+| | `62a457f` | `1a34042` |
+|---|---|---|
+| `handed_count` | 1 | **0** |
+| `handed_local_counter_bug` | True | **False** |
+| `returned_cleanly` | True | **False**（异常如实抛给调用方） |
+
+**接线单独验过。** 判据的单测自己摆放 marker，所以它证明不了生产摆对了——这正是本项目栽过两次的形状。另加一条集成测试，把真实 `_counted_upstream` 调用的那个 registry 换成会抛错的，走服务端真实入口；把 marker 变异回「包住整条 composite」，该测试变红，并在日志里印出缺陷本身：`turn handed back to the client to continue after LookupError("bug in this side's byte counter")`。
+
+**代价如实记**：`stream_delivery` 的签名变了（多一个 `upstream` 关键字参数），30 处测试调用点改为经一个夹具函数 `delivering(...)`，该夹具的 docstring 写明「测试里没有 wrapper，所以 marker 就是整条链——而对每个测试都正确的那个默认值，恰恰是生产里错的那个」。这是刻意不给默认值的理由。
+
+### 9. 一次性交付路径的结局判定不接线
+
+`one_shot_accounting`（`pipeline_app.py`）构造时**不带 `assembler`**，而 `_StreamAccounting.finish()` 把整段结局判定包在 `if self.assembler is not None:` 里。于是走一次性交付的 chat-completions 流，**撕流与客户端断开一律记 `[ OK ] 200`**。
+
+**为什么没做**：归同伴的切片（`2769a64`，2026-08-22 10:38），且他们当时仍在改该文件（`630f7f3`，11:09）。本主题登记不动手。
+
+来源：`reports/260822-review-e-group.md` M3。
+
+**闭合核实（2026-08-27）**：`_StreamAccounting.finish()` 现在为 `assembler is None` 的 one-shot 路径单独判断 `failure` 与 `drained`，上游撕裂记 `fail`、客户端中途离开记 `gone`、正常排空仍记 `ok`。实施、三格测试与受控变异见 `/home/xp/.claude/jobs/0e3de57b/tmp/fix-inference-accounting.md` 第 1 条。
