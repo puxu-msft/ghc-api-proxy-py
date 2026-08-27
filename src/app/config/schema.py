@@ -8,11 +8,11 @@ A request that started under one version keeps seeing it.
 
 from typing import Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 type TlsMode = bool | Literal["both"]
-# `upstream`, not `ghc`. The value names the **leg** that produced the number — upstream's own count against this proxy's estimate — and never a `model_providers` key. Those two coincided while exactly one provider could be configured and it was conventionally called `ghc`; once two can be, a value that looks like a provider name sends its reader to `model_providers` to find one, and there is nothing there. Renamed 2026-08-27, spec §1.3.
-type CountTokensProvider = Literal["upstream", "local"]
+# The name of the local estimator leg. Everything else in `inbound.anthropic_count_tokens.providers` is a `model_providers` key.
+LOCAL_COUNTER = "local"
 type BufferingPolicy = Literal["block", "until-tool-use", "full"]
 type CacheControlMode = Literal["disabled", "passthrough", "sanitize", "proxied"]
 type CacheTtl = Literal["5m", "1h"]
@@ -74,31 +74,16 @@ class ServerConfig(Section):
     tls: TlsConfig = Field(default_factory=TlsConfig)
 
 
-def _reject_renamed_counter(value: object) -> None:
-    """Raise with the rename spelled out if `providers` still says `ghc`.
-
-    A bare enum error reads as "you typed something invalid", and the operator's next move is to go looking for what the valid provider names are — in `model_providers`, which is the wrong place and will not contain `upstream` either. Naming the rename costs one branch and puts the answer in the message. `config.example.yaml` shipped `[ghc, local]`, so anyone who copied it hits this exactly once. Spec §1.3.
-
-    Separate from the validator so the `isinstance` narrowing stays here; inline, it leaks into the validator's return type.
-    """
-    if isinstance(value, list) and any(entry == "ghc" for entry in cast(list[object], value)):
-        raise ValueError(
-            "inbound.anthropic_count_tokens.providers: 'ghc' was renamed to 'upstream' on "
-            "2026-08-27. The value names the leg that counts (upstream's own number, or this "
-            "proxy's local estimate), not a model_providers key — the two only looked alike "
-            "while a single provider could be configured. Write 'upstream'."
-        )
-
-
 class CountTokensConfig(Section):
-    providers: list[CountTokensProvider] = Field(default_factory=lambda: ["upstream", "local"])
-    max_retries: int = Field(default=2, ge=0)
+    """Which legs may answer a token count, in order.
 
-    @field_validator("providers", mode="before")
-    @classmethod
-    def _name_the_rename(cls, value: object) -> object:
-        _reject_renamed_counter(value)
-        return value
+    Each entry is either `local` — this proxy's calibrated estimate — or the name of a configured `model_providers` key. **Not an enumeration.** `ghc` is a legal value because some deployments configure a provider called `ghc`, not because the string is special; pinning the type to `Literal["ghc", "local"]` said that only a deployment whose provider happens to carry that name may ask upstream for a count, which is not a rule anyone made.
+
+    The names are checked against `model_providers` in `ProxyConfig`, because that is where both halves are visible. A check here could only compare against a hard-coded list, which is the thing being removed.
+    """
+
+    providers: list[str] = Field(default_factory=lambda: ["ghc", LOCAL_COUNTER])
+    max_retries: int = Field(default=2, ge=0)
 
 
 class InboundConfig(Section):
@@ -463,6 +448,31 @@ class ProxyConfig(Section):
     def _names_must_be_addressable(cls, value: object) -> object:
         _reject_unaddressable_provider_names(value)
         return value
+
+    @model_validator(mode="after")
+    def _counter_legs_name_something_that_exists(self) -> ProxyConfig:
+        """Check `inbound.anthropic_count_tokens.providers` against the providers this config declares.
+
+        Here rather than on `CountTokensConfig` because this is the first place both halves are in scope, and **relative to the configuration rather than to a fixed list** because that is what the field always meant: `ghc` is valid in a deployment that configures a provider called `ghc`, and means nothing in one that does not. A `Literal` in its place answered the question without looking.
+
+        Two things are deliberately not checked.
+
+        **A config with no providers at all.** That is not a bad counting leg, it is a `ProxyConfig` built without the section that supplies providers — the bundled defaults carry one, and a config lacking them fails at `resolve_default_name` with a message about the thing that is actually missing. Reporting the counting leg there would name a consequence and hide the cause.
+
+        **The default value.** `["ghc", "local"]` names the provider the bundled config ships, and a deployment that renames its providers without touching this key has done nothing wrong: the upstream leg asks whichever provider routing chose, so the string only has to be "not local" for the default to behave correctly. What an operator **writes** is a declaration and is checked; what they inherited is not.
+        """
+        counting = self.inbound.anthropic_count_tokens
+        if not self.model_providers or "providers" not in counting.model_fields_set:
+            return self
+        for leg in counting.providers:
+            if leg != LOCAL_COUNTER and leg not in self.model_providers:
+                configured = ", ".join(sorted(self.model_providers)) or "none"
+                raise ValueError(
+                    f"inbound.anthropic_count_tokens.providers: {leg!r} is neither "
+                    f"{LOCAL_COUNTER!r} nor one of this deployment's model providers "
+                    f"(configured: {configured})"
+                )
+        return self
 
     # A directory, not a file: the name inside it carries the port, so one setting covers every instance an operator runs rather than having to be re-stated per port.
     pidfile_dir: str = ""

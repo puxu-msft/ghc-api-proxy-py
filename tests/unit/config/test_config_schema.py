@@ -1,5 +1,4 @@
 from pathlib import Path
-from typing import Any
 
 import pytest
 import yaml
@@ -11,41 +10,11 @@ from app.pipeline.model_resolution import QUALIFIER_SEPARATOR
 SPEC_PATH = Path(__file__).resolve().parents[3] / "docs/.human-controlled/config.example.yaml"
 
 
-def _example_config() -> dict[str, Any]:
-    return yaml.safe_load(SPEC_PATH.read_text(encoding="utf-8"))
-
-
-def _counter_legs(raw: dict[str, Any]) -> list[str]:
-    section: dict[str, Any] = raw["inbound"]["anthropic_count_tokens"]
-    return list(section["providers"])
-
-
-@pytest.mark.skipif(not SPEC_PATH.is_file(), reason="authoritative config spec not present")
-def test_the_example_config_and_the_counter_rename_are_in_step() -> None:
-    """`config.example.yaml` is the user's file; this repository does not edit it.
-
-    It spells the token-counting leg `ghc`, which was renamed to `upstream` on 2026-08-27 — `.dev/docs/multi-provider-routing/spec.md` §1.3, with the candidate note for that file in §11. So there are two acceptable states and this pins both: either the file still says `ghc`, in which case loading it **must** fail and the failure must name the rename; or the user has taken the change, in which case it says `upstream`.
-
-    What this refuses to allow is the third state — the file saying `ghc` and the schema quietly accepting it, which is what a compatibility alias would have produced and what the ruling was against.
-    """
-    raw = _example_config()
-    if "ghc" in _counter_legs(raw):
-        with pytest.raises(ValidationError) as raised:
-            ProxyConfig.model_validate(raw)
-        assert "renamed to 'upstream'" in str(raised.value)
-    else:
-        assert "upstream" in _counter_legs(raw)
-
-
 @pytest.mark.skipif(not SPEC_PATH.is_file(), reason="authoritative config spec not present")
 def test_authoritative_example_config_parses() -> None:
     # The spec file is the oracle.
     # extra="forbid" means any active key we failed to model fails here, not at startup.
-    # The one value brought up to date first is the counter leg above; every other key is read as written.
-    raw = _example_config()
-    raw["inbound"]["anthropic_count_tokens"]["providers"] = [
-        "upstream" if leg == "ghc" else leg for leg in _counter_legs(raw)
-    ]
+    raw = yaml.safe_load(SPEC_PATH.read_text(encoding="utf-8"))
     config = ProxyConfig.model_validate(raw)
 
     assert config.server.tls.mode == "both"
@@ -95,6 +64,37 @@ def test_the_qualifier_separator_matches_the_config_boundary() -> None:
     That makes it a transcription of `QUALIFIER_SEPARATOR`, and a transcription is a thing that can silently fall behind while both sides keep passing their own tests. This is what notices.
     """
     assert QUALIFIER_SEPARATOR == "/"
+
+
+def test_a_counting_leg_may_name_any_configured_provider() -> None:
+    """`ghc` is legal because a provider is called `ghc`, not because the string is special.
+
+    The field spent a while typed `Literal["ghc", "local"]`, which said that only a deployment whose provider happens to carry that name may ask upstream for a count. Nobody made that rule. A deployment naming its providers `A` and `B` must be able to say so here.
+    """
+    config = ProxyConfig.model_validate(
+        {
+            "model_providers": {"A": {"type": "github_copilot"}, "B": {"type": "github_copilot"}},
+            "default_model_provider": "A",
+            "inbound": {"anthropic_count_tokens": {"providers": ["B", "local"]}},
+        }
+    )
+    assert config.inbound.anthropic_count_tokens.providers == ["B", "local"]
+
+
+def test_a_counting_leg_naming_no_configured_provider_is_refused() -> None:
+    """The other half: the check is against **this** configuration, not against a fixed list.
+
+    `ghc` is exactly as wrong here as `typo` would be, because this deployment configures neither.
+    """
+    with pytest.raises(ValidationError) as raised:
+        ProxyConfig.model_validate(
+            {
+                "model_providers": {"A": {"type": "github_copilot"}},
+                "default_model_provider": "A",
+                "inbound": {"anthropic_count_tokens": {"providers": ["ghc", "local"]}},
+            }
+        )
+    assert "'ghc'" in str(raised.value)
 
 
 def test_model_mappings_have_no_built_in_defaults() -> None:

@@ -286,7 +286,7 @@ async def test_a_translated_route_is_counted_from_the_body_it_would_actually_sen
     # Not called at all, rather than called and refused: a refusal from this one is fatal.
     assert provider.counted == []
     # The trail says why, in words that do not accuse the config file of a fault it does not have.
-    assert context.extras["count_tokens_attempts"] == ["upstream:no-counter-for-openai-responses"]
+    assert context.extras["count_tokens_attempts"] == ["ghc:no-counter-for-openai-responses"]
 
 
 async def test_the_counted_body_is_the_repaired_one() -> None:

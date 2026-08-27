@@ -80,7 +80,7 @@ class ModelProvider(Protocol):
     ) -> httpx2.Response:
         """Ask upstream how many tokens an Anthropic Messages body comes to.
 
-        On the protocol rather than on one implementation because the spec's `inbound.anthropic_count_tokens.providers` names `upstream` as one leg among others; a counter that only some providers offered could not be selected that way.
+        On the protocol rather than on one implementation because the spec's `inbound.anthropic_count_tokens.providers` names a model provider among the legs it may try; a counter that only some providers offered could not be selected by name.
 
         Gated on the Messages capability, the same as sending that body would be.
         """

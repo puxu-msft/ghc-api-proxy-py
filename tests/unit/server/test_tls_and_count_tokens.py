@@ -121,13 +121,13 @@ async def test_the_first_provider_wins_when_it_succeeds() -> None:
 
     result = await count_tokens(
         PAYLOAD,
-        providers=["upstream", "local"],
+        providers=["ghc", "local"],
         max_retries=0,
         upstream=upstream,
         local=lambda _: 7,
     )
     assert result.tokens == 42
-    assert result.provider == "upstream"
+    assert result.provider == "ghc"
 
 
 @pytest.mark.asyncio
@@ -137,7 +137,7 @@ async def test_a_failing_provider_hands_over_to_the_next() -> None:
 
     result = await count_tokens(
         PAYLOAD,
-        providers=["upstream", "local"],
+        providers=["ghc", "local"],
         max_retries=0,
         upstream=upstream,
         local=lambda _: 7,
@@ -158,7 +158,7 @@ async def test_retries_are_spent_within_one_provider() -> None:
 
     result = await count_tokens(
         PAYLOAD,
-        providers=["upstream"],
+        providers=["ghc"],
         max_retries=2,
         upstream=upstream,
     )
@@ -173,7 +173,7 @@ async def test_order_is_taken_from_the_configuration() -> None:
 
     result = await count_tokens(
         PAYLOAD,
-        providers=["local", "upstream"],
+        providers=["local", "ghc"],
         max_retries=0,
         upstream=upstream,
         local=lambda _: 7,
@@ -185,7 +185,7 @@ async def test_order_is_taken_from_the_configuration() -> None:
 async def test_an_unconfigured_provider_is_skipped_rather_than_crashing() -> None:
     result = await count_tokens(
         PAYLOAD,
-        providers=["upstream", "local"],
+        providers=["ghc", "local"],
         max_retries=1,
         upstream=None,
         local=lambda _: 7,
@@ -204,10 +204,10 @@ async def test_every_provider_failing_is_reported_with_the_attempts() -> None:
     with pytest.raises(CountTokensUnavailable) as raised:
         await count_tokens(
             PAYLOAD,
-            providers=["upstream", "local"],
+            providers=["ghc", "local"],
             max_retries=0,
             upstream=upstream,
             local=local,
         )
-    assert any("upstream" in attempt for attempt in raised.value.attempts)
+    assert any("ghc" in attempt for attempt in raised.value.attempts)
     assert any("local" in attempt for attempt in raised.value.attempts)

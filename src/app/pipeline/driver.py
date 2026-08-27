@@ -14,6 +14,7 @@ from uuid import uuid4
 import httpx2
 from pydantic import ValidationError
 
+from app.config.schema import LOCAL_COUNTER
 from app.core.chain import Chain
 from app.model_provider import ModelProvider
 from app.models.anthropic import MessagesRequest
@@ -256,7 +257,7 @@ async def handle_count_tokens(chain: Chain, context: RequestContext) -> dict[str
 
     Shaped by `shape_request`, exactly like the request being measured: a count that ignored `model_mappings`, the capability gate, or the repairs the outbound body gets would answer about a different request than the one that would be asked.
 
-    The two counters are not interchangeable. `upstream` returns upstream's own number and is worth learning from; `local` returns an estimate corrected by what has been learnt so far. So the answer says which one it came from rather than presenting an estimate as a measurement.
+    The two counters are not interchangeable. A model provider returns upstream's own number and is worth learning from; `local` returns an estimate corrected by what has been learnt so far. So the answer says which one it came from rather than presenting an estimate as a measurement.
     """
     provider, route = shape_request(chain, context)
 
@@ -298,7 +299,7 @@ async def handle_count_tokens(chain: Chain, context: RequestContext) -> dict[str
     async def ask_upstream(payload: Mapping[str, Any]) -> int:
         response = await provider.count_tokens(payload, model_id=route.model_id)
         # Taken before the body is read and before the response is closed, so the count line can report the leg it actually flew. Without these a count answered by upstream and one estimated in this process render identically apart from the counter's name — same missing byte fields, same single protocol label — and the line's own convention is that a missing field means the exchange had nothing to put there.
-        # What the leg's presence means is narrower than "upstream answered the count": it means upstream *responded*. A refusal or a transport failure never reaches here — `send_anthropic_count_tokens` raises it as a pipeline error — but a 200 whose body carries no usable `input_tokens` does, and then the raise below hands the count to the estimator with both legs already recorded. `↑…B ↓…B … provider(upstream-failed,local)` is the right reading of that: upstream was asked, upstream replied, and the reply could not be used.
+        # What the leg's presence means is narrower than "upstream answered the count": it means upstream *responded*. A refusal or a transport failure never reaches here — `send_anthropic_count_tokens` raises it as a pipeline error — but a 200 whose body carries no usable `input_tokens` does, and then the raise below hands the count to the estimator with both legs already recorded. `↑…B ↓…B … provider(ghc-failed,local)` is the right reading of that: upstream was asked, upstream replied, and the reply could not be used.
         context.extras["count_tokens_upstream_protocol"] = response.http_version
         context.extras["count_tokens_bytes_in"] = len(response.request.content)
         try:
@@ -319,7 +320,7 @@ async def handle_count_tokens(chain: Chain, context: RequestContext) -> dict[str
 
     # Whether upstream has a counter is a property of where this is going, not of whether the request is serviceable. Token counting is a per-protocol wire contract, and the endpoint list in `docs/.human-controlled/api.md` is where that shows: `POST /v1/messages/count_tokens` serves the Anthropic protocol, and the OpenAI family has no count endpoint at all, reporting usage only on a finished response. A translated route is perfectly sendable and simply has no counter upstream, so it is answered from the estimator for its own protocol rather than refused.
     #
-    # Withholding the counter is how that is said: `count_tokens()` already understands a missing one as "hand over to the next", so this needs no new failure mode. The reason travels with it into the attempts trail, because `upstream:unconfigured` against a config file that does list `upstream` would send the next reader hunting a settings bug that does not exist.
+    # Withholding the counter is how that is said: `count_tokens()` already understands a missing one as "hand over to the next", so this needs no new failure mode. The reason travels with it into the attempts trail, because `ghc:unconfigured` against a config file that does list `ghc` would send the next reader hunting a settings bug that does not exist.
     #
     # A request no translator can carry never reaches here: `translate` above raises `TranslatorNotFound` exactly as it does for the request being counted, and the client gets the same 400 it would have got for sending it.
     upstream_counts = route.target_format is WireFormat.ANTHROPIC_MESSAGES
@@ -339,16 +340,21 @@ async def handle_count_tokens(chain: Chain, context: RequestContext) -> dict[str
     context.extras["count_tokens_provider"] = result.provider
     if result.attempts:
         context.extras["count_tokens_attempts"] = list(result.attempts)
-    # Why the estimate answered, decided here because this is where the two facts that separate the cases live: the reason this function itself withheld the counter, and whether upstream was ever reached. Both readings put `local` on the line as the leg that answered and only one of them is an incident — a route with no upstream counter estimates every time and is working as configured, while an upstream that was asked and could not answer is something to look at. Left to the display layer they would be one string.
-    # Read off the trail rather than off `upstream_counts`, because a counter can be withheld in three ways and only two of them are this function's doing: the operator can also leave `upstream` out of `providers`, or order `local` ahead of it, and then upstream was never asked and nothing failed. `upstream:` is the prefix `count_tokens` writes for every attempt against that leg, and the withheld case is the exact string handed to it above, so neither test has to guess at an entry's shape.
-    if result.provider != "upstream":
-        trail = result.attempts
-        if f"upstream:{absent_reason}" in trail:
+    # Why the estimate answered, decided here because this is where the two facts that separate the cases live: the reason this function itself withheld the counter, and whether any provider leg was ever reached. Both readings put `local` on the line as the leg that answered and only one of them is an incident — a route with no upstream counter estimates every time and is working as configured, while a provider that was asked and could not answer is something to look at. Left to the display layer they would be one string.
+    # Read off the trail rather than off `upstream_counts`, because a counter can be withheld in three ways and only two of them are this function's doing: the operator can also leave every provider out of `providers`, or order `local` ahead of them, and then no provider was ever asked and nothing failed. Every entry `count_tokens` writes is prefixed with the leg's own name, so "not local" identifies the provider legs without this having to know what any of them is called.
+    if result.provider == LOCAL_COUNTER:
+        provider_attempts = [
+            entry for entry in result.attempts if not entry.startswith(f"{LOCAL_COUNTER}:")
+        ]
+        if any(entry.endswith(f":{absent_reason}") for entry in provider_attempts):
             context.extras["count_tokens_reason"] = "no-counter"
-        elif any(entry.startswith("upstream:") for entry in trail):
-            context.extras["count_tokens_reason"] = "upstream-failed"
+        elif provider_attempts:
+            # Named after the provider that failed rather than a generic word: with two configured, which one could not answer is the whole of what the line is for.
+            context.extras["count_tokens_reason"] = (
+                f"{provider_attempts[0].partition(':')[0]}-failed"
+            )
 
-    if result.provider == "upstream":
+    if result.provider != LOCAL_COUNTER:
         # Upstream's number is ground truth for the estimator, which is the only way it improves.
         calibration.learn(protocol, route.model_id, estimate, result.tokens)
         return {"input_tokens": result.tokens}

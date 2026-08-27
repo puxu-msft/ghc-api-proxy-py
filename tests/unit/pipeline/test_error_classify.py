@@ -84,7 +84,7 @@ CASES: tuple[tuple[str, Callable[[], BaseException], ErrorCategory, int], ...] =
     ),
     (
         "count-tokens-reads-its-cause",
-        lambda: CountTokensUnavailable(("upstream:0:UpstreamRejected",), cause=_rejected(400)),
+        lambda: CountTokensUnavailable(("ghc:0:UpstreamRejected",), cause=_rejected(400)),
         ErrorCategory.CLIENT,
         400,
     ),
