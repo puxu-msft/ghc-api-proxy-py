@@ -60,10 +60,13 @@ def test_the_configured_token_file_reaches_the_file_provider(
     assert github_token_path(config, "ghc") == user_data_path() / "github_token.txt"
 
 
-def test_an_unset_token_file_defers_to_the_default_location() -> None:
+def test_an_unset_token_file_gets_a_default_named_after_its_provider() -> None:
+    """One file per provider, ruled by the user 2026-08-28 alongside making the provider a required argument.
+
+    Two providers that authenticate against different tenants hold two different GitHub tokens. A single shared `github_token` meant whichever logged in last silently became the credential for both — and `build_github_token_source` reads through this same function, so the file a login writes and the file the service opens stay one decision.
+    """
     config = ProxyConfig.model_validate({"model_providers": {"ghc": {"type": "github_copilot"}}})
-    # None, not a guessed path: the file provider owns its own default.
-    assert github_token_path(config, "ghc") is None
+    assert github_token_path(config, "ghc") == user_data_path() / "github_token-ghc.txt"
 
 
 def test_each_provider_gets_its_own_token_file() -> None:
@@ -79,8 +82,14 @@ def test_each_provider_gets_its_own_token_file() -> None:
     assert github_token_path(config, "two") == Path("/tokens/two")
 
 
-def test_an_unknown_provider_name_falls_back_rather_than_raising() -> None:
-    assert github_token_path(ProxyConfig(), "absent") is None
+def test_an_unknown_provider_name_still_answers_rather_than_raising() -> None:
+    # Named but not configured: the CLI refuses that before it gets here, so the answer only has to be defined, not useful.
+    assert github_token_path(ProxyConfig(), "absent") == user_data_path() / "github_token-absent.txt"
+
+
+def test_naming_no_provider_at_all_leaves_the_file_provider_its_own_default() -> None:
+    # Nobody on the serving or CLI paths does this; the default argument still has to mean something.
+    assert github_token_path(ProxyConfig()) is None
 
 
 def test_build_chain_gives_each_provider_its_own_token_file(

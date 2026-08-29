@@ -9,10 +9,9 @@ from typing import Annotated
 import typer
 import uvicorn
 from anyio import run
-from pydantic import ValidationError
 from yaml import YAMLError
 
-from app.config.loading import bundled_config_text, load_proxy_config
+from app.config.loading import GITHUB_TOKEN_VARIABLE, bundled_config_text, load_proxy_config
 from app.config.paths import tls_material_dir
 from app.config.schema import ProxyConfig
 from app.core.chain import Chain
@@ -23,9 +22,16 @@ from app.lifecycle.pidfile import PidfileError
 from app.lifecycle.standalone import LIFECYCLE_LOGGER, ShutdownReport
 from app.lifecycle.tls import resolve_tls_material, serves_tls
 from app.model_provider import ProviderNotConfigured
+from app.model_provider.ghc_client.auth.providers import FileTokenProvider
 from app.model_provider.ghc_client.auth.service import authenticate_device, clear_stored_token
+from app.model_provider.ghc_client.config import GhcClientConfig
 from app.observability.logging import get_logger, setup_logging
-from app.server.composition import build_chain, build_http_client, resolve_provider_base_urls
+from app.server.composition import (
+    build_chain,
+    build_http_client,
+    github_token_path,
+    resolve_provider_base_urls,
+)
 from app.server.pipeline_app import create_pipeline_app
 
 app = typer.Typer(
@@ -335,30 +341,122 @@ def start(
         raise typer.Exit(code=1) from error
 
 
-def _authenticate() -> None:
+def _selected_provider(provider: str, config: Path | None) -> tuple[ProxyConfig, str]:
+    """Check that `provider` names a configured provider, and hand back the config it was found in.
+
+    The config comes through `resolve_config_path` like every other entry point's — explicit `--config`, then `GHC_API_PROXY_CONFIG`, then the default location. An earlier version read a config only when `--config` was passed, which put the whole tenant feature behind a flag the operator on a tenant machine has no reason to type: they run `auth`, and got dotcom. Spec `.dev/docs/ghe-device-flow/spec.md` §3.5.
+
+    **The provider is required and is never inferred**, ruled by the user 2026-08-28. `resolve_default_name` answers "which provider serves a request nobody qualified", which is a different question from "which account am I logging in as" — and these two commands write and delete credentials, where a default that quietly picks one for you produces a token stored under an identity the operator did not name. Naming it is one word, and it makes the confirmation line say something checkable.
+    """
+    proxy_config = _read_config(config)
+    if provider not in proxy_config.model_providers:
+        configured = ", ".join(sorted(proxy_config.model_providers)) or "none"
+        raise typer.BadParameter(
+            f"no model provider named {provider!r} is configured (configured: {configured})"
+        )
+    return proxy_config, provider
+
+
+def _authenticate(provider: str, config: Path | None) -> None:
+    """Log in against the tenant the named provider talks to, storing the token where that provider reads it.
+
+    Both halves move together: a login that reaches the right host but writes to a file the provider never opens is as unusable as one that reached the wrong host, and doing only one of the two would leave the feature half-wired. Spec §3.5, §3.6.
+    """
+    proxy_config, provider_name = _selected_provider(provider, config)
+    provider_config = proxy_config.model_providers[provider_name]
+    try:
+        web_base_url = GhcClientConfig(
+            auth_base_url_override=provider_config.auth_base_url
+        ).github_web_base_url
+    except ValueError as error:
+        # Refused rather than quietly sent to github.com: a device code issued by the wrong tenant yields a token the provider's own upstream will not honour, and nothing downstream would report where it came from.
+        typer.echo(f"error: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    token_path = github_token_path(proxy_config, provider_name)
+
     def notify(verification_uri: str, user_code: str) -> None:
         typer.echo(f"Visit {verification_uri} and enter code {user_code}")
 
-    run(authenticate_device, notify)
+    async def login() -> None:
+        await authenticate_device(notify, token_path, web_base_url=web_base_url)
+        # Which provider and which file, resolved and absolute. `github_token_file` is only now a path anything *writes*, and a configured one is taken verbatim: an unexpanded variable stays in the name, and a login that reports success while the service reads elsewhere has no other observable.
+        typer.echo(
+            f"Stored GitHub token for provider {provider_name!r}: {_resolved_token_path(token_path)}"
+        )
+        _warn_if_environment_shadows_the_token_file()
+
+    run(login)
+
+
+def _resolved_token_path(token_path: Path | None) -> Path:
+    """Where the token file actually is, as an absolute path, including the default location.
+
+    Asked of `FileTokenProvider` rather than spelled again here: it owns what "no path configured" resolves to, and a second copy of that expression would be a second answer the day either moves.
+    """
+    return FileTokenProvider(token_path).path.absolute()
+
+
+def _warn_if_environment_shadows_the_token_file() -> None:
+    """Say so when the token file is not the one the service will use.
+
+    The file is the *third* source a provider consults. The first is `CLITokenProvider`, which `build_github_token_source` hard-codes to `CLITokenProvider(None)` and which `--github-token` no longer feeds — so in a running deployment it can never hold a token, and only the environment can shadow the file. **That is why one check is enough, and it stops being enough the moment the CLI level can carry a value.**
+
+    Said out loud on the repository's own measure: an option accepted and then ignored is worse than one refused, because nothing distinguishes it from having worked. Spec §3.6.
+    """
+    if os.environ.get(GITHUB_TOKEN_VARIABLE, "").strip():
+        typer.echo(
+            f"warning: {GITHUB_TOKEN_VARIABLE} is set and takes priority over that file, so this does not change which token the service uses",
+            err=True,
+        )
+
+
+_AUTH_CONFIG_OPTION = typer.Option(
+    "--config",
+    exists=False,
+    file_okay=True,
+    dir_okay=False,
+    help="Read this config instead of the one the usual search finds.",
+)
+_AUTH_PROVIDER_ARGUMENT = typer.Argument(
+    metavar="PROVIDER", help="Which configured model provider to act on."
+)
 
 
 @app.command("auth")
-def auth() -> None:
+def auth(
+    provider: Annotated[str, _AUTH_PROVIDER_ARGUMENT],
+    config: Annotated[Path | None, _AUTH_CONFIG_OPTION] = None,
+) -> None:
     """Authenticate with GitHub Copilot."""
-    _authenticate()
+    _authenticate(provider, config)
 
 
 @app.command("login", hidden=False)
-def login() -> None:
+def login_command(
+    provider: Annotated[str, _AUTH_PROVIDER_ARGUMENT],
+    config: Annotated[Path | None, _AUTH_CONFIG_OPTION] = None,
+) -> None:
     """Alias for auth."""
-    _authenticate()
+    _authenticate(provider, config)
 
 
 @app.command()
-def logout() -> None:
-    """Remove locally stored authentication state."""
-    run(clear_stored_token)
-    typer.echo("Stored GitHub token removed")
+def logout(
+    provider: Annotated[str, _AUTH_PROVIDER_ARGUMENT],
+    config: Annotated[Path | None, _AUTH_CONFIG_OPTION] = None,
+) -> None:
+    """Remove the stored authentication state of one model provider."""
+    # Resolved exactly as `auth` resolves it, and for the reason `auth` exists: once a login writes a provider's own token file, a logout that clears some other path reports having removed authentication state while leaving a working token in place. Spec §3.7.
+    #
+    # **The OAuth origin is deliberately not derived here.** Removing a local file does not depend on where device codes come from, and requiring it would leave a deployment whose `auth_base_url` is a local stand-in unable to delete its own token through the CLI. Written down because §3.3's refusal is loud and a later reader could reasonably think it should apply to both commands.
+    proxy_config, provider_name = _selected_provider(provider, config)
+    token_path = github_token_path(proxy_config, provider_name)
+    run(partial(clear_stored_token, token_path))
+    # Named rather than announced in general. This clears one provider's file and nothing else, which is the whole reason the provider is a required argument rather than something inferred.
+    typer.echo(
+        f"Stored GitHub token removed for provider {provider_name!r}: {_resolved_token_path(token_path)}"
+    )
+    _warn_if_environment_shadows_the_token_file()
 
 
 @app.command("setup-claude-code")
@@ -390,11 +488,12 @@ def _read_config(path: Path | None) -> ProxyConfig:
 
     A missing file and a config the schema rejects are both ordinary operator input on a command that accepts `--config`, and Typer's pretty traceback answers them with a stack that names this module rather than the key they mistyped. Pydantic's message already carries the field path and the reason, so it is passed through whole; only the frames are dropped.
 
-    Scoped to `debug models` on purpose: `start` still raises through, and changing what an already-shipped path does on a bad config was not part of implementing this command.
+    Scoped to the commands that read a config to answer a question — `debug models` first, and since 2026-08-28 `auth` and `logout` as well. `start` still raises through: changing what an already-shipped serving path does on a bad config was not part of implementing any of them. `auth` and `logout` are not that exception, because before that date they read no config at all, so there was no behaviour on a bad config to preserve.
     """
     try:
         return load_proxy_config(config_path=path)
-    except (FileNotFoundError, ValidationError, YAMLError) as error:
+    except (FileNotFoundError, ValueError, YAMLError) as error:
+        # `ValueError` rather than `ValidationError` alone, and deliberately: pydantic's is a subclass of it, but so are the loader's own "configuration file must contain a mapping" and the `UnicodeDecodeError` a non-UTF-8 file raises. Naming only the pydantic one meant a config whose YAML root was a list answered with a traceback from `auth` down to `_read_yaml` — the exact shape this helper exists to prevent, on an input the operator can produce with one keystroke.
         typer.echo(f"error: {error}", err=True)
         raise typer.Exit(code=1) from error
 

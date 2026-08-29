@@ -19,7 +19,7 @@ from httpcore2._async.interfaces import AsyncConnectionInterface
 from httpx2._utils import get_environment_proxies
 from openai import AsyncOpenAI
 
-from app.config.paths import expand_user_path
+from app.config.paths import expand_user_path, user_data_path
 from app.config.schema import ProxyConfig
 from app.core.chain import Chain
 from app.model_provider import (
@@ -307,13 +307,21 @@ def _effective_proxies(options: TransportOptions) -> dict[str, str | None]:
 
 
 def github_token_path(config: ProxyConfig, provider_name: str = "") -> Path | None:
-    """Where a provider's GitHub token file lives, or None to use the default location.
+    """Where a provider's GitHub token file lives, or None when no provider was named.
 
-    The spec spells it with `$XDG_DATA_HOME`, which is unset on a default install.
+    The spec spells the configured form with `$XDG_DATA_HOME`, which is unset on a default install.
+
+    **An unconfigured provider gets `github_token-<provider>.txt`, not one shared file.** Ruled by the user 2026-08-28, together with making the provider a required argument of `auth` and `logout`: two providers that each authenticate against a different tenant hold two different GitHub tokens, and a single default name meant whichever logged in last silently became the credential for both. The name is derived here rather than left to `FileTokenProvider`, because only this side knows which provider is being asked about — and `build_github_token_source` reads through this same function, so the file a login writes and the file the service opens cannot drift apart.
+
+    None is still returned when no provider is named at all, which is nobody on the serving or CLI paths; it leaves `FileTokenProvider` on its own default.
     """
-    provider_config = config.model_providers.get(provider_name) if provider_name else None
+    if not provider_name:
+        return None
+    provider_config = config.model_providers.get(provider_name)
     configured = provider_config.github_token_file if provider_config else ""
-    return expand_user_path(configured) if configured else None
+    if configured:
+        return expand_user_path(configured)
+    return user_data_path() / f"github_token-{provider_name}.txt"
 
 
 def build_github_token_source(
@@ -323,7 +331,7 @@ def build_github_token_source(
     """Assemble the CLI/env/file provider chain the host owns.
 
     The library only wants a token string, so the chain stays on this side of the boundary.
-    A provider naming `github_token_file` points the file step at it, else the default location.
+    The file step goes through `github_token_path`, the same function `auth` and `logout` use — a provider naming `github_token_file` points it there, and one that names none gets `github_token-<provider>.txt`. Shared rather than spelled twice so that the file a login writes and the file this opens cannot drift apart.
     """
     return GitHubTokenSourceAdapter(
         GitHubTokenManager(

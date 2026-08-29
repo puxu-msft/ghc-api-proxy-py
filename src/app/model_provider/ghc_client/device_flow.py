@@ -6,9 +6,11 @@ from typing import Any
 import anyio
 import httpx2
 
+from app.model_provider.ghc_client.config import GITHUB_WEB_BASE_URL
+
 GITHUB_CLIENT_ID = "Iv1.b507a08c87ecfe98"
-DEVICE_CODE_URL = "https://github.com/login/device/code"
-ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token"
+DEVICE_CODE_PATH = "/login/device/code"
+ACCESS_TOKEN_PATH = "/login/oauth/access_token"
 
 
 class DeviceFlowError(RuntimeError):
@@ -29,10 +31,13 @@ class DeviceFlowClient:
         self,
         http_client: httpx2.AsyncClient,
         *,
+        web_base_url: str = GITHUB_WEB_BASE_URL,
         sleep: Callable[[float], Awaitable[None]] = anyio.sleep,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._http = http_client
+        # Where the two OAuth endpoints hang. A parameter rather than the module constants it used to be, because a GitHub Enterprise data-residency tenant issues its own device codes and the tokens are not interchangeable with dotcom's. `resolve_github_web_base_url` derives it from the provider's `auth_base_url`; the default keeps every deployment that names no tenant on exactly the URLs this file used before.
+        self._web_base_url = web_base_url.rstrip("/")
         self._sleep = sleep
         self._monotonic = monotonic
 
@@ -50,7 +55,7 @@ class DeviceFlowClient:
 
     async def request_device_code(self) -> DeviceCode:
         response = await self._http.post(
-            DEVICE_CODE_URL,
+            self._web_base_url + DEVICE_CODE_PATH,
             headers={"Accept": "application/json", "Content-Type": "application/json"},
             json={"client_id": GITHUB_CLIENT_ID, "scope": "read:user"},
         )
@@ -63,7 +68,7 @@ class DeviceFlowClient:
         while self._monotonic() < deadline:
             await self._sleep(interval)
             response = await self._http.post(
-                ACCESS_TOKEN_URL,
+                self._web_base_url + ACCESS_TOKEN_PATH,
                 headers={"Accept": "application/json", "Content-Type": "application/json"},
                 json={
                     "client_id": GITHUB_CLIENT_ID,

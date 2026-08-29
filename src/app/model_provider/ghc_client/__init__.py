@@ -13,7 +13,11 @@ The docstring also said "Imports nothing from `app.*`", which had already stoppe
 
 from app.model_provider.ghc_client.account import GitHubAccountClient, infer_account_type
 from app.model_provider.ghc_client.client import GhcApiClient
-from app.model_provider.ghc_client.config import GhcClientConfig, resolve_api_base_url
+from app.model_provider.ghc_client.config import (
+    GhcClientConfig,
+    resolve_api_base_url,
+    resolve_github_web_base_url,
+)
 from app.model_provider.ghc_client.device_flow import (
     DeviceCode,
     DeviceFlowClient,
@@ -43,4 +47,5 @@ __all__ = [
     "fetch_models",
     "infer_account_type",
     "resolve_api_base_url",
+    "resolve_github_web_base_url",
 ]

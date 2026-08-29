@@ -7,11 +7,12 @@ import pytest
 import typer.rich_utils
 import uvicorn
 import yaml
-from typer.testing import CliRunner
+from typer.testing import CliRunner, Result
 from uvicorn._types import ASGIReceiveCallable, ASGISendCallable, Scope
 
 from app.cli import app, serve_inherited
-from app.config.loading import bundled_config_text
+from app.config.loading import CONFIG_PATH_VARIABLE, GITHUB_TOKEN_VARIABLE, bundled_config_text
+from app.config.paths import user_data_path
 from app.config.schema import ProxyConfig
 from app.lifecycle.entry import StandaloneOptions
 from app.lifecycle.pidfile import PidfileError
@@ -88,17 +89,262 @@ def test_start_subcommand_exposes_bootstrap_options() -> None:
     assert "--account-type" not in result.stdout
 
 
+def _auth_config(tmp_path: Path, body: str, name: str = "config.yaml") -> Path:
+    config_path = tmp_path / name
+    config_path.write_text(body, encoding="utf-8")
+    return config_path
+
+
+def _login_call(patch: pytest.MonkeyPatch, argv: list[str]) -> tuple[Result, AsyncMock]:
+    """Invoke `argv` with the network entry point replaced, and return the result plus the recorder.
+
+    `GHC_API_PROXY_CONFIG` is cleared so a variable in the developer's own shell cannot decide what these assertions see; `tests/unit/conftest.py` already points the default config location at a throwaway directory, so an unset variable means bundled defaults and nothing else.
+    """
+    patch.delenv(CONFIG_PATH_VARIABLE, raising=False)
+    authenticate = AsyncMock()
+    patch.setattr("app.cli.authenticate_device", authenticate)
+    return runner.invoke(app, argv), authenticate
+
+
 def test_auth_and_login_are_aliases() -> None:
     with pytest.MonkeyPatch.context() as patch:
-        authenticate = AsyncMock()
-        patch.setattr("app.cli.authenticate_device", authenticate)
-        auth_result = runner.invoke(app, ["auth"])
-        login_result = runner.invoke(app, ["login"])
+        auth_result, authenticate = _login_call(patch, ["auth", "ghc"])
+        login_result = runner.invoke(app, ["login", "ghc"])
 
     assert auth_result.exit_code == 0
     assert login_result.exit_code == 0
     assert auth_result.stdout == login_result.stdout
     assert authenticate.await_count == 2
+
+
+def test_both_commands_require_the_provider_to_be_named() -> None:
+    """Ruled by the user 2026-08-28: never inferred, on either command.
+
+    These two write and delete credentials. A default that quietly picks a provider stores a token under an identity nobody named, and `logout` then announces success for a file the operator did not choose.
+    """
+    with pytest.MonkeyPatch.context() as patch:
+        auth_result, authenticate = _login_call(patch, ["auth"])
+        logout_result = runner.invoke(app, ["logout"])
+
+    assert auth_result.exit_code != 0
+    assert logout_result.exit_code != 0
+    assert authenticate.await_count == 0
+
+
+def test_an_unconfigured_provider_gets_its_own_default_token_file() -> None:
+    """Per provider, not one shared file — and the same derivation the service reads through.
+
+    Two providers authenticating against different tenants hold two different GitHub tokens; a single `github_token` meant whichever logged in last silently became the credential for both.
+    """
+    with pytest.MonkeyPatch.context() as patch:
+        result, authenticate = _login_call(patch, ["auth", "ghc"])
+
+    assert result.exit_code == 0
+    assert authenticate.call_args.kwargs["web_base_url"] == "https://github.com"
+    assert authenticate.call_args.args[1] == user_data_path() / "github_token-ghc.txt"
+    assert "ghc" in result.output
+
+
+def test_auth_finds_the_tenant_config_through_the_environment(tmp_path: Path) -> None:
+    """The command an operator on a tenant machine types names a provider and nothing else.
+
+    This is the regression guard for the shape this feature was first built in: the derivation existed but sat behind `--config`, so `auth` on a fully configured tenant deployment still logged in against dotcom and reported success. Reading the config through `resolve_config_path` — the loader every other entry point uses — is what closes it, and the environment variable is the middle of that chain's three levels.
+    """
+    token_file = tmp_path / "tenant-token"
+    config_path = _auth_config(
+        tmp_path,
+        "model_providers:\n"
+        "  ghc:\n"
+        "    type: github_copilot\n"
+        '    auth_base_url: "https://api.octocorp.ghe.com"\n'
+        f'    github_token_file: "{token_file}"\n',
+    )
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv(CONFIG_PATH_VARIABLE, str(config_path))
+        authenticate = AsyncMock()
+        patch.setattr("app.cli.authenticate_device", authenticate)
+        result = runner.invoke(app, ["auth", "ghc"])
+
+    assert result.exit_code == 0
+    assert authenticate.call_args.kwargs["web_base_url"] == "https://octocorp.ghe.com"
+    assert authenticate.call_args.args[1] == token_file
+
+
+def test_auth_derives_the_origin_and_token_file_of_the_named_provider(tmp_path: Path) -> None:
+    """Both halves move together: the host the device code comes from, and the file the token lands in.
+
+    A login that reaches the tenant but writes where that provider never reads is as unusable as one that reached dotcom, so neither is asserted alone. A second provider here, because the loader merges over the bundled default rather than replacing it — the bundled `ghc` cannot be removed.
+    """
+    token_file = tmp_path / "tenant-token"
+    config_path = _auth_config(
+        tmp_path,
+        "model_providers:\n"
+        "  tenant:\n"
+        "    type: github_copilot\n"
+        '    auth_base_url: "https://api.octocorp.ghe.com"\n'
+        f'    github_token_file: "{token_file}"\n',
+    )
+
+    with pytest.MonkeyPatch.context() as patch:
+        result, authenticate = _login_call(
+            patch, ["auth", "tenant", "--config", str(config_path)]
+        )
+        other = runner.invoke(app, ["auth", "ghc", "--config", str(config_path)])
+
+    # Per call, not `call_args`: two invocations share one recorder and the property only remembers the last.
+    tenant_call, ghc_call = authenticate.call_args_list
+    assert result.exit_code == 0
+    assert tenant_call.kwargs["web_base_url"] == "https://octocorp.ghe.com"
+    assert tenant_call.args[1] == token_file
+    # The other provider in the same config keeps its own origin and its own file.
+    assert other.exit_code == 0
+    assert ghc_call.kwargs["web_base_url"] == "https://github.com"
+    assert ghc_call.args[1] == user_data_path() / "github_token-ghc.txt"
+
+
+def test_a_self_hosted_enterprise_server_reaches_its_own_oauth_origin(tmp_path: Path) -> None:
+    """Ruled by the user 2026-08-28. `/api/v3` is what identifies the form; the host itself is the origin."""
+    config_path = _auth_config(
+        tmp_path,
+        "model_providers:\n"
+        "  ghc:\n"
+        "    type: github_copilot\n"
+        '    auth_base_url: "https://ghe.example.com/api/v3"\n',
+    )
+
+    with pytest.MonkeyPatch.context() as patch:
+        result, authenticate = _login_call(patch, ["auth", "ghc", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert authenticate.call_args.kwargs["web_base_url"] == "https://ghe.example.com"
+
+
+def test_auth_refuses_a_provider_whose_origin_cannot_be_derived(tmp_path: Path) -> None:
+    """Refused loudly instead of logging in against github.com under a tenant config.
+
+    This is the one case where a fallback would look like success and produce a token nothing accepts.
+    """
+    config_path = _auth_config(
+        tmp_path,
+        "model_providers:\n"
+        "  ghc:\n"
+        "    type: github_copilot\n"
+        '    auth_base_url: "http://127.0.0.1:8080"\n',
+    )
+
+    with pytest.MonkeyPatch.context() as patch:
+        result, authenticate = _login_call(patch, ["auth", "ghc", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert "Device Flow OAuth origin" in result.output
+    assert authenticate.await_count == 0
+
+
+def test_an_unknown_provider_name_is_refused_with_the_configured_ones(tmp_path: Path) -> None:
+    config_path = _auth_config(
+        tmp_path, "model_providers:\n  tenant:\n    type: github_copilot\n"
+    )
+
+    with pytest.MonkeyPatch.context() as patch:
+        auth_result, authenticate = _login_call(
+            patch, ["auth", "absent", "--config", str(config_path)]
+        )
+        logout_result = runner.invoke(app, ["logout", "absent", "--config", str(config_path)])
+
+    for result in (auth_result, logout_result):
+        assert result.exit_code != 0
+        assert "absent" in result.output
+        assert "ghc" in result.output and "tenant" in result.output
+    assert authenticate.await_count == 0
+
+
+def test_auth_says_so_when_the_environment_shadows_the_file_it_just_wrote() -> None:
+    """The token file is the third source the provider consults, behind the CLI option and this variable.
+
+    Without the notice, the login reports success, writes the right file, and changes nothing about which token the service uses — the same shape of silent wrong answer the origin derivation exists to remove.
+    """
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv(GITHUB_TOKEN_VARIABLE, "ghu_from_the_environment")
+        shadowed, _ = _login_call(patch, ["auth", "ghc"])
+    with pytest.MonkeyPatch.context() as patch:
+        patch.delenv(GITHUB_TOKEN_VARIABLE, raising=False)
+        clear, _ = _login_call(patch, ["auth", "ghc"])
+
+    assert shadowed.exit_code == 0
+    assert GITHUB_TOKEN_VARIABLE in shadowed.output
+    assert clear.exit_code == 0
+    assert GITHUB_TOKEN_VARIABLE not in clear.output
+
+
+def test_auth_reports_a_bad_config_instead_of_a_traceback(tmp_path: Path) -> None:
+    """A YAML root that is not a mapping is ordinary operator input, not a crash.
+
+    The loader raises a plain `ValueError` for it and `UnicodeDecodeError` for a non-UTF-8 file; naming only pydantic's `ValidationError` left both to Typer's pretty traceback, which names this module rather than the file the operator has to go and fix.
+    """
+    config_path = _auth_config(tmp_path, "- one\n- two\n", name="rootlist.yaml")
+
+    with pytest.MonkeyPatch.context() as patch:
+        result, authenticate = _login_call(patch, ["auth", "ghc", "--config", str(config_path)])
+        logout_result = runner.invoke(app, ["logout", "ghc", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output and result.output.startswith("error:")
+    assert logout_result.exit_code == 1
+    assert authenticate.await_count == 0
+
+
+def test_logout_removes_the_token_file_the_named_provider_reads(tmp_path: Path) -> None:
+    """The reverse edge of storing the token where the provider reads it.
+
+    Once `auth` writes a provider's own file, a `logout` that clears some other path reports having removed authentication state while a working token stays on disk.
+    """
+    token_file = tmp_path / "tenant-token"
+    token_file.write_text("ghu_tenant", encoding="utf-8")
+    config_path = _auth_config(
+        tmp_path,
+        "model_providers:\n"
+        "  ghc:\n"
+        "    type: github_copilot\n"
+        f'    github_token_file: "{token_file}"\n',
+    )
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv(GITHUB_TOKEN_VARIABLE, "ghu_from_the_environment")
+        patch.delenv(CONFIG_PATH_VARIABLE, raising=False)
+        result = runner.invoke(app, ["logout", "ghc", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert not token_file.exists()
+    # Which provider and which file: the command clears one provider and announces "authentication state", and only the named path lets the operator read the difference. The variable still shadows what is left, so it is named too.
+    assert "ghc" in result.output and str(token_file) in result.output
+    assert GITHUB_TOKEN_VARIABLE in result.output
+
+
+def test_logout_clears_the_token_even_when_no_oauth_origin_can_be_derived(tmp_path: Path) -> None:
+    """Removing a local file must not depend on where device codes come from.
+
+    A deployment whose `auth_base_url` points at a local stand-in cannot log in — §3.3 refuses it loudly — and must still be able to delete its own token. Pinned because that refusal is loud enough that a later reader could reasonably wire it into both commands.
+    """
+    token_file = tmp_path / "local-token"
+    token_file.write_text("ghu_local", encoding="utf-8")
+    config_path = _auth_config(
+        tmp_path,
+        "model_providers:\n"
+        "  ghc:\n"
+        "    type: github_copilot\n"
+        '    auth_base_url: "http://127.0.0.1:8080"\n'
+        f'    github_token_file: "{token_file}"\n',
+    )
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.delenv(CONFIG_PATH_VARIABLE, raising=False)
+        logout_result = runner.invoke(app, ["logout", "ghc", "--config", str(config_path)])
+        auth_result = runner.invoke(app, ["auth", "ghc", "--config", str(config_path)])
+
+    assert logout_result.exit_code == 0
+    assert not token_file.exists()
+    assert auth_result.exit_code == 1
 
 
 def test_debug_subcommands_exist() -> None:
@@ -359,16 +605,6 @@ def test_a_refused_start_reports_cleanly_rather_than_as_a_crash(
         "the refusal escaped unhandled, so the operator sees a traceback"
     )
 
-
-def test_logout_clears_stored_token(monkeypatch: pytest.MonkeyPatch) -> None:
-    clear = AsyncMock()
-    monkeypatch.setattr("app.cli.clear_stored_token", clear)
-
-    result = runner.invoke(app, ["logout"])
-
-    assert result.exit_code == 0
-    assert "removed" in result.stdout.lower()
-    clear.assert_awaited_once()
 
 def test_start_hands_the_configured_tls_mode_to_the_listener(
     tmp_path: Path,
