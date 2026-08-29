@@ -293,3 +293,77 @@ def test_the_command_line_still_beats_the_flat_spelling() -> None:
         environ={"GHC_API_PROXY_PORT": "5000"}, cli_overrides={"server": {"port": 4242}}
     )
     assert config.server.port == 4242
+
+
+def test_a_relative_path_in_the_config_resolves_from_the_config_not_the_working_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruled by the user 2026-08-28, and asserted from a working directory deliberately unrelated to the file.
+
+    Which directory a command was launched from should not decide where the service writes its token or looks for its certificate. `resolve_config_path` already refuses to let cwd choose *which* config is read; this is the same rule applied to what that config says.
+    """
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    config_dir = tmp_path / "etc"
+    config_dir.mkdir()
+    config_path = write_config(
+        config_dir,
+        "model_providers:\n"
+        "  ghc:\n"
+        "    type: github_copilot\n"
+        '    github_token_file: "tokens/github_token"\n'
+        'pidfile_dir: "run"\n'
+        "server:\n"
+        "  tls:\n"
+        '    cert: "certs/server.pem"\n'
+        '    key: "certs/server.key"\n',
+    )
+    monkeypatch.chdir(elsewhere)
+
+    config = load_proxy_config(config_path=config_path)
+
+    assert config.model_providers["ghc"].github_token_file == str(
+        config_dir / "tokens" / "github_token"
+    )
+    assert config.pidfile_dir == str(config_dir / "run")
+    assert config.server.tls.cert == str(config_dir / "certs" / "server.pem")
+    assert config.server.tls.key == str(config_dir / "certs" / "server.key")
+
+
+def test_an_absolute_or_expandable_path_is_left_where_it_points(tmp_path: Path) -> None:
+    """Rebasing applies to what is still relative after expansion, and to nothing else.
+
+    `~` and `$XDG_DATA_HOME/ghc-api-proxy` already name absolute locations; joining them to the config's directory would move files the operator addressed unambiguously.
+    """
+    config_path = write_config(
+        tmp_path,
+        "model_providers:\n"
+        "  ghc:\n"
+        "    type: github_copilot\n"
+        '    github_token_file: "/var/lib/ghc/token"\n'
+        'pidfile_dir: "~/run"\n',
+    )
+
+    config = load_proxy_config(config_path=config_path)
+
+    assert config.model_providers["ghc"].github_token_file == "/var/lib/ghc/token"
+    assert config.pidfile_dir == str(Path.home() / "run")
+
+
+def test_a_relative_path_from_the_environment_keeps_shell_semantics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the file layer is rebased.
+
+    Someone exporting a relative path, or typing one as an option, means the directory they are standing in. Resolving that against a config file somewhere else would be the ambush this rule exists to remove, pointed the other way.
+    """
+    config_dir = tmp_path / "etc"
+    config_dir.mkdir()
+    config_path = write_config(config_dir, "server:\n  port: 4141\n")
+    monkeypatch.setenv(CONFIG_PATH_VARIABLE, str(config_path))
+
+    from_environment = load_proxy_config(environ={"GHC_API_PROXY_PIDFILE_DIR": "run"})
+    from_cli = load_proxy_config(cli_overrides={"pidfile_dir": "run"})
+
+    assert from_environment.pidfile_dir == "run"
+    assert from_cli.pidfile_dir == "run"

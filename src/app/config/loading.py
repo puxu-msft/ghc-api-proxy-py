@@ -14,7 +14,7 @@ from typing import Any, cast
 
 import yaml
 
-from app.config.paths import spec_config_file_path
+from app.config.paths import expand_user_path, spec_config_file_path
 from app.config.schema import ProxyConfig
 
 # The distribution is `ghc-api-proxy`, and the prefix says so in full. `GHC_` alone named GitHub Copilot rather than this proxy, which put every setting of ours in the same namespace as anything else that talks to the same upstream. Ruled 2026-08-22.
@@ -60,6 +60,50 @@ def _read_yaml(path: Path) -> dict[str, Any]:
     if not isinstance(loaded, dict):
         raise ValueError(f"configuration file must contain a mapping: {path}")
     return cast(dict[str, Any], loaded)
+
+
+# Every field in `ProxyConfig` that holds a filesystem path, as a dotted route into the merged mapping. `*` matches one level of keys, which is how `model_providers` is reached without naming the providers an operator invented. Kept as data rather than as a validator per field so that adding a path field is one line here and not a rule rewritten in three places — and so that the list of what counts as a path is readable in one place, which is what `_rebase_configured_paths` needs to be auditable at all.
+_PATH_FIELDS: tuple[tuple[str, ...], ...] = (
+    ("server", "tls", "cert"),
+    ("server", "tls", "key"),
+    ("model_providers", "*", "github_token_file"),
+    ("pidfile_dir",),
+)
+
+
+def _rebase_configured_paths(values: Mapping[str, Any], base_dir: Path) -> dict[str, Any]:
+    """Make every relative path the config file declares absolute against the file's own directory.
+
+    Ruled by the user 2026-08-28: a relative path in `config.yaml` is read relative to `config.yaml`, never to the working directory the command happened to start in. The directory a service was launched from should not decide where its token is written — the same reasoning `resolve_config_path` already applies to which file gets read at all.
+
+    **Only the file layer is rebased.** A relative path arriving from the environment or a CLI option keeps shell semantics, because someone typing `--pidfile-dir ./run` means the directory they are standing in, and silently resolving that against a config file elsewhere would be its own ambush. When no config file was found there is nothing to rebase against and nothing is rewritten.
+
+    Expansion runs first: `~`, `$VAR` and the spec's `$XDG_DATA_HOME/ghc-api-proxy` spelling all produce absolute paths on their own, and only what is still relative afterwards is joined to `base_dir`. Downstream consumers keep calling `expand_user_path` or `Path(...)` unchanged, because expanding an already-absolute path is a no-op.
+    """
+    result = dict(values)
+    for field in _PATH_FIELDS:
+        _rebase_at(result, field, base_dir)
+    return result
+
+
+def _rebase_at(node: dict[str, Any], field: tuple[str, ...], base_dir: Path) -> None:
+    head, rest = field[0], field[1:]
+    if head == "*":
+        for key in list(node):
+            child = node.get(key)
+            if isinstance(child, dict):
+                _rebase_at(cast(dict[str, Any], child), rest, base_dir)
+        return
+    if not rest:
+        value = node.get(head)
+        # Only a non-empty string is a path anyone wrote. An absent key, an empty one (the schema default, meaning "use the built-in location"), and anything that is not a string all belong to layers this function does not decide — the schema reports a wrong type with the field name attached, which is a better message than one from here.
+        if isinstance(value, str) and value.strip():
+            expanded = expand_user_path(value)
+            node[head] = str(expanded if expanded.is_absolute() else base_dir / expanded)
+        return
+    child = node.get(head)
+    if isinstance(child, dict):
+        _rebase_at(cast(dict[str, Any], child), rest, base_dir)
 
 
 def bundled_config_values() -> dict[str, Any]:
@@ -156,7 +200,10 @@ def load_proxy_config(
     ]
     resolved_path = resolve_config_path(config_path)
     if resolved_path is not None:
-        layers.append(_read_yaml(resolved_path))
+        # Rebased before merging, so only the paths this file declares are affected — an environment or CLI value keeps shell semantics. Ruled 2026-08-28; see `_rebase_configured_paths`.
+        layers.append(
+            _rebase_configured_paths(_read_yaml(resolved_path), resolved_path.parent.absolute())
+        )
     layers.append(environment_values(environ))
     layers.append({key: value for key, value in (cli_overrides or {}).items() if value is not None})
 
