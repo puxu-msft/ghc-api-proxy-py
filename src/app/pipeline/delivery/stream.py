@@ -25,7 +25,7 @@ from app.pipeline.delivery.blocks import (
     DeliverySession,
 )
 from app.pipeline.delivery.framing import OutboundFramer
-from app.pipeline.delivery.sse_source import SseEvent, read_events
+from app.pipeline.delivery.sse_source import SseEvent, encode_frame, read_events
 from app.pipeline.retry import RetryLedger, RetryReason, StreamEnding, decide_stream_ending
 from app.streaming.deadline import ClientDeadlineError
 from app.streaming.keepalive import finish_stream_cleanup, raise_with_cleanup_under
@@ -291,7 +291,7 @@ def _report_failure(
     **`origin` comes first, and it is not the same question as `passthrough`.** That one asks whether the client could read upstream's words; this one asks whether there are any. A refusal this proxy formed — an output item it cannot carry — has no upstream event behind it, so on a direct leg the passthrough branch would emit this side's `info` under upstream's event name, or an empty `data:` line. Both are inventions. It goes through the framer on either leg.
     """
     if passthrough and failure.origin is FailureOrigin.UPSTREAM_EVENT:
-        return f"event: {failure.event}\ndata: {failure.raw_data}\n\n".encode()
+        return encode_frame(failure.event, failure.raw_data)
     return framer.error(failure.info)
 
 

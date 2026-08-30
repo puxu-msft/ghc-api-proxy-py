@@ -18,7 +18,7 @@ from app.pipeline.delivery.formats.anthropic_messages import (
     terminal_from_anthropic,
 )
 from app.pipeline.delivery.formats.openai_responses import ResponsesAssembler
-from app.pipeline.delivery.sse_source import SseEvent, parse_frame, read_events
+from app.pipeline.delivery.sse_source import SseEvent, encode_frame, parse_frame, read_events
 from app.pipeline.reply import blocks_from_anthropic
 
 
@@ -81,6 +81,52 @@ async def test_a_trailing_frame_without_a_separator_is_still_read() -> None:
     raw = b'event: message_stop\ndata: {"type":"message_stop"}'
     events = [e async for e in read_events(chunks(raw))]
     assert [e.event for e in events] == ["message_stop"]
+
+
+@pytest.mark.parametrize(
+    ("ending", "spelling"),
+    [(b"\r\n", "CRLF"), (b"\n", "LF"), (b"\r", "CR")],
+)
+@pytest.mark.asyncio
+async def test_frames_separate_on_every_line_ending_the_spec_allows(
+    ending: bytes, spelling: str
+) -> None:
+    """All three endings are legal SSE, and a frame ends at the first blank line.
+
+    Frame *splitting* looked for `b"\\n\\n"`, which a CRLF stream never contains — so two well-formed CRLF frames arrived as one, and the first event's name was simply gone. Measured 2026-08-30: `event: a\\r\\ndata: 1\\r\\n\\r\\nevent: b\\r\\ndata: 2\\r\\n\\r\\n` yielded a single event named `b`.
+
+    Line *parsing* was never the problem — `splitlines()` handles all three — which is why this failed silently rather than as a decode error.
+
+    The event names are asserted, not just the count. The first repair attempt produced two frames whose names were both empty, because the separator pattern backtracked and split one `\\r\\n` into two endings; a count-only assertion passes on that.
+    """
+    raw = ending.join([b"event: a", b"data: 1", b"", b"event: b", b"data: 2", b"", b""])
+    events = [e async for e in read_events(chunks(raw))]
+
+    assert [(e.event, e.data) for e in events] == [("a", "1"), ("b", "2")], spelling
+
+
+@pytest.mark.parametrize(
+    ("event", "data"),
+    [
+        ("x", "first\nsecond"),
+        ("y", ""),
+        ("z", "single"),
+        ("", "no-event-name"),
+    ],
+    ids=["multiline", "empty-data", "single-line", "no-event-name"],
+)
+def test_an_encoded_frame_reads_back_as_what_went_in(event: str, data: str) -> None:
+    """`encode_frame` is for payloads that must survive as the text they arrived as.
+
+    Writing a multi-line payload as one `data:` line puts its second line on the wire as a bare line — not a field at all. The reader skips it, and everything after the first newline is gone. That is what `_report_failure` did until 2026-08-30, which is why the fidelity it was cited as evidence for had only ever been exercised on single-line payloads.
+
+    Empty data is in the table because an event with no `data:` at all is dropped by `parse_frame`: an empty payload and an absent one are different, and only the first is representable.
+    """
+    wire = encode_frame(event, data)
+    back = parse_frame(wire.rstrip(b"\n"))
+
+    assert back is not None
+    assert (back.event, back.data) == (event, data)
 
 
 # --- anthropic assembly ----------------------------------------------------
