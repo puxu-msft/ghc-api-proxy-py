@@ -526,7 +526,7 @@ def test_hosted_web_search_is_off_until_the_config_says_otherwise() -> None:
         },
     )
 
-    assert response.status_code == 200, "an HTTP error here is retried by the client"
+    assert response.status_code == 200, "an HTTP error here draws repeat calls from the model"
     assert seen == [], "a disabled search still reached upstream"
     blocks = orjson.loads(response.content)["content"]
     assert [block["type"] for block in blocks] == [
@@ -536,10 +536,54 @@ def test_hosted_web_search_is_off_until_the_config_says_otherwise() -> None:
     assert blocks[1]["content"]["error_code"] == "unavailable"
 
 
-def test_a_search_that_cannot_run_is_answered_as_a_failed_tool_not_an_error() -> None:
-    """The client issues a search as its own sub-request and treats an HTTP error as a transport problem worth retrying — three times, in the one case on record. A search this endpoint cannot run will not start working on the third attempt.
+@pytest.mark.parametrize(
+    "tools",
+    [
+        [{"type": "web_fetch_20250910", "name": "web_fetch"}],
+        [
+            {"type": "web_search_20250305", "name": "web_search"},
+            {"type": "web_fetch_20250910", "name": "web_fetch"},
+        ],
+    ],
+    ids=["fetch_alone", "fetch_beside_search"],
+)
+def test_a_refused_web_fetch_is_not_answered_as_a_failed_web_search(
+    tools: list[dict[str, str]],
+) -> None:
+    """A `web_fetch` declaration gets the refusal, not a synthesised search that never happened.
 
-    A failed *tool* is not retried. Anthropic defines the shape for exactly this: a 200 carrying `server_tool_use` paired with a `web_search_tool_result` whose content is a single `web_search_tool_result_error` object. So the reply says the search failed in the protocol's own words instead of handing the model an HTTP error string to interpret.
+    The synthesis says *a web search* failed, and it is the only reply this proxy knows how to write. Raising the same exception for `web_fetch` handed the client an HTTP 200 whose first block was `server_tool_use name="web_search"`, carrying the fetch prompt as its query — a tool the client never declared, reported as having run and failed. Measured 2026-08-30, and invisible to the tests then present: the subscriber's own unit test asserts `TranslationRefused`, and `WebSearchNotExecutable` is a subclass, so both spellings passed it. This one goes through `/v1/messages` to the wire, which is where the two differ.
+
+    `hosted-web-search-spec.md` §13 already required a refusal here. Three findings say it is also the right answer rather than merely the recorded one (`.dev/docs/hosted-web-search/reports/260830-claude-code-web-fetch-client-behaviour.md`): Claude Code never declares `web_fetch` as a server tool, so the synthesis is unreachable on the only client in use; the argument for synthesising a failed *search* rests on that client's one-tool sub-request and its unconditional results heading, neither of which a fetch has; and `web_fetch_tool_result` has no consumer in that client at all — it falls through the renderer's `default` and shows a blank turn.
+
+    The mixed case takes the same answer for a different reason, and it is this project's reading rather than the Spec's: a synthesis can only speak for the search half, so answering one would leave the fetch reported as never mentioned.
+
+    `claude-model`, not `gpt-model`, and that is load-bearing: `builtin:server-tool-capability` gates on `target_format is ANTHROPIC_MESSAGES`, so it never sees a request bound for `/responses`. Written against `gpt-model` first, this test failed for a reason that has nothing to do with the fix — the fetch declaration is forwarded verbatim to the Responses upstream, which is the separate gap `status.md` §4.4 already records.
+    """
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1"}))
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "claude-model",
+            "messages": [{"role": "user", "content": "fetch https://example.invalid"}],
+            "max_tokens": 1024,
+            "tools": tools,
+        },
+    )
+
+    assert response.status_code == 400, response.text
+    assert seen == []
+    # The synthesis is what this guards against, so its own two block types are the thing that must be absent — a status-code check alone would pass on a 400 that still described a search. Asserted on those rather than on the string `web_search`, which the refusal message legitimately contains in the mixed case: it names every declaration it refused, and naming them is the point.
+    assert "server_tool_use" not in response.text
+    assert "web_search_tool_result" not in response.text
+
+
+def test_a_search_that_cannot_run_is_answered_as_a_failed_tool_not_an_error() -> None:
+    """The client issues a search as its own sub-request, and on an HTTP error its main-conversation model calls the tool again — three times, in the one case on record. A search this endpoint cannot run will not start working on the third attempt.
+
+    The three are the model's repeat calls, not transport retries; the client does not retry a 400 at all. Corrected 2026-08-30, and it does not change what this test asserts.
+
+    No client mechanism repeats a failed *tool* result, where an error string in a `tool_result` demonstrably drew three repeat calls from the model; whether the model repeats a failed tool result anyway is unmeasured. Anthropic defines the shape for exactly this: a 200 carrying `server_tool_use` paired with a `web_search_tool_result` whose content is a single `web_search_tool_result_error` object. So the reply says the search failed in the protocol's own words instead of handing the model an HTTP error string to interpret.
 
     Asserted on upstream never being called as well, because the whole point is that nothing was asked to answer this from memory.
     """
@@ -569,7 +613,7 @@ def test_a_search_that_cannot_run_is_answered_as_a_failed_tool_not_an_error() ->
         },
     )
 
-    assert response.status_code == 200, "an HTTP error here is retried by the client"
+    assert response.status_code == 200, "an HTTP error here draws repeat calls from the model"
     assert seen == [], "the model was asked to answer a search it could not run"
     blocks = orjson.loads(response.content)["content"]
     assert [block["type"] for block in blocks] == [
@@ -2511,6 +2555,127 @@ def test_a_direct_responses_stream_is_answered_in_responses_events() -> None:
     assert names[-1] == "response.completed"
     assert "response.output_item.done" in names
     assert not [name for name in names if name.startswith(("message_", "content_block_"))]
+
+
+def test_a_direct_responses_client_declares_hosted_web_search_for_itself() -> None:
+    """`hosted_web_search` is off, and a client that asked on `/responses` still gets its declaration forwarded.
+
+    The switch governs a *translation*: it decides whether an Anthropic client's `web_search_20250305` becomes the `{"type": "web_search"}` this endpoint answers to. A request that arrived on `/responses` already wrote that object itself, in the upstream's own vocabulary, and there is nothing translated about it to switch off. Issue #1: the gate decided which requests it owned by looking at the tool object — which cannot say, because the translator emits the client's own spelling — so it refused this one, and the refusal was answered with the Anthropic block pair `server_tool_use` / `web_search_tool_result`, which the Responses framer has no item shape for. The stream tore with `ValueError` mid-delivery, after a 200 had already been sent.
+
+    Asserted on both halves. `tools` on the wire is the behaviour under test; `response.completed` is the regression that reported it, and without it a fix that refuses more quietly would still pass.
+    """
+    client, seen = make_client(
+        lambda _: httpx2.Response(
+            200,
+            content=responses_sse_upstream(),
+            headers={"content-type": "text/event-stream"},
+        )
+    )
+    response = client.post(
+        "/responses",
+        json={
+            "model": "gpt-model",
+            "input": [],
+            "stream": True,
+            "tools": [{"type": "web_search"}],
+        },
+    )
+
+    assert response.status_code == 200
+    sent = orjson.loads(seen[-1].read())
+    assert sent["tools"] == [{"type": "web_search"}]
+    names = [
+        line.removeprefix("event: ")
+        for line in response.text.splitlines()
+        if line.startswith("event: ")
+    ]
+    assert names[-1] == "response.completed", names
+
+
+def test_a_direct_responses_client_survives_an_upstream_that_really_searched() -> None:
+    """The guard for the block pair that §5.3 requires and this project has not built yet.
+
+    `ResponsesAssembler` serves both legs — a Responses client directly, and a Responses upstream being translated to Anthropic — while the framer is always the *client's*. So the moment a `web_search_call` starts assembling into the `server_tool_use` / `web_search_tool_result` pair that §5.3 freezes, a direct `/responses` client gets an Anthropic block handed to `ResponsesFramer`, which has no item shape for it. That is issue #1's exception reached from the opposite direction, and nothing was watching this direction: the sibling test above forwards the declaration but its upstream never actually searches, so it cannot see the block shape at all.
+
+    Green today because the assembler flattens the item to text. It is here to go red the moment that changes without a per-leg switch, which is the whole point — the reply this client should get is a Responses item, never an Anthropic one.
+
+    Driven by the real recording rather than a hand-written stream, for the reason its sibling gives: a `web_search_call` carries nothing on `added` and everything on `done`, and a stand-in gets that backwards.
+
+    The input is asserted before the output, and that is not ceremony. Every output assertion below — 200, `response.completed`, no `server_tool_use`, no Anthropic event names — is satisfied by an ordinary Responses stream that never searched at all. Cassettes are a re-recordable asset in this project, and a legitimate re-record against a turn where the model chose not to search would leave this guard passing while guarding nothing. So the premise is checked structurally, on the parsed item type rather than on a substring, which could match a request digest or the prose of an answer.
+    """
+    cassette = orjson.loads(Path("tests/int/cassettes/responses_web_search_stream.json").read_bytes())
+    interaction = next(i for i in cassette["interactions"] if "responses" in i["request"]["path"])
+    sse = "".join(chunk["text"] for chunk in interaction["response"]["chunks"]).encode()
+
+    searched: list[dict[str, Any]] = []
+    for line in sse.decode().splitlines():
+        if not line.startswith("data: "):
+            continue
+        event = cast(dict[str, Any], orjson.loads(line[6:]))
+        item = event.get("item")
+        if isinstance(item, dict) and cast(dict[str, Any], item).get("type") == "web_search_call":
+            searched.append(cast(dict[str, Any], item))
+    assert searched, "this cassette no longer carries a web_search_call, so it cannot guard the block shape"
+
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200, content=sse, headers={"content-type": "text/event-stream"}
+        )
+    )
+    response = client.post(
+        "/responses",
+        json={
+            "model": "gpt-model",
+            "input": [],
+            "stream": True,
+            "tools": [{"type": "web_search"}],
+        },
+    )
+
+    assert response.status_code == 200
+    names = [
+        line.removeprefix("event: ")
+        for line in response.text.splitlines()
+        if line.startswith("event: ")
+    ]
+    # A tear shows up as a stream that simply stops, so the terminal event is what catches it.
+    assert names[-1] == "response.completed", names
+    # And the client's own protocol throughout: an Anthropic block reaching this leg is the defect, so its vocabulary must not appear either.
+    assert "server_tool_use" not in response.text
+    assert not [name for name in names if name.startswith(("message_", "content_block_"))]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_a_search_refused_on_the_anthropic_leg_is_not_answered_in_anthropic_to_a_responses_client(
+    stream: bool,
+) -> None:
+    """The other half of issue #1, and the half the search gate's own fix does not reach.
+
+    `claude-model` serves no `/responses` endpoint, so an inbound `/responses` request for it is routed onto the Anthropic leg, and `to_anthropic_messages` assigns `tools` across **verbatim** — the bare `{"type": "web_search"}` is still bare on the other side. `builtin:server-tool-capability` refuses it anyway, because its prefix table carries no trailing underscore and so catches the bare OpenAI spelling as well as the dated Anthropic one. That module's own comment has described this route since it was written, noting it was read off the code rather than off a request anyone had seen; this test is that request.
+
+    The refusal used to be answered with a synthesised Anthropic `server_tool_use` / `web_search_tool_result` pair whatever the client had asked in. Delivery frames by the *client's* leg, so what that produced depended only on `stream`, and both were wrong in a different way. Streaming tore on `ValueError: no Responses item shape for block kind 'server_tool_use'` after a 200 was already on the wire — the traceback in the issue. Non-streaming was quieter and worse: 200, logged `ok`, an Anthropic message body handed to a Responses client with nothing anywhere saying so.
+
+    Both are now the refusal itself, in the client's own error shape. The synthesis exists to spare Claude Code the repeat calls an HTTP error drew from it on its search sub-request; a client that cannot read the synthesis gains nothing from it. Parametrised rather than written twice because the defect is one branch and the two endings are what it produced.
+
+    `upstream calls == 0` is the third assertion and not decoration: this whole path is defined by the request not being sent.
+    """
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1"}))
+    response = client.post(
+        "/responses",
+        json={
+            "model": "claude-model",
+            "input": [],
+            "stream": stream,
+            "tools": [{"type": "web_search"}],
+        },
+    )
+
+    assert response.status_code == 400, response.text
+    assert seen == []
+    error = orjson.loads(response.content)["error"]
+    assert error["code"] == "server_tool_not_executable"
+    # The Anthropic block pair is what used to arrive here, so its absence is the regression under test rather than a general tidiness check.
+    assert "server_tool_use" not in response.text
 
 
 def test_an_anthropic_client_on_a_responses_upstream_still_gets_anthropic_events() -> None:

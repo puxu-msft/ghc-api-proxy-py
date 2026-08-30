@@ -4,7 +4,7 @@ The mirror of `anthropic_messages` beside it, for the other client leg. Same env
 
 **This is a reverse translation, and that is the thing to keep in mind when reading it.** `CompletedBlock` is defined as "one fully materialised *Anthropic* content block" (`blocks.py`), so by the time a block reaches here the Responses item it came from has already been mapped into Anthropic's vocabulary by `ResponsesAssembler`. Everything below maps it back. Two consequences are visible in the code and neither is a bug in this module:
 
-- A `web_search_call` item does not survive the round trip. The assembler rewrites it into a text block with prose describing the search, deliberately, because Anthropic has no spelling for it. A Responses client that could have read the real item gets that prose instead. Recorded as a known loss rather than worked around, because undoing it means changing what `CompletedBlock` is.
+- A `web_search_call` item does not survive the round trip. The assembler rewrites it into a text block with prose describing the search, and a Responses client that could have read the real item gets that prose instead. **This is an unimplemented requirement, not a property of the formats.** The reason recorded here until 2026-08-30 — "deliberately, because Anthropic has no spelling for it ... recorded as a known loss rather than worked around" — was false twice over: Anthropic spells it `server_tool_use` paired with `web_search_tool_result` (`hosted-web-search-spec.md` §5.3, ruled by the user as D6 on 2026-08-20), and calling it a known loss is what kept it from being worked around. Restoring the pair needs the `url_citation` annotations that arrive on the following text item, which nothing reads yet; §6.3 also moves where the block closes.
 - A tool call's `arguments` are re-serialised from the parsed object, so whitespace and key order are this proxy's, not upstream's. The `call_id` is upstream's and is forwarded exactly, because the client needs it to answer.
 
 Ids are minted here rather than forwarded, and that is deliberate. Measured on 2026-08-22 across the three cassettes that carry a Responses stream — `anthropic_to_responses_stream`, `history_responses_stream`, `responses_web_search_stream`, out of five in the repository — where every id field in every event differed from every other: 12 of 12, 16 of 16, 125 of 125, including `response.id` itself, which changed between `created`, `in_progress` and `completed`. Upstream's ids identify nothing stable, so passing them through would hand the client an instability it cannot do anything with. What is minted here is consistent within one response, which is what the client's snapshot actually needs.
@@ -411,7 +411,12 @@ class ResponsesAssembler:
         # The block upstream cut short, held rather than emitted or discarded, because at the moment it closes this side does not yet know *why* the response is incomplete — that arrives on the terminal event. Exactly one item can ever be in here: upstream cuts the last one short and then stops.
         self._cut_short: CompletedBlock | None = None
         self._drafts: dict[str, Draft] = {}
-        self._order = 0
+        # **Block numbers are handed out when a deliverable block is formed, not when its item opens.** A block held as `_cut_short` reserves its number before anyone receives it; that is safe because such an item is the last one — the field above says so — so a number reserved and then dropped has no later block to leave a hole in front of, and the hand-back block that may follow numbers itself from `DeliverySession.committed_count`. The Anthropic framer writes this number into `content_block_start`, `_delta`, `_stop` and `signature_delta` verbatim, so a number that is allocated and then never used is a hole in the client's sequence, and two blocks sharing one is a second block read as a continuation of the first.
+        #
+        # It used to count items. That is the same thing only while every item yields exactly one block, and it already did not: `_open` advances unconditionally, while a `DISCARDED` item — `tool_search_output` always, `tool_search_call` whenever no client tool name is known — emits nothing. Measured 2026-08-30 on this file's own `HEAD`: a discarded item followed by a message delivered one block, numbered **1**, with no block 0 ever sent.
+        #
+        # The module docstring notes that `ResponsesFramer` counts its own `output_index` rather than reading this field, and gives that same counter as the reason. That is this leg protecting itself; it did nothing for the Anthropic leg, which reads the field.
+        self._emitted = 0
         self._terminal = Terminal(dialect=ReplyDialect.RESPONSES)
         self._saw_tool_call = False
         self._failure: StreamFailure | None = None
@@ -516,8 +521,8 @@ class ResponsesAssembler:
             TOOL_SEARCH_OUTPUT: DISCARDED,
         }.get(item_type, item_type)
         key = self._item_key(data)
-        self._drafts[key] = Draft(index=self._order, kind=kind, payload=dict(item))
-        self._order += 1
+        # `-1` because on this leg a draft does not own a block number; `_close` takes one from `_emitted` when it actually emits. Deliberately not `0`, which would be a plausible-looking wrong answer if anything ever read it again.
+        self._drafts[key] = Draft(index=-1, kind=kind, payload=dict(item))
 
     def _accumulate(self, data: dict[str, Any], delta: str) -> None:
         draft = self._drafts.get(self._item_key(data))
@@ -554,11 +559,10 @@ class ResponsesAssembler:
                 return ()
             # An item that closes without ever having opened. This item is whole on `done` — it has no deltas and nothing to accumulate — so the `added` it skipped carried nothing this needs, and refusing to close it would throw away a search that actually ran, silently. The same regression is on record in the reference project, where the item vanished with no observation of any kind. Registering it late costs nothing; the alternative costs the turn's search.
             draft = Draft(
-                index=self._order,
+                index=-1,
                 kind=TOOL_USE if late == TOOL_SEARCH_CALL else WEB_SEARCH_CALL,
                 payload=dict(item),
             )
-            self._order += 1
         # Upstream says on the closing event whether this item is whole: `status: "incomplete"` on the one it cut short, `"completed"` on the rest. Measured 15 times, four of them on a `function_call`, whose `arguments` are then truncated JSON.
         #
         # Held rather than dropped, and only when something whole came before it. Half a sentence is not what the client asked for, but it still beats an empty answer, so the rule reverses when this is all there is — and whether it is dropped at all depends on an ending this side has not been told about yet. Ruled 2026-08-21, narrowed 2026-08-22.
@@ -607,11 +611,12 @@ class ResponsesAssembler:
             raw = data.get("item")
             item = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
             payload = {"type": TEXT, TEXT: web_search_call_text(item.get("action"))}
-            # Text from here on. The item type is upstream's, and it has no Anthropic spelling to keep.
+            # Text, until §5.3's block pair is built. Not because the item has no Anthropic spelling — it has one — but because the pair's `content` comes from the `url_citation` annotations on the *next* item, which this does not read yet. See the module docstring.
             kind = TEXT
         else:
             payload = {"type": TEXT, TEXT: draft.text}
-        block = CompletedBlock(index=draft.index, kind=kind, payload=payload)
+        block = CompletedBlock(index=self._emitted, kind=kind, payload=payload)
+        self._emitted += 1
         if cut_short:
             # Not recorded either: a block nobody has received is not a block delivered, and whether anyone ever will is decided on the terminal event.
             self._cut_short = block

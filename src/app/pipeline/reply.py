@@ -25,6 +25,8 @@ def response_payload(chain: Chain, handled: HandledRequest, body: dict[str, Any]
     if handled.synthesized:
         # Already in the client's format: this proxy wrote it, in the shape the client asked in.
         # Translating it would carry an Anthropic body through the Responses reader, which has no `server_tool_use` to read and would hand back the reply with its two blocks missing.
+        #
+        # **"The shape the client asked in" is a claim about the writers, not about this line**, and it was false until issue #1. Nothing here checks the format; the guarantee is that both synthesizers in `app.pipeline.driver` fire only when `inbound_format` is Anthropic Messages. While the failed-search one did not, this branch returned an Anthropic message body to a Responses client, under a 200 the console logged `ok` — the quiet twin of the streaming tear, and the harder of the two to notice.
         return body
     if not route.translation_required:
         return body

@@ -10,7 +10,7 @@ import pytest
 from app.pipeline.request import RequestContext, WireFormat
 from app.pipeline.subscribers.counting import COUNTING_ONLY
 from app.pipeline.subscribers.server_tools import adapt_server_tools
-from app.pipeline.translation_driver.semantic import TranslationRefused
+from app.pipeline.translation_driver.semantic import TranslationRefused, WebSearchNotExecutable
 
 WEB_SEARCH: dict[str, Any] = {"type": "web_search_20250305", "name": "web_search", "max_uses": 5}
 CALCULATOR: dict[str, Any] = {"name": "calculator", "input_schema": {"type": "object"}}
@@ -69,11 +69,30 @@ async def test_client_executed_typed_tools_are_left_alone() -> None:
 
 
 async def test_web_fetch_is_refused_too_despite_upstream_wording_it_differently() -> None:
-    """Upstream refuses this family in different words — `rejected tool(s): web_fetch` — which is why the predicate reads the declaration being sent rather than the wording that comes back."""
+    """Upstream refuses this family in different words — `rejected tool(s): web_fetch` — which is why the predicate reads the declaration being sent rather than the wording that comes back.
+
+    The **exact** exception matters here and `TranslationRefused` alone would not say it: `WebSearchNotExecutable` is a subclass, and it is the one `handle()` answers with a synthesised failed *search*. A fetch raising that told the client a search it never declared had run and failed.
+    """
     ctx = context({"tools": [{"type": "web_fetch_20250910", "name": "web_fetch"}]})
 
-    with pytest.raises(TranslationRefused):
+    with pytest.raises(TranslationRefused) as refusal:
         await adapt_server_tools(ctx)
+    assert not isinstance(refusal.value, WebSearchNotExecutable)
+
+
+async def test_a_web_search_declaration_still_raises_the_subclass_that_gets_synthesised() -> None:
+    """The positive side of the same split, and without it the family test has no discriminating power.
+
+    Both branches raise a `TranslationRefused`, so a test that asserts only the base class passes whichever branch runs. Collapsing `searches_only` to a constant `False` would send a plain web search down the fetch path — 400 instead of the 200 carrying a failed tool that `hosted-web-search-spec.md` §8.3 requires — and every fetch-side assertion would stay green through it.
+
+    The message is asserted too. Its `remembered text where the client expects a search` half is a claim about what the client does with a stripped search declaration, and it is only true of searches; the fetch branch deliberately drops it.
+    """
+    ctx = context({"tools": [{"type": "web_search_20250305", "name": "web_search"}]})
+
+    with pytest.raises(WebSearchNotExecutable) as refusal:
+        await adapt_server_tools(ctx)
+    assert "remembered text where the client expects a search" in str(refusal.value)
+
 
 async def test_the_bare_openai_spelling_is_refused_too() -> None:
     """A `/responses` request naming a Claude model falls back to this endpoint with `tools` carried across verbatim, so the bare spelling really does arrive here."""

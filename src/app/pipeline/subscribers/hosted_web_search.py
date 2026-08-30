@@ -10,7 +10,7 @@ The request translator turns the client's Anthropic declaration into the `{"type
 
 **Why it refuses rather than removing the declaration, which is what it used to do.** Removing it looks like the gentler option — the turn survives, one capability short — and on this client it is the dangerous one. Claude Code runs web search as a separate sub-request whose entire content is `Perform a web search for the query: X` and whose `tools` array holds nothing else; measured over 190 real ones, every single time. A sub-request stripped of its only tool does not fail. The model answers from memory, and the client renders whatever comes back under a `Web search results for query:` heading it attaches unconditionally — no `is_error`, no marker of any kind. Remembered text arrives labelled as searched fact.
 
-So this raises instead, and `handle()` answers it: the reply becomes a `server_tool_use` paired with a `web_search_tool_result` carrying a single error object, which is the shape Anthropic defines for a search that did not run. Not an HTTP error — the same transcript that shows the model degrading well on a 400 also shows the client retrying it three times first, because an HTTP error reads as a transport fault. A failed tool does not get retried. See `delivery/synthetic.py`.
+So this raises instead, and `handle()` answers it: the reply becomes a `server_tool_use` paired with a `web_search_tool_result` carrying a single error object, which is the shape Anthropic defines for a search that did not run. Not an HTTP error — the same transcript that shows the model degrading well on a 400 also shows three attempts before it did. **Those three are the model calling `WebSearch` again, not the transport retrying**: the client's retry table does not retry a 400 at all, and reserves retries for 408, 409, 401, 5xx and usually 429 — ten by default, more if configured. Corrected 2026-08-30; the trade is unchanged, its mechanism was misnamed. What the failed tool buys is that no *mechanism* repeats it; whether the model does anyway is unmeasured. See `delivery/synthetic.py`.
 """
 
 import logging
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 SUBSCRIBER_ID = "builtin:hosted-web-search-gate"
 
-# The spelling the translator emits, and the only one this reads. A client that sent a Responses request naming a builtin directly is left alone: it asked this endpoint for its own feature in its own words, and second-guessing that is not what a capability gate is for.
+# The spelling the translator emits — and **the same tool object a Responses client writes for itself**, which is what makes it useless for deciding which requests this gate owns. The comment here used to claim the opposite ("the only one this reads. A client that sent a Responses request naming a builtin directly is left alone"), and the gate was written on that belief; the two are the same spelling, so it judged the direct client too. Issue #1. Which crossing this gate owns is decided in `gate_hosted_web_search` by the inbound format, where the answer is knowable.
 _HOSTED_WEB_SEARCH = "web_search"
 
 
@@ -91,6 +91,15 @@ async def gate_hosted_web_search(
 
     Defaulting the keyword to `False` rather than `True` so a caller that forgets it refuses rather than searches: the wrong answer is then a search that did not happen and says so, not one that ran when nobody had asked for the feature.
     """
+    if context.inbound_format is not WireFormat.ANTHROPIC_MESSAGES:
+        # **This gate owns one crossing — Anthropic Messages in, Responses upstream — and the inbound format is what says whether a request is on it.** `model_translation.to_openai_responses.hosted_web_search` governs that crossing's translation: it decides whether an Anthropic `web_search_20250305` becomes the `{"type": "web_search"}` this endpoint answers to. A request that arrived on `/responses` wrote that object itself, in the upstream's own vocabulary, and there is nothing translated about it to switch off — it asked this endpoint for its own feature in its own words, which is not what a capability gate is for. Its fate belongs to that endpoint's own upstream contract. `hosted-web-search-spec.md` §1 scopes the whole feature the same way, and §9.0 now requires this predicate.
+        #
+        # Read off `inbound_format` and not off the tool object, which is where this went wrong: the translator emits the client's own spelling, so the payload cannot say which crossing a request is on. Judging the direct client anyway refused it, and the refusal was answered with an Anthropic `server_tool_use` / `web_search_tool_result` pair that the Responses framer has no item shape for — a `ValueError` that tore the stream after a 200 was already on the wire. Issue #1, reproduced by `test_a_direct_responses_client_declares_hosted_web_search_for_itself`.
+        #
+        # **What this predicate does not prove is who wrote the declaration**, and the first version of this comment claimed it did. Nothing here can: an Anthropic inbound may carry a Responses-shaped `{"type": "web_search"}` of its own, the translator keeps it, and this gate judges it. That input's handling on the Anthropic endpoint is undecided and is deliberately not settled here — `hosted-web-search-spec.md` §9.0 records it as such.
+        #
+        # Anthropic Messages by name rather than "was translated", because the emitter is one specific translator and naming it is what a later reader can check. A third inbound leg that learned to emit a hosted search would have to be added here, and that edit is the point.
+        return
     if context.target_format is not WireFormat.OPENAI_RESPONSES:
         return
     if context.extras.get(COUNTING_ONLY):

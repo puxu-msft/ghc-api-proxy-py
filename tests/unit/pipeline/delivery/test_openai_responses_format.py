@@ -361,3 +361,37 @@ def test_only_reasons_the_protocol_has_a_word_for_reach_incomplete_details(
     payload = orjson.loads(frames[-1].decode().split("data: ", 1)[1])["response"]
     assert payload["status"] == "incomplete"
     assert payload["incomplete_details"] == ({"reason": expected} if expected else None)
+
+
+def test_a_discarded_item_does_not_consume_a_block_number() -> None:
+    """Block numbers are the client's sequence, so one handed out and never used is a hole in it.
+
+    The counter used to advance in `_open`, once per output item. That is the same thing only while every item yields exactly one block, and it already was not: a `tool_search_output` is always discarded, and a `tool_search_call` is discarded too whenever no client tool name is known — yet both had taken a number by then. Measured 2026-08-30 before the fix: a discarded item followed by a message delivered exactly one block, numbered **1**, and no block 0 was ever sent.
+
+    The number is not cosmetic on the Anthropic leg. `AnthropicFramer` writes `CompletedBlock.index` verbatim into `content_block_start`, `_delta`, `_stop` and `signature_delta`. This module's own framer is unaffected because it counts its own `output_index` — the module docstring says exactly that, and names this very counter as the reason. It was protecting itself; nothing was protecting the other leg.
+
+    Asserted on the delivered block's index rather than on the counter, because the counter is private and the index is what reaches a client.
+    """
+    from app.pipeline.delivery.formats.openai_responses import ResponsesAssembler
+    from app.pipeline.delivery.sse_source import SseEvent
+
+    def push(kind: str, payload: dict[str, Any]) -> tuple[CompletedBlock, ...]:
+        return assembler.push(SseEvent(event=kind, data=orjson.dumps(payload).decode()))
+
+    # No `client_search_tool`, so the `tool_search_call` below is recognised and deliberately not delivered.
+    assembler = ResponsesAssembler()
+    push("response.output_item.added", {"output_index": 0, "item": {"id": "ts_1", "type": "tool_search_call"}})
+    discarded = push(
+        "response.output_item.done",
+        {"output_index": 0, "item": {"id": "ts_1", "type": "tool_search_call", "status": "completed"}},
+    )
+    assert discarded == ()
+
+    push("response.output_item.added", {"output_index": 1, "item": {"id": "m_1", "type": "message"}})
+    push("response.output_text.delta", {"output_index": 1, "delta": "hi"})
+    delivered = push(
+        "response.output_item.done",
+        {"output_index": 1, "item": {"id": "m_1", "type": "message", "status": "completed"}},
+    )
+
+    assert [(block.index, block.kind) for block in delivered] == [(0, TEXT)]

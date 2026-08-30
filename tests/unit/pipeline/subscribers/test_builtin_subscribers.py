@@ -435,6 +435,41 @@ async def test_the_switch_being_on_does_not_excuse_an_unlisted_model() -> None:
     assert refusal.value.code == "server_tool_capability_unavailable"
 
 
+async def test_a_direct_responses_request_is_not_this_gate_s_to_judge() -> None:
+    """The feature off, the model unlisted, and the declaration still stands — because this proxy did not write it.
+
+    `hosted_web_search` switches a *translation* on and off. An inbound `/responses` request wrote `{"type": "web_search"}` itself, in the upstream's own vocabulary, so there is no translation of ours to withhold. The gate's own comment always said this; what it got wrong was how the two are told apart. The translator emits the client's own spelling, so `payload["tools"]` cannot say which crossing a request is on and `inbound_format` has to.
+
+    What is pinned here is the **scope** of the gate — which crossing it owns — and not who wrote the declaration, which nothing can answer: an Anthropic inbound may carry a Responses-shaped tool object of its own and would still be judged. That case is undecided and deliberately untouched.
+
+    Issue #1 is what the wrong answer cost: the refusal was answered with an Anthropic `server_tool_use` / `web_search_tool_result` pair, and the Responses framer has no item shape for it, so the stream tore after a 200 was already sent. Pinned here as well as end to end in `tests/int/test_pipeline_app.py::test_a_direct_responses_client_declares_hosted_web_search_for_itself`, because this is the predicate and that is the consequence.
+
+    The Anthropic control below is the half that makes this discriminating: without it, a gate that had simply stopped refusing anything would pass.
+    """
+    from app.pipeline.subscribers.hosted_web_search import (
+        compile_supported_by_provider,
+        gate_hosted_web_search,
+    )
+
+    supported = compile_supported_by_provider({"p": []})
+
+    def context_for(inbound: WireFormat) -> RequestContext:
+        context = RequestContext(
+            inbound_format=inbound,
+            requested_model="gpt-5.6-sol",
+            payload={"tools": [{"type": "web_search"}]},
+            resolved_model="gpt-5.6-sol",
+            target_format=WireFormat.OPENAI_RESPONSES,
+        )
+        context.provider_name = "p"
+        return context
+
+    await gate_hosted_web_search(context_for(WireFormat.OPENAI_RESPONSES), supported)
+
+    with pytest.raises(WebSearchNotExecutable):
+        await gate_hosted_web_search(context_for(WireFormat.ANTHROPIC_MESSAGES), supported)
+
+
 async def test_a_provider_does_not_inherit_another_provider_s_permission() -> None:
     """The key lives under `model_providers.<name>`, so the answer is that provider's alone.
 

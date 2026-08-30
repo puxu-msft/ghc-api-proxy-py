@@ -40,7 +40,9 @@ def delivers_blocks(handled: HandledRequest) -> bool:
 
     Chat Completions has no framer. Its boundaries are inside `choices[].delta` and nothing here reads them, so a request whose client leg speaks that dialect is delivered whole by `one_shot_delivery`. Ruled 2026-08-22, after a measurement: those bytes were reaching `AnthropicAssembler`, matching none of its event names, and leaving the client a 200 with an empty body.
 
-    A synthesized reply is written by us and we write Anthropic, so it is deliverable whatever the route was — the same carve-out, for the same reason, that `dialect_for` makes.
+    A synthesized reply is written by us and we write Anthropic, so it is deliverable — but **not** "whatever the route was", which is what this said until issue #1 and is the sentence the defect was living in. Being written in Anthropic is only half of deliverable; the other half is that the client leg has a framer that can write Anthropic blocks, and `framer_for` below picks that framer by `inbound_format`. A synthesized reply reaching a Responses client was framed by `ResponsesFramer`, which has no item shape for `server_tool_use` and raised mid-delivery.
+
+    What makes the carve-out sound is upstream of here: both writers of a synthesized reply — the auto mode branch and the failed-search branch in `app.pipeline.driver` — only fire when `inbound_format` is Anthropic Messages, so the only client that can receive one is the client whose framer reads it. That is an invariant this function depends on and does not enforce; it is stated here because the version that went unstated cost a torn stream and, on the buffered path, an Anthropic body delivered to a Responses client under a 200 logged `ok`.
     """
     if handled.synthesized:
         return True

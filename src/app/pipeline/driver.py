@@ -188,8 +188,16 @@ async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[Req
         rate_limiter=chain.rate_limiter_for(provider.name),
     )
     outcome = await driver.run(context)
-    if isinstance(outcome.error, WebSearchNotExecutable):
-        # Answered rather than failed. The client issues a search as its own sub-request and treats an HTTP error as a transport problem worth retrying — three times, in the one case on record — while a search that cannot run will not start working on the third attempt. A failed *tool* is not retried, so the reply says so in the protocol's own words.
+    if isinstance(outcome.error, WebSearchNotExecutable) and context.inbound_format is WireFormat.ANTHROPIC_MESSAGES:
+        # Answered rather than failed. The client issues a search as its own sub-request, and on an HTTP error its main-conversation model calls the tool again — three times before it gave up, in the one case on record — while a search that cannot run will not start working on the third attempt. No client *mechanism* repeats a failed tool result, so the reply says so in the protocol's own words. (Whether the model repeats one anyway is unmeasured; see `anthropic_messages_synthetic_reply`.)
+        #
+        # **The retries are the model's, not the transport's**, and this said the opposite until 2026-08-30. Claude Code's transport (`Ftw()`) does not retry a 400 at all; 408, 409, 401, 5xx and usually 429 it does, ten times by default and more if configured. So the three on record were three fresh sub-requests the model asked for. The trade stands — three round trips wasted either way — but the mechanism named here has to be the real one, or the next reader tests it against a 5xx and finds it false.
+        #
+        # **Gated on the inbound format, for the reason the auto mode branch above already states**: what this synthesises is an Anthropic Message, and handing one to a client that asked in another protocol answers it in a vocabulary it has no reason to read. The two branches now say the same thing; this one used to be reachable on any leg, and issue #1 is what that cost.
+        #
+        # Reachable from a `/responses` request even after the search gate stopped judging one, so this is not a second lock on the same door. A model that only supports `/v1/messages` routes an inbound Responses request onto the Anthropic leg, where `to_anthropic_messages` assigns `tools` across **verbatim** — the bare declaration stays bare — and `builtin:server-tool-capability` refuses it because its prefix table catches the bare spelling too. Delivery then frames by the *client's* leg: streaming tore on `ValueError: no Responses item shape for block kind 'server_tool_use'`, and non-streaming was worse — a 200, logged `ok`, carrying an Anthropic message body to a Responses client with nothing anywhere saying so. Both measured 2026-08-30.
+        #
+        # Falling through leaves `outcome` carrying the refusal, which becomes an error envelope in the client's own format. That is the honest answer here: the synthesis exists to spare one specific client the repeat calls an HTTP error drew from it, and a client that cannot read the synthesis gains nothing from it.
         return HandledRequest(
             context=context,
             route=route,

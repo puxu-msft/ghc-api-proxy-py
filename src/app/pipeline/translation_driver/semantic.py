@@ -182,7 +182,7 @@ def system_blocks_from_value(value: object) -> tuple[list[SystemBlock], LossCode
 class WebSearchNotExecutable(TranslationRefused):
     """A web search this endpoint cannot run, to be answered rather than refused.
 
-    A subclass of the refusal it replaces, so anything that already classifies a `TranslationRefused` — the 400 mapping among them — keeps working if this is ever raised somewhere that does not know to answer it. What the handler does instead is synthesise the reply Anthropic defines for a failed search, because on the client that sends these an HTTP error gets retried and a failed tool does not.
+    A subclass of the refusal it replaces, so anything that already classifies a `TranslationRefused` — the 400 mapping among them — keeps working if this is ever raised somewhere that does not know to answer it. What the handler does instead is synthesise the reply Anthropic defines for a failed search, because on the client that sends these an HTTP error demonstrably drew repeat calls from the model and no mechanism repeats a failed tool result. (Repeat calls from the *model*: the transport does not retry a 400 at all. Corrected 2026-08-30.)
 
     Carries no query: the turn that asked for the search is still on the context, and reading it there keeps this exception about *what happened* rather than about what the reply should say.
     """

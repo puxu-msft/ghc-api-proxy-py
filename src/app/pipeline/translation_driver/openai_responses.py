@@ -352,7 +352,7 @@ def _tools_for_upstream(
 
     Whether the model behind this actually runs the search is decided elsewhere, and after this: `subscribers/hosted-web-search-gate` reads the resolved model against `models_support_web_search` at `attempt.prepare`. It has to be there rather than here, because this is handed the name the *client* asked for. So this translates unconditionally and the gate answers the request when the answer is no.
 
-    What comes back needs no separate arrangement: a `web_search_call` item has no Anthropic spelling, and both the streaming and non-streaming paths render it as the same line of text that the Anthropic leg flattens its history into.
+    What comes back **does** need a separate arrangement, and does not have one yet: `hosted-web-search-spec.md` §5.3 requires a `web_search_call` to come back as `server_tool_use` paired with `web_search_tool_result` (D6, ruled by the user 2026-08-20), and both the streaming and non-streaming paths still render it as the same line of text the Anthropic leg flattens its history into. The sentence here until 2026-08-30 said no arrangement was needed "because a `web_search_call` item has no Anthropic spelling" — it has one; what is missing is the reading of the `url_citation` annotations that carry the pair's content.
     """
     kept: list[dict[str, Any]] = []
     mapped: list[str] = []
@@ -510,7 +510,9 @@ def blocks_from_item(
             ),
         )
     if kind == "web_search_call":
-        # A search the upstream ran itself. It has no Anthropic spelling and nothing to revive: the item carries a query, a status and an opaque id, and the results are not in it — they reached the model directly and are already folded into the answer text that follows. So what is left to say is what was searched for, and it is said in the same words the Anthropic leg flattens its own history into.
+        # A search the upstream ran itself. The item carries a query, a status and an opaque id, and the results are not in it — so this says what was searched for, in the same words the Anthropic leg flattens its own history into.
+        #
+        # **Not because there is nothing to revive.** The line here until 2026-08-30 said the item "has no Anthropic spelling and nothing to revive", and both halves were wrong: `hosted-web-search-spec.md` §5.3 spells it `server_tool_use` + `web_search_tool_result` (D6, ruled 2026-08-20), and the results are not gone — they arrive as `url_citation` annotations on the text item that follows, which §5.3 makes the pair's only data source. Nothing reads them yet. That is a gap with an owner, not a property of the wire.
         return "assistant", (
             ContentBlock(BlockKind.TEXT, text=web_search_call_text(item.get("action")), raw=item),
         )

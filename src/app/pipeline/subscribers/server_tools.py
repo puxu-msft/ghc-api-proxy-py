@@ -4,7 +4,7 @@ Copilot's Anthropic Messages endpoint does not run Anthropic's native server too
 
 **This used to remove the declaration and let the turn continue, and that was the wrong answer.** It reads as the gentler one: the conversation survives, one capability short. What it actually produces on the client that sends these is a fabrication. Claude Code runs a web search as its own sub-request, carrying `Perform a web search for the query: X` and a `tools` array holding nothing but the search — measured over 190 real ones, every single time. Strip its only tool and the request does not fail; the model answers from memory, and the client renders the reply under a `Web search results for query:` heading it attaches unconditionally. No `is_error`, no marker. Remembered text comes back labelled as searched fact, and nothing downstream can tell the difference.
 
-So this raises instead, and `handle()` answers it: the reply becomes a `server_tool_use` paired with a `web_search_tool_result` carrying a single error object — the shape Anthropic defines for a search that did not run. Not an HTTP error, though that was the first form of this fix: the transcript showing the model degrade well on a 400 also shows the client retry it three times first, because an HTTP error reads as a transport fault and a tool failure does not. See `delivery/synthetic.py`.
+So this raises instead, and `handle()` answers it: the reply becomes a `server_tool_use` paired with a `web_search_tool_result` carrying a single error object — the shape Anthropic defines for a search that did not run. Not an HTTP error, though that was the first form of this fix: the transcript showing the model degrade well on a 400 also shows three attempts before it did. **Those three are the main-conversation model calling `WebSearch` again, not the transport retrying** — corrected 2026-08-30 against the client's own retry table, which does not retry a 400 at all. What the failed tool buys is narrower than it used to say here: the client has no *mechanism* that repeats a failed tool result, where an error string in a `tool_result` demonstrably drew three repeat calls from the model. Whether the model repeats a failed tool result too has not been measured.
 
 **The history is rewritten rather than refused, and on this client that path has never once run.** Flattening a past `server_tool_use` call and its `*_tool_result` answer into text is honest where refusing the declaration is not: those blocks are a record of searches that really happened, not a claim that one is happening now. They become plain text rather than a client `tool_use` / `tool_result` pair, because a downgraded pair refers to a tool this request does not declare, while text refers to nothing.
 
@@ -21,9 +21,9 @@ import logging
 from typing import Any, cast
 
 from app.pipeline.request import RequestContext, WireFormat
-from app.pipeline.server_tool_text import call_subject
+from app.pipeline.server_tool_text import WEB_SEARCH, call_subject
 from app.pipeline.subscribers.counting import COUNTING_ONLY
-from app.pipeline.translation_driver.semantic import WebSearchNotExecutable
+from app.pipeline.translation_driver.semantic import TranslationRefused, WebSearchNotExecutable
 
 logger = logging.getLogger(__name__)
 
@@ -218,15 +218,31 @@ def _refuse_declarations(payload: dict[str, Any]) -> None:
     if not dropped:
         return
 
+    # **Which exception decides which reply**, so the two families are separated here rather than at the handler.
+    #
+    # `WebSearchNotExecutable` is what `handle()` answers with a synthesised `server_tool_use` / `web_search_tool_result` pair. That pair says *a web search* failed, and it is the only thing this proxy knows how to synthesise — so raising it for a `web_fetch` declaration told the client a search it never asked for had failed. Measured 2026-08-30: a `web_fetch_20250910` declaration came back as HTTP 200 whose first block was `server_tool_use name="web_search"`, with the fetch prompt as its query.
+    #
+    # `web_fetch` gets the plain refusal, which the error contract turns into a 400 in the client's own dialect — `hosted-web-search-spec.md` §13, "声明继续 REJECT". Three independent reasons, none of them "web_fetch matters less" (`.dev/docs/hosted-web-search/reports/260830-claude-code-web-fetch-client-behaviour.md`): Claude Code never declares it as a server tool at all, so the synthesis is unreachable on the only client in use; the argument that makes synthesis right for web search does not transfer, because it rests on that client's search sub-request carrying one tool and its unconditional `Web search results for query:` heading, and a fetch has neither; and `web_fetch_tool_result` has no consumer in that client — it falls through the renderer's `default` and shows a blank turn.
+    #
+    # A mixed declaration takes the plain refusal too. The synthesis can only speak for the search half, so answering one would report the fetch as never mentioned. Ruled here rather than in the Spec's own words: §13 does not cover the combination, and this is the reading that states no falsehood. Registered in the Spec at §8.3 as this project's derivation.
+    families = {_family(declared) for declared in dropped}
+    searches_only = families == {WEB_SEARCH}
+
     # Named for the operator before the refusal, which is the client's to see.
     logger.info(
         "answering %d server-tool declaration(s) this endpoint cannot execute as failed: %s",
         len(dropped),
         ", ".join(sorted(dropped)),
     )
-    raise WebSearchNotExecutable(
-        f"this endpoint does not execute {', '.join(sorted(dropped))}, and answering without it"
-        " would return remembered text where the client expects a search",
+    refusal = WebSearchNotExecutable if searches_only else TranslationRefused
+    # The `remembered text` half is a claim about web search specifically — the client's heading presents whatever comes back as the search's findings — so it is only said when that is what was refused. A fetch carries no such heading, and asserting it would be inventing a consequence.
+    because = (
+        ", and answering without it would return remembered text where the client expects a search"
+        if searches_only
+        else ""
+    )
+    raise refusal(
+        f"this endpoint does not execute {', '.join(sorted(dropped))}{because}",
         code="server_tool_not_executable",
         field_path=f"tools.{sorted(dropped)[0]}",
     )
