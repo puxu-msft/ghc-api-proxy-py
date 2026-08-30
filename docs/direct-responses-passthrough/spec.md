@@ -1,10 +1,12 @@
-# 直连 Responses 路径：保真透传产品规格
+# 直连 Responses 路径：原生透传产品规格
 
 日期：2026-08-30
-状态：**DRAFT — 待独立评审**。实现未开始。
-定义域：**inbound 与 target 同为 `openai-responses`**（即 `route.translation_required is False`）。本规格不覆盖任何其他路由。
+状态：**DRAFT v2 — 待复评**。实现未开始。
+定义域：**inbound 与 target 同为 `openai-responses`**（`route.translation_required is False`）。本规格不覆盖任何其他路由。
 
-> **本文是活文档，不冻结。** 新裁决、实测或发现与本文冲突时当场修订，每次修订记入 §10。
+> **本文是活文档，不冻结。** 新裁决、实测或发现与本文冲突时当场修订，每次修订记入 §12。
+>
+> v2 按 [`reports/260830-review-spec.md`](reports/260830-review-spec.md) 重写（blocker 3、major 5，全部采纳）。v1 的自相矛盾与超范围归属见 §12。
 
 ## 1. 为什么需要这份规格
 
@@ -14,115 +16,192 @@
 上游 Responses events → Anthropic CompletedBlock → 客户端 Responses events
 ```
 
-`CompletedBlock` 的定义原文是「one fully materialised **Anthropic** content block」。在这条路径上，把 item 降到 Anthropic 语义再升回来，**唯一的消费者就是那个负责把它升回来的 framer**——纯损耗，且每一次往返都在损耗点上出过故障：
+`CompletedBlock` 的定义原文是「one fully materialised **Anthropic** content block」。这条路径上每一次往返都在损耗点上出过故障：
 
 | | 损耗 | 故障 |
 |---|---|---|
 | GitHub issue #1 | `web_search_call` 无 Anthropic 块对实现，降级成散文 | 实现块对时 framer 不认，撕流 |
 | GitHub issue #2 | `custom_tool_call` 连降级都没有，kind 与 payload 矛盾且 payload 为空 | `ValueError`，200 已发出后撕流 |
 
-`ResponseOutputItem` union 共 **28** 个顶层成员（`openai/types/responses/response_output_item.py`，逐字核对）；翻译层认识 6 个。**22 个**落进兜底。issue #2 只是其中第一个被真实客户端触发的。
+`ResponseOutputItem` union 共 **28** 个顶层成员；翻译层认识 6 个，**22 个**落进兜底。
 
-## 2. 第一原则（用户 2026-08-30 裁决）
+**但「翻译是纯损耗」这个说法过头了，v1 写错了。** `CompletedBlock` 的消费者不止 framer：`BlockBuffer` 读整个 payload 的 `size_bytes` 做内存上限、读 `kind` 决定 `until-tool-use` 何时释放；`Terminal.record` 读 `kind`／tool name／thinking，流入完成行与 TUI。所以透传不是「拆掉中间层」，而是**把 wire 与可观测这两件事分开**——wire 走原生，可观测另立旁路事实（§10）。
 
-> **代理不认识一个 item，不构成在直连腿上拒绝、丢弃或改写它的理由。**
+## 2. 原则与其出处
 
-用户原话：「协议允许，凭什么拒绝？」
+**三条不同来源的依据，分开记，不要合并成一句。**
 
-客户端与上游说同一种语言。**代理的理解力不是客户端能力的上界**——一个代理读不懂的合法 item，客户端很可能读得懂，而且它本来就是冲着那个上游去的。在这条腿上以「我方无法转换」为由毙掉 turn，是把我们的无知强加给一个不需要我们理解任何东西的客户端。
+### 2.1 用户 2026-08-30 裁决（逐字锚）
 
-**这条原则划定了本规格与 `anthropic-responses-bridge/spec.md` 的边界。** 那份规格的 response 矩阵规定「未知 output item → `REJECT`」，其定义域是 **Anthropic inbound → Responses upstream** 的转换——直连腿不发生该转换，故该条**不适用于本腿**。2026-08-30 的一次实现曾把该条套用到直连腿上（`main` 的 `ca777df`），那是定义域误用，本规格落地时必须撤销直连腿的那一半。翻译腿的 `REJECT` 不变，那里转换确实做不到。
+原话：**「协议允许，凭什么拒绝？」**
 
-## 3. 保真层级：事件级，逐字
+支持的命题，仅此一条：**不得以「本代理不认识」为由，拒绝一个协议允许的直连 item。**
 
-**承诺**：上游发给我们的每一个属于某 output item 的 SSE 事件，其 `event` 名与 `data` 载荷**逐字**重放给客户端，**包括本代理不认识的事件类型与不认识的字段**。
+它**不**单独支持「不得丢弃」「不得改写任何字段」「id 必须逐字」——那些另有出处，见 §2.2 与 §2.3。v1 把整套保真政策归给这一句，是超范围归属。
 
-**可行性依据**：`SseEvent` 保留 `event` 与**未经 re-serialise 的原始 `data` 文本**（`sse_source.py`）。项目已经在用同一机制做直连腿的失败事件重放，`StreamFailure.raw_data` 的注释写明了理由：「a round trip through a JSON encoder keeps the fields and not the bytes」。本规格把该既有做法从失败事件扩展到全部 output item 事件。
+### 2.2 用户既有裁决与亲笔文档
 
-**允许改动的，且仅限这些**：
+- `docs/.human-controlled/message-translation.md`：直连**尽可能原样转发**。
+- `.dev/docs/error-envelope/spec.md` 保存的用户 2026-08-23 原话：**「直连路径一定用原生的，即使我们未知，也能传递」**。
 
-| 可改 | 理由 |
+这两条共同支撑「本腿走 native」这个方向。
+
+### 2.3 本规格在上述授权范围内的推导
+
+事件级 logical fidelity 的**精确层级**（§3）、逐事件 id 的处置（§6）、全局顺序与 commit frontier（§4）、`requires_client_action` 判据（§7）、可观测旁路（§10）——**这些是本规格的推导，不是用户裁决**，可由评审共识修正。
+
+### 2.4 定义域边界
+
+`anthropic-responses-bridge/spec.md` 的 response 矩阵规定「未知 output item → `REJECT`」。**该矩阵不适用于本腿**：那份规格逐字把定义域钉在 Anthropic `/v1/messages` inbound 选择 Responses upstream，其 downstream 始终是 Anthropic JSON／SSE；它排除 raw Responses passthrough 的理由正是「下游不是 Responses 客户端」，而本腿的下游就是。
+
+`ca777df` 把该矩阵套用到了直连腿，是定义域误用，本规格落地时**必须撤销直连腿的那一半**。翻译腿的 `REJECT` 不变。
+
+跨腿合同（error envelope、keepalive）仍然适用。
+
+## 3. 保真层级：合法 UTF-8 SSE 的 logical event 与 data
+
+**承诺**：上游每一个属于本响应的 SSE 事件，其 `event` 名与**经 SSE field parsing 得到的 logical `data` 字符串**逐字重放，包括本代理不认识的事件类型与字段。
+
+**不改写 `data` 内部的任何字段**——包括 `sequence_number`、`output_index`、任何 `id`，以及任何未知字段。v1 同时承诺「data 逐字」和「重编 sequence_number／output_index」，而**那两个字段就在 data 这个 JSON 文本里**，两者不可能同时成立。v1 给的理由（「时点改变后原序号不再连续」）也是错的：只推迟不重排时，原序号仍保持次序与连续性；三份 cassette 的 sequence 均为 `0..N-1`。**只有重排才会破坏它，而本规格不重排（§4）。**
+
+**可承诺范围**（实跑核验，见评审 finding 04）：
+
+- 多行 `data:` → SSE 规则 join 为一个含 `\n` 的 logical string，**内容不丢**（丢的是原分行拼法）
+- 空 `data:` → 保留为空字符串
+
+**明确不承诺**：
+
+- **不是 byte-level。** 
+- 注释行、`id:`、`retry:` 与任何其他／未来 SSE field：`parse_frame` 丢弃，不重放
+- 只有 `event:` 而无任何 `data:` 的帧：`parse_frame` 返回 `None`，不重放
+- 非法 UTF-8：`errors='replace'` 已替换为 `�`，不可恢复
+- field 前后空白与行尾（CRLF／LF）的规范化
+
+### 3.1 两处必须先修的既有缺陷
+
+本承诺**不能**靠现有 writer 兑现，实跑给出两个反例：
+
+1. `_report_failure` 把含换行的 payload 写成一行 `data:` 加一行裸文本，客户端再解析只剩第一行。**必须**新增一个接受 `(event: str, data: str)` 的 raw-text SSE encoder，对 `data.split("\n")` 的每一段各写一条 `data:`；**不得**复用只接受 dict 并 `orjson.dumps` 的 `SseFrame`。
+2. `read_events` 的 frame separator 固定为 `b"\n\n"`，两个合法 CRLF 帧会被合并成一个事件。**必须**修正，这是两条腿共用的前置。
+
+## 4. 交付单位与全局顺序
+
+**交付单位是「安全前缀」，不是「单个 item」。**
+
+维护一个 attempt 内的**全局事件队列**与一个**单调 commit frontier**：只有从 frontier 到某位置之间、所有已打开的 item 都已 `done` 时，才释放这段连续前缀。
+
+- item lifecycle 交错时，**允许**一个已完成的 item 被更早的未完成 item 拖住；
+- **不得**为了早发而重排事件——重排正是唯一会让 `sequence_number` 倒退、让 `output_index` 与 SDK snapshot 索引失配的原因。
+
+未知 item-specific 事件**无须被任何类型表认识**，只需停在它原本的全局位置。无法判定某事件属于哪个 item 时，保守持有到 terminal。
+
+> 三份 cassette 的 `output_index` run 都是 `[0,1]`，**只说明已观测样本没有交错**，是趋势样本而非协议保证；本规格按可能交错设计。
+
+## 5. Commit frontier 与 attempt replay
+
+**「已提交」指客户端已经看到本次 attempt 的原生事件。** 它决定 replay 是否还合法，因此必须在本规格裁定，而不是由发送顺序偶然决定。
+
+| 动作 | 是否提交本次 attempt |
 |---|---|
-| SSE 帧外壳（重新组帧） | 帧边界是交付侧的事；`stream.py` 既有注释「Only the SSE wrapper is rebuilt, because frame boundaries are this side's to draw」 |
-| 投递**时点**（推迟到 item 完成边界） | 本项目是块级交付，见 §4 |
-| `sequence_number` **重编** | 时点改变后原序号不再连续；SDK 解析器要求单调 |
-| `output_index` **重编** | 同上；且与已投递单元数一致 |
+| HTTP 200 headers | 否 |
+| SSE comment keepalive | 否 |
+| `response.created` / `response.in_progress` | **保持 attempt-local**，随第一批可交付 item 事件一起提交 |
+| 第一批 item 事件 | 是 |
+| 无 item 的 terminal／failure | 在最终决定不 replay 后，与本 attempt 的 control events 一起提交 |
 
-**明确不承诺**（写出来是为了不让读者误读「原样」）：
-- **不是字节级**。多行 `data:`、SSE 的 `id:` / `retry:` 字段、注释行在 `SseEvent` 之后已不可恢复。若将来需要字节级，捕获必须发生在 SSE 解析之前，那是另一份规格。
-- **不保证事件之间的原始时间间隔**。块级交付按 item 边界成批发出。
+**首个原生事件提交前**：retry taxonomy 判为可重试的 transport tear、无终局 EOF、可重试的 upstream failure，可在统一预算内**透明 replay**；旧 attempt 的 control events、item 队列、terminal、ids、usage 与内存计量**全部丢弃**。
 
-## 4. 交付单位
+**首个原生事件提交后**：**禁止**整次 attempt replay，已交付前缀保留。这与用户亲笔的重试合同一致——「尚未交付完整块可无痕重试；已交付块则不得从头重放」。
 
-**一个 output item = 一个交付单元。** 该 item 的全部原生事件被缓存，在其 `response.output_item.done` 到达时按**原顺序**一次性发出。
+cap 超限、客户端取消、客户端 deadline 等人写文档列为不可继续的原因，**不得** replay。
 
-理由：本项目的块级交付契约（缓冲、背压、keepalive、retry position）以「一个完整单元」为粒度，而 output item 是这条腿上天然的完整单元。这样既保住了那套机制，又不需要理解单元的内容——**边界归交付侧，内容归上游**。
+## 6. 各事件与各字段的处置
 
-`response.created` / `response.in_progress` 与终局事件不属于任何 item，处置见 §5.4、§5.5。
+### 6.1 item 专有事件
 
-## 5. 各字段与各事件的处置
+**必须**原样重放，包括但不限于 `response.custom_tool_call_input.delta` / `.done`、`response.function_call_arguments.*`、`response.output_text.*`、`response.reasoning_summary_text.*`、`response.web_search_call.*`、`response.content_part.*`、`response.output_text.annotation.added`，以及**任何未来新增的**。**不得**因「本代理不消费该事件」而丢弃。issue #2 的根因正是 `custom_tool_call_input.delta` 无人消费。
 
-### 5.1 item 专有事件
+### 6.2 id：逐事件原样，包括不一致
 
-**必须**原样重放，包括但不限于 `response.custom_tool_call_input.delta` / `.done`、`response.function_call_arguments.delta` / `.done`、`response.output_text.delta` / `.done`、`response.reasoning_summary_text.delta`、`response.web_search_call.*`、`response.content_part.added` / `.done`、`response.output_text.annotation.added`，以及**任何未来新增的**。
+每个事件携带的 id（item id、`response.id`、`item_id` 等）**必须**原样重放。**不得**重新 mint。
 
-**不得**因「本代理不消费该事件」而丢弃它。issue #2 的根因正是 `custom_tool_call_input.delta` 无人消费。
+现有 framer 自铸 id 的依据是实测「上游 id 在事件之间不同」（12/12、16/16、125/125）。**那个观测只证明 id 不能作为内部 draft 关联键**——内部改用 `output_index` 与 attempt-local 序号即可（§4 的队列本就按位置组织）。它不证明发给客户端的 id 应当被改写。
 
-### 5.2 item id
+**上游 id 不一致是上游 wire 的事实，在 native 合同下属于应当保留的事实，不是代理该默默修复的缺陷。** 复核：`openai==3.3.1` 的 accumulator 按 `output_index` 累积、不校验 id 相等，所以「SDK 需要稳定 id」在该版本上被排除；其他客户端未穷尽，不外推为全生态安全。
 
-**必须**使用上游在该 item 事件中给出的 id，逐字。**不得**重新 mint。
+若将来要提供 `fix_stream_ids` 之类的兼容变换，**必须**另立显式、可选的 reshape 合同，**不得**叫它 native 或逐字。
 
-`ResponsesFramer` 今天自铸 id，依据是实测「上游 id 在 `added` 与 `done` 之间会变」。那条实测只支持一个结论——**不能用 `added` 的 id 去关联 draft**——不支持改写发给客户端的 id。该 id 可能是客户端下一轮回传的 opaque handle，改写它的后果未测。
+### 6.3 control 与 terminal 事件
 
-### 5.3 `response.id`
+`response.created` / `response.in_progress` / `response.completed` / `response.incomplete` / `response.failed` / `response.cancelled`：**必须**原样重放上游的，**整个 `response` 对象逐字**——含 `status`、`incomplete_details`、`usage`、`tool_usage`、`metadata` 及任何本代理不认识的根级字段。**不得**由本代理合成，**不得**由 `Terminal.stop_reason` 反推（那是面向 Anthropic 的派生摘要，本腿只作可观测用途，见 §10）。
 
-**必须**使用上游的，逐字，不重新 mint。同 §5.2 的理由。
+提交时点见 §5。
 
-### 5.4 `response.created` / `response.in_progress`
+### 6.4 reasoning
 
-**必须**原样重放上游的，**不得**由本代理合成。今天 `ResponsesFramer.preamble()` 合成的 `response` 对象只包含字段子集。
+`encrypted_content` **必须**原样交还，**不得**经本项目的 reasoning carrier 编解码。
 
-### 5.5 终局事件与 terminal response object
+**下一轮回传不会进入 carrier decoder**，这一条已有确证而非待定：`driver.py` 只在 `route.translation_required` 为真时调用 request translator，而 carrier decoder 只存在于该 translator 内；本规格的定义域恰为 false。**需要一条回归测试钉住这个门。**
 
-**必须**原样重放上游的 `response.completed` / `response.incomplete` / `response.failed` / `response.cancelled`，**整个 `response` 对象逐字**——含 `status`、`incomplete_details`、`usage`、`tool_usage`、`metadata` 以及本代理不认识的任何根级字段。
+## 7. Buffering policy
 
-**不得**由 `Terminal.stop_reason` 反推。那是一个面向 Anthropic 的派生摘要（`max_output_tokens` 改写成 `max_tokens`、由 `_saw_tool_call` 推 `tool_use` / `end_turn`），在本腿上**只作内部可观测用途，不得成为 wire 的 source of truth**。
-
-### 5.6 reasoning
-
-`encrypted_content` **必须**原样交还，**不得**经本项目的 reasoning carrier 编解码。carrier 的存在理由是「Responses 的 `encrypted_content` 没有 Anthropic 拼法，所以装进我们签名的载体里」——本腿没有这个跨协议问题。
-
-**待确认**：同一会话下一轮客户端把它原样发回时，请求侧是否会把它当作 carrier 去解码。实现前必须验证。
-
-## 6. 三种 buffering policy 在本腿的含义
-
-| policy | 含义 |
+| policy | 本腿含义 |
 |---|---|
-| `block` | 每个 item 的事件组在其 `done` 后立即发出。默认。 |
-| `until-tool-use` | **判据必须由 item type 给出，不得由 Anthropic block kind 给出。** 今天 `BlockBuffer.add()` 读 `kind == TOOL_USE`；本腿没有 Anthropic kind，需要一个「这是客户端待执行的工具调用吗」的直连侧判据。**哪些 item type 算，本规格未定，实现前必须补。** |
+| `block` | 每个安全前缀（§4）一就绪即发出。默认。 |
 | `full` | 全部事件在上游终局后一次发出。 |
+| `until-tool-use` | 见下。 |
 
-## 7. 失败、截断与容量
+### 7.1 `until-tool-use` 的释放判据
 
-- **上游终局失败事件**（`response.failed` / `response.cancelled` / `error`）：原样重放，见 §5.5。既有 `_report_failure` 的 passthrough 分支已是此行为。
-- **`status: "incomplete"` 的 item**：**必须**照常交付，**不得**套用翻译腿的 `cut_short` / hand-over 政策。那套政策的前提是「客户端能接住合成的 hand-over 块」，而 `hand_back_block()` 对非 Anthropic inbound 明确返回 `None`——在本腿上它只会让最后一个 item 消失。
-- **上游 EOF 无终局事件**：本腿无法合成一个可信的终局（§5.5 禁止推导），故**必须**按流被截断处理并让客户端可见，具体形态**待定**。
-- **memory cap**：`CompletedBlock.size_bytes` 取 `len(repr(payload))`。本腿持有的是原始事件文本，计量口径**必须**改为实际持有的字节数。**cap 的语义是「限制我方持有」还是「限制交付量」，实现前必须确认**。
+**判据是 `requires_client_action(item, original_request)`：该 output item 是否要求客户端提交与之对应的 tool output 或 approval，模型回合才能继续。**
 
-## 8. 非流式
+**不是** Anthropic `BlockKind.TOOL_USE`（本腿没有 Anthropic kind），**也不是**「类型名以 `_call` 结尾」。
 
-非流式直连今天已是 body 原样返回（`reply.py::response_payload` 在 `translation_required is False` 时直接返回）。**本规格不改变它**，并确认它与 §2 一致。
+当前正例：`function_call`、`custom_tool_call`、`computer_call`、`local_shell_call`、`apply_patch_call`、使用 local environment 的 `shell_call`、请求声明 `execution: "client"` 的 `tool_search_call`、等待客户端回答的 `mcp_approval_request`。
 
-## 9. 尚未确定，实现前必须闭合
+当前反例（上游自行执行并在同一响应内给出结果）：`web_search_call`、`file_search_call`、`code_interpreter_call`、`image_generation_call`、server-executed `tool_search_call` 与 MCP call。
 
-1. §6 的 `until-tool-use` 判据（哪些 item type 算工具调用）。
-2. §7 的 EOF 无终局形态。
-3. §7 的 memory cap 口径。
-4. §5.6 的 carrier 回传验证。
-5. Copilot 是否会在响应 `output` 里发 `function_call_output`——影响的是**翻译腿**的已知集合分歧（见 [`reports/260830-known-set-divergence.md`](reports/260830-known-set-divergence.md)），本腿因不做翻译而不受影响。
+**判定需要原始请求的 tool declaration 与 execution mode**，不能只看响应 item 的 type——同一个 `tool_search_call` 会因请求里的 `execution` 不同而得到相反答案。这正是它必须在本规格定案、而不能留给实现的原因。
 
-## 10. 修订记录
+**未知类型**：**不得**默认 `false`。默认 false 会把客户端所需的行动扣押到 terminal，并再次让「代理认识的集合」成为客户端能力的上界。保守视为**需要释放**，并记一条 `predicate unknown` 的可观测事实（§10）；wire 事件本身仍逐字。
+
+触发**只发生在**该 action item 完成且已到达安全 commit frontier 时；触发后永久转为逐前缀释放，保持今天 `until-tool-use` 的一次性状态变化语义。
+
+## 8. 失败、截断与容量
+
+- **上游终局失败事件**（`response.failed` / `response.cancelled` / `error`）：若最终可见则**逐字**重放。
+- **代理侧错误**（cap 超限、客户端 deadline、交付失败、预算耗尽而无上游终局）：按 `error-envelope/spec.md` 写 Responses `event: error`，**不得**合成成功 terminal，**不得**咨询只适用于 Anthropic 客户端的 hand-over 机制。
+- **`status: "incomplete"` 的 item**：**必须**照常交付，**不得**套用翻译腿的 `cut_short` / hand-over 政策——`hand_back_block()` 对非 Anthropic inbound 返回 `None`，那套政策在本腿上只会让最后一个 item 消失。
+- **无终局 EOF**：本腿不得伪造成功终局（§6.3 禁止推导）。按 §5 判断：首个原生事件提交前可 replay；提交后写 `event: error` 并保留已交付前缀。
+- **memory cap**：`buffer_cap_bytes` 的用户亲笔定义是「max bytes to buffer before abandoning this response」，故**限制的是本代理当前持有的字节，不是累计交付量**。本腿计入：尚未 `done` 的原始事件队列、已完成但被 policy 扣住的事件组、control events、以及同时保留的预渲染副本。释放、replay reset、failure、cancel 后按实际持有退还计量。
+
+## 9. 非流式
+
+**当前行为的准确陈述**：`inference.py` 先 `response.json()`（并拒绝非 object 的 JSON），`response_payload` 在 `translation_required is False` 时返回同一个 dict，随后 `JSONResponse(payload)` 再序列化。因此**未知字段按 JSON value 保留，但 raw bytes、空白、key 顺序、数字字面形式、重复键与原 `Content-Type` 都不保留**。v1 写的「今天已是 body 原样返回」按 §3 的逐字读法是错误陈述。
+
+**本规格裁定**：合法 Responses JSON object 按 **JSON value 保真**，所有未知字段保留，允许序列化拼法变化；HTTP status 原样；response headers 按一张明确的直连腿过滤表保留语义头（`request-id`、rate-limit、`retry-after` 等）。**该过滤表本规格未列，是 §11 的未闭合项。**
+
+若将来要 byte-exact，必须在 JSON parse 之前直接交付 `response.content` 与原 content type，并另定非 object／malformed 成功 body 的行为。
+
+## 10. 可观测合同
+
+**wire 的 source of truth 永远是上游原生事件与原生 terminal；可观测事实从旁路派生，不得反向改写 wire。**
+
+本腿**至少**要记录：原生 output item 计数、需要客户端行动的 tool 名称／类型（§7.1）、reasoning 是否出现、权威 terminal status 与 usage、failure／截断／replay 的来源。无法分类时**必须**明确记为 unknown，**不得**伪装成 absent——`Terminal` 的 `stop_reason` 空默认值就是为这个区分而设的。
+
+`BlockBuffer` 今天靠 Anthropic `kind` 同时承担 payload 载体、释放判据与日志分类三件事；本腿**不得**沿用该耦合。
+
+## 11. 未闭合项（归本规格所有）
+
+1. §9 的直连腿 response header 过滤表。
+2. §3.1 两处既有缺陷的修法细节（raw-text encoder 的确切形态、CRLF 修正的影响面）。
+3. §7.1 的 `requires_client_action` 如何从原始请求取得 execution mode（数据通路）。
+
+> 以下**不在**本规格定义域，已从待办移出：`function_call_output` 在响应 output 中的出现与翻译，归 `anthropic-responses-bridge/spec.md`（见 [`reports/260830-known-set-divergence.md`](reports/260830-known-set-divergence.md)）；本腿无条件携带它。
+
+## 12. 修订记录
 
 | 日期 | 条款 | 变化 | 触发 |
 |---|---|---|---|
-| 2026-08-30 | 全文 | 初稿 | GitHub issue #1／#2；用户裁决「协议允许，凭什么拒绝」；方案评审 [`reports/260830-review-plan.md`](reports/260830-review-plan.md) 的 blocker-01 要求实现前必须有本规格 |
+| 2026-08-30 | 全文 | 初稿 | GitHub issue #1／#2；用户裁决；方案评审的 blocker-01 |
+| 2026-08-30 | §2、§3、§4、§5、§6、§7、§8、§9、§10、§11 | **v2 全面重写。** (a) §3 的「data 逐字」与「重编 sequence_number／output_index」自相矛盾——那两个字段就在 data 里；改为一律不改写，并新增 §4 的 commit frontier 保持全局顺序而非重排；(b) §2 拆开 provenance，用户 8/30 原话只覆盖「不得以不认识为由拒绝」，其余归本规格推导；(c) §5 新增 control event commit 时点与 attempt replay 合同（v1 完全缺失）；(d) §7.1 定案 `requires_client_action`，v1 留给实现是错的——同一 `tool_search_call` 会因请求的 `execution` 而相反；(e) §3 的可行性论证有两个实跑反例（多行 payload 重放丢行、CRLF 帧被合并），改为先修再依赖；(f) §9 更正「今天已是 body 原样」的不实陈述；(g) §10 新增可观测合同，v1 §1 的「唯一消费者是 framer」被源码反例推翻；(h) §11 关闭原第 3、4 项（cap 口径与 carrier 门已有确证），移出定义域外项 | [`reports/260830-review-spec.md`](reports/260830-review-spec.md)：blocker 3、major 5，全部采纳 |
