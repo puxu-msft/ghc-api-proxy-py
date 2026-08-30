@@ -63,7 +63,9 @@
 
 ### 4.3 规格自身的失真
 
-`../anthropic-responses-bridge/hosted-web-search-spec.md` 整篇按「实现 hosted web search」写成，未反映默认禁用。已知需要复核的至少有：§8.3 仍把「必须剥离、不得 REJECT」写成规范（已被用户裁决推翻）、§3.4 未反映 `drop_fields` 默认、MJ-1/2/4/5/7/8 标着「实现前必须关闭」而实现已落地。
+`../anthropic-responses-bridge/hosted-web-search-spec.md` 整篇按「实现 hosted web search」写成，未反映默认禁用。已知需要复核的至少有：§3.4 未反映 `drop_fields` 默认、MJ-1/2/4/5/7/8 标着「实现前必须关闭」而实现已落地。
+
+> **2026-08-30 更新**：本条原先第一项是「§8.3 仍把『必须剥离、不得 REJECT』写成规范」。§8.3 已于 2026-08-22 与 2026-08-30 两次修订改掉；同一错误在 §3.6、§4、§5.4 的残留也已于 2026-08-30 就地改写（那三处是合并前独立评审第二轮扫出来的——第一轮只改了被点名的 §8.3 与 §10）。这一项因此结案。
 
 **2026-08-22 已派专门对账**，结果见 `reports/260822-websearch-doc-reconciliation.md`。
 
