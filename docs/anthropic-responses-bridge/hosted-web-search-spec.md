@@ -146,7 +146,7 @@ Anthropic `tool_choice` 映射如下，**必须**按表执行：
 | `{"type":"tool","name":<普通 function tool>}` | 既有 function 形态 | 既有合同 |
 
 - named choice **必须**按 `name` 回查本请求的 `tools[]`，确认被指向的那条声明是 web search 族之后才映射为 builtin 形态。**不得**按 `name` 字符串直接判断——客户端可以把普通 function tool 命名为 `web_search`。
-- 能力门不通过时**不产生** dangling forced choice：请求根本不发往上游（§8.3 合成失败块对），所以没有一个「声明被剥离而 `tool_choice` 还指着它」的中间态需要清理。2026-08-30 更正——原文写「被指向的 web search 声明因能力门未通过而被**剥离**时，该 `tool_choice` 必须同步删除」，那描述的是 2026-08-20 被用户裁决推翻的 drop 路径。`spec.md` 关于 dangling `tool_choice` 的既有条款本身不改，它在别的剥离场景（§3.4 的字段级剥离）下仍然适用。
+- 能力门不通过时**不产生** dangling forced choice：请求根本不发往上游（§8.3 合成失败块对），所以没有一个「声明被剥离而 `tool_choice` 还指着它」的中间态需要清理。2026-08-30 更正——原文写「被指向的 web search 声明因能力门未通过而被**剥离**时，该 `tool_choice` 必须同步删除」，那描述的是 2026-08-20 被用户裁决推翻的 drop 路径。`spec.md` 关于 dangling `tool_choice` 的既有条款本身不改，它对**真正删除或拒绝了被指向那条声明**的路径仍然适用——§3.4 的 `empty_result` 分支就是一例，该分支自己已写明要同步删除 `tool_choice`。**反例是 `drop_unsupported_fields`**：它只剥掉声明里上游不认的子字段，声明本身还在，forced choice 仍有目标，因此不产生 dangling choice；2026-08-30 首版把它举成例子是错的。
 - 被指向的声明因 §3.4 走 REJECT 时不适用本节：整个请求已失败。
 - `disable_parallel_tool_use` 保持现状不映射，本规格不改。
 
