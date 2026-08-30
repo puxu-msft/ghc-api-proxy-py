@@ -16,7 +16,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from app.errors import STATUS_FOR_CATEGORY, ErrorCategory, ErrorInfo
-from app.pipeline.delivery.assembling import BlockAssembler, StreamFailure
+from app.pipeline.delivery.assembling import BlockAssembler, FailureOrigin, StreamFailure
 from app.pipeline.delivery.blocks import (
     TOOL_USE,
     BlockBuffer,
@@ -282,13 +282,15 @@ def _stream_error(category: ErrorCategory, message: str, *, code: str) -> ErrorI
 def _report_failure(
     failure: StreamFailure, *, framer: OutboundFramer, passthrough: bool
 ) -> bytes:
-    """Upstream's own failure, in whichever terms this client can read.
+    """The failure, in whichever terms this client can read.
 
     On a direct leg the client speaks upstream's dialect, so upstream's event name and payload go back out **as they arrived** — including the fields nothing here recognises, which is the whole of "even if we do not know it, it can still be passed on". Only the SSE wrapper is rebuilt, because frame boundaries are this side's to draw. `raw_data` rather than a re-serialised dict for the same reason: a round trip through a JSON encoder keeps the fields and not the bytes.
 
     On a translated leg it cannot: the client does not speak that dialect. The failure crosses the same record everything else does and the client's framer spells it.
+
+    **`origin` comes first, and it is not the same question as `passthrough`.** That one asks whether the client could read upstream's words; this one asks whether there are any. A refusal this proxy formed — an output item it cannot carry — has no upstream event behind it, so on a direct leg the passthrough branch would emit this side's `info` under upstream's event name, or an empty `data:` line. Both are inventions. It goes through the framer on either leg.
     """
-    if passthrough:
+    if passthrough and failure.origin is FailureOrigin.UPSTREAM_EVENT:
         return f"event: {failure.event}\ndata: {failure.raw_data}\n\n".encode()
     return framer.error(failure.info)
 

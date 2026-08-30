@@ -36,7 +36,7 @@ from app.observability.request_trace import (
     snapshot_upstream_connection,
 )
 from app.pipeline.anthropic_request_hook import strip_attribution_lines
-from app.pipeline.delivery.assembling import BlockAssembler
+from app.pipeline.delivery.assembling import BlockAssembler, FailureOrigin
 from app.pipeline.delivery.blocks import TOOL_USE
 from app.pipeline.delivery.stream import (
     Attempt,
@@ -657,6 +657,14 @@ class _StreamAccounting:
             return "retry", "turn handed back to the client to continue"
         if self.failure is not None:
             return "fail", f"stream failed before a terminal event: {self.failure}"
+        # Before the drain, because **either kind of assembler failure drains**: the delivery loop reports it and returns, so the generator ends normally and `drained` is set. The drain wording is wrong for both of them, in opposite directions. For a refusal it would be false twice over — upstream did send its terminal, and this side is what stopped before reading it. For an upstream failure event it says "no terminal arrived" about a stream that ended with an explicit failure terminal: `response.failed`, `response.cancelled` and Anthropic's `error` are terminals, and the bridge Spec lists them as such. Either way it sends whoever reads the line to the wrong half of the system.
+        #
+        # Read off the assembler rather than guessed here, which is what the note above asks for; `origin` is the assembler's own record of who decided.
+        reported = self.assembler.failure if self.assembler is not None else None
+        if reported is not None:
+            if reported.origin is FailureOrigin.PROXY_REFUSAL:
+                return "fail", f"refused mid-stream: {reported.info.message}"
+            return "fail", f"upstream reported a stream failure: {reported.info.message}"
         if self.drained:
             return "fail", "upstream stream ended without a terminal event"
         return "gone", "delivery stopped before upstream finished"

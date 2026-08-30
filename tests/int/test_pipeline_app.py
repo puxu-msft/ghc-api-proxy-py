@@ -2525,6 +2525,63 @@ def responses_sse_upstream(usage: dict[str, Any] | None = None) -> bytes:
     return "".join(frames).encode()
 
 
+def custom_tool_call_sse() -> bytes:
+    """A Responses stream whose one output item is a `custom_tool_call`.
+
+    Hand-written for the same reason its sibling above is: what this has to hold up is route → assembler → framer wiring for an item type the assembler does not recognise, not how Copilot phrases that item on the wire. The one shape fact that matters here is measured rather than assumed — a `custom_tool_call` carries its `input` on its own delta events, **not** on `response.output_text.delta` — because that is precisely what makes the fallback produce an *empty* block rather than a wrong one.
+    """
+    item: dict[str, Any] = {
+        "id": "ctc_1",
+        "type": "custom_tool_call",
+        "call_id": "call_1",
+        "name": "run_shell",
+        "input": "ls -la",
+    }
+    frames = [
+        f"event: response.output_item.added\ndata: {orjson.dumps({'output_index': 0, 'item': item}).decode()}\n\n",
+        f"event: response.output_item.done\ndata: {orjson.dumps({'output_index': 0, 'item': {**item, 'status': 'completed'}}).decode()}\n\n",
+        "event: response.completed\n"
+        f'data: {orjson.dumps({"response": {"usage": {"input_tokens": 3, "output_tokens": 4}}}).decode()}\n\n',
+    ]
+    return "".join(frames).encode()
+
+
+def test_an_output_item_this_assembler_does_not_know_is_refused_not_rendered() -> None:
+    """Issue #2. Upstream answered 200 and delivery raised `ValueError: no Responses item shape for block kind 'custom_tool_call'`, tearing the stream.
+
+    Two defects, one line apart. `_open` mapped an unrecognised item type to *itself*, so the block's kind became the literal string `custom_tool_call`; `_close`'s final `else` built a `TEXT`-shaped payload without setting `kind` to match, which the `WEB_SEARCH_CALL` branch beside it does. The block contradicted itself, and the two legs failed differently: `ResponsesFramer` raised, `AnthropicFramer` sent an empty text block under a `stop_reason` of `end_turn` — telling the client the model had finished while it was in fact waiting on a tool call.
+
+    The payload was also empty, which is why "make the kind agree with the payload" is not the fix: a `custom_tool_call` carries its `input` on `response.custom_tool_call_input.delta`, an event this assembler does not consume, so `draft.text` never fills. That would have traded a loud failure for a silent one.
+
+    `spec.md`'s response matrix already required the answer — `REJECT` for an unknown output item, not to be masked by an empty text block or by a normal terminal, which names both of the old behaviours — so this is the implementation reaching a frozen clause rather than new behaviour.
+
+    **This is not the end state.** The direct leg should not be translating at all; `.dev/docs/direct-responses-passthrough/plan.md` is the passthrough work that would let this item reach the client intact. Until that lands, refusing is the honest answer: this proxy genuinely cannot carry the item, and saying so beats both tearing and pretending.
+    """
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200, content=custom_tool_call_sse(), headers={"content-type": "text/event-stream"}
+        )
+    )
+    response = client.post(
+        "/responses",
+        json={"model": "gpt-model", "input": [], "stream": True},
+    )
+
+    assert response.status_code == 200
+    names = [
+        line.removeprefix("event: ")
+        for line in response.text.splitlines()
+        if line.startswith("event: ")
+    ]
+    # The refusal reaches the client as an error frame it can read...
+    assert names[-1] == "error", names
+    assert "unknown_output_item" in response.text, response.text
+    # ...and **no** terminal follows it. `.dev/docs/error-envelope/spec.md` §3.5: a turn that will not succeed must not end with an event that reads as a completed one. Without this assertion the test would pass on an implementation that emitted the error and then `response.completed` anyway.
+    assert "response.completed" not in response.text, response.text
+    # And nothing was rendered in its place — an empty block satisfying the two assertions above is the silent failure this refusal exists to avoid. Asserted on the parsed event names rather than on a substring, because the error code `unknown_output_item` contains `output_item` and a substring check would contradict itself.
+    assert not [name for name in names if name.startswith("response.output_item")], names
+
+
 def test_a_direct_responses_stream_is_answered_in_responses_events() -> None:
     """A client that asked on `/responses` gets `response.*`, not Anthropic event names.
 

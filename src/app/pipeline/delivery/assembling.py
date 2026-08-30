@@ -60,20 +60,35 @@ class Terminal:
             self.thinking.append("txt" if block.payload.get(THINKING) else "enc")
 
 
+class FailureOrigin(StrEnum):
+    """Who decided this turn will not succeed.
+
+    The load-bearing distinction behind `StreamFailure`, and it has no safe default — which is why it is a required field and an enum rather than a defaulted bool. It was a bool called `replayable` for one commit, and that name collided with `ReplaySupport` in the delivery loop, which answers an entirely different question (may this *attempt* be retried).
+    """
+
+    # Upstream said so, in its own event. A client that speaks upstream's dialect can be handed those words unchanged.
+    UPSTREAM_EVENT = "upstream_event"
+    # This proxy said so. There is no upstream event behind it, so there is nothing to replay on any leg and the client's framer has to spell it.
+    PROXY_REFUSAL = "proxy_refusal"
+
+
 @dataclass(frozen=True, slots=True)
 class StreamFailure:
-    """Upstream said, mid-stream, that this turn failed.
+    """This turn will not end successfully, and the stream is already open.
 
     Carried rather than returned from `push`, for the same reason `terminal` is: it is a fact about the stream so far, not a block that just completed, and threading it through the return type would make every caller destructure a tuple to ask a question most of them do not have.
 
-    Both halves travel because the two legs need different ones. A direct leg replays `event` and `raw_data` as they arrived — upstream's own event name, upstream's own payload, including the fields nothing here recognises — and only the SSE wrapper is rebuilt. A translated leg cannot: the client does not speak that dialect, so it gets `info` spelled in its own.
+    **Two origins, and they are not interchangeable.** `origin` is which. An upstream failure on a direct leg goes back out as `event` and `raw_data` arrived — upstream's own event name, upstream's own payload, including the fields nothing here recognises — and only the SSE wrapper is rebuilt. A translated leg cannot do that; the client does not speak that dialect, so it gets `info` spelled in its own. A refusal this proxy formed has no upstream event to replay **on either leg**, so it always goes through the framer.
 
-    `raw_data` is the undecoded payload text, not a re-serialised dict. Round-tripping through `orjson` preserves the fields and not the bytes, and "even if we do not know it, it can still be passed on" is about the bytes.
+    `origin` has no default deliberately. Omitting it would silently pick "upstream's own words", and the next construction site added for a proxy-side refusal would then try to replay an empty payload under upstream's event name — failing open, on the field that decides which of two mutually exclusive things this is.
+
+    `raw_data` is the undecoded payload text, not a re-serialised dict. Round-tripping through `orjson` preserves the fields and not the bytes, and "even if we do not know it, it can still be passed on" is about the bytes. It is empty on a `PROXY_REFUSAL`, and nothing reads it there.
     """
 
     event: str
     raw_data: str
     info: ErrorInfo
+    origin: FailureOrigin
 
 
 class BlockAssembler(Protocol):
@@ -86,11 +101,13 @@ class BlockAssembler(Protocol):
 
     @property
     def failure(self) -> StreamFailure | None:
-        """Upstream's own report that the turn failed, when one arrived.
+        """Why this turn will not succeed, when something has decided that.
 
-        `None` on every stream that did not carry one, which includes a stream that simply stopped — that is a different ending and `cut_mid_block` is what tells those apart. This one is upstream saying so.
+        Two things can decide it, and `StreamFailure.origin` says which: upstream reported the failure in its own event, or this proxy refused something it cannot convert. The second was added 2026-08-30 for unknown output items; before that this property carried only the first, and its contract said so.
 
-        Until 2026-08-24 both assemblers logged such an event and returned nothing, so `terminal.seen` stayed false and the client received whatever the terminal-less path produces. Since the clean-EOF change of 2026-08-22 that path is a *successful-looking* ending, which made an upstream failure indistinguishable from a completed turn.
+        `None` on every stream where neither has happened, which includes a stream that simply stopped — that is a different ending and `cut_mid_block` is what tells those apart.
+
+        Until 2026-08-24 both assemblers logged an upstream failure event and returned nothing, so `terminal.seen` stayed false and the client received whatever the terminal-less path produces. Since the clean-EOF change of 2026-08-22 that path is a *successful-looking* ending, which made an upstream failure indistinguishable from a completed turn.
         """
         ...
 

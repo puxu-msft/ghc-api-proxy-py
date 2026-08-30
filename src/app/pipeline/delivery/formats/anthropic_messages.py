@@ -16,6 +16,7 @@ from app.config.schema import ContentBlockStartCompat
 from app.errors import STATUS_FOR_CATEGORY, ErrorCategory, ErrorInfo
 from app.pipeline.delivery.assembling import (
     Draft,
+    FailureOrigin,
     ReplyDialect,
     StreamFailure,
     Terminal,
@@ -327,6 +328,7 @@ class AnthropicAssembler:
             detail = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
             spelled = str(detail.get("type", ""))
             self._failure = StreamFailure(
+                origin=FailureOrigin.UPSTREAM_EVENT,
                 event="error",
                 # Upstream's payload as it arrived. A direct leg replays exactly this.
                 raw_data=event.data,

@@ -22,6 +22,7 @@ import orjson
 from app.errors import OPENAI_ERROR_TYPES, STATUS_FOR_CATEGORY, ErrorCategory, ErrorInfo
 from app.pipeline.delivery.assembling import (
     Draft,
+    FailureOrigin,
     ReplyDialect,
     StreamFailure,
     Terminal,
@@ -387,8 +388,14 @@ class ResponsesFramer:
 WEB_SEARCH_CALL = "web_search_call"
 TOOL_SEARCH_CALL = "tool_search_call"
 TOOL_SEARCH_OUTPUT = "tool_search_output"
-# A draft kind meaning "recognised, and deliberately not delivered". Distinct from an unrecognised item, which falls through to the text fallback and reaches the client as an empty block — a shape upstream refuses when the turn is replayed.
+# A draft kind meaning "recognised, and deliberately not delivered". Distinct from an unrecognised item, which is `UNKNOWN` below.
 DISCARDED = "discarded"
+# A draft kind meaning **"this proxy does not know what this item is"**, which is a different fact from `DISCARDED` and gets the opposite treatment.
+#
+# It exists because the fallback used to be the item's own type string. That produced a `CompletedBlock` whose `kind` was, say, `custom_tool_call` while its payload was `{"type": "text", "text": ""}` — a block contradicting itself, and empty besides, because an unrecognised item's content arrives on events this assembler does not consume (`response.custom_tool_call_input.delta` for that one). The two legs then failed differently and neither was right: `ResponsesFramer` raised `ValueError` mid-stream after a 200 (**GitHub issue #2**), and `AnthropicFramer` sent a `content_block_start` with empty text — a shape upstream refuses when the turn is replayed, delivered under a `stop_reason` of `end_turn` that told the client the model had finished while it was in fact waiting on a tool call.
+#
+# `anthropic-responses-bridge/spec.md`'s response matrix has required the answer all along, and its wording names both of those failures: 未知 output item → `REJECT`, **不得由空 text block或正常 terminal 掩盖**. So this is not new behaviour; it is the implementation arriving at a clause that was already frozen. The same document requires the streaming and non-streaming paths to be equivalent, which is why `translation_driver/responses.py` changes with it.
+UNKNOWN = "unknown"
 
 
 class ResponsesAssembler:
@@ -472,6 +479,7 @@ class ResponsesAssembler:
             # `warning` rather than something quieter, because the zero in 第 4 条 is a **discriminating** zero: the same sweep over the same 134336 operations counted 64351 `response.completed`, so the measurement could see this class of event and did not find one. A frame that arrives despite that is worth an operator's attention, not a debug line. (The one way it could become routine is an upstream that ends cancelled turns this way; no path on this SSE leg does, and that is the condition to re-check if these ever start appearing in numbers.)
             code, message = _failure_words(kind, data)
             self._failure = StreamFailure(
+                origin=FailureOrigin.UPSTREAM_EVENT,
                 # Upstream's own event name, kept rather than normalised to `error`. `response.failed` and `response.cancelled` are different things to a client of that API, and a direct leg replays whichever arrived.
                 event=kind,
                 raw_data=event.data,
@@ -518,8 +526,10 @@ class ResponsesAssembler:
             # Delivered as a call on the client's own tool when a name is known. **Without one it is discarded rather than left to fall through**: the fallback renders an empty text block, and an assistant turn carrying one is refused when the client replays it. Discarding loses the model's search request either way; the difference is whether the turn stays replayable.
             TOOL_SEARCH_CALL: TOOL_USE if self._client_search_tool else DISCARDED,
             # The upstream's own account of a **hosted** search: it ran the search and is reporting what it loaded. There is no Anthropic block for that, and the client did not ask for one — it asked for a hosted search, whose whole point is that it happens elsewhere.
+            # Listed explicitly, and it was not until the fallback stopped being "the item's own type". `_close` dispatches on `draft.kind == WEB_SEARCH_CALL`, and that branch only ever ran because `.get(item_type, item_type)` happened to hand back the right string — an implicit dependency on the very fallback that produced issue #2. Naming it here is what keeps the two facts separate: this item **is** recognised, it just has no entry in the map above because its kind is its own name.
+            WEB_SEARCH_CALL: WEB_SEARCH_CALL,
             TOOL_SEARCH_OUTPUT: DISCARDED,
-        }.get(item_type, item_type)
+        }.get(item_type, UNKNOWN)
         key = self._item_key(data)
         # `-1` because on this leg a draft does not own a block number; `_close` takes one from `_emitted` when it actually emits. Deliberately not `0`, which would be a plausible-looking wrong answer if anything ever read it again.
         self._drafts[key] = Draft(index=-1, kind=kind, payload=dict(item))
@@ -572,6 +582,35 @@ class ResponsesAssembler:
         kind = draft.kind
         if draft.kind == DISCARDED:
             # Recognised and deliberately not delivered — see the item map for which items land here and why. The point of naming them is that they never reach the text fallback, which would turn each into an empty block.
+            return ()
+        if draft.kind == UNKNOWN:
+            # **Refused, not rendered and not dropped.** `spec.md`'s response matrix requires `REJECT` for an unknown output item, and spells out that it must not be masked by an empty text block or by a normal terminal — naming, in one line, exactly what the two legs each used to do instead.
+            #
+            # Reported through `failure` rather than raised, because the delivery loop already knows how to end a stream this way and does it correctly: blocks completed before this one go out first — they arrived, and what a client received should not depend on when the refusal landed — then the error frame, then **no terminal**, which `.dev/docs/error-envelope/spec.md` §3.5 requires of a turn that will not succeed. Raising instead would tear the stream, which is the defect rather than the fix.
+            #
+            # `replayable=False`: this is our refusal, not upstream's report, so there is no upstream event to hand a direct client. The framer spells it on either leg.
+            item_type = str(cast(dict[str, Any], data.get("item") or {}).get("type", "")) or "?"
+            logger.warning(
+                "refusing an output item this proxy cannot carry: type=%r item_id=%r",
+                item_type,
+                str(draft.payload.get("id", "")),
+            )
+            self._failure = StreamFailure(
+                event="error",
+                raw_data="",
+                origin=FailureOrigin.PROXY_REFUSAL,
+                info=ErrorInfo(
+                    # **`NOT_IMPLEMENTED`, not `UPSTREAM`.** The category is not "which side did the bytes come from" — it is what the client can do differently, and the two answers differ: `UPSTREAM` means upstream failed, is a 502, and is retryable by default; `NOT_IMPLEMENTED` means this proxy never built the crossing being asked for, is a 501, and explicitly is not. This item is a legal one the SDK declares, and `UNKNOWN` is this side recognising that it cannot convert it — the same capability gap as `TranslatorNotFound`, not an upstream fault. Filing it as `UPSTREAM` would tell a client to retry something that will never work, and send whoever reads it to the wrong side.
+                    #
+                    # The status code is the one this category *would* have carried had the failure happened before the headers went out. Nothing rewrites the response: it was fixed at 200 when upstream's headers arrived, and neither SSE writer reads this field. What carries the meaning after that point is `code`, which stays specific — `.dev/docs/error-envelope/spec.md` §6.4.
+                    #
+                    # `source_format` is left empty on purpose. It names the dialect an error was *read from*, and this one was not read from anything; it is a refusal this proxy formed.
+                    category=ErrorCategory.NOT_IMPLEMENTED,
+                    message=f"upstream sent an output item this proxy cannot convert: {item_type}",
+                    status_code=STATUS_FOR_CATEGORY[ErrorCategory.NOT_IMPLEMENTED],
+                    code="unknown_output_item",
+                ),
+            )
             return ()
         if draft.kind == TOOL_USE:
             self._saw_tool_call = True
