@@ -13,7 +13,9 @@
 **这句话的主语一直是「Anthropic 客户端」，2026-08-30 起代码也是了。** 上面整段只描述 **inbound 为 Anthropic Messages、target 为 Responses 上游**这一条 crossing；规范依据是 [`../anthropic-responses-bridge/hosted-web-search-spec.md`](../anthropic-responses-bridge/hosted-web-search-spec.md) §1 末两段、§8.3 末条、§9.0 末段（均为 2026-08-30 修订）。另外两种情形与上面无关：
 
 - **inbound 就是 `/responses` 的直连请求自己声明的 `{"type":"web_search"}`**：原样发往上游，能力门不判它。它是客户端用上游自己的词汇写给上游的，`model_translation.*` 下的开关按键名管的也不是它。用户 2026-08-30 裁决。
-- **inbound 为 `/responses` 但模型只支持 `/v1/messages`**（`claude-*` 即是）：声明被翻成 Anthropic 拼法后由 `builtin:server-tool-capability` 拒绝，此时**不合成**，改为回客户端自己格式的 error envelope（400，`server_tool_not_executable`）。合成出来的是 Anthropic 块对，Responses 客户端读不懂它。
+- **inbound 为 `/responses` 但模型只支持 `/v1/messages`**（`claude-*` 即是）：`to_anthropic_messages` 对 `tools` **逐字赋值**，裸 `web_search` 过去之后仍是裸的（本行首版写「被翻成 Anthropic 拼法」，是错的），拦住它的是 `builtin:server-tool-capability` 的前缀表不带尾下划线、两种拼法都命中。此时**不合成**，改为回客户端自己格式的 error envelope（400，`server_tool_not_executable`）。合成出来的是 Anthropic 块对，Responses 客户端读不懂它。
+
+还有一条与 issue #1 无关、同批修掉的：**`web_fetch` 声明此前被答以一次假的 `web_search` 失败**（两族共用一个异常类），现按规格 §13 走 `REJECT`；两族混合声明整体 `REJECT`。另需注意 **Anthropic 腿今天不是「剥离声明」而是「拒绝」**——那是用户 2026-08-20 裁决的后果，规格 §8.3 首条与 §10 表格一直漏写到 2026-08-30 才改。
 
 两者此前都走合成，都是 GitHub issue #1：前者撕流，后者在非流式下 200 + Anthropic body 且日志 `ok`。取证与逐条排除见 [`reports/260830-synthesized-reply-non-anthropic-leg-survey.md`](reports/260830-synthesized-reply-non-anthropic-leg-survey.md) 与 [`reports/260830-review-issue1-gate-scope-fix.md`](reports/260830-review-issue1-gate-scope-fix.md)。
 
