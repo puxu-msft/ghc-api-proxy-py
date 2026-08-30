@@ -1,6 +1,6 @@
 # 直连 Responses 透传：实施计划
 
-日期：2026-08-30（v3）
+日期：2026-08-30（v4）
 状态：**主体待实施**；§0 的两项前置已合入 `main`（`7e96adc`）
 权威：[`spec.md`](spec.md)。**本文不定义任何用户可观察行为**——凡本文与 Spec 冲突，以 Spec 为准；凡本文出现 Spec 没有的行为承诺，那是缺陷，应移入 Spec 或删除。
 
@@ -74,18 +74,21 @@
 
 ## 8. 顺序
 
-1. P1、P2（各自可独立合并）
-2. 分流点 + 透传 assembler/framer 骨架，只跑通「无交错、无 replay」的正常流
-3. commit frontier 与交错
-4. replay 合同
-5. `requires_client_action` 与三种 policy
-6. 可观测迁移
-7. 撤销 `ca777df` 的直连腿一半
+1. ~~P1、P2~~ **已完成**（`7e96adc`）
+2. 透传 assembler／framer **骨架**，不接线。只跑单元 smoke，**不宣称任何 issue 测试转绿**
+3. **分流点接线 + 撤销 `ca777df` 的直连腿一半 + 更新那两条测试的断言，同一刀**
+4. commit frontier 与交错
+5. replay 合同（含 §5.2 的三类重开结果与 failure 归一化）
+6. `requires_client_action` 与三种 policy（含 §7.2 的 policy × 最终 ending）
+7. Headers（§9.1）
+8. 可观测迁移
 
-第 2 步之后就应该能让 issue #1 与 issue #2 的直连腿复现用例转绿，**但在第 7 步之前不要动那两条测试的断言**——它们当前钉的是拒绝行为，改断言要与撤销同一刀。
+> **第 3 步为什么必须合成一刀。** v3 把「接线」与「撤销 direct 的 `REJECT`」分成 step 2 与 step 7，同时又说 step 2 之后 issue 测试应转绿、且 step 7 之前不要改它们的断言——三句话不能同时成立。`test_an_output_item_this_assembler_does_not_know_is_refused_not_rendered` 当前**明确断言** direct `custom_tool_call` 以 `error` 收尾、不出现任何 `response.output_item*`；接线一旦生效，正确行为恰好相反，该测试必红。启用 direct 透传与撤销 direct 的拒绝**是同一个 observable switch**，不是两个步骤。
 
 ## 9. 验收
 
 Spec 每一条规范性要求各自需要一条可失败的判据，尤其：多行 data、空 data、未知事件类型、未知字段、id 逐字（含上游不一致）、terminal 整对象、交错 item 不重排、首个原生事件提交前后的 replay 差异、三种 policy 的释放时点、cap 按持有计量。
+
+v5 新增的承重点同样各要一条，它们只在正文出现过：**funded replay 时不收口**（已完成 group 一个字节都不提交）、**policy × 最终 ending** 的三行差异、**已知 native failure code** 的归一化（`server_error` 与 `rate_limit_exceeded` 分别走哪条路）、**`ReopenRefused` 不进上游 taxonomy**、**`Connection` 动态点名的字段被剥离**、**表征元数据按语义判据剥离**（含 `Content-MD5` 这种不在名单里的）。
 
 **判据必须在实现之前独立推导**，与 issue #1 块对那次同样的理由：判据一旦被实现假设污染就不可恢复。
