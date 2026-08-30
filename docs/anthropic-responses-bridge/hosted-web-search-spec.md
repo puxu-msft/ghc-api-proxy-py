@@ -21,7 +21,7 @@
 - **一手证据基线**：[`../hosted-web-search/reports/260820-websearch-upstream-probe.md`](../hosted-web-search/reports/260820-websearch-upstream-probe.md)（本项目 19 次上游实测，gpt-5.5，2026-08-20，原始输出在 `exp/260820-websearch-probe/raw/`）；真实响应样本 `tests/cassettes/responses_web_search_nonstream.json` 与 `tests/cassettes/responses_web_search_stream.json`。参考项目的做法记录在 [`../hosted-web-search/reports/260820-websearch-on-responses-leg.md`](../hosted-web-search/reports/260820-websearch-on-responses-leg.md)，其中「`web_search_call` 的 id 在事件间稳定」一条**已被本项目实测推翻**，不得引用。
 - **证据权重**：§12 逐条标注每项规范性要求的依据是实测、设计裁决，还是仍需探针。凡标注为「仍需探针」的行为，实现时必须按本规格给出的保守分支执行，不得按推断放开。
 - **索引待补**：[README.md](README.md) 的「权威边界」表需要新增本文件一行；本规格作者不代改该索引。
-- **剩余修订项（本文件尚未定稿）**：独立评审 [`../hosted-web-search/reports/260820-review-hosted-web-search-spec.md`](../hosted-web-search/reports/260820-review-hosted-web-search-spec.md) 报 blocker 3、major 9、minor 7。**三条 blocker 与 MJ-3、MJ-6、MJ-9 已处置**（见 §6.3 的成块时点重写、§11 覆盖清单、§14 的裁决登记、§3.4 的 `tool_choice` 清理、配置键命名待对齐、error 裸对象）。**尚未处置**：MJ-1／MJ-2（§12 证据权重表与 §13 探针表未随裁决更新，P12 未登记）、MJ-4（§8.3 与 §3.4 的组合情形未定义）、MJ-5（§9.3 默认值「运行期谓词 vs 冻结字面量」两解并存待收敛）、MJ-7（§5.3 三分支条件不互斥，须改为有序判定）、MJ-8（派生 id 跨轮次重复的唯一性范围未声明）、以及全部 minor。**实现前必须先关闭这些项。**
+- **剩余修订项（本文件尚未定稿）**：独立评审 [`../hosted-web-search/reports/260820-review-hosted-web-search-spec.md`](../hosted-web-search/reports/260820-review-hosted-web-search-spec.md) 报 blocker 3、major 9、minor 7。**三条 blocker 与 MJ-3、MJ-6、MJ-9 已处置**（见 §6.3 的成块时点重写、§11 覆盖清单、§14 的裁决登记、§3.4 的 `tool_choice` 清理、配置键命名待对齐、error 裸对象）。**MJ-7 与 P12 已于 2026-08-30 关闭**：§5.3 的三分支改为有序判定，P12 结案为 `unavailable` 在合法枚举内（三源一致），两者都记在修订记录里。**尚未处置**：MJ-1／MJ-2（§12 证据权重表与 §13 探针表未随裁决更新——P12 本身已结案，但那两张表尚未随之更新）、MJ-4（§8.3 与 §3.4 的组合情形未定义）、MJ-5（§9.3 默认值「运行期谓词 vs 冻结字面量」两解并存待收敛）、MJ-8（派生 id 跨轮次重复的唯一性范围未声明）、以及全部 minor。**实现前必须先关闭这些项。**
 
 ## 修订记录
 
@@ -35,6 +35,7 @@
 | 2026-08-30 | §8.3 新增两条与一处更正、§10 表格与裁决段 | (a) `web_fetch` 与混合声明走 `REJECT`，合成只为 web search——此前两族共用一个异常，fetch 被答成「web_search 失败」；(b) 更正「客户端把 HTTP 错误当传输故障重试三次」的归因，实为模型级重复调用，400 的传输层重试是 0 次；(c) 标注 §10 表格「剥离（不变）」自 2026-08-20 起即已过期；(d) 更正本表上一行所在段落里「声明被翻译成 Anthropic 拼法」——实为 `tools` 逐字赋值 | 实测（web_fetch 被答成 web_search）＋ 客户端源码取证 ＋ 独立评审 |
 | 2026-08-30 | §8.3 首条、§10 表格「声明」行 | **就地改写**两处仍以规范口吻写着「订阅者剥离声明……行为完全不变」的条款——该行为自用户 2026-08-20 裁决起即已不存在。上一次修订只在 §10 加了「表格已过期」的警告框而留着原句，独立评审判为 blocker：给已知错句加警告等于不改，读者仍会照它实现 | 合并前独立评审 |
 | 2026-08-30 | §3.6、§4、§5.4、§8.3 retry 条 | 复评扫出上一轮**漏改的同类**：§3.6 与 §4 仍以规范口吻要求「能力门不通过时剥离声明」，§5.4 仍把拒绝清单叫「剥离清单」，§8.3 的 retry 条仍是绝对句（缺默认值/配置上限/429 例外，且把「没有机制性重试」写成「不会招来重复调用」）。教训记在此：**上一轮只改了被点名的两处而没有机械扫全同类** | 合并前独立评审第二轮 |
+| 2026-08-30 | §5.3 content 表 | (a) 计数口径由「本次响应」改为 §6.3 的**待归因队列**——两条自有推导在 `call→text→call→text` 上给出相反结果，取队列口径因为全局口径要求缓冲整个响应、与块级交付和流式/非流式等价不可兼容；(b) 三分支改为**有序判定**，MJ-7 关闭；(c) P12 结案：`unavailable` 在合法枚举内，三源一致 | 块对验收判据独立推导（发现前两项），协议取证（P12） |
 
 
 ## 1. 范围
@@ -189,16 +190,27 @@ Anthropic `tool_choice` 映射如下，**必须**按表执行：
 
 **`web_search_tool_result` 块**，`content` 按下表：
 
-| 条件 | `content` |
-|---|---|
-| 本次响应中 `web_search_call` **恰好一个**，且后续 message 的 `annotations` 含 `url_citation` | 每条 citation 一项 `{"type":"web_search_result","url":<url>,"title":<title>}`，按出现顺序，按 `url` 去重 |
-| 本次响应中 `web_search_call` **多于一个** | `{"type":"web_search_tool_result_error","error_code":"unavailable"}`，并记 `DEGRADE`（`web_search_results_unattributable`） |
-| 无 `url_citation`，或 `status != "completed"` | `{"type":"web_search_tool_result_error","error_code":"unavailable"}`，并记 `DEGRADE`（`web_search_results_not_representable`） |
+**有序判定，第一个命中者胜**，逐条向下：
+
+| # | 条件 | `content` |
+|---|---|---|
+| 1 | 成块时**待归因队列中多于一个** call | `{"type":"web_search_tool_result_error","error_code":"unavailable"}`，并记 `DEGRADE`（`web_search_results_unattributable`） |
+| 2 | 该 call 的 `status != "completed"` | 同上 error 形态，并记 `DEGRADE`（`web_search_results_not_representable`） |
+| 3 | 该文本块无 `url_citation`（`annotations` 为空数组**或键缺失**，两者同等处置） | 同上 error 形态，并记 `DEGRADE`（`web_search_results_not_representable`） |
+| 4 | 以上皆不命中 | 每条 citation 一项 `{"type":"web_search_result","url":<url>,"title":<title>}`，按出现顺序，按 `url` 去重 |
+
+> **两处 2026-08-30 修订，都是本规格内部两条自有推导打架，不涉及用户裁决。**
+>
+> **（一）计数口径统一到 §6.3 的队列，本表原先的「本次响应中」作废。** 原文按**全局**计数（「本次响应中 `web_search_call` 恰好一个／多于一个」），而 §6.3 的归因规则按**待归因队列**计数。两者在 `call#1 → text#1 → call#2 → text#2` 上给出**相反**结果：全局口径下两对块都落 error，队列口径下两对各拿各的 citations。取队列口径，理由是 §6.3 自己写下的那条，且它是决定性的——流式在处理第一对块时**根本不知道**后面还有没有第二个 call，要用全局计数就必须缓冲到 `response.completed`，那既违背本项目的块级交付，又让流式与非流式分叉，而 §6.3 选这个成块边界的全部理由正是「两者必然等价且不需要缓冲整个响应」。**全局口径与 §6.3 不可兼容，不是措辞差异。**
+>
+> **（二）改为有序判定，MJ-7 就此关闭。** 原三行条件**不互斥**：`status != "completed"` 的单 call 同时命中第一行与第三行；多 call 且无 citation 同时命中第二行与第三行。规格自己已把这一条登记为 MJ-7 并标注「实现前必须关闭」，一直没关。上面的顺序是我的推导：组级判断（队列里有几个）先于个体判断（这一个 call 的 status），再先于文本块侧的判断（有没有 citation），最后才是唯一的非 error 出口。三条 error 分支的 `content` **完全相同**，顺序只决定记哪一条 `DEGRADE` 编码——而那正是两条 error 分支唯一可区分的地方，所以顺序必须是确定的，不能留给实现。
 
 - error 形态**必须是裸对象**，`content` 直接就是 `{"type":"web_search_tool_result_error",...}`，**不得**包成单元素数组。依据是在产的摊平实现：`src/app/pipeline/subscribers/server_tools.py` 的 `_failure_of()` 只认 dict，包成数组会让 §5.4 的摊平静默产出 `[web_search results omitted]`，把一个「结果不可得」说成「什么都没有」。
 - **`encrypted_content` 必须省略**，不得填空串、不得填占位串。省略是「我们没有这个句柄」，占位串是「这里有一个句柄」——后者是断言，且是假的。这一条使合成块不满足 Anthropic 对该项的完整 schema；这是**有意的**，代价由 §5.4 的摊平吸收，且这些块永不回喂 Anthropic 上游。
 - **多于一个 call 时不做归因**：citation 与 call 无关联字段，猜一条关系比不给更糟。这一分支的正确性依赖「一个响应可以有多个 `web_search_call`」这一未探针形态（§12 P6），实现时必须按此保守分支执行。
-- **无结果时用 error 形态而不是 `content: []`**：搜索确实执行了、结果确实进了模型上下文并体现在正文里，说「返回了零条结果」是与事实相反的断言；说「结果不可得」对客户端为真——代理确实拿不到那份清单。`error_code` 取 `unavailable`，**该取值是否在 Anthropic 该块的合法枚举内，实现前必须核对**（新增探针项 P12）。
+- **无结果时用 error 形态而不是 `content: []`**：搜索确实执行了、结果确实进了模型上下文并体现在正文里，说「返回了零条结果」是与事实相反的断言；说「结果不可得」对客户端为真——代理确实拿不到那份清单。`error_code` 取 `unavailable`。
+
+  > **P12 已结案（2026-08-30），`unavailable` 在合法枚举内**，语义为「An internal error occurred」。完整枚举六项：`invalid_tool_input`、`unavailable`、`max_uses_exceeded`、`too_many_requests`、`query_too_long`、`request_too_large`。三源逐字一致——Anthropic 官方文档、anthropic Python SDK 1.0.0、`@anthropic-ai/sdk` 0.116.0——并已核版本漂移（0.59.0 只有五项、缺 `request_too_large`，但 `unavailable` 三版皆在，故该肯定判断不需版本限定）。**证据等级：强，可直接据此实现。** 同一次取证另带回两条独立佐证：官方文档逐字确认 error 是裸对象而非数组（与本节上一条一致），以及**空列表在协议里另有语义**——「搜到了、零条结果」，这正是本条不用 `content: []` 的理由在协议侧的确认。取证见 [`../hosted-web-search/reports/260830-block-pair-acceptance-criteria.md`](../hosted-web-search/reports/260830-block-pair-acceptance-criteria.md)。
 - 搜索块**不得**设置 `stop_reason` 为 `tool_use`。它不是客户端要执行的工具调用，客户端无事可做。`stop_reason` 仍由是否存在真正的 `function_call` 决定。
 - 这一对块与相邻的答案文本块**不得**合并，各占独立 block index。
 - 每对块**必须**记一条 `DEGRADE` 性质的 `ConversionFact`，编码 `server_tool_partially_representable`，携带 `output_index`、`status`、结果条数与 `encrypted_content` 缺失的事实。**不得**记为已保真。
