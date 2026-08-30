@@ -32,6 +32,7 @@
 | 2026-08-24 | §3.4、§14 D1 | 第三取值由 `drop_web_search`（整条声明剥离）改为 `empty_result`（合成 `content: []` 的有效结果）。原取值在本客户端上做不到它承诺的事——剥离后模型凭记忆作答而客户端标为搜索结果 | 用户裁决 |
 | 2026-08-24 | 本表 | 建立修订记录 | 用户裁定 spec 不冻结，修订须可审计 |
 | 2026-08-30 | §1 新增末两段、§8.3 新增末条、§9.0 新增末段 | 把「能力门只在 Anthropic→Responses 这条 crossing 上求值」与「§8.3 的合成只在客户端腿是 Anthropic Messages 时成立」写成规范性条款。原文只在 §1 说了覆盖范围是 Anthropic 客户端，没有把它写成对**能力门与合成**的约束：实现遂按 `target_format`（上游腿）判门，对直连 Responses 客户端也击发；合成侧则完全没有腿判据 | GitHub issue #1（两条独立路径，各自撕流与静默错协议，均已实测）＋ 用户 2026-08-30 裁决「直连 Responses 的声明放行到上游」 |
+| 2026-08-30 | §8.3 新增两条与一处更正、§10 表格与裁决段 | (a) `web_fetch` 与混合声明走 `REJECT`，合成只为 web search——此前两族共用一个异常，fetch 被答成「web_search 失败」；(b) 更正「客户端把 HTTP 错误当传输故障重试三次」的归因，实为模型级重复调用，400 的传输层重试是 0 次；(c) 标注 §10 表格「剥离（不变）」自 2026-08-20 起即已过期；(d) 更正本表上一行所在段落里「声明被翻译成 Anthropic 拼法」——实为 `tools` 逐字赋值 | 实测（web_fetch 被答成 web_search）＋ 客户端源码取证 ＋ 独立评审 |
 
 
 ## 1. 范围
@@ -315,11 +316,16 @@ Anthropic `tool_choice` 映射如下，**必须**按表执行：
 
   > **2026-08-22 更正。** 本条起草时写的是「**必须**剥离 web search 声明、同步清理指向它的 `tool_choice`……理由：与 Anthropic 腿保持同一取舍——剥掉一个能力，好过整轮失败」。用户 2026-08-20 裁决「去除 drop 策略，drop 在这里行为远不如 mock_result」推翻了它，理由是 Claude Code 把 web search 发成独立子请求（`tools` 只有搜索一项，190/190 实测），剥掉它唯一的工具后请求**不会失败**——模型凭记忆作答，而客户端无条件把回复拼上 `Web search results for query:` 抬头。剥离在这条腿上产出的不是「少一个能力」，是**把记忆当搜索结果交付**。
 - **例外且优先**：§3.4 的 `allowed_domains` / `blocked_domains` 非空时走 `REJECT`，该条优先于本节。它拒绝的原因不是能力缺失，而是语义反转：继续执行会把一条明确的收紧约束变成 no-op。
+- **合成只为 web search，`web_fetch` 走 `REJECT`**（2026-08-30 补入，实现已落地）。本节的失败结果固定是 `server_tool_use name="web_search"` 配 `web_search_tool_result`，它只能替 web search 说话。此前 `builtin:server-tool-capability` 对 `web_search*` 与 `web_fetch*` 抛同一个异常，于是一个 `web_fetch_20250910` 声明被答以 HTTP 200 + 一次「web_search 失败」，query 还是那条 fetch 提示——**客户端从未声明的工具，被报告成跑过并失败了**（2026-08-30 实测）。现按 §13 走 `REJECT`。**声明同时含两族时整体 `REJECT`**：合成只能替搜索那一半说话，答复它等于让 fetch 那一半从回复里消失。此条为本项目推导，§13 未覆盖组合情形。
+
+  > 三条独立理由支持 `web_fetch` 不合成，都不是「web_fetch 不重要」（取证 [`../hosted-web-search/reports/260830-claude-code-web-fetch-client-behaviour.md`](../hosted-web-search/reports/260830-claude-code-web-fetch-client-behaviour.md)）：Claude Code 的 WebFetch 是**客户端自己执行**的普通 function tool，从不发 `web_fetch*` server tool 声明，所以这条合成对在用的唯一客户端不可达；使合成在 web search 上正确的那套论证（子请求只带一个工具、客户端无条件贴结果抬头）在 fetch 上**整体失效**而非削弱；且 `web_fetch_tool_result` 在该客户端里**没有消费者**，落渲染器 `default` 分支只会得到一个空白轮次——所以「给它一个形态正确的失败结果」同样无用。
+
+- **「客户端会把 HTTP 错误当传输故障重试三次」是错误归因，2026-08-30 更正。** 该客户端的传输层重试表覆盖 408／409／401／429／5xx，上限 10 次，**400 是 0 次**。transcript 里那 3 次是**主对话模型自己又调用了 3 次 `WebSearch`**，每次产生一个新的子请求。**取舍不变**——3 次模型级重复调用同样是 3 个来回，且一个失败的 tool result 不会招来重复调用，而一个 error 字符串会——但机制必须写对，否则下一个人拿 5xx 一对照就发现它是假的。凡引用本条理由处一律按此措辞。
 - **合成的前提是客户端腿读得懂它**（2026-08-30 补入）。本节规定的失败结果是一对 **Anthropic** content block，所以它**必须**只在客户端腿是 Anthropic Messages 时产出。客户端腿是别的协议时**不得**合成，**必须**让该拒绝按既有 Error 契约归一为客户端自己格式的 error envelope。
 
-  > 这不是假想情形。一个 inbound 为 `/responses`、模型却只支持 `/v1/messages` 的请求（`claude-*` 即是）会被路由到 Anthropic 上游，其声明被翻译成 Anthropic 拼法，然后由 `builtin:server-tool-capability` 在那条腿上拒绝——于是本节的合成在一个 Responses 客户端上触发。交付侧按**客户端**腿选 framer，两种结局都是错的：流式在 200 已发出之后抛 `ValueError: no Responses item shape for block kind 'server_tool_use'` 撕流；非流式返回 200、日志记 `ok`、把一份 Anthropic message body 交给 Responses 客户端，全程没有任何一处说出这件事。两者均于 2026-08-30 实测复现。
+  > 这不是假想情形。一个 inbound 为 `/responses`、模型却只支持 `/v1/messages` 的请求（`claude-*` 即是）会被路由到 Anthropic 上游；`to_anthropic_messages` 对 `tools` 是**逐字赋值**，裸 `web_search` 过去之后仍是裸的（本行 2026-08-30 首版写成「被翻译成 Anthropic 拼法」，是错的，独立评审当场指出），拦住它的是 `builtin:server-tool-capability` 的前缀表不带尾下划线、两种拼法都命中——于是本节的合成在一个 Responses 客户端上触发。交付侧按**客户端**腿选 framer，两种结局都是错的：流式在 200 已发出之后抛 `ValueError: no Responses item shape for block kind 'server_tool_use'` 撕流；非流式返回 200、日志记 `ok`、把一份 Anthropic message body 交给 Responses 客户端，全程没有任何一处说出这件事。两者均于 2026-08-30 实测复现。
   >
-  > 「答复而非失败」的理由（§8.3 上文、Claude Code 会把 HTTP 错误当传输故障重试三次）本身就是**对某一个客户端**成立的，所以它推不出「对任何客户端都合成」。一个读不懂这份合成的客户端，从合成里得不到任何东西。
+  > 「答复而非失败」的理由（§8.3 上文）本身就是**对某一个客户端**成立的，所以它推不出「对任何客户端都合成」。一个读不懂这份合成的客户端，从合成里得不到任何东西。
 
 ### 8.4 上游返回未请求的 `web_search_call`
 
@@ -394,12 +400,14 @@ Anthropic `tool_choice` 映射如下，**必须**按表执行：
 
 **裁决：订阅者不改。** 它的门控判据已经把 Responses 腿排除在外，本规格就是它 docstring 里说的那个「自己的答案」。具体分工：
 
+> **⚠️ 本节表格左栏反复出现的「剥离（不变）」已经过期，2026-08-30 更正。** 用户 2026-08-20 裁决「去除 drop 策略，drop 在这里行为远不如 mock_result」时，订阅者就从「剥离声明」改成了「抛异常、由 `handle()` 合成失败结果」；§8.3 当时跟着改了，本节表格与 §13 没有跟，于是这两处继续按一个已不存在的实现描述系统。现在的分工是：`web_search` → 抛 `WebSearchNotExecutable` → 合成块对；`web_fetch` → 抛 `TranslationRefused` → error envelope（§8.3 末条）。**历史块摊平不受影响，那一半始终是「不变」。**
+
 | | Anthropic Messages 腿 | Responses 腿 |
 |---|---|---|
 | 声明 | 订阅者剥离 + 清理悬空 choice + INFO 日志（不变） | 本规格 §3 映射为 `{"type":"web_search"}`；能力门不通过时 §8.3 剥离 |
 | 历史 server-tool blocks | 订阅者摊平成文本（不变） | **converter 摊平成文本**（§5.4；今天是 `REJECT`） |
 | 上游返回的 server-tool item | 不适用（上游不会产） | 本规格 §5.3 降级成文本 |
-| `web_fetch` | 订阅者剥离 + 摊平（不变） | 声明 `REJECT`（§13）；历史块摊平 |
+| `web_fetch` | ~~订阅者剥离 + 摊平（不变）~~ → **订阅者 `REJECT` + 摊平**（2026-08-30 更正） | 声明 `REJECT`（§13）；历史块摊平 |
 
 三条硬性要求：
 
