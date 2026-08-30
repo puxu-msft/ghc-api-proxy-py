@@ -1,7 +1,7 @@
 # 直连 Responses 路径：原生透传产品规格
 
 日期：2026-08-30
-状态：**DRAFT v3 — 待复评**。实现未开始。
+状态：**DRAFT v4 — 待复评**。主体未开始；§3.1 的两处前置缺陷已实现并合入 `main`（`7e96adc`）。
 定义域：**inbound 与 target 同为 `openai-responses`**（`route.translation_required is False`）。本规格不覆盖任何其他路由。
 
 > **本文是活文档，不冻结。** 新裁决、实测或发现与本文冲突时当场修订，每次修订记入 §12。
@@ -129,7 +129,22 @@ cap 超限、客户端取消、客户端 deadline 等人写文档列为不可继
 | **clean EOF 且无终局** 在首个原生事件提交前 | 按既有 taxonomy 视作可重试的截断。用尽预算后仍无终局时，写 proxy error（§8），**不得**合成成功 terminal |
 | **replacement attempt 自己失败**（建流前 HTTP 失败／被拒／draining 返回 `None`） | 客户端看见的是 **replacement 的**失败，不是旧 attempt 的。§5 已规定 replay 时丢弃旧 attempt 的 terminal／ids／usage，所以回头重放旧 failure 会交付一份已被本代理判定作废的记录。若 replacement 的失败本身不可成帧，则写 proxy error |
 
-**这三条都是本规格的推导**（§2.3），不是用户裁决；它们与既有 retry taxonomy 的关系是「复用」而非「覆盖」。
+### 5.2 native failure 进入 taxonomy 的 adapter
+
+「复用既有 taxonomy」**不能代替一个可执行的输入**，而 v3 就停在了那里。既有入口是 `replay_reason(error: Exception)`，最终落到 `reason_for(error, status_code=...)`，它只认 exception 与 HTTP status；原生 failure 是一个 `StreamFailure`，两者都不是。所以本规格必须给出归一化，否则「taxonomy 判为可重试」没有可求值的东西。
+
+**归一化结果只能是既有三个 `RetryReason` 之一或 `None`，不新增枚举值。**
+
+| 输入 | 归一化 | 理由 |
+|---|---|---|
+| `response.cancelled` | `None`（不重试） | 取消是一个**决定**而非故障；再试一次的输入完全相同 |
+| `response.failed` / `error` | **当前一律 `None`** | 判据只能是上游自己的 `code`，而本项目**没有该 code 集的语义表**——五份 cassette 里这三种事件出现零次（`formats/openai_responses.py` 的既有记录）。在有实测之前，把未知 code 猜成可重试会让一个永久失败耗尽整个预算 |
+
+**这是保守分支，不是终局。** 一旦有实测能把某个 `code` 认定为服务端瞬时错误，按 §12 修订本表放宽为 `SERVER_ERROR`；那属于「派生表按评审共识修正」，不需要用户裁决。
+
+**replacement attempt 自身失败**（建流前的 HTTP 失败、拒绝、draining 返回 `None`）走的是**另一条路**：它是一个 exception，直接进既有 `replay_reason`，无需本表。它最终不可重试时，客户端收到的 carrier 是**客户端方言的 SSE error**（§8），attribution 是 **replacement 的**失败。
+
+**这四条都是本规格的推导**（§2.3），不是用户裁决。
 
 ## 6. 各事件与各字段的处置
 
@@ -169,11 +184,11 @@ cap 超限、客户端取消、客户端 deadline 等人写文档列为不可继
 
 ### 7.1 `until-tool-use` 的释放判据
 
-**判据是 `requires_client_action(item, original_request)`：该 output item 是否要求客户端提交与之对应的 tool output 或 approval，模型回合才能继续。**
+**判据是 `requires_client_action(item)`：该 output item 是否要求客户端提交与之对应的 tool output 或 approval，模型回合才能继续。**
 
 **不是** Anthropic `BlockKind.TOOL_USE`（本腿没有 Anthropic kind），**也不是**「类型名以 `_call` 结尾」。
 
-当前正例：`function_call`、`custom_tool_call`、`computer_call`、`local_shell_call`、`apply_patch_call`、使用 local environment 的 `shell_call`、请求声明 `execution: "client"` 的 `tool_search_call`、等待客户端回答的 `mcp_approval_request`。
+当前正例：`function_call`、`custom_tool_call`、`computer_call`、`local_shell_call`、`apply_patch_call`、`item.environment` 为 local 的 `shell_call`、`item.execution == "client"` 的 `tool_search_call`、等待客户端回答的 `mcp_approval_request`。
 
 当前反例（上游自行执行并在同一响应内给出结果）：`web_search_call`、`file_search_call`、`code_interpreter_call`、`image_generation_call`、server-executed `tool_search_call` 与 MCP call。
 
@@ -184,6 +199,26 @@ cap 超限、客户端取消、客户端 deadline 等人写文档列为不可继
 **未知类型**：**不得**默认 `false`。默认 false 会把客户端所需的行动扣押到 terminal，并再次让「代理认识的集合」成为客户端能力的上界。保守视为**需要释放**，并记一条 `predicate unknown` 的可观测事实（§10）；wire 事件本身仍逐字。
 
 触发**只发生在**该 action item 完成且已到达安全 commit frontier 时；触发后永久转为逐前缀释放，保持今天 `until-tool-use` 的一次性状态变化语义。
+
+### 7.2 policy × ending
+
+`block` 之外的两种 policy 会持有**已完成**的 item group，而 proxy ending（cap、deadline、预算耗尽的 EOF、transport tear）可能先于上游 terminal 到达。v3 只裁了未闭合 suffix 的去向，没裁这些**完整**group 的去向，于是同一段文字同时要求「保留它们」「等 terminal 才发」「立刻写 error」——三者互斥。
+
+**裁定：`full` 的「response 结束」指任意最终 ending，不限于上游 terminal。** 任何 ending 到达时，一律按同一顺序收口：
+
+1. 丢弃未闭合 item 的 suffix（§3）
+2. 按**原序**提交 control 与所有已完成的安全 group
+3. 提交上游 terminal／failure（若有），否则提交 proxy error（§8）
+
+| ending | `block` | `until-tool-use`（未触发） | `full` |
+|---|---|---|---|
+| 上游 terminal／failure | 已逐前缀提交 | 按上表收口 | 按上表收口 |
+| cap／deadline／预算耗尽 EOF／tear | 已提交部分保留，写 error | 按上表收口，末步写 error | 按上表收口，末步写 error |
+| 客户端取消／下游写失败 | — | **例外：无可写通道，不收口** | **例外：无可写通道，不收口** |
+
+**取「先提交已完成内容再写 error」而不是「全丢」**，因为那些 group 在语义上已经完整——它们是模型已经生成完的工具调用或文本，丢掉它们并不比交付它们更诚实，而「直到 response 结束才交付」这条承诺仍然成立。
+
+**不得**沿用现有 `stream.py` 各 ending 的现状作为答案：那里的 exception／client-deadline 分支不 flush 缓冲块，clean EOF 分支却先 `session.finish()`，抄任何一条都会让输出取决于失败**以何种形式**到达，而不是取决于 policy。
 
 ## 8. 失败、截断与容量
 
@@ -197,7 +232,7 @@ cap 超限、客户端取消、客户端 deadline 等人写文档列为不可继
 
 **当前行为的准确陈述**：`inference.py` 先 `response.json()`（并拒绝非 object 的 JSON），`response_payload` 在 `translation_required is False` 时返回同一个 dict，随后 `JSONResponse(payload)` 再序列化。因此**未知字段按 JSON value 保留，但 raw bytes、空白、key 顺序、数字字面形式、重复键与原 `Content-Type` 都不保留**。v1 写的「今天已是 body 原样返回」按 §3 的逐字读法是错误陈述。
 
-**本规格裁定**：合法 Responses JSON object 按 **JSON value 保真**，所有未知字段保留，允许序列化拼法变化；HTTP status 原样；response headers 按一张明确的直连腿过滤表保留语义头（`request-id`、rate-limit、`retry-after` 等）。**该过滤表本规格未列，是 §11 的未闭合项。**
+**本规格裁定**：合法 Responses JSON object 按 **JSON value 保真**，所有未知字段保留，允许序列化拼法变化；HTTP status 原样；response headers 见 §9.1。
 
 若将来要 byte-exact，必须在 JSON parse 之前直接交付 `response.content` 与原 content type，并另定非 object／malformed 成功 body 的行为。
 
@@ -209,6 +244,8 @@ cap 超限、客户端取消、客户端 deadline 等人写文档列为不可继
 
 - **必须剥离**：hop-by-hop 头（`Connection`、`Keep-Alive`、`Transfer-Encoding`、`TE`、`Trailer`、`Upgrade`、`Proxy-Authenticate`、`Proxy-Authorization`）——HTTP 规范要求，不是产品选择。
 - **必须由本代理重建**：`Content-Length`（流式重新成帧后不再成立）、`Content-Encoding`（若本代理已解压）、流式的 `Content-Type`（`text/event-stream`）。
+- **必须剥离 `Connection` 逐跳清单里点名的头**。`Connection: X, Y` 把 `X` 与 `Y` 也声明为逐跳，所以固定名单不够——**必须先读 `Connection` 的值，把它列出的每个字段一并剥掉**，再剥 `Connection` 自己。
+- **必须剥离因 body 变换而失效的表征元数据**：`ETag`、`Last-Modified`、`Content-Digest`／`Digest`、`Repr-Digest`、`Content-Range`。非流式会重新序列化 JSON（§9），流式会重新成帧，这些头描述的是上游那份字节，转发过去就是断言一个不再为真的摘要。
 - **其余一律转发**，包括本代理不认识的头。理由与 §2.1 同源：客户端本来就是冲着这个上游去的，`request-id`、rate-limit 系列、`retry-after` 等决定它的关联、退避与限流行为，剥掉它们是把代理的无知强加给客户端。
 
 > **这与 cassette 录制用 allowlist 的既有教训不冲突，两者场景相反。** 那条教训（denylist 让三个识别性 header 漏进磁盘）针对的是**把上游响应写进版本库**，防的是账号标识被提交；这里是**转发给发起请求的客户端本人**，它对上游的可见性本就不低于我们。没有具体危害就不加防护，是用户既有的安全立场。
@@ -225,9 +262,9 @@ cap 超限、客户端取消、客户端 deadline 等人写文档列为不可继
 
 ## 11. 未闭合项（归本规格所有）
 
-1. §3.1 两处既有缺陷已实现（见 `worktree-260830-sse-frame-fidelity` 的 `8986bbf`），待合并。
+**当前为空。** v4 把此前挂在这里的产品分叉全部移入正文定案：header 合同 → §9.1；`requires_client_action` 的数据来源 → §7.1（item 自带，无需请求侧通路）；policy × ending → §7.2；native failure 的 taxonomy 输入 → §5.2。
 
-> 已关闭：response header 合同移入正文 §9.1；`requires_client_action` 的数据来源问题消失——item 自身携带 `execution`／`environment`，不需要任何请求侧通路。
+实施状态不属于本节，见 [`plan.md`](plan.md)。
 
 > 以下**不在**本规格定义域，已从待办移出：`function_call_output` 在响应 output 中的出现与翻译，归 `anthropic-responses-bridge/spec.md`（见 [`reports/260830-known-set-divergence.md`](reports/260830-known-set-divergence.md)）；本腿无条件携带它。
 
@@ -236,5 +273,6 @@ cap 超限、客户端取消、客户端 deadline 等人写文档列为不可继
 | 日期 | 条款 | 变化 | 触发 |
 |---|---|---|---|
 | 2026-08-30 | 全文 | 初稿 | GitHub issue #1／#2；用户裁决；方案评审的 blocker-01 |
+| 2026-08-30 | §5.2、§7.1、§7.2、§9、§9.1、§11、文首 | **v4。** (a) §7.2 新增 policy × ending 表——v3 只裁了未闭合 suffix，没裁 `full`／未触发 `until-tool-use` 持有的**已完成** group 遇 proxy ending 时的去向，那里三条规范互斥；裁定为「丢 suffix → 按原序提交已完成 group → 提交 terminal 或 error」，客户端取消与下游写失败显式例外；(b) §5.2 新增 native failure → taxonomy 的归一化表——v3 的「复用既有 taxonomy」不是复用而是留空，因为 `replay_reason` 只认 exception 与 HTTP status，而原生 failure 两者都不是；当前保守判为一律不重试并写明放宽条件；(c) §9.1 补 `Connection` 逐跳清单点名的字段与因 body 变换失效的 validator／digest；(d) 同步 v3 只改了解释段而漏掉的 signature、正例、§9 旧句、§11 与文首状态 | [`reports/260830-review-spec-round3.md`](reports/260830-review-spec-round3.md)：blocker 2、major 2 |
 | 2026-08-30 | §3、§5.1、§7.1、§9.1、§11 | **v3。** (a) §3 的「每一个事件」是不可兑现的全称——未闭合 item 遇 terminal／failure 时，完整单位／逐事件保真／不重排三者不可兼得；改为限定在「可提交的完整 item group + control + terminal」，并写明未闭合尾巴的丢弃时点与「terminal 不证明未知 lifecycle 已完成」；(b) §5.1 补三个此前无定义的状态转换（原生 failure、无终局 EOF、replacement 自身失败）；(c) §7.1 更正判据来源——响应 item 自带 `execution`／`environment`，v2 写的「需回查原始请求」是对上一轮评审的误读；(d) §9.1 把 header 合同写进正文并覆盖流式，来源部分援引用户亲笔裁决、选择部分标为本规格推导 | [`reports/260830-review-spec-round2.md`](reports/260830-review-spec-round2.md)：blocker 3、major 1 |
 | 2026-08-30 | §2、§3、§4、§5、§6、§7、§8、§9、§10、§11 | **v2 全面重写。** (a) §3 的「data 逐字」与「重编 sequence_number／output_index」自相矛盾——那两个字段就在 data 里；改为一律不改写，并新增 §4 的 commit frontier 保持全局顺序而非重排；(b) §2 拆开 provenance，用户 8/30 原话只覆盖「不得以不认识为由拒绝」，其余归本规格推导；(c) §5 新增 control event commit 时点与 attempt replay 合同（v1 完全缺失）；(d) §7.1 定案 `requires_client_action`，v1 留给实现是错的——同一 `tool_search_call` 会因请求的 `execution` 而相反；(e) §3 的可行性论证有两个实跑反例（多行 payload 重放丢行、CRLF 帧被合并），改为先修再依赖；(f) §9 更正「今天已是 body 原样」的不实陈述；(g) §10 新增可观测合同，v1 §1 的「唯一消费者是 framer」被源码反例推翻；(h) §11 关闭原第 3、4 项（cap 口径与 carrier 门已有确证），移出定义域外项 | [`reports/260830-review-spec.md`](reports/260830-review-spec.md)：blocker 3、major 5，全部采纳 |

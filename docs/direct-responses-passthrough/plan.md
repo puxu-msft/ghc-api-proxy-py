@@ -1,7 +1,7 @@
 # 直连 Responses 透传：实施计划
 
-日期：2026-08-30（v2）
-状态：**待实施**，等 Spec v2 复评通过
+日期：2026-08-30（v3）
+状态：**主体待实施**；§0 的两项前置已合入 `main`（`7e96adc`）
 权威：[`spec.md`](spec.md)。**本文不定义任何用户可观察行为**——凡本文与 Spec 冲突，以 Spec 为准；凡本文出现 Spec 没有的行为承诺，那是缺陷，应移入 Spec 或删除。
 
 > **v1 已作废并重写。** 它规定「只保存 `done.item` 的最终快照、重发 `added` + `done`、继续 mint id、沿用 framer 的 output index」，而 Spec v2 要求保存全部 item 专有事件、不得 mint id、terminal 整个对象逐字。照 v1 实施会直接违反 Spec。作废理由见 [`reports/260830-review-spec.md`](reports/260830-review-spec.md) major-08 与 [`reports/260830-review-plan.md`](reports/260830-review-plan.md)；两份报告作为时点记录不改。
@@ -10,12 +10,12 @@
 
 它们是整条路的前置，且**两条腿共用**，所以先单独落地、单独验证。
 
-| # | 缺陷 | 判据 |
+| # | 缺陷 | 状态 |
 |---|---|---|
-| P1 | `_report_failure` 对含换行的 payload 写成一行 `data:` 加一行裸文本，客户端只剩第一行 | 新增接受 `(event, data)` 的 raw-text SSE encoder，按 `data.split("\n")` 每段一条 `data:`；测试用多行 payload 走一个完整往返 |
-| P2 | `read_events` 的 frame separator 固定 `b"\n\n"`，两个合法 CRLF 帧被合并成一个事件 | 修正边界判定；测试喂两个 CRLF 帧，断言得到**两个** `SseEvent` |
+| P1 | `_report_failure` 对含换行的 payload 写成一行 `data:` 加一行裸文本，客户端只剩第一行 | **已完成**（`7e96adc`）：新增 `encode_frame(event, data)`，每行一条 `data:` |
+| P2 | `read_events` 的 frame separator 固定 `b"\n\n"`，两个合法 CRLF 帧被合并成一个事件 | **已完成**（`7e96adc`）：分隔符改为两个连续行尾，用 atomic group 防回溯把单个 `\r\n` 拆成两个 |
 
-P1、P2 各自是完整语义单元，可先于主体合并。
+两项都已变异验证：把分隔符改回 LF-only，CRLF 与 CR 两个参数变红；把 encoder 改回单行 `data:`，多行用例变红。
 
 ## 1. 分流点
 
@@ -44,13 +44,23 @@ P1、P2 各自是完整语义单元，可先于主体合并。
 
 ## 4. `requires_client_action`
 
-按 Spec §7.1 实现，判据取自**原始请求的 tool declaration 与 execution mode** 加上响应 item type。所以需要一条从请求侧到交付侧的数据通路（Spec §11 第 3 项，通路本身待定）。
+按 Spec §7.1 实现，签名是 `requires_client_action(item)`——**判据全部读 item 自身**（`item.execution`、`item.environment`），**不需要任何请求侧通路**。v2 写的那条数据通路是对评审意见的误读，已删。
 
 实现可以维护一张由 SDK 版本导出的表，但**表是判据的当前编码，不是判据本身**；未知类型按 Spec 保守视为需要释放并记 `predicate unknown`。
 
+还要实现 Spec §7.2 的 policy × ending 收口顺序：任何 ending 到达时一律「丢未闭合 suffix → 按原序提交已完成 group → 提交 terminal 或 error」，客户端取消与下游写失败例外。**不得**沿用现有 `stream.py` 各 ending 是否 flush 的现状。
+
 ## 5. Replay 与 commit
 
-按 Spec §5 实现 commit frontier 与 attempt 状态重置。这一块**没有现成代码可改**——现有 replay 判据读的是「客户端是否已看到 semantic bytes 与 committed block」，本腿要换成「首个原生事件是否已提交」。
+按 Spec §5 实现 commit frontier 与 attempt 状态重置。现有 replay 判据读的是「客户端是否已看到 semantic bytes 与 committed block」，本腿换成「首个原生事件是否已提交」。
+
+**还要实现 Spec §5.2 的 adapter**：把 `StreamFailure` 归一化成既有 `RetryReason | None` 再交给现有 taxonomy，**不新增枚举值**。当前表判一律不重试（没有上游 code 的语义表），放宽条件写在 Spec 里。replacement 自身失败走另一条路——它是 exception，直接进既有 `replay_reason`。
+
+## 5.1 Headers
+
+按 Spec §9.1 实现，流式与非流式同一合同。当前两处都不转发任何上游语义头，所以这是**新增行为**，各自要测试。
+
+算法顺序要注意：**先读 `Connection` 的值把它点名的字段一并剥掉**，再剥固定的逐跳名单，再剥因 body 变换失效的 validator／digest（`ETag`、`Last-Modified`、`Content-Digest`、`Repr-Digest`、`Content-Range`），其余转发。流式只取第一次 HTTP 200 attempt 的头，replacement 不得覆盖。
 
 ## 6. 可观测
 
