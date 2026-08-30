@@ -31,6 +31,7 @@
 |---|---|---|---|
 | 2026-08-24 | §3.4、§14 D1 | 第三取值由 `drop_web_search`（整条声明剥离）改为 `empty_result`（合成 `content: []` 的有效结果）。原取值在本客户端上做不到它承诺的事——剥离后模型凭记忆作答而客户端标为搜索结果 | 用户裁决 |
 | 2026-08-24 | 本表 | 建立修订记录 | 用户裁定 spec 不冻结，修订须可审计 |
+| 2026-08-30 | §1 新增末两段、§8.3 新增末条、§9.0 新增末段 | 把「能力门只在 Anthropic→Responses 这条 crossing 上求值」与「§8.3 的合成只在客户端腿是 Anthropic Messages 时成立」写成规范性条款。原文只在 §1 说了覆盖范围是 Anthropic 客户端，没有把它写成对**能力门与合成**的约束：实现遂按 `target_format`（上游腿）判门，对直连 Responses 客户端也击发；合成侧则完全没有腿判据 | GitHub issue #1（两条独立路径，各自撕流与静默错协议，均已实测）＋ 用户 2026-08-30 裁决「直连 Responses 的声明放行到上游」 |
 
 
 ## 1. 范围
@@ -38,6 +39,10 @@
 本规格覆盖：Anthropic Messages 客户端声明 web search server tool，请求经本项目路由到 **Responses 上游**并由上游 hosted web search 真正执行，其结果回到 Anthropic 客户端的完整往返。
 
 本规格**不**覆盖，且明确划出（§13 展开理由）：`web_fetch`、`code_execution`、上游枚举里其余 builtin 工具、`/v1/messages` 直连 Anthropic 腿的任何行为改变、`/v1/messages/count_tokens` 腿、反应式 400 剥离重试、Responses continuation 载体。
+
+**本规格的所有规范性行为只在一条 crossing 上成立：inbound 是 Anthropic Messages，target 是 Responses 上游。**「Responses 腿」在本文里指的始终是这条 crossing 的上游那一半，从来不是「凡是 target 为 Responses 的请求」。这两者在实现里被混同过一次，代价见 §9.0 末段。
+
+因此本规格**不**覆盖、且**不得**据本规格施加任何限制的还有一项：**inbound 就是 `/responses` 的直连请求自己声明的 `{"type":"web_search"}`**。该对象是客户端用上游自己的词汇写给上游的，本项目没有翻译它，`model_translation.*` 下的开关按其键名管的也不是它。它的去留由该端点自己的上游契约决定，代理**不得**拦截、剥离或合成答复。用户 2026-08-30 裁决：放行到上游。
 
 ## 2. 术语
 
@@ -310,6 +315,11 @@ Anthropic `tool_choice` 映射如下，**必须**按表执行：
 
   > **2026-08-22 更正。** 本条起草时写的是「**必须**剥离 web search 声明、同步清理指向它的 `tool_choice`……理由：与 Anthropic 腿保持同一取舍——剥掉一个能力，好过整轮失败」。用户 2026-08-20 裁决「去除 drop 策略，drop 在这里行为远不如 mock_result」推翻了它，理由是 Claude Code 把 web search 发成独立子请求（`tools` 只有搜索一项，190/190 实测），剥掉它唯一的工具后请求**不会失败**——模型凭记忆作答，而客户端无条件把回复拼上 `Web search results for query:` 抬头。剥离在这条腿上产出的不是「少一个能力」，是**把记忆当搜索结果交付**。
 - **例外且优先**：§3.4 的 `allowed_domains` / `blocked_domains` 非空时走 `REJECT`，该条优先于本节。它拒绝的原因不是能力缺失，而是语义反转：继续执行会把一条明确的收紧约束变成 no-op。
+- **合成的前提是客户端腿读得懂它**（2026-08-30 补入）。本节规定的失败结果是一对 **Anthropic** content block，所以它**必须**只在客户端腿是 Anthropic Messages 时产出。客户端腿是别的协议时**不得**合成，**必须**让该拒绝按既有 Error 契约归一为客户端自己格式的 error envelope。
+
+  > 这不是假想情形。一个 inbound 为 `/responses`、模型却只支持 `/v1/messages` 的请求（`claude-*` 即是）会被路由到 Anthropic 上游，其声明被翻译成 Anthropic 拼法，然后由 `builtin:server-tool-capability` 在那条腿上拒绝——于是本节的合成在一个 Responses 客户端上触发。交付侧按**客户端**腿选 framer，两种结局都是错的：流式在 200 已发出之后抛 `ValueError: no Responses item shape for block kind 'server_tool_use'` 撕流；非流式返回 200、日志记 `ok`、把一份 Anthropic message body 交给 Responses 客户端，全程没有任何一处说出这件事。两者均于 2026-08-30 实测复现。
+  >
+  > 「答复而非失败」的理由（§8.3 上文、Claude Code 会把 HTTP 错误当传输故障重试三次）本身就是**对某一个客户端**成立的，所以它推不出「对任何客户端都合成」。一个读不懂这份合成的客户端，从合成里得不到任何东西。
 
 ### 8.4 上游返回未请求的 `web_search_call`
 
@@ -339,6 +349,12 @@ Anthropic `tool_choice` 映射如下，**必须**按表执行：
 关闭的理由是支持**不完整**，且缺的部分对客户端不可见：交给 Anthropic 客户端的是一行文本而非 §5.3 冻结的原生块对；上游确实返回的 `url_citation` 零处读取；`max_uses` 与域名清单都发不出去。把半成品设成每个请求的默认，是这条裁决要避免的事。
 
 日志与 error code **必须**把「功能未开启」（`server_tool_disabled`）与「模型未被认领」（`server_tool_capability_unavailable`）分开——默认是关的，所以前者是两者中更可能的那个，运维必须分得清自己看的是哪一种。
+
+**能力门只在 §1 那条 crossing 上求值**（2026-08-30 补入）。判据**必须**包含 inbound 格式，**不得**只读 target format：只读 target 的门会把直连 `/responses` 请求也判进来，而那类请求不在本规格范围内（§1 末段）。
+
+> 这一条是被 GitHub issue #1 逼出来的，值得写下它是怎么错的。实现只判了 `target_format is OPENAI_RESPONSES`，旁边的注释却声称「直连 Responses 客户端会被放过」——作者以为翻译器发出的拼法和客户端自己写的拼法能分开，而两者是**同一个 tool object，逐字相同**，payload 里没有任何东西能回答「这是谁写的」。于是门在直连请求上击发，拒绝被答以 §8.3 的 Anthropic 块对，Responses framer 没有对应的 item 形状，流被撕断。
+>
+> 由此也界定了这条判据**证明得了什么**：它限定的是「哪一条 crossing 归这道门管」，**不是**「这个声明是不是本项目写的」。后者 payload 答不了，inbound 格式也答不了——一个 Anthropic inbound 完全可以自己带一个 Responses 形状的 `{"type":"web_search"}` 进来，翻译器原样保留，门照样判它。那种输入在 Anthropic 端点上的处置**不在**本规格范围内，未经裁决**不得**顺手改动。
 
 ### 9.3 冻结的保守判定（2026-08-20 用户裁决 D4：配置项手动维护）
 

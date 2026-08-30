@@ -10,6 +10,13 @@
 
 **默认关闭。** 打开后，Anthropic 客户端声明的 web search 会被翻成上游 Responses 端点自己的 `{"type":"web_search"}` 并真的执行；关闭时，或模型不被 `models_support_web_search` 的任何一条正则认领时，请求**不发往上游**，代理合成一个 200 响应，内容是 `server_tool_use` 配对 `web_search_tool_result`，后者 `content` 为单个 `web_search_tool_result_error` 对象（`error_code: "unavailable"`）。
 
+**这句话的主语一直是「Anthropic 客户端」，2026-08-30 起代码也是了。** 上面整段只描述 **inbound 为 Anthropic Messages、target 为 Responses 上游**这一条 crossing；规范依据是 [`../anthropic-responses-bridge/hosted-web-search-spec.md`](../anthropic-responses-bridge/hosted-web-search-spec.md) §1 末两段、§8.3 末条、§9.0 末段（均为 2026-08-30 修订）。另外两种情形与上面无关：
+
+- **inbound 就是 `/responses` 的直连请求自己声明的 `{"type":"web_search"}`**：原样发往上游，能力门不判它。它是客户端用上游自己的词汇写给上游的，`model_translation.*` 下的开关按键名管的也不是它。用户 2026-08-30 裁决。
+- **inbound 为 `/responses` 但模型只支持 `/v1/messages`**（`claude-*` 即是）：声明被翻成 Anthropic 拼法后由 `builtin:server-tool-capability` 拒绝，此时**不合成**，改为回客户端自己格式的 error envelope（400，`server_tool_not_executable`）。合成出来的是 Anthropic 块对，Responses 客户端读不懂它。
+
+两者此前都走合成，都是 GitHub issue #1：前者撕流，后者在非流式下 200 + Anthropic body 且日志 `ok`。取证与逐条排除见 [`reports/260830-synthesized-reply-non-anthropic-leg-survey.md`](reports/260830-synthesized-reply-non-anthropic-leg-survey.md) 与 [`reports/260830-review-issue1-gate-scope-fix.md`](reports/260830-review-issue1-gate-scope-fix.md)。
+
 ## 2. 两个配置轴
 
 | 键 | 默认 | 语义 |
