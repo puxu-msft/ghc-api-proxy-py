@@ -373,7 +373,7 @@ cap 超限、客户端取消、客户端 deadline 等人写文档列为不可继
 
 v4 把更早挂在这里的产品分叉全部移入正文定案：header 合同 → §9.1；`requires_client_action` 的数据来源 → §7.1（item 自带，无需请求侧通路）；policy × ending → §7.2；native failure 的 taxonomy 输入 → §5.2。
 
-实施状态不属于本节，见 [`plan.md`](plan.md)。
+实施状态不属于本节，见 [`plan.md`](plan.md)。**不需要用户裁决的延后项**（清理、跨主题指针）归 [`deferred.md`](deferred.md)，本节只放需要用户裁决的产品分叉。
 
 > 以下**不在**本规格定义域，已从待办移出：`function_call_output` 在响应 output 中的出现与翻译，归 `anthropic-responses-bridge/spec.md`（见 [`reports/260830-known-set-divergence.md`](reports/260830-known-set-divergence.md)）；本腿无条件携带它。
 
