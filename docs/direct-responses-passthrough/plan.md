@@ -1,6 +1,6 @@
 # 直连 Responses 透传：实施计划
 
-日期：2026-08-30（v4）
+日期：2026-08-31（v5）
 状态：**主体待实施**；§0 的两项前置已合入 `main`（`7e96adc`）
 权威：[`spec.md`](spec.md)。**本文不定义任何用户可观察行为**——凡本文与 Spec 冲突，以 Spec 为准；凡本文出现 Spec 没有的行为承诺，那是缺陷，应移入 Spec 或删除。
 
@@ -48,19 +48,19 @@
 
 实现可以维护一张由 SDK 版本导出的表，但**表是判据的当前编码，不是判据本身**；未知类型按 Spec 保守视为需要释放并记 `predicate unknown`。
 
-还要实现 Spec §7.2 的 policy × ending 收口顺序：任何 ending 到达时一律「丢未闭合 suffix → 按原序提交已完成 group → 提交 terminal 或 error」，客户端取消与下游写失败例外。**不得**沿用现有 `stream.py` 各 ending 是否 flush 的现状。
+还要实现 Spec §7.2 的收口顺序。**先过 §5 的 replay 门**——funded replay 时 §7.2 根本不运行，旧 attempt 一个字节都不提交。真正进入收口时：丢未闭合 suffix → 按原序提交已完成 group → 末步的 carrier **按 §7.2 的 final source 表**（有上游终局就逐字提交它，没有才写 proxy error）。客户端取消与下游写失败例外。**不得**沿用现有 `stream.py` 各 ending 是否 flush 的现状。
 
 ## 5. Replay 与 commit
 
 按 Spec §5 实现 commit frontier 与 attempt 状态重置。现有 replay 判据读的是「客户端是否已看到 semantic bytes 与 committed block」，本腿换成「首个原生事件是否已提交」。
 
-**还要实现 Spec §5.2 的 adapter**：把 `StreamFailure` 归一化成既有 `RetryReason | None` 再交给现有 taxonomy，**不新增枚举值**。当前表判一律不重试（没有上游 code 的语义表），放宽条件写在 Spec 里。replacement 自身失败走另一条路——它是 exception，直接进既有 `replay_reason`。
+**还要实现 Spec §5.2 的 adapter**：把 `StreamFailure` 归一化成既有 `RetryReason | None` 再交给现有 taxonomy，**不新增枚举值**。映射见 Spec 的表——`server_error` 与 `vector_store_timeout` 可重试、`rate_limit_exceeded` 走既有 rate-limit 通道、其余与未知不重试。重开 attempt 的结果按 Spec §5.2 分成 `OpenedAttempt`／`AttemptFailed`／`ReopenRefused` 三类；**`ReopenRefused`（draining、本地前置拒绝）不得进上游 taxonomy**。承载类型由本文件决定，语义由 Spec 决定。
 
 ## 5.1 Headers
 
 按 Spec §9.1 实现，流式与非流式同一合同。当前两处都不转发任何上游语义头，所以这是**新增行为**，各自要测试。
 
-算法顺序要注意：**先读 `Connection` 的值把它点名的字段一并剥掉**，再剥固定的逐跳名单，再剥因 body 变换失效的 validator／digest（`ETag`、`Last-Modified`、`Content-Digest`、`Repr-Digest`、`Content-Range`），其余转发。流式只取第一次 HTTP 200 attempt 的头，replacement 不得覆盖。
+算法顺序要注意：**先读 `Connection` 的值把它点名的字段一并剥掉**，再剥固定的逐跳名单（含 `Proxy-Connection`），再按 **Spec §9.1 的语义判据**剥掉「验证或描述上游确切字节、而本代理未重新计算」的字段——**判据在 Spec，本文件不复制名单**，因为名单必漏。非流式的 `Content-Type` 按实际输出重建。流式只取第一次 HTTP 200 attempt 的头，replacement 不得覆盖。
 
 ## 6. 可观测
 
