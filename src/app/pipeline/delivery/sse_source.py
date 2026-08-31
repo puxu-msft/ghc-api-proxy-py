@@ -6,7 +6,9 @@ This project has already been bitten by that once.
 
 Multiple `data:` lines in one frame join with a newline, as the spec requires.
 
-Line endings are CRLF, LF or a bare CR — the spec allows all three, and a frame ends at the first blank line. `parse_frame` has always handled that, because `splitlines()` does. Frame *splitting* did not: it looked for `b"\n\n"`, which a CRLF stream never contains, so two well-formed CRLF frames arrived as one. Measured 2026-08-30 — `event: a\r\ndata: 1\r\n\r\nevent: b\r\ndata: 2\r\n\r\n` yielded a single event whose `event` was `b` and whose data was `1\ndata: 2` joined into one string. Not a merge that a reader would notice: the first event's name was simply gone.
+Line endings are CRLF, LF or a bare CR — the spec allows all three, and a frame ends at the first blank line. Frame *splitting* did not handle that: it looked for `b"\n\n"`, which a CRLF stream never contains, so two well-formed CRLF frames arrived as one. Measured 2026-08-30 — `event: a\r\ndata: 1\r\n\r\nevent: b\r\ndata: 2\r\n\r\n` yielded a single event whose `event` was `b` and whose data was `1\ndata: 2` joined into one string. Not a merge that a reader would notice: the first event's name was simply gone.
+
+Splitting a frame into lines was wrong in the opposite direction, and this docstring used to assert the opposite: *"`parse_frame` has always handled that, because `splitlines()` does."* It handles those three **and more**, and the more is what hurt. See `_LINE_ENDING`.
 """
 
 import re
@@ -20,6 +22,15 @@ import orjson
 #
 # **The atomic group is load-bearing.** Written as `(?:\r\n|\r|\n){2}` the engine backtracks: given `event: a\r\ndata: 1`, it tries `\r\n` for the first ending, fails to find a second at `d`, then retries the first as a bare `\r` and matches the `\n` as the second — splitting a single CRLF into two endings and ending the frame in the middle of one line break. Measured 2026-08-30: that spelling cut `event: a\r\ndata: 1\r\n\r\n` into two frames and lost both event names. `(?>...)` forbids the retry, so a `\r\n` once matched stays one ending.
 _FRAME_SEPARATOR = re.compile(rb"(?>\r\n|\r|\n)(?>\r\n|\r|\n)")
+
+# One line ending inside a frame — the same three spellings, and **only** those three.
+#
+# `str.splitlines()`, which this used to call, breaks on a strict superset: it adds U+000B, U+000C, U+001C through U+001E, U+0085, U+2028 and U+2029. A line ending SSE does not recognise does not merely split a line — it **truncates the payload**, because the remainder has no colon and `parse_frame` skips it. Measured 2026-08-31 on `data: {"delta":"a<CH>b"}`: with U+2028, U+2029, U+0085, VT or FF in place of `<CH>`, the resulting data was `{"delta":"a` — content gone, and no longer parseable JSON.
+#
+# How much of that is reachable, stated separately from the mechanism: VT and FF must be escaped inside a JSON string and cannot appear raw, so they are unreachable through this upstream. U+2028, U+2029 and U+0085 **are** legal raw inside a JSON string, and whether they arrive depends on upstream's encoder — that is unmeasured. The mechanism is proven; the occurrence is not. Enough to fix, not enough to claim data is being lost in production today.
+#
+# No atomic group needed here, unlike `_FRAME_SEPARATOR`: there is no second ending to sequence against, so `re.split` matches `\r\n` at a CRLF and never has cause to retry it as a bare `\r`.
+_LINE_ENDING = re.compile(r"\r\n|\r|\n")
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,7 +53,7 @@ def parse_frame(raw: bytes) -> SseEvent | None:
     """Turn one frame into an event, or None when it carries no data."""
     event = ""
     data_lines: list[str] = []
-    for line in raw.decode("utf-8", errors="replace").splitlines():
+    for line in _LINE_ENDING.split(raw.decode("utf-8", errors="replace")):
         if line.startswith(":"):
             continue  # comment, including the keep-alive kind
         name, separator, value = line.partition(":")

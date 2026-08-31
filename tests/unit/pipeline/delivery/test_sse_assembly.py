@@ -95,7 +95,7 @@ async def test_frames_separate_on_every_line_ending_the_spec_allows(
 
     Frame *splitting* looked for `b"\\n\\n"`, which a CRLF stream never contains — so two well-formed CRLF frames arrived as one, and the first event's name was simply gone. Measured 2026-08-30: `event: a\\r\\ndata: 1\\r\\n\\r\\nevent: b\\r\\ndata: 2\\r\\n\\r\\n` yielded a single event named `b`.
 
-    Line *parsing* was never the problem — `splitlines()` handles all three — which is why this failed silently rather than as a decode error.
+    Line *parsing* handled all three even then, which is why this failed silently rather than as a decode error. It handled more than three, though, and that was its own defect — see `test_a_line_ending_sse_does_not_recognise_does_not_split_a_line`.
 
     The event names are asserted, not just the count. The first repair attempt produced two frames whose names were both empty, because the separator pattern backtracked and split one `\\r\\n` into two endings; a count-only assertion passes on that.
     """
@@ -103,6 +103,31 @@ async def test_frames_separate_on_every_line_ending_the_spec_allows(
     events = [e async for e in read_events(chunks(raw))]
 
     assert [(e.event, e.data) for e in events] == [("a", "1"), ("b", "2")], spelling
+
+
+@pytest.mark.parametrize(
+    ("character", "name"),
+    [
+        ("\u2028", "LINE SEPARATOR"),
+        ("\u2029", "PARAGRAPH SEPARATOR"),
+        ("\u0085", "NEL"),
+        ("\u000b", "VT"),
+        ("\u000c", "FF"),
+    ],
+)
+def test_a_line_ending_sse_does_not_recognise_does_not_split_a_line(character: str, name: str) -> None:
+    """SSE recognises CR, LF and CRLF. `str.splitlines()` breaks on a strict superset of those.
+
+    The consequence is worse than an extra split: the remainder of the line has no colon, so `parse_frame` skips it and the payload is **truncated**. Measured 2026-08-31 against `splitlines()` — every character below reduced `{"delta":"a<CH>b"}` to `{"delta":"a`, which has lost content and is no longer parseable JSON, so it goes on to be treated as an event that cannot be attributed to any item.
+
+    Reachability differs per character and the test does not claim otherwise. VT and FF must be escaped inside a JSON string and cannot arrive raw from this upstream; U+2028, U+2029 and U+0085 are legal raw there. Whether upstream's encoder emits them is unmeasured — the mechanism is what this pins.
+    """
+    raw = f'data: {{"delta":"a{character}b"}}'.encode()
+
+    parsed = parse_frame(raw)
+
+    assert parsed is not None, name
+    assert parsed.data == f'{{"delta":"a{character}b"}}', name
 
 
 @pytest.mark.parametrize(
