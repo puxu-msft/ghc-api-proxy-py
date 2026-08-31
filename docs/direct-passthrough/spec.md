@@ -88,11 +88,23 @@
 | 直连对 | 状态 | 依据 |
 |---|---|---|
 | `openai-responses` ↔ `openai-responses` | **本规格的主体工作。**今天走翻译型 assembler，6 个已知 item 类型之外一律拒绝——GitHub issue #2 与 #3 都落在这里 | 引擎已建（`01c33f1`），未接线 |
-| `anthropic-messages` ↔ `anthropic-messages` | **同形缺陷，而且它是主路径不是边角。**`sync-refs/sxwxs-ghc-api/260822-round2-disposition.md` 记着实测：`claude-sonnet-5` 不支持 Responses API（`unsupported_api_for_model`），**Claude 系模型只能走直连**。这条腿今天走 `AnthropicAssembler` ＋ `AnthropicFramer` 的往返，未知 block 类型同样被 framer 拒绝。**落地前须先解决 §2.7 的整形问题** | 同一引擎 ＋ §2.5 的 Anthropic 词汇 |
+| `anthropic-messages` ↔ `anthropic-messages` | **同形缺陷，而且它是主路径不是边角。**`sync-refs/sxwxs-ghc-api/260822-round2-disposition.md` 记着实测：`claude-sonnet-5` 不支持 Responses API（`unsupported_api_for_model`），**Claude 系模型只能走直连**。这条腿今天走 `AnthropicAssembler` ＋ `AnthropicFramer` 的往返，未知 block 类型同样被 framer 拒绝。**落地前须先解决 §2.7 的整形问题** | 词汇已实现并单测（`anthropic_messages_passthrough.py`），**接线待 §2.8 的 hand-over 问题闭合** |
 | `openai-chat-completions` ↔ `openai-chat-completions` | **天花板不存在，但那是偶然。**这条腿没有 framer，走 `one_shot_delivery` 把上游字节原样前送，所以没有任何类型表挡在中间。它缺的是**块级交付**——boundaries 在 `choices[].delta` 里面，2026-08-22 已裁决推迟 | 现状即满足 §2.1；块级交付的缺口是既有推迟项，不因本规格重开 |
 | `openai-embeddings` ↔ `openai-embeddings` | 非流式，按 §9 处置 | 无 SSE 词汇 |
 
 > `gemini-generate-content` 已在路由表中登记但没有 translator 应答，`InboundRoute.implemented` 挡住请求，因此今天不存在该格式的直连腿。它出现时须先有自己的词汇。
+
+### 2.8 §8 的「本腿不咨询 hand-over」是 Responses 腿的事实，不是所有直连腿的
+
+**这条限定是放宽定义域时才暴露出来的，它此前写得比它成立的范围宽。** §8 写着代理侧错误「**不得**咨询只适用于 Anthropic 客户端的 hand-over 机制」，理由是本腿没有续写通道。那个理由在 Responses 腿上成立——客户端不是 Anthropic 客户端，执行不了那个合成的 `tool_use` 块。**在 Anthropic 直连腿上它不成立**：那条腿的客户端**就是** Anthropic 客户端，`hand_over_supported` 按 inbound 格式门控，今天就放行，而 `max_tokens` 的续写是 2026-08-21 用户裁决的「总是 hand over」。
+
+**于是 native 交付与它撞了一个顺序问题。** hand-over 合成一个 `tool_use` 块，它必须落在终局**之前**才是一份合法的回复。而本规格的交付规则把上游自己的 `message_stop` 当作终局事件释放（§5 第四行），在 `block` 下它早已出门——等 `_hand_over` 运行时，要插队的位置已经过去了。
+
+**因此 Anthropic 直连腿的接线在本问题闭合前不进行。** 这不是缩减用户 2026-08-31 裁决的范围：词汇已实现并单测，缺的只是打开开关。挡住它的是 §2.7 自己那条规则——接线不得改变任何一条腿今天已生效的行为，而 `max_tokens` 续写在那条腿上今天就生效，且它正是 Claude 系模型唯一的路。
+
+**待定的是形态，不是方向**（[`deferred.md`](deferred.md) D-5）：要么在 hand-over 可能发生时推迟终局的释放，要么让合成块以该方言的原生事件表达并接在终局之前，要么裁定 native 腿不提供续写并接受那是一次行为回归。第三个选项与 §2.7 冲突，需用户裁。
+
+> **Responses 直连腿不受此条阻挡**：那条腿上 §8 的原判据仍然成立（客户端执行不了 Anthropic 的合成块），`hand_over_supported` 也本就不放行它。issue #2 与 #3 都在那条腿上。
 
 ### 2.7 走 native 会拿掉每条腿现有的兼容整形，这不是可以顺手带过的副作用
 

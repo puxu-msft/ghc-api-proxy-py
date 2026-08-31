@@ -1,7 +1,7 @@
 # 直连 Responses 透传：实施计划
 
-日期：2026-08-31（v9）
-状态：**主体待实施**；§0 的三项前置**全部已合入 `main`**（P1／P2 在 `7e96adc`，P3 在 `109dc44`）。骨架（顺序表第 2 步）已合入 `main`（`01c33f1`，未接线），经两轮独立评审修正；源提交存于 `archive/260831-passthrough-skeleton` 与 `archive/260831-sse-line-endings`
+日期：2026-08-31（v10）
+状态：**Responses 直连腿已接线，issue #2／#3 已修**，在分支 `worktree-260831-passthrough-wiring`（`b9195f4`，1993 passed／ruff clean／pyright 0），**待评审与合并**。§0 的三项前置全部已合入 `main`（P1／P2 在 `7e96adc`，P3 在 `109dc44`）；骨架已合入 `main`（`01c33f1`）。**Anthropic 直连腿的词汇已实现并单测，未接线**——挡在 [`spec.md`](spec.md) §2.8 的 hand-over 问题上（[`deferred.md`](deferred.md) D-5）
 权威：[`spec.md`](spec.md)。**本文不定义任何用户可观察行为**——凡本文与 Spec 冲突，以 Spec 为准；凡本文出现 Spec 没有的行为承诺，那是缺陷，应移入 Spec 或删除。
 
 > **v1 已作废并重写。** 它规定「只保存 `done.item` 的最终快照、重发 `added` + `done`、继续 mint id、沿用 framer 的 output index」，而 Spec v2 要求保存全部 item 专有事件、不得 mint id、terminal 整个对象逐字。照 v1 实施会直接违反 Spec。作废理由见 [`reports/260830-review-spec.md`](reports/260830-review-spec.md) major-08 与 [`reports/260830-review-plan.md`](reports/260830-review-plan.md)；两份报告作为时点记录不改。
@@ -82,11 +82,11 @@ P1／P2 都已变异验证：把分隔符改回 LF-only，CRLF 与 CR 两个参�
 1. ~~P1、P2~~ **已完成**（`7e96adc`）
 2. 透传 assembler／framer **骨架**，不接线。只跑单元 smoke，**不宣称任何 issue 测试转绿**
 3. `parse_frame` 只认 CR／LF／CRLF（Spec §3.1 第三条）。两腿共用的前置，与本腿的接线无关，可独立落地
-4. 交错场景与 §5 的提交语义接线（**什么算「已提交」**）。纯分组与 safe-prefix 归第 2 步，本步只拥有提交语义
-5. replay 合同（含 §5.2 的三类重开结果与 failure 归一化）
-6. `requires_client_action` 与三种 policy（含 §7.2 的 policy × 最终 ending）
-7. **把方言词汇从引擎里抽出来，并给 `anthropic-messages` 一份**（Spec §2.5 的表）。引擎此前是照着 Responses 一种方言写的，词汇散在常量与函数里；本步只做提取与第二份实现，不接线，可用与 Responses 同构的单测验证
-8. **分流点接线 ＋ 撤销 `ca777df` 的直连腿一半 ＋ 更新下述测试的断言，同一刀。接线覆盖 `translation_required is False` 的每一条腿**，不只 Responses
+4. ~~交错场景与 §5 的提交语义接线~~ **已完成**（`092bd43`）：control-only 前缀持有到第一批 item 事件，终局解除持有
+5. ~~replay 合同~~ **已完成**（`d76ac1c`）：`terminal`／`failure`／`cut_mid_block` 由与翻译型 assembler **共用**的读取函数填充，交付循环的 replay 机制原样适用
+6. ~~`requires_client_action` 与三种 policy~~ **已完成**（`82cfa29`、`092bd43`）：三种 policy 由泛型化后的 `BlockBuffer` 直接提供，判据按 §7.1 读 item 自身
+7. ~~抽方言词汇 ＋ `anthropic-messages` 一份~~ **已完成**（`d76ac1c`、`d3b4cc2`）。**写第二份词汇是引擎两条不通用规则的暴露方式**：终局事实此前只在终局事件上读（Anthropic 把 stop reason 放在 `message_delta`，会漏一半），批次判据此前只读闭合事件（Anthropic 的 `content_block_stop` 只带 index，会让每个 tool call 答 `False`）
+8. **接线**：Responses 直连腿**已完成**（`b9195f4`），issue #2／#3 关闭。**Anthropic 腿未接线**，见 §2.8
 9. Headers（§9.1）
 10. 可观测迁移（本步会改变 `tests/int/test_pipeline_app.py:2788` 的断言——该测试自己的注释写着这样断言就是为了让「给它一个 reader」成为一次**有意**的改动而不是静默的）
 
