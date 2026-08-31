@@ -1,7 +1,7 @@
 # 直连 Responses 透传：实施计划
 
-日期：2026-08-31（v6）
-状态：**主体待实施**；§0 的 P1／P2 已合入 `main`（`7e96adc`），P3 未实施。骨架（顺序表第 2 步）已在 `worktree-260831-passthrough-skeleton` 落地并经独立评审修正
+日期：2026-08-31（v7）
+状态：**主体待实施**；§0 的 P1／P2 已合入 `main`（`7e96adc`），**P3 已在 `worktree-260831-sse-line-endings` 实现，未进 `main`**。骨架（顺序表第 2 步）已在 `worktree-260831-passthrough-skeleton` 落地并经两轮独立评审修正
 权威：[`spec.md`](spec.md)。**本文不定义任何用户可观察行为**——凡本文与 Spec 冲突，以 Spec 为准；凡本文出现 Spec 没有的行为承诺，那是缺陷，应移入 Spec 或删除。
 
 > **v1 已作废并重写。** 它规定「只保存 `done.item` 的最终快照、重发 `added` + `done`、继续 mint id、沿用 framer 的 output index」，而 Spec v2 要求保存全部 item 专有事件、不得 mint id、terminal 整个对象逐字。照 v1 实施会直接违反 Spec。作废理由见 [`reports/260830-review-spec.md`](reports/260830-review-spec.md) major-08 与 [`reports/260830-review-plan.md`](reports/260830-review-plan.md)；两份报告作为时点记录不改。
@@ -14,7 +14,7 @@
 |---|---|---|
 | P1 | `_report_failure` 对含换行的 payload 写成一行 `data:` 加一行裸文本，客户端只剩第一行 | **已完成**（`7e96adc`）：新增 `encode_frame(event, data)`，每行一条 `data:` |
 | P2 | `read_events` 的 frame separator 固定 `b"\n\n"`，两个合法 CRLF 帧被合并成一个事件 | **已完成**（`7e96adc`）：分隔符改为两个连续行尾，用 atomic group 防回溯把单个 `\r\n` 拆成两个 |
-| P3 | `parse_frame` 用 `str.splitlines()` 拆行，其断行集是 SSE 的超集，data 里裸的 U+2028／U+2029／U+0085 会让该行从此处截断 | **未实施**：改为只认 CR／LF／CRLF。判据用一个 data 里含裸 U+2028 的帧，断言回读得到完整 payload |
+| P3 | `parse_frame` 用 `str.splitlines()` 拆行，其断行集是 SSE 的超集，data 里裸的 U+2028／U+2029／U+0085 会让该行从此处截断 | **已实现，未进 `main`**（`worktree-260831-sse-line-endings`，`2c93ac6`）：新增 `_LINE_ENDING = re.compile(r"\r\n\|\r\|\n")`，`parse_frame` 改用 `re.split`；5 个参数化用例，变异（改回 `splitlines()`）全红。合入 `main` 后须同步 `spec.md` 文首与 §3.1 第三条、本文件文首与本行 |
 
 P1／P2 都已变异验证：把分隔符改回 LF-only，CRLF 与 CR 两个参数变红；把 encoder 改回单行 `data:`，多行用例变红。
 
@@ -57,7 +57,7 @@ P1／P2 都已变异验证：把分隔符改回 LF-only，CRLF 与 CR 两个参�
 
 按 Spec §5 实现 commit frontier 与 attempt 状态重置。现有 replay 判据读的是「客户端是否已看到 semantic bytes 与 committed block」，本腿换成「首个原生事件是否已提交」。
 
-**还要实现 Spec §5.2 的 adapter**：把 `StreamFailure` 归一化成既有 `RetryReason | None` 再交给现有 taxonomy，**不新增枚举值**。映射见 Spec 的表——`server_error` 与 `vector_store_timeout` 可重试、`rate_limit_exceeded` 走既有 rate-limit 通道、其余与未知不重试。重开 attempt 的结果按 Spec §5.2 分成 `OpenedAttempt`／`AttemptFailed`／`ReopenRefused` 三类；**`ReopenRefused`（draining、本地前置拒绝）不得进上游 taxonomy**。承载类型由本文件决定，语义由 Spec 决定。
+**还要实现 Spec §5.2 的 adapter**：把 `StreamFailure` 归一化成既有 `RetryReason | None` 再交给现有 taxonomy，**不新增枚举值**。映射见 Spec §5.2 的表，**本文件不复制**——与 §5.1 对 header 名单的纪律一致。Spec 是活文档，`vector_store_timeout` 那一格 v6 才刚改过一次，一份转抄在下一次改动时不会红。重开 attempt 的结果按 Spec §5.2 分成 `OpenedAttempt`／`AttemptFailed`／`ReopenRefused` 三类；**`ReopenRefused`（draining、本地前置拒绝）不得进上游 taxonomy**。承载类型由本文件决定，语义由 Spec 决定。
 
 ## 5.1 Headers
 
@@ -87,10 +87,14 @@ P1／P2 都已变异验证：把分隔符改回 LF-only，CRLF 与 CR 两个参�
 6. `requires_client_action` 与三种 policy（含 §7.2 的 policy × 最终 ending）
 7. **分流点接线 + 撤销 `ca777df` 的直连腿一半 + 更新下述测试的断言，同一刀**
 8. Headers（§9.1）
-9. 可观测迁移
+9. 可观测迁移（本步会改变 `tests/int/test_pipeline_app.py:2788` 的断言，见 §9 末）
 
 > **接线为什么必须合成一刀。** v3 把「接线」与「撤销 direct 的 `REJECT`」分成两步，同时又说接线之后 issue 测试应转绿、且撤销之前不要改它们的断言——三句话不能同时成立。`test_an_output_item_this_assembler_does_not_know_is_refused_not_rendered`（`tests/int/test_pipeline_app.py:2549`）当前**明确断言** direct `custom_tool_call` 以 `error` 收尾、不出现任何 `response.output_item*`；接线一旦生效，正确行为恰好相反，该测试必红。启用 direct 透传与撤销 direct 的拒绝**是同一个 observable switch**，不是两个步骤。
 
+> **另一侧的代价，与一个被否决的第三选项（v7 补记）。** 只写「接线在前」的风险会让下一个读者以为这个决定没有代价。接线在后的代价是：step 4（提交语义）、step 5（replay）、step 6（policy）三刀落进 `main` 之后**没有任何调用者**，要到 step 7 才第一次被真实入口执行——本项目在这个形状上有成本记录（守卫被留在 legacy 链路上，三次击发，第三次是静默假成功而非报错）。缓解办法是 step 7 的验收必须包含「新链路确实被真实入口调用」，而不是只看单测绿。
+>
+> 第三个选项是**接线早落但按 policy 条件路由**：`delivery_policy` 只在 `block` 下选透传 assembler，`full`／`until-tool-use` 仍走 `ResponsesAssembler`，直到 step 6 补齐等价物。它同时避开静默退化与死码窗口。**否决理由**：直连腿的可观察行为在过渡期取决于 policy，`ca777df` 的撤销只在 `block` 下生效，于是 issue #2 那个 item 在 `full` 下**仍被拒**——而「不得以不认识为由拒绝」是用户裁决，让它取决于一个配置项是更坏的形状。
+>
 > **接线为什么从第 3 位挪到第 7 位（v6 改）。** 它原本排在 policy 之前，而 `delivery_buffer(chain)` 是两腿共用的构造、`client_delivery` 的 policy 是用户可配项——于是接线生效到 policy 落地之间，直连腿上配 `full` 或 `until-tool-use` 会发生什么，计划里没有答案，最可能的结果是**静默退化成 `block`**：配置项还在、日志照旧、行为悄悄换了一种。本项目已经在「缺席读不出来」这个形状上付过代价。备选方案是保持顺序、写一段降级代码外加一条声明退化的可观测事实，但那段代码在 policy 落地后即成死码；而「一个把两种 policy 留作未定义的接线」本就不是自足的切片，与「小切片即刻集成」的规则并不冲突。**这不是把接线拆开**——它仍然是一刀，只是这一刀落在 policy 之后。来源：[`reports/260831-review-spec-round6.md`](reports/260831-review-spec-round6.md) round6-05。
 
 > **那一刀要动的测试，逐条点名。** `git show ca777df -- tests/` 核过：它只新增了**一个**测试函数，即上面那条（连同一个 SSE 夹具辅助函数，共 57 行）。**「那两条测试」是 v5 的事实错误**，照它去凑数最可能改到的是下面这两条形近但**不在直连腿上**的测试，而它们承载的正是 Spec §2.4 明令保留的翻译腿 `REJECT` 覆盖——改动不会冲突也不会报错，只会让翻译腿的保护静默消失：
@@ -112,6 +116,10 @@ v6：**末步 carrier 按 final source**——尤其「不可重试 code 的 `fa
 
 v7：**control-only 前缀不构成提交**（首帧 `response.created` 之后 replay 仍然合法——这一条直接决定四轮评审产出的 replay 合同走不走得到）；**一个 item 的事件不跨越释放边界**（反例序列 `created → added(0) → added(1) → delta(1) → done(0)`，断言 `added(0)` 不与 `done(0)` 分离）；**「无法归属」与「envelope」处置相反**（拿一个不带 `output_index` 的 audio 事件构造，断言它被持有且进入未闭合尾巴）；**draining 不花 replay 预算**（判定发生在重开之前，断言预算计数器未变）；**上游终局存在但 attempt 已作废时不得逐字重放它**。
 
-来源：[`reports/260831-review-spec-round6.md`](reports/260831-review-spec-round6.md) round6-09、[`reports/260831-review-skeleton.md`](reports/260831-review-skeleton.md) finding 01／02。
+v7 还缺一条，v8 补上：**重开被拒或失败时，已完成的 group 仍须按原序提交**。这是 v7 那次修复（partition 第一格补「且重开已经成功」）的可观察产物，也是 round6 那个 blocker 的正解。它是**反向断言**——错误实现（判定可 replay 就立刻销毁队列）在只测「funded replay 时一个字节都不提交」的判据下照样绿，因为那条测的是另一个方向。写法：构造「判定可 replay → 重开被拒」，断言此前已完成的 group **仍在**最终输出里且保持原序（错误实现只剩一条 error），并一并断言销毁发生在新流到手之后。
+
+v8：**无法归属的事件按 ending 来源二分**（上游终局到达时，一个不带 `output_index` 的事件**仍在**交付里——正向断言；代理侧 ending 时不在）；**非流式错误 body 原始字节透传**（上游 4xx 的 `text/html` body 不被 parse 也不被重新序列化）；**响应头取交集**（`Date`／`Cache-Control`／`Set-Cookie` 不在输出里，而 weak `ETag`／`Last-Modified` 在——两个方向同一条判据里各测一次）。
+
+来源：[`reports/260831-review-spec-round6.md`](reports/260831-review-spec-round6.md) round6-09、[`reports/260831-review-skeleton.md`](reports/260831-review-skeleton.md) finding 01／02、[`reports/260831-review-spec-round7.md`](reports/260831-review-spec-round7.md) round7-09。
 
 **判据必须在实现之前独立推导**，与 issue #1 块对那次同样的理由：判据一旦被实现假设污染就不可恢复。

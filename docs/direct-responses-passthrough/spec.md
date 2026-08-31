@@ -1,7 +1,7 @@
 # 直连 Responses 路径：原生透传产品规格
 
 日期：2026-08-30
-状态：**DRAFT v7 — 待复评**。主体未开始。§3.1 的前两处前置缺陷已实现并合入 `main`（`7e96adc`）；第三处（`parse_frame` 的行拆分）未实现。
+状态：**DRAFT v8 — 待复评**。主体未开始。§3.1 的前两处前置缺陷已实现并合入 `main`（`7e96adc`）；第三处（`parse_frame` 的行拆分）已在 worktree `260831-sse-line-endings` 实现，未进 `main`。**§11 有一项待用户裁决**（响应头黑名单的定义域）。
 定义域：**inbound 与 target 同为 `openai-responses`**（`route.translation_required is False`）。本规格不覆盖任何其他路由。
 
 > **本文是活文档，不冻结。** 新裁决、实测或发现与本文冲突时当场修订，每次修订记入 §12。
@@ -60,9 +60,13 @@
 
 ## 3. 保真层级：合法 UTF-8 SSE 的 logical event 与 data
 
-**承诺**：在**最终被提交的那一次 attempt** 中，凡属于一个**已完成的 item group**、或属于 control 与 terminal／failure 的 SSE 事件，其 `event` 名与**经 SSE field parsing 得到的 logical `data` 字符串**逐字重放，包括本代理不认识的事件类型与字段。
+**承诺**：在**最终被提交的那一次 attempt** 中，凡属于一个**已完成的 item group**、或属于 control 与 terminal／failure 的 SSE 事件，其 `event` 名与**按 SSE 规范的 field parsing 算法得到的 logical `data` 字符串**逐字重放，包括本代理不认识的事件类型与字段。
+
+> **基准是外部规范，不是本项目 parser 的输出**，这个区别是 P3 逼出来的。若以「本项目解析出来的东西」为准，那么 parser 把 payload 截断之后我们仍然「逐字重放了解析结果」，本承诺照样成立——**这句话就检测不出 §3.1 第三条那类缺陷**。钉到规范之后它才有分辨力。相应地，下面「明确不承诺」的四项里有三项描述的是本项目 parser 的现有行为而非规范要求，读时请分清。
 
 **承诺不覆盖未闭合 item 的尾巴。** 一个 item 收到了 `added` 与若干 delta 却始终没有 `done`，其已缓存的事件在下列时点**丢弃**，且**不计作重排**：上游 tear、terminal 到达、failure 到达、cap 超限、deadline、客户端取消。
+
+**「无法归属」的事件不属于上面这条，它有自己的裁定，见 §7.2 收口第 4 步。** 两者形似而来源不同：未闭合尾巴属于一个确定存在、确定没说完的 item；无法归属的事件则**不知道属于谁，也可能根本不属于任何 item**（§4 列出的四个 audio 事件就不属于任何 item）。把它们并进同一条会让后者继承前者的丢弃理由，而那个理由对它并不成立。
 
 > 这条限定是被一个反例逼出来的：`response.created → output_item.added(A) → delta(A) → response.failed`，其中 A 永不 `done`。此时「完整交付单位」「逐事件保真」「不重排」三项**不可兼得**——交付 A 就泄漏了不完整 item，让 failure 越过 A 就是重排，丢掉 A 又违反「每一个事件」的全称，不结束则 terminal 已到却仍在等。用户亲笔的块级合同把「`_start` 到 `_end` 之间的全部内容」定义为交付单位，所以放弃的必须是全称，而不是块级完整性。
 >
@@ -85,11 +89,11 @@
 
 ### 3.1 三处必须先修的既有缺陷
 
-本承诺**不能**靠 v2 当时的 writer 兑现，实跑给出两个反例；两者都已在主仓 `7e96adc` 修复。条款保留——它们仍是规范性要求，只是已被满足。
+本承诺**不能**靠 v2 当时的 writer 兑现，实跑给出两个反例；两者都已在主仓 `7e96adc` 修复。条款保留——它们仍是规范性要求，只是已被满足。第三条不是 writer 而是 **reader**（`parse_frame`）的缺陷，它偏离的是上面钉住的那个外部算法。
 
 1. **已实现（`7e96adc`）。** `_report_failure` 把含换行的 payload 写成一行 `data:` 加一行裸文本，客户端再解析只剩第一行。**必须**有一个接受 `(event: str, data: str)` 的 raw-text SSE encoder，对 `data.split("\n")` 的每一段各写一条 `data:`；**不得**复用只接受 dict 并 `orjson.dumps` 的 `SseFrame`。
 2. **已实现（`7e96adc`）。** `read_events` 的 frame separator 固定为 `b"\n\n"`，两个合法 CRLF 帧会被合并成一个事件。这是两条腿共用的前置。
-3. **未实现。** `parse_frame` 用 `str.splitlines()` 拆行，而它的断行集是 SSE 的**超集**——SSE 只认 CR、LF、CRLF。于是 data 里一个裸的 U+2028、U+2029 或 U+0085 会让该行**从此处截断**：后半段没有冒号，`parse_frame` 直接跳过它，payload 既丢内容又不再是合法 JSON（随后落进 §4 的「无法归属」）。**必须**改为只认 CR／LF／CRLF。
+3. **未实现。** `parse_frame` 用 `str.splitlines()` 拆行，而它的断行集是 SSE 的**超集**——SSE 只认 CR、LF、CRLF。于是 data 里一个裸的 U+2028、U+2029 或 U+0085 会让该行**从此处截断**，后半段无论如何都不再构成一个 `data` 字段：没有冒号就被跳过，有冒号则落进一个既非 `event` 也非 `data` 的字段名（真实 payload 多半是后者，例如 `{"delta":"a<CH>b","output_index":0}` 的后半段）。两条路都丢内容，且截断后的 payload 不再是合法 JSON，随后落进 §4 的「无法归属」。**必须**改为只认 CR／LF／CRLF。
 
    > 机制已实跑证实（U+2028、U+2029、U+0085、VT、FF 五个字符逐一验过，均截断），**触发未证实**：VT 与 FF 在合法 JSON 里必须转义、不可能裸出现，真正有活性的是前三个——它们在 JSON 字符串里裸出现合法，是否真从 Copilot 出来取决于上游的编码器。这个权重足以要求修复，不足以支撑「生产上正在丢数据」。来源：[`reports/260831-review-skeleton.md`](reports/260831-review-skeleton.md) finding 10。
 
@@ -106,7 +110,9 @@
 
 > 这一句 v6 之前是空的，两种读法都讲得通，而实现取了代价更大的那一读。反例（实跑）：`created → added(0) → added(1) → delta(1) → done(0)` 会释放 `[created, added(0)]`，把 item 0 的 `added` 与它的 `done` 拆开，中间隔着 item 1 的全部事件。代价有两层，第二层更贵：客户端拿到半个 group；而更要紧的是它**提交了本次 attempt**（§5），于是整轮的透明 replay 窗口被一个没有任何内容价值的字节关掉——item 1 若随后以可重试的失败结束，本可无痕重放的一整轮只能把失败露给客户端。取现在这一读，代价只是多一点 head-of-line blocking，而上面第一条本就已经接受了它。来源：[`reports/260831-review-skeleton.md`](reports/260831-review-skeleton.md) finding 01。
 
-**只含 control 事件的安全前缀不构成「提交」**，它何时落到客户端由 §5 规定。§4 讲的是「哪一段字节可以成为一个交付单位」，§5 讲的是「交付它算不算堵死了 replay」，两者不是同一个判定。
+**只含 control 事件的安全前缀可以构成一个交付单位，但不得单独交付给客户端**——它随第一批可交付 item 事件一起落地（§5 提交表）。§4 决定哪一段字节构成交付单位，§5 决定它何时落到客户端。
+
+> **v7 这句话的旧写法给了两种读法，而且已经有读者取了错的那一读。** 旧文写「不构成提交，它何时落到客户端由 §5 规定」，接着又说「§5 讲的是交付它算不算堵死了 replay」——前半句是「扣住不发」，后半句是「发了但不算数」。**§5 只支持前者**：§5 给「已提交」下的定义就是「客户端已经看到本次 attempt 的原生事件」，所以一旦真写出去它**就是**提交，「发了不算数」这种状态在 §5 里不存在。错读的代价不止是窗口关早：真做了 replay，客户端会收到**两个** `response.created`，且两者 `response.id` 不同——那是协议层面的坏帧。来源：[`reports/260831-review-spec-round7.md`](reports/260831-review-spec-round7.md) round7-02。
 
 > 不写这一句就会撞上一个每个请求都发生的矛盾：上游首帧是 `response.created`，此时一个 item 都还没打开，上面的释放条件**空真**，于是 §7 的 `block` 行要求「一就绪即发出」，而 §5 要求它保持 attempt-local。若按前者，`response.created` 一写出去 attempt 即为已提交，§5 随即禁止整次 attempt replay——四轮评审产出的那一整套 replay 合同，在默认 policy 下永远走不到。来源：[`reports/260831-review-spec-round6.md`](reports/260831-review-spec-round6.md) round6-03。
 
@@ -114,7 +120,7 @@
 
 > 这不是假想形态。`openai==3.3.1` 的 `ResponseStreamEvent` 共 58 个成员，11 个不带 `output_index`，其中 7 个是 envelope，**另外 4 个是 audio 系列**（`response.audio.delta`／`.done`／`.transcript.delta`／`.transcript.done`）——它们承载模型输出，却既无 `output_index` 也无 `item_id`。payload 解不开时也落在这里。持有它的同时**不得**释放它后面的事件，那是重排。
 
-> 三份 cassette 的 `output_index` run 都是 `[0,1]`，**只说明已观测样本没有交错**，是趋势样本而非协议保证；本规格按可能交错设计。
+> 三份 **Responses 流** cassette 的 `output_index` run 都是 `[0,1]`，**只说明已观测样本没有交错**，是趋势样本而非协议保证；本规格按可能交错设计。（`tests/int/cassettes/` 下共 5 个文件，带 Responses 事件流的是 3 个。）
 
 ## 5. Commit frontier 与 attempt replay
 
@@ -128,7 +134,7 @@
 | 第一批 item 事件 | 是 |
 | 无 item 的 terminal／failure | 在最终决定不 replay 后，与本 attempt 的 control events 一起提交 |
 
-**首个原生事件提交前**：retry taxonomy 判为可重试的 transport tear、无终局 EOF、可重试的 upstream failure，可在统一预算内**透明 replay**；旧 attempt 的 control events、item 队列、terminal、ids、usage 与内存计量**全部丢弃**。
+**首个原生事件提交前**：retry taxonomy 判为可重试的 transport tear、无终局 EOF、可重试的 upstream failure，可在统一预算内**透明 replay**；旧 attempt 的 control events、item 队列、terminal、ids、usage 与内存计量**全部丢弃**——**丢弃发生在新流到手之后**（§5.2 的 `OpenedAttempt`），在此之前旧 attempt 的队列**必须保持可提交**，因为重开可能被拒或失败，那时 §7.2 要把这些已完成的 group 发出去。主仓 `stream.py:468-472` 今天就是这个顺序（`reopen` 返回非 `None` 之后才丢），Spec 此前两处复述反而比代码宽。
 
 **首个原生事件提交后**：**禁止**整次 attempt replay，已交付前缀保留。这与用户亲笔的重试合同一致，概括为「尚未交付完整块可无痕重试；已交付块则不得从头重放」。
 
@@ -162,19 +168,23 @@ cap 超限、客户端取消、客户端 deadline 等人写文档列为不可继
 | `code == "vector_store_timeout"` | `SERVER_ERROR` | 超时就是瞬时失败，与它同处一个 Literal 集不改变这一点 |
 | 其余 `code`，含未知 | `None` | **除上表明列的可重试 code 外一律保守不重试。**其中 `invalid_prompt`、`data_residency_mismatch`、`bio_policy` 与各类 image 格式／尺寸／编码／策略错误，由名称即可判定为永久；**`failed_to_download_image` 是否瞬时未核**（下载失败既可能是 404，也可能是一次瞬时网络故障，名字本身不区分），按保守规则同样落 `None`，取得证据后可单独放宽；未知 code 保守不重试 |
 
-> **v4 写的「没有该 code 集的语义表」是错的**，我没有核就写了。`openai==3.3.1` 的 `ResponseError.code` 是一个 20 成员的 `Literal`，头两个正是 `server_error` 与 `rate_limit_exceeded`，语义一目了然。「五份 cassette 里零出现」只说明当前样本没命中过 failure event，抹不掉协议类型自带的分辨力。
+> **v4 写的「没有该 code 集的语义表」是错的**，我没有核就写了。`openai==3.3.1` 的 `ResponseError.code` 是一个 20 成员的 `Literal`，头两个正是 `server_error` 与 `rate_limit_exceeded`，语义一目了然。「全部五份 cassette 里零出现」只说明当前样本没命中过 failure event，抹不掉协议类型自带的分辨力。
 >
 > **v4 判断「replay 窗口本就很窄，所以代价小」也不成立。** 那只对迅速完成首个安全前缀的 `block` 成立。`full` 在上游终局前根本不 commit，未触发的 `until-tool-use` 可以持有整轮，`block` 遇到长 reasoning 或较早的未闭合 item 同样长时间不 commit。所以 `response.failed` 到达时，`full` 下的透明 replay 窗口覆盖的是**整次 attempt**——损失最大的恰恰是它。
 
-**重开一次 attempt 的结果有三类，必须分开**，v4 把它们压成了「一个 exception」，而那不成立——draining 时**根本没有调用过 `handle`**，既没有 replacement attempt 也没有 exception：
+**重开一次 attempt 的结果有三类，必须分开**，v4 把它们压成了「一个 exception」，而那不成立：replacement 自己失败与本代理拒绝重开的 **origin 不同**，压成一个 exception 会把前者的上游归因套到后者身上。
+
+> v6／v7 用的论据是「draining 时根本没有调用过 `handle`」，而 v7 已把 draining 移出这张表（见下），论据于是落在一个本表声明不管的例子上。三分法本身不依赖它。
 
 | 结果 | 含义 | 处置 |
 |---|---|---|
 | `OpenedAttempt` | 新 attempt 已建立 | 继续 |
-| `AttemptFailed` | replacement **确实开了**并失败，携带它自己的 error 与 origin | 该 error 走既有 `replay_reason`；最终不可重试时客户端看见 **replacement 的**失败 |
+| `AttemptFailed` | replacement **确实开了**并失败，携带它自己的 error | 该 error 走既有 `replay_reason`；最终不可重试时客户端看见 **replacement 的**失败。**origin 为 upstream**——replacement 是一次真实的上游往返，即使失败发生在 transport 层。现有 `FailureOrigin` 只有 `UPSTREAM_EVENT` 与 `PROXY_REFUSAL` 两个值，哪一个承载它属实现问题，归 [`plan.md`](plan.md) |
 | `ReopenRefused` | 本代理**拒绝重开**（本地前置拒绝），origin 是 proxy | **不得**进上游 retry taxonomy，**不得**归因给一个不存在的 replacement；按 §8 写客户端方言的 SSE error |
 
-**draining 不进这张表。**它是 §5 的 replay **资格**判定，发生在重开之前；本表只承载「已判定为可 replay、而重开仍未给出新流」的情形。`ReopenRefused` 这个分类本身仍然有用——本地前置拒绝的其余形态还在它下面——**不要因为把 draining 提前就把整个 `ReopenRefused` 删掉**。
+**draining 不进这张表。**它是 §5 的 replay **资格**判定，发生在重开之前；本表只承载「已判定为可 replay、而重开仍未给出新流」的情形。
+
+`ReopenRefused` 保留为**分类槽位**，但要如实说明它今天是空的：移走 draining 之后，本规格没有点名其余实例，主仓 `_reopen` 也只有 draining 这一条本地前置拒绝（它另一条 `return None` 发生在 `handle` 之后，按定义属 `AttemptFailed`）。保留它是为了**将来新增的本地拒绝有处可去**，不是因为已知还有别的——**不要因为把 draining 提前就把整个 `ReopenRefused` 删掉**，那会让下一种本地拒绝被挤进 `AttemptFailed`、继承一个不属于它的上游归因。
 
 这是**可观察事实的分类**，不是 Python 抛不抛异常的形态；具体用什么类型承载留给 [`plan.md`](plan.md)。
 
@@ -264,11 +274,20 @@ cap 超限、客户端取消、客户端 deadline 等人写文档列为不可继
 
 1. 丢弃未闭合 item 的 suffix（§3）
 2. 按**原序**提交 control 与所有已完成的安全 group
-3. 提交上游 terminal／failure（若有），否则提交 proxy error（§8）
+3. **无法归属的事件**（§4）：最终 ending 是**上游终局**（`completed`／`incomplete`／`cancelled`／`failed`／`error`）时，与上一步一并**按原序逐字提交**；最终 ending 是**代理侧的**（tear、EOF、cap、deadline、拒绝）时，与未闭合尾巴同样丢弃
+4. 提交上游 terminal／failure（若有），否则提交 proxy error（§8）
+
+> **第 3 步是 v8 新增的，此前这类事件在收口处没有归宿**：它不是某个未闭合 item 的 suffix（它不属于任何已知 item），也不属于任何已完成 group，于是三步收口把它漏在了外面——而骨架的 docstring 已经替本规格裁定为丢弃。**丢弃恰好是与 §2.1 张力最大的那个答案**：用户裁的是「不得以本代理不认识为由拒绝一个协议允许的直连 item」，而静默丢掉一个协议合法、承载模型输出的事件，理由正是「本代理判不出它属于谁」。
+>
+> **按 ending 来源二分的理由。** 上游给出终局，说明它把整个 response 说完了，此时这些事件不再有「属于某个还没说完的 item」之外的解释，交付它们比丢掉它们更接近 §2.1；代理侧 ending 则相反，上游确实没说完，与未闭合尾巴同处一境。
+>
+> **触发面分开说。** `openai==3.3.1` 的四个 audio 事件是机制确定、**触发未证实**（Copilot 的 Responses 端点是否发音频事件本轮无从测），只是倾向。而 **payload 解不开这条路径的链条完整**：§3.1 第三条描述的截断会让一个普通的 `output_text.delta` 不再是合法 JSON，`SseEvent.json()` 对它返回 `{}`，于是它落进「无法归属」——若这一步裁为丢弃，一个正常的文本增量事件就因为一个编码问题而静默消失。这条不依赖任何未观测的上游行为。
+>
+> 这是**本规格的推导**（§2.3），且它触到 §2.1 的边，已登记入 §11。来源：[`reports/260831-review-spec-round7.md`](reports/260831-review-spec-round7.md) round7-04。
 
 | 最终 ending | `block` | `until-tool-use`（未触发） | `full` |
 |---|---|---|---|
-| **仍可 funded replay 的 tear／EOF** | **不收口**，整次 attempt 无提交丢弃 | 同左 | 同左 |
+| **partition 第一格命中**（仍可 funded replay，**且重开已经成功**）的 tear／EOF | **不收口**，整次 attempt 无提交丢弃 | 同左 | 同左 |
 | 上游 terminal／failure | 已逐前缀提交 | 按上表收口 | 按上表收口 |
 | cap／deadline／预算耗尽 EOF／不可重试 tear | 已提交部分保留，写 error | 按上表收口，末步写 error | 按上表收口，末步写 error |
 | 客户端取消／下游写失败 | — | **例外：无可写通道，不收口** | **例外：无可写通道，不收口** |
@@ -283,9 +302,11 @@ cap 超限、客户端取消、客户端 deadline 等人写文档列为不可继
 - **代理侧错误**（cap 超限、客户端 deadline、预算耗尽而无上游终局）：按 `error-envelope/spec.md` 写 Responses `event: error`，**不得**合成成功 terminal，**不得**咨询只适用于 Anthropic 客户端的 hand-over 机制。**客户端取消与下游写失败除外**——那两种情形没有可写通道，§7.2 已把它们列为不收口的例外，写 error 是写给一个已经不在的读者。
 - **`status: "incomplete"` 的 item**：**必须**照常交付，**不得**套用翻译腿的 `cut_short` / hand-over 政策——`hand_back_block()` 对非 Anthropic inbound 返回 `None`，那套政策在本腿上只会让最后一个 item 消失。
 - **无终局 EOF**：本腿不得伪造成功终局（§6.3 禁止推导）。按 §5 判断：首个原生事件提交前可 replay；提交后写 `event: error` 并保留已交付前缀。
-- **memory cap**：`buffer_cap_bytes` 的用户亲笔定义是「max bytes to buffer before abandoning this response」，故**限制的是本代理当前持有的字节，不是累计交付量**。本腿计入：尚未 `done` 的原始事件队列、已完成但被 policy 扣住的事件组、control events、以及同时保留的预渲染副本。释放、replay reset、failure、cancel 后按实际持有退还计量。
+- **memory cap**：`buffer_cap_bytes` 的用户亲笔定义是「max bytes to buffer before abandoning this response」，故**限制的是本代理当前持有的字节，不是累计交付量**。本腿计入：尚未 `done` 的原始事件队列、已完成但被 policy 扣住的事件组、control events、以及同时保留的预渲染副本。释放、replay reset、failure、cancel 后按实际持有退还计量——**replay reset 的时点是「重开成功」而非「判定可 replay」**（§5），因为旧队列要保留到新流到手。这一项本身不产生错误行为（保留期内新 attempt 还没开始产字节，峰值不会超过旧 attempt 已有的持有量），但两种读法会让计数器差一个窗口，属「缺席读不出来」的同族。
 
-## 9. 非流式
+## 9. 非流式（仅成功响应）
+
+**本节只覆盖成功（2xx）非流式响应。** 上游的非流式**错误**响应按 [`error-envelope/spec.md`](../error-envelope/spec.md) §3.1 **原始字节透传**，包括其 `Content-Type`（上游答 `text/html` 也照传）——那是跨腿合同（§2.4），不因本腿走 native 而改变。两条规则各自都对，只是定义域此前没写：一个照本节字面实施的人会把上游的 4xx／5xx JSON body 也 parse 一遍再重新序列化，而那正是 error-envelope 用一整节前置工作在防的事。
 
 **当前行为的准确陈述**：`inference.py` 先 `response.json()`（并拒绝非 object 的 JSON），`response_payload` 在 `translation_required is False` 时返回同一个 dict，随后 `JSONResponse(payload)` 再序列化。因此**未知字段按 JSON value 保留，但 raw bytes、空白、key 顺序、数字字面形式、重复键与原 `Content-Type` 都不保留**。v1 写的「今天已是 body 原样返回」按 §3 的逐字读法是错误陈述。
 
@@ -299,7 +320,22 @@ cap 超限、客户端取消、客户端 deadline 等人写文档列为不可继
 
 > **该裁决的定义域是流式块级交付；把同一规则延伸到非流式是本规格的推导**（§2.3），标题里的「同一合同」四个字指的是这个延伸的结果，不是用户裁决的范围。原文所在的文档名、所在节、以及它给出的补救方式（「只能转化为 SSE error」）三重都把定义域钉在流式上——非流式既没有「已经发出去收不回来」这个约束，也没有 SSE 这个补救通道。**当前行为无差异**：`direct_driver/base.py:136-193` 的 `run` 拿到响应头即返回，body 在 driver 循环之外读取且读取失败不会重回该循环，所以非流式上「第一次 200 的头」与「产出 body 的那次 200 的头」恒为同一个 attempt。将来非流式接入 replay 时须重估。来源：[`reports/260831-review-spec-round6.md`](reports/260831-review-spec-round6.md) round6-08。
 
-**哪些头转发，用户未裁决，以下是本规格的推导**（§2.3）：
+**哪些头转发：用户已经写过一份名单，而本规格此前写着「用户未裁决」——这是错标，v8 更正。**
+
+`docs/.human-controlled/message-format-reshape.md` 的「客户端返回 Anthropic Messages」一节逐字写着：
+
+> 直连路径的黑名单有：
+> - `Connection` `Keep-Alive` `Proxy-Connection` `Hop-By-Hop`
+> - `Date` `Cache-Control` `Set-Cookie`
+> - `Content-Length` `Content-Encoding` `Transfer-Encoding`
+>
+> （TODO：这些条目来自 `copilot-api-js` 项目，需要了解原因）
+
+**定义域待用户裁定，这是本规格当前唯一需要用户裁决的事项**（§11）：该节标题是「客户端返回 Anthropic Messages」，而本腿的客户端收到的是 Responses。但 [`error-envelope/spec.md`](../error-envelope/spec.md) §3.1 已经把这份名单套用到本腿，且它的路径判据键在 `Route.translation_required is False`——**与本规格 §2.4 的定义域完全相同**，而 §2.4 又声明 error envelope 这类跨腿合同「仍然适用」。所以在裁决到达之前，本腿的响应头上并存着两份当前指令。
+
+**裁决到达之前一律取交集**：下面的语义判据在用户名单**之上**运行，**除用户黑名单已点名者外**才谈转发。这是保守方向，落地后不与任一份权威相反。差异只在 `Date`／`Cache-Control`／`Set-Cookie` 三项——名单要求剥离，而本规格的「其余一律转发」会转发它们。
+
+**以下的判据本身是本规格的推导**（§2.3）：
 
 - **必须剥离**：hop-by-hop 头（`Connection`、`Keep-Alive`、`Transfer-Encoding`、`TE`、`Trailer`、`Upgrade`、`Proxy-Authenticate`、`Proxy-Authorization`、以及非标准但既有直连表已列的 `Proxy-Connection`）——HTTP 规范要求，不是产品选择。
 - **必须由本代理重建**：`Content-Length`（流式重新成帧后不再成立）、`Content-Encoding`（若本代理已解压）、流式的 `Content-Type`（`text/event-stream`）。
@@ -309,8 +345,10 @@ cap 超限、客户端取消、客户端 deadline 等人写文档列为不可继
   > **v5 的例子里有两个不满足这条判据，是我把名单和判据混着写留下的。** `Last-Modified` 描述的是源资源的修改时间，不验证响应字节；**weak** `ETag` 的用途恰恰是标识语义等价而非逐字节相同。两者都不是 exact-byte 断言，因此**保留**。strong `ETag` 仍须剥离或重算。若将来要连 weak validator 也一并剥，那是「块级交付可能改变表征」的另一条取舍，须单独裁定，不能当成本判据的必然推论。
 - **非流式的 `Content-Type` 由本代理按实际输出重建**。§9 已说明成功 body 会被 parse 成 JSON object 再由 `JSONResponse` 重新序列化，所以输出的就是 JSON——转发上游的 `text/html` 或 vendor media type 会告诉客户端一件不再为真的事，且显式 `Content-Type` 还会压过 `JSONResponse` 本该生成的 `application/json`。只有当上游的 media type 与实际输出兼容时才可保留。
 - **`Content-Encoding` 是 strip-or-recompute**：生产路径经 `httpx2` 的 content decoder 读取，body 到这里已解压，所以上游那个值不再为真——**删除它**，只有本代理自己重新编码时才设新值。**不得**复用原值。
-- **其余一律转发**，包括本代理不认识的头。理由与 §2.1 同源：客户端本来就是冲着这个上游去的，`request-id`、rate-limit 系列、`retry-after` 等决定它的关联、退避与限流行为，剥掉它们是把代理的无知强加给客户端。
+- **除用户黑名单已点名者外，其余一律转发**，包括本代理不认识的头。理由与 §2.1 同源：客户端本来就是冲着这个上游去的，`request-id`、rate-limit 系列、`retry-after` 等决定它的关联、退避与限流行为，剥掉它们是把代理的无知强加给客户端。
 
+> **以下这段论证的是「要不要加额外防护」，不能用来越过一份已经存在的用户名单。** 即使用户裁定本腿不适用那份名单，它的结论也不变；反过来，它也不构成转发 `Set-Cookie` 的授权。
+>
 > **这与 cassette 录制用 allowlist 的既有教训不冲突，两者场景相反。** 那条教训（denylist 让三个识别性 header 漏进磁盘）针对的是**把上游响应写进版本库**，防的是账号标识被提交；这里是**转发给发起请求的客户端本人**，它对上游的可见性本就不低于我们。没有具体危害就不加防护，是用户既有的安全立场。
 
 **当前实现均未转发任何上游语义头**（非流式只构造 `JSONResponse(payload, status_code=...)`，流式只构造 `_AccountedStreamingResponse(..., media_type="text/event-stream")`），所以本条是新增行为，需要各自的测试。
@@ -325,7 +363,15 @@ cap 超限、客户端取消、客户端 deadline 等人写文档列为不可继
 
 ## 11. 未闭合项（归本规格所有）
 
-**当前为空。** v4 把此前挂在这里的产品分叉全部移入正文定案：header 合同 → §9.1；`requires_client_action` 的数据来源 → §7.1（item 自带，无需请求侧通路）；policy × ending → §7.2；native failure 的 taxonomy 输入 → §5.2。
+**当前一项，需用户裁决。**
+
+| # | 未闭合项 | 现状 | 谁能裁 |
+|---|---|---|---|
+| O-1 | `message-format-reshape.md`「客户端返回 Anthropic Messages」一节的**直连响应头黑名单**是否覆盖 Responses 客户端的直连腿 | §9.1 在裁决前**剥离集取并集**（黑名单 ∪ 语义判据），等价地转发集取交集，落地后不与任一权威相反。差异仅 `Date`／`Cache-Control`／`Set-Cookie` 三项 | **用户**。节标题的定义域只有作者能裁。用户自己在该节旁挂了 TODO「这些条目来自 `copilot-api-js` 项目，需要了解原因」，而本项目指令明令不得把 copilot-api-js 的默认值当作项目契约——所以这可能不是一条已定型的裁决，而是一份待用户自己复核的继承清单 |
+
+> **v8 关闭了一项：**「无法归属」的事件在 ending 处的处置已在 §7.2 收口第 3 步定案（上游终局则交付、代理侧 ending 则丢弃）。它属本规格推导且触到 §2.1 的边，若将来出现上游样本表明交付它们会产生坏帧，须重开。
+
+v4 把更早挂在这里的产品分叉全部移入正文定案：header 合同 → §9.1；`requires_client_action` 的数据来源 → §7.1（item 自带，无需请求侧通路）；policy × ending → §7.2；native failure 的 taxonomy 输入 → §5.2。
 
 实施状态不属于本节，见 [`plan.md`](plan.md)。
 
@@ -336,6 +382,7 @@ cap 超限、客户端取消、客户端 deadline 等人写文档列为不可继
 | 日期 | 条款 | 变化 | 触发 |
 |---|---|---|---|
 | 2026-08-30 | 全文 | 初稿 | GitHub issue #1／#2；用户裁决；方案评审的 blocker-01 |
+| 2026-08-31 | §3、§3.1、§4、§5、§5.2、§7.2、§9、§9.1、§11 | **v8。** (a) §9.1 写着「哪些头转发，用户未裁决」，而 `message-format-reshape.md` 有一份**用户亲笔的直连响应头黑名单**，`error-envelope/spec.md` §3.1 已按 `translation_required` 把它套用到本腿——一句「用户未裁决」永久关闭了一个用户已表过态的问题，且推导出的「其余一律转发」与名单在 `Date`／`Cache-Control`／`Set-Cookie` 上相反；改为事实陈述 + 裁决前取交集，定义域登记进 §11 待用户裁；(b) v7 为修 round6-03 补的那句给出两种读法（「扣住不发」与「发了不算数」），§5 只支持前者，且骨架测试注释已按错的那读复述 §5；改写为一句正面规则；(c) v7 只收紧了 partition 第一格，同节 ending 表第一行与 §5 的丢弃句仍是收紧前的谓词、无时点——修复没传播到全部复述处，而漏掉的正是 step 6 视角最先读到的那张表；(d) **「无法归属」的事件被持有到 terminal 之后没有归宿**，收口三步两类都不含它，骨架 docstring 已代本规格裁定为丢弃——而丢弃的理由恰是「判不出归属」，正是 §2.1 否过的那个理由；新增收口第 3 步按 ending 来源二分；(e) §5.2 的三分法论据、`AttemptFailed` 的 origin 取值、`ReopenRefused` 今天为空的如实陈述；(f) §9 补定义域（只覆盖成功响应，错误 body 归 error-envelope 原始字节透传）；(g) §3 的保真基准从「本项目 parser 的输出」改钉到 SSE 规范的 field parsing 算法——否则该承诺对 P3 那类 parser 缺陷天然没有分辨力；(h) §3.1 第三条的机制陈述、cassette 计数的限定词 | [`reports/260831-review-spec-round7.md`](reports/260831-review-spec-round7.md)：blocker 1、major 3、minor 6、nit 4；round6 十条与 skeleton 十一条全部 closed |
 | 2026-08-31 | §3.1、§4、§5、§5.2、§7、§7.2、§9.1 | **v7。** (a) §7.2 的 partition 第一格与第二格**在时间上不互斥**——第一格谓词在尝试重开之前就可求值并要求「全部丢弃」，第二格却把只有重开之后才知道的「被拒」算进自己并要求提交那批已被销毁的 group；第一格补「且重开已经成功」，final source 表补「上游终局存在但其 attempt 已作废」一行；(b) 用户亲笔的「优雅关闭时报错不再考虑无痕重试」**§5 从头到尾没记**，而 §5.2 把 draining 建成重开后的拒绝、时序与裁决相反——补记进 §5 的资格清单并移出 §5.2 的结果表；(c) §4／§7 的「安全前缀一就绪即发出」与 §5 的「control events 保持 attempt-local」对每个请求的首帧给两个答案，按前者实施会让直连腿的透明 replay 在默认 policy 下**永不成立**——§4 补「control-only 前缀不构成提交」，§7 的 `block` 行补提交时点限定；(d) §4 定案「已 `done`」指该 item 的 `done` 也在同一前缀内，一个 item 的事件不得跨越释放边界（否则半个 group 出门，且用一个无内容价值的字节关掉整轮 replay 窗口）；(e) §4 明确「无法归属」与「envelope」是两个相反处置、必须是两个可区分的答案，附 SDK 3.3.1 的 4 个 audio 反例；(f) §5.2 的「余下 17 个是明确的非瞬时失败」仍是未逐项核验的全称，`failed_to_download_image` 改为「未核、保守落 `None`」；(g) §3.1 的两条改为已实现并新增第三条（`splitlines()` 是 SSE 断行集的超集，会截断 data）；(h) §5 的「用户亲笔的重试合同」引号是转述而非原文，改为「概括为」并写明后半句在人写文档里没有对应句子；(i) §9.1 的用户裁决定义域只覆盖流式，向非流式的延伸标为本规格推导 | [`reports/260831-review-spec-round6.md`](reports/260831-review-spec-round6.md)：blocker 1、major 2、minor 6、nit 1；[`reports/260831-review-skeleton.md`](reports/260831-review-skeleton.md)：major 4、minor 6、nit 1 |
 | 2026-08-31 | §5.1、§5.2、§7.2、§9.1 | **v6。** (a) §7.2 第二格把「有上游终局」的情形也写成 proxy error——它至少装着三种来源，其中三种手里有上游自己的终局；新增 final source 表，明确 **carrier 由 final source 决定、与 commit 状态正交**；(b) `vector_store_timeout` 归入瞬时，v5 的「其余 18 个全非瞬时」把它一起压掉了；(c) §5.1 仍把 draining 枚举成「replacement 失败」，与 §5.2 的 `ReopenRefused` 相反——改为引用；(d) §9.1 的例子里 `Last-Modified` 与 weak `ETag` **不满足**同句的判据（它们不验证响应字节），已移出并明确保留，`ETag` 拆强弱；非流式 `Content-Type` 此前落进「其余一律转发」，会告诉客户端一个与实际输出不符的 media type | [`reports/260831-review-spec-round5.md`](reports/260831-review-spec-round5.md)：blocker 1、major 3 |
 | 2026-08-30 | §5.2、§7、§7.2、§8、§9.1、文首 | **v5。** (a) §7.2 的「任何 ending 一律收口」与 §5 的透明 replay **互斥**——先提交已完成 group 就等于提交了首个原生事件，而 §5 随即禁止 whole-attempt replay；根因是「ending」一词同时指了「可能被 replay 掉的 attempt 结束」与「客户端最终看到的结束」。现在 §7.2 只在 replay 判定之后运行，表里加了 funded replay 一行，§7 主表与 §8 的两处同类表述一并同步；(b) §5.2 放宽——v4 写的「没有 code 语义表」是**未核就写的错误**，`ResponseError.code` 是 20 成员 `Literal`，`server_error` 与 `rate_limit_exceeded` 语义明确；v4「replay 窗口很窄」的判断也只对 `block` 成立，`full` 下窗口覆盖整次 attempt；(c) §5.2 把重开结果分成 `OpenedAttempt`／`AttemptFailed`／`ReopenRefused` 三类可观察事实——v4 的「它是一个 exception」不成立，draining 时根本没调用过 `handle`；(d) §9.1 补 `Proxy-Connection`，表征元数据改为**语义判据**而非名单（名单必漏，round4 漏了 `Content-MD5`），`Content-Encoding` 明确为 strip-or-recompute | [`reports/260830-review-spec-round4.md`](reports/260830-review-spec-round4.md)：blocker 1、major 2、minor 2 |
