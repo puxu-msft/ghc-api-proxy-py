@@ -1,7 +1,7 @@
 # 直连 Responses 路径：原生透传产品规格
 
 日期：2026-08-30
-状态：**DRAFT v9 — 待复评**。主体未开始。§3.1 的前两处前置缺陷已实现并合入 `main`（`7e96adc`）；第三处（`parse_frame` 的行拆分）已在 worktree `260831-sse-line-endings` 实现，未进 `main`。**§11 有一项待用户裁决**（响应头黑名单的定义域）。
+状态：**DRAFT v9 — 待复评**。§3.1 的三处前置缺陷**全部已合入 `main`**（P1／P2 在 `7e96adc`，P3 在 `109dc44`）；透传骨架亦已合入（`01c33f1`，未接线）。主体（接线）未开始。**§11 有一项待用户裁决**（响应头黑名单的定义域）。
 定义域：**inbound 与 target 同为 `openai-responses`**（`route.translation_required is False`）。本规格不覆盖任何其他路由。
 
 > **本文是活文档，不冻结。** 新裁决、实测或发现与本文冲突时当场修订，每次修订记入 §12。
@@ -98,7 +98,7 @@
 
 1. **已实现（`7e96adc`）。** `_report_failure` 把含换行的 payload 写成一行 `data:` 加一行裸文本，客户端再解析只剩第一行。**必须**有一个接受 `(event: str, data: str)` 的 raw-text SSE encoder，对 `data.split("\n")` 的每一段各写一条 `data:`；**不得**复用只接受 dict 并 `orjson.dumps` 的 `SseFrame`。
 2. **已实现（`7e96adc`）。** `read_events` 的 frame separator 固定为 `b"\n\n"`，两个合法 CRLF 帧会被合并成一个事件。这是两条腿共用的前置。
-3. **未进 `main`**（已在 worktree `260831-sse-line-endings` 实现，`2c93ac6`）。`parse_frame` 用 `str.splitlines()` 拆行，而它的断行集是 SSE 的**超集**——SSE 只认 CR、LF、CRLF。于是 data 里一个裸的 U+2028、U+2029 或 U+0085 会让该行**从此处截断**，后半段无论如何都不再构成一个 `data` 字段：没有冒号就被跳过，有冒号则落进一个既非 `event` 也非 `data` 的字段名（真实 payload 多半是后者，例如 `{"delta":"a<CH>b","output_index":0}` 的后半段）。两条路都丢内容，且截断后的 payload 不再是合法 JSON，随后落进 §4 的「无法归属」。**必须**改为只认 CR／LF／CRLF。
+3. **已实现（`109dc44`）。** `parse_frame` 曾用 `str.splitlines()` 拆行，而它的断行集是 SSE 的**超集**——SSE 只认 CR、LF、CRLF。于是 data 里一个裸的 U+2028、U+2029 或 U+0085 会让该行**从此处截断**，后半段无论如何都不再构成一个 `data` 字段：没有冒号就被跳过，有冒号则落进一个既非 `event` 也非 `data` 的字段名（真实 payload 多半是后者，例如 `{"delta":"a<CH>b","output_index":0}` 的后半段）。两条路都丢内容，且截断后的 payload 不再是合法 JSON，随后落进 §4 的「无法归属」。**必须**改为只认 CR／LF／CRLF。
 
    > 机制已实跑证实（U+2028、U+2029、U+0085、VT、FF 五个字符逐一验过，均截断），**触发未证实**：VT 与 FF 在合法 JSON 里必须转义、不可能裸出现，真正有活性的是前三个——它们在 JSON 字符串里裸出现合法，是否真从 Copilot 出来取决于上游的编码器。这个权重足以要求修复，不足以支撑「生产上正在丢数据」。来源：[`reports/260831-review-skeleton.md`](reports/260831-review-skeleton.md) finding 10。
 

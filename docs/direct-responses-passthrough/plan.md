@@ -1,7 +1,7 @@
 # 直连 Responses 透传：实施计划
 
 日期：2026-08-31（v8）
-状态：**主体待实施**；§0 的 P1／P2 已合入 `main`（`7e96adc`），**P3 已在 `worktree-260831-sse-line-endings` 实现，未进 `main`**。骨架（顺序表第 2 步）已在 `worktree-260831-passthrough-skeleton` 落地并经两轮独立评审修正
+状态：**主体待实施**；§0 的三项前置**全部已合入 `main`**（P1／P2 在 `7e96adc`，P3 在 `109dc44`）。骨架（顺序表第 2 步）已合入 `main`（`01c33f1`，未接线），经两轮独立评审修正；源提交存于 `archive/260831-passthrough-skeleton` 与 `archive/260831-sse-line-endings`
 权威：[`spec.md`](spec.md)。**本文不定义任何用户可观察行为**——凡本文与 Spec 冲突，以 Spec 为准；凡本文出现 Spec 没有的行为承诺，那是缺陷，应移入 Spec 或删除。
 
 > **v1 已作废并重写。** 它规定「只保存 `done.item` 的最终快照、重发 `added` + `done`、继续 mint id、沿用 framer 的 output index」，而 Spec v2 要求保存全部 item 专有事件、不得 mint id、terminal 整个对象逐字。照 v1 实施会直接违反 Spec。作废理由见 [`reports/260830-review-spec.md`](reports/260830-review-spec.md) major-08 与 [`reports/260830-review-plan.md`](reports/260830-review-plan.md)；两份报告作为时点记录不改。
@@ -14,7 +14,7 @@
 |---|---|---|
 | P1 | `_report_failure` 对含换行的 payload 写成一行 `data:` 加一行裸文本，客户端只剩第一行 | **已完成**（`7e96adc`）：新增 `encode_frame(event, data)`，每行一条 `data:` |
 | P2 | `read_events` 的 frame separator 固定 `b"\n\n"`，两个合法 CRLF 帧被合并成一个事件 | **已完成**（`7e96adc`）：分隔符改为两个连续行尾，用 atomic group 防回溯把单个 `\r\n` 拆成两个 |
-| P3 | `parse_frame` 用 `str.splitlines()` 拆行，其断行集是 SSE 的超集，data 里裸的 U+2028／U+2029／U+0085 会让该行从此处截断 | **已实现，未进 `main`**（`worktree-260831-sse-line-endings`，`2c93ac6`）：新增 `_LINE_ENDING = re.compile(r"\r\n\|\r\|\n")`，`parse_frame` 改用 `re.split`；5 个参数化用例，变异（改回 `splitlines()`）全红。合入 `main` 后须同步 `spec.md` 文首与 §3.1 第三条、本文件文首与本行 |
+| P3 | `parse_frame` 用 `str.splitlines()` 拆行，其断行集是 SSE 的超集，data 里裸的 U+2028／U+2029／U+0085 会让该行从此处截断 | **已完成**（`109dc44`，源提交 `archive/260831-sse-line-endings`）：新增 `_LINE_ENDING = re.compile(r"\r\n\|\r\|\n")`，`parse_frame` 改用 `re.split`；5 个参数化用例，变异（改回 `splitlines()`）全红。独立评审 pass、0 blocker（[`reports/260831-review-sse-line-endings.md`](reports/260831-review-sse-line-endings.md)） |
 
 P1／P2 都已变异验证：把分隔符改回 LF-only，CRLF 与 CR 两个参数变红；把 encoder 改回单行 `data:`，多行用例变红。
 
