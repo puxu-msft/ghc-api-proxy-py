@@ -45,3 +45,21 @@
 **未核**：`@ai-sdk/openai` 具体在哪个版本、以何种方式校验连续性。本项目没有它的源码，采纳的是用户的陈述。
 
 **出处**：[`reports/260831-review-spec-round8.md`](reports/260831-review-spec-round8.md) round8-02。
+
+## D-4　Anthropic 直连腿的 thinking signature 整形默认开着，走 native 会拿掉它
+
+**状态**：产品分叉，等裁决。**比 D-3 严重，因为它默认生效、且落在主路径上。**
+
+**事实**：`hook_fix_anthropic_sse.thinking.content_block_start_compat` 的默认值是 `"signature_delta"`（`src/app/config/schema.py`），`framer_for` 把它交给 `AnthropicFramer`，于是**今天每一条 Anthropic 腿都在做这个整形**——把嵌在 `content_block_start` 里的 thinking signature 抽成单独的 `signature_delta` 事件。纯透传按构造不做任何整形，接线后它就没了。
+
+**为什么落在主路径上**：`sync-refs/sxwxs-ghc-api/260822-round2-disposition.md` 记着实测，`claude-sonnet-5` 不支持 Responses API（`unsupported_api_for_model`），**Claude 系模型只能走直连**。所以这不是某条边角腿的行为变化。
+
+**用户已经表过态，但表的是倾向不是裁决**：`docs/.human-controlled/message-format-reshape.md`「改写上游 Anthropic Messages 输出」一节逐字写着「曾经用 `hook_fix_anthropic_sse.thinking.content_block_start_compat` 配置控制生效，现在我认为（如果客户端真的不支持）这是应该常驻的」，并挂着两个 TODO：确认 Claude 新版是否接受嵌入形式，以及了解 copilot-api-js 原项目怎么处理。**倾向是「常驻」，方向与「拿掉」相反。**
+
+**本规格已裁的部分**（[spec.md](spec.md) §2.7）：接线**不得**改变任何一条腿今天已生效的整形默认值。所以这条不阻塞接线——接线后 `signature_delta` 仍然开着。
+
+**仍待裁的部分**：这个整形长期该以什么形态存在。§6.2 的模式是「另立显式、可选的 reshape 合同，不得叫它 native」；用户的倾向是「常驻」。两者不矛盾（常驻的合同也还是合同），但「默认开、可关」与「常驻、不可关」是两种不同的对外承诺，得由用户定。
+
+**未核**：Claude 新版是否真的不接受嵌入 signature 的形式——这正是用户自己挂的第一个 TODO。整形是否仍然必要取决于它。
+
+**出处**：本轮扩大定义域时发现（[spec.md](spec.md) §2.7）；与 D-3 是同一形状的两例。

@@ -88,11 +88,28 @@
 | 直连对 | 状态 | 依据 |
 |---|---|---|
 | `openai-responses` ↔ `openai-responses` | **本规格的主体工作。**今天走翻译型 assembler，6 个已知 item 类型之外一律拒绝——GitHub issue #2 与 #3 都落在这里 | 引擎已建（`01c33f1`），未接线 |
-| `anthropic-messages` ↔ `anthropic-messages` | **同形缺陷，今天可达。**`descriptor.supports(inbound_endpoint)` 为真时 target 即等于 inbound，集成测试里已有 `anthropic-messages` 上游。这条腿今天走 `AnthropicAssembler` ＋ `AnthropicFramer` 的往返，未知 block 类型同样被 framer 拒绝 | 同一引擎 ＋ 上表的 Anthropic 词汇 |
+| `anthropic-messages` ↔ `anthropic-messages` | **同形缺陷，而且它是主路径不是边角。**`sync-refs/sxwxs-ghc-api/260822-round2-disposition.md` 记着实测：`claude-sonnet-5` 不支持 Responses API（`unsupported_api_for_model`），**Claude 系模型只能走直连**。这条腿今天走 `AnthropicAssembler` ＋ `AnthropicFramer` 的往返，未知 block 类型同样被 framer 拒绝。**落地前须先解决 §2.7 的整形问题** | 同一引擎 ＋ §2.5 的 Anthropic 词汇 |
 | `openai-chat-completions` ↔ `openai-chat-completions` | **天花板不存在，但那是偶然。**这条腿没有 framer，走 `one_shot_delivery` 把上游字节原样前送，所以没有任何类型表挡在中间。它缺的是**块级交付**——boundaries 在 `choices[].delta` 里面，2026-08-22 已裁决推迟 | 现状即满足 §2.1；块级交付的缺口是既有推迟项，不因本规格重开 |
 | `openai-embeddings` ↔ `openai-embeddings` | 非流式，按 §9 处置 | 无 SSE 词汇 |
 
 > `gemini-generate-content` 已在路由表中登记但没有 translator 应答，`InboundRoute.implemented` 挡住请求，因此今天不存在该格式的直连腿。它出现时须先有自己的词汇。
+
+### 2.7 走 native 会拿掉每条腿现有的兼容整形，这不是可以顺手带过的副作用
+
+**放宽定义域之后浮出来的一般事实**：今天每条直连腿的 framer 都在做一点兼容整形，而**纯透传按构造会把它一并去掉**。这不是实现细节，是用户可观察行为，每一条都要单独裁。
+
+已知两例，严重度不同：
+
+| 腿 | 整形 | 今天的状态 | 拿掉的后果 |
+|---|---|---|---|
+| `openai-responses` | `ResponsesFramer._item_id()` 由 `output_index` 生成，同一 item 的 `added` 与 `done` id 连续 | **默认生效**（framer 一直这么做），配置项 `hook_fix_responses_sse.fix_stream_ids` 是注释掉的候选 | 用户具名的 `@ai-sdk/openai` 一类客户端会被自己的连续性校验拒掉。见 [`deferred.md`](deferred.md) D-3 |
+| `anthropic-messages` | `hook_fix_anthropic_sse.thinking.content_block_start_compat`，把嵌在 `content_block_start` 里的 thinking signature 抽成单独的 `signature_delta` | **默认 `"signature_delta"`，即默认开着** | 直接落在 **Claude 系模型唯一的那条腿**上。用户亲笔文档里这条还带着 TODO：「现在我认为（如果客户端真的不支持）这是应该常驻的」——即用户倾向把它变成常驻，而不是拿掉。见 [`deferred.md`](deferred.md) D-4 |
+
+**处置模式 §6.2 已经给过，本节只是把它提升为通则**：兼容变换**必须**另立显式、可选的 reshape 合同，**不得**叫它 native 或逐字。所以正确的形状不是「透传吃掉整形」，也不是「为了保整形而不透传」，而是**透传逐字携带上游事件，声明过的 reshape 合同在其上运行**，且合同的存在与默认值对用户可见。
+
+**因此本规格裁定：接线不得改变任何一条腿今天已生效的整形默认值。** Anthropic 腿的 `signature_delta` 默认开着，接线后仍然开着；Responses 腿今天没有 `fix_stream_ids`，接线后也不会凭空多一个。**要不要改那些默认值是用户的事，不是接线的副作用**（D-3、D-4）。
+
+> 这条通则是 v10 放宽定义域**直接换来的**。只做 Responses 一条腿时，`fix_stream_ids` 看起来像那条腿的特殊情况；两条腿摆在一起才看出它是「native 与既有兼容层的关系」这个一般问题，而 Anthropic 那一例默认开着、又落在主路径上，严重度比先发现的那一例高得多。
 
 ## 3. 保真层级：合法 UTF-8 SSE 的 logical event 与 data
 
