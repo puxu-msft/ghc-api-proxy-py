@@ -31,3 +31,17 @@
 **还缺的证据**：Copilot 究竟会不会在响应 `output` 里发 `function_call_output`。SDK 的 `ResponseOutputItem` union 里有 `ResponseFunctionToolCallOutputItem`，说明**协议允许**；本项目 cassette 与 history 里有没有真实样本**未查**。在拿到答案之前不应单方面选定「拒绝」或「按 tool_result 处理」——前者误伤一个协议允许的形态，后者把 user 角色的块塞进 assistant 回复。
 
 **出处**：[`reports/260830-known-set-divergence.md`](reports/260830-known-set-divergence.md)。当时的处置是「转入设计」，设计尚未落地。
+
+## D-3　本腿启用透传即撤掉稳定 item id，对已具名的一类客户端是回归
+
+**状态**：产品分叉，等裁决。**登记本身不需要用户点头，怎么裁需要。**
+
+**事实**：今天直连 Responses 腿由 `ResponsesFramer` 成帧，`_item_id()` 用 `f"{prefix}_{response_id}_{output_index}"` 生成 id，同一个 item 的 `added` 与 `done` 走同一个 `output_index`，**所以客户端今天拿到的 id 是连续的**。本腿改 native 之后，客户端拿到的是上游那份实测 12/12、16/16、125/125 全不相同的 id（[spec.md](spec.md) §6.2）。
+
+**为什么这是回归而不只是「行为变化」**：用户在 `docs/.human-controlled/config.example.yaml` 的 `hook_fix_responses_sse` 段具名写着「`@ai-sdk/openai` 校验 ID 连续性需要」。所以已知**至少有一类客户端**今天在这条腿上能跑、透传落地后会被它自己的校验拒掉。
+
+**分叉**：是否在启用透传的**同一刀**里提供 opt-in 的 `fix_stream_ids`（默认关），还是先落 native、把兼容开关留作后续。[spec.md](spec.md) §6.2 已裁定这类变换必须另立显式、可选的 reshape 合同、不得叫它 native——**方向没有分歧，分歧只在时点**。
+
+**未核**：`@ai-sdk/openai` 具体在哪个版本、以何种方式校验连续性。本项目没有它的源码，采纳的是用户的陈述。
+
+**出处**：[`reports/260831-review-spec-round8.md`](reports/260831-review-spec-round8.md) round8-02。

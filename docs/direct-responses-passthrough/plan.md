@@ -1,6 +1,6 @@
 # 直连 Responses 透传：实施计划
 
-日期：2026-08-31（v7）
+日期：2026-08-31（v8）
 状态：**主体待实施**；§0 的 P1／P2 已合入 `main`（`7e96adc`），**P3 已在 `worktree-260831-sse-line-endings` 实现，未进 `main`**。骨架（顺序表第 2 步）已在 `worktree-260831-passthrough-skeleton` 落地并经两轮独立评审修正
 权威：[`spec.md`](spec.md)。**本文不定义任何用户可观察行为**——凡本文与 Spec 冲突，以 Spec 为准；凡本文出现 Spec 没有的行为承诺，那是缺陷，应移入 Spec 或删除。
 
@@ -51,7 +51,7 @@ P1／P2 都已变异验证：把分隔符改回 LF-only，CRLF 与 CR 两个参�
 
 实现可以维护一张由 SDK 版本导出的表，但**表是判据的当前编码，不是判据本身**；未知类型按 Spec 保守视为需要释放并记 `predicate unknown`。
 
-还要实现 Spec §7.2 的收口顺序。**先过 §5 的 replay 门**——funded replay 时 §7.2 根本不运行，旧 attempt 一个字节都不提交。真正进入收口时：丢未闭合 suffix → 按原序提交已完成 group → 末步的 carrier **按 §7.2 的 final source 表**（有上游终局就逐字提交它，没有才写 proxy error）。客户端取消与下游写失败例外。**不得**沿用现有 `stream.py` 各 ending 是否 flush 的现状。
+还要实现 Spec §7.2 的收口顺序。**先过 §5 的 replay 门**——funded replay 时 §7.2 根本不运行，旧 attempt 一个字节都不提交。真正进入收口时**照 Spec §7.2 的四步执行，本文件不复制**——与本文件对 header 名单、code 映射表已经采纳的「不复制」纪律一致。v8 之前这里复述的是三步，漏掉的正是当时新增的那一步（无法归属事件的处置），而**漏写不构成冲突**，`plan.md` 文首那句「与 Spec 冲突以 Spec 为准」救不了它：少一步与本来就没有这一步在文本上完全同形，没有任何东西会红。客户端取消与下游写失败例外。**不得**沿用现有 `stream.py` 各 ending 是否 flush 的现状。
 
 ## 5. Replay 与 commit
 
@@ -87,7 +87,7 @@ P1／P2 都已变异验证：把分隔符改回 LF-only，CRLF 与 CR 两个参�
 6. `requires_client_action` 与三种 policy（含 §7.2 的 policy × 最终 ending）
 7. **分流点接线 + 撤销 `ca777df` 的直连腿一半 + 更新下述测试的断言，同一刀**
 8. Headers（§9.1）
-9. 可观测迁移（本步会改变 `tests/int/test_pipeline_app.py:2788` 的断言，见 §9 末）
+9. 可观测迁移（本步会改变 `tests/int/test_pipeline_app.py:2788` 的断言——该测试自己的注释写着这样断言就是为了让「给它一个 reader」成为一次**有意**的改动而不是静默的）
 
 > **接线为什么必须合成一刀。** v3 把「接线」与「撤销 direct 的 `REJECT`」分成两步，同时又说接线之后 issue 测试应转绿、且撤销之前不要改它们的断言——三句话不能同时成立。`test_an_output_item_this_assembler_does_not_know_is_refused_not_rendered`（`tests/int/test_pipeline_app.py:2549`）当前**明确断言** direct `custom_tool_call` 以 `error` 收尾、不出现任何 `response.output_item*`；接线一旦生效，正确行为恰好相反，该测试必红。启用 direct 透传与撤销 direct 的拒绝**是同一个 observable switch**，不是两个步骤。
 
@@ -114,11 +114,13 @@ v5：**funded replay 时不收口**（已完成 group 一个字节都不提交�
 
 v6：**末步 carrier 按 final source**——尤其「不可重试 code 的 `failed` 逐字交付」与「可重试但预算耗尽的 `failed` 逐字交付」这两格，它们是 round5 那个 blocker 的正解，没有判据就没有任何东西能防止实现退回写 proxy error；**`vector_store_timeout` 可重试**；**非流式 `Content-Type` 由本代理重建**（反例是上游用 `text/html` 承载可解析 JSON）；**weak `ETag` 与 `Last-Modified` 必须保留**——**这一条是反向要求，也是最容易被静默违反的**：语义判据的自然实现方式是「剥离一切像 validator 的头」，而正确行为是留下它们，一条只测「strong `ETag` 被剥」的判据在错误实现上照样绿，所以要写成「weak `ETag` 与 `Last-Modified` **仍在**响应头中」这样的正向断言。
 
-v7：**control-only 前缀不构成提交**（首帧 `response.created` 之后 replay 仍然合法——这一条直接决定四轮评审产出的 replay 合同走不走得到）；**一个 item 的事件不跨越释放边界**（反例序列 `created → added(0) → added(1) → delta(1) → done(0)`，断言 `added(0)` 不与 `done(0)` 分离）；**「无法归属」与「envelope」处置相反**（拿一个不带 `output_index` 的 audio 事件构造，断言它被持有且进入未闭合尾巴）；**draining 不花 replay 预算**（判定发生在重开之前，断言预算计数器未变）；**上游终局存在但 attempt 已作废时不得逐字重放它**。
+v7：**control-only 前缀不构成提交**（首帧 `response.created` 之后 replay 仍然合法——这一条直接决定四轮评审产出的 replay 合同走不走得到）；**一个 item 的事件不跨越释放边界**（反例序列 `created → added(0) → added(1) → delta(1) → done(0)`，断言 `added(0)` 不与 `done(0)` 分离）；**「无法归属」与「envelope」处置相反**（拿一个不带 `output_index` 的 audio 事件构造，断言它被**持有**而不是随 envelope 释放，且它与未闭合尾巴**分列两个集合**——ending 处的去向不归这条判据，见下面 v9 那条）；**draining 不花 replay 预算**（判定发生在重开之前，断言预算计数器未变）；**上游终局存在但 attempt 已作废时不得逐字重放它**。
 
 v7 还缺一条，v8 补上：**重开被拒或失败时，已完成的 group 仍须按原序提交**。这是 v7 那次修复（partition 第一格补「且重开已经成功」）的可观察产物，也是 round6 那个 blocker 的正解。它是**反向断言**——错误实现（判定可 replay 就立刻销毁队列）在只测「funded replay 时一个字节都不提交」的判据下照样绿，因为那条测的是另一个方向。写法：构造「判定可 replay → 重开被拒」，断言此前已完成的 group **仍在**最终输出里且保持原序（错误实现只剩一条 error），并一并断言销毁发生在新流到手之后。
 
-v8：**无法归属的事件按 ending 来源二分**（上游终局到达时，一个不带 `output_index` 的事件**仍在**交付里——正向断言；代理侧 ending 时不在）；**非流式错误 body 原始字节透传**（上游 4xx 的 `text/html` body 不被 parse 也不被重新序列化）；**响应头取交集**（`Date`／`Cache-Control`／`Set-Cookie` 不在输出里，而 weak `ETag`／`Last-Modified` 在——两个方向同一条判据里各测一次）。
+v8：**非流式错误 body 原始字节透传**（上游 4xx 的 `text/html` body 不被 parse 也不被重新序列化）；**响应头取交集**——`Date`／`Cache-Control`／`Set-Cookie` 不在输出里，**这半条的方向取决于 Spec §11 O-1，用户裁「名单不覆盖本腿」时须整条反转**；weak `ETag`／`Last-Modified` 在输出里，这半条与裁决无关。
+
+v9：**无法归属的事件按「收口时刻有没有未闭合 item」判**，两个方向各一条，同一个构造只差一个未闭合 item：没有未闭合 item 时一个不带 `output_index` 的事件**仍在**交付里（正向断言）；存在未闭合 item 时它与那条尾巴一同不在。**v8 曾把这条写成「按 ending 来源二分」，那个判据是错的**——照它写出来的实现会在上游终局 ＋ 存在未闭合 item 时发出孤儿帧。
 
 来源：[`reports/260831-review-spec-round6.md`](reports/260831-review-spec-round6.md) round6-09、[`reports/260831-review-skeleton.md`](reports/260831-review-skeleton.md) finding 01／02、[`reports/260831-review-spec-round7.md`](reports/260831-review-spec-round7.md) round7-09。
 
