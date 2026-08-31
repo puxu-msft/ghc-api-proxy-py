@@ -1,8 +1,10 @@
-# 直连 Responses 路径：原生透传产品规格
+# 直连路径：原生透传产品规格
 
 日期：2026-08-30
-状态：**DRAFT v9 — 待复评**。§3.1 的三处前置缺陷**全部已合入 `main`**（P1／P2 在 `7e96adc`，P3 在 `109dc44`）；透传骨架亦已合入（`01c33f1`，未接线）。主体（接线）未开始。**§11 有一项待用户裁决**（响应头黑名单的定义域）。
-定义域：**inbound 与 target 同为 `openai-responses`**（`route.translation_required is False`）。本规格不覆盖任何其他路由。
+状态：**DRAFT v10 — 待复评**。§3.1 的三处前置缺陷**全部已合入 `main`**（P1／P2 在 `7e96adc`，P3 在 `109dc44`）；Responses 方言的透传骨架亦已合入（`01c33f1`，未接线）。主体（接线）未开始。**§11 有一项待用户裁决**（响应头黑名单的定义域）。
+定义域：**任何 `route.translation_required is False` 的路由**，不限方言。v10 之前本规格只覆盖 `openai-responses` 两端；用户 2026-08-31 裁决「根因修复所有直连路径」，定义域随之放宽（§2.1）。
+
+> **目录名 `direct-responses-passthrough` 早于这次放宽，保留不改。** 八轮评审报告、提交信息与其他主题的交叉引用都指向它，改名会让那些引文指向不存在的路径——而报告是时点记录，不能重写。名字现在窄于内容，这一句就是那份落差的说明。
 
 > **本文是活文档，不冻结。** 新裁决、实测或发现与本文冲突时当场修订，每次修订记入 §12。
 >
@@ -31,13 +33,19 @@
 
 **三条不同来源的依据，分开记，不要合并成一句。**
 
-### 2.1 用户 2026-08-30 裁决（逐字锚）
+### 2.1 用户裁决（逐字锚）
 
-原话：**「协议允许，凭什么拒绝？」**
+**2026-08-30，原话：「协议允许，凭什么拒绝？」**
 
 支持的命题，仅此一条：**不得以「本代理不认识」为由，拒绝一个协议允许的直连 item。**
 
 它**不**单独支持「不得丢弃」「不得改写任何字段」「id 必须逐字」——那些另有出处，见 §2.2 与 §2.3。v1 把整套保真政策归给这一句，是超范围归属。
+
+**2026-08-31，原话：「根因修复所有直连路径」。**
+
+支持的命题：上面那条**不是 Responses 专有的**，它约束每一条 `translation_required is False` 的腿。这条裁决直接放宽了本规格的定义域，并否掉了「先只治 Responses、其余等将来」这个选项——本规格 v9 的定义域行正是那么写的，v10 依此裁决改写。
+
+> **提出这个问题的是用户，不是本规格。** v9 把范围限制记为本规格的选择，并在回报里把「其余直连对同形缺陷仍在」列为一条自述的局限；用户读到之后直接裁了范围。所以这不是我推导出来的一般化，是用户对一个已知局限的裁决。
 
 ### 2.2 用户既有裁决与亲笔文档
 
@@ -57,6 +65,34 @@
 `ca777df` 把该矩阵套用到了直连腿，是定义域误用，本规格落地时**必须撤销直连腿的那一半**。翻译腿的 `REJECT` 不变。
 
 跨腿合同（error envelope、keepalive）仍然适用。
+
+### 2.5 一个引擎，每种方言一份词汇
+
+**本规格的绝大部分条款与方言无关**，这是 v10 放宽定义域之后必须先说清的事：§3 的保真层级、§4 的交付单位与全局顺序、§5 的 commit frontier 与 replay、§7 的三种 policy 与收口顺序、§8 的失败与容量、§9／§9.1 的非流式与响应头、§10 的可观测合同——它们描述的是「一条不翻译的腿如何交付」，句子里没有一个 Responses 专有的事实。
+
+**方言专有的只有一份词汇**，每种直连格式各给一份：
+
+| 词汇项 | 它回答什么 | `openai-responses` | `anthropic-messages` |
+|---|---|---|---|
+| control 事件集 | 哪些事件属于响应信封而不属于任何 item | `response.created`／`queued`／`in_progress`／`completed`／`incomplete`／`failed`／`cancelled`、`error` | `message_start`、`message_delta`、`ping`、`error` |
+| terminal 事件集 | 哪些 control 事件结束响应（§5 第四行据此解除持有） | `response.completed`／`incomplete`／`failed`／`cancelled`、`error` | `message_stop`、`error` |
+| item 归属键 | 一个事件属于哪个 item | `output_index` | `index` |
+| item 闭合事件 | 哪个事件宣告某个 item 完整 | `response.output_item.done` | `content_block_stop` |
+| `requires_client_action` | 该 item 是否要求客户端提交 tool output 或 approval（§7.1） | 见 §7.1 的判据 | block `type == "tool_use"` |
+| terminal 事实的读法 | §10 要的 status、usage、stop reason 在哪 | `response.completed` 的 `response` 对象 | `message_delta` 的 `delta.stop_reason` 与 `usage` |
+
+**词汇只描述边界与归属，绝不描述 item 的类型学。**这是 §2.1 的直接后果：一份列举 item 类型的表会重建那道天花板，而边界词汇不会——`response.custom_tool_call_input.delta` 靠 `output_index` 归组，`content_block_delta` 靠 `index` 归组，两者都不需要知道那个 item 是什么。
+
+### 2.6 四条直连腿今天各自的状态
+
+| 直连对 | 状态 | 依据 |
+|---|---|---|
+| `openai-responses` ↔ `openai-responses` | **本规格的主体工作。**今天走翻译型 assembler，6 个已知 item 类型之外一律拒绝——GitHub issue #2 与 #3 都落在这里 | 引擎已建（`01c33f1`），未接线 |
+| `anthropic-messages` ↔ `anthropic-messages` | **同形缺陷，今天可达。**`descriptor.supports(inbound_endpoint)` 为真时 target 即等于 inbound，集成测试里已有 `anthropic-messages` 上游。这条腿今天走 `AnthropicAssembler` ＋ `AnthropicFramer` 的往返，未知 block 类型同样被 framer 拒绝 | 同一引擎 ＋ 上表的 Anthropic 词汇 |
+| `openai-chat-completions` ↔ `openai-chat-completions` | **天花板不存在，但那是偶然。**这条腿没有 framer，走 `one_shot_delivery` 把上游字节原样前送，所以没有任何类型表挡在中间。它缺的是**块级交付**——boundaries 在 `choices[].delta` 里面，2026-08-22 已裁决推迟 | 现状即满足 §2.1；块级交付的缺口是既有推迟项，不因本规格重开 |
+| `openai-embeddings` ↔ `openai-embeddings` | 非流式，按 §9 处置 | 无 SSE 词汇 |
+
+> `gemini-generate-content` 已在路由表中登记但没有 translator 应答，`InboundRoute.implemented` 挡住请求，因此今天不存在该格式的直连腿。它出现时须先有自己的词汇。
 
 ## 3. 保真层级：合法 UTF-8 SSE 的 logical event 与 data
 
@@ -195,7 +231,9 @@ cap 超限、客户端取消、客户端 deadline 等人写文档列为不可继
 
 **这四条都是本规格的推导**（§2.3），不是用户裁决。
 
-## 6. 各事件与各字段的处置
+## 6. 各事件与各字段的处置（`openai-responses` 词汇）
+
+> 本节与 §7.1 是**方言专有**的两节，其余各节与方言无关（§2.5）。`anthropic-messages` 的对应词汇见 §2.5 的表，它的逐字段处置在本腿落地时另立小节，不复制本节。
 
 ### 6.1 item 专有事件
 
@@ -239,7 +277,9 @@ cap 超限、客户端取消、客户端 deadline 等人写文档列为不可继
 | `full` | 全部可提交事件在**任意最终 ending**（§7.2）时一次发出，不限于上游终局。 |
 | `until-tool-use` | 见下。 |
 
-### 7.1 `until-tool-use` 的释放判据
+### 7.1 `until-tool-use` 的释放判据（`openai-responses` 词汇）
+
+> **方言专有**（§2.5）。判据本身——「该 item 是否要求客户端提交 tool output 或 approval，模型回合才能继续」——与方言无关；下面枚举的类型与字段只属于 Responses。`anthropic-messages` 的同一判据是 block `type == "tool_use"`，它没有 `execution`／`environment` 这类条件字段，所以那份词汇是一行而不是一节。
 
 **判据是 `requires_client_action(item)`：该 output item 是否要求客户端提交与之对应的 tool output 或 approval，模型回合才能继续。**
 
@@ -414,6 +454,7 @@ v4 把更早挂在这里的产品分叉全部移入正文定案：header 合同 
 | 日期 | 条款 | 变化 | 触发 |
 |---|---|---|---|
 | 2026-08-30 | 全文 | 初稿 | GitHub issue #1／#2；用户裁决；方案评审的 blocker-01 |
+| 2026-08-31 | 文首、§2.1、§2.5、§2.6、§6、§7.1 | **v10。** **用户裁决「根因修复所有直连路径」**，定义域从「两端同为 `openai-responses`」放宽为「任何 `translation_required is False` 的路由」。触发点是 v9 的一份自述局限：我在回报里说本规格只治 Responses 一对、其余直连对的同形缺陷仍在，用户读到后直接裁了范围——所以这是**用户对已知局限的裁决**，不是本规格推导出的一般化。随之新增 §2.5（一个引擎、每种方言一份词汇，并把「词汇只描述边界与归属、绝不描述 item 类型学」写成 §2.1 的直接后果）与 §2.6（四条直连腿今天各自的状态：Responses 是主体工作；**Anthropic 直连是同形缺陷且今天可达**，集成测试里已有 `anthropic-messages` 上游；Chat Completions 的天花板不存在但那是偶然——它没有 framer 所以字节直传，缺的是块级交付，属既有推迟项；Embeddings 非流式）。§6 与 §7.1 标注为方言专有，其余各节确认与方言无关 | 用户 2026-08-31 裁决 |
 | 2026-08-31 | §3、§3.1、§6.2、§7.2、§8、§9.1、§11 | **v9。** (a) **v8 新加的 §7.2 收口第 3 步是错的**：它按 ending 来源二分，论据句字面说反了（「不再有 X 之外的解释」＝「唯一解释是 X」），而作者真想说的推理被本规格 §3「terminal 不能证明未知 lifecycle 已完成」逐字否掉；评审用骨架 assembler 实跑构造出坏帧（截断的 `done` 让 item 永远开着，该 item 事件被丢而这个 `done` 被逐字发出，客户端拿到孤儿帧且 payload 非法）。改为单一谓词「收口时刻有没有未闭合 item」；**未采纳评审建议里「代理侧 ending 一律丢弃」那半条**，理由写在正文（与同次收口第 2 步不一致）；(b) §6.2 说「其他客户端未穷尽」，而用户在 `config.example.yaml` 具名写下 `@ai-sdk/openai` 校验 ID 连续性——本腿改 native 即撤掉今天 framer 提供的稳定 id，对该类客户端是回归，此前无任何登记；产品分叉入 `deferred.md` D-3；(c) §8 的 cap 口径此前只引了用户双语注释的英文半句，中文半句「累计缓冲」可读成相反的意思，改为如实陈述这是本规格在两读之间的选择；(d) §9.1 的「不与任一权威相反」「差异只在三项」两句都只算了一侧——黑名单蕴含「未点名者转发」，语义判据会剥掉名单没点名的 validator／digest 一族；§11 O-1 同步为两侧，并补上「请求头那节有定义域限定句、响应头那节没有」这个对裁决有用的不对称；(e) §9.1 的「定义域完全相同」改为「超集」，并点破用户名单里的 `Hop-By-Hop` 是类别标记不是头名；(f) §3 的「明确不承诺」按新基准重述——其中两项其实与规范一致，v8 把五项统称为「非规范要求」会诱导读者去改动正确的行为；新登记一处真实偏差（不含冒号的 `data` 行）；(g) §3 的承诺面补上第 3 步提交的无法归属事件、排除句的步号改对；§3.1 第三条的 P3 状态与文首、plan 同口径 | [`reports/260831-review-spec-round8.md`](reports/260831-review-spec-round8.md)：blocker 1、major 3、minor 5、nit 4；round7 十四条全部 closed |
 | 2026-08-31 | §3、§3.1、§4、§5、§5.2、§7.2、§9、§9.1、§11 | **v8。** (a) §9.1 写着「哪些头转发，用户未裁决」，而 `message-format-reshape.md` 有一份**用户亲笔的直连响应头黑名单**，`error-envelope/spec.md` §3.1 已按 `translation_required` 把它套用到本腿——一句「用户未裁决」永久关闭了一个用户已表过态的问题，且推导出的「其余一律转发」与名单在 `Date`／`Cache-Control`／`Set-Cookie` 上相反；改为事实陈述 + 裁决前取交集，定义域登记进 §11 待用户裁；(b) v7 为修 round6-03 补的那句给出两种读法（「扣住不发」与「发了不算数」），§5 只支持前者，且骨架测试注释已按错的那读复述 §5；改写为一句正面规则；(c) v7 只收紧了 partition 第一格，同节 ending 表第一行与 §5 的丢弃句仍是收紧前的谓词、无时点——修复没传播到全部复述处，而漏掉的正是 step 6 视角最先读到的那张表；(d) **「无法归属」的事件被持有到 terminal 之后没有归宿**，收口三步两类都不含它，骨架 docstring 已代本规格裁定为丢弃——而丢弃的理由恰是「判不出归属」，正是 §2.1 否过的那个理由；新增收口第 3 步按 ending 来源二分；(e) §5.2 的三分法论据、`AttemptFailed` 的 origin 取值、`ReopenRefused` 今天为空的如实陈述；(f) §9 补定义域（只覆盖成功响应，错误 body 归 error-envelope 原始字节透传）；(g) §3 的保真基准从「本项目 parser 的输出」改钉到 SSE 规范的 field parsing 算法——否则该承诺对 P3 那类 parser 缺陷天然没有分辨力；(h) §3.1 第三条的机制陈述、cassette 计数的限定词 | [`reports/260831-review-spec-round7.md`](reports/260831-review-spec-round7.md)：blocker 1、major 3、minor 6、nit 4；round6 十条与 skeleton 十一条全部 closed |
 | 2026-08-31 | §3.1、§4、§5、§5.2、§7、§7.2、§9.1 | **v7。** (a) §7.2 的 partition 第一格与第二格**在时间上不互斥**——第一格谓词在尝试重开之前就可求值并要求「全部丢弃」，第二格却把只有重开之后才知道的「被拒」算进自己并要求提交那批已被销毁的 group；第一格补「且重开已经成功」，final source 表补「上游终局存在但其 attempt 已作废」一行；(b) 用户亲笔的「优雅关闭时报错不再考虑无痕重试」**§5 从头到尾没记**，而 §5.2 把 draining 建成重开后的拒绝、时序与裁决相反——补记进 §5 的资格清单并移出 §5.2 的结果表；(c) §4／§7 的「安全前缀一就绪即发出」与 §5 的「control events 保持 attempt-local」对每个请求的首帧给两个答案，按前者实施会让直连腿的透明 replay 在默认 policy 下**永不成立**——§4 补「control-only 前缀不构成提交」，§7 的 `block` 行补提交时点限定；(d) §4 定案「已 `done`」指该 item 的 `done` 也在同一前缀内，一个 item 的事件不得跨越释放边界（否则半个 group 出门，且用一个无内容价值的字节关掉整轮 replay 窗口）；(e) §4 明确「无法归属」与「envelope」是两个相反处置、必须是两个可区分的答案，附 SDK 3.3.1 的 4 个 audio 反例；(f) §5.2 的「余下 17 个是明确的非瞬时失败」仍是未逐项核验的全称，`failed_to_download_image` 改为「未核、保守落 `None`」；(g) §3.1 的两条改为已实现并新增第三条（`splitlines()` 是 SSE 断行集的超集，会截断 data）；(h) §5 的「用户亲笔的重试合同」引号是转述而非原文，改为「概括为」并写明后半句在人写文档里没有对应句子；(i) §9.1 的用户裁决定义域只覆盖流式，向非流式的延伸标为本规格推导 | [`reports/260831-review-spec-round6.md`](reports/260831-review-spec-round6.md)：blocker 1、major 2、minor 6、nit 1；[`reports/260831-review-skeleton.md`](reports/260831-review-skeleton.md)：major 4、minor 6、nit 1 |

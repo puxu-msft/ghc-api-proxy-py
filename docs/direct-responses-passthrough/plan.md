@@ -1,6 +1,6 @@
 # 直连 Responses 透传：实施计划
 
-日期：2026-08-31（v8）
+日期：2026-08-31（v9）
 状态：**主体待实施**；§0 的三项前置**全部已合入 `main`**（P1／P2 在 `7e96adc`，P3 在 `109dc44`）。骨架（顺序表第 2 步）已合入 `main`（`01c33f1`，未接线），经两轮独立评审修正；源提交存于 `archive/260831-passthrough-skeleton` 与 `archive/260831-sse-line-endings`
 权威：[`spec.md`](spec.md)。**本文不定义任何用户可观察行为**——凡本文与 Spec 冲突，以 Spec 为准；凡本文出现 Spec 没有的行为承诺，那是缺陷，应移入 Spec 或删除。
 
@@ -85,10 +85,15 @@ P1／P2 都已变异验证：把分隔符改回 LF-only，CRLF 与 CR 两个参�
 4. 交错场景与 §5 的提交语义接线（**什么算「已提交」**）。纯分组与 safe-prefix 归第 2 步，本步只拥有提交语义
 5. replay 合同（含 §5.2 的三类重开结果与 failure 归一化）
 6. `requires_client_action` 与三种 policy（含 §7.2 的 policy × 最终 ending）
-7. **分流点接线 + 撤销 `ca777df` 的直连腿一半 + 更新下述测试的断言，同一刀**
-8. Headers（§9.1）
-9. 可观测迁移（本步会改变 `tests/int/test_pipeline_app.py:2788` 的断言——该测试自己的注释写着这样断言就是为了让「给它一个 reader」成为一次**有意**的改动而不是静默的）
+7. **把方言词汇从引擎里抽出来，并给 `anthropic-messages` 一份**（Spec §2.5 的表）。引擎此前是照着 Responses 一种方言写的，词汇散在常量与函数里；本步只做提取与第二份实现，不接线，可用与 Responses 同构的单测验证
+8. **分流点接线 ＋ 撤销 `ca777df` 的直连腿一半 ＋ 更新下述测试的断言，同一刀。接线覆盖 `translation_required is False` 的每一条腿**，不只 Responses
+9. Headers（§9.1）
+10. 可观测迁移（本步会改变 `tests/int/test_pipeline_app.py:2788` 的断言——该测试自己的注释写着这样断言就是为了让「给它一个 reader」成为一次**有意**的改动而不是静默的）
 
+> **第 7 步是 v9 新增的，来自用户 2026-08-31 的「根因修复所有直连路径」裁决。** 它排在接线之前而不是之后，理由与 v6 把接线挪到 policy 之后是同一条：一次「只接 Responses、Anthropic 直连继续走往返翻译」的接线不是自足切片——它会让同一个缺陷在两条腿上一条修好一条留着，而两条腿的客户端都看不出区别在哪。**Chat Completions 直连不在本步射程内**：它今天就把上游字节原样前送，天花板不存在（Spec §2.6），它缺的块级交付是 2026-08-22 已裁决的推迟项，不因本规格重开。
+
+> **接线覆盖所有直连腿，不只 Responses。** Spec §2.6 逐条核过四条直连对：Responses 是主体工作；**Anthropic 直连是同形缺陷且今天可达**——`descriptor.supports(inbound_endpoint)` 为真时 target 即等于 inbound，而集成测试里已经有 `anthropic-messages` 上游；Chat Completions 的天花板不存在但那是偶然（没有 framer 所以字节直传）；Embeddings 非流式。
+>
 > **接线为什么必须合成一刀。** v3 把「接线」与「撤销 direct 的 `REJECT`」分成两步，同时又说接线之后 issue 测试应转绿、且撤销之前不要改它们的断言——三句话不能同时成立。`test_an_output_item_this_assembler_does_not_know_is_refused_not_rendered`（`tests/int/test_pipeline_app.py:2549`）当前**明确断言** direct `custom_tool_call` 以 `error` 收尾、不出现任何 `response.output_item*`；接线一旦生效，正确行为恰好相反，该测试必红。启用 direct 透传与撤销 direct 的拒绝**是同一个 observable switch**，不是两个步骤。
 
 > **另一侧的代价，与一个被否决的第三选项（v7 补记）。** 只写「接线在前」的风险会让下一个读者以为这个决定没有代价。接线在后的代价是：step 4（提交语义）、step 5（replay）、step 6（policy）三刀落进 `main` 之后**没有任何调用者**，要到 step 7 才第一次被真实入口执行——本项目在这个形状上有成本记录（守卫被留在 legacy 链路上，三次击发，第三次是静默假成功而非报错）。缓解办法是 step 7 的验收必须包含「新链路确实被真实入口调用」，而不是只看单测绿。
