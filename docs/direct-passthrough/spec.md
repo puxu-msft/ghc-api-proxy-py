@@ -1,7 +1,7 @@
 # 直连路径：原生透传产品规格
 
 日期：2026-08-30
-状态：**DRAFT v14 — 待复评**。§3.1 的三处前置缺陷全部已合入 `main`（P1／P2 在 `7e96adc`，P3 在 `109dc44`），骨架亦已合入（`01c33f1`）。**Responses 直连腿已接线并合入 `main`**（`1fb37cd`，源提交存于 `archive/260901-passthrough-wiring`），issue #2／#3 关闭；**Anthropic 直连腿的词汇已实现、未接线**（§2.8）。**§11 有一项待用户裁决**（响应头黑名单的定义域）。
+状态：**DRAFT v15 — 待复评**。§3.1 的三处前置缺陷全部已合入 `main`（P1／P2 在 `7e96adc`，P3 在 `109dc44`），骨架亦已合入（`01c33f1`）。**Responses 直连腿已接线并合入 `main`**（`1fb37cd`，源提交存于 `archive/260901-passthrough-wiring`），issue #2／#3 关闭；**Anthropic 直连腿的词汇已实现、未接线**（§2.8）。**§11 有一项待用户裁决**（响应头黑名单的定义域）。
 定义域：**任何 `route.translation_required is False` 的路由**，不限方言。v10 之前本规格只覆盖 `openai-responses` 两端；用户 2026-08-31 裁决「根因修复所有直连路径」，定义域随之放宽（§2.1）。
 
 > **目录随之从 `direct-responses-passthrough` 改名为 `direct-passthrough`。** v10 第一稿保留了旧名，理由是「改名会让报告里的引文指向不存在的路径」——那条理由用错了地方：路径重写会伪造的是**报告里的原句**，而同一条规则的另一半正是「文件搬了就把活文档的链接指过去」。目录名是活的，一个窄于内容的名字本身就是缺陷。已重指的是活文档与源码注释；**12 份评审报告内文里的旧绝对路径原样保留**，它们记录的是当时的位置，重写才是伪造。
@@ -117,7 +117,7 @@
 
 ### 2.8 §8 的「本腿不咨询 hand-over」是 Responses 腿的事实，不是所有直连腿的
 
-**这条限定是放宽定义域时才暴露出来的，它此前写得比它成立的范围宽。** §8 写着代理侧错误「**不得**咨询只适用于 Anthropic 客户端的 hand-over 机制」，理由是本腿没有续写通道。那个理由在 Responses 腿上成立——客户端不是 Anthropic 客户端，执行不了那个合成的 `tool_use` 块。**在 Anthropic 直连腿上它不成立**：那条腿的客户端**就是** Anthropic 客户端，`hand_back_block()` 开头那句 `wire_format is not WireFormat.ANTHROPIC_MESSAGES` 按 inbound 格式门控，今天就放行，而 `max_tokens` 的续写是 2026-08-21 用户裁决的「总是 hand over」。
+**这条限定是放宽定义域时才暴露出来的，它此前写得比它成立的范围宽。** §8 曾写着代理侧错误「**不得**咨询只适用于 Anthropic 客户端的续写机制」，理由是本腿没有续写通道。那个理由在 Responses 腿上成立——客户端不是 Anthropic 客户端，执行不了那个合成的 `tool_use` 块。**在 Anthropic 直连腿上它不成立**：那条腿的客户端**就是** Anthropic 客户端，`hand_back_block()` 开头那句 `wire_format is not WireFormat.ANTHROPIC_MESSAGES` 按 inbound 格式门控，今天就放行，而 `max_tokens` 的续写是 2026-08-21 用户裁决的「总是 hand over」。
 
 **于是 native 交付与它撞上了，而且是两层，顺序只是浅的那层。**
 
@@ -399,7 +399,7 @@ cap 超限、客户端取消、客户端 deadline 等人写文档列为不可继
 ## 8. 失败、截断与容量
 
 - **上游终局失败事件**（`response.failed` / `response.cancelled` / `error`）：若最终可见则**逐字**重放。
-- **代理侧错误**（cap 超限、客户端 deadline、预算耗尽而无上游终局）：按 `error-envelope/spec.md` 写 Responses `event: error`，**不得**合成成功 terminal，**不得**咨询只适用于 Anthropic 客户端的 hand-over 机制。**客户端取消与下游写失败除外**——那两种情形没有可写通道，§7.2 已把它们列为不收口的例外，写 error 是写给一个已经不在的读者。
+- **代理侧错误**（cap 超限、客户端 deadline、预算耗尽而无上游终局）：按 `error-envelope/spec.md` 写 Responses `event: error`，**不得**合成成功 terminal。**续写按 §2.8 以本腿自己的方言提供**（用户 2026-09-01 裁决：块级交付在直连与翻译两条路上都必须原生支持，续写是它的一部分）；在那项工作落地之前本腿没有续写通道，代理侧错误直接写 error frame。此前这里写的是「不得咨询只适用于 Anthropic 客户端的机制」，那句话把一个**尚未实现**的限制写成了一条规范。**客户端取消与下游写失败除外**——那两种情形没有可写通道，§7.2 已把它们列为不收口的例外，写 error 是写给一个已经不在的读者。
 - **`status: "incomplete"` 的 item**：**必须**照常交付，**不得**套用翻译腿的 `cut_short` / hand-over 政策——`hand_back_block()` 对非 Anthropic inbound 返回 `None`，那套政策在本腿上只会让最后一个 item 消失。
 - **无终局 EOF**：本腿不得伪造成功终局（§6.3 禁止推导）。按 §5 判断：首个原生事件提交前可 replay；提交后写 `event: error` 并保留已交付前缀。
 - **memory cap**：`buffer_cap_bytes` 的用户注释是**双语的**，两半给出的读法不同：英文半句是「max bytes to buffer before abandoning this response」，中文半句是「累计缓冲超此字节即放弃该响应」——后者可以读成随时间累加。**本规格取「当前持有」这一读**（§2.3 推导，不是用户的定义本身；v8 之前只引了支持结论的英文那半句，属转述丢掉了限定成分）。理由：它与 `BufferCapExceeded` 自述的「guard bounds memory」、与「abandoning this response」的语气一致，而且它是两种读法里**唯一能让 `full` policy 有意义**的那个——按累计读法，`full` 与 `block` 的 cap 行为将没有区别。若用户裁定取累计读法，本节与 §7.2 的 `full` 行为都要重估。因此**限制的是本代理当前持有的字节，不是累计交付量**。本腿计入：尚未 `done` 的原始事件队列、已完成但被 policy 扣住的事件组、control events、以及同时保留的预渲染副本。释放、replay reset、failure、cancel 后按实际持有退还计量——**replay reset 的时点是「重开成功」而非「判定可 replay」**（§5），因为旧队列要保留到新流到手。这一项本身不产生错误行为（保留期内新 attempt 还没开始产字节，峰值不会超过旧 attempt 已有的持有量），但两种读法会让计数器差一个窗口，属「缺席读不出来」的同族。
@@ -491,6 +491,7 @@ v4 把更早挂在这里的产品分叉全部移入正文定案：header 合同 
 | 日期 | 条款 | 变化 | 触发 |
 |---|---|---|---|
 | 2026-08-30 | 全文 | 初稿 | GitHub issue #1／#2；用户裁决；方案评审的 blocker-01 |
+| 2026-09-01 | §2.1、§2.8、§8 | **v15。** 用户两条裁决。**其一，命名**：这个功能叫 `continuation` 不叫 `hand-over`——后者是本规格与实现自造的词，而用户亲笔文档从头到尾叫「续写」，代码里的 `ContinuationSupport` 也早就是这个名字；改名要绕开 `lifecycle` 里同名但无关的 systemd 监听器交接。**其二，射程**：续写必须在每条直连腿上原生可用，因为块级交付在直连与翻译两条路上都必须全面支持——这推翻了 v12 把「native 腿不提供续写」列为候选的处置。**关键背景是这不是改主意**：用户文档的续写一节从一开始就写了 `tool_use` / `function_call` 两种形状、`messages` / `input` 两个字段，末尾那句「暂不」明写「未来我有需要后再补全」，所以待建的是一份已被指定、只实现了一半的合同。顺带照出 `client_message_count` 只读 `messages`、Responses 请求会得 0，而那个数正是循环检测器的输入（D-7） | 用户 2026-09-01 裁决 |
 | 2026-09-01 | §2.5、§2.6、§2.8 | **v14。** (a) §2.5 那句「§5～§10 里句子里没有一个 Responses 专有的事实」是**全称否定，被六个反例证伪**，最重的一处是 §5.2 的归一化表——它的四个输入全是 `ResponseError.code` 的取值，而 Anthropic 的错误事件根本没有 `code` 字段；那是本规格里唯一规定了「怎么算 replay 是否合法」的地方，而那个算法只对一种方言存在。改为分开陈述「机制与方言无关／取值只写了一种方言」，缺失的 Anthropic 映射表登记为 [`deferred.md`](deferred.md) D-6。**这句被证伪的断言正是 v10 放宽定义域时唯一用来说明代价可控的论据**，论据不成立即代价没有被算过；(b) §2.6 的 Chat Completions 行只回答了 §2.1，而定义域放宽后 §5／§8／§10 按字面也落在那条腿上，`one_shot_delivery` 的 docstring 逐字否掉其中三条——写下「哪些条款在那条腿上今天不成立」而不是留白；(c) §2.8 的理由两处不准：顺序问题**不限于 `block`**，且更硬的阻断是类型而非顺序（`_hand_over` 把 `CompletedBlock` 交给只认 `RawEventBatch` 的 `block()`），因此 D-5 的候选 1 单独不解决问题，「缺的只是打开开关」也不成立 | [`reports/260831-review-spec-round9.md`](reports/260831-review-spec-round9.md) round9-02／07／12 |
 | 2026-08-31 | 文首、§2.5、§2.6、§9.1、§12 | **v13。** (a) §2.5 的词汇表只列了六行，而 `Dialect` 实现有八个字段——漏掉的 `read_failure` 与 `reply_dialect` 都不是装饰，后者决定完成行按哪把尺子判读（两方言的字节阈值差一个数量级，实现里漏传这个参数就让 Responses 回复按 Anthropic 的尺子染色）；(b) **该表的 Anthropic control 集漏了 `message_stop`**，而同表下一行说 terminal 集是 control 集的子集——照表实施，每条 Anthropic 直连响应的终局事件都会被判为「无法归属」并永久持有，即挂死；实现是对的，不一致的那一侧是本规格；(c) §9.1 仍写着「本规格还要求两端同为 `openai-responses`」并据此称 error-envelope 的定义域是超集——那是 v10 放宽定义域时漏改的窄读，两者现在完全相同；(d) §2.7 与 §2.8 的物理顺序与编号相反；(e) §12 缺 v11／v12／v13 三行，文首停在 v10 | [`reports/260831-review-spec-round9.md`](reports/260831-review-spec-round9.md)：blocker 1、major 5、minor 6、nit 4；round8 十三条全部 closed |
 | 2026-08-31 | §2.8、§2.6 | **v12。** §8 的「本腿不咨询 hand-over」原来只对 Responses 腿成立——那条腿的客户端执行不了 Anthropic 的合成块。**Anthropic 直连腿上 hand-over 今天就放行**（按 inbound 格式门控），而 native 交付已经把上游终局随批次发出，合成块的插入位置已经过去。因此该腿暂不接线，形态待裁（`deferred.md` D-5） | 接线时实撞 |
