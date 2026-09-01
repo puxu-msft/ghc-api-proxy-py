@@ -1,7 +1,7 @@
 # 直连路径原生透传：实施计划
 
 日期：2026-09-01（v12）
-状态：**Responses 直连腿已接线，issue #2／#3 已修**，在分支 `worktree-260831-passthrough-wiring`（`b9195f4`，1993 passed／ruff clean／pyright 0），**待评审与合并**。§0 的三项前置全部已合入 `main`（P1／P2 在 `7e96adc`，P3 在 `109dc44`）；骨架已合入 `main`（`01c33f1`）。**Anthropic 直连腿的词汇已实现并单测，未接线**——挡在 [`spec.md`](spec.md) §2.8 的 hand-over 问题上（[`deferred.md`](deferred.md) D-5）
+状态：**Responses 直连腿已接线并合入 `main`**（`1fb37cd`，1998 passed／ruff clean／pyright 0），issue #2／#3 已修；源提交存于 `archive/260901-passthrough-wiring`，经一次代码评审与两轮 Spec 评审。§0 的三项前置全部已合入 `main`（P1／P2 在 `7e96adc`，P3 在 `109dc44`）；骨架已合入 `main`（`01c33f1`）。**Anthropic 直连腿的词汇已实现并单测，未接线**——挡在 [`spec.md`](spec.md) §2.8 的 hand-over 问题上（[`deferred.md`](deferred.md) D-5）
 权威：[`spec.md`](spec.md)。**本文不定义任何用户可观察行为**——凡本文与 Spec 冲突，以 Spec 为准；凡本文出现 Spec 没有的行为承诺，那是缺陷，应移入 Spec 或删除。
 
 > **v1 已作废并重写。** 它规定「只保存 `done.item` 的最终快照、重发 `added` + `done`、继续 mint id、沿用 framer 的 output index」，而 Spec v2 要求保存全部 item 专有事件、不得 mint id、terminal 整个对象逐字。照 v1 实施会直接违反 Spec。作废理由见 [`reports/260830-review-spec.md`](reports/260830-review-spec.md) major-08 与 [`reports/260830-review-plan.md`](reports/260830-review-plan.md)；两份报告作为时点记录不改。
@@ -86,7 +86,7 @@ P1／P2 都已变异验证：把分隔符改回 LF-only，CRLF 与 CR 两个参�
 5. replay 合同 —— **部分完成，此前标「已完成」是过头的**。已完成的是：`terminal`／`failure`／`cut_mid_block` 由与翻译型 assembler 共用的读取函数填充，交付循环既有的 replay 机制因此原样适用于本腿。**未完成的是 Spec §5.2 那一半**：原生 failure → `RetryReason` 的归一化 adapter 与 `OpenedAttempt`／`AttemptFailed`／`ReopenRefused` 三类重开结果都还不存在，`assembler.failure` 今天直接写给客户端然后 `return`，从不进 retry taxonomy。也就是说**一个可重试的原生 `response.failed` 今天不会被重试**
 6. ~~`requires_client_action` 与三种 policy~~ **已完成**（`82cfa29`、`092bd43`）：三种 policy 由泛型化后的 `BlockBuffer` 直接提供，判据按 §7.1 读 item 自身
 7. ~~抽方言词汇 ＋ `anthropic-messages` 一份~~ **已完成**（`d76ac1c`、`d3b4cc2`）。**写第二份词汇是引擎两条不通用规则的暴露方式**：终局事实此前只在终局事件上读（Anthropic 把 stop reason 放在 `message_delta`，会漏一半），批次判据此前只读闭合事件（Anthropic 的 `content_block_stop` 只带 index，会让每个 tool call 答 `False`）
-8. **接线**：Responses 直连腿**已完成**（`b9195f4`），issue #2／#3 关闭。**Anthropic 腿未接线**，见 §2.8
+8. **接线**：Responses 直连腿**已完成并合入 `main`**（`1fb37cd`），issue #2／#3 关闭。**Anthropic 腿未接线**，挡在 Spec §2.8 上（`deferred.md` D-5、D-6）
 9. Headers（§9.1）
 10. 可观测迁移（本步会改变 `tests/int/test_pipeline_app.py:2788` 的断言——该测试自己的注释写着这样断言就是为了让「给它一个 reader」成为一次**有意**的改动而不是静默的）
 
