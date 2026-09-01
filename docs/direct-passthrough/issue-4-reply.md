@@ -1,10 +1,12 @@
-# issue #4 的回复草稿
+# issue #4 的回复
 
-状态：**待发**。等 `260901-review-issue4-repair-impl.md` 的评审结论落定再发，因为末段提到的 opt-in 尚未合入 `main`。
+状态：**已发出**，2026-09-01。<https://github.com/puxu-msft/ghc-api-proxy-py/issues/4#issuecomment-5499126649>
 
-发布前重核：`1fb37cd`、`fb5ed7f` 两个哈希是否仍指向所述提交；opt-in 是否已合入并确认键名。
+issue 本身**没有关闭**——用户要的是回复，关闭是另一个动作，留给用户。
 
-> **`gh` 的可写性**：`678d1af` 记录 issue #3 的回复因 EMU 账号 `addComment` 返回 Unauthorized 而无法发出。2026-09-01 复查：`gh auth status` 有两个账号，活跃的是 `puxu-msft`，`gh api repos/:owner/:repo --jq .permissions` 返回 `admin/push/maintain` 皆为真。所以那条限制**可能只对另一个账号成立**，值得重试一次再决定是否继续 park。**issue #3 的那份回复因此也重新变得可发**，是否发由用户定。
+发出版本引用的三个提交：`1fb37cd`（根因修复）、`fb5ed7f`（两半回归测试）、`a436c96`（opt-in 修补）。下面是发出的正文。
+
+> **更正一条被记录下来的阻断观察**：`678d1af` 记着 issue #3 的回复因 `gh` 的 EMU 账号 `addComment` 返回 Unauthorized 而无法发出。2026-09-01 复查：`gh auth status` 有两个账号，活跃的是 `puxu-msft`，对本仓 `permissions` 为 `admin/push/maintain` 皆真，**本次 `gh issue comment 4` 一次成功**。所以那条限制是账号相关的，不是仓库相关的。**issue #3 的那份回复因此重新变得可发**，发不发由用户定。
 
 ---
 
