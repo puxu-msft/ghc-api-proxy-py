@@ -2635,6 +2635,117 @@ def test_a_direct_responses_stream_is_answered_in_responses_events() -> None:
     assert not [name for name in names if name.startswith(("message_", "content_block_"))]
 
 
+def drifting_sealed_reasoning_sse() -> bytes:
+    """One reasoning item whose id **changes between `added` and `done`**, both halves sealed.
+
+    Copied from `tests/int/cassettes/history_responses_stream.json`, where the item at `output_index` 0 arrives as `added` with `id_002` and `done` with `id_003`, each carrying `encrypted_content`. The drift is upstream's own behaviour — `.claude/skills/real-copilot-backup-canary` records it as a Copilot property — and it is what makes an id assertion mean anything.
+
+    The stand-in used by the tests above spells the same id in both halves, which is not what upstream does and cannot tell "carried verbatim" apart from "rewritten to one id". The two seals are spelled differently here for the same reason; the cassette's are both scrubbed to `placeholder`, so it cannot say whether upstream's differ, and pinning them as equal would assert something no recording supports.
+    """
+    frames = responses_envelope_frames()
+    for event, item_id, seal in (
+        ("response.output_item.added", "id_002", "seal-opened"),
+        ("response.output_item.done", "id_003", "seal-closed"),
+    ):
+        item: dict[str, Any] = {
+            "type": "reasoning",
+            "id": item_id,
+            "summary": [],
+            "encrypted_content": seal,
+        }
+        data = orjson.dumps({"output_index": 0, "item": item}).decode()
+        frames.append(f"event: {event}\ndata: {data}\n\n")
+    frames.append(
+        "event: response.completed\n"
+        f'data: {orjson.dumps({"response": {"usage": {"input_tokens": 1, "output_tokens": 1}}}).decode()}\n\n'
+    )
+    return "".join(frames).encode()
+
+
+def delivered_events(body: str) -> list[tuple[str, dict[str, Any]]]:
+    """Every `(event name, parsed data)` pair in an SSE body, in order.
+
+    The name is read off the `event:` line rather than out of the payload: the passthrough carries upstream's frames as they arrived, and upstream does not repeat the type inside `data`. A reader that looked only at `data` would silently see nothing here.
+    """
+    pairs: list[tuple[str, dict[str, Any]]] = []
+    name = ""
+    for line in body.splitlines():
+        if line.startswith("event: "):
+            name = line.removeprefix("event: ")
+        elif line.startswith("data: ") and name:
+            pairs.append((name, orjson.loads(line.removeprefix("data: "))))
+    return pairs
+
+
+def test_a_sealed_reasoning_item_keeps_the_id_its_seal_was_cut_against() -> None:
+    """Issue #4, the response half. Upstream answered 400 `invalid_request_body` on a *later* turn of a working conversation.
+
+    `encrypted_content` is bound to the item id upstream issued it under, and upstream verifies that binding when the item comes back. The translating leg minted its own ids — `ResponsesFramer._item_id` returns `f"{prefix}_{response_id}_{output_index}"`, where `response_id` is this proxy's `uuid4` — and attached upstream's seal to them. The pair the client stored was self-contradictory from the moment it was written.
+
+    **The failure is deferred**: the turn that writes the bad pair is a clean 200 carrying a well-formed reasoning item, and the contradiction only surfaces when a client that keeps a rollout history — Codex does — sends the item back. So a first turn succeeding says nothing about this invariant. (Deferred to the *client*, not undetectable in principle: a proxy comparing upstream's events against its own delivered ones would see the relabelling immediately. Nothing does that today.)
+
+    Measured 2026-09-01 by replaying the reported 901,008-byte body: `The encrypted content for item rs_136b08ff-f6b2-4b41-8f38-ae6d74eb7496_0 could not be verified. Reason: Encrypted content item_id did not match the target item id.` The id it names is `rs_` + a `uuid4` + `_0`, which is `_item_id`'s spelling — traced to this proxy through `request.py` → `inference.py` → `delivery_policy.py` → `openai_responses.py`. That the *reported* 400 an hour earlier read `The resource you requested was not found.` is a different wording, and whether both come from the same check is **not closed**; see `.dev/docs/direct-passthrough/reports/260901-issue4-sealed-reasoning-id.md` §4.
+
+    **Two ways to break this, and the fixture has to see both.** Minting a fresh id is one. Collapsing upstream's two ids into one is the other, and it is not hypothetical: upstream spells the same item differently in `added` and `done`, so a leg that "stabilised" them would hand the client a `done` seal under the `added` id — the same mismatch by another route. `drifting_sealed_reasoning_sse` reproduces the cassette's drift so that both are visible; the stand-in the neighbouring tests use spells one id twice and can see only the first.
+
+    Mutation-checked 2026-09-01: making `carries_upstream_natively` answer `False` turns the ids into `rs_<uuid4>_0` and this test red. That mutation exercises the mint, not the collapse — the collapse has no implementation to mutate, which is why the fixture rather than a mutation is what guards it.
+    """
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200,
+            content=drifting_sealed_reasoning_sse(),
+            headers={"content-type": "text/event-stream"},
+        )
+    )
+    response = client.post(
+        "/responses",
+        json={"model": "gpt-model", "input": [], "stream": True},
+    )
+
+    assert response.status_code == 200
+    sealed = {
+        name: payload["item"]
+        for name, payload in delivered_events(response.text)
+        if payload.get("item", {}).get("type") == "reasoning"
+    }
+    # Both halves arrive, each keeping the id its own seal was cut against.
+    assert set(sealed) == {"response.output_item.added", "response.output_item.done"}, sealed
+    opened = sealed["response.output_item.added"]
+    closed = sealed["response.output_item.done"]
+    assert (opened["id"], opened["encrypted_content"]) == ("id_002", "seal-opened"), opened
+    assert (closed["id"], closed["encrypted_content"]) == ("id_003", "seal-closed"), closed
+
+
+def test_a_sealed_reasoning_item_reaches_upstream_the_way_the_client_wrote_it() -> None:
+    """Issue #4, the request half — the direction the 400 was actually raised on.
+
+    The test above pins what the client is told. What upstream refused, though, was the *next request*: the client sent the stored item back, and the binding on it did not hold. So the invariant has a second half — an inbound sealed reasoning item must reach upstream with the same id and the same seal it arrived with — and until this test there was nothing holding it. `.dev/docs/direct-passthrough/spec.md` §6.4 names the gate: the carrier decoder lives inside the request translator, and `driver.py` only calls that translator when `route.translation_required` is true, which this leg never is. That is an argument, and an argument is not a regression test.
+
+    Asserted on the bytes this proxy sent rather than on the reply, because a reply is generated from whatever went out and cannot say what that was. The seal is checked for being the client's own string, not merely present: the project's reasoning carrier re-encodes what passes through it (`ghc-api-proxy:synthetic-reasoning:v1:` plus base64), so an item that took that path would still carry *an* `encrypted_content` while carrying the wrong bytes.
+    """
+    client, seen = make_client(
+        lambda _: httpx2.Response(
+            200,
+            content=drifting_sealed_reasoning_sse(),
+            headers={"content-type": "text/event-stream"},
+        )
+    )
+    sent_by_client: dict[str, Any] = {
+        "type": "reasoning",
+        "id": "id_003",
+        "summary": [],
+        "encrypted_content": "seal-closed",
+    }
+    response = client.post(
+        "/responses",
+        json={"model": "gpt-model", "input": [sent_by_client], "stream": True},
+    )
+
+    assert response.status_code == 200
+    forwarded = orjson.loads(seen[-1].content)
+    assert forwarded["input"] == [sent_by_client], forwarded["input"]
+
+
 def test_a_direct_responses_client_declares_hosted_web_search_for_itself() -> None:
     """`hosted_web_search` is off, and a client that asked on `/responses` still gets its declaration forwarded.
 
