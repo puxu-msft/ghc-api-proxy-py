@@ -71,16 +71,37 @@
 
 **事实**：`max_tokens` 的 hand-over 是 2026-08-21 的用户裁决（「总是 hand over」），`hand_over_supported` 按 inbound 格式门控，**Anthropic 直连腿今天就放行**。它合成一个 `tool_use` 块交给客户端继续，而那个块必须落在终局**之前**才是一份合法回复。
 
-**冲突**：本规格把上游自己的终局事件当作终局释放（[spec.md](spec.md) §5 第四行），`block` 下它早已出门；等 `_hand_over` 运行时，插队的位置已经过去了。纯 native 交付与 hand-over 的顺序要求直接撞上。
+**冲突有两层，顺序只是浅的那层。**
+
+**顺序，且不限于 `block`。** 本规格把上游自己的终局事件当作终局释放（[spec.md](spec.md) §5 第四行），而交付循环冲刷缓冲发生在 `_hand_over` 判定之前，**对三种 policy 一视同仁**。此前这里写成「`block` 下它早已出门」，把范围写窄了——那会让下面的候选 1 被做成半个修复。
+
+**类型，这一层更硬。** `_hand_over` 把合成的 `CompletedBlock` 交给 `framer.block()`，而透传 framer 只认 `RawEventBatch`（它调 `batch.encode()`）。**即使顺序解决了，那条路径仍是一次 200 之后的 `AttributeError` 撕流。**
 
 **为什么这挡住接线而不是被绕过**：[spec.md](spec.md) §2.7 裁定接线不得改变任何一条腿今天已生效的行为，而这条腿是 Claude 系模型唯一的路（`claude-sonnet-5` 不支持 Responses API）。关掉 hand-over 就是回归主路径。
 
 **三个候选，我倾向第二个**：
 
-1. **hand-over 可能发生时推迟终局的释放**——保住顺序，代价是终局多等一个判定，且 `block` 下这份延迟对所有 Anthropic 直连请求都存在，即使绝大多数不 hand over。
+1. **hand-over 可能发生时推迟终局的释放**——保住顺序，代价是终局多等一个判定，且这份延迟对所有 Anthropic 直连请求都存在，即使绝大多数不 hand over。**它只解决顺序那一层**，类型那一层原样还在，所以单独采纳它做不出可用的实现。
 2. **合成块以该方言的原生事件表达并接在终局之前**——`AnthropicFramer` 本来就会写这套事件，透传 framer 的 `error` 与 `keepalive` 正是这么委托的，机制现成；要解决的是「终局已发出」，可能需要把终局的释放与 hand-over 判定合并成一个决策点。**代价最小，且与既有委托模式一致。**
 3. **裁定 native 腿不提供续写**——与 §2.7 冲突，是一次明确的行为回归，须用户裁。
 
 **Responses 直连腿不受此条阻挡**：§8 的原判据在那条腿上成立（客户端执行不了 Anthropic 的合成块），`hand_over_supported` 也不放行它。issue #2 与 #3 都在那条腿上，接线照常。
 
 **出处**：[spec.md](spec.md) §2.8。放宽定义域时才暴露——§8 那句限定此前写得比它成立的范围宽。
+
+
+## D-6　Anthropic 直连腿缺一份 failure → `RetryReason` 的映射表
+
+**状态**：已知缺口，**不需要用户裁决**——它是本规格的推导层（§2.3），缺的是工作不是决定。
+
+**事实**：[spec.md](spec.md) §5.2 的归一化表是本规格里**唯一**规定「怎么算一次原生失败可不可以 replay」的地方，而它的四个输入全是 `ResponseError.code` 的取值（`response.cancelled`、`server_error`、`rate_limit_exceeded`、`vector_store_timeout`），依据写明是「`openai==3.3.1` 的 `ResponseError.code` 是 20 成员 `Literal`」。
+
+**Anthropic 的错误事件没有 `code` 字段**。它的形状是 `{"type":"error","error":{"type","message"}}`，判别字段是 `error.type`，取值是 `overloaded_error`／`rate_limit_error`／`api_error` 这一族——这一点来自本仓自己的 `anthropic_failure_from` 实现，不是记忆。所以 §5.2 那张表对 Anthropic 直连腿**一行都不适用，也没有任何对应表**。
+
+**为什么此前没人登记**：§2.5 曾断言 §5～§10「句子里没有一个 Responses 专有的事实」，而那句话正是 v10 放宽定义域时用来说明「代价可控」的唯一论据。论据被证伪（v14 已改），这件工作才显出来——它一直存在，只是被一句全称否定挡住了。
+
+**射程**：只影响 Anthropic 直连腿，而那条腿本来就挡在 D-5 上未接线，所以不阻塞当前工作。但它是 D-5 闭合之后**紧接着**要做的事，不是可选项——没有这张表，那条腿上一次可重试的上游失败不会被重试。
+
+**未核**：Anthropic `error.type` 的取值全集，我没有对着官方文档逐条核。这不影响「需要两张表」这个结论，只影响那张表怎么填。
+
+**出处**：[`reports/260831-review-spec-round9.md`](reports/260831-review-spec-round9.md) round9-02。
