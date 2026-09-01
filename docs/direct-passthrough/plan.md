@@ -1,6 +1,6 @@
-# 直连 Responses 透传：实施计划
+# 直连路径原生透传：实施计划
 
-日期：2026-08-31（v11）
+日期：2026-09-01（v12）
 状态：**Responses 直连腿已接线，issue #2／#3 已修**，在分支 `worktree-260831-passthrough-wiring`（`b9195f4`，1993 passed／ruff clean／pyright 0），**待评审与合并**。§0 的三项前置全部已合入 `main`（P1／P2 在 `7e96adc`，P3 在 `109dc44`）；骨架已合入 `main`（`01c33f1`）。**Anthropic 直连腿的词汇已实现并单测，未接线**——挡在 [`spec.md`](spec.md) §2.8 的 hand-over 问题上（[`deferred.md`](deferred.md) D-5）
 权威：[`spec.md`](spec.md)。**本文不定义任何用户可观察行为**——凡本文与 Spec 冲突，以 Spec 为准；凡本文出现 Spec 没有的行为承诺，那是缺陷，应移入 Spec 或删除。
 
@@ -24,7 +24,7 @@ P1／P2 都已变异验证：把分隔符改回 LF-only，CRLF 与 CR 两个参�
 
 在 `delivery_policy` 计算出两种 mode，**实例化两个不同的 assembler**，而不是在 `_close` 深处散落客户端腿条件：
 
-- `DIRECT_RESPONSES_PASSTHROUGH` —— `translation_required is False` 且两端同为 `openai-responses`
+- **透传** —— `translation_required is False`，按 inbound 方言取对应的 `Dialect`（Spec §2.5 的表）。这里此前写的是「且两端同为 `openai-responses`」，那是 v10 放宽定义域**之前**的判据；实现里的 `carries_upstream_natively` 今天仍只放行 Responses，但那是 §2.8 的临时限制而不是分流点的定义
 - `RESPONSES_TO_ANTHROPIC` —— 现有 `ResponsesAssembler`，独占块对归因队列、Anthropic 块号、`UNKNOWN → REJECT`、reasoning carrier
 
 理由（评审 plan-review-06）：两个 feature 语义正交但**实施共享承重点**。issue #1 的块对工作与本工作都要改 `ResponsesAssembler` 的构造参数、`push`/`_open`/`_close`、块号分配与 terminal flush；不物理隔离就会出现「direct `web_search_call` 进了待归因队列」这类跨腿泄漏，而两边各自测试通过也证明不了合并态。
@@ -92,7 +92,9 @@ P1／P2 都已变异验证：把分隔符改回 LF-only，CRLF 与 CR 两个参�
 
 > **第 7 步是 v9 新增的，来自用户 2026-08-31 的「根因修复所有直连路径」裁决。** 它排在接线之前而不是之后，理由与 v6 把接线挪到 policy 之后是同一条：一次「只接 Responses、Anthropic 直连继续走往返翻译」的接线不是自足切片——它会让同一个缺陷在两条腿上一条修好一条留着，而两条腿的客户端都看不出区别在哪。**Chat Completions 直连不在本步射程内**：它今天就把上游字节原样前送，天花板不存在（Spec §2.6），它缺的块级交付是 2026-08-22 已裁决的推迟项，不因本规格重开。
 
-> **接线覆盖所有直连腿，不只 Responses。** Spec §2.6 逐条核过四条直连对：Responses 是主体工作；**Anthropic 直连是同形缺陷且今天可达**——`descriptor.supports(inbound_endpoint)` 为真时 target 即等于 inbound，而集成测试里已经有 `anthropic-messages` 上游；Chat Completions 的天花板不存在但那是偶然（没有 framer 所以字节直传）；Embeddings 非流式。
+> **接线的目标是覆盖所有直连腿，今天只落了 Responses 一条。** Spec §2.6 逐条核过四条直连对：Responses **已接线**；**Anthropic 直连是同形缺陷且今天可达**（`descriptor.supports(inbound_endpoint)` 为真时 target 即等于 inbound，集成测试里已有 `anthropic-messages` 上游），词汇已实现但**未接线**，挡在 §2.8 的 hand-over 问题上（`deferred.md` D-5、D-6）；Chat Completions 的天花板不存在但那是偶然（没有 framer 所以字节直传），而 §5／§8／§10 在它上面今天都不成立，见 §2.6；Embeddings 非流式。
+>
+> 此前这句写的是「接线覆盖所有直连腿」，与它上面第 8 步「Anthropic 腿未接线」直接矛盾——同一份文件里两处相反，而其中一处还在复述 v11 已经换掉的旧论据。
 >
 > **接线为什么必须合成一刀。** v3 把「接线」与「撤销 direct 的 `REJECT`」分成两步，同时又说接线之后 issue 测试应转绿、且撤销之前不要改它们的断言——三句话不能同时成立。`test_an_output_item_this_assembler_does_not_know_is_refused_not_rendered`（`tests/int/test_pipeline_app.py:2549`）当前**明确断言** direct `custom_tool_call` 以 `error` 收尾、不出现任何 `response.output_item*`；接线一旦生效，正确行为恰好相反，该测试必红。启用 direct 透传与撤销 direct 的拒绝**是同一个 observable switch**，不是两个步骤。
 

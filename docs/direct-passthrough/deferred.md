@@ -1,4 +1,4 @@
-# 直连 Responses 原生透传：延后项台账
+# 直连路径原生透传：延后项台账
 
 **这份是活文档**，**只放未闭合项**。查清、决定或做掉的条目从这里移出，并入 [spec.md](spec.md)、[plan.md](plan.md) 或代码注释，移出时带上出处。编号是标识不是序列，移走后不补号。
 
@@ -69,11 +69,11 @@
 
 **状态**：需用户裁形态。**方向不待定，待定的是怎么做。**
 
-**事实**：`max_tokens` 的 hand-over 是 2026-08-21 的用户裁决（「总是 hand over」），`hand_over_supported` 按 inbound 格式门控，**Anthropic 直连腿今天就放行**。它合成一个 `tool_use` 块交给客户端继续，而那个块必须落在终局**之前**才是一份合法回复。
+**事实**：`max_tokens` 的 hand-over 是 2026-08-21 的用户裁决（「总是 hand over」），`hand_back_block()` 开头那句 `wire_format is not WireFormat.ANTHROPIC_MESSAGES` 按 inbound 格式门控，**Anthropic 直连腿今天就放行**。它合成一个 `tool_use` 块交给客户端继续，而那个块必须落在终局**之前**才是一份合法回复。
 
 **冲突有两层，顺序只是浅的那层。**
 
-**顺序，且不限于 `block`。** 本规格把上游自己的终局事件当作终局释放（[spec.md](spec.md) §5 第四行），而交付循环冲刷缓冲发生在 `_hand_over` 判定之前，**对三种 policy 一视同仁**。此前这里写成「`block` 下它早已出门」，把范围写窄了——那会让下面的候选 1 被做成半个修复。
+**顺序，且不限于 `block`。** 本规格把上游自己的终局事件当作终局释放（[spec.md](spec.md) §5 提交表「无 item 的 terminal／failure」那一行），而交付循环冲刷缓冲发生在 `_hand_over` 判定之前，**对三种 policy 一视同仁**。此前这里写成「`block` 下它早已出门」，把范围写窄了——那会让下面的候选 1 被做成半个修复。
 
 **类型，这一层更硬。** `_hand_over` 把合成的 `CompletedBlock` 交给 `framer.block()`，而透传 framer 只认 `RawEventBatch`（它调 `batch.encode()`）。**即使顺序解决了，那条路径仍是一次 200 之后的 `AttributeError` 撕流。**
 
@@ -85,9 +85,9 @@
 2. **合成块以该方言的原生事件表达并接在终局之前**——`AnthropicFramer` 本来就会写这套事件，透传 framer 的 `error` 与 `keepalive` 正是这么委托的，机制现成；要解决的是「终局已发出」，可能需要把终局的释放与 hand-over 判定合并成一个决策点。**代价最小，且与既有委托模式一致。**
 3. **裁定 native 腿不提供续写**——与 §2.7 冲突，是一次明确的行为回归，须用户裁。
 
-**Responses 直连腿不受此条阻挡**：§8 的原判据在那条腿上成立（客户端执行不了 Anthropic 的合成块），`hand_over_supported` 也不放行它。issue #2 与 #3 都在那条腿上，接线照常。
+**Responses 直连腿不受此条阻挡**：§8 的原判据在那条腿上成立（客户端执行不了 Anthropic 的合成块），`hand_back_block()` 的 inbound 格式门也不放行它。issue #2 与 #3 都在那条腿上，接线照常。
 
-**出处**：[spec.md](spec.md) §2.8。放宽定义域时才暴露——§8 那句限定此前写得比它成立的范围宽。
+**出处**：[spec.md](spec.md) §2.8（本主题的 Spec，不是 plan——plan 只有 §1～§9）。放宽定义域时才暴露——§8 那句限定此前写得比它成立的范围宽。
 
 
 ## D-6　Anthropic 直连腿缺一份 failure → `RetryReason` 的映射表

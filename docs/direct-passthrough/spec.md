@@ -75,7 +75,7 @@
 | 词汇项 | 它回答什么 | `openai-responses` | `anthropic-messages` |
 |---|---|---|---|
 | control 事件集 | 哪些事件属于响应信封而不属于任何 item | `response.created`／`queued`／`in_progress`／`completed`／`incomplete`／`failed`／`cancelled`、`error` | `message_start`、`message_delta`、**`message_stop`**、`ping`、`error` |
-| terminal 事件集 | 哪些 control 事件结束响应（§5 第四行据此解除持有） | `response.completed`／`incomplete`／`failed`／`cancelled`、`error` | `message_stop`、`error` |
+| terminal 事件集 | 哪些 control 事件结束响应（§5 提交表「无 item 的 terminal／failure」那一行据此解除持有） | `response.completed`／`incomplete`／`failed`／`cancelled`、`error` | `message_stop`、`error` |
 | item 归属键 | 一个事件属于哪个 item | `output_index` | `index` |
 | item 闭合事件 | 哪个事件宣告某个 item 完整 | `response.output_item.done` | `content_block_stop` |
 | `requires_client_action` | 该 item 是否要求客户端提交 tool output 或 approval（§7.1） | 见 §7.1 的判据 | block `type == "tool_use"` |
@@ -117,11 +117,11 @@
 
 ### 2.8 §8 的「本腿不咨询 hand-over」是 Responses 腿的事实，不是所有直连腿的
 
-**这条限定是放宽定义域时才暴露出来的，它此前写得比它成立的范围宽。** §8 写着代理侧错误「**不得**咨询只适用于 Anthropic 客户端的 hand-over 机制」，理由是本腿没有续写通道。那个理由在 Responses 腿上成立——客户端不是 Anthropic 客户端，执行不了那个合成的 `tool_use` 块。**在 Anthropic 直连腿上它不成立**：那条腿的客户端**就是** Anthropic 客户端，`hand_over_supported` 按 inbound 格式门控，今天就放行，而 `max_tokens` 的续写是 2026-08-21 用户裁决的「总是 hand over」。
+**这条限定是放宽定义域时才暴露出来的，它此前写得比它成立的范围宽。** §8 写着代理侧错误「**不得**咨询只适用于 Anthropic 客户端的 hand-over 机制」，理由是本腿没有续写通道。那个理由在 Responses 腿上成立——客户端不是 Anthropic 客户端，执行不了那个合成的 `tool_use` 块。**在 Anthropic 直连腿上它不成立**：那条腿的客户端**就是** Anthropic 客户端，`hand_back_block()` 开头那句 `wire_format is not WireFormat.ANTHROPIC_MESSAGES` 按 inbound 格式门控，今天就放行，而 `max_tokens` 的续写是 2026-08-21 用户裁决的「总是 hand over」。
 
 **于是 native 交付与它撞上了，而且是两层，顺序只是浅的那层。**
 
-**其一，顺序，且不限于 `block`。** hand-over 合成一个 `tool_use` 块，它必须落在终局**之前**才是一份合法回复。本规格把上游自己的 `message_stop` 当作终局事件释放（§5 第四行），而交付循环冲刷缓冲（含承载终局的那个批次）发生在 hand-over 判定**之前**，对三种 policy 一视同仁。v12 写的「在 `block` 下它早已出门」把范围写窄了——**写窄比写宽更危险**，它给出一条不存在的规避路径，会让 D-5 的候选 1 被做成半个修复。
+**其一，顺序，且不限于 `block`。** hand-over 合成一个 `tool_use` 块，它必须落在终局**之前**才是一份合法回复。本规格把上游自己的 `message_stop` 当作终局事件释放（§5 提交表「无 item 的 terminal／failure」那一行），而交付循环冲刷缓冲（含承载终局的那个批次）发生在 hand-over 判定**之前**，对三种 policy 一视同仁。v12 写的「在 `block` 下它早已出门」把范围写窄了——**写窄比写宽更危险**，它给出一条不存在的规避路径，会让 D-5 的候选 1 被做成半个修复。
 
 **其二，类型，这一层更硬。** `_hand_over` 把合成的 `CompletedBlock` 交给 `framer.block()`，而透传腿的 framer 只认 `RawEventBatch`（它调 `batch.encode()`，`CompletedBlock` 没有这个方法）。**所以即使顺序问题解决了，那条路径依然是一次 200 之后的 `AttributeError` 撕流。**
 
@@ -129,7 +129,7 @@
 
 **待定的是形态，不是方向**（[`deferred.md`](deferred.md) D-5）：要么在 hand-over 可能发生时推迟终局的释放，要么让合成块以该方言的原生事件表达并接在终局之前，要么裁定 native 腿不提供续写并接受那是一次行为回归。**只有第三个选项需要用户裁**——它与 §2.7 冲突，是一次明确的行为回归；前两个是本规格推导，评审共识即可。**候选 1 单独不够**：它只解决顺序那一层，类型那一层原样还在。
 
-> **Responses 直连腿不受此条阻挡**：那条腿上 §8 的原判据仍然成立（客户端执行不了 Anthropic 的合成块），`hand_over_supported` 也本就不放行它。issue #2 与 #3 都在那条腿上。
+> **Responses 直连腿不受此条阻挡**：那条腿上 §8 的原判据仍然成立（客户端执行不了 Anthropic 的合成块），`hand_back_block()` 的 inbound 格式门也本就不放行它。issue #2 与 #3 都在那条腿上。
 
 ## 3. 保真层级：合法 UTF-8 SSE 的 logical event 与 data
 
