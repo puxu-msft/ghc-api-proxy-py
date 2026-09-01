@@ -4,7 +4,9 @@
 
 **Why a registry rather than another function call.** The compatibility fixups are not one thing that grew — they are a family that keeps arriving one upstream rejection at a time, and each one that lands as a fresh call inside some existing function makes the next one harder to see, harder to order against its siblings, and impossible to exercise without standing up everything around it. A name and an event give each of them somewhere to live.
 
-**Not configurable, on purpose.** Protocol repair is a mandatory sanitizer: a request that upstream rejects whole is not a preference. The operator-facing `hooks:` subscription points in `config.example.yaml` are a different layer with their own undecided question — what a list item names — and this package deliberately does not pre-empt that answer by inventing a key of its own.
+**Protocol repair is not configurable, on purpose.** A request that upstream rejects whole is not a preference, so the sanitizers here have no switch. The operator-facing `hooks:` subscription points in `config.example.yaml` are a different layer with their own undecided question — what a list item names — and this package deliberately does not pre-empt that answer by inventing a key of its own.
+
+**A compatibility reshape is the exception, and it is opt-in rather than mandatory.** This paragraph used to say the whole package was unconfigurable, which stopped being true with `builtin:repair-minted-reasoning-ids`: it repairs history this proxy damaged rather than a shape upstream refuses, it edits a body on a leg whose contract is to forward verbatim, and `.dev/docs/direct-passthrough/spec.md` §2.7 requires exactly that kind of pass to carry a declared, default-off switch. So the rule is per-pass and its own Spec clause decides: a sanitizer upstream forces has no key, a reshape this proxy chooses must have one.
 
 ## Order
 
@@ -13,6 +15,7 @@
 | `builtin:server-tool-capability` | `attempt.prepare` | — | Reads and edits `tools`. Anything else that comes to read `tools` has to say whether it wants the client's list or the one that will actually be sent, and answer it here rather than by landing at whatever position happens to work. |
 | `builtin:hosted-web-search-gate` | `attempt.prepare` | after `builtin:server-tool-capability` | Nothing forces it — the two are mutually exclusive by route, one acting only when the target is Anthropic Messages and the other only when it is Responses, so neither can see what the other wrote. Registered next to it because they answer the same question for the two legs, and a reader looking for "where is web search decided" should find both in one place rather than at either end of the list. |
 | `builtin:anthropic-thinking-capability` | `attempt.prepare` | — | Nothing forces its position: `thinking` and `output_config` are touched by nothing else on this event, and its two neighbours read `tools` and `content`. Registered here, after the pair above, because it is the third capability gate and they belong together — all three answer "will the model this is going to actually take this field". |
+| `builtin:repair-minted-reasoning-ids` | `attempt.prepare` | — | Nothing forces its position. It reads and edits `input`, which on this event nothing else touches: every neighbour works on `tools`, `messages` or `content`, and those belong to the Anthropic-shaped body. Off by default; `.dev/docs/direct-passthrough/spec.md` §6.5. |
 | `builtin:blank-text-blocks` | `attempt.prepare` | registered last, by convention | Nothing forces it. It does read what that pass writes — `server_tools.py` rewrites a message's `content` and this reads the same list — but every text block that pass emits carries a `[family]` prefix and `_render_results` has no branch returning an empty string, so none of it can trigger this rule. Last among the rewriters on purpose all the same: this one only removes, and a remover placed after them sees the shape that will actually be sent, so a future pass that does emit a blank block is covered without anyone having to remember to reorder. The order comes from registration order rather than a `before=`/`after=` constraint, and the tuple in `tests/unit/pipeline/subscribers/test_builtin_subscribers.py` is what holds it. |
 | `builtin:anthropic-trailing-assistant` | `attempt.prepare` | **after `builtin:blank-text-blocks`, by an explicit constraint** | The one ordering here that is not convention. It asserts an invariant over the finished message list — that the conversation ends on a user turn — and the pass above is the last thing on this event that can remove a message. Run before it and the guard checks a list that is not the one going out, which is the failure it exists to catch. Stated with `after=` rather than by registration order because a constraint that matters should not be recoverable only by reading this table. |
 | `builtin:anthropic-cache-control-vocabulary` | `attempt.prepare` | **after `builtin:server-tool-capability`, by an explicit constraint** | The second one that is not convention, and for the same kind of reason: it removes the `cache_control` keys upstream refuses from every marker in the body, and `server_tools.py` **puts a marker back** — when it rewrites a server-tool result into a text block it deliberately carries the block's `cache_control` across, so a breakpoint keeps marking the same boundary. Run before that pass and the one marker it re-emits is the one that goes out unpruned. Registered last among the rewriters otherwise: it only deletes keys, never blocks or messages, so nothing downstream depends on where it sits relative to the two removers. |
@@ -43,6 +46,10 @@ from app.pipeline.subscribers.blank_text import SUBSCRIBER_ID as BLANK_TEXT_BLOC
 from app.pipeline.subscribers.blank_text import drop_blank_text_blocks
 from app.pipeline.subscribers.hosted_web_search import SUBSCRIBER_ID as HOSTED_WEB_SEARCH_GATE_ID
 from app.pipeline.subscribers.hosted_web_search import gate_hosted_web_search
+from app.pipeline.subscribers.minted_reasoning_ids import (
+    SUBSCRIBER_ID as MINTED_REASONING_IDS_ID,
+)
+from app.pipeline.subscribers.minted_reasoning_ids import repair_minted_reasoning_ids
 from app.pipeline.subscribers.server_tools import SUBSCRIBER_ID as SERVER_TOOL_CAPABILITY_ID
 from app.pipeline.subscribers.server_tools import adapt_server_tools
 
@@ -57,6 +64,7 @@ def register_builtin_subscribers(
     thinking_display: ThinkingDisplayPolicy = "passthrough",
     cache_control: CacheControlMode = "sanitize",
     cache_control_sanitize: Sequence[tuple[re.Pattern[str], frozenset[str]]] = (),
+    repair_minted_reasoning_ids_enabled: bool = False,
 ) -> None:
     """Add every built-in subscriber to a registry that has not been frozen yet.
 
@@ -92,6 +100,14 @@ def register_builtin_subscribers(
     )
     registry.subscribe(
         EVENT_ATTEMPT_PREPARE,
+        MINTED_REASONING_IDS_ID,
+        # Bound at registration for the reason its neighbours give: it is a startup decision, and a per-request field holding one is a field something can change mid-flight.
+        lambda context: repair_minted_reasoning_ids(
+            context, enabled=repair_minted_reasoning_ids_enabled
+        ),
+    )
+    registry.subscribe(
+        EVENT_ATTEMPT_PREPARE,
         BLANK_TEXT_BLOCKS_ID,
         drop_blank_text_blocks,
     )
@@ -120,6 +136,7 @@ __all__ = [
     "ANTHROPIC_TRAILING_ASSISTANT_ID",
     "BLANK_TEXT_BLOCKS_ID",
     "HOSTED_WEB_SEARCH_GATE_ID",
+    "MINTED_REASONING_IDS_ID",
     "SERVER_TOOL_CAPABILITY_ID",
     "adapt_server_tools",
     "adapt_thinking_capability",
@@ -127,5 +144,6 @@ __all__ = [
     "gate_hosted_web_search",
     "prune_cache_control_fields",
     "register_builtin_subscribers",
+    "repair_minted_reasoning_ids",
     "repair_trailing_assistant",
 ]

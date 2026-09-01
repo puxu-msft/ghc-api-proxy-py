@@ -2746,6 +2746,68 @@ def test_a_sealed_reasoning_item_reaches_upstream_the_way_the_client_wrote_it() 
     assert forwarded["input"] == [sent_by_client], forwarded["input"]
 
 
+POISONED_REASONING_ITEM: dict[str, Any] = {
+    "type": "reasoning",
+    # The id upstream named when the issue #4 body was replayed on 2026-09-01: `rs_` + a `uuid4` + `_0`.
+    "id": "rs_136b08ff-f6b2-4b41-8f38-ae6d74eb7496_0",
+    "summary": [],
+    "encrypted_content": "seal-closed",
+}
+
+
+REPAIRED_REASONING_ITEM: dict[str, Any] = {
+    "type": "reasoning",
+    "summary": [],
+    "encrypted_content": "seal-closed",
+}
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected", "why"),
+    [
+        (
+            None,
+            POISONED_REASONING_ITEM,
+            "the shipped default leaves the body alone, poisoned or not",
+        ),
+        (
+            {"hook_fix_responses_request": {"repair_minted_reasoning_ids": True}},
+            REPAIRED_REASONING_ITEM,
+            "switched on, the id goes and everything else stays",
+        ),
+    ],
+)
+def test_the_repair_is_opt_in_end_to_end(
+    overrides: dict[str, Any] | None, expected: dict[str, Any], why: str
+) -> None:
+    """`spec.md` §6.5, end to end: config key → chain → the bytes upstream receives.
+
+    The unit tests beside `minted_reasoning_ids.py` hold the predicate; what this adds is that the switch is wired and that the shipped default really is off — neither of which a unit test calling the function with an `enabled` argument can say, because it starts downstream of the schema.
+
+    **The two cases differ in the switch and nothing else**, which is what makes the first one a control. An earlier version changed the item as well as the configuration, and measured against it: flipping the schema default to `True` left both cases green, so the pair could not tell "opt-in" from "on by default" at all.
+    """
+    client, seen = make_client(
+        lambda _: httpx2.Response(
+            200,
+            content=drifting_sealed_reasoning_sse(),
+            headers={"content-type": "text/event-stream"},
+        ),
+        overrides=overrides,
+    )
+    response = client.post(
+        "/responses",
+        json={
+            "model": "gpt-model",
+            "input": [dict(POISONED_REASONING_ITEM)],
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    forwarded = orjson.loads(seen[-1].content)
+    assert forwarded["input"] == [expected], why
+
+
 def test_a_direct_responses_client_declares_hosted_web_search_for_itself() -> None:
     """`hosted_web_search` is off, and a client that asked on `/responses` still gets its declaration forwarded.
 

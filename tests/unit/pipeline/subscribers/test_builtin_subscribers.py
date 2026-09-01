@@ -25,6 +25,7 @@ from app.pipeline.subscribers import (
     ANTHROPIC_TRAILING_ASSISTANT_ID,
     BLANK_TEXT_BLOCKS_ID,
     HOSTED_WEB_SEARCH_GATE_ID,
+    MINTED_REASONING_IDS_ID,
     SERVER_TOOL_CAPABILITY_ID,
     register_builtin_subscribers,
 )
@@ -38,6 +39,8 @@ EXPECTED_ON_ATTEMPT_PREPARE = (
     SERVER_TOOL_CAPABILITY_ID,
     HOSTED_WEB_SEARCH_GATE_ID,
     ANTHROPIC_THINKING_CAPABILITY_ID,
+    # Position is convention, not constraint: it is the only pass on this event that reads `input`, and every neighbour works on the Anthropic-shaped body's `tools`, `messages` or `content`, so none of them can see what it wrote or write what it reads.
+    MINTED_REASONING_IDS_ID,
     BLANK_TEXT_BLOCKS_ID,
     ANTHROPIC_TRAILING_ASSISTANT_ID,
     ANTHROPIC_CACHE_CONTROL_ID,

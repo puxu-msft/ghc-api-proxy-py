@@ -386,6 +386,15 @@ class FixAnthropicSseHook(Section):
     rewrite_refusal: RewriteRefusalConfig = Field(default_factory=RewriteRefusalConfig)
 
 
+class FixResponsesRequestHook(Section):
+    # **Off by default, and it stays off**: `.dev/docs/direct-passthrough/spec.md` §2.7 requires a compatibility reshape on a native leg to be declared and optional, never folded into what is called verbatim. The user ruled the switch and its narrow shape together on 2026-09-01.
+    #
+    # What it turns on: an inbound `reasoning` item that carries `encrypted_content` **and** whose `id` matches the one shape `ResponsesFramer._item_id` could emit has that `id` removed before the body goes upstream. Upstream verifies the seal against the id it issued, so such a pair is refused every time it is replayed — permanently, for any client that keeps a rollout history. GitHub issue #4.
+    #
+    # It repairs history rather than behaviour: nothing produces that pair any more, since `1fb37cd` carries upstream's own events. Leave it off unless a conversation from before that commit is worth keeping alive. `app.pipeline.subscribers.minted_reasoning_ids` holds the predicate and why each part of it is needed.
+    repair_minted_reasoning_ids: bool = False
+
+
 def _reject_unaddressable_provider_names(value: object) -> None:
     """Refuse a `model_providers` key that the qualifier syntax cannot name.
 
@@ -507,5 +516,8 @@ class ProxyConfig(Section):
         default_factory=FixAnthropicRequestHook
     )
     hook_fix_anthropic_sse: FixAnthropicSseHook = Field(default_factory=FixAnthropicSseHook)
+    hook_fix_responses_request: FixResponsesRequestHook = Field(
+        default_factory=FixResponsesRequestHook
+    )
 
     model_config = ConfigDict(frozen=True, extra="forbid")

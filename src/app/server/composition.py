@@ -553,6 +553,7 @@ def build_chain(
         cache_control_sanitize=compile_sanitize_table(
             config.hook_fix_anthropic_request.cache_control_sanitize
         ),
+        repair_minted_reasoning_ids_enabled=config.hook_fix_responses_request.repair_minted_reasoning_ids,
     )
 
     return Chain(
