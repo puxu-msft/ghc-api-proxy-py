@@ -1,7 +1,7 @@
 # 直连路径：原生透传产品规格
 
 日期：2026-08-30
-状态：**DRAFT v15 — 待复评**。§3.1 的三处前置缺陷全部已合入 `main`（P1／P2 在 `7e96adc`，P3 在 `109dc44`），骨架亦已合入（`01c33f1`）。**Responses 直连腿已接线并合入 `main`**（`1fb37cd`，源提交存于 `archive/260901-passthrough-wiring`），issue #2／#3 关闭；**Anthropic 直连腿的词汇已实现、未接线**（§2.8）。**§11 有一项待用户裁决**（响应头黑名单的定义域）。
+状态：**DRAFT v17 — 待复评**。§3.1 的三处前置缺陷全部已合入 `main`（P1／P2 在 `7e96adc`，P3 在 `109dc44`），骨架亦已合入（`01c33f1`）。**Responses 直连腿已接线并合入 `main`**（`1fb37cd`，源提交存于 `archive/260901-passthrough-wiring`），issue #2／#3 关闭，**issue #4 的根因随同一次接线消除**（§6.2、§6.4；已污染的客户端历史是 §11 的 O-2，需用户裁决）；**Anthropic 直连腿的词汇已实现、未接线**（§2.8）。**§11 有两项待用户裁决**（响应头黑名单的定义域；已污染的客户端历史要不要在请求侧剥离）。
 定义域：**任何 `route.translation_required is False` 的路由**，不限方言。v10 之前本规格只覆盖 `openai-responses` 两端；用户 2026-08-31 裁决「根因修复所有直连路径」，定义域随之放宽（§2.1）。
 
 > **目录随之从 `direct-responses-passthrough` 改名为 `direct-passthrough`。** v10 第一稿保留了旧名，理由是「改名会让报告里的引文指向不存在的路径」——那条理由用错了地方：路径重写会伪造的是**报告里的原句**，而同一条规则的另一半正是「文件搬了就把活文档的链接指过去」。目录名是活的，一个窄于内容的名字本身就是缺陷。已重指的是活文档与源码注释；**12 份评审报告内文里的旧绝对路径原样保留**，它们记录的是当时的位置，重写才是伪造。
@@ -294,6 +294,24 @@ cap 超限、客户端取消、客户端 deadline 等人写文档列为不可继
 
 > 未核的一项：`@ai-sdk/openai` 具体在哪个版本、以何种方式校验连续性，本项目没有它的源码，采纳的是用户的陈述。
 
+**改写 id 的后果不止于客户端兼容，本节此前把它写窄了。** 上面整节把「不得重新 mint」的代价与收益都摆在客户端一侧——谁校验连续性、谁会被拒——读起来像一次可以两边权衡的取舍。**GitHub issue #4 证伪了这个框架：对一个封了 `encrypted_content` 的 reasoning item，改写 id 是硬性正确性缺陷，没有取舍可言。**
+
+实测（2026-09-01，把 issue #4 报的那份 901,008 字节 body 原样重放）：
+
+```
+400 invalid_request_body
+The encrypted content for item rs_136b08ff-f6b2-4b41-8f38-ae6d74eb7496_0 could not be verified.
+Reason: Encrypted content item_id did not match the target item id.
+```
+
+被点名的那个 id 是 `rs_` ＋ 一个 `uuid4` ＋ `_0`，即 `_item_id()` 的拼法；这条链路（`request.py` 的 `uuid4` → `inference.py` → `delivery_policy.py` → `openai_responses.py`）足以证明**本代理确实这么拼**，但不足以证明「没有哪个上游会这么拼」——后者本规格早先的措辞是一句没有证据的全称，已删。**密文与它被签发时的 item id 绑定，上游在回传时校验这个绑定**；翻译腿把上游的密文挂到自铸的 id 上，这一对从写出来的那一刻就自相矛盾。逐字段处置见 §6.4。
+
+> **归因的限定**：用户 16:32 收到的原话是 `The resource you requested was not found.`，而 16:50 起同一份 body 重放稳定得到上面那句。两句都是 400 ＋ `invalid_request_body`，且后者点名了本代理自铸的 id。**「这两句出自同一个校验分支」未闭合**——上游可能在这几小时内改了文案，也可能存在两个分支。所以「id 缺陷就是 16:32 那次观测的根因」是**高置信推断，不是直接观测**。它对处置没有影响（缺陷本身是直接观测到的，且修法独立成立），但不得被转述成观测。
+
+**这个缺陷的形状值得单独记：它是延迟的。** 出问题的那一轮响应是干净的 200，item 形状合法，**客户端在回放之前看不出异常**；矛盾要等到一个保存 rollout 历史的客户端（Codex 就是）把这个 item 发回来才暴露。所以「第一轮跑通了」对这条不变量零鉴别力，issue #4 报的也正是一次「本来在用的会话，某一轮起持续 400」。
+
+> 「延迟」是**对客户端而言**，不是原理上不可检测——一个把上游事件与自己交付的事件逐一比对的代理，第一轮就能看见这次改标。今天没有任何东西在做这件比对。本规格早先写的是「本轮任何观测都看不出异常」，那是一句过头的全称。
+
 ### 6.3 control 与 terminal 事件
 
 `response.created` / `response.in_progress` / `response.completed` / `response.incomplete` / `response.failed` / `response.cancelled`：**必须**原样重放上游的，**整个 `response` 对象逐字**——含 `status`、`incomplete_details`、`usage`、`tool_usage`、`metadata` 及任何本代理不认识的根级字段。**不得**由本代理合成，**不得**由 `Terminal.stop_reason` 反推（那是面向 Anthropic 的派生摘要，本腿只作可观测用途，见 §10）。
@@ -305,6 +323,21 @@ cap 超限、客户端取消、客户端 deadline 等人写文档列为不可继
 `encrypted_content` **必须**原样交还，**不得**经本项目的 reasoning carrier 编解码。
 
 **下一轮回传不会进入 carrier decoder**，这一条已有确证而非待定：`driver.py` 只在 `route.translation_required` 为真时调用 request translator，而 carrier decoder 只存在于该 translator 内；本规格的定义域恰为 false。**需要一条回归测试钉住这个门。**
+
+**`id` 与 `encrypted_content` 是一对，必须整对原样交还。** `encrypted_content` 与上游签发它时的 item id 绑定，上游在回传时校验该绑定并在不符时以 400 `invalid_request_body` 拒绝整个请求（§6.2 有实测原文）。因此本节的「原样交还」不能只读成「密文别动」——**把密文原样带走而给 item 换一个 id，与篡改密文等效**。
+
+**这条不变量有两半，两半各有一条回归测试**（均在 `tests/int/test_pipeline_app.py`）：
+
+| 半 | 测试 | 它挡住什么 |
+|---|---|---|
+| 响应（上游 → 客户端） | `test_a_sealed_reasoning_item_keeps_the_id_its_seal_was_cut_against` | 铸新 id；**以及把上游漂移的两个 id 合并成一个** |
+| 请求（客户端 → 上游） | `test_a_sealed_reasoning_item_reaches_upstream_the_way_the_client_wrote_it` | 入站 sealed item 的 id 或密文被删改，或被送进 carrier decoder |
+
+**请求那一半此前只有论证没有测试。** 上一段那句「回传不会进入 carrier decoder」是从 `translation_required` 的门推出来的，而**一个论证不是一条回归测试**——本节先前把这件事记为「需要一条回归测试钉住这个门」，现在它存在了。断言落在本代理**发出的字节**上，不在回复上：回复由发出去的东西生成，说不出发出去的是什么。
+
+**响应那一半的夹具必须带 id 漂移，否则它辨别不了第二种破法。** 上游对同一个 item 在 `added` 与 `done` 上拼不同的 id（`tests/int/cassettes/history_responses_stream.json` 的 `output_index` 0：`id_002` → `id_003`，两处都带密文）。一个「稳定化」这两个 id 的兼容层会把 `done` 的密文挂到 `added` 的 id 上——**同一种绑定失配，另一条路径**。旁边那些测试用的 stand-in 两处拼同一个 id，对这种回归恒等，只能看见第一种。
+
+**变异校验（2026-09-01，三次，各自命中对应的那一半）**：(A) 令 `carries_upstream_natively` 返回 `False` → 交付 id 变成 `rs_<uuid4>_0`（与 issue #4 报的同形），响应侧测试红；(B) 在 `PassthroughFramer.block` 注入「把批次内 item id 统一为首见的那个」→ `done` 变成 `(id_002, seal-closed)`，响应侧测试红，而**旧夹具下这个变异是恒等映射、会静默变绿**；(C) 在 `direct_driver/base.py` 注入 §11 O-2 提的那条剥离（无条件删掉入站 sealed item 的 `id`）→ 请求侧测试红、响应侧不受影响。
 
 ## 7. Buffering policy
 
@@ -472,11 +505,13 @@ cap 超限、客户端取消、客户端 deadline 等人写文档列为不可继
 
 ## 11. 未闭合项（归本规格所有）
 
-**当前一项，需用户裁决。**
+**当前两项，均需用户裁决。**
 
 | # | 未闭合项 | 现状 | 谁能裁 |
 |---|---|---|---|
 | O-1 | `message-format-reshape.md`「客户端返回 Anthropic Messages」一节的**直连响应头黑名单**是否覆盖 **Responses 客户端**的直连腿。**只问这一条腿**：四条直连腿里，Anthropic 直连的客户端收到的就是 Anthropic Messages，那一节的标题直接覆盖它，没有定义域疑问；Chat Completions 直连今天字节直传、不进本节；Embeddings 非流式 | §9.1 在裁决前**剥离集取并集**（黑名单 ∪ 语义判据）。**差异有两侧**：名单要剥而本规格会转发的是 `Date`／`Cache-Control`／`Set-Cookie`（取并集后被剥，这一侧不与名单相反）；名单没点名而本规格要剥的是 strong `ETag`／`Content-Digest`／`Content-Range`／`Content-MD5` 一族（这一侧偏离名单，且按语义判据自己的说法数不完） | **用户**。节标题的定义域只有作者能裁。**一条对裁决有用的文本事实**：同一份文件的**请求头**那一节写着「这部分仅在 `/messages` 或 `/messages/count_tokens` 端点入口生效」，**响应头**那一节没有任何同类限定句，只有节标题——这个不对称可以朝两个方向读（「需要限定时用户会明确写出来」或「开头一节的限定统辖全文」），本规格不主张任何一读。另：用户自己在该节旁挂了 TODO「这些条目来自 `copilot-api-js` 项目，需要了解原因」，而本项目指令明令不得把 copilot-api-js 的默认值当作项目契约——所以这可能不是一条已定型的裁决，而是一份待用户自己复核的继承清单 |
+
+| O-2 | **已被自铸 id 污染的客户端历史，要不要在请求侧加一条兼容剥离。** 具体做法：对入站 reasoning item，当它带 `encrypted_content` 且 id 是本代理自铸的形状时，去掉 `id` 字段 | **今天没有任何剥离**，此类会话每轮 400 且不会自行恢复。实测（2026-09-01，均打真实上游）：issue #4 那份 901,008 字节 body 发给 `1fb37cd` 的服务仍是 **400**；同一份 body 删掉 15 个 sealed reasoning item 的 `id` 后 **200**；`1fb37cd` 上新开会话取回上游自己的 id ＋ 5,240 字节密文再原样回发 **200**（正对照） | **用户。** 天平上唯一决定性的量是「手上有没有一条不愿放弃的旧会话」，而那只有用户知道 |
 
 > **v8 关闭过一项又在 v9 重裁：**「无法归属」的事件在 ending 处的处置。v8 按 ending 来源二分，v9 改为按「收口时刻有没有未闭合 item」判——重开条件（「出现坏帧」）在 v8 落笔当轮就已被满足，且构造即可、不需要上游样本。详见 §7.2 收口第 3 步下的说明。它属本规格推导且触到 §2.1 的边。
 
@@ -484,12 +519,24 @@ v4 把更早挂在这里的产品分叉全部移入正文定案：header 合同 
 
 实施状态不属于本节，见 [`plan.md`](plan.md)。**不需要用户裁决的延后项**（清理、跨主题指针）归 [`deferred.md`](deferred.md)，本节只放需要用户裁决的产品分叉。
 
+### O-2 的两侧，以及一条被先前草稿高估的论据
+
+**支持加**：能救活用户手上已经死掉的会话，代价是一次窄改。**受影响的会话不会自愈**——`1fb37cd` 阻止的是产生新的坏 item，它修不了已经写进客户端 rollout 历史的那些。
+
+**反对加**：这是一次兼容整形，按 §2.7 **必须**另立显式、可选的合同，不得混进 native。判据只能靠 id 形态启发式，而形态识别的紧度依赖 provider：Copilot 签发的 item id 是无前缀的 base64，所以在本上游够紧；换成 OpenAI 本家就不再成立，`rs_` 正是其合法前缀。**更窄的做法存在**：不认「`rs_` ＋任意＋数字」，只认 `rs_` ＋ 一个规范 `uuid4` ＋ `_` ＋ 序号（即 `_item_id()` 真正会产出的形状），并按 provider 或显式 opt-in 限定作用域。
+
+> **先前草稿的主论据是「这个缺陷自清」，那句话站不住，两处都错。** 其一，它当时写作「本代理再也不会产生这种 item」——而 4141 上运行的仍是早于 `1fb37cd` 的构建，**在明确 cutover 之前它还在制造新的污染**，所以那句话当下为假。其二，「不再新增」只等于集合**不再增长**，不等于**自行清空**：一个保存完整 rollout、失败后既不推进也不裁剪历史的客户端，会把同一个坏 item 永远重发下去——而 issue #4 描述的正是这样一条会话。这条论据被独立评审（`reports/260901-review-issue4-artifacts.md` review-03）判为系统性高估死代码、低估可持续污染，此处采纳。
+
+**我的建议（低置信）**：先不加，改用「新开一个 Codex 会话」绕过；**除非用户手上确有不愿放弃的长会话**，那就按上面的窄形态 ＋ 显式 opt-in 实现。置信之所以低，是因为天平取决于那条会话的价值，而那个量不在我这里——这也正是它归本节而不归 [`deferred.md`](deferred.md) 的原因。
+
 > 以下**不在**本规格定义域，已从待办移出：`function_call_output` 在响应 output 中的出现与翻译，归 `anthropic-responses-bridge/spec.md`（见 [`reports/260830-known-set-divergence.md`](reports/260830-known-set-divergence.md)）；本腿无条件携带它。
 
 ## 12. 修订记录
 
 | 日期 | 条款 | 变化 | 触发 |
 |---|---|---|---|
+| 2026-09-01 | §6.2、§6.4、§11 | **v17。** 独立评审 5 major／2 minor，全部采纳。(a) **O-2 此前被停在 `deferred.md` D-8**，而那份台账开头逐字写着「需要用户裁决的产品分叉登记在 Spec §11，不在这里」——这是本项目「Spec 级事实不得停在待办账本」规则的直接违背，条目已移入 §11 并删去 D-8；(b) O-2 原来的主论据「缺陷自清」两处错（旧构建仍在跑、仍在制造污染；不再新增≠自行清空），已改写并降低建议置信；(c) §6.4 的回归测试此前只覆盖响应半程，请求半程（正是 400 被抛出的方向）只有论证没有测试，现已补齐并登记；(d) 响应侧夹具此前两处拼同一个 id，对「把上游漂移的两个 id 合并成一个」这第二种破法恒等、会静默变绿，已改用 cassette 的真实漂移；(e) 归因的措辞限定（两句 400 是否同一分支未闭合）补进 §6.2、文首与测试 docstring；(f) 两处全称过头（「本轮任何观测都看不出」「没有哪个上游会这么拼」）改为有证据支持的限定 | [`reports/260901-review-issue4-artifacts.md`](reports/260901-review-issue4-artifacts.md) |
+| 2026-09-01 | §6.2、§6.4 | **v16。** GitHub issue #4：一条本来在用的 Responses 会话下一轮起持续 400 `invalid_request_body`。§6.2 此前把「不得重新 mint id」的代价全部记在客户端一侧（谁校验连续性），读起来是一次可权衡的取舍；实测证明对封了 `encrypted_content` 的 reasoning item 它是硬性正确性缺陷——**密文与签发时的 item id 绑定，上游回传时校验该绑定**，而 `_item_id()` 自铸的 id 必然对不上。§6.4 的「原样交还」随之补全为「`id` 与 `encrypted_content` 整对原样」，并登记已落地的回归测试与其变异校验。**该缺陷已由 `1fb37cd` 的 native 接线消除（它不铸 id），但已污染的客户端历史不会自愈**，作为产品分叉登记为 §11 的 O-2。归因带一条限定：原始那次 400 的措辞与重放时不同，「两句出自同一校验分支」未闭合（§6.2） | GitHub issue #4；[`reports/260901-issue4-passthrough-400-trace.md`](reports/260901-issue4-passthrough-400-trace.md)；[`reports/260901-review-issue4-artifacts.md`](reports/260901-review-issue4-artifacts.md) |
 | 2026-08-30 | 全文 | 初稿 | GitHub issue #1／#2；用户裁决；方案评审的 blocker-01 |
 | 2026-09-01 | §2.1、§2.8、§8 | **v15。** 用户两条裁决。**其一，命名**：这个功能叫 `continuation` 不叫 `hand-over`——后者是本规格与实现自造的词，而用户亲笔文档从头到尾叫「续写」，代码里的 `ContinuationSupport` 也早就是这个名字；改名要绕开 `lifecycle` 里同名但无关的 systemd 监听器交接。**其二，射程**：续写必须在每条直连腿上原生可用，因为块级交付在直连与翻译两条路上都必须全面支持——这推翻了 v12 把「native 腿不提供续写」列为候选的处置。**关键背景是这不是改主意**：用户文档的续写一节从一开始就写了 `tool_use` / `function_call` 两种形状、`messages` / `input` 两个字段，末尾那句「暂不」明写「未来我有需要后再补全」，所以待建的是一份已被指定、只实现了一半的合同。顺带照出 `client_message_count` 只读 `messages`、Responses 请求会得 0，而那个数正是循环检测器的输入（D-7） | 用户 2026-09-01 裁决 |
 | 2026-09-01 | §2.5、§2.6、§2.8 | **v14。** (a) §2.5 那句「§5～§10 里句子里没有一个 Responses 专有的事实」是**全称否定，被六个反例证伪**，最重的一处是 §5.2 的归一化表——它的四个输入全是 `ResponseError.code` 的取值，而 Anthropic 的错误事件根本没有 `code` 字段；那是本规格里唯一规定了「怎么算 replay 是否合法」的地方，而那个算法只对一种方言存在。改为分开陈述「机制与方言无关／取值只写了一种方言」，缺失的 Anthropic 映射表登记为 [`deferred.md`](deferred.md) D-6。**这句被证伪的断言正是 v10 放宽定义域时唯一用来说明代价可控的论据**，论据不成立即代价没有被算过；(b) §2.6 的 Chat Completions 行只回答了 §2.1，而定义域放宽后 §5／§8／§10 按字面也落在那条腿上，`one_shot_delivery` 的 docstring 逐字否掉其中三条——写下「哪些条款在那条腿上今天不成立」而不是留白；(c) §2.8 的理由两处不准：顺序问题**不限于 `block`**，且更硬的阻断是类型而非顺序（`_hand_over` 把 `CompletedBlock` 交给只认 `RawEventBatch` 的 `block()`），因此 D-5 的候选 1 单独不解决问题，「缺的只是打开开关」也不成立 | [`reports/260831-review-spec-round9.md`](reports/260831-review-spec-round9.md) round9-02／07／12 |
