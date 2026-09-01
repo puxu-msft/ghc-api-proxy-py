@@ -5,6 +5,8 @@ Split out of `app.server.handler` on 2026-08-22. Above `app.pipeline.delivery`, 
 
 
 
+from typing import Any
+
 from app.core.chain import Chain
 from app.pipeline.delivery import BlockBuffer
 from app.pipeline.delivery.assembling import BlockAssembler, ReplyDialect
@@ -13,7 +15,11 @@ from app.pipeline.delivery.formats.anthropic_messages import (
     AnthropicFramer,
 )
 from app.pipeline.delivery.formats.openai_responses import ResponsesAssembler, ResponsesFramer
+from app.pipeline.delivery.formats.openai_responses_passthrough import (
+    responses_passthrough_assembler,
+)
 from app.pipeline.delivery.framing import OutboundFramer
+from app.pipeline.delivery.passthrough import PassthroughFramer
 from app.pipeline.delivery.stream import StreamSettings
 from app.pipeline.driver import CLIENT_SEARCH_TOOL, HandledRequest
 from app.pipeline.request import WireFormat
@@ -48,13 +54,31 @@ def delivers_blocks(handled: HandledRequest) -> bool:
         return True
     return handled.route.inbound_format is not WireFormat.OPENAI_CHAT_COMPLETIONS
 
+def carries_upstream_natively(handled: HandledRequest) -> bool:
+    """Whether this route's client speaks the dialect upstream answered in, so nothing needs translating.
+
+    `direct-passthrough/spec.md` §2.6 and the user's 2026-08-31 ruling: **every** leg where `translation_required` is false should carry upstream's own events rather than round-tripping them through an Anthropic intermediate. Three of the four are not here yet, each for its own recorded reason.
+
+    `anthropic-messages` is built and unit-tested but not switched on — `spec.md` §2.8: `max_tokens` hand-over is a user ruling that is live on that leg today, it synthesises a block that has to precede the terminal, and native delivery has already released upstream's terminal by then. Turning it on before that is settled would regress the leg every Claude model takes, which §2.7 forbids. `deferred.md` D-5.
+
+    `openai-chat-completions` has no ceiling to remove: it has no framer at all, so `one_shot_delivery` already forwards upstream's bytes. `openai-embeddings` is not streamed.
+
+    A synthesized reply is excluded because this proxy wrote it, in Anthropic, and it has to be framed by whoever can write that — the invariant `delivers_blocks` already depends on.
+    """
+    if handled.synthesized:
+        return False
+    if handled.route.translation_required:
+        return False
+    return handled.route.inbound_format is WireFormat.OPENAI_RESPONSES
+
+
 def framer_for(
     handled: HandledRequest,
     chain: Chain,
     *,
     message_id: str,
     model: str,
-) -> OutboundFramer | None:
+) -> OutboundFramer[Any] | None:
     """The outbound framer for this route's client leg, or `None` when it has none and the stream is delivered whole.
 
     Selected on `route.inbound_format` — the protocol the client asked in — and deliberately **not** on `dialect_for`, which answers which upstream replied. On the main product path those are different formats: a request arriving as Anthropic Messages and served by a Responses upstream has to be answered in Anthropic Messages, and framing it by the upstream's dialect would start sending `response.*` events to a client that cannot read them.
@@ -70,7 +94,9 @@ def framer_for(
             )
         return None
     if handled.route.inbound_format is WireFormat.OPENAI_RESPONSES:
-        return ResponsesFramer(response_id=message_id, model=model)
+        native = ResponsesFramer(response_id=message_id, model=model)
+        # The passthrough writes upstream's own frames and delegates the two it still has to invent — an error and a keep-alive — to the very framer it replaces. Constructed either way so that delegate exists.
+        return PassthroughFramer(delegate=native) if carries_upstream_natively(handled) else native
     return AnthropicFramer(
         message_id=message_id,
         model=model,
@@ -81,11 +107,14 @@ def framer_for(
 
 def assembler_for(
     handled: HandledRequest, *, hand_over_stop_reasons: frozenset[str] = frozenset({"max_tokens"})
-) -> BlockAssembler:
+) -> BlockAssembler[Any]:
     """Pick the assembler matching the upstream this route actually used.
 
     Dispatched on `dialect_for` rather than testing the wire format again, so the streaming and buffered paths cannot come to disagree about which upstream answered — one branch decides it for both.
     """
+    if carries_upstream_natively(handled):
+        # Nothing to translate, so nothing to fail to translate. This is what closes GitHub issues #2 and #3: the refusal they hit lives in `ResponsesAssembler`, which this leg no longer reaches.
+        return responses_passthrough_assembler()
     if dialect_for(handled) is ReplyDialect.RESPONSES:
         # Only this one can see whether upstream cut an item short, and so only this one needs to know which endings will hand the turn back.
         return ResponsesAssembler(

@@ -1,15 +1,21 @@
 """The direct Responses passthrough assembler and framer.
 
-Skeleton-level: grouping, ordering and byte fidelity. Replay, buffering policies, headers and cap accounting are later steps and are not exercised here — see `.dev/docs/direct-responses-passthrough/plan.md`.
+Skeleton-level: grouping, ordering and byte fidelity. Replay, buffering policies, headers and cap accounting are later steps and are not exercised here — see `.dev/docs/direct-passthrough/plan.md`.
 """
 
 import orjson
+import pytest
 
+from app.errors import ErrorCategory, ErrorInfo
+from app.pipeline.delivery.assembling import Terminal
+from app.pipeline.delivery.blocks import BlockBuffer, BufferCapExceeded
+from app.pipeline.delivery.formats.openai_responses import ResponsesFramer
 from app.pipeline.delivery.formats.openai_responses_passthrough import (
-    RawEventBatch,
-    ResponsesPassthroughAssembler,
-    ResponsesPassthroughFramer,
+    RESPONSES_DIALECT,
+    requires_client_action,
+    responses_passthrough_assembler,
 )
+from app.pipeline.delivery.passthrough import PassthroughAssembler, PassthroughFramer, RawEventBatch
 from app.pipeline.delivery.sse_source import SseEvent, parse_frame
 
 
@@ -17,7 +23,7 @@ def event(name: str, **payload: object) -> SseEvent:
     return SseEvent(event=name, data=orjson.dumps(payload).decode())
 
 
-def drain(assembler: ResponsesPassthroughAssembler, events: list[SseEvent]) -> list[SseEvent]:
+def drain(assembler: PassthroughAssembler, events: list[SseEvent]) -> list[SseEvent]:
     """Every event the assembler released, flattened, in release order."""
     out: list[SseEvent] = []
     for one in events:
@@ -44,7 +50,7 @@ def test_an_item_type_nothing_here_knows_reaches_the_client_intact() -> None:
         ),
     ]
 
-    assert drain(ResponsesPassthroughAssembler(), sent) == sent
+    assert drain(responses_passthrough_assembler(), sent) == sent
 
 
 def test_an_unknown_event_is_grouped_with_its_item_not_treated_as_envelope() -> None:
@@ -54,7 +60,7 @@ def test_an_unknown_event_is_grouped_with_its_item_not_treated_as_envelope() -> 
 
     The difference is only observable while an item is open, so that is what this asserts. An event misfiled as envelope would not appear in `unfinished_items`, and §3 requires exactly those events to be dropped at an ending — so the mutation does not merely mis-order, it would leak a fragment of an unfinished item to the client.
     """
-    assembler = ResponsesPassthroughAssembler()
+    assembler = responses_passthrough_assembler()
     assembler.push(event("response.output_item.added", output_index=0, item={"type": "x"}))
     assembler.push(event("response.output_item.done", output_index=0, item={"type": "x"}))
 
@@ -72,7 +78,7 @@ def test_nothing_is_released_before_its_item_closes() -> None:
 
     The unit here is the output item, and its boundary is `output_item.done`. Until then the events are held — held, not dropped, which is the difference from the fallback that produced issue #2.
     """
-    assembler = ResponsesPassthroughAssembler()
+    assembler = responses_passthrough_assembler()
 
     assert assembler.push(event("response.output_item.added", output_index=0, item={"type": "x"})) == ()
     assert assembler.push(event("response.output_text.delta", output_index=0, delta="hi")) == ()
@@ -94,7 +100,7 @@ def test_a_finished_item_waits_behind_an_unfinished_earlier_one() -> None:
 
     The three Responses-stream cassettes in this repository never interleave, so this is designed against the protocol rather than against a sample; that is recorded in the Spec as a trend sample, not a guarantee.
     """
-    assembler = ResponsesPassthroughAssembler()
+    assembler = responses_passthrough_assembler()
     assembler.push(event("response.output_item.added", output_index=0, item={"type": "a"}))
     assembler.push(event("response.output_item.added", output_index=1, item={"type": "b"}))
 
@@ -118,9 +124,9 @@ def test_an_items_events_do_not_straddle_a_release_boundary() -> None:
 
     §4 rules that "already `done`" means the item's `done` falls inside the prefix, so nothing goes. Two things go wrong otherwise, and the second is the expensive one: the client gets half a group, and the attempt is committed by a byte carrying no content — which shuts §5's whole-attempt replay window for a turn that could still have been replayed intact, had item 1 failed retryably a moment later.
     """
-    assembler = ResponsesPassthroughAssembler()
-    # A control-only prefix is a delivery unit, and §5 forbids delivering it on its own — it rides out with the first batch of item events. The assembler releases it to its caller here; whether it reaches the client is the delivery step's decision, not this one's.
-    assert assembler.push(event("response.created", response={"id": "resp_1"})) != ()
+    assembler = responses_passthrough_assembler()
+    # Held, not released: §4 says a control-only prefix rides out with the first batch of item events, because delivering it alone would put upstream's first native event in front of the client and §5 counts that as committing the attempt.
+    assert assembler.push(event("response.created", response={"id": "resp_1"})) == ()
 
     assembler.push(event("response.output_item.added", output_index=0, item={"type": "a"}))
     assembler.push(event("response.output_item.added", output_index=1, item={"type": "b"}))
@@ -134,7 +140,7 @@ def test_retreating_past_one_straddling_item_can_expose_another() -> None:
 
     Here item 0 and item 1 both complete before item 2 opens, but their events interleave and item 1's `done` lands after item 2's `added`. Retreating past item 1 puts item 0's `done` into the tail, so item 0 straddles a boundary that was fine an instant earlier. A single-pass implementation releases item 0's `added` alone — exactly the split the rule exists to prevent.
     """
-    assembler = ResponsesPassthroughAssembler()
+    assembler = responses_passthrough_assembler()
     assembler.push(event("response.output_item.added", output_index=0, item={"type": "a"}))
     assembler.push(event("response.output_item.added", output_index=1, item={"type": "b"}))
     assembler.push(event("response.output_item.done", output_index=0, item={"type": "a"}))
@@ -148,9 +154,9 @@ def test_control_events_keep_their_place_in_the_queue() -> None:
 
     It is released with the prefix it sits in, which is what keeps the client's view of the envelope in the order upstream wrote it. When it may be *submitted* is a separate question that `spec.md` §5 answers, and the skeleton does not decide it.
     """
-    assembler = ResponsesPassthroughAssembler()
+    assembler = responses_passthrough_assembler()
 
-    assert assembler.push(event("response.created", response={"id": "resp_1"})) != ()
+    assert assembler.push(event("response.created", response={"id": "resp_1"})) == ()
 
     assembler.push(event("response.output_item.added", output_index=0, item={"type": "x"}))
     held = assembler.push(event("response.completed", response={"id": "resp_1"}))
@@ -159,13 +165,23 @@ def test_control_events_keep_their_place_in_the_queue() -> None:
     assert held == ()
     assert [e.event for e in assembler.unfinished_items] == ["response.output_item.added"]
 
+    # It closes, and now everything goes out together in the order upstream wrote it — the envelope frames included.
+    released = assembler.push(event("response.output_item.done", output_index=0, item={"type": "x"}))
+    assert len(released) == 1
+    assert [e.event for e in released[0].events] == [
+        "response.created",
+        "response.output_item.added",
+        "response.completed",
+        "response.output_item.done",
+    ]
+
 
 def test_an_unfinished_tail_is_visible_to_whoever_ends_the_stream() -> None:
     """The assembler exposes the tail; it does not decide when to drop it.
 
     `spec.md` §3 drops an unclosed item's events at every ending, and §7.2 says which ending. Both are the caller's business — an assembler that dropped them itself would be making an ending decision from inside the parser.
     """
-    assembler = ResponsesPassthroughAssembler()
+    assembler = responses_passthrough_assembler()
     assembler.push(event("response.output_item.added", output_index=0, item={"type": "x"}))
     assembler.push(event("response.output_item.done", output_index=0, item={"type": "x"}))
     assembler.push(event("response.output_item.added", output_index=1, item={"type": "y"}))
@@ -184,7 +200,7 @@ def test_a_done_for_an_item_that_never_opened_still_closes_it() -> None:
 
     It used to say "upstream is on record for" this shape. It is not. `hosted-web-search-spec.md` §12 lists it as open question P7 — *"是否真的存在「`done` 无 `added`」形态"* — and records that both of this project's measurements carried an `added`; the three Responses-stream cassettes pair every `added` with its `done`. What is on record is the **reference project's** own implementation dropping such an item silently, which is a different fact about a different program. Leaving the claim would have closed P7 with an observation that never happened.
     """
-    assembler = ResponsesPassthroughAssembler()
+    assembler = responses_passthrough_assembler()
 
     released = assembler.push(event("response.output_item.done", output_index=0, item={"type": "x"}))
 
@@ -199,7 +215,7 @@ def test_an_event_that_cannot_be_attributed_is_held_rather_than_released() -> No
 
     The earlier implementation returned a bare `None` for both "envelope" and "cannot attribute", so this event was released immediately as though it were envelope — a fragment of something that may never close, delivered to the client. Asserted before any item opens, which is where the old code released it outright.
     """
-    assembler = ResponsesPassthroughAssembler()
+    assembler = responses_passthrough_assembler()
 
     assert assembler.push(event("response.audio.delta", delta="...")) == ()
     assert [e.event for e in assembler.unattributed] == ["response.audio.delta"]
@@ -211,7 +227,7 @@ def test_an_unattributable_event_blocks_the_prefix_behind_it() -> None:
 
     So it is a barrier, not a skip: a whole item that closes after it still waits. That is the same head-of-line trade §4 already accepts for an open item, applied to an event whose owner is unknown.
     """
-    assembler = ResponsesPassthroughAssembler()
+    assembler = responses_passthrough_assembler()
     assembler.push(event("response.audio.delta", delta="..."))
 
     assembler.push(event("response.output_item.added", output_index=0, item={"type": "x"}))
@@ -226,7 +242,7 @@ def test_an_unattributable_event_is_reported_apart_from_an_unclosed_tail() -> No
 
     Asserted with an item open around the unattributable event, so the two sets are non-empty at the same time and an implementation that returned one for both would fail.
     """
-    assembler = ResponsesPassthroughAssembler()
+    assembler = responses_passthrough_assembler()
     assembler.push(event("response.output_item.added", output_index=0, item={"type": "x"}))
     assembler.push(event("response.output_text.delta", delta="no output_index at all"))
     assembler.push(event("response.output_text.delta", output_index=0, delta="hi"))
@@ -243,11 +259,17 @@ def test_queued_is_envelope_and_travels_with_its_prefix() -> None:
 
     Harmless while the two non-item answers shared one slot; once they are told apart it decides which, so an omission would hold the envelope frame — and everything after it — to the terminal.
     """
-    assembler = ResponsesPassthroughAssembler()
+    assembler = responses_passthrough_assembler()
 
-    assert assembler.push(event("response.queued", response={"id": "resp_1"})) != ()
+    # Envelope, so it is held neither as an unclosed item's fragment nor as an unattributable one — but §4 still does not deliver a control-only prefix on its own, so nothing comes out until content does.
+    assert assembler.push(event("response.queued", response={"id": "resp_1"})) == ()
     assert assembler.unfinished_items == ()
     assert assembler.unattributed == ()
+
+    # Had it been judged unattributable instead, it would have been held to the terminal and blocked everything behind it. It is not.
+    released = assembler.push(event("response.output_item.done", output_index=0, item={"type": "x"}))
+    assert len(released) == 1
+    assert [e.event for e in released[0].events] == ["response.queued", "response.output_item.done"]
 
 
 def test_a_second_attempt_needs_a_second_assembler() -> None:
@@ -255,14 +277,14 @@ def test_a_second_attempt_needs_a_second_assembler() -> None:
 
     Not a supported mode — §5 discards the old attempt's queue wholesale on replay, so an attempt gets its own assembler. Asserted because the failure is silent: feeding attempt 2 to a used instance produces no error and no observable fact, just per-event forwarding where block-level delivery should be. This test pins the lifetime the class requires rather than a behaviour it offers.
     """
-    used = ResponsesPassthroughAssembler()
+    used = responses_passthrough_assembler()
     used.push(event("response.output_item.added", output_index=0, item={"type": "x"}))
     used.push(event("response.output_item.done", output_index=0, item={"type": "x"}))
 
     # Attempt 2 through the same instance: index 0 is already closed, so nothing is ever held.
     assert used.push(event("response.output_item.added", output_index=0, item={"type": "x"})) != ()
 
-    fresh = ResponsesPassthroughAssembler()
+    fresh = responses_passthrough_assembler()
     assert fresh.push(event("response.output_item.added", output_index=0, item={"type": "x"})) == ()
 
 
@@ -275,10 +297,12 @@ def test_the_framer_writes_the_payload_it_was_given() -> None:
         events=(
             SseEvent(event="response.output_text.delta", data='{"output_index":0,"delta":"a"}'),
             SseEvent(event="x.unknown", data="first\nsecond"),
-        )
+        ),
+        dialect=RESPONSES_DIALECT,
     )
 
-    wire = ResponsesPassthroughFramer().batch(batch)
+    framer = PassthroughFramer(delegate=ResponsesFramer(response_id="resp_1", model="m"))
+    wire = b"".join(framer.block(batch))
     frames = [parse_frame(f) for f in wire.split(b"\n\n") if f.strip()]
 
     assert [(f.event, f.data) for f in frames if f is not None] == [
@@ -287,18 +311,310 @@ def test_the_framer_writes_the_payload_it_was_given() -> None:
     ]
 
 
-def test_held_bytes_measures_the_text_actually_held() -> None:
+def test_queued_bytes_measures_the_text_actually_held() -> None:
     """The cap in `spec.md` §8 bounds what this proxy is holding, per the user's own config wording.
 
     Measured on the raw event text, because that is what is in the queue — not `repr` of a parsed payload, which is what the Anthropic-side block measures and would be a different number for the same bytes.
     """
-    assembler = ResponsesPassthroughAssembler()
-    assert assembler.held_bytes == 0
+    assembler = responses_passthrough_assembler()
+    assert assembler.queued_bytes == 0
 
     assembler.push(event("response.output_item.added", output_index=0, item={"type": "x"}))
-    held = assembler.held_bytes
+    held = assembler.queued_bytes
 
     assert held > 0
     assembler.push(event("response.output_item.done", output_index=0, item={"type": "x"}))
     # Released, so no longer held.
-    assert assembler.held_bytes == 0
+    assert assembler.queued_bytes == 0
+
+
+def test_the_same_type_answers_oppositely_by_its_own_execution_field() -> None:
+    """§7.1's whole reason for reading the item rather than a type table.
+
+    `ResponseToolSearchCall` declares `execution: Literal["server", "client"]`, so a table keyed on `tool_search_call` alone would be wrong for one of the two halves whichever answer it picked. Asserted as a pair, because either one alone passes on a constant.
+    """
+    assert requires_client_action({"type": "tool_search_call", "execution": "client"}) is True
+    assert requires_client_action({"type": "tool_search_call", "execution": "server"}) is False
+
+
+def test_an_item_type_nothing_here_knows_is_assumed_to_need_the_client() -> None:
+    """The conservative direction, and §2.1 is why it is that one.
+
+    Answering `False` for an unknown type would hold whatever the client has to act on until the terminal, which makes the set of types this proxy recognises the ceiling on what a client can do. Releasing early costs one extra flush; withholding costs the turn. An item with no readable `type` gets the same answer for the same reason.
+    """
+    assert requires_client_action({"type": "some_2027_tool_call"}) is True
+    assert requires_client_action({}) is True
+
+
+def test_a_hosted_tool_the_upstream_runs_itself_needs_nothing_from_the_client() -> None:
+    """The control for the test above: if everything answered `True`, `until-tool-use` would release on the first item and mean nothing."""
+    assert requires_client_action({"type": "web_search_call"}) is False
+    assert requires_client_action({"type": "message"}) is False
+
+
+def test_a_batch_answers_from_whichever_event_carries_the_item() -> None:
+    """Not from the closing event, because the two dialects put the item in different places.
+
+    A Responses `output_item.done` carries the finished item; an Anthropic `content_block_stop` carries only an index, and the block's type arrived on `content_block_start`. A predicate that asked only the closing event would answer `False` for every Anthropic tool call. Scanning the batch is safe because §4 already guarantees an item's events never straddle a release boundary — if the item is in here, its whole group is.
+
+    Asserted as a pair on `tool_search_call`, the type whose answer is decided by a field spread across the group: the opening event announces the type and the closing one carries `execution`.
+    """
+    def group(execution: str) -> RawEventBatch:
+        return RawEventBatch(
+            events=(
+                SseEvent(
+                    event="response.output_item.added",
+                    data='{"output_index":0,"item":{"type":"tool_search_call"}}',
+                ),
+                SseEvent(
+                    event="response.output_item.done",
+                    data='{"output_index":0,"item":{"type":"tool_search_call","execution":"'
+                    + execution
+                    + '"}}',
+                ),
+            ),
+            dialect=RESPONSES_DIALECT,
+        )
+
+    assert group("client").requires_client_action is True
+    assert group("server").requires_client_action is False
+
+
+def test_a_terminal_lifts_the_hold_on_a_response_with_no_items() -> None:
+    """§5's fourth row: an item-less terminal is submitted with this attempt's control events.
+
+    Without this the hold rule would be a deadlock for the shortest legal response there is — `created` then `completed`, nothing in between. Holding for "the first batch of item events" that never comes would deliver the client nothing at all.
+    """
+    assembler = responses_passthrough_assembler()
+
+    assert assembler.push(event("response.created", response={"id": "resp_1"})) == ()
+
+    released = assembler.push(event("response.completed", response={"id": "resp_1"}))
+
+    assert len(released) == 1
+    assert [e.event for e in released[0].events] == ["response.created", "response.completed"]
+
+
+def test_the_terminal_facts_are_recorded_without_touching_the_wire() -> None:
+    """§10 wants the authoritative status and usage; §6.3 forbids deriving anything back onto the events.
+
+    So the assembler reads upstream's terminal for the side record and still carries that same event out verbatim inside a batch. Both halves are asserted here, because keeping only the first is how a leg ends up reporting facts it also quietly rewrote.
+
+    `upstream_usage` is upstream's own object rather than the Anthropic conversion beside it: that conversion subtracts the cached input and drops reasoning tokens, and a leg reporting what upstream said needs the original.
+    """
+    assembler = responses_passthrough_assembler()
+    assert assembler.terminal.seen is False
+
+    assembler.push(event("response.output_item.added", output_index=0, item={"type": "message"}))
+    assembler.push(
+        event("response.output_item.done", output_index=0, item={"type": "message"})
+    )
+    released = assembler.push(
+        event(
+            "response.completed",
+            response={"id": "resp_1", "status": "completed", "usage": {"input_tokens": 7}},
+        )
+    )
+
+    assert assembler.terminal.seen is True
+    assert assembler.terminal.stop_reason == "end_turn"
+    assert assembler.terminal.upstream_usage == {"input_tokens": 7}
+    # And the same event still goes to the client as upstream wrote it.
+    assert [e.event for e in released[0].events][-1] == "response.completed"
+
+
+def test_a_turn_that_asked_the_client_to_act_says_so_in_its_stop_reason() -> None:
+    """The control for the test above — otherwise `end_turn` would be a constant.
+
+    The two legs establish this differently and mean the same thing: the translating assembler knows it built a tool-use block, this one knows an item required client action (§7.1). Both feed the same shared reader.
+    """
+    assembler = responses_passthrough_assembler()
+    assembler.push(event("response.output_item.added", output_index=0, item={"type": "function_call"}))
+    assembler.push(
+        event("response.output_item.done", output_index=0, item={"type": "function_call", "name": "f"})
+    )
+    assembler.push(event("response.completed", response={"id": "resp_1"}))
+
+    assert assembler.terminal.stop_reason == "tool_use"
+
+
+def test_an_upstream_failure_is_carried_with_its_own_name_and_payload() -> None:
+    """What makes verbatim replay possible at all: `_report_failure` writes `event` and `raw_data` back out.
+
+    So the record has to keep upstream's own event name rather than normalising to `error` — `response.failed` and `response.cancelled` are different things to a client of that API — and the payload as text rather than a re-serialised dict, because a round trip through an encoder keeps the fields and not the bytes.
+    """
+    assembler = responses_passthrough_assembler()
+    raw = '{"response":{"id":"resp_1","error":{"code":"server_error","message":"boom"}}}'
+
+    assembler.push(SseEvent(event="response.failed", data=raw))
+
+    failure = assembler.failure
+    assert failure is not None
+    assert failure.event == "response.failed"
+    assert failure.raw_data == raw
+    assert failure.info.code == "server_error"
+
+
+def test_cut_mid_block_is_true_only_while_an_item_is_open() -> None:
+    """It tells a stream cut *through* an item from one cut *between* items, and the two endings differ.
+
+    A clean close between items delivers everything whole and needs no error frame; a close through one does. Both leave `terminal.seen` false, so this is the only observable that separates them.
+    """
+    assembler = responses_passthrough_assembler()
+    assert assembler.cut_mid_block is False
+
+    assembler.push(event("response.output_item.added", output_index=0, item={"type": "message"}))
+    assert assembler.cut_mid_block is True
+
+    assembler.push(event("response.output_item.done", output_index=0, item={"type": "message"}))
+    assert assembler.cut_mid_block is False
+
+
+def test_the_framer_invents_no_envelope_and_no_terminal() -> None:
+    """Two empties that are not the same empty, and neither is an oversight.
+
+    Upstream's own opening event and its own terminal arrive as ordinary events and ride out inside batches. Emitting counterparts here would deliver each of them twice, with a different id the second time — the invented one is not upstream's.
+    """
+    framer = PassthroughFramer(delegate=ResponsesFramer(response_id="resp_1", model="m"))
+
+    assert framer.preamble() == ()
+    assert framer.terminal(Terminal(seen=True, stop_reason="end_turn")) == ()
+
+
+def test_the_framer_refuses_to_synthesise_a_terminal() -> None:
+    """§8 forbids this leg inventing a successful terminal, and `stream._deliver` reads this to know.
+
+    On a translating leg an upstream that closes cleanly between items gets the configured stop reason written for it, and the turn reads as complete. §5.1 requires an error there instead: the only honest terminal is upstream's, and it never arrived.
+    """
+    framer = PassthroughFramer(delegate=ResponsesFramer(response_id="resp_1", model="m"))
+
+    assert framer.synthesises_terminal is False
+
+
+def test_the_framer_delegates_the_two_frames_this_leg_still_invents() -> None:
+    """An error frame and a keep-alive really are this side's own, and each dialect already spells them.
+
+    Delegating rather than reimplementing is what keeps one spelling: a second copy here would drift from `error-envelope/spec.md` §6.3 the first time that shape changed. Asserted against the leg's ordinary framer producing the identical bytes.
+    """
+    delegate = ResponsesFramer(response_id="resp_1", model="m")
+    framer = PassthroughFramer(delegate=delegate)
+    info = ErrorInfo(
+        category=ErrorCategory.UPSTREAM, message="boom", status_code=502, code="upstream_stream_failed"
+    )
+
+    assert framer.keepalive() == delegate.keepalive()
+    assert framer.error(info) == ResponsesFramer(response_id="resp_1", model="m").error(info)
+
+
+def test_the_opening_envelope_event_does_not_claim_upstream_finished() -> None:
+    """The blocker an independent review found, and the assertion that would have caught it.
+
+    The shared terminal reader used to set `seen = True` on its first line, with the guard living outside it in the translating assembler's `kind in {...}` branch. The passthrough then called it for *every* envelope event, so `response.created` — upstream's very first frame — reported that upstream had finished, with a `stop_reason` of `end_turn` nobody had said.
+
+    Everything downstream that asks "did upstream finish" then answered yes. Measured across three endings: a torn stream left the delivery loop as an orderly ending with no error frame, the exception swallowed and replay never even asked; a clean EOF without a terminal wrote nothing; the completion line logged `ok`. The leg was silently succeeding at every way of failing.
+
+    The existing terminal test asserts `seen is False` too, but before pushing anything and without ever sending `response.created`, so it had no discriminating power here at all.
+    """
+    assembler = responses_passthrough_assembler()
+
+    assembler.push(event("response.created", response={"id": "resp_1"}))
+
+    assert assembler.terminal.seen is False
+    assert assembler.terminal.stop_reason == ""
+
+    assembler.push(event("response.in_progress", response={"id": "resp_1"}))
+
+    assert assembler.terminal.seen is False
+
+
+def test_an_upstream_failure_event_goes_out_once() -> None:
+    """It is both an envelope event and a failure, and each half had its own delivery path.
+
+    The batch carried it because it is envelope; `stream._report_failure` replayed it verbatim because it is a failure. The client received upstream's `response.failed` twice, byte-identically — a behaviour this leg introduced, since the translating leg only ever produced the one frame.
+
+    It stays in the queue regardless of who emits it, because §5's fourth row uses a terminal to lift the hold on a control-only prefix. Asserted on both halves: the hold is lifted (something comes out) and the failure itself is not in what comes out.
+    """
+    assembler = responses_passthrough_assembler()
+    delivered = [
+        e.event
+        for e in drain(
+            assembler,
+            [
+                event("response.created", response={"id": "resp_1"}),
+                event("response.output_item.added", output_index=0, item={"type": "message"}),
+                event("response.output_item.done", output_index=0, item={"type": "message"}),
+                SseEvent(
+                    event="response.failed",
+                    data='{"response":{"error":{"code":"server_error"}}}',
+                ),
+            ],
+        )
+    ]
+
+    assert assembler.failure is not None
+    assert delivered == [
+        "response.created",
+        "response.output_item.added",
+        "response.output_item.done",
+    ]
+    assert "response.failed" not in delivered
+
+
+def test_an_item_that_never_closes_does_not_take_the_whole_response_with_it() -> None:
+    """§7.2's closing sequence, and what its absence cost.
+
+    An item that opens and never closes blocks everything behind it — that is head-of-line blocking working as §4 intends, while the stream is live. At the ending it must stop: the groups queued behind that item are *finished*, not half-built, and upstream's own terminal is queued there too. Without a closing sequence they were all abandoned, so one unclosed item produced a 200 with zero bytes.
+
+    Step 1 still drops the unclosed item's own events. Step 3 drops the unattributable ones too, because with an item open one of them may be its missing half.
+    """
+    assembler = responses_passthrough_assembler()
+    assembler.push(event("response.created", response={"id": "resp_1"}))
+    assembler.push(event("response.output_item.added", output_index=0, item={"type": "a"}))
+    assembler.push(event("response.output_text.delta", output_index=0, delta="never closes"))
+    assembler.push(event("response.output_item.added", output_index=1, item={"type": "b"}))
+    assembler.push(event("response.output_item.done", output_index=1, item={"type": "b"}))
+    assembler.push(event("response.completed", response={"id": "resp_1"}))
+
+    closing = assembler.close()
+
+    assert len(closing) == 1
+    assert [e.event for e in closing[0].events] == [
+        "response.created",
+        # item 0's two events are dropped — it never closed.
+        "response.output_item.added",
+        "response.output_item.done",
+        "response.completed",
+    ]
+    assert [e.json().get("output_index") for e in closing[0].events if "output_index" in e.json()] == [1, 1]
+
+
+def test_the_closing_sequence_keeps_an_unattributable_event_when_nothing_is_open() -> None:
+    """The other half of step 3, and the control for the test above.
+
+    With no item unclosed, an unattributable event cannot be some open item's missing half, so dropping it would be refusing a protocol-legal event because this proxy could not tell whose it was — the reason §2.1 rejects.
+    """
+    assembler = responses_passthrough_assembler()
+    assembler.push(event("response.created", response={"id": "resp_1"}))
+    assembler.push(event("response.audio.delta", delta="..."))
+
+    closing = assembler.close()
+
+    assert len(closing) == 1
+    assert [e.event for e in closing[0].events] == ["response.created", "response.audio.delta"]
+
+
+def test_the_cap_can_see_what_the_assembler_is_holding() -> None:
+    """§8 counts the queue first, and it was outside the buffer's view entirely.
+
+    `BlockBuffer` only ever measured units that had already been released to it. On this leg an item that opens and never closes keeps every later group queued in the assembler, so `buffer_cap_bytes` — 16MiB by default, and enabled by default — bounded nothing at all there.
+    """
+    assembler = responses_passthrough_assembler()
+    buffer: BlockBuffer[RawEventBatch] = BlockBuffer(policy="block", cap_bytes=200)
+
+    assembler.push(event("response.output_item.added", output_index=0, item={"type": "a"}))
+    for _ in range(20):
+        assembler.push(event("response.output_text.delta", output_index=0, delta="x" * 40))
+
+    assert assembler.queued_bytes > 200
+    with pytest.raises(BufferCapExceeded):
+        buffer.enforce_cap_over(assembler.queued_bytes)

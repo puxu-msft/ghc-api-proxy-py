@@ -11,19 +11,21 @@ from typing import Protocol
 
 from app.errors import ErrorInfo
 from app.pipeline.delivery.assembling import Terminal
-from app.pipeline.delivery.blocks import CompletedBlock
+from app.pipeline.delivery.blocks import CompletedBlock, DeliveryUnit
 
 
-class OutboundFramer(Protocol):
+class OutboundFramer[UnitT: DeliveryUnit = CompletedBlock](Protocol):
     def preamble(self) -> tuple[bytes, ...]:
         """The frames that open a response.
 
-        Emitted with the first block, never on its own: a turn that produces nothing must not leave the client holding a message that looks started.
+        Emitted with the first unit, never on its own: a turn that produces nothing must not leave the client holding a message that looks started.
+
+        Empty on a leg that invents nothing — the direct Responses passthrough opens the response with upstream's own `response.created`, which arrives as an ordinary event and needs no counterpart from this side.
         """
         ...
 
-    def block(self, block: CompletedBlock) -> tuple[bytes, ...]:
-        """One whole block's frames. A caller never receives half a group."""
+    def block(self, block: UnitT) -> tuple[bytes, ...]:
+        """One whole unit's frames. A caller never receives half a group."""
         ...
 
     def terminal(self, terminal: Terminal) -> tuple[bytes, ...]:
@@ -39,4 +41,16 @@ class OutboundFramer(Protocol):
 
     def keepalive(self) -> bytes:
         """What goes out between blocks so the connection is not silent."""
+        ...
+
+    @property
+    def synthesises_terminal(self) -> bool:
+        """Whether this leg may invent a terminal for a stream that ended without one.
+
+        True for a translating leg: it is already writing every frame the client sees, so a configured stop reason is one more thing it spells, and a turn that stopped cleanly between blocks reads as complete rather than as an error.
+
+        False for a direct passthrough. `direct-passthrough/spec.md` §8 forbids that leg synthesising a successful terminal, and §5.1 requires an error instead — the only honest terminal there is upstream's own, and this is exactly the case where it never arrived.
+
+        Read by `stream._deliver` at that one ending. A leg-aware fact rather than a setting, because it is a property of what the leg is allowed to say, not of how an operator configured it.
+        """
         ...

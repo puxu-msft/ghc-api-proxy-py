@@ -2503,6 +2503,19 @@ def test_a_responses_upstream_is_logged_in_its_own_words(request_log: None, capl
     assert "think(" not in line and "tool_use(" not in line
 
 
+def responses_envelope_frames() -> list[str]:
+    """The two frames every real Responses stream opens with.
+
+    Measured, not assumed: all three Responses-stream cassettes in this repository lead with `response.created` then `response.in_progress` before any item event, unanimously.
+
+    They are here because the hand-written stands-in below used to omit them, and while the direct leg was translating that was invisible — `ResponsesFramer.preamble()` invented both, so a test asserting the client sees `response.created` first was asserting **this proxy's invention** rather than anything upstream does. The passthrough invents nothing, which is what made the omission visible. The OpenAI SDK's stream parser raises without `response.created`, so a mock lacking it also could not have caught a leg that dropped it.
+    """
+    return [
+        'event: response.created\ndata: {"response":{"id":"resp_mock","status":"in_progress"}}\n\n',
+        'event: response.in_progress\ndata: {"response":{"id":"resp_mock","status":"in_progress"}}\n\n',
+    ]
+
+
 def responses_sse_upstream(usage: dict[str, Any] | None = None) -> bytes:
     """A Responses SSE stream carrying one sealed reasoning item and one function call.
 
@@ -2512,7 +2525,7 @@ def responses_sse_upstream(usage: dict[str, Any] | None = None) -> bytes:
         {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "sealed"},
         {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "Bash", "arguments": ""},
     ]
-    frames: list[str] = []
+    frames: list[str] = responses_envelope_frames()
     for index, item in enumerate(items):
         data: dict[str, Any] = {"output_index": index, "item": item}
         for event in ("response.output_item.added", "response.output_item.done"):
@@ -2538,6 +2551,7 @@ def custom_tool_call_sse() -> bytes:
         "input": "ls -la",
     }
     frames = [
+        *responses_envelope_frames(),
         f"event: response.output_item.added\ndata: {orjson.dumps({'output_index': 0, 'item': item}).decode()}\n\n",
         f"event: response.output_item.done\ndata: {orjson.dumps({'output_index': 0, 'item': {**item, 'status': 'completed'}}).decode()}\n\n",
         "event: response.completed\n"
@@ -2546,7 +2560,7 @@ def custom_tool_call_sse() -> bytes:
     return "".join(frames).encode()
 
 
-def test_an_output_item_this_assembler_does_not_know_is_refused_not_rendered() -> None:
+def test_an_output_item_this_proxy_does_not_know_reaches_the_client_intact() -> None:
     """Issue #2. Upstream answered 200 and delivery raised `ValueError: no Responses item shape for block kind 'custom_tool_call'`, tearing the stream.
 
     Two defects, one line apart. `_open` mapped an unrecognised item type to *itself*, so the block's kind became the literal string `custom_tool_call`; `_close`'s final `else` built a `TEXT`-shaped payload without setting `kind` to match, which the `WEB_SEARCH_CALL` branch beside it does. The block contradicted itself, and the two legs failed differently: `ResponsesFramer` raised, `AnthropicFramer` sent an empty text block under a `stop_reason` of `end_turn` — telling the client the model had finished while it was in fact waiting on a tool call.
@@ -2555,7 +2569,9 @@ def test_an_output_item_this_assembler_does_not_know_is_refused_not_rendered() -
 
     `spec.md`'s response matrix already required the answer — `REJECT` for an unknown output item, not to be masked by an empty text block or by a normal terminal, which names both of the old behaviours — so this is the implementation reaching a frozen clause rather than new behaviour.
 
-    **This is not the end state.** The direct leg should not be translating at all; `.dev/docs/direct-responses-passthrough/plan.md` is the passthrough work that would let this item reach the client intact. Until that lands, refusing is the honest answer: this proxy genuinely cannot carry the item, and saying so beats both tearing and pretending.
+    **Issue #3 is the same defect reported again**, from a ChatGPT client on the same endpoint, after the refusal above had replaced the tear. Changing a tear into an honest refusal was not a root-cause fix: the ceiling — that the set of item types this proxy recognises bounds what a client can receive — was untouched, and the user had already ruled against it. `direct-passthrough/spec.md` §2.1 holds that ruling verbatim; it is not copied here, because a quotation transcribed into code is one more place it can fall out of step with its source.
+
+    **This test now asserts the end state**, and it reverses on purpose. The direct leg no longer translates, so there is no unknown item type to refuse: `custom_tool_call` reaches the client whole, upstream's own envelope and terminal included. What is asserted is the payload rather than only the event names, because an empty block satisfying the name assertions is exactly the silent failure the refusal was introduced to avoid.
     """
     client, _ = make_client(
         lambda _: httpx2.Response(
@@ -2573,13 +2589,18 @@ def test_an_output_item_this_assembler_does_not_know_is_refused_not_rendered() -
         for line in response.text.splitlines()
         if line.startswith("event: ")
     ]
-    # The refusal reaches the client as an error frame it can read...
-    assert names[-1] == "error", names
-    assert "unknown_output_item" in response.text, response.text
-    # ...and **no** terminal follows it. `.dev/docs/error-envelope/spec.md` §3.5: a turn that will not succeed must not end with an event that reads as a completed one. Without this assertion the test would pass on an implementation that emitted the error and then `response.completed` anyway.
-    assert "response.completed" not in response.text, response.text
-    # And nothing was rendered in its place — an empty block satisfying the two assertions above is the silent failure this refusal exists to avoid. Asserted on the parsed event names rather than on a substring, because the error code `unknown_output_item` contains `output_item` and a substring check would contradict itself.
-    assert not [name for name in names if name.startswith("response.output_item")], names
+    # Upstream's own envelope, carried rather than invented.
+    assert names[0] == "response.created", names
+    # The item reaches the client, both halves of its lifecycle.
+    assert names.count("response.output_item.added") == 1, names
+    assert names.count("response.output_item.done") == 1, names
+    # Intact, not emptied — the payload is what makes this different from the fallback that produced issue #2, which delivered a block whose kind contradicted an empty body.
+    assert '"name":"run_shell"' in response.text.replace(" ", ""), response.text
+    assert '"input":"ls -la"' in response.text, response.text
+    # The turn ends the way upstream ended it, and no refusal is invented along the way.
+    assert names[-1] == "response.completed", names
+    assert "error" not in names, names
+    assert "unknown_output_item" not in response.text, response.text
 
 
 def test_a_direct_responses_stream_is_answered_in_responses_events() -> None:

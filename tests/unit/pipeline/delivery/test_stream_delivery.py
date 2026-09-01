@@ -722,6 +722,15 @@ class SlowAssembler:
         """Never mid-block: this stand-in exists for the timing, and completes its block or nothing."""
         return False
 
+    def close(self) -> tuple[CompletedBlock, ...]:
+        """Nothing held back: this stand-in delivers its block through `push` or not at all."""
+        return ()
+
+    @property
+    def queued_bytes(self) -> int:
+        """Nothing queued outside the buffer, so the cap sees everything it holds."""
+        return 0
+
     def __init__(self, *, seconds: float, first_block: bool = False) -> None:
         self._seconds = seconds
         self._terminal = Terminal()

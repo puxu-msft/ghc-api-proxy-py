@@ -12,7 +12,7 @@ from typing import Any, Protocol
 import orjson
 
 from app.errors import ErrorInfo
-from app.pipeline.delivery.blocks import THINKING, TOOL_USE, CompletedBlock
+from app.pipeline.delivery.blocks import THINKING, TOOL_USE, CompletedBlock, DeliveryUnit
 from app.pipeline.delivery.sse_source import SseEvent
 
 
@@ -91,9 +91,14 @@ class StreamFailure:
     origin: FailureOrigin
 
 
-class BlockAssembler(Protocol):
-    def push(self, event: SseEvent) -> tuple[CompletedBlock, ...]:
-        """Take one event; return blocks that just became complete."""
+class BlockAssembler[UnitT: DeliveryUnit = CompletedBlock](Protocol):
+    """Turns one upstream's events into whatever that leg delivers.
+
+    Generic over the unit since 2026-08-31. The translating legs produce `CompletedBlock`; the direct Responses leg produces a run of upstream's own events, because on that leg the client speaks upstream's dialect and there is nothing to translate. Both satisfy this, so `stream._deliver` reads one shape and needs no branch for which leg it is serving.
+    """
+
+    def push(self, event: SseEvent) -> tuple[UnitT, ...]:
+        """Take one event; return units that just became deliverable."""
         ...
 
     @property
@@ -108,6 +113,25 @@ class BlockAssembler(Protocol):
         `None` on every stream where neither has happened, which includes a stream that simply stopped — that is a different ending and `cut_mid_block` is what tells those apart.
 
         Until 2026-08-24 both assemblers logged an upstream failure event and returned nothing, so `terminal.seen` stayed false and the client received whatever the terminal-less path produces. Since the clean-EOF change of 2026-08-22 that path is a *successful-looking* ending, which made an upstream failure indistinguishable from a completed turn.
+        """
+        ...
+
+    def close(self) -> tuple[UnitT, ...]:
+        """Whatever this assembler is still holding that the ending may deliver.
+
+        `()` for the translating assemblers: what they hold is a half-built block, and `spec.md` §3 drops those at every ending — there is nothing an ending could legally take from them.
+
+        The direct passthrough holds something else. Its queue keeps whole, finished item groups behind an earlier item that never closed, and those are not half-built: dropping them threw away the entire response, upstream's own terminal included, whenever any item failed to close. `direct-passthrough/spec.md` §7.2's closing sequence says which of the held events go and which stay, and this is where the caller asks.
+        """
+        ...
+
+    @property
+    def queued_bytes(self) -> int:
+        """Bytes this assembler is holding that the delivery buffer cannot see.
+
+        `0` for the translating assemblers, and that is the pre-existing accounting rather than a claim they hold nothing: their drafts become blocks at the item's closing event and enter the buffer there, so the cap sees them from that point. A draft mid-item has never been counted and this change does not alter that.
+
+        The passthrough's queue is different in kind, which is why the field exists: an item that opens and does not close holds every later group behind it, and `spec.md` §8 names exactly those — "尚未 `done` 的原始事件队列、已完成但被 policy 扣住的事件组" — as the first thing the cap must count. Left uncounted, `buffer_cap_bytes` bounded nothing on this leg.
         """
         ...
 

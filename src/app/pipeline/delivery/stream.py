@@ -23,6 +23,7 @@ from app.pipeline.delivery.blocks import (
     CompletedBlock,
     DeliveryError,
     DeliverySession,
+    DeliveryUnit,
 )
 from app.pipeline.delivery.framing import OutboundFramer
 from app.pipeline.delivery.sse_source import SseEvent, encode_frame, read_events
@@ -69,7 +70,8 @@ class UpstreamSource:
 
 # What one replaced attempt hands over: a fresh byte stream, the marker naming its upstream side, and the fresh assembler and buffer that go with it. Nothing from the attempt it replaces travels with them — including the marker, so a tear recorded by the previous attempt's cannot be mistaken for this one's.
 # Declared here rather than beside the other contracts because it names `UpstreamSource`, and a forward reference in a `type` alias leaves the tuple partially unknown to the type checker — which then cannot see the unpack that consumes it.
-Attempt = tuple[AsyncIterator[bytes], UpstreamSource, BlockAssembler, BlockBuffer]
+# `Any` rather than a type parameter, and the invariant it gives up is real: a replacement must carry the same unit as the attempt it replaces. That is guaranteed at construction — `inference.py` builds the replacement from the same `assembler_for`/`delivery_buffer` pair as the first attempt — rather than here, because threading a parameter through `ReplaySupport` and its callback would put it in four signatures to say what one construction site already decides.
+Attempt = tuple[AsyncIterator[bytes], UpstreamSource, BlockAssembler[Any], BlockBuffer[Any]]
 
 
 
@@ -280,7 +282,7 @@ def _stream_error(category: ErrorCategory, message: str, *, code: str) -> ErrorI
 
 
 def _report_failure(
-    failure: StreamFailure, *, framer: OutboundFramer, passthrough: bool
+    failure: StreamFailure, *, framer: OutboundFramer[Any], passthrough: bool
 ) -> bytes:
     """The failure, in whichever terms this client can read.
 
@@ -295,14 +297,14 @@ def _report_failure(
     return framer.error(failure.info)
 
 
-async def stream_delivery(
+async def stream_delivery[UnitT: DeliveryUnit](
     chunks: AsyncIterator[bytes],
-    assembler: BlockAssembler,
+    assembler: BlockAssembler[UnitT],
     *,
     upstream: UpstreamSource,
-    buffer: BlockBuffer,
+    buffer: BlockBuffer[UnitT],
     settings: StreamSettings,
-    framer: OutboundFramer,
+    framer: OutboundFramer[UnitT],
     replay: ReplaySupport | None = None,
     continuation: ContinuationSupport | None = None,
     on_tear_after_terminal: Callable[[Exception], None] | None = None,
@@ -343,14 +345,14 @@ async def stream_delivery(
             last_write.at = loop.time()
 
 
-async def _deliver(
+async def _deliver[UnitT: DeliveryUnit](
     chunks: AsyncIterator[bytes],
-    assembler: BlockAssembler,
+    assembler: BlockAssembler[UnitT],
     *,
     upstream: UpstreamSource,
-    buffer: BlockBuffer,
+    buffer: BlockBuffer[UnitT],
     settings: StreamSettings,
-    framer: OutboundFramer,
+    framer: OutboundFramer[UnitT],
     last_write: _LastWrite,
     replay: ReplaySupport | None = None,
     continuation: ContinuationSupport | None = None,
@@ -381,6 +383,8 @@ async def _deliver(
                     if pull.event is not None:
                         # Assembled before any cue is answered. A pull that came back with an event has not shown that the event can be delivered: a malformed one makes the assembler raise right here, and that has to reach the caller ahead of a comment claiming everything is fine.
                         completed = assembler.push(pull.event)
+                        # The cap has to see what the assembler is holding too. On a passthrough leg an item that opens and never closes keeps every later group queued outside the buffer, and `direct-passthrough/spec.md` §8 names that queue as the first thing `buffer_cap_bytes` must bound — uncounted, the default 16MiB bounded nothing there.
+                        buffer.enforce_cap_over(assembler.queued_bytes)
                         for block in completed:
                             for chunk in _commit(
                                 session,
@@ -503,6 +507,12 @@ async def _deliver(
         )
         raise torn
 
+    # `direct-passthrough/spec.md` §7.2's closing sequence, asked of the assembler before the buffer is drained so that whatever it releases still passes through the policy. The translating assemblers answer with nothing — what they hold is a half-built block, which every ending drops. The passthrough answers with the finished groups its queue was holding behind an item that never closed, and those were previously abandoned along with upstream's own terminal: one unclosed item produced a 200 with zero bytes.
+    for held in assembler.close():
+        for chunk in _commit(session, held, framer, client_has_bytes.is_set()):
+            client_has_bytes.set()
+            yield chunk
+
     remaining = session.finish()
     if remaining and not client_has_bytes.is_set():
         # The held-back path needs the same preamble as the incremental one.
@@ -529,7 +539,11 @@ async def _deliver(
         # Nothing was ever committed downstream, so there is no started message to correct — the same case the legacy chain leaves to its caller (`render_error` there runs only `if session.frontier.message_start_accepted`). An upstream that produced no block and no terminal still leaves the client a 200 with an empty body; that is pre-existing behaviour on a path this slice does not touch, and widening it is a separate question from STR-04's flush.
         return
     if not terminal.seen:
-        if not assembler.cut_mid_block and settings.unterminated_stop_reason:
+        if (
+            not assembler.cut_mid_block
+            and settings.unterminated_stop_reason
+            and framer.synthesises_terminal
+        ):
             # Upstream closed cleanly *between* blocks. Every block it produced is whole and already delivered, so nothing the client holds is damaged — the only thing missing is upstream's own word for why it stopped, and an error frame answers that by calling a reply truncated when nothing was cut. Ruled 2026-08-22.
             #
             # The reason on the wire is a synthesis and stays configurable so that it is chosen rather than inherited: `client_delivery.unterminated_stream_stop_reason` carries it, defaults to upstream's own `incomplete`, and going empty puts this ending back to the error below. What it must not silently become is `end_turn` — that is what `framer.terminal` fills an empty reason with, and it would claim a turn upstream never claimed.
@@ -579,9 +593,9 @@ async def _deliver(
 
 def _hand_over(
     continuation: ContinuationSupport | None,
-    session: DeliverySession,
-    assembler: BlockAssembler,
-    framer: OutboundFramer,
+    session: DeliverySession[Any],
+    assembler: BlockAssembler[Any],
+    framer: OutboundFramer[Any],
     *,
     error: BaseException | None = None,
     stop_reason: str = "",
@@ -615,10 +629,10 @@ def _hand_over(
     return chunks
 
 
-def _commit(
-    session: DeliverySession,
-    block: CompletedBlock,
-    framer: OutboundFramer,
+def _commit[UnitT: DeliveryUnit](
+    session: DeliverySession[UnitT],
+    block: UnitT,
+    framer: OutboundFramer[UnitT],
     started: bool,
 ) -> list[bytes]:
     """Offer one block and frame whatever the buffer released."""

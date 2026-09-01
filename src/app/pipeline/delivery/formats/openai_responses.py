@@ -84,6 +84,35 @@ def _failure_words(kind: str, data: dict[str, Any]) -> tuple[str, str]:
     return _words(cast(dict[str, Any], nested) if isinstance(nested, dict) else {})
 
 
+def responses_failure_from(event: SseEvent) -> StreamFailure | None:
+    """Upstream's own failure event as a failure record, or `None` when this event is not one.
+
+    Module-level and shared, because **both legs of this dialect ask the same question**: the translating assembler asks it to stop pretending the turn succeeded, and the direct leg's passthrough asks it to replay upstream's own words. A second copy would be a second answer, and the first thing to drift would be the nested-versus-flat `error` shape that `_failure_words` exists to get right.
+
+    The log line lives here for the reason ruled 2026-08-22: a path we knowingly do not handle must still be logged, and it is still the only record an operator reads. `warning` rather than something quieter because the zero behind it is a **discriminating** zero — the same sweep over 134336 operations counted 64351 `response.completed`, so the measurement could see this class of event and found none. One arriving despite that is worth attention.
+    """
+    data = event.json()
+    kind = event.event or str(data.get("type", ""))
+    if kind not in _FAILURE_EVENTS:
+        return None
+    code, message = _failure_words(kind, data)
+    logger.warning("upstream sent %r mid-stream: code=%r message=%r", kind, code, message)
+    return StreamFailure(
+        origin=FailureOrigin.UPSTREAM_EVENT,
+        # Upstream's own event name, kept rather than normalised to `error`. `response.failed` and `response.cancelled` are different things to a client of that API, and a direct leg replays whichever arrived.
+        event=kind,
+        raw_data=event.data,
+        info=ErrorInfo(
+            category=ErrorCategory.UPSTREAM,
+            message=message or f"upstream sent {kind}",
+            status_code=STATUS_FOR_CATEGORY[ErrorCategory.UPSTREAM],
+            code=code or kind,
+            source_format=OPENAI_RESPONSES,
+            source_bytes=event.data.encode(),
+        ),
+    )
+
+
 def _json_arguments(value: object) -> str:
     """A tool call's arguments as the string the wire carries.
 
@@ -375,6 +404,11 @@ class ResponsesFramer:
             },
         ).encode()
 
+    @property
+    def synthesises_terminal(self) -> bool:
+        """Yes: this framer writes every frame the client sees, so it can honestly write the last one."""
+        return True
+
     def keepalive(self) -> bytes:
         """The same SSE comment the Anthropic leg uses.
 
@@ -436,6 +470,15 @@ class ResponsesAssembler:
     def terminal(self) -> Terminal:
         return self._terminal
 
+    def close(self) -> tuple[CompletedBlock, ...]:
+        """Nothing: what this assembler still holds is a half-built block, which every ending drops."""
+        return ()
+
+    @property
+    def queued_bytes(self) -> int:
+        """Zero, and see `BlockAssembler.queued_bytes` for why that is the pre-existing accounting."""
+        return 0
+
     @property
     def cut_mid_block(self) -> bool:
         """A draft still open, **or one upstream already told us it cut short**. See `BlockAssembler`.
@@ -473,31 +516,7 @@ class ResponsesAssembler:
             # Upstream said this turn failed, and since 2026-08-24 that is carried rather than logged and dropped.
             #
             # **The comment this replaces was already wrong.** It said the client received the same `incomplete_responses_stream` frame a tear produces, "and the two remain indistinguishable on the wire". After the clean-EOF change of 2026-08-22 that path stopped producing an error frame at all: the client got `response.incomplete` with `error: null` — a terminal event that reads as an orderly ending. An upstream failure was indistinguishable from success, not from a tear. `.dev/docs/error-envelope/spec.md` §3.5.
-            #
-            # The log line stays, for the reason ruled 2026-08-22: a path we knowingly do not handle must still be logged. It is no longer the only record, but it is still the only one an operator reads.
-            #
-            # `warning` rather than something quieter, because the zero in 第 4 条 is a **discriminating** zero: the same sweep over the same 134336 operations counted 64351 `response.completed`, so the measurement could see this class of event and did not find one. A frame that arrives despite that is worth an operator's attention, not a debug line. (The one way it could become routine is an upstream that ends cancelled turns this way; no path on this SSE leg does, and that is the condition to re-check if these ever start appearing in numbers.)
-            code, message = _failure_words(kind, data)
-            self._failure = StreamFailure(
-                origin=FailureOrigin.UPSTREAM_EVENT,
-                # Upstream's own event name, kept rather than normalised to `error`. `response.failed` and `response.cancelled` are different things to a client of that API, and a direct leg replays whichever arrived.
-                event=kind,
-                raw_data=event.data,
-                info=ErrorInfo(
-                    category=ErrorCategory.UPSTREAM,
-                    message=message or f"upstream sent {kind}",
-                    status_code=STATUS_FOR_CATEGORY[ErrorCategory.UPSTREAM],
-                    code=code or kind,
-                    source_format=OPENAI_RESPONSES,
-                    source_bytes=event.data.encode(),
-                ),
-            )
-            logger.warning(
-                "upstream sent %r mid-stream: code=%r message=%r",
-                kind,
-                code,
-                message,
-            )
+            self._failure = responses_failure_from(event)
             return ()
         return ()
 
@@ -664,29 +683,45 @@ class ResponsesAssembler:
         return (block,)
 
     def _read_terminal(self, kind: str, data: dict[str, Any]) -> None:
-        self._terminal.seen = True
-        raw = data.get("response")
-        response = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
-        usage = response.get("usage")
-        if isinstance(usage, dict):
-            self._terminal.usage = _anthropic_usage(cast(dict[str, Any], usage))
-            # Kept as it arrived, for the leg that has to report it back in upstream's own shape. See `Terminal.upstream_usage`.
-            self._terminal.upstream_usage = dict[str, Any](cast(dict[str, Any], usage))
-        if kind == "response.incomplete":
-            details = response.get("incomplete_details")
-            reason = ""
-            if isinstance(details, dict):
-                reason = str(cast(dict[str, Any], details).get("reason", ""))
-            # `.dev/docs/anthropic-responses-bridge/spec.md`: the output-token limit is max_tokens downstream. That one has an Anthropic spelling; nothing else does, so nothing else is translated.
-            #
-            # Everything upstream did not name `max_output_tokens` used to become `end_turn`, which reported a turn upstream had cut short as one it finished — the same defect `Terminal.stop_reason` was given an empty default to avoid, reintroduced one field further down. It is upstream's word that goes on the wire now, unmapped. Claude Code's own schema for this field is a nullable string with no enumeration and its readers compare against known values and skip the rest, so a word it does not know costs it nothing; a wrong word it does know costs a reader the truth.
-            #
-            # `"incomplete"` when upstream said the response was incomplete without saying why. That is still upstream's own word for it — the terminal event is `response.incomplete` and the response carries `status: "incomplete"` — and it keeps the one case with no reason out of `end_turn` as well. Leaving it empty would not: `stream_delivery` fills an empty reason with `end_turn`, which is right for a stream that ended cleanly and says nothing, and wrong here.
-            self._terminal.stop_reason = (
-                "max_tokens" if reason == "max_output_tokens" else reason or "incomplete"
-            )
-            return
-        self._terminal.stop_reason = TOOL_USE if self._saw_tool_call else "end_turn"
+        read_responses_terminal(kind, data, self._terminal, saw_tool_call=self._saw_tool_call)
+
+
+def read_responses_terminal(
+    kind: str, data: dict[str, Any], terminal: Terminal, *, saw_tool_call: bool
+) -> None:
+    """Fill in what upstream said when it finished.
+
+    Module-level and shared with the direct leg's passthrough for the same reason `responses_failure_from` is: both legs read the same terminal event for the same facts. The passthrough only ever *records* them — `spec.md` §6.3 requires upstream's own terminal to reach the client verbatim, so nothing here is derived back onto the wire, and this is the §10 side record.
+
+    `saw_tool_call` is the one fact the caller has to supply, because the two legs establish it differently: the translating assembler knows it built a tool-use block, and the passthrough knows an item asked the client to act (§7.1). Both mean the same thing to whoever reads the stop reason.
+
+    **The guard is here rather than at each call site**, and it was not here when this function was extracted. The translating assembler had it outside, in a `kind in {...}` branch; the passthrough leg then called this for *every* envelope event, so `response.created` set `seen=True` and `stop_reason="end_turn"` before upstream had said anything at all. Everything downstream that asks "did upstream finish" then answered yes: a torn stream broke out of the delivery loop as an orderly ending, no error frame was written, the exception was swallowed, and replay was never even asked. Measured across three endings; the leg reported a clean `ok` for each. Putting the guard in the shared function is what stops the third caller repeating it.
+    """
+    if kind not in {"response.completed", "response.incomplete"}:
+        return
+    terminal.seen = True
+    raw = data.get("response")
+    response = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+    usage = response.get("usage")
+    if isinstance(usage, dict):
+        terminal.usage = _anthropic_usage(cast(dict[str, Any], usage))
+        # Kept as it arrived, for the leg that has to report it back in upstream's own shape. See `Terminal.upstream_usage`.
+        terminal.upstream_usage = dict[str, Any](cast(dict[str, Any], usage))
+    if kind == "response.incomplete":
+        details = response.get("incomplete_details")
+        reason = ""
+        if isinstance(details, dict):
+            reason = str(cast(dict[str, Any], details).get("reason", ""))
+        # `.dev/docs/anthropic-responses-bridge/spec.md`: the output-token limit is max_tokens downstream. That one has an Anthropic spelling; nothing else does, so nothing else is translated.
+        #
+        # Everything upstream did not name `max_output_tokens` used to become `end_turn`, which reported a turn upstream had cut short as one it finished — the same defect `Terminal.stop_reason` was given an empty default to avoid, reintroduced one field further down. It is upstream's word that goes on the wire now, unmapped. Claude Code's own schema for this field is a nullable string with no enumeration and its readers compare against known values and skip the rest, so a word it does not know costs it nothing; a wrong word it does know costs a reader the truth.
+        #
+        # `"incomplete"` when upstream said the response was incomplete without saying why. That is still upstream's own word for it — the terminal event is `response.incomplete` and the response carries `status: "incomplete"` — and it keeps the one case with no reason out of `end_turn` as well. Leaving it empty would not: `stream_delivery` fills an empty reason with `end_turn`, which is right for a stream that ended cleanly and says nothing, and wrong here.
+        terminal.stop_reason = (
+            "max_tokens" if reason == "max_output_tokens" else reason or "incomplete"
+        )
+        return
+    terminal.stop_reason = TOOL_USE if saw_tool_call else "end_turn"
 
 
 def _upstream_cut_this_item_short(data: dict[str, Any]) -> bool:

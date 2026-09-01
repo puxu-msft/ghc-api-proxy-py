@@ -273,6 +273,11 @@ class AnthropicFramer:
     def error(self, info: ErrorInfo) -> bytes:
         return error_frame(info).encode()
 
+    @property
+    def synthesises_terminal(self) -> bool:
+        """Yes: this framer writes every frame the client sees, so it can honestly write the last one."""
+        return True
+
     def keepalive(self) -> bytes:
         return b": ping\n\n"
 
@@ -293,6 +298,15 @@ class AnthropicAssembler:
     def failure(self) -> StreamFailure | None:
         return self._failure
 
+    def close(self) -> tuple[CompletedBlock, ...]:
+        """Nothing: what this assembler still holds is a half-built block, which every ending drops."""
+        return ()
+
+    @property
+    def queued_bytes(self) -> int:
+        """Zero, and see `BlockAssembler.queued_bytes` for why that is the pre-existing accounting."""
+        return 0
+
     @property
     def cut_mid_block(self) -> bool:
         """A draft still open means the events stopped part-way through a block. See `BlockAssembler`."""
@@ -310,42 +324,14 @@ class AnthropicAssembler:
             return ()
         if kind == "content_block_stop":
             return self._close(data)
-        if kind == "message_delta":
-            self._read_terminal(data)
-            return ()
-        if kind == "message_stop":
-            self._terminal.seen = True
+        if kind in {"message_delta", "message_stop"}:
+            read_anthropic_terminal(event, self._terminal)
             return ()
         if kind == "error":
             # Upstream said this turn failed, and since 2026-08-24 that is carried rather than logged and dropped.
             #
             # **The comment this replaces was already wrong when it was written, and wrong in the direction that mattered.** It said the client received the same `incomplete_responses_stream` frame a torn connection produces, "and the two remain indistinguishable on the wire". After the clean-EOF change of 2026-08-22 the terminal-less path stopped producing that frame: a stream that stopped at a block boundary got `message_delta` with a stop reason and then `message_stop`. So an upstream failure was not indistinguishable from a tear — it was indistinguishable from a **completed turn**. Measured across both legs; `.dev/docs/error-envelope/spec.md` §3.5.
-            #
-            # The log line stays. Ruled 2026-08-22: a path we knowingly do not handle must still be logged, because silence makes "this never happens" and "it happens and we cannot tell" the same observation. It is no longer the only record — the client gets one now too — but it is still the only one an operator reads.
-            #
-            # The shape is `{"type": "error", "error": {"type", "message"}}`, from the reference implementation's own declaration; `kind` is read from the event line first, which is what keeps this reachable when upstream sends `event: error` with no `type` in the payload.
-            raw = data.get("error")
-            detail = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
-            spelled = str(detail.get("type", ""))
-            self._failure = StreamFailure(
-                origin=FailureOrigin.UPSTREAM_EVENT,
-                event="error",
-                # Upstream's payload as it arrived. A direct leg replays exactly this.
-                raw_data=event.data,
-                info=ErrorInfo(
-                    category=_category_of(spelled),
-                    message=str(detail.get("message", "")) or "upstream reported a failure",
-                    status_code=STATUS_FOR_CATEGORY[_category_of(spelled)],
-                    code=spelled or "upstream_error_event",
-                    source_format=ANTHROPIC_MESSAGES,
-                    source_bytes=event.data.encode(),
-                ),
-            )
-            logger.warning(
-                "upstream sent an error event mid-stream: type=%r message=%r",
-                spelled,
-                detail.get("message", ""),
-            )
+            self._failure = anthropic_failure_from(event)
             return ()
         return ()
 
@@ -392,15 +378,67 @@ class AnthropicAssembler:
         self._terminal.record(block)
         return (block,)
 
-    def _read_terminal(self, data: dict[str, Any]) -> None:
-        raw = data.get("delta")
-        delta = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
-        reason = delta.get("stop_reason")
-        if isinstance(reason, str):
-            self._terminal.stop_reason = reason
-        usage = data.get("usage")
-        if isinstance(usage, dict):
-            self._terminal.usage = dict[str, Any](cast(dict[str, Any], usage))
+
+def anthropic_failure_from(event: SseEvent) -> StreamFailure | None:
+    """Upstream's own error event as a failure record, or `None` when this event is not one.
+
+    Module-level and shared with the direct leg's passthrough: the translating assembler asks this to stop pretending the turn succeeded, and the direct leg asks it to replay upstream's own words. A second copy would be a second answer.
+
+    The shape is `{"type": "error", "error": {"type", "message"}}`, from the reference implementation's own declaration. The event name is read first, which is what keeps this reachable when upstream sends `event: error` with no `type` in the payload.
+
+    The log line stays. Ruled 2026-08-22: a path we knowingly do not handle must still be logged, because silence makes "this never happens" and "it happens and we cannot tell" the same observation. It is no longer the only record — the client gets one too — but it is still the only one an operator reads.
+    """
+    data = event.json()
+    kind = event.event or str(data.get("type", ""))
+    if kind != "error":
+        return None
+    raw = data.get("error")
+    detail = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+    spelled = str(detail.get("type", ""))
+    logger.warning(
+        "upstream sent an error event mid-stream: type=%r message=%r",
+        spelled,
+        detail.get("message", ""),
+    )
+    return StreamFailure(
+        origin=FailureOrigin.UPSTREAM_EVENT,
+        event="error",
+        # Upstream's payload as it arrived. A direct leg replays exactly this.
+        raw_data=event.data,
+        info=ErrorInfo(
+            category=_category_of(spelled),
+            message=str(detail.get("message", "")) or "upstream reported a failure",
+            status_code=STATUS_FOR_CATEGORY[_category_of(spelled)],
+            code=spelled or "upstream_error_event",
+            source_format=ANTHROPIC_MESSAGES,
+            source_bytes=event.data.encode(),
+        ),
+    )
+
+
+def read_anthropic_terminal(event: SseEvent, terminal: Terminal) -> None:
+    """Fill in what upstream said when it finished.
+
+    Module-level and shared with the direct leg's passthrough, for the reason its Responses counterpart is: both legs read the same events for the same facts, and a second copy would be a second answer to what upstream's usage and stop reason are.
+
+    **This dialect splits its ending across two events**, which is why one function takes both. `message_delta` carries the stop reason and the usage; `message_stop` merely closes. A stream that lost only the second still told us why it stopped — which is why `seen` and `stop_reason` are set in different places and neither implies the other.
+    """
+    kind = event.event or str(event.json().get("type", ""))
+    data = event.json()
+    if kind == "message_stop":
+        terminal.seen = True
+        return
+    if kind != "message_delta":
+        return
+    raw = data.get("delta")
+    delta = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+    reason = delta.get("stop_reason")
+    if isinstance(reason, str):
+        terminal.stop_reason = reason
+    usage = data.get("usage")
+    if isinstance(usage, dict):
+        terminal.usage = dict[str, Any](cast(dict[str, Any], usage))
+
 
 
 def terminal_from_anthropic(
