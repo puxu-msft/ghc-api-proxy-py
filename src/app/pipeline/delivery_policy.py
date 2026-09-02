@@ -17,6 +17,7 @@ from app.pipeline.delivery.formats.anthropic_messages import (
 from app.pipeline.delivery.formats.openai_responses import ResponsesAssembler, ResponsesFramer
 from app.pipeline.delivery.formats.openai_responses_passthrough import (
     responses_passthrough_assembler,
+    stabilise_stream_ids,
 )
 from app.pipeline.delivery.framing import OutboundFramer
 from app.pipeline.delivery.passthrough import PassthroughFramer
@@ -96,7 +97,13 @@ def framer_for(
     if handled.route.inbound_format is WireFormat.OPENAI_RESPONSES:
         native = ResponsesFramer(response_id=message_id, model=model)
         # The passthrough writes upstream's own frames and delegates the two it still has to invent — an error and a keep-alive — to the very framer it replaces. Constructed either way so that delegate exists.
-        return PassthroughFramer(delegate=native) if carries_upstream_natively(handled) else native
+        if not carries_upstream_natively(handled):
+            return native
+        # Read here rather than carried in on a delivery setting, for the reason its Anthropic sibling below gives: which ids a Responses client can group by is a fact about that wire format. `None` when the switch is off, so the framer forwards upstream's bytes untouched and the reshape cannot become an unnamed default (`direct-passthrough/spec.md` §6.6).
+        reshape = (
+            stabilise_stream_ids if chain.config.hook_fix_responses_sse.fix_stream_ids else None
+        )
+        return PassthroughFramer(delegate=native, reshape=reshape)
     return AnthropicFramer(
         message_id=message_id,
         model=model,

@@ -3,6 +3,8 @@
 Skeleton-level: grouping, ordering and byte fidelity. Replay, buffering policies, headers and cap accounting are later steps and are not exercised here — see `.dev/docs/direct-passthrough/plan.md`.
 """
 
+from typing import Any
+
 import orjson
 import pytest
 
@@ -14,6 +16,7 @@ from app.pipeline.delivery.formats.openai_responses_passthrough import (
     RESPONSES_DIALECT,
     requires_client_action,
     responses_passthrough_assembler,
+    stabilise_stream_ids,
 )
 from app.pipeline.delivery.passthrough import PassthroughAssembler, PassthroughFramer, RawEventBatch
 from app.pipeline.delivery.sse_source import SseEvent, parse_frame
@@ -618,3 +621,157 @@ def test_the_cap_can_see_what_the_assembler_is_holding() -> None:
     assert assembler.queued_bytes > 200
     with pytest.raises(BufferCapExceeded):
         buffer.enforce_cap_over(assembler.queued_bytes)
+
+
+def stabilised(events: list[SseEvent]) -> list[dict[str, Any]]:
+    return [orjson.loads(e.data) for e in stabilise_stream_ids(tuple(events))]
+
+
+def drifting_item(index: int, item_id: str, *, seal: str | None = None) -> dict[str, Any]:
+    item: dict[str, Any] = {"type": "reasoning", "id": item_id, "summary": []}
+    if seal is not None:
+        item["encrypted_content"] = seal
+    return {"output_index": index, "item": item}
+
+
+def test_every_event_of_an_item_takes_the_id_its_closing_event_carried() -> None:
+    """`spec.md` §6.6. Copilot spells the same item differently on every event it appears in.
+
+    Measured 2026-09-02 over one real stream: ten distinct ids for a single `output_index`, and three distinct `response.id` values across the envelope. Codex renders such a stream's answer more than once, which is what this reshape exists to stop — while the leg without it forwards exactly what upstream sent, which is what `spec.md` §6.2 requires of anything called native.
+
+    Asserted on the *closing* id specifically, not merely on "all the same": stabilising onto the opening id would satisfy a same-ness assertion and is the one direction that breaks a seal.
+    """
+    events = [
+        SseEvent("response.output_item.added", orjson.dumps(drifting_item(0, "opened")).decode()),
+        SseEvent("response.output_text.delta", orjson.dumps({"output_index": 0, "item_id": "middle", "delta": "hi"}).decode()),
+        SseEvent("response.output_item.done", orjson.dumps(drifting_item(0, "closed")).decode()),
+    ]
+
+    added, delta, done = stabilised(events)
+
+    assert added["item"]["id"] == "closed"
+    assert delta["item_id"] == "closed"
+    assert done["item"]["id"] == "closed"
+
+
+def test_the_closing_event_is_not_touched_at_all() -> None:
+    """It carries the id everything else is moved onto, and the seal cut against that id.
+
+    Byte-for-byte rather than field-by-field, because this is the one event whose exact payload the client stores and replays. Verified the same way against both real captures.
+    """
+    done = SseEvent(
+        "response.output_item.done",
+        orjson.dumps(drifting_item(0, "closed", seal="the-real-seal")).decode(),
+    )
+
+    (result,) = stabilise_stream_ids((done,))
+
+    assert result.data == done.data
+
+
+def test_a_seal_whose_id_is_being_rewritten_goes_with_it() -> None:
+    """Upstream puts a partial seal on the opening event too, under that event's own id.
+
+    Measured 2026-09-02: 4,888 bytes on `added`, 5,032 on `done`, different ids. Rewriting the opening id while keeping its seal would hand the client exactly the pair upstream refuses — GitHub issue #4, manufactured here rather than inherited. The complete seal is on the closing event, which is untouched, so nothing the client needs is lost.
+    """
+    events = [
+        SseEvent("response.output_item.added", orjson.dumps(drifting_item(0, "opened", seal="partial")).decode()),
+        SseEvent("response.output_item.done", orjson.dumps(drifting_item(0, "closed", seal="complete")).decode()),
+    ]
+
+    added, done = stabilised(events)
+
+    assert added["item"]["id"] == "closed"
+    assert "encrypted_content" not in added["item"]
+    assert done["item"]["encrypted_content"] == "complete"
+
+
+def test_an_item_still_open_at_this_boundary_is_left_alone() -> None:
+    """Nothing to stabilise onto yet: its closing event is in a later batch, along with the rest of it.
+
+    §4 guarantees an item's events never straddle a release boundary, so this case is a batch that ends *before* the item opens — a control event run — rather than a torn item. Leaving it untouched is what keeps the reshape from inventing an id upstream never sent.
+    """
+    orphan = SseEvent(
+        "response.output_text.delta",
+        orjson.dumps({"output_index": 7, "item_id": "no-closing-event-here", "delta": "x"}).decode(),
+    )
+
+    (result,) = stabilise_stream_ids((orphan,))
+
+    assert result.data == orphan.data
+
+
+def test_the_envelope_settles_on_one_response_id_including_the_items_it_lists() -> None:
+    """Three ids for one response is what upstream sends; a client correlating on it sees three responses.
+
+    `response.completed` repeats the finished items positionally in `output`, so those ids are stabilised too — otherwise a client reading the turn off that array instead of off the item events would still see the drift, just somewhere harder to notice.
+    """
+    events = [
+        SseEvent("response.created", orjson.dumps({"response": {"id": "first"}}).decode()),
+        SseEvent("response.output_item.done", orjson.dumps(drifting_item(0, "closed")).decode()),
+        SseEvent(
+            "response.completed",
+            orjson.dumps({"response": {"id": "third", "output": [{"type": "reasoning", "id": "yet-another"}]}}).decode(),
+        ),
+    ]
+
+    created, _, completed = stabilised(events)
+
+    assert created["response"]["id"] == "first"
+    assert completed["response"]["id"] == "first"
+    assert completed["response"]["output"][0]["id"] == "closed"
+
+
+def test_nothing_is_added_dropped_or_reordered() -> None:
+    """The reshape edits ids. Everything else about the stream is upstream's, including its shape.
+
+    `sequence_number` in particular: it is upstream's own counter, and renumbering it would claim this proxy composed the stream. Asserted here rather than left to review because a reshape that starts tidying is how a named contract turns back into a translation.
+    """
+    events = [
+        SseEvent("response.created", orjson.dumps({"response": {"id": "r"}, "sequence_number": 0}).decode()),
+        SseEvent("response.output_item.added", orjson.dumps({**drifting_item(0, "opened"), "sequence_number": 1}).decode()),
+        SseEvent("response.output_item.done", orjson.dumps({**drifting_item(0, "closed"), "sequence_number": 2}).decode()),
+    ]
+
+    result = stabilise_stream_ids(tuple(events))
+
+    assert [e.event for e in result] == [e.event for e in events]
+    assert [orjson.loads(e.data)["sequence_number"] for e in result] == [0, 1, 2]
+
+
+def test_a_second_closing_event_for_one_item_is_recorded(caplog: pytest.LogCaptureFixture) -> None:
+    """The one upstream shape that can make a single-slot client render an answer twice.
+
+    Codex takes an item out of its slot on `response.output_item.done`; a second one for the same `output_index` finds the slot empty, synthesises a fresh started/completed pair, and renders the whole text again as ordinary content. Read from Codex 0.144.1's own source, not inferred — `.dev/docs/direct-passthrough/reports/260902-duplicate-delivery-hunt.md`, which reached this shape by exhausting 207 mutations of an upstream sequence: all 21 that reproduced the symptom were this one.
+
+    **The translating leg swallowed it and this leg forwards it**, so the change of behaviour is real and is `1fb37cd`'s. What is *not* established is that upstream ever sends it: every capture this project holds carries exactly one closing event per item, and the request log keeps no bodies. That is why this records rather than drops — dropping would change what a native leg promises (§2.1) on the strength of a guess, and one real session with this line in place settles it. `deferred.md` D-9.
+
+    Asserted on the log because the delivery is deliberately unchanged: the assertion that nothing else moved is the second half.
+    """
+    assembler = responses_passthrough_assembler()
+    closing = event("response.output_item.done", output_index=0, item={"id": "m", "type": "message"})
+
+    with caplog.at_level("WARNING"):
+        first = assembler.push(closing)
+        second = assembler.push(closing)
+
+    assert "closed output_index 0 twice" in caplog.text
+    # Still carried, both times. This leg does not decide what upstream may say.
+    assert [e for batch in first for e in batch.events] == [closing]
+    assert [e for batch in second for e in batch.events] == [closing]
+
+
+def test_one_closing_event_per_item_says_nothing(caplog: pytest.LogCaptureFixture) -> None:
+    """The control, and it is the half that makes the warning worth having.
+
+    A detector that fires on the ordinary stream tells an operator nothing and trains them to ignore it. This is the shape all three of the project's real recordings carry.
+    """
+    assembler = responses_passthrough_assembler()
+
+    with caplog.at_level("WARNING"):
+        assembler.push(event("response.output_item.added", output_index=0, item={"id": "m", "type": "message"}))
+        assembler.push(event("response.output_item.done", output_index=0, item={"id": "m", "type": "message"}))
+        assembler.push(event("response.output_item.added", output_index=1, item={"id": "n", "type": "message"}))
+        assembler.push(event("response.output_item.done", output_index=1, item={"id": "n", "type": "message"}))
+
+    assert caplog.text == ""

@@ -2689,6 +2689,8 @@ def test_a_sealed_reasoning_item_keeps_the_id_its_seal_was_cut_against() -> None
     **Two ways to break this, and the fixture has to see both.** Minting a fresh id is one. Collapsing upstream's two ids into one is the other, and it is not hypothetical: upstream spells the same item differently in `added` and `done`, so a leg that "stabilised" them would hand the client a `done` seal under the `added` id — the same mismatch by another route. `drifting_sealed_reasoning_sse` reproduces the cassette's drift so that both are visible; the stand-in the neighbouring tests use spells one id twice and can see only the first.
 
     Mutation-checked 2026-09-01: making `carries_upstream_natively` answer `False` turns the ids into `rs_<uuid4>_0` and this test red. That mutation exercises the mint, not the collapse — the collapse has no implementation to mutate, which is why the fixture rather than a mutation is what guards it.
+
+    **This is the shipped default**, and `fix_stream_ids` is what would break it — that reshape settles an item's events onto one id on purpose, so the companion below asserts the other contract over the same stream with the switch on.
     """
     client, _ = make_client(
         lambda _: httpx2.Response(
@@ -2713,6 +2715,39 @@ def test_a_sealed_reasoning_item_keeps_the_id_its_seal_was_cut_against() -> None
     opened = sealed["response.output_item.added"]
     closed = sealed["response.output_item.done"]
     assert (opened["id"], opened["encrypted_content"]) == ("id_002", "seal-opened"), opened
+    assert (closed["id"], closed["encrypted_content"]) == ("id_003", "seal-closed"), closed
+
+
+def test_the_opt_in_reshape_settles_drifting_ids_onto_the_closing_one() -> None:
+    """The same stream as above with `fix_stream_ids` asked for. `spec.md` §6.6.
+
+    Upstream spells one item differently on every event it appears in — measured 2026-09-02 over a real stream: ten distinct ids for a single `output_index`, three distinct `response.id`. The user named a client that checks those ids for continuity, so the reshape settles them.
+
+    **Asserted on the closing id, not on sameness.** Settling onto the *opening* id would satisfy "all ids equal" and would attach the closing seal to the opening id — GitHub issue #4 all over again, this time by our own hand. So the direction is the assertion, and the opening event's partial seal must be gone with the id it was cut against, while the closing event keeps both.
+    """
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200,
+            content=drifting_sealed_reasoning_sse(),
+            headers={"content-type": "text/event-stream"},
+        ),
+        overrides={"hook_fix_responses_sse": {"fix_stream_ids": True}},
+    )
+    response = client.post(
+        "/responses",
+        json={"model": "gpt-model", "input": [], "stream": True},
+    )
+
+    assert response.status_code == 200
+    sealed = {
+        name: payload["item"]
+        for name, payload in delivered_events(response.text)
+        if payload.get("item", {}).get("type") == "reasoning"
+    }
+    opened = sealed["response.output_item.added"]
+    closed = sealed["response.output_item.done"]
+    assert opened["id"] == "id_003", opened
+    assert "encrypted_content" not in opened, opened
     assert (closed["id"], closed["encrypted_content"]) == ("id_003", "seal-closed"), closed
 
 
