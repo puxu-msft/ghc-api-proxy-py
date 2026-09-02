@@ -118,3 +118,45 @@
 **射程**：今天不可达（续写按 inbound 格式门控，Responses 请求根本走不到这里），但它会在 D-5 落地的同一刻变成可达——所以它属于那项工作，不是它之后的清理。
 
 **出处**：用户 2026-09-01 裁决续写须在直连腿可用时顺带照出；文档指定与实现的差距见 [spec.md](spec.md) §2.8。
+
+## D-9　Codex 在直连腿上「结果重复输出」，成因未查明
+
+**状态**：**未闭合的缺陷调查**，不需要用户裁决——需要的是把成因找出来。
+
+**编号说明**：跳过 D-8。那个号曾短暂用于「已污染的客户端历史要不要剥离」，随即因归属错误移入 [spec.md](spec.md) §11 O-2 并删号；按本台账开头的规矩，**移走的号不补**。
+
+**症状**：用户 2026-09-02 报告，Codex CLI 经本代理 `/responses` 直连腿与 Copilot 对话时，同一段回答会重复输出。出现在 `1fb37cd`（该腿改为原生透传）之后；此前走翻译腿时正常。
+
+**已排除的解释，每条都有硬证据**：
+
+| 假设 | 结论 | 证据 |
+|---|---|---|
+| item id／`response.id` 漂移导致客户端拆分 item | **证伪** | Codex `0.144.1` 用单槽 `active_item`（`added` 置位、`done` 取走），其事件结构体不解析 `output_index`，delta 分支只取 `delta`，`response.completed` 只读 `{id, usage, end_turn}`。针对用户实际二进制的定向探针 8/8 命中、2/2 负控制落空 |
+| 客户端把 `output_text.delta` 与 `output_item.done` 各渲染一次 | **证伪** | 实测旧构建（翻译腿）同样发这两类事件，事件类型序列两边完全一致 |
+| `response.completed` 携带 `output` 数组导致二次渲染 | **证伪** | 新旧两边都带；且 Codex 不读该字段 |
+
+**出处**：[`reports/260902-codex-item-grouping-key.md`](reports/260902-codex-item-grouping-key.md)。
+
+**成因形状已定位，2026-09-02**（[`reports/260902-duplicate-delivery-hunt.md`](reports/260902-duplicate-delivery-hunt.md)）：
+
+**上游对同一个 `output_index` 发出第二个 `response.output_item.done`。** 穷举 207 个上游序列变异，能复现该症状的 21 个**无一例外**都是这一形状；其余路径逐事件计数确认每个上游事件恰好交付一次。
+
+**代理侧不是「发两遍」，是「不再过滤两遍」**——方向与我最初的猜测相反。翻译腿把「关闭一个从未打开的 item」当空操作吞掉（`openai_responses.py`），直连透传逐字转发（`passthrough.py`）。所以行为变化是真的，且确由 `1fb37cd` 引入。
+
+**Codex 侧机制已读源码核实**（非推断）：空槽收到 `done` → `stream_events_utils.rs` 补发 started+completed → `streaming.rs` 的 `finalize_completed_assistant_message` 第二次被调用时 `stream_controller` 已被 `take()`，于是把全文当普通内容再渲染一遍。
+
+**最小复现**：普通 Responses 流，把最后那个 `output_item.done` 帧原样再发一遍。直连腿渲染两次，翻译腿一次。**与缓冲策略无关**。
+
+**证据缺口，不掩饰**：**无法证明上游真的会这么发。** 三份真实录音各只有一次闭合事件；历史库自 2026-08-15 起不再存 frame；代理请求日志不含 body。所以触发条件里「上游重复发 `done`」这一条**未取证**，另两条（直连腿、单槽客户端）已知成立。
+
+**已落地的处置：只观测，不动行为**（`e1d6676`）。`PassthroughAssembler` 本就维护着 `_closed`，「对已关闭的 `output_index` 再收到闭合事件」是一行可判的谓词，此前静默通过；现在记一条 warning。**为什么不直接丢弃那个重复事件**：丢弃会改变 native 腿的对外承诺（§2.1，正是这条腿存在的理由），而支撑它的只是一个未取证的猜测；一条日志零行为改动，且**一次真实会话即可判定**。
+
+**下一步（等一次真实观测）**：用户下次用 Codex 跑一轮，若日志出现 `closed output_index N twice`，则触发条件三条齐备，此时再按 Spec 决定要不要过滤——**那是一次对外承诺的修改，须先改 Spec 并交用户裁定**。若始终不出现，则本条结论被证伪，须重开调查。
+
+**已排除并记下的四条**（省得重走）：`synthesises_terminal` 的腿间分歧、Codex 解析 `ResponseCompleted.usage` 失败、replay 重发已交付事件、`until-tool-use` 双重释放。
+
+**另一条便宜的可证伪实验**：只统一 `output_text.delta` 的 `item_id` 而不动 `added`／`done`，Codex 行为应当**零变化**——若观察到变化，说明对其解析器的理解仍有缺口。`b8fe245` 的 `fix_stream_ids` 合并后可直接做。
+
+**为什么这条不是 §6.6**：§6.6 的 `fix_stream_ids` 服务的是 `@ai-sdk/openai`（D-3），与本条无关。**当时把两者接在一起是一次错误归因**，已在 §6.6 开头的警示框里更正。
+
+**未核**：Codex 的 app-server IPC 转发层（`bespoke_event_handling.rs`）未逐行核查；上述结论只覆盖 assistant 文本路径，reasoning 与 tool call 的语义不同；全部来自源码阅读与字面量探针，非运行时观测。
