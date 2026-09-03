@@ -1,6 +1,7 @@
 # Effort translation 实施计划评审处置
 
 - status：closed
+- scope：本文件只记录实施前的plan评审；原“下一步”已执行，current implementation／code review终态见[代码评审处置](review-disposition-effort-translation-code.md)
 - source_reports：[R1](reports/260903-review-effort-translation-plan.md)；[R2](reports/260903-review-effort-translation-plan-r2.md)；[R3](reports/260903-review-effort-translation-plan-r3.md)；[R4](reports/260903-review-effort-translation-plan-r4.md)；[R5](reports/260903-review-effort-translation-plan-r5.md)
 - received_at：2026-09-03
 - R1 counts：blocker=0，major=6，minor=0，nit=0，finding_total=6；verified=yes
@@ -43,13 +44,13 @@
 - 支撑动作／结论：采纳M1～M6并重写实施计划，复评后才执行。
 - 若前提为假：对应计划重排与新增步骤会失去依据。逐项读取当前源码、计划、Spec和pytest命令后，六项均已确认；没有暂定驳回。
 
-## 下一步
+## 后续执行结果
 
-1. 提交plan／Implementation／报告／处置账。
-2. 进入保留的effort code worktree，按plan Task 1开始实现。
+1. Plan／Implementation／报告／处置账已提交，plan正文保留为执行配方并在顶部记录最终状态与实际偏离。
+2. Tasks 1～5已从保留的effort worktree完成；生产代码经逐Task review、whole-branch review、唯一fix wave与scoped R2，reviewed source已归档且净语义进入main。Current证据见[Implementation](implementation.md)与[代码评审处置](review-disposition-effort-translation-code.md)。
 
 ## Closeout
 
 - consensus：R5给出0 blocker／0 major／0 minor／0 nit；全部有效finding均为`adopted`，无`open`、无`disputed`、无待回应标注。
 - authority：实现行为回到current Spec；执行顺序与接口回到[plan-effort-translation.md](plan-effort-translation.md)；本处置账只记录计划评审结论。
-- not proved：production implementation尚未开始，计划pass不证明任何代码、wire、配置或测试已实现。
+- evidence boundary：本轮plan pass在当时不证明任何代码、wire、配置或测试已实现；后续实现证据由[代码评审处置](review-disposition-effort-translation-code.md)独立承载，不能反向扩大本轮R5的评审范围。

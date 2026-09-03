@@ -374,13 +374,16 @@ Raw capture的provenance图固定为：真实upstream是producer→独立raw HTT
 
 这些路径目前只是验收资产规划，不代表文件已经存在或 gate 已执行。
 
-## 当前实现映射与尚未执行项
+## 当前实现映射与仍未执行范围
 
-oracle 写完后仅为判断自动化落点读取了当前实现。以下事实不改变 oracle，也不是产品通过证据：
+以下映射按`main@4b7d74f`重读，只说明验收应落在哪些真实接缝，不改变上面的oracle，也不把局部实现／测试外推为完整产品通过：
 
-- `src/app/routes/anthropic.py` 当前将 upstream nonstream body 与 stream raw bytes直接返回，适合作为未来 HTTP route-level gate 的入口，但它本身不能证明 Responses→Anthropic 转换或 block buffering。
-- `src/app/pipeline/executor.py` 当前集中持有 Anthropic hooks、approval、retry attempts 与 History，适合作为单一 lifecycle owner 的测试接缝。
-- `src/app/streaming/buffered_retry.py` 当前只提供整流 `collect_with_limit()`，其被测对象不是完整 content block；不得用其存在性替代 block-level commit gate。
-- `src/app/routes/responses_ws.py` 当前拥有原生 Responses WS route 的独立 approval／History；Anthropic bridge 若使用 WS upstream，验收必须证明它只复用 transport client，而不复用这条 route lifecycle。
+- `src/app/server/routes/inference.py` 是真实ASGI inference入口，负责把pipeline outcome接入buffered或block-level delivery，并在首块前失败时通过`_reopen()`打开transparent replay。
+- `src/app/pipeline/driver.py` 与`src/app/pipeline/routing.py`共同持有route、request shaping、translation调用、upstream attempt与count入口；send／count的request-level语义一致性应从这里进入验证。
+- `src/app/pipeline/translation_driver/anthropic_messages.py`、`openai_responses.py`与`semantic.py`是双向request／response语义转换接缝；`reasoning.py`与`reasoning_carrier.py`分别持有effort对齐和跨轮reasoning carrier。
+- `src/app/pipeline/delivery/`持有SSE source、assembler、完整block commit、framing、passthrough与error终态；不得再用`src/app/streaming/buffered_retry.py`中只面向整流收集的helper替代block-level gate。
+- `src/app/observability/request_trace.py`、request log与History subscribers承接attempt、conversion、terminal和持久记录；生命周期验收必须从真实route观察这些聚合记录，不另建第二owner。
+- 当前没有`src/app/routes/responses_ws.py`或独立Responses WS route。若未来Anthropic bridge选择WS upstream，仍须先实现transport并证明只复用transport client、不复制route lifecycle；上文WS验收资产规划目前保持未实现。
+- 已实现主路径由`tests/int/test_pipeline_app.py`、`tests/unit/pipeline/translation_driver/`、`tests/unit/pipeline/delivery/`及`tests/int/recorded/`覆盖。本轮request-level effort切片在reviewed source上执行full Ruff、full Pyright与2183项pytest，并用一次授权的PONG＋gpt-5.5＋explicit-high cassette校准该真实场景；这不关闭完整REQ-05B、全部自动化资产规划、其它model／effort、真实WS upstream或完整bridge Acceptance。
 
-本次没有运行候选实现测试、mutation 或真 upstream PoC。原因不是成本或 YAGNI，而是本次唯一授权产物是本规范，且尚未指定已实现的 bridge 候选与可写验证资产位置。上述全部 oracle 均保留为必需项，没有因当前代码尚缺接缝而删除或降级。
+`tests/acceptance/`下的职责拆分仍是规划，不因本轮已有unit／integration／recorded tests而冒充已经存在。后续实现上述未覆盖oracle时，应复用当前真实入口与测试基础设施，不按本节已删除的旧路径建立第二套harness。

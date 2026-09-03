@@ -1,6 +1,7 @@
 # Effort translation Spec 评审处置
 
 - status：closed
+- scope：本文件只记录实施前的Spec评审；原“下一步”已执行，current implementation／code review终态见[代码评审处置](review-disposition-effort-translation-code.md)
 - source_reports：[R1](reports/260903-review-effort-translation-spec.md)；[R2](reports/260903-review-effort-translation-spec-r2.md)；[R3](reports/260903-review-effort-translation-spec-r3.md)；[R4](reports/260903-review-effort-translation-spec-r4.md)
 - received_at：2026-09-03
 - R1 counts：blocker=0，major=6，minor=0，nit=0；verified=yes
@@ -42,13 +43,13 @@
 - 支撑动作／结论：采用 M01～M06 并修订 current Spec、Acceptance、Implementation。
 - 若前提为假：M01 的官方／compatibility 分界及 M05／M06 的同步修订会失去依据，文档不应据此更改。独立读取官方 Effort／Messages／Extended thinking、报告绑定hash、当前CAL-04和Implementation restatement后，前提均已确认；M01 的兼容保留和 M04 的控制粒度是协调者判断，须交原 reviewer 明确复评。
 
-## 下一步
+## 后续执行结果
 
-1. 用户审阅current Spec、Acceptance与本处置结论。
-2. 用户审阅通过后调用`writing-plans`，从保留的effort worktree实施；生产代码验收另起代码review，不复用本轮文档pass。
+1. 用户已审阅并批准当时的current Spec；实施计划随后形成并经独立R5以0 findings关闭。
+2. Tasks 1～5已从保留的effort worktree实施，生产代码另经逐Task review、whole-branch review、唯一fix wave与scoped R2，不复用本轮文档pass；reviewed source已归档且净语义进入main。Current证据见[Implementation](implementation.md)与[代码评审处置](review-disposition-effort-translation-code.md)。
 
 ## Closeout
 
 - consensus：R4对R3-M01／R3-M02及其合并来源给出0 blocker／0 major／0 minor／0 nit；全部有效finding均为`adopted`或无可处置正文的`no_change_needed`，无`open`、无`disputed`、无待回应标注。
 - current authority：[spec.md](spec.md)；Acceptance只转录判据，Implementation只报告实现状态；本处置账只记录本轮评审结论。
-- not proved：生产实现尚未开始，本轮文档pass不证明任一路由、wire、配置或测试已经实现。
+- evidence boundary：本轮文档pass在当时不证明任一路由、wire、配置或测试已经实现；后续实现证据由[代码评审处置](review-disposition-effort-translation-code.md)独立承载，不能反向扩大本轮R4的评审范围。
