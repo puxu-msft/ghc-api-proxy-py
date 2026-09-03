@@ -1,6 +1,6 @@
 # HTTP 408 后长期请求修复状态
 
-状态：implemented，等待 development-record closeout。
+状态：completed。
 
 行为权威见 `spec.md`；用户控制的需求来源见 `../../../docs/.human-controlled/upstream-retry-and-continuation.md`。
 
@@ -18,7 +18,7 @@ HTTP 408 是另一层：GitHub Copilot 返回 `408 user_request_timeout`，messa
 
 ## 已实现
 
-`main` commit `33cf387` 在请求体完整读取后并行运行 dispatch 与 Uvicorn disconnect listener；disconnect 会取消整个 dispatch，且 retry loop 不再把被 cleanup wrapper 替换的 cancellation 当成可重试失败。
+2026-09-04 的 mainline commit `fix: cancel upstream work after client disconnect` 在请求体完整读取后并行运行 dispatch 与 Uvicorn disconnect listener；disconnect 会取消整个 dispatch，且 retry loop 不再把被 cleanup wrapper 替换的 cancellation 当成可重试失败。
 
 DirectDriver 在 handoff 前持续持有 provider Response；429/status rejection、subscriber failure/retry、AnyIO level cancellation、deadline、listener failure、helper outer cancellation和 close failure均通过统一 owner cleanup。`finish_async_cleanup()` 在独立 task 中完成释放；异常优先级、residual ExceptionGroup metadata 与完整异常图无环均有回归测试。
 
@@ -26,7 +26,7 @@ DirectDriver 在 handoff 前持续持有 provider Response；429/status rejectio
 
 ## 验证
 
-Reviewed source：`archive/260904-timeout-408-disconnect` 指向 `a565bbb`；mainline squash：`33cf387`。两者六个 owned paths 的 blob 逐一相同。
+Reviewed source 由稳定 archive `archive/260904-timeout-408-disconnect` 保存；2026-09-04 mainline squash 的主题为 `fix: cancel upstream work after client disconnect`。两者六个 owned paths 的 blob 逐一相同。
 
 Integration worktree 基于包含后续 HTTP 499 提交的 `main`，执行：
 
@@ -51,3 +51,13 @@ uv run --frozen pytest tests --cov=app --cov-report=term --cov-fail-under=80
 - 只改 TUI，把长时条目隐藏或定时 reap：会丢掉仍在运行的真实请求，并继续消耗上游资源。
 - 新增通用 retry backoff：可能缓和请求风暴，但不关闭无人消费的旧 task，且属于独立策略变更。
 - 为任意 ASGI receive wrapper 新建跨阶段 relay：当前固定 Uvicorn H1 拓扑没有该触发条件；已记录明确重开条件，不以未来假设扩大本次实现。
+
+## 收尾
+
+开发记录已通过最终独立评审并提交到 local `dotdev`，提交主题为 `docs: record timeout 408 investigation`；没有推送。
+
+Feature 与 integration worktree均干净，reviewed source有稳定 archive，main已装位相同语义。本轮未为不可逆删除取得独立 manifest 评审许可，因此两棵 worktree及其分支终态选择 `keep`，不删除。
+
+`$CLAUDE_JOB_DIR/tmp/CLOSEOUT.md` 记录 job scratch 的双方法枚举与逐类处置。本轮零删除，临时对象等待 harness 自动过期。
+
+主工作树中与本任务无关的 translation、lockfile、tool-choice probe等并行 WIP保持原样；未暂存、提交、覆盖或清理这些路径。未推送 main/archive/dotdev，未重启、停止或 signal 端口 4141 的服务。
