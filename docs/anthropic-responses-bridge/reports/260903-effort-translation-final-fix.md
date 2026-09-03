@@ -1,6 +1,6 @@
 # Effort translation final fix wave 报告
 
-> 本文件由coordinator从implementer `a5185013ca013ad2d`在job tmp中的报告完整转录；末尾追加controller squash integration事实。
+> 本文件由coordinator基于implementer `a5185013ca013ad2d`在job tmp中的报告做内容转录，并归一化中英文间距与标点排版；它不是byte-verbatim original。末尾另行追加controller squash integration事实；原始报告保留在`$CLAUDE_JOB_DIR/tmp/final-fix-report-agent.md`等待harness自然过期。
 
 ## Identity
 
@@ -86,7 +86,7 @@ Responses same-format nested residual现在包含stale`reasoning.effort="low"`�
 
 ## Concerns
 
-- 按唯一fix-wave implementer约束，本轮禁止派subagent，因此没有实施后的独立reviewer verdict；本报告与commit交由coordinator复核并squash集成，当前状态不冒充已集成终态。
+- 按用户对唯一fix-wave implementer的约束，本轮禁止派subagent，因此没有实施后的独立reviewer verdict；本报告与commit交由coordinator复核并squash集成，当前状态不冒充已集成终态。
 - 受控变异快照`/tmp/a518-driver-before-old-bug-mutation.py`与commit message文件`/tmp/a518-final-fix-commit-message.txt`未删除；没有独立manifest review时不执行不可逆清理。
 - 本轮没有已知的code／test／docstring未闭合项。
 - `F-MAJ-2`的Spec／Acceptance修订不在本轮范围，未编辑`.dev`，由coordinator处理。

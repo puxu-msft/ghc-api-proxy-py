@@ -12,7 +12,7 @@
 - `main@4b7d74f`以一个whole-feature squash交付双向effort翻译：target Anthropic thinking profiles、统一`ThinkingEffortIntent`、Anthropic→Responses与Responses→Anthropic effort mapping、逐消息effort、nested residual、send／count、profile facts持久化、live recorder修复与explicit-high cassette。
 - Reviewed source由`archive/260903-effort-translation@ed6addd`精确保留；`worktree-effort-translation@ed6addd`保持clean并继续保留。Main squash与reviewed source的完整tree OID同为`4c71bc029e6ad5cef001c2e874f9930039604bcd`，`git diff 4b7d74f ed6addd`为空。
 - 用户可摘取的配置说明位于`.dev/human-controlled-docs-candidates/effort-thinking-profiles-config-example.md`；它明确标为无效力候选，未修改`docs/.human-controlled/`。
-- `.dev`中的Spec、Acceptance、Implementation、terminal plan、三份review disposition及23份截至R2的评审／实施报告已提交；本closeout另外归档session harvest与终态报告。
+- `.dev`中的Spec、Acceptance、Implementation、terminal plan、三份review disposition及23份截至R2的评审／实施报告已提交；本closeout另外归档session harvest与closeout draft。
 
 ## 2. 验证与证据边界
 
@@ -43,7 +43,7 @@
 - Spec与plan disposition原“下一步”已改为“后续执行结果”，保留其实施前review范围，不把后续代码证据反向塞进旧R4／R5 verdict。
 - Acceptance原“当前实现映射”引用已不存在的`src/app/routes/anthropic.py`、`pipeline/executor.py`与`routes/responses_ws.py`，已按main重写为`server/routes/inference.py`、`pipeline/driver.py`、`translation_driver/`、`pipeline/delivery/`与真实tests；整体bridge继续`UNVERIFIED`。
 - Point-in-time reports中的旧HEAD、FAIL、pending与较小test count不回写；final R2、code disposition与Implementation明确接管current结论。
-- 正控`rg --fixed-strings 'main@4b7d74f'`命中Implementation、terminal plan、code disposition与candidate四个living carriers；旧`Task 5 WIP`、`task review pending`、`scoped re-review pending`、`full suite pending`、`main integration pending`、`尚待final scoped review`、`尚未squash进入main`扫描在这些living carriers中无命中。
+- Closeout R1指出初轮状态扫描只覆盖狭窄pending短语，漏过Implementation中的“活动／正在关闭／再进入实现／先实施”同义残留，故初轮“living carriers已同步”结论撤销。修正后以`Effort Tasks 1～5已review、full verify并进入main`为正控命中Implementation current表，再把上述同义词与原pending patterns一起扫描Implementation、terminal plan、三份disposition和candidate，结果无命中；point-in-time reports继续排除在清零范围外。
 
 ## 5. 临时态与保留策略
 
@@ -103,3 +103,13 @@
 ## 10. Closeout review contract
 
 Fresh reviewer必须独立核：交付commit／archive／tree equality；full verification与R2边界；living docs current状态；session harvest是否足以承接未采用路线与临时对象；memory删除两目标是否没有独有事实；保留对象／用户WIP／负空间是否忠实；本报告是否存在遗漏或过度声称。只有0 blocker／0 major且给出memory deletion manifest正面回执后，才执行两项memory处置。执行后更新本报告为terminal并做一次scoped re-review；在那之前不发完成信号。
+
+## 11. Closeout R1处置
+
+[独立closeout R1](260903-review-effort-translation-closeout.md)给出0 blocker／1 major／1 minor／1 nit；memory deletion manifest的两项精确target与接收者已独立枚举，`MEMORY_DELETION: APPROVED`，但合取门因major尚未关闭而没有执行删除。
+
+- `ETC-MAJ-01`：采纳。Implementation标题改为已完成切片，中后段Spec／Acceptance／本文三行改为review已关闭、main已装位、effort无后续实施动作；扩展状态扫描覆盖R1指出的同义残留并撤销初轮过强结论。
+- `ETC-MIN-02`：采纳。Final-fix持久报告明确它是内容转录并做排版归一化，不再声称byte-verbatim；恢复“用户对唯一fix-wave implementer的约束”这一authority限定，原始job报告继续保留到harness自然过期。
+- `ETC-NIT-03`：采纳。Review关闭前把自称的“终态报告”改为“closeout draft”；只有memory实际处置和scoped re-review完成后才统一terminal状态。
+
+当前状态仍是`draft-awaiting-closeout-review`。下一步只允许原closeout reviewer对这三项fix及相邻status闭包做scoped R2；R2关闭major前不执行memory删除、不标Task completed、不发完成信号。
