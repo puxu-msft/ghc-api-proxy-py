@@ -33,6 +33,7 @@
 - Modify: `src/app/core/chain.py:29-53`
 - Modify: `src/app/pipeline/routing.py:371-379`
 - Modify: `src/app/server/composition.py:526-575`
+- Modify: `src/app/pipeline/driver.py:157-163,274-280`
 - Modify: `src/app/pipeline/translation_driver/reasoning.py`
 - Modify: `src/app/pipeline/translation_driver/semantic.py:104-117`
 - Test: `tests/unit/config/test_config_schema.py`
@@ -155,6 +156,8 @@ thinking_profile_pattern: str = ""
 
 `Chain`新增`thinking_profiles: CompiledThinkingProfiles = ()`；`build_chain()`调用`compile_thinking_profiles(config.model_translation.to_anthropic_messages.thinking_profiles)`；`translation_target(provider, model_id, thinking_profiles)`选择最后命中profile并保留pattern。`handle()`与`handle_count_tokens()`都传同一`chain.thinking_profiles`。
 
+**执行时Ruling（2026-09-03）**：原Files／Step 8 pathspec漏列`src/app/pipeline/driver.py`，却在本Step明确要求修改它。该文件归入Task 1，范围只限上述两处profile参数接线；Task 2的source-header逻辑仍由Task 2实现。
+
 - [ ] **Step 5: 运行直接配置探针**
 
 Run:
@@ -219,8 +222,8 @@ Expected: targeted tests、Ruff、Pyright全部通过；这只证明profile配�
 只暂存本Task路径。先用Write创建`$CLAUDE_JOB_DIR/tmp/commit-effort-profile.txt`，内容为`feat: configure Anthropic thinking profiles`，再执行：
 
 ```bash
-git add -- src/app/config/schema.py src/app/config/bundled-config.yaml src/app/core/chain.py src/app/pipeline/routing.py src/app/server/composition.py src/app/pipeline/translation_driver/reasoning.py src/app/pipeline/translation_driver/semantic.py tests/unit/config/test_config_schema.py tests/unit/config/test_config_loading.py tests/unit/pipeline/translation_driver/test_reasoning.py tests/int/test_pipeline_app.py
-git commit -F "$CLAUDE_JOB_DIR/tmp/commit-effort-profile.txt" -- src/app/config/schema.py src/app/config/bundled-config.yaml src/app/core/chain.py src/app/pipeline/routing.py src/app/server/composition.py src/app/pipeline/translation_driver/reasoning.py src/app/pipeline/translation_driver/semantic.py tests/unit/config/test_config_schema.py tests/unit/config/test_config_loading.py tests/unit/pipeline/translation_driver/test_reasoning.py tests/int/test_pipeline_app.py
+git add -- src/app/config/schema.py src/app/config/bundled-config.yaml src/app/core/chain.py src/app/pipeline/routing.py src/app/server/composition.py src/app/pipeline/driver.py src/app/pipeline/translation_driver/reasoning.py src/app/pipeline/translation_driver/semantic.py tests/unit/config/test_config_schema.py tests/unit/config/test_config_loading.py tests/unit/pipeline/translation_driver/test_reasoning.py tests/int/test_pipeline_app.py
+git commit -F "$CLAUDE_JOB_DIR/tmp/commit-effort-profile.txt" -- src/app/config/schema.py src/app/config/bundled-config.yaml src/app/core/chain.py src/app/pipeline/routing.py src/app/server/composition.py src/app/pipeline/driver.py src/app/pipeline/translation_driver/reasoning.py src/app/pipeline/translation_driver/semantic.py tests/unit/config/test_config_schema.py tests/unit/config/test_config_loading.py tests/unit/pipeline/translation_driver/test_reasoning.py tests/int/test_pipeline_app.py
 ```
 
 ### Task 2: 建立`ThinkingEffortIntent`、source context与nested residual
