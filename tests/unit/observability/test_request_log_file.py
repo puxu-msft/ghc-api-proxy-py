@@ -79,12 +79,12 @@ def test_a_successful_request_writes_one_complete_structured_record(tmp_path: Pa
         first_upstream_byte_s=0.42,
         upstream_max_gap_s=6.5,
         upstream_chunks=214,
-        bytes_in=1783221,
+        upstream_request_body_bytes=1783221,
         upstream_conn={"local": "172.19.141.235:56822", "peer": "140.82.116.5:443", "alpn": "h2", "stream_id": 7},
     )
     trace.absorb(terminal)
 
-    log_completion(_chain(), trace, 200, bytes_out=2153)
+    log_completion(_chain(), trace, 200, upstream_response_body_bytes=2153)
 
     record = _only_record(tmp_path)
     assert set(record) == {
@@ -190,7 +190,7 @@ def test_a_failed_request_keeps_detail_and_reports_no_terminal(tmp_path: Path, m
         terminal_seen=False,
     )
 
-    log_completion(_chain(), trace, 200, bytes_out=trace.received)
+    log_completion(_chain(), trace, 200, upstream_response_body_bytes=trace.received)
 
     record = _only_record(tmp_path)
     assert record["status"] == "fail"
@@ -208,10 +208,67 @@ def test_a_write_failure_does_not_interrupt_request_completion(tmp_path: Path, m
     monkeypatch.setattr(request_log_file, "user_data_path", lambda: tmp_path / "nope" / "\0bad")
     trace = RequestTrace(method="POST", path="/v1/messages", started=time.monotonic(), started_at="2026-08-20T15:01:53.580Z")
 
-    log_completion(_chain(), trace, 200, bytes_out=0)
+    log_completion(_chain(), trace, 200, upstream_response_body_bytes=0)
 
     assert len(emitted) == 1
     assert emitted[0][1] == "ok"
+
+
+def test_finalized_writer_rejects_non_json_values_instead_of_stringifying_them(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    result = request_log_file.write_finalized_record(
+        cast(Any, {"schema_version": 2, "bad": object()})
+    )
+
+    assert result is None
+    paths = list((tmp_path / "requests").glob("requests-*.jsonl"))
+    assert len(paths) == 1
+    assert paths[0].read_text(encoding="utf-8") == ""
+    assert "could not keep the finalized request record" in caplog.text
+
+
+def test_finalized_writer_round_trips_arbitrary_precision_provider_integers(
+    tmp_path: Path,
+) -> None:
+    value = 10**100
+    record = cast(
+        Any,
+        {
+            "schema_version": 2,
+            "observation": {
+                "response": {
+                    "usage": {
+                        "normalized": {"input_tokens": value},
+                        "raw": {
+                            "availability": "observed",
+                            "value": {"input_tokens": value},
+                        },
+                        "exact": {"upstream_input_tokens": value},
+                    },
+                    "provider_usage": {
+                        "availability": "observed",
+                        "value": {"opaque": value},
+                    },
+                }
+            },
+        },
+    )
+
+    path = request_log_file.write_finalized_record(record)
+
+    assert path is not None
+    restored = _only_record(tmp_path)
+    response = restored["observation"]["response"]
+    observed = (
+        response["usage"]["normalized"]["input_tokens"],
+        response["usage"]["raw"]["value"]["input_tokens"],
+        response["usage"]["exact"]["upstream_input_tokens"],
+        response["provider_usage"]["value"]["opaque"],
+    )
+    assert all(type(item) is int for item in observed)
+    assert observed == (value, value, value, value)
 
 
 def test_connection_identity_is_copied_while_the_transport_is_live() -> None:

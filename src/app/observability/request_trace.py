@@ -21,6 +21,8 @@ from app.observability.request_log import (
 from app.observability.request_log_file import write_request_record
 from app.pipeline.delivery.assembling import ReplyDialect, Terminal
 from app.pipeline.request import RequestContext
+from app.pipeline.response_action import ClientActionRequirement
+from app.pipeline.response_observation import JsonAvailability, ResponseObservation
 from app.pipeline.translation_driver.semantic import Loss
 
 # The logger every per-request line goes under. Named so a filter, a test or a log shipper can select this process's own lines out of a stream that also carries `httpx` and `uvicorn` — a substring match on the message cannot, because `httpx` narrates every upstream call with the same path in it.
@@ -165,8 +167,10 @@ class RequestTrace:
     first_upstream_byte_s: float | None = None
     upstream_max_gap_s: float | None = None
     upstream_chunks: int = 0
-    bytes_in: int | None = None
+    upstream_request_body_bytes: int | None = None
     received: int = 0
+    # Distinguishes an observed empty upstream body from a request that never reached a response body at all.
+    received_known: bool = False
     usage: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
     terminal_seen: bool = False
     stop_reason: str = ""
@@ -179,6 +183,12 @@ class RequestTrace:
     dialect: ReplyDialect = ReplyDialect.ANTHROPIC
     upstream_conn: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
     losses: tuple[dict[str, str], ...] = ()
+    response_observation: ResponseObservation | None = None
+
+    @property
+    def upstream_response_body_bytes(self) -> int | None:
+        """Decoded upstream response-body bytes, preserving observed zero."""
+        return self.received if self.received_known else None
 
     def absorb(self, reply: Terminal) -> None:
         """Take the aggregated reply record onto the line.
@@ -193,6 +203,97 @@ class RequestTrace:
         self.thinking = tuple(reply.thinking)
         self.dialect = reply.dialect
 
+    def absorb_response(self, observation: ResponseObservation) -> None:
+        """Take provider-side facts without making them part of delivery control.
+
+        The legacy flat fields remain a compatibility projection. The observation itself is the richer source used by the Responses renderer now and by the versioned request record in the next slice.
+        """
+        self.response_observation = observation
+        if observation.source_protocol != "openai-responses":
+            return
+        # A replacement attempt makes every response fact from the attempt it replaced stale, including the legacy projection already absorbed from its assembler. Rebuild that projection from the current observer rather than layering new optional facts over old concrete ones.
+        self.usage = {}
+        self.terminal_seen = False
+        self.stop_reason = ""
+        self.blocks = 0
+        self.tools = ()
+        self.thinking = ()
+        self.dialect = ReplyDialect.RESPONSES
+        if observation.terminal_seen is not None:
+            self.terminal_seen = observation.terminal_seen
+        if observation.usage is not None:
+            normalized = observation.usage.normalized
+            usage = {
+                key: value
+                for key, value in (
+                    ("input_tokens", normalized.input_tokens),
+                    ("cache_read_input_tokens", normalized.cache_read_input_tokens),
+                    (
+                        "cache_creation_input_tokens",
+                        normalized.cache_creation_input_tokens,
+                    ),
+                    ("output_tokens", normalized.output_tokens),
+                )
+                if value is not None
+            }
+            if usage:
+                self.usage = usage
+        items = observation.output_items
+        if items is not None:
+            self.blocks = len(items)
+            self.tools = tuple(
+                item.name or ""
+                for item in items
+                if item.client_action.requirement is ClientActionRequirement.REQUIRED
+            )
+            self.thinking = tuple(
+                "txt"
+                if item.reasoning.has_readable_summary
+                else "enc"
+                for item in items
+                if item.type == "reasoning"
+                and (
+                    item.reasoning.has_readable_summary
+                    or item.reasoning.has_encrypted_content
+                )
+            )
+        required = bool(
+            items
+            and any(
+                item.client_action.requirement is ClientActionRequirement.REQUIRED
+                for item in items
+            )
+        )
+        failure_status = (
+            observation.terminal_event_type.removeprefix("response.")
+            if observation.terminal_event_type
+            in {"response.failed", "response.cancelled"}
+            else observation.status
+        )
+        if failure_status in {"failed", "cancelled"}:
+            self.stop_reason = failure_status
+            if not self.detail and observation.error_summary is not None:
+                message = observation.error_summary.message
+                if message:
+                    self.detail = f"provider response failed: {message}"
+        elif (
+            observation.error_summary is not None
+            or observation.error.availability is JsonAvailability.OBSERVED
+        ):
+            self.stop_reason = "error"
+            if not self.detail and observation.error_summary is not None:
+                message = observation.error_summary.message
+                if message:
+                    self.detail = f"provider response failed: {message}"
+        elif observation.status == "completed":
+            self.stop_reason = "tool_use" if required else "end_turn"
+        elif observation.status == "incomplete":
+            self.stop_reason = (
+                "max_tokens"
+                if observation.incomplete_reason == "max_output_tokens"
+                else observation.incomplete_reason or "incomplete"
+            )
+
     def absorb_losses(self, context: RequestContext) -> None:
         """Take whatever translation has recorded so far onto the line.
 
@@ -203,12 +304,15 @@ class RequestTrace:
         self.losses = _translation_losses(context)
 
 
-def log_completion(chain: Chain, trace: RequestTrace, status_code: int | None, *, bytes_out: int | None) -> None:
-    """Write the one line that says this request happened.
-
-    Emitted here rather than inside the handler because every exit path — a rejected body, a routing refusal, an upstream failure, a delivered answer, and an exception on its way out through `_serve` — has to produce exactly one, and the handler has a return for each of them and no say in the last.
-    """
-    line = RequestLine(
+def request_line_from_trace(
+    trace: RequestTrace,
+    status_code: int | None,
+    *,
+    upstream_response_body_bytes: int | None,
+    duration_s: float | None = None,
+) -> RequestLine:
+    """Detach the legacy display/JSON projection from the mutable request trace."""
+    return RequestLine(
         method=trace.method,
         path=trace.path,
         request_id=trace.request_id,
@@ -221,18 +325,18 @@ def log_completion(chain: Chain, trace: RequestTrace, status_code: int | None, *
         model=trace.model,
         status_code=status_code,
         started_at=trace.started_at,
-        duration_s=time.monotonic() - trace.started,
+        duration_s=(time.monotonic() - trace.started if duration_s is None else duration_s),
         first_upstream_byte_s=trace.first_upstream_byte_s,
         upstream_max_gap_s=trace.upstream_max_gap_s,
         upstream_chunks=trace.upstream_chunks,
-        bytes_in=trace.bytes_in,
-        bytes_out=bytes_out,
-        usage=trace.usage,
+        bytes_in=trace.upstream_request_body_bytes,
+        bytes_out=upstream_response_body_bytes,
+        usage=dict(trace.usage),
         terminal_seen=trace.terminal_seen,
         stop_reason=trace.stop_reason,
         blocks=trace.blocks,
-        tools=trace.tools,
-        thinking=trace.thinking,
+        tools=tuple(trace.tools),
+        thinking=tuple(trace.thinking),
         count_provider=trace.count_provider,
         count_provider_reason=trace.count_provider_reason,
         dialect=trace.dialect,
@@ -240,8 +344,26 @@ def log_completion(chain: Chain, trace: RequestTrace, status_code: int | None, *
         replaced_failures=tuple(trace.replaced_failures),
         tore_after_terminal=trace.tore_after_terminal,
         detail=trace.detail,
-        upstream_conn=trace.upstream_conn,
-        losses=trace.losses,
+        upstream_conn=dict(trace.upstream_conn),
+        losses=tuple(dict(loss) for loss in trace.losses),
+    )
+
+
+def log_completion(
+    chain: Chain,
+    trace: RequestTrace,
+    status_code: int | None,
+    *,
+    upstream_response_body_bytes: int | None,
+) -> None:
+    """Write the one line that says this request happened.
+
+    Emitted here rather than inside the handler because every exit path — a rejected body, a routing refusal, an upstream failure, a delivered answer, and an exception on its way out through `_serve` — has to produce exactly one, and the handler has a return for each of them and no say in the last.
+    """
+    line = request_line_from_trace(
+        trace,
+        status_code,
+        upstream_response_body_bytes=upstream_response_body_bytes,
     )
     status = status_for(status_code, override=trace.status_override)
     # Counted here rather than where the loss is recorded, so the count and the record are produced from the same tuple and cannot disagree about what this request lost.
@@ -250,6 +372,12 @@ def log_completion(chain: Chain, trace: RequestTrace, status_code: int | None, *
         TRANSLATION_LOSSES.labels(direction=direction, code=code).inc()
     write_request_record(line, status=status)
     get_logger(REQUEST_LOGGER).info(
-        format_completion_line(line, status=status, unicode=chain.capabilities.unicode, color=chain.capabilities.color),
+        format_completion_line(
+            line,
+            status=status,
+            unicode=chain.capabilities.unicode,
+            color=chain.capabilities.color,
+            response_observation=trace.response_observation,
+        ),
         status=status,
     )

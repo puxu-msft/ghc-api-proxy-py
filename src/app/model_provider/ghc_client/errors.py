@@ -157,6 +157,7 @@ def normalize_upstream_error(error: BaseException) -> PipelineError | None:
                 body=parts.body,
                 body_bytes=parts.body_bytes,
                 content_type=parts.content_type,
+                body_observed=True,
             )
         if status is not None and status not in RETRYABLE_STATUSES and 400 <= status < 500:
             return UpstreamRejected(
@@ -166,6 +167,7 @@ def normalize_upstream_error(error: BaseException) -> PipelineError | None:
                 body=parts.body,
                 body_bytes=parts.body_bytes,
                 content_type=parts.content_type,
+                body_observed=True,
                 sent=_sent_body(error),
             )
         return UpstreamError(
@@ -175,6 +177,7 @@ def normalize_upstream_error(error: BaseException) -> PipelineError | None:
             body=parts.body,
             body_bytes=parts.body_bytes,
             content_type=parts.content_type,
+            body_observed=True,
         )
     if isinstance(error, _CONNECTION_ERRORS):
         # No response exists yet, so there is no status to carry and nothing to reject over.

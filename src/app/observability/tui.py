@@ -106,8 +106,10 @@ class FooterTui:
     def _render(self) -> Text:
         """Recomputed on every refresh, so elapsed fields tick without anyone pushing an update."""
         columns = self._live.console.width if self._live is not None else 80
+        snapshot = self.registry.observation_snapshot()
+        # The TUI consumes the store's one atomic live/completed frame even though this collapsed view intentionally renders only its live half. A future detail view can use `snapshot.completed` without introducing another read boundary.
         line = build_footer(
-            self.registry.snapshot(),
+            list(snapshot.live),
             time.monotonic(),
             columns,
             unicode=self.capabilities.unicode,

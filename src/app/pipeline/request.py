@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from app.model_provider import ModelDescriptor, ModelEndpoint
 from app.pipeline.delivery.assembling import Terminal
+from app.pipeline.response_observation import ResponseObservation, ResponsesObserver
 from app.pipeline.retry import RetryLedger
 
 
@@ -52,6 +53,8 @@ class Attempt:
     error: str = ""
     # The monotonic instant this attempt must not outlive, or `None` when nothing bounds it. An instant rather than a duration because two places enforce it — the driver, up to the response headers, and the delivery chain, over the body that arrives after the driver has returned — and a duration would be started twice, from two different moments, and would then bound rather more than one attempt's life.
     deadline_at: float | None = None
+    # Created when the attempt opens, before subscribers or the send can fail. A replacement attempt therefore becomes the only current source of response facts even when it never obtains response headers.
+    response_observer: ResponsesObserver | None = None
 
 
 @dataclass(slots=True)
@@ -87,6 +90,8 @@ class RequestContext:
     # Aggregated here rather than re-derived by whoever wants it, so a consumer — the console line, and anything after it — reads a record instead of inspecting the response payload for itself.
     # Both delivery paths fill it: the streaming one from its assembler, a buffered one from the body it read whole. `None` means no reply was reached.
     reply: Terminal | None = None
+    # Provider-side facts are separate from `reply`: observation can exist for a failed or partial attempt and never participates in framing, retry or hand-over decisions.
+    response_observation: ResponseObservation | None = None
 
     # Anything a subscriber wants to carry between events.
     extras: MutableMapping[str, Any] = field(default_factory=lambda: dict[str, Any]())
@@ -94,10 +99,18 @@ class RequestContext:
     retry_ledger: RetryLedger | None = None
 
     def begin_attempt(self, *, payload: dict[str, Any] | None = None) -> Attempt:
+        # The current response changes when the attempt begins, not when it gets headers. Otherwise an attempt that fails before producing a stream leaves the previous attempt's partial items looking current.
+        self.response_observation = None
+        observer = (
+            ResponsesObserver()
+            if self.target_format is WireFormat.OPENAI_RESPONSES
+            else None
+        )
         attempt = Attempt(
             index=len(self.attempts),
             endpoint=self.endpoint,
             payload=payload if payload is not None else dict(self.payload),
+            response_observer=observer,
         )
         self.attempts.append(attempt)
         return attempt

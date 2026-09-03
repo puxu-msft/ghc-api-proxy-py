@@ -59,6 +59,22 @@ async def test_nothing_at_all_produces_nothing_at_all() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_observed_empty_whole_body_is_offered_as_its_own_send_unit() -> None:
+    offered: list[str] = []
+
+    written = [
+        chunk
+        async for chunk in one_shot_delivery(
+            feed(),
+            on_complete=lambda: offered.append("complete"),
+        )
+    ]
+
+    assert written == [b""]
+    assert offered == ["complete"]
+
+
+@pytest.mark.asyncio
 async def test_a_guard_that_fires_still_hands_over_what_had_arrived() -> None:
     """The bytes upstream already sent go out, and then the failure propagates.
 

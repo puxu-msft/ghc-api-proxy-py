@@ -1,5 +1,6 @@
 import asyncio
-from typing import Any
+from collections.abc import AsyncIterator
+from typing import Any, cast
 
 import httpx2
 import pytest
@@ -119,12 +120,58 @@ def driver(
     return AnthropicMessagesDriver(provider, frozen, budget=RetryBudget(max_total=max_total))
 
 
+class UnreadStream(httpx2.AsyncByteStream):
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        yield b"unread"
+
+
+class RejectingRateLimiter:
+    async def acquire(self) -> float:
+        return 0.0
+
+    def observe_failure(self, _status: int, _headers: dict[str, str]) -> bool:
+        return True
+
+    def observe_success(self, _headers: dict[str, str]) -> None:
+        pass
+
+
 def routing_registry(provider: FakeProvider | None = None) -> ProviderRegistry:
     """A one-provider registry, which is what these routing tests are about.
 
     `decide_route` takes the registry rather than a provider since routing began choosing between providers: the choice is part of the routing decision, so handing it a single provider would test a function that no longer exists.
     """
     return ProviderRegistry({"ghc": provider or FakeProvider()}, default="ghc")
+
+
+@pytest.mark.asyncio
+async def test_unconsumed_stream_status_body_stays_unobserved() -> None:
+    provider = FakeProvider(
+        responses=[
+            httpx2.Response(
+                429,
+                stream=UnreadStream(),
+                headers={"content-type": "application/json"},
+            )
+        ]
+    )
+    direct = DirectDriver(
+        ModelEndpoint.ANTHROPIC_MESSAGES,
+        provider,
+        SubscriberRegistry[RequestContext]().freeze(),
+        budget=RetryBudget(max_total=0),
+        rate_limiter=cast(Any, RejectingRateLimiter()),
+    )
+    request = context()
+    request.stream = True
+
+    outcome = await direct.run(request)
+
+    assert isinstance(outcome.error, PipelineAbort)
+    assert isinstance(outcome.error.cause, UpstreamError)
+    assert outcome.error.cause.status_code == 429
+    assert outcome.error.cause.body_bytes == b""
+    assert outcome.error.cause.body_observed is False
 
 
 def test_an_unroutable_qualifier_names_the_value_not_the_key() -> None:

@@ -4,7 +4,7 @@ The frame is `[PREFIX] HH:MM:SS METHOD /path ...`, with the fixed-width prefix a
 
 The field order follows `copilot-api-js`, whose real rendered lines look like `[ OK ] 14:25:36 200 anthropic/claude-opus-4-8 1.2s ↑1.0k+8.0k+1.0k ↻80% ↓456 end_turn`. Two things there are deliberate rather than incidental, and both are kept: a **successful** line collapses method and path into `<inbound-format>/<model>`, because once a request has worked, which model answered is the thing worth reading and the route is noise; a line that did **not** succeed keeps `METHOD /path`, because that is what has to be reproduced. Which of the two a line is comes from the verdict passed to `format_completion_line`, never from the status code: a streamed reply's code is settled when upstream's headers arrive, so a stream that tore an hour later still carries a 200 and would otherwise be dressed as an answer that arrived.
 
-Bytes and tokens both use `↑`/`↓` and are told apart by unit, again as upstream does: bytes carry `B`/`KB`/`MB`, token counts are bare with a `k`/`m` suffix. Every field is dropped when it has nothing to say, so the line grows only with what actually happened.
+Bytes and tokens both use `↑`/`↓` and are told apart by unit, again as upstream does: decoded upstream HTTP body bytes carry `B`/`KiB`/`MiB`, token counts are bare with a `k`/`m` suffix. Every field is dropped when it has nothing to say, so the line grows only with what actually happened.
 
 Kept pure and separate from the emitting call so a line can be asserted without a logger, a terminal or a served request.
 """
@@ -27,6 +27,12 @@ from app.observability.terminal import (
 )
 from app.pipeline.delivery.assembling import ReplyDialect
 from app.pipeline.hand_over import one_line
+from app.pipeline.response_action import ClientActionRequirement
+from app.pipeline.response_observation import (
+    JsonAvailability,
+    ResponseAvailability,
+    ResponseObservation,
+)
 
 # What to call the same two things under each upstream, abbreviated to fit a line. Held here, in the layer that renders, because which word to print is a display decision; what happened is the record's business and it says only which upstream described it.
 # `tool_use` is the Anthropic stop reason the Responses assembler synthesises for the client's benefit. Recognised by name so the line can put back what upstream actually sent.
@@ -36,9 +42,9 @@ TOOL_WORD = {ReplyDialect.ANTHROPIC: TOOL_USE_REASON, ReplyDialect.RESPONSES: "f
 
 # Where a reply stops being ordinary. Bytes are 1024-based, matching what `format_bytes` prints. A count inside the printed figure's rounding band can show the same number in a different colour from one just over the threshold; the thresholds are the round numbers rather than the rounding band, and that is the accepted trade.
 #
-# Bytes are per dialect; tokens are not. The two dialects are counted at the same place and in the same units — `_counted_upstream` wraps `aiter_bytes()`, so both figures are post-decompression bytes off the same wire — and on this proxy's traffic a Responses reply still costs tens of times more per output token than an Anthropic one. That is what the Responses wire costs rather than anything this proxy does, and two measured causes account for it. Item-level events carry a 416-byte opaque item id: in the capture at `exp/260820-websearch-probe/raw/C2-responses-search-stream-response.txt`, 13 item-level events each carry one, and across its three `output_text.delta` frames those ids are 63.7% of the bytes against 3.6% for the text delivered. Responses splits a reply into fine-grained deltas, so that fixed per-event cost is paid many times over. Separately, `response.created`, `response.in_progress` and `response.completed` each echo the entire `tools` array, which is why replies of 7-8 output tokens from the current client are observed at 57-58KB — a floor that follows from that client's tool declarations and their schema sizes, not a constant of the protocol: the C2 capture declares one tool and runs to 16KB in total.
+# Bytes are per dialect; tokens are not. The two dialects are counted at the same decoded HTTP body boundary—`_counted_upstream` wraps `aiter_bytes()`—so both figures are post-decompression response-body bytes, not full wire traffic. On this proxy's traffic a Responses reply still costs tens of times more body bytes per output token than an Anthropic one. That is what the Responses body representation costs rather than anything this proxy does, and two measured causes account for it. Item-level events carry a 416-byte opaque item id: in the capture at `exp/260820-websearch-probe/raw/C2-responses-search-stream-response.txt`, 13 item-level events each carry one, and across its three `output_text.delta` frames those ids are 63.7% of the bytes against 3.6% for the text delivered. Responses splits a reply into fine-grained deltas, so that fixed per-event cost is paid many times over. Separately, `response.created`, `response.in_progress` and `response.completed` each echo the entire `tools` array, which is why replies of 7-8 output tokens from the current client are observed at 57-58KiB — a floor that follows from that client's tool declarations and their schema sizes, not a constant of the protocol: the C2 capture declares one tool and runs to 16KiB in total.
 #
-# So one pair of numbers cannot discriminate on both paths. Measured over 4,546 production requests (snapshot 2026-08-21): the old 10KB/100KB left 98.8% of Responses lines painted notable and 49.6% heavy — a column lit on almost every line has stopped carrying information — while producing 11.8%/0.1% on Anthropic traffic, which is the intended shape. The Responses pair is therefore chosen to restore that same qualitative shape rather than by scaling the old numbers by the byte ratio: roughly the top decile notable and well under one percent heavy (9.8%/0.9% on that snapshot). What the colour means is "unusual for this path", so the display goes by path-relative frequency instead. These shares move with traffic and are a sighting rather than a contract — the thresholds are round numbers that produced the right shape, not a fitted constant. Tokens need no such split: a token means the same thing whoever emitted it.
+# So one pair of numbers cannot discriminate on both paths. Measured over 4,546 production requests (snapshot 2026-08-21): the old 10KiB/100KiB left 98.8% of Responses lines painted notable and 49.6% heavy — a column lit on almost every line has stopped carrying information — while producing 11.8%/0.1% on Anthropic traffic, which is the intended shape. The Responses pair is therefore chosen to restore that same qualitative shape rather than by scaling the old numbers by the byte ratio: roughly the top decile notable and well under one percent heavy (9.8%/0.9% on that snapshot). What the colour means is "unusual for this path", so the display goes by path-relative frequency instead. These shares move with traffic and are a sighting rather than a contract — the thresholds are round numbers that produced the right shape, not a fitted constant. Tokens need no such split: a token means the same thing whoever emitted it.
 RECEIVED_BYTES_THRESHOLDS = {
     ReplyDialect.ANTHROPIC: (10 * 1024, 100 * 1024),
     ReplyDialect.RESPONSES: (384 * 1024, 4 * 1024 * 1024),
@@ -106,7 +112,7 @@ class RequestLine:
 
     `model` empty means routing never resolved one — a rejected body, an unknown model. It is then left out rather than printed as a placeholder, because a placeholder reads as a model actually named that.
 
-    `bytes_in` / `bytes_out` are wire bytes in each direction; `usage` is the upstream's own token accounting, keyed as Anthropic reports it. The two are separate facts and a request can have either without the other — a rejected body has bytes and no tokens, a cached hit has tokens and almost no bytes.
+    `bytes_in` / `bytes_out` are legacy JSONL names for the upstream HTTP request/response body lengths. They are application-observed body bytes—not HTTP framing, headers, TLS wire bytes, or downstream delivery—and remain named this way only because JSONL v1 compatibility freezes the flat keys. `usage` is the upstream's own token accounting, keyed as Anthropic reports it. The two are separate facts and a request can have either without the other—a rejected body has bytes and no tokens, a cached hit has tokens and almost no bytes.
 
     `count_provider` is set only on a token-counting request, and names the counting provider that produced the number; `count_provider_reason` carries what was tried before it, when anything was. See `format_count_provider`. `count_tokens` is the endpoint the request arrived at, which is the same fact one step earlier: it is true of a count that failed before any provider ran, where `count_provider` is empty.
 
@@ -156,6 +162,16 @@ class RequestLine:
     # `code` is the machine-readable half and `detail` the human one, which is the division `LossCode` was written for; both are kept because the code alone cannot say *which* extensions were dropped, and the detail alone cannot be counted.
     losses: tuple[dict[str, str], ...] = ()
 
+    @property
+    def upstream_request_body_bytes(self) -> int | None:
+        """Explicit name for the legacy `bytes_in` JSONL field."""
+        return self.bytes_in
+
+    @property
+    def upstream_response_body_bytes(self) -> int | None:
+        """Explicit name for the legacy `bytes_out` JSONL field."""
+        return self.bytes_out
+
 
 def format_thinking(kinds: tuple[str, ...], dialect: ReplyDialect = ReplyDialect.ANTHROPIC) -> str:
     """`think(enc:1)` / `reason(enc:1,txt:2)` — how much reasoning came back, and of which sort.
@@ -202,6 +218,106 @@ def format_pending_tools(tools: tuple[str, ...], *, color: bool = False) -> str:
     """
     named = [tool for tool in tools if tool]
     return f"called({_painted_tools(named, color=color)})" if named else ""
+
+
+def inert_token(value: str, *, limit: int = 120) -> str:
+    """Make one provider-controlled value inert inside the completion grammar.
+
+    Letters, numbers and the punctuation used by ordinary protocol identifiers stay readable. Whitespace, ANSI/control bytes and every structural delimiter are rendered as Unicode escapes, so one raw value cannot close its own parentheses or manufacture another field.
+    """
+    encoded: list[str] = []
+    length = 0
+    for character in value:
+        piece = (
+            character
+            if character.isalnum() or character in "-._:/@"
+            else f"\\u{ord(character):04x}"
+            if ord(character) <= 0xFFFF
+            else f"\\U{ord(character):08x}"
+        )
+        if length + len(piece) > limit:
+            marker = "…"
+            while encoded and length + len(marker) > limit:
+                length -= len(encoded.pop())
+            if len(marker) <= limit:
+                encoded.append(marker)
+            break
+        encoded.append(piece)
+        length += len(piece)
+    return "".join(encoded)
+
+
+def format_response_observation(
+    observation: ResponseObservation,
+    *,
+    color: bool = False,
+) -> list[str]:
+    """Responses' own terminal status and the actual items that require client action."""
+    if (
+        observation.source_protocol != "openai-responses"
+        or observation.availability is not ResponseAvailability.OBSERVED
+    ):
+        return []
+    parts: list[str] = []
+    terminal_status = (
+        observation.terminal_event_type.removeprefix("response.")
+        if observation.terminal_event_type is not None
+        else None
+    )
+    status = (
+        terminal_status
+        if terminal_status in {"completed", "incomplete", "failed", "cancelled"}
+        else observation.status
+    )
+    if status == "incomplete":
+        reason = inert_token(observation.incomplete_reason or "")
+        word = f"incomplete({reason})" if reason else "incomplete"
+        parts.append(paint(word, YELLOW, color=color))
+    elif status in {"failed", "cancelled"}:
+        parts.append(paint(status, RED, color=color))
+    elif (
+        terminal_status == "error"
+        or observation.error.availability is JsonAvailability.OBSERVED
+    ):
+        code = _provider_error_code(observation)
+        word = f"error({inert_token(code)})" if code else "error"
+        parts.append(paint(word, RED, color=color))
+    elif status == "completed":
+        parts.append(paint("completed", GREEN, color=color))
+
+    for item in observation.output_items or ():
+        requirement = item.client_action.requirement
+        if requirement is ClientActionRequirement.NOT_REQUIRED:
+            continue
+        item_type = inert_token(item.type or "")
+        name = inert_token(item.name or "")
+        if requirement is ClientActionRequirement.UNKNOWN:
+            unknown = f"{item_type}?" if item_type else "?"
+            parts.append(f"client_action({unknown})")
+            continue
+        word = item_type or "client_action"
+        parts.append(f"{word}({_painted_tools([name], color=color)})" if name else word)
+    return parts
+
+
+def response_thinking(observation: ResponseObservation) -> tuple[str, ...]:
+    items = observation.output_items
+    if items is None:
+        return ()
+    return tuple(
+        "txt" if item.reasoning.has_readable_summary else "enc"
+        for item in items
+        if item.type == "reasoning"
+        and (
+            item.reasoning.has_readable_summary
+            or item.reasoning.has_encrypted_content
+        )
+    )
+
+
+def _provider_error_code(observation: ResponseObservation) -> str:
+    summary = observation.error_summary
+    return summary.code if summary is not None and summary.code is not None else ""
 
 
 def format_count_provider(provider: str, reason: str = "", *, color: bool = False) -> str:
@@ -274,24 +390,29 @@ def format_tokens(usage: dict[str, Any], *, unicode: bool = True, color: bool = 
     input_tokens = read("input_tokens")
     cache_read = read("cache_read_input_tokens")
     cache_write = read("cache_creation_input_tokens")
+    raw_input_tokens = usage.get("input_tokens")
+    input_known = isinstance(raw_input_tokens, int) and not isinstance(raw_input_tokens, bool)
+    has_input_side = input_known or "cache_read_input_tokens" in usage or "cache_creation_input_tokens" in usage
 
-    head = f"{up}{format_count(input_tokens)}"
-    if cache_read:
-        head += paint(f"+{format_count(cache_read)}", DIM, color=color)
-    if cache_write:
-        head += paint(f"+{format_count(cache_write)}", CYAN, color=color)
-    parts = [head]
+    parts: list[str] = []
+    if has_input_side:
+        head = f"{up}{format_count(input_tokens)}" if input_known else f"{up}?"
+        if "cache_read_input_tokens" in usage:
+            head += paint(f"+{format_count(cache_read)}", DIM, color=color)
+        if "cache_creation_input_tokens" in usage:
+            head += paint(f"+{format_count(cache_write)}", CYAN, color=color)
+        parts.append(head)
 
-    supplied = input_tokens + cache_read + cache_write
-    if cache_read or cache_write:
-        # Both rates, as upstream shows them: what came out of cache, and what went into it on this request. `+new%` is what tells a warm prompt apart from one that just paid to be cached, which read alone cannot.
-        marker = "↻" if unicode else "cache "
-        hit = round(100 * cache_read / supplied) if supplied else 0
-        new = round(100 * cache_write / supplied) if supplied else 0
-        rate = paint(f"{marker}{hit}%", cache_hit_colour(hit), color=color)
-        if cache_write:
-            rate += paint(f"+{new}%", CYAN, color=color)
-        parts.append(rate)
+        supplied = input_tokens + cache_read + cache_write
+        if input_known and (cache_read or cache_write):
+            # Rates require the whole denominator. A known cache segment beside unknown fresh input is useful as an absolute count and cannot honestly become a percentage.
+            marker = "↻" if unicode else "cache "
+            hit = round(100 * cache_read / supplied) if supplied else 0
+            new = round(100 * cache_write / supplied) if supplied else 0
+            rate = paint(f"{marker}{hit}%", cache_hit_colour(hit), color=color)
+            if cache_write:
+                rate += paint(f"+{new}%", CYAN, color=color)
+            parts.append(rate)
 
     if "output_tokens" in usage:
         produced = read("output_tokens")
@@ -333,10 +454,17 @@ def format_arrival_line(line: RequestLine) -> str:
     return " ".join(parts)
 
 
-def format_completion_line(line: RequestLine, *, status: LogStatus, unicode: bool = True, color: bool = False) -> str:
+def format_completion_line(
+    line: RequestLine,
+    *,
+    status: LogStatus,
+    unicode: bool = True,
+    color: bool = False,
+    response_observation: ResponseObservation | None = None,
+) -> str:
     """The message body for a finished request.
 
-    Ordered status, subject, duration, wire bytes, tokens, ending, retries, detail, request id — narrowing from how it went, to what it cost, to why it ended. The ending is the stop reason, or on a token-counting request the counting provider that answered it. Every field after the subject is omitted when it has nothing to say, so a bare rejection and a full streamed answer share one column order instead of drifting into two formats.
+    Ordered status, subject, duration, upstream HTTP body bytes, tokens, ending, retries, detail, request id—narrowing from how it went, to what it cost, to why it ended. The ending is the stop reason, or on a token-counting request the counting provider that answered it. Every field after the subject is omitted when it has nothing to say, so a bare rejection and a full streamed answer share one column order instead of drifting into two formats.
 
     The request id is the exception to that order and sits past the end of it, because it is not a fact about the request: it is the join key to the structured record, a UUID as wide as several real fields put together, and on a line that worked there is nothing to go and join to. So it is printed only when the line reports something other than success, and printed last, where a reader who wants it knows to look and a reader scanning the fields never has to step over it. The record file carries it on every request either way, which is what makes dropping it here cost nothing.
 
@@ -360,25 +488,51 @@ def format_completion_line(line: RequestLine, *, status: LogStatus, unicode: boo
     if line.duration_s is not None:
         parts.append(paint(format_duration(line.duration_s), duration_colour(line.duration_s), color=color))
 
-    # Wire bytes, one field for both directions so they read as a pair rather than as two unrelated numbers.
+    # Upstream HTTP body bytes, one field for both directions so they read as a pair rather than as two unrelated numbers. These are not full wire bytes and not downstream delivery bytes.
     # Only the returning half escalates. What this proxy sent upstream is a consequence of the request the client made and says nothing about how the reply went, so it stays quiet whatever its size.
     # The thresholds come from the dialect for the reason recorded at `RECEIVED_BYTES_THRESHOLDS`: subscripted rather than looked up with a default, exactly as `REASONING_WORD` and `TOOL_WORD` are, so a dialect added later fails here instead of silently being judged by another path's sense of large.
     notable_bytes, heavy_bytes = RECEIVED_BYTES_THRESHOLDS[line.dialect]
+    upstream_response_bytes = line.upstream_response_body_bytes
     received_colour = (
-        volume_colour(line.bytes_out, notable=notable_bytes, heavy=heavy_bytes) if line.bytes_out is not None else DIM
+        volume_colour(
+            upstream_response_bytes,
+            notable=notable_bytes,
+            heavy=heavy_bytes,
+        )
+        if upstream_response_bytes is not None
+        else DIM
     )
-    wire = [
-        paint(f"{up}{format_bytes(line.bytes_in)}", DIM, color=color) if line.bytes_in is not None else "",
-        paint(f"{down}{format_bytes(line.bytes_out)}", received_colour, color=color) if line.bytes_out is not None else "",
+    upstream_bodies = [
+        paint(
+            f"{up}{format_bytes(line.upstream_request_body_bytes)}",
+            DIM,
+            color=color,
+        )
+        if line.upstream_request_body_bytes is not None
+        else "",
+        paint(
+            f"{down}{format_bytes(upstream_response_bytes)}",
+            received_colour,
+            color=color,
+        )
+        if upstream_response_bytes is not None
+        else "",
     ]
-    parts.extend(part for part in wire if part)
+    parts.extend(part for part in upstream_bodies if part)
 
     tokens = format_tokens(line.usage, unicode=unicode, color=color)
     if tokens:
         parts.append(tokens)
+    response_ending = (
+        format_response_observation(response_observation, color=color)
+        if response_observation is not None
+        else []
+    )
     if line.count_provider:
         # A count has no reply and therefore no stop reason, so this is its ending. The order is for the reader rather than for the state machine: `count_provider` is set only on the count branch, which returns before a reply is ever aggregated, so no reachable request carries both and swapping these two arms would change nothing that runs.
         parts.append(format_count_provider(line.count_provider, line.count_provider_reason, color=color))
+    elif response_ending:
+        parts.extend(response_ending)
     elif line.stop_reason:
         parts.append(format_stop_reason(line.stop_reason, line.tools, line.dialect, color=color))
     elif line.tools:
@@ -396,7 +550,12 @@ def format_completion_line(line: RequestLine, *, status: LogStatus, unicode: boo
         parts.append(paint(f"upstream closed abruptly after finishing the turn: {line.tore_after_terminal}", YELLOW, color=color))
 
     rendered = " ".join(parts)
-    thinking = format_thinking(line.thinking, line.dialect)
+    thinking_kinds = (
+        response_thinking(response_observation)
+        if response_observation is not None and response_observation.output_items is not None
+        else line.thinking
+    )
+    thinking = format_thinking(thinking_kinds, line.dialect)
     if thinking:
         # Last, and grey. It says what the model did on its way to the answer rather than anything about the exchange, so it belongs after the fields that describe the exchange and should not compete with them.
         rendered = f"{rendered} {paint(thinking, DIM, color=color)}"

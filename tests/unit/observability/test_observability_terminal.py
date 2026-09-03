@@ -79,5 +79,5 @@ def test_a_stream_that_refuses_to_answer_is_treated_as_not_a_terminal() -> None:
 
 def test_an_empty_colour_leaves_the_text_alone() -> None:
     # How "no colour" is expressed by a ramp whose middle rung is the terminal's own foreground. A naive format string would emit a bare reset here, which would end whatever span came before it.
-    assert paint("50.0KB", "", color=True) == "50.0KB"
-    assert paint("50.0KB", DIM, color=True) == f"{DIM}50.0KB{RESET}"
+    assert paint("50.0KiB", "", color=True) == "50.0KiB"
+    assert paint("50.0KiB", DIM, color=True) == f"{DIM}50.0KiB{RESET}"

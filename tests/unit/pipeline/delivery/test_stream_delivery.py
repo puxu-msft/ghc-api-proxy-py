@@ -5,8 +5,9 @@ Nothing before the first whole block, each block as a closed group, keep-alives 
 """
 
 import asyncio
+import logging
 import time
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import aclosing, suppress
 from types import SimpleNamespace
 from typing import Any, cast
@@ -144,6 +145,102 @@ async def test_a_block_reaches_the_client_as_soon_as_it_closes() -> None:
         "message_delta",
         "message_stop",
     ]
+
+
+@pytest.mark.asyncio
+async def test_an_observer_failure_does_not_change_the_delivered_stream(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    payloads = anthropic_stream("kept")
+    baseline = await collect(payloads)
+
+    def fail_observation(_event: SseEvent) -> None:
+        raise RuntimeError("observer broke")
+
+    delivered = [
+        chunk
+        async for chunk in delivering(
+            feed(payloads),
+            AnthropicAssembler(),
+            buffer=BlockBuffer(policy="block"),
+            settings=StreamSettings(sse_ping_interval=0),
+            framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
+            observe_event=fail_observation,
+        )
+    ]
+
+    assert delivered == baseline
+    assert "response observation callback failed" in caplog.text
+    assert "observer broke" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_observer_and_logging_handler_failure_still_leave_wire_unchanged() -> None:
+    payloads = anthropic_stream("kept")
+    baseline = await collect(payloads)
+
+    def fail_observation(_event: SseEvent) -> None:
+        raise RuntimeError("observer broke")
+
+    class ExplodingHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            del record
+            raise RuntimeError("logging handler failed")
+
+    observer_logger = logging.getLogger("app.response_observation")
+    handler = ExplodingHandler()
+    observer_logger.addHandler(handler)
+    try:
+        delivered = [
+            chunk
+            async for chunk in delivering(
+                feed(payloads),
+                AnthropicAssembler(),
+                buffer=BlockBuffer(policy="block"),
+                settings=StreamSettings(sse_ping_interval=0),
+                framer=AnthropicFramer(
+                    message_id="msg_1",
+                    model="claude-model",
+                ),
+                observe_event=fail_observation,
+            )
+        ]
+    finally:
+        observer_logger.removeHandler(handler)
+        handler.close()
+
+    assert delivered == baseline
+
+
+@pytest.mark.asyncio
+async def test_runtime_origin_is_recorded_before_the_error_frame_send_frontier() -> None:
+    torn = httpx2.ReadError("upstream tore before terminal")
+
+    async def upstream() -> AsyncIterator[bytes]:
+        yield frame(
+            "content_block_start",
+            {"index": 0, "content_block": {"type": "text"}},
+        )
+        raise torn
+
+    observed: list[tuple[Exception, bool]] = []
+    delivery = delivering(
+        upstream(),
+        AnthropicAssembler(),
+        buffer=BlockBuffer(policy="block"),
+        settings=StreamSettings(sse_ping_interval=0),
+        framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
+        on_runtime_failure=lambda error, is_upstream: observed.append(
+            (error, is_upstream)
+        ),
+    )
+
+    error_frame = await anext(delivery)
+    assert b"upstream_stream_failed" in error_frame
+    assert observed == [(torn, True)]
+    # Simulate this frame's ASGI send failing: close without ever resuming beyond its yield. A callback placed after the yield would still be absent here.
+    await delivery.aclose()
+    assert observed == [(torn, True)]
 
 
 @pytest.mark.asyncio
@@ -1366,7 +1463,7 @@ async def test_a_client_that_leaves_releases_the_upstream_through_every_layer() 
     def counted(request_id: str, count: int) -> None:
         """The registry call `_counted_upstream` makes; this test is about the close chain, not the counting."""
 
-    chain = cast(Any, SimpleNamespace(active_requests=SimpleNamespace(add_bytes=counted)))
+    chain = cast(Any, SimpleNamespace(active_requests=SimpleNamespace(add_upstream_response_bytes=counted)))
     trace = RequestTrace(method="POST", path="/v1/messages", request_id="probe", started=time.monotonic())
     marker = UpstreamSource(
         with_deadline_at(with_idle_timeout(raw(), timeout_seconds=0), deadline_at=None)
@@ -1425,7 +1522,7 @@ async def test_a_second_cancellation_does_not_interrupt_the_release_it_arrives_d
     def counted(request_id: str, count: int) -> None:
         """This test is about the release, not the counting."""
 
-    chain = cast(Any, SimpleNamespace(active_requests=SimpleNamespace(add_bytes=counted)))
+    chain = cast(Any, SimpleNamespace(active_requests=SimpleNamespace(add_upstream_response_bytes=counted)))
     trace = RequestTrace(method="POST", path="/v1/messages", request_id="probe", started=time.monotonic())
 
     async def read_until_cancelled() -> None:
@@ -1470,7 +1567,7 @@ async def test_a_body_that_cannot_be_closed_says_so_when_nothing_else_is_ending(
     def counted(request_id: str, count: int) -> None:
         """This test is about the release, not the counting."""
 
-    chain = cast(Any, SimpleNamespace(active_requests=SimpleNamespace(add_bytes=counted)))
+    chain = cast(Any, SimpleNamespace(active_requests=SimpleNamespace(add_upstream_response_bytes=counted)))
     trace = RequestTrace(method="POST", path="/v1/messages", request_id="probe", started=time.monotonic())
     counted_stream = _counted_upstream(refuses_to_close(), chain, "probe", trace)
 
@@ -1511,7 +1608,7 @@ async def test_a_falsey_upstream_failure_is_still_the_one_reported() -> None:
     def counted(request_id: str, count: int) -> None:
         """This test is about which exception propagates, not about the counting."""
 
-    chain = cast(Any, SimpleNamespace(active_requests=SimpleNamespace(add_bytes=counted)))
+    chain = cast(Any, SimpleNamespace(active_requests=SimpleNamespace(add_upstream_response_bytes=counted)))
     trace = RequestTrace(method="POST", path="/v1/messages", request_id="probe", started=time.monotonic())
 
     with pytest.raises(Falsey) as caught:
@@ -1528,7 +1625,7 @@ class _ExplodingRegistry:
         self.seen = 0
         self.boom_at = boom_at
 
-    def add_bytes(self, request_id: str, count: int) -> None:
+    def add_upstream_response_bytes(self, request_id: str, count: int) -> None:
         self.seen += 1
         if self.seen >= self.boom_at:
             raise LookupError("bug in this side's byte counter")
@@ -1793,6 +1890,8 @@ def delivering(
     framer: OutboundFramer,
     replay: ReplaySupport | None = None,
     continuation: ContinuationSupport | None = None,
+    on_runtime_failure: Callable[[Exception, bool], None] | None = None,
+    observe_event: Callable[[SseEvent], None] | None = None,
 ) -> AsyncGenerator[bytes]:
     """`stream_delivery` with the upstream side named, which in a test is the whole of what was passed.
 
@@ -1808,6 +1907,8 @@ def delivering(
         framer=framer,
         replay=replay,
         continuation=continuation,
+        on_runtime_failure=on_runtime_failure,
+        observe_event=observe_event,
     )
 
 

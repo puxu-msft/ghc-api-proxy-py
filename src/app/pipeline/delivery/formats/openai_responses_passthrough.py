@@ -5,7 +5,7 @@
 **No item-type taxonomy lives here either.** `CONTROL_EVENTS` separates the envelope from everything else and never one item type from another, so an item this proxy has never heard of is grouped by its `output_index` without anything recognising it. The type sets below belong to `requires_client_action`, which answers a different question — whether the client owes the model something — and §7.1 explains why that one cannot be a pure table.
 """
 
-from typing import Any, cast
+from typing import Any
 
 from app.pipeline.delivery.assembling import ReplyDialect, Terminal
 from app.pipeline.delivery.formats.openai_responses import (
@@ -14,6 +14,7 @@ from app.pipeline.delivery.formats.openai_responses import (
 )
 from app.pipeline.delivery.passthrough import Dialect, PassthroughAssembler
 from app.pipeline.delivery.sse_source import SseEvent
+from app.pipeline.response_action import classify_responses_client_action
 
 # The response envelope: events belonging to no output item.
 #
@@ -44,53 +45,12 @@ TERMINAL_EVENTS = frozenset(
 
 ITEM_DONE = "response.output_item.done"
 
-# Item types that stop the model's turn until the client submits something. `spec.md` §7.1: the predicate is *not* the type alone — the same `tool_search_call` answers oppositely depending on whether the server or the client runs it — so these are the types for which the type is sufficient, and the two conditional ones are handled beside them.
-_ALWAYS_CLIENT_ACTION = frozenset(
-    {
-        "function_call",
-        "custom_tool_call",
-        "computer_call",
-        "local_shell_call",
-        "apply_patch_call",
-        "mcp_approval_request",
-    }
-)
-
-# Upstream runs these itself and reports the result in the same response, so the client owes nothing.
-_NEVER_CLIENT_ACTION = frozenset(
-    {
-        "web_search_call",
-        "file_search_call",
-        "code_interpreter_call",
-        "image_generation_call",
-        "mcp_call",
-        "reasoning",
-        "message",
-    }
-)
-
-
 def requires_client_action(item: dict[str, Any]) -> bool:
-    """Whether this output item stops the turn until the client submits a tool output or an approval.
+    """The established delivery answer, read from the shared observation classification.
 
-    `spec.md` §7.1, and the reason it reads the item rather than a type table: `ResponseToolSearchCall` carries `execution: Literal["server", "client"]` and `ResponseFunctionShellToolCall` carries `environment`, so **the same type gives opposite answers**. A table keyed on type alone cannot be right for those two.
-
-    **An unknown type answers `True`.** Defaulting to `False` would hold whatever the client has to act on until the terminal, and would make the set of types this proxy recognises the ceiling on what a client can do — the thing §2.1 rules out. Releasing early costs nothing but an earlier flush; withholding costs the turn.
+    Observation keeps its tri-state requirement and the basis for that answer. This adapter reads the independent compatibility boolean because two unknown observations intentionally have opposite delivery behaviour: an unrecognised future item releases early, while a `tool_search_call` with no recognised execution value does not.
     """
-    item_type = str(item.get("type", ""))
-    if item_type in _ALWAYS_CLIENT_ACTION:
-        return True
-    if item_type in _NEVER_CLIENT_ACTION:
-        return False
-    if item_type == "tool_search_call":
-        return str(item.get("execution", "")) == "client"
-    if item_type == "shell_call":
-        # `environment` absent, or present and not a container reference, means it runs where the client is.
-        environment: object = item.get("environment")
-        if not isinstance(environment, dict):
-            return True
-        return "container" not in str(cast(dict[str, Any], environment).get("type", ""))
-    return True
+    return classify_responses_client_action(item).delivery_required
 
 
 def _read_terminal(event: SseEvent, terminal: Terminal, saw_client_action: bool) -> None:

@@ -33,6 +33,7 @@ class UpstreamError(PipelineError):
         body: str = "",
         body_bytes: bytes = b"",
         content_type: str = "",
+        body_observed: bool = False,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
@@ -41,6 +42,8 @@ class UpstreamError(PipelineError):
         self.body = body
         # The same content one fidelity up, and the pair is deliberate. `body` is `response.text`, which has already made a charset decision; on a direct path the client is owed upstream's own bytes, and a decode that replaced a byte cannot be undone. Empty when the failure arrived without a response to read them off.
         self.body_bytes = body_bytes
+        # Empty bytes are ambiguous without this bit: they may be a measured empty response or a streaming body nobody consumed. Non-empty bytes prove observation on their own; empty requires the response boundary to say so explicitly.
+        self.body_observed = body_observed or bool(body_bytes)
         self.content_type = content_type
 
 
@@ -58,6 +61,7 @@ class UpstreamRateLimit(UpstreamError):
         body: str = "",
         body_bytes: bytes = b"",
         content_type: str = "",
+        body_observed: bool = False,
     ) -> None:
         super().__init__(
             message,
@@ -66,6 +70,7 @@ class UpstreamRateLimit(UpstreamError):
             body=body,
             body_bytes=body_bytes,
             content_type=content_type,
+            body_observed=body_observed,
         )
         self.retry_after = retry_after
 
@@ -90,6 +95,7 @@ class UpstreamRejected(PipelineError):
         body_bytes: bytes = b"",
         content_type: str = "",
         sent: bytes = b"",
+        body_observed: bool = False,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
@@ -97,6 +103,7 @@ class UpstreamRejected(PipelineError):
         self.body = body
         # See `UpstreamError`. Not the same thing as `sent` below, which is the *request*.
         self.body_bytes = body_bytes
+        self.body_observed = body_observed or bool(body_bytes)
         self.content_type = content_type
         self.sent = sent
 

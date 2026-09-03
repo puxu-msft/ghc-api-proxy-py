@@ -317,6 +317,16 @@ def test_every_upstream_failure_that_has_a_body_carries_its_bytes(
     # Narrowed a second time against the union rather than against `kind`, which is a variable and narrows nothing. Both members carry the field, so this reads it without a `getattr` that would also pass on a class that has no such attribute.
     assert isinstance(normalized, UpstreamError | UpstreamRejected)
     assert normalized.body_bytes == b'{"e":1}'
+    assert normalized.body_observed is True
+
+
+def test_an_observed_empty_status_body_is_distinct_from_an_unread_stream() -> None:
+    normalized = normalize_upstream_error(status_error(500, raw=b""))
+
+    assert isinstance(normalized, UpstreamError)
+    assert normalized.body_bytes == b""
+    assert normalized.body_observed is True
+    assert normalized.status_code == 500
 
 
 def test_a_failure_with_no_response_has_empty_bytes_rather_than_a_guess() -> None:
@@ -328,4 +338,5 @@ def test_a_failure_with_no_response_has_empty_bytes_rather_than_a_guess() -> Non
 
     assert isinstance(normalized, UpstreamError)
     assert normalized.body_bytes == b""
+    assert normalized.body_observed is False
     assert normalized.status_code is None

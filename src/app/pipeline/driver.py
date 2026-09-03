@@ -260,7 +260,12 @@ def _answered_auto_mode(
         attempts=context.attempt_count,
     )
 
-async def handle_count_tokens(chain: Chain, context: RequestContext) -> dict[str, Any]:
+async def handle_count_tokens(
+    chain: Chain,
+    context: RequestContext,
+    on_routed: Callable[[RequestContext], None] | None = None,
+    on_upstream_response: Callable[[RequestContext], None] | None = None,
+) -> dict[str, Any]:
     """Serve `/v1/messages/count_tokens` through the provider chain the spec names.
 
     Shaped by `shape_request`, exactly like the request being measured: a count that ignored `model_mappings`, the capability gate, or the repairs the outbound body gets would answer about a different request than the one that would be asked.
@@ -268,6 +273,8 @@ async def handle_count_tokens(chain: Chain, context: RequestContext) -> dict[str
     The two counters are not interchangeable. A model provider returns upstream's own number and is worth learning from; `local` returns an estimate corrected by what has been learnt so far. So the answer says which one it came from rather than presenting an estimate as a measurement.
     """
     provider, route = shape_request(chain, context)
+    if on_routed is not None:
+        on_routed(context)
 
     # Translated too, and in the same order the real request takes it: shape, translate, name the resolved model, then let the subscribers see it. A count that stopped short of translation would be measuring an Anthropic body against a model that is never going to be sent one — `/responses` receives a different set of items, a different tool shape, and a different spelling of every role, and its tokenizer counts what arrives rather than what was asked.
     # This is also the only way the subscribers see here what they see in production: the driver publishes `attempt.prepare` after translation, so publishing it before would hand them a protocol they never meet on this route.
@@ -309,12 +316,14 @@ async def handle_count_tokens(chain: Chain, context: RequestContext) -> dict[str
         # Taken before the body is read and before the response is closed, so the count line can report the leg it actually flew. Without these a count answered by upstream and one estimated in this process render identically apart from the counter's name — same missing byte fields, same single protocol label — and the line's own convention is that a missing field means the exchange had nothing to put there.
         # What the leg's presence means is narrower than "upstream answered the count": it means upstream *responded*. A refusal or a transport failure never reaches here — `send_anthropic_count_tokens` raises it as a pipeline error — but a 200 whose body carries no usable `input_tokens` does, and then the raise below hands the count to the estimator with both legs already recorded. `↑…B ↓…B … provider(ghc-failed,local)` is the right reading of that: upstream was asked, upstream replied, and the reply could not be used.
         context.extras["count_tokens_upstream_protocol"] = response.http_version
-        context.extras["count_tokens_bytes_in"] = len(response.request.content)
+        context.extras["count_tokens_upstream_request_bytes"] = len(response.request.content)
+        # The SDK has already buffered the complete body at this point. Record its measured length before status/JSON interpretation so an empty or malformed answer remains an observed 0/N rather than becoming "unknown" on the fallback path.
+        context.extras["count_tokens_upstream_response_bytes"] = len(response.content)
+        if on_upstream_response is not None:
+            on_upstream_response(context)
         try:
             response.raise_for_status()
             body = cast(dict[str, Any], response.json())
-            # After the body is in hand, so this is the whole of what upstream sent rather than however much had arrived. Recorded for the same reason as the outbound half: a leg reported in one direction only says, by this line's convention, that nothing came back.
-            context.extras["count_tokens_bytes_out"] = len(response.content)
         finally:
             await response.aclose()
         counted = body.get("input_tokens")

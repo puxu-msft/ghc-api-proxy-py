@@ -30,6 +30,7 @@ from openai import AsyncOpenAI
 from prometheus_client import REGISTRY
 from pydantic import ValidationError
 from starlette.requests import ClientDisconnect, Request
+from starlette.types import Message
 
 import app.server.routes.inference as inference_route
 from app.config.schema import ModelProviderConfig, ProxyConfig
@@ -40,6 +41,7 @@ from app.model_provider.ghc_client.tokens import CopilotTokenManager
 from app.observability import rejection_capture
 from app.observability.active_requests import ActiveRequestRegistry
 from app.observability.logging import setup_logging
+from app.observability.request_completion import RequestCompletionCoordinator
 from app.observability.request_log_file import request_logs_dir
 from app.observability.request_trace import REQUEST_LOGGER, RequestTrace
 from app.pipeline import driver
@@ -60,6 +62,7 @@ from app.pipeline.delivery.stream import (
     stream_delivery,
 )
 from app.pipeline.delivery_policy import delivery_buffer, stream_settings
+from app.pipeline.response_observation import ResponsesObserver
 from app.server.app_state import CHAIN_STATE_KEY
 from app.server.composition import build_chain
 from app.server.pipeline_app import (
@@ -1688,19 +1691,87 @@ def _registry(client: TestClient) -> ActiveRequestRegistry:
 
 def test_a_request_is_in_the_footer_registry_while_it_is_in_flight() -> None:
     # Observed from inside the upstream handler, the one point that runs while the request genuinely is in flight. Asserting after the response returns could only ever see an empty registry, and would pass just as happily if nothing were ever registered.
-    inflight: list[str] = []
+    inflight: list[tuple[str, str, str, str, bool | None]] = []
 
     def upstream(_: httpx2.Request) -> httpx2.Response:
-        inflight.extend(entry.model for entry in _registry(client).snapshot())
+        inflight.extend(
+            (
+                entry.model,
+                entry.route,
+                entry.inbound_format,
+                entry.provider_name,
+                entry.stream,
+            )
+            for entry in _registry(client).snapshot()
+        )
         return httpx2.Response(200, json={"id": "msg_1", "content": []})
 
     client, _ = make_client(upstream)
     client.post("/v1/messages", json={"model": "claude-model", "messages": []})
 
-    # Resolved by the time upstream is called, because routing decides it before the call and says so immediately. This asserted `[""]` while the model was published only after the whole exchange finished, which meant the footer read `(resolving)` for the entire upstream call — not slow feedback but wrong feedback, and the test was encoding it as correct.
-    assert inflight == ["claude-model"]
+    # Resolved by the time upstream is called, because routing decides it before the call and says so immediately. The richer store facts come from the same route decision, not from a completed record projected backwards.
+    assert inflight == [
+        (
+            "claude-model",
+            "/v1/messages",
+            "anthropic-messages",
+            "ghc",
+            False,
+        )
+    ]
     # Released afterwards, or the footer fills with requests that finished long ago.
     assert _registry(client).snapshot() == []
+
+
+def test_buffered_upstream_bytes_reach_the_live_store_before_response_translation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response_sizes: list[int] = []
+
+    def upstream(_: httpx2.Request) -> httpx2.Response:
+        response = httpx2.Response(200, json={"id": "msg_1", "content": []})
+        response_sizes.append(len(response.content))
+        return response
+
+    client, _ = make_client(upstream)
+    observed_live_bytes: list[int | None] = []
+    original = inference_route.response_payload
+
+    def observe_before_translation(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        observed_live_bytes.extend(entry.upstream_response_bytes for entry in _registry(client).snapshot())
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(inference_route, "response_payload", observe_before_translation)
+    client.post("/v1/messages", json={"model": "claude-model", "messages": []})
+
+    assert observed_live_bytes == response_sizes
+
+
+def test_count_upstream_bytes_reach_the_live_store_before_response_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response_sizes: list[int] = []
+
+    def upstream(_: httpx2.Request) -> httpx2.Response:
+        response = httpx2.Response(200, json={"input_tokens": 42})
+        response_sizes.append(len(response.content))
+        return response
+
+    client, _ = make_client(upstream)
+    observed_live_bytes: list[int | None] = []
+    response_type = inference_route.JSONResponse
+
+    def observe_before_response(*args: Any, **kwargs: Any) -> Any:
+        observed_live_bytes.extend(entry.upstream_response_bytes for entry in _registry(client).snapshot())
+        return response_type(*args, **kwargs)
+
+    monkeypatch.setattr(inference_route, "JSONResponse", observe_before_response)
+    client.post(
+        "/v1/messages/count_tokens",
+        json={"model": "claude-model", "messages": []},
+    )
+
+    assert observed_live_bytes == response_sizes
 
 
 def test_a_streaming_request_stays_registered_until_its_body_is_finished() -> None:
@@ -1717,13 +1788,13 @@ def test_a_streaming_request_stays_registered_until_its_body_is_finished() -> No
             calls.append("add")
             super().add(request_id, model=model, started_at=started_at)
 
-        def add_bytes(self, request_id: str, count: int) -> None:
+        def add_upstream_response_bytes(self, request_id: str, count: int) -> None:
             calls.append("bytes")
-            super().add_bytes(request_id, count)
+            super().add_upstream_response_bytes(request_id, count)
 
-        def remove(self, request_id: str) -> None:
-            calls.append("remove")
-            super().remove(request_id)
+        def complete(self, request_id: str, record: Any) -> None:
+            calls.append("complete")
+            super().complete(request_id, record)
 
     client, _ = make_client(
         lambda _: httpx2.Response(
@@ -1741,9 +1812,9 @@ def test_a_streaming_request_stays_registered_until_its_body_is_finished() -> No
     assert response.status_code == 200
 
     assert calls[0] == "add"
-    assert "bytes" in calls, "no downstream bytes were counted, so the footer could never show one"
-    # The decisive assertion: every byte is counted before the slot is released. Releasing at the handler's exit puts `remove` ahead of them all.
-    assert calls.index("remove") > max(index for index, call in enumerate(calls) if call == "bytes")
+    assert "bytes" in calls, "no upstream response bytes were counted, so the footer could never show receive progress"
+    # The decisive assertion: every byte is counted before the atomic live→completed transition. Completing at the handler's exit puts it ahead of them all.
+    assert calls.index("complete") > max(index for index, call in enumerate(calls) if call == "bytes")
     assert _registry(client).snapshot() == []
 
 
@@ -1890,8 +1961,8 @@ def test_a_token_count_says_it_was_one_and_which_counter_answered(request_log: N
     assert lines[0].startswith("H1/H1 200 anthropic-messages-count-tokens/claude-model ")
     assert lines[0].endswith("provider(ghc)")
     # Both directions of that leg. One of them alone would say, by this line's own convention, that nothing came back — from the exchange that produced the number on the line.
-    assert re.search(r"[↑>][\d.]+(B|KB|MB)\b", lines[0]), "the body sent upstream is what the count was measured on"
-    assert re.search(r"[↓<][\d.]+(B|KB|MB)\b", lines[0]), "and upstream's answer is where the number came from"
+    assert re.search(r"[↑>][\d.]+(B|KiB|MiB)\b", lines[0]), "the body sent upstream is what the count was measured on"
+    assert re.search(r"[↓<][\d.]+(B|KiB|MiB)\b", lines[0]), "and upstream's answer is where the number came from"
 
 
 def test_a_count_upstream_could_not_answer_is_reported_as_an_estimate(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
@@ -1957,8 +2028,240 @@ def test_a_count_upstream_answered_uselessly_keeps_the_leg_it_flew(request_log: 
     # Both legs and both directions, next to the counter that says the number on the line is not upstream's.
     assert lines[0].startswith("H1/H1 200 anthropic-messages-count-tokens/claude-model ")
     assert lines[0].endswith("provider(ghc-failed,local)")
-    assert re.search(r"[↑>][\d.]+(B|KB|MB)\b", lines[0])
-    assert re.search(r"[↓<][\d.]+(B|KB|MB)\b", lines[0])
+    assert re.search(r"[↑>][\d.]+(B|KiB|MiB)\b", lines[0])
+    assert re.search(r"[↓<][\d.]+(B|KiB|MiB)\b", lines[0])
+
+
+@pytest.mark.parametrize("content", [b"", b"not-json"])
+def test_count_malformed_upstream_body_preserves_measured_response_bytes(
+    content: bytes,
+) -> None:
+    observed_during_parse: list[int | None] = []
+
+    def upstream(_: httpx2.Request) -> httpx2.Response:
+        response = httpx2.Response(
+            200,
+            content=content,
+            headers={"content-type": "application/json"},
+        )
+        parse = response.json
+
+        def observe_then_parse(**kwargs: Any) -> Any:
+            observed_during_parse.extend(
+                entry.upstream_response_bytes
+                for entry in _registry(client).snapshot()
+            )
+            return parse(**kwargs)
+
+        response.json = observe_then_parse
+        return response
+
+    client, _ = make_client(upstream)
+    response = client.post(
+        "/v1/messages/count_tokens",
+        json={"model": "claude-model", "messages": []},
+    )
+
+    assert response.json()["estimated"] is True
+    assert observed_during_parse
+    assert set(observed_during_parse) == {len(content)}
+    record = _records()[-1]
+    assert record["bytes_out"] == len(content)
+    assert record["observation"]["body_bytes"]["upstream_response"] == len(
+        content
+    )
+
+
+def test_count_failure_without_local_fallback_preserves_upstream_response_bytes() -> None:
+    content = b"not-json"
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200,
+            content=content,
+            headers={"content-type": "application/json"},
+        ),
+        overrides={
+            "inbound": {
+                "anthropic_count_tokens": {
+                    "providers": ["ghc"],
+                    "max_retries": 0,
+                }
+            }
+        },
+    )
+
+    response = client.post(
+        "/v1/messages/count_tokens",
+        json={"model": "claude-model", "messages": []},
+    )
+
+    assert response.status_code == 500
+    record = _records()[-1]
+    assert record["bytes_out"] == len(content)
+    assert record["observation"]["body_bytes"]["upstream_response"] == len(
+        content
+    )
+
+
+def test_buffered_responses_status_error_keeps_body_and_error_summary(
+    request_log: None,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    upstream_sizes: list[int] = []
+    live_bytes_at_observation: list[int | None] = []
+    observe_body_bytes = ResponsesObserver.observe_body_bytes
+
+    def observe_after_live_update(
+        self: ResponsesObserver,
+        body: bytes,
+    ) -> None:
+        live_bytes_at_observation.extend(
+            entry.upstream_response_bytes
+            for entry in _registry(client).snapshot()
+        )
+        observe_body_bytes(self, body)
+
+    monkeypatch.setattr(
+        ResponsesObserver,
+        "observe_body_bytes",
+        observe_after_live_update,
+    )
+
+    def upstream(_: httpx2.Request) -> httpx2.Response:
+        response = httpx2.Response(
+            400,
+            json={
+                "status": "completed",
+                "error": {
+                    "type": "server_error",
+                    "code": "status_error",
+                    "message": "provider rejected this response",
+                },
+            },
+        )
+        upstream_sizes.append(len(response.content))
+        return response
+
+    client, _ = make_client(upstream)
+    with caplog.at_level(logging.INFO):
+        response = client.post(
+            "/v1/responses",
+            json={"model": "gpt-model", "input": []},
+        )
+
+    assert response.status_code == 400
+    assert live_bytes_at_observation == [upstream_sizes[-1]]
+    record = _records()[-1]
+    assert record["bytes_out"] == upstream_sizes[-1]
+    observed = record["observation"]["response"]
+    assert observed["availability"] == "observed"
+    assert observed["error_summary"] == {
+        "type": "server_error",
+        "code": "status_error",
+        "message": "provider rejected this response",
+    }
+    assert record["status"] == "fail"
+    assert record["stop_reason"] == "error"
+    assert "provider rejected this response" in record["detail"]
+    line = _request_lines(caplog.records)[-1]
+    assert "error(status_error)" in line
+
+
+def test_streamed_responses_completed_with_error_uses_one_error_projection(
+    request_log: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    terminal: dict[str, Any] = {
+        "type": "response.completed",
+        "response": {
+            "status": "completed",
+            "output": [],
+            "usage": {"input_tokens": 1, "output_tokens": 0},
+            "error": {
+                "type": "server_error",
+                "code": "status_error",
+                "message": "provider completed with an error",
+            },
+        },
+    }
+    body = (
+        b"event: response.completed\ndata: "
+        + orjson.dumps(terminal)
+        + b"\n\n"
+    )
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200,
+            content=body,
+            headers={"content-type": "text/event-stream"},
+        )
+    )
+
+    with caplog.at_level(logging.INFO):
+        response = client.post(
+            "/v1/responses",
+            json={"model": "gpt-model", "input": [], "stream": True},
+        )
+
+    assert response.status_code == 200
+    record = _records()[-1]
+    assert record["status"] == "fail"
+    assert record["stop_reason"] == "error"
+    assert record["observation"]["response"]["error_summary"]["code"] == (
+        "status_error"
+    )
+    assert "provider response failed: provider completed with an error" in record[
+        "detail"
+    ]
+    assert "error(status_error)" in _request_lines(caplog.records)[-1]
+
+
+def test_buffered_responses_malformed_status_error_is_unavailable_not_not_applicable() -> None:
+    content = b"not-json"
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            400,
+            content=content,
+            headers={"content-type": "application/json"},
+        )
+    )
+
+    response = client.post(
+        "/v1/responses",
+        json={"model": "gpt-model", "input": []},
+    )
+
+    assert response.status_code == 400
+    record = _records()[-1]
+    assert record["bytes_out"] == len(content)
+    observed = record["observation"]["response"]
+    assert observed["availability"] == "unavailable"
+    assert [issue["code"] for issue in observed["issues"]] == [
+        "response_body_not_json"
+    ]
+
+
+def test_responses_attempt_that_fails_before_provider_body_is_unavailable() -> None:
+    def upstream(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("provider connection failed", request=request)
+
+    client, _ = make_client(
+        upstream,
+        overrides={"upstream_request_retry": {"max_total": 0}},
+    )
+
+    response = client.post(
+        "/v1/responses",
+        json={"model": "gpt-model", "input": []},
+    )
+
+    assert response.status_code >= 500
+    observed = _records()[-1]["observation"]["response"]
+    assert observed["availability"] == "unavailable"
+    assert [issue["code"] for issue in observed["issues"]] == [
+        "provider_body_not_observed"
+    ]
 
 
 def test_a_refused_request_is_reported_with_its_route_and_reason(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
@@ -2028,7 +2331,19 @@ def test_a_request_that_raised_on_its_way_out_still_writes_its_one_line(
     assert status == "fail"
     # The exception is named, not merely alluded to. `str(RuntimeError())` is empty and would leave the detail as a colon with nothing after it, so the line quotes the `repr` — which is why the class name appears here even though this one does have a message.
     assert "request failed before a response: RuntimeError" in line
-    assert _registry(client).snapshot() == [], "and the slot is still released"
+    snapshot = _registry(client).observation_snapshot()
+    assert snapshot.live == (), "and the slot is still released"
+    assert len(snapshot.completed) == 1
+    records = _records()
+    assert len(records) == 1
+    record = records[0]
+    assert record["schema_version"] == 2
+    assert record["status"] == "fail"
+    delivery = record["observation"]["delivery"]
+    assert delivery["state"] == "not_started"
+    assert delivery["intended_http_status"] is None
+    assert delivery["failure"]["origin"] == "dispatch"
+    assert record["observation"]["timings"]["response_ready_s"] is None
 
 
 def test_a_client_that_hung_up_mid_body_is_reported_as_gone_rather_than_as_a_failure(
@@ -2057,11 +2372,18 @@ def test_a_client_that_hung_up_mid_body_is_reported_as_gone_rather_than_as_a_fai
     # Asserted separately from the status, because `_add_status_prefix` renders an unrecognised one as `[....]` — a line that then merely looks unremarkable instead of failing.
     assert _request_prefixes(caplog.records) == ["[GONE]"]
     assert "client disconnected before the request was answered" in line
-    assert _registry(client).snapshot() == []
+    snapshot = _registry(client).observation_snapshot()
+    assert snapshot.live == ()
+    assert len(snapshot.completed) == 1
+    record = snapshot.completed[0]
+    assert record.status == "gone"
+    assert record.delivery.failure is not None
+    assert record.delivery.failure.origin.value == "dispatch"
+    assert record.delivery.failure.category.value == "disconnect"
 
 
-def test_a_streaming_request_reports_what_it_actually_delivered(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
-    # Written by the delivery generator, not by the handler: at the moment the handler returns a stream has sent nothing, so a line written there would report every stream as having delivered zero bytes.
+def test_a_streaming_request_reports_what_it_received_from_upstream(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
+    # Written by the upstream body counter, not by the handler: at the moment the handler returns no response-body chunk has arrived, so a line written there would report every stream as having received zero bytes.
     client, _ = make_client(
         lambda _: httpx2.Response(
             200,
@@ -2076,15 +2398,22 @@ def test_a_streaming_request_reports_what_it_actually_delivered(request_log: Non
     lines = _request_lines(caplog.records)
     assert len(lines) == 1
     assert lines[0].startswith("H1/H1 200 anthropic-messages/claude-model ")
-    assert "↓" in lines[0], "a delivered stream must report its byte count"
+    assert "↓" in lines[0], "a streamed upstream response must report its received body bytes"
     assert "↓0B" not in lines[0]
 
 
 @pytest.mark.parametrize(
-    ("failure", "drained", "expected_status", "expected_detail"),
+    (
+        "failure",
+        "drained",
+        "completion_accepted",
+        "expected_status",
+        "expected_detail",
+    ),
     [
         pytest.param(
             ConnectionError("upstream tore"),
+            False,
             False,
             "fail",
             "stream failed before a terminal event: upstream tore",
@@ -2093,11 +2422,12 @@ def test_a_streaming_request_reports_what_it_actually_delivered(request_log: Non
         pytest.param(
             None,
             False,
+            False,
             "gone",
             "delivery stopped before upstream finished",
             id="client-left",
         ),
-        pytest.param(None, True, "ok", None, id="clean-drain"),
+        pytest.param(None, True, True, "ok", None, id="clean-drain"),
     ],
 )
 def test_one_shot_accounting_reports_how_delivery_actually_ended(
@@ -2105,6 +2435,7 @@ def test_one_shot_accounting_reports_how_delivery_actually_ended(
     caplog: pytest.LogCaptureFixture,
     failure: BaseException | None,
     drained: bool,
+    completion_accepted: bool,
     expected_status: str,
     expected_detail: str | None,
 ) -> None:
@@ -2120,18 +2451,23 @@ def test_one_shot_accounting_reports_how_delivery_actually_ended(
         request_id="req-one-shot",
         started=time.monotonic(),
     )
+    completion = RequestCompletionCoordinator(chain, trace, trace.request_id)
     accounting = _StreamAccounting(
         chain=chain,
         request_id=trace.request_id,
         trace=trace,
+        completion=completion,
         status_code=200,
         drained=drained,
         failure=failure,
     )
+    if completion_accepted:
+        accounting.completion_delivery.accept(True)
     chain.active_requests.add(trace.request_id)
 
     with caplog.at_level(logging.INFO):
-        accounting.finish()
+        accounting.settle()
+        completion.publish()
 
     (line, status), = _request_outcomes(caplog.records)
     assert status == expected_status
@@ -2159,10 +2495,12 @@ async def test_a_client_deadline_is_accounted_as_the_failure_its_frame_reports(
         started=time.monotonic(),
     )
     assembler = AnthropicAssembler()
+    completion = RequestCompletionCoordinator(chain, trace, trace.request_id)
     accounting = _StreamAccounting(
         chain=chain,
         request_id=trace.request_id,
         trace=trace,
+        completion=completion,
         status_code=200,
         assembler=assembler,
     )
@@ -2187,6 +2525,7 @@ async def test_a_client_deadline_is_accounted_as_the_failure_its_frame_reports(
     with caplog.at_level(logging.INFO), pytest.raises(ClientDeadlineError):
         async for chunk in delivery:
             chunks.append(chunk)
+    completion.publish()
 
     assert b"client_deadline_exceeded" in b"".join(chunks)
     (line, status), = _request_outcomes(caplog.records)
@@ -2198,9 +2537,9 @@ async def test_a_client_deadline_is_accounted_as_the_failure_its_frame_reports(
 def test_a_stream_that_never_terminated_is_not_reported_as_a_clean_finish(
     request_log: None, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The reported line, in full: `[ OK ] 09:00:11 H1/H2 200 anthropic-messages/claude-opus-5 385.0s ↑583.5KB ↓43.2KB`.
+    """The reported line, in full: `[ OK ] 09:00:11 H1/H2 200 anthropic-messages/claude-opus-5 385.0s ↑583.5KiB ↓43.2KiB`.
 
-    43KB had come back over 385 seconds and then upstream stopped without saying how the turn ended. The reply summary was gated on having seen that ending, so it was never taken onto the line — and every field that says what a reply *was* dropped out together, leaving something indistinguishable from a quiet successful request. The status could not correct it either: it is fixed when the response headers arrive and stays 200 however the stream ends.
+    43KiB had come back over 385 seconds and then upstream stopped without saying how the turn ended. The reply summary was gated on having seen that ending, so it was never taken onto the line — and every field that says what a reply *was* dropped out together, leaving something indistinguishable from a quiet successful request. The status could not correct it either: it is fixed when the response headers arrive and stays 200 however the stream ends.
 
     So the two halves are asserted separately. The prefix must say `fail`, and the line must name the truncation rather than leave it to be inferred from which fields are missing — an absence reads the same as a field this endpoint does not report.
     """
@@ -2237,8 +2576,9 @@ async def test_an_upstream_that_tore_says_so_and_says_what_broke(
     chain = _chain_of(client)
     trace = RequestTrace(method="POST", path="/v1/messages", request_id="req_1", started=time.monotonic())
     assembler = AnthropicAssembler()
+    completion = RequestCompletionCoordinator(chain, trace, trace.request_id)
     accounting = _StreamAccounting(
-        chain=chain, request_id="req_1", trace=trace, status_code=200, assembler=assembler
+        chain=chain, request_id="req_1", trace=trace, completion=completion, status_code=200, assembler=assembler
     )
     chain.active_requests.add("req_1")
 
@@ -2264,6 +2604,7 @@ async def test_an_upstream_that_tore_says_so_and_says_what_broke(
             with pytest.raises(httpx2.ReadError):
                 async for _ in delivery:
                     pass
+    completion.publish()
 
     (line, status), = _request_outcomes(caplog.records)
     assert status == "fail"
@@ -2286,8 +2627,9 @@ async def test_a_tear_after_the_stop_reason_is_still_a_tear(
     chain = _chain_of(client)
     trace = RequestTrace(method="POST", path="/v1/messages", request_id="req_1", started=time.monotonic())
     assembler = AnthropicAssembler()
+    completion = RequestCompletionCoordinator(chain, trace, trace.request_id)
     accounting = _StreamAccounting(
-        chain=chain, request_id="req_1", trace=trace, status_code=200, assembler=assembler
+        chain=chain, request_id="req_1", trace=trace, completion=completion, status_code=200, assembler=assembler
     )
     chain.active_requests.add("req_1")
 
@@ -2314,6 +2656,7 @@ async def test_a_tear_after_the_stop_reason_is_still_a_tear(
                     pass
 
     assert assembler.terminal.stop_reason == "end_turn", "upstream did give its reason before it tore"
+    completion.publish()
     (line, status), = _request_outcomes(caplog.records)
     assert status == "fail", f"a tear was reported as a clean finish: {line}"
     assert "connection reset by peer" in line
@@ -2358,8 +2701,9 @@ async def test_a_client_that_walked_away_is_not_blamed_on_upstream(
     chain = _chain_of(client)
     trace = RequestTrace(method="POST", path="/v1/messages", request_id="req_1", started=time.monotonic())
     assembler = AnthropicAssembler()
+    completion = RequestCompletionCoordinator(chain, trace, trace.request_id)
     accounting = _StreamAccounting(
-        chain=chain, request_id="req_1", trace=trace, status_code=200, assembler=assembler
+        chain=chain, request_id="req_1", trace=trace, completion=completion, status_code=200, assembler=assembler
     )
     chain.active_requests.add("req_1")
 
@@ -2386,6 +2730,7 @@ async def test_a_client_that_walked_away_is_not_blamed_on_upstream(
             assert await anext(delivery), "the first block should have reached the client"
             # And now the client is gone.
             await delivery.aclose()
+    completion.publish()
 
     (line, status), = _request_outcomes(caplog.records)
     # `gone`, not `fail`: nothing here is the proxy's fault or upstream's, and painting every cancelled turn the same red as a reset would bury the resets. Ruled 2026-08-20.
@@ -2431,10 +2776,12 @@ async def test_a_native_terminal_is_complete_only_after_its_send_returns(
         started=time.monotonic(),
     )
     assembler = responses_passthrough_assembler()
+    completion = RequestCompletionCoordinator(chain, trace, trace.request_id)
     accounting = _StreamAccounting(
         chain=chain,
         request_id=trace.request_id,
         trace=trace,
+        completion=completion,
         status_code=200,
         assembler=cast(BlockAssembler[Any], assembler),
     )
@@ -2482,7 +2829,7 @@ async def test_a_native_terminal_is_complete_only_after_its_send_returns(
     wait_forever = asyncio.Event()
     sent_bodies: list[bytes] = []
 
-    async def send(message: dict[str, Any]) -> None:
+    async def send(message: Message) -> None:
         if message["type"] != "http.response.body":
             return
         body = cast(bytes, message.get("body", b""))
@@ -2591,10 +2938,12 @@ async def test_a_terminal_marker_stays_with_its_chunk_when_buffering_releases_mu
         started=time.monotonic(),
     )
     assembler = responses_passthrough_assembler()
+    completion = RequestCompletionCoordinator(chain, trace, trace.request_id)
     accounting = _StreamAccounting(
         chain=chain,
         request_id=trace.request_id,
         trace=trace,
+        completion=completion,
         status_code=200,
         assembler=cast(BlockAssembler[Any], assembler),
     )
@@ -2634,6 +2983,7 @@ async def test_a_terminal_marker_stays_with_its_chunk_when_buffering_releases_mu
 
         # The terminal send is cancelled rather than resumed. A marker accidentally attached to the first chunk would leave this request green.
         await delivery.aclose()
+    completion.publish()
 
     (line, status), = _request_outcomes(caplog.records)
     assert status == "gone", line
@@ -2682,7 +3032,7 @@ async def test_the_responses_route_wires_its_terminal_send_to_completion_account
         await terminal_send_returned.wait()
         return {"type": "http.disconnect"}
 
-    async def send(message: dict[str, Any]) -> None:
+    async def send(message: Message) -> None:
         if message["type"] != "http.response.body":
             return
         body = cast(bytes, message.get("body", b""))
@@ -2721,6 +3071,73 @@ async def test_the_responses_route_wires_its_terminal_send_to_completion_account
     (line, status), = _request_outcomes(caplog.records)
     assert status == "ok", line
     assert "delivery stopped before upstream finished" not in line
+
+
+async def test_response_start_failure_closes_the_unstarted_upstream_owner() -> None:
+    class OwnedStream(httpx2.AsyncByteStream):
+        def __init__(self) -> None:
+            self.pulled = False
+            self.closed = False
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            self.pulled = True
+            yield responses_sse_upstream()
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    owned = OwnedStream()
+
+    def upstream(_: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            200,
+            stream=owned,
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client, _ = make_client(upstream)
+    request_body = orjson.dumps({"model": "gpt-model", "input": [], "stream": True})
+    request_sent = False
+
+    async def receive() -> Message:
+        nonlocal request_sent
+        if not request_sent:
+            request_sent = True
+            return {"type": "http.request", "body": request_body, "more_body": False}
+        return {"type": "http.disconnect"}
+
+    async def send(message: Message) -> None:
+        if message["type"] == "http.response.start":
+            raise OSError("client transport closed before response start")
+
+    scope: dict[str, Any] = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/responses",
+        "raw_path": b"/v1/responses",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"host", b"testserver"),
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(request_body)).encode()),
+        ],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+        "state": {},
+    }
+
+    with pytest.raises(ClientDisconnect):
+        await cast(Any, client.app)(scope, receive, send)
+
+    assert owned.pulled is False
+    assert owned.closed is True
+    snapshot = _registry(client).observation_snapshot()
+    assert snapshot.live == ()
+    assert len(snapshot.completed) == 1
 
 
 def test_a_stream_that_did_terminate_is_still_reported_as_one(
@@ -2819,6 +3236,7 @@ def test_a_responses_upstream_is_logged_in_its_own_words(request_log: None, capl
                     {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "sealed"},
                     {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "Bash", "arguments": "{}"},
                 ],
+                "usage": {"input_tokens": 9, "output_tokens": 2},
             },
         )
     )
@@ -2831,6 +3249,8 @@ def test_a_responses_upstream_is_logged_in_its_own_words(request_log: None, capl
     assert "reason(enc:1)" in line
     # `function_call`, not the `tool_use` stop reason synthesised downstream for the client's benefit — a Responses trace contains no `tool_use` to go looking for.
     assert "function_call(Bash)" in line
+    assert "↓2" in line
+    assert "↑9" not in line, "missing cache details must not turn the whole prompt into known-fresh input"
     assert "think(" not in line and "tool_use(" not in line
 
 
@@ -2864,7 +3284,7 @@ def responses_sse_upstream(usage: dict[str, Any] | None = None) -> bytes:
     reported = usage if usage is not None else {"input_tokens": 3, "output_tokens": 4}
     frames.append(
         "event: response.completed\n"
-        f'data: {orjson.dumps({"response": {"usage": reported}}).decode()}\n\n'
+        f'data: {orjson.dumps({"response": {"status": "completed", "model": "gpt-model", "output": items, "usage": reported}}).decode()}\n\n'
     )
     return "".join(frames).encode()
 
@@ -2886,12 +3306,15 @@ def custom_tool_call_sse() -> bytes:
         f"event: response.output_item.added\ndata: {orjson.dumps({'output_index': 0, 'item': item}).decode()}\n\n",
         f"event: response.output_item.done\ndata: {orjson.dumps({'output_index': 0, 'item': {**item, 'status': 'completed'}}).decode()}\n\n",
         "event: response.completed\n"
-        f'data: {orjson.dumps({"response": {"usage": {"input_tokens": 3, "output_tokens": 4}}}).decode()}\n\n',
+        f'data: {orjson.dumps({"response": {"status": "completed", "model": "gpt-model", "output": [{**item, "status": "completed"}], "usage": {"input_tokens": 3, "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0}, "output_tokens": 4, "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": 7}}}).decode()}\n\n',
     ]
     return "".join(frames).encode()
 
 
-def test_an_output_item_this_proxy_does_not_know_reaches_the_client_intact() -> None:
+def test_an_output_item_this_proxy_does_not_know_reaches_the_client_intact(
+    request_log: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Issue #2. Upstream answered 200 and delivery raised `ValueError: no Responses item shape for block kind 'custom_tool_call'`, tearing the stream.
 
     Two defects, one line apart. `_open` mapped an unrecognised item type to *itself*, so the block's kind became the literal string `custom_tool_call`; `_close`'s final `else` built a `TEXT`-shaped payload without setting `kind` to match, which the `WEB_SEARCH_CALL` branch beside it does. The block contradicted itself, and the two legs failed differently: `ResponsesFramer` raised, `AnthropicFramer` sent an empty text block under a `stop_reason` of `end_turn` — telling the client the model had finished while it was in fact waiting on a tool call.
@@ -2909,10 +3332,11 @@ def test_an_output_item_this_proxy_does_not_know_reaches_the_client_intact() -> 
             200, content=custom_tool_call_sse(), headers={"content-type": "text/event-stream"}
         )
     )
-    response = client.post(
-        "/responses",
-        json={"model": "gpt-model", "input": [], "stream": True},
-    )
+    with caplog.at_level(logging.INFO):
+        response = client.post(
+            "/responses",
+            json={"model": "gpt-model", "input": [], "stream": True},
+        )
 
     assert response.status_code == 200
     names = [
@@ -2932,6 +3356,9 @@ def test_an_output_item_this_proxy_does_not_know_reaches_the_client_intact() -> 
     assert names[-1] == "response.completed", names
     assert "error" not in names, names
     assert "unknown_output_item" not in response.text, response.text
+    request_line = _request_lines(caplog.records)[0]
+    assert "completed custom_tool_call(run_shell)" in request_line
+    assert "function_call" not in request_line
 
 
 def test_a_direct_responses_stream_is_answered_in_responses_events() -> None:
@@ -3310,14 +3737,12 @@ def test_a_streamed_responses_reply_is_logged_in_its_own_words(
     assert "think(" not in line and "tool_use(" not in line
 
 
-def test_a_route_whose_reply_cannot_be_read_claims_nothing_about_it(
+def test_a_direct_buffered_responses_reply_is_observed_before_translation(
     request_log: None, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """An inbound `/responses` reply keeps its own shape end to end, and the Anthropic reader finds nothing in it.
+    """A direct Responses body is read in its own source vocabulary rather than by the Anthropic reply reader.
 
-    The regression this pins: summarising through a record whose stop reason defaults to `end_turn` turned "nobody said" into "finished cleanly", so every one of these lines claimed an outcome no upstream had reported. An absent `content` is indistinguishable from a reply that had none, which is exactly why the empty summary has to be refused rather than absorbed.
-
-    Reporting nothing here is the honest state and also the pre-existing one; giving these routes a real summary is open work, tracked in `.dev/docs/tui/deferred.md`.
+    The old path honestly reported nothing because its only reader expected `content`. The provider-side observer now reads `output` before any response translation, so buffered and streamed Responses expose the same status, item and reasoning facts without inventing an Anthropic stop reason.
     """
     client, _ = make_client(
         lambda _: httpx2.Response(
@@ -3339,10 +3764,135 @@ def test_a_route_whose_reply_cannot_be_read_claims_nothing_about_it(
 
     line = _request_lines(caplog.records)[0]
     assert line.startswith("H1/H1 200 openai-responses/gpt-model ")
-    assert "end_turn" not in line, "a stop reason nobody sent must not appear"
-    # The reply's contents are simply not reported on this route yet. Asserted so that giving it a reader is a deliberate change to this test rather than a silent one.
-    assert "reason(" not in line and "think(" not in line
-    assert "function_call(" not in line and "tool_use(" not in line
+    assert "completed function_call(Bash)" in line
+    assert line.endswith("reason(enc:1)")
+    assert "end_turn" not in line and "tool_use" not in line
+
+
+@pytest.mark.parametrize(
+    ("provider_status", "provider_error", "expected"),
+    [
+        (
+            "failed",
+            {"code": "server_error", "message": "provider failed"},
+            "failed",
+        ),
+        ("cancelled", None, "cancelled"),
+        (
+            "completed",
+            {"code": "server_error", "message": "provider failed"},
+            "error(server_error)",
+        ),
+    ],
+)
+def test_a_direct_buffered_provider_failure_is_not_logged_as_an_http_success(
+    provider_status: str,
+    provider_error: dict[str, str] | None,
+    expected: str,
+    request_log: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200,
+            json={
+                "id": "resp_1",
+                "model": "gpt-model",
+                "status": provider_status,
+                "error": provider_error,
+                "output": [],
+            },
+        )
+    )
+
+    with caplog.at_level(logging.INFO):
+        response = client.post("/responses", json={"model": "gpt-model", "input": []})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == provider_status
+    line = _request_lines(caplog.records)[0]
+    assert "POST /responses gpt-model" in line
+    assert f" {expected}" in line
+    if provider_error is not None:
+        assert provider_error["message"] in line
+    assert " req=" in line
+    assert "completed" not in line
+
+
+def test_translated_buffered_failure_keeps_source_projection_after_client_translation(
+    request_log: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200,
+            json={
+                "id": "resp_1",
+                "model": "gpt-model",
+                "status": "failed",
+                "error": {"code": "server_error", "message": "provider failed"},
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "upstream_name",
+                        "call_id": "call_1",
+                        "arguments": "{}",
+                    }
+                ],
+                "usage": {"input_tokens": 9, "output_tokens": 2},
+            },
+        )
+    )
+
+    with caplog.at_level(logging.INFO):
+        response = client.post("/v1/messages", json={"model": "gpt-model", "messages": []})
+
+    assert response.status_code == 200
+    record = _records()[-1]
+    assert record["usage"] == {"output_tokens": 2}
+    assert record["blocks"] == 1
+    assert record["tools"] == ["upstream_name"]
+    line = _request_lines(caplog.records)[0]
+    assert "failed" in line
+    assert "function_call(upstream_name)" in line
+    assert "↑9" not in line
+
+
+def test_source_projection_survives_a_response_translation_exception(
+    request_log: None,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200,
+            json={
+                "id": "resp_1",
+                "model": "gpt-model",
+                "status": "completed",
+                "output": [{"type": "function_call", "name": "upstream_name"}],
+                "usage": {"input_tokens": 9, "output_tokens": 2},
+            },
+        )
+    )
+
+    def fail_translation(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("response translation broke")
+
+    monkeypatch.setattr(inference_route, "response_payload", fail_translation)
+    with caplog.at_level(logging.INFO), pytest.raises(
+        RuntimeError,
+        match="response translation broke",
+    ):
+        client.post("/v1/messages", json={"model": "gpt-model", "messages": []})
+
+    record = _records()[-1]
+    assert record["usage"] == {"output_tokens": 2}
+    assert record["blocks"] == 1
+    assert record["tools"] == ["upstream_name"]
+    line = _request_lines(caplog.records)[0]
+    assert "completed function_call(upstream_name)" in line
+    assert "↑0" not in line and "↑9" not in line
 
 
 def test_a_streamed_translated_reply_reports_what_the_prompt_actually_cost(
@@ -3357,7 +3907,10 @@ def test_a_streamed_translated_reply_reports_what_the_prompt_actually_cost(
             200,
             content=responses_sse_upstream({
                 "input_tokens": 138_500,
-                "input_tokens_details": {"cached_tokens": 135_000},
+                "input_tokens_details": {
+                    "cached_tokens": 135_000,
+                    "cache_write_tokens": 0,
+                },
                 "output_tokens": 2_700,
                 "total_tokens": 141_200,
             }),
@@ -3387,9 +3940,29 @@ async def test_a_body_that_fails_to_close_is_still_accounted_for() -> None:
         finally:
             raise RuntimeError("closing the body blew up")
 
+    class _Completion:
+        delivery_accepted = False
+
+        def mark_response_ready(self, _status_code: int) -> None:
+            pass
+
+        def note_asgi_message_offered(self, _message: Message) -> None:
+            pass
+
+        def note_send_failure(self, _error: BaseException) -> None:
+            pass
+
+        def note_wrapped_failure(self, _error: BaseException, *, origin: object) -> None:
+            pass
+
+        def publish(self) -> None:
+            finished.append("published")
+
     class _Accounting:
-        def finish(self) -> None:
-            finished.append("finished")
+        completion = _Completion()
+
+        def settle(self) -> None:
+            finished.append("settled")
 
     content = body()
     # Started, so that closing it has a suspended frame to unwind and the `finally` above can run.
@@ -3399,13 +3972,13 @@ async def test_a_body_that_fails_to_close_is_still_accounted_for() -> None:
     async def receive() -> dict[str, Any]:
         return {"type": "http.disconnect"}
 
-    async def send(message: dict[str, Any]) -> None:
+    async def send(message: Message) -> None:
         raise RuntimeError("the client went away")
 
     with pytest.raises(RuntimeError) as raised:
         await response({"type": "http", "method": "POST", "path": "/", "headers": []}, receive, send)
 
-    assert finished == ["finished"]
+    assert finished == ["settled", "published"]
     # The exit that ended the request, not the close that failed on the way out — with the close failure chained on so neither is lost.
     assert str(raised.value) == "the client went away"
     assert str(raised.value.__cause__) == "closing the body blew up"
@@ -3428,7 +4001,10 @@ def test_a_buffered_translated_reply_hands_the_client_anthropic_token_keys(
                 "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hi"}]}],
                 "usage": {
                     "input_tokens": 138_500,
-                    "input_tokens_details": {"cached_tokens": 135_000},
+                    "input_tokens_details": {
+                    "cached_tokens": 135_000,
+                    "cache_write_tokens": 0,
+                },
                     "output_tokens": 2_700,
                     "total_tokens": 141_200,
                 },
@@ -3972,7 +4548,10 @@ def test_a_torn_stream_the_client_never_saw_is_replayed_end_to_end() -> None:
     assert len(calls) == 2
 
 
-def test_a_replay_on_the_translation_leg_sends_the_conversation_again() -> None:
+def test_a_replay_on_the_translation_leg_sends_the_conversation_again(
+    request_log: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """The primary path, where a replayed attempt has to send what the *client* sent.
 
     `handle` translates in place — it assigns the translated body back onto the context and edits the dict it was given — so a second pass over the same context translated an already-translated body. Measured before the fix: the second attempt went out as `{"model": "gpt-model", "input": [], "stream": true}`, and the client was answered from an empty prompt with a clean 200. The earlier end-to-end replay test uses `claude-model`, which needs no translation, so it was structurally unable to see this.
@@ -3984,8 +4563,8 @@ def test_a_replay_on_the_translation_leg_sends_the_conversation_again() -> None:
     async def torn_body() -> AsyncIterator[bytes]:
         yield (
             b'event: response.output_item.added\n'
-            b'data: {"output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[],'
-            b'"encrypted_content":"sealed"}}\n\n'
+            b'data: {"output_index":5,"item":{"type":"custom_tool_call","id":"old_1",'
+            b'"name":"discarded"}}\n\n'
         )
         raise httpx2.RemoteProtocolError("peer closed the connection")
 
@@ -4002,14 +4581,15 @@ def test_a_replay_on_the_translation_leg_sends_the_conversation_again() -> None:
         )
 
     client, seen = make_client(upstream)
-    response = client.post(
-        "/v1/messages",
-        json={
-            "model": "gpt-model",
-            "messages": [{"role": "user", "content": "remember me"}],
-            "stream": True,
-        },
-    )
+    with caplog.at_level(logging.INFO):
+        response = client.post(
+            "/v1/messages",
+            json={
+                "model": "gpt-model",
+                "messages": [{"role": "user", "content": "remember me"}],
+                "stream": True,
+            },
+        )
 
     assert response.status_code == 200
     assert len(calls) == 2
@@ -4019,6 +4599,10 @@ def test_a_replay_on_the_translation_leg_sends_the_conversation_again() -> None:
     assert "remember me" in seen[-1].content.decode()
     # And it was translated exactly once: a second pass would have wrapped the Responses body again.
     assert "messages" not in replayed
+    line = _request_lines(caplog.records)[0]
+    assert "completed function_call(Bash)" in line
+    assert "discarded" not in line
+    assert "custom_tool_call" not in line
 
 
 def test_a_replay_is_reported_on_the_request_line(
@@ -4167,6 +4751,51 @@ def test_a_replacement_that_never_opened_an_attempt_is_not_recorded_as_one(
     record = _records()[-1]
     assert record["attempts"] == 1
     assert record["replaced_failures"] == []
+
+
+def test_a_replacement_that_opens_but_never_gets_a_response_cannot_leak_the_old_observation(
+    request_log: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    calls: list[int] = []
+
+    async def torn_body() -> AsyncIterator[bytes]:
+        yield (
+            b'event: response.output_item.added\n'
+            b'data: {"output_index":5,"item":{"type":"custom_tool_call",'
+            b'"name":"discarded"}}\n\n'
+        )
+        raise httpx2.RemoteProtocolError("first attempt tore")
+
+    def upstream(request: httpx2.Request) -> httpx2.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx2.Response(
+                200,
+                content=torn_body(),
+                headers={"content-type": "text/event-stream"},
+            )
+        raise httpx2.ConnectError("replacement failed before response", request=request)
+
+    client, _ = make_client(
+        upstream,
+        overrides={"upstream_request_retry": {"max_total": 1}},
+    )
+    with caplog.at_level(logging.INFO), contextlib.suppress(Exception):
+        client.post(
+            "/responses",
+            json={"model": "gpt-model", "input": [], "stream": True},
+        )
+
+    assert calls == [1, 1], "the replacement must have opened and reached the provider"
+    record = _records()[-1]
+    assert record["attempts"] == 2
+    assert record["blocks"] == 0
+    assert record["tools"] == []
+    assert record["thinking"] == []
+    line = _request_lines(caplog.records)[0]
+    assert "discarded" not in line
+    assert "custom_tool_call" not in line
 
 
 def test_a_long_upstream_failure_is_cut_before_it_reaches_the_line(
@@ -4375,11 +5004,11 @@ def test_the_marker_sits_below_this_sides_bookkeeping_in_production(
             super().__init__()
             self.seen = 0
 
-        def add_bytes(self, request_id: str, count: int) -> None:
+        def add_upstream_response_bytes(self, request_id: str, count: int) -> None:
             self.seen += 1
             if self.seen >= 4:
                 raise LookupError("bug in this side's byte counter")
-            super().add_bytes(request_id, count)
+            super().add_upstream_response_bytes(request_id, count)
 
     async def frame_by_frame() -> AsyncIterator[bytes]:
         # One chunk per frame, so the counter is called several times and the bug lands after a block has already gone out.
@@ -4403,6 +5032,30 @@ def test_the_marker_sits_below_this_sides_bookkeeping_in_production(
 
     # And it is not dressed up as a turn the client can carry on from.
     assert not any("handed back" in line for line in _request_lines(caplog.records))
+
+
+def test_runtime_upstream_stream_failure_keeps_upstream_origin() -> None:
+    async def torn_body() -> AsyncIterator[bytes]:
+        yield (
+            b'event: content_block_start\ndata: {"index":0,"content_block":{"type":"text"}}\n\n'
+        )
+        raise httpx2.ReadError("upstream body tore")
+
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200,
+            content=torn_body(),
+            headers={"content-type": "text/event-stream"},
+        ),
+        overrides={"upstream_request_retry": {"max_total": 0}},
+    )
+
+    with pytest.raises(httpx2.ReadError, match="upstream body tore"):
+        _delivered(client)
+
+    failure = _records()[-1]["observation"]["delivery"]["failure"]
+    assert failure["origin"] == "upstream"
+    assert failure["message"] == "upstream body tore"
 
 
 def test_a_hand_over_says_what_it_swallowed(

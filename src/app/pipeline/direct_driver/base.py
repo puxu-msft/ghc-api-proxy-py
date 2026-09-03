@@ -163,13 +163,21 @@ class DirectDriver:
             if self._rate_limiter is not None:
                 headers = dict(response.headers)
                 if self._rate_limiter.observe_failure(response.status_code, headers):
-                    # A limited status is not a delivered response; let the retry path see it.
+                    # A limited status is not a delivered response; let the retry path see it. A buffered body is retained for the error observer, while a streaming response has not been read and must not be forced here.
                     outcome.response = None
                     attempt.error = f"upstream returned {response.status_code}"
+                    body_bytes = (
+                        response.content if response.is_stream_consumed else b""
+                    )
                     if not await self._handle_failure(
                         UpstreamError(
                             f"upstream returned {response.status_code}",
                             status_code=response.status_code,
+                            headers=response.headers,
+                            body=(response.text if body_bytes else ""),
+                            body_bytes=body_bytes,
+                            content_type=response.headers.get("content-type", ""),
+                            body_observed=response.is_stream_consumed,
                         ),
                         context,
                         outcome,

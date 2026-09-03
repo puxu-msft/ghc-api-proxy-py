@@ -9,17 +9,25 @@ Two things about how these are written, both from a plan review:
 **Headers are asserted in both directions.** Today's behaviour — dropping every one of upstream's headers except a reformatted `Retry-After` on a 429 — passes any test that only checks the ones that should survive.
 """
 
+import logging
+from collections.abc import Iterator
 from typing import Any
 
 import httpx2
 import orjson
 import pytest
+import structlog
 from fastapi.testclient import TestClient
 
 # Same directory, so pytest's default `prepend` import mode puts it on the path. There is no `tests` package to import through — `tests/__init__.py` does not exist, deliberately.
-from test_pipeline_app import make_client, sse_upstream
+from test_pipeline_app import (
+    _request_lines,  # pyright: ignore[reportPrivateUsage]
+    make_client,
+    sse_upstream,
+)
 
 from app.errors import ErrorCategory, ErrorInfo
+from app.observability.logging import setup_logging
 from app.server.http_errors import _outbound_headers  # pyright: ignore[reportPrivateUsage]
 
 # Upstream's headers, mixed on purpose: three that carry meaning a client acts on, two that frame upstream's own connection and must not ride along.
@@ -36,6 +44,17 @@ UPSTREAM_HEADERS = {
 
 # Not valid UTF-8 and not valid JSON. Whatever reaches the client either is these bytes or is not.
 OPAQUE = b"\xffraw-body"
+
+
+@pytest.fixture
+def configured_request_log() -> Iterator[None]:
+    """This test group needs the production ProcessorFormatter only for completion-line assertions."""
+    setup_logging(log_format="text", colors=False)
+    try:
+        yield
+    finally:
+        structlog.reset_defaults()
+        logging.getLogger().handlers.clear()
 
 
 def failing_upstream(
@@ -474,12 +493,30 @@ def test_a_reported_failure_does_not_end_with_a_terminal_that_reads_as_success()
 
 RESPONSES_FAILED = '{"type":"response.failed","response":{"error":{"code":"server_error","message":"boom"}}}'
 RESPONSES_CANCELLED = '{"type":"response.cancelled","response":{"error":{"code":"cancelled","message":"stopped"}}}'
+RESPONSES_ERROR = '{"type":"error","error":{"code":"stream_error","message":"broken"}}'
+RESPONSES_ERROR_FLAT = '{"type":"error","code":"flat_error","message":"broken"}'
+RESPONSES_ERROR_NO_CODE = '{"type":"error","error":{"message":"broken"}}'
+RESPONSES_ERROR_FLAT_NO_CODE = '{"type":"error","message":"broken"}'
 
 
 @pytest.mark.parametrize(
-    "event, payload", [("response.failed", RESPONSES_FAILED), ("response.cancelled", RESPONSES_CANCELLED)]
+    ("event", "payload", "expected"),
+    [
+        ("response.failed", RESPONSES_FAILED, "failed"),
+        ("response.cancelled", RESPONSES_CANCELLED, "cancelled"),
+        ("error", RESPONSES_ERROR, "error(stream_error)"),
+        ("error", RESPONSES_ERROR_FLAT, "error(flat_error)"),
+        ("error", RESPONSES_ERROR_NO_CODE, "error"),
+        ("error", RESPONSES_ERROR_FLAT_NO_CODE, "error"),
+    ],
 )
-def test_a_direct_responses_leg_keeps_upstreams_own_event_name(event: str, payload: str) -> None:
+def test_a_direct_responses_leg_keeps_upstreams_own_event_name(
+    event: str,
+    payload: str,
+    expected: str,
+    configured_request_log: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """`response.failed` and `response.cancelled` are different things to a client of that API.
 
     Normalising both to `error` would be this proxy deciding they are the same, which it is not entitled to do on a leg it is only carrying.
@@ -494,10 +531,16 @@ def test_a_direct_responses_leg_keeps_upstreams_own_event_name(event: str, paylo
         return httpx2.Response(200, content=body, headers={"content-type": "text/event-stream"})
 
     client, _ = make_client(handler)
-    with client.stream("POST", "/v1/responses", json={"model": "gpt-model", "input": [], "stream": True}) as response:
+    with caplog.at_level(logging.INFO), client.stream(
+        "POST",
+        "/v1/responses",
+        json={"model": "gpt-model", "input": [], "stream": True},
+    ) as response:
         delivered = b"".join(response.iter_bytes())
 
     assert event in _events(delivered), f"upstream's own event name was lost: {_events(delivered)}"
+    line = _request_lines(caplog.records)[0]
+    assert f" {expected} " in line
 
 
 def test_a_translated_leg_spells_upstreams_failure_in_the_clients_dialect() -> None:

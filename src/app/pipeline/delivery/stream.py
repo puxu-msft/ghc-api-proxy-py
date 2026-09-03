@@ -9,9 +9,10 @@ The keep-alive here is the **client-facing** one, and its cadence hangs off the 
 """
 
 import asyncio
+import logging
 import sys
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator
-from contextlib import aclosing
+from contextlib import aclosing, suppress
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -264,9 +265,9 @@ async def one_shot_delivery(
         if body:
             yield bytes(body)
         raise
-    if body:
+    if body or on_complete is not None:
         if on_complete is not None:
-            # The whole upstream body exists, but the downstream frontier has not advanced yet. The caller confirms it only when this yield resumes after ASGI send.
+            # Empty is a measured whole body, not an absent one. Offer and yield it too, so its own ASGI send-return—not natural drain before Starlette sends anything—is the one-shot completion frontier.
             on_complete()
         yield bytes(body)
 
@@ -302,6 +303,23 @@ def _report_failure(
     return framer.error(failure.info)
 
 
+def _observe_without_affecting_delivery(
+    callback: Callable[[SseEvent], None] | None,
+    event: SseEvent,
+) -> None:
+    if callback is None:
+        return
+    try:
+        callback(event)
+    except Exception:
+        # This is the last boundary before an observer bug would enter the delivery tear handler below. Reporting is itself no-throw: a broken logging handler is another observability failure, not a delivery failure.
+        # No third independent reporting channel remains once the fallback logger fails.
+        with suppress(Exception):
+            logging.getLogger("app.response_observation").exception(
+                "response observation callback failed"
+            )
+
+
 async def stream_delivery[UnitT: DeliveryUnit](
     chunks: AsyncIterator[bytes],
     assembler: BlockAssembler[UnitT],
@@ -313,6 +331,8 @@ async def stream_delivery[UnitT: DeliveryUnit](
     replay: ReplaySupport | None = None,
     continuation: ContinuationSupport | None = None,
     on_tear_after_terminal: Callable[[Exception], None] | None = None,
+    on_runtime_failure: Callable[[Exception, bool], None] | None = None,
+    observe_event: Callable[[SseEvent], None] | None = None,
     passthrough: bool = False,
 ) -> AsyncGenerator[bytes]:
     """Turn an upstream byte stream into the client's SSE, one complete block at a time.
@@ -342,6 +362,8 @@ async def stream_delivery[UnitT: DeliveryUnit](
             replay=replay,
             continuation=continuation,
             on_tear_after_terminal=on_tear_after_terminal,
+            on_runtime_failure=on_runtime_failure,
+            observe_event=observe_event,
             passthrough=passthrough,
         )
     ) as inner:
@@ -362,6 +384,8 @@ async def _deliver[UnitT: DeliveryUnit](
     replay: ReplaySupport | None = None,
     continuation: ContinuationSupport | None = None,
     on_tear_after_terminal: Callable[[Exception], None] | None = None,
+    on_runtime_failure: Callable[[Exception, bool], None] | None = None,
+    observe_event: Callable[[SseEvent], None] | None = None,
     passthrough: bool = False,
 ) -> AsyncGenerator[bytes]:
     """Assemble and frame the response. Wrapped by `stream_delivery`, which stamps the clock."""
@@ -386,6 +410,8 @@ async def _deliver[UnitT: DeliveryUnit](
                 async for pull in events:
                     wrote = False
                     if pull.event is not None:
+                        # Observation is side-only and attempt-scoped. The callback resolves the current attempt on every event, so a replay cannot keep writing into the record it replaced. Its public observer contract contains ordinary parsing failures; delivery never reads the observation back.
+                        _observe_without_affecting_delivery(observe_event, pull.event)
                         # Assembled before any cue is answered. A pull that came back with an event has not shown that the event can be delivered: a malformed one makes the assembler raise right here, and that has to reach the caller ahead of a comment claiming everything is fine.
                         completed = assembler.push(pull.event)
                         # The cap has to see what the assembler is holding too. On a passthrough leg an item that opens and never closes keeps every later group queued outside the buffer, and `direct-passthrough/spec.md` §8 names that queue as the first thing `buffer_cap_bytes` must bound — uncounted, the default 16MiB bounded nothing there.
@@ -430,6 +456,8 @@ async def _deliver[UnitT: DeliveryUnit](
             # Ahead of `terminal.seen` on purpose, and that ordering is a ruling rather than an accident of writing order: `client_request_deadline` bounds this round's total elapsed time, so once it fires the round is over whether or not upstream happened to finish first. A complete reply may be sitting assembled in the buffer, and it is dropped. Ruled 2026-08-22.
             #
             # The attempt deadline (`upstream_request_deadline`, raised by `pipeline_app`'s `with_deadline_at`) has no branch of its own here — it arrives as an ordinary tear and is classified below. It is ordered the other way round, *after* `terminal.seen`, for the opposite reason: it ends only this attempt, so a turn upstream finished must not be handed to it as something to retry.
+            if on_runtime_failure is not None:
+                on_runtime_failure(torn, False)
             yield framer.error(
                 _stream_error(
                     ErrorCategory.INTERNAL,
@@ -496,6 +524,9 @@ async def _deliver[UnitT: DeliveryUnit](
         # Nothing is flushed first, for the same reason the client deadline flushes nothing: what is buffered but undelivered would make the size of this ending depend on the buffering policy, while the ending itself is a failure.
         #
         # Three codes, one per way this can end, so that a reader of a client transcript can tell them apart without the server's log beside them.
+        if on_runtime_failure is not None:
+            # Record the authoritative origin before yielding the error frame: its downstream send is a separate, lower-priority frontier that may fail and prevent this generator from ever resuming.
+            on_runtime_failure(torn, not ours)
         yield framer.error(
             _stream_error(
                 ErrorCategory.INTERNAL if ours else ErrorCategory.UPSTREAM,

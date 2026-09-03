@@ -11,6 +11,7 @@ from pathlib import Path
 
 from app.config.paths import user_data_path
 from app.observability.request_log import RequestLine
+from app.wire_json import JsonValue
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,33 @@ def write_request_record(line: RequestLine, *, status: str) -> Path | None:
     except Exception as failure:
         # Every failure, not just `OSError`: an invalid path can raise `ValueError` before touching the filesystem, serialization can reject an unexpected value, and this function promises never to affect the request. Report the loss rather than swallowing it, but do not turn an already-determined request outcome into a logging failure.
         logger.warning("could not keep the structured request record: %r", failure)
+        return None
+    return path
+
+
+def write_finalized_record(record: dict[str, JsonValue]) -> Path | None:
+    """Append a versioned finalized record without an implicit string fallback.
+
+    `FinalizedRequest.to_record_dict()` is the only domain-to-JSON conversion. Reaching this boundary with anything else is an observability error worth logging, not a reason to silently turn a structured value into its Python representation.
+    """
+    try:
+        now = datetime.now(UTC)
+        directory = request_logs_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"requests-{now:%Y%m%d}.jsonl"
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write(
+                json.dumps(
+                    record,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+                + "\n"
+            )
+        _prune(directory)
+    except Exception as failure:
+        logger.warning("could not keep the finalized request record: %r", failure)
         return None
     return path
 
