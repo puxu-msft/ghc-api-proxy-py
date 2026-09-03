@@ -47,7 +47,7 @@
 
 ## 5. 临时态与保留策略
 
-[Session harvest](260903-effort-translation-session-harvest.md)从完整parent transcript、15份subagent transcript与Git objects机械枚举本工作单元，覆盖code／`.dev` commits、subagents、job tmp、外部`/tmp`、rejected routes、falsified causes、corrected methods、calibrations、mutations与live calls。Harvester写入前以`find`和`fd --hidden --no-ignore`得到相同的32项job tmp集合，写入后为33项；terminal update预先创建最后两条commit-message文件后，pre-marker集合为37项，两种方法的排序集合逐项diff为空；写入`$CLAUDE_JOB_DIR/tmp/CLOSEOUT.md`后final集合为38项，再次逐项diff为空。Marker明确零temp删除、全部就地等待harness过期。
+[Session harvest](260903-effort-translation-session-harvest.md)从完整parent transcript、15份subagent transcript与Git objects机械枚举本工作单元，覆盖code／`.dev` commits、subagents、job tmp、外部`/tmp`、rejected routes、falsified causes、corrected methods、calibrations、mutations与live calls。Harvester写入前以`find`和`fd --hidden --no-ignore`得到相同的32项job tmp集合，写入后为33项；terminal update预先创建最后两条commit-message文件后，pre-marker集合为37项，两种方法的排序集合逐项diff为空；写入`$CLAUDE_JOB_DIR/tmp/CLOSEOUT.md`后final集合为38项，再次逐项diff为空。Terminal check R3发现marker把20个commit-message文件误写成18个；修正后独立Python从目录派生并断言`total=38`、`commit_messages=20`，`find`／`fd`集合diff仍为空。Marker明确零temp删除、全部就地等待harness过期。
 
 本轮不删除以下对象：
 
@@ -98,7 +98,7 @@
 - 时序敏感的首块前replay使用确定性torn stream fixture，并以旧header行为mutation证明判据命中；不把单次live cassette当稳定时序test。
 - 改名／删除legacy effort resolver已在Task 3精确symbol scan与final reviewer legacy scan中零命中；本closeout没有再执行blanket rename／delete。
 - Code review disposition无open／disputed／pending finding，六条未采纳路线与R2三个`no_change_needed`均经final reviewer明确裁决。
-- Closeout R1与scoped R2已覆盖本报告、session harvest、Acceptance、两份早期disposition、terminal plan、Implementation、candidate status及final-fix receiver；R1三项finding均由R2确认`ADDRESSED`。Memory精确处置和job tmp marker已完成。唯一尚未关闭的门是对实际terminal update做final scoped check；通过后只需把本报告status改为`terminal`、记录该final check并把Task #18标completed。
+- Closeout R1与scoped R2已覆盖本报告、session harvest、Acceptance、两份早期disposition、terminal plan、Implementation、candidate status及final-fix receiver；R1三项finding均由R2确认`ADDRESSED`。Memory精确处置已完成。Terminal check R3确认memory移除，但发现job marker漏分两份预创建commit-message文件并拒绝terminal；该行已修为20项，38项总集重新对账。唯一尚未关闭的门是对TERM-MIN-01修正做scoped recheck；通过后只需把本报告status改为`terminal`、记录该recheck并把Task #18标completed。
 
 ## 10. Closeout review contract
 
@@ -113,3 +113,12 @@ Fresh reviewer必须独立核：交付commit／archive／tree equality；full ve
 - `ETC-NIT-03`：采纳。Review关闭前把自称的“终态报告”改为“closeout draft”；只有memory实际处置和scoped re-review完成后才统一terminal状态。
 
 [Closeout scoped R2](260903-review-effort-translation-closeout-r2.md)确认ETC-MAJ-01／MIN-02／NIT-03全部`ADDRESSED`、`NEW_BREAKAGE: none`、0 blocker／major／minor／nit，并再次批准同一memory deletion manifest。随后已执行两项精确memory处置、写入final job marker并更新本报告。当前状态为`terminal-update-awaiting-final-check`；只允许原reviewer核实际处置与相邻状态闭包，final check通过前不标Task completed、不发完成信号。
+
+## 12. Terminal check R3处置
+
+[Terminal check R3](260903-review-effort-translation-closeout-r3.md)确认memory移除、SDD retain、38项总集、pre-marker 37项、external`/tmp`零删除、living docs与所有负空间均准确，但发现`CLOSEOUT.md`把20个commit-message文件写成18个；因此给0 blocker／0 major／1 minor，`JOB_MARKER_VERIFIED: NO`并拒绝terminal update。
+
+- `TERM-MIN-01`：采纳。Marker现区分18个marker前已消费文件、随后由`.dev@247a0f8`消费的terminal-closeout message，以及预留给final-check提交并可复用的closeout-verification message；三类共20项，全部零删除、等待harness过期。
+- 修正后`find`与`fd --hidden --no-ignore`的38项排序集合再次逐项diff为空；独立Python从实际目录派生并断言`total=38`与`commit_messages=20`。
+
+Status继续保持`terminal-update-awaiting-final-check`。下一步只复核TERM-MIN-01、38项集合与本节记录；通过前不标Task completed、不发完成信号。
