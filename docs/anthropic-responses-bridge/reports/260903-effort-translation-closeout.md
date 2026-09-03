@@ -1,6 +1,6 @@
 # Effort translation closeout
 
-- status：draft-awaiting-closeout-review
+- status：terminal-update-awaiting-final-check
 - work_unit：2026-09-03 Anthropic Messages ↔ OpenAI Responses request-level effort translation
 - transcript_harvest：[session harvest](260903-effort-translation-session-harvest.md)
 - behavior_authority：[current Spec](../spec.md)
@@ -12,7 +12,7 @@
 - `main@4b7d74f`以一个whole-feature squash交付双向effort翻译：target Anthropic thinking profiles、统一`ThinkingEffortIntent`、Anthropic→Responses与Responses→Anthropic effort mapping、逐消息effort、nested residual、send／count、profile facts持久化、live recorder修复与explicit-high cassette。
 - Reviewed source由`archive/260903-effort-translation@ed6addd`精确保留；`worktree-effort-translation@ed6addd`保持clean并继续保留。Main squash与reviewed source的完整tree OID同为`4c71bc029e6ad5cef001c2e874f9930039604bcd`，`git diff 4b7d74f ed6addd`为空。
 - 用户可摘取的配置说明位于`.dev/human-controlled-docs-candidates/effort-thinking-profiles-config-example.md`；它明确标为无效力候选，未修改`docs/.human-controlled/`。
-- `.dev`中的Spec、Acceptance、Implementation、terminal plan、三份review disposition及23份截至R2的评审／实施报告已提交；本closeout另外归档session harvest与closeout draft。
+- `.dev`中的Spec、Acceptance、Implementation、terminal plan、三份review disposition及23份截至R2的评审／实施报告已提交；本closeout另外归档session harvest与当前等待final check的closeout report。
 
 ## 2. 验证与证据边界
 
@@ -47,7 +47,7 @@
 
 ## 5. 临时态与保留策略
 
-[Session harvest](260903-effort-translation-session-harvest.md)从完整parent transcript、15份subagent transcript与Git objects机械枚举本工作单元，覆盖code／`.dev` commits、subagents、job tmp、外部`/tmp`、rejected routes、falsified causes、corrected methods、calibrations、mutations与live calls。Harvester写入前以`find`和`fd --hidden --no-ignore`得到相同的32项job tmp集合，写入后为33项；closeout后续新增文件须在最终marker中重新列入。
+[Session harvest](260903-effort-translation-session-harvest.md)从完整parent transcript、15份subagent transcript与Git objects机械枚举本工作单元，覆盖code／`.dev` commits、subagents、job tmp、外部`/tmp`、rejected routes、falsified causes、corrected methods、calibrations、mutations与live calls。Harvester写入前以`find`和`fd --hidden --no-ignore`得到相同的32项job tmp集合，写入后为33项；terminal update预先创建最后两条commit-message文件后，pre-marker集合为37项，两种方法的排序集合逐项diff为空；写入`$CLAUDE_JOB_DIR/tmp/CLOSEOUT.md`后final集合为38项，再次逐项diff为空。Marker明确零temp删除、全部就地等待harness过期。
 
 本轮不删除以下对象：
 
@@ -57,16 +57,16 @@
 - Controller、Task 1～5 source worktrees与`agent/final-effort-fix-a518`branch：main与archive已保全语义，但用户未要求删除，且本轮不把“可清理”推成删除授权。
 - Main用户WIP：`docs/.human-controlled/config.example.yaml`、`docs/.human-controlled/message-translation.md`、`.dockerignore`、`Dockerfile`、`docker-compose.yml`、`exp/260820-h2-stream-cap/`保持原样，未暂存、未提交、未清理。
 
-## 6. Memory deletion manifest
+## 6. Memory deletion record
 
-唯一拟执行的删除是退役活动SDD恢复指针；它在功能完成后继续写“Active implementation”会让后继者重复执行已经完成的Tasks。其原文与索引已被session harvest逐字定位，current事实由Implementation、terminal plan、code disposition、main／archive refs与保留的SDD ledger承担。
+唯一获准并实际执行的删除是退役活动SDD恢复指针；它在功能完成后继续写“Active implementation”会让后继者重复执行已经完成的Tasks。其原文与索引已被session harvest逐字定位，current事实由Implementation、terminal plan、code disposition、main／archive refs与保留的SDD ledger承担。
 
-| Target | 当前作用 | 长期接收者 | 拟执行动作 | 前置条件 |
+| Target | 原作用 | 长期接收者 | 实际动作 | 放行与复核 |
 |---|---|---|---|---|
-| `/home/xp/.claude/projects/-home-xp-src-ghc-api-proxy-py/memory/effort-translation-sdd-ledger.md` | 活动任务恢复指针，现已错误 | `.dev/docs/anthropic-responses-bridge/implementation.md`、terminal plan、code disposition、保留的SDD progress | exact-path删除 | 独立closeout reviewer确认该memory没有未承接事实、删除目标精确且MEMORY索引同步 |
-| `/home/xp/.claude/projects/-home-xp-src-ghc-api-proxy-py/memory/MEMORY.md:49` | 上述活动指针的索引行 | 同上 | exact-string移除该一行，不改其它memory索引 | 同上 |
+| `/home/xp/.claude/projects/-home-xp-src-ghc-api-proxy-py/memory/effort-translation-sdd-ledger.md` | 活动任务恢复指针，完成后已错误 | `.dev/docs/anthropic-responses-bridge/implementation.md`、terminal plan、code disposition、保留的SDD progress | exact-path删除 | Closeout R1独立确认无未承接事实并批准；scoped R2维持批准 |
+| `/home/xp/.claude/projects/-home-xp-src-ghc-api-proxy-py/memory/MEMORY.md`中的唯一对应行 | 上述活动指针的索引 | 同上 | exact-string移除该一行，不改其它memory索引 | 同上 |
 
-除此两项，本manifest不授权删除任何memory、repo file、branch、worktree、job tmp或外部`/tmp`对象。若reviewer不能独立确认，memory同样fail closed保留并改为terminal说明，不执行删除。
+执行后用独立Python断言确认pointer文件不存在且`MEMORY.md`不再含`effort-translation-sdd-ledger.md`，输出`pointer_absent=true index_reference_absent=true`。除此两项，本manifest没有授权、也没有执行任何memory、repo file、branch、worktree、job tmp或外部`/tmp`删除。
 
 ## 7. 可复用资产处置
 
@@ -98,7 +98,7 @@
 - 时序敏感的首块前replay使用确定性torn stream fixture，并以旧header行为mutation证明判据命中；不把单次live cassette当稳定时序test。
 - 改名／删除legacy effort resolver已在Task 3精确symbol scan与final reviewer legacy scan中零命中；本closeout没有再执行blanket rename／delete。
 - Code review disposition无open／disputed／pending finding，六条未采纳路线与R2三个`no_change_needed`均经final reviewer明确裁决。
-- 尚未关闭的门：本closeout报告、session harvest、Acceptance／两份早期disposition／terminal plan／Implementation／candidate status修订尚待fresh independent closeout review；memory删除尚待manifest正面回执；Task #18尚待上述步骤完成后标completed；job tmp marker尚待最终文件集合稳定后写入。
+- Closeout R1与scoped R2已覆盖本报告、session harvest、Acceptance、两份早期disposition、terminal plan、Implementation、candidate status及final-fix receiver；R1三项finding均由R2确认`ADDRESSED`。Memory精确处置和job tmp marker已完成。唯一尚未关闭的门是对实际terminal update做final scoped check；通过后只需把本报告status改为`terminal`、记录该final check并把Task #18标completed。
 
 ## 10. Closeout review contract
 
@@ -112,4 +112,4 @@ Fresh reviewer必须独立核：交付commit／archive／tree equality；full ve
 - `ETC-MIN-02`：采纳。Final-fix持久报告明确它是内容转录并做排版归一化，不再声称byte-verbatim；恢复“用户对唯一fix-wave implementer的约束”这一authority限定，原始job报告继续保留到harness自然过期。
 - `ETC-NIT-03`：采纳。Review关闭前把自称的“终态报告”改为“closeout draft”；只有memory实际处置和scoped re-review完成后才统一terminal状态。
 
-当前状态仍是`draft-awaiting-closeout-review`。下一步只允许原closeout reviewer对这三项fix及相邻status闭包做scoped R2；R2关闭major前不执行memory删除、不标Task completed、不发完成信号。
+[Closeout scoped R2](260903-review-effort-translation-closeout-r2.md)确认ETC-MAJ-01／MIN-02／NIT-03全部`ADDRESSED`、`NEW_BREAKAGE: none`、0 blocker／major／minor／nit，并再次批准同一memory deletion manifest。随后已执行两项精确memory处置、写入final job marker并更新本报告。当前状态为`terminal-update-awaiting-final-check`；只允许原reviewer核实际处置与相邻状态闭包，final check通过前不标Task completed、不发完成信号。
