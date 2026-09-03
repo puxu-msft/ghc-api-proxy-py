@@ -1,12 +1,13 @@
 # Effort translation 代码评审处置
 
-- status：awaiting-final-scoped-re-review
+- status：review-clean-awaiting-full-verification
 - implementation_base：`b67634d929b22f3cdcc83cf5607cd37c4eb35c2c`
 - pre_fix_head：`505d62fd2622c4ecb35e701fad33e1ca12300fb6`
 - current_candidate：`ed6addd017f461c15abc494584e727f1badec633`
 - task_reports：[Task 1 R1](reports/260903-review-effort-translation-task1.md)／[R2](reports/260903-review-effort-translation-task1-r2.md)；[Task 2](reports/260903-review-effort-translation-task2.md)；[Task 3 R1](reports/260903-review-effort-translation-task3.md)／[R2](reports/260903-review-effort-translation-task3-r2.md)／[R3](reports/260903-review-effort-translation-task3-r3.md)；[Task 4](reports/260903-review-effort-translation-task4.md)；[Task 5](reports/260903-review-effort-translation-task5.md)
-- final_reports：[whole-branch R1](reports/260903-review-effort-translation-final.md)；R2 pending
+- final_reports：[whole-branch R1](reports/260903-review-effort-translation-final.md)；[scoped R2](reports/260903-review-effort-translation-final-r2.md)
 - final_R1_counts：blocker=0，major=2，minor=4，nit=1
+- final_R2_counts：blocker=0，major=0，minor=0，nit=0；R1七项全部`ADDRESSED`；`NEW_BREAKAGE: none`；Spec／Quality／docs sync PASS
 
 本文只记录代码实施评审的finding、裁定来源与终态。行为authority仍是[current Spec](spec.md)，Acceptance只转录可判否判据，[Implementation](implementation.md)报告候选进度；本文不得把某轮review pass外推为完整bridge、其它model／effort或部署状态。
 
@@ -54,6 +55,12 @@ Task 2 review为Spec／Quality PASS且0 findings；Task 4、Task 5除上表defer
 - Replay判别控制：把send／count source snapshot临时恢复为旧`dict(context.client_headers)`后，新test精确在第二次handle以`beta-required`失败；恢复后1 passed。该控制证明test打到request-lifetime source header接缝，不冒充其它retry行为。
 - 真实cassette仍只证明本轮PONG场景在gpt-5.5对explicit high返回可回放high stream；没有追加真实调用。
 
-## 等待R2核验
+## Final scoped R2结论
 
-Final scoped R2只核：R1七项finding、`505d62f..ed6addd`fix diff、Spec／Acceptance correction、candidate config文档、Implementation与本处置账同步，以及这些修复触及的相邻合同。若R2确认全部addressed且无new breakage，再把本文status改为closed、补R2 counts与报告链接；之后仍须在exact candidate HEAD运行final full suite，不能把R2静态review替代测试。
+R2按限定范围确认R1七项全部`ADDRESSED`、Spec／Quality／docs sync PASS、`NEW_BREAKAGE: none`，且逐条维持六条未采纳路线；候选可以进入exact-HEAD full verification，无需再扩展review。
+
+R2另列三个“最没把握但不构成finding”的判断，均`no_change_needed`：候选配置文档在target writer语境中用Anthropic字段名`max_tokens`是准确的，不在评审后改成双字段措辞；REQ-05A source-header合同与REL-01 replay合同已经组合推出per-message beta replay，Acceptance不枚举每一个跨域组合；`RequestContext`本来是可写记录，独立dict与“不被path policy重绑定”足以形成当前snapshot合同，不引入物理不可变容器。这些路线若未来有新的用户需求或实际failure再重开，不以本轮不改制造永久禁令。
+
+## 等待full verification
+
+只剩在精确`ed6addd`运行项目规定的full Ruff、Pyright和pytest。通过后本文status改为`closed`并记录结果；失败则按实际错误保持open，不把scoped R2静态PASS替代测试。
