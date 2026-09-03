@@ -1,6 +1,6 @@
 # Effort translation closeout
 
-- status：terminal-update-awaiting-final-check
+- status：terminal
 - work_unit：2026-09-03 Anthropic Messages ↔ OpenAI Responses request-level effort translation
 - transcript_harvest：[session harvest](260903-effort-translation-session-harvest.md)
 - behavior_authority：[current Spec](../spec.md)
@@ -12,7 +12,7 @@
 - `main@4b7d74f`以一个whole-feature squash交付双向effort翻译：target Anthropic thinking profiles、统一`ThinkingEffortIntent`、Anthropic→Responses与Responses→Anthropic effort mapping、逐消息effort、nested residual、send／count、profile facts持久化、live recorder修复与explicit-high cassette。
 - Reviewed source由`archive/260903-effort-translation@ed6addd`精确保留；`worktree-effort-translation@ed6addd`保持clean并继续保留。Main squash与reviewed source的完整tree OID同为`4c71bc029e6ad5cef001c2e874f9930039604bcd`，`git diff 4b7d74f ed6addd`为空。
 - 用户可摘取的配置说明位于`.dev/human-controlled-docs-candidates/effort-thinking-profiles-config-example.md`；它明确标为无效力候选，未修改`docs/.human-controlled/`。
-- `.dev`中的Spec、Acceptance、Implementation、terminal plan、三份review disposition及23份截至R2的评审／实施报告已提交；本closeout另外归档session harvest与当前等待final check的closeout report。
+- `.dev`中的Spec、Acceptance、Implementation、terminal plan、三份review disposition及23份截至R2的评审／实施报告已提交；本closeout另外归档session harvest、closeout R1～R4与本terminal report。
 
 ## 2. 验证与证据边界
 
@@ -98,7 +98,7 @@
 - 时序敏感的首块前replay使用确定性torn stream fixture，并以旧header行为mutation证明判据命中；不把单次live cassette当稳定时序test。
 - 改名／删除legacy effort resolver已在Task 3精确symbol scan与final reviewer legacy scan中零命中；本closeout没有再执行blanket rename／delete。
 - Code review disposition无open／disputed／pending finding，六条未采纳路线与R2三个`no_change_needed`均经final reviewer明确裁决。
-- Closeout R1与scoped R2已覆盖本报告、session harvest、Acceptance、两份早期disposition、terminal plan、Implementation、candidate status及final-fix receiver；R1三项finding均由R2确认`ADDRESSED`。Memory精确处置已完成。Terminal check R3确认memory移除，但发现job marker漏分两份预创建commit-message文件并拒绝terminal；该行已修为20项，38项总集重新对账。唯一尚未关闭的门是对TERM-MIN-01修正做scoped recheck；通过后只需把本报告status改为`terminal`、记录该recheck并把Task #18标completed。
+- Closeout R1与scoped R2覆盖本报告、session harvest、Acceptance、两份早期disposition、terminal plan、Implementation、candidate status及final-fix receiver；R1三项finding均由R2确认`ADDRESSED`。Memory精确处置已完成。Terminal check R3发现job marker漏分两份预创建commit-message文件并拒绝terminal；修正后R4确认`TERM-MIN-01: ADDRESSED`、38／20 marker verified、`NEW_BREAKAGE: none`、0 blocker／major／minor／nit，并明确批准本机械terminal update无需再review。Task #18已标completed，所有本工作单元closeout门已关闭。
 
 ## 10. Closeout review contract
 
@@ -122,3 +122,9 @@ Fresh reviewer必须独立核：交付commit／archive／tree equality；full ve
 - 修正后`find`与`fd --hidden --no-ignore`的38项排序集合再次逐项diff为空；独立Python从实际目录派生并断言`total=38`与`commit_messages=20`。
 
 Status继续保持`terminal-update-awaiting-final-check`。下一步只复核TERM-MIN-01、38项集合与本节记录；通过前不标Task completed、不发完成信号。
+
+## 13. Final scoped R4与terminal state
+
+[Final scoped R4](260903-review-effort-translation-closeout-r4.md)确认`TERM-MIN-01: ADDRESSED`、job tmp的`total=38`／`commit_messages=20`、`JOB_MARKER_VERIFIED: YES`、`NEW_BREAKAGE: none`，最终为0 blocker／0 major／0 minor／0 nit。Reviewer精确批准：本报告status改为`terminal`、自称改为terminal report、记录R4、Task #18标completed，并只提交本报告与R4原件；这些机械值已被独立固定，执行后无需再review或重跑full suite。
+
+Terminal update已按批准清单执行。没有再修改代码、Spec、Acceptance、memory、marker、其它temp、branch、worktree或运行状态；没有push、deploy、cutover、第三次live call或`4141`操作。
