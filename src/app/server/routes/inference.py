@@ -6,12 +6,13 @@ Split out of `app.server.pipeline_app` on 2026-08-22. That module is the app fac
 import asyncio
 import sys
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Coroutine
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, cast
 from uuid import uuid4
 
+import anyio
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.requests import ClientDisconnect
@@ -72,7 +73,12 @@ from app.streaming.deadline import (
     with_deadline_at,
 )
 from app.streaming.idle_timeout import with_idle_timeout
-from app.streaming.keepalive import finish_stream_cleanup, raise_with_cleanup_under
+from app.streaming.keepalive import (
+    find_cancellation,
+    finish_async_cleanup,
+    finish_stream_cleanup,
+    raise_with_cleanup_under,
+)
 
 
 async def serve(request: Request) -> Response:
@@ -193,6 +199,140 @@ def _upstream_error_body(error: BaseException) -> bytes | None:
     return None
 
 
+def _plain_cancellation(error: BaseException | None) -> bool:
+    """Whether an exit is only the task group's expected cancellation."""
+    return bool(
+        isinstance(error, asyncio.CancelledError)
+        and error.__cause__ is None
+        and error.__context__ is None
+        and not getattr(error, "__notes__", None)
+    )
+
+
+def _raise_with_secondaries(
+    primary: BaseException,
+    secondaries: list[BaseException],
+) -> None:
+    distinct = [error for error in secondaries if error is not primary]
+    if not distinct:
+        raise primary
+    secondary: BaseException = (
+        distinct[0]
+        if len(distinct) == 1
+        else BaseExceptionGroup("concurrent request cleanup failed", distinct)
+    )
+    raise_with_cleanup_under(primary, secondary)
+
+
+async def _discard_prepared_response(
+    response: Response,
+    *,
+    primary: BaseException | None,
+) -> list[BaseException]:
+    close = getattr(response, "aclose", None)
+    if not callable(close):
+        return []
+    cleanup_error, cleanup_cancellation = await finish_async_cleanup(
+        cast(Callable[[], Coroutine[Any, Any, None]], close),
+        primary=primary,
+    )
+    return [
+        error
+        for error in (cleanup_error, cleanup_cancellation)
+        if error is not None and error is not primary
+    ]
+
+
+async def _run_dispatch_while_connected(
+    receive: Receive,
+    operation: Callable[[], Awaitable[Response]],
+) -> Response:
+    """Run response preparation alongside the downstream disconnect listener.
+
+    The request-body reader owns `receive` until it has consumed the whole body. This helper starts afterwards and does not hand a Response over until its listener has stopped cleanly; a StreamingResponse then becomes the next owner of the same receive channel.
+    """
+    winner = [""]
+    results: list[Response] = []
+    operation_error: BaseException | None = None
+    listener_error: BaseException | None = None
+    handed_off = False
+
+    try:
+        async with anyio.create_task_group() as task_group:
+
+            def stop(label: str) -> None:
+                if not winner[0]:
+                    winner[0] = label
+                task_group.cancel_scope.cancel()
+
+            async def run_operation() -> None:
+                nonlocal operation_error
+                try:
+                    results.append(await operation())
+                except BaseException as error:
+                    operation_error = error
+                finally:
+                    stop("operation")
+
+            async def listen_for_disconnect() -> None:
+                nonlocal listener_error
+                try:
+                    while True:
+                        message = await receive()
+                        if message["type"] == "http.disconnect":
+                            stop("disconnect")
+                            return
+                except BaseException as error:
+                    listener_error = error
+                    stop("listener")
+
+            task_group.start_soon(run_operation)
+            task_group.start_soon(listen_for_disconnect)
+
+        if winner[0] == "operation" and operation_error is None:
+            if len(results) != 1:
+                raise RuntimeError("dispatch completed without exactly one response")
+            if listener_error is None or _plain_cancellation(listener_error):
+                handed_off = True
+                return results[0]
+            _raise_with_secondaries(listener_error, [])
+
+        if winner[0] == "operation":
+            if operation_error is None:
+                raise RuntimeError("dispatch exited without a result or failure")
+            operation_secondaries: list[BaseException] = (
+                []
+                if listener_error is None or _plain_cancellation(listener_error)
+                else [listener_error]
+            )
+            _raise_with_secondaries(operation_error, operation_secondaries)
+
+        primary: BaseException
+        if winner[0] == "disconnect":
+            primary = ClientDisconnect()
+        elif winner[0] == "listener" and listener_error is not None:
+            primary = listener_error
+        else:
+            raise RuntimeError("dispatch and disconnect listener ended without a winner")
+
+        secondaries: list[BaseException] = []
+        if operation_error is not None and not _plain_cancellation(operation_error):
+            secondaries.append(operation_error)
+        _raise_with_secondaries(primary, secondaries)
+        raise AssertionError("unreachable")
+    finally:
+        if results and not handed_off:
+            cleanup_primary = sys.exception()
+            cleanup_errors = await _discard_prepared_response(
+                results[0],
+                primary=cleanup_primary,
+            )
+            if cleanup_errors:
+                if cleanup_primary is None:
+                    cleanup_primary = cleanup_errors.pop(0)
+                _raise_with_secondaries(cleanup_primary, cleanup_errors)
+
+
 async def _dispatch(
     request: Request,
     chain: Chain,
@@ -208,7 +348,26 @@ async def _dispatch(
     )
     # Consumed here so the request is fully read before anything can return, which is what lets a rejected body be reported at all. Its size is deliberately **not** what `↑` reports — see `log_completion`. The request is already registered, so a client that never finishes sending is visible for however long it takes.
     await request.body()
+    return await _run_dispatch_while_connected(
+        request.receive,
+        lambda: _dispatch_after_body(
+            request,
+            chain,
+            trace,
+            completion,
+            client_deadline_at=client_deadline_at,
+        ),
+    )
 
+
+async def _dispatch_after_body(
+    request: Request,
+    chain: Chain,
+    trace: RequestTrace,
+    completion: RequestCompletionCoordinator,
+    *,
+    client_deadline_at: float | None,
+) -> Response:
     # The template rather than the URL: once a path carries parameters the two differ, and only the template identifies the route. The router records which of its own paths answered, so this is that answer rather than a second match of our own. Reading it also survives a mount prefix — measured, `--root-path /api` made `route_for_path(request.url.path)` miss on every route and answer 404 from the branch below.
     matched = request.scope.get("route")
     route = route_for_path(getattr(matched, "path", None) or request.url.path)
@@ -1056,6 +1215,10 @@ class _AccountedStreamingResponse(StreamingResponse):
         )
         self._accounting = accounting
 
+    async def aclose(self) -> None:
+        """Release a prepared response that never crossed into ASGI delivery."""
+        await self._cleanup.aclose()
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         self._accounting.completion.mark_response_ready(self.status_code)
 
@@ -1178,27 +1341,6 @@ async def _counted_upstream(chunks: AsyncIterator[bytes], chain: Chain, request_
             raise cleanup_error
 
 
-def _find_cancellation(error: BaseException) -> asyncio.CancelledError | None:
-    seen: set[int] = set()
-    pending = [error]
-    while pending:
-        current = pending.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-        if isinstance(current, asyncio.CancelledError):
-            return current
-        pending.extend(
-            nested
-            for nested in (current.__cause__, current.__context__)
-            if nested is not None
-        )
-        if isinstance(current, BaseExceptionGroup):
-            group = cast(BaseExceptionGroup[BaseException], current)
-            pending.extend(group.exceptions)
-    return None
-
-
 async def _tracked_delivery(chunks: AsyncGenerator[bytes], accounting: _StreamAccounting) -> AsyncGenerator[bytes]:
     """Forward the delivery stream untouched and account for the request when it ends.
 
@@ -1222,7 +1364,7 @@ async def _tracked_delivery(chunks: AsyncGenerator[bytes], accounting: _StreamAc
         # A cancellation can enter a suspended `anext()` and be replaced by the source's failing `finally`. That replacement is still cleanup, identified by the cancellation in its exception chain; treating it as runtime failure revoked terminal units whose send had already returned.
         current_task = asyncio.current_task()
         replaced_cancellation = (
-            _find_cancellation(error)
+            find_cancellation(error)
             if current_task is not None and current_task.cancelling() > 0
             else None
         )
@@ -1255,7 +1397,7 @@ async def _tracked_delivery(chunks: AsyncGenerator[bytes], accounting: _StreamAc
         # Settle the runtime ending and monotonic completion frontier before classifying cleanup. Once a native terminal send returned, the cleanup failure is post-delivery evidence, not a reason to erase that historical fact.
         accounting.settle()
         primary_cancellation = (
-            _find_cancellation(primary) if primary is not None else None
+            find_cancellation(primary) if primary is not None else None
         )
         if (
             primary_cancellation is not None

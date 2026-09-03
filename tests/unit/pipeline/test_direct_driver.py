@@ -2,6 +2,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
+import anyio
 import httpx2
 import pytest
 
@@ -125,6 +126,39 @@ class UnreadStream(httpx2.AsyncByteStream):
         yield b"unread"
 
 
+class CheckpointCloseStream(httpx2.AsyncByteStream):
+    def __init__(self) -> None:
+        self.close_started = asyncio.Event()
+        self.close_finished = asyncio.Event()
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        yield b"unread"
+
+    async def aclose(self) -> None:
+        self.close_started.set()
+        # AnyIO level cancellation is delivered again at this checkpoint unless response cleanup runs in its own task.
+        await asyncio.sleep(0)
+        self.close_finished.set()
+
+
+class FailingCloseStream(CheckpointCloseStream):
+    async def aclose(self) -> None:
+        self.close_started.set()
+        await asyncio.sleep(0)
+        raise RuntimeError("response close failed")
+
+
+class SlowCloseStream(CheckpointCloseStream):
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = asyncio.Event()
+
+    async def aclose(self) -> None:
+        self.close_started.set()
+        await self.release.wait()
+        self.close_finished.set()
+
+
 class RejectingRateLimiter:
     async def acquire(self) -> float:
         return 0.0
@@ -146,11 +180,12 @@ def routing_registry(provider: FakeProvider | None = None) -> ProviderRegistry:
 
 @pytest.mark.asyncio
 async def test_unconsumed_stream_status_body_stays_unobserved() -> None:
+    owned = CheckpointCloseStream()
     provider = FakeProvider(
         responses=[
             httpx2.Response(
                 429,
-                stream=UnreadStream(),
+                stream=owned,
                 headers={"content-type": "application/json"},
             )
         ]
@@ -172,6 +207,67 @@ async def test_unconsumed_stream_status_body_stays_unobserved() -> None:
     assert outcome.error.cause.status_code == 429
     assert outcome.error.cause.body_bytes == b""
     assert outcome.error.cause.body_observed is False
+    assert owned.close_started.is_set()
+    assert owned.close_finished.is_set()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_retry_cleanup_stays_cancellation() -> None:
+    owned = SlowCloseStream()
+    provider = FakeProvider(
+        responses=[httpx2.Response(429, stream=owned)]
+    )
+    direct = DirectDriver(
+        ModelEndpoint.ANTHROPIC_MESSAGES,
+        provider,
+        SubscriberRegistry[RequestContext]().freeze(),
+        budget=RetryBudget(max_total=1),
+        rate_limiter=cast(Any, RejectingRateLimiter()),
+    )
+    request = context()
+    request.stream = True
+    running = asyncio.create_task(direct.run(request))
+    await asyncio.wait_for(owned.close_started.wait(), timeout=1)
+
+    running.cancel()
+    owned.release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+    assert owned.close_finished.is_set()
+    assert len(provider.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_deadline_during_retry_cleanup_stays_a_timeout() -> None:
+    owned = SlowCloseStream()
+    provider = FakeProvider(
+        responses=[httpx2.Response(429, stream=owned)]
+    )
+    direct = DirectDriver(
+        ModelEndpoint.ANTHROPIC_MESSAGES,
+        provider,
+        SubscriberRegistry[RequestContext]().freeze(),
+        budget=RetryBudget(max_total=1),
+        rate_limiter=cast(Any, RejectingRateLimiter()),
+    )
+    request = context()
+    request.stream = True
+
+    async def run() -> None:
+        async with asyncio.timeout(0.05):
+            await direct.run(request)
+
+    running = asyncio.create_task(run())
+    await asyncio.wait_for(owned.close_started.wait(), timeout=1)
+    await asyncio.sleep(0.06)
+    owned.release.set()
+
+    with pytest.raises(TimeoutError):
+        await running
+
+    assert owned.close_finished.is_set()
+    assert len(provider.sent) == 1
 
 
 def test_an_unroutable_qualifier_names_the_value_not_the_key() -> None:
@@ -591,3 +687,193 @@ async def test_a_cancellation_passes_through_rather_than_being_answered() -> Non
     with pytest.raises(TimeoutError):
         async with asyncio.timeout(0.05):
             await driver(FakeProvider(), registry).run(context())
+
+
+@pytest.mark.asyncio
+async def test_nested_cleanup_wrappers_cannot_turn_cancellation_into_retry_or_a_cycle() -> None:
+    class NestedCleanupProvider(FakeProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+
+        async def send(
+            self,
+            endpoint: ModelEndpoint,
+            payload: Any,
+            *,
+            model_id: str,
+            stream: bool = False,
+            extra_headers: Any = None,
+        ) -> httpx2.Response:
+            self.sent.append((endpoint, dict(payload)))
+            self.sent_headers.append(extra_headers)
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError as cancellation:
+                inner = RuntimeError("inner cleanup failure")
+                inner.__cause__ = cancellation
+                outer = PipelineRetry("outer retryable cleanup failure")
+                raise outer from inner
+            raise AssertionError("unreachable")
+
+    def assert_acyclic(root: BaseException) -> None:
+        visited: set[int] = set()
+        active: set[int] = set()
+
+        def visit(error: BaseException) -> None:
+            error_id = id(error)
+            assert error_id not in active, f"exception graph cycles through {error!r}"
+            if error_id in visited:
+                return
+            visited.add(error_id)
+            active.add(error_id)
+            linked = [
+                child
+                for child in (error.__cause__, error.__context__)
+                if child is not None
+            ]
+            if isinstance(error, BaseExceptionGroup):
+                group = cast(BaseExceptionGroup[BaseException], error)
+                linked.extend(group.exceptions)
+            for child in linked:
+                visit(child)
+            active.remove(error_id)
+
+        visit(root)
+
+    provider = NestedCleanupProvider()
+    running = asyncio.create_task(driver(provider).run(context()))
+    await asyncio.wait_for(provider.started.wait(), timeout=1)
+    running.cancel()
+
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await running
+
+    cancellation = raised.value
+    outer = cancellation.__cause__
+    assert isinstance(outer, PipelineRetry)
+    assert str(outer) == "outer retryable cleanup failure"
+    inner = outer.__cause__
+    assert isinstance(inner, RuntimeError)
+    assert str(inner) == "inner cleanup failure"
+    assert inner.__cause__ is None
+    assert len(provider.sent) == 1
+    assert_acyclic(cancellation)
+
+
+@pytest.mark.asyncio
+async def test_cancellation_closes_a_response_the_driver_has_not_handed_off() -> None:
+    """The driver owns the response until its success subscribers finish.
+
+    A downstream disconnect can cancel this exact interval: provider send has returned, but the route has not received the response yet. Clearing `outcome.response` without closing it loses the only owner and leaves its connection checked out.
+    """
+    owned = CheckpointCloseStream()
+    response = httpx2.Response(200, stream=owned)
+    entered_subscriber = asyncio.Event()
+    registry = SubscriberRegistry[RequestContext]()
+
+    async def hold_response(ctx: RequestContext) -> None:
+        del ctx
+        entered_subscriber.set()
+        await asyncio.Event().wait()
+
+    registry.subscribe(EVENT_REQUEST_SUCCEEDED, "hold-response", hold_response)
+
+    async def run() -> None:
+        with pytest.raises(asyncio.CancelledError):
+            await driver(FakeProvider(responses=[response]), registry).run(context())
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(run)
+        await asyncio.wait_for(entered_subscriber.wait(), timeout=1)
+        assert response.is_closed is False
+        # This is how the pre-response listener stops dispatch: AnyIO's cancelled scope, not a one-shot `Task.cancel()` from outside it.
+        task_group.cancel_scope.cancel()
+
+    assert response.is_closed is True
+    assert owned.close_started.is_set()
+    assert owned.close_finished.is_set()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_keeps_a_response_close_failure_as_its_cause() -> None:
+    owned = FailingCloseStream()
+    response = httpx2.Response(200, stream=owned)
+    entered_subscriber = asyncio.Event()
+    exits: list[BaseException] = []
+    registry = SubscriberRegistry[RequestContext]()
+
+    async def hold_response(ctx: RequestContext) -> None:
+        del ctx
+        entered_subscriber.set()
+        await asyncio.Event().wait()
+
+    registry.subscribe(EVENT_REQUEST_SUCCEEDED, "hold-response", hold_response)
+
+    async def run() -> None:
+        try:
+            await driver(FakeProvider(responses=[response]), registry).run(context())
+        except BaseException as error:
+            exits.append(error)
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(run)
+        await asyncio.wait_for(entered_subscriber.wait(), timeout=1)
+        task_group.cancel_scope.cancel()
+
+    assert len(exits) == 1
+    cancellation = exits[0]
+    assert isinstance(cancellation, asyncio.CancelledError)
+    assert isinstance(cancellation.__cause__, RuntimeError)
+    assert str(cancellation.__cause__) == "response close failed"
+    assert owned.close_started.is_set()
+
+
+@pytest.mark.asyncio
+async def test_subscriber_retry_closes_the_response_it_discarded() -> None:
+    owned = CheckpointCloseStream()
+    discarded = httpx2.Response(200, stream=owned)
+    registry = SubscriberRegistry[RequestContext]()
+    calls = 0
+
+    async def retry_once(ctx: RequestContext) -> None:
+        nonlocal calls
+        del ctx
+        calls += 1
+        if calls == 1:
+            raise PipelineRetry("retry after inspecting the response")
+
+    registry.subscribe(EVENT_REQUEST_SUCCEEDED, "retry-once", retry_once)
+    outcome = await driver(
+        FakeProvider(responses=[discarded, httpx2.Response(200)]),
+        registry,
+    ).run(context())
+
+    assert outcome.succeeded is True
+    assert outcome.attempts == 2
+    assert discarded.is_closed is True
+    assert owned.close_started.is_set()
+    assert owned.close_finished.is_set()
+
+
+@pytest.mark.asyncio
+async def test_close_failure_does_not_erase_the_subscriber_retry() -> None:
+    owned = FailingCloseStream()
+    discarded = httpx2.Response(200, stream=owned)
+    provider = FakeProvider(responses=[discarded])
+    registry = SubscriberRegistry[RequestContext]()
+
+    async def retry(ctx: RequestContext) -> None:
+        del ctx
+        raise PipelineRetry("subscriber retry")
+
+    registry.subscribe(EVENT_REQUEST_SUCCEEDED, "retry", retry)
+
+    with pytest.raises(PipelineRetry, match="subscriber retry") as raised:
+        await driver(provider, registry).run(context())
+
+    assert isinstance(raised.value.__cause__, RuntimeError)
+    assert str(raised.value.__cause__) == "response close failed"
+    assert len(provider.sent) == 1
+    assert owned.close_started.is_set()

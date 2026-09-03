@@ -15,6 +15,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
+import anyio
 import h2.errors
 import h2.events
 import httpcore2
@@ -24,6 +25,7 @@ import pytest
 import structlog
 from anthropic import AsyncAnthropic
 from fastapi import FastAPI
+from fastapi.responses import Response
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from openai import AsyncOpenAI
@@ -35,7 +37,7 @@ from starlette.types import Message
 import app.server.routes.inference as inference_route
 from app.config.schema import ModelProviderConfig, ProxyConfig
 from app.core.chain import Chain
-from app.model_provider import GithubCopilotProvider, ModelProvider
+from app.model_provider import GithubCopilotProvider, ModelDescriptor, ModelEndpoint, ModelProvider
 from app.model_provider.ghc_client import GhcApiClient, GhcClientConfig
 from app.model_provider.ghc_client.tokens import CopilotTokenManager
 from app.observability import rejection_capture
@@ -62,6 +64,7 @@ from app.pipeline.delivery.stream import (
     stream_delivery,
 )
 from app.pipeline.delivery_policy import delivery_buffer, stream_settings
+from app.pipeline.exceptions import PipelineRetry
 from app.pipeline.response_observation import ResponsesObserver
 from app.server.app_state import CHAIN_STATE_KEY
 from app.server.composition import build_chain
@@ -70,6 +73,7 @@ from app.server.pipeline_app import (
 )
 from app.server.routes.inference import (
     _AccountedStreamingResponse,  # pyright: ignore[reportPrivateUsage]
+    _run_dispatch_while_connected,  # pyright: ignore[reportPrivateUsage]
     _StreamAccounting,  # pyright: ignore[reportPrivateUsage]
     _tracked_delivery,  # pyright: ignore[reportPrivateUsage]
 )
@@ -3104,7 +3108,9 @@ async def test_response_start_failure_closes_the_unstarted_upstream_owner() -> N
         if not request_sent:
             request_sent = True
             return {"type": "http.request", "body": request_body, "more_body": False}
-        return {"type": "http.disconnect"}
+        # Keep the disconnect channel open so this test reaches its stated boundary: the response-start send fails. Pre-response disconnect has its own test below.
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
 
     async def send(message: Message) -> None:
         if message["type"] == "http.response.start":
@@ -3138,6 +3144,250 @@ async def test_response_start_failure_closes_the_unstarted_upstream_owner() -> N
     snapshot = _registry(client).observation_snapshot()
     assert snapshot.live == ()
     assert len(snapshot.completed) == 1
+
+
+async def test_disconnect_before_upstream_headers_cancels_the_dispatch() -> None:
+    """A completed request body used to leave no downstream disconnect listener.
+
+    Uvicorn marks a lost HTTP/1.1 connection disconnected and wakes `receive`, but it does not cancel the ASGI task. Waiting for an eventual response send to notice therefore leaves the abandoned dispatch free to wait and retry upstream.
+    """
+
+    class WaitingProvider:
+        name = "ghc"
+        base_url = "https://upstream.invalid"
+        catalog_refreshed_at = "2026-09-04T00:00:00+00:00"
+        available_ids = frozenset({"gpt-model"})
+        disabled_ids: frozenset[str] = frozenset()
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.cancelled = asyncio.Event()
+
+        def describe(self, model_id: str) -> ModelDescriptor | None:
+            if model_id != "gpt-model":
+                return None
+            return ModelDescriptor(
+                id=model_id,
+                endpoints=frozenset({ModelEndpoint.OPENAI_RESPONSES}),
+            )
+
+        async def refresh_catalog(self) -> bool:
+            return False
+
+        async def send(
+            self,
+            endpoint: ModelEndpoint,
+            payload: Any,
+            *,
+            model_id: str,
+            stream: bool = False,
+            extra_headers: Any = None,
+        ) -> httpx2.Response:
+            del endpoint, payload, model_id, stream, extra_headers
+            self.calls += 1
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError as cancellation:
+                self.cancelled.set()
+                # A transport cleanup may replace cancellation with a group that also contains something the retry taxonomy normally funds. The current task is still cancelling, so this must remain one attempt; cancellation becomes primary and the residual cleanup group must stay structured without pointing back to it.
+                grouped = BaseExceptionGroup(
+                    "provider cleanup replaced cancellation",
+                    [cancellation, PipelineRetry("retryable cleanup failure")],
+                )
+                grouped.add_note("provider cleanup note")
+                raise grouped from OSError("provider cleanup root")
+            raise AssertionError("unreachable")
+
+        async def count_tokens(
+            self, payload: Any, *, model_id: str
+        ) -> httpx2.Response:
+            del payload, model_id
+            raise NotImplementedError
+
+    provider = WaitingProvider()
+    config = ProxyConfig.model_validate(
+        {
+            "model_providers": {"ghc": {"type": "github_copilot"}},
+            "default_model_provider": "ghc",
+            # A positive budget distinguishes cancellation from an UpstreamError: the former must not open a replacement attempt.
+            "upstream_request_retry": {"max_total": 9},
+            "client_delivery": {"client_request_deadline": 30},
+            "upstream_request_timeouts": {"upstream_request_deadline": 30},
+        }
+    )
+    request_body = orjson.dumps(
+        {"model": "gpt-model", "input": [], "stream": True}
+    )
+    request_sent = False
+    receive_calls = 0
+
+    async def receive() -> Message:
+        nonlocal request_sent, receive_calls
+        receive_calls += 1
+        if not request_sent:
+            request_sent = True
+            return {
+                "type": "http.request",
+                "body": request_body,
+                "more_body": False,
+            }
+        return {"type": "http.disconnect"}
+
+    async def send(_: Message) -> None:
+        return None
+
+    scope: dict[str, Any] = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "https",
+        "path": "/v1/responses",
+        "raw_path": b"/v1/responses",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"host", b"testserver"),
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(request_body)).encode()),
+        ],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 443),
+        "state": {},
+    }
+
+    async with httpx2.AsyncClient() as http_client:
+        chain = build_chain(
+            config,
+            http_client=http_client,
+            providers={"ghc": cast(ModelProvider, provider)},
+        )
+        app = create_pipeline_app(chain)
+
+        with pytest.raises(ClientDisconnect) as raised:
+            async with asyncio.timeout(1):
+                await cast(Any, app)(scope, receive, send)
+
+    cancellation = raised.value.__cause__
+    assert isinstance(cancellation, asyncio.CancelledError)
+    residual_value = cancellation.__cause__
+    assert isinstance(residual_value, BaseExceptionGroup)
+    residual = cast(BaseExceptionGroup[BaseException], residual_value)
+    assert residual.message == "provider cleanup replaced cancellation"
+    assert isinstance(residual.__cause__, OSError)
+    assert str(residual.__cause__) == "provider cleanup root"
+    assert getattr(residual, "__notes__", None) == ["provider cleanup note"]
+    assert len(residual.exceptions) == 1
+    assert isinstance(residual.exceptions[0], PipelineRetry)
+    assert str(residual.exceptions[0]) == "retryable cleanup failure"
+    assert cancellation not in residual.exceptions
+    assert receive_calls == 2
+    assert provider.cancelled.is_set()
+    assert provider.calls == 1
+    snapshot = chain.active_requests.observation_snapshot()
+    assert snapshot.live == ()
+    assert len(snapshot.completed) == 1
+    record = snapshot.completed[0]
+    assert record.status == "gone"
+    assert record.delivery.failure is not None
+    assert record.delivery.failure.category.value == "disconnect"
+
+
+async def test_disconnect_preserves_an_operation_cleanup_failure() -> None:
+    operation_started = asyncio.Event()
+
+    async def operation() -> Response:
+        operation_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError as cancellation:
+            raise cancellation from RuntimeError("operation cleanup failed")
+        raise AssertionError("unreachable")
+
+    async def receive() -> Message:
+        await operation_started.wait()
+        return {"type": "http.disconnect"}
+
+    with pytest.raises(ClientDisconnect) as raised:
+        await _run_dispatch_while_connected(receive, operation)
+
+    cancellation = raised.value.__cause__
+    assert isinstance(cancellation, asyncio.CancelledError)
+    assert isinstance(cancellation.__cause__, RuntimeError)
+    assert str(cancellation.__cause__) == "operation cleanup failed"
+
+
+async def test_listener_cleanup_failure_closes_the_unhanded_response() -> None:
+    class ReceiveCleanupError(RuntimeError):
+        pass
+
+    class PreparedResponse(Response):
+        def __init__(self) -> None:
+            super().__init__()
+            self.close_finished = asyncio.Event()
+
+        async def aclose(self) -> None:
+            await asyncio.sleep(0)
+            self.close_finished.set()
+
+    prepared = PreparedResponse()
+
+    async def operation() -> Response:
+        return prepared
+
+    async def receive() -> Message:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError as cancellation:
+            raise ReceiveCleanupError("receive cleanup failed") from cancellation
+        raise AssertionError("unreachable")
+
+    with pytest.raises(ReceiveCleanupError, match="receive cleanup failed"):
+        await _run_dispatch_while_connected(receive, operation)
+
+    assert prepared.close_finished.is_set()
+
+
+async def test_outer_cancellation_during_listener_cleanup_closes_the_response() -> None:
+    class PreparedResponse(Response):
+        def __init__(self) -> None:
+            super().__init__()
+            self.close_finished = asyncio.Event()
+
+        async def aclose(self) -> None:
+            await asyncio.sleep(0)
+            self.close_finished.set()
+
+    prepared = PreparedResponse()
+    listener_cleanup_started = asyncio.Event()
+    release_listener = asyncio.Event()
+
+    async def operation() -> Response:
+        return prepared
+
+    async def receive() -> Message:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            listener_cleanup_started.set()
+            # Keep task-group __aexit__ open until a second, outer cancellation has landed on the helper task.
+            with anyio.CancelScope(shield=True):
+                await release_listener.wait()
+            raise
+        raise AssertionError("unreachable")
+
+    running = asyncio.create_task(
+        _run_dispatch_while_connected(receive, operation)
+    )
+    await asyncio.wait_for(listener_cleanup_started.wait(), timeout=1)
+    running.cancel()
+    await asyncio.sleep(0)
+    release_listener.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+    assert prepared.close_finished.is_set()
 
 
 def test_a_stream_that_did_terminate_is_still_reported_as_one(
