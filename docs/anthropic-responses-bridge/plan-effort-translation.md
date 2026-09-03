@@ -10,6 +10,13 @@
 
 **Spec:** `.dev/docs/anthropic-responses-bridge/spec.md` 的「Request-level ThinkingEffortIntent」与双向字段矩阵；验收转录为 `.dev/docs/anthropic-responses-bridge/acceptance.md` 的 REQ-05A。实现状态由 `.dev/docs/anthropic-responses-bridge/implementation.md` 维护。
 
+## 执行状态（2026-09-03）
+
+- **状态**：Tasks 1～5全部实施、whole-branch final review与唯一fix wave收口、full Ruff／Pyright／pytest通过，净语义已进入main；current事实与证据见[Implementation](implementation.md)和[代码评审处置](review-disposition-effort-translation-code.md)。下文checkbox保留为本次执行配方与可追溯计划，不再表示open待办。
+- **装位**：reviewed source由`archive/260903-effort-translation@ed6addd`保留，squash结果为`main@4b7d74f`；完整tree一致。
+- **实际偏离**：Task 1 Files遗漏了最终profile接线所需的`src/app/pipeline/driver.py`，执行时只补send／count两处参数；Task 5为取得真实explicit-high cassette，增加multi-provider后失效的recorder统一transport与零interaction保护；final review另发现transparent replay丢source beta header及Spec同pattern override文字漂移，分别以request-lifetime snapshot和living Spec／Acceptance纠正收口。三项均记录在[代码评审处置](review-disposition-effort-translation-code.md)，没有删除或缩减原计划功能。
+- **边界**：真实cassette只校准PONG＋gpt-5.5＋explicit high，不外推其它model／effort；没有push、deployment或`4141`cutover。
+
 ## Global Constraints
 
 - 不修改 `docs/.human-controlled/`；配置样例建议写入 `.dev/human-controlled-docs-candidates/`，由用户自行摘取。

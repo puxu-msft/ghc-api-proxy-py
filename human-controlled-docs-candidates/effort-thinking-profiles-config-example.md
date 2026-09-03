@@ -6,7 +6,7 @@
 
 ## 一、现状：配置控制thinking形状，不控制effort档位
 
-**实现候选现状**（`worktree-effort-translation@ed6addd017f461c15abc494584e727f1badec633`，尚待final scoped review与主树集成）：`model_translation.to_anthropic_messages.thinking_profiles`是translated Responses→Anthropic Messages writer选择thinking wire shape的唯一能力来源。随包默认值见`src/app/config/bundled-config.yaml:58-79`，schema见`src/app/config/schema.py:232-259`，compile／selection见`src/app/pipeline/routing.py:377-421`。
+**实现现状**（reviewed source`archive/260903-effort-translation@ed6addd`，已squash为`main@4b7d74f`）：`model_translation.to_anthropic_messages.thinking_profiles`是translated Responses→Anthropic Messages writer选择thinking wire shape的唯一能力来源。随包默认值见`src/app/config/bundled-config.yaml:58-79`，schema见`src/app/config/schema.py:232-259`，compile／selection见`src/app/pipeline/routing.py:377-421`。
 
 Profile不设置effort。当前生成的effort来自入站Responses`reasoning.effort`：`none`要求目标能写`thinking.type=disabled`；`minimal`先近似为Anthropic`low`；`low／medium／high／xhigh／max`按目标catalog中的Anthropic-compatible档位对齐。Profile只回答同一intent应写成`adaptive`、带手工budget的`enabled`，还是`disabled`。
 

@@ -66,4 +66,5 @@ R2另列三个“最没把握但不构成finding”的判断，均`no_change_nee
 
 - consensus：Final scoped R2确认R1七项全部`ADDRESSED`、0 blocker／0 major／0 minor／0 nit、`NEW_BREAKAGE: none`；六条未采纳路线逐条维持，三个不构成finding的判断已记录`no_change_needed`，无`open`、无`disputed`、无暂定驳回。
 - verification：精确`ed6addd`的full Ruff、full Pyright与full pytest＋coverage全部通过；review与运行证据现在指向同一candidate HEAD。
-- remaining boundary：该candidate尚未squash进入main；完整bridge、其它model／effort、真实manager／cgroup与deployment状态不由本处置账升级。Main integration若发生，须按项目worktree规则保留reviewed source archive并在main组合态做相称检查；不得push或cutover。
+- integration：reviewed source由`archive/260903-effort-translation@ed6addd`精确保留，净语义已squash为`main@4b7d74f`；两者完整tree OID同为`4c71bc029e6ad5cef001c2e874f9930039604bcd`且commit-to-commit diff为空。Main-side gate复用同一tree刚取得的full verification，不对未变bytes重复运行；main index保持空，用户控制文档、Docker与实验WIP未进入提交。
+- remaining boundary：完整bridge、其它model／effort、真实manager／cgroup与deployment状态不由本处置账升级；没有push或cutover。
