@@ -540,6 +540,7 @@ def _responses_observation_and_line(
     body: dict[str, object],
     *,
     status: LogStatus = "ok",
+    thinking: tuple[str, ...] = (),
 ) -> tuple[ResponseObservation, str]:
     observer = ResponsesObserver()
     observer.observe_response(body)
@@ -552,6 +553,7 @@ def _responses_observation_and_line(
             model="gpt-model",
             status_code=200,
             stop_reason="tool_use",
+            thinking=thinking,
             dialect=ReplyDialect.RESPONSES,
         ),
         status=status,
@@ -563,8 +565,13 @@ def _responses_observation_line(
     body: dict[str, object],
     *,
     status: LogStatus = "ok",
+    thinking: tuple[str, ...] = (),
 ) -> str:
-    return _responses_observation_and_line(body, status=status)[1]
+    return _responses_observation_and_line(
+        body,
+        status=status,
+        thinking=thinking,
+    )[1]
 
 
 def _assert_output_item_identity(
@@ -574,6 +581,27 @@ def _assert_output_item_identity(
     assert observation.output_items is not None
     assert tuple(
         (item.output_index, item.type, item.name) for item in observation.output_items
+    ) == expected
+
+
+def _assert_output_item_facts(
+    observation: ResponseObservation,
+    expected: tuple[
+        tuple[int, str | None, str | None, int, bool, bool],
+        ...,
+    ],
+) -> None:
+    assert observation.output_items is not None
+    assert tuple(
+        (
+            item.output_index,
+            item.type,
+            item.name,
+            item.reasoning.summary_items,
+            item.reasoning.has_readable_summary,
+            item.reasoning.has_encrypted_content,
+        )
+        for item in observation.output_items
     ) == expected
 
 
@@ -588,6 +616,281 @@ def test_responses_observation_renders_actual_function_and_reasoning() -> None:
 
     assert line.endswith("completed function_call(Bash) reason(enc:1)")
     assert "tool_use" not in line
+
+
+def test_reasoning_before_repeated_tools_keeps_its_output_position() -> None:
+    observation, line = _responses_observation_and_line({
+        "status": "completed",
+        "output": [
+            {"type": "reasoning", "summary": [], "encrypted_content": "sealed"},
+            {"type": "function_call", "name": "Read"},
+            {"type": "function_call", "name": "Read"},
+            {"type": "function_call", "name": "Read"},
+            {"type": "function_call", "name": "Read"},
+        ],
+    })
+
+    assert line.endswith(
+        "completed reason(enc:1) function_call(Read,Read,Read,Read)"
+    )
+    _assert_output_item_facts(
+        observation,
+        (
+            (0, "reasoning", None, 0, False, True),
+            (1, "function_call", "Read", 0, False, False),
+            (2, "function_call", "Read", 0, False, False),
+            (3, "function_call", "Read", 0, False, False),
+            (4, "function_call", "Read", 0, False, False),
+        ),
+    )
+
+
+def test_reasoning_and_tools_preserve_interleaved_visible_order() -> None:
+    interleaved_observation, interleaved = _responses_observation_and_line({
+        "status": "completed",
+        "output": [
+            {"type": "reasoning", "summary": [], "encrypted_content": "sealed"},
+            {"type": "function_call", "name": "Read"},
+            {"type": "function_call", "name": "Bash"},
+            {"type": "reasoning", "summary": [{"text": "visible"}]},
+            {"type": "function_call", "name": "Read"},
+        ],
+    })
+    barrier_observation, barrier = _responses_observation_and_line({
+        "status": "completed",
+        "output": [
+            {"type": "function_call", "name": "Read"},
+            {"type": "reasoning", "summary": [], "encrypted_content": "sealed"},
+            {"type": "function_call", "name": "Bash"},
+        ],
+    })
+
+    assert interleaved.endswith(
+        "completed reason(enc:1) function_call(Read,Bash) reason(txt:1) function_call(Read)"
+    )
+    _assert_output_item_facts(
+        interleaved_observation,
+        (
+            (0, "reasoning", None, 0, False, True),
+            (1, "function_call", "Read", 0, False, False),
+            (2, "function_call", "Bash", 0, False, False),
+            (3, "reasoning", None, 1, True, False),
+            (4, "function_call", "Read", 0, False, False),
+        ),
+    )
+    assert barrier.endswith(
+        "completed function_call(Read) reason(enc:1) function_call(Bash)"
+    )
+    _assert_output_item_facts(
+        barrier_observation,
+        (
+            (0, "function_call", "Read", 0, False, False),
+            (1, "reasoning", None, 0, False, True),
+            (2, "function_call", "Bash", 0, False, False),
+        ),
+    )
+
+
+def test_reasoning_counts_only_contiguous_same_kind_runs() -> None:
+    same_observation, same = _responses_observation_and_line({
+        "status": "completed",
+        "output": [
+            {"type": "reasoning", "summary": [], "encrypted_content": "one"},
+            {"type": "reasoning", "summary": [], "encrypted_content": "two"},
+        ],
+    })
+    ordered_observation, ordered = _responses_observation_and_line({
+        "status": "completed",
+        "output": [
+            {"type": "reasoning", "summary": [{"text": "first"}]},
+            {"type": "reasoning", "summary": [], "encrypted_content": "middle"},
+            {"type": "reasoning", "summary": [{"text": "last"}]},
+        ],
+    })
+
+    assert same.endswith("completed reason(enc:2)")
+    _assert_output_item_facts(
+        same_observation,
+        (
+            (0, "reasoning", None, 0, False, True),
+            (1, "reasoning", None, 0, False, True),
+        ),
+    )
+    assert ordered.endswith(
+        "completed reason(txt:1) reason(enc:1) reason(txt:1)"
+    )
+    _assert_output_item_facts(
+        ordered_observation,
+        (
+            (0, "reasoning", None, 1, True, False),
+            (1, "reasoning", None, 0, False, True),
+            (2, "reasoning", None, 1, True, False),
+        ),
+    )
+
+
+def test_client_actions_reset_same_kind_reasoning_runs() -> None:
+    known_observation, known = _responses_observation_and_line({
+        "status": "completed",
+        "output": [
+            {"type": "reasoning", "summary": [], "encrypted_content": "before"},
+            {"type": "function_call", "name": "Read"},
+            {"type": "reasoning", "summary": [], "encrypted_content": "after"},
+        ],
+    })
+    unknown_observation, unknown = _responses_observation_and_line({
+        "status": "completed",
+        "output": [
+            {"type": "reasoning", "summary": [], "encrypted_content": "before"},
+            {"type": "some_2027_tool_call", "name": "future"},
+            {"type": "reasoning", "summary": [], "encrypted_content": "after"},
+        ],
+    })
+    anonymous_observation, anonymous = _responses_observation_and_line({
+        "status": "completed",
+        "output": [
+            {"type": "reasoning", "summary": [], "encrypted_content": "first"},
+            {"type": "function_call", "name": ""},
+            {"type": "reasoning", "summary": [], "encrypted_content": "second"},
+            {"type": "function_call", "name": None},
+            {"type": "reasoning", "summary": [], "encrypted_content": "third"},
+        ],
+    })
+
+    assert known.endswith(
+        "completed reason(enc:1) function_call(Read) reason(enc:1)"
+    )
+    _assert_output_item_facts(
+        known_observation,
+        (
+            (0, "reasoning", None, 0, False, True),
+            (1, "function_call", "Read", 0, False, False),
+            (2, "reasoning", None, 0, False, True),
+        ),
+    )
+    assert unknown.endswith(
+        "completed reason(enc:1) client_action(some_2027_tool_call?) reason(enc:1)"
+    )
+    _assert_output_item_facts(
+        unknown_observation,
+        (
+            (0, "reasoning", None, 0, False, True),
+            (1, "some_2027_tool_call", "future", 0, False, False),
+            (2, "reasoning", None, 0, False, True),
+        ),
+    )
+    assert anonymous.endswith(
+        "completed reason(enc:1) function_call reason(enc:1) function_call reason(enc:1)"
+    )
+    _assert_output_item_facts(
+        anonymous_observation,
+        (
+            (0, "reasoning", None, 0, False, True),
+            (1, "function_call", "", 0, False, False),
+            (2, "reasoning", None, 0, False, True),
+            (3, "function_call", None, 0, False, False),
+            (4, "reasoning", None, 0, False, True),
+        ),
+    )
+
+
+def test_reasoning_prefers_readable_summary_when_both_facts_exist() -> None:
+    observation, line = _responses_observation_and_line({
+        "status": "completed",
+        "output": [
+            {
+                "type": "reasoning",
+                "summary": [{"text": "visible"}],
+                "encrypted_content": "sealed",
+            }
+        ],
+    })
+
+    assert line.endswith("completed reason(txt:1)")
+    assert "reason(enc" not in line
+    _assert_output_item_facts(
+        observation,
+        ((0, "reasoning", None, 1, True, True),),
+    )
+
+
+def test_invisible_items_do_not_break_reasoning_runs() -> None:
+    observation, line = _responses_observation_and_line({
+        "status": "completed",
+        "output": [
+            {"type": "reasoning", "summary": [], "encrypted_content": "before"},
+            {"type": "message"},
+            {"type": "reasoning", "summary": []},
+            {"type": "web_search_call"},
+            {"type": "reasoning", "summary": [], "encrypted_content": "after"},
+        ],
+    })
+
+    assert line.endswith("completed reason(enc:2)")
+    _assert_output_item_facts(
+        observation,
+        (
+            (0, "reasoning", None, 0, False, True),
+            (1, "message", None, 0, False, False),
+            (2, "reasoning", None, 0, False, False),
+            (3, "web_search_call", None, 0, False, False),
+            (4, "reasoning", None, 0, False, True),
+        ),
+    )
+
+
+def test_observed_item_sequences_suppress_legacy_reasoning_fallback() -> None:
+    legacy = ("enc",)
+    empty_observation, empty = _responses_observation_and_line(
+        {"status": "completed", "output": []},
+        thinking=legacy,
+    )
+    invisible_observation, invisible = _responses_observation_and_line(
+        {
+            "status": "completed",
+            "output": [
+                {"type": "message"},
+                {"type": "web_search_call"},
+                {"type": "reasoning", "summary": []},
+            ],
+        },
+        thinking=legacy,
+    )
+    unavailable_observation, unavailable = _responses_observation_and_line(
+        {"status": "completed"},
+        thinking=legacy,
+    )
+    visible_observation, visible = _responses_observation_and_line(
+        {
+            "status": "completed",
+            "output": [
+                {"type": "reasoning", "summary": [], "encrypted_content": "sealed"}
+            ],
+        },
+        thinking=legacy,
+    )
+
+    assert empty.endswith("completed")
+    assert "reason(" not in empty
+    _assert_output_item_facts(empty_observation, ())
+    assert invisible.endswith("completed")
+    assert "reason(" not in invisible
+    _assert_output_item_facts(
+        invisible_observation,
+        (
+            (0, "message", None, 0, False, False),
+            (1, "web_search_call", None, 0, False, False),
+            (2, "reasoning", None, 0, False, False),
+        ),
+    )
+    assert unavailable.endswith("completed reason(enc:1)")
+    assert unavailable_observation.output_items is None
+    assert visible.endswith("completed reason(enc:1)")
+    assert visible.count("reason(enc:1)") == 1
+    _assert_output_item_facts(
+        visible_observation,
+        ((0, "reasoning", None, 0, False, True),),
+    )
 
 
 def test_responses_observation_does_not_call_a_custom_action_a_function() -> None:
@@ -663,27 +966,27 @@ def test_responses_observation_groups_only_adjacent_actual_type_runs() -> None:
     )
 
 
-def test_non_client_items_do_not_break_the_displayed_action_run() -> None:
+def test_invisible_non_client_items_do_not_break_the_displayed_action_run() -> None:
     observation, line = _responses_observation_and_line({
         "status": "completed",
         "output": [
             {"type": "function_call", "name": "Read"},
-            {"type": "reasoning", "summary": [], "encrypted_content": "sealed"},
+            {"type": "reasoning", "summary": []},
             {"type": "message"},
             {"type": "web_search_call"},
             {"type": "function_call", "name": "Bash"},
         ],
     })
 
-    assert line.endswith("completed function_call(Read,Bash) reason(enc:1)")
-    _assert_output_item_identity(
+    assert line.endswith("completed function_call(Read,Bash)")
+    _assert_output_item_facts(
         observation,
         (
-            (0, "function_call", "Read"),
-            (1, "reasoning", None),
-            (2, "message", None),
-            (3, "web_search_call", None),
-            (4, "function_call", "Bash"),
+            (0, "function_call", "Read", 0, False, False),
+            (1, "reasoning", None, 0, False, False),
+            (2, "message", None, 0, False, False),
+            (3, "web_search_call", None, 0, False, False),
+            (4, "function_call", "Bash", 0, False, False),
         ),
     )
 

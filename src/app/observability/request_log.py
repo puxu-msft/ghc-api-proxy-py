@@ -30,6 +30,7 @@ from app.pipeline.hand_over import one_line
 from app.pipeline.response_action import ClientActionRequirement
 from app.pipeline.response_observation import (
     JsonAvailability,
+    OutputItemSummary,
     ResponseAvailability,
     ResponseObservation,
 )
@@ -247,12 +248,22 @@ def inert_token(value: str, *, limit: int = 120) -> str:
     return "".join(encoded)
 
 
+def _reasoning_kind(item: OutputItemSummary) -> str | None:
+    if item.type != "reasoning":
+        return None
+    if item.reasoning.has_readable_summary:
+        return "txt"
+    if item.reasoning.has_encrypted_content:
+        return "enc"
+    return None
+
+
 def format_response_observation(
     observation: ResponseObservation,
     *,
     color: bool = False,
 ) -> list[str]:
-    """Responses' own terminal status and the actual items that require client action."""
+    """Responses' own terminal status and visible items in output order."""
     if (
         observation.source_protocol != "openai-responses"
         or observation.availability is not ResponseAvailability.OBSERVED
@@ -285,62 +296,78 @@ def format_response_observation(
     elif status == "completed":
         parts.append(paint("completed", GREEN, color=color))
 
-    run_type: str | None = None
-    run_label = ""
-    run_names: list[str] = []
+    tool_run_type: str | None = None
+    tool_run_label = ""
+    tool_run_names: list[str] = []
+    reason_run_kind: str | None = None
+    reason_run_count = 0
 
-    def flush_run() -> None:
-        nonlocal run_type, run_label, run_names
-        if run_type is None:
+    def flush_tool_run() -> None:
+        nonlocal tool_run_type, tool_run_label, tool_run_names
+        if tool_run_type is None:
             return
-        parts.append(f"{run_label}({_painted_tools(run_names, color=color)})")
-        run_type = None
-        run_label = ""
-        run_names = []
+        parts.append(
+            f"{tool_run_label}({_painted_tools(tool_run_names, color=color)})"
+        )
+        tool_run_type = None
+        tool_run_label = ""
+        tool_run_names = []
+
+    def flush_reason_run() -> None:
+        nonlocal reason_run_kind, reason_run_count
+        if reason_run_kind is None:
+            return
+        parts.append(
+            paint(
+                f"{REASONING_WORD[ReplyDialect.RESPONSES]}({reason_run_kind}:{reason_run_count})",
+                DIM,
+                color=color,
+            )
+        )
+        reason_run_kind = None
+        reason_run_count = 0
 
     for item in observation.output_items or ():
+        reasoning_kind = _reasoning_kind(item)
+        if reasoning_kind is not None:
+            flush_tool_run()
+            if reason_run_kind == reasoning_kind:
+                reason_run_count += 1
+                continue
+            flush_reason_run()
+            reason_run_kind = reasoning_kind
+            reason_run_count = 1
+            continue
+
         requirement = item.client_action.requirement
         if requirement is ClientActionRequirement.NOT_REQUIRED:
             continue
+        flush_reason_run()
         raw_type = item.type or ""
         item_type = inert_token(raw_type)
         raw_name = item.name
         name = inert_token(raw_name or "")
         if requirement is ClientActionRequirement.UNKNOWN:
-            flush_run()
+            flush_tool_run()
             unknown = f"{item_type}?" if item_type else "?"
             parts.append(f"client_action({unknown})")
             continue
         word = item_type or "client_action"
         if not raw_name:
-            flush_run()
+            flush_tool_run()
             parts.append(word)
             continue
         # The raw type is the run identity; the inert, bounded spelling is presentation only. Using `item_type` here would merge distinct provider types that truncate to the same label.
-        if run_type == raw_type:
-            run_names.append(name)
+        if tool_run_type == raw_type:
+            tool_run_names.append(name)
             continue
-        flush_run()
-        run_type = raw_type
-        run_label = word
-        run_names = [name]
-    flush_run()
+        flush_tool_run()
+        tool_run_type = raw_type
+        tool_run_label = word
+        tool_run_names = [name]
+    flush_tool_run()
+    flush_reason_run()
     return parts
-
-
-def response_thinking(observation: ResponseObservation) -> tuple[str, ...]:
-    items = observation.output_items
-    if items is None:
-        return ()
-    return tuple(
-        "txt" if item.reasoning.has_readable_summary else "enc"
-        for item in items
-        if item.type == "reasoning"
-        and (
-            item.reasoning.has_readable_summary
-            or item.reasoning.has_encrypted_content
-        )
-    )
 
 
 def _provider_error_code(observation: ResponseObservation) -> str:
@@ -578,14 +605,18 @@ def format_completion_line(
         parts.append(paint(f"upstream closed abruptly after finishing the turn: {line.tore_after_terminal}", YELLOW, color=color))
 
     rendered = " ".join(parts)
-    thinking_kinds = (
-        response_thinking(response_observation)
-        if response_observation is not None and response_observation.output_items is not None
-        else line.thinking
+    has_observed_responses_items = (
+        response_observation is not None
+        and response_observation.source_protocol == "openai-responses"
+        and response_observation.availability is ResponseAvailability.OBSERVED
+        and response_observation.output_items is not None
     )
-    thinking = format_thinking(thinking_kinds, line.dialect)
+    thinking = format_thinking(
+        () if has_observed_responses_items else line.thinking,
+        line.dialect,
+    )
     if thinking:
-        # Last, and grey. It says what the model did on its way to the answer rather than anything about the exchange, so it belongs after the fields that describe the exchange and should not compete with them.
+        # Last, and grey, only when no observed Responses item sequence can place it. This legacy summary says that reasoning existed but cannot claim where it sat relative to tools.
         rendered = f"{rendered} {paint(thinking, DIM, color=color)}"
     # A colon rather than a space before the reason, matching the upstream shape and giving the eye somewhere to stop on a line that is otherwise all fields.
     if line.detail:

@@ -4049,8 +4049,8 @@ def test_a_direct_buffered_responses_reply_is_observed_before_translation(
 
     line = _request_lines(caplog.records)[0]
     assert line.startswith("H1/H1 200 openai-responses/gpt-model ")
-    assert "completed function_call(Bash)" in line
-    assert line.endswith("reason(enc:1)")
+    assert "completed reason(enc:1) function_call(Bash)" in line
+    assert line.count("reason(enc:1)") == 1
     assert "end_turn" not in line and "tool_use" not in line
 
 
@@ -4211,6 +4211,7 @@ def test_a_streamed_translated_reply_reports_what_the_prompt_actually_cost(
     assert "↑3.5k+135.0k" in line
     assert "↻97%" in line
     assert "↓2.7k" in line
+    assert "completed reason(enc:1) function_call(Bash)" in line
     assert "↑138.5k" not in line, "the total was being reported as though none of it was cached"
 
 
@@ -4885,7 +4886,7 @@ def test_a_replay_on_the_translation_leg_sends_the_conversation_again(
     # And it was translated exactly once: a second pass would have wrapped the Responses body again.
     assert "messages" not in replayed
     line = _request_lines(caplog.records)[0]
-    assert "completed function_call(Bash)" in line
+    assert "completed reason(enc:1) function_call(Bash)" in line
     assert "discarded" not in line
     assert "custom_tool_call" not in line
 
