@@ -38,6 +38,28 @@ def test_a_successful_request_names_the_model_rather_than_the_route() -> None:
     assert "POST" not in line
 
 
+def test_conversion_facts_do_not_add_console_fields() -> None:
+    line = RequestLine(
+        method="POST",
+        path="/responses",
+        inbound_format="openai-responses",
+        model="claude-opus-5",
+        status_code=200,
+        duration_s=1.0,
+        facts=(
+            {
+                "code": "thinking-profile-selected",
+                "detail": "resolved_model=claude-opus-5; pattern=claude-opus-5(?:-[0-9]{8})?",
+            },
+        ),
+    )
+
+    assert format_completion_line(line, status="ok") == format_completion_line(
+        replace(line, facts=()),
+        status="ok",
+    )
+
+
 def test_a_failed_request_keeps_the_method_and_path() -> None:
     # The opposite trade: a failure is something to reproduce, and the route is exactly what has to be repeated.
     line = format_completion_line(

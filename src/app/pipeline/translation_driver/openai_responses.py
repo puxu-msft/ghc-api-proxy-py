@@ -23,7 +23,13 @@ from app.pipeline.translation_driver.content import (
     ReasoningState,
     SemanticMessage,
 )
-from app.pipeline.translation_driver.reasoning import resolve
+from app.pipeline.translation_driver.reasoning import (
+    RESPONSES_EFFORTS,
+    EffortSource,
+    ReasoningResolution,
+    ThinkingEffortIntent,
+    align_effort,
+)
 from app.pipeline.translation_driver.semantic import (
     Conversion,
     LossCode,
@@ -47,7 +53,16 @@ WIRE_FORMAT = "openai-responses"
 logger = logging.getLogger(__name__)
 
 _PASSTHROUGH_KEYS = frozenset(
-    {"model", "instructions", "input", "tools", "stream", "max_output_tokens", "temperature"}
+    {
+        "model",
+        "instructions",
+        "input",
+        "tools",
+        "stream",
+        "max_output_tokens",
+        "temperature",
+        "reasoning",
+    }
 )
 SYSTEM_ROLE = "system"
 
@@ -84,8 +99,46 @@ def _blocks_from_instructions(value: object) -> tuple[list[SystemBlock], LossCod
     return blocks, problem
 
 
-def from_openai_responses(payload: Mapping[str, Any]) -> SemanticRequest:
+def read_responses_thinking_effort(
+    payload: Mapping[str, Any],
+) -> tuple[ThinkingEffortIntent | None, dict[str, dict[str, Any]]]:
+    """Read a Responses reasoning object without losing siblings the reader does not own."""
+    if "reasoning" not in payload:
+        return None, {}
+    raw = payload["reasoning"]
+    if not isinstance(raw, Mapping):
+        raise TranslationRefused(
+            "reasoning must be an object",
+            code="reasoning-intent-invalid",
+            field_path="reasoning",
+        )
+
+    fields = dict[str, Any](cast(Mapping[str, Any], raw))
+    effort = fields.pop("effort", None)
+    if effort is not None and (not isinstance(effort, str) or effort not in RESPONSES_EFFORTS):
+        raise TranslationRefused(
+            "invalid Responses reasoning effort",
+            code="effort-invalid",
+            field_path="reasoning.effort",
+        )
+
+    intent = ThinkingEffortIntent(
+        enabled=effort != "none",
+        effort=effort,
+        effort_source=EffortSource.RESPONSES,
+    )
+    return intent, ({"reasoning": fields} if fields else {})
+
+
+def from_openai_responses(
+    payload: Mapping[str, Any],
+    *,
+    source_headers: Mapping[str, str] | None = None,
+    translated: bool = False,
+) -> SemanticRequest:
+    del source_headers, translated
     blocks, problem = _blocks_from_instructions(payload.get("instructions"))
+    thinking_effort, nested_extensions = read_responses_thinking_effort(payload)
     model = payload.get("model")
     request = SemanticRequest(
         model=model if isinstance(model, str) else "",
@@ -93,7 +146,9 @@ def from_openai_responses(payload: Mapping[str, Any]) -> SemanticRequest:
         messages=_messages_from_input(payload.get("input")),
         tools=_dict_list(payload.get("tools")),
         stream=bool(payload.get("stream", False)),
+        thinking_effort=thinking_effort,
         source_format=WIRE_FORMAT,
+        nested_extensions=nested_extensions,
     )
     if problem is not None:
         request.conversion.record(problem, "instructions")
@@ -897,6 +952,7 @@ def to_openai_responses(
         payload["max_output_tokens"] = request.max_output_tokens
     if request.temperature is not None:
         payload["temperature"] = request.temperature
+    payload.update(request.nested_extensions_for(WIRE_FORMAT))
     _apply_reasoning(payload, request, target_model or TranslationTarget())
     payload.update(request.extensions_for(WIRE_FORMAT))
     # After the extensions, because that is where `tool_choice` arrives on the crossing where it survives at all. Repointing comes first: a choice that named a mapped declaration is not dangling, it just has a new spelling to follow.
@@ -949,26 +1005,58 @@ def _search_context(request: SemanticRequest) -> SearchContext:
     return SearchContext(tool_name=name, call_ids=call_ids, definitions=definitions)
 
 
+def _align_enabled_responses_effort(
+    desired: str,
+    capabilities: tuple[str, ...] | None,
+) -> ReasoningResolution:
+    if capabilities is not None and capabilities and set(capabilities) <= {"none"}:
+        raise TranslationRefused(
+            "target model offers only disabled reasoning",
+            code="reasoning-enable-not-supported",
+            field_path="output_config.effort",
+        )
+    filtered = (
+        None
+        if capabilities is None
+        else tuple(value for value in capabilities if value != "none")
+    )
+    return align_effort(desired, filtered)
+
+
 def _apply_reasoning(
     payload: dict[str, Any], request: SemanticRequest, target_model: TranslationTarget
 ) -> None:
-    """Write the `reasoning` object this request's intent resolves to, if any.
-
-    Nothing is written when the request expressed no intent. That is the pre-existing behaviour and it stays: a body that never mentioned `thinking` should not start carrying a reasoning policy because this function was added.
-
-    When there *is* an intent, the target's own published effort names decide what it becomes — `resolve` will not return a name this model does not offer. An intent that cannot be rendered at all is recorded as a loss rather than dropped in silence, because the request asked for something and did not get it.
-    """
-    intent = request.reasoning
+    """Write the Responses effort selected from the unified thinking and effort intent."""
+    intent = request.thinking_effort
     if intent is None:
         return
-    resolution = resolve(intent, target_model.reasoning_efforts)
+
+    if not intent.enabled:
+        if target_model.reasoning_efforts is None or "none" not in target_model.reasoning_efforts:
+            raise TranslationRefused(
+                "target model does not publish disabled reasoning",
+                code="reasoning-disable-not-supported",
+                field_path="output_config.effort",
+            )
+        resolution = ReasoningResolution(effort="none")
+    elif intent.effort is None:
+        return
+    else:
+        resolution = _align_enabled_responses_effort(
+            intent.effort,
+            target_model.reasoning_efforts,
+        )
+
     if resolution.effort is None:
         request.conversion.record(
             LossCode.REASONING_INTENT_NOT_CARRIED,
-            f"{intent.mode} reasoning was not sent: {resolution.reason}",
+            f"{intent.effort or 'enabled'} effort was not sent: {resolution.reason}",
         )
         return
-    payload["reasoning"] = {"effort": resolution.effort}
+    existing = payload.get("reasoning")
+    reasoning = cast(dict[str, Any], existing) if isinstance(existing, dict) else {}
+    reasoning["effort"] = resolution.effort
+    payload["reasoning"] = reasoning
     if resolution.approximated:
-        detail = resolution.reason or f"{intent.mode} reasoning was sent as effort {resolution.effort}"
+        detail = resolution.reason or f"effort {intent.effort} was sent as {resolution.effort}"
         request.conversion.record(LossCode.REASONING_INTENT_APPROXIMATED, detail)

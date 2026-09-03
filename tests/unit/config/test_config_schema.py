@@ -157,3 +157,65 @@ def test_the_listen_address_is_restart_only() -> None:
     # Nothing rebinds a live listener, so `current` would otherwise report a port nobody serves.
     assert "server.host" in NOT_HOT_RELOADABLE
     assert "server.port" in NOT_HOT_RELOADABLE
+
+
+def validate_thinking_profile(profile: dict[str, object]) -> ProxyConfig:
+    return ProxyConfig.model_validate(
+        {
+            "model_translation": {
+                "to_anthropic_messages": {"thinking_profiles": {"target-model": profile}}
+            }
+        }
+    )
+
+
+@pytest.mark.parametrize("modes", [[], ["adaptive", "adaptive"], ["automatic"]])
+def test_thinking_profile_modes_must_be_nonempty_unique_and_known(modes: list[str]) -> None:
+    with pytest.raises(ValidationError):
+        validate_thinking_profile({"modes": modes, "can_disable": True})
+
+
+@pytest.mark.parametrize("value", ["false", 0, 1])
+def test_thinking_profile_can_disable_rejects_coercion(value: object) -> None:
+    with pytest.raises(ValidationError):
+        validate_thinking_profile({"modes": ["adaptive"], "can_disable": value})
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_thinking_profile_can_disable_accepts_native_booleans(value: bool) -> None:
+    profile = validate_thinking_profile(
+        {"modes": ["adaptive"], "can_disable": value}
+    ).model_translation.to_anthropic_messages.thinking_profiles["target-model"]
+    assert profile.can_disable is value
+
+
+@pytest.mark.parametrize("value", [True, False, 0, 1023, "2048"])
+def test_thinking_profile_manual_budget_must_be_a_strict_integer_at_least_1024(
+    value: object,
+) -> None:
+    with pytest.raises(ValidationError):
+        validate_thinking_profile(
+            {
+                "modes": ["enabled"],
+                "can_disable": True,
+                "manual_budget_tokens": value,
+            }
+        )
+
+
+def test_thinking_profile_accepts_its_minimum_manual_budget() -> None:
+    profile = validate_thinking_profile(
+        {"modes": ["enabled"], "can_disable": True, "manual_budget_tokens": 1024}
+    ).model_translation.to_anthropic_messages.thinking_profiles["target-model"]
+    assert profile.manual_budget_tokens == 1024
+
+
+def test_thinking_profile_rejects_an_unknown_disabled_effort_limit() -> None:
+    with pytest.raises(ValidationError):
+        validate_thinking_profile(
+            {
+                "modes": ["adaptive"],
+                "can_disable": True,
+                "disabled_max_effort": "ultracode",
+            }
+        )

@@ -70,6 +70,8 @@ class RequestContext:
 
     # The client's own protocol-negotiation headers, already filtered by `app.pipeline.request_headers`. Held here rather than read at the send site because the driver is where an attempt is built, and it has no access to the ASGI request.
     client_headers: Mapping[str, str] = field(default_factory=lambda: dict[str, str]())
+    # The filtered client protocol headers before target-path forwarding policy changes `client_headers`. `None` means the request-lifetime snapshot has not been initialized; an empty mapping is a real initialized value. `build_context` initializes real inbound requests, while `source_headers_for_translation` preserves contexts constructed directly in tests by snapshotting their current headers exactly once.
+    source_headers: Mapping[str, str] | None = None
 
     # Filled in by routing.
     resolved_model: str = ""
@@ -92,6 +94,11 @@ class RequestContext:
     extras: MutableMapping[str, Any] = field(default_factory=lambda: dict[str, Any]())
     # One budget for this client request, however many attempts it takes — including the ones delivery opens after a torn body, which happen long after the driver that opened the first has returned. Built lazily by `handle` and kept here rather than by the driver, because a driver built per call would hand each reopened attempt a fresh budget and `max_total` would stop being a bound on anything.
     retry_ledger: RetryLedger | None = None
+
+    def source_headers_for_translation(self) -> Mapping[str, str]:
+        if self.source_headers is None:
+            self.source_headers = dict(self.client_headers)
+        return self.source_headers
 
     def begin_attempt(self, *, payload: dict[str, Any] | None = None) -> Attempt:
         attempt = Attempt(

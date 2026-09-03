@@ -1,178 +1,146 @@
-"""Choosing a reasoning effort against what a model actually publishes.
-
-The catalog recorded in `tests/int/cassettes/anthropic_to_responses_stream.json` is the reason these are shaped the way they are: real Copilot models publish *different* effort sets — three names for `grok-4.5`, four without `none` for `gpt-5.3-codex`, six including `max` for `gpt-5.6-terra`. So the cases below are capability sets, not models, and every one of them asserts the same invariant from a different angle: whatever comes back is either nothing or a name that was on offer.
-"""
+"""Align an already-selected effort against the model catalog."""
 
 import pytest
 
+from app.config.schema import ThinkingTargetProfileConfig
+from app.pipeline.routing import compile_thinking_profiles, select_thinking_profile
 from app.pipeline.translation_driver.reasoning import (
+    ANTHROPIC_EFFORTS,
     EFFORT_LADDER,
-    ReasoningIntent,
-    ReasoningIntentInvalid,
-    intent_from_thinking,
-    resolve,
-    unused_thinking_fields,
+    RESPONSES_EFFORTS,
+    align_anthropic_effort,
+    align_effort,
 )
 
-# The three shapes the real catalog actually shows, named for what distinguishes them.
 NO_NONE = ("low", "medium", "high", "xhigh")
-WITH_NONE = ("none", "low", "medium", "high", "xhigh")
 NARROW = ("low", "medium", "high")
 FULL = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
-# The gemini flash shape from the recorded catalog: it publishes `minimal` and no `none`, which is the pair that made a missing ladder entry answer wrongly and say so untruthfully.
-WITH_MINIMAL = ("minimal", "low", "medium", "high")
 
 
-def test_a_budget_lands_on_a_rung_the_model_offers() -> None:
-    for budget, expected in ((1_000, "low"), (10_000, "medium"), (20_000, "high"), (30_000, "xhigh"), (50_000, "max")):
-        resolution = resolve(ReasoningIntent(mode="budget", budget_tokens=budget), FULL)
-        assert resolution.effort == expected, budget
+def test_an_exact_effort_is_kept() -> None:
+    resolution = align_effort("xhigh", NO_NONE)
+
+    assert resolution.effort == "xhigh"
+    assert resolution.approximated is False
 
 
-def test_a_budget_above_what_the_model_offers_comes_down_rather_than_up() -> None:
-    """`grok-4.5` publishes only low/medium/high. A 50k budget wants `max`; sending `max` is a 400 and sending `high` is the honest nearest thing this model can do."""
-    resolution = resolve(ReasoningIntent(mode="budget", budget_tokens=50_000), NARROW)
+def test_an_unavailable_effort_comes_down_to_the_strongest_supported_level() -> None:
+    resolution = align_effort("max", NARROW)
 
     assert resolution.effort == "high"
-    assert resolution.approximated
-    assert "max" in resolution.reason
+    assert resolution.approximated is True
+    assert resolution.reason == "asked for max, which this model does not offer; sent high"
 
 
-def test_disabled_becomes_none_where_none_exists() -> None:
-    resolution = resolve(ReasoningIntent(mode="disabled"), WITH_NONE)
+def test_an_effort_below_every_supported_level_uses_the_weakest_level() -> None:
+    resolution = align_effort("low", ("high", "xhigh"))
 
-    assert resolution.effort == "none"
-    assert not resolution.approximated
-
-
-def test_disabled_falls_to_the_weakest_rung_where_none_does_not_exist() -> None:
-    """`gpt-5.3-codex` has no `none`, and omitting the field is measured to give upstream's default of `medium` — so "off" has to be said as the weakest thing sayable, and said to be an approximation."""
-    resolution = resolve(ReasoningIntent(mode="disabled"), NO_NONE)
-
-    assert resolution.effort == "low"
-    assert resolution.approximated
-    assert "weaker than anything" in resolution.reason
+    assert resolution.effort == "high"
+    assert resolution.approximated is True
+    assert resolution.reason == "asked for low, which is weaker than anything this model offers; sent high"
 
 
-def test_adaptive_asks_for_high_and_settles_for_less() -> None:
-    assert resolve(ReasoningIntent(mode="adaptive"), FULL).effort == "high"
-    assert resolve(ReasoningIntent(mode="adaptive"), NARROW).effort == "high"
-    assert resolve(ReasoningIntent(mode="adaptive"), ("low",)).effort == "low"
+def test_unknown_and_empty_capabilities_both_omit_effort_with_distinct_reasons() -> None:
+    absent = align_effort("high", None)
+    empty = align_effort("high", ())
+
+    assert absent.effort is None
+    assert absent.reason == "the catalog publishes no reasoning efforts for this model"
+    assert empty.effort is None
+    assert empty.reason == "this model advertises no reasoning efforts"
 
 
-def test_adaptive_never_climbs_past_what_it_asked_for() -> None:
-    """Effort costs money. A model offering `max` does not get `max` because the request said "you decide"."""
-    assert resolve(ReasoningIntent(mode="adaptive"), FULL).effort == "high"
+def test_an_exact_unranked_catalog_effort_is_still_kept() -> None:
+    resolution = align_effort("future-level", ("future-level",))
+
+    assert resolution.effort == "future-level"
+    assert resolution.approximated is False
 
 
-def test_an_unknown_catalog_and_an_empty_one_are_different_answers_and_neither_guesses() -> None:
-    absent = resolve(ReasoningIntent(mode="adaptive"), None)
-    empty = resolve(ReasoningIntent(mode="adaptive"), ())
+def test_unrankable_capabilities_are_not_guessed() -> None:
+    resolution = align_effort("high", ("future-level",))
 
-    assert absent.effort is None and empty.effort is None
-    assert "publishes no" in absent.reason
-    assert "advertises no" in empty.reason
-
-
-@pytest.mark.parametrize("capabilities", [NO_NONE, WITH_NONE, NARROW, FULL, WITH_MINIMAL, ("max",), ("none",)])
-def test_the_chosen_effort_is_always_one_the_model_offers(capabilities: tuple[str, ...]) -> None:
-    """The one invariant. Swept over every intent this project can form, against every capability shape the real catalog shows."""
-    intents = [ReasoningIntent(mode="disabled"), ReasoningIntent(mode="adaptive")]
-    intents += [ReasoningIntent(mode="budget", budget_tokens=n) for n in (1, 3_000, 8_000, 16_000, 30_000, 1_000_000)]
-
-    for intent in intents:
-        resolution = resolve(intent, capabilities)
-        assert resolution.effort is None or resolution.effort in capabilities, (intent, capabilities)
+    assert resolution.effort is None
+    assert resolution.approximated is True
+    assert resolution.reason == "asked for high; this model publishes only effort names this proxy cannot rank (future-level), so none was chosen"
 
 
-def test_every_rung_the_ladder_names_can_actually_be_chosen() -> None:
-    """Each rung, pinned to the input that reaches it.
+def test_anthropic_alignment_uses_only_anthropic_effort_candidates() -> None:
+    exact = align_anthropic_effort("high", ("none", "minimal", "high", "future-level"))
+    incompatible = align_anthropic_effort("high", ("none", "minimal", "future-level"))
 
-    An earlier version compared the *set* of reachable efforts against `set(EFFORT_LADDER)`, which is not a test: deleting `max` from the ladder shrinks both sides at once and it stayed green while a 30k budget silently fell to a different rung. Pinning each pair means removing a rung from the ladder, or moving a threshold, fails here with the pair that changed.
-    """
-    assert resolve(ReasoningIntent(mode="disabled"), FULL).effort == "none"
-    assert resolve(ReasoningIntent(mode="budget", budget_tokens=1), FULL).effort == "low"
-    assert resolve(ReasoningIntent(mode="budget", budget_tokens=8_000), FULL).effort == "medium"
-    assert resolve(ReasoningIntent(mode="budget", budget_tokens=16_000), FULL).effort == "high"
-    assert resolve(ReasoningIntent(mode="budget", budget_tokens=24_000), FULL).effort == "xhigh"
-    assert resolve(ReasoningIntent(mode="budget", budget_tokens=32_000), FULL).effort == "max"
-    # `minimal` is reached from below rather than by a budget: no budget asks for it, but a model that offers it and not `none` must get it for `disabled`.
-    assert resolve(ReasoningIntent(mode="disabled"), WITH_MINIMAL).effort == "minimal"
-    # And the ladder names nothing this project cannot reach, which is the half the pairs above cannot say.
-    assert set(EFFORT_LADDER) == {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+    assert exact.effort == "high"
+    assert exact.approximated is False
+    assert incompatible.effort is None
+    assert incompatible.reason == "this model advertises no Anthropic-compatible reasoning effort candidates"
 
 
-def test_thinking_is_read_into_the_three_modes() -> None:
-    assert intent_from_thinking(None) is None
-    assert intent_from_thinking({"type": "disabled"}) == ReasoningIntent(mode="disabled")
-    assert intent_from_thinking({"type": "adaptive"}) == ReasoningIntent(mode="adaptive")
-    assert intent_from_thinking({"type": "auto"}) == ReasoningIntent(mode="adaptive")
-    assert intent_from_thinking({"type": "enabled", "budget_tokens": 5000}) == ReasoningIntent(
-        mode="budget", budget_tokens=5000
+def test_anthropic_downward_alignment_names_the_compatible_candidate_domain() -> None:
+    resolution = align_anthropic_effort("max", ("minimal", "medium", "high"))
+
+    assert resolution.effort == "high"
+    assert resolution.approximated is True
+    assert resolution.reason == "asked for max, which is not among this model's published Anthropic-compatible candidates; sent high"
+
+
+@pytest.mark.parametrize("desired", EFFORT_LADDER)
+@pytest.mark.parametrize("capabilities", [NO_NONE, NARROW, FULL, ("max",), ("future-level",)])
+def test_aligned_effort_is_always_published_by_the_model(
+    desired: str,
+    capabilities: tuple[str, ...],
+) -> None:
+    resolution = align_effort(desired, capabilities)
+
+    assert resolution.effort is None or resolution.effort in capabilities
+
+
+def test_wire_effort_sets_are_explicit() -> None:
+    assert {"low", "medium", "high", "xhigh", "max"} == ANTHROPIC_EFFORTS
+    assert {
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    } == RESPONSES_EFFORTS
+
+
+def test_thinking_profile_selection_uses_the_last_full_match() -> None:
+    profiles = compile_thinking_profiles(
+        {
+            r"claude-opus-.*": ThinkingTargetProfileConfig(
+                modes=("adaptive",),
+                can_disable=True,
+            ),
+            r"claude-opus-5": ThinkingTargetProfileConfig(
+                modes=("enabled", "adaptive"),
+                can_disable=False,
+                manual_budget_tokens=2048,
+            ),
+        }
     )
 
+    selected = select_thinking_profile(profiles, "claude-opus-5")
 
-def test_enabled_without_a_budget_is_adaptive_rather_than_refused() -> None:
-    """Anthropic accepts the body, so refusing it here would reject a request upstream would have taken."""
-    assert intent_from_thinking({"type": "enabled"}) == ReasoningIntent(mode="adaptive")
-
-
-def test_a_boolean_budget_is_refused_rather_than_read_as_one_token() -> None:
-    """`True` is an `int` in Python. Without the explicit `bool` check, `budget_tokens: true` asks for a one-token budget — a wrong answer that no test of integers would find."""
-    with pytest.raises(ReasoningIntentInvalid) as raised:
-        intent_from_thinking({"type": "enabled", "budget_tokens": True})
-
-    assert raised.value.field_path == "thinking.budget_tokens"
+    assert selected is not None
+    pattern, profile = selected
+    assert pattern == r"claude-opus-5"
+    assert profile.modes == ("enabled", "adaptive")
+    assert profile.can_disable is False
+    assert profile.manual_budget_tokens == 2048
 
 
-@pytest.mark.parametrize(
-    ("thinking", "field_path"),
-    [
-        ({"type": "sideways"}, "thinking.type"),
-        ({"type": 3}, "thinking.type"),
-        ({}, "thinking.type"),
-        ({"type": "enabled", "budget_tokens": 0}, "thinking.budget_tokens"),
-        ({"type": "enabled", "budget_tokens": -5}, "thinking.budget_tokens"),
-        ({"type": "enabled", "budget_tokens": "lots"}, "thinking.budget_tokens"),
-        ("enabled", "thinking"),
-    ],
-)
-def test_a_thinking_field_that_cannot_be_read_names_the_field_it_could_not_read(
-    thinking: object, field_path: str
-) -> None:
-    with pytest.raises(ReasoningIntentInvalid) as raised:
-        intent_from_thinking(thinking)
+def test_thinking_profile_selection_does_not_accept_a_partial_match() -> None:
+    profiles = compile_thinking_profiles(
+        {
+            r"claude-opus-5": ThinkingTargetProfileConfig(
+                modes=("adaptive",),
+                can_disable=True,
+            )
+        }
+    )
 
-    assert raised.value.field_path == field_path
-
-
-def test_fields_a_mode_does_not_read_are_named() -> None:
-    """`disabled` ignores a budget the client meant. Answering "nothing was lost" about it would be false, and `thinking` no longer travels in `extensions` where the drop used to be reported."""
-    disabled = ReasoningIntent(mode="disabled")
-    assert unused_thinking_fields({"type": "disabled", "budget_tokens": 8000}, disabled) == ("budget_tokens",)
-    assert unused_thinking_fields({"type": "disabled"}, disabled) == ()
-
-    budget = ReasoningIntent(mode="budget", budget_tokens=5000)
-    assert unused_thinking_fields({"type": "enabled", "budget_tokens": 5000}, budget) == ()
-    assert unused_thinking_fields({"type": "enabled", "budget_tokens": 5000, "mode": "deep"}, budget) == ("mode",)
-
-    assert unused_thinking_fields({"type": "disabled"}, None) == ()
-
-
-def test_disabled_reaches_minimal_where_a_model_offers_it() -> None:
-    """The gemini flash shape: `minimal` on offer, no `none`.
-
-    With `minimal` missing from the ladder this answered `low` — one rung more thinking than the request asked for — and said "weaker than anything this model offers", which was untrue while `minimal` sat right there. `resolve`'s assertion could not catch it, because `low` genuinely is on offer: a wrong answer, not an invalid one.
-    """
-    resolution = resolve(ReasoningIntent(mode="disabled"), WITH_MINIMAL)
-
-    assert resolution.effort == "minimal"
-    assert resolution.approximated
-
-
-def test_the_official_default_budget_does_not_land_in_the_second_strongest_rung() -> None:
-    """16000 is `vscode-copilot-chat`'s own default `thinking.budget_tokens`.
-
-    It is the only external number that bears on these thresholds — the first-party client performs no budget-to-effort conversion at all, so there is no rule to copy. What it does say is that 16000 is what an unconfigured user sends, and an unconfigured user should not be buying the second-strongest reasoning tier.
-    """
-    assert resolve(ReasoningIntent(mode="budget", budget_tokens=16_000), FULL).effort == "high"
+    assert select_thinking_profile(profiles, "prefix-claude-opus-5") is None
+    assert select_thinking_profile(profiles, "claude-opus-5-suffix") is None

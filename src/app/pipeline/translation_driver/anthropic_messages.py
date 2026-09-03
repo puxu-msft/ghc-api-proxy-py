@@ -14,9 +14,11 @@ from app.pipeline.translation_driver.content import (
     SemanticMessage,
 )
 from app.pipeline.translation_driver.reasoning import (
-    ReasoningIntentInvalid,
-    intent_from_thinking,
-    unused_thinking_fields,
+    ANTHROPIC_EFFORTS,
+    EFFORT_LADDER,
+    EffortSource,
+    ThinkingEffortIntent,
+    align_anthropic_effort,
 )
 from app.pipeline.translation_driver.reasoning_carrier import (
     decode_reasoning_carrier,
@@ -24,6 +26,7 @@ from app.pipeline.translation_driver.reasoning_carrier import (
 )
 from app.pipeline.translation_driver.semantic import (
     Conversion,
+    ConversionFactCode,
     LossCode,
     SemanticRequest,
     SystemBlock,
@@ -33,10 +36,245 @@ from app.pipeline.translation_driver.semantic import (
 )
 
 WIRE_FORMAT = "anthropic-messages"
+RESPONSES_WIRE_FORMAT = "openai-responses"
 
 _PASSTHROUGH_KEYS = frozenset(
-    {"model", "system", "messages", "tools", "stream", "max_tokens", "temperature", "thinking"}
+    {
+        "model",
+        "system",
+        "messages",
+        "tools",
+        "stream",
+        "max_tokens",
+        "temperature",
+        "thinking",
+        "output_config",
+    }
 )
+
+EFFORT_BETA = "mid-conversation-output-config-2026-07-01"
+_CONTROL_MESSAGE_KEYS = frozenset({"role", "content", "output_config"})
+_CONTROL_OUTPUT_KEYS = frozenset({"effort"})
+
+
+def _reasoning_intent_refused(message: str, *, field_path: str) -> TranslationRefused:
+    return TranslationRefused(
+        message,
+        code="reasoning-intent-invalid",
+        field_path=field_path,
+    )
+
+
+def _thinking_enabled(
+    payload: Mapping[str, Any],
+    *,
+    translated: bool,
+    conversion: Conversion,
+) -> tuple[bool, dict[str, Any] | None]:
+    if "thinking" not in payload:
+        return True, None
+    thinking = payload["thinking"]
+    if not isinstance(thinking, Mapping):
+        raise _reasoning_intent_refused("thinking must be an object", field_path="thinking")
+    field = dict[str, Any](cast(Mapping[str, Any], thinking))
+    kind = field.pop("type", None)
+    if not isinstance(kind, str):
+        raise _reasoning_intent_refused(
+            "thinking.type must be a string",
+            field_path="thinking.type",
+        )
+    if kind not in {"disabled", "adaptive", "auto", "enabled"}:
+        raise _reasoning_intent_refused(
+            f"unknown thinking.type {kind!r}",
+            field_path="thinking.type",
+        )
+
+    budget = field.get("budget_tokens")
+    if "budget_tokens" in field:
+        if isinstance(budget, bool) or not isinstance(budget, int):
+            raise _reasoning_intent_refused(
+                "thinking.budget_tokens must be an integer",
+                field_path="thinking.budget_tokens",
+            )
+        if budget <= 0:
+            raise _reasoning_intent_refused(
+                "thinking.budget_tokens must be positive",
+                field_path="thinking.budget_tokens",
+            )
+
+    if translated and kind == "auto":
+        conversion.record(
+            LossCode.REASONING_INTENT_APPROXIMATED,
+            "thinking.type=auto accepted as a translated-path compatibility extension",
+        )
+    if translated and kind == "enabled" and budget is None:
+        conversion.record(
+            LossCode.REASONING_INTENT_APPROXIMATED,
+            "thinking.budget_tokens absent on enabled thinking; accepted as a translated-path compatibility extension",
+        )
+    if translated and kind == "enabled" and isinstance(budget, int):
+        max_tokens = payload.get("max_tokens")
+        compatibility_reasons: list[str] = []
+        if budget < 1024:
+            compatibility_reasons.append("below the official 1024-token minimum")
+        if (
+            isinstance(max_tokens, int)
+            and not isinstance(max_tokens, bool)
+            and budget >= max_tokens
+        ):
+            compatibility_reasons.append("not below max_tokens")
+        if compatibility_reasons:
+            conversion.record(
+                LossCode.REASONING_INTENT_APPROXIMATED,
+                f"thinking.budget_tokens={budget} accepted as a translated-path compatibility extension: {', '.join(compatibility_reasons)}",
+            )
+    return kind != "disabled", field
+
+
+def read_anthropic_thinking_effort(
+    payload: Mapping[str, Any],
+    *,
+    translated: bool,
+    conversion: Conversion,
+) -> tuple[ThinkingEffortIntent, dict[str, dict[str, Any]]]:
+    """Read Anthropic's independent thinking enablement and effort level without deriving either from a budget."""
+    enabled, thinking_residual = _thinking_enabled(
+        payload,
+        translated=translated,
+        conversion=conversion,
+    )
+    nested: dict[str, dict[str, Any]] = {}
+    if thinking_residual is not None:
+        nested["thinking"] = thinking_residual
+
+    source = EffortSource.ANTHROPIC_DEFAULT
+    effort = "high"
+    if "output_config" in payload:
+        output = payload["output_config"]
+        if not isinstance(output, Mapping):
+            raise TranslationRefused(
+                "output_config must be an object",
+                code="effort-invalid",
+                field_path="output_config",
+            )
+        output_fields = dict[str, Any](cast(Mapping[str, Any], output))
+        explicit_effort = output_fields.pop("effort", None)
+        if "effort" in output:
+            if not isinstance(explicit_effort, str) or explicit_effort not in ANTHROPIC_EFFORTS:
+                raise TranslationRefused(
+                    "invalid Anthropic effort",
+                    code="effort-invalid",
+                    field_path="output_config.effort",
+                )
+            effort = explicit_effort
+            source = EffortSource.ANTHROPIC_TOP_LEVEL
+        nested["output_config"] = output_fields
+
+    return ThinkingEffortIntent(enabled=enabled, effort=effort, effort_source=source), nested
+
+
+def _is_effort_control_candidate(raw: object) -> bool:
+    return isinstance(raw, Mapping) and "output_config" in raw
+
+
+def _anthropic_beta_tokens(headers: Mapping[str, str]) -> frozenset[str]:
+    return frozenset(
+        token.strip()
+        for token in headers.get("anthropic-beta", "").split(",")
+        if token.strip()
+    )
+
+
+def _parse_effort_control(
+    raw: Mapping[str, Any],
+    *,
+    index: int,
+    source_headers: Mapping[str, str],
+) -> str:
+    field = f"messages[{index}]"
+    extra = raw.keys() - _CONTROL_MESSAGE_KEYS
+    if extra:
+        key = sorted(extra)[0]
+        raise TranslationRefused(
+            f"unsupported effort control field {key!r}",
+            code="effort-control-invalid",
+            field_path=f"{field}.{key}",
+        )
+    if raw.get("role") != "system":
+        raise TranslationRefused(
+            "effort control role must be system",
+            code="effort-control-invalid",
+            field_path=f"{field}.role",
+        )
+    content = raw.get("content")
+    if content != "" and content != []:
+        raise TranslationRefused(
+            "effort control content must be empty",
+            code="effort-control-invalid",
+            field_path=f"{field}.content",
+        )
+    output = raw.get("output_config")
+    if not isinstance(output, Mapping):
+        raise TranslationRefused(
+            "effort control output_config must be an object",
+            code="effort-control-invalid",
+            field_path=f"{field}.output_config",
+        )
+    output_fields = cast(Mapping[str, Any], output)
+    output_extra = output_fields.keys() - _CONTROL_OUTPUT_KEYS
+    if output_extra:
+        key = sorted(output_extra)[0]
+        raise TranslationRefused(
+            f"unsupported effort control output field {key!r}",
+            code="effort-control-invalid",
+            field_path=f"{field}.output_config.{key}",
+        )
+    effort = output_fields.get("effort")
+    if not isinstance(effort, str) or effort not in ANTHROPIC_EFFORTS:
+        raise TranslationRefused(
+            "invalid per-message effort",
+            code="effort-invalid",
+            field_path=f"{field}.output_config.effort",
+        )
+    if EFFORT_BETA not in _anthropic_beta_tokens(source_headers):
+        raise TranslationRefused(
+            "per-message effort requires its beta header",
+            code="beta-required",
+            field_path=f"{field}.output_config.effort",
+        )
+    return effort
+
+
+def _effective_per_message_effort(
+    messages: list[object],
+    *,
+    source_headers: Mapping[str, str],
+    baseline: str,
+    baseline_source: EffortSource,
+) -> tuple[str, list[object], EffortSource]:
+    active = baseline
+    source = baseline_source
+    pending: str | None = None
+    filtered: list[object] = []
+    for index, raw in enumerate(messages):
+        if _is_effort_control_candidate(raw):
+            pending = _parse_effort_control(
+                cast(Mapping[str, Any], raw),
+                index=index,
+                source_headers=source_headers,
+            )
+            continue
+        filtered.append(raw)
+        if (
+            isinstance(raw, Mapping)
+            and cast(Mapping[str, Any], raw).get("role") == "user"
+            and pending is not None
+        ):
+            active = pending
+            source = EffortSource.ANTHROPIC_PER_MESSAGE
+            pending = None
+    return active, filtered, source
+
 
 TEXT = "text"
 THINKING = "thinking"
@@ -118,21 +356,47 @@ def _message_from_anthropic(raw: Mapping[str, Any]) -> SemanticMessage:
     return SemanticMessage(role, tuple(_block_from_anthropic(b) for b in _dict_list(content)))
 
 
-def from_anthropic_messages(payload: Mapping[str, Any]) -> SemanticRequest:
+def from_anthropic_messages(
+    payload: Mapping[str, Any],
+    *,
+    source_headers: Mapping[str, str] | None = None,
+    translated: bool = False,
+) -> SemanticRequest:
     blocks, problem = system_blocks_from_value(payload.get("system"))
-    model = payload.get("model")
+    conversion = Conversion()
+    thinking_effort, nested_extensions = read_anthropic_thinking_effort(
+        payload,
+        translated=translated,
+        conversion=conversion,
+    )
     raw_messages = payload.get("messages")
+    message_values = cast(list[object], raw_messages) if isinstance(raw_messages, list) else []
+    active_effort, filtered_messages, effort_source = _effective_per_message_effort(
+        message_values,
+        source_headers=source_headers or {},
+        baseline=cast(str, thinking_effort.effort),
+        baseline_source=thinking_effort.effort_source,
+    )
+    thinking_effort = ThinkingEffortIntent(
+        enabled=thinking_effort.enabled,
+        effort=active_effort,
+        effort_source=effort_source,
+    )
+    model = payload.get("model")
     request = SemanticRequest(
         model=model if isinstance(model, str) else "",
         system=blocks,
         messages=[
-            _message_from_anthropic(cast(Mapping[str, Any], m))
-            for m in (raw_messages if isinstance(raw_messages, list) else [])  # pyright: ignore[reportUnknownVariableType]
-            if isinstance(m, Mapping)
+            _message_from_anthropic(cast(Mapping[str, Any], message))
+            for message in filtered_messages
+            if isinstance(message, Mapping)
         ],
         tools=_dict_list(payload.get("tools")),
         stream=bool(payload.get("stream", False)),
+        thinking_effort=thinking_effort,
         source_format=WIRE_FORMAT,
+        nested_extensions=nested_extensions,
+        conversion=conversion,
     )
     if problem is not None:
         request.conversion.record(problem, "system")
@@ -143,21 +407,6 @@ def from_anthropic_messages(payload: Mapping[str, Any]) -> SemanticRequest:
     temperature = payload.get("temperature")
     if isinstance(temperature, int | float):
         request.temperature = float(temperature)
-    # Read into an intent here rather than left for the writer, so an unreadable `thinking` is refused while the client's own field name is still in scope to name in the error. What the intent then becomes on the wire depends on the target model and is not this side's business.
-    thinking = payload.get("thinking")
-    try:
-        request.reasoning = intent_from_thinking(thinking)
-    except ReasoningIntentInvalid as invalid:
-        raise TranslationRefused(
-            str(invalid), code="reasoning-intent-invalid", field_path=invalid.field_path
-        ) from invalid
-    # Claiming `thinking` took it out of `extensions`, which is where an unclaimed field's loss used to be reported. Whatever the mode did not read is named here instead, so `{"type": "disabled", "budget_tokens": 8000}` does not answer "nothing was lost" about a budget it ignored.
-    unread = unused_thinking_fields(thinking, request.reasoning)
-    if unread:
-        request.conversion.record(
-            LossCode.REASONING_INTENT_APPROXIMATED,
-            f"thinking fields not read by this intent: {', '.join(unread)}",
-        )
 
     # Anything not claimed above is carried rather than dropped.
     # An unmodelled field therefore survives the round trip back to the same format.
@@ -226,11 +475,144 @@ def _reasoning_to_anthropic(block: ContentBlock, conversion: Conversion) -> dict
     return {"type": THINKING, THINKING: block.text, "signature": signature}
 
 
+def _thinking_profile_detail(target: TranslationTarget, *, reason: str | None = None) -> str:
+    model = target.model_id or "<unknown>"
+    pattern = target.thinking_profile_pattern or "<none>"
+    detail = f"resolved_model={model}; pattern={pattern}"
+    return f"{detail}; reason={reason}" if reason is not None else detail
+
+
+def _thinking_profile_refusal(
+    conversion: Conversion,
+    target: TranslationTarget,
+    message: str,
+    *,
+    code: str,
+    field_path: str,
+) -> TranslationRefused:
+    conversion.observe(
+        ConversionFactCode.THINKING_PROFILE_REJECTED,
+        _thinking_profile_detail(target, reason=code),
+    )
+    return TranslationRefused(
+        message,
+        code=code,
+        field_path=field_path,
+        facts=tuple(conversion.facts),
+    )
+
+
+def render_anthropic_thinking(
+    intent: ThinkingEffortIntent,
+    target: TranslationTarget,
+    *,
+    max_tokens: int | None,
+    conversion: Conversion | None = None,
+) -> dict[str, Any]:
+    """Render thinking only from the resolved target's configured profile."""
+    observed = conversion if conversion is not None else Conversion()
+    profile = target.thinking_profile
+    if profile is None:
+        raise _thinking_profile_refusal(
+            observed,
+            target,
+            "no thinking profile matches the resolved model",
+            code="thinking-profile-missing",
+            field_path="reasoning",
+        )
+    observed.observe(
+        ConversionFactCode.THINKING_PROFILE_SELECTED,
+        _thinking_profile_detail(target),
+    )
+    if not intent.enabled:
+        if not profile.can_disable:
+            raise _thinking_profile_refusal(
+                observed,
+                target,
+                "target model cannot disable thinking",
+                code="thinking-disable-not-supported",
+                field_path="reasoning.effort",
+            )
+        if profile.disabled_max_effort is not None and EFFORT_LADDER.index("high") > EFFORT_LADDER.index(profile.disabled_max_effort):
+            raise _thinking_profile_refusal(
+                observed,
+                target,
+                "target model cannot disable thinking at its effective effort",
+                code="thinking-disable-effort-not-supported",
+                field_path="reasoning.effort",
+            )
+        return {"type": "disabled"}
+
+    for mode in profile.modes:
+        if mode == "adaptive":
+            return {"type": "adaptive"}
+        budget = profile.manual_budget_tokens
+        if mode == "enabled" and budget is not None and budget >= 1024 and max_tokens is not None and budget < max_tokens:
+            return {"type": "enabled", "budget_tokens": budget}
+    raise _thinking_profile_refusal(
+        observed,
+        target,
+        "target thinking profile has no renderable mode",
+        code="thinking-mode-not-renderable",
+        field_path="reasoning",
+    )
+
+
+def _apply_responses_thinking(
+    payload: dict[str, Any],
+    request: SemanticRequest,
+    target: TranslationTarget,
+) -> None:
+    intent = request.thinking_effort
+    if request.source_format != RESPONSES_WIRE_FORMAT or intent is None:
+        return
+
+    payload["thinking"] = render_anthropic_thinking(
+        intent,
+        target,
+        max_tokens=request.max_output_tokens,
+        conversion=request.conversion,
+    )
+    if not intent.enabled or intent.effort is None:
+        return
+
+    desired = intent.effort
+    if desired == "minimal":
+        request.conversion.record(
+            LossCode.REASONING_INTENT_APPROXIMATED,
+            "Responses effort minimal was approximated to Anthropic low",
+        )
+        desired = "low"
+    elif desired not in ANTHROPIC_EFFORTS:
+        raise TranslationRefused(
+            "invalid Responses reasoning effort",
+            code="effort-invalid",
+            field_path="reasoning.effort",
+        )
+
+    resolution = align_anthropic_effort(desired, target.reasoning_efforts)
+    if resolution.effort is None:
+        request.conversion.record(
+            LossCode.REASONING_INTENT_NOT_CARRIED,
+            f"{desired} effort was not sent to Anthropic: {resolution.reason}",
+        )
+        return
+
+    existing = payload.get("output_config")
+    output = cast(dict[str, Any], existing) if isinstance(existing, dict) else {}
+    output["effort"] = resolution.effort
+    payload["output_config"] = output
+    if resolution.approximated:
+        request.conversion.record(
+            LossCode.REASONING_INTENT_APPROXIMATED,
+            resolution.reason or f"effort {desired} was sent as {resolution.effort}",
+        )
+
+
 def to_anthropic_messages(
     request: SemanticRequest, target_model: TranslationTarget | None = None
 ) -> dict[str, Any]:
-    # `target_model` is accepted and unused. Every outbound translator takes it so the registry can hand one to all of them alike; what a model can do only changes the rendering on the leg that has to choose an upstream-specific spelling, and Anthropic's own format has no such choice to make here.
-    del target_model
+    target = target_model or TranslationTarget()
     messages: list[dict[str, Any]] = []
     for message in request.messages:
         rendered = [
@@ -253,29 +635,36 @@ def to_anthropic_messages(
         payload["max_tokens"] = request.max_output_tokens
     if request.temperature is not None:
         payload["temperature"] = request.temperature
+    payload.update(request.nested_extensions_for(WIRE_FORMAT))
     _restore_thinking(payload, request)
+    _apply_responses_thinking(payload, request, target)
     payload.update(request.extensions_for(WIRE_FORMAT))
     return payload
 
 
 def _restore_thinking(payload: dict[str, Any], request: SemanticRequest) -> None:
-    """Put `thinking` back on the way out to this same format.
-
-    The reader claims `thinking` now, which takes it out of `extensions` — and `extensions` is what used to carry an unclaimed field across a same-format round trip untouched. Claiming a field without rebuilding it is therefore how a round trip starts losing it, and the loss is silent because the field simply is not there on the other side.
-
-    `effort` has no Anthropic spelling: it is what a Responses request says, and there is no budget that means the same thing. Reported rather than invented.
-    """
-    intent = request.reasoning
-    if intent is None:
+    """Rebuild only an Anthropic-origin request; rendering a Responses intent against a target profile belongs to Task 4."""
+    intent = request.thinking_effort
+    if intent is None or request.source_format != WIRE_FORMAT:
         return
-    if intent.mode == "disabled":
-        payload["thinking"] = {"type": "disabled"}
-    elif intent.mode == "adaptive":
-        payload["thinking"] = {"type": "adaptive"}
-    elif intent.mode == "budget" and intent.budget_tokens is not None:
-        payload["thinking"] = {"type": "enabled", "budget_tokens": intent.budget_tokens}
-    else:
-        request.conversion.record(
-            LossCode.REASONING_INTENT_NOT_CARRIED,
-            f"{intent.mode} reasoning has no Anthropic spelling",
+
+    if "thinking" in request.nested_extensions:
+        existing_thinking = payload.get("thinking")
+        thinking = (
+            cast(dict[str, Any], existing_thinking)
+            if isinstance(existing_thinking, dict)
+            else {}
         )
+        if not intent.enabled:
+            thinking["type"] = "disabled"
+        elif "budget_tokens" in thinking:
+            thinking["type"] = "enabled"
+        else:
+            thinking["type"] = "adaptive"
+        payload["thinking"] = thinking
+
+    if intent.effort_source is EffortSource.ANTHROPIC_TOP_LEVEL and intent.effort is not None:
+        existing_output = payload.get("output_config")
+        output = cast(dict[str, Any], existing_output) if isinstance(existing_output, dict) else {}
+        output["effort"] = intent.effort
+        payload["output_config"] = output

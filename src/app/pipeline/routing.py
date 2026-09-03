@@ -6,10 +6,12 @@ Decide whether the inbound format and the model's endpoint differ, and so whethe
 A model may name its target format explicitly as `model@format`.
 """
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
+from app.config.schema import ThinkingTargetProfileConfig
 from app.model_provider import (
     CapabilityMissing,
     EndpointNotSupported,
@@ -34,6 +36,10 @@ from app.pipeline.request import (
     FORMAT_ENDPOINTS,
     RequestContext,
     WireFormat,
+)
+from app.pipeline.translation_driver.reasoning import (
+    CompiledThinkingProfiles,
+    ThinkingTargetProfile,
 )
 from app.pipeline.translation_driver.semantic import TranslationTarget
 
@@ -368,12 +374,48 @@ def apply_route(context: RequestContext, route: Route) -> None:
     context.model_descriptor = route.descriptor
 
 
-def translation_target(provider: ModelProvider, model_id: str) -> TranslationTarget:
+def compile_thinking_profiles(
+    configured: Mapping[str, ThinkingTargetProfileConfig],
+) -> CompiledThinkingProfiles:
+    return tuple(
+        (
+            re.compile(pattern),
+            ThinkingTargetProfile(
+                modes=profile.modes,
+                can_disable=profile.can_disable,
+                disabled_max_effort=profile.disabled_max_effort,
+                manual_budget_tokens=profile.manual_budget_tokens,
+            ),
+        )
+        for pattern, profile in configured.items()
+    )
+
+
+def select_thinking_profile(
+    profiles: CompiledThinkingProfiles, model_id: str
+) -> tuple[str, ThinkingTargetProfile] | None:
+    selected: tuple[str, ThinkingTargetProfile] | None = None
+    for pattern, profile in profiles:
+        if pattern.fullmatch(model_id):
+            selected = (pattern.pattern, profile)
+    return selected
+
+
+def translation_target(
+    provider: ModelProvider,
+    model_id: str,
+    thinking_profiles: CompiledThinkingProfiles,
+) -> TranslationTarget:
     """What the resolved model can do, in the form a writer reads.
 
-    Built from the same descriptor routing used, so the capabilities a translation renders against are the ones the request will actually be sent to. A model the provider does not describe yields the default — no published efforts — which makes a writer decline to render rather than guess, exactly as an absent catalog field does.
+    Built from the same descriptor routing used, so the capabilities a translation renders against are the ones the request will actually be sent to. A model the provider does not describe yields no published efforts, which makes a writer decline to render rather than guess, exactly as an absent catalog field does. Thinking capability comes only from the configured profile table and remains independent of whether the live catalog has a descriptor.
     """
     descriptor = provider.describe(model_id)
-    if descriptor is None:
-        return TranslationTarget(model_id=model_id)
-    return TranslationTarget(model_id=model_id, reasoning_efforts=descriptor.reasoning_efforts)
+    selected = select_thinking_profile(thinking_profiles, model_id)
+    pattern, profile = selected if selected is not None else ("", None)
+    return TranslationTarget(
+        model_id=model_id,
+        reasoning_efforts=descriptor.reasoning_efforts if descriptor is not None else None,
+        thinking_profile=profile,
+        thinking_profile_pattern=pattern,
+    )

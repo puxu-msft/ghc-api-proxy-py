@@ -55,6 +55,29 @@ model_providers:
 
 default_model_provider: ghc
 
+model_translation:
+  to_anthropic_messages:
+    thinking_profiles:
+      'claude-(?:fable|mythos)-5(?:[.-]1)?(?:-[0-9]{8})?':
+        modes: [adaptive]
+        can_disable: false
+      'claude-mythos-preview(?:-[0-9]{8})?':
+        modes: [adaptive, enabled]
+        can_disable: false
+      'claude-opus-5(?:-[0-9]{8})?':
+        modes: [adaptive]
+        can_disable: true
+        disabled_max_effort: high
+      'claude-(?:opus-4[.-](?:7|8)|sonnet-5)(?:-[0-9]{8})?':
+        modes: [adaptive]
+        can_disable: true
+      'claude-(?:opus|sonnet)-4[.-]6(?:-[0-9]{8})?':
+        modes: [adaptive, enabled]
+        can_disable: true
+      'claude-(?:(?:opus|sonnet|haiku)-4[.-]5|opus-4[.-]1|opus-4|sonnet-4)(?:-[0-9]{8})?':
+        modes: [enabled]
+        can_disable: true
+
 # 上游会拒收、因此必须在发出前删掉的 `cache_control` 子字段，按模型点名。
 # `cache_control` subfields this upstream refuses, named per model.
 #

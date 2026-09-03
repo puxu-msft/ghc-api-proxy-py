@@ -57,6 +57,7 @@ def build_context(
     if route.model_from_path:
         working["model"] = model.strip()
 
+    filtered_headers = forwarded_client_headers(headers or {})
     context = RequestContext(
         inbound_format=route.wire_format,
         requested_model=model.strip(),
@@ -64,7 +65,8 @@ def build_context(
         payload=working,
         original_payload=payload,
         stream=stream,
-        client_headers=forwarded_client_headers(headers or {}),
+        client_headers=filtered_headers,
+        source_headers=dict(filtered_headers),
     )
     if route.count_tokens:
         context.extras["count_tokens"] = True

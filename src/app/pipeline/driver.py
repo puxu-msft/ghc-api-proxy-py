@@ -6,7 +6,7 @@ What is *not* here is deliberate. Rendering a failure as HTTP belongs to the edg
 """
 
 import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 from uuid import uuid4
@@ -49,6 +49,9 @@ from app.pipeline.retry import RetryLedger
 from app.pipeline.routing import Route, apply_route, decide_route, translation_target
 from app.pipeline.subscribers.counting import COUNTING_ONLY
 from app.pipeline.translation_driver.semantic import (
+    ConversionFact,
+    SemanticRequest,
+    TranslationRefused,
     WebSearchNotExecutable,
 )
 from app.tokenization.estimators import estimate_anthropic_input, estimate_responses_input
@@ -129,7 +132,40 @@ def shape_request(
         fix_anthropic_request(context.payload, chain.config.hook_fix_anthropic_request)
     return provider, route
 
+
+def _keep_conversion_facts(
+    context: RequestContext,
+    facts: Sequence[ConversionFact],
+) -> None:
+    if facts:
+        context.extras["conversion_facts"] = list(facts)
+
+
+def _translate_with_facts(
+    chain: Chain,
+    context: RequestContext,
+    route: Route,
+    provider: ModelProvider,
+    source_headers: Mapping[str, str],
+) -> tuple[dict[str, Any], SemanticRequest]:
+    target = translation_target(provider, route.model_id, chain.thinking_profiles)
+    try:
+        translated, semantic = chain.translators.translate(
+            context.payload,
+            source=route.inbound_format,
+            target=route.target_format,
+            target_model=target,
+            source_headers=source_headers,
+        )
+    except TranslationRefused as refusal:
+        _keep_conversion_facts(context, refusal.facts)
+        raise
+    _keep_conversion_facts(context, semantic.conversion.facts)
+    return translated, semantic
+
+
 async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[RequestContext], None] | None = None) -> HandledRequest:
+    source_headers = context.source_headers_for_translation()
     provider, route = shape_request(chain, context, on_routed)
 
     # Before translation, because the predicates read `system` and `messages` and the target format has neither. Before the driver, because the whole point is that no upstream call happens: this is the one path where the reply is decided without an attempt.
@@ -155,11 +191,12 @@ async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[Req
             )
 
     if route.translation_required:
-        translated, semantic = chain.translators.translate(
-            context.payload,
-            source=route.inbound_format,
-            target=route.target_format,
-            target_model=translation_target(provider, route.model_id),
+        translated, semantic = _translate_with_facts(
+            chain,
+            context,
+            route,
+            provider,
+            source_headers,
         )
         context.payload = translated
         if semantic.client_search_tool:
@@ -267,16 +304,18 @@ async def handle_count_tokens(chain: Chain, context: RequestContext) -> dict[str
 
     The two counters are not interchangeable. A model provider returns upstream's own number and is worth learning from; `local` returns an estimate corrected by what has been learnt so far. So the answer says which one it came from rather than presenting an estimate as a measurement.
     """
+    source_headers = context.source_headers_for_translation()
     provider, route = shape_request(chain, context)
 
     # Translated too, and in the same order the real request takes it: shape, translate, name the resolved model, then let the subscribers see it. A count that stopped short of translation would be measuring an Anthropic body against a model that is never going to be sent one — `/responses` receives a different set of items, a different tool shape, and a different spelling of every role, and its tokenizer counts what arrives rather than what was asked.
     # This is also the only way the subscribers see here what they see in production: the driver publishes `attempt.prepare` after translation, so publishing it before would hand them a protocol they never meet on this route.
     if route.translation_required:
-        translated, semantic = chain.translators.translate(
-            context.payload,
-            source=route.inbound_format,
-            target=route.target_format,
-            target_model=translation_target(provider, route.model_id),
+        translated, semantic = _translate_with_facts(
+            chain,
+            context,
+            route,
+            provider,
+            source_headers,
         )
         context.payload = translated
         if not semantic.conversion.lossless:

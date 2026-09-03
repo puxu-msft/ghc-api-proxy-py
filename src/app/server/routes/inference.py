@@ -223,7 +223,7 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
             trace.model = context.resolved_model
             trace.detail = str(error)
             # A count that failed still translated, and what the translation could not carry is part of why it may have failed.
-            trace.absorb_losses(context)
+            trace.absorb_conversion(context)
             # No capture here on purpose. `count_tokens` converts every upstream failure into `CountTokensUnavailable` before it reaches this line, so an `UpstreamRejected` never arrives and a call would be wiring that looks live and is not. That conversion also means a counting request refused over its body answers 503 rather than upstream's own verdict, which is a separate gap and not this one's to close.
             return error_response(
                 error,
@@ -256,7 +256,7 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
         if isinstance(came_back, int):
             trace.received = came_back
         # A count is translated too, and on the same terms — so a count whose `thinking` never crossed says so, exactly as a turn does.
-        trace.absorb_losses(context)
+        trace.absorb_conversion(context)
         return JSONResponse(counted)
 
     # Taken before anything can rewrite it, because a replayed attempt has to send what the client sent. `handle` translates in place — `context.payload = translated`, and `fix_anthropic_request` edits the dict it is given — so a second pass over the same context would translate an already-translated body. Measured 2026-08-22 on the primary path: the second attempt went out as `{"model": "gpt-model", "input": [], "stream": true}` and the client was answered from an empty prompt with a clean 200.
@@ -270,7 +270,7 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
         trace.attempts = context.attempt_count
         trace.detail = str(error)
         # A refused crossing is exactly where the losses matter: they name which field the request could not carry, and the error alone rarely does.
-        trace.absorb_losses(context)
+        trace.absorb_conversion(context)
         # Before the response is written, because `context.payload` is the body upstream refused and nothing downstream keeps it.
         capture_rejection(context, error, request_id=trace.request_id)
         return error_response(
@@ -284,7 +284,7 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
     trace.requested_model = context.requested_model
     trace.attempts = context.attempt_count
     # The request half has crossed by now whatever happens next, so this covers the three returns below. The buffered path calls again once the reply has crossed back.
-    trace.absorb_losses(context)
+    trace.absorb_conversion(context)
 
     response = handled.response
     if response is None:
@@ -569,7 +569,7 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
     if context.reply is not None:
         trace.absorb(context.reply)
     # Again, because the reply has only just crossed back: the response half of the translation records its losses during `response_payload` above, after the call that covered the request half.
-    trace.absorb_losses(context)
+    trace.absorb_conversion(context)
     return JSONResponse(payload, status_code=response.status_code)
 
 

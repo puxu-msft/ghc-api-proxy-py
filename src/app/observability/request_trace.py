@@ -21,7 +21,7 @@ from app.observability.request_log import (
 from app.observability.request_log_file import write_request_record
 from app.pipeline.delivery.assembling import ReplyDialect, Terminal
 from app.pipeline.request import RequestContext
-from app.pipeline.translation_driver.semantic import Loss
+from app.pipeline.translation_driver.semantic import ConversionFact, Loss
 
 # The logger every per-request line goes under. Named so a filter, a test or a log shipper can select this process's own lines out of a stream that also carries `httpx` and `uvicorn` — a substring match on the message cannot, because `httpx` narrates every upstream call with the same path in it.
 REQUEST_LOGGER = "app.request"
@@ -132,6 +132,18 @@ def _translation_losses(context: RequestContext) -> tuple[dict[str, str], ...]:
     return tuple(collected)
 
 
+def _translation_facts(context: RequestContext) -> tuple[dict[str, str], ...]:
+    """Non-loss observations made while translating the request."""
+    recorded = context.extras.get("conversion_facts")
+    if not isinstance(recorded, list):
+        return ()
+    return tuple(
+        {"code": fact.code.value, "detail": fact.detail}
+        for fact in cast(list[Any], recorded)
+        if isinstance(fact, ConversionFact)
+    )
+
+
 @dataclass(slots=True)
 class RequestTrace:
     """What is known about a request as it goes, gathered for its log line.
@@ -179,6 +191,7 @@ class RequestTrace:
     dialect: ReplyDialect = ReplyDialect.ANTHROPIC
     upstream_conn: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
     losses: tuple[dict[str, str], ...] = ()
+    facts: tuple[dict[str, str], ...] = ()
 
     def absorb(self, reply: Terminal) -> None:
         """Take the aggregated reply record onto the line.
@@ -193,7 +206,7 @@ class RequestTrace:
         self.thinking = tuple(reply.thinking)
         self.dialect = reply.dialect
 
-    def absorb_losses(self, context: RequestContext) -> None:
+    def absorb_conversion(self, context: RequestContext) -> None:
         """Take whatever translation has recorded so far onto the line.
 
         Recomputes from `context.extras` rather than appending, so calling it again after more translation has happened is correct and calling it twice with nothing in between changes nothing. That is what lets it be called at each point a translation has just finished instead of at one point that would have to be the last.
@@ -201,6 +214,7 @@ class RequestTrace:
         Called from every `return` in `_dispatch` that has a `context` to read, because no single site sits after all of them. That is the arrangement's cost and it has already been paid once: the count-tokens failure path was added to this list only after a review found it returning `losses: []` for a request whose translation had recorded some. A `return` added later without a call here reports nothing rather than reporting a lie — an empty tuple is also what a lossless crossing looks like — so the omission is invisible, which is why the rule is stated here rather than a count that drifts.
         """
         self.losses = _translation_losses(context)
+        self.facts = _translation_facts(context)
 
 
 def log_completion(chain: Chain, trace: RequestTrace, status_code: int | None, *, bytes_out: int | None) -> None:
@@ -242,6 +256,7 @@ def log_completion(chain: Chain, trace: RequestTrace, status_code: int | None, *
         detail=trace.detail,
         upstream_conn=trace.upstream_conn,
         losses=trace.losses,
+        facts=trace.facts,
     )
     status = status_for(status_code, override=trace.status_override)
     # Counted here rather than where the loss is recorded, so the count and the record are produced from the same tuple and cannot disagree about what this request lost.

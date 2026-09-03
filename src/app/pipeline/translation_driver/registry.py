@@ -27,8 +27,20 @@ from app.pipeline.translation_driver.responses import (
 )
 from app.pipeline.translation_driver.semantic import SemanticRequest, TranslationTarget
 
-type InboundTranslator = Callable[[Mapping[str, Any]], SemanticRequest]
+
+class RequestReader(Protocol):
+    def __call__(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        source_headers: Mapping[str, str] | None = None,
+        translated: bool = False,
+    ) -> SemanticRequest: ...
+
+
 type OutboundTranslator = Callable[[SemanticRequest, TranslationTarget], dict[str, Any]]
+
+
 class ResponseReader(Protocol):
     """Reads an upstream response body into the intermediate form.
 
@@ -58,12 +70,12 @@ def outbound_name(wire: WireFormat) -> str:
 
 class TranslatorRegistry:
     def __init__(self) -> None:
-        self._inbound: dict[WireFormat, InboundTranslator] = {}
+        self._inbound: dict[WireFormat, RequestReader] = {}
         self._outbound: dict[WireFormat, OutboundTranslator] = {}
         self._read_response: dict[WireFormat, ResponseReader] = {}
         self._write_response: dict[WireFormat, ResponseWriter] = {}
 
-    def register_inbound(self, wire: WireFormat, translator: InboundTranslator) -> None:
+    def register_inbound(self, wire: WireFormat, translator: RequestReader) -> None:
         self._inbound[wire] = translator
 
     def register_outbound(self, wire: WireFormat, translator: OutboundTranslator) -> None:
@@ -82,7 +94,7 @@ class TranslatorRegistry:
             + [outbound_name(wire) for wire in self._outbound]
         )
 
-    def inbound(self, wire: WireFormat) -> InboundTranslator:
+    def inbound(self, wire: WireFormat) -> RequestReader:
         translator = self._inbound.get(wire)
         if translator is None:
             raise TranslatorNotFound(f"no translator registered as {inbound_name(wire)}")
@@ -101,6 +113,7 @@ class TranslatorRegistry:
         source: WireFormat,
         target: WireFormat,
         target_model: TranslationTarget | None = None,
+        source_headers: Mapping[str, str] | None = None,
     ) -> tuple[dict[str, Any], SemanticRequest]:
         """Carry a payload from one wire format to another through the intermediate form.
 
@@ -111,7 +124,11 @@ class TranslatorRegistry:
         """
         to_semantic = self.inbound(source)
         to_wire = self.outbound(target)
-        semantic = to_semantic(payload)
+        semantic = to_semantic(
+            payload,
+            source_headers=source_headers,
+            translated=source is not target,
+        )
         return to_wire(semantic, target_model or TranslationTarget()), semantic
 
     def translate_response(

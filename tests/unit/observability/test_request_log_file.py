@@ -19,6 +19,8 @@ from app.observability.request_trace import (
 from app.observability.terminal import TerminalCapabilities
 from app.pipeline.delivery.assembling import ReplyDialect, Terminal
 from app.pipeline.delivery.blocks import CompletedBlock
+from app.pipeline.request import RequestContext, WireFormat
+from app.pipeline.translation_driver.semantic import Conversion, ConversionFactCode
 
 
 @pytest.fixture(autouse=True)
@@ -123,6 +125,7 @@ def test_a_successful_request_writes_one_complete_structured_record(tmp_path: Pa
         "detail",
         "upstream_conn",
         "losses",
+        "facts",
     }
     assert record | {"at": "ignored", "duration_s": "ignored"} == {
         "at": "ignored",
@@ -165,12 +168,46 @@ def test_a_successful_request_writes_one_complete_structured_record(tmp_path: Pa
         "upstream_conn": {"local": "172.19.141.235:56822", "peer": "140.82.116.5:443", "alpn": "h2", "stream_id": 7},
         # Empty on an untranslated turn, and empty rather than absent: a lossless crossing and a crossing nothing looked at have to be one shape here, because the record is written for requests that never reached a translator at all.
         "losses": [],
+        "facts": [],
     }
     assert record["at"].endswith("Z")
     assert cast(float, record["duration_s"]) >= 1.0
     # The join key lives in the record, not on the console line: there is nothing to join to on a request that worked, and the id is wider than several real fields put together.
     assert "req-1" not in emitted[0][0]
     assert emitted[0][1] == record["status"]
+
+
+def test_conversion_facts_are_durable_without_becoming_losses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _capture_console(monkeypatch)
+    conversion = Conversion()
+    conversion.observe(
+        ConversionFactCode.THINKING_PROFILE_SELECTED,
+        "resolved_model=claude-opus-5; pattern=claude-opus-5(?:-[0-9]{8})?",
+    )
+    assert conversion.lossless is True
+    context = RequestContext(
+        inbound_format=WireFormat.OPENAI_RESPONSES,
+        requested_model="claude-opus-5",
+        payload={"model": "claude-opus-5", "input": []},
+    )
+    context.extras["conversion_facts"] = [*conversion.facts, {"code": "not-a-typed-fact"}]
+    trace = RequestTrace(
+        method="POST",
+        path="/responses",
+        started=time.monotonic(),
+    )
+
+    trace.absorb_conversion(context)
+    log_completion(_chain(), trace, 200, bytes_out=0)
+
+    record = _only_record(tmp_path)
+    assert record["facts"] == [
+        {
+            "code": "thinking-profile-selected",
+            "detail": "resolved_model=claude-opus-5; pattern=claude-opus-5(?:-[0-9]{8})?",
+        }
+    ]
+    assert record["losses"] == []
 
 
 def test_a_failed_request_keeps_detail_and_reports_no_terminal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

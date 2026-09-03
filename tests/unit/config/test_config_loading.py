@@ -13,6 +13,7 @@ from app.config.loading import (
 from app.config.paths import spec_config_file_path
 from app.config.provider import ConfigProvider, pin_restart_only
 from app.config.schema import ProxyConfig
+from app.pipeline.routing import compile_thinking_profiles, select_thinking_profile
 
 
 def write_config(directory: Path, body: str) -> Path:
@@ -367,3 +368,136 @@ def test_a_relative_path_from_the_environment_keeps_shell_semantics(
 
     assert from_environment.pidfile_dir == "run"
     assert from_cli.pidfile_dir == "run"
+
+
+@pytest.mark.parametrize(
+    ("model_id", "expected_pattern", "expected_modes", "can_disable", "disabled_max_effort"),
+    [
+        (
+            "claude-fable-5",
+            r"claude-(?:fable|mythos)-5(?:[.-]1)?(?:-[0-9]{8})?",
+            ("adaptive",),
+            False,
+            None,
+        ),
+        (
+            "claude-mythos-preview",
+            r"claude-mythos-preview(?:-[0-9]{8})?",
+            ("adaptive", "enabled"),
+            False,
+            None,
+        ),
+        (
+            "claude-opus-5",
+            r"claude-opus-5(?:-[0-9]{8})?",
+            ("adaptive",),
+            True,
+            "high",
+        ),
+        (
+            "claude-opus-4.8",
+            r"claude-(?:opus-4[.-](?:7|8)|sonnet-5)(?:-[0-9]{8})?",
+            ("adaptive",),
+            True,
+            None,
+        ),
+        (
+            "claude-sonnet-4.6",
+            r"claude-(?:opus|sonnet)-4[.-]6(?:-[0-9]{8})?",
+            ("adaptive", "enabled"),
+            True,
+            None,
+        ),
+        (
+            "claude-haiku-4.5",
+            r"claude-(?:(?:opus|sonnet|haiku)-4[.-]5|opus-4[.-]1|opus-4|sonnet-4)(?:-[0-9]{8})?",
+            ("enabled",),
+            True,
+            None,
+        ),
+    ],
+)
+def test_bundled_thinking_profiles_match_the_official_model_families(
+    model_id: str,
+    expected_pattern: str,
+    expected_modes: tuple[str, ...],
+    can_disable: bool,
+    disabled_max_effort: str | None,
+) -> None:
+    config = load_proxy_config(environ={})
+    profiles = compile_thinking_profiles(
+        config.model_translation.to_anthropic_messages.thinking_profiles
+    )
+
+    selected = select_thinking_profile(profiles, model_id)
+
+    assert selected is not None
+    pattern, profile = selected
+    assert pattern == expected_pattern
+    assert profile.modes == expected_modes
+    assert profile.can_disable is can_disable
+    assert profile.disabled_max_effort == disabled_max_effort
+    assert profile.manual_budget_tokens is None
+
+
+@pytest.mark.parametrize(
+    "model_id", ["claude-sonnet-4-1", "claude-haiku-4-1", "claude-haiku-4"]
+)
+def test_bundled_thinking_profiles_do_not_claim_adjacent_unsupported_models(
+    model_id: str,
+) -> None:
+    config = load_proxy_config(environ={})
+    profiles = compile_thinking_profiles(
+        config.model_translation.to_anthropic_messages.thinking_profiles
+    )
+
+    assert select_thinking_profile(profiles, model_id) is None
+
+
+def test_thinking_profile_last_matching_user_pattern_overrides_bundled_default(
+    tmp_path: Path,
+) -> None:
+    config_path = write_config(
+        tmp_path,
+        "model_translation:\n"
+        "  to_anthropic_messages:\n"
+        "    thinking_profiles:\n"
+        "      'claude-opus-.*':\n"
+        "        modes: [enabled, adaptive]\n"
+        "        can_disable: true\n"
+        "        manual_budget_tokens: 2048\n",
+    )
+    config = load_proxy_config(config_path=config_path, environ={})
+    profiles = compile_thinking_profiles(
+        config.model_translation.to_anthropic_messages.thinking_profiles
+    )
+
+    selected = select_thinking_profile(profiles, "claude-opus-5")
+
+    assert selected is not None
+    pattern, profile = selected
+    assert pattern == "claude-opus-.*"
+    assert profile.modes == ("enabled", "adaptive")
+    assert profile.manual_budget_tokens == 2048
+
+
+def test_thinking_profile_same_pattern_override_keeps_unnamed_fields(
+    tmp_path: Path,
+) -> None:
+    config_path = write_config(
+        tmp_path,
+        "model_translation:\n"
+        "  to_anthropic_messages:\n"
+        "    thinking_profiles:\n"
+        "      'claude-opus-5(?:-[0-9]{8})?':\n"
+        "        manual_budget_tokens: 4096\n",
+    )
+    config = load_proxy_config(config_path=config_path, environ={})
+    profile = config.model_translation.to_anthropic_messages.thinking_profiles[
+        r"claude-opus-5(?:-[0-9]{8})?"
+    ]
+
+    assert profile.modes == ("adaptive",)
+    assert profile.can_disable is True
+    assert profile.disabled_max_effort == "high"
+    assert profile.manual_budget_tokens == 4096

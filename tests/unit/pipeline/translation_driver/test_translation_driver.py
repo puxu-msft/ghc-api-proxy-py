@@ -1,12 +1,25 @@
 import json
 import re
+from collections.abc import Mapping
 from typing import Any, cast
 
 import pytest
 
 from app.pipeline.request import WireFormat
-from app.pipeline.translation_driver.anthropic_messages import from_anthropic_messages
-from app.pipeline.translation_driver.openai_responses import to_openai_responses
+from app.pipeline.translation_driver.anthropic_messages import (
+    from_anthropic_messages,
+    render_anthropic_thinking,
+    to_anthropic_messages,
+)
+from app.pipeline.translation_driver.openai_responses import (
+    from_openai_responses,
+    to_openai_responses,
+)
+from app.pipeline.translation_driver.reasoning import (
+    EffortSource,
+    ThinkingEffortIntent,
+    ThinkingTargetProfile,
+)
 from app.pipeline.translation_driver.reasoning_carrier import decode_reasoning_carrier
 from app.pipeline.translation_driver.registry import (
     TranslatorNotFound,
@@ -19,6 +32,7 @@ from app.pipeline.translation_driver.semantic import (
     LossCode,
     SemanticRequest,
     TranslationRefused,
+    TranslationTarget,
 )
 
 # The worked example from `docs/.human-controlled/message-translation.md`.
@@ -171,6 +185,789 @@ def test_unmodelled_fields_survive_a_same_format_round_trip() -> None:
     )
     assert result["metadata"] == {"user_id": "u1"}
     assert result["top_p"] == 0.9
+
+
+def test_thinking_effort_intent_keeps_enablement_effort_and_source_together() -> None:
+    intent = ThinkingEffortIntent(
+        enabled=True,
+        effort="high",
+        effort_source=EffortSource.ANTHROPIC_DEFAULT,
+    )
+
+    assert intent.enabled is True
+    assert intent.effort == "high"
+    assert intent.effort_source is EffortSource.ANTHROPIC_DEFAULT
+
+
+def test_registry_passes_source_headers_and_translation_state_to_the_reader() -> None:
+    captured: dict[str, object] = {}
+
+    def reader(
+        payload: Mapping[str, Any],
+        *,
+        source_headers: Mapping[str, str] | None = None,
+        translated: bool = False,
+    ) -> SemanticRequest:
+        del payload
+        captured.update(headers=dict(source_headers or {}), translated=translated)
+        return SemanticRequest(model="m", source_format="anthropic-messages")
+
+    def writer(request: SemanticRequest, target: TranslationTarget) -> dict[str, Any]:
+        del target
+        return {"model": request.model}
+
+    registry = TranslatorRegistry()
+    registry.register_inbound(WireFormat.ANTHROPIC_MESSAGES, reader)
+    registry.register_outbound(WireFormat.OPENAI_RESPONSES, writer)
+    registry.translate(
+        {"model": "m"},
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+        source_headers={"anthropic-beta": "mid-conversation-output-config-2026-07-01"},
+    )
+
+    assert captured == {
+        "headers": {"anthropic-beta": "mid-conversation-output-config-2026-07-01"},
+        "translated": True,
+    }
+
+
+def test_nested_extensions_for_preserves_same_format_and_records_cross_format_fields() -> None:
+    request = SemanticRequest(
+        model="m",
+        source_format="openai-responses",
+        nested_extensions={"reasoning": {"summary": "auto"}},
+    )
+
+    assert request.nested_extensions_for("openai-responses") == {
+        "reasoning": {"summary": "auto"}
+    }
+    assert request.nested_extensions_for("anthropic-messages") == {}
+    assert [loss.detail for loss in request.conversion.losses] == [
+        "from openai-responses into anthropic-messages: reasoning.summary"
+    ]
+
+
+def test_responses_same_format_nested_extensions_are_merged_before_owned_effort() -> None:
+    request = SemanticRequest(
+        model="m",
+        source_format="openai-responses",
+        thinking_effort=ThinkingEffortIntent(
+            enabled=True,
+            effort="high",
+            effort_source=EffortSource.RESPONSES,
+        ),
+        nested_extensions={"reasoning": {"effort": "low", "summary": "auto"}},
+    )
+
+    payload = to_openai_responses(
+        request,
+        TranslationTarget(reasoning_efforts=("high",)),
+    )
+
+    assert payload["reasoning"] == {"effort": "high", "summary": "auto"}
+
+
+def test_anthropic_same_format_nested_extensions_are_rebuilt() -> None:
+    request = SemanticRequest(
+        model="m",
+        source_format="anthropic-messages",
+        thinking_effort=ThinkingEffortIntent(
+            enabled=True,
+            effort="low",
+            effort_source=EffortSource.ANTHROPIC_TOP_LEVEL,
+        ),
+        nested_extensions={
+            "thinking": {"budget_tokens": 2048, "future": "kept"},
+            "output_config": {"future": True},
+        },
+    )
+
+    payload = to_anthropic_messages(request)
+
+    assert payload["thinking"] == {
+        "type": "enabled",
+        "budget_tokens": 2048,
+        "future": "kept",
+    }
+    assert payload["output_config"] == {"effort": "low", "future": True}
+
+
+def test_explicit_effort_wins_and_budget_never_selects_the_level() -> None:
+    registry = default_registry()
+
+    def translate(budget: int) -> tuple[dict[str, Any], SemanticRequest]:
+        return registry.translate(
+            {
+                "model": "m",
+                "messages": [{"role": "user", "content": "hi"}],
+                "thinking": {"type": "enabled", "budget_tokens": budget},
+                "output_config": {"effort": "xhigh"},
+            },
+            source=WireFormat.ANTHROPIC_MESSAGES,
+            target=WireFormat.OPENAI_RESPONSES,
+            target_model=TranslationTarget(
+                model_id="m",
+                reasoning_efforts=("low", "medium", "high", "xhigh", "max"),
+            ),
+        )
+
+    first_wire, first_semantic = translate(1024)
+    second_wire, second_semantic = translate(64000)
+    assert first_wire["reasoning"] == {"effort": "xhigh"}
+    assert second_wire["reasoning"] == first_wire["reasoning"]
+    for semantic in (first_semantic, second_semantic):
+        assert [(loss.code, loss.detail) for loss in semantic.conversion.losses] == [
+            (
+                LossCode.EXTENSIONS_NOT_CARRIED,
+                "from anthropic-messages into openai-responses: thinking.budget_tokens",
+            )
+        ]
+
+
+@pytest.mark.parametrize(
+    ("request_fields", "expected_losses", "budget_not_carried_count"),
+    [
+        pytest.param(
+            {"thinking": {"type": "auto"}},
+            [
+                (
+                    LossCode.REASONING_INTENT_APPROXIMATED,
+                    "thinking.type=auto accepted as a translated-path compatibility extension",
+                )
+            ],
+            0,
+            id="auto",
+        ),
+        pytest.param(
+            {"thinking": {"type": "enabled"}},
+            [
+                (
+                    LossCode.REASONING_INTENT_APPROXIMATED,
+                    "thinking.budget_tokens absent on enabled thinking; accepted as a translated-path compatibility extension",
+                )
+            ],
+            0,
+            id="enabled-without-budget",
+        ),
+        pytest.param(
+            {"thinking": {"type": "enabled", "budget_tokens": 512}},
+            [
+                (
+                    LossCode.REASONING_INTENT_APPROXIMATED,
+                    "thinking.budget_tokens=512 accepted as a translated-path compatibility extension: below the official 1024-token minimum",
+                ),
+                (
+                    LossCode.EXTENSIONS_NOT_CARRIED,
+                    "from anthropic-messages into openai-responses: thinking.budget_tokens",
+                ),
+            ],
+            1,
+            id="budget-below-minimum",
+        ),
+        pytest.param(
+            {
+                "max_tokens": 2048,
+                "thinking": {"type": "enabled", "budget_tokens": 2048},
+            },
+            [
+                (
+                    LossCode.REASONING_INTENT_APPROXIMATED,
+                    "thinking.budget_tokens=2048 accepted as a translated-path compatibility extension: not below max_tokens",
+                ),
+                (
+                    LossCode.EXTENSIONS_NOT_CARRIED,
+                    "from anthropic-messages into openai-responses: thinking.budget_tokens",
+                ),
+            ],
+            1,
+            id="budget-not-below-max-tokens",
+        ),
+    ],
+)
+def test_anthropic_thinking_compatibility_has_static_wire_and_loss_expectations(
+    request_fields: dict[str, Any],
+    expected_losses: list[tuple[LossCode, str]],
+    budget_not_carried_count: int,
+) -> None:
+    wire, semantic = default_registry().translate(
+        {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            **request_fields,
+        },
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+        target_model=TranslationTarget(
+            model_id="m",
+            reasoning_efforts=("low", "medium", "high", "xhigh", "max"),
+        ),
+    )
+
+    assert wire["reasoning"] == {"effort": "high"}
+    assert [(loss.code, loss.detail) for loss in semantic.conversion.losses] == expected_losses
+    assert sum(
+        loss.code is LossCode.EXTENSIONS_NOT_CARRIED
+        and loss.detail
+        == "from anthropic-messages into openai-responses: thinking.budget_tokens"
+        for loss in semantic.conversion.losses
+    ) == budget_not_carried_count
+
+
+@pytest.mark.parametrize(
+    ("reasoning", "enabled", "effort"),
+    [
+        ({}, True, None),
+        ({"effort": None}, True, None),
+        ({"effort": "none"}, False, "none"),
+        ({"effort": "minimal"}, True, "minimal"),
+        ({"effort": "low"}, True, "low"),
+        ({"effort": "medium"}, True, "medium"),
+        ({"effort": "high"}, True, "high"),
+        ({"effort": "xhigh"}, True, "xhigh"),
+        ({"effort": "max"}, True, "max"),
+    ],
+)
+def test_responses_reasoning_effort_reader_maps_the_complete_domain(
+    reasoning: dict[str, Any],
+    enabled: bool,
+    effort: str | None,
+) -> None:
+    request = from_openai_responses({"model": "m", "input": [], "reasoning": reasoning})
+
+    assert request.thinking_effort == ThinkingEffortIntent(
+        enabled=enabled,
+        effort=effort,
+        effort_source=EffortSource.RESPONSES,
+    )
+
+
+def test_responses_reasoning_absent_leaves_the_intent_absent() -> None:
+    request = from_openai_responses({"model": "m", "input": []})
+
+    assert request.thinking_effort is None
+    assert request.nested_extensions == {}
+
+
+@pytest.mark.parametrize("reasoning", [None, "high", [], 3])
+def test_malformed_responses_reasoning_object_is_refused(reasoning: object) -> None:
+    with pytest.raises(TranslationRefused) as raised:
+        from_openai_responses({"model": "m", "input": [], "reasoning": reasoning})
+
+    assert raised.value.code == "reasoning-intent-invalid"
+    assert raised.value.field_path == "reasoning"
+
+
+@pytest.mark.parametrize("effort", [True, 3, [], "future", "ultracode"])
+def test_malformed_or_unknown_responses_reasoning_effort_is_refused(effort: object) -> None:
+    with pytest.raises(TranslationRefused) as raised:
+        from_openai_responses({"model": "m", "input": [], "reasoning": {"effort": effort}})
+
+    assert raised.value.code == "effort-invalid"
+    assert raised.value.field_path == "reasoning.effort"
+
+
+def test_profile_modes_fall_through_to_adaptive() -> None:
+    intent = ThinkingEffortIntent(True, "high", EffortSource.RESPONSES)
+    target = TranslationTarget(
+        model_id="claude-model",
+        thinking_profile=ThinkingTargetProfile(
+            modes=("enabled", "adaptive"),
+            can_disable=True,
+            manual_budget_tokens=2048,
+        ),
+        thinking_profile_pattern="claude-model",
+    )
+
+    assert render_anthropic_thinking(intent, target, max_tokens=2048) == {"type": "adaptive"}
+    assert render_anthropic_thinking(intent, target, max_tokens=None) == {"type": "adaptive"}
+
+
+def test_extended_only_profile_never_invents_budget() -> None:
+    intent = ThinkingEffortIntent(True, "high", EffortSource.RESPONSES)
+    target = TranslationTarget(
+        model_id="claude-model",
+        thinking_profile=ThinkingTargetProfile(modes=("enabled",), can_disable=True),
+        thinking_profile_pattern="claude-model",
+    )
+
+    with pytest.raises(TranslationRefused) as raised:
+        render_anthropic_thinking(intent, target, max_tokens=4096)
+
+    assert raised.value.code == "thinking-mode-not-renderable"
+    assert raised.value.field_path == "reasoning"
+
+
+def test_manual_thinking_profile_requires_budget_below_request_max() -> None:
+    intent = ThinkingEffortIntent(True, "high", EffortSource.RESPONSES)
+    target = TranslationTarget(
+        model_id="claude-model",
+        thinking_profile=ThinkingTargetProfile(
+            modes=("enabled",),
+            can_disable=True,
+            manual_budget_tokens=2048,
+        ),
+        thinking_profile_pattern="claude-model",
+    )
+
+    assert render_anthropic_thinking(intent, target, max_tokens=2049) == {
+        "type": "enabled",
+        "budget_tokens": 2048,
+    }
+    with pytest.raises(TranslationRefused, match="no renderable mode"):
+        render_anthropic_thinking(intent, target, max_tokens=2048)
+
+
+def test_disabled_thinking_profile_uses_default_high_for_its_effort_limit() -> None:
+    intent = ThinkingEffortIntent(False, "none", EffortSource.RESPONSES)
+    allowed = TranslationTarget(
+        thinking_profile=ThinkingTargetProfile(
+            modes=("adaptive",),
+            can_disable=True,
+            disabled_max_effort="high",
+        )
+    )
+    refused = TranslationTarget(
+        thinking_profile=ThinkingTargetProfile(
+            modes=("adaptive",),
+            can_disable=True,
+            disabled_max_effort="medium",
+        )
+    )
+
+    assert render_anthropic_thinking(intent, allowed, max_tokens=None) == {"type": "disabled"}
+    with pytest.raises(TranslationRefused) as raised:
+        render_anthropic_thinking(intent, refused, max_tokens=None)
+    assert raised.value.code == "thinking-disable-effort-not-supported"
+
+
+def _responses_to_anthropic(
+    effort: str | None,
+    *,
+    reasoning_efforts: tuple[str, ...] | None = ("low", "medium", "high", "xhigh", "max"),
+) -> tuple[dict[str, Any], SemanticRequest]:
+    reasoning: dict[str, Any] = {} if effort is None else {"effort": effort}
+    request = from_openai_responses(
+        {
+            "model": "claude-model",
+            "input": [],
+            "max_output_tokens": 4096,
+            "reasoning": reasoning,
+        }
+    )
+    payload = to_anthropic_messages(
+        request,
+        TranslationTarget(
+            model_id="claude-model",
+            reasoning_efforts=reasoning_efforts,
+            thinking_profile=ThinkingTargetProfile(modes=("adaptive",), can_disable=True),
+            thinking_profile_pattern="claude-model",
+        ),
+    )
+    return payload, request
+
+
+def test_minimal_maps_to_low_and_records_approximation() -> None:
+    payload, request = _responses_to_anthropic("minimal")
+
+    assert payload["thinking"] == {"type": "adaptive"}
+    assert payload["output_config"] == {"effort": "low"}
+    assert [(loss.code, loss.detail) for loss in request.conversion.losses] == [
+        (
+            LossCode.REASONING_INTENT_APPROXIMATED,
+            "Responses effort minimal was approximated to Anthropic low",
+        )
+    ]
+
+
+def test_anthropic_alignment_names_an_incompatible_published_catalog() -> None:
+    payload, request = _responses_to_anthropic(
+        "high",
+        reasoning_efforts=("none", "minimal", "future-level"),
+    )
+
+    assert payload["thinking"] == {"type": "adaptive"}
+    assert "output_config" not in payload
+    assert [(loss.code, loss.detail) for loss in request.conversion.losses] == [
+        (
+            LossCode.REASONING_INTENT_NOT_CARRIED,
+            "high effort was not sent to Anthropic: this model advertises no Anthropic-compatible reasoning effort candidates",
+        )
+    ]
+
+
+def test_anthropic_alignment_names_the_weakest_compatible_floor() -> None:
+    payload, request = _responses_to_anthropic(
+        "low",
+        reasoning_efforts=("minimal", "medium"),
+    )
+
+    assert payload["thinking"] == {"type": "adaptive"}
+    assert payload["output_config"] == {"effort": "medium"}
+    assert [(loss.code, loss.detail) for loss in request.conversion.losses] == [
+        (
+            LossCode.REASONING_INTENT_APPROXIMATED,
+            "asked for low; medium is the weakest Anthropic-compatible candidate published by this model, so medium was sent",
+        )
+    ]
+
+
+def test_minimal_then_catalog_floor_records_both_losses_in_order() -> None:
+    payload, request = _responses_to_anthropic(
+        "minimal",
+        reasoning_efforts=("medium",),
+    )
+
+    assert payload["thinking"] == {"type": "adaptive"}
+    assert payload["output_config"] == {"effort": "medium"}
+    assert [(loss.code, loss.detail) for loss in request.conversion.losses] == [
+        (
+            LossCode.REASONING_INTENT_APPROXIMATED,
+            "Responses effort minimal was approximated to Anthropic low",
+        ),
+        (
+            LossCode.REASONING_INTENT_APPROXIMATED,
+            "asked for low; medium is the weakest Anthropic-compatible candidate published by this model, so medium was sent",
+        ),
+    ]
+
+
+def test_minimal_with_absent_catalog_records_both_losses_in_order() -> None:
+    payload, request = _responses_to_anthropic("minimal", reasoning_efforts=None)
+
+    assert payload["thinking"] == {"type": "adaptive"}
+    assert "output_config" not in payload
+    assert [(loss.code, loss.detail) for loss in request.conversion.losses] == [
+        (
+            LossCode.REASONING_INTENT_APPROXIMATED,
+            "Responses effort minimal was approximated to Anthropic low",
+        ),
+        (
+            LossCode.REASONING_INTENT_NOT_CARRIED,
+            "low effort was not sent to Anthropic: the catalog publishes no Anthropic-compatible reasoning effort candidates for this model",
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("desired", "published", "expected"),
+    [
+        ("xhigh", ("low", "medium", "high", "xhigh", "max"), "xhigh"),
+        ("max", ("low", "medium", "high"), "high"),
+        ("low", ("medium", "high"), "medium"),
+    ],
+)
+def test_responses_to_anthropic_reasoning_effort_uses_exact_downward_and_floor_alignment(
+    desired: str,
+    published: tuple[str, ...],
+    expected: str,
+) -> None:
+    payload, request = _responses_to_anthropic(desired, reasoning_efforts=published)
+
+    assert payload["thinking"] == {"type": "adaptive"}
+    assert payload["output_config"] == {"effort": expected}
+    assert request.conversion.has(LossCode.REASONING_INTENT_APPROXIMATED) is (desired != expected)
+
+
+@pytest.mark.parametrize("published", [None, (), ("future-level",), ("none", "minimal")])
+def test_responses_to_anthropic_reasoning_effort_not_carried_keeps_thinking(
+    published: tuple[str, ...] | None,
+) -> None:
+    payload, request = _responses_to_anthropic("high", reasoning_efforts=published)
+
+    assert payload["thinking"] == {"type": "adaptive"}
+    assert "output_config" not in payload
+    assert request.conversion.has(LossCode.REASONING_INTENT_NOT_CARRIED)
+
+
+def test_responses_reasoning_none_and_unspecified_effort_do_not_invent_output_config() -> None:
+    disabled, _ = _responses_to_anthropic("none")
+    unspecified, _ = _responses_to_anthropic(None)
+
+    assert disabled["thinking"] == {"type": "disabled"}
+    assert unspecified["thinking"] == {"type": "adaptive"}
+    assert "output_config" not in disabled
+    assert "output_config" not in unspecified
+
+
+def test_nested_extension_reasoning_fields_are_not_counted_as_lost_effort() -> None:
+    source: dict[str, Any] = {
+        "model": "claude-model",
+        "input": [],
+        "reasoning": {
+            "effort": "high",
+            "summary": "auto",
+            "context": {"trace": True},
+            "mode": "future",
+        },
+    }
+    same_format_request = from_openai_responses(source)
+    same_format = to_openai_responses(
+        same_format_request,
+        TranslationTarget(reasoning_efforts=("high",)),
+    )
+    assert same_format["reasoning"] == source["reasoning"]
+
+    cross_format_request = from_openai_responses(source)
+    cross_format = to_anthropic_messages(
+        cross_format_request,
+        TranslationTarget(
+            model_id="claude-model",
+            reasoning_efforts=("high",),
+            thinking_profile=ThinkingTargetProfile(modes=("adaptive",), can_disable=True),
+            thinking_profile_pattern="claude-model",
+        ),
+    )
+    assert cross_format["thinking"] == {"type": "adaptive"}
+    assert cross_format["output_config"] == {"effort": "high"}
+    assert [loss.detail for loss in cross_format_request.conversion.losses] == [
+        "from openai-responses into anthropic-messages: reasoning.context",
+        "from openai-responses into anthropic-messages: reasoning.mode",
+        "from openai-responses into anthropic-messages: reasoning.summary",
+    ]
+    assert all("reasoning.effort" not in loss.detail for loss in cross_format_request.conversion.losses)
+
+
+def test_anthropic_reader_defaults_omitted_thinking_and_effort_to_enabled_high() -> None:
+    request = from_anthropic_messages(
+        {"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+        translated=True,
+    )
+
+    assert request.thinking_effort == ThinkingEffortIntent(
+        enabled=True,
+        effort="high",
+        effort_source=EffortSource.ANTHROPIC_DEFAULT,
+    )
+    assert request.nested_extensions == {}
+
+
+def test_equal_per_message_effort_still_records_per_message_provenance() -> None:
+    request = from_anthropic_messages(
+        {
+            "model": "m",
+            "output_config": {"effort": "high"},
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "",
+                    "output_config": {"effort": "high"},
+                },
+                {"role": "user", "content": "hi"},
+            ],
+        },
+        source_headers={"anthropic-beta": "mid-conversation-output-config-2026-07-01"},
+        translated=True,
+    )
+
+    assert request.thinking_effort == ThinkingEffortIntent(
+        enabled=True,
+        effort="high",
+        effort_source=EffortSource.ANTHROPIC_PER_MESSAGE,
+    )
+
+
+@pytest.mark.parametrize(
+    ("thinking", "enabled"),
+    [
+        ({"type": "adaptive"}, True),
+        ({"type": "auto"}, True),
+        ({"type": "enabled"}, True),
+        ({"type": "enabled", "budget_tokens": 1024}, True),
+        ({"type": "disabled"}, False),
+    ],
+)
+def test_anthropic_reader_derives_only_enablement_from_thinking(
+    thinking: dict[str, Any],
+    enabled: bool,
+) -> None:
+    request = from_anthropic_messages(
+        {
+            "model": "m",
+            "messages": [],
+            "thinking": thinking,
+            "output_config": {"effort": "low"},
+        },
+        translated=True,
+    )
+
+    assert request.thinking_effort is not None
+    assert request.thinking_effort.enabled is enabled
+    assert request.thinking_effort.effort == "low"
+    assert request.thinking_effort.effort_source is EffortSource.ANTHROPIC_TOP_LEVEL
+
+
+def test_anthropic_same_format_rebuild_uses_intent_and_nested_residuals() -> None:
+    request = from_anthropic_messages(
+        {
+            "model": "m",
+            "messages": [],
+            "thinking": {
+                "type": "enabled",
+                "budget_tokens": 2048,
+                "future": "thinking-sibling",
+            },
+            "output_config": {
+                "effort": "xhigh",
+                "future": "output-sibling",
+            },
+        },
+        translated=True,
+    )
+
+    payload = to_anthropic_messages(request)
+
+    assert payload["thinking"] == {
+        "type": "enabled",
+        "budget_tokens": 2048,
+        "future": "thinking-sibling",
+    }
+    assert payload["output_config"] == {
+        "effort": "xhigh",
+        "future": "output-sibling",
+    }
+
+
+@pytest.mark.parametrize(
+    ("thinking", "field_path"),
+    [
+        (None, "thinking"),
+        ("enabled", "thinking"),
+        ({}, "thinking.type"),
+        ({"type": 3}, "thinking.type"),
+        ({"type": "sideways"}, "thinking.type"),
+        ({"type": "enabled", "budget_tokens": True}, "thinking.budget_tokens"),
+        ({"type": "enabled", "budget_tokens": 0}, "thinking.budget_tokens"),
+        ({"type": "enabled", "budget_tokens": -5}, "thinking.budget_tokens"),
+        ({"type": "enabled", "budget_tokens": "lots"}, "thinking.budget_tokens"),
+    ],
+)
+def test_invalid_thinking_is_refused_at_its_exact_field(
+    thinking: object,
+    field_path: str,
+) -> None:
+    with pytest.raises(TranslationRefused) as raised:
+        from_anthropic_messages(
+            {"model": "m", "messages": [], "thinking": thinking},
+            translated=True,
+        )
+
+    assert raised.value.code == "reasoning-intent-invalid"
+    assert raised.value.field_path == field_path
+
+
+@pytest.mark.parametrize(
+    ("output_config", "field_path"),
+    [
+        (None, "output_config"),
+        ("high", "output_config"),
+        ({"effort": None}, "output_config.effort"),
+        ({"effort": 3}, "output_config.effort"),
+        ({"effort": "minimal"}, "output_config.effort"),
+        ({"effort": "ultracode"}, "output_config.effort"),
+    ],
+)
+def test_invalid_anthropic_effort_is_refused_at_its_exact_field(
+    output_config: object,
+    field_path: str,
+) -> None:
+    with pytest.raises(TranslationRefused) as raised:
+        from_anthropic_messages(
+            {"model": "m", "messages": [], "output_config": output_config},
+            translated=True,
+        )
+
+    assert raised.value.code == "effort-invalid"
+    assert raised.value.field_path == field_path
+
+
+@pytest.mark.parametrize(
+    ("message", "headers", "code", "field_path"),
+    [
+        (
+            {
+                "role": "system",
+                "content": "",
+                "output_config": {"effort": "high"},
+                "future": True,
+            },
+            {"anthropic-beta": "mid-conversation-output-config-2026-07-01"},
+            "effort-control-invalid",
+            "messages[0].future",
+        ),
+        (
+            {
+                "role": "assistant",
+                "content": "not empty",
+                "output_config": {"effort": "high"},
+            },
+            {"anthropic-beta": "mid-conversation-output-config-2026-07-01"},
+            "effort-control-invalid",
+            "messages[0].role",
+        ),
+        (
+            {
+                "role": "system",
+                "content": "not empty",
+                "output_config": {"effort": "high"},
+            },
+            {"anthropic-beta": "mid-conversation-output-config-2026-07-01"},
+            "effort-control-invalid",
+            "messages[0].content",
+        ),
+        (
+            {"role": "system", "content": "", "output_config": None},
+            {"anthropic-beta": "mid-conversation-output-config-2026-07-01"},
+            "effort-control-invalid",
+            "messages[0].output_config",
+        ),
+        (
+            {
+                "role": "system",
+                "content": "",
+                "output_config": {"effort": "high", "future": True},
+            },
+            {"anthropic-beta": "mid-conversation-output-config-2026-07-01"},
+            "effort-control-invalid",
+            "messages[0].output_config.future",
+        ),
+        (
+            {
+                "role": "system",
+                "content": "",
+                "output_config": {"effort": "ultracode"},
+            },
+            {"anthropic-beta": "mid-conversation-output-config-2026-07-01"},
+            "effort-invalid",
+            "messages[0].output_config.effort",
+        ),
+        (
+            {
+                "role": "system",
+                "content": "",
+                "output_config": {"effort": "high"},
+            },
+            {},
+            "beta-required",
+            "messages[0].output_config.effort",
+        ),
+    ],
+)
+def test_invalid_per_message_effort_control_is_refused_before_message_parsing(
+    message: dict[str, Any],
+    headers: dict[str, str],
+    code: str,
+    field_path: str,
+) -> None:
+    with pytest.raises(TranslationRefused) as raised:
+        from_anthropic_messages(
+            {"model": "m", "messages": [message]},
+            source_headers=headers,
+            translated=True,
+        )
+
+    assert raised.value.code == code
+    assert raised.value.field_path == field_path
 
 
 def test_string_system_prompt_is_accepted() -> None:

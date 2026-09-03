@@ -22,8 +22,20 @@ from typing import Any
 import httpx2
 
 from app.config.schema import ProxyConfig
+from app.core.chain import Chain
+from app.model_provider import ModelProvider, resolve_default_name
+from app.model_provider.ghc_client import (
+    CopilotTokenManager,
+    GhcClientConfig,
+    build_identity_headers,
+)
 from app.pipeline.driver import handle_bounded
-from app.server.composition import build_chain, refresh_catalogs
+from app.server.composition import (
+    build_chain,
+    build_copilot_provider,
+    build_github_token_source,
+    refresh_catalogs,
+)
 from app.server.inbound import build_context
 from app.server.routes.table import route_for_path
 from recorded.cassettes import RecordingTransport
@@ -43,13 +55,41 @@ SCENARIOS: dict[str, dict[str, Any]] = {
 }
 
 
+def _recording_chain(
+    config: ProxyConfig,
+    http_client: httpx2.AsyncClient,
+) -> Chain:
+    provider_name = resolve_default_name(config)
+    provider_config = config.model_providers[provider_name]
+    ghc_config = GhcClientConfig(
+        api_base_url_override=provider_config.api_base_url,
+        auth_base_url_override=provider_config.auth_base_url,
+    )
+    token_manager = CopilotTokenManager(
+        build_github_token_source(config, provider_name),
+        http_client,
+        auth_base_url=ghc_config.auth_base_url,
+        identity_headers=build_identity_headers(ghc_config),
+    )
+    providers: dict[str, ModelProvider] = {
+        provider_name: build_copilot_provider(
+            provider_name,
+            config,
+            http_client=http_client,
+            token_manager=token_manager,
+            interaction_id="interaction",
+        )
+    }
+    return build_chain(config, http_client=http_client, providers=providers)
+
+
 async def record(name: str) -> None:
     body = SCENARIOS[name]
     config: ProxyConfig = pinned_config()
     recorder = RecordingTransport()
     client = httpx2.AsyncClient(transport=recorder, timeout=120)
     try:
-        chain = build_chain(config, http_client=client)
+        chain = _recording_chain(config, client)
         await refresh_catalogs(chain)
         route = route_for_path("/v1/messages")
         if route is None:
@@ -65,6 +105,10 @@ async def record(name: str) -> None:
         await client.aclose()
 
     destination = CASSETTE_DIR / f"{name}.json"
+    if not recorder.cassette.interactions:
+        raise RuntimeError(
+            f"scenario {name} recorded zero interactions; refusing to overwrite {destination}"
+        )
     recorder.cassette.write(destination)
     print(f"wrote {destination} ({len(recorder.cassette.interactions)} interactions)")
     for interaction in recorder.cassette.interactions:
@@ -78,7 +122,11 @@ def main() -> int:
     if len(sys.argv) != 2 or sys.argv[1] not in SCENARIOS:
         print(f"usage: record_cassette.py {{{'|'.join(SCENARIOS)}}}", file=sys.stderr)
         return 2
-    asyncio.run(record(sys.argv[1]))
+    try:
+        asyncio.run(record(sys.argv[1]))
+    except RuntimeError as error:
+        print(error, file=sys.stderr)
+        return 1
     return 0
 
 

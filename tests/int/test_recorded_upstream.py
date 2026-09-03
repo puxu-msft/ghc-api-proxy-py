@@ -7,11 +7,14 @@ Why this file exists rather than another hand-written stand-in: streaming on thi
 
 import re
 from collections.abc import AsyncIterator
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import httpx2
 import orjson
 import pytest
+import recorded.record_cassette as record_cassette
 from recorded.cassettes import (
     KEPT_RESPONSE_HEADERS,
     Cassette,
@@ -22,6 +25,8 @@ from recorded.cassettes import (
 from recorded.recorded_provider import cassette_path, recorded_chain
 from test_pipeline_app import delivering
 
+import app.server.composition as composition
+from app.config.loading import GITHUB_TOKEN_VARIABLE
 from app.pipeline.delivery.formats.anthropic_messages import AnthropicFramer
 from app.pipeline.delivery_policy import assembler_for, delivery_buffer, stream_settings
 from app.pipeline.driver import handle_bounded
@@ -285,6 +290,148 @@ class _FakeUpstream(httpx2.AsyncBaseTransport):
                     yield chunk
 
         return httpx2.Response(200, headers=self._headers, stream=_Stream(list(self._chunks)))
+
+
+class _RecordingScenarioUpstream(httpx2.AsyncBaseTransport):
+    """Serve the live recorder's three upstream legs without opening a socket."""
+
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        path = request.url.path
+        if path == "/copilot_internal/v2/token":
+            chunks = [
+                orjson.dumps(
+                    {
+                        "token": "copilot-token",
+                        "expires_at": 4_102_444_800,
+                        "refresh_in": 1500,
+                    }
+                )
+            ]
+            return await _FakeUpstream(chunks, {"content-type": "application/json"}).handle_async_request(request)
+        if path == "/models":
+            chunks = [
+                orjson.dumps(
+                    {
+                        "object": "list",
+                        "data": [
+                            {
+                                "id": "gpt-5.5",
+                                "supported_endpoints": ["/responses"],
+                                "capabilities": {
+                                    "supports": {
+                                        "reasoning_effort": [
+                                            "none",
+                                            "low",
+                                            "medium",
+                                            "high",
+                                            "xhigh",
+                                            "max",
+                                        ]
+                                    }
+                                },
+                            }
+                        ],
+                    }
+                )
+            ]
+            return await _FakeUpstream(chunks, {"content-type": "application/json"}).handle_async_request(request)
+        if path == "/responses":
+            chunks = [
+                b'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_1"}}\n\n',
+                b'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_1"}}\n\n',
+            ]
+            return await _FakeUpstream(chunks, {"content-type": "text/event-stream"}).handle_async_request(request)
+        raise AssertionError(f"unexpected request path {path}")
+
+
+@pytest.mark.asyncio
+async def test_live_recording_uses_one_transport_for_catalog_and_inference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The recorder, not a provider-private client, must see the complete live flow."""
+    monkeypatch.setenv(GITHUB_TOKEN_VARIABLE, "github-token")
+    recorder = RecordingTransport(_RecordingScenarioUpstream())
+    monkeypatch.setattr(record_cassette, "RecordingTransport", lambda: recorder)
+    monkeypatch.setattr(record_cassette, "CASSETTE_DIR", tmp_path)
+
+    def independent_client_forbidden(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise AssertionError("recording built a provider-private HTTP client")
+
+    monkeypatch.setattr(composition, "build_http_client", independent_client_forbidden)
+
+    await record_cassette.record(CASSETTE)
+
+    recorded = Cassette.read(tmp_path / f"{CASSETTE}.json")
+    by_path = {interaction.path: interaction for interaction in recorded.interactions}
+    expected_paths = {"/copilot_internal/v2/token", "/models", "/responses"}
+    assert expected_paths <= by_path.keys()
+    for path in expected_paths:
+        assert by_path[path].authenticated is True
+        assert by_path[path].chunks
+
+
+@pytest.mark.asyncio
+async def test_empty_recording_refuses_to_replace_an_existing_cassette(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / f"{CASSETTE}.json"
+    original = b"verified cassette\n"
+    destination.write_bytes(original)
+    recorder = RecordingTransport(_FakeUpstream([b"unused"], {}))
+    monkeypatch.setattr(record_cassette, "RecordingTransport", lambda: recorder)
+    monkeypatch.setattr(record_cassette, "CASSETTE_DIR", tmp_path)
+
+    def empty_chain(config: object, client: object) -> object:
+        del config, client
+        return object()
+
+    def route_for_any_path(path: str) -> object:
+        del path
+        return object()
+
+    def context_for_any_body(route: object, body: object) -> object:
+        del route, body
+        return object()
+
+    async def refresh_nothing(chain: object) -> None:
+        del chain
+
+    async def successful_without_recording(chain: object, context: object) -> SimpleNamespace:
+        del chain, context
+        return SimpleNamespace(response=httpx2.Response(200, content=b"unrecorded"))
+
+    monkeypatch.setattr(record_cassette, "_recording_chain", empty_chain)
+    monkeypatch.setattr(record_cassette, "refresh_catalogs", refresh_nothing)
+    monkeypatch.setattr(record_cassette, "route_for_path", route_for_any_path)
+    monkeypatch.setattr(record_cassette, "build_context", context_for_any_body)
+    monkeypatch.setattr(record_cassette, "handle_bounded", successful_without_recording)
+
+    with pytest.raises(RuntimeError, match="zero interactions"):
+        await record_cassette.record(CASSETTE)
+
+    assert destination.read_bytes() == original
+
+
+def test_record_script_returns_nonzero_for_an_empty_recording(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    async def empty_recording(name: str) -> None:
+        raise RuntimeError(f"scenario {name} recorded zero interactions")
+
+    monkeypatch.setattr(record_cassette, "record", empty_recording)
+    monkeypatch.setattr(
+        record_cassette.sys,
+        "argv",
+        ["record_cassette.py", CASSETTE],
+    )
+    status = record_cassette.main()
+
+    assert status == 1
+    assert "zero interactions" in capsys.readouterr().err
 
 
 @pytest.mark.asyncio

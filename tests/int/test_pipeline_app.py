@@ -10,7 +10,7 @@ import inspect
 import logging
 import re
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator, Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -55,6 +55,14 @@ from app.pipeline.delivery.stream import (
     stream_delivery,
 )
 from app.pipeline.delivery_policy import delivery_buffer, stream_settings
+from app.pipeline.request import RequestContext, WireFormat
+from app.pipeline.translation_driver.reasoning import ThinkingTargetProfile
+from app.pipeline.translation_driver.registry import TranslatorRegistry
+from app.pipeline.translation_driver.semantic import (
+    ConversionFactCode,
+    SemanticRequest,
+    TranslationTarget,
+)
 from app.server.app_state import CHAIN_STATE_KEY
 from app.server.composition import build_chain
 from app.server.pipeline_app import (
@@ -75,7 +83,20 @@ BASE_URL = "https://copilot.example"
 CATALOG: dict[str, Any] = {
     "object": "list",
     "data": [
-        {"id": "claude-model", "supported_endpoints": ["/v1/messages"]},
+        {
+            "id": "claude-model",
+            "supported_endpoints": ["/v1/messages"],
+            "capabilities": {
+                "supports": {"reasoning_effort": ["low", "medium", "high", "xhigh", "max"]}
+            },
+        },
+        {
+            "id": "claude-opus-5",
+            "supported_endpoints": ["/v1/messages"],
+            "capabilities": {
+                "supports": {"reasoning_effort": ["low", "medium", "high", "xhigh", "max"]}
+            },
+        },
         {"id": "gpt-model", "supported_endpoints": ["/responses"]},
         {"id": "cc-model", "supported_endpoints": ["/chat/completions"]},
         {"id": "embed-model", "supported_endpoints": ["/embeddings"]},
@@ -85,6 +106,20 @@ CATALOG: dict[str, Any] = {
             "id": "reasoning-model",
             "supported_endpoints": ["/responses"],
             "capabilities": {"supports": {"reasoning_effort": ["low", "medium", "high"]}},
+        },
+        {
+            "id": "reasoning-full-model",
+            "supported_endpoints": ["/responses"],
+            "capabilities": {
+                "supports": {
+                    "reasoning_effort": ["none", "low", "medium", "high", "xhigh", "max"]
+                }
+            },
+        },
+        {
+            "id": "reasoning-none-only-model",
+            "supported_endpoints": ["/responses"],
+            "capabilities": {"supports": {"reasoning_effort": ["none"]}},
         },
     ],
 }
@@ -169,6 +204,265 @@ def make_client(
         # Otherwise the calibrator would read and write the real user data directory.
         chain = replace(chain, tokenization=TokenizationStateStore(tokenization_path))
     return TestClient(create_pipeline_app(chain)), seen
+
+
+def test_invalid_thinking_profile_regex_fails_while_building_the_chain() -> None:
+    provider, http_client = make_provider(
+        lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []})
+    )
+    config = ProxyConfig.model_validate(
+        {
+            "model_providers": {"ghc": {"type": "github_copilot"}},
+            "default_model_provider": "ghc",
+            "model_translation": {
+                "to_anthropic_messages": {
+                    "thinking_profiles": {
+                        "[": {"modes": ["adaptive"], "can_disable": True}
+                    }
+                }
+            },
+        }
+    )
+
+    try:
+        with pytest.raises(re.error):
+            build_chain(
+                config,
+                http_client=http_client,
+                providers={"ghc": provider},
+            )
+    finally:
+        asyncio.run(http_client.aclose())
+
+
+_EXPECTED_DRIVER_THINKING_TARGET = TranslationTarget(
+    model_id="claude-model",
+    reasoning_efforts=("low", "medium", "high", "xhigh", "max"),
+    thinking_profile=ThinkingTargetProfile(
+        modes=("enabled", "adaptive"),
+        can_disable=True,
+        disabled_max_effort="xhigh",
+        manual_budget_tokens=2048,
+    ),
+    thinking_profile_pattern=r"claude-model",
+)
+
+
+def build_thinking_profile_recording_chain() -> tuple[
+    Chain, httpx2.AsyncClient, list[TranslationTarget]
+]:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.host == "api.github.com":
+            return httpx2.Response(
+                200,
+                json={"token": "copilot", "expires_at": 5000, "refresh_in": 1500},
+            )
+        if request.url.path.endswith("/count_tokens"):
+            return httpx2.Response(200, json={"input_tokens": 37})
+        return httpx2.Response(200, json={"id": "msg_1", "content": []})
+
+    provider, http_client = make_provider(handler)
+    config = ProxyConfig.model_validate(
+        {
+            "model_providers": {"ghc": {"type": "github_copilot"}},
+            "default_model_provider": "ghc",
+            "model_translation": {
+                "to_anthropic_messages": {
+                    "thinking_profiles": {
+                        r"claude-.*": {
+                            "modes": ["adaptive"],
+                            "can_disable": False,
+                        },
+                        r"claude-model": {
+                            "modes": ["enabled", "adaptive"],
+                            "can_disable": True,
+                            "disabled_max_effort": "xhigh",
+                            "manual_budget_tokens": 2048,
+                        },
+                    }
+                }
+            },
+        }
+    )
+    chain = build_chain(
+        config,
+        http_client=http_client,
+        providers={"ghc": provider},
+    )
+    captured: list[TranslationTarget] = []
+    translators = TranslatorRegistry()
+
+    def read_responses(
+        payload: Mapping[str, Any],
+        *,
+        source_headers: Mapping[str, str] | None = None,
+        translated: bool = False,
+    ) -> SemanticRequest:
+        del source_headers, translated
+        return SemanticRequest(model=cast(str, payload["model"]))
+
+    def write_anthropic(
+        request: SemanticRequest, target: TranslationTarget
+    ) -> dict[str, Any]:
+        captured.append(target)
+        return {
+            "model": request.model,
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 4096,
+        }
+
+    translators.register_inbound(WireFormat.OPENAI_RESPONSES, read_responses)
+    translators.register_outbound(WireFormat.ANTHROPIC_MESSAGES, write_anthropic)
+    chain.translators = translators
+    return chain, http_client, captured
+
+
+async def test_handle_passes_the_compiled_thinking_profile_to_the_translation_target() -> None:
+    chain, http_client, captured = build_thinking_profile_recording_chain()
+    context = RequestContext(
+        inbound_format=WireFormat.OPENAI_RESPONSES,
+        requested_model="claude-model",
+        payload={"model": "claude-model", "input": []},
+    )
+
+    try:
+        handled = await driver.handle(chain, context)
+    finally:
+        await http_client.aclose()
+
+    assert handled.outcome.error is None
+    assert captured == [_EXPECTED_DRIVER_THINKING_TARGET]
+
+
+async def test_handle_count_tokens_passes_the_same_compiled_thinking_profile_to_the_translation_target() -> None:
+    chain, http_client, captured = build_thinking_profile_recording_chain()
+    context = RequestContext(
+        inbound_format=WireFormat.OPENAI_RESPONSES,
+        requested_model="claude-model",
+        payload={"model": "claude-model", "input": []},
+    )
+
+    try:
+        counted = await driver.handle_count_tokens(chain, context)
+    finally:
+        await http_client.aclose()
+
+    assert counted == {"input_tokens": 37}
+    assert captured == [_EXPECTED_DRIVER_THINKING_TARGET]
+
+
+_SOURCE_HEADER_BETA = "mid-conversation-output-config-2026-07-01"
+
+
+def build_source_header_recording_chain() -> tuple[
+    Chain,
+    httpx2.AsyncClient,
+    list[tuple[dict[str, str], bool]],
+    list[httpx2.Request],
+]:
+    sent: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.host == "api.github.com":
+            return httpx2.Response(
+                200,
+                json={"token": "copilot", "expires_at": 5000, "refresh_in": 1500},
+            )
+        sent.append(request)
+        return httpx2.Response(200, json={"id": "resp_1", "output": []})
+
+    provider, http_client = make_provider(handler)
+    config = ProxyConfig.model_validate(
+        {
+            "model_providers": {"ghc": {"type": "github_copilot"}},
+            "default_model_provider": "ghc",
+        }
+    )
+    chain = build_chain(
+        config,
+        http_client=http_client,
+        providers={"ghc": provider},
+    )
+    captured: list[tuple[dict[str, str], bool]] = []
+
+    def read_anthropic(
+        payload: Mapping[str, Any],
+        *,
+        source_headers: Mapping[str, str] | None = None,
+        translated: bool = False,
+    ) -> SemanticRequest:
+        model = payload.get("model")
+        captured.append((dict(source_headers or {}), translated))
+        return SemanticRequest(
+            model=model if isinstance(model, str) else "",
+            source_format=WireFormat.ANTHROPIC_MESSAGES.value,
+        )
+
+    chain.translators.register_inbound(WireFormat.ANTHROPIC_MESSAGES, read_anthropic)
+    return chain, http_client, captured, sent
+
+
+async def test_handle_passes_source_header_before_path_policy_clears_it() -> None:
+    chain, http_client, captured, sent = build_source_header_recording_chain()
+    context = RequestContext(
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        requested_model="gpt-model",
+        payload={"model": "gpt-model", "messages": [{"role": "user", "content": "hi"}]},
+        client_headers={"anthropic-beta": _SOURCE_HEADER_BETA},
+    )
+
+    try:
+        handled = await driver.handle(chain, context)
+    finally:
+        await http_client.aclose()
+
+    assert handled.outcome.error is None
+    assert captured == [({"anthropic-beta": _SOURCE_HEADER_BETA}, True)]
+    assert context.client_headers == {}
+    assert sent
+    assert "anthropic-beta" not in sent[-1].headers
+
+
+async def test_an_initialized_empty_source_header_snapshot_is_not_repopulated() -> None:
+    chain, http_client, captured, sent = build_source_header_recording_chain()
+    context = RequestContext(
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        requested_model="gpt-model",
+        payload={"model": "gpt-model", "messages": [{"role": "user", "content": "hi"}]},
+        client_headers={"anthropic-beta": _SOURCE_HEADER_BETA},
+        source_headers={},
+    )
+
+    try:
+        handled = await driver.handle(chain, context)
+    finally:
+        await http_client.aclose()
+
+    assert handled.outcome.error is None
+    assert captured == [({}, True)]
+    assert context.source_headers == {}
+    assert sent
+    assert "anthropic-beta" not in sent[-1].headers
+
+
+async def test_handle_count_tokens_passes_source_header_before_path_policy_clears_it() -> None:
+    chain, http_client, captured, sent = build_source_header_recording_chain()
+    context = RequestContext(
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        requested_model="gpt-model",
+        payload={"model": "gpt-model", "messages": [{"role": "user", "content": "hi"}]},
+        client_headers={"anthropic-beta": _SOURCE_HEADER_BETA},
+    )
+
+    try:
+        counted = await driver.handle_count_tokens(chain, context)
+    finally:
+        await http_client.aclose()
+
+    assert counted["estimated"] is True
+    assert captured == [({"anthropic-beta": _SOURCE_HEADER_BETA}, True)]
+    assert context.client_headers == {}
+    assert sent == []
 
 
 def test_anthropic_request_reaches_the_messages_endpoint_untranslated() -> None:
@@ -3373,23 +3667,30 @@ def test_a_translated_request_records_what_it_could_not_carry() -> None:
 
     records = _records()
     assert len(records) == 1, records
-    losses = records[0]["losses"]
-    assert [entry["direction"] for entry in losses] == ["request"]
-    assert [entry["code"] for entry in losses] == ["extensions-not-carried"]
-    detail = losses[0]["detail"]
-    assert "top_p" in detail and "stop_sequences" in detail, detail
+    assert records[0]["losses"] == [
+        {
+            "direction": "request",
+            "code": "reasoning-intent-not-carried",
+            "detail": "high effort was not sent: the catalog publishes no reasoning efforts for this model",
+        },
+        {
+            "direction": "request",
+            "code": "extensions-not-carried",
+            "detail": "from anthropic-messages into openai-responses: stop_sequences, top_p",
+        },
+    ]
 
 
 def test_a_translated_request_that_lost_nothing_records_nothing() -> None:
     """A crossing that *could* have lost something and did not.
 
-    An earlier version used `claude-model`, which is served untranslated — so it proved only that a request with no translator records no losses, which is true of an implementation that reports a loss on every translation. `gpt-model` is translated; this body simply has nothing in it that the Responses format cannot take.
+    An earlier version used `claude-model`, which is served untranslated — so it proved only that a request with no translator records no losses, which is true of an implementation that reports a loss on every translation. `reasoning-model` is translated and explicitly publishes `high`; this body has nothing in it that the Responses format cannot take.
     """
     client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
     response = client.post(
         "/v1/messages",
         json={
-            "model": "gpt-model",
+            "model": "reasoning-model",
             "system": [{"type": "text", "text": "be brief"}],
             "messages": [{"role": "user", "content": "hi"}],
             "max_tokens": 64,
@@ -3510,13 +3811,7 @@ def test_the_attribution_line_is_not_counted_as_prompt() -> None:
     assert "Be brief." in sent
 
 
-def test_a_thinking_budget_reaches_upstream_as_an_effort_the_model_offers() -> None:
-    """The whole channel: an Anthropic `thinking` budget, through routing, to the bytes upstream received.
-
-    Before this existed the field was dropped at the format boundary and `EXTENSIONS_NOT_CARRIED` was the only trace — so a client asking for deep reasoning got whatever the upstream defaulted to, and nothing said so.
-
-    32k asks for `max`. This model publishes only low/medium/high, so `high` is the honest answer and `max` would be a 400.
-    """
+def test_omitted_anthropic_effort_sends_high() -> None:
     client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
     response = client.post(
         "/v1/messages",
@@ -3524,57 +3819,69 @@ def test_a_thinking_budget_reaches_upstream_as_an_effort_the_model_offers() -> N
             "model": "reasoning-model",
             "messages": [{"role": "user", "content": "hi"}],
             "max_tokens": 64,
-            "thinking": {"type": "enabled", "budget_tokens": 32_000},
         },
     )
 
     assert response.status_code == 200
-    sent = cast(dict[str, Any], orjson.loads(seen[-1].read()))
+    assert len(seen) == 1
+    sent = cast(dict[str, Any], orjson.loads(seen[0].read()))
     assert sent["reasoning"] == {"effort": "high"}
 
 
-def test_a_model_that_publishes_no_efforts_is_sent_none_rather_than_a_guess() -> None:
-    """`gpt-model` has no `capabilities` in the catalog at all. Inventing an effort for it would be asking for something upstream never said it takes; the request goes without one and the record says why."""
+def test_a_model_that_publishes_no_efforts_omits_effort_and_records_the_loss() -> None:
     client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
     response = client.post(
         "/v1/messages",
         json={
             "model": "gpt-model",
             "messages": [{"role": "user", "content": "hi"}],
-            "thinking": {"type": "enabled", "budget_tokens": 32_000},
+            "output_config": {"effort": "xhigh"},
         },
     )
 
     assert response.status_code == 200
-    sent = cast(dict[str, Any], orjson.loads(seen[-1].read()))
+    assert len(seen) == 1
+    sent = cast(dict[str, Any], orjson.loads(seen[0].read()))
     assert "reasoning" not in sent
-
-    codes = [entry["code"] for entry in _records()[0]["losses"]]
-    assert "reasoning-intent-not-carried" in codes
+    assert [
+        (entry["code"], entry["detail"])
+        for entry in _records()[0]["losses"]
+    ] == [
+        (
+            "reasoning-intent-not-carried",
+            "xhigh effort was not sent: the catalog publishes no reasoning efforts for this model",
+        )
+    ]
 
 
 def test_an_approximated_effort_is_recorded_as_a_loss() -> None:
-    """Downgrading `max` to `high` changes what the client asked for, so it is reported rather than done quietly."""
-    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
     response = client.post(
         "/v1/messages",
         json={
             "model": "reasoning-model",
             "messages": [{"role": "user", "content": "hi"}],
-            "thinking": {"type": "enabled", "budget_tokens": 32_000},
+            "output_config": {"effort": "xhigh"},
         },
     )
 
     assert response.status_code == 200
-    losses = _records()[0]["losses"]
-    approximations = [entry for entry in losses if entry["code"] == "reasoning-intent-approximated"]
-    assert len(approximations) == 1
-    assert "max" in approximations[0]["detail"] and "high" in approximations[0]["detail"]
+    assert len(seen) == 1
+    sent = cast(dict[str, Any], orjson.loads(seen[0].read()))
+    assert sent["reasoning"] == {"effort": "high"}
+    assert [
+        (entry["code"], entry["detail"])
+        for entry in _records()[0]["losses"]
+    ] == [
+        (
+            "reasoning-intent-approximated",
+            "asked for xhigh, which this model does not offer; sent high",
+        )
+    ]
 
 
 def test_an_unreadable_thinking_field_is_refused_by_name() -> None:
-    """A client error rather than a silent approximation: nothing can be chosen for a budget of `-1`, and guessing would send an effort the request never asked for."""
-    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
     response = client.post(
         "/v1/messages",
         json={
@@ -3585,34 +3892,605 @@ def test_an_unreadable_thinking_field_is_refused_by_name() -> None:
     )
 
     assert response.status_code == 400
-    # `param` rather than `field_path`: the field that names which part of the request is at fault now uses the spelling OpenAI declares and Anthropic tolerates, instead of one only this project used.
+    assert response.json()["error"]["code"] == "reasoning-intent-invalid"
     assert response.json()["error"]["param"] == "thinking.budget_tokens"
+    assert seen == []
 
 
-def test_a_count_resolves_reasoning_the_same_way_the_send_does() -> None:
-    """Counting measures the body that would be sent, so it has to resolve `thinking` the same way.
-
-    Nothing goes upstream on this path — the Responses family has no counter — so the resolution cannot be read off a request. It is read off the loss the resolution recorded instead, which is the only observable this path produces. Asserting merely that the count came back and that nothing was sent is what the first version of this test did, and it stayed green with the capability channel removed from `handle_count_tokens` entirely.
-    """
-    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1", "usage": {"input_tokens": 7}}))
+def test_disabled_intent_sends_none_when_the_target_supports_it() -> None:
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
     response = client.post(
-        "/v1/messages/count_tokens",
+        "/v1/messages",
+        json={
+            "model": "reasoning-full-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "thinking": {"type": "disabled"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(seen) == 1
+    sent = cast(dict[str, Any], orjson.loads(seen[0].read()))
+    assert sent["reasoning"] == {"effort": "none"}
+
+
+
+def test_disabled_intent_rejects_a_target_without_none() -> None:
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
+    response = client.post(
+        "/v1/messages",
         json={
             "model": "reasoning-model",
             "messages": [{"role": "user", "content": "hi"}],
-            "thinking": {"type": "enabled", "budget_tokens": 32_000},
+            "thinking": {"type": "disabled"},
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "reasoning-disable-not-supported"
+    assert response.json()["error"]["param"] == "output_config.effort"
+    assert seen == []
+
+
+
+def test_enabled_intent_rejects_a_none_only_target() -> None:
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "reasoning-none-only-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "output_config": {"effort": "high"},
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "reasoning-enable-not-supported"
+    assert response.json()["error"]["param"] == "output_config.effort"
+    assert seen == []
+
+
+
+def test_per_message_effort_overrides_top_level_and_is_not_prompt_content() -> None:
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
+    response = client.post(
+        "/v1/messages",
+        headers={
+            "anthropic-beta": "other-beta, mid-conversation-output-config-2026-07-01"
+        },
+        json={
+            "model": "reasoning-full-model",
+            "output_config": {"effort": "medium"},
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "",
+                    "output_config": {"effort": "xhigh"},
+                },
+                {"role": "user", "content": "hi"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(seen) == 1
+    sent = cast(dict[str, Any], orjson.loads(seen[0].read()))
+    assert sent["reasoning"] == {"effort": "xhigh"}
+    assert sent["input"] == [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "hi"}],
+        }
+    ]
+
+
+
+def test_future_only_effort_control_does_not_apply(monkeypatch: pytest.MonkeyPatch) -> None:
+    contexts: list[RequestContext] = []
+    real_build_context = inference_route.build_context
+
+    def capture_context(*args: Any, **kwargs: Any) -> RequestContext:
+        context = real_build_context(*args, **kwargs)
+        contexts.append(context)
+        return context
+
+    monkeypatch.setattr(inference_route, "build_context", capture_context)
+    payload: dict[str, Any] = {
+        "model": "reasoning-full-model",
+        "output_config": {"effort": "medium"},
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "system",
+                "content": [],
+                "output_config": {"effort": "xhigh"},
+            },
+        ],
+    }
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
+    response = client.post(
+        "/v1/messages",
+        headers={"anthropic-beta": "mid-conversation-output-config-2026-07-01"},
+        json=payload,
+    )
+
+    assert response.status_code == 200
+    assert len(seen) == 1
+    sent = cast(dict[str, Any], orjson.loads(seen[0].read()))
+    assert sent["reasoning"] == {"effort": "medium"}
+    assert sent["input"] == [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "hi"}],
+        }
+    ]
+    assert len(contexts) == 1
+    assert contexts[0].original_payload == payload
+
+
+
+@pytest.mark.parametrize(
+    ("message", "headers", "code", "param"),
+    [
+        (
+            {
+                "role": "system",
+                "content": "",
+                "output_config": {"effort": "high"},
+            },
+            {},
+            "beta-required",
+            "messages[0].output_config.effort",
+        ),
+        (
+            {
+                "role": "system",
+                "content": "not empty",
+                "output_config": {"effort": "high"},
+            },
+            {"anthropic-beta": "mid-conversation-output-config-2026-07-01"},
+            "effort-control-invalid",
+            "messages[0].content",
+        ),
+    ],
+)
+def test_invalid_per_message_effort_control_is_rejected_before_upstream(
+    message: dict[str, Any],
+    headers: dict[str, str],
+    code: str,
+    param: str,
+) -> None:
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
+    response = client.post(
+        "/v1/messages",
+        headers=headers,
+        json={"model": "reasoning-model", "messages": [message]},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == code
+    assert response.json()["error"]["param"] == param
+    assert seen == []
+
+
+
+def test_direct_anthropic_leg_bypasses_effort_translation() -> None:
+    client, seen = make_client(
+        lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []})
+    )
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "claude-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "output_config": {"effort": "ultracode"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(seen) == 1
+    assert str(seen[0].url) == f"{BASE_URL}/v1/messages"
+    sent = cast(dict[str, Any], orjson.loads(seen[0].read()))
+    assert sent["output_config"] == {"effort": "ultracode"}
+
+
+
+def test_count_produces_the_same_effort_losses_without_calling_upstream() -> None:
+    payload = {
+        "model": "reasoning-model",
+        "messages": [{"role": "user", "content": "hi"}],
+        "thinking": {"type": "enabled", "budget_tokens": 64_000},
+        "output_config": {"effort": "xhigh"},
+    }
+    send_client, send_seen = make_client(
+        lambda _: httpx2.Response(200, json={"id": "resp_1"})
+    )
+    send_response = send_client.post("/v1/messages", json=payload)
+
+    count_client, count_seen = make_client(
+        lambda _: httpx2.Response(200, json={"id": "resp_1"})
+    )
+    count_response = count_client.post("/v1/messages/count_tokens", json=payload)
+
+    assert send_response.status_code == 200
+    assert len(send_seen) == 1
+    sent = cast(dict[str, Any], orjson.loads(send_seen[0].read()))
+    assert sent["reasoning"] == {"effort": "high"}
+    assert count_response.status_code == 200
+    assert count_response.json()["estimated"] is True
+    assert count_seen == []
+    records = _records()
+    assert len(records) == 2
+    assert records[0]["losses"] == records[1]["losses"]
+    assert [
+        (entry["code"], entry["detail"])
+        for entry in records[0]["losses"]
+    ] == [
+        (
+            "extensions-not-carried",
+            "from anthropic-messages into openai-responses: thinking.budget_tokens",
+        ),
+        (
+            "reasoning-intent-approximated",
+            "asked for xhigh, which this model does not offer; sent high",
+        ),
+    ]
+
+
+def test_count_path_conversion_facts_reach_jsonl() -> None:
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
+    chain = _chain_of(client)
+    original = chain.translators
+    translators = TranslatorRegistry()
+    translators.register_inbound(
+        WireFormat.ANTHROPIC_MESSAGES,
+        original.inbound(WireFormat.ANTHROPIC_MESSAGES),
+    )
+
+    def observing_responses_writer(
+        request: SemanticRequest,
+        target: TranslationTarget,
+    ) -> dict[str, Any]:
+        request.conversion.observe(
+            ConversionFactCode.THINKING_PROFILE_SELECTED,
+            "resolved_model=gpt-model; pattern=count-path-test",
+        )
+        return original.outbound(WireFormat.OPENAI_RESPONSES)(request, target)
+
+    translators.register_outbound(
+        WireFormat.OPENAI_RESPONSES,
+        observing_responses_writer,
+    )
+    chain.translators = translators
+
+    response = client.post(
+        "/v1/messages/count_tokens",
+        json={
+            "model": "gpt-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 64,
         },
     )
 
     assert response.status_code == 200
     assert response.json()["estimated"] is True
-    assert not [request for request in seen if "reasoning" in request.read().decode()]
+    assert seen == []
+    assert _records()[0]["facts"] == [
+        {
+            "code": "thinking-profile-selected",
+            "detail": "resolved_model=gpt-model; pattern=count-path-test",
+        }
+    ]
 
-    # 20k wants `xhigh`; this model stops at `high`. The count path saw the same capabilities and made the same downgrade — with the channel disconnected it reports `not-carried` instead.
-    losses = _records()[0]["losses"]
-    approximations = [entry for entry in losses if entry["code"] == "reasoning-intent-approximated"]
-    assert len(approximations) == 1, losses
-    assert "max" in approximations[0]["detail"] and "high" in approximations[0]["detail"]
+
+ANTHROPIC_TRANSLATION_RESPONSE: dict[str, Any] = {
+    "id": "msg_1",
+    "type": "message",
+    "role": "assistant",
+    "content": [],
+    "model": "claude-model",
+    "stop_reason": "end_turn",
+    "stop_sequence": None,
+    "usage": {"input_tokens": 1, "output_tokens": 1},
+}
+
+
+def _reverse_profile_overrides(profiles: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "model_translation": {
+            "to_anthropic_messages": {
+                "thinking_profiles": profiles,
+            }
+        }
+    }
+
+
+def test_exact_thinking_profile_fact_reaches_jsonl() -> None:
+    pattern = r"claude-opus-5(?:-[0-9]{8})?"
+    client, seen = make_client(
+        lambda _: httpx2.Response(200, json=ANTHROPIC_TRANSLATION_RESPONSE),
+        overrides=_reverse_profile_overrides(
+            {pattern: {"modes": ["adaptive"], "can_disable": True}}
+        ),
+    )
+
+    response = client.post(
+        "/responses",
+        json={"model": "claude-opus-5", "input": [], "reasoning": {"effort": "high"}},
+    )
+
+    assert response.status_code == 200
+    assert len(seen) == 1
+    assert _records()[0]["facts"] == [
+        {
+            "code": "thinking-profile-selected",
+            "detail": f"resolved_model=claude-opus-5; pattern={pattern}",
+        }
+    ]
+
+
+def test_last_matching_user_thinking_profile_fact_reaches_jsonl() -> None:
+    default_pattern = r"claude-opus-5(?:-[0-9]{8})?"
+    override_pattern = r"claude-opus-5"
+    client, seen = make_client(
+        lambda _: httpx2.Response(200, json=ANTHROPIC_TRANSLATION_RESPONSE),
+        overrides=_reverse_profile_overrides(
+            {
+                default_pattern: {"modes": ["adaptive"], "can_disable": True},
+                override_pattern: {
+                    "modes": ["enabled"],
+                    "can_disable": True,
+                    "manual_budget_tokens": 2048,
+                },
+            }
+        ),
+    )
+
+    response = client.post(
+        "/responses",
+        json={
+            "model": "claude-opus-5",
+            "input": [],
+            "max_output_tokens": 4096,
+            "reasoning": {"effort": "high"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(seen) == 1
+    assert cast(dict[str, Any], orjson.loads(seen[0].read()))["thinking"] == {
+        "type": "enabled",
+        "budget_tokens": 2048,
+    }
+    assert _records()[0]["facts"] == [
+        {
+            "code": "thinking-profile-selected",
+            "detail": f"resolved_model=claude-opus-5; pattern={override_pattern}",
+        }
+    ]
+
+
+def test_minimal_maps_to_low_and_records_approximation() -> None:
+    client, seen = make_client(
+        lambda _: httpx2.Response(200, json=ANTHROPIC_TRANSLATION_RESPONSE),
+        overrides=_reverse_profile_overrides(
+            {"claude-model": {"modes": ["adaptive"], "can_disable": True}}
+        ),
+    )
+    response = client.post(
+        "/responses",
+        json={"model": "claude-model", "input": [], "reasoning": {"effort": "minimal"}},
+    )
+
+    assert response.status_code == 200
+    assert len(seen) == 1
+    assert cast(dict[str, Any], orjson.loads(seen[0].read())) == {
+        "model": "claude-model",
+        "messages": [],
+        "thinking": {"type": "adaptive"},
+        "output_config": {"effort": "low"},
+    }
+    assert [(entry["code"], entry["detail"]) for entry in _records()[0]["losses"]] == [
+        (
+            "reasoning-intent-approximated",
+            "Responses effort minimal was approximated to Anthropic low",
+        )
+    ]
+
+
+def test_rejected_thinking_profile_facts_reach_jsonl() -> None:
+    client, seen = make_client(
+        lambda _: httpx2.Response(200, json=ANTHROPIC_TRANSLATION_RESPONSE),
+        overrides=_reverse_profile_overrides(
+            {"claude-model": {"modes": ["adaptive"], "can_disable": False}}
+        ),
+    )
+    response = client.post(
+        "/responses",
+        json={"model": "claude-model", "input": [], "reasoning": {"effort": "none"}},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "thinking-disable-not-supported"
+    assert response.json()["error"]["param"] == "reasoning.effort"
+    assert seen == []
+    assert _records()[0]["facts"] == [
+        {
+            "code": "thinking-profile-selected",
+            "detail": "resolved_model=claude-model; pattern=claude-model",
+        },
+        {
+            "code": "thinking-profile-rejected",
+            "detail": "resolved_model=claude-model; pattern=claude-model; reason=thinking-disable-not-supported",
+        },
+    ]
+
+
+def test_extended_only_profile_never_invents_budget() -> None:
+    client, seen = make_client(
+        lambda _: httpx2.Response(200, json=ANTHROPIC_TRANSLATION_RESPONSE),
+        overrides=_reverse_profile_overrides(
+            {"claude-model": {"modes": ["enabled"], "can_disable": True}}
+        ),
+    )
+    response = client.post(
+        "/responses",
+        json={
+            "model": "claude-model",
+            "input": [],
+            "max_output_tokens": 4096,
+            "reasoning": {"effort": "high"},
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "thinking-mode-not-renderable"
+    assert response.json()["error"]["param"] == "reasoning"
+    assert seen == []
+    assert _records()[0]["facts"] == [
+        {
+            "code": "thinking-profile-selected",
+            "detail": "resolved_model=claude-model; pattern=claude-model",
+        },
+        {
+            "code": "thinking-profile-rejected",
+            "detail": "resolved_model=claude-model; pattern=claude-model; reason=thinking-mode-not-renderable",
+        },
+    ]
+
+
+def test_missing_profile_rejects() -> None:
+    client, seen = make_client(
+        lambda _: httpx2.Response(200, json=ANTHROPIC_TRANSLATION_RESPONSE),
+        overrides=_reverse_profile_overrides({}),
+    )
+    response = client.post(
+        "/responses",
+        json={"model": "claude-model", "input": [], "reasoning": {"effort": "high"}},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "thinking-profile-missing"
+    assert response.json()["error"]["param"] == "reasoning"
+    assert seen == []
+    assert _records()[0]["facts"] == [
+        {
+            "code": "thinking-profile-rejected",
+            "detail": "resolved_model=claude-model; pattern=<none>; reason=thinking-profile-missing",
+        }
+    ]
+
+
+def test_responses_to_anthropic_manual_profile_uses_budget_and_falls_back_by_request() -> None:
+    overrides = _reverse_profile_overrides(
+        {
+            "claude-model": {
+                "modes": ["enabled", "adaptive"],
+                "can_disable": True,
+                "manual_budget_tokens": 2048,
+            }
+        }
+    )
+    manual_client, manual_seen = make_client(
+        lambda _: httpx2.Response(200, json=ANTHROPIC_TRANSLATION_RESPONSE),
+        overrides=overrides,
+    )
+    manual_response = manual_client.post(
+        "/responses",
+        json={
+            "model": "claude-model",
+            "input": [],
+            "max_output_tokens": 4096,
+            "reasoning": {"effort": "high"},
+        },
+    )
+    fallback_client, fallback_seen = make_client(
+        lambda _: httpx2.Response(200, json=ANTHROPIC_TRANSLATION_RESPONSE),
+        overrides=overrides,
+    )
+    fallback_response = fallback_client.post(
+        "/responses",
+        json={
+            "model": "claude-model",
+            "input": [],
+            "max_output_tokens": 2048,
+            "reasoning": {"effort": "high"},
+        },
+    )
+
+    assert manual_response.status_code == 200
+    assert fallback_response.status_code == 200
+    assert cast(dict[str, Any], orjson.loads(manual_seen[0].read()))["thinking"] == {
+        "type": "enabled",
+        "budget_tokens": 2048,
+    }
+    assert cast(dict[str, Any], orjson.loads(fallback_seen[0].read()))["thinking"] == {
+        "type": "adaptive"
+    }
+
+
+def test_responses_to_anthropic_budget_max_fails_closed_without_fallback() -> None:
+    client, seen = make_client(
+        lambda _: httpx2.Response(200, json=ANTHROPIC_TRANSLATION_RESPONSE),
+        overrides=_reverse_profile_overrides(
+            {
+                "claude-model": {
+                    "modes": ["enabled"],
+                    "can_disable": True,
+                    "manual_budget_tokens": 2048,
+                }
+            }
+        ),
+    )
+    response = client.post(
+        "/responses",
+        json={
+            "model": "claude-model",
+            "input": [],
+            "max_output_tokens": 2048,
+            "reasoning": {"effort": "high"},
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "thinking-mode-not-renderable"
+    assert response.json()["error"]["param"] == "reasoning"
+    assert seen == []
+
+
+def test_responses_to_anthropic_absent_reasoning_does_not_require_profile() -> None:
+    client, seen = make_client(
+        lambda _: httpx2.Response(200, json=ANTHROPIC_TRANSLATION_RESPONSE),
+        overrides=_reverse_profile_overrides({}),
+    )
+    response = client.post(
+        "/responses",
+        json={"model": "claude-model", "input": []},
+    )
+
+    assert response.status_code == 200
+    assert len(seen) == 1
+    sent = cast(dict[str, Any], orjson.loads(seen[0].read()))
+    assert "thinking" not in sent
+    assert "output_config" not in sent
+
+
+def test_direct_responses_leg_bypasses_effort_translation() -> None:
+    payload: dict[str, Any] = {
+        "model": "gpt-model",
+        "input": [],
+        "reasoning": {"effort": "ultracode", "summary": "auto"},
+    }
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
+    response = client.post("/responses", content=orjson.dumps(payload), headers={"content-type": "application/json"})
+
+    assert response.status_code == 200
+    assert len(seen) == 1
+    assert str(seen[0].url) == f"{BASE_URL}/responses"
+    assert seen[0].read() == orjson.dumps(payload)
+    assert _records()[0]["facts"] == []
 
 
 def test_a_silence_in_the_middle_of_a_delivered_stream_reaches_the_record() -> None:
@@ -3723,6 +4601,77 @@ def test_a_replay_on_the_translation_leg_sends_the_conversation_again() -> None:
     assert "remember me" in seen[-1].content.decode()
     # And it was translated exactly once: a second pass would have wrapped the Responses body again.
     assert "messages" not in replayed
+
+
+def test_per_message_effort_survives_a_pre_block_translation_replay() -> None:
+    calls: list[int] = []
+
+    async def torn_body() -> AsyncIterator[bytes]:
+        yield (
+            b"event: response.output_item.added\n"
+            b'data: {"output_index":0,"item":{"type":"reasoning","id":"rs_torn","summary":[],'
+            b'"encrypted_content":"partial"}}\n\n'
+        )
+        raise httpx2.RemoteProtocolError("peer closed the connection")
+
+    def upstream(request: httpx2.Request) -> httpx2.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx2.Response(
+                200,
+                content=torn_body(),
+                headers={"content-type": "text/event-stream"},
+            )
+        return httpx2.Response(
+            200,
+            content=responses_sse_upstream(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client, seen = make_client(upstream)
+    response = client.post(
+        "/v1/messages",
+        headers={"anthropic-beta": "mid-conversation-output-config-2026-07-01"},
+        json={
+            "model": "reasoning-full-model",
+            "output_config": {"effort": "medium"},
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "",
+                    "output_config": {"effort": "high"},
+                },
+                {"role": "user", "content": "hi"},
+            ],
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(calls) == 2
+    assert len(seen) == 2
+    sent = [cast(dict[str, Any], orjson.loads(request.content)) for request in seen]
+    expected_input = [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "hi"}],
+        }
+    ]
+    assert [body["reasoning"] for body in sent] == [
+        {"effort": "high"},
+        {"effort": "high"},
+    ]
+    assert [body["input"] for body in sent] == [expected_input, expected_input]
+    assert all("anthropic-beta" not in request.headers for request in seen)
+    events = [
+        line.removeprefix("event: ")
+        for line in response.text.splitlines()
+        if line.startswith("event: ")
+    ]
+    assert events.count("message_start") == 1
+    assert events[-1] == "message_stop"
+    assert "Bash" in response.text
 
 
 def test_a_replay_is_reported_on_the_request_line(

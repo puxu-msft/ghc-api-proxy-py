@@ -1,62 +1,42 @@
-"""Turning a request's reasoning intent into an effort the target model actually offers.
+"""Align a wire-selected reasoning effort with the target model's published capabilities.
 
-Two facts meet here and neither is negotiable. The client says how much thinking it wants, in Anthropic's vocabulary — off, adaptive, or a token budget. The catalog says which effort names this particular model accepts, and **that set differs per model**: the real Copilot catalog recorded in `tests/int/cassettes/anthropic_to_responses_stream.json` gives `gpt-5.3-codex` four names without `none`, `gpt-5.5` five with it, `gpt-5.6-terra` six including `max`, `grok-4.5` only three, and the gemini flash models a `minimal` that appears nowhere else. A mapping that hard-codes any name is a mapping that eventually sends one the model does not take.
-
-So the one hard invariant is `resolution.effort is None or resolution.effort in capabilities`. It is asserted at the end of `resolve` rather than trusted, because the failure it prevents is silent: an unsupported effort name is a 400 from the gateway on a request that looked fine here. The reference implementation this was compared against checks its capability list on two of its five branches and hard-codes the other three; the three that are hard-coded happen to be supported by every model in today's catalog, which is exactly why nobody notices until a catalog changes.
-
-Omission is not "off". Measured on a real `gpt-5.5` exchange: a request carrying no `reasoning` at all comes back with `"reasoning":{"effort":"medium",...}` — the upstream default. So `thinking: {"type": "disabled"}` has to be *said*, and saying it means finding a name for it.
-
-The thresholds are this project's policy, not an upstream fact, and a reading of the first-party client settled that there is no upstream rule to adopt: `vscode-copilot-chat` never converts a budget into an effort on either leg — on the Anthropic side it sends `thinking.budget_tokens` and `output_config.effort` as independent fields. Nothing in the catalog publishes a correspondence either, and the Responses models publish no `min_thinking_budget`/`max_thinking_budget` at all — those belong to the Claude models on the other endpoint and borrowing them would be inventing a contract.
-
-Two things that client *does* settle, and both are followed here: the effort set comes from the catalog and is never hard-coded (its own type for it is an open `string[]`, and it passes names it does not recognise straight through), and `reasoning` carries only `effort` and `summary` — `context` and `mode` appear nowhere in it.
+Thinking enablement and effort selection are already settled before this module is called. This module never derives effort from `thinking.budget_tokens`; it only preserves an exact published value or aligns a selected value along the shared effort ladder.
 """
 
+import re
 from dataclasses import dataclass
-from typing import cast
+from enum import StrEnum
 
 # Weakest to strongest. The catalog lists names but never says they are ordered, so the order is stated here as this project's own and used for every comparison — `supported[-1]` would be reading an order out of a list that does not promise one.
 #
 # `minimal` is on this ladder because it is on the wire, not because anything documents it: it appears in the catalog recorded at `tests/int/cassettes/anthropic_to_responses_stream.json` on the gemini flash models. The official first-party client does not recognise the name either — it passes unknown levels through untouched — so a name missing from *this* ladder is not merely unranked, it is invisible: `_weakest` iterates the ladder, so a model publishing `["minimal", "low", …]` would have `disabled` answered with `low` while the reason said "weaker than anything this model offers", which is false. The assertion cannot catch that, because `low` really is on offer.
 EFFORT_LADDER: tuple[str, ...] = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+ANTHROPIC_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
+RESPONSES_EFFORTS = frozenset({"none", "minimal", *ANTHROPIC_EFFORTS})
 
-# Which rung a `thinking.budget_tokens` asks for. Lower bounds, read as "this many tokens or more". Policy, not measurement — and a search of the first-party client established that there is no upstream rule to find: it never converts a budget into an effort at all, sending `thinking.budget_tokens` and `output_config.effort` side by side as independent fields.
-#
-# The one external datum that bears on the numbers is the official client's default budget of 16000. A user who configured nothing should not land in the second-strongest rung, so 16000 sits at `high` rather than at `xhigh`, and the rest are spaced around it. That is a sanity check against a default, not a rule anybody published.
-BUDGET_LADDER: tuple[tuple[int, str], ...] = (
-    (32_000, "max"),
-    (24_000, "xhigh"),
-    (16_000, "high"),
-    (8_000, "medium"),
-)
-BUDGET_FLOOR = "low"
-
-# What `thinking: {"type": "adaptive"}` asks for. Adaptive means "decide for me", and this is the rung it decides on when the target has no adaptive mode of its own to hand the decision to.
-ADAPTIVE_EFFORT = "high"
-
-
-class ReasoningIntentInvalid(ValueError):
-    """The `thinking` field is not one of the shapes Anthropic defines.
-
-    Separate from a loss because it is the client's mistake rather than a limit of the crossing: a `budget_tokens` of `-1` or a `type` nobody has heard of cannot be approximated into anything, and carrying on would mean choosing an effort the request never asked for.
-
-    Carries the field path so the caller can tell the client which part of its body is the problem.
-    """
-
-    def __init__(self, message: str, *, field_path: str) -> None:
-        super().__init__(message)
-        self.field_path = field_path
+class EffortSource(StrEnum):
+    ANTHROPIC_DEFAULT = "anthropic-default"
+    ANTHROPIC_TOP_LEVEL = "anthropic-top-level"
+    ANTHROPIC_PER_MESSAGE = "anthropic-per-message"
+    RESPONSES = "responses"
 
 
 @dataclass(frozen=True, slots=True)
-class ReasoningIntent:
-    """How much reasoning the request asked for, in nobody's wire vocabulary.
+class ThinkingEffortIntent:
+    enabled: bool
+    effort: str | None
+    effort_source: EffortSource
 
-    `mode` is what was asked, and the other two fields carry the argument for the modes that take one. Protocol-neutral on purpose: `budget` is how Anthropic says it and `effort` is how the Responses API says it, and an intermediate form that stored either spelling would have to be rewritten the first time a third format arrived.
-    """
 
-    mode: str
-    budget_tokens: int | None = None
-    effort: str | None = None
+@dataclass(frozen=True, slots=True)
+class ThinkingTargetProfile:
+    modes: tuple[str, ...]
+    can_disable: bool
+    disabled_max_effort: str | None = None
+    manual_budget_tokens: int | None = None
+
+
+CompiledThinkingProfiles = tuple[tuple[re.Pattern[str], ThinkingTargetProfile], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,81 +45,12 @@ class ReasoningResolution:
 
     `effort` of `None` means send no `reasoning` field at all — which, per the module docstring, is *not* a way to express "off". It is what a target that publishes no efforts gets, and it is always accompanied by a reason.
 
-    `approximated` is true when the answer is not what was asked for: a continuous budget landed on a discrete rung, or the rung the request wanted was not on offer and a lower one was used. `reason` says which, in words meant for whoever reads the loss record.
+    `approximated` is true when the requested rung was not on offer and another published rung was used, or when no rankable rung could be selected. `reason` says which, in words meant for whoever reads the loss record.
     """
 
     effort: str | None
     approximated: bool = False
     reason: str = ""
-
-
-def intent_from_thinking(thinking: object) -> ReasoningIntent | None:
-    """Read Anthropic's `thinking` field, or `None` when the request did not set one.
-
-    Rejects rather than guesses. `budget_tokens` must be a positive `int` and specifically not a `bool` — `True` is an `int` in Python, and a client sending `{"type": "enabled", "budget_tokens": true}` would otherwise be read as asking for one token.
-    """
-    if thinking is None:
-        return None
-    if not isinstance(thinking, dict):
-        raise ReasoningIntentInvalid("thinking must be an object", field_path="thinking")
-    field = dict[str, object](thinking)  # pyright: ignore[reportUnknownArgumentType]
-    kind = field.get("type")
-    if not isinstance(kind, str):
-        raise ReasoningIntentInvalid("thinking.type must be a string", field_path="thinking.type")
-    if kind == "disabled":
-        return ReasoningIntent(mode="disabled")
-    if kind in ("adaptive", "auto"):
-        return ReasoningIntent(mode="adaptive")
-    if kind != "enabled":
-        raise ReasoningIntentInvalid(f"unknown thinking.type {kind!r}", field_path="thinking.type")
-
-    budget = field.get("budget_tokens")
-    if budget is None:
-        # `enabled` without a budget is still a request to think; it just does not say how much. Treated as adaptive rather than refused, because refusing would reject a body Anthropic accepts.
-        return ReasoningIntent(mode="adaptive")
-    if isinstance(budget, bool) or not isinstance(budget, int):
-        raise ReasoningIntentInvalid(
-            "thinking.budget_tokens must be an integer", field_path="thinking.budget_tokens"
-        )
-    if budget <= 0:
-        raise ReasoningIntentInvalid(
-            "thinking.budget_tokens must be positive", field_path="thinking.budget_tokens"
-        )
-    return ReasoningIntent(mode="budget", budget_tokens=budget)
-
-
-# What each mode actually reads out of `thinking`. Anything else the client sent is not refused — Anthropic may add fields and refusing them would reject bodies it accepts — but it is not silently eaten either, because `thinking` is now claimed by the reader and a claimed field no longer travels in `extensions` where an unclaimed one would have been reported.
-_CONSUMED_BY_MODE = {
-    "disabled": frozenset({"type"}),
-    "adaptive": frozenset({"type"}),
-    "budget": frozenset({"type", "budget_tokens"}),
-}
-
-
-def unused_thinking_fields(thinking: object, intent: ReasoningIntent | None) -> tuple[str, ...]:
-    """The keys of `thinking` this intent did not read, sorted.
-
-    `{"type": "disabled", "budget_tokens": 8000}` is the case worth naming: the budget is real, the client meant it, and `disabled` ignores it entirely. Answering "nothing was lost" there would be false.
-    """
-    if intent is None or not isinstance(thinking, dict):
-        return ()
-    consumed = _CONSUMED_BY_MODE.get(intent.mode, frozenset({"type"}))
-    return tuple(sorted(key for key in cast(dict[str, object], thinking) if key not in consumed))
-
-
-def _desired(intent: ReasoningIntent) -> str:
-    """The rung this intent asks for, before anything is known about what the target offers."""
-    if intent.mode == "disabled":
-        return "none"
-    if intent.mode == "adaptive":
-        return ADAPTIVE_EFFORT
-    if intent.mode == "effort" and intent.effort:
-        return intent.effort
-    budget = intent.budget_tokens or 0
-    for threshold, rung in BUDGET_LADDER:
-        if budget >= threshold:
-            return rung
-    return BUDGET_FLOOR
 
 
 def _at_or_below(desired: str, supported: frozenset[str]) -> str | None:
@@ -166,37 +77,62 @@ def _weakest(supported: frozenset[str]) -> str | None:
     return None
 
 
+def align_anthropic_effort(
+    desired: str, capabilities: tuple[str, ...] | None
+) -> ReasoningResolution:
+    """Fit a Responses effort onto the Anthropic effort names a target publishes.
+
+    The catalog may advertise names from another protocol or future names this proxy cannot place. The Anthropic writer may emit only Anthropic's five levels, so intersect before using the shared alignment policy. `None` remains distinct from an explicitly empty or incompatible capability set.
+    """
+    compatible = (
+        None
+        if capabilities is None
+        else tuple(value for value in capabilities if value in ANTHROPIC_EFFORTS)
+    )
+    return _align_effort(desired, compatible, candidate_domain="Anthropic-compatible")
+
+
 def align_effort(desired: str, capabilities: tuple[str, ...] | None) -> ReasoningResolution:
     """Fit an effort name somebody already chose onto what this model publishes.
 
-    Different question from `resolve`, same ladder and the same direction. `resolve` starts from what the *request* asked for in Anthropic's vocabulary; this starts from a name an operator wrote in `model_thinking_effort` and only has to make it acceptable to the model that will answer. Both are asked "does this model take this rung", and two ladders would eventually give two answers.
+    A name the catalog publishes is sent verbatim, ranked or not. That branch is first on purpose: `EFFORT_LADDER` is this project's ordering and the catalog is the authority on membership, so a model publishing an effort nobody here has heard of still gets it.
 
-    **A name the catalog publishes is sent verbatim, ranked or not.** That branch is first on purpose: `EFFORT_LADDER` is this project's ordering and the catalog is the authority on membership, so a model publishing an effort nobody here has heard of still gets it. Skipping that check is precisely the defect in the first-party client, which compares against a hardcoded `low|medium|high` and therefore silently sends no `output_config` at all when configured with `xhigh` or `max` — both of which `claude-sonnet-5` publishes today. See `.dev/docs/anthropic-direct-request-shape/spec.md` §2.4.
-
-    **Where this parts company with `resolve`, and why it may.** When nothing can be fitted, `resolve` goes *up* to the weakest rung on offer; this answers `None` and sends no field. That is not a second opinion about the same question — the two legs disagree about what silence means. On the Responses leg omission is measured to give upstream's own default, so "off" has to be said out loud and going up is the only way to say anything at all. On this leg omission *is* the documented default (`high`), so declining to choose is a real answer rather than an absence of one. Guessing at a rung this ladder cannot place would be picking a cost for the operator out of names nobody here can order.
+    When nothing rankable can be fitted, this answers `None` rather than guessing at the cost of a name the ladder cannot place. Callers decide whether omission is legal for their wire contract; disabled reasoning is handled separately because it must be stated as `none` rather than omitted.
     """
+    return _align_effort(desired, capabilities)
+
+
+def _align_effort(
+    desired: str,
+    capabilities: tuple[str, ...] | None,
+    *,
+    candidate_domain: str | None = None,
+) -> ReasoningResolution:
     if capabilities is None:
-        return ReasoningResolution(
-            effort=None,
-            approximated=True,
-            reason="the catalog publishes no reasoning efforts for this model",
+        reason = (
+            f"the catalog publishes no {candidate_domain} reasoning effort candidates for this model"
+            if candidate_domain is not None
+            else "the catalog publishes no reasoning efforts for this model"
         )
+        return ReasoningResolution(effort=None, approximated=True, reason=reason)
     supported = frozenset(capabilities)
     if not supported:
-        return ReasoningResolution(
-            effort=None,
-            approximated=True,
-            reason="this model advertises no reasoning efforts",
+        reason = (
+            f"this model advertises no {candidate_domain} reasoning effort candidates"
+            if candidate_domain is not None
+            else "this model advertises no reasoning efforts"
         )
+        return ReasoningResolution(effort=None, approximated=True, reason=reason)
     if desired in supported:
         return ReasoningResolution(effort=desired)
     chosen = _at_or_below(desired, supported)
     if chosen is not None:
-        return ReasoningResolution(
-            effort=chosen,
-            approximated=True,
-            reason=f"asked for {desired}, which this model does not offer; sent {chosen}",
+        reason = (
+            f"asked for {desired}, which is not among this model's published {candidate_domain} candidates; sent {chosen}"
+            if candidate_domain is not None
+            else f"asked for {desired}, which this model does not offer; sent {chosen}"
         )
+        return ReasoningResolution(effort=chosen, approximated=True, reason=reason)
     floor = _weakest(supported)
     if floor is None:
         # Everything this model publishes is a name `EFFORT_LADDER` cannot place, so there is no "weakest" to fall back to — `_weakest` walks the ladder and sees none of them.
@@ -210,64 +146,12 @@ def align_effort(desired: str, capabilities: tuple[str, ...] | None) -> Reasonin
                 f" rank ({published}), so none was chosen"
             ),
         )
-    if desired in EFFORT_LADDER:
+    if candidate_domain is not None:
+        rankability = "" if desired in EFFORT_LADDER else ", which this proxy cannot rank"
+        reason = f"asked for {desired}{rankability}; {floor} is the weakest {candidate_domain} candidate published by this model, so {floor} was sent"
+    elif desired in EFFORT_LADDER:
         reason = f"asked for {desired}, which is weaker than anything this model offers; sent {floor}"
     else:
         # The other way to reach the floor, and it used to be reported as the one above — which said the request asked for less than everything on offer, about a name nothing here can compare.
         reason = f"asked for {desired}, which this proxy cannot rank and this model does not publish; sent its weakest, {floor}"
     return ReasoningResolution(effort=floor, approximated=True, reason=reason)
-
-
-def resolve(intent: ReasoningIntent, capabilities: tuple[str, ...] | None) -> ReasoningResolution:
-    """Choose the effort to send for this intent against this model's published names.
-
-    `capabilities` of `None` means the catalog said nothing about this model's efforts — which is not the same as an empty tuple, where it said "none at all". Neither gets an effort, and both say why, because filling in a guess is how a request quietly starts asking for something it did not ask for.
-
-    The invariant every branch below is written to hold is checked here rather than assumed. It is the one property that matters and the one whose violation is invisible from inside this process: an effort name the model does not offer is a 400 from the gateway, arriving long after this function returned something that looked reasonable.
-    """
-    resolution = _resolve(intent, capabilities)
-    if resolution.effort is not None and resolution.effort not in (capabilities or ()):
-        raise AssertionError(
-            f"resolver chose {resolution.effort!r}, which is not among {capabilities!r}"
-        )
-    return resolution
-
-
-def _resolve(intent: ReasoningIntent, capabilities: tuple[str, ...] | None) -> ReasoningResolution:
-    if capabilities is None:
-        return ReasoningResolution(
-            effort=None,
-            approximated=True,
-            reason="the catalog publishes no reasoning efforts for this model",
-        )
-    supported = frozenset(capabilities)
-    if not supported:
-        return ReasoningResolution(
-            effort=None,
-            approximated=True,
-            reason="this model advertises no reasoning efforts",
-        )
-
-    desired = _desired(intent)
-    chosen = _at_or_below(desired, supported)
-    if chosen == desired:
-        return ReasoningResolution(effort=chosen, approximated=intent.mode == "budget")
-    if chosen is not None:
-        return ReasoningResolution(
-            effort=chosen,
-            approximated=True,
-            reason=f"asked for {desired}, which this model does not offer; sent {chosen}",
-        )
-    # Nothing at or below what was asked for. The request wanted less thinking than the weakest thing on offer — `disabled` against a model that always reasons is the case that reaches here — so the floor is the closest this target can come.
-    floor = _weakest(supported)
-    if floor is None:
-        return ReasoningResolution(
-            effort=None,
-            approximated=True,
-            reason="this model advertises no reasoning efforts",
-        )
-    return ReasoningResolution(
-        effort=floor,
-        approximated=True,
-        reason=f"asked for {desired}, which is weaker than anything this model offers; sent {floor}",
-    )

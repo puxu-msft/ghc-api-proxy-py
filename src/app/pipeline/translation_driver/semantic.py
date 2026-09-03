@@ -14,7 +14,7 @@ from enum import StrEnum
 from typing import Any
 
 from app.pipeline.translation_driver.content import SemanticMessage
-from app.pipeline.translation_driver.reasoning import ReasoningIntent
+from app.pipeline.translation_driver.reasoning import ThinkingEffortIntent, ThinkingTargetProfile
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,18 +56,37 @@ class LossCode(StrEnum):
     UPSTREAM_ERROR_NOT_INTERPRETED = "upstream-error-not-interpreted"
 
 
+class ConversionFactCode(StrEnum):
+    THINKING_PROFILE_SELECTED = "thinking-profile-selected"
+    THINKING_PROFILE_REJECTED = "thinking-profile-rejected"
+
+
+@dataclass(frozen=True, slots=True)
+class ConversionFact:
+    code: ConversionFactCode
+    detail: str = ""
+
+
 class TranslationRefused(Exception):
     """The request says something this crossing cannot carry without changing what it means.
 
     Distinct from a `Loss`, and the distinction is the point. A loss is something the client can be told about afterwards because the request still means what it meant — a dropped cache marker, a cost ceiling nobody can enforce. This is for the other kind: a field whose removal would silently reverse an instruction, where carrying on is worse than refusing.
 
-    Carries a `code` and the `field_path` that caused it so the client is told which part of its request is the problem, rather than being handed a generic refusal it cannot act on.
+    Carries a `code` and the `field_path` that caused it so the client is told which part of its request is the problem, rather than being handed a generic refusal it cannot act on. `facts` is the immutable snapshot of non-loss conversion observations available at the point of rejection.
     """
 
-    def __init__(self, message: str, *, code: str, field_path: str) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        field_path: str,
+        facts: tuple[ConversionFact, ...] = (),
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.field_path = field_path
+        self.facts = facts
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,15 +102,19 @@ class Loss:
 
 @dataclass(slots=True)
 class Conversion:
-    """What a translation could not carry over.
+    """The losses and non-loss facts owned by one translation.
 
-    A named loss is the difference between a degraded response and a silent one.
+    A named loss is the difference between a degraded response and a silent one. Facts record observations without changing `lossless`, which depends only on whether losses exist.
     """
 
     losses: list[Loss] = field(default_factory=lambda: list[Loss]())
+    facts: list[ConversionFact] = field(default_factory=lambda: list[ConversionFact]())
 
     def record(self, code: LossCode, detail: str = "") -> None:
         self.losses.append(Loss(code, detail))
+
+    def observe(self, code: ConversionFactCode, detail: str = "") -> None:
+        self.facts.append(ConversionFact(code, detail))
 
     def has(self, code: LossCode) -> bool:
         return any(loss.code is code for loss in self.losses)
@@ -114,6 +137,8 @@ class TranslationTarget:
 
     model_id: str = ""
     reasoning_efforts: tuple[str, ...] | None = None
+    thinking_profile: ThinkingTargetProfile | None = None
+    thinking_profile_pattern: str = ""
 
 
 @dataclass(slots=True)
@@ -127,14 +152,17 @@ class SemanticRequest:
     stream: bool = False
     max_output_tokens: int | None = None
     temperature: float | None = None
-    # How much reasoning the request asked for, as an intent rather than either side's spelling. `None` means the request said nothing, which is not the same as asking for none — see `reasoning.resolve`, where omitting the field entirely is measured to give upstream's default rather than silence.
-    reasoning: ReasoningIntent | None = None
+    thinking_effort: ThinkingEffortIntent | None = None
     # Which wire format the extensions below came off. A writer for a different format must not replay them: an unclaimed key is unclaimed *in its own format*, and in another one it is at best meaningless. Measured — sending Anthropic's `context_management` to the Responses endpoint gets `failed to parse request`, so replaying it is not merely untidy.
     source_format: str = ""
     # The client's own tool-search tool, when one was identified. Written by the outbound writer rather than read off the wire, because identification depends on what that writer decided to do — and the *response* half needs the same answer to turn a `tool_search_call` back into a call on that tool. Empty means no search was translated, which is also the answer when identification declined.
     client_search_tool: str = ""
     # Fields no translator claimed, kept so an unknown key is not silently dropped.
     extensions: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
+    # Unclaimed siblings inside objects a reader otherwise owns. Kept separately so a writer can merge the object before its modelled fields overwrite stale residual values.
+    nested_extensions: dict[str, dict[str, Any]] = field(
+        default_factory=lambda: dict[str, dict[str, Any]]()
+    )
     conversion: Conversion = field(default_factory=Conversion)
 
     def extensions_for(self, wire_format: str) -> dict[str, Any]:
@@ -149,6 +177,19 @@ class SemanticRequest:
             f"from {self.source_format or 'an unnamed format'} into {wire_format}: "
             f"{', '.join(sorted(self.extensions))}",
         )
+        return {}
+
+    def nested_extensions_for(self, wire_format: str) -> dict[str, dict[str, Any]]:
+        if not self.nested_extensions:
+            return {}
+        if self.source_format == wire_format:
+            return {name: dict(fields) for name, fields in self.nested_extensions.items()}
+        for name, fields in self.nested_extensions.items():
+            for key in sorted(fields):
+                self.conversion.record(
+                    LossCode.EXTENSIONS_NOT_CARRIED,
+                    f"from {self.source_format} into {wire_format}: {name}.{key}",
+                )
         return {}
 
 

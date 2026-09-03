@@ -30,6 +30,8 @@ type WebSearchConstraintPolicy = Literal["error", "drop_fields"]
 type AutoModeDecision = Literal["passthrough", "allow", "block"]
 # What to do with `thinking.display` on the way to an Anthropic Messages upstream. `passthrough` — the default — sends whatever the client said and adds nothing; `drop` removes the key; the two remaining values rewrite it. `omitted` streams `thinking` blocks with empty text and is the upstream default on the Claude 5 family, `summarized` asks for a readable summary of the reasoning instead.
 type ThinkingDisplayPolicy = Literal["passthrough", "drop", "omitted", "summarized"]
+type AnthropicEffort = Literal["low", "medium", "high", "xhigh", "max"]
+type AnthropicThinkingMode = Literal["adaptive", "enabled"]
 
 # Dotted paths the spec marks as requiring a restart. Everything else is hot-reloadable.
 #
@@ -227,9 +229,33 @@ class ToOpenAiResponsesConfig(Section):
     web_search_domain_restrictions: WebSearchConstraintPolicy = "drop_fields"
 
 
+class ThinkingTargetProfileConfig(Section):
+    modes: tuple[AnthropicThinkingMode, ...]
+    can_disable: bool = Field(strict=True)
+    disabled_max_effort: AnthropicEffort | None = None
+    manual_budget_tokens: int | None = Field(default=None, strict=True, ge=1024)
+
+    @model_validator(mode="after")
+    def _modes_are_nonempty_and_unique(self) -> ThinkingTargetProfileConfig:
+        if not self.modes:
+            raise ValueError("thinking profile modes may not be empty")
+        if len(set(self.modes)) != len(self.modes):
+            raise ValueError("thinking profile modes may not contain duplicates")
+        return self
+
+
+class ToAnthropicMessagesConfig(Section):
+    thinking_profiles: dict[str, ThinkingTargetProfileConfig] = Field(
+        default_factory=lambda: dict[str, ThinkingTargetProfileConfig]()
+    )
+
+
 class ModelTranslationConfig(Section):
     to_openai_responses: ToOpenAiResponsesConfig = Field(
         default_factory=ToOpenAiResponsesConfig
+    )
+    to_anthropic_messages: ToAnthropicMessagesConfig = Field(
+        default_factory=ToAnthropicMessagesConfig
     )
 
 

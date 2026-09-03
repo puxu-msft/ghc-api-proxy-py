@@ -155,6 +155,8 @@ class RequestLine:
     # What translation could not carry, one entry per recorded loss, in the order recorded. Each entry is `{"direction": "request"|"response", "code": …, "detail": …}`. Direction is a property of the loss rather than a second field, because "what did this request lose" is one question and answering it from two lists is how the two drift apart.
     # `code` is the machine-readable half and `detail` the human one, which is the division `LossCode` was written for; both are kept because the code alone cannot say *which* extensions were dropped, and the detail alone cannot be counted.
     losses: tuple[dict[str, str], ...] = ()
+    # Non-loss observations made while translating the request. Durable for the same reason as `losses`, and likewise omitted from the console line.
+    facts: tuple[dict[str, str], ...] = ()
 
 
 def format_thinking(kinds: tuple[str, ...], dialect: ReplyDialect = ReplyDialect.ANTHROPIC) -> str:

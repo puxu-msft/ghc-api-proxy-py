@@ -53,6 +53,7 @@ from app.pipeline.model_resolution import inspect_mappings
 from app.pipeline.rate_limiting import RateLimiter
 from app.pipeline.request import RequestContext
 from app.pipeline.request_headers import compile_beta_flag_denials
+from app.pipeline.routing import compile_thinking_profiles
 from app.pipeline.subscribers import register_builtin_subscribers
 from app.pipeline.subscribers.anthropic_cache_control import compile_sanitize_table
 from app.pipeline.subscribers.hosted_web_search import compile_supported_by_provider
@@ -531,6 +532,9 @@ def build_chain(
     web_search_models = compile_supported_by_provider(
         {name: provider.models_support_web_search for name, provider in config.model_providers.items()}
     )
+    thinking_profiles = compile_thinking_profiles(
+        config.model_translation.to_anthropic_messages.thinking_profiles
+    )
     # `proxied` is a spelling `config.example.yaml` defines and this project has not built: it asks the proxy to strip the client's breakpoints and inject its own, and only the stripping half exists. Refusing at startup rather than treating it as `passthrough`, because the quiet version of this is an operator who configured the proxy to own prompt caching, sees no error, and is billed as though nobody owned it. A config value that cannot be honoured belongs in the same class as a pattern that does not compile — it stops start-up, not the first request that reaches it.
     if config.hook_fix_anthropic_request.cache_control == "proxied":
         raise ValueError(
@@ -558,6 +562,7 @@ def build_chain(
 
     return Chain(
         config=config,
+        thinking_profiles=thinking_profiles,
         beta_flag_denials=compile_beta_flag_denials(
             config.hook_strip_anthropic_request_headers.strip_anthropic_beta_flags
         ),

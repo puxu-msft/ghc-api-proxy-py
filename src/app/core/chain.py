@@ -22,6 +22,7 @@ from app.observability.terminal import TerminalCapabilities, detect_terminal
 from app.pipeline.events import FrozenSubscribers
 from app.pipeline.rate_limiting import RateLimiter
 from app.pipeline.request import RequestContext
+from app.pipeline.translation_driver.reasoning import CompiledThinkingProfiles
 from app.pipeline.translation_driver.registry import TranslatorRegistry
 from app.tokenization.state_store import TokenizationStateStore
 
@@ -50,6 +51,7 @@ class Chain:
     )
     # `strip_anthropic_beta_flags` compiled, in the order the operator wrote it. Same reason as `web_search_models` above it: a pattern that does not compile belongs to the config, so it should stop start-up rather than the first request that happens to reach the table.
     beta_flag_denials: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = ()
+    thinking_profiles: CompiledThinkingProfiles = ()
 
     def rate_limiter_for(self, provider_name: str) -> RateLimiter:
         return self.rate_limiters[provider_name]
