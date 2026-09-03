@@ -1208,7 +1208,7 @@ async def test_a_bug_in_framing_is_not_charged_to_upstream() -> None:
 
     `from_assembly` tagged `assembler.push` and nothing else, so an exception out of the framer fell through to the `not ours` default: the error frame called it `upstream_stream_failed` and the hand-over block called it `internal`. Two exits, opposite answers, one bug — and the client can only read the frame.
 
-    The stated reason for the limit was that widening the tagged region "means wrapping a `yield`". It did not: `_commit` returns a list, so every framer call inside it has already run by the time the first chunk leaves. `deferred.md` §22之二.
+    The stated reason for the limit was that widening the tagged region "means wrapping a `yield`". The real boundary is the outer `try`: lazy `_commit` is iterated inside it, so every framer call remains covered, including one that runs after an earlier complete unit's yield resumes. `deferred.md` §22之二.
     """
     handed: list[BaseException | None] = []
 

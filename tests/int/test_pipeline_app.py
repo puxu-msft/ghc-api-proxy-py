@@ -46,7 +46,12 @@ from app.pipeline import driver
 from app.pipeline.delivery.assembling import BlockAssembler
 from app.pipeline.delivery.blocks import BlockBuffer
 from app.pipeline.delivery.formats.anthropic_messages import AnthropicAssembler, AnthropicFramer
+from app.pipeline.delivery.formats.openai_responses import ResponsesFramer
+from app.pipeline.delivery.formats.openai_responses_passthrough import (
+    responses_passthrough_assembler,
+)
 from app.pipeline.delivery.framing import OutboundFramer
+from app.pipeline.delivery.passthrough import PassthroughFramer
 from app.pipeline.delivery.stream import (
     ContinuationSupport,
     ReplaySupport,
@@ -2390,6 +2395,332 @@ async def test_a_client_that_walked_away_is_not_blamed_on_upstream(
         f"a client-side disconnect was reported as an upstream fault: {line}"
     )
     assert "delivery stopped before upstream finished" in line
+
+
+@pytest.mark.parametrize(
+    ("disconnect_at", "expected_status"),
+    [
+        ("before_terminal_send_returns", "gone"),
+        ("after_terminal_send_returns", "ok"),
+        ("never", "ok"),
+    ],
+)
+async def test_a_native_terminal_is_complete_only_after_its_send_returns(
+    request_log: None,
+    caplog: pytest.LogCaptureFixture,
+    disconnect_at: str,
+    expected_status: str,
+) -> None:
+    """The production race behind Codex requests reported as gone after `response.completed`.
+
+    The event and chunk sequence comes from a real Copilot cassette. Only the transport tail and downstream disconnect are controlled: after the recorded terminal frame, upstream waits for another pull while the client disconnects before or after that frame's ASGI send returns. The send-return case meets the same application-visible boundary as a naturally drained stream; the suspended-send case does not. Letting upstream reach EOF is the no-disconnect control.
+    """
+    cassette = orjson.loads(Path("tests/int/cassettes/responses_web_search_stream.json").read_bytes())
+    interaction = next(i for i in cassette["interactions"] if "responses" in i["request"]["path"])
+    recorded_chunks = tuple(chunk["text"].encode() for chunk in interaction["response"]["chunks"])
+    assert any(b"response.completed" in chunk for chunk in recorded_chunks), (
+        "the cassette must still contain the terminal event this test controls"
+    )
+
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "unused"}))
+    chain = _chain_of(client)
+    trace = RequestTrace(
+        method="POST",
+        path="/v1/responses",
+        request_id="req_terminal_frontier",
+        started=time.monotonic(),
+    )
+    assembler = responses_passthrough_assembler()
+    accounting = _StreamAccounting(
+        chain=chain,
+        request_id=trace.request_id,
+        trace=trace,
+        status_code=200,
+        assembler=cast(BlockAssembler[Any], assembler),
+    )
+    chain.active_requests.add(trace.request_id)
+
+    source_closed = asyncio.Event()
+    hold_transport_tail = asyncio.Event()
+
+    async def recorded_upstream() -> AsyncIterator[bytes]:
+        try:
+            for chunk in recorded_chunks:
+                yield chunk
+            if disconnect_at != "never":
+                # Production had parsed the terminal but was still waiting for the HTTP body iterator's next pull. Hold that exact interval until downstream cancellation closes us.
+                await hold_transport_tail.wait()
+        finally:
+            source_closed.set()
+
+    upstream = UpstreamSource(recorded_upstream())
+    framer = PassthroughFramer(
+        delegate=ResponsesFramer(response_id="resp_1", model="gpt-model"),
+        on_terminal_unit=accounting.completion_delivery.offer,
+    )
+    delivery = _tracked_delivery(
+        stream_delivery(
+            upstream,
+            assembler,
+            upstream=upstream,
+            buffer=cast(BlockBuffer[Any], delivery_buffer(chain)),
+            settings=stream_settings(chain),
+            framer=framer,
+            passthrough=True,
+        ),
+        accounting,
+    )
+    response = _AccountedStreamingResponse(
+        delivery,
+        accounting,
+        status_code=200,
+        media_type="text/event-stream",
+    )
+
+    terminal_send_started = asyncio.Event()
+    terminal_send_returned = asyncio.Event()
+    wait_forever = asyncio.Event()
+    sent_bodies: list[bytes] = []
+
+    async def send(message: dict[str, Any]) -> None:
+        if message["type"] != "http.response.body":
+            return
+        body = cast(bytes, message.get("body", b""))
+        if body:
+            sent_bodies.append(body)
+        if b"event: response.completed" not in body:
+            return
+        terminal_send_started.set()
+        if disconnect_at == "before_terminal_send_returns":
+            # The concurrent disconnect listener cancels this suspended send. The tracker must not accept a completion chunk whose send never returned.
+            await wait_forever.wait()
+        terminal_send_returned.set()
+
+    async def receive() -> dict[str, str]:
+        if disconnect_at == "before_terminal_send_returns":
+            await terminal_send_started.wait()
+        elif disconnect_at == "after_terminal_send_returns":
+            await terminal_send_returned.wait()
+        else:
+            await wait_forever.wait()
+        return {"type": "http.disconnect"}
+
+    with caplog.at_level(logging.INFO):
+        async with asyncio.timeout(10):
+            await response(
+                {
+                    "type": "http",
+                    "asgi": {"spec_version": "2.3"},
+                    "method": "POST",
+                    "path": "/v1/responses",
+                    "headers": [],
+                },
+                receive,
+                send,
+            )
+
+    assert assembler.terminal.seen, "the proxy must have parsed the recorded terminal in every case"
+    assert source_closed.is_set(), "downstream completion or cancellation must still release upstream"
+    assert terminal_send_returned.is_set() is (expected_status == "ok")
+    assert accounting.completion_delivery.accepted is (expected_status == "ok")
+    assert accounting.drained is (disconnect_at == "never")
+    assert any(b"event: response.completed" in body for body in sent_bodies)
+
+    (line, status), = _request_outcomes(caplog.records)
+    assert status == expected_status, line
+    if expected_status == "gone":
+        assert "delivery stopped before the upstream terminal reached the client" in line
+    else:
+        assert "delivery stopped before upstream finished" not in line
+
+
+async def test_a_terminal_marker_stays_with_its_chunk_when_buffering_releases_multiple_units(
+    request_log: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`until-tool-use` may release an older ordinary unit beside the terminal unit.
+
+    An unclosed item holds a later complete function call and terminal until EOF. Closing drops that item and offers the held terminal batch; the function call opens `until-tool-use`, so the buffer releases an earlier message batch and this terminal batch together. Framing the whole release eagerly used to set one shared pending bit before the earlier chunk was even yielded, making its send return accept a terminal whose own send had not returned.
+    """
+
+    def frame(name: str, payload: dict[str, Any]) -> str:
+        return f"event: {name}\ndata: {orjson.dumps(payload).decode()}\n\n"
+
+    ordinary: dict[str, Any] = {"type": "message", "id": "msg_0", "content": []}
+    never_closed: dict[str, Any] = {"type": "message", "id": "msg_1", "content": []}
+    function_call = {
+        "type": "function_call",
+        "id": "fc_2",
+        "call_id": "call_2",
+        "name": "Bash",
+        "arguments": "{}",
+    }
+    upstream_body = "".join(
+        [
+            *responses_envelope_frames(),
+            frame("response.output_item.added", {"output_index": 0, "item": ordinary}),
+            frame("response.output_item.done", {"output_index": 0, "item": ordinary}),
+            frame(
+                "response.output_item.added",
+                {"output_index": 1, "item": never_closed},
+            ),
+            frame(
+                "response.output_item.added",
+                {"output_index": 2, "item": function_call},
+            ),
+            frame(
+                "response.output_item.done",
+                {"output_index": 2, "item": function_call},
+            ),
+            frame(
+                "response.completed",
+                {"response": {"usage": {"input_tokens": 1, "output_tokens": 1}}},
+            ),
+        ]
+    ).encode()
+
+    async def recorded_shape() -> AsyncIterator[bytes]:
+        yield upstream_body
+
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "unused"}))
+    chain = _chain_of(client)
+    trace = RequestTrace(
+        method="POST",
+        path="/v1/responses",
+        request_id="req_multi_release_frontier",
+        started=time.monotonic(),
+    )
+    assembler = responses_passthrough_assembler()
+    accounting = _StreamAccounting(
+        chain=chain,
+        request_id=trace.request_id,
+        trace=trace,
+        status_code=200,
+        assembler=cast(BlockAssembler[Any], assembler),
+    )
+    chain.active_requests.add(trace.request_id)
+    upstream = UpstreamSource(recorded_shape())
+    framer = PassthroughFramer(
+        delegate=ResponsesFramer(response_id="resp_1", model="gpt-model"),
+        on_terminal_unit=accounting.completion_delivery.offer,
+    )
+    delivery = _tracked_delivery(
+        stream_delivery(
+            upstream,
+            assembler,
+            upstream=upstream,
+            buffer=cast(
+                BlockBuffer[Any],
+                BlockBuffer(policy="until-tool-use"),
+            ),
+            settings=stream_settings(chain),
+            framer=framer,
+            passthrough=True,
+        ),
+        accounting,
+    )
+
+    with caplog.at_level(logging.INFO):
+        first = await anext(delivery)
+        assert b"response.completed" not in first
+        assert not accounting.completion_delivery.pending
+        assert not accounting.completion_delivery.accepted
+
+        # Pulling again means the first chunk's send returned. The next body is now offered to ASGI but its send has not returned, so only this terminal chunk may be pending.
+        terminal = await anext(delivery)
+        assert b"response.completed" in terminal
+        assert accounting.completion_delivery.pending
+        assert not accounting.completion_delivery.accepted
+
+        # The terminal send is cancelled rather than resumed. A marker accidentally attached to the first chunk would leave this request green.
+        await delivery.aclose()
+
+    (line, status), = _request_outcomes(caplog.records)
+    assert status == "gone", line
+    assert "delivery stopped before the upstream terminal reached the client" in line
+
+
+async def test_the_responses_route_wires_its_terminal_send_to_completion_accounting(
+    request_log: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The production composition, not a manually connected framer and accounting object.
+
+    A component-level regression can prove the frontier's semantics while leaving `framer_for` free to drop its callback. This drives the real FastAPI route, request parser, provider, delivery policy and ASGI 2.3 disconnect listener so that the same omission would restore the production `[GONE]` line.
+    """
+    cassette = orjson.loads(Path("tests/int/cassettes/responses_web_search_stream.json").read_bytes())
+    interaction = next(i for i in cassette["interactions"] if "responses" in i["request"]["path"])
+    recorded_chunks = tuple(chunk["text"].encode() for chunk in interaction["response"]["chunks"])
+    hold_transport_tail = asyncio.Event()
+    upstream_closed = asyncio.Event()
+
+    async def recorded_upstream() -> AsyncIterator[bytes]:
+        try:
+            for chunk in recorded_chunks:
+                yield chunk
+            await hold_transport_tail.wait()
+        finally:
+            upstream_closed.set()
+
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200,
+            content=recorded_upstream(),
+            headers={"content-type": "text/event-stream"},
+        )
+    )
+    request_body = orjson.dumps({"model": "gpt-model", "input": [], "stream": True})
+    request_sent = False
+    terminal_send_returned = asyncio.Event()
+    sent_bodies: list[bytes] = []
+
+    async def receive() -> dict[str, Any]:
+        nonlocal request_sent
+        if not request_sent:
+            request_sent = True
+            return {"type": "http.request", "body": request_body, "more_body": False}
+        await terminal_send_returned.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, Any]) -> None:
+        if message["type"] != "http.response.body":
+            return
+        body = cast(bytes, message.get("body", b""))
+        if body:
+            sent_bodies.append(body)
+        if b"event: response.completed" in body:
+            # No await between this signal and returning: the stream task resumes `_tracked_delivery` and accepts the frontier before the disconnect listener can run.
+            terminal_send_returned.set()
+
+    scope: dict[str, Any] = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/responses",
+        "raw_path": b"/v1/responses",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"host", b"testserver"),
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(request_body)).encode()),
+        ],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+        "state": {},
+    }
+
+    with caplog.at_level(logging.INFO):
+        async with asyncio.timeout(10):
+            await cast(Any, client.app)(scope, receive, send)
+
+    assert upstream_closed.is_set(), "the downstream disconnect must still close the held upstream tail"
+    assert any(b"event: response.completed" in body for body in sent_bodies)
+    (line, status), = _request_outcomes(caplog.records)
+    assert status == "ok", line
+    assert "delivery stopped before upstream finished" not in line
 
 
 def test_a_stream_that_did_terminate_is_still_reported_as_one(

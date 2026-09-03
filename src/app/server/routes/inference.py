@@ -9,7 +9,7 @@ import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import aclosing
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, cast
 from uuid import uuid4
 
@@ -323,11 +323,13 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
         # The instant the driver fixed when it opened this attempt, read rather than recomputed: a second `now + deadline` here would start the clock at the moment the headers came back and quietly grant the attempt a second full lifetime.
         attempt = context.current_attempt
         settings = stream_settings(chain)
+        completion_delivery = _CompletionDelivery()
         framer = framer_for(
             handled,
             chain,
             message_id=context.id,
             model=context.resolved_model,
+            on_passthrough_terminal_unit=completion_delivery.offer,
         )
         if framer is None:
             # This client leg has no outbound framer, so there is no block to deliver. The upstream stream is read whole and handed over in one write, in the client's own dialect, byte for byte. Ruled 2026-08-22; before this branch existed those bytes went into an assembler that recognised none of them and the client got a 200 with an empty body and no error frame.
@@ -340,6 +342,7 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
                 trace=trace,
                 status_code=response.status_code,
                 context=context,
+                completion_delivery=completion_delivery,
             )
             return _AccountedStreamingResponse(
                 _tracked_delivery(
@@ -358,7 +361,8 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
                                 trace,
                             ),
                             deadline_at=client_deadline_at,
-                        )
+                        ),
+                        on_complete=completion_delivery.offer,
                     ),
                     one_shot_accounting,
                 ),
@@ -390,6 +394,7 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
             status_code=response.status_code,
             context=context,
             assembler=assembler,
+            completion_delivery=completion_delivery,
         )
 
         async def _reopen(replacing: Exception) -> Attempt | None:
@@ -574,6 +579,25 @@ async def _dispatch(request: Request, chain: Chain, trace: RequestTrace) -> Resp
 
 
 @dataclass(slots=True)
+class _CompletionDelivery:
+    """The one downstream chunk whose accepted send completes this reply.
+
+    `pending` is set while that chunk is being framed. It becomes `accepted` only after `_tracked_delivery` resumes from yielding the same chunk, which `StreamingResponse` does after its ASGI send returns. Keeping the two states separate is what prevents a parsed or merely yielded terminal from being reported as delivered.
+    """
+
+    pending: bool = False
+    accepted: bool = False
+
+    def offer(self) -> None:
+        self.pending = True
+
+    def accept(self, offered: bool) -> None:
+        if offered:
+            self.pending = False
+            self.accepted = True
+
+
+@dataclass(slots=True)
 class _StreamAccounting:
     """One streaming request's slot in the footer and its eventual log line.
 
@@ -590,6 +614,8 @@ class _StreamAccounting:
     handed_over: bool = False
     # What the hand-over swallowed, when it swallowed one. `None` on the endings that are not failures — a turn upstream cut short for want of room is handed back without anything having gone wrong.
     handed_over_error: BaseException | None = None
+    # Independent of `drained`: a native terminal batch or complete one-shot body may cross the downstream send boundary before the generator gets another turn to observe EOF. Sharing this object with the framer lets the producer identify the right chunk without searching encoded bytes here.
+    completion_delivery: _CompletionDelivery = field(default_factory=_CompletionDelivery)
     # Upstream finished the turn and then the connection went. Not a failure — the client holds the whole reply — and recorded anyway, because until this field existed the exception was discarded where it was caught and the request was accounted a plain success. An operator watching a peer that resets every connection after its last frame had nothing at all to look at.
     tore_after_terminal: BaseException | None = None
     done: bool = False
@@ -602,8 +628,12 @@ class _StreamAccounting:
             return
         self.done = True
         self.chain.active_requests.remove(self.request_id)
-        # A one-shot leg has no assembler and therefore no terminal record. A clean drain is its successful ending; a propagated failure or a local abort still has to reach the same verdict machinery instead of disappearing behind the assembler gate.
-        if self.assembler is None and (self.failure is not None or not self.drained):
+        # A completion unit may have crossed the downstream send boundary before a disconnect cancelled the generator's next pull. That reply is as complete as one whose iterator happened to observe EOF first; the scheduler must not decide its verdict.
+        delivered_whole = self.failure is None and (
+            self.drained or self.completion_delivery.accepted
+        )
+        # A one-shot leg has no assembler and therefore no terminal record. Its whole body is the completion unit; a partial body emitted while propagating a failure never offers that unit and still reaches the ending machinery.
+        if self.assembler is None and not delivered_whole:
             self.trace.status_override, self.trace.detail = self._ending()
         # Read at the end because that is when the upstream's terminal event has either been seen or failed to arrive.
         if self.assembler is not None:
@@ -613,10 +643,8 @@ class _StreamAccounting:
             # Deliberately still gated on `seen` while the line above is not, and conservatively rather than undecidedly: `reply is not None` currently means the reply finished, hooks and History are written against that, and widening it is a contract change that belongs with the STR-04 slice which needs a failed History anyway. Registered in `.dev/docs/anthropic-responses-bridge/implementation.md`'s 结构怪味登记 so it is reconsidered there rather than rediscovered.
             if terminal.seen and self.context is not None:
                 self.context.reply = terminal
-            # Two conditions, because either one alone lets a real incident through. Upstream's reason is not enough: `stream_delivery` writes its terminal frames after its event loop, so a tear or a disconnect unwinds straight past them and the client gets neither `message_delta` nor `message_stop` even when the assembler recorded upstream's. And a clean drain is not enough either: that is exactly the truncation this whole path exists to report.
-            # Gating on the reason rather than on `seen` is what separates the one benign case from all of these — an Anthropic leg splits its ending, `message_delta` carrying the reason and usage and `message_stop` merely closing, and a stream that drained after the first has told us everything the client was owed. Reporting that as truncated produced a line arguing with itself: `end_turn` followed by a note saying nothing ended.
-            # `failure is None` is there to keep this gate and `_ending()` asking the same question in the same order, not to cover a case anyone has produced: a review measured that `drained` and `failure` cannot both be set today, because an exception from the delivery chain surfaces inside the loop below and so never reaches the assignment that marks a drain. Do not go looking for the state — it needs an early `break` in that loop to exist. Without this term, adding one would silently reopen a gap `_ending()` still believes it is closing.
-            delivered_whole = self.drained and self.failure is None
+            # The reason and a downstream frontier are separate conditions. A translated leg may parse upstream's terminal before it has written the client's `message_delta` and `message_stop`; only its natural drain proves those frames went out. A native passthrough is different: upstream's own terminal rides inside one identified completion unit, and `completion_delivery.accepted` proves that exact chunk's ASGI send returned. Neither `terminal.seen` nor a yield alone is enough.
+            # Gating on the reason rather than on `seen` is what separates the one benign Anthropic case from all of these — `message_delta` carries the reason and usage while `message_stop` merely closes, so a stream that drained after the first has told us everything the client was owed. Reporting that as truncated produced a line arguing with itself: `end_turn` followed immediately by a note saying nothing ended.
             # `handed_over` forces the question even on a stream that drained with a reason: a turn upstream ended for want of room drains cleanly and carries `max_tokens`, and would otherwise be reported as an ordinary success — which is the one reading the hand-over exists to prevent.
             if self.handed_over or not (delivered_whole and terminal.stop_reason):
                 # Said outright, because absence is not readable. The status was fixed when the response headers arrived and stays 200 however the stream ends; the fields upstream never sent are simply gone; and a reader cannot tell a field this endpoint does not report from one this request never got.
@@ -667,6 +695,10 @@ class _StreamAccounting:
             return "fail", f"upstream reported a stream failure: {reported.info.message}"
         if self.drained:
             return "fail", "upstream stream ended without a terminal event"
+        if self.assembler is not None and self.assembler.terminal.seen:
+            return "gone", "delivery stopped before the upstream terminal reached the client"
+        if self.completion_delivery.pending:
+            return "gone", "delivery stopped after upstream finished"
         return "gone", "delivery stopped before upstream finished"
 
 
@@ -765,8 +797,11 @@ async def _tracked_delivery(chunks: AsyncGenerator[bytes], accounting: _StreamAc
     try:
         async with aclosing(chunks):
             async for chunk in chunks:
+                completion_offered = accounting.completion_delivery.pending
                 yield chunk
-            # Reached only when upstream's stream ran out on its own. A client that goes away closes this generator at a `yield`, and GeneratorExit unwinds straight past this line to the `finally` — which is exactly what tells "upstream stopped mid-turn" apart from "there was nobody left to deliver to". Neither has seen a terminal event, so nothing else can.
+                # `StreamingResponse` resumes this generator only after `await send` returns for the yielded body. If send raises or disconnect cancellation closes us at the yield, this line is skipped and a merely parsed or framed terminal never becomes accepted.
+                accounting.completion_delivery.accept(completion_offered)
+            # Reached only when the whole delivery generator ran out on its own. A client that goes away closes this generator at a `yield`, and GeneratorExit unwinds straight past this line to the `finally`; a completion unit whose ASGI send returned can now independently meet the same application-visible completion boundary despite that local abort.
             accounting.drained = True
     except Exception as error:
         # The third ending, and the one that used to be filed under the second: upstream tearing the connection — `httpx.ReadError`, a reset, a converter blowing up — leaves this generator by raising rather than by being closed, so it skips the line above and would otherwise be reported as a client that walked away.

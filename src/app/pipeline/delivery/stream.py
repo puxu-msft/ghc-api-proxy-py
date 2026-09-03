@@ -10,7 +10,7 @@ The keep-alive here is the **client-facing** one, and its cadence hangs off the 
 
 import asyncio
 import sys
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import aclosing
 from dataclasses import dataclass, replace
 from typing import Any
@@ -243,7 +243,9 @@ def _keepalive_due(
     return max(ping_deadline, last_write.at + interval)
 
 
-async def one_shot_delivery(chunks: AsyncIterator[bytes]) -> AsyncGenerator[bytes]:
+async def one_shot_delivery(
+    chunks: AsyncIterator[bytes], *, on_complete: Callable[[], None] | None = None
+) -> AsyncGenerator[bytes]:
     """Hand the upstream stream to the client whole, once all of it has arrived.
 
     For a client leg this proxy has no outbound framer for. Block-level delivery needs two halves — something that knows where a block ends in the upstream's events, and something that writes one in the client's — and Chat Completions has neither: its boundaries live inside `choices[].delta`, which nothing here reads. Ruled 2026-08-22 to buffer rather than to invent them; parsing that shape is its own piece of work.
@@ -263,6 +265,9 @@ async def one_shot_delivery(chunks: AsyncIterator[bytes]) -> AsyncGenerator[byte
             yield bytes(body)
         raise
     if body:
+        if on_complete is not None:
+            # The whole upstream body exists, but the downstream frontier has not advanced yet. The caller confirms it only when this yield resumes after ASGI send.
+            on_complete()
         yield bytes(body)
 
 
@@ -634,16 +639,17 @@ def _commit[UnitT: DeliveryUnit](
     block: UnitT,
     framer: OutboundFramer[UnitT],
     started: bool,
-) -> list[bytes]:
-    """Offer one block and frame whatever the buffer released."""
+) -> Iterator[bytes]:
+    """Offer one block and lazily frame each unit the buffer released.
+
+    Laziness preserves the unit-to-chunk boundary. A buffering policy may release several units together; framing them all before the first yield lets side records produced while framing a later unit describe an earlier chunk whose send returns first.
+    """
     released = session.offer(block)
     if not released:
-        return []
-    chunks: list[bytes] = []
+        return
     if not started:
         # The preamble waits for the first block.
         # A response that never produces one never looks like a message that began.
-        chunks.extend(framer.preamble())
+        yield from framer.preamble()
     for ready in released:
-        chunks.extend(framer.block(ready))
-    return chunks
+        yield from framer.block(ready)

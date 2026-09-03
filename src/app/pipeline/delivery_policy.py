@@ -5,6 +5,7 @@ Split out of `app.server.handler` on 2026-08-22. Above `app.pipeline.delivery`, 
 
 
 
+from collections.abc import Callable
 from typing import Any
 
 from app.core.chain import Chain
@@ -78,6 +79,7 @@ def framer_for(
     *,
     message_id: str,
     model: str,
+    on_passthrough_terminal_unit: Callable[[], None] | None = None,
 ) -> OutboundFramer[Any] | None:
     """The outbound framer for this route's client leg, or `None` when it has none and the stream is delivered whole.
 
@@ -96,7 +98,14 @@ def framer_for(
     if handled.route.inbound_format is WireFormat.OPENAI_RESPONSES:
         native = ResponsesFramer(response_id=message_id, model=model)
         # The passthrough writes upstream's own frames and delegates the two it still has to invent — an error and a keep-alive — to the very framer it replaces. Constructed either way so that delegate exists.
-        return PassthroughFramer(delegate=native) if carries_upstream_natively(handled) else native
+        return (
+            PassthroughFramer(
+                delegate=native,
+                on_terminal_unit=on_passthrough_terminal_unit,
+            )
+            if carries_upstream_natively(handled)
+            else native
+        )
     return AnthropicFramer(
         message_id=message_id,
         model=model,

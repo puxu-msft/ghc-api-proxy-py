@@ -106,6 +106,14 @@ class RawEventBatch:
             if item
         )
 
+    @property
+    def contains_terminal(self) -> bool:
+        """Whether this batch carries upstream's own terminal event.
+
+        Asked on the structured batch rather than by searching the encoded bytes. A payload may repeat an event name as data, and each dialect already owns the authoritative terminal set.
+        """
+        return any(event.event in self.dialect.terminal_events for event in self.events)
+
     def encode(self) -> bytes:
         """The batch as SSE frames, each event's name and payload unchanged.
 
@@ -323,6 +331,7 @@ class PassthroughFramer:
     """
 
     delegate: OutboundFramer[Any]
+    on_terminal_unit: Callable[[], None] | None = None
 
     @property
     def synthesises_terminal(self) -> bool:
@@ -336,7 +345,11 @@ class PassthroughFramer:
         return ()
 
     def block(self, block: RawEventBatch) -> tuple[bytes, ...]:
-        return (block.encode(),)
+        encoded = block.encode()
+        if block.contains_terminal and self.on_terminal_unit is not None:
+            # The caller confirms this frontier only after the yielded chunk's ASGI send returns. Marking here says which chunk carries the terminal; it does not claim that the client has it yet.
+            self.on_terminal_unit()
+        return (encoded,)
 
     def terminal(self, terminal: Terminal) -> tuple[bytes, ...]:
         return ()
