@@ -39,6 +39,7 @@
 | [pidfile-port-scoping.md](pidfile-port-scoping.md) | pidfile 已改为 `pidfile_dir` 目录语义并按端口命名（已采纳）；剩一个待裁决点（`GHC_API_PROXY_PORT` 这个拼写像环境变量却不是）与一项切换时的一次性影响 |
 | [instructions-shape-conflict.md](instructions-shape-conflict.md) | **`message-translation.md:34-62` 的 `instructions` 对象数组形态被 GHC 拒绝**——六种数组形态全部 400，只有字符串可用；待用户裁决是否改规格 |
 | [anthropic-thinking-capability.md](anthropic-thinking-capability.md) | **`message-format-reshape.md` 第 65 节缺一条**——`claude-sonnet-5` 拒绝 `thinking.type: enabled`（2026-08-24 线上 400，出站请求体已落盘）；提案含新顶层键 `model_thinking_effort` 与 `thinking.display` 开关，附四个待裁决开口 |
+| [effort-thinking-profiles-config-example.md](effort-thinking-profiles-config-example.md) | **Translated Responses→Anthropic Messages的thinking profile配置示例**——说明resolved-model `fullmatch`、最后命中、同pattern deep merge、manual budget与effort独立，以及新增窄pattern／部分override两种写法；不改direct Anthropic腿 |
 | [upstream-retry-and-continuation-supplements.md](upstream-retry-and-continuation-supplements.md) | 对 `upstream-retry-and-continuation.md` 的补充与提问；该文件由主会话另行维护 |
 | [uncovered-modules.md](uncovered-modules.md) | 其余未被用户文档描述的包，各一行 |
 
