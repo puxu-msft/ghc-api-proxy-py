@@ -7,11 +7,14 @@
 - **总体 verdict**：**规范且活**（原写 `FINALIZED`，2026-08-24 解冻，见上一条）。Carrier 双格式合同及其余行为已裁决，可继续实施；**已裁决不等于本文不可修订**——但反向同样成立：**实现进度不得反向改写本规格**，实现与已裁决行为不符时是把偏离交回用户重裁，不是改本文去迁就代码。规格维持“一 Responses reasoning item → 一 Anthropic thinking block”与普通模式下非空 encrypted-only no-loss。目标在 Anthropic pipeline 的单一生命周期内形成 direct bridge，不能复制 OpenAI route 的第二套 orchestration，也不能采用 raw passthrough、“超限后退化为 live forwarding”或参考实现的有损 non-stream reasoning 聚合行为。
 - **已裁决且不可重开**：semantic block 就是一个 Anthropic content block；block-level buffering 是基础能力；下游不提供 token/event 级 live streaming。上游可以增量读取，但完整 Anthropic content block 是最小可观察提交单元。buffer 与 carrier 是普通内存对象，统一服从全局内存预算、准入与背压，不 spill，也不因容量压力退化为 live forwarding。双 endpoint 模型默认走 Messages，Responses bridge 由明确 route policy／config 启用。reasoning signature 的 producer 固定使用本项目主 v1；consumer 同时接受本项目主 v1 与 `copilot-api-js` 当前 v1 合法主路径。不得加入 HMAC、keyring、domain binding 或泛化安全系统，也不得恢复 Anthropic 原生 server-tool 编排。
 - **2026-08-22 用户重裁，覆盖本文原「首块前零 HTTP success headers」**：HTTP success headers 在第一次得到上游 HTTP 200 的尝试时就转发给下游，不等待首个完整 block；`ping` 因此可以出现在首块之前。权威是用户亲笔的 `docs/.human-controlled/client-side-block-delivery.md`「客户端响应头」一节，理由是让 `sse_ping_interval` 的保活覆盖等待首块的长窗口。**被覆盖的只有 headers 那一半**：`message_start` 与首个完整 block 进入同一 sink batch 的绑定不变，body event 在首块前仍不可见。已按此改写「Downstream Anthropic SSE」第 1／2／3 条、retry 边界一节与不变量一节；当前新链实现的就是这个行为（`handle_bounded` 跑到上游响应头到达即返回，随后返回 `StreamingResponse`）。
-  **尚未跟进、需独立切片**：`acceptance.md` 的 `CAL-04-GRAMMAR-v1`（ping 转移行与冻结 fixtures，并需重新审视 R3-M1／R4-M1／R5-M1 三条已闭评审行）、本文第 579 行那条 M1 评审记录（点时记录，不回填）、以及 `architecture.md` 的 delayed response-start owner 一族（实测该机制及其测试只存在于已不可达的旧链）。
+  **同步状态**：`acceptance.md` 已于 2026-09-03 把 current oracle 升为 `CAL-04-GRAMMAR-v2`，只改写 current ping／headers 转移与 fixtures；R3-M1／R4-M1／R5-M1 仍留在原 point-in-time report，不回填历史。本文评审处置表的 M1 同样保留原裁决并就地标注已被本次 2026-08-22 用户裁决覆盖。`architecture.md` 的 delayed response-start owner 一族仍是非规范旧链描述，不得覆盖本节 current contract。
 - **2026-08-24 修订「Downstream Anthropic SSE」第 7 条：SSE error event 之前必须先咨询合成续写。** 触发是一次生产事故 req=`75ccdf6f`（诊断见 `../upstream/retry-and-continuation/reports/260824-silent-eof-after-thinking-diagnosis.md`）：上游交付一个完整 thinking 块后静默、随后切穿块中干净 EOF，客户端只拿到一句 `API Error`，而它本可以拿到一个可续写的 `tool_use`。
   **本条不是新裁决，是把一条既有的用户裁决补进本文。** 权威是用户亲笔的 `docs/.human-controlled/upstream-retry-and-continuation.md` 第 30 行：「如果已经交付过至少一个完整块，则将报错合成为自制的 `tool_use` / `function_call` 块……返回给客户端」。该文第 5–11 行的「无法继续」清单未列入「上游流无终止事件」，最接近的第 15 行「网络中断」属「一般可以继续」，故本格落在第 30 行的处方之内。实现此前只在**撕裂**路径上执行了它，干净 EOF 路径从不咨询——两条路把客户端留在同一个位置（`src/app/pipeline/retry.py` 该处注释明文如此），出口却不同。
   **范围限定，不要读宽**：本条只约束**本来就要发 SSE error event、且失败属于人写文档「业务可继续」那一类**的结局。上游停在块边界、按 2026-08-22 裁决以合成 stop reason 正常收尾的那一格**不报错**，因此不在第 30 行的触发条件内，行为不变；代理自我保护（`DeliveryError`）、客户端已断开、400／401／`refusal` 与本侧 bug 属该文第 5–11 行的「无法继续」，同样不咨询。**修订初稿把义务写成「凡发 SSE error event 之前」，比实现和人写文档都宽，会要求把明确不可继续的保护性错误也合成为续写；异源评审 2026-08-24 判为 major，已按此收窄。**
 - **2026-08-25 修订「Tools 与 tool choice」：客户端的 tool search 改为翻译，不再剥离。用户裁决，推翻 8-24 那条。** 两条针对的是不同的事——8-24 禁止代理**主动注入**（那部分仍有效，删掉的两个 legacy 开关不恢复），8-25 要求把**客户端已声明的**搜索翻到本腿。推翻旧条款的依据是一次读类型定义 + 看模型产出的实测：`ToolSearchToolParam.execution` 有 `"client"` 一档，语义与 Anthropic 侧的自定义 tool search 对应，完整往返实测跑通（`reports/260825-tool-search-translation-measurements.md`）。**8-24 暂缓映射的理由「Responses 的 tool_search 是 host 执行的、语义不等价」由此被证伪**——那个判断只看了「加上它请求变 200」，没读类型也没看 output items。同轮写下识别只有启发式（无协议判据，两个一线客户端硬编码了不同名字）与「认不出就不提升」的兜底，依据 `reports/260825-tool-search-translation-shapes.md`。
+- **2026-09-03 修订 request-level thinking／effort 双向合同：废除活翻译路径的 budget→effort 推导，以 `ThinkingEffortIntent` 同时承载启用状态与有效档位。** 触发是本轮实现审计确认显式 Anthropic `output_config.effort` 与 Responses `reasoning.effort` 两向都只落入 generic extension loss，而既有实现只从已废弃的 `thinking.budget_tokens` 猜档位；用户随后裁定：`thinking` 只决定是否启用 thinking effort，所有 effort level 只由 `output_config.effort` 决定，省略 `thinking` 视为启用，省略 Anthropic effort 取协议默认 `high`，禁用优先于任何显式档位。用户同时裁定逐消息 effort 折叠为当前生成的有效档位；反向 `none` 映射为 disabled，`minimal` 近似为 `low`；其余同名档按 catalog 对齐。
+  **Ultracode 边界**：调查 Claude Code 2.1.241 后确认 `ultracode` 不是 Anthropic Messages wire 的第六个 effort 值，而是客户端的 `xhigh` effort 加常驻动态 Workflow 编排；用户据此裁定本代理只翻译实际 wire 上的 `xhigh`，literal `ultracode` 作为非法 effort 拒绝，且不在代理侧模拟客户端 Workflow。实现依据见「Reasoning 与 signature 契约」的 request-level 小节；本次修订同步更新字段矩阵、验收行为与 `acceptance.md` 的 REQ-05A／REQ-05B。
+  **2026-09-03 R2 target thinking profile 裁决**：官方 thinking 表是版本化权威快照而非永久常量，Copilot catalog 又没有完整发布 extended／disabled／always-on facts。用户裁定不在代码硬编码 model family 表；`model_translation.to_anthropic_messages.thinking_profiles` 是唯一来源，随包默认配置以 resolved-model 正则转录官方当前表，用户配置可覆盖。未命中 profile、always-on target收到disabled intent、extended-only target没有显式 manual budget、manual budget与请求`max_tokens`不相容时均fail closed；不得从effort档位或catalog budget limits猜出manual budget。
 - **2026-08-24 修订「Tools 与 tool choice」与请求字段矩阵：tool 声明改为白名单重建，`defer_loading` 不进 wire。** 触发是一次线上 400，`req=fcc0bebc`、模型 `gpt-5.6-sol`：`Invalid Value: 'tools.defer_loading'. Deferred tools require tools.tool_search.` 根因不是漏了一个字段的处置，而是 `translation_driver/openai_responses.py` 的 `_function_tool` **按黑名单复制**（只排除 `input_schema`），于是客户端放在 tool 上的任何键都会到达一个从未同意过它的 endpoint。本文原有的矩阵对 `tools[]` 内字段没有任何条目，而本文自己写着「unknown 不自动继承 permissive」——**实现在这里事实上是 permissive 的，与本文的默认原则相反**，这次把缺口补上而不是只补 `defer_loading` 一格。
   实测依据 [reports/260824-responses-leg-tool-field-measurements.md](reports/260824-responses-leg-tool-field-measurements.md)（正控制先跑，逐格一次真实调用）；字段白名单取自本仓 `.venv` 里 openai SDK 3.3.1 的 `FunctionToolParam`，那是这条 wire 的权威而不是我方推断。前身 `copilot-api-js` 与 `CLIProxyAPIPlus` 分别以白名单重建和显式删除处理同一件事，两者都不做 tool_search 映射——**旁证而非判据**。
   **范围限定**：本条只移除字段并记 `DEGRADE`，**不**引入任何 tool_search 能力——**用户 2026-08-24 裁定 tool search 不是本代理提供的能力**，该裁决同时删除了 legacy `AppSettings` 里两个从未接线的 `tool_search` 开关。另外，`tools[].cache_control` 经实测**是被该 endpoint 接受的**（含 `scope`），所以它进白名单外侧的理由是「无等价语义」而不是「会 400」——不要把这两个理由混起来读。
@@ -208,6 +211,11 @@ Protocol leg 必须只在一个 route-policy 接缝按以下顺序决定；后�
 | `tools[].cache_control` | `DEGRADE` | 同上按白名单移除并记录。**注意这一格与 `system`／content block 那格的理由不同**：实测该 endpoint 对 tool 上的 `cache_control`（含 `scope`）返回 200，所以移除它不是兼容性修复，而是「Responses 无等价语义、不把客户端的断点意图伪装成已生效」 |
 | Anthropic 原生 server／typed tool | `REJECT` | 执行本规格 server-tool no-revive，不进入 upstream |
 | `tool_choice` auto／any／none／named、parallel flag | `TRANSFORM` | 映射到 Responses 对应类别；目标缺失或 capability 不满足时拒绝，不产生 dangling choice |
+| request-level `thinking` | `TRANSFORM`＋`DEGRADE` | Anthropic 官方shape为`disabled`、`adaptive`，以及带必需`budget_tokens>=1024`且通常`budget_tokens<max_tokens`的manual `enabled`（interleaved thinking例外）；manual模式在4.6 deprecated、4.7+拒绝、4.5及更早仍可能是唯一模式。Translated path为保留既有兼容面，另接受`auto`、缺budget的`enabled`、正整数低budget及不满足官方budget／max关系的其它正整数budget，把它们明确归类为proxy compatibility extension；direct path不应用该扩展。所有这些输入只决定`ThinkingEffortIntent.enabled`，任何`budget_tokens`都不参与effort level选择，跨到Responses时省略并记录精确路径 |
+| 顶层 `output_config.effort` | `TRANSFORM` | 合法值仅为 `low／medium／high／xhigh／max`；显式值决定 intent 档位，省略时按 Anthropic contract 取 `high`。Thinking disabled 优先：目标支持 `none` 时发 `reasoning.effort=none`；目标不支持或未明确发布 `none` 时在 upstream 前稳定拒绝，不得用最低档重新启用思考。非 disabled 时从 resolved model 公布档位中排除`none`后再对齐并写入`reasoning.effort`；已知集合只剩`none`时稳定拒绝，不把enabled翻成disabled |
+| 逐消息 `output_config.effort` 控制 | `TRANSFORM` | 仅接受 `anthropic-beta: mid-conversation-output-config-2026-07-01` 启用的合法 effort-only system message；按消息顺序求当前生成的最后生效值，覆盖顶层档位并从 Responses prompt 移除控制消息。缺 beta、非空 content 或非法 role／shape均在网络前稳定拒绝；尚无后续 user turn 的合法控制项不影响当前生成，从 Responses prompt 移除并只保留在 original request／History 中，下一轮客户端重放后再按其位置生效 |
+| `output_config` 中 effort 之外的成员 | `DEGRADE` | reader 认领 effort 后保留其余成员供同格式重建；跨格式只按精确子字段记录未携带，不得把已成功转换的 effort 误报为整对象丢失 |
+| literal effort `ultracode` | `REJECT` | `ultracode` 是 Claude Code 客户端会话模式，不是 Anthropic Messages wire 值；客户端实际在 wire 上发送 `xhigh`。代理只转换 `xhigh`，不接受 literal alias，也不模拟客户端 Workflow orchestration |
 | 本项目主 v1 reasoning carrier | `TRANSFORM` | 先按本项目 namespace、version、tag 与最小 payload schema 恢复 visible summary 和可选 `encrypted_content`；普通 echo 路径必须 value-exact 恢复 payload，细则见双格式合同 |
 | `copilot-api-js` upstream v1 payload form | `TRANSFORM` | 在本项目格式之后识别当前 upstream v1 的合法 prefix＋base64url 主路径，恢复 visible summary 与可选 `encrypted_content`；兼容输入不改变本项目 producer 的主输出格式 |
 | 本项目 bare marker／upstream bare prefix／upstream legacy bare sentinel | `TRANSFORM` | 按冻结识别顺序恢复仅含 visible summary、无 `encrypted_content` 的 Responses reasoning item；直接 Messages leg 无条件剥离这些 synthetic blocks，避免把代理 carrier 发给 Claude |
@@ -219,6 +227,18 @@ Protocol leg 必须只在一个 route-policy 接缝按以下顺序决定；后�
 | request `metadata.user_id` 或明确 allowlist 项 | `TRANSFORM` | 映射到 Responses 对应 metadata／user 字段并保留 original metadata |
 | 其他 metadata | `DEGRADE` | 不发 upstream，记录字段路径；不得覆盖 original History metadata |
 | 未识别顶层字段 | `REJECT` | 默认 strict；Pydantic `extra=allow` 不得把它变成 silent drop |
+
+### Responses request → Anthropic request
+
+| Responses 字段／语义 | 状态 | 冻结行为 |
+|---|---|---|
+| `reasoning` 缺席 | `PRESERVE` | 没有显式 request-level thinking／effort intent；Anthropic writer 不替源端猜 Responses 的 model-specific 默认，省略 `thinking` 与 `output_config.effort` |
+| `reasoning.effort=none` | `TRANSFORM` | 形成`ThinkingEffortIntent.enabled=false`；命中target profile且`can_disable=true`时写`thinking={type:"disabled"}`，不附`output_config.effort`；always-on、profile unknown或disabled effort上限不满足时零upstream拒绝 |
+| `reasoning.effort=minimal` | `TRANSFORM`＋`DEGRADE` | 形成enabled intent并把`minimal`近似为Anthropic effort `low`。Thinking shape按target profile的`modes`顺序选择首个可渲染项；bundled extended-only只有`enabled`，必须有显式manual budget且满足当前`max_tokens`，否则拒绝。Effort再按Anthropic五档capability对齐并记录两个档名 |
+| `reasoning.effort=low／medium／high／xhigh／max` | `TRANSFORM` | 形成enabled intent；thinking shape先按target profile顺序选择首个可渲染的adaptive或带显式manual budget的enabled，profile unknown／全profile无可渲染mode时拒绝。目标Anthropic effort候选仅为其公布集合与五档交集：exact同名发送；否则取不强于请求档的最强候选，取不到则取最弱候选，两者均记approximation；catalog缺席／空、交集为空或只有不可排序名字时省略`output_config.effort`并记not-carried，但不撤销已由profile渲染的thinking enable intent |
+| `reasoning` 存在但 effort 缺席／为 `null` | `TRANSFORM` | 形成enabled、档位未指定的intent；thinking shape仍须按target profile渲染，extended-only仍要求显式manual budget；不替源端补effort |
+| `reasoning` 中 effort 之外的成员 | `DEGRADE` | reader 认领 effort 后保留 `summary／context／mode` 及未来成员供同格式重建；跨格式只按精确子字段记录未携带，不得把已成功转换的 effort 误报为整对象丢失 |
+| malformed `reasoning`、非字符串 effort、未知 effort 或 literal `ultracode` | `REJECT` | 在任何 upstream 调用前返回稳定 incompatibility error，并指向 `reasoning` 或 `reasoning.effort`；不得选默认档掩盖客户端错误 |
 
 ### Responses response → Anthropic response
 
@@ -250,7 +270,44 @@ Protocol leg 必须只在一个 route-policy 接缝按以下顺序决定；后�
 
 ## Reasoning 与 signature 契约
 
-- Anthropic `thinking.enabled`／`adaptive` 映射为 Responses `reasoning` 配置时，必须受模型 `reasoning_effort` 能力与 budget limits 约束。不能把 budget heuristic 当作模型明确支持。
+### Request-level `ThinkingEffortIntent`
+
+Request-level thinking／effort 与 response reasoning item 是两类事实：前者决定本次生成是否启用思考及采用哪个 effort level，后者是跨轮 continuation state。它们不得共用 carrier、item identity 或 accumulator。翻译 IR 使用 `ThinkingEffortIntent | None`，其中 `enabled: bool` 只表达启用状态，`effort: str | None` 表达有效档位，`effort_source` 区分 `anthropic-default`、`anthropic-top-level`、`anthropic-per-message` 与 `responses`；`budget_tokens` 不进入该 IR。
+
+外部合同来源为 Anthropic 官方 [Effort](https://platform.claude.com/docs/en/build-with-claude/effort)、[Extended thinking](https://platform.claude.com/docs/en/build-with-claude/extended-thinking) 与 [Thinking troubleshooting](https://platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting) 文档（2026-09-03 读取），以及项目锁定 OpenAI SDK 3.3.1 由 OpenAPI 生成的 `ReasoningEffort`／`Reasoning` 类型；Claude Code ultracode 的实际解析与 request builder 取自本机 2.1.241 extracted source `~/.claude/refs/claude-code-2.1.241/app.pretty.js:41764,98541,99106,428490-429022`。这些来源解释字段事实；本节的跨协议优先级、近似方向、配置来源和拒绝策略由用户在 2026-09-03 本轮裁定。
+
+#### Target Anthropic thinking profile
+
+`model_translation.to_anthropic_messages.thinking_profiles` 是 Responses→Anthropic writer 选择 thinking wire shape 的唯一能力来源。键为对 resolved model id 执行 `fullmatch` 的正则，所有命中中**最后一项生效**：bundled defaults先加载，用户新增pattern随后合并，因而用户覆盖不被默认宽pattern抢走；用户以同一pattern重写时直接替换该profile。未命中不按model name、vendor、budget limits或`adaptive_thinking`邻近字段猜测，只有request-level intent确实需要render thinking时才稳定拒绝。
+
+每个profile包含：有序`modes`，成员只允许`adaptive`或`enabled`；`can_disable: bool`；可选`disabled_max_effort`；可选`manual_budget_tokens`。Writer对enabled intent按`modes`顺序逐项尝试并选第一个可渲染者：`adaptive`直接写`thinking.type=adaptive`；`enabled`只有在profile显式给出manual budget、当前request有`max_tokens`且`1024 <= manual_budget_tokens < max_tokens`时可渲染。某一mode缺少本次请求所需事实时继续检查下一项，只有整个`modes`列表都不可渲染才拒绝；因此`[enabled, adaptive]`在budget合法时使用manual shape，在budget缺失或与本次`max_tokens`不相容时回退adaptive，而`[enabled]`同样条件下拒绝。Bridge不注入interleaved-thinking beta，因此不使用“interleaved时budget可超过max_tokens”的例外。Manual budget只负责构造extended-only target所需合法shape，独立于effort档位且不得从effort或catalog min／max推导。Disabled intent要求`can_disable=true`，并让当前有效Anthropic effort不高于`disabled_max_effort`；Responses `none`不产生Anthropic `output_config.effort`，故该检查按Anthropic缺省`high`执行。不满足即拒绝，不用省略thinking或最低档伪装disabled。
+
+随包默认配置必须以正则profile逐行转录下表；这是项目default的规范表，`bundled-config.yaml`是它的实现转录。官方表变化时同一变更修订本表、bundled config及对应测试，不能只改其中一份：
+
+| Bundled resolved-model regex（`fullmatch`） | 官方family（2026-09-03快照） | `modes`顺序 | `can_disable` | `disabled_max_effort` | bundled `manual_budget_tokens` |
+|---|---|---|---:|---|---|
+| `claude-(?:fable|mythos)-5(?:[.-]1)?(?:-[0-9]{8})?` | Claude Fable 5／5.1、Claude Mythos 5／5.1 | `adaptive` | 否 | — | 无 |
+| `claude-mythos-preview(?:-[0-9]{8})?` | Claude Mythos Preview | `adaptive, enabled` | 否 | — | 无 |
+| `claude-opus-5(?:-[0-9]{8})?` | Claude Opus 5 | `adaptive` | 是 | `high` | 无 |
+| `claude-(?:opus-4[.-](?:7|8)|sonnet-5)(?:-[0-9]{8})?` | Claude Opus 4.7／4.8、Claude Sonnet 5 | `adaptive` | 是 | — | 无 |
+| `claude-(?:opus|sonnet)-4[.-]6(?:-[0-9]{8})?` | Claude Opus 4.6、Claude Sonnet 4.6 | `adaptive, enabled` | 是 | — | 无 |
+| `claude-(?:(?:opus|sonnet|haiku)-4[.-]5|opus-4[.-]1|opus-4|sonnet-4)(?:-[0-9]{8})?` | Claude Opus／Sonnet／Haiku 4.5及更早支持thinking的Claude 4 models | `enabled` | 是 | — | 无 |
+
+`disabled_max_effort`缺席表示`can_disable=true`没有额外effort上限；存在时才执行上限检查。`manual_budget_tokens`默认全为空是有意的：官方只给合法范围，不给能代表Responses effort的唯一budget。用户若要让extended-only target承载enabled intent，必须用resolved-model override显式选择该budget；配置validation在启动时拒绝未知mode、空modes、非布尔`can_disable`、非法effort上限，以及非整数／布尔／小于1024的manual budget，请求时再检查budget与该request的`max_tokens`关系。Profile来源、命中pattern与拒绝原因进入conversion facts／History。
+
+- **Anthropic thinking 状态与官方边界**：显式 `thinking.type=disabled` 形成 `enabled=false`；`thinking` 缺席与`adaptive`形成`enabled=true`。官方manual `enabled`必须带`budget_tokens>=1024`且通常小于`max_tokens`，只有interleaved thinking允许超过该request的`max_tokens`；它在Claude 4.6 deprecated但仍成功、4.7及以后拒绝、支持thinking的4.5及更早模型仍可能只接受它；其budget仍只控制manual thinking，不决定effort。
+- **Translated-path compatibility extension**：为保留当前已实现接受面，只有发生跨格式翻译时另接受`thinking.type=auto`、缺budget的`enabled`，`0<budget_tokens<1024`的enabled，以及未满足官方budget／max关系但保持正整数的enabled；三者都归一为`enabled=true`并记录compatibility／未携带事实，不能冒充Anthropic官方shape。任意合法或兼容`budget_tokens`均不进入Responses wire、不决定effort，并以精确路径记录未携带。Direct Anthropic leg不运行该扩展，继续原样交给目标model按其capability判定；未知type、非对象thinking、非整数／布尔或非正budget稳定拒绝。
+- **Anthropic effort 来源与优先级**：合法顶层 `output_config.effort` 是 `low／medium／high／xhigh／max`，省略时有效值为 Anthropic 默认 `high`。带 `mid-conversation-output-config-2026-07-01` beta 的 effort-only system message按消息顺序生效；对当前生成实际生效的最后一条覆盖顶层值，控制消息本身不进入 Responses prompt。Translator 必须读取路径转发策略清空前的源协议 header，仅用于验证 beta；该 header 仍不得转发给 Responses upstream。
+- **逐消息控制的合法形状与能力边界**：官方控制项必须是`role=system`、空content、且`output_config`只含合法effort，并带`mid-conversation-output-config-2026-07-01`；官方当前只为Fable／Mythos 5.1与Opus 5列明支持。Direct Anthropic leg原样转发并由目标model执行该capability gate；translated path按用户批准的bridge能力折叠控制，只要求Responses target明确发布可对齐effort，不把这一扩展表述为source Claude model官方支持。缺beta、非空content、错误role、未知sibling或非法effort均在upstream调用前拒绝。按消息顺序只把已位于某个user turn之前的最后一条控制应用到当前生成；末尾尚无后续user turn的合法控制项本轮不生效，从Responses prompt移除并只保留在original request／History，待下一轮客户端把它重放到后续user之前时再生效。普通system message不因本条被误认成effort控制。
+- **Anthropic → Responses**：disabled 优先于 intent 中的显式或默认档位。目标发布 `none` 时发 `reasoning.effort=none`；未发布 `none` 或 capability unknown 时零 upstream稳定拒绝，不得以最低档把disabled改成enabled。Enabled intent先从目标`reasoning_effort`集合排除`none`，再把有效档位对齐：精确支持则value-exact发送，不支持则取不强于请求档位的最强已发布档；没有向下档时取最弱已发布档并记录approximation；已知集合排除`none`后为空时稳定拒绝，不能把enabled翻成disabled；catalog缺席／原集合为空时不发并记录not-carried；只剩无法排序且不与请求值精确相等的名字时不发并记录not-carried。任何发送值都必须来自该resolved model公布的集合且不得为`none`。
+- **Responses → Anthropic**：`none`形成disabled；`minimal`形成enabled并先近似为`low`；`low／medium／high／xhigh／max`形成enabled与同名desired档；reasoning对象存在但effort缺席或为`null`时形成enabled、档位未指定的intent。Thinking wire先由`model_translation.to_anthropic_messages.thinking_profiles`的最后一个resolved-model fullmatch决定：disabled要求`can_disable`与effort上限成立；enabled按profile有序modes逐项选择首个可渲染shape；manual enabled缺budget或与本次`max_tokens`不相容时继续扫描后续adaptive，所有mode都不可渲染才拒绝。Profile unknown、always-on disabled或全profile不可渲染均稳定拒绝。Thinking shape确定后，有desired effort时再从目标catalog发布集合与Anthropic五档交集中选择：exact同名；否则取不强于desired的最强候选，取不到则取最弱候选，两者记approximation；catalog缺席／空、交集为空或只有不可排序名字时省略`output_config.effort`并记not-carried，但保留thinking shape。`minimal`自身的first-step近似即使随后exact命中`low`也必须留痕。Malformed／未知effort稳定拒绝。
+- **Ultracode**：Claude Code 的 `ultracode` 是客户端会话模式，实际 API effort 固定解析为 `xhigh`，另加不进入 Messages body 的 Workflow orchestration。Bridge 按普通 `xhigh` 翻译；literal `ultracode` 不是两侧 wire 的合法 effort，必须拒绝；代理不得通过扫描 prompt、注入 tool 或启动第二个 orchestrator 来模拟客户端 Workflow。
+- **兄弟字段与同格式重建**：reader 认领 `output_config.effort` 或 `reasoning.effort` 后，原对象其余成员不得随之消失；同格式 writer 重建完整对象，跨格式只对没有对应语义的精确子字段记 loss。已转换 effort 不得再被 generic extension loss 计为丢失。
+- **发送与计数同形**：真实发送和 `/v1/messages/count_tokens` 必须使用同一源 header、同一 intent 归一与同一 catalog 对齐。Effort 控制未来生成，不增加 input token estimate；count 仍需产生与真实发送相同的 translated body 与 conversion losses。
+- **直接腿不受改写**：无需翻译的 Anthropic→Anthropic 与 Responses→Responses 路径继续原样转发；本节不得成为直连请求的第二套 effort policy。
+
+### Response-level reasoning item 与 signature
+
 - 从 Responses 返回的每个 reasoning item 一对一映射为 Anthropic `thinking` block；非空 `encrypted_content` 必须通过下方本项目主 carrier 往返。item identity、resolved model 与 upstream identity 只能作为内部 typed facts 保存，不得塞进 carrier。
 - carrier 是跨轮 continuation payload，不是认证信封。新 producer 固定输出本项目主 v1；consumer 同时支持本项目主 v1 与 `copilot-api-js` 当前 upstream v1 合法主路径。客户端原样 echo producer 给出的 signature 后，普通模式 consumer 必须 value-exact 恢复同一非空 `encrypted_content`；不要求不同 producer 产生同一 carrier bytes。
 - foreign／unsigned signature 不恢复为 Responses reasoning state。它们按既有 translator 的 degradation／drop contract 处理并记录分类；不得把 foreign opaque signature 当作 `encrypted_content`。直接 Messages leg 对真实 Anthropic signature 继续按原合同处理。
@@ -574,6 +631,8 @@ semantic block 固定等于一个 Anthropic content block，而不是 Responses 
 - Responses-only模型的Anthropic请求只调用Responses transport；direct Messages-capable Anthropic模型按已确认route policy选择Messages；无兼容endpoint时零网络调用并返回Anthropic错误。
 - 每个attempt捕获的Responses payload反映该attempt的Anthropic `PRE_SEND`与retry修改；不存在loop外陈旧转换。
 - text、image、tool use／result、reasoning／signature与交错顺序在non-stream和stream归一化结果中一致。
+- Anthropic→Responses 的 request-level effort 由统一 `ThinkingEffortIntent` 转换：省略 thinking／effort得到enabled＋`high`，显式 `low／medium／high／xhigh／max` value-exact或按目标catalog向下对齐，disabled优先，deprecated `budget_tokens`改变数值不改变effort且产生未携带记录。带合法beta的逐消息effort覆盖顶层并且控制消息不进入prompt；缺beta或非法控制项零upstream并返回精确字段错误。Literal `ultracode`拒绝，实际`xhigh`正常转换。
+- Responses→Anthropic 的 request-level effort 按冻结表转换：`none`形成disabled intent，`minimal`先近似为`low`，其余五档同名；最终thinking shape只由`model_translation.to_anthropic_messages.thinking_profiles`最后命中的resolved-model正则决定。Bundled默认配置逐行转录官方表，用户配置可覆盖；always-on disabled、extended-only缺manual budget、profile unknown与budget／`max_tokens`不相容均在调用前拒绝，malformed／unknown effort同样拒绝。被认领对象的兄弟字段同格式可重建，跨格式只记录没有对应语义的子字段；直连腿仍原样转发。
 - 本项目主 v1 producer→client echo→consumer 对非空 `encrypted_content` value-exact 往返，version／tag／最小字段 gate 唯一；consumer 同时接受 `copilot-api-js` upstream v1 合法向量、bare prefix 与 legacy bare sentinel。识别顺序稳定，项目 unknown version、foreign 与代表性 malformed 不被误恢复且不泄漏裸异常；不要求所有 malformed 边界逐字节等同 Node。普通模式下 encrypted-only 与 multiple reasoning items 不丢失、不错配；显式 strip 时每 item 仍保留 block cardinality并记录有意 payload removal。
 - HTTP SSE与upstream WS的同一Responses lifecycle序列产生相同Anthropicblocks、usage、stop reason与error。
 - 任意上游chunk／frame切分下，首block完成前下游观察到零`message_start`和零body events（`ping` 除外，见「Downstream Anthropic SSE」第 3 条）；任一block完成前观察到零个该block events，完成后只看到一个合法、连续、闭合的block envelope。HTTP success headers 不在此列——按 2026-08-22 裁决它在第一次上游 200 时就已提交。
@@ -586,7 +645,7 @@ semantic block 固定等于一个 Anthropic content block，而不是 Responses 
 
 ## 已冻结决策与残余分叉
 
-以下架构轴已经冻结，不得在实施计划中重新开放：semantic block等于 Anthropic content block；首block前零headers／body event；buffer 与 carrier 作为普通内存对象统一服从全局 budget 和背压；双endpoint默认Messages且Responses须显式启用；unknown capability fail closed；选择的endpoint／transport不可用时默认显式失败；reasoning使用“项目主 v1 producer＋upstream v1 compatibility consumer”双格式合同；server-tool no-revive。
+以下架构轴已经冻结，不得在实施计划中重新开放：semantic block等于 Anthropic content block；第一次upstream 200即提交HTTP success headers，首block前只允许envelope层`ping` body event，`message_start`仍与首个完整block同batch；buffer 与 carrier 作为普通内存对象统一服从全局 budget 和背压；双endpoint默认Messages且Responses须显式启用；unknown capability fail closed；选择的endpoint／transport不可用时默认显式失败；request-level thinking／effort 使用统一 `ThinkingEffortIntent`，thinking只决定启用状态、档位只取自 effort且Anthropic缺省为`high`，逐消息控制折叠为当前有效档，反向`none→disabled`、`minimal→low`且thinking shape只取最后命中的配置profile，bundled默认以正则转录官方表、用户配置覆盖、unknown／不可渲染profile fail closed，ultracode只按实际wire的`xhigh`处理；response reasoning使用“项目主 v1 producer＋upstream v1 compatibility consumer”双格式合同；server-tool no-revive。
 
 残余低概率产品分叉仅限“双向字段处置矩阵”末尾列出的四项。它们当前都有完整、可验收的基础行为`REJECT`／仅服务端config，因此不阻断实现，也不得被解释为授权 permissive fallback。Post-commit continuation保留为正式扩展点，但在独立resume contract、ledger suppression和PoC获批前，基础行为固定为partial failure，不能冒充transparent retry。
 
@@ -628,7 +687,7 @@ semantic block 固定等于一个 Anthropic content block，而不是 Responses 
 
 | ID | 原发现 | 处置 | 级别 | 规格落点与理由 |
 |---|---|---|---|---|
-| M1 | B2允许首block前暴露`message_start`并仍称可透明retry | **采纳并关闭** | C | “Downstream Anthropic SSE”冻结首block前零HTTP success headers、零`message_start`、零body event；首批将`message_start`与完整block同batch提交，旧B2已删除 |
+| M1 | B2允许首block前暴露`message_start`并仍称可透明retry | **历史处置已被2026-08-22用户裁决部分覆盖；current见“Downstream Anthropic SSE”** | C | 原处置冻结首block前零HTTP success headers／零body；2026-08-22裁决改为第一次upstream 200即提交headers并允许首block前`ping`。未被覆盖的一半仍有效：首批将`message_start`与完整block同batch提交，首block前不得出现其它body event |
 | M2 | 双endpoint／vendor route precedence未冻结 | **采纳并关闭** | C | “冻结的route precedence”与真值表规定显式override优先、双支持默认Messages、Responses-only走Responses、unknown fail closed、不可用显式失败；transport fallback只有明确策略才存在 |
 | M3 | 缺preserve／transform／reject／degrade字段矩阵 | **采纳并关闭** | C | 新增双向矩阵、状态定义与四项低概率扩展；基础行为均已冻结，unknown不再留给实现者silent drop或任选strict／permissive |
 | M4 | server-tool措辞可能恢复既有不支持能力 | **采纳并关闭** | C | Request tools、response matrix、block完成条件与排除方案共同冻结no-revive；任何白名单必须另行取得用户裁决 |
