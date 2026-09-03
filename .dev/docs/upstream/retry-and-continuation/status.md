@@ -1,6 +1,6 @@
 # HTTP 499 retry 实现状态
 
-- status: implemented-spec-draft-awaiting-user-review-dotdev-unpublished
+- status: implemented-spec-draft-awaiting-user-review-dotdev-push-needs-auth
 - updated_at: 2026-09-04
 - implementation_commit: 2026-09-04 `fix: retry upstream HTTP 499 responses`
 - product_requirement_authority: `docs/.human-controlled/upstream-retry-and-continuation.md`
@@ -37,19 +37,19 @@
 
 用户已经针对本次变更明确授权 agent 把已评审候选转录到 `docs/.human-controlled/upstream-retry-and-continuation.md`，同时要求“不提交该文件，我再审核”。目标 Spec 目前只存在于 main 工作树，未 staged、未 committed；本轮不得把它纳入任何提交。候选材料保留在 `.dev/human-controlled-docs-candidates/260904-http-499-retry.md`，记录转录来源、派生决策与未采用方案；用户审核接受后，目标 Spec 条款成为现行 requirement authority，代码常量与专项测试作为其转录。
 
-用户已经选择专用 `origin/dotdev` 分支持久化 `.dev`。远端最初不存在该 ref；本轮在独立临时 worktree 中创建了尚无 commit 的 orphan local `dotdev`，只复制本任务拥有的路径并逐文件校验哈希。首次 commit/push 尚未执行，storage finding 的下一执行者是 coordinator，而不是再次询问用户。
+用户已经选择专用 `origin/dotdev` 分支持久化 `.dev`。远端最初不存在该 ref；本轮在独立临时 worktree 中创建 orphan local `dotdev`，只复制本任务拥有的 11 个路径并逐文件校验哈希，随后以 2026-09-04 `docs: establish dotdev development records` 创建 root commit。首次 push 未发布任何 ref：第一次连接 GitHub 443 超时，第二次因后台会话无法读取 GitHub HTTPS 用户名而失败。storage finding 当前需要用户在带凭据的前台 shell 中执行精确 `dotdev:dotdev` push。
 
 功能实现和测试已经闭合。任务 closeout 仍有两项执行状态：
 
 1. Spec 已转录且保持未提交，等待用户审核。
-2. dotdev 已完成本地 orphan 布局和预发布评审，integration checklist、review 与限定复评报告均已补齐；11 个本任务文件等待精确提交并首次 push，push 成功后重新读取 `origin/dotdev` 作为持久化证据。
+2. dotdev 的 11 文件 root commit 已创建；首次 push 因后台会话无 GitHub HTTPS 凭据而失败。用户需运行 `git -C /home/xp/src/ghc-api-proxy-py push --set-upstream origin dotdev:dotdev`，随后重新读取 `origin/dotdev` 验证远端 OID并回写 storage finding。
 
 在用户审核 Spec 之前，本状态不发出“完整完成”信号。
 
 ## 本轮边界
 
 - 未启动、停止、重启或接管现有 4141 服务，也未执行生产 cutover。
-- 未 push、未创建 PR。
+- 两次只针对 `dotdev:dotdev` 的 push 均在发布前失败，`origin/dotdev` 尚未创建；未 push `main` 或其它 ref，未创建 PR。
 - 未修改或清理共享树中其他会话的 WIP、worktree、ref、harness output 或用户 rejected capture。
 - `$CLAUDE_JOB_DIR/tmp` 在收尾枚举时为空；harness task 目录中的四个输出文件由 harness 管理并原样保留，本轮没有执行删除。
 - 本次未使用 Claude Plan Mode，没有计划临时文件需要迁移。

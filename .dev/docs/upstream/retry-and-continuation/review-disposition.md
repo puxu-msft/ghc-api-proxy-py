@@ -171,11 +171,12 @@
 待决事项：
 
 - statement_kind: decision
-- decision_status: user-selected-execution-in-progress
+- decision_status: user-selected-blocked-on-credentialed-push
 - decision_origin: user-selected-from-proposal
 - ruling: 用户选择“专用的 origin/dotdev 分支”。该裁决授权创建并首次 push 专用 orphan `dotdev`，不授权 push `main`、目标 Spec 或其它 ref。
-- next_actor: coordinator
-- response_required: false
+- execution: local orphan root commit `docs: establish dotdev development records` 已创建；第一次 push 连接 GitHub 443 超时，第二次 push 因后台会话无法读取 GitHub HTTPS 用户名而失败，均未发布 remote ref。
+- next_actor: user-credentialed-shell
+- response_required: true
 - pending_annotation_ids: http499-closeout-review-general-sonnet-260904-02
 
 ### http499-closeout-review-general-sonnet-260904-03
@@ -285,8 +286,8 @@
 
 ## 当前共识状态
 
-- overall: executing-user-rulings
-- consensus: 首轮 4 条 finding、限定复评 1 条 minor、closeout review 2 条 minor、integration review 2 条 finding 及 integration rereview 1 条 minor 均 fixed；closeout 的 2 条 major 已由用户选择执行路径，Spec 等待用户审核，storage 等待 coordinator 完成首次 push。
+- overall: blocked-on-user-actions
+- consensus: 首轮 4 条 finding、限定复评 1 条 minor、closeout review 2 条 minor、integration review 2 条 finding 及 integration rereview 1 条 minor 均 fixed；closeout 的 2 条 major 已由用户选择执行路径，Spec 等待用户审核，storage 的 local root commit 已完成但首次 push 等待用户带凭据执行。
 - open: 2
 - disputed: 0
 - fixed: 10
