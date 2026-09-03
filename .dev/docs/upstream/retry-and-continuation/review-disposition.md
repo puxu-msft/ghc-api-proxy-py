@@ -11,6 +11,8 @@
 - source_integration_review_sha256: `268f9f977f46ffdf834ef844e4d3c5fe9d09757e1b7e29d030120f3e5d122259`
 - source_integration_rereview: `reports/260904-http-499-user-ruling-integration-rereview-general-opus.md`
 - source_integration_rereview_sha256: `2d412ef76d1ea99566799f2046404288b461c018fa7df9fb4d72b5897c39b25f`
+- source_detail_placement_review: `reports/260904-http-499-detail-placement-review-general-sonnet.md`
+- source_detail_placement_review_sha256: `1831b64f99bfd2af730ed0f3d1f10bc96ee1d2981f313725cde4d9aedd677b71`
 - received_at: 2026-09-04
 - counts_declared: blocker=0 major=3 minor=1 nit=0
 - counts_verified: yes
@@ -139,18 +141,20 @@
 - judgment_status: concurred
 - severity: major
 - disposition_level: A
-- fix: open
-- evidence: 当前用户控制 Spec 尚未写入 HTTP 499，而 2026-09-04 `fix: retry upstream HTTP 499 responses` 已改变 observable behavior；项目 workflow 明令完整 Spec 先于实现。
+- fix: adopted
+- outcome: fixed
+- evidence: 当前用户控制 Spec 已按用户最终编辑写入 `499 Client Closed Request`，并由用户以 2026-09-04 `update docs to make HTTP 499 retryable` 提交；用户接受需求修订，并明确详细解释本身正确但不属于该文档。
+- action: 保留目标 Spec 的精简 requirement；把已验证的详细机制、观测边界与未采用方案迁入 `.dev/docs/upstream/retry-and-continuation/http-499-retry.md`，不再要求目标 Spec 完整转录实现说明。
 
-待决事项：
+裁决：
 
 - statement_kind: decision
-- decision_status: user-selected-pending-review
-- decision_origin: user-selected-from-proposal
-- ruling: 用户要求“你直接并入但不提交该文件，我再审核”。候选已转录到目标 Spec 工作树，目标文件保持 unstaged、uncommitted；这不是用户对全文的最终审核通过。
-- next_actor: user-reviewer
-- response_required: true
-- pending_annotation_ids: http499-closeout-review-general-sonnet-260904-01
+- decision_status: user-reviewed-approved-with-placement-correction
+- decision_origin: user-initiated
+- ruling: 用户表示“接受修订，但你加入了详细解释，而这些解释不应该放入该文档（但解释本身是对的）”。精简 requirement 成为权威；详细解释归中间层开发文档。
+- next_actor: none
+- response_required: false
+- pending_annotation_ids: none
 
 ### http499-closeout-review-general-sonnet-260904-02
 
@@ -195,7 +199,7 @@
 - fix: adopted
 - outcome: fixed
 - evidence: 候选稿曾同时写“待独立复评”与“可供用户决定”，而限定复评已经完成。
-- action: 候选稿状态已改为“限定复评已通过；待用户决定是否并入”。
+- action: 候选稿先改为限定复评已通过；用户最终审核后又改写成 `adopted-in-concise-form` 处置记录，并把详细解释迁入中间层 implementation notes。
 - next_actor: none
 - response_required: false
 - pending_annotation_ids: none
@@ -286,11 +290,11 @@
 
 ## 当前共识状态
 
-- overall: blocked-on-user-actions
-- consensus: 首轮 4 条 finding、限定复评 1 条 minor、closeout review 2 条 minor、integration review 2 条 finding 及 integration rereview 1 条 minor 均 fixed；closeout 的 2 条 major 已由用户选择执行路径，Spec 等待用户审核，storage 的 local root commit 已完成但首次 push 等待用户带凭据执行。
-- open: 2
+- overall: blocked-on-dotdev-push
+- consensus: 首轮 4 条 finding、限定复评 1 条 minor、closeout review 的 Spec major 与 2 条 minor、integration review 2 条 finding 及 integration rereview 1 条 minor 均 fixed；用户接受精简的 499 requirement 并把正确的详细解释留在中间层文档。仅 storage major 保持 open，等待带凭据首次 push。
+- open: 1
 - disputed: 0
-- fixed: 10
+- fixed: 11
 - rejected: 0
 - deferred: 0
-- pending_annotation_ids: http499-closeout-review-general-sonnet-260904-01, http499-closeout-review-general-sonnet-260904-02
+- pending_annotation_ids: http499-closeout-review-general-sonnet-260904-02

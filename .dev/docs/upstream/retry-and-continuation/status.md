@@ -1,10 +1,12 @@
 # HTTP 499 retry 实现状态
 
-- status: implemented-spec-draft-awaiting-user-review-dotdev-push-needs-auth
+- status: implemented-spec-approved-dotdev-push-needs-auth
 - updated_at: 2026-09-04
 - implementation_commit: 2026-09-04 `fix: retry upstream HTTP 499 responses`
+- requirement_commit: 2026-09-04 `update docs to make HTTP 499 retryable`
 - product_requirement_authority: `docs/.human-controlled/upstream-retry-and-continuation.md`
-- pending_requirement_candidate: `../../../human-controlled-docs-candidates/260904-http-499-retry.md`
+- implementation_notes: `http-499-retry.md`
+- candidate_disposition: `../../../human-controlled-docs-candidates/260904-http-499-retry.md`
 
 ## 当前实现
 
@@ -31,25 +33,22 @@
 
 最终 closeout review 见 `reports/260904-http-499-closeout-review-general-sonnet.md`：生产代码与专项测试没有功能缺陷，但发现 2 条 major——现行用户控制 Spec 尚未并入 499 条款，以及 `.dev` 缺少项目约定的 Git 持久载体；另 2 条 minor 已修正。用户随后给出两项裁决：授权把候选转录到目标 Spec 但保持未提交以供审核，并选择专用 `origin/dotdev` 分支持久化开发文档。用户裁决整合评审见 `reports/260904-http-499-user-ruling-integration-review-general-opus.md`；它要求 living docs 记录真实执行阶段，并在首次 push 前把该轮 checklist/report 一并纳入 dotdev。
 
-最终处置与未采用路线见 `review-disposition.md`。Spec finding 仍等待用户审核；storage finding 已由用户裁决并正在由 coordinator 执行，只有远端 ref 建立且精确文件集可恢复后才转为 fixed。
+用户最终接受精简后的 `499 Client Closed Request` requirement，并明确把正确的详细解释留在需求文档之外；这些解释现由 `http-499-retry.md` 承载。最终处置与未采用路线见 `review-disposition.md`。Spec review finding 已关闭；storage finding 只有在远端 ref 建立且精确文件集可恢复后才转为 fixed。
 
 ## 文档权威与剩余事项
 
-用户已经针对本次变更明确授权 agent 把已评审候选转录到 `docs/.human-controlled/upstream-retry-and-continuation.md`，同时要求“不提交该文件，我再审核”。目标 Spec 目前只存在于 main 工作树，未 staged、未 committed；本轮不得把它纳入任何提交。候选材料保留在 `.dev/human-controlled-docs-candidates/260904-http-499-retry.md`，记录转录来源、派生决策与未采用方案；用户审核接受后，目标 Spec 条款成为现行 requirement authority，代码常量与专项测试作为其转录。
+用户已经审核并接受 `docs/.human-controlled/upstream-retry-and-continuation.md` 中精简的 `499 Client Closed Request` 修订，并以 2026-09-04 `update docs to make HTTP 499 retryable` 提交。用户删除的详细机制解释本身仍被确认正确，但不属于该需求文档；它们已经迁入 `http-499-retry.md`。候选处置记录保留在 `.dev/human-controlled-docs-candidates/260904-http-499-retry.md`，说明哪些内容进入需求层、哪些内容转入中间层。
 
-用户已经选择专用 `origin/dotdev` 分支持久化 `.dev`。远端最初不存在该 ref；本轮在独立临时 worktree 中创建 orphan local `dotdev`，只复制本任务拥有的 11 个路径并逐文件校验哈希，随后以 2026-09-04 `docs: establish dotdev development records` 创建 root commit。首次 push 未发布任何 ref：第一次连接 GitHub 443 超时，第二次因后台会话无法读取 GitHub HTTPS 用户名而失败。storage finding 当前需要用户在带凭据的前台 shell 中执行精确 `dotdev:dotdev` push。
+用户已经选择专用 `origin/dotdev` 分支持久化 `.dev`。远端最初不存在该 ref；本轮在独立临时 worktree 中创建 orphan local `dotdev`，只复制本任务拥有的路径并逐文件校验哈希，随后创建本地提交。首次 push 未发布任何 ref：第一次连接 GitHub 443 超时，第二次因后台会话无法读取 GitHub HTTPS 用户名而失败。storage finding 当前需要用户在带凭据的前台 shell 中执行精确 `dotdev:dotdev` push。
 
-功能实现和测试已经闭合。任务 closeout 仍有两项执行状态：
+功能实现、测试与 Spec 用户审核已经闭合。任务 closeout 只剩 dotdev 发布：用户需运行 `git -C /home/xp/src/ghc-api-proxy-py push --set-upstream origin dotdev:dotdev`，随后重新读取 `origin/dotdev` 验证远端 OID并回写 storage finding。
 
-1. Spec 已转录且保持未提交，等待用户审核。
-2. dotdev 的 11 文件 root commit 已创建；首次 push 因后台会话无 GitHub HTTPS 凭据而失败。用户需运行 `git -C /home/xp/src/ghc-api-proxy-py push --set-upstream origin dotdev:dotdev`，随后重新读取 `origin/dotdev` 验证远端 OID并回写 storage finding。
-
-在用户审核 Spec 之前，本状态不发出“完整完成”信号。
+在 dotdev 持久化完成之前，本状态不发出“完整完成”信号。
 
 ## 本轮边界
 
 - 未启动、停止、重启或接管现有 4141 服务，也未执行生产 cutover。
 - 两次只针对 `dotdev:dotdev` 的 push 均在发布前失败，`origin/dotdev` 尚未创建；未 push `main` 或其它 ref，未创建 PR。
 - 未修改或清理共享树中其他会话的 WIP、worktree、ref、harness output 或用户 rejected capture。
-- `$CLAUDE_JOB_DIR/tmp` 在收尾枚举时为空；harness task 目录中的四个输出文件由 harness 管理并原样保留，本轮没有执行删除。
+- `$CLAUDE_JOB_DIR/tmp` 当前包含 clean local `dotdev` worktree，因远端 push 尚未完成而有意保留；harness task outputs 由 harness 管理并原样保留，本轮没有执行删除。
 - 本次未使用 Claude Plan Mode，没有计划临时文件需要迁移。
