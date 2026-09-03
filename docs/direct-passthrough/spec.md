@@ -1,7 +1,7 @@
 # 直连路径：原生透传产品规格
 
 日期：2026-08-30
-状态：**DRAFT v19 — 待复评**。§3.1 的三处前置缺陷全部已合入 `main`（P1／P2 在 `7e96adc`，P3 在 `109dc44`），骨架亦已合入（`01c33f1`）。**Responses 直连腿已接线并合入 `main`**（`1fb37cd`，源提交存于 `archive/260901-passthrough-wiring`），issue #2／#3 关闭，**issue #4 的根因随同一次接线消除**（§6.2、§6.4；已污染的客户端历史由 §6.5 的 opt-in 修补处置，用户 2026-09-01 裁决）；**Anthropic 直连腿的词汇已实现、未接线**（§2.8）。**§11 有一项待用户裁决**（响应头黑名单的定义域）；已污染的客户端历史那一项**用户已于 2026-09-01 裁决**，条款是 §6.5。
+状态：**DRAFT v20 — 待复评**。§3.1 的三处前置缺陷全部已合入 `main`（P1／P2 在 `7e96adc`，P3 在 `109dc44`），骨架亦已合入（`01c33f1`）。**Responses 直连腿已接线并合入 `main`**（`1fb37cd`，源提交存于 `archive/260901-passthrough-wiring`），issue #2／#3 关闭，**issue #4 的根因随同一次接线消除**（§6.2、§6.4；已污染的客户端历史由 §6.5 的 opt-in 修补处置，用户 2026-09-01 裁决）；**§10 新增的 Responses 流式直连 terminal status 与 typed client-action facts 分槽合同待本轮实现**；**Anthropic 直连腿的词汇已实现、未接线**（§2.8）。**§11 有一项待用户裁决**（响应头黑名单的定义域）；已污染的客户端历史那一项**用户已于 2026-09-01 裁决**，条款是 §6.5。
 定义域：**任何 `route.translation_required is False` 的路由**，不限方言。v10 之前本规格只覆盖 `openai-responses` 两端；用户 2026-08-31 裁决「根因修复所有直连路径」，定义域随之放宽（§2.1）。
 
 > **目录随之从 `direct-responses-passthrough` 改名为 `direct-passthrough`。** v10 第一稿保留了旧名，理由是「改名会让报告里的引文指向不存在的路径」——那条理由用错了地方：路径重写会伪造的是**报告里的原句**，而同一条规则的另一半正是「文件搬了就把活文档的链接指过去」。目录名是活的，一个窄于内容的名字本身就是缺陷。已重指的是活文档与源码注释；**12 份评审报告内文里的旧绝对路径原样保留**，它们记录的是当时的位置，重写才是伪造。
@@ -514,21 +514,21 @@ envelope 事件（`created`／`in_progress`／`completed`／`incomplete`／`fail
 
 > **方言专有**（§2.5）。判据本身——「该 item 是否要求客户端提交 tool output 或 approval，模型回合才能继续」——与方言无关；下面枚举的类型与字段只属于 Responses。`anthropic-messages` 的同一判据是 block `type == "tool_use"`，它没有 `execution`／`environment` 这类条件字段，所以那份词汇是一行而不是一节。
 
-**判据是 `requires_client_action(item)`：该 output item 是否要求客户端提交与之对应的 tool output 或 approval，模型回合才能继续。**
+**事实判据是 `client_action_requirement(item)`：该 output item 是否要求客户端提交与之对应的 tool output 或 approval，模型回合才能继续。它返回 `required`、`not_required`、`unknown` 三态。** `requires_client_action` 是 buffering policy 使用的布尔投影：仅 `not_required` 投影为 `false`，`required` 与 `unknown` 都投影为 `true`，因为在事实不明时先释放不会限制客户端能力，而扣押可能让模型永久等不到客户端。
 
 **不是** Anthropic `BlockKind.TOOL_USE`（本腿没有 Anthropic kind），**也不是**「类型名以 `_call` 结尾」。
 
-当前正例：`function_call`、`custom_tool_call`、`computer_call`、`local_shell_call`、`apply_patch_call`、`item.environment` 为 local 的 `shell_call`、`item.execution == "client"` 的 `tool_search_call`、等待客户端回答的 `mcp_approval_request`。
+当前 `required`：`function_call`、`custom_tool_call`、`computer_call`、`local_shell_call`、`apply_patch_call`、`item.environment` 明确为 local 的 `shell_call`、`item.execution == "client"` 的 `tool_search_call`、等待客户端回答的 `mcp_approval_request`。
 
-当前反例（上游自行执行并在同一响应内给出结果）：`web_search_call`、`file_search_call`、`code_interpreter_call`、`image_generation_call`、server-executed `tool_search_call` 与 MCP call。
+当前 `not_required`（上游自行执行并在同一响应内给出结果）：`web_search_call`、`file_search_call`、`code_interpreter_call`、`image_generation_call`、`item.execution == "server"` 的 `tool_search_call`、明确指向 server container 的 `shell_call` 与 MCP call。
 
-**判据读 item 自身携带的执行语义**，不是 item 的 `type`，也**不需要回查原始请求**。核对 SDK 类型（2026-08-30）：`ResponseToolSearchCall` 自带 `execution: Literal["server", "client"]`，`ResponseFunctionShellToolCall` 自带 `environment`。同一个 `tool_search_call` 因此会给出相反答案——这正是「按 type 判」不成立、而本规格必须定案的原因。
+当前 `unknown`：代理不认识的原生 type、type 缺席，以及 `tool_search_call` 与 `shell_call` 这类条件类型缺少或带有无法判定的 discriminator。unknown fact 保留原生 type 与可选 name；原生 type 也缺席时才把其显示名记为 `unknown`。不得把「policy 为避免扣押而选择释放」改写成「已确认模型在等客户端」。
+
+**分类读 item 自身携带的执行语义**，不需要回查原始请求。核对 SDK 类型（2026-08-30）：`ResponseToolSearchCall` 自带 `execution: Literal["server", "client"]`，`ResponseFunctionShellToolCall` 自带 `environment`。同一个 `tool_search_call` 因此会给出相反答案——这正是「按 type 判」不成立、而本规格必须定案的原因。
 
 > v2 曾写「判定需要原始请求的 tool declaration」，那是把上一轮评审的「同一 type 会有相反答案」误读成「要回请求里查」。响应 item 自己就带着答案；回查原始请求既无依据，还可能读到 attempt 之间被改写过的版本。
 
-**未知类型**：**不得**默认 `false`。默认 false 会把客户端所需的行动扣押到 terminal，并再次让「代理认识的集合」成为客户端能力的上界。保守视为**需要释放**，并记一条 `predicate unknown` 的可观测事实（§10）；wire 事件本身仍逐字。
-
-触发**只发生在**该 action item 完成且已到达安全 commit frontier 时；触发后永久转为逐前缀释放，保持今天 `until-tool-use` 的一次性状态变化语义。
+触发**只发生在**该 item 的布尔投影为 `true`、item 已完成且已到达安全 commit frontier 时；触发后永久转为逐前缀释放，保持今天 `until-tool-use` 的一次性状态变化语义。三态分类同时进入 §10 的可观测旁路，不能从触发结果反推回来。
 
 ### 7.2 policy × ending
 
@@ -664,6 +664,15 @@ envelope 事件（`created`／`in_progress`／`completed`／`incomplete`／`fail
 
 本腿**至少**要记录：原生 output item 计数、需要客户端行动的 tool 名称／类型（§7.1）、reasoning 是否出现、权威 terminal status 与 usage、failure／截断／replay 的来源。无法分类时**必须**明确记为 unknown，**不得**伪装成 absent——`Terminal` 的 `stop_reason` 空默认值就是为这个区分而设的。
 
+权威 terminal status 与「后续是否仍需客户端行动」是两个可以同时为真的事实，必须占两个槽，不能把后者折进前者，也不能拿前者覆盖后者。本轮实现范围是原生 Responses **流式**直连路径：它从 `response.output_item.*` 与 `response.completed` 事件建立旁路事实；非流式 direct `/responses` 仍属 [`../tui/deferred.md`](../tui/deferred.md) 第 0 条的 whole-body reader 缺口，本轮不把它写成已覆盖。
+
+- `terminal_status` 逐字记录原生 response 对象的 `status`，缺席时为空。`response.completed` 到达且 response 内的 status 缺席时，可由事件名记录 `completed`；这是该原生 terminal 自己给出的状态，不是推测。它不覆盖 `Terminal.stop_reason`——后者仍是翻译和续写策略使用的语义结局，两者的消费者不同。
+- 最终 client-action 摘要的 authority 是终局 response 对象的完整 `output` 数组，不是 `output_item.done` 到达顺序，也不是 buffering policy 的 bool。按数组位置得到 Responses `output_index`，逐项运行 §7.1 的三态分类；`client_actions` 只记录 `required` 或 `unknown` 的 typed facts，`not_required` 不进入列表。每项至少含 `requirement`、原生 `type`、可选 `name` 与 `output_index`，保留重复。`function_call` 与 `custom_tool_call` 均为 `required`；名称为空时仍保留 type。原生 type 未知时保留原文并把 requirement 记为 `unknown`，只有 type 本身缺席时 type 才记为 `unknown`。
+- `client_action_classification_complete` 是 terminal snapshot 的集合级事实，不能由 `client_actions` 是否为空反推。它只在终局 response 明确携带一个 `output` 数组且数组里的每一项都得到三态分类时为 true。显式空数组满足条件，代表 terminal snapshot 已确认没有 output items；`output` 缺席或类型错误不满足。数组元素不是 object 或缺少 type 时仍可得到 `unknown` 分类，所以它不会把“结论未知”混成“没有分类”。stream 的未闭合 item、越界 index 与 unattributed events 继续由 §4、§7.2、`cut_mid_block`、请求 verdict 与 detail 报告，不进入这个字段；把交付完整性也塞进 terminal snapshot 分类会在同一请求上建立第二套状态机。
+- `completed` 只说明这一份 Responses response 已经收口。只有 `client_action_classification_complete is true` 且 `client_actions` 为空时，terminal snapshot 才足以断言没有客户端行动；含 `required` 时模型仍在等待，含 `unknown` 或 snapshot 分类不完备时本代理无法确认工作已经结束。这三种情形都不足以支撑绿色。展示层必须同时读 status、typed facts 与集合完备标志；其文本和颜色合同由 [`../tui/spec.md`](../tui/spec.md)「着色规则」与「描述回复的用词跟随上游」两节定义。任何只按 `terminal_status` 或空 action 列表把 `completed` 判绿的实现都不满足本条。
+
+用户于 2026-09-03 明确指定 `completed + function_call/custom_tool_call` 不绿，并选择把 terminal status 与 client-action facts 分槽。三态分类、集合完备标志、terminal `output` authority、`output_index` 顺序、重复、无名与 unknown 的记录与呈现是本规格依据既有 §4、§7.1 与「unknown 不得伪装 absent」合同作出的推导，不标作用户原话。
+
 `BlockBuffer` 今天靠 Anthropic `kind` 同时承担 payload 载体、释放判据与日志分类三件事；本腿**不得**沿用该耦合。
 
 ## 11. 未闭合项（归本规格所有）
@@ -700,6 +709,7 @@ v4 把更早挂在这里的产品分叉全部移入正文定案：header 合同 
 
 | 日期 | 条款 | 变化 | 触发 |
 |---|---|---|---|
+| 2026-09-03 | §7.1、§10 | **v20。** Responses 流式直连的权威 `terminal_status` 与 typed `client_actions` 分槽；action requirement 从 policy bool 拆为 `required`、`not_required`、`unknown` 三态，policy 只读其布尔投影；最终摘要以 terminal `output` 为 authority，并以 `client_action_classification_complete` 区分空 actions 与尚未分类完备。`completed` 仅在集合分类完备且无客户端行动时可绿；action 按 terminal output position 排序并保留重复、无名与 unknown。非流式 reader 仍留在 TUI deferred 第 0 条 | 用户主动指出 `completed + function_call/custom_tool_call` 不代表工作结束，并选择 terminal status 与 client-action facts 分槽；三态、terminal `output` authority、集合完备、顺序、重复、无名、unknown 与 streaming 定义域的精确化为本规格推导，来源是 §4、§7.1、§10 及 2026-09-03 独立评审 |
 | 2026-09-01 | §6.5.1、§6.5.2、§6.5.3、§6.5.5 | **v19。** §6.5 落地后的独立评审，3 major／5 minor，**全部采纳，无驳回**。(a) **§6.5.3 的定义域此前只写在纸上**：实现只查了 `target_format`，并用「翻译后的 body 没有 Responses `input` 数组」当省略另两道门的理由——该理由被 `to_openai_responses()` 源码与执行探针共同证伪（它无条件建 `input`，`_reasoning_item()` 还能往里放 sealed item）；**今天没出事只是因为当前 translator 不往那个 item 上写 id**，即定义域是被一个巧合实现的。三道门现已逐字落地并各有反例测试；(b) **§6.5.1 的判据宽于本代理能铸出的集合**：只写「小写十六进制 `8-4-4-12`」会放行 version-1 UUID 与前导零序号（评审实际构造并观察到被误删），而放宽正是「窄形态」裁决要防的那一侧；现补齐 version／variant／无前导零，并更正原文漏写的一组（应为 `8-4-4-4-12`）；(c) §6.5.5 的「计数长期为零即提出退役」**没有 oracle**——日志缺席同时兼容四种情形，且无时间窗、无触发者；改为一个不需要新机制的可判定条件（操作者关掉它、受影响会话不再出现绑定失败的 400）；(d) §6.5.2 的「正确 id 只存在于密文里」是无据的位置声称，改为「本代理没保留、也无法重建」；「任意不匹配 id 一律 400」改为「三个各试一次全部 400，全称是强推断非穷举」 | [`reports/260901-review-issue4-repair-impl.md`](reports/260901-review-issue4-repair-impl.md) |
 | 2026-09-01 | §6.5（新）、§11 | **v18。用户裁决 O-2：「加，按窄形态 ＋ 显式 opt-in」。** 已被自铸 id 污染的客户端历史不会自愈，本代理为其提供一次性修补：入站 reasoning item 若带密文且 id 逐字匹配 `_item_id()` 真正会产出的形状（`rs_` ＋ 规范 uuid4 ＋ `_` ＋ 序号），删掉其 `id`，其余逐字保留。**两个限定词都出自用户**：窄形态（不是「`rs_` ＋任意＋数字」——宽形态会误伤 OpenAI 本家合法的 `rs_` id）、显式 opt-in（默认关闭，按 §2.7 它是兼容整形不是 native）。O-2 随之从未闭合项移入正文定案，§11 留存根 | 用户 2026-09-01 裁决 |
 | 2026-09-01 | §6.2、§6.4、§11 | **v17。** 独立评审 5 major／2 minor，全部采纳。(a) **O-2 此前被停在 `deferred.md` D-8**，而那份台账开头逐字写着「需要用户裁决的产品分叉登记在 Spec §11，不在这里」——这是本项目「Spec 级事实不得停在待办账本」规则的直接违背，条目已移入 §11 并删去 D-8；(b) O-2 原来的主论据「缺陷自清」两处错（旧构建仍在跑、仍在制造污染；不再新增≠自行清空），已改写并降低建议置信；(c) §6.4 的回归测试此前只覆盖响应半程，请求半程（正是 400 被抛出的方向）只有论证没有测试，现已补齐并登记；(d) 响应侧夹具此前两处拼同一个 id，对「把上游漂移的两个 id 合并成一个」这第二种破法恒等、会静默变绿，已改用 cassette 的真实漂移；(e) 归因的措辞限定（两句 400 是否同一分支未闭合）补进 §6.2、文首与测试 docstring；(f) 两处全称过头（「本轮任何观测都看不出」「没有哪个上游会这么拼」）改为有证据支持的限定 | [`reports/260901-review-issue4-artifacts.md`](reports/260901-review-issue4-artifacts.md) |

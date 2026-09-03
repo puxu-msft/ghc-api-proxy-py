@@ -1,6 +1,6 @@
 # Spec：TUI 请求日志与实时 footer
 
-状态：已实现并与代码对账（分支 `worktree-tui-request-log-footer`）。范围为本次切片；panel/detail 交互不在其中，见文末「明确不做」。验收逐条对应的测试见「验收」一节。
+状态：主体已实现并与代码对账（分支 `worktree-tui-request-log-footer`）。2026-09-03 新增的 Responses 流式直连 terminal status 与 client action 组合展示和着色合同待本轮实现；panel/detail 交互不在其中，见文末「明确不做」。验收逐条对应的测试见「验收」一节。
 
 ## 目标
 
@@ -128,7 +128,7 @@
 | 上行字节 | 恒灰。它的大小由客户端发来的请求决定，与回复如何无关 |
 | 上行词元 | 本身不着色；其缓存分段为「读」灰、「写」青 |
 | 缓存命中率 | 反向：≥80% 灰，越低越红 |
-| **结束原因** | `end_turn` / `stop_sequence` 绿；`max_tokens` 黄；`refusal` 红；`tool_use` / `function_call` 不着色；**表以外的原因一律不着色** |
+| **结束原因与终局状态** | `end_turn` / `stop_sequence` 绿；Responses 的 `completed` 仅在 `client_action_classification_complete` 为 true 且 `client_actions` 为空时绿，存在 required、unknown 或集合分类不完备时不着色；`max_tokens` 黄；`refusal` 红；`tool_use` / `function_call` / `custom_tool_call` 不着色；**表以外的原因或状态一律不着色** |
 | **计数提供方** | `provider` 与括号不着色，括号内的 `[<试过的>,]<应答的>` 灰 |
 | **工具名列表** | 灰；其中 `AskUserQuestion` 青 |
 | 推理块 | 灰 |
@@ -142,6 +142,7 @@
 - **结束原因是一条阶梯，不是一个标志位**。这几个都终结了这一轮，所以单一颜色只能表达「它停了」——而这件事有这个字段本身就已说明。读者想知道的是**这个结束有多成问题**：干净收尾没什么可看；在词元上限处被截断，是那一行上唯一值得看的事；而拒绝连内容都没交付、也无法直接续跑，所以它与失败状态码同级（红），而不是低一级。裁决于 2026-08-20，由用户指定 `max_tokens` 黄、`refusal` 红。`tool_use` / `function_call` 不进任何一档——它确实结束了模型这一次回复，但它是唯一表示**工作尚未结束**的原因：调用方要去跑工具再回来，给它一个结束色等于在最常见的中间点上画句号。
 
   这张表是**封闭白名单**，不是规则。表以外的结束原因一律不着色：光看名字无从判断它是好消息还是坏消息，随便给个颜色就是在断言这段代码并不知道的事。
+- **Responses 的 `completed` 不能脱离完整 terminal output 集合判读。** `completed` 说明这一份 Responses response 已经收口，不说明模型与客户端之间的工作已经结束；同一份 response 完全可以同时含 `function_call` 或 `custom_tool_call`，等待客户端执行后续动作。权威 terminal status、typed client-action facts 与集合级 `client_action_classification_complete` 因此分槽并同时进入判读。只有 terminal `output` 明确是数组、其中每一项都已得到三态分类，且 action 列表为空时，`completed` 才能使用代表「没什么要看」的绿色；确认需要行动、分类为 unknown，或 terminal snapshot 本身不完备时都不绿。stream item 生命周期是否完整由请求 verdict 与 detail 表达，不由这个颜色字段重复判定。判据不从工具名称、空列表或 buffering policy 的布尔投影反推。用户于 2026-09-03 明确指定 `completed + function_call/custom_tool_call` 不绿，并选择 terminal status 与 client-action facts 分槽；集合完备标志、terminal `output` authority、unknown、无名调用与顺序的处置是本规格推导。
 - **临界点取整数，不迁就四舍五入带**。裁决于 2026-08-20：`format_bytes` 只印一位小数，因此 10239 与 10240 字节都显示 `10.0KB`，却分处「灰」与「不着色」两侧。这是已知且接受的表现——阈值是 `10 * 1024` 这个整数，不是「打印出 `10.0KB` 的那一点」。
 - **`AskUserQuestion` 从灰色列表里挑出来**。这个工具的用途本身就是向人提问，所以工作此刻卡在「有没有人看到」上。对列表里其它名字**不作任何断言**——工具名是任意字符串，别的工具同样可能在等审批或等外部事件；只是这一个把「要等人」写在了名字上，颜色也只建立在这一点上。
 - **计数提供方不进结束原因那条阶梯**。裁决于 2026-08-20，用户明确选了不着色。`ghc` 与 `local` 都不是「有多成问题」的档位：一条翻译路由本来就没有上游计数器，天天答 `provider(no-counter,local)` 是正常配置而不是事故，给它一个警示色等于每天喊一次狼来了。降级那一档（`provider(ghc-failed,local)`）改由**词**承担，而不是颜色——这样它在落盘日志里同样读得出来，颜色在那里是丢失的。计数器名与其原因和工具名列表同理，是括号里的细节，灰。
@@ -156,6 +157,8 @@
 | 以工具调用收尾 | `tool_use(Bash,Read)` | `function_call(Bash,Read)` |
 | 调用了工具但没人说这一轮结束了 | `called(Bash,Read)` | `called(Bash,Read)` |
 
+原生 Responses 流式直连路径还持有一个翻译路径没有的独立事实：上游 response 自己的权威 terminal status。它不取代 output item；两者按「status 在前、client action 按 terminal `response.output` 数组位置在后」同时显示，例如 `completed function_call(Bash)`、`completed custom_tool_call(run_shell)`。该数组位置就是 Responses 的 output position，权威不是 `done` 事件到达顺序；同一类型的每个调用保留重复。确认需要客户端行动的 item 按原生 type 显示，名称为空时只显示 type；分类无法确定但 policy 为避免扣押而保守释放的 item 显示为 `client_action?(<原生 type>)`，type 也缺席时显示 `client_action?(unknown)`。terminal `output` 缺席或类型错误时，列表空也不代表没有 action，行上追加 `client_action?(unclassified)`。这里的 `completed` 按「着色规则」同时读 required 与 unknown facts 以及集合完备标志。上述 authority、集合完备、顺序、重复、无名和 unknown 呈现是本规格为兑现可观测合同作出的推导，不是用户原话。
+
 第三行是**两个上游共用一个词**的唯一一处，而且刻意不是任何一方的词。`tool_use` 与 `function_call` 都断言回复**以工具调用收尾**；在一条没有结束原因的行上，没有人说过回复结束了，借用任一方都是在给被截断的一轮画上句号。真实的只有「这些块关闭了、这些工具被点了名」，而这值得读——一轮已经点了三个工具才被截断，与一轮什么都没产出，是不同的事故。
 
 不用 `tools(...)`：那也是请求侧**工具声明**的名字，读日志的人无从分辨「这次请求声明了 Bash 和 Read」与「这一轮调用了它们」，而那是交换的两端。
@@ -164,7 +167,7 @@
 
 判定依据是**路由**（`handler.dialect_for`），不是回复体：缓冲回复是在翻译成客户端形状之后才被读回的，那时体内已不再有任何东西说明是谁应答的。流式路径由 assembler 自身携带（一个 assembler 只可能描述一种上游）。两者共用同一个分支——`assembler_for` 基于 `dialect_for` 的结果分派——以免两条路径对「谁应答的」得出不同答案。
 
-**本次未改、留待裁决**：`end_turn` / `max_tokens` 在 Responses 上游同样是合成词（真实的是 `response.completed` 与 `incomplete_details.reason = max_output_tokens`），`enc` / `txt` 两个计数标签同理（真实的是 `encrypted_content` 与 reasoning summary）。用户本次只指定了推理块与工具调用两处，故不自行扩大；见 `deferred` 记录。
+**仍未改、留待裁决**：本轮只让原生 Responses 流式直连路径记录并展示权威 terminal status；翻译型 Responses 路径仍把 `response.completed` / `response.incomplete` 映成面向 Anthropic 下游的 `end_turn` / `max_tokens` 后再汇总，是否也保存原生 status 是另一项可观察改动。`enc` / `txt` 两个计数标签同样仍是合成词（真实的是 `encrypted_content` 与 reasoning summary）。两项开放范围及数据丢失点见 [`deferred.md`](deferred.md)。
 
 ## 数据来源
 
@@ -182,9 +185,16 @@
 4. 40 列与 80 列下 footer 均不折行。
 5. 流式请求在其字节仍在下行期间持续出现在 footer 上，字节数随之增长。
 6. footer 构建是纯函数：给定在飞集合、当前时刻与列宽，输出确定，无 I/O、无墙钟读取。
+7. Responses 终局状态的判读必须覆盖 status、逐项分类与 terminal snapshot 完备三层。格式化单元在开颜色时，对 `client_action_classification_complete=true` 且 actions 为空的状态精确产出 `\x1b[32mcompleted\x1b[0m`；对两项有序行动精确产出 `completed function_call(\x1b[2mBash\x1b[0m) custom_tool_call(\x1b[2mrun_shell\x1b[0m)`——action type 与 `completed` 本身不着色，普通名称仍遵守工具名列表的灰色合同；对 snapshot 分类不完备且 actions 为空精确产出 `completed client_action?(unclassified)`，不含绿色转义。真实 streaming `/responses` 内部路由用 mock upstream 跑五组对照：(a) terminal 显式 `output=[]`，stream 另含一个 unattributed event，摘要仍为 complete、actions 为空，纯文本尾段为 `completed`；(b) terminal `output` 只有完整 `message`，同样得到 clean `completed`，用于判红“所有 item 都是 unknown”；(c) terminal `output` 缺席与类型错误参数化为两例，两者都得到 `completed client_action?(unclassified)` 且不绿；(d) terminal `output` 含一个未知原生 type，得到 `completed client_action?(future_tool_call)` 且不绿；(e) terminal `output` 依次含 `function_call(Bash)`、重复的 `function_call(Bash)` 与无名 `custom_tool_call`；stream 中三个 `done` snapshot 全部故意改成 `tool_search_call(execution=server)` 并使用不同名称，所以 done 侧的 `any(required)` 为 false，而 terminal 三项全部是 `required`；三个 `done` 再以 2、1、0 的反序到达。最终尾段仍须为 `completed function_call(Bash) function_call(Bash) custom_tool_call`，三项恰好一次且 `completed` 不绿。最后一例是 source-of-truth 控制，不冒充真实上游合法分歧；全部 mock 只证明本代理的 collector、`RequestTrace → RequestLine` 接线、terminal authority、分类完备、排序与展示，不冒充真实上游本轮实况。把 `output=[]` 当缺席、把缺席或错误类型当 complete、让任何 unattributed event 阻止 complete、把所有 item 分类为 unknown、丢弃 unknown、从 `done` snapshot 收集最终 name 或 requirement、按 `done` 到达顺序输出、action 列读 terminal 但 completed 颜色偷读 done-side bool、只按 terminal status 着色或把所有 completed 一律取消着色，必须分别被上述同一组断言判红，且失败原因落在目标字段或尾段，不得由 fixture 解析错误代打。
 
 ## 明确不做
 
 - **panel / detail 交互**（展开列表、详情页、滚动、按键解码）。现有 reducer 的 `panel_list` / `detail` 两态保留，本次不接线。**注意**：`rich.Live` 的 footer 跟着内容浮动而非钉物理底行，多行面板要钉底时这个模型可能不够用，届时需重新评估是否退回 DECSTBM，不得假设本次结论已经覆盖那个场景。
 - **从 TUI 中止请求**。P1 只读边界，中止归审批系统。
 - 分层遥测、请求历史面板等，均已有各自归属文档。
+
+## 修订记录
+
+| 日期 | 条款 | 变化 | 触发 |
+|---|---|---|---|
+| 2026-09-03 | 着色规则、描述回复的用词、验收 | Responses 流式直连的 `completed` 改为与 typed client-action facts 组合判读：仅在已确认无客户端行动时绿；存在 `required`、`unknown` 或集合分类不完备时不着色，并同时显示权威 status、每项行动或 `unclassified` 标记。新增颜色双向控制、explicit-empty、complete not-required、complete unknown 与 missing/malformed-unclassified 三组集合控制、反序 `done` 的排序控制，以及重复与无名 action 的端到端 oracle | 用户主动指出 `completed + function_call/custom_tool_call` 不代表工作结束，并选择 terminal status 与 client-action facts 分槽；三态、terminal `output` authority、集合完备、排序、重复、无名与 unknown 呈现为本规格推导，来源是 direct-passthrough §4、§7.1 与 §10 及 2026-09-03 独立评审 |

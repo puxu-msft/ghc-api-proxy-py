@@ -34,20 +34,22 @@
 
 **倾向**：值得做，优先级低于第 0 条。做的时候应当一并处理，别只补一半。**本条仍未闭合；旧成本论证失效后，是否做与怎么做需要按当前接线重新评估，本文不替用户作出重估。**
 
-## 1. Responses 上游的 stop reason 仍是合成词
+## 1. 翻译型 Responses 路径的 stop reason 仍是合成词
 
-**现状**：2026-08-20 起，日志行对推理块与工具调用已按上游用词区分（`think` / `reason`，`tool_use` / `function_call`，见 `spec.md` 的「描述回复的用词跟随上游」）。但同一行上的 `end_turn` 与 `max_tokens` **在 Responses 上游同样是合成的**：
+**已从本条移出的定案**：原生 Responses 流式直连路径必须同时记录权威 `terminal_status` 与 typed `client_actions`；`completed` 只有在集合分类完备且不存在 required 或 unknown client-action fact 时才绿。该合同及用户 2026-09-03 的裁决已进入 [`spec.md`](spec.md)「着色规则」和 [`../direct-passthrough/spec.md`](../direct-passthrough/spec.md) §10，本条不再承载它。
+
+**仍未闭合的现状**：翻译型 Responses 路径的日志行对推理块与工具调用已按上游用词区分（`reason`、`function_call`），但终局仍来自为 Anthropic 下游合成的 `end_turn` / `max_tokens`：
 
 | 行上显示 | Responses 实际发的 |
 |---|---|
-| `end_turn` | `response.completed`（没有 stop reason 这个概念） |
+| `end_turn` | `response.completed` |
 | `max_tokens` | `response.incomplete` + `incomplete_details.reason = "max_output_tokens"` |
 
-**为什么没做**：用户本次只指定了推理块与工具调用两处。扩大到 stop reason 会改变更多行的可观察输出，属于用户未裁决的范围。
+原生直连路径本轮新增的旁路 facts 不能自动解决这里：缓冲翻译路径在读回客户端形状时已经丢掉原生 response status，流式翻译路径则仍把 status 映成下游 stop reason。要让它们也显示权威 status，需要在翻译前保存同一份旁路事实，而不是从合成词反推。
 
-**留下的不一致**：一条 Responses 行现在可能读作 `function_call(Bash)`（上游真名）紧邻 `end_turn`（合成词），词汇是一半一半的。这是已知的、有意接受的状态，不是疏漏。
+**为什么仍留在本条**：用户本轮明确选择把端到端接线落在 direct `openai-responses`；翻译型路径是否同步改变每条 Responses 完成行的词汇与字段数，仍未裁决。`end_turn` 出现在几乎每条翻译型完成行上，影响面远大于工具轮，不能借直连路径的实现范围静默扩大。
 
-**决定时需要的信息**：`end_turn` 出现在几乎每一行上，改词的影响面远大于 `tool_use`；而 `tool_use` 只在工具轮出现。两者 ROI 不同，值得分开裁决。
+**证据强度**：路径与数据丢失点已由源码和既有集成测试确认，足以据此设计后续切片；是否值得改变主产品路径的所有完成行，仍需用户决定。
 
 ## 3. `[GONE]` 分不出「客户端走了」与「我们自己关停了」
 
