@@ -35,6 +35,9 @@
       "Bash(git stash pop)"
     ]
   },
+  "worktree": {
+    "bgIsolation": "none"
+  },
   "enabledPlugins": {
     "context7-plugin@context7-marketplace": true,
     "episodic-memory@superpowers-marketplace": true,
