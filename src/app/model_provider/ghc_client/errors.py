@@ -30,7 +30,7 @@ from app.pipeline.exceptions import (
 
 # Statuses where the same request, sent again, can plausibly get a different answer.
 # 401 is here because the token can be re-minted; whether it *is* retried is the budget's call, and `githubTokenExpired.max_retries` defaults to 0.
-RETRYABLE_STATUSES = frozenset({401, 408, 409, 425, 429, 500, 502, 503, 504})
+RETRYABLE_STATUSES = frozenset({401, 408, 409, 425, 429, 499, 500, 502, 503, 504})
 
 _STATUS_ERRORS = (OpenAIStatusError, AnthropicStatusError)
 _TIMEOUT_ERRORS = (OpenAITimeoutError, AnthropicTimeoutError)
