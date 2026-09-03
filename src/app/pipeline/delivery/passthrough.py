@@ -9,8 +9,9 @@ Why the path exists at all, in one line: on a same-format direct request the cli
 **What this deliberately does not know: item types.** There is no type table here and there must not be one. `Dialect` describes *boundaries and attribution* — which events are the envelope, what keys an item, what closes one — and never taxonomy, so an item this proxy has never heard of is carried without anything having to recognise it. A type table would rebuild the ceiling §2.1 rules out.
 """
 
+import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any
 
@@ -18,6 +19,8 @@ from app.errors import ErrorInfo
 from app.pipeline.delivery.assembling import ReplyDialect, StreamFailure, Terminal
 from app.pipeline.delivery.framing import OutboundFramer
 from app.pipeline.delivery.sse_source import SseEvent, encode_frame
+
+logger = logging.getLogger(__name__)
 
 
 class Attribution(StrEnum):
@@ -178,6 +181,15 @@ class PassthroughAssembler:
         if isinstance(item, int):
             if event.event == self._dialect.item_done_event:
                 # A closing event for a position never opened still closes it. Defensive: an item left open would wedge the queue forever, and tolerating it costs nothing. Whether upstream sends that shape is an open question — `hosted-web-search-spec.md` §12 P7, where both of this project's measurements carried an opening event. The regression on record is the reference project's own implementation dropping such an item silently, a different fact about a different program.
+                if item in self._closed:
+                    # **The one shape that can make a single-slot client render an answer twice**, and this leg forwards it where the translating leg swallowed it. Codex takes an item out of its slot on this event; a second one finds the slot empty, synthesises a fresh started/completed pair, and renders the whole text again as ordinary content — read from its source, not inferred. `deferred.md` D-9.
+                    #
+                    # **Recorded rather than dropped, because nobody has caught upstream doing it.** Every capture this project holds carries exactly one closing event per item, so the question of whether this ever fires is exactly the question that cannot be answered from what is on disk. Dropping it would change what a native leg promises (§2.1) on the strength of a guess; a log line changes nothing and settles it from one real session.
+                    logger.warning(
+                        "upstream closed output_index %d twice on the %s leg; a client that keys on one open item at a time will render this item's content again (deferred.md D-9)",
+                        item,
+                        self._dialect.name,
+                    )
                 self._open.discard(item)
                 self._closed.add(item)
                 self._terminal.blocks += 1
@@ -328,9 +340,12 @@ class PassthroughFramer:
     **`preamble` and `terminal` are empty on purpose, and they are not the same emptiness.** Upstream's own opening envelope event and its own terminal arrive as ordinary events and ride out inside batches, so emitting counterparts here would deliver each of them twice — with different ids, since the invented one is not upstream's.
 
     **`error` and `keepalive` are delegated rather than reimplemented.** Those two frames really are this side's inventions, and each dialect already spells them: an SSE comment for the keep-alive, and the error shape `error-envelope/spec.md` §6.3 sets out. Writing a second copy here would be one more place for the two spellings to drift, so the leg's ordinary framer supplies them.
+
+    **`reshape` is the one place a declared compatibility contract may edit the wire**, and it is `None` unless an operator switched one on. §2.7 requires such a transform to be named, optional and never called native; keeping it as a parameter rather than a branch inside `block` is what stops it becoming an unnamed default the way stable ids did before `1fb37cd` (§6.6.6). The engine stays dialect-agnostic: whichever vocabulary is in play supplies the callable, or does not.
     """
 
     delegate: OutboundFramer[Any]
+    reshape: Callable[[tuple[SseEvent, ...]], tuple[SseEvent, ...]] | None = None
     on_terminal_unit: Callable[[], None] | None = None
 
     @property
@@ -345,6 +360,8 @@ class PassthroughFramer:
         return ()
 
     def block(self, block: RawEventBatch) -> tuple[bytes, ...]:
+        if self.reshape is not None:
+            block = replace(block, events=self.reshape(block.events))
         encoded = block.encode()
         if block.contains_terminal and self.on_terminal_unit is not None:
             # The caller confirms this frontier only after the yielded chunk's ASGI send returns. Marking here says which chunk carries the terminal; it does not claim that the client has it yet.
