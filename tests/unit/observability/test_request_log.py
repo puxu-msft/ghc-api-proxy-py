@@ -22,7 +22,12 @@ from app.observability.terminal import BOLD_RED, CYAN, DIM, GREEN, RED, RESET, W
 from app.pipeline.delivery.assembling import ReplyDialect
 from app.pipeline.delivery.sse_source import SseEvent
 from app.pipeline.hand_over import one_line
-from app.pipeline.response_observation import ResponsesObserver
+from app.pipeline.response_action import (
+    ClientActionBasis,
+    ClientActionObservation,
+    ClientActionRequirement,
+)
+from app.pipeline.response_observation import ResponseObservation, ResponsesObserver
 
 
 def test_a_successful_request_names_the_model_rather_than_the_route() -> None:
@@ -531,14 +536,15 @@ def test_a_responses_turn_names_the_item_upstream_actually_sent() -> None:
     assert format_stop_reason("tool_use", ("Bash",), ReplyDialect.ANTHROPIC) == "tool_use(Bash)"
 
 
-def _responses_observation_line(
+def _responses_observation_and_line(
     body: dict[str, object],
     *,
     status: LogStatus = "ok",
-) -> str:
+) -> tuple[ResponseObservation, str]:
     observer = ResponsesObserver()
     observer.observe_response(body)
-    return format_completion_line(
+    observation = observer.snapshot()
+    return observation, format_completion_line(
         RequestLine(
             method="POST",
             path="/responses",
@@ -549,8 +555,26 @@ def _responses_observation_line(
             dialect=ReplyDialect.RESPONSES,
         ),
         status=status,
-        response_observation=observer.snapshot(),
+        response_observation=observation,
     )
+
+
+def _responses_observation_line(
+    body: dict[str, object],
+    *,
+    status: LogStatus = "ok",
+) -> str:
+    return _responses_observation_and_line(body, status=status)[1]
+
+
+def _assert_output_item_identity(
+    observation: ResponseObservation,
+    expected: tuple[tuple[int, str | None, str | None], ...],
+) -> None:
+    assert observation.output_items is not None
+    assert tuple(
+        (item.output_index, item.type, item.name) for item in observation.output_items
+    ) == expected
 
 
 def test_responses_observation_renders_actual_function_and_reasoning() -> None:
@@ -574,6 +598,201 @@ def test_responses_observation_does_not_call_a_custom_action_a_function() -> Non
 
     assert line.endswith("completed custom_tool_call(run_shell)")
     assert "function_call" not in line
+
+
+def test_responses_observation_groups_adjacent_calls_without_deduplicating() -> None:
+    observation, line = _responses_observation_and_line({
+        "status": "completed",
+        "output": [
+            {"type": "function_call", "name": "Read"},
+            {"type": "function_call", "name": "Read"},
+            {"type": "function_call", "name": "Read"},
+            {"type": "function_call", "name": "Read"},
+        ],
+    })
+
+    assert line.endswith("completed function_call(Read,Read,Read,Read)")
+    _assert_output_item_identity(
+        observation,
+        (
+            (0, "function_call", "Read"),
+            (1, "function_call", "Read"),
+            (2, "function_call", "Read"),
+            (3, "function_call", "Read"),
+        ),
+    )
+
+
+def test_responses_observation_groups_only_adjacent_actual_type_runs() -> None:
+    grouped_observation, grouped = _responses_observation_and_line({
+        "status": "completed",
+        "output": [
+            {"type": "custom_tool_call", "name": "exec"},
+            {"type": "function_call", "name": "Read"},
+            {"type": "function_call", "name": "Bash"},
+            {"type": "function_call", "name": "Read"},
+        ],
+    })
+    interleaved_observation, interleaved = _responses_observation_and_line({
+        "status": "completed",
+        "output": [
+            {"type": "function_call", "name": "Read"},
+            {"type": "custom_tool_call", "name": "exec"},
+            {"type": "function_call", "name": "Bash"},
+        ],
+    })
+
+    assert grouped.endswith("completed custom_tool_call(exec) function_call(Read,Bash,Read)")
+    _assert_output_item_identity(
+        grouped_observation,
+        (
+            (0, "custom_tool_call", "exec"),
+            (1, "function_call", "Read"),
+            (2, "function_call", "Bash"),
+            (3, "function_call", "Read"),
+        ),
+    )
+    assert interleaved.endswith("completed function_call(Read) custom_tool_call(exec) function_call(Bash)")
+    _assert_output_item_identity(
+        interleaved_observation,
+        (
+            (0, "function_call", "Read"),
+            (1, "custom_tool_call", "exec"),
+            (2, "function_call", "Bash"),
+        ),
+    )
+
+
+def test_non_client_items_do_not_break_the_displayed_action_run() -> None:
+    observation, line = _responses_observation_and_line({
+        "status": "completed",
+        "output": [
+            {"type": "function_call", "name": "Read"},
+            {"type": "reasoning", "summary": [], "encrypted_content": "sealed"},
+            {"type": "message"},
+            {"type": "web_search_call"},
+            {"type": "function_call", "name": "Bash"},
+        ],
+    })
+
+    assert line.endswith("completed function_call(Read,Bash) reason(enc:1)")
+    _assert_output_item_identity(
+        observation,
+        (
+            (0, "function_call", "Read"),
+            (1, "reasoning", None),
+            (2, "message", None),
+            (3, "web_search_call", None),
+            (4, "function_call", "Bash"),
+        ),
+    )
+
+
+def test_anonymous_and_unknown_actions_break_named_runs_without_disappearing() -> None:
+    body: dict[str, object] = {
+        "status": "completed",
+        "output": [
+            {"type": "function_call", "name": "Read"},
+            {"type": "function_call", "name": ""},
+            {"type": "function_call", "name": ""},
+            {"type": "function_call", "name": "Bash"},
+            {"type": "some_2027_tool_call", "name": "future"},
+            {"type": "function_call", "name": "Read"},
+            {"type": "function_call", "name": None},
+            {"type": "function_call", "name": "Bash"},
+        ],
+    }
+    observation, line = _responses_observation_and_line(body)
+
+    assert line.endswith(
+        "completed function_call(Read) function_call function_call function_call(Bash) "
+        "client_action(some_2027_tool_call?) function_call(Read) function_call function_call(Bash)"
+    )
+    _assert_output_item_identity(
+        observation,
+        (
+            (0, "function_call", "Read"),
+            (1, "function_call", ""),
+            (2, "function_call", ""),
+            (3, "function_call", "Bash"),
+            (4, "some_2027_tool_call", "future"),
+            (5, "function_call", "Read"),
+            (6, "function_call", None),
+            (7, "function_call", "Bash"),
+        ),
+    )
+
+
+def test_grouping_uses_raw_types_before_bounded_display_encoding() -> None:
+    prefix = "x" * 121
+    raw_types = (f"{prefix}a", f"{prefix}b")
+    observer = ResponsesObserver()
+    observer.observe_response({
+        "status": "completed",
+        "output": [
+            {"type": raw_types[0], "name": "Read"},
+            {"type": raw_types[1], "name": "Bash"},
+        ],
+    })
+    observation = observer.snapshot()
+    assert observation.output_items is not None
+    required = ClientActionObservation(
+        requirement=ClientActionRequirement.REQUIRED,
+        basis=ClientActionBasis.KNOWN_CLIENT_ACTION,
+        delivery_required=True,
+    )
+    rendered_observation = replace(
+        observation,
+        output_items=tuple(
+            replace(item, client_action=required) for item in observation.output_items
+        ),
+    )
+    line = format_completion_line(
+        RequestLine(
+            method="POST",
+            path="/responses",
+            inbound_format="openai-responses",
+            model="gpt-model",
+            status_code=200,
+            dialect=ReplyDialect.RESPONSES,
+        ),
+        status="ok",
+        response_observation=rendered_observation,
+    )
+    display_type = f"{'x' * 119}…"
+
+    _assert_output_item_identity(
+        rendered_observation,
+        (
+            (0, raw_types[0], "Read"),
+            (1, raw_types[1], "Bash"),
+        ),
+    )
+    assert line.endswith(f"completed {display_type}(Read) {display_type}(Bash)")
+    assert f"{display_type}(Read,Bash)" not in line
+
+
+def test_grouped_names_are_made_inert_before_renderer_commas_are_added() -> None:
+    observation, line = _responses_observation_and_line({
+        "status": "completed",
+        "output": [
+            {"type": "function_call", "name": "Read,now"},
+            {"type": "function_call", "name": "Bash)\x1b"},
+        ],
+    })
+
+    assert line.endswith(
+        "completed function_call(Read\\u002cnow,Bash\\u0029\\u001b)"
+    )
+    assert "Read,now" not in line
+    assert "\x1b" not in line
+    _assert_output_item_identity(
+        observation,
+        (
+            (0, "function_call", "Read,now"),
+            (1, "function_call", "Bash)\x1b"),
+        ),
+    )
 
 
 def test_responses_observation_keeps_an_unknown_action_unknown() -> None:

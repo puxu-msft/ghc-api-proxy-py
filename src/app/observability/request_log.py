@@ -285,18 +285,46 @@ def format_response_observation(
     elif status == "completed":
         parts.append(paint("completed", GREEN, color=color))
 
+    run_type: str | None = None
+    run_label = ""
+    run_names: list[str] = []
+
+    def flush_run() -> None:
+        nonlocal run_type, run_label, run_names
+        if run_type is None:
+            return
+        parts.append(f"{run_label}({_painted_tools(run_names, color=color)})")
+        run_type = None
+        run_label = ""
+        run_names = []
+
     for item in observation.output_items or ():
         requirement = item.client_action.requirement
         if requirement is ClientActionRequirement.NOT_REQUIRED:
             continue
-        item_type = inert_token(item.type or "")
-        name = inert_token(item.name or "")
+        raw_type = item.type or ""
+        item_type = inert_token(raw_type)
+        raw_name = item.name
+        name = inert_token(raw_name or "")
         if requirement is ClientActionRequirement.UNKNOWN:
+            flush_run()
             unknown = f"{item_type}?" if item_type else "?"
             parts.append(f"client_action({unknown})")
             continue
         word = item_type or "client_action"
-        parts.append(f"{word}({_painted_tools([name], color=color)})" if name else word)
+        if not raw_name:
+            flush_run()
+            parts.append(word)
+            continue
+        # The raw type is the run identity; the inert, bounded spelling is presentation only. Using `item_type` here would merge distinct provider types that truncate to the same label.
+        if run_type == raw_type:
+            run_names.append(name)
+            continue
+        flush_run()
+        run_type = raw_type
+        run_label = word
+        run_names = [name]
+    flush_run()
     return parts
 
 
