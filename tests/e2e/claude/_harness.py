@@ -23,7 +23,7 @@ import httpx2
 import uvicorn
 from _upstream import BASE_URL, CATALOG, ScriptedUpstream
 
-from app.config.schema import ProxyConfig
+from app.config.schema import GithubCopilotProviderConfig, ProxyConfig
 from app.model_provider import GithubCopilotProvider
 from app.model_provider.ghc_client import GhcApiClient, GhcClientConfig
 from app.model_provider.ghc_client.tokens import CopilotTokenManager
@@ -84,10 +84,12 @@ def running_proxy(
     for key, value in (overrides or {}).items():
         settings[key] = value
     config = ProxyConfig.model_validate(settings)
+    provider_config = config.model_providers["ghc"]
+    assert isinstance(provider_config, GithubCopilotProviderConfig)
     provider = GithubCopilotProvider(
         "ghc",
         client,
-        config.model_providers["ghc"],
+        provider_config,
         http_client=http_client,
         base_url=BASE_URL,
     )

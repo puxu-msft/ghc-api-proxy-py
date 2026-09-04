@@ -35,7 +35,7 @@ from starlette.requests import ClientDisconnect, Request
 from starlette.types import Message
 
 import app.server.routes.inference as inference_route
-from app.config.schema import ModelProviderConfig, ProxyConfig
+from app.config.schema import GithubCopilotProviderConfig, ProxyConfig
 from app.core.chain import Chain
 from app.model_provider import GithubCopilotProvider, ModelDescriptor, ModelEndpoint, ModelProvider
 from app.model_provider.ghc_client import GhcApiClient, GhcClientConfig
@@ -137,7 +137,7 @@ def make_provider(
     provider = GithubCopilotProvider(
         "ghc",
         client,
-        ModelProviderConfig(type="github_copilot", disabled_models=disabled or []),
+        GithubCopilotProviderConfig(type="github_copilot", disabled_models=disabled or []),
         http_client=http_client,
         base_url=BASE_URL,
     )

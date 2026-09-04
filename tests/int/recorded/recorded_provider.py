@@ -15,7 +15,7 @@ import httpx2
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 
-from app.config.schema import ModelProviderConfig, ProxyConfig
+from app.config.schema import GithubCopilotProviderConfig, ProxyConfig
 from app.core.chain import Chain
 from app.model_provider import GithubCopilotProvider, ModelProvider
 from app.model_provider.ghc_client import CopilotTokenManager, GhcApiClient, GhcClientConfig
@@ -66,7 +66,7 @@ def recorded_provider(name: str, http_client: httpx2.AsyncClient) -> GithubCopil
     return GithubCopilotProvider(
         "ghc",
         client,
-        ModelProviderConfig(type="github_copilot", api_base_url=BASE_URL),
+        GithubCopilotProviderConfig(type="github_copilot", api_base_url=BASE_URL),
         http_client=http_client,
         base_url=BASE_URL,
     )

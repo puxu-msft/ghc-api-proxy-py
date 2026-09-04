@@ -259,6 +259,40 @@ def test_an_unknown_provider_name_is_refused_with_the_configured_ones(tmp_path: 
     assert authenticate.await_count == 0
 
 
+def test_xingchen_auth_commands_are_refused_before_github_side_effects(tmp_path: Path) -> None:
+    config_path = _auth_config(
+        tmp_path,
+        "model_providers:\n"
+        "  xingchen:\n"
+        "    type: xingchen\n"
+        "    models: [chat-pro]\n"
+        "    gateway_api_key: gateway-key\n"
+        "    x_token: complete.x.token\n"
+        "    device_id: device-id\n"
+        "    install_id: install-id\n"
+        "default_model_provider: ghc\n",
+    )
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.delenv(CONFIG_PATH_VARIABLE, raising=False)
+        authenticate = AsyncMock()
+        clear = AsyncMock()
+        patch.setattr("app.cli.authenticate_device", authenticate)
+        patch.setattr("app.cli.clear_stored_token", clear)
+        results = [
+            runner.invoke(app, [command, "xingchen", "--config", str(config_path)])
+            for command in ("auth", "login", "logout")
+        ]
+
+    for result in results:
+        assert result.exit_code != 0
+        assert "xingchen" in result.output
+        assert "gateway_api_key" in result.output
+        assert "x_token" in result.output
+    assert authenticate.await_count == 0
+    assert clear.await_count == 0
+
+
 def test_auth_says_so_when_the_environment_shadows_the_file_it_just_wrote() -> None:
     """The token file is the third source the provider consults, behind the CLI option and this variable.
 
@@ -292,6 +326,27 @@ def test_auth_reports_a_bad_config_instead_of_a_traceback(tmp_path: Path) -> Non
     assert "Traceback" not in result.output and result.output.startswith("error:")
     assert logout_result.exit_code == 1
     assert authenticate.await_count == 0
+
+
+def test_invalid_xingchen_config_does_not_print_credentials(tmp_path: Path) -> None:
+    config_path = _auth_config(
+        tmp_path,
+        "model_providers:\n"
+        "  xingchen:\n"
+        "    type: xingchen\n"
+        "    models: [chat-pro]\n"
+        "    gateway_api_key: LEAK-GATEWAY\n"
+        "    x_token: LEAK.X.TOKEN\n"
+        "    device_id: device-id\n",
+    )
+
+    result = runner.invoke(app, ["auth", "xingchen", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert "LEAK-GATEWAY" not in result.output
+    assert "LEAK.X.TOKEN" not in result.output
+    assert "install_id" in result.output
+    assert "Field required" in result.output
 
 
 def test_logout_removes_the_token_file_the_named_provider_reads(tmp_path: Path) -> None:

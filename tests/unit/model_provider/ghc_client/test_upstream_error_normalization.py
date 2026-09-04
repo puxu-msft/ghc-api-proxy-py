@@ -10,7 +10,7 @@ import pytest
 from h2.exceptions import NoSuchStreamError, StreamClosedError
 from h2.exceptions import ProtocolError as H2ProtocolError
 
-from app.model_provider.ghc_client.errors import normalize_upstream_error, retry_after_seconds
+from app.model_provider.upstream_errors import normalize_upstream_error, retry_after_seconds
 from app.pipeline.exceptions import (
     Disposition,
     PipelineAbort,
@@ -151,10 +151,15 @@ def test_an_error_that_is_not_the_upstreams_is_left_alone() -> None:
     assert normalize_upstream_error(PipelineAbort("already ours")) is None
 
 
-def test_retry_after_ignores_the_http_date_form() -> None:
-    """Legal but unused here, and parsing it would be code nothing could show works."""
-    assert retry_after_seconds({"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}) is None
-    assert retry_after_seconds({"Retry-After": "3"}) == 3.0
+def test_retry_after_supports_seconds_and_xingchen_milliseconds() -> None:
+    assert retry_after_seconds({"Retry-After": "3", "Retry-After-Ms": "1500"}) == 3.0
+    assert retry_after_seconds({"Retry-After-Ms": "1500"}) == 1.5
+    assert retry_after_seconds(
+        {
+            "Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT",
+            "Retry-After-Ms": "2500",
+        }
+    ) == 2.5
     assert retry_after_seconds({}) is None
 
 

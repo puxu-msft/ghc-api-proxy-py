@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 
 class ModelEndpoint(StrEnum):
@@ -17,6 +17,18 @@ class ModelEndpoint(StrEnum):
     OPENAI_RESPONSES = "/responses"
     OPENAI_RESPONSES_WS = "ws:/responses"
     OPENAI_EMBEDDINGS = "/embeddings"
+
+
+type CatalogSource = Literal["upstream", "static"]
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogSnapshot:
+    """A provider catalog plus the provenance and driver facts needed to report it."""
+
+    raw: Mapping[str, Any]
+    source: CatalogSource
+    driven_endpoints: frozenset[ModelEndpoint]
 
 
 class ProviderError(RuntimeError):

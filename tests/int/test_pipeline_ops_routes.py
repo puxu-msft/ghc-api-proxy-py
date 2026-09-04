@@ -377,6 +377,39 @@ async def test_api_config_redacts_only_the_userinfo_of_the_proxy() -> None:
     assert untouched == "http://proxy.internal:8080"
 
 
+@pytest.mark.asyncio
+async def test_api_config_redacts_only_xingchen_credentials() -> None:
+    config = ProxyConfig.model_validate(
+        {
+            "model_providers": {
+                "xingchen": {
+                    "type": "xingchen",
+                    "models": ["chat-pro"],
+                    "gateway_api_key": "gateway-secret",
+                    "x_token": "complete.secret.token",
+                    "device_id": "device-id",
+                    "install_id": "install-id",
+                }
+            },
+            "default_model_provider": "xingchen",
+        }
+    )
+    async with client_for(frozenset({"m"}), config) as client:
+        response = await client.get("/api/config")
+
+    assert response.status_code == 200
+    serialized = response.text
+    provider = response.json()["model_providers"]["xingchen"]
+    assert "gateway-secret" not in serialized
+    assert "complete.secret.token" not in serialized
+    assert provider["gateway_api_key"] == "***"
+    assert provider["x_token"] == "***"
+    assert provider["models"] == ["chat-pro"]
+    assert provider["device_id"] == "device-id"
+    assert provider["install_id"] == "install-id"
+    assert provider["api_base_url"] == "https://agent.teleai.com.cn/superCowork/sapi/api/v1"
+
+
 def test_the_ops_surface_is_mounted_on_the_router_production_builds() -> None:
     """Every test above mounts `ops_router` itself, so none of them can see whether anything else does.
 

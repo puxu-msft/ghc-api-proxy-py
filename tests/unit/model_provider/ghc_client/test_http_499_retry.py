@@ -9,7 +9,7 @@ import pytest
 
 from app.config.schema import UpstreamRequestRetryConfig
 from app.model_provider import ModelEndpoint, ModelProvider
-from app.model_provider.ghc_client.errors import normalize_upstream_error
+from app.model_provider.upstream_errors import normalize_upstream_error
 from app.pipeline.direct_driver import DirectDriver, LedgerBudget
 from app.pipeline.events import SubscriberRegistry
 from app.pipeline.exceptions import (

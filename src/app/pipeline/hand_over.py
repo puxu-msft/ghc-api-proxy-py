@@ -14,7 +14,7 @@ from h2.exceptions import H2Error
 
 from app.core.chain import Chain
 from app.errors import ErrorCategory
-from app.model_provider.ghc_client.errors import normalize_upstream_error
+from app.model_provider.upstream_errors import normalize_upstream_error
 from app.observability.logging import get_logger
 from app.pipeline.request import RequestContext, WireFormat
 from app.pipeline.retry import RetryReason, reason_for

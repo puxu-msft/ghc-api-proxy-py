@@ -13,7 +13,7 @@ from yaml import YAMLError
 
 from app.config.loading import GITHUB_TOKEN_VARIABLE, bundled_config_text, load_proxy_config
 from app.config.paths import tls_material_dir
-from app.config.schema import ProxyConfig
+from app.config.schema import GithubCopilotProviderConfig, ProxyConfig
 from app.core.chain import Chain
 from app.debug.models import collect_catalogs, render_json, render_text
 from app.lifecycle.entry import StandaloneOptions, run_standalone
@@ -357,13 +357,26 @@ def _selected_provider(provider: str, config: Path | None) -> tuple[ProxyConfig,
     return proxy_config, provider
 
 
+def _selected_github_provider(
+    provider: str,
+    config: Path | None,
+) -> tuple[ProxyConfig, str, GithubCopilotProviderConfig]:
+    proxy_config, provider_name = _selected_provider(provider, config)
+    provider_config = proxy_config.model_providers[provider_name]
+    if not isinstance(provider_config, GithubCopilotProviderConfig):
+        raise typer.BadParameter(
+            f"model provider {provider_name!r} has type {provider_config.type!r}; CLI auth only manages "
+            "GitHub Copilot credentials. Configure Xingchen `gateway_api_key` and `x_token` instead."
+        )
+    return proxy_config, provider_name, provider_config
+
+
 def _authenticate(provider: str, config: Path | None) -> None:
     """Log in against the tenant the named provider talks to, storing the token where that provider reads it.
 
     Both halves move together: a login that reaches the right host but writes to a file the provider never opens is as unusable as one that reached the wrong host, and doing only one of the two would leave the feature half-wired. Spec §3.5, §3.6.
     """
-    proxy_config, provider_name = _selected_provider(provider, config)
-    provider_config = proxy_config.model_providers[provider_name]
+    proxy_config, provider_name, provider_config = _selected_github_provider(provider, config)
     try:
         web_base_url = GhcClientConfig(
             auth_base_url_override=provider_config.auth_base_url
@@ -449,7 +462,7 @@ def logout(
     # Resolved exactly as `auth` resolves it, and for the reason `auth` exists: once a login writes a provider's own token file, a logout that clears some other path reports having removed authentication state while leaving a working token in place. Spec §3.7.
     #
     # **The OAuth origin is deliberately not derived here.** Removing a local file does not depend on where device codes come from, and requiring it would leave a deployment whose `auth_base_url` is a local stand-in unable to delete its own token through the CLI. Written down because §3.3's refusal is loud and a later reader could reasonably think it should apply to both commands.
-    proxy_config, provider_name = _selected_provider(provider, config)
+    proxy_config, provider_name, _ = _selected_github_provider(provider, config)
     token_path = github_token_path(proxy_config, provider_name)
     run(partial(clear_stored_token, token_path))
     # Named rather than announced in general. This clears one provider's file and nothing else, which is the whole reason the provider is a required argument rather than something inferred.
@@ -512,11 +525,11 @@ def debug_models(
         bool,
         typer.Option(
             "--json",
-            help="Print the complete decoded upstream payload, keyed by provider name unless --provider names one.",
+            help="Print the complete provider catalog, keyed by provider name unless --provider names one.",
         ),
     ] = False,
 ) -> None:
-    """Show upstream model information."""
+    """Show model information from each provider's routing catalog."""
     proxy_config = _read_config(config)
     if provider is not None and provider not in proxy_config.model_providers:
         configured = ", ".join(sorted(proxy_config.model_providers)) or "none"
