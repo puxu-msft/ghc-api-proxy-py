@@ -1,6 +1,6 @@
 # httpx → httpx2 迁移实施计划
 
-状态：起草 2026-08-21，**第 2 稿**（第 1 稿经两份独立评审判 `needs-fix`，本稿是处置后的版本）。本文件是活文档：实施状态、已裁决事项、待裁决事项都在这里。
+状态：起草 2026-08-21，**第 2 稿，2026-09-04 状态同步**。核心依赖迁移、stream cap、WebSocket、OTel 与回归已完成并进入主线；V2 的 current-stack 异常形态已由后续实测回答。步骤 4 的剩余散文逐条审计没有完整闭合证据，仍明确保留为残余项。本文件继续作为迁移记录与残余项载体，不把早期验证数字冒充当前基线。
 
 调研与评审依据：
 
@@ -11,7 +11,7 @@
 - `reports/260821-review-httpx2-plan-b.md` —— 第 1 稿评审（覆盖面、可验证性、回滚、文档纪律）。
 - `reports/260821-review-httpx2-plan-r2.md` —— 第 2 稿复评，只攻 D3' 与 D7，处置见 §8。
 
-## 0. 实施状态（2026-08-21）
+## 0. 实施状态（2026-09-04 同步）
 
 | 步骤 | 状态 | 落点 |
 |---|---|---|
@@ -20,19 +20,26 @@
 | 步骤 2：`stream_cap` 按 D3' 改 + 饱和突发判别测试 + starlette floor 修正 | **完成** | `2b20be7` |
 | 步骤 3：判别性测试（OTel span 对照） | **完成** | `5aeb9d7` |
 | 步骤 3：判别性测试（WS 默认实现绑定共享 client） | **完成** | `2924a8c` 内 |
-| 步骤 4：散文与注释改名（约 51 处） | **进行中**，`idle_timeout.py` 那条失实注释已改，其余待做 | — |
-| 步骤 5：V2 h2 GOAWAY 缝隙复测 | **未做** | §4 V2 |
-| 步骤 6：全量回归 | 每步都跑了；当前 1567 passed / 2 skipped，`ruff check src tests` 干净，`pyright` 21 error 全部属于同伴未提交的 `stream_cap` 改动，本次零新增 | — |
+| 步骤 4：散文与注释逐条复核 | **残余项，未宣称完成**。`idle_timeout.py` 的旧栈结论已按版本改正，`stream_cap.py` 已承接 cap 机理与测量；其余 `httpx` 文本同时包含历史版本、logger 名、第三方模块名与泛称，没有逐条处置账可证明 51 处已闭合 | 本计划保留，不用命中数冒充语义审计 |
+| 步骤 5：V2 h2 GOAWAY 缝隙复测 | **后续完成**。2026-08-23 在 current `httpx2`／`httpcore2` 栈实测出 read boundary 决定 `httpx2.RemoteProtocolError` 或裸 `h2.ProtocolError` 的两种 carrier，现行 normalization 与测试承接结论 | §4 V2；`../upstream/retry-and-continuation/reports/260823-h2-protocolerror-category.md` |
+| 步骤 6：迁移候选回归 | **完成于迁移当时**；原始 1567 passed／2 skipped、Ruff 与 Pyright 结果只作 2026-08-21 快照，不是当前主线基线 | 当前验证命令以项目根 `CLAUDE.md` 为准 |
 
 **端到端验证（这是本次任务的原始判据）**：从 `2924a8c` 全新 `uvx --refresh --from git+file://…` 安装并 `ghc-api-proxy start --port 41411`，服务启动、向 GitHub 换取 Copilot token（HTTP/2 200）、拉到 42 个模型、正常监听，SIGTERM 后优雅排空退出。用户报的那条命令的两级失败点（starlette 私有 API、anthropic 拒收 client）都不再出现。
 
 
 探针（可复跑，解释器用装了最新依赖的环境）：
 
-- `.dev/exp/httpx2-migration/probe_cap_designs.py` —— 驱动真实连接池收发循环，对照三种 cap 设计。**这是 D3' 的判据。**
+- `.dev/exp/httpx2-migration/probe_cap_designs.py` —— 驱动真实连接池收发循环，对照三种 cap 设计。**这是 D3' 的判据。** `PROBE_CORE` 选择要 import 的 core 包（默认 `httpcore2`），`PROBE_CAP` 选择每连接上限（默认 4），`PROBE_SCENARIOS` 是空格分隔的 `burst,max_connections` 对（默认覆盖不饱和与饱和组合）。输出 `peak`、`conns`、`closed_in_use`、`attempts`、`rejects`；exit 0 只表示 `not_available` 在所选场景守住 cap 且没有关闭仍被占用的连接，不表示其余设计都正确。
 - `.dev/exp/httpx2-cap-probe/probe_tls.py` —— TLS 信任源对照，带 `expired.badssl.com` 负样本。
 - `.dev/exp/httpx2-cap-probe/probe_cap.py` —— 第 1 稿用的单趟分配探针。**保留作为历史记录，但它的结论已被 `probe_cap_designs.py` 取代**：它手工把请求塞进队列再触发一次分配，测的是一个真实到达模式下罕见的状态。
 - `.dev/exp/httpx2-migration/rename_imports.py` —— 步骤 2 的机械改名器（tokenize 级，只改 NAME token，跳过注释与字符串，显式保护 `opentelemetry.instrumentation.httpx` 这类属性位，遇到 `import ... as` 直接报错退出）。
+- `.dev/exp/httpx2-migration/archive-260821/stage_migration.py` —— 迁移当时为共享索引构造 rename-only blob 的一次性助手，原样归档；没有 living consumer，Usage 与 argparse 还存在历史不一致，**不得当作当前 staging 工具运行**。归档说明见同目录 `README.md`。
+
+从主仓根复跑当前配置量级的示例：
+
+```bash
+PROBE_CORE=httpcore2 PROBE_CAP=1 PROBE_SCENARIOS='50,100 200,100 500,100' uv run python .dev/exp/httpx2-migration/probe_cap_designs.py
+```
 
 ## 1. 为什么迁移
 
@@ -64,7 +71,7 @@ httpx2 是 Pydantic 接管维护后从 `httpx 0.28.1`（commit `b5addb6`）分�
 
 httpcore2 2.3.0 把 `_assign_requests_to_connections` 重写成单趟循环（PR #974）：可复用连接集合在一趟分配开始时**快照一次**，`is_available()` 整趟只问一次。而 `StreamCappedConnection` 的全部机制就是覆盖 `is_available()`。
 
-判据探针 `.dev/exp/httpx2-migration/probe_cap_designs.py` 驱动**真实的 `AsyncConnectionPool.handle_async_request` 循环**（第 1 稿的探针只手工调用一次 `_assign_requests_to_connections`，测不到真实到达模式）。cap=4，度量三项：`peak` = 单连接上实际同时在飞的最大请求数（cap 的全部目的：一次 GOAWAY 端掉的就是这些）、`conns` = 建立的连接数、`closed_in_use` = 池在其上仍挂着已分配请求时就关掉的连接数。
+判据探针 `.dev/exp/httpx2-migration/probe_cap_designs.py` 驱动**真实的 `AsyncConnectionPool.handle_async_request` 循环**（第 1 稿的探针只手工调用一次 `_assign_requests_to_connections`，测不到真实到达模式）。默认 cap=4，度量五项：`peak` = 单连接上实际同时在飞的最大请求数（cap 的全部目的：一次 GOAWAY 端掉的就是这些）、`conns` = 建立的连接数、`closed_in_use` = 池在其上仍挂着已分配请求时就关掉的连接数、`attempts` = 请求进入 wrapper handler 的总次数、`rejects` = `not_available` 设计主动退回池重排的次数。前三项判断正确性与连接放大，后两项揭示发送时拒绝的内部重排成本；参数与运行命令见 §0。
 
 httpcore2 2.12.0 实测：
 
@@ -176,11 +183,11 @@ floor 是**语义约束**，不是口味：代码注入 `httpx2.AsyncClient`（�
 
 **步骤 3**：判别性测试补齐 —— D5 的 tracing span 用例、D4 的 WS loopback 用例。两者都要先证明能打红。
 
-**步骤 4**：散文与注释的改名（那 51 处），逐条判断：指代包名的改；引用「httpx 0.28 / httpcore 1.0.9 的某行为」这类历史实测结论的，连同结论一起复核，必要时标注版本与日期。特别是 `idle_timeout.py:26` —— httpx2 把 `aiter_raw` 的 `await self.aclose()` 移进了 `finally`，那句 2026-08-20 的实测结论两个分句都不再成立。评审 B 已核：**没有任何测试断言了旧行为**，所以这一条只需改注释，不会有测试变红。同时把 API delta §5.1 的「私有面存活性」对照表蒸馏进 `stream_cap.py` 的模块文档串。
+**步骤 4——残余项，未宣称完成**：`idle_timeout.py:26` 已把旧 `httpx 0.28.1` 与当前 `httpx2` 的关闭行为分开记录，`stream_cap.py` 已承接 API delta §5.1 的私有面存活性与饱和测量。其余历史清单没有逐条处置账；当前 `httpx` 文本同时包含版本化历史观察、logger／模块的真实名字、第三方类型的泛称和可能仍需改正的包名，因此既不能一键改成 `httpx2`，也不能拿剩余命中数宣称审计完成。保留为文档残余项，不阻塞已经完成的生产迁移。
 
-**步骤 5**：V2（h2 GOAWAY 缝隙）复测，见 §4。
+**步骤 5——后续完成**：没有改写 8 月 20 日已归档的 PoC，而是在 current `httpx2`／`httpcore2` 栈上于 2026-08-23 直接测得两种 carrier：GOAWAY 后续帧跨 read boundary 时出现 `httpx2.RemoteProtocolError`，同一 read 内出现裸 `h2.ProtocolError`。当前 normalization 与回归覆盖承接该结论；完整证据见 §4 V2 与 `../upstream/retry-and-continuation/reports/260823-h2-protocolerror-category.md`。
 
-**步骤 6**：全量回归 —— `uv run pytest`、`ruff check`、`uv run pyright`。**排在 V1/V2 之后**，因为它们失败会改代码（第 1 稿把回归排在验证之前，评审 A 的 M4）。Pyright **可能**暴露新错误（httpx2 把 `Headers.get()` 的返回注解从 `Any` 收紧成 `str | None`），以实际输出为准 —— 第 1 稿写成「预期会报」，但没有仓库级证据。
+**步骤 6——迁移当时完成**：迁移候选运行了 `uv run pytest`、`ruff check` 与 `uv run pyright`；当时数字只作 2026-08-21 快照，见 §0。V2 后来在独立的 retry-and-continuation 切片中完成并由其自身测试承接，不倒推改写本计划的历史执行顺序，也不把早期回归冒充当前主线验证。
 
 ## 4. 必须实测的项
 
@@ -202,13 +209,13 @@ httpx2 2.12.0 default ctx: truststore._api
 
 **权重边界**：这只证明**当前这台开发机**的 OS 信任库够用。若部署到信任库不同的机器（精简容器镜像尤其常见，很多基础镜像不装 `ca-certificates`），结论不自动成立，需在该机器上复跑同一个探针。退路是把 `certifi` 加回 `dependencies` 并显式传 `verify=ssl.create_default_context(cafile=certifi.where())`。
 
-### V2：h2 GOAWAY 缝隙的形态 —— 待做
+### V2：h2 GOAWAY 缝隙的形态 —— 后续完成
 
-`ghc_client/transport.py:31-33` 记录的那条「hyper-h2 从缝隙里抛出 `h2.exceptions.ProtocolError`、没人包装」的实测结论，依赖的是 httpcore 的内部结构而非 httpx 的公共契约。httpcore2 在 2.1.0（#935）、2.4.0（#1012/#1013）、2.10.0（#1093，「HTTP/2 stream 失败时传播原异常而非 KeyError」）都动过这块。
+原迁移计划没有改写 `exp/260820-h2-goaway-poc/run_poc.py`：它是 2026-08-20 旧栈的历史 PoC，原样保留才不伪造那次观察。原计划要求建立 current-stack fixture 的目的已由 2026-08-23 的生产路径实测满足，证据在 `../upstream/retry-and-continuation/reports/260823-h2-protocolerror-category.md`，当前实现说明在主仓 `src/app/model_provider/ghc_client/errors.py`。
 
-**runner 路径**：实际可执行的 PoC 是 `exp/260820-h2-goaway-poc/run_poc.py`（第 1 稿写的 `.dev/docs/upstream/h2-goaway/` 只有文档与分析脚本）。它 `:20-21` 仍 import `httpcore`/`httpx`，`:7` 指定迁移前的 `.venv`，而清单把 `exp/` 排除在机械迁移之外 —— 所以要先做一份 httpx2 版的一次性 fixture，不要就地改那个已归档的 PoC。
+实测答案不是“httpcore2 已经全包住”或“永远裸抛”二选一，而是 read boundary 决定 carrier：GOAWAY 与后续触发帧落在不同 read 时，httpcore2 把 event 映射成 `httpcore2.RemoteProtocolError`，httpx2 再映射为 `httpx2.RemoteProtocolError`；落在同一 read 时，`receive_data` 位于 mapping guard 外，裸 `h2.ProtocolError` 穿出。当前 normalization 把两者都纳入 upstream failure，但 h2 exception hierarchy 本身不携带可靠 attribution，残余取舍与证据边界归 retry-and-continuation 主题，不在本迁移计划重裁。
 
-结论有两个方向都要接受：那条旁路可能**不再必要**（httpcore2 已经包住了），也可能**仍不充分**。两种都要写进 `transport.py` 的注释并标日期。
+本项因此按“原问题已有 current-stack 实测与生产承接”结案，不把旧 runner 修成第二套当前验收系统。它证明 carrier gap 的形态与当前处理，不证明任意 GOAWAY 都来自同一方或同一原因。
 
 ### V3：`uv lock` 之后的依赖图 —— 步骤 1 内
 
@@ -228,7 +235,7 @@ httpx2 2.12.0 default ctx: truststore._api
 
 - **步骤 1 是一个原子切片**，中途任何一处失败都直接 `git checkout -- .` 重来，不要试图在半迁移状态上打补丁。它的收敛判据是「`import app.cli` 能过且 `pytest --collect-only` 能收集」，不是「测试全绿」。
 - **`uv lock` 的 diff 必须逐行审**。放开 fastapi 会连带 `starlette 0.52.1 → 1.6.0` 这样的大版本升级（D7 已裁决接受并给了证据），但**其他**非 httpx 的版本变动要单独裁决、单独提交，不能塞进一个标题写着「依赖切换」的提交里。仓库上一个提交 `1d14605` 正是被 starlette 1.x 打过一次。
-- **V2 失败时**：`transport.py` 的旁路是加固还是删除，属于产品行为判断，不在本迁移的授权范围内 —— 停下来问用户，不要顺手改。
+- **V2 的历史中止条件已经退场**：2026-08-23 的 current-stack 实测回答了 carrier gap，并由当前 normalization 与测试承接；后续若要改变裸 h2 异常的 attribution 取舍，归 `upstream/retry-and-continuation` 的产品判断，不在本迁移计划顺手重裁。
 
 ## 6. 待用户裁决
 

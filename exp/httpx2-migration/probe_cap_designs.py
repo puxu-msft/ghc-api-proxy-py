@@ -11,19 +11,25 @@ What is measured, per design:
   peak            the most requests ever in flight at once on a single connection (the cap's whole purpose: a GOAWAY takes out everything in flight on one connection)
   conns           how many connections were created (amplification)
   closed_in_use   connections the pool closed while it still held requests assigned to them (a broken reservation invariant)
+  attempts        requests entering the wrapper's send path, including re-assignments
+  rejects         send attempts the not_available design returned to the pool for re-assignment
+
+Run from the main repository root. `PROBE_CORE` names the importable core package (default `httpcore2`), `PROBE_CAP` sets the per-connection cap (default 4), and `PROBE_SCENARIOS` is a space-separated list of `burst,max_connections` pairs:
+
+  PROBE_CORE=httpcore2 PROBE_CAP=1 PROBE_SCENARIOS='50,100 200,100 500,100' uv run python .dev/exp/httpx2-migration/probe_cap_designs.py
+
+Exit 0 means only that not_available held the configured cap without closing a connection that still had assigned requests in the selected scenarios. It does not declare either comparison design correct.
 """
 
 from __future__ import annotations
 
 import asyncio
+import importlib
+import os
 import sys
 from collections.abc import AsyncIterator
 
-import importlib
-import os
-
-# Which stack to drive. The cap has to hold on both: httpcore 1.0.9 is what ships today and
-# httpcore2 is what the migration lands on.
+# Which stack to drive. `PROBE_CORE` keeps the historical httpcore 1.0.9 comparison reproducible; current production uses httpcore2.
 httpcore2 = importlib.import_module(os.environ.get("PROBE_CORE", "httpcore2"))
 AsyncConnectionInterface = httpcore2.AsyncConnectionInterface
 ConnectionNotAvailable = httpcore2.ConnectionNotAvailable
@@ -31,7 +37,11 @@ Origin = httpcore2.Origin
 Request = httpcore2.Request
 Response = httpcore2.Response
 
-MAX_STREAMS = 4
+MAX_STREAMS = int(os.environ.get("PROBE_CAP", "4"))
+SCENARIOS = [
+    tuple(int(n) for n in pair.split(","))
+    for pair in os.environ.get("PROBE_SCENARIOS", "24,100 100,100 24,2 100,4 100,8").split()
+]
 
 
 class Meter:
@@ -42,6 +52,8 @@ class Meter:
         self.peak = 0
         self.connections = 0
         self.closed_in_use = 0
+        self.attempts = 0
+        self.rejections = 0
 
     def enter(self, key: int) -> None:
         self.in_flight[key] = self.in_flight.get(key, 0) + 1
@@ -123,7 +135,9 @@ class Capped(AsyncConnectionInterface):
         return True
 
     async def handle_async_request(self, request: Request) -> Response:
+        self._meter.attempts += 1
         if self._design == "not_available" and self.assigned_request_count() > self._max:
+            self._meter.rejections += 1
             raise ConnectionNotAvailable()
         return await self._inner.handle_async_request(request)
 
@@ -177,7 +191,7 @@ async def run(design: str, burst: int, *, inner_idle: bool, max_connections: int
 async def main() -> int:
     print(f"httpcore2 {httpcore2.__version__}, cap = {MAX_STREAMS} streams per connection\n")
     failures = 0
-    for burst, max_connections in ((24, 100), (100, 100), (24, 2), (100, 4), (100, 8)):
+    for burst, max_connections in SCENARIOS:
         for inner_idle in (False, True):
             print(f"burst={burst} max_connections={max_connections} inner.is_idle()={inner_idle}")
             for design in ("is_available", "can_handle", "not_available"):
@@ -185,7 +199,8 @@ async def main() -> int:
                 held = meter.peak <= MAX_STREAMS
                 print(
                     f"  {design:14s} peak={meter.peak:<4d} conns={meter.connections:<4d}"
-                    f" closed_in_use={meter.closed_in_use:<3d} cap held={held}"
+                    f" closed_in_use={meter.closed_in_use:<3d} attempts={meter.attempts:<6d}"
+                    f" rejects={meter.rejections:<6d} cap held={held}"
                 )
                 if design == "not_available" and (not held or meter.closed_in_use):
                     failures += 1
