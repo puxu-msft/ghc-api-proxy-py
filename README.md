@@ -62,6 +62,7 @@
 | `docs/architecture-audit/` | 2026-08-14 那一轮七轴线独立体检（依赖图、重复实现、模块边界、类型泄漏等）及其综合 |
 | `docs/graceful-shutdown/` | 关闭信号到进程退出之间的一切；目前只有 `client-side/`，监听器那一半还散在 `systemd-*` 与 `deployment-systemd` 下 |
 | `docs/project-review-principles-skill/` | `project-review-principles` skill 本身的事实核查与形态评审 |
+| `docs/early-verification/` | 2026-07-15～17 的 Phase 0～8、Hooks 与 Tokenization 验收原件；只作历史快照，当前验证权威仍是项目根 `CLAUDE.md` 与主仓 `tests/` |
 | `docs/archived-2604-rewrite/` | 早期 peer 写的 `copilot-api-js` 学习笔记，用户 2026-08-20 裁定整体过期，**仅供参考、无权威地位** |
 | `docs/tmp/` | 未分类：判不进任何话题的报告，以及话题尚不明朗时的新报告 |
 | `docs/docs-tmp-migration/` | 2026-08-21 那次搬迁自身的记录：逐文件分类表、判据与批次报告 |
