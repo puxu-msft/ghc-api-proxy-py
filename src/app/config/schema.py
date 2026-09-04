@@ -6,7 +6,7 @@ A request that started under one version keeps seeing it.
 `NOT_HOT_RELOADABLE` lists the dotted paths the spec marks as requiring a restart.
 """
 
-from typing import Literal, cast
+from typing import Annotated, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -40,9 +40,19 @@ type ThinkingDisplayPolicy = Literal["passthrough", "drop", "omitted", "summariz
 NOT_HOT_RELOADABLE = frozenset(
     {
         "model_providers.*.api_base_url",
+        "model_providers.*.app_version",
         "model_providers.*.auth_base_url",
         "model_providers.*.auth_state_file",
+        "model_providers.*.client_type",
+        "model_providers.*.device_id",
+        "model_providers.*.gateway_api_key",
         "model_providers.*.github_token_file",
+        "model_providers.*.install_id",
+        "model_providers.*.models",
+        "model_providers.*.route_target",
+        "model_providers.*.type",
+        "model_providers.*.user_agent",
+        "model_providers.*.x_token",
         "pidfile_dir",
         "proxy",
         "reactive_rate_limiter",
@@ -55,9 +65,14 @@ NOT_HOT_RELOADABLE = frozenset(
     }
 )
 
+# Fields shared with an older provider but fixed into the Xingchen instance at startup. Kept type-scoped so this feature does not silently change the existing GitHub Copilot hot-reload contract.
+PROVIDER_NOT_HOT_RELOADABLE: dict[str, frozenset[str]] = {
+    "xingchen": frozenset({"disabled_models"}),
+}
+
 
 class Section(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
 
 
 class TlsConfig(Section):
@@ -91,29 +106,25 @@ class InboundConfig(Section):
     anthropic_count_tokens: CountTokensConfig = Field(default_factory=CountTokensConfig)
 
 
-class ModelProviderConfig(Section):
-    type: Literal["github_copilot", "codebuddy"]
+class _ModelProviderConfigBase(Section):
     # Where inference goes.
     api_base_url: str = ""
+    disabled_models: list[str] = Field(default_factory=lambda: list[str]())
+
+
+class GithubCopilotProviderConfig(_ModelProviderConfigBase):
+    type: Literal["github_copilot"]
     # Where a GitHub token is exchanged for a Copilot one, and where the account is described.
     # A separate host from the one above, and separately configurable: an enterprise install moves both, and leaving this one a module constant meant nothing could be stood up locally — the inference calls could be redirected and the three auth calls could not.
     auth_base_url: str = ""
     # May contain `$XDG_DATA_HOME`; expanded by `app.config.paths.expand_user_path`.
     github_token_file: str = ""
-    # `codebuddy` only: the desktop app's login-state `.info` file, holding the tokens
-    # this provider refreshes and writes back. Empty means auto-discovery in the
-    # desktop app's own data directory. Restart-pinned with the other credential
-    # paths: a live provider was built around the file it was given at startup.
-    # May contain `$XDG_DATA_HOME`; expanded by `app.config.paths.expand_user_path`.
-    auth_state_file: str = ""
     model_refresh_interval: int = Field(default=3600, ge=0)
-    disabled_models: list[str] = Field(default_factory=lambda: list[str]())
     # Which models actually execute hosted web search. Each entry is a **regular expression**, matched against upstream `model.id` with `fullmatch` — so a plain id like `gpt-5.5` still means what it says and needs no anchors, while `gpt-5\.\d+.*` covers a family. A declaration from the client is translated into this endpoint's own `{"type": "web_search"}` only for a model some pattern claims. For any other, the request is answered with a failed `web_search_tool_result` rather than sent on without the tool: a search sub-request stripped of its only tool succeeds by answering from memory, and the client labels that reply as search results.
     #
     # Maintained by hand because the catalog cannot answer the question. Measured 2026-08-20 across the live catalog — 42 models, 67,656 bytes — the union of `capabilities.supports` keys holds no web-search bit of any kind, and a value-level scan for `search|web_|builtin|hosted` over the whole document returns nothing. The two models known to work cannot be told apart from the rest on any advertised field.
     #
-    # The default covers the `gpt-<major>.<minor>` line for majors 5 through 9, which is every
-    # OpenAI-vendor model advertising `/responses` in that catalog — `gpt-5.3-codex`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.5`, and the three `gpt-5.6-*` — and claims their successors as they appear. Ruled a pattern rather than an id list on 2026-08-21, after an id list had to be hand-extended for exactly that reason.
+    # The default covers the `gpt-<major>.<minor>` line for majors 5 through 9, which is every OpenAI-vendor model advertising `/responses` in that catalog — `gpt-5.3-codex`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.5`, and the three `gpt-5.6-*` — and claims their successors as they appear. Ruled a pattern rather than an id list on 2026-08-21, after an id list had to be hand-extended for exactly that reason.
     #
     # **The dot is load-bearing.** `gpt-5-mini` has no dotted minor and is vendor `Azure OpenAI`, a different supply chain; requiring `\.` is what keeps a family pattern from sweeping it in. A two-digit major (`gpt-10.0`) is deliberately not matched: inventing a naming scheme two majors ahead is a guess, and the failure is an operator adding one line, not a wrong answer.
     #
@@ -121,6 +132,70 @@ class ModelProviderConfig(Section):
     models_support_web_search: list[str] = Field(
         default_factory=lambda: [r"gpt-[5-9]\.\d+.*"]
     )
+
+
+def _canonical_model_name(name: str) -> str:
+    # A transcription of `app.pipeline.model_resolution.canonical`; the config layer stays independent of the pipeline, and a cross-layer test keeps the two spellings aligned.
+    return name.strip().lower().replace(".", "-")
+
+
+class XingchenProviderConfig(_ModelProviderConfigBase):
+    type: Literal["xingchen"]
+    api_base_url: str = "https://agent.teleai.com.cn/superCowork/sapi/api/v1"
+    models: list[str] = Field(min_length=1)
+    gateway_api_key: str = Field(min_length=1, repr=False)
+    x_token: str = Field(min_length=1, repr=False)
+    device_id: str = Field(min_length=1)
+    install_id: str = Field(min_length=1)
+    app_version: str = "2.4.1"
+    route_target: str = "ops-gateway"
+    client_type: str = "desktop"
+    user_agent: str = "super-agent/1.0"
+
+    @field_validator(
+        "api_base_url",
+        "gateway_api_key",
+        "x_token",
+        "device_id",
+        "install_id",
+        "app_version",
+        "route_target",
+        "client_type",
+        "user_agent",
+    )
+    @classmethod
+    def _value_may_not_be_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("value may not be empty or blank")
+        return value
+
+    @field_validator("models")
+    @classmethod
+    def _models_must_be_distinct_and_addressable(cls, value: list[str]) -> list[str]:
+        if any(not model.strip() for model in value):
+            raise ValueError("models may not contain an empty or blank id")
+        if len(value) != len(set(value)):
+            raise ValueError("models may not contain duplicate ids")
+        canonical = [_canonical_model_name(model) for model in value]
+        if len(canonical) != len(set(canonical)):
+            raise ValueError("models may not contain canonically equivalent ids")
+        return value
+
+
+class CodebuddyProviderConfig(_ModelProviderConfigBase):
+    type: Literal["codebuddy"]
+    # The desktop app's login-state `.info` file, holding the tokens this provider
+    # refreshes and writes back. Empty means auto-discovery in the desktop app's
+    # own data directory. Restart-pinned with the other credential paths: a live
+    # provider was built around the file it was given at startup.
+    # May contain `$XDG_DATA_HOME`; expanded by `app.config.paths.expand_user_path`.
+    auth_state_file: str = ""
+
+
+type ModelProviderConfig = Annotated[
+    GithubCopilotProviderConfig | XingchenProviderConfig | CodebuddyProviderConfig,
+    Field(discriminator="type"),
+]
 
 
 class UpstreamTransportConfig(Section):
@@ -537,4 +612,4 @@ class ProxyConfig(Section):
     )
     hook_fix_responses_sse: FixResponsesSseHook = Field(default_factory=FixResponsesSseHook)
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)

@@ -6,10 +6,11 @@ They are reported instead of silently applied.
 """
 
 from collections.abc import Callable, Iterator
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, cast
 
-from app.config.schema import NOT_HOT_RELOADABLE, ProxyConfig
+from app.config.schema import NOT_HOT_RELOADABLE, PROVIDER_NOT_HOT_RELOADABLE, ProxyConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +63,81 @@ def _write(values: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
     cursor[path[-1]] = value
 
 
+def _providers(values: dict[str, Any]) -> dict[str, Any]:
+    raw = values.get("model_providers")
+    if not isinstance(raw, dict):
+        return {}
+    return cast(dict[str, Any], raw)
+
+
+def _provider_type(value: object) -> str:
+    if not isinstance(value, dict):
+        return ""
+    candidate = cast(dict[str, Any], value).get("type")
+    return candidate if isinstance(candidate, str) else ""
+
+
+def _pin_provider_graph(
+    startup_values: dict[str, Any],
+    candidate_values: dict[str, Any],
+    pinned: set[str],
+) -> bool:
+    """Keep provider membership and variants aligned with the instances built at startup."""
+    startup_providers = _providers(startup_values)
+    candidate_providers = _providers(candidate_values)
+    changed = False
+    for name in sorted(set(startup_providers) | set(candidate_providers)):
+        was = startup_providers.get(name)
+        now = candidate_providers.get(name)
+        if was is not None and now is not None and _provider_type(was) == _provider_type(now):
+            continue
+        changed = True
+        if was is None:
+            candidate_providers.pop(name, None)
+        else:
+            candidate_providers[name] = deepcopy(was)
+        pinned.add(f"model_providers.{name}")
+    return changed
+
+
+_PROVIDER_GRAPH_SELECTORS: tuple[tuple[str, ...], ...] = (
+    ("default_model_provider",),
+    ("fallback_model_provider",),
+    ("inbound", "anthropic_count_tokens", "providers"),
+)
+
+
+def _pin_provider_graph_selectors(
+    startup_values: dict[str, Any],
+    candidate_values: dict[str, Any],
+    pinned: set[str],
+) -> None:
+    for path in _PROVIDER_GRAPH_SELECTORS:
+        was = _read(startup_values, path)
+        now = _read(candidate_values, path)
+        _write(candidate_values, path, deepcopy(was))
+        if was != now:
+            pinned.add(".".join(path))
+
+
+def _pin_type_scoped_provider_fields(
+    startup_values: dict[str, Any],
+    candidate_values: dict[str, Any],
+    pinned: set[str],
+) -> None:
+    startup_providers = _providers(startup_values)
+    candidate_providers = _providers(candidate_values)
+    for name in sorted(set(startup_providers) & set(candidate_providers)):
+        provider_type = _provider_type(startup_providers[name])
+        for field in PROVIDER_NOT_HOT_RELOADABLE.get(provider_type, ()):
+            path = ("model_providers", name, field)
+            was = _read(startup_values, path)
+            now = _read(candidate_values, path)
+            if was != now:
+                _write(candidate_values, path, was)
+                pinned.add(".".join(path))
+
+
 def pin_restart_only(startup: ProxyConfig, candidate: ProxyConfig) -> ReloadOutcome:
     """Keep restart-only values at what the process started with.
 
@@ -70,7 +146,18 @@ def pin_restart_only(startup: ProxyConfig, candidate: ProxyConfig) -> ReloadOutc
     startup_values = startup.model_dump(mode="python")
     candidate_values = candidate.model_dump(mode="python")
 
-    pinned: list[str] = []
+    pinned: set[str] = set()
+    counting_providers_explicit = (
+        "providers" in candidate.inbound.anthropic_count_tokens.model_fields_set
+    )
+    graph_changed = _pin_provider_graph(startup_values, candidate_values, pinned)
+    if graph_changed:
+        _pin_provider_graph_selectors(startup_values, candidate_values, pinned)
+        counting_providers_explicit = (
+            "providers" in startup.inbound.anthropic_count_tokens.model_fields_set
+        )
+    _pin_type_scoped_provider_fields(startup_values, candidate_values, pinned)
+
     for pattern in sorted(NOT_HOT_RELOADABLE):
         seen: set[tuple[str, ...]] = set()
         for path in (*_expand(pattern, startup_values), *_expand(pattern, candidate_values)):
@@ -81,7 +168,13 @@ def pin_restart_only(startup: ProxyConfig, candidate: ProxyConfig) -> ReloadOutc
             now = _read(candidate_values, path)
             if was != now:
                 _write(candidate_values, path, was)
-                pinned.append(".".join(path))
+                pinned.add(".".join(path))
+
+    # `model_dump` materialises defaults, but this validator intentionally distinguishes an inherited default from an operator-written provider list. Preserve that distinction across the round trip or a deployment whose only provider is not named `ghc` fails its first reload on a value nobody wrote.
+    if not counting_providers_explicit:
+        inbound = cast(dict[str, Any], candidate_values["inbound"])
+        counting = cast(dict[str, Any], inbound["anthropic_count_tokens"])
+        counting.pop("providers", None)
 
     effective = ProxyConfig.model_validate(candidate_values)
     return ReloadOutcome(

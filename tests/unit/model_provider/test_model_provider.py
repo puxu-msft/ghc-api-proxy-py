@@ -6,7 +6,7 @@ import pytest
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 
-from app.config.schema import ModelProviderConfig, ProxyConfig
+from app.config.schema import GithubCopilotProviderConfig, ProxyConfig
 from app.model_provider import (
     CapabilityMissing,
     EndpointNotSupported,
@@ -82,7 +82,7 @@ def build_provider(
     provider = GithubCopilotProvider(
         "ghc",
         client,
-        ModelProviderConfig(type="github_copilot", disabled_models=disabled or []),
+        GithubCopilotProviderConfig(type="github_copilot", disabled_models=disabled or []),
         http_client=http_client,
         base_url=BASE_URL,
     )

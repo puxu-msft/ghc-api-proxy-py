@@ -12,7 +12,7 @@ from app.config.loading import (
 )
 from app.config.paths import spec_config_file_path
 from app.config.provider import ConfigProvider, pin_restart_only
-from app.config.schema import ProxyConfig
+from app.config.schema import CodebuddyProviderConfig, GithubCopilotProviderConfig, ProxyConfig
 
 
 def write_config(directory: Path, body: str) -> Path:
@@ -93,6 +93,33 @@ def test_environment_nests_on_double_underscore() -> None:
     assert values == {"client_delivery": {"sse_ping_interval": "7"}}
 
 
+def xingchen_values(**overrides: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "type": "xingchen",
+        "models": ["chat-pro"],
+        "gateway_api_key": "gateway-key",
+        "x_token": "complete.x.token",
+        "device_id": "device-id",
+        "install_id": "install-id",
+    }
+    values.update(overrides)
+    return values
+
+
+def test_nested_environment_overrides_xingchen_credentials() -> None:
+    config = load_proxy_config(
+        bundled={"model_providers": {"xingchen": xingchen_values()}},
+        environ={
+            "GHC_API_PROXY_MODEL_PROVIDERS__XINGCHEN__GATEWAY_API_KEY": "environment-key",
+            "GHC_API_PROXY_MODEL_PROVIDERS__XINGCHEN__X_TOKEN": "environment.x.token",
+        },
+    )
+    xingchen = config.model_providers["xingchen"]
+    assert xingchen.type == "xingchen"
+    assert xingchen.gateway_api_key == "environment-key"
+    assert xingchen.x_token == "environment.x.token"
+
+
 def test_missing_explicit_config_file_is_an_error(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         resolve_config_path(tmp_path / "absent.yaml")
@@ -143,10 +170,185 @@ def test_restart_only_wildcard_path_is_pinned_per_provider() -> None:
         }
     )
     outcome = pin_restart_only(startup, candidate)
-    assert outcome.config.model_providers["ghc"].api_base_url == "https://old"
+    ghc = outcome.config.model_providers["ghc"]
+    assert isinstance(ghc, GithubCopilotProviderConfig)
+    assert ghc.api_base_url == "https://old"
     # A hot-reloadable sibling in the same section still takes effect.
-    assert outcome.config.model_providers["ghc"].model_refresh_interval == 60
+    assert ghc.model_refresh_interval == 60
     assert outcome.restart_required == ("model_providers.ghc.api_base_url",)
+
+
+def test_added_provider_is_pinned_out_as_one_graph_change() -> None:
+    startup = ProxyConfig.model_validate(
+        {"model_providers": {"ghc": {"type": "github_copilot"}}}
+    )
+    candidate = ProxyConfig.model_validate(
+        {
+            "model_providers": {
+                "ghc": {"type": "github_copilot"},
+                "xingchen": xingchen_values(),
+            },
+            "default_model_provider": "ghc",
+        }
+    )
+
+    outcome = pin_restart_only(startup, candidate)
+
+    assert set(outcome.config.model_providers) == {"ghc"}
+    assert outcome.config.default_model_provider == ""
+    assert outcome.restart_required == (
+        "default_model_provider",
+        "model_providers.xingchen",
+    )
+
+
+def test_provider_graph_change_restores_default_fallback_and_count_selectors() -> None:
+    startup = ProxyConfig.model_validate(
+        {
+            "model_providers": {"ghc": {"type": "github_copilot"}},
+            "default_model_provider": "ghc",
+            "inbound": {
+                "anthropic_count_tokens": {"providers": ["ghc", "local"]}
+            },
+        }
+    )
+    candidate = ProxyConfig.model_validate(
+        {
+            "model_providers": {
+                "ghc": {"type": "github_copilot"},
+                "xingchen": xingchen_values(),
+            },
+            "default_model_provider": "xingchen",
+            "fallback_model_provider": "xingchen",
+            "inbound": {
+                "anthropic_count_tokens": {"providers": ["xingchen", "local"]}
+            },
+        }
+    )
+
+    outcome = pin_restart_only(startup, candidate)
+
+    assert set(outcome.config.model_providers) == {"ghc"}
+    assert outcome.config.default_model_provider == "ghc"
+    assert outcome.config.fallback_model_provider == ""
+    assert outcome.config.inbound.anthropic_count_tokens.providers == ["ghc", "local"]
+    assert outcome.restart_required == (
+        "default_model_provider",
+        "fallback_model_provider",
+        "inbound.anthropic_count_tokens.providers",
+        "model_providers.xingchen",
+    )
+
+
+def test_graph_change_restores_an_implicit_count_selector_as_implicit() -> None:
+    startup = ProxyConfig.model_validate(
+        {
+            "model_providers": {"only": {"type": "github_copilot"}},
+            "default_model_provider": "only",
+        }
+    )
+    candidate = ProxyConfig.model_validate(
+        {
+            "model_providers": {
+                "only": {"type": "github_copilot"},
+                "xingchen": xingchen_values(),
+            },
+            "default_model_provider": "only",
+            "inbound": {
+                "anthropic_count_tokens": {"providers": ["xingchen", "local"]}
+            },
+        }
+    )
+
+    outcome = pin_restart_only(startup, candidate)
+
+    assert set(outcome.config.model_providers) == {"only"}
+    assert outcome.config.inbound.anthropic_count_tokens.providers == ["ghc", "local"]
+    assert "providers" not in outcome.config.inbound.anthropic_count_tokens.model_fields_set
+    assert "inbound.anthropic_count_tokens.providers" in outcome.restart_required
+
+
+def test_removed_provider_is_restored_as_one_graph_change() -> None:
+    startup = ProxyConfig.model_validate(
+        {
+            "model_providers": {
+                "ghc": {"type": "github_copilot"},
+                "xingchen": xingchen_values(),
+            },
+            "default_model_provider": "ghc",
+        }
+    )
+    candidate = ProxyConfig.model_validate(
+        {
+            "model_providers": {"ghc": {"type": "github_copilot"}},
+            "default_model_provider": "ghc",
+        }
+    )
+
+    outcome = pin_restart_only(startup, candidate)
+
+    assert set(outcome.config.model_providers) == {"ghc", "xingchen"}
+    assert outcome.restart_required == ("model_providers.xingchen",)
+
+
+def test_provider_type_change_restores_the_whole_startup_variant() -> None:
+    startup = ProxyConfig.model_validate(
+        {"model_providers": {"same": {"type": "github_copilot", "auth_base_url": "https://api.github.com"}}}
+    )
+    candidate = ProxyConfig.model_validate(
+        {"model_providers": {"same": xingchen_values()}}
+    )
+
+    outcome = pin_restart_only(startup, candidate)
+    provider = outcome.config.model_providers["same"]
+
+    assert provider.type == "github_copilot"
+    assert provider.auth_base_url == "https://api.github.com"
+    assert outcome.restart_required == ("model_providers.same",)
+
+
+def test_xingchen_instance_fields_are_pinned_without_exposing_values() -> None:
+    startup = ProxyConfig.model_validate(
+        {"model_providers": {"xingchen": xingchen_values(disabled_models=["chat-lite"])}}
+    )
+    candidate = ProxyConfig.model_validate(
+        {
+            "model_providers": {
+                "xingchen": xingchen_values(
+                    models=["chat-next"],
+                    gateway_api_key="new-key",
+                    x_token="new.x.token",
+                    device_id="new-device",
+                    install_id="new-install",
+                    app_version="3.0.0",
+                    route_target="new-route",
+                    client_type="new-client",
+                    user_agent="new-agent",
+                    disabled_models=["chat-pro"],
+                )
+            }
+        }
+    )
+
+    outcome = pin_restart_only(startup, candidate)
+    provider = outcome.config.model_providers["xingchen"]
+
+    assert provider.type == "xingchen"
+    assert provider.models == ["chat-pro"]
+    assert provider.gateway_api_key == "gateway-key"
+    assert provider.x_token == "complete.x.token"
+    assert provider.device_id == "device-id"
+    assert provider.install_id == "install-id"
+    assert provider.app_version == "2.4.1"
+    assert provider.route_target == "ops-gateway"
+    assert provider.client_type == "desktop"
+    assert provider.user_agent == "super-agent/1.0"
+    assert provider.disabled_models == ["chat-lite"]
+    reported = "\n".join(outcome.restart_required)
+    assert "new-key" not in reported
+    assert "new.x.token" not in reported
+    assert "model_providers.xingchen.disabled_models" in outcome.restart_required
+    assert "model_providers.xingchen.models" in outcome.restart_required
 
 
 def test_hot_reloadable_change_applies_without_being_reported() -> None:
@@ -199,7 +401,9 @@ def test_the_token_file_is_pinned_per_provider() -> None:
         {"model_providers": {"ghc": {"type": "github_copilot", "github_token_file": "/b"}}}
     )
     outcome = pin_restart_only(startup, candidate)
-    assert outcome.config.model_providers["ghc"].github_token_file == "/a"
+    ghc = outcome.config.model_providers["ghc"]
+    assert isinstance(ghc, GithubCopilotProviderConfig)
+    assert ghc.github_token_file == "/a"
     assert outcome.restart_required == ("model_providers.ghc.github_token_file",)
 
 
@@ -321,10 +525,10 @@ def test_a_relative_path_in_the_config_resolves_from_the_config_not_the_working_
     monkeypatch.chdir(elsewhere)
 
     config = load_proxy_config(config_path=config_path)
+    ghc = config.model_providers["ghc"]
 
-    assert config.model_providers["ghc"].github_token_file == str(
-        config_dir / "tokens" / "github_token"
-    )
+    assert isinstance(ghc, GithubCopilotProviderConfig)
+    assert ghc.github_token_file == str(config_dir / "tokens" / "github_token")
     assert config.pidfile_dir == str(config_dir / "run")
     assert config.server.tls.cert == str(config_dir / "certs" / "server.pem")
     assert config.server.tls.key == str(config_dir / "certs" / "server.key")
@@ -349,7 +553,9 @@ def test_a_relative_auth_state_file_is_based_on_the_config_file_too(
 
     config = load_proxy_config(config_path=config_path)
 
-    assert config.model_providers["cb"].auth_state_file == str(config_dir / "auth" / "codebuddy.info")
+    cb = config.model_providers["cb"]
+    assert isinstance(cb, CodebuddyProviderConfig)
+    assert cb.auth_state_file == str(config_dir / "auth" / "codebuddy.info")
 
 
 def test_an_absolute_or_expandable_path_is_left_where_it_points(tmp_path: Path) -> None:
@@ -367,8 +573,10 @@ def test_an_absolute_or_expandable_path_is_left_where_it_points(tmp_path: Path) 
     )
 
     config = load_proxy_config(config_path=config_path)
+    ghc = config.model_providers["ghc"]
 
-    assert config.model_providers["ghc"].github_token_file == "/var/lib/ghc/token"
+    assert isinstance(ghc, GithubCopilotProviderConfig)
+    assert ghc.github_token_file == "/var/lib/ghc/token"
     assert config.pidfile_dir == str(Path.home() / "run")
 
 

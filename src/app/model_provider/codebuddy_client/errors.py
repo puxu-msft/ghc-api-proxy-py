@@ -1,16 +1,16 @@
 """Turn one CodeBuddy upstream response into the pipeline's closed error set.
 
-The vocabulary and the retryable-status set are the sibling library's
-(`ghc_client.errors`), imported rather than copied: two normalizers answering
-"what does a failed upstream response mean" differently is how one failure gets
-two fates depending on which provider served it. This client speaks raw
+The vocabulary and the retryable-status set are the shared normalizer's
+(`model_provider.upstream_errors`), imported rather than copied: two normalizers
+answering "what does a failed upstream response mean" differently is how one
+failure gets two fates depending on which provider served it. This client speaks raw
 `httpx2` rather than going through an SDK, so the mapping is written against
 responses rather than SDK exceptions.
 """
 
 import httpx2
 
-from app.model_provider.ghc_client.errors import RETRYABLE_STATUSES, retry_after_seconds
+from app.model_provider.upstream_errors import RETRYABLE_STATUSES, retry_after_seconds
 from app.pipeline.exceptions import UpstreamError, UpstreamRateLimit, UpstreamRejected
 
 

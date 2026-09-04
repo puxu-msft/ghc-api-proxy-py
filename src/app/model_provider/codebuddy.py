@@ -17,9 +17,10 @@ from typing import Any
 
 import httpx2
 
-from app.config.schema import ModelProviderConfig
+from app.config.schema import CodebuddyProviderConfig
 from app.model_provider.codebuddy_client import CodebuddyClient, static_catalog
 from app.model_provider.types import (
+    CatalogSnapshot,
     EndpointNotImplemented,
     ModelDescriptor,
     ModelEndpoint,
@@ -47,7 +48,7 @@ class CodebuddyProvider:
         self,
         name: str,
         client: CodebuddyClient,
-        config: ModelProviderConfig,
+        config: CodebuddyProviderConfig,
         *,
         base_url: str,
     ) -> None:
@@ -84,6 +85,16 @@ class CodebuddyProvider:
         Copilot catalog takes.
         """
         return self._raw_catalog
+
+    @property
+    def catalog_snapshot(self) -> CatalogSnapshot:
+        return CatalogSnapshot(
+            raw=self._raw_catalog,
+            # Static: the backend advertises no `/models` endpoint, so the table is
+            # what this provider serves rather than something a fetch returned.
+            source="static",
+            driven_endpoints=DRIVEN_ENDPOINTS,
+        )
 
     @property
     def available_ids(self) -> frozenset[str]:

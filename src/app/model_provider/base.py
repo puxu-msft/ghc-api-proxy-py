@@ -6,11 +6,19 @@ It does not translate formats, resolve aliases, orchestrate retries or decide ro
 """
 
 from collections.abc import Mapping
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 import httpx2
 
-from app.model_provider.types import ModelDescriptor, ModelEndpoint
+from app.model_provider.types import CatalogSnapshot, ModelDescriptor, ModelEndpoint
+
+
+@runtime_checkable
+class CatalogProvider(Protocol):
+    """Optional diagnostics seam for providers that can expose a complete catalog snapshot."""
+
+    @property
+    def catalog_snapshot(self) -> CatalogSnapshot: ...
 
 
 class ModelProvider(Protocol):

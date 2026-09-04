@@ -1,13 +1,13 @@
 """`debug models`: which models each configured provider offers, and what this proxy can do with them.
 
-Fetched live from upstream through the server's own composition root rather than read out of a running proxy. The questions this answers — is the model on offer at all, is it disabled here, does this proxy have a driver for the endpoint it advertises — get asked when requests are being refused or the service will not start, which is exactly when there is no running instance to ask.
+Collected through the server's own composition root rather than read out of a running proxy. Each provider supplies the catalog it actually routes from and labels whether that catalog came from upstream or static configuration.
 
-The renderer reads `ModelRow`, never the wire payload: one place decides what a catalog entry means, so the table and any later consumer cannot disagree about it. `--json` is the deliberate exception — it hands back the decoded payload unprojected, because the reason to ask for it is to see everything upstream said rather than the seven columns the table picked.
+The renderer reads `ModelRow`, never the wire payload: one place decides what a catalog entry means, so the table and any later consumer cannot disagree about it. `--json` is the deliberate exception — it hands back the provider's decoded catalog unprojected.
 """
 
 import json
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -15,21 +15,16 @@ from rich.cells import cell_len
 
 from app.config.schema import ProxyConfig
 from app.core.chain import Chain
-from app.model_provider import ModelEndpoint, model_type_of, resolve_endpoints
-from app.model_provider.codebuddy import DRIVEN_ENDPOINTS as CODEBUDDY_DRIVEN_ENDPOINTS
+from app.model_provider import (
+    CatalogProvider,
+    CatalogSource,
+    ModelEndpoint,
+    model_type_of,
+    resolve_endpoints,
+)
 from app.model_provider.ghc_client.auth.providers import NoGitHubToken
-from app.model_provider.github_copilot import DRIVEN_ENDPOINTS as COPILOT_DRIVEN_ENDPOINTS
 from app.observability.footer import CONTROL_CHARS
 from app.server.composition import build_chain, build_http_client, resolve_provider_base_urls
-
-# Which endpoints each provider type's driver table can actually drive, keyed by the
-# config's `type` value. Read per provider rather than imported from one module,
-# because "what is drivable" is a fact about the provider serving the model, and two
-# types with different send tables would otherwise be judged by one of them.
-DRIVEN_BY_TYPE: dict[str, frozenset[ModelEndpoint]] = {
-    "github_copilot": COPILOT_DRIVEN_ENDPOINTS,
-    "codebuddy": CODEBUDDY_DRIVEN_ENDPOINTS,
-}
 
 # The one status that means a request naming this model would be routed.
 ROUTABLE = "ok"
@@ -75,6 +70,7 @@ class ProviderCatalog:
     base_url: str
     raw: Mapping[str, Any]
     rows: tuple[ModelRow, ...]
+    source: CatalogSource = "upstream"
     unreadable: int = 0
 
 
@@ -167,8 +163,8 @@ def _wrong_shape(model: Mapping[str, Any]) -> bool:
 def build_rows(
     raw: Mapping[str, Any],
     *,
-    disabled: Sequence[str] = (),
-    driven: frozenset[ModelEndpoint] = frozenset(),
+    driven_endpoints: frozenset[ModelEndpoint],
+    disabled: Iterable[str] = (),
 ) -> tuple[tuple[ModelRow, ...], int]:
     """Project an upstream catalog payload onto the rows a report shows, and count what could not be projected at all.
 
@@ -200,7 +196,7 @@ def build_rows(
         )
         # An endpoint we have no enum member for is by definition one we cannot drive.
         undriven = frozenset(
-            [endpoint.value for endpoint in resolved.known if endpoint not in driven]
+            [endpoint.value for endpoint in resolved.known if endpoint not in driven_endpoints]
             + list(resolved.unknown)
         )
         rows.append(
@@ -242,28 +238,38 @@ async def collect_catalogs(
     http_client = build_http_client(config, proxy_from_cli=False)
     chain: Chain | None = None
     try:
-        # Probed here for the same reason the chain is built here: a report that named a different base URL from the one the server resolves would be worse than no report.
-        config = await resolve_provider_base_urls(config, http_client=http_client)
+        # Probed here for the same reason the chain is built here: a report that named a different base URL from the one the server resolves would be worse than no report. A provider filter also keeps a request for one static catalog from probing unrelated GitHub accounts.
+        selected_names = None if only is None else frozenset({only})
+        config = await resolve_provider_base_urls(
+            config,
+            http_client=http_client,
+            provider_names=selected_names,
+        )
         chain = build_chain(config, http_client=http_client)
         names = [only] if only is not None else sorted(chain.providers.names)
         for name in names:
             provider = chain.providers.get(name)
+            if not isinstance(provider, CatalogProvider):
+                failures.append(CatalogFailure(name, "provider type publishes no catalog"))
+                continue
             try:
                 await provider.refresh_catalog()
             except Exception as error:
                 failures.append(CatalogFailure(name, describe_failure(error)))
                 continue
+            snapshot = provider.catalog_snapshot
             rows, unreadable = build_rows(
-                provider.raw_catalog,
-                disabled=config.model_providers[name].disabled_models,
-                driven=DRIVEN_BY_TYPE.get(config.model_providers[name].type, frozenset()),
+                snapshot.raw,
+                driven_endpoints=snapshot.driven_endpoints,
+                disabled=provider.disabled_ids,
             )
             catalogs.append(
                 ProviderCatalog(
                     name=name,
                     base_url=provider.base_url,
-                    raw=provider.raw_catalog,
+                    raw=snapshot.raw,
                     rows=rows,
+                    source=snapshot.source,
                     unreadable=unreadable,
                 )
             )
@@ -374,14 +380,14 @@ def render_text(catalogs: Sequence[ProviderCatalog]) -> str:
     blocks: list[str] = []
     for catalog in catalogs:
         lines = [
-            f"{_printable(catalog.name)}  {_printable(catalog.base_url)}",
+            f"{_printable(catalog.name)}  {_printable(catalog.base_url)}  [{catalog.source}]",
             _summary(catalog),
         ]
         if catalog.rows:
             lines.append("")
             lines.extend(_table([_cells(row) for row in catalog.rows]))
         else:
-            lines.append("upstream offered no models")
+            lines.append("catalog offers no models")
         legend = [
             (any(row.undriven for row in catalog.rows), f"{UNDRIVEN_MARK} advertised by upstream, no driver in this proxy"),
             (any(row.assumed for row in catalog.rows), f"{ASSUMED_MARK} not named by upstream; the standard endpoint for this model type"),
@@ -395,9 +401,9 @@ def render_text(catalogs: Sequence[ProviderCatalog]) -> str:
 
 
 def render_json(catalogs: Sequence[ProviderCatalog], *, keyed: bool = True) -> str:
-    """Every provider's decoded payload, complete and unprojected.
+    """Every provider's decoded catalog, complete and unprojected.
 
-    Not the upstream bytes: the response was parsed to JSON before it reached here, so whitespace, escape spelling and any duplicate object key are already gone. What survives is every field of the decoded catalog, which is what distinguishes this from the table — the table shows seven columns, this shows everything upstream said.
+    An upstream catalog has already been parsed from JSON, while a static one was constructed from configuration. In both cases this preserves every catalog field rather than reducing it to the table's seven columns.
 
     `keyed` reflects what was asked for, not how many providers happen to be configured. The wrapper is dropped only when it also leaves exactly one payload to return — two catalogs cannot be one document, so a `keyed=False` that arrived alongside several of them keeps the names rather than picking a winner. Without `--provider` the caller asked about the deployment and the answer has to say which upstream each payload came from; with it they named one, and wrapping that single answer in a key they already typed only makes it something to unwrap again.
     """

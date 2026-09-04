@@ -1,0 +1,1 @@
+"""Xingchen model provider tests."""

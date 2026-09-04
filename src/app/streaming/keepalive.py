@@ -1,6 +1,7 @@
 import asyncio
 import sys
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine
+from typing import Any, cast
 
 from app.streaming.idle_timeout import StreamIdleTimeoutError
 
@@ -83,6 +84,9 @@ def _reaches(start: BaseException, target: BaseException) -> bool:
             continue
         seen.add(id(current))
         stack.extend(link for link in (current.__cause__, current.__context__) if link is not None)
+        if isinstance(current, BaseExceptionGroup):
+            group = cast(BaseExceptionGroup[BaseException], current)
+            stack.extend(group.exceptions)
     return False
 
 
@@ -154,6 +158,18 @@ async def finish_stream_cleanup[T](
         if pending_error is not None:
             raise pending_error
 
+    return await finish_async_cleanup(cleanup, primary=primary)
+
+
+async def finish_async_cleanup(
+    cleanup: Callable[[], Coroutine[Any, Any, None]],
+    *,
+    primary: BaseException | None = None,
+) -> tuple[BaseException | None, asyncio.CancelledError | None]:
+    """Run one asynchronous release to completion despite further cancellation.
+
+    Returns the cleanup failure and the first cancellation received while waiting as separate facts. The caller owns their priority relative to `primary`; this function only guarantees that the release task has reached a terminal state before either is acted on.
+    """
     cleanup_task = asyncio.create_task(cleanup())
     current = asyncio.current_task()
     cancelling_seen = current.cancelling() if current is not None else 0
@@ -181,6 +197,28 @@ async def finish_stream_cleanup[T](
     except BaseException as exc:
         return exc, deferred_cancellation
     return None, deferred_cancellation
+
+
+def find_cancellation(error: BaseException) -> asyncio.CancelledError | None:
+    """Find a cancellation anywhere in one exception graph without looping."""
+    seen: set[int] = set()
+    pending = [error]
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, asyncio.CancelledError):
+            return current
+        pending.extend(
+            nested
+            for nested in (current.__cause__, current.__context__)
+            if nested is not None
+        )
+        if isinstance(current, BaseExceptionGroup):
+            group = cast(BaseExceptionGroup[BaseException], current)
+            pending.extend(group.exceptions)
+    return None
 
 
 async def _cancel_and_observe[T](pending: asyncio.Task[T]) -> BaseException | None:

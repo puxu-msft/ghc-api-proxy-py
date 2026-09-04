@@ -8,9 +8,10 @@ Copying it per endpoint is how the four drift apart.
 """
 
 import asyncio
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import httpx2
 
@@ -26,6 +27,11 @@ from app.pipeline.exceptions import (
 from app.pipeline.rate_limiting import RateLimiter
 from app.pipeline.request import RequestContext
 from app.pipeline.retry import RetryLedger, reason_for
+from app.streaming.keepalive import (
+    find_cancellation,
+    finish_async_cleanup,
+    raise_with_cleanup_under,
+)
 
 EVENT_ATTEMPT_PREPARE = "attempt.prepare"
 EVENT_ATTEMPT_SUCCEEDED = "attempt.succeeded"
@@ -40,6 +46,88 @@ EVENTS = (
     EVENT_REQUEST_SUCCEEDED,
     EVENT_REQUEST_FAILED,
 )
+
+
+def _clear_exception_backedges(
+    error: BaseException,
+    target: BaseException,
+    seen: set[int] | None = None,
+) -> None:
+    """Remove direct links back to an exit that is becoming the primary."""
+    visited: set[int] = seen if seen is not None else set()
+    if id(error) in visited:
+        return
+    visited.add(id(error))
+
+    for attribute in ("__cause__", "__context__"):
+        linked = getattr(error, attribute)
+        if linked is target:
+            setattr(error, attribute, None)
+        elif linked is not None:
+            _clear_exception_backedges(linked, target, visited)
+    if isinstance(error, BaseExceptionGroup):
+        group = cast(BaseExceptionGroup[BaseException], error)
+        for member in group.exceptions:
+            _clear_exception_backedges(member, target, visited)
+
+
+def _without_exception(
+    error: BaseException,
+    target: BaseException,
+) -> BaseException | None:
+    """Remove one selected exit while preserving group metadata and shape."""
+    if error is target:
+        return None
+    residual = error
+    if isinstance(error, BaseExceptionGroup):
+        group = cast(BaseExceptionGroup[BaseException], error)
+        _, remainder = group.split(lambda candidate: candidate is target)
+        if remainder is None:
+            return None
+        residual = remainder
+    _clear_exception_backedges(residual, target)
+    return residual
+
+
+def _reraise_if_cancelling(error: BaseException) -> None:
+    """Keep cancellation in control when cleanup replaced its top-level type."""
+    current = asyncio.current_task()
+    cancellation = find_cancellation(error)
+    if current is None or current.cancelling() <= 0 or cancellation is None:
+        return
+    secondary = _without_exception(error, cancellation)
+    if secondary is not None:
+        raise_with_cleanup_under(cancellation, secondary)
+    raise cancellation
+
+
+async def _finish_response_cleanup(
+    response: httpx2.Response,
+    *,
+    primary: BaseException | None,
+    discard_reason: BaseException | None = None,
+) -> None:
+    cleanup_error, cleanup_cancellation = await finish_async_cleanup(
+        response.aclose,
+        primary=primary,
+    )
+    active_primary = primary
+    if active_primary is None:
+        active_primary = cleanup_cancellation
+    if (
+        active_primary is None
+        and cleanup_error is not None
+        and discard_reason is not None
+    ):
+        # A retry decision already consumed this failure. Bring it back only when closing the discarded response also failed, so both facts survive; a new cancellation during an otherwise successful close still belongs to the outer deadline or shutdown.
+        active_primary = discard_reason
+    if active_primary is not None:
+        if cleanup_error is not None:
+            raise_with_cleanup_under(active_primary, cleanup_error)
+        if cleanup_cancellation is not None:
+            raise active_primary
+    elif cleanup_error is not None:
+        raise cleanup_error
 
 
 @dataclass(slots=True)
@@ -153,6 +241,7 @@ class DirectDriver:
                 # Not a failure this loop gets to have an opinion about. A cancellation is the runtime saying this task stops now, and it is how the layers above express their own deadlines: `handle_bounded` wraps the whole request in `asyncio.timeout`, which fires by cancelling and then reads the cancellation back out to turn it into a `TimeoutError`. Catching it here consumed it, so that conversion never happened and the line meant to answer it — `raise UpstreamTimeout(f"client request exceeded {deadline}s")` — was dead code. The client was told 502 `CancelledError` with an empty message instead of 504. Measured 2026-08-22; see `.dev/docs/upstream/retry-and-continuation/deferred.md` 8a.
                 raise
             except BaseException as error:
+                _reraise_if_cancelling(error)
                 attempt.error = str(error)
                 if not await self._handle_failure(error, context, outcome):
                     return outcome
@@ -160,17 +249,19 @@ class DirectDriver:
 
             attempt.status_code = response.status_code
             outcome.response = response
-            if self._rate_limiter is not None:
-                headers = dict(response.headers)
-                if self._rate_limiter.observe_failure(response.status_code, headers):
-                    # A limited status is not a delivered response; let the retry path see it. A buffered body is retained for the error observer, while a streaming response has not been read and must not be forced here.
-                    outcome.response = None
-                    attempt.error = f"upstream returned {response.status_code}"
-                    body_bytes = (
-                        response.content if response.is_stream_consumed else b""
-                    )
-                    if not await self._handle_failure(
-                        UpstreamError(
+            handed_off = False
+            discard_reason: BaseException | None = None
+            try:
+                if self._rate_limiter is not None:
+                    headers = dict(response.headers)
+                    if self._rate_limiter.observe_failure(response.status_code, headers):
+                        # A limited status is not a delivered response; let the retry path see it. A buffered body is retained for the error observer, while a streaming response has not been read and must not be forced here.
+                        outcome.response = None
+                        attempt.error = f"upstream returned {response.status_code}"
+                        body_bytes = (
+                            response.content if response.is_stream_consumed else b""
+                        )
+                        discard_reason = UpstreamError(
                             f"upstream returned {response.status_code}",
                             status_code=response.status_code,
                             headers=response.headers,
@@ -178,27 +269,40 @@ class DirectDriver:
                             body_bytes=body_bytes,
                             content_type=response.headers.get("content-type", ""),
                             body_observed=response.is_stream_consumed,
-                        ),
-                        context,
-                        outcome,
-                    ):
+                        )
+                        if not await self._handle_failure(
+                            discard_reason,
+                            context,
+                            outcome,
+                        ):
+                            return outcome
+                        continue
+                    self._rate_limiter.observe_success(headers)
+                try:
+                    await self._publish(EVENT_ATTEMPT_SUCCEEDED, context, outcome)
+                    await self._publish(EVENT_REQUEST_SUCCEEDED, context, outcome)
+                except asyncio.CancelledError:
+                    # The response is still this driver's until both success events return. The owner cleanup in `finally` releases it before cancellation leaves.
+                    outcome.response = None
+                    raise
+                except BaseException as error:
+                    _reraise_if_cancelling(error)
+                    outcome.response = None
+                    attempt.error = str(error)
+                    discard_reason = error
+                    if not await self._handle_failure(error, context, outcome):
                         return outcome
                     continue
-                self._rate_limiter.observe_success(headers)
-            try:
-                await self._publish(EVENT_ATTEMPT_SUCCEEDED, context, outcome)
-                await self._publish(EVENT_REQUEST_SUCCEEDED, context, outcome)
-            except asyncio.CancelledError:
-                # Same reason as above, and the same consequence if it were caught: a subscriber's own await can be the one that observes the cancellation.
-                outcome.response = None
-                raise
-            except BaseException as error:
-                outcome.response = None
-                attempt.error = str(error)
-                if not await self._handle_failure(error, context, outcome):
-                    return outcome
-                continue
-            return outcome
+                handed_off = True
+                return outcome
+            finally:
+                if not handed_off:
+                    outcome.response = None
+                    await _finish_response_cleanup(
+                        response,
+                        primary=sys.exception(),
+                        discard_reason=discard_reason,
+                    )
 
     @staticmethod
     def _upstream_status(error: BaseException) -> tuple[int | None, dict[str, str]]:

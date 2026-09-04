@@ -6,9 +6,10 @@ from typing import Any, cast
 
 import httpx2
 
-from app.config.schema import ModelProviderConfig
+from app.config.schema import GithubCopilotProviderConfig
 from app.model_provider.ghc_client import GhcApiClient, fetch_models
 from app.model_provider.types import (
+    CatalogSnapshot,
     EndpointNotImplemented,
     ModelDescriptor,
     ModelEndpoint,
@@ -47,7 +48,7 @@ class GithubCopilotProvider:
         self,
         name: str,
         client: GhcApiClient,
-        config: ModelProviderConfig,
+        config: GithubCopilotProviderConfig,
         *,
         http_client: httpx2.AsyncClient,
         base_url: str,
@@ -86,6 +87,14 @@ class GithubCopilotProvider:
         Kept beside the descriptors rather than derived back from them: the descriptors are a projection built for routing and drop nearly everything else the catalog said, so anything reporting on the catalog itself would otherwise have to fetch it a second time.
         """
         return self._raw_catalog
+
+    @property
+    def catalog_snapshot(self) -> CatalogSnapshot:
+        return CatalogSnapshot(
+            raw=self._raw_catalog,
+            source="upstream",
+            driven_endpoints=DRIVEN_ENDPOINTS,
+        )
 
     @property
     def available_ids(self) -> frozenset[str]:

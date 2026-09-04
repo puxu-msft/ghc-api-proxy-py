@@ -1,8 +1,8 @@
-"""Turn the SDKs' exceptions into the pipeline's closed set.
+"""Turn upstream client exceptions into the pipeline's closed set.
 
-`docs/.human-controlled/request-pipeline.md` has the driver abort on anything outside that set, and that is the right default — a subscriber's `KeyError` must not read as "retry". But the production send path calls `AsyncOpenAI.post` and `AsyncAnthropic.post` directly, and both raise their *own* status and connection exceptions on 4xx, 5xx and transport failure. Those are outside the set, so every real upstream failure aborted and surfaced as a bare 502, and the configured 429, 5xx and network retry budgets were never once consulted on the path that serves requests.
+`docs/.human-controlled/request-pipeline.md` has the driver abort on anything outside that set, and that is the right default — a subscriber's `KeyError` must not read as "retry". The production providers use OpenAI and Anthropic SDKs as well as raw httpx2; all three expose their own status, timeout and connection exceptions.
 
-The fix belongs here rather than in `classify`: widening the closed set would let genuine bugs read as retryable. This is the one boundary where the SDKs' vocabulary becomes ours, so it is where the translation goes — every caller of `GhcApiClient` gets it, not just the driver that noticed.
+The translation belongs here rather than in `classify`: widening the closed set would let genuine bugs read as retryable. This is the one boundary where upstream client vocabulary becomes ours, shared by every provider that sends through one of those clients.
 
 Which statuses come back retryable is a judgement about determinism, not about severity. A 400 naming a field upstream will not accept answers the same way nine times over; a 503 does not.
 """
@@ -32,8 +32,8 @@ from app.pipeline.exceptions import (
 # 401 is here because the token can be re-minted; whether it *is* retried is the budget's call, and `githubTokenExpired.max_retries` defaults to 0.
 RETRYABLE_STATUSES = frozenset({401, 408, 409, 425, 429, 499, 500, 502, 503, 504})
 
-_STATUS_ERRORS = (OpenAIStatusError, AnthropicStatusError)
-_TIMEOUT_ERRORS = (OpenAITimeoutError, AnthropicTimeoutError)
+_STATUS_ERRORS = (OpenAIStatusError, AnthropicStatusError, httpx2.HTTPStatusError)
+_TIMEOUT_ERRORS = (OpenAITimeoutError, AnthropicTimeoutError, httpx2.TimeoutException)
 # `H2Error` is here because nothing wraps it on the body path, and its absence made one upstream event have two fates. httpcore guards only the socket read — `receive_data` sits outside that `try` (`httpcore2/_async/http2.py:425`) — and httpx re-raises what its map does not know. So a GOAWAY whose following frames land in a *separate* read arrives as `httpx2.RemoteProtocolError` and is retried, while the same GOAWAY batched into *one* read arrives as a bare `h2.exceptions.ProtocolError` and was neither retried nor called an upstream failure. Which one happened was decided by the kernel's read boundary. Measured 2026-08-23, `.dev/docs/upstream/retry-and-continuation/reports/260823-h2-protocolerror-category.md`.
 #
 # The family rather than one class, and the reason is not that every `H2Error` is upstream's — it is not. h2's hierarchy carries no attribution: `ProtocolError` is raised for a peer's bad preamble and for a local `send_data` over the window alike, `RFC1122Error` only ever for the caller's own misuse, and `StreamIDTooLowError`, `NoSuchStreamError`, `StreamClosedError` and `FlowControlError` are all reachable from both sides. An independent review built ten of them through h2's public API.
@@ -59,15 +59,19 @@ _CONNECTION_ERRORS = (
 
 
 def retry_after_seconds(headers: Mapping[str, str]) -> float | None:
-    """Read `Retry-After` as seconds, ignoring the HTTP-date form.
+    """Read a numeric retry delay, preferring the standard seconds header over milliseconds."""
+    retry_after = next((v for k, v in headers.items() if k.lower() == "retry-after"), None)
+    if retry_after is not None:
+        try:
+            return float(retry_after)
+        except ValueError:
+            pass
 
-    The date form is legal and upstream does not use it; parsing it here would be code with no way to tell whether it works.
-    """
-    raw = next((v for k, v in headers.items() if k.lower() == "retry-after"), None)
-    if raw is None:
+    retry_after_ms = next((v for k, v in headers.items() if k.lower() == "retry-after-ms"), None)
+    if retry_after_ms is None:
         return None
     try:
-        return float(raw)
+        return float(retry_after_ms) / 1000
     except ValueError:
         return None
 

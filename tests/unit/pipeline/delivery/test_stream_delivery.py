@@ -18,7 +18,7 @@ import pytest
 
 from app.config.schema import ContentBlockStartCompat, UpstreamRequestRetryConfig
 from app.errors import ANTHROPIC_ERROR_TYPES, ErrorCategory
-from app.model_provider.ghc_client.errors import normalize_upstream_error
+from app.model_provider.upstream_errors import normalize_upstream_error
 from app.observability.active_requests import ActiveRequestRegistry
 from app.observability.request_trace import RequestTrace
 from app.pipeline.delivery import stream as stream_module

@@ -11,7 +11,7 @@ from pathlib import Path
 import httpx2
 import pytest
 
-from app.config.schema import ModelProviderConfig
+from app.config.schema import CodebuddyProviderConfig
 from app.model_provider import (
     EndpointNotSupported,
     ModelEndpoint,
@@ -61,7 +61,7 @@ def build_provider(
         credentials,
         http_client=http_client,
     )
-    config = ModelProviderConfig(type="codebuddy", disabled_models=disabled or [])
+    config = CodebuddyProviderConfig(type="codebuddy", disabled_models=disabled or [])
     return CodebuddyProvider("cb", client, config, base_url="https://cb.example")
 
 

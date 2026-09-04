@@ -109,7 +109,7 @@ def test_pipeline_exceptions_stay_importable_without_the_pipeline() -> None:
 def test_h2_is_imported_only_for_its_types() -> None:
     """A cheap architecture signal, named for what it checks rather than for what it would be nice to know.
 
-    It reads static imports and nothing else. An earlier name said "no live module drives h2 itself", which a review answered without importing anything new: `h2.exceptions` is allowed, so `raise H2Error(...)` from this side's own code passes and produces exactly the bare `H2Error` the mapping in `app.model_provider.ghc_client.errors` treats as the peer's. `importlib.import_module("h2.connection")` passes too — a dynamic import is not an `ast.Import`.
+    It reads static imports and nothing else. An earlier name said "no live module drives h2 itself", which a review answered without importing anything new: `h2.exceptions` is allowed, so `raise H2Error(...)` from this side's own code passes and produces exactly the bare `H2Error` the mapping in `app.model_provider.upstream_errors` treats as the peer's. `importlib.import_module("h2.connection")` passes too — a dynamic import is not an `ast.Import`.
 
     So this is **not** a condition that mapping can rest on, and `errors.py` no longer cites it as one. What it is worth: a new static import of h2 has to be argued for rather than noticed later.
 
