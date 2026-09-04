@@ -195,6 +195,175 @@ def anthropic_tool_call(
     return reply
 
 
+def responses_tool_call(
+    name: str,
+    tool_input: dict[str, Any],
+    *,
+    call_id: str = "call_scripted",
+    model: str = "gpt-model",
+) -> Callable[..., httpx2.Response]:
+    arguments = json.dumps(tool_input)
+    item: dict[str, Any] = {
+        "type": "function_call",
+        "id": "fc_scripted",
+        "call_id": call_id,
+        "name": name,
+        "arguments": arguments,
+        "status": "completed",
+    }
+    events: list[tuple[str, dict[str, Any]]] = [
+        (
+            "response.output_item.added",
+            {"output_index": 0, "item": {**item, "arguments": "", "status": "in_progress"}},
+        ),
+        (
+            "response.function_call_arguments.delta",
+            {"output_index": 0, "item_id": "fc_delta", "delta": arguments},
+        ),
+        ("response.output_item.done", {"output_index": 0, "item": item}),
+    ]
+    return _responses_reply([item], events, model=model)
+
+
+def responses_hosted_search(
+    query: str,
+    answer: str,
+    *,
+    model: str = "gpt-model",
+) -> Callable[..., httpx2.Response]:
+    search: dict[str, Any] = {
+        "type": "web_search_call",
+        "id": "ws_scripted_done",
+        "status": "completed",
+        "action": {"type": "search", "query": query, "queries": [query]},
+    }
+    message: dict[str, Any] = {
+        "type": "message",
+        "id": "msg_scripted_done",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": answer, "annotations": []}],
+    }
+    events: list[tuple[str, dict[str, Any]]] = [
+        (
+            "response.output_item.added",
+            {
+                "output_index": 0,
+                "item": {
+                    "type": "web_search_call",
+                    "id": "ws_scripted_added",
+                    "status": "in_progress",
+                },
+            },
+        ),
+        (
+            "response.web_search_call.searching",
+            {"output_index": 0, "item_id": "ws_scripted_searching"},
+        ),
+        ("response.output_item.done", {"output_index": 0, "item": search}),
+        (
+            "response.output_item.added",
+            {
+                "output_index": 1,
+                "item": {
+                    "type": "message",
+                    "id": "msg_scripted_added",
+                    "role": "assistant",
+                    "status": "in_progress",
+                    "content": [],
+                },
+            },
+        ),
+        (
+            "response.output_text.delta",
+            {"output_index": 1, "item_id": "msg_scripted_delta", "delta": answer},
+        ),
+        ("response.output_item.done", {"output_index": 1, "item": message}),
+    ]
+    return _responses_reply([search, message], events, model=model)
+
+
+def responses_text(text: str, *, model: str = "gpt-model") -> Callable[..., httpx2.Response]:
+    message: dict[str, Any] = {
+        "type": "message",
+        "id": "msg_scripted_text",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": text, "annotations": []}],
+    }
+    events: list[tuple[str, dict[str, Any]]] = [
+        (
+            "response.output_item.added",
+            {
+                "output_index": 0,
+                "item": {**message, "id": "msg_scripted_added", "status": "in_progress", "content": []},
+            },
+        ),
+        (
+            "response.output_text.delta",
+            {"output_index": 0, "item_id": "msg_scripted_delta", "delta": text},
+        ),
+        ("response.output_item.done", {"output_index": 0, "item": message}),
+    ]
+    return _responses_reply([message], events, model=model)
+
+
+def _responses_reply(
+    output: list[dict[str, Any]],
+    events: list[tuple[str, dict[str, Any]]],
+    *,
+    model: str,
+) -> Callable[..., httpx2.Response]:
+    response = {
+        "id": "resp_scripted",
+        "object": "response",
+        "model": model,
+        "status": "completed",
+        "output": output,
+        "usage": {
+            "input_tokens": 1,
+            "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+            "output_tokens": 1,
+            "output_tokens_details": {"reasoning_tokens": 0},
+            "total_tokens": 2,
+        },
+    }
+
+    def reply(body: dict[str, Any]) -> httpx2.Response:
+        if not body.get("stream"):
+            return httpx2.Response(200, json=response)
+        frames = [
+            _frame(
+                "response.created",
+                {
+                    "type": "response.created",
+                    "response": {**response, "status": "in_progress", "output": [], "usage": None},
+                },
+            ),
+            _frame(
+                "response.in_progress",
+                {
+                    "type": "response.in_progress",
+                    "response": {**response, "status": "in_progress", "output": [], "usage": None},
+                },
+            ),
+        ]
+        frames.extend(_frame(event, {"type": event, **data}) for event, data in events)
+        frames.append(
+            _frame(
+                "response.completed",
+                {"type": "response.completed", "response": response},
+            )
+        )
+        return httpx2.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content="".join(frames).encode(),
+        )
+
+    return reply
+
+
 def _sse(
     blocks: list[tuple[str, dict[str, Any]]], *, model: str, stop_reason: str
 ) -> bytes:

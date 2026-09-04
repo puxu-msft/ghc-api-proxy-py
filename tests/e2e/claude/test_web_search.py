@@ -6,11 +6,77 @@ The setup is the two-stage shape the client actually uses. A test cannot make Cl
 """
 
 from pathlib import Path
+from typing import Any, cast
 
 from _harness import run_claude, running_proxy
-from _upstream import ScriptedUpstream, anthropic_text, anthropic_tool_call
+from _upstream import (
+    BASE_URL,
+    ScriptedUpstream,
+    anthropic_text,
+    anthropic_tool_call,
+    responses_hosted_search,
+    responses_text,
+    responses_tool_call,
+)
 
 SEARCH_TOOLS = ["--allowedTools", "WebSearch"]
+
+
+def test_a_hosted_search_native_pair_reaches_the_real_client_and_conversation_continues(
+    config_dir: Path,
+) -> None:
+    """The positive D6 path through the real binary and all three model turns."""
+    query = "bun 1.3 release notes"
+    search_answer = "hosted-search-answer-Q7v2"
+    final = "after-hosted-search-R8k3"
+    upstream = ScriptedUpstream(
+        replies=[
+            responses_tool_call("WebSearch", {"query": query}),
+            responses_hosted_search(query, search_answer),
+            responses_text(final),
+        ]
+    )
+    overrides = {
+        "model_translation": {"to_openai_responses": {"hosted_web_search": True}},
+        "model_providers": {
+            "ghc": {
+                "type": "github_copilot",
+                "api_base_url": BASE_URL,
+                "models_support_web_search": ["gpt-model"],
+            }
+        },
+    }
+
+    with running_proxy(upstream, overrides=overrides) as proxy:
+        result = run_claude(
+            "search for bun 1.3",
+            proxy=proxy,
+            config_dir=config_dir,
+            model="gpt-model",
+            extra_args=SEARCH_TOOLS,
+        )
+
+    assert result.returncode == 0, result.stderr
+    assert final in result.stdout, result.stdout
+    assert [exchange.path for exchange in upstream.seen] == [
+        "/responses",
+        "/responses",
+        "/responses",
+    ]
+    assert upstream.seen[1].tool_types == ["web_search"]
+    third_input = upstream.seen[2].body.get("input")
+    assert isinstance(third_input, list), third_input
+    matching_outputs: list[Any] = [
+        cast(dict[str, Any], item).get("output")
+        for item in cast(list[Any], third_input)
+        if isinstance(item, dict)
+        and cast(dict[str, Any], item).get("type") == "function_call_output"
+        and cast(dict[str, Any], item).get("call_id") == "call_scripted"
+    ]
+    assert len(matching_outputs) == 1, third_input
+    rendered = str(matching_outputs[0])
+    assert "Web search error: unavailable" in rendered, rendered
+    assert search_answer in rendered, rendered
 
 
 def test_a_search_the_proxy_cannot_run_never_reaches_upstream(config_dir: Path) -> None:
