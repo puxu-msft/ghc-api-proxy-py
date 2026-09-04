@@ -18,7 +18,7 @@
 
 ## 当前实现
 
-`src/app/model_provider/ghc_client/errors.py` 的 `RETRYABLE_STATUSES` 包含 499。OpenAI SDK 抛出的 `APIStatusError(499)` 经 `normalize_upstream_error()` 成为 `UpstreamError(status_code=499)`，而不是确定性的 `UpstreamRejected`。
+`src/app/model_provider/upstream_errors.py` 的 `RETRYABLE_STATUSES` 包含 499。OpenAI SDK 抛出的 `APIStatusError(499)` 经 `normalize_upstream_error()` 成为 `UpstreamError(status_code=499)`，而不是确定性的 `UpstreamRejected`。该模块于 2026-09-04 随 `feat: add xingchen model provider` 从 GHC client 子包提升为所有 model provider 共享边界；这是装位变化，不改变本条 retry mapping。
 
 `classify()` 因而返回 `Disposition.RETRY`，`reason_for()` 将该有状态瞬时失败归入 `RetryReason.SERVER_ERROR`。重试沿用 `upstream_request_retry.strategies.serverError.max_retries` 与共享 `max_total`，不新增 499 专用计数器、配置或冷却间隔。SDK 自身 retry 仍关闭，重试由 `DirectDriver` 统一驱动。
 

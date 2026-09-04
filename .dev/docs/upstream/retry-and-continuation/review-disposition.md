@@ -169,19 +169,20 @@
 - judgment_status: concurred
 - severity: major
 - disposition_level: A
-- fix: open
-- evidence: `.dev/.git` 与 `.dev/README.md` 不存在，父仓忽略整个 `.dev/`；本轮候选、报告、处置账和 status 当前没有项目规则所述的独立 Git 持久版本。
+- fix: adopted
+- outcome: fixed
+- evidence: 用户完成首次 push 后，`git ls-remote --heads origin refs/heads/dotdev` 与 local `refs/heads/dotdev` 返回同一 OID；本任务 `docs: preserve accepted HTTP 499 rationale` 提交是该 tip 的祖先，且当前 dotdev tree 可枚举到全部 HTTP 499 living docs、candidate、disposition 与 review originals。
+- action: 以 dedicated orphan `origin/dotdev` 取代缺失的 nested `.dev` repository；main 的 `.dev/` 继续作为 ignored active copy，`.dev/README.md` 与 project workflow 记录精确同步和权限边界。
 
-待决事项：
+裁决：
 
 - statement_kind: decision
-- decision_status: user-selected-blocked-on-credentialed-push
+- decision_status: user-selected-completed
 - decision_origin: user-selected-from-proposal
-- ruling: 用户选择“专用的 origin/dotdev 分支”。该裁决授权创建并首次 push 专用 orphan `dotdev`，不授权 push `main`、目标 Spec 或其它 ref。
-- execution: local orphan root commit `docs: establish dotdev development records` 已创建；第一次 push 连接 GitHub 443 超时，第二次 push 因后台会话无法读取 GitHub HTTPS 用户名而失败，均未发布 remote ref。
-- next_actor: user-credentialed-shell
-- response_required: true
-- pending_annotation_ids: http499-closeout-review-general-sonnet-260904-02
+- ruling: 用户选择“专用的 origin/dotdev 分支”，并在带凭据的前台完成首次 push。该裁决只覆盖 `dotdev`，没有授权 push `main`、目标 Spec 或其它 ref。
+- next_actor: none
+- response_required: false
+- pending_annotation_ids: none
 
 ### http499-closeout-review-general-sonnet-260904-03
 
@@ -290,11 +291,11 @@
 
 ## 当前共识状态
 
-- overall: blocked-on-dotdev-push
-- consensus: 首轮 4 条 finding、限定复评 1 条 minor、closeout review 的 Spec major 与 2 条 minor、integration review 2 条 finding 及 integration rereview 1 条 minor 均 fixed；用户接受精简的 499 requirement 并把正确的详细解释留在中间层文档。仅 storage major 保持 open，等待带凭据首次 push。
-- open: 1
+- overall: closed
+- consensus: 12 条已登记 finding 全部 fixed。用户接受精简的 499 requirement 并把正确的详细解释留在中间层文档；`origin/dotdev` 已建立并经 local/remote OID 对账，全部开发记录可从远端历史恢复。
+- open: 0
 - disputed: 0
-- fixed: 11
+- fixed: 12
 - rejected: 0
 - deferred: 0
-- pending_annotation_ids: http499-closeout-review-general-sonnet-260904-02
+- pending_annotation_ids: none
