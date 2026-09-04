@@ -17,7 +17,12 @@ from app.observability.request_trace import (
     snapshot_upstream_connection,
 )
 from app.observability.terminal import TerminalCapabilities
-from app.pipeline.delivery.assembling import ReplyDialect, Terminal
+from app.pipeline.delivery.assembling import (
+    ClientAction,
+    ClientActionRequirement,
+    ReplyDialect,
+    Terminal,
+)
 from app.pipeline.delivery.blocks import CompletedBlock
 from app.pipeline.request import RequestContext, WireFormat
 from app.pipeline.translation_driver.semantic import Conversion, ConversionFactCode
@@ -61,6 +66,12 @@ def test_a_successful_request_writes_one_complete_structured_record(tmp_path: Pa
         usage={"input_tokens": 10, "output_tokens": 4},
         seen=True,
         dialect=ReplyDialect.RESPONSES,
+        terminal_status="completed",
+        client_actions=[
+            ClientAction(ClientActionRequirement.REQUIRED, "function_call", "Bash", 0),
+            ClientAction(ClientActionRequirement.REQUIRED, "custom_tool_call", "", 1),
+        ],
+        client_action_classification_complete=True,
     )
     terminal.record(CompletedBlock(index=0, kind="text", payload={"type": "text", "text": "done"}))
     terminal.record(CompletedBlock(index=1, kind="tool_use", payload={"type": "tool_use", "name": "Bash"}))
@@ -113,6 +124,9 @@ def test_a_successful_request_writes_one_complete_structured_record(tmp_path: Pa
         "usage",
         "terminal_seen",
         "stop_reason",
+        "terminal_status",
+        "client_actions",
+        "client_action_classification_complete",
         "blocks",
         "tools",
         "thinking",
@@ -153,6 +167,22 @@ def test_a_successful_request_writes_one_complete_structured_record(tmp_path: Pa
         "usage": {"input_tokens": 10, "output_tokens": 4},
         "terminal_seen": True,
         "stop_reason": "tool_use",
+        "terminal_status": "completed",
+        "client_actions": [
+            {
+                "requirement": "required",
+                "type": "function_call",
+                "name": "Bash",
+                "output_index": 0,
+            },
+            {
+                "requirement": "required",
+                "type": "custom_tool_call",
+                "name": "",
+                "output_index": 1,
+            },
+        ],
+        "client_action_classification_complete": True,
         "blocks": 3,
         "tools": ["Bash"],
         "thinking": ["enc"],
@@ -175,6 +205,30 @@ def test_a_successful_request_writes_one_complete_structured_record(tmp_path: Pa
     # The join key lives in the record, not on the console line: there is nothing to join to on a request that worked, and the id is wider than several real fields put together.
     assert "req-1" not in emitted[0][0]
     assert emitted[0][1] == record["status"]
+
+
+def test_legacy_tool_summary_does_not_fabricate_native_terminal_facts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _capture_console(monkeypatch)
+    terminal = Terminal(stop_reason="tool_use", seen=True)
+    terminal.record(
+        CompletedBlock(
+            index=0,
+            kind="tool_use",
+            payload={"type": "tool_use", "name": "Bash"},
+        )
+    )
+    trace = RequestTrace(method="POST", path="/v1/messages", started=time.monotonic())
+
+    trace.absorb(terminal)
+    log_completion(_chain(), trace, 200, bytes_out=0)
+
+    record = _only_record(tmp_path)
+    assert record["tools"] == ["Bash"]
+    assert record["terminal_status"] == ""
+    assert record["client_actions"] == []
+    assert record["client_action_classification_complete"] is False
 
 
 def test_conversion_facts_are_durable_without_becoming_losses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

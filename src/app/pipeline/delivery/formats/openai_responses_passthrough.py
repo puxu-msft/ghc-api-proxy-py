@@ -9,10 +9,18 @@ from typing import Any, cast
 
 import orjson
 
-from app.pipeline.delivery.assembling import ReplyDialect, Terminal
+from app.pipeline.delivery.assembling import (
+    ClientActionRequirement,
+    ReplyDialect,
+    Terminal,
+)
 from app.pipeline.delivery.formats.openai_responses import (
     read_responses_terminal,
     responses_failure_from,
+)
+from app.pipeline.delivery.formats.openai_responses_actions import (
+    client_action_requirement,
+    read_responses_client_actions,
 )
 from app.pipeline.delivery.passthrough import Dialect, PassthroughAssembler
 from app.pipeline.delivery.sse_source import SseEvent
@@ -46,67 +54,31 @@ TERMINAL_EVENTS = frozenset(
 
 ITEM_DONE = "response.output_item.done"
 
-# Item types that stop the model's turn until the client submits something. `spec.md` §7.1: the predicate is *not* the type alone — the same `tool_search_call` answers oppositely depending on whether the server or the client runs it — so these are the types for which the type is sufficient, and the two conditional ones are handled beside them.
-_ALWAYS_CLIENT_ACTION = frozenset(
-    {
-        "function_call",
-        "custom_tool_call",
-        "computer_call",
-        "local_shell_call",
-        "apply_patch_call",
-        "mcp_approval_request",
-    }
-)
-
-# Upstream runs these itself and reports the result in the same response, so the client owes nothing.
-_NEVER_CLIENT_ACTION = frozenset(
-    {
-        "web_search_call",
-        "file_search_call",
-        "code_interpreter_call",
-        "image_generation_call",
-        "mcp_call",
-        "reasoning",
-        "message",
-    }
-)
-
 
 def requires_client_action(item: dict[str, Any]) -> bool:
-    """Whether this output item stops the turn until the client submits a tool output or an approval.
-
-    `spec.md` §7.1, and the reason it reads the item rather than a type table: `ResponseToolSearchCall` carries `execution: Literal["server", "client"]` and `ResponseFunctionShellToolCall` carries `environment`, so **the same type gives opposite answers**. A table keyed on type alone cannot be right for those two.
-
-    **An unknown type answers `True`.** Defaulting to `False` would hold whatever the client has to act on until the terminal, and would make the set of types this proxy recognises the ceiling on what a client can do — the thing §2.1 rules out. Releasing early costs nothing but an earlier flush; withholding costs the turn.
-    """
-    item_type = str(item.get("type", ""))
-    if item_type in _ALWAYS_CLIENT_ACTION:
-        return True
-    if item_type in _NEVER_CLIENT_ACTION:
-        return False
-    if item_type == "tool_search_call":
-        return str(item.get("execution", "")) == "client"
-    if item_type == "shell_call":
-        # `environment` absent, or present and not a container reference, means it runs where the client is.
-        environment: object = item.get("environment")
-        if not isinstance(environment, dict):
-            return True
-        return "container" not in str(cast(dict[str, Any], environment).get("type", ""))
-    return True
+    """Project the three-state fact onto the conservative buffering decision."""
+    return client_action_requirement(item) is not ClientActionRequirement.NOT_REQUIRED
 
 
 def _read_terminal(event: SseEvent, terminal: Terminal, saw_client_action: bool) -> None:
-    """Adapter onto the shared reader, which takes the event already split into name and payload.
-
-    The reader is shared with the translating assembler on purpose (`openai_responses.read_responses_terminal`): both legs read the same terminal event for the same facts, and a second copy would be a second answer to what upstream's usage and stop reason are.
-    """
+    """Read shared semantics, then the direct completed terminal's native facts."""
     data = event.json()
+    kind = event.event or str(data.get("type", ""))
     read_responses_terminal(
-        event.event or str(data.get("type", "")),
+        kind,
         data,
         terminal,
         saw_tool_call=saw_client_action,
     )
+    if kind != "response.completed":
+        return
+    raw_response = data.get("response")
+    response = cast(dict[str, Any], raw_response) if isinstance(raw_response, dict) else {}
+    raw_status = response.get("status")
+    terminal.terminal_status = raw_status if isinstance(raw_status, str) and raw_status else "completed"
+    actions, classification_complete = read_responses_client_actions(response)
+    terminal.client_actions = actions
+    terminal.client_action_classification_complete = classification_complete
 
 
 RESPONSES_DIALECT = Dialect(
@@ -117,7 +89,7 @@ RESPONSES_DIALECT = Dialect(
     item_done_event=ITEM_DONE,
     # **Not** the item id. This upstream sends a different `item.id` on an item's `added` and `done`, so keying on the id pairs nothing — the defect `ResponsesAssembler._item_key` already records.
     item_index_field="output_index",
-    requires_client_action=requires_client_action,
+    client_action_requirement=client_action_requirement,
     read_terminal=_read_terminal,
     read_failure=responses_failure_from,
 )

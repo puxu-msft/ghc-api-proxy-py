@@ -25,7 +25,11 @@ from app.observability.terminal import (
     paint,
     volume_colour,
 )
-from app.pipeline.delivery.assembling import ReplyDialect
+from app.pipeline.delivery.assembling import (
+    ClientAction,
+    ClientActionRequirement,
+    ReplyDialect,
+)
 from app.pipeline.hand_over import one_line
 
 # What to call the same two things under each upstream, abbreviated to fit a line. Held here, in the layer that renders, because which word to print is a display decision; what happened is the record's business and it says only which upstream described it.
@@ -138,6 +142,9 @@ class RequestLine:
     usage: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
     terminal_seen: bool = False
     stop_reason: str = ""
+    terminal_status: str = ""
+    client_actions: tuple[ClientAction, ...] = ()
+    client_action_classification_complete: bool = False
     blocks: int = 0
     tools: tuple[str, ...] = ()
     thinking: tuple[str, ...] = ()
@@ -193,6 +200,41 @@ def format_stop_reason(
     reason_colour = REASON_COLOURS.get(stop_reason)
     painted = paint(word, reason_colour, color=color) if reason_colour else word
     return f"{painted}({_painted_tools(named, color=color)})" if named else painted
+
+
+def format_client_actions(actions: tuple[ClientAction, ...], *, color: bool = False) -> str:
+    """Render required and unknown terminal output items in authoritative order."""
+    rendered: list[str] = []
+    for action in actions:
+        if action.requirement is ClientActionRequirement.NOT_REQUIRED:
+            # The producer excludes these. Tolerating a directly constructed record must not make a server-executed item look like work the client owes.
+            continue
+        if action.requirement is ClientActionRequirement.UNKNOWN:
+            rendered.append(f"client_action?({action.type})")
+            continue
+        if action.name:
+            rendered.append(f"{action.type}({_painted_tools([action.name], color=color)})")
+        else:
+            rendered.append(action.type)
+    return " ".join(rendered)
+
+
+def format_terminal_status(
+    status: str,
+    actions: tuple[ClientAction, ...],
+    classification_complete: bool,
+    *,
+    color: bool = False,
+) -> str:
+    """Render a direct terminal status with the client action context that qualifies it."""
+    clean_completed = status == "completed" and classification_complete and not actions
+    rendered = [paint(status, GREEN, color=color) if clean_completed else status]
+    action_text = format_client_actions(actions, color=color)
+    if action_text:
+        rendered.append(action_text)
+    if not classification_complete:
+        rendered.append("client_action?(unclassified)")
+    return " ".join(rendered)
 
 
 def format_pending_tools(tools: tuple[str, ...], *, color: bool = False) -> str:
@@ -381,6 +423,15 @@ def format_completion_line(line: RequestLine, *, status: LogStatus, unicode: boo
     if line.count_provider:
         # A count has no reply and therefore no stop reason, so this is its ending. The order is for the reader rather than for the state machine: `count_provider` is set only on the count branch, which returns before a reply is ever aggregated, so no reachable request carries both and swapping these two arms would change nothing that runs.
         parts.append(format_count_provider(line.count_provider, line.count_provider_reason, color=color))
+    elif line.terminal_status:
+        parts.append(
+            format_terminal_status(
+                line.terminal_status,
+                line.client_actions,
+                line.client_action_classification_complete,
+                color=color,
+            )
+        )
     elif line.stop_reason:
         parts.append(format_stop_reason(line.stop_reason, line.tools, line.dialect, color=color))
     elif line.tools:

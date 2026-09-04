@@ -16,7 +16,12 @@ from enum import StrEnum
 from typing import Any
 
 from app.errors import ErrorInfo
-from app.pipeline.delivery.assembling import ReplyDialect, StreamFailure, Terminal
+from app.pipeline.delivery.assembling import (
+    ClientActionRequirement,
+    ReplyDialect,
+    StreamFailure,
+    Terminal,
+)
 from app.pipeline.delivery.framing import OutboundFramer
 from app.pipeline.delivery.sse_source import SseEvent, encode_frame
 
@@ -58,8 +63,8 @@ class Dialect:
     item_done_event: str
     # The payload field that says which item an event belongs to. Responses keys on `output_index`, Anthropic on `index`; both are positions rather than ids, which matters because Copilot sends a different item id on an item's opening and closing events.
     item_index_field: str
-    # Whether a finished item stops the turn until the client submits a tool output or an approval (`spec.md` §7.1).
-    requires_client_action: Callable[[dict[str, Any]], bool]
+    # The item's client-action fact (`spec.md` §7.1). The engine projects UNKNOWN conservatively for buffering without flattening the observable fact.
+    client_action_requirement: Callable[[dict[str, Any]], ClientActionRequirement]
     # Fill in the observable terminal facts from a terminal event. §10 wants the authoritative status and usage; the wire still carries upstream's own event verbatim, so nothing here is reverse-derived onto it (§6.3).
     read_terminal: Callable[[SseEvent, Terminal, bool], None]
     # Upstream's own failure event, as a failure record, or `None` when this event is not one.
@@ -97,16 +102,24 @@ class RawEventBatch:
 
     @property
     def requires_client_action(self) -> bool:
-        """Whether any item in this batch stops the turn until the client acts.
+        """Whether any complete item projects to a client action for buffering.
 
-        **Read off whichever event carries the item object, not off the closing event.** The two dialects put it in different places: a Responses `output_item.done` carries the finished item, while an Anthropic `content_block_stop` carries only an index and the block's type arrived on `content_block_start`. Asking only the closing event would answer `False` for every Anthropic tool call.
-
-        Safe to scan the whole batch because §4 already guarantees an item's events never straddle a release boundary: if the item is in here at all, its whole group is. Where a dialect spreads the deciding fields across events — a Responses `tool_search_call` announces its type on the opening event and its `execution` on the closing one — `any` takes the conservative direction, which is the same direction §7.1 takes for an unknown type.
+        Item facts are merged by position before classification. Responses can put the type on an opening event and the execution side on the closing one; classifying those halves independently would let the opening's UNKNOWN override a closing event that says the server executes the item. Anthropic needs the same merge for the opposite shape, where only the opening event carries the block.
         """
+        indexed: dict[int, dict[str, Any]] = {}
+        unindexed: list[dict[str, Any]] = []
+        for event in self.events:
+            item = _item_object(event)
+            if item is None:
+                continue
+            index = event.json().get(self.dialect.item_index_field)
+            if isinstance(index, int):
+                indexed.setdefault(index, {}).update(item)
+            else:
+                unindexed.append(item)
         return any(
-            self.dialect.requires_client_action(item)
-            for item in (_item_object(e) for e in self.events)
-            if item
+            self.dialect.client_action_requirement(item) is not ClientActionRequirement.NOT_REQUIRED
+            for item in (*indexed.values(), *unindexed)
         )
 
     def encode(self) -> bytes:
@@ -117,16 +130,13 @@ class RawEventBatch:
         return b"".join(encode_frame(e.event, e.data) for e in self.events)
 
 
-def _item_object(event: SseEvent) -> dict[str, Any]:
-    """The item object an opening or closing event carries, or an empty mapping.
-
-    Empty rather than `None` so callers ask about its contents rather than about whether it exists — an item with no readable type gets the same conservative answer an unknown one does.
-    """
+def _item_object(event: SseEvent) -> dict[str, Any] | None:
+    """The item object an event carries, preserving present-empty versus absent."""
     for key in ("item", "content_block"):
         found: object = event.json().get(key)
         if isinstance(found, dict):
             return dict[str, Any](found)  # pyright: ignore[reportUnknownArgumentType]
-    return {}
+    return None
 
 
 @dataclass(slots=True)
@@ -185,7 +195,10 @@ class PassthroughAssembler:
                 self._open.discard(item)
                 self._closed.add(item)
                 self._terminal.blocks += 1
-                if self._dialect.requires_client_action(_item_object(event)):
+                item_object = _item_object(event)
+                item_for_classification = item_object if item_object is not None else {}
+                requirement = self._dialect.client_action_requirement(item_for_classification)
+                if requirement is not ClientActionRequirement.NOT_REQUIRED:
                     self._saw_client_action = True
             elif item not in self._closed:
                 self._open.add(item)

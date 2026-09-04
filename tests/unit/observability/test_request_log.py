@@ -10,13 +10,18 @@ from app.observability.request_log import (
     format_arrival_line,
     format_completion_line,
     format_stop_reason,
+    format_terminal_status,
     format_thinking,
     format_tokens,
     http_label,
     status_for,
 )
 from app.observability.terminal import BOLD_RED, CYAN, DIM, GREEN, RED, RESET, WHITE, YELLOW
-from app.pipeline.delivery.assembling import ReplyDialect
+from app.pipeline.delivery.assembling import (
+    ClientAction,
+    ClientActionRequirement,
+    ReplyDialect,
+)
 from app.pipeline.hand_over import one_line
 
 
@@ -361,6 +366,77 @@ def test_a_stop_reason_without_tools_is_left_alone() -> None:
     # An empty name is dropped rather than rendered as a gap, which would read as a tool called "".
     assert format_stop_reason("tool_use", ("", "")) == "tool_use"
     assert format_stop_reason("", ("Bash",)) == ""
+
+
+def test_completed_is_green_only_for_a_classified_action_free_snapshot() -> None:
+    assert format_terminal_status("completed", (), True, color=True) == f"{GREEN}completed{RESET}"
+    assert format_terminal_status("completed", (), False, color=True) == "completed client_action?(unclassified)"
+
+
+def test_completed_with_client_actions_keeps_status_and_types_uncoloured() -> None:
+    actions = (
+        ClientAction(ClientActionRequirement.REQUIRED, "function_call", "Bash", 0),
+        ClientAction(ClientActionRequirement.REQUIRED, "custom_tool_call", "run_shell", 1),
+    )
+
+    rendered = format_terminal_status("completed", actions, True, color=True)
+
+    assert rendered == (
+        f"completed function_call({DIM}Bash{RESET}) "
+        f"custom_tool_call({DIM}run_shell{RESET})"
+    )
+    assert f"{GREEN}completed{RESET}" not in rendered
+
+
+def test_unknown_client_actions_are_visible_without_claiming_the_client_owes_them() -> None:
+    actions = (ClientAction(ClientActionRequirement.UNKNOWN, "future_tool_call", "future", 0),)
+
+    assert format_terminal_status("completed", actions, True) == "completed client_action?(future_tool_call)"
+
+
+def test_an_interactive_terminal_action_keeps_its_attention_colour() -> None:
+    actions = (
+        ClientAction(ClientActionRequirement.REQUIRED, "function_call", "AskUserQuestion", 0),
+    )
+
+    assert format_terminal_status("completed", actions, True, color=True) == (
+        f"completed function_call({CYAN}AskUserQuestion{RESET})"
+    )
+
+
+def test_terminal_status_display_does_not_take_its_colour_from_the_legacy_stop_reason() -> None:
+    line = RequestLine(
+        method="POST",
+        path="/responses",
+        status_code=200,
+        stop_reason="end_turn",
+        terminal_status="completed",
+        client_actions=(
+            ClientAction(ClientActionRequirement.REQUIRED, "function_call", "Bash", 0),
+        ),
+        client_action_classification_complete=True,
+        dialect=ReplyDialect.RESPONSES,
+    )
+
+    rendered = format_completion_line(line, status="ok", color=True)
+
+    assert f"{GREEN}completed{RESET}" not in rendered
+    assert rendered.endswith(f"completed function_call({DIM}Bash{RESET})")
+    assert "end_turn" not in rendered
+
+
+def test_incomplete_responses_keep_the_legacy_max_tokens_colour() -> None:
+    line = RequestLine(
+        method="POST",
+        path="/responses",
+        status_code=200,
+        stop_reason="max_tokens",
+        dialect=ReplyDialect.RESPONSES,
+    )
+
+    assert format_completion_line(line, status="ok", color=True).endswith(
+        f"{YELLOW}max_tokens{RESET}"
+    )
 
 
 def test_tools_without_a_stop_reason_are_still_named() -> None:

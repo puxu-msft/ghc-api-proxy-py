@@ -42,6 +42,7 @@ from app.observability.active_requests import ActiveRequestRegistry
 from app.observability.logging import setup_logging
 from app.observability.request_log_file import request_logs_dir
 from app.observability.request_trace import REQUEST_LOGGER, RequestTrace
+from app.observability.terminal import DIM, GREEN, RESET, TerminalCapabilities
 from app.pipeline import driver
 from app.pipeline.delivery.assembling import BlockAssembler
 from app.pipeline.delivery.blocks import BlockBuffer
@@ -2832,6 +2833,45 @@ def responses_sse_upstream(usage: dict[str, Any] | None = None) -> bytes:
     return "".join(frames).encode()
 
 
+_OUTPUT_MISSING = object()
+
+
+def responses_observability_sse(
+    *,
+    stream_items: dict[int, tuple[dict[str, Any], dict[str, Any]]],
+    done_order: tuple[int, ...],
+    terminal_output: object = _OUTPUT_MISSING,
+    unattributed: tuple[str, dict[str, Any]] | None = None,
+) -> bytes:
+    """Build a native Responses stream whose event and terminal snapshots may disagree."""
+    frames = responses_envelope_frames()
+    for output_index, (added, _) in stream_items.items():
+        frames.append(
+            "event: response.output_item.added\n"
+            f"data: {orjson.dumps({'output_index': output_index, 'item': added}).decode()}\n\n"
+        )
+    if unattributed is not None:
+        event_name, payload = unattributed
+        frames.append(f"event: {event_name}\ndata: {orjson.dumps(payload).decode()}\n\n")
+    for output_index in done_order:
+        _, done = stream_items[output_index]
+        frames.append(
+            "event: response.output_item.done\n"
+            f"data: {orjson.dumps({'output_index': output_index, 'item': done}).decode()}\n\n"
+        )
+    terminal: dict[str, Any] = {
+        "status": "completed",
+        "usage": {"input_tokens": 3, "output_tokens": 4},
+    }
+    if terminal_output is not _OUTPUT_MISSING:
+        terminal["output"] = terminal_output
+    frames.append(
+        "event: response.completed\n"
+        f"data: {orjson.dumps({'response': terminal}).decode()}\n\n"
+    )
+    return "".join(frames).encode()
+
+
 def custom_tool_call_sse() -> bytes:
     """A Responses stream whose one output item is a `custom_tool_call`.
 
@@ -3306,6 +3346,133 @@ def test_a_streamed_responses_reply_is_logged_in_its_own_words(
     assert "reason(enc:1)" in line
     assert "function_call(Bash)" in line
     assert "think(" not in line and "tool_use(" not in line
+
+
+def _logged_direct_responses(
+    content: bytes,
+    caplog: pytest.LogCaptureFixture,
+    *,
+    color: bool = False,
+) -> str:
+    client, _ = make_client(
+        lambda _: httpx2.Response(200, content=content, headers={"content-type": "text/event-stream"})
+    )
+    if color:
+        chain = _chain_of(client)
+        capabilities = TerminalCapabilities(live=False, color=True, unicode=True)
+        setattr(cast(FastAPI, client.app).state, CHAIN_STATE_KEY, replace(chain, capabilities=capabilities))
+
+    with caplog.at_level(logging.INFO):
+        response = client.post(
+            "/responses",
+            json={"model": "gpt-model", "input": [], "stream": True},
+        )
+
+    assert response.status_code == 200
+    lines = _request_lines(caplog.records)
+    assert len(lines) == 1
+    return lines[0]
+
+
+def test_an_explicit_empty_terminal_output_is_a_clean_completed_snapshot(
+    request_log: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    line = _logged_direct_responses(
+        responses_observability_sse(
+            stream_items={},
+            done_order=(),
+            terminal_output=[],
+            unattributed=("response.audio.delta", {"delta": "audio"}),
+        ),
+        caplog,
+    )
+
+    assert line.endswith("completed")
+    assert "client_action?(" not in line
+
+
+def test_a_terminal_message_is_not_misclassified_as_an_unknown_action(
+    request_log: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    message = {"type": "message", "id": "m_1", "status": "completed"}
+    line = _logged_direct_responses(
+        responses_observability_sse(
+            stream_items={0: (message, message)},
+            done_order=(0,),
+            terminal_output=[message],
+        ),
+        caplog,
+    )
+
+    assert line.endswith("completed")
+    assert "client_action?(" not in line
+
+
+@pytest.mark.parametrize("terminal_output", [_OUTPUT_MISSING, {}])
+def test_a_missing_or_malformed_terminal_output_is_visible_as_unclassified(
+    terminal_output: object,
+    request_log: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    line = _logged_direct_responses(
+        responses_observability_sse(
+            stream_items={},
+            done_order=(),
+            terminal_output=terminal_output,
+        ),
+        caplog,
+    )
+
+    assert line.endswith("completed client_action?(unclassified)")
+
+
+def test_an_unknown_terminal_item_is_visible_as_unknown(
+    request_log: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    item = {"type": "future_tool_call", "name": "future"}
+    line = _logged_direct_responses(
+        responses_observability_sse(
+            stream_items={0: (item, item)},
+            done_order=(0,),
+            terminal_output=[item],
+        ),
+        caplog,
+    )
+
+    assert line.endswith("completed client_action?(future_tool_call)")
+
+
+def test_terminal_output_drives_both_action_list_and_completed_colour(
+    request_log: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    added = {"type": "tool_search_call"}
+    stream_items = {
+        index: (
+            added,
+            {"type": "tool_search_call", "execution": "server", "name": f"stale_{index}"},
+        )
+        for index in range(3)
+    }
+    terminal_output = [
+        {"type": "function_call", "name": "Bash"},
+        {"type": "function_call", "name": "Bash"},
+        {"type": "custom_tool_call"},
+    ]
+    line = _logged_direct_responses(
+        responses_observability_sse(
+            stream_items=stream_items,
+            done_order=(2, 1, 0),
+            terminal_output=terminal_output,
+        ),
+        caplog,
+        color=True,
+    )
+
+    assert line.endswith(
+        f"completed function_call({DIM}Bash{RESET}) "
+        f"function_call({DIM}Bash{RESET}) custom_tool_call"
+    )
+    assert f"{GREEN}completed{RESET}" not in line
 
 
 def test_a_route_whose_reply_cannot_be_read_claims_nothing_about_it(

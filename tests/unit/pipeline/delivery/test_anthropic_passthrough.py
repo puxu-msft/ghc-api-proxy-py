@@ -5,10 +5,12 @@ The engine itself is exercised in `test_responses_passthrough.py`; this module t
 
 import orjson
 
+from app.pipeline.delivery.assembling import ClientActionRequirement
 from app.pipeline.delivery.formats.anthropic_messages import AnthropicFramer
 from app.pipeline.delivery.formats.anthropic_messages_passthrough import (
     ANTHROPIC_DIALECT,
     anthropic_passthrough_assembler,
+    client_action_requirement,
     requires_client_action,
 )
 from app.pipeline.delivery.passthrough import PassthroughAssembler, PassthroughFramer, RawEventBatch
@@ -94,13 +96,13 @@ def test_message_delta_carries_the_stop_reason_without_ending_the_response() -> 
 
 
 def test_only_a_tool_use_block_asks_the_client_for_anything() -> None:
-    """One line rather than §7.1's whole section, because this dialect has no conditional field.
-
-    The pair matters: if everything answered `True`, `until-tool-use` would release on the first block and mean nothing.
-    """
+    """The classifier stays two-valued in Anthropic's single-action vocabulary."""
+    assert client_action_requirement({"type": "tool_use"}) is ClientActionRequirement.REQUIRED
+    assert client_action_requirement({"type": "text"}) is ClientActionRequirement.NOT_REQUIRED
+    assert client_action_requirement({"type": "thinking"}) is ClientActionRequirement.NOT_REQUIRED
+    assert client_action_requirement({"type": "future_content"}) is ClientActionRequirement.NOT_REQUIRED
     assert requires_client_action({"type": "tool_use"}) is True
     assert requires_client_action({"type": "text"}) is False
-    assert requires_client_action({"type": "thinking"}) is False
 
 
 def test_a_batch_finds_the_block_type_on_the_opening_event() -> None:

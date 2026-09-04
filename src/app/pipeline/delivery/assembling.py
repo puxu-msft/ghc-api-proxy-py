@@ -26,6 +26,24 @@ class ReplyDialect(StrEnum):
     RESPONSES = "responses"
 
 
+class ClientActionRequirement(StrEnum):
+    """Whether an output item requires the client to continue the model's work."""
+
+    REQUIRED = "required"
+    NOT_REQUIRED = "not_required"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class ClientAction:
+    """One terminal Responses output item that may require the client to act."""
+
+    requirement: ClientActionRequirement
+    type: str
+    name: str = ""
+    output_index: int = -1
+
+
 @dataclass(slots=True)
 class Terminal:
     """What the upstream said when it finished."""
@@ -47,6 +65,12 @@ class Terminal:
     #
     # `None` on every leg but the Responses streaming one, the buffered path included — and `None` rather than an empty mapping, because those are different answers. A usage of zero is a measurement; not having asked is not. An empty default would have made "upstream reported nothing" and "nobody looked" the same value, which is the defect `stop_reason`'s empty default exists to avoid, one field further down.
     upstream_usage: dict[str, Any] | None = None
+    # The direct Responses terminal's own status. Separate from `stop_reason`, which remains the translated semantic ending used by delivery and continuation.
+    terminal_status: str = ""
+    # Required or unknown client-action facts from the direct terminal's authoritative `response.output` snapshot, in output order.
+    client_actions: list[ClientAction] = field(default_factory=lambda: list[ClientAction]())
+    # False means no complete terminal output snapshot was available, not that the snapshot contained no client actions.
+    client_action_classification_complete: bool = False
 
     def record(self, block: CompletedBlock) -> None:
         """Take one finished block into the running summary of the reply.

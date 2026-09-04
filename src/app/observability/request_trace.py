@@ -19,7 +19,7 @@ from app.observability.request_log import (
     status_for,
 )
 from app.observability.request_log_file import write_request_record
-from app.pipeline.delivery.assembling import ReplyDialect, Terminal
+from app.pipeline.delivery.assembling import ClientAction, ReplyDialect, Terminal
 from app.pipeline.request import RequestContext
 from app.pipeline.translation_driver.semantic import ConversionFact, Loss
 
@@ -182,6 +182,9 @@ class RequestTrace:
     usage: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
     terminal_seen: bool = False
     stop_reason: str = ""
+    terminal_status: str = ""
+    client_actions: tuple[ClientAction, ...] = ()
+    client_action_classification_complete: bool = False
     blocks: int = 0
     tools: tuple[str, ...] = ()
     thinking: tuple[str, ...] = ()
@@ -201,6 +204,9 @@ class RequestTrace:
         self.usage = dict(reply.usage)
         self.terminal_seen = reply.seen
         self.stop_reason = reply.stop_reason
+        self.terminal_status = reply.terminal_status
+        self.client_actions = tuple(reply.client_actions)
+        self.client_action_classification_complete = reply.client_action_classification_complete
         self.blocks = reply.blocks
         self.tools = tuple(reply.tools)
         self.thinking = tuple(reply.thinking)
@@ -244,6 +250,9 @@ def log_completion(chain: Chain, trace: RequestTrace, status_code: int | None, *
         usage=trace.usage,
         terminal_seen=trace.terminal_seen,
         stop_reason=trace.stop_reason,
+        terminal_status=trace.terminal_status,
+        client_actions=trace.client_actions,
+        client_action_classification_complete=trace.client_action_classification_complete,
         blocks=trace.blocks,
         tools=trace.tools,
         thinking=trace.thinking,

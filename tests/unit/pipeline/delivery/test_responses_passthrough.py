@@ -9,11 +9,12 @@ import orjson
 import pytest
 
 from app.errors import ErrorCategory, ErrorInfo
-from app.pipeline.delivery.assembling import Terminal
+from app.pipeline.delivery.assembling import ClientAction, ClientActionRequirement, Terminal
 from app.pipeline.delivery.blocks import BlockBuffer, BufferCapExceeded
 from app.pipeline.delivery.formats.openai_responses import ResponsesFramer
 from app.pipeline.delivery.formats.openai_responses_passthrough import (
     RESPONSES_DIALECT,
+    client_action_requirement,
     requires_client_action,
     responses_passthrough_assembler,
     stabilise_stream_ids,
@@ -331,49 +332,63 @@ def test_queued_bytes_measures_the_text_actually_held() -> None:
     assert assembler.queued_bytes == 0
 
 
-def test_the_same_type_answers_oppositely_by_its_own_execution_field() -> None:
-    """§7.1's whole reason for reading the item rather than a type table.
+@pytest.mark.parametrize(
+    ("item", "expected"),
+    [
+        ({"type": "function_call"}, ClientActionRequirement.REQUIRED),
+        ({"type": "custom_tool_call"}, ClientActionRequirement.REQUIRED),
+        ({"type": "message"}, ClientActionRequirement.NOT_REQUIRED),
+        ({"type": "web_search_call"}, ClientActionRequirement.NOT_REQUIRED),
+        (
+            {"type": "tool_search_call", "execution": "client"},
+            ClientActionRequirement.REQUIRED,
+        ),
+        (
+            {"type": "tool_search_call", "execution": "server"},
+            ClientActionRequirement.NOT_REQUIRED,
+        ),
+        ({"type": "tool_search_call"}, ClientActionRequirement.UNKNOWN),
+        (
+            {"type": "shell_call", "environment": {"type": "local"}},
+            ClientActionRequirement.REQUIRED,
+        ),
+        (
+            {"type": "shell_call", "environment": {"type": "container_reference"}},
+            ClientActionRequirement.NOT_REQUIRED,
+        ),
+        ({"type": "shell_call"}, ClientActionRequirement.UNKNOWN),
+        ({"type": "some_2027_tool_call"}, ClientActionRequirement.UNKNOWN),
+        ({}, ClientActionRequirement.UNKNOWN),
+    ],
+)
+def test_responses_client_action_requirement(item: dict[str, Any], expected: ClientActionRequirement) -> None:
+    assert client_action_requirement(item) is expected
 
-    `ResponseToolSearchCall` declares `execution: Literal["server", "client"]`, so a table keyed on `tool_search_call` alone would be wrong for one of the two halves whichever answer it picked. Asserted as a pair, because either one alone passes on a constant.
-    """
-    assert requires_client_action({"type": "tool_search_call", "execution": "client"}) is True
-    assert requires_client_action({"type": "tool_search_call", "execution": "server"}) is False
 
-
-def test_an_item_type_nothing_here_knows_is_assumed_to_need_the_client() -> None:
-    """The conservative direction, and §2.1 is why it is that one.
-
-    Answering `False` for an unknown type would hold whatever the client has to act on until the terminal, which makes the set of types this proxy recognises the ceiling on what a client can do. Releasing early costs one extra flush; withholding costs the turn. An item with no readable `type` gets the same answer for the same reason.
-    """
+def test_the_policy_projects_unknown_in_the_conservative_direction() -> None:
+    """Facts stay unknown while buffering releases rather than limiting a future client."""
     assert requires_client_action({"type": "some_2027_tool_call"}) is True
-    assert requires_client_action({}) is True
-
-
-def test_a_hosted_tool_the_upstream_runs_itself_needs_nothing_from_the_client() -> None:
-    """The control for the test above: if everything answered `True`, `until-tool-use` would release on the first item and mean nothing."""
-    assert requires_client_action({"type": "web_search_call"}) is False
+    assert requires_client_action({"type": "tool_search_call"}) is True
     assert requires_client_action({"type": "message"}) is False
 
 
-def test_a_batch_answers_from_whichever_event_carries_the_item() -> None:
-    """Not from the closing event, because the two dialects put the item in different places.
-
-    A Responses `output_item.done` carries the finished item; an Anthropic `content_block_stop` carries only an index, and the block's type arrived on `content_block_start`. A predicate that asked only the closing event would answer `False` for every Anthropic tool call. Scanning the batch is safe because §4 already guarantees an item's events never straddle a release boundary — if the item is in here, its whole group is.
-
-    Asserted as a pair on `tool_search_call`, the type whose answer is decided by a field spread across the group: the opening event announces the type and the closing one carries `execution`.
-    """
-    def group(execution: str) -> RawEventBatch:
+def test_a_batch_merges_an_items_facts_before_projecting_the_policy() -> None:
+    """The opening's unknown execution must not override the completed item's answer."""
+    def group(execution: str | None) -> RawEventBatch:
+        closing: dict[str, object] = {"type": "tool_search_call"}
+        if execution is not None:
+            closing["execution"] = execution
         return RawEventBatch(
             events=(
-                SseEvent(
-                    event="response.output_item.added",
-                    data='{"output_index":0,"item":{"type":"tool_search_call"}}',
+                event(
+                    "response.output_item.added",
+                    output_index=0,
+                    item={"type": "tool_search_call"},
                 ),
-                SseEvent(
-                    event="response.output_item.done",
-                    data='{"output_index":0,"item":{"type":"tool_search_call","execution":"'
-                    + execution
-                    + '"}}',
+                event(
+                    "response.output_item.done",
+                    output_index=0,
+                    item=closing,
                 ),
             ),
             dialect=RESPONSES_DIALECT,
@@ -381,6 +396,17 @@ def test_a_batch_answers_from_whichever_event_carries_the_item() -> None:
 
     assert group("client").requires_client_action is True
     assert group("server").requires_client_action is False
+    assert group(None).requires_client_action is True
+
+
+def test_an_explicit_empty_item_projects_unknown_for_buffering() -> None:
+    batch = RawEventBatch(
+        events=(event("response.output_item.done", output_index=0, item={}),),
+        dialect=RESPONSES_DIALECT,
+    )
+
+    assert client_action_requirement({}) is ClientActionRequirement.UNKNOWN
+    assert batch.requires_client_action is True
 
 
 def test_a_terminal_lifts_the_hold_on_a_response_with_no_items() -> None:
@@ -415,13 +441,21 @@ def test_the_terminal_facts_are_recorded_without_touching_the_wire() -> None:
     released = assembler.push(
         event(
             "response.completed",
-            response={"id": "resp_1", "status": "completed", "usage": {"input_tokens": 7}},
+            response={
+                "id": "resp_1",
+                "status": "completed",
+                "output": [],
+                "usage": {"input_tokens": 7},
+            },
         )
     )
 
     assert assembler.terminal.seen is True
     assert assembler.terminal.stop_reason == "end_turn"
     assert assembler.terminal.upstream_usage == {"input_tokens": 7}
+    assert assembler.terminal.terminal_status == "completed"
+    assert assembler.terminal.client_actions == []
+    assert assembler.terminal.client_action_classification_complete is True
     # And the same event still goes to the client as upstream wrote it.
     assert [e.event for e in released[0].events][-1] == "response.completed"
 
@@ -439,6 +473,102 @@ def test_a_turn_that_asked_the_client_to_act_says_so_in_its_stop_reason() -> Non
     assembler.push(event("response.completed", response={"id": "resp_1"}))
 
     assert assembler.terminal.stop_reason == "tool_use"
+
+
+def test_terminal_actions_come_from_output_not_done_side_policy_facts() -> None:
+    assembler = responses_passthrough_assembler()
+    for index in range(3):
+        assembler.push(
+            event(
+                "response.output_item.added",
+                output_index=index,
+                item={"type": "tool_search_call"},
+            )
+        )
+    for index in (2, 1, 0):
+        assembler.push(
+            event(
+                "response.output_item.done",
+                output_index=index,
+                item={"type": "tool_search_call", "execution": "server", "name": "stale"},
+            )
+        )
+    terminal_output = [
+        {"type": "function_call", "name": "Bash"},
+        {"type": "function_call", "name": "Bash"},
+        {"type": "custom_tool_call"},
+    ]
+
+    assembler.push(
+        event(
+            "response.completed",
+            response={"status": "completed", "output": terminal_output},
+        )
+    )
+
+    assert assembler.terminal.stop_reason == "end_turn", "the done-side policy fact remains separate"
+    assert assembler.terminal.client_actions == [
+        ClientAction(ClientActionRequirement.REQUIRED, "function_call", "Bash", 0),
+        ClientAction(ClientActionRequirement.REQUIRED, "function_call", "Bash", 1),
+        ClientAction(ClientActionRequirement.REQUIRED, "custom_tool_call", "", 2),
+    ]
+    assert assembler.terminal.client_action_classification_complete is True
+
+
+@pytest.mark.parametrize("response", [{}, {"output": {}}])
+def test_a_missing_or_malformed_terminal_output_is_not_a_confirmed_empty_snapshot(
+    response: dict[str, object],
+) -> None:
+    assembler = responses_passthrough_assembler()
+
+    assembler.push(event("response.completed", response=response))
+
+    assert assembler.terminal.terminal_status == "completed"
+    assert assembler.terminal.client_actions == []
+    assert assembler.terminal.client_action_classification_complete is False
+
+
+def test_unknown_terminal_items_are_facts_not_absence() -> None:
+    assembler = responses_passthrough_assembler()
+
+    assembler.push(
+        event(
+            "response.completed",
+            response={
+                "output": [
+                    {"type": "message"},
+                    {"type": "future_tool_call", "name": "future"},
+                    None,
+                ]
+            },
+        )
+    )
+
+    assert assembler.terminal.client_actions == [
+        ClientAction(ClientActionRequirement.UNKNOWN, "future_tool_call", "future", 1),
+        ClientAction(ClientActionRequirement.UNKNOWN, "unknown", "", 2),
+    ]
+    assert assembler.terminal.client_action_classification_complete is True
+
+
+def test_incomplete_keeps_its_legacy_stop_reason_without_native_completion_facts() -> None:
+    assembler = responses_passthrough_assembler()
+
+    assembler.push(
+        event(
+            "response.incomplete",
+            response={
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "output": [{"type": "function_call", "name": "Bash"}],
+            },
+        )
+    )
+
+    assert assembler.terminal.stop_reason == "max_tokens"
+    assert assembler.terminal.terminal_status == ""
+    assert assembler.terminal.client_actions == []
+    assert assembler.terminal.client_action_classification_complete is False
 
 
 def test_an_upstream_failure_is_carried_with_its_own_name_and_payload() -> None:

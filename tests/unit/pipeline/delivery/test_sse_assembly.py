@@ -450,6 +450,29 @@ def test_a_malformed_usage_costs_the_counts_and_not_the_response() -> None:
     assert assembler.terminal.seen is True
 
 
+def test_translating_responses_assembler_does_not_claim_direct_terminal_facts() -> None:
+    assembler = ResponsesAssembler()
+    opening = {"output_index": 0, "item": {"type": "function_call", "name": "Bash"}}
+    closing = {
+        "output_index": 0,
+        "item": {"type": "function_call", "name": "Bash", "arguments": "{}"},
+    }
+    assembler.push(SseEvent("response.output_item.added", orjson.dumps(opening).decode()))
+    assembler.push(SseEvent("response.output_item.done", orjson.dumps(closing).decode()))
+
+    assembler.push(
+        SseEvent(
+            "response.completed",
+            orjson.dumps({"response": {"output": [closing["item"]]}}).decode(),
+        )
+    )
+
+    assert assembler.terminal.stop_reason == "tool_use"
+    assert assembler.terminal.terminal_status == ""
+    assert assembler.terminal.client_actions == []
+    assert assembler.terminal.client_action_classification_complete is False
+
+
 def test_a_search_that_closes_without_ever_opening_is_still_delivered() -> None:
     """A `web_search_call` is whole on `done`: it has no deltas and nothing to accumulate, so the `added` it may skip carried nothing the close needs.
 

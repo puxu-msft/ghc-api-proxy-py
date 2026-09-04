@@ -9,7 +9,11 @@
 
 from typing import Any
 
-from app.pipeline.delivery.assembling import ReplyDialect, Terminal
+from app.pipeline.delivery.assembling import (
+    ClientActionRequirement,
+    ReplyDialect,
+    Terminal,
+)
 from app.pipeline.delivery.blocks import TOOL_USE
 from app.pipeline.delivery.formats.anthropic_messages import (
     anthropic_failure_from,
@@ -37,14 +41,19 @@ TERMINAL_EVENTS = frozenset({"message_stop", "error"})
 ITEM_DONE = "content_block_stop"
 
 
-def requires_client_action(item: dict[str, Any]) -> bool:
-    """Whether this content block stops the turn until the client submits a tool result.
+def client_action_requirement(item: dict[str, Any]) -> ClientActionRequirement:
+    """Classify the content block in Anthropic's single-action vocabulary.
 
-    One line rather than §7.1's whole section, because this dialect has no conditional field: a `tool_use` block always means the client owes the model something, and nothing else does. The Responses side needs more because the same `tool_search_call` answers oppositely depending on `execution`.
-
-    An unknown block type answers `False` here, and that is not the Responses rule inverted — it is the same rule applied to a different set. On the Responses side an unknown *item* may well be a tool call this proxy has not heard of. Here the vocabulary is Anthropic's own content-block types, where `tool_use` is the single spelling for "the client must act"; a new kind of block would be new *content*, not a new way of asking the client for something.
+    A `tool_use` block always means the client owes the model something, and nothing else does. An unknown block type is therefore not required here: unlike an unknown Responses item, it is new content rather than a new spelling for a client action.
     """
-    return str(item.get("type", "")) == TOOL_USE
+    if item.get("type") == TOOL_USE:
+        return ClientActionRequirement.REQUIRED
+    return ClientActionRequirement.NOT_REQUIRED
+
+
+def requires_client_action(item: dict[str, Any]) -> bool:
+    """Project the classifier onto the buffering policy's boolean."""
+    return client_action_requirement(item) is not ClientActionRequirement.NOT_REQUIRED
 
 
 def _read_terminal(event: SseEvent, terminal: Terminal, saw_client_action: bool) -> None:
@@ -62,7 +71,7 @@ ANTHROPIC_DIALECT = Dialect(
     terminal_events=TERMINAL_EVENTS,
     item_done_event=ITEM_DONE,
     item_index_field="index",
-    requires_client_action=requires_client_action,
+    client_action_requirement=client_action_requirement,
     read_terminal=_read_terminal,
     read_failure=anthropic_failure_from,
 )
