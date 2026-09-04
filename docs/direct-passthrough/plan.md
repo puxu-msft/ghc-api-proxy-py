@@ -1,7 +1,7 @@
 # 直连路径原生透传：实施计划
 
-日期：2026-09-01（v12）
-状态：**Responses 直连腿已接线并合入 `main`**（`1fb37cd`，1998 passed／ruff clean／pyright 0），issue #2／#3 已修；源提交存于 `archive/260901-passthrough-wiring`，经一次代码评审与两轮 Spec 评审。§0 的三项前置全部已合入 `main`（P1／P2 在 `7e96adc`，P3 在 `109dc44`）；骨架已合入 `main`（`01c33f1`）。**Anthropic 直连腿的词汇已实现并单测，未接线**——挡在 [`spec.md`](spec.md) §2.8 的 hand-over 问题上（[`deferred.md`](deferred.md) D-5）
+日期：2026-09-04（v13）
+状态：**Responses 直连腿已接线并合入 `main`**（`1fb37cd`，1998 passed、ruff clean、pyright 0），issue #2 和 #3 已修；源提交存于 `archive/260901-passthrough-wiring`，经一次代码评审与两轮 Spec 评审。§0 的三项前置全部已合入 `main`（P1、P2 在 `7e96adc`，P3 在 `109dc44`）；骨架已合入 `main`（`01c33f1`）。**Responses 流式直连的 terminal status 与 client-action 可观测切片已定稿待实现**（Spec §7.1、§10；TUI Spec「着色规则」与「验收」；设计与规格提交 `.dev@831b7dc`；实施计划 §10 经两轮独立评审达到 0 blocker、0 major）。**Anthropic 直连腿的词汇已实现并单测，未接线**——挡在 [`spec.md`](spec.md) §2.8 的 hand-over 问题上（[`deferred.md`](deferred.md) D-5）
 权威：[`spec.md`](spec.md)。**本文不定义任何用户可观察行为**——凡本文与 Spec 冲突，以 Spec 为准；凡本文出现 Spec 没有的行为承诺，那是缺陷，应移入 Spec 或删除。
 
 > **v1 已作废并重写。** 它规定「只保存 `done.item` 的最终快照、重发 `added` + `done`、继续 mint id、沿用 framer 的 output index」，而 Spec v2 要求保存全部 item 专有事件、不得 mint id、terminal 整个对象逐字。照 v1 实施会直接违反 Spec。作废理由见 [`reports/260830-review-spec.md`](reports/260830-review-spec.md) major-08 与 [`reports/260830-review-plan.md`](reports/260830-review-plan.md)；两份报告作为时点记录不改。
@@ -69,7 +69,15 @@ P1／P2 都已变异验证：把分隔符改回 LF-only，CRLF 与 CR 两个参�
 
 按 Spec §10：wire 走原生，可观测另立旁路 typed facts。`Terminal` 在本腿只作内部摘要，不得反推 wire。
 
-需要迁移的既有事实：item 计数、需要客户端行动的 tool 名、reasoning 是否出现、权威 terminal status 与 usage、failure/截断/replay 来源。
+完整迁移仍包括 item 计数、需要客户端行动的 tool 名称与类型、reasoning 是否出现、权威 terminal status 与 usage、failure、截断和 replay 来源。本轮只完成 Responses 流式直连的 terminal status 与 client-action 这一组相互依赖的事实：三态 `client_action_requirement`、buffering bool 投影、terminal `response.output` authority、typed `client_actions`、`client_action_classification_complete`、结构化记录与完成行上下文着色。非流式 `/responses` reader、reasoning 与其它尚未迁移的旁路事实继续保持原状态，不能把本切片写成 §10 整体完成。
+
+本轮 Goal：当 Responses terminal status 为 `completed` 时，完成行同时保留 terminal status 与 terminal output 中的 client actions；只有 terminal snapshot 分类完备且没有 required 或 unknown action 时，`completed` 才绿。
+
+本轮 Architecture：`assembling.py` 持有方言无关的 typed records；Responses 方言从 terminal `response.output` 一次形成最终 action snapshot，同时保留现有 done-side bool 给 buffering 与下游 stop reason 合成；`RequestTrace` 与 `RequestLine` 只搬运事实；`request_log.py` 是唯一决定文本和颜色的 presentation 层。两条消费路径不得互相反推。
+
+本轮 Tech Stack：Python 3.14 dataclasses、`StrEnum`、现有 SSE assembler、structlog 请求完成行、pytest、Ruff check、Pyright。
+
+本轮 Spec：[`spec.md`](spec.md) §7.1 与 §10，以及 [`../tui/spec.md`](../tui/spec.md)「着色规则」「描述回复的用词跟随上游」「验收」；定稿基线为 `.dev@831b7dc` 加评审处置 [`reports/260903-completed-client-actions-spec-review-disposition.md`](reports/260903-completed-client-actions-spec-review-disposition.md)。
 
 ## 7. 撤销 `ca777df` 在直连腿的那一半
 
@@ -88,7 +96,7 @@ P1／P2 都已变异验证：把分隔符改回 LF-only，CRLF 与 CR 两个参�
 7. ~~抽方言词汇 ＋ `anthropic-messages` 一份~~ **已完成**（`d76ac1c`、`d3b4cc2`）。**写第二份词汇是引擎两条不通用规则的暴露方式**：终局事实此前只在终局事件上读（Anthropic 把 stop reason 放在 `message_delta`，会漏一半），批次判据此前只读闭合事件（Anthropic 的 `content_block_stop` 只带 index，会让每个 tool call 答 `False`）
 8. **接线**：Responses 直连腿**已完成并合入 `main`**（`1fb37cd`），issue #2／#3 关闭。**Anthropic 腿未接线**，挡在 Spec §2.8 上（`deferred.md` D-5、D-6）
 9. Headers（§9.1）
-10. 可观测迁移（本步会改变 `tests/int/test_pipeline_app.py:2788` 的断言——该测试自己的注释写着这样断言就是为了让「给它一个 reader」成为一次**有意**的改动而不是静默的）
+10. 可观测迁移按独立事实组落地。本轮 10a 是 Responses 流式直连的 terminal status 与 client actions，具体任务见 §10；它不改变非流式 `/responses` 的空摘要测试。后续 whole-body reader 真正落地时才修改那条刻意钉住缺席的断言，不能由 10a 提前改掉
 
 > **第 7 步是 v9 新增的，来自用户 2026-08-31 的「根因修复所有直连路径」裁决。** 它排在接线之前而不是之后，理由与 v6 把接线挪到 policy 之后是同一条：一次「只接 Responses、Anthropic 直连继续走往返翻译」的接线不是自足切片——它会让同一个缺陷在两条腿上一条修好一条留着，而两条腿的客户端都看不出区别在哪。**Chat Completions 直连不在本步射程内**：它今天就把上游字节原样前送，天花板不存在（Spec §2.6），它缺的块级交付是 2026-08-22 已裁决的推迟项，不因本规格重开。
 
@@ -132,3 +140,272 @@ v9：**无法归属的事件按「收口时刻有没有未闭合 item」判**，
 来源：[`reports/260831-review-spec-round6.md`](reports/260831-review-spec-round6.md) round6-09、[`reports/260831-review-skeleton.md`](reports/260831-review-skeleton.md) finding 01／02、[`reports/260831-review-spec-round7.md`](reports/260831-review-spec-round7.md) round7-09。
 
 **判据必须在实现之前独立推导**，与 issue #1 块对那次同样的理由：判据一旦被实现假设污染就不可恢复。
+
+## 10. Responses 流式直连的 terminal status 与 client actions
+
+> **For agentic workers:** REQUIRED SUB-SKILL: use `superpowers:subagent-driven-development`（推荐）或 `superpowers:executing-plans`，逐任务执行并在任务间复核。步骤使用 checkbox 追踪。
+
+### 全局约束
+
+- 实现只覆盖原生 Responses **流式直连**；非流式 `/responses` whole-body reader 与翻译型 Responses terminal status 均保持 deferred。
+- Wire 仍逐字携带上游事件；新增 facts 不得反向改写 wire，也不得替代 `Terminal.stop_reason`、`_saw_client_action`、framing、continuation 或 buffering policy 的既有消费者。
+- 最终 action facts 与 completed 颜色只读 terminal `response.output`；done-side facts 只服务既有 policy 与 stop-reason 合成，两个来源不得混用。
+- 不运行 `ruff format`。实现后运行针对性 pytest、`uv run ruff check`、`uv run pyright`；最终候选再按项目规则跑一次完整回归。
+- 提交边界按语义切片，不按红绿状态；共享主树提交只用精确 pathspec，不碰其它会话的索引与 WIP。
+
+### Task 10.1：把 action 语义建模为三态事实与 policy 投影
+
+**Files**
+
+- Modify: `src/app/pipeline/delivery/assembling.py:19-60`
+- Modify: `src/app/pipeline/delivery/passthrough.py:38-66,79-110,145-200`
+- Create: `src/app/pipeline/delivery/formats/openai_responses_actions.py`
+- Modify: `src/app/pipeline/delivery/formats/openai_responses_passthrough.py:49-123`
+- Modify: `src/app/pipeline/delivery/formats/anthropic_messages_passthrough.py:40-68`
+- Test: `tests/unit/pipeline/delivery/test_responses_passthrough.py:334-383`
+- Test: `tests/unit/pipeline/delivery/test_anthropic_passthrough.py:96-119`
+
+**Interfaces**
+
+- Produces `ClientActionRequirement(StrEnum)` with `REQUIRED = "required"`, `NOT_REQUIRED = "not_required"`, `UNKNOWN = "unknown"`.
+- Produces frozen `ClientAction` with fields `requirement: ClientActionRequirement`, `type: str`, `name: str = ""`, `output_index: int = -1`.
+- Produces `client_action_requirement(item: dict[str, Any]) -> ClientActionRequirement` in dependency-leaf module `openai_responses_actions.py`, so both `openai_responses.py` and `openai_responses_passthrough.py` can import it without a cycle.
+- Changes `Dialect` to consume `client_action_requirement: Callable[[dict[str, Any]], ClientActionRequirement]`; `RawEventBatch.requires_client_action` and `PassthroughAssembler._saw_client_action` use `requirement is not NOT_REQUIRED` as the sole bool projection.
+- Keeps public per-dialect `requires_client_action(item) -> bool` wrappers for current callers and tests; each wrapper projects its classifier rather than maintaining a second classification table.
+
+- [ ] **Step 1：先实现 production 三态分类，不从 tests 反推合同。** 在 `assembling.py` 定义 enum 与 frozen record；在新依赖叶 `openai_responses_actions.py` 定义 `client_action_requirement(item)`，避免 `openai_responses.py ↔ openai_responses_passthrough.py` 循环 import：已知正例 → `REQUIRED`，已知 server-executed 反例 → `NOT_REQUIRED`，未知 type、缺 type、条件 type 缺或错 discriminator → `UNKNOWN`。`tool_search_call.execution` 只接受 `client` 或 `server`；`shell_call.environment.type` 只接受 `local` 或 `container_reference`。Anthropic 方言将 `tool_use` 分类为 `REQUIRED`，其余为 `NOT_REQUIRED`，保持现有未知 content block 的 false 语义。
+
+```python
+class ClientActionRequirement(StrEnum):
+    REQUIRED = "required"
+    NOT_REQUIRED = "not_required"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class ClientAction:
+    requirement: ClientActionRequirement
+    type: str
+    name: str = ""
+    output_index: int = -1
+```
+
+- [ ] **Step 2：把 generic engine 改读 classifier，再显式投影 bool。** `RawEventBatch` 先按 `dialect.item_index_field` 合并同一 item 在 opening 与 closing event 上的字典，再对每个 merged item 分类一次；否则 opening 上缺 `execution` 的 `tool_search_call` 会先得 `UNKNOWN`，把 closing 已明确的 `server` 错投影成 true。合并后只要任一 classification 不是 `NOT_REQUIRED`，batch property 就返回 true；没有整数 index 但带 item object 的事件单独分类。`PassthroughAssembler` 在 done 上更新 `_saw_client_action` 时同样使用投影。保留该 bool，因为 shared terminal reader 仍用它为下游合成 `tool_use` 或 `end_turn`；不要让本轮最终 action list 读取它。
+
+- [ ] **Step 3：补三态 unit tests。** 参数化覆盖 Responses 的 required、not-required 与 unknown 集，至少包括 `function_call`、`custom_tool_call`、server 与 client `tool_search_call`、local 与 container `shell_call`、缺 discriminator、未来 type 与缺 type；继续断言 wrapper 的 bool 对 `UNKNOWN` 为 true。Batch 测试必须保留 opening 缺 `execution`、closing 分别为 server/client 的成对样本，前者 false、后者 true；再加 opening/closing 都缺 discriminator 的 unknown→true 控制，证明 merge 而非常量。Anthropic 测试继续断言 `tool_use=True`、text/thinking=False，并新增 classifier 精确枚举断言，防 wrapper 与 classifier 漂移。
+
+```python
+@pytest.mark.parametrize(
+    ("item", "expected"),
+    [
+        ({"type": "function_call"}, ClientActionRequirement.REQUIRED),
+        ({"type": "custom_tool_call"}, ClientActionRequirement.REQUIRED),
+        ({"type": "message"}, ClientActionRequirement.NOT_REQUIRED),
+        ({"type": "tool_search_call", "execution": "server"}, ClientActionRequirement.NOT_REQUIRED),
+        ({"type": "tool_search_call", "execution": "client"}, ClientActionRequirement.REQUIRED),
+        ({"type": "tool_search_call"}, ClientActionRequirement.UNKNOWN),
+        ({"type": "future_tool_call"}, ClientActionRequirement.UNKNOWN),
+        ({}, ClientActionRequirement.UNKNOWN),
+    ],
+)
+def test_responses_client_action_requirement(item, expected):
+    assert client_action_requirement(item) is expected
+```
+
+- [ ] **Step 4：运行本任务验证。** Run: `uv run pytest tests/unit/pipeline/delivery/test_responses_passthrough.py tests/unit/pipeline/delivery/test_anthropic_passthrough.py -q`；expected: PASS。Run: `uv run ruff check src/app/pipeline/delivery/assembling.py src/app/pipeline/delivery/passthrough.py src/app/pipeline/delivery/formats/openai_responses_actions.py src/app/pipeline/delivery/formats/openai_responses_passthrough.py src/app/pipeline/delivery/formats/anthropic_messages_passthrough.py tests/unit/pipeline/delivery/test_responses_passthrough.py tests/unit/pipeline/delivery/test_anthropic_passthrough.py`；expected: clean。Run: `uv run pyright src/app/pipeline/delivery/assembling.py src/app/pipeline/delivery/passthrough.py src/app/pipeline/delivery/formats/openai_responses_actions.py src/app/pipeline/delivery/formats/openai_responses_passthrough.py src/app/pipeline/delivery/formats/anthropic_messages_passthrough.py tests/unit/pipeline/delivery/test_responses_passthrough.py tests/unit/pipeline/delivery/test_anthropic_passthrough.py`；expected: 0 errors。
+
+- [ ] **Step 5：记录实现 checkpoint，不提交。** 这一任务的接口会被 10.2～10.5 同一语义功能继续修改；把针对性命令与结果记在本计划，保留工作树供最终 merged-state review。绿色不是提交边界，且非平凡产物不得在独立评审前提交。
+
+### Task 10.2：从 terminal output 建立权威 action snapshot
+
+**Files**
+
+- Modify: `src/app/pipeline/delivery/assembling.py:29-60`
+- Modify: `src/app/pipeline/delivery/formats/openai_responses_actions.py`
+- Modify: `src/app/pipeline/delivery/formats/openai_responses_passthrough.py:98-123`
+- Test: `tests/unit/pipeline/delivery/test_responses_passthrough.py:401-443`
+- Test: `tests/unit/pipeline/delivery/test_sse_assembly.py:520-620`
+
+**Interfaces**
+
+- Extends `Terminal` with `terminal_status: str = ""`, `client_actions: list[ClientAction]`, `client_action_classification_complete: bool = False`.
+- Produces `read_responses_client_actions(response: dict[str, Any]) -> tuple[list[ClientAction], bool]`; list order is terminal `output` array order and `output_index` is `enumerate()` position.
+- Only `openai_responses_passthrough._read_terminal()` fills these fields, and only for `response.completed`, after delegating existing stop-reason/usage work to `read_responses_terminal()`; `response.incomplete` keeps `terminal_status=""` and therefore retains the existing yellow `max_tokens` renderer path. The shared reader and translating `ResponsesAssembler` remain unchanged, so the feature cannot leak into translated routes.
+
+- [ ] **Step 1：实现 terminal snapshot reader。** If `response["output"]` is not a list, return `([], False)`; an explicit empty list returns `([], True)`. For every array element, coerce non-dict entries to `{}` so they classify `UNKNOWN`; retain an unknown native type verbatim, and use `"unknown"` only when type is absent. Use `name` only when it is a non-empty string. Never inspect assembler drafts or done snapshots in this function.
+
+```python
+def read_responses_client_actions(response: dict[str, Any]) -> tuple[list[ClientAction], bool]:
+    raw_output = response.get("output")
+    if not isinstance(raw_output, list):
+        return [], False
+    actions: list[ClientAction] = []
+    for output_index, raw_item in enumerate(cast(list[object], raw_output)):
+        item = cast(dict[str, Any], raw_item) if isinstance(raw_item, dict) else {}
+        requirement = client_action_requirement(item)
+        if requirement is ClientActionRequirement.NOT_REQUIRED:
+            continue
+        raw_type = item.get("type")
+        raw_name = item.get("name")
+        actions.append(
+            ClientAction(
+                requirement=requirement,
+                type=raw_type if isinstance(raw_type, str) and raw_type else "unknown",
+                name=raw_name if isinstance(raw_name, str) else "",
+                output_index=output_index,
+            )
+        )
+    return actions, True
+```
+
+- [ ] **Step 2：只接到 passthrough adapter 的 completed 分支，不改 shared reader、wire、incomplete 或 stop reason。** `openai_responses_passthrough._read_terminal()` 先照旧调用 `read_responses_terminal()`；仅当 event 是 `response.completed` 时，再从同一 response 对象填 direct-only facts。Status 为非空字符串时逐字保存，否则由 event name 得到 `completed`。`response.incomplete` 不填新字段，继续经 `stop_reason="max_tokens"` 与既有黄色 renderer 展示。不要修改 `openai_responses.read_responses_terminal()`、`ResponsesAssembler`、`Terminal.seen`、usage conversion、incomplete-reason mapping，或 `TOOL_USE if saw_tool_call else "end_turn"` 分支。
+
+- [ ] **Step 3：写 authority、completeness 与 scope 单测。** Extend the direct completed-terminal test with explicit `output=[] → complete true, actions=[]`; parameterize missing/malformed output → false; complete `message` → true and no action; unknown type → `UNKNOWN` fact; non-object item → `UNKNOWN(type="unknown")`. Add the source-control case: done snapshots are all server `tool_search_call`, terminal output contains required function/custom calls with different names; assert stop_reason still follows done-side bool (`end_turn`) while terminal action facts all follow terminal output. This apparent disagreement is intentional: two consumers, two authorities. Add `response.incomplete` with `incomplete_details.reason="max_output_tokens"` and terminal output present; assert `stop_reason == "max_tokens"`, `terminal_status == ""`, `client_actions == []` and completeness false, pinning F01’s excluded branch.
+
+- [ ] **Step 4：保住 translating assembler。** Add a focused assertion that a Responses-to-Anthropic stream with done-side `function_call` still synthesises `tool_use`, while `terminal_status == ""`, `client_actions == []` and `client_action_classification_complete is False` even when its raw terminal response contains `output`. This proves direct-only facts are filled by the passthrough adapter rather than the shared reader, and translated delivery semantics remain unchanged.
+
+- [ ] **Step 5：运行本任务验证。** Run: `uv run pytest tests/unit/pipeline/delivery/test_responses_passthrough.py tests/unit/pipeline/delivery/test_sse_assembly.py -q`；expected: PASS。Run: `uv run ruff check src/app/pipeline/delivery/assembling.py src/app/pipeline/delivery/formats/openai_responses_actions.py src/app/pipeline/delivery/formats/openai_responses_passthrough.py tests/unit/pipeline/delivery/test_responses_passthrough.py tests/unit/pipeline/delivery/test_sse_assembly.py`；expected: clean。Run: `uv run pyright src/app/pipeline/delivery/assembling.py src/app/pipeline/delivery/formats/openai_responses_actions.py src/app/pipeline/delivery/formats/openai_responses_passthrough.py tests/unit/pipeline/delivery/test_responses_passthrough.py tests/unit/pipeline/delivery/test_sse_assembly.py`；expected: 0 errors。
+
+- [ ] **Step 6：记录实现 checkpoint，不提交。** 把 terminal snapshot 单测与 targeted static-check 结果记入本计划；保留与 10.1 相同的未提交候选，供后续传播与最终一次 merged-state review。
+
+### Task 10.3：把新 facts 无损传播到结构化记录与完成行
+
+**Files**
+
+- Modify: `src/app/observability/request_trace.py:147-270`
+- Modify: `src/app/observability/request_log.py:103-159`
+- Test: `tests/unit/observability/test_request_log_file.py:57-178`
+
+**Interfaces**
+
+- `RequestTrace` adds `terminal_status: str`, `client_actions: tuple[ClientAction, ...]`, `client_action_classification_complete: bool`; `absorb()` copies all three.
+- `RequestLine` adds the same three frozen-record fields; `log_completion()` forwards them one-for-one.
+- JSONL serialization uses existing `dataclasses.asdict`, yielding action objects as `{requirement,type,name,output_index}` and retaining the completeness bool even when false.
+
+- [ ] **Step 1：扩展 aggregate 与 immutable line。** Defaults must represent “nothing observed”: empty status, empty tuple, false completeness. Keep `tools` untouched for translated/Anthropic wording. `absorb()` converts terminal list to tuple; `log_completion()` forwards every field explicitly.
+
+- [ ] **Step 2：更新完整结构化记录 oracle。** In `test_a_successful_request_writes_one_complete_structured_record`, construct terminal facts explicitly and add the three keys to both exact key set and exact value object. Use two actions, including an unnamed one, so `asdict` shape and absence-vs-empty semantics are visible.
+
+```python
+terminal.terminal_status = "completed"
+terminal.client_actions = [
+    ClientAction(ClientActionRequirement.REQUIRED, "function_call", "Bash", 0),
+    ClientAction(ClientActionRequirement.REQUIRED, "custom_tool_call", "", 1),
+]
+terminal.client_action_classification_complete = True
+```
+
+- [ ] **Step 3：加一个 isolation assertion。** A terminal with legacy `tools=["Bash"]` and no new facts must keep the new fields at `""`, `[]`, `False`; this prevents generic `Terminal.record()` from accidentally fabricating direct facts and widening the feature into translated/Anthropic paths.
+
+- [ ] **Step 4：运行本任务验证。** Run: `uv run pytest tests/unit/observability/test_request_log_file.py -q`；expected: PASS。Run: `uv run ruff check src/app/observability/request_trace.py src/app/observability/request_log.py tests/unit/observability/test_request_log_file.py`；expected: clean。Run: `uv run pyright src/app/observability/request_trace.py src/app/observability/request_log.py tests/unit/observability/test_request_log_file.py`；expected: 0 errors。
+
+- [ ] **Step 5：记录实现 checkpoint，不提交。** 把结构化记录 exact-object 测试与 targeted static-check 结果记入本计划；保留候选给完成行与端到端接线继续使用。
+
+### Task 10.4：按 terminal snapshot 上下文渲染 completed
+
+**Files**
+
+- Modify: `src/app/observability/request_log.py:31-57,162-247,338-412`
+- Test: `tests/unit/observability/test_request_log.py:341-389,525-562`
+
+**Interfaces**
+
+- Produces `format_client_actions(actions: tuple[ClientAction, ...], *, color: bool = False) -> str`.
+- Extends `format_stop_reason()` only by leaving it untouched for existing stop reasons; direct terminal status is a separate formatter path.
+- Adds `format_terminal_status(status: str, actions: tuple[ClientAction, ...], classification_complete: bool, *, color: bool = False) -> str`; conditional green applies only to `status == "completed"`, completeness true, and empty actions.
+
+- [ ] **Step 1：先实现纯 presentation helpers。** Required actions render as `<type>` or `<type>(<dim/cyan names>)`; unknown actions render `client_action?(<native type>)`, or `client_action?(unknown)` when no type. An incomplete snapshot with no action appends `client_action?(unclassified)`. `completed` is painted GREEN only when complete and action-free; other known terminal statuses remain uncoloured unless the closed whitelist later names them. Reuse `_painted_tools` for action names so `AskUserQuestion` stays cyan and ordinary names stay dim.
+
+```python
+def format_terminal_status(status, actions, classification_complete, *, color=False):
+    clean_completed = status == "completed" and classification_complete and not actions
+    head = paint(status, GREEN, color=color) if clean_completed else status
+    detail = format_client_actions(actions, color=color)
+    if not classification_complete and not detail:
+        detail = "client_action?(unclassified)"
+    return " ".join(part for part in (head, detail) if part)
+```
+
+- [ ] **Step 2：把 terminal-status branch 放在 count provider 之后、legacy stop reason 之前。** `count_provider` remains mutually exclusive. When `line.terminal_status` exists, render status/actions/completeness and do not also render synthesised `line.stop_reason` or `line.tools`; translated routes have empty terminal status and keep their exact old output. Thinking remains after the ending segment.
+
+- [ ] **Step 3：补 exact color/text tests。** Cover clean completed exact green span; completed plus required function/custom actions with dim names and uncoloured status/types; unknown native type; missing snapshot → unclassified; `AskUserQuestion` remains cyan; action order and duplicates preserved. Add regressions that `terminal_status=""` keeps existing `function_call(Bash)` output byte-for-byte, and direct `response.incomplete` still reaches the legacy `max_tokens` formatter with its yellow span rather than the new terminal-status branch.
+
+- [ ] **Step 4：运行本任务验证。** Run: `uv run pytest tests/unit/observability/test_request_log.py -q`；expected: PASS。Run: `uv run ruff check src/app/observability/request_log.py tests/unit/observability/test_request_log.py`；expected: clean。Run: `uv run pyright src/app/observability/request_log.py tests/unit/observability/test_request_log.py`；expected: 0 errors。
+
+- [ ] **Step 5：记录实现 checkpoint，不提交。** 把 presentation exact-span 测试与 targeted static-check 结果记入本计划；保留候选给真实 streaming route 验收。
+
+### Task 10.5：用真实 streaming `/responses` 内部路由锁住两个 source consumers
+
+**Files**
+
+- Modify: `tests/int/test_pipeline_app.py:15-80,1955-1975,2800-2895,3289-3343`
+- Reuse production code from Tasks 10.1～10.4; no new test-only parser or proof framework.
+
+**Interfaces**
+
+- Adds one helper that builds raw Responses SSE from explicit opening/done/terminal item arrays; it must use `orjson` only for framing fixture bytes, never production serializers for expected log text.
+- The test reads the actual request completion line through `_request_lines(caplog.records)`. Route (e) replaces the app-state chain with `replace(_chain_of(client), capabilities=TerminalCapabilities(live=False, color=True, unicode=True))`, so the same production route exposes action-name DIM spans and whether `completed` itself received GREEN; `setup_logging(colors=False)` remains responsible only for outer logger decoration.
+
+- [ ] **Step 1：扩展 fixture helper，使 done 与 terminal snapshots 可故意不同。** Define module sentinel `_OUTPUT_MISSING = object()` and signature `responses_observability_sse(*, stream_items: dict[int, tuple[dict[str, Any], dict[str, Any]]], done_order: tuple[int, ...], terminal_output: object = _OUTPUT_MISSING, unattributed: tuple[str, dict[str, Any]] | None = None) -> bytes`. Emit ordinary created/in_progress, every added snapshot in mapping insertion order, optional unattributed frame, every done snapshot in explicit `done_order`, then a `response.completed` whose response includes `output` only when `terminal_output is not _OUTPUT_MISSING`. Import `TerminalCapabilities` for the color-enabled source-control request. This helper describes bytes; it must not compute expected actions or colors.
+
+- [ ] **Step 2：实现 Spec 的五组 route 对照。** Parameterize explicit empty output plus unattributed event, complete message, missing/malformed output, and unknown future type. Add the source-control request whose terminal output is three required actions while all done snapshots are server `tool_search_call` and close 2/1/0. Assert the whole ending suffix exactly, including `client_action?(unclassified)` and `client_action?(future_tool_call)`.
+
+- [ ] **Step 3：在同一个 source-control request 上分开观察两个 consumers。** Before sending route (e), replace the app-state chain capabilities with `TerminalCapabilities(live=False, color=True, unicode=True)`. Assert the exact ANSI suffix: terminal actions and order prove action-list authority；absence of `GREEN` around `completed` while every done-side classification is `NOT_REQUIRED` proves color authority。Keep a Task 10.4 unit record with `terminal_status="completed"`, terminal required actions, completeness true and legacy `stop_reason="end_turn"`; the direct branch must ignore that stop reason for color。
+
+- [ ] **Step 4：运行集成与相邻回归。** Run: `uv run pytest tests/int/test_pipeline_app.py -q -k 'responses and (terminal or client_action or logged_in_its_own_words or output_item_this_proxy)'`；expected: selected tests PASS. Then run `uv run pytest tests/unit/pipeline/delivery/test_responses_passthrough.py tests/unit/pipeline/delivery/test_sse_assembly.py tests/unit/observability/test_request_log_file.py tests/unit/observability/test_request_log.py tests/int/test_pipeline_app.py -q`；expected: PASS。
+
+- [ ] **Step 5：执行已写入 Spec 的缺陷控制。** 先把 clean candidate 的 `openai_responses_actions.py`、`openai_responses_passthrough.py`、`request_log.py` 与 `test_pipeline_app.py` 逐文件复制到 `$CLAUDE_JOB_DIR/tmp/completed-actions-controls/`，并用 `cmp` 验证快照。逐次只改一个变量并跑同一目标测试：`clean_completed` 恒按 status 为 true、恒为 false、忽略 completeness；classifier 恒为 UNKNOWN；reader 丢掉 UNKNOWN；reader 反转 terminal output；route (e) 的 terminal output 临时换成 done snapshots；action 列仍读 terminal 但 completed 颜色改读 `line.stop_reason`。每次确认失败断言正是目标 span、suffix 或 field，立即从 candidate 快照复制回去并逐文件 `cmp`；不得后台运行 mutation，不得用 `git checkout` 或 `git restore` 恢复。最后再跑 Task 10.5 combined suite，证明没有 mutation 留在树上。
+
+- [ ] **Step 6：形成一个待评审候选，不提交。** 核对 source/test diff 只包含 10.1～10.5，记录 targeted suite 与每个缺陷控制的结果；进入 10.6 的 merged-state 独立评审。
+
+### Task 10.6：合并态验证、独立评审与文档同步
+
+**Files**
+
+- Modify: `.dev/docs/direct-passthrough/plan.md`（本节 task 状态与证据）
+- Modify: `.dev/docs/direct-passthrough/spec.md` 顶部状态与 §12 修订记录，仅在实现证据成立后从“待实现”改为“已实现”
+- Modify: `.dev/docs/tui/spec.md` 顶部状态与修订记录，仅同步本切片
+- Create: `.dev/docs/direct-passthrough/reports/260904-completed-client-actions-implementation-review-disposition.md`
+- Modify: `.dev/docs/direct-passthrough/reports/260903-completed-client-actions-spec-review-disposition.md` only if implementation review finds a spec-level correction
+- Reviewer original: write inside the reviewer’s isolated worktree because that harness cannot write the main tree’s `.dev`; distil every finding and disposition into the main-tree disposition file above
+
+**Interfaces**
+
+- No product interface; closes the implementation slice against the approved living Specs.
+
+- [ ] **Step 1：运行 targeted merged-state suite。** Run the Task 10.5 combined pytest command；expected: all selected tests pass。确认 Task 10.5 的 mutation 全部已经从 candidate 快照恢复，四个 snapshot files 逐个 `cmp` 相等。
+
+- [ ] **Step 2：先完成 independent implementation review 与处置。** Reviewer compares source, tests, Spec §7.1/§10 and TUI acceptance；claims list includes both action-list and color consumers reading terminal facts, done-side bool retained only for stop reason/policy, `response.incomplete`、buffered 与 translated paths unchanged, JSONL fields durable, and mutation controls failing for the intended reason。Reviewer writes its original in its isolated worktree；main session records every finding、C-level disposition and rejected route in `260904-completed-client-actions-implementation-review-disposition.md`。Use `my-skills:let-agent-review` and `my-skills:checking-review-report` until 0 blocker/major。If a finding changes relevant bytes, rerun only its affected targeted tests and mutation controls before resuming the same reviewer；do not run the full suite yet。
+
+- [ ] **Step 3：共识后的稳定候选只做一次最终验证。** Run: `uv run ruff check src tests`；expected: clean。Run: `uv run pyright src tests`；expected: 0 errors。Run: `uv run pytest tests --cov=app --cov-report=term --cov-fail-under=80`；expected: PASS with coverage threshold met。These are the final candidate’s checks；do not re-run merely because unrelated HEAD moves，only when relevant bytes change。
+
+- [ ] **Step 4：最终验证后提交一个 source 语义单元。** Commit subject: `feat: report contextual Responses completion status`。用 Write 在 `$CLAUDE_JOB_DIR/tmp/source-commit-message.txt` 写入 subject。先看全局 `git diff --cached --name-status`，保留任何同伴 staged entries；再对下列同一份精确 pathspec 执行 `git add -- "${paths[@]}"`、scoped cached audit 与 `git commit -F ... -- "${paths[@]}"`。显式 add 是新文件进入 index 的必要条件；不得为清索引而 reset 或 restore，也不使用裸 commit。
+
+```bash
+paths=(
+  src/app/pipeline/delivery/assembling.py
+  src/app/pipeline/delivery/passthrough.py
+  src/app/pipeline/delivery/formats/openai_responses_actions.py
+  src/app/pipeline/delivery/formats/openai_responses_passthrough.py
+  src/app/pipeline/delivery/formats/anthropic_messages_passthrough.py
+  src/app/observability/request_trace.py
+  src/app/observability/request_log.py
+  tests/unit/pipeline/delivery/test_responses_passthrough.py
+  tests/unit/pipeline/delivery/test_anthropic_passthrough.py
+  tests/unit/pipeline/delivery/test_sse_assembly.py
+  tests/unit/observability/test_request_log_file.py
+  tests/unit/observability/test_request_log.py
+  tests/int/test_pipeline_app.py
+)
+git diff --cached --name-status
+git add -- "${paths[@]}"
+git diff --cached --name-status -- "${paths[@]}"
+git commit -F "$CLAUDE_JOB_DIR/tmp/source-commit-message.txt" -- "${paths[@]}"
+git show --format='%H %s' --name-status --no-renames HEAD -- "${paths[@]}"
+```
+
+- [ ] **Step 5：同步 living docs。** Mark only Task 10a complete, record exact verification commands and reviewer verdict in this plan, and update both Specs’ status/revision records. Do not mark all §10 observability migration complete; reasoning、failure provenance and buffered reader remain outside this slice.
+
+- [ ] **Step 6：提交文档语义单元。** In `.dev`, use Write to create the commit-message file，then `git add --` the exact touched plan、Spec and disposition-report paths so the new report is known to Git；audit scoped cached paths and use a pathspec `git commit -F` with subject `docs: record contextual completed status implementation`。Do not include unrelated `.dev` WIP and do not push。
+
+- [ ] **Step 7：判断并执行 closeout。** Load `my-skills:closing-out-work-at-a-boundary`; inspect plan/report dispositions, leave still-open direct-passthrough items in their authoritative carriers, and report code commit(s), `.dev` commit, targeted/full verification, review verdict, and any blocked item without claiming the broader direct-passthrough project complete。
