@@ -66,10 +66,10 @@ from app.pipeline.delivery_policy import (
 )
 from app.pipeline.driver import (
     RESPONSE_CONVERSION_LOSSES,
-    handle,
     handle_bounded,
     handle_count_tokens,
     ledger_for,
+    replay_prepared,
 )
 from app.pipeline.error_classify import describe
 from app.pipeline.hand_over import HandBackOutcome, hand_back_block, one_line, replay_reason
@@ -714,6 +714,14 @@ async def _dispatch_after_body(
     if context.stream:
         # The instant the driver fixed when it opened this attempt, read rather than recomputed: a second `now + deadline` here would start the clock at the moment the headers came back and quietly grant the attempt a second full lifetime.
         attempt = context.current_attempt
+        # This is the attempt whose headers and body are about to be delivered. A pre-header retry may have made it attempt 1 or later, so replay sources cannot be hard-coded to request attempt 0. A synthesized stream can have an attempt that failed before admission and never needs replay; defer the invariant check until `_reopen` is actually called.
+        replay_payload = (
+            deepcopy(attempt.payload)
+            if attempt is not None and attempt.token_admission is not None
+            else None
+        )
+        replay_admission = attempt.token_admission if attempt is not None else None
+        replay_route = handled.route
         settings = stream_settings(chain)
         completion_delivery = _CompletionDelivery()
         framer = framer_for(
@@ -798,7 +806,7 @@ async def _dispatch_after_body(
         async def _reopen(replacing: Exception) -> Attempt | None:
             """Another attempt at the same request, wrapped in the same guards as the first.
 
-            `handle` rather than `handle_bounded`: the client deadline is enforced over the body now, and a second `asyncio.timeout` around this would be a second clock for one lifetime — the exact defect the outer guard was added to fix.
+            `replay_prepared` rather than `handle_bounded`: the client deadline is enforced over the body now, and a second `asyncio.timeout` around this would be a second clock for one lifetime — the exact defect the outer guard was added to fix.
 
             The trace keeps the first attempt's connection identity and byte count. A reader comparing `upstream_conn` across failures is looking for the connection that broke, and overwriting it with the one that recovered erases the thing being looked for.
 
@@ -816,11 +824,19 @@ async def _dispatch_after_body(
                     request_id=trace.request_id,
                 )
                 return None
-            # What the client sent, not what the last attempt turned it into. See `inbound_payload`.
-            context.payload = deepcopy(inbound_payload)
+            if replay_payload is None or replay_admission is None:
+                raise RuntimeError("upstream replay has no source attempt admission")
+            # Replay the exact final payload and admission decision that produced the response currently being delivered. Rerouting or rerunning mutable shaping here can connect a prefix produced from one conversation to a replacement built from another.
             opened_before = context.attempt_count
             try:
-                again = await handle(chain, context, _routed)
+                again = await replay_prepared(
+                    chain,
+                    context,
+                    replay_route,
+                    replay_payload,
+                    replay_admission,
+                    _routed,
+                )
             finally:
                 # Both written off the same fact — whether `begin_attempt` ran — so an entry here always means an upstream attempt was opened for it, and never the reverse.
                 #

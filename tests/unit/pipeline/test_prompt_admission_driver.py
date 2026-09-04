@@ -1,12 +1,19 @@
 import asyncio
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
 import httpx2
 import pytest
 
 import app.pipeline.direct_driver.base as driver_module
-from app.model_provider import ModelDescriptor, ModelEndpoint, PromptTokenLimits
+from app.model_provider import (
+    DescriptorProviderMismatch,
+    EndpointNotSupported,
+    ModelDescriptor,
+    ModelEndpoint,
+    PromptTokenLimits,
+)
 from app.pipeline.direct_driver import (
     EVENT_ATTEMPT_FAILED,
     EVENT_ATTEMPT_PREPARE,
@@ -28,12 +35,20 @@ from app.tokenization.admission import (
 )
 
 
-def descriptor(model: str = "gpt-model") -> ModelDescriptor:
+def descriptor(
+    model: str = "gpt-model",
+    *,
+    provider_name: str = "ghc",
+    endpoints: frozenset[ModelEndpoint] | None = None,
+    generation: int = 7,
+) -> ModelDescriptor:
     return ModelDescriptor(
         id=model,
-        endpoints=frozenset({ModelEndpoint.OPENAI_RESPONSES}),
-        provider_name="ghc",
-        catalog_generation=7,
+        endpoints=(
+            frozenset({ModelEndpoint.OPENAI_RESPONSES}) if endpoints is None else endpoints
+        ),
+        provider_name=provider_name,
+        catalog_generation=generation,
         catalog_refreshed_at="2026-09-04T00:00:00+00:00",
         prompt_token_limits=PromptTokenLimits(
             tokenizer="o200k_base",
@@ -65,12 +80,19 @@ class RecordingProvider:
     disabled_ids: frozenset[str] = frozenset()
     raw_catalog: Mapping[str, Any] = {}
 
-    def __init__(self, responses: list[httpx2.Response | BaseException] | None = None) -> None:
+    def __init__(
+        self,
+        responses: list[httpx2.Response | BaseException] | None = None,
+        *,
+        current_descriptor: ModelDescriptor | None = None,
+    ) -> None:
         self.sent: list[tuple[str, dict[str, Any]]] = []
+        self.sent_descriptors: list[ModelDescriptor] = []
+        self.current_descriptor = current_descriptor or descriptor()
         self._responses = responses or [httpx2.Response(200)]
 
     def describe(self, model_id: str) -> ModelDescriptor | None:
-        return descriptor(model_id) if model_id == "gpt-model" else None
+        return self.current_descriptor if model_id == self.current_descriptor.id else None
 
     async def refresh_catalog(self) -> bool:
         return False
@@ -85,6 +107,7 @@ class RecordingProvider:
         extra_headers: Mapping[str, str] | None = None,
     ) -> httpx2.Response:
         del endpoint, stream, extra_headers
+        self.sent_descriptors.append(descriptor)
         self.sent.append((descriptor.id, dict(payload)))
         result = self._responses.pop(0)
         if isinstance(result, BaseException):
@@ -117,9 +140,16 @@ class CountingLimiter:
 
 
 class AdvancingAdmission:
-    def __init__(self, clock: list[float], *, advance_to: float | None = None) -> None:
+    def __init__(
+        self,
+        clock: list[float],
+        *,
+        advance_to: float | None = None,
+        outcome: TokenAdmissionOutcome = TokenAdmissionOutcome.ADMITTED_FAST,
+    ) -> None:
         self.clock = clock
         self.advance_to = advance_to
+        self.outcome = outcome
         self.calls = 0
 
     async def evaluate(
@@ -139,7 +169,7 @@ class AdvancingAdmission:
         return TokenAdmissionObservation(
             attempt=attempt,
             origin="proxy",
-            outcome=TokenAdmissionOutcome.ADMITTED_FAST,
+            outcome=self.outcome,
             target_format=target_format,
             model=descriptor.id,
             provider=descriptor.provider_name,
@@ -163,13 +193,18 @@ def driver(
     clock: Any = None,
     attempt_deadline: int = 0,
     max_total: int = 0,
+    model_descriptor: ModelDescriptor | None = None,
+    prepared_payload: Mapping[str, Any] | None = None,
+    reused_admission: TokenAdmissionObservation | None = None,
 ) -> OpenAIResponsesDriver:
     return OpenAIResponsesDriver(
         provider,
         (registry or SubscriberRegistry[RequestContext]()).freeze(),
         budget=RetryBudget(max_total=max_total),
-        descriptor=descriptor(),
+        descriptor=model_descriptor or descriptor(),
         admission=admission or PromptTokenAdmission(),
+        prepared_payload=prepared_payload,
+        reused_admission=reused_admission,
         rate_limiter=limiter,
         clock=clock,
         attempt_deadline=attempt_deadline,
@@ -237,6 +272,7 @@ async def test_prepare_cannot_reroute_the_captured_descriptor() -> None:
         request.payload["model"] = "other-model"
         request.resolved_model = "other-model"
         request.provider_name = "other"
+        request.target_format = WireFormat.ANTHROPIC_MESSAGES
         request.model_descriptor = ModelDescriptor(
             id="other-model",
             endpoints=frozenset({ModelEndpoint.OPENAI_RESPONSES}),
@@ -250,6 +286,130 @@ async def test_prepare_cannot_reroute_the_captured_descriptor() -> None:
 
     assert outcome.succeeded is True
     assert provider.sent == [("gpt-model", {"model": "gpt-model", "input": "short"})]
+    observed = outcome.context.attempts[0].token_admission
+    assert observed is not None
+    assert observed.outcome is TokenAdmissionOutcome.ADMITTED_FAST
+    assert observed.target_format == WireFormat.OPENAI_RESPONSES.value
+
+
+@pytest.mark.parametrize(
+    ("invalid_descriptor", "error_type"),
+    [
+        (descriptor(provider_name="foreign"), DescriptorProviderMismatch),
+        (
+            descriptor(endpoints=frozenset({ModelEndpoint.ANTHROPIC_MESSAGES})),
+            EndpointNotSupported,
+        ),
+    ],
+    ids=["foreign-owner", "unsupported-endpoint"],
+)
+def test_descriptor_is_validated_before_prepare_or_admission(
+    invalid_descriptor: ModelDescriptor,
+    error_type: type[Exception],
+) -> None:
+    registry = SubscriberRegistry[RequestContext]()
+    prepare_calls = 0
+
+    async def read_descriptor(request: RequestContext) -> None:
+        nonlocal prepare_calls
+        prepare_calls += 1
+        assert request.model_descriptor is not None
+        _ = request.model_descriptor.reasoning_efforts
+
+    registry.subscribe(EVENT_ATTEMPT_PREPARE, "test:read-descriptor", read_descriptor)
+    provider = RecordingProvider()
+    policy = AdvancingAdmission([0.0])
+    limiter = CountingLimiter()
+
+    with pytest.raises(error_type):
+        driver(
+            provider,
+            registry=registry,
+            admission=policy,
+            limiter=limiter,
+            model_descriptor=invalid_descriptor,
+        )
+
+    assert prepare_calls == 0
+    assert policy.calls == 0
+    assert limiter.calls == 0
+    assert provider.sent == []
+
+
+@pytest.mark.asyncio
+async def test_send_keeps_the_same_id_descriptor_captured_before_replacement() -> None:
+    captured = descriptor(generation=7)
+    replacement = replace(captured, catalog_generation=8)
+    provider = RecordingProvider(current_descriptor=replacement)
+
+    outcome = await driver(provider, model_descriptor=captured).run(context())
+
+    assert outcome.succeeded is True
+    assert provider.sent_descriptors == [captured]
+    assert provider.sent_descriptors[0] is captured
+    observed = outcome.context.attempts[0].token_admission
+    assert observed is not None
+    assert observed.catalog_generation == 7
+
+    new_provider = RecordingProvider(current_descriptor=replacement)
+    new_outcome = await driver(new_provider, model_descriptor=replacement).run(context())
+
+    assert new_outcome.succeeded is True
+    assert new_provider.sent_descriptors == [replacement]
+    assert new_provider.sent_descriptors[0] is replacement
+
+
+@pytest.mark.asyncio
+async def test_prepared_replay_reuses_payload_and_observation_without_prepare_or_policy() -> None:
+    registry = SubscriberRegistry[RequestContext]()
+    prepare_calls = 0
+
+    async def must_not_prepare(_request: RequestContext) -> None:
+        nonlocal prepare_calls
+        prepare_calls += 1
+
+    registry.subscribe(EVENT_ATTEMPT_PREPARE, "test:must-not-prepare", must_not_prepare)
+    source = TokenAdmissionObservation(
+        attempt=1,
+        origin="proxy",
+        outcome=TokenAdmissionOutcome.ADMITTED_COUNTED,
+        target_format=WireFormat.OPENAI_RESPONSES.value,
+        model="gpt-model",
+        provider="ghc",
+        catalog_generation=7,
+        catalog_refreshed_at="2026-09-04T00:00:00+00:00",
+        tokenizer="o200k_base",
+        max_prompt_tokens=8,
+        max_context_window_tokens=10,
+        field_path="input",
+        field_kind="input",
+        field_utf8_byte_count=20,
+        field_token_count=8,
+    )
+    prepared = {"model": "gpt-model", "input": "source"}
+    policy = AdvancingAdmission([0.0])
+    provider = RecordingProvider()
+
+    outcome = await driver(
+        provider,
+        registry=registry,
+        admission=policy,
+        prepared_payload=prepared,
+        reused_admission=source,
+    ).run(context({"model": "gpt-model", "input": "working-copy"}))
+
+    assert outcome.succeeded is True
+    assert prepare_calls == 0
+    assert policy.calls == 0
+    assert provider.sent == [("gpt-model", prepared)]
+    observed = outcome.context.attempts[0].token_admission
+    assert observed == replace(
+        source,
+        attempt=0,
+        outcome=TokenAdmissionOutcome.REUSED,
+        reused_from_attempt=1,
+        reused_outcome=TokenAdmissionOutcome.ADMITTED_COUNTED.value,
+    )
 
 
 @pytest.mark.asyncio
@@ -304,6 +464,36 @@ async def test_deadline_after_fast_policy_stops_before_limiter_and_provider() ->
     assert policy.calls == 1
     assert limiter.calls == 0
     assert provider.sent == []
+
+
+@pytest.mark.asyncio
+async def test_deadline_after_rejected_policy_wins_over_prompt_rejection() -> None:
+    clock = [0.0]
+    policy = AdvancingAdmission(
+        clock,
+        advance_to=2.0,
+        outcome=TokenAdmissionOutcome.REJECTED,
+    )
+    limiter = CountingLimiter()
+    provider = RecordingProvider()
+
+    outcome = await driver(
+        provider,
+        admission=policy,
+        limiter=limiter,
+        clock=lambda: clock[0],
+        attempt_deadline=1,
+    ).run(context())
+
+    assert isinstance(outcome.error, PipelineAbort)
+    assert isinstance(outcome.error.cause, UpstreamTimeout)
+    assert not isinstance(outcome.error, PromptTokenLimitExceeded)
+    assert policy.calls == 1
+    assert limiter.calls == 0
+    assert provider.sent == []
+    observed = outcome.context.attempts[0].token_admission
+    assert observed is not None
+    assert observed.outcome is TokenAdmissionOutcome.REJECTED
 
 
 @pytest.mark.asyncio

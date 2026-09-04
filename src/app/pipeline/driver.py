@@ -7,6 +7,7 @@ What is *not* here is deliberate. Rendering a failure as HTTP belongs to the edg
 
 import asyncio
 from collections.abc import Callable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, cast
 from uuid import uuid4
@@ -16,7 +17,7 @@ from pydantic import ValidationError
 
 from app.config.schema import LOCAL_COUNTER
 from app.core.chain import Chain
-from app.model_provider import ModelProvider
+from app.model_provider import ModelDescriptor, ModelProvider
 from app.models.anthropic import MessagesRequest
 from app.observability.metrics import BETA_FLAGS_STRIPPED
 from app.pipeline.anthropic_request_hook import fix_anthropic_request
@@ -51,6 +52,7 @@ from app.pipeline.subscribers.counting import COUNTING_ONLY
 from app.pipeline.translation_driver.semantic import (
     WebSearchNotExecutable,
 )
+from app.tokenization.admission import TokenAdmissionObservation
 from app.tokenization.estimators import estimate_anthropic_input, estimate_responses_input
 from app.wire_json import dumps
 
@@ -179,6 +181,47 @@ async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[Req
     # The payload names the inbound model; upstream must be asked for the resolved one.
     context.payload["model"] = route.model_id
 
+    return await _drive(chain, context, provider, route, descriptor)
+
+
+async def replay_prepared(
+    chain: Chain,
+    context: RequestContext,
+    route: Route,
+    prepared_payload: Mapping[str, Any],
+    reused_admission: TokenAdmissionObservation,
+    on_routed: Callable[[RequestContext], None] | None = None,
+) -> HandledRequest:
+    """Replay the exact final payload that produced the stream now being delivered."""
+    descriptor = route.descriptor
+    if descriptor is None:
+        raise RuntimeError("replay route has no model descriptor")
+    provider = chain.providers.get(route.provider_name)
+    apply_route(context, route)
+    if on_routed is not None:
+        on_routed(context)
+    context.payload = deepcopy(dict(prepared_payload))
+    return await _drive(
+        chain,
+        context,
+        provider,
+        route,
+        descriptor,
+        prepared_payload=prepared_payload,
+        reused_admission=reused_admission,
+    )
+
+
+async def _drive(
+    chain: Chain,
+    context: RequestContext,
+    provider: ModelProvider,
+    route: Route,
+    descriptor: ModelDescriptor,
+    *,
+    prepared_payload: Mapping[str, Any] | None = None,
+    reused_admission: TokenAdmissionObservation | None = None,
+) -> HandledRequest:
     timeouts = chain.config.upstream_request_timeouts
     # Read straight off the field it names. It used to be resolved against `response_header_overrides`, which is a different setting entirely: an operator capping the header wait for one model would have capped that model's whole attempt instead, cutting a long turn short in the name of a guard that was never asked for.
     attempt_deadline = timeouts.upstream_request_deadline
@@ -196,6 +239,8 @@ async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[Req
         rate_limiter=chain.rate_limiter_for(provider.name),
         descriptor=descriptor,
         admission=chain.prompt_token_admission,
+        prepared_payload=prepared_payload,
+        reused_admission=reused_admission,
     )
     outcome = await driver.run(context)
     if isinstance(outcome.error, WebSearchNotExecutable) and context.inbound_format is WireFormat.ANTHROPIC_MESSAGES:

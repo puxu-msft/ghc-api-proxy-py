@@ -1,5 +1,5 @@
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any, Literal, cast
 
@@ -41,6 +41,7 @@ _ALLOWED_TOP_LEVEL = frozenset(
 )
 _ALLOWED_ITEM_FIELDS = {
     "additional_tools": frozenset({"agent", "id", "role", "tools", "type"}),
+    "image": frozenset({"cache_control", "source", "transformations", "type"}),
     "function_call": frozenset(
         {"agent", "arguments", "call_id", "caller", "id", "name", "status", "type"}
     ),
@@ -59,6 +60,9 @@ _ALLOWED_ITEM_FIELDS = {
 _ALLOWED_TEXT_PART_FIELDS = frozenset({"annotations", "logprobs", "text", "type"})
 _ALLOWED_IMAGE_PART_FIELDS = frozenset({"detail", "file_id", "image_url", "type"})
 _ALLOWED_SUMMARY_FIELDS = frozenset({"text", "type"})
+_IMAGE_MEDIA_TYPES = frozenset({"image/gif", "image/jpeg", "image/png", "image/webp"})
+_IMAGE_CACHE_TTLS = frozenset({"5m", "1h"})
+_IMAGE_TRANSFORMATIONS = frozenset({"downsize", "error"})
 
 
 class TokenAdmissionOutcome(StrEnum):
@@ -70,6 +74,7 @@ class TokenAdmissionOutcome(StrEnum):
     ADMITTED_FAST = "admitted_fast"
     ADMITTED_COUNTED = "admitted_counted"
     REJECTED = "rejected"
+    REUSED = "reused"
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +94,38 @@ class TokenAdmissionObservation:
     field_kind: str | None = None
     field_utf8_byte_count: int | None = None
     field_token_count: int | None = None
+    reused_from_attempt: int | None = None
+    reused_outcome: str | None = None
+
+
+_REUSABLE_OUTCOMES = frozenset(
+    {
+        TokenAdmissionOutcome.NOT_APPLICABLE,
+        TokenAdmissionOutcome.SKIPPED_MISSING_METADATA,
+        TokenAdmissionOutcome.SKIPPED_UNSUPPORTED_TOKENIZER,
+        TokenAdmissionOutcome.SKIPPED_REDUCTION_CONTROL,
+        TokenAdmissionOutcome.SKIPPED_UNKNOWN_SHAPE,
+        TokenAdmissionOutcome.ADMITTED_FAST,
+        TokenAdmissionOutcome.ADMITTED_COUNTED,
+    }
+)
+
+
+def reuse_token_admission(
+    source: TokenAdmissionObservation,
+    *,
+    attempt: int,
+) -> TokenAdmissionObservation:
+    """Record that delivery reused one already-decided final payload."""
+    if source.outcome not in _REUSABLE_OUTCOMES:
+        raise ValueError(f"cannot reuse token admission outcome {source.outcome.value!r}")
+    return replace(
+        source,
+        attempt=attempt,
+        outcome=TokenAdmissionOutcome.REUSED,
+        reused_from_attempt=source.attempt,
+        reused_outcome=source.outcome.value,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +154,66 @@ def _candidate(path: str, kind: str, text: str) -> _TextCandidate:
 
 def _unknown_fields(value: Mapping[str, Any], allowed: frozenset[str]) -> bool:
     return not set(value).issubset(allowed)
+
+
+def _known_image_source(value: object) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    source = cast(Mapping[str, Any], value)
+    kind = source.get("type")
+    if kind == "base64":
+        media_type = source.get("media_type")
+        return (
+            set(source) == {"data", "media_type", "type"}
+            and isinstance(source.get("data"), str)
+            and isinstance(media_type, str)
+            and media_type in _IMAGE_MEDIA_TYPES
+        )
+    if kind == "url":
+        return set(source) == {"type", "url"} and isinstance(source.get("url"), str)
+    if kind == "file":
+        return set(source) == {"file_id", "type"} and isinstance(source.get("file_id"), str)
+    return False
+
+
+def _known_image_cache_control(value: object) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, Mapping):
+        return False
+    cache = cast(Mapping[str, Any], value)
+    if not set(cache).issubset({"ttl", "type"}) or cache.get("type") != "ephemeral":
+        return False
+    ttl = cache.get("ttl")
+    return "ttl" not in cache or (isinstance(ttl, str) and ttl in _IMAGE_CACHE_TTLS)
+
+
+def _known_image_transformations(value: object) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, Mapping):
+        return False
+    transformations = cast(Mapping[str, Any], value)
+    if not set(transformations).issubset({"oversized_image"}):
+        return False
+    oversized = transformations.get("oversized_image")
+    return "oversized_image" not in transformations or (
+        isinstance(oversized, str) and oversized in _IMAGE_TRANSFORMATIONS
+    )
+
+
+def _known_native_image(item: Mapping[str, Any]) -> bool:
+    return (
+        _known_image_source(item.get("source"))
+        and (
+            "cache_control" not in item
+            or _known_image_cache_control(item.get("cache_control"))
+        )
+        and (
+            "transformations" not in item
+            or _known_image_transformations(item.get("transformations"))
+        )
+    )
 
 
 def _message_candidates(item: Mapping[str, Any], index: int) -> list[_TextCandidate] | None:
@@ -193,6 +290,9 @@ def _input_candidates(value: object) -> list[_TextCandidate] | None:
             if found is None:
                 return None
             candidates.extend(found)
+        elif kind == "image":
+            if not _known_native_image(item):
+                return None
         elif kind == "function_call":
             arguments = item.get("arguments")
             if not isinstance(arguments, str):
@@ -398,4 +498,5 @@ __all__ = [
     "PromptTokenAdmission",
     "TokenAdmissionObservation",
     "TokenAdmissionOutcome",
+    "reuse_token_admission",
 ]

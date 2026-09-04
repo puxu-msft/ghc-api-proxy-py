@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any
 
 import httpx2
@@ -209,6 +210,51 @@ def test_descriptor_owner_gate_accepts_its_issuer() -> None:
     )
 
     require_descriptor_owner(descriptor, "ghc")
+
+
+@pytest.mark.asyncio
+async def test_primary_provider_send_and_count_reject_foreign_descriptors_before_transport() -> None:
+    seen: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        if request.url.path.endswith("/count_tokens"):
+            return httpx2.Response(200, json={"input_tokens": 1})
+        return httpx2.Response(
+            200,
+            json={
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+                "model": "claude-model",
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    provider, http_client = build_provider(handler)
+    foreign = replace(
+        descriptor_for(provider, "claude-model"),
+        provider_name="other",
+    )
+    try:
+        with pytest.raises(DescriptorProviderMismatch):
+            await provider.send(
+                ModelEndpoint.ANTHROPIC_MESSAGES,
+                {"model": "claude-model", "messages": [], "max_tokens": 1},
+                descriptor=foreign,
+            )
+        with pytest.raises(DescriptorProviderMismatch):
+            await provider.count_tokens(
+                {"model": "claude-model", "messages": []},
+                descriptor=foreign,
+            )
+    finally:
+        await http_client.aclose()
+
+    assert seen == []
 
 
 def test_capability_gate_rejects_a_model_that_advertises_nothing() -> None:

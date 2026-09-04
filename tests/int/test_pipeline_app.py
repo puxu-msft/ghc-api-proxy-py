@@ -51,7 +51,6 @@ from app.observability.logging import setup_logging
 from app.observability.request_completion import RequestCompletionCoordinator
 from app.observability.request_log_file import request_logs_dir
 from app.observability.request_trace import REQUEST_LOGGER, RequestTrace
-from app.pipeline import driver
 from app.pipeline.delivery.assembling import BlockAssembler
 from app.pipeline.delivery.blocks import BlockBuffer
 from app.pipeline.delivery.formats.anthropic_messages import AnthropicAssembler, AnthropicFramer
@@ -69,7 +68,10 @@ from app.pipeline.delivery.stream import (
     stream_delivery,
 )
 from app.pipeline.delivery_policy import delivery_buffer, stream_settings
+from app.pipeline.direct_driver import EVENT_ATTEMPT_FAILED, EVENT_ATTEMPT_PREPARE
+from app.pipeline.events import FrozenSubscribers, Subscription
 from app.pipeline.exceptions import PipelineRetry
+from app.pipeline.request import RequestContext
 from app.pipeline.response_observation import ResponsesObserver
 from app.server.app_state import CHAIN_STATE_KEY
 from app.server.composition import build_chain
@@ -85,6 +87,7 @@ from app.server.routes.inference import (
 from app.server.routes.router import build_router
 from app.server.routes.table import route_for_path
 from app.streaming.deadline import ClientDeadlineError
+from app.tokenization.admission import PromptTokenAdmission, TokenAdmissionObservation
 from app.tokenization.state_store import TokenizationStateStore
 
 BASE_URL = "https://copilot.example"
@@ -158,6 +161,7 @@ def make_client(
     tokenization_path: Path | None = None,
     overrides: dict[str, Any] | None = None,
     catalog: dict[str, Any] | None = None,
+    configure_chain: Callable[[Chain], None] | None = None,
 ) -> tuple[TestClient, list[httpx2.Request]]:
     seen: list[httpx2.Request] = []
     selected_catalog = catalog or CATALOG
@@ -188,6 +192,8 @@ def make_client(
     if tokenization_path is not None:
         # Otherwise the calibrator would read and write the real user data directory.
         chain = replace(chain, tokenization=TokenizationStateStore(tokenization_path))
+    if configure_chain is not None:
+        configure_chain(chain)
     return TestClient(create_pipeline_app(chain)), seen
 
 
@@ -3609,6 +3615,7 @@ async def test_disconnect_with_repeated_level_cancellation_stays_inside_the_app(
             return ModelDescriptor(
                 id=model_id,
                 endpoints=frozenset({ModelEndpoint.OPENAI_RESPONSES}),
+                provider_name="ghc",
             )
 
         async def refresh_catalog(self) -> bool:
@@ -3752,6 +3759,7 @@ async def test_disconnect_before_upstream_headers_cancels_the_dispatch() -> None
             return ModelDescriptor(
                 id=model_id,
                 endpoints=frozenset({ModelEndpoint.OPENAI_RESPONSES}),
+                provider_name="ghc",
             )
 
         async def refresh_catalog(self) -> bool:
@@ -5600,6 +5608,161 @@ def test_a_replay_on_the_translation_leg_sends_the_conversation_again(
     assert "custom_tool_call" not in line
 
 
+def test_delivery_replay_reuses_the_normal_attempt_that_produced_the_stream() -> None:
+    prepare_calls = 0
+    failure_calls = 0
+    a_text = "A" * 2000
+    b_text = "B" * 2000
+    c_text = "C" * 2000
+
+    class CountingAdmission:
+        def __init__(self, delegate: PromptTokenAdmission) -> None:
+            self.delegate = delegate
+            self.calls = 0
+
+        async def evaluate(
+            self,
+            *,
+            attempt: int,
+            target_format: str,
+            descriptor: ModelDescriptor,
+            payload: dict[str, Any],
+        ) -> TokenAdmissionObservation:
+            self.calls += 1
+            return await self.delegate.evaluate(
+                attempt=attempt,
+                target_format=target_format,
+                descriptor=descriptor,
+                payload=payload,
+            )
+
+    admission_counter: CountingAdmission | None = None
+
+    def set_input_text(request: RequestContext, text: str) -> None:
+        items = cast(list[Any], request.payload["input"])
+        message = cast(dict[str, Any], items[0])
+        parts = cast(list[Any], message["content"])
+        part = cast(dict[str, Any], parts[0])
+        part["text"] = text
+
+    async def on_prepare(request: RequestContext) -> None:
+        nonlocal prepare_calls
+        prepare_calls += 1
+        if request.attempt_count >= 3:
+            set_input_text(request, c_text)
+
+    async def on_failure(request: RequestContext) -> None:
+        nonlocal failure_calls
+        failure_calls += 1
+        set_input_text(request, b_text)
+
+    def configure(chain: Chain) -> None:
+        nonlocal admission_counter
+        events = {
+            event: list(chain.subscribers.for_event(event))
+            for event in chain.subscribers.events
+        }
+        events.setdefault(EVENT_ATTEMPT_PREPARE, []).append(
+            Subscription(id="test:count-prepare", handler=on_prepare)
+        )
+        events.setdefault(EVENT_ATTEMPT_FAILED, []).append(
+            Subscription(id="test:rewrite-after-503", handler=on_failure)
+        )
+        chain.subscribers = FrozenSubscribers(events)
+        admission_counter = CountingAdmission(chain.prompt_token_admission)
+        chain.prompt_token_admission = cast(PromptTokenAdmission, admission_counter)
+
+    async def torn_body() -> AsyncIterator[bytes]:
+        yield (
+            b"event: response.output_item.added\n"
+            b'data: {"output_index":0,"item":{"type":"custom_tool_call","id":"torn_1",'
+            b'"name":"discarded"}}\n\n'
+        )
+        raise httpx2.RemoteProtocolError("stream from B tore")
+
+    calls = 0
+
+    def upstream(_request: httpx2.Request) -> httpx2.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx2.Response(
+                503,
+                json={"error": {"message": "try again", "type": "server_error"}},
+            )
+        if calls == 2:
+            return httpx2.Response(
+                200,
+                content=torn_body(),
+                headers={"content-type": "text/event-stream"},
+            )
+        return httpx2.Response(
+            200,
+            content=responses_sse_upstream(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    catalog = deepcopy(CATALOG)
+    cast(dict[str, Any], catalog["data"][1])["capabilities"] = {
+        "tokenizer": "o200k_base",
+        "limits": {"max_prompt_tokens": 1000, "max_context_window_tokens": 1000},
+    }
+    client, seen = make_client(
+        upstream,
+        catalog=catalog,
+        overrides={"upstream_request_retry": {"max_total": 2}},
+        configure_chain=configure,
+    )
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "gpt-model",
+            "messages": [{"role": "user", "content": a_text}],
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert calls == 3
+    assert len(seen) == 3
+    sent = [orjson.loads(request.content) for request in seen]
+    assert sent[0]["input"][0]["content"][0]["text"] == a_text
+    assert sent[1]["input"][0]["content"][0]["text"] == b_text
+    assert sent[2] == sent[1]
+    assert c_text not in seen[2].content.decode()
+    assert prepare_calls == 2
+    assert failure_calls == 1
+    assert admission_counter is not None
+    assert admission_counter.calls == 2
+    admissions = _records()[-1]["observation"]["token_admission"]
+    assert [entry["outcome"] for entry in admissions] == [
+        "admitted_counted",
+        "admitted_counted",
+        "reused",
+    ]
+    source = admissions[1]
+    reused = admissions[2]
+    assert reused["reused_from_attempt"] == 1
+    assert reused["reused_outcome"] == "admitted_counted"
+    assert source["field_token_count"] is not None
+    for key in (
+        "origin",
+        "target_format",
+        "model",
+        "provider",
+        "catalog_generation",
+        "catalog_refreshed_at",
+        "tokenizer",
+        "max_prompt_tokens",
+        "max_context_window_tokens",
+        "field_path",
+        "field_kind",
+        "field_utf8_byte_count",
+        "field_token_count",
+    ):
+        assert reused[key] == source[key]
+
+
 @pytest.mark.parametrize(
     ("second_body", "expected_response_codes"),
     [
@@ -5792,9 +5955,9 @@ def test_a_replacement_that_never_opened_an_attempt_is_not_recorded_as_one(
 ) -> None:
     """The entry and the attempt count are written off the same fact, so neither can appear without the other.
 
-    `context.attempt_count` advances in `RequestContext.begin_attempt`, which `DirectDriver.run` calls on the way in, and `handle` can fail well before reaching it — `shape_request` and translation both run first. Recording the replacement on the way in was the fix for losing a replacement that failed *after* opening its attempt, and it overshot in the other direction: measured, one upstream call, `attempts=1`, and a `replaced_failures` entry for a replay that had not opened one.
+    `context.attempt_count` advances in `RequestContext.begin_attempt`, which `DirectDriver.run` calls on the way in, and `replay_prepared` can fail while validating or constructing that driver. Recording the replacement on the way in was the fix for losing a replacement that failed *after* opening its attempt, and it overshot in the other direction: measured, one upstream call, `attempts=1`, and a `replaced_failures` entry for a replay that had not opened one.
 
-    **"Opened an attempt", not "reached upstream" — a review narrowed this and the distinction is real.** `begin_attempt` runs before the prepare subscribers, before the rate limiter and before `_send`, so a replacement that fails between them advances the count with no upstream I/O and *is* recorded. The injection point below sits in `shape_request`, which satisfies both readings, so this test cannot tell them apart and does not claim to. If "a byte actually left" is ever the fact wanted, `attempt_count` is the wrong oracle for it and a new one belongs at the provider-send boundary — that is a product question, not something a test's wording should settle quietly.
+    **"Opened an attempt", not "reached upstream" — a review narrowed this and the distinction is real.** `begin_attempt` runs before the rate limiter and before `_send`, so a replacement that fails between them advances the count with no upstream I/O and *is* recorded. The injection point below sits before the replay driver, which satisfies both readings, so this test cannot tell them apart and does not claim to. If "a byte actually left" is ever the fact wanted, `attempt_count` is the wrong oracle for it and a new one belongs at the provider-send boundary — that is a product question, not something a test's wording should settle quietly.
 
     A phantom here is worse than a missing entry, because the field exists to answer "what did this proxy quietly do" and an invented answer is unfalsifiable from the record.
     """
@@ -5812,23 +5975,20 @@ def test_a_replacement_that_never_opened_an_attempt_is_not_recorded_as_one(
             200, content=torn_body(), headers={"content-type": "text/event-stream"}
         )
 
-    real_shape = driver.shape_request
-    shaped: list[int] = []
+    replays: list[int] = []
 
-    def shape_once(*args: Any, **kwargs: Any) -> Any:
-        shaped.append(1)
-        if len(shaped) > 1:
-            # Before the driver exists, let alone `begin_attempt` — the same position a routing or translation failure occupies.
-            raise RuntimeError("the replay could not even be shaped")
-        return real_shape(*args, **kwargs)
+    async def fail_before_attempt(*_args: Any, **_kwargs: Any) -> Any:
+        replays.append(1)
+        # Before the replay driver exists, let alone `begin_attempt`.
+        raise RuntimeError("the replay could not open its prepared driver")
 
-    monkeypatch.setattr(driver, "shape_request", shape_once)
+    monkeypatch.setattr(inference_route, "replay_prepared", fail_before_attempt)
 
     client, _ = make_client(upstream)
     with contextlib.suppress(Exception):
         client.post("/v1/messages", json={"model": "claude-model", "messages": [], "stream": True})
 
-    assert len(shaped) == 2, "the premise: a replay was attempted"
+    assert replays == [1], "the premise: a replay was attempted"
     assert calls == [1], "and it failed before the driver could open an attempt for it"
     record = _records()[-1]
     assert record["attempts"] == 1
@@ -7075,6 +7235,33 @@ def test_translated_prompt_admission_uses_anthropics_preheader_error(
                 "input": "0123456789" * 100,
                 "future_control": True,
             },
+            "skipped_unknown_shape",
+        ),
+        (
+            _prompt_admission_catalog(),
+            cast(
+                dict[str, Any],
+                {
+                    "model": "gpt-model",
+                    "input": [
+                        {
+                            "type": "message",
+                            "role": "user",
+                            "content": [
+                                {"type": "input_text", "text": "0123456789" * 100}
+                            ],
+                        },
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": [],
+                                "data": "AAAA",
+                            },
+                        },
+                    ],
+                },
+            ),
             "skipped_unknown_shape",
         ),
     ],

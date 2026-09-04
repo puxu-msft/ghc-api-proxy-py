@@ -410,6 +410,8 @@ def test_token_admission_observations_are_ordered_complete_and_prompt_free(
         "field_kind": "input_text",
         "field_utf8_byte_count": 2_265_280,
         "field_token_count": 1_375_742,
+        "reused_from_attempt": None,
+        "reused_outcome": None,
     }
     assert "secret prompt text" not in json.dumps(serialized)
 

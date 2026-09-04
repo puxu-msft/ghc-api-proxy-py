@@ -9,12 +9,14 @@ from typing import cast
 import anyio
 import pytest
 
+import app.server.pipeline_app as pipeline_app_module
 from app.config.schema import ProxyConfig
 from app.core.chain import Chain
 from app.model_provider.ghc_client.models import run_model_refresh_loop
 from app.server.composition import refresh_catalogs
 from app.server.pipeline_app import (
     _catalog_refresh_intervals,  # pyright: ignore[reportPrivateUsage]
+    create_pipeline_app,
 )
 
 
@@ -101,6 +103,78 @@ def test_only_positive_dynamic_provider_intervals_create_refresh_jobs() -> None:
     chain = cast(Chain, SimpleNamespace(config=config))
 
     assert _catalog_refresh_intervals(chain) == (("active", 17),)
+
+
+@pytest.mark.asyncio
+async def test_pipeline_lifespan_starts_and_cancels_the_configured_refresh_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = anyio.Event()
+    cancelled = anyio.Event()
+    calls: list[tuple[str, int]] = []
+
+    class _Tokenization:
+        def __init__(self) -> None:
+            self.loaded = False
+            self.flushed = False
+
+        async def load(self) -> None:
+            self.loaded = True
+
+        async def flush(self) -> None:
+            self.flushed = True
+
+        async def run_periodic_flush(self, _interval: float) -> None:
+            await anyio.sleep_forever()
+
+    async def unavailable_at_startup(_chain: Chain) -> None:
+        raise RuntimeError("startup catalog unavailable")
+
+    async def controlled_refresh(_chain: Chain, name: str, interval: int) -> None:
+        calls.append((name, interval))
+        entered.set()
+        try:
+            await anyio.sleep_forever()
+        finally:
+            cancelled.set()
+
+    def no_footer(_active: object, _capabilities: object) -> None:
+        return None
+
+    monkeypatch.setattr(pipeline_app_module, "refresh_catalogs", unavailable_at_startup)
+    monkeypatch.setattr(pipeline_app_module, "_run_catalog_refresh", controlled_refresh)
+    monkeypatch.setattr(pipeline_app_module, "footer_tui_or_none", no_footer)
+    config = ProxyConfig.model_validate(
+        {
+            "model_providers": {
+                "active": {"type": "github_copilot", "model_refresh_interval": 17},
+                "disabled": {"type": "github_copilot", "model_refresh_interval": 0},
+                "static": {"type": "codebuddy"},
+            },
+            "default_model_provider": "active",
+        }
+    )
+    tokenization = _Tokenization()
+    chain = cast(
+        Chain,
+        SimpleNamespace(
+            config=config,
+            providers=_Registry({"active": _Provider("active")}),
+            tokenization=tokenization,
+            active_requests=object(),
+            capabilities=object(),
+        ),
+    )
+    app = create_pipeline_app(chain)
+
+    with anyio.fail_after(2):
+        async with app.router.lifespan_context(app):
+            await entered.wait()
+
+    assert calls == [("active", 17)]
+    assert tokenization.loaded is True
+    assert tokenization.flushed is True
+    assert cancelled.is_set()
 
 
 @pytest.mark.asyncio

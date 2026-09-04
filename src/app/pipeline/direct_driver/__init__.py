@@ -4,8 +4,8 @@ One module per upstream endpoint, as the driver table in `docs/.human-controlled
 `ws:/responses` has no driver, matching that table's unsupported row.
 """
 
-from collections.abc import Callable
-from typing import Protocol
+from collections.abc import Callable, Mapping
+from typing import Any, Protocol
 
 from app.model_provider import ModelDescriptor, ModelEndpoint, ModelProvider
 from app.pipeline.direct_driver.anthropic_messages import AnthropicMessagesDriver
@@ -29,6 +29,7 @@ from app.pipeline.direct_driver.openai_responses import OpenAIResponsesDriver
 from app.pipeline.events import FrozenSubscribers
 from app.pipeline.rate_limiting import RateLimiter
 from app.pipeline.request import RequestContext
+from app.tokenization.admission import TokenAdmissionObservation
 
 
 class DriverFactory(Protocol):
@@ -42,6 +43,8 @@ class DriverFactory(Protocol):
         budget: Budget,
         descriptor: ModelDescriptor | None = None,
         admission: AdmissionPolicy | None = None,
+        prepared_payload: Mapping[str, Any] | None = None,
+        reused_admission: TokenAdmissionObservation | None = None,
         attempt_deadline: int = 0,
         response_header_timeout: int = 0,
         rate_limiter: RateLimiter | None = None,

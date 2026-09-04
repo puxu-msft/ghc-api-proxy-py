@@ -1013,6 +1013,8 @@ def _token_admission_dict(
         "field_kind": observation.field_kind,
         "field_utf8_byte_count": observation.field_utf8_byte_count,
         "field_token_count": observation.field_token_count,
+        "reused_from_attempt": observation.reused_from_attempt,
+        "reused_outcome": observation.reused_outcome,
     }
 
 

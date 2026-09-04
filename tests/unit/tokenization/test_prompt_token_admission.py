@@ -1,12 +1,20 @@
+import asyncio
 import hashlib
+import json
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 import tiktoken
+from prompt_admission_process_helper import controlled_count
 
 import app.tokenization.admission as admission_module
 from app.model_provider import ModelDescriptor, ModelEndpoint, PromptTokenLimits
+from app.pipeline.translation_driver.anthropic_messages import from_anthropic_messages
+from app.pipeline.translation_driver.openai_responses import to_openai_responses
+from app.pipeline.translation_driver.semantic import TranslationTarget
 from app.tokenization.admission import (
     OPENAI_RESPONSES,
     PromptTokenAdmission,
@@ -299,6 +307,297 @@ async def test_non_lookup_worker_failure_is_not_swallowed(
             descriptor=descriptor(context_limit=1),
             payload={"model": "gpt-model", "input": "long enough"},
         )
+
+
+def process_control(tmp_path: Path, name: str, *, released: bool = False) -> tuple[str, Path, Path]:
+    entered = tmp_path / f"{name}-entered"
+    release = tmp_path / f"{name}-release"
+    if released:
+        release.write_text("go", encoding="utf-8")
+    text = json.dumps(
+        {
+            "entered": str(entered),
+            "release": str(release),
+            "result": 2,
+        }
+    )
+    return text, entered, release
+
+
+@pytest.mark.asyncio
+async def test_real_process_cancellation_releases_capacity_for_the_next_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(admission_module, "_count_ordinary", controlled_count)
+    real_run_sync = admission_module.run_sync
+    limiter = anyio.CapacityLimiter(1)
+    calls: list[tuple[bool, anyio.CapacityLimiter | None]] = []
+
+    async def observed_run_sync(
+        function: Any,
+        *args: Any,
+        cancellable: bool = False,
+        limiter: anyio.CapacityLimiter | None = None,
+    ) -> Any:
+        calls.append((cancellable, limiter))
+        return await real_run_sync(
+            function,
+            *args,
+            cancellable=cancellable,
+            limiter=limiter,
+        )
+
+    monkeypatch.setattr(admission_module, "run_sync", observed_run_sync)
+    policy = PromptTokenAdmission(limiter=limiter)
+    model = descriptor(context_limit=1)
+    first_text, first_entered, first_release = process_control(tmp_path, "first")
+    first = asyncio.create_task(
+        policy.evaluate(
+            attempt=0,
+            target_format=OPENAI_RESPONSES,
+            descriptor=model,
+            payload={"model": "gpt-model", "input": first_text},
+        )
+    )
+    async with asyncio.timeout(5):
+        while not first_entered.exists():
+            await asyncio.sleep(0.01)
+
+    fallback_used = False
+
+    async def fallback_release() -> None:
+        nonlocal fallback_used
+        await asyncio.sleep(1)
+        fallback_used = True
+        first_release.write_text("go", encoding="utf-8")
+
+    fallback = asyncio.create_task(fallback_release())
+    try:
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+    finally:
+        fallback.cancel()
+        first_release.write_text("go", encoding="utf-8")
+        await asyncio.gather(first, fallback, return_exceptions=True)
+
+    assert fallback_used is False
+    assert limiter.borrowed_tokens == 0
+    second_text, second_entered, _ = process_control(tmp_path, "second", released=True)
+    observed = await asyncio.wait_for(
+        policy.evaluate(
+            attempt=1,
+            target_format=OPENAI_RESPONSES,
+            descriptor=model,
+            payload={"model": "gpt-model", "input": second_text},
+        ),
+        timeout=5,
+    )
+    assert observed.outcome is TokenAdmissionOutcome.REJECTED
+    assert second_entered.exists()
+    assert calls and all(cancellable is True and used is limiter for cancellable, used in calls)
+
+
+@pytest.mark.asyncio
+async def test_real_process_counts_share_one_worker_capacity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(admission_module, "_count_ordinary", controlled_count)
+    limiter = anyio.CapacityLimiter(1)
+    policy = PromptTokenAdmission(limiter=limiter)
+    model = descriptor(context_limit=1)
+    first_text, first_entered, first_release = process_control(tmp_path, "first")
+    second_text, second_entered, second_release = process_control(tmp_path, "second")
+    first = asyncio.create_task(
+        policy.evaluate(
+            attempt=0,
+            target_format=OPENAI_RESPONSES,
+            descriptor=model,
+            payload={"model": "gpt-model", "input": first_text},
+        )
+    )
+    second = asyncio.create_task(
+        policy.evaluate(
+            attempt=1,
+            target_format=OPENAI_RESPONSES,
+            descriptor=model,
+            payload={"model": "gpt-model", "input": second_text},
+        )
+    )
+    try:
+        async with asyncio.timeout(5):
+            while not (
+                limiter.statistics().tasks_waiting == 1
+                and int(first_entered.exists()) + int(second_entered.exists()) == 1
+            ):
+                await asyncio.sleep(0.01)
+        assert limiter.borrowed_tokens == 1
+
+        if first_entered.exists():
+            first_release.write_text("go", encoding="utf-8")
+        else:
+            second_release.write_text("go", encoding="utf-8")
+        async with asyncio.timeout(5):
+            while not (first_entered.exists() and second_entered.exists()):
+                await asyncio.sleep(0.01)
+    finally:
+        first_release.write_text("go", encoding="utf-8")
+        second_release.write_text("go", encoding="utf-8")
+        await asyncio.gather(first, second, return_exceptions=True)
+
+    assert limiter.borrowed_tokens == 0
+
+
+def translated_image_payload(image: dict[str, Any], text: str) -> dict[str, Any]:
+    semantic = from_anthropic_messages(
+        {
+            "model": "gpt-model",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": text},
+                        image,
+                    ],
+                }
+            ],
+        }
+    )
+    return to_openai_responses(
+        semantic,
+        TranslationTarget(model_id="gpt-model"),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "image",
+    [
+        {
+            "type": "image",
+            "source": {"type": "base64", "media_type": media_type, "data": "AAAA"},
+        }
+        for media_type in ("image/jpeg", "image/png", "image/gif", "image/webp")
+    ]
+    + [
+        {
+            "type": "image",
+            "source": {"type": "url", "url": "https://example.invalid/image.png"},
+            "cache_control": {"type": "ephemeral", "ttl": "1h"},
+        },
+        {
+            "type": "image",
+            "source": {"type": "file", "file_id": "file_1"},
+            "transformations": {"oversized_image": "downsize"},
+        },
+        {
+            "type": "image",
+            "source": {"type": "file", "file_id": "file_2"},
+            "cache_control": None,
+            "transformations": None,
+        },
+    ],
+    ids=["jpeg", "png", "gif", "webp", "url-cache", "file-transform", "nullable-metadata"],
+)
+async def test_real_translator_native_image_shapes_remain_in_the_admission_domain(
+    image: dict[str, Any],
+) -> None:
+    text = "abcdefghij " * 100
+    count = text_count(text)
+    payload = translated_image_payload(image, text)
+
+    assert [item["type"] for item in payload["input"]] == ["message", "image"]
+    observed = await PromptTokenAdmission().evaluate(
+        attempt=0,
+        target_format=OPENAI_RESPONSES,
+        descriptor=descriptor(prompt_limit=count - 2, context_limit=count - 1),
+        payload=payload,
+    )
+
+    assert observed.outcome is TokenAdmissionOutcome.REJECTED
+    assert observed.field_path == "input[0].content[0].text"
+    assert observed.field_token_count == count
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "image",
+    [
+        {
+            "type": "image",
+            "source": {"type": "url", "url": "https://example.invalid/image.png"},
+            "future": True,
+        },
+        {"type": "image", "source": {"type": "future", "url": "https://example.invalid"}},
+        {
+            "type": "image",
+            "source": {
+                "type": "url",
+                "url": "https://example.invalid/image.png",
+                "future": True,
+            },
+        },
+        {"type": "image", "source": {"type": "url", "url": 7}},
+        {
+            "type": "image",
+            "source": {"type": "base64", "media_type": "application/pdf", "data": "AAAA"},
+        },
+        {
+            "type": "image",
+            "source": {"type": "base64", "media_type": [], "data": "AAAA"},
+        },
+        {
+            "type": "image",
+            "source": {"type": "url", "url": "https://example.invalid/image.png"},
+            "cache_control": {"type": "ephemeral", "ttl": "2h"},
+        },
+        {
+            "type": "image",
+            "source": {"type": "url", "url": "https://example.invalid/image.png"},
+            "cache_control": {"type": "ephemeral", "ttl": []},
+        },
+        {
+            "type": "image",
+            "source": {"type": "file", "file_id": "file_1"},
+            "transformations": {"oversized_image": "crop"},
+        },
+        {
+            "type": "image",
+            "source": {"type": "file", "file_id": "file_1"},
+            "transformations": {"oversized_image": []},
+        },
+    ],
+    ids=[
+        "unknown-outer",
+        "unknown-source-type",
+        "unknown-source-field",
+        "wrong-required-type",
+        "invalid-media-type",
+        "unhashable-media-type",
+        "invalid-cache-ttl",
+        "unhashable-cache-ttl",
+        "invalid-transformation",
+        "unhashable-transformation",
+    ],
+)
+async def test_real_translator_unknown_or_malformed_native_images_fail_open(
+    image: dict[str, Any],
+) -> None:
+    text = "abcdefghij " * 100
+    count = text_count(text)
+    payload = translated_image_payload(image, text)
+
+    observed = await PromptTokenAdmission().evaluate(
+        attempt=0,
+        target_format=OPENAI_RESPONSES,
+        descriptor=descriptor(prompt_limit=count - 2, context_limit=count - 1),
+        payload=payload,
+    )
+
+    assert observed.outcome is TokenAdmissionOutcome.SKIPPED_UNKNOWN_SHAPE
+    assert observed.field_path is None
 
 
 @pytest.mark.asyncio

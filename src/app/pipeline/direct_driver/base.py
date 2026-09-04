@@ -9,14 +9,20 @@ Copying it per endpoint is how the four drift apart.
 
 import asyncio
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Protocol, cast
 
 import httpx2
 
-from app.model_provider import ModelDescriptor, ModelEndpoint, ModelProvider
+from app.model_provider import (
+    ModelDescriptor,
+    ModelEndpoint,
+    ModelProvider,
+    require_descriptor_owner,
+    require_endpoint,
+)
 from app.pipeline.events import FrozenSubscribers
 from app.pipeline.exceptions import (
     Disposition,
@@ -27,14 +33,18 @@ from app.pipeline.exceptions import (
     classify,
 )
 from app.pipeline.rate_limiting import RateLimiter
-from app.pipeline.request import Attempt, RequestContext
+from app.pipeline.request import ENDPOINT_FORMATS, Attempt, RequestContext
 from app.pipeline.retry import RetryLedger, reason_for
 from app.streaming.keepalive import (
     find_cancellation,
     finish_async_cleanup,
     raise_with_cleanup_under,
 )
-from app.tokenization.admission import TokenAdmissionObservation, TokenAdmissionOutcome
+from app.tokenization.admission import (
+    TokenAdmissionObservation,
+    TokenAdmissionOutcome,
+    reuse_token_admission,
+)
 
 EVENT_ATTEMPT_PREPARE = "attempt.prepare"
 EVENT_ATTEMPT_SUCCEEDED = "attempt.succeeded"
@@ -211,6 +221,8 @@ class DirectDriver:
         budget: Budget,
         descriptor: ModelDescriptor | None = None,
         admission: AdmissionPolicy | None = None,
+        prepared_payload: Mapping[str, Any] | None = None,
+        reused_admission: TokenAdmissionObservation | None = None,
         attempt_deadline: int = 0,
         response_header_timeout: int = 0,
         rate_limiter: RateLimiter | None = None,
@@ -218,12 +230,34 @@ class DirectDriver:
     ) -> None:
         if (descriptor is None) is not (admission is None):
             raise ValueError("descriptor and admission must be configured together")
+        if (prepared_payload is None) is not (reused_admission is None):
+            raise ValueError("prepared payload and reused admission must be configured together")
+        if prepared_payload is not None and descriptor is None:
+            raise ValueError("prepared replay requires a routed descriptor and admission policy")
+        target_format = ENDPOINT_FORMATS[endpoint].value
+        if descriptor is not None:
+            require_descriptor_owner(descriptor, provider.name)
+            require_endpoint(descriptor, endpoint, provider.name)
+        if reused_admission is not None and descriptor is not None:
+            if (
+                reused_admission.model != descriptor.id
+                or reused_admission.provider != descriptor.provider_name
+                or reused_admission.catalog_generation != descriptor.catalog_generation
+                or reused_admission.target_format != target_format
+            ):
+                raise ValueError("reused admission does not belong to the captured route")
+            reuse_token_admission(reused_admission, attempt=reused_admission.attempt)
         self._endpoint = endpoint
+        self._target_format = target_format
         self._provider = provider
         self._subscribers = subscribers
         self._budget = budget
         self._descriptor = descriptor
         self._admission = admission
+        self._prepared_payload = (
+            deepcopy(dict(prepared_payload)) if prepared_payload is not None else None
+        )
+        self._reused_admission = reused_admission
         self._attempt_deadline = attempt_deadline
         self._response_header_timeout = response_header_timeout
         self._rate_limiter = rate_limiter
@@ -256,26 +290,35 @@ class DirectDriver:
         outcome: DriverOutcome,
         attempt: Attempt,
     ) -> httpx2.Response:
-        await self._publish(EVENT_ATTEMPT_PREPARE, context, outcome)
+        source_payload: Mapping[str, Any] = context.payload
+        if self._prepared_payload is None:
+            await self._publish(EVENT_ATTEMPT_PREPARE, context, outcome)
+        else:
+            source_payload = self._prepared_payload
         if self._descriptor is not None and self._admission is not None:
-            # A private structural copy closes the nested-alias window between the final mutable subscriber and the rate-limiter wait. The same object is admitted and sent.
-            attempt.payload = deepcopy(context.payload)
+            # A private structural copy closes the nested-alias window between the final mutable subscriber and the rate-limiter wait. The same object is admitted and sent. A delivery replay starts from the source attempt's already-final copy and makes another private copy rather than rerunning mutable shaping.
+            attempt.payload = deepcopy(dict(source_payload))
             attempt.payload["model"] = self._descriptor.id
             self._raise_if_deadline_elapsed(attempt)
-            target_format = context.target_format.value if context.target_format is not None else ""
-            observation = await self._admission.evaluate(
-                attempt=attempt.index,
-                target_format=target_format,
-                descriptor=self._descriptor,
-                payload=attempt.payload,
-            )
-            attempt.token_admission = observation
-            if observation.outcome is TokenAdmissionOutcome.REJECTED:
-                raise PromptTokenLimitExceeded(observation)
-            self._raise_if_deadline_elapsed(attempt)
+            if self._reused_admission is not None:
+                attempt.token_admission = reuse_token_admission(
+                    self._reused_admission,
+                    attempt=attempt.index,
+                )
+            else:
+                observation = await self._admission.evaluate(
+                    attempt=attempt.index,
+                    target_format=self._target_format,
+                    descriptor=self._descriptor,
+                    payload=attempt.payload,
+                )
+                attempt.token_admission = observation
+                self._raise_if_deadline_elapsed(attempt)
+                if observation.outcome is TokenAdmissionOutcome.REJECTED:
+                    raise PromptTokenLimitExceeded(observation)
         else:
             # Compatibility path for direct driver tests and callers that have not routed a model. Production configures both descriptor and admission.
-            attempt.payload = dict(context.payload)
+            attempt.payload = dict(source_payload)
         if self._rate_limiter is not None:
             context.extras["rate_limit_wait_s"] = await self._rate_limiter.acquire()
             self._raise_if_deadline_elapsed(attempt)
