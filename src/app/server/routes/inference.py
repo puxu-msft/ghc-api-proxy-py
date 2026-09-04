@@ -1050,7 +1050,7 @@ class _StreamAccounting:
             # The cause is quoted when there was one, for the same reason the branch below quotes it: this line is the only account of it that exists anywhere. A hand-over does not re-raise, so nothing downstream ever sees the exception, and `retry` on its own says a turn was handed back without saying what it was handed back from.
             if self.handed_over_error is not None:
                 # Bounded for the same reason the replayed failure is, and it was not until a test that asserted the *rendered* line found ten thousand characters of upstream's own text on one of them. `repr` has no limit and upstream chooses the text; both places that put an exception on this line go through the same cut.
-                return "retry", f"turn handed back to the client to continue after {one_line(self.handed_over_error)}"
+                return "retry", f"turn handed back to the client to continue after {self.handed_over_error}"
             return "retry", "turn handed back to the client to continue"
         if self.failure is not None:
             return "fail", f"stream failed before a terminal event: {self.failure}"

@@ -5181,6 +5181,8 @@ def test_a_long_failure_is_cut_on_the_hand_over_line_too(
     assert "more chars" in line
     assert huge not in line
     assert len(line) < 800
+    expected = hand_over_module.one_line(repr(httpx2.RemoteProtocolError(huge)))
+    assert _records()[-1]["detail"].endswith(expected)
 
 
 def test_the_client_deadline_survives_a_replay() -> None:
