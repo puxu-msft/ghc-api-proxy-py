@@ -23,6 +23,7 @@ from app.pipeline.events import FrozenSubscribers
 from app.pipeline.rate_limiting import RateLimiter
 from app.pipeline.request import RequestContext
 from app.pipeline.translation_driver.registry import TranslatorRegistry
+from app.tokenization.admission import PromptTokenAdmission
 from app.tokenization.state_store import TokenizationStateStore
 
 
@@ -48,6 +49,8 @@ class Chain:
     tokenization: TokenizationStateStore = field(
         default_factory=lambda: TokenizationStateStore(tokenization_state_path())
     )
+    # One process-wide worker permit for the exceptional large-field path. Ordinary requests stay on the byte fast path and never acquire it.
+    prompt_token_admission: PromptTokenAdmission = field(default_factory=PromptTokenAdmission)
     # `strip_anthropic_beta_flags` compiled, in the order the operator wrote it. Same reason as `web_search_models` above it: a pattern that does not compile belongs to the config, so it should stop start-up rather than the first request that happens to reach the table.
     beta_flag_denials: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = ()
 

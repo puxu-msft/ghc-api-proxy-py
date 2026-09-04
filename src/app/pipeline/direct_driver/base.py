@@ -10,28 +10,31 @@ Copying it per endpoint is how the four drift apart.
 import asyncio
 import sys
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Protocol, cast
 
 import httpx2
 
-from app.model_provider import ModelEndpoint, ModelProvider
+from app.model_provider import ModelDescriptor, ModelEndpoint, ModelProvider
 from app.pipeline.events import FrozenSubscribers
 from app.pipeline.exceptions import (
     Disposition,
     PipelineAbort,
+    PromptTokenLimitExceeded,
     UpstreamError,
     UpstreamTimeout,
     classify,
 )
 from app.pipeline.rate_limiting import RateLimiter
-from app.pipeline.request import RequestContext
+from app.pipeline.request import Attempt, RequestContext
 from app.pipeline.retry import RetryLedger, reason_for
 from app.streaming.keepalive import (
     find_cancellation,
     finish_async_cleanup,
     raise_with_cleanup_under,
 )
+from app.tokenization.admission import TokenAdmissionObservation, TokenAdmissionOutcome
 
 EVENT_ATTEMPT_PREPARE = "attempt.prepare"
 EVENT_ATTEMPT_SUCCEEDED = "attempt.succeeded"
@@ -174,6 +177,17 @@ class Budget(Protocol):
     def take_for(self, error: BaseException) -> tuple[bool, str]: ...
 
 
+class AdmissionPolicy(Protocol):
+    async def evaluate(
+        self,
+        *,
+        attempt: int,
+        target_format: str,
+        descriptor: ModelDescriptor,
+        payload: dict[str, Any],
+    ) -> TokenAdmissionObservation: ...
+
+
 @dataclass(slots=True)
 class DriverOutcome:
     context: RequestContext
@@ -195,17 +209,25 @@ class DirectDriver:
         subscribers: FrozenSubscribers[RequestContext],
         *,
         budget: Budget,
+        descriptor: ModelDescriptor | None = None,
+        admission: AdmissionPolicy | None = None,
         attempt_deadline: int = 0,
         response_header_timeout: int = 0,
         rate_limiter: RateLimiter | None = None,
+        clock: Callable[[], float] | None = None,
     ) -> None:
+        if (descriptor is None) is not (admission is None):
+            raise ValueError("descriptor and admission must be configured together")
         self._endpoint = endpoint
         self._provider = provider
         self._subscribers = subscribers
         self._budget = budget
+        self._descriptor = descriptor
+        self._admission = admission
         self._attempt_deadline = attempt_deadline
         self._response_header_timeout = response_header_timeout
         self._rate_limiter = rate_limiter
+        self._clock = clock
 
     @property
     def endpoint(self) -> ModelEndpoint:
@@ -221,22 +243,71 @@ class DirectDriver:
         for subscription in self._subscribers.for_event(event):
             await subscription.handler(context)
 
+    def _now(self) -> float:
+        return self._clock() if self._clock is not None else asyncio.get_running_loop().time()
+
+    def _raise_if_deadline_elapsed(self, attempt: Attempt) -> None:
+        if attempt.deadline_at is not None and self._now() >= attempt.deadline_at:
+            raise UpstreamTimeout(f"attempt exceeded {self._attempt_deadline}s")
+
+    async def _prepare_and_send(
+        self,
+        context: RequestContext,
+        outcome: DriverOutcome,
+        attempt: Attempt,
+    ) -> httpx2.Response:
+        await self._publish(EVENT_ATTEMPT_PREPARE, context, outcome)
+        if self._descriptor is not None and self._admission is not None:
+            # A private structural copy closes the nested-alias window between the final mutable subscriber and the rate-limiter wait. The same object is admitted and sent.
+            attempt.payload = deepcopy(context.payload)
+            attempt.payload["model"] = self._descriptor.id
+            self._raise_if_deadline_elapsed(attempt)
+            target_format = context.target_format.value if context.target_format is not None else ""
+            observation = await self._admission.evaluate(
+                attempt=attempt.index,
+                target_format=target_format,
+                descriptor=self._descriptor,
+                payload=attempt.payload,
+            )
+            attempt.token_admission = observation
+            if observation.outcome is TokenAdmissionOutcome.REJECTED:
+                raise PromptTokenLimitExceeded(observation)
+            self._raise_if_deadline_elapsed(attempt)
+        else:
+            # Compatibility path for direct driver tests and callers that have not routed a model. Production configures both descriptor and admission.
+            attempt.payload = dict(context.payload)
+        if self._rate_limiter is not None:
+            context.extras["rate_limit_wait_s"] = await self._rate_limiter.acquire()
+            self._raise_if_deadline_elapsed(attempt)
+        return await self._send(context, attempt.payload)
+
+    async def _run_attempt(
+        self,
+        context: RequestContext,
+        outcome: DriverOutcome,
+        attempt: Attempt,
+    ) -> httpx2.Response:
+        if attempt.deadline_at is None:
+            return await self._prepare_and_send(context, outcome, attempt)
+        timeout = asyncio.timeout_at(attempt.deadline_at)
+        try:
+            async with timeout:
+                return await self._prepare_and_send(context, outcome, attempt)
+        except TimeoutError as error:
+            if timeout.expired():
+                raise UpstreamTimeout(f"attempt exceeded {self._attempt_deadline}s") from error
+            raise
+
     async def run(self, context: RequestContext) -> DriverOutcome:
         outcome = DriverOutcome(context=context)
         while True:
             attempt = context.begin_attempt()
             if self._attempt_deadline > 0:
-                # Fixed here rather than at the send, so that everything this attempt does — preparing, waiting on the rate limiter, sending, and then streaming a body long after this function has returned — is measured against one instant.
-                attempt.deadline_at = asyncio.get_running_loop().time() + self._attempt_deadline
+                # One instant covers prepare, admission, limiter wait, response headers and the body that delivery consumes after this function returns.
+                attempt.deadline_at = self._now() + self._attempt_deadline
             outcome.attempts = context.attempt_count
             try:
-                await self._publish(EVENT_ATTEMPT_PREPARE, context, outcome)
-                # Subscribers edit the context payload.
-                # Re-read it rather than trusting the copy taken when the attempt opened.
-                attempt.payload = dict(context.payload)
-                if self._rate_limiter is not None:
-                    context.extras["rate_limit_wait_s"] = await self._rate_limiter.acquire()
-                response = await self._send(context, attempt.payload)
+                response = await self._run_attempt(context, outcome, attempt)
             except asyncio.CancelledError:
                 # Not a failure this loop gets to have an opinion about. A cancellation is the runtime saying this task stops now, and it is how the layers above express their own deadlines: `handle_bounded` wraps the whole request in `asyncio.timeout`, which fires by cancelling and then reads the cancellation back out to turn it into a `TimeoutError`. Catching it here consumed it, so that conversion never happened and the line meant to answer it — `raise UpstreamTimeout(f"client request exceeded {deadline}s")` — was dead code. The client was told 502 `CancelledError` with an empty message instead of 504. Measured 2026-08-22; see `.dev/docs/upstream/retry-and-continuation/deferred.md` 8a.
                 raise
@@ -350,38 +421,27 @@ class DirectDriver:
         context: RequestContext,
         payload: dict[str, Any],
     ) -> httpx2.Response:
-        """Send one attempt under both upstream guards that can act from here.
+        """Send one attempt until its response headers arrive.
 
-        This await ends when the response headers arrive, not when the body has been read — measured 2026-08-20 on a server that held the body back two seconds after its headers. So `response_header` is bounded here in full, while the attempt deadline is one bound enforced from two places: a streaming body outlives this function, and the delivery chain holds it to the same instant.
-
-        Both raise `UpstreamTimeout`: both fire while the driver still owns the attempt, so either one leaves through the same path as any other attempt that ran out of time. What is then done about it — another attempt, a continuation, nothing — belongs to the retry configuration, not here.
+        The whole-attempt deadline surrounds this call in `_run_attempt`; this narrower guard says specifically that upstream produced no headers within `response_header_timeout`.
         """
         send = self._provider.send(
             self._endpoint,
             payload,
-            model_id=context.resolved_model,
+            model_id=(
+                self._descriptor.id
+                if self._descriptor is not None
+                else context.resolved_model
+            ),
             stream=context.stream,
             extra_headers=context.client_headers or None,
         )
-        attempt = context.current_attempt
-        deadline_at = attempt.deadline_at if attempt is not None else None
-
-        async def under_header_guard() -> httpx2.Response:
-            if self._response_header_timeout <= 0:
-                return await send
-            try:
-                async with asyncio.timeout(self._response_header_timeout):
-                    return await send
-            except TimeoutError as error:
-                raise UpstreamTimeout(
-                    f"no response headers within {self._response_header_timeout}s"
-                ) from error
-
-        if deadline_at is None:
-            return await under_header_guard()
+        if self._response_header_timeout <= 0:
+            return await send
         try:
-            async with asyncio.timeout_at(deadline_at):
-                return await under_header_guard()
+            async with asyncio.timeout(self._response_header_timeout):
+                return await send
         except TimeoutError as error:
-            # Reached only when the outer guard fired: an `UpstreamTimeout` from the inner one is not a `TimeoutError`, so it passes through with its own account of what ran out.
-            raise UpstreamTimeout(f"attempt exceeded {self._attempt_deadline}s") from error
+            raise UpstreamTimeout(
+                f"no response headers within {self._response_header_timeout}s"
+            ) from error

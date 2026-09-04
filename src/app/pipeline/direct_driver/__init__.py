@@ -4,9 +4,10 @@ One module per upstream endpoint, as the driver table in `docs/.human-controlled
 `ws:/responses` has no driver, matching that table's unsupported row.
 """
 
+from collections.abc import Callable
 from typing import Protocol
 
-from app.model_provider import ModelEndpoint, ModelProvider
+from app.model_provider import ModelDescriptor, ModelEndpoint, ModelProvider
 from app.pipeline.direct_driver.anthropic_messages import AnthropicMessagesDriver
 from app.pipeline.direct_driver.base import (
     EVENT_ATTEMPT_FAILED,
@@ -15,6 +16,7 @@ from app.pipeline.direct_driver.base import (
     EVENT_REQUEST_FAILED,
     EVENT_REQUEST_SUCCEEDED,
     EVENTS,
+    AdmissionPolicy,
     Budget,
     DirectDriver,
     DriverOutcome,
@@ -38,9 +40,12 @@ class DriverFactory(Protocol):
         subscribers: FrozenSubscribers[RequestContext],
         *,
         budget: Budget,
+        descriptor: ModelDescriptor | None = None,
+        admission: AdmissionPolicy | None = None,
         attempt_deadline: int = 0,
         response_header_timeout: int = 0,
         rate_limiter: RateLimiter | None = None,
+        clock: Callable[[], float] | None = None,
     ) -> DirectDriver: ...
 
 
@@ -59,6 +64,7 @@ __all__ = [
     "EVENT_ATTEMPT_SUCCEEDED",
     "EVENT_REQUEST_FAILED",
     "EVENT_REQUEST_SUCCEEDED",
+    "AdmissionPolicy",
     "AnthropicMessagesDriver",
     "Budget",
     "DirectDriver",
