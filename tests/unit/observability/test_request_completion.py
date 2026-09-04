@@ -18,6 +18,7 @@ from app.observability.request_completion import (
     DeliveryState,
     FailureCategory,
     FailureOrigin,
+    InterruptionPhase,
     RequestCompletionCoordinator,
 )
 from app.observability.request_log import format_completion_line
@@ -187,7 +188,14 @@ def test_finalized_request_is_one_immutable_source_for_store_json_and_console(
     assert record["bytes_in"] == 11
     assert record["bytes_out"] == 13
     observation = cast(dict[str, Any], record["observation"])
-    assert set(observation) == {"response", "delivery", "timings", "body_bytes"}
+    assert set(observation) == {
+        "response",
+        "interruptions",
+        "delivery",
+        "timings",
+        "body_bytes",
+    }
+    assert observation["interruptions"] == []
     response = cast(dict[str, Any], observation["response"])
     assert set(response) == {
         "availability",
@@ -271,6 +279,68 @@ def test_finalized_request_is_one_immutable_source_for_store_json_and_console(
     assert "↓13B" in rendered
     assert "↓5B" not in rendered, "the completion line used ASGI downstream bytes instead of upstream response-body bytes"
     assert trace.response_observation is first.response
+
+
+def test_interruption_evidence_is_ordered_typed_and_orthogonal_to_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class BadReceiveError(RuntimeError):
+        def __str__(self) -> str:
+            raise RuntimeError("stringify failed")
+
+        def __repr__(self) -> str:
+            raise RuntimeError("repr failed")
+
+    completion, _trace, _store, records, _logger = _coordinator(monkeypatch)
+    completion.mark_response_ready(200)
+    completion.note_http_disconnect(phase=InterruptionPhase.REQUEST_BODY)
+    completion.note_asgi_receive_error(
+        BadReceiveError(),
+        phase=InterruptionPhase.RESPONSE_STREAM,
+    )
+    completion.note_upstream_stream_failure(
+        RuntimeError("peer closed"),
+        attempt=2,
+        category="network",
+    )
+    completion.note_asgi_message_sent({"type": "http.response.start", "status": 200})
+    completion.note_asgi_message_sent({"type": "http.response.body", "body": b"retry"})
+    completion.settle(
+        status_code=200,
+        upstream_response_bytes=13,
+        completion_unit="translated_drain",
+    )
+
+    record = completion.publish()
+
+    assert record.delivery.failure is None
+    assert record.delivery.state is DeliveryState.ACCEPTED
+    serialized = cast(
+        list[dict[str, Any]],
+        cast(dict[str, Any], records[0]["observation"])["interruptions"],
+    )
+    assert [(item["kind"], item["phase"]) for item in serialized] == [
+        ("http_disconnect", "request_body"),
+        ("asgi_receive_error", "response_stream"),
+        ("upstream_stream_failure", "upstream_body"),
+    ]
+    assert serialized[0]["category"] == "disconnect"
+    assert serialized[0]["exception_type"] is None
+    assert serialized[1]["category"] == "error"
+    assert serialized[1]["exception_module"] == __name__
+    assert serialized[1]["exception_type"].endswith("BadReceiveError")
+    assert serialized[1]["message"] is None
+    assert serialized[2]["origin"] == "upstream"
+    assert serialized[2]["attempt"] == 2
+    assert serialized[2]["category"] == "network"
+    assert serialized[2]["exception_type"] == "RuntimeError"
+    assert serialized[2]["message"] == "peer closed"
+    assert serialized[2]["continuation_synthesized"] is True
+    assert [item["observed_s"] for item in serialized] == sorted(
+        item["observed_s"] for item in serialized
+    )
+    assert "BadReceiveError for request observability" in caplog.text
 
 
 def test_error_only_response_serializes_an_absent_usage_dto(
@@ -944,13 +1014,21 @@ async def test_stream_cleanup_failure_does_not_replace_a_send_disconnect(
     response = _AccountedStreamingResponse(content, accounting, status_code=200)
     completion.mark_response_ready(200)
 
+    receive_calls = 0
+
+    async def receive() -> Message:
+        nonlocal receive_calls
+        receive_calls += 1
+        raise AssertionError("ASGI 2.4 must not call receive")
+
     async def send(message: Message) -> None:
         if message["type"] == "http.response.body":
             raise OSError("client transport closed")
 
     with pytest.raises(ClientDisconnect) as raised:
-        await response(STREAM_SCOPE, receive_request, send)
+        await response(STREAM_SCOPE, receive, send)
 
+    assert receive_calls == 0
     assert isinstance(raised.value.__cause__, RuntimeError)
     assert str(raised.value.__cause__) == "inner cleanup failed"
     record = store.observation_snapshot().completed[-1]
@@ -960,6 +1038,7 @@ async def test_stream_cleanup_failure_does_not_replace_a_send_disconnect(
     assert record.delivery.failure.origin is FailureOrigin.SEND
     assert record.delivery.failure.category is FailureCategory.DISCONNECT
     assert record.delivery.failure.message == "client transport closed"
+    assert record.interruptions == ()
 
 
 @pytest.mark.asyncio
@@ -1072,9 +1151,113 @@ async def test_pre_acceptance_cancellation_remains_primary_when_cleanup_fails(
     assert record.delivery.post_delivery_failure is None
     assert len(record.delivery.additional_failures) == 1
     assert record.delivery.additional_failures[0].origin is FailureOrigin.CLEANUP
+    assert len(record.interruptions) == 1
+    interruption = record.interruptions[0]
+    assert interruption.kind.value == "http_disconnect"
+    assert interruption.phase is InterruptionPhase.RESPONSE_STREAM
+    assert interruption.category == "disconnect"
+    assert interruption.continuation_synthesized is False
     detail = record.request_line().detail
     assert "delivery stopped before upstream finished" in detail
     assert "cleanup also failed: transport tail cleanup failed" in detail
+
+
+@pytest.mark.asyncio
+async def test_response_receive_error_is_recorded_and_re_raised_by_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    completion, trace, store, _records, _logger = _coordinator(monkeypatch)
+    nonterminal_sent = asyncio.Event()
+    hold_body = asyncio.Event()
+    receive_error = RuntimeError("ASGI receive failed")
+
+    async def body() -> AsyncGenerator[bytes]:
+        yield b"nonterminal"
+        await hold_body.wait()
+
+    accounting = _StreamAccounting(
+        chain=completion.chain,
+        request_id=trace.request_id,
+        trace=trace,
+        completion=completion,
+        status_code=200,
+        assembler=cast(Any, responses_passthrough_assembler()),
+        passthrough=True,
+    )
+    response = _AccountedStreamingResponse(
+        _tracked_delivery(body(), accounting),
+        accounting,
+        status_code=200,
+    )
+
+    async def send(message: Message) -> None:
+        if message["type"] == "http.response.body" and message.get("body") == b"nonterminal":
+            nonterminal_sent.set()
+
+    async def receive() -> Message:
+        await nonterminal_sent.wait()
+        raise receive_error
+
+    with pytest.raises(RuntimeError) as raised:
+        await response(HTTP_SCOPE, receive, send)
+
+    assert raised.value is receive_error
+    record = store.observation_snapshot().completed[-1]
+    assert len(record.interruptions) == 1
+    interruption = record.interruptions[0]
+    assert interruption.kind.value == "asgi_receive_error"
+    assert interruption.phase is InterruptionPhase.RESPONSE_STREAM
+    assert interruption.exception_type == "RuntimeError"
+    assert interruption.message == "ASGI receive failed"
+    assert interruption.continuation_synthesized is False
+
+
+@pytest.mark.asyncio
+async def test_direct_response_task_cancellation_does_not_invent_receive_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    completion, trace, store, _records, _logger = _coordinator(monkeypatch)
+    nonterminal_sent = asyncio.Event()
+    hold_body = asyncio.Event()
+    hold_receive = asyncio.Event()
+
+    async def body() -> AsyncGenerator[bytes]:
+        yield b"nonterminal"
+        await hold_body.wait()
+
+    accounting = _StreamAccounting(
+        chain=completion.chain,
+        request_id=trace.request_id,
+        trace=trace,
+        completion=completion,
+        status_code=200,
+        assembler=cast(Any, responses_passthrough_assembler()),
+        passthrough=True,
+    )
+    response = _AccountedStreamingResponse(
+        _tracked_delivery(body(), accounting),
+        accounting,
+        status_code=200,
+    )
+
+    async def send(message: Message) -> None:
+        if message["type"] == "http.response.body" and message.get("body") == b"nonterminal":
+            nonterminal_sent.set()
+
+    async def receive() -> Message:
+        await hold_receive.wait()
+        raise AssertionError("unreachable")
+
+    running = asyncio.create_task(response(HTTP_SCOPE, receive, send))
+    await asyncio.wait_for(nonterminal_sent.wait(), timeout=1)
+    running.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+    record = store.observation_snapshot().completed[-1]
+    assert record.status == "gone"
+    assert record.interruptions == ()
 
 
 @pytest.mark.asyncio

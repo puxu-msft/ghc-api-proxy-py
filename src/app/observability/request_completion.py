@@ -69,12 +69,44 @@ class FailureCategory(StrEnum):
     PROVIDER_FAILURE = "provider_failure"
 
 
+class InterruptionKind(StrEnum):
+    HTTP_DISCONNECT = "http_disconnect"
+    ASGI_RECEIVE_ERROR = "asgi_receive_error"
+    UPSTREAM_STREAM_FAILURE = "upstream_stream_failure"
+
+
+class InterruptionOrigin(StrEnum):
+    DOWNSTREAM = "downstream"
+    UPSTREAM = "upstream"
+
+
+class InterruptionPhase(StrEnum):
+    REQUEST_BODY = "request_body"
+    DISPATCH_WAIT = "dispatch_wait"
+    RESPONSE_STREAM = "response_stream"
+    UPSTREAM_BODY = "upstream_body"
+
+
 @dataclass(frozen=True, slots=True)
 class FailureSummary:
     origin: FailureOrigin
     category: FailureCategory
     type: str | None
     message: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class InterruptionObservation:
+    kind: InterruptionKind
+    origin: InterruptionOrigin
+    phase: InterruptionPhase
+    observed_s: float
+    attempt: int | None
+    category: str | None
+    exception_module: str | None
+    exception_type: str | None
+    message: str | None
+    continuation_synthesized: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +146,7 @@ class FinalizedRequest:
     delivery: DeliveryObservation
     timings: TimingObservation
     body_bytes: BodyBytesObservation
+    interruptions: tuple[InterruptionObservation, ...] = ()
 
     def request_line(self) -> RequestLine:
         value = thaw_json(self.legacy)
@@ -172,6 +205,10 @@ class FinalizedRequest:
             "schema_version": 2,
             "observation": {
                 "response": _response_dict(self.response),
+                "interruptions": [
+                    _interruption_dict(interruption)
+                    for interruption in self.interruptions
+                ],
                 "delivery": _delivery_dict(self.delivery),
                 "timings": _timings_dict(self.timings),
                 "body_bytes": _body_bytes_dict(self.body_bytes),
@@ -196,6 +233,9 @@ class RequestCompletionCoordinator:
     )
     _seen_failures: list[BaseException] = field(
         default_factory=lambda: list[BaseException]()
+    )
+    _interruptions: list[InterruptionObservation] = field(
+        default_factory=lambda: list[InterruptionObservation]()
     )
     _response_ready_s: float | None = None
     _legacy_duration_s: float | None = None
@@ -268,6 +308,45 @@ class RequestCompletionCoordinator:
 
     def note_send_failure(self, error: BaseException) -> None:
         self._note_failure(error, origin=FailureOrigin.SEND)
+
+    def note_http_disconnect(self, *, phase: InterruptionPhase) -> None:
+        self._note_interruption(
+            kind=InterruptionKind.HTTP_DISCONNECT,
+            origin=InterruptionOrigin.DOWNSTREAM,
+            phase=phase,
+            category=FailureCategory.DISCONNECT.value,
+        )
+
+    def note_asgi_receive_error(
+        self,
+        error: Exception,
+        *,
+        phase: InterruptionPhase,
+    ) -> None:
+        self._note_interruption(
+            kind=InterruptionKind.ASGI_RECEIVE_ERROR,
+            origin=InterruptionOrigin.DOWNSTREAM,
+            phase=phase,
+            category=FailureCategory.ERROR.value,
+            error=error,
+        )
+
+    def note_upstream_stream_failure(
+        self,
+        error: BaseException,
+        *,
+        attempt: int,
+        category: str,
+    ) -> None:
+        self._note_interruption(
+            kind=InterruptionKind.UPSTREAM_STREAM_FAILURE,
+            origin=InterruptionOrigin.UPSTREAM,
+            phase=InterruptionPhase.UPSTREAM_BODY,
+            attempt=attempt,
+            category=category,
+            error=error,
+            continuation_synthesized=True,
+        )
 
     def note_wrapped_failure(self, error: BaseException, *, origin: FailureOrigin) -> None:
         self._note_failure(error, origin=origin)
@@ -398,11 +477,42 @@ class RequestCompletionCoordinator:
                 upstream_response=self._upstream_response_bytes,
                 downstream_response=self._downstream_body_bytes,
             ),
+            interruptions=tuple(self._interruptions),
         )
         # Set before every sink. A re-entrant or duplicate publisher sees the same immutable record and cannot repeat a side effect.
         self._record = record
         self._emit(record)
         return record
+
+    def _note_interruption(
+        self,
+        *,
+        kind: InterruptionKind,
+        origin: InterruptionOrigin,
+        phase: InterruptionPhase,
+        category: str,
+        attempt: int | None = None,
+        error: BaseException | None = None,
+        continuation_synthesized: bool = False,
+    ) -> None:
+        self._interruptions.append(
+            InterruptionObservation(
+                kind=kind,
+                origin=origin,
+                phase=phase,
+                observed_s=time.monotonic() - self.trace.started,
+                attempt=attempt,
+                category=category,
+                exception_module=(type(error).__module__ if error is not None else None),
+                exception_type=(type(error).__qualname__ if error is not None else None),
+                message=(
+                    _safe_exception_message(error)
+                    if error is not None
+                    else None
+                ),
+                continuation_synthesized=continuation_synthesized,
+            )
+        )
 
     def _note_failure(self, error: BaseException, *, origin: FailureOrigin) -> None:
         if any(error is seen for seen in self._seen_failures):
@@ -450,6 +560,22 @@ class RequestCompletionCoordinator:
                 _warn_no_raise("could not emit %s: %r", name, error)
 
 
+def _safe_exception_message(error: BaseException) -> str | None:
+    for render in (str, repr):
+        try:
+            rendered = render(error)
+        except Exception as rendering_error:
+            _warn_no_raise(
+                "could not render %s for request observability: %r",
+                type(error).__qualname__,
+                rendering_error,
+            )
+            continue
+        if rendered:
+            return one_line(rendered)
+    return None
+
+
 def _failure_summary(error: BaseException, *, origin: FailureOrigin) -> FailureSummary:
     if isinstance(error, asyncio.CancelledError):
         category = FailureCategory.CANCELLED
@@ -463,7 +589,7 @@ def _failure_summary(error: BaseException, *, origin: FailureOrigin) -> FailureS
         origin=origin,
         category=category,
         type=error.__class__.__name__,
-        message=one_line(str(error) or repr(error)),
+        message=_safe_exception_message(error),
     )
 
 
@@ -693,6 +819,23 @@ def _failure_dict(failure: FailureSummary | None) -> dict[str, JsonValue] | None
     }
 
 
+def _interruption_dict(
+    interruption: InterruptionObservation,
+) -> dict[str, JsonValue]:
+    return {
+        "kind": interruption.kind.value,
+        "origin": interruption.origin.value,
+        "phase": interruption.phase.value,
+        "observed_s": interruption.observed_s,
+        "attempt": interruption.attempt,
+        "category": interruption.category,
+        "exception_module": interruption.exception_module,
+        "exception_type": interruption.exception_type,
+        "message": interruption.message,
+        "continuation_synthesized": interruption.continuation_synthesized,
+    }
+
+
 def _delivery_dict(delivery: DeliveryObservation) -> dict[str, JsonValue]:
     return {
         "state": delivery.state.value,
@@ -772,6 +915,10 @@ __all__ = [
     "FailureOrigin",
     "FailureSummary",
     "FinalizedRequest",
+    "InterruptionKind",
+    "InterruptionObservation",
+    "InterruptionOrigin",
+    "InterruptionPhase",
     "RequestCompletionCoordinator",
     "TimingObservation",
 ]

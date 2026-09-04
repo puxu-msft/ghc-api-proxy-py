@@ -2384,6 +2384,11 @@ def test_a_client_that_hung_up_mid_body_is_reported_as_gone_rather_than_as_a_fai
     assert record.delivery.failure is not None
     assert record.delivery.failure.origin.value == "dispatch"
     assert record.delivery.failure.category.value == "disconnect"
+    assert len(record.interruptions) == 1
+    interruption = record.interruptions[0]
+    assert interruption.kind.value == "http_disconnect"
+    assert interruption.phase.value == "request_body"
+    assert interruption.category == "disconnect"
 
 
 def test_a_streaming_request_reports_what_it_received_from_upstream(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
@@ -3291,6 +3296,11 @@ async def test_disconnect_before_upstream_headers_cancels_the_dispatch() -> None
     assert record.status == "gone"
     assert record.delivery.failure is not None
     assert record.delivery.failure.category.value == "disconnect"
+    assert len(record.interruptions) == 1
+    interruption = record.interruptions[0]
+    assert interruption.kind.value == "http_disconnect"
+    assert interruption.phase.value == "dispatch_wait"
+    assert interruption.category == "disconnect"
 
 
 async def test_disconnect_preserves_an_operation_cleanup_failure() -> None:

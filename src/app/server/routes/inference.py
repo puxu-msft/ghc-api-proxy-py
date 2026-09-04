@@ -26,7 +26,10 @@ from app.observability.rejection_capture import capture_rejection
 from app.observability.request_completion import (
     FailureOrigin as CompletionFailureOrigin,
 )
-from app.observability.request_completion import RequestCompletionCoordinator
+from app.observability.request_completion import (
+    InterruptionPhase,
+    RequestCompletionCoordinator,
+)
 from app.observability.request_log import (
     LogStatus,
     RequestLine,
@@ -246,6 +249,8 @@ async def _discard_prepared_response(
 async def _run_dispatch_while_connected(
     receive: Receive,
     operation: Callable[[], Awaitable[Response]],
+    *,
+    on_disconnect: Callable[[], None] | None = None,
 ) -> Response:
     """Run response preparation alongside the downstream disconnect listener.
 
@@ -280,6 +285,8 @@ async def _run_dispatch_while_connected(
                     while True:
                         message = await receive()
                         if message["type"] == "http.disconnect":
+                            if on_disconnect is not None:
+                                on_disconnect()
                             stop("disconnect")
                             return
                 except BaseException as error:
@@ -347,7 +354,13 @@ async def _dispatch(
         asyncio.get_running_loop().time() + client_deadline if client_deadline > 0 else None
     )
     # Consumed here so the request is fully read before anything can return, which is what lets a rejected body be reported at all. Its size is deliberately **not** what `↑` reports — see `log_completion`. The request is already registered, so a client that never finishes sending is visible for however long it takes.
-    await request.body()
+    try:
+        await request.body()
+    except ClientDisconnect:
+        completion.note_http_disconnect(
+            phase=InterruptionPhase.REQUEST_BODY,
+        )
+        raise
     return await _run_dispatch_while_connected(
         request.receive,
         lambda: _dispatch_after_body(
@@ -356,6 +369,9 @@ async def _dispatch(
             trace,
             completion,
             client_deadline_at=client_deadline_at,
+        ),
+        on_disconnect=lambda: completion.note_http_disconnect(
+            phase=InterruptionPhase.DISPATCH_WAIT,
         ),
     )
 
@@ -1222,6 +1238,21 @@ class _AccountedStreamingResponse(StreamingResponse):
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         self._accounting.completion.mark_response_ready(self.status_code)
 
+        async def observed_receive() -> Message:
+            try:
+                message = await receive()
+            except Exception as error:
+                self._accounting.completion.note_asgi_receive_error(
+                    error,
+                    phase=InterruptionPhase.RESPONSE_STREAM,
+                )
+                raise
+            if message.get("type") == "http.disconnect":
+                self._accounting.completion.note_http_disconnect(
+                    phase=InterruptionPhase.RESPONSE_STREAM,
+                )
+            return message
+
         async def observed_send(message: Message) -> None:
             self._accounting.completion.note_asgi_message_offered(message)
             try:
@@ -1244,7 +1275,7 @@ class _AccountedStreamingResponse(StreamingResponse):
 
         primary: BaseException | None = None
         try:
-            await super().__call__(scope, receive, observed_send)
+            await super().__call__(scope, observed_receive, observed_send)
         except BaseException as error:
             primary = error
             self._accounting.completion.note_wrapped_failure(
