@@ -24,6 +24,7 @@ from app.pipeline.request import RequestContext
 from app.pipeline.response_action import ClientActionRequirement
 from app.pipeline.response_observation import JsonAvailability, ResponseObservation
 from app.pipeline.translation_driver.semantic import Loss
+from app.tokenization.admission import TokenAdmissionObservation
 
 # The logger every per-request line goes under. Named so a filter, a test or a log shipper can select this process's own lines out of a stream that also carries `httpx` and `uvicorn` — a substring match on the message cannot, because `httpx` narrates every upstream call with the same path in it.
 REQUEST_LOGGER = "app.request"
@@ -189,6 +190,7 @@ class RequestTrace:
     dialect: ReplyDialect = ReplyDialect.ANTHROPIC
     upstream_conn: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
     losses: tuple[dict[str, str], ...] = ()
+    token_admissions: tuple[TokenAdmissionObservation, ...] = ()
     response_observation: ResponseObservation | None = None
 
     @property
@@ -334,6 +336,14 @@ class RequestTrace:
                 if observation.incomplete_reason == "max_output_tokens"
                 else observation.incomplete_reason or "incomplete"
             )
+
+    def absorb_token_admissions(self, context: RequestContext) -> None:
+        """Project every attempt's admission result in attempt order."""
+        self.token_admissions = tuple(
+            attempt.token_admission
+            for attempt in context.attempts
+            if attempt.token_admission is not None
+        )
 
     def absorb_losses(self, context: RequestContext) -> None:
         """Take whatever translation has recorded so far onto the line.

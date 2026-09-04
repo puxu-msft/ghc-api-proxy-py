@@ -31,6 +31,7 @@ from app.pipeline.response_observation import (
     freeze_json,
     thaw_json,
 )
+from app.tokenization.admission import TokenAdmissionObservation
 from app.wire_json import JsonValue
 
 if TYPE_CHECKING:
@@ -153,6 +154,7 @@ class FinalizedRequest:
     delivery: DeliveryObservation
     timings: TimingObservation
     body_bytes: BodyBytesObservation
+    token_admissions: tuple[TokenAdmissionObservation, ...] = ()
     interruptions: tuple[InterruptionObservation, ...] = ()
 
     def request_line(self) -> RequestLine:
@@ -212,6 +214,10 @@ class FinalizedRequest:
             "schema_version": 2,
             "observation": {
                 "response": _response_dict(self.response),
+                "token_admission": [
+                    _token_admission_dict(observation)
+                    for observation in self.token_admissions
+                ],
                 "interruptions": [
                     _interruption_dict(interruption)
                     for interruption in self.interruptions
@@ -541,6 +547,7 @@ class RequestCompletionCoordinator:
                 upstream_response=self._upstream_response_bytes,
                 downstream_response=self._downstream_body_bytes,
             ),
+            token_admissions=self.trace.token_admissions,
             interruptions=tuple(self._interruptions),
         )
         # Set before every sink. A re-entrant or duplicate publisher sees the same immutable record and cannot repeat a side effect.
@@ -985,6 +992,28 @@ def _failure_dict(failure: FailureSummary | None) -> dict[str, JsonValue] | None
     if failure.notes:
         value["notes"] = list(failure.notes)
     return value
+
+
+def _token_admission_dict(
+    observation: TokenAdmissionObservation,
+) -> dict[str, JsonValue]:
+    return {
+        "attempt": observation.attempt,
+        "origin": observation.origin,
+        "outcome": observation.outcome.value,
+        "target_format": observation.target_format,
+        "model": observation.model,
+        "provider": observation.provider,
+        "catalog_generation": observation.catalog_generation,
+        "catalog_refreshed_at": observation.catalog_refreshed_at,
+        "tokenizer": observation.tokenizer,
+        "max_prompt_tokens": observation.max_prompt_tokens,
+        "max_context_window_tokens": observation.max_context_window_tokens,
+        "field_path": observation.field_path,
+        "field_kind": observation.field_kind,
+        "field_utf8_byte_count": observation.field_utf8_byte_count,
+        "field_token_count": observation.field_token_count,
+    }
 
 
 def _interruption_dict(

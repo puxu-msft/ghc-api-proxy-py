@@ -42,6 +42,7 @@ from app.server.routes.inference import (
     _tracked_delivery,  # pyright: ignore[reportPrivateUsage]
     _upstream_error_body,  # pyright: ignore[reportPrivateUsage]
 )
+from app.tokenization.admission import TokenAdmissionObservation, TokenAdmissionOutcome
 
 
 class RecordingLogger:
@@ -230,11 +231,13 @@ def test_finalized_request_is_one_immutable_source_for_store_json_and_console(
     observation = cast(dict[str, Any], record["observation"])
     assert set(observation) == {
         "response",
+        "token_admission",
         "interruptions",
         "delivery",
         "timings",
         "body_bytes",
     }
+    assert observation["token_admission"] == []
     assert observation["interruptions"] == []
     response = cast(dict[str, Any], observation["response"])
     assert set(response) == {
@@ -333,6 +336,82 @@ def test_finalized_request_is_one_immutable_source_for_store_json_and_console(
     assert "↓13B" in rendered
     assert "↓5B" not in rendered, "the completion line used ASGI downstream bytes instead of upstream response-body bytes"
     assert trace.response_observation is first.response
+
+
+def test_token_admission_observations_are_ordered_complete_and_prompt_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    completion, trace, _store, records, _logger = _coordinator(monkeypatch)
+    context = RequestContext(
+        inbound_format=WireFormat.OPENAI_RESPONSES,
+        requested_model="gpt-model",
+        payload={"model": "gpt-model", "input": "secret prompt text"},
+    )
+    first = context.begin_attempt()
+    first.token_admission = TokenAdmissionObservation(
+        attempt=0,
+        origin="proxy",
+        outcome=TokenAdmissionOutcome.ADMITTED_FAST,
+        target_format="openai-responses",
+        model="gpt-model",
+        provider="ghc",
+        catalog_generation=7,
+        catalog_refreshed_at="2026-09-04T00:00:00+00:00",
+        tokenizer="o200k_base",
+        max_prompt_tokens=922_000,
+        max_context_window_tokens=1_050_000,
+        field_path="input",
+        field_kind="input",
+        field_utf8_byte_count=18,
+    )
+    second = context.begin_attempt()
+    second.token_admission = TokenAdmissionObservation(
+        attempt=1,
+        origin="proxy",
+        outcome=TokenAdmissionOutcome.REJECTED,
+        target_format="openai-responses",
+        model="gpt-model",
+        provider="ghc",
+        catalog_generation=8,
+        catalog_refreshed_at="2026-09-04T00:01:00+00:00",
+        tokenizer="o200k_base",
+        max_prompt_tokens=922_000,
+        max_context_window_tokens=1_050_000,
+        field_path="input[2].content[0].text",
+        field_kind="input_text",
+        field_utf8_byte_count=2_265_280,
+        field_token_count=1_375_742,
+    )
+    trace.absorb_token_admissions(context)
+    completion.settle(status_code=400, upstream_response_bytes=None)
+
+    completion.publish()
+
+    serialized = cast(
+        list[dict[str, Any]],
+        cast(dict[str, Any], records[0]["observation"])["token_admission"],
+    )
+    assert [item["attempt"] for item in serialized] == [0, 1]
+    assert [item["outcome"] for item in serialized] == ["admitted_fast", "rejected"]
+    assert serialized[0]["field_token_count"] is None
+    assert serialized[1] == {
+        "attempt": 1,
+        "origin": "proxy",
+        "outcome": "rejected",
+        "target_format": "openai-responses",
+        "model": "gpt-model",
+        "provider": "ghc",
+        "catalog_generation": 8,
+        "catalog_refreshed_at": "2026-09-04T00:01:00+00:00",
+        "tokenizer": "o200k_base",
+        "max_prompt_tokens": 922_000,
+        "max_context_window_tokens": 1_050_000,
+        "field_path": "input[2].content[0].text",
+        "field_kind": "input_text",
+        "field_utf8_byte_count": 2_265_280,
+        "field_token_count": 1_375_742,
+    }
+    assert "secret prompt text" not in json.dumps(serialized)
 
 
 def test_interruption_evidence_is_ordered_typed_and_orthogonal_to_delivery(

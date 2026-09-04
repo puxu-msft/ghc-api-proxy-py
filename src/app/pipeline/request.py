@@ -10,7 +10,10 @@ That document now calls the object `ClientRequest` and gives each upstream try i
 from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from app.tokenization.admission import TokenAdmissionObservation
 from uuid import uuid4
 
 from app.model_provider import ModelDescriptor, ModelEndpoint
@@ -55,6 +58,8 @@ class Attempt:
     deadline_at: float | None = None
     # Created when the attempt opens, before subscribers or the send can fail. A replacement attempt therefore becomes the only current source of response facts even when it never obtains response headers.
     response_observer: ResponsesObserver | None = None
+    # One result per attempt. Kept on the attempt so a retry cannot overwrite the admission facts of the request it replaced.
+    token_admission: TokenAdmissionObservation | None = None
 
 
 @dataclass(slots=True)
