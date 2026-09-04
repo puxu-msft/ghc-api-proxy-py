@@ -257,6 +257,20 @@ def test_finalized_request_is_one_immutable_source_for_store_json_and_console(
         "post_delivery_failure": None,
         "additional_failures": [],
     }
+    timings = cast(dict[str, Any], observation["timings"])
+    assert timings == {
+        "response_ready_s": first.timings.response_ready_s,
+        "finalized_s": first.timings.finalized_s,
+        "first_upstream_byte_s": None,
+        "upstream_max_gap_s": None,
+        "upstream_chunks": 0,
+        "upstream_timing_attempt": None,
+        "last_upstream_chunk_s": None,
+        "final_upstream_pull_started_s": None,
+        "upstream_end_s": None,
+        "upstream_tail_gap_s": None,
+        "upstream_final_pull_s": None,
+    }
     body_bytes = cast(dict[str, Any], observation["body_bytes"])
     assert body_bytes == {
         "upstream_request": 11,

@@ -9,9 +9,11 @@ import contextlib
 import inspect
 import logging
 import re
+import threading
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator
 from dataclasses import replace
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
 
@@ -4846,10 +4848,12 @@ def test_a_torn_stream_the_client_never_saw_is_replayed_end_to_end() -> None:
     assert events[-1] == "message_stop"
     assert "kept" in response.text
     assert len(calls) == 2
+    record = _records()[-1]
     assert not any(
         item["kind"] == "upstream_stream_failure"
-        for item in _records()[-1]["observation"]["interruptions"]
+        for item in record["observation"]["interruptions"]
     )
+    assert record["observation"]["timings"]["upstream_timing_attempt"] == 2
 
 
 def test_a_replay_on_the_translation_leg_sends_the_conversation_again(
@@ -5311,6 +5315,187 @@ def test_an_interrupted_turn_is_handed_back_to_the_client_as_a_tool_call(
     assert interruption["exception_type"] == httpx2.RemoteProtocolError.__qualname__
     assert "ConnectionTerminated" in interruption["message"]
     assert interruption["continuation_synthesized"] is True
+    timings = record["observation"]["timings"]
+    assert timings["upstream_timing_attempt"] == 1
+    assert timings["last_upstream_chunk_s"] is not None
+    assert timings["final_upstream_pull_started_s"] is not None
+    assert timings["upstream_end_s"] is not None
+    assert timings["upstream_tail_gap_s"] >= timings["upstream_final_pull_s"] >= 0
+
+
+def test_real_h1_incomplete_chunked_body_records_the_exact_trigger_and_pull_timing(
+    request_log: None,
+) -> None:
+    reasoning: dict[str, Any] = {
+        "type": "reasoning",
+        "id": "rs_1",
+        "summary": [],
+        "encrypted_content": "sealed",
+    }
+    message: dict[str, Any] = {
+        "type": "message",
+        "id": "msg_1",
+        "role": "assistant",
+        "status": "in_progress",
+        "content": [],
+    }
+
+    def frame(name: str, data: dict[str, Any]) -> bytes:
+        return f"event: {name}\ndata: {orjson.dumps(data).decode()}\n\n".encode()
+
+    partial_body = b"".join(
+        [
+            *(item.encode() for item in responses_envelope_frames()),
+            frame(
+                "response.output_item.added",
+                {"output_index": 0, "item": reasoning},
+            ),
+            frame(
+                "response.output_item.done",
+                {"output_index": 0, "item": reasoning},
+            ),
+            frame(
+                "response.output_item.added",
+                {"output_index": 1, "item": message},
+            ),
+            frame(
+                "response.output_text.delta",
+                {"output_index": 1, "item_id": "msg_1", "delta": "partial"},
+            ),
+        ]
+    )
+
+    class IncompleteChunkedHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, format: str, *args: object) -> None:
+            del format, args
+
+        def _send_json(self, body: object) -> None:
+            encoded = orjson.dumps(body)
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def do_GET(self) -> None:
+            if self.path.endswith("/models"):
+                self._send_json(CATALOG)
+                return
+            self.send_error(404)
+
+        def do_POST(self) -> None:
+            length = int(self.headers.get("content-length", "0"))
+            if length:
+                self.rfile.read(length)
+            if not self.path.endswith("/responses"):
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("content-type", "text/event-stream")
+            self.send_header("transfer-encoding", "chunked")
+            self.send_header("connection", "close")
+            self.end_headers()
+            self.wfile.write(f"{len(partial_body):X}\r\n".encode())
+            self.wfile.write(partial_body)
+            self.wfile.write(b"\r\n")
+            self.wfile.flush()
+            # Deliberately omit the zero chunk and trailers. Returning closes the H1 socket while h11 still expects the body terminator.
+            self.close_connection = True
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), IncompleteChunkedHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    token_http = httpx2.AsyncClient(
+        transport=httpx2.MockTransport(
+            lambda _: httpx2.Response(
+                200,
+                json={"token": "copilot", "expires_at": 5000, "refresh_in": 1500},
+            )
+        )
+    )
+    upstream_http = httpx2.AsyncClient()
+    tokens = CopilotTokenManager(StaticTokenSource(), token_http, clock=lambda: 1000)
+    ghc_client = GhcApiClient(
+        AsyncOpenAI(
+            api_key="proxy-managed",
+            base_url=base_url,
+            http_client=upstream_http,
+            max_retries=0,
+        ),
+        AsyncAnthropic(
+            api_key="proxy-managed",
+            base_url=base_url,
+            http_client=upstream_http,
+            max_retries=0,
+        ),
+        tokens,
+        GhcClientConfig(api_base_url_override=base_url),
+        interaction_id="real-h1-incomplete-chunked",
+    )
+    provider = GithubCopilotProvider(
+        "ghc",
+        ghc_client,
+        GithubCopilotProviderConfig(type="github_copilot"),
+        http_client=upstream_http,
+        base_url=base_url,
+    )
+    provider.replace_catalog(CATALOG)
+    config = ProxyConfig.model_validate(
+        {
+            "model_providers": {
+                "ghc": {"type": "github_copilot", "api_base_url": base_url}
+            },
+            "default_model_provider": "ghc",
+            "upstream_request_retry": {"max_total": 0},
+        }
+    )
+    chain = build_chain(
+        config,
+        http_client=upstream_http,
+        providers={"ghc": cast(ModelProvider, provider)},
+    )
+
+    try:
+        with TestClient(create_pipeline_app(chain)) as client:
+            response = client.post(
+                "/v1/messages",
+                json={"model": "gpt-model", "messages": [], "stream": True},
+            )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert response.status_code == 200
+    handed = _handed_back(response.content)
+    record = _records()[-1]
+    interruptions = [
+        item
+        for item in record["observation"]["interruptions"]
+        if item["kind"] == "upstream_stream_failure"
+    ]
+    assert len(interruptions) == 1
+    interruption = interruptions[0]
+    assert interruption["attempt"] == 1
+    assert interruption["category"] == handed["input"]["category"] == "network"
+    assert interruption["exception_module"] == httpx2.RemoteProtocolError.__module__
+    assert interruption["exception_type"] == httpx2.RemoteProtocolError.__qualname__
+    assert interruption["message"] == (
+        "peer closed connection without sending complete message body (incomplete chunked read)"
+    )
+    assert record["status"] == "retry"
+    assert record["observation"]["delivery"]["state"] == "accepted"
+    assert record["observation"]["delivery"]["unit"] == "translated_drain"
+    assert record["observation"]["delivery"]["failure"] is None
+    timings = record["observation"]["timings"]
+    assert timings["upstream_timing_attempt"] == 1
+    assert timings["last_upstream_chunk_s"] is not None
+    assert timings["final_upstream_pull_started_s"] is not None
+    assert timings["upstream_end_s"] is not None
+    assert timings["upstream_tail_gap_s"] >= timings["upstream_final_pull_s"] >= 0
 
 
 def test_only_the_attempt_that_synthesizes_continuation_records_an_interruption() -> None:
@@ -5353,6 +5538,7 @@ def test_only_the_attempt_that_synthesizes_continuation_records_an_interruption(
     assert interruption["exception_type"] == httpx2.RemoteProtocolError.__qualname__
     assert interruption["message"] == "second attempt tore after a complete block"
     assert record["attempts"] == 2
+    assert record["observation"]["timings"]["upstream_timing_attempt"] == 2
     assert len(record["replaced_failures"]) == 1
     assert "first attempt tore" in record["replaced_failures"][0]
 

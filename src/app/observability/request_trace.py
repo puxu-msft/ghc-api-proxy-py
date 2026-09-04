@@ -167,6 +167,12 @@ class RequestTrace:
     first_upstream_byte_s: float | None = None
     upstream_max_gap_s: float | None = None
     upstream_chunks: int = 0
+    upstream_timing_attempt: int | None = None
+    last_upstream_chunk_s: float | None = None
+    final_upstream_pull_started_s: float | None = None
+    upstream_end_s: float | None = None
+    upstream_tail_gap_s: float | None = None
+    upstream_final_pull_s: float | None = None
     upstream_request_body_bytes: int | None = None
     received: int = 0
     # Distinguishes an observed empty upstream body from a request that never reached a response body at all.
@@ -189,6 +195,41 @@ class RequestTrace:
     def upstream_response_body_bytes(self) -> int | None:
         """Decoded upstream response-body bytes, preserving observed zero."""
         return self.received if self.received_known else None
+
+    def begin_upstream_body_timing(self, attempt: int) -> None:
+        """Start the atomic timing projection for the latest body attempt."""
+        self.upstream_timing_attempt = attempt
+        self.last_upstream_chunk_s = None
+        self.final_upstream_pull_started_s = None
+        self.upstream_end_s = None
+        self.upstream_tail_gap_s = None
+        self.upstream_final_pull_s = None
+
+    def note_upstream_pull_started(self, now: float) -> None:
+        if self.upstream_timing_attempt is None:
+            raise RuntimeError("upstream body timing has not started")
+        self.final_upstream_pull_started_s = now - self.started
+        self.upstream_end_s = None
+        self.upstream_tail_gap_s = None
+        self.upstream_final_pull_s = None
+
+    def note_upstream_chunk(self, now: float) -> None:
+        if self.final_upstream_pull_started_s is None:
+            raise RuntimeError("upstream pull timing has not started")
+        self.last_upstream_chunk_s = now - self.started
+
+    def note_upstream_end(self, now: float) -> None:
+        if self.final_upstream_pull_started_s is None:
+            raise RuntimeError("upstream pull timing has not started")
+        self.upstream_end_s = now - self.started
+        self.upstream_final_pull_s = (
+            self.upstream_end_s - self.final_upstream_pull_started_s
+        )
+        self.upstream_tail_gap_s = (
+            self.upstream_end_s - self.last_upstream_chunk_s
+            if self.last_upstream_chunk_s is not None
+            else None
+        )
 
     def absorb(self, reply: Terminal) -> None:
         """Take the aggregated reply record onto the line.

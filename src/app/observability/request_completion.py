@@ -128,6 +128,12 @@ class TimingObservation:
     first_upstream_byte_s: float | None
     upstream_max_gap_s: float | None
     upstream_chunks: int
+    upstream_timing_attempt: int | None = None
+    last_upstream_chunk_s: float | None = None
+    final_upstream_pull_started_s: float | None = None
+    upstream_end_s: float | None = None
+    upstream_tail_gap_s: float | None = None
+    upstream_final_pull_s: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -478,6 +484,14 @@ class RequestCompletionCoordinator:
                 first_upstream_byte_s=self.trace.first_upstream_byte_s,
                 upstream_max_gap_s=self.trace.upstream_max_gap_s,
                 upstream_chunks=self.trace.upstream_chunks,
+                upstream_timing_attempt=self.trace.upstream_timing_attempt,
+                last_upstream_chunk_s=self.trace.last_upstream_chunk_s,
+                final_upstream_pull_started_s=(
+                    self.trace.final_upstream_pull_started_s
+                ),
+                upstream_end_s=self.trace.upstream_end_s,
+                upstream_tail_gap_s=self.trace.upstream_tail_gap_s,
+                upstream_final_pull_s=self.trace.upstream_final_pull_s,
             ),
             body_bytes=BodyBytesObservation(
                 upstream_request=self.trace.upstream_request_body_bytes,
@@ -865,6 +879,12 @@ def _timings_dict(timings: TimingObservation) -> dict[str, JsonValue]:
         "first_upstream_byte_s": timings.first_upstream_byte_s,
         "upstream_max_gap_s": timings.upstream_max_gap_s,
         "upstream_chunks": timings.upstream_chunks,
+        "upstream_timing_attempt": timings.upstream_timing_attempt,
+        "last_upstream_chunk_s": timings.last_upstream_chunk_s,
+        "final_upstream_pull_started_s": timings.final_upstream_pull_started_s,
+        "upstream_end_s": timings.upstream_end_s,
+        "upstream_tail_gap_s": timings.upstream_tail_gap_s,
+        "upstream_final_pull_s": timings.upstream_final_pull_s,
     }
 
 

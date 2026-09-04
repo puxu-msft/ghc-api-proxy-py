@@ -6,6 +6,7 @@ Nothing before the first whole block, each block as a closed group, keep-alives 
 
 import asyncio
 import logging
+import sys
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import aclosing, suppress
@@ -782,6 +783,7 @@ async def test_the_idle_guard_settles_the_stream_it_was_watching() -> None:
         cast(Any, SimpleNamespace(active_requests=ActiveRequestRegistry())),
         "req",
         trace,
+        attempt=1,
     )
     delivery = _delivery(counted)
 
@@ -1131,6 +1133,7 @@ async def test_the_deadline_guard_settles_the_stream_it_was_watching() -> None:
         cast(Any, SimpleNamespace(active_requests=ActiveRequestRegistry())),
         "req",
         trace,
+        attempt=1,
     )
     delivery = _delivery(counted)
 
@@ -1167,6 +1170,7 @@ async def test_a_silence_in_the_middle_of_the_stream_is_recorded_apart_from_the_
         cast(Any, SimpleNamespace(active_requests=ActiveRequestRegistry())),
         "req",
         trace,
+        attempt=1,
     )
 
     async with aclosing(counted):
@@ -1178,6 +1182,17 @@ async def test_a_silence_in_the_middle_of_the_stream_is_recorded_apart_from_the_
     assert trace.first_upstream_byte_s >= before_first
     assert trace.upstream_max_gap_s is not None
     assert mid_stream <= trace.upstream_max_gap_s < before_first
+    assert trace.upstream_timing_attempt == 1
+    assert trace.last_upstream_chunk_s is not None
+    assert trace.final_upstream_pull_started_s is not None
+    assert trace.upstream_end_s is not None
+    assert trace.last_upstream_chunk_s <= trace.final_upstream_pull_started_s <= trace.upstream_end_s
+    assert trace.upstream_tail_gap_s == pytest.approx(
+        trace.upstream_end_s - trace.last_upstream_chunk_s
+    )
+    assert trace.upstream_final_pull_s == pytest.approx(
+        trace.upstream_end_s - trace.final_upstream_pull_started_s
+    )
 
 
 @pytest.mark.asyncio
@@ -1192,6 +1207,7 @@ async def test_a_stream_of_one_chunk_reports_no_gap_rather_than_a_gap_of_zero() 
         cast(Any, SimpleNamespace(active_requests=ActiveRequestRegistry())),
         "req",
         trace,
+        attempt=1,
     )
 
     async with aclosing(counted):
@@ -1199,6 +1215,138 @@ async def test_a_stream_of_one_chunk_reports_no_gap_rather_than_a_gap_of_zero() 
 
     assert trace.upstream_chunks == 1
     assert trace.upstream_max_gap_s is None
+    assert trace.upstream_timing_attempt == 1
+    assert trace.last_upstream_chunk_s is not None
+    assert trace.final_upstream_pull_started_s is not None
+    assert trace.upstream_end_s is not None
+    assert trace.last_upstream_chunk_s <= trace.final_upstream_pull_started_s <= trace.upstream_end_s
+    assert trace.upstream_tail_gap_s == pytest.approx(
+        trace.upstream_end_s - trace.last_upstream_chunk_s
+    )
+    assert trace.upstream_final_pull_s == pytest.approx(
+        trace.upstream_end_s - trace.final_upstream_pull_started_s
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [None, ValueError("empty body failed")])
+async def test_zero_chunk_body_end_has_a_pull_duration_but_no_tail(
+    failure: ValueError | None,
+) -> None:
+    async def source() -> AsyncIterator[bytes]:
+        if failure is not None:
+            raise failure
+        if False:
+            yield b"unreachable"
+
+    trace = RequestTrace(method="POST", path="/v1/messages", started=time.monotonic())
+    counted = _counted_upstream(
+        source(),
+        cast(Any, SimpleNamespace(active_requests=ActiveRequestRegistry())),
+        "req",
+        trace,
+        attempt=2,
+    )
+
+    if failure is None:
+        assert [chunk async for chunk in counted] == []
+    else:
+        with pytest.raises(ValueError) as raised:
+            _ = [chunk async for chunk in counted]
+        assert raised.value is failure
+
+    assert trace.upstream_timing_attempt == 2
+    assert trace.last_upstream_chunk_s is None
+    assert trace.final_upstream_pull_started_s is not None
+    assert trace.upstream_end_s is not None
+    assert trace.final_upstream_pull_started_s <= trace.upstream_end_s
+    assert trace.upstream_tail_gap_s is None
+    assert trace.upstream_final_pull_s == pytest.approx(
+        trace.upstream_end_s - trace.final_upstream_pull_started_s
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_new_body_attempt_resets_every_previous_timing_companion() -> None:
+    async def first_attempt() -> AsyncIterator[bytes]:
+        yield b"first"
+        raise ValueError("first attempt failed")
+
+    async def empty_attempt() -> AsyncIterator[bytes]:
+        if False:
+            yield b"unreachable"
+
+    async def held_attempt() -> AsyncIterator[bytes]:
+        yield b"third"
+        await asyncio.Event().wait()
+
+    chain = cast(Any, SimpleNamespace(active_requests=ActiveRequestRegistry()))
+    trace = RequestTrace(method="POST", path="/v1/messages", started=time.monotonic())
+    first = _counted_upstream(first_attempt(), chain, "req", trace, attempt=1)
+    with pytest.raises(ValueError, match="first attempt failed"):
+        _ = [chunk async for chunk in first]
+    assert trace.upstream_end_s is not None
+    assert trace.last_upstream_chunk_s is not None
+
+    second = _counted_upstream(empty_attempt(), chain, "req", trace, attempt=2)
+    assert [chunk async for chunk in second] == []
+    assert trace.upstream_timing_attempt == 2
+    assert trace.last_upstream_chunk_s is None
+    assert trace.final_upstream_pull_started_s is not None
+    assert trace.upstream_end_s is not None
+    assert trace.upstream_tail_gap_s is None
+    assert trace.upstream_final_pull_s is not None
+
+    third = _counted_upstream(held_attempt(), chain, "req", trace, attempt=3)
+    assert await anext(third) == b"third"
+    await third.aclose()
+    assert trace.upstream_timing_attempt == 3
+    assert trace.last_upstream_chunk_s is not None
+    assert trace.final_upstream_pull_started_s is not None
+    assert trace.final_upstream_pull_started_s <= trace.last_upstream_chunk_s
+    assert trace.upstream_end_s is None
+    assert trace.upstream_tail_gap_s is None
+    assert trace.upstream_final_pull_s is None
+
+
+@pytest.mark.asyncio
+async def test_cancellation_replaced_by_cleanup_error_is_not_an_upstream_body_end() -> None:
+    next_pull_started = asyncio.Event()
+
+    async def source() -> AsyncIterator[bytes]:
+        try:
+            yield b"first"
+            next_pull_started.set()
+            await asyncio.Event().wait()
+        finally:
+            cancellation = sys.exception()
+            if isinstance(cancellation, asyncio.CancelledError):
+                raise RuntimeError("cleanup replaced cancellation") from cancellation
+
+    trace = RequestTrace(method="POST", path="/v1/messages", started=time.monotonic())
+    counted = _counted_upstream(
+        source(),
+        cast(Any, SimpleNamespace(active_requests=ActiveRequestRegistry())),
+        "req",
+        trace,
+        attempt=1,
+    )
+    assert await anext(counted) == b"first"
+    pending = asyncio.create_task(anext(counted))
+    await asyncio.wait_for(next_pull_started.wait(), timeout=1)
+    pending.cancel()
+
+    with pytest.raises(RuntimeError, match="cleanup replaced cancellation") as raised:
+        await pending
+
+    assert isinstance(raised.value.__cause__, asyncio.CancelledError)
+    assert trace.upstream_timing_attempt == 1
+    assert trace.last_upstream_chunk_s is not None
+    assert trace.final_upstream_pull_started_s is not None
+    assert trace.last_upstream_chunk_s <= trace.final_upstream_pull_started_s
+    assert trace.upstream_end_s is None
+    assert trace.upstream_tail_gap_s is None
+    assert trace.upstream_final_pull_s is None
 
 
 def _replay_over(attempts: list[list[bytes]]) -> ReplaySupport:
@@ -1471,7 +1619,8 @@ async def test_a_client_that_leaves_releases_the_upstream_through_every_layer() 
     delivery = stream_delivery(
         # All five, in production's order. An earlier version of this test stopped at the counter and its docstring still claimed to compose what production composes; a review counted them, and a later one caught the docstring calling five objects four.
         with_client_deadline_at(
-            _counted_upstream(marker, chain, "probe", trace), deadline_at=None
+            _counted_upstream(marker, chain, "probe", trace, attempt=1),
+            deadline_at=None,
         ),
         AnthropicAssembler(),
         upstream=marker,
@@ -1486,6 +1635,13 @@ async def test_a_client_that_leaves_releases_the_upstream_through_every_layer() 
     await delivery.aclose()
     # Immediately, not after a tick: an owner still holding the source keeps it open for as long as it holds it, so a collector cannot be what releases the connection.
     assert closed == [True]
+    assert trace.upstream_timing_attempt == 1
+    assert trace.last_upstream_chunk_s is not None
+    assert trace.final_upstream_pull_started_s is not None
+    assert trace.final_upstream_pull_started_s <= trace.last_upstream_chunk_s
+    assert trace.upstream_end_s is None
+    assert trace.upstream_tail_gap_s is None
+    assert trace.upstream_final_pull_s is None
 
 
 @pytest.mark.asyncio
@@ -1526,7 +1682,9 @@ async def test_a_second_cancellation_does_not_interrupt_the_release_it_arrives_d
     trace = RequestTrace(method="POST", path="/v1/messages", request_id="probe", started=time.monotonic())
 
     async def read_until_cancelled() -> None:
-        counted_stream = _counted_upstream(slow_to_release(), chain, "probe", trace)
+        counted_stream = _counted_upstream(
+            slow_to_release(), chain, "probe", trace, attempt=1
+        )
         async with aclosing(counted_stream):
             async for _ in counted_stream:
                 await asyncio.sleep(30)
@@ -1544,6 +1702,13 @@ async def test_a_second_cancellation_does_not_interrupt_the_release_it_arrives_d
         await task
     assert task.cancelled(), "the task is still cancelled — that part was never in question"
     assert events == ["close-entered", "close-finished"], "and the upstream was released anyway"
+    assert trace.upstream_timing_attempt == 1
+    assert trace.last_upstream_chunk_s is not None
+    assert trace.final_upstream_pull_started_s is not None
+    assert trace.final_upstream_pull_started_s <= trace.last_upstream_chunk_s
+    assert trace.upstream_end_s is None
+    assert trace.upstream_tail_gap_s is None
+    assert trace.upstream_final_pull_s is None
 
 
 @pytest.mark.asyncio
@@ -1569,7 +1734,9 @@ async def test_a_body_that_cannot_be_closed_says_so_when_nothing_else_is_ending(
 
     chain = cast(Any, SimpleNamespace(active_requests=SimpleNamespace(add_upstream_response_bytes=counted)))
     trace = RequestTrace(method="POST", path="/v1/messages", request_id="probe", started=time.monotonic())
-    counted_stream = _counted_upstream(refuses_to_close(), chain, "probe", trace)
+    counted_stream = _counted_upstream(
+        refuses_to_close(), chain, "probe", trace, attempt=1
+    )
 
     async for _ in counted_stream:
         break
@@ -1612,7 +1779,9 @@ async def test_a_falsey_upstream_failure_is_still_the_one_reported() -> None:
     trace = RequestTrace(method="POST", path="/v1/messages", request_id="probe", started=time.monotonic())
 
     with pytest.raises(Falsey) as caught:
-        async for _ in _counted_upstream(TearsFalselyAndCannotClose(), chain, "probe", trace):
+        async for _ in _counted_upstream(
+            TearsFalselyAndCannotClose(), chain, "probe", trace, attempt=1
+        ):
             pass
 
     assert isinstance(caught.value.__cause__, RuntimeError), "the close failure is recorded under it, not over it"
@@ -1651,7 +1820,7 @@ async def test_a_bug_below_the_marker_but_above_the_source_is_still_ours() -> No
 
     with pytest.raises(LookupError):
         async for _ in stream_delivery(
-            _counted_upstream(source, chain, "probe", trace),
+            _counted_upstream(source, chain, "probe", trace, attempt=1),
             AnthropicAssembler(),
             upstream=source,
             buffer=BlockBuffer(policy="block"),

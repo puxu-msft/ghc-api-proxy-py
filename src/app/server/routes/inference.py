@@ -637,6 +637,7 @@ async def _dispatch_after_body(
                                 chain,
                                 trace.request_id,
                                 trace,
+                                attempt=context.attempt_count,
                             ),
                             deadline_at=client_deadline_at,
                         ),
@@ -738,6 +739,7 @@ async def _dispatch_after_body(
                         chain,
                         trace.request_id,
                         trace,
+                        attempt=again.context.attempt_count,
                     ),
                     deadline_at=client_deadline_at,
                 ),
@@ -795,6 +797,7 @@ async def _dispatch_after_body(
                             chain,
                             trace.request_id,
                             trace,
+                            attempt=context.attempt_count,
                         ),
                         deadline_at=client_deadline_at,
                     ),
@@ -1332,7 +1335,14 @@ class _AccountedStreamingResponse(StreamingResponse):
             self._accounting.completion.publish()
 
 
-async def _counted_upstream(chunks: AsyncIterator[bytes], chain: Chain, request_id: str, trace: RequestTrace) -> AsyncGenerator[bytes]:
+async def _counted_upstream(
+    chunks: AsyncIterator[bytes],
+    chain: Chain,
+    request_id: str,
+    trace: RequestTrace,
+    *,
+    attempt: int,
+) -> AsyncGenerator[bytes]:
     """Count what upstream sends, as it arrives, and forward it untouched.
 
     This is the number both the footer and the completion line report, because what an operator is watching is the proxy's conversation with upstream. Bytes delivered onward to the client are a different quantity and a much worse indicator: block-level delivery holds a block until it is whole, so a downstream count sits at zero for most of a request and then jumps — which reads as a broken display rather than as the buffering it is.
@@ -1344,9 +1354,26 @@ async def _counted_upstream(chunks: AsyncIterator[bytes], chain: Chain, request_
     **Closing this closes the stream under it**, the same way `with_idle_timeout` and `read_events` do. This was the one layer of the production chain that did not, and it was the layer everything else releases through: `read_events` closes the outermost composite and the client deadline closes this one, and the chain stopped here. A client that went away mid-turn therefore left the marker, both guards and the upstream response open until the collector reached them — measured 2026-08-24 against the real five-object composition, where the raw source stayed open across a tick and only an explicit close released it. A cancellation propagates all the way down **when the close succeeds**, which is why the client deadline's own path was never the one that leaked and an ordinary early close was. A source with no `aclose` is left alone, and a close that itself fails is ordered against whatever was already propagating — both by `finish_stream_cleanup`, which is what this delegates the whole of cleanup to.
     """
     trace.received_known = True
+    trace.begin_upstream_body_timing(attempt)
     previous: float | None = None
     try:
-        async for chunk in chunks:
+        while True:
+            trace.note_upstream_pull_started(time.monotonic())
+            try:
+                chunk = await anext(chunks)
+            except StopAsyncIteration:
+                trace.note_upstream_end(time.monotonic())
+                break
+            except Exception as error:
+                current_task = asyncio.current_task()
+                replaced_cancellation = (
+                    find_cancellation(error)
+                    if current_task is not None and current_task.cancelling() > 0
+                    else None
+                )
+                if replaced_cancellation is None:
+                    trace.note_upstream_end(time.monotonic())
+                raise
             now = time.monotonic()
             if chunk and trace.first_upstream_byte_s is None:
                 trace.first_upstream_byte_s = now - trace.started
@@ -1355,6 +1382,7 @@ async def _counted_upstream(chunks: AsyncIterator[bytes], chain: Chain, request_
                 if trace.upstream_max_gap_s is None or gap > trace.upstream_max_gap_s:
                     trace.upstream_max_gap_s = gap
             previous = now
+            trace.note_upstream_chunk(now)
             # Every arrival, not only the ones carrying bytes, so a gap here means what a gap means to `with_idle_timeout` underneath — that guard resets on any item, and a count using a different rule would put the two numbers on scales that cannot be compared. httpx's `aiter_bytes` drops empty chunks anyway, so on the production chain the two rules agree.
             trace.upstream_chunks += 1
             trace.received += len(chunk)
