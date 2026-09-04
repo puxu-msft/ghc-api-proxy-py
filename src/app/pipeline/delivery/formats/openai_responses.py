@@ -4,7 +4,7 @@ The mirror of `anthropic_messages` beside it, for the other client leg. Same env
 
 **This is a reverse translation, and that is the thing to keep in mind when reading it.** `CompletedBlock` is defined as "one fully materialised *Anthropic* content block" (`blocks.py`), so by the time a block reaches here the Responses item it came from has already been mapped into Anthropic's vocabulary by `ResponsesAssembler`. Everything below maps it back. Two consequences are visible in the code and neither is a bug in this module:
 
-- A `web_search_call` item does not survive the round trip. The assembler rewrites it into a text block with prose describing the search, and a Responses client that could have read the real item gets that prose instead. **This is an unimplemented requirement, not a property of the formats.** The reason recorded here until 2026-08-30 — "deliberately, because Anthropic has no spelling for it ... recorded as a known loss rather than worked around" — was false twice over: Anthropic spells it `server_tool_use` paired with `web_search_tool_result` (`hosted-web-search-spec.md` §5.3, ruled by the user as D6 on 2026-08-20), and calling it a known loss is what kept it from being worked around. Restoring the pair needs the `url_citation` annotations that arrive on the following text item, which nothing reads yet; §6.3 also moves where the block closes.
+- An expected `web_search_call` becomes the adjacent `server_tool_use` / `web_search_tool_result` pair required by `hosted-web-search-spec.md` §5.3. The result is `unavailable`: Responses does not provide Anthropic's required `encrypted_content`, so citations cannot form a schema-valid success result. An unsolicited call keeps the D3 text fallback, selected by request-scoped context rather than by the response spelling.
 - A tool call's `arguments` are re-serialised from the parsed object, so whitespace and key order are this proxy's, not upstream's. The `call_id` is upstream's and is forwarded exactly, because the client needs it to answer.
 
 Ids are minted here rather than forwarded, and that is deliberate. Measured on 2026-08-22 across the three cassettes that carry a Responses stream — `anthropic_to_responses_stream`, `history_responses_stream`, `responses_web_search_stream`, out of five in the repository — where every id field in every event differed from every other: 12 of 12, 16 of 16, 125 of 125, including `response.id` itself, which changed between `created`, `in_progress` and `completed`. Upstream's ids identify nothing stable, so passing them through would hand the client an instability it cannot do anything with. What is minted here is consistent within one response, which is what the client's snapshot actually needs.
@@ -20,6 +20,7 @@ from typing import Any, cast
 import orjson
 
 from app.errors import OPENAI_ERROR_TYPES, STATUS_FOR_CATEGORY, ErrorCategory, ErrorInfo
+from app.pipeline import anthropic_server_tools
 from app.pipeline.delivery.assembling import (
     Draft,
     FailureOrigin,
@@ -31,9 +32,11 @@ from app.pipeline.delivery.assembling import (
 )
 from app.pipeline.delivery.blocks import (
     REDACTED_THINKING,
+    SERVER_TOOL_USE,
     TEXT,
     THINKING,
     TOOL_USE,
+    WEB_SEARCH_TOOL_RESULT,
     CompletedBlock,
 )
 from app.pipeline.delivery.sse_frame import SseFrame
@@ -52,6 +55,7 @@ from app.pipeline.translation_driver.responses import (
     FINISHED_STOP_REASONS,
     INCOMPLETE_REASONS,
 )
+from app.pipeline.translation_driver.semantic import Loss, LossCode
 from app.protocols.responses_anthropic import (
     ResponseConversionError,
     anthropic_usage_from_responses,
@@ -441,9 +445,14 @@ class ResponsesAssembler:
         *,
         hand_over_stop_reasons: frozenset[str] = frozenset({"max_tokens"}),
         client_search_tool: str = "",
+        hosted_web_search_expected: bool = False,
     ) -> None:
         # The name a `tool_search_call` is delivered under. It cannot be read from the stream — on this wire the search *is* the tool, so the item names nothing — and without it such an item would fall through to the unknown branch and reach the client as an empty text block. Empty here means this request translated no tool search, in which case no such item is expected.
         self._client_search_tool = client_search_tool
+        # A request-side fact, not an inference from the response spelling. The same item type can be unsolicited, and D3 deliberately keeps that path as text.
+        self._hosted_web_search_expected = hosted_web_search_expected
+        # Attempt-scoped by ownership: a transparent replay replaces the assembler and therefore discards the losses from the attempt it replaced.
+        self._response_losses: list[Loss] = []
         # Which endings will hand the turn back to the client, and so which ones may drop the block upstream cut short. One setting, because dropping content is only defensible when the client is handed a way to get it back.
         self._hand_over_stop_reasons = hand_over_stop_reasons
         # The block upstream cut short, held rather than emitted or discarded, because at the moment it closes this side does not yet know *why* the response is incomplete — that arrives on the terminal event. Exactly one item can ever be in here: upstream cuts the last one short and then stops.
@@ -466,6 +475,11 @@ class ResponsesAssembler:
     @property
     def terminal(self) -> Terminal:
         return self._terminal
+
+    @property
+    def response_losses(self) -> tuple[Loss, ...]:
+        """Response conversion facts owned by this upstream attempt."""
+        return tuple(self._response_losses)
 
     def close(self) -> tuple[CompletedBlock, ...]:
         """Nothing: what this assembler still holds is a half-built block, which every ending drops."""
@@ -510,6 +524,13 @@ class ResponsesAssembler:
             return ()
         if kind == "response.function_call_arguments.delta":
             self._accumulate_arguments(data, str(data.get("delta", "")))
+            return ()
+        if kind in {
+            "response.web_search_call.in_progress",
+            "response.web_search_call.searching",
+            "response.web_search_call.completed",
+        }:
+            # Known control metadata. The authoritative action arrives on output_item.done; the item ids on these events are observed to drift and carry no correlation value.
             return ()
         if kind == "response.output_item.done":
             return self._close(data)
@@ -818,11 +839,19 @@ class ResponsesAssembler:
             reasoning = read_responses_reasoning(closing)
             payload = reasoning_to_anthropic(reasoning, bridge_for_client=True)
         elif draft.kind == WEB_SEARCH_CALL:
-            # Read off the closing event, not the draft. `output_item.added` carries this item with only an id, a status and a type — the query appears for the first time on `done`, and this item has no delta events at all, so the draft has nothing in it to render. Assembling from the draft is what produced an empty text block on every search.
+            # Read off the closing event, not the draft. `output_item.added` carries no action and this item has no content deltas.
             raw = data.get("item")
             item = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+            if self._hosted_web_search_expected:
+                return self._complete_hosted_web_search(item)
+            # D3 is still undecided. An unsolicited call keeps the established readable fallback rather than borrowing D6's native pair.
+            self._response_losses.append(
+                Loss(
+                    LossCode.SERVER_TOOL_NOT_CARRIED,
+                    anthropic_server_tools.unsolicited_web_search_loss(item.get("action")),
+                )
+            )
             payload = {"type": TEXT, TEXT: web_search_call_text(item.get("action"))}
-            # Text, until §5.3's block pair is built. Not because the item has no Anthropic spelling — it has one — but because the pair's `content` comes from the `url_citation` annotations on the *next* item, which this does not read yet. See the module docstring.
             kind = TEXT
         else:
             payload = {"type": TEXT, TEXT: draft.text}
@@ -839,6 +868,41 @@ class ResponsesAssembler:
             return ()
         self._terminal.record(block)
         return (block,)
+
+    def _complete_hosted_web_search(
+        self, item: dict[str, Any]
+    ) -> tuple[CompletedBlock, CompletedBlock]:
+        """Complete one expected hosted search as an atomic native pair."""
+        pair = anthropic_server_tools.unavailable_web_search_pair(item.get("action"))
+        call_id = str(pair.call["id"])
+        admission_group = f"hosted-web-search:{call_id}"
+        call = CompletedBlock(
+            index=self._emitted,
+            kind=SERVER_TOOL_USE,
+            payload=pair.call,
+            admission_group=admission_group,
+        )
+        result = CompletedBlock(
+            index=self._emitted + 1,
+            kind=WEB_SEARCH_TOOL_RESULT,
+            payload=pair.result,
+            admission_group=admission_group,
+        )
+        self._emitted += 2
+        self._terminal.record(call)
+        self._terminal.record(result)
+        detail = anthropic_server_tools.partial_web_search_loss(
+            pair,
+            item.get("status"),
+        )
+        self._response_losses.append(
+            Loss(LossCode.SERVER_TOOL_PARTIALLY_REPRESENTABLE, detail)
+        )
+        logger.info(
+            "rendered expected web_search_call as an unavailable Anthropic pair: %s",
+            detail,
+        )
+        return call, result
 
     def _read_terminal(self, kind: str, data: dict[str, Any]) -> None:
         read_responses_terminal(kind, data, self._terminal, saw_tool_call=self._saw_tool_call)

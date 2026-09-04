@@ -14,9 +14,11 @@ from app.pipeline.delivery.assembling import (
     Terminal,
 )
 from app.pipeline.delivery.blocks import (
+    SERVER_TOOL_USE,
     TEXT,
     THINKING,
     TOOL_USE,
+    WEB_SEARCH_TOOL_RESULT,
     BlockBuffer,
     BufferCapExceeded,
     CompletedBlock,
@@ -41,9 +43,11 @@ from app.pipeline.delivery.sse_frame import SseFrame
 from app.pipeline.delivery.sse_source import SseEvent, read_events
 
 __all__ = [
+    "SERVER_TOOL_USE",
     "TEXT",
     "THINKING",
     "TOOL_USE",
+    "WEB_SEARCH_TOOL_RESULT",
     "AnthropicAssembler",
     "AnthropicFramer",
     "BlockAssembler",

@@ -15,7 +15,8 @@ from collections.abc import Callable, Mapping
 from typing import Any, cast
 
 from app.config.schema import SystemPromptPlacement, WebSearchConstraintPolicy
-from app.pipeline.server_tool_text import call_text, web_search_call_text
+from app.pipeline import anthropic_server_tools
+from app.pipeline.server_tool_text import render_server_tool_block, web_search_call_text
 from app.pipeline.translation_driver.content import BlockKind, ContentBlock, SemanticMessage
 from app.pipeline.translation_driver.reasoning import resolve
 from app.pipeline.translation_driver.reasoning_bridge import (
@@ -352,7 +353,7 @@ def _tools_for_upstream(
 
     Whether the model behind this actually runs the search is decided elsewhere, and after this: `subscribers/hosted-web-search-gate` reads the resolved model against `models_support_web_search` at `attempt.prepare`. It has to be there rather than here, because this is handed the name the *client* asked for. So this translates unconditionally and the gate answers the request when the answer is no.
 
-    What comes back **does** need a separate arrangement, and does not have one yet: `hosted-web-search-spec.md` §5.3 requires a `web_search_call` to come back as `server_tool_use` paired with `web_search_tool_result` (D6, ruled by the user 2026-08-20), and both the streaming and non-streaming paths still render it as the same line of text the Anthropic leg flattens its history into. The sentence here until 2026-08-30 said no arrangement was needed "because a `web_search_call` item has no Anthropic spelling" — it has one; what is missing is the reading of the `url_citation` annotations that carry the pair's content.
+    The response half distinguishes this mapped declaration from an unsolicited call through a request-scoped fact. An expected `web_search_call` becomes the native unavailable pair required by `hosted-web-search-spec.md` §5.3; an unsolicited one keeps the D3 text fallback. The pair does not depend on citations: Responses has no genuine Anthropic `encrypted_content`, so a schema-valid success result cannot be built.
     """
     kept: list[dict[str, Any]] = []
     mapped: list[str] = []
@@ -434,6 +435,7 @@ def _tools_for_upstream(
         if isinstance(ordinary, str):
             function_names.add(ordinary)
         kept.append(_function_tool(tool, request.conversion, keep_defer_loading=will_search))
+    request.hosted_web_search_expected = bool(mapped)
     if mapped:
         # INFO rather than DEBUG: a client with web search switched on triggers this every request, so it is a setting and not a warning — but it is also the only place an operator can see that the declaration they sent is not the one that went out.
         logger.info(
@@ -508,13 +510,53 @@ def blocks_from_item(
             ContentBlock(BlockKind.REASONING, reasoning=reasoning, raw=item),
         )
     if kind == "web_search_call":
-        # A search the upstream ran itself. The item carries a query, a status and an opaque id, and the results are not in it — so this says what was searched for, in the same words the Anthropic leg flattens its own history into.
-        #
-        # **Not because there is nothing to revive.** The line here until 2026-08-30 said the item "has no Anthropic spelling and nothing to revive", and both halves were wrong: `hosted-web-search-spec.md` §5.3 spells it `server_tool_use` + `web_search_tool_result` (D6, ruled 2026-08-20), and the results are not gone — they arrive as `url_citation` annotations on the text item that follows, which §5.3 makes the pair's only data source. Nothing reads them yet. That is a gap with an owner, not a property of the wire.
+        # The item-local reader also serves Responses request history, where no request-scoped
+        # expected fact exists. Keep the conservative D3 text form here. The response-only reader
+        # wraps this function and substitutes a native pair only when the Anthropic request half
+        # actually mapped a hosted declaration.
         return "assistant", (
             ContentBlock(BlockKind.TEXT, text=web_search_call_text(item.get("action")), raw=item),
         )
     return "user", (ContentBlock(BlockKind.UNKNOWN, raw=item),)
+
+
+def response_blocks_from_item(
+    item: dict[str, Any],
+    *,
+    conversion: Conversion,
+    client_search_tool: str = "",
+    hosted_web_search_expected: bool = False,
+) -> tuple[str, tuple[ContentBlock, ...]]:
+    """Read one response item with request-scoped hosted-search context."""
+    if item.get("type") != "web_search_call":
+        return blocks_from_item(item, client_search_tool=client_search_tool)
+    if not hosted_web_search_expected:
+        conversion.record(
+            LossCode.SERVER_TOOL_NOT_CARRIED,
+            anthropic_server_tools.unsolicited_web_search_loss(item.get("action")),
+        )
+        return blocks_from_item(item, client_search_tool=client_search_tool)
+
+    pair = anthropic_server_tools.unavailable_web_search_pair(item.get("action"))
+    conversion.record(
+        LossCode.SERVER_TOOL_PARTIALLY_REPRESENTABLE,
+        anthropic_server_tools.partial_web_search_loss(pair, item.get("status")),
+    )
+    return "assistant", (
+        ContentBlock(
+            BlockKind.SERVER_TOOL_USE,
+            call_id=str(pair.call["id"]),
+            name=anthropic_server_tools.WEB_SEARCH,
+            arguments=pair.action.input,
+            raw=pair.call,
+        ),
+        ContentBlock(
+            BlockKind.WEB_SEARCH_TOOL_RESULT,
+            call_id=str(pair.call["id"]),
+            output=pair.result["content"],
+            raw=pair.result,
+        ),
+    )
 
 
 def _messages_from_input(value: object) -> list[SemanticMessage]:
@@ -651,46 +693,28 @@ def _item_from_block(
         )
     flattened = _server_tool_block_as_text(block)
     if flattened is not None:
-        conversion.record(
-            LossCode.SERVER_TOOL_NOT_CARRIED,
-            f"{flattened[0]} into {WIRE_FORMAT}: flattened to text",
-        )
+        source_type, text, dropped_opaque = flattened
+        detail = f"{source_type} into {WIRE_FORMAT}: flattened to text"
+        if dropped_opaque:
+            detail += "; opaque encrypted_content not carried"
+        conversion.record(LossCode.SERVER_TOOL_NOT_CARRIED, detail)
         return {
             "type": "message",
             "role": "assistant",
-            "content": [{"type": "output_text", "text": flattened[1]}],
+            "content": [{"type": "output_text", "text": text}],
         }
     conversion.record(LossCode.BLOCK_NOT_CARRIED, f"{block.kind.value} into {WIRE_FORMAT}")
     return None
 
 
-def _server_tool_block_as_text(block: ContentBlock) -> tuple[str, str] | None:
-    """An Anthropic server-tool block rendered as text, or `None` when it is not one.
-
-    These arrive because *we sent them*. When a search cannot run, this proxy answers with a `server_tool_use` paired with a failed `web_search_tool_result`, and the client replays that turn verbatim on the next request. There is no `server_tool_use` in the Responses protocol, so without this the whole assistant turn is dropped — not merely the two blocks, since a message left with no content is not carried either.
-
-    What that cost is worth stating plainly: the model would be shown two consecutive user turns and no trace of the search, so it does not know one was attempted, does not know it failed, and is free to try again — producing the same failure, dropped the same way. Telling it once and then forgetting is worse than not telling it, because the second turn looks like the first.
-
-    Text rather than a downgraded `function_call`, for the reason the Anthropic leg gives at the same decision: a downgraded pair refers to a tool this request does not declare, while text refers to nothing. The wording comes from `pipeline/server_tool_text.py`, which is also what the Anthropic leg flattens with — one history, one shape, whichever leg it crosses.
-    """
-    raw = block.raw
-    if not raw:
+def _server_tool_block_as_text(
+    block: ContentBlock,
+) -> tuple[str, str, bool] | None:
+    """Use the shared history renderer for an Anthropic server-tool block."""
+    rendering = render_server_tool_block(block.raw)
+    if rendering is None:
         return None
-    kind = raw.get("type")
-    if kind == "server_tool_use":
-        name = raw.get("name")
-        if not isinstance(name, str):
-            return None
-        return kind, call_text(name, raw.get("input"))
-    if not isinstance(kind, str) or not kind.endswith("_tool_result") or kind == "tool_result":
-        return None
-    family = kind[: -len("_tool_result")]
-    content = raw.get("content")
-    if isinstance(content, dict):
-        code = cast(dict[str, Any], content).get("error_code")
-        if isinstance(code, str) and code:
-            return kind, f"[{family} failed: {code}]"
-    return kind, f"[{family} results omitted]"
+    return rendering.source_type, rendering.text, rendering.dropped_opaque
 
 
 def _encoded_arguments(value: Any) -> str:
@@ -861,6 +885,7 @@ def to_openai_responses(
     # Recorded on the request so the response half can find it. It is not readable from the Responses body: a `tool_search_call` names no tool, because on that wire the search *is* the tool.
     # The name the *response* half should hand a `tool_search_call` back under. Written after the tools array is built, because that is where it may be cleared: a hosted search wins over the client's, and in that case the search is the upstream's own and belongs to nobody on this side.
     request.client_search_tool = search.tool_name
+    request.hosted_web_search_expected = False
     payload: dict[str, Any] = {
         "model": request.model,
         "input": _input_from_messages(request.messages, request.conversion, search),

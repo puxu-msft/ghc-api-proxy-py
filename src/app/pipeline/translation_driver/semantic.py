@@ -44,6 +44,7 @@ class LossCode(StrEnum):
     INSTRUCTIONS_ROLE_NOT_CARRIED = "instructions-role-not-carried"
     TOOL_RESULT_CONTENT_FLATTENED = "tool-result-content-flattened"
     SERVER_TOOL_NOT_CARRIED = "server-tool-not-carried"
+    SERVER_TOOL_PARTIALLY_REPRESENTABLE = "server-tool-partially-representable"
     SERVER_TOOL_CONSTRAINT_DROPPED = "server-tool-constraint-dropped"
     REASONING_INTENT_APPROXIMATED = "reasoning-intent-approximated"
     REASONING_INTENT_NOT_CARRIED = "reasoning-intent-not-carried"
@@ -133,6 +134,8 @@ class SemanticRequest:
     source_format: str = ""
     # The client's own tool-search tool, when one was identified. Written by the outbound writer rather than read off the wire, because identification depends on what that writer decided to do — and the *response* half needs the same answer to turn a `tool_search_call` back into a call on that tool. Empty means no search was translated, which is also the answer when identification declined.
     client_search_tool: str = ""
+    # True only when the writer actually mapped an Anthropic dated web-search declaration into the Responses builtin. The response half reads this to distinguish D6's requested call from D3's unsolicited call; the response payload cannot answer who asked for it.
+    hosted_web_search_expected: bool = False
     # Fields no translator claimed, kept so an unknown key is not silently dropped.
     extensions: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
     conversion: Conversion = field(default_factory=Conversion)

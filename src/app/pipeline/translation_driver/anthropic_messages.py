@@ -39,6 +39,8 @@ THINKING = "thinking"
 REDACTED_THINKING = "redacted_thinking"
 TOOL_USE = "tool_use"
 TOOL_RESULT = "tool_result"
+SERVER_TOOL_USE = "server_tool_use"
+WEB_SEARCH_TOOL_RESULT = "web_search_tool_result"
 IMAGE = "image"
 
 
@@ -47,6 +49,12 @@ def _dict_list(value: object) -> list[dict[str, Any]]:
         return []
     entries = cast(list[object], value)
     return [dict[str, Any](cast(Mapping[str, Any], e)) for e in entries if isinstance(e, Mapping)]
+
+
+def _dict_value(value: object) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    return dict[str, Any](cast(Mapping[str, Any], value))
 
 
 def _block_from_anthropic(raw: dict[str, Any]) -> ContentBlock:
@@ -77,6 +85,21 @@ def _block_from_anthropic(raw: dict[str, Any]) -> ContentBlock:
             call_id=str(raw.get("tool_use_id", "")),
             output=raw.get("content"),
             is_error=bool(raw.get("is_error", False)),
+            raw=raw,
+        )
+    if kind == SERVER_TOOL_USE:
+        return ContentBlock(
+            BlockKind.SERVER_TOOL_USE,
+            call_id=str(raw.get("id", "")),
+            name=str(raw.get("name", "")),
+            arguments=raw.get("input"),
+            raw=raw,
+        )
+    if kind == WEB_SEARCH_TOOL_RESULT:
+        return ContentBlock(
+            BlockKind.WEB_SEARCH_TOOL_RESULT,
+            call_id=str(raw.get("tool_use_id", "")),
+            output=raw.get("content"),
             raw=raw,
         )
     if kind == IMAGE:
@@ -183,6 +206,29 @@ def _block_to_anthropic(
         if block.is_error:
             result["is_error"] = True
         return result
+    if block.kind is BlockKind.SERVER_TOOL_USE:
+        if block.raw.get("type") == SERVER_TOOL_USE:
+            return dict(block.raw)
+        return {
+            "type": SERVER_TOOL_USE,
+            "id": block.call_id,
+            "name": block.name,
+            "input": _dict_value(block.arguments),
+        }
+    if block.kind is BlockKind.WEB_SEARCH_TOOL_RESULT:
+        if block.raw.get("type") == WEB_SEARCH_TOOL_RESULT:
+            return dict(block.raw)
+        if block.output is None:
+            conversion.record(
+                LossCode.BLOCK_NOT_CARRIED,
+                "web_search_tool_result has no content",
+            )
+            return None
+        return {
+            "type": WEB_SEARCH_TOOL_RESULT,
+            "tool_use_id": block.call_id,
+            "content": block.output,
+        }
     # Image and unknown blocks have no modelled fields; their original is the only faithful rendering, and returning it is what keeps a same-format crossing exact.
     if block.raw:
         return dict(block.raw)

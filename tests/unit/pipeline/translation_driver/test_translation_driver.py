@@ -388,6 +388,39 @@ def test_a_carrier_this_proxy_issued_does_cross() -> None:
     assert not semantic.conversion.has(LossCode.REASONING_STATE_NOT_PORTABLE)
 
 
+def test_server_tool_blocks_round_trip_with_raw_extensions_intact() -> None:
+    content = [
+        {
+            "type": "server_tool_use",
+            "id": "srvtoolu_1",
+            "name": "web_search",
+            "input": {"query": "release notes"},
+            "caller": {"type": "direct"},
+            "cache_control": {"type": "ephemeral"},
+        },
+        {
+            "type": "web_search_tool_result",
+            "tool_use_id": "srvtoolu_1",
+            "content": {
+                "type": "web_search_tool_result_error",
+                "error_code": "unavailable",
+            },
+            "caller": {"type": "direct"},
+        },
+    ]
+
+    crossed, _ = default_registry().translate(
+        {
+            "model": "m",
+            "messages": [{"role": "assistant", "content": content}],
+        },
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.ANTHROPIC_MESSAGES,
+    )
+
+    assert crossed["messages"][0]["content"] == content
+
+
 def test_an_unknown_block_is_carried_rather_than_dropped() -> None:
     """A format grows block types faster than a translator learns them.
 
@@ -603,7 +636,7 @@ def test_an_anthropic_web_search_declaration_becomes_the_spelling_this_endpoint_
 
     The function tool beside it is the other half: translating the declaration must not disturb the client's real tools.
     """
-    payload, _ = default_registry().translate(
+    payload, semantic = default_registry().translate(
         {
             **ANTHROPIC_REQUEST,
             "tools": [
@@ -618,6 +651,7 @@ def test_an_anthropic_web_search_declaration_becomes_the_spelling_this_endpoint_
         {"type": "web_search"},
         {"type": "function", "name": "get_time", "parameters": {"type": "object"}},
     ]
+    assert semantic.hosted_web_search_expected is True
 
 
 def test_the_next_dated_version_of_the_declaration_maps_too() -> None:
@@ -627,6 +661,7 @@ def test_the_next_dated_version_of_the_declaration_maps_too() -> None:
         tools=[{"type": "web_search_20991231", "name": "web_search"}],
     )
     assert to_openai_responses(request)["tools"] == [{"type": "web_search"}]
+    assert request.hosted_web_search_expected is True
 
 
 def test_the_endpoints_own_web_search_spellings_are_left_alone() -> None:
@@ -640,10 +675,12 @@ def test_the_endpoints_own_web_search_spellings_are_left_alone() -> None:
             {"type": "web_search"},
             {"type": "web_search_preview"},
             {"type": "web_search_preview_2025_03_11"},
+            {"type": "web_search_2025_08_26"},
         ],
     )
     payload = to_openai_responses(request)
     assert payload["tools"] == request.tools
+    assert request.hosted_web_search_expected is False
     assert request.conversion.lossless, request.conversion.losses
 
 
@@ -807,11 +844,7 @@ def test_web_fetch_is_left_for_its_own_repair() -> None:
     ]
 
 
-def test_a_search_the_upstream_ran_is_reported_rather_than_dropped() -> None:
-    """The item has no Anthropic spelling and nothing to revive: it carries a query, a status and an opaque id, and the results are not in it — they reached the model directly and are already folded into the answer that follows.
-
-    So what is left to say is what was searched for, in the same words `builtin:server-tool-capability` flattens the Anthropic leg's history into. One wording, because the same conversation moves between the two legs when a client switches model.
-    """
+def test_an_expected_search_becomes_a_native_unavailable_pair_before_the_answer() -> None:
     payload, semantic = default_registry().translate_response(
         {
             "id": "resp_1",
@@ -821,25 +854,106 @@ def test_a_search_the_upstream_ran_is_reported_rather_than_dropped() -> None:
                     "type": "web_search_call",
                     "id": "x" * 416,
                     "status": "completed",
-                    "action": {"type": "search", "query": "bun release notes", "queries": ["bun release notes"]},
+                    "action": {
+                        "type": "search",
+                        "query": "bun release notes",
+                        "queries": ["bun release notes"],
+                    },
                 },
                 {
                     "type": "message",
                     "role": "assistant",
-                    "content": [{"type": "output_text", "text": "Bun 1.3 is out.", "annotations": []}],
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Bun 1.3 is out.",
+                            "annotations": [],
+                        }
+                    ],
                 },
             ],
         },
         source=WireFormat.OPENAI_RESPONSES,
         target=WireFormat.ANTHROPIC_MESSAGES,
+        hosted_web_search_expected=True,
     )
-    assert payload["content"] == [
-        {"type": "text", "text": "[web_search] bun release notes"},
-        {"type": "text", "text": "Bun 1.3 is out."},
-    ]
-    # The 416-character upstream handle must not reach the client: it means nothing to the model, it inflates every later request, and this project carries no continuation that could spend it.
+
+    call, result, answer = payload["content"]
+    assert call["type"] == "server_tool_use"
+    assert call["name"] == "web_search"
+    assert call["input"] == {"query": "bun release notes"}
+    assert result == {
+        "type": "web_search_tool_result",
+        "tool_use_id": call["id"],
+        "content": {
+            "type": "web_search_tool_result_error",
+            "error_code": "unavailable",
+        },
+    }
+    assert answer == {"type": "text", "text": "Bun 1.3 is out."}
+    assert payload["stop_reason"] == "end_turn"
     assert "x" * 32 not in json.dumps(payload)
-    assert semantic.conversion.lossless, semantic.conversion.losses
+    assert semantic.conversion.has(LossCode.SERVER_TOOL_PARTIALLY_REPRESENTABLE)
+
+
+def test_an_expected_incomplete_search_is_not_dropped_by_hand_over_rules() -> None:
+    payload, semantic = default_registry().translate_response(
+        {
+            "id": "resp_1",
+            "model": "gpt-5.6-sol",
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "before"}],
+                },
+                {
+                    "type": "web_search_call",
+                    "id": "unstable",
+                    "status": "incomplete",
+                },
+            ],
+        },
+        source=WireFormat.OPENAI_RESPONSES,
+        target=WireFormat.ANTHROPIC_MESSAGES,
+        hosted_web_search_expected=True,
+    )
+
+    assert [block["type"] for block in payload["content"]] == [
+        "text",
+        "server_tool_use",
+        "web_search_tool_result",
+    ]
+    assert payload["content"][1]["input"] == {}
+    assert payload["stop_reason"] == "max_tokens"
+    assert semantic.conversion.has(LossCode.SERVER_TOOL_PARTIALLY_REPRESENTABLE)
+
+
+def test_an_unsolicited_search_keeps_the_d3_text_fallback() -> None:
+    payload, semantic = default_registry().translate_response(
+        {
+            "id": "resp_1",
+            "model": "gpt-5.6-sol",
+            "output": [
+                {
+                    "type": "web_search_call",
+                    "id": "upstream-id",
+                    "status": "completed",
+                    "action": {"type": "open_page", "url": "https://example.com"},
+                }
+            ],
+        },
+        source=WireFormat.OPENAI_RESPONSES,
+        target=WireFormat.ANTHROPIC_MESSAGES,
+    )
+
+    assert payload["content"] == [
+        {"type": "text", "text": "[web_search] open_page https://example.com"}
+    ]
+    assert semantic.conversion.has(LossCode.SERVER_TOOL_NOT_CARRIED)
 
 
 def test_a_choice_is_left_alone_when_its_name_also_belongs_to_a_function_tool() -> None:
@@ -946,6 +1060,46 @@ def test_a_replayed_failed_search_still_says_it_happened() -> None:
     ]
     assert "[web_search] bun 1.3" in texts, texts
     assert "[web_search failed: unavailable]" in texts, texts
+    assert semantic.conversion.has(LossCode.SERVER_TOOL_NOT_CARRIED)
+
+
+def test_another_server_tool_family_keeps_the_existing_generic_text_fallback() -> None:
+    payload, semantic = default_registry().translate(
+        {
+            "model": "gpt-5.6-sol",
+            "max_tokens": 64,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "server_tool_use",
+                            "id": "srvtoolu_code",
+                            "name": "code_execution",
+                            "input": {"code": "1 + 1"},
+                        },
+                        {
+                            "type": "code_execution_tool_result",
+                            "tool_use_id": "srvtoolu_code",
+                            "content": {"type": "code_execution_result", "stdout": "2"},
+                        },
+                    ],
+                },
+                {"role": "user", "content": "continue"},
+            ],
+        },
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+
+    texts = [
+        str(cast(dict[str, Any], part)["text"])
+        for item in cast(list[Any], payload["input"])
+        for part in cast(list[Any], cast(dict[str, Any], item).get("content", []))
+        if isinstance(part, dict) and "text" in cast(dict[str, Any], part)
+    ]
+    assert "[code_execution]" in texts
+    assert "[code_execution results omitted]" in texts
     assert semantic.conversion.has(LossCode.SERVER_TOOL_NOT_CARRIED)
 
 

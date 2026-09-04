@@ -64,11 +64,18 @@ from app.pipeline.delivery_policy import (
     stream_idle_seconds,
     stream_settings,
 )
-from app.pipeline.driver import handle, handle_bounded, handle_count_tokens, ledger_for
+from app.pipeline.driver import (
+    RESPONSE_CONVERSION_LOSSES,
+    handle,
+    handle_bounded,
+    handle_count_tokens,
+    ledger_for,
+)
 from app.pipeline.error_classify import describe
 from app.pipeline.hand_over import HandBackOutcome, hand_back_block, one_line, replay_reason
 from app.pipeline.reply import reply_summary, response_payload
 from app.pipeline.request import RequestContext, WireFormat
+from app.pipeline.translation_driver.semantic import Loss
 from app.server.app_state import chain_of
 from app.server.http_errors import error_response, proxy_error
 from app.server.inbound import InboundRequestError, build_context
@@ -781,6 +788,7 @@ async def _dispatch_after_body(
             status_code=response.status_code,
             context=context,
             assembler=assembler,
+            response_loss_assembler=assembler,
             passthrough=carries_upstream_natively(handled),
             completion_delivery=completion_delivery,
         )
@@ -821,13 +829,16 @@ async def _dispatch_after_body(
                     trace.attempts = context.attempt_count
                     active.set_attempts(trace.request_id, context.attempt_count)
                     trace.replaced_failures.append(one_line(repr(replacing)))
+                    # The replacement attempt now owns response conversion facts even if it fails before obtaining headers and an assembler. The discarded attempt's losses must not become the final request's losses.
+                    accounting.response_loss_assembler = None
             reopened = again.outcome.response
             if reopened is None or not again.context.stream:
                 return None
             fresh_attempt = again.context.current_attempt
             fresh_assembler = assembler_for(again, hand_over_stop_reasons=_hand_over_reasons)
-            # The accounting reads the terminal off whichever assembler is current, and after this the current one is this.
+            # The accounting reads terminal and response-conversion facts off whichever assembler is current, and after this the current one is this.
             accounting.assembler = fresh_assembler
+            accounting.response_loss_assembler = fresh_assembler
             # Its own marker, at the same line as the first attempt's: below the counter, above the guards that speak for upstream. A fresh one rather than the first attempt's, so a tear that attempt recorded cannot be read as this one's.
             fresh_upstream = UpstreamSource(
                 with_deadline_at(
@@ -1017,6 +1028,15 @@ class _CompletionDelivery:
             self.accepted = True
 
 
+def _assembler_response_losses(assembler: BlockAssembler[Any] | None) -> list[Loss]:
+    if assembler is None:
+        return []
+    value = getattr(assembler, "response_losses", ())
+    if not isinstance(value, tuple):
+        return []
+    return [loss for loss in cast(tuple[object, ...], value) if isinstance(loss, Loss)]
+
+
 @dataclass(slots=True)
 class _StreamAccounting:
     """One streaming request's slot in the footer and its eventual log line.
@@ -1031,6 +1051,8 @@ class _StreamAccounting:
     status_code: int
     context: RequestContext | None = None
     assembler: BlockAssembler | None = None
+    # Attempt-scoped independently of the terminal owner. A replay may open a replacement attempt and fail before it obtains a new assembler; in that gap the discarded attempt's response losses must not become the request's final facts.
+    response_loss_assembler: BlockAssembler | None = None
     # Native passthrough can complete early only through its identified terminal batch. A translated leg instead completes by natural drain. Keeping the mode explicit prevents a drained native failure from being mislabelled as a translated completion.
     passthrough: bool = False
     # Set when the turn was handed back to the client as a tool call. Neither `ok` nor `fail` on its own: the client holds a complete reply and will act on it, and the upstream attempt behind it did not finish.
@@ -1095,6 +1117,11 @@ class _StreamAccounting:
             observation = self.context.response_observation
             if observation is not None and observation.provider_failed:
                 self.trace.status_override = "fail"
+            # Response conversion is attempt-scoped while streaming. A transparent replay replaces the assembler, so publish only the current assembler's facts and overwrite anything the discarded attempt observed before recomputing the request trace.
+            self.context.extras[RESPONSE_CONVERSION_LOSSES] = _assembler_response_losses(
+                self.response_loss_assembler
+            )
+            self.trace.absorb_losses(self.context)
         completion_unit = None
         if delivered_whole:
             if self.assembler is None:

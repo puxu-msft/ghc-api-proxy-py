@@ -306,13 +306,13 @@ def _chat_tool_choice(
 
 
 def from_chat_completions_response(
-    payload: Mapping[str, Any], *, client_search_tool: str = ""
+    payload: Mapping[str, Any],
+    *,
+    client_search_tool: str = "",
+    hosted_web_search_expected: bool = False,
 ) -> SemanticResponse:
-    """Read a whole `chat.completion` object into the intermediate form.
-
-    `client_search_tool` is accepted and unused, as on the Anthropic side: this
-    wire has no `tool_search_call` to hand back.
-    """
+    """Read a whole `chat.completion` object into the intermediate form."""
+    del client_search_tool, hosted_web_search_expected
     response = SemanticResponse(
         id=str(payload.get("id", "")),
         model=str(payload.get("model", "")),

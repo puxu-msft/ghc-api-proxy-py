@@ -40,7 +40,11 @@ class ResponseReader(Protocol):
     """
 
     def __call__(
-        self, payload: Mapping[str, Any], *, client_search_tool: str = ""
+        self,
+        payload: Mapping[str, Any],
+        *,
+        client_search_tool: str = "",
+        hosted_web_search_expected: bool = False,
     ) -> SemanticResponse: ...
 type ResponseWriter = Callable[[SemanticResponse], dict[str, Any]]
 
@@ -125,6 +129,7 @@ class TranslatorRegistry:
         source: WireFormat,
         target: WireFormat,
         client_search_tool: str = "",
+        hosted_web_search_expected: bool = False,
     ) -> tuple[dict[str, Any], SemanticResponse]:
         """Carry a response back across, so the client sees the format it asked in.
 
@@ -136,7 +141,11 @@ class TranslatorRegistry:
         writer = self._write_response.get(target)
         if writer is None:
             raise TranslatorNotFound(f"no response writer registered for {target.value}")
-        semantic = reader(payload, client_search_tool=client_search_tool)
+        semantic = reader(
+            payload,
+            client_search_tool=client_search_tool,
+            hosted_web_search_expected=hosted_web_search_expected,
+        )
         return writer(semantic), semantic
 
 

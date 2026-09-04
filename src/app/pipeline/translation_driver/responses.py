@@ -20,7 +20,10 @@ from app.pipeline.translation_driver.anthropic_messages import (
     block_to_anthropic,
 )
 from app.pipeline.translation_driver.content import BlockKind, ContentBlock
-from app.pipeline.translation_driver.openai_responses import blocks_from_item, item_from_block
+from app.pipeline.translation_driver.openai_responses import (
+    item_from_block,
+    response_blocks_from_item,
+)
 from app.pipeline.translation_driver.semantic import Conversion, LossCode
 from app.protocols.responses_anthropic import (
     ResponseConversionError,
@@ -69,12 +72,13 @@ def _mapping_list(value: object) -> list[dict[str, Any]]:
 
 
 def from_anthropic_response(
-    payload: Mapping[str, Any], *, client_search_tool: str = ""
+    payload: Mapping[str, Any],
+    *,
+    client_search_tool: str = "",
+    hosted_web_search_expected: bool = False,
 ) -> SemanticResponse:
-    """`client_search_tool` is accepted and unused: this wire has no `tool_search_call` to hand back.
-
-    Present because `ResponseReader` is one protocol for every format. Silently ignoring an argument is the right answer here rather than a smell — the Anthropic side is where the client's search tool already lives, so there is nothing to restore.
-    """
+    """Accept and ignore response facts that only the Responses wire can use."""
+    del client_search_tool, hosted_web_search_expected
     response = SemanticResponse(
         id=str(payload.get("id", "")),
         model=str(payload.get("model", "")),
@@ -158,6 +162,7 @@ def from_openai_responses_response(
     *,
     hand_over_stop_reasons: frozenset[str] = frozenset({"max_tokens"}),
     client_search_tool: str = "",
+    hosted_web_search_expected: bool = False,
 ) -> SemanticResponse:
     """`client_search_tool` names the tool a `tool_search_call` should be handed back as.
 
@@ -176,8 +181,12 @@ def from_openai_responses_response(
     # Read here rather than after the loop because the drop happens inside it. The streaming assembler cannot do this: its items close before the terminal event says why, so it holds the one it cut short instead and answers the same question a moment later.
     will_hand_over, _ = _responses_stop_reason(payload, has_tool_call=False)
     for item in _mapping_list(payload.get("output")):
+        expected_web_search = (
+            hosted_web_search_expected and item.get("type") == "web_search_call"
+        )
         if (
             str(item.get("status", "")) == "incomplete"
+            and not expected_web_search
             and response.blocks
             and will_hand_over in hand_over_stop_reasons
         ):
@@ -190,7 +199,12 @@ def from_openai_responses_response(
                 LossCode.ITEM_NOT_CARRIED, f"truncated {item.get('type')!r} dropped"
             )
             continue
-        _, blocks = blocks_from_item(item, client_search_tool=client_search_tool)
+        _, blocks = response_blocks_from_item(
+            item,
+            conversion=response.conversion,
+            client_search_tool=client_search_tool,
+            hosted_web_search_expected=hosted_web_search_expected,
+        )
         for block in blocks:
             if block.kind is BlockKind.UNKNOWN:
                 response.conversion.record(

@@ -10,7 +10,12 @@ import pytest
 from app.pipeline.request import RequestContext, WireFormat
 from app.pipeline.subscribers.counting import COUNTING_ONLY
 from app.pipeline.subscribers.server_tools import adapt_server_tools
-from app.pipeline.translation_driver.semantic import TranslationRefused, WebSearchNotExecutable
+from app.pipeline.translation_driver.semantic import (
+    Loss,
+    LossCode,
+    TranslationRefused,
+    WebSearchNotExecutable,
+)
 
 WEB_SEARCH: dict[str, Any] = {"type": "web_search_20250305", "name": "web_search", "max_uses": 5}
 CALCULATOR: dict[str, Any] = {"name": "calculator", "input_schema": {"type": "object"}}
@@ -169,12 +174,18 @@ async def test_a_search_turn_left_in_the_history_becomes_text() -> None:
 
 
 async def test_the_opaque_bulk_of_a_result_is_not_carried_into_the_text() -> None:
-    # `encrypted_content` is most of a result's bytes and means nothing to anyone but upstream. Upstream also rejects it unless it is genuine, so there is no repairing it either — only leaving it out.
+    # `encrypted_content` is most of a result's bytes and means nothing to anyone but upstream. Upstream also rejects it unless it is genuine, so there is no repairing it either — only leaving it out and recording that loss.
     ctx = context({"messages": [{"role": "assistant", "content": [SEARCH_RESULT]}]})
 
     await adapt_server_tools(ctx)
 
     assert "AAAA" not in ctx.payload["messages"][0]["content"][0]["text"]
+    assert ctx.extras["conversion_losses"] == [
+        Loss(
+            LossCode.SERVER_TOOL_NOT_CARRIED,
+            "web_search_tool_result flattened to text; opaque encrypted_content not carried",
+        )
+    ]
 
 
 async def test_a_failed_search_turn_says_so_rather_than_pretending_it_returned_nothing() -> None:

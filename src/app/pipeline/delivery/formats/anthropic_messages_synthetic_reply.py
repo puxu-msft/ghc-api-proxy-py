@@ -29,8 +29,10 @@ from typing import Any, cast
 
 import orjson
 
-# The documented error code for "an internal error occurred", which is what a proxy that cannot reach the tool at all amounts to from the client's side.
-ERROR_CODE = "unavailable"
+from app.pipeline.anthropic_server_tools import UNAVAILABLE, unavailable_web_search_pair
+
+# Kept as this module's public spelling for callers and tests that import it.
+ERROR_CODE = UNAVAILABLE
 
 _MAX_QUERY = 400
 
@@ -80,20 +82,12 @@ def failed_search_blocks(query: str, *, call_id: str) -> list[dict[str, Any]]:
 
     Both are required. The result block references its call by `tool_use_id`, so a result without its `server_tool_use` refers to nothing, and a call without its result is an unanswered tool the client would wait on.
     """
-    return [
-        {
-            "type": "server_tool_use",
-            "id": call_id,
-            "name": "web_search",
-            "input": {"query": query},
-        },
-        {
-            "type": "web_search_tool_result",
-            "tool_use_id": call_id,
-            # A single object, not a list. The documented shape for an error, and the same discriminator `subscribers/server_tools.py` reads when flattening one of these later.
-            "content": {"type": "web_search_tool_result_error", "error_code": ERROR_CODE},
-        },
-    ]
+    pair = unavailable_web_search_pair(
+        {"type": "search", "query": query},
+        call_id=call_id,
+        input_override={"query": query},
+    )
+    return [pair.call, pair.result]
 
 
 def failed_search_body(query: str, *, message_id: str, model: str, call_id: str) -> dict[str, Any]:

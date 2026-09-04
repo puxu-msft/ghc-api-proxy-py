@@ -21,6 +21,7 @@ from app.pipeline.delivery.formats.openai_responses import ResponsesAssembler
 from app.pipeline.delivery.sse_source import SseEvent, encode_frame, parse_frame, read_events
 from app.pipeline.reply import blocks_from_anthropic
 from app.pipeline.translation_driver.reasoning_bridge import ReasoningBridgeError
+from app.pipeline.translation_driver.semantic import LossCode
 
 
 def frame(event: str, data: dict[str, Any], *, space: bool = True) -> bytes:
@@ -664,6 +665,73 @@ def test_a_search_that_closes_without_ever_opening_is_still_delivered() -> None:
         )
     )
     assert [block.payload["text"] for block in blocks] == ["[web_search] orphan query"]
+    assert [loss.code for loss in assembler.response_losses] == [
+        LossCode.SERVER_TOOL_NOT_CARRIED
+    ]
+    assert "unsolicited" in assembler.response_losses[0].detail
+
+
+def test_an_expected_search_done_without_added_becomes_one_atomic_native_pair() -> None:
+    assembler = ResponsesAssembler(hosted_web_search_expected=True)
+
+    blocks = assembler.push(
+        SseEvent(
+            "response.output_item.done",
+            orjson.dumps(
+                {
+                    "output_index": 0,
+                    "item": {
+                        "type": "web_search_call",
+                        "id": "z" * 416,
+                        "status": "incomplete",
+                        "action": {
+                            "type": "find_in_page",
+                            "url": "https://example.com/doc",
+                            "pattern": "needle",
+                        },
+                    },
+                }
+            ).decode(),
+        )
+    )
+
+    assert [block.kind for block in blocks] == [
+        "server_tool_use",
+        "web_search_tool_result",
+    ]
+    assert blocks[0].payload["input"] == {}
+    assert blocks[1].payload["tool_use_id"] == blocks[0].payload["id"]
+    assert blocks[0].admission_group == blocks[1].admission_group
+    assert blocks[0].admission_group
+    assert assembler.cut_mid_block is False
+    assert assembler.terminal.tools == []
+    assert [loss.code for loss in assembler.response_losses] == [
+        LossCode.SERVER_TOOL_PARTIALLY_REPRESENTABLE
+    ]
+    assert "find_in_page" in assembler.response_losses[0].detail
+    assert "https://example.com/doc" in assembler.response_losses[0].detail
+    assert "needle" in assembler.response_losses[0].detail
+
+
+def test_web_search_lifecycle_events_are_known_nonsemantic_controls() -> None:
+    assembler = ResponsesAssembler(hosted_web_search_expected=True)
+
+    for event_type in (
+        "response.web_search_call.in_progress",
+        "response.web_search_call.searching",
+        "response.web_search_call.completed",
+    ):
+        assert assembler.push(
+            SseEvent(
+                event_type,
+                orjson.dumps(
+                    {"output_index": 0, "item_id": f"unstable-{event_type}"}
+                ).decode(),
+            )
+        ) == ()
+
+    assert assembler.terminal.blocks == 0
+    assert assembler.cut_mid_block is False
 
 
 def test_an_ordinary_item_that_closes_without_opening_is_still_ignored() -> None:
@@ -729,6 +797,49 @@ def _terminal(assembler: ResponsesAssembler, reason: str) -> tuple[CompletedBloc
             orjson.dumps({"response": {"incomplete_details": {"reason": reason}}}).decode(),
         )
     )
+
+
+def test_an_incomplete_expected_search_after_a_block_never_enters_cut_short() -> None:
+    assembler = ResponsesAssembler(hosted_web_search_expected=True)
+    whole = _responses_item(
+        assembler,
+        0,
+        {
+            "type": "message",
+            "id": "m1",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "before"}],
+        },
+    )
+    assert len(whole) == 1
+
+    pair = assembler.push(
+        SseEvent(
+            "response.output_item.done",
+            orjson.dumps(
+                {
+                    "output_index": 1,
+                    "item": {
+                        "type": "web_search_call",
+                        "id": "unstable",
+                        "status": "incomplete",
+                    },
+                }
+            ).decode(),
+        )
+    )
+
+    assert [block.kind for block in pair] == [
+        "server_tool_use",
+        "web_search_tool_result",
+    ]
+    assert assembler.cut_mid_block is False
+    assert assembler.terminal.blocks == 3
+    assert _terminal(assembler, "max_output_tokens") == ()
+    assert assembler.terminal.stop_reason == "max_tokens"
+    assert [loss.code for loss in assembler.response_losses] == [
+        LossCode.SERVER_TOOL_PARTIALLY_REPRESENTABLE
+    ]
 
 
 def test_an_item_upstream_cut_short_is_dropped_when_the_turn_will_be_handed_back() -> None:

@@ -288,9 +288,9 @@ class ToOpenAiResponsesConfig(Section):
     # Where the system prompt goes. `instructions-joint-string` puts the blocks in the top-level `instructions` as one `\n\n`-joined string, which is the only form this upstream accepts today. Kept as a named setting rather than baked in so a second placement — `as-role-system`, a `role: system` message at the head of the conversation — can be added without the caller changing.
     system_prompts: SystemPromptPlacement = "instructions-joint-string"
 
-    # Whether this leg offers hosted web search at all. **Off by default**, ruled 2026-08-21: the support is real but partial, and the parts that are missing are not visible to the client.
-    # A search runs upstream and really searches, but what comes back to an Anthropic client is a line of text rather than the `server_tool_use` / `web_search_tool_result` pair the protocol defines; `url_citation` annotations upstream does return are not read; `max_uses` cannot be sent; `allowed_domains` / `blocked_domains` cannot be sent either and are dropped by default.
-    # Shipping that on by default would make a half-built feature the thing every request gets.
+    # Whether this leg offers hosted web search at all. **Off by default**, ruled 2026-08-21: the support is real but partial, and the parts that remain missing are not visible to the client.
+    # A search runs upstream and the response is restored as `server_tool_use` / `web_search_tool_result`, but Responses supplies no genuine Anthropic `encrypted_content`, so the structured result is reported as unavailable while the model's answer remains text. `max_uses` cannot be sent; `allowed_domains` / `blocked_domains` cannot be sent either and are dropped by the current default.
+    # Shipping that on by default would still make a partial feature the thing every request gets.
     #
     # Off does **not** mean the declaration is quietly removed. The request is answered with a failed `web_search_tool_result`, the same as for a model no pattern claims — because on this client a search is its own sub-request carrying nothing but the search, and one stripped of it answers from memory under a heading the client reads as search results. The two are distinguished in the log, which is where an operator has to be able to tell "nobody turned this on" from "this model is not on the list".
     #

@@ -24,9 +24,11 @@ from app.pipeline.delivery.assembling import (
 )
 from app.pipeline.delivery.blocks import (
     REDACTED_THINKING,
+    SERVER_TOOL_USE,
     TEXT,
     THINKING,
     TOOL_USE,
+    WEB_SEARCH_TOOL_RESULT,
     CompletedBlock,
 )
 from app.pipeline.delivery.formats.errors import write_error
@@ -119,6 +121,9 @@ def block_frames(
         start_payload["text"] = ""
     elif block.kind == "thinking":
         start_payload["thinking"] = ""
+    elif block.kind in {SERVER_TOOL_USE, WEB_SEARCH_TOOL_RESULT}:
+        # Server-side calls and results are already complete and carry their whole payload in the start frame. They are not client tool calls and have no input delta.
+        pass
 
     frames = [
         SseFrame(

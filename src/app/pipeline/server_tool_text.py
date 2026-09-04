@@ -1,24 +1,36 @@
-"""One rendering of a server-tool call as text, shared by both legs.
+"""One text rendering for server-tool history on every upstream leg.
 
-A `web_search` call reaches a client through two different routes and has to look the same on both. On the Anthropic leg `builtin:server-tool-capability` flattens the blocks a past turn left in the history, because that endpoint refuses them. On the Responses leg the upstream executes the search itself and reports it as a `web_search_call` item, and this renders that too.
+A conversation can move between providers. A server-tool block therefore has to flatten to the same text whether the next request targets Anthropic or Responses; two renderers make one history acquire two meanings without either endpoint reporting an error.
 
-**That second caller is a gap, not a translation.** The reason written here until 2026-08-30 was that a `web_search_call` "has no Anthropic spelling", which is false: Anthropic spells it `server_tool_use` paired with `web_search_tool_result`, `hosted-web-search-spec.md` §5.3 froze the shape, and the user ruled it (D6) on 2026-08-20. The item's results really are absent from the item — they arrive later, as `url_citation` annotations on the text that follows — so restoring the pair means reading those, which nothing does yet. Until that lands, the Responses leg renders text; what it must not do is call that outcome inevitable, which is what the old wording did and what kept it from being fixed.
-
-Both are "say in text what the model did", and they must say it the same way. A conversation is not pinned to one leg: the same history moves between them when a client switches model, and two renderings would leave one session carrying two shapes of the same fact. Nothing would report that — it is not an error at either end, just a history that quietly stopped being uniform. So the wording lives in one place and neither caller spells it out.
+The renderer preserves readable facts and reports whether it dropped opaque content. `encrypted_content` is deliberately never put into model-visible text: it is meaningful only to the provider that issued it, but its removal is still a loss callers must record.
 """
 
+from dataclasses import dataclass
 from typing import Any, cast
 
+from app.pipeline.anthropic_server_tools import project_web_search_action
+
 WEB_SEARCH = "web_search"
+WEB_FETCH = "web_fetch"
+
+
+@dataclass(frozen=True, slots=True)
+class ServerToolTextRendering:
+    source_type: str
+    text: str
+    cache_control: Any = None
+    has_cache_control: bool = False
+    dropped_opaque: bool = False
+
+    def as_text_block(self) -> dict[str, Any]:
+        block: dict[str, Any] = {"type": "text", "text": self.text}
+        if self.has_cache_control:
+            block["cache_control"] = self.cache_control
+        return block
 
 
 def call_subject(raw_input: Any) -> str:
-    """What the call was about, as a trailing fragment, or the empty string.
-
-    Reads `query` and `url` because the families name their argument differently — `web_search` asks a question, `web_fetch` names a page — and a renderer that knew only about the first turned every fetch into a bare `[web_fetch]`.
-
-    Stripped, because the surrounding text is generated: a trailing newline in the client's query would put whitespace at the end of an assistant turn, which upstream rejects separately.
-    """
+    """What a server-tool call was about, as a trailing fragment."""
     if not isinstance(raw_input, dict):
         return ""
     entry = cast(dict[str, Any], raw_input)
@@ -35,23 +47,119 @@ def call_text(family: str, raw_input: Any) -> str:
 
 
 def web_search_call_text(action: Any) -> str:
-    """The line for a Responses `web_search_call`, read off its `action`.
+    """Render a Responses hosted-search action without losing readable fields."""
+    projected = project_web_search_action(action)
+    suffix = f" {projected.readable}" if projected.readable else ""
+    return f"[{WEB_SEARCH}]{suffix}"
 
-    `action` carries `query` and `queries` together, with the same content in both — measured on this project's own cassettes. `query` is preferred and `queries` is the fallback, so a future response that drops the singular still says what was searched for.
 
-    Absent entirely on an item that never got that far, which the caller must tolerate: a `status` of `incomplete` has been observed with no `action` at all. That renders as a bare `[web_search]`, which is true — a search happened and we cannot say what for.
+def render_server_tool_block(
+    block: Any,
+    *,
+    families: tuple[str, ...] | None = None,
+) -> ServerToolTextRendering | None:
+    """Render one Anthropic server-tool history block as replayable text.
 
-    Deliberately *not* carrying the item's `id`. The reference implementation puts it in the text, where it arrives as 416 characters of opaque base64 in the middle of an assistant turn: it inflates every subsequent request, it means nothing to the model reading it, and it publishes a server-side handle to the client. It is a reference this project has already decided not to continue (no continuation carrier), so nothing downstream can spend it.
+    ``families`` limits a caller that owns only known-rejected families. With no
+    limit, every server-tool family keeps the generic text fallback the
+    Responses translator historically provided.
     """
-    if not isinstance(action, dict):
-        return call_text(WEB_SEARCH, None)
-    entry = cast(dict[str, Any], action)
-    query = entry.get("query")
-    if not (isinstance(query, str) and query.strip()):
-        queries = entry.get("queries")
-        if isinstance(queries, list):
-            joined = ", ".join(
-                q.strip() for q in cast(list[Any], queries) if isinstance(q, str) and q.strip()
-            )
-            query = joined or None
-    return call_text(WEB_SEARCH, {"query": query} if isinstance(query, str) else None)
+    if not isinstance(block, dict):
+        return None
+    entry = cast(dict[str, Any], block)
+    block_type = entry.get("type")
+    if not isinstance(block_type, str):
+        return None
+
+    text: str
+    dropped_opaque = False
+    if block_type == "server_tool_use":
+        name = entry.get("name")
+        if not isinstance(name, str):
+            return None
+        family = _family(name, families)
+        if family is None:
+            return None
+        text = call_text(family, entry.get("input"))
+    else:
+        if block_type == "tool_result" or not block_type.endswith("_tool_result"):
+            return None
+        family = _family(block_type[: -len("_tool_result")], families)
+        if family is None:
+            return None
+        text, dropped_opaque = _render_results(entry.get("content"), family)
+
+    return ServerToolTextRendering(
+        source_type=block_type,
+        text=text,
+        cache_control=entry.get("cache_control"),
+        has_cache_control="cache_control" in entry,
+        dropped_opaque=dropped_opaque,
+    )
+
+
+def _family(name: str, families: tuple[str, ...] | None) -> str | None:
+    if families is None:
+        return name or None
+    for family in families:
+        if name.startswith(family):
+            return family
+    return None
+
+
+def _describe_one(item: Any) -> tuple[str | None, bool]:
+    if not isinstance(item, dict):
+        return None, False
+    result = cast(dict[str, Any], item)
+    title = result.get("title")
+    url = result.get("url")
+    has_title = isinstance(title, str) and bool(title.strip())
+    has_url = isinstance(url, str) and bool(url.strip())
+    line: str | None = None
+    if has_title and has_url:
+        line = f"- {title} — {url}"
+    elif has_url:
+        line = f"- {url}"
+    elif has_title:
+        line = f"- {title}"
+    return line, "encrypted_content" in result
+
+
+def _failure_of(content: Any) -> str | None:
+    if not isinstance(content, dict):
+        return None
+    entry = cast(dict[str, Any], content)
+    kind = entry.get("type")
+    code = entry.get("error_code")
+    failed = (isinstance(kind, str) and kind.endswith("_error")) or code is not None
+    if not failed:
+        return None
+    return code if isinstance(code, str) else ""
+
+
+def _render_results(content: Any, family: str) -> tuple[str, bool]:
+    failure = _failure_of(content)
+    if failure is not None:
+        text = f"[{family} failed: {failure}]" if failure else f"[{family} failed]"
+        return text, False
+
+    items: list[Any] = (
+        cast(list[Any], content) if isinstance(content, list) else [content] if content else []
+    )
+    described = [_describe_one(item) for item in items]
+    lines = [line for line, _ in described if line is not None]
+    dropped_opaque = any(dropped for _, dropped in described)
+    if not lines:
+        return f"[{family} results omitted]", dropped_opaque
+    return "\n".join([f"[{family} results]", *lines]), dropped_opaque
+
+
+__all__ = [
+    "WEB_FETCH",
+    "WEB_SEARCH",
+    "ServerToolTextRendering",
+    "call_subject",
+    "call_text",
+    "render_server_tool_block",
+    "web_search_call_text",
+]

@@ -457,12 +457,11 @@ def test_an_anthropic_web_search_declaration_reaches_upstream_in_its_own_spellin
     assert b"web_search_20250305" not in seen[-1].read()
 
 
-def test_a_streamed_search_is_delivered_as_a_line_rather_than_an_empty_block() -> None:
-    """Driven by a real upstream recording: `tests/int/cassettes/responses_web_search_stream.json`.
+def test_a_streamed_search_is_delivered_as_a_native_pair_before_the_answer() -> None:
+    """Replay the real Responses search stream through the full Anthropic route.
 
-    A `web_search_call` has no delta events and arrives with only an id, a status and a type on `output_item.added` — the query appears for the first time on `done`. Assembled the ordinary way, from the draft the `added` opened, it closed as an empty text block: the client got a blank content block ahead of every answer, and the one fact the item carried was thrown away.
-
-    The cassette is used rather than a hand-written stream because that asymmetry is exactly the kind of thing a stand-in gets wrong — it would have been written from what the events are assumed to carry.
+    The recording carries drifting item ids and no citations. The requested call must still become
+    one adjacent unavailable pair at its done boundary, while the answer remains its own text block.
     """
     cassette = orjson.loads(Path("tests/int/cassettes/responses_web_search_stream.json").read_bytes())
     interaction = next(
@@ -475,7 +474,6 @@ def test_a_streamed_search_is_delivered_as_a_line_rather_than_an_empty_block() -
             200, content=sse, headers={"content-type": "text/event-stream"}
         ),
         overrides={
-            # Explicitly on: the switch defaults to off, so without this the gate refuses before the model list is ever consulted and the test stops discriminating what it names.
             "model_translation": {"to_openai_responses": {"hosted_web_search": True}},
             "model_providers": {
                 "ghc": {
@@ -483,7 +481,7 @@ def test_a_streamed_search_is_delivered_as_a_line_rather_than_an_empty_block() -
                     "api_base_url": BASE_URL,
                     "models_support_web_search": ["gpt-model"],
                 }
-            }
+            },
         },
     )
     response = client.post(
@@ -498,21 +496,130 @@ def test_a_streamed_search_is_delivered_as_a_line_rather_than_an_empty_block() -
     )
 
     assert response.status_code == 200
+    starts = [
+        orjson.loads(line[6:])["content_block"]
+        for line in response.text.splitlines()
+        if line.startswith("data: ") and '"content_block_start"' in line
+    ]
+    assert [block["type"] for block in starts] == [
+        "server_tool_use",
+        "web_search_tool_result",
+        "text",
+    ]
+    assert starts[0]["name"] == "web_search"
+    assert starts[1]["tool_use_id"] == starts[0]["id"]
+    assert starts[1]["content"] == {
+        "type": "web_search_tool_result_error",
+        "error_code": "unavailable",
+    }
     deltas = [
         orjson.loads(line[6:])["delta"]["text"]
         for line in response.text.splitlines()
-        if line.startswith("data: ") and '"content_block_delta"' in line
+        if line.startswith("data: ") and '"text_delta"' in line
     ]
-    assert deltas[0].startswith("[web_search] "), deltas
-    assert "Thursday, August 20, 2026" in deltas[1]
-    # No block may be delivered empty: that was the symptom, and it is invisible in a test that only checks the answer arrived.
-    assert all(text for text in deltas), deltas
+    assert len(deltas) == 1
+    assert "Thursday, August 20, 2026" in deltas[0]
+    assert "[web_search]" not in response.text
+    losses = _records()[0]["losses"]
+    assert [entry["direction"] for entry in losses] == ["response"]
+    assert [entry["code"] for entry in losses] == [
+        "server-tool-partially-representable"
+    ]
+
+
+def test_a_buffered_search_is_delivered_as_the_same_native_pair() -> None:
+    cassette = orjson.loads(
+        Path("tests/int/cassettes/responses_web_search_nonstream.json").read_bytes()
+    )
+    interaction = next(
+        i for i in cassette["interactions"] if "responses" in i["request"]["path"]
+    )
+    body = "".join(chunk["text"] for chunk in interaction["response"]["chunks"]).encode()
+
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200,
+            content=body,
+            headers={"content-type": "application/json"},
+        ),
+        overrides={
+            "model_translation": {"to_openai_responses": {"hosted_web_search": True}},
+            "model_providers": {
+                "ghc": {
+                    "type": "github_copilot",
+                    "api_base_url": BASE_URL,
+                    "models_support_web_search": ["gpt-model"],
+                }
+            },
+        },
+    )
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "gpt-model",
+            "messages": [{"role": "user", "content": "what day is it"}],
+            "max_tokens": 256,
+            "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+        },
+    )
+
+    assert response.status_code == 200
+    call, result, answer = response.json()["content"]
+    assert call["type"] == "server_tool_use"
+    assert result == {
+        "type": "web_search_tool_result",
+        "tool_use_id": call["id"],
+        "content": {
+            "type": "web_search_tool_result_error",
+            "error_code": "unavailable",
+        },
+    }
+    assert answer["type"] == "text"
+    assert "Thursday, August 20, 2026" in answer["text"]
+    assert response.json()["stop_reason"] == "end_turn"
+    losses = _records()[0]["losses"]
+    assert [entry["direction"] for entry in losses] == ["response"]
+    assert [entry["code"] for entry in losses] == [
+        "server-tool-partially-representable"
+    ]
+
+
+def test_an_unsolicited_streamed_search_records_the_d3_response_loss() -> None:
+    cassette = orjson.loads(Path("tests/int/cassettes/responses_web_search_stream.json").read_bytes())
+    interaction = next(
+        i for i in cassette["interactions"] if "responses" in i["request"]["path"]
+    )
+    sse = "".join(chunk["text"] for chunk in interaction["response"]["chunks"]).encode()
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200,
+            content=sse,
+            headers={"content-type": "text/event-stream"},
+        )
+    )
+
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "gpt-model",
+            "messages": [{"role": "user", "content": "answer directly"}],
+            "max_tokens": 256,
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert "[web_search]" in response.text
+    losses = _records()[0]["losses"]
+    assert [entry["direction"] for entry in losses] == ["response"]
+    assert [entry["code"] for entry in losses] == ["server-tool-not-carried"]
+    assert "unsolicited" in losses[0]["detail"]
 
 
 def test_hosted_web_search_is_off_until_the_config_says_otherwise() -> None:
     """The default. A search declaration with nothing configured is answered as a failed tool, and upstream is never asked.
 
-    Ruled 2026-08-21: the Responses leg really does execute a search, but what this proxy does with the answer is partial — a line of text where the protocol defines a `server_tool_use` / `web_search_tool_result` pair, `url_citation` annotations unread, `max_uses` and the domain lists unsendable. Off is what keeps that from being what every request gets.
+    Ruled 2026-08-21: the Responses leg really does execute a search, but the crossing remains partial even after response blocks are restored — structured success results lack Anthropic's required `encrypted_content`, while `max_uses` and the domain lists remain unsendable. Off keeps that partial capability from becoming what every request gets.
 
     Off is not the same as removing the declaration and carrying on. A Claude Code search is its own sub-request carrying nothing but the search, so one stripped of it answers from memory under a heading the client reads as search results — which is why `seen == []` is half the assertion.
 
@@ -4011,6 +4118,33 @@ def responses_sse_upstream(usage: dict[str, Any] | None = None) -> bytes:
     return "".join(frames).encode()
 
 
+def responses_web_search_sse(query: str = "release notes", answer: str = "found") -> bytes:
+    search = {
+        "type": "web_search_call",
+        "id": "unstable-search-id",
+        "status": "completed",
+        "action": {"type": "search", "query": query},
+    }
+    message: dict[str, Any] = {
+        "type": "message",
+        "id": "message-id",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": answer, "annotations": []}],
+    }
+    frames = [
+        *responses_envelope_frames(),
+        f"event: response.output_item.added\ndata: {orjson.dumps({'output_index': 0, 'item': {'type': 'web_search_call', 'id': 'added-id', 'status': 'in_progress'}}).decode()}\n\n",
+        f"event: response.output_item.done\ndata: {orjson.dumps({'output_index': 0, 'item': search}).decode()}\n\n",
+        f"event: response.output_item.added\ndata: {orjson.dumps({'output_index': 1, 'item': {'type': 'message', 'id': 'message-added', 'role': 'assistant', 'status': 'in_progress', 'content': []}}).decode()}\n\n",
+        f"event: response.output_text.delta\ndata: {orjson.dumps({'output_index': 1, 'item_id': 'message-delta', 'delta': answer}).decode()}\n\n",
+        f"event: response.output_item.done\ndata: {orjson.dumps({'output_index': 1, 'item': message}).decode()}\n\n",
+        "event: response.completed\n"
+        f'data: {orjson.dumps({"response": {"status": "completed", "model": "gpt-model", "output": [search, message], "usage": {"input_tokens": 3, "output_tokens": 4}}}).decode()}\n\n',
+    ]
+    return "".join(frames).encode()
+
+
 def custom_tool_call_sse() -> bytes:
     """A Responses stream whose one output item is a `custom_tool_call`.
 
@@ -4359,11 +4493,9 @@ def test_a_direct_responses_client_declares_hosted_web_search_for_itself() -> No
 
 
 def test_a_direct_responses_client_survives_an_upstream_that_really_searched() -> None:
-    """The guard for the block pair that §5.3 requires and this project has not built yet.
+    """A direct Responses client keeps the upstream-native search stream.
 
-    `ResponsesAssembler` serves both legs — a Responses client directly, and a Responses upstream being translated to Anthropic — while the framer is always the *client's*. So the moment a `web_search_call` starts assembling into the `server_tool_use` / `web_search_tool_result` pair that §5.3 freezes, a direct `/responses` client gets an Anthropic block handed to `ResponsesFramer`, which has no item shape for it. That is issue #1's exception reached from the opposite direction, and nothing was watching this direction: the sibling test above forwards the declaration but its upstream never actually searches, so it cannot see the block shape at all.
-
-    Green today because the assembler flattens the item to text. It is here to go red the moment that changes without a per-leg switch, which is the whole point — the reply this client should get is a Responses item, never an Anthropic one.
+    The translated Anthropic crossing now revives an expected `web_search_call` as a native Anthropic pair, but this direct route uses the passthrough assembler and must never enter that conversion. The reply this client gets is a Responses item, never an Anthropic block.
 
     Driven by the real recording rather than a hand-written stream, for the reason its sibling gives: a `web_search_call` carries nothing on `added` and everything on `done`, and a stand-in gets that backwards.
 
@@ -5373,6 +5505,90 @@ def test_a_replay_on_the_translation_leg_sends_the_conversation_again(
     assert "completed reason(enc:1) function_call(Bash)" in line
     assert "discarded" not in line
     assert "custom_tool_call" not in line
+
+
+@pytest.mark.parametrize(
+    ("second_body", "expected_response_codes"),
+    [
+        (responses_sse_upstream(), []),
+        (
+            responses_web_search_sse(query="second search", answer="second answer"),
+            ["server-tool-partially-representable"],
+        ),
+    ],
+    ids=["replacement-does-not-search", "replacement-searches-once"],
+)
+def test_a_replay_keeps_only_the_winning_attempts_response_losses(
+    second_body: bytes,
+    expected_response_codes: list[str],
+) -> None:
+    calls: list[int] = []
+
+    async def searched_then_torn() -> AsyncIterator[bytes]:
+        search = {
+            "type": "web_search_call",
+            "id": "first-attempt-id",
+            "status": "completed",
+            "action": {"type": "search", "query": "discarded search"},
+        }
+        frames = [
+            *responses_envelope_frames(),
+            f"event: response.output_item.added\ndata: {orjson.dumps({'output_index': 0, 'item': {'type': 'web_search_call', 'id': 'first-added', 'status': 'in_progress'}}).decode()}\n\n",
+            f"event: response.output_item.done\ndata: {orjson.dumps({'output_index': 0, 'item': search}).decode()}\n\n",
+        ]
+        yield "".join(frames).encode()
+        raise httpx2.RemoteProtocolError("first attempt tore after search")
+
+    def upstream(request: httpx2.Request) -> httpx2.Response:
+        calls.append(1)
+        return (
+            httpx2.Response(
+                200,
+                content=searched_then_torn(),
+                headers={"content-type": "text/event-stream"},
+            )
+            if len(calls) == 1
+            else httpx2.Response(
+                200,
+                content=second_body,
+                headers={"content-type": "text/event-stream"},
+            )
+        )
+
+    client, _ = make_client(
+        upstream,
+        overrides={
+            "client_delivery": {"buffering_policy": "full"},
+            "model_translation": {"to_openai_responses": {"hosted_web_search": True}},
+            "model_providers": {
+                "ghc": {
+                    "type": "github_copilot",
+                    "api_base_url": BASE_URL,
+                    "models_support_web_search": ["gpt-model"],
+                }
+            },
+        },
+    )
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "gpt-model",
+            "messages": [{"role": "user", "content": "search"}],
+            "stream": True,
+            "max_tokens": 256,
+            "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(calls) == 2
+    response_losses = [
+        entry
+        for entry in _records()[-1]["losses"]
+        if entry["direction"] == "response"
+    ]
+    assert [entry["code"] for entry in response_losses] == expected_response_codes
+    assert not any("discarded search" in entry["detail"] for entry in response_losses)
 
 
 def test_a_replay_is_reported_on_the_request_line(
