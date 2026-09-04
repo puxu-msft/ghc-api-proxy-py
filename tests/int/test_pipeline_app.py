@@ -4291,7 +4291,7 @@ def delivered_events(body: str) -> list[tuple[str, dict[str, Any]]]:
     return pairs
 
 
-def test_a_sealed_reasoning_item_keeps_the_id_its_seal_was_cut_against() -> None:
+def test_explicitly_disabled_reshape_keeps_each_id_with_its_seal() -> None:
     """Issue #4, the response half. Upstream answered 400 `invalid_request_body` on a *later* turn of a working conversation.
 
     `encrypted_content` is bound to the item id upstream issued it under, and upstream verifies that binding when the item comes back. The translating leg minted its own ids — `ResponsesFramer._item_id` returns `f"{prefix}_{response_id}_{output_index}"`, where `response_id` is this proxy's `uuid4` — and attached upstream's seal to them. The pair the client stored was self-contradictory from the moment it was written.
@@ -4304,14 +4304,15 @@ def test_a_sealed_reasoning_item_keeps_the_id_its_seal_was_cut_against() -> None
 
     Mutation-checked 2026-09-01: making `carries_upstream_natively` answer `False` turns the ids into `rs_<uuid4>_0` and this test red. That mutation exercises the mint, not the collapse — the collapse has no implementation to mutate, which is why the fixture rather than a mutation is what guards it.
 
-    **This is the shipped default**, and `fix_stream_ids` is what would break it — that reshape settles an item's events onto one id on purpose, so the companion below asserts the other contract over the same stream with the switch on.
+    **This is the explicit native opt-out**, and `fix_stream_ids` is what would break it — that reshape settles an item's events onto one id on purpose, so this test turns the default-on switch off while the companion below asserts the default contract over the same stream.
     """
     client, _ = make_client(
         lambda _: httpx2.Response(
             200,
             content=drifting_sealed_reasoning_sse(),
             headers={"content-type": "text/event-stream"},
-        )
+        ),
+        overrides={"hook_fix_responses_sse": {"fix_stream_ids": False}},
     )
     response = client.post(
         "/responses",
@@ -4332,8 +4333,8 @@ def test_a_sealed_reasoning_item_keeps_the_id_its_seal_was_cut_against() -> None
     assert (closed["id"], closed["encrypted_content"]) == ("id_003", "seal-closed"), closed
 
 
-def test_the_opt_in_reshape_settles_drifting_ids_onto_the_closing_one() -> None:
-    """The same stream as above with `fix_stream_ids` asked for. `spec.md` §6.6.
+def test_the_default_reshape_settles_drifting_ids_onto_the_closing_one() -> None:
+    """The same stream as above under the default-on `fix_stream_ids`. `spec.md` §6.6.
 
     Upstream spells one item differently on every event it appears in — measured 2026-09-02 over a real stream: ten distinct ids for a single `output_index`, three distinct `response.id`. The user named a client that checks those ids for continuity, so the reshape settles them.
 
@@ -4344,8 +4345,7 @@ def test_the_opt_in_reshape_settles_drifting_ids_onto_the_closing_one() -> None:
             200,
             content=drifting_sealed_reasoning_sse(),
             headers={"content-type": "text/event-stream"},
-        ),
-        overrides={"hook_fix_responses_sse": {"fix_stream_ids": True}},
+        )
     )
     response = client.post(
         "/responses",
