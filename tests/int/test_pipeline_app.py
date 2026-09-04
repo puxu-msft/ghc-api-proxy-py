@@ -2357,25 +2357,48 @@ def test_a_request_that_raised_on_its_way_out_still_writes_its_one_line(
     assert record["observation"]["timings"]["response_ready_s"] is None
 
 
-def test_a_client_that_hung_up_mid_body_is_reported_as_gone_rather_than_as_a_failure(
+async def test_a_client_that_hung_up_mid_body_is_reported_as_gone_without_escaping_the_app(
     request_log: None, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The other half of the same exit, and the reason it is not one branch.
+    """A routine client departure is complete once it has been accounted for.
 
     A client abandoning a turn is routine on a proxy fronting an interactive one; a reply this proxy could not parse is an incident. Reporting both as `[FAIL]` with one shared sentence would bury the second under the first, which is the ruling `_StreamAccounting._ending` already records for the streaming path.
 
-    `Request.body` is patched because `TestClient` has no way to announce a body and then stop sending. What is being fixed is what `_serve` does with the exception, and that is exactly what arrives here — `ClientDisconnect`, unwrapped, nothing between the raise and the handler.
+    `Request.body` is patched because the in-process ASGI harness has no way to announce part of a body and then stop sending. Calling the app directly also exposes the boundary under test: it must return without raising or sending an invented response after `ClientDisconnect`.
     """
     client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
+    sent: list[Message] = []
 
     async def body(self: Request) -> bytes:
         raise ClientDisconnect
 
+    async def receive() -> Message:
+        raise AssertionError("the patched body reader must own this disconnect")
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    scope: dict[str, Any] = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "https",
+        "path": "/v1/messages",
+        "raw_path": b"/v1/messages",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(b"host", b"testserver"), (b"content-type", b"application/json")],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 443),
+        "state": {},
+    }
+
     with caplog.at_level(logging.INFO), pytest.MonkeyPatch.context() as patch:
         patch.setattr(Request, "body", body)
-        with pytest.raises(ClientDisconnect):
-            client.post("/v1/messages", json={"model": "claude-model", "messages": []})
+        await cast(Any, client.app)(scope, receive, send)
 
+    assert sent == []
     outcomes = _request_outcomes(caplog.records)
     assert len(outcomes) == 1
     line, status = outcomes[0]
@@ -2391,11 +2414,121 @@ def test_a_client_that_hung_up_mid_body_is_reported_as_gone_rather_than_as_a_fai
     assert record.delivery.failure is not None
     assert record.delivery.failure.origin.value == "dispatch"
     assert record.delivery.failure.category.value == "disconnect"
+    assert record.delivery.additional_failures == ()
     assert len(record.interruptions) == 1
     interruption = record.interruptions[0]
     assert interruption.kind.value == "http_disconnect"
     assert interruption.phase.value == "request_body"
     assert interruption.category == "disconnect"
+
+
+def _request_for_direct_serve(client: TestClient) -> Request:
+    async def receive() -> Message:
+        raise AssertionError("the patched dispatcher must not read the request channel")
+
+    return Request(
+        {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.3"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "https",
+            "path": "/v1/messages",
+            "raw_path": b"/v1/messages",
+            "query_string": b"",
+            "root_path": "",
+            "headers": [],
+            "client": ("testclient", 50000),
+            "server": ("testserver", 443),
+            "state": {},
+            "app": client.app,
+        },
+        receive,
+    )
+
+
+async def test_disconnect_preserves_an_independent_failure_in_implicit_context(
+    request_log: None,
+) -> None:
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
+    context_failure = RuntimeError("independent context failure")
+    cancellation = asyncio.CancelledError()
+    failure = ClientDisconnect()
+    failure.__cause__ = cancellation
+    failure.__context__ = context_failure
+
+    async def dispatch(
+        request: Request,
+        chain: Chain,
+        trace: RequestTrace,
+        completion: RequestCompletionCoordinator,
+    ) -> Response:
+        del request, chain, trace, completion
+        raise failure
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(inference_route, "_dispatch", dispatch)
+        with pytest.raises(ClientDisconnect) as raised:
+            await inference_route.serve(_request_for_direct_serve(client))
+
+    assert raised.value is failure
+    snapshot = _registry(client).observation_snapshot()
+    assert snapshot.live == ()
+    assert len(snapshot.completed) == 1
+    record = snapshot.completed[0]
+    assert record.status == "gone"
+    assert len(record.delivery.additional_failures) == 1
+    additional = record.delivery.additional_failures[0]
+    assert additional.origin.value == "cleanup"
+    assert additional.type == "RuntimeError"
+    assert additional.message == "independent context failure"
+    assert "cleanup also failed: independent context failure" in record.request_line().detail
+
+
+async def test_unrenderable_disconnect_secondary_cannot_block_completion(
+    request_log: None,
+) -> None:
+    class UnrenderableCleanupError(RuntimeError):
+        def __str__(self) -> str:
+            raise RuntimeError("secondary str failed")
+
+        def __repr__(self) -> str:
+            raise RuntimeError("secondary repr failed")
+
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
+    context_failure = UnrenderableCleanupError()
+    failure = ClientDisconnect()
+    failure.__cause__ = asyncio.CancelledError()
+    failure.__context__ = context_failure
+
+    async def dispatch(
+        request: Request,
+        chain: Chain,
+        trace: RequestTrace,
+        completion: RequestCompletionCoordinator,
+    ) -> Response:
+        del request, chain, trace, completion
+        raise failure
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(inference_route, "_dispatch", dispatch)
+        with pytest.raises(ClientDisconnect) as raised:
+            await inference_route.serve(_request_for_direct_serve(client))
+
+    assert raised.value is failure
+    snapshot = _registry(client).observation_snapshot()
+    assert snapshot.live == ()
+    assert len(snapshot.completed) == 1
+    record = snapshot.completed[0]
+    assert record.status == "gone"
+    assert len(record.delivery.additional_failures) == 1
+    additional = record.delivery.additional_failures[0]
+    assert additional.origin.value == "cleanup"
+    assert additional.type == "UnrenderableCleanupError"
+    assert additional.message is None
+    detail = record.request_line().detail
+    assert "cleanup also failed: " in detail
+    assert detail.endswith("UnrenderableCleanupError")
 
 
 def test_a_streaming_request_reports_what_it_received_from_upstream(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
@@ -3158,6 +3291,148 @@ async def test_response_start_failure_closes_the_unstarted_upstream_owner() -> N
     assert len(snapshot.completed) == 1
 
 
+async def test_disconnect_with_repeated_level_cancellation_stays_inside_the_app() -> None:
+    """HTTP cleanup can receive the same AnyIO cancellation at more than one checkpoint.
+
+    Those linked `CancelledError` objects are still the one expected disconnect exit. They must neither become a cleanup failure nor escape to Uvicorn after the request record is complete.
+    """
+
+    class WaitingProvider:
+        name = "ghc"
+        base_url = "https://upstream.invalid"
+        catalog_refreshed_at = "2026-09-04T00:00:00+00:00"
+        available_ids = frozenset({"gpt-model"})
+        disabled_ids: frozenset[str] = frozenset()
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.cancellations: list[asyncio.CancelledError] = []
+
+        def describe(self, model_id: str) -> ModelDescriptor | None:
+            if model_id != "gpt-model":
+                return None
+            return ModelDescriptor(
+                id=model_id,
+                endpoints=frozenset({ModelEndpoint.OPENAI_RESPONSES}),
+            )
+
+        async def refresh_catalog(self) -> bool:
+            return False
+
+        async def send(
+            self,
+            endpoint: ModelEndpoint,
+            payload: Any,
+            *,
+            model_id: str,
+            stream: bool = False,
+            extra_headers: Any = None,
+        ) -> httpx2.Response:
+            del endpoint, payload, model_id, stream, extra_headers
+            self.calls += 1
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError as first:
+                self.cancellations.append(first)
+                try:
+                    # Mirrors an HTTP transport doing another await while its AnyIO cancel scope is already cancelled. Level cancellation injects another object whose context points at the first.
+                    await asyncio.sleep(0)
+                except asyncio.CancelledError as repeated:
+                    self.cancellations.append(repeated)
+                    raise
+                raise
+            raise AssertionError("unreachable")
+
+        async def count_tokens(
+            self, payload: Any, *, model_id: str
+        ) -> httpx2.Response:
+            del payload, model_id
+            raise NotImplementedError
+
+    provider = WaitingProvider()
+    config = ProxyConfig.model_validate(
+        {
+            "model_providers": {"ghc": {"type": "github_copilot"}},
+            "default_model_provider": "ghc",
+            "upstream_request_retry": {"max_total": 9},
+            "client_delivery": {"client_request_deadline": 30},
+            "upstream_request_timeouts": {"upstream_request_deadline": 30},
+        }
+    )
+    request_body = orjson.dumps(
+        {
+            "model": "gpt-model",
+            "messages": [],
+            "max_tokens": 1024,
+            "stream": True,
+        }
+    )
+    request_sent = False
+    sent: list[Message] = []
+
+    async def receive() -> Message:
+        nonlocal request_sent
+        if not request_sent:
+            request_sent = True
+            return {
+                "type": "http.request",
+                "body": request_body,
+                "more_body": False,
+            }
+        return {"type": "http.disconnect"}
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    scope: dict[str, Any] = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "https",
+        "path": "/v1/messages",
+        "raw_path": b"/v1/messages",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"host", b"testserver"),
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(request_body)).encode()),
+        ],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 443),
+        "state": {},
+    }
+
+    async with httpx2.AsyncClient() as http_client:
+        chain = build_chain(
+            config,
+            http_client=http_client,
+            providers={"ghc": cast(ModelProvider, provider)},
+        )
+        app = create_pipeline_app(chain)
+        async with asyncio.timeout(1):
+            await cast(Any, app)(scope, receive, send)
+
+    assert sent == []
+    assert len(provider.cancellations) == 2
+    assert provider.cancellations[0] is not provider.cancellations[1]
+    assert provider.cancellations[1].__context__ is provider.cancellations[0]
+    assert provider.calls == 1
+    snapshot = chain.active_requests.observation_snapshot()
+    assert snapshot.live == ()
+    assert len(snapshot.completed) == 1
+    record = snapshot.completed[0]
+    assert record.status == "gone"
+    assert record.delivery.failure is not None
+    assert record.delivery.failure.category.value == "disconnect"
+    assert record.delivery.additional_failures == ()
+    assert len(record.interruptions) == 1
+    interruption = record.interruptions[0]
+    assert interruption.kind.value == "http_disconnect"
+    assert interruption.phase.value == "dispatch_wait"
+
+
 async def test_disconnect_before_upstream_headers_cancels_the_dispatch() -> None:
     """A completed request body used to leave no downstream disconnect listener.
 
@@ -3303,11 +3578,51 @@ async def test_disconnect_before_upstream_headers_cancels_the_dispatch() -> None
     assert record.status == "gone"
     assert record.delivery.failure is not None
     assert record.delivery.failure.category.value == "disconnect"
+    assert len(record.delivery.additional_failures) == 1
+    additional = record.delivery.additional_failures[0]
+    assert additional.origin.value == "cleanup"
+    assert additional.category.value == "error"
+    assert additional.type == "ExceptionGroup"
+    assert additional.message is not None
+    assert "provider cleanup replaced cancellation" in additional.message
+    assert "cleanup also failed: provider cleanup replaced cancellation" in record.request_line().detail
     assert len(record.interruptions) == 1
     interruption = record.interruptions[0]
     assert interruption.kind.value == "http_disconnect"
     assert interruption.phase.value == "dispatch_wait"
     assert interruption.category == "disconnect"
+
+
+async def test_repeated_level_cancellations_are_not_disconnect_secondaries() -> None:
+    operation_started = asyncio.Event()
+    cancellations: list[asyncio.CancelledError] = []
+
+    async def operation() -> Response:
+        operation_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError as first:
+            cancellations.append(first)
+            try:
+                await asyncio.sleep(0)
+            except asyncio.CancelledError as repeated:
+                cancellations.append(repeated)
+                raise
+            raise
+        raise AssertionError("unreachable")
+
+    async def receive() -> Message:
+        await operation_started.wait()
+        return {"type": "http.disconnect"}
+
+    with pytest.raises(ClientDisconnect) as raised:
+        await _run_dispatch_while_connected(receive, operation)
+
+    assert len(cancellations) == 2
+    assert cancellations[0] is not cancellations[1]
+    assert cancellations[1].__context__ is cancellations[0]
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
 
 
 async def test_disconnect_preserves_an_operation_cleanup_failure() -> None:

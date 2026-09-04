@@ -387,7 +387,7 @@ class RequestCompletionCoordinator:
             self.trace.detail = "ASGI response returned without a terminal delivery message"
 
     def note_secondary_cleanup(self, error: BaseException) -> None:
-        detail = one_line(str(error) or repr(error))
+        detail = self._exception_message(error) or type(error).__qualname__
         suffix = f"cleanup also failed: {detail}"
         self.trace.detail = (
             f"{self.trace.detail}; {suffix}"

@@ -84,6 +84,17 @@ from app.streaming.keepalive import (
 )
 
 
+class _DisconnectedResponse(Response):
+    """Complete FastAPI routing after the peer has left without sending a response."""
+
+    def __init__(self) -> None:
+        # Kept as internal state because FastAPI requires an endpoint Response. `__call__` sends no ASGI messages, so this status is never presented or accounted as a response.
+        super().__init__(status_code=499)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        del scope, receive, send
+
+
 async def serve(request: Request) -> Response:
     """Register the request, hand it to the dispatcher, and account for it on the way out.
 
@@ -116,17 +127,30 @@ async def serve(request: Request) -> Response:
     try:
         response = await _dispatch(request, chain, trace, completion)
     except BaseException as failure:
-        # This is the only path with no outer Response object to publish from. Preserve the existing classification, attach the dispatch failure to the delivery observation, publish once, then propagate the original exception.
+        # This is the only path with no outer Response object to publish from. Preserve the existing classification, attach the dispatch failure to the delivery observation, and publish once before the exception boundary decides whether anything remains to propagate.
         trace.status_override, trace.detail = _aborted(failure)
         completion.note_wrapped_failure(
             failure,
             origin=CompletionFailureOrigin.DISPATCH,
         )
+        secondary_failures = _disconnect_secondary_failures(failure)
+        for secondary in secondary_failures:
+            completion.note_secondary_cleanup(secondary)
+            completion.note_wrapped_failure(
+                secondary,
+                origin=CompletionFailureOrigin.CLEANUP,
+            )
         completion.settle(
             status_code=None,
             upstream_response_bytes=trace.upstream_response_body_bytes,
         )
         completion.publish()
+        if (
+            isinstance(failure, ClientDisconnect)
+            and not secondary_failures
+            and not getattr(failure, "__notes__", None)
+        ):
+            return _DisconnectedResponse()
         raise
     completion.mark_response_ready(response.status_code)
     if isinstance(response, StreamingResponse):
@@ -202,14 +226,95 @@ def _upstream_error_body(error: BaseException) -> bytes | None:
     return None
 
 
-def _plain_cancellation(error: BaseException | None) -> bool:
-    """Whether an exit is only the task group's expected cancellation."""
-    return bool(
-        isinstance(error, asyncio.CancelledError)
-        and error.__cause__ is None
-        and error.__context__ is None
-        and not getattr(error, "__notes__", None)
-    )
+def _exception_links(error: BaseException) -> list[BaseException]:
+    links = [
+        nested
+        for nested in (error.__cause__, error.__context__)
+        if nested is not None
+    ]
+    if isinstance(error, BaseExceptionGroup):
+        group = cast(BaseExceptionGroup[BaseException], error)
+        links.extend(group.exceptions)
+    return links
+
+
+def _cancellation_only(error: BaseException | None) -> bool:
+    """Whether an exception graph contains only the task group's expected cancellation."""
+    if error is None:
+        return False
+    seen: set[int] = set()
+    pending = [error]
+    found_cancellation = False
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if getattr(current, "__notes__", None):
+            return False
+        if isinstance(current, asyncio.CancelledError):
+            found_cancellation = True
+        elif not isinstance(current, BaseExceptionGroup):
+            return False
+        pending.extend(_exception_links(cast(BaseException, current)))
+    return found_cancellation
+
+
+def _secondary_failure_key(
+    error: BaseException,
+) -> tuple[str, str, frozenset[tuple[str, str]]]:
+    """Identify equivalent exception-group wrappers without conflating independent errors."""
+    if not isinstance(error, BaseExceptionGroup):
+        return ("exception", str(id(error)), frozenset())
+
+    seen: set[int] = set()
+    facts: set[tuple[str, str]] = set()
+    pending: list[BaseException] = [error]
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        facts.update(
+            ("note", note)
+            for note in getattr(current, "__notes__", ())
+        )
+        if isinstance(current, asyncio.CancelledError | BaseExceptionGroup):
+            pending.extend(_exception_links(cast(BaseException, current)))
+        else:
+            facts.add(("exception", str(id(current))))
+    group = cast(BaseExceptionGroup[BaseException], error)
+    return ("group", group.message, frozenset(facts))
+
+
+def _disconnect_secondary_failures(error: BaseException) -> list[BaseException]:
+    """Return each real failure below a disconnect, ignoring cancellation-only links."""
+    if not isinstance(error, ClientDisconnect):
+        return []
+    seen_nodes = {id(error)}
+    seen_failures: set[tuple[str, str, frozenset[tuple[str, str]]]] = set()
+    pending = list(reversed(_exception_links(error)))
+    secondaries: list[BaseException] = []
+    while pending:
+        current = pending.pop()
+        if id(current) in seen_nodes:
+            continue
+        seen_nodes.add(id(current))
+        if _cancellation_only(current):
+            continue
+        if isinstance(current, asyncio.CancelledError):
+            if getattr(current, "__notes__", None):
+                key = _secondary_failure_key(current)
+                if key not in seen_failures:
+                    seen_failures.add(key)
+                    secondaries.append(current)
+            pending.extend(reversed(_exception_links(current)))
+            continue
+        key = _secondary_failure_key(current)
+        if key not in seen_failures:
+            seen_failures.add(key)
+            secondaries.append(current)
+    return secondaries
 
 
 def _raise_with_secondaries(
@@ -299,7 +404,7 @@ async def _run_dispatch_while_connected(
         if winner[0] == "operation" and operation_error is None:
             if len(results) != 1:
                 raise RuntimeError("dispatch completed without exactly one response")
-            if listener_error is None or _plain_cancellation(listener_error):
+            if listener_error is None or _cancellation_only(listener_error):
                 handed_off = True
                 return results[0]
             _raise_with_secondaries(listener_error, [])
@@ -309,7 +414,7 @@ async def _run_dispatch_while_connected(
                 raise RuntimeError("dispatch exited without a result or failure")
             operation_secondaries: list[BaseException] = (
                 []
-                if listener_error is None or _plain_cancellation(listener_error)
+                if listener_error is None or _cancellation_only(listener_error)
                 else [listener_error]
             )
             _raise_with_secondaries(operation_error, operation_secondaries)
@@ -323,7 +428,7 @@ async def _run_dispatch_while_connected(
             raise RuntimeError("dispatch and disconnect listener ended without a winner")
 
         secondaries: list[BaseException] = []
-        if operation_error is not None and not _plain_cancellation(operation_error):
+        if operation_error is not None and not _cancellation_only(operation_error):
             secondaries.append(operation_error)
         _raise_with_secondaries(primary, secondaries)
         raise AssertionError("unreachable")
