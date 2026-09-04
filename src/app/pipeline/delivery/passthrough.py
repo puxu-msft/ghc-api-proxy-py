@@ -341,7 +341,7 @@ class PassthroughFramer:
 
     **`error` and `keepalive` are delegated rather than reimplemented.** Those two frames really are this side's inventions, and each dialect already spells them: an SSE comment for the keep-alive, and the error shape `error-envelope/spec.md` §6.3 sets out. Writing a second copy here would be one more place for the two spellings to drift, so the leg's ordinary framer supplies them.
 
-    **`reshape` is the one place a declared compatibility contract may edit the wire**, and it is `None` unless an operator switched one on. §2.7 requires such a transform to be named, optional and never called native; keeping it as a parameter rather than a branch inside `block` is what stops it becoming an unnamed default the way stable ids did before `1fb37cd` (§6.6.6). The engine stays dialect-agnostic: whichever vocabulary is in play supplies the callable, or does not.
+    **`reshape` is the one place a declared compatibility contract may edit the wire**, and it is `None` whenever that contract is disabled. §2.7 requires such a transform to be named, configurable and never called native; keeping it as a parameter rather than a branch inside `block` is what stops a default-on reshape becoming unnamed the way stable ids were before `1fb37cd` (§6.6.6). The engine stays dialect-agnostic: whichever vocabulary is in play supplies the callable, or does not.
     """
 
     delegate: OutboundFramer[Any]

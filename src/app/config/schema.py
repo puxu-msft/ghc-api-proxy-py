@@ -480,10 +480,10 @@ class FixResponsesRequestHook(Section):
 class FixResponsesSseHook(Section):
     # **The name is the user's own**, written into `docs/.human-controlled/config.example.yaml` before any of this existed: "修复上游流在 `output_item.added` / `output_item.done` 间不一致的 item ID。`@ai-sdk/openai` 校验 ID 连续性需要。" The measurement is wider than that sentence — every id in the stream drifts, not only the two it names — but the key keeps their spelling.
     #
-    # **Off by default**, per `.dev/docs/direct-passthrough/spec.md` §2.7: this rewrites upstream's bytes on a leg whose contract is to forward them, so it has to be asked for. An earlier revision of this shipped it on, reasoning that Codex needed it; that reasoning was falsified — Codex parses no id at all on the events in question (`reports/260902-codex-item-grouping-key.md`) — and a default cannot outlive the argument that justified it.
+    # **On by default**, per the user's 2026-09-04 ruling after Claude Code failed with the known `activeReasoningPart.summaryParts` symptom while this reshape was disabled. This remains a named compatibility transform rather than part of native passthrough: an operator can set it to `false` to preserve every upstream id byte-for-byte. `.dev/docs/direct-passthrough/spec.md` §6.6.
     #
-    # Who it is for is the client the user named: one that checks an item's id is the same on `added` and `done`. Nothing inside this proxy needs it — the engine keys on `output_index`. `.dev/docs/direct-passthrough/spec.md` §6.6.
-    fix_stream_ids: bool = False
+    # Who it is for is the client the user named: one that checks an item's id is the same on `added` and `done`. Nothing inside this proxy needs it — the engine keys on `output_index`. The earlier Codex rationale remains falsified; this default rests on the independently observed Claude Code failure, not on Codex.
+    fix_stream_ids: bool = True
 
 
 def _reject_unaddressable_provider_names(value: object) -> None:

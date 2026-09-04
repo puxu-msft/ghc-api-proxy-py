@@ -115,7 +115,7 @@ def _rewrite_item_ids(payload: dict[str, Any], item_id: str) -> bool:
 def stabilise_stream_ids(events: tuple[SseEvent, ...]) -> tuple[SseEvent, ...]:
     """Give every event of one output item the id its **closing** event carries.
 
-    `spec.md` §6.6. Off unless configured: this rewrites upstream's bytes, and §2.7 forbids calling such a thing native.
+    `spec.md` §6.6. On by default and explicitly disableable: this rewrites upstream's bytes, and §2.7 forbids calling such a thing native.
 
     **Closing rather than first-seen, and that is the whole difficulty.** Measured 2026-09-02: one reasoning item arrived with a 4,888-byte seal under one id on `added` and a 5,032-byte seal under a different id on `done`. Each seal is bound to the id it came with, and upstream verifies that binding when the item is replayed. Stabilising onto the opening id would attach the closing seal to the opening id — issue #4 exactly, manufactured here rather than inherited. Stabilising onto the closing id leaves the pair the client actually stores untouched.
 
