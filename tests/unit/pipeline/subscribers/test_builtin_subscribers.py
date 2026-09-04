@@ -5,6 +5,7 @@ The point of a registry is that the set and the order are decisions rather than 
 The two tests at the bottom are the ones that matter most. Everything above them proves `register_builtin_subscribers` does what it says; only those prove anybody calls it, on each of the two paths that reach upstream. A carrier nothing invokes looks identical to a working one from every other angle.
 """
 
+from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any
 
@@ -99,6 +100,10 @@ class RecordingProvider:
     @property
     def available_ids(self) -> frozenset[str]:
         return frozenset({"claude-model"})
+    @property
+    def raw_catalog(self) -> Mapping[str, Any]:
+        return {}
+
 
     # Reporting-only members of the provider protocol, here so this stub satisfies it. Nothing on this test's path reads them; `/api/status` does.
     @property

@@ -5,6 +5,7 @@ The shape under test is the one production actually sent on 2026-08-24 and got a
 Two of these go through `build_chain` and `handle` rather than calling the subscriber. Being registered is not being run, and on this feature there is a second thing only the full path can prove: the capability the subscriber reads has to travel from the catalog through `decide_route` and `apply_route` onto the context. A test that sets `context.model_descriptor` by hand would stay green if that wiring were cut.
 """
 
+from collections.abc import Mapping
 from typing import Any
 
 import httpx2
@@ -382,6 +383,10 @@ class CapableProvider:
     @property
     def available_ids(self) -> frozenset[str]:
         return frozenset({"claude-sonnet-5"})
+    @property
+    def raw_catalog(self) -> Mapping[str, Any]:
+        return {}
+
 
     # Reporting-only members of the provider protocol, here so this stub satisfies it. Nothing on this test's path reads them; `/api/status` does.
     @property

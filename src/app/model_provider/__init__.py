@@ -5,7 +5,10 @@ Other providers with other endpoints can be added without changing the callers.
 """
 
 from app.model_provider.base import ModelProvider
-from app.model_provider.github_copilot import PROVIDER_TYPE, GithubCopilotProvider
+from app.model_provider.codebuddy import PROVIDER_TYPE as CODEBUDDY_PROVIDER_TYPE
+from app.model_provider.codebuddy import CodebuddyProvider
+from app.model_provider.github_copilot import PROVIDER_TYPE as GITHUB_COPILOT_PROVIDER_TYPE
+from app.model_provider.github_copilot import GithubCopilotProvider
 from app.model_provider.registry import (
     ProviderNotConfigured,
     ProviderRegistry,
@@ -27,8 +30,10 @@ from app.model_provider.types import (
 )
 
 __all__ = [
-    "PROVIDER_TYPE",
+    "CODEBUDDY_PROVIDER_TYPE",
+    "GITHUB_COPILOT_PROVIDER_TYPE",
     "CapabilityMissing",
+    "CodebuddyProvider",
     "EndpointNotImplemented",
     "EndpointNotSupported",
     "GithubCopilotProvider",

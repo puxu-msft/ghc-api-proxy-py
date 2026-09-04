@@ -4,6 +4,7 @@ The defect being fixed is a configured timeout that never takes effect, which lo
 """
 
 import asyncio
+from collections.abc import Mapping
 from typing import Any
 
 import httpx2
@@ -29,6 +30,10 @@ class SlowProvider:
     @property
     def available_ids(self) -> frozenset[str]:
         return frozenset({"claude-model"})
+    @property
+    def raw_catalog(self) -> Mapping[str, Any]:
+        return {}
+
 
     # Reporting-only members of the provider protocol, here so this stub satisfies it. Nothing on this test's path reads them; `/api/status` does.
     @property

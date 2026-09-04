@@ -25,6 +25,11 @@ from app.errors import (
     UpstreamCondition,
     category_for_status,
 )
+from app.model_provider.codebuddy_client.auth_state import (
+    AuthRefreshFailed,
+    AuthStateInvalid,
+    AuthStateMissing,
+)
 from app.model_provider.registry import ProviderNotConfigured
 from app.model_provider.types import (
     CapabilityMissing,
@@ -241,6 +246,9 @@ def test_the_provider_error_subclasses_are_all_classified() -> None:
         EndpointNotSupported,
         EndpointNotImplemented,
         ProviderNotConfigured,
+        AuthRefreshFailed,
+        AuthStateInvalid,
+        AuthStateMissing,
     }
     actual = set(ProviderError.__subclasses__())
 

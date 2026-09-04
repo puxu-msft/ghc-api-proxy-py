@@ -24,6 +24,11 @@ from app.errors import (
     is_context_window_exceeded,
     prompt_limit_counts,
 )
+from app.model_provider.codebuddy_client.auth_state import (
+    AuthRefreshFailed,
+    AuthStateInvalid,
+    AuthStateMissing,
+)
 from app.model_provider.registry import ProviderNotConfigured
 from app.model_provider.types import (
     CapabilityMissing,
@@ -53,6 +58,12 @@ _PROVIDER_ROWS: tuple[tuple[type[ProviderError], ErrorCategory], ...] = (
     (EndpointNotImplemented, ErrorCategory.NOT_IMPLEMENTED),
     # An operator naming a provider that is not configured. Nothing the client sends can change it.
     (ProviderNotConfigured, ErrorCategory.INTERNAL),
+    # The CodeBuddy desktop login state: missing, unreadable, or refused by the
+    # refresh endpoint. The client cannot fix any of these by resending — the fix
+    # is logging into the desktop app or pointing the config at a live state file.
+    (AuthStateMissing, ErrorCategory.AUTH),
+    (AuthStateInvalid, ErrorCategory.AUTH),
+    (AuthRefreshFailed, ErrorCategory.AUTH),
 )
 
 

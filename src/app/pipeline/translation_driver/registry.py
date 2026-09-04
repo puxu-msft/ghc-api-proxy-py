@@ -14,6 +14,10 @@ from app.pipeline.translation_driver.anthropic_messages import (
     from_anthropic_messages,
     to_anthropic_messages,
 )
+from app.pipeline.translation_driver.openai_chat_completions import (
+    from_chat_completions_response,
+    to_openai_chat_completions,
+)
 from app.pipeline.translation_driver.openai_responses import (
     from_openai_responses,
     to_openai_responses,
@@ -161,5 +165,14 @@ def default_registry(config: ModelTranslationConfig | None = None) -> Translator
     )
     registry.register_response_writer(
         WireFormat.OPENAI_RESPONSES, to_openai_responses_response
+    )
+    # Chat Completions is registered as an *outbound* target and a response source
+    # only. No inbound translator, no response writer: a client that speaks Chat
+    # Completions is served by the direct passthrough leg, which forwards its bytes
+    # rather than round-tripping them through the intermediate form, so a pair here
+    # would be registration for a route that cannot be built.
+    registry.register_outbound(WireFormat.OPENAI_CHAT_COMPLETIONS, to_openai_chat_completions)
+    registry.register_response_reader(
+        WireFormat.OPENAI_CHAT_COMPLETIONS, from_chat_completions_response
     )
     return registry

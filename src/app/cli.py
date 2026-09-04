@@ -4,7 +4,7 @@ from collections.abc import Callable
 from functools import partial
 from pathlib import Path
 from types import FrameType
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 import uvicorn
@@ -12,7 +12,7 @@ from anyio import run
 from yaml import YAMLError
 
 from app.config.loading import GITHUB_TOKEN_VARIABLE, bundled_config_text, load_proxy_config
-from app.config.paths import tls_material_dir
+from app.config.paths import expand_user_path, tls_material_dir
 from app.config.schema import ProxyConfig
 from app.core.chain import Chain
 from app.debug.models import collect_catalogs, render_json, render_text
@@ -21,10 +21,17 @@ from app.lifecycle.listener import listening_urls
 from app.lifecycle.pidfile import PidfileError
 from app.lifecycle.standalone import LIFECYCLE_LOGGER, ShutdownReport
 from app.lifecycle.tls import resolve_tls_material, serves_tls
-from app.model_provider import ProviderNotConfigured
+from app.model_provider import CODEBUDDY_PROVIDER_TYPE, ProviderNotConfigured
+from app.model_provider.codebuddy_client import (
+    CodebuddyClientConfig,
+    CodebuddyCredentials,
+    DesktopAuthState,
+    discover_auth_file,
+)
 from app.model_provider.ghc_client.auth.providers import FileTokenProvider
 from app.model_provider.ghc_client.auth.service import authenticate_device, clear_stored_token
 from app.model_provider.ghc_client.config import GhcClientConfig
+from app.model_provider.types import ProviderError
 from app.observability.logging import get_logger, setup_logging
 from app.server.composition import (
     build_chain,
@@ -364,6 +371,9 @@ def _authenticate(provider: str, config: Path | None) -> None:
     """
     proxy_config, provider_name = _selected_provider(provider, config)
     provider_config = proxy_config.model_providers[provider_name]
+    if provider_config.type == CODEBUDDY_PROVIDER_TYPE:
+        _verify_codebuddy_auth(provider_name, provider_config)
+        return
     try:
         web_base_url = GhcClientConfig(
             auth_base_url_override=provider_config.auth_base_url
@@ -386,6 +396,64 @@ def _authenticate(provider: str, config: Path | None) -> None:
         _warn_if_environment_shadows_the_token_file()
 
     run(login)
+
+
+def _codebuddy_state_path(provider_name: str, provider_config: Any) -> str:
+    """The login-state file a CodeBuddy provider reads, configured or discovered."""
+    if provider_config.auth_state_file:
+        return str(expand_user_path(provider_config.auth_state_file))
+    discovered = discover_auth_file()
+    if not discovered:
+        typer.echo(
+            f"error: provider {provider_name!r} has no auth_state_file configured and none "
+            "was found under the desktop app's data directory; log in there first or set "
+            f"model_providers.{provider_name}.auth_state_file",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    return discovered
+
+
+def _verify_codebuddy_auth(provider_name: str, provider_config: Any) -> None:
+    """Verify the desktop login state a CodeBuddy provider depends on, refreshing it if stale.
+
+    There is no login flow here to drive: the credential is the desktop
+    WorkBuddy/CodeBuddy application's own session. What `auth` can honestly do is
+    read that state, report who it belongs to, and refresh a near-expiry token the
+    same way the serving path would — so an operator learns now whether the
+    provider can serve, not on the first request.
+    """
+    state = DesktopAuthState(_codebuddy_state_path(provider_name, provider_config))
+    try:
+        summary = state.summary()
+    except ProviderError as error:
+        typer.echo(f"error: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(f"Login state for provider {provider_name!r}: {state.path}")
+    typer.echo(
+        f"  account: {summary.get('nickname') or summary.get('uid') or '(unknown)'}"
+        + (f" @ {summary['enterprise']}" if summary.get("enterprise") else "")
+    )
+    expired = bool(summary.get("expired"))
+    typer.echo(f"  token expired: {expired}")
+    if not expired:
+        return
+    typer.echo("  refreshing...")
+    cb_config = CodebuddyClientConfig(api_base_url_override=provider_config.api_base_url)
+    http_client = build_http_client(ProxyConfig(), proxy_from_cli=False, warn_about_proxies=False)
+
+    async def refresh() -> None:
+        try:
+            await CodebuddyCredentials(state, http_client, cb_config).request_headers()
+        finally:
+            await http_client.aclose()
+
+    try:
+        run(refresh)
+    except ProviderError as error:
+        typer.echo(f"error: refresh failed: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(f"  refreshed; token now expires at {state.summary().get('expires_at')}")
 
 
 def _resolved_token_path(token_path: Path | None) -> Path:
@@ -450,6 +518,15 @@ def logout(
     #
     # **The OAuth origin is deliberately not derived here.** Removing a local file does not depend on where device codes come from, and requiring it would leave a deployment whose `auth_base_url` is a local stand-in unable to delete its own token through the CLI. Written down because §3.3's refusal is loud and a later reader could reasonably think it should apply to both commands.
     proxy_config, provider_name = _selected_provider(provider, config)
+    if proxy_config.model_providers[provider_name].type == CODEBUDDY_PROVIDER_TYPE:
+        # The credential is the desktop application's own session file. Deleting it
+        # from here would log the desktop app out too — an action that size is the
+        # desktop app's to offer, not this command's.
+        typer.echo(
+            f"provider {provider_name!r} reads its login state from the WorkBuddy/CodeBuddy "
+            "desktop application; log out there. Nothing was deleted."
+        )
+        return
     token_path = github_token_path(proxy_config, provider_name)
     run(partial(clear_stored_token, token_path))
     # Named rather than announced in general. This clears one provider's file and nothing else, which is the whole reason the provider is a required argument rather than something inferred.

@@ -15,11 +15,21 @@ from rich.cells import cell_len
 
 from app.config.schema import ProxyConfig
 from app.core.chain import Chain
-from app.model_provider import GithubCopilotProvider, model_type_of, resolve_endpoints
+from app.model_provider import ModelEndpoint, model_type_of, resolve_endpoints
+from app.model_provider.codebuddy import DRIVEN_ENDPOINTS as CODEBUDDY_DRIVEN_ENDPOINTS
 from app.model_provider.ghc_client.auth.providers import NoGitHubToken
-from app.model_provider.github_copilot import DRIVEN_ENDPOINTS
+from app.model_provider.github_copilot import DRIVEN_ENDPOINTS as COPILOT_DRIVEN_ENDPOINTS
 from app.observability.footer import CONTROL_CHARS
 from app.server.composition import build_chain, build_http_client, resolve_provider_base_urls
+
+# Which endpoints each provider type's driver table can actually drive, keyed by the
+# config's `type` value. Read per provider rather than imported from one module,
+# because "what is drivable" is a fact about the provider serving the model, and two
+# types with different send tables would otherwise be judged by one of them.
+DRIVEN_BY_TYPE: dict[str, frozenset[ModelEndpoint]] = {
+    "github_copilot": COPILOT_DRIVEN_ENDPOINTS,
+    "codebuddy": CODEBUDDY_DRIVEN_ENDPOINTS,
+}
 
 # The one status that means a request naming this model would be routed.
 ROUTABLE = "ok"
@@ -158,6 +168,7 @@ def build_rows(
     raw: Mapping[str, Any],
     *,
     disabled: Sequence[str] = (),
+    driven: frozenset[ModelEndpoint] = frozenset(),
 ) -> tuple[tuple[ModelRow, ...], int]:
     """Project an upstream catalog payload onto the rows a report shows, and count what could not be projected at all.
 
@@ -189,7 +200,7 @@ def build_rows(
         )
         # An endpoint we have no enum member for is by definition one we cannot drive.
         undriven = frozenset(
-            [endpoint.value for endpoint in resolved.known if endpoint not in DRIVEN_ENDPOINTS]
+            [endpoint.value for endpoint in resolved.known if endpoint not in driven]
             + list(resolved.unknown)
         )
         rows.append(
@@ -237,9 +248,6 @@ async def collect_catalogs(
         names = [only] if only is not None else sorted(chain.providers.names)
         for name in names:
             provider = chain.providers.get(name)
-            if not isinstance(provider, GithubCopilotProvider):
-                failures.append(CatalogFailure(name, "provider type publishes no catalog"))
-                continue
             try:
                 await provider.refresh_catalog()
             except Exception as error:
@@ -248,6 +256,7 @@ async def collect_catalogs(
             rows, unreadable = build_rows(
                 provider.raw_catalog,
                 disabled=config.model_providers[name].disabled_models,
+                driven=DRIVEN_BY_TYPE.get(config.model_providers[name].type, frozenset()),
             )
             catalogs.append(
                 ProviderCatalog(

@@ -67,6 +67,7 @@ _PATH_FIELDS: tuple[tuple[str, ...], ...] = (
     ("server", "tls", "cert"),
     ("server", "tls", "key"),
     ("model_providers", "*", "github_token_file"),
+    ("model_providers", "*", "auth_state_file"),
     ("pidfile_dir",),
 )
 

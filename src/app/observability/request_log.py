@@ -37,8 +37,16 @@ from app.pipeline.response_observation import (
 # What to call the same two things under each upstream, abbreviated to fit a line. Held here, in the layer that renders, because which word to print is a display decision; what happened is the record's business and it says only which upstream described it.
 # `tool_use` is the Anthropic stop reason the Responses assembler synthesises for the client's benefit. Recognised by name so the line can put back what upstream actually sent.
 TOOL_USE_REASON = "tool_use"
-REASONING_WORD = {ReplyDialect.ANTHROPIC: "think", ReplyDialect.RESPONSES: "reason"}
-TOOL_WORD = {ReplyDialect.ANTHROPIC: TOOL_USE_REASON, ReplyDialect.RESPONSES: "function_call"}
+REASONING_WORD = {
+    ReplyDialect.ANTHROPIC: "think",
+    ReplyDialect.RESPONSES: "reason",
+    ReplyDialect.CHAT_COMPLETIONS: "reason",
+}
+TOOL_WORD = {
+    ReplyDialect.ANTHROPIC: TOOL_USE_REASON,
+    ReplyDialect.RESPONSES: "function_call",
+    ReplyDialect.CHAT_COMPLETIONS: "tool_calls",
+}
 
 # Where a reply stops being ordinary. Bytes are 1024-based, matching what `format_bytes` prints. A count inside the printed figure's rounding band can show the same number in a different colour from one just over the threshold; the thresholds are the round numbers rather than the rounding band, and that is the accepted trade.
 #
@@ -48,6 +56,11 @@ TOOL_WORD = {ReplyDialect.ANTHROPIC: TOOL_USE_REASON, ReplyDialect.RESPONSES: "f
 RECEIVED_BYTES_THRESHOLDS = {
     ReplyDialect.ANTHROPIC: (10 * 1024, 100 * 1024),
     ReplyDialect.RESPONSES: (384 * 1024, 4 * 1024 * 1024),
+    # Borrowed from the Anthropic pair until this leg has traffic to measure: its
+    # chunks repeat an id and a model name per event, so it sits between the two
+    # — closer to Anthropic's economy than to Responses' echoed tool arrays. The
+    # sighting that replaces this guess should pick its own numbers.
+    ReplyDialect.CHAT_COMPLETIONS: (10 * 1024, 100 * 1024),
 }
 NOTABLE_TOKENS, HEAVY_TOKENS = 1_000, 10_000
 

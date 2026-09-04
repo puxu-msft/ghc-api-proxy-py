@@ -1,4 +1,6 @@
+import json
 import signal
+import time
 from pathlib import Path
 from typing import cast
 from unittest.mock import AsyncMock, Mock
@@ -292,6 +294,75 @@ def test_auth_reports_a_bad_config_instead_of_a_traceback(tmp_path: Path) -> Non
     assert "Traceback" not in result.output and result.output.startswith("error:")
     assert logout_result.exit_code == 1
     assert authenticate.await_count == 0
+
+
+def test_auth_for_a_codebuddy_provider_verifies_the_desktop_state(tmp_path: Path) -> None:
+    """No device flow exists here: `auth` reads the desktop login state and says what it found."""
+    config_path = _auth_config(
+        tmp_path,
+        "model_providers:\n"
+        "  cb:\n"
+        "    type: codebuddy\n",
+    )
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("CODEBUDDY_AUTH_DIR", str(tmp_path))
+        (tmp_path / "session.info").write_text(
+            json.dumps(
+                {
+                    "auth": {
+                        "accessToken": "a",
+                        "refreshToken": "r",
+                        "expiresAt": (int(time.time()) + 3600) * 1000,
+                    },
+                    "account": {"uid": "u-1", "nickname": "tester"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        result = runner.invoke(app, ["auth", "cb", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert "cb" in result.output
+    assert "tester" in result.output
+    assert str(tmp_path / "session.info") in result.output
+
+
+def test_auth_for_a_codebuddy_provider_without_login_state_names_the_config_key(
+    tmp_path: Path,
+) -> None:
+    config_path = _auth_config(
+        tmp_path,
+        "model_providers:\n"
+        "  cb:\n"
+        "    type: codebuddy\n",
+    )
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("CODEBUDDY_AUTH_DIR", str(tmp_path / "absent"))
+        result = runner.invoke(app, ["auth", "cb", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert "auth_state_file" in result.output
+
+
+def test_logout_for_a_codebuddy_provider_deletes_nothing(tmp_path: Path) -> None:
+    """The credential is the desktop application's session; logging out there is its own action."""
+    state_file = tmp_path / "session.info"
+    state_file.write_text("{}", encoding="utf-8")
+    config_path = _auth_config(
+        tmp_path,
+        "model_providers:\n"
+        "  cb:\n"
+        "    type: codebuddy\n"
+        f'    auth_state_file: "{state_file}"\n',
+    )
+
+    result = runner.invoke(app, ["logout", "cb", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert state_file.exists()
+    assert "desktop" in result.output
 
 
 def test_logout_removes_the_token_file_the_named_provider_reads(tmp_path: Path) -> None:

@@ -3,6 +3,7 @@
 Until 2026-08-19 the new chain answered 404 to `/health/readiness` while the existing chain answered it — and the existing chain is the one two of the three entry points still run. A supervisor pointed at the new chain had nothing to ask.
 """
 
+from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Any
 
@@ -29,6 +30,10 @@ class StubProvider:
     @property
     def available_ids(self) -> frozenset[str]:
         return self._ids
+
+    @property
+    def raw_catalog(self) -> Mapping[str, Any]:
+        return {}
 
     @property
     def disabled_ids(self) -> frozenset[str]:

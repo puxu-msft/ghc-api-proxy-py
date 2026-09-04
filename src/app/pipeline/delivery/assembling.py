@@ -19,11 +19,16 @@ from app.pipeline.delivery.sse_source import SseEvent
 class ReplyDialect(StrEnum):
     """Whose vocabulary the reply arrived in.
 
-    Not `WireFormat`. That enum is the whole taxonomy of body shapes a route can take, and it lives with `RequestContext`, which now holds one of these records — importing it here would close a cycle. What a summary of a reply needs is narrower anyway: only which of the two upstreams described it, so the words on the console line can be that upstream's own. A reply is assembled by exactly one of them, so this is a property of the record rather than something a reader has to be told separately.
+    Not `WireFormat`. That enum is the whole taxonomy of body shapes a route can take, and it lives with `RequestContext`, which now holds one of these records — importing it here would close a cycle. What a summary of a reply needs is narrower anyway: only which upstream described it, so the words on the console line can be that upstream's own. A reply is assembled by exactly one of them, so this is a property of the record rather than something a reader has to be told separately.
     """
 
     ANTHROPIC = "anthropic"
     RESPONSES = "responses"
+    # The Chat Completions upstream — reached translated, behind an Anthropic or
+    # Responses client leg. Its own chunks carry no block boundaries, so the words
+    # that describe one of its replies are the assembler's problem, not the
+    # client's: the client still reads its own format.
+    CHAT_COMPLETIONS = "chat-completions"
 
 
 @dataclass(slots=True)

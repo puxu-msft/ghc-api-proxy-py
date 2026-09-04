@@ -330,6 +330,28 @@ def test_a_relative_path_in_the_config_resolves_from_the_config_not_the_working_
     assert config.server.tls.key == str(config_dir / "certs" / "server.key")
 
 
+def test_a_relative_auth_state_file_is_based_on_the_config_file_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`auth_state_file` is a credential path like `github_token_file`, so it follows the same rule."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    config_dir = tmp_path / "etc"
+    config_dir.mkdir()
+    config_path = write_config(
+        config_dir,
+        "model_providers:\n"
+        "  cb:\n"
+        "    type: codebuddy\n"
+        '    auth_state_file: "auth/codebuddy.info"\n',
+    )
+    monkeypatch.chdir(elsewhere)
+
+    config = load_proxy_config(config_path=config_path)
+
+    assert config.model_providers["cb"].auth_state_file == str(config_dir / "auth" / "codebuddy.info")
+
+
 def test_an_absolute_or_expandable_path_is_left_where_it_points(tmp_path: Path) -> None:
     """Rebasing applies to what is still relative after expansion, and to nothing else.
 

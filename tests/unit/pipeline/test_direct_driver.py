@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import Any, cast
 
 import httpx2
@@ -60,6 +60,10 @@ class FakeProvider:
     @property
     def available_ids(self) -> frozenset[str]:
         return frozenset(CATALOG)
+
+    @property
+    def raw_catalog(self) -> Mapping[str, Any]:
+        return {}
 
     @property
     def disabled_ids(self) -> frozenset[str]:

@@ -41,6 +41,7 @@ NOT_HOT_RELOADABLE = frozenset(
     {
         "model_providers.*.api_base_url",
         "model_providers.*.auth_base_url",
+        "model_providers.*.auth_state_file",
         "model_providers.*.github_token_file",
         "pidfile_dir",
         "proxy",
@@ -91,7 +92,7 @@ class InboundConfig(Section):
 
 
 class ModelProviderConfig(Section):
-    type: Literal["github_copilot"]
+    type: Literal["github_copilot", "codebuddy"]
     # Where inference goes.
     api_base_url: str = ""
     # Where a GitHub token is exchanged for a Copilot one, and where the account is described.
@@ -99,6 +100,12 @@ class ModelProviderConfig(Section):
     auth_base_url: str = ""
     # May contain `$XDG_DATA_HOME`; expanded by `app.config.paths.expand_user_path`.
     github_token_file: str = ""
+    # `codebuddy` only: the desktop app's login-state `.info` file, holding the tokens
+    # this provider refreshes and writes back. Empty means auto-discovery in the
+    # desktop app's own data directory. Restart-pinned with the other credential
+    # paths: a live provider was built around the file it was given at startup.
+    # May contain `$XDG_DATA_HOME`; expanded by `app.config.paths.expand_user_path`.
+    auth_state_file: str = ""
     model_refresh_interval: int = Field(default=3600, ge=0)
     disabled_models: list[str] = Field(default_factory=lambda: list[str]())
     # Which models actually execute hosted web search. Each entry is a **regular expression**, matched against upstream `model.id` with `fullmatch` — so a plain id like `gpt-5.5` still means what it says and needs no anchors, while `gpt-5\.\d+.*` covers a family. A declaration from the client is translated into this endpoint's own `{"type": "web_search"}` only for a model some pattern claims. For any other, the request is answered with a failed `web_search_tool_result` rather than sent on without the tool: a search sub-request stripped of its only tool succeeds by answering from memory, and the client labels that reply as search results.

@@ -25,7 +25,7 @@ from app.debug.models import (
     render_json,
     render_text,
 )
-from app.model_provider import GithubCopilotProvider, ProviderNotConfigured
+from app.model_provider import GithubCopilotProvider, ModelProvider, ProviderNotConfigured
 
 runner = CliRunner()
 
@@ -73,7 +73,9 @@ CATALOG: dict[str, Any] = {
 
 
 def _rows_by_id(raw: dict[str, Any], *, disabled: list[str] | None = None):
-    rows, _ = build_rows(raw, disabled=disabled or [])
+    from app.model_provider.github_copilot import DRIVEN_ENDPOINTS
+
+    rows, _ = build_rows(raw, disabled=disabled or [], driven=DRIVEN_ENDPOINTS)
     return {row.id: row for row in rows}
 
 
@@ -283,9 +285,11 @@ def test_the_recorded_catalog_capture_reads_end_to_end() -> None:
 
     The hand-built payload above encodes what we believe an entry looks like. This one is what upstream actually sent, so it is the only place that catches a reader looking up `family` or the limits at the wrong depth — the shape of a row would stay valid while every value in it was empty.
     """
+    from app.model_provider.github_copilot import DRIVEN_ENDPOINTS
+
     raw = json.loads((REPO_ROOT / "refs" / "available_models.json").read_text(encoding="utf-8"))
 
-    rows, unreadable = build_rows(raw, disabled=["gpt-4o"])
+    rows, unreadable = build_rows(raw, disabled=["gpt-4o"], driven=DRIVEN_ENDPOINTS)
     by_id = {row.id: row for row in rows}
 
     assert len(rows) == len(raw["data"])
@@ -305,7 +309,13 @@ def test_the_recorded_catalog_capture_reads_end_to_end() -> None:
 
 def _catalog(**overrides: Any) -> ProviderCatalog:
     raw = overrides.pop("raw", CATALOG)
-    rows, unreadable = build_rows(raw, disabled=overrides.pop("disabled", ["blocked"]))
+    from app.model_provider.github_copilot import DRIVEN_ENDPOINTS
+
+    rows, unreadable = build_rows(
+        raw,
+        disabled=overrides.pop("disabled", ["blocked"]),
+        driven=overrides.pop("driven", DRIVEN_ENDPOINTS),
+    )
     return ProviderCatalog(
         name=overrides.pop("name", "ghc"),
         base_url=overrides.pop("base_url", "https://api.githubcopilot.com"),
@@ -313,6 +323,51 @@ def _catalog(**overrides: Any) -> ProviderCatalog:
         rows=rows,
         unreadable=unreadable,
     )
+
+
+async def test_a_codebuddy_provider_serves_its_static_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A static-catalog provider is collected like any other: `collect_catalogs` no longer picks providers by concrete type, so this rides the same path a Copilot catalog does."""
+    from app.model_provider.codebuddy import CodebuddyProvider as RealCodebuddyProvider
+
+    class _FakeCodebuddy(RealCodebuddyProvider):
+        def __init__(self, name: str) -> None:
+            self._name_ = name
+            self._raw_ = {
+                "object": "list",
+                "data": [
+                    {"id": "glm-5.2", "supported_endpoints": ["/chat/completions"]},
+                    {"id": "glm-5.1", "supported_endpoints": ["/chat/completions"]},
+                ],
+            }
+
+        @property
+        def name(self) -> str:
+            return self._name_
+
+        @property
+        def base_url(self) -> str:
+            return "https://copilot.tencent.com"
+
+        @property
+        def raw_catalog(self) -> dict[str, Any]:
+            return self._raw_
+
+        async def refresh_catalog(self) -> bool:
+            return False
+
+    _patch_collection(monkeypatch, {"cb": _FakeCodebuddy("cb")})
+    config = ProxyConfig.model_validate(
+        {"model_providers": {"cb": {"type": "codebuddy"}}, "default_model_provider": "cb"}
+    )
+
+    catalogs, failures = await collect_catalogs(config)
+
+    assert failures == ()
+    assert [row.status for row in catalogs[0].rows] == ["ok", "ok"]
+    # Chat Completions is driven on this provider type, so no undriven mark appears.
+    assert all(row.undriven == frozenset() for row in catalogs[0].rows)
 
 
 def test_the_report_counts_by_status_and_explains_its_own_marks() -> None:
@@ -460,7 +515,8 @@ def test_a_missing_token_is_reported_with_the_command_that_fixes_it() -> None:
 class _FakeProvider(GithubCopilotProvider):
     """A provider that answers from a canned payload, or refuses to.
 
-    Subclassed rather than duck-typed because `collect_catalogs` checks the concrete type before trusting a provider to have a catalog — a stand-in that skipped that check would test a path production never takes.
+    Subclassed from a real provider rather than duck-typed: a stand-in promising
+    attributes no production provider guarantees would test a path production never takes.
     """
 
     def __init__(self, name: str, *, raw: dict[str, Any] | None = None, fails: str = "") -> None:
@@ -487,14 +543,14 @@ class _FakeProvider(GithubCopilotProvider):
 
 
 class _FakeRegistry:
-    def __init__(self, providers: dict[str, GithubCopilotProvider]) -> None:
+    def __init__(self, providers: dict[str, ModelProvider]) -> None:
         self._providers = providers
 
     @property
     def names(self) -> frozenset[str]:
         return frozenset(self._providers)
 
-    def get(self, name: str) -> GithubCopilotProvider:
+    def get(self, name: str) -> ModelProvider:
         return self._providers[name]
 
 
@@ -520,7 +576,7 @@ def _two_provider_config() -> ProxyConfig:
 
 def _patch_collection(
     monkeypatch: pytest.MonkeyPatch,
-    providers: dict[str, GithubCopilotProvider],
+    providers: dict[str, ModelProvider],
 ) -> _RecordingClient:
     client = _RecordingClient()
 

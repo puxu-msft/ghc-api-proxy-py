@@ -37,6 +37,18 @@ class ModelProvider(Protocol):
     def available_ids(self) -> frozenset[str]: ...
 
     @property
+    def raw_catalog(self) -> Mapping[str, Any]:
+        """The catalog exactly as upstream published it, for reporting.
+
+        On the protocol rather than on one implementation because the debug tooling
+        renders any provider's catalog, and a property only some providers had made
+        that tooling branch on types to ask a question every provider can answer.
+        Static catalogs count: what a provider serves is what upstream said, even
+        when upstream said it to the reference implementation instead of over HTTP.
+        """
+        ...
+
+    @property
     def disabled_ids(self) -> frozenset[str]:
         """Ids the catalog advertises that this deployment switched off.
 

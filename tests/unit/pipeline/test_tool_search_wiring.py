@@ -5,6 +5,7 @@ Every other test in this area injects the name at the layer it is testing — `t
 So these go through `handle()` and `assembler_for()`, which is where the name is actually produced and read. Without them the feature can be disconnected silently, which is the exact shape this project has a standing lesson about.
 """
 
+from collections.abc import Mapping
 from typing import Any
 
 import httpx2
@@ -45,6 +46,10 @@ class ResponsesProvider:
     @property
     def available_ids(self) -> frozenset[str]:
         return frozenset({"gpt-5.6-sol"})
+    @property
+    def raw_catalog(self) -> Mapping[str, Any]:
+        return {}
+
 
     # Reporting-only members of the provider protocol, here so this stub satisfies it. Nothing on this test's path reads them; `/api/status` does.
     @property

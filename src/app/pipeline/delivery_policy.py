@@ -15,6 +15,7 @@ from app.pipeline.delivery.formats.anthropic_messages import (
     AnthropicAssembler,
     AnthropicFramer,
 )
+from app.pipeline.delivery.formats.openai_chat_completions import ChatCompletionsAssembler
 from app.pipeline.delivery.formats.openai_responses import ResponsesAssembler, ResponsesFramer
 from app.pipeline.delivery.formats.openai_responses_passthrough import (
     responses_passthrough_assembler,
@@ -32,13 +33,15 @@ def dialect_for(handled: HandledRequest) -> ReplyDialect:
 
     Taken from the route rather than from the reply, because a buffered reply is read back after translation and by then looks Anthropic-shaped whatever answered it. The route is the only thing that still knows which upstream was actually spoken to, which is what the console line reports.
 
-    Two dialects, not one per wire format: anything that is not a Responses upstream is assembled as Anthropic — `assembler_for` below dispatches on this very answer — so the pair describes what the code actually does rather than the whole `WireFormat` taxonomy. A third upstream would need its own assembler before it could need its own words.
+    Three dialects, not one per wire format: a Chat Completions upstream is reached only translated, behind an Anthropic or Responses client leg, so its replies are assembled by their own assembler and merely *named* here. Anything else that is not a Responses upstream is assembled as Anthropic.
     """
     if handled.synthesized:
         # We wrote it, and we write Anthropic. The route below is about who *would* have answered.
         return ReplyDialect.ANTHROPIC
     if handled.route.target_format is WireFormat.OPENAI_RESPONSES:
         return ReplyDialect.RESPONSES
+    if handled.route.target_format is WireFormat.OPENAI_CHAT_COMPLETIONS:
+        return ReplyDialect.CHAT_COMPLETIONS
     return ReplyDialect.ANTHROPIC
 
 def delivers_blocks(handled: HandledRequest) -> bool:
@@ -89,7 +92,7 @@ def framer_for(
     The pairing with `assembler_for` is the point. That one is chosen by the upstream leg, this one by the client leg, and a translated route uses one of each.
     """
     if not delivers_blocks(handled):
-        # One-shot delivery forwards upstream's bytes unchanged, so it is only correct while upstream is answering in the protocol the client asked in. Today that holds by construction — the translator registry has no Chat Completions leg, so such a route cannot be built — and this says so out loud rather than relying on it. Registering one would otherwise send a Responses body to a Chat Completions client, verbatim and silently.
+        # One-shot delivery forwards upstream's bytes unchanged, so it is only correct while upstream is answering in the protocol the client asked in. On the Chat Completions *upstream* leg that holds by construction — it is reached only behind a client leg that has a framer, so this branch never sees it. What can still reach here is a Chat Completions *client* routed to some other endpoint, and this says that out loud rather than relying on it: registering a chat outbound framer would otherwise be the one change that makes a Responses body reach a Chat Completions client, verbatim and silently.
         if handled.route.translation_required:
             raise ValueError(
                 f"no framer for {handled.route.inbound_format.value}, and its bytes were translated "
@@ -135,6 +138,13 @@ def assembler_for(
             # Put on the context by the request translation. The streaming path needs it for the same reason the buffered one does — a `tool_search_call` names no tool — and reads it from the same place, so the two cannot come to deliver the model's search request under different names.
             client_search_tool=str(handled.context.extras.get(CLIENT_SEARCH_TOOL, "")),
         )
+    if dialect_for(handled) is ReplyDialect.CHAT_COMPLETIONS:
+        # A Chat Completions upstream is reached only translated; the old default
+        # here would have fed its `choices[].delta` chunks to the Anthropic
+        # assembler, which matches none of their keys and leaves the client a 200
+        # with an empty body — the exact defect `delivers_blocks` documents for the
+        # mirror-image route.
+        return ChatCompletionsAssembler()
     return AnthropicAssembler()
 
 def stream_settings(chain: Chain) -> StreamSettings:

@@ -5,6 +5,7 @@ The 400 is measured — 2026-08-24 against `claude-sonnet-5` through the running
 The two anchor cases below are not hypotheticals either. Each was measured by running this project's own repairs over a legal three-turn body ending in `user` and watching it come out ending in `assistant`. They are written here as end-to-end tests through `handle` rather than as calls to the subscriber, because the thing worth locking is the *interaction*: one pass removes a turn, another has to notice.
 """
 
+from collections.abc import Mapping
 from typing import Any
 
 import httpx2
@@ -122,6 +123,10 @@ class RecordingProvider:
     @property
     def available_ids(self) -> frozenset[str]:
         return frozenset({"claude-sonnet-5"})
+    @property
+    def raw_catalog(self) -> Mapping[str, Any]:
+        return {}
+
 
     # Reporting-only members of the provider protocol, here so this stub satisfies it. Nothing on this test's path reads them; `/api/status` does.
     @property

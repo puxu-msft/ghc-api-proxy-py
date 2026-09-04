@@ -3,6 +3,7 @@
 Both cover the same defect from opposite ends. Claude Code sends `anthropic-beta` with ten tokens and `context_management: {"edits": null}` on every request; the chain forwarded neither correctly, so upstream refused a field the beta would have enabled and the client saw a 502. Measured against the live upstream on 2026-08-18: `{"edits": null}` is refused, `{"edits": []}` is accepted, and without the beta header the field is not recognised at all.
 """
 
+from collections.abc import Mapping
 from typing import Any
 
 import httpx2
@@ -414,6 +415,10 @@ class _DescribingProvider:
     @property
     def available_ids(self) -> frozenset[str]:
         return frozenset({"claude-sonnet-5"})
+    @property
+    def raw_catalog(self) -> Mapping[str, Any]:
+        return {}
+
 
     # Reporting-only members of the provider protocol, here so this stub satisfies it. Nothing on this test's path reads them; `/api/status` does.
     @property
