@@ -9,6 +9,7 @@ from openai import AsyncOpenAI
 from app.config.schema import GithubCopilotProviderConfig, ProxyConfig
 from app.model_provider import (
     CapabilityMissing,
+    DescriptorProviderMismatch,
     EndpointNotSupported,
     GithubCopilotProvider,
     ModelDescriptor,
@@ -19,6 +20,7 @@ from app.model_provider import (
     UnknownModel,
     parse_endpoints,
     parse_prompt_token_limits,
+    require_descriptor_owner,
     require_endpoint,
     resolve_default_name,
 )
@@ -181,6 +183,27 @@ def test_descriptor_keeps_one_catalog_generation_and_prompt_limit_snapshot() -> 
         max_context_window_tokens=1_050_000,
     )
     assert first is not second
+
+
+def test_descriptor_owner_gate_rejects_a_cross_provider_snapshot() -> None:
+    descriptor = ModelDescriptor(
+        id="gpt-model",
+        endpoints=frozenset({ModelEndpoint.OPENAI_RESPONSES}),
+        provider_name="first",
+    )
+
+    with pytest.raises(DescriptorProviderMismatch):
+        require_descriptor_owner(descriptor, "second")
+
+
+def test_descriptor_owner_gate_accepts_its_issuer() -> None:
+    descriptor = ModelDescriptor(
+        id="gpt-model",
+        endpoints=frozenset({ModelEndpoint.OPENAI_RESPONSES}),
+        provider_name="ghc",
+    )
+
+    require_descriptor_owner(descriptor, "ghc")
 
 
 def test_capability_gate_rejects_a_model_that_advertises_nothing() -> None:

@@ -33,6 +33,7 @@ from app.model_provider.codebuddy_client.auth_state import (
 from app.model_provider.registry import ProviderNotConfigured
 from app.model_provider.types import (
     CapabilityMissing,
+    DescriptorProviderMismatch,
     EndpointNotImplemented,
     EndpointNotSupported,
     ProviderError,
@@ -136,6 +137,12 @@ CASES: tuple[tuple[str, Callable[[], BaseException], ErrorCategory, int], ...] =
         501,
     ),
     (
+        "descriptor-provider-mismatch",
+        lambda: DescriptorProviderMismatch("first", "second", "gpt-model"),
+        ErrorCategory.INTERNAL,
+        500,
+    ),
+    (
         "provider-not-configured",
         lambda: ProviderNotConfigured("nope"),
         ErrorCategory.INTERNAL,
@@ -184,6 +191,7 @@ EXPECTED_CASE_IDS = frozenset(
         "capability-missing",
         "endpoint-not-supported",
         "endpoint-not-implemented",
+        "descriptor-provider-mismatch",
         "provider-not-configured",
         "provider-error-base",
         "translation-refused",
@@ -274,6 +282,7 @@ def test_the_provider_error_subclasses_are_all_classified() -> None:
         CapabilityMissing,
         EndpointNotSupported,
         EndpointNotImplemented,
+        DescriptorProviderMismatch,
         ProviderNotConfigured,
         AuthRefreshFailed,
         AuthStateInvalid,

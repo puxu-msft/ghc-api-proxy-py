@@ -32,6 +32,7 @@ from app.model_provider.codebuddy_client.auth_state import (
 from app.model_provider.registry import ProviderNotConfigured
 from app.model_provider.types import (
     CapabilityMissing,
+    DescriptorProviderMismatch,
     EndpointNotImplemented,
     EndpointNotSupported,
     ProviderError,
@@ -57,6 +58,8 @@ _PROVIDER_ROWS: tuple[tuple[type[ProviderError], ErrorCategory], ...] = (
     (EndpointNotSupported, ErrorCategory.CLIENT),
     # Its own docstring: "The model advertises the endpoint but this proxy does not drive it." That is this proxy's gap, and calling it a bad request would blame the client for a capability nobody built.
     (EndpointNotImplemented, ErrorCategory.NOT_IMPLEMENTED),
+    # A descriptor crossing providers is a pipeline wiring defect. The client selected a model; this proxy handed its resolved fact to the wrong owner.
+    (DescriptorProviderMismatch, ErrorCategory.INTERNAL),
     # An operator naming a provider that is not configured. Nothing the client sends can change it.
     (ProviderNotConfigured, ErrorCategory.INTERNAL),
     # The CodeBuddy desktop login state: missing, unreadable, or refused by the

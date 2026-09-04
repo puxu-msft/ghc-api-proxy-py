@@ -81,6 +81,19 @@ class EndpointNotImplemented(ProviderError):
         self.endpoint = endpoint
 
 
+class DescriptorProviderMismatch(ProviderError):
+    """A routed descriptor was handed to a different provider instance."""
+
+    def __init__(self, expected: str, actual: str, model_id: str) -> None:
+        super().__init__(
+            f"provider {actual!r} cannot use model descriptor {model_id!r} "
+            f"issued by {expected!r}"
+        )
+        self.expected = expected
+        self.actual = actual
+        self.model_id = model_id
+
+
 @dataclass(frozen=True, slots=True)
 class PromptTokenLimits:
     """The catalog facts that make a local Responses admission decision possible.
@@ -259,6 +272,12 @@ def resolve_endpoints(advertised: object, *, model_type: str = "") -> ResolvedEn
     if default is None:
         return ResolvedEndpoints(frozenset(), (), False)
     return ResolvedEndpoints(frozenset({default}), (), False)
+
+
+def require_descriptor_owner(descriptor: ModelDescriptor, provider: str) -> None:
+    """Refuse a descriptor another provider issued before any network side effect."""
+    if descriptor.provider_name != provider:
+        raise DescriptorProviderMismatch(descriptor.provider_name, provider, descriptor.id)
 
 
 def require_endpoint(descriptor: ModelDescriptor, endpoint: ModelEndpoint, provider: str) -> None:
