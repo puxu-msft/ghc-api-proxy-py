@@ -4,21 +4,27 @@
 
 与项目自身 `docs/` 的区别：`docs/` 是面向使用者的最终文档；这里是**给做这件事的人看的**。
 
-## 与主仓库的关系
+## 与主仓库及远端分支的关系
 
-`.dev/` 在主仓库的 `.gitignore` 里，**不进主分支版本控制**。它自己是一个独立仓库（当前分支 `dotdev`）。
+`.dev/` 是主工作树里的协作编辑面，在主仓库的 `.gitignore` 中，**不进入 `main`**。用户于 2026-09-04 选择专用 orphan 分支 `origin/dotdev` 作为开发记录的远端持久源；该裁决取代了本文件此前所写的“`.dev/` 以嵌套独立仓库作为最终存储”模型。远端分支的规范树只含 `.dev/`，不得把它 merge 或 squash 进 `main`。
 
-> **注意一个已经踩过的坑**：`git mv` 会把目标路径登记进索引，而 `.gitignore` 对**已跟踪**的路径无效。把主仓库里已跟踪的文件搬进来，用 `mv` + `git rm --cached <旧路径>`，不要用 `git mv`；否则文件会被改名后继续留在主仓库的版本控制里，恰好是搬进来要避免的事。
+本机当前 `.dev/.git` 仍保存迁移前的本地独立历史。本地历史可以作为合并来源，但**不能把其仓库根直接推到 `origin/dotdev`**：那会把 `docs/` 写到远端根，而不是规范的 `.dev/docs/`。同步时应在专用 worktree／临时 clone 中以远端 tip 为第一父提交，把本地内容映射到 `.dev/` 前缀，并保留本地历史为第二父提交。
 
-## 提交与推送
+> **注意一个已经踩过的坑**：`git mv` 会把目标路径登记进主仓索引，而 `.gitignore` 对**已跟踪**的路径无效。把主仓库里已跟踪的文件搬进 active copy，用 `mv` + `git rm --cached <旧路径>`，不要用 `git mv`；否则文件会被改名后继续留在 `main` 的版本控制里，恰好是搬进来要避免的事。
 
-裁决于 2026-08-20。这两条方向相反，理由也不同：
+## 提交、同步与推送
 
-- **提交：总是可以主动提交，不必先问。** 这里存的是工作记录，它唯一的失败模式是丢失。没有下游消费者会被一次提交打断，没有 CI 会红，也没有别人的分支会被搅乱——所以「先攒着，等一个合适的时机」在这里没有任何好处，只有风险。2026-08-20 就发生过一次：主仓库的暂存区被并行会话反复争用，一个会话暂存的内容被另一个会话的提交裹走，`git diff --cached` 一度读出空。及时落盘是对这种情况唯一有效的防御。
-    - 允许短暂的不一致状态。这里不跑测试、不跑构建，提交边界只按语义划分。
-- **推送：`[hard]` 除非用户当次明确指示，不推送。** 推送是对外发布，与提交完全不是一件事。
+裁决于 2026-08-20，并由 2026-09-04 的远端存储裁决补全：
 
-  **`.dev` 已经配了 `origin`，且指向主项目同一个 GitHub 仓库**（`git remote -v` 自行确认）。这意味着一条 `git push` 会把开发过程记录——包含评审原件、绝对路径、失败过程、尚未裁决的想法——推到那个远端的 `dotdev` 分支上。这个远端是继承来的，不是为本目录选定的。所以「不要推送」不是一句原则性的谨慎，而是一个已经接好线、按下去就生效的按钮。
+- **本地记录：总是可以主动持久化，不必先问。** 这里存的是工作记录，它最直接的失败模式是丢失；允许短暂的不一致状态，提交边界只按语义划分。
+- **同步：只带当前任务拥有的精确路径。** 不 bulk-copy 整个 `.dev/`，因为其它会话可能正在写不相关报告或 living docs。远端与 active copy 不同时，先判断哪一侧是仍在进行的工作；不得让较旧快照覆盖新 WIP，也不得让未经评审的 active copy 静默替换 reviewed remote snapshot。
+- **推送：`[hard]` 除非用户当次明确指示，不推送。** `origin/dotdev` 是最后一次已发布的持久快照；只存在于本机的提交不得描述为已经在远端。本轮用户明确要求合并远端时，仍须先获取并比较远端 tip，禁止 force push 覆盖并行提交。
+
+## 恢复
+
+从 `origin/dotdev` 恢复时，在专用 worktree 中检出该 orphan 分支，再把需要的 `.dev/` 精确路径还原到主工作树的 ignored active copy；不要把共享主工作树从 `main` 切走，也不要把整个远端树无选择地覆盖到正在被同伴编辑的 `.dev/`。
+
+完整的同步边界、首次远端建立与已发生的失败尝试见 [`docs/upstream/retry-and-continuation/status.md`](docs/upstream/retry-and-continuation/status.md) 的 HTTP 499 状态段及其 `http-499-retry.md`、`review-disposition.md`。
 
 ## 布局
 
@@ -62,6 +68,9 @@
 | `docs/architecture-audit/` | 2026-08-14 那一轮七轴线独立体检（依赖图、重复实现、模块边界、类型泄漏等）及其综合 |
 | `docs/graceful-shutdown/` | 关闭信号到进程退出之间的一切；目前只有 `client-side/`，监听器那一半还散在 `systemd-*` 与 `deployment-systemd` 下 |
 | `docs/project-review-principles-skill/` | `project-review-principles` skill 本身的事实核查与形态评审 |
+| `docs/reasoning-carrier/` | 从另一 source clone 导入的 reasoning carrier v2 规格与评审；原 source ref／worktree 当前不可达，不能视作 current implementation |
+| `docs/timeout-408/` | 从另一 source clone 导入的客户端预响应断连规格、运行态取证和评审；当前 checkout 尚未装位实现 |
+| `docs/xingchen/` | 从另一 source clone 导入的 Xingchen provider 规格与评审；当前 checkout 尚未装位实现 |
 | `docs/early-verification/` | 2026-07-15～17 的 Phase 0～8、Hooks 与 Tokenization 验收原件；只作历史快照，当前验证权威仍是项目根 `CLAUDE.md` 与主仓 `tests/` |
 | `docs/archived-2604-rewrite/` | 早期 peer 写的 `copilot-api-js` 学习笔记，用户 2026-08-20 裁定整体过期，**仅供参考、无权威地位** |
 | `docs/tmp/` | 未分类：判不进任何话题的报告，以及话题尚不明朗时的新报告 |

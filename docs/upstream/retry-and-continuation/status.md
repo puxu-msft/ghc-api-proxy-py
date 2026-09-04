@@ -1,8 +1,18 @@
 # 实现状态与路线
 
-**日期**：2026-08-21。**权威**：`docs/.human-controlled/upstream-retry-and-continuation.md`（下称「人写文档」）。本文只记实现状态与路线，不复述它的裁决。裁决的时间、场合与理由记在 [`decisions.md`](decisions.md)。
+**建立日期**：2026-08-21。**最近同步**：2026-09-04。**权威**：`docs/.human-controlled/upstream-retry-and-continuation.md`（下称「人写文档」）。本文只记实现状态与路线，不复述它的裁决。裁决的时间、场合与理由记在 [`decisions.md`](decisions.md)。
 
-## 当前状态：除 B 阶段外一行代码都还没动
+## 2026-09-04 导入快照：HTTP 499 source 尚未装位到当前 checkout
+
+`origin/dotdev` 导入的 [`http-499-retry.md`](http-499-retry.md)、[`review-disposition.md`](review-disposition.md) 与报告描述**另一份 source clone**：那里的人写 requirement 已加入 `499 Client Closed Request`，实现提交主题为 `fix: retry upstream HTTP 499 responses`。这些文件作为点时开发记录保留，不是当前 checkout 的行为、需求或完成状态。
+
+导入复核时，当前主仓最新提交主题为 `feat: report contextual Responses completion status`；当前 `docs/.human-controlled/upstream-retry-and-continuation.md` 的可继续清单没有 HTTP 499，当前 `src/app/model_provider/ghc_client/errors.py` 的 `RETRYABLE_STATUSES` 也没有 499。因此本主题在当前 checkout 的准确状态是：**外部 clone 的需求、实现与评审记录已持久化，source history 与用户控制 requirement 尚未装位，不得宣称 current／complete。** 恢复条件是对应用户控制提交和 reviewed source history 在当前主仓可达，并重新对账实现、测试和人写 authority；本次 dotdev 合并不授权代用户修改人写文档。
+
+用户选择专用 `origin/dotdev` 作为 `.dev` 的远端持久源这一**存储裁决**独立成立，由本仓根 [`../../../README.md`](../../../README.md) 维护；它不证明同一批文档描述的 source 已进入当前 main。
+
+下面“历史基线”一节是主仓 2026-08-21 `feat: replace the proxy-side continuation design` 之前的点时基线，保留用于解释后续 A～F 路线，不是 2026-09-04 的当前摘要；其后逐阶段更正与本导入快照共同构成可用记录。
+
+## 历史基线：除 B 阶段外一行代码都还没动
 
 **本节描述的是主仓 `8a36fe3`**（即 B 阶段落地之前）。B 阶段随后删除了代理内续写机制；下表中与它相关的行已就地标注。其余各行仍然成立。
 
