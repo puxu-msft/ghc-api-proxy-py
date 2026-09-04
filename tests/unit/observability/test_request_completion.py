@@ -300,9 +300,11 @@ def test_interruption_evidence_is_ordered_typed_and_orthogonal_to_delivery(
         phase=InterruptionPhase.RESPONSE_STREAM,
     )
     completion.note_upstream_stream_failure(
-        RuntimeError("peer closed"),
         attempt=2,
         category="network",
+        exception_module="httpx2",
+        exception_type="RemoteProtocolError",
+        message="peer closed",
     )
     completion.note_asgi_message_sent({"type": "http.response.start", "status": 200})
     completion.note_asgi_message_sent({"type": "http.response.body", "body": b"retry"})
@@ -334,7 +336,8 @@ def test_interruption_evidence_is_ordered_typed_and_orthogonal_to_delivery(
     assert serialized[2]["origin"] == "upstream"
     assert serialized[2]["attempt"] == 2
     assert serialized[2]["category"] == "network"
-    assert serialized[2]["exception_type"] == "RuntimeError"
+    assert serialized[2]["exception_module"] == "httpx2"
+    assert serialized[2]["exception_type"] == "RemoteProtocolError"
     assert serialized[2]["message"] == "peer closed"
     assert serialized[2]["continuation_synthesized"] is True
     assert [item["observed_s"] for item in serialized] == sorted(

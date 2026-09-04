@@ -333,19 +333,26 @@ class RequestCompletionCoordinator:
 
     def note_upstream_stream_failure(
         self,
-        error: BaseException,
         *,
         attempt: int,
         category: str,
+        exception_module: str,
+        exception_type: str,
+        message: str | None,
     ) -> None:
-        self._note_interruption(
-            kind=InterruptionKind.UPSTREAM_STREAM_FAILURE,
-            origin=InterruptionOrigin.UPSTREAM,
-            phase=InterruptionPhase.UPSTREAM_BODY,
-            attempt=attempt,
-            category=category,
-            error=error,
-            continuation_synthesized=True,
+        self._interruptions.append(
+            InterruptionObservation(
+                kind=InterruptionKind.UPSTREAM_STREAM_FAILURE,
+                origin=InterruptionOrigin.UPSTREAM,
+                phase=InterruptionPhase.UPSTREAM_BODY,
+                observed_s=time.monotonic() - self.trace.started,
+                attempt=attempt,
+                category=category,
+                exception_module=exception_module,
+                exception_type=exception_type,
+                message=message,
+                continuation_synthesized=True,
+            )
         )
 
     def note_wrapped_failure(self, error: BaseException, *, origin: FailureOrigin) -> None:

@@ -1187,6 +1187,10 @@ def test_max_output_tokens_becomes_the_anthropic_stop_reason() -> None:
     assert record["stop_reason"] == "max_tokens"
     assert record["blocks"] == 1
     assert TOOL_NAME not in record.get("tools", [])
+    assert not any(
+        item["kind"] == "upstream_stream_failure"
+        for item in record["observation"]["interruptions"]
+    )
 
 
 def test_untranslated_route_body_is_returned_unchanged() -> None:
@@ -4842,6 +4846,10 @@ def test_a_torn_stream_the_client_never_saw_is_replayed_end_to_end() -> None:
     assert events[-1] == "message_stop"
     assert "kept" in response.text
     assert len(calls) == 2
+    assert not any(
+        item["kind"] == "upstream_stream_failure"
+        for item in _records()[-1]["observation"]["interruptions"]
+    )
 
 
 def test_a_replay_on_the_translation_leg_sends_the_conversation_again(
@@ -5283,6 +5291,70 @@ def test_an_interrupted_turn_is_handed_back_to_the_client_as_a_tool_call(
     assert b"message_stop" in delivered
     # And what the client kept is still there: the hand-over adds an ending, it does not replace one.
     assert b'"text":"first"' in delivered
+    record = _records()[-1]
+    assert record["status"] == "retry"
+    assert record["observation"]["delivery"]["state"] == "accepted"
+    assert record["observation"]["delivery"]["unit"] == "translated_drain"
+    assert record["observation"]["delivery"]["failure"] is None
+    interruptions = record["observation"]["interruptions"]
+    upstream_interruptions = [
+        item for item in interruptions if item["kind"] == "upstream_stream_failure"
+    ]
+    assert len(upstream_interruptions) == 1
+    interruption = upstream_interruptions[0]
+    assert interruption["kind"] == "upstream_stream_failure"
+    assert interruption["origin"] == "upstream"
+    assert interruption["phase"] == "upstream_body"
+    assert interruption["attempt"] == 1
+    assert interruption["category"] == handed["input"]["category"]
+    assert interruption["exception_module"] == httpx2.RemoteProtocolError.__module__
+    assert interruption["exception_type"] == httpx2.RemoteProtocolError.__qualname__
+    assert "ConnectionTerminated" in interruption["message"]
+    assert interruption["continuation_synthesized"] is True
+
+
+def test_only_the_attempt_that_synthesizes_continuation_records_an_interruption() -> None:
+    calls: list[int] = []
+
+    async def first_attempt() -> AsyncIterator[bytes]:
+        yield (
+            b'event: content_block_start\ndata: {"index":0,"content_block":{"type":"text"}}\n\n'
+        )
+        raise httpx2.ReadError("first attempt tore before a complete block")
+
+    async def second_attempt() -> AsyncIterator[bytes]:
+        yield sse_upstream("kept").partition(b"event: message_delta")[0]
+        raise httpx2.RemoteProtocolError("second attempt tore after a complete block")
+
+    def upstream(_: httpx2.Request) -> httpx2.Response:
+        calls.append(1)
+        body = first_attempt() if len(calls) == 1 else second_attempt()
+        return httpx2.Response(
+            200,
+            content=body,
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client, _ = make_client(upstream)
+    delivered = _delivered(client)
+
+    assert len(calls) == 2
+    handed = _handed_back(delivered)
+    record = _records()[-1]
+    interruptions = [
+        item
+        for item in record["observation"]["interruptions"]
+        if item["kind"] == "upstream_stream_failure"
+    ]
+    assert len(interruptions) == 1
+    interruption = interruptions[0]
+    assert interruption["attempt"] == 2
+    assert interruption["category"] == handed["input"]["category"] == "network"
+    assert interruption["exception_type"] == httpx2.RemoteProtocolError.__qualname__
+    assert interruption["message"] == "second attempt tore after a complete block"
+    assert record["attempts"] == 2
+    assert len(record["replaced_failures"]) == 1
+    assert "first attempt tore" in record["replaced_failures"][0]
 
 
 def test_the_marker_sits_below_this_sides_bookkeeping_in_production(
@@ -5510,6 +5582,10 @@ def test_a_turn_that_ran_out_of_room_is_handed_back_the_same_way() -> None:
     assert b'"stop_reason":"tool_use"' in delivered
     # The reason upstream gave is not what goes on the wire — the turn now ends in a tool call — but what it produced is still delivered.
     assert b'"text":"first"' in delivered
+    assert not any(
+        item["kind"] == "upstream_stream_failure"
+        for item in _records()[-1]["observation"]["interruptions"]
+    )
 
 
 def test_a_client_request_in_another_format_is_not_handed_a_tool_call() -> None:
@@ -5535,6 +5611,10 @@ def test_a_client_request_in_another_format_is_not_handed_a_tool_call() -> None:
         "POST", "/responses", json={"model": "gpt-model", "input": [], "stream": True}
     ) as response:
         b"".join(response.iter_bytes())
+    assert not any(
+        item["kind"] == "upstream_stream_failure"
+        for item in _records()[-1]["observation"]["interruptions"]
+    )
 
 
 def test_a_handed_back_turn_is_neither_a_success_nor_a_failure_on_the_line() -> None:
@@ -5583,7 +5663,12 @@ def test_a_turn_upstream_finished_is_not_handed_back_when_the_connection_goes_af
     assert b'"text":"complete"' in delivered
     assert b'"stop_reason":"end_turn"' in delivered
     assert b"message_stop" in delivered
-    assert _records()[-1]["status"] == "ok"
+    record = _records()[-1]
+    assert record["status"] == "ok"
+    assert not any(
+        item["kind"] == "upstream_stream_failure"
+        for item in record["observation"]["interruptions"]
+    )
 
 
 def test_a_hand_back_on_the_translation_leg_counts_the_client_s_own_messages() -> None:

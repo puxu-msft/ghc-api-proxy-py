@@ -6,6 +6,7 @@ Split out of `app.server.pipeline_app` on 2026-08-22. Both decisions here are do
 """
 
 from asyncio import CancelledError
+from dataclasses import dataclass
 from typing import Any, cast
 from uuid import uuid4
 
@@ -27,6 +28,20 @@ CATEGORY_FOR_REASON = {
     RetryReason.SERVER_ERROR: ErrorCategory.UPSTREAM,
     RetryReason.GITHUB_TOKEN_EXPIRED: ErrorCategory.AUTH,
 }
+
+
+@dataclass(frozen=True, slots=True)
+class HandBackTrigger:
+    category: str
+    exception_module: str
+    exception_type: str
+    message: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class HandBackOutcome:
+    payload: dict[str, Any]
+    trigger: HandBackTrigger | None
 
 
 def client_message_count(payload: dict[str, Any]) -> int:
@@ -69,6 +84,17 @@ def one_line(text: str) -> str:
     if len(flat) <= _MAX_LINK_CHARS:
         return flat
     return f"{flat[:_MAX_LINK_CHARS]}… (+{len(flat) - _MAX_LINK_CHARS} more chars)"
+
+
+def _safe_outer_message(error: BaseException) -> str | None:
+    for render in (str, repr):
+        try:
+            rendered = render(error)
+        except Exception:
+            continue
+        if rendered:
+            return one_line(rendered)
+    return None
 
 
 def _chain(error: BaseException) -> tuple[list[BaseException], bool]:
@@ -228,8 +254,8 @@ def hand_back_block(
     request_id: str,
     error: BaseException | None,
     stop_reason: str,
-) -> dict[str, Any] | None:
-    """The `tool_use` block that hands an unfinishable turn to the client, or `None` to leave the ending alone.
+) -> HandBackOutcome | None:
+    """The hand-back action and its trigger, or `None` to leave the ending alone.
 
     Only for a client that asked in Anthropic Messages. The block is that protocol's shape, and the whole mechanism rests on the client executing a tool and coming back — which is a Claude Code behaviour, and the only harness in use. `upstream-retry-and-continuation.md` accepts that limit rather than guessing at the others.
 
@@ -253,8 +279,10 @@ def hand_back_block(
     # Category is what the MCP server keys its reply on, so it is read through the same mapping that decided this failure was continuable in the first place. Classified raw, a transport tear is `internal` — it is not an `OSError` — while the retry path calls the same failure `network`, and the two answers would have disagreed about one event.
     #
     # A turn upstream cut short for want of room is not an error and has no `ErrorCategory`. It travels under the stop reason upstream gave it, which is also what a reader of the MCP server's journal will recognise. **The value is provisional**: the user ruled that this case gets a category of its own but has not named it, and the server that reads it is being changed in another repository. See `.dev/docs/upstream/retry-and-continuation/decisions.md` 4.1.
+    trigger: HandBackTrigger | None
     if error is None:
         category = stop_reason
+        trigger = None
     else:
         # `Exception`, because that is what decided the failure was continuable in the first place — the endings that are not exceptions never reach here with one.
         reason = replay_reason(error) if isinstance(error, Exception) else None
@@ -266,20 +294,29 @@ def hand_back_block(
             if reason
             else ErrorCategory.UPSTREAM.value
         )
+        trigger = HandBackTrigger(
+            category=category,
+            exception_module=type(error).__module__,
+            exception_type=type(error).__qualname__,
+            message=_safe_outer_message(error),
+        )
     detail = interruption_message(
         error=error,
         stop_reason=stop_reason,
         request_id=request_id,
         attempt_count=context.attempt_count,
     )
-    return {
-        "type": "tool_use",
-        "id": f"toolu_{uuid4().hex[:24]}",
-        "name": name,
-        "input": {
-            # The client's own count, not the upstream request's: it advances by exactly two per hand-over — one assistant turn, one tool result — which is what makes "the same number twice" an exact answer rather than a heuristic. Ruled 2026-08-21.
-            "num_messages": client_message_count(inbound_payload),
-            "category": category,
-            "message": detail,
+    return HandBackOutcome(
+        payload={
+            "type": "tool_use",
+            "id": f"toolu_{uuid4().hex[:24]}",
+            "name": name,
+            "input": {
+                # The client's own count, not the upstream request's: it advances by exactly two per hand-over — one assistant turn, one tool result — which is what makes "the same number twice" an exact answer rather than a heuristic. Ruled 2026-08-21.
+                "num_messages": client_message_count(inbound_payload),
+                "category": category,
+                "message": detail,
+            },
         },
-    }
+        trigger=trigger,
+    )

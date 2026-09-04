@@ -64,7 +64,7 @@ from app.pipeline.delivery_policy import (
 )
 from app.pipeline.driver import handle, handle_bounded, handle_count_tokens, ledger_for
 from app.pipeline.error_classify import describe
-from app.pipeline.hand_over import hand_back_block, one_line, replay_reason
+from app.pipeline.hand_over import HandBackOutcome, hand_back_block, one_line, replay_reason
 from app.pipeline.reply import reply_summary, response_payload
 from app.pipeline.request import RequestContext, WireFormat
 from app.server.app_state import chain_of
@@ -575,7 +575,10 @@ async def _dispatch_after_body(
     _hand_over_reasons = frozenset(chain.config.upstream_request_retry.hand_over_stop_reasons)
 
 
-    def _hand_back(error: BaseException | None, stop_reason: str) -> dict[str, Any] | None:
+    def _hand_back(
+        error: BaseException | None,
+        stop_reason: str,
+    ) -> HandBackOutcome | None:
         return hand_back_block(
             chain=chain,
             context=context,
@@ -753,13 +756,22 @@ async def _dispatch_after_body(
             if accounting.handed_over:
                 # One per turn. Today the two call sites in `_deliver` each return, so a second call cannot happen — but that is a property of control flow somewhere else, and the guard's whole value is surviving a change to it. This project has already found guards stranded on a path nobody takes.
                 return None
-            payload = _hand_back(error, stop_reason)
-            if payload is not None:
-                # The client is about to get a complete reply it will act on, and the upstream attempt behind it did not finish.
-                accounting.handed_over = True
-                # Kept because a hand-over is the one ending that swallows its cause: the exception never leaves the delivery generator, so `_StreamAccounting.failure` — which is set from what propagates — stays `None` and the completion line had nothing to say about *why* the turn was handed back. Two reviews found failures reaching the client as a clean `retry` line with no account of them anywhere.
-                accounting.handed_over_error = error
-            return payload
+            outcome = _hand_back(error, stop_reason)
+            if outcome is None:
+                return None
+            if outcome.trigger is not None and error is not None:
+                accounting.completion.note_upstream_stream_failure(
+                    attempt=context.attempt_count,
+                    category=outcome.trigger.category,
+                    exception_module=outcome.trigger.exception_module,
+                    exception_type=outcome.trigger.exception_type,
+                    message=outcome.trigger.message,
+                )
+            # The client is about to get a complete reply it will act on, and the upstream attempt behind it did not finish.
+            accounting.handed_over = True
+            # Kept because a hand-over is the one ending that swallows its cause: the exception never leaves the delivery generator, so `_StreamAccounting.failure` — which is set from what propagates — stays `None` and the completion line had nothing to say about *why* the turn was handed back. Two reviews found failures reaching the client as a clean `retry` line with no account of them anywhere.
+            accounting.handed_over_error = error
+            return outcome.payload
 
         continuation = ContinuationSupport(
             synthesize=_hand_back_streaming, stop_reasons=_hand_over_reasons
@@ -856,7 +868,7 @@ async def _dispatch_after_body(
         # The truncated block was already dropped during translation, where upstream's `status` is still readable. This is the other half of that: dropping content is only defensible because the client is handed a way to get it back.
         content = payload.get("content")
         if isinstance(content, list):
-            cast(list[Any], content).append(handed)
+            cast(list[Any], content).append(handed.payload)
             payload["stop_reason"] = TOOL_USE
             # Neither `ok` nor `fail`, for the same reason as the streaming path. Set here rather than by an accounting object, because a buffered request settles its line inline.
             trace.status_override = "retry"
