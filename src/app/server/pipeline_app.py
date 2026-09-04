@@ -13,7 +13,9 @@ from importlib.metadata import PackageNotFoundError, version
 import anyio
 from fastapi import FastAPI
 
+from app.config.schema import GithubCopilotProviderConfig
 from app.core.chain import Chain
+from app.model_provider.ghc_client.models import run_model_refresh_loop
 from app.observability.logging import get_logger
 from app.observability.tui import footer_tui_or_none
 from app.server.admission import InFlightLimit
@@ -38,6 +40,39 @@ def create_pipeline_app(chain: Chain) -> FastAPI:
         max_inflight=chain.config.proactive_rate_limiter.max_inflight,
     )
     return app
+
+
+def _catalog_refresh_intervals(chain: Chain) -> tuple[tuple[str, int], ...]:
+    """The configured dynamic providers whose catalog task should exist."""
+    return tuple(
+        (name, provider.model_refresh_interval)
+        for name, provider in chain.config.model_providers.items()
+        if isinstance(provider, GithubCopilotProviderConfig)
+        and provider.model_refresh_interval > 0
+    )
+
+
+async def _run_catalog_refresh(
+    chain: Chain,
+    name: str,
+    interval_seconds: int,
+) -> None:
+    provider = chain.providers.get(name)
+    logger = get_logger()
+
+    def report(error: Exception) -> None:
+        logger.warning(
+            "model provider %r: background catalog refresh failed: %s",
+            name,
+            error,
+            status="fail",
+        )
+
+    await run_model_refresh_loop(
+        provider.refresh_catalog,
+        interval_seconds=interval_seconds,
+        on_error=report,
+    )
 
 
 def _version() -> str:
@@ -75,6 +110,13 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
     tui = footer_tui_or_none(chain.active_requests, chain.capabilities)
     async with anyio.create_task_group() as flushing:
         flushing.start_soon(chain.tokenization.run_periodic_flush, TOKENIZATION_FLUSH_SECONDS)
+        for provider_name, interval_seconds in _catalog_refresh_intervals(chain):
+            flushing.start_soon(
+                _run_catalog_refresh,
+                chain,
+                provider_name,
+                interval_seconds,
+            )
         try:
             with ExitStack() as terminal:
                 if tui is not None:

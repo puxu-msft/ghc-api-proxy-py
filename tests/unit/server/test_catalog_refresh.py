@@ -6,10 +6,16 @@ Its own file because the defect it guards against is invisible from everywhere e
 from types import SimpleNamespace
 from typing import cast
 
+import anyio
 import pytest
 
+from app.config.schema import ProxyConfig
 from app.core.chain import Chain
+from app.model_provider.ghc_client.models import run_model_refresh_loop
 from app.server.composition import refresh_catalogs
+from app.server.pipeline_app import (
+    _catalog_refresh_intervals,  # pyright: ignore[reportPrivateUsage]
+)
 
 
 class _Provider:
@@ -79,3 +85,84 @@ async def test_providers_are_refreshed_in_a_deterministic_order() -> None:
     providers = {name: _Provider(name, log=log) for name in ("zeta", "alpha", "mid")}
     await refresh_catalogs(_chain(providers))
     assert log == ["alpha", "mid", "zeta"]
+
+
+def test_only_positive_dynamic_provider_intervals_create_refresh_jobs() -> None:
+    config = ProxyConfig.model_validate(
+        {
+            "model_providers": {
+                "active": {"type": "github_copilot", "model_refresh_interval": 17},
+                "disabled": {"type": "github_copilot", "model_refresh_interval": 0},
+                "static": {"type": "codebuddy"},
+            },
+            "default_model_provider": "active",
+        }
+    )
+    chain = cast(Chain, SimpleNamespace(config=config))
+
+    assert _catalog_refresh_intervals(chain) == (("active", 17),)
+
+
+@pytest.mark.asyncio
+async def test_periodic_refresh_reports_one_failure_and_keeps_running() -> None:
+    class StopLoop(Exception):
+        pass
+
+    sleeps: list[float] = []
+    calls = 0
+    errors: list[Exception] = []
+
+    async def sleep(interval: float) -> None:
+        sleeps.append(interval)
+        if len(sleeps) == 3:
+            raise StopLoop
+
+    async def refresh() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("catalog unavailable")
+
+    with pytest.raises(StopLoop):
+        await run_model_refresh_loop(
+            refresh,
+            interval_seconds=17,
+            on_error=errors.append,
+            sleep=sleep,
+        )
+
+    assert sleeps == [17, 17, 17]
+    assert calls == 2
+    assert len(errors) == 1
+    assert str(errors[0]) == "catalog unavailable"
+
+
+@pytest.mark.asyncio
+async def test_periodic_refresh_cancels_an_inflight_refresh() -> None:
+    entered = anyio.Event()
+    cancelled = anyio.Event()
+
+    async def no_sleep(_interval: float) -> None:
+        return None
+
+    async def refresh() -> None:
+        entered.set()
+        try:
+            await anyio.sleep_forever()
+        finally:
+            cancelled.set()
+
+    async def run() -> None:
+        await run_model_refresh_loop(
+            refresh,
+            interval_seconds=17,
+            on_error=lambda _error: None,
+            sleep=no_sleep,
+        )
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(run)
+        await entered.wait()
+        tasks.cancel_scope.cancel()
+
+    assert cancelled.is_set()
