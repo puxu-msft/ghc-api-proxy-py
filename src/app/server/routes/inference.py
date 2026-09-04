@@ -29,6 +29,8 @@ from app.observability.request_completion import (
 from app.observability.request_completion import (
     InterruptionPhase,
     RequestCompletionCoordinator,
+    safe_exception_graph_notes,
+    safe_exception_notes,
 )
 from app.observability.request_log import (
     LogStatus,
@@ -133,23 +135,14 @@ async def serve(request: Request) -> Response:
             failure,
             origin=CompletionFailureOrigin.DISPATCH,
         )
-        secondary_failures = _disconnect_secondary_failures(failure)
-        for secondary in secondary_failures:
-            completion.note_secondary_cleanup(secondary)
-            completion.note_wrapped_failure(
-                secondary,
-                origin=CompletionFailureOrigin.CLEANUP,
-            )
+        if isinstance(failure, ClientDisconnect):
+            _note_disconnect_cleanup(completion, failure)
         completion.settle(
             status_code=None,
             upstream_response_bytes=trace.upstream_response_body_bytes,
         )
         completion.publish()
-        if (
-            isinstance(failure, ClientDisconnect)
-            and not secondary_failures
-            and not getattr(failure, "__notes__", None)
-        ):
+        if isinstance(failure, ClientDisconnect):
             return _DisconnectedResponse()
         raise
     completion.mark_response_ready(response.status_code)
@@ -250,7 +243,7 @@ def _cancellation_only(error: BaseException | None) -> bool:
         if id(current) in seen:
             continue
         seen.add(id(current))
-        if getattr(current, "__notes__", None):
+        if safe_exception_notes(current):
             return False
         if isinstance(current, asyncio.CancelledError):
             found_cancellation = True
@@ -267,18 +260,17 @@ def _secondary_failure_key(
     if not isinstance(error, BaseExceptionGroup):
         return ("exception", str(id(error)), frozenset())
 
+    normalized_error = cast(BaseException, error)
     seen: set[int] = set()
-    facts: set[tuple[str, str]] = set()
+    facts: set[tuple[str, str]] = {
+        ("note", note) for note in safe_exception_graph_notes(normalized_error)
+    }
     pending: list[BaseException] = [error]
     while pending:
         current = pending.pop()
         if id(current) in seen:
             continue
         seen.add(id(current))
-        facts.update(
-            ("note", note)
-            for note in getattr(current, "__notes__", ())
-        )
         if isinstance(current, asyncio.CancelledError | BaseExceptionGroup):
             pending.extend(_exception_links(cast(BaseException, current)))
         else:
@@ -303,7 +295,7 @@ def _disconnect_secondary_failures(error: BaseException) -> list[BaseException]:
         if _cancellation_only(current):
             continue
         if isinstance(current, asyncio.CancelledError):
-            if getattr(current, "__notes__", None):
+            if safe_exception_notes(current):
                 key = _secondary_failure_key(current)
                 if key not in seen_failures:
                     seen_failures.add(key)
@@ -315,6 +307,15 @@ def _disconnect_secondary_failures(error: BaseException) -> list[BaseException]:
             seen_failures.add(key)
             secondaries.append(current)
     return secondaries
+
+
+def _note_disconnect_cleanup(
+    completion: RequestCompletionCoordinator,
+    failure: ClientDisconnect,
+) -> None:
+    completion.note_secondary_cleanup_notes(failure)
+    for secondary in _disconnect_secondary_failures(failure):
+        completion.note_secondary_cleanup_failure(secondary)
 
 
 def _raise_with_secondaries(
@@ -1411,6 +1412,8 @@ class _AccountedStreamingResponse(StreamingResponse):
                     else CompletionFailureOrigin.WRAPPED
                 ),
             )
+            if isinstance(error, ClientDisconnect):
+                _note_disconnect_cleanup(self._accounting.completion, error)
         if observed_background is not None and self.background is observed_background:
             self.background = original_background
 
@@ -1421,10 +1424,15 @@ class _AccountedStreamingResponse(StreamingResponse):
                 primary=primary,
             )
             if cleanup_error is not None:
-                self._accounting.completion.note_wrapped_failure(
-                    cleanup_error,
-                    origin=CompletionFailureOrigin.CLEANUP,
-                )
+                if isinstance(primary, ClientDisconnect):
+                    self._accounting.completion.note_secondary_cleanup_failure(
+                        cleanup_error
+                    )
+                else:
+                    self._accounting.completion.note_wrapped_failure(
+                        cleanup_error,
+                        origin=CompletionFailureOrigin.CLEANUP,
+                    )
             elif cleanup_cancellation is not None:
                 self._accounting.completion.note_wrapped_failure(
                     cleanup_cancellation,
@@ -1432,10 +1440,15 @@ class _AccountedStreamingResponse(StreamingResponse):
                 )
             if primary is None:
                 primary = cleanup_cancellation
+            if isinstance(primary, ClientDisconnect):
+                return
             if primary is not None:
                 if cleanup_error is not None:
                     raise_with_cleanup_under(primary, cleanup_error)
                 raise primary
+            if isinstance(cleanup_error, ClientDisconnect):
+                _note_disconnect_cleanup(self._accounting.completion, cleanup_error)
+                return
             if cleanup_error is not None:
                 raise cleanup_error
         finally:

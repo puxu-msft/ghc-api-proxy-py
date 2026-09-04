@@ -93,6 +93,7 @@ class FailureSummary:
     category: FailureCategory
     type: str | None
     message: str | None
+    notes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,14 +238,20 @@ class RequestCompletionCoordinator:
     _additional_failures: list[FailureSummary] = field(
         default_factory=lambda: list[FailureSummary]()
     )
-    _seen_failures: list[BaseException] = field(
-        default_factory=lambda: list[BaseException]()
+    _seen_failures: list[tuple[BaseException, FailureOrigin]] = field(
+        default_factory=lambda: list[tuple[BaseException, FailureOrigin]]()
     )
     _interruptions: list[InterruptionObservation] = field(
         default_factory=lambda: list[InterruptionObservation]()
     )
     _exception_messages: list[tuple[BaseException, str | None]] = field(
         default_factory=lambda: list[tuple[BaseException, str | None]]()
+    )
+    _exception_notes: list[tuple[BaseException, tuple[str, ...]]] = field(
+        default_factory=lambda: list[tuple[BaseException, tuple[str, ...]]]()
+    )
+    _secondary_detail_suffixes: list[str] = field(
+        default_factory=lambda: list[str]()
     )
     _response_ready_s: float | None = None
     _legacy_duration_s: float | None = None
@@ -387,13 +394,46 @@ class RequestCompletionCoordinator:
             self.trace.detail = "ASGI response returned without a terminal delivery message"
 
     def note_secondary_cleanup(self, error: BaseException) -> None:
-        detail = self._exception_message(error) or type(error).__qualname__
-        suffix = f"cleanup also failed: {detail}"
+        details = [
+            self._exception_message(error) or type(error).__qualname__,
+            *self._exception_notes_for(error),
+        ]
+        self._append_secondary_detail(f"cleanup also failed: {'; '.join(details)}")
+
+    def note_secondary_cleanup_failure(self, error: BaseException) -> bool:
+        # Console detail and structured-failure identity are separate axes. An inner delivery layer may have recorded this exact cleanup object before the outer response discovers that it is secondary to a disconnect; only that cleanup-origin case needs its suffix filled in here. A send error already serving as the primary may also sit under ClientDisconnect.__cause__, and must not be mislabeled as a second cleanup failure.
+        for seen, origin in self._seen_failures:
+            if error is seen:
+                if origin is FailureOrigin.CLEANUP:
+                    self.note_secondary_cleanup(error)
+                return False
+        self.note_secondary_cleanup(error)
+        self._note_failure(error, origin=FailureOrigin.CLEANUP)
+        return True
+
+    def note_secondary_cleanup_notes(self, error: BaseException) -> None:
+        for note in self._exception_notes_for(error):
+            self._append_secondary_detail(
+                note if note.startswith("cleanup also failed:") else f"cleanup note: {note}"
+            )
+
+    def _append_secondary_detail(self, suffix: str) -> None:
+        if suffix in self._secondary_detail_suffixes:
+            return
+        self._secondary_detail_suffixes.append(suffix)
+        self._append_detail(suffix)
+
+    def _append_detail(self, suffix: str) -> None:
         self.trace.detail = (
             f"{self.trace.detail}; {suffix}"
             if self.trace.detail
             else suffix
         )
+
+    def _ending_with_secondaries(self, detail: str) -> str:
+        if not self._secondary_detail_suffixes:
+            return detail
+        return "; ".join((detail, *self._secondary_detail_suffixes))
 
     def note_stream_ending(
         self,
@@ -406,11 +446,11 @@ class RequestCompletionCoordinator:
         if authoritative:
             self._authoritative_stream_ending = True
             self.trace.status_override = status
-            self.trace.detail = detail
+            self.trace.detail = self._ending_with_secondaries(detail)
             return
         if self._failure is None:
             self.trace.status_override = status
-            self.trace.detail = detail
+            self.trace.detail = self._ending_with_secondaries(detail)
             return
         if (
             status == "gone"
@@ -418,7 +458,7 @@ class RequestCompletionCoordinator:
             in {FailureCategory.DISCONNECT, FailureCategory.CANCELLED}
         ):
             # Keep the structured primary message in DeliveryObservation while retaining the established stream-specific console explanation for routine client aborts. Server-side send failures keep their exact primary detail.
-            self.trace.detail = detail
+            self.trace.detail = self._ending_with_secondaries(detail)
 
     def settle(
         self,
@@ -546,14 +586,28 @@ class RequestCompletionCoordinator:
         self._exception_messages.append((error, message))
         return message
 
+    def _exception_notes_for(self, error: BaseException) -> tuple[str, ...]:
+        normalized_error = error
+        for seen, notes in self._exception_notes:
+            if normalized_error is seen:
+                return notes
+        notes = (
+            safe_exception_graph_notes(normalized_error)
+            if isinstance(error, BaseExceptionGroup)
+            else safe_exception_notes(normalized_error)
+        )
+        self._exception_notes.append((normalized_error, notes))
+        return notes
+
     def _note_failure(self, error: BaseException, *, origin: FailureOrigin) -> None:
-        if any(error is seen for seen in self._seen_failures):
+        if any(error is seen for seen, _origin in self._seen_failures):
             return
-        self._seen_failures.append(error)
+        self._seen_failures.append((error, origin))
         summary = _failure_summary(
             error,
             origin=origin,
             message=self._exception_message(error),
+            notes=self._exception_notes_for(error),
         )
         if self._state is DeliveryState.ACCEPTED:
             if self._post_delivery_failure is None:
@@ -612,11 +666,80 @@ def _safe_exception_message(error: BaseException) -> str | None:
     return None
 
 
+def safe_exception_notes(error: BaseException) -> tuple[str, ...]:
+    """Read one exception's notes as inert base strings without trusting dynamic methods."""
+    try:
+        raw_notes = getattr(error, "__notes__", None)
+    except BaseException as rendering_error:
+        _warn_no_raise(
+            "could not read %s notes for request observability: %r",
+            type(error).__qualname__,
+            rendering_error,
+        )
+        return ("<exception notes unavailable>",)
+    if raw_notes is None:
+        return ()
+    if type(raw_notes) is not list:
+        _warn_no_raise(
+            "ignored an invalid %s notes container for request observability",
+            type(error).__qualname__,
+        )
+        return ("<invalid exception notes container>",)
+
+    normalized: list[str] = []
+    notes = cast(list[object], raw_notes)
+    for note in notes:
+        if not isinstance(note, str):
+            normalized.append("<invalid exception note>")
+            continue
+        try:
+            # Calling the base C implementation avoids a str subclass's overridden `split`, `encode`, `__hash__`, or related methods from re-entering request control flow.
+            base_note = bytes.decode(str.encode(note, "utf-8", "replace"), "utf-8")
+            rendered = one_line(base_note)
+        except BaseException as rendering_error:
+            _warn_no_raise(
+                "could not normalize an exception note for request observability: %r",
+                rendering_error,
+            )
+            normalized.append("<unrenderable exception note>")
+            continue
+        if rendered:
+            normalized.append(rendered)
+    return tuple(normalized)
+
+
+def safe_exception_graph_notes(error: BaseException) -> tuple[str, ...]:
+    """Collect normalized notes from a whole cause/context/group graph once each."""
+    seen_nodes: set[int] = set()
+    seen_notes: set[str] = set()
+    notes: list[str] = []
+    pending = [error]
+    while pending:
+        current = pending.pop()
+        if id(current) in seen_nodes:
+            continue
+        seen_nodes.add(id(current))
+        for note in safe_exception_notes(current):
+            if note not in seen_notes:
+                seen_notes.add(note)
+                notes.append(note)
+        pending.extend(
+            nested
+            for nested in (current.__cause__, current.__context__)
+            if nested is not None
+        )
+        if isinstance(current, BaseExceptionGroup):
+            group = cast(BaseExceptionGroup[BaseException], current)
+            pending.extend(group.exceptions)
+    return tuple(notes)
+
+
 def _failure_summary(
     error: BaseException,
     *,
     origin: FailureOrigin,
     message: str | None,
+    notes: tuple[str, ...],
 ) -> FailureSummary:
     if isinstance(error, asyncio.CancelledError):
         category = FailureCategory.CANCELLED
@@ -631,6 +754,7 @@ def _failure_summary(
         category=category,
         type=error.__class__.__name__,
         message=message,
+        notes=notes,
     )
 
 
@@ -852,12 +976,15 @@ def _exact_usage_dict(exact: ExactUsage | None) -> dict[str, JsonValue] | None:
 def _failure_dict(failure: FailureSummary | None) -> dict[str, JsonValue] | None:
     if failure is None:
         return None
-    return {
+    value: dict[str, JsonValue] = {
         "origin": failure.origin.value,
         "category": failure.category.value,
         "type": failure.type,
         "message": failure.message,
     }
+    if failure.notes:
+        value["notes"] = list(failure.notes)
+    return value
 
 
 def _interruption_dict(
@@ -968,4 +1095,6 @@ __all__ = [
     "InterruptionPhase",
     "RequestCompletionCoordinator",
     "TimingObservation",
+    "safe_exception_graph_notes",
+    "safe_exception_notes",
 ]

@@ -8,7 +8,7 @@ from typing import Any, cast
 import pytest
 from starlette.background import BackgroundTask
 from starlette.requests import ClientDisconnect
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.types import Message, Receive, Scope, Send
 
 import app.observability.request_completion as completion_module
@@ -1082,12 +1082,9 @@ async def test_stream_cleanup_failure_does_not_replace_a_send_disconnect(
         if message["type"] == "http.response.body":
             raise OSError("client transport closed")
 
-    with pytest.raises(ClientDisconnect) as raised:
-        await response(STREAM_SCOPE, receive, send)
+    await response(STREAM_SCOPE, receive, send)
 
     assert receive_calls == 0
-    assert isinstance(raised.value.__cause__, RuntimeError)
-    assert str(raised.value.__cause__) == "inner cleanup failed"
     record = store.observation_snapshot().completed[-1]
     assert record.status == "gone"
     assert record.delivery.state is DeliveryState.STARTED
@@ -1095,7 +1092,76 @@ async def test_stream_cleanup_failure_does_not_replace_a_send_disconnect(
     assert record.delivery.failure.origin is FailureOrigin.SEND
     assert record.delivery.failure.category is FailureCategory.DISCONNECT
     assert record.delivery.failure.message == "client transport closed"
+    (additional,) = tuple(
+        failure
+        for failure in record.delivery.additional_failures
+        if failure.origin is FailureOrigin.CLEANUP
+    )
+    assert additional.type == "RuntimeError"
+    assert additional.message == "inner cleanup failed"
+    assert record.request_line().detail == (
+        "delivery stopped before upstream finished; "
+        "cleanup also failed: inner cleanup failed"
+    )
     assert record.interruptions == ()
+
+
+@pytest.mark.asyncio
+async def test_stream_disconnect_note_survives_authoritative_ending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    completion, trace, store, records, _logger = _coordinator(monkeypatch)
+
+    async def body() -> AsyncGenerator[bytes]:
+        if False:
+            yield b""
+
+    accounting = _StreamAccounting(
+        chain=completion.chain,
+        request_id=trace.request_id,
+        trace=trace,
+        completion=completion,
+        status_code=200,
+    )
+    content = _tracked_delivery(body(), accounting)
+    response = _AccountedStreamingResponse(content, accounting, status_code=200)
+    failure = ClientDisconnect()
+    failure.add_note("cleanup also failed: note-only streaming cleanup")
+
+    async def disconnect(
+        self: StreamingResponse,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+    ) -> None:
+        del self, scope, receive, send
+        raise failure
+
+    async def send(_message: Message) -> None:
+        pass
+
+    monkeypatch.setattr(StreamingResponse, "__call__", disconnect)
+    await response(STREAM_SCOPE, receive_request, send)
+
+    record = store.observation_snapshot().completed[-1]
+    assert record.status == "gone"
+    assert record.delivery.failure is not None
+    assert record.delivery.failure.type == "ClientDisconnect"
+    assert record.delivery.failure.notes == (
+        "cleanup also failed: note-only streaming cleanup",
+    )
+    assert record.request_line().detail == (
+        "delivery stopped before upstream finished; "
+        "cleanup also failed: note-only streaming cleanup"
+    )
+    delivery = cast(
+        dict[str, Any],
+        cast(dict[str, Any], records[-1]["observation"])["delivery"],
+    )
+    serialized_failure = cast(dict[str, Any], delivery["failure"])
+    assert serialized_failure["notes"] == [
+        "cleanup also failed: note-only streaming cleanup"
+    ]
 
 
 @pytest.mark.asyncio
@@ -1409,8 +1475,7 @@ async def test_stream_start_failure_publishes_without_starting_the_body(
         if message["type"] == "http.response.start":
             raise OSError("client transport closed")
 
-    with pytest.raises(ClientDisconnect):
-        await response(STREAM_SCOPE, receive_request, send)
+    await response(STREAM_SCOPE, receive_request, send)
 
     assert body_started is False
     assert close_calls == [0], "the response owner must close before publication"
@@ -1501,8 +1566,7 @@ async def test_drained_native_non_completion_waits_for_the_final_asgi_body(
         if message["type"] == "http.response.body" and not bool(message.get("more_body", False)):
             raise OSError("final empty body send disconnected")
 
-    with pytest.raises(ClientDisconnect):
-        await response(STREAM_SCOPE, receive_request, send)
+    await response(STREAM_SCOPE, receive_request, send)
 
     record = store.observation_snapshot().completed[-1]
     assert record.status == "fail"
@@ -1601,11 +1665,7 @@ async def test_empty_one_shot_body_crosses_only_after_its_own_send_returns(
         if fail_semantic_send and bool(message.get("more_body", False)):
             raise OSError("empty one-shot send failed")
 
-    if fail_semantic_send:
-        with pytest.raises(ClientDisconnect):
-            await response(STREAM_SCOPE, receive_request, send)
-    else:
-        await response(STREAM_SCOPE, receive_request, send)
+    await response(STREAM_SCOPE, receive_request, send)
 
     record = store.observation_snapshot().completed[-1]
     if fail_semantic_send:

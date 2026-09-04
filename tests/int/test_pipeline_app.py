@@ -9,6 +9,7 @@ import contextlib
 import inspect
 import logging
 import re
+import ssl
 import threading
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator
@@ -2447,7 +2448,7 @@ def _request_for_direct_serve(client: TestClient) -> Request:
     )
 
 
-async def test_disconnect_preserves_an_independent_failure_in_implicit_context(
+async def test_disconnect_records_an_independent_failure_without_escaping_the_app(
     request_log: None,
 ) -> None:
     client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
@@ -2468,15 +2469,16 @@ async def test_disconnect_preserves_an_independent_failure_in_implicit_context(
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(inference_route, "_dispatch", dispatch)
-        with pytest.raises(ClientDisconnect) as raised:
-            await inference_route.serve(_request_for_direct_serve(client))
+        response = await inference_route.serve(_request_for_direct_serve(client))
 
-    assert raised.value is failure
+    assert response.status_code == 499
     snapshot = _registry(client).observation_snapshot()
     assert snapshot.live == ()
     assert len(snapshot.completed) == 1
     record = snapshot.completed[0]
     assert record.status == "gone"
+    assert record.delivery.failure is not None
+    assert record.delivery.failure.type == "ClientDisconnect"
     assert len(record.delivery.additional_failures) == 1
     additional = record.delivery.additional_failures[0]
     assert additional.origin.value == "cleanup"
@@ -2485,7 +2487,97 @@ async def test_disconnect_preserves_an_independent_failure_in_implicit_context(
     assert "cleanup also failed: independent context failure" in record.request_line().detail
 
 
-async def test_unrenderable_disconnect_secondary_cannot_block_completion(
+async def test_ssl_want_read_cleanup_on_disconnect_is_observed_without_escaping(
+    request_log: None,
+) -> None:
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
+    cleanup_failure = ssl.SSLWantReadError(
+        ssl.SSL_ERROR_WANT_READ,
+        "The operation did not complete (read) (_ssl.c:2710)",
+    )
+    cancellation = asyncio.CancelledError()
+    cancellation.__cause__ = cleanup_failure
+    failure = ClientDisconnect()
+    failure.__cause__ = cancellation
+
+    async def dispatch(
+        request: Request,
+        chain: Chain,
+        trace: RequestTrace,
+        completion: RequestCompletionCoordinator,
+    ) -> Response:
+        del request, chain, trace, completion
+        raise failure
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(inference_route, "_dispatch", dispatch)
+        response = await inference_route.serve(_request_for_direct_serve(client))
+
+    assert response.status_code == 499
+    snapshot = _registry(client).observation_snapshot()
+    assert snapshot.live == ()
+    assert len(snapshot.completed) == 1
+    record = snapshot.completed[0]
+    assert record.status == "gone"
+    assert record.delivery.failure is not None
+    assert record.delivery.failure.type == "ClientDisconnect"
+    assert len(record.delivery.additional_failures) == 1
+    additional = record.delivery.additional_failures[0]
+    assert additional.origin.value == "cleanup"
+    assert additional.type == "SSLWantReadError"
+    assert additional.message is not None
+    assert "The operation did not complete (read)" in additional.message
+    assert "cleanup also failed: The operation did not complete (read)" in record.request_line().detail
+
+
+async def test_nested_group_notes_are_normalized_and_preserved_after_disconnect(
+    request_log: None,
+) -> None:
+    class UnhashableNote(str):
+        __hash__ = None  # type: ignore[assignment]
+
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
+    inner = ExceptionGroup("inner cleanup", [RuntimeError("nested cleanup failure")])
+    inner.__notes__ = [UnhashableNote("nested group note")]
+    outer = ExceptionGroup("outer cleanup", [inner])
+    cancellation = asyncio.CancelledError()
+    cancellation.__cause__ = outer
+    failure = ClientDisconnect()
+    failure.__cause__ = cancellation
+
+    async def dispatch(
+        request: Request,
+        chain: Chain,
+        trace: RequestTrace,
+        completion: RequestCompletionCoordinator,
+    ) -> Response:
+        del request, chain, trace, completion
+        raise failure
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(inference_route, "_dispatch", dispatch)
+        response = await inference_route.serve(_request_for_direct_serve(client))
+
+    assert response.status_code == 499
+    snapshot = _registry(client).observation_snapshot()
+    assert snapshot.live == ()
+    assert len(snapshot.completed) == 1
+    record = snapshot.completed[0]
+    assert record.status == "gone"
+    assert len(record.delivery.additional_failures) == 1
+    additional = record.delivery.additional_failures[0]
+    assert additional.origin.value == "cleanup"
+    assert additional.type == "ExceptionGroup"
+    assert additional.notes == ("nested group note",)
+    assert "nested group note" in record.request_line().detail
+    records = _records()
+    assert len(records) == 1
+    delivery = cast(dict[str, Any], records[0]["observation"])["delivery"]
+    serialized = cast(dict[str, Any], cast(dict[str, Any], delivery)["additional_failures"][0])
+    assert serialized["notes"] == ["nested group note"]
+
+
+async def test_unrenderable_disconnect_secondary_is_recorded_without_escaping(
     request_log: None,
 ) -> None:
     class UnrenderableCleanupError(RuntimeError):
@@ -2512,15 +2604,16 @@ async def test_unrenderable_disconnect_secondary_cannot_block_completion(
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(inference_route, "_dispatch", dispatch)
-        with pytest.raises(ClientDisconnect) as raised:
-            await inference_route.serve(_request_for_direct_serve(client))
+        response = await inference_route.serve(_request_for_direct_serve(client))
 
-    assert raised.value is failure
+    assert response.status_code == 499
     snapshot = _registry(client).observation_snapshot()
     assert snapshot.live == ()
     assert len(snapshot.completed) == 1
     record = snapshot.completed[0]
     assert record.status == "gone"
+    assert record.delivery.failure is not None
+    assert record.delivery.failure.type == "ClientDisconnect"
     assert len(record.delivery.additional_failures) == 1
     additional = record.delivery.additional_failures[0]
     assert additional.origin.value == "cleanup"
@@ -2529,6 +2622,49 @@ async def test_unrenderable_disconnect_secondary_cannot_block_completion(
     detail = record.request_line().detail
     assert "cleanup also failed: " in detail
     assert detail.endswith("UnrenderableCleanupError")
+
+
+async def test_disconnect_notes_remain_observable_after_the_exception_is_consumed(
+    request_log: None,
+) -> None:
+    class HostileNote(str):
+        __hash__ = None  # type: ignore[assignment]
+
+        def split(self, sep: str | None = None, maxsplit: Any = -1) -> list[str]:
+            del sep, maxsplit
+            raise GeneratorExit("note split escaped")
+
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
+    failure = ClientDisconnect()
+    failure.__notes__ = [HostileNote("cleanup also failed: note-only cleanup")]
+
+    async def dispatch(
+        request: Request,
+        chain: Chain,
+        trace: RequestTrace,
+        completion: RequestCompletionCoordinator,
+    ) -> Response:
+        del request, chain, trace, completion
+        raise failure
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(inference_route, "_dispatch", dispatch)
+        response = await inference_route.serve(_request_for_direct_serve(client))
+
+    assert response.status_code == 499
+    snapshot = _registry(client).observation_snapshot()
+    assert snapshot.live == ()
+    assert len(snapshot.completed) == 1
+    record = snapshot.completed[0]
+    assert record.status == "gone"
+    assert record.delivery.failure is not None
+    assert record.delivery.failure.notes == ("cleanup also failed: note-only cleanup",)
+    assert record.request_line().detail.endswith("cleanup also failed: note-only cleanup")
+    records = _records()
+    assert len(records) == 1
+    delivery = cast(dict[str, Any], records[0]["observation"])["delivery"]
+    serialized_failure = cast(dict[str, Any], cast(dict[str, Any], delivery)["failure"])
+    assert serialized_failure["notes"] == ["cleanup also failed: note-only cleanup"]
 
 
 def test_a_streaming_request_reports_what_it_received_from_upstream(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
@@ -3281,8 +3417,7 @@ async def test_response_start_failure_closes_the_unstarted_upstream_owner() -> N
         "state": {},
     }
 
-    with pytest.raises(ClientDisconnect):
-        await cast(Any, client.app)(scope, receive, send)
+    await cast(Any, client.app)(scope, receive, send)
 
     assert owned.pulled is False
     assert owned.closed is True
@@ -3449,6 +3584,7 @@ async def test_disconnect_before_upstream_headers_cancels_the_dispatch() -> None
         def __init__(self) -> None:
             self.calls = 0
             self.cancelled = asyncio.Event()
+            self.cancellation: asyncio.CancelledError | None = None
 
         def describe(self, model_id: str) -> ModelDescriptor | None:
             if model_id != "gpt-model":
@@ -3476,6 +3612,7 @@ async def test_disconnect_before_upstream_headers_cancels_the_dispatch() -> None
                 await asyncio.Event().wait()
             except asyncio.CancelledError as cancellation:
                 self.cancelled.set()
+                self.cancellation = cancellation
                 # A transport cleanup may replace cancellation with a group that also contains something the retry taxonomy normally funds. The current task is still cancelling, so this must remain one attempt; cancellation becomes primary and the residual cleanup group must stay structured without pointing back to it.
                 grouped = BaseExceptionGroup(
                     "provider cleanup replaced cancellation",
@@ -3507,6 +3644,7 @@ async def test_disconnect_before_upstream_headers_cancels_the_dispatch() -> None
     )
     request_sent = False
     receive_calls = 0
+    sent: list[Message] = []
 
     async def receive() -> Message:
         nonlocal request_sent, receive_calls
@@ -3520,8 +3658,8 @@ async def test_disconnect_before_upstream_headers_cancels_the_dispatch() -> None
             }
         return {"type": "http.disconnect"}
 
-    async def send(_: Message) -> None:
-        return None
+    async def send(message: Message) -> None:
+        sent.append(message)
 
     scope: dict[str, Any] = {
         "type": "http",
@@ -3551,11 +3689,11 @@ async def test_disconnect_before_upstream_headers_cancels_the_dispatch() -> None
         )
         app = create_pipeline_app(chain)
 
-        with pytest.raises(ClientDisconnect) as raised:
-            async with asyncio.timeout(1):
-                await cast(Any, app)(scope, receive, send)
+        async with asyncio.timeout(1):
+            await cast(Any, app)(scope, receive, send)
 
-    cancellation = raised.value.__cause__
+    assert sent == []
+    cancellation = provider.cancellation
     assert isinstance(cancellation, asyncio.CancelledError)
     residual_value = cancellation.__cause__
     assert isinstance(residual_value, BaseExceptionGroup)
@@ -3585,7 +3723,9 @@ async def test_disconnect_before_upstream_headers_cancels_the_dispatch() -> None
     assert additional.type == "ExceptionGroup"
     assert additional.message is not None
     assert "provider cleanup replaced cancellation" in additional.message
+    assert additional.notes == ("provider cleanup note",)
     assert "cleanup also failed: provider cleanup replaced cancellation" in record.request_line().detail
+    assert "provider cleanup note" in record.request_line().detail
     assert len(record.interruptions) == 1
     interruption = record.interruptions[0]
     assert interruption.kind.value == "http_disconnect"
