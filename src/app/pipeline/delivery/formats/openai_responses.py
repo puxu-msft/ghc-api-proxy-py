@@ -23,18 +23,28 @@ from app.errors import OPENAI_ERROR_TYPES, STATUS_FOR_CATEGORY, ErrorCategory, E
 from app.pipeline.delivery.assembling import (
     Draft,
     FailureOrigin,
+    ReasoningSummaryDraft,
     ReplyDialect,
     StreamFailure,
     Terminal,
     decode_json,
 )
-from app.pipeline.delivery.blocks import TEXT, THINKING, TOOL_USE, CompletedBlock
+from app.pipeline.delivery.blocks import (
+    REDACTED_THINKING,
+    TEXT,
+    THINKING,
+    TOOL_USE,
+    CompletedBlock,
+)
 from app.pipeline.delivery.sse_frame import SseFrame
 from app.pipeline.delivery.sse_source import SseEvent
 from app.pipeline.server_tool_text import web_search_call_text
-from app.pipeline.translation_driver.reasoning_carrier import (
-    decode_reasoning_carrier,
-    encode_reasoning_carrier,
+from app.pipeline.translation_driver.reasoning_bridge import (
+    ReasoningBridgeError,
+    read_anthropic_reasoning,
+    read_responses_reasoning,
+    reasoning_to_anthropic,
+    reasoning_to_responses,
 )
 
 # The buffered half of this same client leg owns these two tables; this is the streaming half. They were duplicated until 2026-08-27 and kept in step by a comment on each — `fef7d96` is the record of what it costs when the two halves describe one ending differently, so "the same set" is worth making checkable rather than remembered. The import runs `delivery` → `translation_driver`, which is the direction this module already depends in.
@@ -209,7 +219,7 @@ class ResponsesFramer:
         """
         if block.kind == TOOL_USE:
             frames = self._function_call(block)
-        elif block.kind == THINKING:
+        elif block.kind in {THINKING, REDACTED_THINKING}:
             frames = self._reasoning(block)
         elif block.kind == TEXT:
             frames = self._message(block)
@@ -322,25 +332,12 @@ class ResponsesFramer:
         )
 
     def _reasoning(self, block: CompletedBlock) -> tuple[bytes, ...]:
-        """Reasoning, with no summary delta events.
-
-        Upstream sends none either: in the two of those three that carry a reasoning item at all, it arrives as `added` then `done` with no delta events between them, so this copies that shape rather than inventing a finer-grained one.
-        The `summary` list in those recordings is **empty**, so the `summary_text` part written below has the same standing as the `function_call` frames above — it follows the SDK's types, not a recording. Said plainly because the alternative is a reader taking it for measured.
-
-        `encrypted_content` is written only when there was some. The assembler stores this project's own carrier in the block's `signature`, and an empty carrier is still a non-empty marker string, so decoding is what tells "upstream sealed some reasoning" apart from "upstream sent none". Emitting the marker itself would hand the client a token it cannot use.
-        """
+        """One whole Anthropic reasoning block projected into a client-facing Responses item."""
         index = self._output_index
         item_id = self._item_id("rs")
-        summary_text = str(block.payload.get(THINKING, ""))
-        item: dict[str, Any] = {
-            "id": item_id,
-            "type": "reasoning",
-            "summary": [{"type": "summary_text", "text": summary_text}] if summary_text else [],
-            "content": [],
-        }
-        carrier = decode_reasoning_carrier(str(block.payload.get("signature", "")))
-        if carrier.encrypted_content:
-            item["encrypted_content"] = carrier.encrypted_content
+        content = block.reasoning or read_anthropic_reasoning(block.payload)
+        projected = reasoning_to_responses(content, bridge_for_client=True)
+        item: dict[str, Any] = {"id": item_id, **projected, "content": []}
         self._items.append(item)
         return (
             self._frame(
@@ -496,8 +493,20 @@ class ResponsesAssembler:
         if kind == "response.output_item.added":
             self._open(data)
             return ()
-        if kind in {"response.output_text.delta", "response.reasoning_summary_text.delta"}:
+        if kind == "response.output_text.delta":
             self._accumulate(data, str(data.get("delta", "")))
+            return ()
+        if kind == "response.reasoning_summary_part.added":
+            self._open_summary_part(data)
+            return ()
+        if kind == "response.reasoning_summary_text.delta":
+            self._accumulate_summary_text(data, str(data.get("delta", "")))
+            return ()
+        if kind == "response.reasoning_summary_text.done":
+            self._finish_summary_text(data)
+            return ()
+        if kind == "response.reasoning_summary_part.done":
+            self._finish_summary_part(data)
             return ()
         if kind == "response.function_call_arguments.delta":
             self._accumulate_arguments(data, str(data.get("delta", "")))
@@ -558,6 +567,138 @@ class ResponsesAssembler:
         if draft is not None:
             draft.text += delta
 
+    def _open_summary_part(self, data: dict[str, Any]) -> None:
+        draft = self._reasoning_draft(data)
+        index = self._summary_index(data)
+        if index in draft.reasoning_summary:
+            raise ReasoningBridgeError(
+                "reasoning_summary_lifecycle",
+                f"summary part {index} opened more than once",
+            )
+        raw = data.get("part")
+        part = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+        if part.get("type") != "summary_text" or not isinstance(part.get("text"), str):
+            raise ReasoningBridgeError(
+                "reasoning_summary_unsupported_part",
+                f"summary part {index} must be summary_text with string text",
+            )
+        extensions = {
+            key: value for key, value in part.items() if key not in {"type", "text"}
+        }
+        draft.reasoning_summary[index] = ReasoningSummaryDraft(
+            text=cast(str, part["text"]),
+            extensions=extensions,
+        )
+
+    def _accumulate_summary_text(self, data: dict[str, Any], delta: str) -> None:
+        index, part = self._summary_part(data)
+        if part.text_done or part.part_done:
+            raise ReasoningBridgeError(
+                "reasoning_summary_lifecycle",
+                f"summary part {index} received a delta after done",
+            )
+        part.text += delta
+
+    def _finish_summary_text(self, data: dict[str, Any]) -> None:
+        index, part = self._summary_part(data)
+        text = data.get("text")
+        if not isinstance(text, str):
+            raise ReasoningBridgeError(
+                "reasoning_summary_malformed",
+                f"summary text done {index} has no string text",
+            )
+        if part.text_done or part.part_done:
+            raise ReasoningBridgeError(
+                "reasoning_summary_lifecycle",
+                f"summary text {index} completed more than once",
+            )
+        part.text = text
+        part.text_done = True
+
+    def _finish_summary_part(self, data: dict[str, Any]) -> None:
+        index, part = self._summary_part(data)
+        if part.part_done:
+            raise ReasoningBridgeError(
+                "reasoning_summary_lifecycle",
+                f"summary part {index} completed more than once",
+            )
+        status = data.get("status")
+        if status == "incomplete":
+            part.incomplete = True
+            part.part_done = True
+            return
+        if status is not None:
+            raise ReasoningBridgeError(
+                "reasoning_summary_malformed",
+                f"summary part {index} has unsupported status {status!r}",
+            )
+        raw = data.get("part")
+        closed = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+        if closed.get("type") != "summary_text" or not isinstance(closed.get("text"), str):
+            raise ReasoningBridgeError(
+                "reasoning_summary_unsupported_part",
+                f"summary part {index} must close with summary_text and string text",
+            )
+        part.text = cast(str, closed["text"])
+        part.extensions = {
+            key: value for key, value in closed.items() if key not in {"type", "text"}
+        }
+        part.part_done = True
+
+    def _reasoning_draft(self, data: dict[str, Any]) -> Draft:
+        draft = self._drafts.get(self._item_key(data))
+        if draft is None or draft.kind != THINKING:
+            raise ReasoningBridgeError(
+                "reasoning_summary_lifecycle",
+                "reasoning summary event has no open reasoning item",
+            )
+        return draft
+
+    def _summary_part(
+        self, data: dict[str, Any]
+    ) -> tuple[int, ReasoningSummaryDraft]:
+        draft = self._reasoning_draft(data)
+        index = self._summary_index(data)
+        part = draft.reasoning_summary.get(index)
+        if part is None:
+            raise ReasoningBridgeError(
+                "reasoning_summary_lifecycle",
+                f"summary part {index} was not opened",
+            )
+        return index, part
+
+    @staticmethod
+    def _summary_index(data: dict[str, Any]) -> int:
+        index = data.get("summary_index")
+        if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+            raise ReasoningBridgeError(
+                "reasoning_summary_malformed",
+                "reasoning summary event requires a non-negative summary_index",
+            )
+        return index
+
+    @staticmethod
+    def _summary_from_draft(draft: Draft) -> list[dict[str, Any]]:
+        if any(part.incomplete for part in draft.reasoning_summary.values()):
+            raise ReasoningBridgeError(
+                "incomplete_reasoning_summary",
+                "reasoning summary ended incomplete without a closing summary",
+            )
+        indexes = sorted(draft.reasoning_summary)
+        if indexes != list(range(len(indexes))):
+            raise ReasoningBridgeError(
+                "reasoning_summary_lifecycle",
+                "reasoning summary indices must be continuous from zero",
+            )
+        return [
+            {
+                "type": "summary_text",
+                "text": draft.reasoning_summary[index].text,
+                **dict(draft.reasoning_summary[index].extensions),
+            }
+            for index in indexes
+        ]
+
     def _accumulate_arguments(self, data: dict[str, Any], delta: str) -> None:
         draft = self._drafts.get(self._item_key(data))
         if draft is not None:
@@ -599,6 +740,7 @@ class ResponsesAssembler:
         # A `reasoning` item carries no `status` at all — verified against a completed one, whose key set is identical — so this cannot see a truncated one and does not try. Left open deliberately; `.dev/docs/upstream/retry-and-continuation/deferred.md` §2.
         cut_short = _upstream_cut_this_item_short(data) and self._terminal.blocks > 0
         kind = draft.kind
+        reasoning = None
         if draft.kind == DISCARDED:
             # Recognised and deliberately not delivered — see the item map for which items land here and why. The point of naming them is that they never reach the text fallback, which would turn each into an empty block.
             return ()
@@ -659,11 +801,22 @@ class ResponsesAssembler:
                     "input": decode_json(draft.partial_json or "{}"),
                 }
         elif draft.kind == THINKING:
-            payload = {
-                "type": THINKING,
-                THINKING: draft.text,
-                "signature": _reasoning_signature(draft, data),
-            }
+            raw_closing = data.get("item")
+            closing = (
+                dict[str, Any](cast(dict[str, Any], raw_closing))
+                if isinstance(raw_closing, dict)
+                else {}
+            )
+            if "summary" not in closing:
+                closing["summary"] = self._summary_from_draft(draft)
+            if (
+                "encrypted_content" not in closing
+                and "encrypted_content" in draft.payload
+            ):
+                closing["encrypted_content"] = draft.payload["encrypted_content"]
+            closing["type"] = "reasoning"
+            reasoning = read_responses_reasoning(closing)
+            payload = reasoning_to_anthropic(reasoning, bridge_for_client=True)
         elif draft.kind == WEB_SEARCH_CALL:
             # Read off the closing event, not the draft. `output_item.added` carries this item with only an id, a status and a type — the query appears for the first time on `done`, and this item has no delta events at all, so the draft has nothing in it to render. Assembling from the draft is what produced an empty text block on every search.
             raw = data.get("item")
@@ -673,7 +826,12 @@ class ResponsesAssembler:
             kind = TEXT
         else:
             payload = {"type": TEXT, TEXT: draft.text}
-        block = CompletedBlock(index=self._emitted, kind=kind, payload=payload)
+        block = CompletedBlock(
+            index=self._emitted,
+            kind=kind,
+            payload=payload,
+            reasoning=reasoning,
+        )
         self._emitted += 1
         if cut_short:
             # Not recorded either: a block nobody has received is not a block delivered, and whether anyone ever will is decided on the terminal event.
@@ -733,22 +891,6 @@ def _upstream_cut_this_item_short(data: dict[str, Any]) -> bool:
     item = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
     status = item.get("status")
     return status == "incomplete"
-
-
-def _reasoning_signature(draft: Draft, closing: dict[str, Any]) -> str:
-    """The carrier for a Responses reasoning item, read from the event that closed it.
-
-    `.dev/docs/anthropic-responses-bridge/spec.md` fixes both halves: a non-empty `encrypted_content` must survive value-exact so the
-    client can echo it back and the next turn can carry on, and a missing or empty one still emits the project's bare marker rather than nothing. This used to write `""`, which broke both.
-
-    Read from the closing item rather than the draft: `output_item.added` and `output_item.done` do not carry the same content — that is the same asymmetry that made the assembler pair nothing when it keyed drafts on `item.id`. The draft is the fallback, not the source.
-    """
-    raw = closing.get("item")
-    item = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
-    encrypted = str(item.get("encrypted_content", "")) or str(
-        draft.payload.get("encrypted_content", "")
-    )
-    return encode_reasoning_carrier(encrypted or None)
 
 
 def _anthropic_usage(usage: dict[str, Any]) -> dict[str, Any]:

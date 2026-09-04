@@ -759,24 +759,7 @@ def test_reasoning_forward_blocks_round_trip_through_messages_request_converter(
 
     converted = convert_messages_request_to_responses(request)
 
-    assert len(converted.wire["input"]) == len(reasoning_items)
-    assert converted.wire["input"] == [
-        {
-            "type": "reasoning",
-            "summary": [{"type": "summary_text", "text": "first"}],
-            "encrypted_content": "ENC-1",
-        },
-        {
-            "type": "reasoning",
-            "summary": [{"type": "summary_text", "text": "second + detail"}],
-            "encrypted_content": "ENC-2",
-        },
-        {
-            "type": "reasoning",
-            "summary": [],
-            "encrypted_content": "ENC-ONLY",
-        },
-    ]
+    assert converted.wire["input"] == reasoning_items
 
 
 @pytest.mark.parametrize(

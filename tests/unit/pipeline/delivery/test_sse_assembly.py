@@ -20,6 +20,7 @@ from app.pipeline.delivery.formats.anthropic_messages import (
 from app.pipeline.delivery.formats.openai_responses import ResponsesAssembler
 from app.pipeline.delivery.sse_source import SseEvent, encode_frame, parse_frame, read_events
 from app.pipeline.reply import blocks_from_anthropic
+from app.pipeline.translation_driver.reasoning_bridge import ReasoningBridgeError
 
 
 def frame(event: str, data: dict[str, Any], *, space: bool = True) -> bytes:
@@ -245,6 +246,32 @@ def test_interleaved_blocks_close_independently() -> None:
     ].payload["text"] == "first"
 
 
+def test_anthropic_redacted_thinking_assembles_as_typed_reasoning() -> None:
+    assembler = AnthropicAssembler()
+    assembler.push(
+        SseEvent(
+            "content_block_start",
+            orjson.dumps(
+                {
+                    "index": 0,
+                    "content_block": {
+                        "type": "redacted_thinking",
+                        "data": "opaque-redacted",
+                    },
+                }
+            ).decode(),
+        )
+    )
+    [block] = assembler.push(
+        SseEvent("content_block_stop", orjson.dumps({"index": 0}).decode())
+    )
+    assert block.kind == "redacted_thinking"
+    assert block.reasoning is not None
+    assert block.reasoning.redacted is True
+    assert block.reasoning.state is not None
+    assert block.reasoning.state.value == "opaque-redacted"
+
+
 # --- responses assembly ----------------------------------------------------
 
 
@@ -260,6 +287,170 @@ def test_responses_item_completes_only_on_done() -> None:
         {"item": {"id": "i1", "type": "message"}}
     ).decode()))
     assert blocks[0].payload == {"type": "text", "text": "partial"}
+
+
+def test_reasoning_summary_events_preserve_parts_empty_text_and_extensions() -> None:
+    assembler = ResponsesAssembler()
+
+    def push(kind: str, body: dict[str, Any]) -> tuple[CompletedBlock, ...]:
+        payload = {"output_index": 0, **body}
+        return assembler.push(SseEvent(kind, orjson.dumps(payload).decode()))
+
+    push("response.output_item.added", {"item": {"id": "r1", "type": "reasoning"}})
+    push(
+        "response.reasoning_summary_part.added",
+        {
+            "item_id": "r1",
+            "summary_index": 0,
+            "part": {"type": "summary_text", "text": "一", "detail": 1},
+        },
+    )
+    push(
+        "response.reasoning_summary_text.delta",
+        {"item_id": "r1", "summary_index": 0, "delta": "A"},
+    )
+    push(
+        "response.reasoning_summary_text.done",
+        {"item_id": "r1", "summary_index": 0, "text": "一A"},
+    )
+    push(
+        "response.reasoning_summary_part.done",
+        {
+            "item_id": "r1",
+            "summary_index": 0,
+            "part": {"type": "summary_text", "text": "一A", "detail": 1},
+        },
+    )
+    push(
+        "response.reasoning_summary_part.added",
+        {
+            "item_id": "r1",
+            "summary_index": 1,
+            "part": {"type": "summary_text", "text": ""},
+        },
+    )
+    push(
+        "response.reasoning_summary_part.done",
+        {
+            "item_id": "r1",
+            "summary_index": 1,
+            "part": {"type": "summary_text", "text": ""},
+        },
+    )
+    push(
+        "response.reasoning_summary_part.added",
+        {
+            "item_id": "r1",
+            "summary_index": 2,
+            "part": {"type": "summary_text", "text": "😀"},
+        },
+    )
+    push(
+        "response.reasoning_summary_text.delta",
+        {"item_id": "r1", "summary_index": 2, "delta": "二"},
+    )
+    [block] = push(
+        "response.output_item.done",
+        {"item": {"id": "r1", "type": "reasoning", "encrypted_content": "ENC"}},
+    )
+
+    assert block.reasoning is not None
+    assert block.reasoning.responses_summary() == [
+        {"type": "summary_text", "text": "一A", "detail": 1},
+        {"type": "summary_text", "text": ""},
+        {"type": "summary_text", "text": "😀二"},
+    ]
+    assert block.payload["thinking"] == "一A😀二"
+    assert block.payload["signature"].startswith("ghc-api-proxy:synthetic-reasoning:v2:")
+
+
+def test_closing_reasoning_summary_replaces_lower_event_state() -> None:
+    assembler = ResponsesAssembler()
+    assembler.push(
+        SseEvent(
+            "response.output_item.added",
+            orjson.dumps({"output_index": 0, "item": {"id": "r1", "type": "reasoning"}}).decode(),
+        )
+    )
+    assembler.push(
+        SseEvent(
+            "response.reasoning_summary_part.added",
+            orjson.dumps(
+                {
+                    "output_index": 0,
+                    "item_id": "r1",
+                    "summary_index": 0,
+                    "part": {"type": "summary_text", "text": "old"},
+                }
+            ).decode(),
+        )
+    )
+    [block] = assembler.push(
+        SseEvent(
+            "response.output_item.done",
+            orjson.dumps(
+                {
+                    "output_index": 0,
+                    "item": {
+                        "id": "r1",
+                        "type": "reasoning",
+                        "summary": [{"type": "summary_text", "text": "authoritative"}],
+                    },
+                }
+            ).decode(),
+        )
+    )
+    assert block.reasoning is not None
+    assert block.reasoning.responses_summary() == [
+        {"type": "summary_text", "text": "authoritative"}
+    ]
+
+
+def test_incomplete_summary_part_without_closing_summary_is_not_delivered() -> None:
+    assembler = ResponsesAssembler()
+    assembler.push(
+        SseEvent(
+            "response.output_item.added",
+            orjson.dumps({"output_index": 0, "item": {"id": "r1", "type": "reasoning"}}).decode(),
+        )
+    )
+    assembler.push(
+        SseEvent(
+            "response.reasoning_summary_part.added",
+            orjson.dumps(
+                {
+                    "output_index": 0,
+                    "item_id": "r1",
+                    "summary_index": 0,
+                    "part": {"type": "summary_text", "text": "partial"},
+                }
+            ).decode(),
+        )
+    )
+    assembler.push(
+        SseEvent(
+            "response.reasoning_summary_part.done",
+            orjson.dumps(
+                {
+                    "output_index": 0,
+                    "item_id": "r1",
+                    "summary_index": 0,
+                    "status": "incomplete",
+                    "part": {"type": "summary_text", "text": "partial"},
+                }
+            ).decode(),
+        )
+    )
+    with pytest.raises(ReasoningBridgeError) as caught:
+        assembler.push(
+            SseEvent(
+                "response.output_item.done",
+                orjson.dumps(
+                    {"output_index": 0, "item": {"id": "r1", "type": "reasoning"}}
+                ).decode(),
+            )
+        )
+    assert caught.value.code == "incomplete_reasoning_summary"
 
 
 def test_responses_function_call_becomes_a_tool_use_block() -> None:

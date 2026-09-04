@@ -16,14 +16,14 @@ from typing import Any, cast
 
 from app.config.schema import SystemPromptPlacement, WebSearchConstraintPolicy
 from app.pipeline.server_tool_text import call_text, web_search_call_text
-from app.pipeline.translation_driver.content import (
-    BlockKind,
-    ContentBlock,
-    OpaqueFormat,
-    ReasoningState,
-    SemanticMessage,
-)
+from app.pipeline.translation_driver.content import BlockKind, ContentBlock, SemanticMessage
 from app.pipeline.translation_driver.reasoning import resolve
+from app.pipeline.translation_driver.reasoning_bridge import (
+    ReasoningBridgeError,
+    ReasoningNotPortable,
+    read_responses_reasoning,
+    reasoning_to_responses,
+)
 from app.pipeline.translation_driver.semantic import (
     Conversion,
     LossCode,
@@ -496,18 +496,16 @@ def blocks_from_item(
             ),
         )
     if kind == "reasoning":
-        encrypted = str(item.get("encrypted_content", ""))
+        try:
+            reasoning = read_responses_reasoning(item)
+        except ReasoningBridgeError as error:
+            raise TranslationRefused(
+                error.detail,
+                code=error.code,
+                field_path="input.reasoning",
+            ) from error
         return "assistant", (
-            ContentBlock(
-                BlockKind.REASONING,
-                text=_summary_text(item.get("summary")),
-                reasoning=(
-                    ReasoningState(OpaqueFormat.RESPONSES_ENCRYPTED, encrypted)
-                    if encrypted
-                    else None
-                ),
-                raw=item,
-            ),
+            ContentBlock(BlockKind.REASONING, reasoning=reasoning, raw=item),
         )
     if kind == "web_search_call":
         # A search the upstream ran itself. The item carries a query, a status and an opaque id, and the results are not in it — so this says what was searched for, in the same words the Anthropic leg flattens its own history into.
@@ -538,10 +536,6 @@ def _block_from_content_part(part: dict[str, Any]) -> ContentBlock:
     if kind == "input_image":
         return ContentBlock(BlockKind.IMAGE, raw=part)
     return ContentBlock(BlockKind.UNKNOWN, raw=part)
-
-
-def _summary_text(value: object) -> str:
-    return "".join(str(part.get("text", "")) for part in _dict_list(value))
 
 
 def _decoded_arguments(value: object) -> Any:
@@ -592,7 +586,7 @@ def item_from_block(
     conversion: Conversion,
 ) -> dict[str, Any] | None:
     """Render one block as a Responses item, or None when it may not cross."""
-    return _item_from_block(block, role, conversion)
+    return _item_from_block(block, role, conversion, bridge_for_client=True)
 
 
 def _item_from_block(
@@ -600,6 +594,8 @@ def _item_from_block(
     role: str,
     conversion: Conversion,
     search: SearchContext | None = None,
+    *,
+    bridge_for_client: bool = False,
 ) -> dict[str, Any] | None:
     if search is not None and search.active:
         # The two history shapes a client-executed tool search leaves behind. Both are recognised by `call_id` rather than by content: the call is the one that went to the search tool, and the result is the one answering it — a result that came back empty is still a search result, and rendering it as an ordinary `function_call_output` would tell the model a tool it never called had returned.
@@ -648,7 +644,11 @@ def _item_from_block(
             "output": _flattened_output(block, conversion),
         }
     if block.kind is BlockKind.REASONING:
-        return _reasoning_item(block, conversion)
+        return _reasoning_item(
+            block,
+            conversion,
+            bridge_for_client=bridge_for_client,
+        )
     flattened = _server_tool_block_as_text(block)
     if flattened is not None:
         conversion.record(
@@ -729,40 +729,27 @@ def _flattened_output(block: ContentBlock, conversion: Conversion) -> str:
     return json.dumps(output, ensure_ascii=False)
 
 
-def _reasoning_item(block: ContentBlock, conversion: Conversion) -> dict[str, Any] | None:
-    """Render reasoning, or refuse and say so.
-
-    Refusing matters more than rendering. Anthropic's signature is a value only Anthropic can produce; writing it into `encrypted_content` would hand upstream something it never issued.
-    A carrier this proxy signed is different — the Responses payload is inside it, and taking it back out is recovery, not invention.
-    """
-    state = block.reasoning
-    if state is None:
-        return {"type": "reasoning", "summary": _summary_parts(block.text)}
-    if state.format is OpaqueFormat.RESPONSES_ENCRYPTED:
-        return {
-            "type": "reasoning",
-            "summary": _summary_parts(block.text),
-            "encrypted_content": state.value,
-        }
-    if state.format is OpaqueFormat.PROXY_CARRIER:
-        # A carrier this proxy issued. With a payload it round-trips value-exact; bare, `.dev/docs/anthropic-responses-bridge/spec.md` says TRANSFORM — restore a summary-only reasoning item rather than drop the block. It
-        # used to be dropped, which lost the turn's reasoning entirely on the way back.
-        item: dict[str, Any] = {
-            "type": "reasoning",
-            "summary": _summary_parts(block.text),
-        }
-        if state.encrypted_content:
-            item["encrypted_content"] = state.encrypted_content
-        return item
-    conversion.record(
-        LossCode.REASONING_STATE_NOT_PORTABLE,
-        f"{state.format.value} cannot be written as {WIRE_FORMAT} encrypted_content",
-    )
-    return None
-
-
-def _summary_parts(text: str) -> list[dict[str, Any]]:
-    return [{"type": "summary_text", "text": text}] if text else []
+def _reasoning_item(
+    block: ContentBlock,
+    conversion: Conversion,
+    *,
+    bridge_for_client: bool,
+) -> dict[str, Any] | None:
+    """Render provider-native reasoning or a client-facing bridge carrier."""
+    content = block.reasoning
+    if content is None:
+        conversion.record(LossCode.BLOCK_NOT_CARRIED, "reasoning block has no typed content")
+        return None
+    try:
+        return reasoning_to_responses(content, bridge_for_client=bridge_for_client)
+    except ReasoningNotPortable:
+        state = content.state
+        source = state.format.value if state is not None else content.source_format
+        conversion.record(
+            LossCode.REASONING_STATE_NOT_PORTABLE,
+            f"{source} cannot be written to a Responses upstream",
+        )
+        return None
 
 
 def _place_in_instructions(payload: dict[str, Any], request: SemanticRequest) -> None:

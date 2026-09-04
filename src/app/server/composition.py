@@ -648,6 +648,9 @@ def build_chain(
         # Keyed on the resolved model id, which is the name upstream receives. Passed straight through rather than pre-processed: unlike the web-search patterns there is nothing to compile, and the only thing that could be checked here — whether the value is an effort the model publishes — is a question about the live catalog rather than about the config, so it is answered per request.
         thinking_efforts=config.model_thinking_effort,
         thinking_display=config.hook_fix_anthropic_request.thinking.display,
+        assistant_message_layout=(
+            config.hook_fix_anthropic_request.thinking.assistant_message_layout
+        ),
         cache_control=config.hook_fix_anthropic_request.cache_control,
         # Compiled here rather than per request, for the same reason as the beta table above it: a pattern that does not compile should stop start-up, in the config's own words, rather than raise from inside whichever request first reached it.
         cache_control_sanitize=compile_sanitize_table(

@@ -7,7 +7,10 @@ import pytest
 from app.pipeline.request import WireFormat
 from app.pipeline.translation_driver.anthropic_messages import from_anthropic_messages
 from app.pipeline.translation_driver.openai_responses import to_openai_responses
-from app.pipeline.translation_driver.reasoning_carrier import decode_reasoning_carrier
+from app.pipeline.translation_driver.reasoning_carrier import (
+    RESPONSES_ENCRYPTED_CONTENT,
+    decode_reasoning_carrier,
+)
 from app.pipeline.translation_driver.registry import (
     TranslatorNotFound,
     TranslatorRegistry,
@@ -467,7 +470,10 @@ def test_a_responses_reasoning_item_reaches_anthropic_with_its_state_intact() ->
     thinking = next(block for block in payload["content"] if block["type"] == "thinking")
     assert thinking["thinking"] == "thought"
     assert thinking["signature"], "the continuation state was dropped"
-    assert decode_reasoning_carrier(thinking["signature"]).encrypted_content == "ENC123"
+    decoded = decode_reasoning_carrier(thinking["signature"])
+    encrypted = decoded.record(RESPONSES_ENCRYPTED_CONTENT)
+    assert encrypted is not None
+    assert encrypted.value == "ENC123"
 
 
 def test_a_reply_with_nothing_to_say_carries_no_content_rather_than_an_empty_block() -> None:
@@ -503,6 +509,63 @@ def test_a_response_round_trip_keeps_the_reasoning_payload() -> None:
     reasoning = next(item for item in back["output"] if item["type"] == "reasoning")
     assert reasoning["encrypted_content"] == "ENC123"
     assert semantic.conversion.lossless, semantic.conversion.losses
+
+
+def test_response_round_trip_preserves_summary_part_boundaries_and_extensions() -> None:
+    response = {
+        **RESPONSES_RESPONSE,
+        "output": [
+            {
+                "type": "reasoning",
+                "summary": [
+                    {"type": "summary_text", "text": "一", "detail": 1},
+                    {"type": "summary_text", "text": ""},
+                    {"type": "summary_text", "text": "😀二"},
+                ],
+                "encrypted_content": "ENC",
+            }
+        ],
+    }
+    registry = default_registry()
+    anthropic, _ = registry.translate_response(
+        response,
+        source=WireFormat.OPENAI_RESPONSES,
+        target=WireFormat.ANTHROPIC_MESSAGES,
+    )
+    restored, semantic = registry.translate_response(
+        anthropic,
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    assert restored["output"] == response["output"]
+    assert semantic.conversion.lossless
+
+
+def test_native_anthropic_signature_round_trips_through_responses_response() -> None:
+    response = {
+        "id": "msg_native",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-model",
+        "content": [
+            {"type": "thinking", "thinking": "visible", "signature": "CAIS-native"}
+        ],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+    }
+    registry = default_registry()
+    responses, _ = registry.translate_response(
+        response,
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    restored, semantic = registry.translate_response(
+        responses,
+        source=WireFormat.OPENAI_RESPONSES,
+        target=WireFormat.ANTHROPIC_MESSAGES,
+    )
+    assert restored["content"] == response["content"]
+    assert semantic.conversion.lossless
 
 
 def test_a_response_tool_call_leaves_as_a_json_string() -> None:

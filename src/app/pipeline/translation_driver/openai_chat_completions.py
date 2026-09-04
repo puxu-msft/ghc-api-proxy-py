@@ -19,6 +19,7 @@ from collections.abc import Mapping
 from typing import Any, cast
 
 from app.pipeline.translation_driver.content import BlockKind, ContentBlock
+from app.pipeline.translation_driver.reasoning_bridge import read_chat_reasoning
 from app.pipeline.translation_driver.responses import SemanticResponse
 from app.pipeline.translation_driver.semantic import (
     Conversion,
@@ -329,7 +330,12 @@ def from_chat_completions_response(
     if isinstance(reasoning, str) and reasoning:
         # Some chat backends stream the model's scratch work in a `reasoning_content`
         # extension. Read rather than dropped: it is content the model produced.
-        blocks.append(ContentBlock(BlockKind.REASONING, text=reasoning))
+        blocks.append(
+            ContentBlock(
+                BlockKind.REASONING,
+                reasoning=read_chat_reasoning(reasoning),
+            )
+        )
     content = message.get("content")
     if isinstance(content, str) and content:
         blocks.append(ContentBlock(BlockKind.TEXT, text=content))

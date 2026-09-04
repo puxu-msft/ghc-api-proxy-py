@@ -17,7 +17,13 @@ from openai.types.responses.response_stream_event import ResponseStreamEvent
 
 from app.errors import ErrorCategory, ErrorInfo
 from app.pipeline.delivery.assembling import Terminal
-from app.pipeline.delivery.blocks import TEXT, THINKING, TOOL_USE, CompletedBlock
+from app.pipeline.delivery.blocks import (
+    REDACTED_THINKING,
+    TEXT,
+    THINKING,
+    TOOL_USE,
+    CompletedBlock,
+)
 from app.pipeline.delivery.formats.openai_responses import ResponsesFramer
 
 
@@ -171,6 +177,70 @@ def test_reasoning_carries_encrypted_content_only_when_there_was_some() -> None:
     assert first.encrypted_content == "sealed-bytes"
     assert second.summary == []
     assert second.encrypted_content is None
+
+
+def test_native_anthropic_signature_streams_through_a_responses_client_carrier() -> None:
+    block = CompletedBlock(
+        index=0,
+        kind=THINKING,
+        payload={
+            "type": THINKING,
+            THINKING: "visible",
+            "signature": "CAIS-native",
+        },
+    )
+    response = replay(
+        whole(framer(), [block], Terminal(stop_reason="end_turn", seen=True))
+    )
+    reasoning = cast(Any, response.output[0])
+    assert reasoning.summary[0].text == "visible"
+    assert reasoning.encrypted_content.startswith(
+        "ghc-api-proxy:synthetic-reasoning:v2:"
+    )
+
+    from app.pipeline.translation_driver.reasoning_bridge import (
+        read_responses_reasoning,
+        reasoning_to_anthropic,
+    )
+
+    recovered = read_responses_reasoning(
+        {
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "visible"}],
+            "encrypted_content": reasoning.encrypted_content,
+        }
+    )
+    assert reasoning_to_anthropic(recovered, bridge_for_client=False) == block.payload
+
+
+def test_redacted_anthropic_reasoning_streams_through_responses_without_visible_text() -> None:
+    block = CompletedBlock(
+        index=0,
+        kind=REDACTED_THINKING,
+        payload={"type": REDACTED_THINKING, "data": "opaque-redacted"},
+    )
+    response = replay(
+        whole(framer(), [block], Terminal(stop_reason="end_turn", seen=True))
+    )
+    reasoning = cast(Any, response.output[0])
+    assert reasoning.summary == []
+    assert reasoning.encrypted_content.startswith(
+        "ghc-api-proxy:synthetic-reasoning:v2:"
+    )
+
+    from app.pipeline.translation_driver.reasoning_bridge import (
+        read_responses_reasoning,
+        reasoning_to_anthropic,
+    )
+
+    recovered = read_responses_reasoning(
+        {
+            "type": "reasoning",
+            "summary": [],
+            "encrypted_content": reasoning.encrypted_content,
+        }
+    )
+    assert reasoning_to_anthropic(recovered, bridge_for_client=False) == block.payload
 
 
 def test_a_truncated_turn_completes_as_incomplete_with_upstreams_reason() -> None:

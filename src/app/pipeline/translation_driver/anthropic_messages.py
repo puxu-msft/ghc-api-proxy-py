@@ -6,21 +6,17 @@ Reads and writes the typed content model rather than moving `dict`s around. `D-A
 from collections.abc import Mapping
 from typing import Any, cast
 
-from app.pipeline.translation_driver.content import (
-    BlockKind,
-    ContentBlock,
-    OpaqueFormat,
-    ReasoningState,
-    SemanticMessage,
-)
+from app.pipeline.translation_driver.content import BlockKind, ContentBlock, SemanticMessage
 from app.pipeline.translation_driver.reasoning import (
     ReasoningIntentInvalid,
     intent_from_thinking,
     unused_thinking_fields,
 )
-from app.pipeline.translation_driver.reasoning_carrier import (
-    decode_reasoning_carrier,
-    encode_reasoning_carrier,
+from app.pipeline.translation_driver.reasoning_bridge import (
+    ReasoningBridgeError,
+    ReasoningNotPortable,
+    read_anthropic_reasoning,
+    reasoning_to_anthropic,
 )
 from app.pipeline.translation_driver.semantic import (
     Conversion,
@@ -53,42 +49,20 @@ def _dict_list(value: object) -> list[dict[str, Any]]:
     return [dict[str, Any](cast(Mapping[str, Any], e)) for e in entries if isinstance(e, Mapping)]
 
 
-def _reasoning_from_signature(signature: str) -> ReasoningState:
-    """Classify a `thinking.signature` by who issued it.
-
-    A carrier this proxy (or the service it is compatible with) issued decodes back to the
-    Responses payload it was holding, so it can cross. Anything else is Anthropic's own and stays
-    Anthropic's own — `portable_to` is what stops it being forged into an `encrypted_content`.
-    """
-    decoded = decode_reasoning_carrier(signature)
-    if decoded.classification == "foreign":
-        return ReasoningState(OpaqueFormat.CLAUDE_SIGNATURE, signature)
-    return ReasoningState(
-        OpaqueFormat.PROXY_CARRIER,
-        signature,
-        encrypted_content=decoded.encrypted_content or "",
-    )
-
-
 def _block_from_anthropic(raw: dict[str, Any]) -> ContentBlock:
     kind = str(raw.get("type", ""))
     if kind == TEXT:
         return ContentBlock(BlockKind.TEXT, text=str(raw.get("text", "")), raw=raw)
-    if kind == THINKING:
-        signature = str(raw.get("signature", ""))
-        return ContentBlock(
-            BlockKind.REASONING,
-            text=str(raw.get(THINKING, "")),
-            reasoning=_reasoning_from_signature(signature) if signature else None,
-            raw=raw,
-        )
-    if kind == REDACTED_THINKING:
-        return ContentBlock(
-            BlockKind.REASONING,
-            redacted=True,
-            reasoning=ReasoningState(OpaqueFormat.CLAUDE_SIGNATURE, str(raw.get("data", ""))),
-            raw=raw,
-        )
+    if kind in {THINKING, REDACTED_THINKING}:
+        try:
+            reasoning = read_anthropic_reasoning(raw)
+        except ReasoningBridgeError as error:
+            raise TranslationRefused(
+                error.detail,
+                code=error.code,
+                field_path=f"messages.content.{kind}",
+            ) from error
+        return ContentBlock(BlockKind.REASONING, reasoning=reasoning, raw=raw)
     if kind == TOOL_USE:
         return ContentBlock(
             BlockKind.TOOL_USE,
@@ -172,8 +146,8 @@ def _system_value(blocks: list[SystemBlock]) -> list[dict[str, Any]]:
 
 
 def block_to_anthropic(block: ContentBlock, conversion: Conversion) -> dict[str, Any] | None:
-    """Render one block as Anthropic content, or None when it has no faithful rendering."""
-    return _block_to_anthropic(block, conversion)
+    """Render one response block for an Anthropic client."""
+    return _block_to_anthropic(block, conversion, bridge_for_client=True)
 
 
 def block_from_anthropic(raw: dict[str, Any]) -> ContentBlock:
@@ -181,11 +155,20 @@ def block_from_anthropic(raw: dict[str, Any]) -> ContentBlock:
     return _block_from_anthropic(raw)
 
 
-def _block_to_anthropic(block: ContentBlock, conversion: Conversion) -> dict[str, Any] | None:
+def _block_to_anthropic(
+    block: ContentBlock,
+    conversion: Conversion,
+    *,
+    bridge_for_client: bool,
+) -> dict[str, Any] | None:
     if block.kind is BlockKind.TEXT:
         return {"type": TEXT, "text": block.text}
     if block.kind is BlockKind.REASONING:
-        return _reasoning_to_anthropic(block, conversion)
+        return _reasoning_to_anthropic(
+            block,
+            conversion,
+            bridge_for_client=bridge_for_client,
+        )
     if block.kind is BlockKind.TOOL_USE:
         return {
             "type": TOOL_USE,
@@ -207,23 +190,27 @@ def _block_to_anthropic(block: ContentBlock, conversion: Conversion) -> dict[str
     return None
 
 
-def _reasoning_to_anthropic(block: ContentBlock, conversion: Conversion) -> dict[str, Any]:
-    """Render a reasoning block as Anthropic thinking, issuing a carrier when the state is ours.
-
-    A Responses `encrypted_content` has no Anthropic spelling, so it travels inside a carrier this proxy signs. That is the reverse of the refusal on the way out: encoding *our own* value is honest, encoding Anthropic's would not be.
-    """
-    if block.redacted and block.reasoning is not None:
-        return {"type": REDACTED_THINKING, "data": block.reasoning.value}
-    signature = ""
-    state = block.reasoning
-    if state is not None:
-        if state.format in {OpaqueFormat.CLAUDE_SIGNATURE, OpaqueFormat.PROXY_CARRIER}:
-            # Already an Anthropic-shaped signature — ours or theirs, it goes back as it came.
-            signature = state.value
-        else:
-            # A Responses payload has no Anthropic spelling, so it travels inside a carrier we sign. Encoding our own value is recovery; encoding Anthropic's would be invention.
-            signature = encode_reasoning_carrier(state.value)
-    return {"type": THINKING, THINKING: block.text, "signature": signature}
+def _reasoning_to_anthropic(
+    block: ContentBlock,
+    conversion: Conversion,
+    *,
+    bridge_for_client: bool,
+) -> dict[str, Any] | None:
+    """Render reasoning natively, or put provider-specific state in a client carrier."""
+    content = block.reasoning
+    if content is None:
+        conversion.record(LossCode.BLOCK_NOT_CARRIED, "reasoning block has no typed content")
+        return None
+    try:
+        return reasoning_to_anthropic(content, bridge_for_client=bridge_for_client)
+    except ReasoningNotPortable:
+        state = content.state
+        source = state.format.value if state is not None else content.source_format
+        conversion.record(
+            LossCode.REASONING_STATE_NOT_PORTABLE,
+            f"{source} cannot be written to an Anthropic upstream",
+        )
+        return None
 
 
 def to_anthropic_messages(
@@ -236,7 +223,12 @@ def to_anthropic_messages(
         rendered = [
             block
             for block in (
-                _block_to_anthropic(b, request.conversion) for b in message.blocks
+                _block_to_anthropic(
+                    b,
+                    request.conversion,
+                    bridge_for_client=False,
+                )
+                for b in message.blocks
             )
             if block is not None
         ]

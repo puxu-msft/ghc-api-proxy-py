@@ -12,12 +12,14 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from app.config.schema import BufferingPolicy
+from app.pipeline.translation_driver.content import ReasoningContent
 
 # The kinds a `CompletedBlock` can be. Anthropic's words, because a block *is* an Anthropic content block by definition (see `CompletedBlock`) whichever upstream it was assembled from — so these are the internal vocabulary rather than one format's, and they belong beside the type they describe.
 #
 # `TOOL_USE` used to be spelled three times: here as `TOOL_USE_KIND`, in the assembler as `TOOL_USE`, and again in `stream`. Three names for one string is three places for them to drift.
 TEXT = "text"
 THINKING = "thinking"
+REDACTED_THINKING = "redacted_thinking"
 TOOL_USE = "tool_use"
 
 
@@ -71,10 +73,13 @@ class CompletedBlock:
     index: int
     kind: str
     payload: dict[str, Any]
+    reasoning: ReasoningContent | None = None
 
     @property
     def size_bytes(self) -> int:
-        return len(repr(self.payload).encode())
+        payload_bytes = len(repr(self.payload).encode())
+        reasoning_bytes = len(repr(self.reasoning).encode()) if self.reasoning is not None else 0
+        return payload_bytes + reasoning_bytes
 
     @property
     def requires_client_action(self) -> bool:

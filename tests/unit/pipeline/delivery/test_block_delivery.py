@@ -9,6 +9,10 @@ from app.pipeline.delivery import (
     DeliveryError,
     DeliverySession,
 )
+from app.pipeline.translation_driver.content import (
+    ReasoningContent,
+    ReasoningSummaryPart,
+)
 
 
 def block(index: int, kind: str = "text", size: int = 10) -> CompletedBlock:
@@ -70,6 +74,29 @@ def test_cap_abandons_the_response_rather_than_trimming() -> None:
     with pytest.raises(BufferCapExceeded) as raised:
         buffer.add(block(1, size=200))
     assert raised.value.cap == 60
+
+
+def test_cap_counts_typed_reasoning_state_held_beside_the_wire_payload() -> None:
+    payload = {"type": "thinking", "thinking": "x", "signature": "carrier"}
+    reasoning = ReasoningContent(
+        visible_text="x",
+        source_format="openai-responses",
+        summary_parts=(
+            ReasoningSummaryPart("x", {"large": "y" * 1000}),
+        ),
+    )
+    reasoning_block = CompletedBlock(
+        index=0,
+        kind="thinking",
+        payload=payload,
+        reasoning=reasoning,
+    )
+    payload_only = len(repr(payload).encode())
+    assert reasoning_block.size_bytes > payload_only + 1000
+
+    buffer = BlockBuffer(policy="full", cap_bytes=payload_only + 100)
+    with pytest.raises(BufferCapExceeded):
+        buffer.add(reasoning_block)
 
 
 def test_cap_of_zero_disables_the_guard() -> None:

@@ -29,6 +29,10 @@ from app.pipeline.translation_driver.openai_chat_completions import (
     WIRE_FORMAT,
     chat_usage_to_anthropic,
 )
+from app.pipeline.translation_driver.reasoning_bridge import (
+    read_chat_reasoning,
+    reasoning_to_anthropic,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -230,13 +234,20 @@ class ChatCompletionsAssembler:
         if draft is None:
             return ()
         payload = dict(draft.payload)
+        reasoning = None
         if draft.kind == TEXT:
             payload[TEXT] = draft.text
         elif draft.kind == THINKING:
-            payload[THINKING] = draft.text
+            reasoning = read_chat_reasoning(draft.text)
+            payload = reasoning_to_anthropic(reasoning, bridge_for_client=True)
         elif draft.kind == TOOL_USE and draft.partial_json:
             payload["input"] = _decode_arguments(draft.partial_json)
-        block = CompletedBlock(index=draft.index, kind=draft.kind, payload=payload)
+        block = CompletedBlock(
+            index=draft.index,
+            kind=draft.kind,
+            payload=payload,
+            reasoning=reasoning,
+        )
         self._terminal.record(block)
         return (block,)
 

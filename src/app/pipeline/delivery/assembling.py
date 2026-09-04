@@ -12,7 +12,13 @@ from typing import Any, Protocol
 import orjson
 
 from app.errors import ErrorInfo
-from app.pipeline.delivery.blocks import THINKING, TOOL_USE, CompletedBlock, DeliveryUnit
+from app.pipeline.delivery.blocks import (
+    REDACTED_THINKING,
+    THINKING,
+    TOOL_USE,
+    CompletedBlock,
+    DeliveryUnit,
+)
 from app.pipeline.delivery.sse_source import SseEvent
 
 
@@ -61,7 +67,7 @@ class Terminal:
         self.blocks += 1
         if block.kind == TOOL_USE:
             self.tools.append(str(block.payload.get("name", "")))
-        elif block.kind == THINKING:
+        elif block.kind in {THINKING, REDACTED_THINKING}:
             self.thinking.append("txt" if block.payload.get(THINKING) else "enc")
 
 
@@ -152,6 +158,17 @@ class BlockAssembler[UnitT: DeliveryUnit = CompletedBlock](Protocol):
 
 
 @dataclass(slots=True)
+class ReasoningSummaryDraft:
+    """One Responses summary part while its event group is still open."""
+
+    text: str = ""
+    extensions: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
+    text_done: bool = False
+    part_done: bool = False
+    incomplete: bool = False
+
+
+@dataclass(slots=True)
 class Draft:
     """One block being accumulated, before its closing event arrives.
 
@@ -163,6 +180,9 @@ class Draft:
     payload: dict[str, Any]
     text: str = ""
     partial_json: str = ""
+    reasoning_summary: dict[int, ReasoningSummaryDraft] = field(
+        default_factory=lambda: dict[int, ReasoningSummaryDraft]()
+    )
 
 
 def decode_json(raw: str) -> Any:

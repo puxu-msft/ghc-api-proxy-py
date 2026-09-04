@@ -13,6 +13,11 @@ from app.pipeline.translation_driver.openai_chat_completions import (
     from_chat_completions_response,
     to_openai_chat_completions,
 )
+from app.pipeline.translation_driver.reasoning_carrier import (
+    CHAT_REASONING_CONTENT,
+    RESPONSES_SUMMARY_TEXT_LAYOUT,
+    decode_reasoning_carrier,
+)
 from app.pipeline.translation_driver.registry import TranslatorNotFound, default_registry
 from app.pipeline.translation_driver.semantic import LossCode
 
@@ -314,6 +319,68 @@ def test_a_whole_chat_completion_reads_back_into_the_intermediate_form() -> None
     assert response.stop_reason == "end_turn"
     assert [(block.kind.value, block.text) for block in response.blocks] == [("text", "hello there")]
     assert response.usage == {"input_tokens": 12, "output_tokens": 3}
+
+
+def test_buffered_chat_reasoning_reaches_both_client_formats_as_typed_content() -> None:
+    payload = {
+        "id": "chatcmpl-reasoning",
+        "model": "glm-5.2",
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "reasoning_content": "hidden chain",
+                    "content": "answer",
+                },
+            }
+        ],
+        "usage": {"prompt_tokens": 12, "completion_tokens": 3},
+    }
+    semantic = from_chat_completions_response(payload)
+    assert semantic.blocks[0].reasoning is not None
+    assert semantic.blocks[0].reasoning.visible_text == "hidden chain"
+    assert semantic.blocks[0].reasoning.source_format == "openai-chat-completions"
+    assert semantic.blocks[0].reasoning.state is None
+
+    registry = default_registry()
+    anthropic, anthropic_semantic = registry.translate_response(
+        payload,
+        source=WireFormat.OPENAI_CHAT_COMPLETIONS,
+        target=WireFormat.ANTHROPIC_MESSAGES,
+    )
+    assert [block["type"] for block in anthropic["content"]] == ["thinking", "text"]
+    thinking = anthropic["content"][0]
+    assert thinking["thinking"] == "hidden chain"
+    anthropic_carrier = decode_reasoning_carrier(thinking["signature"])
+    assert {record.type for record in anthropic_carrier.records} == {
+        CHAT_REASONING_CONTENT,
+        RESPONSES_SUMMARY_TEXT_LAYOUT,
+    }
+    assert anthropic["content"][1] == {"type": "text", "text": "answer"}
+    assert not anthropic_semantic.conversion.has(LossCode.BLOCK_NOT_CARRIED)
+
+    responses, responses_semantic = registry.translate_response(
+        payload,
+        source=WireFormat.OPENAI_CHAT_COMPLETIONS,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    assert responses["output"][0]["type"] == "reasoning"
+    assert responses["output"][0]["summary"] == [
+        {"type": "summary_text", "text": "hidden chain"}
+    ]
+    responses_carrier = decode_reasoning_carrier(
+        responses["output"][0]["encrypted_content"]
+    )
+    assert [(record.type, record.value) for record in responses_carrier.records] == [
+        (CHAT_REASONING_CONTENT, None)
+    ]
+    assert responses["output"][1]["type"] == "message"
+    assert responses["output"][1]["content"] == [
+        {"type": "output_text", "text": "answer"}
+    ]
+    assert not responses_semantic.conversion.has(LossCode.BLOCK_NOT_CARRIED)
 
 
 def test_tool_calls_read_back_with_decoded_arguments() -> None:

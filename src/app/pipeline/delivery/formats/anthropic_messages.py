@@ -22,10 +22,17 @@ from app.pipeline.delivery.assembling import (
     Terminal,
     decode_json,
 )
-from app.pipeline.delivery.blocks import TEXT, THINKING, TOOL_USE, CompletedBlock
+from app.pipeline.delivery.blocks import (
+    REDACTED_THINKING,
+    TEXT,
+    THINKING,
+    TOOL_USE,
+    CompletedBlock,
+)
 from app.pipeline.delivery.formats.errors import write_error
 from app.pipeline.delivery.sse_frame import SseFrame
 from app.pipeline.delivery.sse_source import SseEvent
+from app.pipeline.translation_driver.reasoning_bridge import read_anthropic_reasoning
 
 # This leg's own name, as `WireFormat` spells it. A literal here and a literal in the route table would be two spellings of one fact.
 ANTHROPIC_MESSAGES = "anthropic-messages"
@@ -374,7 +381,17 @@ class AnthropicAssembler:
             payload[THINKING] = draft.text
         elif draft.kind == TOOL_USE and draft.partial_json:
             payload["input"] = decode_json(draft.partial_json)
-        block = CompletedBlock(index=draft.index, kind=draft.kind, payload=payload)
+        reasoning = (
+            read_anthropic_reasoning(payload)
+            if draft.kind in {THINKING, REDACTED_THINKING}
+            else None
+        )
+        block = CompletedBlock(
+            index=draft.index,
+            kind=draft.kind,
+            payload=payload,
+            reasoning=reasoning,
+        )
         self._terminal.record(block)
         return (block,)
 

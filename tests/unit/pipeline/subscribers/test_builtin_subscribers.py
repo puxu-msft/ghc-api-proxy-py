@@ -12,10 +12,15 @@ from typing import Any
 import httpx2
 import pytest
 
-from app.config.schema import ProxyConfig
+from app.config.schema import FixAnthropicRequestHook, ProxyConfig
 from app.model_provider import EndpointNotSupported, ModelDescriptor, ModelEndpoint
 from app.models.anthropic import MessagesRequest
-from app.pipeline.direct_driver import AnthropicMessagesDriver, RetryBudget
+from app.pipeline.anthropic_request_hook import fix_anthropic_request
+from app.pipeline.direct_driver import (
+    AnthropicMessagesDriver,
+    OpenAIResponsesDriver,
+    RetryBudget,
+)
 from app.pipeline.direct_driver.base import EVENT_ATTEMPT_PREPARE
 from app.pipeline.driver import handle_count_tokens
 from app.pipeline.events import SubscriberRegistry
@@ -27,10 +32,12 @@ from app.pipeline.subscribers import (
     BLANK_TEXT_BLOCKS_ID,
     HOSTED_WEB_SEARCH_GATE_ID,
     MINTED_REASONING_IDS_ID,
+    REASONING_CARRIER_LAST_MILE_ID,
     SERVER_TOOL_CAPABILITY_ID,
     register_builtin_subscribers,
 )
 from app.pipeline.subscribers.counting import COUNTING_ONLY
+from app.pipeline.translation_driver.reasoning_carrier import encode_reasoning_carrier
 from app.pipeline.translation_driver.registry import TranslatorNotFound, default_registry
 from app.pipeline.translation_driver.semantic import TranslationRefused, WebSearchNotExecutable
 from app.server.composition import build_chain
@@ -43,8 +50,9 @@ EXPECTED_ON_ATTEMPT_PREPARE = (
     # Position is convention, not constraint: it is the only pass on this event that reads `input`, and every neighbour works on the Anthropic-shaped body's `tools`, `messages` or `content`, so none of them can see what it wrote or write what it reads.
     MINTED_REASONING_IDS_ID,
     BLANK_TEXT_BLOCKS_ID,
-    ANTHROPIC_TRAILING_ASSISTANT_ID,
+    REASONING_CARRIER_LAST_MILE_ID,
     ANTHROPIC_CACHE_CONTROL_ID,
+    ANTHROPIC_TRAILING_ASSISTANT_ID,
 )
 # Keyed by event, so a subscriber added on a *different* event fails here too. Asserting one bucket would have let the next one land on `attempt.failed` with both assertions still green — a lock that only covers the door it was hung on.
 EXPECTED_BY_EVENT = {EVENT_ATTEMPT_PREPARE: EXPECTED_ON_ATTEMPT_PREPARE}
@@ -224,6 +232,90 @@ async def test_a_blank_block_is_gone_from_what_the_driver_actually_sends() -> No
             ],
         }
     ]
+
+
+async def test_translated_responses_wire_keeps_two_reasoning_items_without_separator() -> None:
+    registry = SubscriberRegistry[RequestContext]()
+    register_builtin_subscribers(registry)
+    provider = RecordingProvider(endpoint=ModelEndpoint.OPENAI_RESPONSES)
+    driver = OpenAIResponsesDriver(provider, registry.freeze(), budget=RetryBudget(max_total=1))
+    anthropic = {
+        "model": "claude-model",
+        "max_tokens": 32,
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "thinking",
+                        "thinking": "first",
+                        "signature": encode_reasoning_carrier("ENC-1"),
+                    },
+                    {
+                        "type": "thinking",
+                        "thinking": "second",
+                        "signature": encode_reasoning_carrier("ENC-2"),
+                    },
+                ],
+            }
+        ],
+    }
+    fix_anthropic_request(anthropic, FixAnthropicRequestHook())
+    translated, _ = default_registry().translate(
+        anthropic,
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    context = RequestContext(
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        requested_model="claude-model",
+        payload=translated,
+        original_payload=anthropic,
+    )
+    context.resolved_model = "claude-model"
+    context.target_format = WireFormat.OPENAI_RESPONSES
+
+    await driver.run(context)
+
+    assert provider.sent
+    assert [item["type"] for item in provider.sent[0]["input"]] == [
+        "reasoning",
+        "reasoning",
+    ]
+
+
+async def test_direct_anthropic_driver_never_sends_compatible_synthetic_carrier() -> None:
+    registry = SubscriberRegistry[RequestContext]()
+    register_builtin_subscribers(registry)
+    provider = RecordingProvider()
+    driver = AnthropicMessagesDriver(provider, registry.freeze(), budget=RetryBudget(max_total=1))
+    context = RequestContext(
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        requested_model="claude-model",
+        payload={
+            "model": "claude-model",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "thinking",
+                            "thinking": "old",
+                            "signature": "copilot-api:synthetic-reasoning:v1:RU5D",
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+    context.resolved_model = "claude-model"
+    context.target_format = WireFormat.ANTHROPIC_MESSAGES
+
+    outcome = await driver.run(context)
+
+    assert provider.sent == []
+    assert isinstance(outcome.error, TranslationRefused)
+    assert outcome.error.code == "reasoning_carrier_not_unwrapped"
 
 
 async def test_the_counting_leg_measures_rather_than_refusing() -> None:

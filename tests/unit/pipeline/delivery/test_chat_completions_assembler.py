@@ -7,6 +7,14 @@ from typing import Any
 from app.pipeline.delivery.assembling import ReplyDialect
 from app.pipeline.delivery.formats.openai_chat_completions import ChatCompletionsAssembler
 from app.pipeline.delivery.sse_source import SseEvent
+from app.pipeline.translation_driver.openai_chat_completions import (
+    from_chat_completions_response,
+)
+from app.pipeline.translation_driver.reasoning_carrier import (
+    CHAT_REASONING_CONTENT,
+    RESPONSES_SUMMARY_TEXT_LAYOUT,
+    decode_reasoning_carrier,
+)
 
 
 def chunk(delta: dict[str, Any], finish: str | None = None) -> SseEvent:
@@ -122,7 +130,32 @@ def test_reasoning_content_becomes_a_thinking_block_before_the_text() -> None:
     thinking = assembler.push(chunk({"content": "answer"}))
 
     assert [block.kind for block in thinking] == ["thinking"]
+    assert thinking[0].payload["type"] == "thinking"
     assert thinking[0].payload["thinking"] == "thinking..."
+    carrier = decode_reasoning_carrier(thinking[0].payload["signature"])
+    assert {record.type for record in carrier.records} == {
+        CHAT_REASONING_CONTENT,
+        RESPONSES_SUMMARY_TEXT_LAYOUT,
+    }
+    assert thinking[0].reasoning is not None
+    buffered = from_chat_completions_response(
+        {
+            "id": "chatcmpl-reasoning",
+            "model": "glm-5.2",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {
+                        "role": "assistant",
+                        "reasoning_content": "thinking...",
+                        "content": "answer",
+                    },
+                }
+            ],
+        }
+    )
+    assert thinking[0].reasoning == buffered.blocks[0].reasoning
     final = assembler.push(chunk({}, finish="stop"))
     assert [block.kind for block in final] == ["text"]
     assert assembler.terminal.thinking == ["txt"]

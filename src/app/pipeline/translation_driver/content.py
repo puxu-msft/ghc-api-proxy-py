@@ -42,23 +42,46 @@ class OpaqueFormat(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ReasoningState:
-    """The continuation state a reasoning block carries, and where it may legitimately go."""
+    """One provider-issued continuation value.
+
+    Presence is represented by the object itself, so an empty string stays distinct from an absent field. A value only travels natively to the format that issued it; the bridge codec is what lets a client carry it through another format without presenting it to that format's upstream.
+    """
 
     format: OpaqueFormat
     value: str = ""
-    # Set when a proxy-issued carrier was decoded: the Responses payload it was holding.
-    encrypted_content: str = ""
 
     def portable_to(self, target: OpaqueFormat) -> bool:
-        """Whether this state may be written into `target` without inventing anything.
+        """Whether this exact value belongs in `target`'s native opaque slot."""
+        return self.format is target
 
-        A native Claude signature is not portable to Responses. Encoding one would hand upstream a value it never issued and cannot verify; the honest outcome is a recorded loss.
-        """
-        if self.format is target:
-            return True
-        if self.format is OpaqueFormat.PROXY_CARRIER:
-            return bool(self.encrypted_content) or target is OpaqueFormat.CLAUDE_SIGNATURE
-        return False
+
+@dataclass(frozen=True, slots=True)
+class ReasoningSummaryPart:
+    """One Responses `summary_text` part, including fields this reader does not consume."""
+
+    text: str
+    extensions: Mapping[str, Any] = field(default_factory=lambda: dict[str, Any]())
+
+    def to_wire(self) -> dict[str, Any]:
+        return {"type": "summary_text", "text": self.text, **dict(self.extensions)}
+
+
+@dataclass(frozen=True, slots=True)
+class ReasoningContent:
+    """One reasoning item's visible projection, structure, and provider-native state."""
+
+    visible_text: str
+    source_format: str
+    summary_parts: tuple[ReasoningSummaryPart, ...] | None = None
+    state: ReasoningState | None = None
+    redacted: bool = False
+
+    def responses_summary(self) -> list[dict[str, Any]]:
+        if self.summary_parts is not None:
+            return [part.to_wire() for part in self.summary_parts]
+        if not self.visible_text:
+            return []
+        return [{"type": "summary_text", "text": self.visible_text}]
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,9 +101,7 @@ class ContentBlock:
     output: Any = None
     is_error: bool = False
 
-    reasoning: ReasoningState | None = None
-    # Anthropic's `redacted_thinking`: the model reasoned but the text is withheld.
-    redacted: bool = False
+    reasoning: ReasoningContent | None = None
 
     # The block exactly as it arrived. The only content an `UNKNOWN` block has, and what lets a same-format crossing return what it was given rather than what the model could express.
     raw: Mapping[str, Any] = field(default_factory=lambda: dict[str, Any]())
