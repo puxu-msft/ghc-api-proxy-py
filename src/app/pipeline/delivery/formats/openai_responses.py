@@ -457,6 +457,8 @@ class ResponsesAssembler:
         self._hand_over_stop_reasons = hand_over_stop_reasons
         # The block upstream cut short, held rather than emitted or discarded, because at the moment it closes this side does not yet know *why* the response is incomplete — that arrives on the terminal event. Exactly one item can ever be in here: upstream cuts the last one short and then stops.
         self._cut_short: CompletedBlock | None = None
+        self._cut_short_loss: Loss | None = None
+        self._cut_short_item_type: str = ""
         self._drafts: dict[str, Draft] = {}
         # **Block numbers are handed out when a deliverable block is formed, not when its item opens.** A block held as `_cut_short` reserves its number before anyone receives it; that is safe because such an item is the last one — the field above says so — so a number reserved and then dropped has no later block to leave a hole in front of, and the hand-back block that may follow numbers itself from `DeliverySession.committed_count`. The Anthropic framer writes this number into `content_block_start`, `_delta`, `_stop` and `signature_delta` verbatim, so a number that is allocated and then never used is a hole in the client's sequence, and two blocks sharing one is a second block read as a continuation of the first.
         #
@@ -538,9 +540,20 @@ class ResponsesAssembler:
             self._read_terminal(kind, data)
             # Now the reason is known, the held block can be answered. Kept when this ending will not hand the turn back — the client would otherwise lose a passage it cannot ask for again — and dropped when it will, because the next turn produces it whole.
             held, self._cut_short = self._cut_short, None
+            held_loss, self._cut_short_loss = self._cut_short_loss, None
+            held_type, self._cut_short_item_type = self._cut_short_item_type, ""
             if held is not None and self._terminal.stop_reason not in self._hand_over_stop_reasons:
+                if held_loss is not None:
+                    self._response_losses.append(held_loss)
                 self._terminal.record(held)
                 return (held,)
+            if held is not None:
+                self._response_losses.append(
+                    Loss(
+                        LossCode.ITEM_NOT_CARRIED,
+                        f"truncated {held_type!r} dropped",
+                    )
+                )
             return ()
         if kind in _FAILURE_EVENTS:
             # Upstream said this turn failed, and since 2026-08-24 that is carried rather than logged and dropped.
@@ -762,6 +775,7 @@ class ResponsesAssembler:
         cut_short = _upstream_cut_this_item_short(data) and self._terminal.blocks > 0
         kind = draft.kind
         reasoning = None
+        block_loss: Loss | None = None
         if draft.kind == DISCARDED:
             # Recognised and deliberately not delivered — see the item map for which items land here and why. The point of naming them is that they never reach the text fallback, which would turn each into an empty block.
             return ()
@@ -842,14 +856,13 @@ class ResponsesAssembler:
             # Read off the closing event, not the draft. `output_item.added` carries no action and this item has no content deltas.
             raw = data.get("item")
             item = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+            self._record_web_search_call_id_loss(item)
             if self._hosted_web_search_expected:
                 return self._complete_hosted_web_search(item)
-            # D3 is still undecided. An unsolicited call keeps the established readable fallback rather than borrowing D6's native pair.
-            self._response_losses.append(
-                Loss(
-                    LossCode.SERVER_TOOL_NOT_CARRIED,
-                    anthropic_server_tools.unsolicited_web_search_loss(item.get("action")),
-                )
+            # D3 is still undecided. Delay its flattening loss with a cut-short block: if max-token hand-over drops the item, the true loss is ITEM_NOT_CARRIED instead.
+            block_loss = Loss(
+                LossCode.SERVER_TOOL_NOT_CARRIED,
+                anthropic_server_tools.unsolicited_web_search_loss(item.get("action")),
             )
             payload = {"type": TEXT, TEXT: web_search_call_text(item.get("action"))}
             kind = TEXT
@@ -863,11 +876,24 @@ class ResponsesAssembler:
         )
         self._emitted += 1
         if cut_short:
-            # Not recorded either: a block nobody has received is not a block delivered, and whether anyone ever will is decided on the terminal event.
+            # Neither the block nor its rendering loss is final until the terminal says whether hand-over will reproduce it.
             self._cut_short = block
+            self._cut_short_loss = block_loss
+            self._cut_short_item_type = str(
+                cast(dict[str, Any], data.get("item") or {}).get("type", "")
+            )
             return ()
+        if block_loss is not None:
+            self._response_losses.append(block_loss)
         self._terminal.record(block)
         return (block,)
+
+    def _record_web_search_call_id_loss(self, item: dict[str, Any]) -> None:
+        detail = anthropic_server_tools.web_search_call_id_loss(item.get("id"))
+        if detail is not None:
+            self._response_losses.append(
+                Loss(LossCode.SERVER_TOOL_CALL_ID_NOT_CARRIED, detail)
+            )
 
     def _complete_hosted_web_search(
         self, item: dict[str, Any]

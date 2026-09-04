@@ -154,13 +154,16 @@ def unavailable_web_search_pair(
 
 
 def partial_web_search_loss(pair: UnavailableWebSearchPair, status: object) -> str:
-    detail = (
-        f"web_search_call status={status!r}; upstream id not carried; "
-        "structured result unavailable"
-    )
+    detail = f"web_search_call status={status!r}; structured result unavailable"
     if pair.action.loss_detail:
         detail += f"; {pair.action.loss_detail}"
     return detail
+
+
+def web_search_call_id_loss(item_id: object) -> str | None:
+    if not isinstance(item_id, str) or not item_id:
+        return None
+    return "web_search_call upstream id not carried"
 
 
 def unsolicited_web_search_loss(action: object) -> str:
@@ -187,4 +190,5 @@ __all__ = [
     "project_web_search_action",
     "unavailable_web_search_pair",
     "unsolicited_web_search_loss",
+    "web_search_call_id_loss",
 ]

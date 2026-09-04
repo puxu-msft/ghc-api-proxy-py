@@ -893,6 +893,7 @@ def test_an_expected_search_becomes_a_native_unavailable_pair_before_the_answer(
     assert answer == {"type": "text", "text": "Bun 1.3 is out."}
     assert payload["stop_reason"] == "end_turn"
     assert "x" * 32 not in json.dumps(payload)
+    assert semantic.conversion.has(LossCode.SERVER_TOOL_CALL_ID_NOT_CARRIED)
     assert semantic.conversion.has(LossCode.SERVER_TOOL_PARTIALLY_REPRESENTABLE)
 
 
@@ -929,6 +930,7 @@ def test_an_expected_incomplete_search_is_not_dropped_by_hand_over_rules() -> No
     ]
     assert payload["content"][1]["input"] == {}
     assert payload["stop_reason"] == "max_tokens"
+    assert semantic.conversion.has(LossCode.SERVER_TOOL_CALL_ID_NOT_CARRIED)
     assert semantic.conversion.has(LossCode.SERVER_TOOL_PARTIALLY_REPRESENTABLE)
 
 

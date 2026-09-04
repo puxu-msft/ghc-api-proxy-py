@@ -45,6 +45,7 @@ class ResponseReader(Protocol):
         *,
         client_search_tool: str = "",
         hosted_web_search_expected: bool = False,
+        hand_over_stop_reasons: frozenset[str] = frozenset({"max_tokens"}),
     ) -> SemanticResponse: ...
 type ResponseWriter = Callable[[SemanticResponse], dict[str, Any]]
 
@@ -130,6 +131,7 @@ class TranslatorRegistry:
         target: WireFormat,
         client_search_tool: str = "",
         hosted_web_search_expected: bool = False,
+        hand_over_stop_reasons: frozenset[str] = frozenset({"max_tokens"}),
     ) -> tuple[dict[str, Any], SemanticResponse]:
         """Carry a response back across, so the client sees the format it asked in.
 
@@ -145,6 +147,7 @@ class TranslatorRegistry:
             payload,
             client_search_tool=client_search_tool,
             hosted_web_search_expected=hosted_web_search_expected,
+            hand_over_stop_reasons=hand_over_stop_reasons,
         )
         return writer(semantic), semantic
 

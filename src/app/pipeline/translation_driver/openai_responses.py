@@ -520,6 +520,17 @@ def blocks_from_item(
     return "user", (ContentBlock(BlockKind.UNKNOWN, raw=item),)
 
 
+def record_web_search_call_id_loss(
+    item: dict[str, Any],
+    conversion: Conversion,
+) -> None:
+    if item.get("type") != "web_search_call":
+        return
+    detail = anthropic_server_tools.web_search_call_id_loss(item.get("id"))
+    if detail is not None:
+        conversion.record(LossCode.SERVER_TOOL_CALL_ID_NOT_CARRIED, detail)
+
+
 def response_blocks_from_item(
     item: dict[str, Any],
     *,

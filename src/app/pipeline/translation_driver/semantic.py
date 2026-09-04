@@ -44,6 +44,7 @@ class LossCode(StrEnum):
     INSTRUCTIONS_ROLE_NOT_CARRIED = "instructions-role-not-carried"
     TOOL_RESULT_CONTENT_FLATTENED = "tool-result-content-flattened"
     SERVER_TOOL_NOT_CARRIED = "server-tool-not-carried"
+    SERVER_TOOL_CALL_ID_NOT_CARRIED = "server-tool-call-id-not-carried"
     SERVER_TOOL_PARTIALLY_REPRESENTABLE = "server-tool-partially-representable"
     SERVER_TOOL_CONSTRAINT_DROPPED = "server-tool-constraint-dropped"
     REASONING_INTENT_APPROXIMATED = "reasoning-intent-approximated"

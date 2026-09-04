@@ -44,6 +44,9 @@ def response_payload(chain: Chain, handled: HandledRequest, body: dict[str, Any]
         hosted_web_search_expected=bool(
             handled.context.extras.get(HOSTED_WEB_SEARCH_EXPECTED)
         ),
+        hand_over_stop_reasons=frozenset(
+            chain.config.upstream_request_retry.hand_over_stop_reasons
+        ),
     )
     if not semantic.conversion.lossless:
         handled.context.extras[RESPONSE_CONVERSION_LOSSES] = list(semantic.conversion.losses)

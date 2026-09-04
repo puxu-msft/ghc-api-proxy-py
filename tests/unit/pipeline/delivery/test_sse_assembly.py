@@ -21,6 +21,7 @@ from app.pipeline.delivery.formats.openai_responses import ResponsesAssembler
 from app.pipeline.delivery.sse_source import SseEvent, encode_frame, parse_frame, read_events
 from app.pipeline.reply import blocks_from_anthropic
 from app.pipeline.translation_driver.reasoning_bridge import ReasoningBridgeError
+from app.pipeline.translation_driver.responses import from_openai_responses_response
 from app.pipeline.translation_driver.semantic import LossCode
 
 
@@ -666,9 +667,10 @@ def test_a_search_that_closes_without_ever_opening_is_still_delivered() -> None:
     )
     assert [block.payload["text"] for block in blocks] == ["[web_search] orphan query"]
     assert [loss.code for loss in assembler.response_losses] == [
-        LossCode.SERVER_TOOL_NOT_CARRIED
+        LossCode.SERVER_TOOL_CALL_ID_NOT_CARRIED,
+        LossCode.SERVER_TOOL_NOT_CARRIED,
     ]
-    assert "unsolicited" in assembler.response_losses[0].detail
+    assert "unsolicited" in assembler.response_losses[1].detail
 
 
 def test_an_expected_search_done_without_added_becomes_one_atomic_native_pair() -> None:
@@ -706,11 +708,12 @@ def test_an_expected_search_done_without_added_becomes_one_atomic_native_pair() 
     assert assembler.cut_mid_block is False
     assert assembler.terminal.tools == []
     assert [loss.code for loss in assembler.response_losses] == [
-        LossCode.SERVER_TOOL_PARTIALLY_REPRESENTABLE
+        LossCode.SERVER_TOOL_CALL_ID_NOT_CARRIED,
+        LossCode.SERVER_TOOL_PARTIALLY_REPRESENTABLE,
     ]
-    assert "find_in_page" in assembler.response_losses[0].detail
-    assert "https://example.com/doc" in assembler.response_losses[0].detail
-    assert "needle" in assembler.response_losses[0].detail
+    assert "find_in_page" in assembler.response_losses[1].detail
+    assert "https://example.com/doc" in assembler.response_losses[1].detail
+    assert "needle" in assembler.response_losses[1].detail
 
 
 def test_web_search_lifecycle_events_are_known_nonsemantic_controls() -> None:
@@ -838,8 +841,90 @@ def test_an_incomplete_expected_search_after_a_block_never_enters_cut_short() ->
     assert _terminal(assembler, "max_output_tokens") == ()
     assert assembler.terminal.stop_reason == "max_tokens"
     assert [loss.code for loss in assembler.response_losses] == [
-        LossCode.SERVER_TOOL_PARTIALLY_REPRESENTABLE
+        LossCode.SERVER_TOOL_CALL_ID_NOT_CARRIED,
+        LossCode.SERVER_TOOL_PARTIALLY_REPRESENTABLE,
     ]
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected_kinds", "expected_losses"),
+    [
+        (
+            "max_output_tokens",
+            ["text"],
+            [
+                LossCode.SERVER_TOOL_CALL_ID_NOT_CARRIED,
+                LossCode.ITEM_NOT_CARRIED,
+            ],
+        ),
+        (
+            "content_filter",
+            ["text", "text"],
+            [
+                LossCode.SERVER_TOOL_CALL_ID_NOT_CARRIED,
+                LossCode.SERVER_TOOL_NOT_CARRIED,
+            ],
+        ),
+    ],
+)
+def test_an_incomplete_unsolicited_search_has_stream_buffer_degradation_parity(
+    reason: str,
+    expected_kinds: list[str],
+    expected_losses: list[LossCode],
+) -> None:
+    body: dict[str, Any] = {
+        "id": "resp_1",
+        "model": "gpt-model",
+        "status": "incomplete",
+        "incomplete_details": {"reason": reason},
+        "output": [
+            {
+                "type": "message",
+                "id": "m1",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "before"}],
+            },
+            {
+                "type": "web_search_call",
+                "id": "ws_incomplete",
+                "status": "incomplete",
+                "action": {"type": "search", "query": "unfinished"},
+            },
+        ],
+    }
+    buffered = from_openai_responses_response(body)
+
+    streamed = ResponsesAssembler()
+    streamed_blocks = list(
+        _responses_item(
+            streamed,
+            0,
+            {
+                "type": "message",
+                "id": "m1",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "before"}],
+            },
+        )
+    )
+    assert _responses_item(
+        streamed,
+        1,
+        {
+            "type": "web_search_call",
+            "id": "ws_incomplete",
+            "status": "incomplete",
+            "action": {"type": "search", "query": "unfinished"},
+        },
+    ) == ()
+    streamed_blocks.extend(_terminal(streamed, reason))
+
+    assert [block.kind.value for block in buffered.blocks] == expected_kinds
+    assert [block.kind for block in streamed_blocks] == expected_kinds
+    assert [loss.code for loss in buffered.conversion.losses] == expected_losses
+    assert [loss.code for loss in streamed.response_losses] == expected_losses
 
 
 def test_an_item_upstream_cut_short_is_dropped_when_the_turn_will_be_handed_back() -> None:

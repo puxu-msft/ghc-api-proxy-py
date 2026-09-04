@@ -22,6 +22,7 @@ from app.pipeline.translation_driver.anthropic_messages import (
 from app.pipeline.translation_driver.content import BlockKind, ContentBlock
 from app.pipeline.translation_driver.openai_responses import (
     item_from_block,
+    record_web_search_call_id_loss,
     response_blocks_from_item,
 )
 from app.pipeline.translation_driver.semantic import Conversion, LossCode
@@ -76,9 +77,10 @@ def from_anthropic_response(
     *,
     client_search_tool: str = "",
     hosted_web_search_expected: bool = False,
+    hand_over_stop_reasons: frozenset[str] = frozenset({"max_tokens"}),
 ) -> SemanticResponse:
     """Accept and ignore response facts that only the Responses wire can use."""
-    del client_search_tool, hosted_web_search_expected
+    del client_search_tool, hosted_web_search_expected, hand_over_stop_reasons
     response = SemanticResponse(
         id=str(payload.get("id", "")),
         model=str(payload.get("model", "")),
@@ -181,6 +183,7 @@ def from_openai_responses_response(
     # Read here rather than after the loop because the drop happens inside it. The streaming assembler cannot do this: its items close before the terminal event says why, so it holds the one it cut short instead and answers the same question a moment later.
     will_hand_over, _ = _responses_stop_reason(payload, has_tool_call=False)
     for item in _mapping_list(payload.get("output")):
+        record_web_search_call_id_loss(item, response.conversion)
         expected_web_search = (
             hosted_web_search_expected and item.get("type") == "web_search_call"
         )

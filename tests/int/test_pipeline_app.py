@@ -525,9 +525,10 @@ def test_a_streamed_search_is_delivered_as_a_native_pair_before_the_answer() -> 
     assert "Thursday, August 20, 2026" in deltas[0]
     assert "[web_search]" not in response.text
     losses = _records()[0]["losses"]
-    assert [entry["direction"] for entry in losses] == ["response"]
+    assert [entry["direction"] for entry in losses] == ["response", "response"]
     assert [entry["code"] for entry in losses] == [
-        "server-tool-partially-representable"
+        "server-tool-call-id-not-carried",
+        "server-tool-partially-representable",
     ]
 
 
@@ -582,9 +583,10 @@ def test_a_buffered_search_is_delivered_as_the_same_native_pair() -> None:
     assert "Thursday, August 20, 2026" in answer["text"]
     assert response.json()["stop_reason"] == "end_turn"
     losses = _records()[0]["losses"]
-    assert [entry["direction"] for entry in losses] == ["response"]
+    assert [entry["direction"] for entry in losses] == ["response", "response"]
     assert [entry["code"] for entry in losses] == [
-        "server-tool-partially-representable"
+        "server-tool-call-id-not-carried",
+        "server-tool-partially-representable",
     ]
 
 
@@ -615,9 +617,56 @@ def test_an_unsolicited_streamed_search_records_the_d3_response_loss() -> None:
     assert response.status_code == 200
     assert "[web_search]" in response.text
     losses = _records()[0]["losses"]
-    assert [entry["direction"] for entry in losses] == ["response"]
-    assert [entry["code"] for entry in losses] == ["server-tool-not-carried"]
-    assert "unsolicited" in losses[0]["detail"]
+    assert [entry["direction"] for entry in losses] == ["response", "response"]
+    assert [entry["code"] for entry in losses] == [
+        "server-tool-call-id-not-carried",
+        "server-tool-not-carried",
+    ]
+    assert "unsolicited" in losses[1]["detail"]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_custom_hand_over_reason_has_stream_buffer_d3_parity(stream: bool) -> None:
+    response_body = incomplete_unsolicited_search_response()
+    upstream_response = (
+        httpx2.Response(
+            200,
+            content=incomplete_unsolicited_search_sse(),
+            headers={"content-type": "text/event-stream"},
+        )
+        if stream
+        else httpx2.Response(200, json=response_body)
+    )
+    client, _ = make_client(
+        lambda _: upstream_response,
+        overrides={
+            "upstream_request_retry": {
+                "hand_over_stop_reasons": ["content_filter"]
+            }
+        },
+    )
+
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "gpt-model",
+            "messages": [{"role": "user", "content": "answer"}],
+            "max_tokens": 256,
+            "stream": stream,
+        },
+    )
+
+    assert response.status_code == 200
+    assert "before" in response.text
+    assert "unfinished" not in response.text
+    assert "turn_interrupted" in response.text
+    losses = [
+        entry for entry in _records()[-1]["losses"] if entry["direction"] == "response"
+    ]
+    assert [entry["code"] for entry in losses] == [
+        "server-tool-call-id-not-carried",
+        "item-not-carried",
+    ]
 
 
 def test_hosted_web_search_is_off_until_the_config_says_otherwise() -> None:
@@ -4149,6 +4198,46 @@ def responses_web_search_sse(query: str = "release notes", answer: str = "found"
     return "".join(frames).encode()
 
 
+def incomplete_unsolicited_search_response() -> dict[str, Any]:
+    return {
+        "id": "resp_incomplete_search",
+        "model": "gpt-model",
+        "status": "incomplete",
+        "incomplete_details": {"reason": "content_filter"},
+        "output": [
+            {
+                "type": "message",
+                "id": "message-before",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "before", "annotations": []}],
+            },
+            {
+                "type": "web_search_call",
+                "id": "search-cut-short",
+                "status": "incomplete",
+                "action": {"type": "search", "query": "unfinished"},
+            },
+        ],
+        "usage": {"input_tokens": 3, "output_tokens": 4},
+    }
+
+
+def incomplete_unsolicited_search_sse() -> bytes:
+    response = incomplete_unsolicited_search_response()
+    message, search = cast(list[dict[str, Any]], response["output"])
+    frames = [
+        *responses_envelope_frames(),
+        f"event: response.output_item.added\ndata: {orjson.dumps({'output_index': 0, 'item': {**message, 'status': 'in_progress', 'content': []}}).decode()}\n\n",
+        f"event: response.output_text.delta\ndata: {orjson.dumps({'output_index': 0, 'item_id': 'message-delta', 'delta': 'before'}).decode()}\n\n",
+        f"event: response.output_item.done\ndata: {orjson.dumps({'output_index': 0, 'item': message}).decode()}\n\n",
+        f"event: response.output_item.added\ndata: {orjson.dumps({'output_index': 1, 'item': {**search, 'status': 'in_progress', 'action': None}}).decode()}\n\n",
+        f"event: response.output_item.done\ndata: {orjson.dumps({'output_index': 1, 'item': search}).decode()}\n\n",
+        f"event: response.incomplete\ndata: {orjson.dumps({'response': response}).decode()}\n\n",
+    ]
+    return "".join(frames).encode()
+
+
 def custom_tool_call_sse() -> bytes:
     """A Responses stream whose one output item is a `custom_tool_call`.
 
@@ -5517,7 +5606,10 @@ def test_a_replay_on_the_translation_leg_sends_the_conversation_again(
         (responses_sse_upstream(), []),
         (
             responses_web_search_sse(query="second search", answer="second answer"),
-            ["server-tool-partially-representable"],
+            [
+                "server-tool-call-id-not-carried",
+                "server-tool-partially-representable",
+            ],
         ),
     ],
     ids=["replacement-does-not-search", "replacement-searches-once"],

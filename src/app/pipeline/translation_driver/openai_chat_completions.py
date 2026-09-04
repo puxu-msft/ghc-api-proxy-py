@@ -310,9 +310,10 @@ def from_chat_completions_response(
     *,
     client_search_tool: str = "",
     hosted_web_search_expected: bool = False,
+    hand_over_stop_reasons: frozenset[str] = frozenset({"max_tokens"}),
 ) -> SemanticResponse:
     """Read a whole `chat.completion` object into the intermediate form."""
-    del client_search_tool, hosted_web_search_expected
+    del client_search_tool, hosted_web_search_expected, hand_over_stop_reasons
     response = SemanticResponse(
         id=str(payload.get("id", "")),
         model=str(payload.get("model", "")),
