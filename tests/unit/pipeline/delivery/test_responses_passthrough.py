@@ -1,8 +1,6 @@
-"""The direct Responses passthrough assembler and framer.
+"""The direct Responses passthrough assembler, framer and generic delivery path."""
 
-Skeleton-level: grouping, ordering and byte fidelity. Replay, buffering policies, headers and cap accounting are later steps and are not exercised here — see `.dev/docs/direct-passthrough/plan.md`.
-"""
-
+from collections.abc import AsyncIterator
 from typing import Any
 
 import orjson
@@ -10,7 +8,7 @@ import pytest
 
 from app.errors import ErrorCategory, ErrorInfo
 from app.pipeline.delivery.assembling import Terminal
-from app.pipeline.delivery.blocks import BlockBuffer, BufferCapExceeded
+from app.pipeline.delivery.blocks import BlockBuffer, BufferCapExceeded, DeliverySession
 from app.pipeline.delivery.formats.openai_responses import ResponsesFramer
 from app.pipeline.delivery.formats.openai_responses_passthrough import (
     RESPONSES_DIALECT,
@@ -19,7 +17,8 @@ from app.pipeline.delivery.formats.openai_responses_passthrough import (
     stabilise_stream_ids,
 )
 from app.pipeline.delivery.passthrough import PassthroughAssembler, PassthroughFramer, RawEventBatch
-from app.pipeline.delivery.sse_source import SseEvent, parse_frame
+from app.pipeline.delivery.sse_source import SseEvent, encode_frame, parse_frame
+from app.pipeline.delivery.stream import StreamSettings, UpstreamSource, stream_delivery
 
 
 def event(name: str, **payload: object) -> SseEvent:
@@ -383,6 +382,34 @@ def test_a_batch_answers_from_whichever_event_carries_the_item() -> None:
     assert group("server").requires_client_action is False
 
 
+def test_until_tool_use_reads_a_real_client_action_from_any_unit_in_the_batch() -> None:
+    passive = RawEventBatch(
+        events=(event("response.output_item.done", output_index=0, item={"type": "message"}),),
+        dialect=RESPONSES_DIALECT,
+    )
+    actionable = RawEventBatch(
+        events=(
+            event(
+                "response.output_item.done",
+                output_index=1,
+                item={"type": "tool_search_call", "execution": "client"},
+            ),
+        ),
+        dialect=RESPONSES_DIALECT,
+    )
+    trailing = RawEventBatch(
+        events=(event("response.output_item.done", output_index=2, item={"type": "message"}),),
+        dialect=RESPONSES_DIALECT,
+    )
+    session: DeliverySession[RawEventBatch] = DeliverySession(
+        buffer=BlockBuffer(policy="until-tool-use")
+    )
+
+    assert session.offer_many((passive,)) == ()
+    assert session.offer_many((actionable, trailing)) == (passive, actionable, trailing)
+    assert session.started is True
+
+
 def test_a_terminal_lifts_the_hold_on_a_response_with_no_items() -> None:
     """§5's fourth row: an item-less terminal is submitted with this attempt's control events.
 
@@ -604,6 +631,50 @@ def test_the_closing_sequence_keeps_an_unattributable_event_when_nothing_is_open
 
     assert len(closing) == 1
     assert [e.event for e in closing[0].events] == ["response.created", "response.audio.delta"]
+
+
+@pytest.mark.asyncio
+async def test_direct_responses_close_batch_travels_through_generic_delivery() -> None:
+    sent = [
+        event("response.created", response={"id": "resp_1"}),
+        event("response.output_item.added", output_index=0, item={"type": "a"}),
+        event("response.output_text.delta", output_index=0, delta="never closes"),
+        event("response.output_item.added", output_index=1, item={"type": "b"}),
+        event("response.output_item.done", output_index=1, item={"type": "b"}),
+        event("response.completed", response={"id": "resp_1"}),
+    ]
+
+    async def upstream_bytes() -> AsyncIterator[bytes]:
+        for one in sent:
+            yield encode_frame(one.event, one.data)
+
+    source = UpstreamSource(upstream_bytes())
+    chunks = [
+        chunk
+        async for chunk in stream_delivery(
+            source,
+            responses_passthrough_assembler(),
+            upstream=source,
+            buffer=BlockBuffer[RawEventBatch](policy="block"),
+            settings=StreamSettings(sse_ping_interval=0),
+            framer=PassthroughFramer(delegate=ResponsesFramer(response_id="resp_1", model="m")),
+            passthrough=True,
+        )
+    ]
+    frames = [parse_frame(frame_bytes) for frame_bytes in b"".join(chunks).split(b"\n\n") if frame_bytes]
+
+    assert [one.event for one in frames if one is not None] == [
+        "response.created",
+        "response.output_item.added",
+        "response.output_item.done",
+        "response.completed",
+    ]
+    assert [one.json().get("output_index") for one in frames if one is not None] == [
+        None,
+        1,
+        1,
+        None,
+    ]
 
 
 def test_the_cap_can_see_what_the_assembler_is_holding() -> None:

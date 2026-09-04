@@ -67,6 +67,76 @@ def test_until_tool_use_without_a_tool_call_still_delivers_at_the_end() -> None:
     assert [b.index for b in buffer.finish()] == [0, 1]
 
 
+def test_block_policy_releases_one_assembler_batch_together() -> None:
+    buffer = BlockBuffer(policy="block")
+
+    released = buffer.add_many((block(0), block(1)))
+
+    assert [b.index for b in released] == [0, 1]
+    assert buffer.held_count == 0
+
+
+def test_full_policy_holds_one_assembler_batch_together() -> None:
+    buffer = BlockBuffer(policy="full")
+
+    assert buffer.add_many((block(0), block(1))) == ()
+
+    assert [b.index for b in buffer.finish()] == [0, 1]
+
+
+def test_until_tool_use_decides_from_the_whole_assembler_batch() -> None:
+    buffer = BlockBuffer(policy="until-tool-use")
+    buffer.add(block(0))
+
+    released = buffer.add_many((block(1), block(2, kind="tool_use")))
+
+    assert [b.index for b in released] == [0, 1, 2]
+    assert [b.index for b in buffer.add_many((block(3), block(4)))] == [3, 4]
+
+
+def test_an_empty_batch_does_not_drain_what_an_earlier_batch_held() -> None:
+    buffer = BlockBuffer(policy="until-tool-use")
+    buffer.add(block(0))
+
+    assert buffer.add_many(()) == ()
+    assert buffer.held_count == 1
+    assert [b.index for b in buffer.finish()] == [0]
+
+
+def test_cap_rejects_a_whole_batch_without_changing_held_state() -> None:
+    existing = block(0, size=1)
+    first = block(1, size=1)
+    second = block(2, size=1)
+    cap = existing.size_bytes + first.size_bytes
+    buffer = BlockBuffer(policy="full", cap_bytes=cap)
+    buffer.add(existing)
+    held_before = buffer.held_bytes
+
+    with pytest.raises(BufferCapExceeded) as raised:
+        buffer.add_many((first, second))
+
+    assert raised.value.held == existing.size_bytes + first.size_bytes + second.size_bytes
+    assert buffer.held_bytes == held_before
+    assert buffer.held_count == 1
+    assert buffer.finish() == (existing,)
+
+
+def test_rejected_client_action_batch_does_not_latch_until_tool_use_open() -> None:
+    first = block(0, size=1)
+    later = block(2, size=1)
+    cap = first.size_bytes + later.size_bytes
+    rejected = block(1, kind="tool_use", size=cap * 2)
+    buffer = BlockBuffer(policy="until-tool-use", cap_bytes=cap)
+    assert buffer.add(first) == ()
+
+    with pytest.raises(BufferCapExceeded):
+        buffer.add_many((rejected,))
+
+    assert buffer.add(later) == ()
+    assert buffer.held_count == 2
+    assert [b.index for b in buffer.finish()] == [0, 2]
+
+
 def test_cap_abandons_the_response_rather_than_trimming() -> None:
     # Trimming or spilling would deliver something the model did not produce.
     buffer = BlockBuffer(policy="full", cap_bytes=60)
@@ -129,6 +199,16 @@ def test_session_starts_once_the_first_block_is_delivered() -> None:
     assert [b.index for b in delivered] == [0]
     assert session.started is True
     assert session.committed_count == 1
+
+
+def test_session_commits_one_offered_batch_in_order() -> None:
+    session = DeliverySession(buffer=BlockBuffer(policy="block"))
+
+    delivered = session.offer_many((block(0), block(1)))
+
+    assert [b.index for b in delivered] == [0, 1]
+    assert [b.index for b in session.delivered] == [0, 1]
+    assert session.committed_count == 2
 
 
 def test_session_commits_in_order_across_the_hold_and_the_release() -> None:

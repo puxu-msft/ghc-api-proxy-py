@@ -24,7 +24,7 @@ from app.observability.active_requests import ActiveRequestRegistry
 from app.observability.request_trace import RequestTrace
 from app.pipeline.delivery import stream as stream_module
 from app.pipeline.delivery.assembling import BlockAssembler, StreamFailure, Terminal
-from app.pipeline.delivery.blocks import BlockBuffer, CompletedBlock
+from app.pipeline.delivery.blocks import BlockBuffer, BufferCapExceeded, CompletedBlock
 from app.pipeline.delivery.formats.anthropic_messages import AnthropicAssembler, AnthropicFramer
 from app.pipeline.delivery.formats.openai_responses import ResponsesAssembler
 from app.pipeline.delivery.framing import OutboundFramer
@@ -132,6 +132,54 @@ def block_start_indices(chunks: list[bytes]) -> list[int]:
     ]
 
 
+def completed_text(index: int, text: str, *, admission_group: str = "") -> CompletedBlock:
+    return CompletedBlock(
+        index=index,
+        kind="text",
+        payload={"type": "text", "text": text},
+        admission_group=admission_group,
+    )
+
+
+class BatchAssembler:
+    """A protocol-shaped assembler whose successive events release caller-chosen batches."""
+
+    def __init__(
+        self,
+        batches: list[tuple[CompletedBlock, ...]],
+        *,
+        closing: tuple[CompletedBlock, ...] = (),
+    ) -> None:
+        self._batches = list(batches)
+        self._closing = closing
+        self._terminal = Terminal()
+
+    def push(self, event: SseEvent) -> tuple[CompletedBlock, ...]:
+        del event
+        return self._batches.pop(0) if self._batches else ()
+
+    @property
+    def terminal(self) -> Terminal:
+        return self._terminal
+
+    @property
+    def failure(self) -> StreamFailure | None:
+        return None
+
+    def close(self) -> tuple[CompletedBlock, ...]:
+        self._terminal.seen = True
+        self._terminal.stop_reason = "end_turn"
+        return self._closing
+
+    @property
+    def queued_bytes(self) -> int:
+        return 0
+
+    @property
+    def cut_mid_block(self) -> bool:
+        return False
+
+
 @pytest.mark.asyncio
 async def test_a_block_reaches_the_client_as_soon_as_it_closes() -> None:
     chunks = await collect(anthropic_stream("one", "two"))
@@ -146,6 +194,124 @@ async def test_a_block_reaches_the_client_as_soon_as_it_closes() -> None:
         "message_delta",
         "message_stop",
     ]
+
+
+@pytest.mark.asyncio
+async def test_unmarked_units_from_one_push_keep_independent_admission() -> None:
+    first = completed_text(0, "first")
+    second = completed_text(1, "second")
+    cap = max(first.size_bytes, second.size_bytes)
+
+    chunks = [
+        chunk
+        async for chunk in delivering(
+            feed([frame("units.ready", {})]),
+            BatchAssembler([(first, second)]),
+            buffer=BlockBuffer(policy="block", cap_bytes=cap),
+            settings=StreamSettings(sse_ping_interval=0),
+            framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
+        )
+    ]
+
+    assert block_start_indices(chunks) == [0, 1]
+    assert "error" not in events_of(chunks)
+
+
+@pytest.mark.asyncio
+async def test_a_cap_between_two_grouped_units_rejects_before_framing_either() -> None:
+    first = completed_text(0, "first", admission_group="pair")
+    second = completed_text(1, "second", admission_group="pair")
+    cap = max(first.size_bytes, second.size_bytes)
+    assert first.size_bytes + second.size_bytes > cap
+    chunks: list[bytes] = []
+
+    with pytest.raises(BufferCapExceeded):
+        async for chunk in delivering(
+            feed([frame("batch.ready", {})]),
+            BatchAssembler([(first, second)]),
+            buffer=BlockBuffer(policy="block", cap_bytes=cap),
+            settings=StreamSettings(sse_ping_interval=0),
+            framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
+        ):
+            chunks.append(chunk)
+
+    assert block_start_indices(chunks) == []
+    assert events_of(chunks) == ["error"]
+
+
+@pytest.mark.asyncio
+async def test_an_assembler_close_batch_is_admitted_before_any_unit_is_framed() -> None:
+    first = completed_text(0, "first", admission_group="pair")
+    second = completed_text(1, "second", admission_group="pair")
+    cap = max(first.size_bytes, second.size_bytes)
+    chunks: list[bytes] = []
+
+    with pytest.raises(BufferCapExceeded):
+        async for chunk in delivering(
+            feed([]),
+            BatchAssembler([], closing=(first, second)),
+            buffer=BlockBuffer(policy="block", cap_bytes=cap),
+            settings=StreamSettings(sse_ping_interval=0),
+            framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
+        ):
+            chunks.append(chunk)
+
+    assert chunks == []
+
+
+@pytest.mark.asyncio
+async def test_units_in_one_admitted_batch_are_still_framed_lazily() -> None:
+    class FailsOnSecondUnit(AnthropicFramer):
+        def block(self, block: CompletedBlock) -> tuple[bytes, ...]:
+            if block.index == 1:
+                raise RuntimeError("second unit framing failed")
+            return super().block(block)
+
+    chunks: list[bytes] = []
+    with pytest.raises(RuntimeError, match="second unit framing failed"):
+        async for chunk in delivering(
+            feed([frame("batch.ready", {})]),
+            BatchAssembler(
+                [
+                    (
+                        completed_text(0, "first", admission_group="pair"),
+                        completed_text(1, "second", admission_group="pair"),
+                    )
+                ]
+            ),
+            buffer=BlockBuffer(policy="block"),
+            settings=StreamSettings(sse_ping_interval=0),
+            framer=FailsOnSecondUnit(message_id="msg_1", model="claude-model"),
+        ):
+            chunks.append(chunk)
+
+    assert block_start_indices(chunks) == [0]
+    assert events_of(chunks)[-1] == "error"
+
+
+@pytest.mark.asyncio
+async def test_a_pair_batch_can_commit_before_a_later_text_batch_exceeds_the_cap() -> None:
+    pair = (
+        completed_text(0, "call", admission_group="hosted-search"),
+        completed_text(1, "result", admission_group="hosted-search"),
+    )
+    text = completed_text(2, "x" * 1000)
+    cap = sum(block.size_bytes for block in pair)
+    assert text.size_bytes > cap
+    chunks: list[bytes] = []
+
+    with pytest.raises(BufferCapExceeded):
+        async for chunk in delivering(
+            feed([frame("pair.ready", {}), frame("text.ready", {})]),
+            BatchAssembler([pair, (text,)]),
+            buffer=BlockBuffer(policy="block", cap_bytes=cap),
+            settings=StreamSettings(sse_ping_interval=0),
+            framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
+        ):
+            chunks.append(chunk)
+
+    assert block_start_indices(chunks) == [0, 1]
+    assert events_of(chunks)[-1] == "error"
 
 
 @pytest.mark.asyncio

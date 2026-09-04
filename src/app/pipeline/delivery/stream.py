@@ -11,7 +11,7 @@ The keep-alive here is the **client-facing** one, and its cadence hangs off the 
 import asyncio
 import logging
 import sys
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from contextlib import aclosing, suppress
 from dataclasses import dataclass, replace
 from typing import Any, cast
@@ -464,10 +464,10 @@ async def _deliver[UnitT: DeliveryUnit](
                         completed = assembler.push(pull.event)
                         # The cap has to see what the assembler is holding too. On a passthrough leg an item that opens and never closes keeps every later group queued outside the buffer, and `direct-passthrough/spec.md` §8 names that queue as the first thing `buffer_cap_bytes` must bound — uncounted, the default 16MiB bounded nothing there.
                         buffer.enforce_cap_over(assembler.queued_bytes)
-                        for block in completed:
+                        for admission_batch in _admission_batches(completed):
                             for chunk in _commit(
                                 session,
-                                block,
+                                admission_batch,
                                 framer,
                                 client_has_bytes.is_set(),
                             ):
@@ -596,8 +596,8 @@ async def _deliver[UnitT: DeliveryUnit](
         raise torn
 
     # `direct-passthrough/spec.md` §7.2's closing sequence, asked of the assembler before the buffer is drained so that whatever it releases still passes through the policy. The translating assemblers answer with nothing — what they hold is a half-built block, which every ending drops. The passthrough answers with the finished groups its queue was holding behind an item that never closed, and those were previously abandoned along with upstream's own terminal: one unclosed item produced a 200 with zero bytes.
-    for held in assembler.close():
-        for chunk in _commit(session, held, framer, client_has_bytes.is_set()):
+    for admission_batch in _admission_batches(assembler.close()):
+        for chunk in _commit(session, admission_batch, framer, client_has_bytes.is_set()):
             client_has_bytes.set()
             yield chunk
 
@@ -717,17 +717,41 @@ def _hand_over(
     return chunks
 
 
+def _admission_batches[UnitT: DeliveryUnit](
+    units: Iterable[UnitT],
+) -> Iterator[tuple[UnitT, ...]]:
+    """Preserve ordinary per-unit admission while joining explicitly marked neighbours."""
+    grouped: list[UnitT] = []
+    group = ""
+    for unit in units:
+        unit_group = unit.admission_group if isinstance(unit, CompletedBlock) else ""
+        if not unit_group:
+            if grouped:
+                yield tuple(grouped)
+                grouped = []
+                group = ""
+            yield (unit,)
+            continue
+        if grouped and unit_group != group:
+            yield tuple(grouped)
+            grouped = []
+        grouped.append(unit)
+        group = unit_group
+    if grouped:
+        yield tuple(grouped)
+
+
 def _commit[UnitT: DeliveryUnit](
     session: DeliverySession[UnitT],
-    block: UnitT,
+    batch: Iterable[UnitT],
     framer: OutboundFramer[UnitT],
     started: bool,
 ) -> Iterator[bytes]:
-    """Offer one block and lazily frame each unit the buffer released.
+    """Offer one admission batch and lazily frame each unit the buffer released.
 
-    Laziness preserves the unit-to-chunk boundary. A buffering policy may release several units together; framing them all before the first yield lets side records produced while framing a later unit describe an earlier chunk whose send returns first.
+    Admission and the policy decision cover the whole batch. Framing stays lazy to preserve the unit-to-chunk boundary: framing everything before the first yield lets side records produced while framing a later unit describe an earlier chunk whose send returns first.
     """
-    released = session.offer(block)
+    released = session.offer_many(batch)
     if not released:
         return
     if not started:

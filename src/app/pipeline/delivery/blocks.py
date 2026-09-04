@@ -74,6 +74,8 @@ class CompletedBlock:
     kind: str
     payload: dict[str, Any]
     reasoning: ReasoningContent | None = None
+    # Non-empty only when adjacent blocks form one indivisible buffer-admission group. Ordinary blocks remain independent by default.
+    admission_group: str = ""
 
     @property
     def size_bytes(self) -> int:
@@ -120,22 +122,31 @@ class BlockBuffer[UnitT: DeliveryUnit = CompletedBlock]:
         return len(self._held)
 
     def add(self, block: UnitT) -> tuple[UnitT, ...]:
-        """Take one completed unit and return whatever may now be delivered.
+        """Take one completed unit and return whatever may now be delivered."""
+        return self.add_many((block,))
 
-        The cap is checked *before* the unit goes in, so the buffer never holds more than it is allowed to even for the instant before raising.
+    def add_many(self, blocks: Iterable[UnitT]) -> tuple[UnitT, ...]:
+        """Take one completed batch and decide its admission and release atomically.
+
+        The cap sees the whole non-empty batch before any unit enters the buffer. An empty batch is a no-op rather than a policy cue, so it cannot drain units held by an earlier batch.
         """
-        self._enforce_cap(incoming=block.size_bytes)
-        self._held.append(block)
-        self._held_bytes += block.size_bytes
+        batch = tuple(blocks)
+        if not batch:
+            return ()
+
+        incoming = sum(block.size_bytes for block in batch)
+        self._enforce_cap(incoming=incoming)
+        self._held.extend(batch)
+        self._held_bytes += incoming
 
         if self.policy == "full":
             return ()
         if self.policy == "block":
             return self._drain()
-        # until-tool-use: hold everything until the client is owed something, then stream per unit.
+        # until-tool-use: hold whole batches until the client is owed something, then stream per batch.
         if self._released_after_tool_use:
             return self._drain()
-        if block.requires_client_action:
+        if any(block.requires_client_action for block in batch):
             self._released_after_tool_use = True
             return self._drain()
         return ()
@@ -182,7 +193,10 @@ class DeliverySession[UnitT: DeliveryUnit = CompletedBlock]:
         return len(self.delivered)
 
     def offer(self, block: UnitT) -> tuple[UnitT, ...]:
-        ready = self.buffer.add(block)
+        return self.offer_many((block,))
+
+    def offer_many(self, blocks: Iterable[UnitT]) -> tuple[UnitT, ...]:
+        ready = self.buffer.add_many(blocks)
         return self._commit(ready)
 
     def finish(self) -> tuple[UnitT, ...]:
