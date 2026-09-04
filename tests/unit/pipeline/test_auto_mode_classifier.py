@@ -504,7 +504,11 @@ class ExplodingProvider:
     def describe(self, model_id: str) -> ModelDescriptor | None:
         if model_id != "claude-model":
             return None
-        return ModelDescriptor(id=model_id, endpoints=frozenset({self._endpoint}))
+        return ModelDescriptor(
+            id=model_id,
+            endpoints=frozenset({self._endpoint}),
+            provider_name=self.name,
+        )
 
     async def refresh_catalog(self) -> bool:
         return False

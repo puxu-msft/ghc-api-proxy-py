@@ -31,6 +31,7 @@ MEASURED_THINKING: dict[str, Any] = {
 ADAPTIVE = ModelDescriptor(
     id="claude-sonnet-5",
     endpoints=frozenset({ModelEndpoint.ANTHROPIC_MESSAGES}),
+    provider_name="ghc",
     reasoning_efforts=("low", "medium", "high", "xhigh", "max"),
     adaptive_thinking=True,
 )
@@ -38,6 +39,7 @@ ADAPTIVE = ModelDescriptor(
 BUDGETED = ModelDescriptor(
     id="claude-sonnet-4.5",
     endpoints=frozenset({ModelEndpoint.ANTHROPIC_MESSAGES}),
+    provider_name="ghc",
     adaptive_thinking=False,
 )
 

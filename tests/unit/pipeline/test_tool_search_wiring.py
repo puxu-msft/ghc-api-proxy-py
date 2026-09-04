@@ -32,6 +32,7 @@ DEFERRED: dict[str, Any] = {
 RESPONSES_MODEL = ModelDescriptor(
     id="gpt-5.6-sol",
     endpoints=frozenset({ModelEndpoint.OPENAI_RESPONSES}),
+    provider_name="ghc",
 )
 
 

@@ -37,6 +37,7 @@ TABLE = compile_sanitize_table({"claude-.*": ["scope"]})
 SONNET = ModelDescriptor(
     id="claude-sonnet-5",
     endpoints=frozenset({ModelEndpoint.ANTHROPIC_MESSAGES}),
+    provider_name="ghc",
     adaptive_thinking=True,
 )
 

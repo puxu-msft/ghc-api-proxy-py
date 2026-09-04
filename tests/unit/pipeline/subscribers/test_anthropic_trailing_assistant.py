@@ -26,6 +26,7 @@ from app.server.routes.table import route_for_path
 MODEL = ModelDescriptor(
     id="claude-sonnet-5",
     endpoints=frozenset({ModelEndpoint.ANTHROPIC_MESSAGES}),
+    provider_name="ghc",
     reasoning_efforts=("low", "medium", "high", "xhigh", "max"),
     adaptive_thinking=True,
 )
