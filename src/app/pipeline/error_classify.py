@@ -17,8 +17,8 @@ from app.errors import (
     DEFAULT_CODE_FOR_CATEGORY,
     STATUS_FOR_CATEGORY,
     ErrorCategory,
+    ErrorCondition,
     ErrorInfo,
-    UpstreamCondition,
     category_for_status,
     condition_message,
     is_context_window_exceeded,
@@ -40,6 +40,7 @@ from app.model_provider.types import (
 from app.pipeline.count_tokens import CountTokensRequestError, CountTokensUnavailable
 from app.pipeline.exceptions import (
     PipelineAbort,
+    PromptTokenLimitExceeded,
     UpstreamError,
     UpstreamRateLimit,
     UpstreamRejected,
@@ -143,7 +144,7 @@ class _UpstreamRead:
     interpreted: bool
     message: str = ""
     kind: str = ""
-    condition: UpstreamCondition | None = None
+    condition: ErrorCondition | None = None
     counts: tuple[int, int] | None = None
 
 
@@ -173,7 +174,7 @@ def _read_upstream_error(body: str) -> _UpstreamRead:
     text = message if isinstance(message, str) else ""
     code = upstream_code if isinstance(upstream_code, str) else ""
     condition = (
-        UpstreamCondition.CONTEXT_WINDOW_EXCEEDED
+        ErrorCondition.CONTEXT_WINDOW_EXCEEDED
         if is_context_window_exceeded(message=text, code=code)
         else None
     )
@@ -196,12 +197,20 @@ def _condition_message(read: _UpstreamRead) -> str:
     return condition_message(read.condition, read.counts)
 
 
-def _proxy_error(category: ErrorCategory, message: str, *, code: str = "", param: str = "") -> ErrorInfo:
+def _proxy_error(
+    category: ErrorCategory,
+    message: str,
+    *,
+    code: str = "",
+    param: str = "",
+    condition: ErrorCondition | None = None,
+) -> ErrorInfo:
     """A failure this proxy produced. No upstream answer exists, so nothing is carried from one."""
     return ErrorInfo(
         category=category,
         message=message,
         status_code=STATUS_FOR_CATEGORY[category],
+        condition=condition,
         code=code or DEFAULT_CODE_FOR_CATEGORY[category],
         param=param,
     )
@@ -219,6 +228,13 @@ def describe(error: BaseException, *, source_format: str = "") -> ErrorInfo:
     if isinstance(error, CountTokensUnavailable) and error.cause is not None:
         return describe(error.cause, source_format=source_format)
 
+    if isinstance(error, PromptTokenLimitExceeded):
+        return _proxy_error(
+            ErrorCategory.CLIENT,
+            condition_message(ErrorCondition.CONTEXT_WINDOW_EXCEEDED, None),
+            param=error.observation.field_path or "",
+            condition=ErrorCondition.CONTEXT_WINDOW_EXCEEDED,
+        )
     if isinstance(error, UpstreamRateLimit):
         return _from_upstream(error, source_format=source_format)
     if isinstance(error, UpstreamTimeout):

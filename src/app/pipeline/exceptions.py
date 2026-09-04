@@ -5,8 +5,14 @@ The closed set is the point.
 A subscriber's KeyError must not read as a control instruction.
 """
 
+from __future__ import annotations
+
 from collections.abc import Mapping
 from enum import StrEnum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.tokenization.admission import TokenAdmissionObservation
 
 
 class Disposition(StrEnum):
@@ -19,6 +25,22 @@ class Disposition(StrEnum):
 
 class PipelineError(Exception):
     """Base of the closed set. Raising a subclass is how a subscriber steers the flow."""
+
+
+class PromptTokenLimitExceeded(PipelineError):
+    """The final Responses payload failed the proxy's local prompt admission policy."""
+
+    def __init__(self, observation: TokenAdmissionObservation) -> None:
+        super().__init__(
+            f"proxy prompt admission rejected {observation.model} "
+            f"at {observation.field_path or 'unknown field'}: "
+            f"standalone {observation.tokenizer or 'unknown tokenizer'} count "
+            f"{observation.field_token_count} exceeds context window "
+            f"{observation.max_context_window_tokens} "
+            f"(catalog prompt limit {observation.max_prompt_tokens}, "
+            f"provider {observation.provider} generation {observation.catalog_generation})"
+        )
+        self.observation = observation
 
 
 class UpstreamError(PipelineError):

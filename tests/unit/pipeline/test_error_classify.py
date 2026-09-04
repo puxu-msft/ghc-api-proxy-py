@@ -21,8 +21,8 @@ from app.errors import (
     OPENAI_ERROR_TYPES,
     STATUS_FOR_CATEGORY,
     ErrorCategory,
+    ErrorCondition,
     ErrorInfo,
-    UpstreamCondition,
     category_for_status,
 )
 from app.model_provider.codebuddy_client.auth_state import (
@@ -42,16 +42,21 @@ from app.pipeline.count_tokens import CountTokensRequestError, CountTokensUnavai
 from app.pipeline.delivery.formats.errors import formats_with_writers, write_error
 from app.pipeline.error_classify import describe
 from app.pipeline.exceptions import (
+    Disposition,
     PipelineAbort,
+    PromptTokenLimitExceeded,
     UpstreamError,
     UpstreamRateLimit,
     UpstreamRejected,
     UpstreamTimeout,
+    classify,
 )
 from app.pipeline.request import WireFormat
+from app.pipeline.retry import reason_for
 from app.pipeline.routing import RoutingError
 from app.pipeline.translation_driver.registry import TranslatorNotFound
 from app.pipeline.translation_driver.semantic import TranslationRefused
+from app.tokenization.admission import TokenAdmissionObservation, TokenAdmissionOutcome
 
 BILLING_BODY = '{"error": {"type": "billing_error", "message": "credit exhausted"}}'
 
@@ -62,6 +67,28 @@ def _rejected(status: int, *, body: str = "{}") -> UpstreamRejected:
 
 def _upstream(status: int | None, *, body: str = "{}") -> UpstreamError:
     return UpstreamError("failed", status_code=status, body=body)
+
+
+def _prompt_limit_exceeded() -> PromptTokenLimitExceeded:
+    return PromptTokenLimitExceeded(
+        TokenAdmissionObservation(
+            attempt=0,
+            origin="proxy",
+            outcome=TokenAdmissionOutcome.REJECTED,
+            target_format="openai-responses",
+            model="gpt-model",
+            provider="ghc",
+            catalog_generation=7,
+            catalog_refreshed_at="2026-09-04T00:00:00+00:00",
+            tokenizer="o200k_base",
+            max_prompt_tokens=922_000,
+            max_context_window_tokens=1_050_000,
+            field_path="input[2].content[0].text",
+            field_kind="input_text",
+            field_utf8_byte_count=2_265_280,
+            field_token_count=1_375_742,
+        )
+    )
 
 
 # (id, build the failure, expected category, expected status)
@@ -81,6 +108,7 @@ CASES: tuple[tuple[str, Callable[[], BaseException], ErrorCategory, int], ...] =
     ("upstream-503", lambda: _upstream(503), ErrorCategory.OVERLOADED, 503),
     ("upstream-no-status", lambda: _upstream(None), ErrorCategory.NETWORK, 502),
     ("upstream-timeout", lambda: UpstreamTimeout("timed out"), ErrorCategory.TIMEOUT, 504),
+    ("proxy-prompt-limit", _prompt_limit_exceeded, ErrorCategory.CLIENT, 400),
     (
         "abort-reads-its-cause",
         lambda: PipelineAbort("budget exhausted", cause=_upstream(503)),
@@ -149,6 +177,7 @@ EXPECTED_CASE_IDS = frozenset(
         "upstream-503",
         "upstream-no-status",
         "upstream-timeout",
+        "proxy-prompt-limit",
         "abort-reads-its-cause",
         "count-tokens-reads-its-cause",
         "unknown-model",
@@ -386,7 +415,7 @@ def test_an_upstream_context_overflow_is_recognised_on_every_leg_that_reports_on
     """
     info = describe(_overflow_rejection(body), source_format="openai-responses")
 
-    assert info.condition is UpstreamCondition.CONTEXT_WINDOW_EXCEEDED, case
+    assert info.condition is ErrorCondition.CONTEXT_WINDOW_EXCEEDED, case
     # The category is still decided by the status, and the condition does not touch it.
     assert info.category is ErrorCategory.CLIENT
     assert info.status_code == 400
@@ -410,7 +439,7 @@ def test_each_predicate_the_spec_names_recognises_the_condition_on_its_own(
     """
     info = describe(_overflow_rejection(body), source_format="openai-responses")
 
-    assert info.condition is UpstreamCondition.CONTEXT_WINDOW_EXCEEDED, predicate
+    assert info.condition is ErrorCondition.CONTEXT_WINDOW_EXCEEDED, predicate
 
 
 @pytest.mark.parametrize(
@@ -439,9 +468,9 @@ def test_what_the_predicate_deliberately_does_not_accept(case: str, body: str) -
     "status, expected",
     [
         # Every 4xx this proxy calls `CLIENT` can carry an overflow. 413 is the one upstream might plausibly use and nothing here depends on 400 in particular — a mutation adding a `status == 400` gate left 302 tests green.
-        (400, UpstreamCondition.CONTEXT_WINDOW_EXCEEDED),
-        (413, UpstreamCondition.CONTEXT_WINDOW_EXCEEDED),
-        (422, UpstreamCondition.CONTEXT_WINDOW_EXCEEDED),
+        (400, ErrorCondition.CONTEXT_WINDOW_EXCEEDED),
+        (413, ErrorCondition.CONTEXT_WINDOW_EXCEEDED),
+        (422, ErrorCondition.CONTEXT_WINDOW_EXCEEDED),
         # And these cannot, whatever the body says. A 429 restated as an overflow is the worst case in the set: the client acts on the phrase with no status gate of its own, so it would compact and resend immediately — the one thing not to do when rate limited.
         (429, None),
         (401, None),
@@ -450,7 +479,7 @@ def test_what_the_predicate_deliberately_does_not_accept(case: str, body: str) -
     ],
 )
 def test_only_a_client_error_can_be_an_overflow_whatever_the_body_says(
-    status: int, expected: UpstreamCondition | None
+    status: int, expected: ErrorCondition | None
 ) -> None:
     """Spec §5.5.1's second half. The body is one question and the status is another, and this is where the second is asked."""
     info = describe(
@@ -483,6 +512,45 @@ def test_a_restated_condition_drops_the_prefix_that_marks_a_quotation() -> None:
     info = describe(_overflow_rejection(RESPONSES_LEG_OVERFLOW), source_format="openai-responses")
 
     assert "upstream returned" not in info.message
+
+
+def test_proxy_prompt_admission_uses_the_same_condition_without_impersonating_upstream() -> None:
+    error = _prompt_limit_exceeded()
+    info = describe(error, source_format="openai-responses")
+
+    assert classify(error) is Disposition.ABORT
+    assert reason_for(error) is None
+    assert info.category is ErrorCategory.CLIENT
+    assert info.condition is ErrorCondition.CONTEXT_WINDOW_EXCEEDED
+    assert info.status_code == 400
+    assert info.message == "prompt is too long: the input exceeds this model's context window"
+    assert not any(character.isdigit() for character in info.message)
+    assert info.param == "input[2].content[0].text"
+    assert info.source_format == ""
+    assert info.source_bytes == b""
+    assert info.headers == {}
+
+
+def test_proxy_prompt_admission_has_the_complete_shape_in_each_client_dialect() -> None:
+    info = describe(_prompt_limit_exceeded())
+
+    assert write_error(info, wire_format="openai-responses") == {
+        "error": {
+            "message": "prompt is too long: the input exceeds this model's context window",
+            "type": "invalid_request_error",
+            "param": "input[2].content[0].text",
+            "code": "context_length_exceeded",
+        }
+    }
+    assert write_error(info, wire_format="anthropic-messages") == {
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "message": "prompt is too long: the input exceeds this model's context window",
+            "code": "model_max_prompt_tokens_exceeded",
+            "param": "input[2].content[0].text",
+        },
+    }
 
 
 # The spec's per-dialect table, transcribed by hand and *not* read off the production mapping. Written as expected wire output rather than as table entries, so it fails for a wrong value and for a writer that stops consulting the table alike — a reviewer changed the OpenAI spelling to nonsense and 302 tests stayed green.
@@ -521,11 +589,11 @@ def test_the_dialect_code_cases_cover_every_wire_format() -> None:
     [("anthropic", ANTHROPIC_CONDITION_CODES), ("openai", OPENAI_CONDITION_CODES)],
 )
 def test_every_dialect_that_has_a_code_spells_every_condition(
-    name: str, table: dict[UpstreamCondition, str]
+    name: str, table: dict[ErrorCondition, str]
 ) -> None:
     """Same failure mode as the category tables, one enum over. A condition with no spelling silently renders as its category's default, which reads as "we did not recognise this"."""
-    assert set(table) == set(UpstreamCondition), (
-        f"{name} is missing {set(UpstreamCondition) - set(table)}"
+    assert set(table) == set(ErrorCondition), (
+        f"{name} is missing {set(ErrorCondition) - set(table)}"
     )
 
 

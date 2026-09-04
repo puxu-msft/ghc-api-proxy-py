@@ -2,7 +2,7 @@
 
 `.dev/docs/error-envelope/spec.md` is the authority. It is a living document — read its revision record for what changed and when, rather than pinning to a date here. What lives here:
 
-- `ErrorCategory`, the closed set of *what kind of failure this is* — this proxy's own concept, not any dialect's spelling. `UpstreamCondition` sits beside it for the narrower question of *which failure upstream is describing*.
+- `ErrorCategory`, the closed set of *what kind of failure this is* — this proxy's own concept, not any dialect's spelling. `ErrorCondition` sits beside it for the narrower question of *which failure upstream is describing*.
 - `ErrorInfo`, the record one failure travels as, and the per-dialect tables that render its category and its condition.
 - The wordings a condition is **recognised** by, beside the wordings it is **spelled** in. `prompt_limit_counts` is the odd one — its return value is `app.tokenization`'s currency, not this module's — and it is here because it reads the same three patterns the predicate does; the reason is on the function.
 
@@ -20,10 +20,10 @@ if TYPE_CHECKING:
     from app.pipeline.translation_driver.semantic import Conversion
 
 
-class UpstreamCondition(StrEnum):
-    """What upstream said it was, when this proxy recognises the thing well enough to say it in its own words.
+class ErrorCondition(StrEnum):
+    """A specific failure this proxy knows how to state in every client dialect.
 
-    Orthogonal to `ErrorCategory`, and the split is what each answers. A category answers *what a client can do differently* and is decided by the status; a condition answers *which failure upstream is describing* and is decided by reading its body. A context-window overflow and a malformed field are both `CLIENT`/400 — the category is right and is not the whole story.
+    Orthogonal to `ErrorCategory`, and the split is what each answers. A category answers *what a client can do differently*; a condition answers *which supported failure happened*. The condition may come from reading an upstream body or from a deterministic proxy-side refusal. A context-window overflow and a malformed field are both `CLIENT`/400 — the category is right and is not the whole story.
 
     A closed set on purpose. `.dev/docs/error-envelope/spec.md` §5.5 is the authority for what may join it and for how each member is spelled per dialect; nothing goes in without a spelling in every dialect table below, which is what stops a new member from silently rendering as its category's default.
     """
@@ -69,7 +69,7 @@ class ErrorInfo:
     message: str
     status_code: int
     # Which failure upstream was describing, when it was one this proxy recognises. `None` is the ordinary case and is not a defect: reading upstream's body far enough to name the condition is done for the few that change what a client does, not for every failure.
-    condition: UpstreamCondition | None = None
+    condition: ErrorCondition | None = None
     # This proxy's own stable identifier for the failure. A dialect's declared fields rarely include it — Anthropic's `ErrorObject` declares only `type` and `message` — so treat it as a versioned extension rather than as something a client's SDK surfaces as a typed attribute.
     code: str = ""
     # Which field of the request the failure is about, when one is named. `TranslationRefused.field_path` is the source that already exists.
@@ -184,16 +184,16 @@ NO_RETRY_CATEGORIES: frozenset[ErrorCategory] = frozenset(
 # What this proxy calls a recognised condition, per dialect. Spec §5.5.2.
 # These *replace* the category's default `code` rather than sitting beside it: a client reading `code` is asking one question, and answering it with `invalid_request` when the answer is known to be narrower throws away the only machine-readable channel this envelope has.
 # Anthropic's spelling is upstream's own on its Anthropic leg — 27 first-hand samples — rather than one invented here.
-ANTHROPIC_CONDITION_CODES: dict[UpstreamCondition, str] = {
-    UpstreamCondition.CONTEXT_WINDOW_EXCEEDED: "model_max_prompt_tokens_exceeded",
+ANTHROPIC_CONDITION_CODES: dict[ErrorCondition, str] = {
+    ErrorCondition.CONTEXT_WINDOW_EXCEEDED: "model_max_prompt_tokens_exceeded",
 }
 
-OPENAI_CONDITION_CODES: dict[UpstreamCondition, str] = {
-    UpstreamCondition.CONTEXT_WINDOW_EXCEEDED: "context_length_exceeded",
+OPENAI_CONDITION_CODES: dict[ErrorCondition, str] = {
+    ErrorCondition.CONTEXT_WINDOW_EXCEEDED: "context_length_exceeded",
 }
 
 # Gemini's error object has no `code` string — its `code` is the HTTP status and its identifier is `status`, which is the category's. So a condition adds nothing there, and the absence is the entry rather than an omission.
-CONDITION_CODES_BY_FORMAT: dict[str, dict[UpstreamCondition, str]] = {
+CONDITION_CODES_BY_FORMAT: dict[str, dict[ErrorCondition, str]] = {
     "anthropic-messages": ANTHROPIC_CONDITION_CODES,
     "openai-chat-completions": OPENAI_CONDITION_CODES,
     "openai-responses": OPENAI_CONDITION_CODES,
@@ -212,7 +212,7 @@ PROMPT_TOO_LONG_WITH_COUNTS = PROMPT_TOO_LONG_PHRASE + ": {current} tokens > {li
 PROMPT_TOO_LONG_WITHOUT_COUNTS = PROMPT_TOO_LONG_PHRASE + ": the input exceeds this model's context window"
 
 
-def condition_code(condition: UpstreamCondition, *, wire_format: str) -> str:
+def condition_code(condition: ErrorCondition, *, wire_format: str) -> str:
     """How one dialect spells a recognised condition, or empty when it has no channel for one.
 
     Empty rather than a fallback spelling: a dialect with no `code` field would be handed a value it cannot carry, and the caller's own default is the right answer there.
@@ -270,14 +270,14 @@ def is_context_window_exceeded(*, message: str, code: str) -> bool:
     return prompt_limit_counts(message) is not None
 
 
-def condition_message(condition: UpstreamCondition, counts: tuple[int, int] | None) -> str:
+def condition_message(condition: ErrorCondition, counts: tuple[int, int] | None) -> str:
     """The sentence a recognised condition is stated in.
 
     Here rather than in the classifier so that every site building an `ErrorInfo` with a condition words it the same way. The alternative — each construction site rendering its own — is how a record ends up carrying a condition and a message that disagree, and nothing in the type would say so.
 
     Not per dialect, and Spec §5.5.2 records that as a decision rather than an oversight: making it per dialect means rendering in the writer, which would leave `ErrorInfo.message` saying something different from what the client is sent — the same split already registered as a defect on the observability side.
     """
-    if condition is UpstreamCondition.CONTEXT_WINDOW_EXCEEDED:
+    if condition is ErrorCondition.CONTEXT_WINDOW_EXCEEDED:
         if counts is not None:
             current, limit = counts
             return PROMPT_TOO_LONG_WITH_COUNTS.format(current=current, limit=limit)
