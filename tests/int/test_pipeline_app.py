@@ -4254,6 +4254,12 @@ async def test_a_body_that_fails_to_close_is_still_accounted_for() -> None:
         def note_send_failure(self, _error: BaseException) -> None:
             pass
 
+        def note_http_disconnect(self, *, phase: object) -> None:
+            pass
+
+        def note_asgi_receive_error(self, _error: Exception, *, phase: object) -> None:
+            pass
+
         def note_wrapped_failure(self, _error: BaseException, *, origin: object) -> None:
             pass
 
