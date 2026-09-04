@@ -6,6 +6,7 @@ Split out of `app.server.pipeline_app` on 2026-08-22. Both decisions here are do
 """
 
 from asyncio import CancelledError
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, cast
 from uuid import uuid4
@@ -36,6 +37,7 @@ class HandBackTrigger:
     exception_module: str
     exception_type: str
     message: str | None
+    legacy_repr: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +50,7 @@ class HandBackOutcome:
 class _ExceptionObservation:
     outer_message: str | None
     description: str
+    legacy_repr: str | None
 
 
 def client_message_count(payload: dict[str, Any]) -> int:
@@ -92,10 +95,31 @@ def one_line(text: str) -> str:
     return f"{flat[:_MAX_LINK_CHARS]}… (+{len(flat) - _MAX_LINK_CHARS} more chars)"
 
 
+def _report_render_failure(
+    error: BaseException,
+    *,
+    renderer: str,
+    failure: BaseException,
+) -> None:
+    with suppress(BaseException):
+        get_logger().warning(
+            "hand_back_exception_render_failed",
+            exception_module=type(error).__module__,
+            exception_type=type(error).__qualname__,
+            renderer=renderer,
+            rendering_failure_type=type(failure).__qualname__,
+        )
+
+
 def _safe_repr(error: BaseException) -> str | None:
     try:
         rendered = one_line(repr(error))
-    except BaseException:
+    except BaseException as rendering_failure:
+        _report_render_failure(
+            error,
+            renderer="repr",
+            failure=rendering_failure,
+        )
         return None
     return rendered or None
 
@@ -153,7 +177,12 @@ def _link_text(link: BaseException) -> str:
     """
     try:
         text = one_line(str(link))
-    except BaseException:
+    except BaseException as rendering_failure:
+        _report_render_failure(
+            link,
+            renderer="str",
+            failure=rendering_failure,
+        )
         text = ""
     stream_id = getattr(link, "stream_id", None)
     if isinstance(link, H2Error) and isinstance(stream_id, int) and text == str(stream_id):
@@ -215,10 +244,12 @@ def _observe_exception(error: BaseException) -> _ExceptionObservation:
     gloss = _h2_gloss(links)
     if gloss:
         described = f"{described} ({gloss})"
-    outer_message = texts[0] or _safe_repr(error)
+    legacy_repr = _safe_repr(error)
+    outer_message = texts[0] or legacy_repr
     return _ExceptionObservation(
         outer_message=outer_message,
         description=described,
+        legacy_repr=legacy_repr,
     )
 
 
@@ -324,6 +355,7 @@ def hand_back_block(
             exception_module=type(error).__module__,
             exception_type=type(error).__qualname__,
             message=observation.outer_message,
+            legacy_repr=observation.legacy_repr,
         )
     detail = interruption_message(
         error=error,

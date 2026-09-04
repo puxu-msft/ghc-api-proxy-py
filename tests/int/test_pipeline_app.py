@@ -36,6 +36,7 @@ from pydantic import ValidationError
 from starlette.requests import ClientDisconnect, Request
 from starlette.types import Message
 
+import app.pipeline.hand_over as hand_over_module
 import app.server.routes.inference as inference_route
 from app.config.schema import GithubCopilotProviderConfig, ProxyConfig
 from app.core.chain import Chain
@@ -5526,6 +5527,15 @@ async def test_real_h1_incomplete_chunked_body_records_the_exact_trigger_and_pul
     if provider_terminal:
         assert interruptions == []
         assert b"turn_interrupted" not in response.content
+        assert b'"thinking_delta"' in response.content
+        assert b'"stop_reason":"end_turn"' in response.content
+        events = [
+            line.removeprefix("event: ")
+            for line in response.text.splitlines()
+            if line.startswith("event: ")
+        ]
+        assert events.count("message_stop") == 1
+        assert events[-1] == "message_stop"
         assert record["status"] == "ok"
         assert "RemoteProtocolError" in record["tore_after_terminal"]
         assert "incomplete chunked read" in record["tore_after_terminal"]
@@ -5724,6 +5734,58 @@ def test_hand_back_renders_the_failure_once_for_payload_and_trigger() -> None:
     assert "first and only render" in handed["input"]["message"]
     assert interruption["message"] == "first and only render"
     assert interruption["exception_type"].endswith("OneShotUpstreamError")
+
+
+def test_hand_back_reports_unrenderable_trigger_without_losing_the_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reports: list[dict[str, object]] = []
+
+    class Reporter:
+        def warning(self, event: object, **values: object) -> None:
+            if event != "hand_back_exception_render_failed":
+                return
+            reports.append(values)
+            raise GeneratorExit("reporter exited")
+
+    class UnrenderableUpstreamError(Exception):
+        def __str__(self) -> str:
+            raise asyncio.CancelledError("string rendering cancelled")
+
+        def __repr__(self) -> str:
+            raise GeneratorExit("repr rendering exited")
+
+    error = UnrenderableUpstreamError()
+
+    async def torn_body() -> AsyncIterator[bytes]:
+        yield sse_upstream("first").partition(b"event: message_delta")[0]
+        raise error
+
+    monkeypatch.setattr(hand_over_module, "get_logger", lambda: Reporter())
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200,
+            content=torn_body(),
+            headers={"content-type": "text/event-stream"},
+        ),
+        overrides={"upstream_request_retry": {"max_total": 0}},
+    )
+    delivered = _delivered(client)
+
+    handed = _handed_back(delivered)
+    record = _records()[-1]
+    interruption = next(
+        item
+        for item in record["observation"]["interruptions"]
+        if item["kind"] == "upstream_stream_failure"
+    )
+    assert len(reports) == 2
+    assert {report["renderer"] for report in reports} == {"str", "repr"}
+    assert "UnrenderableUpstreamError" in handed["input"]["message"]
+    assert interruption["exception_type"].endswith("UnrenderableUpstreamError")
+    assert interruption["message"] is None
+    assert record["status"] == "retry"
+    assert "UnrenderableUpstreamError" in record["detail"]
 
 
 def test_a_hand_over_says_what_it_swallowed(

@@ -772,7 +772,11 @@ async def _dispatch_after_body(
             # The client is about to get a complete reply it will act on, and the upstream attempt behind it did not finish.
             accounting.handed_over = True
             # Kept because a hand-over is the one ending that swallows its cause: the exception never leaves the delivery generator, so `_StreamAccounting.failure` — which is set from what propagates — stays `None` and the completion line had nothing to say about *why* the turn was handed back. Two reviews found failures reaching the client as a clean `retry` line with no account of them anywhere.
-            accounting.handed_over_error = error
+            accounting.handed_over_error = (
+                outcome.trigger.legacy_repr or outcome.trigger.exception_type
+                if outcome.trigger is not None
+                else None
+            )
             return outcome.payload
 
         continuation = ContinuationSupport(
@@ -925,8 +929,8 @@ class _StreamAccounting:
     passthrough: bool = False
     # Set when the turn was handed back to the client as a tool call. Neither `ok` nor `fail` on its own: the client holds a complete reply and will act on it, and the upstream attempt behind it did not finish.
     handed_over: bool = False
-    # What the hand-over swallowed, when it swallowed one. `None` on the endings that are not failures — a turn upstream cut short for want of room is handed back without anything having gone wrong.
-    handed_over_error: BaseException | None = None
+    # The once-rendered legacy account of what the hand-over swallowed. `None` on endings that are not failures; settlement must not touch the exception again after payload and typed trigger were built from the same observation.
+    handed_over_error: str | None = None
     # Independent of `drained`: a native terminal batch or complete one-shot body may cross the downstream send boundary before the generator gets another turn to observe EOF. Sharing this object with the framer lets the producer identify the right chunk without searching encoded bytes here.
     completion_delivery: _CompletionDelivery = field(default_factory=_CompletionDelivery)
     # Upstream finished the turn and then the connection went. Not a failure — the client holds the whole reply — and recorded anyway, because until this field existed the exception was discarded where it was caught and the request was accounted a plain success. An operator watching a peer that resets every connection after its last frame had nothing at all to look at.
@@ -1046,7 +1050,7 @@ class _StreamAccounting:
             # The cause is quoted when there was one, for the same reason the branch below quotes it: this line is the only account of it that exists anywhere. A hand-over does not re-raise, so nothing downstream ever sees the exception, and `retry` on its own says a turn was handed back without saying what it was handed back from.
             if self.handed_over_error is not None:
                 # Bounded for the same reason the replayed failure is, and it was not until a test that asserted the *rendered* line found ten thousand characters of upstream's own text on one of them. `repr` has no limit and upstream chooses the text; both places that put an exception on this line go through the same cut.
-                return "retry", f"turn handed back to the client to continue after {one_line(repr(self.handed_over_error))}"
+                return "retry", f"turn handed back to the client to continue after {one_line(self.handed_over_error)}"
             return "retry", "turn handed back to the client to continue"
         if self.failure is not None:
             return "fail", f"stream failed before a terminal event: {self.failure}"

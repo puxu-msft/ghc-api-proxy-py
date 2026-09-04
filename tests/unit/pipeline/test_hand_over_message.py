@@ -23,6 +23,7 @@ from h2.exceptions import ProtocolError as H2ProtocolError
 from h2.exceptions import StreamClosedError
 from openai import APIConnectionError
 
+import app.pipeline.hand_over as hand_over_module
 from app.pipeline.hand_over import interruption_message
 from app.streaming.deadline import StreamDeadlineError
 from app.streaming.idle_timeout import StreamIdleTimeoutError
@@ -366,11 +367,45 @@ def test_the_line_carries_the_key_that_reaches_the_proxys_own_log() -> None:
     ids=["cancelled", "generator-exit"],
 )
 def test_a_renderer_baseexception_does_not_replace_the_described_error(
+    monkeypatch: pytest.MonkeyPatch,
     render_failure: BaseException,
 ) -> None:
+    reported: list[tuple[object, dict[str, object]]] = []
+
+    class Reporter:
+        def warning(self, event: object, **values: object) -> None:
+            reported.append((event, values))
+
     class UnrenderableUpstreamError(Exception):
         def __str__(self) -> str:
             raise render_failure
+
+    monkeypatch.setattr(hand_over_module, "get_logger", lambda: Reporter())
+    text = message(UnrenderableUpstreamError())
+
+    assert "UnrenderableUpstreamError" in text
+    assert len(reported) == 1
+    assert reported[0][0] == "hand_back_exception_render_failed"
+    assert reported[0][1]["renderer"] == "str"
+    assert reported[0][1]["rendering_failure_type"] == type(render_failure).__qualname__
+
+
+def test_renderer_fallback_reporting_cannot_replace_the_hand_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ExplodingReporter:
+        def warning(self, _event: object, **_values: object) -> None:
+            raise GeneratorExit("reporter exited")
+
+    class UnrenderableUpstreamError(Exception):
+        def __str__(self) -> str:
+            raise asyncio.CancelledError("string rendering cancelled")
+
+    monkeypatch.setattr(
+        hand_over_module,
+        "get_logger",
+        lambda: ExplodingReporter(),
+    )
 
     text = message(UnrenderableUpstreamError())
 
