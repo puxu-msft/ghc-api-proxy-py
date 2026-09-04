@@ -1,7 +1,7 @@
 # 直连路径原生透传：实施计划
 
-日期：2026-09-04（v13）
-状态：**Responses 直连腿已接线并合入 `main`**（`1fb37cd`，1998 passed、ruff clean、pyright 0），issue #2 和 #3 已修；源提交存于 `archive/260901-passthrough-wiring`，经一次代码评审与两轮 Spec 评审。§0 的三项前置全部已合入 `main`（P1、P2 在 `7e96adc`，P3 在 `109dc44`）；骨架已合入 `main`（`01c33f1`）。**Responses 流式直连的 terminal status 与 client-action 可观测切片已实现并合入 `main`（`bb5783f`）**（Spec §7.1、§10；TUI Spec「着色规则」与「验收」；设计与规格提交 `.dev@831b7dc`；实施计划 §10 经两轮独立评审达到 0 blocker、0 major）。**Anthropic 直连腿的词汇已实现并单测，未接线**——挡在 [`spec.md`](spec.md) §2.8 的 hand-over 问题上（[`deferred.md`](deferred.md) D-5）
+日期：2026-09-04（v14）
+状态：**Responses 直连腿已接线并合入 `main`**（`1fb37cd`，1998 passed、ruff clean、pyright 0），issue #2 和 #3 已修；源提交存于 `archive/260901-passthrough-wiring`，经一次代码评审与两轮 Spec 评审。§0 的三项前置全部已合入 `main`（P1、P2 在 `7e96adc`，P3 在 `109dc44`）；骨架已合入 `main`（`01c33f1`）。**Responses 流式直连的 terminal status 与 client-action 可观测切片已实现并合入 `main`（`bb5783f`）**（Spec §7.1、§10；TUI Spec「着色规则」与「验收」；设计与规格提交 `.dev@831b7dc`；实施计划 §10 经两轮独立评审达到 0 blocker、0 major）。**Anthropic 直连腿的词汇已实现并单测，未接线**；用户已裁的直连与翻译块级交付 continuation 现由 Spec v22 在当前两种 applicable block-aware 生成方言——Anthropic Messages 与 OpenAI Responses——上闭成共同 decision、streaming／whole-body finalization 与 native failure 动作合同，实施切片在 §11。Passthrough 整体仍覆盖所有 `translation_required is False` 路由；Chat Completions 块级解析作为独立推迟项，Embeddings 不适用 continuation。Anthropic selector 只在 §11 的 continuation、D-6 failure adapter、native side facts 与当前 `signature_delta` reshape 全部闭合后启用
 权威：[`spec.md`](spec.md)。**本文不定义任何用户可观察行为**——凡本文与 Spec 冲突，以 Spec 为准；凡本文出现 Spec 没有的行为承诺，那是缺陷，应移入 Spec 或删除。
 
 > **v1 已作废并重写。** 它规定「只保存 `done.item` 的最终快照、重发 `added` + `done`、继续 mint id、沿用 framer 的 output index」，而 Spec v2 要求保存全部 item 专有事件、不得 mint id、terminal 整个对象逐字。照 v1 实施会直接违反 Spec。作废理由见 [`reports/260830-review-spec.md`](reports/260830-review-spec.md) major-08 与 [`reports/260830-review-plan.md`](reports/260830-review-plan.md)；两份报告作为时点记录不改。
@@ -100,9 +100,9 @@ P1／P2 都已变异验证：把分隔符改回 LF-only，CRLF 与 CR 两个参�
 
 > **第 7 步是 v9 新增的，来自用户 2026-08-31 的「根因修复所有直连路径」裁决。** 它排在接线之前而不是之后，理由与 v6 把接线挪到 policy 之后是同一条：一次「只接 Responses、Anthropic 直连继续走往返翻译」的接线不是自足切片——它会让同一个缺陷在两条腿上一条修好一条留着，而两条腿的客户端都看不出区别在哪。**Chat Completions 直连不在本步射程内**：它今天就把上游字节原样前送，天花板不存在（Spec §2.6），它缺的块级交付是 2026-08-22 已裁决的推迟项，不因本规格重开。
 
-> **接线的目标是覆盖所有直连腿，今天只落了 Responses 一条。** Spec §2.6 逐条核过四条直连对：Responses **已接线**；**Anthropic 直连是同形缺陷且今天可达**（`descriptor.supports(inbound_endpoint)` 为真时 target 即等于 inbound，集成测试里已有 `anthropic-messages` 上游），词汇已实现但**未接线**，挡在 §2.8 的 hand-over 问题上（`deferred.md` D-5、D-6）；Chat Completions 的天花板不存在但那是偶然（没有 framer 所以字节直传），而 §5／§8／§10 在它上面今天都不成立，见 §2.6；Embeddings 非流式。
+> **Native passthrough 接线的目标覆盖所有直连腿；continuation 的当前 applicability 是其中两种 block-aware 生成方言。** Spec §2.6 逐条核过四条直连对：Responses **已接线**；Anthropic 直连是同形缺陷且今天可达，词汇已实现但**未接线**，挡在 §2.8 的 continuation 问题上（`deferred.md` D-5、D-6）；Chat Completions 没有类型天花板但缺块级解析，继续走 one-shot 字节直传；Embeddings 非流式且不是生成回合。D-5 关闭不宣称后两者获得 continuation。
 >
-> 此前这句写的是「接线覆盖所有直连腿」，与它上面第 8 步「Anthropic 腿未接线」直接矛盾——同一份文件里两处相反，而其中一处还在复述 v11 已经换掉的旧论据。
+> 此前这句写的是「接线覆盖所有直连腿」，与它上面第 8 步「Anthropic 腿未接线」直接矛盾——同一份文件里两处相反，而其中一处还在复述 v11 已经换掉的旧论据。这里保留的是 passthrough 总目标，不把它再次转述成 D-5 continuation 的完成面。
 >
 > **接线为什么必须合成一刀。** v3 把「接线」与「撤销 direct 的 `REJECT`」分成两步，同时又说接线之后 issue 测试应转绿、且撤销之前不要改它们的断言——三句话不能同时成立。`test_an_output_item_this_assembler_does_not_know_is_refused_not_rendered`（`tests/int/test_pipeline_app.py:2549`）当前**明确断言** direct `custom_tool_call` 以 `error` 收尾、不出现任何 `response.output_item*`；接线一旦生效，正确行为恰好相反，该测试必红。启用 direct 透传与撤销 direct 的拒绝**是同一个 observable switch**，不是两个步骤。
 
@@ -421,3 +421,80 @@ Final candidate checkpoint（2026-09-04）：implementation review 首轮 1 majo
 - [x] **Step 6：提交文档语义单元。** In `.dev`, use Write to create the commit-message file，then `git add --` the exact touched plan、Spec and disposition-report paths so the new report is known to Git；audit scoped cached paths and use a pathspec `git commit -F` with subject `docs: record contextual completed status implementation`。Do not include unrelated `.dev` WIP and do not push。
 
 - [x] **Step 7：判断并执行 closeout。** Load `my-skills:closing-out-work-at-a-boundary`; inspect plan/report dispositions, leave still-open direct-passthrough items in their authoritative carriers, and report code commit(s), `.dev` commit, targeted/full verification, review verdict, and any blocked item without claiming the broader direct-passthrough project complete。
+
+## 11. 两种 block-aware 生成方言的原生 continuation 与统一 finalization
+
+**状态：planned，尚未实现。** 行为权威是 Spec v22 的 §2.6、§2.8、§5.3、§7.2、§8、§9.2、§10；本节只安排职责边界与实施切片。当前 applicability 是能识别完整生成单位并能表达 executable synthetic call 的 Anthropic Messages 与 OpenAI Responses；Chat Completions 块级解析仍按 2026-08-22 裁决推迟，Embeddings 不是生成回合。来源分析、独立评审与处置分别是 [`reports/260903-next-root-fix-backlog-analysis.md`](reports/260903-next-root-fix-backlog-analysis.md)、[`reports/260903-next-root-fix-analysis-review-general-opus.md`](reports/260903-next-root-fix-analysis-review-general-opus.md)、[`reports/260903-next-root-fix-analysis-review-disposition.md`](reports/260903-next-root-fix-analysis-review-disposition.md)。
+
+### 11.1 唯一 outcome 契约与数据生命周期
+
+把 `hand_over.py` 里的领域判断迁到具名 continuation 模块，候选路径为 `src/app/pipeline/continuation.py`；旧模块可以保留错误描述等邻近逻辑，但不得继续以 Anthropic dict 充当跨层合同。策略输出只保留两个互斥 variant：`ContinuationDeclined(reason, observations)` 与 `ContinuationRequested(intent, observations)`。`ContinuationIntent` 至少含 `tool_name`、`call_id`、`num_messages`、`category`、`message`；`observations` 携带已经成立的 stop／failure 分类与拒绝理由。不得用 `retry: bool`、`handed_over: bool` 或 payload shape 猜 variant。
+
+流程驱动另有一个互斥的 `EndingAction`：`REPLAY`、`EMIT_UPSTREAM_ENDING`、`EMIT_CONTINUATION`、`EMIT_PROXY_FAILURE`、`NO_WRITE`。Streaming driver 与 whole-body driver 各自解释 action，拥有 replay ledger、deadline、commit frontier、顺序、取消、资源释放和 emitted effect；continuation 策略不进入发送循环、不消费 replay budget、不自行改 terminal，也没有自己的次数预算。Driver 可以看见全部 intent 与 observations，但不得从 `error`／`stop_reason` 再重判一套 eligibility。
+
+| 数据 | 所有者 | 生命周期与更新 | replay／拒绝时的语义 | 观测时点 |
+|---|---|---|---|---|
+| inbound payload、tool name、`num_messages` | request policy | request-stable；`num_messages` 从 `messages` 或 `input` 二选一读取，不累计 | replay 共享；request 结束失效 | 策略正常返回后可记录 |
+| stop／failure observation、方言 taxonomy 结果 | 当前 attempt 的 dialect adapter | attempt-local、replace | replay 后旧 observation 保留在 attempt history，但不能污染新 attempt 的决策 | 分类完成即成立，与 action 是否获批无关 |
+| `ContinuationDecision`／`ContinuationIntent` 与 call id | continuation policy | decision 为 finalization-local、immutable；只有 requested variant 含 intent | `REPLAY` 获批时不调用 policy；policy declined 时只有 reason／observations、没有 intent；requested 时在最终 attempt 创建一次 intent | Decision 返回时 observations 已成立；intent 随 `EMIT_CONTINUATION` action 记录为 proposed effect，只有 action 执行后才记录 emitted |
+| `EndingAction` | driver | 每个 ending 恰好一个 | replacement 成功后旧 action 作废；取消可把尚未执行 action 终止为 `NO_WRITE` | accepted 与 completed 分开记录，不能把 proposed 当 emitted |
+| native typed side facts | dialect reader／共同 summary owner | attempt-local 聚合，最终 request snapshot | replay 时旧 attempt facts 丢弃；final attempt 才吸收进 RequestTrace | item／terminal reader 成功后成立，不依赖 wire 是否已经提交 |
+
+编排模型是单一 driver：先决定 funded replay，只有 replay 未获批或 replacement 未建立时才调用 continuation policy；policy decline 后 driver 继续选择 upstream ending／proxy failure／no-write，不存在“下一策略”隐式 fallthrough。Streaming 与 non-streaming 调同一个 policy entry；两个方言 adapter 只提供 failure taxonomy 与 wire projection。
+
+### Task 11.2：先修 D-7 并建立 typed decision
+
+**Production files**：`src/app/pipeline/continuation.py`（新）、`src/app/pipeline/hand_over.py`、`src/app/pipeline/delivery/stream.py`、`src/app/server/routes/inference.py`。
+
+1. 让 `client_message_count()` 同时识别 list 形的 `messages` 与 `input`；两者同时出现时按 inbound wire format 选择，不把二者相加，也不从 translated payload 读取。
+2. 把当前 `ContinuationSupport.synthesize -> dict | None` 换成 `decide(EndingObservation) -> ContinuationDecision`；将 `CATEGORY_FOR_REASON`、tool declaration warning、bounded message 与 request identity 作为策略输入／observation，返回 typed intent 而不是 Anthropic payload。
+3. 保留现有 translating Anthropic 行为作为第一消费者，证明结构调整没有改变其 stream/non-stream wire；D-7 可以作为独立 semantic commit 先落地，但仍属于本节完成边界。
+4. 测试直接比较 Anthropic `messages` 与 Responses `input` 的非空计数，另给 0 对非 0 的控制，避免旧实现以两个 0 假绿；policy declined 时 observation 与具名 reason 仍存在，但 intent 与 emitted effect 不存在。另钉用户裁决：continuation 自身没有次数预算，replay ledger 的拒绝只让 driver 继续咨询 policy，不得冒充 policy decline。
+
+### Task 11.3：让 streaming terminal 先成为 ending outcome
+
+**Production files**：`src/app/pipeline/delivery/stream.py`、`src/app/pipeline/delivery/passthrough.py`、`src/app/pipeline/delivery/assembling.py`。
+
+1. `PassthroughAssembler` 不再把 terminal 同时当“可立即提交的普通 batch 数据”与 `Terminal.seen` side channel。终局事件保持 attempt-local，作为显式 ending outcome 交给 driver；已完成安全前缀仍按 §4 释放，terminal 之前的完整 group 不被吞。
+2. 把 `_deliver()` 中 native failure 的“`_report_failure()` 后直接 return”改为 action selection；所有 ending 先过 replay，再过 continuation decision，最后只执行一个 `EndingAction`。Replacement 成功之前不得销毁旧队列；客户端取消和下游写失败保持无写通道。
+3. `_hand_over()` 不再接收 `CompletedBlock` 并调用任意 `framer.block()`；它由 action executor 取代。删除或收窄旧 helper 时保留“普通 failure 先发剩余完整单位、没有已交付或持有的完整单位则 decline”的合同，同时保留 `max_tokens`／`max_output_tokens` 即使零完整单位也可 continuation 的用户特例，不删功能。
+4. 三种 buffering policy 各从真实 delivery loop 覆盖 terminal 不早发、已交付或持有的完整单位先于 synthetic call、最终只有一个 terminal；必须包含 `full`／未触发 `until-tool-use` 持有完整 group 且 replay 不可用的 F-01 场景。负路径分别是：普通 failure 零完整单位、无 continuation 配置、proxy protection 与客户端取消；正向控制是 max-token 零完整单位仍产生 synthetic call。
+
+### Task 11.4：复用两种方言 writer 投影 streaming continuation
+
+**Production files**：`src/app/pipeline/delivery/formats/anthropic_messages.py`、`src/app/pipeline/delivery/formats/openai_responses.py`、`src/app/pipeline/delivery/passthrough.py`，必要时各自增加 dependency-leaf continuation builder。
+
+1. 扩展现有 `AnthropicFramer`／`ResponsesFramer` 的 typed projection 或复用其 module-level frame builders；不得新建第三套重复方言词汇，也不得把 `PassthroughFramer.block` 放宽成 `RawEventBatch | CompletedBlock`。
+2. Anthropic 投影写完整 `tool_use` block、`message_delta(stop_reason=tool_use)` 与唯一 `message_stop`；Responses 投影写完整 `function_call` item 与唯一 `response.completed`，按 Spec §5.3 保持 response/item/call id、sequence、output index 与 terminal output 自洽。
+3. Upstream native events 与 proxy-synthesized events 分开建模；只有前者承诺逐字保真。Usage 沿用 upstream terminal snapshot，synthetic call 不伪计为模型 token。
+4. 对错误 writer 做交叉负样本：Anthropic intent 不能被 Responses builder 接受，反之亦然；已交付 upstream item 不因 synthetic item 的 index／id 分配被改写。
+
+### Task 11.5：统一 whole-body finalization
+
+**Production files**：`src/app/pipeline/reply.py`、`src/app/server/routes/inference.py`、Task 11.2 的 continuation policy 与 Task 11.4 的 dialect body builders。
+
+1. 把 `inference.py:551-567` 当前只认 Anthropic `stop_reason/content` 的内联分支移成 whole-body action executor；它读取 response-level terminal facts，调用与 streaming 相同的 `ContinuationDecision`，不再自行构造 hand-back dict。
+2. Anthropic 与 Responses body 严格按 Spec §9.2 投影；存在的完整单位先保留，synthetic call 只追加一次，terminal 字段与 output/content snapshot 一致；max-token 零完整单位时 call 分别成为唯一 `content`／`output`。上游 non-2xx body 继续走 error-envelope 的 raw-byte carrier，不能先 parse 以便 continuation。
+3. 从真实 `server/routes/inference.py` non-stream 入口分别触发 `max_tokens` 与 `max_output_tokens`，并比较相同 ending 的 streaming/non-stream、translated/direct intent 字段；helper 单测不能冒充 route 接线。
+
+### Task 11.6：完成 D-6 的两方言 native failure adapters
+
+**Production files**：`src/app/pipeline/delivery/formats/openai_responses_passthrough.py`、`src/app/pipeline/delivery/formats/anthropic_messages_passthrough.py`、`src/app/pipeline/delivery/stream.py`、Task 11.2 的 outcome types。
+
+1. Responses adapter 从 `ResponseError.code` 映射到现有 retry／continuation category；Anthropic adapter从 `error.type` 映射，先对照当前官方类型或真实事件证据确定闭集，未知值保守落不可 replay，但仍保留原 failure carrier。
+2. Action 对照必须落在真实 driver：未提交且 replay ledger 批出 funded attempt → replay；replay 不发生而 streaming 已交付或持有完整单位、普通 failure 可继续 → 先提交完整单位再 continuation；max-token 即使零完整单位也可 continuation；不可继续或 policy declined → 原上游 failure／proxy failure 各守自己的 carrier。
+3. Adapter 只分类并发布 observation，不执行 replay／continuation；driver 不解析 raw failure 文本重判。D-6 可独立 semantic commit，但在它闭合前 Anthropic selector 不启用，D-5 不宣称对外完成。
+
+### Task 11.7：补齐 native side facts，再保持 reshape 后启用 selector
+
+**Production files**：`src/app/pipeline/delivery/passthrough.py`、`src/app/pipeline/delivery/assembling.py`、两种 native dialect reader、`src/app/observability/request_trace.py`、`src/app/pipeline/delivery_policy.py`。
+
+1. 从 native item/content block 产出 reasoning、tool、client-action 等 typed side facts，汇入与 translating 路径相同的 summary owner；wire 与 facts 单向分离。对现有两份 cassette 只声称 reasoning parity，tool ground truth 没有录制时用 side-fact contract 测试并明确证据层。
+2. 为 Anthropic passthrough 接入当前 `content_block_start_compat=signature_delta` reshape；默认继续拆出 `signature_delta`，显式关闭继续保留 embedded 形态，synthetic continuation `tool_use` 不受 thinking reshape 影响。D-4 的长期“默认可关还是常驻不可关”仍待用户，不能在本任务顺带裁。
+3. 最后才让 `carries_upstream_natively()` 放行 Anthropic direct。真实 streaming/non-stream route 同时覆盖 selector、continuation、默认 reshape、显式关闭、native failure 与 side facts；只构造 assembler/framer 不算接线。
+
+### 完成边界与 semantic commit 边界
+
+D-7、typed outcome、streaming finalization、两方言 projection、whole-body、D-6、side facts、reshape 与 selector 可以按上述职责各自形成 semantic commit，不要求一个大提交，也不以某次测试转绿划提交边界。**对外完成边界不同**：只有 Anthropic Messages 与 OpenAI Responses 两种当前 applicable 方言的 streaming/non-streaming continuation、native failure actions、native side facts、当前 reshape 默认值与真实 selector 接线全部满足 Spec v22，才能关闭 D-5 并宣称 Anthropic direct 接线完成。F-01 side facts 可以在核心 continuation 前独立落地；这只改变提交顺序，不把它移出 selector 前置。D-5 的关闭不宣称 Chat Completions 已获得块级 delivery／continuation，也不把 Embeddings 计作 continuation surface。
+
+未采纳路线：不把 `PassthroughFramer.block` 扩成 union 来掩盖类型错误；不为 streaming 与 non-streaming 复制 eligibility；不把 terminal 继续塞进普通 batch 后靠 side channel 补救；不因 D-6 可独立提交就把它排到 selector 之后；不把当前 `signature_delta` 默认值的保持误写成 D-4 长期分叉已经裁决；不把这轮实施扩成新的 proof framework。

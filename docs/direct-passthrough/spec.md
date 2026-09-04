@@ -1,7 +1,7 @@
 # 直连路径：原生透传产品规格
 
 日期：2026-08-30
-状态：**DRAFT v21 — 待复评**。§3.1 的三处前置缺陷全部已合入 `main`（P1／P2 在 `7e96adc`，P3 在 `109dc44`），骨架亦已合入（`01c33f1`）。**Responses 直连腿已接线并合入 `main`**（`1fb37cd`，源提交存于 `archive/260901-passthrough-wiring`），issue #2／#3 关闭，**issue #4 的根因随同一次接线消除**（§6.2、§6.4；已污染的客户端历史由 §6.5 的 opt-in 修补处置，用户 2026-09-01 裁决）；**§10 的 Responses 流式直连 terminal status 与 typed client-action facts 分槽合同已由 `bb5783f` 实现**；**Anthropic 直连腿的词汇已实现、未接线**（§2.8）。**§11 有一项待用户裁决**（响应头黑名单的定义域）；已污染的客户端历史那一项**用户已于 2026-09-01 裁决**，条款是 §6.5。
+状态：**DRAFT v22 — 待复评**。§3.1 的三处前置缺陷全部已合入 `main`（P1／P2 在 `7e96adc`，P3 在 `109dc44`），骨架亦已合入（`01c33f1`）。**Responses 直连腿已接线并合入 `main`**（`1fb37cd`，源提交存于 `archive/260901-passthrough-wiring`），issue #2／#3 关闭，**issue #4 的根因随同一次接线消除**（§6.2、§6.4；已污染的客户端历史由 §6.5 的 opt-in 修补处置，用户 2026-09-01 裁决）；**§10 的 Responses 流式直连 terminal status 与 typed client-action facts 分槽合同已由 `bb5783f` 实现**；**Anthropic 直连腿的词汇已实现、未接线**（§2.8）。**直连 continuation 的共同 intent、streaming finalization、native failure 动作矩阵与 non-stream body 合同已经补入 §5.3／§9.2，尚未实现**；完整实施边界见 [`plan.md`](plan.md) §11。**§11 有一项待用户裁决**（响应头黑名单的定义域）；已污染的客户端历史那一项**用户已于 2026-09-01 裁决**，条款是 §6.5。
 定义域：**任何 `route.translation_required is False` 的路由**，不限方言。v10 之前本规格只覆盖 `openai-responses` 两端；用户 2026-08-31 裁决「根因修复所有直连路径」，定义域随之放宽（§2.1）。
 
 > **目录随之从 `direct-responses-passthrough` 改名为 `direct-passthrough`。** v10 第一稿保留了旧名，理由是「改名会让报告里的引文指向不存在的路径」——那条理由用错了地方：路径重写会伪造的是**报告里的原句**，而同一条规则的另一半正是「文件搬了就把活文档的链接指过去」。目录名是活的，一个窄于内容的名字本身就是缺陷。已重指的是活文档与源码注释；**12 份评审报告内文里的旧绝对路径原样保留**，它们记录的是当时的位置，重写才是伪造。
@@ -68,9 +68,9 @@
 
 ### 2.5 一个引擎，每种方言一份词汇
 
-**本规格的绝大部分条款与方言无关**，这是 v10 放宽定义域之后必须先说清的事：§3 的保真层级、§4 的交付单位与全局顺序、§5 的 commit frontier 与 replay、§7 的三种 policy 与收口顺序、§8 的失败与容量、§9／§9.1 的非流式与响应头、§10 的可观测合同——它们描述的是「一条不翻译的腿如何交付」，句子里没有一个 Responses 专有的事实。
+**本规格的机制骨架大部分与方言无关，但不是 §§5～10 的每一句都方言无关。** 共同部分包括 §3 的保真层级、§4 的安全前缀与全局顺序、§5 的 commit frontier、§7 的 policy 结构和 §8 的容量边界；方言仍分别拥有 terminal／failure 的读取、native failure taxonomy、continuation call 与 terminal 投影、non-stream body 字段、item action 分类和可观测 reader。v10 曾把这句话写成“句子里没有一个 Responses 专有事实”，v14 已被六个反例推翻；本段保留可共享的机制，不再用全称把 adapter 工作藏掉。
 
-**方言专有的只有一份词汇**，每种直连格式各给一份。下表**八行**——v10 只列了六行，漏掉了实现里同样存在的 `read_failure` 与 `name`／`reply_dialect`，而漏掉的那两行不是装饰：`read_failure` 决定上游失败事件怎么被认出来，`reply_dialect` 决定完成行按哪把尺子判读这条回复（两种方言的字节阈值差一个数量级）。
+**下表是每种 block-aware streaming 方言都要提供的边界词汇，不是全部方言差异。** 当前两种直连生成方言各给一份。下表**八行**——v10 只列了六行，漏掉了实现里同样存在的 `read_failure` 与 `name`／`reply_dialect`，而漏掉的那两行不是装饰：`read_failure` 决定上游失败事件怎么被认出来，`reply_dialect` 决定完成行按哪把尺子判读这条回复（两种方言的字节阈值差一个数量级）。§5.3／§9.2 另列 continuation projection 与 whole-body adapter；新增方言时两处都必须补，不能以本表存在为由宣称算法已经全通用。
 
 | 词汇项 | 它回答什么 | `openai-responses` | `anthropic-messages` |
 |---|---|---|---|
@@ -92,30 +92,32 @@
 | 直连对 | 状态 | 依据 |
 |---|---|---|
 | `openai-responses` ↔ `openai-responses` | **本规格的主体工作。**今天走翻译型 assembler，6 个已知 item 类型之外一律拒绝——GitHub issue #2 与 #3 都落在这里 | **已接线并合入 `main`**（`1fb37cd`）；issue #2／#3 关闭 |
-| `anthropic-messages` ↔ `anthropic-messages` | **同形缺陷，而且它是主路径不是边角。**`sync-refs/sxwxs-ghc-api/260822-round2-disposition.md` 记着实测：`claude-sonnet-5` 不支持 Responses API（`unsupported_api_for_model`），**Claude 系模型只能走直连**。这条腿今天走 `AnthropicAssembler` ＋ `AnthropicFramer` 的往返，未知 block 类型同样被 framer 拒绝。**落地前须先解决 §2.7 的整形问题** | 词汇已实现并单测（`anthropic_messages_passthrough.py`），**接线待 §2.8 的 hand-over 问题闭合** |
-| `openai-chat-completions` ↔ `openai-chat-completions` | **天花板不存在，但那是偶然。**这条腿没有 framer，走 `one_shot_delivery` 把上游字节原样前送，所以没有任何类型表挡在中间。它缺的是**块级交付**——boundaries 在 `choices[].delta` 里面，2026-08-22 已裁决推迟 | 现状即满足 §2.1；块级交付的缺口是既有推迟项，不因本规格重开 |
-| `openai-embeddings` ↔ `openai-embeddings` | 非流式，按 §9 处置 | 无 SSE 词汇 |
+| `anthropic-messages` ↔ `anthropic-messages` | **同形缺陷，而且是 Claude 模型的关键可达 route，不是项目定义的 primary product path。**`sync-refs/sxwxs-ghc-api/260822-round2-disposition.md` 记着实测：`claude-sonnet-5` 不支持 Responses API（`unsupported_api_for_model`），该模型只能走直连；项目 primary product path 仍是 Anthropic Messages inbound → OpenAI Responses upstream。这条腿今天走 `AnthropicAssembler` ＋ `AnthropicFramer` 的往返，未知 block 类型同样被 framer 拒绝。**落地前须先解决 §2.7 的整形问题** | 词汇已实现并单测（`anthropic_messages_passthrough.py`），**接线待 §2.8 的 continuation 问题闭合** |
+| `openai-chat-completions` ↔ `openai-chat-completions` | **天花板不存在，但那是偶然。**这条腿没有 framer，走 `one_shot_delivery` 把上游字节原样前送，所以没有任何类型表挡在中间。它缺的是**块级交付**——boundaries 在 `choices[].delta` 里面，2026-08-22 已裁决推迟 | 现状即满足 §2.1；在能识别完整单位并有本方言 continuation projection 之前，§5.3 不适用。块级交付的缺口是既有推迟项，不因 D-5 重开；将来若实现该能力，须把它接入同一 semantic continuation contract |
+| `openai-embeddings` ↔ `openai-embeddings` | 非流式，没有模型生成回合、stop reason 或客户端可执行的 tool/function call | §9 的 JSON value 保真与 header 合同仍适用；continuation 不适用 |
 
-> `gemini-generate-content` 已在路由表中登记但没有 translator 应答，`InboundRoute.implemented` 挡住请求，因此今天不存在该格式的直连腿。它出现时须先有自己的词汇。
+Continuation 的 applicability 比本规格整体定义域窄：它覆盖**能识别完整生成单位，且客户端方言能表达可执行 synthetic call 的 block-delivery／whole-body 生成路径**。当前只有 `anthropic-messages` 与 `openai-responses` 两种方言。用户亲笔合同原先接受“目前只给 anthropic-messages”，后续裁决要求直连与翻译的块级交付都原生支持 continuation；这触发 Responses 与 Anthropic 两腿，不撤销 Chat Completions 块级解析已推迟的既有裁决，也不把 Embeddings 变成生成协议。这里收窄的是本规格此前自行扩写的“每条直连腿”，不是用户已裁的功能。
+
+> `gemini-generate-content` 已在路由表中登记但没有 translator 应答，`InboundRoute.implemented` 挡住请求，因此今天不存在该格式的直连腿。它出现时须先有自己的词汇，并按上段 applicability 判断是否需要 continuation adapter。
 
 ### 2.7 走 native 会拿掉每条腿现有的兼容整形，这不是可以顺手带过的副作用
 
-**放宽定义域之后浮出来的一般事实**：今天每条直连腿的 framer 都在做一点兼容整形，而**纯透传按构造会把它一并去掉**。这不是实现细节，是用户可观察行为，每一条都要单独裁。
+**放宽定义域之后浮出来的一般事实**：今天两条有 framer 的 block-aware 直连生成腿都在做兼容整形，而**纯透传按构造会把它一并去掉**。这不是实现细节，是用户可观察行为，每一条都要单独裁；Chat Completions 没有 framer，Embeddings 不走这套 streaming writer，本段不把它们算进来。
 
 已知两例，严重度不同：
 
 | 腿 | 整形 | 今天的状态 | 拿掉的后果 |
 |---|---|---|---|
-| `openai-responses` | `ResponsesFramer._item_id()` 由 `output_index` 生成，同一 item 的 `added` 与 `done` id 连续 | **默认生效**（framer 一直这么做），配置项 `hook_fix_responses_sse.fix_stream_ids` 是注释掉的候选 | 用户具名的 `@ai-sdk/openai` 一类客户端会被自己的连续性校验拒掉。见 [`deferred.md`](deferred.md) D-3 |
+| `openai-responses` | 旧 `ResponsesFramer._item_id()` 由 `output_index` 生成，同一 item 的 `added` 与 `done` id 连续；native 接线拿掉了这层无名稳定化 | **已显式建模并实现**：`hook_fix_responses_sse.fix_stream_ids` 默认关，开启时由 `stabilise_stream_ids` reshape；合同见 §6.6 | 默认关时用户具名的 `@ai-sdk/openai` 一类客户端可能被自己的连续性校验拒掉；这是显式 opt-in 的已知代价，不再是未登记分叉 |
 | `anthropic-messages` | `hook_fix_anthropic_sse.thinking.content_block_start_compat`，把嵌在 `content_block_start` 里的 thinking signature 抽成单独的 `signature_delta` | **默认 `"signature_delta"`，即默认开着** | 直接落在 **Claude 系模型唯一的那条腿**上。用户亲笔文档里这条还带着 TODO：「现在我认为（如果客户端真的不支持）这是应该常驻的」——即用户倾向把它变成常驻，而不是拿掉。见 [`deferred.md`](deferred.md) D-4 |
 
 **处置模式 §6.2 已经给过，本节只是把它提升为通则**：兼容变换**必须**另立显式、可选的 reshape 合同，**不得**叫它 native 或逐字。所以正确的形状不是「透传吃掉整形」，也不是「为了保整形而不透传」，而是**透传逐字携带上游事件，声明过的 reshape 合同在其上运行**，且合同的存在与默认值对用户可见。
 
-**因此本规格裁定：接线不得改变任何一条腿今天已生效的整形默认值。** Anthropic 腿的 `signature_delta` 默认开着，接线后仍然开着；Responses 腿今天没有 `fix_stream_ids`，接线后也不会凭空多一个。**要不要改那些默认值是用户的事，不是接线的副作用**（D-3、D-4）。
+**因此本规格裁定：接线不得把兼容整形的变化藏成 native 的副作用。** Anthropic 腿的 `signature_delta` 默认开着，接线后仍然开着；Responses 的无名稳定 id 行为已随 native 接线消失，随后被 §6.6 显式建模为默认关的 `fix_stream_ids` opt-in。两项当前默认都已写清；仍待用户裁的只有 Anthropic reshape 长期“默认开、可关”还是“常驻、不可关”（[`deferred.md`](deferred.md) D-4）。
 
 > 这条通则是 v10 放宽定义域**直接换来的**。只做 Responses 一条腿时，`fix_stream_ids` 看起来像那条腿的特殊情况；两条腿摆在一起才看出它是「native 与既有兼容层的关系」这个一般问题，而 Anthropic 那一例默认开着、又落在主路径上，严重度比先发现的那一例高得多。
 
-### 2.8 §8 的「本腿不咨询 hand-over」是 Responses 腿的事实，不是所有直连腿的
+### 2.8 §8 旧有的「本腿不咨询 continuation」只描述当时的 Responses 实现，不是当前 applicable 直连路径的合同
 
 **这条限定是放宽定义域时才暴露出来的，它此前写得比它成立的范围宽。** §8 曾写着代理侧错误「**不得**咨询只适用于 Anthropic 客户端的续写机制」，理由是本腿没有续写通道。那个理由在 Responses 腿上成立——客户端不是 Anthropic 客户端，执行不了那个合成的 `tool_use` 块。**在 Anthropic 直连腿上它不成立**：那条腿的客户端**就是** Anthropic 客户端，`hand_back_block()` 开头那句 `wire_format is not WireFormat.ANTHROPIC_MESSAGES` 按 inbound 格式门控，今天就放行，而 `max_tokens` 的续写是 2026-08-21 用户裁决的「总是 hand over」。
 
@@ -125,11 +127,11 @@
 
 **其二，类型，这一层更硬。** `_hand_over` 把合成的 `CompletedBlock` 交给 `framer.block()`，而透传腿的 framer 只认 `RawEventBatch`（它调 `batch.encode()`，`CompletedBlock` 没有这个方法）。**所以即使顺序问题解决了，那条路径依然是一次 200 之后的 `AttributeError` 撕流。**
 
-**因此 Anthropic 直连腿的接线在本问题闭合前不进行。** 这不是缩减用户 2026-08-31 裁决的范围：词汇已实现并单测。**但也不是「缺的只是打开开关」**——上面第二层说的类型不匹配是一段还没写的代码，不是一个没翻的开关。挡住它的是 §2.7 自己那条规则——接线不得改变任何一条腿今天已生效的行为，而 `max_tokens` 续写在那条腿上今天就生效，且它正是 Claude 系模型唯一的路。
+**因此 Anthropic 直连腿的接线在本问题闭合前不进行。** 这不是缩减用户 2026-08-31 裁决的范围：词汇已实现并单测。**但也不是「缺的只是打开开关」**——上面第二层说的类型不匹配是一段还没写的代码，不是一个没翻的开关。挡住它的是 §2.7 自己那条规则——接线不得改变任何一条腿今天已生效的行为，而 `max_tokens` continuation 在那条腿上今天就生效，且它正是 Claude 系模型唯一的路。
 
-**待定的是形态，不是方向**（[`deferred.md`](deferred.md) D-5）：要么在 hand-over 可能发生时推迟终局的释放，要么让合成块以该方言的原生事件表达并接在终局之前，要么裁定 native 腿不提供续写并接受那是一次行为回归。**只有第三个选项需要用户裁**——它与 §2.7 冲突，是一次明确的行为回归；前两个是本规格推导，评审共识即可。**候选 1 单独不够**：它只解决顺序那一层，类型那一层原样还在。
+**形态已经由用户 2026-09-01 裁定，不再待定**（[`deferred.md`](deferred.md) D-5）：合成 continuation call 必须以客户端本腿的原生方言表达并接在终局之前。单独推迟终局只能解决顺序，解决不了 `CompletedBlock` 被交给 `RawEventBatch` writer 的类型错误；裁定 native 腿不提供 continuation 的候选被用户明确否决。完整的格式无关 intent、streaming finalization 与 failure 动作合同见 §5.3，non-stream body 合同见 §9.2。
 
-> **Responses 直连腿不受此条阻挡**：那条腿上 §8 的原判据仍然成立（客户端执行不了 Anthropic 的合成块），`hand_back_block()` 的 inbound 格式门也本就不放行它。issue #2 与 #3 都在那条腿上。
+> **Responses 直连腿目前没有 continuation，不等于合同排除它。** `hand_back_block()` 的 inbound 格式门今天不放行 Responses，只能说明实现仍停在 Anthropic 专用 carrier；用户 2026-09-01 的裁决覆盖直连与翻译两种块级交付路径，而 Responses 与 Anthropic 正是当前两种满足 §2.6 applicability 的生成方言。两者必须共享同一个 semantic decision，只有 wire projection、terminal 字段和 streaming／whole-body 流程按方言分开。issue #2 与 #3 的 Responses 接线不受本节阻挡，是因为当时没有宣称 continuation 已完成，而不是因为 Responses 获得永久豁免。
 
 ## 3. 保真层级：合法 UTF-8 SSE 的 logical event 与 data
 
@@ -216,7 +218,7 @@
 
 **首个原生事件提交后**：**禁止**整次 attempt replay，已交付前缀保留。这与用户亲笔的重试合同一致，概括为「尚未交付完整块可无痕重试；已交付块则不得从头重放」。
 
-> **上面那句是概括，不是原文**，别拿引号去回指。人写文档里前半句的对应原句是「如果还没交付过完整块，直接在代理端无痕重试」；后半句**没有**对应句子——那里写的是已交付完整块之后走 MCP 合成续写，而该机制明确「目前只给 anthropic-messages 客户端请求时使用」。在本腿上结论仍然等价：本腿没有续写通道，§8 已裁定走 SSE error。
+> **上面那句是概括，不是原文**，别拿引号去回指。人写文档里前半句的对应原句是「如果还没交付过完整块，直接在代理端无痕重试」；后半句对应的是已交付完整块之后走 MCP 合成续写。该文档最初接受「目前只给 anthropic-messages」，并明写未来按需要补全；用户 2026-09-01 随后要求 continuation 在直连与翻译的块级交付路径上原生可用，§2.6 据此把当前 applicability 扩到 Anthropic 与 Responses 两种生成方言。没有 continuation adapter 的旧实现状态不再是规范，最终动作见 §5.3。
 
 cap 超限、客户端取消、客户端 deadline 等人写文档列为不可继续的原因，**不得** replay。
 
@@ -228,9 +230,9 @@ cap 超限、客户端取消、客户端 deadline 等人写文档列为不可继
 
 | 情形 | 裁定 |
 |---|---|
-| 上游**原生 failure 事件**（`response.failed` / `response.cancelled` / `error`）在首个原生事件提交前到达 | 是否可 replay **完全复用既有 retry taxonomy**，不为本腿另造闭集。taxonomy 判为不可重试时，该 failure 事件**逐字**交付并结束 |
-| **clean EOF 且无终局** 在首个原生事件提交前 | 按既有 taxonomy 视作可重试的截断。用尽预算后仍无终局时，写 proxy error（§8），**不得**合成成功 terminal |
-| **重开 attempt 没能给出新流** | 按 §5.2 的三类结果分别处置。**draining 根本到不了这里**——它是 §5 的 replay 资格判定，发生在重开之前；客户端看见 `AttemptFailed` 时才是 replacement 的失败，不是旧 attempt 的。§5 已规定 replay 时丢弃旧 attempt 的 terminal／ids／usage，所以回头重放旧 failure 会交付一份已被本代理判定作废的记录。若 replacement 的失败本身不可成帧，则写 proxy error |
+| 上游**原生 failure 事件**（`response.failed` / `response.cancelled` / `error`）在首个原生事件提交前到达 | 是否可 replay **完全复用既有 retry taxonomy**，不为本腿另造闭集。Replay 不发生时进入 §7.2／§5.3：可继续且有已交付或 held complete unit 时可 continuation；taxonomy 判为不可重试或 policy declined 时，该 failure 事件按 §6.3 **逐字**交付并结束 |
+| **clean EOF 且无终局** 在首个原生事件提交前 | 按既有 taxonomy 视作可重试的截断。Replay 不发生时，若 held complete unit 将在 §7.2 提交且 continuation requested，则写 synthetic call 与唯一 terminal；否则写 proxy error（§8），不得从 EOF 本身伪造上游成功 terminal |
+| **重开 attempt 没能给出新流** | 按 §5.2 的三类结果区分 replacement failure 与 proxy refusal，并保留旧 attempt 的 queue 直到 final action 决定。**Draining 根本到不了这里**——它是 §5 的 replay 资格判定，发生在重开之前。若旧 attempt 有 complete unit 且 continuation requested，先提交这些单位再 continuation；declined 时按 §5.2／§8 写 replacement 或 proxy failure，不回头重放已判作废的旧 terminal |
 
 ### 5.2 native failure 进入 taxonomy 的 adapter
 
@@ -268,9 +270,45 @@ cap 超限、客户端取消、客户端 deadline 等人写文档列为不可继
 
 **这四条都是本规格的推导**（§2.3），不是用户裁决。
 
+### 5.3 格式无关的 continuation intent 与 streaming finalization
+
+Continuation 的领域判定只做一次，返回一个互斥的 `ContinuationDecision`：`declined(reason, observations)`，或 `requested(intent, observations)`。只有 requested variant 携带**格式无关、不可直接成帧**的 `ContinuationIntent`；intent 至少含 tool name、call id、`num_messages`、category 与 message，不把 eligibility outcome 重复塞进 intent。`num_messages` 同时支持客户端请求的 `messages` 与 `input`，不得把 Responses 请求恒记成 0。翻译腿与直连腿、streaming 与 non-streaming 必须对相同请求与相同 ending 得到同一 semantic decision；客户端方言只决定如何投影 requested intent，不得各自重判 continuation 是否成立。
+
+Eligibility 先受 §2.6 applicability 限定，并要求配置给出 continuation tool、ending 属 continuation taxonomy、当前仍有可写通道，且不是 proxy protection、客户端取消或下游写失败。**完整单位前提按 ending 分开**：普通可继续 failure／tear 只有在至少一个完整单位已经交付，或由 streaming finalization 持有并将在 synthetic call 前提交时，才 requested；`max_tokens`／`max_output_tokens` 不要求已有完整单位——按用户亲笔合同丢弃未完成单位后，只要其它条件成立就 requested，synthetic call 可以成为本轮唯一内容。客户端未声明工具只产生 warning，不改变 requested；未配置 tool、方言不适用或 ending 不可继续才 declined。
+
+**Continuation 没有次数预算。** 用户亲笔合同明确“不需要次数上限”；现有 retry ledger 只决定 `REPLAY` 是否获批，并在调用 continuation policy 之前由 driver 读取，不能作为 eligibility 的第二道门。Client deadline、proxy protection 与无写通道按它们自己的具名条件 decline／`NO_WRITE`，不合并成一个未定义的“剩余预算”。
+
+Final action 的规范词汇是互斥的 `REPLAY`、`EMIT_UPSTREAM_ENDING`、`EMIT_CONTINUATION`、`EMIT_PROXY_FAILURE` 与 `NO_WRITE`；实现可以用同义 typed variant，但不得压成多个可非法组合的 boolean。**Streaming driver 拥有 finalization，策略不拥有发送循环。** 原生 terminal 到达时必须先变成一个显式 ending outcome；不得一边把它当普通 `RawEventBatch` 提交，一边再通过 `Terminal.seen` 旁路通知 driver。Driver 在任何 terminal frame 离开之前先按既有 replay ledger 决定 `REPLAY`，未 replay 才咨询 `ContinuationDecision` 并选择其余四个 action，按下列顺序收口：
+
+1. 先按 §4、§7.2 交付所有应保留的完整单位，未闭合尾巴仍按原合同处置。
+2. 不生成 continuation intent 时，原上游 terminal 或最终 failure 按 §5、§7.2、§8 的既有 carrier **恰好交付一次**。
+3. 生成 continuation intent 时，原上游 successful／incomplete terminal 或可继续 failure **不得出门**；driver 先投影一个客户端可执行的原生 continuation call，再投影一个与该 call 一致的终局。整个客户端可见回复只有一个 terminal。
+4. 代理合成的字段必须有明确来源：call id 来自 intent；方言 writer 分配的 item id、index 与 sequence 只服务这一合成 item，并在其全部事件及 terminal snapshot 中自洽；不得把这些字段冒充上游原生字段，也不得改写此前已交付的上游 item。
+
+| 客户端方言 | continuation call 的原生投影 | 最终 terminal |
+|---|---|---|
+| `anthropic-messages` | 用既有 Anthropic framing primitive 写一个完整的 synthetic `tool_use` content block，block index 取下一个未用位置，id 使用 intent 的 call id，input 携带 category、message 与 `num_messages` 所规定的参数 | 写一个 `message_delta`，`stop_reason == "tool_use"`，随后恰好一个 `message_stop`；沿用本次上游 message identity，usage 沿用上游 terminal 事实且不把代理合成块伪计为模型 token。原上游 `message_delta`／`message_stop` 不出门 |
+| `openai-responses` | 用既有 Responses framing primitive 写一个完整的 synthetic `function_call` output item；`output_index` 取下一个未用位置，item id 由 writer 新建并在 `added`／arguments／`done` 间保持一致，call id 使用 intent 的值，`sequence_number` 从已保留事件之后单调继续 | 写恰好一个 `response.completed`；沿用本次上游 response id，terminal `output` 为已保留完整 output items 加 synthetic call，`status == "completed"`，`incomplete_details` 清空，usage 沿用上游 terminal 事实且不把代理合成 item 伪计为模型 token。原上游 `response.incomplete`／其它被 continuation 接管的 terminal 不出门 |
+
+Anthropic 上游原生批次在提交前仍须经过 §2.7 已启用的 compatibility reshape：默认 `signature_delta` 继续生效，显式关闭时 embedded signature 原样保留。该 reshape 只处理上游 thinking block；synthetic continuation `tool_use` 不得被它误判为 thinking，也不得改变 intent。
+
+Native failure 的 final action 由**commit frontier、既有 replay ledger、共同 `ContinuationDecision` 与方言 failure taxonomy**共同决定，不能由某个异常分支直接 `return`：
+
+| 状态 | Final action 与动作 |
+|---|---|
+| 首个原生事件尚未提交，failure taxonomy 判为可 replay，且既有 replay ledger 批出 funded attempt，replacement 成功建立 | `REPLAY`：旧 attempt 的所有字节与 side facts 在新流成功建立后丢弃 |
+| Replay 不可用、被拒或 replacement 未建立；普通 failure／tear 可继续；streaming 已交付至少一个完整单位，或持有至少一个将在 synthetic call 前按 §7.2 提交的完整单位；`ContinuationDecision` 为 requested | `EMIT_CONTINUATION`：先保留／提交完整单位，隐藏该可继续 failure，再按上表投影 continuation call 与唯一终局。`full` 与未触发的 `until-tool-use` 持有完整 group 时明确落在本行，不因尚未 commit 而漏出矩阵 |
+| `max_tokens`／`max_output_tokens`，`ContinuationDecision` 为 requested | `EMIT_CONTINUATION`：丢弃未完成单位，保留存在的完整单位并投影 continuation；没有完整单位时 synthetic call 可以成为唯一内容，不回落到原 incomplete terminal |
+| Failure taxonomy 判为不可重试／不可继续，或 `ContinuationDecision` 为 declined | `EMIT_UPSTREAM_ENDING` 或 `EMIT_PROXY_FAILURE`：上游 failure 保持本方言规定的原 carrier；代理自身 failure 按 error-envelope 写 proxy carrier，不把二者互换 |
+| Proxy protection、客户端取消、下游写失败或无可写通道 | `EMIT_PROXY_FAILURE` 或 `NO_WRITE`，依既有 carrier 可用性决定；不 replay、不 continuation，绝不为了“完整终局”向不存在的读者写数据 |
+
+Responses 的 `ResponseError.code` 与 Anthropic 的 `error.type` 必须分别有方言 adapter，再共同归一化成现有 `RetryReason | None`／continuation category；不得拿 §5.2 的 Responses code 表直接索引 Anthropic failure。两份 adapter 可以分开落地，但 Anthropic selector 启用与本节对外宣称完成都以两份方言的动作矩阵可执行为前置。
+
+本节是对用户 2026-09-01「该功能理应在直连路径上正确可用，因为块级交付是直连、翻译都必须全面、原生支持的」裁决的规格化推导，适用面按 §2.6 限定为当前两种 block-aware 生成方言。字段载体、顺序、final action 与两方言投影来自 2026-09-03 的根修分析及独立复评；实施边界见 [`plan.md`](plan.md) §11，原始推导与被否决路线保留在 [`reports/260903-next-root-fix-backlog-analysis.md`](reports/260903-next-root-fix-backlog-analysis.md) 及其评审／处置件。
+
 ## 6. 各事件与各字段的处置（`openai-responses` 词汇）
 
-> 本节与 §7.1 是**方言专有**的两节，其余各节与方言无关（§2.5）。`anthropic-messages` 的对应词汇见 §2.5 的表，它的逐字段处置在本腿落地时另立小节，不复制本节。
+> 本节与 §7.1 是 **Responses 方言专有**的逐事件／分类合同；它们不是全部方言差异（§2.5 已更正旧全称）。`anthropic-messages` 的边界词汇见 §2.5 的表，continuation 与 non-stream 投影见 §5.3／§9.2，failure adapter 属 D-6；它的逐字段处置在本腿落地时另立小节，不复制本节。
 
 ### 6.1 item 专有事件
 
@@ -290,7 +328,7 @@ cap 超限、客户端取消、客户端 deadline 等人写文档列为不可继
 
 **回归是具体的。** 今天这条腿由 `ResponsesFramer` 成帧，`_item_id()` 用 `f"{prefix}_{response_id}_{output_index}"` 生成，同一个 item 的 `added` 与 `done` 走同一个 `output_index`，**所以客户端今天拿到的 id 是连续的**。本腿改 native 之后拿到的是上游那份实测全不相同的 id。也就是说：一个用 `@ai-sdk/openai` 的 Responses 客户端今天在这条腿上能跑，透传落地后会被它自己的连续性校验拒掉。**这项回归此前没有任何文档登记。**
 
-若要提供 `fix_stream_ids` 之类的兼容变换，**必须**另立显式、可选的 reshape 合同，**不得**叫它 native 或逐字——方向与用户那段注释一致，因为那本来就是个 opt-in 开关。**但它在本腿不是纯粹的将来事项**：本腿落地即撤掉今天 framer 提供的稳定 id。是否在启用透传的同一刀里提供这个 opt-in，是一个产品分叉，已登记进 [`deferred.md`](deferred.md) D-3。
+`fix_stream_ids` 兼容变换已经按这个边界落地：另立显式、可选的 reshape 合同，**不得**叫它 native 或逐字；当前默认关，显式开启时才稳定 id，完整合同见 §6.6。本腿接线时撤掉旧 framer 无名提供的稳定 id 曾是一项未登记分叉，现已由 §6.6 的具名配置、默认值与实现接管，不再留在 deferred。
 
 > 未核的一项：`@ai-sdk/openai` 具体在哪个版本、以何种方式校验连续性，本项目没有它的源码，采纳的是用户的陈述。
 
@@ -314,9 +352,11 @@ Reason: Encrypted content item_id did not match the target item id.
 
 ### 6.3 control 与 terminal 事件
 
-`response.created` / `response.in_progress` / `response.completed` / `response.incomplete` / `response.failed` / `response.cancelled`：**必须**原样重放上游的，**整个 `response` 对象逐字**——含 `status`、`incomplete_details`、`usage`、`tool_usage`、`metadata` 及任何本代理不认识的根级字段。**不得**由本代理合成，**不得**由 `Terminal.stop_reason` 反推（那是面向 Anthropic 的派生摘要，本腿只作可观测用途，见 §10）。
+`response.created` / `response.in_progress` / `response.completed` / `response.incomplete` / `response.failed` / `response.cancelled`：当 §5.3 选择 `EMIT_UPSTREAM_ENDING` 时，**必须**原样重放上游的事件与**整个 `response` 对象**——含 `status`、`incomplete_details`、`usage`、`tool_usage`、`metadata` 及任何本代理不认识的根级字段。该 upstream-native terminal **不得**由本代理合成，**不得**由 `Terminal.stop_reason` 反推（那是面向 Anthropic 的派生摘要，本腿只作可观测用途，见 §10）。
 
-提交时点见 §5。
+§5.3 选择 `EMIT_CONTINUATION` 是具名例外：原上游 terminal 被 continuation finalization 接管而不出门，代理按 §5.3／§9.2 明确列出的字段合成一个 proxy-owned terminal。该 synthetic terminal 不冒充 upstream-native event，也不继承上一段的“整个 response 对象逐字”承诺；除此之外没有第二个合成成功 terminal 的出口。
+
+提交时点与 final action 见 §5、§5.3。
 
 ### 6.4 reasoning
 
@@ -415,7 +455,7 @@ Reason: Encrypted content item_id did not match the target item id.
 
 ### 6.6 响应侧：把上游漂移的 id 稳定化（`hook_fix_responses_sse.fix_stream_ids`）
 
-**状态：草案，等用户裁默认值。** 方向不需要再裁——§6.2 已裁定这类变换必须另立显式、可选的 reshape 合同、不得叫它 native，[`deferred.md`](deferred.md) D-3 也说「方向没有分歧，分歧只在时点」。**时点已被生产逼出来了**（下一段），剩下要用户定的只有一件：默认开还是默认关。
+**状态：合同已定并实现，默认关，显式 opt-in。** §6.2 已裁定这类变换必须另立显式、可选的 reshape 合同、不得叫它 native；2026-09-02 又在 Codex 因果假设被证伪后把默认值定为关。当前 `hook_fix_responses_sse.fix_stream_ids` 默认 `False`，`PassthroughFramer` 只在显式开启时调用 `stabilise_stream_ids`；本节不再有待用户裁的默认值。
 
 > ### ⚠️ 本节的触发理由已被证伪，条款本身仍然成立——两件事分开读
 >
@@ -427,7 +467,7 @@ Reason: Encrypted content item_id did not match the target item id.
 >
 > 所以 §6.6.4（统一 `response.id`）与本节全部 item id 处置，**对 Codex 的行为一概无影响**——重复输出另有成因，仍未查明（[`deferred.md`](deferred.md) **D-9**）。
 >
-> **本节为什么还留着**：它服务的是 D-3 登记的那个客户端——用户在 `config.example.yaml` 里亲笔点名的 `@ai-sdk/openai`，症状是校验失败抛异常而非重复渲染。那条需求独立成立，与 Codex 无关。**§6.6.6 的默认值随之改判为「关」**：默认开的唯一论据是「Codex 需要它」，论据没了，默认值不能活得比它久。
+> **本节为什么还留着**：它服务的是用户在 `config.example.yaml` 里亲笔点名的 `@ai-sdk/openai`，症状是校验失败抛异常而非重复渲染。那条需求独立成立，与 Codex 无关；原 deferred D-3 已由本节的现行合同接管。**§6.6.6 的默认值随之改判为「关」**：默认开的唯一论据是「Codex 需要它」，论据没了，默认值不能活得比它久。
 
 #### 6.6.1 触发它的观测
 
@@ -489,16 +529,13 @@ envelope 事件（`created`／`in_progress`／`completed`／`incomplete`／`fail
 
 **必须留下痕迹**：启用时至少记录本次响应改写了几个事件、以及被统一掉的 id 有几个不同值。理由与 §6.5.4 相同——一次静默的流改写正是本主题反复付过代价的形状。
 
-#### 6.6.6 待用户裁决：默认开还是默认关
+#### 6.6.6 默认关，显式开启
 
-**这是本节唯一悬空的事，其余都已由 §6.2 与本节裁定。**
+**当前裁定是默认关，2026-09-02 已定。** `@ai-sdk/openai` 是已具名的兼容需求，操作者可显式开启；Codex 不读取这些 id，不能支撑默认开启。默认关也与 §6.5 及 §2.7“兼容整形必须显式”的合同一致。
 
-- **默认关**（与 §6.5 一致，也与 §2.7「兼容整形必须显式」的字面最贴）：代价是用户的 Codex 在他自己打开之前一直是坏的，而这条腿上**目前已知的两类客户端（Codex、`@ai-sdk/openai`）都需要它**。
-- **默认开**：代价是「native 透传」这条对外承诺默认就被一层整形改写了，与 §2.1 的方向相悖；但可辩护之处在于——**它恢复的是这条腿在 `1fb37cd` 之前一直提供、且从未有人依赖过其反面的行为**，而 §2.7 那句「接线不得改变任何一条腿今天已生效的整形默认值」按其**意图**读，本来就指向「不要在接线中悄悄拿掉既有整形」。
+此前真正的分叉是：默认关保住 native 默认语义，但要求特定客户端显式索取；默认开恢复 `1fb37cd` 之前由自铸 id 无名提供的稳定行为，却让“native”默认经过 reshape。后者当时唯一新增的现实权重来自“Codex 也需要”，而该前提已由本节开头的源码探针证伪，所以分叉关闭，不再列作待裁。
 
 > **v11 写 §2.7 时把这条判错了。** 原文是「Responses 腿今天没有 `fix_stream_ids`，接线后也不会凭空多一个」——它只看了配置项存不存在，没看**行为**存不存在。稳定 id 那时是**默认生效的**，只是由自铸 id 顺带提供、没有名字。按 §2.7 自己那句「不得改变已生效的整形默认值」，接线其实**已经违反了它**，而当时无人察觉，因为那层整形没有名字可查。**这是「负空间读不出来」的一个实例**：一份只列出配置项的清单，看不见那些没有配置项的既有行为。
-
-**已定为「默认关」，2026-09-02。** 上面「默认开」那一侧的全部分量都压在「这条腿上已知的客户端都需要它」这句话上，而那句话里的 Codex 被证伪了（见本节开头的警示框），剩下的只有用户点名的 `@ai-sdk/openai` ——那是一个**特定客户端的兼容需求**，正是 §2.7 说必须显式索取的东西。**一个默认值不能活得比支撑它的论据更久。**
 
 > 「稳定 id 曾是无名的既有行为」这条负空间观察**本身没有被证伪**，仍然记在这里：`1fb37cd` 的接线确实悄悄拿掉了一层一直在生效的整形，而 §2.7 那句「接线不得改变已生效的整形默认值」当时看不见它，因为它没有名字。**那说明 §2.7 的检查方式有缺口**（只查配置项、查不到无名行为），但它不足以把这层整形推回默认开——**「它以前在」不等于「它应该在」**，尤其在唯一已知的受益者已经被证明不需要它之后。
 
@@ -540,28 +577,30 @@ envelope 事件（`created`／`in_progress`／`completed`／`incomplete`／`fail
 
 | §5 判出 | §7.2 |
 |---|---|
-| 首个原生事件**尚未**提交，replay 有预算、该失败可重试，**且重开已经成功**（§5.2 的 `OpenedAttempt`） | **不运行。** 旧 attempt 的 control、queue、ids、usage 全部丢弃且**一个字节都不提交**——包括已完成的 group |
-| 首个原生事件尚未提交，但 replay 不可用／被拒／预算耗尽 | 运行；末步的 carrier 由**下表的 final source** 决定，不由 commit 状态决定 |
-| 首个原生事件**已**提交 | 运行（§5 此时已禁止 whole-attempt replay） |
+| 首个原生事件**尚未**提交，replay ledger 批出 funded attempt、该失败可重试，**且重开已经成功**（§5.2 的 `OpenedAttempt`） | **不运行。** 旧 attempt 的 control、queue、ids、usage 全部丢弃且**一个字节都不提交**——包括已完成的 group |
+| 首个原生事件尚未提交，但 replay 不可用／被拒／预算耗尽／replacement 未建立 | 运行；已完成而尚未提交的 group 在步骤 2 进入 commit frontier，并作为普通 failure continuation 的进展事实。末步由 §5.3 的 `ContinuationDecision` 与 final source 共同决定，不由进入本节前的 commit 状态决定 |
+| 首个原生事件**已**提交 | 运行；§5 此时已禁止 whole-attempt replay，已交付完整单位可供普通 failure continuation 判断 |
+| `max_tokens`／`max_output_tokens` terminal | 运行；丢弃未完成单位后即使没有任何完整 group，§5.3 仍可选择 continuation |
 
 > **「且重开已经成功」这半句是 v7 补的，缺了它两格在时间上不互斥。** 第一格原本的三项谓词在**尝试重开之前**就全部可求值，而第二格把「被拒」也算进自己——那是**重开之后**才知道的事实。于是优雅关闭期间收到一个可重试的 `response.failed` 时，第一格先命中并销毁全部已完成 group，随后第二格命中并要求提交它们，同一场景两个相反答案，`full` 下差别是「整轮内容」对「一条 error」。这不是纸面推演：`retry.py:140` 在返回 `REPLAY` 时就已花掉预算，`stream.py:467-468` 之后才重开，`inference.py:410-415` 的 draining 检查还在 `_reopen` 内部——判定与「知道被拒」之间隔着一次完整往返。补上这半句，三格重新成为任一时刻都可判定的 partition。采纳上面 §5 的 draining 前移会消掉这里最尖锐的那个实例，但**替代不了**这半句：`AttemptFailed` 与本地前置拒绝的其余形态仍然落在同一个间隔里。来源：[`reports/260831-review-spec-round6.md`](reports/260831-review-spec-round6.md) round6-01。
 
-**末步发什么，由 final source 决定——这是一根与 commit 状态正交的轴。** v5 把第二格一律写成 proxy error，而那一格至少装着三种来源，其中两种手里有上游自己的终局：
+**末步发什么，由 `ContinuationDecision` 与 final source 共同决定——两者都与进入 §7.2 前的 commit 状态正交。** Final source 决定 declined 时保留哪个 carrier；requested 则由 §5.3 的具名例外接管原 ending：
 
-| final source | 末步 |
+| Final source／decision | 末步 |
 |---|---|
-| 上游 `response.completed`／`response.incomplete` 到达 | **逐字提交它**（§6.3）。这一格里根本没有 replay 的必要 |
-| 上游 `response.cancelled`，或不可重试 code 的 `failed`／`error` | **逐字提交它**（§5.1）。它是真实存在的上游终局 |
-| 可重试的 `response.failed` 但预算耗尽 | **逐字提交它**。预算耗尽改变的是「能不能再试」，不改变「上游说了什么」 |
-| 上游终局**存在**，但它所属的 attempt 已被 replay 判定作废（§5.2 的 `ReopenRefused`／`AttemptFailed`） | 按 §8 写 error，origin 依 §5.2（`ReopenRefused` 为 proxy，`AttemptFailed` 为 upstream）。**不得**回头逐字重放那份已作废的终局——§5 规定 replay 时丢弃旧 attempt 的 terminal／ids／usage，重放它等于交付一份本代理自己判定作废的记录 |
-| 没有任何上游终局（tear、EOF、proxy refusal、cap、deadline） | 写 proxy error（§8） |
+| §5.3 的 `ContinuationDecision` 为 requested | `EMIT_CONTINUATION`：步骤 2 已提交所有可保留完整 group，随后写 synthetic call 与唯一 proxy-owned terminal；原上游 terminal／failure 不出门。Max-token 特例允许步骤 2 没有 group |
+| 上游 `response.completed`／`response.incomplete` 到达，decision 为 declined | `EMIT_UPSTREAM_ENDING`：**逐字提交它**（§6.3） |
+| 上游 `response.cancelled`，或不可重试 code 的 `failed`／`error` | `EMIT_UPSTREAM_ENDING`：**逐字提交它**（§5.1）；它是真实存在的上游终局且 taxonomy 不请求 continuation |
+| 可重试的 `response.failed` 但 replay budget 耗尽，decision 为 declined | `EMIT_UPSTREAM_ENDING`：**逐字提交它**。Replay budget 耗尽只改变“能不能再开一个透明 attempt”，不自动拒绝或批准 continuation；decline 后仍保留上游说过的话 |
+| 上游终局**存在**，但它所属的 attempt 已被 replay 判定作废（§5.2 的 `ReopenRefused`／`AttemptFailed`），decision 为 declined | `EMIT_PROXY_FAILURE`：按 §8 写 error，origin 依 §5.2（`ReopenRefused` 为 proxy，`AttemptFailed` 为 upstream）。**不得**回头逐字重放那份已作废的终局——§5 规定 replay 时丢弃旧 attempt 的 terminal／ids／usage，重放它等于交付一份本代理自己判定作废的记录 |
+| 没有任何上游终局（tear、EOF、proxy refusal、cap、deadline），decision 为 declined | 有可写通道时 `EMIT_PROXY_FAILURE`（§8），没有时 `NO_WRITE` |
 
 **裁定：`full` 的「response 结束」指任意**最终**ending，不限于上游 terminal。** 最终 ending 到达时，一律按同一顺序收口：
 
 1. 丢弃未闭合 item 的 suffix（§3）
 2. 按**原序**提交 control 与所有已完成的安全 group
 3. **无法归属的事件**（§4）：**收口时刻没有任何已打开而未闭合的 item** 时，与上一步一并按原序逐字提交；**存在**未闭合 item 时，与未闭合尾巴一同丢弃
-4. 提交上游 terminal／failure（若有），否则提交 proxy error（§8）
+4. 执行上表唯一 final action：requested 时提交 synthetic continuation call 与唯一 proxy-owned terminal；declined 时提交相应上游 terminal／failure 或 proxy error；无写通道时 `NO_WRITE`
 
 > **这一步存在的理由**：这类事件不是某个未闭合 item 的 suffix（它不属于任何已知 item），也不属于任何已完成 group，v8 之前的三步收口把它整个漏在了外面——而骨架的 docstring 已经替本规格裁定为丢弃。**丢弃恰好是与 §2.1 张力最大的那个答案**：用户裁的是「不得以本代理不认识为由拒绝一个协议允许的直连 item」，而静默丢掉一个协议合法、承载模型输出的事件，理由正是「本代理判不出它属于谁」。
 >
@@ -584,20 +623,23 @@ envelope 事件（`created`／`in_progress`／`completed`／`incomplete`／`fail
 | 最终 ending | `block` | `until-tool-use`（未触发） | `full` |
 |---|---|---|---|
 | **partition 第一格命中**（仍可 funded replay，**且重开已经成功**）的 tear／EOF | **不收口**，整次 attempt 无提交丢弃 | 同左 | 同左 |
-| 上游 terminal／failure | 已逐前缀提交 | 按上表收口 | 按上表收口 |
-| cap／deadline／预算耗尽 EOF／不可重试 tear | 已提交部分保留，写 error | 按上表收口，末步写 error | 按上表收口，末步写 error |
+| 上游 successful／incomplete terminal 或 native failure | 已逐安全前缀提交；terminal 仍等 §5.3 final action | 按上表收口，再执行唯一 final action | 按上表收口，再执行唯一 final action |
+| Replay budget 耗尽的 EOF、可继续 tear／failure | 已交付完整单位时可 `EMIT_CONTINUATION`，否则按 final source 发 failure／error | 先提交持有的完整 group；其存在满足普通 failure continuation 的进展前提，再执行 requested／declined 对应 action | 同左 |
+| Cap、client deadline、不可继续 tear／failure | 已提交部分保留，按 final source 发 failure／proxy error | 按上表收口，末步发 failure／proxy error | 同左 |
+| `max_tokens`／`max_output_tokens` terminal | 丢未完成单位；即使无完整 group 也可 `EMIT_CONTINUATION` | 同左，先提交存在的完整 group | 同左 |
 | 客户端取消／下游写失败 | — | **例外：无可写通道，不收口** | **例外：无可写通道，不收口** |
 
-**取「先提交已完成内容再写 error」而不是「全丢」**，因为那些 group 在语义上已经完整——它们是模型已经生成完的工具调用或文本，丢掉它们并不比交付它们更诚实，而「直到 response 结束才交付」这条承诺仍然成立。
+**取“先提交已完成内容再执行 final action”而不是“全丢”**，因为那些 group 在语义上已经完整——它们是模型已经生成完的工具调用或文本，丢掉它们并不比交付它们更诚实，而“直到 response 结束才交付”这条承诺仍然成立。Final action 可能是 continuation、上游 failure 或 proxy error；不能把它预写死成 error。
 
 **不得**沿用现有 `stream.py` 各 ending 的现状作为答案：那里的 exception／client-deadline 分支不 flush 缓冲块，clean EOF 分支却先 `session.finish()`，抄任何一条都会让输出取决于失败**以何种形式**到达，而不是取决于 policy。
 
 ## 8. 失败、截断与容量
 
-- **上游终局失败事件**（`response.failed` / `response.cancelled` / `error`）：若最终可见则**逐字**重放。
-- **代理侧错误**（cap 超限、客户端 deadline、预算耗尽而无上游终局）：按 `error-envelope/spec.md` 写 Responses `event: error`，**不得**合成成功 terminal。**续写按 §2.8 以本腿自己的方言提供**（用户 2026-09-01 裁决：块级交付在直连与翻译两条路上都必须原生支持，续写是它的一部分）；在那项工作落地之前本腿没有续写通道，代理侧错误直接写 error frame。此前这里写的是「不得咨询只适用于 Anthropic 客户端的机制」，那句话把一个**尚未实现**的限制写成了一条规范。**客户端取消与下游写失败除外**——那两种情形没有可写通道，§7.2 已把它们列为不收口的例外，写 error 是写给一个已经不在的读者。
-- **`status: "incomplete"` 的 item**：**必须**照常交付，**不得**套用翻译腿的 `cut_short` / hand-over 政策——`hand_back_block()` 对非 Anthropic inbound 返回 `None`，那套政策在本腿上只会让最后一个 item 消失。
-- **无终局 EOF**：本腿不得伪造成功终局（§6.3 禁止推导）。按 §5 判断：首个原生事件提交前可 replay；提交后写 `event: error` 并保留已交付前缀。
+- **上游终局失败事件**（`response.failed` / `response.cancelled` / `error`）：先进入 §5.3 的 native failure 动作矩阵；只有最终动作是“保持原 failure carrier”时才逐字重放。可 replay 的 attempt 不泄漏旧 failure；已保留完整单位且可 continuation 的 failure 被原生 continuation call 与唯一终局取代。
+- **代理侧保护与时限**（cap 超限、客户端 deadline）：按用户亲笔合同不可继续，不进入 continuation；有可写通道时按 `error-envelope/spec.md` 写客户端方言的 proxy error，没有时 `NO_WRITE`。**客户端取消与下游写失败除外**——那两种情形没有可写通道，§7.2 已把它们列为不收口的例外，写 error 是写给一个已经不在的读者。
+- **Replay budget 耗尽、replacement 未建立或无终局 EOF／tear**：replay ledger 只决定不能再透明开 attempt，不决定 continuation。当前方言满足 §2.6 applicability、failure 可继续且已经交付或持有至少一个完整单位时，§5.3 可选择 continuation；否则按 final source 写上游 failure 或 proxy error。用户 2026-09-01 已裁定 continuation 是直连与翻译的块级交付路径都要原生支持的功能，尚未实现不构成规范豁免。
+- **`status: "incomplete"` 的 output item**：只要其 delivery unit 已完整闭合就照常保留，不因 item 自己的 status 套用翻译腿 `cut_short` 判据；continuation 的触发读 response-level terminal／failure 与共同 eligibility，不能靠丢掉最后一个完整 item 实现。Responses response-level `status == "incomplete"` 的 finalization 归 §5.3／§9.2。
+- **无终局 EOF**：本腿不得从空白推导一个上游成功 terminal。按 §5 先尝试合法 replay；replay 不发生时按上一条与 §5.3 在 `EMIT_CONTINUATION`／`EMIT_PROXY_FAILURE`／`NO_WRITE` 中选择，已交付或收口时提交的完整前缀保留。
 - **memory cap**：`buffer_cap_bytes` 的用户注释是**双语的**，两半给出的读法不同：英文半句是「max bytes to buffer before abandoning this response」，中文半句是「累计缓冲超此字节即放弃该响应」——后者可以读成随时间累加。**本规格取「当前持有」这一读**（§2.3 推导，不是用户的定义本身；v8 之前只引了支持结论的英文那半句，属转述丢掉了限定成分）。理由：它与 `BufferCapExceeded` 自述的「guard bounds memory」、与「abandoning this response」的语气一致，而且它是两种读法里**唯一能让 `full` policy 有意义**的那个——按累计读法，`full` 与 `block` 的 cap 行为将没有区别。若用户裁定取累计读法，本节与 §7.2 的 `full` 行为都要重估。因此**限制的是本代理当前持有的字节，不是累计交付量**。本腿计入：尚未 `done` 的原始事件队列、已完成但被 policy 扣住的事件组、control events、以及同时保留的预渲染副本。释放、replay reset、failure、cancel 后按实际持有退还计量——**replay reset 的时点是「重开成功」而非「判定可 replay」**（§5），因为旧队列要保留到新流到手。这一项本身不产生错误行为（保留期内新 attempt 还没开始产字节，峰值不会超过旧 attempt 已有的持有量），但两种读法会让计数器差一个窗口，属「缺席读不出来」的同族。
 
 ## 9. 非流式（仅成功响应）
@@ -658,11 +700,26 @@ envelope 事件（`created`／`in_progress`／`completed`／`incomplete`／`fail
 
 **当前实现均未转发任何上游语义头**（非流式只构造 `JSONResponse(payload, status_code=...)`，流式只构造 `_AccountedStreamingResponse(..., media_type="text/event-stream")`），所以本条是新增行为，需要各自的测试。
 
+### 9.2 Non-stream continuation 的 whole-body finalization
+
+Non-stream 与 streaming 消费 §5.3 的**同一份 continuation intent**，不得在 `inference.py` 的 whole-body 分支另写一套 eligibility、category、message 或 `num_messages` 判定。Whole-body driver 拥有 body finalization：先从上游 body 识别 terminal outcome 与已完整 materialize 的 content／output units，再决定原 body 原样按 JSON value 返回、投影 continuation body，还是保持 failure carrier。
+
+| 方言 | continuation 触发的 terminal 事实 | body 投影 |
+|---|---|---|
+| `anthropic-messages` | `stop_reason == "max_tokens"`，并满足 §5.3 除“已有完整单位”外的 applicability／配置／可写通道条件 | 已有的完整 `content` blocks 按 JSON value 保留并追加一个 synthetic `tool_use` block；没有完整 block 时该 synthetic call 是唯一 content。其 id 使用 intent call id，input 来自同一 intent；最终 `stop_reason == "tool_use"`，message id、model 与上游 usage 保留，代理合成 block 不伪计为模型 token |
+| `openai-responses` | response `status == "incomplete"` 且 `incomplete_details.reason == "max_output_tokens"`，并满足 §5.3 除“已有完整单位”外的 applicability／配置／可写通道条件 | 已有的完整 `output` items 按 JSON value 保留并在数组末尾追加一个 synthetic `function_call` item；没有完整 item 时该 synthetic call 是唯一 output。Call id 使用 intent 值，item id 由 writer 新建并与该 item 自洽，item 的位置由追加后的数组索引表达——non-stream item 本身不增加 event-level `output_index` 字段；最终 `status == "completed"`，`incomplete_details` 清空，response id、model 与上游 usage 保留，代理合成 item 不伪计为模型 token |
+
+不生成 intent 时，合法成功 body 继续按 §9 的 JSON value 保真返回；上游非流式错误 body 继续归 error-envelope，不能为了 continuation 先 parse 再重新序列化。已保留单位与 synthetic call 的顺序必须与 streaming 投影相同：先全部上游完整单位，再恰好一个 continuation call；不存在原 terminal 与 synthetic terminal 同时留在一个 body 的形态。
+
+真实 route 验收必须分别从 Anthropic 与 Responses non-stream 入口触发这两行，不能只直接构造 body helper。还要做 semantic 对照：相同 ending 的 streaming 与 non-stream、translated 与 direct 产出的 intent 字段逐项相等；方言 writer 的 body／event 字段不同不构成 intent 差异。
+
 ## 10. 可观测合同
 
 **wire 的 source of truth 永远是上游原生事件与原生 terminal；可观测事实从旁路派生，不得反向改写 wire。**
 
 本腿**至少**要记录：原生 output item 计数、需要客户端行动的 tool 名称／类型（§7.1）、reasoning 是否出现、权威 terminal status 与 usage、failure／截断／replay 的来源。无法分类时**必须**明确记为 unknown，**不得**伪装成 absent——`Terminal` 的 `stop_reason` 空默认值就是为这个区分而设的。
+
+每种 native dialect 必须从原生 item／content block 产出 typed side facts，并与翻译腿汇入同一个摘要所有者；不得因 wire 不再 materialize `CompletedBlock` 就只增加 block 计数而放弃 reasoning、tool 或 client-action 分类。Side facts 只进入 observability，不得反向改写 native wire。Ground truth 的角色要分开：两份现有 cassette 已实证 Responses translating／native 的 reasoning parity 反例；tool 分类缺口目前由 production control flow 证明，只有在存在相符录制时才能把它写成上游样本观测。对同一录制输入的 translating／native 摘要应逐项相等，未知 item fact 记 unknown 而不是 absent。
 
 权威 terminal status 与「后续是否仍需客户端行动」是两个可以同时为真的事实，必须占两个槽，不能把后者折进前者，也不能拿前者覆盖后者。本轮实现范围是原生 Responses **流式**直连路径：它从 `response.output_item.*` 与 `response.completed` 事件建立旁路事实；非流式 direct `/responses` 仍属 [`../tui/deferred.md`](../tui/deferred.md) 第 0 条的 whole-body reader 缺口，本轮不把它写成已覆盖。
 
@@ -709,6 +766,7 @@ v4 把更早挂在这里的产品分叉全部移入正文定案：header 合同 
 
 | 日期 | 条款 | 变化 | 触发 |
 |---|---|---|---|
+| 2026-09-04 | 文首、§2.5、§2.6、§2.8、§5、§5.3、§6.3、§6.6、§7.2、§8、§9.2、§10 | **v22。** 把用户 2026-09-01 已裁的“直连与翻译块级交付路径原生 continuation”闭成可实施合同，并纠正本规格自行扩写的“每条直连腿”：当前 applicability 是能识别完整生成单位且能表达 executable synthetic call 的 Anthropic Messages 与 OpenAI Responses；Chat Completions 块级解析仍按既有裁决推迟，Embeddings 不适用。翻译／直连与 streaming／non-streaming 共用 `ContinuationDecision`，requested 才携带格式无关 intent；continuation 无次数预算，replay ledger 只决定 `REPLAY`。普通 failure 需要已交付或 held-and-about-to-commit 的完整单位，max-token 即使零完整单位也可 continuation；§7.2 为 `full`／未触发 `until-tool-use` 的 held group 补齐 final action。两种方言各自投影 synthetic call 与唯一终局；native failure 由 commit frontier、方言 taxonomy、replay ledger 与 decision 分为 replay／continuation／upstream ending／proxy failure／no-write；whole-body 两种方言分别定义 trigger 与 body 字段；native side facts 补齐 reasoning／tool／client-action 的共同摘要入口。当前 `signature_delta` reshape、D-6 failure adapter、D-7 message count 与 side facts 都进入 selector 启用及 D-5 对外完成边界，实施可按独立 semantic commits 拆分。两轮处置复核另修正：§6.3 的 upstream-native terminal 原样承诺只适用于 `EMIT_UPSTREAM_ENDING`，`EMIT_CONTINUATION` 是具名 synthetic-terminal 例外；non-stream Responses item 的位置由 `output` 数组索引表达，不写 event-level `output_index`；§2.5 的方言无关全称、§5 的“本腿无 continuation”及 §6.6 已定默认关却仍标待裁的 current-state 漂移一并更正 | [`reports/260903-next-root-fix-backlog-analysis.md`](reports/260903-next-root-fix-backlog-analysis.md)；[`reports/260903-next-root-fix-analysis-review-general-opus.md`](reports/260903-next-root-fix-analysis-review-general-opus.md)；[`reports/260903-next-root-fix-analysis-review-disposition.md`](reports/260903-next-root-fix-analysis-review-disposition.md)；[`../git-housekeeping/reports/260904-dotdev-dirty-inventory-disposition-recheck.md`](../git-housekeeping/reports/260904-dotdev-dirty-inventory-disposition-recheck.md)；[`../git-housekeeping/reports/260904-dotdev-merge-review-gpt-opus.md`](../git-housekeeping/reports/260904-dotdev-merge-review-gpt-opus.md) |
 | 2026-09-04 | §7.1、§10 | **v21。** `bb5783f` 实现 v20 合同：三态 classifier 与 policy bool 投影分开；Responses passthrough 只在 `response.completed` 从 terminal `response.output` 采集 status、ordered typed actions 与 snapshot completeness；三项事实经 RequestTrace 与 RequestLine 持久化并由独立 renderer 组合判读。`response.incomplete`、translated 与 nonstream 均保持 legacy 行为。实现评审修复 present-empty `{}` 被 batch truthiness 跳过的边界，终评 0 blocker、0 major；最终 Ruff clean、Pyright 0、full regression 2213 passed、2 skipped、coverage 91.29% | `bb5783f`；[`reports/260904-completed-client-actions-implementation-review-disposition.md`](reports/260904-completed-client-actions-implementation-review-disposition.md) |
 | 2026-09-03 | §7.1、§10 | **v20。** Responses 流式直连的权威 `terminal_status` 与 typed `client_actions` 分槽；action requirement 从 policy bool 拆为 `required`、`not_required`、`unknown` 三态，policy 只读其布尔投影；最终摘要以 terminal `output` 为 authority，并以 `client_action_classification_complete` 区分空 actions 与尚未分类完备。`completed` 仅在集合分类完备且无客户端行动时可绿；action 按 terminal output position 排序并保留重复、无名与 unknown。非流式 reader 仍留在 TUI deferred 第 0 条 | 用户主动指出 `completed + function_call/custom_tool_call` 不代表工作结束，并选择 terminal status 与 client-action facts 分槽；三态、terminal `output` authority、集合完备、顺序、重复、无名、unknown 与 streaming 定义域的精确化为本规格推导，来源是 §4、§7.1、§10 及 2026-09-03 独立评审 |
 | 2026-09-01 | §6.5.1、§6.5.2、§6.5.3、§6.5.5 | **v19。** §6.5 落地后的独立评审，3 major／5 minor，**全部采纳，无驳回**。(a) **§6.5.3 的定义域此前只写在纸上**：实现只查了 `target_format`，并用「翻译后的 body 没有 Responses `input` 数组」当省略另两道门的理由——该理由被 `to_openai_responses()` 源码与执行探针共同证伪（它无条件建 `input`，`_reasoning_item()` 还能往里放 sealed item）；**今天没出事只是因为当前 translator 不往那个 item 上写 id**，即定义域是被一个巧合实现的。三道门现已逐字落地并各有反例测试；(b) **§6.5.1 的判据宽于本代理能铸出的集合**：只写「小写十六进制 `8-4-4-12`」会放行 version-1 UUID 与前导零序号（评审实际构造并观察到被误删），而放宽正是「窄形态」裁决要防的那一侧；现补齐 version／variant／无前导零，并更正原文漏写的一组（应为 `8-4-4-4-12`）；(c) §6.5.5 的「计数长期为零即提出退役」**没有 oracle**——日志缺席同时兼容四种情形，且无时间窗、无触发者；改为一个不需要新机制的可判定条件（操作者关掉它、受影响会话不再出现绑定失败的 400）；(d) §6.5.2 的「正确 id 只存在于密文里」是无据的位置声称，改为「本代理没保留、也无法重建」；「任意不匹配 id 一律 400」改为「三个各试一次全部 400，全称是强推断非穷举」 | [`reports/260901-review-issue4-repair-impl.md`](reports/260901-review-issue4-repair-impl.md) |
@@ -716,7 +774,7 @@ v4 把更早挂在这里的产品分叉全部移入正文定案：header 合同 
 | 2026-09-01 | §6.2、§6.4、§11 | **v17。** 独立评审 5 major／2 minor，全部采纳。(a) **O-2 此前被停在 `deferred.md` D-8**，而那份台账开头逐字写着「需要用户裁决的产品分叉登记在 Spec §11，不在这里」——这是本项目「Spec 级事实不得停在待办账本」规则的直接违背，条目已移入 §11 并删去 D-8；(b) O-2 原来的主论据「缺陷自清」两处错（旧构建仍在跑、仍在制造污染；不再新增≠自行清空），已改写并降低建议置信；(c) §6.4 的回归测试此前只覆盖响应半程，请求半程（正是 400 被抛出的方向）只有论证没有测试，现已补齐并登记；(d) 响应侧夹具此前两处拼同一个 id，对「把上游漂移的两个 id 合并成一个」这第二种破法恒等、会静默变绿，已改用 cassette 的真实漂移；(e) 归因的措辞限定（两句 400 是否同一分支未闭合）补进 §6.2、文首与测试 docstring；(f) 两处全称过头（「本轮任何观测都看不出」「没有哪个上游会这么拼」）改为有证据支持的限定 | [`reports/260901-review-issue4-artifacts.md`](reports/260901-review-issue4-artifacts.md) |
 | 2026-09-01 | §6.2、§6.4 | **v16。** GitHub issue #4：一条本来在用的 Responses 会话下一轮起持续 400 `invalid_request_body`。§6.2 此前把「不得重新 mint id」的代价全部记在客户端一侧（谁校验连续性），读起来是一次可权衡的取舍；实测证明对封了 `encrypted_content` 的 reasoning item 它是硬性正确性缺陷——**密文与签发时的 item id 绑定，上游回传时校验该绑定**，而 `_item_id()` 自铸的 id 必然对不上。§6.4 的「原样交还」随之补全为「`id` 与 `encrypted_content` 整对原样」，并登记已落地的回归测试与其变异校验。**该缺陷已由 `1fb37cd` 的 native 接线消除（它不铸 id），但已污染的客户端历史不会自愈**，作为产品分叉登记为 §11 的 O-2。归因带一条限定：原始那次 400 的措辞与重放时不同，「两句出自同一校验分支」未闭合（§6.2） | GitHub issue #4；[`reports/260901-issue4-passthrough-400-trace.md`](reports/260901-issue4-passthrough-400-trace.md)；[`reports/260901-review-issue4-artifacts.md`](reports/260901-review-issue4-artifacts.md) |
 | 2026-08-30 | 全文 | 初稿 | GitHub issue #1／#2；用户裁决；方案评审的 blocker-01 |
-| 2026-09-01 | §2.1、§2.8、§8 | **v15。** 用户两条裁决。**其一，命名**：这个功能叫 `continuation` 不叫 `hand-over`——后者是本规格与实现自造的词，而用户亲笔文档从头到尾叫「续写」，代码里的 `ContinuationSupport` 也早就是这个名字；改名要绕开 `lifecycle` 里同名但无关的 systemd 监听器交接。**其二，射程**：续写必须在每条直连腿上原生可用，因为块级交付在直连与翻译两条路上都必须全面支持——这推翻了 v12 把「native 腿不提供续写」列为候选的处置。**关键背景是这不是改主意**：用户文档的续写一节从一开始就写了 `tool_use` / `function_call` 两种形状、`messages` / `input` 两个字段，末尾那句「暂不」明写「未来我有需要后再补全」，所以待建的是一份已被指定、只实现了一半的合同。顺带照出 `client_message_count` 只读 `messages`、Responses 请求会得 0，而那个数正是循环检测器的输入（D-7） | 用户 2026-09-01 裁决 |
+| 2026-09-01 | §2.1、§2.8、§8 | **v15。** 用户两条裁决。**其一，命名**：这个功能叫 `continuation` 不叫 `hand-over`——后者是本规格与实现自造的词，而用户亲笔文档从头到尾叫「续写」，代码里的 `ContinuationSupport` 也早就是这个名字；改名要绕开 `lifecycle` 里同名但无关的 systemd 监听器交接。**其二，射程**：用户原话要求该功能在直连路径正确可用，因为块级交付在直连与翻译两条路上都必须全面、原生支持；这推翻了 v12 把“native 腿不提供续写”列为候选的处置。**本规格当时把它扩写成“每条直连腿”，该全称不是用户原话，v22 已按既有 Chat Completions 块级解析推迟与 Embeddings 非生成属性纠正为当前两种 applicable 生成方言。**关键背景是这不是改主意：用户文档的续写一节从一开始就写了 `tool_use`／`function_call` 两种形状、`messages`／`input` 两个字段，末尾那句“暂不”明写“未来我有需要后再补全”，所以 Responses／Anthropic 待建的是一份已被指定、只实现了一半的合同。顺带照出 `client_message_count` 只读 `messages`、Responses 请求会得 0，而那个数正是循环检测器的输入（D-7） | 用户 2026-09-01 裁决；v22 对本规格过宽转述的更正 |
 | 2026-09-01 | §2.5、§2.6、§2.8 | **v14。** (a) §2.5 那句「§5～§10 里句子里没有一个 Responses 专有的事实」是**全称否定，被六个反例证伪**，最重的一处是 §5.2 的归一化表——它的四个输入全是 `ResponseError.code` 的取值，而 Anthropic 的错误事件根本没有 `code` 字段；那是本规格里唯一规定了「怎么算 replay 是否合法」的地方，而那个算法只对一种方言存在。改为分开陈述「机制与方言无关／取值只写了一种方言」，缺失的 Anthropic 映射表登记为 [`deferred.md`](deferred.md) D-6。**这句被证伪的断言正是 v10 放宽定义域时唯一用来说明代价可控的论据**，论据不成立即代价没有被算过；(b) §2.6 的 Chat Completions 行只回答了 §2.1，而定义域放宽后 §5／§8／§10 按字面也落在那条腿上，`one_shot_delivery` 的 docstring 逐字否掉其中三条——写下「哪些条款在那条腿上今天不成立」而不是留白；(c) §2.8 的理由两处不准：顺序问题**不限于 `block`**，且更硬的阻断是类型而非顺序（`_hand_over` 把 `CompletedBlock` 交给只认 `RawEventBatch` 的 `block()`），因此 D-5 的候选 1 单独不解决问题，「缺的只是打开开关」也不成立 | [`reports/260831-review-spec-round9.md`](reports/260831-review-spec-round9.md) round9-02／07／12 |
 | 2026-08-31 | 文首、§2.5、§2.6、§9.1、§12 | **v13。** (a) §2.5 的词汇表只列了六行，而 `Dialect` 实现有八个字段——漏掉的 `read_failure` 与 `reply_dialect` 都不是装饰，后者决定完成行按哪把尺子判读（两方言的字节阈值差一个数量级，实现里漏传这个参数就让 Responses 回复按 Anthropic 的尺子染色）；(b) **该表的 Anthropic control 集漏了 `message_stop`**，而同表下一行说 terminal 集是 control 集的子集——照表实施，每条 Anthropic 直连响应的终局事件都会被判为「无法归属」并永久持有，即挂死；实现是对的，不一致的那一侧是本规格；(c) §9.1 仍写着「本规格还要求两端同为 `openai-responses`」并据此称 error-envelope 的定义域是超集——那是 v10 放宽定义域时漏改的窄读，两者现在完全相同；(d) §2.7 与 §2.8 的物理顺序与编号相反；(e) §12 缺 v11／v12／v13 三行，文首停在 v10 | [`reports/260831-review-spec-round9.md`](reports/260831-review-spec-round9.md)：blocker 1、major 5、minor 6、nit 4；round8 十三条全部 closed |
 | 2026-08-31 | §2.8、§2.6 | **v12。** §8 的「本腿不咨询 hand-over」原来只对 Responses 腿成立——那条腿的客户端执行不了 Anthropic 的合成块。**Anthropic 直连腿上 hand-over 今天就放行**（按 inbound 格式门控），而 native 交付已经把上游终局随批次发出，合成块的插入位置已经过去。因此该腿暂不接线，形态待裁（`deferred.md` D-5） | 接线时实撞 |

@@ -32,27 +32,13 @@
 
 **出处**：[`reports/260830-known-set-divergence.md`](reports/260830-known-set-divergence.md)。当时的处置是「转入设计」，设计尚未落地。
 
-## D-3　本腿启用透传即撤掉稳定 item id，对已具名的一类客户端是回归
-
-**状态**：产品分叉，等裁决。**登记本身不需要用户点头，怎么裁需要。**
-
-**事实**：今天直连 Responses 腿由 `ResponsesFramer` 成帧，`_item_id()` 用 `f"{prefix}_{response_id}_{output_index}"` 生成 id，同一个 item 的 `added` 与 `done` 走同一个 `output_index`，**所以客户端今天拿到的 id 是连续的**。本腿改 native 之后，客户端拿到的是上游那份实测 12/12、16/16、125/125 全不相同的 id（[spec.md](spec.md) §6.2）。
-
-**为什么这是回归而不只是「行为变化」**：用户在 `docs/.human-controlled/config.example.yaml` 的 `hook_fix_responses_sse` 段具名写着「`@ai-sdk/openai` 校验 ID 连续性需要」。所以已知**至少有一类客户端**今天在这条腿上能跑、透传落地后会被它自己的校验拒掉。
-
-**分叉**：是否在启用透传的**同一刀**里提供 opt-in 的 `fix_stream_ids`（默认关），还是先落 native、把兼容开关留作后续。[spec.md](spec.md) §6.2 已裁定这类变换必须另立显式、可选的 reshape 合同、不得叫它 native——**方向没有分歧，分歧只在时点**。
-
-**未核**：`@ai-sdk/openai` 具体在哪个版本、以何种方式校验连续性。本项目没有它的源码，采纳的是用户的陈述。
-
-**出处**：[`reports/260831-review-spec-round8.md`](reports/260831-review-spec-round8.md) round8-02。
-
 ## D-4　Anthropic 直连腿的 thinking signature 整形默认开着，走 native 会拿掉它
 
-**状态**：产品分叉，等裁决。**比 D-3 严重，因为它默认生效、且落在主路径上。**
+**状态**：产品分叉，等裁决。**比已由 Spec §6.6 闭合的 Responses id reshape 更严重，因为它默认生效、且落在 Claude 模型的关键可达 route 上。**
 
 **事实**：`hook_fix_anthropic_sse.thinking.content_block_start_compat` 的默认值是 `"signature_delta"`（`src/app/config/schema.py`），`framer_for` 把它交给 `AnthropicFramer`，于是**今天每一条 Anthropic 腿都在做这个整形**——把嵌在 `content_block_start` 里的 thinking signature 抽成单独的 `signature_delta` 事件。纯透传按构造不做任何整形，接线后它就没了。
 
-**为什么落在主路径上**：`sync-refs/sxwxs-ghc-api/260822-round2-disposition.md` 记着实测，`claude-sonnet-5` 不支持 Responses API（`unsupported_api_for_model`），**Claude 系模型只能走直连**。所以这不是某条边角腿的行为变化。
+**为什么射程重要**：`sync-refs/sxwxs-ghc-api/260822-round2-disposition.md` 记着实测，`claude-sonnet-5` 不支持 Responses API（`unsupported_api_for_model`），该模型只能走直连。所以这不是某条边角腿的行为变化；但项目定义的 primary product path 仍是 Anthropic Messages inbound → OpenAI Responses upstream，不把两者混称。
 
 **用户已经表过态，但表的是倾向不是裁决**：`docs/.human-controlled/message-format-reshape.md`「改写上游 Anthropic Messages 输出」一节逐字写着「曾经用 `hook_fix_anthropic_sse.thinking.content_block_start_compat` 配置控制生效，现在我认为（如果客户端真的不支持）这是应该常驻的」，并挂着两个 TODO：确认 Claude 新版是否接受嵌入形式，以及了解 copilot-api-js 原项目怎么处理。**倾向是「常驻」，方向与「拿掉」相反。**
 
@@ -62,12 +48,12 @@
 
 **未核**：Claude 新版是否真的不接受嵌入 signature 的形式——这正是用户自己挂的第一个 TODO。整形是否仍然必要取决于它。
 
-**出处**：本轮扩大定义域时发现（[spec.md](spec.md) §2.7）；与 D-3 是同一形状的两例。
+**出处**：本轮扩大定义域时发现（[spec.md](spec.md) §2.7）；与已由 Spec §6.6 闭合的 Responses id reshape 是同一形状的两例。
 
 
-## D-5　让续写在直连腿上原生可用——Anthropic 直连腿的接线等它
+## D-5　让 continuation 在当前两种 block-aware 直连生成方言上原生可用——Anthropic 直连腿的接线等它
 
-**状态**：**已裁，待做**。用户 2026-09-01：「该功能理应在直连路径上正确可用，因为块级交付是直连、翻译都必须全面、原生支持的」。这条否掉了下面的候选 3，并把候选 2 定为要做的事。此前这里写的是「需用户裁形态」——现在形态也裁完了，剩下的是工作。
+**状态**：**已裁，已进入 [`plan.md`](plan.md) §11，待做**。用户 2026-09-01：「该功能理应在直连路径上正确可用，因为块级交付是直连、翻译都必须全面、原生支持的」。这条否掉了下面的候选 3，并把候选 2 定为要做的事。此前这里写的是「需用户裁形态」——现在形态也裁完了，Spec v22 已闭合共同 intent、streaming／whole-body finalization 与 native failure 动作矩阵，剩下的是实施。
 
 **事实**：`max_tokens` 的 hand-over 是 2026-08-21 的用户裁决（「总是 hand over」），`hand_back_block()` 开头那句 `wire_format is not WireFormat.ANTHROPIC_MESSAGES` 按 inbound 格式门控，**Anthropic 直连腿今天就放行**。它合成一个 `tool_use` 块交给客户端继续，而那个块必须落在终局**之前**才是一份合法回复。
 
@@ -77,7 +63,7 @@
 
 **类型，这一层更硬。** `_hand_over` 把合成的 `CompletedBlock` 交给 `framer.block()`，而透传 framer 只认 `RawEventBatch`（它调 `batch.encode()`）。**即使顺序解决了，那条路径仍是一次 200 之后的 `AttributeError` 撕流。**
 
-**为什么这挡住接线而不是被绕过**：[spec.md](spec.md) §2.7 裁定接线不得改变任何一条腿今天已生效的行为，而这条腿是 Claude 系模型唯一的路（`claude-sonnet-5` 不支持 Responses API）。关掉 hand-over 就是回归主路径。
+**为什么这挡住接线而不是被绕过**：[spec.md](spec.md) §2.7 裁定接线不得改变任何一条腿今天已生效的行为，而这条腿是 `claude-sonnet-5` 的唯一可达 route（它不支持 Responses API）。关掉 continuation 就是该关键 route 的行为回归。
 
 **三个候选，用户 2026-09-01 已裁：走第二个。**候选 3 被明确否掉，因为它与「块级交付两条路都必须原生支持」相反。
 
@@ -85,14 +71,16 @@
 2. **合成块以该方言的原生事件表达并接在终局之前**——`AnthropicFramer` 本来就会写这套事件，透传 framer 的 `error` 与 `keepalive` 正是这么委托的，机制现成；要解决的是「终局已发出」，可能需要把终局的释放与 hand-over 判定合并成一个决策点。**代价最小，且与既有委托模式一致。**
 3. ~~**裁定 native 腿不提供续写**~~——**用户已否**。它与 §2.7 冲突，也与「块级交付必须在两条路上全面支持」相反。
 
-**Responses 直连腿不受此条阻挡**：§8 的原判据在那条腿上成立（客户端执行不了 Anthropic 的合成块），`hand_back_block()` 的 inbound 格式门也不放行它。issue #2 与 #3 都在那条腿上，接线照常。
+**Responses 直连腿已经接线，但 continuation 同样未完成**：`hand_back_block()` 的 inbound 格式门今天不放行 Responses，只说明旧实现仍返回 Anthropic 专用 dict，不能把尚未实现读成永久豁免。用户后续裁决覆盖直连与翻译的块级交付路径；Spec v22 §2.6 将当前 applicability 明确为能识别完整生成单位并能表达 executable synthetic call 的 Anthropic Messages 与 OpenAI Responses，两者共享 semantic decision。Chat Completions 的块级解析仍按 2026-08-22 裁决推迟，Embeddings 不是生成回合；D-5 不冒充它们已经有 continuation。
 
-**出处**：[spec.md](spec.md) §2.8（本主题的 Spec，不是 plan——plan 只有 §1～§9）。放宽定义域时才暴露——§8 那句限定此前写得比它成立的范围宽。
+**完成边界**：D-7 message count、D-6 两方言 failure adapter、streaming／whole-body finalization、native side facts、当前 `signature_delta` reshape 与 Anthropic selector 真实接线全部属于 D-5 对外完成边界；它们可以分成独立 semantic commits，不能因先后落地就把后做的一项降为“接线之后再补”。关闭 D-5 只声明当前两种 applicable 方言完成，不关闭 Chat Completions 的独立块级欠项。
+
+**出处**：[spec.md](spec.md) §2.8、§5.3、§9.2 与 [`plan.md`](plan.md) §11。放宽定义域时才暴露——§8 那句限定此前写得比它成立的范围宽；2026-09-03 根修分析及独立复评把完整依赖闭包补齐。
 
 
 ## D-6　Anthropic 直连腿缺一份 failure → `RetryReason` 的映射表
 
-**状态**：已知缺口，**不需要用户裁决**——它是本规格的推导层（§2.3），缺的是工作不是决定。
+**状态**：已知缺口，**不需要用户裁决，已进入 [`plan.md`](plan.md) §11.6**——它是本规格的推导层（§2.3），缺的是工作不是决定。
 
 **事实**：[spec.md](spec.md) §5.2 的归一化表是本规格里**唯一**规定「怎么算一次原生失败可不可以 replay」的地方，而它的四个输入全是 `ResponseError.code` 的取值（`response.cancelled`、`server_error`、`rate_limit_exceeded`、`vector_store_timeout`），依据写明是「`openai==3.3.1` 的 `ResponseError.code` 是 20 成员 `Literal`」。
 
@@ -100,7 +88,7 @@
 
 **为什么此前没人登记**：§2.5 曾断言 §5～§10「句子里没有一个 Responses 专有的事实」，而那句话正是 v10 放宽定义域时用来说明「代价可控」的唯一论据。论据被证伪（v14 已改），这件工作才显出来——它一直存在，只是被一句全称否定挡住了。
 
-**射程**：只影响 Anthropic 直连腿，而那条腿本来就挡在 D-5 上未接线，所以不阻塞当前工作。但它是 D-5 闭合之后**紧接着**要做的事，不是可选项——没有这张表，那条腿上一次可重试的上游失败不会被重试。
+**射程与顺序**：它直接影响 Anthropic 直连腿，也决定 Spec v22 §5.3 的 native failure 三向动作矩阵能否执行。D-6 不是 D-5 闭合之后的后续清理，而是 D-5 对外完成与 Anthropic selector 启用的前置；实现仍可形成独立 semantic commit，commit 顺序不等于完成依赖。没有这张表，那条腿上一次可重试的上游失败既不会 replay，也无法在已保留完整单位后正确选择 continuation。
 
 **未核**：Anthropic `error.type` 的取值全集，我没有对着官方文档逐条核。这不影响「需要两张表」这个结论，只影响那张表怎么填。
 
@@ -109,7 +97,7 @@
 
 ## D-7　`client_message_count` 只读 `messages`，Responses 请求会得到 0
 
-**状态**：已知缺陷，**不需要用户裁决**——用户文档已经指定了正确行为，这是实现只做了一半。
+**状态**：已知缺陷，**不需要用户裁决，已进入 [`plan.md`](plan.md) §11.2**——用户文档已经指定了正确行为，这是实现只做了一半。
 
 **事实**：`src/app/pipeline/hand_over.py` 的 `client_message_count` 是 `payload.get("messages")`，非 list 就返回 `0`。而用户亲笔文档写的是「`num_messages` 是客户端请求中 **`messages` / `input`** 的长度」——`input` 是 Responses 请求的字段名。所以一个 Responses 请求走到续写时，这个数是 0。
 
@@ -157,6 +145,6 @@
 
 **另一条便宜的可证伪实验**：只统一 `output_text.delta` 的 `item_id` 而不动 `added`／`done`，Codex 行为应当**零变化**——若观察到变化，说明对其解析器的理解仍有缺口。`b8fe245` 的 `fix_stream_ids` 合并后可直接做。
 
-**为什么这条不是 §6.6**：§6.6 的 `fix_stream_ids` 服务的是 `@ai-sdk/openai`（D-3），与本条无关。**当时把两者接在一起是一次错误归因**，已在 §6.6 开头的警示框里更正。
+**为什么这条不是 §6.6**：§6.6 的 `fix_stream_ids` 服务的是 `@ai-sdk/openai`，与本条无关。**当时把两者接在一起是一次错误归因**，已在 §6.6 开头的警示框里更正。
 
 **未核**：Codex 的 app-server IPC 转发层（`bespoke_event_handling.rs`）未逐行核查；上述结论只覆盖 assistant 文本路径，reasoning 与 tool call 的语义不同；全部来自源码阅读与字面量探针，非运行时观测。
