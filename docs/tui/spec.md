@@ -1,6 +1,6 @@
 # Spec：TUI 请求日志与实时 footer
 
-状态：主体已实现并与代码对账（分支 `worktree-tui-request-log-footer`）。2026-09-03 新增的 Responses 流式直连 terminal status 与 client action 组合展示和着色合同待本轮实现；panel/detail 交互不在其中，见文末「明确不做」。验收逐条对应的测试见「验收」一节。
+状态：主体已实现并与代码对账（分支 `worktree-tui-request-log-footer`）。2026-09-03 新增的 Responses 流式直连 terminal status 与 client action 组合展示和着色合同已由 `bb5783f` 实现；panel/detail 交互不在其中，见文末「明确不做」。验收逐条对应的测试见「验收」一节。
 
 ## 目标
 
@@ -197,4 +197,5 @@
 
 | 日期 | 条款 | 变化 | 触发 |
 |---|---|---|---|
+| 2026-09-04 | 着色规则、描述回复的用词、验收 | `bb5783f` 实现 Responses 流式直连终局展示：`completed` 与 terminal output 的 required 与 unknown actions 同时显示，只有 snapshot 分类完备且 action-free 时绿色；unclassified 显式可读。JSONL 持久化 status、typed actions 与 completeness；incomplete、translated、nonstream 保持既有路径。实现评审终评 0 blocker、0 major，9 个单变量 controls 全部目标变红；最终 Ruff clean、Pyright 0、full regression 2213 passed、2 skipped、coverage 91.29% | `bb5783f`；[`../direct-passthrough/reports/260904-completed-client-actions-implementation-review-disposition.md`](../direct-passthrough/reports/260904-completed-client-actions-implementation-review-disposition.md) |
 | 2026-09-03 | 着色规则、描述回复的用词、验收 | Responses 流式直连的 `completed` 改为与 typed client-action facts 组合判读：仅在已确认无客户端行动时绿；存在 `required`、`unknown` 或集合分类不完备时不着色，并同时显示权威 status、每项行动或 `unclassified` 标记。新增颜色双向控制、explicit-empty、complete not-required、complete unknown 与 missing/malformed-unclassified 三组集合控制、反序 `done` 的排序控制，以及重复与无名 action 的端到端 oracle | 用户主动指出 `completed + function_call/custom_tool_call` 不代表工作结束，并选择 terminal status 与 client-action facts 分槽；三态、terminal `output` authority、集合完备、排序、重复、无名与 unknown 呈现为本规格推导，来源是 direct-passthrough §4、§7.1 与 §10 及 2026-09-03 独立评审 |
