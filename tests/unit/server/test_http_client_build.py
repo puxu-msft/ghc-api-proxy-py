@@ -32,6 +32,13 @@ def socket_options_of(client: httpx2.AsyncClient) -> object:
     return socket_options_of_transport(client._transport)  # pyright: ignore[reportPrivateUsage]
 
 
+def http2_for_url(client: httpx2.AsyncClient, url: str) -> bool:
+    """The protocol flag on the pool that will actually serve this URL."""
+    transport = client._transport_for_url(httpx2.URL(url))  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(transport, httpx2.AsyncHTTPTransport)
+    return transport._pool._http2  # pyright: ignore[reportPrivateUsage]
+
+
 def limits_of(client: httpx2.AsyncClient) -> tuple[int, int, float | None]:
     transport = client._transport  # pyright: ignore[reportPrivateUsage]
     assert isinstance(transport, httpx2.AsyncHTTPTransport)
@@ -249,27 +256,37 @@ def test_a_socks_setting_the_environment_leaves_room_for_is_warned_about(
     assert [record for record in caplog.records if "SOCKS" in record.message]
 
 
-def test_http2_can_be_switched_off_for_an_http1_upstream() -> None:
-    """One GOAWAY on a multiplexed connection kills every stream riding it, so this switch exists."""
-    off = ProxyConfig.model_validate({"upstream_transport": {"http2": False}})
-    on = ProxyConfig.model_validate({"upstream_transport": {"http2": True}})
-    assert transport_options(off, proxy_from_cli=False).http2 is False
-    assert transport_options(on, proxy_from_cli=False).http2 is True
+@pytest.mark.parametrize("proxy", ["", "http://127.0.0.1:7890"])
+@pytest.mark.parametrize(
+    ("upstream_transport", "expected_http2"),
+    [
+        ({}, False),
+        ({"http2": True}, True),
+        ({"http2": True, "http2_ping_interval": 0}, True),
+    ],
+)
+def test_the_protocol_setting_reaches_every_active_pool(
+    monkeypatch: pytest.MonkeyPatch,
+    proxy: str,
+    upstream_transport: dict[str, int | bool],
+    expected_http2: bool,
+) -> None:
+    """Read the direct or proxy pool, not our intermediate options.
 
-
-def test_the_ping_interval_no_longer_decides_the_protocol() -> None:
-    """It used to, which is how a key named after a ping interval became the HTTP/1.1 switch.
-
-    Nothing reads `http2_ping_interval` today — neither httpx nor httpcore exposes an HTTP/2 PING interval — so it never produced a ping either. Pinned so the coupling cannot come back by accident: setting it to 0 must leave the protocol alone.
+    The third case pins the old coupling out of existence: a zero PING interval must not disable explicitly enabled HTTP/2.
     """
-    config = ProxyConfig.model_validate({"upstream_transport": {"http2_ping_interval": 0}})
-    assert transport_options(config, proxy_from_cli=False).http2 is True
+    _clear_proxy_environment(monkeypatch)
+    config = ProxyConfig.model_validate(
+        {"proxy": proxy, "upstream_transport": upstream_transport}
+    )
+    client = build_http_client(config, proxy_from_cli=bool(proxy))
+    assert http2_for_url(client, "https://api.githubcopilot.com/v1") is expected_http2
 
 
-def test_the_spec_defaults_produce_a_keepalive_and_http2() -> None:
+def test_the_spec_defaults_produce_a_keepalive_and_http1_1() -> None:
     options = transport_options(ProxyConfig(), proxy_from_cli=False)
     assert options.socket_options is not None
-    assert options.http2 is True
+    assert options.http2 is False
 
 
 def describe_route(client: httpx2.AsyncClient, url: str) -> str:

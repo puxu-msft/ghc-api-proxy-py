@@ -270,8 +270,10 @@ graceful_cleanup_timeout: 60
 # ======================================================================================================================
 
 upstream_transport:
-  # 是否启用 HTTP/2。默认 true。
-  # Enable HTTP/2. Default is true.
+  # 默认值权威：`.dev/docs/delivery-keepalive/spec.md` §3（用户裁决，2026-09-05）。
+  # Default authority: `.dev/docs/delivery-keepalive/spec.md` §3 (user ruling, 2026-09-05).
+  # 是否启用 HTTP/2。默认 false，即使用 HTTP/1.1。
+  # Enable HTTP/2. Default is false, so HTTP/1.1 is used.
   http2: false
 
   # 每个 HTTP/2 上游连接的最大并发流数（0 = 不限制）。
