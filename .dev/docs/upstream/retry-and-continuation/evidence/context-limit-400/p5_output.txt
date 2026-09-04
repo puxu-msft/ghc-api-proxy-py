@@ -1,0 +1,152 @@
+# upstream 4xx bodies seen in non-success operations (scan at 2026-08-21T22:56:18)
+
+---    21x  400  first: history-v3-260807.db req_1786047545891_139 endpoint=anthropic-messages resolved_model=gpt-5.6-terra
+      {"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","code":"invalid_request_body"}}
+
+
+---     6x  408  first: history-v3-260809.db req_1786055496029_1371 endpoint=anthropic-messages resolved_model=gpt-5.6-sol
+      {"error":{"message":"Timed out reading request body. Try again, or use a smaller request size.","code":"user_request_timeout"}}
+
+
+---     2x  400  first: history-v3-260807.db req_1784665446811_2971 endpoint=anthropic-messages resolved_model=gpt-5.5
+      {"error":{"message":"Invalid 'input[1].id': 'call_jCWUMZ57P3JSaKR5wZBhrO8Z'. Expected an ID that begins with 'fc'.","code":"invalid_request_body"}}
+
+
+---     1x  400  first: history-v3-260807.db req_1784404326995_700 endpoint=anthropic-messages resolved_model=claude-opus-4.8
+      {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1001284 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdA784vkb8RKW4Qdyg2ci","type":"error"}
+
+---     1x  400  first: history-v3-260807.db req_1784579046486_184 endpoint=anthropic-messages resolved_model=claude-sonnet-5
+      {"type":"error","error":{"type":"invalid_request_error","message":"Tool 'search.web' not found in provided tools"},"request_id":"req_011CdDwBMW5shCHsAJgoZou9"}
+
+---     1x  400  first: history-v3-260807.db req_1784579046486_184 endpoint=anthropic-messages resolved_model=claude-sonnet-5
+      {"type":"error","error":{"type":"invalid_request_error","message":"Tool 'search.web' not found in provided tools"},"request_id":"req_011CdDwBPDWvjbtxqntxuf55"}
+
+---     1x  400  first: history-v3-260807.db req_1784579056164_186 endpoint=anthropic-messages resolved_model=claude-sonnet-5
+      {"type":"error","error":{"type":"invalid_request_error","message":"Tool 'search.web' not found in provided tools"},"request_id":"req_011CdDwC4xwkAuzzbD1LKu9j"}
+
+---     1x  400  first: history-v3-260807.db req_1784579056164_186 endpoint=anthropic-messages resolved_model=claude-sonnet-5
+      {"type":"error","error":{"type":"invalid_request_error","message":"Tool 'search.web' not found in provided tools"},"request_id":"req_011CdDwC6ZguPXNMgymt39tE"}
+
+---     1x  400  first: history-v3-260807.db req_1784580196711_239 endpoint=anthropic-messages resolved_model=claude-sonnet-5
+      {"type":"error","error":{"type":"invalid_request_error","message":"Tool 'search.web' not found in provided tools"},"request_id":"req_011CdDxe9MCoPyeaYkS5GEDq"}
+
+---     1x  400  first: history-v3-260807.db req_1784580196711_239 endpoint=anthropic-messages resolved_model=claude-sonnet-5
+      {"type":"error","error":{"type":"invalid_request_error","message":"Tool 'search.web' not found in provided tools"},"request_id":"req_011CdDxeAuiaFHxRuBo4ftMv"}
+
+---     1x  400  first: history-v3-260807.db req_1784654497464_2034 endpoint=anthropic-messages resolved_model=claude-sonnet-5
+      {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1000292 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdFb5DQgCfKBNuV7tJrGs","type":"error"}
+
+---     1x  400  first: history-v3-260807.db req_1784654502444_2035 endpoint=anthropic-messages resolved_model=claude-sonnet-5
+      {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1001591 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdFb5addFnvvdLop4JKxh","type":"error"}
+
+---     1x  400  first: history-v3-260807.db req_1784726368092_462 endpoint=anthropic-messages resolved_model=claude-sonnet-4.6
+      {"type":"error","error":{"type":"invalid_request_error","message":"This model does not support assistant message prefill. The conversation must end with a user message."},"request_id":"req_011CdHAR4bFoPpuS8iAupN7d"}
+
+---     1x  400  first: history-v3-260807.db req_1784726374676_465 endpoint=anthropic-messages resolved_model=claude-sonnet-4.6
+      {"type":"error","error":{"type":"invalid_request_error","message":"This model does not support assistant message prefill. The conversation must end with a user message."},"request_id":"req_011CdHARZhicytZsXt2odLNP"}
+
+---     1x  400  first: history-v3-260807.db req_1784726397257_472 endpoint=anthropic-messages resolved_model=claude-opus-4.8
+      {"type":"error","error":{"type":"invalid_request_error","message":"This model does not support assistant message prefill. The conversation must end with a user message."},"request_id":"req_011CdHATDFDYbEZYtEBrRy36"}
+
+---     1x  400  first: history-v3-260807.db req_1784752304856_1357 endpoint=anthropic-messages resolved_model=claude-opus-4.8
+      {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1000725 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdHjNzZhWM3Rdco1Sbm1V","type":"error"}
+
+---     1x  422  first: history-v3-260809.db req_1786113804705_5292 endpoint=anthropic-messages resolved_model=gpt-5.6-sol
+      {"error":{"message":"This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber","code":"cyber_policy"}}
+
+
+---     1x  400  first: history-v3-260809.db req_1786214989420_1 endpoint=anthropic-messages resolved_model=claude-opus-5
+      {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1299744 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqnMoLxTnJakAt1ofa4k","type":"error"}
+
+---     1x  400  first: history-v3-260809.db req_1786214992332_5 endpoint=anthropic-messages resolved_model=claude-opus-5
+      {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1299744 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqnNAXBVoCBFjBDNNq2U","type":"error"}
+
+---     1x  400  first: history-v3-260809.db req_1786215077067_22 endpoint=anthropic-messages resolved_model=claude-opus-5
+      {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1056489 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqnUFqL43VNrPQyGcfLZ","type":"error"}
+
+---     1x  400  first: history-v3-260809.db req_1786215080148_24 endpoint=anthropic-messages resolved_model=claude-opus-5
+      {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1056489 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqnUUKR7TPNig3HGF2PU","type":"error"}
+
+---     1x  400  first: history-v3-260809.db req_1786215083692_27 endpoint=anthropic-messages resolved_model=claude-opus-5
+      {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1223614 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqnVaggA4Yv9n2Zot5Kf","type":"error"}
+
+---     1x  400  first: history-v3-260809.db req_1786215095990_32 endpoint=anthropic-messages resolved_model=claude-opus-5
+      {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1098276 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqnVf5r1YH24LQzLGYXx","type":"error"}
+
+---     1x  400  first: history-v3-260809.db req_1786215107568_36 endpoint=anthropic-messages resolved_model=claude-opus-5
+      {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1098276 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqnWebrGkgkMnRVsNKD3","type":"error"}
+
+---     1x  400  first: history-v3-260809.db req_1786215107321_35 endpoint=anthropic-messages resolved_model=claude-opus-5
+      {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1223614 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqnWfDJuS1ECAFj3smAF","type":"error"}
+
+---     1x  400  first: history-v3-260809.db req_1786216425652_489 endpoint=anthropic-messages resolved_model=claude-opus-5
+      {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1051542 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqpBfDGSBVzf9CCXXeBA","type":"error"}
+
+---     1x  400  first: history-v3-260809.db req_1786216429252_491 endpoint=anthropic-messages resolved_model=claude-opus-5
+      {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1051542 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqpBvcDk5EtpfHy5U9FA","type":"error"}
+
+---     1x  400  first: history-v3-260809.db req_1786216477337_512 endpoint=anthropic-messages resolved_model=claude-opus-5
+      {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1051542 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqpFTxxGaEC3nb2VUiFb","type":"error"}
+
+---     1x  400  first: history-v3-260809.db req_1786216507671_525 endpoint=anthropic-messages resolved_model=claude-opus-5
+      {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1051542 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqpHknHrSaA188BwwDHe","type":"error"}
+
+---     1x  400  first: history-v3-260809.db req_1786217021652_689 endpoint=anthropic-messages resolved_model=claude-opus-5
+      {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1051542 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqpwjumVF8UnT55ai4DR","type":"error"}
+
+---     1x  400  first: history-v3-260809.db req_1786217696326_952 endpoint=anthropic-messages resolved_model=claude-opus-5
+      {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1051542 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqqoMWGx7VGnkDwkCXv6","type":"error"}
+
+---     1x  400  first: history-v3-260809.db req_1786217700836_958 endpoint=anthropic-messages resolved_model=claude-opus-5
+      {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1051542 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqqoenLao19Haa3K8ZeT","type":"error"}
+
+---     1x  400  first: history-v3-260809.db req_1786220828786_2207 endpoint=anthropic-messages resolved_model=claude-opus-5
+      {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1071938 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqunLb9Sdmqi1yN2eTpK","type":"error"}
+
+---     1x  400  first: history-v3-260809.db req_1786220940076_24 endpoint=anthropic-messages resolved_model=claude-opus-5
+      {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1071938 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdquvSKuJYbj5RgQ8jRvX","type":"error"}
+
+---     1x  400  first: history-v3-260809.db req_1786221325847_171 endpoint=anthropic-messages resolved_model=claude-opus-5
+      {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1051542 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqvQsQoPn7LWhuKg5oG1","type":"error"}
+
+---     1x  400  first: history-v3-260809.db req_1786221330509_176 endpoint=anthropic-messages resolved_model=claude-opus-5
+      {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1051542 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqvRGg2bs1tqRLvnMJKY","type":"error"}
+
+---     1x  400  first: history-v3-260809.db req_1786221775139_297 endpoint=anthropic-messages resolved_model=claude-opus-5
+      {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1051542 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqvyzmEeDZ2uWqTa91bj","type":"error"}
+
+---     1x  400  first: history-v3-260809.db req_1786221781772_307 endpoint=anthropic-messages resolved_model=claude-opus-5
+      {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1051542 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqvzUfmfRMAsjK2dFEPR","type":"error"}
+
+---     1x  400  first: history-v3-260809.db req_1786221956083_381 endpoint=anthropic-messages resolved_model=claude-opus-5
+      {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1051542 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqwDLbhXKcz3joo19PNm","type":"error"}
+
+---     1x  400  first: history-v3-260809.db req_1786221961723_387 endpoint=anthropic-messages resolved_model=claude-opus-5
+      {"error":{"code":"model_max_prompt_tokens_exceeded","message":"prompt is too long: 1051542 tokens \u003e 1000000 maximum","type":"invalid_request_error"},"request_id":"req_011CdqwDkJy9YDgyzVF2fixv","type":"error"}
+
+---     1x  400  first: history-v3.db req_1786453961673_239 endpoint=anthropic-messages resolved_model=claude-opus-5
+      {"type":"error","error":{"type":"invalid_request_error","message":"messages: at least one message is required"},"request_id":"req_011Cdw25RhAemPc7DsQLyGuT"}
+
+---     1x  400  first: history-v3.db req_1786458729535_268 endpoint=anthropic-messages resolved_model=gpt-5.6-luna
+      {"error":{"message":"Invalid 'max_output_tokens': integer below minimum value. Expected a value \u003e= 16, but got 8 instead.","code":"invalid_request_body"}}
+
+
+---     1x  400  first: history-v3.db req_1786458912903_316 endpoint=anthropic-messages resolved_model=claude-opus-5
+      {"type":"error","error":{"type":"invalid_request_error","message":"Tool 'finish_silently' cannot have both defer_loading=true and cache_control set. Tools with defer_loading cannot use prompt caching."},"request_id":"req_011Cdw8NQcMRSXVPARMkfPco"}
+
+---     1x  400  first: history-v3.db req_1786459130651_369 endpoint=anthropic-messages resolved_model=claude-opus-5
+      {"type":"error","error":{"type":"invalid_request_error","message":"Tool 'finish_silently' cannot have both defer_loading=true and cache_control set. Tools with defer_loading cannot use prompt caching."},"request_id":"req_011Cdw8eSvhSRboADPpzXe4w"}
+
+---     1x  400  first: history-v3.db req_1786461070119_480 endpoint=anthropic-messages resolved_model=claude-opus-5
+      {"type":"error","error":{"type":"invalid_request_error","message":"Tool 'write_stdin' cannot have both defer_loading=true and cache_control set. Tools with defer_loading cannot use prompt caching."},"request_id":"req_011CdwB7S2NFHhK9zgc5gYFT"}
+
+---     1x  400  first: history-v3.db req_1786462074032_529 endpoint=anthropic-messages resolved_model=claude-opus-5
+      {"type":"error","error":{"type":"invalid_request_error","message":"Tool 't' cannot have both defer_loading=true and cache_control set. Tools with defer_loading cannot use prompt caching."},"request_id":"req_011CdwCPR39NEz2WhPdsztcY"}
+
+---     1x  400  first: history-v3.db req_1786462074512_530 endpoint=anthropic-messages resolved_model=claude-opus-5
+      {"type":"error","error":{"type":"invalid_request_error","message":"Tool 't' cannot have both defer_loading=true and cache_control set. Tools with defer_loading cannot use prompt caching."},"request_id":"req_011CdwCPT3wWbH9rLFB8xb3u"}
+
+---     1x  400  first: history-v3.db req_1786462213869_551 endpoint=anthropic-messages resolved_model=claude-opus-5
+      {"type":"error","error":{"type":"invalid_request_error","message":"Tool 't' cannot have both defer_loading=true and cache_control set. Tools with defer_loading cannot use prompt caching."},"request_id":"req_011CdwCZixS2gFnHhDy3jszB"}
+
+{"distinct_shapes": 48, "total": 74}

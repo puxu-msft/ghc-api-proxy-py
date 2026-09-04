@@ -1,8 +1,10 @@
 # HTTP 499 retry implementation notes
 
-- status: current
-- requirement_authority: `docs/.human-controlled/upstream-retry-and-continuation.md` 中的 `499 Client Closed Request` 可重试条目
-- implementation: 2026-09-04 `fix: retry upstream HTTP 499 responses`
+> **Imported source-clone snapshot，not current in this checkout.** 本文从 `origin/dotdev` 导入，记录另一份 source clone 在 2026-09-04 的 requirement、实现与评审。导入复核时，当前 checkout 的人写 requirement 与 `RETRYABLE_STATUSES` 均不含 HTTP 499；对应 source commits 也不在当前主仓对象库中。以下“当前”一律只读作**该 source clone 当时**，不得用来声称本 checkout 已实现或已获得用户需求授权。恢复 current 地位的条件见 [`status.md`](status.md) 的 HTTP 499 导入快照段。
+
+- status: imported-external-clone-snapshot
+- recorded_requirement_authority: source clone 的 `docs/.human-controlled/upstream-retry-and-continuation.md` 中 `499 Client Closed Request` 可重试条目；当前 checkout 不含该条目
+- recorded_implementation: 2026-09-04 `fix: retry upstream HTTP 499 responses`；当前 checkout 不含该提交语义
 - status_and_evidence: `status.md`
 - review_disposition: `review-disposition.md`
 
@@ -16,7 +18,7 @@
 
 这些事实足以支持两项行动：当前 499 是上游对本代理请求作出的 HTTP 响应，不是本代理观察到下游客户端已经断开；修复应落在 upstream SDK error normalization 边界。它们不支持断言 GitHub Copilot 为什么产生 499。请求体大小与约 123 秒延迟是相关观测，不作为 retry 条件或成因结论。
 
-## 当前实现
+## Source clone 当时的实现
 
 `src/app/model_provider/upstream_errors.py` 的 `RETRYABLE_STATUSES` 包含 499。OpenAI SDK 抛出的 `APIStatusError(499)` 经 `normalize_upstream_error()` 成为 `UpstreamError(status_code=499)`，而不是确定性的 `UpstreamRejected`。该模块于 2026-09-04 随 `feat: add xingchen model provider` 从 GHC client 子包提升为所有 model provider 共享边界；这是装位变化，不改变本条 retry mapping。
 

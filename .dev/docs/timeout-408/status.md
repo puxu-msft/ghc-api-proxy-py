@@ -1,8 +1,10 @@
 # HTTP 408 后长期请求修复状态
 
-状态：completed。
+> **Imported source-clone snapshot，not current in this checkout.** 本文件从 `origin/dotdev` 导入，以下 completed、mainline、archive 与验证结论只描述另一份 source clone 在 2026-09-04 的状态。导入复核时，当前 checkout 的 inference 路径仍在读完 body 后直接等待 dispatch，`src/`／`tests/` 没有本文件所述 disconnect listener 或 `finish_async_cleanup`；对应 source/archive refs 也未随文档导入。报告原件可作为点时证据，当前主仓不得据此宣称实现完成。
 
-行为权威见 `spec.md`；用户控制的需求来源见 `../../../docs/.human-controlled/upstream-retry-and-continuation.md`。
+状态：imported-external-clone-snapshot；source history 尚未装位。
+
+记录中的行为权威见 `spec.md`；当前 checkout 的用户控制需求来源仍是 `../../../docs/.human-controlled/upstream-retry-and-continuation.md`。恢复 living／completed 状态须先让 reviewed source 与 archive 在当前主仓可达，再重新对账代码、测试与人写 authority。
 
 ## 当前结论
 

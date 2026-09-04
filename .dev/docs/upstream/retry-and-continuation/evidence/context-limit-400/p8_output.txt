@@ -1,0 +1,9 @@
+== history-v3-20260815-183721.db: successful ops with a chunk-0 scanned = 793; 4xx seen in them = {}
+== history-v3-20260816-160151.db: successful ops with a chunk-0 scanned = 901; 4xx seen in them = {}
+== history-v3-20260817-050754.db: successful ops with a chunk-0 scanned = 569; 4xx seen in them = {}
+== history-v3-20260818-044224.db: successful ops with a chunk-0 scanned = 1156; 4xx seen in them = {}
+== history-v3-260807.db: successful ops with a chunk-0 scanned = 20822; 4xx seen in them = {}
+== history-v3-260809.db: successful ops with a chunk-0 scanned = 39247; 4xx seen in them = {'499': 2, '408': 2}
+== history-v3-260811.db: successful ops with a chunk-0 scanned = 6059; 4xx seen in them = {'408': 2}
+== history-v3.db: successful ops with a chunk-0 scanned = 24436; 4xx seen in them = {'408': 2, '499': 1, '400': 1, '429': 2}
+TOTAL 4xx inside successful operations: {'499': 3, '408': 6, '400': 1, '429': 2}

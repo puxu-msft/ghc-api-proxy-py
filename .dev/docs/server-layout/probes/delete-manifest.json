@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "allow_unenumerated_targets": true,
+  "targets": [
+    "/home/xp/src/ghc-api-proxy-py/src/app/context",
+    "/home/xp/src/ghc-api-proxy-py/src/app/delivery",
+    "/home/xp/src/ghc-api-proxy-py/src/app/history",
+    "/home/xp/src/ghc-api-proxy-py/src/app/hooks",
+    "/home/xp/src/ghc-api-proxy-py/src/app/openai",
+    "/home/xp/src/ghc-api-proxy-py/src/app/routes"
+  ],
+  "preserved": [
+    "46 个 .py 源文件已由 git mv 迁至 src/.archived/app/ 下的对应位置，rename 检测保留 git 历史",
+    "被删除的六个目录此刻只含 __pycache__ 编译产物；脚本在每次 rmtree 前断言该目录下无任何真实文件，断言失败即中止"
+  ],
+  "note": "targets 在本清单里已逐条列明；allow_unenumerated_targets 仅因为护栏无法静态读取被调用的 Python 脚本内容。删除动机：这六个目录留着会使 app.routes 等成为可 import 的空 PEP 420 命名空间包（已实测确认），从而让「旧链是否还可达」这类判断给出错误答案。"
+}

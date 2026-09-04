@@ -1,8 +1,8 @@
 # Xingchen model provider 规格
 
-状态：living specification
+状态：imported living specification；另一 source clone 曾实现并评审，当前 checkout 尚未装位对应 source history。
 
-本规格定义 `ghc-api-proxy` 如何把 Xingchen 云端 LLM 网关接入 `app.model_provider`。它是本 feature 的行为权威；外部 TeleAgent 协议材料提供上游事实，用户在本项目中的裁决决定本次产品范围。
+本规格定义 `ghc-api-proxy` 如何把 Xingchen 云端 LLM 网关接入 `app.model_provider`。它是本 feature 的目标行为权威；外部 TeleAgent 协议材料提供上游事实，用户在本项目中的裁决决定本次产品范围。当前实现状态以 [`status.md`](status.md) 顶部导入注记为准，不得从报告 PASS 或本规格存在反推 current main 已实现。
 
 ## 1. 依据与权威边界
 

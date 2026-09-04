@@ -1,6 +1,8 @@
 # HTTP 499 retry 评审处置账
 
-- status: active
+> **Imported source-clone disposition，not current product status.** 本账从 `origin/dotdev` 导入；其中 `fixed`／`closed` 只表示另一份 source clone 的候选与评审在当时闭合。当前 checkout 缺对应人写 requirement 与 source history，不能把本账的 terminal outcomes 投影为 current main 已实现。报告原件与处置保持点时证据；恢复 current 地位须先满足 [`status.md`](status.md) 的 HTTP 499 导入条件。
+
+- status: imported-external-clone-snapshot
 - source_report: `reports/260904-http-499-review-general-opus.md`
 - source_report_sha256: `2d8b692cf2a9cfa0157918bb4597ad21a6878fceff1d10fcdf863e6d96aa3e04`
 - source_rereview: `reports/260904-http-499-rereview-general-opus.md`

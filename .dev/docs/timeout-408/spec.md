@@ -1,10 +1,10 @@
 # HTTP 408 后的下游断开与请求终止规格
 
-状态：living，已实现。
+状态：imported living specification；另一 source clone 曾实现并评审，当前 checkout 尚未装位对应 source history，不得读作已实现。
 
 ## 1. 权威边界
 
-需求层权威是 `docs/.human-controlled/upstream-retry-and-continuation.md`：客户端断开时必须取消上游请求；请求超时、HTTP 408 所属的可恢复失败仍可在尚未交付完整块时无痕重试，且既有无痕重试不设置冷却间隔。本规格只定义这两条要求在当前 Uvicorn 请求生命周期中的交界，不改变 HTTP 408 的可重试性、重试预算或既有 timeout 默认值。
+需求层权威是 `docs/.human-controlled/upstream-retry-and-continuation.md`：客户端断开时必须取消上游请求；请求超时、HTTP 408 所属的可恢复失败仍可在尚未交付完整块时无痕重试，且既有无痕重试不设置冷却间隔。本规格只定义这两条要求在 Uvicorn 请求生命周期中的交界，不改变 HTTP 408 的可重试性、重试预算或既有 timeout 默认值。它可以继续作为待实现的行为规格；本文件后文涉及“当前实现”的句子以导入 source clone 为时点，不覆盖当前 checkout 的实际实现状态，后者见 [`status.md`](status.md) 顶部注记。
 
 当前受支持的生产拓扑是 Uvicorn 0.52.4、downstream HTTP/1.x，且没有消费 `receive` 的 middleware。Uvicorn H11 以持久 `disconnected` flag 表示连接丢失，此后每次 `receive()` 都会再次返回 `http.disconnect`。如果将来引入其他 ASGI server、消费后延迟转交消息的 receive middleware、公开承诺任意 ASGI host，或在当前 Uvicorn H11 组合上复现“响应前 listener 被 operation-win 取消后，后续 StreamingResponse listener 读不到已经发生的 disconnect”，必须重新评估跨 dispatch/response 阶段的持久 receive relay；当前规格不作这项更宽承诺。
 

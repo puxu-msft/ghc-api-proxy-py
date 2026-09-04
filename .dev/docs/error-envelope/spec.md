@@ -1,0 +1,428 @@
+# 错误信封：直连透传 / 翻译过 IR
+
+**这份是 Spec**，答「应该是什么样」，规范性。**这是活文档，不冻结。** 新的用户裁决、实测或发现一旦与本文任何一处冲突或限定它，**当场修订本文**——不把已知错误的条款留在原地，也不把修正寄存到延后台账或评审报告里。§10 的两项已由用户裁决。权威永远是本文的当前版本；某条何时因何而变，读下面的条款修订记录。
+
+> **2026-08-24 用户裁定**：全面废除「spec 冻结」规则，spec 必须按新裁定不断更新。此前本文第 3 行声明「**2026-08-23 冻结**——本文的规范条款自此为实施的判据。变更需要新的裁决或新的评审共识」，**该声明作废**。下表原名「冻结后的修订」，现名「条款修订记录」；**表内条目原文一字未动**——它们记录的是发生过的事实，作废的是「冻结」这个框架，不是这些记录本身。同期改写的规则正文见 `.claude/rules/00-development-workflow.md` 与 `.github/copilot-instructions.md`。
+
+**条款修订记录**：
+
+| 日期 | 条款 | 变化 | 依据 |
+|---|---|---|---|
+| 2026-08-23 | §5.1 | 补全 `ProviderError` 家族五个子类；冻结时的表只列了其中两个，而 `EndpointNotSupported` 已被实测证明可达 | 计划评审 [reports/260823-plan-review.md](reports/260823-plan-review.md) F-04，我方独立复现 |
+| 2026-08-23 | §6.4 | 补上一条例外：**流式帧上 `code` 是唯一能承载「谁的错」的通道**。§6.4 原文说「真正保住客户端动作差异的是 status 与 `x-should-retry`，不是 `code`」——那对非流式成立，对流式不成立，因为 status 在响应头发出时就已定死 | 实施 I 片时由既有测试暴露：两条流式测试原本靠 `internal_error` / `upstream_error` 的区分，而 Anthropic 的真实词汇表把两者都写作 `api_error` |
+| 2026-08-24 | §6.2、§6.3 | **§6.2 的重试依据只覆盖两个 SDK，不覆盖主产品路径上的客户端。** 补上「按腿分列」的限定与 Claude Code 一列；§6.3 补上 anthropic-messages 流式必须用**嵌套**信封的客户端侧理由，以及错误帧**时机**决定客户端重不重试这一条 | 实测 Claude Code 2.1.241 反编译源码，[reports/260824-claude-code-sse-retry-behavior.md](reports/260824-claude-code-sse-retry-behavior.md)，形状判定可用同目录探针复现。原登记为延后项 E-9 待裁；2026-08-24 裁定废除冻结后，按新规则「台账不得存放已知错误的 Spec 条款」直接并入正文，E-9 撤销 |
+| 2026-08-24 | **新增 §5.5** | **IR 只按状态码分类，做的是转发而不是翻译。** 新增与 `category` 正交的闭集字段 `condition`，首个成员 `CONTEXT_WINDOW_EXCEEDED`：认出上游在说「输入超出上下文窗口」时，`message` 改用 Anthropic 的措辞 `prompt is too long: …`，`code` 按方言拼写。**这不是文案改良**——Claude Code 的识别判据是子串 `prompt is too long`，而它那条 `context window` 判据被 HTTP 413 挡住，于是上游 Responses 腿的 400 在主产品路径上一直认不出，客户端因此不压缩、不重发 | 用户 2026-08-24 提出该场景并要求翻译路径改用 anthropic-messages 的表达。上游形态依据 48 例一手记录 [../upstream/retry-and-continuation/reports/260821-context-limit-400-examples.md](../upstream/retry-and-continuation/reports/260821-context-limit-400-examples.md)；客户端判据依据三版本反编译实测 [reports/260824-claude-code-context-limit-detection.md](reports/260824-claude-code-context-limit-detection.md) |
+
+## 修订记录
+
+| 版本 | 变化 | 触发 |
+|---|---|---|
+| v1 | 首稿 | 用户裁决 |
+| v2 | 推翻 v1 的两处：不新建 `SemanticError`（IR 已存在）、原始字节已丢失 | 出口清点 [260823-error-surface-inventory.md](../server-layout/reports/260823-error-surface-inventory.md) |
+| **v3** | 采纳评审的 4 条 blocker、8 条 major、1 条 minor，**全部** | 评审 [reports/260823-spec-review-gpt.md](reports/260823-spec-review-gpt.md) |
+
+**v3 相对 v2 的实质改动**（每条都对应一条评审发现，处置记录见 [reports/260823-spec-review-disposition.md](reports/260823-spec-review-disposition.md)）：
+
+- **删掉了 v2 §5 给裁决第 1 条开的例外**。v2 主张「直连路径上流内失败事件也要过 IR，因为本代理已经在重新成帧」——这是把实现约束反过来改写了用户的行为裁决，且该例外并不必要（错误事件是自足的 SSE 事件，不需要装配即可原样转发）。
+- **v2 说「IR 已经存在」，只对了一半**。`ErrorCategory` 是一个分类枚举、一个字段，不是能承载翻译的记录。v3 定义 `ErrorInfo`，并补上 v2 整块缺失的 **source → IR 表**。
+- **v2 §6 的「同一个信封的两种包装」不成立**。OpenAI Responses 的 `ResponseErrorEvent` 是扁平的，不是 JSON `ErrorObject` 的嵌套形状。改为「同一语义事实，按各协议各自合法的 carrier 写出」。
+- **v2 §7 把待裁决项写成了实施指令**（「在裁决到达之前，实施按第 1 个进行」）。删除。
+- **v2 给用户亲笔的响应头黑名单加了「只为成功响应」这个原文没有的限定**。删除。
+- **补上 category → status / code / retry 的完整输出行为表**。两个客户端 SDK 都按 HTTP status 选异常类、都默认重试 408/409/429/≥500（实测），所以只定义 `type` 字符串不足以定义客户端动作。
+- **收窄 v2 §4.2 的结论**：「不属于官方 SDK 声明的顶层词汇表」成立，「Anthropic 不认识」超出证据。
+- **消除四处范围自相矛盾**：路径未注册、框架 404/405、Gemini 501、one-shot 腿。
+
+**用户裁决**（2026-08-23，原文）：
+
+> 1. 直连路径一定用原生的，即使我们未知，也能传递；
+> 2. 翻译路径，按需建立 IR 机制，有判断力、需要支持的情况，都要先映射到内部已知概念，再按需转出实际格式。
+
+## 1. 这条裁决的来源与效力
+
+**第 2 条已经是追认状态**，不是新增。`docs/.human-controlled/message-translation.md:9`：
+
+> 对于翻译路径，采用按需理解和处理的原则，不直接建立两种类型之间的映射，而是总是建立消息格式与内部 IR 的映射关系，按需理解和处理。
+
+同文件第 3、5 行给出机制：`translation_driver`，`输入格式 <-> 中间表示 <-> 上游模型格式`；每种格式注册 `inbound.from-*` / `outbound.to-*`；**不要求能力等价**，无唯一翻译路径处提供配置选项。
+
+**第 1 条与既有条款同形。** `message-format-reshape.md:11` 对请求头写明：直连走黑名单、翻译走白名单。「客户端返回 Anthropic Messages」一节（第 51～63 行）对响应头写了同一对名单。**该节原文没有「只为成功响应」这样的限定**，v2 曾自行添加，v3 删除。
+
+该节 TODO（第 63 行）带三层限定：「根据我的认知」、非 Anthropic 上游可能语义相同形式不同、「在认清之前翻译路径的处置先不做」。**当前翻译过 IR 的授权来自 2026-08-23 的新裁决，不是来自那条 TODO。**
+
+## 2. 判据：哪条路、什么来源
+
+一个错误的处置由两个正交的事实决定，**不由它发生在流式还是非流式、响应头之前还是之后决定**。今天恰恰是后者在决定形状（§7），那是实现时序泄漏成了协议。
+
+| | 来源：上游 | 来源：本代理 |
+|---|---|---|
+| **直连路径**（`Route.translation_required` 为 False） | **原生透传**（§3），流内事件同样（§3.4） | 过 IR，按客户端方言写出（§4～§6） |
+| **翻译路径** | 读成 IR，按客户端方言写出；读不动的见 §10.1 | 过 IR，按客户端方言写出 |
+
+「本代理产生」的完整清单见 §5.1。
+
+**路径未注册不在本 Spec 覆盖范围内**（v2 曾把它列进来，与 §11 排除框架 404/405 相矛盾）：这类请求根本不进 `serve`，由 Starlette 直接答 `{"detail":"Not Found"}`，且没有 route 就推不出 `inbound_format`，「按客户端方言」没有定义域。见 §11 的登记。
+
+## 3. 直连透传（裁决第 1 条）
+
+客户端与上游说同一种方言，因此我们对这段内容**既不需要判断力，也不应施加判断力**。
+
+### 3.1 非流式：body、状态码、响应头
+
+- **body**：上游的错误 body 原样交给客户端。不解析、不重排、不改写、不包一层。我们不认识的字段必须原样到达。
+- **状态码**：上游的状态码原样透传。**今天不是这样**：`RETRYABLE_STATUSES`（401、408、409、425、429、500、502、503、504）里除 429 外的每一个，在重试预算耗尽后都变成 502（清点 §3，401 与 503 已实测）。502 说的是「网关自己坏了」，与上游说的（凭证过期、过载、上游超时）都不同，而客户端**会据此改变动作**——两个 SDK 都按 status 选异常类。
+- **响应头**：沿用 `message-format-reshape.md`「客户端返回 Anthropic Messages」一节的**直连黑名单**。该节原文不区分成功与错误，本 Spec 因此不区分。语义头（`anthropic-ratelimit-*`、`x-request-id`、`retry-after` 的原始写法、`x-should-retry`）到达客户端；分帧头（`content-length`、`content-encoding`、`transfer-encoding`、`connection` 一族）不转发。
+  - 今天除 429 上重新格式化的 `retry-after` 外全部丢弃（清点 §4，实测）。
+  - 原料已在手：`UpstreamError.headers` 与 `UpstreamRejected.headers` 都已被赋值，且**全系统零消费者**（清点 §2.4，实测）。
+- **`Content-Type`**：随上游。上游答 `text/html` 或空 body 时同样原样透传。
+
+### 3.2 前置项：原始字节已经不在了
+
+`model_provider/ghc_client/errors.py` 的 `_response_parts` 只取 `response.text`，即已按 charset 解码的 `str`；SDK 的 response 对象在异常被翻译的那一刻就无人持有。评审用非 UTF-8 body 实测确认：上游发 `b"\xffraw-body"`，客户端拿到的是 `�raw-body`——**字节已经不可恢复**。
+
+因此：**在 `_response_parts` 处同时保留原始 `bytes` 与其 `content-type`**。对绝大多数 JSON 上游与解码结果等价，但对非 UTF-8、BOM、上游故意发的畸形字节不等价——而那正是「我们未知」的典型情形。
+
+**这一项是 §3 其余部分的前置**，实施排在最前。
+
+### 3.3 直连路径上仍然由本代理产生的错误
+
+本代理在拿到上游回答**之前**就失败了（路由拒绝、翻译器缺失、请求体不合法、本侧守卫触发等），此时不存在「上游原生」这个东西，走 §4～§6。
+
+### 3.4 流式：上游的失败事件也照样原样转发
+
+**v2 曾为这一格开例外，v3 删除。** 上游在流中发的 `event: error`（Anthropic）、`response.failed` / `response.cancelled`（Responses）是**自足的 SSE 事件**——它不是内容块，不需要装配，原样转发在技术上完全可行。「本代理已经在重新成帧」是实现现状，不构成改写裁决的理由。
+
+要求：
+
+- 直连腿上，上游失败事件的 **event 名与完整 JSON payload（含我们不认识的字段）原样重放**给客户端。若 SSE 序号一类的传输包装必须重编，只允许改传输包装，**不得把 payload 先归入本项目的闭集**。
+- 翻译腿上，由上游方言的 error reader 读成 `ErrorInfo`，再由客户端方言的 writer 写出。
+
+### 3.5 今天这里是全清点里唯一「把失败伪装成成功」的出口
+
+上游明确说「我失败了」时，**该失败事件零字节到达客户端**（先前已交付的完整块仍然到达，代理随后合成的正常终结也到达——所以不是「整个响应为空」）。客户端收到 `message_delta(stop_reason:"incomplete")` + `message_stop`，或 `response.incomplete` 且 `error: null`：**语法上完全正常的收尾**（清点 §7 与评审各自实测；评审测得 752 / 2903 / 749 字节）。
+
+两处代码注释都说「与撕裂产生的 `incomplete_responses_stream` 帧不可区分」。**这句话已经不成立**：自 2026-08-22 干净 EOF 改动落地后，块边界上的 EOF 走 `framer.terminal(stop_reason="incomplete")` 而不是错误帧。现在是**与成功不可区分**，比注释描述的严重。注释必须一并修正。
+
+该请求**不得**以一个表示正常结束的终结事件收尾。
+
+这条与 `.dev/docs/upstream/retry-and-continuation/deferred.md` 第 4 条是同一件事，但**代价已经变了**，登记时的定级需要重评。
+
+## 4. IR：`ErrorInfo`
+
+### 4.1 为什么需要一个记录，而不只是那个枚举
+
+`app/errors.py` 的 `ErrorCategory`（6 个成员）确实已经存在，且 `stream.py` 的三个 SSE 错误出口与 `hand_over.py` 都在用它。**但它是一个分类枚举，是 IR 的一个字段，不是 IR。** 它不装 `message`、`status_code`、`headers`、`code`、`param`、上游原始 payload、未知扩展、来源方言或转换损失——而 §6 的写出要求这些全都参与。
+
+v2 把「枚举已存在」当成「IR 已存在」，是从 v1「在错误的地方新建记录」过度矫正到了「不需要记录」。
+
+### 4.2 形状
+
+沿用 `SemanticRequest` / `SemanticResponse` 的房屋风格（`dataclass(slots=True)`，带 `Conversion`）：
+
+| 字段 | 含义 |
+|---|---|
+| `category` | `ErrorCategory`，见 §4.3。**保留现有 6 个成员的拼写不变**，只新增——`hand_over.py` 与 MCP 侧已在读这些值（契约见 `.dev/docs/upstream/retry-and-continuation/decisions.md` 4.1） |
+| `condition` | `UpstreamCondition`，可为空，见 §5.5。与 `category` 正交：`category` 答「客户端该做什么动作」，`condition` 答「上游具体在说哪件事」。认不出时为空 |
+| `message` | 给人读的一句话。**不得包含 SDK 的实现细节**，见 §4.5 |
+| `status_code` | 告诉客户端的 HTTP 状态。由 §5 的表决定，不是从异常类名猜 |
+| `code` | 稳定标识符。本项目自己的扩展，见 §6.4 |
+| `param` | 出问题的字段路径（`TranslationRefused.field_path` 是现成来源） |
+| `headers` | 要转发给客户端的上游语义头，已按 §3.1 的黑名单过滤 |
+| `source_format` | 这份错误读自哪种方言；本代理产生的为空 |
+| `source_bytes` / `source_content_type` | 上游原文与其类型，未解析。用于直连透传（§3）与 §10.1 |
+| `conversion` | 与请求/响应翻译同样的 `Conversion`，记录读不动或写不出的部分 |
+
+### 4.3 `ErrorCategory` 的取值
+
+现有 6 个在「客户端能做出不同动作」这个尺度上不够分——`CLIENT` 一个成员要同时表达「你的 body 错了」「没这个模型」「你没权限」。补齐为：
+
+`CLIENT`、`AUTH`、`RATE_LIMIT`、`NETWORK`、`UPSTREAM`、`INTERNAL`（以上现有，拼写不变）、`PERMISSION`、`BILLING`、`NOT_FOUND`、`OVERLOADED`、`TIMEOUT`、`NOT_IMPLEMENTED`（以上新增）。
+
+**`BILLING` 必须现在就进表**，不能留给「未来的未知错误」：Anthropic 官方词汇表里有 `billing_error`，它与 `permission_error` 可能同落 403，而客户端靠 `.type` 区分「去处理账单」与「去申请权限」——两个完全不同的动作。
+
+### 4.4 补全 IR 的另一半：`code` 与 `param` 必须一并接上
+
+今天只有 `TranslationRefused` 带 `code` 与 `field_path`（实测拿到过四字段的错误体），`UpstreamRejected` 与 `PipelineAbort` 都不带。这两个字段是本项目自己设计、语义正确的机器可读通道，只服务于一个异常类是浪费。
+
+### 4.5 `message` 的来源
+
+今天它是 `str(APIStatusError)`，形状随上游 content-type 三变：JSON 时是 Python `dict` 的 repr（单引号、不可解析）；HTML 时是原文且**没有** `Error code:` 前缀；空 body 时只有 `Error code: 400`——全由 SDK 的分支决定，本项目没有一处代码知道自己在往里放什么（清点 §2.1，三种形状均实测）。
+
+要求：`message` 由本项目自己构造，上游原文走 `source_bytes` 与 §6.4 的通道，不再依赖 SDK 的 `__str__`。
+
+## 5. source → IR：每一种失败进哪一格
+
+这是 v2 整块缺失的部分。没有它，实现者只能自己发明公共行为。
+
+### 5.1 本代理产生的错误
+
+| 来源 | `category` | `status_code` | 备注 |
+|---|---|---|---|
+| 请求体不是合法 JSON / 不是对象 | `CLIENT` | 400 | |
+| `InboundRequestError`（缺 model、路径段为空、不可流式端点请求 stream） | `CLIENT` | 400 | |
+| `UnknownModel` | `NOT_FOUND` | **404** | **行为变更**：今天是 400。理由是本代理自己的语义——请求指名的模型在目录里不存在，这是「没找到」而不是「你的 body 写错了」；`CapabilityMissing` 与它的区别正在于此。两个 SDK 对 400 与 404 都不重试，客户端的重试动作不变，改变的是它拿到的异常类。**不以「Anthropic 真实 API 也这样答」为据**——仓库里没有那个观测，我未验证 |
+| `CapabilityMissing` | `CLIENT` | 400 | 目录对该模型的端点集为空。模型在，但没说它能做什么，按拒绝处理 |
+| `EndpointNotSupported` | `CLIENT` | 400 | 模型不宣称支持这个端点。**冻结时漏了这一格**，而它已被实测证明可达（`POST /v1/messages` 请求 `claude-model@openai-responses` → 400，上游请求数 0） |
+| `EndpointNotImplemented` | `NOT_IMPLEMENTED` | 501 | 它的 docstring 就写着「模型宣称支持这个端点，但**本代理**没有驱动它」——这是代理的能力缺口，与 `TranslatorNotFound` 同格，不该说成客户端 body 有错 |
+| `ProviderNotConfigured` | `INTERNAL` | 500 | 运营方配置问题（`default_model_provider` 指向未配置的名字）。客户端改什么都没用 |
+| 其它 `ProviderError`（基类或未列出的子类） | `CLIENT` | 400 | **保持今天的行为，不猜**。已命名的子类优先。为一个尚不存在的失败改变客户端动作，比留着现状更糟；要求一条测试钉住 `ProviderError` 的子类集合，新增一个子类必须显式分类才能通过——这是「枚举加成员会给每张以它为键的表造缺项」在类层级上的同一形状 |
+| `RoutingError` | `CLIENT` | 400 | |
+| `TranslatorNotFound` | `NOT_IMPLEMENTED` | **501** | **行为变更**：今天是 400，那是把「代理没建这个能力」说成「客户端 body 有错」。与 `route.implemented=False` 同格 |
+| `TranslationRefused` | `CLIENT` | 400 | 带 `code` 与 `param` |
+| `route.implemented` 为 False（Gemini 三条） | `NOT_IMPLEMENTED` | 501 | |
+| `CountTokensRequestError` | `CLIENT` | 400 | |
+| `CountTokensUnavailable` | **读穿到它的成因** | 同 | **行为变更**：今天一律 503，上游 400 与 500 两件不同的事被压成同一个答案，上游 body 一字节不到（清点 E6，实测）。直连路径上这违反裁决第 1 条 |
+| 客户端截止时间到期（`ClientDeadlineError`） | `TIMEOUT` | 504 | 本侧时钟，无上游原生可传 |
+| 上游空闲超时（`StreamIdleTimeoutError`） | `TIMEOUT` | 504 | |
+| 缓冲上限超出（`BufferCapExceeded`） | `INTERNAL` | 500 | |
+| 上游答 200 但 body 不是 JSON | `UPSTREAM` | 502 | **行为变更**：今天异常逃出 `_dispatch`，客户端拿到 `500` + `text/plain` + `Internal Server Error` 五个字（清点 E18，实测） |
+
+### 5.2 上游状态码 → `category`（仅翻译路径需要；直连路径原样透传）
+
+| 上游 status | `category` |
+|---|---|
+| 400 | `CLIENT` |
+| 401 | `AUTH` |
+| 403 | `PERMISSION`；上游 body 的 `error.type` 是 `billing_error` 时为 `BILLING` |
+| 404 | `NOT_FOUND` |
+| 408 | `TIMEOUT` |
+| 413 / 422 | `CLIENT` |
+| 429 | `RATE_LIMIT` |
+| 500 / 502 | `UPSTREAM` |
+| 503 / 529 | `OVERLOADED` |
+| 504 | `TIMEOUT` |
+| 其它 4xx | `CLIENT` |
+| 其它 5xx | `UPSTREAM` |
+
+### 5.3 上游流内事件 → `category`（仅翻译路径；直连路径按 §3.4 原样转发）
+
+| 事件 | `category` |
+|---|---|
+| Anthropic `event: error`，payload 的 `error.type` 在官方词汇表内 | 按该 type 反查 §6.1 的表 |
+| Anthropic `event: error`，payload 的 `error.type` 不在词汇表内 | 见 §10.1 |
+| Responses `response.failed` / `response.cancelled` | 由 `response.error.code` 判定；判不出时见 §10.1 |
+| 传输撕裂、连接被对端关闭 | `NETWORK` |
+
+### 5.4 `PipelineAbort`
+
+读穿到 `cause`，按上表判定。今天 `error_status` 已经这样做了一半——它对 `cause` 递归，但递归的终点仍然是那张会把 401/503 打成 502 的表。
+
+### 5.5 上游报告的具体条件：认得的，要说成本代理自己的话
+
+§5.2 只把状态码变成 `category`，那是「客户端该做什么动作」这一层。**它下面还有一层：上游具体在说哪件事。** 用户裁决第 2 条对翻译路径的要求是「有判断力、需要支持的情况，都要先映射到内部已知概念，再按需转出实际格式」——一条只按状态码分类、把上游原句照抄进 `message` 的实现，做的是转发而不是翻译。
+
+因此 IR 增加一个正交于 `category` 的字段 `condition`，取值是一个**闭集**，登记本代理认得的上游条件。**它不改变 `category`、`status_code`，只改变 `message` 与 `code`。** 今天只有一个成员：
+
+| `condition` | 含义 |
+|---|---|
+| `CONTEXT_WINDOW_EXCEEDED` | 请求的输入超出了该模型的上下文窗口 |
+
+#### 5.5.1 判据：怎么认出 `CONTEXT_WINDOW_EXCEEDED`
+
+**恰好三条，命中任一即成立。** 依据是 48 例一手记录，[../upstream/retry-and-continuation/reports/260821-context-limit-400-examples.md](../upstream/retry-and-continuation/reports/260821-context-limit-400-examples.md)：
+
+1. `error.code == "model_max_prompt_tokens_exceeded"`（Copilot 的 Anthropic 腿 27 例，以及 vscode-copilot-chat 录到的 `/chat/completions` 腿）。**强判据**：同腿其余 400 连 `code` 字段都不带。
+2. `error.message` 含片段 `exceeds the context window`（不区分大小写）。这是 Copilot 的 Responses 腿唯一可用的判据——**该腿的 `error.code` 恒为 `invalid_request_body`，与「参数写错」「id 前缀不对」完全同码，零区分力**。
+3. `error.message` 匹配 `prompt is too long: N tokens > M maximum` 或 `prompt token count of N exceeds the limit of M`，且这对数满足 `N > M > 0`。它们同时给出数字，因此这一条由取数函数本身回答，而不是另立一份模式清单——「这句话说的是超限」与「它的数字是这两个」必须不可能各说各话。
+
+**只匹配片段，不匹配整句。** 2026-08-24 用户实测到的上游原句是 `Your input exceeds the context window of this model. Please adjust your input and try again again.`——比 2026-08 记录的 48 例多一个 `again`。上游文案会漂，末句 `Please adjust your input and try again.` 本就是通用尾巴。
+
+**裸片段 `prompt is too long` 不是第四条判据，这是裁决而非疏漏。** 上游会把请求派生的字符串回显进 `error.message`——48 例报告 §3.1／§3.2 的对照组里就有回显工具名与回显 id 两例——所以片段判据是对「客户端能部分左右的文本」下判断。而误判的代价不是文案问题：客户端会压缩历史并重发，上游真正的错误话被整句替换。已记录的每一条含该短语的样本都同时带着 `code` 或数字，因此排除它不损失任何已观测形态。
+
+> **残留风险，写下来而不是回避。** 排除裸片段**并不能**阻止误触发：条件未命中时本代理仍会把上游原句逐字引用进 `message`（`upstream returned 400: …`），于是一条恰好含 `prompt is too long` 的无关上游错误，其字节仍会到达客户端并被它的子串判据命中。判据在这里管的是**本代理是否主张这是一次超限**——不改写、不贴 `model_max_prompt_tokens_exceeded`、保留上游原话——**仅此而已**。这条是 2026-08-24 写那条负控测试时才发现的：两份评审都没有指出它，因为它出现在「不识别」那一侧。不为此裁剪上游原文：那会让代理编辑它唯一被要求原样带过的东西。
+
+**判据只读上游 body；但条件只在 `category` 为 `CLIENT` 时成立。** 这两句不矛盾，答的是两个问题：body 说了什么，与这个状态码上「超限」还能不能是真的。一个 401、429 或 5xx 无论正文写什么都不是超限，而这个区分不是学理上的——客户端对该短语**没有自己的状态码门**，所以一个被改写成超限的 429 会让它立刻压缩并重发，这是被限流时最糟的动作。`CLIENT` 覆盖 400、413、422 与其余 4xx，够用且不含 `AUTH` / `RATE_LIMIT` / `PERMISSION`。
+
+#### 5.5.2 写出：`message` 用 Anthropic 的措辞，`code` 按方言拼写
+
+`condition` 命中时：
+
+- **`message` 由本代理构造，且不带 `upstream returned <status>: ` 前缀。** 认出来了就用自己的话说，前缀是「我在转述别人」的标记，与已经写在 `status_code` 里的数字也重复。
+- 上游给了数字（判据 3，或判据 1 的 Anthropic 腿）时写 `prompt is too long: {current} tokens > {limit} maximum`；上游没给数字（Responses 腿，body 里一个数字都没有）时写 `prompt is too long: the input exceeds this model's context window`。
+- **不得合成数字。** 上限可以从模型目录的 `max_prompt_tokens` 取，当前值只能靠本地估算器猜——一个猜出来的 token 数会被客户端当作实测值显示给用户，比不写更糟。这条是禁令，不是暂缓。
+
+`message` 是**方言中立**的，即 OpenAI 与 Gemini 信封上也写这句 Anthropic 措辞。这是明知而为：把 `message` 变成按方言渲染，就等于把「说什么」搬进只负责「怎么拼」的 writer，而本项目的主产品路径是 anthropic-messages。机器可读的那一半由 `code` 按方言拼写承担：
+
+| `condition` | Anthropic `code` | OpenAI `code` | Gemini `code` |
+|---|---|---|---|
+| `CONTEXT_WINDOW_EXCEEDED` | `model_max_prompt_tokens_exceeded` | `context_length_exceeded` | 不适用，Gemini 信封无 `code` 字段 |
+
+Anthropic 那一列取自 Copilot 自己在 Anthropic 腿上发的原值（27 例一手），OpenAI 那一列是该生态的通行拼写。两者都覆盖 `UpstreamCondition` 全集，要求测试断言 `set(表) == set(UpstreamCondition)`——新增一个成员必须显式拼写才能通过。
+
+#### 5.5.3 为什么必须含 `prompt is too long`：判据是客户端的解析器
+
+**这不是文案偏好，是主产品路径上客户端行为的开关。** 实测 Claude Code 2.1.207 / 2.1.226 / 2.1.241 反编译源码，证据与可复现探针见 [reports/260824-claude-code-context-limit-detection.md](reports/260824-claude-code-context-limit-detection.md)：
+
+- 它的判据是把错误对象整串序列化后 `toLowerCase()`，再 `.includes("prompt is too long")`（2.1.241 的 `Eci`）。**`error.type` 与 `error.code` 完全不参与判定，也没有状态码门。**
+- 它确实另有一条 `context window` 判据，但**被 `status === 413` 挡住**，三个版本都一样。所以上游那句 `exceeds the context window` 在 400 上**永远认不出**。
+- 认出来 ⇒ 触发反应式自动压缩并**重发**请求（`trigger: "ptl"` → `reactive_compact_retry`），用户看到的是压缩后继续；认不出 ⇒ 会话里贴一条 `API Error: 400 {整串 JSON}`，不压缩、不重试、不换模型。
+- 数字是**可选**的：只在「会话不足两组、压无可压」的兜底解释里用 `/prompt is too long[^0-9]*(\d+)\s*tokens?\s*>\s*(\d+)/i` 抠一次；抠不到退化成不带数字的解释，不影响压缩。这正是 §5.5.2 允许无数字写法的依据。
+- `prompt is too long` 是三个版本唯一的最大公约数。`input is too long for requested model` 只对 ≥ 2.1.226 有效；`capability_rejected: prompt_too_long` 是 Claude Code 网关侧的内部协议，**本代理不得伪造**。
+
+**适用限度**：这是未文档化的内部实现，不是稳定契约。本条把它当作「当前实测的兼容目标」，复测锚点是字面量 `prompt is too long`。
+
+**验收时不得用界面文案作判据。** Claude Code 还有一条**本地按 token 估算直接拒发**的路径（`blocking_limit`，2.1.241 `L312326`），一个字节都不上行，却产出与真实识别**逐字相同**的 `Prompt is too long`。所以在界面上看到这句话，推不出代理返回过 4xx，也推不出本条改写生效。要验证识别，判据是**代理侧是否收到紧随其后的第二个（压缩后的）请求**。
+
+**本条采用后代理必须能承受的流量形态**：压缩内部另有两层自愈（摘要请求自身超限则丢历史重发，上限 3 次；反应式摘要逐步退让），代理侧会观察到同一轮里连续多个请求。
+
+§6.3 对 anthropic-messages 的嵌套信封要求在本条上**不**是承重结构，这一点必须写清楚，因为初稿写反了：客户端的 `makeMessage` 在顶层有 `message` 字段时取那一个字段，而扁平信封恰好会把这句话放在那里，所以它照样命中（同目录探针 case I 实测）。嵌套之所以保留，是 §6.3 自己的两条理由——Anthropic carrier 的合法形状，以及 `overloaded_error` 那条判据要求关键词落在会被丢弃的字段里。**不得借用一条被证伪的因果去支撑另一条正确的规范。**
+
+#### 5.5.4 定义域：只覆盖建流前的 HTTP 错误 body
+
+本节只管**上游以非 2xx HTTP 响应报告的失败**，也就是 `_from_upstream` 读到的那一格。上游在流内报告的失败（Anthropic 的 `event: error`、Responses 的 `response.failed` / `response.cancelled`）**不产生 `condition`**。
+
+这不是 §7 的例外，而是它的定义域尚未到达那里：48 例全部是建流前 400，**没有任何一例上下文超限以流内事件到达**。为一个从未观测到的形态建映射，等于替上游发明它会怎么说话——与 [deferred.md](deferred.md) E-10 拒绝为 `max_tokens` 溢出建映射是同一条理由。登记在 E-12，重开条件是拿到一份真实的流内样本。
+
+**这一条是评审逼出来的**：Spec 初稿说 `condition` 命中时「只改变 `message` 与 `code`」而没有说定义域，于是它读起来覆盖全部翻译路径，而实现只覆盖 HTTP 那一格。要么收窄要么补实现，唯独不能沉默。
+
+#### 5.5.5 直连路径不适用
+
+裁决第 1 条优先：直连腿原样透传，上游说什么客户端收到什么。Copilot 的 Anthropic 腿本来就发 `prompt is too long`，客户端在那条腿上一直是好的——**坏的只有翻译腿**，也就是 anthropic-messages 进、openai-responses 出这条主产品路径。
+
+## 6. IR → 各方言：完整的输出行为
+
+### 6.1 类别 → 各方言的类型拼写
+
+| `ErrorCategory` | Anthropic `error.type` | 本代理约定的 OpenAI `error.type` | Gemini `error.status` |
+|---|---|---|---|
+| `CLIENT` | `invalid_request_error` | `invalid_request_error` | `INVALID_ARGUMENT` |
+| `AUTH` | `authentication_error` | `authentication_error` | `UNAUTHENTICATED` |
+| `PERMISSION` | `permission_error` | `permission_error` | `PERMISSION_DENIED` |
+| `BILLING` | `billing_error` | `insufficient_quota` | `PERMISSION_DENIED` |
+| `NOT_FOUND` | `not_found_error` | `not_found_error` | `NOT_FOUND` |
+| `RATE_LIMIT` | `rate_limit_error` | `rate_limit_error` | `RESOURCE_EXHAUSTED` |
+| `OVERLOADED` | `overloaded_error` | `server_error` | `UNAVAILABLE` |
+| `TIMEOUT` | `timeout_error` | `server_error` | `DEADLINE_EXCEEDED` |
+| `NETWORK` | `api_error` | `server_error` | `UNAVAILABLE` |
+| `UPSTREAM` | `api_error` | `server_error` | `INTERNAL` |
+| `INTERNAL` | `api_error` | `server_error` | `INTERNAL` |
+| `NOT_IMPLEMENTED` | `api_error` | `server_error` | `UNIMPLEMENTED` |
+
+**关于 Anthropic 那一列**：取自 `anthropic.types.shared.error_object.ErrorObject` 这个以 `type` 为 discriminator 的九成员 union，与 `anthropic.types.shared.error_type.ErrorType` 交叉核对一致（评审独立验证，方法比清点的目录正则强）。
+
+**今天这一列是错的**：`WIRE_TYPES` 的 `network_error`、`upstream_error`、`internal_error` 都不在这九个之内（我方实测），所以 Anthropic 腿的 SSE 错误帧一直在发**不属于官方 SDK 声明词汇表**的 `error.type`。
+
+**结论只到这里，不再往前**：SDK 的 `APIStatusError.__init__` 对 `error.type` 只做 `cast`、没有 runtime validation，真实 API 也可能先于 SDK 发布新值。所以成立的是「不能声称它是合同内的 Anthropic 类型」，**不是**「Anthropic 不认识」——v2 那句超出了证据，v3 收窄。按官方词汇重映射仍然是对的目标。
+
+**关于 OpenAI 那一列**：`ErrorObject.type` 是裸 `str`（实测 `openai==3.3.1`），没有 Literal 也没有 enum，官方错误指南也没有为这些字符串背书。所以这一列的表头写的是「**本代理约定的**」——它不模拟 OpenAI 的封闭词汇，因为那个词汇不存在。
+
+**正因为它是裸 `str`，就没有理由把 `AUTH`、`PERMISSION`、`NOT_FOUND` 压成 `invalid_request_error`**（v2 那样做了，是为了填表）。v3 保留区分。
+
+### 6.2 类别 → status / 默认 code / retry 指令
+
+**只定义 `type` 字符串不足以定义客户端动作。** 两个 SDK 都按 HTTP status 选异常类，且都默认重试 **408 / 409 / 429 / ≥500**，都识别 `x-should-retry`（实测四条，`_base_client.py` 逐条核对）。
+
+⚠️ **上一句只覆盖 anthropic-sdk-python / typescript，且只覆盖非流式腿。** 主产品路径上的客户端是第三个——Claude Code——它不走那套：构造 SDK client 时传 `maxRetries: 0`（`app.pretty.js:429164`、`428607`），SDK 自带重试整个不生效，改由自己的判据驱动（`Ftw`，`273461`）。下表**在非流式腿上对它同样成立**（`Ftw` 重试 408/409/429/≥500、识别 `x-should-retry`），**但在流式腿上这张表的两个杠杆都够不着**：status 在响应头发出时就已定死（§6.4 已就 `code` 认过这一点），而 `x-should-retry` 对流内 error 帧同样无效——流内错误不经过 `Ftw`。流式腿的实际判据见 §6.3。实测 Claude Code 2.1.241，证据与可复现探针见 [reports/260824-claude-code-sse-retry-behavior.md](reports/260824-claude-code-sse-retry-behavior.md)。
+
+| `ErrorCategory` | status | 默认 `code` | `x-should-retry` |
+|---|---|---|---|
+| `CLIENT` | 400 | `invalid_request` | —（400 本就不重试） |
+| `AUTH` | 401 | `authentication_failed` | — |
+| `PERMISSION` | 403 | `permission_denied` | — |
+| `BILLING` | 403 | `billing_issue` | — |
+| `NOT_FOUND` | 404 | `not_found` | — |
+| `RATE_LIMIT` | 429 | `rate_limited` | 不设，保留 SDK 默认重试 |
+| `OVERLOADED` | 503 | `overloaded` | 不设，保留 SDK 默认重试 |
+| `TIMEOUT` | 504 | `timeout` | 不设，保留 SDK 默认重试 |
+| `NETWORK` | 502 | `upstream_network_failure` | 不设 |
+| `UPSTREAM` | 502 | `upstream_failure` | 不设 |
+| `INTERNAL` | 500 | `proxy_internal_error` | **`false`** —— 代理自己的 bug，重试同一请求不会好 |
+| `NOT_IMPLEMENTED` | 501 | `not_implemented` | **`false`** —— 否则两个 SDK 都会把它当 ≥500 自动重试，而这个类别存在的理由正是「重试没用」 |
+
+**这张表给的是默认值，`condition` 命中时 `code` 由 §5.5.2 的按方言表覆盖**，`status` 与 `category` 不变。
+
+**直连路径上，status 来自上游而不是这张表**（§3.1）。这张表管的是本代理产生的错误，以及翻译路径上重新渲染的错误。
+
+**`x-should-retry` 那一列只对非流式腿有意义。** 流式腿上响应头早已发出，该列写什么都不影响客户端动作。特别是 `RATE_LIMIT` 行的「保留 SDK 默认重试」——非流式腿的 429 确实被重试，但**流内 `rate_limit_error` 帧不会让 Claude Code 发起任何重试**（它的 `rate_limit_error` 谓词只被状态码归一化函数消费，重试判据从不引用）。同一 category 两条腿行为不同，这张表只描述其中一条。
+
+### 6.3 各方言的 carrier：JSON 与流式分别列
+
+**v2 说「SSE 的 error 帧与 JSON body 是同一个信封的两种包装」，对 OpenAI Responses 不成立**——它的 `ResponseErrorEvent` 是**扁平**的 `{"type":"error","code","message","param","sequence_number"}`，事件 `type` 固定为字面量 `"error"`，没有嵌套 `error` 对象，也没有独立的 category 字段。现有 `ResponsesFramer.error()` 正是因此把 category 放进 `message` 而不是复用 JSON 信封。
+
+规范改为：**同一语义事实，按各协议各自合法的 error carrier 写出**。
+
+| 方言 | 非流式 JSON | 流式 |
+|---|---|---|
+| `anthropic-messages` | `{"type":"error","error":{"type":<vocab>,"message":…,"code":…}}` | `event: error` + 同一对象 |
+| `openai-chat-completions` / `openai-embeddings` | `{"error":{"message":…,"type":<vocab>,"param":…,"code":…}}` | 该腿今天没有 framer，见 §8 |
+| `openai-responses` | 同上 | `event: error` + **扁平** `{"type":"error","code":…,"message":…,"param":…,"sequence_number":…}`；category 走 `code` |
+| `gemini-generate-content` | `{"error":{"code":<int>,"message":…,"status":<VOCAB>}}` | 未实现（§11） |
+
+**anthropic-messages 流式腿的两条硬约束**（实测 Claude Code 2.1.241，[reports/260824-claude-code-sse-retry-behavior.md](reports/260824-claude-code-sse-retry-behavior.md)）。这条腿上客户端是否重试，只由错误帧的**形状**与**时机**决定，与 status、与 `x-should-retry` 都无关：
+
+1. **信封必须嵌套，顶层不得带 `message` 字段。** 上表已经是这个形状，但此前没有写下理由，属于巧合正确、无护栏。Claude Code 的判据是对错误对象序列化后的整串做子串匹配 `'"type":"overloaded_error"'`；扁平信封（如 Responses 的 `ResponseErrorEvent` 那种 `{"type":"overloaded_error","message":…}`）会让它的 `makeMessage` 取到顶层 `message` 而不拼整串 JSON，匹配必然失败，重试静默失效。**因此本腿不得为了向 Responses 的扁平形状对齐而改动此信封。** 线上字节的空格与缩进不影响判定（客户端先 parse 再重新序列化），起作用的只有嵌套结构本身。
+2. **`OVERLOADED` 是本腿唯一能触发客户端重试的类别，且必须赶在第一个非 thinking 内容块之前发出。** 一旦已有正文块交付，任何流内错误都只会被定格成 partial 并追加一句「可能不完整」，客户端不再重试。这意味着「发什么」之外还有「什么时候发」——与块级交付直接相关，见 `.dev/docs/delivery-keepalive/`。本 Spec 只登记这条约束，**是否加守卫测试固化它，由 [plan.md](plan.md) 排期**。
+
+### 6.4 `code` 是本项目的扩展，不是方言天然提供的通道
+
+Anthropic 的九个 `ErrorObject` 成员都只声明 `message` 与 `type`；`error_frame()` 现在加的 `code` 是**本项目的扩展**。Python SDK 会把 raw body 的 dict 留在 `APIStatusError.body` 里，但只把 `.type` 提升为 typed 属性，**没有一等 `.code`**。
+
+所以：
+
+- `code` 标为**版本化的本项目扩展**，在 §6.2 里定义默认值。
+- **不得用它来论证 §6.1 的分辨率损失已被补回**（v2 那样做了）。`NETWORK` / `UPSTREAM` / `INTERNAL` / `NOT_IMPLEMENTED` 在 Anthropic 侧都塌成 `api_error`，客户端要区分它们只能读这个扩展字段，而**目前没有已知消费者在读**。真正保住客户端动作差异的是 §6.2 的 status 与 `x-should-retry`，不是 `code`。
+- **但流式帧是例外，`code` 在那里是唯一的通道。** 一个在响应头之后发生的失败，其 status 早在头发出时就定死为 200，`x-should-retry` 同样已经送出——两条通道都不可用。所以「这是本代理的 bug」与「这是上游断的」在 SSE 错误帧上只能靠 `code`（`proxy_delivery_failed` 对 `upstream_stream_failed`）区分。
+  这不是推论：`tests/unit/pipeline/delivery/test_stream_delivery.py` 里两条测试原本就靠 `internal_error` / `upstream_error` 的区分，把表改成 Anthropic 的真实词汇后它们立刻变红——**仓库里确实有东西在依赖这个区分**，而它现在只能落在 `code` 上。
+- 若将来有已知客户端解析它，在此列出该解析器与解析失败的后果。
+
+## 7. 流式与非流式必须表达同一件事
+
+同一个端点上，一个错误发生在响应头提交之前还是之后，客户端得到的**语义事实必须一致**；**形状按 §6.3 各自合法的 carrier**，不要求逐字节同形。今天分界线是实现时序而非协议，本 Spec 取消它。
+
+## 8. `framer is None` 那条腿：本 Spec 不解决，但要说准
+
+inbound 是 Chat Completions 且流式时，那条腿没有 framer，写不出任何错误帧。§7 的不变量对它**带例外**，此处显式写明而不是靠 §11 的排除暗示。
+
+「给 Chat Completions 找块边界」已被裁决推迟，本 Spec 不展开。要求：
+
+- 修正 `inference.py` 里那句与实测不符的注释——它说守卫触发时客户端拿到空 body，实测拿到的是**已到达的上游字节**（清点实测 69 字节），只是没有任何错误帧。
+- 把「这条腿缺少合法的 streaming error carrier」登记为**待裁决**（§10.2），而不是当作已满足。
+
+## 9. Gemini 的 501 纳入本切片
+
+`route.implemented=False` 是本代理产生的错误，Gemini 三条路径今天恰好答 501，而**错误 writer 就是 Gemini 端点当前唯一的 wire 输出**。v2 一边在 §2 要求所有本代理错误按客户端方言写出，一边在范围外排除 Gemini，两者不能同时成立。
+
+v3 纳入：**Gemini 的 501 用 Gemini 的错误信封**。这不要求实现成功请求的翻译，只要求已有端点用它自己声明的错误格式。
+
+## 10. 用户已裁决的两项
+
+### 10.1 翻译路径上读不动的上游错误 —— 裁决：候选 A
+
+裁决第 1 条的前提是直连，不适用；第 2 条的前提是「有判断力、需要支持」，也不适用；`message-translation.md` 的「**按需**理解和处理」把这一格留空。生产上会真的发生（上游改版、新错误码、供应商特有的失败）。
+
+**用户 2026-08-23 裁决：取候选 A。** 规范条款如下。
+
+翻译路径上，上游的错误既不属于本项目已建 IR 的任何概念、也读不出可靠的 `category` 时：
+
+- `category` 取 `UPSTREAM`，按 §6.1 / §6.2 渲染成客户端方言的类型、状态与 `code`；
+- **上游原文原样放进一个命名扩展字段**，保持其结构而不是压成字符串。字段名 `upstream_error`，值是上游 body 解析出的 JSON 值本身；解析不出 JSON 时，放它的原始文本（`ErrorInfo.source_bytes` 按其 `source_content_type` 解码，解不出时用 `latin-1` 兜底以保证不丢字节）。
+
+以 Anthropic 客户端 + 未知 Responses 错误为例，完整 wire：
+
+```json
+{"type":"error","error":{"type":"api_error","message":"upstream failed and this proxy could not interpret its error","code":"upstream_failure","upstream_error":{"type":"vendor_specific_thing","detail":"…"}}}
+```
+
+**已知代价，明写而非回避**：`upstream_error` 是本项目的扩展，Anthropic 的 `ErrorObject` 没有声明它，所以客户端**拿不到 typed 属性**，要读 raw body（Python SDK 会把整个 dict 留在 `APIStatusError.body` 里）。这是取 A 而非 C 换来的：原文保持结构化，机器不必二次解析一段人读的字符串。
+
+**未采纳的两个，记录理由**：
+
+- **候选 B（原样透传上游错误体）**：零信息损失、零维护，但 Anthropic 客户端会拿到一个没有顶层 `type` 的形状，SDK 的 `.type` 取不到；且与「翻译路径理应翻译」相抵触。
+- **候选 C（原文只进 `message`）**：完全落在方言声明的字段内，任何客户端都读得到全部信息，但原文变成人读的字符串，机器要二次解析，`message` 长度也不可控。
+
+### 10.2 Chat Completions 流式腿缺少合法的 error carrier —— 裁决：推迟
+
+**用户 2026-08-23 裁决：推迟，不在本切片内实现。**
+
+见 §8。§7 的不变量对这条腿**带例外**，此处是该例外的授权来源。这条腿在守卫触发或上游撕裂时，客户端拿到的仍然是已到达的上游字节 + 连接裸断，没有任何错误帧。它与「给 Chat Completions 找块边界」是同一件工作，那件此前已被推迟过。
+
+**登记去向**：`.dev/docs/error-envelope/deferred.md`，实施时建立。
+
+## 11. 不在本 Spec 范围内（每条都登记，不静默排除）
+
+- **成功响应的信封**。本 Spec 只管错误。
+- **框架自身的 404 / 405**（`{"detail":…}`）。改它要接管 Starlette 的异常处理，属另一件事。**登记**：同一个 app 里因此有两种信封，客户端要按 `error` / `detail` 两个键试探。
+- **响应头黑白名单的内容本身**。`message-format-reshape.md` 已规定，本 Spec 引用不改写。
+- **Gemini 成功请求的 wire 翻译**。Gemini 的**错误**信封在范围内（§9）。
+- **`app/errors.py` 里 `ApiError` / `classify_error` 的去留**。它们只被 `models/common.py` 与 `streaming/sse.py` 用，而那两处在当前链路上无路由消费。**登记**为独立的归档判断。
+- **可观测性面与线路说法不一致**：客户端截止那一例，线路上写 `client_deadline_exceeded`，完成行写「upstream stream ended without a terminal event」（清点 §6.1，实测）。同一事件两种说法。**登记**。
+- **`ResponsesAssembler` 不读 `output_item.done` 里的 content**，导致重成帧后 `output_text` 为空（清点 §10.4 顺带实测）。与错误面无关，**登记**。

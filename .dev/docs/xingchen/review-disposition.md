@@ -1,8 +1,10 @@
 # Xingchen provider 评审处置
 
-状态：closed
+> **Imported source-clone disposition，not current integration status.** 本账从 `origin/dotdev` 导入；closed 与下列 PASS 只适用于另一份 source clone 的 reviewed candidate。当前 checkout 不含文中 source/archive/squash commits，也没有 Xingchen 实现；报告与处置作为点时证据保留，不能据此声称 current main 已集成。
 
-权威行为规格：[`spec.md`](spec.md)
+状态：imported-external-clone-snapshot
+
+目标行为规格：[`spec.md`](spec.md)；当前 checkout 尚未实现
 
 原始报告：
 

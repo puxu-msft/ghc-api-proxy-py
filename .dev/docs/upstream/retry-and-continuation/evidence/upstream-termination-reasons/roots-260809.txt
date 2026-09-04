@@ -1,0 +1,66 @@
+db=/home/xp/.local/share/copilot-api/history-v3-260809.db ops_with_roots=36322 root_frames=10370254
+
+ROOT FRAME EVENT TYPES
+  response.function_call_arguments.delta: 4602049
+  response.output_text.delta: 3390705
+  response.reasoning_summary_text.delta: 1183488
+  content_block_delta: 667673
+  response.output_item.added: 91242
+  response.output_item.done: 90889
+  response.function_call_arguments.done: 47950
+  content_block_stop: 40833
+  message_delta: 35378
+  message_stop: 35378
+  response.created: 30810
+  response.in_progress: 30800
+  response.completed: 30322
+  response.reasoning_summary_part.added: 12763
+  response.reasoning_summary_text.done: 12758
+  response.reasoning_summary_part.done: 12758
+  content_block_start: 10923
+  response.content_part.added: 9785
+  response.output_text.done: 9520
+  response.content_part.done: 9515
+  message_start: 5508
+  response.output_text.annotation.added: 216
+  response.web_search_call.in_progress: 142
+  response.web_search_call.searching: 142
+  response.web_search_call.completed: 142
+  response.incomplete: 16
+
+response.status by terminal event
+  ('response.created', 'in_progress'): 30810
+  ('response.in_progress', 'in_progress'): 30800
+  ('response.completed', 'completed'): 30322
+  ('response.incomplete', 'incomplete'): 16
+
+NON-NULL incomplete_details
+  {"reason": "max_output_tokens"}: 16
+
+ERRORS
+
+message_delta.stop_reason (root frames)
+  tool_use: 32847
+  end_turn: 2516
+  max_tokens: 15
+
+choices[].finish_reason
+
+output item (type,status)
+  ('reasoning', 'None'): 66574
+  ('function_call', 'in_progress'): 48022
+  ('function_call', 'completed'): 47948
+  ('message', 'in_progress'): 9760
+  ('message', 'completed'): 9527
+  ('web_search_call', 'in_progress'): 142
+  ('web_search_call', 'completed'): 142
+  ('message', 'incomplete'): 11
+  ('tool_search_call', 'in_progress'): 2
+  ('tool_search_call', 'completed'): 2
+  ('function_call', 'incomplete'): 1
+
+refusals
+
+SAMPLES
+  incdet :: ('/home/xp/.local/share/copilot-api/history-v3-260809.db', 'req_1786048072650_19', 'response.incomplete', '{"error": null, "id": "oXp+nQAotTIpaxdepGbkcUyeoz2zz+DWjOL6PuDWDaoRaZTpe8IuRsbNikfGIETypMCc4E44xRHgwXDFD6ZhFLqOhYvS2Bg1/yVc2SUh5ReGHhVzBa16oPod62HpYJNuhlXLuDJE+TXVJFlWOMuGOlC27McUJ6LGASa0kxJv4IGzG+ZMUpKjbe4nhdhs2sdMSKlafV6UzSMh+ORkmiuWiVeFML4fF60y0PiXWFfFqMOLcyDBg/uqG/uMnUZ8teGzFagIVnnd2B9JXVu/KFzZiVllVQzCewLwLV70FlhSWe/cllqRXFRP892hYRAUg2TqQYz+IXAAxU/r12BOfiRwoHwRPXUB661ySJZJvzoGvcEy/rO5yzjsVrtFrlY3NadjdB8QCqpZvasRQOUhb2SqAnY6dD1LV4pDQySF", "incomplete_details": {"reason": "max_output_tokens"}, "status": "incomplete", "usage": {"input_tokens": 917011, "input_tokens_details": {"cache_write_tokens": 6264, "cached_tokens": 910400}, "output_tokens": 4555, "output_tokens_details": {"reasoning_tokens": 1203}, "total_tokens": 921566}}')
+  incdet :: ('/home/xp/.local/share/copilot-api/history-v3-260809.db', 'req_1786048139071_35', 'response.incomplete', '{"error": null, "id": "YEGbEEGi5huTPepDhNoo4qFwlpduOyxA9BkQbOXEL0Fu+7ePmbrXAT/2yzLPXxgR5B3KJoYFwOTllJdqEOufcpmny6oHpFKEQaR80nBGa4Cp0+THjNqGDoAU4zAYzQDdFG034p+KekSb6yHyt8ZcoP5CvAIQwb4RK90bDJUEIlyjEk3Q15SA35GxWTBqpOg4qUFpzgXk/pH3hp8SBLqi8I8enDnalK2s/J52AVkjdfgh2nbiDvd+xxM/9fQS9h0o9iuPbXqVeVz3XePYgptVPsMfpetSBZg7cckMtGAVu8KWu1esw08TQ16b6OXaM6jX6V76M4I92uzGOois3lGrjMXgPcWe+Ytn51uLjJftMNfGx5XI3LPHcHNWnEJb8F2slFLihtXV60rHA9Yat5YhmBj/UpfLTUukLj+b", "incomplete_details": {"reason": "max_output_tokens"}, "status": "incomplete", "usage": {"input_tokens": 920407, "input_tokens_details": {"cache_write_tokens": 3740, "cached_tokens": 916664}, "output_tokens": 1159, "output_tokens_details": {"reasoning_tokens": 114}, "total_tokens": 921566}}')

@@ -1,0 +1,56 @@
+db=/home/xp/.local/share/copilot-api/history-v3.db ops_with_roots=22836 root_frames=3368903
+
+ROOT FRAME EVENT TYPES
+  content_block_delta: 2136782
+  response.function_call_arguments.delta: 699988
+  response.reasoning_summary_text.delta: 201776
+  response.output_text.delta: 112120
+  content_block_stop: 41514
+  content_block_start: 37703
+  message_delta: 22775
+  message_stop: 22775
+  message_start: 18975
+  response.output_item.added: 13036
+  response.output_item.done: 13012
+  response.function_call_arguments.done: 7162
+  response.created: 3933
+  response.in_progress: 3932
+  response.completed: 3903
+  response.reasoning_summary_part.added: 2211
+  response.reasoning_summary_text.done: 2210
+  response.reasoning_summary_part.done: 2210
+  response.content_part.added: 667
+  response.output_text.done: 664
+  response.content_part.done: 664
+  response.output_text.annotation.added: 39
+  response.web_search_call.in_progress: 9
+  response.web_search_call.searching: 9
+  response.web_search_call.completed: 9
+
+response.status by terminal event
+  ('response.created', 'in_progress'): 3933
+  ('response.in_progress', 'in_progress'): 3932
+  ('response.completed', 'completed'): 3903
+
+NON-NULL incomplete_details
+
+ERRORS
+
+message_delta.stop_reason (root frames)
+  tool_use: 21056
+  end_turn: 1719
+
+choices[].finish_reason
+
+output item (type,status)
+  ('reasoning', 'None'): 10362
+  ('function_call', 'in_progress'): 7175
+  ('function_call', 'completed'): 7162
+  ('message', 'completed'): 680
+  ('message', 'in_progress'): 651
+  ('web_search_call', 'in_progress'): 9
+  ('web_search_call', 'completed'): 9
+
+refusals
+
+SAMPLES

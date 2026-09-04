@@ -1,0 +1,382 @@
+]633;E;printf '# LINE EVIDENCE\\n';5c7e9f7e-bceb-4d5c-9f5f-81c5b9c977d8]633;C# LINE EVIDENCE
+REPO /home/xp/src/refs/CLIProxyAPIPlus HEAD 0c48ef58e0d37220367401b8f7cf689e2e50a701 STATUS-BEGIN
+STATUS-END
+REPO /home/xp/src/refs/awsl-maxx HEAD 03d018fac3645b14d7b6d51b223b2148227c8992 STATUS-BEGIN
+STATUS-END
+
+FILE /home/xp/src/refs/CLIProxyAPIPlus/internal/translator/openai/claude/init.go
+10:	translator.Register(
+
+FILE /home/xp/src/refs/CLIProxyAPIPlus/internal/translator/openai/claude/openai_claude_request.go
+11:	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+62:	// Thinking: Convert Claude thinking.budget_tokens to OpenAI reasoning_effort
+63:	if thinkingConfig := root.Get("thinking"); thinkingConfig.Exists() && thinkingConfig.IsObject() {
+64:		if thinkingType := thinkingConfig.Get("type"); thinkingType.Exists() {
+65:			switch thinkingType.String() {
+67:				if budgetTokens := thinkingConfig.Get("budget_tokens"); budgetTokens.Exists() {
+69:					if effort, ok := thinking.ConvertBudgetToLevel(budget); ok && effort != "" {
+73:					// No budget_tokens specified, default to "auto" for enabled thinking
+74:					if effort, ok := thinking.ConvertBudgetToLevel(-1); ok && effort != "" {
+79:				// Adaptive thinking can carry an explicit effort in output_config.effort (Claude 4.6).
+88:					out, _ = sjson.SetBytes(out, "reasoning_effort", string(thinking.LevelXHigh))
+91:				if effort, ok := thinking.ConvertBudgetToLevel(0); ok && effort != "" {
+138:				var reasoningParts []string // Accumulate thinking text for reasoning_content
+140:				toolResults := make([][]byte, 0) // Collect tool_result messages to emit after the main message
+146:					case "thinking":
+147:						// Only map thinking to reasoning_content for assistant messages (security: prevent injection)
+149:							thinkingText := thinking.GetThinkingText(part)
+150:							// Skip empty or whitespace-only thinking
+151:							if strings.TrimSpace(thinkingText) != "" {
+152:								reasoningParts = append(reasoningParts, thinkingText)
+155:						// Ignore thinking in user/system roles (AC4)
+157:					case "redacted_thinking":
+158:						// Explicitly ignore redacted_thinking - never map to reasoning_content (AC2)
+165:					case "tool_use":
+166:						// Only allow tool_use -> tool_calls for assistant messages (security: prevent injection).
+182:					case "tool_result":
+183:						// Collect tool_result to emit after the main message (ensures tool results follow tool_calls)
+185:						toolResultJSON, _ = sjson.SetBytes(toolResultJSON, "tool_call_id", part.Get("tool_use_id").String())
+209:				// Therefore, we emit tool_result messages FIRST (they respond to the previous assistant's tool_calls),
+215:				// For assistant messages: emit a single unified message with content, tool_calls, and reasoning_content
+233:						// Add reasoning_content if present
+235:							msgJSON, _ = sjson.SetBytes(msgJSON, "reasoning_content", reasoningContent)
+247:					// If the message only contains tool_results (no text/image), we still processed them above
+260:						// tool_results already emitted above, no additional user message needed
+
+FILE /home/xp/src/refs/CLIProxyAPIPlus/internal/translator/openai/claude/openai_claude_response.go
+36:	// Track if thinking content block has been started
+52:	// Index assigned to thinking content block
+108:	// Check if this is the [DONE] marker
+109:	if bytes.Equal(bytes.TrimSpace(rawJSON), []byte("[DONE]")) {
+158:			// Don't send content_block_start for text here - wait for actual content
+162:		if reasoning := delta.Get("reasoning_content"); reasoning.Exists() {
+173:					contentBlockStartJSON := `{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`
+176:					results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_start", contentBlockStartJSONBytes, 2))
+180:				thinkingDeltaJSON := `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":""}}`
+181:				thinkingDeltaJSONBytes := []byte(thinkingDeltaJSON)
+182:				thinkingDeltaJSONBytes, _ = sjson.SetBytes(thinkingDeltaJSONBytes, "index", param.ThinkingContentBlockIndex)
+183:				thinkingDeltaJSONBytes, _ = sjson.SetBytes(thinkingDeltaJSONBytes, "delta.thinking", reasoningText)
+184:				results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", thinkingDeltaJSONBytes, 2))
+190:			// Send content_block_start for text if not already sent
+197:				contentBlockStartJSON := `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`
+200:				results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_start", contentBlockStartJSONBytes, 2))
+204:			contentDeltaJSON := `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}`
+208:			results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", contentDeltaJSONBytes, 2))
+246:						// Send content_block_start for tool_use
+247:						contentBlockStartJSON := `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`
+252:						results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_start", contentBlockStartJSONBytes, 2))
+278:		// Send content_block_stop for thinking content if needed
+280:			contentBlockStopJSON := []byte(`{"type":"content_block_stop","index":0}`)
+282:			results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_stop", contentBlockStopJSON, 2))
+287:		// Send content_block_stop for text if text content block was started
+290:		// Send content_block_stop for any tool calls
+298:					inputDeltaJSON := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`)
+301:					results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", inputDeltaJSON, 2))
+304:				contentBlockStopJSON := []byte(`{"type":"content_block_stop","index":0}`)
+306:				results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_stop", contentBlockStopJSON, 2))
+312:		// Don't send message_delta here - wait for usage info or [DONE]
+340:// convertOpenAIDoneToAnthropic handles the [DONE] marker and sends final events
+346:		contentBlockStopJSON := []byte(`{"type":"content_block_stop","index":0}`)
+348:		results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_stop", contentBlockStopJSON, 2))
+361:				inputDeltaJSON := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`)
+364:				results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", inputDeltaJSON, 2))
+367:			contentBlockStopJSON := []byte(`{"type":"content_block_stop","index":0}`)
+369:			results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_stop", contentBlockStopJSON, 2))
+400:		reasoningNode := choice.Get("message.reasoning_content")
+405:			block := []byte(`{"type":"thinking","thinking":""}`)
+406:			block, _ = sjson.SetBytes(block, "thinking", reasoningText)
+420:				toolUseBlock := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
+468:		return "tool_use"
+471:	case "function_call": // Legacy OpenAI
+472:		return "tool_use"
+524:	contentBlockStopJSON := []byte(`{"type":"content_block_stop","index":0}`)
+526:	*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_stop", contentBlockStopJSON, 2))
+543:	contentBlockStopJSON := []byte(`{"type":"content_block_stop","index":0}`)
+545:	*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_stop", contentBlockStopJSON, 2))
+584:					var thinkingBuilder strings.Builder
+597:						if thinkingBuilder.Len() == 0 {
+600:						block := []byte(`{"type":"thinking","thinking":""}`)
+601:						block, _ = sjson.SetBytes(block, "thinking", thinkingBuilder.String())
+603:						thinkingBuilder.Reset()
+618:									toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
+640:							if thinking := item.Get("text"); thinking.Exists() {
+641:								thinkingBuilder.WriteString(thinking.String())
+661:			if reasoning := message.Get("reasoning_content"); reasoning.Exists() {
+666:					block := []byte(`{"type":"thinking","thinking":""}`)
+667:					block, _ = sjson.SetBytes(block, "thinking", reasoningText)
+675:					toolUseBlock := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
+709:			out, _ = sjson.SetBytes(out, "stop_reason", "tool_use")
+
+FILE /home/xp/src/refs/CLIProxyAPIPlus/internal/translator/openai/openai/responses/init.go
+10:	translator.Register(
+
+FILE /home/xp/src/refs/CLIProxyAPIPlus/internal/translator/openai/openai/responses/openai_openai-responses_request.go
+114:			case "function_call":
+135:			case "function_call_output":
+
+FILE /home/xp/src/refs/CLIProxyAPIPlus/internal/translator/openai/openai/responses/openai_openai-responses_response.go
+27:	CompletionPending bool
+43:	MsgItemAdded    map[int]bool // whether response.output_item.added emitted for message
+66:	completed := []byte(`{"type":"response.completed","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null}}`)
+69:	completed, _ = sjson.SetBytes(completed, "response.created_at", st.Created)
+70:	// Inject original request fields into response as per docs/response.completed.json
+169:			item := []byte(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
+197:	return emitRespEvent("response.completed", completed)
+229:	if bytes.Equal(rawJSON, []byte("[DONE]")) {
+230:		if st.CompletionPending && !st.CompletedEmitted {
+281:	toolStateKey := func(outputIndex, toolIndex int) string { return fmt.Sprintf("%d:%d", outputIndex, toolIndex) }
+309:		st.CompletionPending = false
+311:		// response.created
+312:		created := []byte(`{"type":"response.created","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress","background":false,"error":null,"output":[]}}`)
+315:		created, _ = sjson.SetBytes(created, "response.created_at", st.Created)
+316:		out = append(out, emitRespEvent("response.created", created))
+321:		inprog, _ = sjson.SetBytes(inprog, "response.created_at", st.Created)
+340:		outputItemDone := []byte(`{"type":"response.output_item.done","item":{"id":"","type":"reasoning","encrypted_content":"","summary":[{"type":"summary_text","text":""}]},"output_index":0,"sequence_number":0}`)
+345:		out = append(out, emitRespEvent("response.output_item.done", outputItemDone))
+351:	// choices[].delta content / tool_calls / reasoning_content
+368:						item := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"in_progress","content":[],"role":"assistant"}}`)
+372:						out = append(out, emitRespEvent("response.output_item.added", item))
+399:				// reasoning_content (OpenAI reasoning incremental text)
+400:				if rc := delta.Get("reasoning_content"); rc.Exists() && rc.String() != "" {
+405:						item := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"reasoning","status":"in_progress","summary":[]}}`)
+409:						out = append(out, emitRespEvent("response.output_item.added", item))
+456:						itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}}`)
+461:						out = append(out, emitRespEvent("response.output_item.done", itemDone))
+467:						key := toolStateKey(idx, toolIndex)
+486:							o := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"function_call","status":"in_progress","arguments":"","call_id":"","name":""}}`)
+492:							out = append(out, emitRespEvent("response.output_item.added", o))
+506:								ad := []byte(`{"type":"response.function_call_arguments.delta","sequence_number":0,"item_id":"","output_index":0,"delta":""}`)
+511:								out = append(out, emitRespEvent("response.function_call_arguments.delta", ad))
+520:			// finish_reason triggers item-level finalization. response.completed is
+521:			// deferred until the terminal [DONE] marker so late usage-only chunks can
+555:							itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}}`)
+560:							out = append(out, emitRespEvent("response.output_item.done", itemDone))
+592:						fcDone := []byte(`{"type":"response.function_call_arguments.done","sequence_number":0,"item_id":"","output_index":0,"arguments":""}`)
+597:						out = append(out, emitRespEvent("response.function_call_arguments.done", fcDone))
+599:						itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}}`)
+606:						out = append(out, emitRespEvent("response.output_item.done", itemDone))
+611:				st.CompletionPending = true
+721:	rcText := gjson.GetBytes(rawJSON, "choices.0.message.reasoning_content").String()
+731:		// Prefer summary_text from reasoning_content; encrypted_content is optional
+759:						item := []byte(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
+
+FILE /home/xp/src/refs/CLIProxyAPIPlus/internal/translator/openai/openai/responses/openai_openai-responses_response_test.go
+27:func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ResponseCompletedWaitsForDone(t *testing.T) {
+35:		doneInputIndex int // Index in tt.in where the terminal [DONE] chunk arrives and response.completed must be emitted.
+43:			// so response.completed must wait for [DONE] to include that usage.
+46:				`data: {"id":"resp_late_usage","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_late_usage","type":"function","function":{"name":"read","arguments":""}}]},"finish_reason":null}]}`,
+47:				`data: {"id":"resp_late_usage","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":[{"index":0,"function":{"arguments":"{\"filePath\":\"C:\\\\repo\\\\README.md\"}"}}]},"finish_reason":"tool_calls"}]}`,
+49:				`data: [DONE]`,
+59:			// single response.completed event and it should remain deferred until [DONE].
+62:				`data: {"id":"resp_usage_same_chunk","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_usage_same_chunk","type":"function","function":{"name":"read","arguments":""}}]},"finish_reason":null}]}`,
+63:				`data: {"id":"resp_usage_same_chunk","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":[{"index":0,"function":{"arguments":"{\"filePath\":\"C:\\\\repo\\\\README.md\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":13,"completion_tokens":5,"total_tokens":18}}`,
+64:				`data: [DONE]`,
+73:			// An OpenAI-compatible streams from a buggy server might never send usage, so response.completed should
+74:			// still wait for [DONE] but omit the usage object entirely.
+77:				`data: {"id":"resp_no_usage","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_no_usage","type":"function","function":{"name":"read","arguments":""}}]},"finish_reason":null}]}`,
+78:				`data: {"id":"resp_no_usage","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":[{"index":0,"function":{"arguments":"{\"filePath\":\"C:\\\\repo\\\\README.md\"}"}}]},"finish_reason":"tool_calls"}]}`,
+79:				`data: [DONE]`,
+99:					if event != "response.completed" {
+107:						t.Fatalf("unexpected early response.completed on input index %d", i)
+113:				t.Fatalf("expected exactly 1 response.completed event, got %d", completedCount)
+116:				t.Fatalf("expected response.completed on terminal [DONE] chunk at input index %d, got %d", tt.doneInputIndex, completedInputIndex)
+122:					t.Fatalf("expected response.completed to omit usage when none was provided, got %s", completedData.Get("response.usage").Raw)
+127:			// When usage is present, the final response.completed event must preserve the usage values.
+141:func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_MultipleToolCallsRemainSeparate(t *testing.T) {
+143:		`data: {"id":"resp_test","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_read","type":"function","function":{"name":"read","arguments":""}}]},"finish_reason":null}]}`,
+144:		`data: {"id":"resp_test","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":[{"index":0,"function":{"arguments":"{\"filePath\":\"C:\\\\repo\",\"limit\":400,\"offset\":1}"}}]},"finish_reason":null}]}`,
+145:		`data: {"id":"resp_test","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":1,"id":"call_glob","type":"function","function":{"name":"glob","arguments":""}}]},"finish_reason":null}]}`,
+146:		`data: {"id":"resp_test","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":[{"index":1,"function":{"arguments":"{\"path\":\"C:\\\\repo\",\"pattern\":\"*.{yml,yaml}\"}"}}]},"finish_reason":null}]}`,
+147:		`data: {"id":"resp_test","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":10,"total_tokens":20,"prompt_tokens":10}}`,
+148:		`data: [DONE]`,
+167:		case "response.output_item.added":
+168:			if data.Get("item.type").String() != "function_call" {
+172:		case "response.output_item.done":
+173:			if data.Get("item.type").String() != "function_call" {
+179:		case "response.completed":
+182:				if item.Get("type").String() == "function_call" {
+190:		t.Fatalf("expected 2 function_call added events, got %d", len(addedNames))
+193:		t.Fatalf("expected 2 function_call done events, got %d", len(doneArgs))
+234:		t.Fatalf("expected 2 function_call items in response.output, got %d", len(outputItems))
+244:func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_MultiChoiceToolCallsUseDistinctOutputIndexes(t *testing.T) {
+246:		`data: {"id":"resp_multi_choice","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_choice0","type":"function","function":{"name":"glob","arguments":""}}]},"finish_reason":null},{"index":1,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_choice1","type":"function","function":{"name":"read","arguments":""}}]},"finish_reason":null}]}`,
+247:		`data: {"id":"resp_multi_choice","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\"C:\\\\repo\",\"pattern\":\"*.go\"}"}}]},"finish_reason":null},{"index":1,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":[{"index":0,"function":{"arguments":"{\"filePath\":\"C:\\\\repo\\\\README.md\",\"limit\":20,\"offset\":1}"}}]},"finish_reason":null}]}`,
+248:		`data: {"id":"resp_multi_choice","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":"tool_calls"},{"index":1,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":10,"total_tokens":20,"prompt_tokens":10}}`,
+249:		`data: [DONE]`,
+272:		case "response.output_item.added":
+273:			if data.Get("item.type").String() != "function_call" {
+281:		case "response.output_item.done":
+282:			if data.Get("item.type").String() != "function_call" {
+295:		t.Fatalf("expected 2 function_call added events, got %d", len(added))
+298:		t.Fatalf("expected 2 function_call done events, got %d", len(done))
+328:func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_MixedMessageAndToolUseDistinctOutputIndexes(t *testing.T) {
+330:		`data: {"id":"resp_mixed","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":"hello","reasoning_content":null,"tool_calls":null},"finish_reason":null},{"index":1,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_choice1","type":"function","function":{"name":"read","arguments":""}}]},"finish_reason":null}]}`,
+331:		`data: {"id":"resp_mixed","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":"stop"},{"index":1,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":[{"index":0,"function":{"arguments":"{\"filePath\":\"C:\\\\repo\\\\README.md\",\"limit\":20,\"offset\":1}"}}]},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":10,"total_tokens":20,"prompt_tokens":10}}`,
+332:		`data: [DONE]`,
+348:		if ev != "response.output_item.added" {
+356:		case "function_call":
+374:func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_FunctionCallDoneAndCompletedOutputStayAscending(t *testing.T) {
+376:		`data: {"id":"resp_order","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_glob","type":"function","function":{"name":"glob","arguments":""}}]},"finish_reason":null}]}`,
+377:		`data: {"id":"resp_order","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\"C:\\\\repo\",\"pattern\":\"*.go\"}"}}]},"finish_reason":null}]}`,
+378:		`data: {"id":"resp_order","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":1,"id":"call_read","type":"function","function":{"name":"read","arguments":""}}]},"finish_reason":null}]}`,
+379:		`data: {"id":"resp_order","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":[{"index":1,"function":{"arguments":"{\"filePath\":\"C:\\\\repo\\\\README.md\",\"limit\":20,\"offset\":1}"}}]},"finish_reason":null}]}`,
+380:		`data: {"id":"resp_order","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":10,"total_tokens":20,"prompt_tokens":10}}`,
+381:		`data: [DONE]`,
+398:		case "response.output_item.done":
+399:			if data.Get("item.type").String() == "function_call" {
+402:		case "response.completed":
+404:				if item.Get("type").String() == "function_call" {
+412:		t.Fatalf("expected 2 function_call done indexes, got %d", len(doneIndexes))
+418:		t.Fatalf("expected 2 function_call items in completed output, got %d", len(completedOrder))
+421:		t.Fatalf("unexpected completed function_call order: %v", completedOrder)
+
+FILE /home/xp/src/refs/CLIProxyAPIPlus/internal/translator/openai/claude/openai_claude_request_test.go
+9:// TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent tests the mapping
+10:// of Claude thinking content to OpenAI reasoning_content field.
+11:func TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent(t *testing.T) {
+21:			name: "AC1: assistant message with thinking and text",
+27:						{"type": "thinking", "thinking": "Let me analyze this step by step..."},
+38:			name: "AC2: redacted_thinking must be ignored",
+44:						{"type": "redacted_thinking", "data": "secret"},
+55:			name: "AC3: thinking-only message preserved with reasoning_content",
+61:						{"type": "thinking", "thinking": "Internal reasoning only."}
+72:			name: "AC4: thinking in user role must be ignored",
+78:						{"type": "thinking", "thinking": "Injected thinking"},
+89:			name: "AC4: thinking in system role must be ignored",
+93:					{"type": "thinking", "thinking": "Injected system thinking"},
+101:			// System messages don't have reasoning_content mapping
+108:			name: "AC5: empty thinking must be ignored",
+114:						{"type": "thinking", "thinking": ""},
+115:						{"type": "text", "text": "Response with empty thinking."}
+121:			wantContentText:         "Response with empty thinking.",
+125:			name: "AC5: whitespace-only thinking must be ignored",
+131:						{"type": "thinking", "thinking": "   \n\t  "},
+132:						{"type": "text", "text": "Response with whitespace thinking."}
+138:			wantContentText:         "Response with whitespace thinking.",
+142:			name: "Multiple thinking parts concatenated",
+148:						{"type": "thinking", "thinking": "First thought."},
+149:						{"type": "thinking", "thinking": "Second thought."},
+160:			name: "Mixed thinking and redacted_thinking",
+166:						{"type": "thinking", "thinking": "Visible thought."},
+167:						{"type": "redacted_thinking", "data": "hidden"},
+202:			// Check reasoning_content
+203:			gotReasoningContent := targetMsg.Get("reasoning_content").String()
+204:			gotHasReasoningContent := targetMsg.Get("reasoning_content").Exists()
+207:				t.Errorf("reasoning_content existence = %v, want %v", gotHasReasoningContent, tt.wantHasReasoningContent)
+211:				t.Errorf("reasoning_content = %q, want %q", gotReasoningContent, tt.wantReasoningContent)
+249:// TestConvertClaudeRequestToOpenAI_ThinkingOnlyMessagePreserved tests AC3:
+250:// that a message with only thinking content is preserved (not dropped).
+251:func TestConvertClaudeRequestToOpenAI_ThinkingOnlyMessagePreserved(t *testing.T) {
+261:				"content": [{"type": "thinking", "thinking": "Let me calculate: 2+2=4"}]
+275:	// Should have: user + assistant (thinking-only) + user = 3 messages
+280:	// Check the assistant message (index 1) has reasoning_content
+286:	if !assistantMsg.Get("reasoning_content").Exists() {
+287:		t.Error("Expected assistant message to have reasoning_content")
+290:	if assistantMsg.Get("reasoning_content").String() != "Let me calculate: 2+2=4" {
+291:		t.Errorf("Unexpected reasoning_content: %s", assistantMsg.Get("reasoning_content").String())
+295:func TestConvertClaudeRequestToOpenAI_SystemMessageScenarios(t *testing.T) {
+393:func TestConvertClaudeRequestToOpenAI_ToolResultOrderAndContent(t *testing.T) {
+400:					{"type": "tool_use", "id": "call_1", "name": "do_work", "input": {"a": 1}}
+407:					{"type": "tool_result", "tool_use_id": "call_1", "content": [{"type":"text","text":"tool ok"}]},
+452:func TestConvertClaudeRequestToOpenAI_ToolResultObjectContent(t *testing.T) {
+459:					{"type": "tool_use", "id": "call_1", "name": "do_work", "input": {"a": 1}}
+465:					{"type": "tool_result", "tool_use_id": "call_1", "content": {"foo": "bar"}}
+491:func TestConvertClaudeRequestToOpenAI_ToolResultTextAndImageContent(t *testing.T) {
+498:					{"type": "tool_use", "id": "call_1", "name": "do_work", "input": {"a": 1}}
+505:						"type": "tool_result",
+506:						"tool_use_id": "call_1",
+550:func TestConvertClaudeRequestToOpenAI_ToolResultURLImageOnly(t *testing.T) {
+557:					{"type": "tool_use", "id": "call_1", "name": "do_work", "input": {"a": 1}}
+564:						"type": "tool_result",
+565:						"tool_use_id": "call_1",
+599:func TestConvertClaudeRequestToOpenAI_AssistantTextToolUseTextOrder(t *testing.T) {
+607:					{"type": "tool_use", "id": "call_1", "name": "do_work", "input": {"a": 1}},
+649:func TestConvertClaudeRequestToOpenAI_AssistantThinkingToolUseThinkingSplit(t *testing.T) {
+656:					{"type": "thinking", "thinking": "t1"},
+658:					{"type": "tool_use", "id": "call_1", "name": "do_work", "input": {"a": 1}},
+659:					{"type": "thinking", "thinking": "t2"},
+670:	// New behavior: all content, thinking, and tool_calls unified in single assistant message
+671:	// Expect: assistant(content[pre,post] + tool_calls + reasoning_content[t1+t2])
+694:	// Should have combined reasoning_content from both thinking blocks
+695:	if got := assistantMsg.Get("reasoning_content").String(); got != "t1\n\nt2" {
+696:		t.Fatalf("Expected reasoning_content %q, got %q", "t1\n\nt2", got)
+
+FILE /home/xp/src/refs/awsl-maxx/internal/converter/claude_to_codex.go
+86:					case "tool_use":
+87:						// Convert tool use to function_call output
+107:								Type:      "function_call",
+114:						case "tool_result":
+115:							toolUseID, _ := m["tool_use_id"].(string)
+118:								Type:   "function_call_output",
+202:		case "tool_use":
+213:				Type:      "function_call",
+248:				"type": "response.created",
+256:		case "content_block_delta":
+259:					"type": "response.output_item.delta",
+
+FILE /home/xp/src/refs/awsl-maxx/internal/converter/codex_to_claude.go
+77:			case "function_call":
+78:				// Convert function call to tool_use block
+90:						Type:  "tool_use",
+96:			case "function_call_output":
+97:				// Convert function call output to tool_result
+103:						Type:      "tool_result",
+147:		case "response.created":
+163:				"type":  "content_block_start",
+166:					"type":     "thinking",
+167:					"thinking": "",
+170:			output = append(output, FormatSSE("content_block_start", blockStart)...)
+175:				"type":  "content_block_delta",
+178:					"type":     "thinking_delta",
+179:					"thinking": delta,
+182:			output = append(output, FormatSSE("content_block_delta", claudeDelta)...)
+186:				"type":  "content_block_stop",
+189:			output = append(output, FormatSSE("content_block_stop", blockStop)...)
+194:				"type":  "content_block_start",
+201:			output = append(output, FormatSSE("content_block_start", blockStart)...)
+206:				"type":  "content_block_delta",
+213:			output = append(output, FormatSSE("content_block_delta", claudeDelta)...)
+217:				"type":  "content_block_stop",
+220:			output = append(output, FormatSSE("content_block_stop", blockStop)...)
+223:		case "response.output_item.added":
+225:			if item.Get("type").String() == "function_call" {
+235:					"type":  "content_block_start",
+238:						"type": "tool_use",
+244:				output = append(output, FormatSSE("content_block_start", blockStart)...)
+247:					"type":  "content_block_delta",
+254:				output = append(output, FormatSSE("content_block_delta", blockDelta)...)
+257:		case "response.function_call_arguments.delta":
+259:				"type":  "content_block_delta",
+266:			output = append(output, FormatSSE("content_block_delta", blockDelta)...)
+268:		case "response.output_item.done":
+270:			if item.Get("type").String() == "function_call" {
+272:					"type":  "content_block_stop",
+275:				output = append(output, FormatSSE("content_block_stop", blockStop)...)
+279:		case "response.completed":
+283:					stopReason = "tool_use"
+325:	if root.Get("type").String() == "response.completed" && root.Get("response").Exists() {
+353:				thinkingBuilder := strings.Builder{}
+358:								thinkingBuilder.WriteString(txt.String())
+360:								thinkingBuilder.WriteString(part.String())
+365:						thinkingBuilder.WriteString(summary.String())
+368:				if thinkingBuilder.Len() == 0 {
+373:									thinkingBuilder.WriteString(txt.String())
+375:									thinkingBuilder.WriteString(part.String())
+380:							thinkingBuilder.WriteString(content.String())
+384:				if thinkingBuilder.Len() > 0 {
+385:					block := `{"type":"thinking","thinking":""}`
+386:					block, _ = sjson.Set(block, "thinking", thinkingBuilder.String())
+406:			case "function_call":
+418:				block := `{"type":"tool_use","id":"","name":"","input":{}}`
+433:			stopReason = "tool_use"
+
+FILE /home/xp/src/refs/awsl-maxx/internal/converter/claude_codex_test.go
+8:func TestClaudeToCodexRequest_Basic(t *testing.T) {
+15:				{Type: "tool_use", ID: "call_1", Name: "do", Input: map[string]interface{}{"a": 1}},
+37:func TestCodexToClaudeResponse_Basic(t *testing.T) {
+47:			Type:      "function_call",
+63:	if got.StopReason != "tool_use" {
+64:		t.Fatalf("expected tool_use stop_reason")
+68:func TestCodexToClaudeResponse_Stream(t *testing.T) {
+73:		"type": "response.created",
+82:		"type": "response.output_item.delta",

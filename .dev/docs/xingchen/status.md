@@ -1,12 +1,14 @@
-# Xingchen model provider 当前状态
+# Xingchen model provider 状态
 
-更新时间：2026-09-04
+> **Imported source-clone snapshot，not current in this checkout.** 本文件从 `origin/dotdev` 导入，以下 main/archive、实现与验证结论只描述另一份 source clone。导入复核时，当前 checkout 的 `src/`／`tests/` 对 Xingchen、TeleAgent 与 gateway credential fields 均无实现命中，文中引用的 source/archive commits 在当前主仓对象库也不可达。报告原件继续保留；在 reviewed source history 装位并重新核验之前，不得把本文件投影成当前 main 已实现。
 
-行为权威：[`spec.md`](spec.md)
+更新时间：2026-09-04 source-clone snapshot
 
-评审处置：[`review-disposition.md`](review-disposition.md)
+行为规格：[`spec.md`](spec.md)；当前 checkout 尚未实现
 
-## 已实现
+点时评审处置：[`review-disposition.md`](review-disposition.md)
+
+## Source clone 当时已实现
 
 `main` 的 `0cd1641aae90b4758a6ec4fc0fa053d24bf5906c` 包含 Xingchen chat-only model provider：
 
