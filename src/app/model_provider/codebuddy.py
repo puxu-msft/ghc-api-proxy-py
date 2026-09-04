@@ -25,6 +25,7 @@ from app.model_provider.types import (
     ModelDescriptor,
     ModelEndpoint,
     UnknownModel,
+    parse_prompt_token_limits,
     require_endpoint,
     resolve_endpoints,
 )
@@ -60,6 +61,7 @@ class CodebuddyProvider:
         self._descriptors: dict[str, ModelDescriptor] = {}
         self._raw_catalog: dict[str, Any] = {"object": "list", "data": []}
         self._refreshed_at: str = ""
+        self._catalog_generation = 0
         self.replace_catalog(static_catalog())
 
     @property
@@ -121,6 +123,8 @@ class CodebuddyProvider:
         entries = raw.get("data")
         if not isinstance(entries, list):
             raise ValueError("models response data must be a list")
+        generation = self._catalog_generation + 1
+        refreshed_at = datetime.now(UTC).isoformat(timespec="seconds")
         descriptors: dict[str, ModelDescriptor] = {}
         for entry in entries:  # pyright: ignore[reportUnknownVariableType]
             if not isinstance(entry, dict):
@@ -137,12 +141,17 @@ class CodebuddyProvider:
                 id=model_id,
                 endpoints=resolved.known,
                 unknown_endpoints=resolved.unknown,
+                provider_name=self._name,
+                catalog_generation=generation,
+                catalog_refreshed_at=refreshed_at,
+                prompt_token_limits=parse_prompt_token_limits(model),
             )
         self._descriptors = descriptors
         self._raw_catalog = dict(raw)
+        self._catalog_generation = generation
         # Stamped only here, so it marks a successful replacement rather than an
         # attempt — the same rule the Copilot provider applies.
-        self._refreshed_at = datetime.now(UTC).isoformat(timespec="seconds")
+        self._refreshed_at = refreshed_at
 
     async def refresh_catalog(self) -> bool:
         """Re-read the static table. Returns whether it changed — it cannot.

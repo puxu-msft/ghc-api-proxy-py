@@ -13,10 +13,12 @@ from app.model_provider import (
     GithubCopilotProvider,
     ModelDescriptor,
     ModelEndpoint,
+    PromptTokenLimits,
     ProviderNotConfigured,
     ProviderRegistry,
     UnknownModel,
     parse_endpoints,
+    parse_prompt_token_limits,
     require_endpoint,
     resolve_default_name,
 )
@@ -29,7 +31,17 @@ CATALOG: dict[str, Any] = {
     "object": "list",
     "data": [
         {"id": "claude-model", "supported_endpoints": ["/v1/messages"]},
-        {"id": "gpt-model", "supported_endpoints": ["/responses", "/chat/completions"]},
+        {
+            "id": "gpt-model",
+            "supported_endpoints": ["/responses", "/chat/completions"],
+            "capabilities": {
+                "tokenizer": "o200k_base",
+                "limits": {
+                    "max_prompt_tokens": 922_000,
+                    "max_context_window_tokens": 1_050_000,
+                },
+            },
+        },
         {"id": "embed-model", "supported_endpoints": ["/embeddings"]},
         {"id": "mute-model", "supported_endpoints": []},
         {"id": "future-model", "supported_endpoints": ["/v1/messages", "/brand-new"]},
@@ -107,6 +119,68 @@ def test_endpoints_parse_into_known_members_and_leftovers() -> None:
     assert known == {ModelEndpoint.ANTHROPIC_MESSAGES, ModelEndpoint.OPENAI_RESPONSES}
     # An unrecognised path is kept rather than dropped, so a new upstream endpoint stays visible.
     assert unknown == ("/brand-new",)
+
+
+def test_prompt_token_limits_are_read_from_the_nested_catalog_shape() -> None:
+    limits = parse_prompt_token_limits(CATALOG["data"][1])
+
+    assert limits == PromptTokenLimits(
+        tokenizer="o200k_base",
+        max_prompt_tokens=922_000,
+        max_context_window_tokens=1_050_000,
+    )
+
+
+@pytest.mark.parametrize(
+    "capabilities",
+    [
+        None,
+        {"tokenizer": "", "limits": {"max_prompt_tokens": 10, "max_context_window_tokens": 20}},
+        {"tokenizer": "o200k_base", "limits": None},
+        {"tokenizer": "o200k_base", "limits": {"max_prompt_tokens": True, "max_context_window_tokens": 20}},
+        {"tokenizer": "o200k_base", "limits": {"max_prompt_tokens": 10, "max_context_window_tokens": False}},
+        {"tokenizer": "o200k_base", "limits": {"max_prompt_tokens": 0, "max_context_window_tokens": 20}},
+        {"tokenizer": "o200k_base", "limits": {"max_prompt_tokens": 21, "max_context_window_tokens": 20}},
+    ],
+)
+def test_prompt_token_limits_fail_open_on_incomplete_or_invalid_metadata(
+    capabilities: object,
+) -> None:
+    assert parse_prompt_token_limits({"capabilities": capabilities}) is None
+
+
+def test_flat_limit_lookalikes_do_not_replace_nested_catalog_metadata() -> None:
+    assert (
+        parse_prompt_token_limits(
+            {
+                "tokenizer": "o200k_base",
+                "max_prompt_tokens": 922_000,
+                "max_context_window_tokens": 1_050_000,
+            }
+        )
+        is None
+    )
+
+
+def test_descriptor_keeps_one_catalog_generation_and_prompt_limit_snapshot() -> None:
+    provider, _ = build_provider(upstream(httpx2.Response(200)))
+    first = provider.describe("gpt-model")
+    assert first is not None
+
+    provider.replace_catalog(CATALOG)
+    second = provider.describe("gpt-model")
+    assert second is not None
+
+    assert first.provider_name == "ghc"
+    assert second.provider_name == "ghc"
+    assert first.catalog_generation == 1
+    assert second.catalog_generation == 2
+    assert first.prompt_token_limits == second.prompt_token_limits == PromptTokenLimits(
+        tokenizer="o200k_base",
+        max_prompt_tokens=922_000,
+        max_context_window_tokens=1_050_000,
+    )
+    assert first is not second
 
 
 def test_capability_gate_rejects_a_model_that_advertises_nothing() -> None:

@@ -16,6 +16,7 @@ from app.model_provider.types import (
     UnknownModel,
     model_type_of,
     parse_adaptive_thinking,
+    parse_prompt_token_limits,
     parse_reasoning_efforts,
     require_endpoint,
     resolve_endpoints,
@@ -65,6 +66,7 @@ class GithubCopilotProvider:
         self._raw_catalog: dict[str, Any] = {"object": "list", "data": []}
         self._etag: str | None = None
         self._refreshed_at: str = ""
+        self._catalog_generation = 0
 
     @property
     def name(self) -> str:
@@ -114,6 +116,8 @@ class GithubCopilotProvider:
         entries = raw.get("data")
         if not isinstance(entries, list):
             raise ValueError("models response data must be a list")
+        generation = self._catalog_generation + 1
+        refreshed_at = datetime.now(UTC).isoformat(timespec="seconds")
         descriptors: dict[str, ModelDescriptor] = {}
         for entry in entries:  # pyright: ignore[reportUnknownVariableType]
             if not isinstance(entry, dict):
@@ -135,11 +139,16 @@ class GithubCopilotProvider:
                 # Read here for the same reason the endpoints are: the raw catalog is kept, but anything that reads it a second time to answer the same question is a second answer waiting to disagree with this one.
                 reasoning_efforts=parse_reasoning_efforts(model),
                 adaptive_thinking=parse_adaptive_thinking(model),
+                provider_name=self._name,
+                catalog_generation=generation,
+                catalog_refreshed_at=refreshed_at,
+                prompt_token_limits=parse_prompt_token_limits(model),
             )
         self._descriptors = descriptors
         self._raw_catalog = dict(raw)
+        self._catalog_generation = generation
         # Stamped only here, so it marks a successful replacement rather than an attempt. A refresh that raised, or one upstream answered 304 to, leaves the previous stamp standing — which is correct: the descriptors it describes are still the ones in hand.
-        self._refreshed_at = datetime.now(UTC).isoformat(timespec="seconds")
+        self._refreshed_at = refreshed_at
 
     async def refresh_catalog(self) -> bool:
         """Refetch the catalog, authenticating as of now.

@@ -28,10 +28,15 @@ class XingchenProvider:
         self._name = name
         self._client = client
         self._disabled = frozenset(config.disabled_models)
+        self._catalog_generation = 1
+        self._refreshed_at = datetime.now(UTC).isoformat(timespec="seconds")
         self._descriptors = {
             model_id: ModelDescriptor(
                 id=model_id,
                 endpoints=DRIVEN_ENDPOINTS,
+                provider_name=self._name,
+                catalog_generation=self._catalog_generation,
+                catalog_refreshed_at=self._refreshed_at,
             )
             for model_id in config.models
         }
@@ -47,7 +52,6 @@ class XingchenProvider:
                 for model_id in config.models
             ],
         }
-        self._refreshed_at = datetime.now(UTC).isoformat(timespec="seconds")
 
     @property
     def name(self) -> str:
