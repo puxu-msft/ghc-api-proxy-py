@@ -12,11 +12,7 @@ import httpx2
 import pytest
 
 from app.config.schema import CodebuddyProviderConfig
-from app.model_provider import (
-    EndpointNotSupported,
-    ModelEndpoint,
-    UnknownModel,
-)
+from app.model_provider import EndpointNotSupported, ModelDescriptor, ModelEndpoint
 from app.model_provider.codebuddy import DRIVEN_ENDPOINTS, CodebuddyProvider
 from app.model_provider.codebuddy_client import (
     CodebuddyClient,
@@ -65,6 +61,12 @@ def build_provider(
     return CodebuddyProvider("cb", client, config, base_url="https://cb.example")
 
 
+def descriptor_for(provider: CodebuddyProvider, model_id: str) -> ModelDescriptor:
+    descriptor = provider.describe(model_id)
+    assert descriptor is not None
+    return descriptor
+
+
 def test_the_static_catalog_is_served_and_stamped(tmp_path: Path) -> None:
     provider = build_provider(tmp_path)
 
@@ -97,19 +99,6 @@ def test_disabled_models_are_not_on_offer(tmp_path: Path) -> None:
     assert provider.disabled_ids == frozenset({DEFAULT_MODEL_IDS[0]})
 
 
-def test_an_unknown_model_is_refused_before_the_network(tmp_path: Path) -> None:
-    provider = build_provider(tmp_path)
-
-    with pytest.raises(UnknownModel):
-        asyncio.run(
-            provider.send(
-                ModelEndpoint.OPENAI_CHAT_COMPLETIONS,
-                {"model": "nope"},
-                model_id="nope",
-            )
-        )
-
-
 def test_the_messages_endpoint_is_refused_by_the_gate(tmp_path: Path) -> None:
     """Anthropic clients reach this provider translated; the gate is what enforces it."""
     provider = build_provider(tmp_path)
@@ -120,7 +109,7 @@ def test_the_messages_endpoint_is_refused_by_the_gate(tmp_path: Path) -> None:
             provider.send(
                 ModelEndpoint.ANTHROPIC_MESSAGES,
                 {"model": model_id},
-                model_id=model_id,
+                descriptor=descriptor_for(provider, model_id),
             )
         )
 
@@ -131,7 +120,12 @@ def test_count_tokens_is_gated_the_same_way(tmp_path: Path) -> None:
     model_id = DEFAULT_MODEL_IDS[0]
 
     with pytest.raises(EndpointNotSupported):
-        asyncio.run(provider.count_tokens({"model": model_id}, model_id=model_id))
+        asyncio.run(
+            provider.count_tokens(
+                {"model": model_id},
+                descriptor=descriptor_for(provider, model_id),
+            )
+        )
 
 
 def test_the_driven_table_matches_the_send_path() -> None:

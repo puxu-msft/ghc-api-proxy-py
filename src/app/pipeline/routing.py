@@ -15,7 +15,6 @@ from app.model_provider import (
     EndpointNotSupported,
     ModelDescriptor,
     ModelEndpoint,
-    ModelProvider,
     ProviderRegistry,
     UnknownModel,
 )
@@ -368,12 +367,9 @@ def apply_route(context: RequestContext, route: Route) -> None:
     context.model_descriptor = route.descriptor
 
 
-def translation_target(provider: ModelProvider, model_id: str) -> TranslationTarget:
-    """What the resolved model can do, in the form a writer reads.
-
-    Built from the same descriptor routing used, so the capabilities a translation renders against are the ones the request will actually be sent to. A model the provider does not describe yields the default — no published efforts — which makes a writer decline to render rather than guess, exactly as an absent catalog field does.
-    """
-    descriptor = provider.describe(model_id)
-    if descriptor is None:
-        return TranslationTarget(model_id=model_id)
-    return TranslationTarget(model_id=model_id, reasoning_efforts=descriptor.reasoning_efforts)
+def translation_target(descriptor: ModelDescriptor) -> TranslationTarget:
+    """Project the exact catalog snapshot routing selected into the translator's view."""
+    return TranslationTarget(
+        model_id=descriptor.id,
+        reasoning_efforts=descriptor.reasoning_efforts,
+    )

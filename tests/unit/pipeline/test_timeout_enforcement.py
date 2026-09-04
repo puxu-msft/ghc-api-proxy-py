@@ -59,7 +59,7 @@ class SlowProvider:
         endpoint: ModelEndpoint,
         payload: Any,
         *,
-        model_id: str,
+        descriptor: ModelDescriptor,
         stream: bool = False,
         extra_headers: Any = None,
     ) -> httpx2.Response:
@@ -67,7 +67,7 @@ class SlowProvider:
         await asyncio.sleep(self._delay)
         return httpx2.Response(200, json={})
 
-    async def count_tokens(self, payload: Any, *, model_id: str) -> httpx2.Response:
+    async def count_tokens(self, payload: Any, *, descriptor: ModelDescriptor) -> httpx2.Response:
         # Present so the fake really satisfies the protocol. Nothing here counts tokens, and a silent stub would let a test think it had.
         raise NotImplementedError("this fake does not count tokens")
 

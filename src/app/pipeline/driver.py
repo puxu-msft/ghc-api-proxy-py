@@ -133,6 +133,9 @@ def shape_request(
 
 async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[RequestContext], None] | None = None) -> HandledRequest:
     provider, route = shape_request(chain, context, on_routed)
+    descriptor = route.descriptor
+    if descriptor is None:
+        raise RuntimeError("routed request has no model descriptor")
 
     # Before translation, because the predicates read `system` and `messages` and the target format has neither. Before the driver, because the whole point is that no upstream call happens: this is the one path where the reply is decided without an attempt.
     #
@@ -161,7 +164,7 @@ async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[Req
             context.payload,
             source=route.inbound_format,
             target=route.target_format,
-            target_model=translation_target(provider, route.model_id),
+            target_model=translation_target(descriptor),
         )
         context.payload = translated
         if semantic.client_search_tool:
@@ -191,6 +194,8 @@ async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[Req
         attempt_deadline=attempt_deadline,
         response_header_timeout=timeouts.response_header,
         rate_limiter=chain.rate_limiter_for(provider.name),
+        descriptor=descriptor,
+        admission=chain.prompt_token_admission,
     )
     outcome = await driver.run(context)
     if isinstance(outcome.error, WebSearchNotExecutable) and context.inbound_format is WireFormat.ANTHROPIC_MESSAGES:
@@ -278,6 +283,9 @@ async def handle_count_tokens(
     The two counters are not interchangeable. A model provider returns upstream's own number and is worth learning from; `local` returns an estimate corrected by what has been learnt so far. So the answer says which one it came from rather than presenting an estimate as a measurement.
     """
     provider, route = shape_request(chain, context)
+    descriptor = route.descriptor
+    if descriptor is None:
+        raise RuntimeError("count route has no model descriptor")
     if on_routed is not None:
         on_routed(context)
 
@@ -288,7 +296,7 @@ async def handle_count_tokens(
             context.payload,
             source=route.inbound_format,
             target=route.target_format,
-            target_model=translation_target(provider, route.model_id),
+            target_model=translation_target(descriptor),
         )
         context.payload = translated
         if not semantic.conversion.lossless:
@@ -317,7 +325,7 @@ async def handle_count_tokens(
     calibration = chain.tokenization.calibration
 
     async def ask_upstream(payload: Mapping[str, Any]) -> int:
-        response = await provider.count_tokens(payload, model_id=route.model_id)
+        response = await provider.count_tokens(payload, descriptor=descriptor)
         # Taken before the body is read and before the response is closed, so the count line can report the leg it actually flew. Without these a count answered by upstream and one estimated in this process render identically apart from the counter's name — same missing byte fields, same single protocol label — and the line's own convention is that a missing field means the exchange had nothing to put there.
         # What the leg's presence means is narrower than "upstream answered the count": it means upstream *responded*. A refusal or a transport failure never reaches here — `send_anthropic_count_tokens` raises it as a pipeline error — but a 200 whose body carries no usable `input_tokens` does, and then the raise below hands the count to the estimator with both legs already recorded. `↑…B ↓…B … provider(ghc-failed,local)` is the right reading of that: upstream was asked, upstream replied, and the reply could not be used.
         context.extras["count_tokens_upstream_protocol"] = response.http_version

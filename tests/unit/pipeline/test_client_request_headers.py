@@ -450,14 +450,14 @@ class _DescribingProvider:
         endpoint: ModelEndpoint,
         payload: Any,
         *,
-        model_id: str,
+        descriptor: ModelDescriptor,
         stream: bool = False,
         extra_headers: Any = None,
     ) -> httpx2.Response:
         # `shape_request` stops before any attempt, so reaching this means the test under it grew a leg it did not mean to have.
         raise AssertionError("this test shapes a request; it never sends one")
 
-    async def count_tokens(self, payload: Any, *, model_id: str) -> httpx2.Response:
+    async def count_tokens(self, payload: Any, *, descriptor: ModelDescriptor) -> httpx2.Response:
         raise AssertionError("this test shapes a request; it never counts one")
 
 

@@ -648,6 +648,7 @@ async def _dispatch_after_body(
         trace.model = context.resolved_model
         trace.attempts = context.attempt_count
         trace.detail = str(error)
+        trace.absorb_token_admissions(context)
         # A refused crossing is exactly where the losses matter: they name which field the request could not carry, and the error alone rarely does.
         trace.absorb_losses(context)
         # Before the response is written, because `context.payload` is the body upstream refused and nothing downstream keeps it.
@@ -662,6 +663,7 @@ async def _dispatch_after_body(
     trace.model = context.resolved_model
     trace.requested_model = context.requested_model
     trace.attempts = context.attempt_count
+    trace.absorb_token_admissions(context)
     # The request half has crossed by now whatever happens next, so this covers the three returns below. The buffered path calls again once the reply has crossed back.
     trace.absorb_losses(context)
 
@@ -828,6 +830,7 @@ async def _dispatch_after_body(
                 if context.attempt_count > opened_before:
                     trace.attempts = context.attempt_count
                     active.set_attempts(trace.request_id, context.attempt_count)
+                    trace.absorb_token_admissions(context)
                     trace.replaced_failures.append(one_line(repr(replacing)))
                     # The replacement attempt now owns response conversion facts even if it fails before obtaining headers and an assembler. The discarded attempt's losses must not become the final request's losses.
                     accounting.response_loss_assembler = None

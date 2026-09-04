@@ -17,7 +17,6 @@ from app.model_provider import (
     PromptTokenLimits,
     ProviderNotConfigured,
     ProviderRegistry,
-    UnknownModel,
     parse_endpoints,
     parse_prompt_token_limits,
     require_descriptor_owner,
@@ -102,6 +101,12 @@ def build_provider(
     )
     provider.replace_catalog(CATALOG)
     return provider, http_client
+
+
+def descriptor_for(provider: GithubCopilotProvider, model_id: str) -> ModelDescriptor:
+    descriptor = provider.describe(model_id)
+    assert descriptor is not None
+    return descriptor
 
 
 def upstream(response: httpx2.Response) -> Callable[[httpx2.Request], httpx2.Response]:
@@ -229,6 +234,35 @@ def test_disabled_model_is_not_on_offer() -> None:
 
 
 @pytest.mark.asyncio
+async def test_inflight_send_uses_the_descriptor_captured_before_catalog_replacement() -> None:
+    seen: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(200, json={"ok": True})
+
+    provider, http_client = build_provider(handler)
+    captured = descriptor_for(provider, "claude-model")
+    provider.replace_catalog(
+        {"data": [{"id": "replacement", "supported_endpoints": ["/responses"]}]}
+    )
+    try:
+        response = await provider.send(
+            ModelEndpoint.ANTHROPIC_MESSAGES,
+            {"model": "claude-model"},
+            descriptor=captured,
+        )
+    finally:
+        await http_client.aclose()
+
+    assert response.status_code == 200
+    assert provider.describe("claude-model") is None
+    assert captured.catalog_generation == 1
+    assert descriptor_for(provider, "replacement").catalog_generation == 2
+    assert [str(request.url) for request in seen] == [f"{BASE_URL}/v1/messages"]
+
+
+@pytest.mark.asyncio
 async def test_send_reaches_the_endpoint_the_model_advertises() -> None:
     seen: list[httpx2.Request] = []
 
@@ -246,7 +280,7 @@ async def test_send_reaches_the_endpoint_the_model_advertises() -> None:
         await provider.send(
             ModelEndpoint.ANTHROPIC_MESSAGES,
             {"model": "claude-model"},
-            model_id="claude-model",
+            descriptor=descriptor_for(provider, "claude-model"),
         )
     finally:
         await http_client.aclose()
@@ -268,7 +302,7 @@ async def test_unadvertised_endpoint_is_refused_before_the_network() -> None:
             await provider.send(
                 ModelEndpoint.OPENAI_RESPONSES,
                 {"model": "claude-model"},
-                model_id="claude-model",
+                descriptor=descriptor_for(provider, "claude-model"),
             )
     finally:
         await http_client.aclose()
@@ -291,29 +325,7 @@ async def test_model_with_empty_capabilities_is_refused_before_the_network() -> 
             await provider.send(
                 ModelEndpoint.ANTHROPIC_MESSAGES,
                 {"model": "mute-model"},
-                model_id="mute-model",
-            )
-    finally:
-        await http_client.aclose()
-
-    assert seen == []
-
-
-@pytest.mark.asyncio
-async def test_disabled_model_is_refused_before_the_network() -> None:
-    seen: list[httpx2.Request] = []
-
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        seen.append(request)
-        return httpx2.Response(200, json={"ok": True})
-
-    provider, http_client = build_provider(handler, disabled=["banned-model"])
-    try:
-        with pytest.raises(UnknownModel):
-            await provider.send(
-                ModelEndpoint.ANTHROPIC_MESSAGES,
-                {"model": "banned-model"},
-                model_id="banned-model",
+                descriptor=descriptor_for(provider, "mute-model"),
             )
     finally:
         await http_client.aclose()
@@ -325,7 +337,7 @@ async def test_disabled_model_is_refused_before_the_network() -> None:
 async def test_count_tokens_is_gated_on_the_messages_capability() -> None:
     """Counting a body is refused wherever sending it would be, and before the network.
 
-    Three ways to be refused, and they are not the same: `gpt-model` advertises other endpoints, `mute-model` advertises none, and the third is not in the catalog at all. A gate that only asked "is this model known" would let the first two through.
+    Two ways to be refused, and they are not the same: `gpt-model` advertises other endpoints while `mute-model` advertises none. Unknown and disabled ids never produce a routed descriptor, so routing owns those refusals before this provider contract is called.
     """
     seen: list[httpx2.Request] = []
 
@@ -336,13 +348,10 @@ async def test_count_tokens_is_gated_on_the_messages_capability() -> None:
     provider, http_client = build_provider(handler)
     try:
         with pytest.raises(EndpointNotSupported):
-            await provider.count_tokens({"model": "gpt-model"}, model_id="gpt-model")
+            await provider.count_tokens({"model": "gpt-model"}, descriptor=descriptor_for(provider, "gpt-model"))
 
         with pytest.raises(CapabilityMissing):
-            await provider.count_tokens({"model": "mute-model"}, model_id="mute-model")
-
-        with pytest.raises(UnknownModel):
-            await provider.count_tokens({"model": "no-such"}, model_id="no-such")
+            await provider.count_tokens({"model": "mute-model"}, descriptor=descriptor_for(provider, "mute-model"))
     finally:
         await http_client.aclose()
 
@@ -486,7 +495,7 @@ async def test_a_model_with_an_unstated_endpoint_can_actually_be_sent_to() -> No
         await provider.send(
             ModelEndpoint.OPENAI_CHAT_COMPLETIONS,
             {"model": "chatter"},
-            model_id="chatter",
+            descriptor=descriptor_for(provider, "chatter"),
         )
     finally:
         await http_client.aclose()
@@ -546,7 +555,7 @@ async def test_an_unreadable_endpoint_field_is_refused_before_the_network() -> N
             await provider.send(
                 ModelEndpoint.OPENAI_CHAT_COMPLETIONS,
                 {"model": "unreadable"},
-                model_id="unreadable",
+                descriptor=descriptor_for(provider, "unreadable"),
             )
     finally:
         await http_client.aclose()

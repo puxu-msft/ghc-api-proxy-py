@@ -8,7 +8,7 @@ import openai
 import pytest
 
 from app.config.schema import UpstreamRequestRetryConfig
-from app.model_provider import ModelEndpoint, ModelProvider
+from app.model_provider import ModelDescriptor, ModelEndpoint, ModelProvider
 from app.model_provider.upstream_errors import normalize_upstream_error
 from app.pipeline.direct_driver import DirectDriver, LedgerBudget
 from app.pipeline.events import SubscriberRegistry
@@ -30,16 +30,24 @@ class SequenceProvider:
         self.outcomes = outcomes
         self.calls = 0
 
+    def describe(self, model_id: str) -> ModelDescriptor | None:
+        if model_id != "gpt-model":
+            return None
+        return ModelDescriptor(
+            id=model_id,
+            endpoints=frozenset({ModelEndpoint.OPENAI_RESPONSES}),
+        )
+
     async def send(
         self,
         endpoint: ModelEndpoint,
         payload: Mapping[str, Any],
         *,
-        model_id: str,
+        descriptor: ModelDescriptor,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
     ) -> httpx2.Response:
-        del endpoint, payload, model_id, stream, extra_headers
+        del endpoint, payload, descriptor, stream, extra_headers
         self.calls += 1
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, BaseException):

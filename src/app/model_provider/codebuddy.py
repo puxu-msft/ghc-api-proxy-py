@@ -24,8 +24,8 @@ from app.model_provider.types import (
     EndpointNotImplemented,
     ModelDescriptor,
     ModelEndpoint,
-    UnknownModel,
     parse_prompt_token_limits,
+    require_descriptor_owner,
     require_endpoint,
     resolve_endpoints,
 )
@@ -168,13 +168,11 @@ class CodebuddyProvider:
         endpoint: ModelEndpoint,
         payload: Mapping[str, Any],
         *,
-        model_id: str,
+        descriptor: ModelDescriptor,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
     ) -> httpx2.Response:
-        descriptor = self.describe(model_id)
-        if descriptor is None:
-            raise UnknownModel(self._name, model_id)
+        require_descriptor_owner(descriptor, self._name)
         require_endpoint(descriptor, endpoint, self._name)
         if endpoint not in _SEND_METHODS:
             raise EndpointNotImplemented(self._name, endpoint.value)
@@ -184,7 +182,7 @@ class CodebuddyProvider:
         self,
         payload: Mapping[str, Any],
         *,
-        model_id: str,
+        descriptor: ModelDescriptor,
     ) -> httpx2.Response:
         """Anthropic token counting.
 
@@ -192,8 +190,6 @@ class CodebuddyProvider:
         advertises `/v1/messages`, so the gate refuses before any network call and
         the configured counting chain falls through to its next leg.
         """
-        descriptor = self.describe(model_id)
-        if descriptor is None:
-            raise UnknownModel(self._name, model_id)
+        require_descriptor_owner(descriptor, self._name)
         require_endpoint(descriptor, ModelEndpoint.ANTHROPIC_MESSAGES, self._name)
         raise EndpointNotImplemented(self._name, ModelEndpoint.ANTHROPIC_MESSAGES.value)

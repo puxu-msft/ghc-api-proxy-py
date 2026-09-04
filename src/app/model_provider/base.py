@@ -82,13 +82,13 @@ class ModelProvider(Protocol):
         endpoint: ModelEndpoint,
         payload: Mapping[str, Any],
         *,
-        model_id: str,
+        descriptor: ModelDescriptor,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
     ) -> httpx2.Response:
         """Send one request to one endpoint.
 
-        Raises before touching the network when the model does not advertise the endpoint.
+        The descriptor is the immutable snapshot routing selected. Raises before touching the network when another provider issued it or the model does not advertise the endpoint.
         """
         ...
 
@@ -96,12 +96,12 @@ class ModelProvider(Protocol):
         self,
         payload: Mapping[str, Any],
         *,
-        model_id: str,
+        descriptor: ModelDescriptor,
     ) -> httpx2.Response:
         """Ask upstream how many tokens an Anthropic Messages body comes to.
 
         On the protocol rather than on one implementation because the spec's `inbound.anthropic_count_tokens.providers` names a model provider among the legs it may try; a counter that only some providers offered could not be selected by name.
 
-        Gated on the Messages capability, the same as sending that body would be.
+        Gated on descriptor ownership and the Messages capability, the same as sending that body would be.
         """
         ...

@@ -412,14 +412,14 @@ class CapableProvider:
         endpoint: ModelEndpoint,
         payload: Any,
         *,
-        model_id: str,
+        descriptor: ModelDescriptor,
         stream: bool = False,
         extra_headers: Any = None,
     ) -> httpx2.Response:
         self.sent.append(dict(payload))
         return httpx2.Response(200)
 
-    async def count_tokens(self, payload: Any, *, model_id: str) -> httpx2.Response:
+    async def count_tokens(self, payload: Any, *, descriptor: ModelDescriptor) -> httpx2.Response:
         self.counted.append(dict(payload))
         # Carries a request because the caller calls `raise_for_status()`, which needs one. Without it the count quietly falls back to the local estimate and an assertion about `counted` would still be green while nothing upstream was ever asked.
         return httpx2.Response(

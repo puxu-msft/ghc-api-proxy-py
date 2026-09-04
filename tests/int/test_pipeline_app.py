@@ -13,6 +13,7 @@ import ssl
 import threading
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator
+from copy import deepcopy
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -118,6 +119,7 @@ def make_provider(
     handler: Callable[[httpx2.Request], httpx2.Response],
     *,
     disabled: list[str] | None = None,
+    catalog: dict[str, Any] | None = None,
 ) -> tuple[GithubCopilotProvider, httpx2.AsyncClient]:
     http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     tokens = CopilotTokenManager(StaticTokenSource(), http_client, clock=lambda: 1000)
@@ -145,7 +147,7 @@ def make_provider(
         http_client=http_client,
         base_url=BASE_URL,
     )
-    provider.replace_catalog(CATALOG)
+    provider.replace_catalog(catalog or CATALOG)
     return provider, http_client
 
 
@@ -155,8 +157,10 @@ def make_client(
     mappings: dict[str, str] | None = None,
     tokenization_path: Path | None = None,
     overrides: dict[str, Any] | None = None,
+    catalog: dict[str, Any] | None = None,
 ) -> tuple[TestClient, list[httpx2.Request]]:
     seen: list[httpx2.Request] = []
+    selected_catalog = catalog or CATALOG
 
     def recording(request: httpx2.Request) -> httpx2.Response:
         if request.url.host == "api.github.com":
@@ -166,11 +170,11 @@ def make_client(
             )
         if request.url.path.endswith("/models"):
             # The app refreshes the catalog before it accepts anything, so the stand-in has to answer that too. Left out of `seen`: it is start-up, not the request under test.
-            return httpx2.Response(200, json=CATALOG)
+            return httpx2.Response(200, json=selected_catalog)
         seen.append(request)
         return handler(request)
 
-    provider, http_client = make_provider(recording)
+    provider, http_client = make_provider(recording, catalog=selected_catalog)
     config = ProxyConfig.model_validate(
         {
             "model_providers": {"ghc": {"type": "github_copilot", "api_base_url": BASE_URL}},
@@ -3566,11 +3570,11 @@ async def test_disconnect_with_repeated_level_cancellation_stays_inside_the_app(
             endpoint: ModelEndpoint,
             payload: Any,
             *,
-            model_id: str,
+            descriptor: ModelDescriptor,
             stream: bool = False,
             extra_headers: Any = None,
         ) -> httpx2.Response:
-            del endpoint, payload, model_id, stream, extra_headers
+            del endpoint, payload, descriptor, stream, extra_headers
             self.calls += 1
             try:
                 await asyncio.Event().wait()
@@ -3586,9 +3590,9 @@ async def test_disconnect_with_repeated_level_cancellation_stays_inside_the_app(
             raise AssertionError("unreachable")
 
         async def count_tokens(
-            self, payload: Any, *, model_id: str
+            self, payload: Any, *, descriptor: ModelDescriptor
         ) -> httpx2.Response:
-            del payload, model_id
+            del payload, descriptor
             raise NotImplementedError
 
     provider = WaitingProvider()
@@ -3709,11 +3713,11 @@ async def test_disconnect_before_upstream_headers_cancels_the_dispatch() -> None
             endpoint: ModelEndpoint,
             payload: Any,
             *,
-            model_id: str,
+            descriptor: ModelDescriptor,
             stream: bool = False,
             extra_headers: Any = None,
         ) -> httpx2.Response:
-            del endpoint, payload, model_id, stream, extra_headers
+            del endpoint, payload, descriptor, stream, extra_headers
             self.calls += 1
             try:
                 await asyncio.Event().wait()
@@ -3730,9 +3734,9 @@ async def test_disconnect_before_upstream_headers_cancels_the_dispatch() -> None
             raise AssertionError("unreachable")
 
         async def count_tokens(
-            self, payload: Any, *, model_id: str
+            self, payload: Any, *, descriptor: ModelDescriptor
         ) -> httpx2.Response:
-            del payload, model_id
+            del payload, descriptor
             raise NotImplementedError
 
     provider = WaitingProvider()
@@ -6861,6 +6865,183 @@ def test_a_finished_turn_on_the_translation_leg_is_not_handed_back_either() -> N
     assert b"turn_interrupted" not in delivered
     assert b"message_stop" in delivered
     assert _records()[-1]["status"] == "ok"
+
+
+def _prompt_admission_catalog(
+    *,
+    tokenizer: str = "o200k_base",
+    prompt_limit: int = 8,
+    context_limit: int = 10,
+) -> dict[str, Any]:
+    catalog = deepcopy(CATALOG)
+    model = next(entry for entry in catalog["data"] if entry["id"] == "gpt-model")
+    model["capabilities"] = {
+        "tokenizer": tokenizer,
+        "limits": {
+            "max_prompt_tokens": prompt_limit,
+            "max_context_window_tokens": context_limit,
+        },
+    }
+    return catalog
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_direct_responses_prompt_admission_rejects_before_upstream(
+    stream: bool,
+) -> None:
+    client, seen = make_client(
+        lambda _: httpx2.Response(599, json={"error": "must not be called"}),
+        catalog=_prompt_admission_catalog(),
+    )
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-model",
+            "input": "0123456789" * 100,
+            "stream": stream,
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json() == {
+        "error": {
+            "message": "prompt is too long: the input exceeds this model's context window",
+            "type": "invalid_request_error",
+            "param": "input",
+            "code": "context_length_exceeded",
+        }
+    }
+    assert seen == []
+    [observation] = _records()[-1]["observation"]["token_admission"]
+    assert observation["origin"] == "proxy"
+    assert observation["outcome"] == "rejected"
+    assert observation["field_path"] == "input"
+    assert observation["field_token_count"] > observation["max_context_window_tokens"]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_translated_prompt_admission_uses_anthropics_preheader_error(
+    stream: bool,
+) -> None:
+    client, seen = make_client(
+        lambda _: httpx2.Response(599, json={"error": "must not be called"}),
+        catalog=_prompt_admission_catalog(),
+    )
+
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "gpt-model",
+            "messages": [{"role": "user", "content": "0123456789" * 100}],
+            "max_tokens": 64,
+            "stream": stream,
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json() == {
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "message": "prompt is too long: the input exceeds this model's context window",
+            "code": "model_max_prompt_tokens_exceeded",
+            "param": "input[0].content[0].text",
+        },
+    }
+    assert seen == []
+
+
+@pytest.mark.parametrize(
+    ("catalog", "payload", "outcome"),
+    [
+        (
+            _prompt_admission_catalog(context_limit=100),
+            {"model": "gpt-model", "input": "short"},
+            "admitted_fast",
+        ),
+        (
+            _prompt_admission_catalog(tokenizer="future_encoding"),
+            {"model": "gpt-model", "input": "0123456789" * 100},
+            "skipped_unsupported_tokenizer",
+        ),
+        (
+            _prompt_admission_catalog(),
+            {
+                "model": "gpt-model",
+                "input": "0123456789" * 100,
+                "truncation": "auto",
+            },
+            "skipped_reduction_control",
+        ),
+        (
+            _prompt_admission_catalog(),
+            {
+                "model": "gpt-model",
+                "input": "0123456789" * 100,
+                "future_control": True,
+            },
+            "skipped_unknown_shape",
+        ),
+    ],
+)
+def test_prompt_admission_fail_open_paths_send_upstream_once(
+    catalog: dict[str, Any],
+    payload: dict[str, Any],
+    outcome: str,
+) -> None:
+    client, seen = make_client(
+        lambda _: httpx2.Response(418, json={"error": {"message": "upstream reached"}}),
+        catalog=catalog,
+    )
+
+    response = client.post("/v1/responses", json=payload)
+
+    assert response.status_code == 418
+    assert len(seen) == 1
+    [observation] = _records()[-1]["observation"]["token_admission"]
+    assert observation["outcome"] == outcome
+
+
+def test_missing_prompt_metadata_is_observed_and_sent_upstream_once() -> None:
+    client, seen = make_client(
+        lambda _: httpx2.Response(418, json={"error": {"message": "upstream reached"}})
+    )
+
+    response = client.post(
+        "/v1/responses",
+        json={"model": "gpt-model", "input": "0123456789" * 100},
+    )
+
+    assert response.status_code == 418
+    assert len(seen) == 1
+    [observation] = _records()[-1]["observation"]["token_admission"]
+    assert observation["outcome"] == "skipped_missing_metadata"
+    assert observation["tokenizer"] is None
+    assert observation["max_context_window_tokens"] is None
+
+
+def test_count_tokens_measures_the_same_oversized_translation_without_admitting_it() -> None:
+    client, seen = make_client(
+        lambda _: httpx2.Response(599, json={"error": "must not be called"}),
+        catalog=_prompt_admission_catalog(),
+    )
+
+    response = client.post(
+        "/v1/messages/count_tokens",
+        json={
+            "model": "gpt-model",
+            "messages": [{"role": "user", "content": "0123456789" * 100}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["estimated"] is True
+    assert response.json()["input_tokens"] > 10
+    assert seen == []
+    assert _records()[-1]["observation"]["token_admission"] == []
 
 
 def delivering(

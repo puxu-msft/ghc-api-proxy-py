@@ -13,11 +13,11 @@ from app.model_provider.types import (
     EndpointNotImplemented,
     ModelDescriptor,
     ModelEndpoint,
-    UnknownModel,
     model_type_of,
     parse_adaptive_thinking,
     parse_prompt_token_limits,
     parse_reasoning_efforts,
+    require_descriptor_owner,
     require_endpoint,
     resolve_endpoints,
 )
@@ -175,13 +175,11 @@ class GithubCopilotProvider:
         endpoint: ModelEndpoint,
         payload: Mapping[str, Any],
         *,
-        model_id: str,
+        descriptor: ModelDescriptor,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
     ) -> httpx2.Response:
-        descriptor = self.describe(model_id)
-        if descriptor is None:
-            raise UnknownModel(self._name, model_id)
+        require_descriptor_owner(descriptor, self._name)
         require_endpoint(descriptor, endpoint, self._name)
         if endpoint not in _SEND_METHODS:
             raise EndpointNotImplemented(self._name, endpoint.value)
@@ -210,15 +208,13 @@ class GithubCopilotProvider:
         self,
         payload: Mapping[str, Any],
         *,
-        model_id: str,
+        descriptor: ModelDescriptor,
     ) -> httpx2.Response:
         """Anthropic token counting.
 
         The spec groups it with the Messages driver rather than giving it its own routing row.
         It is therefore gated on the Messages capability.
         """
-        descriptor = self.describe(model_id)
-        if descriptor is None:
-            raise UnknownModel(self._name, model_id)
+        require_descriptor_owner(descriptor, self._name)
         require_endpoint(descriptor, ModelEndpoint.ANTHROPIC_MESSAGES, self._name)
         return await self._client.send_anthropic_count_tokens(payload)

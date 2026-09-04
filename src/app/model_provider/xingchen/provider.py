@@ -9,7 +9,7 @@ from app.model_provider.types import (
     CatalogSnapshot,
     ModelDescriptor,
     ModelEndpoint,
-    UnknownModel,
+    require_descriptor_owner,
     require_endpoint,
 )
 from app.model_provider.xingchen.client import XingchenClient
@@ -99,13 +99,11 @@ class XingchenProvider:
         endpoint: ModelEndpoint,
         payload: Mapping[str, Any],
         *,
-        model_id: str,
+        descriptor: ModelDescriptor,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
     ) -> httpx2.Response:
-        descriptor = self.describe(model_id)
-        if descriptor is None:
-            raise UnknownModel(self._name, model_id)
+        require_descriptor_owner(descriptor, self._name)
         require_endpoint(descriptor, endpoint, self._name)
         return await self._client.send_chat_completions(
             payload,
@@ -117,11 +115,9 @@ class XingchenProvider:
         self,
         payload: Mapping[str, Any],
         *,
-        model_id: str,
+        descriptor: ModelDescriptor,
     ) -> httpx2.Response:
         del payload
-        descriptor = self.describe(model_id)
-        if descriptor is None:
-            raise UnknownModel(self._name, model_id)
+        require_descriptor_owner(descriptor, self._name)
         require_endpoint(descriptor, ModelEndpoint.ANTHROPIC_MESSAGES, self._name)
         raise AssertionError("Xingchen descriptors must never advertise Anthropic Messages")

@@ -80,12 +80,12 @@ class RecordingProvider:
         endpoint: ModelEndpoint,
         payload: Mapping[str, Any],
         *,
-        model_id: str,
+        descriptor: ModelDescriptor,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
     ) -> httpx2.Response:
         del endpoint, stream, extra_headers
-        self.sent.append((model_id, dict(payload)))
+        self.sent.append((descriptor.id, dict(payload)))
         result = self._responses.pop(0)
         if isinstance(result, BaseException):
             raise result
@@ -95,9 +95,9 @@ class RecordingProvider:
         self,
         payload: Mapping[str, Any],
         *,
-        model_id: str,
+        descriptor: ModelDescriptor,
     ) -> httpx2.Response:
-        del payload, model_id
+        del payload, descriptor
         raise NotImplementedError
 
 

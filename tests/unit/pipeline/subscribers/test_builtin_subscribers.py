@@ -139,17 +139,21 @@ class RecordingProvider:
         endpoint: ModelEndpoint,
         payload: Any,
         *,
-        model_id: str,
+        descriptor: ModelDescriptor,
         stream: bool = False,
         extra_headers: Any = None,
     ) -> httpx2.Response:
         self.sent.append(dict(payload))
         return httpx2.Response(200)
 
-    async def count_tokens(self, payload: Any, *, model_id: str) -> httpx2.Response:
+    async def count_tokens(self, payload: Any, *, descriptor: ModelDescriptor) -> httpx2.Response:
         # The real provider gates this on the Messages capability and raises `EndpointNotSupported` when it is absent. Mirrored here so a caller that asks anyway fails the same way it would in production, rather than quietly succeeding against a fake that has no opinion.
         if self._endpoint is not ModelEndpoint.ANTHROPIC_MESSAGES:
-            raise EndpointNotSupported(self.name, model_id, ModelEndpoint.ANTHROPIC_MESSAGES.value)
+            raise EndpointNotSupported(
+                self.name,
+                descriptor.id,
+                ModelEndpoint.ANTHROPIC_MESSAGES.value,
+            )
         self.counted.append(dict(payload))
         # Carries a request because the caller calls `raise_for_status()`, which needs one. A bare response makes that raise, and the count then quietly falls back to the local estimate — a green assertion about `counted` would have hidden it.
         return httpx2.Response(

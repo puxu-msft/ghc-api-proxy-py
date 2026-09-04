@@ -8,9 +8,9 @@ from app.config.schema import XingchenProviderConfig
 from app.model_provider import (
     CatalogProvider,
     EndpointNotSupported,
+    ModelDescriptor,
     ModelEndpoint,
     ModelProvider,
-    UnknownModel,
 )
 from app.model_provider.xingchen import XingchenClient, XingchenProvider
 
@@ -41,6 +41,12 @@ def make_provider(
     configured = provider_config or config()
     client = XingchenClient(http_client, configured, uuid_factory=lambda: next(sequence))
     return XingchenProvider("xingchen", client, configured), http_client
+
+
+def descriptor_for(provider: XingchenProvider, model_id: str) -> ModelDescriptor:
+    descriptor = provider.describe(model_id)
+    assert descriptor is not None
+    return descriptor
 
 
 def test_static_catalog_is_chat_only_and_preserves_disabled_arithmetic() -> None:
@@ -112,7 +118,7 @@ async def test_chat_endpoint_is_sent() -> None:
         response = await provider.send(
             ModelEndpoint.OPENAI_CHAT_COMPLETIONS,
             {"model": "chat-pro"},
-            model_id="chat-pro",
+            descriptor=descriptor_for(provider, "chat-pro"),
         )
     finally:
         await http_client.aclose()
@@ -124,7 +130,7 @@ async def test_chat_endpoint_is_sent() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unknown_disabled_and_unsupported_requests_never_reach_the_network() -> None:
+async def test_unsupported_endpoints_never_reach_the_network() -> None:
     seen: list[httpx2.Request] = []
     provider, http_client = make_provider(
         httpx2.MockTransport(
@@ -133,35 +139,23 @@ async def test_unknown_disabled_and_unsupported_requests_never_reach_the_network
     )
 
     try:
-        with pytest.raises(UnknownModel):
-            await provider.send(
-                ModelEndpoint.OPENAI_CHAT_COMPLETIONS,
-                {"model": "unknown"},
-                model_id="unknown",
-            )
-        with pytest.raises(UnknownModel):
-            await provider.send(
-                ModelEndpoint.OPENAI_CHAT_COMPLETIONS,
-                {"model": "chat-lite"},
-                model_id="chat-lite",
-            )
         with pytest.raises(EndpointNotSupported):
             await provider.send(
                 ModelEndpoint.ANTHROPIC_MESSAGES,
                 {"model": "chat-pro"},
-                model_id="chat-pro",
+                descriptor=descriptor_for(provider, "chat-pro"),
             )
         with pytest.raises(EndpointNotSupported):
             await provider.send(
                 ModelEndpoint.OPENAI_RESPONSES,
                 {"model": "chat-pro"},
-                model_id="chat-pro",
+                descriptor=descriptor_for(provider, "chat-pro"),
             )
         with pytest.raises(EndpointNotSupported):
             await provider.send(
                 ModelEndpoint.OPENAI_EMBEDDINGS,
                 {"model": "chat-pro"},
-                model_id="chat-pro",
+                descriptor=descriptor_for(provider, "chat-pro"),
             )
     finally:
         await http_client.aclose()
@@ -180,11 +174,10 @@ async def test_count_tokens_is_always_refused_before_the_network() -> None:
 
     try:
         with pytest.raises(EndpointNotSupported):
-            await provider.count_tokens({"model": "chat-pro"}, model_id="chat-pro")
-        with pytest.raises(UnknownModel):
-            await provider.count_tokens({"model": "unknown"}, model_id="unknown")
-        with pytest.raises(UnknownModel):
-            await provider.count_tokens({"model": "chat-lite"}, model_id="chat-lite")
+            await provider.count_tokens(
+                {"model": "chat-pro"},
+                descriptor=descriptor_for(provider, "chat-pro"),
+            )
     finally:
         await http_client.aclose()
 

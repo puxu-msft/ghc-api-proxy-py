@@ -425,14 +425,13 @@ class DirectDriver:
 
         The whole-attempt deadline surrounds this call in `_run_attempt`; this narrower guard says specifically that upstream produced no headers within `response_header_timeout`.
         """
+        descriptor = self._descriptor or self._provider.describe(context.resolved_model)
+        if descriptor is None:
+            raise RuntimeError("direct driver has no routed model descriptor")
         send = self._provider.send(
             self._endpoint,
             payload,
-            model_id=(
-                self._descriptor.id
-                if self._descriptor is not None
-                else context.resolved_model
-            ),
+            descriptor=descriptor,
             stream=context.stream,
             extra_headers=context.client_headers or None,
         )
