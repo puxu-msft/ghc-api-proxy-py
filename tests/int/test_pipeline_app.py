@@ -2853,7 +2853,7 @@ async def test_an_upstream_that_tore_says_so_and_says_what_broke(
 
     A reset, a `ReadError`, a converter blowing up — upstream failing mid-stream leaves the delivery generator by *raising*, not by being closed, so it skips the flag that marks a drained stream and used to be reported as a client that walked away. Two different sides of the proxy, one message.
 
-    The error text is on the line because nothing else on this path writes it down: it unwinds out through the framework, and the request's own line is the only record that survives. A line saying merely that the stream stopped throws away the one fact worth having.
+    The error text is on the line because the request's own account is the durable record. The production boundary now consumes a framed upstream failure after its error-frame send returns, so relying on a framework traceback would lose the fact precisely when duplicate traceback suppression works.
 
     This and the disconnect test below reach past the HTTP layer this file is otherwise about, because neither ending can be produced through it — `TestClient` drains the body rather than disconnecting, and no upstream stand-in reachable from a request can tear mid-stream. They stay here rather than moving to a component file because they need this file's `make_client` and `_chain_of` to build a real chain, and duplicating that to satisfy the directory name would be the worse trade.
     """
@@ -6125,12 +6125,18 @@ def test_the_marker_sits_below_this_sides_bookkeeping_in_production(
     assert not any("handed back" in line for line in _request_lines(caplog.records))
 
 
-def test_runtime_upstream_stream_failure_keeps_upstream_origin() -> None:
+def test_runtime_upstream_stream_failure_is_reported_without_escaping_the_app() -> None:
+    message = "peer closed connection without sending complete message body (incomplete chunked read)"
+    core_error = httpcore2.RemoteProtocolError(message)
+    error = httpx2.RemoteProtocolError(message)
+    error.__cause__ = core_error
+    error.__context__ = core_error
+
     async def torn_body() -> AsyncIterator[bytes]:
         yield (
             b'event: content_block_start\ndata: {"index":0,"content_block":{"type":"text"}}\n\n'
         )
-        raise httpx2.ReadError("upstream body tore")
+        raise error
 
     client, _ = make_client(
         lambda _: httpx2.Response(
@@ -6141,12 +6147,85 @@ def test_runtime_upstream_stream_failure_keeps_upstream_origin() -> None:
         overrides={"upstream_request_retry": {"max_total": 0}},
     )
 
-    with pytest.raises(httpx2.ReadError, match="upstream body tore"):
-        _delivered(client)
+    delivered = _delivered(client)
 
-    failure = _records()[-1]["observation"]["delivery"]["failure"]
+    assert b'"code":"upstream_stream_failed"' in delivered
+    record = _records()[-1]
+    assert record["status"] == "fail"
+    delivery = record["observation"]["delivery"]
+    assert delivery["state"] == "accepted"
+    assert delivery["unit"] == "body"
+    failure = delivery["failure"]
     assert failure["origin"] == "upstream"
-    assert failure["message"] == "upstream body tore"
+    assert failure["type"] == httpx2.RemoteProtocolError.__qualname__
+    assert failure["message"] == str(error)
+
+
+async def test_reported_upstream_failure_does_not_hide_a_distinct_cleanup_failure() -> None:
+    upstream_error = httpx2.RemoteProtocolError("upstream body tore")
+    cleanup_error = RuntimeError("upstream body close failed")
+
+    class TearsAndCannotClose(AsyncIterator[bytes]):
+        def __init__(self) -> None:
+            self.sent_prefix = False
+
+        def __aiter__(self) -> AsyncIterator[bytes]:
+            return self
+
+        async def __anext__(self) -> bytes:
+            if not self.sent_prefix:
+                self.sent_prefix = True
+                return (
+                    b'event: content_block_start\ndata: {"index":0,'
+                    b'"content_block":{"type":"text"}}\n\n'
+                )
+            raise upstream_error
+
+        async def aclose(self) -> None:
+            raise cleanup_error
+
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
+    chain = _chain_of(client)
+    trace = RequestTrace(method="POST", path="/v1/messages", request_id="req_1", started=time.monotonic())
+    assembler = AnthropicAssembler()
+    completion = RequestCompletionCoordinator(chain, trace, trace.request_id)
+    accounting = _StreamAccounting(
+        chain=chain,
+        request_id=trace.request_id,
+        trace=trace,
+        completion=completion,
+        status_code=200,
+        assembler=assembler,
+    )
+    chain.active_requests.add(trace.request_id)
+    upstream = UpstreamSource(TearsAndCannotClose())
+    delivery = _tracked_delivery(
+        stream_delivery(
+            inference_route._counted_upstream(  # pyright: ignore[reportPrivateUsage]
+                upstream,
+                chain,
+                trace.request_id,
+                trace,
+                attempt=1,
+            ),
+            assembler,
+            upstream=upstream,
+            buffer=delivery_buffer(chain),
+            settings=stream_settings(chain),
+            framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
+            on_runtime_failure=accounting.note_runtime_failure,
+        ),
+        accounting,
+    )
+    chunks: list[bytes] = []
+
+    with pytest.raises(httpx2.RemoteProtocolError) as caught:
+        async for chunk in delivery:
+            chunks.append(chunk)
+
+    assert b'"code":"upstream_stream_failed"' in b"".join(chunks)
+    assert caught.value is upstream_error
+    assert caught.value.__cause__ is cleanup_error
 
 
 def test_hand_back_renders_the_failure_once_for_payload_and_trigger() -> None:
@@ -6303,9 +6382,9 @@ def test_a_draining_process_does_not_replay_a_stream_the_client_never_saw() -> N
 
     The drain is begun from inside the upstream handler because that is when it happens in production: a drain waits for the requests already running, so the ones it has to stop are exactly the ones already past this point.
 
-    **What the client gets is the truncated ending, not a hand-over**, and asserting that is the point rather than an omission. It is not that a hand-over is impossible here — `_hand_over` builds its own preamble when nothing has started — but that its `committed_count == 0` gate does not let this case through. Whether it should is open; see `deferred.md` §5. An earlier version of this test used a scenario where a block had already been delivered, and passed identically with the drain gate removed.
+    **What the client gets is an error frame, not a hand-over**, and asserting that is the point rather than an omission. It is not that a hand-over is impossible here — `_hand_over` builds its own preamble when nothing has started — but that its `committed_count == 0` gate does not let this case through. Whether it should is open; see `deferred.md` §5. An earlier version of this test used a scenario where a block had already been delivered, and passed identically with the drain gate removed.
 
-    That ending is a bare re-raise rather than an error frame, which is the shape `deferred.md` §5 already records as inconsistent. Pinned here as it is, not as it should be: this test is about the attempt that was not made, and dressing up the ending would make it a second test of something else.
+    Once the error frame's ASGI send returns, the same upstream exception is accounted rather than re-raised through the application boundary. That does not change this test's subject: the drain gate still decides that no replacement attempt opens.
     """
     calls: list[int] = []
 
@@ -6325,9 +6404,10 @@ def test_a_draining_process_does_not_replay_a_stream_the_client_never_saw() -> N
         )
 
     client, _ = make_client(draining_upstream)
-    with pytest.raises(httpx2.RemoteProtocolError):
-        _ = _delivered(client)
+    delivered = _delivered(client)
 
+    assert b'"code":"upstream_stream_failed"' in delivered
+    assert b"turn_interrupted" not in delivered
     assert len(calls) == 1, "a draining process opened another upstream request"
 
 
@@ -6425,11 +6505,13 @@ def test_a_client_request_in_another_format_is_not_handed_a_tool_call() -> None:
         ),
         overrides={"upstream_request_retry": {"max_total": 0}},
     )
-    # No hand-over means the ending is what it always was: the tear reaches the caller and the connection is cut, which is what this harness surfaces as the exception.
-    with pytest.raises(httpx2.RemoteProtocolError), client.stream(
+    # No hand-over means the client gets this dialect's error event. Once that event's send returns, the same accounted upstream exception does not escape the app.
+    with client.stream(
         "POST", "/responses", json={"model": "gpt-model", "input": [], "stream": True}
     ) as response:
-        b"".join(response.iter_bytes())
+        delivered = b"".join(response.iter_bytes())
+    assert b'"code":"upstream_stream_failed"' in delivered
+    assert b"turn_interrupted" not in delivered
     assert not any(
         item["kind"] == "upstream_stream_failure"
         for item in _records()[-1]["observation"]["interruptions"]

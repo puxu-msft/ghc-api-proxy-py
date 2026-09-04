@@ -331,7 +331,7 @@ def test_no_framing_header_of_upstreams_rides_along(header: str) -> None:
 def _streamed(client: Any, body: dict[str, Any]) -> bytes:
     """Everything that reached the client, recorded by a tee around the app.
 
-    **Not read off the response object**, and that is the whole reason this exists. Starlette's test client only rewinds its buffer when it sees `more_body=False`; a stream that ends by raising never reaches that line, so the response reads from the tail and reports `b""`. Every ending examined here frames the error and *then* re-raises — deliberately: the frame tells the client, the exception tells this side's own accounting — so reading the response would report zero bytes for exactly the cases in question. Measured; `.dev/docs/server-layout/reports/260823-error-surface-inventory.md` §6 records the same trap costing a whole round of readings.
+    Kept at the ASGI send boundary rather than read off the response object so these tests assert the bytes that actually left the application. Upstream failures whose error-frame send succeeds now let the response end normally, but local delivery failures still re-raise after framing; the tee observes both without making test transport buffering part of the oracle. `.dev/docs/server-layout/reports/260823-error-surface-inventory.md` §6 records the earlier response-buffer trap.
 
     A tee rather than driving the ASGI app by hand: constructing a scope by hand skips whatever the test client sets up around it, and a first attempt at that hung instead of failing.
     """

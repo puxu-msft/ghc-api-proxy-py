@@ -224,24 +224,24 @@ async def test_runtime_origin_is_recorded_before_the_error_frame_send_frontier()
         )
         raise torn
 
-    observed: list[tuple[Exception, bool]] = []
+    observed: list[tuple[Exception, bool, bool]] = []
     delivery = delivering(
         upstream(),
         AnthropicAssembler(),
         buffer=BlockBuffer(policy="block"),
         settings=StreamSettings(sse_ping_interval=0),
         framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
-        on_runtime_failure=lambda error, is_upstream: observed.append(
-            (error, is_upstream)
+        on_runtime_failure=lambda error, is_upstream, provenance: observed.append(
+            (error, is_upstream, provenance is not None and provenance(error))
         ),
     )
 
     error_frame = await anext(delivery)
     assert b"upstream_stream_failed" in error_frame
-    assert observed == [(torn, True)]
+    assert observed == [(torn, True, True)]
     # Simulate this frame's ASGI send failing: close without ever resuming beyond its yield. A callback placed after the yield would still be absent here.
     await delivery.aclose()
-    assert observed == [(torn, True)]
+    assert observed == [(torn, True, True)]
 
 
 @pytest.mark.asyncio
@@ -2093,7 +2093,10 @@ def delivering(
     framer: OutboundFramer,
     replay: ReplaySupport | None = None,
     continuation: ContinuationSupport | None = None,
-    on_runtime_failure: Callable[[Exception, bool], None] | None = None,
+    on_runtime_failure: Callable[
+        [Exception, bool, Callable[[Exception], bool] | None], None
+    ]
+    | None = None,
     observe_event: Callable[[SseEvent], None] | None = None,
 ) -> AsyncGenerator[bytes]:
     """`stream_delivery` with the upstream side named, which in a test is the whole of what was passed.

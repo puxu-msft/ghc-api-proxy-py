@@ -14,7 +14,7 @@ import sys
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import aclosing, suppress
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, cast
 
 from app.errors import STATUS_FOR_CATEGORY, ErrorCategory, ErrorInfo
 from app.pipeline.delivery.assembling import BlockAssembler, FailureOrigin, StreamFailure
@@ -34,6 +34,43 @@ from app.streaming.keepalive import finish_stream_cleanup, raise_with_cleanup_un
 
 PING_FRAME = b": ping\n\n"
 
+type FailureProvenance = Callable[[Exception], bool]
+type _ExceptionGraphFingerprint = frozenset[tuple[str, int, int, int]]
+
+
+def _exception_graph_fingerprint(error: BaseException) -> _ExceptionGraphFingerprint | None:
+    """Capture exception-object identity and graph edges, failing closed on hostile metadata."""
+    facts: set[tuple[str, int, int, int]] = set()
+    seen: set[int] = set()
+    pending: list[BaseException] = [error]
+    try:
+        while pending:
+            current = pending.pop()
+            current_id = id(current)
+            if current_id in seen:
+                continue
+            seen.add(current_id)
+            facts.add(("node", current_id, 0, 0))
+            for kind, linked in (
+                ("cause", current.__cause__),
+                ("context", current.__context__),
+            ):
+                if linked is not None:
+                    facts.add((kind, current_id, 0, id(linked)))
+                    pending.append(linked)
+            if isinstance(current, BaseExceptionGroup):
+                group = cast(BaseExceptionGroup[BaseException], current)
+                for index, nested in enumerate(group.exceptions):
+                    facts.add(("member", current_id, index, id(nested)))
+                    pending.append(nested)
+            for index, note in enumerate(
+                getattr(cast(BaseException, current), "__notes__", ())
+            ):
+                facts.add(("note", current_id, index, id(note)))
+    except BaseException:
+        return None
+    return frozenset(facts)
+
 
 class UpstreamSource:
     """The upstream side of the byte stream, named by the caller so that what it raises can be told from what this side raises.
@@ -49,6 +86,8 @@ class UpstreamSource:
         self._source = source.__aiter__()
         # The exception this iterator raised, if it has. Compared by identity downstream, so a later attempt's tear cannot be mistaken for this one's.
         self.tear: Exception | None = None
+        # Captured where the source first raises, before this proxy's outer iterators run cleanup and can attach independent failures to the same root object.
+        self._tear_fingerprint: _ExceptionGraphFingerprint | None = None
 
     def __aiter__(self) -> AsyncIterator[bytes]:
         return self
@@ -60,7 +99,16 @@ class UpstreamSource:
             raise
         except Exception as tear:
             self.tear = tear
+            self._tear_fingerprint = _exception_graph_fingerprint(tear)
             raise
+
+    def tear_is_unmodified(self, error: Exception) -> bool:
+        """Whether no exception fact was attached after this source observed its tear."""
+        return bool(
+            error is self.tear
+            and self._tear_fingerprint is not None
+            and _exception_graph_fingerprint(error) == self._tear_fingerprint
+        )
 
     async def aclose(self) -> None:
         """Delegated, because `read_events` closes the byte stream under it and that is what releases the upstream response."""
@@ -331,7 +379,7 @@ async def stream_delivery[UnitT: DeliveryUnit](
     replay: ReplaySupport | None = None,
     continuation: ContinuationSupport | None = None,
     on_tear_after_terminal: Callable[[Exception], None] | None = None,
-    on_runtime_failure: Callable[[Exception, bool], None] | None = None,
+    on_runtime_failure: Callable[[Exception, bool, FailureProvenance | None], None] | None = None,
     observe_event: Callable[[SseEvent], None] | None = None,
     passthrough: bool = False,
 ) -> AsyncGenerator[bytes]:
@@ -384,7 +432,7 @@ async def _deliver[UnitT: DeliveryUnit](
     replay: ReplaySupport | None = None,
     continuation: ContinuationSupport | None = None,
     on_tear_after_terminal: Callable[[Exception], None] | None = None,
-    on_runtime_failure: Callable[[Exception, bool], None] | None = None,
+    on_runtime_failure: Callable[[Exception, bool, FailureProvenance | None], None] | None = None,
     observe_event: Callable[[SseEvent], None] | None = None,
     passthrough: bool = False,
 ) -> AsyncGenerator[bytes]:
@@ -457,7 +505,7 @@ async def _deliver[UnitT: DeliveryUnit](
             #
             # The attempt deadline (`upstream_request_deadline`, raised by `pipeline_app`'s `with_deadline_at`) has no branch of its own here — it arrives as an ordinary tear and is classified below. It is ordered the other way round, *after* `terminal.seen`, for the opposite reason: it ends only this attempt, so a turn upstream finished must not be handed to it as something to retry.
             if on_runtime_failure is not None:
-                on_runtime_failure(torn, False)
+                on_runtime_failure(torn, False, None)
             yield framer.error(
                 _stream_error(
                     ErrorCategory.INTERNAL,
@@ -519,14 +567,18 @@ async def _deliver[UnitT: DeliveryUnit](
                 return
         # Every remaining ending gets a frame *and* still reaches the caller. Until 2026-08-22 it was a bare `raise`, which the client received as a 200 whose body simply stopped — byte-for-byte the same as an idle timeout, a deadline, or the proxy abandoning the response, with only the server's own log able to tell them apart (`deferred.md` 8d). The response has been open since before the first chunk, so a frame is the only channel left.
         #
-        # The `raise` stays, and that pairing is the whole design rather than belt-and-braces. Swapping it for the frame was tried first and is wrong: the caller reads this exception to decide the request's verdict and to put the reason on the completion line, so a stream that framed and returned cleanly logged `ok` and left no record of the failure anywhere. That is `deferred.md` §12's defect manufactured on purpose. Yielding first and raising second gives the client the frame — a generator's chunk is written as it is yielded — and leaves the caller's account intact.
+        # The `raise` stays to carry the exact exception into request accounting; swapping it for the frame was tried first and logged the request `ok`, with no durable failure fact. `_tracked_delivery` may consume that same upstream exception only after the yielded frame's ASGI send returns. Local failures, a frame whose send did not return, and distinct cleanup failures continue outward. Yield first and raise second is what makes those two boundaries independently observable.
         #
         # Nothing is flushed first, for the same reason the client deadline flushes nothing: what is buffered but undelivered would make the size of this ending depend on the buffering policy, while the ending itself is a failure.
         #
         # Three codes, one per way this can end, so that a reader of a client transcript can tell them apart without the server's log beside them.
         if on_runtime_failure is not None:
-            # Record the authoritative origin before yielding the error frame: its downstream send is a separate, lower-priority frontier that may fail and prevent this generator from ever resuming.
-            on_runtime_failure(torn, not ours)
+            # Record the authoritative origin before yielding the error frame: its downstream send is a separate, lower-priority frontier that may fail and prevent this generator from ever resuming. The bound provenance check reaches back to the current attempt's positive marker and is re-run only if the frame's send returns.
+            on_runtime_failure(
+                torn,
+                not ours,
+                upstream.tear_is_unmodified if not ours else None,
+            )
         yield framer.error(
             _stream_error(
                 ErrorCategory.INTERNAL if ours else ErrorCategory.UPSTREAM,

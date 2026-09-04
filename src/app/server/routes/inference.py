@@ -1045,6 +1045,8 @@ class _StreamAccounting:
     # How the delivery generator ended. Three endings arrive here indistinguishable — upstream's stream ran out, upstream tore, or delivery was cut short from this side — because none of them saw a terminal event and that is all the assembler records. Naming the wrong one sends whoever reads the line to the wrong half of the system, so each is recorded where it happens instead of guessed here.
     drained: bool = False
     failure: BaseException | None = None
+    # Bound to the attempt's positive upstream marker. It rechecks the exception graph after the error-frame send, so a cleanup failure attached to the same root cannot ride through the identity gate unnoticed.
+    failure_provenance: Callable[[Exception], bool] | None = None
 
     def settle(self) -> None:
         """Settle stream-specific facts without publishing the request-wide record."""
@@ -1108,8 +1110,14 @@ class _StreamAccounting:
             completion_unit=completion_unit,
         )
 
-    def note_runtime_failure(self, error: Exception, upstream: bool) -> None:
+    def note_runtime_failure(
+        self,
+        error: Exception,
+        upstream: bool,
+        provenance: Callable[[Exception], bool] | None = None,
+    ) -> None:
         self.failure = error
+        self.failure_provenance = provenance if upstream else None
         self.completion.note_wrapped_failure(
             error,
             origin=(
@@ -1144,7 +1152,7 @@ class _StreamAccounting:
     def _ending(self) -> tuple[LogStatus, str]:
         """Which of the three ways this stream stopped short, and how much of a problem each is.
 
-        The failure is quoted rather than summarised. It is the only account of what went wrong that exists anywhere — an upstream reset unwinds through the delivery generator and out through the framework, and nothing else on this path writes it down — so a line reporting only that the stream stopped would discard the one fact worth having.
+        The failure is quoted rather than summarised. It is the durable account of what went wrong: an upstream reset unwinds through delivery into this accounting object, then may be consumed after its error frame's ASGI send returns. A line reporting only that the stream stopped would discard the one fact worth having.
 
         A client that left is `gone` rather than `fail`, ruled 2026-08-20. Two of these are the proxy's problem and one is not: on a proxy fronting an interactive client, cancelling a turn is routine, and painting every Esc the same red as an upstream reset would bury the resets. `[ OK ]`, which is what those lines used to get, is the other direction of the same mistake — it made a cancelled turn indistinguishable from an answer that arrived.
 
@@ -1535,7 +1543,7 @@ async def _counted_upstream(
 
 
 async def _tracked_delivery(chunks: AsyncGenerator[bytes], accounting: _StreamAccounting) -> AsyncGenerator[bytes]:
-    """Forward the delivery stream untouched and account for the request when it ends.
+    """Forward delivery, account for its ending, and contain a reported upstream failure after its error frame is sent.
 
     `finally` rather than a trailing statement, because a client that disconnects mid-stream cancels this generator — and a request that vanishes from the footer, or never gets its log line, only when something has gone wrong is exactly backwards.
 
@@ -1545,12 +1553,23 @@ async def _tracked_delivery(chunks: AsyncGenerator[bytes], accounting: _StreamAc
     """
     cancellation_cleanup_error: BaseException | None = None
     replaced_cancellation: asyncio.CancelledError | None = None
+    accepted_upstream_failure: Exception | None = None
     try:
         async for chunk in chunks:
             completion_offered = accounting.completion_delivery.pending
+            # `note_runtime_failure` runs immediately before the error frame is formed. Snapshot its exact upstream exception beside that frame, so only this chunk's successful send can make the later re-raise consumable.
+            upstream_failure_offered = (
+                accounting.failure
+                if isinstance(accounting.failure, Exception)
+                and accounting.failure_provenance is not None
+                and accounting.failure_provenance(accounting.failure)
+                else None
+            )
             yield chunk
-            # `StreamingResponse` resumes this generator only after `await send` returns for the yielded body. If send raises or disconnect cancellation closes us at the yield, this line is skipped and a merely parsed or framed terminal never becomes accepted.
+            # `StreamingResponse` resumes this generator only after `await send` returns for the yielded body. If send raises or disconnect cancellation closes us at the yield, these lines are skipped and neither a merely parsed terminal nor a merely framed upstream failure becomes accepted.
             accounting.completion_delivery.accept(completion_offered)
+            if upstream_failure_offered is not None:
+                accepted_upstream_failure = upstream_failure_offered
         # Reached only when the whole delivery generator ran out on its own. A client that goes away closes this generator at a `yield`, and GeneratorExit unwinds straight past this line to the `finally`; a completion unit whose ASGI send returned can now independently meet the same application-visible completion boundary despite that local abort.
         accounting.drained = True
     except Exception as error:
@@ -1567,7 +1586,14 @@ async def _tracked_delivery(chunks: AsyncGenerator[bytes], accounting: _StreamAc
             if accounting.failure is not error:
                 # One-shot and unexpected local paths have no inner source marker. The normal block path records the exact upstream/local origin through `on_runtime_failure` before the exception reaches here.
                 accounting.note_runtime_failure(error, False)
-            raise
+            provenance = accounting.failure_provenance
+            if (
+                error is not accepted_upstream_failure
+                or provenance is None
+                or not provenance(error)
+            ):
+                raise
+            # The same, still-unmodified upstream exception already produced an error frame whose ASGI send returned. Its operational facts remain in accounting; propagating it farther would add only Uvicorn's duplicate application traceback.
     finally:
         primary = sys.exception()
         if isinstance(primary, GeneratorExit):
