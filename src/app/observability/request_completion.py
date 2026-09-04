@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 def _warn_no_raise(message: str, *args: object) -> None:
     """Last-resort reporting that cannot re-enter request control flow."""
     # The logging handler is the failed observability sink here. There is no independent safe channel left to report that second failure through.
-    with suppress(Exception):
+    with suppress(BaseException):
         logger.warning(message, *args)
 
 
@@ -242,6 +242,9 @@ class RequestCompletionCoordinator:
     )
     _interruptions: list[InterruptionObservation] = field(
         default_factory=lambda: list[InterruptionObservation]()
+    )
+    _exception_messages: list[tuple[BaseException, str | None]] = field(
+        default_factory=lambda: list[tuple[BaseException, str | None]]()
     )
     _response_ready_s: float | None = None
     _legacy_duration_s: float | None = None
@@ -527,7 +530,7 @@ class RequestCompletionCoordinator:
                 exception_module=(type(error).__module__ if error is not None else None),
                 exception_type=(type(error).__qualname__ if error is not None else None),
                 message=(
-                    _safe_exception_message(error)
+                    self._exception_message(error)
                     if error is not None
                     else None
                 ),
@@ -535,11 +538,23 @@ class RequestCompletionCoordinator:
             )
         )
 
+    def _exception_message(self, error: BaseException) -> str | None:
+        for seen, message in self._exception_messages:
+            if error is seen:
+                return message
+        message = _safe_exception_message(error)
+        self._exception_messages.append((error, message))
+        return message
+
     def _note_failure(self, error: BaseException, *, origin: FailureOrigin) -> None:
         if any(error is seen for seen in self._seen_failures):
             return
         self._seen_failures.append(error)
-        summary = _failure_summary(error, origin=origin)
+        summary = _failure_summary(
+            error,
+            origin=origin,
+            message=self._exception_message(error),
+        )
         if self._state is DeliveryState.ACCEPTED:
             if self._post_delivery_failure is None:
                 self._post_delivery_failure = summary
@@ -584,8 +599,8 @@ class RequestCompletionCoordinator:
 def _safe_exception_message(error: BaseException) -> str | None:
     for render in (str, repr):
         try:
-            rendered = render(error)
-        except Exception as rendering_error:
+            rendered = one_line(render(error))
+        except BaseException as rendering_error:
             _warn_no_raise(
                 "could not render %s for request observability: %r",
                 type(error).__qualname__,
@@ -593,11 +608,16 @@ def _safe_exception_message(error: BaseException) -> str | None:
             )
             continue
         if rendered:
-            return one_line(rendered)
+            return rendered
     return None
 
 
-def _failure_summary(error: BaseException, *, origin: FailureOrigin) -> FailureSummary:
+def _failure_summary(
+    error: BaseException,
+    *,
+    origin: FailureOrigin,
+    message: str | None,
+) -> FailureSummary:
     if isinstance(error, asyncio.CancelledError):
         category = FailureCategory.CANCELLED
     elif isinstance(error, ClientDisconnect) or (
@@ -610,7 +630,7 @@ def _failure_summary(error: BaseException, *, origin: FailureOrigin) -> FailureS
         origin=origin,
         category=category,
         type=error.__class__.__name__,
-        message=_safe_exception_message(error),
+        message=message,
     )
 
 

@@ -5329,8 +5329,10 @@ def test_an_interrupted_turn_is_handed_back_to_the_client_as_a_tool_call(
     assert timings["upstream_tail_gap_s"] >= timings["upstream_final_pull_s"] >= 0
 
 
-def test_real_h1_incomplete_chunked_body_records_the_exact_trigger_and_pull_timing(
+@pytest.mark.parametrize("provider_terminal", [False, True], ids=["mid-turn", "post-terminal"])
+async def test_real_h1_incomplete_chunked_body_records_the_exact_trigger_and_pull_timing(
     request_log: None,
+    provider_terminal: bool,
 ) -> None:
     reasoning: dict[str, Any] = {
         "type": "reasoning",
@@ -5349,27 +5351,45 @@ def test_real_h1_incomplete_chunked_body_records_the_exact_trigger_and_pull_timi
     def frame(name: str, data: dict[str, Any]) -> bytes:
         return f"event: {name}\ndata: {orjson.dumps(data).decode()}\n\n".encode()
 
-    partial_body = b"".join(
-        [
-            *(item.encode() for item in responses_envelope_frames()),
+    body_frames = [
+        *(item.encode() for item in responses_envelope_frames()),
+        frame(
+            "response.output_item.added",
+            {"output_index": 0, "item": reasoning},
+        ),
+        frame(
+            "response.output_item.done",
+            {"output_index": 0, "item": reasoning},
+        ),
+    ]
+    if provider_terminal:
+        body_frames.append(
             frame(
-                "response.output_item.added",
-                {"output_index": 0, "item": reasoning},
-            ),
-            frame(
-                "response.output_item.done",
-                {"output_index": 0, "item": reasoning},
-            ),
-            frame(
-                "response.output_item.added",
-                {"output_index": 1, "item": message},
-            ),
-            frame(
-                "response.output_text.delta",
-                {"output_index": 1, "item_id": "msg_1", "delta": "partial"},
-            ),
-        ]
-    )
+                "response.completed",
+                {
+                    "response": {
+                        "status": "completed",
+                        "model": "gpt-model",
+                        "output": [reasoning],
+                        "usage": {"input_tokens": 3, "output_tokens": 4},
+                    }
+                },
+            )
+        )
+    else:
+        body_frames.extend(
+            [
+                frame(
+                    "response.output_item.added",
+                    {"output_index": 1, "item": message},
+                ),
+                frame(
+                    "response.output_text.delta",
+                    {"output_index": 1, "item_id": "msg_1", "delta": "partial"},
+                ),
+            ]
+        )
+    partial_body = b"".join(body_frames)
 
     class IncompleteChunkedHandler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -5414,85 +5434,123 @@ def test_real_h1_incomplete_chunked_body_records_the_exact_trigger_and_pull_timi
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base_url = f"http://127.0.0.1:{server.server_port}"
-    token_http = httpx2.AsyncClient(
-        transport=httpx2.MockTransport(
-            lambda _: httpx2.Response(
-                200,
-                json={"token": "copilot", "expires_at": 5000, "refresh_in": 1500},
-            )
-        )
-    )
-    upstream_http = httpx2.AsyncClient()
-    tokens = CopilotTokenManager(StaticTokenSource(), token_http, clock=lambda: 1000)
-    ghc_client = GhcApiClient(
-        AsyncOpenAI(
-            api_key="proxy-managed",
-            base_url=base_url,
-            http_client=upstream_http,
-            max_retries=0,
-        ),
-        AsyncAnthropic(
-            api_key="proxy-managed",
-            base_url=base_url,
-            http_client=upstream_http,
-            max_retries=0,
-        ),
-        tokens,
-        GhcClientConfig(api_base_url_override=base_url),
-        interaction_id="real-h1-incomplete-chunked",
-    )
-    provider = GithubCopilotProvider(
-        "ghc",
-        ghc_client,
-        GithubCopilotProviderConfig(type="github_copilot"),
-        http_client=upstream_http,
-        base_url=base_url,
-    )
-    provider.replace_catalog(CATALOG)
-    config = ProxyConfig.model_validate(
-        {
-            "model_providers": {
-                "ghc": {"type": "github_copilot", "api_base_url": base_url}
-            },
-            "default_model_provider": "ghc",
-            "upstream_request_retry": {"max_total": 0},
-        }
-    )
-    chain = build_chain(
-        config,
-        http_client=upstream_http,
-        providers={"ghc": cast(ModelProvider, provider)},
-    )
-
     try:
-        with TestClient(create_pipeline_app(chain)) as client:
-            response = client.post(
-                "/v1/messages",
-                json={"model": "gpt-model", "messages": [], "stream": True},
+        async with (
+            httpx2.AsyncClient(
+                transport=httpx2.MockTransport(
+                    lambda _: httpx2.Response(
+                        200,
+                        json={
+                            "token": "copilot",
+                            "expires_at": 5000,
+                            "refresh_in": 1500,
+                        },
+                    )
+                )
+            ) as token_http,
+            httpx2.AsyncClient() as upstream_http,
+        ):
+            tokens = CopilotTokenManager(
+                StaticTokenSource(), token_http, clock=lambda: 1000
             )
+            ghc_client = GhcApiClient(
+                AsyncOpenAI(
+                    api_key="proxy-managed",
+                    base_url=base_url,
+                    http_client=upstream_http,
+                    max_retries=0,
+                ),
+                AsyncAnthropic(
+                    api_key="proxy-managed",
+                    base_url=base_url,
+                    http_client=upstream_http,
+                    max_retries=0,
+                ),
+                tokens,
+                GhcClientConfig(api_base_url_override=base_url),
+                interaction_id="real-h1-incomplete-chunked",
+            )
+            provider = GithubCopilotProvider(
+                "ghc",
+                ghc_client,
+                GithubCopilotProviderConfig(type="github_copilot"),
+                http_client=upstream_http,
+                base_url=base_url,
+            )
+            provider.replace_catalog(CATALOG)
+            config = ProxyConfig.model_validate(
+                {
+                    "model_providers": {
+                        "ghc": {
+                            "type": "github_copilot",
+                            "api_base_url": base_url,
+                        }
+                    },
+                    "default_model_provider": "ghc",
+                    "upstream_request_retry": {"max_total": 0},
+                }
+            )
+            chain = build_chain(
+                config,
+                http_client=upstream_http,
+                providers={"ghc": cast(ModelProvider, provider)},
+            )
+            async with httpx2.AsyncClient(
+                transport=httpx2.ASGITransport(app=create_pipeline_app(chain)),
+                base_url="http://testserver",
+            ) as downstream_http:
+                response = await downstream_http.post(
+                    "/v1/messages",
+                    json={
+                        "model": "gpt-model",
+                        "messages": [],
+                        "stream": True,
+                    },
+                )
+        assert token_http.is_closed
+        assert upstream_http.is_closed
+        assert downstream_http.is_closed
     finally:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+    assert not thread.is_alive()
 
     assert response.status_code == 200
-    handed = _handed_back(response.content)
     record = _records()[-1]
     interruptions = [
         item
         for item in record["observation"]["interruptions"]
         if item["kind"] == "upstream_stream_failure"
     ]
-    assert len(interruptions) == 1
-    interruption = interruptions[0]
-    assert interruption["attempt"] == 1
-    assert interruption["category"] == handed["input"]["category"] == "network"
-    assert interruption["exception_module"] == httpx2.RemoteProtocolError.__module__
-    assert interruption["exception_type"] == httpx2.RemoteProtocolError.__qualname__
-    assert interruption["message"] == (
-        "peer closed connection without sending complete message body (incomplete chunked read)"
-    )
-    assert record["status"] == "retry"
+    if provider_terminal:
+        assert interruptions == []
+        assert b"turn_interrupted" not in response.content
+        assert record["status"] == "ok"
+        assert "RemoteProtocolError" in record["tore_after_terminal"]
+        assert "incomplete chunked read" in record["tore_after_terminal"]
+    else:
+        handed = _handed_back(response.content)
+        assert b'"thinking_delta"' in response.content
+        assert response.text.count(TOOL_NAME) == 1
+        events = [
+            line.removeprefix("event: ")
+            for line in response.text.splitlines()
+            if line.startswith("event: ")
+        ]
+        assert events.count("message_stop") == 1
+        assert events[-1] == "message_stop"
+        assert b'"stop_reason":"tool_use"' in response.content
+        assert len(interruptions) == 1
+        interruption = interruptions[0]
+        assert interruption["attempt"] == 1
+        assert interruption["category"] == handed["input"]["category"] == "network"
+        assert interruption["exception_module"] == httpx2.RemoteProtocolError.__module__
+        assert interruption["exception_type"] == httpx2.RemoteProtocolError.__qualname__
+        assert interruption["message"] == (
+            "peer closed connection without sending complete message body (incomplete chunked read)"
+        )
+        assert record["status"] == "retry"
     assert record["observation"]["delivery"]["state"] == "accepted"
     assert record["observation"]["delivery"]["unit"] == "translated_drain"
     assert record["observation"]["delivery"]["failure"] is None
@@ -5502,6 +5560,12 @@ def test_real_h1_incomplete_chunked_body_records_the_exact_trigger_and_pull_timi
     assert timings["final_upstream_pull_started_s"] is not None
     assert timings["upstream_end_s"] is not None
     assert timings["upstream_tail_gap_s"] >= timings["upstream_final_pull_s"] >= 0
+    assert timings["upstream_tail_gap_s"] == pytest.approx(
+        timings["upstream_end_s"] - timings["last_upstream_chunk_s"]
+    )
+    assert timings["upstream_final_pull_s"] == pytest.approx(
+        timings["upstream_end_s"] - timings["final_upstream_pull_started_s"]
+    )
 
 
 def test_only_the_attempt_that_synthesizes_continuation_records_an_interruption() -> None:
@@ -5616,6 +5680,50 @@ def test_runtime_upstream_stream_failure_keeps_upstream_origin() -> None:
     failure = _records()[-1]["observation"]["delivery"]["failure"]
     assert failure["origin"] == "upstream"
     assert failure["message"] == "upstream body tore"
+
+
+def test_hand_back_renders_the_failure_once_for_payload_and_trigger() -> None:
+    class OneShotUpstreamError(Exception):
+        def __init__(self) -> None:
+            super().__init__()
+            self.render_calls = 0
+
+        def __str__(self) -> str:
+            self.render_calls += 1
+            if self.render_calls > 1:
+                raise RuntimeError("exception rendered more than once")
+            return "first and only render"
+
+        def __repr__(self) -> str:
+            return "fallback repr"
+
+    error = OneShotUpstreamError()
+
+    async def torn_body() -> AsyncIterator[bytes]:
+        yield sse_upstream("first").partition(b"event: message_delta")[0]
+        raise error
+
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200,
+            content=torn_body(),
+            headers={"content-type": "text/event-stream"},
+        ),
+        overrides={"upstream_request_retry": {"max_total": 0}},
+    )
+    delivered = _delivered(client)
+
+    handed = _handed_back(delivered)
+    record = _records()[-1]
+    interruption = next(
+        item
+        for item in record["observation"]["interruptions"]
+        if item["kind"] == "upstream_stream_failure"
+    )
+    assert error.render_calls == 1
+    assert "first and only render" in handed["input"]["message"]
+    assert interruption["message"] == "first and only render"
+    assert interruption["exception_type"].endswith("OneShotUpstreamError")
 
 
 def test_a_hand_over_says_what_it_swallowed(

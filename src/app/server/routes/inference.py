@@ -761,7 +761,7 @@ async def _dispatch_after_body(
             outcome = _hand_back(error, stop_reason)
             if outcome is None:
                 return None
-            if outcome.trigger is not None and error is not None:
+            if outcome.trigger is not None:
                 accounting.completion.note_upstream_stream_failure(
                     attempt=context.attempt_count,
                     category=outcome.trigger.category,

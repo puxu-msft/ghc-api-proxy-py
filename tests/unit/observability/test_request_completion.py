@@ -62,6 +62,46 @@ class ExplodingReporter:
         raise RuntimeError("logging handler failed")
 
 
+class BaseExplodingReporter:
+    def warning(self, _message: str, *_args: object) -> None:
+        raise GeneratorExit("logging handler exited")
+
+
+class StringCancelledError(RuntimeError):
+    def __str__(self) -> str:
+        raise asyncio.CancelledError("string rendering cancelled")
+
+
+class StringExitedError(RuntimeError):
+    def __str__(self) -> str:
+        raise GeneratorExit("string rendering exited")
+
+
+class UnrenderableReceiveError(StringCancelledError):
+    def __repr__(self) -> str:
+        raise GeneratorExit("repr rendering exited")
+
+
+class OneShotRenderedError(RuntimeError):
+    def __init__(self, *_args: object) -> None:
+        super().__init__()
+        self.render_calls = 0
+
+    def __str__(self) -> str:
+        self.render_calls += 1
+        if self.render_calls > 1:
+            raise RuntimeError("exception rendered more than once")
+        return "first and only render"
+
+    def __repr__(self) -> str:
+        return "fallback repr"
+
+
+class WhitespaceRenderedError(RuntimeError):
+    def __str__(self) -> str:
+        return " \n\t "
+
+
 def _coordinator(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -1180,13 +1220,35 @@ async def test_pre_acceptance_cancellation_remains_primary_when_cleanup_fails(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error_type", "expected_message"),
+    [
+        (RuntimeError, "ASGI receive failed"),
+        (StringCancelledError, "StringCancelledError"),
+        (StringExitedError, "StringExitedError"),
+        (UnrenderableReceiveError, None),
+        (WhitespaceRenderedError, "WhitespaceRenderedError"),
+        (OneShotRenderedError, "first and only render"),
+    ],
+    ids=[
+        "ordinary",
+        "str-cancelled",
+        "str-exited",
+        "both-renderers-fail",
+        "whitespace-falls-back",
+        "single-render-shared",
+    ],
+)
 async def test_response_receive_error_is_recorded_and_re_raised_by_identity(
     monkeypatch: pytest.MonkeyPatch,
+    error_type: type[RuntimeError],
+    expected_message: str | None,
 ) -> None:
     completion, trace, store, _records, _logger = _coordinator(monkeypatch)
+    monkeypatch.setattr(completion_module, "logger", BaseExplodingReporter())
     nonterminal_sent = asyncio.Event()
     hold_body = asyncio.Event()
-    receive_error = RuntimeError("ASGI receive failed")
+    receive_error = error_type("ASGI receive failed")
 
     async def body() -> AsyncGenerator[bytes]:
         yield b"nonterminal"
@@ -1215,7 +1277,7 @@ async def test_response_receive_error_is_recorded_and_re_raised_by_identity(
         await nonterminal_sent.wait()
         raise receive_error
 
-    with pytest.raises(RuntimeError) as raised:
+    with pytest.raises(error_type) as raised:
         await response(HTTP_SCOPE, receive, send)
 
     assert raised.value is receive_error
@@ -1224,9 +1286,27 @@ async def test_response_receive_error_is_recorded_and_re_raised_by_identity(
     interruption = record.interruptions[0]
     assert interruption.kind.value == "asgi_receive_error"
     assert interruption.phase is InterruptionPhase.RESPONSE_STREAM
-    assert interruption.exception_type == "RuntimeError"
-    assert interruption.message == "ASGI receive failed"
+    assert interruption.exception_type == error_type.__qualname__
+    if expected_message is None:
+        assert interruption.message is None
+    else:
+        assert interruption.message is not None
+        assert expected_message in interruption.message
     assert interruption.continuation_synthesized is False
+    if isinstance(receive_error, OneShotRenderedError):
+        assert receive_error.render_calls == 1
+        failure_summaries = [
+            record.delivery.failure,
+            record.delivery.post_delivery_failure,
+            *record.delivery.additional_failures,
+        ]
+        matching = [
+            summary
+            for summary in failure_summaries
+            if summary is not None and summary.type == "OneShotRenderedError"
+        ]
+        assert len(matching) == 1
+        assert matching[0].message == "first and only render"
 
 
 @pytest.mark.asyncio

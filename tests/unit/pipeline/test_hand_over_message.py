@@ -357,6 +357,37 @@ def test_the_line_carries_the_key_that_reaches_the_proxys_own_log() -> None:
     assert "attempt 3" in text
 
 
+@pytest.mark.parametrize(
+    "render_failure",
+    [
+        asyncio.CancelledError("string rendering cancelled"),
+        GeneratorExit("string rendering exited"),
+    ],
+    ids=["cancelled", "generator-exit"],
+)
+def test_a_renderer_baseexception_does_not_replace_the_described_error(
+    render_failure: BaseException,
+) -> None:
+    class UnrenderableUpstreamError(Exception):
+        def __str__(self) -> str:
+            raise render_failure
+
+    text = message(UnrenderableUpstreamError())
+
+    assert "UnrenderableUpstreamError" in text
+
+
+def test_whitespace_only_error_text_falls_back_to_the_exception_type() -> None:
+    class WhitespaceError(Exception):
+        def __str__(self) -> str:
+            return " \n\t "
+
+    text = message(WhitespaceError())
+
+    assert "WhitespaceError" in text
+    assert text.strip()
+
+
 def test_a_long_error_body_is_cut_and_says_so() -> None:
     text = message(httpx2.HTTPError("x" * 400))
     assert len(text) < 400

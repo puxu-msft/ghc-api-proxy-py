@@ -1349,6 +1349,40 @@ async def test_cancellation_replaced_by_cleanup_error_is_not_an_upstream_body_en
     assert trace.upstream_final_pull_s is None
 
 
+@pytest.mark.asyncio
+async def test_direct_pull_cancellation_is_not_an_upstream_body_end() -> None:
+    next_pull_started = asyncio.Event()
+
+    async def source() -> AsyncIterator[bytes]:
+        yield b"first"
+        next_pull_started.set()
+        await asyncio.Event().wait()
+
+    trace = RequestTrace(method="POST", path="/v1/messages", started=time.monotonic())
+    counted = _counted_upstream(
+        source(),
+        cast(Any, SimpleNamespace(active_requests=ActiveRequestRegistry())),
+        "req",
+        trace,
+        attempt=1,
+    )
+    assert await anext(counted) == b"first"
+    pending = asyncio.create_task(anext(counted))
+    await asyncio.wait_for(next_pull_started.wait(), timeout=1)
+    pending.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+
+    assert trace.upstream_timing_attempt == 1
+    assert trace.last_upstream_chunk_s is not None
+    assert trace.final_upstream_pull_started_s is not None
+    assert trace.last_upstream_chunk_s <= trace.final_upstream_pull_started_s
+    assert trace.upstream_end_s is None
+    assert trace.upstream_tail_gap_s is None
+    assert trace.upstream_final_pull_s is None
+
+
 def _replay_over(attempts: list[list[bytes]]) -> ReplaySupport:
     """Hand out one fresh attempt per call, each with its own assembler and buffer."""
     remaining = list(attempts)

@@ -44,6 +44,12 @@ class HandBackOutcome:
     trigger: HandBackTrigger | None
 
 
+@dataclass(frozen=True, slots=True)
+class _ExceptionObservation:
+    outer_message: str | None
+    description: str
+
+
 def client_message_count(payload: dict[str, Any]) -> int:
     """How many messages the client sent, as the client counted them.
 
@@ -86,15 +92,12 @@ def one_line(text: str) -> str:
     return f"{flat[:_MAX_LINK_CHARS]}… (+{len(flat) - _MAX_LINK_CHARS} more chars)"
 
 
-def _safe_outer_message(error: BaseException) -> str | None:
-    for render in (str, repr):
-        try:
-            rendered = render(error)
-        except Exception:
-            continue
-        if rendered:
-            return one_line(rendered)
-    return None
+def _safe_repr(error: BaseException) -> str | None:
+    try:
+        rendered = one_line(repr(error))
+    except BaseException:
+        return None
+    return rendered or None
 
 
 def _chain(error: BaseException) -> tuple[list[BaseException], bool]:
@@ -148,14 +151,20 @@ def _link_text(link: BaseException) -> str:
 
     `h2.exceptions.StreamClosedError` and `NoSuchStreamError` assign `self.stream_id` without calling `super().__init__`, but `BaseException.__new__` has already put the constructor argument in `args` — so `str()` on them is a bare stream id. A `message` reading `3` is worse than an empty one: an empty field is visibly missing, while `3` looks like something upstream said. Measured 2026-08-23, `.dev/docs/upstream/retry-and-continuation/reports/260823-handover-error-shapes.md` §2.2(g).
     """
-    text = str(link)
+    try:
+        text = one_line(str(link))
+    except BaseException:
+        text = ""
     stream_id = getattr(link, "stream_id", None)
     if isinstance(link, H2Error) and isinstance(stream_id, int) and text == str(stream_id):
         return f"stream {stream_id}"
-    return one_line(text)
+    return text
 
 
-def _asyncio_timeout_plumbing(links: list[BaseException]) -> set[int]:
+def _asyncio_timeout_plumbing(
+    links: list[BaseException],
+    texts: list[str],
+) -> set[int]:
     """Which links are the two `asyncio.timeout` raises around a guard, by position in the chain.
 
     `asyncio.timeout` ends its scope by cancelling the task and converting that into `TimeoutError`, so a guard built on it arrives as exactly three adjacent links — a `TimeoutError` subclass carrying its own message, then a bare `builtins.TimeoutError()`, then an empty `asyncio.CancelledError()`. Measured for `StreamDeadlineError` and `StreamIdleTimeoutError` in `.dev/docs/upstream/retry-and-continuation/reports/260823-handover-error-shapes.md` §2.2(a)/(b). Only the second and third are suppressed; the guard itself is the account.
@@ -167,14 +176,50 @@ def _asyncio_timeout_plumbing(links: list[BaseException]) -> set[int]:
         guard, converted, cancelled = links[index], links[index + 1], links[index + 2]
         if (
             isinstance(guard, TimeoutError)
-            and _link_text(guard)
+            and texts[index]
             and type(converted) is TimeoutError
-            and not _link_text(converted)
+            and not texts[index + 1]
             and type(cancelled) is CancelledError
-            and not _link_text(cancelled)
+            and not texts[index + 2]
         ):
             found.update({index + 1, index + 2})
     return found
+
+
+def _observe_exception(error: BaseException) -> _ExceptionObservation:
+    links, truncated = _chain(error)
+    texts = [_link_text(link) for link in links]
+    plumbing = _asyncio_timeout_plumbing(links, texts)
+    rendered: list[str] = []
+    seen_text: set[str] = set()
+    seen_class: set[str] = set()
+    for position, (link, text) in enumerate(zip(links, texts, strict=True)):
+        name = f"{type(link).__module__}.{type(link).__qualname__}"
+        fresh_class = type(link).__qualname__ not in seen_class
+        fresh_text = bool(text) and text not in seen_text
+        if fresh_text:
+            rendered.append(f"{name}: {text}")
+        elif fresh_class and position not in plumbing:
+            rendered.append(name)
+        else:
+            continue
+        seen_class.add(type(link).__qualname__)
+        if text:
+            seen_text.add(text)
+    described = "; caused by ".join(rendered)
+    if truncated:
+        described = (
+            f"{described}; caused by … "
+            f"(chain continues past {_MAX_LINKS} links)"
+        )
+    gloss = _h2_gloss(links)
+    if gloss:
+        described = f"{described} ({gloss})"
+    outer_message = texts[0] or _safe_repr(error)
+    return _ExceptionObservation(
+        outer_message=outer_message,
+        description=described,
+    )
 
 
 def describe_error(error: BaseException) -> str:
@@ -196,32 +241,7 @@ def describe_error(error: BaseException) -> str:
 
     Freshness of a class is judged on `__qualname__`, not on the full dotted path: `httpx2.ReadError` wrapping `httpcore2.ReadError` is one failure described twice by two libraries, and that is the case worth collapsing. Two same-named exceptions from genuinely unrelated modules would collapse too. That is deliberate, and it has only ever been produced by construction.
     """
-    links, truncated = _chain(error)
-    plumbing = _asyncio_timeout_plumbing(links)
-    rendered: list[str] = []
-    seen_text: set[str] = set()
-    seen_class: set[str] = set()
-    for position, link in enumerate(links):
-        text = _link_text(link)
-        name = f"{type(link).__module__}.{type(link).__qualname__}"
-        fresh_class = type(link).__qualname__ not in seen_class
-        fresh_text = bool(text) and text not in seen_text
-        if fresh_text:
-            rendered.append(f"{name}: {text}")
-        elif fresh_class and position not in plumbing:
-            rendered.append(name)
-        else:
-            continue
-        seen_class.add(type(link).__qualname__)
-        if text:
-            seen_text.add(text)
-    described = "; caused by ".join(rendered)
-    if truncated:
-        # Named rather than left to trail off, for the same reason a cut message says how much it lost: a chain that ended and a chain that was cut are otherwise the same string.
-        described = f"{described}; caused by … (chain continues past {_MAX_LINKS} links)"
-    # Scanned over every link, including the ones dropped just above: the event object rides on httpcore's exception, which is exactly the link whose text was a duplicate.
-    gloss = _h2_gloss(links)
-    return f"{described} ({gloss})" if gloss else described
+    return _observe_exception(error).description
 
 
 def interruption_message(
@@ -230,6 +250,7 @@ def interruption_message(
     stop_reason: str,
     request_id: str,
     attempt_count: int,
+    observation: _ExceptionObservation | None = None,
 ) -> str:
     """What the hand-over tells the client this turn ended of.
 
@@ -242,7 +263,8 @@ def interruption_message(
     if error is None:
         # Without this the field repeated `category` verbatim and said nothing twice. The stop reason is still quoted whole, since it is upstream's own word and the configured set it was matched against is not fixed to one value.
         return f"upstream ended the turn before it was finished: stop_reason={stop_reason} {where}"
-    return f"{describe_error(error)} {where}"
+    observed = observation or _observe_exception(error)
+    return f"{observed.description} {where}"
 
 
 def hand_back_block(
@@ -280,9 +302,11 @@ def hand_back_block(
     #
     # A turn upstream cut short for want of room is not an error and has no `ErrorCategory`. It travels under the stop reason upstream gave it, which is also what a reader of the MCP server's journal will recognise. **The value is provisional**: the user ruled that this case gets a category of its own but has not named it, and the server that reads it is being changed in another repository. See `.dev/docs/upstream/retry-and-continuation/decisions.md` 4.1.
     trigger: HandBackTrigger | None
+    observation: _ExceptionObservation | None
     if error is None:
         category = stop_reason
         trigger = None
+        observation = None
     else:
         # `Exception`, because that is what decided the failure was continuable in the first place — the endings that are not exceptions never reach here with one.
         reason = replay_reason(error) if isinstance(error, Exception) else None
@@ -294,17 +318,19 @@ def hand_back_block(
             if reason
             else ErrorCategory.UPSTREAM.value
         )
+        observation = _observe_exception(error)
         trigger = HandBackTrigger(
             category=category,
             exception_module=type(error).__module__,
             exception_type=type(error).__qualname__,
-            message=_safe_outer_message(error),
+            message=observation.outer_message,
         )
     detail = interruption_message(
         error=error,
         stop_reason=stop_reason,
         request_id=request_id,
         attempt_count=context.attempt_count,
+        observation=observation,
     )
     return HandBackOutcome(
         payload={
