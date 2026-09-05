@@ -6,16 +6,18 @@ from typing import Any, cast
 
 import httpx2
 
-from app.config.schema import ModelProviderConfig
+from app.config.schema import GithubCopilotProviderConfig
 from app.model_provider.ghc_client import GhcApiClient, fetch_models
 from app.model_provider.types import (
+    CatalogSnapshot,
     EndpointNotImplemented,
     ModelDescriptor,
     ModelEndpoint,
-    UnknownModel,
     model_type_of,
     parse_adaptive_thinking,
+    parse_prompt_token_limits,
     parse_reasoning_efforts,
+    require_descriptor_owner,
     require_endpoint,
     resolve_endpoints,
 )
@@ -47,7 +49,7 @@ class GithubCopilotProvider:
         self,
         name: str,
         client: GhcApiClient,
-        config: ModelProviderConfig,
+        config: GithubCopilotProviderConfig,
         *,
         http_client: httpx2.AsyncClient,
         base_url: str,
@@ -64,6 +66,7 @@ class GithubCopilotProvider:
         self._raw_catalog: dict[str, Any] = {"object": "list", "data": []}
         self._etag: str | None = None
         self._refreshed_at: str = ""
+        self._catalog_generation = 0
 
     @property
     def name(self) -> str:
@@ -88,6 +91,14 @@ class GithubCopilotProvider:
         return self._raw_catalog
 
     @property
+    def catalog_snapshot(self) -> CatalogSnapshot:
+        return CatalogSnapshot(
+            raw=self._raw_catalog,
+            source="upstream",
+            driven_endpoints=DRIVEN_ENDPOINTS,
+        )
+
+    @property
     def available_ids(self) -> frozenset[str]:
         return frozenset(self._descriptors) - self._disabled
 
@@ -105,6 +116,8 @@ class GithubCopilotProvider:
         entries = raw.get("data")
         if not isinstance(entries, list):
             raise ValueError("models response data must be a list")
+        generation = self._catalog_generation + 1
+        refreshed_at = datetime.now(UTC).isoformat(timespec="seconds")
         descriptors: dict[str, ModelDescriptor] = {}
         for entry in entries:  # pyright: ignore[reportUnknownVariableType]
             if not isinstance(entry, dict):
@@ -126,11 +139,16 @@ class GithubCopilotProvider:
                 # Read here for the same reason the endpoints are: the raw catalog is kept, but anything that reads it a second time to answer the same question is a second answer waiting to disagree with this one.
                 reasoning_efforts=parse_reasoning_efforts(model),
                 adaptive_thinking=parse_adaptive_thinking(model),
+                provider_name=self._name,
+                catalog_generation=generation,
+                catalog_refreshed_at=refreshed_at,
+                prompt_token_limits=parse_prompt_token_limits(model),
             )
         self._descriptors = descriptors
         self._raw_catalog = dict(raw)
+        self._catalog_generation = generation
         # Stamped only here, so it marks a successful replacement rather than an attempt. A refresh that raised, or one upstream answered 304 to, leaves the previous stamp standing — which is correct: the descriptors it describes are still the ones in hand.
-        self._refreshed_at = datetime.now(UTC).isoformat(timespec="seconds")
+        self._refreshed_at = refreshed_at
 
     async def refresh_catalog(self) -> bool:
         """Refetch the catalog, authenticating as of now.
@@ -157,13 +175,11 @@ class GithubCopilotProvider:
         endpoint: ModelEndpoint,
         payload: Mapping[str, Any],
         *,
-        model_id: str,
+        descriptor: ModelDescriptor,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
     ) -> httpx2.Response:
-        descriptor = self.describe(model_id)
-        if descriptor is None:
-            raise UnknownModel(self._name, model_id)
+        require_descriptor_owner(descriptor, self._name)
         require_endpoint(descriptor, endpoint, self._name)
         if endpoint not in _SEND_METHODS:
             raise EndpointNotImplemented(self._name, endpoint.value)
@@ -192,15 +208,13 @@ class GithubCopilotProvider:
         self,
         payload: Mapping[str, Any],
         *,
-        model_id: str,
+        descriptor: ModelDescriptor,
     ) -> httpx2.Response:
         """Anthropic token counting.
 
         The spec groups it with the Messages driver rather than giving it its own routing row.
         It is therefore gated on the Messages capability.
         """
-        descriptor = self.describe(model_id)
-        if descriptor is None:
-            raise UnknownModel(self._name, model_id)
+        require_descriptor_owner(descriptor, self._name)
         require_endpoint(descriptor, ModelEndpoint.ANTHROPIC_MESSAGES, self._name)
         return await self._client.send_anthropic_count_tokens(payload)

@@ -9,11 +9,7 @@ from typing import Any, cast
 
 import orjson
 
-from app.pipeline.delivery.assembling import (
-    ClientActionRequirement,
-    ReplyDialect,
-    Terminal,
-)
+from app.pipeline.delivery.assembling import ReplyDialect, Terminal
 from app.pipeline.delivery.formats.openai_responses import (
     read_responses_terminal,
     responses_failure_from,
@@ -24,6 +20,7 @@ from app.pipeline.delivery.formats.openai_responses_actions import (
 )
 from app.pipeline.delivery.passthrough import Dialect, PassthroughAssembler
 from app.pipeline.delivery.sse_source import SseEvent
+from app.pipeline.response_action import classify_responses_client_action
 
 # The response envelope: events belonging to no output item.
 #
@@ -56,8 +53,8 @@ ITEM_DONE = "response.output_item.done"
 
 
 def requires_client_action(item: dict[str, Any]) -> bool:
-    """Project the three-state fact onto the conservative buffering decision."""
-    return client_action_requirement(item) is not ClientActionRequirement.NOT_REQUIRED
+    """Project the shared three-state classification onto the delivery decision."""
+    return classify_responses_client_action(item).delivery_required
 
 
 def _read_terminal(event: SseEvent, terminal: Terminal, saw_client_action: bool) -> None:
@@ -127,7 +124,7 @@ def _rewrite_item_ids(payload: dict[str, Any], item_id: str) -> bool:
 def stabilise_stream_ids(events: tuple[SseEvent, ...]) -> tuple[SseEvent, ...]:
     """Give every event of one output item the id its **closing** event carries.
 
-    `spec.md` §6.6. Off unless configured: this rewrites upstream's bytes, and §2.7 forbids calling such a thing native.
+    `spec.md` §6.6. On by default and explicitly disableable: this rewrites upstream's bytes, and §2.7 forbids calling such a thing native.
 
     **Closing rather than first-seen, and that is the whole difficulty.** Measured 2026-09-02: one reasoning item arrived with a 4,888-byte seal under one id on `added` and a 5,032-byte seal under a different id on `done`. Each seal is bound to the id it came with, and upstream verifies that binding when the item is replayed. Stabilising onto the opening id would attach the closing seal to the opening id — issue #4 exactly, manufactured here rather than inherited. Stabilising onto the closing id leaves the pair the client actually stores untouched.
 

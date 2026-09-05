@@ -6,11 +6,19 @@ It does not translate formats, resolve aliases, orchestrate retries or decide ro
 """
 
 from collections.abc import Mapping
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 import httpx2
 
-from app.model_provider.types import ModelDescriptor, ModelEndpoint
+from app.model_provider.types import CatalogSnapshot, ModelDescriptor, ModelEndpoint
+
+
+@runtime_checkable
+class CatalogProvider(Protocol):
+    """Optional diagnostics seam for providers that can expose a complete catalog snapshot."""
+
+    @property
+    def catalog_snapshot(self) -> CatalogSnapshot: ...
 
 
 class ModelProvider(Protocol):
@@ -35,6 +43,18 @@ class ModelProvider(Protocol):
 
     @property
     def available_ids(self) -> frozenset[str]: ...
+
+    @property
+    def raw_catalog(self) -> Mapping[str, Any]:
+        """The catalog exactly as upstream published it, for reporting.
+
+        On the protocol rather than on one implementation because the debug tooling
+        renders any provider's catalog, and a property only some providers had made
+        that tooling branch on types to ask a question every provider can answer.
+        Static catalogs count: what a provider serves is what upstream said, even
+        when upstream said it to the reference implementation instead of over HTTP.
+        """
+        ...
 
     @property
     def disabled_ids(self) -> frozenset[str]:
@@ -62,13 +82,13 @@ class ModelProvider(Protocol):
         endpoint: ModelEndpoint,
         payload: Mapping[str, Any],
         *,
-        model_id: str,
+        descriptor: ModelDescriptor,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
     ) -> httpx2.Response:
         """Send one request to one endpoint.
 
-        Raises before touching the network when the model does not advertise the endpoint.
+        The descriptor is the immutable snapshot routing selected. Raises before touching the network when another provider issued it or the model does not advertise the endpoint.
         """
         ...
 
@@ -76,12 +96,12 @@ class ModelProvider(Protocol):
         self,
         payload: Mapping[str, Any],
         *,
-        model_id: str,
+        descriptor: ModelDescriptor,
     ) -> httpx2.Response:
         """Ask upstream how many tokens an Anthropic Messages body comes to.
 
         On the protocol rather than on one implementation because the spec's `inbound.anthropic_count_tokens.providers` names a model provider among the legs it may try; a counter that only some providers offered could not be selected by name.
 
-        Gated on the Messages capability, the same as sending that body would be.
+        Gated on descriptor ownership and the Messages capability, the same as sending that body would be.
         """
         ...

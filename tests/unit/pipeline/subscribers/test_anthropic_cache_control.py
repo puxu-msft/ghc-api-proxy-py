@@ -7,6 +7,7 @@ The shape under test is the one a user's machine actually sent on 2026-08-24 and
 One test goes through `build_chain` and `handle` rather than calling the subscriber. Being registered is not being run: every assertion that calls `prune_cache_control_fields` directly would stay green if nobody had wired it up.
 """
 
+from collections.abc import Mapping
 from typing import Any
 
 import httpx2
@@ -36,6 +37,7 @@ TABLE = compile_sanitize_table({"claude-.*": ["scope"]})
 SONNET = ModelDescriptor(
     id="claude-sonnet-5",
     endpoints=frozenset({ModelEndpoint.ANTHROPIC_MESSAGES}),
+    provider_name="ghc",
     adaptive_thinking=True,
 )
 
@@ -201,6 +203,10 @@ class CapableProvider:
     @property
     def available_ids(self) -> frozenset[str]:
         return frozenset({"claude-sonnet-5"})
+    @property
+    def raw_catalog(self) -> Mapping[str, Any]:
+        return {}
+
 
     # Reporting-only members of the provider protocol, here so this stub satisfies it. Nothing on this test's path reads them; `/api/status` does.
     @property
@@ -226,14 +232,14 @@ class CapableProvider:
         endpoint: ModelEndpoint,
         payload: Any,
         *,
-        model_id: str,
+        descriptor: ModelDescriptor,
         stream: bool = False,
         extra_headers: Any = None,
     ) -> httpx2.Response:
         self.sent.append(dict(payload))
         return httpx2.Response(200)
 
-    async def count_tokens(self, payload: Any, *, model_id: str) -> httpx2.Response:
+    async def count_tokens(self, payload: Any, *, descriptor: ModelDescriptor) -> httpx2.Response:
         self.counted.append(dict(payload))
         # Carries a request because the caller calls `raise_for_status()`, which needs one.
         return httpx2.Response(

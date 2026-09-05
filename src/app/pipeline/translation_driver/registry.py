@@ -14,6 +14,10 @@ from app.pipeline.translation_driver.anthropic_messages import (
     from_anthropic_messages,
     to_anthropic_messages,
 )
+from app.pipeline.translation_driver.openai_chat_completions import (
+    from_chat_completions_response,
+    to_openai_chat_completions,
+)
 from app.pipeline.translation_driver.openai_responses import (
     from_openai_responses,
     to_openai_responses,
@@ -48,7 +52,12 @@ class ResponseReader(Protocol):
     """
 
     def __call__(
-        self, payload: Mapping[str, Any], *, client_search_tool: str = ""
+        self,
+        payload: Mapping[str, Any],
+        *,
+        client_search_tool: str = "",
+        hosted_web_search_expected: bool = False,
+        hand_over_stop_reasons: frozenset[str] = frozenset({"max_tokens"}),
     ) -> SemanticResponse: ...
 type ResponseWriter = Callable[[SemanticResponse], dict[str, Any]]
 
@@ -138,6 +147,8 @@ class TranslatorRegistry:
         source: WireFormat,
         target: WireFormat,
         client_search_tool: str = "",
+        hosted_web_search_expected: bool = False,
+        hand_over_stop_reasons: frozenset[str] = frozenset({"max_tokens"}),
     ) -> tuple[dict[str, Any], SemanticResponse]:
         """Carry a response back across, so the client sees the format it asked in.
 
@@ -149,7 +160,12 @@ class TranslatorRegistry:
         writer = self._write_response.get(target)
         if writer is None:
             raise TranslatorNotFound(f"no response writer registered for {target.value}")
-        semantic = reader(payload, client_search_tool=client_search_tool)
+        semantic = reader(
+            payload,
+            client_search_tool=client_search_tool,
+            hosted_web_search_expected=hosted_web_search_expected,
+            hand_over_stop_reasons=hand_over_stop_reasons,
+        )
         return writer(semantic), semantic
 
 
@@ -178,5 +194,14 @@ def default_registry(config: ModelTranslationConfig | None = None) -> Translator
     )
     registry.register_response_writer(
         WireFormat.OPENAI_RESPONSES, to_openai_responses_response
+    )
+    # Chat Completions is registered as an *outbound* target and a response source
+    # only. No inbound translator, no response writer: a client that speaks Chat
+    # Completions is served by the direct passthrough leg, which forwards its bytes
+    # rather than round-tripping them through the intermediate form, so a pair here
+    # would be registration for a route that cannot be built.
+    registry.register_outbound(WireFormat.OPENAI_CHAT_COMPLETIONS, to_openai_chat_completions)
+    registry.register_response_reader(
+        WireFormat.OPENAI_CHAT_COMPLETIONS, from_chat_completions_response
     )
     return registry

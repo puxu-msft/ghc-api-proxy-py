@@ -16,9 +16,10 @@
 | `builtin:hosted-web-search-gate` | `attempt.prepare` | after `builtin:server-tool-capability` | Nothing forces it — the two are mutually exclusive by route, one acting only when the target is Anthropic Messages and the other only when it is Responses, so neither can see what the other wrote. Registered next to it because they answer the same question for the two legs, and a reader looking for "where is web search decided" should find both in one place rather than at either end of the list. |
 | `builtin:anthropic-thinking-capability` | `attempt.prepare` | — | Nothing forces its position: `thinking` and `output_config` are touched by nothing else on this event, and its two neighbours read `tools` and `content`. Registered here, after the pair above, because it is the third capability gate and they belong together — all three answer "will the model this is going to actually take this field". |
 | `builtin:repair-minted-reasoning-ids` | `attempt.prepare` | — | Nothing forces its position. It reads and edits `input`, which on this event nothing else touches: every neighbour works on `tools`, `messages` or `content`, and those belong to the Anthropic-shaped body. Off by default; `.dev/docs/direct-passthrough/spec.md` §6.5. |
-| `builtin:blank-text-blocks` | `attempt.prepare` | registered last, by convention | Nothing forces it. It does read what that pass writes — `server_tools.py` rewrites a message's `content` and this reads the same list — but every text block that pass emits carries a `[family]` prefix and `_render_results` has no branch returning an empty string, so none of it can trigger this rule. Last among the rewriters on purpose all the same: this one only removes, and a remover placed after them sees the shape that will actually be sent, so a future pass that does emit a blank block is covered without anyone having to remember to reorder. The order comes from registration order rather than a `before=`/`after=` constraint, and the tuple in `tests/unit/pipeline/subscribers/test_builtin_subscribers.py` is what holds it. |
-| `builtin:anthropic-trailing-assistant` | `attempt.prepare` | **after `builtin:blank-text-blocks`, by an explicit constraint** | The one ordering here that is not convention. It asserts an invariant over the finished message list — that the conversation ends on a user turn — and the pass above is the last thing on this event that can remove a message. Run before it and the guard checks a list that is not the one going out, which is the failure it exists to catch. Stated with `after=` rather than by registration order because a constraint that matters should not be recoverable only by reading this table. |
-| `builtin:anthropic-cache-control-vocabulary` | `attempt.prepare` | **after `builtin:server-tool-capability`, by an explicit constraint** | The second one that is not convention, and for the same kind of reason: it removes the `cache_control` keys upstream refuses from every marker in the body, and `server_tools.py` **puts a marker back** — when it rewrites a server-tool result into a text block it deliberately carries the block's `cache_control` across, so a breakpoint keeps marking the same boundary. Run before that pass and the one marker it re-emits is the one that goes out unpruned. Registered last among the rewriters otherwise: it only deletes keys, never blocks or messages, so nothing downstream depends on where it sits relative to the two removers. |
+| `builtin:blank-text-blocks` | `attempt.prepare` | before `builtin:reasoning-carrier-last-mile` | This pass only removes text blocks that say nothing. Removing one can put two thinking blocks together, so the following pass owns the resulting Anthropic-only repair rather than this remover inventing a separator itself. |
+| `builtin:reasoning-carrier-last-mile` | `attempt.prepare` | **after `builtin:blank-text-blocks`** | Refuses every project or compatible synthetic carrier still present in provider-bound wire. On an Anthropic target only, it then owns the configured thinking adjacency repair. Running after blank removal means it sees the body actually being sent and leaves no second separator owner. |
+| `builtin:anthropic-cache-control-vocabulary` | `attempt.prepare` | **after `builtin:server-tool-capability`, by an explicit constraint** | It removes the `cache_control` keys upstream refuses from every marker in the body, and `server_tools.py` can put one back while rewriting a result. It only deletes fields, never blocks or messages, but it still precedes the final invariant assertion so the last subscriber observes the exact provider-bound body. |
+| `builtin:anthropic-trailing-assistant` | `attempt.prepare` | **after `builtin:reasoning-carrier-last-mile` and `builtin:anthropic-cache-control-vocabulary`** | It asserts an invariant over the finished provider-bound message list after the last block-moving and field-pruning passes. Stated with `after=` rather than by registration order because a constraint that matters should not be recoverable only by reading this table. |
 
 `tests/unit/pipeline/subscribers/test_builtin_subscribers.py` locks the registered set and the frozen order, so a subscriber added without a decision about where it goes fails there rather than in production.
 """
@@ -26,7 +27,7 @@
 import re
 from collections.abc import Mapping, Sequence
 
-from app.config.schema import CacheControlMode, ThinkingDisplayPolicy
+from app.config.schema import AssistantMessageLayout, CacheControlMode, ThinkingDisplayPolicy
 from app.pipeline.direct_driver.base import EVENT_ATTEMPT_PREPARE
 from app.pipeline.events import SubscriberRegistry
 from app.pipeline.request import RequestContext
@@ -50,6 +51,10 @@ from app.pipeline.subscribers.minted_reasoning_ids import (
     SUBSCRIBER_ID as MINTED_REASONING_IDS_ID,
 )
 from app.pipeline.subscribers.minted_reasoning_ids import repair_minted_reasoning_ids
+from app.pipeline.subscribers.reasoning_carrier import (
+    SUBSCRIBER_ID as REASONING_CARRIER_LAST_MILE_ID,
+)
+from app.pipeline.subscribers.reasoning_carrier import guard_and_layout_reasoning
 from app.pipeline.subscribers.server_tools import SUBSCRIBER_ID as SERVER_TOOL_CAPABILITY_ID
 from app.pipeline.subscribers.server_tools import adapt_server_tools
 
@@ -62,6 +67,7 @@ def register_builtin_subscribers(
     default_provider: str = "",
     thinking_efforts: Mapping[str, str] | None = None,
     thinking_display: ThinkingDisplayPolicy = "passthrough",
+    assistant_message_layout: AssistantMessageLayout = "move_and_synthetic",
     cache_control: CacheControlMode = "sanitize",
     cache_control_sanitize: Sequence[tuple[re.Pattern[str], frozenset[str]]] = (),
     repair_minted_reasoning_ids_enabled: bool = False,
@@ -113,10 +119,20 @@ def register_builtin_subscribers(
     )
     registry.subscribe(
         EVENT_ATTEMPT_PREPARE,
+        REASONING_CARRIER_LAST_MILE_ID,
+        lambda context: guard_and_layout_reasoning(
+            context,
+            assistant_message_layout=assistant_message_layout,
+        ),
+        # Blank removal may put two thinking blocks together. This pass is the sole owner of repairing that final Anthropic shape.
+        after=(BLANK_TEXT_BLOCKS_ID,),
+    )
+    registry.subscribe(
+        EVENT_ATTEMPT_PREPARE,
         ANTHROPIC_TRAILING_ASSISTANT_ID,
         repair_trailing_assistant,
-        # The one ordering constraint on this event, and it is load-bearing rather than tidy: this reads the finished message list, and the pass above is the last one that can shorten it.
-        after=(BLANK_TEXT_BLOCKS_ID,),
+        # This assertion runs last, after both the last block-moving pass and the last field-pruning pass.
+        after=(REASONING_CARRIER_LAST_MILE_ID, ANTHROPIC_CACHE_CONTROL_ID),
     )
     registry.subscribe(
         EVENT_ATTEMPT_PREPARE,
@@ -137,11 +153,13 @@ __all__ = [
     "BLANK_TEXT_BLOCKS_ID",
     "HOSTED_WEB_SEARCH_GATE_ID",
     "MINTED_REASONING_IDS_ID",
+    "REASONING_CARRIER_LAST_MILE_ID",
     "SERVER_TOOL_CAPABILITY_ID",
     "adapt_server_tools",
     "adapt_thinking_capability",
     "drop_blank_text_blocks",
     "gate_hosted_web_search",
+    "guard_and_layout_reasoning",
     "prune_cache_control_fields",
     "register_builtin_subscribers",
     "repair_minted_reasoning_ids",

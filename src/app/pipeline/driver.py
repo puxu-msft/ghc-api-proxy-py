@@ -7,17 +7,16 @@ What is *not* here is deliberate. Rendering a failure as HTTP belongs to the edg
 
 import asyncio
 from collections.abc import Callable, Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, cast
 from uuid import uuid4
 
 import httpx2
-from pydantic import ValidationError
 
 from app.config.schema import LOCAL_COUNTER
 from app.core.chain import Chain
-from app.model_provider import ModelProvider
-from app.models.anthropic import MessagesRequest
+from app.model_provider import ModelDescriptor, ModelProvider
 from app.observability.metrics import BETA_FLAGS_STRIPPED
 from app.pipeline.anthropic_request_hook import fix_anthropic_request
 from app.pipeline.auto_mode_classifier import AutoModeVerdict, classify, log_hit, verdict_text
@@ -54,11 +53,14 @@ from app.pipeline.translation_driver.semantic import (
     TranslationRefused,
     WebSearchNotExecutable,
 )
-from app.tokenization.estimators import estimate_anthropic_input, estimate_responses_input
+from app.tokenization.admission import TokenAdmissionObservation
+from app.tokenization.scaling import scale_local_estimate
 from app.wire_json import dumps
 
-# Where the identified client tool-search tool is kept between the request and response halves. A `tool_search_call` names no tool — on that wire the search *is* the tool — so this is the only way the name survives the crossing.
+# Where request-translation facts are kept for the response half. Neither kind of Responses search call carries enough information to recover these decisions from the response itself.
 CLIENT_SEARCH_TOOL = "client_search_tool"
+HOSTED_WEB_SEARCH_EXPECTED = "hosted_web_search_expected"
+RESPONSE_CONVERSION_LOSSES = "response_conversion_losses"
 
 @dataclass(slots=True)
 class HandledRequest:
@@ -145,10 +147,10 @@ def _translate_with_facts(
     chain: Chain,
     context: RequestContext,
     route: Route,
-    provider: ModelProvider,
+    descriptor: ModelDescriptor,
     source_headers: Mapping[str, str],
 ) -> tuple[dict[str, Any], SemanticRequest]:
-    target = translation_target(provider, route.model_id, chain.thinking_profiles)
+    target = translation_target(descriptor, chain.thinking_profiles)
     try:
         translated, semantic = chain.translators.translate(
             context.payload,
@@ -167,6 +169,9 @@ def _translate_with_facts(
 async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[RequestContext], None] | None = None) -> HandledRequest:
     source_headers = context.source_headers_for_translation()
     provider, route = shape_request(chain, context, on_routed)
+    descriptor = route.descriptor
+    if descriptor is None:
+        raise RuntimeError("routed request has no model descriptor")
 
     # Before translation, because the predicates read `system` and `messages` and the target format has neither. Before the driver, because the whole point is that no upstream call happens: this is the one path where the reply is decided without an attempt.
     #
@@ -195,19 +200,63 @@ async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[Req
             chain,
             context,
             route,
-            provider,
+            descriptor,
             source_headers,
         )
         context.payload = translated
         if semantic.client_search_tool:
             # Kept for the response half, which cannot recover it: a `tool_search_call` names no tool, so without this the model's search request has no name to come back under.
             context.extras[CLIENT_SEARCH_TOOL] = semantic.client_search_tool
+        if semantic.hosted_web_search_expected:
+            # The same `web_search_call` spelling can be requested or unsolicited. Only the request translator knows which one this turn permits D6 to revive as a native pair.
+            context.extras[HOSTED_WEB_SEARCH_EXPECTED] = True
         if not semantic.conversion.lossless:
             context.extras["conversion_losses"] = list(semantic.conversion.losses)
 
     # The payload names the inbound model; upstream must be asked for the resolved one.
     context.payload["model"] = route.model_id
 
+    return await _drive(chain, context, provider, route, descriptor)
+
+
+async def replay_prepared(
+    chain: Chain,
+    context: RequestContext,
+    route: Route,
+    prepared_payload: Mapping[str, Any],
+    reused_admission: TokenAdmissionObservation,
+    on_routed: Callable[[RequestContext], None] | None = None,
+) -> HandledRequest:
+    """Replay the exact final payload that produced the stream now being delivered."""
+    descriptor = route.descriptor
+    if descriptor is None:
+        raise RuntimeError("replay route has no model descriptor")
+    provider = chain.providers.get(route.provider_name)
+    apply_route(context, route)
+    if on_routed is not None:
+        on_routed(context)
+    context.payload = deepcopy(dict(prepared_payload))
+    return await _drive(
+        chain,
+        context,
+        provider,
+        route,
+        descriptor,
+        prepared_payload=prepared_payload,
+        reused_admission=reused_admission,
+    )
+
+
+async def _drive(
+    chain: Chain,
+    context: RequestContext,
+    provider: ModelProvider,
+    route: Route,
+    descriptor: ModelDescriptor,
+    *,
+    prepared_payload: Mapping[str, Any] | None = None,
+    reused_admission: TokenAdmissionObservation | None = None,
+) -> HandledRequest:
     timeouts = chain.config.upstream_request_timeouts
     # Read straight off the field it names. It used to be resolved against `response_header_overrides`, which is a different setting entirely: an operator capping the header wait for one model would have capped that model's whole attempt instead, cutting a long turn short in the name of a guard that was never asked for.
     attempt_deadline = timeouts.upstream_request_deadline
@@ -223,6 +272,10 @@ async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[Req
         attempt_deadline=attempt_deadline,
         response_header_timeout=timeouts.response_header,
         rate_limiter=chain.rate_limiter_for(provider.name),
+        descriptor=descriptor,
+        admission=chain.prompt_token_admission,
+        prepared_payload=prepared_payload,
+        reused_admission=reused_admission,
     )
     outcome = await driver.run(context)
     if isinstance(outcome.error, WebSearchNotExecutable) and context.inbound_format is WireFormat.ANTHROPIC_MESSAGES:
@@ -297,15 +350,33 @@ def _answered_auto_mode(
         attempts=context.attempt_count,
     )
 
-async def handle_count_tokens(chain: Chain, context: RequestContext) -> dict[str, Any]:
+def _check_count_deadline(deadline_at: float | None) -> None:
+    if deadline_at is not None and asyncio.get_running_loop().time() >= deadline_at:
+        raise UpstreamTimeout("client request exceeded its deadline while counting tokens")
+
+
+async def handle_count_tokens(
+    chain: Chain,
+    context: RequestContext,
+    on_routed: Callable[[RequestContext], None] | None = None,
+    on_upstream_response: Callable[[RequestContext], None] | None = None,
+    *,
+    deadline_at: float | None = None,
+) -> dict[str, Any]:
     """Serve `/v1/messages/count_tokens` through the provider chain the spec names.
 
     Shaped by `shape_request`, exactly like the request being measured: a count that ignored `model_mappings`, the capability gate, or the repairs the outbound body gets would answer about a different request than the one that would be asked.
 
     The two counters are not interchangeable. A model provider returns upstream's own number and is worth learning from; `local` returns an estimate corrected by what has been learnt so far. So the answer says which one it came from rather than presenting an estimate as a measurement.
     """
+    _check_count_deadline(deadline_at)
     source_headers = context.source_headers_for_translation()
     provider, route = shape_request(chain, context)
+    descriptor = route.descriptor
+    if descriptor is None:
+        raise RuntimeError("count route has no model descriptor")
+    if on_routed is not None:
+        on_routed(context)
 
     # Translated too, and in the same order the real request takes it: shape, translate, name the resolved model, then let the subscribers see it. A count that stopped short of translation would be measuring an Anthropic body against a model that is never going to be sent one — `/responses` receives a different set of items, a different tool shape, and a different spelling of every role, and its tokenizer counts what arrives rather than what was asked.
     # This is also the only way the subscribers see here what they see in production: the driver publishes `attempt.prepare` after translation, so publishing it before would hand them a protocol they never meet on this route.
@@ -314,7 +385,7 @@ async def handle_count_tokens(chain: Chain, context: RequestContext) -> dict[str
             chain,
             context,
             route,
-            provider,
+            descriptor,
             source_headers,
         )
         context.payload = translated
@@ -333,27 +404,30 @@ async def handle_count_tokens(chain: Chain, context: RequestContext) -> dict[str
     protocol = route.target_format.value
     if route.target_format is WireFormat.ANTHROPIC_MESSAGES:
         protocol = "anthropic"
-        estimate = estimate_anthropic_input(_countable(context.payload))
-    elif route.target_format is WireFormat.OPENAI_RESPONSES:
-        estimate = estimate_responses_input(context.payload)
-    else:
+    elif route.target_format is not WireFormat.OPENAI_RESPONSES:
         # Unreachable today and written to stay loud if that changes: the only outbound translators registered are Anthropic and Responses, so any other target already failed above with `TranslatorNotFound`. Add one — chat-completions is the obvious candidate, and three models in the catalogue advertise nothing else — and this branch opens. Reading a chat-completions body with the Responses estimator finds no `input` and no `instructions` and returns 1, which is not an estimate but a claim that the request is free.
         raise CountTokensRequestError(
             f"no token estimator for {route.target_format.value}; add one before routing counts there"
         )
+    _check_count_deadline(deadline_at)
+    estimate = await chain.local_token_worker.estimate(protocol, context.payload)
+    _check_count_deadline(deadline_at)
     calibration = chain.tokenization.calibration
 
     async def ask_upstream(payload: Mapping[str, Any]) -> int:
-        response = await provider.count_tokens(payload, model_id=route.model_id)
+        _check_count_deadline(deadline_at)
+        response = await provider.count_tokens(payload, descriptor=descriptor)
         # Taken before the body is read and before the response is closed, so the count line can report the leg it actually flew. Without these a count answered by upstream and one estimated in this process render identically apart from the counter's name — same missing byte fields, same single protocol label — and the line's own convention is that a missing field means the exchange had nothing to put there.
         # What the leg's presence means is narrower than "upstream answered the count": it means upstream *responded*. A refusal or a transport failure never reaches here — `send_anthropic_count_tokens` raises it as a pipeline error — but a 200 whose body carries no usable `input_tokens` does, and then the raise below hands the count to the estimator with both legs already recorded. `↑…B ↓…B … provider(ghc-failed,local)` is the right reading of that: upstream was asked, upstream replied, and the reply could not be used.
         context.extras["count_tokens_upstream_protocol"] = response.http_version
-        context.extras["count_tokens_bytes_in"] = len(response.request.content)
+        context.extras["count_tokens_upstream_request_bytes"] = len(response.request.content)
+        # The SDK has already buffered the complete body at this point. Record its measured length before status/JSON interpretation so an empty or malformed answer remains an observed 0/N rather than becoming "unknown" on the fallback path.
+        context.extras["count_tokens_upstream_response_bytes"] = len(response.content)
+        if on_upstream_response is not None:
+            on_upstream_response(context)
         try:
             response.raise_for_status()
             body = cast(dict[str, Any], response.json())
-            # After the body is in hand, so this is the whole of what upstream sent rather than however much had arrived. Recorded for the same reason as the outbound half: a leg reported in one direction only says, by this line's convention, that nothing came back.
-            context.extras["count_tokens_bytes_out"] = len(response.content)
         finally:
             await response.aclose()
         counted = body.get("input_tokens")
@@ -363,7 +437,11 @@ async def handle_count_tokens(chain: Chain, context: RequestContext) -> dict[str
 
     def estimate_locally(payload: Mapping[str, Any]) -> int:
         del payload  # Already measured above; recomputing per attempt would only cost time.
-        return calibration.calibrate(protocol, route.model_id, estimate)
+        _check_count_deadline(deadline_at)
+        return scale_local_estimate(
+            calibration.calibrate(protocol, route.model_id, estimate),
+            settings.local_estimate_multiplier,
+        )
 
     # Whether upstream has a counter is a property of where this is going, not of whether the request is serviceable. Token counting is a per-protocol wire contract, and the endpoint list in `docs/.human-controlled/api.md` is where that shows: `POST /v1/messages/count_tokens` serves the Anthropic protocol, and the OpenAI family has no count endpoint at all, reporting usage only on a finished response. A translated route is perfectly sendable and simply has no counter upstream, so it is answered from the estimator for its own protocol rather than refused.
     #
@@ -401,23 +479,12 @@ async def handle_count_tokens(chain: Chain, context: RequestContext) -> dict[str
                 f"{provider_attempts[0].partition(':')[0]}-failed"
             )
 
+    _check_count_deadline(deadline_at)
     if result.provider != LOCAL_COUNTER:
         # Upstream's number is ground truth for the estimator, which is the only way it improves.
         calibration.learn(protocol, route.model_id, estimate, result.tokens)
         return {"input_tokens": result.tokens}
     return {"input_tokens": result.tokens, "estimated": True}
-
-def _countable(payload: Mapping[str, Any]) -> MessagesRequest:
-    """Read the body as a Messages request for estimation only.
-
-    `max_tokens` is required to *send* a Messages request but means nothing when counting its input, and Anthropic's own count_tokens endpoint does not ask for it. Supplying one here keeps a legitimate body from being rejected; it is never sent anywhere.
-    """
-    countable = dict(payload)
-    countable.setdefault("max_tokens", 1)
-    try:
-        return MessagesRequest.model_validate(countable)
-    except ValidationError as error:
-        raise CountTokensRequestError(f"not a countable Messages body: {error}") from error
 
 async def handle_bounded(
     chain: Chain,

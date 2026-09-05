@@ -17,7 +17,6 @@ from app.model_provider import (
     EndpointNotSupported,
     ModelDescriptor,
     ModelEndpoint,
-    ModelProvider,
     ProviderRegistry,
     UnknownModel,
 )
@@ -402,20 +401,15 @@ def select_thinking_profile(
 
 
 def translation_target(
-    provider: ModelProvider,
-    model_id: str,
+    descriptor: ModelDescriptor,
     thinking_profiles: CompiledThinkingProfiles,
 ) -> TranslationTarget:
-    """What the resolved model can do, in the form a writer reads.
-
-    Built from the same descriptor routing used, so the capabilities a translation renders against are the ones the request will actually be sent to. A model the provider does not describe yields no published efforts, which makes a writer decline to render rather than guess, exactly as an absent catalog field does. Thinking capability comes only from the configured profile table and remains independent of whether the live catalog has a descriptor.
-    """
-    descriptor = provider.describe(model_id)
-    selected = select_thinking_profile(thinking_profiles, model_id)
+    """Project routing's exact catalog snapshot plus the configured thinking profile."""
+    selected = select_thinking_profile(thinking_profiles, descriptor.id)
     pattern, profile = selected if selected is not None else ("", None)
     return TranslationTarget(
-        model_id=model_id,
-        reasoning_efforts=descriptor.reasoning_efforts if descriptor is not None else None,
+        model_id=descriptor.id,
+        reasoning_efforts=descriptor.reasoning_efforts,
         thinking_profile=profile,
         thinking_profile_pattern=pattern,
     )

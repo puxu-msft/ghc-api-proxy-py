@@ -8,6 +8,7 @@ They are a transliteration of a snapshot, so they can drift from the client. Wha
 """
 
 import re
+from collections.abc import Mapping
 from typing import Any, cast
 
 import httpx2
@@ -482,6 +483,10 @@ class ExplodingProvider:
     @property
     def available_ids(self) -> frozenset[str]:
         return frozenset({"claude-model"})
+    @property
+    def raw_catalog(self) -> Mapping[str, Any]:
+        return {}
+
 
     # Reporting-only members of the provider protocol, here so this stub satisfies it. Nothing on this test's path reads them; `/api/status` does.
     @property
@@ -499,7 +504,11 @@ class ExplodingProvider:
     def describe(self, model_id: str) -> ModelDescriptor | None:
         if model_id != "claude-model":
             return None
-        return ModelDescriptor(id=model_id, endpoints=frozenset({self._endpoint}))
+        return ModelDescriptor(
+            id=model_id,
+            endpoints=frozenset({self._endpoint}),
+            provider_name=self.name,
+        )
 
     async def refresh_catalog(self) -> bool:
         return False

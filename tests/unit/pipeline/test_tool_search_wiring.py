@@ -5,6 +5,7 @@ Every other test in this area injects the name at the layer it is testing — `t
 So these go through `handle()` and `assembler_for()`, which is where the name is actually produced and read. Without them the feature can be disconnected silently, which is the exact shape this project has a standing lesson about.
 """
 
+from collections.abc import Mapping
 from typing import Any
 
 import httpx2
@@ -31,6 +32,7 @@ DEFERRED: dict[str, Any] = {
 RESPONSES_MODEL = ModelDescriptor(
     id="gpt-5.6-sol",
     endpoints=frozenset({ModelEndpoint.OPENAI_RESPONSES}),
+    provider_name="ghc",
 )
 
 
@@ -45,6 +47,10 @@ class ResponsesProvider:
     @property
     def available_ids(self) -> frozenset[str]:
         return frozenset({"gpt-5.6-sol"})
+    @property
+    def raw_catalog(self) -> Mapping[str, Any]:
+        return {}
+
 
     # Reporting-only members of the provider protocol, here so this stub satisfies it. Nothing on this test's path reads them; `/api/status` does.
     @property
@@ -70,14 +76,14 @@ class ResponsesProvider:
         endpoint: ModelEndpoint,
         payload: Any,
         *,
-        model_id: str,
+        descriptor: ModelDescriptor,
         stream: bool = False,
         extra_headers: Any = None,
     ) -> httpx2.Response:
         self.sent.append(dict(payload))
         return httpx2.Response(200)
 
-    async def count_tokens(self, payload: Any, *, model_id: str) -> httpx2.Response:
+    async def count_tokens(self, payload: Any, *, descriptor: ModelDescriptor) -> httpx2.Response:
         return httpx2.Response(
             200,
             json={"input_tokens": 7},

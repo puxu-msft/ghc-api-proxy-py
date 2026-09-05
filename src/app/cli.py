@@ -12,8 +12,12 @@ from anyio import run
 from yaml import YAMLError
 
 from app.config.loading import GITHUB_TOKEN_VARIABLE, bundled_config_text, load_proxy_config
-from app.config.paths import tls_material_dir
-from app.config.schema import ProxyConfig
+from app.config.paths import expand_user_path, tls_material_dir
+from app.config.schema import (
+    CodebuddyProviderConfig,
+    GithubCopilotProviderConfig,
+    ProxyConfig,
+)
 from app.core.chain import Chain
 from app.debug.models import collect_catalogs, render_json, render_text
 from app.lifecycle.entry import StandaloneOptions, run_standalone
@@ -22,9 +26,16 @@ from app.lifecycle.pidfile import PidfileError
 from app.lifecycle.standalone import LIFECYCLE_LOGGER, ShutdownReport
 from app.lifecycle.tls import resolve_tls_material, serves_tls
 from app.model_provider import ProviderNotConfigured
+from app.model_provider.codebuddy_client import (
+    CodebuddyClientConfig,
+    CodebuddyCredentials,
+    DesktopAuthState,
+    discover_auth_file,
+)
 from app.model_provider.ghc_client.auth.providers import FileTokenProvider
 from app.model_provider.ghc_client.auth.service import authenticate_device, clear_stored_token
 from app.model_provider.ghc_client.config import GhcClientConfig
+from app.model_provider.types import ProviderError
 from app.observability.logging import get_logger, setup_logging
 from app.server.composition import (
     build_chain,
@@ -357,6 +368,20 @@ def _selected_provider(provider: str, config: Path | None) -> tuple[ProxyConfig,
     return proxy_config, provider
 
 
+def _selected_github_provider(
+    provider: str,
+    config: Path | None,
+) -> tuple[ProxyConfig, str, GithubCopilotProviderConfig]:
+    proxy_config, provider_name = _selected_provider(provider, config)
+    provider_config = proxy_config.model_providers[provider_name]
+    if not isinstance(provider_config, GithubCopilotProviderConfig):
+        raise typer.BadParameter(
+            f"model provider {provider_name!r} has type {provider_config.type!r}; CLI auth only manages "
+            "GitHub Copilot credentials. Configure Xingchen `gateway_api_key` and `x_token` instead."
+        )
+    return proxy_config, provider_name, provider_config
+
+
 def _authenticate(provider: str, config: Path | None) -> None:
     """Log in against the tenant the named provider talks to, storing the token where that provider reads it.
 
@@ -364,6 +389,13 @@ def _authenticate(provider: str, config: Path | None) -> None:
     """
     proxy_config, provider_name = _selected_provider(provider, config)
     provider_config = proxy_config.model_providers[provider_name]
+    if isinstance(provider_config, CodebuddyProviderConfig):
+        _verify_codebuddy_auth(provider_name, provider_config)
+        return
+    # The GitHub helper names the refusal for every non-Copilot type, so a Xingchen
+    # provider is told where its credentials actually live rather than getting a
+    # device flow aimed at the wrong tenant.
+    _, _, provider_config = _selected_github_provider(provider, config)
     try:
         web_base_url = GhcClientConfig(
             auth_base_url_override=provider_config.auth_base_url
@@ -386,6 +418,64 @@ def _authenticate(provider: str, config: Path | None) -> None:
         _warn_if_environment_shadows_the_token_file()
 
     run(login)
+
+
+def _codebuddy_state_path(provider_name: str, provider_config: CodebuddyProviderConfig) -> str:
+    """The login-state file a CodeBuddy provider reads, configured or discovered."""
+    if provider_config.auth_state_file:
+        return str(expand_user_path(provider_config.auth_state_file))
+    discovered = discover_auth_file()
+    if not discovered:
+        typer.echo(
+            f"error: provider {provider_name!r} has no auth_state_file configured and none "
+            "was found under the desktop app's data directory; log in there first or set "
+            f"model_providers.{provider_name}.auth_state_file",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    return discovered
+
+
+def _verify_codebuddy_auth(provider_name: str, provider_config: CodebuddyProviderConfig) -> None:
+    """Verify the desktop login state a CodeBuddy provider depends on, refreshing it if stale.
+
+    There is no login flow here to drive: the credential is the desktop
+    WorkBuddy/CodeBuddy application's own session. What `auth` can honestly do is
+    read that state, report who it belongs to, and refresh a near-expiry token the
+    same way the serving path would — so an operator learns now whether the
+    provider can serve, not on the first request.
+    """
+    state = DesktopAuthState(_codebuddy_state_path(provider_name, provider_config))
+    try:
+        summary = state.summary()
+    except ProviderError as error:
+        typer.echo(f"error: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(f"Login state for provider {provider_name!r}: {state.path}")
+    typer.echo(
+        f"  account: {summary.get('nickname') or summary.get('uid') or '(unknown)'}"
+        + (f" @ {summary['enterprise']}" if summary.get("enterprise") else "")
+    )
+    expired = bool(summary.get("expired"))
+    typer.echo(f"  token expired: {expired}")
+    if not expired:
+        return
+    typer.echo("  refreshing...")
+    cb_config = CodebuddyClientConfig(api_base_url_override=provider_config.api_base_url)
+    http_client = build_http_client(ProxyConfig(), proxy_from_cli=False, warn_about_proxies=False)
+
+    async def refresh() -> None:
+        try:
+            await CodebuddyCredentials(state, http_client, cb_config).request_headers()
+        finally:
+            await http_client.aclose()
+
+    try:
+        run(refresh)
+    except ProviderError as error:
+        typer.echo(f"error: refresh failed: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(f"  refreshed; token now expires at {state.summary().get('expires_at')}")
 
 
 def _resolved_token_path(token_path: Path | None) -> Path:
@@ -450,6 +540,16 @@ def logout(
     #
     # **The OAuth origin is deliberately not derived here.** Removing a local file does not depend on where device codes come from, and requiring it would leave a deployment whose `auth_base_url` is a local stand-in unable to delete its own token through the CLI. Written down because §3.3's refusal is loud and a later reader could reasonably think it should apply to both commands.
     proxy_config, provider_name = _selected_provider(provider, config)
+    if isinstance(proxy_config.model_providers[provider_name], CodebuddyProviderConfig):
+        # The credential is the desktop application's own session file. Deleting it
+        # from here would log the desktop app out too — an action that size is the
+        # desktop app's to offer, not this command's.
+        typer.echo(
+            f"provider {provider_name!r} reads its login state from the WorkBuddy/CodeBuddy "
+            "desktop application; log out there. Nothing was deleted."
+        )
+        return
+    _selected_github_provider(provider, config)
     token_path = github_token_path(proxy_config, provider_name)
     run(partial(clear_stored_token, token_path))
     # Named rather than announced in general. This clears one provider's file and nothing else, which is the whole reason the provider is a required argument rather than something inferred.
@@ -512,11 +612,11 @@ def debug_models(
         bool,
         typer.Option(
             "--json",
-            help="Print the complete decoded upstream payload, keyed by provider name unless --provider names one.",
+            help="Print the complete provider catalog, keyed by provider name unless --provider names one.",
         ),
     ] = False,
 ) -> None:
-    """Show upstream model information."""
+    """Show model information from each provider's routing catalog."""
     proxy_config = _read_config(config)
     if provider is not None and provider not in proxy_config.model_providers:
         configured = ", ".join(sorted(proxy_config.model_providers)) or "none"

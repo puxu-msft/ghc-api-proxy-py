@@ -5,6 +5,7 @@ The 400 is measured — 2026-08-24 against `claude-sonnet-5` through the running
 The two anchor cases below are not hypotheticals either. Each was measured by running this project's own repairs over a legal three-turn body ending in `user` and watching it come out ending in `assistant`. They are written here as end-to-end tests through `handle` rather than as calls to the subscriber, because the thing worth locking is the *interaction*: one pass removes a turn, another has to notice.
 """
 
+from collections.abc import Mapping
 from typing import Any
 
 import httpx2
@@ -25,6 +26,7 @@ from app.server.routes.table import route_for_path
 MODEL = ModelDescriptor(
     id="claude-sonnet-5",
     endpoints=frozenset({ModelEndpoint.ANTHROPIC_MESSAGES}),
+    provider_name="ghc",
     reasoning_efforts=("low", "medium", "high", "xhigh", "max"),
     adaptive_thinking=True,
 )
@@ -122,6 +124,10 @@ class RecordingProvider:
     @property
     def available_ids(self) -> frozenset[str]:
         return frozenset({"claude-sonnet-5"})
+    @property
+    def raw_catalog(self) -> Mapping[str, Any]:
+        return {}
+
 
     # Reporting-only members of the provider protocol, here so this stub satisfies it. Nothing on this test's path reads them; `/api/status` does.
     @property
@@ -147,14 +153,14 @@ class RecordingProvider:
         endpoint: ModelEndpoint,
         payload: Any,
         *,
-        model_id: str,
+        descriptor: ModelDescriptor,
         stream: bool = False,
         extra_headers: Any = None,
     ) -> httpx2.Response:
         self.sent.append(dict(payload))
         return httpx2.Response(200)
 
-    async def count_tokens(self, payload: Any, *, model_id: str) -> httpx2.Response:
+    async def count_tokens(self, payload: Any, *, descriptor: ModelDescriptor) -> httpx2.Response:
         self.counted.append(dict(payload))
         return httpx2.Response(
             200,

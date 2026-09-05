@@ -24,7 +24,9 @@ from app.pipeline.rate_limiting import RateLimiter
 from app.pipeline.request import RequestContext
 from app.pipeline.translation_driver.reasoning import CompiledThinkingProfiles
 from app.pipeline.translation_driver.registry import TranslatorRegistry
+from app.tokenization.admission import PromptTokenAdmission
 from app.tokenization.state_store import TokenizationStateStore
+from app.tokenization.worker import LocalTokenWorker
 
 
 @dataclass(slots=True)
@@ -49,9 +51,15 @@ class Chain:
     tokenization: TokenizationStateStore = field(
         default_factory=lambda: TokenizationStateStore(tokenization_state_path())
     )
+    # One CPU permit shared by count estimation and the exceptional large-field admission path. Ordinary inference stays on the byte fast path without acquiring it.
+    local_token_worker: LocalTokenWorker = field(default_factory=LocalTokenWorker)
+    prompt_token_admission: PromptTokenAdmission = field(init=False)
     # `strip_anthropic_beta_flags` compiled, in the order the operator wrote it. Same reason as `web_search_models` above it: a pattern that does not compile belongs to the config, so it should stop start-up rather than the first request that happens to reach the table.
     beta_flag_denials: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = ()
     thinking_profiles: CompiledThinkingProfiles = ()
+
+    def __post_init__(self) -> None:
+        self.prompt_token_admission = PromptTokenAdmission(limiter=self.local_token_worker.limiter)
 
     def rate_limiter_for(self, provider_name: str) -> RateLimiter:
         return self.rate_limiters[provider_name]

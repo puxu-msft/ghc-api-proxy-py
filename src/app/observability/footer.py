@@ -17,7 +17,7 @@ PREFIX = "[<-->] "
 DRAINING_PREFIX = "[DRIN] "
 RESOLVING = "(resolving)"
 SEPARATOR = " | "
-# Between the requests of one model. A space alone ran them together — `48.6s ↓15.6KB 28.3s` reads as one request with three fields rather than as two requests — and the reader has no way to know where one ends, because any of the fields may be absent.
+# Between the requests of one model. A space alone ran them together — `48.6s ↓15.6KiB 28.3s` reads as one request with three fields rather than as two requests — and the reader has no way to know where one ends, because any of the fields may be absent.
 ITEM_SEPARATOR = ", "
 # Any C0 control character would force a second physical line and break the one-line invariant.
 CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
@@ -27,14 +27,19 @@ CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 class ActiveRequest:
     """One in-flight request, as the footer needs it.
 
-    `model` is empty until routing resolves it. `bytes_out` stays `None` until the request reports streaming progress: its absence means "nothing has streamed back yet", which is a different fact from `0`.
+    `model` is empty until routing resolves it. `upstream_response_bytes` stays `None` until the request observes an upstream HTTP response-body chunk: its absence means "nothing has arrived from upstream yet", which is a different fact from `0`. `downstream_bytes` independently counts body bytes whose ASGI send returned; the narrow footer does not render that richer fact yet.
     """
 
     request_id: str
     model: str
     started_at: float
-    bytes_out: int | None = None
+    upstream_response_bytes: int | None = None
     attempts: int = 1
+    route: str = ""
+    inbound_format: str = ""
+    provider_name: str = ""
+    stream: bool | None = None
+    downstream_bytes: int | None = None
 
 
 def format_duration(seconds: float) -> str:
@@ -45,10 +50,11 @@ def format_duration(seconds: float) -> str:
 
 
 def format_bytes(count: int) -> str:
+    """Format a byte count with IEC binary units matching the 1024 divisor."""
     if count >= 1_048_576:
-        return f"{count / 1_048_576:.1f}MB"
+        return f"{count / 1_048_576:.1f}MiB"
     if count >= 1024:
-        return f"{count / 1024:.1f}KB"
+        return f"{count / 1024:.1f}KiB"
     return f"{count}B"
 
 
@@ -60,9 +66,9 @@ def _item(request: ActiveRequest, now: float, *, unicode: bool) -> str:
     elapsed = format_duration(max(0.0, now - request.started_at))
     if request.attempts > 1:
         elapsed = f"{elapsed}({request.attempts - 1})"
-    if request.bytes_out is None:
+    if request.upstream_response_bytes is None:
         return elapsed
-    return f"{elapsed} {'↓' if unicode else '<'}{format_bytes(request.bytes_out)}"
+    return f"{elapsed} {'↓' if unicode else '<'}{format_bytes(request.upstream_response_bytes)}"
 
 
 @dataclass(slots=True)

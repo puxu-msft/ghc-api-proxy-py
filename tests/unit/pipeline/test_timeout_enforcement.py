@@ -4,6 +4,7 @@ The defect being fixed is a configured timeout that never takes effect, which lo
 """
 
 import asyncio
+from collections.abc import Mapping
 from typing import Any
 
 import httpx2
@@ -29,6 +30,10 @@ class SlowProvider:
     @property
     def available_ids(self) -> frozenset[str]:
         return frozenset({"claude-model"})
+    @property
+    def raw_catalog(self) -> Mapping[str, Any]:
+        return {}
+
 
     # Reporting-only members of the provider protocol, here so this stub satisfies it. Nothing on this test's path reads them; `/api/status` does.
     @property
@@ -54,7 +59,7 @@ class SlowProvider:
         endpoint: ModelEndpoint,
         payload: Any,
         *,
-        model_id: str,
+        descriptor: ModelDescriptor,
         stream: bool = False,
         extra_headers: Any = None,
     ) -> httpx2.Response:
@@ -62,7 +67,7 @@ class SlowProvider:
         await asyncio.sleep(self._delay)
         return httpx2.Response(200, json={})
 
-    async def count_tokens(self, payload: Any, *, model_id: str) -> httpx2.Response:
+    async def count_tokens(self, payload: Any, *, descriptor: ModelDescriptor) -> httpx2.Response:
         # Present so the fake really satisfies the protocol. Nothing here counts tokens, and a silent stub would let a test think it had.
         raise NotImplementedError("this fake does not count tokens")
 

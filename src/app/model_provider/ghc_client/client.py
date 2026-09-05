@@ -8,9 +8,9 @@ from openai import AsyncOpenAI
 from openai._types import Body as OpenAIBody
 
 from app.model_provider.ghc_client.config import GhcClientConfig
-from app.model_provider.ghc_client.errors import normalize_upstream_error
 from app.model_provider.ghc_client.headers import build_request_headers
 from app.model_provider.ghc_client.tokens import CopilotTokenManager
+from app.model_provider.upstream_errors import normalize_upstream_error
 
 
 class GhcApiClient:

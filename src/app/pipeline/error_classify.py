@@ -17,16 +17,22 @@ from app.errors import (
     DEFAULT_CODE_FOR_CATEGORY,
     STATUS_FOR_CATEGORY,
     ErrorCategory,
+    ErrorCondition,
     ErrorInfo,
-    UpstreamCondition,
     category_for_status,
     condition_message,
     is_context_window_exceeded,
     prompt_limit_counts,
 )
+from app.model_provider.codebuddy_client.auth_state import (
+    AuthRefreshFailed,
+    AuthStateInvalid,
+    AuthStateMissing,
+)
 from app.model_provider.registry import ProviderNotConfigured
 from app.model_provider.types import (
     CapabilityMissing,
+    DescriptorProviderMismatch,
     EndpointNotImplemented,
     EndpointNotSupported,
     ProviderError,
@@ -35,6 +41,7 @@ from app.model_provider.types import (
 from app.pipeline.count_tokens import CountTokensRequestError, CountTokensUnavailable
 from app.pipeline.exceptions import (
     PipelineAbort,
+    PromptTokenLimitExceeded,
     UpstreamError,
     UpstreamRateLimit,
     UpstreamRejected,
@@ -51,8 +58,16 @@ _PROVIDER_ROWS: tuple[tuple[type[ProviderError], ErrorCategory], ...] = (
     (EndpointNotSupported, ErrorCategory.CLIENT),
     # Its own docstring: "The model advertises the endpoint but this proxy does not drive it." That is this proxy's gap, and calling it a bad request would blame the client for a capability nobody built.
     (EndpointNotImplemented, ErrorCategory.NOT_IMPLEMENTED),
+    # A descriptor crossing providers is a pipeline wiring defect. The client selected a model; this proxy handed its resolved fact to the wrong owner.
+    (DescriptorProviderMismatch, ErrorCategory.INTERNAL),
     # An operator naming a provider that is not configured. Nothing the client sends can change it.
     (ProviderNotConfigured, ErrorCategory.INTERNAL),
+    # The CodeBuddy desktop login state: missing, unreadable, or refused by the
+    # refresh endpoint. The client cannot fix any of these by resending — the fix
+    # is logging into the desktop app or pointing the config at a live state file.
+    (AuthStateMissing, ErrorCategory.AUTH),
+    (AuthStateInvalid, ErrorCategory.AUTH),
+    (AuthRefreshFailed, ErrorCategory.AUTH),
 )
 
 
@@ -132,7 +147,7 @@ class _UpstreamRead:
     interpreted: bool
     message: str = ""
     kind: str = ""
-    condition: UpstreamCondition | None = None
+    condition: ErrorCondition | None = None
     counts: tuple[int, int] | None = None
 
 
@@ -162,7 +177,7 @@ def _read_upstream_error(body: str) -> _UpstreamRead:
     text = message if isinstance(message, str) else ""
     code = upstream_code if isinstance(upstream_code, str) else ""
     condition = (
-        UpstreamCondition.CONTEXT_WINDOW_EXCEEDED
+        ErrorCondition.CONTEXT_WINDOW_EXCEEDED
         if is_context_window_exceeded(message=text, code=code)
         else None
     )
@@ -185,12 +200,20 @@ def _condition_message(read: _UpstreamRead) -> str:
     return condition_message(read.condition, read.counts)
 
 
-def _proxy_error(category: ErrorCategory, message: str, *, code: str = "", param: str = "") -> ErrorInfo:
+def _proxy_error(
+    category: ErrorCategory,
+    message: str,
+    *,
+    code: str = "",
+    param: str = "",
+    condition: ErrorCondition | None = None,
+) -> ErrorInfo:
     """A failure this proxy produced. No upstream answer exists, so nothing is carried from one."""
     return ErrorInfo(
         category=category,
         message=message,
         status_code=STATUS_FOR_CATEGORY[category],
+        condition=condition,
         code=code or DEFAULT_CODE_FOR_CATEGORY[category],
         param=param,
     )
@@ -208,6 +231,13 @@ def describe(error: BaseException, *, source_format: str = "") -> ErrorInfo:
     if isinstance(error, CountTokensUnavailable) and error.cause is not None:
         return describe(error.cause, source_format=source_format)
 
+    if isinstance(error, PromptTokenLimitExceeded):
+        return _proxy_error(
+            ErrorCategory.CLIENT,
+            condition_message(ErrorCondition.CONTEXT_WINDOW_EXCEEDED, None),
+            param=error.observation.field_path or "",
+            condition=ErrorCondition.CONTEXT_WINDOW_EXCEEDED,
+        )
     if isinstance(error, UpstreamRateLimit):
         return _from_upstream(error, source_format=source_format)
     if isinstance(error, UpstreamTimeout):

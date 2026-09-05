@@ -21,7 +21,7 @@ from typing import Any
 
 import httpx2
 
-from app.config.schema import ProxyConfig
+from app.config.schema import GithubCopilotProviderConfig, ProxyConfig
 from app.core.chain import Chain
 from app.model_provider import ModelProvider, resolve_default_name
 from app.model_provider.ghc_client import (
@@ -61,6 +61,10 @@ def _recording_chain(
 ) -> Chain:
     provider_name = resolve_default_name(config)
     provider_config = config.model_providers[provider_name]
+    if not isinstance(provider_config, GithubCopilotProviderConfig):
+        raise RuntimeError(
+            f"cassette recording requires a github_copilot provider, got {provider_config.type!r}"
+        )
     ghc_config = GhcClientConfig(
         api_base_url_override=provider_config.api_base_url,
         auth_base_url_override=provider_config.auth_base_url,
@@ -74,7 +78,7 @@ def _recording_chain(
     providers: dict[str, ModelProvider] = {
         provider_name: build_copilot_provider(
             provider_name,
-            config,
+            provider_config,
             http_client=http_client,
             token_manager=token_manager,
             interaction_id="interaction",

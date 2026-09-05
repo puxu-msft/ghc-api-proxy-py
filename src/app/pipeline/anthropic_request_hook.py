@@ -1,17 +1,14 @@
-"""The `hook_fix_anthropic_request` fixups, applied while the body is still Anthropic-shaped.
+"""Format-independent Anthropic inbound fixups, before the body may be translated.
 
-Order matters and it is the reason this runs where it does. `handler.handle()` translates before it drives, so by the time the driver publishes `attempt.prepare` the payload is in the *target* format — Responses on the primary path. An Anthropic-request fixup applied there would be looking at a body that no longer has `messages` at all. This is the spec's `on_client_request_parsed` moment.
-
-Nothing here is new logic. `destack_content` and `sanitize_empty_thinking` already implement what the spec asks for; what was missing is anything on the new chain calling them.
+Tool-pair repair and removal of wholly empty thinking apply to the client's Anthropic history whichever upstream format serves it. Anthropic-only adjacency repair does not live here: it runs at `attempt.prepare`, after routing and translation, so a Responses target never receives a synthetic text separator.
 """
 
 import logging
 import re
 from typing import Any, cast
 
-from app.anthropic.thinking.destack import DestackStrategy, destack_content
 from app.anthropic.thinking.protection import sanitize_empty_thinking
-from app.config.schema import AssistantMessageLayout, FixAnthropicRequestHook
+from app.config.schema import FixAnthropicRequestHook
 
 logger = logging.getLogger(__name__)
 
@@ -96,22 +93,6 @@ def strip_attribution_lines(payload: dict[str, Any]) -> int:
     else:
         del payload["system"]
     return removed
-
-
-# The spec names the outcome; the existing implementation names the manoeuvre.
-_LAYOUT_STRATEGY: dict[AssistantMessageLayout, DestackStrategy] = {
-    False: "passthrough",
-    "move_and_synthetic": "move_blocks",
-    "synthetic_only": "insert_text",
-}
-
-
-def layout_strategy(layout: AssistantMessageLayout) -> DestackStrategy:
-    """Map the configured layout onto the destack strategy that produces it.
-
-    Total rather than defaulted: the schema now admits exactly the three spellings the spec defines, so a missing case would be a bug here rather than an operator's typo. A fallback would have turned an unhandled value into a silent rewrite of the request body.
-    """
-    return _LAYOUT_STRATEGY[layout]
 
 
 def normalize_context_management(payload: dict[str, Any]) -> None:
@@ -242,7 +223,6 @@ def fix_anthropic_request(payload: dict[str, Any], config: FixAnthropicRequestHo
             emptied,
         )
 
-    strategy = layout_strategy(config.thinking.assistant_message_layout)
     strip_empty = config.thinking.strip_both_empty_thinking_blocks
 
     for message in messages:
@@ -257,9 +237,5 @@ def fix_anthropic_request(payload: dict[str, Any], config: FixAnthropicRequestHo
         if strip_empty:
             # Before the layout pass: a block with neither signature nor text carries nothing, so letting it separate two real thinking blocks would spend a separator on a placeholder.
             content, _ = sanitize_empty_thinking(content, "all_empty")
-
-        # Only assistant turns can hit the adjacency rejection the layout exists to avoid.
-        if entry.get("role") == "assistant":
-            content, _ = destack_content(content, strategy)
 
         entry["content"] = content

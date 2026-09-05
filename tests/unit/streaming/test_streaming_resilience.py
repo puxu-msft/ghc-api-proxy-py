@@ -638,6 +638,25 @@ def test_a_cleanup_that_already_points_at_the_primary_is_noted_rather_than_linke
     )
 
 
+def test_a_cleanup_group_containing_the_primary_is_not_linked_back_to_it() -> None:
+    primary = asyncio.CancelledError()
+    cleanup = BaseExceptionGroup(
+        "cleanup failed",
+        [primary, RuntimeError("response close failed")],
+    )
+
+    with pytest.raises(asyncio.CancelledError) as caught:
+        raise_with_cleanup_under(primary, cleanup)
+
+    assert caught.value is primary
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert any(
+        "response close failed" in note
+        for note in getattr(caught.value, "__notes__", [])
+    )
+
+
 def test_pairing_an_exception_with_itself_does_not_make_it_its_own_cause() -> None:
     """Python accepts `raise x from x`; a reader following the chain then walks in place.
 

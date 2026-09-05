@@ -12,26 +12,30 @@ from typing import Any, Protocol
 import orjson
 
 from app.errors import ErrorInfo
-from app.pipeline.delivery.blocks import THINKING, TOOL_USE, CompletedBlock, DeliveryUnit
+from app.pipeline.delivery.blocks import (
+    REDACTED_THINKING,
+    THINKING,
+    TOOL_USE,
+    CompletedBlock,
+    DeliveryUnit,
+)
 from app.pipeline.delivery.sse_source import SseEvent
+from app.pipeline.response_action import ClientActionRequirement
 
 
 class ReplyDialect(StrEnum):
     """Whose vocabulary the reply arrived in.
 
-    Not `WireFormat`. That enum is the whole taxonomy of body shapes a route can take, and it lives with `RequestContext`, which now holds one of these records — importing it here would close a cycle. What a summary of a reply needs is narrower anyway: only which of the two upstreams described it, so the words on the console line can be that upstream's own. A reply is assembled by exactly one of them, so this is a property of the record rather than something a reader has to be told separately.
+    Not `WireFormat`. That enum is the whole taxonomy of body shapes a route can take, and it lives with `RequestContext`, which now holds one of these records — importing it here would close a cycle. What a summary of a reply needs is narrower anyway: only which upstream described it, so the words on the console line can be that upstream's own. A reply is assembled by exactly one of them, so this is a property of the record rather than something a reader has to be told separately.
     """
 
     ANTHROPIC = "anthropic"
     RESPONSES = "responses"
-
-
-class ClientActionRequirement(StrEnum):
-    """Whether an output item requires the client to continue the model's work."""
-
-    REQUIRED = "required"
-    NOT_REQUIRED = "not_required"
-    UNKNOWN = "unknown"
+    # The Chat Completions upstream — reached translated, behind an Anthropic or
+    # Responses client leg. Its own chunks carry no block boundaries, so the words
+    # that describe one of its replies are the assembler's problem, not the
+    # client's: the client still reads its own format.
+    CHAT_COMPLETIONS = "chat-completions"
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,7 +84,7 @@ class Terminal:
         self.blocks += 1
         if block.kind == TOOL_USE:
             self.tools.append(str(block.payload.get("name", "")))
-        elif block.kind == THINKING:
+        elif block.kind in {THINKING, REDACTED_THINKING}:
             self.thinking.append("txt" if block.payload.get(THINKING) else "enc")
 
 
@@ -171,6 +175,17 @@ class BlockAssembler[UnitT: DeliveryUnit = CompletedBlock](Protocol):
 
 
 @dataclass(slots=True)
+class ReasoningSummaryDraft:
+    """One Responses summary part while its event group is still open."""
+
+    text: str = ""
+    extensions: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
+    text_done: bool = False
+    part_done: bool = False
+    incomplete: bool = False
+
+
+@dataclass(slots=True)
 class Draft:
     """One block being accumulated, before its closing event arrives.
 
@@ -182,6 +197,9 @@ class Draft:
     payload: dict[str, Any]
     text: str = ""
     partial_json: str = ""
+    reasoning_summary: dict[int, ReasoningSummaryDraft] = field(
+        default_factory=lambda: dict[int, ReasoningSummaryDraft]()
+    )
 
 
 def decode_json(raw: str) -> Any:

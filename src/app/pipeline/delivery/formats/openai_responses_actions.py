@@ -2,62 +2,16 @@
 
 from typing import Any, cast
 
-from app.pipeline.delivery.assembling import ClientAction, ClientActionRequirement
-
-_ALWAYS_CLIENT_ACTION = frozenset(
-    {
-        "function_call",
-        "custom_tool_call",
-        "computer_call",
-        "local_shell_call",
-        "apply_patch_call",
-        "mcp_approval_request",
-    }
-)
-
-_NEVER_CLIENT_ACTION = frozenset(
-    {
-        "web_search_call",
-        "file_search_call",
-        "code_interpreter_call",
-        "image_generation_call",
-        "mcp_call",
-        "reasoning",
-        "message",
-    }
+from app.pipeline.delivery.assembling import ClientAction
+from app.pipeline.response_action import (
+    ClientActionRequirement,
+    classify_responses_client_action,
 )
 
 
 def client_action_requirement(item: dict[str, Any]) -> ClientActionRequirement:
-    """Classify the item's client-action requirement without making policy decisions.
-
-    The conditional item types carry their execution side on the item itself. A missing or unfamiliar discriminator is unknown rather than either answer: the buffering policy may conservatively release it, while observability still reports that the fact was not established.
-    """
-    raw_type = item.get("type")
-    if not isinstance(raw_type, str) or not raw_type:
-        return ClientActionRequirement.UNKNOWN
-    if raw_type in _ALWAYS_CLIENT_ACTION:
-        return ClientActionRequirement.REQUIRED
-    if raw_type in _NEVER_CLIENT_ACTION:
-        return ClientActionRequirement.NOT_REQUIRED
-    if raw_type == "tool_search_call":
-        execution = item.get("execution")
-        if execution == "client":
-            return ClientActionRequirement.REQUIRED
-        if execution == "server":
-            return ClientActionRequirement.NOT_REQUIRED
-        return ClientActionRequirement.UNKNOWN
-    if raw_type == "shell_call":
-        environment = item.get("environment")
-        if not isinstance(environment, dict):
-            return ClientActionRequirement.UNKNOWN
-        environment_type = cast(dict[str, Any], environment).get("type")
-        if environment_type == "local":
-            return ClientActionRequirement.REQUIRED
-        if environment_type == "container_reference":
-            return ClientActionRequirement.NOT_REQUIRED
-        return ClientActionRequirement.UNKNOWN
-    return ClientActionRequirement.UNKNOWN
+    """Read the observable requirement from the shared Responses classifier."""
+    return classify_responses_client_action(item).requirement
 
 
 def read_responses_client_actions(response: dict[str, Any]) -> tuple[list[ClientAction], bool]:

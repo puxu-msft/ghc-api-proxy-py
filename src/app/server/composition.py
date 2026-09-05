@@ -6,6 +6,7 @@ Everything is constructed once at startup and handed down, so nothing reaches fo
 
 import logging
 import socket
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -20,15 +21,32 @@ from httpx2._utils import get_environment_proxies
 from openai import AsyncOpenAI
 
 from app.config.paths import expand_user_path, user_data_path
-from app.config.schema import ProxyConfig
+from app.config.schema import (
+    CodebuddyProviderConfig,
+    GithubCopilotProviderConfig,
+    ProxyConfig,
+    XingchenProviderConfig,
+)
 from app.core.chain import Chain
 from app.model_provider import (
-    PROVIDER_TYPE,
+    CODEBUDDY_PROVIDER_TYPE,
+    GITHUB_COPILOT_PROVIDER_TYPE,
+    XINGCHEN_PROVIDER_TYPE,
     GithubCopilotProvider,
     ModelProvider,
     ProviderNotConfigured,
     ProviderRegistry,
+    XingchenClient,
+    XingchenProvider,
     resolve_default_name,
+)
+from app.model_provider.codebuddy import CodebuddyProvider
+from app.model_provider.codebuddy_client import (
+    CodebuddyClient,
+    CodebuddyClientConfig,
+    CodebuddyCredentials,
+    DesktopAuthState,
+    discover_auth_file,
 )
 from app.model_provider.ghc_client import (
     CopilotTokenManager,
@@ -67,6 +85,7 @@ logger = logging.getLogger(__name__)
 #
 # Degrading is not silent. It is logged, and an enterprise account left on the individual host fails loudly on its first request rather than answering wrongly.
 _CREDENTIALS_REFUSED = frozenset({401, 403})
+
 
 @dataclass(frozen=True, slots=True)
 class TransportOptions:
@@ -319,7 +338,12 @@ def github_token_path(config: ProxyConfig, provider_name: str = "") -> Path | No
     if not provider_name:
         return None
     provider_config = config.model_providers.get(provider_name)
-    configured = provider_config.github_token_file if provider_config else ""
+    if provider_config is None:
+        configured = ""
+    elif isinstance(provider_config, GithubCopilotProviderConfig):
+        configured = provider_config.github_token_file
+    else:
+        raise ValueError(f"provider {provider_name!r} is not a GitHub Copilot provider")
     if configured:
         return expand_user_path(configured)
     return user_data_path() / f"github_token-{provider_name}.txt"
@@ -349,6 +373,7 @@ async def resolve_provider_base_urls(
     config: ProxyConfig,
     *,
     http_client: httpx2.AsyncClient,
+    provider_names: Collection[str] | None = None,
 ) -> ProxyConfig:
     """Fill in the API base URL of every provider that did not name one, by asking GitHub what the subscription is.
 
@@ -361,7 +386,9 @@ async def resolve_provider_base_urls(
     resolved = dict(config.model_providers)
     changed = False
     for name, provider_config in config.model_providers.items():
-        if provider_config.type != PROVIDER_TYPE or provider_config.api_base_url:
+        if provider_names is not None and name not in provider_names:
+            continue
+        if not isinstance(provider_config, GithubCopilotProviderConfig) or provider_config.api_base_url:
             continue
         auth_base_url = GhcClientConfig(
             auth_base_url_override=provider_config.auth_base_url
@@ -422,13 +449,12 @@ async def resolve_provider_base_urls(
 
 def build_copilot_provider(
     name: str,
-    config: ProxyConfig,
+    provider_config: GithubCopilotProviderConfig,
     *,
     http_client: httpx2.AsyncClient,
     token_manager: CopilotTokenManager,
     interaction_id: str,
 ) -> GithubCopilotProvider:
-    provider_config = config.model_providers[name]
     ghc_config = GhcClientConfig(
         api_base_url_override=provider_config.api_base_url,
         auth_base_url_override=provider_config.auth_base_url,
@@ -460,6 +486,54 @@ def build_copilot_provider(
     )
 
 
+def build_codebuddy_provider(
+    name: str,
+    provider_config: CodebuddyProviderConfig,
+    *,
+    http_client: httpx2.AsyncClient,
+) -> CodebuddyProvider:
+    """Wire one CodeBuddy provider: desktop login state, one client, a static catalog.
+
+    No token is read here — the login state is read (and refreshed) at the first
+    request, so a proxy whose desktop app is logged in later still starts. The base
+    URL is resolved from the constant rather than probed: the upstream has no
+    per-subscription host to discover.
+    """
+    cb_config = CodebuddyClientConfig(api_base_url_override=provider_config.api_base_url)
+    state_path = (
+        str(expand_user_path(provider_config.auth_state_file))
+        if provider_config.auth_state_file
+        else discover_auth_file()
+    )
+    if not state_path:
+        logger.warning(
+            "model provider %r: no CodeBuddy auth state file configured and none found "
+            "under the desktop app's data directory; every request will fail until "
+            "model_providers.%s.auth_state_file names one",
+            name,
+            name,
+        )
+        state = DesktopAuthState("")
+    else:
+        state = DesktopAuthState(state_path)
+    client = CodebuddyClient(
+        cb_config,
+        CodebuddyCredentials(state, http_client, cb_config),
+        http_client=http_client,
+    )
+    return CodebuddyProvider(name, client, provider_config, base_url=cb_config.api_base_url)
+
+
+def build_xingchen_provider(
+    name: str,
+    provider_config: XingchenProviderConfig,
+    *,
+    http_client: httpx2.AsyncClient,
+) -> XingchenProvider:
+    client = XingchenClient(http_client, provider_config)
+    return XingchenProvider(name, client, provider_config)
+
+
 def build_chain(
     config: ProxyConfig,
     *,
@@ -482,8 +556,13 @@ def build_chain(
     for chosen in (default_name, config.fallback_model_provider):
         if chosen and chosen not in config.model_providers:
             raise ProviderNotConfigured(chosen)
+    supported_provider_types = {
+        GITHUB_COPILOT_PROVIDER_TYPE,
+        XINGCHEN_PROVIDER_TYPE,
+        CODEBUDDY_PROVIDER_TYPE,
+    }
     for name, provider_config in config.model_providers.items():
-        if provider_config.type != PROVIDER_TYPE:
+        if provider_config.type not in supported_provider_types:
             raise ValueError(f"unsupported provider type {provider_config.type!r} for {name!r}")
 
     provider_clients: dict[str, httpx2.AsyncClient] = {}
@@ -495,25 +574,39 @@ def build_chain(
             # `warn_about_proxies=False`: `build_http_client` reports unusable SOCKS proxies, and that report is about the environment rather than about this provider. Left on, it would repeat verbatim once per provider on top of the caller's own.
             client = build_http_client(config, proxy_from_cli=proxy_from_cli, warn_about_proxies=False)
             provider_clients[name] = client
-            # Per provider: each may name its own token file.
-            token_source = build_github_token_source(config, name)
-            ghc_config = GhcClientConfig(
-                api_base_url_override=provider_config.api_base_url,
-                auth_base_url_override=provider_config.auth_base_url,
-            )
-            token_manager = CopilotTokenManager(
-                token_source,
-                client,
-                auth_base_url=ghc_config.auth_base_url,
-                identity_headers=build_identity_headers(ghc_config),
-            )
-            built[name] = build_copilot_provider(
-                name,
-                config,
-                http_client=client,
-                token_manager=token_manager,
-                interaction_id=interaction_id,
-            )
+            if isinstance(provider_config, GithubCopilotProviderConfig):
+                # Per provider: each GitHub account may name its own token file.
+                token_source = build_github_token_source(config, name)
+                ghc_config = GhcClientConfig(
+                    api_base_url_override=provider_config.api_base_url,
+                    auth_base_url_override=provider_config.auth_base_url,
+                )
+                token_manager = CopilotTokenManager(
+                    token_source,
+                    client,
+                    auth_base_url=ghc_config.auth_base_url,
+                    identity_headers=build_identity_headers(ghc_config),
+                )
+                built[name] = build_copilot_provider(
+                    name,
+                    provider_config,
+                    http_client=client,
+                    token_manager=token_manager,
+                    interaction_id=interaction_id,
+                )
+            elif isinstance(provider_config, CodebuddyProviderConfig):
+                # CodeBuddy carries no GitHub credential: its login state is the
+                # desktop app's `.info` file, discovered or configured, and nothing
+                # here checks that it exists — the same start-without-credentials
+                # rule the Copilot branch follows, with the file read (and refreshed)
+                # at the first request instead.
+                built[name] = build_codebuddy_provider(name, provider_config, http_client=client)
+            else:
+                built[name] = build_xingchen_provider(
+                    name,
+                    provider_config,
+                    http_client=client,
+                )
         providers = built
 
     # Static mapping checks, here rather than after `refresh_catalogs` because none of them consults a catalog — that is exactly the property the user's ruling selected for. Warned, never raised: a typo'd qualifier still leaves every other model routable, and failing start-up over it was explicitly ruled against. Spec §5.1.
@@ -529,8 +622,15 @@ def build_chain(
     # Each provider's own patterns, kept apart rather than merged. The key lives under `model_providers.<name>` because the answer is that provider's, and a merge lets a provider whose list is empty inherit every other provider's — passing a gate its own configuration never opened.
     #
     # Compiled here rather than per request, which also puts a pattern that does not compile at startup — in the config's own words — instead of inside whichever request first reached the gate.
+    #
+    # Only Copilot configs carry the field at all since the per-type split: an
+    # upstream with no hosted search cannot inherit the Copilot-measured default.
     web_search_models = compile_supported_by_provider(
-        {name: provider.models_support_web_search for name, provider in config.model_providers.items()}
+        {
+            name: provider.models_support_web_search
+            for name, provider in config.model_providers.items()
+            if isinstance(provider, GithubCopilotProviderConfig)
+        }
     )
     thinking_profiles = compile_thinking_profiles(
         config.model_translation.to_anthropic_messages.thinking_profiles
@@ -552,6 +652,9 @@ def build_chain(
         # Keyed on the resolved model id, which is the name upstream receives. Passed straight through rather than pre-processed: unlike the web-search patterns there is nothing to compile, and the only thing that could be checked here — whether the value is an effort the model publishes — is a question about the live catalog rather than about the config, so it is answered per request.
         thinking_efforts=config.model_thinking_effort,
         thinking_display=config.hook_fix_anthropic_request.thinking.display,
+        assistant_message_layout=(
+            config.hook_fix_anthropic_request.thinking.assistant_message_layout
+        ),
         cache_control=config.hook_fix_anthropic_request.cache_control,
         # Compiled here rather than per request, for the same reason as the beta table above it: a pattern that does not compile should stop start-up, in the config's own words, rather than raise from inside whichever request first reached it.
         cache_control_sanitize=compile_sanitize_table(
@@ -609,6 +712,7 @@ __all__ = [
     "build_github_token_source",
     "build_http_client",
     "build_request_headers",
+    "build_xingchen_provider",
     "github_token_path",
     "refresh_catalogs",
     "resolve_provider_base_urls",

@@ -6,13 +6,7 @@ Reads and writes the typed content model rather than moving `dict`s around. `D-A
 from collections.abc import Mapping
 from typing import Any, cast
 
-from app.pipeline.translation_driver.content import (
-    BlockKind,
-    ContentBlock,
-    OpaqueFormat,
-    ReasoningState,
-    SemanticMessage,
-)
+from app.pipeline.translation_driver.content import BlockKind, ContentBlock, SemanticMessage
 from app.pipeline.translation_driver.reasoning import (
     ANTHROPIC_EFFORTS,
     EFFORT_LADDER,
@@ -20,9 +14,11 @@ from app.pipeline.translation_driver.reasoning import (
     ThinkingEffortIntent,
     align_anthropic_effort,
 )
-from app.pipeline.translation_driver.reasoning_carrier import (
-    decode_reasoning_carrier,
-    encode_reasoning_carrier,
+from app.pipeline.translation_driver.reasoning_bridge import (
+    ReasoningBridgeError,
+    ReasoningNotPortable,
+    read_anthropic_reasoning,
+    reasoning_to_anthropic,
 )
 from app.pipeline.translation_driver.semantic import (
     Conversion,
@@ -30,10 +26,12 @@ from app.pipeline.translation_driver.semantic import (
     LossCode,
     SemanticRequest,
     SystemBlock,
+    ToolChoiceNotSupported,
     TranslationRefused,
     TranslationTarget,
     system_blocks_from_value,
 )
+from app.pipeline.translation_driver.tool_choice import intent_from_anthropic_tool_choice
 
 WIRE_FORMAT = "anthropic-messages"
 RESPONSES_WIRE_FORMAT = "openai-responses"
@@ -49,6 +47,7 @@ _PASSTHROUGH_KEYS = frozenset(
         "temperature",
         "thinking",
         "output_config",
+        "tool_choice",
     }
 )
 
@@ -281,6 +280,8 @@ THINKING = "thinking"
 REDACTED_THINKING = "redacted_thinking"
 TOOL_USE = "tool_use"
 TOOL_RESULT = "tool_result"
+SERVER_TOOL_USE = "server_tool_use"
+WEB_SEARCH_TOOL_RESULT = "web_search_tool_result"
 IMAGE = "image"
 
 
@@ -291,42 +292,26 @@ def _dict_list(value: object) -> list[dict[str, Any]]:
     return [dict[str, Any](cast(Mapping[str, Any], e)) for e in entries if isinstance(e, Mapping)]
 
 
-def _reasoning_from_signature(signature: str) -> ReasoningState:
-    """Classify a `thinking.signature` by who issued it.
-
-    A carrier this proxy (or the service it is compatible with) issued decodes back to the
-    Responses payload it was holding, so it can cross. Anything else is Anthropic's own and stays
-    Anthropic's own — `portable_to` is what stops it being forged into an `encrypted_content`.
-    """
-    decoded = decode_reasoning_carrier(signature)
-    if decoded.classification == "foreign":
-        return ReasoningState(OpaqueFormat.CLAUDE_SIGNATURE, signature)
-    return ReasoningState(
-        OpaqueFormat.PROXY_CARRIER,
-        signature,
-        encrypted_content=decoded.encrypted_content or "",
-    )
+def _dict_value(value: object) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    return dict[str, Any](cast(Mapping[str, Any], value))
 
 
 def _block_from_anthropic(raw: dict[str, Any]) -> ContentBlock:
     kind = str(raw.get("type", ""))
     if kind == TEXT:
         return ContentBlock(BlockKind.TEXT, text=str(raw.get("text", "")), raw=raw)
-    if kind == THINKING:
-        signature = str(raw.get("signature", ""))
-        return ContentBlock(
-            BlockKind.REASONING,
-            text=str(raw.get(THINKING, "")),
-            reasoning=_reasoning_from_signature(signature) if signature else None,
-            raw=raw,
-        )
-    if kind == REDACTED_THINKING:
-        return ContentBlock(
-            BlockKind.REASONING,
-            redacted=True,
-            reasoning=ReasoningState(OpaqueFormat.CLAUDE_SIGNATURE, str(raw.get("data", ""))),
-            raw=raw,
-        )
+    if kind in {THINKING, REDACTED_THINKING}:
+        try:
+            reasoning = read_anthropic_reasoning(raw)
+        except ReasoningBridgeError as error:
+            raise TranslationRefused(
+                error.detail,
+                code=error.code,
+                field_path=f"messages.content.{kind}",
+            ) from error
+        return ContentBlock(BlockKind.REASONING, reasoning=reasoning, raw=raw)
     if kind == TOOL_USE:
         return ContentBlock(
             BlockKind.TOOL_USE,
@@ -341,6 +326,21 @@ def _block_from_anthropic(raw: dict[str, Any]) -> ContentBlock:
             call_id=str(raw.get("tool_use_id", "")),
             output=raw.get("content"),
             is_error=bool(raw.get("is_error", False)),
+            raw=raw,
+        )
+    if kind == SERVER_TOOL_USE:
+        return ContentBlock(
+            BlockKind.SERVER_TOOL_USE,
+            call_id=str(raw.get("id", "")),
+            name=str(raw.get("name", "")),
+            arguments=raw.get("input"),
+            raw=raw,
+        )
+    if kind == WEB_SEARCH_TOOL_RESULT:
+        return ContentBlock(
+            BlockKind.WEB_SEARCH_TOOL_RESULT,
+            call_id=str(raw.get("tool_use_id", "")),
+            output=raw.get("content"),
             raw=raw,
         )
     if kind == IMAGE:
@@ -408,11 +408,17 @@ def from_anthropic_messages(
     if isinstance(temperature, int | float):
         request.temperature = float(temperature)
 
+    # Read the client's intent once; unclaimed shapes stay in extensions for same-format replay.
+    choice = payload.get("tool_choice")
+    request.tool_choice = intent_from_anthropic_tool_choice(choice)
+
     # Anything not claimed above is carried rather than dropped.
     # An unmodelled field therefore survives the round trip back to the same format.
     request.extensions = {
         key: value for key, value in payload.items() if key not in _PASSTHROUGH_KEYS
     }
+    if request.tool_choice is None and "tool_choice" in payload:
+        request.extensions["tool_choice"] = choice
     return request
 
 
@@ -421,8 +427,8 @@ def _system_value(blocks: list[SystemBlock]) -> list[dict[str, Any]]:
 
 
 def block_to_anthropic(block: ContentBlock, conversion: Conversion) -> dict[str, Any] | None:
-    """Render one block as Anthropic content, or None when it has no faithful rendering."""
-    return _block_to_anthropic(block, conversion)
+    """Render one response block for an Anthropic client."""
+    return _block_to_anthropic(block, conversion, bridge_for_client=True)
 
 
 def block_from_anthropic(raw: dict[str, Any]) -> ContentBlock:
@@ -430,11 +436,20 @@ def block_from_anthropic(raw: dict[str, Any]) -> ContentBlock:
     return _block_from_anthropic(raw)
 
 
-def _block_to_anthropic(block: ContentBlock, conversion: Conversion) -> dict[str, Any] | None:
+def _block_to_anthropic(
+    block: ContentBlock,
+    conversion: Conversion,
+    *,
+    bridge_for_client: bool,
+) -> dict[str, Any] | None:
     if block.kind is BlockKind.TEXT:
         return {"type": TEXT, "text": block.text}
     if block.kind is BlockKind.REASONING:
-        return _reasoning_to_anthropic(block, conversion)
+        return _reasoning_to_anthropic(
+            block,
+            conversion,
+            bridge_for_client=bridge_for_client,
+        )
     if block.kind is BlockKind.TOOL_USE:
         return {
             "type": TOOL_USE,
@@ -449,6 +464,29 @@ def _block_to_anthropic(block: ContentBlock, conversion: Conversion) -> dict[str
         if block.is_error:
             result["is_error"] = True
         return result
+    if block.kind is BlockKind.SERVER_TOOL_USE:
+        if block.raw.get("type") == SERVER_TOOL_USE:
+            return dict(block.raw)
+        return {
+            "type": SERVER_TOOL_USE,
+            "id": block.call_id,
+            "name": block.name,
+            "input": _dict_value(block.arguments),
+        }
+    if block.kind is BlockKind.WEB_SEARCH_TOOL_RESULT:
+        if block.raw.get("type") == WEB_SEARCH_TOOL_RESULT:
+            return dict(block.raw)
+        if block.output is None:
+            conversion.record(
+                LossCode.BLOCK_NOT_CARRIED,
+                "web_search_tool_result has no content",
+            )
+            return None
+        return {
+            "type": WEB_SEARCH_TOOL_RESULT,
+            "tool_use_id": block.call_id,
+            "content": block.output,
+        }
     # Image and unknown blocks have no modelled fields; their original is the only faithful rendering, and returning it is what keeps a same-format crossing exact.
     if block.raw:
         return dict(block.raw)
@@ -456,23 +494,27 @@ def _block_to_anthropic(block: ContentBlock, conversion: Conversion) -> dict[str
     return None
 
 
-def _reasoning_to_anthropic(block: ContentBlock, conversion: Conversion) -> dict[str, Any]:
-    """Render a reasoning block as Anthropic thinking, issuing a carrier when the state is ours.
-
-    A Responses `encrypted_content` has no Anthropic spelling, so it travels inside a carrier this proxy signs. That is the reverse of the refusal on the way out: encoding *our own* value is honest, encoding Anthropic's would not be.
-    """
-    if block.redacted and block.reasoning is not None:
-        return {"type": REDACTED_THINKING, "data": block.reasoning.value}
-    signature = ""
-    state = block.reasoning
-    if state is not None:
-        if state.format in {OpaqueFormat.CLAUDE_SIGNATURE, OpaqueFormat.PROXY_CARRIER}:
-            # Already an Anthropic-shaped signature — ours or theirs, it goes back as it came.
-            signature = state.value
-        else:
-            # A Responses payload has no Anthropic spelling, so it travels inside a carrier we sign. Encoding our own value is recovery; encoding Anthropic's would be invention.
-            signature = encode_reasoning_carrier(state.value)
-    return {"type": THINKING, THINKING: block.text, "signature": signature}
+def _reasoning_to_anthropic(
+    block: ContentBlock,
+    conversion: Conversion,
+    *,
+    bridge_for_client: bool,
+) -> dict[str, Any] | None:
+    """Render reasoning natively, or put provider-specific state in a client carrier."""
+    content = block.reasoning
+    if content is None:
+        conversion.record(LossCode.BLOCK_NOT_CARRIED, "reasoning block has no typed content")
+        return None
+    try:
+        return reasoning_to_anthropic(content, bridge_for_client=bridge_for_client)
+    except ReasoningNotPortable:
+        state = content.state
+        source = state.format.value if state is not None else content.source_format
+        conversion.record(
+            LossCode.REASONING_STATE_NOT_PORTABLE,
+            f"{source} cannot be written to an Anthropic upstream",
+        )
+        return None
 
 
 def _thinking_profile_detail(target: TranslationTarget, *, reason: str | None = None) -> str:
@@ -618,7 +660,12 @@ def to_anthropic_messages(
         rendered = [
             block
             for block in (
-                _block_to_anthropic(b, request.conversion) for b in message.blocks
+                _block_to_anthropic(
+                    b,
+                    request.conversion,
+                    bridge_for_client=False,
+                )
+                for b in message.blocks
             )
             if block is not None
         ]
@@ -638,6 +685,7 @@ def to_anthropic_messages(
     payload.update(request.nested_extensions_for(WIRE_FORMAT))
     _restore_thinking(payload, request)
     _apply_responses_thinking(payload, request, target)
+    _restore_tool_choice(payload, request)
     payload.update(request.extensions_for(WIRE_FORMAT))
     return payload
 
@@ -668,3 +716,31 @@ def _restore_thinking(payload: dict[str, Any], request: SemanticRequest) -> None
         output = cast(dict[str, Any], existing_output) if isinstance(existing_output, dict) else {}
         output["effort"] = intent.effort
         payload["output_config"] = output
+
+
+def _restore_tool_choice(payload: dict[str, Any], request: SemanticRequest) -> None:
+    """Render the intent without relaxing a selection the target cannot honor."""
+    crossing = request.source_format != WIRE_FORMAT
+    intent = request.tool_choice
+    if intent is None:
+        if crossing and "tool_choice" in request.extensions:
+            raise ToolChoiceNotSupported("tool_choice has no supported Anthropic translation")
+        return
+    if intent.mode in {"auto", "any", "none"}:
+        choice: dict[str, Any] = {"type": intent.mode}
+    elif intent.mode == "tool" and intent.name:
+        choice = {"type": "tool", "name": intent.name}
+    else:
+        raise ToolChoiceNotSupported(f"{intent.mode} tool choice has no Anthropic spelling")
+    if crossing:
+        if not payload.get("tools"):
+            if intent.mode in {"any", "tool"}:
+                raise ToolChoiceNotSupported("a forced tool choice requires declared tools")
+            return
+        if intent.mode == "tool" and not any(
+            tool.get("name") == intent.name for tool in request.tools
+        ):
+            raise ToolChoiceNotSupported(f"{intent.name} is not declared by the tools this request sends")
+    if intent.disable_parallel is not None:
+        choice["disable_parallel_tool_use"] = intent.disable_parallel
+    payload["tool_choice"] = choice

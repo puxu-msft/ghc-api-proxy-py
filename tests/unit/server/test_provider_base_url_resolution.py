@@ -105,6 +105,47 @@ async def test_a_hand_written_base_url_is_never_probed(
 
 
 @pytest.mark.asyncio
+async def test_provider_filter_does_not_probe_an_unrelated_github_account(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(GITHUB_TOKEN_VARIABLE, "ghu_from_env")
+    seen: list[httpx2.Request] = []
+    http_client = probe_client({"copilot_plan": "enterprise"}, seen)
+    config = ProxyConfig.model_validate(
+        {
+            "model_providers": {
+                "ghc": {
+                    "type": "github_copilot",
+                    "github_token_file": str(tmp_path / "absent-token"),
+                },
+                "xingchen": {
+                    "type": "xingchen",
+                    "models": ["chat-pro"],
+                    "gateway_api_key": "gateway-key",
+                    "x_token": "complete.x.token",
+                    "device_id": "device-id",
+                    "install_id": "install-id",
+                },
+            },
+            "default_model_provider": "ghc",
+        }
+    )
+
+    try:
+        resolved = await resolve_provider_base_urls(
+            config,
+            http_client=http_client,
+            provider_names={"xingchen"},
+        )
+    finally:
+        await http_client.aclose()
+
+    assert resolved is config
+    assert seen == []
+
+
+@pytest.mark.asyncio
 async def test_absent_credentials_leave_the_base_url_unresolved(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

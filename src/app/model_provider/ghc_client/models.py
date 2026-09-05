@@ -46,12 +46,13 @@ async def run_model_refresh_loop(
     refresh: Callable[[], Awaitable[object]],
     *,
     interval_seconds: float,
+    on_error: Callable[[Exception], None],
     sleep: Callable[[float], Awaitable[None]] = anyio.sleep,
 ) -> None:
-    """Refresh the catalog periodically; a single failure does not end the loop."""
+    """Refresh the catalog periodically; report one failure and keep the loop alive."""
     while True:
         await sleep(interval_seconds)
         try:
             await refresh()
-        except Exception:
-            continue
+        except Exception as error:
+            on_error(error)

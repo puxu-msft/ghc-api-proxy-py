@@ -10,7 +10,7 @@ import pytest
 from h2.exceptions import NoSuchStreamError, StreamClosedError
 from h2.exceptions import ProtocolError as H2ProtocolError
 
-from app.model_provider.ghc_client.errors import normalize_upstream_error, retry_after_seconds
+from app.model_provider.upstream_errors import normalize_upstream_error, retry_after_seconds
 from app.pipeline.exceptions import (
     Disposition,
     PipelineAbort,
@@ -151,10 +151,15 @@ def test_an_error_that_is_not_the_upstreams_is_left_alone() -> None:
     assert normalize_upstream_error(PipelineAbort("already ours")) is None
 
 
-def test_retry_after_ignores_the_http_date_form() -> None:
-    """Legal but unused here, and parsing it would be code nothing could show works."""
-    assert retry_after_seconds({"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}) is None
-    assert retry_after_seconds({"Retry-After": "3"}) == 3.0
+def test_retry_after_supports_seconds_and_xingchen_milliseconds() -> None:
+    assert retry_after_seconds({"Retry-After": "3", "Retry-After-Ms": "1500"}) == 3.0
+    assert retry_after_seconds({"Retry-After-Ms": "1500"}) == 1.5
+    assert retry_after_seconds(
+        {
+            "Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT",
+            "Retry-After-Ms": "2500",
+        }
+    ) == 2.5
     assert retry_after_seconds({}) is None
 
 
@@ -317,6 +322,16 @@ def test_every_upstream_failure_that_has_a_body_carries_its_bytes(
     # Narrowed a second time against the union rather than against `kind`, which is a variable and narrows nothing. Both members carry the field, so this reads it without a `getattr` that would also pass on a class that has no such attribute.
     assert isinstance(normalized, UpstreamError | UpstreamRejected)
     assert normalized.body_bytes == b'{"e":1}'
+    assert normalized.body_observed is True
+
+
+def test_an_observed_empty_status_body_is_distinct_from_an_unread_stream() -> None:
+    normalized = normalize_upstream_error(status_error(500, raw=b""))
+
+    assert isinstance(normalized, UpstreamError)
+    assert normalized.body_bytes == b""
+    assert normalized.body_observed is True
+    assert normalized.status_code == 500
 
 
 def test_a_failure_with_no_response_has_empty_bytes_rather_than_a_guess() -> None:
@@ -328,4 +343,5 @@ def test_a_failure_with_no_response_has_empty_bytes_rather_than_a_guess() -> Non
 
     assert isinstance(normalized, UpstreamError)
     assert normalized.body_bytes == b""
+    assert normalized.body_observed is False
     assert normalized.status_code is None

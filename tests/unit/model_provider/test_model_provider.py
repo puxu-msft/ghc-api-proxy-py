@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any
 
 import httpx2
@@ -6,17 +7,20 @@ import pytest
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 
-from app.config.schema import ModelProviderConfig, ProxyConfig
+from app.config.schema import GithubCopilotProviderConfig, ProxyConfig
 from app.model_provider import (
     CapabilityMissing,
+    DescriptorProviderMismatch,
     EndpointNotSupported,
     GithubCopilotProvider,
     ModelDescriptor,
     ModelEndpoint,
+    PromptTokenLimits,
     ProviderNotConfigured,
     ProviderRegistry,
-    UnknownModel,
     parse_endpoints,
+    parse_prompt_token_limits,
+    require_descriptor_owner,
     require_endpoint,
     resolve_default_name,
 )
@@ -29,7 +33,17 @@ CATALOG: dict[str, Any] = {
     "object": "list",
     "data": [
         {"id": "claude-model", "supported_endpoints": ["/v1/messages"]},
-        {"id": "gpt-model", "supported_endpoints": ["/responses", "/chat/completions"]},
+        {
+            "id": "gpt-model",
+            "supported_endpoints": ["/responses", "/chat/completions"],
+            "capabilities": {
+                "tokenizer": "o200k_base",
+                "limits": {
+                    "max_prompt_tokens": 922_000,
+                    "max_context_window_tokens": 1_050_000,
+                },
+            },
+        },
         {"id": "embed-model", "supported_endpoints": ["/embeddings"]},
         {"id": "mute-model", "supported_endpoints": []},
         {"id": "future-model", "supported_endpoints": ["/v1/messages", "/brand-new"]},
@@ -82,12 +96,18 @@ def build_provider(
     provider = GithubCopilotProvider(
         "ghc",
         client,
-        ModelProviderConfig(type="github_copilot", disabled_models=disabled or []),
+        GithubCopilotProviderConfig(type="github_copilot", disabled_models=disabled or []),
         http_client=http_client,
         base_url=BASE_URL,
     )
     provider.replace_catalog(CATALOG)
     return provider, http_client
+
+
+def descriptor_for(provider: GithubCopilotProvider, model_id: str) -> ModelDescriptor:
+    descriptor = provider.describe(model_id)
+    assert descriptor is not None
+    return descriptor
 
 
 def upstream(response: httpx2.Response) -> Callable[[httpx2.Request], httpx2.Response]:
@@ -107,6 +127,134 @@ def test_endpoints_parse_into_known_members_and_leftovers() -> None:
     assert known == {ModelEndpoint.ANTHROPIC_MESSAGES, ModelEndpoint.OPENAI_RESPONSES}
     # An unrecognised path is kept rather than dropped, so a new upstream endpoint stays visible.
     assert unknown == ("/brand-new",)
+
+
+def test_prompt_token_limits_are_read_from_the_nested_catalog_shape() -> None:
+    limits = parse_prompt_token_limits(CATALOG["data"][1])
+
+    assert limits == PromptTokenLimits(
+        tokenizer="o200k_base",
+        max_prompt_tokens=922_000,
+        max_context_window_tokens=1_050_000,
+    )
+
+
+@pytest.mark.parametrize(
+    "capabilities",
+    [
+        None,
+        {"tokenizer": "", "limits": {"max_prompt_tokens": 10, "max_context_window_tokens": 20}},
+        {"tokenizer": "o200k_base", "limits": None},
+        {"tokenizer": "o200k_base", "limits": {"max_prompt_tokens": True, "max_context_window_tokens": 20}},
+        {"tokenizer": "o200k_base", "limits": {"max_prompt_tokens": 10, "max_context_window_tokens": False}},
+        {"tokenizer": "o200k_base", "limits": {"max_prompt_tokens": 0, "max_context_window_tokens": 20}},
+        {"tokenizer": "o200k_base", "limits": {"max_prompt_tokens": 21, "max_context_window_tokens": 20}},
+    ],
+)
+def test_prompt_token_limits_fail_open_on_incomplete_or_invalid_metadata(
+    capabilities: object,
+) -> None:
+    assert parse_prompt_token_limits({"capabilities": capabilities}) is None
+
+
+def test_flat_limit_lookalikes_do_not_replace_nested_catalog_metadata() -> None:
+    assert (
+        parse_prompt_token_limits(
+            {
+                "tokenizer": "o200k_base",
+                "max_prompt_tokens": 922_000,
+                "max_context_window_tokens": 1_050_000,
+            }
+        )
+        is None
+    )
+
+
+def test_descriptor_keeps_one_catalog_generation_and_prompt_limit_snapshot() -> None:
+    provider, _ = build_provider(upstream(httpx2.Response(200)))
+    first = provider.describe("gpt-model")
+    assert first is not None
+
+    provider.replace_catalog(CATALOG)
+    second = provider.describe("gpt-model")
+    assert second is not None
+
+    assert first.provider_name == "ghc"
+    assert second.provider_name == "ghc"
+    assert first.catalog_generation == 1
+    assert second.catalog_generation == 2
+    assert first.prompt_token_limits == second.prompt_token_limits == PromptTokenLimits(
+        tokenizer="o200k_base",
+        max_prompt_tokens=922_000,
+        max_context_window_tokens=1_050_000,
+    )
+    assert first is not second
+
+
+def test_descriptor_owner_gate_rejects_a_cross_provider_snapshot() -> None:
+    descriptor = ModelDescriptor(
+        id="gpt-model",
+        endpoints=frozenset({ModelEndpoint.OPENAI_RESPONSES}),
+        provider_name="first",
+    )
+
+    with pytest.raises(DescriptorProviderMismatch):
+        require_descriptor_owner(descriptor, "second")
+
+
+def test_descriptor_owner_gate_accepts_its_issuer() -> None:
+    descriptor = ModelDescriptor(
+        id="gpt-model",
+        endpoints=frozenset({ModelEndpoint.OPENAI_RESPONSES}),
+        provider_name="ghc",
+    )
+
+    require_descriptor_owner(descriptor, "ghc")
+
+
+@pytest.mark.asyncio
+async def test_primary_provider_send_and_count_reject_foreign_descriptors_before_transport() -> None:
+    seen: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        if request.url.path.endswith("/count_tokens"):
+            return httpx2.Response(200, json={"input_tokens": 1})
+        return httpx2.Response(
+            200,
+            json={
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+                "model": "claude-model",
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    provider, http_client = build_provider(handler)
+    foreign = replace(
+        descriptor_for(provider, "claude-model"),
+        provider_name="other",
+    )
+    try:
+        with pytest.raises(DescriptorProviderMismatch):
+            await provider.send(
+                ModelEndpoint.ANTHROPIC_MESSAGES,
+                {"model": "claude-model", "messages": [], "max_tokens": 1},
+                descriptor=foreign,
+            )
+        with pytest.raises(DescriptorProviderMismatch):
+            await provider.count_tokens(
+                {"model": "claude-model", "messages": []},
+                descriptor=foreign,
+            )
+    finally:
+        await http_client.aclose()
+
+    assert seen == []
 
 
 def test_capability_gate_rejects_a_model_that_advertises_nothing() -> None:
@@ -132,6 +280,35 @@ def test_disabled_model_is_not_on_offer() -> None:
 
 
 @pytest.mark.asyncio
+async def test_inflight_send_uses_the_descriptor_captured_before_catalog_replacement() -> None:
+    seen: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(200, json={"ok": True})
+
+    provider, http_client = build_provider(handler)
+    captured = descriptor_for(provider, "claude-model")
+    provider.replace_catalog(
+        {"data": [{"id": "replacement", "supported_endpoints": ["/responses"]}]}
+    )
+    try:
+        response = await provider.send(
+            ModelEndpoint.ANTHROPIC_MESSAGES,
+            {"model": "claude-model"},
+            descriptor=captured,
+        )
+    finally:
+        await http_client.aclose()
+
+    assert response.status_code == 200
+    assert provider.describe("claude-model") is None
+    assert captured.catalog_generation == 1
+    assert descriptor_for(provider, "replacement").catalog_generation == 2
+    assert [str(request.url) for request in seen] == [f"{BASE_URL}/v1/messages"]
+
+
+@pytest.mark.asyncio
 async def test_send_reaches_the_endpoint_the_model_advertises() -> None:
     seen: list[httpx2.Request] = []
 
@@ -149,7 +326,7 @@ async def test_send_reaches_the_endpoint_the_model_advertises() -> None:
         await provider.send(
             ModelEndpoint.ANTHROPIC_MESSAGES,
             {"model": "claude-model"},
-            model_id="claude-model",
+            descriptor=descriptor_for(provider, "claude-model"),
         )
     finally:
         await http_client.aclose()
@@ -171,7 +348,7 @@ async def test_unadvertised_endpoint_is_refused_before_the_network() -> None:
             await provider.send(
                 ModelEndpoint.OPENAI_RESPONSES,
                 {"model": "claude-model"},
-                model_id="claude-model",
+                descriptor=descriptor_for(provider, "claude-model"),
             )
     finally:
         await http_client.aclose()
@@ -194,29 +371,7 @@ async def test_model_with_empty_capabilities_is_refused_before_the_network() -> 
             await provider.send(
                 ModelEndpoint.ANTHROPIC_MESSAGES,
                 {"model": "mute-model"},
-                model_id="mute-model",
-            )
-    finally:
-        await http_client.aclose()
-
-    assert seen == []
-
-
-@pytest.mark.asyncio
-async def test_disabled_model_is_refused_before_the_network() -> None:
-    seen: list[httpx2.Request] = []
-
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        seen.append(request)
-        return httpx2.Response(200, json={"ok": True})
-
-    provider, http_client = build_provider(handler, disabled=["banned-model"])
-    try:
-        with pytest.raises(UnknownModel):
-            await provider.send(
-                ModelEndpoint.ANTHROPIC_MESSAGES,
-                {"model": "banned-model"},
-                model_id="banned-model",
+                descriptor=descriptor_for(provider, "mute-model"),
             )
     finally:
         await http_client.aclose()
@@ -228,7 +383,7 @@ async def test_disabled_model_is_refused_before_the_network() -> None:
 async def test_count_tokens_is_gated_on_the_messages_capability() -> None:
     """Counting a body is refused wherever sending it would be, and before the network.
 
-    Three ways to be refused, and they are not the same: `gpt-model` advertises other endpoints, `mute-model` advertises none, and the third is not in the catalog at all. A gate that only asked "is this model known" would let the first two through.
+    Two ways to be refused, and they are not the same: `gpt-model` advertises other endpoints while `mute-model` advertises none. Unknown and disabled ids never produce a routed descriptor, so routing owns those refusals before this provider contract is called.
     """
     seen: list[httpx2.Request] = []
 
@@ -239,13 +394,10 @@ async def test_count_tokens_is_gated_on_the_messages_capability() -> None:
     provider, http_client = build_provider(handler)
     try:
         with pytest.raises(EndpointNotSupported):
-            await provider.count_tokens({"model": "gpt-model"}, model_id="gpt-model")
+            await provider.count_tokens({"model": "gpt-model"}, descriptor=descriptor_for(provider, "gpt-model"))
 
         with pytest.raises(CapabilityMissing):
-            await provider.count_tokens({"model": "mute-model"}, model_id="mute-model")
-
-        with pytest.raises(UnknownModel):
-            await provider.count_tokens({"model": "no-such"}, model_id="no-such")
+            await provider.count_tokens({"model": "mute-model"}, descriptor=descriptor_for(provider, "mute-model"))
     finally:
         await http_client.aclose()
 
@@ -389,7 +541,7 @@ async def test_a_model_with_an_unstated_endpoint_can_actually_be_sent_to() -> No
         await provider.send(
             ModelEndpoint.OPENAI_CHAT_COMPLETIONS,
             {"model": "chatter"},
-            model_id="chatter",
+            descriptor=descriptor_for(provider, "chatter"),
         )
     finally:
         await http_client.aclose()
@@ -449,7 +601,7 @@ async def test_an_unreadable_endpoint_field_is_refused_before_the_network() -> N
             await provider.send(
                 ModelEndpoint.OPENAI_CHAT_COMPLETIONS,
                 {"model": "unreadable"},
-                model_id="unreadable",
+                descriptor=descriptor_for(provider, "unreadable"),
             )
     finally:
         await http_client.aclose()

@@ -21,13 +21,27 @@ import logging
 from typing import Any, cast
 
 from app.pipeline.request import RequestContext, WireFormat
-from app.pipeline.server_tool_text import WEB_SEARCH, call_subject
+from app.pipeline.server_tool_text import WEB_SEARCH, render_server_tool_block
 from app.pipeline.subscribers.counting import COUNTING_ONLY
-from app.pipeline.translation_driver.semantic import TranslationRefused, WebSearchNotExecutable
+from app.pipeline.translation_driver.semantic import (
+    Loss,
+    LossCode,
+    TranslationRefused,
+    WebSearchNotExecutable,
+)
 
 logger = logging.getLogger(__name__)
 
 SUBSCRIBER_ID = "builtin:server-tool-capability"
+_REQUEST_LOSSES = "conversion_losses"
+
+
+def _record_loss(context: RequestContext, detail: str) -> None:
+    recorded = context.extras.get(_REQUEST_LOSSES)
+    if not isinstance(recorded, list):
+        recorded = []
+        context.extras[_REQUEST_LOSSES] = recorded
+    cast(list[Any], recorded).append(Loss(LossCode.SERVER_TOOL_NOT_CARRIED, detail))
 
 # Only what upstream has actually been measured rejecting on this leg.
 #
@@ -63,116 +77,13 @@ def _family(name: str) -> str | None:
     return None
 
 
-def _describe_one(item: Any) -> str | None:
-    """One line for one result, or `None` when it says nothing worth a line.
-
-    `encrypted_content` is deliberately not among the fields read. It is the bulk of a search result's bytes and is opaque to everyone but upstream, so carrying it would multiply the history's size to say nothing.
-    """
-    if not isinstance(item, dict):
-        return None
-    result = cast(dict[str, Any], item)
-    title = result.get("title")
-    url = result.get("url")
-    has_title = isinstance(title, str) and title.strip()
-    has_url = isinstance(url, str) and url.strip()
-    if has_title and has_url:
-        return f"- {title} — {url}"
-    if has_url:
-        return f"- {url}"
-    if has_title:
-        # A result with a title and no URL still names what was read. Dropping it would let a turn that fetched three pages report two.
-        return f"- {title}"
-    return None
-
-
-def _failure_of(content: Any) -> str | None:
-    """The error code when this result payload is a failure, else `None`.
-
-    Read off `type` and `error_code` rather than off the payload's *shape*. A single object is not evidence of failure: a successful `web_fetch_tool_result` carries one object too, and treating shape as the discriminator reported a fetch that worked as one that failed — and threw away its URL and text on the way.
-    """
-    if not isinstance(content, dict):
-        return None
-    entry = cast(dict[str, Any], content)
-    kind = entry.get("type")
-    code = entry.get("error_code")
-    failed = (isinstance(kind, str) and kind.endswith("_error")) or code is not None
-    if not failed:
-        return None
-    return code if isinstance(code, str) else ""
-
-
-def _render_results(content: Any, family: str) -> str:
-    """Turn a server-tool result's payload into something a model can still read.
-
-    Three payload shapes reach here: a list of results (`web_search`), a single result object (`web_fetch`), and an error object (either family).
-    """
-    failure = _failure_of(content)
-    if failure is not None:
-        return f"[{family} failed: {failure}]" if failure else f"[{family} failed]"
-    items: list[Any] = (
-        cast(list[Any], content) if isinstance(content, list) else [content] if content else []
-    )
-    lines = [line for line in (_describe_one(item) for item in items) if line is not None]
-    if not lines:
-        return f"[{family} results omitted]"
-    return "\n".join([f"[{family} results]", *lines])
-
-
-def _as_text(entry: dict[str, Any], text: str) -> dict[str, Any]:
-    """The replacement block, carrying over what the original said about caching.
-
-    `cache_control` is a property of the position in the prompt, not of the block's kind, so a breakpoint the client placed here still marks the same boundary once the block is text. Dropping it would silently move where the prefix ends.
-    """
-    replacement: dict[str, Any] = {"type": "text", "text": text}
-    cache_control = entry.get("cache_control")
-    if cache_control is not None:
-        replacement["cache_control"] = cache_control
-    return replacement
-
-
-def _flatten_history_block(block: Any) -> dict[str, Any] | None:
-    """The text a rejected server-tool block becomes, or `None` to leave the block alone.
-
-    Flattened to text rather than downgraded to a client `tool_use` / `tool_result` pair, which is what the reference implementation does. That downgrade only works while the tool stays declared; here the declaration has just been removed, so a surviving reference would be rejected in its own right — the reference project matches `Tool 'X' not found in provided tools` for that case, which this project has not measured for itself. Text refers to nothing and so cannot dangle either way.
-
-    Repairing these in place is not on the table either: upstream requires a real, non-empty `encrypted_content` on every search result and rejects both an empty string and any placeholder, measured by the reference project. Whatever a client replays, we cannot make it sendable.
-    """
-    if not isinstance(block, dict):
-        return None
-    entry = cast(dict[str, Any], block)
-    block_type = entry.get("type")
-    if not isinstance(block_type, str):
-        return None
-
-    if block_type == "server_tool_use":
-        name = entry.get("name")
-        if not isinstance(name, str):
-            return None
-        family = _family(name)
-        if family is None:
-            return None
-        return _as_text(entry, f"[{family}]{call_subject(entry.get('input'))}")
-
-    # `tool_result` on its own is the client-side one and belongs to a tool we never touched.
-    if block_type == "tool_result" or not block_type.endswith("_tool_result"):
-        return None
-    family = _family(block_type)
-    if family is None:
-        return None
-    return _as_text(entry, _render_results(entry.get("content"), family))
-
-
-def _flatten_history(payload: dict[str, Any]) -> int:
-    """Replace rejected server-tool blocks left in the history, returning how many.
-
-    Runs whether or not this request declared anything, and unlike the declaration it does not refuse: a block here records a search that already happened somewhere it was possible, so turning it into text loses provenance rather than inventing an answer.
-
-    On the client this project actually serves, this has nothing to do. Claude Code keeps its main conversation free of these blocks — the search lives in a separate sub-request that carries no history at all — so what this handles is a transcript from elsewhere: another provider, a direct Anthropic session, a client that does not split the two. Real shapes, none of them observed here.
-    """
+def _flatten_history(payload: dict[str, Any]) -> tuple[int, tuple[str, ...]]:
+    """Replace server-tool history blocks and return each structured loss."""
     messages = payload.get("messages")
     if not isinstance(messages, list):
-        return 0
+        return 0, ()
     flattened = 0
+    losses: list[str] = []
     for message in cast(list[Any], messages):
         if not isinstance(message, dict):
             continue
@@ -183,16 +94,23 @@ def _flatten_history(payload: dict[str, Any]) -> int:
         rebuilt: list[Any] = []
         touched = False
         for block in cast(list[Any], content):
-            replacement = _flatten_history_block(block)
-            if replacement is None:
+            rendering = render_server_tool_block(
+                block,
+                families=_REJECTED_TYPE_PREFIXES,
+            )
+            if rendering is None:
                 rebuilt.append(block)
                 continue
-            rebuilt.append(replacement)
+            rebuilt.append(rendering.as_text_block())
             touched = True
             flattened += 1
+            detail = f"{rendering.source_type} flattened to text"
+            if rendering.dropped_opaque:
+                detail += "; opaque encrypted_content not carried"
+            losses.append(detail)
         if touched:
             entry["content"] = rebuilt
-    return flattened
+    return flattened, tuple(losses)
 
 
 def _refuse_declarations(payload: dict[str, Any]) -> None:
@@ -262,10 +180,12 @@ async def adapt_server_tools(context: RequestContext) -> None:
     if not context.extras.get(COUNTING_ONLY):
         # Measuring is exempt: nothing is executed, so nothing can come back invented. The history is still flattened below, because that is what makes the measured body the one that would actually be sent.
         _refuse_declarations(payload)
-    flattened = _flatten_history(payload)
+    flattened, losses = _flatten_history(payload)
     if flattened:
         # INFO for the same reason as the declaration line below: routine for a session that used web search, but it rewrites what the model is shown, which is not something to bury in debug.
         logger.info(
             "flattened %d server-tool block(s) left in the history into text; upstream would have rejected them",
             flattened,
         )
+    for detail in losses:
+        _record_loss(context, detail)

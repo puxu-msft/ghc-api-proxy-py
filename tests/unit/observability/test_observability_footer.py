@@ -8,8 +8,8 @@ from app.observability.footer import ActiveRequest, build_footer
 NOW = 1_000.0
 
 
-def _request(request_id: str, model: str, age: float, bytes_out: int | None = None, attempts: int = 1) -> ActiveRequest:
-    return ActiveRequest(request_id=request_id, model=model, started_at=NOW - age, bytes_out=bytes_out, attempts=attempts)
+def _request(request_id: str, model: str, age: float, upstream_response_bytes: int | None = None, attempts: int = 1) -> ActiveRequest:
+    return ActiveRequest(request_id=request_id, model=model, started_at=NOW - age, upstream_response_bytes=upstream_response_bytes, attempts=attempts)
 
 
 def test_open_connections_are_shown_as_their_own_block() -> None:
@@ -31,14 +31,14 @@ def test_connections_are_shown_even_with_nothing_in_flight() -> None:
 def test_requests_of_one_model_are_separated_by_commas() -> None:
     """Where one request ends and the next begins.
 
-    Joined by a space, `48.6s ↓15.6KB 28.3s` reads as a single request with three fields, and the reader cannot tell otherwise because any field may be absent — the third request here has no byte count at all.
+    Joined by a space, `48.6s ↓15.6KiB 28.3s` reads as a single request with three fields, and the reader cannot tell otherwise because any field may be absent — the third request here has no byte count at all.
     """
     active = [
-        _request("a", "claude-opus-5", 48.6, bytes_out=15_974),
-        _request("b", "claude-opus-5", 28.3, bytes_out=8_396),
+        _request("a", "claude-opus-5", 48.6, upstream_response_bytes=15_974),
+        _request("b", "claude-opus-5", 28.3, upstream_response_bytes=8_396),
         _request("c", "claude-opus-5", 3.6),
     ]
-    assert build_footer(active, NOW, 200) == "[<-->] claude-opus-5 x3 48.6s ↓15.6KB, 28.3s ↓8.2KB, 3.6s"
+    assert build_footer(active, NOW, 200) == "[<-->] claude-opus-5 x3 48.6s ↓15.6KiB, 28.3s ↓8.2KiB, 3.6s"
 
 
 def test_draining_says_so_in_the_prefix() -> None:
@@ -93,7 +93,7 @@ def test_a_model_actually_named_resolving_does_not_merge_with_unresolved_ones() 
 def test_absent_byte_count_is_not_the_same_as_zero() -> None:
     # No bytes field means nothing has streamed back yet; `0B` means it streamed and produced nothing.
     assert "↓" not in build_footer([_request("a", "gpt-5", 1.0)], NOW, 80)
-    assert "↓0B" in build_footer([_request("a", "gpt-5", 1.0, bytes_out=0)], NOW, 80)
+    assert "↓0B" in build_footer([_request("a", "gpt-5", 1.0, upstream_response_bytes=0)], NOW, 80)
 
 
 def test_retries_are_reported_next_to_the_elapsed() -> None:
@@ -106,7 +106,7 @@ def test_sub_second_requests_keep_millisecond_precision() -> None:
 
 def test_the_line_never_exceeds_one_terminal_row() -> None:
     # The hard invariant. Measured failure without it: at 40 columns the footer wraps onto a second row every run.
-    active = [_request(str(index), f"model-with-a-long-name-{index}", float(index), bytes_out=index * 4096) for index in range(12)]
+    active = [_request(str(index), f"model-with-a-long-name-{index}", float(index), upstream_response_bytes=index * 4096) for index in range(12)]
     for columns in (20, 40, 60, 80, 120):
         assert len(build_footer(active, NOW, columns)) <= columns - 1
 
@@ -145,7 +145,7 @@ def test_leftover_width_is_shared_round_robin_rather_than_by_first_come() -> Non
 
 
 def test_the_byte_marker_degrades_where_the_glyph_cannot_be_encoded() -> None:
-    line = build_footer([_request("a", "gpt-5", 1.0, bytes_out=2048)], NOW, 80, unicode=False)
+    line = build_footer([_request("a", "gpt-5", 1.0, upstream_response_bytes=2048)], NOW, 80, unicode=False)
     assert "↓" not in line
     # Still marked rather than dropped: a bare number would read as a second time field.
-    assert "<2.0KB" in line
+    assert "<2.0KiB" in line

@@ -3,6 +3,7 @@
 Until 2026-08-19 the new chain answered 404 to `/health/readiness` while the existing chain answered it — and the existing chain is the one two of the three entry points still run. A supervisor pointed at the new chain had nothing to ask.
 """
 
+from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Any
 
@@ -10,9 +11,11 @@ import httpx2
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from prometheus_client import REGISTRY
 
 from app.config.schema import ProxyConfig
 from app.model_provider.types import ModelDescriptor, ModelEndpoint
+from app.observability.metrics import RESPONSIVENESS
 from app.server.app_state import CHAIN_STATE_KEY
 from app.server.routes.ops import router as ops_router
 from app.server.routes.router import build_router
@@ -29,6 +32,10 @@ class StubProvider:
     @property
     def available_ids(self) -> frozenset[str]:
         return self._ids
+
+    @property
+    def raw_catalog(self) -> Mapping[str, Any]:
+        return {}
 
     @property
     def disabled_ids(self) -> frozenset[str]:
@@ -217,10 +224,23 @@ async def test_the_model_list_omits_what_the_chosen_provider_cannot_serve() -> N
 
 @pytest.mark.asyncio
 async def test_metrics_are_served() -> None:
-    async with client_for(frozenset({"m"})) as client:
-        response = await client.get("/metrics")
+    before = REGISTRY.get_sample_value("ghc_proxy_event_loop_monitor_active")
+    assert before is not None
+    RESPONSIVENESS.loop_active.inc(7)
+    try:
+        async with client_for(frozenset({"m"})) as client:
+            response = await client.get("/metrics")
+    finally:
+        RESPONSIVENESS.loop_active.dec(7)
+
     assert response.status_code == 200
     assert b"python_gc_objects_collected_total" in response.content
+    assert b"ghc_proxy_event_loop_lag_seconds_count" in response.content
+    assert b"ghc_proxy_event_loop_lag_max_seconds" in response.content
+    assert b"ghc_proxy_event_loop_lag_failures_total" in response.content
+    assert b"ghc_proxy_tui_last_render_age_seconds" in response.content
+    assert b"ghc_proxy_tui_terminal_io_in_progress_seconds" in response.content
+    assert f"ghc_proxy_event_loop_monitor_active {before + 7}".encode() in response.content
 
 
 @pytest.mark.asyncio
@@ -375,6 +395,39 @@ async def test_api_config_redacts_only_the_userinfo_of_the_proxy() -> None:
     async with client_for(frozenset({"m"}), plain) as client:
         untouched = (await client.get("/api/config")).json()["proxy"]
     assert untouched == "http://proxy.internal:8080"
+
+
+@pytest.mark.asyncio
+async def test_api_config_redacts_only_xingchen_credentials() -> None:
+    config = ProxyConfig.model_validate(
+        {
+            "model_providers": {
+                "xingchen": {
+                    "type": "xingchen",
+                    "models": ["chat-pro"],
+                    "gateway_api_key": "gateway-secret",
+                    "x_token": "complete.secret.token",
+                    "device_id": "device-id",
+                    "install_id": "install-id",
+                }
+            },
+            "default_model_provider": "xingchen",
+        }
+    )
+    async with client_for(frozenset({"m"}), config) as client:
+        response = await client.get("/api/config")
+
+    assert response.status_code == 200
+    serialized = response.text
+    provider = response.json()["model_providers"]["xingchen"]
+    assert "gateway-secret" not in serialized
+    assert "complete.secret.token" not in serialized
+    assert provider["gateway_api_key"] == "***"
+    assert provider["x_token"] == "***"
+    assert provider["models"] == ["chat-pro"]
+    assert provider["device_id"] == "device-id"
+    assert provider["install_id"] == "install-id"
+    assert provider["api_base_url"] == "https://agent.teleai.com.cn/superCowork/sapi/api/v1"
 
 
 def test_the_ops_surface_is_mounted_on_the_router_production_builds() -> None:

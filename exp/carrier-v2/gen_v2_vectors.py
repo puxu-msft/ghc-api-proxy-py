@@ -1,10 +1,13 @@
-"""Canonical v2 vectors, computed from the spec text alone.
+"""Historical vectors for the superseded ordinal-only v2 candidate.
 
-Deliberately imports nothing from `app`: acceptance.md:114 requires expected values not be
-produced by the codec under test. This re-implements the written rules — compact UTF-8 JSON,
-field order tag/encrypted_content/i, unpadded base64url — and nothing else.
+This is not the current v2 contract or an acceptance oracle. The 2026-09-04 living Spec at
+`.dev/docs/reasoning-carrier/spec.md` replaced `{tag, encrypted_content, i}` with a typed-record
+envelope and removed ordinal `i` from this producer. Kept only as a reproducible counterexample
+to that rejected candidate; current vectors belong to the implementing patch and must be derived
+independently from the living Spec.
 """
-import base64, json
+import base64
+import json
 
 PREFIX = "ghc-api-proxy:synthetic-reasoning:v2:"
 BARE   = "ghc-api-proxy:synthetic-reasoning:v2"
@@ -32,4 +35,4 @@ for enc, i in cases:
     back = json.loads(raw)
     assert back == {"tag": TAG, "encrypted_content": enc, "i": i}, back
     assert base64.urlsafe_b64encode(raw).decode().rstrip("=") == p, "not canonical"
-print("\nself-check: all vectors round-trip and are canonical base64url")
+print("\nHISTORICAL ONLY: superseded ordinal-only vectors round-trip as originally specified")

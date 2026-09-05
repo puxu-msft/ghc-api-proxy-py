@@ -5,6 +5,7 @@ The shape under test is the one production actually sent on 2026-08-24 and got a
 Two of these go through `build_chain` and `handle` rather than calling the subscriber. Being registered is not being run, and on this feature there is a second thing only the full path can prove: the capability the subscriber reads has to travel from the catalog through `decide_route` and `apply_route` onto the context. A test that sets `context.model_descriptor` by hand would stay green if that wiring were cut.
 """
 
+from collections.abc import Mapping
 from typing import Any
 
 import httpx2
@@ -30,6 +31,7 @@ MEASURED_THINKING: dict[str, Any] = {
 ADAPTIVE = ModelDescriptor(
     id="claude-sonnet-5",
     endpoints=frozenset({ModelEndpoint.ANTHROPIC_MESSAGES}),
+    provider_name="ghc",
     reasoning_efforts=("low", "medium", "high", "xhigh", "max"),
     adaptive_thinking=True,
 )
@@ -37,6 +39,7 @@ ADAPTIVE = ModelDescriptor(
 BUDGETED = ModelDescriptor(
     id="claude-sonnet-4.5",
     endpoints=frozenset({ModelEndpoint.ANTHROPIC_MESSAGES}),
+    provider_name="ghc",
     adaptive_thinking=False,
 )
 
@@ -382,6 +385,10 @@ class CapableProvider:
     @property
     def available_ids(self) -> frozenset[str]:
         return frozenset({"claude-sonnet-5"})
+    @property
+    def raw_catalog(self) -> Mapping[str, Any]:
+        return {}
+
 
     # Reporting-only members of the provider protocol, here so this stub satisfies it. Nothing on this test's path reads them; `/api/status` does.
     @property
@@ -407,14 +414,14 @@ class CapableProvider:
         endpoint: ModelEndpoint,
         payload: Any,
         *,
-        model_id: str,
+        descriptor: ModelDescriptor,
         stream: bool = False,
         extra_headers: Any = None,
     ) -> httpx2.Response:
         self.sent.append(dict(payload))
         return httpx2.Response(200)
 
-    async def count_tokens(self, payload: Any, *, model_id: str) -> httpx2.Response:
+    async def count_tokens(self, payload: Any, *, descriptor: ModelDescriptor) -> httpx2.Response:
         self.counted.append(dict(payload))
         # Carries a request because the caller calls `raise_for_status()`, which needs one. Without it the count quietly falls back to the local estimate and an assertion about `counted` would still be green while nothing upstream was ever asked.
         return httpx2.Response(

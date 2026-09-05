@@ -10,11 +10,8 @@ Where the block came from is settled and is not this module's problem any more: 
 """
 
 import logging
-from collections.abc import Mapping
 from typing import Any, cast
 
-from app.anthropic.thinking.destack import SYNTHETIC_SEPARATOR
-from app.anthropic.thinking.protection import THINKING_TYPES
 from app.pipeline.request import RequestContext, WireFormat
 
 logger = logging.getLogger(__name__)
@@ -40,30 +37,13 @@ def _is_blank_text(block: Any) -> bool:
     return isinstance(text, str) and not text.strip()
 
 
-def _is_thinking(block: Any) -> bool:
-    return isinstance(block, Mapping) and cast(Mapping[str, Any], block).get("type") in THINKING_TYPES
-
-
 def _without_blank_text(content: list[Any]) -> list[Any]:
-    """The same blocks, minus the ones that say nothing.
+    """The same blocks minus blank text; Anthropic adjacency is repaired after this pass.
 
     Returns the argument itself when nothing matched, so an untouched body stays the object it arrived as and the caller can tell "nothing to do" from "everything went" by identity.
-
-    One blank block is not simply dropped: the one standing between two thinking blocks is replaced by the separator `destack_content` would have used. Removing it outright would leave the two thinking blocks adjacent, which is the arrangement the layout pass exists to prevent — and that pass ran before translation, long before this one, so it cannot clean up after this. This is reasoning about a shape rather than a measurement of one: it has not been observed in production, but it costs one comparison and the alternative is trading one refusal for another.
     """
-    kept: list[Any] = []
-    changed = False
-    for index, block in enumerate(content):
-        if not _is_blank_text(block):
-            kept.append(block)
-            continue
-        changed = True
-        following = next(
-            (later for later in content[index + 1 :] if not _is_blank_text(later)), None
-        )
-        if kept and _is_thinking(kept[-1]) and _is_thinking(following):
-            kept.append({"type": "text", "text": SYNTHETIC_SEPARATOR})
-    return content if not changed else kept
+    kept = [block for block in content if not _is_blank_text(block)]
+    return content if len(kept) == len(content) else kept
 
 
 async def drop_blank_text_blocks(context: RequestContext) -> None:

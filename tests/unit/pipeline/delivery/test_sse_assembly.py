@@ -20,6 +20,9 @@ from app.pipeline.delivery.formats.anthropic_messages import (
 from app.pipeline.delivery.formats.openai_responses import ResponsesAssembler
 from app.pipeline.delivery.sse_source import SseEvent, encode_frame, parse_frame, read_events
 from app.pipeline.reply import blocks_from_anthropic
+from app.pipeline.translation_driver.reasoning_bridge import ReasoningBridgeError
+from app.pipeline.translation_driver.responses import from_openai_responses_response
+from app.pipeline.translation_driver.semantic import LossCode
 
 
 def frame(event: str, data: dict[str, Any], *, space: bool = True) -> bytes:
@@ -245,6 +248,32 @@ def test_interleaved_blocks_close_independently() -> None:
     ].payload["text"] == "first"
 
 
+def test_anthropic_redacted_thinking_assembles_as_typed_reasoning() -> None:
+    assembler = AnthropicAssembler()
+    assembler.push(
+        SseEvent(
+            "content_block_start",
+            orjson.dumps(
+                {
+                    "index": 0,
+                    "content_block": {
+                        "type": "redacted_thinking",
+                        "data": "opaque-redacted",
+                    },
+                }
+            ).decode(),
+        )
+    )
+    [block] = assembler.push(
+        SseEvent("content_block_stop", orjson.dumps({"index": 0}).decode())
+    )
+    assert block.kind == "redacted_thinking"
+    assert block.reasoning is not None
+    assert block.reasoning.redacted is True
+    assert block.reasoning.state is not None
+    assert block.reasoning.state.value == "opaque-redacted"
+
+
 # --- responses assembly ----------------------------------------------------
 
 
@@ -260,6 +289,170 @@ def test_responses_item_completes_only_on_done() -> None:
         {"item": {"id": "i1", "type": "message"}}
     ).decode()))
     assert blocks[0].payload == {"type": "text", "text": "partial"}
+
+
+def test_reasoning_summary_events_preserve_parts_empty_text_and_extensions() -> None:
+    assembler = ResponsesAssembler()
+
+    def push(kind: str, body: dict[str, Any]) -> tuple[CompletedBlock, ...]:
+        payload = {"output_index": 0, **body}
+        return assembler.push(SseEvent(kind, orjson.dumps(payload).decode()))
+
+    push("response.output_item.added", {"item": {"id": "r1", "type": "reasoning"}})
+    push(
+        "response.reasoning_summary_part.added",
+        {
+            "item_id": "r1",
+            "summary_index": 0,
+            "part": {"type": "summary_text", "text": "一", "detail": 1},
+        },
+    )
+    push(
+        "response.reasoning_summary_text.delta",
+        {"item_id": "r1", "summary_index": 0, "delta": "A"},
+    )
+    push(
+        "response.reasoning_summary_text.done",
+        {"item_id": "r1", "summary_index": 0, "text": "一A"},
+    )
+    push(
+        "response.reasoning_summary_part.done",
+        {
+            "item_id": "r1",
+            "summary_index": 0,
+            "part": {"type": "summary_text", "text": "一A", "detail": 1},
+        },
+    )
+    push(
+        "response.reasoning_summary_part.added",
+        {
+            "item_id": "r1",
+            "summary_index": 1,
+            "part": {"type": "summary_text", "text": ""},
+        },
+    )
+    push(
+        "response.reasoning_summary_part.done",
+        {
+            "item_id": "r1",
+            "summary_index": 1,
+            "part": {"type": "summary_text", "text": ""},
+        },
+    )
+    push(
+        "response.reasoning_summary_part.added",
+        {
+            "item_id": "r1",
+            "summary_index": 2,
+            "part": {"type": "summary_text", "text": "😀"},
+        },
+    )
+    push(
+        "response.reasoning_summary_text.delta",
+        {"item_id": "r1", "summary_index": 2, "delta": "二"},
+    )
+    [block] = push(
+        "response.output_item.done",
+        {"item": {"id": "r1", "type": "reasoning", "encrypted_content": "ENC"}},
+    )
+
+    assert block.reasoning is not None
+    assert block.reasoning.responses_summary() == [
+        {"type": "summary_text", "text": "一A", "detail": 1},
+        {"type": "summary_text", "text": ""},
+        {"type": "summary_text", "text": "😀二"},
+    ]
+    assert block.payload["thinking"] == "一A😀二"
+    assert block.payload["signature"].startswith("ghc-api-proxy:synthetic-reasoning:v2:")
+
+
+def test_closing_reasoning_summary_replaces_lower_event_state() -> None:
+    assembler = ResponsesAssembler()
+    assembler.push(
+        SseEvent(
+            "response.output_item.added",
+            orjson.dumps({"output_index": 0, "item": {"id": "r1", "type": "reasoning"}}).decode(),
+        )
+    )
+    assembler.push(
+        SseEvent(
+            "response.reasoning_summary_part.added",
+            orjson.dumps(
+                {
+                    "output_index": 0,
+                    "item_id": "r1",
+                    "summary_index": 0,
+                    "part": {"type": "summary_text", "text": "old"},
+                }
+            ).decode(),
+        )
+    )
+    [block] = assembler.push(
+        SseEvent(
+            "response.output_item.done",
+            orjson.dumps(
+                {
+                    "output_index": 0,
+                    "item": {
+                        "id": "r1",
+                        "type": "reasoning",
+                        "summary": [{"type": "summary_text", "text": "authoritative"}],
+                    },
+                }
+            ).decode(),
+        )
+    )
+    assert block.reasoning is not None
+    assert block.reasoning.responses_summary() == [
+        {"type": "summary_text", "text": "authoritative"}
+    ]
+
+
+def test_incomplete_summary_part_without_closing_summary_is_not_delivered() -> None:
+    assembler = ResponsesAssembler()
+    assembler.push(
+        SseEvent(
+            "response.output_item.added",
+            orjson.dumps({"output_index": 0, "item": {"id": "r1", "type": "reasoning"}}).decode(),
+        )
+    )
+    assembler.push(
+        SseEvent(
+            "response.reasoning_summary_part.added",
+            orjson.dumps(
+                {
+                    "output_index": 0,
+                    "item_id": "r1",
+                    "summary_index": 0,
+                    "part": {"type": "summary_text", "text": "partial"},
+                }
+            ).decode(),
+        )
+    )
+    assembler.push(
+        SseEvent(
+            "response.reasoning_summary_part.done",
+            orjson.dumps(
+                {
+                    "output_index": 0,
+                    "item_id": "r1",
+                    "summary_index": 0,
+                    "status": "incomplete",
+                    "part": {"type": "summary_text", "text": "partial"},
+                }
+            ).decode(),
+        )
+    )
+    with pytest.raises(ReasoningBridgeError) as caught:
+        assembler.push(
+            SseEvent(
+                "response.output_item.done",
+                orjson.dumps(
+                    {"output_index": 0, "item": {"id": "r1", "type": "reasoning"}}
+                ).decode(),
+            )
+        )
+    assert caught.value.code == "incomplete_reasoning_summary"
 
 
 def test_responses_function_call_becomes_a_tool_use_block() -> None:
@@ -496,6 +689,75 @@ def test_a_search_that_closes_without_ever_opening_is_still_delivered() -> None:
         )
     )
     assert [block.payload["text"] for block in blocks] == ["[web_search] orphan query"]
+    assert [loss.code for loss in assembler.response_losses] == [
+        LossCode.SERVER_TOOL_CALL_ID_NOT_CARRIED,
+        LossCode.SERVER_TOOL_NOT_CARRIED,
+    ]
+    assert "unsolicited" in assembler.response_losses[1].detail
+
+
+def test_an_expected_search_done_without_added_becomes_one_atomic_native_pair() -> None:
+    assembler = ResponsesAssembler(hosted_web_search_expected=True)
+
+    blocks = assembler.push(
+        SseEvent(
+            "response.output_item.done",
+            orjson.dumps(
+                {
+                    "output_index": 0,
+                    "item": {
+                        "type": "web_search_call",
+                        "id": "z" * 416,
+                        "status": "incomplete",
+                        "action": {
+                            "type": "find_in_page",
+                            "url": "https://example.com/doc",
+                            "pattern": "needle",
+                        },
+                    },
+                }
+            ).decode(),
+        )
+    )
+
+    assert [block.kind for block in blocks] == [
+        "server_tool_use",
+        "web_search_tool_result",
+    ]
+    assert blocks[0].payload["input"] == {}
+    assert blocks[1].payload["tool_use_id"] == blocks[0].payload["id"]
+    assert blocks[0].admission_group == blocks[1].admission_group
+    assert blocks[0].admission_group
+    assert assembler.cut_mid_block is False
+    assert assembler.terminal.tools == []
+    assert [loss.code for loss in assembler.response_losses] == [
+        LossCode.SERVER_TOOL_CALL_ID_NOT_CARRIED,
+        LossCode.SERVER_TOOL_PARTIALLY_REPRESENTABLE,
+    ]
+    assert "find_in_page" in assembler.response_losses[1].detail
+    assert "https://example.com/doc" in assembler.response_losses[1].detail
+    assert "needle" in assembler.response_losses[1].detail
+
+
+def test_web_search_lifecycle_events_are_known_nonsemantic_controls() -> None:
+    assembler = ResponsesAssembler(hosted_web_search_expected=True)
+
+    for event_type in (
+        "response.web_search_call.in_progress",
+        "response.web_search_call.searching",
+        "response.web_search_call.completed",
+    ):
+        assert assembler.push(
+            SseEvent(
+                event_type,
+                orjson.dumps(
+                    {"output_index": 0, "item_id": f"unstable-{event_type}"}
+                ).decode(),
+            )
+        ) == ()
+
+    assert assembler.terminal.blocks == 0
+    assert assembler.cut_mid_block is False
 
 
 def test_an_ordinary_item_that_closes_without_opening_is_still_ignored() -> None:
@@ -561,6 +823,131 @@ def _terminal(assembler: ResponsesAssembler, reason: str) -> tuple[CompletedBloc
             orjson.dumps({"response": {"incomplete_details": {"reason": reason}}}).decode(),
         )
     )
+
+
+def test_an_incomplete_expected_search_after_a_block_never_enters_cut_short() -> None:
+    assembler = ResponsesAssembler(hosted_web_search_expected=True)
+    whole = _responses_item(
+        assembler,
+        0,
+        {
+            "type": "message",
+            "id": "m1",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "before"}],
+        },
+    )
+    assert len(whole) == 1
+
+    pair = assembler.push(
+        SseEvent(
+            "response.output_item.done",
+            orjson.dumps(
+                {
+                    "output_index": 1,
+                    "item": {
+                        "type": "web_search_call",
+                        "id": "unstable",
+                        "status": "incomplete",
+                    },
+                }
+            ).decode(),
+        )
+    )
+
+    assert [block.kind for block in pair] == [
+        "server_tool_use",
+        "web_search_tool_result",
+    ]
+    assert assembler.cut_mid_block is False
+    assert assembler.terminal.blocks == 3
+    assert _terminal(assembler, "max_output_tokens") == ()
+    assert assembler.terminal.stop_reason == "max_tokens"
+    assert [loss.code for loss in assembler.response_losses] == [
+        LossCode.SERVER_TOOL_CALL_ID_NOT_CARRIED,
+        LossCode.SERVER_TOOL_PARTIALLY_REPRESENTABLE,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected_kinds", "expected_losses"),
+    [
+        (
+            "max_output_tokens",
+            ["text"],
+            [
+                LossCode.SERVER_TOOL_CALL_ID_NOT_CARRIED,
+                LossCode.ITEM_NOT_CARRIED,
+            ],
+        ),
+        (
+            "content_filter",
+            ["text", "text"],
+            [
+                LossCode.SERVER_TOOL_CALL_ID_NOT_CARRIED,
+                LossCode.SERVER_TOOL_NOT_CARRIED,
+            ],
+        ),
+    ],
+)
+def test_an_incomplete_unsolicited_search_has_stream_buffer_degradation_parity(
+    reason: str,
+    expected_kinds: list[str],
+    expected_losses: list[LossCode],
+) -> None:
+    body: dict[str, Any] = {
+        "id": "resp_1",
+        "model": "gpt-model",
+        "status": "incomplete",
+        "incomplete_details": {"reason": reason},
+        "output": [
+            {
+                "type": "message",
+                "id": "m1",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "before"}],
+            },
+            {
+                "type": "web_search_call",
+                "id": "ws_incomplete",
+                "status": "incomplete",
+                "action": {"type": "search", "query": "unfinished"},
+            },
+        ],
+    }
+    buffered = from_openai_responses_response(body)
+
+    streamed = ResponsesAssembler()
+    streamed_blocks = list(
+        _responses_item(
+            streamed,
+            0,
+            {
+                "type": "message",
+                "id": "m1",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "before"}],
+            },
+        )
+    )
+    assert _responses_item(
+        streamed,
+        1,
+        {
+            "type": "web_search_call",
+            "id": "ws_incomplete",
+            "status": "incomplete",
+            "action": {"type": "search", "query": "unfinished"},
+        },
+    ) == ()
+    streamed_blocks.extend(_terminal(streamed, reason))
+
+    assert [block.kind.value for block in buffered.blocks] == expected_kinds
+    assert [block.kind for block in streamed_blocks] == expected_kinds
+    assert [loss.code for loss in buffered.conversion.losses] == expected_losses
+    assert [loss.code for loss in streamed.response_losses] == expected_losses
 
 
 def test_an_item_upstream_cut_short_is_dropped_when_the_turn_will_be_handed_back() -> None:

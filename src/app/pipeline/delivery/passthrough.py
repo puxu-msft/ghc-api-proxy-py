@@ -122,6 +122,14 @@ class RawEventBatch:
             for item in (*indexed.values(), *unindexed)
         )
 
+    @property
+    def contains_terminal(self) -> bool:
+        """Whether this batch carries upstream's own terminal event.
+
+        Asked on the structured batch rather than by searching the encoded bytes. A payload may repeat an event name as data, and each dialect already owns the authoritative terminal set.
+        """
+        return any(event.event in self.dialect.terminal_events for event in self.events)
+
     def encode(self) -> bytes:
         """The batch as SSE frames, each event's name and payload unchanged.
 
@@ -346,11 +354,12 @@ class PassthroughFramer:
 
     **`error` and `keepalive` are delegated rather than reimplemented.** Those two frames really are this side's inventions, and each dialect already spells them: an SSE comment for the keep-alive, and the error shape `error-envelope/spec.md` §6.3 sets out. Writing a second copy here would be one more place for the two spellings to drift, so the leg's ordinary framer supplies them.
 
-    **`reshape` is the one place a declared compatibility contract may edit the wire**, and it is `None` unless an operator switched one on. §2.7 requires such a transform to be named, optional and never called native; keeping it as a parameter rather than a branch inside `block` is what stops it becoming an unnamed default the way stable ids did before `1fb37cd` (§6.6.6). The engine stays dialect-agnostic: whichever vocabulary is in play supplies the callable, or does not.
+    **`reshape` is the one place a declared compatibility contract may edit the wire**, and it is `None` whenever that contract is disabled. §2.7 requires such a transform to be named, configurable and never called native; keeping it as a parameter rather than a branch inside `block` is what stops a default-on reshape becoming unnamed the way stable ids were before `1fb37cd` (§6.6.6). The engine stays dialect-agnostic: whichever vocabulary is in play supplies the callable, or does not.
     """
 
     delegate: OutboundFramer[Any]
     reshape: Callable[[tuple[SseEvent, ...]], tuple[SseEvent, ...]] | None = None
+    on_terminal_unit: Callable[[], None] | None = None
 
     @property
     def synthesises_terminal(self) -> bool:
@@ -364,9 +373,13 @@ class PassthroughFramer:
         return ()
 
     def block(self, block: RawEventBatch) -> tuple[bytes, ...]:
-        if self.reshape is None:
-            return (block.encode(),)
-        return (replace(block, events=self.reshape(block.events)).encode(),)
+        if self.reshape is not None:
+            block = replace(block, events=self.reshape(block.events))
+        encoded = block.encode()
+        if block.contains_terminal and self.on_terminal_unit is not None:
+            # The caller confirms this frontier only after the yielded chunk's ASGI send returns. Marking here says which chunk carries the terminal; it does not claim that the client has it yet.
+            self.on_terminal_unit()
+        return (encoded,)
 
     def terminal(self, terminal: Terminal) -> tuple[bytes, ...]:
         return ()

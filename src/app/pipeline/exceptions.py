@@ -5,8 +5,14 @@ The closed set is the point.
 A subscriber's KeyError must not read as a control instruction.
 """
 
+from __future__ import annotations
+
 from collections.abc import Mapping
 from enum import StrEnum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.tokenization.admission import TokenAdmissionObservation
 
 
 class Disposition(StrEnum):
@@ -21,6 +27,22 @@ class PipelineError(Exception):
     """Base of the closed set. Raising a subclass is how a subscriber steers the flow."""
 
 
+class PromptTokenLimitExceeded(PipelineError):
+    """The final Responses payload failed the proxy's local prompt admission policy."""
+
+    def __init__(self, observation: TokenAdmissionObservation) -> None:
+        super().__init__(
+            f"proxy prompt admission rejected {observation.model} "
+            f"at {observation.field_path or 'unknown field'}: "
+            f"standalone {observation.tokenizer or 'unknown tokenizer'} count "
+            f"{observation.field_token_count} exceeds context window "
+            f"{observation.max_context_window_tokens} "
+            f"(catalog prompt limit {observation.max_prompt_tokens}, "
+            f"provider {observation.provider} generation {observation.catalog_generation})"
+        )
+        self.observation = observation
+
+
 class UpstreamError(PipelineError):
     """Upstream refused or failed. Retryable by default; the budget decides."""
 
@@ -33,6 +55,7 @@ class UpstreamError(PipelineError):
         body: str = "",
         body_bytes: bytes = b"",
         content_type: str = "",
+        body_observed: bool = False,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
@@ -41,6 +64,8 @@ class UpstreamError(PipelineError):
         self.body = body
         # The same content one fidelity up, and the pair is deliberate. `body` is `response.text`, which has already made a charset decision; on a direct path the client is owed upstream's own bytes, and a decode that replaced a byte cannot be undone. Empty when the failure arrived without a response to read them off.
         self.body_bytes = body_bytes
+        # Empty bytes are ambiguous without this bit: they may be a measured empty response or a streaming body nobody consumed. Non-empty bytes prove observation on their own; empty requires the response boundary to say so explicitly.
+        self.body_observed = body_observed or bool(body_bytes)
         self.content_type = content_type
 
 
@@ -58,6 +83,7 @@ class UpstreamRateLimit(UpstreamError):
         body: str = "",
         body_bytes: bytes = b"",
         content_type: str = "",
+        body_observed: bool = False,
     ) -> None:
         super().__init__(
             message,
@@ -66,6 +92,7 @@ class UpstreamRateLimit(UpstreamError):
             body=body,
             body_bytes=body_bytes,
             content_type=content_type,
+            body_observed=body_observed,
         )
         self.retry_after = retry_after
 
@@ -90,6 +117,7 @@ class UpstreamRejected(PipelineError):
         body_bytes: bytes = b"",
         content_type: str = "",
         sent: bytes = b"",
+        body_observed: bool = False,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
@@ -97,6 +125,7 @@ class UpstreamRejected(PipelineError):
         self.body = body
         # See `UpstreamError`. Not the same thing as `sent` below, which is the *request*.
         self.body_bytes = body_bytes
+        self.body_observed = body_observed or bool(body_bytes)
         self.content_type = content_type
         self.sent = sent
 

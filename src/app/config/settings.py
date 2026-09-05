@@ -24,7 +24,7 @@ class UpstreamConfig(FrozenModel):
     keepalive_expiry: int = 30
     connect_timeout: float = 10.0
     read_timeout: float = 300.0
-    http2: bool = True
+    http2: bool = False
     proxy: str | None = None
 
 

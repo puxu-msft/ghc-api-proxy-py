@@ -9,11 +9,12 @@ The keep-alive here is the **client-facing** one, and its cadence hangs off the 
 """
 
 import asyncio
+import logging
 import sys
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
-from contextlib import aclosing
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterable, Iterator
+from contextlib import aclosing, suppress
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, cast
 
 from app.errors import STATUS_FOR_CATEGORY, ErrorCategory, ErrorInfo
 from app.pipeline.delivery.assembling import BlockAssembler, FailureOrigin, StreamFailure
@@ -33,6 +34,43 @@ from app.streaming.keepalive import finish_stream_cleanup, raise_with_cleanup_un
 
 PING_FRAME = b": ping\n\n"
 
+type FailureProvenance = Callable[[Exception], bool]
+type _ExceptionGraphFingerprint = frozenset[tuple[str, int, int, int]]
+
+
+def _exception_graph_fingerprint(error: BaseException) -> _ExceptionGraphFingerprint | None:
+    """Capture exception-object identity and graph edges, failing closed on hostile metadata."""
+    facts: set[tuple[str, int, int, int]] = set()
+    seen: set[int] = set()
+    pending: list[BaseException] = [error]
+    try:
+        while pending:
+            current = pending.pop()
+            current_id = id(current)
+            if current_id in seen:
+                continue
+            seen.add(current_id)
+            facts.add(("node", current_id, 0, 0))
+            for kind, linked in (
+                ("cause", current.__cause__),
+                ("context", current.__context__),
+            ):
+                if linked is not None:
+                    facts.add((kind, current_id, 0, id(linked)))
+                    pending.append(linked)
+            if isinstance(current, BaseExceptionGroup):
+                group = cast(BaseExceptionGroup[BaseException], current)
+                for index, nested in enumerate(group.exceptions):
+                    facts.add(("member", current_id, index, id(nested)))
+                    pending.append(nested)
+            for index, note in enumerate(
+                getattr(cast(BaseException, current), "__notes__", ())
+            ):
+                facts.add(("note", current_id, index, id(note)))
+    except BaseException:
+        return None
+    return frozenset(facts)
+
 
 class UpstreamSource:
     """The upstream side of the byte stream, named by the caller so that what it raises can be told from what this side raises.
@@ -48,6 +86,8 @@ class UpstreamSource:
         self._source = source.__aiter__()
         # The exception this iterator raised, if it has. Compared by identity downstream, so a later attempt's tear cannot be mistaken for this one's.
         self.tear: Exception | None = None
+        # Captured where the source first raises, before this proxy's outer iterators run cleanup and can attach independent failures to the same root object.
+        self._tear_fingerprint: _ExceptionGraphFingerprint | None = None
 
     def __aiter__(self) -> AsyncIterator[bytes]:
         return self
@@ -59,7 +99,16 @@ class UpstreamSource:
             raise
         except Exception as tear:
             self.tear = tear
+            self._tear_fingerprint = _exception_graph_fingerprint(tear)
             raise
+
+    def tear_is_unmodified(self, error: Exception) -> bool:
+        """Whether no exception fact was attached after this source observed its tear."""
+        return bool(
+            error is self.tear
+            and self._tear_fingerprint is not None
+            and _exception_graph_fingerprint(error) == self._tear_fingerprint
+        )
 
     async def aclose(self) -> None:
         """Delegated, because `read_events` closes the byte stream under it and that is what releases the upstream response."""
@@ -243,7 +292,9 @@ def _keepalive_due(
     return max(ping_deadline, last_write.at + interval)
 
 
-async def one_shot_delivery(chunks: AsyncIterator[bytes]) -> AsyncGenerator[bytes]:
+async def one_shot_delivery(
+    chunks: AsyncIterator[bytes], *, on_complete: Callable[[], None] | None = None
+) -> AsyncGenerator[bytes]:
     """Hand the upstream stream to the client whole, once all of it has arrived.
 
     For a client leg this proxy has no outbound framer for. Block-level delivery needs two halves — something that knows where a block ends in the upstream's events, and something that writes one in the client's — and Chat Completions has neither: its boundaries live inside `choices[].delta`, which nothing here reads. Ruled 2026-08-22 to buffer rather than to invent them; parsing that shape is its own piece of work.
@@ -262,7 +313,10 @@ async def one_shot_delivery(chunks: AsyncIterator[bytes]) -> AsyncGenerator[byte
         if body:
             yield bytes(body)
         raise
-    if body:
+    if body or on_complete is not None:
+        if on_complete is not None:
+            # Empty is a measured whole body, not an absent one. Offer and yield it too, so its own ASGI send-return—not natural drain before Starlette sends anything—is the one-shot completion frontier.
+            on_complete()
         yield bytes(body)
 
 
@@ -297,6 +351,23 @@ def _report_failure(
     return framer.error(failure.info)
 
 
+def _observe_without_affecting_delivery(
+    callback: Callable[[SseEvent], None] | None,
+    event: SseEvent,
+) -> None:
+    if callback is None:
+        return
+    try:
+        callback(event)
+    except Exception:
+        # This is the last boundary before an observer bug would enter the delivery tear handler below. Reporting is itself no-throw: a broken logging handler is another observability failure, not a delivery failure.
+        # No third independent reporting channel remains once the fallback logger fails.
+        with suppress(Exception):
+            logging.getLogger("app.response_observation").exception(
+                "response observation callback failed"
+            )
+
+
 async def stream_delivery[UnitT: DeliveryUnit](
     chunks: AsyncIterator[bytes],
     assembler: BlockAssembler[UnitT],
@@ -308,6 +379,8 @@ async def stream_delivery[UnitT: DeliveryUnit](
     replay: ReplaySupport | None = None,
     continuation: ContinuationSupport | None = None,
     on_tear_after_terminal: Callable[[Exception], None] | None = None,
+    on_runtime_failure: Callable[[Exception, bool, FailureProvenance | None], None] | None = None,
+    observe_event: Callable[[SseEvent], None] | None = None,
     passthrough: bool = False,
 ) -> AsyncGenerator[bytes]:
     """Turn an upstream byte stream into the client's SSE, one complete block at a time.
@@ -337,6 +410,8 @@ async def stream_delivery[UnitT: DeliveryUnit](
             replay=replay,
             continuation=continuation,
             on_tear_after_terminal=on_tear_after_terminal,
+            on_runtime_failure=on_runtime_failure,
+            observe_event=observe_event,
             passthrough=passthrough,
         )
     ) as inner:
@@ -357,6 +432,8 @@ async def _deliver[UnitT: DeliveryUnit](
     replay: ReplaySupport | None = None,
     continuation: ContinuationSupport | None = None,
     on_tear_after_terminal: Callable[[Exception], None] | None = None,
+    on_runtime_failure: Callable[[Exception, bool, FailureProvenance | None], None] | None = None,
+    observe_event: Callable[[SseEvent], None] | None = None,
     passthrough: bool = False,
 ) -> AsyncGenerator[bytes]:
     """Assemble and frame the response. Wrapped by `stream_delivery`, which stamps the clock."""
@@ -381,14 +458,16 @@ async def _deliver[UnitT: DeliveryUnit](
                 async for pull in events:
                     wrote = False
                     if pull.event is not None:
+                        # Observation is side-only and attempt-scoped. The callback resolves the current attempt on every event, so a replay cannot keep writing into the record it replaced. Its public observer contract contains ordinary parsing failures; delivery never reads the observation back.
+                        _observe_without_affecting_delivery(observe_event, pull.event)
                         # Assembled before any cue is answered. A pull that came back with an event has not shown that the event can be delivered: a malformed one makes the assembler raise right here, and that has to reach the caller ahead of a comment claiming everything is fine.
                         completed = assembler.push(pull.event)
                         # The cap has to see what the assembler is holding too. On a passthrough leg an item that opens and never closes keeps every later group queued outside the buffer, and `direct-passthrough/spec.md` §8 names that queue as the first thing `buffer_cap_bytes` must bound — uncounted, the default 16MiB bounded nothing there.
                         buffer.enforce_cap_over(assembler.queued_bytes)
-                        for block in completed:
+                        for admission_batch in _admission_batches(completed):
                             for chunk in _commit(
                                 session,
-                                block,
+                                admission_batch,
                                 framer,
                                 client_has_bytes.is_set(),
                             ):
@@ -425,6 +504,8 @@ async def _deliver[UnitT: DeliveryUnit](
             # Ahead of `terminal.seen` on purpose, and that ordering is a ruling rather than an accident of writing order: `client_request_deadline` bounds this round's total elapsed time, so once it fires the round is over whether or not upstream happened to finish first. A complete reply may be sitting assembled in the buffer, and it is dropped. Ruled 2026-08-22.
             #
             # The attempt deadline (`upstream_request_deadline`, raised by `pipeline_app`'s `with_deadline_at`) has no branch of its own here — it arrives as an ordinary tear and is classified below. It is ordered the other way round, *after* `terminal.seen`, for the opposite reason: it ends only this attempt, so a turn upstream finished must not be handed to it as something to retry.
+            if on_runtime_failure is not None:
+                on_runtime_failure(torn, False, None)
             yield framer.error(
                 _stream_error(
                     ErrorCategory.INTERNAL,
@@ -486,11 +567,18 @@ async def _deliver[UnitT: DeliveryUnit](
                 return
         # Every remaining ending gets a frame *and* still reaches the caller. Until 2026-08-22 it was a bare `raise`, which the client received as a 200 whose body simply stopped — byte-for-byte the same as an idle timeout, a deadline, or the proxy abandoning the response, with only the server's own log able to tell them apart (`deferred.md` 8d). The response has been open since before the first chunk, so a frame is the only channel left.
         #
-        # The `raise` stays, and that pairing is the whole design rather than belt-and-braces. Swapping it for the frame was tried first and is wrong: the caller reads this exception to decide the request's verdict and to put the reason on the completion line, so a stream that framed and returned cleanly logged `ok` and left no record of the failure anywhere. That is `deferred.md` §12's defect manufactured on purpose. Yielding first and raising second gives the client the frame — a generator's chunk is written as it is yielded — and leaves the caller's account intact.
+        # The `raise` stays to carry the exact exception into request accounting; swapping it for the frame was tried first and logged the request `ok`, with no durable failure fact. `_tracked_delivery` may consume that same upstream exception only after the yielded frame's ASGI send returns. Local failures, a frame whose send did not return, and distinct cleanup failures continue outward. Yield first and raise second is what makes those two boundaries independently observable.
         #
         # Nothing is flushed first, for the same reason the client deadline flushes nothing: what is buffered but undelivered would make the size of this ending depend on the buffering policy, while the ending itself is a failure.
         #
         # Three codes, one per way this can end, so that a reader of a client transcript can tell them apart without the server's log beside them.
+        if on_runtime_failure is not None:
+            # Record the authoritative origin before yielding the error frame: its downstream send is a separate, lower-priority frontier that may fail and prevent this generator from ever resuming. The bound provenance check reaches back to the current attempt's positive marker and is re-run only if the frame's send returns.
+            on_runtime_failure(
+                torn,
+                not ours,
+                upstream.tear_is_unmodified if not ours else None,
+            )
         yield framer.error(
             _stream_error(
                 ErrorCategory.INTERNAL if ours else ErrorCategory.UPSTREAM,
@@ -508,8 +596,8 @@ async def _deliver[UnitT: DeliveryUnit](
         raise torn
 
     # `direct-passthrough/spec.md` §7.2's closing sequence, asked of the assembler before the buffer is drained so that whatever it releases still passes through the policy. The translating assemblers answer with nothing — what they hold is a half-built block, which every ending drops. The passthrough answers with the finished groups its queue was holding behind an item that never closed, and those were previously abandoned along with upstream's own terminal: one unclosed item produced a 200 with zero bytes.
-    for held in assembler.close():
-        for chunk in _commit(session, held, framer, client_has_bytes.is_set()):
+    for admission_batch in _admission_batches(assembler.close()):
+        for chunk in _commit(session, admission_batch, framer, client_has_bytes.is_set()):
             client_has_bytes.set()
             yield chunk
 
@@ -629,21 +717,46 @@ def _hand_over(
     return chunks
 
 
+def _admission_batches[UnitT: DeliveryUnit](
+    units: Iterable[UnitT],
+) -> Iterator[tuple[UnitT, ...]]:
+    """Preserve ordinary per-unit admission while joining explicitly marked neighbours."""
+    grouped: list[UnitT] = []
+    group = ""
+    for unit in units:
+        unit_group = unit.admission_group if isinstance(unit, CompletedBlock) else ""
+        if not unit_group:
+            if grouped:
+                yield tuple(grouped)
+                grouped = []
+                group = ""
+            yield (unit,)
+            continue
+        if grouped and unit_group != group:
+            yield tuple(grouped)
+            grouped = []
+        grouped.append(unit)
+        group = unit_group
+    if grouped:
+        yield tuple(grouped)
+
+
 def _commit[UnitT: DeliveryUnit](
     session: DeliverySession[UnitT],
-    block: UnitT,
+    batch: Iterable[UnitT],
     framer: OutboundFramer[UnitT],
     started: bool,
-) -> list[bytes]:
-    """Offer one block and frame whatever the buffer released."""
-    released = session.offer(block)
+) -> Iterator[bytes]:
+    """Offer one admission batch and lazily frame each unit the buffer released.
+
+    Admission and the policy decision cover the whole batch. Framing stays lazy to preserve the unit-to-chunk boundary: framing everything before the first yield lets side records produced while framing a later unit describe an earlier chunk whose send returns first.
+    """
+    released = session.offer_many(batch)
     if not released:
-        return []
-    chunks: list[bytes] = []
+        return
     if not started:
         # The preamble waits for the first block.
         # A response that never produces one never looks like a message that began.
-        chunks.extend(framer.preamble())
+        yield from framer.preamble()
     for ready in released:
-        chunks.extend(framer.block(ready))
-    return chunks
+        yield from framer.block(ready)

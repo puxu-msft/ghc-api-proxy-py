@@ -6,7 +6,7 @@ A request that started under one version keeps seeing it.
 `NOT_HOT_RELOADABLE` lists the dotted paths the spec marks as requiring a restart.
 """
 
-from typing import Literal, cast
+from typing import Annotated, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -42,8 +42,19 @@ type AnthropicThinkingMode = Literal["adaptive", "enabled"]
 NOT_HOT_RELOADABLE = frozenset(
     {
         "model_providers.*.api_base_url",
+        "model_providers.*.app_version",
         "model_providers.*.auth_base_url",
+        "model_providers.*.auth_state_file",
+        "model_providers.*.client_type",
+        "model_providers.*.device_id",
+        "model_providers.*.gateway_api_key",
         "model_providers.*.github_token_file",
+        "model_providers.*.install_id",
+        "model_providers.*.models",
+        "model_providers.*.route_target",
+        "model_providers.*.type",
+        "model_providers.*.user_agent",
+        "model_providers.*.x_token",
         "pidfile_dir",
         "proxy",
         "reactive_rate_limiter",
@@ -56,9 +67,14 @@ NOT_HOT_RELOADABLE = frozenset(
     }
 )
 
+# Fields shared with an older provider but fixed into the Xingchen instance at startup. Kept type-scoped so this feature does not silently change the existing GitHub Copilot hot-reload contract.
+PROVIDER_NOT_HOT_RELOADABLE: dict[str, frozenset[str]] = {
+    "xingchen": frozenset({"disabled_models"}),
+}
+
 
 class Section(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
 
 
 class TlsConfig(Section):
@@ -86,29 +102,40 @@ class CountTokensConfig(Section):
 
     providers: list[str] = Field(default_factory=lambda: ["ghc", LOCAL_COUNTER])
     max_retries: int = Field(default=2, ge=0)
+    # Applied once after calibration, only when the count is answered locally. Upstream counts, calibration samples and inference admission remain unscaled.
+    local_estimate_multiplier: float = Field(default=1.0, ge=1.0, allow_inf_nan=False)
+
+    @field_validator("local_estimate_multiplier", mode="before")
+    @classmethod
+    def _multiplier_is_not_boolean(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("local_estimate_multiplier must be a number, not a boolean")
+        return value
 
 
 class InboundConfig(Section):
     anthropic_count_tokens: CountTokensConfig = Field(default_factory=CountTokensConfig)
 
 
-class ModelProviderConfig(Section):
-    type: Literal["github_copilot"]
+class _ModelProviderConfigBase(Section):
     # Where inference goes.
     api_base_url: str = ""
+    disabled_models: list[str] = Field(default_factory=lambda: list[str]())
+
+
+class GithubCopilotProviderConfig(_ModelProviderConfigBase):
+    type: Literal["github_copilot"]
     # Where a GitHub token is exchanged for a Copilot one, and where the account is described.
     # A separate host from the one above, and separately configurable: an enterprise install moves both, and leaving this one a module constant meant nothing could be stood up locally — the inference calls could be redirected and the three auth calls could not.
     auth_base_url: str = ""
     # May contain `$XDG_DATA_HOME`; expanded by `app.config.paths.expand_user_path`.
     github_token_file: str = ""
     model_refresh_interval: int = Field(default=3600, ge=0)
-    disabled_models: list[str] = Field(default_factory=lambda: list[str]())
     # Which models actually execute hosted web search. Each entry is a **regular expression**, matched against upstream `model.id` with `fullmatch` — so a plain id like `gpt-5.5` still means what it says and needs no anchors, while `gpt-5\.\d+.*` covers a family. A declaration from the client is translated into this endpoint's own `{"type": "web_search"}` only for a model some pattern claims. For any other, the request is answered with a failed `web_search_tool_result` rather than sent on without the tool: a search sub-request stripped of its only tool succeeds by answering from memory, and the client labels that reply as search results.
     #
     # Maintained by hand because the catalog cannot answer the question. Measured 2026-08-20 across the live catalog — 42 models, 67,656 bytes — the union of `capabilities.supports` keys holds no web-search bit of any kind, and a value-level scan for `search|web_|builtin|hosted` over the whole document returns nothing. The two models known to work cannot be told apart from the rest on any advertised field.
     #
-    # The default covers the `gpt-<major>.<minor>` line for majors 5 through 9, which is every
-    # OpenAI-vendor model advertising `/responses` in that catalog — `gpt-5.3-codex`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.5`, and the three `gpt-5.6-*` — and claims their successors as they appear. Ruled a pattern rather than an id list on 2026-08-21, after an id list had to be hand-extended for exactly that reason.
+    # The default covers the `gpt-<major>.<minor>` line for majors 5 through 9, which is every OpenAI-vendor model advertising `/responses` in that catalog — `gpt-5.3-codex`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.5`, and the three `gpt-5.6-*` — and claims their successors as they appear. Ruled a pattern rather than an id list on 2026-08-21, after an id list had to be hand-extended for exactly that reason.
     #
     # **The dot is load-bearing.** `gpt-5-mini` has no dotted minor and is vendor `Azure OpenAI`, a different supply chain; requiring `\.` is what keeps a family pattern from sweeping it in. A two-digit major (`gpt-10.0`) is deliberately not matched: inventing a naming scheme two majors ahead is a guess, and the failure is an operator adding one line, not a wrong answer.
     #
@@ -118,13 +145,77 @@ class ModelProviderConfig(Section):
     )
 
 
+def _canonical_model_name(name: str) -> str:
+    # A transcription of `app.pipeline.model_resolution.canonical`; the config layer stays independent of the pipeline, and a cross-layer test keeps the two spellings aligned.
+    return name.strip().lower().replace(".", "-")
+
+
+class XingchenProviderConfig(_ModelProviderConfigBase):
+    type: Literal["xingchen"]
+    api_base_url: str = "https://agent.teleai.com.cn/superCowork/sapi/api/v1"
+    models: list[str] = Field(min_length=1)
+    gateway_api_key: str = Field(min_length=1, repr=False)
+    x_token: str = Field(min_length=1, repr=False)
+    device_id: str = Field(min_length=1)
+    install_id: str = Field(min_length=1)
+    app_version: str = "2.4.1"
+    route_target: str = "ops-gateway"
+    client_type: str = "desktop"
+    user_agent: str = "super-agent/1.0"
+
+    @field_validator(
+        "api_base_url",
+        "gateway_api_key",
+        "x_token",
+        "device_id",
+        "install_id",
+        "app_version",
+        "route_target",
+        "client_type",
+        "user_agent",
+    )
+    @classmethod
+    def _value_may_not_be_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("value may not be empty or blank")
+        return value
+
+    @field_validator("models")
+    @classmethod
+    def _models_must_be_distinct_and_addressable(cls, value: list[str]) -> list[str]:
+        if any(not model.strip() for model in value):
+            raise ValueError("models may not contain an empty or blank id")
+        if len(value) != len(set(value)):
+            raise ValueError("models may not contain duplicate ids")
+        canonical = [_canonical_model_name(model) for model in value]
+        if len(canonical) != len(set(canonical)):
+            raise ValueError("models may not contain canonically equivalent ids")
+        return value
+
+
+class CodebuddyProviderConfig(_ModelProviderConfigBase):
+    type: Literal["codebuddy"]
+    # The desktop app's login-state `.info` file, holding the tokens this provider
+    # refreshes and writes back. Empty means auto-discovery in the desktop app's
+    # own data directory. Restart-pinned with the other credential paths: a live
+    # provider was built around the file it was given at startup.
+    # May contain `$XDG_DATA_HOME`; expanded by `app.config.paths.expand_user_path`.
+    auth_state_file: str = ""
+
+
+type ModelProviderConfig = Annotated[
+    GithubCopilotProviderConfig | XingchenProviderConfig | CodebuddyProviderConfig,
+    Field(discriminator="type"),
+]
+
+
 class UpstreamTransportConfig(Section):
     # A real TCP keep-alive: seconds of idle before the first probe, and seconds between probes. 0 disables it. Until 2026-08-20 this key was mapped to httpx's connection-pool idle expiry instead, which never writes a byte to the socket and does not apply at all while a request is in flight — so the name promised liveness the transport never had. Nothing replaces that mapping: pooling is httpx's own business and was never a setting anyone chose.
     # What it can tell you depends on whether a proxy is in the way. TCP keep-alive is per-connection, and a proxy terminates the connection: measured 2026-08-20, our socket's peer is the origin when direct and the proxy when tunnelling through one. So with a proxy configured this probes the hop to the proxy and says nothing about upstream, whose connection is the proxy's to keep.
     tcp_keepalive_interval: int = Field(default=15, ge=0)
-    # Set false to negotiate HTTP/1.1 upstream. Ruled 2026-08-20, after one upstream GOAWAY killed every in-flight stream at once: HTTP/2 multiplexes them onto one connection, so one connection-level event is one blast radius. HTTP/1.1 gives each request its own connection and costs more handshakes. See `.dev/docs/upstream/h2-goaway/findings.md`.
+    # HTTP/1.1 is the default; set true to enable HTTP/2 upstream. Ruled 2026-09-05 after HTTP/1.1 materially improved the field failure rate and the current HTTP/2 stack reproduced active-stream loss after graceful GOAWAY. This supports the default without claiming HTTP/2 caused every observed 408. See `.dev/docs/delivery-keepalive/spec.md` §3.
     # Authoritative on its own. It used to be derived from `http2_ping_interval > 0`, which meant a key named after a ping interval silently decided the protocol.
-    http2: bool = True
+    http2: bool = False
     # NOT IMPLEMENTED, and it cannot be from here. `docs/.dev/…/streaming-resilience.md` asked for a periodic HTTP/2 PING because some intermediaries retire a connection on application-level silence, which an L4 keep-alive cannot answer. httpx exposes no such interval; httpcore 1.0.9 never calls h2's `ping()` and runs no background read loop, so there is nothing to hook without forking the transport. Kept rather than deleted because it is a user-authored key with a spec behind it. It does not disable HTTP/2 — `http2` above does. `timeouts.upstream_h2_ping`, the legacy spelling of the same intent, was deleted in favour of this one.
     http2_ping_interval: int = Field(default=15, ge=0)
     # How many concurrent requests may share one upstream connection. 0 = unlimited, which is httpx's own behaviour and what this ran with until 2026-08-20.
@@ -208,9 +299,9 @@ class ToOpenAiResponsesConfig(Section):
     # Where the system prompt goes. `instructions-joint-string` puts the blocks in the top-level `instructions` as one `\n\n`-joined string, which is the only form this upstream accepts today. Kept as a named setting rather than baked in so a second placement — `as-role-system`, a `role: system` message at the head of the conversation — can be added without the caller changing.
     system_prompts: SystemPromptPlacement = "instructions-joint-string"
 
-    # Whether this leg offers hosted web search at all. **Off by default**, ruled 2026-08-21: the support is real but partial, and the parts that are missing are not visible to the client.
-    # A search runs upstream and really searches, but what comes back to an Anthropic client is a line of text rather than the `server_tool_use` / `web_search_tool_result` pair the protocol defines; `url_citation` annotations upstream does return are not read; `max_uses` cannot be sent; `allowed_domains` / `blocked_domains` cannot be sent either and are dropped by default.
-    # Shipping that on by default would make a half-built feature the thing every request gets.
+    # Whether this leg offers hosted web search at all. **Off by default**, ruled 2026-08-21: the support is real but partial, and the parts that remain missing are not visible to the client.
+    # A search runs upstream and the response is restored as `server_tool_use` / `web_search_tool_result`, but Responses supplies no genuine Anthropic `encrypted_content`, so the structured result is reported as unavailable while the model's answer remains text. `max_uses` cannot be sent; `allowed_domains` / `blocked_domains` cannot be sent either and are dropped by the current default.
+    # Shipping that on by default would still make a partial feature the thing every request gets.
     #
     # Off does **not** mean the declaration is quietly removed. The request is answered with a failed `web_search_tool_result`, the same as for a model no pattern claims — because on this client a search is its own sub-request carrying nothing but the search, and one stripped of it answers from memory under a heading the client reads as search results. The two are distinguished in the log, which is where an operator has to be able to tell "nobody turned this on" from "this model is not on the list".
     #
@@ -424,10 +515,10 @@ class FixResponsesRequestHook(Section):
 class FixResponsesSseHook(Section):
     # **The name is the user's own**, written into `docs/.human-controlled/config.example.yaml` before any of this existed: "修复上游流在 `output_item.added` / `output_item.done` 间不一致的 item ID。`@ai-sdk/openai` 校验 ID 连续性需要。" The measurement is wider than that sentence — every id in the stream drifts, not only the two it names — but the key keeps their spelling.
     #
-    # **Off by default**, per `.dev/docs/direct-passthrough/spec.md` §2.7: this rewrites upstream's bytes on a leg whose contract is to forward them, so it has to be asked for. An earlier revision of this shipped it on, reasoning that Codex needed it; that reasoning was falsified — Codex parses no id at all on the events in question (`reports/260902-codex-item-grouping-key.md`) — and a default cannot outlive the argument that justified it.
+    # **On by default**, per the user's 2026-09-04 ruling after Claude Code failed with the known `activeReasoningPart.summaryParts` symptom while this reshape was disabled. This remains a named compatibility transform rather than part of native passthrough: an operator can set it to `false` to preserve every upstream id byte-for-byte. `.dev/docs/direct-passthrough/spec.md` §6.6.
     #
-    # Who it is for is the client the user named: one that checks an item's id is the same on `added` and `done`. Nothing inside this proxy needs it — the engine keys on `output_index`. `.dev/docs/direct-passthrough/spec.md` §6.6.
-    fix_stream_ids: bool = False
+    # Who it is for is the client the user named: one that checks an item's id is the same on `added` and `done`. Nothing inside this proxy needs it — the engine keys on `output_index`. The earlier Codex rationale remains falsified; this default rests on the independently observed Claude Code failure, not on Codex.
+    fix_stream_ids: bool = True
 
 
 def _reject_unaddressable_provider_names(value: object) -> None:
@@ -556,4 +647,4 @@ class ProxyConfig(Section):
     )
     hook_fix_responses_sse: FixResponsesSseHook = Field(default_factory=FixResponsesSseHook)
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)

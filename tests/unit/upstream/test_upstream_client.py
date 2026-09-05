@@ -36,6 +36,19 @@ def test_copilot_base_url_falls_back_to_individual_when_account_type_is_unset() 
     assert resolve_copilot_base_url(AppSettings()) == "https://api.githubcopilot.com"
 
 
+def test_legacy_upstream_protocol_reaches_the_actual_pool() -> None:
+    default_client = create_http_client(AppSettings())
+    enabled_client = create_http_client(
+        AppSettings.model_validate({"upstream": {"http2": True}})
+    )
+    default_transport = default_client._transport  # pyright: ignore[reportPrivateUsage]
+    enabled_transport = enabled_client._transport  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(default_transport, httpx2.AsyncHTTPTransport)
+    assert isinstance(enabled_transport, httpx2.AsyncHTTPTransport)
+    assert default_transport._pool._http2 is False  # pyright: ignore[reportPrivateUsage]
+    assert enabled_transport._pool._http2 is True  # pyright: ignore[reportPrivateUsage]
+
+
 def test_copilot_headers_protect_core_values_from_model_headers() -> None:
     settings = AppSettings()
 

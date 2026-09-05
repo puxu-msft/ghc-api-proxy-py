@@ -6,6 +6,8 @@ Split out of `app.server.pipeline_app` on 2026-08-22. Both decisions here are do
 """
 
 from asyncio import CancelledError
+from contextlib import suppress
+from dataclasses import dataclass
 from typing import Any, cast
 from uuid import uuid4
 
@@ -14,7 +16,7 @@ from h2.exceptions import H2Error
 
 from app.core.chain import Chain
 from app.errors import ErrorCategory
-from app.model_provider.ghc_client.errors import normalize_upstream_error
+from app.model_provider.upstream_errors import normalize_upstream_error
 from app.observability.logging import get_logger
 from app.pipeline.request import RequestContext, WireFormat
 from app.pipeline.retry import RetryReason, reason_for
@@ -27,6 +29,28 @@ CATEGORY_FOR_REASON = {
     RetryReason.SERVER_ERROR: ErrorCategory.UPSTREAM,
     RetryReason.GITHUB_TOKEN_EXPIRED: ErrorCategory.AUTH,
 }
+
+
+@dataclass(frozen=True, slots=True)
+class HandBackTrigger:
+    category: str
+    exception_module: str
+    exception_type: str
+    message: str | None
+    legacy_repr: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class HandBackOutcome:
+    payload: dict[str, Any]
+    trigger: HandBackTrigger | None
+
+
+@dataclass(frozen=True, slots=True)
+class _ExceptionObservation:
+    outer_message: str | None
+    description: str
+    legacy_repr: str | None
 
 
 def client_message_count(payload: dict[str, Any]) -> int:
@@ -69,6 +93,35 @@ def one_line(text: str) -> str:
     if len(flat) <= _MAX_LINK_CHARS:
         return flat
     return f"{flat[:_MAX_LINK_CHARS]}… (+{len(flat) - _MAX_LINK_CHARS} more chars)"
+
+
+def _report_render_failure(
+    error: BaseException,
+    *,
+    renderer: str,
+    failure: BaseException,
+) -> None:
+    with suppress(BaseException):
+        get_logger().warning(
+            "hand_back_exception_render_failed",
+            exception_module=type(error).__module__,
+            exception_type=type(error).__qualname__,
+            renderer=renderer,
+            rendering_failure_type=type(failure).__qualname__,
+        )
+
+
+def _safe_repr(error: BaseException) -> str | None:
+    try:
+        rendered = one_line(repr(error))
+    except BaseException as rendering_failure:
+        _report_render_failure(
+            error,
+            renderer="repr",
+            failure=rendering_failure,
+        )
+        return None
+    return rendered or None
 
 
 def _chain(error: BaseException) -> tuple[list[BaseException], bool]:
@@ -122,14 +175,25 @@ def _link_text(link: BaseException) -> str:
 
     `h2.exceptions.StreamClosedError` and `NoSuchStreamError` assign `self.stream_id` without calling `super().__init__`, but `BaseException.__new__` has already put the constructor argument in `args` — so `str()` on them is a bare stream id. A `message` reading `3` is worse than an empty one: an empty field is visibly missing, while `3` looks like something upstream said. Measured 2026-08-23, `.dev/docs/upstream/retry-and-continuation/reports/260823-handover-error-shapes.md` §2.2(g).
     """
-    text = str(link)
+    try:
+        text = one_line(str(link))
+    except BaseException as rendering_failure:
+        _report_render_failure(
+            link,
+            renderer="str",
+            failure=rendering_failure,
+        )
+        text = ""
     stream_id = getattr(link, "stream_id", None)
     if isinstance(link, H2Error) and isinstance(stream_id, int) and text == str(stream_id):
         return f"stream {stream_id}"
-    return one_line(text)
+    return text
 
 
-def _asyncio_timeout_plumbing(links: list[BaseException]) -> set[int]:
+def _asyncio_timeout_plumbing(
+    links: list[BaseException],
+    texts: list[str],
+) -> set[int]:
     """Which links are the two `asyncio.timeout` raises around a guard, by position in the chain.
 
     `asyncio.timeout` ends its scope by cancelling the task and converting that into `TimeoutError`, so a guard built on it arrives as exactly three adjacent links — a `TimeoutError` subclass carrying its own message, then a bare `builtins.TimeoutError()`, then an empty `asyncio.CancelledError()`. Measured for `StreamDeadlineError` and `StreamIdleTimeoutError` in `.dev/docs/upstream/retry-and-continuation/reports/260823-handover-error-shapes.md` §2.2(a)/(b). Only the second and third are suppressed; the guard itself is the account.
@@ -141,14 +205,52 @@ def _asyncio_timeout_plumbing(links: list[BaseException]) -> set[int]:
         guard, converted, cancelled = links[index], links[index + 1], links[index + 2]
         if (
             isinstance(guard, TimeoutError)
-            and _link_text(guard)
+            and texts[index]
             and type(converted) is TimeoutError
-            and not _link_text(converted)
+            and not texts[index + 1]
             and type(cancelled) is CancelledError
-            and not _link_text(cancelled)
+            and not texts[index + 2]
         ):
             found.update({index + 1, index + 2})
     return found
+
+
+def _observe_exception(error: BaseException) -> _ExceptionObservation:
+    links, truncated = _chain(error)
+    texts = [_link_text(link) for link in links]
+    plumbing = _asyncio_timeout_plumbing(links, texts)
+    rendered: list[str] = []
+    seen_text: set[str] = set()
+    seen_class: set[str] = set()
+    for position, (link, text) in enumerate(zip(links, texts, strict=True)):
+        name = f"{type(link).__module__}.{type(link).__qualname__}"
+        fresh_class = type(link).__qualname__ not in seen_class
+        fresh_text = bool(text) and text not in seen_text
+        if fresh_text:
+            rendered.append(f"{name}: {text}")
+        elif fresh_class and position not in plumbing:
+            rendered.append(name)
+        else:
+            continue
+        seen_class.add(type(link).__qualname__)
+        if text:
+            seen_text.add(text)
+    described = "; caused by ".join(rendered)
+    if truncated:
+        described = (
+            f"{described}; caused by … "
+            f"(chain continues past {_MAX_LINKS} links)"
+        )
+    gloss = _h2_gloss(links)
+    if gloss:
+        described = f"{described} ({gloss})"
+    legacy_repr = _safe_repr(error)
+    outer_message = texts[0] or legacy_repr
+    return _ExceptionObservation(
+        outer_message=outer_message,
+        description=described,
+        legacy_repr=legacy_repr,
+    )
 
 
 def describe_error(error: BaseException) -> str:
@@ -170,32 +272,7 @@ def describe_error(error: BaseException) -> str:
 
     Freshness of a class is judged on `__qualname__`, not on the full dotted path: `httpx2.ReadError` wrapping `httpcore2.ReadError` is one failure described twice by two libraries, and that is the case worth collapsing. Two same-named exceptions from genuinely unrelated modules would collapse too. That is deliberate, and it has only ever been produced by construction.
     """
-    links, truncated = _chain(error)
-    plumbing = _asyncio_timeout_plumbing(links)
-    rendered: list[str] = []
-    seen_text: set[str] = set()
-    seen_class: set[str] = set()
-    for position, link in enumerate(links):
-        text = _link_text(link)
-        name = f"{type(link).__module__}.{type(link).__qualname__}"
-        fresh_class = type(link).__qualname__ not in seen_class
-        fresh_text = bool(text) and text not in seen_text
-        if fresh_text:
-            rendered.append(f"{name}: {text}")
-        elif fresh_class and position not in plumbing:
-            rendered.append(name)
-        else:
-            continue
-        seen_class.add(type(link).__qualname__)
-        if text:
-            seen_text.add(text)
-    described = "; caused by ".join(rendered)
-    if truncated:
-        # Named rather than left to trail off, for the same reason a cut message says how much it lost: a chain that ended and a chain that was cut are otherwise the same string.
-        described = f"{described}; caused by … (chain continues past {_MAX_LINKS} links)"
-    # Scanned over every link, including the ones dropped just above: the event object rides on httpcore's exception, which is exactly the link whose text was a duplicate.
-    gloss = _h2_gloss(links)
-    return f"{described} ({gloss})" if gloss else described
+    return _observe_exception(error).description
 
 
 def interruption_message(
@@ -204,6 +281,7 @@ def interruption_message(
     stop_reason: str,
     request_id: str,
     attempt_count: int,
+    observation: _ExceptionObservation | None = None,
 ) -> str:
     """What the hand-over tells the client this turn ended of.
 
@@ -216,7 +294,8 @@ def interruption_message(
     if error is None:
         # Without this the field repeated `category` verbatim and said nothing twice. The stop reason is still quoted whole, since it is upstream's own word and the configured set it was matched against is not fixed to one value.
         return f"upstream ended the turn before it was finished: stop_reason={stop_reason} {where}"
-    return f"{describe_error(error)} {where}"
+    observed = observation or _observe_exception(error)
+    return f"{observed.description} {where}"
 
 
 def hand_back_block(
@@ -228,8 +307,8 @@ def hand_back_block(
     request_id: str,
     error: BaseException | None,
     stop_reason: str,
-) -> dict[str, Any] | None:
-    """The `tool_use` block that hands an unfinishable turn to the client, or `None` to leave the ending alone.
+) -> HandBackOutcome | None:
+    """The hand-back action and its trigger, or `None` to leave the ending alone.
 
     Only for a client that asked in Anthropic Messages. The block is that protocol's shape, and the whole mechanism rests on the client executing a tool and coming back — which is a Claude Code behaviour, and the only harness in use. `upstream-retry-and-continuation.md` accepts that limit rather than guessing at the others.
 
@@ -253,8 +332,12 @@ def hand_back_block(
     # Category is what the MCP server keys its reply on, so it is read through the same mapping that decided this failure was continuable in the first place. Classified raw, a transport tear is `internal` — it is not an `OSError` — while the retry path calls the same failure `network`, and the two answers would have disagreed about one event.
     #
     # A turn upstream cut short for want of room is not an error and has no `ErrorCategory`. It travels under the stop reason upstream gave it, which is also what a reader of the MCP server's journal will recognise. **The value is provisional**: the user ruled that this case gets a category of its own but has not named it, and the server that reads it is being changed in another repository. See `.dev/docs/upstream/retry-and-continuation/decisions.md` 4.1.
+    trigger: HandBackTrigger | None
+    observation: _ExceptionObservation | None
     if error is None:
         category = stop_reason
+        trigger = None
+        observation = None
     else:
         # `Exception`, because that is what decided the failure was continuable in the first place — the endings that are not exceptions never reach here with one.
         reason = replay_reason(error) if isinstance(error, Exception) else None
@@ -266,20 +349,32 @@ def hand_back_block(
             if reason
             else ErrorCategory.UPSTREAM.value
         )
+        observation = _observe_exception(error)
+        trigger = HandBackTrigger(
+            category=category,
+            exception_module=type(error).__module__,
+            exception_type=type(error).__qualname__,
+            message=observation.outer_message,
+            legacy_repr=observation.legacy_repr,
+        )
     detail = interruption_message(
         error=error,
         stop_reason=stop_reason,
         request_id=request_id,
         attempt_count=context.attempt_count,
+        observation=observation,
     )
-    return {
-        "type": "tool_use",
-        "id": f"toolu_{uuid4().hex[:24]}",
-        "name": name,
-        "input": {
-            # The client's own count, not the upstream request's: it advances by exactly two per hand-over — one assistant turn, one tool result — which is what makes "the same number twice" an exact answer rather than a heuristic. Ruled 2026-08-21.
-            "num_messages": client_message_count(inbound_payload),
-            "category": category,
-            "message": detail,
+    return HandBackOutcome(
+        payload={
+            "type": "tool_use",
+            "id": f"toolu_{uuid4().hex[:24]}",
+            "name": name,
+            "input": {
+                # The client's own count, not the upstream request's: it advances by exactly two per hand-over — one assistant turn, one tool result — which is what makes "the same number twice" an exact answer rather than a heuristic. Ruled 2026-08-21.
+                "num_messages": client_message_count(inbound_payload),
+                "category": category,
+                "message": detail,
+            },
         },
-    }
+        trigger=trigger,
+    )

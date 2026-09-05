@@ -40,15 +40,38 @@ async def test_the_stream_comes_back_byte_for_byte() -> None:
 @pytest.mark.asyncio
 async def test_it_arrives_as_one_write() -> None:
     """The delivery unit is the whole stream, which is the cost of having no block boundaries."""
-    written = [chunk async for chunk in one_shot_delivery(feed(*CHUNKS))]
+    completed: list[str] = []
+    written = [
+        chunk
+        async for chunk in one_shot_delivery(
+            feed(*CHUNKS), on_complete=lambda: completed.append("complete")
+        )
+    ]
 
     assert written == [b"".join(CHUNKS)]
+    assert completed == ["complete"]
 
 
 @pytest.mark.asyncio
 async def test_nothing_at_all_produces_nothing_at_all() -> None:
     """An empty write would be a delivery. There was none."""
     assert [chunk async for chunk in one_shot_delivery(feed())] == []
+
+
+@pytest.mark.asyncio
+async def test_an_observed_empty_whole_body_is_offered_as_its_own_send_unit() -> None:
+    offered: list[str] = []
+
+    written = [
+        chunk
+        async for chunk in one_shot_delivery(
+            feed(),
+            on_complete=lambda: offered.append("complete"),
+        )
+    ]
+
+    assert written == [b""]
+    assert offered == ["complete"]
 
 
 @pytest.mark.asyncio
@@ -60,12 +83,17 @@ async def test_a_guard_that_fires_still_hands_over_what_had_arrived() -> None:
     Before 2026-08-22 the exception unwound with the buffer still in hand and the client got a 200 with an empty body, which is the same symptom the one-shot path was added to remove.
     """
     delivered = bytearray()
+    completed: list[str] = []
     with pytest.raises(StreamIdleTimeoutError):
-        async for chunk in one_shot_delivery(feed(*CHUNKS, fail_after=2)):
+        async for chunk in one_shot_delivery(
+            feed(*CHUNKS, fail_after=2),
+            on_complete=lambda: completed.append("complete"),
+        ):
             delivered += chunk
 
     assert bytes(delivered) == b"".join(CHUNKS[:2])
     assert b"[DONE]" not in delivered
+    assert completed == [], "a partial body is not the one-shot completion unit"
 
 
 @pytest.mark.asyncio

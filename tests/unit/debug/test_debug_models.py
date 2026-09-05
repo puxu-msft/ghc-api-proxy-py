@@ -25,7 +25,13 @@ from app.debug.models import (
     render_json,
     render_text,
 )
-from app.model_provider import GithubCopilotProvider, ProviderNotConfigured
+from app.model_provider import (
+    CatalogSnapshot,
+    CatalogSource,
+    ModelEndpoint,
+    ProviderNotConfigured,
+)
+from app.model_provider.github_copilot import DRIVEN_ENDPOINTS
 
 runner = CliRunner()
 
@@ -73,7 +79,11 @@ CATALOG: dict[str, Any] = {
 
 
 def _rows_by_id(raw: dict[str, Any], *, disabled: list[str] | None = None):
-    rows, _ = build_rows(raw, disabled=disabled or [])
+    rows, _ = build_rows(
+        raw,
+        driven_endpoints=DRIVEN_ENDPOINTS,
+        disabled=disabled or [],
+    )
     return {row.id: row for row in rows}
 
 
@@ -243,7 +253,7 @@ def test_entries_that_yield_no_row_are_counted_rather_than_dropped() -> None:
         "data": ["not-an-object", None, 42, {"no": "id"}, _model("fine"), _model("also-fine")],
     }
 
-    rows, unreadable = build_rows(raw)
+    rows, unreadable = build_rows(raw, driven_endpoints=DRIVEN_ENDPOINTS)
 
     assert len(rows) == 2
     assert unreadable == 4
@@ -275,7 +285,10 @@ def test_an_absent_optional_field_is_not_treated_as_malformed() -> None:
 
 
 def test_a_payload_without_a_model_list_yields_no_rows() -> None:
-    assert build_rows({"object": "list"}) == ((), 0)
+    assert build_rows(
+        {"object": "list"},
+        driven_endpoints=DRIVEN_ENDPOINTS,
+    ) == ((), 0)
 
 
 def test_the_recorded_catalog_capture_reads_end_to_end() -> None:
@@ -283,9 +296,15 @@ def test_the_recorded_catalog_capture_reads_end_to_end() -> None:
 
     The hand-built payload above encodes what we believe an entry looks like. This one is what upstream actually sent, so it is the only place that catches a reader looking up `family` or the limits at the wrong depth — the shape of a row would stay valid while every value in it was empty.
     """
+    from app.model_provider.github_copilot import DRIVEN_ENDPOINTS
+
     raw = json.loads((REPO_ROOT / "refs" / "available_models.json").read_text(encoding="utf-8"))
 
-    rows, unreadable = build_rows(raw, disabled=["gpt-4o"])
+    rows, unreadable = build_rows(
+        raw,
+        driven_endpoints=DRIVEN_ENDPOINTS,
+        disabled=["gpt-4o"],
+    )
     by_id = {row.id: row for row in rows}
 
     assert len(rows) == len(raw["data"])
@@ -305,7 +324,11 @@ def test_the_recorded_catalog_capture_reads_end_to_end() -> None:
 
 def _catalog(**overrides: Any) -> ProviderCatalog:
     raw = overrides.pop("raw", CATALOG)
-    rows, unreadable = build_rows(raw, disabled=overrides.pop("disabled", ["blocked"]))
+    rows, unreadable = build_rows(
+        raw,
+        driven_endpoints=DRIVEN_ENDPOINTS,
+        disabled=overrides.pop("disabled", ["blocked"]),
+    )
     return ProviderCatalog(
         name=overrides.pop("name", "ghc"),
         base_url=overrides.pop("base_url", "https://api.githubcopilot.com"),
@@ -313,6 +336,42 @@ def _catalog(**overrides: Any) -> ProviderCatalog:
         rows=rows,
         unreadable=unreadable,
     )
+
+
+async def test_a_codebuddy_provider_serves_its_static_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A static-catalog provider is collected like any other: the CatalogProvider gate is about the snapshot a provider publishes, not about which upstream type it belongs to."""
+    from app.model_provider.codebuddy import DRIVEN_ENDPOINTS as CODEBUDDY_DRIVEN_ENDPOINTS
+
+    static = {
+        "object": "list",
+        "data": [
+            {"id": "glm-5.2", "supported_endpoints": ["/chat/completions"]},
+            {"id": "glm-5.1", "supported_endpoints": ["/chat/completions"]},
+        ],
+    }
+    _patch_collection(
+        monkeypatch,
+        {
+            "cb": _FakeProvider(
+                "cb",
+                raw=static,
+                source="static",
+                driven_endpoints=CODEBUDDY_DRIVEN_ENDPOINTS,
+            )
+        },
+    )
+    config = ProxyConfig.model_validate(
+        {"model_providers": {"cb": {"type": "codebuddy"}}, "default_model_provider": "cb"}
+    )
+
+    catalogs, failures = await collect_catalogs(config)
+
+    assert failures == ()
+    assert [row.status for row in catalogs[0].rows] == ["ok", "ok"]
+    # Chat Completions is driven on this provider type, so no undriven mark appears.
+    assert all(row.undriven == frozenset() for row in catalogs[0].rows)
 
 
 def test_the_report_counts_by_status_and_explains_its_own_marks() -> None:
@@ -359,7 +418,7 @@ def test_the_summary_line_cannot_be_split_by_upstream_text() -> None:
 def test_a_provider_with_an_empty_catalog_says_so() -> None:
     text = render_text([_catalog(raw={"data": []}, disabled=[])])
 
-    assert "upstream offered no models" in text
+    assert "catalog offers no models" in text
     assert "0 models, 0 routable" in text
 
 
@@ -457,15 +516,27 @@ def test_a_missing_token_is_reported_with_the_command_that_fixes_it() -> None:
     assert describe_failure(TimeoutError()) == "TimeoutError"
 
 
-class _FakeProvider(GithubCopilotProvider):
-    """A provider that answers from a canned payload, or refuses to.
+class _FakeProvider:
+    """A provider that answers from a canned diagnostics snapshot, or refuses to."""
 
-    Subclassed rather than duck-typed because `collect_catalogs` checks the concrete type before trusting a provider to have a catalog — a stand-in that skipped that check would test a path production never takes.
-    """
-
-    def __init__(self, name: str, *, raw: dict[str, Any] | None = None, fails: str = "") -> None:
+    def __init__(
+        self,
+        name: str,
+        *,
+        raw: dict[str, Any] | None = None,
+        disabled: frozenset[str] = frozenset(),
+        # Parameters rather than constants so one stand-in serves every provider
+        # type's snapshot shape: a static catalog with its own driven table is a
+        # real configuration, not a special case.
+        source: CatalogSource = "upstream",
+        driven_endpoints: frozenset[ModelEndpoint] = DRIVEN_ENDPOINTS,
+        fails: str = "",
+    ) -> None:
+        self._source: CatalogSource = source
+        self._driven_endpoints: frozenset[ModelEndpoint] = driven_endpoints
         self._name_ = name
         self._raw_ = raw or {"data": []}
+        self._disabled = disabled
         self._fails = fails
 
     @property
@@ -477,8 +548,16 @@ class _FakeProvider(GithubCopilotProvider):
         return f"https://{self._name_}.test"
 
     @property
-    def raw_catalog(self) -> dict[str, Any]:
-        return self._raw_
+    def disabled_ids(self) -> frozenset[str]:
+        return self._disabled
+
+    @property
+    def catalog_snapshot(self) -> CatalogSnapshot:
+        return CatalogSnapshot(
+            raw=self._raw_,
+            source=self._source,
+            driven_endpoints=self._driven_endpoints,
+        )
 
     async def refresh_catalog(self) -> bool:
         if self._fails:
@@ -487,14 +566,14 @@ class _FakeProvider(GithubCopilotProvider):
 
 
 class _FakeRegistry:
-    def __init__(self, providers: dict[str, GithubCopilotProvider]) -> None:
+    def __init__(self, providers: dict[str, _FakeProvider]) -> None:
         self._providers = providers
 
     @property
     def names(self) -> frozenset[str]:
         return frozenset(self._providers)
 
-    def get(self, name: str) -> GithubCopilotProvider:
+    def get(self, name: str) -> _FakeProvider:
         return self._providers[name]
 
 
@@ -520,7 +599,7 @@ def _two_provider_config() -> ProxyConfig:
 
 def _patch_collection(
     monkeypatch: pytest.MonkeyPatch,
-    providers: dict[str, GithubCopilotProvider],
+    providers: dict[str, _FakeProvider],
 ) -> _RecordingClient:
     client = _RecordingClient()
 
@@ -577,13 +656,50 @@ async def test_the_named_provider_is_the_only_one_asked(monkeypatch: pytest.Monk
     assert client.closed
 
 
+async def test_xingchen_catalog_is_reported_as_static_without_network() -> None:
+    config = ProxyConfig.model_validate(
+        {
+            "model_providers": {
+                "xingchen": {
+                    "type": "xingchen",
+                    "models": ["chat-pro", "chat-lite"],
+                    "disabled_models": ["chat-lite"],
+                    "gateway_api_key": "gateway-key",
+                    "x_token": "complete.x.token",
+                    "device_id": "device-id",
+                    "install_id": "install-id",
+                }
+            },
+            "default_model_provider": "xingchen",
+        }
+    )
+
+    catalogs, failures = await collect_catalogs(config, "xingchen")
+
+    assert failures == ()
+    assert len(catalogs) == 1
+    catalog = catalogs[0]
+    assert catalog.name == "xingchen"
+    assert catalog.source == "static"
+    assert catalog.base_url == "https://agent.teleai.com.cn/superCowork/sapi/api/v1"
+    assert {row.id: row.status for row in catalog.rows} == {
+        "chat-lite": "disabled",
+        "chat-pro": "ok",
+    }
+    assert "[static]" in render_text(catalogs)
+
+
 async def test_each_provider_gets_its_own_disabled_list(monkeypatch: pytest.MonkeyPatch) -> None:
     """The disabled list is per provider in the schema; reading the wrong one marks the wrong model."""
     _patch_collection(
         monkeypatch,
         {
             "healthy": _FakeProvider("healthy", raw=CATALOG),
-            "broken": _FakeProvider("broken", raw=CATALOG),
+            "broken": _FakeProvider(
+                "broken",
+                raw=CATALOG,
+                disabled=frozenset({"blocked"}),
+            ),
         },
     )
 
@@ -650,8 +766,10 @@ def test_cli_reports_a_bad_config_without_a_traceback(tmp_path: Path) -> None:
 
     assert result.exit_code == 1
     assert "Traceback" not in result.output
-    # Pydantic's field path survives: it is the part that says which key to fix.
-    assert "model_providers.ghc.type" in result.stderr
+    # Pydantic's discriminator error keeps both the provider path and the invalid type value.
+    assert "model_providers.ghc" in result.stderr
+    assert "not_a_provider" in result.stderr
+    assert "type" in result.stderr
 
 
 def test_cli_reports_a_missing_config_without_a_traceback(tmp_path: Path) -> None:

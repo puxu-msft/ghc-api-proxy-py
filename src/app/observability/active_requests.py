@@ -7,26 +7,47 @@ An earlier version of this file claimed a lock was unnecessary because "every mu
 The tracking boundary is deliberately not the handler's return. A streaming request has produced no bytes at the moment its handler returns — the body is consumed afterwards — so deregistering there would drop each streaming request off the footer at exactly the moment it starts being worth watching. `track_stream` exists to hold the registration open across the generator instead.
 """
 
+from __future__ import annotations
+
 import threading
 import time
+from collections import deque
 from collections.abc import AsyncGenerator, Callable, Generator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from app.observability.footer import ActiveRequest
+
+if TYPE_CHECKING:
+    from app.observability.request_completion import FinalizedRequest
 
 
 @dataclass(slots=True)
 class _Entry:
     model: str
     started_at: float
-    bytes_out: int | None = None
+    upstream_response_bytes: int | None = None
     attempts: int = 1
+    route: str = ""
+    inbound_format: str = ""
+    provider_name: str = ""
+    stream: bool | None = None
+    downstream_bytes: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RequestObservationSnapshot:
+    live: tuple[ActiveRequest, ...]
+    completed: tuple[FinalizedRequest, ...]
 
 
 @dataclass(slots=True)
 class ActiveRequestRegistry:
     _entries: dict[str, _Entry] = field(default_factory=lambda: dict[str, _Entry]())
+    _completed: deque[FinalizedRequest] = field(
+        default_factory=lambda: deque(maxlen=256)
+    )
     # Uncontended in practice — the critical sections are a dict write or a short copy — so the cost is a few tens of nanoseconds on a path that is already doing network I/O.
     _lock: threading.Lock = field(default_factory=threading.Lock)
     # Set once the listener stops accepting. Held here rather than passed to each render because the renderer runs on its own thread and needs somewhere to read it from that is not a moving argument.
@@ -61,21 +82,34 @@ class ActiveRequestRegistry:
         self._draining = True
 
     def snapshot(self) -> list[ActiveRequest]:
-        """A detached view for the renderer, so a mutation mid-render cannot change what it is drawing.
+        """The live half retained for the one-line footer's existing pull interface."""
+        return list(self.observation_snapshot().live)
 
-        Built inside the lock: the detachment is what protects the *caller*, and the iteration that produces it is exactly what needs protecting from a concurrent write.
+    def observation_snapshot(self) -> RequestObservationSnapshot:
+        """Detach live and completed requests under one lock.
+
+        `complete()` moves a request between these two collections in the same critical section, so a renderer never observes it on both sides or on neither side.
         """
         with self._lock:
-            return [
+            live = tuple(
                 ActiveRequest(
                     request_id=request_id,
                     model=entry.model,
                     started_at=entry.started_at,
-                    bytes_out=entry.bytes_out,
+                    upstream_response_bytes=entry.upstream_response_bytes,
                     attempts=entry.attempts,
+                    route=entry.route,
+                    inbound_format=entry.inbound_format,
+                    provider_name=entry.provider_name,
+                    stream=entry.stream,
+                    downstream_bytes=entry.downstream_bytes,
                 )
                 for request_id, entry in self._entries.items()
-            ]
+            )
+            return RequestObservationSnapshot(
+                live=live,
+                completed=tuple(self._completed),
+            )
 
     def add(self, request_id: str, *, model: str = "", started_at: float | None = None) -> None:
         with self._lock:
@@ -85,6 +119,12 @@ class ActiveRequestRegistry:
         with self._lock:
             self._entries.pop(request_id, None)
 
+    def complete(self, request_id: str, record: FinalizedRequest) -> None:
+        """Atomically move one request out of live and into the bounded completed side."""
+        with self._lock:
+            self._entries.pop(request_id, None)
+            self._completed.append(record)
+
     def set_model(self, request_id: str, model: str) -> None:
         """Routing resolves the model after the request is already registered, so the footer shows `(resolving)` first and the real name once it is known."""
         with self._lock:
@@ -92,18 +132,53 @@ class ActiveRequestRegistry:
             if entry is not None:
                 entry.model = model
 
+    def set_route(self, request_id: str, *, route: str, inbound_format: str) -> None:
+        with self._lock:
+            entry = self._entries.get(request_id)
+            if entry is not None:
+                entry.route = route
+                entry.inbound_format = inbound_format
+
+    def set_provider(self, request_id: str, provider_name: str) -> None:
+        with self._lock:
+            entry = self._entries.get(request_id)
+            if entry is not None:
+                entry.provider_name = provider_name
+
+    def set_stream(self, request_id: str, stream: bool) -> None:
+        with self._lock:
+            entry = self._entries.get(request_id)
+            if entry is not None:
+                entry.stream = stream
+
     def set_attempts(self, request_id: str, attempts: int) -> None:
         with self._lock:
             entry = self._entries.get(request_id)
             if entry is not None:
                 entry.attempts = attempts
 
-    def add_bytes(self, request_id: str, count: int) -> None:
-        """Record downstream progress. The first call is what turns `↓` on: until then the footer shows no byte field at all, which reads as "nothing has streamed back yet" rather than "zero bytes"."""
+    def add_upstream_response_bytes(self, request_id: str, count: int) -> None:
+        """Record decoded upstream HTTP response-body bytes as they arrive."""
         with self._lock:
             entry = self._entries.get(request_id)
             if entry is not None:
-                entry.bytes_out = (entry.bytes_out or 0) + count
+                entry.upstream_response_bytes = (
+                    entry.upstream_response_bytes or 0
+                ) + count
+
+    def set_upstream_response_bytes(self, request_id: str, count: int) -> None:
+        """Set a complete buffered upstream HTTP response-body length."""
+        with self._lock:
+            entry = self._entries.get(request_id)
+            if entry is not None:
+                entry.upstream_response_bytes = count
+
+    def add_downstream_bytes(self, request_id: str, count: int) -> None:
+        """Record response body bytes whose ASGI send has returned."""
+        with self._lock:
+            entry = self._entries.get(request_id)
+            if entry is not None:
+                entry.downstream_bytes = (entry.downstream_bytes or 0) + count
 
     @contextmanager
     def track(self, request_id: str, *, model: str = "") -> Generator[None]:

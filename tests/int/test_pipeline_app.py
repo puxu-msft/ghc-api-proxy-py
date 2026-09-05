@@ -9,12 +9,17 @@ import contextlib
 import inspect
 import logging
 import re
+import ssl
+import threading
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator, Mapping
+from copy import deepcopy
 from dataclasses import replace
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
 
+import anyio
 import h2.errors
 import h2.events
 import httpcore2
@@ -23,23 +28,29 @@ import orjson
 import pytest
 import structlog
 from anthropic import AsyncAnthropic
+from count_worker_helper import blocked_count_job
 from fastapi import FastAPI
+from fastapi.responses import Response
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from openai import AsyncOpenAI
 from prometheus_client import REGISTRY
 from pydantic import ValidationError
 from starlette.requests import ClientDisconnect, Request
+from starlette.types import Message
 
+import app.pipeline.hand_over as hand_over_module
 import app.server.routes.inference as inference_route
-from app.config.schema import ModelProviderConfig, ProxyConfig
+import app.tokenization.worker as token_worker_module
+from app.config.schema import GithubCopilotProviderConfig, ProxyConfig
 from app.core.chain import Chain
-from app.model_provider import GithubCopilotProvider, ModelProvider
+from app.model_provider import GithubCopilotProvider, ModelDescriptor, ModelEndpoint, ModelProvider
 from app.model_provider.ghc_client import GhcApiClient, GhcClientConfig
 from app.model_provider.ghc_client.tokens import CopilotTokenManager
 from app.observability import rejection_capture
 from app.observability.active_requests import ActiveRequestRegistry
 from app.observability.logging import setup_logging
+from app.observability.request_completion import RequestCompletionCoordinator
 from app.observability.request_log_file import request_logs_dir
 from app.observability.request_trace import REQUEST_LOGGER, RequestTrace
 from app.observability.terminal import DIM, GREEN, RESET, TerminalCapabilities
@@ -47,7 +58,12 @@ from app.pipeline import driver
 from app.pipeline.delivery.assembling import BlockAssembler
 from app.pipeline.delivery.blocks import BlockBuffer
 from app.pipeline.delivery.formats.anthropic_messages import AnthropicAssembler, AnthropicFramer
+from app.pipeline.delivery.formats.openai_responses import ResponsesFramer
+from app.pipeline.delivery.formats.openai_responses_passthrough import (
+    responses_passthrough_assembler,
+)
 from app.pipeline.delivery.framing import OutboundFramer
+from app.pipeline.delivery.passthrough import PassthroughFramer
 from app.pipeline.delivery.stream import (
     ContinuationSupport,
     ReplaySupport,
@@ -56,7 +72,11 @@ from app.pipeline.delivery.stream import (
     stream_delivery,
 )
 from app.pipeline.delivery_policy import delivery_buffer, stream_settings
+from app.pipeline.direct_driver import EVENT_ATTEMPT_FAILED, EVENT_ATTEMPT_PREPARE
+from app.pipeline.events import FrozenSubscribers, Subscription
+from app.pipeline.exceptions import PipelineRetry
 from app.pipeline.request import RequestContext, WireFormat
+from app.pipeline.response_observation import ResponsesObserver
 from app.pipeline.translation_driver.reasoning import ThinkingTargetProfile
 from app.pipeline.translation_driver.registry import TranslatorRegistry
 from app.pipeline.translation_driver.semantic import (
@@ -71,12 +91,14 @@ from app.server.pipeline_app import (
 )
 from app.server.routes.inference import (
     _AccountedStreamingResponse,  # pyright: ignore[reportPrivateUsage]
+    _run_dispatch_while_connected,  # pyright: ignore[reportPrivateUsage]
     _StreamAccounting,  # pyright: ignore[reportPrivateUsage]
     _tracked_delivery,  # pyright: ignore[reportPrivateUsage]
 )
 from app.server.routes.router import build_router
 from app.server.routes.table import route_for_path
 from app.streaming.deadline import ClientDeadlineError
+from app.tokenization.admission import PromptTokenAdmission, TokenAdmissionObservation
 from app.tokenization.state_store import TokenizationStateStore
 
 BASE_URL = "https://copilot.example"
@@ -138,6 +160,7 @@ def make_provider(
     handler: Callable[[httpx2.Request], httpx2.Response],
     *,
     disabled: list[str] | None = None,
+    catalog: dict[str, Any] | None = None,
 ) -> tuple[GithubCopilotProvider, httpx2.AsyncClient]:
     http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     tokens = CopilotTokenManager(StaticTokenSource(), http_client, clock=lambda: 1000)
@@ -161,11 +184,11 @@ def make_provider(
     provider = GithubCopilotProvider(
         "ghc",
         client,
-        ModelProviderConfig(type="github_copilot", disabled_models=disabled or []),
+        GithubCopilotProviderConfig(type="github_copilot", disabled_models=disabled or []),
         http_client=http_client,
         base_url=BASE_URL,
     )
-    provider.replace_catalog(CATALOG)
+    provider.replace_catalog(catalog or CATALOG)
     return provider, http_client
 
 
@@ -175,8 +198,11 @@ def make_client(
     mappings: dict[str, str] | None = None,
     tokenization_path: Path | None = None,
     overrides: dict[str, Any] | None = None,
+    catalog: dict[str, Any] | None = None,
+    configure_chain: Callable[[Chain], None] | None = None,
 ) -> tuple[TestClient, list[httpx2.Request]]:
     seen: list[httpx2.Request] = []
+    selected_catalog = catalog or CATALOG
 
     def recording(request: httpx2.Request) -> httpx2.Response:
         if request.url.host == "api.github.com":
@@ -186,11 +212,11 @@ def make_client(
             )
         if request.url.path.endswith("/models"):
             # The app refreshes the catalog before it accepts anything, so the stand-in has to answer that too. Left out of `seen`: it is start-up, not the request under test.
-            return httpx2.Response(200, json=CATALOG)
+            return httpx2.Response(200, json=selected_catalog)
         seen.append(request)
         return handler(request)
 
-    provider, http_client = make_provider(recording)
+    provider, http_client = make_provider(recording, catalog=selected_catalog)
     config = ProxyConfig.model_validate(
         {
             "model_providers": {"ghc": {"type": "github_copilot", "api_base_url": BASE_URL}},
@@ -204,6 +230,8 @@ def make_client(
     if tokenization_path is not None:
         # Otherwise the calibrator would read and write the real user data directory.
         chain = replace(chain, tokenization=TokenizationStateStore(tokenization_path))
+    if configure_chain is not None:
+        configure_chain(chain)
     return TestClient(create_pipeline_app(chain)), seen
 
 
@@ -736,12 +764,11 @@ def test_an_anthropic_web_search_declaration_reaches_upstream_in_its_own_spellin
     assert b"web_search_20250305" not in seen[-1].read()
 
 
-def test_a_streamed_search_is_delivered_as_a_line_rather_than_an_empty_block() -> None:
-    """Driven by a real upstream recording: `tests/int/cassettes/responses_web_search_stream.json`.
+def test_a_streamed_search_is_delivered_as_a_native_pair_before_the_answer() -> None:
+    """Replay the real Responses search stream through the full Anthropic route.
 
-    A `web_search_call` has no delta events and arrives with only an id, a status and a type on `output_item.added` — the query appears for the first time on `done`. Assembled the ordinary way, from the draft the `added` opened, it closed as an empty text block: the client got a blank content block ahead of every answer, and the one fact the item carried was thrown away.
-
-    The cassette is used rather than a hand-written stream because that asymmetry is exactly the kind of thing a stand-in gets wrong — it would have been written from what the events are assumed to carry.
+    The recording carries drifting item ids and no citations. The requested call must still become
+    one adjacent unavailable pair at its done boundary, while the answer remains its own text block.
     """
     cassette = orjson.loads(Path("tests/int/cassettes/responses_web_search_stream.json").read_bytes())
     interaction = next(
@@ -754,7 +781,6 @@ def test_a_streamed_search_is_delivered_as_a_line_rather_than_an_empty_block() -
             200, content=sse, headers={"content-type": "text/event-stream"}
         ),
         overrides={
-            # Explicitly on: the switch defaults to off, so without this the gate refuses before the model list is ever consulted and the test stops discriminating what it names.
             "model_translation": {"to_openai_responses": {"hosted_web_search": True}},
             "model_providers": {
                 "ghc": {
@@ -762,7 +788,7 @@ def test_a_streamed_search_is_delivered_as_a_line_rather_than_an_empty_block() -
                     "api_base_url": BASE_URL,
                     "models_support_web_search": ["gpt-model"],
                 }
-            }
+            },
         },
     )
     response = client.post(
@@ -777,21 +803,182 @@ def test_a_streamed_search_is_delivered_as_a_line_rather_than_an_empty_block() -
     )
 
     assert response.status_code == 200
+    starts = [
+        orjson.loads(line[6:])["content_block"]
+        for line in response.text.splitlines()
+        if line.startswith("data: ") and '"content_block_start"' in line
+    ]
+    assert [block["type"] for block in starts] == [
+        "server_tool_use",
+        "web_search_tool_result",
+        "text",
+    ]
+    assert starts[0]["name"] == "web_search"
+    assert starts[1]["tool_use_id"] == starts[0]["id"]
+    assert starts[1]["content"] == {
+        "type": "web_search_tool_result_error",
+        "error_code": "unavailable",
+    }
     deltas = [
         orjson.loads(line[6:])["delta"]["text"]
         for line in response.text.splitlines()
-        if line.startswith("data: ") and '"content_block_delta"' in line
+        if line.startswith("data: ") and '"text_delta"' in line
     ]
-    assert deltas[0].startswith("[web_search] "), deltas
-    assert "Thursday, August 20, 2026" in deltas[1]
-    # No block may be delivered empty: that was the symptom, and it is invisible in a test that only checks the answer arrived.
-    assert all(text for text in deltas), deltas
+    assert len(deltas) == 1
+    assert "Thursday, August 20, 2026" in deltas[0]
+    assert "[web_search]" not in response.text
+    losses = [
+        entry for entry in _records()[0]["losses"] if entry["direction"] == "response"
+    ]
+    assert [entry["code"] for entry in losses] == [
+        "server-tool-call-id-not-carried",
+        "server-tool-partially-representable",
+    ]
+
+
+def test_a_buffered_search_is_delivered_as_the_same_native_pair() -> None:
+    cassette = orjson.loads(
+        Path("tests/int/cassettes/responses_web_search_nonstream.json").read_bytes()
+    )
+    interaction = next(
+        i for i in cassette["interactions"] if "responses" in i["request"]["path"]
+    )
+    body = "".join(chunk["text"] for chunk in interaction["response"]["chunks"]).encode()
+
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200,
+            content=body,
+            headers={"content-type": "application/json"},
+        ),
+        overrides={
+            "model_translation": {"to_openai_responses": {"hosted_web_search": True}},
+            "model_providers": {
+                "ghc": {
+                    "type": "github_copilot",
+                    "api_base_url": BASE_URL,
+                    "models_support_web_search": ["gpt-model"],
+                }
+            },
+        },
+    )
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "gpt-model",
+            "messages": [{"role": "user", "content": "what day is it"}],
+            "max_tokens": 256,
+            "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+        },
+    )
+
+    assert response.status_code == 200
+    call, result, answer = response.json()["content"]
+    assert call["type"] == "server_tool_use"
+    assert result == {
+        "type": "web_search_tool_result",
+        "tool_use_id": call["id"],
+        "content": {
+            "type": "web_search_tool_result_error",
+            "error_code": "unavailable",
+        },
+    }
+    assert answer["type"] == "text"
+    assert "Thursday, August 20, 2026" in answer["text"]
+    assert response.json()["stop_reason"] == "end_turn"
+    losses = [
+        entry for entry in _records()[0]["losses"] if entry["direction"] == "response"
+    ]
+    assert [entry["code"] for entry in losses] == [
+        "server-tool-call-id-not-carried",
+        "server-tool-partially-representable",
+    ]
+
+
+def test_an_unsolicited_streamed_search_records_the_d3_response_loss() -> None:
+    cassette = orjson.loads(Path("tests/int/cassettes/responses_web_search_stream.json").read_bytes())
+    interaction = next(
+        i for i in cassette["interactions"] if "responses" in i["request"]["path"]
+    )
+    sse = "".join(chunk["text"] for chunk in interaction["response"]["chunks"]).encode()
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200,
+            content=sse,
+            headers={"content-type": "text/event-stream"},
+        )
+    )
+
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "gpt-model",
+            "messages": [{"role": "user", "content": "answer directly"}],
+            "max_tokens": 256,
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert "[web_search]" in response.text
+    losses = [
+        entry for entry in _records()[0]["losses"] if entry["direction"] == "response"
+    ]
+    assert [entry["code"] for entry in losses] == [
+        "server-tool-call-id-not-carried",
+        "server-tool-not-carried",
+    ]
+    assert "unsolicited" in losses[1]["detail"]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_custom_hand_over_reason_has_stream_buffer_d3_parity(stream: bool) -> None:
+    response_body = incomplete_unsolicited_search_response()
+    upstream_response = (
+        httpx2.Response(
+            200,
+            content=incomplete_unsolicited_search_sse(),
+            headers={"content-type": "text/event-stream"},
+        )
+        if stream
+        else httpx2.Response(200, json=response_body)
+    )
+    client, _ = make_client(
+        lambda _: upstream_response,
+        overrides={
+            "upstream_request_retry": {
+                "hand_over_stop_reasons": ["content_filter"]
+            }
+        },
+    )
+
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "gpt-model",
+            "messages": [{"role": "user", "content": "answer"}],
+            "max_tokens": 256,
+            "stream": stream,
+        },
+    )
+
+    assert response.status_code == 200
+    assert "before" in response.text
+    assert "unfinished" not in response.text
+    assert "turn_interrupted" in response.text
+    losses = [
+        entry for entry in _records()[-1]["losses"] if entry["direction"] == "response"
+    ]
+    assert [entry["code"] for entry in losses] == [
+        "server-tool-call-id-not-carried",
+        "item-not-carried",
+    ]
 
 
 def test_hosted_web_search_is_off_until_the_config_says_otherwise() -> None:
     """The default. A search declaration with nothing configured is answered as a failed tool, and upstream is never asked.
 
-    Ruled 2026-08-21: the Responses leg really does execute a search, but what this proxy does with the answer is partial — a line of text where the protocol defines a `server_tool_use` / `web_search_tool_result` pair, `url_citation` annotations unread, `max_uses` and the domain lists unsendable. Off is what keeps that from being what every request gets.
+    Ruled 2026-08-21: the Responses leg really does execute a search, but the crossing remains partial even after response blocks are restored — structured success results lack Anthropic's required `encrypted_content`, while `max_uses` and the domain lists remain unsendable. Off keeps that partial capability from becoming what every request gets.
 
     Off is not the same as removing the declaration and carrying on. A Claude Code search is its own sub-request carrying nothing but the search, so one stripped of it answers from memory under a heading the client reads as search results — which is why `seen == []` is half the assertion.
 
@@ -1470,6 +1657,10 @@ def test_max_output_tokens_becomes_the_anthropic_stop_reason() -> None:
     assert record["stop_reason"] == "max_tokens"
     assert record["blocks"] == 1
     assert TOOL_NAME not in record.get("tools", [])
+    assert not any(
+        item["kind"] == "upstream_stream_failure"
+        for item in record["observation"]["interruptions"]
+    )
 
 
 def test_untranslated_route_body_is_returned_unchanged() -> None:
@@ -1599,6 +1790,239 @@ def test_count_tokens_falls_back_to_the_local_estimate() -> None:
     body = response.json()
     assert body["estimated"] is True
     assert body["input_tokens"] > 0
+
+
+@pytest.mark.parametrize("model", ["claude-model", "gpt-model"])
+def test_local_count_multiplier_is_applied_once_after_calibration(model: str) -> None:
+    body = {"model": model, "messages": [{"role": "user", "content": "hello there"}]}
+    overrides: dict[str, Any] = {
+        "inbound": {"anthropic_count_tokens": {"providers": ["local"]}}
+    }
+    baseline, _ = make_client(
+        lambda _: httpx2.Response(599),
+        overrides=overrides,
+    )
+    raw = baseline.post("/v1/messages/count_tokens", json=body).json()["input_tokens"]
+    overrides["inbound"]["anthropic_count_tokens"]["local_estimate_multiplier"] = 1.5
+    scaled, seen = make_client(lambda _: httpx2.Response(599), overrides=overrides)
+    calibration = _chain_of(scaled).tokenization.calibration
+    protocol = "anthropic" if model == "claude-model" else "openai-responses"
+    calibration.learn(protocol, model, raw, raw * 2)
+
+    response = scaled.post("/v1/messages/count_tokens", json=body)
+
+    assert response.status_code == 200
+    assert response.json() == {"input_tokens": raw * 3, "estimated": True}
+    assert seen == []
+
+
+def test_count_multiplier_does_not_change_upstream_result_or_raw_learning() -> None:
+    body = {"model": "claude-model", "messages": [{"role": "user", "content": "hello there"}]}
+    baseline, _ = make_client(
+        lambda _: httpx2.Response(599),
+        overrides={"inbound": {"anthropic_count_tokens": {"providers": ["local"]}}},
+    )
+    raw = baseline.post("/v1/messages/count_tokens", json=body).json()["input_tokens"]
+    client, seen = make_client(
+        lambda _: httpx2.Response(200, json={"input_tokens": raw * 2}),
+        overrides={"inbound": {"anthropic_count_tokens": {"local_estimate_multiplier": 3.0}}},
+    )
+
+    response = client.post("/v1/messages/count_tokens", json=body)
+
+    assert response.json() == {"input_tokens": raw * 2}
+    assert len(seen) == 1
+    assert _chain_of(client).tokenization.calibration.calibrate("anthropic", "claude-model", raw) == raw * 2
+
+
+def test_count_multiplier_does_not_scale_responses_admission() -> None:
+    client, seen = make_client(
+        lambda _: httpx2.Response(418, json={"error": {"message": "upstream reached"}}),
+        catalog=_prompt_admission_catalog(context_limit=100),
+        overrides={"inbound": {"anthropic_count_tokens": {"local_estimate_multiplier": 1000.0}}},
+    )
+
+    response = client.post("/v1/responses", json={"model": "gpt-model", "input": "short"})
+
+    assert response.status_code == 418
+    assert len(seen) == 1
+    [observed] = _records()[-1]["observation"]["token_admission"]
+    assert observed["outcome"] == "admitted_fast"
+
+
+async def test_count_process_does_not_block_http_and_cancellation_releases_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(token_worker_module, "_estimate_input", blocked_count_job)
+    client, seen = make_client(
+        lambda _: httpx2.Response(599),
+        overrides={"inbound": {"anthropic_count_tokens": {"providers": ["local"]}}},
+    )
+    chain = _chain_of(client)
+    entered, release = tmp_path / "entered", tmp_path / "release"
+    body = {
+        "model": "claude-model",
+        "messages": [{"role": "user", "content": "count this"}],
+        "metadata": {"entered": str(entered), "release": str(release)},
+    }
+    async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=client.app), base_url="http://testserver") as http:
+        counting = asyncio.create_task(http.post("/v1/messages/count_tokens", json=body))
+        try:
+            async with asyncio.timeout(5):
+                while not entered.exists():
+                    await asyncio.sleep(0.01)
+            assert not counting.done()
+            healthy = await asyncio.wait_for(http.get("/health/liveness"), timeout=1)
+            assert healthy.status_code == 200
+            counting.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(counting, timeout=2)
+            assert chain.local_token_worker.limiter.borrowed_tokens == 0
+            release.touch()
+            answer = await asyncio.wait_for(http.post("/v1/messages/count_tokens", json=body), timeout=5)
+            assert answer.json() == {"input_tokens": 17, "estimated": True}
+        finally:
+            release.touch()
+            counting.cancel()
+            await asyncio.gather(counting, return_exceptions=True)
+    assert seen == []
+
+
+async def test_count_http_disconnect_cancels_running_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(token_worker_module, "_estimate_input", blocked_count_job)
+    client, seen = make_client(lambda _: httpx2.Response(599))
+    chain = _chain_of(client)
+    entered, release = tmp_path / "entered", tmp_path / "release"
+    body = orjson.dumps({
+        "model": "claude-model",
+        "messages": [],
+        "metadata": {"entered": str(entered), "release": str(release)},
+    })
+    received_body = False
+    sent: list[Message] = []
+
+    async def receive() -> Message:
+        nonlocal received_body
+        if not received_body:
+            received_body = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        async with asyncio.timeout(5):
+            while not entered.exists():
+                await asyncio.sleep(0.01)
+        return {"type": "http.disconnect"}
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    scope: dict[str, Any] = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/messages/count_tokens",
+        "raw_path": b"/v1/messages/count_tokens",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(b"content-type", b"application/json")],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+        "state": {},
+    }
+    try:
+        async with asyncio.timeout(7):
+            await client.app(scope, receive, send)
+    finally:
+        release.touch()
+
+    assert entered.exists()
+    assert sent == []
+    assert seen == []
+    assert chain.local_token_worker.limiter.borrowed_tokens == 0
+    assert chain.tokenization.calibration.snapshot() == {}
+    assert _records()[-1]["status"] == "gone"
+
+
+@pytest.mark.parametrize("blocked_phase", ["body", "worker", "provider"])
+async def test_count_request_deadline_covers_body_worker_and_provider(
+    blocked_phase: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, seen = make_client(
+        lambda _: httpx2.Response(200, json={"input_tokens": 42}),
+        overrides={"client_delivery": {"client_request_deadline": 1}},
+    )
+    chain = _chain_of(client)
+    entered, release = tmp_path / "entered", tmp_path / "release"
+    body: dict[str, Any] = {
+        "model": "claude-model",
+        "messages": [],
+        "metadata": {"entered": str(entered), "release": str(release)},
+    }
+    provider_calls = 0
+
+    async def delayed_provider(*_args: Any, **_kwargs: Any) -> httpx2.Response:
+        nonlocal provider_calls
+        provider_calls += 1
+        await asyncio.sleep(10)
+        raise AssertionError("provider should have been cancelled")
+
+    async def streamed_body() -> AsyncIterator[bytes]:
+        if blocked_phase == "body":
+            yield b"{"
+            await asyncio.sleep(10)
+            raise AssertionError("body should have been cancelled")
+        yield orjson.dumps(body)
+
+    if blocked_phase != "body":
+        # This test isolates the named waiting phase, not process cold start. Warm the loop's worker before the HTTP request starts its one-second deadline.
+        await chain.local_token_worker.estimate("anthropic", {"model": "claude-model", "messages": []})
+    if blocked_phase == "worker":
+        monkeypatch.setattr(token_worker_module, "_estimate_input", blocked_count_job)
+    if blocked_phase == "provider":
+        monkeypatch.setattr(chain.providers.get("ghc"), "count_tokens", delayed_provider)
+    async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=client.app), base_url="http://testserver") as http:
+        try:
+            response = await asyncio.wait_for(
+                http.post("/v1/messages/count_tokens", content=streamed_body(), headers={"content-type": "application/json"}),
+                timeout=5,
+            )
+        finally:
+            release.touch()
+
+    assert response.status_code == 504
+    assert response.json()["error"]["type"] == "timeout_error"
+    assert chain.local_token_worker.limiter.borrowed_tokens == 0
+    assert provider_calls == (1 if blocked_phase == "provider" else 0)
+    assert seen == []
+    assert chain.tokenization.calibration.snapshot() == {}
+
+
+async def test_worker_timeout_error_is_not_relabeled_as_client_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, seen = make_client(lambda _: httpx2.Response(599))
+
+    async def failing_worker(_protocol: str, _payload: Any) -> int:
+        raise TimeoutError("worker's own timeout")
+
+    monkeypatch.setattr(_chain_of(client).local_token_worker, "estimate", failing_worker)
+    async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=client.app), base_url="http://testserver") as http:
+        response = await http.post("/v1/messages/count_tokens", json={"model": "claude-model", "messages": []})
+
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "proxy_internal_error"
+    assert seen == []
+
+
+def test_count_and_admission_share_the_app_worker_permit() -> None:
+    client, _ = make_client(lambda _: httpx2.Response(599))
+    chain = _chain_of(client)
+    assert chain.prompt_token_admission._limiter is chain.local_token_worker.limiter  # pyright: ignore[reportPrivateUsage]
+    assert chain.local_token_worker.limiter.total_tokens == 1
 
 
 def test_count_tokens_asks_about_the_mapped_model() -> None:
@@ -1978,19 +2402,87 @@ def _registry(client: TestClient) -> ActiveRequestRegistry:
 
 def test_a_request_is_in_the_footer_registry_while_it_is_in_flight() -> None:
     # Observed from inside the upstream handler, the one point that runs while the request genuinely is in flight. Asserting after the response returns could only ever see an empty registry, and would pass just as happily if nothing were ever registered.
-    inflight: list[str] = []
+    inflight: list[tuple[str, str, str, str, bool | None]] = []
 
     def upstream(_: httpx2.Request) -> httpx2.Response:
-        inflight.extend(entry.model for entry in _registry(client).snapshot())
+        inflight.extend(
+            (
+                entry.model,
+                entry.route,
+                entry.inbound_format,
+                entry.provider_name,
+                entry.stream,
+            )
+            for entry in _registry(client).snapshot()
+        )
         return httpx2.Response(200, json={"id": "msg_1", "content": []})
 
     client, _ = make_client(upstream)
     client.post("/v1/messages", json={"model": "claude-model", "messages": []})
 
-    # Resolved by the time upstream is called, because routing decides it before the call and says so immediately. This asserted `[""]` while the model was published only after the whole exchange finished, which meant the footer read `(resolving)` for the entire upstream call — not slow feedback but wrong feedback, and the test was encoding it as correct.
-    assert inflight == ["claude-model"]
+    # Resolved by the time upstream is called, because routing decides it before the call and says so immediately. The richer store facts come from the same route decision, not from a completed record projected backwards.
+    assert inflight == [
+        (
+            "claude-model",
+            "/v1/messages",
+            "anthropic-messages",
+            "ghc",
+            False,
+        )
+    ]
     # Released afterwards, or the footer fills with requests that finished long ago.
     assert _registry(client).snapshot() == []
+
+
+def test_buffered_upstream_bytes_reach_the_live_store_before_response_translation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response_sizes: list[int] = []
+
+    def upstream(_: httpx2.Request) -> httpx2.Response:
+        response = httpx2.Response(200, json={"id": "msg_1", "content": []})
+        response_sizes.append(len(response.content))
+        return response
+
+    client, _ = make_client(upstream)
+    observed_live_bytes: list[int | None] = []
+    original = inference_route.response_payload
+
+    def observe_before_translation(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        observed_live_bytes.extend(entry.upstream_response_bytes for entry in _registry(client).snapshot())
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(inference_route, "response_payload", observe_before_translation)
+    client.post("/v1/messages", json={"model": "claude-model", "messages": []})
+
+    assert observed_live_bytes == response_sizes
+
+
+def test_count_upstream_bytes_reach_the_live_store_before_response_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response_sizes: list[int] = []
+
+    def upstream(_: httpx2.Request) -> httpx2.Response:
+        response = httpx2.Response(200, json={"input_tokens": 42})
+        response_sizes.append(len(response.content))
+        return response
+
+    client, _ = make_client(upstream)
+    observed_live_bytes: list[int | None] = []
+    response_type = inference_route.JSONResponse
+
+    def observe_before_response(*args: Any, **kwargs: Any) -> Any:
+        observed_live_bytes.extend(entry.upstream_response_bytes for entry in _registry(client).snapshot())
+        return response_type(*args, **kwargs)
+
+    monkeypatch.setattr(inference_route, "JSONResponse", observe_before_response)
+    client.post(
+        "/v1/messages/count_tokens",
+        json={"model": "claude-model", "messages": []},
+    )
+
+    assert observed_live_bytes == response_sizes
 
 
 def test_a_streaming_request_stays_registered_until_its_body_is_finished() -> None:
@@ -2007,13 +2499,13 @@ def test_a_streaming_request_stays_registered_until_its_body_is_finished() -> No
             calls.append("add")
             super().add(request_id, model=model, started_at=started_at)
 
-        def add_bytes(self, request_id: str, count: int) -> None:
+        def add_upstream_response_bytes(self, request_id: str, count: int) -> None:
             calls.append("bytes")
-            super().add_bytes(request_id, count)
+            super().add_upstream_response_bytes(request_id, count)
 
-        def remove(self, request_id: str) -> None:
-            calls.append("remove")
-            super().remove(request_id)
+        def complete(self, request_id: str, record: Any) -> None:
+            calls.append("complete")
+            super().complete(request_id, record)
 
     client, _ = make_client(
         lambda _: httpx2.Response(
@@ -2031,9 +2523,9 @@ def test_a_streaming_request_stays_registered_until_its_body_is_finished() -> No
     assert response.status_code == 200
 
     assert calls[0] == "add"
-    assert "bytes" in calls, "no downstream bytes were counted, so the footer could never show one"
-    # The decisive assertion: every byte is counted before the slot is released. Releasing at the handler's exit puts `remove` ahead of them all.
-    assert calls.index("remove") > max(index for index, call in enumerate(calls) if call == "bytes")
+    assert "bytes" in calls, "no upstream response bytes were counted, so the footer could never show receive progress"
+    # The decisive assertion: every byte is counted before the atomic live→completed transition. Completing at the handler's exit puts it ahead of them all.
+    assert calls.index("complete") > max(index for index, call in enumerate(calls) if call == "bytes")
     assert _registry(client).snapshot() == []
 
 
@@ -2180,8 +2672,8 @@ def test_a_token_count_says_it_was_one_and_which_counter_answered(request_log: N
     assert lines[0].startswith("H1/H1 200 anthropic-messages-count-tokens/claude-model ")
     assert lines[0].endswith("provider(ghc)")
     # Both directions of that leg. One of them alone would say, by this line's own convention, that nothing came back — from the exchange that produced the number on the line.
-    assert re.search(r"[↑>][\d.]+(B|KB|MB)\b", lines[0]), "the body sent upstream is what the count was measured on"
-    assert re.search(r"[↓<][\d.]+(B|KB|MB)\b", lines[0]), "and upstream's answer is where the number came from"
+    assert re.search(r"[↑>][\d.]+(B|KiB|MiB)\b", lines[0]), "the body sent upstream is what the count was measured on"
+    assert re.search(r"[↓<][\d.]+(B|KiB|MiB)\b", lines[0]), "and upstream's answer is where the number came from"
 
 
 def test_a_count_upstream_could_not_answer_is_reported_as_an_estimate(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
@@ -2247,8 +2739,240 @@ def test_a_count_upstream_answered_uselessly_keeps_the_leg_it_flew(request_log: 
     # Both legs and both directions, next to the counter that says the number on the line is not upstream's.
     assert lines[0].startswith("H1/H1 200 anthropic-messages-count-tokens/claude-model ")
     assert lines[0].endswith("provider(ghc-failed,local)")
-    assert re.search(r"[↑>][\d.]+(B|KB|MB)\b", lines[0])
-    assert re.search(r"[↓<][\d.]+(B|KB|MB)\b", lines[0])
+    assert re.search(r"[↑>][\d.]+(B|KiB|MiB)\b", lines[0])
+    assert re.search(r"[↓<][\d.]+(B|KiB|MiB)\b", lines[0])
+
+
+@pytest.mark.parametrize("content", [b"", b"not-json"])
+def test_count_malformed_upstream_body_preserves_measured_response_bytes(
+    content: bytes,
+) -> None:
+    observed_during_parse: list[int | None] = []
+
+    def upstream(_: httpx2.Request) -> httpx2.Response:
+        response = httpx2.Response(
+            200,
+            content=content,
+            headers={"content-type": "application/json"},
+        )
+        parse = response.json
+
+        def observe_then_parse(**kwargs: Any) -> Any:
+            observed_during_parse.extend(
+                entry.upstream_response_bytes
+                for entry in _registry(client).snapshot()
+            )
+            return parse(**kwargs)
+
+        response.json = observe_then_parse
+        return response
+
+    client, _ = make_client(upstream)
+    response = client.post(
+        "/v1/messages/count_tokens",
+        json={"model": "claude-model", "messages": []},
+    )
+
+    assert response.json()["estimated"] is True
+    assert observed_during_parse
+    assert set(observed_during_parse) == {len(content)}
+    record = _records()[-1]
+    assert record["bytes_out"] == len(content)
+    assert record["observation"]["body_bytes"]["upstream_response"] == len(
+        content
+    )
+
+
+def test_count_failure_without_local_fallback_preserves_upstream_response_bytes() -> None:
+    content = b"not-json"
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200,
+            content=content,
+            headers={"content-type": "application/json"},
+        ),
+        overrides={
+            "inbound": {
+                "anthropic_count_tokens": {
+                    "providers": ["ghc"],
+                    "max_retries": 0,
+                }
+            }
+        },
+    )
+
+    response = client.post(
+        "/v1/messages/count_tokens",
+        json={"model": "claude-model", "messages": []},
+    )
+
+    assert response.status_code == 500
+    record = _records()[-1]
+    assert record["bytes_out"] == len(content)
+    assert record["observation"]["body_bytes"]["upstream_response"] == len(
+        content
+    )
+
+
+def test_buffered_responses_status_error_keeps_body_and_error_summary(
+    request_log: None,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    upstream_sizes: list[int] = []
+    live_bytes_at_observation: list[int | None] = []
+    observe_body_bytes = ResponsesObserver.observe_body_bytes
+
+    def observe_after_live_update(
+        self: ResponsesObserver,
+        body: bytes,
+    ) -> None:
+        live_bytes_at_observation.extend(
+            entry.upstream_response_bytes
+            for entry in _registry(client).snapshot()
+        )
+        observe_body_bytes(self, body)
+
+    monkeypatch.setattr(
+        ResponsesObserver,
+        "observe_body_bytes",
+        observe_after_live_update,
+    )
+
+    def upstream(_: httpx2.Request) -> httpx2.Response:
+        response = httpx2.Response(
+            400,
+            json={
+                "status": "completed",
+                "error": {
+                    "type": "server_error",
+                    "code": "status_error",
+                    "message": "provider rejected this response",
+                },
+            },
+        )
+        upstream_sizes.append(len(response.content))
+        return response
+
+    client, _ = make_client(upstream)
+    with caplog.at_level(logging.INFO):
+        response = client.post(
+            "/v1/responses",
+            json={"model": "gpt-model", "input": []},
+        )
+
+    assert response.status_code == 400
+    assert live_bytes_at_observation == [upstream_sizes[-1]]
+    record = _records()[-1]
+    assert record["bytes_out"] == upstream_sizes[-1]
+    observed = record["observation"]["response"]
+    assert observed["availability"] == "observed"
+    assert observed["error_summary"] == {
+        "type": "server_error",
+        "code": "status_error",
+        "message": "provider rejected this response",
+    }
+    assert record["status"] == "fail"
+    assert record["stop_reason"] == "error"
+    assert "provider rejected this response" in record["detail"]
+    line = _request_lines(caplog.records)[-1]
+    assert "error(status_error)" in line
+
+
+def test_streamed_responses_completed_with_error_uses_one_error_projection(
+    request_log: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    terminal: dict[str, Any] = {
+        "type": "response.completed",
+        "response": {
+            "status": "completed",
+            "output": [],
+            "usage": {"input_tokens": 1, "output_tokens": 0},
+            "error": {
+                "type": "server_error",
+                "code": "status_error",
+                "message": "provider completed with an error",
+            },
+        },
+    }
+    body = (
+        b"event: response.completed\ndata: "
+        + orjson.dumps(terminal)
+        + b"\n\n"
+    )
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200,
+            content=body,
+            headers={"content-type": "text/event-stream"},
+        )
+    )
+
+    with caplog.at_level(logging.INFO):
+        response = client.post(
+            "/v1/responses",
+            json={"model": "gpt-model", "input": [], "stream": True},
+        )
+
+    assert response.status_code == 200
+    record = _records()[-1]
+    assert record["status"] == "fail"
+    assert record["stop_reason"] == "error"
+    assert record["observation"]["response"]["error_summary"]["code"] == (
+        "status_error"
+    )
+    assert "provider response failed: provider completed with an error" in record[
+        "detail"
+    ]
+    assert "error(status_error)" in _request_lines(caplog.records)[-1]
+
+
+def test_buffered_responses_malformed_status_error_is_unavailable_not_not_applicable() -> None:
+    content = b"not-json"
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            400,
+            content=content,
+            headers={"content-type": "application/json"},
+        )
+    )
+
+    response = client.post(
+        "/v1/responses",
+        json={"model": "gpt-model", "input": []},
+    )
+
+    assert response.status_code == 400
+    record = _records()[-1]
+    assert record["bytes_out"] == len(content)
+    observed = record["observation"]["response"]
+    assert observed["availability"] == "unavailable"
+    assert [issue["code"] for issue in observed["issues"]] == [
+        "response_body_not_json"
+    ]
+
+
+def test_responses_attempt_that_fails_before_provider_body_is_unavailable() -> None:
+    def upstream(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("provider connection failed", request=request)
+
+    client, _ = make_client(
+        upstream,
+        overrides={"upstream_request_retry": {"max_total": 0}},
+    )
+
+    response = client.post(
+        "/v1/responses",
+        json={"model": "gpt-model", "input": []},
+    )
+
+    assert response.status_code >= 500
+    observed = _records()[-1]["observation"]["response"]
+    assert observed["availability"] == "unavailable"
+    assert [issue["code"] for issue in observed["issues"]] == [
+        "provider_body_not_observed"
+    ]
 
 
 def test_a_refused_request_is_reported_with_its_route_and_reason(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
@@ -2318,28 +3042,63 @@ def test_a_request_that_raised_on_its_way_out_still_writes_its_one_line(
     assert status == "fail"
     # The exception is named, not merely alluded to. `str(RuntimeError())` is empty and would leave the detail as a colon with nothing after it, so the line quotes the `repr` — which is why the class name appears here even though this one does have a message.
     assert "request failed before a response: RuntimeError" in line
-    assert _registry(client).snapshot() == [], "and the slot is still released"
+    snapshot = _registry(client).observation_snapshot()
+    assert snapshot.live == (), "and the slot is still released"
+    assert len(snapshot.completed) == 1
+    records = _records()
+    assert len(records) == 1
+    record = records[0]
+    assert record["schema_version"] == 2
+    assert record["status"] == "fail"
+    delivery = record["observation"]["delivery"]
+    assert delivery["state"] == "not_started"
+    assert delivery["intended_http_status"] is None
+    assert delivery["failure"]["origin"] == "dispatch"
+    assert record["observation"]["timings"]["response_ready_s"] is None
 
 
-def test_a_client_that_hung_up_mid_body_is_reported_as_gone_rather_than_as_a_failure(
+async def test_a_client_that_hung_up_mid_body_is_reported_as_gone_without_escaping_the_app(
     request_log: None, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The other half of the same exit, and the reason it is not one branch.
+    """A routine client departure is complete once it has been accounted for.
 
     A client abandoning a turn is routine on a proxy fronting an interactive one; a reply this proxy could not parse is an incident. Reporting both as `[FAIL]` with one shared sentence would bury the second under the first, which is the ruling `_StreamAccounting._ending` already records for the streaming path.
 
-    `Request.body` is patched because `TestClient` has no way to announce a body and then stop sending. What is being fixed is what `_serve` does with the exception, and that is exactly what arrives here — `ClientDisconnect`, unwrapped, nothing between the raise and the handler.
+    `Request.body` is patched because the in-process ASGI harness has no way to announce part of a body and then stop sending. Calling the app directly also exposes the boundary under test: it must return without raising or sending an invented response after `ClientDisconnect`.
     """
     client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
+    sent: list[Message] = []
 
     async def body(self: Request) -> bytes:
         raise ClientDisconnect
 
+    async def receive() -> Message:
+        raise AssertionError("the patched body reader must own this disconnect")
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    scope: dict[str, Any] = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "https",
+        "path": "/v1/messages",
+        "raw_path": b"/v1/messages",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(b"host", b"testserver"), (b"content-type", b"application/json")],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 443),
+        "state": {},
+    }
+
     with caplog.at_level(logging.INFO), pytest.MonkeyPatch.context() as patch:
         patch.setattr(Request, "body", body)
-        with pytest.raises(ClientDisconnect):
-            client.post("/v1/messages", json={"model": "claude-model", "messages": []})
+        await cast(Any, client.app)(scope, receive, send)
 
+    assert sent == []
     outcomes = _request_outcomes(caplog.records)
     assert len(outcomes) == 1
     line, status = outcomes[0]
@@ -2347,11 +3106,268 @@ def test_a_client_that_hung_up_mid_body_is_reported_as_gone_rather_than_as_a_fai
     # Asserted separately from the status, because `_add_status_prefix` renders an unrecognised one as `[....]` — a line that then merely looks unremarkable instead of failing.
     assert _request_prefixes(caplog.records) == ["[GONE]"]
     assert "client disconnected before the request was answered" in line
-    assert _registry(client).snapshot() == []
+    snapshot = _registry(client).observation_snapshot()
+    assert snapshot.live == ()
+    assert len(snapshot.completed) == 1
+    record = snapshot.completed[0]
+    assert record.status == "gone"
+    assert record.delivery.failure is not None
+    assert record.delivery.failure.origin.value == "dispatch"
+    assert record.delivery.failure.category.value == "disconnect"
+    assert record.delivery.additional_failures == ()
+    assert len(record.interruptions) == 1
+    interruption = record.interruptions[0]
+    assert interruption.kind.value == "http_disconnect"
+    assert interruption.phase.value == "request_body"
+    assert interruption.category == "disconnect"
 
 
-def test_a_streaming_request_reports_what_it_actually_delivered(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
-    # Written by the delivery generator, not by the handler: at the moment the handler returns a stream has sent nothing, so a line written there would report every stream as having delivered zero bytes.
+def _request_for_direct_serve(client: TestClient) -> Request:
+    async def receive() -> Message:
+        raise AssertionError("the patched dispatcher must not read the request channel")
+
+    return Request(
+        {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.3"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "https",
+            "path": "/v1/messages",
+            "raw_path": b"/v1/messages",
+            "query_string": b"",
+            "root_path": "",
+            "headers": [],
+            "client": ("testclient", 50000),
+            "server": ("testserver", 443),
+            "state": {},
+            "app": client.app,
+        },
+        receive,
+    )
+
+
+async def test_disconnect_records_an_independent_failure_without_escaping_the_app(
+    request_log: None,
+) -> None:
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
+    context_failure = RuntimeError("independent context failure")
+    cancellation = asyncio.CancelledError()
+    failure = ClientDisconnect()
+    failure.__cause__ = cancellation
+    failure.__context__ = context_failure
+
+    async def dispatch(
+        request: Request,
+        chain: Chain,
+        trace: RequestTrace,
+        completion: RequestCompletionCoordinator,
+    ) -> Response:
+        del request, chain, trace, completion
+        raise failure
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(inference_route, "_dispatch", dispatch)
+        response = await inference_route.serve(_request_for_direct_serve(client))
+
+    assert response.status_code == 499
+    snapshot = _registry(client).observation_snapshot()
+    assert snapshot.live == ()
+    assert len(snapshot.completed) == 1
+    record = snapshot.completed[0]
+    assert record.status == "gone"
+    assert record.delivery.failure is not None
+    assert record.delivery.failure.type == "ClientDisconnect"
+    assert len(record.delivery.additional_failures) == 1
+    additional = record.delivery.additional_failures[0]
+    assert additional.origin.value == "cleanup"
+    assert additional.type == "RuntimeError"
+    assert additional.message == "independent context failure"
+    assert "cleanup also failed: independent context failure" in record.request_line().detail
+
+
+async def test_ssl_want_read_cleanup_on_disconnect_is_observed_without_escaping(
+    request_log: None,
+) -> None:
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
+    cleanup_failure = ssl.SSLWantReadError(
+        ssl.SSL_ERROR_WANT_READ,
+        "The operation did not complete (read) (_ssl.c:2710)",
+    )
+    cancellation = asyncio.CancelledError()
+    cancellation.__cause__ = cleanup_failure
+    failure = ClientDisconnect()
+    failure.__cause__ = cancellation
+
+    async def dispatch(
+        request: Request,
+        chain: Chain,
+        trace: RequestTrace,
+        completion: RequestCompletionCoordinator,
+    ) -> Response:
+        del request, chain, trace, completion
+        raise failure
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(inference_route, "_dispatch", dispatch)
+        response = await inference_route.serve(_request_for_direct_serve(client))
+
+    assert response.status_code == 499
+    snapshot = _registry(client).observation_snapshot()
+    assert snapshot.live == ()
+    assert len(snapshot.completed) == 1
+    record = snapshot.completed[0]
+    assert record.status == "gone"
+    assert record.delivery.failure is not None
+    assert record.delivery.failure.type == "ClientDisconnect"
+    assert len(record.delivery.additional_failures) == 1
+    additional = record.delivery.additional_failures[0]
+    assert additional.origin.value == "cleanup"
+    assert additional.type == "SSLWantReadError"
+    assert additional.message is not None
+    assert "The operation did not complete (read)" in additional.message
+    assert "cleanup also failed: The operation did not complete (read)" in record.request_line().detail
+
+
+async def test_nested_group_notes_are_normalized_and_preserved_after_disconnect(
+    request_log: None,
+) -> None:
+    class UnhashableNote(str):
+        __hash__ = None  # type: ignore[assignment]
+
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
+    inner = ExceptionGroup("inner cleanup", [RuntimeError("nested cleanup failure")])
+    inner.__notes__ = [UnhashableNote("nested group note")]
+    outer = ExceptionGroup("outer cleanup", [inner])
+    cancellation = asyncio.CancelledError()
+    cancellation.__cause__ = outer
+    failure = ClientDisconnect()
+    failure.__cause__ = cancellation
+
+    async def dispatch(
+        request: Request,
+        chain: Chain,
+        trace: RequestTrace,
+        completion: RequestCompletionCoordinator,
+    ) -> Response:
+        del request, chain, trace, completion
+        raise failure
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(inference_route, "_dispatch", dispatch)
+        response = await inference_route.serve(_request_for_direct_serve(client))
+
+    assert response.status_code == 499
+    snapshot = _registry(client).observation_snapshot()
+    assert snapshot.live == ()
+    assert len(snapshot.completed) == 1
+    record = snapshot.completed[0]
+    assert record.status == "gone"
+    assert len(record.delivery.additional_failures) == 1
+    additional = record.delivery.additional_failures[0]
+    assert additional.origin.value == "cleanup"
+    assert additional.type == "ExceptionGroup"
+    assert additional.notes == ("nested group note",)
+    assert "nested group note" in record.request_line().detail
+    records = _records()
+    assert len(records) == 1
+    delivery = cast(dict[str, Any], records[0]["observation"])["delivery"]
+    serialized = cast(dict[str, Any], cast(dict[str, Any], delivery)["additional_failures"][0])
+    assert serialized["notes"] == ["nested group note"]
+
+
+async def test_unrenderable_disconnect_secondary_is_recorded_without_escaping(
+    request_log: None,
+) -> None:
+    class UnrenderableCleanupError(RuntimeError):
+        def __str__(self) -> str:
+            raise RuntimeError("secondary str failed")
+
+        def __repr__(self) -> str:
+            raise RuntimeError("secondary repr failed")
+
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
+    context_failure = UnrenderableCleanupError()
+    failure = ClientDisconnect()
+    failure.__cause__ = asyncio.CancelledError()
+    failure.__context__ = context_failure
+
+    async def dispatch(
+        request: Request,
+        chain: Chain,
+        trace: RequestTrace,
+        completion: RequestCompletionCoordinator,
+    ) -> Response:
+        del request, chain, trace, completion
+        raise failure
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(inference_route, "_dispatch", dispatch)
+        response = await inference_route.serve(_request_for_direct_serve(client))
+
+    assert response.status_code == 499
+    snapshot = _registry(client).observation_snapshot()
+    assert snapshot.live == ()
+    assert len(snapshot.completed) == 1
+    record = snapshot.completed[0]
+    assert record.status == "gone"
+    assert record.delivery.failure is not None
+    assert record.delivery.failure.type == "ClientDisconnect"
+    assert len(record.delivery.additional_failures) == 1
+    additional = record.delivery.additional_failures[0]
+    assert additional.origin.value == "cleanup"
+    assert additional.type == "UnrenderableCleanupError"
+    assert additional.message is None
+    detail = record.request_line().detail
+    assert "cleanup also failed: " in detail
+    assert detail.endswith("UnrenderableCleanupError")
+
+
+async def test_disconnect_notes_remain_observable_after_the_exception_is_consumed(
+    request_log: None,
+) -> None:
+    class HostileNote(str):
+        __hash__ = None  # type: ignore[assignment]
+
+        def split(self, sep: str | None = None, maxsplit: Any = -1) -> list[str]:
+            del sep, maxsplit
+            raise GeneratorExit("note split escaped")
+
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
+    failure = ClientDisconnect()
+    failure.__notes__ = [HostileNote("cleanup also failed: note-only cleanup")]
+
+    async def dispatch(
+        request: Request,
+        chain: Chain,
+        trace: RequestTrace,
+        completion: RequestCompletionCoordinator,
+    ) -> Response:
+        del request, chain, trace, completion
+        raise failure
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(inference_route, "_dispatch", dispatch)
+        response = await inference_route.serve(_request_for_direct_serve(client))
+
+    assert response.status_code == 499
+    snapshot = _registry(client).observation_snapshot()
+    assert snapshot.live == ()
+    assert len(snapshot.completed) == 1
+    record = snapshot.completed[0]
+    assert record.status == "gone"
+    assert record.delivery.failure is not None
+    assert record.delivery.failure.notes == ("cleanup also failed: note-only cleanup",)
+    assert record.request_line().detail.endswith("cleanup also failed: note-only cleanup")
+    records = _records()
+    assert len(records) == 1
+    delivery = cast(dict[str, Any], records[0]["observation"])["delivery"]
+    serialized_failure = cast(dict[str, Any], cast(dict[str, Any], delivery)["failure"])
+    assert serialized_failure["notes"] == ["cleanup also failed: note-only cleanup"]
+
+
+def test_a_streaming_request_reports_what_it_received_from_upstream(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
+    # Written by the upstream body counter, not by the handler: at the moment the handler returns no response-body chunk has arrived, so a line written there would report every stream as having received zero bytes.
     client, _ = make_client(
         lambda _: httpx2.Response(
             200,
@@ -2366,15 +3382,22 @@ def test_a_streaming_request_reports_what_it_actually_delivered(request_log: Non
     lines = _request_lines(caplog.records)
     assert len(lines) == 1
     assert lines[0].startswith("H1/H1 200 anthropic-messages/claude-model ")
-    assert "↓" in lines[0], "a delivered stream must report its byte count"
+    assert "↓" in lines[0], "a streamed upstream response must report its received body bytes"
     assert "↓0B" not in lines[0]
 
 
 @pytest.mark.parametrize(
-    ("failure", "drained", "expected_status", "expected_detail"),
+    (
+        "failure",
+        "drained",
+        "completion_accepted",
+        "expected_status",
+        "expected_detail",
+    ),
     [
         pytest.param(
             ConnectionError("upstream tore"),
+            False,
             False,
             "fail",
             "stream failed before a terminal event: upstream tore",
@@ -2383,11 +3406,12 @@ def test_a_streaming_request_reports_what_it_actually_delivered(request_log: Non
         pytest.param(
             None,
             False,
+            False,
             "gone",
             "delivery stopped before upstream finished",
             id="client-left",
         ),
-        pytest.param(None, True, "ok", None, id="clean-drain"),
+        pytest.param(None, True, True, "ok", None, id="clean-drain"),
     ],
 )
 def test_one_shot_accounting_reports_how_delivery_actually_ended(
@@ -2395,6 +3419,7 @@ def test_one_shot_accounting_reports_how_delivery_actually_ended(
     caplog: pytest.LogCaptureFixture,
     failure: BaseException | None,
     drained: bool,
+    completion_accepted: bool,
     expected_status: str,
     expected_detail: str | None,
 ) -> None:
@@ -2410,18 +3435,23 @@ def test_one_shot_accounting_reports_how_delivery_actually_ended(
         request_id="req-one-shot",
         started=time.monotonic(),
     )
+    completion = RequestCompletionCoordinator(chain, trace, trace.request_id)
     accounting = _StreamAccounting(
         chain=chain,
         request_id=trace.request_id,
         trace=trace,
+        completion=completion,
         status_code=200,
         drained=drained,
         failure=failure,
     )
+    if completion_accepted:
+        accounting.completion_delivery.accept(True)
     chain.active_requests.add(trace.request_id)
 
     with caplog.at_level(logging.INFO):
-        accounting.finish()
+        accounting.settle()
+        completion.publish()
 
     (line, status), = _request_outcomes(caplog.records)
     assert status == expected_status
@@ -2449,10 +3479,12 @@ async def test_a_client_deadline_is_accounted_as_the_failure_its_frame_reports(
         started=time.monotonic(),
     )
     assembler = AnthropicAssembler()
+    completion = RequestCompletionCoordinator(chain, trace, trace.request_id)
     accounting = _StreamAccounting(
         chain=chain,
         request_id=trace.request_id,
         trace=trace,
+        completion=completion,
         status_code=200,
         assembler=assembler,
     )
@@ -2477,6 +3509,7 @@ async def test_a_client_deadline_is_accounted_as_the_failure_its_frame_reports(
     with caplog.at_level(logging.INFO), pytest.raises(ClientDeadlineError):
         async for chunk in delivery:
             chunks.append(chunk)
+    completion.publish()
 
     assert b"client_deadline_exceeded" in b"".join(chunks)
     (line, status), = _request_outcomes(caplog.records)
@@ -2488,9 +3521,9 @@ async def test_a_client_deadline_is_accounted_as_the_failure_its_frame_reports(
 def test_a_stream_that_never_terminated_is_not_reported_as_a_clean_finish(
     request_log: None, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The reported line, in full: `[ OK ] 09:00:11 H1/H2 200 anthropic-messages/claude-opus-5 385.0s ↑583.5KB ↓43.2KB`.
+    """The reported line, in full: `[ OK ] 09:00:11 H1/H2 200 anthropic-messages/claude-opus-5 385.0s ↑583.5KiB ↓43.2KiB`.
 
-    43KB had come back over 385 seconds and then upstream stopped without saying how the turn ended. The reply summary was gated on having seen that ending, so it was never taken onto the line — and every field that says what a reply *was* dropped out together, leaving something indistinguishable from a quiet successful request. The status could not correct it either: it is fixed when the response headers arrive and stays 200 however the stream ends.
+    43KiB had come back over 385 seconds and then upstream stopped without saying how the turn ended. The reply summary was gated on having seen that ending, so it was never taken onto the line — and every field that says what a reply *was* dropped out together, leaving something indistinguishable from a quiet successful request. The status could not correct it either: it is fixed when the response headers arrive and stays 200 however the stream ends.
 
     So the two halves are asserted separately. The prefix must say `fail`, and the line must name the truncation rather than leave it to be inferred from which fields are missing — an absence reads the same as a field this endpoint does not report.
     """
@@ -2519,7 +3552,7 @@ async def test_an_upstream_that_tore_says_so_and_says_what_broke(
 
     A reset, a `ReadError`, a converter blowing up — upstream failing mid-stream leaves the delivery generator by *raising*, not by being closed, so it skips the flag that marks a drained stream and used to be reported as a client that walked away. Two different sides of the proxy, one message.
 
-    The error text is on the line because nothing else on this path writes it down: it unwinds out through the framework, and the request's own line is the only record that survives. A line saying merely that the stream stopped throws away the one fact worth having.
+    The error text is on the line because the request's own account is the durable record. The production boundary now consumes a framed upstream failure after its error-frame send returns, so relying on a framework traceback would lose the fact precisely when duplicate traceback suppression works.
 
     This and the disconnect test below reach past the HTTP layer this file is otherwise about, because neither ending can be produced through it — `TestClient` drains the body rather than disconnecting, and no upstream stand-in reachable from a request can tear mid-stream. They stay here rather than moving to a component file because they need this file's `make_client` and `_chain_of` to build a real chain, and duplicating that to satisfy the directory name would be the worse trade.
     """
@@ -2527,8 +3560,9 @@ async def test_an_upstream_that_tore_says_so_and_says_what_broke(
     chain = _chain_of(client)
     trace = RequestTrace(method="POST", path="/v1/messages", request_id="req_1", started=time.monotonic())
     assembler = AnthropicAssembler()
+    completion = RequestCompletionCoordinator(chain, trace, trace.request_id)
     accounting = _StreamAccounting(
-        chain=chain, request_id="req_1", trace=trace, status_code=200, assembler=assembler
+        chain=chain, request_id="req_1", trace=trace, completion=completion, status_code=200, assembler=assembler
     )
     chain.active_requests.add("req_1")
 
@@ -2554,6 +3588,7 @@ async def test_an_upstream_that_tore_says_so_and_says_what_broke(
             with pytest.raises(httpx2.ReadError):
                 async for _ in delivery:
                     pass
+    completion.publish()
 
     (line, status), = _request_outcomes(caplog.records)
     assert status == "fail"
@@ -2576,8 +3611,9 @@ async def test_a_tear_after_the_stop_reason_is_still_a_tear(
     chain = _chain_of(client)
     trace = RequestTrace(method="POST", path="/v1/messages", request_id="req_1", started=time.monotonic())
     assembler = AnthropicAssembler()
+    completion = RequestCompletionCoordinator(chain, trace, trace.request_id)
     accounting = _StreamAccounting(
-        chain=chain, request_id="req_1", trace=trace, status_code=200, assembler=assembler
+        chain=chain, request_id="req_1", trace=trace, completion=completion, status_code=200, assembler=assembler
     )
     chain.active_requests.add("req_1")
 
@@ -2604,6 +3640,7 @@ async def test_a_tear_after_the_stop_reason_is_still_a_tear(
                     pass
 
     assert assembler.terminal.stop_reason == "end_turn", "upstream did give its reason before it tore"
+    completion.publish()
     (line, status), = _request_outcomes(caplog.records)
     assert status == "fail", f"a tear was reported as a clean finish: {line}"
     assert "connection reset by peer" in line
@@ -2648,8 +3685,9 @@ async def test_a_client_that_walked_away_is_not_blamed_on_upstream(
     chain = _chain_of(client)
     trace = RequestTrace(method="POST", path="/v1/messages", request_id="req_1", started=time.monotonic())
     assembler = AnthropicAssembler()
+    completion = RequestCompletionCoordinator(chain, trace, trace.request_id)
     accounting = _StreamAccounting(
-        chain=chain, request_id="req_1", trace=trace, status_code=200, assembler=assembler
+        chain=chain, request_id="req_1", trace=trace, completion=completion, status_code=200, assembler=assembler
     )
     chain.active_requests.add("req_1")
 
@@ -2676,6 +3714,7 @@ async def test_a_client_that_walked_away_is_not_blamed_on_upstream(
             assert await anext(delivery), "the first block should have reached the client"
             # And now the client is gone.
             await delivery.aclose()
+    completion.publish()
 
     (line, status), = _request_outcomes(caplog.records)
     # `gone`, not `fail`: nothing here is the proxy's fault or upstream's, and painting every cancelled turn the same red as a reset would bury the resets. Ruled 2026-08-20.
@@ -2685,6 +3724,843 @@ async def test_a_client_that_walked_away_is_not_blamed_on_upstream(
         f"a client-side disconnect was reported as an upstream fault: {line}"
     )
     assert "delivery stopped before upstream finished" in line
+
+
+@pytest.mark.parametrize(
+    ("disconnect_at", "expected_status"),
+    [
+        ("before_terminal_send_returns", "gone"),
+        ("after_terminal_send_returns", "ok"),
+        ("never", "ok"),
+    ],
+)
+async def test_a_native_terminal_is_complete_only_after_its_send_returns(
+    request_log: None,
+    caplog: pytest.LogCaptureFixture,
+    disconnect_at: str,
+    expected_status: str,
+) -> None:
+    """The production race behind Codex requests reported as gone after `response.completed`.
+
+    The event and chunk sequence comes from a real Copilot cassette. Only the transport tail and downstream disconnect are controlled: after the recorded terminal frame, upstream waits for another pull while the client disconnects before or after that frame's ASGI send returns. The send-return case meets the same application-visible boundary as a naturally drained stream; the suspended-send case does not. Letting upstream reach EOF is the no-disconnect control.
+    """
+    cassette = orjson.loads(Path("tests/int/cassettes/responses_web_search_stream.json").read_bytes())
+    interaction = next(i for i in cassette["interactions"] if "responses" in i["request"]["path"])
+    recorded_chunks = tuple(chunk["text"].encode() for chunk in interaction["response"]["chunks"])
+    assert any(b"response.completed" in chunk for chunk in recorded_chunks), (
+        "the cassette must still contain the terminal event this test controls"
+    )
+
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "unused"}))
+    chain = _chain_of(client)
+    trace = RequestTrace(
+        method="POST",
+        path="/v1/responses",
+        request_id="req_terminal_frontier",
+        started=time.monotonic(),
+    )
+    assembler = responses_passthrough_assembler()
+    completion = RequestCompletionCoordinator(chain, trace, trace.request_id)
+    accounting = _StreamAccounting(
+        chain=chain,
+        request_id=trace.request_id,
+        trace=trace,
+        completion=completion,
+        status_code=200,
+        assembler=cast(BlockAssembler[Any], assembler),
+    )
+    chain.active_requests.add(trace.request_id)
+
+    source_closed = asyncio.Event()
+    hold_transport_tail = asyncio.Event()
+
+    async def recorded_upstream() -> AsyncIterator[bytes]:
+        try:
+            for chunk in recorded_chunks:
+                yield chunk
+            if disconnect_at != "never":
+                # Production had parsed the terminal but was still waiting for the HTTP body iterator's next pull. Hold that exact interval until downstream cancellation closes us.
+                await hold_transport_tail.wait()
+        finally:
+            source_closed.set()
+
+    upstream = UpstreamSource(recorded_upstream())
+    framer = PassthroughFramer(
+        delegate=ResponsesFramer(response_id="resp_1", model="gpt-model"),
+        on_terminal_unit=accounting.completion_delivery.offer,
+    )
+    delivery = _tracked_delivery(
+        stream_delivery(
+            upstream,
+            assembler,
+            upstream=upstream,
+            buffer=cast(BlockBuffer[Any], delivery_buffer(chain)),
+            settings=stream_settings(chain),
+            framer=framer,
+            passthrough=True,
+        ),
+        accounting,
+    )
+    response = _AccountedStreamingResponse(
+        delivery,
+        accounting,
+        status_code=200,
+        media_type="text/event-stream",
+    )
+
+    terminal_send_started = asyncio.Event()
+    terminal_send_returned = asyncio.Event()
+    wait_forever = asyncio.Event()
+    sent_bodies: list[bytes] = []
+
+    async def send(message: Message) -> None:
+        if message["type"] != "http.response.body":
+            return
+        body = cast(bytes, message.get("body", b""))
+        if body:
+            sent_bodies.append(body)
+        if b"event: response.completed" not in body:
+            return
+        terminal_send_started.set()
+        if disconnect_at == "before_terminal_send_returns":
+            # The concurrent disconnect listener cancels this suspended send. The tracker must not accept a completion chunk whose send never returned.
+            await wait_forever.wait()
+        terminal_send_returned.set()
+
+    async def receive() -> dict[str, str]:
+        if disconnect_at == "before_terminal_send_returns":
+            await terminal_send_started.wait()
+        elif disconnect_at == "after_terminal_send_returns":
+            await terminal_send_returned.wait()
+        else:
+            await wait_forever.wait()
+        return {"type": "http.disconnect"}
+
+    with caplog.at_level(logging.INFO):
+        async with asyncio.timeout(10):
+            await response(
+                {
+                    "type": "http",
+                    "asgi": {"spec_version": "2.3"},
+                    "method": "POST",
+                    "path": "/v1/responses",
+                    "headers": [],
+                },
+                receive,
+                send,
+            )
+
+    assert assembler.terminal.seen, "the proxy must have parsed the recorded terminal in every case"
+    assert source_closed.is_set(), "downstream completion or cancellation must still release upstream"
+    assert terminal_send_returned.is_set() is (expected_status == "ok")
+    assert accounting.completion_delivery.accepted is (expected_status == "ok")
+    assert accounting.drained is (disconnect_at == "never")
+    assert any(b"event: response.completed" in body for body in sent_bodies)
+
+    (line, status), = _request_outcomes(caplog.records)
+    assert status == expected_status, line
+    if expected_status == "gone":
+        assert "delivery stopped before the upstream terminal reached the client" in line
+    else:
+        assert "delivery stopped before upstream finished" not in line
+
+
+async def test_a_terminal_marker_stays_with_its_chunk_when_buffering_releases_multiple_units(
+    request_log: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`until-tool-use` may release an older ordinary unit beside the terminal unit.
+
+    An unclosed item holds a later complete function call and terminal until EOF. Closing drops that item and offers the held terminal batch; the function call opens `until-tool-use`, so the buffer releases an earlier message batch and this terminal batch together. Framing the whole release eagerly used to set one shared pending bit before the earlier chunk was even yielded, making its send return accept a terminal whose own send had not returned.
+    """
+
+    def frame(name: str, payload: dict[str, Any]) -> str:
+        return f"event: {name}\ndata: {orjson.dumps(payload).decode()}\n\n"
+
+    ordinary: dict[str, Any] = {"type": "message", "id": "msg_0", "content": []}
+    never_closed: dict[str, Any] = {"type": "message", "id": "msg_1", "content": []}
+    function_call = {
+        "type": "function_call",
+        "id": "fc_2",
+        "call_id": "call_2",
+        "name": "Bash",
+        "arguments": "{}",
+    }
+    upstream_body = "".join(
+        [
+            *responses_envelope_frames(),
+            frame("response.output_item.added", {"output_index": 0, "item": ordinary}),
+            frame("response.output_item.done", {"output_index": 0, "item": ordinary}),
+            frame(
+                "response.output_item.added",
+                {"output_index": 1, "item": never_closed},
+            ),
+            frame(
+                "response.output_item.added",
+                {"output_index": 2, "item": function_call},
+            ),
+            frame(
+                "response.output_item.done",
+                {"output_index": 2, "item": function_call},
+            ),
+            frame(
+                "response.completed",
+                {"response": {"usage": {"input_tokens": 1, "output_tokens": 1}}},
+            ),
+        ]
+    ).encode()
+
+    async def recorded_shape() -> AsyncIterator[bytes]:
+        yield upstream_body
+
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "unused"}))
+    chain = _chain_of(client)
+    trace = RequestTrace(
+        method="POST",
+        path="/v1/responses",
+        request_id="req_multi_release_frontier",
+        started=time.monotonic(),
+    )
+    assembler = responses_passthrough_assembler()
+    completion = RequestCompletionCoordinator(chain, trace, trace.request_id)
+    accounting = _StreamAccounting(
+        chain=chain,
+        request_id=trace.request_id,
+        trace=trace,
+        completion=completion,
+        status_code=200,
+        assembler=cast(BlockAssembler[Any], assembler),
+    )
+    chain.active_requests.add(trace.request_id)
+    upstream = UpstreamSource(recorded_shape())
+    framer = PassthroughFramer(
+        delegate=ResponsesFramer(response_id="resp_1", model="gpt-model"),
+        on_terminal_unit=accounting.completion_delivery.offer,
+    )
+    delivery = _tracked_delivery(
+        stream_delivery(
+            upstream,
+            assembler,
+            upstream=upstream,
+            buffer=cast(
+                BlockBuffer[Any],
+                BlockBuffer(policy="until-tool-use"),
+            ),
+            settings=stream_settings(chain),
+            framer=framer,
+            passthrough=True,
+        ),
+        accounting,
+    )
+
+    with caplog.at_level(logging.INFO):
+        first = await anext(delivery)
+        assert b"response.completed" not in first
+        assert not accounting.completion_delivery.pending
+        assert not accounting.completion_delivery.accepted
+
+        # Pulling again means the first chunk's send returned. The next body is now offered to ASGI but its send has not returned, so only this terminal chunk may be pending.
+        terminal = await anext(delivery)
+        assert b"response.completed" in terminal
+        assert accounting.completion_delivery.pending
+        assert not accounting.completion_delivery.accepted
+
+        # The terminal send is cancelled rather than resumed. A marker accidentally attached to the first chunk would leave this request green.
+        await delivery.aclose()
+    completion.publish()
+
+    (line, status), = _request_outcomes(caplog.records)
+    assert status == "gone", line
+    assert "delivery stopped before the upstream terminal reached the client" in line
+
+
+async def test_the_responses_route_wires_its_terminal_send_to_completion_accounting(
+    request_log: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The production composition, not a manually connected framer and accounting object.
+
+    A component-level regression can prove the frontier's semantics while leaving `framer_for` free to drop its callback. This drives the real FastAPI route, request parser, provider, delivery policy and ASGI 2.3 disconnect listener so that the same omission would restore the production `[GONE]` line.
+    """
+    cassette = orjson.loads(Path("tests/int/cassettes/responses_web_search_stream.json").read_bytes())
+    interaction = next(i for i in cassette["interactions"] if "responses" in i["request"]["path"])
+    recorded_chunks = tuple(chunk["text"].encode() for chunk in interaction["response"]["chunks"])
+    hold_transport_tail = asyncio.Event()
+    upstream_closed = asyncio.Event()
+
+    async def recorded_upstream() -> AsyncIterator[bytes]:
+        try:
+            for chunk in recorded_chunks:
+                yield chunk
+            await hold_transport_tail.wait()
+        finally:
+            upstream_closed.set()
+
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200,
+            content=recorded_upstream(),
+            headers={"content-type": "text/event-stream"},
+        )
+    )
+    request_body = orjson.dumps({"model": "gpt-model", "input": [], "stream": True})
+    request_sent = False
+    terminal_send_returned = asyncio.Event()
+    sent_bodies: list[bytes] = []
+
+    async def receive() -> dict[str, Any]:
+        nonlocal request_sent
+        if not request_sent:
+            request_sent = True
+            return {"type": "http.request", "body": request_body, "more_body": False}
+        await terminal_send_returned.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: Message) -> None:
+        if message["type"] != "http.response.body":
+            return
+        body = cast(bytes, message.get("body", b""))
+        if body:
+            sent_bodies.append(body)
+        if b"event: response.completed" in body:
+            # No await between this signal and returning: the stream task resumes `_tracked_delivery` and accepts the frontier before the disconnect listener can run.
+            terminal_send_returned.set()
+
+    scope: dict[str, Any] = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/responses",
+        "raw_path": b"/v1/responses",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"host", b"testserver"),
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(request_body)).encode()),
+        ],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+        "state": {},
+    }
+
+    with caplog.at_level(logging.INFO):
+        async with asyncio.timeout(10):
+            await cast(Any, client.app)(scope, receive, send)
+
+    assert upstream_closed.is_set(), "the downstream disconnect must still close the held upstream tail"
+    assert any(b"event: response.completed" in body for body in sent_bodies)
+    (line, status), = _request_outcomes(caplog.records)
+    assert status == "ok", line
+    assert "delivery stopped before upstream finished" not in line
+
+
+async def test_response_start_failure_closes_the_unstarted_upstream_owner() -> None:
+    class OwnedStream(httpx2.AsyncByteStream):
+        def __init__(self) -> None:
+            self.pulled = False
+            self.closed = False
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            self.pulled = True
+            yield responses_sse_upstream()
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    owned = OwnedStream()
+
+    def upstream(_: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            200,
+            stream=owned,
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client, _ = make_client(upstream)
+    request_body = orjson.dumps({"model": "gpt-model", "input": [], "stream": True})
+    request_sent = False
+
+    async def receive() -> Message:
+        nonlocal request_sent
+        if not request_sent:
+            request_sent = True
+            return {"type": "http.request", "body": request_body, "more_body": False}
+        # Keep the disconnect channel open so this test reaches its stated boundary: the response-start send fails. Pre-response disconnect has its own test below.
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    async def send(message: Message) -> None:
+        if message["type"] == "http.response.start":
+            raise OSError("client transport closed before response start")
+
+    scope: dict[str, Any] = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/responses",
+        "raw_path": b"/v1/responses",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"host", b"testserver"),
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(request_body)).encode()),
+        ],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+        "state": {},
+    }
+
+    await cast(Any, client.app)(scope, receive, send)
+
+    assert owned.pulled is False
+    assert owned.closed is True
+    snapshot = _registry(client).observation_snapshot()
+    assert snapshot.live == ()
+    assert len(snapshot.completed) == 1
+
+
+async def test_disconnect_with_repeated_level_cancellation_stays_inside_the_app() -> None:
+    """HTTP cleanup can receive the same AnyIO cancellation at more than one checkpoint.
+
+    Those linked `CancelledError` objects are still the one expected disconnect exit. They must neither become a cleanup failure nor escape to Uvicorn after the request record is complete.
+    """
+
+    class WaitingProvider:
+        name = "ghc"
+        base_url = "https://upstream.invalid"
+        catalog_refreshed_at = "2026-09-04T00:00:00+00:00"
+        available_ids = frozenset({"gpt-model"})
+        disabled_ids: frozenset[str] = frozenset()
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.cancellations: list[asyncio.CancelledError] = []
+
+        def describe(self, model_id: str) -> ModelDescriptor | None:
+            if model_id != "gpt-model":
+                return None
+            return ModelDescriptor(
+                id=model_id,
+                endpoints=frozenset({ModelEndpoint.OPENAI_RESPONSES}),
+                provider_name="ghc",
+            )
+
+        async def refresh_catalog(self) -> bool:
+            return False
+
+        async def send(
+            self,
+            endpoint: ModelEndpoint,
+            payload: Any,
+            *,
+            descriptor: ModelDescriptor,
+            stream: bool = False,
+            extra_headers: Any = None,
+        ) -> httpx2.Response:
+            del endpoint, payload, descriptor, stream, extra_headers
+            self.calls += 1
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError as first:
+                self.cancellations.append(first)
+                try:
+                    # Mirrors an HTTP transport doing another await while its AnyIO cancel scope is already cancelled. Level cancellation injects another object whose context points at the first.
+                    await asyncio.sleep(0)
+                except asyncio.CancelledError as repeated:
+                    self.cancellations.append(repeated)
+                    raise
+                raise
+            raise AssertionError("unreachable")
+
+        async def count_tokens(
+            self, payload: Any, *, descriptor: ModelDescriptor
+        ) -> httpx2.Response:
+            del payload, descriptor
+            raise NotImplementedError
+
+    provider = WaitingProvider()
+    config = ProxyConfig.model_validate(
+        {
+            "model_providers": {"ghc": {"type": "github_copilot"}},
+            "default_model_provider": "ghc",
+            "upstream_request_retry": {"max_total": 9},
+            "client_delivery": {"client_request_deadline": 30},
+            "upstream_request_timeouts": {"upstream_request_deadline": 30},
+        }
+    )
+    request_body = orjson.dumps(
+        {
+            "model": "gpt-model",
+            "messages": [],
+            "max_tokens": 1024,
+            "stream": True,
+        }
+    )
+    request_sent = False
+    sent: list[Message] = []
+
+    async def receive() -> Message:
+        nonlocal request_sent
+        if not request_sent:
+            request_sent = True
+            return {
+                "type": "http.request",
+                "body": request_body,
+                "more_body": False,
+            }
+        return {"type": "http.disconnect"}
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    scope: dict[str, Any] = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "https",
+        "path": "/v1/messages",
+        "raw_path": b"/v1/messages",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"host", b"testserver"),
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(request_body)).encode()),
+        ],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 443),
+        "state": {},
+    }
+
+    async with httpx2.AsyncClient() as http_client:
+        chain = build_chain(
+            config,
+            http_client=http_client,
+            providers={"ghc": cast(ModelProvider, provider)},
+        )
+        app = create_pipeline_app(chain)
+        async with asyncio.timeout(1):
+            await cast(Any, app)(scope, receive, send)
+
+    assert sent == []
+    assert len(provider.cancellations) == 2
+    assert provider.cancellations[0] is not provider.cancellations[1]
+    assert provider.cancellations[1].__context__ is provider.cancellations[0]
+    assert provider.calls == 1
+    snapshot = chain.active_requests.observation_snapshot()
+    assert snapshot.live == ()
+    assert len(snapshot.completed) == 1
+    record = snapshot.completed[0]
+    assert record.status == "gone"
+    assert record.delivery.failure is not None
+    assert record.delivery.failure.category.value == "disconnect"
+    assert record.delivery.additional_failures == ()
+    assert len(record.interruptions) == 1
+    interruption = record.interruptions[0]
+    assert interruption.kind.value == "http_disconnect"
+    assert interruption.phase.value == "dispatch_wait"
+
+
+async def test_disconnect_before_upstream_headers_cancels_the_dispatch() -> None:
+    """A completed request body used to leave no downstream disconnect listener.
+
+    Uvicorn marks a lost HTTP/1.1 connection disconnected and wakes `receive`, but it does not cancel the ASGI task. Waiting for an eventual response send to notice therefore leaves the abandoned dispatch free to wait and retry upstream.
+    """
+
+    class WaitingProvider:
+        name = "ghc"
+        base_url = "https://upstream.invalid"
+        catalog_refreshed_at = "2026-09-04T00:00:00+00:00"
+        available_ids = frozenset({"gpt-model"})
+        disabled_ids: frozenset[str] = frozenset()
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.cancelled = asyncio.Event()
+            self.cancellation: asyncio.CancelledError | None = None
+
+        def describe(self, model_id: str) -> ModelDescriptor | None:
+            if model_id != "gpt-model":
+                return None
+            return ModelDescriptor(
+                id=model_id,
+                endpoints=frozenset({ModelEndpoint.OPENAI_RESPONSES}),
+                provider_name="ghc",
+            )
+
+        async def refresh_catalog(self) -> bool:
+            return False
+
+        async def send(
+            self,
+            endpoint: ModelEndpoint,
+            payload: Any,
+            *,
+            descriptor: ModelDescriptor,
+            stream: bool = False,
+            extra_headers: Any = None,
+        ) -> httpx2.Response:
+            del endpoint, payload, descriptor, stream, extra_headers
+            self.calls += 1
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError as cancellation:
+                self.cancelled.set()
+                self.cancellation = cancellation
+                # A transport cleanup may replace cancellation with a group that also contains something the retry taxonomy normally funds. The current task is still cancelling, so this must remain one attempt; cancellation becomes primary and the residual cleanup group must stay structured without pointing back to it.
+                grouped = BaseExceptionGroup(
+                    "provider cleanup replaced cancellation",
+                    [cancellation, PipelineRetry("retryable cleanup failure")],
+                )
+                grouped.add_note("provider cleanup note")
+                raise grouped from OSError("provider cleanup root")
+            raise AssertionError("unreachable")
+
+        async def count_tokens(
+            self, payload: Any, *, descriptor: ModelDescriptor
+        ) -> httpx2.Response:
+            del payload, descriptor
+            raise NotImplementedError
+
+    provider = WaitingProvider()
+    config = ProxyConfig.model_validate(
+        {
+            "model_providers": {"ghc": {"type": "github_copilot"}},
+            "default_model_provider": "ghc",
+            # A positive budget distinguishes cancellation from an UpstreamError: the former must not open a replacement attempt.
+            "upstream_request_retry": {"max_total": 9},
+            "client_delivery": {"client_request_deadline": 30},
+            "upstream_request_timeouts": {"upstream_request_deadline": 30},
+        }
+    )
+    request_body = orjson.dumps(
+        {"model": "gpt-model", "input": [], "stream": True}
+    )
+    request_sent = False
+    receive_calls = 0
+    sent: list[Message] = []
+
+    async def receive() -> Message:
+        nonlocal request_sent, receive_calls
+        receive_calls += 1
+        if not request_sent:
+            request_sent = True
+            return {
+                "type": "http.request",
+                "body": request_body,
+                "more_body": False,
+            }
+        return {"type": "http.disconnect"}
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    scope: dict[str, Any] = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "https",
+        "path": "/v1/responses",
+        "raw_path": b"/v1/responses",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"host", b"testserver"),
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(request_body)).encode()),
+        ],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 443),
+        "state": {},
+    }
+
+    async with httpx2.AsyncClient() as http_client:
+        chain = build_chain(
+            config,
+            http_client=http_client,
+            providers={"ghc": cast(ModelProvider, provider)},
+        )
+        app = create_pipeline_app(chain)
+
+        async with asyncio.timeout(1):
+            await cast(Any, app)(scope, receive, send)
+
+    assert sent == []
+    cancellation = provider.cancellation
+    assert isinstance(cancellation, asyncio.CancelledError)
+    residual_value = cancellation.__cause__
+    assert isinstance(residual_value, BaseExceptionGroup)
+    residual = cast(BaseExceptionGroup[BaseException], residual_value)
+    assert residual.message == "provider cleanup replaced cancellation"
+    assert isinstance(residual.__cause__, OSError)
+    assert str(residual.__cause__) == "provider cleanup root"
+    assert getattr(residual, "__notes__", None) == ["provider cleanup note"]
+    assert len(residual.exceptions) == 1
+    assert isinstance(residual.exceptions[0], PipelineRetry)
+    assert str(residual.exceptions[0]) == "retryable cleanup failure"
+    assert cancellation not in residual.exceptions
+    assert receive_calls == 2
+    assert provider.cancelled.is_set()
+    assert provider.calls == 1
+    snapshot = chain.active_requests.observation_snapshot()
+    assert snapshot.live == ()
+    assert len(snapshot.completed) == 1
+    record = snapshot.completed[0]
+    assert record.status == "gone"
+    assert record.delivery.failure is not None
+    assert record.delivery.failure.category.value == "disconnect"
+    assert len(record.delivery.additional_failures) == 1
+    additional = record.delivery.additional_failures[0]
+    assert additional.origin.value == "cleanup"
+    assert additional.category.value == "error"
+    assert additional.type == "ExceptionGroup"
+    assert additional.message is not None
+    assert "provider cleanup replaced cancellation" in additional.message
+    assert additional.notes == ("provider cleanup note",)
+    assert "cleanup also failed: provider cleanup replaced cancellation" in record.request_line().detail
+    assert "provider cleanup note" in record.request_line().detail
+    assert len(record.interruptions) == 1
+    interruption = record.interruptions[0]
+    assert interruption.kind.value == "http_disconnect"
+    assert interruption.phase.value == "dispatch_wait"
+    assert interruption.category == "disconnect"
+
+
+async def test_repeated_level_cancellations_are_not_disconnect_secondaries() -> None:
+    operation_started = asyncio.Event()
+    cancellations: list[asyncio.CancelledError] = []
+
+    async def operation() -> Response:
+        operation_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError as first:
+            cancellations.append(first)
+            try:
+                await asyncio.sleep(0)
+            except asyncio.CancelledError as repeated:
+                cancellations.append(repeated)
+                raise
+            raise
+        raise AssertionError("unreachable")
+
+    async def receive() -> Message:
+        await operation_started.wait()
+        return {"type": "http.disconnect"}
+
+    with pytest.raises(ClientDisconnect) as raised:
+        await _run_dispatch_while_connected(receive, operation)
+
+    assert len(cancellations) == 2
+    assert cancellations[0] is not cancellations[1]
+    assert cancellations[1].__context__ is cancellations[0]
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+
+
+async def test_disconnect_preserves_an_operation_cleanup_failure() -> None:
+    operation_started = asyncio.Event()
+
+    async def operation() -> Response:
+        operation_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError as cancellation:
+            raise cancellation from RuntimeError("operation cleanup failed")
+        raise AssertionError("unreachable")
+
+    async def receive() -> Message:
+        await operation_started.wait()
+        return {"type": "http.disconnect"}
+
+    with pytest.raises(ClientDisconnect) as raised:
+        await _run_dispatch_while_connected(receive, operation)
+
+    cancellation = raised.value.__cause__
+    assert isinstance(cancellation, asyncio.CancelledError)
+    assert isinstance(cancellation.__cause__, RuntimeError)
+    assert str(cancellation.__cause__) == "operation cleanup failed"
+
+
+async def test_listener_cleanup_failure_closes_the_unhanded_response() -> None:
+    class ReceiveCleanupError(RuntimeError):
+        pass
+
+    class PreparedResponse(Response):
+        def __init__(self) -> None:
+            super().__init__()
+            self.close_finished = asyncio.Event()
+
+        async def aclose(self) -> None:
+            await asyncio.sleep(0)
+            self.close_finished.set()
+
+    prepared = PreparedResponse()
+
+    async def operation() -> Response:
+        return prepared
+
+    async def receive() -> Message:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError as cancellation:
+            raise ReceiveCleanupError("receive cleanup failed") from cancellation
+        raise AssertionError("unreachable")
+
+    with pytest.raises(ReceiveCleanupError, match="receive cleanup failed"):
+        await _run_dispatch_while_connected(receive, operation)
+
+    assert prepared.close_finished.is_set()
+
+
+async def test_outer_cancellation_during_listener_cleanup_closes_the_response() -> None:
+    class PreparedResponse(Response):
+        def __init__(self) -> None:
+            super().__init__()
+            self.close_finished = asyncio.Event()
+
+        async def aclose(self) -> None:
+            await asyncio.sleep(0)
+            self.close_finished.set()
+
+    prepared = PreparedResponse()
+    listener_cleanup_started = asyncio.Event()
+    release_listener = asyncio.Event()
+
+    async def operation() -> Response:
+        return prepared
+
+    async def receive() -> Message:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            listener_cleanup_started.set()
+            # Keep task-group __aexit__ open until a second, outer cancellation has landed on the helper task.
+            with anyio.CancelScope(shield=True):
+                await release_listener.wait()
+            raise
+        raise AssertionError("unreachable")
+
+    running = asyncio.create_task(
+        _run_dispatch_while_connected(receive, operation)
+    )
+    await asyncio.wait_for(listener_cleanup_started.wait(), timeout=1)
+    running.cancel()
+    await asyncio.sleep(0)
+    release_listener.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+    assert prepared.close_finished.is_set()
 
 
 def test_a_stream_that_did_terminate_is_still_reported_as_one(
@@ -2783,6 +4659,7 @@ def test_a_responses_upstream_is_logged_in_its_own_words(request_log: None, capl
                     {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "sealed"},
                     {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "Bash", "arguments": "{}"},
                 ],
+                "usage": {"input_tokens": 9, "output_tokens": 2},
             },
         )
     )
@@ -2795,6 +4672,8 @@ def test_a_responses_upstream_is_logged_in_its_own_words(request_log: None, capl
     assert "reason(enc:1)" in line
     # `function_call`, not the `tool_use` stop reason synthesised downstream for the client's benefit — a Responses trace contains no `tool_use` to go looking for.
     assert "function_call(Bash)" in line
+    assert "↓2" in line
+    assert "↑9" not in line, "missing cache details must not turn the whole prompt into known-fresh input"
     assert "think(" not in line and "tool_use(" not in line
 
 
@@ -2828,7 +4707,7 @@ def responses_sse_upstream(usage: dict[str, Any] | None = None) -> bytes:
     reported = usage if usage is not None else {"input_tokens": 3, "output_tokens": 4}
     frames.append(
         "event: response.completed\n"
-        f'data: {orjson.dumps({"response": {"usage": reported}}).decode()}\n\n'
+        f'data: {orjson.dumps({"response": {"status": "completed", "model": "gpt-model", "output": items, "usage": reported}}).decode()}\n\n'
     )
     return "".join(frames).encode()
 
@@ -2872,6 +4751,73 @@ def responses_observability_sse(
     return "".join(frames).encode()
 
 
+def responses_web_search_sse(query: str = "release notes", answer: str = "found") -> bytes:
+    search = {
+        "type": "web_search_call",
+        "id": "unstable-search-id",
+        "status": "completed",
+        "action": {"type": "search", "query": query},
+    }
+    message: dict[str, Any] = {
+        "type": "message",
+        "id": "message-id",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": answer, "annotations": []}],
+    }
+    frames = [
+        *responses_envelope_frames(),
+        f"event: response.output_item.added\ndata: {orjson.dumps({'output_index': 0, 'item': {'type': 'web_search_call', 'id': 'added-id', 'status': 'in_progress'}}).decode()}\n\n",
+        f"event: response.output_item.done\ndata: {orjson.dumps({'output_index': 0, 'item': search}).decode()}\n\n",
+        f"event: response.output_item.added\ndata: {orjson.dumps({'output_index': 1, 'item': {'type': 'message', 'id': 'message-added', 'role': 'assistant', 'status': 'in_progress', 'content': []}}).decode()}\n\n",
+        f"event: response.output_text.delta\ndata: {orjson.dumps({'output_index': 1, 'item_id': 'message-delta', 'delta': answer}).decode()}\n\n",
+        f"event: response.output_item.done\ndata: {orjson.dumps({'output_index': 1, 'item': message}).decode()}\n\n",
+        "event: response.completed\n"
+        f'data: {orjson.dumps({"response": {"status": "completed", "model": "gpt-model", "output": [search, message], "usage": {"input_tokens": 3, "output_tokens": 4}}}).decode()}\n\n',
+    ]
+    return "".join(frames).encode()
+
+
+def incomplete_unsolicited_search_response() -> dict[str, Any]:
+    return {
+        "id": "resp_incomplete_search",
+        "model": "gpt-model",
+        "status": "incomplete",
+        "incomplete_details": {"reason": "content_filter"},
+        "output": [
+            {
+                "type": "message",
+                "id": "message-before",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "before", "annotations": []}],
+            },
+            {
+                "type": "web_search_call",
+                "id": "search-cut-short",
+                "status": "incomplete",
+                "action": {"type": "search", "query": "unfinished"},
+            },
+        ],
+        "usage": {"input_tokens": 3, "output_tokens": 4},
+    }
+
+
+def incomplete_unsolicited_search_sse() -> bytes:
+    response = incomplete_unsolicited_search_response()
+    message, search = cast(list[dict[str, Any]], response["output"])
+    frames = [
+        *responses_envelope_frames(),
+        f"event: response.output_item.added\ndata: {orjson.dumps({'output_index': 0, 'item': {**message, 'status': 'in_progress', 'content': []}}).decode()}\n\n",
+        f"event: response.output_text.delta\ndata: {orjson.dumps({'output_index': 0, 'item_id': 'message-delta', 'delta': 'before'}).decode()}\n\n",
+        f"event: response.output_item.done\ndata: {orjson.dumps({'output_index': 0, 'item': message}).decode()}\n\n",
+        f"event: response.output_item.added\ndata: {orjson.dumps({'output_index': 1, 'item': {**search, 'status': 'in_progress', 'action': None}}).decode()}\n\n",
+        f"event: response.output_item.done\ndata: {orjson.dumps({'output_index': 1, 'item': search}).decode()}\n\n",
+        f"event: response.incomplete\ndata: {orjson.dumps({'response': response}).decode()}\n\n",
+    ]
+    return "".join(frames).encode()
+
+
 def custom_tool_call_sse() -> bytes:
     """A Responses stream whose one output item is a `custom_tool_call`.
 
@@ -2889,12 +4835,15 @@ def custom_tool_call_sse() -> bytes:
         f"event: response.output_item.added\ndata: {orjson.dumps({'output_index': 0, 'item': item}).decode()}\n\n",
         f"event: response.output_item.done\ndata: {orjson.dumps({'output_index': 0, 'item': {**item, 'status': 'completed'}}).decode()}\n\n",
         "event: response.completed\n"
-        f'data: {orjson.dumps({"response": {"usage": {"input_tokens": 3, "output_tokens": 4}}}).decode()}\n\n',
+        f'data: {orjson.dumps({"response": {"status": "completed", "model": "gpt-model", "output": [{**item, "status": "completed"}], "usage": {"input_tokens": 3, "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0}, "output_tokens": 4, "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": 7}}}).decode()}\n\n',
     ]
     return "".join(frames).encode()
 
 
-def test_an_output_item_this_proxy_does_not_know_reaches_the_client_intact() -> None:
+def test_an_output_item_this_proxy_does_not_know_reaches_the_client_intact(
+    request_log: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Issue #2. Upstream answered 200 and delivery raised `ValueError: no Responses item shape for block kind 'custom_tool_call'`, tearing the stream.
 
     Two defects, one line apart. `_open` mapped an unrecognised item type to *itself*, so the block's kind became the literal string `custom_tool_call`; `_close`'s final `else` built a `TEXT`-shaped payload without setting `kind` to match, which the `WEB_SEARCH_CALL` branch beside it does. The block contradicted itself, and the two legs failed differently: `ResponsesFramer` raised, `AnthropicFramer` sent an empty text block under a `stop_reason` of `end_turn` — telling the client the model had finished while it was in fact waiting on a tool call.
@@ -2912,10 +4861,11 @@ def test_an_output_item_this_proxy_does_not_know_reaches_the_client_intact() -> 
             200, content=custom_tool_call_sse(), headers={"content-type": "text/event-stream"}
         )
     )
-    response = client.post(
-        "/responses",
-        json={"model": "gpt-model", "input": [], "stream": True},
-    )
+    with caplog.at_level(logging.INFO):
+        response = client.post(
+            "/responses",
+            json={"model": "gpt-model", "input": [], "stream": True},
+        )
 
     assert response.status_code == 200
     names = [
@@ -2935,6 +4885,9 @@ def test_an_output_item_this_proxy_does_not_know_reaches_the_client_intact() -> 
     assert names[-1] == "response.completed", names
     assert "error" not in names, names
     assert "unknown_output_item" not in response.text, response.text
+    request_line = _request_lines(caplog.records)[0]
+    assert "completed custom_tool_call(run_shell)" in request_line
+    assert "function_call" not in request_line
 
 
 def test_a_direct_responses_stream_is_answered_in_responses_events() -> None:
@@ -3011,7 +4964,7 @@ def delivered_events(body: str) -> list[tuple[str, dict[str, Any]]]:
     return pairs
 
 
-def test_a_sealed_reasoning_item_keeps_the_id_its_seal_was_cut_against() -> None:
+def test_explicitly_disabled_reshape_keeps_each_id_with_its_seal() -> None:
     """Issue #4, the response half. Upstream answered 400 `invalid_request_body` on a *later* turn of a working conversation.
 
     `encrypted_content` is bound to the item id upstream issued it under, and upstream verifies that binding when the item comes back. The translating leg minted its own ids — `ResponsesFramer._item_id` returns `f"{prefix}_{response_id}_{output_index}"`, where `response_id` is this proxy's `uuid4` — and attached upstream's seal to them. The pair the client stored was self-contradictory from the moment it was written.
@@ -3024,14 +4977,15 @@ def test_a_sealed_reasoning_item_keeps_the_id_its_seal_was_cut_against() -> None
 
     Mutation-checked 2026-09-01: making `carries_upstream_natively` answer `False` turns the ids into `rs_<uuid4>_0` and this test red. That mutation exercises the mint, not the collapse — the collapse has no implementation to mutate, which is why the fixture rather than a mutation is what guards it.
 
-    **This is the shipped default**, and `fix_stream_ids` is what would break it — that reshape settles an item's events onto one id on purpose, so the companion below asserts the other contract over the same stream with the switch on.
+    **This is the explicit native opt-out**, and `fix_stream_ids` is what would break it — that reshape settles an item's events onto one id on purpose, so this test turns the default-on switch off while the companion below asserts the default contract over the same stream.
     """
     client, _ = make_client(
         lambda _: httpx2.Response(
             200,
             content=drifting_sealed_reasoning_sse(),
             headers={"content-type": "text/event-stream"},
-        )
+        ),
+        overrides={"hook_fix_responses_sse": {"fix_stream_ids": False}},
     )
     response = client.post(
         "/responses",
@@ -3052,8 +5006,8 @@ def test_a_sealed_reasoning_item_keeps_the_id_its_seal_was_cut_against() -> None
     assert (closed["id"], closed["encrypted_content"]) == ("id_003", "seal-closed"), closed
 
 
-def test_the_opt_in_reshape_settles_drifting_ids_onto_the_closing_one() -> None:
-    """The same stream as above with `fix_stream_ids` asked for. `spec.md` §6.6.
+def test_the_default_reshape_settles_drifting_ids_onto_the_closing_one() -> None:
+    """The same stream as above under the default-on `fix_stream_ids`. `spec.md` §6.6.
 
     Upstream spells one item differently on every event it appears in — measured 2026-09-02 over a real stream: ten distinct ids for a single `output_index`, three distinct `response.id`. The user named a client that checks those ids for continuity, so the reshape settles them.
 
@@ -3064,8 +5018,7 @@ def test_the_opt_in_reshape_settles_drifting_ids_onto_the_closing_one() -> None:
             200,
             content=drifting_sealed_reasoning_sse(),
             headers={"content-type": "text/event-stream"},
-        ),
-        overrides={"hook_fix_responses_sse": {"fix_stream_ids": True}},
+        )
     )
     response = client.post(
         "/responses",
@@ -3213,11 +5166,9 @@ def test_a_direct_responses_client_declares_hosted_web_search_for_itself() -> No
 
 
 def test_a_direct_responses_client_survives_an_upstream_that_really_searched() -> None:
-    """The guard for the block pair that §5.3 requires and this project has not built yet.
+    """A direct Responses client keeps the upstream-native search stream.
 
-    `ResponsesAssembler` serves both legs — a Responses client directly, and a Responses upstream being translated to Anthropic — while the framer is always the *client's*. So the moment a `web_search_call` starts assembling into the `server_tool_use` / `web_search_tool_result` pair that §5.3 freezes, a direct `/responses` client gets an Anthropic block handed to `ResponsesFramer`, which has no item shape for it. That is issue #1's exception reached from the opposite direction, and nothing was watching this direction: the sibling test above forwards the declaration but its upstream never actually searches, so it cannot see the block shape at all.
-
-    Green today because the assembler flattens the item to text. It is here to go red the moment that changes without a per-leg switch, which is the whole point — the reply this client should get is a Responses item, never an Anthropic one.
+    The translated Anthropic crossing now revives an expected `web_search_call` as a native Anthropic pair, but this direct route uses the passthrough assembler and must never enter that conversion. The reply this client gets is a Responses item, never an Anthropic block.
 
     Driven by the real recording rather than a hand-written stream, for the reason its sibling gives: a `web_search_call` carries nothing on `added` and everything on `done`, and a stand-in gets that backwards.
 
@@ -3475,14 +5426,12 @@ def test_terminal_output_drives_both_action_list_and_completed_colour(
     assert f"{GREEN}completed{RESET}" not in line
 
 
-def test_a_route_whose_reply_cannot_be_read_claims_nothing_about_it(
+def test_a_direct_buffered_responses_reply_is_observed_before_translation(
     request_log: None, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """An inbound `/responses` reply keeps its own shape end to end, and the Anthropic reader finds nothing in it.
+    """A direct Responses body is read in its own source vocabulary rather than by the Anthropic reply reader.
 
-    The regression this pins: summarising through a record whose stop reason defaults to `end_turn` turned "nobody said" into "finished cleanly", so every one of these lines claimed an outcome no upstream had reported. An absent `content` is indistinguishable from a reply that had none, which is exactly why the empty summary has to be refused rather than absorbed.
-
-    Reporting nothing here is the honest state and also the pre-existing one; giving these routes a real summary is open work, tracked in `.dev/docs/tui/deferred.md`.
+    The old path honestly reported nothing because its only reader expected `content`. The provider-side observer now reads `output` before any response translation, so buffered and streamed Responses expose the same status, item and reasoning facts without inventing an Anthropic stop reason.
     """
     client, _ = make_client(
         lambda _: httpx2.Response(
@@ -3504,10 +5453,135 @@ def test_a_route_whose_reply_cannot_be_read_claims_nothing_about_it(
 
     line = _request_lines(caplog.records)[0]
     assert line.startswith("H1/H1 200 openai-responses/gpt-model ")
-    assert "end_turn" not in line, "a stop reason nobody sent must not appear"
-    # The reply's contents are simply not reported on this route yet. Asserted so that giving it a reader is a deliberate change to this test rather than a silent one.
-    assert "reason(" not in line and "think(" not in line
-    assert "function_call(" not in line and "tool_use(" not in line
+    assert "completed reason(enc:1) function_call(Bash)" in line
+    assert line.count("reason(enc:1)") == 1
+    assert "end_turn" not in line and "tool_use" not in line
+
+
+@pytest.mark.parametrize(
+    ("provider_status", "provider_error", "expected"),
+    [
+        (
+            "failed",
+            {"code": "server_error", "message": "provider failed"},
+            "failed",
+        ),
+        ("cancelled", None, "cancelled"),
+        (
+            "completed",
+            {"code": "server_error", "message": "provider failed"},
+            "error(server_error)",
+        ),
+    ],
+)
+def test_a_direct_buffered_provider_failure_is_not_logged_as_an_http_success(
+    provider_status: str,
+    provider_error: dict[str, str] | None,
+    expected: str,
+    request_log: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200,
+            json={
+                "id": "resp_1",
+                "model": "gpt-model",
+                "status": provider_status,
+                "error": provider_error,
+                "output": [],
+            },
+        )
+    )
+
+    with caplog.at_level(logging.INFO):
+        response = client.post("/responses", json={"model": "gpt-model", "input": []})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == provider_status
+    line = _request_lines(caplog.records)[0]
+    assert "POST /responses gpt-model" in line
+    assert f" {expected}" in line
+    if provider_error is not None:
+        assert provider_error["message"] in line
+    assert " req=" in line
+    assert "completed" not in line
+
+
+def test_translated_buffered_failure_keeps_source_projection_after_client_translation(
+    request_log: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200,
+            json={
+                "id": "resp_1",
+                "model": "gpt-model",
+                "status": "failed",
+                "error": {"code": "server_error", "message": "provider failed"},
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "upstream_name",
+                        "call_id": "call_1",
+                        "arguments": "{}",
+                    }
+                ],
+                "usage": {"input_tokens": 9, "output_tokens": 2},
+            },
+        )
+    )
+
+    with caplog.at_level(logging.INFO):
+        response = client.post("/v1/messages", json={"model": "gpt-model", "messages": []})
+
+    assert response.status_code == 200
+    record = _records()[-1]
+    assert record["usage"] == {"output_tokens": 2}
+    assert record["blocks"] == 1
+    assert record["tools"] == ["upstream_name"]
+    line = _request_lines(caplog.records)[0]
+    assert "failed" in line
+    assert "function_call(upstream_name)" in line
+    assert "↑9" not in line
+
+
+def test_source_projection_survives_a_response_translation_exception(
+    request_log: None,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200,
+            json={
+                "id": "resp_1",
+                "model": "gpt-model",
+                "status": "completed",
+                "output": [{"type": "function_call", "name": "upstream_name"}],
+                "usage": {"input_tokens": 9, "output_tokens": 2},
+            },
+        )
+    )
+
+    def fail_translation(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("response translation broke")
+
+    monkeypatch.setattr(inference_route, "response_payload", fail_translation)
+    with caplog.at_level(logging.INFO), pytest.raises(
+        RuntimeError,
+        match="response translation broke",
+    ):
+        client.post("/v1/messages", json={"model": "gpt-model", "messages": []})
+
+    record = _records()[-1]
+    assert record["usage"] == {"output_tokens": 2}
+    assert record["blocks"] == 1
+    assert record["tools"] == ["upstream_name"]
+    line = _request_lines(caplog.records)[0]
+    assert "completed function_call(upstream_name)" in line
+    assert "↑0" not in line and "↑9" not in line
 
 
 def test_a_streamed_translated_reply_reports_what_the_prompt_actually_cost(
@@ -3522,7 +5596,10 @@ def test_a_streamed_translated_reply_reports_what_the_prompt_actually_cost(
             200,
             content=responses_sse_upstream({
                 "input_tokens": 138_500,
-                "input_tokens_details": {"cached_tokens": 135_000},
+                "input_tokens_details": {
+                    "cached_tokens": 135_000,
+                    "cache_write_tokens": 0,
+                },
                 "output_tokens": 2_700,
                 "total_tokens": 141_200,
             }),
@@ -3538,6 +5615,7 @@ def test_a_streamed_translated_reply_reports_what_the_prompt_actually_cost(
     assert "↑3.5k+135.0k" in line
     assert "↻97%" in line
     assert "↓2.7k" in line
+    assert "completed reason(enc:1) function_call(Bash)" in line
     assert "↑138.5k" not in line, "the total was being reported as though none of it was cached"
 
 
@@ -3552,9 +5630,35 @@ async def test_a_body_that_fails_to_close_is_still_accounted_for() -> None:
         finally:
             raise RuntimeError("closing the body blew up")
 
+    class _Completion:
+        delivery_accepted = False
+
+        def mark_response_ready(self, _status_code: int) -> None:
+            pass
+
+        def note_asgi_message_offered(self, _message: Message) -> None:
+            pass
+
+        def note_send_failure(self, _error: BaseException) -> None:
+            pass
+
+        def note_http_disconnect(self, *, phase: object) -> None:
+            pass
+
+        def note_asgi_receive_error(self, _error: Exception, *, phase: object) -> None:
+            pass
+
+        def note_wrapped_failure(self, _error: BaseException, *, origin: object) -> None:
+            pass
+
+        def publish(self) -> None:
+            finished.append("published")
+
     class _Accounting:
-        def finish(self) -> None:
-            finished.append("finished")
+        completion = _Completion()
+
+        def settle(self) -> None:
+            finished.append("settled")
 
     content = body()
     # Started, so that closing it has a suspended frame to unwind and the `finally` above can run.
@@ -3564,13 +5668,13 @@ async def test_a_body_that_fails_to_close_is_still_accounted_for() -> None:
     async def receive() -> dict[str, Any]:
         return {"type": "http.disconnect"}
 
-    async def send(message: dict[str, Any]) -> None:
+    async def send(message: Message) -> None:
         raise RuntimeError("the client went away")
 
     with pytest.raises(RuntimeError) as raised:
         await response({"type": "http", "method": "POST", "path": "/", "headers": []}, receive, send)
 
-    assert finished == ["finished"]
+    assert finished == ["settled", "published"]
     # The exit that ended the request, not the close that failed on the way out — with the close failure chained on so neither is lost.
     assert str(raised.value) == "the client went away"
     assert str(raised.value.__cause__) == "closing the body blew up"
@@ -3593,7 +5697,10 @@ def test_a_buffered_translated_reply_hands_the_client_anthropic_token_keys(
                 "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hi"}]}],
                 "usage": {
                     "input_tokens": 138_500,
-                    "input_tokens_details": {"cached_tokens": 135_000},
+                    "input_tokens_details": {
+                    "cached_tokens": 135_000,
+                    "cache_write_tokens": 0,
+                },
                     "output_tokens": 2_700,
                     "total_tokens": 141_200,
                 },
@@ -4045,6 +6152,33 @@ def test_an_approximated_effort_is_recorded_as_a_loss() -> None:
             "asked for xhigh, which this model does not offer; sent high",
         )
     ]
+
+
+@pytest.mark.parametrize("route", ["/v1/messages", "/v1/messages/count_tokens"])
+@pytest.mark.parametrize(
+    "choice",
+    [
+        {"type": "tool", "name": "missing"},
+        {"type": "tool", "name": "lookup", "future_field": 1},
+    ],
+)
+def test_unrepresentable_tool_choice_is_refused_before_upstream(
+    route: str, choice: dict[str, Any]
+) -> None:
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
+    response = client.post(
+        route,
+        json={
+            "model": "gpt-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"name": "lookup", "input_schema": {"type": "object"}}],
+            "tool_choice": choice,
+        },
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "tool-choice-not-supported"
+    assert response.json()["error"]["param"] == "tool_choice"
+    assert seen == []
 
 
 def test_an_unreadable_thinking_field_is_refused_by_name() -> None:
@@ -4719,9 +6853,18 @@ def test_a_torn_stream_the_client_never_saw_is_replayed_end_to_end() -> None:
     assert events[-1] == "message_stop"
     assert "kept" in response.text
     assert len(calls) == 2
+    record = _records()[-1]
+    assert not any(
+        item["kind"] == "upstream_stream_failure"
+        for item in record["observation"]["interruptions"]
+    )
+    assert record["observation"]["timings"]["upstream_timing_attempt"] == 2
 
 
-def test_a_replay_on_the_translation_leg_sends_the_conversation_again() -> None:
+def test_a_replay_on_the_translation_leg_sends_the_conversation_again(
+    request_log: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """The primary path, where a replayed attempt has to send what the *client* sent.
 
     `handle` translates in place — it assigns the translated body back onto the context and edits the dict it was given — so a second pass over the same context translated an already-translated body. Measured before the fix: the second attempt went out as `{"model": "gpt-model", "input": [], "stream": true}`, and the client was answered from an empty prompt with a clean 200. The earlier end-to-end replay test uses `claude-model`, which needs no translation, so it was structurally unable to see this.
@@ -4733,8 +6876,8 @@ def test_a_replay_on_the_translation_leg_sends_the_conversation_again() -> None:
     async def torn_body() -> AsyncIterator[bytes]:
         yield (
             b'event: response.output_item.added\n'
-            b'data: {"output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[],'
-            b'"encrypted_content":"sealed"}}\n\n'
+            b'data: {"output_index":5,"item":{"type":"custom_tool_call","id":"old_1",'
+            b'"name":"discarded"}}\n\n'
         )
         raise httpx2.RemoteProtocolError("peer closed the connection")
 
@@ -4751,14 +6894,15 @@ def test_a_replay_on_the_translation_leg_sends_the_conversation_again() -> None:
         )
 
     client, seen = make_client(upstream)
-    response = client.post(
-        "/v1/messages",
-        json={
-            "model": "gpt-model",
-            "messages": [{"role": "user", "content": "remember me"}],
-            "stream": True,
-        },
-    )
+    with caplog.at_level(logging.INFO):
+        response = client.post(
+            "/v1/messages",
+            json={
+                "model": "gpt-model",
+                "messages": [{"role": "user", "content": "remember me"}],
+                "stream": True,
+            },
+        )
 
     assert response.status_code == 200
     assert len(calls) == 2
@@ -4768,6 +6912,254 @@ def test_a_replay_on_the_translation_leg_sends_the_conversation_again() -> None:
     assert "remember me" in seen[-1].content.decode()
     # And it was translated exactly once: a second pass would have wrapped the Responses body again.
     assert "messages" not in replayed
+    line = _request_lines(caplog.records)[0]
+    assert "completed reason(enc:1) function_call(Bash)" in line
+    assert "discarded" not in line
+    assert "custom_tool_call" not in line
+
+
+def test_delivery_replay_reuses_the_normal_attempt_that_produced_the_stream() -> None:
+    prepare_calls = 0
+    failure_calls = 0
+    a_text = "A" * 2000
+    b_text = "B" * 2000
+    c_text = "C" * 2000
+
+    class CountingAdmission:
+        def __init__(self, delegate: PromptTokenAdmission) -> None:
+            self.delegate = delegate
+            self.calls = 0
+
+        async def evaluate(
+            self,
+            *,
+            attempt: int,
+            target_format: str,
+            descriptor: ModelDescriptor,
+            payload: dict[str, Any],
+        ) -> TokenAdmissionObservation:
+            self.calls += 1
+            return await self.delegate.evaluate(
+                attempt=attempt,
+                target_format=target_format,
+                descriptor=descriptor,
+                payload=payload,
+            )
+
+    admission_counter: CountingAdmission | None = None
+
+    def set_input_text(request: RequestContext, text: str) -> None:
+        items = cast(list[Any], request.payload["input"])
+        message = cast(dict[str, Any], items[0])
+        parts = cast(list[Any], message["content"])
+        part = cast(dict[str, Any], parts[0])
+        part["text"] = text
+
+    async def on_prepare(request: RequestContext) -> None:
+        nonlocal prepare_calls
+        prepare_calls += 1
+        if request.attempt_count >= 3:
+            set_input_text(request, c_text)
+
+    async def on_failure(request: RequestContext) -> None:
+        nonlocal failure_calls
+        failure_calls += 1
+        set_input_text(request, b_text)
+
+    def configure(chain: Chain) -> None:
+        nonlocal admission_counter
+        events = {
+            event: list(chain.subscribers.for_event(event))
+            for event in chain.subscribers.events
+        }
+        events.setdefault(EVENT_ATTEMPT_PREPARE, []).append(
+            Subscription(id="test:count-prepare", handler=on_prepare)
+        )
+        events.setdefault(EVENT_ATTEMPT_FAILED, []).append(
+            Subscription(id="test:rewrite-after-503", handler=on_failure)
+        )
+        chain.subscribers = FrozenSubscribers(events)
+        admission_counter = CountingAdmission(chain.prompt_token_admission)
+        chain.prompt_token_admission = cast(PromptTokenAdmission, admission_counter)
+
+    async def torn_body() -> AsyncIterator[bytes]:
+        yield (
+            b"event: response.output_item.added\n"
+            b'data: {"output_index":0,"item":{"type":"custom_tool_call","id":"torn_1",'
+            b'"name":"discarded"}}\n\n'
+        )
+        raise httpx2.RemoteProtocolError("stream from B tore")
+
+    calls = 0
+
+    def upstream(_request: httpx2.Request) -> httpx2.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx2.Response(
+                503,
+                json={"error": {"message": "try again", "type": "server_error"}},
+            )
+        if calls == 2:
+            return httpx2.Response(
+                200,
+                content=torn_body(),
+                headers={"content-type": "text/event-stream"},
+            )
+        return httpx2.Response(
+            200,
+            content=responses_sse_upstream(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    catalog = deepcopy(CATALOG)
+    catalog_entries = cast(list[dict[str, Any]], catalog["data"])
+    gpt_descriptor = next(item for item in catalog_entries if item.get("id") == "gpt-model")
+    gpt_descriptor["capabilities"] = {
+        "tokenizer": "o200k_base",
+        "limits": {"max_prompt_tokens": 1000, "max_context_window_tokens": 1000},
+    }
+    client, seen = make_client(
+        upstream,
+        catalog=catalog,
+        overrides={"upstream_request_retry": {"max_total": 2}},
+        configure_chain=configure,
+    )
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "gpt-model",
+            "messages": [{"role": "user", "content": a_text}],
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert calls == 3
+    assert len(seen) == 3
+    sent = [orjson.loads(request.content) for request in seen]
+    assert sent[0]["input"][0]["content"][0]["text"] == a_text
+    assert sent[1]["input"][0]["content"][0]["text"] == b_text
+    assert sent[2] == sent[1]
+    assert c_text not in seen[2].content.decode()
+    assert prepare_calls == 2
+    assert failure_calls == 1
+    assert admission_counter is not None
+    assert admission_counter.calls == 2
+    admissions = _records()[-1]["observation"]["token_admission"]
+    assert [entry["outcome"] for entry in admissions] == [
+        "admitted_counted",
+        "admitted_counted",
+        "reused",
+    ]
+    source = admissions[1]
+    reused = admissions[2]
+    assert reused["reused_from_attempt"] == 1
+    assert reused["reused_outcome"] == "admitted_counted"
+    assert source["field_token_count"] is not None
+    for key in (
+        "origin",
+        "target_format",
+        "model",
+        "provider",
+        "catalog_generation",
+        "catalog_refreshed_at",
+        "tokenizer",
+        "max_prompt_tokens",
+        "max_context_window_tokens",
+        "field_path",
+        "field_kind",
+        "field_utf8_byte_count",
+        "field_token_count",
+    ):
+        assert reused[key] == source[key]
+
+
+@pytest.mark.parametrize(
+    ("second_body", "expected_response_codes"),
+    [
+        (responses_sse_upstream(), []),
+        (
+            responses_web_search_sse(query="second search", answer="second answer"),
+            [
+                "server-tool-call-id-not-carried",
+                "server-tool-partially-representable",
+            ],
+        ),
+    ],
+    ids=["replacement-does-not-search", "replacement-searches-once"],
+)
+def test_a_replay_keeps_only_the_winning_attempts_response_losses(
+    second_body: bytes,
+    expected_response_codes: list[str],
+) -> None:
+    calls: list[int] = []
+
+    async def searched_then_torn() -> AsyncIterator[bytes]:
+        search = {
+            "type": "web_search_call",
+            "id": "first-attempt-id",
+            "status": "completed",
+            "action": {"type": "search", "query": "discarded search"},
+        }
+        frames = [
+            *responses_envelope_frames(),
+            f"event: response.output_item.added\ndata: {orjson.dumps({'output_index': 0, 'item': {'type': 'web_search_call', 'id': 'first-added', 'status': 'in_progress'}}).decode()}\n\n",
+            f"event: response.output_item.done\ndata: {orjson.dumps({'output_index': 0, 'item': search}).decode()}\n\n",
+        ]
+        yield "".join(frames).encode()
+        raise httpx2.RemoteProtocolError("first attempt tore after search")
+
+    def upstream(request: httpx2.Request) -> httpx2.Response:
+        calls.append(1)
+        return (
+            httpx2.Response(
+                200,
+                content=searched_then_torn(),
+                headers={"content-type": "text/event-stream"},
+            )
+            if len(calls) == 1
+            else httpx2.Response(
+                200,
+                content=second_body,
+                headers={"content-type": "text/event-stream"},
+            )
+        )
+
+    client, _ = make_client(
+        upstream,
+        overrides={
+            "client_delivery": {"buffering_policy": "full"},
+            "model_translation": {"to_openai_responses": {"hosted_web_search": True}},
+            "model_providers": {
+                "ghc": {
+                    "type": "github_copilot",
+                    "api_base_url": BASE_URL,
+                    "models_support_web_search": ["gpt-model"],
+                }
+            },
+        },
+    )
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "gpt-model",
+            "messages": [{"role": "user", "content": "search"}],
+            "stream": True,
+            "max_tokens": 256,
+            "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(calls) == 2
+    response_losses = [
+        entry
+        for entry in _records()[-1]["losses"]
+        if entry["direction"] == "response"
+    ]
+    assert [entry["code"] for entry in response_losses] == expected_response_codes
+    assert not any("discarded search" in entry["detail"] for entry in response_losses)
 
 
 def test_per_message_effort_survives_a_pre_block_translation_replay() -> None:
@@ -4946,9 +7338,9 @@ def test_a_replacement_that_never_opened_an_attempt_is_not_recorded_as_one(
 ) -> None:
     """The entry and the attempt count are written off the same fact, so neither can appear without the other.
 
-    `context.attempt_count` advances in `RequestContext.begin_attempt`, which `DirectDriver.run` calls on the way in, and `handle` can fail well before reaching it — `shape_request` and translation both run first. Recording the replacement on the way in was the fix for losing a replacement that failed *after* opening its attempt, and it overshot in the other direction: measured, one upstream call, `attempts=1`, and a `replaced_failures` entry for a replay that had not opened one.
+    `context.attempt_count` advances in `RequestContext.begin_attempt`, which `DirectDriver.run` calls on the way in, and `replay_prepared` can fail while validating or constructing that driver. Recording the replacement on the way in was the fix for losing a replacement that failed *after* opening its attempt, and it overshot in the other direction: measured, one upstream call, `attempts=1`, and a `replaced_failures` entry for a replay that had not opened one.
 
-    **"Opened an attempt", not "reached upstream" — a review narrowed this and the distinction is real.** `begin_attempt` runs before the prepare subscribers, before the rate limiter and before `_send`, so a replacement that fails between them advances the count with no upstream I/O and *is* recorded. The injection point below sits in `shape_request`, which satisfies both readings, so this test cannot tell them apart and does not claim to. If "a byte actually left" is ever the fact wanted, `attempt_count` is the wrong oracle for it and a new one belongs at the provider-send boundary — that is a product question, not something a test's wording should settle quietly.
+    **"Opened an attempt", not "reached upstream" — a review narrowed this and the distinction is real.** `begin_attempt` runs before the rate limiter and before `_send`, so a replacement that fails between them advances the count with no upstream I/O and *is* recorded. The injection point below sits before the replay driver, which satisfies both readings, so this test cannot tell them apart and does not claim to. If "a byte actually left" is ever the fact wanted, `attempt_count` is the wrong oracle for it and a new one belongs at the provider-send boundary — that is a product question, not something a test's wording should settle quietly.
 
     A phantom here is worse than a missing entry, because the field exists to answer "what did this proxy quietly do" and an invented answer is unfalsifiable from the record.
     """
@@ -4966,27 +7358,69 @@ def test_a_replacement_that_never_opened_an_attempt_is_not_recorded_as_one(
             200, content=torn_body(), headers={"content-type": "text/event-stream"}
         )
 
-    real_shape = driver.shape_request
-    shaped: list[int] = []
+    replays: list[int] = []
 
-    def shape_once(*args: Any, **kwargs: Any) -> Any:
-        shaped.append(1)
-        if len(shaped) > 1:
-            # Before the driver exists, let alone `begin_attempt` — the same position a routing or translation failure occupies.
-            raise RuntimeError("the replay could not even be shaped")
-        return real_shape(*args, **kwargs)
+    async def fail_before_attempt(*_args: Any, **_kwargs: Any) -> Any:
+        replays.append(1)
+        # Before the replay driver exists, let alone `begin_attempt`.
+        raise RuntimeError("the replay could not open its prepared driver")
 
-    monkeypatch.setattr(driver, "shape_request", shape_once)
+    monkeypatch.setattr(inference_route, "replay_prepared", fail_before_attempt)
 
     client, _ = make_client(upstream)
     with contextlib.suppress(Exception):
         client.post("/v1/messages", json={"model": "claude-model", "messages": [], "stream": True})
 
-    assert len(shaped) == 2, "the premise: a replay was attempted"
+    assert replays == [1], "the premise: a replay was attempted"
     assert calls == [1], "and it failed before the driver could open an attempt for it"
     record = _records()[-1]
     assert record["attempts"] == 1
     assert record["replaced_failures"] == []
+
+
+def test_a_replacement_that_opens_but_never_gets_a_response_cannot_leak_the_old_observation(
+    request_log: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    calls: list[int] = []
+
+    async def torn_body() -> AsyncIterator[bytes]:
+        yield (
+            b'event: response.output_item.added\n'
+            b'data: {"output_index":5,"item":{"type":"custom_tool_call",'
+            b'"name":"discarded"}}\n\n'
+        )
+        raise httpx2.RemoteProtocolError("first attempt tore")
+
+    def upstream(request: httpx2.Request) -> httpx2.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx2.Response(
+                200,
+                content=torn_body(),
+                headers={"content-type": "text/event-stream"},
+            )
+        raise httpx2.ConnectError("replacement failed before response", request=request)
+
+    client, _ = make_client(
+        upstream,
+        overrides={"upstream_request_retry": {"max_total": 1}},
+    )
+    with caplog.at_level(logging.INFO), contextlib.suppress(Exception):
+        client.post(
+            "/responses",
+            json={"model": "gpt-model", "input": [], "stream": True},
+        )
+
+    assert calls == [1, 1], "the replacement must have opened and reached the provider"
+    record = _records()[-1]
+    assert record["attempts"] == 2
+    assert record["blocks"] == 0
+    assert record["tools"] == []
+    assert record["thinking"] == []
+    line = _request_lines(caplog.records)[0]
+    assert "discarded" not in line
+    assert "custom_tool_call" not in line
 
 
 def test_a_long_upstream_failure_is_cut_before_it_reaches_the_line(
@@ -5057,6 +7491,8 @@ def test_a_long_failure_is_cut_on_the_hand_over_line_too(
     assert "more chars" in line
     assert huge not in line
     assert len(line) < 800
+    expected = hand_over_module.one_line(repr(httpx2.RemoteProtocolError(huge)))
+    assert _records()[-1]["detail"].endswith(expected)
 
 
 def test_the_client_deadline_survives_a_replay() -> None:
@@ -5178,6 +7614,325 @@ def test_an_interrupted_turn_is_handed_back_to_the_client_as_a_tool_call(
     assert b"message_stop" in delivered
     # And what the client kept is still there: the hand-over adds an ending, it does not replace one.
     assert b'"text":"first"' in delivered
+    record = _records()[-1]
+    assert record["status"] == "retry"
+    assert record["observation"]["delivery"]["state"] == "accepted"
+    assert record["observation"]["delivery"]["unit"] == "translated_drain"
+    assert record["observation"]["delivery"]["failure"] is None
+    interruptions = record["observation"]["interruptions"]
+    upstream_interruptions = [
+        item for item in interruptions if item["kind"] == "upstream_stream_failure"
+    ]
+    assert len(upstream_interruptions) == 1
+    interruption = upstream_interruptions[0]
+    assert interruption["kind"] == "upstream_stream_failure"
+    assert interruption["origin"] == "upstream"
+    assert interruption["phase"] == "upstream_body"
+    assert interruption["attempt"] == 1
+    assert interruption["category"] == handed["input"]["category"]
+    assert interruption["exception_module"] == httpx2.RemoteProtocolError.__module__
+    assert interruption["exception_type"] == httpx2.RemoteProtocolError.__qualname__
+    assert "ConnectionTerminated" in interruption["message"]
+    assert interruption["continuation_synthesized"] is True
+    timings = record["observation"]["timings"]
+    assert timings["upstream_timing_attempt"] == 1
+    assert timings["last_upstream_chunk_s"] is not None
+    assert timings["final_upstream_pull_started_s"] is not None
+    assert timings["upstream_end_s"] is not None
+    assert timings["upstream_tail_gap_s"] >= timings["upstream_final_pull_s"] >= 0
+
+
+@pytest.mark.parametrize("provider_terminal", [False, True], ids=["mid-turn", "post-terminal"])
+async def test_real_h1_incomplete_chunked_body_records_the_exact_trigger_and_pull_timing(
+    request_log: None,
+    provider_terminal: bool,
+) -> None:
+    reasoning: dict[str, Any] = {
+        "type": "reasoning",
+        "id": "rs_1",
+        "summary": [],
+        "encrypted_content": "sealed",
+    }
+    message: dict[str, Any] = {
+        "type": "message",
+        "id": "msg_1",
+        "role": "assistant",
+        "status": "in_progress",
+        "content": [],
+    }
+
+    def frame(name: str, data: dict[str, Any]) -> bytes:
+        return f"event: {name}\ndata: {orjson.dumps(data).decode()}\n\n".encode()
+
+    body_frames = [
+        *(item.encode() for item in responses_envelope_frames()),
+        frame(
+            "response.output_item.added",
+            {"output_index": 0, "item": reasoning},
+        ),
+        frame(
+            "response.output_item.done",
+            {"output_index": 0, "item": reasoning},
+        ),
+    ]
+    if provider_terminal:
+        body_frames.append(
+            frame(
+                "response.completed",
+                {
+                    "response": {
+                        "status": "completed",
+                        "model": "gpt-model",
+                        "output": [reasoning],
+                        "usage": {"input_tokens": 3, "output_tokens": 4},
+                    }
+                },
+            )
+        )
+    else:
+        body_frames.extend(
+            [
+                frame(
+                    "response.output_item.added",
+                    {"output_index": 1, "item": message},
+                ),
+                frame(
+                    "response.output_text.delta",
+                    {"output_index": 1, "item_id": "msg_1", "delta": "partial"},
+                ),
+            ]
+        )
+    partial_body = b"".join(body_frames)
+
+    class IncompleteChunkedHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, format: str, *args: object) -> None:
+            del format, args
+
+        def _send_json(self, body: object) -> None:
+            encoded = orjson.dumps(body)
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def do_GET(self) -> None:
+            if self.path.endswith("/models"):
+                self._send_json(CATALOG)
+                return
+            self.send_error(404)
+
+        def do_POST(self) -> None:
+            length = int(self.headers.get("content-length", "0"))
+            if length:
+                self.rfile.read(length)
+            if not self.path.endswith("/responses"):
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("content-type", "text/event-stream")
+            self.send_header("transfer-encoding", "chunked")
+            self.send_header("connection", "close")
+            self.end_headers()
+            self.wfile.write(f"{len(partial_body):X}\r\n".encode())
+            self.wfile.write(partial_body)
+            self.wfile.write(b"\r\n")
+            self.wfile.flush()
+            # Deliberately omit the zero chunk and trailers. Returning closes the H1 socket while h11 still expects the body terminator.
+            self.close_connection = True
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), IncompleteChunkedHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        async with (
+            httpx2.AsyncClient(
+                transport=httpx2.MockTransport(
+                    lambda _: httpx2.Response(
+                        200,
+                        json={
+                            "token": "copilot",
+                            "expires_at": 5000,
+                            "refresh_in": 1500,
+                        },
+                    )
+                )
+            ) as token_http,
+            httpx2.AsyncClient() as upstream_http,
+        ):
+            tokens = CopilotTokenManager(
+                StaticTokenSource(), token_http, clock=lambda: 1000
+            )
+            ghc_client = GhcApiClient(
+                AsyncOpenAI(
+                    api_key="proxy-managed",
+                    base_url=base_url,
+                    http_client=upstream_http,
+                    max_retries=0,
+                ),
+                AsyncAnthropic(
+                    api_key="proxy-managed",
+                    base_url=base_url,
+                    http_client=upstream_http,
+                    max_retries=0,
+                ),
+                tokens,
+                GhcClientConfig(api_base_url_override=base_url),
+                interaction_id="real-h1-incomplete-chunked",
+            )
+            provider = GithubCopilotProvider(
+                "ghc",
+                ghc_client,
+                GithubCopilotProviderConfig(type="github_copilot"),
+                http_client=upstream_http,
+                base_url=base_url,
+            )
+            provider.replace_catalog(CATALOG)
+            config = ProxyConfig.model_validate(
+                {
+                    "model_providers": {
+                        "ghc": {
+                            "type": "github_copilot",
+                            "api_base_url": base_url,
+                        }
+                    },
+                    "default_model_provider": "ghc",
+                    "upstream_request_retry": {"max_total": 0},
+                }
+            )
+            chain = build_chain(
+                config,
+                http_client=upstream_http,
+                providers={"ghc": cast(ModelProvider, provider)},
+            )
+            async with httpx2.AsyncClient(
+                transport=httpx2.ASGITransport(app=create_pipeline_app(chain)),
+                base_url="http://testserver",
+            ) as downstream_http:
+                response = await downstream_http.post(
+                    "/v1/messages",
+                    json={
+                        "model": "gpt-model",
+                        "messages": [],
+                        "stream": True,
+                    },
+                )
+        assert token_http.is_closed
+        assert upstream_http.is_closed
+        assert downstream_http.is_closed
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+    assert not thread.is_alive()
+
+    assert response.status_code == 200
+    record = _records()[-1]
+    interruptions = [
+        item
+        for item in record["observation"]["interruptions"]
+        if item["kind"] == "upstream_stream_failure"
+    ]
+    if provider_terminal:
+        assert interruptions == []
+        assert b"turn_interrupted" not in response.content
+        assert b'"thinking_delta"' in response.content
+        assert b'"stop_reason":"end_turn"' in response.content
+        events = [
+            line.removeprefix("event: ")
+            for line in response.text.splitlines()
+            if line.startswith("event: ")
+        ]
+        assert events.count("message_stop") == 1
+        assert events[-1] == "message_stop"
+        assert record["status"] == "ok"
+        assert "RemoteProtocolError" in record["tore_after_terminal"]
+        assert "incomplete chunked read" in record["tore_after_terminal"]
+    else:
+        handed = _handed_back(response.content)
+        assert b'"thinking_delta"' in response.content
+        assert response.text.count(TOOL_NAME) == 1
+        events = [
+            line.removeprefix("event: ")
+            for line in response.text.splitlines()
+            if line.startswith("event: ")
+        ]
+        assert events.count("message_stop") == 1
+        assert events[-1] == "message_stop"
+        assert b'"stop_reason":"tool_use"' in response.content
+        assert len(interruptions) == 1
+        interruption = interruptions[0]
+        assert interruption["attempt"] == 1
+        assert interruption["category"] == handed["input"]["category"] == "network"
+        assert interruption["exception_module"] == httpx2.RemoteProtocolError.__module__
+        assert interruption["exception_type"] == httpx2.RemoteProtocolError.__qualname__
+        assert interruption["message"] == (
+            "peer closed connection without sending complete message body (incomplete chunked read)"
+        )
+        assert record["status"] == "retry"
+    assert record["observation"]["delivery"]["state"] == "accepted"
+    assert record["observation"]["delivery"]["unit"] == "translated_drain"
+    assert record["observation"]["delivery"]["failure"] is None
+    timings = record["observation"]["timings"]
+    assert timings["upstream_timing_attempt"] == 1
+    assert timings["last_upstream_chunk_s"] is not None
+    assert timings["final_upstream_pull_started_s"] is not None
+    assert timings["upstream_end_s"] is not None
+    assert timings["upstream_tail_gap_s"] >= timings["upstream_final_pull_s"] >= 0
+    assert timings["upstream_tail_gap_s"] == pytest.approx(
+        timings["upstream_end_s"] - timings["last_upstream_chunk_s"]
+    )
+    assert timings["upstream_final_pull_s"] == pytest.approx(
+        timings["upstream_end_s"] - timings["final_upstream_pull_started_s"]
+    )
+
+
+def test_only_the_attempt_that_synthesizes_continuation_records_an_interruption() -> None:
+    calls: list[int] = []
+
+    async def first_attempt() -> AsyncIterator[bytes]:
+        yield (
+            b'event: content_block_start\ndata: {"index":0,"content_block":{"type":"text"}}\n\n'
+        )
+        raise httpx2.ReadError("first attempt tore before a complete block")
+
+    async def second_attempt() -> AsyncIterator[bytes]:
+        yield sse_upstream("kept").partition(b"event: message_delta")[0]
+        raise httpx2.RemoteProtocolError("second attempt tore after a complete block")
+
+    def upstream(_: httpx2.Request) -> httpx2.Response:
+        calls.append(1)
+        body = first_attempt() if len(calls) == 1 else second_attempt()
+        return httpx2.Response(
+            200,
+            content=body,
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client, _ = make_client(upstream)
+    delivered = _delivered(client)
+
+    assert len(calls) == 2
+    handed = _handed_back(delivered)
+    record = _records()[-1]
+    interruptions = [
+        item
+        for item in record["observation"]["interruptions"]
+        if item["kind"] == "upstream_stream_failure"
+    ]
+    assert len(interruptions) == 1
+    interruption = interruptions[0]
+    assert interruption["attempt"] == 2
+    assert interruption["category"] == handed["input"]["category"] == "network"
+    assert interruption["exception_type"] == httpx2.RemoteProtocolError.__qualname__
+    assert interruption["message"] == "second attempt tore after a complete block"
+    assert record["attempts"] == 2
+    assert record["observation"]["timings"]["upstream_timing_attempt"] == 2
+    assert len(record["replaced_failures"]) == 1
+    assert "first attempt tore" in record["replaced_failures"][0]
 
 
 def test_the_marker_sits_below_this_sides_bookkeeping_in_production(
@@ -5195,11 +7950,11 @@ def test_the_marker_sits_below_this_sides_bookkeeping_in_production(
             super().__init__()
             self.seen = 0
 
-        def add_bytes(self, request_id: str, count: int) -> None:
+        def add_upstream_response_bytes(self, request_id: str, count: int) -> None:
             self.seen += 1
             if self.seen >= 4:
                 raise LookupError("bug in this side's byte counter")
-            super().add_bytes(request_id, count)
+            super().add_upstream_response_bytes(request_id, count)
 
     async def frame_by_frame() -> AsyncIterator[bytes]:
         # One chunk per frame, so the counter is called several times and the bug lands after a block has already gone out.
@@ -5223,6 +7978,205 @@ def test_the_marker_sits_below_this_sides_bookkeeping_in_production(
 
     # And it is not dressed up as a turn the client can carry on from.
     assert not any("handed back" in line for line in _request_lines(caplog.records))
+
+
+def test_runtime_upstream_stream_failure_is_reported_without_escaping_the_app() -> None:
+    message = "peer closed connection without sending complete message body (incomplete chunked read)"
+    core_error = httpcore2.RemoteProtocolError(message)
+    error = httpx2.RemoteProtocolError(message)
+    error.__cause__ = core_error
+    error.__context__ = core_error
+
+    async def torn_body() -> AsyncIterator[bytes]:
+        yield (
+            b'event: content_block_start\ndata: {"index":0,"content_block":{"type":"text"}}\n\n'
+        )
+        raise error
+
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200,
+            content=torn_body(),
+            headers={"content-type": "text/event-stream"},
+        ),
+        overrides={"upstream_request_retry": {"max_total": 0}},
+    )
+
+    delivered = _delivered(client)
+
+    assert b'"code":"upstream_stream_failed"' in delivered
+    record = _records()[-1]
+    assert record["status"] == "fail"
+    delivery = record["observation"]["delivery"]
+    assert delivery["state"] == "accepted"
+    assert delivery["unit"] == "body"
+    failure = delivery["failure"]
+    assert failure["origin"] == "upstream"
+    assert failure["type"] == httpx2.RemoteProtocolError.__qualname__
+    assert failure["message"] == str(error)
+
+
+async def test_reported_upstream_failure_does_not_hide_a_distinct_cleanup_failure() -> None:
+    upstream_error = httpx2.RemoteProtocolError("upstream body tore")
+    cleanup_error = RuntimeError("upstream body close failed")
+
+    class TearsAndCannotClose(AsyncIterator[bytes]):
+        def __init__(self) -> None:
+            self.sent_prefix = False
+
+        def __aiter__(self) -> AsyncIterator[bytes]:
+            return self
+
+        async def __anext__(self) -> bytes:
+            if not self.sent_prefix:
+                self.sent_prefix = True
+                return (
+                    b'event: content_block_start\ndata: {"index":0,'
+                    b'"content_block":{"type":"text"}}\n\n'
+                )
+            raise upstream_error
+
+        async def aclose(self) -> None:
+            raise cleanup_error
+
+    client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
+    chain = _chain_of(client)
+    trace = RequestTrace(method="POST", path="/v1/messages", request_id="req_1", started=time.monotonic())
+    assembler = AnthropicAssembler()
+    completion = RequestCompletionCoordinator(chain, trace, trace.request_id)
+    accounting = _StreamAccounting(
+        chain=chain,
+        request_id=trace.request_id,
+        trace=trace,
+        completion=completion,
+        status_code=200,
+        assembler=assembler,
+    )
+    chain.active_requests.add(trace.request_id)
+    upstream = UpstreamSource(TearsAndCannotClose())
+    delivery = _tracked_delivery(
+        stream_delivery(
+            inference_route._counted_upstream(  # pyright: ignore[reportPrivateUsage]
+                upstream,
+                chain,
+                trace.request_id,
+                trace,
+                attempt=1,
+            ),
+            assembler,
+            upstream=upstream,
+            buffer=delivery_buffer(chain),
+            settings=stream_settings(chain),
+            framer=AnthropicFramer(message_id="msg_1", model="claude-model"),
+            on_runtime_failure=accounting.note_runtime_failure,
+        ),
+        accounting,
+    )
+    chunks: list[bytes] = []
+
+    with pytest.raises(httpx2.RemoteProtocolError) as caught:
+        async for chunk in delivery:
+            chunks.append(chunk)
+
+    assert b'"code":"upstream_stream_failed"' in b"".join(chunks)
+    assert caught.value is upstream_error
+    assert caught.value.__cause__ is cleanup_error
+
+
+def test_hand_back_renders_the_failure_once_for_payload_and_trigger() -> None:
+    class OneShotUpstreamError(Exception):
+        def __init__(self) -> None:
+            super().__init__()
+            self.render_calls = 0
+
+        def __str__(self) -> str:
+            self.render_calls += 1
+            if self.render_calls > 1:
+                raise RuntimeError("exception rendered more than once")
+            return "first and only render"
+
+        def __repr__(self) -> str:
+            return "fallback repr"
+
+    error = OneShotUpstreamError()
+
+    async def torn_body() -> AsyncIterator[bytes]:
+        yield sse_upstream("first").partition(b"event: message_delta")[0]
+        raise error
+
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200,
+            content=torn_body(),
+            headers={"content-type": "text/event-stream"},
+        ),
+        overrides={"upstream_request_retry": {"max_total": 0}},
+    )
+    delivered = _delivered(client)
+
+    handed = _handed_back(delivered)
+    record = _records()[-1]
+    interruption = next(
+        item
+        for item in record["observation"]["interruptions"]
+        if item["kind"] == "upstream_stream_failure"
+    )
+    assert error.render_calls == 1
+    assert "first and only render" in handed["input"]["message"]
+    assert interruption["message"] == "first and only render"
+    assert interruption["exception_type"].endswith("OneShotUpstreamError")
+
+
+def test_hand_back_reports_unrenderable_trigger_without_losing_the_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reports: list[dict[str, object]] = []
+
+    class Reporter:
+        def warning(self, event: object, **values: object) -> None:
+            if event != "hand_back_exception_render_failed":
+                return
+            reports.append(values)
+            raise GeneratorExit("reporter exited")
+
+    class UnrenderableUpstreamError(Exception):
+        def __str__(self) -> str:
+            raise asyncio.CancelledError("string rendering cancelled")
+
+        def __repr__(self) -> str:
+            raise GeneratorExit("repr rendering exited")
+
+    error = UnrenderableUpstreamError()
+
+    async def torn_body() -> AsyncIterator[bytes]:
+        yield sse_upstream("first").partition(b"event: message_delta")[0]
+        raise error
+
+    monkeypatch.setattr(hand_over_module, "get_logger", lambda: Reporter())
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            200,
+            content=torn_body(),
+            headers={"content-type": "text/event-stream"},
+        ),
+        overrides={"upstream_request_retry": {"max_total": 0}},
+    )
+    delivered = _delivered(client)
+
+    handed = _handed_back(delivered)
+    record = _records()[-1]
+    interruption = next(
+        item
+        for item in record["observation"]["interruptions"]
+        if item["kind"] == "upstream_stream_failure"
+    )
+    assert len(reports) == 2
+    assert {report["renderer"] for report in reports} == {"str", "repr"}
+    assert "UnrenderableUpstreamError" in handed["input"]["message"]
+    assert interruption["exception_type"].endswith("UnrenderableUpstreamError")
+    assert interruption["message"] is None
+    assert record["status"] == "retry"
+    assert "UnrenderableUpstreamError" in record["detail"]
 
 
 def test_a_hand_over_says_what_it_swallowed(
@@ -5283,9 +8237,9 @@ def test_a_draining_process_does_not_replay_a_stream_the_client_never_saw() -> N
 
     The drain is begun from inside the upstream handler because that is when it happens in production: a drain waits for the requests already running, so the ones it has to stop are exactly the ones already past this point.
 
-    **What the client gets is the truncated ending, not a hand-over**, and asserting that is the point rather than an omission. It is not that a hand-over is impossible here — `_hand_over` builds its own preamble when nothing has started — but that its `committed_count == 0` gate does not let this case through. Whether it should is open; see `deferred.md` §5. An earlier version of this test used a scenario where a block had already been delivered, and passed identically with the drain gate removed.
+    **What the client gets is an error frame, not a hand-over**, and asserting that is the point rather than an omission. It is not that a hand-over is impossible here — `_hand_over` builds its own preamble when nothing has started — but that its `committed_count == 0` gate does not let this case through. Whether it should is open; see `deferred.md` §5. An earlier version of this test used a scenario where a block had already been delivered, and passed identically with the drain gate removed.
 
-    That ending is a bare re-raise rather than an error frame, which is the shape `deferred.md` §5 already records as inconsistent. Pinned here as it is, not as it should be: this test is about the attempt that was not made, and dressing up the ending would make it a second test of something else.
+    Once the error frame's ASGI send returns, the same upstream exception is accounted rather than re-raised through the application boundary. That does not change this test's subject: the drain gate still decides that no replacement attempt opens.
     """
     calls: list[int] = []
 
@@ -5305,9 +8259,10 @@ def test_a_draining_process_does_not_replay_a_stream_the_client_never_saw() -> N
         )
 
     client, _ = make_client(draining_upstream)
-    with pytest.raises(httpx2.RemoteProtocolError):
-        _ = _delivered(client)
+    delivered = _delivered(client)
 
+    assert b'"code":"upstream_stream_failed"' in delivered
+    assert b"turn_interrupted" not in delivered
     assert len(calls) == 1, "a draining process opened another upstream request"
 
 
@@ -5381,6 +8336,10 @@ def test_a_turn_that_ran_out_of_room_is_handed_back_the_same_way() -> None:
     assert b'"stop_reason":"tool_use"' in delivered
     # The reason upstream gave is not what goes on the wire — the turn now ends in a tool call — but what it produced is still delivered.
     assert b'"text":"first"' in delivered
+    assert not any(
+        item["kind"] == "upstream_stream_failure"
+        for item in _records()[-1]["observation"]["interruptions"]
+    )
 
 
 def test_a_client_request_in_another_format_is_not_handed_a_tool_call() -> None:
@@ -5401,11 +8360,17 @@ def test_a_client_request_in_another_format_is_not_handed_a_tool_call() -> None:
         ),
         overrides={"upstream_request_retry": {"max_total": 0}},
     )
-    # No hand-over means the ending is what it always was: the tear reaches the caller and the connection is cut, which is what this harness surfaces as the exception.
-    with pytest.raises(httpx2.RemoteProtocolError), client.stream(
+    # No hand-over means the client gets this dialect's error event. Once that event's send returns, the same accounted upstream exception does not escape the app.
+    with client.stream(
         "POST", "/responses", json={"model": "gpt-model", "input": [], "stream": True}
     ) as response:
-        b"".join(response.iter_bytes())
+        delivered = b"".join(response.iter_bytes())
+    assert b'"code":"upstream_stream_failed"' in delivered
+    assert b"turn_interrupted" not in delivered
+    assert not any(
+        item["kind"] == "upstream_stream_failure"
+        for item in _records()[-1]["observation"]["interruptions"]
+    )
 
 
 def test_a_handed_back_turn_is_neither_a_success_nor_a_failure_on_the_line() -> None:
@@ -5454,7 +8419,12 @@ def test_a_turn_upstream_finished_is_not_handed_back_when_the_connection_goes_af
     assert b'"text":"complete"' in delivered
     assert b'"stop_reason":"end_turn"' in delivered
     assert b"message_stop" in delivered
-    assert _records()[-1]["status"] == "ok"
+    record = _records()[-1]
+    assert record["status"] == "ok"
+    assert not any(
+        item["kind"] == "upstream_stream_failure"
+        for item in record["observation"]["interruptions"]
+    )
 
 
 def test_a_hand_back_on_the_translation_leg_counts_the_client_s_own_messages() -> None:
@@ -5530,6 +8500,210 @@ def test_a_finished_turn_on_the_translation_leg_is_not_handed_back_either() -> N
     assert b"turn_interrupted" not in delivered
     assert b"message_stop" in delivered
     assert _records()[-1]["status"] == "ok"
+
+
+def _prompt_admission_catalog(
+    *,
+    tokenizer: str = "o200k_base",
+    prompt_limit: int = 8,
+    context_limit: int = 10,
+) -> dict[str, Any]:
+    catalog = deepcopy(CATALOG)
+    model = next(entry for entry in catalog["data"] if entry["id"] == "gpt-model")
+    model["capabilities"] = {
+        "tokenizer": tokenizer,
+        "limits": {
+            "max_prompt_tokens": prompt_limit,
+            "max_context_window_tokens": context_limit,
+        },
+    }
+    return catalog
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_direct_responses_prompt_admission_rejects_before_upstream(
+    stream: bool,
+) -> None:
+    client, seen = make_client(
+        lambda _: httpx2.Response(599, json={"error": "must not be called"}),
+        catalog=_prompt_admission_catalog(),
+    )
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-model",
+            "input": "0123456789" * 100,
+            "stream": stream,
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json() == {
+        "error": {
+            "message": "prompt is too long: the input exceeds this model's context window",
+            "type": "invalid_request_error",
+            "param": "input",
+            "code": "context_length_exceeded",
+        }
+    }
+    assert seen == []
+    [observation] = _records()[-1]["observation"]["token_admission"]
+    assert observation["origin"] == "proxy"
+    assert observation["outcome"] == "rejected"
+    assert observation["field_path"] == "input"
+    assert observation["field_token_count"] > observation["max_context_window_tokens"]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_translated_prompt_admission_uses_anthropics_preheader_error(
+    stream: bool,
+) -> None:
+    client, seen = make_client(
+        lambda _: httpx2.Response(599, json={"error": "must not be called"}),
+        catalog=_prompt_admission_catalog(),
+    )
+
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "gpt-model",
+            "messages": [{"role": "user", "content": "0123456789" * 100}],
+            "max_tokens": 64,
+            "stream": stream,
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json() == {
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "message": "prompt is too long: the input exceeds this model's context window",
+            "code": "model_max_prompt_tokens_exceeded",
+            "param": "input[0].content[0].text",
+        },
+    }
+    assert seen == []
+
+
+@pytest.mark.parametrize(
+    ("catalog", "payload", "outcome"),
+    [
+        (
+            _prompt_admission_catalog(context_limit=100),
+            {"model": "gpt-model", "input": "short"},
+            "admitted_fast",
+        ),
+        (
+            _prompt_admission_catalog(tokenizer="future_encoding"),
+            {"model": "gpt-model", "input": "0123456789" * 100},
+            "skipped_unsupported_tokenizer",
+        ),
+        (
+            _prompt_admission_catalog(),
+            {
+                "model": "gpt-model",
+                "input": "0123456789" * 100,
+                "truncation": "auto",
+            },
+            "skipped_reduction_control",
+        ),
+        (
+            _prompt_admission_catalog(),
+            {
+                "model": "gpt-model",
+                "input": "0123456789" * 100,
+                "future_control": True,
+            },
+            "skipped_unknown_shape",
+        ),
+        (
+            _prompt_admission_catalog(),
+            cast(
+                dict[str, Any],
+                {
+                    "model": "gpt-model",
+                    "input": [
+                        {
+                            "type": "message",
+                            "role": "user",
+                            "content": [
+                                {"type": "input_text", "text": "0123456789" * 100}
+                            ],
+                        },
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": [],
+                                "data": "AAAA",
+                            },
+                        },
+                    ],
+                },
+            ),
+            "skipped_unknown_shape",
+        ),
+    ],
+)
+def test_prompt_admission_fail_open_paths_send_upstream_once(
+    catalog: dict[str, Any],
+    payload: dict[str, Any],
+    outcome: str,
+) -> None:
+    client, seen = make_client(
+        lambda _: httpx2.Response(418, json={"error": {"message": "upstream reached"}}),
+        catalog=catalog,
+    )
+
+    response = client.post("/v1/responses", json=payload)
+
+    assert response.status_code == 418
+    assert len(seen) == 1
+    [observation] = _records()[-1]["observation"]["token_admission"]
+    assert observation["outcome"] == outcome
+
+
+def test_missing_prompt_metadata_is_observed_and_sent_upstream_once() -> None:
+    client, seen = make_client(
+        lambda _: httpx2.Response(418, json={"error": {"message": "upstream reached"}})
+    )
+
+    response = client.post(
+        "/v1/responses",
+        json={"model": "gpt-model", "input": "0123456789" * 100},
+    )
+
+    assert response.status_code == 418
+    assert len(seen) == 1
+    [observation] = _records()[-1]["observation"]["token_admission"]
+    assert observation["outcome"] == "skipped_missing_metadata"
+    assert observation["tokenizer"] is None
+    assert observation["max_context_window_tokens"] is None
+
+
+def test_count_tokens_measures_the_same_oversized_translation_without_admitting_it() -> None:
+    client, seen = make_client(
+        lambda _: httpx2.Response(599, json={"error": "must not be called"}),
+        catalog=_prompt_admission_catalog(),
+    )
+
+    response = client.post(
+        "/v1/messages/count_tokens",
+        json={
+            "model": "gpt-model",
+            "messages": [{"role": "user", "content": "0123456789" * 100}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["estimated"] is True
+    assert response.json()["input_tokens"] > 10
+    assert seen == []
+    assert _records()[-1]["observation"]["token_admission"] == []
 
 
 def delivering(

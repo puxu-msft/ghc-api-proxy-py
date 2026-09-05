@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 
 class ModelEndpoint(StrEnum):
@@ -17,6 +17,18 @@ class ModelEndpoint(StrEnum):
     OPENAI_RESPONSES = "/responses"
     OPENAI_RESPONSES_WS = "ws:/responses"
     OPENAI_EMBEDDINGS = "/embeddings"
+
+
+type CatalogSource = Literal["upstream", "static"]
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogSnapshot:
+    """A provider catalog plus the provenance and driver facts needed to report it."""
+
+    raw: Mapping[str, Any]
+    source: CatalogSource
+    driven_endpoints: frozenset[ModelEndpoint]
 
 
 class ProviderError(RuntimeError):
@@ -69,6 +81,60 @@ class EndpointNotImplemented(ProviderError):
         self.endpoint = endpoint
 
 
+class DescriptorProviderMismatch(ProviderError):
+    """A routed descriptor was handed to a different provider instance."""
+
+    def __init__(self, expected: str, actual: str, model_id: str) -> None:
+        super().__init__(
+            f"provider {actual!r} cannot use model descriptor {model_id!r} "
+            f"issued by {expected!r}"
+        )
+        self.expected = expected
+        self.actual = actual
+        self.model_id = model_id
+
+
+@dataclass(frozen=True, slots=True)
+class PromptTokenLimits:
+    """The catalog facts that make a local Responses admission decision possible.
+
+    Kept as one optional value because a tokenizer without both limits, or a limit without the tokenizer that gives it meaning, is not a weaker admission fact. It is no admission fact at all.
+    """
+
+    tokenizer: str
+    max_prompt_tokens: int
+    max_context_window_tokens: int
+
+
+def parse_prompt_token_limits(model: Mapping[str, Any]) -> PromptTokenLimits | None:
+    """Read the three nested catalog fields as one fail-open fact.
+
+    The complete model entry is the input. Reading flat lookalike keys would silently leave every real Copilot descriptor without limits, while accepting a bool as an int would turn ``true`` into a one-token context window.
+    """
+    capabilities = model.get("capabilities")
+    if not isinstance(capabilities, dict):
+        return None
+    typed_capabilities = cast(dict[str, Any], capabilities)
+    tokenizer = typed_capabilities.get("tokenizer")
+    limits = typed_capabilities.get("limits")
+    if not isinstance(tokenizer, str) or not tokenizer:
+        return None
+    if not isinstance(limits, dict):
+        return None
+    typed_limits = cast(dict[str, Any], limits)
+    max_prompt = typed_limits.get("max_prompt_tokens")
+    max_context = typed_limits.get("max_context_window_tokens")
+    if type(max_prompt) is not int or type(max_context) is not int:
+        return None
+    if max_prompt <= 0 or max_context <= 0 or max_prompt > max_context:
+        return None
+    return PromptTokenLimits(
+        tokenizer=tokenizer,
+        max_prompt_tokens=max_prompt,
+        max_context_window_tokens=max_context,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ModelDescriptor:
     """What a provider knows about one model.
@@ -87,6 +153,11 @@ class ModelDescriptor:
     request_headers: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
     reasoning_efforts: tuple[str, ...] | None = None
     adaptive_thinking: bool = False
+    # Provider ownership and generation make this descriptor a routed snapshot rather than a model id that callers have to look up again. Defaults keep hand-built test descriptors honest about having no catalog provenance.
+    provider_name: str = ""
+    catalog_generation: int = 0
+    catalog_refreshed_at: str = ""
+    prompt_token_limits: PromptTokenLimits | None = None
 
     def supports(self, endpoint: ModelEndpoint) -> bool:
         return endpoint in self.endpoints
@@ -201,6 +272,12 @@ def resolve_endpoints(advertised: object, *, model_type: str = "") -> ResolvedEn
     if default is None:
         return ResolvedEndpoints(frozenset(), (), False)
     return ResolvedEndpoints(frozenset({default}), (), False)
+
+
+def require_descriptor_owner(descriptor: ModelDescriptor, provider: str) -> None:
+    """Refuse a descriptor another provider issued before any network side effect."""
+    if descriptor.provider_name != provider:
+        raise DescriptorProviderMismatch(descriptor.provider_name, provider, descriptor.id)
 
 
 def require_endpoint(descriptor: ModelDescriptor, endpoint: ModelEndpoint, provider: str) -> None:

@@ -4,8 +4,13 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from app.config.schema import NOT_HOT_RELOADABLE, ProxyConfig
-from app.pipeline.model_resolution import QUALIFIER_SEPARATOR
+from app.config.schema import (
+    NOT_HOT_RELOADABLE,
+    GithubCopilotProviderConfig,
+    ProxyConfig,
+    XingchenProviderConfig,
+)
+from app.pipeline.model_resolution import QUALIFIER_SEPARATOR, canonical
 
 SPEC_PATH = Path(__file__).resolve().parents[3] / "docs/.human-controlled/config.example.yaml"
 
@@ -56,6 +61,135 @@ def test_an_ordinary_provider_name_is_still_accepted() -> None:
     """The control for the check above, which is otherwise satisfied by refusing every name."""
     config = ProxyConfig.model_validate({"model_providers": {"ghc": {"type": "github_copilot"}}})
     assert "ghc" in config.model_providers
+
+
+def xingchen_values(**overrides: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "type": "xingchen",
+        "models": ["chat-pro", "chat-lite"],
+        "gateway_api_key": "gateway-secret",
+        "x_token": "complete.x.token",
+        "device_id": "device-id",
+        "install_id": "install-id",
+    }
+    values.update(overrides)
+    return values
+
+
+def test_provider_config_is_discriminated_by_type() -> None:
+    config = ProxyConfig.model_validate(
+        {
+            "model_providers": {
+                "ghc": {"type": "github_copilot"},
+                "xingchen": xingchen_values(),
+            },
+            "default_model_provider": "ghc",
+        }
+    )
+
+    ghc = config.model_providers["ghc"]
+    xingchen = config.model_providers["xingchen"]
+    assert isinstance(ghc, GithubCopilotProviderConfig)
+    assert isinstance(xingchen, XingchenProviderConfig)
+    assert xingchen.api_base_url == "https://agent.teleai.com.cn/superCowork/sapi/api/v1"
+    assert xingchen.app_version == "2.4.1"
+    assert xingchen.route_target == "ops-gateway"
+    assert xingchen.client_type == "desktop"
+    assert xingchen.user_agent == "super-agent/1.0"
+    assert "gateway-secret" not in repr(xingchen)
+    assert "complete.x.token" not in repr(xingchen)
+
+
+@pytest.mark.parametrize(
+    "missing",
+    ["models", "gateway_api_key", "x_token", "device_id", "install_id"],
+)
+def test_xingchen_rejects_a_missing_required_field(missing: str) -> None:
+    values = xingchen_values()
+    del values[missing]
+    with pytest.raises(ValidationError):
+        ProxyConfig.model_validate({"model_providers": {"xingchen": values}})
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "api_base_url",
+        "gateway_api_key",
+        "x_token",
+        "device_id",
+        "install_id",
+        "app_version",
+        "route_target",
+        "client_type",
+        "user_agent",
+    ],
+)
+def test_xingchen_rejects_blank_identity_and_credential_values(field: str) -> None:
+    with pytest.raises(ValidationError):
+        ProxyConfig.model_validate(
+            {"model_providers": {"xingchen": xingchen_values(**{field: "  "})}}
+        )
+
+
+@pytest.mark.parametrize("models", [[], ["chat-pro", ""], ["chat-pro", "  "], ["chat-pro", "chat-pro"]])
+def test_xingchen_rejects_empty_blank_or_duplicate_models(models: list[str]) -> None:
+    with pytest.raises(ValidationError):
+        ProxyConfig.model_validate(
+            {"model_providers": {"xingchen": xingchen_values(models=models)}}
+        )
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [("m-1.0", "m-1-0"), ("Chat-Pro", "chat-pro")],
+)
+def test_xingchen_rejects_model_ids_routing_treats_as_equivalent(
+    first: str,
+    second: str,
+) -> None:
+    assert canonical(first) == canonical(second)
+    with pytest.raises(ValidationError, match="canonically equivalent"):
+        ProxyConfig.model_validate(
+            {
+                "model_providers": {
+                    "xingchen": xingchen_values(models=[first, second])
+                }
+            }
+        )
+
+
+def test_xingchen_validation_errors_hide_credential_inputs() -> None:
+    values = xingchen_values(gateway_api_key="LEAK-GATEWAY", x_token="LEAK.X.TOKEN")
+    del values["install_id"]
+
+    with pytest.raises(ValidationError) as raised:
+        ProxyConfig.model_validate({"model_providers": {"xingchen": values}})
+
+    rendered = str(raised.value)
+    assert "LEAK-GATEWAY" not in rendered
+    assert "LEAK.X.TOKEN" not in rendered
+    assert "model_providers.xingchen.xingchen.install_id" in rendered
+    assert "Field required" in rendered
+
+
+def test_provider_variants_reject_each_others_fields() -> None:
+    with pytest.raises(ValidationError):
+        ProxyConfig.model_validate(
+            {
+                "model_providers": {
+                    "xingchen": xingchen_values(github_token_file="not-for-xingchen")
+                }
+            }
+        )
+    with pytest.raises(ValidationError):
+        ProxyConfig.model_validate(
+            {
+                "model_providers": {
+                    "ghc": {"type": "github_copilot", "x_token": "not-for-github"}
+                }
+            }
+        )
 
 
 def test_the_qualifier_separator_matches_the_config_boundary() -> None:

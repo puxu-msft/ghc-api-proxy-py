@@ -1,9 +1,9 @@
-"""Check every row of the r4 capability table against the frozen algorithm.
+"""Check the superseded ordinal-only v2 candidate against its historical table.
 
-Algorithm: `i` is the 0-based ordinal among ALL reasoning items of the turn (bare markers
-included). On the way back, number the recovered reasoning blocks 0,1,2... in source order and
-require every payload carrier's `i` to equal its own ordinal. Bare markers occupy an ordinal but
-carry no `i`, so they are skipped by the comparison.
+This is not the current v2 algorithm or an acceptance oracle. The 2026-09-04 living Spec at
+`.dev/docs/reasoning-carrier/spec.md` removed ordinal `i` from this producer in favour of a typed
+record envelope. The old algorithm is retained only to reproduce the capability boundary that
+caused the candidate to be rejected.
 """
 BARE = None  # a bare marker: occupies a slot, carries no i
 
@@ -39,7 +39,10 @@ for name, blocks, claimed in rows:
     actual = detects(blocks)
     good = actual == claimed
     ok &= good
-    print(f"{name:26} {str(claimed):>8} {str(actual):>8}  {'OK' if good else '*** MISMATCH'}")
+    print(f"{name:26} {claimed!s:>8} {actual!s:>8}  {'OK' if good else '*** MISMATCH'}")
 print()
 print("emit sanity: 3 items with bare at 1 ->", emit(3, bare_at={1}))
-print("VERDICT:", "table matches the algorithm" if ok else "TABLE IS WRONG")
+print(
+    "HISTORICAL VERDICT:",
+    "superseded table matches its old algorithm" if ok else "SUPERSEDED TABLE IS WRONG",
+)

@@ -1,0 +1,8 @@
+# HTTP 400 content-type: text/plain; charset=utf-8
+
+{
+  "error": {
+    "message": "Invalid type for 'tool_choice.tools[0]': expected an object, but got a string instead.",
+    "code": "invalid_request_body"
+  }
+}

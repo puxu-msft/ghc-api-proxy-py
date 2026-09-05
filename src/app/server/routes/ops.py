@@ -8,7 +8,7 @@ Only what this chain can answer truthfully is here. Readiness is the catalog, be
 """
 
 
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, Request, Response
@@ -153,16 +153,37 @@ def _without_credentials(url: str) -> str:
     return urlunsplit((parsed.scheme, f"***@{host}", parsed.path, parsed.query, parsed.fragment))
 
 
+_CREDENTIAL_REDACTION = "***"
+_XINGCHEN_CREDENTIAL_FIELDS = frozenset({"gateway_api_key", "x_token"})
+
+
+def _redact_model_provider_credentials(data: dict[str, Any]) -> None:
+    raw_providers = data.get("model_providers")
+    if not isinstance(raw_providers, dict):
+        return
+    providers = cast(dict[str, object], raw_providers)
+    for raw_provider in providers.values():
+        if not isinstance(raw_provider, dict):
+            continue
+        provider = cast(dict[str, Any], raw_provider)
+        if provider.get("type") != "xingchen":
+            continue
+        for field in _XINGCHEN_CREDENTIAL_FIELDS:
+            if field in provider:
+                provider[field] = _CREDENTIAL_REDACTION
+
+
 @router.get("/api/config")
 async def config(request: Request) -> JSONResponse:
     """The configuration this process is actually running, as it was resolved.
 
     The snapshot rather than any file: five layers feed it, so the file alone never answers "what is in effect", and a restart-only key may differ from what the file now says — that gap is precisely what an operator opens this to see.
 
-    `proxy` is the one field redacted, and only its userinfo. The chain this replaces blanked `auth.github_token` and `upstream.api_key`; neither field exists in this schema, and the credential a `ProxyConfig` can still carry is the one embedded in a proxy URL. `github_token_file` names a path, not a token, and is left alone. Base URLs are not treated as credential carriers here — userinfo in them is legal but is not how anyone configures them, and if that turns out to be wrong this is the place that has to grow, not a wider blanket applied on suspicion.
+    Proxy userinfo and the two credential values carried by an Xingchen provider are redacted at this presentation boundary. Provider names, base URLs, static models and device/install identity stay visible because they answer the diagnostic question this endpoint exists for.
     """
     data = chain_of(request).config.model_dump(mode="json")
     proxy = data.get("proxy")
     if isinstance(proxy, str):
         data["proxy"] = _without_credentials(proxy)
+    _redact_model_provider_credentials(data)
     return JSONResponse(data)

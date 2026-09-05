@@ -29,11 +29,11 @@ class ResponseUsageFacts:
     """Exact Responses usage details plus their normalized Anthropic totals."""
 
     upstream_input_tokens: int
-    input_tokens: int
-    cache_read_input_tokens: int
-    cache_creation_input_tokens: int
+    input_tokens: int | None
+    cache_read_input_tokens: int | None
+    cache_creation_input_tokens: int | None
     output_tokens: int
-    reasoning_tokens: int
+    reasoning_tokens: int | None
     total_tokens: int
     input_tokens_details: Mapping[str, int]
     output_tokens_details: Mapping[str, int]
@@ -121,7 +121,7 @@ def convert_responses_response_to_anthropic(
     if not content:
         content.append(ContentBlock(type="text", text=""))
 
-    converted_usage = _convert_usage(response.get("usage"))
+    converted_usage = convert_responses_usage(response.get("usage"))
     return ConvertedResponse(
         message=MessagesResponse(
             id=anthropic_message_id_from_response_id(response_id),
@@ -205,7 +205,7 @@ def _convert_function_call(
 
 
 @dataclass(frozen=True, slots=True)
-class _ConvertedUsage:
+class ResponseUsageConversion:
     wire: AnthropicUsage
     exact: ResponseUsageFacts | None
     facts: tuple[ResponseConversionFact, ...]
@@ -218,13 +218,13 @@ def anthropic_usage_from_responses(usage: object) -> dict[str, int]:
 
     Raises `ResponseConversionError` on a malformed usage, exactly as the response conversion does. A caller for whom this is a side concern — a log line, say — has to decide what to do with that rather than have a default chosen for it here.
     """
-    converted = _convert_usage(usage)
+    converted = convert_responses_usage(usage)
     return converted.wire.model_dump()
 
 
-def _convert_usage(value: object) -> _ConvertedUsage:
+def convert_responses_usage(value: object) -> ResponseUsageConversion:
     if value is None:
-        return _ConvertedUsage(
+        return ResponseUsageConversion(
             wire=AnthropicUsage(),
             exact=None,
             facts=(ResponseConversionFact(code="usage_estimated", field_path="usage"),),
@@ -245,11 +245,20 @@ def _convert_usage(value: object) -> _ConvertedUsage:
         usage.get("output_tokens_details"),
         "usage.output_tokens_details",
     )
-    cache_read = input_details.get("cached_tokens", 0)
-    cache_creation = input_details.get("cache_write_tokens", 0)
-    reasoning = output_details.get("reasoning_tokens", 0)
-    input_tokens = max(0, total_input - cache_read - cache_creation)
-    total_tokens = input_tokens + cache_read + cache_creation + output
+    cache_read_observed = input_details.get("cached_tokens")
+    cache_creation_observed = input_details.get("cache_write_tokens")
+    reasoning_observed = output_details.get("reasoning_tokens")
+    # Anthropic's wire requires concrete cache counts. The exact facts beside it retain whether Responses actually reported each detail, so a compatibility zero never becomes an observation.
+    cache_read = cache_read_observed or 0
+    cache_creation = cache_creation_observed or 0
+    reasoning = reasoning_observed or 0
+    wire_input_tokens = max(0, total_input - cache_read - cache_creation)
+    exact_input_tokens = (
+        wire_input_tokens
+        if cache_read_observed is not None and cache_creation_observed is not None
+        else None
+    )
+    total_tokens = total_input + output
 
     facts: list[ResponseConversionFact] = []
     if total_input < cache_read + cache_creation:
@@ -268,20 +277,20 @@ def _convert_usage(value: object) -> _ConvertedUsage:
             ResponseConversionFact(code="usage_inconsistent", field_path="usage.total_tokens")
         )
 
-    return _ConvertedUsage(
+    return ResponseUsageConversion(
         wire=AnthropicUsage(
-            input_tokens=input_tokens,
+            input_tokens=wire_input_tokens,
             output_tokens=output,
             cache_read_input_tokens=cache_read,
             cache_creation_input_tokens=cache_creation,
         ),
         exact=ResponseUsageFacts(
             upstream_input_tokens=total_input,
-            input_tokens=input_tokens,
-            cache_read_input_tokens=cache_read,
-            cache_creation_input_tokens=cache_creation,
+            input_tokens=exact_input_tokens,
+            cache_read_input_tokens=cache_read_observed,
+            cache_creation_input_tokens=cache_creation_observed,
             output_tokens=output,
-            reasoning_tokens=reasoning,
+            reasoning_tokens=reasoning_observed,
             total_tokens=total_tokens,
             input_tokens_details=input_details,
             output_tokens_details=output_details,
@@ -351,8 +360,10 @@ __all__ = [
     "ConvertedResponse",
     "ResponseConversionError",
     "ResponseConversionFact",
+    "ResponseUsageConversion",
     "ResponseUsageFacts",
     "anthropic_message_id_from_response_id",
     "anthropic_usage_from_responses",
     "convert_responses_response_to_anthropic",
+    "convert_responses_usage",
 ]

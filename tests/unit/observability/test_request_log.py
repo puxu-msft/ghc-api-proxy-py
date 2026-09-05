@@ -5,7 +5,10 @@ Driven directly rather than through a served request, so every branch of the fie
 
 from dataclasses import replace
 
+import orjson
+
 from app.observability.request_log import (
+    LogStatus,
     RequestLine,
     format_arrival_line,
     format_completion_line,
@@ -17,12 +20,15 @@ from app.observability.request_log import (
     status_for,
 )
 from app.observability.terminal import BOLD_RED, CYAN, DIM, GREEN, RED, RESET, WHITE, YELLOW
-from app.pipeline.delivery.assembling import (
-    ClientAction,
-    ClientActionRequirement,
-    ReplyDialect,
-)
+from app.pipeline.delivery.assembling import ClientAction, ReplyDialect
+from app.pipeline.delivery.sse_source import SseEvent
 from app.pipeline.hand_over import one_line
+from app.pipeline.response_action import (
+    ClientActionBasis,
+    ClientActionObservation,
+    ClientActionRequirement,
+)
+from app.pipeline.response_observation import ResponseObservation, ResponsesObserver
 
 
 def test_a_successful_request_names_the_model_rather_than_the_route() -> None:
@@ -39,7 +45,7 @@ def test_a_successful_request_names_the_model_rather_than_the_route() -> None:
         ),
         status="ok",
     )
-    assert line == "200 anthropic-messages/claude-sonnet-4.5 3.0s ↓12.1KB"
+    assert line == "200 anthropic-messages/claude-sonnet-4.5 3.0s ↓12.1KiB"
     assert "POST" not in line
 
 
@@ -243,7 +249,7 @@ def test_the_byte_marker_degrades_where_the_glyph_cannot_be_encoded() -> None:
         status="ok",
     )
     assert "↓" not in line
-    assert "<2.0KB" in line
+    assert "<2.0KiB" in line
 
 
 def test_the_arrival_line_says_only_what_is_known_on_arrival() -> None:
@@ -549,13 +555,13 @@ def test_an_unmapped_model_is_named_once() -> None:
     assert "f/same-model" in line
 
 
-def test_both_directions_of_wire_bytes_are_reported() -> None:
-    # The reported gap: only the streaming path counted anything, so every other request showed no byte field at all.
+def test_both_upstream_http_body_directions_are_reported() -> None:
+    # The reported gap: only the streaming path counted upstream response-body bytes, so every other request showed no byte field at all.
     line = format_completion_line(
         RequestLine(method="POST", path="/p", inbound_format="f", model="m", status_code=200, duration_s=1.0, bytes_in=152, bytes_out=2300),
         status="ok",
     )
-    assert "↑152B ↓2.2KB" in line
+    assert "↑152B ↓2.2KiB" in line
 
 
 def test_token_usage_is_rendered_with_its_cache_breakdown() -> None:
@@ -591,6 +597,13 @@ def test_zero_output_tokens_are_reported_rather_than_omitted() -> None:
     assert "↓" not in format_tokens({"input_tokens": 10})
 
 
+def test_unknown_input_is_not_rendered_as_a_measured_zero() -> None:
+    assert format_tokens({"output_tokens": 2}) == "↓2"
+    partial = format_tokens({"cache_read_input_tokens": 5, "output_tokens": 2})
+    assert partial == "↑?+5 ↓2"
+    assert "↻" not in partial
+
+
 def test_token_markers_degrade_with_the_rest_of_the_line() -> None:
     ascii_form = format_tokens({"input_tokens": 10, "cache_read_input_tokens": 5, "output_tokens": 2}, unicode=False)
     assert "↑" not in ascii_form
@@ -615,6 +628,795 @@ def test_a_responses_turn_names_the_item_upstream_actually_sent() -> None:
     # Reasons that are not the synthesised one are upstream's own already and are left alone.
     assert format_stop_reason("max_tokens", (), ReplyDialect.RESPONSES) == "max_tokens"
     assert format_stop_reason("tool_use", ("Bash",), ReplyDialect.ANTHROPIC) == "tool_use(Bash)"
+
+
+def _responses_observation_and_line(
+    body: dict[str, object],
+    *,
+    status: LogStatus = "ok",
+    thinking: tuple[str, ...] = (),
+) -> tuple[ResponseObservation, str]:
+    observer = ResponsesObserver()
+    observer.observe_response(body)
+    observation = observer.snapshot()
+    return observation, format_completion_line(
+        RequestLine(
+            method="POST",
+            path="/responses",
+            inbound_format="openai-responses",
+            model="gpt-model",
+            status_code=200,
+            stop_reason="tool_use",
+            thinking=thinking,
+            dialect=ReplyDialect.RESPONSES,
+        ),
+        status=status,
+        response_observation=observation,
+    )
+
+
+def _responses_observation_line(
+    body: dict[str, object],
+    *,
+    status: LogStatus = "ok",
+    thinking: tuple[str, ...] = (),
+) -> str:
+    return _responses_observation_and_line(
+        body,
+        status=status,
+        thinking=thinking,
+    )[1]
+
+
+def test_observed_completed_is_green_only_for_a_known_action_free_output() -> None:
+    clean = ResponsesObserver()
+    clean.observe_response({"status": "completed", "output": []})
+    missing = ResponsesObserver()
+    missing.observe_response({"status": "completed"})
+
+    base = RequestLine(method="POST", path="/responses", status_code=200)
+    clean_line = format_completion_line(
+        base,
+        status="ok",
+        color=True,
+        response_observation=clean.snapshot(),
+    )
+    missing_line = format_completion_line(
+        base,
+        status="ok",
+        color=True,
+        response_observation=missing.snapshot(),
+    )
+
+    assert f"{GREEN}completed{RESET}" in clean_line
+    assert f"{GREEN}completed{RESET}" not in missing_line
+    assert missing_line.endswith("completed client_action?(unclassified)")
+
+
+def test_observed_completed_with_required_or_unknown_actions_is_not_green() -> None:
+    for item in (
+        {"type": "function_call", "name": "Bash"},
+        {"type": "future_tool_call"},
+    ):
+        observer = ResponsesObserver()
+        observer.observe_response({"status": "completed", "output": [item]})
+
+        rendered = format_completion_line(
+            RequestLine(method="POST", path="/responses", status_code=200),
+            status="ok",
+            color=True,
+            response_observation=observer.snapshot(),
+        )
+
+        assert f"{GREEN}completed{RESET}" not in rendered
+
+
+def test_response_observation_precedes_legacy_terminal_and_unavailable_falls_back() -> None:
+    observed = ResponsesObserver()
+    observed.observe_response({"status": "completed", "output": []})
+    line = RequestLine(
+        method="POST",
+        path="/responses",
+        status_code=200,
+        terminal_status="failed",
+        client_action_classification_complete=True,
+    )
+
+    preferred = format_completion_line(
+        line,
+        status="ok",
+        response_observation=observed.snapshot(),
+    )
+    fallback = format_completion_line(
+        line,
+        status="fail",
+        response_observation=ResponsesObserver().snapshot(),
+    )
+
+    assert preferred.endswith("completed")
+    assert "failed" not in preferred
+    assert fallback.endswith("failed")
+
+
+def _assert_output_item_identity(
+    observation: ResponseObservation,
+    expected: tuple[tuple[int, str | None, str | None], ...],
+) -> None:
+    assert observation.output_items is not None
+    assert tuple(
+        (item.output_index, item.type, item.name) for item in observation.output_items
+    ) == expected
+
+
+def _assert_output_item_facts(
+    observation: ResponseObservation,
+    expected: tuple[
+        tuple[int, str | None, str | None, int, bool, bool],
+        ...,
+    ],
+) -> None:
+    assert observation.output_items is not None
+    assert tuple(
+        (
+            item.output_index,
+            item.type,
+            item.name,
+            item.reasoning.summary_items,
+            item.reasoning.has_readable_summary,
+            item.reasoning.has_encrypted_content,
+        )
+        for item in observation.output_items
+    ) == expected
+
+
+def test_responses_observation_renders_actual_function_and_reasoning() -> None:
+    line = _responses_observation_line({
+        "status": "completed",
+        "output": [
+            {"type": "function_call", "name": "Bash"},
+            {"type": "reasoning", "summary": [], "encrypted_content": "sealed"},
+        ],
+    })
+
+    assert line.endswith("completed function_call(Bash) reason(enc:1)")
+    assert "tool_use" not in line
+
+
+def test_reasoning_before_repeated_tools_keeps_its_output_position() -> None:
+    observation, line = _responses_observation_and_line({
+        "status": "completed",
+        "output": [
+            {"type": "reasoning", "summary": [], "encrypted_content": "sealed"},
+            {"type": "function_call", "name": "Read"},
+            {"type": "function_call", "name": "Read"},
+            {"type": "function_call", "name": "Read"},
+            {"type": "function_call", "name": "Read"},
+        ],
+    })
+
+    assert line.endswith(
+        "completed reason(enc:1) function_call(Read) function_call(Read) function_call(Read) function_call(Read)"
+    )
+    _assert_output_item_facts(
+        observation,
+        (
+            (0, "reasoning", None, 0, False, True),
+            (1, "function_call", "Read", 0, False, False),
+            (2, "function_call", "Read", 0, False, False),
+            (3, "function_call", "Read", 0, False, False),
+            (4, "function_call", "Read", 0, False, False),
+        ),
+    )
+
+
+def test_reasoning_and_tools_preserve_interleaved_visible_order() -> None:
+    interleaved_observation, interleaved = _responses_observation_and_line({
+        "status": "completed",
+        "output": [
+            {"type": "reasoning", "summary": [], "encrypted_content": "sealed"},
+            {"type": "function_call", "name": "Read"},
+            {"type": "function_call", "name": "Bash"},
+            {"type": "reasoning", "summary": [{"text": "visible"}]},
+            {"type": "function_call", "name": "Read"},
+        ],
+    })
+    barrier_observation, barrier = _responses_observation_and_line({
+        "status": "completed",
+        "output": [
+            {"type": "function_call", "name": "Read"},
+            {"type": "reasoning", "summary": [], "encrypted_content": "sealed"},
+            {"type": "function_call", "name": "Bash"},
+        ],
+    })
+
+    assert interleaved.endswith(
+        "completed reason(enc:1) function_call(Read) function_call(Bash) reason(txt:1) function_call(Read)"
+    )
+    _assert_output_item_facts(
+        interleaved_observation,
+        (
+            (0, "reasoning", None, 0, False, True),
+            (1, "function_call", "Read", 0, False, False),
+            (2, "function_call", "Bash", 0, False, False),
+            (3, "reasoning", None, 1, True, False),
+            (4, "function_call", "Read", 0, False, False),
+        ),
+    )
+    assert barrier.endswith(
+        "completed function_call(Read) reason(enc:1) function_call(Bash)"
+    )
+    _assert_output_item_facts(
+        barrier_observation,
+        (
+            (0, "function_call", "Read", 0, False, False),
+            (1, "reasoning", None, 0, False, True),
+            (2, "function_call", "Bash", 0, False, False),
+        ),
+    )
+
+
+def test_reasoning_counts_only_contiguous_same_kind_runs() -> None:
+    same_observation, same = _responses_observation_and_line({
+        "status": "completed",
+        "output": [
+            {"type": "reasoning", "summary": [], "encrypted_content": "one"},
+            {"type": "reasoning", "summary": [], "encrypted_content": "two"},
+        ],
+    })
+    ordered_observation, ordered = _responses_observation_and_line({
+        "status": "completed",
+        "output": [
+            {"type": "reasoning", "summary": [{"text": "first"}]},
+            {"type": "reasoning", "summary": [], "encrypted_content": "middle"},
+            {"type": "reasoning", "summary": [{"text": "last"}]},
+        ],
+    })
+
+    assert same.endswith("completed reason(enc:2)")
+    _assert_output_item_facts(
+        same_observation,
+        (
+            (0, "reasoning", None, 0, False, True),
+            (1, "reasoning", None, 0, False, True),
+        ),
+    )
+    assert ordered.endswith(
+        "completed reason(txt:1) reason(enc:1) reason(txt:1)"
+    )
+    _assert_output_item_facts(
+        ordered_observation,
+        (
+            (0, "reasoning", None, 1, True, False),
+            (1, "reasoning", None, 0, False, True),
+            (2, "reasoning", None, 1, True, False),
+        ),
+    )
+
+
+def test_client_actions_reset_same_kind_reasoning_runs() -> None:
+    known_observation, known = _responses_observation_and_line({
+        "status": "completed",
+        "output": [
+            {"type": "reasoning", "summary": [], "encrypted_content": "before"},
+            {"type": "function_call", "name": "Read"},
+            {"type": "reasoning", "summary": [], "encrypted_content": "after"},
+        ],
+    })
+    unknown_observation, unknown = _responses_observation_and_line({
+        "status": "completed",
+        "output": [
+            {"type": "reasoning", "summary": [], "encrypted_content": "before"},
+            {"type": "some_2027_tool_call", "name": "future"},
+            {"type": "reasoning", "summary": [], "encrypted_content": "after"},
+        ],
+    })
+    anonymous_observation, anonymous = _responses_observation_and_line({
+        "status": "completed",
+        "output": [
+            {"type": "reasoning", "summary": [], "encrypted_content": "first"},
+            {"type": "function_call", "name": ""},
+            {"type": "reasoning", "summary": [], "encrypted_content": "second"},
+            {"type": "function_call", "name": None},
+            {"type": "reasoning", "summary": [], "encrypted_content": "third"},
+        ],
+    })
+
+    assert known.endswith(
+        "completed reason(enc:1) function_call(Read) reason(enc:1)"
+    )
+    _assert_output_item_facts(
+        known_observation,
+        (
+            (0, "reasoning", None, 0, False, True),
+            (1, "function_call", "Read", 0, False, False),
+            (2, "reasoning", None, 0, False, True),
+        ),
+    )
+    assert unknown.endswith(
+        "completed reason(enc:1) client_action?(some_2027_tool_call) reason(enc:1)"
+    )
+    _assert_output_item_facts(
+        unknown_observation,
+        (
+            (0, "reasoning", None, 0, False, True),
+            (1, "some_2027_tool_call", "future", 0, False, False),
+            (2, "reasoning", None, 0, False, True),
+        ),
+    )
+    assert anonymous.endswith(
+        "completed reason(enc:1) function_call reason(enc:1) function_call reason(enc:1)"
+    )
+    _assert_output_item_facts(
+        anonymous_observation,
+        (
+            (0, "reasoning", None, 0, False, True),
+            (1, "function_call", "", 0, False, False),
+            (2, "reasoning", None, 0, False, True),
+            (3, "function_call", None, 0, False, False),
+            (4, "reasoning", None, 0, False, True),
+        ),
+    )
+
+
+def test_reasoning_prefers_readable_summary_when_both_facts_exist() -> None:
+    observation, line = _responses_observation_and_line({
+        "status": "completed",
+        "output": [
+            {
+                "type": "reasoning",
+                "summary": [{"text": "visible"}],
+                "encrypted_content": "sealed",
+            }
+        ],
+    })
+
+    assert line.endswith("completed reason(txt:1)")
+    assert "reason(enc" not in line
+    _assert_output_item_facts(
+        observation,
+        ((0, "reasoning", None, 1, True, True),),
+    )
+
+
+def test_invisible_items_do_not_break_reasoning_runs() -> None:
+    observation, line = _responses_observation_and_line({
+        "status": "completed",
+        "output": [
+            {"type": "reasoning", "summary": [], "encrypted_content": "before"},
+            {"type": "message"},
+            {"type": "reasoning", "summary": []},
+            {"type": "web_search_call"},
+            {"type": "reasoning", "summary": [], "encrypted_content": "after"},
+        ],
+    })
+
+    assert line.endswith("completed reason(enc:2)")
+    _assert_output_item_facts(
+        observation,
+        (
+            (0, "reasoning", None, 0, False, True),
+            (1, "message", None, 0, False, False),
+            (2, "reasoning", None, 0, False, False),
+            (3, "web_search_call", None, 0, False, False),
+            (4, "reasoning", None, 0, False, True),
+        ),
+    )
+
+
+def test_observed_item_sequences_suppress_legacy_reasoning_fallback() -> None:
+    legacy = ("enc",)
+    empty_observation, empty = _responses_observation_and_line(
+        {"status": "completed", "output": []},
+        thinking=legacy,
+    )
+    invisible_observation, invisible = _responses_observation_and_line(
+        {
+            "status": "completed",
+            "output": [
+                {"type": "message"},
+                {"type": "web_search_call"},
+                {"type": "reasoning", "summary": []},
+            ],
+        },
+        thinking=legacy,
+    )
+    unavailable_observation, unavailable = _responses_observation_and_line(
+        {"status": "completed"},
+        thinking=legacy,
+    )
+    visible_observation, visible = _responses_observation_and_line(
+        {
+            "status": "completed",
+            "output": [
+                {"type": "reasoning", "summary": [], "encrypted_content": "sealed"}
+            ],
+        },
+        thinking=legacy,
+    )
+
+    assert empty.endswith("completed")
+    assert "reason(" not in empty
+    _assert_output_item_facts(empty_observation, ())
+    assert invisible.endswith("completed")
+    assert "reason(" not in invisible
+    _assert_output_item_facts(
+        invisible_observation,
+        (
+            (0, "message", None, 0, False, False),
+            (1, "web_search_call", None, 0, False, False),
+            (2, "reasoning", None, 0, False, False),
+        ),
+    )
+    assert unavailable.endswith("completed client_action?(unclassified) reason(enc:1)")
+    assert unavailable_observation.output_items is None
+    assert visible.endswith("completed reason(enc:1)")
+    assert visible.count("reason(enc:1)") == 1
+    _assert_output_item_facts(
+        visible_observation,
+        ((0, "reasoning", None, 0, False, True),),
+    )
+
+
+def test_responses_observation_does_not_call_a_custom_action_a_function() -> None:
+    line = _responses_observation_line({
+        "status": "completed",
+        "output": [{"type": "custom_tool_call", "name": "run_shell"}],
+    })
+
+    assert line.endswith("completed custom_tool_call(run_shell)")
+    assert "function_call" not in line
+
+
+def test_responses_observation_preserves_adjacent_calls_without_deduplicating() -> None:
+    observation, line = _responses_observation_and_line({
+        "status": "completed",
+        "output": [
+            {"type": "function_call", "name": "Read"},
+            {"type": "function_call", "name": "Read"},
+            {"type": "function_call", "name": "Read"},
+            {"type": "function_call", "name": "Read"},
+        ],
+    })
+
+    assert line.endswith(
+        "completed function_call(Read) function_call(Read) function_call(Read) function_call(Read)"
+    )
+    _assert_output_item_identity(
+        observation,
+        (
+            (0, "function_call", "Read"),
+            (1, "function_call", "Read"),
+            (2, "function_call", "Read"),
+            (3, "function_call", "Read"),
+        ),
+    )
+
+
+def test_responses_observation_preserves_actual_type_order_without_grouping() -> None:
+    grouped_observation, grouped = _responses_observation_and_line({
+        "status": "completed",
+        "output": [
+            {"type": "custom_tool_call", "name": "exec"},
+            {"type": "function_call", "name": "Read"},
+            {"type": "function_call", "name": "Bash"},
+            {"type": "function_call", "name": "Read"},
+        ],
+    })
+    interleaved_observation, interleaved = _responses_observation_and_line({
+        "status": "completed",
+        "output": [
+            {"type": "function_call", "name": "Read"},
+            {"type": "custom_tool_call", "name": "exec"},
+            {"type": "function_call", "name": "Bash"},
+        ],
+    })
+
+    assert grouped.endswith("completed custom_tool_call(exec) function_call(Read) function_call(Bash) function_call(Read)")
+    _assert_output_item_identity(
+        grouped_observation,
+        (
+            (0, "custom_tool_call", "exec"),
+            (1, "function_call", "Read"),
+            (2, "function_call", "Bash"),
+            (3, "function_call", "Read"),
+        ),
+    )
+    assert interleaved.endswith("completed function_call(Read) custom_tool_call(exec) function_call(Bash)")
+    _assert_output_item_identity(
+        interleaved_observation,
+        (
+            (0, "function_call", "Read"),
+            (1, "custom_tool_call", "exec"),
+            (2, "function_call", "Bash"),
+        ),
+    )
+
+
+def test_invisible_non_client_items_do_not_remove_or_reorder_actions() -> None:
+    observation, line = _responses_observation_and_line({
+        "status": "completed",
+        "output": [
+            {"type": "function_call", "name": "Read"},
+            {"type": "reasoning", "summary": []},
+            {"type": "message"},
+            {"type": "web_search_call"},
+            {"type": "function_call", "name": "Bash"},
+        ],
+    })
+
+    assert line.endswith("completed function_call(Read) function_call(Bash)")
+    _assert_output_item_facts(
+        observation,
+        (
+            (0, "function_call", "Read", 0, False, False),
+            (1, "reasoning", None, 0, False, False),
+            (2, "message", None, 0, False, False),
+            (3, "web_search_call", None, 0, False, False),
+            (4, "function_call", "Bash", 0, False, False),
+        ),
+    )
+
+
+def test_anonymous_and_unknown_actions_break_named_runs_without_disappearing() -> None:
+    body: dict[str, object] = {
+        "status": "completed",
+        "output": [
+            {"type": "function_call", "name": "Read"},
+            {"type": "function_call", "name": ""},
+            {"type": "function_call", "name": ""},
+            {"type": "function_call", "name": "Bash"},
+            {"type": "some_2027_tool_call", "name": "future"},
+            {"type": "function_call", "name": "Read"},
+            {"type": "function_call", "name": None},
+            {"type": "function_call", "name": "Bash"},
+        ],
+    }
+    observation, line = _responses_observation_and_line(body)
+
+    assert line.endswith(
+        "completed function_call(Read) function_call function_call function_call(Bash) "
+        "client_action?(some_2027_tool_call) function_call(Read) function_call function_call(Bash)"
+    )
+    _assert_output_item_identity(
+        observation,
+        (
+            (0, "function_call", "Read"),
+            (1, "function_call", ""),
+            (2, "function_call", ""),
+            (3, "function_call", "Bash"),
+            (4, "some_2027_tool_call", "future"),
+            (5, "function_call", "Read"),
+            (6, "function_call", None),
+            (7, "function_call", "Bash"),
+        ),
+    )
+
+
+def test_bounded_display_encoding_does_not_merge_distinct_raw_types() -> None:
+    prefix = "x" * 121
+    raw_types = (f"{prefix}a", f"{prefix}b")
+    observer = ResponsesObserver()
+    observer.observe_response({
+        "status": "completed",
+        "output": [
+            {"type": raw_types[0], "name": "Read"},
+            {"type": raw_types[1], "name": "Bash"},
+        ],
+    })
+    observation = observer.snapshot()
+    assert observation.output_items is not None
+    required = ClientActionObservation(
+        requirement=ClientActionRequirement.REQUIRED,
+        basis=ClientActionBasis.KNOWN_CLIENT_ACTION,
+        delivery_required=True,
+    )
+    rendered_observation = replace(
+        observation,
+        output_items=tuple(
+            replace(item, client_action=required) for item in observation.output_items
+        ),
+    )
+    line = format_completion_line(
+        RequestLine(
+            method="POST",
+            path="/responses",
+            inbound_format="openai-responses",
+            model="gpt-model",
+            status_code=200,
+            dialect=ReplyDialect.RESPONSES,
+        ),
+        status="ok",
+        response_observation=rendered_observation,
+    )
+    display_type = f"{'x' * 119}…"
+
+    _assert_output_item_identity(
+        rendered_observation,
+        (
+            (0, raw_types[0], "Read"),
+            (1, raw_types[1], "Bash"),
+        ),
+    )
+    assert line.endswith(f"completed {display_type}(Read) {display_type}(Bash)")
+    assert f"{display_type}(Read,Bash)" not in line
+
+
+def test_action_names_are_made_inert_before_rendering() -> None:
+    observation, line = _responses_observation_and_line({
+        "status": "completed",
+        "output": [
+            {"type": "function_call", "name": "Read,now"},
+            {"type": "function_call", "name": "Bash)\x1b"},
+        ],
+    })
+
+    assert line.endswith(
+        "completed function_call(Read\\u002cnow) function_call(Bash\\u0029\\u001b)"
+    )
+    assert "Read,now" not in line
+    assert "\x1b" not in line
+    _assert_output_item_identity(
+        observation,
+        (
+            (0, "function_call", "Read,now"),
+            (1, "function_call", "Bash)\x1b"),
+        ),
+    )
+
+
+def test_responses_observation_keeps_an_unknown_action_unknown() -> None:
+    line = _responses_observation_line({
+        "status": "completed",
+        "output": [{"type": "some_2027_tool_call"}],
+    })
+
+    assert line.endswith("completed client_action?(some_2027_tool_call)")
+    assert "function_call" not in line
+
+
+def test_responses_observation_renders_incomplete_and_failure_statuses() -> None:
+    incomplete = _responses_observation_line({
+        "status": "incomplete",
+        "incomplete_details": {"reason": "max_output_tokens"},
+        "output": [],
+    })
+    failed = _responses_observation_line(
+        {
+            "status": "failed",
+            "error": {"code": "server_error", "message": "provider failed"},
+            "output": [],
+        },
+        status="fail",
+    )
+
+    assert incomplete.endswith("incomplete(max_output_tokens)")
+    assert failed.endswith("failed")
+    assert "completed" not in failed
+
+
+def test_responses_failure_events_keep_their_actual_terminal_names() -> None:
+    for event_type, payload, expected in (
+        (
+            "response.failed",
+            {"response": {"error": {"code": "server_error", "message": "boom"}}},
+            "failed",
+        ),
+        (
+            "response.cancelled",
+            {"response": {"error": {"code": "cancelled", "message": "boom"}}},
+            "cancelled",
+        ),
+        (
+            "error",
+            {"type": "error", "code": "stream_error", "message": "boom"},
+            "error(stream_error)",
+        ),
+        ("error", {"error": {"message": "boom"}}, "error"),
+        ("error", {"type": "error", "message": "boom"}, "error"),
+    ):
+        observer = ResponsesObserver()
+        observer.observe_event(
+            SseEvent(event=event_type, data=orjson.dumps(payload).decode())
+        )
+        observation = observer.snapshot()
+        line = format_completion_line(
+            RequestLine(
+                method="POST",
+                path="/responses",
+                inbound_format="openai-responses",
+                model="gpt-model",
+                status_code=200,
+                dialect=ReplyDialect.RESPONSES,
+            ),
+            status="fail",
+            response_observation=observation,
+        )
+
+        assert observation.provider_failed is True
+        assert observation.error_summary is not None
+        assert observation.error_summary.message == "boom"
+        assert line.endswith(expected)
+
+
+def test_provider_tokens_are_inert_inside_the_completion_grammar() -> None:
+    line = _responses_observation_line({
+        "status": "incomplete",
+        "incomplete_details": {
+            "reason": "max) failed,\x1b[31m\tline\nnext\\end",
+        },
+        "output": [
+            {
+                "type": "custom_tool_call) failed",
+                "name": "run, now\x00\x1b[0m",
+            }
+        ],
+    })
+
+    assert "\x1b" not in line and "\x00" not in line
+    assert "max\\u0029\\u0020failed\\u002c\\u001b" in line
+    assert "\\u0009line\\u000anext\\u005cend" in line
+    assert "custom_tool_call\\u0029\\u0020failed" in line
+
+    raw_name = "run, now\x00\x1b[0m\\again"
+    named_observer = ResponsesObserver()
+    named_observer.observe_response({
+        "status": "completed",
+        "output": [{"type": "custom_tool_call", "name": raw_name}],
+    })
+    named_observation = named_observer.snapshot()
+    named_line = format_completion_line(
+        RequestLine(
+            method="POST",
+            path="/responses",
+            inbound_format="openai-responses",
+            model="gpt-model",
+            status_code=200,
+            dialect=ReplyDialect.RESPONSES,
+        ),
+        status="ok",
+        response_observation=named_observation,
+    )
+    assert named_observation.output_items is not None
+    assert named_observation.output_items[0].name == raw_name
+    assert "\x1b" not in named_line and "\x00" not in named_line
+    assert "run\\u002c\\u0020now\\u0000\\u001b" in named_line
+    assert "\\u005cagain" in named_line
+
+    error_observer = ResponsesObserver()
+    error_observer.observe_event(
+        SseEvent(
+            event="error",
+            data=orjson.dumps({
+                "type": "error",
+                "code": "bad)\\code\t\x1b",
+                "message": "boom",
+            }).decode(),
+        )
+    )
+    error_line = format_completion_line(
+        RequestLine(method="POST", path="/responses", status_code=200),
+        status="fail",
+        response_observation=error_observer.snapshot(),
+    )
+    assert "error(bad\\u0029\\u005ccode\\u0009\\u001b)" in error_line
+    assert "\x1b" not in error_line
+
+    long_name = "x)" * 200
+    long_observer = ResponsesObserver()
+    long_observer.observe_response({
+        "status": "completed",
+        "output": [{"type": "custom_tool_call", "name": long_name}],
+    })
+    long_observation = long_observer.snapshot()
+    long_line = format_completion_line(
+        RequestLine(method="POST", path="/responses", status_code=200),
+        status="ok",
+        response_observation=long_observation,
+    )
+    assert long_observation.output_items is not None
+    assert long_observation.output_items[0].name == long_name
+    assert "…" in long_line
+    assert len(long_line) < 200
 
 
 def test_the_dialect_reaches_the_rendered_line() -> None:
@@ -654,17 +1456,17 @@ def test_what_came_back_escalates_with_its_size() -> None:
     def field(byte_count: int) -> str:
         return _received(byte_count).split()[-1]
 
-    assert field(5 * 1024) == f"{DIM}↓5.0KB{RESET}"
+    assert field(5 * 1024) == f"{DIM}↓5.0KiB{RESET}"
     # The middle rung carries no escape at all: an explicit white was brighter than the untouched text beside it and read as emphasis. Compared for equality so a stray code fails here rather than being invisible to an `in` check.
-    assert field(10 * 1024) == "↓10.0KB"
-    assert field(50 * 1024) == "↓50.0KB"
-    assert field(100 * 1024) == f"{YELLOW}↓100.0KB{RESET}"
+    assert field(10 * 1024) == "↓10.0KiB"
+    assert field(50 * 1024) == "↓50.0KiB"
+    assert field(100 * 1024) == f"{YELLOW}↓100.0KiB{RESET}"
 
 
 def test_the_thresholds_are_the_round_numbers() -> None:
-    # Exactly `10 * 1024`, not the point where the printed figure reaches `10.0KB`. Both counts below print `10.0KB`, so the same shown number comes out grey on one line and untouched on the next — accepted, because the threshold being the round number is what was asked for.
-    assert _received(10 * 1024 - 1).split()[-1] == f"{DIM}↓10.0KB{RESET}"
-    assert _received(10 * 1024).split()[-1] == "↓10.0KB"
+    # Exactly `10 * 1024`, not the point where the printed figure reaches `10.0KiB`. Both counts below print `10.0KiB`, so the same shown number comes out grey on one line and untouched on the next — accepted, because the threshold being the round number is what was asked for.
+    assert _received(10 * 1024 - 1).split()[-1] == f"{DIM}↓10.0KiB{RESET}"
+    assert _received(10 * 1024).split()[-1] == "↓10.0KiB"
 
 
 def test_how_large_is_large_is_read_off_the_dialect() -> None:
@@ -682,15 +1484,15 @@ def test_how_large_is_large_is_read_off_the_dialect() -> None:
             status="ok",
         ).split()[-1]
 
-    # 100KB tops out the Anthropic scale and is unremarkable on the Responses one, where the current client's tool declarations alone are observed to put 57-58KB under a reply of any size.
-    assert field(100 * 1024, ReplyDialect.ANTHROPIC) == f"{YELLOW}↓100.0KB{RESET}"
-    assert field(100 * 1024, ReplyDialect.RESPONSES) == f"{DIM}↓100.0KB{RESET}"
+    # 100KiB tops out the Anthropic scale and is unremarkable on the Responses one, where the current client's tool declarations alone are observed to put 57-58KiB under a reply of any size.
+    assert field(100 * 1024, ReplyDialect.ANTHROPIC) == f"{YELLOW}↓100.0KiB{RESET}"
+    assert field(100 * 1024, ReplyDialect.RESPONSES) == f"{DIM}↓100.0KiB{RESET}"
 
-    # Both rungs pinned from below as well as on the mark. Without the just-below counts these assertions pass for any thresholds bracketing them — `(256KB, 3MB)` satisfies every on-the-mark line above — so the pair could drift down to where it was lighting every line again without a test noticing.
-    assert field(384 * 1024 - 1, ReplyDialect.RESPONSES) == f"{DIM}↓384.0KB{RESET}"
-    assert field(384 * 1024, ReplyDialect.RESPONSES) == "↓384.0KB"
-    assert field(4 * 1024 * 1024 - 1, ReplyDialect.RESPONSES) == "↓4.0MB"
-    assert field(4 * 1024 * 1024, ReplyDialect.RESPONSES) == f"{YELLOW}↓4.0MB{RESET}"
+    # Both rungs pinned from below as well as on the mark. Without the just-below counts these assertions pass for any thresholds bracketing them — `(256KiB, 3MiB)` satisfies every on-the-mark line above — so the pair could drift down to where it was lighting every line again without a test noticing.
+    assert field(384 * 1024 - 1, ReplyDialect.RESPONSES) == f"{DIM}↓384.0KiB{RESET}"
+    assert field(384 * 1024, ReplyDialect.RESPONSES) == "↓384.0KiB"
+    assert field(4 * 1024 * 1024 - 1, ReplyDialect.RESPONSES) == "↓4.0MiB"
+    assert field(4 * 1024 * 1024, ReplyDialect.RESPONSES) == f"{YELLOW}↓4.0MiB{RESET}"
 
 
 def test_what_went_out_stays_quiet_however_large() -> None:

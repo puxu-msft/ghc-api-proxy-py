@@ -15,14 +15,9 @@ from collections.abc import Callable, Mapping
 from typing import Any, cast
 
 from app.config.schema import SystemPromptPlacement, WebSearchConstraintPolicy
-from app.pipeline.server_tool_text import call_text, web_search_call_text
-from app.pipeline.translation_driver.content import (
-    BlockKind,
-    ContentBlock,
-    OpaqueFormat,
-    ReasoningState,
-    SemanticMessage,
-)
+from app.pipeline import anthropic_server_tools
+from app.pipeline.server_tool_text import render_server_tool_block, web_search_call_text
+from app.pipeline.translation_driver.content import BlockKind, ContentBlock, SemanticMessage
 from app.pipeline.translation_driver.reasoning import (
     RESPONSES_EFFORTS,
     EffortSource,
@@ -30,15 +25,23 @@ from app.pipeline.translation_driver.reasoning import (
     ThinkingEffortIntent,
     align_effort,
 )
+from app.pipeline.translation_driver.reasoning_bridge import (
+    ReasoningBridgeError,
+    ReasoningNotPortable,
+    read_responses_reasoning,
+    reasoning_to_responses,
+)
 from app.pipeline.translation_driver.semantic import (
     Conversion,
     LossCode,
     SemanticRequest,
     SystemBlock,
+    ToolChoiceNotSupported,
     TranslationRefused,
     TranslationTarget,
     system_blocks_from_value,
 )
+from app.pipeline.translation_driver.tool_choice import intent_from_responses_tool_choice
 from app.pipeline.translation_driver.tool_search import (
     HOSTED_SEARCH_TOOL,
     SearchContext,
@@ -62,6 +65,7 @@ _PASSTHROUGH_KEYS = frozenset(
         "max_output_tokens",
         "temperature",
         "reasoning",
+        "tool_choice",
     }
 )
 SYSTEM_ROLE = "system"
@@ -163,6 +167,18 @@ def from_openai_responses(
     request.extensions = {
         key: value for key, value in payload.items() if key not in _PASSTHROUGH_KEYS
     }
+    # Only claim exact supported shapes; preserve everything else for same-format replay.
+    choice = payload.get("tool_choice")
+    request.tool_choice = intent_from_responses_tool_choice(
+        choice, payload.get("parallel_tool_calls")
+    )
+    if request.tool_choice is None:
+        if "tool_choice" in payload:
+            request.extensions["tool_choice"] = choice
+        # Without a claimed choice, parallel_tool_calls remains in extensions as well.
+    elif payload.get("parallel_tool_calls") is False:
+        # The intent now carries this field; do not also report it as a lost extension.
+        request.extensions.pop("parallel_tool_calls", None)
     return request
 
 
@@ -400,19 +416,22 @@ def _tools_for_upstream(
     request: SemanticRequest,
     policy: WebSearchConstraintPolicy,
     search: SearchContext,
-) -> tuple[list[dict[str, Any]], set[str], set[str]]:
+) -> tuple[list[dict[str, Any]], set[str], set[str], set[str]]:
     """The declarations to send, with web search in the spelling this endpoint runs.
 
     Anthropic's dated spelling costs the whole turn here; `{"type": "web_search"}` is accepted and the upstream really executes the search, returning the answer with the results already folded into it. So the declaration is translated rather than removed — removing it was this repair's first form and it traded a broken turn for a silently missing capability.
 
     Whether the model behind this actually runs the search is decided elsewhere, and after this: `subscribers/hosted-web-search-gate` reads the resolved model against `models_support_web_search` at `attempt.prepare`. It has to be there rather than here, because this is handed the name the *client* asked for. So this translates unconditionally and the gate answers the request when the answer is no.
 
-    What comes back **does** need a separate arrangement, and does not have one yet: `hosted-web-search-spec.md` §5.3 requires a `web_search_call` to come back as `server_tool_use` paired with `web_search_tool_result` (D6, ruled by the user 2026-08-20), and both the streaming and non-streaming paths still render it as the same line of text the Anthropic leg flattens its history into. The sentence here until 2026-08-30 said no arrangement was needed "because a `web_search_call` item has no Anthropic spelling" — it has one; what is missing is the reading of the `url_citation` annotations that carry the pair's content.
+    The response half distinguishes this mapped declaration from an unsolicited call through a request-scoped fact. An expected `web_search_call` becomes the native unavailable pair required by `hosted-web-search-spec.md` §5.3; an unsolicited one keeps the D3 text fallback. The pair does not depend on citations: Responses has no genuine Anthropic `encrypted_content`, so a schema-valid success result cannot be built.
+
+    The three name sets describe the declarations actually emitted: web-search mappings, surviving named functions, and declarations replaced by the unnamed tool-search builtin. A search name inferred only from history does not establish that a current declaration was replaced.
     """
     kept: list[dict[str, Any]] = []
     mapped: list[str] = []
     mapped_names: set[str] = set()
     function_names: set[str] = set()
+    search_names: set[str] = set()
     seen_web_search = False
     # Which of the client's own tools performs its tool search, or "" when it cannot be identified. Resolved once for the whole array because promotion is a *replacement* — the tool named here leaves `tools` and comes back as the `tool_search` builtin — and because the same answer decides how the history's calls and results are written further down.
     search_tool = search.tool_name
@@ -435,6 +454,10 @@ def _tools_for_upstream(
     for tool in request.tools:
         if is_hosted_search_tool(tool):
             # Anthropic's hosted search, which identifies itself. `execution: "server"` is the honest translation: the client asked for a search it does not run, and this endpoint runs it.
+            hosted_name = tool.get("name")
+            if isinstance(hosted_name, str):
+                # Kept so a `tool_choice` naming this declaration gets a precise answer: the builtin it became has no name, and "not declared" would be the wrong reason.
+                search_names.add(hosted_name)
             if not seen_tool_search:
                 seen_tool_search = True
                 kept.append(dict(HOSTED_SEARCH_TOOL))
@@ -446,9 +469,10 @@ def _tools_for_upstream(
                 )
             # Deliberately **not** added to `mapped_names`: that set means "declarations that became the web search builtin", and both of its consumers rewrite a matching `tool_choice` to `{"type": "web_search"}`. A hosted search added there earns a forced choice pointing at a builtin this request does not declare.
             #
-            # The cost of leaving it out is a `tool_choice` naming the hosted search going stale, which `_drop_dangling_tool_choice` already removes — a lost forced choice rather than a forced call on the wrong tool.
+            # The choice renderer refuses a forced selection of this name: its replacement has no supported forcing spelling.
             continue
         if search_tool and tool.get("name") == search_tool:
+            search_names.add(search_tool)
             # The client's own search tool, promoted rather than forwarded. Leaving it in place is measured to make the model call it instead of searching, which leaves every deferred tool unloadable.
             #
             # `seen_tool_search` can only already be set here if two tools carry the same name, since the hosted case cleared `search_tool` above. Recorded rather than dropped in silence: a tool leaving the request without a trace is the failure this module's own docstring is written against.
@@ -489,6 +513,7 @@ def _tools_for_upstream(
         if isinstance(ordinary, str):
             function_names.add(ordinary)
         kept.append(_function_tool(tool, request.conversion, keep_defer_loading=will_search))
+    request.hosted_web_search_expected = bool(mapped)
     if mapped:
         # INFO rather than DEBUG: a client with web search switched on triggers this every request, so it is a setting and not a warning — but it is also the only place an operator can see that the declaration they sent is not the one that went out.
         logger.info(
@@ -497,7 +522,7 @@ def _tools_for_upstream(
             ", ".join(sorted(mapped)),
             _WEB_SEARCH_TYPE,
         )
-    return kept, mapped_names, function_names
+    return kept, mapped_names, function_names, search_names
 
 
 def blocks_from_item(
@@ -551,27 +576,76 @@ def blocks_from_item(
             ),
         )
     if kind == "reasoning":
-        encrypted = str(item.get("encrypted_content", ""))
+        try:
+            reasoning = read_responses_reasoning(item)
+        except ReasoningBridgeError as error:
+            raise TranslationRefused(
+                error.detail,
+                code=error.code,
+                field_path="input.reasoning",
+            ) from error
         return "assistant", (
-            ContentBlock(
-                BlockKind.REASONING,
-                text=_summary_text(item.get("summary")),
-                reasoning=(
-                    ReasoningState(OpaqueFormat.RESPONSES_ENCRYPTED, encrypted)
-                    if encrypted
-                    else None
-                ),
-                raw=item,
-            ),
+            ContentBlock(BlockKind.REASONING, reasoning=reasoning, raw=item),
         )
     if kind == "web_search_call":
-        # A search the upstream ran itself. The item carries a query, a status and an opaque id, and the results are not in it — so this says what was searched for, in the same words the Anthropic leg flattens its own history into.
-        #
-        # **Not because there is nothing to revive.** The line here until 2026-08-30 said the item "has no Anthropic spelling and nothing to revive", and both halves were wrong: `hosted-web-search-spec.md` §5.3 spells it `server_tool_use` + `web_search_tool_result` (D6, ruled 2026-08-20), and the results are not gone — they arrive as `url_citation` annotations on the text item that follows, which §5.3 makes the pair's only data source. Nothing reads them yet. That is a gap with an owner, not a property of the wire.
+        # The item-local reader also serves Responses request history, where no request-scoped
+        # expected fact exists. Keep the conservative D3 text form here. The response-only reader
+        # wraps this function and substitutes a native pair only when the Anthropic request half
+        # actually mapped a hosted declaration.
         return "assistant", (
             ContentBlock(BlockKind.TEXT, text=web_search_call_text(item.get("action")), raw=item),
         )
     return "user", (ContentBlock(BlockKind.UNKNOWN, raw=item),)
+
+
+def record_web_search_call_id_loss(
+    item: dict[str, Any],
+    conversion: Conversion,
+) -> None:
+    if item.get("type") != "web_search_call":
+        return
+    detail = anthropic_server_tools.web_search_call_id_loss(item.get("id"))
+    if detail is not None:
+        conversion.record(LossCode.SERVER_TOOL_CALL_ID_NOT_CARRIED, detail)
+
+
+def response_blocks_from_item(
+    item: dict[str, Any],
+    *,
+    conversion: Conversion,
+    client_search_tool: str = "",
+    hosted_web_search_expected: bool = False,
+) -> tuple[str, tuple[ContentBlock, ...]]:
+    """Read one response item with request-scoped hosted-search context."""
+    if item.get("type") != "web_search_call":
+        return blocks_from_item(item, client_search_tool=client_search_tool)
+    if not hosted_web_search_expected:
+        conversion.record(
+            LossCode.SERVER_TOOL_NOT_CARRIED,
+            anthropic_server_tools.unsolicited_web_search_loss(item.get("action")),
+        )
+        return blocks_from_item(item, client_search_tool=client_search_tool)
+
+    pair = anthropic_server_tools.unavailable_web_search_pair(item.get("action"))
+    conversion.record(
+        LossCode.SERVER_TOOL_PARTIALLY_REPRESENTABLE,
+        anthropic_server_tools.partial_web_search_loss(pair, item.get("status")),
+    )
+    return "assistant", (
+        ContentBlock(
+            BlockKind.SERVER_TOOL_USE,
+            call_id=str(pair.call["id"]),
+            name=anthropic_server_tools.WEB_SEARCH,
+            arguments=pair.action.input,
+            raw=pair.call,
+        ),
+        ContentBlock(
+            BlockKind.WEB_SEARCH_TOOL_RESULT,
+            call_id=str(pair.call["id"]),
+            output=pair.result["content"],
+            raw=pair.result,
+        ),
+    )
 
 
 def _messages_from_input(value: object) -> list[SemanticMessage]:
@@ -593,10 +667,6 @@ def _block_from_content_part(part: dict[str, Any]) -> ContentBlock:
     if kind == "input_image":
         return ContentBlock(BlockKind.IMAGE, raw=part)
     return ContentBlock(BlockKind.UNKNOWN, raw=part)
-
-
-def _summary_text(value: object) -> str:
-    return "".join(str(part.get("text", "")) for part in _dict_list(value))
 
 
 def _decoded_arguments(value: object) -> Any:
@@ -647,7 +717,7 @@ def item_from_block(
     conversion: Conversion,
 ) -> dict[str, Any] | None:
     """Render one block as a Responses item, or None when it may not cross."""
-    return _item_from_block(block, role, conversion)
+    return _item_from_block(block, role, conversion, bridge_for_client=True)
 
 
 def _item_from_block(
@@ -655,6 +725,8 @@ def _item_from_block(
     role: str,
     conversion: Conversion,
     search: SearchContext | None = None,
+    *,
+    bridge_for_client: bool = False,
 ) -> dict[str, Any] | None:
     if search is not None and search.active:
         # The two history shapes a client-executed tool search leaves behind. Both are recognised by `call_id` rather than by content: the call is the one that went to the search tool, and the result is the one answering it — a result that came back empty is still a search result, and rendering it as an ordinary `function_call_output` would tell the model a tool it never called had returned.
@@ -697,55 +769,49 @@ def _item_from_block(
             "arguments": _encoded_arguments(block.arguments),
         }
     if block.kind is BlockKind.TOOL_RESULT:
+        output = _flattened_output(block, conversion)
+        if block.is_error:
+            # Responses has no error flag; preserve the failure as text without interpreting any existing prefix.
+            conversion.record(
+                LossCode.TOOL_RESULT_ERROR_MARKED,
+                f"tool result for {block.call_id}: is_error marked in text",
+            )
+            output = f"[tool_error] {output}"
         return {
             "type": "function_call_output",
             "call_id": block.call_id,
-            "output": _flattened_output(block, conversion),
+            "output": output,
         }
     if block.kind is BlockKind.REASONING:
-        return _reasoning_item(block, conversion)
+        return _reasoning_item(
+            block,
+            conversion,
+            bridge_for_client=bridge_for_client,
+        )
     flattened = _server_tool_block_as_text(block)
     if flattened is not None:
-        conversion.record(
-            LossCode.SERVER_TOOL_NOT_CARRIED,
-            f"{flattened[0]} into {WIRE_FORMAT}: flattened to text",
-        )
+        source_type, text, dropped_opaque = flattened
+        detail = f"{source_type} into {WIRE_FORMAT}: flattened to text"
+        if dropped_opaque:
+            detail += "; opaque encrypted_content not carried"
+        conversion.record(LossCode.SERVER_TOOL_NOT_CARRIED, detail)
         return {
             "type": "message",
             "role": "assistant",
-            "content": [{"type": "output_text", "text": flattened[1]}],
+            "content": [{"type": "output_text", "text": text}],
         }
     conversion.record(LossCode.BLOCK_NOT_CARRIED, f"{block.kind.value} into {WIRE_FORMAT}")
     return None
 
 
-def _server_tool_block_as_text(block: ContentBlock) -> tuple[str, str] | None:
-    """An Anthropic server-tool block rendered as text, or `None` when it is not one.
-
-    These arrive because *we sent them*. When a search cannot run, this proxy answers with a `server_tool_use` paired with a failed `web_search_tool_result`, and the client replays that turn verbatim on the next request. There is no `server_tool_use` in the Responses protocol, so without this the whole assistant turn is dropped — not merely the two blocks, since a message left with no content is not carried either.
-
-    What that cost is worth stating plainly: the model would be shown two consecutive user turns and no trace of the search, so it does not know one was attempted, does not know it failed, and is free to try again — producing the same failure, dropped the same way. Telling it once and then forgetting is worse than not telling it, because the second turn looks like the first.
-
-    Text rather than a downgraded `function_call`, for the reason the Anthropic leg gives at the same decision: a downgraded pair refers to a tool this request does not declare, while text refers to nothing. The wording comes from `pipeline/server_tool_text.py`, which is also what the Anthropic leg flattens with — one history, one shape, whichever leg it crosses.
-    """
-    raw = block.raw
-    if not raw:
+def _server_tool_block_as_text(
+    block: ContentBlock,
+) -> tuple[str, str, bool] | None:
+    """Use the shared history renderer for an Anthropic server-tool block."""
+    rendering = render_server_tool_block(block.raw)
+    if rendering is None:
         return None
-    kind = raw.get("type")
-    if kind == "server_tool_use":
-        name = raw.get("name")
-        if not isinstance(name, str):
-            return None
-        return kind, call_text(name, raw.get("input"))
-    if not isinstance(kind, str) or not kind.endswith("_tool_result") or kind == "tool_result":
-        return None
-    family = kind[: -len("_tool_result")]
-    content = raw.get("content")
-    if isinstance(content, dict):
-        code = cast(dict[str, Any], content).get("error_code")
-        if isinstance(code, str) and code:
-            return kind, f"[{family} failed: {code}]"
-    return kind, f"[{family} results omitted]"
+    return rendering.source_type, rendering.text, rendering.dropped_opaque
 
 
 def _encoded_arguments(value: Any) -> str:
@@ -784,40 +850,27 @@ def _flattened_output(block: ContentBlock, conversion: Conversion) -> str:
     return json.dumps(output, ensure_ascii=False)
 
 
-def _reasoning_item(block: ContentBlock, conversion: Conversion) -> dict[str, Any] | None:
-    """Render reasoning, or refuse and say so.
-
-    Refusing matters more than rendering. Anthropic's signature is a value only Anthropic can produce; writing it into `encrypted_content` would hand upstream something it never issued.
-    A carrier this proxy signed is different — the Responses payload is inside it, and taking it back out is recovery, not invention.
-    """
-    state = block.reasoning
-    if state is None:
-        return {"type": "reasoning", "summary": _summary_parts(block.text)}
-    if state.format is OpaqueFormat.RESPONSES_ENCRYPTED:
-        return {
-            "type": "reasoning",
-            "summary": _summary_parts(block.text),
-            "encrypted_content": state.value,
-        }
-    if state.format is OpaqueFormat.PROXY_CARRIER:
-        # A carrier this proxy issued. With a payload it round-trips value-exact; bare, `.dev/docs/anthropic-responses-bridge/spec.md` says TRANSFORM — restore a summary-only reasoning item rather than drop the block. It
-        # used to be dropped, which lost the turn's reasoning entirely on the way back.
-        item: dict[str, Any] = {
-            "type": "reasoning",
-            "summary": _summary_parts(block.text),
-        }
-        if state.encrypted_content:
-            item["encrypted_content"] = state.encrypted_content
-        return item
-    conversion.record(
-        LossCode.REASONING_STATE_NOT_PORTABLE,
-        f"{state.format.value} cannot be written as {WIRE_FORMAT} encrypted_content",
-    )
-    return None
-
-
-def _summary_parts(text: str) -> list[dict[str, Any]]:
-    return [{"type": "summary_text", "text": text}] if text else []
+def _reasoning_item(
+    block: ContentBlock,
+    conversion: Conversion,
+    *,
+    bridge_for_client: bool,
+) -> dict[str, Any] | None:
+    """Render provider-native reasoning or a client-facing bridge carrier."""
+    content = block.reasoning
+    if content is None:
+        conversion.record(LossCode.BLOCK_NOT_CARRIED, "reasoning block has no typed content")
+        return None
+    try:
+        return reasoning_to_responses(content, bridge_for_client=bridge_for_client)
+    except ReasoningNotPortable:
+        state = content.state
+        source = state.format.value if state is not None else content.source_format
+        conversion.record(
+            LossCode.REASONING_STATE_NOT_PORTABLE,
+            f"{source} cannot be written to a Responses upstream",
+        )
+        return None
 
 
 def _place_in_instructions(payload: dict[str, Any], request: SemanticRequest) -> None:
@@ -835,86 +888,96 @@ _SYSTEM_PROMPT_PLACEMENTS: dict[
 }
 
 
-def _carry_forced_search(
+def _render_tool_choice(
     payload: dict[str, Any],
     request: SemanticRequest,
     mapped_names: set[str],
     function_names: set[str],
+    search_names: set[str],
 ) -> None:
-    """Carry an Anthropic `tool_choice` that demanded the search across the format boundary.
+    """Follow rewritten declarations even on a same-format translation.
 
-    `tool_choice` is not a key any translator claims, so it rides in `extensions` and is dropped whole when the formats differ — correct for the general case, and wrong for this one. Measured over 190 real Claude Code sub-requests, 95 of them force the search this way, and those requests exist for no other purpose: the client has already decided a search is what it wants and sends a turn saying `Perform a web search for the query: X`.
-
-    Losing it there is worse than losing a preference. The model, no longer obliged to search, may answer from memory instead — and the client renders whatever comes back under a `Web search results for query:` heading regardless. A dropped `tool_choice` is one of the ways that heading ends up over text nothing searched for.
-
-    Upstream takes `{"type": "web_search"}` here: measured 200, echoed back normalised, with a `web_search_call` in the output and `num_requests` of 1. It forces the search rather than merely tolerating the field.
+    A forced selection must remain forced. Tool-search promotion has no supported forcing spelling in this translator; the measured allowlist is not an equivalent replacement.
     """
-    if payload.get("tool_choice") is not None:
+    crossing = request.source_format != WIRE_FORMAT
+    intent = request.tool_choice
+    if intent is None:
+        if crossing and "tool_choice" in request.extensions:
+            raise ToolChoiceNotSupported("tool_choice has no supported Responses translation")
+        _repoint_unclaimed_tool_choice(payload, mapped_names, function_names, search_names)
         return
-    choice = request.extensions.get("tool_choice")
-    if not isinstance(choice, dict):
-        return
-    entry = cast(dict[str, Any], choice)
-    named = entry.get("name")
-    if not isinstance(named, str) or named not in mapped_names:
-        return
-    if named in function_names:
-        # Ambiguous: the name is also an ordinary function tool's. Forcing a hosted search would be answering a question only the client can answer.
-        return
-    payload["tool_choice"] = {"type": _WEB_SEARCH_TYPE}
+    has_tools = bool(payload.get("tools"))
+    if crossing and not has_tools:
+        if intent.mode in {"any", "tool"}:
+            raise ToolChoiceNotSupported("a forced tool choice requires declared tools")
+        if intent.mode in {"auto", "none"}:
+            return
+
+    choice: str | dict[str, Any]
+    if intent.mode == "auto":
+        choice = "auto"
+    elif intent.mode == "any":
+        choice = "required"
+    elif intent.mode == "none":
+        choice = "none"
+    elif intent.mode == "tool" and intent.name:
+        named = intent.name
+        matches = sum(named in names for names in (function_names, mapped_names, search_names))
+        if matches > 1 and (crossing or named not in function_names):
+            raise ToolChoiceNotSupported(f"ambiguous tool choice: {named} names multiple declaration kinds")
+        if named in function_names:
+            choice = {"type": "function", "name": named}
+        elif named in mapped_names:
+            choice = {"type": _WEB_SEARCH_TYPE}
+        elif named in search_names:
+            raise ToolChoiceNotSupported(
+                f"{named} became tool_search, which has no supported forced-choice translation"
+            )
+        elif not crossing:
+            # Without a declaration rewrite, preserve the client's own same-format selection.
+            choice = {"type": "function", "name": named}
+        else:
+            raise ToolChoiceNotSupported(f"{named} is not declared by the tools this request sends")
+    else:
+        raise ToolChoiceNotSupported(f"{intent.mode} tool choice has no Responses spelling")
+
+    payload["tool_choice"] = choice
+    if intent.disable_parallel and (has_tools or not crossing):
+        payload["parallel_tool_calls"] = False
 
 
-def _repoint_tool_choice(
-    payload: dict[str, Any], mapped_names: set[str], function_names: set[str]
+def _repoint_unclaimed_tool_choice(
+    payload: dict[str, Any],
+    mapped_names: set[str],
+    function_names: set[str],
+    search_names: set[str],
 ) -> None:
-    """Follow a `tool_choice` that named a web search declaration into the builtin spelling.
-
-    A builtin tool object carries no `name` — it is `{"type": "web_search"}` and nothing else — so a choice that named the Anthropic declaration now points at something with no name to match. Left alone it costs the turn on its own account, which would be the mapping trading one rejection for another.
-
-    Upstream takes `{"type": "web_search"}` in the choice position: measured 200, echoed back normalised as `web_search_preview`, with `tool_usage.web_search.num_requests` of 1 and a `web_search_call` in the output. It really does force the search rather than merely being tolerated.
-
-    Only reachable on the same-format crossing today. Anthropic's `tool_choice` is not a key any translator claims, so it rides in `extensions` and is dropped on the way to another format — the Anthropic leg's forced choice never arrives here at all, which is its own gap and recorded as one.
-    """
+    """Preserve opaque choices unless this writer changed the declaration they name."""
     choice = payload.get("tool_choice")
     if not isinstance(choice, dict):
         return
     entry = cast(dict[str, Any], choice)
+    if entry.get("type") == "allowed_tools":
+        rewritten_names = mapped_names | search_names
+        for selected in _dict_list(entry.get("tools")):
+            named = selected.get("name")
+            if isinstance(named, str) and named in rewritten_names and named not in function_names:
+                raise ToolChoiceNotSupported(f"allowed_tools refers to rewritten tool {named}")
+        return
     named = entry.get("name")
-    if not isinstance(named, str) or named not in mapped_names:
+    if not isinstance(named, str) or named in function_names:
         return
-    if named in function_names:
-        # The name resolves to an ordinary function tool as well. Which one the client meant is its own ambiguity to own, and answering it by forcing a hosted search would be this proxy inventing the answer — so the choice is left exactly as it arrived.
+    if named in search_names:
+        raise ToolChoiceNotSupported(
+            f"{named} became tool_search, which has no supported forced-choice translation"
+        )
+    if named not in mapped_names:
         return
-    payload["tool_choice"] = {"type": _WEB_SEARCH_TYPE}
-
-
-def _drop_dangling_tool_choice(payload: dict[str, Any]) -> None:
-    """Remove a `tool_choice` left pointing at a declaration that is no longer being sent.
-
-    Only reachable on the same-format crossing. Anthropic's `tool_choice` is not a key any translator claims, so it rides in `extensions` and is dropped on the way to another format — but a Responses request replays its own extensions verbatim, and a client that sent the Anthropic spelling of a declaration can have named it here too.
-
-    Left behind, it trades one rejection for another: the declaration would no longer be refused, and the choice naming a tool that is not declared would be. That is the same reasoning, and the same two cases, as `_drop_dangling_choice` on the Anthropic leg — a choice that names a missing tool, and a choice of any kind once nothing is left to choose from.
-    """
-    choice = payload.get("tool_choice")
-    if choice is None:
+    if set(entry) == {"type", "name"} and entry.get("type") in ("tool", "function"):
+        payload["tool_choice"] = {"type": _WEB_SEARCH_TYPE}
         return
-    remaining = payload.get("tools")
-    if not remaining:
-        del payload["tool_choice"]
-        return
-    if not isinstance(choice, dict) or not isinstance(remaining, list):
-        return
-    entry = cast(dict[str, Any], choice)
-    named = entry.get("name")
-    if not isinstance(named, str):
-        return
-    declared = {
-        cast(dict[str, Any], tool).get("name")
-        for tool in cast(list[Any], remaining)
-        if isinstance(tool, dict)
-    }
-    if named not in declared:
-        del payload["tool_choice"]
+    # Replacing this object would discard fields the reader deliberately did not interpret.
+    raise ToolChoiceNotSupported(f"tool_choice for rewritten tool {named} contains unsupported fields")
 
 
 def to_openai_responses(
@@ -929,20 +992,20 @@ def to_openai_responses(
     # Recorded on the request so the response half can find it. It is not readable from the Responses body: a `tool_search_call` names no tool, because on that wire the search *is* the tool.
     # The name the *response* half should hand a `tool_search_call` back under. Written after the tools array is built, because that is where it may be cleared: a hosted search wins over the client's, and in that case the search is the upstream's own and belongs to nobody on this side.
     request.client_search_tool = search.tool_name
+    request.hosted_web_search_expected = False
     payload: dict[str, Any] = {
         "model": request.model,
         "input": _input_from_messages(request.messages, request.conversion, search),
     }
     if request.system:
         _SYSTEM_PROMPT_PLACEMENTS[system_prompts](payload, request)
-    dropped_any = False
     mapped_names: set[str] = set()
     function_names: set[str] = set()
+    search_names: set[str] = set()
     if request.tools:
-        tools, mapped_names, function_names = _tools_for_upstream(
+        tools, mapped_names, function_names, search_names = _tools_for_upstream(
             request, web_search_domain_restrictions, search
         )
-        dropped_any = len(tools) != len(request.tools)
         if tools:
             # Not `[]` when everything was removed. An empty array is a different thing to say than saying nothing, and absent is the spelling every request without tools already uses.
             payload["tools"] = tools
@@ -955,12 +1018,8 @@ def to_openai_responses(
     payload.update(request.nested_extensions_for(WIRE_FORMAT))
     _apply_reasoning(payload, request, target_model or TranslationTarget())
     payload.update(request.extensions_for(WIRE_FORMAT))
-    # After the extensions, because that is where `tool_choice` arrives on the crossing where it survives at all. Repointing comes first: a choice that named a mapped declaration is not dangling, it just has a new spelling to follow.
-    if mapped_names:
-        _carry_forced_search(payload, request, mapped_names, function_names)
-        _repoint_tool_choice(payload, mapped_names, function_names)
-    if dropped_any:
-        _drop_dangling_tool_choice(payload)
+    # Resolve both modelled and opaque selections against the declarations this writer produced.
+    _render_tool_choice(payload, request, mapped_names, function_names, search_names)
     return payload
 
 

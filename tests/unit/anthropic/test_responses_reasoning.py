@@ -1,16 +1,23 @@
 from collections.abc import Mapping
 
 from app.anthropic.thinking.responses_reasoning import (
-    PROJECT_SYNTHETIC_REASONING_SIGNATURE,
     SYNTHETIC_REASONING_SIGNATURE,
     SYNTHETIC_REASONING_SIGNATURE_PREFIX,
     anthropic_thinking_to_responses,
+    decode_anthropic_thinking,
     responses_reasoning_to_anthropic,
 )
-from app.pipeline.translation_driver.reasoning_carrier import encode_reasoning_carrier
+from app.pipeline.translation_driver.reasoning_carrier import (
+    ANTHROPIC_THINKING_SIGNATURE,
+    PROJECT_SYNTHETIC_REASONING_V2,
+    RESPONSES_ENCRYPTED_CONTENT,
+    RESPONSES_SUMMARY_TEXT_LAYOUT,
+    CarrierRecord,
+    encode_reasoning_carrier_v2,
+)
 
 
-def test_plain_summary_becomes_thinking_with_bare_carrier() -> None:
+def test_facade_uses_v2_bare_for_canonical_summary_only_reasoning() -> None:
     blocks = responses_reasoning_to_anthropic(
         [
             {
@@ -23,147 +30,29 @@ def test_plain_summary_becomes_thinking_with_bare_carrier() -> None:
         {
             "type": "thinking",
             "thinking": "step 1... step 2...",
-            "signature": PROJECT_SYNTHETIC_REASONING_SIGNATURE,
+            "signature": PROJECT_SYNTHETIC_REASONING_V2,
         }
     ]
 
 
-def test_encrypted_only_reasoning_creates_a_reversible_thinking_block() -> None:
-    blocks = responses_reasoning_to_anthropic(
-        [{"type": "reasoning", "summary": [], "encrypted_content": "ENC=="}]
-    )
-
-    assert blocks == [
-        {
-            "type": "thinking",
-            "thinking": "",
-            "signature": encode_reasoning_carrier("ENC=="),
-        }
-    ]
-    assert blocks is not None
-    assert anthropic_thinking_to_responses(blocks[0]) == {
+def test_facade_round_trip_preserves_multiple_parts_empty_text_extensions_and_opaque() -> None:
+    reasoning: Mapping[str, object] = {
         "type": "reasoning",
-        "summary": [],
-        "encrypted_content": "ENC==",
-    }
-
-
-def test_empty_reasoning_item_keeps_one_item_one_block_cardinality() -> None:
-    blocks = responses_reasoning_to_anthropic(
-        [{"type": "reasoning", "summary": [], "encrypted_content": ""}]
-    )
-
-    assert blocks is not None
-    assert blocks == [
-        {
-            "type": "thinking",
-            "thinking": "",
-            "signature": PROJECT_SYNTHETIC_REASONING_SIGNATURE,
-        }
-    ]
-    assert anthropic_thinking_to_responses(blocks[0]) == {
-        "type": "reasoning",
-        "summary": [],
-    }
-
-
-def test_encrypted_content_is_recovered_from_an_empty_thinking_carrier() -> None:
-    assert anthropic_thinking_to_responses(
-        {
-            "type": "thinking",
-            "thinking": "",
-            "signature": f"{SYNTHETIC_REASONING_SIGNATURE_PREFIX}RU5DPT0",
-        }
-    ) == {"type": "reasoning", "summary": [], "encrypted_content": "ENC=="}
-
-
-def test_mixed_reasoning_joins_summary_and_carries_encrypted_content() -> None:
-    blocks = responses_reasoning_to_anthropic(
-        [
-            {
-                "type": "reasoning",
-                "summary": [
-                    {"type": "summary_text", "text": "first"},
-                    {"type": "summary_text", "text": " + second"},
-                ],
-                "encrypted_content": "opaque-😀",
-            }
-        ]
-    )
-
-    assert blocks == [
-        {
-            "type": "thinking",
-            "thinking": "first + second",
-            "signature": encode_reasoning_carrier("opaque-😀"),
-        }
-    ]
-
-
-def test_reasoning_items_become_independent_blocks_in_source_order() -> None:
-    blocks = responses_reasoning_to_anthropic(
-        [
-            {
-                "type": "reasoning",
-                "summary": [{"type": "summary_text", "text": "first"}],
-                "encrypted_content": "ENC-1",
-            },
-            {"type": "message", "content": [{"type": "output_text", "text": "answer"}]},
-            {
-                "type": "reasoning",
-                "summary": [
-                    {"type": "summary_text", "text": " + second"},
-                    {"type": "summary_text", "text": ""},
-                ],
-            },
-            {"type": "reasoning", "summary": [], "encrypted_content": "ENC-2"},
-            {
-                "type": "reasoning",
-                "summary": [{"type": "summary_text", "text": " + third"}],
-                "encrypted_content": "",
-            },
-        ]
-    )
-
-    assert blocks == [
-        {
-            "type": "thinking",
-            "thinking": "first",
-            "signature": encode_reasoning_carrier("ENC-1"),
-        },
-        {
-            "type": "thinking",
-            "thinking": " + second",
-            "signature": PROJECT_SYNTHETIC_REASONING_SIGNATURE,
-        },
-        {
-            "type": "thinking",
-            "thinking": "",
-            "signature": encode_reasoning_carrier("ENC-2"),
-        },
-        {
-            "type": "thinking",
-            "thinking": " + third",
-            "signature": PROJECT_SYNTHETIC_REASONING_SIGNATURE,
-        },
-    ]
-
-
-def test_carrier_round_trip_is_field_and_byte_compatible() -> None:
-    reasoning = {
-        "type": "reasoning",
-        "summary": [{"type": "summary_text", "text": "visible"}],
+        "summary": [
+            {"type": "summary_text", "text": "一", "detail": 1},
+            {"type": "summary_text", "text": ""},
+            {"type": "summary_text", "text": "😀二"},
+        ],
         "encrypted_content": "ENC==\x00😀",
     }
-
     blocks = responses_reasoning_to_anthropic([reasoning])
-
     assert blocks is not None
     assert len(blocks) == 1
+    assert blocks[0]["signature"].startswith("ghc-api-proxy:synthetic-reasoning:v2:")
     assert anthropic_thinking_to_responses(blocks[0]) == reasoning
 
 
-def test_multiple_reasoning_items_round_trip_without_cross_item_loss() -> None:
+def test_facade_preserves_reasoning_item_cardinality() -> None:
     reasoning_items: list[Mapping[str, object]] = [
         {
             "type": "reasoning",
@@ -178,36 +67,92 @@ def test_multiple_reasoning_items_round_trip_without_cross_item_loss() -> None:
             ],
             "encrypted_content": "ENC-2",
         },
-        {
-            "type": "reasoning",
-            "summary": [],
-            "encrypted_content": "ENC-ONLY",
-        },
+        {"type": "reasoning", "summary": [], "encrypted_content": "ENC-ONLY"},
     ]
-
     blocks = responses_reasoning_to_anthropic(reasoning_items)
-
     assert blocks is not None
-    assert [anthropic_thinking_to_responses(block) for block in blocks] == [
+    assert [anthropic_thinking_to_responses(block) for block in blocks] == reasoning_items
+
+
+def test_facade_still_consumes_copilot_v1_payload_bare_and_legacy_forms() -> None:
+    assert anthropic_thinking_to_responses(
         {
-            "type": "reasoning",
-            "summary": [{"type": "summary_text", "text": "first"}],
-            "encrypted_content": "ENC-1",
-        },
+            "type": "thinking",
+            "thinking": "legacy summary",
+            "signature": f"{SYNTHETIC_REASONING_SIGNATURE_PREFIX}RU5DPT0",
+        }
+    ) == {
+        "type": "reasoning",
+        "summary": [{"type": "summary_text", "text": "legacy summary"}],
+        "encrypted_content": "ENC==",
+    }
+    assert anthropic_thinking_to_responses(
         {
-            "type": "reasoning",
-            "summary": [{"type": "summary_text", "text": "second + detail"}],
-            "encrypted_content": "ENC-2",
-        },
+            "type": "thinking",
+            "thinking": "bare prefix",
+            "signature": SYNTHETIC_REASONING_SIGNATURE_PREFIX,
+        }
+    ) == {
+        "type": "reasoning",
+        "summary": [{"type": "summary_text", "text": "bare prefix"}],
+    }
+    assert anthropic_thinking_to_responses(
         {
-            "type": "reasoning",
-            "summary": [],
-            "encrypted_content": "ENC-ONLY",
-        },
+            "type": "thinking",
+            "thinking": "legacy sentinel",
+            "signature": SYNTHETIC_REASONING_SIGNATURE,
+        }
+    ) == {
+        "type": "reasoning",
+        "summary": [{"type": "summary_text", "text": "legacy sentinel"}],
+    }
+
+
+def test_facade_reports_slot_aware_v2_classifications() -> None:
+    cases = [
+        (
+            encode_reasoning_carrier_v2(
+                [CarrierRecord("future.provider.reasoning.detail", {"x": 1})]
+            ),
+            "visible",
+            "project_v2_unsupported_record",
+        ),
+        (
+            encode_reasoning_carrier_v2(
+                [CarrierRecord(ANTHROPIC_THINKING_SIGNATURE, "CAIS-native")]
+            ),
+            "visible",
+            "project_v2_direction_mismatch",
+        ),
+        (
+            encode_reasoning_carrier_v2(
+                [CarrierRecord(RESPONSES_ENCRYPTED_CONTENT, "ENC")]
+            ),
+            "visible",
+            "project_v2_profile_mismatch",
+        ),
+        (
+            encode_reasoning_carrier_v2(
+                [
+                    CarrierRecord(
+                        RESPONSES_SUMMARY_TEXT_LAYOUT,
+                        {"lengths": [1], "extensions": [{}]},
+                    )
+                ]
+            ),
+            "ab",
+            "project_v2_presentation_mismatch",
+        ),
     ]
+    for signature, thinking, expected in cases:
+        decoded = decode_anthropic_thinking(
+            {"type": "thinking", "thinking": thinking, "signature": signature}
+        )
+        assert decoded.item is None
+        assert decoded.classification == expected
 
 
-def test_foreign_and_redacted_thinking_are_not_recovered() -> None:
+def test_foreign_redacted_malformed_and_invalid_blocks_are_not_recovered() -> None:
     assert (
         anthropic_thinking_to_responses(
             {"type": "thinking", "thinking": "foreign", "signature": "CAIS-claude"}
@@ -220,39 +165,13 @@ def test_foreign_and_redacted_thinking_are_not_recovered() -> None:
         )
         is None
     )
-
-
-def test_invalid_blocks_and_legacy_carrier_follow_minimal_compatibility() -> None:
     assert anthropic_thinking_to_responses({"type": "thinking", "thinking": 42}) is None
-    assert (
-        anthropic_thinking_to_responses(
-            {
-                "type": "thinking",
-                "thinking": "legacy summary",
-                "signature": SYNTHETIC_REASONING_SIGNATURE,
-            }
-        )
-        == {
-            "type": "reasoning",
-            "summary": [{"type": "summary_text", "text": "legacy summary"}],
-        }
-    )
     assert (
         anthropic_thinking_to_responses(
             {
                 "type": "thinking",
                 "thinking": "malformed payload",
                 "signature": f"{SYNTHETIC_REASONING_SIGNATURE_PREFIX}!!!",
-            }
-        )
-        is None
-    )
-    assert (
-        anthropic_thinking_to_responses(
-            {
-                "type": "thinking",
-                "thinking": "truncated payload",
-                "signature": f"{SYNTHETIC_REASONING_SIGNATURE_PREFIX}A",
             }
         )
         is None
