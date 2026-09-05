@@ -1,0 +1,134 @@
+# HTTP 200 content-type: application/json
+
+{
+  "copilot_usage": {
+    "token_details": [
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 500000000000,
+        "model": "gpt-5.5",
+        "token_count": 50,
+        "token_type": "input"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 50000000000,
+        "model": "gpt-5.5",
+        "token_count": 0,
+        "token_type": "cache_read"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 0,
+        "model": "gpt-5.5",
+        "token_count": 0,
+        "token_type": "cache_write"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 3000000000000,
+        "model": "gpt-5.5",
+        "token_count": 6,
+        "token_type": "output"
+      }
+    ],
+    "total_nano_aiu": 43000000
+  },
+  "created_at": 1788466600,
+  "id": "UbOwjwGBtkg3yLVurkgZx/UKYdEy/Y7vn2ebSdusQtVI13xM60f2Ms42NTa/Gsf+ujK+CQyPF8AvolCxTs16q4hbRgEqK37clrDUuXGSseZf7521nUQA3eMca98MlNBaWSaqV36MLpDagpNKDhJq5kB5WuajWNxUanqZCGFOdEziHPYKI4EmY6vUOGeXngcS95s3ZZyY+QsDdBBCB9pNGES2WnYKH/sIfDKwbahMLqhl5BF855LjjvFMKUcp9dmgkXl5t0lSH9LICw63LbHhZbycxSIrh/EfRijCYyMpx/I2wmHvPF+bTPp1KyaBHkoHH4ivhneNPn59HvHMDzQhlV5ei/aJsyNj0Uhj+YynbFC621fujzq7LtEZtZfUIkT5gFYmeAszo/yPcLLByuJ4cu2vIU6u6AxL",
+  "incomplete_details": null,
+  "instructions": null,
+  "max_output_tokens": 256,
+  "model": "gpt-5.5-2026-04-23",
+  "object": "response",
+  "output": [
+    {
+      "content": [
+        {
+          "annotations": [],
+          "logprobs": [],
+          "text": "Paris.",
+          "type": "output_text"
+        }
+      ],
+      "id": "MHlRLIolJgrPMMTOKt/2BW1L9r4j8rgjUvomrXh5Hd6h4wB4D9AxxgNWJKB+k50tR4/1Uc+v1hN2LDI9lvk8kv8BBEUeMGA2ENkZV6ThvI4g8BBj8RqoIrTMsU+Xf5RnjcKvFL69PxqNEYxwcKey9XO0AeaRZVnN9i00r4BgNhkYhNl8vf7ZmRBb3xVkIWJjtblXvGIjTOrYY34rLTdlcOIFMcQyXdILgh5Y8OP4N35R1QsvOwcI2goazTLdB8OnOc4bj8RUP//Nzknt5unaJIKOSSjLUr/mOpEuZv6q+X5KyDhFUlc5RYsnpsAJGZ+50rHcD1OADnv/7zKf77cbjA69r23Qb6+9saa+bUGWXauvtZ2dbf7e5povPk1WoPlxCTtwWYzszO3Lj02TR0BSlOVM9nF5EF8=",
+      "phase": "final_answer",
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    }
+  ],
+  "output_text": null,
+  "parallel_tool_calls": true,
+  "previous_response_id": null,
+  "prompt_cache_retention": "24h",
+  "reasoning": {
+    "context": "current_turn",
+    "effort": "medium",
+    "summary": null
+  },
+  "safety_identifier": "REDACTED",
+  "service_tier": "default",
+  "status": "completed",
+  "temperature": 1,
+  "text": {
+    "format": {
+      "type": "text"
+    },
+    "verbosity": "medium"
+  },
+  "tool_choice": "auto",
+  "tool_usage": {
+    "image_gen": {
+      "input_tokens": 0,
+      "input_tokens_details": {
+        "image_tokens": 0,
+        "text_tokens": 0
+      },
+      "output_tokens": 0,
+      "output_tokens_details": {
+        "image_tokens": 0,
+        "text_tokens": 0
+      },
+      "total_tokens": 0
+    },
+    "web_search": {
+      "num_requests": 0
+    }
+  },
+  "tools": [
+    {
+      "type": "function",
+      "description": "Get the weather for a city",
+      "name": "get_weather",
+      "output_schema": null,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "city": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "city"
+        ]
+      },
+      "strict": true
+    }
+  ],
+  "top_p": 0.98,
+  "truncation": "disabled",
+  "usage": {
+    "input_tokens": 50,
+    "input_tokens_details": {
+      "cache_write_tokens": 0,
+      "cached_tokens": 0
+    },
+    "output_tokens": 6,
+    "output_tokens_details": {
+      "reasoning_tokens": 0
+    },
+    "total_tokens": 56
+  }
+}
