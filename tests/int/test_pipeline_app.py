@@ -1492,6 +1492,64 @@ def test_count_tokens_falls_back_to_the_local_estimate() -> None:
     assert body["input_tokens"] > 0
 
 
+@pytest.mark.parametrize("model", ["claude-model", "gpt-model"])
+def test_local_count_multiplier_is_applied_once_after_calibration(model: str) -> None:
+    body = {"model": model, "messages": [{"role": "user", "content": "hello there"}]}
+    overrides: dict[str, Any] = {
+        "inbound": {"anthropic_count_tokens": {"providers": ["local"]}}
+    }
+    baseline, _ = make_client(
+        lambda _: httpx2.Response(599),
+        overrides=overrides,
+    )
+    raw = baseline.post("/v1/messages/count_tokens", json=body).json()["input_tokens"]
+    overrides["inbound"]["anthropic_count_tokens"]["local_estimate_multiplier"] = 1.5
+    scaled, seen = make_client(lambda _: httpx2.Response(599), overrides=overrides)
+    calibration = _chain_of(scaled).tokenization.calibration
+    protocol = "anthropic" if model == "claude-model" else "openai-responses"
+    calibration.learn(protocol, model, raw, raw * 2)
+
+    response = scaled.post("/v1/messages/count_tokens", json=body)
+
+    assert response.status_code == 200
+    assert response.json() == {"input_tokens": raw * 3, "estimated": True}
+    assert seen == []
+
+
+def test_count_multiplier_does_not_change_upstream_result_or_raw_learning() -> None:
+    body = {"model": "claude-model", "messages": [{"role": "user", "content": "hello there"}]}
+    baseline, _ = make_client(
+        lambda _: httpx2.Response(599),
+        overrides={"inbound": {"anthropic_count_tokens": {"providers": ["local"]}}},
+    )
+    raw = baseline.post("/v1/messages/count_tokens", json=body).json()["input_tokens"]
+    client, seen = make_client(
+        lambda _: httpx2.Response(200, json={"input_tokens": raw * 2}),
+        overrides={"inbound": {"anthropic_count_tokens": {"local_estimate_multiplier": 3.0}}},
+    )
+
+    response = client.post("/v1/messages/count_tokens", json=body)
+
+    assert response.json() == {"input_tokens": raw * 2}
+    assert len(seen) == 1
+    assert _chain_of(client).tokenization.calibration.calibrate("anthropic", "claude-model", raw) == raw * 2
+
+
+def test_count_multiplier_does_not_scale_responses_admission() -> None:
+    client, seen = make_client(
+        lambda _: httpx2.Response(418, json={"error": {"message": "upstream reached"}}),
+        catalog=_prompt_admission_catalog(context_limit=100),
+        overrides={"inbound": {"anthropic_count_tokens": {"local_estimate_multiplier": 1000.0}}},
+    )
+
+    response = client.post("/v1/responses", json={"model": "gpt-model", "input": "short"})
+
+    assert response.status_code == 418
+    assert len(seen) == 1
+    [observed] = _records()[-1]["observation"]["token_admission"]
+    assert observed["outcome"] == "admitted_fast"
+
+
 def test_count_tokens_asks_about_the_mapped_model() -> None:
     # A count that ignored model_mappings would answer about a model the request never reaches.
     client, seen = make_client(

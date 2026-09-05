@@ -100,6 +100,15 @@ class CountTokensConfig(Section):
 
     providers: list[str] = Field(default_factory=lambda: ["ghc", LOCAL_COUNTER])
     max_retries: int = Field(default=2, ge=0)
+    # Applied once after calibration, only when the count is answered locally. Upstream counts, calibration samples and inference admission remain unscaled.
+    local_estimate_multiplier: float = Field(default=1.0, ge=1.0, allow_inf_nan=False)
+
+    @field_validator("local_estimate_multiplier", mode="before")
+    @classmethod
+    def _multiplier_is_not_boolean(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("local_estimate_multiplier must be a number, not a boolean")
+        return value
 
 
 class InboundConfig(Section):

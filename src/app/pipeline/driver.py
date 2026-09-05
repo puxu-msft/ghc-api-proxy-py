@@ -54,6 +54,7 @@ from app.pipeline.translation_driver.semantic import (
 )
 from app.tokenization.admission import TokenAdmissionObservation
 from app.tokenization.estimators import estimate_anthropic_input, estimate_responses_input
+from app.tokenization.scaling import scale_local_estimate
 from app.wire_json import dumps
 
 # Where request-translation facts are kept for the response half. Neither kind of Responses search call carries enough information to recover these decisions from the response itself.
@@ -391,7 +392,10 @@ async def handle_count_tokens(
 
     def estimate_locally(payload: Mapping[str, Any]) -> int:
         del payload  # Already measured above; recomputing per attempt would only cost time.
-        return calibration.calibrate(protocol, route.model_id, estimate)
+        return scale_local_estimate(
+            calibration.calibrate(protocol, route.model_id, estimate),
+            settings.local_estimate_multiplier,
+        )
 
     # Whether upstream has a counter is a property of where this is going, not of whether the request is serviceable. Token counting is a per-protocol wire contract, and the endpoint list in `docs/.human-controlled/api.md` is where that shows: `POST /v1/messages/count_tokens` serves the Anthropic protocol, and the OpenAI family has no count endpoint at all, reporting usage only on a finished response. A translated route is perfectly sendable and simply has no counter upstream, so it is answered from the estimator for its own protocol rather than refused.
     #
