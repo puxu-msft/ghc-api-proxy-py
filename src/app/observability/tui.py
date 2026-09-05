@@ -3,8 +3,8 @@ import sys
 import time
 from collections.abc import Generator
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
-from typing import Literal
+from dataclasses import dataclass, field, replace
+from typing import Literal, TextIO, cast
 
 from rich.console import Console
 from rich.live import Live
@@ -13,6 +13,8 @@ from textual.app import App
 
 from app.observability.active_requests import ActiveRequestRegistry
 from app.observability.footer import build_footer
+from app.observability.metrics import RESPONSIVENESS, ResponsivenessMetrics
+from app.observability.responsiveness import ObservedTerminal, observe_render, observe_tui
 from app.observability.terminal import TerminalCapabilities, detect_terminal
 
 type TuiView = Literal["collapsed", "panel_list", "detail"]
@@ -102,9 +104,15 @@ class FooterTui:
     refresh_per_second: int = 8
     _live: Live | None = None
     _handler: LiveConsoleHandler | None = None
+    metrics: ResponsivenessMetrics = field(default_factory=lambda: RESPONSIVENESS, repr=False)
+    _metrics_owner: object = field(default_factory=object, init=False, repr=False)
 
     def _render(self) -> Text:
         """Recomputed on every refresh, so elapsed fields tick without anyone pushing an update."""
+        with observe_render(self.metrics, self._metrics_owner):
+            return self._render_content()
+
+    def _render_content(self) -> Text:
         columns = self._live.console.width if self._live is not None else 80
         snapshot = self.registry.observation_snapshot()
         # The TUI consumes the store's one atomic live/completed frame even though this collapsed view intentionally renders only its live half. A future detail view can use `snapshot.completed` without introducing another read boundary.
@@ -121,7 +129,14 @@ class FooterTui:
 
     @contextmanager
     def activate(self) -> Generator[FooterTui]:
-        console = Console(file=sys.stderr, highlight=False, soft_wrap=False, no_color=not self.capabilities.color, emoji=False)
+        self._metrics_owner = object()
+        with observe_tui(self.metrics, self._metrics_owner), self._activate_live():
+            yield self
+
+    @contextmanager
+    def _activate_live(self) -> Generator[FooterTui]:
+        stream = cast(TextIO, ObservedTerminal(sys.stderr, self.metrics, self._metrics_owner))
+        console = Console(file=stream, highlight=False, soft_wrap=False, no_color=not self.capabilities.color, emoji=False)
         live = Live(
             get_renderable=self._render,
             console=console,

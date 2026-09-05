@@ -7,7 +7,13 @@ Deliberately not `app.observability.telemetry`. That module builds an OpenTeleme
 Counts rather than the detail: a count says how often, and the per-request record says which fields on which request. Both are needed and neither substitutes — the count is what shows a translation quietly dropping a parameter on every request, and the record is what says which parameter.
 """
 
-from prometheus_client import Counter
+import threading
+import time
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
+from dataclasses import dataclass
+
+from prometheus_client import REGISTRY, CollectorRegistry, Counter, Gauge, Histogram
 
 # Labelled by direction and code rather than by model or request, because a metric's label set multiplies its series count and a request id would make one series per request. Which request lost what is the record's question; this answers how often it happens at all.
 TRANSLATION_LOSSES = Counter(
@@ -32,3 +38,160 @@ BETA_FLAGS_STRIPPED = Counter(
     "`anthropic-beta` flags removed from a client request because the configured table names them for the resolved model.",
     ("model", "flag"),
 )
+
+
+RESPONSIVENESS_BUCKETS = (.001, .005, .01, .025, .05, .1, .25, .5, 1, 2, 3, 5, 10, float("inf"))
+
+
+class DurationMetric:
+    """Keep a distribution and an exact high-water mark without retaining samples."""
+
+    def __init__(self, histogram: Histogram, maximum: Gauge, failures: Counter, clock: Callable[[], float]) -> None:
+        self.histogram = histogram
+        self.maximum = maximum
+        self.failures = failures
+        self.clock = clock
+        self._maximum = 0.0
+        self._lock = threading.Lock()
+
+    def observe(self, seconds: float, *, failed: bool = False) -> None:
+        seconds = max(0.0, seconds)
+        self.histogram.observe(seconds)
+        if failed:
+            self.failures.inc()
+        with self._lock:
+            if seconds > self._maximum:
+                self._maximum = seconds
+                self.maximum.set(seconds)
+
+    @contextmanager
+    def measure(self) -> Generator[None]:
+        started = self.clock()
+        failed = True
+        try:
+            yield
+            failed = False
+        finally:
+            self.observe(self.clock() - started, failed=failed)
+
+
+@dataclass(slots=True)
+class _RenderProgress:
+    previous_start: float | None = None
+    last_success: float | None = None
+
+
+class ResponsivenessMetrics:
+    """Fixed-cardinality process metrics, with only active TUI/I/O state retained.
+
+    Progress callbacks take this object's short lock, never a renderer or output lock. Durations survive lifecycle exit; active state does not. Tests may supply a private Prometheus registry without resetting the process's counters.
+    """
+
+    def __init__(self, registry: CollectorRegistry = REGISTRY, clock: Callable[[], float] = time.monotonic) -> None:
+        self.clock = clock
+        self._lock = threading.Lock()
+        self._tuis: dict[object, _RenderProgress] = {}
+        self._io: dict[str, dict[object, tuple[object, float]]] = {"write": {}, "flush": {}}
+        self.loop_lag = self._family("event_loop_lag", "Event-loop heartbeat lateness; not CPU time.", registry)[()]
+        self.render_interval = self._family("tui_render_interval", "Time between footer callback entries, including work, waits and scheduling.", registry)[()]
+        self.render_duration = self._family("tui_render_duration", "Footer callback duration, excluding subsequent Console rendering and I/O.", registry)[()]
+        self.terminal_io = {
+            key[0]: metric for key, metric in self._family(
+                "tui_terminal_io_duration", "Footer Console TextIO call duration, including scheduling pauses.", registry,
+                ("operation",), (("write",), ("flush",)),
+            ).items()
+        }
+        self.tokenizer = self._family(
+            "local_tokenizer_duration", "Local estimator lookup or post-lookup estimation duration; not pure BPE CPU time.", registry,
+            ("format", "phase"), tuple((fmt, phase) for fmt in ("anthropic", "responses") for phase in ("lookup", "estimate")),
+        )
+        self.loop_active = Gauge("ghc_proxy_event_loop_monitor_active", "Running event-loop heartbeat tasks.", registry=registry)
+        self.tui_active = Gauge("ghc_proxy_tui_active", "Active footer lifecycles.", registry=registry)
+        self.tui_active.set_function(self._active_tuis)
+        self.render_age = Gauge("ghc_proxy_tui_last_render_age_seconds", "Oldest active footer's successful callback age; NaN if any active footer has no success yet, zero if inactive.", registry=registry)
+        self.render_age.set_function(self._render_age)
+        self.io_active = Gauge("ghc_proxy_tui_terminal_io_in_progress", "Unreturned footer Console TextIO calls.", ("operation",), registry=registry)
+        self.io_age = Gauge("ghc_proxy_tui_terminal_io_in_progress_seconds", "Oldest unreturned footer Console TextIO call age, zero if none.", ("operation",), registry=registry)
+        for operation in ("write", "flush"):
+            self.io_active.labels(operation).set_function(lambda operation=operation: self._io_progress(operation)[0])
+            self.io_age.labels(operation).set_function(lambda operation=operation: self._io_progress(operation)[1])
+
+    def _family(
+        self,
+        name: str,
+        description: str,
+        registry: CollectorRegistry,
+        labels: tuple[str, ...] = (),
+        values: tuple[tuple[str, ...], ...] = ((),),
+    ) -> dict[tuple[str, ...], DurationMetric]:
+        histogram = Histogram(f"ghc_proxy_{name}_seconds", description, labels, buckets=RESPONSIVENESS_BUCKETS, registry=registry)
+        maximum = Gauge(f"ghc_proxy_{name}_max_seconds", f"Process lifetime maximum. {description}", labels, registry=registry)
+        failures = Counter(f"ghc_proxy_{name}_failures_total", "Failed measured operations; labels never contain exception text.", labels, registry=registry)
+        return {
+            value: DurationMetric(
+                histogram.labels(*value) if labels else histogram,
+                maximum.labels(*value) if labels else maximum,
+                failures.labels(*value) if labels else failures,
+                self.clock,
+            ) for value in values
+        }
+
+    def activate(self, owner: object) -> None:
+        with self._lock:
+            self._tuis[owner] = _RenderProgress()
+
+    def deactivate(self, owner: object) -> None:
+        with self._lock:
+            self._tuis.pop(owner, None)
+            for pending in self._io.values():
+                for token in [token for token, (writer, _) in pending.items() if writer is owner]:
+                    del pending[token]
+
+    def render_started(self, owner: object, now: float) -> bool:
+        with self._lock:
+            state = self._tuis.get(owner)
+            if state is None:
+                return False
+            previous = state.previous_start
+            state.previous_start = now
+        if previous is not None:
+            self.render_interval.observe(now - previous)
+        return True
+
+    def render_succeeded(self, owner: object, now: float) -> None:
+        with self._lock:
+            state = self._tuis.get(owner)
+            if state is not None:
+                state.last_success = now
+
+    def io_started(self, owner: object, operation: str, token: object, now: float) -> None:
+        with self._lock:
+            if owner in self._tuis:
+                self._io[operation][token] = (owner, now)
+
+    def io_finished(self, operation: str, token: object) -> None:
+        with self._lock:
+            self._io[operation].pop(token, None)
+
+    def _active_tuis(self) -> float:
+        with self._lock:
+            return len(self._tuis)
+
+    def _render_age(self) -> float:
+        now = self.clock()
+        with self._lock:
+            if not self._tuis:
+                return 0.0
+            successful = [state.last_success for state in self._tuis.values()]
+        if any(value is None for value in successful):
+            return float("nan")
+        return max(max(0.0, now - value) for value in successful if value is not None)
+
+    def _io_progress(self, operation: str) -> tuple[int, float]:
+        now = self.clock()
+        with self._lock:
+            starts = [started for _, started in self._io[operation].values()]
+        return len(starts), max(0.0, now - min(starts)) if starts else 0.0
+
+
+RESPONSIVENESS = ResponsivenessMetrics()

@@ -5,6 +5,7 @@ import tiktoken
 from anyio.to_thread import run_sync
 
 from app.models.anthropic import ContentBlock, MessagesRequest
+from app.observability.metrics import RESPONSIVENESS
 from app.wire_json import dumps
 
 _TOKENIZER_NAME = "o200k_base"
@@ -43,27 +44,29 @@ def _anthropic_content_text(
 
 
 def estimate_anthropic_input(request: MessagesRequest) -> int:
-    encoding = tiktoken.get_encoding(_TOKENIZER_NAME)
-    total = 0
-    if isinstance(request.system, str):
-        total += len(encoding.encode(request.system)) + 4
-    elif request.system:
-        total += sum(len(encoding.encode(block.text)) + 4 for block in request.system)
-    if request.tools:
-        tool_data = [tool.model_dump(mode="json", exclude_none=True) for tool in request.tools]
-        total += len(encoding.encode(dumps(tool_data).decode())) + 4
-    for message in request.messages:
-        total += len(encoding.encode(message.role))
-        total += len(
-            encoding.encode(
-                _anthropic_content_text(
-                    message.content,
-                    assistant=message.role == "assistant",
+    with RESPONSIVENESS.tokenizer[("anthropic", "lookup")].measure():
+        encoding = tiktoken.get_encoding(_TOKENIZER_NAME)
+    with RESPONSIVENESS.tokenizer[("anthropic", "estimate")].measure():
+        total = 0
+        if isinstance(request.system, str):
+            total += len(encoding.encode(request.system)) + 4
+        elif request.system:
+            total += sum(len(encoding.encode(block.text)) + 4 for block in request.system)
+        if request.tools:
+            tool_data = [tool.model_dump(mode="json", exclude_none=True) for tool in request.tools]
+            total += len(encoding.encode(dumps(tool_data).decode())) + 4
+        for message in request.messages:
+            total += len(encoding.encode(message.role))
+            total += len(
+                encoding.encode(
+                    _anthropic_content_text(
+                        message.content,
+                        assistant=message.role == "assistant",
+                    )
                 )
             )
-        )
-        total += 4
-    return max(total, 1)
+            total += 4
+        return max(total, 1)
 
 
 def _responses_item_text(item: Mapping[str, Any]) -> str:
@@ -117,21 +120,23 @@ def estimate_responses_input(payload: Mapping[str, Any]) -> int:
 
     Upstream has no counter to check this against: the OpenAI family reports usage only on a finished response. So the number is an estimate in a stronger sense than the Anthropic one, which at least shares a caliber with an endpoint that answers — and, until something teaches this protocol's calibration, an *uncorrected* one. Calibration is keyed on the target protocol all the same, because mixing the two families' factors would correct each with the other's error.
     """
-    encoding = tiktoken.get_encoding(_TOKENIZER_NAME)
-    total = 0
-    instructions = payload.get("instructions")
-    if isinstance(instructions, str) and instructions:
-        total += len(encoding.encode(instructions)) + 4
-    tools = payload.get("tools")
-    if tools:
-        total += len(encoding.encode(dumps(tools).decode())) + 4
-    items = payload.get("input")
-    if isinstance(items, list):
-        for item in cast(list[Any], items):
-            if not isinstance(item, dict):
-                total += len(encoding.encode(dumps(item).decode())) + 4
-                continue
-            text = _responses_item_text(cast(dict[str, Any], item))
-            if text:
-                total += len(encoding.encode(text)) + 4
-    return max(total, 1)
+    with RESPONSIVENESS.tokenizer[("responses", "lookup")].measure():
+        encoding = tiktoken.get_encoding(_TOKENIZER_NAME)
+    with RESPONSIVENESS.tokenizer[("responses", "estimate")].measure():
+        total = 0
+        instructions = payload.get("instructions")
+        if isinstance(instructions, str) and instructions:
+            total += len(encoding.encode(instructions)) + 4
+        tools = payload.get("tools")
+        if tools:
+            total += len(encoding.encode(dumps(tools).decode())) + 4
+        items = payload.get("input")
+        if isinstance(items, list):
+            for item in cast(list[Any], items):
+                if not isinstance(item, dict):
+                    total += len(encoding.encode(dumps(item).decode())) + 4
+                    continue
+                text = _responses_item_text(cast(dict[str, Any], item))
+                if text:
+                    total += len(encoding.encode(text)) + 4
+        return max(total, 1)

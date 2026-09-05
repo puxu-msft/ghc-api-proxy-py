@@ -17,6 +17,7 @@ from app.config.schema import GithubCopilotProviderConfig
 from app.core.chain import Chain
 from app.model_provider.ghc_client.models import run_model_refresh_loop
 from app.observability.logging import get_logger
+from app.observability.responsiveness import monitor_event_loop
 from app.observability.tui import footer_tui_or_none
 from app.server.admission import InFlightLimit
 from app.server.app_state import chain_of_app, set_chain
@@ -109,6 +110,7 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # Probed, not configured: whether a live footer belongs on this stream is a fact about where the output goes, and the process can see that for itself. Nothing is logged when it comes back unsupported — a pipe or a CI job is the normal case, not a degradation worth a line in everybody's log.
     tui = footer_tui_or_none(chain.active_requests, chain.capabilities)
     async with anyio.create_task_group() as flushing:
+        flushing.start_soon(monitor_event_loop)
         flushing.start_soon(chain.tokenization.run_periodic_flush, TOKENIZATION_FLUSH_SECONDS)
         for provider_name, interval_seconds in _catalog_refresh_intervals(chain):
             flushing.start_soon(

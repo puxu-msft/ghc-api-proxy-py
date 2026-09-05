@@ -11,9 +11,11 @@ import httpx2
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from prometheus_client import REGISTRY
 
 from app.config.schema import ProxyConfig
 from app.model_provider.types import ModelDescriptor, ModelEndpoint
+from app.observability.metrics import RESPONSIVENESS
 from app.server.app_state import CHAIN_STATE_KEY
 from app.server.routes.ops import router as ops_router
 from app.server.routes.router import build_router
@@ -222,10 +224,23 @@ async def test_the_model_list_omits_what_the_chosen_provider_cannot_serve() -> N
 
 @pytest.mark.asyncio
 async def test_metrics_are_served() -> None:
-    async with client_for(frozenset({"m"})) as client:
-        response = await client.get("/metrics")
+    before = REGISTRY.get_sample_value("ghc_proxy_event_loop_monitor_active")
+    assert before is not None
+    RESPONSIVENESS.loop_active.inc(7)
+    try:
+        async with client_for(frozenset({"m"})) as client:
+            response = await client.get("/metrics")
+    finally:
+        RESPONSIVENESS.loop_active.dec(7)
+
     assert response.status_code == 200
     assert b"python_gc_objects_collected_total" in response.content
+    assert b"ghc_proxy_event_loop_lag_seconds_count" in response.content
+    assert b"ghc_proxy_event_loop_lag_max_seconds" in response.content
+    assert b"ghc_proxy_event_loop_lag_failures_total" in response.content
+    assert b"ghc_proxy_tui_last_render_age_seconds" in response.content
+    assert b"ghc_proxy_tui_terminal_io_in_progress_seconds" in response.content
+    assert f"ghc_proxy_event_loop_monitor_active {before + 7}".encode() in response.content
 
 
 @pytest.mark.asyncio
