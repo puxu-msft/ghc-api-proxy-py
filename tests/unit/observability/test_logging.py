@@ -4,7 +4,8 @@ import logging
 import pytest
 import structlog
 
-from app.observability.logging import get_logger, setup_logging
+from app.model_provider.ghc_client.auth.providers import NoGitHubToken
+from app.observability.logging import LogFormat, get_logger, setup_logging
 
 
 def _flush_handlers() -> None:
@@ -59,6 +60,58 @@ def test_stdlib_logging_is_rendered_by_structlog(capsys: pytest.CaptureFixture[s
     event = json.loads(captured.err)
     assert event["event"] == "server warning"
     assert event["level"] == "warning"
+
+
+@pytest.mark.parametrize("log_format", ["text", "json"])
+def test_catalog_failure_formats_its_positional_arguments(
+    capsys: pytest.CaptureFixture[str], log_format: LogFormat,
+) -> None:
+    setup_logging(log_format=log_format, colors=False)
+    reason = "No GitHub token provider produced a usable token"
+
+    with structlog.contextvars.bound_contextvars(request_id="catalog-refresh"):
+        get_logger().warning(
+            "model provider %r: background catalog refresh failed: %s",
+            "ghc",
+            NoGitHubToken(reason),
+            status="fail",
+        )
+    _flush_handlers()
+
+    output = capsys.readouterr().err
+    expected = f"model provider 'ghc': background catalog refresh failed: {reason}"
+    if log_format == "json":
+        event = json.loads(output)
+        assert event["event"] == expected
+        assert event["status"] == "fail"
+        assert event["level"] == "warning"
+        assert event["request_id"] == "catalog-refresh"
+        assert "positional_args" not in event
+    else:
+        assert output.startswith("[FAIL] ")
+        assert f" {expected} request_id=catalog-refresh\n" in output
+        assert "positional_args=" not in output
+
+
+@pytest.mark.parametrize("log_format", ["text", "json"])
+def test_native_and_stdlib_logs_preserve_literal_percent_signs(
+    capsys: pytest.CaptureFixture[str], log_format: LogFormat,
+) -> None:
+    setup_logging(log_format=log_format, colors=False)
+    for logger in (get_logger("app.probe"), logging.getLogger("app.probe")):
+        logger.warning("progress %(value)s", {"value": "100%; literal %s"})
+        logger.warning("no arguments: 100%; literal %s")
+    _flush_handlers()
+
+    lines = capsys.readouterr().err.splitlines()
+    if log_format == "json":
+        events = [json.loads(line) for line in lines]
+        messages = [event["event"] for event in events]
+        assert all("positional_args" not in event for event in events)
+    else:
+        assert all(line.startswith("[WARN] ") for line in lines)
+        messages = [line.split(" ", 2)[2] for line in lines]
+    assert messages == ["progress 100%; literal %s", "no arguments: 100%; literal %s"] * 2
 
 
 def _raise_through_two_frames() -> None:

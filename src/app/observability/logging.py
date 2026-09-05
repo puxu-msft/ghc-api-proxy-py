@@ -133,6 +133,7 @@ def setup_logging(
         structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
+        structlog.stdlib.PositionalArgumentsFormatter(),
         # Wall-clock time of day for the console, an absolute UTC instant for JSON. A person watching a terminal is placing the line against the request they just made; a log shipper is correlating it with another machine, and `HH:MM:SS` cannot survive that.
         structlog.processors.TimeStamper(fmt="iso", utc=True)
         if log_format == "json"
