@@ -25,6 +25,7 @@ from app.pipeline.translation_driver.semantic import (
     Conversion,
     LossCode,
     SemanticRequest,
+    ToolChoiceNotSupported,
     TranslationTarget,
 )
 
@@ -117,12 +118,8 @@ def to_openai_chat_completions(
     if request.tools:
         body["tools"] = [_chat_tool(tool) for tool in request.tools]
 
-    # `tool_choice` and `stop_sequences` ride in `extensions`, because no translator
-    # claims them generically. This wire *can* say both, so they are claimed here —
-    # popped before `extensions_for`, which would otherwise record their loss and
-    # drop them, turning "must call a tool" into "may call one".
-    tool_choice = request.extensions.pop("tool_choice", None)
-    mapped_choice, parallel_tool_calls = _chat_tool_choice(tool_choice, conversion)
+    # Tool selection was claimed by the reader; stop_sequences is still this writer's extension.
+    mapped_choice, parallel_tool_calls = _chat_tool_choice(request)
     if mapped_choice is not None:
         body["tool_choice"] = mapped_choice
     if parallel_tool_calls is not None:
@@ -257,51 +254,36 @@ def _chat_tool(tool: Mapping[str, Any]) -> dict[str, Any]:
         "function": {
             "name": tool.get("name", ""),
             "description": tool.get("description", ""),
-            "parameters": tool.get("input_schema", {}),
+            "parameters": tool.get("input_schema", tool.get("parameters", {})),
         },
     }
 
 
-def _chat_tool_choice(
-    value: object, conversion: Conversion
-) -> tuple[object, bool | None]:
-    """An Anthropic `tool_choice` in chat's spelling, plus `parallel_tool_calls`.
-
-    The second element is chat's own `parallel_tool_calls` key, which is a body
-    field of its own rather than part of `tool_choice` — `None` when the request
-    said nothing. Anthropic's `any` and OpenAI's `required` are the same claim —
-    some tool, no preference — and Anthropic's `disable_parallel_tool_use` is the
-    inverse of chat's `parallel_tool_calls`. A shape this cannot read is recorded
-    and dropped rather than guessed at: a forced choice silently becoming a free
-    one reverses an instruction.
-    """
-    if value is None:
+def _chat_tool_choice(request: SemanticRequest) -> tuple[object, bool | None]:
+    """Render the shared intent, never re-parse an unclaimed foreign extension."""
+    crossing = request.source_format != WIRE_FORMAT
+    intent = request.tool_choice
+    if intent is None:
+        if crossing and "tool_choice" in request.extensions:
+            raise ToolChoiceNotSupported("tool_choice has no supported Chat Completions translation")
         return None, None
-    if isinstance(value, str):
-        return (value if value in ("auto", "none", "required") else None), None
-    if not isinstance(value, dict):
-        conversion.record(
-            LossCode.EXTENSIONS_NOT_CARRIED, f"tool_choice of unreadable shape: {value!r}"
-        )
-        return None, None
-    choice = cast(dict[str, Any], value)
-    choice_type = choice.get("type")
+    if crossing and not request.tools:
+        if intent.mode in {"any", "tool"}:
+            raise ToolChoiceNotSupported("a forced tool choice requires declared tools")
+        if intent.mode in {"auto", "none"}:
+            return None, None
     mapped: object
-    if choice_type == "auto":
-        mapped = "auto"
-    elif choice_type == "any":
+    if intent.mode in {"auto", "none"}:
+        mapped = intent.mode
+    elif intent.mode == "any":
         mapped = "required"
-    # `type: "tool"` is Anthropic's spelling of a named forced call, `type: "function"`
-    # is Responses'; both mean the same and both are accepted, because the writer
-    # serves whichever of the two readers produced the intermediate form.
-    elif choice_type in ("tool", "function") and isinstance(choice.get("name"), str):
-        mapped = {"type": "function", "function": {"name": choice["name"]}}
+    elif intent.mode == "tool" and intent.name:
+        if crossing and not any(tool.get("name") == intent.name for tool in request.tools):
+            raise ToolChoiceNotSupported(f"{intent.name} is not declared by the tools this request sends")
+        mapped = {"type": "function", "function": {"name": intent.name}}
     else:
-        conversion.record(
-            LossCode.EXTENSIONS_NOT_CARRIED, f"tool_choice {choice_type!r} has no Chat spelling"
-        )
-        return None, None
-    parallel = False if choice.get("disable_parallel_tool_use") is True else None
+        raise ToolChoiceNotSupported(f"{intent.mode} tool choice has no Chat Completions spelling")
+    parallel = False if intent.disable_parallel is True else None
     return mapped, parallel
 
 

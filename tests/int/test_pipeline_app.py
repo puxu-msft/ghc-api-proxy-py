@@ -5676,6 +5676,33 @@ def test_an_approximated_effort_is_recorded_as_a_loss() -> None:
     assert "max" in approximations[0]["detail"] and "high" in approximations[0]["detail"]
 
 
+@pytest.mark.parametrize("route", ["/v1/messages", "/v1/messages/count_tokens"])
+@pytest.mark.parametrize(
+    "choice",
+    [
+        {"type": "tool", "name": "missing"},
+        {"type": "tool", "name": "lookup", "future_field": 1},
+    ],
+)
+def test_unrepresentable_tool_choice_is_refused_before_upstream(
+    route: str, choice: dict[str, Any]
+) -> None:
+    client, seen = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))
+    response = client.post(
+        route,
+        json={
+            "model": "gpt-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"name": "lookup", "input_schema": {"type": "object"}}],
+            "tool_choice": choice,
+        },
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "tool-choice-not-supported"
+    assert response.json()["error"]["param"] == "tool_choice"
+    assert seen == []
+
+
 def test_an_unreadable_thinking_field_is_refused_by_name() -> None:
     """A client error rather than a silent approximation: nothing can be chosen for a budget of `-1`, and guessing would send an effort the request never asked for."""
     client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "resp_1"}))

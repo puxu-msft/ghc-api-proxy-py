@@ -19,7 +19,7 @@ from app.pipeline.translation_driver.reasoning_carrier import (
     decode_reasoning_carrier,
 )
 from app.pipeline.translation_driver.registry import TranslatorNotFound, default_registry
-from app.pipeline.translation_driver.semantic import LossCode
+from app.pipeline.translation_driver.semantic import LossCode, TranslationRefused
 
 
 def anthropic_request(body: dict[str, Any]):
@@ -139,8 +139,8 @@ def test_tool_choice_spellings_map_onto_chat() -> None:
     cases = [
         ({"type": "auto"}, "auto"),
         ({"type": "any"}, "required"),
+        ({"type": "none"}, "none"),
         ({"type": "tool", "name": "weather"}, {"type": "function", "function": {"name": "weather"}}),
-        ({"type": "function", "name": "weather"}, {"type": "function", "function": {"name": "weather"}}),
     ]
     for anthropic_choice, chat_choice in cases:
         request = anthropic_request(
@@ -148,6 +148,7 @@ def test_tool_choice_spellings_map_onto_chat() -> None:
                 "model": "m",
                 "max_tokens": 8,
                 "tool_choice": anthropic_choice,
+                "tools": [{"name": "weather", "input_schema": {"type": "object"}}],
                 "messages": [{"role": "user", "content": "hi"}],
             }
         )
@@ -163,6 +164,7 @@ def test_disable_parallel_tool_use_becomes_parallel_tool_calls_false() -> None:
             "model": "m",
             "max_tokens": 8,
             "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
+            "tools": [{"name": "weather", "input_schema": {"type": "object"}}],
             "messages": [{"role": "user", "content": "hi"}],
         }
     )
@@ -171,6 +173,48 @@ def test_disable_parallel_tool_use_becomes_parallel_tool_calls_false() -> None:
 
     assert body["tool_choice"] == "auto"
     assert body["parallel_tool_calls"] is False
+
+
+def test_a_responses_named_choice_and_parallel_limit_reach_chat() -> None:
+    parameters = {"type": "object", "properties": {"city": {"type": "string"}}}
+    body, semantic = default_registry().translate(
+        {
+            "model": "m",
+            "input": [],
+            "tools": [{"type": "function", "name": "weather", "parameters": parameters}],
+            "tool_choice": {"type": "function", "name": "weather"},
+            "parallel_tool_calls": False,
+        },
+        source=WireFormat.OPENAI_RESPONSES,
+        target=WireFormat.OPENAI_CHAT_COMPLETIONS,
+    )
+    assert body["tool_choice"] == {"type": "function", "function": {"name": "weather"}}
+    assert body["parallel_tool_calls"] is False
+    assert body["tools"][0]["function"]["parameters"] == parameters
+    assert semantic.conversion.lossless
+
+
+@pytest.mark.parametrize(
+    "choice",
+    [
+        {"type": "tool", "name": "missing"},
+        {"type": "tool", "name": "weather", "future_field": 1},
+        {"type": "function", "name": "weather"},
+    ],
+)
+def test_chat_refuses_unrepresentable_anthropic_choices(choice: dict[str, Any]) -> None:
+    request = anthropic_request(
+        {
+            "model": "m",
+            "messages": [],
+            "tools": [{"name": "weather", "input_schema": {"type": "object"}}],
+            "tool_choice": choice,
+        }
+    )
+    with pytest.raises(TranslationRefused) as caught:
+        to_openai_chat_completions(request)
+    assert caught.value.code == "tool-choice-not-supported"
+    assert caught.value.field_path == "tool_choice"
 
 
 def test_an_error_tool_result_is_marked_and_recorded() -> None:

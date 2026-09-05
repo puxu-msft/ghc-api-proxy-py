@@ -15,6 +15,7 @@ from typing import Any
 
 from app.pipeline.translation_driver.content import SemanticMessage
 from app.pipeline.translation_driver.reasoning import ReasoningIntent
+from app.pipeline.translation_driver.tool_choice import ToolChoiceIntent
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +44,8 @@ class LossCode(StrEnum):
     REASONING_STATE_NOT_PORTABLE = "reasoning-state-not-portable"
     INSTRUCTIONS_ROLE_NOT_CARRIED = "instructions-role-not-carried"
     TOOL_RESULT_CONTENT_FLATTENED = "tool-result-content-flattened"
+    # Responses has no tool-result error flag; the failure is represented by a text prefix.
+    TOOL_RESULT_ERROR_MARKED = "tool-result-error-marked"
     SERVER_TOOL_NOT_CARRIED = "server-tool-not-carried"
     SERVER_TOOL_CALL_ID_NOT_CARRIED = "server-tool-call-id-not-carried"
     SERVER_TOOL_PARTIALLY_REPRESENTABLE = "server-tool-partially-representable"
@@ -52,7 +55,7 @@ class LossCode(StrEnum):
     TOOL_DESCRIPTION_COERCED = "tool-description-coerced"
     # A `cache_control` key upstream does not accept, removed so the rest of the request can be sent. Its own member rather than `EXTENSIONS_NOT_CARRIED` because what was lost is specific and consequential: `scope` decides how widely a cached prefix is shared, so dropping it changes what the cache does rather than dropping decoration. Spec §7.1.
     CACHE_CONTROL_FIELD_NOT_CARRIED = "cache-control-field-not-carried"
-    # This proxy put something in the body that the client did not write. The only member that records an *addition* rather than something dropped, and it is here for the same reason as the rest: a body that no longer says what the client said has to say so somewhere a reader will see it.
+    # This proxy put something in the body that the client did not write. An addition needs a record just as a dropped field does.
     SYNTHETIC_TURN_ADDED = "synthetic-turn-added"
     # Upstream answered with an error this proxy could not read as one. Recorded rather than silently dropped, because it is what decides whether the client is handed upstream's original alongside our envelope — spec §10.1.
     UPSTREAM_ERROR_NOT_INTERPRETED = "upstream-error-not-interpreted"
@@ -70,6 +73,13 @@ class TranslationRefused(Exception):
         super().__init__(message)
         self.code = code
         self.field_path = field_path
+
+
+class ToolChoiceNotSupported(TranslationRefused):
+    """A requested tool selection cannot be preserved by this translation."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="tool-choice-not-supported", field_path="tool_choice")
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +141,8 @@ class SemanticRequest:
     temperature: float | None = None
     # How much reasoning the request asked for, as an intent rather than either side's spelling. `None` means the request said nothing, which is not the same as asking for none — see `reasoning.resolve`, where omitting the field entirely is measured to give upstream's default rather than silence.
     reasoning: ReasoningIntent | None = None
+    # None means absent or unclaimed; an unclaimed choice remains in extensions for exact replay.
+    tool_choice: ToolChoiceIntent | None = None
     # Which wire format the extensions below came off. A writer for a different format must not replay them: an unclaimed key is unclaimed *in its own format*, and in another one it is at best meaningless. Measured — sending Anthropic's `context_management` to the Responses endpoint gets `failed to parse request`, so replaying it is not merely untidy.
     source_format: str = ""
     # The client's own tool-search tool, when one was identified. Written by the outbound writer rather than read off the wire, because identification depends on what that writer decided to do — and the *response* half needs the same answer to turn a `tool_search_call` back into a call on that tool. Empty means no search was translated, which is also the answer when identification declined.

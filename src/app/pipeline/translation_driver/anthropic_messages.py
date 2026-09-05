@@ -23,15 +23,17 @@ from app.pipeline.translation_driver.semantic import (
     LossCode,
     SemanticRequest,
     SystemBlock,
+    ToolChoiceNotSupported,
     TranslationRefused,
     TranslationTarget,
     system_blocks_from_value,
 )
+from app.pipeline.translation_driver.tool_choice import intent_from_anthropic_tool_choice
 
 WIRE_FORMAT = "anthropic-messages"
 
 _PASSTHROUGH_KEYS = frozenset(
-    {"model", "system", "messages", "tools", "stream", "max_tokens", "temperature", "thinking"}
+    {"model", "system", "messages", "tools", "stream", "max_tokens", "temperature", "thinking", "tool_choice"}
 )
 
 TEXT = "text"
@@ -156,11 +158,17 @@ def from_anthropic_messages(payload: Mapping[str, Any]) -> SemanticRequest:
             f"thinking fields not read by this intent: {', '.join(unread)}",
         )
 
+    # Read the client's intent once; unclaimed shapes stay in extensions for same-format replay.
+    choice = payload.get("tool_choice")
+    request.tool_choice = intent_from_anthropic_tool_choice(choice)
+
     # Anything not claimed above is carried rather than dropped.
     # An unmodelled field therefore survives the round trip back to the same format.
     request.extensions = {
         key: value for key, value in payload.items() if key not in _PASSTHROUGH_KEYS
     }
+    if request.tool_choice is None and "tool_choice" in payload:
+        request.extensions["tool_choice"] = choice
     return request
 
 
@@ -292,6 +300,7 @@ def to_anthropic_messages(
     if request.temperature is not None:
         payload["temperature"] = request.temperature
     _restore_thinking(payload, request)
+    _restore_tool_choice(payload, request)
     payload.update(request.extensions_for(WIRE_FORMAT))
     return payload
 
@@ -317,3 +326,31 @@ def _restore_thinking(payload: dict[str, Any], request: SemanticRequest) -> None
             LossCode.REASONING_INTENT_NOT_CARRIED,
             f"{intent.mode} reasoning has no Anthropic spelling",
         )
+
+
+def _restore_tool_choice(payload: dict[str, Any], request: SemanticRequest) -> None:
+    """Render the intent without relaxing a selection the target cannot honor."""
+    crossing = request.source_format != WIRE_FORMAT
+    intent = request.tool_choice
+    if intent is None:
+        if crossing and "tool_choice" in request.extensions:
+            raise ToolChoiceNotSupported("tool_choice has no supported Anthropic translation")
+        return
+    if intent.mode in {"auto", "any", "none"}:
+        choice: dict[str, Any] = {"type": intent.mode}
+    elif intent.mode == "tool" and intent.name:
+        choice = {"type": "tool", "name": intent.name}
+    else:
+        raise ToolChoiceNotSupported(f"{intent.mode} tool choice has no Anthropic spelling")
+    if crossing:
+        if not payload.get("tools"):
+            if intent.mode in {"any", "tool"}:
+                raise ToolChoiceNotSupported("a forced tool choice requires declared tools")
+            return
+        if intent.mode == "tool" and not any(
+            tool.get("name") == intent.name for tool in request.tools
+        ):
+            raise ToolChoiceNotSupported(f"{intent.name} is not declared by the tools this request sends")
+    if intent.disable_parallel is not None:
+        choice["disable_parallel_tool_use"] = intent.disable_parallel
+    payload["tool_choice"] = choice

@@ -349,6 +349,361 @@ def test_tool_arguments_cross_as_a_json_string() -> None:
     assert isinstance(call["arguments"], str)
 
 
+def test_an_errored_tool_result_is_marked_in_text() -> None:
+    """Responses has no tool-result error flag, so the failure is marked in text."""
+    payload, semantic = default_registry().translate(
+        {
+            **CONVERSATION,
+            "messages": [
+                *CONVERSATION["messages"][:2],
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu_1",
+                            "content": [{"type": "text", "text": "permission denied"}],
+                            "is_error": True,
+                        }
+                    ],
+                },
+            ],
+        },
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    output = next(item for item in payload["input"] if item["type"] == "function_call_output")
+    assert output["output"] == "[tool_error] permission denied"
+    assert semantic.conversion.has(LossCode.TOOL_RESULT_ERROR_MARKED)
+
+
+def test_a_passing_tool_result_is_not_marked() -> None:
+    """The marker belongs to the error, not to the rendering: a clean result crosses verbatim."""
+    payload, semantic = default_registry().translate(
+        CONVERSATION,
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    output = next(item for item in payload["input"] if item["type"] == "function_call_output")
+    assert output["output"] == "file body"
+    assert not semantic.conversion.has(LossCode.TOOL_RESULT_ERROR_MARKED)
+
+
+@pytest.mark.parametrize("is_error", [False, True])
+def test_a_literal_tool_error_prefix_is_not_reinterpreted(is_error: bool) -> None:
+    text = "[tool_error] literal tool output"
+    payload, semantic = default_registry().translate(
+        {
+            "model": "m",
+            "messages": [{"role": "user", "content": [{
+                "type": "tool_result", "tool_use_id": "c", "content": text, "is_error": is_error,
+            }]}],
+        },
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    assert payload["input"][0]["output"] == ("[tool_error] " if is_error else "") + text
+    assert semantic.conversion.has(LossCode.TOOL_RESULT_ERROR_MARKED) is is_error
+
+    restored, _ = default_registry().translate(
+        {"model": "m", "input": [{"type": "function_call_output", "call_id": "c", "output": text}]},
+        source=WireFormat.OPENAI_RESPONSES,
+        target=WireFormat.ANTHROPIC_MESSAGES,
+    )
+    result = restored["messages"][0]["content"][0]
+    assert result["content"] == text
+    assert "is_error" not in result
+
+
+# Responses spellings measured in exp/260904-tool-choice-probe/; these tests enforce the translation contract, not upstream enforcement.
+
+
+def test_tool_choice_modes_convert_across_the_boundary() -> None:
+    """Modelled choices survive the format boundary rather than becoming lost extensions."""
+    for anthropic, responses in [
+        ({"type": "auto"}, "auto"),
+        ({"type": "any"}, "required"),
+        ({"type": "none"}, "none"),
+    ]:
+        payload, _ = default_registry().translate(
+            {
+                **ANTHROPIC_REQUEST,
+                "tools": [{"name": "get_time", "input_schema": {"type": "object"}}],
+                "tool_choice": anthropic,
+            },
+            source=WireFormat.ANTHROPIC_MESSAGES,
+            target=WireFormat.OPENAI_RESPONSES,
+        )
+        assert payload["tool_choice"] == responses, anthropic
+
+
+def test_a_named_function_tool_choice_passes_through() -> None:
+    """A named function and its no-parallel restriction survive together."""
+    payload, semantic = default_registry().translate(
+        {
+            "model": "claude-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 100,
+            "tools": [{"name": "get_time", "input_schema": {"type": "object"}}],
+            "tool_choice": {
+                "type": "tool",
+                "name": "get_time",
+                "disable_parallel_tool_use": True,
+            },
+        },
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    assert payload["tool_choice"] == {"type": "function", "name": "get_time"}
+    assert payload["parallel_tool_calls"] is False
+    assert semantic.conversion.lossless, semantic.conversion.losses
+
+
+def test_explicit_parallel_false_does_not_force_a_responses_flag() -> None:
+    """An explicit permission to use parallel tools imposes no cross-format restriction."""
+    payload, _ = default_registry().translate(
+        {
+            **ANTHROPIC_REQUEST,
+            "tools": [{"name": "get_time", "input_schema": {"type": "object"}}],
+            "tool_choice": {"type": "tool", "name": "get_time", "disable_parallel_tool_use": False},
+        },
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    assert "parallel_tool_calls" not in payload
+
+
+@pytest.mark.parametrize(
+    "choice",
+    [
+        {"type": "tool", "name": "get_weather"},
+        {"type": "tool", "name": "get_time", "disable_parallel_tool_use": None},
+        {"type": "tool", "name": "get_time", "future_field": 1},
+    ],
+)
+def test_an_unrepresentable_choice_is_refused(choice: dict[str, Any]) -> None:
+    with pytest.raises(TranslationRefused) as caught:
+        default_registry().translate(
+            {
+                **ANTHROPIC_REQUEST,
+                "tools": [{"name": "get_time", "input_schema": {"type": "object"}}],
+                "tool_choice": choice,
+            },
+            source=WireFormat.ANTHROPIC_MESSAGES,
+            target=WireFormat.OPENAI_RESPONSES,
+        )
+    assert caught.value.code == "tool-choice-not-supported"
+    assert caught.value.field_path == "tool_choice"
+
+
+@pytest.mark.parametrize("choice", [{"type": "any"}, {"type": "tool", "name": "get_time"}])
+def test_a_forced_choice_with_no_tools_is_refused(choice: dict[str, str]) -> None:
+    with pytest.raises(TranslationRefused, match="requires declared tools"):
+        default_registry().translate(
+            {**ANTHROPIC_REQUEST, "tool_choice": choice},
+            source=WireFormat.ANTHROPIC_MESSAGES,
+            target=WireFormat.OPENAI_RESPONSES,
+        )
+
+
+def test_an_unclaimed_choice_replays_on_the_same_format() -> None:
+    choice = {"type": "tool", "name": "get_time", "future_field": 1}
+    payload, _ = default_registry().translate(
+        {**ANTHROPIC_REQUEST, "tool_choice": choice},
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.ANTHROPIC_MESSAGES,
+    )
+    assert payload["tool_choice"] == choice
+
+
+def test_anthropic_tool_choice_round_trips_through_the_same_format() -> None:
+    """Same-format replay preserves the explicit false value as well as the selected tool."""
+    crossed, _ = default_registry().translate(
+        {
+            **ANTHROPIC_REQUEST,
+            "tools": [{"name": "get_time", "input_schema": {"type": "object"}}],
+            "tool_choice": {"type": "tool", "name": "get_time", "disable_parallel_tool_use": False},
+        },
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.ANTHROPIC_MESSAGES,
+    )
+    assert crossed["tool_choice"] == {
+        "type": "tool",
+        "name": "get_time",
+        "disable_parallel_tool_use": False,
+    }
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        {"type": "tool_search_tool_regex_20251119", "name": "tool_search_tool_regex"},
+        {"name": "ToolSearch", "input_schema": {"type": "object"}},
+    ],
+)
+def test_a_forced_choice_of_a_replaced_search_tool_is_refused(tool: dict[str, Any]) -> None:
+    with pytest.raises(TranslationRefused, match="became tool_search"):
+        default_registry().translate(
+            {
+                **ANTHROPIC_REQUEST,
+                "tools": [tool, CC_DEFERRED],
+                "tool_choice": {"type": "tool", "name": tool["name"]},
+            },
+            source=WireFormat.ANTHROPIC_MESSAGES,
+            target=WireFormat.OPENAI_RESPONSES,
+        )
+
+
+def test_responses_tool_choice_is_restored_as_anthropic_spelling() -> None:
+    """The Responses reader and Anthropic writer share the same selection intent."""
+    for responses, anthropic in [
+        ("required", {"type": "any"}),
+        ("auto", {"type": "auto"}),
+        ({"type": "function", "name": "get_time"}, {"type": "tool", "name": "get_time"}),
+    ]:
+        payload, _ = default_registry().translate(
+            {
+                "model": "m",
+                "input": [],
+                "tools": [{"type": "function", "name": "get_time", "parameters": {"type": "object"}}],
+                "tool_choice": responses,
+            },
+            source=WireFormat.OPENAI_RESPONSES,
+            target=WireFormat.ANTHROPIC_MESSAGES,
+        )
+        assert payload["tool_choice"] == anthropic, responses
+
+
+def test_responses_parallel_false_becomes_disable_parallel_true() -> None:
+    """An explicit Responses no-parallel constraint becomes the Anthropic restriction."""
+    payload, _ = default_registry().translate(
+        {
+            "model": "m",
+            "input": [],
+            "tools": [{"type": "function", "name": "get_time", "parameters": {"type": "object"}}],
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
+        },
+        source=WireFormat.OPENAI_RESPONSES,
+        target=WireFormat.ANTHROPIC_MESSAGES,
+    )
+    assert payload["tool_choice"] == {"type": "auto", "disable_parallel_tool_use": True}
+
+
+def test_responses_tool_choice_round_trips_through_the_same_format() -> None:
+    """A parallel permission not carried by the intent still survives in extensions."""
+    crossed, _ = default_registry().translate(
+        {
+            "model": "m",
+            "input": [],
+            "tools": [{"type": "function", "name": "get_time", "parameters": {"type": "object"}}],
+            "tool_choice": {"type": "function", "name": "get_time"},
+            "parallel_tool_calls": True,
+        },
+        source=WireFormat.OPENAI_RESPONSES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    assert crossed["tool_choice"] == {"type": "function", "name": "get_time"}
+    assert crossed["parallel_tool_calls"] is True
+
+
+def test_a_parallel_false_without_a_choice_replays_exactly() -> None:
+    """A standalone parallel flag is not consumed without a modelled choice."""
+    crossed, _ = default_registry().translate(
+        {"model": "m", "input": [], "parallel_tool_calls": False},
+        source=WireFormat.OPENAI_RESPONSES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    assert crossed["parallel_tool_calls"] is False
+
+
+def test_the_allowed_tools_mode_is_this_wires_own_and_replays() -> None:
+    """An unmodelled native allowlist stays intact when its declarations are not rewritten."""
+    choice = {
+        "type": "allowed_tools",
+        "tools": [{"type": "function", "name": "get_time"}],
+    }
+    crossed, _ = default_registry().translate(
+        {
+            "model": "m",
+            "input": [],
+            "tools": [{"type": "function", "name": "get_time", "parameters": {"type": "object"}}],
+            "tool_choice": choice,
+        },
+        source=WireFormat.OPENAI_RESPONSES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    assert crossed["tool_choice"] == choice
+
+
+def test_auto_and_none_without_tools_are_skipped_silently_on_a_crossing() -> None:
+    for mode in ({"type": "auto"}, {"type": "none"}):
+        payload, semantic = default_registry().translate(
+            {"model": "m", "messages": [], "tool_choice": mode},
+            source=WireFormat.ANTHROPIC_MESSAGES,
+            target=WireFormat.OPENAI_RESPONSES,
+        )
+        assert "tool_choice" not in payload, mode
+        assert semantic.conversion.lossless
+
+
+def test_a_parallel_flag_does_not_hide_an_unrepresentable_forced_choice() -> None:
+    with pytest.raises(TranslationRefused, match="get_weather is not declared"):
+        default_registry().translate(
+            {
+                **ANTHROPIC_REQUEST,
+                "tools": [{"name": "get_time", "input_schema": {"type": "object"}}],
+                "tool_choice": {
+                    "type": "tool",
+                    "name": "get_weather",
+                    "disable_parallel_tool_use": True,
+                },
+            },
+            source=WireFormat.ANTHROPIC_MESSAGES,
+            target=WireFormat.OPENAI_RESPONSES,
+        )
+
+
+def test_a_crossing_without_tools_does_not_invent_a_choice() -> None:
+    payload, semantic = default_registry().translate(
+        {"model": "m", "input": [], "tool_choice": "auto", "parallel_tool_calls": False},
+        source=WireFormat.OPENAI_RESPONSES,
+        target=WireFormat.ANTHROPIC_MESSAGES,
+    )
+    assert "tool_choice" not in payload
+    assert semantic.conversion.lossless
+
+    with pytest.raises(TranslationRefused, match="requires declared tools"):
+        default_registry().translate(
+            {"model": "m", "input": [], "tool_choice": "required"},
+            source=WireFormat.OPENAI_RESPONSES,
+            target=WireFormat.ANTHROPIC_MESSAGES,
+        )
+
+
+def test_a_same_format_choice_without_tools_is_relayed() -> None:
+    """Without a declaration rewrite, same-format choices remain the client's own shape."""
+    crossed, semantic = default_registry().translate(
+        {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
+        },
+        source=WireFormat.ANTHROPIC_MESSAGES,
+        target=WireFormat.ANTHROPIC_MESSAGES,
+    )
+    assert crossed["tool_choice"] == {"type": "auto", "disable_parallel_tool_use": True}
+    assert semantic.conversion.lossless, semantic.conversion.losses
+
+    crossed, semantic = default_registry().translate(
+        {"model": "m", "input": [], "tool_choice": "required"},
+        source=WireFormat.OPENAI_RESPONSES,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    assert crossed["tool_choice"] == "required"
+    assert semantic.conversion.lossless, semantic.conversion.losses
+
+
 def test_a_real_anthropic_signature_is_refused_rather_than_forged() -> None:
     """The safety property, not a formatting one.
 
@@ -980,10 +1335,7 @@ def test_a_choice_is_left_alone_when_its_name_also_belongs_to_a_function_tool() 
 
 
 def test_a_forced_search_survives_the_format_boundary() -> None:
-    """`tool_choice` is nobody's modelled field, so it rides in `extensions` and is dropped whole when the formats differ. Correct in general, wrong here.
-
-    Measured over 190 real Claude Code sub-requests, 95 force the search this way — and those requests exist for no other purpose: the turn they carry says `Perform a web search for the query: X`. A model no longer obliged to search may answer from memory instead, and the client renders whatever comes back under a `Web search results for query:` heading either way. This is one of the ways that heading ends up over text nothing searched for.
-    """
+    """A forced web-search choice follows its mapped builtin rather than becoming optional."""
     payload, _ = default_registry().translate(
         {
             "model": "gpt-5.6-sol",
@@ -999,23 +1351,23 @@ def test_a_forced_search_survives_the_format_boundary() -> None:
     assert payload["tool_choice"] == {"type": "web_search"}
 
 
-def test_a_forced_choice_is_not_carried_when_the_name_is_ambiguous() -> None:
-    """The same trap as the same-format case: a client may call an ordinary function tool `web_search`. Which one it meant is its own ambiguity, and forcing a hosted search would be answering it on its behalf."""
-    payload, _ = default_registry().translate(
-        {
-            "model": "gpt-5.6-sol",
-            "messages": [{"role": "user", "content": "hi"}],
-            "max_tokens": 1024,
-            "tools": [
-                dict(REAL_WEB_SEARCH_DECLARATION),
-                {"name": "web_search", "input_schema": {"type": "object"}},
-            ],
-            "tool_choice": {"type": "tool", "name": "web_search"},
-        },
-        source=WireFormat.ANTHROPIC_MESSAGES,
-        target=WireFormat.OPENAI_RESPONSES,
-    )
-    assert "tool_choice" not in payload
+def test_a_forced_choice_is_refused_when_the_name_is_ambiguous() -> None:
+    """An ambiguous forced name must not become a free choice or pick the wrong declaration."""
+    with pytest.raises(TranslationRefused, match="ambiguous tool choice"):
+        default_registry().translate(
+            {
+                "model": "gpt-5.6-sol",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 1024,
+                "tools": [
+                    dict(REAL_WEB_SEARCH_DECLARATION),
+                    {"name": "web_search", "input_schema": {"type": "object"}},
+                ],
+                "tool_choice": {"type": "tool", "name": "web_search"},
+            },
+            source=WireFormat.ANTHROPIC_MESSAGES,
+            target=WireFormat.OPENAI_RESPONSES,
+        )
 
 
 def test_a_replayed_failed_search_still_says_it_happened() -> None:
@@ -1516,21 +1868,17 @@ def test_the_hosted_search_wins_over_the_clients_own_whatever_the_array_order() 
 
 
 def test_a_forced_choice_on_the_hosted_search_is_not_repointed_at_web_search() -> None:
-    """`mapped_names` means "became the web search builtin", and a hosted search did not.
-
-    Putting it there earns `tool_choice: {"type": "web_search"}` on a request whose `tools` contain no web search — a forced call on a tool nobody declared.
-    """
-    payload, _ = default_registry().translate(
-        {
-            **ANTHROPIC_REQUEST,
-            "tools": [{"type": "tool_search_tool_regex_20251119", "name": "tool_search_tool_regex"}, CC_DEFERRED],
-            "tool_choice": {"type": "tool", "name": "tool_search_tool_regex"},
-        },
-        source=WireFormat.ANTHROPIC_MESSAGES,
-        target=WireFormat.OPENAI_RESPONSES,
-    )
-
-    assert payload.get("tool_choice") != {"type": "web_search"}
+    """A hosted tool search must not be forced as an unrelated web-search builtin."""
+    with pytest.raises(TranslationRefused, match="became tool_search"):
+        default_registry().translate(
+            {
+                **ANTHROPIC_REQUEST,
+                "tools": [{"type": "tool_search_tool_regex_20251119", "name": "tool_search_tool_regex"}, CC_DEFERRED],
+                "tool_choice": {"type": "tool", "name": "tool_search_tool_regex"},
+            },
+            source=WireFormat.ANTHROPIC_MESSAGES,
+            target=WireFormat.OPENAI_RESPONSES,
+        )
 
 
 def test_a_failed_search_is_not_reported_to_the_model_as_a_completed_one() -> None:
