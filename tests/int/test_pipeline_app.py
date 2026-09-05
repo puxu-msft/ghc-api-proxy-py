@@ -28,6 +28,7 @@ import orjson
 import pytest
 import structlog
 from anthropic import AsyncAnthropic
+from count_worker_helper import blocked_count_job
 from fastapi import FastAPI
 from fastapi.responses import Response
 from fastapi.routing import APIRoute
@@ -40,6 +41,7 @@ from starlette.types import Message
 
 import app.pipeline.hand_over as hand_over_module
 import app.server.routes.inference as inference_route
+import app.tokenization.worker as token_worker_module
 from app.config.schema import GithubCopilotProviderConfig, ProxyConfig
 from app.core.chain import Chain
 from app.model_provider import GithubCopilotProvider, ModelDescriptor, ModelEndpoint, ModelProvider
@@ -1548,6 +1550,181 @@ def test_count_multiplier_does_not_scale_responses_admission() -> None:
     assert len(seen) == 1
     [observed] = _records()[-1]["observation"]["token_admission"]
     assert observed["outcome"] == "admitted_fast"
+
+
+async def test_count_process_does_not_block_http_and_cancellation_releases_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(token_worker_module, "_estimate_input", blocked_count_job)
+    client, seen = make_client(
+        lambda _: httpx2.Response(599),
+        overrides={"inbound": {"anthropic_count_tokens": {"providers": ["local"]}}},
+    )
+    chain = _chain_of(client)
+    entered, release = tmp_path / "entered", tmp_path / "release"
+    body = {
+        "model": "claude-model",
+        "messages": [{"role": "user", "content": "count this"}],
+        "metadata": {"entered": str(entered), "release": str(release)},
+    }
+    async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=client.app), base_url="http://testserver") as http:
+        counting = asyncio.create_task(http.post("/v1/messages/count_tokens", json=body))
+        try:
+            async with asyncio.timeout(5):
+                while not entered.exists():
+                    await asyncio.sleep(0.01)
+            assert not counting.done()
+            healthy = await asyncio.wait_for(http.get("/health/liveness"), timeout=1)
+            assert healthy.status_code == 200
+            counting.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(counting, timeout=2)
+            assert chain.local_token_worker.limiter.borrowed_tokens == 0
+            release.touch()
+            answer = await asyncio.wait_for(http.post("/v1/messages/count_tokens", json=body), timeout=5)
+            assert answer.json() == {"input_tokens": 17, "estimated": True}
+        finally:
+            release.touch()
+            counting.cancel()
+            await asyncio.gather(counting, return_exceptions=True)
+    assert seen == []
+
+
+async def test_count_http_disconnect_cancels_running_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(token_worker_module, "_estimate_input", blocked_count_job)
+    client, seen = make_client(lambda _: httpx2.Response(599))
+    chain = _chain_of(client)
+    entered, release = tmp_path / "entered", tmp_path / "release"
+    body = orjson.dumps({
+        "model": "claude-model",
+        "messages": [],
+        "metadata": {"entered": str(entered), "release": str(release)},
+    })
+    received_body = False
+    sent: list[Message] = []
+
+    async def receive() -> Message:
+        nonlocal received_body
+        if not received_body:
+            received_body = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        async with asyncio.timeout(5):
+            while not entered.exists():
+                await asyncio.sleep(0.01)
+        return {"type": "http.disconnect"}
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    scope: dict[str, Any] = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/messages/count_tokens",
+        "raw_path": b"/v1/messages/count_tokens",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(b"content-type", b"application/json")],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+        "state": {},
+    }
+    try:
+        async with asyncio.timeout(7):
+            await client.app(scope, receive, send)
+    finally:
+        release.touch()
+
+    assert entered.exists()
+    assert sent == []
+    assert seen == []
+    assert chain.local_token_worker.limiter.borrowed_tokens == 0
+    assert chain.tokenization.calibration.snapshot() == {}
+    assert _records()[-1]["status"] == "gone"
+
+
+@pytest.mark.parametrize("blocked_phase", ["body", "worker", "provider"])
+async def test_count_request_deadline_covers_body_worker_and_provider(
+    blocked_phase: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, seen = make_client(
+        lambda _: httpx2.Response(200, json={"input_tokens": 42}),
+        overrides={"client_delivery": {"client_request_deadline": 1}},
+    )
+    chain = _chain_of(client)
+    entered, release = tmp_path / "entered", tmp_path / "release"
+    body: dict[str, Any] = {
+        "model": "claude-model",
+        "messages": [],
+        "metadata": {"entered": str(entered), "release": str(release)},
+    }
+    provider_calls = 0
+
+    async def delayed_provider(*_args: Any, **_kwargs: Any) -> httpx2.Response:
+        nonlocal provider_calls
+        provider_calls += 1
+        await asyncio.sleep(10)
+        raise AssertionError("provider should have been cancelled")
+
+    async def streamed_body() -> AsyncIterator[bytes]:
+        if blocked_phase == "body":
+            yield b"{"
+            await asyncio.sleep(10)
+            raise AssertionError("body should have been cancelled")
+        yield orjson.dumps(body)
+
+    if blocked_phase != "body":
+        # This test isolates the named waiting phase, not process cold start. Warm the loop's worker before the HTTP request starts its one-second deadline.
+        await chain.local_token_worker.estimate("anthropic", {"model": "claude-model", "messages": []})
+    if blocked_phase == "worker":
+        monkeypatch.setattr(token_worker_module, "_estimate_input", blocked_count_job)
+    if blocked_phase == "provider":
+        monkeypatch.setattr(chain.providers.get("ghc"), "count_tokens", delayed_provider)
+    async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=client.app), base_url="http://testserver") as http:
+        try:
+            response = await asyncio.wait_for(
+                http.post("/v1/messages/count_tokens", content=streamed_body(), headers={"content-type": "application/json"}),
+                timeout=5,
+            )
+        finally:
+            release.touch()
+
+    assert response.status_code == 504
+    assert response.json()["error"]["type"] == "timeout_error"
+    assert chain.local_token_worker.limiter.borrowed_tokens == 0
+    assert provider_calls == (1 if blocked_phase == "provider" else 0)
+    assert seen == []
+    assert chain.tokenization.calibration.snapshot() == {}
+
+
+async def test_worker_timeout_error_is_not_relabeled_as_client_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, seen = make_client(lambda _: httpx2.Response(599))
+
+    async def failing_worker(_protocol: str, _payload: Any) -> int:
+        raise TimeoutError("worker's own timeout")
+
+    monkeypatch.setattr(_chain_of(client).local_token_worker, "estimate", failing_worker)
+    async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=client.app), base_url="http://testserver") as http:
+        response = await http.post("/v1/messages/count_tokens", json={"model": "claude-model", "messages": []})
+
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "proxy_internal_error"
+    assert seen == []
+
+
+def test_count_and_admission_share_the_app_worker_permit() -> None:
+    client, _ = make_client(lambda _: httpx2.Response(599))
+    chain = _chain_of(client)
+    assert chain.prompt_token_admission._limiter is chain.local_token_worker.limiter  # pyright: ignore[reportPrivateUsage]
+    assert chain.local_token_worker.limiter.total_tokens == 1
 
 
 def test_count_tokens_asks_about_the_mapped_model() -> None:

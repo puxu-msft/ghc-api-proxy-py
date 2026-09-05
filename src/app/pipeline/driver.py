@@ -13,12 +13,10 @@ from typing import Any, cast
 from uuid import uuid4
 
 import httpx2
-from pydantic import ValidationError
 
 from app.config.schema import LOCAL_COUNTER
 from app.core.chain import Chain
 from app.model_provider import ModelDescriptor, ModelProvider
-from app.models.anthropic import MessagesRequest
 from app.observability.metrics import BETA_FLAGS_STRIPPED
 from app.pipeline.anthropic_request_hook import fix_anthropic_request
 from app.pipeline.auto_mode_classifier import AutoModeVerdict, classify, log_hit, verdict_text
@@ -53,7 +51,6 @@ from app.pipeline.translation_driver.semantic import (
     WebSearchNotExecutable,
 )
 from app.tokenization.admission import TokenAdmissionObservation
-from app.tokenization.estimators import estimate_anthropic_input, estimate_responses_input
 from app.tokenization.scaling import scale_local_estimate
 from app.wire_json import dumps
 
@@ -316,11 +313,18 @@ def _answered_auto_mode(
         attempts=context.attempt_count,
     )
 
+def _check_count_deadline(deadline_at: float | None) -> None:
+    if deadline_at is not None and asyncio.get_running_loop().time() >= deadline_at:
+        raise UpstreamTimeout("client request exceeded its deadline while counting tokens")
+
+
 async def handle_count_tokens(
     chain: Chain,
     context: RequestContext,
     on_routed: Callable[[RequestContext], None] | None = None,
     on_upstream_response: Callable[[RequestContext], None] | None = None,
+    *,
+    deadline_at: float | None = None,
 ) -> dict[str, Any]:
     """Serve `/v1/messages/count_tokens` through the provider chain the spec names.
 
@@ -328,6 +332,7 @@ async def handle_count_tokens(
 
     The two counters are not interchangeable. A model provider returns upstream's own number and is worth learning from; `local` returns an estimate corrected by what has been learnt so far. So the answer says which one it came from rather than presenting an estimate as a measurement.
     """
+    _check_count_deadline(deadline_at)
     provider, route = shape_request(chain, context)
     descriptor = route.descriptor
     if descriptor is None:
@@ -360,17 +365,18 @@ async def handle_count_tokens(
     protocol = route.target_format.value
     if route.target_format is WireFormat.ANTHROPIC_MESSAGES:
         protocol = "anthropic"
-        estimate = estimate_anthropic_input(_countable(context.payload))
-    elif route.target_format is WireFormat.OPENAI_RESPONSES:
-        estimate = estimate_responses_input(context.payload)
-    else:
+    elif route.target_format is not WireFormat.OPENAI_RESPONSES:
         # Unreachable today and written to stay loud if that changes: the only outbound translators registered are Anthropic and Responses, so any other target already failed above with `TranslatorNotFound`. Add one — chat-completions is the obvious candidate, and three models in the catalogue advertise nothing else — and this branch opens. Reading a chat-completions body with the Responses estimator finds no `input` and no `instructions` and returns 1, which is not an estimate but a claim that the request is free.
         raise CountTokensRequestError(
             f"no token estimator for {route.target_format.value}; add one before routing counts there"
         )
+    _check_count_deadline(deadline_at)
+    estimate = await chain.local_token_worker.estimate(protocol, context.payload)
+    _check_count_deadline(deadline_at)
     calibration = chain.tokenization.calibration
 
     async def ask_upstream(payload: Mapping[str, Any]) -> int:
+        _check_count_deadline(deadline_at)
         response = await provider.count_tokens(payload, descriptor=descriptor)
         # Taken before the body is read and before the response is closed, so the count line can report the leg it actually flew. Without these a count answered by upstream and one estimated in this process render identically apart from the counter's name — same missing byte fields, same single protocol label — and the line's own convention is that a missing field means the exchange had nothing to put there.
         # What the leg's presence means is narrower than "upstream answered the count": it means upstream *responded*. A refusal or a transport failure never reaches here — `send_anthropic_count_tokens` raises it as a pipeline error — but a 200 whose body carries no usable `input_tokens` does, and then the raise below hands the count to the estimator with both legs already recorded. `↑…B ↓…B … provider(ghc-failed,local)` is the right reading of that: upstream was asked, upstream replied, and the reply could not be used.
@@ -392,6 +398,7 @@ async def handle_count_tokens(
 
     def estimate_locally(payload: Mapping[str, Any]) -> int:
         del payload  # Already measured above; recomputing per attempt would only cost time.
+        _check_count_deadline(deadline_at)
         return scale_local_estimate(
             calibration.calibrate(protocol, route.model_id, estimate),
             settings.local_estimate_multiplier,
@@ -433,23 +440,12 @@ async def handle_count_tokens(
                 f"{provider_attempts[0].partition(':')[0]}-failed"
             )
 
+    _check_count_deadline(deadline_at)
     if result.provider != LOCAL_COUNTER:
         # Upstream's number is ground truth for the estimator, which is the only way it improves.
         calibration.learn(protocol, route.model_id, estimate, result.tokens)
         return {"input_tokens": result.tokens}
     return {"input_tokens": result.tokens, "estimated": True}
-
-def _countable(payload: Mapping[str, Any]) -> MessagesRequest:
-    """Read the body as a Messages request for estimation only.
-
-    `max_tokens` is required to *send* a Messages request but means nothing when counting its input, and Anthropic's own count_tokens endpoint does not ask for it. Supplying one here keeps a legitimate body from being rejected; it is never sent anywhere.
-    """
-    countable = dict(payload)
-    countable.setdefault("max_tokens", 1)
-    try:
-        return MessagesRequest.model_validate(countable)
-    except ValidationError as error:
-        raise CountTokensRequestError(f"not a countable Messages body: {error}") from error
 
 async def handle_bounded(
     chain: Chain,

@@ -72,6 +72,7 @@ from app.pipeline.driver import (
     replay_prepared,
 )
 from app.pipeline.error_classify import describe
+from app.pipeline.exceptions import UpstreamTimeout
 from app.pipeline.hand_over import HandBackOutcome, hand_back_block, one_line, replay_reason
 from app.pipeline.reply import reply_summary, response_payload
 from app.pipeline.request import RequestContext, WireFormat
@@ -466,6 +467,35 @@ async def _dispatch(
     client_deadline_at = (
         asyncio.get_running_loop().time() + client_deadline if client_deadline > 0 else None
     )
+    matched = request.scope.get("route")
+    route = route_for_path(getattr(matched, "path", None) or request.url.path)
+    if route is not None and route.count_tokens and client_deadline_at is not None:
+        trace.inbound_format = route.wire_format.value
+        trace.count_tokens = True
+        chain.active_requests.set_route(trace.request_id, route=route.path, inbound_format=trace.inbound_format)
+        timeout = asyncio.timeout_at(client_deadline_at)
+        try:
+            async with timeout:
+                response = await _dispatch_with_body(request, chain, trace, completion, client_deadline_at)
+                if asyncio.get_running_loop().time() < client_deadline_at:
+                    return response
+                # A fully synchronous final segment may return before the loop can dispatch its timeout callback. Count replies own no open upstream response here.
+        except TimeoutError:
+            if not timeout.expired():
+                raise
+        error = UpstreamTimeout(f"client request exceeded {client_deadline}s")
+        trace.detail = str(error)
+        return error_response(error, inbound_format=route.wire_format.value)
+    return await _dispatch_with_body(request, chain, trace, completion, client_deadline_at)
+
+
+async def _dispatch_with_body(
+    request: Request,
+    chain: Chain,
+    trace: RequestTrace,
+    completion: RequestCompletionCoordinator,
+    client_deadline_at: float | None,
+) -> Response:
     # Consumed here so the request is fully read before anything can return, which is what lets a rejected body be reported at all. Its size is deliberately **not** what `↑` reports — see `log_completion`. The request is already registered, so a client that never finishes sending is visible for however long it takes.
     try:
         await request.body()
@@ -602,6 +632,7 @@ async def _dispatch_after_body(
                 context,
                 _routed,
                 _count_upstream_response_observed,
+                deadline_at=client_deadline_at,
             )
         except Exception as error:
             # Idempotent with the early callback and needed when failure happened before that callback could run.
