@@ -440,6 +440,7 @@ hook_strip_anthropic_request_headers:
   # 特定能力请求头只针对特定模型有效，按需剥离。
   # Certain capability request headers are only valid for certain models. Strip them as needed.
   strip_anthropic_beta_flags:
+    # 注意，本文是示例，这里事实上已被上文 model_mappings 覆盖，从而导致永远不会出现发往 claude-sonnet-4.6 的请求。
     claude-sonnet-4.6:
       - interleaved-thinking-2025-05-14
       - context-management-2025-06-27
@@ -465,21 +466,17 @@ hook_strip_anthropic_request_headers:
 
 # anthropic 请求处理
 hook_fix_anthropic_request:
-  # # advanced-tool-use-2025-11-20
-  # # tool-search-tool-2025-10-19
-  # tool_search:
-  #   enabled: false
+  # 输入缓存模式
+  #   passthrough: 原样转发客户端 cache_control
+  #   sanitize:    剥离已知模型与已知报错字段的组合的字段（默认）
+  cache_control: sanitize
 
-  # Cache control mode for prompt caching. / prompt 缓存的 cache control 模式。
-  #   disabled:    strip all cache_control fields (no caching) / 剥离所有 cache_control 字段（不缓存）
-  #   passthrough: forward client cache_control as-is (default) — clients like Claude Code send / 原样转发客户端 cache_control（默认）——Claude Code 等客户端
-  #                their own well-tuned conversation breakpoints; the proxy stays out of the way / 自带调优过的对话断点，代理不插手
-  #   sanitize:    forward but normalize to { type: "ephemeral" } (strip non-standard fields like scope) / 转发但归一化为 { type: "ephemeral" }（剥离 scope 等非标准字段）
-  #   proxied:     proxy controls injection — strip client breakpoints, then re-inject GHC-style: / 代理控制注入——剥光客户端断点后再注入 GHC 风格：
-  #                message-level breakpoints (last tool_result per round + current user message + / 消息级断点（每轮最后一个 tool_result + 当前 user 消息 +
-  #                terminal assistant) caching the conversation, then tools/system on spare slots. / 终态 assistant）缓存对话，再用余位给 tools/system
-  #                Use for clients that don't send their own cache_control. / 适用于不自带 cache_control 的客户端
-  cache_control: passthrough
+  # 仅 sanitize 已知模型与已知报错字段的组合
+  cache_control_sanitize:
+    # `scope`：由 `prompt-caching-scope-2026-01-05` beta 引入，新版 Claude Code 会发。
+    # 2026-08-24 实测，opus-5 / 4.8 / 4.7 / 4.6、sonnet-5 / 4.6、haiku-4.5 全部拒收它，无论是否携带 beta 头。
+    claude-.*:
+      - scope
 
   # Extended prompt-cache TTL (extended-cache-ttl-2025-04-11): upgrade the cache_control breakpoints the
   # proxy WRITES from Anthropic's default 5m to 1h. Only takes effect when the proxy owns breakpoints —
@@ -554,6 +551,17 @@ hook_fix_anthropic_request:
       # 记录的条目多久失效（分钟）。0 = 永久记忆。
       # How long the remembered entry is valid (minutes). 0 = permanent memory.
       poisoned_ttl_minutes: 4320
+
+  # 拦截并直接响应 auto mode 分类器的请求。
+  intercept_auto_mode_classifier:
+    #   passthrough: 透传
+    #   allow: 直接允许
+    #   block: 直接拒绝
+    decision: allow
+
+    match_system_prompt_prefix: "You are a security monitor for autonomous AI coding agents."
+
+    block_reason_str: "Blocked by proxy, without a model review."
 
 # anthropic 响应处理
 hook_fix_anthropic_sse:

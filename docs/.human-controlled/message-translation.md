@@ -4,6 +4,10 @@
 
 提供 `translation_driver`，用于在“输入格式 <-> 中间表示 <-> 上游模型格式”之间做转换。每个受支持的翻译格式都可以注册为翻译器（translator），如 `inbound.from-anthropic-messages`、`outbound.to-anthropic-messages`、`inbound.from-openai-responses`、`outbound.to-openai-responses` 等。不要求能力等价，尽可能提供翻译能力，在没有唯一的翻译路径之处提供配置选项。
 
+对于直连路径，采用尽可能原样转发的原则。当我们需要理解和处理时，才分析和处理对应部分。
+
+对于翻译路径，采用按需理解和处理的原则，不直接建立两种类型之间的映射，而是总是建立消息格式与内部 IR 的映射关系，按需理解和处理。
+
 ## anthropic-messages <-> openai-responses
 
 ### 如何提供系统提示词？
