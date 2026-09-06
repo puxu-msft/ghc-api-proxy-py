@@ -7,6 +7,8 @@ import httpx2
 from app.config.schema import XingchenProviderConfig
 from app.model_provider.types import (
     CatalogSnapshot,
+    ChatEndpointCapabilities,
+    ChatResponseMode,
     ModelDescriptor,
     ModelEndpoint,
     require_descriptor_owner,
@@ -16,6 +18,14 @@ from app.model_provider.xingchen.client import XingchenClient
 
 PROVIDER_TYPE = "xingchen"
 DRIVEN_ENDPOINTS = frozenset({ModelEndpoint.OPENAI_CHAT_COMPLETIONS})
+_CHAT_ENDPOINT_CAPABILITIES = ChatEndpointCapabilities(
+    response_modes=frozenset(
+        {ChatResponseMode.STREAMING, ChatResponseMode.NON_STREAMING}
+    ),
+    stream_options_include_usage_default=True,
+    tool_stream_default=True,
+    provenance="2026-09-04 protocol measurement",
+)
 
 
 class XingchenProvider:
@@ -34,6 +44,7 @@ class XingchenProvider:
             model_id: ModelDescriptor(
                 id=model_id,
                 endpoints=DRIVEN_ENDPOINTS,
+                chat_endpoint_capabilities=_CHAT_ENDPOINT_CAPABILITIES,
                 provider_name=self._name,
                 catalog_generation=self._catalog_generation,
                 catalog_refreshed_at=self._refreshed_at,

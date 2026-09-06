@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
 from typing import Any
 
 import httpx2
@@ -10,6 +10,8 @@ from openai import AsyncOpenAI
 from app.config.schema import GithubCopilotProviderConfig, ProxyConfig
 from app.model_provider import (
     CapabilityMissing,
+    ChatEndpointCapabilities,
+    ChatResponseMode,
     DescriptorProviderMismatch,
     EndpointNotSupported,
     GithubCopilotProvider,
@@ -170,6 +172,50 @@ def test_flat_limit_lookalikes_do_not_replace_nested_catalog_metadata() -> None:
     )
 
 
+def test_chat_capability_rejects_empty_response_modes() -> None:
+    with pytest.raises(ValueError, match="Chat response_modes must not be empty"):
+        ChatEndpointCapabilities(
+            response_modes=frozenset(),
+            stream_options_include_usage_default=None,
+            tool_stream_default=None,
+            provenance="test fixture",
+        )
+
+
+def test_chat_capability_rejects_empty_provenance() -> None:
+    with pytest.raises(ValueError, match="Chat capability provenance must not be empty"):
+        ChatEndpointCapabilities(
+            response_modes=frozenset({ChatResponseMode.STREAMING}),
+            stream_options_include_usage_default=None,
+            tool_stream_default=None,
+            provenance="",
+        )
+
+
+def test_chat_endpoint_requires_an_explicit_capability_snapshot() -> None:
+    with pytest.raises(ValueError, match="Chat endpoint requires non-null capabilities"):
+        ModelDescriptor(
+            id="chat-model",
+            endpoints=frozenset({ModelEndpoint.OPENAI_CHAT_COMPLETIONS}),
+        )
+
+
+def test_non_chat_endpoint_rejects_a_chat_capability_snapshot() -> None:
+    capability = ChatEndpointCapabilities(
+        response_modes=frozenset({ChatResponseMode.NON_STREAMING}),
+        stream_options_include_usage_default=None,
+        tool_stream_default=None,
+        provenance="test fixture",
+    )
+
+    with pytest.raises(ValueError, match="Chat capabilities require the Chat endpoint"):
+        ModelDescriptor(
+            id="responses-model",
+            endpoints=frozenset({ModelEndpoint.OPENAI_RESPONSES}),
+            chat_endpoint_capabilities=capability,
+        )
+
+
 def test_descriptor_keeps_one_catalog_generation_and_prompt_limit_snapshot() -> None:
     provider, _ = build_provider(upstream(httpx2.Response(200)))
     first = provider.describe("gpt-model")
@@ -189,6 +235,32 @@ def test_descriptor_keeps_one_catalog_generation_and_prompt_limit_snapshot() -> 
         max_context_window_tokens=1_050_000,
     )
     assert first is not second
+
+
+def test_github_chat_capability_profile_comes_from_the_catalog_snapshot() -> None:
+    provider, _ = build_provider(upstream(httpx2.Response(200)))
+    descriptor = descriptor_for(provider, "gpt-model")
+
+    assert descriptor.chat_endpoint_capabilities == ChatEndpointCapabilities(
+        response_modes=frozenset(
+            {ChatResponseMode.STREAMING, ChatResponseMode.NON_STREAMING}
+        ),
+        stream_options_include_usage_default=None,
+        tool_stream_default=None,
+        provenance="GitHub Copilot provider catalog",
+    )
+    assert descriptor_for(provider, "claude-model").chat_endpoint_capabilities is None
+
+
+def test_chat_capability_snapshot_is_frozen() -> None:
+    provider, _ = build_provider(upstream(httpx2.Response(200)))
+    capability = descriptor_for(provider, "gpt-model").chat_endpoint_capabilities
+    assert capability is not None
+    assert isinstance(capability.response_modes, frozenset)
+
+    mutable_capability: Any = capability
+    with pytest.raises(FrozenInstanceError):
+        mutable_capability.provenance = "changed"
 
 
 def test_descriptor_owner_gate_rejects_a_cross_provider_snapshot() -> None:

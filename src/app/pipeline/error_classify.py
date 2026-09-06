@@ -36,6 +36,7 @@ from app.model_provider.types import (
     EndpointNotImplemented,
     EndpointNotSupported,
     ProviderError,
+    ResponseModeNotSupported,
     UnknownModel,
 )
 from app.pipeline.count_tokens import CountTokensRequestError, CountTokensUnavailable
@@ -245,6 +246,12 @@ def describe(error: BaseException, *, source_format: str = "") -> ErrorInfo:
     if isinstance(error, UpstreamRejected | UpstreamError):
         return _from_upstream(error, source_format=source_format)
 
+    if isinstance(error, ResponseModeNotSupported):
+        return _proxy_error(
+            ErrorCategory.CLIENT,
+            str(error),
+            code="unsupported_response_mode",
+        )
     if isinstance(error, ProviderError):
         for kind, category in _PROVIDER_ROWS:
             if isinstance(error, kind):

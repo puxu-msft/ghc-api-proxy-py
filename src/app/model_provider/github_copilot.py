@@ -10,6 +10,8 @@ from app.config.schema import GithubCopilotProviderConfig
 from app.model_provider.ghc_client import GhcApiClient, fetch_models
 from app.model_provider.types import (
     CatalogSnapshot,
+    ChatEndpointCapabilities,
+    ChatResponseMode,
     EndpointNotImplemented,
     ModelDescriptor,
     ModelEndpoint,
@@ -42,6 +44,15 @@ _SEND_METHODS = {
 
 # Which advertised endpoints this proxy can actually drive. Derived from the send table rather than written out again, so a report of what is drivable cannot drift from what `send` will take.
 DRIVEN_ENDPOINTS: frozenset[ModelEndpoint] = frozenset(_SEND_METHODS)
+
+_CHAT_ENDPOINT_CAPABILITIES = ChatEndpointCapabilities(
+    response_modes=frozenset(
+        {ChatResponseMode.STREAMING, ChatResponseMode.NON_STREAMING}
+    ),
+    stream_options_include_usage_default=None,
+    tool_stream_default=None,
+    provenance="GitHub Copilot provider catalog",
+)
 
 
 class GithubCopilotProvider:
@@ -134,6 +145,11 @@ class GithubCopilotProvider:
             descriptors[model_id] = ModelDescriptor(
                 id=model_id,
                 endpoints=resolved.known,
+                chat_endpoint_capabilities=(
+                    _CHAT_ENDPOINT_CAPABILITIES
+                    if ModelEndpoint.OPENAI_CHAT_COMPLETIONS in resolved.known
+                    else None
+                ),
                 unknown_endpoints=resolved.unknown,
                 request_headers=_string_mapping(model.get("request_headers")),
                 # Read here for the same reason the endpoints are: the raw catalog is kept, but anything that reads it a second time to answer the same question is a second answer waiting to disagree with this one.

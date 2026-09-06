@@ -11,6 +11,25 @@ from types import MappingProxyType
 from typing import Any, Literal, cast
 
 
+class ChatResponseMode(StrEnum):
+    STREAMING = "streaming"
+    NON_STREAMING = "non_streaming"
+
+
+@dataclass(frozen=True, slots=True)
+class ChatEndpointCapabilities:
+    response_modes: frozenset[ChatResponseMode]
+    stream_options_include_usage_default: Literal[True] | None
+    tool_stream_default: Literal[True] | None
+    provenance: str
+
+    def __post_init__(self) -> None:
+        if not self.response_modes:
+            raise ValueError("Chat response_modes must not be empty")
+        if not self.provenance:
+            raise ValueError("Chat capability provenance must not be empty")
+
+
 class ModelEndpoint(StrEnum):
     ANTHROPIC_MESSAGES = "/v1/messages"
     OPENAI_CHAT_COMPLETIONS = "/chat/completions"
@@ -62,6 +81,25 @@ class CapabilityMissing(ProviderError):
         super().__init__(f"{provider} advertises no endpoints for model {model_id!r}")
         self.provider = provider
         self.model_id = model_id
+
+
+class ResponseModeNotSupported(ProviderError):
+    def __init__(
+        self,
+        provider: str,
+        model_id: str,
+        requested_mode: ChatResponseMode,
+        available_modes: frozenset[ChatResponseMode],
+    ) -> None:
+        self.provider = provider
+        self.model_id = model_id
+        self.requested_mode = requested_mode
+        self.available_modes = available_modes
+        available = ", ".join(sorted(mode.value for mode in available_modes))
+        super().__init__(
+            f"provider {provider} model {model_id} does not support Chat response mode "
+            f"{requested_mode.value}; available modes: {available or 'none'}"
+        )
 
 
 class EndpointNotSupported(ProviderError):
@@ -158,6 +196,14 @@ class ModelDescriptor:
     catalog_generation: int = 0
     catalog_refreshed_at: str = ""
     prompt_token_limits: PromptTokenLimits | None = None
+    chat_endpoint_capabilities: ChatEndpointCapabilities | None = None
+
+    def __post_init__(self) -> None:
+        has_chat_endpoint = ModelEndpoint.OPENAI_CHAT_COMPLETIONS in self.endpoints
+        if has_chat_endpoint and self.chat_endpoint_capabilities is None:
+            raise ValueError("Chat endpoint requires non-null capabilities")
+        if not has_chat_endpoint and self.chat_endpoint_capabilities is not None:
+            raise ValueError("Chat capabilities require the Chat endpoint")
 
     def supports(self, endpoint: ModelEndpoint) -> bool:
         return endpoint in self.endpoints

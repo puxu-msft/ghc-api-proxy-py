@@ -33,10 +33,12 @@ from app.model_provider.codebuddy_client.auth_state import (
 from app.model_provider.registry import ProviderNotConfigured
 from app.model_provider.types import (
     CapabilityMissing,
+    ChatResponseMode,
     DescriptorProviderMismatch,
     EndpointNotImplemented,
     EndpointNotSupported,
     ProviderError,
+    ResponseModeNotSupported,
     UnknownModel,
 )
 from app.pipeline.count_tokens import CountTokensRequestError, CountTokensUnavailable
@@ -125,6 +127,17 @@ CASES: tuple[tuple[str, Callable[[], BaseException], ErrorCategory, int], ...] =
     ("unknown-model", lambda: UnknownModel("ghc", "nope"), ErrorCategory.NOT_FOUND, 404),
     ("capability-missing", lambda: CapabilityMissing("ghc", "mute"), ErrorCategory.CLIENT, 400),
     (
+        "response-mode-not-supported",
+        lambda: ResponseModeNotSupported(
+            "codebuddy",
+            "chat-model",
+            ChatResponseMode.NON_STREAMING,
+            frozenset({ChatResponseMode.STREAMING}),
+        ),
+        ErrorCategory.CLIENT,
+        400,
+    ),
+    (
         "endpoint-not-supported",
         lambda: EndpointNotSupported("ghc", "m", "/responses"),
         ErrorCategory.CLIENT,
@@ -189,6 +202,7 @@ EXPECTED_CASE_IDS = frozenset(
         "count-tokens-reads-its-cause",
         "unknown-model",
         "capability-missing",
+        "response-mode-not-supported",
         "endpoint-not-supported",
         "endpoint-not-implemented",
         "descriptor-provider-mismatch",
@@ -220,6 +234,41 @@ def test_a_failure_is_described_as_the_spec_says(
     assert info.status_code == status
     assert info.code == DEFAULT_CODE_FOR_CATEGORY[category] or info.code
     assert info.message
+
+
+def test_response_mode_refusal_has_its_own_openai_400_body() -> None:
+    error = ResponseModeNotSupported(
+        "codebuddy",
+        "chat-model",
+        ChatResponseMode.NON_STREAMING,
+        frozenset({ChatResponseMode.STREAMING}),
+    )
+    assert error.provider == "codebuddy"
+    assert error.model_id == "chat-model"
+    assert error.requested_mode is ChatResponseMode.NON_STREAMING
+    assert error.available_modes == frozenset({ChatResponseMode.STREAMING})
+
+    info = describe(error)
+    expected = {
+        "error": {
+            "message": "provider codebuddy model chat-model does not support Chat response mode non_streaming; available modes: streaming",
+            "type": "invalid_request_error",
+            "param": None,
+            "code": "unsupported_response_mode",
+        }
+    }
+
+    assert info.category is ErrorCategory.CLIENT
+    assert info.status_code == 400
+    assert info.code == "unsupported_response_mode"
+    assert write_error(info, wire_format="openai-chat-completions") == expected
+
+    capability_missing = write_error(
+        describe(CapabilityMissing("codebuddy", "chat-model")),
+        wire_format="openai-chat-completions",
+    )
+    assert capability_missing != expected
+    assert capability_missing["error"]["code"] == "invalid_request"
 
 
 def test_a_refusal_over_a_field_carries_the_field_and_its_own_code() -> None:
@@ -280,6 +329,7 @@ def test_the_provider_error_subclasses_are_all_classified() -> None:
     named = {
         UnknownModel,
         CapabilityMissing,
+        ResponseModeNotSupported,
         EndpointNotSupported,
         EndpointNotImplemented,
         DescriptorProviderMismatch,

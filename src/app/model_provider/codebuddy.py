@@ -21,6 +21,8 @@ from app.config.schema import CodebuddyProviderConfig
 from app.model_provider.codebuddy_client import CodebuddyClient, static_catalog
 from app.model_provider.types import (
     CatalogSnapshot,
+    ChatEndpointCapabilities,
+    ChatResponseMode,
     EndpointNotImplemented,
     ModelDescriptor,
     ModelEndpoint,
@@ -42,6 +44,13 @@ _SEND_METHODS = {
 # `github_copilot.DRIVEN_ENDPOINTS`: derived from the send table so a report of
 # what is drivable cannot drift from what `send` will take.
 DRIVEN_ENDPOINTS: frozenset[ModelEndpoint] = frozenset(_SEND_METHODS)
+
+_CHAT_ENDPOINT_CAPABILITIES = ChatEndpointCapabilities(
+    response_modes=frozenset({ChatResponseMode.STREAMING}),
+    stream_options_include_usage_default=True,
+    tool_stream_default=None,
+    provenance="reference compatibility assumption; P6 not run",
+)
 
 
 class CodebuddyProvider:
@@ -140,6 +149,11 @@ class CodebuddyProvider:
             descriptors[model_id] = ModelDescriptor(
                 id=model_id,
                 endpoints=resolved.known,
+                chat_endpoint_capabilities=(
+                    _CHAT_ENDPOINT_CAPABILITIES
+                    if ModelEndpoint.OPENAI_CHAT_COMPLETIONS in resolved.known
+                    else None
+                ),
                 unknown_endpoints=resolved.unknown,
                 provider_name=self._name,
                 catalog_generation=generation,

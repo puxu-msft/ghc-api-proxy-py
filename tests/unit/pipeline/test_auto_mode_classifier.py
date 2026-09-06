@@ -16,7 +16,12 @@ import orjson
 import pytest
 
 from app.config.schema import AutoModeDecision, InterceptAutoModeClassifierConfig, ProxyConfig
-from app.model_provider import ModelDescriptor, ModelEndpoint
+from app.model_provider import (
+    ChatEndpointCapabilities,
+    ChatResponseMode,
+    ModelDescriptor,
+    ModelEndpoint,
+)
 from app.pipeline.auto_mode_classifier import classify, verdict_text
 from app.pipeline.delivery.formats.anthropic_messages_synthetic_reply import (
     auto_mode_body,
@@ -27,6 +32,15 @@ from app.pipeline.request import RequestContext, WireFormat
 from app.server.composition import build_chain
 
 MONITOR_PROMPT = "You are a security monitor for autonomous AI coding agents."
+
+_NEUTRAL_CHAT_CAPABILITY = ChatEndpointCapabilities(
+    response_modes=frozenset(
+        {ChatResponseMode.STREAMING, ChatResponseMode.NON_STREAMING}
+    ),
+    stream_options_include_usage_default=None,
+    tool_stream_default=None,
+    provenance="auto-mode test fixture",
+)
 
 
 def classifier_request(
@@ -508,6 +522,11 @@ class ExplodingProvider:
             id=model_id,
             endpoints=frozenset({self._endpoint}),
             provider_name=self.name,
+            chat_endpoint_capabilities=(
+                _NEUTRAL_CHAT_CAPABILITY
+                if self._endpoint is ModelEndpoint.OPENAI_CHAT_COMPLETIONS
+                else None
+            ),
         )
 
     async def refresh_catalog(self) -> bool:

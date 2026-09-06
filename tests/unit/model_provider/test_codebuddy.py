@@ -12,7 +12,13 @@ import httpx2
 import pytest
 
 from app.config.schema import CodebuddyProviderConfig
-from app.model_provider import EndpointNotSupported, ModelDescriptor, ModelEndpoint
+from app.model_provider import (
+    ChatEndpointCapabilities,
+    ChatResponseMode,
+    EndpointNotSupported,
+    ModelDescriptor,
+    ModelEndpoint,
+)
 from app.model_provider.codebuddy import DRIVEN_ENDPOINTS, CodebuddyProvider
 from app.model_provider.codebuddy_client import (
     CodebuddyClient,
@@ -84,6 +90,19 @@ def test_every_model_advertises_exactly_chat_completions(tmp_path: Path) -> None
     descriptor = provider.describe(DEFAULT_MODEL_IDS[0])
     assert descriptor is not None
     assert descriptor.endpoints == frozenset({ModelEndpoint.OPENAI_CHAT_COMPLETIONS})
+
+
+def test_chat_capability_profile_is_the_reference_compatibility_assumption(
+    tmp_path: Path,
+) -> None:
+    descriptor = descriptor_for(build_provider(tmp_path), DEFAULT_MODEL_IDS[0])
+
+    assert descriptor.chat_endpoint_capabilities == ChatEndpointCapabilities(
+        response_modes=frozenset({ChatResponseMode.STREAMING}),
+        stream_options_include_usage_default=True,
+        tool_stream_default=None,
+        provenance="reference compatibility assumption; P6 not run",
+    )
 
 
 def test_refresh_catalog_reports_unchanged(tmp_path: Path) -> None:

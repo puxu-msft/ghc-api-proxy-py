@@ -7,6 +7,8 @@ import pytest
 from app.config.schema import XingchenProviderConfig
 from app.model_provider import (
     CatalogProvider,
+    ChatEndpointCapabilities,
+    ChatResponseMode,
     EndpointNotSupported,
     ModelDescriptor,
     ModelEndpoint,
@@ -83,6 +85,14 @@ def test_static_catalog_is_chat_only_and_preserves_disabled_arithmetic() -> None
     descriptor = provider.describe("chat-pro")
     assert descriptor is not None
     assert descriptor.endpoints == {ModelEndpoint.OPENAI_CHAT_COMPLETIONS}
+    assert descriptor.chat_endpoint_capabilities == ChatEndpointCapabilities(
+        response_modes=frozenset(
+            {ChatResponseMode.STREAMING, ChatResponseMode.NON_STREAMING}
+        ),
+        stream_options_include_usage_default=True,
+        tool_stream_default=True,
+        provenance="2026-09-04 protocol measurement",
+    )
     assert provider.describe("chat-lite") is None
 
 
