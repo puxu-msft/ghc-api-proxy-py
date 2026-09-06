@@ -20,9 +20,11 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 
 from app.errors import STATUS_FOR_CATEGORY, ErrorCategory, ErrorInfo
+from app.pipeline.chat_completions.events import ChatEventFacts, ChatEventKind, ChatEventReader
 from app.pipeline.delivery.assembling import FailureOrigin, ReplyDialect, StreamFailure, Terminal
 from app.pipeline.delivery.blocks import TEXT, THINKING, TOOL_USE, CompletedBlock
 from app.pipeline.delivery.sse_source import SseEvent
+from app.pipeline.response_observation import FrozenJsonObject, JsonAvailability, thaw_json
 from app.pipeline.translation_driver.openai_chat_completions import (
     CHAT_STOP_REASONS,
     REASONING_CONTENT,
@@ -62,6 +64,8 @@ class ChatCompletionsAssembler:
         self._tools: dict[int, int] = {}
         self._terminal = Terminal(dialect=ReplyDialect.CHAT_COMPLETIONS)
         self._failure: StreamFailure | None = None
+        self._reader = ChatEventReader()
+        self._event_ordinal = 0
 
     @property
     def terminal(self) -> Terminal:
@@ -94,20 +98,23 @@ class ChatCompletionsAssembler:
         return bool(self._open)
 
     def push(self, event: SseEvent) -> tuple[CompletedBlock, ...]:
-        if event.data.strip() == "[DONE]":
-            # The transport's own terminator. `finish_reason` is what sets `seen`
-            # normally; a [DONE] without one still means upstream ended on purpose.
+        facts = self._reader.read_sse_event(event, ordinal=self._event_ordinal)
+        self._event_ordinal += 1
+        if facts.kind is ChatEventKind.DONE:
+            # The transport's own terminator. `finish_reason` is what sets `seen` normally; a [DONE] without one still means upstream ended on purpose.
             self._terminal.seen = True
             return self._flush_open()
-        data = event.json()
-        if not data:
+        if facts.kind is ChatEventKind.ERROR:
+            # Error-carrier recognition precedes ordinary choices, so a failed turn cannot become a partial success merely by carrying both fields.
+            self._failure = chat_failure_from_facts(facts, raw_data=event.data)
             return ()
-        if "error" in data and "choices" not in data:
-            # Some OpenAI-compatible backends report a failed turn as a bare error
-            # object mid-stream. Carried rather than logged and dropped, so the
-            # client is told the turn failed instead of watching a 200 end early.
-            self._failure = chat_failure_from(event)
+        if (
+            facts.kind is not ChatEventKind.CHUNK
+            or facts.value.availability is not JsonAvailability.OBSERVED
+            or not isinstance(facts.value.value, FrozenJsonObject)
+        ):
             return ()
+        data = cast(dict[str, Any], thaw_json(facts.value.value))
         completed: list[CompletedBlock] = []
         usage = data.get("usage")
         if isinstance(usage, dict) and usage:
@@ -285,22 +292,35 @@ def _decode_arguments(partial_json: str) -> dict[str, Any]:
 
 
 def chat_failure_from(event: SseEvent) -> StreamFailure | None:
-    """A chat upstream's mid-stream error object as a failure record, or None."""
-    data = event.json()
-    raw = data.get("error")
-    detail = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
-    spelled = str(detail.get("code", "") or detail.get("type", ""))
+    """A chat upstream's mid-stream error carrier as a failure record, or None."""
+    facts = ChatEventReader().read_sse_event(event)
+    if facts.kind is not ChatEventKind.ERROR:
+        return None
+    return chat_failure_from_facts(facts, raw_data=event.data)
+
+
+def chat_failure_from_facts(facts: ChatEventFacts, *, raw_data: str) -> StreamFailure:
+    """Project already-decoded error facts without re-running carrier recognition."""
+    data = (
+        thaw_json(facts.value.value)
+        if facts.value.availability is JsonAvailability.OBSERVED and facts.value.value is not None
+        else None
+    )
+    mapping = cast(dict[str, Any], data) if isinstance(data, dict) else {}
+    nested = mapping.get("error")
+    detail = cast(dict[str, Any], nested) if isinstance(nested, dict) else mapping
+    spelled = next((value for value in facts.error_values if value), "")
     message = str(detail.get("message", "")) or "upstream reported a failure"
     return StreamFailure(
         origin=FailureOrigin.UPSTREAM_EVENT,
         event="error",
-        raw_data=event.data,
+        raw_data=raw_data,
         info=ErrorInfo(
             category=ErrorCategory.UPSTREAM,
             message=message,
             status_code=STATUS_FOR_CATEGORY[ErrorCategory.UPSTREAM],
             code=spelled or "upstream_error_event",
             source_format=WIRE_FORMAT,
-            source_bytes=event.data.encode(),
+            source_bytes=raw_data.encode(),
         ),
     )

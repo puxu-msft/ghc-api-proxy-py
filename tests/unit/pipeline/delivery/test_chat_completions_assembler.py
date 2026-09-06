@@ -221,6 +221,26 @@ def test_a_bare_error_object_becomes_a_stream_failure() -> None:
     assert assembler.failure.info.message == "blocked"
 
 
+def test_an_error_carrier_with_choices_is_still_a_stream_failure() -> None:
+    assembler = ChatCompletionsAssembler()
+
+    assembler.push(
+        SseEvent(
+            event="",
+            data=_json(
+                {
+                    "error": {"code": "server_error", "message": "retry this attempt"},
+                    "choices": [{"index": 0, "delta": {"content": "not a completion"}}],
+                }
+            ),
+        )
+    )
+
+    assert assembler.failure is not None
+    assert assembler.failure.info.message == "retry this attempt"
+    assert assembler.close() == ()
+
+
 def test_the_terminal_is_named_for_the_chat_dialect() -> None:
     assembler = ChatCompletionsAssembler()
 
