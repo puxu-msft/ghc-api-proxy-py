@@ -10,6 +10,14 @@ import orjson
 from app.observability.request_log import (
     LogStatus,
     RequestLine,
+    _action_display_segment,  # pyright: ignore[reportPrivateUsage]
+    _AnonymousAction,  # pyright: ignore[reportPrivateUsage]
+    _coalesce_response_display_segments,  # pyright: ignore[reportPrivateUsage]
+    _NamedAction,  # pyright: ignore[reportPrivateUsage]
+    _Reasoning,  # pyright: ignore[reportPrivateUsage]
+    _render_response_display_segment,  # pyright: ignore[reportPrivateUsage]
+    _response_display_segment,  # pyright: ignore[reportPrivateUsage]
+    _UnknownAction,  # pyright: ignore[reportPrivateUsage]
     format_arrival_line,
     format_completion_line,
     format_stop_reason,
@@ -382,13 +390,14 @@ def test_completed_is_green_only_for_a_classified_action_free_snapshot() -> None
 def test_completed_with_client_actions_keeps_status_and_types_uncoloured() -> None:
     actions = (
         ClientAction(ClientActionRequirement.REQUIRED, "function_call", "Bash", 0),
-        ClientAction(ClientActionRequirement.REQUIRED, "custom_tool_call", "run_shell", 1),
+        ClientAction(ClientActionRequirement.REQUIRED, "function_call", "Bash", 1),
+        ClientAction(ClientActionRequirement.REQUIRED, "custom_tool_call", "run_shell", 2),
     )
 
     rendered = format_terminal_status("completed", actions, True, color=True)
 
     assert rendered == (
-        f"completed function_call({DIM}Bash{RESET}) "
+        f"completed function_call({DIM}Bash,Bash{RESET}) "
         f"custom_tool_call({DIM}run_shell{RESET})"
     )
     assert f"{GREEN}completed{RESET}" not in rendered
@@ -398,6 +407,22 @@ def test_unknown_client_actions_are_visible_without_claiming_the_client_owes_the
     actions = (ClientAction(ClientActionRequirement.UNKNOWN, "future_tool_call", "future", 0),)
 
     assert format_terminal_status("completed", actions, True) == "completed client_action?(future_tool_call)"
+
+
+def test_legacy_action_grouping_stops_at_unknown_and_anonymous_actions() -> None:
+    actions = (
+        ClientAction(ClientActionRequirement.REQUIRED, "function_call", "Read", 0),
+        ClientAction(ClientActionRequirement.REQUIRED, "function_call", "Bash", 1),
+        ClientAction(ClientActionRequirement.UNKNOWN, "future_tool_call", "future", 2),
+        ClientAction(ClientActionRequirement.REQUIRED, "function_call", "Edit", 3),
+        ClientAction(ClientActionRequirement.REQUIRED, "function_call", "", 4),
+        ClientAction(ClientActionRequirement.REQUIRED, "function_call", "TaskCreate", 5),
+    )
+
+    assert format_terminal_status("completed", actions, True) == (
+        "completed function_call(Read,Bash) client_action?(future_tool_call) "
+        "function_call(Edit) function_call function_call(TaskCreate)"
+    )
 
 
 def test_an_interactive_terminal_action_keeps_its_attention_colour() -> None:
@@ -669,17 +694,28 @@ def _responses_observation_line(
 
 
 def test_observed_completed_is_green_only_for_a_known_action_free_output() -> None:
-    clean = ResponsesObserver()
-    clean.observe_response({"status": "completed", "output": []})
+    empty = ResponsesObserver()
+    empty.observe_response({"status": "completed", "output": []})
+    non_action = ResponsesObserver()
+    non_action.observe_response({
+        "status": "completed",
+        "output": [{"type": "message"}],
+    })
     missing = ResponsesObserver()
     missing.observe_response({"status": "completed"})
 
     base = RequestLine(method="POST", path="/responses", status_code=200)
-    clean_line = format_completion_line(
+    empty_line = format_completion_line(
         base,
         status="ok",
         color=True,
-        response_observation=clean.snapshot(),
+        response_observation=empty.snapshot(),
+    )
+    non_action_line = format_completion_line(
+        base,
+        status="ok",
+        color=True,
+        response_observation=non_action.snapshot(),
     )
     missing_line = format_completion_line(
         base,
@@ -688,7 +724,9 @@ def test_observed_completed_is_green_only_for_a_known_action_free_output() -> No
         response_observation=missing.snapshot(),
     )
 
-    assert f"{GREEN}completed{RESET}" in clean_line
+    assert f"{GREEN}completed{RESET}" in empty_line
+    assert f"{GREEN}completed{RESET}" in non_action_line
+    assert "client_action?" not in non_action_line
     assert f"{GREEN}completed{RESET}" not in missing_line
     assert missing_line.endswith("completed client_action?(unclassified)")
 
@@ -769,6 +807,112 @@ def _assert_output_item_facts(
     ) == expected
 
 
+def test_response_items_project_to_typed_display_segments() -> None:
+    cases: tuple[tuple[dict[str, object], object], ...] = (
+        (
+            {"type": "reasoning", "summary": [{"text": "visible"}]},
+            _Reasoning("txt", 1),
+        ),
+        (
+            {
+                "type": "reasoning",
+                "summary": [],
+                "encrypted_content": "sealed",
+            },
+            _Reasoning("enc", 1),
+        ),
+        ({"type": "message"}, None),
+        (
+            {"type": "function_call", "name": "Bash"},
+            _NamedAction("function_call", ("Bash",)),
+        ),
+        (
+            {"type": "function_call", "name": ""},
+            _AnonymousAction("function_call"),
+        ),
+        (
+            {"type": "future_tool_call", "name": "future"},
+            _UnknownAction("future_tool_call"),
+        ),
+    )
+
+    for raw_item, expected in cases:
+        observer = ResponsesObserver()
+        observer.observe_response({"status": "completed", "output": [raw_item]})
+        items = observer.snapshot().output_items
+        assert items is not None
+        assert _response_display_segment(items[0]) == expected
+
+
+def test_legacy_actions_project_to_the_same_typed_segments() -> None:
+    assert (
+        _action_display_segment(
+            ClientActionRequirement.NOT_REQUIRED,
+            "web_search_call",
+            "search",
+        )
+        is None
+    )
+    assert _action_display_segment(
+        ClientActionRequirement.UNKNOWN,
+        "unknown",
+        "future",
+    ) == _UnknownAction("unknown")
+    assert _action_display_segment(
+        ClientActionRequirement.REQUIRED,
+        "function_call",
+        "",
+    ) == _AnonymousAction("function_call")
+
+
+def test_response_display_segments_coalesce_adjacent_named_actions() -> None:
+    segments = (
+        _NamedAction("function_call", ("Read",)),
+        _NamedAction("function_call", ("Read",)),
+        _NamedAction("function_call", ("Bash",)),
+    )
+
+    assert _coalesce_response_display_segments(segments) == (
+        _NamedAction("function_call", ("Read", "Read", "Bash")),
+    )
+
+
+def test_response_display_segments_keep_visible_barriers() -> None:
+    barriers = (
+        _NamedAction("function_call", ("Read",)),
+        _Reasoning("enc", 1),
+        _NamedAction("function_call", ("Bash",)),
+        _UnknownAction("future_tool_call"),
+        _NamedAction("function_call", ("Read",)),
+        _AnonymousAction("function_call"),
+        _NamedAction("function_call", ("Bash",)),
+    )
+    prefix = "x" * 121
+    colliding_display_types = (
+        _NamedAction(f"{prefix}a", ("Read",)),
+        _NamedAction(f"{prefix}b", ("Bash",)),
+    )
+
+    assert _coalesce_response_display_segments(barriers) == barriers
+    assert _coalesce_response_display_segments(
+        (_Reasoning("enc", 1), _Reasoning("enc", 2), _Reasoning("txt", 1))
+    ) == (_Reasoning("enc", 3), _Reasoning("txt", 1))
+    assert _coalesce_response_display_segments(
+        colliding_display_types
+    ) == colliding_display_types
+
+
+def test_response_display_segment_renderer_encodes_names_before_adding_commas() -> None:
+    rendered = _render_response_display_segment(
+        _NamedAction("function_call", ("Read,now", "Bash)\x1b")),
+        color=False,
+    )
+
+    assert rendered == "function_call(Read\\u002cnow,Bash\\u0029\\u001b)"
+    assert "Read,now" not in rendered
+    assert "\x1b" not in rendered
+
+
 def test_responses_observation_renders_actual_function_and_reasoning() -> None:
     line = _responses_observation_line({
         "status": "completed",
@@ -780,6 +924,25 @@ def test_responses_observation_renders_actual_function_and_reasoning() -> None:
 
     assert line.endswith("completed function_call(Bash) reason(enc:1)")
     assert "tool_use" not in line
+
+
+def test_user_reported_adjacent_function_calls_share_one_display_segment() -> None:
+    line = _responses_observation_line({
+        "status": "completed",
+        "output": [
+            {
+                "type": "reasoning",
+                "summary": [],
+                "encrypted_content": "sealed",
+            },
+            {"type": "function_call", "name": "TaskCreate"},
+            {"type": "function_call", "name": "Bash"},
+        ],
+    })
+
+    assert line.endswith(
+        "completed reason(enc:1) function_call(TaskCreate,Bash)"
+    )
 
 
 def test_reasoning_before_repeated_tools_keeps_its_output_position() -> None:
@@ -795,7 +958,7 @@ def test_reasoning_before_repeated_tools_keeps_its_output_position() -> None:
     })
 
     assert line.endswith(
-        "completed reason(enc:1) function_call(Read) function_call(Read) function_call(Read) function_call(Read)"
+        "completed reason(enc:1) function_call(Read,Read,Read,Read)"
     )
     _assert_output_item_facts(
         observation,
@@ -830,7 +993,7 @@ def test_reasoning_and_tools_preserve_interleaved_visible_order() -> None:
     })
 
     assert interleaved.endswith(
-        "completed reason(enc:1) function_call(Read) function_call(Bash) reason(txt:1) function_call(Read)"
+        "completed reason(enc:1) function_call(Read,Bash) reason(txt:1) function_call(Read)"
     )
     _assert_output_item_facts(
         interleaved_observation,
@@ -1067,7 +1230,7 @@ def test_responses_observation_does_not_call_a_custom_action_a_function() -> Non
     assert "function_call" not in line
 
 
-def test_responses_observation_preserves_adjacent_calls_without_deduplicating() -> None:
+def test_responses_observation_groups_adjacent_calls_without_deduplicating() -> None:
     observation, line = _responses_observation_and_line({
         "status": "completed",
         "output": [
@@ -1078,9 +1241,7 @@ def test_responses_observation_preserves_adjacent_calls_without_deduplicating() 
         ],
     })
 
-    assert line.endswith(
-        "completed function_call(Read) function_call(Read) function_call(Read) function_call(Read)"
-    )
+    assert line.endswith("completed function_call(Read,Read,Read,Read)")
     _assert_output_item_identity(
         observation,
         (
@@ -1092,7 +1253,7 @@ def test_responses_observation_preserves_adjacent_calls_without_deduplicating() 
     )
 
 
-def test_responses_observation_preserves_actual_type_order_without_grouping() -> None:
+def test_responses_observation_groups_only_adjacent_same_type_actions() -> None:
     grouped_observation, grouped = _responses_observation_and_line({
         "status": "completed",
         "output": [
@@ -1111,7 +1272,7 @@ def test_responses_observation_preserves_actual_type_order_without_grouping() ->
         ],
     })
 
-    assert grouped.endswith("completed custom_tool_call(exec) function_call(Read) function_call(Bash) function_call(Read)")
+    assert grouped.endswith("completed custom_tool_call(exec) function_call(Read,Bash,Read)")
     _assert_output_item_identity(
         grouped_observation,
         (
@@ -1144,7 +1305,7 @@ def test_invisible_non_client_items_do_not_remove_or_reorder_actions() -> None:
         ],
     })
 
-    assert line.endswith("completed function_call(Read) function_call(Bash)")
+    assert line.endswith("completed function_call(Read,Bash)")
     _assert_output_item_facts(
         observation,
         (
@@ -1251,7 +1412,7 @@ def test_action_names_are_made_inert_before_rendering() -> None:
     })
 
     assert line.endswith(
-        "completed function_call(Read\\u002cnow) function_call(Bash\\u0029\\u001b)"
+        "completed function_call(Read\\u002cnow,Bash\\u0029\\u001b)"
     )
     assert "Read,now" not in line
     assert "\x1b" not in line

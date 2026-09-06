@@ -230,21 +230,22 @@ def format_stop_reason(
 
 def format_client_actions(actions: tuple[ClientAction, ...], *, color: bool = False) -> str:
     """Render required and unknown terminal output items in authoritative order."""
-    rendered: list[str] = []
-    for action in actions:
-        if action.requirement is ClientActionRequirement.NOT_REQUIRED:
-            # The producer excludes these. Tolerating a directly constructed record must not make a server-executed item look like work the client owes.
-            continue
-        item_type = inert_token(action.type) or "client_action"
-        if action.requirement is ClientActionRequirement.UNKNOWN:
-            rendered.append(f"client_action?({item_type or 'unknown'})")
-            continue
-        if action.name:
-            name = inert_token(action.name)
-            rendered.append(f"{item_type}({_painted_tools([name], color=color)})")
-        else:
-            rendered.append(item_type)
-    return " ".join(rendered)
+    segments = tuple(
+        segment
+        for action in actions
+        if (
+            segment := _action_display_segment(
+                action.requirement,
+                action.type,
+                action.name,
+            )
+        )
+        is not None
+    )
+    return " ".join(
+        _render_response_display_segment(segment, color=color)
+        for segment in _coalesce_response_display_segments(segments)
+    )
 
 
 def format_terminal_status(
@@ -303,7 +304,37 @@ def inert_token(value: str, *, limit: int = 120) -> str:
     return "".join(encoded)
 
 
-def _reasoning_kind(item: OutputItemSummary) -> str | None:
+type _ReasoningKind = Literal["enc", "txt"]
+
+
+@dataclass(frozen=True, slots=True)
+class _NamedAction:
+    raw_type: str | None
+    raw_names: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _Reasoning:
+    kind: _ReasoningKind
+    count: int
+
+
+@dataclass(frozen=True, slots=True)
+class _UnknownAction:
+    raw_type: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _AnonymousAction:
+    raw_type: str | None
+
+
+type _ResponseDisplaySegment = (
+    _NamedAction | _Reasoning | _UnknownAction | _AnonymousAction
+)
+
+
+def _reasoning_kind(item: OutputItemSummary) -> _ReasoningKind | None:
     if item.type != "reasoning":
         return None
     if item.reasoning.has_readable_summary:
@@ -311,6 +342,84 @@ def _reasoning_kind(item: OutputItemSummary) -> str | None:
     if item.reasoning.has_encrypted_content:
         return "enc"
     return None
+
+
+def _action_display_segment(
+    requirement: ClientActionRequirement,
+    raw_type: str | None,
+    raw_name: str | None,
+) -> _ResponseDisplaySegment | None:
+    if requirement is ClientActionRequirement.NOT_REQUIRED:
+        return None
+    if requirement is ClientActionRequirement.UNKNOWN:
+        return _UnknownAction(raw_type=raw_type)
+    if not raw_name:
+        return _AnonymousAction(raw_type=raw_type)
+    return _NamedAction(raw_type=raw_type, raw_names=(raw_name,))
+
+
+def _response_display_segment(
+    item: OutputItemSummary,
+) -> _ResponseDisplaySegment | None:
+    reasoning_kind = _reasoning_kind(item)
+    if reasoning_kind is not None:
+        return _Reasoning(kind=reasoning_kind, count=1)
+    return _action_display_segment(
+        item.client_action.requirement,
+        item.type,
+        item.name,
+    )
+
+
+def _coalesce_response_display_segments(
+    segments: tuple[_ResponseDisplaySegment, ...],
+) -> tuple[_ResponseDisplaySegment, ...]:
+    coalesced: list[_ResponseDisplaySegment] = []
+    for segment in segments:
+        previous = coalesced[-1] if coalesced else None
+        if (
+            isinstance(previous, _NamedAction)
+            and isinstance(segment, _NamedAction)
+            and previous.raw_type == segment.raw_type
+        ):
+            coalesced[-1] = _NamedAction(
+                raw_type=previous.raw_type,
+                raw_names=previous.raw_names + segment.raw_names,
+            )
+        elif (
+            isinstance(previous, _Reasoning)
+            and isinstance(segment, _Reasoning)
+            and previous.kind == segment.kind
+        ):
+            coalesced[-1] = _Reasoning(
+                kind=previous.kind,
+                count=previous.count + segment.count,
+            )
+        else:
+            coalesced.append(segment)
+    return tuple(coalesced)
+
+
+def _render_response_display_segment(
+    segment: _ResponseDisplaySegment,
+    *,
+    color: bool,
+) -> str:
+    if isinstance(segment, _NamedAction):
+        item_type = inert_token(segment.raw_type or "") or "client_action"
+        names = [inert_token(name) for name in segment.raw_names]
+        return f"{item_type}({_painted_tools(names, color=color)})"
+    if isinstance(segment, _Reasoning):
+        return paint(
+            f"{REASONING_WORD[ReplyDialect.RESPONSES]}({segment.kind}:{segment.count})",
+            DIM,
+            color=color,
+        )
+    if isinstance(segment, _UnknownAction):
+        item_type = inert_token(segment.raw_type or "")
+        return f"client_action?({item_type or 'unknown'})"
+    item_type = inert_token(segment.raw_type or "")
+    return item_type or "client_action"
 
 
 def format_response_observation(
@@ -362,50 +471,15 @@ def format_response_observation(
         if items is None:
             parts.append("client_action?(unclassified)")
 
-    reason_run_kind: str | None = None
-    reason_run_count = 0
-
-    def flush_reason_run() -> None:
-        nonlocal reason_run_kind, reason_run_count
-        if reason_run_kind is None:
-            return
-        parts.append(
-            paint(
-                f"{REASONING_WORD[ReplyDialect.RESPONSES]}({reason_run_kind}:{reason_run_count})",
-                DIM,
-                color=color,
-            )
-        )
-        reason_run_kind = None
-        reason_run_count = 0
-
-    for item in items or ():
-        reasoning_kind = _reasoning_kind(item)
-        if reasoning_kind is not None:
-            if reason_run_kind == reasoning_kind:
-                reason_run_count += 1
-                continue
-            flush_reason_run()
-            reason_run_kind = reasoning_kind
-            reason_run_count = 1
-            continue
-
-        requirement = item.client_action.requirement
-        if requirement is ClientActionRequirement.NOT_REQUIRED:
-            continue
-        flush_reason_run()
-        item_type = inert_token(item.type or "")
-        if requirement is ClientActionRequirement.UNKNOWN:
-            parts.append(f"client_action?({item_type or 'unknown'})")
-            continue
-        word = item_type or "client_action"
-        name = inert_token(item.name or "")
-        parts.append(
-            f"{word}({_painted_tools([name], color=color)})"
-            if name
-            else word
-        )
-    flush_reason_run()
+    segments = tuple(
+        segment
+        for item in items or ()
+        if (segment := _response_display_segment(item)) is not None
+    )
+    parts.extend(
+        _render_response_display_segment(segment, color=color)
+        for segment in _coalesce_response_display_segments(segments)
+    )
     return parts
 
 

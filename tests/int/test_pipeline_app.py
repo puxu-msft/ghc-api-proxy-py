@@ -5420,8 +5420,7 @@ def test_terminal_output_drives_both_action_list_and_completed_colour(
     )
 
     assert line.endswith(
-        f"completed function_call({DIM}Bash{RESET}) "
-        f"function_call({DIM}Bash{RESET}) custom_tool_call"
+        f"completed function_call({DIM}Bash,Bash{RESET}) custom_tool_call"
     )
     assert f"{GREEN}completed{RESET}" not in line
 
