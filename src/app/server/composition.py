@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 from urllib.request import getproxies
+from uuid import uuid4
 
 import httpcore2
 import httpx2
