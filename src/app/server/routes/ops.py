@@ -8,6 +8,7 @@ Only what this chain can answer truthfully is here. Readiness is the catalog, be
 """
 
 
+from collections.abc import Mapping
 from typing import Any, cast
 from urllib.parse import urlsplit, urlunsplit
 
@@ -16,6 +17,8 @@ from fastapi.responses import JSONResponse
 from prometheus_client import REGISTRY, generate_latest
 
 from app.core.chain import Chain
+from app.model_provider.base import ModelProvider
+from app.pipeline.model_resolution import canonical
 from app.pipeline.routing import route_table
 from app.server.app_state import chain_of
 
@@ -107,6 +110,152 @@ async def status(request: Request) -> JSONResponse:
     )
 
 
+def _requested_model_format(request: Request) -> str | None:
+    requested = request.query_params.get("format", "openai").lower()
+    if requested in {"openai", "pi"}:
+        return requested
+    return None
+
+
+def _invalid_model_format() -> JSONResponse:
+    return JSONResponse(
+        {
+            "error": {
+                "type": "invalid_request_error",
+                "message": "format must be either 'openai' or 'pi'",
+                "param": "format",
+                "code": None,
+            }
+        },
+        status_code=400,
+    )
+
+
+def _upstream_metadata(provider: ModelProvider, model_id: str) -> dict[str, Any]:
+    entries = provider.raw_catalog.get("data")
+    if not isinstance(entries, list):
+        return {}
+    for entry in cast(list[Any], entries):
+        if not isinstance(entry, dict):
+            continue
+        model = cast(dict[str, Any], entry)
+        if model.get("id") == model_id:
+            return dict(model)
+    return {}
+
+
+def _model_entries(chain: Chain) -> list[dict[str, Any]]:
+    data: list[dict[str, Any]] = []
+    for row in route_table(
+        providers=chain.providers, mappings=chain.config.model_mappings
+    ):
+        if row.serviceable != "yes":
+            continue
+        if row.provider is None:
+            raise RuntimeError(f"serviceable model {row.name!r} has no provider")
+        provider = chain.providers.get(row.provider)
+        entry = _upstream_metadata(provider, row.model)
+        entry.update({"id": row.name, "object": "model", "owned_by": row.provider})
+        data.append(entry)
+    return data
+
+
+def _pi_number(value: object) -> int | float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        return value
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _string_mapping(value: object) -> Mapping[str, Any]:
+    if isinstance(value, Mapping):
+        return cast(Mapping[str, Any], value)
+    return {}
+
+
+def _pi_cost(entry: dict[str, Any]) -> dict[str, int | float] | None:
+    pricing = _string_mapping(entry.get("pricing"))
+    if not pricing:
+        return None
+    names = {
+        "input": ("input",),
+        "output": ("output",),
+        "cacheRead": ("cacheRead", "cache_read", "cache_read_input_tokens"),
+        "cacheWrite": ("cacheWrite", "cache_write", "cache_creation_input_tokens"),
+    }
+    cost: dict[str, int | float] = {}
+    for target, candidates in names.items():
+        for candidate in candidates:
+            value = _pi_number(pricing.get(candidate))
+            if value is not None:
+                cost[target] = value
+                break
+    return cost if len(cost) == len(names) else None
+
+
+def _pi_api(entry: dict[str, Any]) -> str | None:
+    endpoints = entry.get("supported_endpoints")
+    if not isinstance(endpoints, list):
+        return None
+    for endpoint, api in (
+        ("/responses", "openai-responses"),
+        ("/v1/messages", "anthropic-messages"),
+        ("/chat/completions", "openai-completions"),
+    ):
+        if endpoint in endpoints:
+            return api
+    return None
+
+
+def _pi_model(entry: dict[str, Any]) -> dict[str, Any]:
+    capabilities_dict = _string_mapping(entry.get("capabilities"))
+    supports_dict = _string_mapping(capabilities_dict.get("supports"))
+    limits_dict = _string_mapping(capabilities_dict.get("limits"))
+
+    model_id = cast(str, entry["id"])
+    reasoning_effort = supports_dict.get("reasoning_effort")
+    enabled_efforts = (
+        {
+            value
+            for value in cast(list[Any], reasoning_effort)
+            if isinstance(value, str) and value != "none"
+        }
+        if isinstance(reasoning_effort, list)
+        else set[str]()
+    )
+    reasoning = supports_dict.get("adaptive_thinking") is True or (
+        bool(enabled_efforts)
+    )
+    result: dict[str, Any] = {
+        "id": model_id,
+        "name": entry.get("name") if isinstance(entry.get("name"), str) else model_id,
+        "reasoning": reasoning,
+        "input": ["text", "image"] if supports_dict.get("vision") is True else ["text"],
+    }
+    api = _pi_api(entry)
+    if api is not None:
+        result["api"] = api
+    for source, target in (
+        ("max_context_window_tokens", "contextWindow"),
+        ("max_output_tokens", "maxTokens"),
+    ):
+        value = limits_dict.get(source)
+        if type(value) is int and value > 0:
+            result[target] = value
+    cost = _pi_cost(entry)
+    if cost is not None:
+        result["cost"] = cost
+    if supports_dict.get("adaptive_thinking") is True and api == "anthropic-messages":
+        result["compat"] = {"forceAdaptiveThinking": True}
+    return result
+
+
 @router.get("/models")
 @router.get("/v1/models")
 @router.get("/openai/v1/models")
@@ -118,18 +267,53 @@ async def list_models(request: Request) -> JSONResponse:
     `owned_by` therefore names the provider that would actually answer, which is the first time it has said anything — it used to be the default provider's name on every row, i.e. a constant. Spec §4.1.
     """
     chain = chain_of(request)
+    model_format = _requested_model_format(request)
+    if model_format is None:
+        return _invalid_model_format()
+    data = _model_entries(chain)
+    if model_format == "pi":
+        data = [_pi_model(entry) for entry in data]
+
     return JSONResponse(
         {
             "object": "list",
-            "data": [
-                {"id": row.name, "object": "model", "owned_by": row.provider}
-                for row in route_table(
-                    providers=chain.providers, mappings=chain.config.model_mappings
-                )
-                if row.serviceable == "yes"
-            ],
+            "data": data,
         }
     )
+
+
+@router.get("/models/{model:path}")
+@router.get("/v1/models/{model:path}")
+@router.get("/openai/v1/models/{model:path}")
+async def retrieve_model(model: str, request: Request) -> JSONResponse:
+    """Retrieve one routed model in OpenAI or Pi's model shape."""
+    if not model:
+        return await list_models(request)
+    model_format = _requested_model_format(request)
+    if model_format is None:
+        return _invalid_model_format()
+    requested_model = canonical(model)
+    entry = next(
+        (
+            candidate
+            for candidate in _model_entries(chain_of(request))
+            if canonical(cast(str, candidate["id"])) == requested_model
+        ),
+        None,
+    )
+    if entry is None:
+        return JSONResponse(
+            {
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": f"The model '{model}' does not exist",
+                    "param": "model",
+                    "code": "model_not_found",
+                }
+            },
+            status_code=404,
+        )
+    return JSONResponse(_pi_model(entry) if model_format == "pi" else entry)
 
 
 @router.get("/metrics")

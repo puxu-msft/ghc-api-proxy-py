@@ -23,11 +23,17 @@ from app.server.routes.router import build_router
 
 class StubProvider:
     def __init__(
-        self, name: str, ids: frozenset[str], *, disabled: frozenset[str] = frozenset()
+        self,
+        name: str,
+        ids: frozenset[str],
+        *,
+        disabled: frozenset[str] = frozenset(),
+        raw_catalog: Mapping[str, Any] | None = None,
     ) -> None:
         self.name = name
         self._ids = ids
         self._disabled = disabled
+        self._raw_catalog = dict(raw_catalog or {})
 
     @property
     def available_ids(self) -> frozenset[str]:
@@ -35,7 +41,7 @@ class StubProvider:
 
     @property
     def raw_catalog(self) -> Mapping[str, Any]:
-        return {}
+        return self._raw_catalog
 
     @property
     def disabled_ids(self) -> frozenset[str]:
@@ -192,6 +198,221 @@ async def test_the_model_list_names_the_provider_that_would_actually_answer() ->
     owners = {entry["id"]: entry["owned_by"] for entry in response.json()["data"]}
     assert owners["claude-opus-4.8"] == "A"
     assert owners["gpt-5.6-terra"] == "B"
+
+
+@pytest.mark.asyncio
+async def test_the_model_list_preserves_upstream_model_metadata() -> None:
+    catalog = {
+        "object": "list",
+        "data": [
+            {
+                "id": "claude-opus-5",
+                "object": "model",
+                "created": 1_756_000_000,
+                "context_length": 200_000,
+                "pricing": {"input": "3", "output": "15"},
+            }
+        ],
+    }
+    provider = StubProvider(
+        "ghc",
+        frozenset({"claude-opus-5"}),
+        raw_catalog=catalog,
+    )
+
+    async with client_for(frozenset(), providers={"ghc": provider}) as client:
+        response = await client.get("/v1/models")
+
+    entry = response.json()["data"][0]
+    assert entry["id"] == "claude-opus-5"
+    assert entry["object"] == "model"
+    assert entry["owned_by"] == "ghc"
+    assert entry["created"] == 1_756_000_000
+    assert entry["context_length"] == 200_000
+    assert entry["pricing"] == {"input": "3", "output": "15"}
+
+
+@pytest.mark.asyncio
+async def test_a_model_detail_preserves_the_openai_model_shape() -> None:
+    catalog = {
+        "object": "list",
+        "data": [
+            {
+                "id": "claude-opus-5",
+                "created": 1_756_000_000,
+                "name": "Claude Opus 5",
+            }
+        ],
+    }
+    provider = StubProvider(
+        "ghc",
+        frozenset({"claude-opus-5"}),
+        raw_catalog=catalog,
+    )
+
+    async with client_for(frozenset(), providers={"ghc": provider}) as client:
+        response = await client.get("/v1/models/claude-opus-5")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "id": "claude-opus-5",
+        "created": 1_756_000_000,
+        "name": "Claude Opus 5",
+        "object": "model",
+        "owned_by": "ghc",
+    }
+
+
+@pytest.mark.asyncio
+async def test_pi_model_format_projects_catalog_capabilities() -> None:
+    catalog = {
+        "object": "list",
+        "data": [
+            {
+                "id": "claude-opus-5",
+                "name": "Claude Opus 5",
+                "supported_endpoints": ["/v1/messages"],
+                "pricing": {"input": "3", "output": "15"},
+                "capabilities": {
+                    "limits": {
+                        "max_context_window_tokens": 200_000,
+                        "max_output_tokens": 16_000,
+                    },
+                    "supports": {
+                        "adaptive_thinking": True,
+                        "reasoning_effort": ["low", "high"],
+                        "vision": True,
+                    },
+                },
+            }
+        ],
+    }
+    provider = StubProvider(
+        "ghc",
+        frozenset({"claude-opus-5"}),
+        raw_catalog=catalog,
+    )
+
+    async with client_for(frozenset(), providers={"ghc": provider}) as client:
+        response = await client.get("/v1/models?format=pi")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "object": "list",
+        "data": [
+            {
+                "id": "claude-opus-5",
+                "name": "Claude Opus 5",
+                "api": "anthropic-messages",
+                "reasoning": True,
+                "input": ["text", "image"],
+                "contextWindow": 200_000,
+                "maxTokens": 16_000,
+                "compat": {"forceAdaptiveThinking": True},
+            }
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_pi_model_format_does_not_invent_missing_cost_rates() -> None:
+    provider = StubProvider(
+        "ghc",
+        frozenset({"claude-opus-5"}),
+        raw_catalog={
+            "data": [
+                {
+                    "id": "claude-opus-5",
+                    "pricing": {"input": "3", "output": "15"},
+                    "capabilities": {"supports": {"reasoning_effort": ["none"]}},
+                }
+            ]
+        },
+    )
+
+    async with client_for(frozenset(), providers={"ghc": provider}) as client:
+        response = await client.get("/v1/models/claude-opus-5?format=pi")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["reasoning"] is False
+    assert "cost" not in body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/models/", "/v1/models/", "/openai/v1/models/"])
+async def test_model_list_trailing_slash_keeps_list_behavior(path: str) -> None:
+    async with client_for(frozenset({"claude-opus-5"})) as client:
+        response = await client.get(path)
+
+    assert response.status_code == 200
+    assert response.json()["object"] == "list"
+
+
+@pytest.mark.asyncio
+async def test_model_detail_returns_not_found_for_an_unroutable_model() -> None:
+    async with client_for(frozenset({"claude-opus-5"})) as client:
+        response = await client.get("/v1/models/unknown")
+
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_model_detail_uses_routing_model_name_equivalence() -> None:
+    config = config_with({"Opus": "claude-opus-5"})
+    async with client_for(frozenset({"claude-opus-5"}), config) as client:
+        response = await client.get("/v1/models/opus")
+
+    assert response.status_code == 200
+    assert response.json()["id"] == "Opus"
+
+
+@pytest.mark.asyncio
+async def test_an_model_alias_preserves_metadata_from_its_upstream_target() -> None:
+    catalog = {
+        "object": "list",
+        "data": [
+            {
+                "id": "claude-opus-5",
+                "context_length": 200_000,
+                "pricing": {"input": "3", "output": "15"},
+            }
+        ],
+    }
+    provider = StubProvider(
+        "ghc",
+        frozenset({"claude-opus-5"}),
+        raw_catalog=catalog,
+    )
+    config = config_with({"opus": "claude-opus-5"})
+
+    async with client_for(frozenset(), config, providers={"ghc": provider}) as client:
+        response = await client.get("/v1/models")
+
+    entry = next(item for item in response.json()["data"] if item["id"] == "opus")
+    assert entry["context_length"] == 200_000
+    assert entry["pricing"] == {"input": "3", "output": "15"}
+
+
+@pytest.mark.asyncio
+async def test_the_model_list_prefers_exact_metadata_when_canonical_ids_collide() -> None:
+    provider = StubProvider(
+        "ghc",
+        frozenset({"model.1"}),
+        raw_catalog={
+            "data": [
+                {"id": "model-1", "context_length": 1},
+                {"id": "model.1", "context_length": 2},
+            ]
+        },
+    )
+
+    async with client_for(frozenset(), providers={"ghc": provider}) as client:
+        response = await client.get("/v1/models")
+
+    entry = response.json()["data"][0]
+    assert entry["id"] == "model.1"
+    assert entry["context_length"] == 2
 
 
 @pytest.mark.asyncio
