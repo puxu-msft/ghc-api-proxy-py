@@ -4,7 +4,7 @@ Two stages, because the two questions are answered at different moments.
 
 **The floor**, applied in `build_context` before anything downstream can hold the result: credentials, the proxy's own identity, hop-by-hop fields and the forwarded chain are removed unconditionally. `REQUEST_FLOOR` in `app.anthropic.header_policy` is the list, and it matches the reference implementation's `SENSITIVE_DENYLIST` entry for entry. `message-format-reshape.md` names a shorter list — `Forwarded` chain, `Cookie`, `X-Api-Key`, `Host`, `Content-Length`, `Content-Encoding`, `Accept-Encoding` — and every one of those is inside the floor. What the document's summary leaves out is `authorization` itself, which the reference implementation guards twice.
 
-**The path policy**, applied in `shape_request` once routing has decided: the direct path forwards by blacklist, the translation path by whitelist, exactly as that document says. Its whitelist is empty today, so a translated request forwards nothing of the client's — `anthropic-beta` included, which the Anthropic-to-Responses leg had been sending to an endpoint that has no betas.
+**The path policy**, applied in `shape_request` once routing has decided: the direct path forwards by blacklist, the translation path by whitelist. A translated request forwards no protocol negotiation headers from the client — `anthropic-beta` included. Conversation identity was extracted into `RequestContext` before this policy and is not a client header on either path.
 
 Splitting them is what lets the floor keep its promise. Routing has not happened at parse time, so a single path-aware filter there would be guessing; a single filter after routing would leave the client's credentials on the context in between.
 
@@ -44,7 +44,8 @@ _GATEWAY_DENIED: dict[str, str] = {
 # The direct path's blacklist, beyond the floor. Empty, and that is the finding rather than an omission: every entry `message-format-reshape.md` lists for the direct path is already in `REQUEST_FLOOR`, so the floor alone realises the document's list. Kept as a named seam because the document's own TODO says those entries came from `copilot-api-js` and their reasons are not yet understood — when one of them turns out to belong here rather than in the floor, this is where it goes.
 DIRECT_PATH_BLACKLIST: tuple[str, ...] = ()
 
-# The translation path's whitelist. `message-format-reshape.md` writes it as "(暂无)" and means it: a translated request is not a forwarded one, so a header negotiated against the Anthropic wire format has no standing on the endpoint that actually answers.
+# The translation path does not forward protocol negotiation headers. Conversation
+# identity is extracted into RequestContext before this policy runs.
 TRANSLATED_PATH_WHITELIST: tuple[str, ...] = ()
 
 

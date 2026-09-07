@@ -62,7 +62,9 @@ class SlowProvider:
         descriptor: ModelDescriptor,
         stream: bool = False,
         extra_headers: Any = None,
+        interaction_id: str | None = None,
     ) -> httpx2.Response:
+        del endpoint, payload, descriptor, stream, extra_headers, interaction_id
         self.calls += 1
         await asyncio.sleep(self._delay)
         return httpx2.Response(200, json={})

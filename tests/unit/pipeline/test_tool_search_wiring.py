@@ -79,7 +79,9 @@ class ResponsesProvider:
         descriptor: ModelDescriptor,
         stream: bool = False,
         extra_headers: Any = None,
+        interaction_id: str | None = None,
     ) -> httpx2.Response:
+        del endpoint, descriptor, stream, extra_headers, interaction_id
         self.sent.append(dict(payload))
         return httpx2.Response(200)
 

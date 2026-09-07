@@ -46,8 +46,9 @@ class SequenceProvider:
         descriptor: ModelDescriptor,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
+        interaction_id: str | None = None,
     ) -> httpx2.Response:
-        del endpoint, payload, descriptor, stream, extra_headers
+        del endpoint, payload, descriptor, stream, extra_headers, interaction_id
         self.calls += 1
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, BaseException):

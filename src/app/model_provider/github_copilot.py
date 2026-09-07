@@ -194,6 +194,7 @@ class GithubCopilotProvider:
         descriptor: ModelDescriptor,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
+        interaction_id: str | None = None,
     ) -> httpx2.Response:
         require_descriptor_owner(descriptor, self._name)
         require_endpoint(descriptor, endpoint, self._name)
@@ -205,20 +206,23 @@ class GithubCopilotProvider:
                 payload,
                 stream=stream,
                 extra_headers=extra_headers,
+                interaction_id=interaction_id,
             )
         if endpoint is ModelEndpoint.OPENAI_CHAT_COMPLETIONS:
             return await self._client.send_chat_completions(
                 payload,
                 stream=stream,
                 extra_headers=extra_headers,
+                interaction_id=interaction_id,
             )
         if endpoint is ModelEndpoint.OPENAI_RESPONSES:
             return await self._client.send_responses(
                 payload,
                 stream=stream,
                 extra_headers=extra_headers,
+                interaction_id=interaction_id,
             )
-        return await self._client.send_embeddings(payload)
+        return await self._client.send_embeddings(payload, interaction_id=interaction_id)
 
     async def count_tokens(
         self,

@@ -56,6 +56,7 @@ class FakeProvider:
         self.sent: list[tuple[ModelEndpoint, dict[str, Any]]] = []
         # Recorded rather than discarded: the header path existed as a parameter on every layer for a long time with nothing ever filling it, and a fake that drops the value cannot tell that state apart from a working one.
         self.sent_headers: list[Any] = []
+        self.sent_interaction_ids: list[str | None] = []
         self._responses = responses or []
 
     @property
@@ -92,9 +93,11 @@ class FakeProvider:
         descriptor: ModelDescriptor,
         stream: bool = False,
         extra_headers: Any = None,
+        interaction_id: str | None = None,
     ) -> httpx2.Response:
         self.sent.append((endpoint, dict(payload)))
         self.sent_headers.append(extra_headers)
+        self.sent_interaction_ids.append(interaction_id)
         outcome = self._responses.pop(0) if self._responses else httpx2.Response(200)
         if isinstance(outcome, BaseException):
             raise outcome
@@ -663,13 +666,47 @@ async def test_the_driver_hands_the_clients_headers_to_the_provider() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_driver_hands_the_interaction_id_to_the_provider() -> None:
+    provider = FakeProvider()
+    ctx = context()
+    ctx.interaction_id = "session-a"
+
+    outcome = await driver(provider).run(ctx)
+
+    assert outcome.succeeded is True
+    assert provider.sent_interaction_ids == ["session-a"]
+
+
+@pytest.mark.asyncio
+async def test_retry_reuses_a_frozen_provider_interaction_id() -> None:
+    provider = FakeProvider(
+        responses=[UpstreamError("boom", status_code=502), httpx2.Response(200)]
+    )
+    registry = SubscriberRegistry[RequestContext]()
+
+    async def mutate_interaction(ctx: RequestContext) -> None:
+        ctx.interaction_id = "second"
+
+    registry.subscribe(EVENT_ATTEMPT_FAILED, "mutate-interaction", mutate_interaction)
+    ctx = context()
+    ctx.interaction_id = "first"
+
+    outcome = await driver(provider, registry).run(ctx)
+
+    assert outcome.succeeded is True
+    assert provider.sent_interaction_ids == ["first", "first"]
+
+
+@pytest.mark.asyncio
 async def test_no_client_headers_sends_none_rather_than_an_empty_mapping() -> None:
     """`None` is what the provider signature means by "nothing to add"."""
     provider = FakeProvider()
+    ctx = context()
 
-    await driver(provider).run(context())
+    await driver(provider).run(ctx)
 
     assert provider.sent_headers == [None]
+    assert provider.sent_interaction_ids == [ctx.id]
 
 
 @pytest.mark.asyncio
@@ -708,9 +745,11 @@ async def test_nested_cleanup_wrappers_cannot_turn_cancellation_into_retry_or_a_
             descriptor: ModelDescriptor,
             stream: bool = False,
             extra_headers: Any = None,
+            interaction_id: str | None = None,
         ) -> httpx2.Response:
             self.sent.append((endpoint, dict(payload)))
             self.sent_headers.append(extra_headers)
+            self.sent_interaction_ids.append(interaction_id)
             self.started.set()
             try:
                 await asyncio.Event().wait()

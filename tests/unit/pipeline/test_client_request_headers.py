@@ -100,7 +100,7 @@ def test_the_floor_is_a_blacklist_so_an_unknown_client_header_survives_it() -> N
 
 
 def test_a_translated_request_forwards_nothing_of_the_clients() -> None:
-    """`message-format-reshape.md` gives the translation path a whitelist and leaves it empty.
+    """Session identity is carried by RequestContext, not by translated client headers.
 
     The header the client negotiated is about the Anthropic wire format; the request that answers is a Responses one. Until this ruling the Anthropic-to-Responses leg forwarded `anthropic-beta` to an endpoint that has no betas.
     """
@@ -108,6 +108,7 @@ def test_a_translated_request_forwards_nothing_of_the_clients() -> None:
         "anthropic-beta": "context-management-2025-06-27",
         "anthropic-version": "2023-06-01",
         "x-stainless-timeout": "600",
+        "x-claude-code-session-id": "session-a",
     }
     assert apply_path_header_policy(client, translated=True) == {}
     assert apply_path_header_policy(client, translated=False) == client
@@ -453,7 +454,9 @@ class _DescribingProvider:
         descriptor: ModelDescriptor,
         stream: bool = False,
         extra_headers: Any = None,
+        interaction_id: str | None = None,
     ) -> httpx2.Response:
+        del endpoint, payload, descriptor, stream, extra_headers, interaction_id
         # `shape_request` stops before any attempt, so reaching this means the test under it grew a leg it did not mean to have.
         raise AssertionError("this test shapes a request; it never sends one")
 

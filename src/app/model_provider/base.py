@@ -85,10 +85,15 @@ class ModelProvider(Protocol):
         descriptor: ModelDescriptor,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
+        interaction_id: str | None = None,
     ) -> httpx2.Response:
         """Send one request to one endpoint.
 
-        The descriptor is the immutable snapshot routing selected. Raises before touching the network when another provider issued it or the model does not advertise the endpoint.
+        The descriptor is the immutable snapshot routing selected. `interaction_id`
+        is an optional logical conversation identity for providers whose upstream
+        protocol binds requests to one interaction; other providers may ignore it.
+        Raises before touching the network when another provider issued the descriptor
+        or the model does not advertise the endpoint.
         """
         ...
 

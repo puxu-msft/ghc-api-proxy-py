@@ -167,7 +167,7 @@ async def test_a_forwarded_header_never_travels_beside_the_one_it_collides_with(
             extra_headers={
                 "authorization": "Bearer client-secret",
                 "user-agent": "claude-cli/2.0.0",
-                "x-interaction-id": "client-chosen",
+                "x-interaction-type": "client-chosen",
                 "anthropic-beta": "probe",
             },
         )
@@ -184,8 +184,35 @@ async def test_a_forwarded_header_never_travels_beside_the_one_it_collides_with(
     # Not `== [ours]`, and the difference is a finding rather than a concession: on the Responses leg the SDK's own `AsyncOpenAI/Python …` travels beside ours, because `AsyncOpenAI` is constructed without `default_headers`. That predates this test and is nobody's ruling yet, so it is named here rather than pinned as a failure — the guarantee this test owns is that the *client's* identity does not reach upstream, and that holds on both legs.
     assert sent.get_list("x-interaction-id") == [sent["x-interaction-id"]]
     assert sent["x-interaction-id"] != "client-chosen"
+    assert sent["x-interaction-type"] == "conversation-panel"
     # The one that does not collide still travels; this drops colliding names, not forwarding.
     assert sent["anthropic-beta"] == "probe"
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_interaction_id_becomes_the_owned_upstream_header() -> None:
+    seen: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.host == "api.github.com":
+            return httpx2.Response(
+                200,
+                json={"token": "copilot", "expires_at": 5000, "refresh_in": 1500},
+            )
+        seen.append(request)
+        return httpx2.Response(200, json={"ok": True})
+
+    client, http_client = build_client(handler)
+    try:
+        await client.send_responses(
+            {"model": "m"},
+            interaction_id="session-a",
+        )
+    finally:
+        await http_client.aclose()
+
+    sent = seen[0].headers
+    assert sent["x-interaction-id"] == "session-a"
 
 
 @pytest.mark.asyncio
@@ -209,4 +236,3 @@ async def test_ordinary_send_raises_in_the_pipelines_vocabulary() -> None:
     assert raised.value.retry_after == 7.0
     # The SDK error is still reachable, so nothing about the cause is lost in translation.
     assert isinstance(raised.value.__cause__, openai.RateLimitError)
-

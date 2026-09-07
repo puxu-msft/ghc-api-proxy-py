@@ -459,7 +459,7 @@ def build_copilot_provider(
     *,
     http_client: httpx2.AsyncClient,
     token_manager: CopilotTokenManager,
-    interaction_id: str,
+    interaction_id: str | None = None,
 ) -> GithubCopilotProvider:
     ghc_config = GhcClientConfig(
         api_base_url_override=provider_config.api_base_url,
@@ -481,7 +481,7 @@ def build_copilot_provider(
         ),
         token_manager,
         ghc_config,
-        interaction_id=interaction_id,
+        interaction_id=interaction_id or str(uuid4()),
     )
     return GithubCopilotProvider(
         name,
@@ -556,7 +556,7 @@ def build_chain(
     http_client: httpx2.AsyncClient,
     providers: dict[str, ModelProvider] | None = None,
     subscribers: SubscriberRegistry[RequestContext] | None = None,
-    interaction_id: str = "interaction",
+    interaction_id: str | None = None,
     proxy_from_cli: bool = False,
 ) -> Chain:
     """Assemble the chain.

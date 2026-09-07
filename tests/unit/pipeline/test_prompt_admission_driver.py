@@ -105,8 +105,9 @@ class RecordingProvider:
         descriptor: ModelDescriptor,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
+        interaction_id: str | None = None,
     ) -> httpx2.Response:
-        del endpoint, stream, extra_headers
+        del endpoint, stream, extra_headers, interaction_id
         self.sent_descriptors.append(descriptor)
         self.sent.append((descriptor.id, dict(payload)))
         result = self._responses.pop(0)

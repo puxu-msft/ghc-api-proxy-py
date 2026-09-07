@@ -477,6 +477,7 @@ class DirectDriver:
             descriptor=descriptor,
             stream=context.stream,
             extra_headers=context.client_headers or None,
+            interaction_id=context.interaction_id_for_provider(),
         )
         if self._response_header_timeout <= 0:
             return await send

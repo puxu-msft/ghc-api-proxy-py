@@ -13,6 +13,10 @@ from typing import Any
 
 from app.pipeline.request import RequestContext
 from app.pipeline.request_headers import forwarded_client_headers
+from app.pipeline.session_identity import (
+    interaction_id_from_headers,
+    without_interaction_id_headers,
+)
 from app.server.routes.table import InboundRoute
 
 
@@ -57,13 +61,17 @@ def build_context(
     if route.model_from_path:
         working["model"] = model.strip()
 
-    filtered_headers = forwarded_client_headers(headers or {})
+    inbound_headers = headers or {}
+    filtered_headers = without_interaction_id_headers(
+        forwarded_client_headers(inbound_headers)
+    )
     context = RequestContext(
         inbound_format=route.wire_format,
         requested_model=model.strip(),
         # Deep rather than shallow, and that is the whole point of the pair. The fixups downstream edit `messages` and `system` in place; with a shallow copy those edits reached the caller's parsed body, so there was no version of the request left that said what the client actually sent.
         payload=working,
         original_payload=payload,
+        interaction_id=interaction_id_from_headers(inbound_headers),
         stream=stream,
         client_headers=filtered_headers,
         source_headers=dict(filtered_headers),

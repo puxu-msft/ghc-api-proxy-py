@@ -562,8 +562,28 @@ def test_a_translated_request_carries_none_of_the_clients_headers() -> None:
     assert response.status_code == 200
     assert str(seen[-1].url) == f"{BASE_URL}/responses"
     assert "anthropic-beta" not in seen[-1].headers
-    # Not just the beta header — the whitelist is empty, so none of the client's negotiation travels.
+    # Not just the beta header — the translation whitelist is empty, so none of the client's negotiation travels.
     assert seen[-1].headers.get("anthropic-version") != "2023-06-01"
+
+
+def test_a_translated_claude_session_id_binds_the_upstream_interaction() -> None:
+    client, seen = make_client(
+        lambda _: httpx2.Response(200, json={"id": "resp_1"}),
+    )
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "gpt-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 64,
+        },
+        headers={"x-claude-code-session-id": "session-a"},
+    )
+
+    assert response.status_code == 200
+    upstream_headers = seen[-1].headers
+    assert upstream_headers["x-interaction-id"] == "session-a"
+    assert "x-claude-code-session-id" not in upstream_headers
 
 
 def test_an_unconfigured_model_still_gets_the_whole_header() -> None:
@@ -4222,8 +4242,9 @@ async def test_disconnect_with_repeated_level_cancellation_stays_inside_the_app(
             descriptor: ModelDescriptor,
             stream: bool = False,
             extra_headers: Any = None,
+            interaction_id: str | None = None,
         ) -> httpx2.Response:
-            del endpoint, payload, descriptor, stream, extra_headers
+            del endpoint, payload, descriptor, stream, extra_headers, interaction_id
             self.calls += 1
             try:
                 await asyncio.Event().wait()
@@ -4366,8 +4387,9 @@ async def test_disconnect_before_upstream_headers_cancels_the_dispatch() -> None
             descriptor: ModelDescriptor,
             stream: bool = False,
             extra_headers: Any = None,
+            interaction_id: str | None = None,
         ) -> httpx2.Response:
-            del endpoint, payload, descriptor, stream, extra_headers
+            del endpoint, payload, descriptor, stream, extra_headers, interaction_id
             self.calls += 1
             try:
                 await asyncio.Event().wait()

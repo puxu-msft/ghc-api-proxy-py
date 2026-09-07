@@ -185,7 +185,9 @@ class CodebuddyProvider:
         descriptor: ModelDescriptor,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
+        interaction_id: str | None = None,
     ) -> httpx2.Response:
+        del interaction_id
         require_descriptor_owner(descriptor, self._name)
         require_endpoint(descriptor, endpoint, self._name)
         if endpoint not in _SEND_METHODS:

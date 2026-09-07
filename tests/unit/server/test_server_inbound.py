@@ -50,6 +50,23 @@ def test_context_carries_the_route_format_and_the_model() -> None:
     assert context.stream is False
 
 
+def test_context_extracts_session_identity_without_leaving_it_in_client_headers() -> None:
+    route = route_for_path("/v1/messages")
+    assert route is not None
+    context = build_context(
+        route,
+        {"model": "claude-model", "messages": []},
+        {
+            "x-session-id": "generic-session",
+            "x-claude-code-session-id": "claude-session",
+            "user-agent": "claude-code",
+        },
+    )
+
+    assert context.interaction_id == "claude-session"
+    assert context.client_headers == {"user-agent": "claude-code"}
+
+
 def test_stream_flag_is_read_from_the_body() -> None:
     route = route_for_path("/responses")
     assert route is not None

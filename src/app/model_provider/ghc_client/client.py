@@ -40,6 +40,7 @@ class GhcApiClient:
         self,
         *,
         extra_headers: Mapping[str, str] | None = None,
+        interaction_id: str | None = None,
     ) -> dict[str, str]:
         """The upstream headers, with anything the caller adds underneath rather than on top.
 
@@ -51,7 +52,7 @@ class GhcApiClient:
         headers = build_request_headers(
             token,
             self._config,
-            interaction_id=self._interaction_id,
+            interaction_id=interaction_id or self._interaction_id,
         )
         if extra_headers:
             owned = {name.lower() for name in headers}
@@ -72,12 +73,18 @@ class GhcApiClient:
         *,
         stream: bool,
         extra_headers: Mapping[str, str] | None = None,
+        interaction_id: str | None = None,
     ) -> httpx2.Response:
         return await self._openai.post(
             path,
             cast_to=httpx2.Response,
             body=cast(OpenAIBody, dict(payload)),
-            options={"headers": await self.request_headers(extra_headers=extra_headers)},
+            options={
+                "headers": await self.request_headers(
+                    extra_headers=extra_headers,
+                    interaction_id=interaction_id,
+                )
+            },
             stream=stream,
         )
 
@@ -88,12 +95,18 @@ class GhcApiClient:
         *,
         stream: bool,
         extra_headers: Mapping[str, str] | None = None,
+        interaction_id: str | None = None,
     ) -> httpx2.Response:
         return await self._anthropic.post(
             path,
             cast_to=httpx2.Response,
             body=cast(AnthropicBody, dict(payload)),
-            options={"headers": await self.request_headers(extra_headers=extra_headers)},
+            options={
+                "headers": await self.request_headers(
+                    extra_headers=extra_headers,
+                    interaction_id=interaction_id,
+                )
+            },
             stream=stream,
         )
 
@@ -117,6 +130,7 @@ class GhcApiClient:
         *,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
+        interaction_id: str | None = None,
     ) -> httpx2.Response:
         return await self._in_pipeline_terms(
             self._post_openai(
@@ -124,6 +138,7 @@ class GhcApiClient:
                 payload,
                 stream=stream,
                 extra_headers=extra_headers,
+                interaction_id=interaction_id,
             )
         )
 
@@ -133,6 +148,7 @@ class GhcApiClient:
         *,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
+        interaction_id: str | None = None,
     ) -> httpx2.Response:
         return await self._in_pipeline_terms(
             self._post_anthropic(
@@ -140,6 +156,7 @@ class GhcApiClient:
                 payload,
                 stream=stream,
                 extra_headers=extra_headers,
+                interaction_id=interaction_id,
             )
         )
 
@@ -157,6 +174,7 @@ class GhcApiClient:
         *,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
+        interaction_id: str | None = None,
     ) -> httpx2.Response:
         return await self._in_pipeline_terms(
             self._post_openai(
@@ -164,13 +182,21 @@ class GhcApiClient:
                 payload,
                 stream=stream,
                 extra_headers=extra_headers,
+                interaction_id=interaction_id,
             )
         )
 
     async def send_embeddings(
         self,
         payload: Mapping[str, Any],
+        *,
+        interaction_id: str | None = None,
     ) -> httpx2.Response:
         return await self._in_pipeline_terms(
-            self._post_openai("/embeddings", payload, stream=False)
+            self._post_openai(
+                "/embeddings",
+                payload,
+                stream=False,
+                interaction_id=interaction_id,
+            )
         )

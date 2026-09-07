@@ -74,6 +74,10 @@ class RequestContext:
     original_payload: Mapping[str, Any] = field(default_factory=lambda: dict[str, Any]())
 
     id: str = field(default_factory=lambda: str(uuid4()))
+    # The client's logical conversation identity, consumed by providers that expose an upstream interaction binding.
+    interaction_id: str | None = None
+    # Resolved once at the first provider send so mutable subscribers cannot split retries or delivery reopens across interactions.
+    provider_interaction_id: str | None = None
     stream: bool = False
 
     # The client's own protocol-negotiation headers, already filtered by `app.pipeline.request_headers`. Held here rather than read at the send site because the driver is where an attempt is built, and it has no access to the ASGI request.
@@ -109,6 +113,11 @@ class RequestContext:
         if self.source_headers is None:
             self.source_headers = dict(self.client_headers)
         return self.source_headers
+
+    def interaction_id_for_provider(self) -> str:
+        if self.provider_interaction_id is None:
+            self.provider_interaction_id = self.interaction_id or self.id
+        return self.provider_interaction_id
 
     def begin_attempt(self, *, payload: dict[str, Any] | None = None) -> Attempt:
         # The current response changes when the attempt begins, not when it gets headers. Otherwise an attempt that fails before producing a stream leaves the previous attempt's partial items looking current.
