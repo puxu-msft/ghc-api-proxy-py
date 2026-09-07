@@ -1,17 +1,17 @@
-"""What the Responses estimator counts, asserted by what changes when a part is added.
+"""Regression tests for the Responses estimator's compatibility integer interface.
 
-Written as deltas rather than absolute numbers on purpose. An absolute expectation would have to restate the formula, and a test that restates the thing it tests passes for every version of it — which is exactly how the first attempt at pinning this function failed: it asserted the handler's answer equalled `estimate_responses_input(...)`, which pins *which* estimator runs and nothing about what it computes. Three separate mutations to the estimator left the whole suite green.
-
-Each test here corresponds to one such mutation: drop the piece it adds, and this goes red.
+Delta tests protect individual known-text contributions. Independent ordinary-token and literal-framing expectations protect complete arithmetic and special-spelling semantics without using the production analyzer as their oracle.
 """
 
+import json
 from typing import Any
 
 import pytest
 import tiktoken
 
 from app.tokenization.estimators import estimate_responses_input
-from app.wire_json import dumps
+from app.tokenization.features import analyze_responses_input
+from app.tokenization.types import FeatureName
 
 ENCODING = "o200k_base"
 SPECIAL_SPELLINGS = sorted(tiktoken.get_encoding(ENCODING).special_tokens_set)
@@ -19,6 +19,10 @@ SPECIAL_SPELLINGS = sorted(tiktoken.get_encoding(ENCODING).special_tokens_set)
 
 def tokens(text: str) -> int:
     return len(tiktoken.get_encoding(ENCODING).encode(text, disallowed_special=()))
+
+
+def canonical(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"), sort_keys=True)
 
 
 def base() -> dict[str, Any]:
@@ -30,18 +34,22 @@ def base() -> dict[str, Any]:
     }
 
 
-def test_a_reasoning_item_is_not_free() -> None:
-    """The defect this file was written for.
+def test_reasoning_ciphertext_contributes_framing_and_opaque_features_not_text_tokens() -> None:
+    short_payload = base()
+    short_payload["input"].append(
+        {"type": "reasoning", "id": "rs_1", "encrypted_content": "A"}
+    )
+    long_payload = base()
+    long_payload["input"].append(
+        {"type": "reasoning", "id": "rs_1", "encrypted_content": "A" * 4000}
+    )
 
-    A measured round trip carried 7286 characters of `encrypted_content` in one reasoning item, and the 7.6 KB body it belonged to was reported as 30 tokens. Nothing corrects that afterwards — no learner teaches this protocol's calibration yet — so a zero here reaches the client as a zero.
-    """
-    payload = base()
-    carrier = "A" * 4000
-    payload["input"].append({"type": "reasoning", "id": "rs_1", "encrypted_content": carrier})
+    short = analyze_responses_input(short_payload)
+    long = analyze_responses_input(long_payload)
 
-    grew_by = estimate_responses_input(payload) - estimate_responses_input(base())
-
-    assert grew_by >= tokens(carrier)
+    assert short.known_tokens - analyze_responses_input(base()).known_tokens == 4
+    assert long.known_tokens == short.known_tokens
+    assert long.feature_vector.get(FeatureName.OPAQUE_REASONING_BYTES).value == 4000
 
 
 def test_the_arguments_of_a_function_call_are_counted() -> None:
@@ -86,14 +94,20 @@ def test_a_tool_declaration_is_counted() -> None:
     assert grew_by >= tokens("d" * 2000)
 
 
-def test_an_item_of_an_unknown_kind_is_not_free() -> None:
-    # A kind nobody has taught this function about must not read as weightless, or the next one upstream invents arrives as a body that measured smaller than it is.
-    payload = base()
-    payload["input"].append({"type": "something_new", "blob": "z" * 3000})
+def test_an_item_of_an_unknown_kind_contributes_framing_and_features_not_blob_tokens() -> None:
+    short_payload = base()
+    short_payload["input"].append({"type": "something_new", "blob": "z"})
+    long_payload = base()
+    long_payload["input"].append({"type": "something_new", "blob": "z" * 3000})
 
-    grew_by = estimate_responses_input(payload) - estimate_responses_input(base())
+    short = analyze_responses_input(short_payload)
+    long = analyze_responses_input(long_payload)
 
-    assert grew_by >= tokens("z" * 3000)
+    assert short.known_tokens - analyze_responses_input(base()).known_tokens == 4
+    assert long.known_tokens == short.known_tokens
+    assert long.feature_vector.get(FeatureName.UNKNOWN_JSON_BYTES).value > short.feature_vector.get(
+        FeatureName.UNKNOWN_JSON_BYTES
+    ).value
 
 
 def test_the_text_of_a_message_is_counted() -> None:
@@ -112,17 +126,17 @@ def _special_surface(surface: str, spelling: str) -> tuple[dict[str, Any], int]:
     if surface == "instructions":
         return {"instructions": spelling}, tokens(spelling) + 4
     if surface == "message":
-        text = f"user\n{spelling}"
-        return {"input": [{"type": "message", "role": "user", "content": spelling}]}, tokens(text) + 4
+        return {"input": [{"type": "message", "role": "user", "content": spelling}]}, tokens(
+            "user"
+        ) + tokens(spelling) + 4
     if surface == "tool-schema":
         tool = {
             "type": "function",
             "name": "lookup",
             "parameters": {"type": "object", "description": spelling},
         }
-        return {"tools": [tool]}, tokens(dumps([tool]).decode()) + 4
+        return {"tools": [tool]}, tokens(canonical([tool])) + 8
     if surface == "function-call-arguments":
-        text = f"call_1\nlookup\n{spelling}"
         return {
             "input": [
                 {
@@ -132,9 +146,8 @@ def _special_surface(surface: str, spelling: str) -> tuple[dict[str, Any], int]:
                     "arguments": spelling,
                 }
             ]
-        }, tokens(text) + 4
+        }, tokens("call_1") + tokens("lookup") + tokens(spelling) + 4
     if surface == "function-call-output":
-        text = f"call_1\n{spelling}"
         return {
             "input": [
                 {
@@ -143,7 +156,7 @@ def _special_surface(surface: str, spelling: str) -> tuple[dict[str, Any], int]:
                     "output": spelling,
                 }
             ]
-        }, tokens(text) + 4
+        }, tokens("call_1") + tokens(spelling) + 4
     raise AssertionError(f"unknown test surface: {surface}")
 
 

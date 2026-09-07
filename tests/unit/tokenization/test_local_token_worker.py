@@ -1,5 +1,6 @@
 import asyncio
 import json
+import pickle
 from pathlib import Path
 
 import anyio
@@ -12,6 +13,7 @@ from app.models.anthropic import MessagesRequest
 from app.observability.metrics import ResponsivenessMetrics
 from app.pipeline.count_tokens import CountTokensRequestError
 from app.tokenization.estimators import estimate_anthropic_input, estimate_responses_input
+from app.tokenization.types import EstimateFeatures, FeatureName
 from app.tokenization.worker import LocalTokenWorker
 
 
@@ -42,6 +44,30 @@ async def test_real_worker_keeps_counts_and_publishes_parent_metrics(
         duration = registry.get_sample_value("ghc_proxy_local_tokenizer_duration_seconds_sum", labels)
         assert duration is not None and duration >= 0
         assert registry.get_sample_value("ghc_proxy_local_tokenizer_duration_max_seconds", labels) == duration
+        assert registry.get_sample_value("ghc_proxy_local_tokenizer_duration_failures_total", labels) == 0
+
+
+async def test_real_worker_returns_pickle_safe_structured_responses_features(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = CollectorRegistry()
+    monkeypatch.setattr(worker_module, "RESPONSIVENESS", ResponsivenessMetrics(registry))
+    payload = {
+        "model": "gpt-model",
+        "input": [
+            {"type": "message", "role": "user", "content": "visible"},
+            {"type": "reasoning", "encrypted_content": "opaque"},
+        ],
+    }
+
+    result = await LocalTokenWorker().analyze_responses(payload)
+
+    assert isinstance(result, EstimateFeatures)
+    assert pickle.loads(pickle.dumps(result)) == result
+    assert result.feature_vector.get(FeatureName.OPAQUE_REASONING_BYTES).value == len("opaque")
+    for phase in ("lookup", "estimate"):
+        labels = {"format": "responses", "phase": phase}
+        assert registry.get_sample_value("ghc_proxy_local_tokenizer_duration_seconds_count", labels) == 1
         assert registry.get_sample_value("ghc_proxy_local_tokenizer_duration_failures_total", labels) == 0
 
 

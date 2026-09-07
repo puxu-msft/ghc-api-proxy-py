@@ -5,10 +5,10 @@ from prometheus_client import CollectorRegistry
 
 from app.models.anthropic import MessagesRequest
 from app.observability.metrics import ResponsivenessMetrics
-from app.tokenization import estimators
+from app.tokenization import estimators, features
 
 
-@pytest.mark.parametrize(("format_name", "expected", "estimate_seconds"), [("anthropic", 8, .4), ("responses", 6, .2)])
+@pytest.mark.parametrize(("format_name", "expected", "estimate_seconds"), [("anthropic", 8, .4), ("responses", 8, .4)])
 def test_estimator_times_lookup_and_estimation_separately(
     monkeypatch: pytest.MonkeyPatch, format_name: str, expected: int, estimate_seconds: float,
 ) -> None:
@@ -16,6 +16,7 @@ def test_estimator_times_lookup_and_estimation_separately(
     registry = CollectorRegistry()
     metrics = ResponsivenessMetrics(registry, clock=lambda: now[0])
     monkeypatch.setattr(estimators, "RESPONSIVENESS", metrics)
+    monkeypatch.setattr(features, "RESPONSIVENESS", metrics)
 
     class Encoding:
         def encode_ordinary(self, text: str) -> list[int]:
@@ -45,6 +46,7 @@ def test_estimator_failure_identity_is_preserved(
     registry = CollectorRegistry()
     metrics = ResponsivenessMetrics(registry)
     monkeypatch.setattr(estimators, "RESPONSIVENESS", metrics)
+    monkeypatch.setattr(features, "RESPONSIVENESS", metrics)
     error = ValueError("known tokenizer failure")
 
     class Encoding:

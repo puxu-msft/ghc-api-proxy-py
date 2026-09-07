@@ -9,11 +9,9 @@ from pydantic import ValidationError
 from app.models.anthropic import MessagesRequest
 from app.observability.metrics import RESPONSIVENESS
 from app.pipeline.count_tokens import CountTokensRequestError
-from app.tokenization.estimators import (
-    EstimatorTiming,
-    estimate_anthropic_input,
-    estimate_responses_input,
-)
+from app.tokenization.estimators import EstimatorTiming, estimate_anthropic_input
+from app.tokenization.features import analyze_responses_input
+from app.tokenization.types import EstimateFeatures
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +19,7 @@ class TokenEstimate:
     tokens: int | None
     timings: tuple[EstimatorTiming, ...]
     error: Exception | None = None
+    features: EstimateFeatures | None = None
 
 
 def _countable(payload: Mapping[str, Any]) -> MessagesRequest:
@@ -38,26 +37,38 @@ def _estimate_input(protocol: str, payload: Mapping[str, Any]) -> TokenEstimate:
     try:
         if protocol == "anthropic":
             count = estimate_anthropic_input(_countable(payload), timings=timings)
+            features = None
         elif protocol == "openai-responses":
-            count = estimate_responses_input(payload, timings=timings)
+            features = analyze_responses_input(payload, timings=timings)
+            count = max(features.known_tokens, 1)
         else:
             raise CountTokensRequestError(f"no token estimator for {protocol}; add one before routing counts there")
     except Exception as error:
         # Return completed stage observations even on an ordinary failure. The parent records them and raises this error; a worker killed by cancellation or a process failure cannot return a final timing sample.
         return TokenEstimate(None, tuple(timings), error)
-    return TokenEstimate(count, tuple(timings))
+    return TokenEstimate(count, tuple(timings), features=features)
 
 
 class LocalTokenWorker:
     def __init__(self, *, limiter: anyio.CapacityLimiter | None = None) -> None:
         self.limiter = limiter if limiter is not None else anyio.CapacityLimiter(1)
 
-    async def estimate(self, protocol: str, payload: Mapping[str, Any]) -> int:
+    async def _run(self, protocol: str, payload: Mapping[str, Any]) -> TokenEstimate:
         result = await run_sync(_estimate_input, protocol, payload, cancellable=True, limiter=self.limiter)
         for sample in result.timings:
             RESPONSIVENESS.tokenizer[(sample.format, sample.phase)].observe(sample.seconds, failed=sample.failed)
         if result.error is not None:
             raise result.error
+        return result
+
+    async def estimate(self, protocol: str, payload: Mapping[str, Any]) -> int:
+        result = await self._run(protocol, payload)
         if result.tokens is None:
             raise RuntimeError("token worker returned neither a count nor an error")
         return result.tokens
+
+    async def analyze_responses(self, payload: Mapping[str, Any]) -> EstimateFeatures:
+        result = await self._run("openai-responses", payload)
+        if result.features is None:
+            raise RuntimeError("Responses token worker returned no structured features")
+        return result.features
