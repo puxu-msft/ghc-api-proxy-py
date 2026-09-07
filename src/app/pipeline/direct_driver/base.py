@@ -23,6 +23,7 @@ from app.model_provider import (
     require_descriptor_owner,
     require_endpoint,
 )
+from app.observability.raw_capture import RawRequestCapture
 from app.pipeline.events import FrozenSubscribers
 from app.pipeline.exceptions import (
     Disposition,
@@ -345,6 +346,9 @@ class DirectDriver:
         outcome = DriverOutcome(context=context)
         while True:
             attempt = context.begin_attempt()
+            capture = context.extras.get("raw_capture")
+            if isinstance(capture, RawRequestCapture):
+                capture.upstream_attempt_start(attempt.index)
             if self._attempt_deadline > 0:
                 # One instant covers prepare, admission, limiter wait, response headers and the body that delivery consumes after this function returns.
                 attempt.deadline_at = self._now() + self._attempt_deadline
@@ -357,6 +361,8 @@ class DirectDriver:
             except BaseException as error:
                 _reraise_if_cancelling(error)
                 attempt.error = str(error)
+                if isinstance(capture, RawRequestCapture):
+                    capture.upstream_attempt_end(attempt.index, complete=False)
                 if not await self._handle_failure(error, context, outcome):
                     return outcome
                 continue
@@ -412,6 +418,8 @@ class DirectDriver:
             finally:
                 if not handed_off:
                     outcome.response = None
+                    if isinstance(capture, RawRequestCapture):
+                        capture.upstream_attempt_end(attempt.index, complete=False)
                     await _finish_response_cleanup(
                         response,
                         primary=sys.exception(),

@@ -18,6 +18,7 @@ from app.config.schema import LOCAL_COUNTER
 from app.core.chain import Chain
 from app.model_provider import ModelDescriptor, ModelProvider
 from app.observability.metrics import BETA_FLAGS_STRIPPED
+from app.observability.raw_capture import RawRequestCapture
 from app.pipeline.anthropic_request_hook import fix_anthropic_request
 from app.pipeline.auto_mode_classifier import AutoModeVerdict, classify, log_hit, verdict_text
 from app.pipeline.count_tokens import CountTokensRequestError, count_tokens
@@ -416,7 +417,22 @@ async def handle_count_tokens(
 
     async def ask_upstream(payload: Mapping[str, Any]) -> int:
         _check_count_deadline(deadline_at)
-        response = await provider.count_tokens(payload, descriptor=descriptor)
+        capture = context.extras.get("raw_capture")
+        attempt = context.current_attempt.index if context.current_attempt is not None else 0
+        if isinstance(capture, RawRequestCapture):
+            capture.upstream_attempt_start(attempt)
+        try:
+            response = await provider.count_tokens(payload, descriptor=descriptor)
+        except BaseException:
+            if isinstance(capture, RawRequestCapture):
+                capture.upstream_attempt_end(attempt, complete=False)
+            raise
+        if isinstance(capture, RawRequestCapture):
+            capture.upstream_request_body(response.request.content, attempt=attempt)
+            capture.upstream_response_start(response.status_code, attempt=attempt)
+            capture.upstream_response_body(response.content, attempt=attempt)
+            capture.upstream_response_end(attempt=attempt)
+            capture.upstream_attempt_end(attempt, complete=True)
         # Taken before the body is read and before the response is closed, so the count line can report the leg it actually flew. Without these a count answered by upstream and one estimated in this process render identically apart from the counter's name — same missing byte fields, same single protocol label — and the line's own convention is that a missing field means the exchange had nothing to put there.
         # What the leg's presence means is narrower than "upstream answered the count": it means upstream *responded*. A refusal or a transport failure never reaches here — `send_anthropic_count_tokens` raises it as a pipeline error — but a 200 whose body carries no usable `input_tokens` does, and then the raise below hands the count to the estimator with both legs already recorded. `↑…B ↓…B … provider(ghc-failed,local)` is the right reading of that: upstream was asked, upstream replied, and the reply could not be used.
         context.extras["count_tokens_upstream_protocol"] = response.http_version

@@ -275,6 +275,24 @@ def test_unknown_key_inside_a_section_is_rejected() -> None:
         ProxyConfig.model_validate({"client_delivery": {"no_such_field": 1}})
 
 
+def test_raw_capture_is_opt_in_and_has_a_bounded_compression_level() -> None:
+    assert ProxyConfig().observability.raw_capture.enabled is False
+    config = ProxyConfig.model_validate(
+        {
+            "observability": {
+                "raw_capture": {
+                    "enabled": True,
+                    "directory": "./captures",
+                    "compression_level": 5,
+                }
+            }
+        }
+    )
+
+    assert config.observability.raw_capture.enabled is True
+    assert config.observability.raw_capture.compression_level == 5
+
+
 def test_snapshot_is_frozen() -> None:
     config = ProxyConfig()
     with pytest.raises(ValidationError):

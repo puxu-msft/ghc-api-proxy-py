@@ -33,6 +33,7 @@ dependencies = [
     "textual",
     "tiktoken",
     "typer",
+    "zstandard",
     "uvicorn",
     "cryptography>=50.0.0",
 ]
@@ -46,9 +47,6 @@ dev = [
     # Only `tests/tui/` needs it: a terminal emulator that turns the footer's byte stream back into a screen grid plus scrollback. Asserting on the bytes instead would not catch a footer that lands on top of a log line, which is the whole failure mode.
     "pyte",
     "ruff",
-    # Only `tests/int/recorded/from_history.py` needs it: the copilot-api history database
-    # stores its objects zstd-compressed. Nothing the proxy itself runs touches this.
-    "zstandard",
 ]
 
 [project.scripts]

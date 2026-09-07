@@ -13,6 +13,7 @@ from typing import Any, cast
 from uuid import uuid4
 
 import anyio
+import orjson
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.requests import ClientDisconnect
@@ -22,6 +23,7 @@ from app.core.chain import Chain
 from app.errors import ErrorCategory
 from app.observability.logging import get_logger
 from app.observability.metrics import ATTRIBUTION_LINES_STRIPPED
+from app.observability.raw_capture import RawRequestCapture, agent_id_from_headers
 from app.observability.rejection_capture import capture_rejection
 from app.observability.request_completion import (
     FailureOrigin as CompletionFailureOrigin,
@@ -76,6 +78,7 @@ from app.pipeline.exceptions import UpstreamTimeout
 from app.pipeline.hand_over import HandBackOutcome, hand_back_block, one_line, replay_reason
 from app.pipeline.reply import reply_summary, response_payload
 from app.pipeline.request import RequestContext, WireFormat
+from app.pipeline.session_identity import interaction_id_from_headers
 from app.pipeline.translation_driver.semantic import Loss
 from app.server.app_state import chain_of
 from app.server.http_errors import error_response, proxy_error
@@ -129,10 +132,22 @@ async def serve(request: Request) -> Response:
     get_logger(REQUEST_LOGGER).debug(format_arrival_line(RequestLine(method=trace.method, path=trace.path)), status="pending")
 
     chain.active_requests.add(trace.request_id)
+    raw_capture = (
+        chain.raw_capture.start(
+            session_id=interaction_id_from_headers(request.headers) or "unknown-session",
+            agent_id=agent_id_from_headers(request.headers) or "unknown-agent",
+            request_id=trace.request_id,
+            method=trace.method,
+            path=trace.path,
+        )
+        if chain.raw_capture is not None
+        else None
+    )
     completion = RequestCompletionCoordinator(
         chain=chain,
         trace=trace,
         request_id=trace.request_id,
+        raw_capture=raw_capture,
     )
     try:
         response = await _dispatch(request, chain, trace, completion)
@@ -497,9 +512,32 @@ async def _dispatch_with_body(
     client_deadline_at: float | None,
 ) -> Response:
     # Consumed here so the request is fully read before anything can return, which is what lets a rejected body be reported at all. Its size is deliberately **not** what `↑` reports — see `log_completion`. The request is already registered, so a client that never finishes sending is visible for however long it takes.
+    original_receive = request.receive
+
+    async def observed_request_receive() -> Message:
+        try:
+            message = await original_receive()
+        except ClientDisconnect:
+            completion.note_request_body_end(complete=False)
+            raise
+        if message.get("type") == "http.request":
+            body_chunk = message.get("body", b"")
+            if isinstance(body_chunk, bytes):
+                completion.note_request_body_chunk(
+                    body_chunk,
+                    more_body=bool(message.get("more_body", False)),
+                )
+            if not bool(message.get("more_body", False)):
+                completion.note_request_body_end(complete=True)
+        elif message.get("type") == "http.disconnect":
+            completion.note_request_body_end(complete=False)
+        return message
+
+    request._receive = observed_request_receive  # pyright: ignore[reportPrivateUsage]
     try:
-        await request.body()
+        body = await request.body()
     except ClientDisconnect:
+        completion.note_request_body_end(complete=False)
         completion.note_http_disconnect(
             phase=InterruptionPhase.REQUEST_BODY,
         )
@@ -511,6 +549,7 @@ async def _dispatch_with_body(
             chain,
             trace,
             completion,
+            body,
             client_deadline_at=client_deadline_at,
         ),
         on_disconnect=lambda: completion.note_http_disconnect(
@@ -524,6 +563,7 @@ async def _dispatch_after_body(
     chain: Chain,
     trace: RequestTrace,
     completion: RequestCompletionCoordinator,
+    raw_body: bytes,
     *,
     client_deadline_at: float | None,
 ) -> Response:
@@ -557,8 +597,8 @@ async def _dispatch_after_body(
         )
 
     try:
-        parsed: object = await request.json()
-    except ValueError:
+        parsed: object = orjson.loads(raw_body)
+    except orjson.JSONDecodeError:
         trace.detail = "body is not valid JSON"
         return error_response(
             proxy_error(ErrorCategory.CLIENT, "body is not valid JSON"),
@@ -597,6 +637,8 @@ async def _dispatch_after_body(
     # Recorded here rather than beside the resolved model, so every path below — the count endpoint, the failures, the ones that never route at all — reports what the client asked for even when nothing answered it.
     trace.message_id = context.id
     trace.requested_model = context.requested_model
+    if completion.raw_capture is not None:
+        context.extras["raw_capture"] = completion.raw_capture
 
     active = chain.active_requests
 
@@ -713,7 +755,11 @@ async def _dispatch_after_body(
             translated=context.translation_required,
         )
     # Exactly what went out to upstream, taken off the request httpx actually sent rather than re-serialized from the payload. It is not the client's body size: translation rewrites the payload, and the version upstream is billed and tokenized for is the one worth reporting.
+    current_attempt = context.current_attempt
+    attempt_index = current_attempt.index if current_attempt is not None else None
     trace.upstream_request_body_bytes = len(response.request.content)
+    completion.note_upstream_request_body(response.request.content, attempt=attempt_index)
+    completion.note_upstream_response_start(response.status_code, attempt=attempt_index)
     trace.upstream_protocol = http_label(response.http_version)
     # Snapshot the live socket now. `log_completion` intentionally runs only after the response is released, when httpcore's `client_addr` lookup can already raise `OSError: [Errno 9] Bad file descriptor`.
     trace.upstream_conn = snapshot_upstream_connection(response)
@@ -792,6 +838,12 @@ async def _dispatch_after_body(
                                 trace.request_id,
                                 trace,
                                 attempt=context.attempt_count,
+                                attempt_index=(
+                                    context.current_attempt.index
+                                    if context.current_attempt is not None
+                                    else None
+                                ),
+                                capture=one_shot_accounting.completion.raw_capture,
                             ),
                             deadline_at=client_deadline_at,
                         ),
@@ -885,6 +937,15 @@ async def _dispatch_after_body(
             if reopened is None or not again.context.stream:
                 return None
             fresh_attempt = again.context.current_attempt
+            fresh_attempt_index = fresh_attempt.index if fresh_attempt is not None else None
+            completion.note_upstream_request_body(
+                reopened.request.content,
+                attempt=fresh_attempt_index,
+            )
+            completion.note_upstream_response_start(
+                reopened.status_code,
+                attempt=fresh_attempt_index,
+            )
             fresh_assembler = assembler_for(again, hand_over_stop_reasons=_hand_over_reasons)
             # The accounting reads terminal and response-conversion facts off whichever assembler is current, and after this the current one is this.
             accounting.assembler = fresh_assembler
@@ -907,6 +968,8 @@ async def _dispatch_after_body(
                         trace.request_id,
                         trace,
                         attempt=again.context.attempt_count,
+                        attempt_index=fresh_attempt.index if fresh_attempt is not None else None,
+                        capture=accounting.completion.raw_capture,
                     ),
                     deadline_at=client_deadline_at,
                 ),
@@ -969,6 +1032,12 @@ async def _dispatch_after_body(
                             trace.request_id,
                             trace,
                             attempt=context.attempt_count,
+                            attempt_index=(
+                                context.current_attempt.index
+                                if context.current_attempt is not None
+                                else None
+                            ),
+                            capture=accounting.completion.raw_capture,
                         ),
                         deadline_at=client_deadline_at,
                     ),
@@ -996,6 +1065,10 @@ async def _dispatch_after_body(
     # What upstream sent us, not what we hand onward. A buffered reply is one read, so this is the whole of it.
     trace.received = len(response.content)
     trace.received_known = True
+    completion.note_upstream_response_body(response.content, attempt=attempt_index)
+    completion.note_upstream_response_end(attempt=attempt_index)
+    if attempt_index is not None:
+        completion.note_upstream_attempt_end(attempt_index, complete=True)
     active.set_upstream_response_bytes(trace.request_id, trace.received)
     attempt = context.current_attempt
     observer = attempt.response_observer if attempt is not None else None
@@ -1549,6 +1622,8 @@ async def _counted_upstream(
     trace: RequestTrace,
     *,
     attempt: int,
+    attempt_index: int | None = None,
+    capture: RawRequestCapture | None = None,
 ) -> AsyncGenerator[bytes]:
     """Count what upstream sends, as it arrives, and forward it untouched.
 
@@ -1563,6 +1638,7 @@ async def _counted_upstream(
     trace.received_known = True
     trace.begin_upstream_body_timing(attempt)
     previous: float | None = None
+    upstream_eof = False
     try:
         while True:
             trace.note_upstream_pull_started(time.monotonic())
@@ -1570,6 +1646,9 @@ async def _counted_upstream(
                 chunk = await anext(chunks)
             except StopAsyncIteration:
                 trace.note_upstream_end(time.monotonic())
+                if capture is not None:
+                    capture.upstream_response_end(attempt=attempt_index)
+                upstream_eof = True
                 break
             except Exception as error:
                 current_task = asyncio.current_task()
@@ -1594,6 +1673,8 @@ async def _counted_upstream(
             trace.upstream_chunks += 1
             trace.received += len(chunk)
             chain.active_requests.add_upstream_response_bytes(request_id, len(chunk))
+            if capture is not None:
+                capture.upstream_response_body(chunk, attempt=attempt_index)
             yield chunk
     finally:
         # Same order as `_AccountedStreamingResponse.__call__` above, and by the same call rather than by a second copy of the reasoning: the exit that got us here is the one that propagates, with the close failure chained under it. Raising straight from a `finally` replaces it, and a review measured what that costs on the real composition — the byte counter's own bug did not merely lose priority, it left the chain entirely, because the generator below raises its close error with *its* `GeneratorExit` as context rather than with what was propagating. A cancellation is the same story: replaced by a close failure, the task is no longer cancelled.
@@ -1610,6 +1691,11 @@ async def _counted_upstream(
         # `is None` rather than `or`, which conflates "is there one" with "which one wins". A `BaseException` subclass may define a falsey `__bool__`, and `or` then hands the exit to the cleanup failure or to a cancellation instead — measured right here: a falsey primary came out of this generator as the `CleanupError`, demoted to its own context. `keepalive.py` states the same priority and had the same bug.
         if primary is None:
             primary = cleanup_cancellation
+        if capture is not None:
+            capture.upstream_attempt_end(
+                attempt_index if attempt_index is not None else attempt - 1,
+                complete=upstream_eof,
+            )
         if primary is not None:
             if cleanup_error is not None:
                 raise_with_cleanup_under(primary, cleanup_error)

@@ -82,6 +82,18 @@ class Section(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
 
 
+class RawCaptureConfig(Section):
+    enabled: bool = False
+    directory: str = ""
+    compression_level: int = Field(default=3, ge=1, le=22)
+    max_file_bytes: int = Field(default=512 * 1024 * 1024, ge=0)
+    max_total_bytes: int = Field(default=4 * 1024 * 1024 * 1024, ge=0)
+
+
+class ObservabilityConfig(Section):
+    raw_capture: RawCaptureConfig = Field(default_factory=RawCaptureConfig)
+
+
 class TlsConfig(Section):
     # false = HTTP only, true = HTTPS only, "both" = same port, dispatched on the first byte.
     mode: TlsMode = False
@@ -605,6 +617,7 @@ def _reject_unaddressable_provider_names(value: object) -> None:
 class ProxyConfig(Section):
     server: ServerConfig = Field(default_factory=ServerConfig)
     inbound: InboundConfig = Field(default_factory=InboundConfig)
+    observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
 
     # The sole source of model-name mapping; the spec forbids built-in defaults.
     model_mappings: dict[str, str] = Field(default_factory=lambda: dict[str, str]())

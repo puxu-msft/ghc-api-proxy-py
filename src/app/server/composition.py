@@ -73,6 +73,7 @@ from app.model_provider.openai_compatible import (
     OpenAICompatibleClient,
     OpenAICompatibleProvider,
 )
+from app.observability.raw_capture import RawCaptureStore
 from app.pipeline.events import SubscriberRegistry
 from app.pipeline.model_resolution import inspect_mappings
 from app.pipeline.rate_limiting import RateLimiter
@@ -686,6 +687,21 @@ def build_chain(
         repair_minted_reasoning_ids_enabled=config.hook_fix_responses_request.repair_minted_reasoning_ids,
     )
 
+    raw_capture_config = config.observability.raw_capture
+    raw_capture = None
+    if raw_capture_config.enabled:
+        raw_capture_root = (
+            expand_user_path(raw_capture_config.directory)
+            if raw_capture_config.directory.strip()
+            else user_data_path() / "raw-captures"
+        )
+        raw_capture = RawCaptureStore(
+            raw_capture_root,
+            compression_level=raw_capture_config.compression_level,
+            max_file_bytes=raw_capture_config.max_file_bytes,
+            max_total_bytes=raw_capture_config.max_total_bytes,
+        )
+
     return Chain(
         config=config,
         thinking_profiles=thinking_profiles,
@@ -703,6 +719,7 @@ def build_chain(
         provider_clients=provider_clients,
         # One limiter per provider: a limit on one upstream must not throttle another.
         rate_limiters={name: RateLimiter(config.reactive_rate_limiter) for name in providers},
+        raw_capture=raw_capture,
     )
 
 

@@ -13,6 +13,7 @@ from starlette.requests import ClientDisconnect
 
 from app.observability.logging import get_logger
 from app.observability.metrics import TRANSLATION_LOSSES
+from app.observability.raw_capture import RawRequestCapture
 from app.observability.request_log import LogStatus, RequestLine, format_completion_line, status_for
 from app.observability.request_log_file import utc_timestamp, write_finalized_record
 from app.observability.request_trace import REQUEST_LOGGER, RequestTrace, request_line_from_trace
@@ -275,9 +276,11 @@ class RequestCompletionCoordinator:
     _legacy_duration_s: float | None = None
     _status_code: int | None = None
     _upstream_response_bytes: int | None = None
+    _raw_client_response_started: bool = False
     _authoritative_stream_ending: bool = False
     _settled: bool = False
     _record: FinalizedRequest | None = None
+    raw_capture: RawRequestCapture | None = None
 
     @property
     def delivery_accepted(self) -> bool:
@@ -309,6 +312,15 @@ class RequestCompletionCoordinator:
         self.note_asgi_message_offered(message)
         kind = message.get("type")
         if kind == "http.response.start":
+            status = message.get("status")
+            if (
+                self.raw_capture is not None
+                and not self._raw_client_response_started
+                and isinstance(status, int)
+                and not isinstance(status, bool)
+            ):
+                self.raw_capture.client_response_start(status)
+                self._raw_client_response_started = True
             self._http_start_accepted = True
             if self._state is DeliveryState.NOT_STARTED:
                 self._state = DeliveryState.STARTED
@@ -322,12 +334,15 @@ class RequestCompletionCoordinator:
         if kind != "http.response.body":
             return
         body = message.get("body", b"")
-        count: int | None = None
-        if isinstance(body, bytes | bytearray):
-            count = len(body)
+        body_bytes: bytes | None = None
+        if isinstance(body, bytes):
+            body_bytes = body
+        elif isinstance(body, bytearray):
+            body_bytes = bytes(body)
         elif isinstance(body, memoryview):
-            count = body.nbytes
-        if count is not None:
+            body_bytes = body.tobytes()
+        if body_bytes is not None:
+            count = len(body_bytes)
             if self._downstream_body_bytes is None:
                 self._downstream_body_bytes = 0
             self._downstream_body_bytes += count
@@ -335,10 +350,57 @@ class RequestCompletionCoordinator:
                 self.chain.active_requests.add_downstream_bytes(self.request_id, count)
             except Exception as error:
                 _warn_no_raise("could not update live downstream bytes: %r", error)
+            if self.raw_capture is not None:
+                self.raw_capture.client_response_body(
+                    body_bytes,
+                    more_body=bool(message.get("more_body", False)),
+                )
         if not bool(message.get("more_body", False)):
             self._state = DeliveryState.ACCEPTED
             if self._unit is None:
                 self._unit = "body"
+
+    def note_request_body(self, body: bytes) -> None:
+        if self.raw_capture is not None:
+            self.raw_capture.request_body(body)
+
+    def note_request_body_chunk(self, body: bytes, *, more_body: bool) -> None:
+        if self.raw_capture is not None:
+            self.raw_capture.request_body_chunk(body, more_body=more_body)
+
+    def note_request_body_end(self, *, complete: bool) -> None:
+        if self.raw_capture is not None:
+            self.raw_capture.request_body_end(complete=complete)
+
+    def note_upstream_request_body(self, body: bytes, *, attempt: int | None = None) -> None:
+        if self.raw_capture is not None:
+            self.raw_capture.upstream_request_body(body, attempt=attempt)
+
+    def note_upstream_response_start(
+        self,
+        status_code: int,
+        *,
+        attempt: int | None = None,
+    ) -> None:
+        if self.raw_capture is not None:
+            self.raw_capture.upstream_response_start(status_code, attempt=attempt)
+
+    def note_upstream_response_body(self, body: bytes, *, attempt: int | None = None) -> None:
+        if self.raw_capture is not None:
+            self.raw_capture.upstream_response_body(body, attempt=attempt)
+
+    def note_upstream_response_end(
+        self,
+        *,
+        complete: bool = True,
+        attempt: int | None = None,
+    ) -> None:
+        if self.raw_capture is not None:
+            self.raw_capture.upstream_response_end(complete=complete, attempt=attempt)
+
+    def note_upstream_attempt_end(self, attempt: int, *, complete: bool) -> None:
+        if self.raw_capture is not None:
+            self.raw_capture.upstream_attempt_end(attempt, complete=complete)
 
     def note_send_failure(self, error: BaseException) -> None:
         self._note_failure(error, origin=FailureOrigin.SEND)
@@ -562,6 +624,11 @@ class RequestCompletionCoordinator:
             token_admissions=self.trace.token_admissions,
             interruptions=tuple(self._interruptions),
         )
+        if self.raw_capture is not None:
+            self.raw_capture.finish(
+                status_code=self._status_code,
+                complete=self.delivery_accepted,
+            )
         # Set before every sink. A re-entrant or duplicate publisher sees the same immutable record and cannot repeat a side effect.
         self._record = record
         self._emit(record)

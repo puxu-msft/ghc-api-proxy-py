@@ -5,8 +5,10 @@ Upstream protocol behaviour is therefore the real thing rather than a friendlier
 """
 
 import asyncio
+import base64
 import contextlib
 import inspect
+import io
 import logging
 import re
 import ssl
@@ -27,6 +29,7 @@ import httpx2
 import orjson
 import pytest
 import structlog
+import zstandard
 from anthropic import AsyncAnthropic
 from count_worker_helper import blocked_count_job
 from fastapi import FastAPI
@@ -233,6 +236,49 @@ def make_client(
     if configure_chain is not None:
         configure_chain(chain)
     return TestClient(create_pipeline_app(chain)), seen
+
+
+def test_opt_in_raw_capture_records_client_and_upstream_bodies(tmp_path: Path) -> None:
+    capture_dir = tmp_path / "captures"
+    client, _ = make_client(
+        lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}),
+        overrides={
+            "observability": {
+                "raw_capture": {
+                    "enabled": True,
+                    "directory": str(capture_dir),
+                }
+            }
+        },
+    )
+
+    with client:
+        response = client.post(
+            "/v1/messages",
+            headers={
+                "x-claude-code-session-id": "session-capture",
+                "x-claude-code-agent-id": "agent-capture",
+            },
+            json={"model": "claude-model", "messages": []},
+        )
+
+    assert response.status_code == 200
+    _chain_of(client).raw_capture.flush()  # type: ignore[union-attr]
+    files = list(capture_dir.glob("session-*/agent-*.jsonl.zst"))
+    assert len(files) == 1
+    with files[0].open("rb") as stream:
+        compressed = stream.read()
+    with zstandard.ZstdDecompressor().stream_reader(io.BytesIO(compressed)) as reader:
+        records = [orjson.loads(line) for line in reader.read().splitlines()]
+
+    events = [record["event"] for record in records]
+    assert "request.body" in events
+    assert "upstream.request.body" in events
+    assert "upstream.response.body" in events
+    assert "client.response.body" in events
+    assert events.count("client.response.start") == 1
+    request_record = next(record for record in records if record["event"] == "request.body")
+    assert orjson.loads(base64.b64decode(request_record["body"]))["model"] == "claude-model"
 
 
 def test_invalid_thinking_profile_regex_fails_while_building_the_chain() -> None:
