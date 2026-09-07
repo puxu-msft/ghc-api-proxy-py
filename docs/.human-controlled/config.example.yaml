@@ -63,12 +63,10 @@ server:
     strict: false
 
 inbound:
-  # GHC API 提供分词计数器 `POST /v1/messages/count_tokens`，这里控制是否使用它。
-  # The GHC API provides a token counter `POST /v1/messages/count_tokens`, this controls whether to use it.
+  # 当前路由的上游若提供 `POST /v1/messages/count_tokens`，优先使用上游；
+  # 上游不提供或调用失败时，自动回退到本地 calibrated tiktoken 估算。
+  # When the routed upstream provides `POST /v1/messages/count_tokens`, it is preferred; if it is unavailable or fails, the local calibrated tiktoken estimate is used.
   anthropic_count_tokens:
-    # local = 本地 calibrated tiktoken 估算。
-    # local = local calibrated tiktoken estimate.
-    providers: [ghc, local]
     max_retries: 2
 
 # 模型名映射：请求模型 → 目标模型。

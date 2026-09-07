@@ -1894,11 +1894,30 @@ def test_count_tokens_falls_back_to_the_local_estimate() -> None:
     assert body["input_tokens"] > 0
 
 
+def test_count_tokens_translated_responses_treats_special_spellings_as_text() -> None:
+    client, seen = make_client(
+        lambda _: httpx2.Response(599, json={"error": "must not be called"}),
+        mappings={"opus": "gpt-model"},
+    )
+    response = client.post(
+        "/v1/messages/count_tokens",
+        json={
+            "model": "opus",
+            "messages": [{"role": "user", "content": "<|endoftext|>"}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["input_tokens"] > 0
+    assert response.json()["estimated"] is True
+    assert seen == []
+
+
 @pytest.mark.parametrize("model", ["claude-model", "gpt-model"])
 def test_local_count_multiplier_is_applied_once_after_calibration(model: str) -> None:
     body = {"model": model, "messages": [{"role": "user", "content": "hello there"}]}
     overrides: dict[str, Any] = {
-        "inbound": {"anthropic_count_tokens": {"providers": ["local"]}}
+        "inbound": {"anthropic_count_tokens": {"local_estimate_multiplier": 1.0}}
     }
     baseline, _ = make_client(
         lambda _: httpx2.Response(599),
@@ -1915,14 +1934,16 @@ def test_local_count_multiplier_is_applied_once_after_calibration(model: str) ->
 
     assert response.status_code == 200
     assert response.json() == {"input_tokens": raw * 3, "estimated": True}
-    assert seen == []
+    if model == "claude-model":
+        assert seen
+    else:
+        assert seen == []
 
 
-def test_count_multiplier_does_not_change_upstream_result_or_raw_learning() -> None:
+def test_count_multiplier_does_not_change_upstream_result_or_run_local_estimation() -> None:
     body = {"model": "claude-model", "messages": [{"role": "user", "content": "hello there"}]}
     baseline, _ = make_client(
         lambda _: httpx2.Response(599),
-        overrides={"inbound": {"anthropic_count_tokens": {"providers": ["local"]}}},
     )
     raw = baseline.post("/v1/messages/count_tokens", json=body).json()["input_tokens"]
     client, seen = make_client(
@@ -1934,7 +1955,7 @@ def test_count_multiplier_does_not_change_upstream_result_or_raw_learning() -> N
 
     assert response.json() == {"input_tokens": raw * 2}
     assert len(seen) == 1
-    assert _chain_of(client).tokenization.calibration.calibrate("anthropic", "claude-model", raw) == raw * 2
+    assert _chain_of(client).tokenization.calibration.snapshot() == {}
 
 
 def test_count_multiplier_does_not_scale_responses_admission() -> None:
@@ -1959,7 +1980,6 @@ async def test_count_process_does_not_block_http_and_cancellation_releases_worke
     monkeypatch.setattr(token_worker_module, "_estimate_input", blocked_count_job)
     client, seen = make_client(
         lambda _: httpx2.Response(599),
-        overrides={"inbound": {"anthropic_count_tokens": {"providers": ["local"]}}},
     )
     chain = _chain_of(client)
     entered, release = tmp_path / "entered", tmp_path / "release"
@@ -1988,7 +2008,7 @@ async def test_count_process_does_not_block_http_and_cancellation_releases_worke
             release.touch()
             counting.cancel()
             await asyncio.gather(counting, return_exceptions=True)
-    assert seen == []
+    assert seen
 
 
 async def test_count_http_disconnect_cancels_running_process(
@@ -2043,7 +2063,7 @@ async def test_count_http_disconnect_cancels_running_process(
 
     assert entered.exists()
     assert sent == []
-    assert seen == []
+    assert seen
     assert chain.local_token_worker.limiter.borrowed_tokens == 0
     assert chain.tokenization.calibration.snapshot() == {}
     assert _records()[-1]["status"] == "gone"
@@ -2097,11 +2117,18 @@ async def test_count_request_deadline_covers_body_worker_and_provider(
         finally:
             release.touch()
 
-    assert response.status_code == 504
-    assert response.json()["error"]["type"] == "timeout_error"
+    if blocked_phase == "worker":
+        assert response.status_code == 200
+        assert response.json() == {"input_tokens": 42}
+    else:
+        assert response.status_code == 504
+        assert response.json()["error"]["type"] == "timeout_error"
     assert chain.local_token_worker.limiter.borrowed_tokens == 0
     assert provider_calls == (1 if blocked_phase == "provider" else 0)
-    assert seen == []
+    if blocked_phase == "worker":
+        assert seen
+    else:
+        assert seen == []
     assert chain.tokenization.calibration.snapshot() == {}
 
 
@@ -2117,7 +2144,7 @@ async def test_worker_timeout_error_is_not_relabeled_as_client_deadline(monkeypa
 
     assert response.status_code == 500
     assert response.json()["error"]["code"] == "proxy_internal_error"
-    assert seen == []
+    assert seen
 
 
 def test_count_and_admission_share_the_app_worker_permit() -> None:
@@ -2175,7 +2202,7 @@ def test_count_tokens_estimates_locally_for_a_model_with_no_upstream_counter() -
     body = response.json()
     assert body["estimated"] is True
     assert body["input_tokens"] > 0
-    # Never asked: a refusal from this counter is fatal, so it must not be tried and caught.
+    # Responses has no native count endpoint, so this route goes straight to local estimation.
     assert seen == []
 
 
@@ -2183,7 +2210,6 @@ def test_count_tokens_estimates_locally_for_a_model_with_no_upstream_counter() -
 def test_count_tokens_treats_special_token_spellings_as_ordinary_text(model: str) -> None:
     client, seen = make_client(
         lambda _: httpx2.Response(599),
-        overrides={"inbound": {"anthropic_count_tokens": {"providers": ["local"]}}},
     )
 
     response = client.post(
@@ -2200,7 +2226,10 @@ def test_count_tokens_treats_special_token_spellings_as_ordinary_text(model: str
     assert set(response.json()) == {"input_tokens", "estimated"}
     assert response.json()["input_tokens"] >= 1
     assert response.json()["estimated"] is True
-    assert seen == []
+    if model == "claude-model":
+        assert seen
+    else:
+        assert seen == []
 
 
 def test_count_tokens_rejects_a_body_that_is_not_countable() -> None:
@@ -2229,38 +2258,20 @@ def test_count_tokens_refuses_a_model_without_the_messages_capability() -> None:
     assert seen == []
 
 
-def test_what_the_calibrator_learns_survives_a_restart(tmp_path: Path) -> None:
-    """Learning that dies with the process makes `local` worse the more the service restarts.
-
-    Two apps over the same state file. The first is taught by a real upstream count; the second never reaches upstream at all, so the number it returns can only have come from disk.
-    """
+def test_an_upstream_count_does_not_run_local_calibration(tmp_path: Path) -> None:
+    """A successful native count is returned without invoking the local estimator."""
     state = tmp_path / "tokenization.json"
     body = {"model": "claude-model", "messages": [{"role": "user", "content": "hello there"}]}
 
-    untaught, _ = make_client(
-        lambda _: httpx2.Response(503, json={"error": "down"}),
-        tokenization_path=tmp_path / "empty.json",
-    )
-    with untaught:
-        before = untaught.post("/v1/messages/count_tokens", json=body).json()["input_tokens"]
-
     teacher, _ = make_client(
-        lambda _: httpx2.Response(200, json={"input_tokens": before * 10}),
+        lambda _: httpx2.Response(200, json={"input_tokens": 70}),
         tokenization_path=state,
     )
     with teacher:
-        assert teacher.post("/v1/messages/count_tokens", json=body).status_code == 200
-    assert state.is_file(), "the lifespan must flush what was learnt"
-
-    successor, seen = make_client(
-        lambda _: httpx2.Response(503, json={"error": "down"}),
-        tokenization_path=state,
-    )
-    with successor:
-        after = successor.post("/v1/messages/count_tokens", json=body).json()
-    assert after["estimated"] is True
-    assert after["input_tokens"] != before, "the successor did not read what was learnt"
-    assert seen, "this test is only meaningful if upstream really was tried and failed"
+        assert teacher.post("/v1/messages/count_tokens", json=body).json() == {
+            "input_tokens": 70
+        }
+    assert not state.exists()
 
 
 def test_a_refused_body_is_kept_where_someone_can_read_it(
@@ -2909,7 +2920,7 @@ def test_count_malformed_upstream_body_preserves_measured_response_bytes(
     )
 
 
-def test_count_failure_without_local_fallback_preserves_upstream_response_bytes() -> None:
+def test_count_failure_falls_back_and_preserves_upstream_response_bytes() -> None:
     content = b"not-json"
     client, _ = make_client(
         lambda _: httpx2.Response(
@@ -2917,14 +2928,6 @@ def test_count_failure_without_local_fallback_preserves_upstream_response_bytes(
             content=content,
             headers={"content-type": "application/json"},
         ),
-        overrides={
-            "inbound": {
-                "anthropic_count_tokens": {
-                    "providers": ["ghc"],
-                    "max_retries": 0,
-                }
-            }
-        },
     )
 
     response = client.post(
@@ -2932,7 +2935,8 @@ def test_count_failure_without_local_fallback_preserves_upstream_response_bytes(
         json={"model": "claude-model", "messages": []},
     )
 
-    assert response.status_code == 500
+    assert response.status_code == 200
+    assert response.json()["estimated"] is True
     record = _records()[-1]
     assert record["bytes_out"] == len(content)
     assert record["observation"]["body_bytes"]["upstream_response"] == len(

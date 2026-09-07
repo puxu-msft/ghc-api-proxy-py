@@ -103,7 +103,6 @@ def _pin_provider_graph(
 _PROVIDER_GRAPH_SELECTORS: tuple[tuple[str, ...], ...] = (
     ("default_model_provider",),
     ("fallback_model_provider",),
-    ("inbound", "anthropic_count_tokens", "providers"),
 )
 
 
@@ -147,15 +146,9 @@ def pin_restart_only(startup: ProxyConfig, candidate: ProxyConfig) -> ReloadOutc
     candidate_values = candidate.model_dump(mode="python")
 
     pinned: set[str] = set()
-    counting_providers_explicit = (
-        "providers" in candidate.inbound.anthropic_count_tokens.model_fields_set
-    )
     graph_changed = _pin_provider_graph(startup_values, candidate_values, pinned)
     if graph_changed:
         _pin_provider_graph_selectors(startup_values, candidate_values, pinned)
-        counting_providers_explicit = (
-            "providers" in startup.inbound.anthropic_count_tokens.model_fields_set
-        )
     _pin_type_scoped_provider_fields(startup_values, candidate_values, pinned)
 
     for pattern in sorted(NOT_HOT_RELOADABLE):
@@ -169,12 +162,6 @@ def pin_restart_only(startup: ProxyConfig, candidate: ProxyConfig) -> ReloadOutc
             if was != now:
                 _write(candidate_values, path, was)
                 pinned.add(".".join(path))
-
-    # `model_dump` materialises defaults, but this validator intentionally distinguishes an inherited default from an operator-written provider list. Preserve that distinction across the round trip or a deployment whose only provider is not named `ghc` fails its first reload on a value nobody wrote.
-    if not counting_providers_explicit:
-        inbound = cast(dict[str, Any], candidate_values["inbound"])
-        counting = cast(dict[str, Any], inbound["anthropic_count_tokens"])
-        counting.pop("providers", None)
 
     effective = ProxyConfig.model_validate(candidate_values)
     return ReloadOutcome(

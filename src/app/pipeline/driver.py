@@ -13,15 +13,22 @@ from typing import Any, cast
 from uuid import uuid4
 
 import httpx2
+from pydantic import ValidationError
 
 from app.config.schema import LOCAL_COUNTER
 from app.core.chain import Chain
 from app.model_provider import ModelDescriptor, ModelProvider
+from app.models.anthropic import MessagesRequest
 from app.observability.metrics import BETA_FLAGS_STRIPPED
 from app.observability.raw_capture import RawRequestCapture
 from app.pipeline.anthropic_request_hook import fix_anthropic_request
 from app.pipeline.auto_mode_classifier import AutoModeVerdict, classify, log_hit, verdict_text
-from app.pipeline.count_tokens import CountTokensRequestError, count_tokens
+from app.pipeline.count_tokens import (
+    CountTokensRequestError,
+    CountTokensResult,
+    CountTokensUnavailable,
+    count_tokens,
+)
 from app.pipeline.delivery.formats.anthropic_messages_synthetic_reply import (
     auto_mode_body,
     auto_mode_sse,
@@ -356,6 +363,15 @@ def _check_count_deadline(deadline_at: float | None) -> None:
         raise UpstreamTimeout("client request exceeded its deadline while counting tokens")
 
 
+def _validate_count_tokens_messages(payload: Mapping[str, Any]) -> None:
+    countable = dict(payload)
+    countable.setdefault("max_tokens", 1)
+    try:
+        MessagesRequest.model_validate(countable)
+    except ValidationError as error:
+        raise CountTokensRequestError(f"not a countable Messages body: {error}") from error
+
+
 async def handle_count_tokens(
     chain: Chain,
     context: RequestContext,
@@ -410,10 +426,16 @@ async def handle_count_tokens(
         raise CountTokensRequestError(
             f"no token estimator for {route.target_format.value}; add one before routing counts there"
         )
-    _check_count_deadline(deadline_at)
-    estimate = await chain.local_token_worker.estimate(protocol, context.payload)
-    _check_count_deadline(deadline_at)
     calibration = chain.tokenization.calibration
+    estimate: int | None = None
+
+    async def ensure_estimate() -> int:
+        nonlocal estimate
+        if estimate is None:
+            _check_count_deadline(deadline_at)
+            estimate = await chain.local_token_worker.estimate(protocol, context.payload)
+            _check_count_deadline(deadline_at)
+        return estimate
 
     async def ask_upstream(payload: Mapping[str, Any]) -> int:
         _check_count_deadline(deadline_at)
@@ -452,7 +474,9 @@ async def handle_count_tokens(
         return counted
 
     def estimate_locally(payload: Mapping[str, Any]) -> int:
-        del payload  # Already measured above; recomputing per attempt would only cost time.
+        del payload
+        if estimate is None:
+            raise RuntimeError("local token estimate was not prepared")
         _check_count_deadline(deadline_at)
         return scale_local_estimate(
             calibration.calibrate(protocol, route.model_id, estimate),
@@ -470,27 +494,52 @@ async def handle_count_tokens(
     payload = dict(context.payload)
     payload.pop("stream", None)
     absent_reason = f"no-counter-for-{route.target_format.value}"
-    result = await count_tokens(
-        payload,
-        providers=settings.providers,
-        max_retries=settings.max_retries,
-        upstream=ask_upstream if upstream_counts else None,
-        local=estimate_locally,
-        upstream_absent_reason=absent_reason,
-    )
+    if upstream_counts:
+        _validate_count_tokens_messages(payload)
+        try:
+            result = await count_tokens(
+                payload,
+                providers=(provider.name,),
+                max_retries=settings.max_retries,
+                upstream=ask_upstream,
+                local=None,
+                upstream_absent_reason=absent_reason,
+            )
+        except CountTokensUnavailable as unavailable:
+            await ensure_estimate()
+            result = CountTokensResult(
+                tokens=estimate_locally(payload),
+                provider=LOCAL_COUNTER,
+                attempts=unavailable.attempts,
+            )
+    else:
+        await ensure_estimate()
+        result = await count_tokens(
+            payload,
+            providers=(LOCAL_COUNTER,),
+            max_retries=settings.max_retries,
+            upstream=None,
+            local=estimate_locally,
+            upstream_absent_reason=absent_reason,
+        )
     context.extras["count_tokens_provider"] = result.provider
     if result.attempts:
         context.extras["count_tokens_attempts"] = list(result.attempts)
-    # Why the estimate answered, decided here because this is where the two facts that separate the cases live: the reason this function itself withheld the counter, and whether any provider leg was ever reached. Both readings put `local` on the line as the leg that answered and only one of them is an incident — a route with no upstream counter estimates every time and is working as configured, while a provider that was asked and could not answer is something to look at. Left to the display layer they would be one string.
-    # Read off the trail rather than off `upstream_counts`, because a counter can be withheld in three ways and only two of them are this function's doing: the operator can also leave every provider out of `providers`, or order `local` ahead of them, and then no provider was ever asked and nothing failed. Every entry `count_tokens` writes is prefixed with the leg's own name, so "not local" identifies the provider legs without this having to know what any of them is called.
+    # Why the estimate answered, decided here because this is where the facts
+    # that separate the cases live: whether the routed upstream had a counter
+    # and whether it answered. Both readings put `local` on the line as the leg
+    # that answered, while the attempts trail preserves the upstream failure.
+    # Read off the trail rather than off `upstream_counts`, because the upstream
+    # may be unavailable or may fail before the local fallback answers.
     if result.provider == LOCAL_COUNTER:
         provider_attempts = [
             entry for entry in result.attempts if not entry.startswith(f"{LOCAL_COUNTER}:")
         ]
-        if any(entry.endswith(f":{absent_reason}") for entry in provider_attempts):
+        if not upstream_counts or any(entry.endswith(f":{absent_reason}") for entry in provider_attempts):
             context.extras["count_tokens_reason"] = "no-counter"
         elif provider_attempts:
-            # Named after the provider that failed rather than a generic word: with two configured, which one could not answer is the whole of what the line is for.
+            # Name the routed provider that failed rather than using a generic
+            # word: which upstream could not answer is useful diagnosis.
             context.extras["count_tokens_reason"] = (
                 f"{provider_attempts[0].partition(':')[0]}-failed"
             )
@@ -498,7 +547,8 @@ async def handle_count_tokens(
     _check_count_deadline(deadline_at)
     if result.provider != LOCAL_COUNTER:
         # Upstream's number is ground truth for the estimator, which is the only way it improves.
-        calibration.learn(protocol, route.model_id, estimate, result.tokens)
+        if estimate is not None:
+            calibration.learn(protocol, route.model_id, estimate, result.tokens)
         return {"input_tokens": result.tokens}
     return {"input_tokens": result.tokens, "estimated": True}
 

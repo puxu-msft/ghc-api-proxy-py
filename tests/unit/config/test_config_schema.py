@@ -200,35 +200,17 @@ def test_the_qualifier_separator_matches_the_config_boundary() -> None:
     assert QUALIFIER_SEPARATOR == "/"
 
 
-def test_a_counting_leg_may_name_any_configured_provider() -> None:
-    """`ghc` is legal because a provider is called `ghc`, not because the string is special.
-
-    The field spent a while typed `Literal["ghc", "local"]`, which said that only a deployment whose provider happens to carry that name may ask upstream for a count. Nobody made that rule. A deployment naming its providers `A` and `B` must be able to say so here.
-    """
-    config = ProxyConfig.model_validate(
-        {
-            "model_providers": {"A": {"type": "github_copilot"}, "B": {"type": "github_copilot"}},
-            "default_model_provider": "A",
-            "inbound": {"anthropic_count_tokens": {"providers": ["B", "local"]}},
-        }
-    )
-    assert config.inbound.anthropic_count_tokens.providers == ["B", "local"]
-
-
-def test_a_counting_leg_naming_no_configured_provider_is_refused() -> None:
-    """The other half: the check is against **this** configuration, not against a fixed list.
-
-    `ghc` is exactly as wrong here as `typo` would be, because this deployment configures neither.
-    """
-    with pytest.raises(ValidationError) as raised:
+def test_counting_provider_selection_is_not_configurable() -> None:
+    with pytest.raises(ValidationError):
         ProxyConfig.model_validate(
             {
-                "model_providers": {"A": {"type": "github_copilot"}},
-                "default_model_provider": "A",
-                "inbound": {"anthropic_count_tokens": {"providers": ["ghc", "local"]}},
+                "inbound": {
+                    "anthropic_count_tokens": {
+                        "providers": ["ghc", "local"],
+                    }
+                },
             }
         )
-    assert "'ghc'" in str(raised.value)
 
 
 def test_model_mappings_have_no_built_in_defaults() -> None:

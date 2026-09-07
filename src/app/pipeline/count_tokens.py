@@ -1,8 +1,8 @@
-"""Anthropic token counting through a provider chain.
+"""Anthropic token counting through the routed upstream and local fallback.
 
-`inbound.anthropic_count_tokens.providers` names the order to try. Each entry is either `local` — the calibrated estimate — or the name of a configured model provider, which asks upstream. Those names are checked against `model_providers` when the configuration loads; nothing here treats any particular string as special, because none of them is.
-
-A provider that fails hands over to the next, so a transient problem degrades to an estimate.
+The current route decides which upstream may answer. That upstream is tried
+first when it owns the native counter; a local calibrated estimate follows when
+the protocol has no upstream counter or the upstream cannot answer.
 
 `max_retries` applies per provider, not to the chain.
 One flaky provider therefore cannot consume the attempts the next one would have had.
@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.config.schema import LOCAL_COUNTER
-from app.model_provider import ProviderError
+from app.model_provider import EndpointNotImplemented, ProviderError
 
 type UpstreamCounter = Callable[[Mapping[str, Any]], Awaitable[int]]
 type LocalCounter = Callable[[Mapping[str, Any]], int]
@@ -29,11 +29,13 @@ class CountTokensRequestError(ValueError):
 
 
 class CountTokensUnavailable(RuntimeError):
-    """Every configured provider failed.
+    """The routed upstream and local estimator both failed.
 
-    `cause` is the **last** counter's failure, and last rather than first on purpose: the providers are tried in the operator's configured order, so the one that ran out is the one whose verdict stands. It travels because without it this exception flattens every reason into one — measured, an upstream 400 and an upstream 500 both reached the client as a 503 carrying none of upstream's body, which are two entirely different things for a client to be told.
+    `cause` is the last counter's failure. It travels because without it this
+    exception flattens every reason into one.
 
-    `attempts` stays as the human-readable trail of everything that was tried; `cause` is what anything downstream classifies from.
+    `attempts` stays as the human-readable trail of everything that was tried.
+    `cause` is what anything downstream classifies from.
     """
 
     def __init__(self, attempts: Sequence[str], *, cause: BaseException | None = None) -> None:
@@ -58,7 +60,7 @@ async def count_tokens(
     local: LocalCounter | None = None,
     upstream_absent_reason: str = "unconfigured",
 ) -> CountTokensResult:
-    """Try each provider in order, retrying within one before moving on.
+    """Try the routed upstream and then the local estimator.
 
     `upstream_absent_reason` names *why* there is no upstream counter, for the attempts trail. It defaults to the historical answer — nobody supplied one — but a caller that withheld it deliberately should say so, because `ghc:unconfigured` read against a config file that plainly lists `ghc` sends the next reader looking for a settings bug that is not there.
     """
@@ -85,6 +87,10 @@ async def count_tokens(
                     provider=provider,
                     attempts=tuple(attempts),
                 )
+            except EndpointNotImplemented as error:
+                last_failure = error
+                attempts.append(f"{provider}:unavailable")
+                break
             except ProviderError:
                 # Unserviceable, not unlucky: retrying or degrading would both answer the wrong question. The caller turns this into a 400.
                 raise

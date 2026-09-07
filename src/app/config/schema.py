@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 type TlsMode = bool | Literal["both"]
-# The name of the local estimator leg. Everything else in `inbound.anthropic_count_tokens.providers` is a `model_providers` key.
+# The internal name of the local estimator leg in count-token results.
 LOCAL_COUNTER = "local"
 type BufferingPolicy = Literal["block", "until-tool-use", "full"]
 type CacheControlMode = Literal["disabled", "passthrough", "sanitize", "proxied"]
@@ -52,7 +52,6 @@ NOT_HOT_RELOADABLE = frozenset(
         "model_providers.*.github_token_file",
         "model_providers.*.install_id",
         "model_providers.*.api_key",
-        "model_providers.*.default_endpoint",
         "model_providers.*.models",
         "model_providers.*.route_target",
         "model_providers.*.type",
@@ -72,8 +71,7 @@ NOT_HOT_RELOADABLE = frozenset(
 
 # Fields shared with an older provider but fixed into the Xingchen instance at startup. Kept type-scoped so this feature does not silently change the existing GitHub Copilot hot-reload contract.
 PROVIDER_NOT_HOT_RELOADABLE: dict[str, frozenset[str]] = {
-    "openai_compatible": frozenset({"disabled_models", "model_refresh_interval"}),
-    "openai": frozenset({"disabled_models", "model_refresh_interval"}),
+    "sub2api": frozenset({"disabled_models", "model_refresh_interval"}),
     "xingchen": frozenset({"disabled_models"}),
 }
 
@@ -110,14 +108,13 @@ class ServerConfig(Section):
 
 
 class CountTokensConfig(Section):
-    """Which legs may answer a token count, in order.
+    """Control retries and calibration for upstream-first token counting.
 
-    Each entry is either `local` — this proxy's calibrated estimate — or the name of a configured `model_providers` key. **Not an enumeration.** `ghc` is a legal value because some deployments configure a provider called `ghc`, not because the string is special; pinning the type to `Literal["ghc", "local"]` said that only a deployment whose provider happens to carry that name may ask upstream for a count, which is not a rule anyone made.
-
-    The names are checked against `model_providers` in `ProxyConfig`, because that is where both halves are visible. A check here could only compare against a hard-coded list, which is the thing being removed.
+    The routed upstream provider is always tried first when it owns a native
+    counter. The local estimator is the fallback when that upstream has no
+    counter or cannot answer.
     """
 
-    providers: list[str] = Field(default_factory=lambda: ["ghc", LOCAL_COUNTER])
     max_retries: int = Field(default=2, ge=0)
     # Applied once after calibration, only when the count is answered locally. Upstream counts, calibration samples and inference admission remain unscaled.
     local_estimate_multiplier: float = Field(default=1.0, ge=1.0, allow_inf_nan=False)
@@ -221,14 +218,13 @@ class CodebuddyProviderConfig(_ModelProviderConfigBase):
 
 
 class OpenAICompatibleProviderConfig(_ModelProviderConfigBase):
-    type: Literal["openai_compatible", "openai"]
+    type: Literal["sub2api"]
     api_base_url: str = Field(default="", min_length=1, validate_default=True)
     api_key: str = Field(default="", repr=False)
     models: list[str] = Field(default_factory=list)
     model_refresh_interval: int = Field(default=3600, ge=0)
-    # OpenAI-compatible catalogues frequently omit endpoint capabilities. Responses
-    # is the safe default for this proxy because it is the primary translation target.
-    default_endpoint: Literal["responses", "chat_completions"] = "responses"
+    # sub2api catalogues may omit endpoint capabilities; the provider then supplies
+    # its three native protocol endpoints as the default capability set.
 
     @field_validator("api_base_url")
     @classmethod
@@ -648,31 +644,6 @@ class ProxyConfig(Section):
     def _names_must_be_addressable(cls, value: object) -> object:
         _reject_unaddressable_provider_names(value)
         return value
-
-    @model_validator(mode="after")
-    def _counter_legs_name_something_that_exists(self) -> ProxyConfig:
-        """Check `inbound.anthropic_count_tokens.providers` against the providers this config declares.
-
-        Here rather than on `CountTokensConfig` because this is the first place both halves are in scope, and **relative to the configuration rather than to a fixed list** because that is what the field always meant: `ghc` is valid in a deployment that configures a provider called `ghc`, and means nothing in one that does not. A `Literal` in its place answered the question without looking.
-
-        Two things are deliberately not checked.
-
-        **A config with no providers at all.** That is not a bad counting leg, it is a `ProxyConfig` built without the section that supplies providers — the bundled defaults carry one, and a config lacking them fails at `resolve_default_name` with a message about the thing that is actually missing. Reporting the counting leg there would name a consequence and hide the cause.
-
-        **The default value.** `["ghc", "local"]` names the provider the bundled config ships, and a deployment that renames its providers without touching this key has done nothing wrong: the upstream leg asks whichever provider routing chose, so the string only has to be "not local" for the default to behave correctly. What an operator **writes** is a declaration and is checked; what they inherited is not.
-        """
-        counting = self.inbound.anthropic_count_tokens
-        if not self.model_providers or "providers" not in counting.model_fields_set:
-            return self
-        for leg in counting.providers:
-            if leg != LOCAL_COUNTER and leg not in self.model_providers:
-                configured = ", ".join(sorted(self.model_providers)) or "none"
-                raise ValueError(
-                    f"inbound.anthropic_count_tokens.providers: {leg!r} is neither "
-                    f"{LOCAL_COUNTER!r} nor one of this deployment's model providers "
-                    f"(configured: {configured})"
-                )
-        return self
 
     # A directory, not a file: the name inside it carries the port, so one setting covers every instance an operator runs rather than having to be re-stated per port.
     pidfile_dir: str = ""

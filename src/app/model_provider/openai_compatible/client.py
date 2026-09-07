@@ -1,4 +1,4 @@
-"""Raw HTTP client for OpenAI-compatible providers."""
+"""Raw HTTP client for the sub2api provider."""
 
 from collections.abc import Mapping
 from typing import Any, cast
@@ -11,12 +11,15 @@ from app.model_provider.types import ModelEndpoint
 from app.model_provider.upstream_errors import normalize_upstream_error
 from app.wire_json import dumps
 
+ANTHROPIC_MESSAGES_PATH = "/v1/messages"
+COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
 RESPONSES_PATH = "/responses"
 CHAT_COMPLETIONS_PATH = "/chat/completions"
 EMBEDDINGS_PATH = "/embeddings"
 MODELS_PATH = "/models"
 
 _PATHS = {
+    ModelEndpoint.ANTHROPIC_MESSAGES: ANTHROPIC_MESSAGES_PATH,
     ModelEndpoint.OPENAI_RESPONSES: RESPONSES_PATH,
     ModelEndpoint.OPENAI_CHAT_COMPLETIONS: CHAT_COMPLETIONS_PATH,
     ModelEndpoint.OPENAI_EMBEDDINGS: EMBEDDINGS_PATH,
@@ -67,6 +70,11 @@ class OpenAICompatibleClient:
             )
         return headers
 
+    def _anthropic_path(self, path: str) -> str:
+        if self._base_url.endswith("/v1"):
+            return path.removeprefix("/v1")
+        return path
+
     async def _send(
         self,
         request: httpx2.Request,
@@ -98,6 +106,8 @@ class OpenAICompatibleClient:
         extra_headers: Mapping[str, str] | None = None,
     ) -> httpx2.Response:
         path = _PATHS[endpoint]
+        if endpoint is ModelEndpoint.ANTHROPIC_MESSAGES:
+            path = self._anthropic_path(path)
         body = dumps(dict(payload))
         request = self._http.build_request(
             "POST",
@@ -124,3 +134,13 @@ class OpenAICompatibleClient:
         if not isinstance(loaded, dict):
             raise ValueError("OpenAI-compatible models response must be an object")
         return cast(dict[str, Any], loaded)
+
+    async def count_tokens(self, payload: Mapping[str, Any]) -> httpx2.Response:
+        body = dumps(dict(payload))
+        request = self._http.build_request(
+            "POST",
+            f"{self._base_url}{self._anthropic_path(COUNT_TOKENS_PATH)}",
+            headers=self._headers(),
+            content=body,
+        )
+        return await self._send(request, stream=False)

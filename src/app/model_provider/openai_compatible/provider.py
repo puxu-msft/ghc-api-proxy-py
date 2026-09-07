@@ -1,4 +1,4 @@
-"""OpenAI-compatible provider with a Responses-first capability default."""
+"""The sub2api provider, which natively serves three protocol endpoints."""
 
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -22,15 +22,23 @@ from app.model_provider.types import (
     resolve_endpoints,
 )
 
-PROVIDER_TYPE = "openai_compatible"
-PROVIDER_TYPES = frozenset({PROVIDER_TYPE, "openai"})
+PROVIDER_TYPE = "sub2api"
+PROVIDER_TYPES = frozenset({PROVIDER_TYPE})
 
 _SEND_METHODS = {
+    ModelEndpoint.ANTHROPIC_MESSAGES,
     ModelEndpoint.OPENAI_RESPONSES,
     ModelEndpoint.OPENAI_CHAT_COMPLETIONS,
     ModelEndpoint.OPENAI_EMBEDDINGS,
 }
 DRIVEN_ENDPOINTS = frozenset(_SEND_METHODS)
+_DEFAULT_ENDPOINTS = frozenset(
+    {
+        ModelEndpoint.ANTHROPIC_MESSAGES,
+        ModelEndpoint.OPENAI_RESPONSES,
+        ModelEndpoint.OPENAI_CHAT_COMPLETIONS,
+    }
+)
 
 _CHAT_ENDPOINT_CAPABILITIES = ChatEndpointCapabilities(
     response_modes=frozenset(
@@ -40,12 +48,6 @@ _CHAT_ENDPOINT_CAPABILITIES = ChatEndpointCapabilities(
     tool_stream_default=None,
     provenance="OpenAI-compatible provider catalog",
 )
-
-
-def _catalog_endpoint_default(config: OpenAICompatibleProviderConfig) -> ModelEndpoint:
-    if config.default_endpoint == "chat_completions":
-        return ModelEndpoint.OPENAI_CHAT_COMPLETIONS
-    return ModelEndpoint.OPENAI_RESPONSES
 
 
 def _normalise_endpoints(value: object) -> object:
@@ -128,7 +130,6 @@ class OpenAICompatibleProvider:
             raise ValueError("models response data must be a list")
         generation = self._catalog_generation + 1
         refreshed_at = datetime.now(UTC).isoformat(timespec="seconds")
-        default_endpoint = _catalog_endpoint_default(self._config)
         allowed_models = frozenset(self._config.models)
         descriptors: dict[str, ModelDescriptor] = {}
         for entry in cast(list[Any], entries):
@@ -141,16 +142,19 @@ class OpenAICompatibleProvider:
             if allowed_models and model_id not in allowed_models:
                 continue
             advertised = _normalise_endpoints(model.get("supported_endpoints"))
-            if advertised is None:
-                advertised = [default_endpoint.value]
-            resolved = resolve_endpoints(advertised, model_type="chat")
+            resolved = (
+                None
+                if advertised is None
+                else resolve_endpoints(advertised, model_type="chat")
+            )
+            endpoints = _DEFAULT_ENDPOINTS if resolved is None else resolved.known
             descriptors[model_id] = ModelDescriptor(
                 id=model_id,
-                endpoints=resolved.known,
-                unknown_endpoints=resolved.unknown,
+                endpoints=endpoints,
+                unknown_endpoints=() if resolved is None else resolved.unknown,
                 chat_endpoint_capabilities=(
                     _CHAT_ENDPOINT_CAPABILITIES
-                    if ModelEndpoint.OPENAI_CHAT_COMPLETIONS in resolved.known
+                    if ModelEndpoint.OPENAI_CHAT_COMPLETIONS in endpoints
                     else None
                 ),
                 provider_name=self._name,
@@ -198,7 +202,6 @@ class OpenAICompatibleProvider:
         *,
         descriptor: ModelDescriptor,
     ) -> httpx2.Response:
-        del payload
         require_descriptor_owner(descriptor, self._name)
         require_endpoint(descriptor, ModelEndpoint.ANTHROPIC_MESSAGES, self._name)
-        raise EndpointNotImplemented(self._name, ModelEndpoint.ANTHROPIC_MESSAGES.value)
+        return await self._client.count_tokens(payload)

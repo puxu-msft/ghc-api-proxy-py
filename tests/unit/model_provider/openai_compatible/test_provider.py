@@ -20,7 +20,7 @@ from app.wire_json import loads
 
 def config(**overrides: Any) -> OpenAICompatibleProviderConfig:
     values: dict[str, Any] = {
-        "type": "openai_compatible",
+        "type": "sub2api",
         "api_base_url": "https://ttthree.example/v1",
         "api_key": "test-key",
         "models": ["configured-model"],
@@ -29,12 +29,12 @@ def config(**overrides: Any) -> OpenAICompatibleProviderConfig:
     return OpenAICompatibleProviderConfig.model_validate(values)
 
 
-def test_ttthree_name_can_use_the_openai_compatible_provider_type() -> None:
+def test_ttthree_name_can_use_the_sub2api_provider_type() -> None:
     proxy = ProxyConfig.model_validate(
         {
             "model_providers": {
                 "ttthree": {
-                    "type": "openai_compatible",
+                    "type": "sub2api",
                     "api_base_url": "https://ttthree.example/v1",
                     "api_key": "test-key",
                 }
@@ -48,9 +48,24 @@ def test_ttthree_name_can_use_the_openai_compatible_provider_type() -> None:
     assert "test-key" not in repr(provider)
 
 
-def test_openai_compatible_provider_requires_an_api_base_url() -> None:
+def test_sub2api_provider_requires_an_api_base_url() -> None:
     with pytest.raises(ValidationError):
-        OpenAICompatibleProviderConfig.model_validate({"type": "openai_compatible"})
+        OpenAICompatibleProviderConfig.model_validate({"type": "sub2api"})
+
+
+@pytest.mark.parametrize("provider_type", ["openai_compatible", "openai"])
+def test_legacy_provider_types_are_rejected(provider_type: str) -> None:
+    with pytest.raises(ValidationError):
+        ProxyConfig.model_validate(
+            {
+                "model_providers": {
+                    "ttthree": {
+                        "type": provider_type,
+                        "api_base_url": "https://ttthree.example/v1",
+                    }
+                }
+            }
+        )
 
 
 @pytest.mark.parametrize(
@@ -62,12 +77,12 @@ def test_openai_compatible_provider_requires_an_api_base_url() -> None:
         " https://example.com/v1",
     ],
 )
-def test_openai_compatible_provider_rejects_an_invalid_api_base_url(
+def test_sub2api_provider_rejects_an_invalid_api_base_url(
     api_base_url: str,
 ) -> None:
     with pytest.raises(ValidationError):
         OpenAICompatibleProviderConfig.model_validate(
-            {"type": "openai_compatible", "api_base_url": api_base_url}
+            {"type": "sub2api", "api_base_url": api_base_url}
         )
 
 
@@ -156,6 +171,78 @@ async def test_models_refresh_is_not_static_even_when_an_allowlist_is_configured
         assert provider.describe("configured-model") is not None
     finally:
         await http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_sub2api_catalog_defaults_to_all_three_native_protocols() -> None:
+    seen: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        if request.url.path == "/v1/models":
+            return httpx2.Response(
+                200,
+                json={"object": "list", "data": [{"id": "native-model"}]},
+            )
+        return httpx2.Response(200, json={"type": "message", "content": []})
+
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
+    provider_config = config(models=["native-model"])
+    provider = OpenAICompatibleProvider(
+        "ttthree",
+        OpenAICompatibleClient(http_client, provider_config),
+        provider_config,
+    )
+
+    try:
+        await provider.refresh_catalog()
+        descriptor = provider.describe("native-model")
+        assert descriptor is not None
+        assert descriptor.endpoints == {
+            ModelEndpoint.ANTHROPIC_MESSAGES,
+            ModelEndpoint.OPENAI_RESPONSES,
+            ModelEndpoint.OPENAI_CHAT_COMPLETIONS,
+        }
+        await provider.send(
+            ModelEndpoint.ANTHROPIC_MESSAGES,
+            {"model": "native-model", "messages": [], "max_tokens": 16},
+            descriptor=descriptor,
+        )
+    finally:
+        await http_client.aclose()
+
+    assert [request.url.path for request in seen] == ["/v1/models", "/v1/messages"]
+
+
+@pytest.mark.asyncio
+async def test_sub2api_count_tokens_reaches_the_native_endpoint() -> None:
+    seen: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(200, json={"input_tokens": 5})
+
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
+    provider_config = config(models=["native-model"])
+    provider = OpenAICompatibleProvider(
+        "ttthree",
+        OpenAICompatibleClient(http_client, provider_config),
+        provider_config,
+    )
+    provider.replace_catalog({"data": [{"id": "native-model"}]})
+
+    try:
+        descriptor = provider.describe("native-model")
+        assert descriptor is not None
+        response = await provider.count_tokens(
+            {"model": "native-model", "messages": [{"role": "user", "content": "hello"}]},
+            descriptor=descriptor,
+        )
+    finally:
+        await http_client.aclose()
+
+    assert response.json() == {"input_tokens": 5}
+    assert [request.url.path for request in seen] == ["/v1/messages/count_tokens"]
 
 
 @pytest.mark.asyncio

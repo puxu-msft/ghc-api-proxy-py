@@ -1,5 +1,7 @@
 from app.model_provider.openai_compatible.client import (
+    ANTHROPIC_MESSAGES_PATH,
     CHAT_COMPLETIONS_PATH,
+    COUNT_TOKENS_PATH,
     EMBEDDINGS_PATH,
     MODELS_PATH,
     RESPONSES_PATH,
@@ -12,8 +14,13 @@ from app.model_provider.openai_compatible.provider import (
     OpenAICompatibleProvider,
 )
 
+Sub2ApiClient = OpenAICompatibleClient
+Sub2ApiProvider = OpenAICompatibleProvider
+
 __all__ = [
+    "ANTHROPIC_MESSAGES_PATH",
     "CHAT_COMPLETIONS_PATH",
+    "COUNT_TOKENS_PATH",
     "DRIVEN_ENDPOINTS",
     "EMBEDDINGS_PATH",
     "MODELS_PATH",
@@ -22,4 +29,6 @@ __all__ = [
     "RESPONSES_PATH",
     "OpenAICompatibleClient",
     "OpenAICompatibleProvider",
+    "Sub2ApiClient",
+    "Sub2ApiProvider",
 ]

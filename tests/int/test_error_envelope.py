@@ -569,24 +569,15 @@ def test_a_translated_leg_spells_upstreams_failure_in_the_clients_dialect() -> N
 
 
 # ---------------------------------------------------------------------------
-# The two remaining exits from the inventory.
+# The remaining count-token fallback path.
 # ---------------------------------------------------------------------------
 
-ONLY_UPSTREAM_COUNTER = {"inbound": {"anthropic_count_tokens": {"providers": ["ghc"], "max_retries": 0}}}
-
-
 @pytest.mark.parametrize("status", [400, 500])
-def test_a_failed_count_reports_what_upstream_said_rather_than_one_flat_503(status: int) -> None:
-    """Upstream's 400 and its 500 are different things, and both used to arrive as 503 with none of its body.
-
-    Parametrised over both rather than asserting one, because the defect was that they were *the same*: `CountTokensUnavailable` flattened every reason into one status and kept no cause to read back.
-
-    The local estimator is configured out. With it in the list this endpoint answers 200 with an estimate and never reaches the failure at all — which is the right default and also means a test using it would prove nothing about this path.
-    """
+def test_a_failed_count_falls_back_to_the_local_estimate(status: int) -> None:
+    """A routed upstream failure does not make count_tokens unavailable."""
     client, _ = make_client(
         failing_upstream(status, content=b'{"error":{"message":"upstream says"}}',
                          headers={"content-type": "application/json"}),
-        overrides=ONLY_UPSTREAM_COUNTER,
     )
 
     response = client.post(
@@ -594,13 +585,12 @@ def test_a_failed_count_reports_what_upstream_said_rather_than_one_flat_503(stat
         json={"model": "claude-model", "messages": [{"role": "user", "content": "hi"}]},
     )
 
-    assert response.status_code == status
-    # Upstream's own body: this is a direct path, and a count is not exempt from that.
-    assert response.json() == {"error": {"message": "upstream says"}}
+    assert response.status_code == 200
+    assert response.json()["estimated"] is True
 
 
 def test_the_local_estimator_still_answers_when_it_is_configured() -> None:
-    """The control for the test above. Without it, `providers: ["ghc"]` could be doing the work rather than the read-through."""
+    """The local estimate remains the fallback when upstream is unavailable."""
     client, _ = make_client(failing_upstream(500))
 
     response = client.post(

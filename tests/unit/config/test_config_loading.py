@@ -203,14 +203,11 @@ def test_added_provider_is_pinned_out_as_one_graph_change() -> None:
     )
 
 
-def test_provider_graph_change_restores_default_fallback_and_count_selectors() -> None:
+def test_provider_graph_change_restores_default_and_fallback() -> None:
     startup = ProxyConfig.model_validate(
         {
             "model_providers": {"ghc": {"type": "github_copilot"}},
             "default_model_provider": "ghc",
-            "inbound": {
-                "anthropic_count_tokens": {"providers": ["ghc", "local"]}
-            },
         }
     )
     candidate = ProxyConfig.model_validate(
@@ -221,9 +218,6 @@ def test_provider_graph_change_restores_default_fallback_and_count_selectors() -
             },
             "default_model_provider": "xingchen",
             "fallback_model_provider": "xingchen",
-            "inbound": {
-                "anthropic_count_tokens": {"providers": ["xingchen", "local"]}
-            },
         }
     )
 
@@ -232,41 +226,11 @@ def test_provider_graph_change_restores_default_fallback_and_count_selectors() -
     assert set(outcome.config.model_providers) == {"ghc"}
     assert outcome.config.default_model_provider == "ghc"
     assert outcome.config.fallback_model_provider == ""
-    assert outcome.config.inbound.anthropic_count_tokens.providers == ["ghc", "local"]
     assert outcome.restart_required == (
         "default_model_provider",
         "fallback_model_provider",
-        "inbound.anthropic_count_tokens.providers",
         "model_providers.xingchen",
     )
-
-
-def test_graph_change_restores_an_implicit_count_selector_as_implicit() -> None:
-    startup = ProxyConfig.model_validate(
-        {
-            "model_providers": {"only": {"type": "github_copilot"}},
-            "default_model_provider": "only",
-        }
-    )
-    candidate = ProxyConfig.model_validate(
-        {
-            "model_providers": {
-                "only": {"type": "github_copilot"},
-                "xingchen": xingchen_values(),
-            },
-            "default_model_provider": "only",
-            "inbound": {
-                "anthropic_count_tokens": {"providers": ["xingchen", "local"]}
-            },
-        }
-    )
-
-    outcome = pin_restart_only(startup, candidate)
-
-    assert set(outcome.config.model_providers) == {"only"}
-    assert outcome.config.inbound.anthropic_count_tokens.providers == ["ghc", "local"]
-    assert "providers" not in outcome.config.inbound.anthropic_count_tokens.model_fields_set
-    assert "inbound.anthropic_count_tokens.providers" in outcome.restart_required
 
 
 def test_removed_provider_is_restored_as_one_graph_change() -> None:

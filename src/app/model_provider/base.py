@@ -105,7 +105,9 @@ class ModelProvider(Protocol):
     ) -> httpx2.Response:
         """Ask upstream how many tokens an Anthropic Messages body comes to.
 
-        On the protocol rather than on one implementation because the spec's `inbound.anthropic_count_tokens.providers` names a model provider among the legs it may try; a counter that only some providers offered could not be selected by name.
+        On the protocol because the routed model provider decides whether this
+        upstream leg exists; callers must not hard-code a provider-specific
+        counting path.
 
         Gated on descriptor ownership and the Messages capability, the same as sending that body would be.
         """

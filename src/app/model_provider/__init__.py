@@ -12,14 +12,16 @@ from app.model_provider.github_copilot import (
 )
 from app.model_provider.github_copilot import GithubCopilotProvider
 from app.model_provider.openai_compatible import (
-    PROVIDER_TYPE as OPENAI_COMPATIBLE_PROVIDER_TYPE,
+    PROVIDER_TYPE as SUB2API_PROVIDER_TYPE,
 )
 from app.model_provider.openai_compatible import (
-    PROVIDER_TYPES as OPENAI_COMPATIBLE_PROVIDER_TYPES,
+    PROVIDER_TYPES as SUB2API_PROVIDER_TYPES,
 )
 from app.model_provider.openai_compatible import (
     OpenAICompatibleClient,
     OpenAICompatibleProvider,
+    Sub2ApiClient,
+    Sub2ApiProvider,
 )
 from app.model_provider.registry import (
     ProviderNotConfigured,
@@ -57,8 +59,8 @@ from app.model_provider.xingchen import XingchenClient, XingchenProvider
 __all__ = [
     "CODEBUDDY_PROVIDER_TYPE",
     "GITHUB_COPILOT_PROVIDER_TYPE",
-    "OPENAI_COMPATIBLE_PROVIDER_TYPE",
-    "OPENAI_COMPATIBLE_PROVIDER_TYPES",
+    "SUB2API_PROVIDER_TYPE",
+    "SUB2API_PROVIDER_TYPES",
     "XINGCHEN_PROVIDER_TYPE",
     "CapabilityMissing",
     "CatalogProvider",
@@ -82,6 +84,8 @@ __all__ = [
     "ProviderRegistry",
     "ResolvedEndpoints",
     "ResponseModeNotSupported",
+    "Sub2ApiClient",
+    "Sub2ApiProvider",
     "UnknownModel",
     "XingchenClient",
     "XingchenProvider",
