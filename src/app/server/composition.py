@@ -24,6 +24,7 @@ from app.config.paths import expand_user_path, user_data_path
 from app.config.schema import (
     CodebuddyProviderConfig,
     GithubCopilotProviderConfig,
+    OpenAICompatibleProviderConfig,
     ProxyConfig,
     XingchenProviderConfig,
 )
@@ -31,6 +32,7 @@ from app.core.chain import Chain
 from app.model_provider import (
     CODEBUDDY_PROVIDER_TYPE,
     GITHUB_COPILOT_PROVIDER_TYPE,
+    OPENAI_COMPATIBLE_PROVIDER_TYPES,
     XINGCHEN_PROVIDER_TYPE,
     GithubCopilotProvider,
     ModelProvider,
@@ -66,6 +68,10 @@ from app.model_provider.ghc_client.auth.providers import (
     NoGitHubToken,
 )
 from app.model_provider.ghc_client.config import AccountType
+from app.model_provider.openai_compatible import (
+    OpenAICompatibleClient,
+    OpenAICompatibleProvider,
+)
 from app.pipeline.events import SubscriberRegistry
 from app.pipeline.model_resolution import inspect_mappings
 from app.pipeline.rate_limiting import RateLimiter
@@ -534,6 +540,16 @@ def build_xingchen_provider(
     return XingchenProvider(name, client, provider_config)
 
 
+def build_openai_compatible_provider(
+    name: str,
+    provider_config: OpenAICompatibleProviderConfig,
+    *,
+    http_client: httpx2.AsyncClient,
+) -> OpenAICompatibleProvider:
+    client = OpenAICompatibleClient(http_client, provider_config)
+    return OpenAICompatibleProvider(name, client, provider_config)
+
+
 def build_chain(
     config: ProxyConfig,
     *,
@@ -560,7 +576,7 @@ def build_chain(
         GITHUB_COPILOT_PROVIDER_TYPE,
         XINGCHEN_PROVIDER_TYPE,
         CODEBUDDY_PROVIDER_TYPE,
-    }
+    } | OPENAI_COMPATIBLE_PROVIDER_TYPES
     for name, provider_config in config.model_providers.items():
         if provider_config.type not in supported_provider_types:
             raise ValueError(f"unsupported provider type {provider_config.type!r} for {name!r}")
@@ -601,6 +617,12 @@ def build_chain(
                 # rule the Copilot branch follows, with the file read (and refreshed)
                 # at the first request instead.
                 built[name] = build_codebuddy_provider(name, provider_config, http_client=client)
+            elif isinstance(provider_config, OpenAICompatibleProviderConfig):
+                built[name] = build_openai_compatible_provider(
+                    name,
+                    provider_config,
+                    http_client=client,
+                )
             else:
                 built[name] = build_xingchen_provider(
                     name,
@@ -711,6 +733,7 @@ __all__ = [
     "build_copilot_provider",
     "build_github_token_source",
     "build_http_client",
+    "build_openai_compatible_provider",
     "build_request_headers",
     "build_xingchen_provider",
     "github_token_path",

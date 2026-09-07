@@ -1,7 +1,4 @@
-"""`refresh_catalogs` keeps one provider's failure from becoming every provider's failure.
-
-Its own file because the defect it guards against is invisible from everywhere else. Catalogues load once, at start-up; nothing retries them (`run_model_refresh_loop` has no caller, `model_refresh_interval` no consumer on this chain); and a provider that never loaded surfaces only as `/health/readiness` answering 503 for the life of the process. An independent review found that a secondary provider with a stale token could take the **default** provider down with it, and which one got refreshed depended on `frozenset` iteration order.
-"""
+"""Catalog refresh keeps provider failures isolated and recoverable."""
 
 from types import SimpleNamespace
 from typing import cast
@@ -89,12 +86,23 @@ async def test_providers_are_refreshed_in_a_deterministic_order() -> None:
     assert log == ["alpha", "mid", "zeta"]
 
 
-def test_only_positive_dynamic_provider_intervals_create_refresh_jobs() -> None:
+def test_only_positive_catalog_provider_intervals_create_refresh_jobs() -> None:
     config = ProxyConfig.model_validate(
         {
             "model_providers": {
                 "active": {"type": "github_copilot", "model_refresh_interval": 17},
                 "disabled": {"type": "github_copilot", "model_refresh_interval": 0},
+                "responses": {
+                    "type": "openai_compatible",
+                    "api_base_url": "https://ttthree.example/v1",
+                    "model_refresh_interval": 23,
+                },
+                "static-responses": {
+                    "type": "openai_compatible",
+                    "api_base_url": "https://ttthree.example/v1",
+                    "models": ["model"],
+                    "model_refresh_interval": 29,
+                },
                 "static": {"type": "codebuddy"},
             },
             "default_model_provider": "active",
@@ -102,7 +110,11 @@ def test_only_positive_dynamic_provider_intervals_create_refresh_jobs() -> None:
     )
     chain = cast(Chain, SimpleNamespace(config=config))
 
-    assert _catalog_refresh_intervals(chain) == (("active", 17),)
+    assert _catalog_refresh_intervals(chain) == (
+        ("active", 17),
+        ("responses", 23),
+        ("static-responses", 29),
+    )
 
 
 @pytest.mark.asyncio
@@ -149,6 +161,11 @@ async def test_pipeline_lifespan_starts_and_cancels_the_configured_refresh_task(
             "model_providers": {
                 "active": {"type": "github_copilot", "model_refresh_interval": 17},
                 "disabled": {"type": "github_copilot", "model_refresh_interval": 0},
+                "responses": {
+                    "type": "openai_compatible",
+                    "api_base_url": "https://ttthree.example/v1",
+                    "model_refresh_interval": 23,
+                },
                 "static": {"type": "codebuddy"},
             },
             "default_model_provider": "active",
@@ -159,7 +176,9 @@ async def test_pipeline_lifespan_starts_and_cancels_the_configured_refresh_task(
         Chain,
         SimpleNamespace(
             config=config,
-            providers=_Registry({"active": _Provider("active")}),
+            providers=_Registry(
+                {"active": _Provider("active"), "responses": _Provider("responses")}
+            ),
             tokenization=tokenization,
             active_requests=object(),
             capabilities=object(),
@@ -171,7 +190,7 @@ async def test_pipeline_lifespan_starts_and_cancels_the_configured_refresh_task(
         async with app.router.lifespan_context(app):
             await entered.wait()
 
-    assert calls == [("active", 17)]
+    assert calls == [("active", 17), ("responses", 23)]
     assert tokenization.loaded is True
     assert tokenization.flushed is True
     assert cancelled.is_set()

@@ -7,6 +7,7 @@ A request that started under one version keeps seeing it.
 """
 
 from typing import Annotated, Literal, cast
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -50,6 +51,8 @@ NOT_HOT_RELOADABLE = frozenset(
         "model_providers.*.gateway_api_key",
         "model_providers.*.github_token_file",
         "model_providers.*.install_id",
+        "model_providers.*.api_key",
+        "model_providers.*.default_endpoint",
         "model_providers.*.models",
         "model_providers.*.route_target",
         "model_providers.*.type",
@@ -69,6 +72,8 @@ NOT_HOT_RELOADABLE = frozenset(
 
 # Fields shared with an older provider but fixed into the Xingchen instance at startup. Kept type-scoped so this feature does not silently change the existing GitHub Copilot hot-reload contract.
 PROVIDER_NOT_HOT_RELOADABLE: dict[str, frozenset[str]] = {
+    "openai_compatible": frozenset({"disabled_models", "model_refresh_interval"}),
+    "openai": frozenset({"disabled_models", "model_refresh_interval"}),
     "xingchen": frozenset({"disabled_models"}),
 }
 
@@ -203,8 +208,54 @@ class CodebuddyProviderConfig(_ModelProviderConfigBase):
     auth_state_file: str = ""
 
 
+class OpenAICompatibleProviderConfig(_ModelProviderConfigBase):
+    type: Literal["openai_compatible", "openai"]
+    api_base_url: str = Field(default="", min_length=1, validate_default=True)
+    api_key: str = Field(default="", repr=False)
+    models: list[str] = Field(default_factory=list)
+    model_refresh_interval: int = Field(default=3600, ge=0)
+    # OpenAI-compatible catalogues frequently omit endpoint capabilities. Responses
+    # is the safe default for this proxy because it is the primary translation target.
+    default_endpoint: Literal["responses", "chat_completions"] = "responses"
+
+    @field_validator("api_base_url")
+    @classmethod
+    def _api_base_url_may_not_be_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("api_base_url may not be empty or blank")
+        if value != value.strip():
+            raise ValueError("api_base_url may not have leading or trailing whitespace")
+        try:
+            parsed = urlsplit(value)
+            port = parsed.port
+        except ValueError as error:
+            raise ValueError("api_base_url must be a valid absolute HTTP(S) URL") from error
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or (port is not None and not 1 <= port <= 65535)
+        ):
+            raise ValueError("api_base_url must be a valid absolute HTTP(S) URL")
+        return value
+
+    @field_validator("models")
+    @classmethod
+    def _models_must_be_distinct_and_addressable(cls, value: list[str]) -> list[str]:
+        if any(not model.strip() for model in value):
+            raise ValueError("models may not contain an empty or blank id")
+        if len(value) != len(set(value)):
+            raise ValueError("models may not contain duplicate ids")
+        canonical = [_canonical_model_name(model) for model in value]
+        if len(canonical) != len(set(canonical)):
+            raise ValueError("models may not contain canonically equivalent ids")
+        return value
+
+
 type ModelProviderConfig = Annotated[
-    GithubCopilotProviderConfig | XingchenProviderConfig | CodebuddyProviderConfig,
+    GithubCopilotProviderConfig
+    | XingchenProviderConfig
+    | CodebuddyProviderConfig
+    | OpenAICompatibleProviderConfig,
     Field(discriminator="type"),
 ]
 
