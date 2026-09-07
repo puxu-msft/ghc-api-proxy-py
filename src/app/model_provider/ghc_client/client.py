@@ -36,13 +36,13 @@ class GhcApiClient:
         self._config = config
         self._interaction_id = interaction_id
 
-    async def request_headers(
+    async def headers_for_interaction(
         self,
+        interaction_id: str,
         *,
         extra_headers: Mapping[str, str] | None = None,
-        interaction_id: str | None = None,
     ) -> dict[str, str]:
-        """The upstream headers, with anything the caller adds underneath rather than on top.
+        """Build headers for one explicit Copilot interaction.
 
         `build_request_headers` already says the protocol and identity fields are owned by this library, and they have to be: the identity set makes the request look like Copilot Chat, and upstream rejects requests that do not. A caller forwarding a client's headers would otherwise replace `user-agent` — or `Authorization` — without anything failing loudly.
 
@@ -52,7 +52,7 @@ class GhcApiClient:
         headers = build_request_headers(
             token,
             self._config,
-            interaction_id=interaction_id or self._interaction_id,
+            interaction_id=interaction_id,
         )
         if extra_headers:
             owned = {name.lower() for name in headers}
@@ -66,6 +66,17 @@ class GhcApiClient:
             }
         return headers
 
+    async def catalog_headers(
+        self,
+        *,
+        extra_headers: Mapping[str, str] | None = None,
+    ) -> dict[str, str]:
+        """Build headers for provider-owned catalog traffic without a client session."""
+        return await self.headers_for_interaction(
+            self._interaction_id,
+            extra_headers=extra_headers,
+        )
+
     async def _post_openai(
         self,
         path: str,
@@ -73,16 +84,16 @@ class GhcApiClient:
         *,
         stream: bool,
         extra_headers: Mapping[str, str] | None = None,
-        interaction_id: str | None = None,
+        interaction_id: str,
     ) -> httpx2.Response:
         return await self._openai.post(
             path,
             cast_to=httpx2.Response,
             body=cast(OpenAIBody, dict(payload)),
             options={
-                "headers": await self.request_headers(
+                "headers": await self.headers_for_interaction(
+                    interaction_id,
                     extra_headers=extra_headers,
-                    interaction_id=interaction_id,
                 )
             },
             stream=stream,
@@ -95,16 +106,16 @@ class GhcApiClient:
         *,
         stream: bool,
         extra_headers: Mapping[str, str] | None = None,
-        interaction_id: str | None = None,
+        interaction_id: str,
     ) -> httpx2.Response:
         return await self._anthropic.post(
             path,
             cast_to=httpx2.Response,
             body=cast(AnthropicBody, dict(payload)),
             options={
-                "headers": await self.request_headers(
+                "headers": await self.headers_for_interaction(
+                    interaction_id,
                     extra_headers=extra_headers,
-                    interaction_id=interaction_id,
                 )
             },
             stream=stream,
@@ -130,7 +141,7 @@ class GhcApiClient:
         *,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
-        interaction_id: str | None = None,
+        interaction_id: str,
     ) -> httpx2.Response:
         return await self._in_pipeline_terms(
             self._post_openai(
@@ -148,7 +159,7 @@ class GhcApiClient:
         *,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
-        interaction_id: str | None = None,
+        interaction_id: str,
     ) -> httpx2.Response:
         return await self._in_pipeline_terms(
             self._post_anthropic(
@@ -165,7 +176,12 @@ class GhcApiClient:
         payload: Mapping[str, Any],
     ) -> httpx2.Response:
         return await self._in_pipeline_terms(
-            self._post_anthropic("/v1/messages/count_tokens", payload, stream=False)
+            self._post_anthropic(
+                "/v1/messages/count_tokens",
+                payload,
+                stream=False,
+                interaction_id=self._interaction_id,
+            )
         )
 
     async def send_responses(
@@ -174,7 +190,7 @@ class GhcApiClient:
         *,
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
-        interaction_id: str | None = None,
+        interaction_id: str,
     ) -> httpx2.Response:
         return await self._in_pipeline_terms(
             self._post_openai(
@@ -190,7 +206,7 @@ class GhcApiClient:
         self,
         payload: Mapping[str, Any],
         *,
-        interaction_id: str | None = None,
+        interaction_id: str,
     ) -> httpx2.Response:
         return await self._in_pipeline_terms(
             self._post_openai(

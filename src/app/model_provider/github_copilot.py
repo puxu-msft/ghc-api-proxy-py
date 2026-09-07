@@ -172,7 +172,7 @@ class GithubCopilotProvider:
         The headers are obtained per call rather than held from construction: the Copilot token expires, so a set captured once would authenticate the first refresh and nothing after it.
         Held headers are merged on top for the catalog-specific extras a caller passed in.
         """
-        headers = await self._client.request_headers(extra_headers=self._catalog_headers)
+        headers = await self._client.catalog_headers(extra_headers=self._catalog_headers)
         page = await fetch_models(
             self._http,
             self._base_url,
@@ -200,6 +200,8 @@ class GithubCopilotProvider:
         require_endpoint(descriptor, endpoint, self._name)
         if endpoint not in _SEND_METHODS:
             raise EndpointNotImplemented(self._name, endpoint.value)
+        if interaction_id is None:
+            raise ValueError("GitHub Copilot inference requires an interaction_id")
 
         if endpoint is ModelEndpoint.ANTHROPIC_MESSAGES:
             return await self._client.send_anthropic_messages(

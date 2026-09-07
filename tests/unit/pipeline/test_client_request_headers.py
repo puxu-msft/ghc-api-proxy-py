@@ -83,7 +83,7 @@ def test_the_floor_is_a_blacklist_so_an_unknown_client_header_survives_it() -> N
 
     Under the old allowlist only `anthropic-beta` and `anthropic-version` ever travelled. The document asks for a blacklist on the direct path, so a header nobody enumerated now reaches the next stage — which is the point, and also why the floor above it has to be right.
 
-    `user-agent` surviving *here* is not the same as it reaching upstream: it collides with a header the proxy owns, and `GhcApiClient.request_headers` is what drops it. That is a separate test, in a separate file, because it is a separate guarantee.
+    `user-agent` surviving *here* is not the same as it reaching upstream: it collides with a header the proxy owns, and `GhcApiClient.headers_for_interaction` is what drops it. That is a separate test, in a separate file, because it is a separate guarantee.
     """
     forwarded = forwarded_client_headers(
         {

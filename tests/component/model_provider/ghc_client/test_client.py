@@ -88,7 +88,13 @@ async def test_each_endpoint_is_posted_with_copilot_auth(method: str, path: str)
 
     client, http_client = build_client(handler)
     try:
-        await getattr(client, method)({"model": "any-model"})
+        if method == "send_anthropic_count_tokens":
+            await getattr(client, method)({"model": "any-model"})
+        else:
+            await getattr(client, method)(
+                {"model": "any-model"},
+                interaction_id="interaction",
+            )
     finally:
         await http_client.aclose()
 
@@ -103,7 +109,11 @@ async def test_each_endpoint_is_posted_with_copilot_auth(method: str, path: str)
 async def test_streaming_response_is_returned_unconsumed() -> None:
     client, http_client = build_client(token_or(httpx2.Response(200, stream=RawByteStream())))
     try:
-        response = await client.send_anthropic_messages({"model": "m"}, stream=True)
+        response = await client.send_anthropic_messages(
+            {"model": "m"},
+            stream=True,
+            interaction_id="interaction",
+        )
         assert response.is_stream_consumed is False
         body = await response.aread()
         await response.aclose()
@@ -131,6 +141,7 @@ async def test_extra_headers_reach_the_anthropic_leg() -> None:
         await client.send_anthropic_messages(
             {"model": "m"},
             extra_headers={"anthropic-beta": "probe"},
+            interaction_id="interaction",
         )
     finally:
         await http_client.aclose()
@@ -143,7 +154,7 @@ async def test_extra_headers_reach_the_anthropic_leg() -> None:
 async def test_a_forwarded_header_never_travels_beside_the_one_it_collides_with(leg: str) -> None:
     """The proxy's own value wins, and the loser does not come along for the ride.
 
-    `request_headers` merged with `{**extra, **owned}`, which only lets the owned value win when the two spellings are byte-equal — and they are not. This library writes `Authorization` capitalised; a header forwarded from a client arrives lowercased. Two dict keys, both surviving.
+    `headers_for_interaction` merges `{**extra, **owned}`, which only lets the owned value win when the two spellings are byte-equal — and they are not. This library writes `Authorization` capitalised; a header forwarded from a client arrives lowercased. Two dict keys, both surviving.
 
     **Both legs, and that is the whole point.** The first version of this test ran on the Anthropic leg only and was useless: `httpx2.Headers.__setitem__` folds the collision away inside that SDK, so the owned value won there whatever this function did. Measured 2026-08-22 with the fix reverted — Anthropic leg one `authorization`, Responses leg **two**. A test that only saw the leg the SDK protects is named for a guarantee it cannot observe, which is how a fix gets reported healthy after it breaks.
 
@@ -170,6 +181,7 @@ async def test_a_forwarded_header_never_travels_beside_the_one_it_collides_with(
                 "x-interaction-type": "client-chosen",
                 "anthropic-beta": "probe",
             },
+            interaction_id="interaction",
         )
     finally:
         await http_client.aclose()
@@ -216,6 +228,19 @@ async def test_an_explicit_interaction_id_becomes_the_owned_upstream_header() ->
 
 
 @pytest.mark.asyncio
+async def test_catalog_headers_use_the_provider_fallback() -> None:
+    client, http_client = build_client(
+        token_or(httpx2.Response(200, json={"ok": True}))
+    )
+    try:
+        headers = await client.catalog_headers()
+    finally:
+        await http_client.aclose()
+
+    assert headers["X-Interaction-Id"] == "interaction"
+
+
+@pytest.mark.asyncio
 async def test_ordinary_send_raises_in_the_pipelines_vocabulary() -> None:
     """A 429 has to arrive in the driver's own vocabulary, or its budget is never consulted.
 
@@ -228,7 +253,7 @@ async def test_ordinary_send_raises_in_the_pipelines_vocabulary() -> None:
     )
     try:
         with pytest.raises(UpstreamRateLimit) as raised:
-            await client.send_responses({"model": "m"})
+            await client.send_responses({"model": "m"}, interaction_id="interaction")
     finally:
         await http_client.aclose()
 

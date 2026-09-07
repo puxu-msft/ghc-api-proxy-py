@@ -369,6 +369,7 @@ async def test_inflight_send_uses_the_descriptor_captured_before_catalog_replace
             ModelEndpoint.ANTHROPIC_MESSAGES,
             {"model": "claude-model"},
             descriptor=captured,
+            interaction_id="test-interaction",
         )
     finally:
         await http_client.aclose()
@@ -399,11 +400,34 @@ async def test_send_reaches_the_endpoint_the_model_advertises() -> None:
             ModelEndpoint.ANTHROPIC_MESSAGES,
             {"model": "claude-model"},
             descriptor=descriptor_for(provider, "claude-model"),
+            interaction_id="test-interaction",
         )
     finally:
         await http_client.aclose()
 
     assert [str(request.url) for request in seen] == [f"{BASE_URL}/v1/messages"]
+
+
+@pytest.mark.asyncio
+async def test_github_inference_requires_an_explicit_interaction_id() -> None:
+    seen: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(200, json={"ok": True})
+
+    provider, http_client = build_provider(handler)
+    try:
+        with pytest.raises(ValueError, match="interaction_id"):
+            await provider.send(
+                ModelEndpoint.ANTHROPIC_MESSAGES,
+                {"model": "claude-model"},
+                descriptor=descriptor_for(provider, "claude-model"),
+            )
+    finally:
+        await http_client.aclose()
+
+    assert seen == []
 
 
 @pytest.mark.asyncio
@@ -614,6 +638,7 @@ async def test_a_model_with_an_unstated_endpoint_can_actually_be_sent_to() -> No
             ModelEndpoint.OPENAI_CHAT_COMPLETIONS,
             {"model": "chatter"},
             descriptor=descriptor_for(provider, "chatter"),
+            interaction_id="test-interaction",
         )
     finally:
         await http_client.aclose()
