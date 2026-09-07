@@ -16,8 +16,10 @@ from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 from prometheus_client import REGISTRY, generate_latest
 
+from app.config.schema import GithubCopilotProviderConfig
 from app.core.chain import Chain
 from app.model_provider.base import ModelProvider
+from app.model_provider.copilot_pricing import pricing_for
 from app.pipeline.model_resolution import canonical
 from app.pipeline.routing import route_table
 from app.server.app_state import chain_of
@@ -156,6 +158,12 @@ def _model_entries(chain: Chain) -> list[dict[str, Any]]:
         provider = chain.providers.get(row.provider)
         entry = _upstream_metadata(provider, row.model)
         entry.update({"id": row.name, "object": "model", "owned_by": row.provider})
+        provider_config = chain.config.model_providers.get(row.provider)
+        if isinstance(provider_config, GithubCopilotProviderConfig):
+            pricing = pricing_for(row.model)
+            if pricing is not None:
+                entry["copilot_pricing"] = pricing
+                entry.setdefault("pricing", pricing)
         data.append(entry)
     return data
 
@@ -180,23 +188,62 @@ def _string_mapping(value: object) -> Mapping[str, Any]:
 
 
 def _pi_cost(entry: dict[str, Any]) -> dict[str, int | float] | None:
-    pricing = _string_mapping(entry.get("pricing"))
+    pricing = _string_mapping(entry.get("copilot_pricing", entry.get("pricing")))
     if not pricing:
         return None
     names = {
         "input": ("input",),
         "output": ("output",),
-        "cacheRead": ("cacheRead", "cache_read", "cache_read_input_tokens"),
+        "cacheRead": (
+            "cacheRead",
+            "cached_input",
+            "cache_read",
+            "cache_read_input_tokens",
+        ),
         "cacheWrite": ("cacheWrite", "cache_write", "cache_creation_input_tokens"),
     }
-    cost: dict[str, int | float] = {}
-    for target, candidates in names.items():
-        for candidate in candidates:
-            value = _pi_number(pricing.get(candidate))
-            if value is not None:
-                cost[target] = value
-                break
-    return cost if len(cost) == len(names) else None
+
+    def rates(value: Mapping[str, Any]) -> dict[str, int | float] | None:
+        result: dict[str, int | float] = {}
+        for target, candidates in names.items():
+            for candidate in candidates:
+                number = _pi_number(value.get(candidate))
+                if number is not None:
+                    result[target] = number
+                    break
+        return result if len(result) == len(names) else None
+
+    raw_tiers = pricing.get("tiers")
+    if isinstance(raw_tiers, list):
+        tiers = [_string_mapping(tier) for tier in cast(list[Any], raw_tiers)]
+        tiers = [tier for tier in tiers if tier]
+        if not tiers:
+            return None
+        base = next(
+            (tier for tier in tiers if tier.get("name") == "default"),
+            tiers[0],
+        )
+        base_rates = rates(base)
+        if base_rates is None:
+            return None
+        cost: dict[str, Any] = dict(base_rates)
+        converted_tiers: list[dict[str, Any]] = []
+        for tier in tiers:
+            if tier is base:
+                continue
+            minimum = tier.get("input_min_tokens")
+            tier_rates = rates(tier)
+            if type(minimum) is not int or minimum <= 0 or tier_rates is None:
+                return None
+            converted_tiers.append(
+                {"inputTokensAbove": minimum - 1, **tier_rates}
+            )
+        if converted_tiers:
+            cost["tiers"] = converted_tiers
+        return cost
+
+    direct_cost = rates(pricing)
+    return direct_cost
 
 
 def _pi_api(entry: dict[str, Any]) -> str | None:
@@ -338,7 +385,11 @@ def _without_credentials(url: str) -> str:
 
 
 _CREDENTIAL_REDACTION = "***"
-_XINGCHEN_CREDENTIAL_FIELDS = frozenset({"gateway_api_key", "x_token"})
+_PROVIDER_CREDENTIAL_FIELDS = {
+    "xingchen": frozenset({"gateway_api_key", "x_token"}),
+    "openai_compatible": frozenset({"api_key"}),
+    "openai": frozenset({"api_key"}),
+}
 
 
 def _redact_model_provider_credentials(data: dict[str, Any]) -> None:
@@ -350,9 +401,15 @@ def _redact_model_provider_credentials(data: dict[str, Any]) -> None:
         if not isinstance(raw_provider, dict):
             continue
         provider = cast(dict[str, Any], raw_provider)
-        if provider.get("type") != "xingchen":
+        provider_type = provider.get("type")
+        fields = (
+            _PROVIDER_CREDENTIAL_FIELDS.get(provider_type)
+            if isinstance(provider_type, str)
+            else None
+        )
+        if fields is None:
             continue
-        for field in _XINGCHEN_CREDENTIAL_FIELDS:
+        for field in fields:
             if field in provider:
                 provider[field] = _CREDENTIAL_REDACTION
 

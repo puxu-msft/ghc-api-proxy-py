@@ -128,6 +128,16 @@ def config_with(mappings: dict[str, str], **rest: Any) -> ProxyConfig:
     return ProxyConfig.model_validate({"model_mappings": mappings, **rest})
 
 
+def github_config(**rest: Any) -> ProxyConfig:
+    return ProxyConfig.model_validate(
+        {
+            "model_providers": {"ghc": {"type": "github_copilot"}},
+            "default_model_provider": "ghc",
+            **rest,
+        }
+    )
+
+
 @pytest.mark.asyncio
 async def test_liveness_says_nothing_about_readiness() -> None:
     """Separate on purpose: a process that is up but cannot route is alive and not ready."""
@@ -250,17 +260,21 @@ async def test_a_model_detail_preserves_the_openai_model_shape() -> None:
         raw_catalog=catalog,
     )
 
-    async with client_for(frozenset(), providers={"ghc": provider}) as client:
+    async with client_for(
+        frozenset(),
+        github_config(),
+        providers={"ghc": provider},
+    ) as client:
         response = await client.get("/v1/models/claude-opus-5")
 
     assert response.status_code == 200
-    assert response.json() == {
-        "id": "claude-opus-5",
-        "created": 1_756_000_000,
-        "name": "Claude Opus 5",
-        "object": "model",
-        "owned_by": "ghc",
-    }
+    body = response.json()
+    assert body["id"] == "claude-opus-5"
+    assert body["created"] == 1_756_000_000
+    assert body["name"] == "Claude Opus 5"
+    assert body["object"] == "model"
+    assert body["owned_by"] == "ghc"
+    assert body["copilot_pricing"]["currency"] == "USD"
 
 
 @pytest.mark.asyncio
@@ -293,7 +307,11 @@ async def test_pi_model_format_projects_catalog_capabilities() -> None:
         raw_catalog=catalog,
     )
 
-    async with client_for(frozenset(), providers={"ghc": provider}) as client:
+    async with client_for(
+        frozenset(),
+        github_config(),
+        providers={"ghc": provider},
+    ) as client:
         response = await client.get("/v1/models?format=pi")
 
     assert response.status_code == 200
@@ -309,13 +327,19 @@ async def test_pi_model_format_projects_catalog_capabilities() -> None:
                 "contextWindow": 200_000,
                 "maxTokens": 16_000,
                 "compat": {"forceAdaptiveThinking": True},
+                "cost": {
+                    "input": 5.0,
+                    "output": 25.0,
+                    "cacheRead": 0.5,
+                    "cacheWrite": 6.25,
+                },
             }
         ],
     }
 
 
 @pytest.mark.asyncio
-async def test_pi_model_format_does_not_invent_missing_cost_rates() -> None:
+async def test_pi_model_format_uses_cached_rates_and_excludes_none_reasoning() -> None:
     provider = StubProvider(
         "ghc",
         frozenset({"claude-opus-5"}),
@@ -330,13 +354,74 @@ async def test_pi_model_format_does_not_invent_missing_cost_rates() -> None:
         },
     )
 
-    async with client_for(frozenset(), providers={"ghc": provider}) as client:
+    async with client_for(
+        frozenset(),
+        github_config(),
+        providers={"ghc": provider},
+    ) as client:
         response = await client.get("/v1/models/claude-opus-5?format=pi")
 
     assert response.status_code == 200
     body = response.json()
     assert body["reasoning"] is False
-    assert "cost" not in body
+    assert body["cost"] == {
+        "input": 5.0,
+        "output": 25.0,
+        "cacheRead": 0.5,
+        "cacheWrite": 6.25,
+    }
+
+
+@pytest.mark.asyncio
+async def test_model_list_includes_cached_price_tiers_and_credit_rates() -> None:
+    provider = StubProvider(
+        "ghc",
+        frozenset({"gpt-5.6-sol"}),
+        raw_catalog={"data": [{"id": "gpt-5.6-sol", "name": "GPT-5.6 Sol"}]},
+    )
+
+    async with client_for(
+        frozenset(),
+        github_config(),
+        providers={"ghc": provider},
+    ) as client:
+        response = await client.get("/v1/models")
+
+    pricing = response.json()["data"][0]["copilot_pricing"]
+    assert pricing["source"].endswith("/models-and-pricing")
+    assert pricing["tiers"][0]["credits"] == {
+        "input": 400,
+        "cached_input": 40,
+        "cache_write": 500,
+        "output": 2000,
+    }
+    assert pricing["tiers"][1]["input_min_tokens"] == 272_001
+
+
+@pytest.mark.asyncio
+async def test_model_list_does_not_apply_copilot_prices_to_another_provider() -> None:
+    provider = StubProvider(
+        "ghc",
+        frozenset({"gpt-5.6-sol"}),
+        raw_catalog={"data": [{"id": "gpt-5.6-sol"}]},
+    )
+
+    config = ProxyConfig.model_validate(
+        {
+            "model_providers": {"ghc": {"type": "codebuddy"}},
+            "default_model_provider": "ghc",
+        }
+    )
+    client = client_for(
+        frozenset(),
+        config,
+        providers={"ghc": provider},
+    )
+    async with client:
+        response = await client.get("/v1/models")
+
+    assert response.status_code == 200
+    assert "copilot_pricing" not in response.json()["data"][0]
 
 
 @pytest.mark.asyncio
