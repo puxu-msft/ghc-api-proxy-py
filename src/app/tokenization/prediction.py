@@ -7,6 +7,7 @@ snapshot.  Persistence, queues, and checkpoint policy belong to later slices.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import exp, log
 from statistics import median
 
 from app.tokenization.types import (
@@ -14,6 +15,7 @@ from app.tokenization.types import (
     AnchorUseIntent,
     EstimateFeatures,
     ExactAnchor,
+    LearningIdentity,
     LearningSnapshot,
     MethodChampion,
     PredictionCandidateKey,
@@ -23,7 +25,10 @@ from app.tokenization.types import (
     PredictionMethod,
     PredictionRecord,
     PrefixAnchor,
+    PrefixFingerprint,
+    ProfileKey,
     SampleKey,
+    StoredSample,
     TokenPrediction,
 )
 
@@ -36,6 +41,29 @@ _PREFIX_KEY = PredictionCandidateKey(
 _COLD_KEY = PredictionCandidateKey(
     PredictionMethod.COLD_START, PredictionCandidateVariant.DETERMINISTIC
 )
+_PREFIX_ADDITIVE_KEY = PredictionCandidateKey(
+    PredictionMethod.HISTORY_PREFIX, PredictionCandidateVariant.ADDITIVE
+)
+_PREFIX_MULTIPLICATIVE_KEY = PredictionCandidateKey(
+    PredictionMethod.HISTORY_PREFIX, PredictionCandidateVariant.MULTIPLICATIVE
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _PrefixPair:
+    base: StoredSample
+    longer: StoredSample
+    suffix_baseline_delta: float
+
+
+@dataclass(frozen=True, slots=True)
+class PrefixPairIndex:
+    """Immutable, point-in-time historical prefix pairs for one snapshot."""
+
+    identity: LearningIdentity
+    active_epoch: int
+    revision: int
+    pairs: tuple[_PrefixPair, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,10 +75,13 @@ class _PredictionBuild:
 
 
 def predict_exact_or_prefix(
-    features: EstimateFeatures, snapshot: LearningSnapshot
+    features: EstimateFeatures,
+    snapshot: LearningSnapshot,
+    *,
+    prefix_pair_index: PrefixPairIndex | None = None,
 ) -> PredictionDecision:
     """Select the request-side prediction and its optional anchor-use intent."""
-    result = _build_predictions(features, snapshot)
+    result = _build_predictions(features, snapshot, prefix_pair_index=prefix_pair_index)
     return PredictionDecision(
         prediction=result.selected,
         anchor_use_intent=result.intents.get(result.selected.candidate_key),
@@ -58,14 +89,18 @@ def predict_exact_or_prefix(
 
 
 def build_prediction_record(
-    sample_key: SampleKey, features: EstimateFeatures, snapshot: LearningSnapshot
+    sample_key: SampleKey,
+    features: EstimateFeatures,
+    snapshot: LearningSnapshot,
+    *,
+    prefix_pair_index: PrefixPairIndex | None = None,
 ) -> PredictionRecord:
     """Freeze all currently available candidates before the current label is learned."""
     if sample_key in {sample.sample_key for sample in snapshot.samples} or sample_key in {
         record.sample_key for record in snapshot.prediction_records
     }:
         raise ValueError("current sample key must not already be present in the prediction snapshot")
-    result = _build_predictions(features, snapshot)
+    result = _build_predictions(features, snapshot, prefix_pair_index=prefix_pair_index)
     return PredictionRecord(
         sample_key=sample_key,
         selected_key=result.selected.candidate_key,
@@ -100,8 +135,15 @@ def evaluate(record: PredictionRecord, actual: int) -> tuple[PredictionEvaluatio
     return tuple(evaluations)
 
 
-def _build_predictions(features: EstimateFeatures, snapshot: LearningSnapshot) -> _PredictionBuild:
+def _build_predictions(
+    features: EstimateFeatures,
+    snapshot: LearningSnapshot,
+    *,
+    prefix_pair_index: PrefixPairIndex | None,
+) -> _PredictionBuild:
     _validate_compatibility(features, snapshot)
+    index = prefix_pair_index or build_prefix_pair_index(snapshot)
+    _validate_prefix_pair_index(index, snapshot)
     candidates: list[TokenPrediction] = []
     intents: dict[PredictionCandidateKey, AnchorUseIntent] = {}
 
@@ -136,13 +178,40 @@ def _build_predictions(features: EstimateFeatures, snapshot: LearningSnapshot) -
                 1,
             )
         )
-        intents[_PREFIX_KEY] = AnchorUseIntent(
+        prefix_intent = AnchorUseIntent(
             kind=AnchorKind.PREFIX,
             identity=snapshot.identity,
             learning_epoch=snapshot.active_epoch,
             fingerprint=anchor.prefix_fingerprint.digest,
             source_sample_keys=(anchor.sample_key,),
         )
+        intents[_PREFIX_KEY] = prefix_intent
+        additive_evidence, multiplicative_evidence = _learned_prefix_evidence(
+            index, features.profile_key
+        )
+        if len(additive_evidence) >= 3:
+            candidates.append(
+                _candidate(
+                    features,
+                    snapshot,
+                    _PREFIX_ADDITIVE_KEY,
+                    anchor.actual_tokens + suffix_delta + median(additive_evidence),
+                    len(additive_evidence),
+                )
+            )
+            intents[_PREFIX_ADDITIVE_KEY] = prefix_intent
+        if len(multiplicative_evidence) >= 3:
+            candidates.append(
+                _candidate(
+                    features,
+                    snapshot,
+                    _PREFIX_MULTIPLICATIVE_KEY,
+                    anchor.actual_tokens
+                    + suffix_delta * exp(median(multiplicative_evidence)),
+                    len(multiplicative_evidence),
+                )
+            )
+            intents[_PREFIX_MULTIPLICATIVE_KEY] = prefix_intent
 
     candidates.append(
         _candidate(
@@ -155,11 +224,14 @@ def _build_predictions(features: EstimateFeatures, snapshot: LearningSnapshot) -
     )
 
     candidates_tuple = tuple(candidates)
+    prefix_champion = _select_prefix_champion(features, snapshot, candidates_tuple)
     champions = tuple(
-        MethodChampion(candidate.candidate_key, eligible_for_selection=True)
+        MethodChampion(
+            _champion_key_for_method(method, candidates_tuple, prefix_champion),
+            eligible_for_selection=True,
+        )
         for method in PredictionMethod
-        for candidate in candidates_tuple
-        if candidate.method is method
+        if any(candidate.method is method for candidate in candidates_tuple)
     )
     selected = next(
         candidate
@@ -178,6 +250,206 @@ def _validate_compatibility(features: EstimateFeatures, snapshot: LearningSnapsh
         or snapshot.active_epoch != snapshot.identity.learning_epoch
     ):
         raise ValueError("features and learning snapshot are incompatible")
+
+
+def build_prefix_pair_index(snapshot: LearningSnapshot) -> PrefixPairIndex:
+    """Build canonical, committed-earlier base pairs without inspecting records."""
+    seen_orders: set[int] = set()
+    for sample in snapshot.samples:
+        order = sample.committed_order
+        if type(order) is not int or order < 1:
+            raise ValueError("snapshot samples require positive committed orders")
+        if order in seen_orders:
+            raise ValueError("snapshot sample committed orders must be unique")
+        seen_orders.add(order)
+
+    ordered_samples = tuple(
+        sorted(
+            snapshot.samples,
+            key=lambda sample: (
+                sample.committed_order,
+                sample.sample_key[0].encode("utf-8"),
+                sample.sample_key[1].encode("utf-8"),
+                sample.sample_key[2],
+            ),
+        )
+    )
+    lookup: dict[tuple[str, PrefixFingerprint], StoredSample] = {}
+    pairs: list[_PrefixPair] = []
+    for longer in ordered_samples:
+        base = _canonical_base_for(longer, lookup)
+        if base is not None:
+            pairs.append(
+                _PrefixPair(
+                    base=base,
+                    longer=longer,
+                    suffix_baseline_delta=_suffix_baseline(
+                        longer.features, len(base.features.input_item_contributions)
+                    ),
+                )
+            )
+        if longer.features.prefix_fingerprints:
+            final_prefix = longer.features.prefix_fingerprints[-1]
+            lookup_key = (longer.features.context_fingerprint, final_prefix)
+            existing = lookup.get(lookup_key)
+            if existing is None or _is_preferred_base(longer, existing):
+                lookup[lookup_key] = longer
+    return PrefixPairIndex(snapshot.identity, snapshot.active_epoch, snapshot.revision, tuple(pairs))
+
+
+def _validate_prefix_pair_index(index: PrefixPairIndex, snapshot: LearningSnapshot) -> None:
+    if (
+        index.identity != snapshot.identity
+        or index.active_epoch != snapshot.active_epoch
+        or index.revision != snapshot.revision
+    ):
+        raise ValueError("prefix pair index must match snapshot identity, epoch, and revision")
+
+
+def _canonical_base_for(
+    longer: StoredSample, lookup: dict[tuple[str, PrefixFingerprint], StoredSample]
+) -> StoredSample | None:
+    candidates = (
+        lookup.get((longer.features.context_fingerprint, prefix))
+        for prefix in longer.features.prefix_fingerprints[:-1]
+    )
+    bases = tuple(base for base in candidates if base is not None)
+    if not bases:
+        return None
+    return min(
+        bases,
+        key=lambda sample: (
+            -len(sample.features.input_item_contributions),
+            -sample.observed_at_us,
+            sample.sample_key[0].encode("utf-8"),
+            sample.sample_key[1].encode("utf-8"),
+            sample.sample_key[2],
+        ),
+    )
+
+
+def _is_preferred_base(candidate: StoredSample, existing: StoredSample) -> bool:
+    return (
+        -len(candidate.features.input_item_contributions),
+        -candidate.observed_at_us,
+        candidate.sample_key[0].encode("utf-8"),
+        candidate.sample_key[1].encode("utf-8"),
+        candidate.sample_key[2],
+    ) < (
+        -len(existing.features.input_item_contributions),
+        -existing.observed_at_us,
+        existing.sample_key[0].encode("utf-8"),
+        existing.sample_key[1].encode("utf-8"),
+        existing.sample_key[2],
+    )
+
+
+def _suffix_baseline(features: EstimateFeatures, start: int) -> float:
+    return sum(
+        item.known_tokens
+        + (item.capability_visual_tokens if item.capability_visual_tokens is not None else 0)
+        + item.prior_residual_tokens
+        for item in features.input_item_contributions[start:]
+    )
+
+
+def _learned_prefix_evidence(
+    index: PrefixPairIndex, profile_key: ProfileKey
+) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    additive: list[float] = []
+    multiplicative: list[float] = []
+    for pair in index.pairs:
+        if pair.longer.features.profile_key != profile_key:
+            continue
+        actual_delta = pair.longer.actual_input_tokens - pair.base.actual_input_tokens
+        if actual_delta <= 0:
+            continue
+        if pair.suffix_baseline_delta >= 0:
+            additive.append(actual_delta - pair.suffix_baseline_delta)
+        if pair.suffix_baseline_delta > 0:
+            multiplicative.append(log(actual_delta / pair.suffix_baseline_delta))
+    return tuple(additive), tuple(multiplicative)
+
+
+def _champion_key_for_method(
+    method: PredictionMethod,
+    candidates: tuple[TokenPrediction, ...],
+    prefix_champion: PredictionCandidateKey | None,
+) -> PredictionCandidateKey:
+    if method is PredictionMethod.HISTORY_PREFIX:
+        if prefix_champion is None:
+            raise ValueError("represented prefix candidates require a prefix champion")
+        return prefix_champion
+    return next(candidate.candidate_key for candidate in candidates if candidate.method is method)
+
+
+def _select_prefix_champion(
+    features: EstimateFeatures,
+    snapshot: LearningSnapshot,
+    candidates: tuple[TokenPrediction, ...],
+) -> PredictionCandidateKey | None:
+    current_prefix_keys = tuple(
+        candidate.candidate_key
+        for candidate in candidates
+        if candidate.method is PredictionMethod.HISTORY_PREFIX
+    )
+    if not current_prefix_keys:
+        return None
+    records_by_key = {record.sample_key: record for record in snapshot.prediction_records}
+    samples_by_key = {sample.sample_key: sample for sample in snapshot.samples}
+    if set(records_by_key) - set(samples_by_key):
+        raise ValueError("prediction records must link to retained samples")
+    eligible: list[tuple[StoredSample, PredictionRecord]] = []
+    for sample_key, record in records_by_key.items():
+        sample = samples_by_key[sample_key]
+        if record.selected.profile_key != sample.features.profile_key:
+            raise ValueError("prediction record profile key must match its linked sample")
+        if (
+            record.selected.identity != sample.identity
+            or record.selected.learning_epoch != sample.identity.learning_epoch
+        ):
+            raise ValueError("prediction record identity and epoch must match its linked sample")
+        if sample.actual_input_tokens <= 0 or record.selected.profile_key != features.profile_key:
+            continue
+        candidate_by_key = {candidate.candidate_key: candidate for candidate in record.candidates}
+        if all(key in candidate_by_key for key in current_prefix_keys):
+            eligible.append((sample, record))
+    eligible.sort(
+        key=lambda value: (
+            value[0].observed_at_us,
+            value[0].sample_key[0].encode("utf-8"),
+            value[0].sample_key[1].encode("utf-8"),
+            value[0].sample_key[2],
+        ),
+        reverse=True,
+    )
+    window = eligible[:31]
+    if len(window) < 8:
+        return _PREFIX_KEY
+    ape_by_key: dict[PredictionCandidateKey, float] = {}
+    for key in current_prefix_keys:
+        apes = tuple(
+            abs(
+                next(candidate for candidate in record.candidates if candidate.candidate_key == key)
+                .unscaled_tokens
+                - sample.actual_input_tokens
+            )
+            / sample.actual_input_tokens
+            for sample, record in window
+        )
+        ape_by_key[key] = median(apes)
+    deterministic_ape = ape_by_key[_PREFIX_KEY]
+    contenders = [
+        key
+        for key in current_prefix_keys
+        if key is _PREFIX_KEY or ape_by_key[key] < deterministic_ape
+    ]
+    preference = {
+        _PREFIX_KEY: 0,
+        _PREFIX_ADDITIVE_KEY: 1,
+        _PREFIX_MULTIPLICATIVE_KEY: 2,
+    }
+    return min(contenders, key=lambda key: (ape_by_key[key], preference[key]))
 
 
 def _candidate(
