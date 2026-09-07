@@ -682,6 +682,42 @@ def test_anthropic_request_for_a_responses_model_is_translated() -> None:
     assert '"messages"' not in sent
 
 
+def test_a_translated_chat_request_rejects_an_empty_message_list_before_upstream() -> None:
+    client, seen = make_client(
+        lambda _: httpx2.Response(400, json={"error": "must not be called"}),
+        mappings={"claude-model": "cc-model"},
+    )
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "claude-model",
+            "messages": [],
+            "tools": [{"name": "bash", "input_schema": {"type": "object"}}],
+        },
+    )
+
+    assert response.status_code == 400
+    assert seen == []
+    assert response.json()["error"]["param"] == "messages"
+    assert response.json()["error"]["code"] == "messages-empty"
+
+
+def test_a_responses_request_falling_back_to_chat_points_at_input_when_empty() -> None:
+    client, seen = make_client(
+        lambda _: httpx2.Response(400, json={"error": "must not be called"}),
+        mappings={"gpt-model": "cc-model"},
+    )
+    response = client.post(
+        "/responses",
+        json={"model": "gpt-model", "input": []},
+    )
+
+    assert response.status_code == 400
+    assert seen == []
+    assert response.json()["error"]["param"] == "input"
+    assert response.json()["error"]["code"] == "input-empty"
+
+
 def test_the_responses_leg_keeps_the_blank_blocks_it_was_given() -> None:
     """The primary path is not rewritten to satisfy a rule only the other path has.
 

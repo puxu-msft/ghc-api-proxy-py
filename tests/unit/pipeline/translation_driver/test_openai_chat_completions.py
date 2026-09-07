@@ -44,6 +44,48 @@ def test_a_minimal_anthropic_request_becomes_a_chat_body() -> None:
     assert request.conversion.lossless
 
 
+@pytest.mark.parametrize(
+    "messages",
+    [
+        [],
+        [{"role": "user", "content": []}],
+    ],
+)
+def test_chat_refuses_when_translation_has_no_messages(
+    messages: list[dict[str, Any]],
+) -> None:
+    request = anthropic_request({"model": "m", "messages": messages})
+
+    with pytest.raises(TranslationRefused, match="messages must be non-empty") as caught:
+        to_openai_chat_completions(request)
+
+    assert caught.value.code == "messages-empty"
+    assert caught.value.field_path == "messages"
+
+
+def test_chat_refusal_does_not_consume_source_extensions() -> None:
+    request = anthropic_request(
+        {"model": "m", "messages": [], "stop_sequences": ["do not consume"]}
+    )
+
+    with pytest.raises(TranslationRefused, match="messages must be non-empty"):
+        to_openai_chat_completions(request)
+
+    assert request.extensions["stop_sequences"] == ["do not consume"]
+
+
+def test_chat_refuses_empty_responses_input_using_the_source_field() -> None:
+    with pytest.raises(TranslationRefused, match="input must be non-empty") as caught:
+        default_registry().translate(
+            {"model": "m", "input": []},
+            source=WireFormat.OPENAI_RESPONSES,
+            target=WireFormat.OPENAI_CHAT_COMPLETIONS,
+        )
+
+    assert caught.value.code == "input-empty"
+    assert caught.value.field_path == "input"
+
+
 def test_the_system_field_becomes_the_first_message() -> None:
     request = anthropic_request(
         {
@@ -180,7 +222,13 @@ def test_a_responses_named_choice_and_parallel_limit_reach_chat() -> None:
     body, semantic = default_registry().translate(
         {
             "model": "m",
-            "input": [],
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hi"}],
+                }
+            ],
             "tools": [{"type": "function", "name": "weather", "parameters": parameters}],
             "tool_choice": {"type": "function", "name": "weather"},
             "parallel_tool_calls": False,

@@ -27,10 +27,12 @@ from app.pipeline.translation_driver.semantic import (
     LossCode,
     SemanticRequest,
     ToolChoiceNotSupported,
+    TranslationRefused,
     TranslationTarget,
 )
 
 WIRE_FORMAT = "openai-chat-completions"
+RESPONSES_WIRE_FORMAT = "openai-responses"
 
 TEXT = "text"
 TOOL_CALLS = "tool_calls"
@@ -53,6 +55,20 @@ CHAT_STOP_REASONS = {
     "tool_calls": TOOL_USE_STOP,
     "length": MAX_TOKENS,
 }
+
+
+def _empty_messages_refusal(request: SemanticRequest) -> TranslationRefused:
+    if request.source_format == RESPONSES_WIRE_FORMAT:
+        return TranslationRefused(
+            "input must be non-empty",
+            code="input-empty",
+            field_path="input",
+        )
+    return TranslationRefused(
+        "messages must be non-empty",
+        code="messages-empty",
+        field_path="messages",
+    )
 
 
 def chat_usage_to_anthropic(usage: Mapping[str, Any]) -> dict[str, Any]:
@@ -125,6 +141,9 @@ def to_openai_chat_completions(
         body["tool_choice"] = mapped_choice
     if parallel_tool_calls is not None:
         body["parallel_tool_calls"] = parallel_tool_calls
+    if not messages:
+        raise _empty_messages_refusal(request)
+
     stop_sequences = request.extensions.pop("stop_sequences", None)
     if isinstance(stop_sequences, list) and stop_sequences:
         body["stop"] = stop_sequences
