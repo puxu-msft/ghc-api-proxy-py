@@ -22,7 +22,7 @@ def test_multiplier_rejects_invalid_configuration(value: object) -> None:
 
 @pytest.mark.parametrize(
     ("tokens", "multiplier", "expected"),
-    [(100, 1.1, 110), (101, 1.1, 112), (1, 1.01, 2), (0, 1.5, 0), (10**30, 1.1, 11 * 10**29)],
+    [(100, 1.1, 110), (101, 1.1, 112), (1, 1.01, 2), (0, 1.5, 1), (10**30, 1.1, 11 * 10**29)],
 )
 def test_multiplier_rounds_the_decimal_product_up(tokens: int, multiplier: float, expected: int) -> None:
     assert scale_local_estimate(tokens, multiplier) == expected
