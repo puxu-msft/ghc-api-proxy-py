@@ -11,7 +11,11 @@ import tiktoken
 
 from app.tokenization.estimators import estimate_responses_input
 from app.tokenization.features import analyze_responses_input
-from app.tokenization.types import FeatureName
+from app.tokenization.types import (
+    FeatureName,
+    SyntheticUnresizedPatchGridFormula,
+    TokenizationCapabilities,
+)
 
 ENCODING = "o200k_base"
 SPECIAL_SPELLINGS = sorted(tiktoken.get_encoding(ENCODING).special_tokens_set)
@@ -187,3 +191,14 @@ def test_configured_special_spellings_are_ordinary_text_on_every_responses_surfa
 def test_an_empty_body_still_counts_as_something() -> None:
     # Zero would divide badly in the calibrator and reads as "this request is free", which no request is.
     assert estimate_responses_input({}) >= 1
+
+
+def test_legacy_integer_wrapper_does_not_add_capability_visual_tokens() -> None:
+    payload = {"input": [{"type": "input_image", "width": 56, "height": 84}]}
+    capabilities = TokenizationCapabilities(
+        SyntheticUnresizedPatchGridFormula(revision=1, patch_width=28, patch_height=28)
+    )
+    features = analyze_responses_input(payload, capabilities=capabilities)
+
+    assert features.capability_visual_tokens == 6
+    assert estimate_responses_input(payload, capabilities=capabilities) == max(features.known_tokens, 1)

@@ -13,7 +13,12 @@ from app.models.anthropic import MessagesRequest
 from app.observability.metrics import ResponsivenessMetrics
 from app.pipeline.count_tokens import CountTokensRequestError
 from app.tokenization.estimators import estimate_anthropic_input, estimate_responses_input
-from app.tokenization.types import EstimateFeatures, FeatureName
+from app.tokenization.types import (
+    EstimateFeatures,
+    FeatureName,
+    SyntheticUnresizedPatchGridFormula,
+    TokenizationCapabilities,
+)
 from app.tokenization.worker import LocalTokenWorker
 
 
@@ -57,13 +62,18 @@ async def test_real_worker_returns_pickle_safe_structured_responses_features(
         "input": [
             {"type": "message", "role": "user", "content": "visible"},
             {"type": "reasoning", "encrypted_content": "opaque"},
+            {"type": "input_image", "width": 56, "height": 84},
         ],
     }
+    capabilities = TokenizationCapabilities(
+        SyntheticUnresizedPatchGridFormula(revision=1, patch_width=28, patch_height=28)
+    )
 
-    result = await LocalTokenWorker().analyze_responses(payload)
+    result = await LocalTokenWorker().analyze_responses(payload, capabilities=capabilities)
 
     assert isinstance(result, EstimateFeatures)
     assert pickle.loads(pickle.dumps(result)) == result
+    assert result.capability_visual_tokens == 6
     assert result.feature_vector.get(FeatureName.OPAQUE_REASONING_BYTES).value == len("opaque")
     for phase in ("lookup", "estimate"):
         labels = {"format": "responses", "phase": phase}

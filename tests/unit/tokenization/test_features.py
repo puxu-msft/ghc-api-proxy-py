@@ -13,24 +13,42 @@ from app.tokenization.features import (
     MEDIA_REASON,
     OPAQUE_BYTES_REASON,
     OPAQUE_ITEMS_REASON,
+    PDF_REASON,
     UNKNOWN_BYTES_REASON,
     UNKNOWN_ITEMS_REASON,
     analyze_responses_input,
 )
 from app.tokenization.types import (
+    AnchorKind,
+    AnchorUseIntent,
+    AnchorUseOutcome,
     EstimateFeatures,
     FeatureName,
     FeatureValue,
     FeatureVector,
     LearningIdentity,
+    LearningReasonCode,
+    LearningSnapshot,
+    LearningUpdate,
+    MethodChampion,
+    NoPrefixCheckpointChange,
+    PredictionCandidateKey,
+    PredictionCandidateVariant,
+    PredictionDecision,
     PredictionEvaluation,
     PredictionMethod,
     PredictionRecord,
     ProfileKey,
+    SampleCommittedMetadata,
     SentRequestSnapshot,
+    StoreCancellationPhase,
     StoredSample,
     StructuralProfile,
+    SyntheticUnresizedPatchGridFormula,
+    TokenizationCapabilities,
+    TokenLearningObservation,
     TokenPrediction,
+    VisualTokenFormulaKind,
 )
 
 ENCODING = "o200k_base"
@@ -142,6 +160,57 @@ def test_prefix_chain_preserves_order_and_every_previous_item() -> None:
     assert changed_prefix.prefix_fingerprints[1] != original.prefix_fingerprints[1]
 
 
+def test_item_contributions_exactly_reconstruct_known_and_visual_aggregates() -> None:
+    capabilities = TokenizationCapabilities(
+        visual_formula=SyntheticUnresizedPatchGridFormula(1, 28, 28)
+    )
+    features = analyze_responses_input(
+        {
+            "instructions": "fixed",
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "first"}]},
+                {"type": "input_image", "width": 56, "height": 84},
+            ],
+        },
+        capabilities=capabilities,
+    )
+
+    assert len(features.input_item_contributions) == len(features.prefix_fingerprints) == 2
+    assert features.known_tokens == features.fixed_context_contribution.known_tokens + sum(
+        item.known_tokens for item in features.input_item_contributions
+    )
+    assert features.capability_visual_tokens == sum(
+        cast(int, item.capability_visual_tokens)
+        for item in features.input_item_contributions
+    ) == 6
+    with pytest.raises(ValueError, match="known_tokens"):
+        replace(features, input_item_contributions=features.input_item_contributions[:-1])
+
+
+def test_compact_prefix_carriers_cover_788_items_with_pickle_safe_alignment() -> None:
+    features = analyze_responses_input(
+        {"input": [{"type": "message", "role": "user", "content": "x"}] * 788}
+    )
+
+    assert len(features.prefix_fingerprints) == len(features.input_item_contributions) == 788
+    assert len(canonical([prefix.digest for prefix in features.prefix_fingerprints]).encode()) < 65_536
+    assert len(
+        canonical(
+            [
+                [
+                    item.visible_tokens,
+                    item.item_framing_tokens,
+                    item.nested_framing_tokens,
+                    item.capability_visual_tokens,
+                    item.prior_residual_tokens,
+                ]
+                for item in features.input_item_contributions
+            ]
+        ).encode()
+    ) < 65_536
+    assert pickle.loads(pickle.dumps(features)) == features
+
+
 def test_unknown_type_digests_are_sorted_bounded_and_do_not_retain_type_text() -> None:
     unknown_types = [f"future-{index}" for index in range(10)]
     payload = {
@@ -226,21 +295,32 @@ def _learning_identity(
     )
 
 
+def _default_variant(method: PredictionMethod) -> PredictionCandidateVariant:
+    if method is PredictionMethod.HISTORY_EXACT:
+        return PredictionCandidateVariant.MEDIAN
+    if method in {PredictionMethod.HISTORY_PREFIX, PredictionMethod.COLD_START}:
+        return PredictionCandidateVariant.DETERMINISTIC
+    return PredictionCandidateVariant.ADDITIVE
+
+
 def _prediction(
     features: EstimateFeatures,
     *,
     identity: LearningIdentity | None = None,
     profile_key: ProfileKey | None = None,
     method: PredictionMethod = PredictionMethod.COLD_START,
+    variant: PredictionCandidateVariant | None = None,
     unscaled_tokens: float = 10.0,
     history_revision: int = 7,
     learning_epoch: int | None = None,
 ) -> TokenPrediction:
     selected_identity = identity or _learning_identity(features)
+    candidate_key = PredictionCandidateKey(method, variant or _default_variant(method))
     return TokenPrediction(
         identity=selected_identity,
         profile_key=profile_key or features.profile_key,
         method=method,
+        candidate_key=candidate_key,
         unscaled_tokens=unscaled_tokens,
         sample_count=0,
         history_revision=history_revision,
@@ -250,16 +330,44 @@ def _prediction(
     )
 
 
-def test_prediction_record_requires_selected_full_object_membership() -> None:
+def _record(
+    sample_key: tuple[str, str, int],
+    candidates: tuple[TokenPrediction, ...],
+    *,
+    selected_key: PredictionCandidateKey | None = None,
+    eligibility: Mapping[PredictionMethod, bool] | None = None,
+) -> PredictionRecord:
+    candidate_by_method: dict[PredictionMethod, TokenPrediction] = {}
+    for candidate in candidates:
+        candidate_by_method.setdefault(candidate.method, candidate)
+    champions = tuple(
+        MethodChampion(
+            candidate_by_method[method].candidate_key,
+            True if eligibility is None else eligibility.get(method, True),
+        )
+        for method in PredictionMethod
+        if method in candidate_by_method
+    )
+    chosen = selected_key or next(
+        champion.candidate_key for champion in champions if champion.eligible_for_selection
+    )
+    return PredictionRecord(sample_key, chosen, candidates, champions)
+
+
+def test_prediction_record_requires_selected_candidate_key_membership() -> None:
     features = analyze_responses_input({})
     candidate = _prediction(features)
-    same_method_but_different_value = replace(candidate, unscaled_tokens=11.0)
+    missing = PredictionCandidateKey(
+        PredictionMethod.HISTORY_EXACT,
+        PredictionCandidateVariant.MEDIAN,
+    )
 
-    with pytest.raises(ValueError, match="selected prediction"):
+    with pytest.raises(ValueError, match="selected key"):
         PredictionRecord(
             sample_key=("boot", "request", 0),
-            selected=same_method_but_different_value,
+            selected_key=missing,
             candidates=(candidate,),
+            method_champions=(MethodChampion(candidate.candidate_key, True),),
         )
 
 
@@ -275,7 +383,7 @@ def test_prediction_record_rejects_cross_candidate_semantic_conflicts() -> None:
         method=PredictionMethod.HISTORY_EXACT,
     )
     with pytest.raises(ValueError, match="learning identity"):
-        PredictionRecord(("boot", "request", 0), selected, (selected, conflicting_identity))
+        _record(("boot", "request", 0), (selected, conflicting_identity))
 
     conflicting_generation = _prediction(
         features,
@@ -283,7 +391,7 @@ def test_prediction_record_rejects_cross_candidate_semantic_conflicts() -> None:
         method=PredictionMethod.HISTORY_EXACT,
     )
     with pytest.raises(ValueError, match="estimator generation"):
-        PredictionRecord(("boot", "request", 0), selected, (selected, conflicting_generation))
+        _record(("boot", "request", 0), (selected, conflicting_generation))
 
     conflicting_schema = _prediction(
         features,
@@ -291,7 +399,7 @@ def test_prediction_record_rejects_cross_candidate_semantic_conflicts() -> None:
         method=PredictionMethod.HISTORY_EXACT,
     )
     with pytest.raises(ValueError, match="profile schema revision"):
-        PredictionRecord(("boot", "request", 0), selected, (selected, conflicting_schema))
+        _record(("boot", "request", 0), (selected, conflicting_schema))
 
     next_epoch_identity = replace(identity, learning_epoch=identity.learning_epoch + 1)
     conflicting_epoch = _prediction(
@@ -300,7 +408,7 @@ def test_prediction_record_rejects_cross_candidate_semantic_conflicts() -> None:
         method=PredictionMethod.HISTORY_EXACT,
     )
     with pytest.raises(ValueError, match="learning epoch"):
-        PredictionRecord(("boot", "request", 0), selected, (selected, conflicting_epoch))
+        _record(("boot", "request", 0), (selected, conflicting_epoch))
 
     conflicting_profile = _prediction(
         features,
@@ -308,7 +416,7 @@ def test_prediction_record_rejects_cross_candidate_semantic_conflicts() -> None:
         method=PredictionMethod.HISTORY_EXACT,
     )
     with pytest.raises(ValueError, match="profile key"):
-        PredictionRecord(("boot", "request", 0), selected, (selected, conflicting_profile))
+        _record(("boot", "request", 0), (selected, conflicting_profile))
 
     conflicting_revision = _prediction(
         features,
@@ -316,7 +424,7 @@ def test_prediction_record_rejects_cross_candidate_semantic_conflicts() -> None:
         history_revision=selected.history_revision + 1,
     )
     with pytest.raises(ValueError, match="history revision"):
-        PredictionRecord(("boot", "request", 0), selected, (selected, conflicting_revision))
+        _record(("boot", "request", 0), (selected, conflicting_revision))
 
     with pytest.raises(ValueError, match="prediction epoch"):
         replace(selected, learning_epoch=selected.learning_epoch + 1)
@@ -333,7 +441,7 @@ def test_stored_sample_requires_feature_generation_and_schema_identity() -> None
             features=features,
             actual_input_tokens=10,
             raw_body_sha256=hashlib.sha256(b"body").hexdigest(),
-            observed_at="2026-09-07T00:00:00Z",
+            observed_at_us=1_757_203_200_000_000,
         )
 
     with pytest.raises(ValueError, match="estimator generation"):
@@ -351,6 +459,10 @@ def test_prediction_evaluation_rejects_impossible_error_metrics() -> None:
     valid = PredictionEvaluation(
         sample_key=("boot", "request", 0),
         method=PredictionMethod.COLD_START,
+        candidate_key=PredictionCandidateKey(
+            PredictionMethod.COLD_START,
+            PredictionCandidateVariant.DETERMINISTIC,
+        ),
         predicted_tokens=12.0,
         actual_tokens=10,
         absolute_error=2.0,
@@ -360,6 +472,10 @@ def test_prediction_evaluation_rejects_impossible_error_metrics() -> None:
     zero_actual = PredictionEvaluation(
         sample_key=("boot", "zero", 0),
         method=PredictionMethod.COLD_START,
+        candidate_key=PredictionCandidateKey(
+            PredictionMethod.COLD_START,
+            PredictionCandidateVariant.DETERMINISTIC,
+        ),
         predicted_tokens=5.0,
         actual_tokens=0,
         absolute_error=5.0,
@@ -381,6 +497,123 @@ def test_prediction_evaluation_rejects_impossible_error_metrics() -> None:
         replace(valid, absolute_percentage_error=0.3)
     with pytest.raises(ValueError, match="must be absent"):
         replace(zero_actual, signed_relative_error=0.0, absolute_percentage_error=0.0)
+
+
+def test_learning_snapshot_carries_bounded_prediction_history_with_identity_invariants() -> None:
+    features = analyze_responses_input({})
+    identity = _learning_identity(features)
+    prediction = _prediction(features, identity=identity)
+    record = _record(("boot", "request", 0), (prediction,))
+    evaluation = PredictionEvaluation(
+        sample_key=record.sample_key,
+        method=prediction.method,
+        candidate_key=prediction.candidate_key,
+        predicted_tokens=prediction.unscaled_tokens,
+        actual_tokens=10,
+        absolute_error=0.0,
+        signed_relative_error=0.0,
+        absolute_percentage_error=0.0,
+    )
+    sample = StoredSample(
+        sample_key=record.sample_key,
+        identity=identity,
+        features=features,
+        actual_input_tokens=10,
+        raw_body_sha256=hashlib.sha256(b"body").hexdigest(),
+        observed_at_us=1_757_203_200_000_000,
+    )
+    _observation = TokenLearningObservation(
+        sample_key=record.sample_key,
+        outcome="committed",
+        reason_code=LearningReasonCode.SAMPLE_COMMITTED,
+        metadata=SampleCommittedMetadata(sample.actual_input_tokens),
+        prefix_checkpoint_outcome=NoPrefixCheckpointChange(),
+        evaluations=(evaluation,),
+        revision=prediction.history_revision + 1,
+        learning_epoch=identity.learning_epoch,
+    )
+
+    snapshot = LearningSnapshot(
+        identity=identity,
+        revision=prediction.history_revision,
+        active_epoch=identity.learning_epoch,
+        samples=(replace(sample, committed_order=1),),
+        prediction_records=(record,),
+        evaluations=(evaluation,),
+    )
+    update = LearningUpdate(sample, record, (evaluation,), NoPrefixCheckpointChange())
+
+    assert snapshot.prediction_records == (record,)
+    assert snapshot.evaluations == (evaluation,)
+    assert update.prefix_checkpoint_command == NoPrefixCheckpointChange()
+    with pytest.raises(ValueError, match="identity epoch"):
+        replace(snapshot, active_epoch=identity.learning_epoch + 1)
+    with pytest.raises(ValueError, match="prefix checkpoint command"):
+        replace(update, prefix_checkpoint_command=cast(Any, None))
+
+
+def test_learning_snapshot_rejects_evaluation_without_record_candidate() -> None:
+    features = analyze_responses_input({})
+    identity = _learning_identity(features)
+    cold = _prediction(features, identity=identity)
+    record = _record(("boot", "request", 0), (cold,))
+    sample = StoredSample(
+        sample_key=record.sample_key,
+        identity=identity,
+        features=features,
+        actual_input_tokens=10,
+        raw_body_sha256=hashlib.sha256(b"body").hexdigest(),
+        observed_at_us=1_757_203_200_000_000,
+    )
+    extra_exact = PredictionEvaluation(
+        sample_key=record.sample_key,
+        method=PredictionMethod.HISTORY_EXACT,
+        candidate_key=PredictionCandidateKey(
+            PredictionMethod.HISTORY_EXACT,
+            PredictionCandidateVariant.MEDIAN,
+        ),
+        predicted_tokens=10.0,
+        actual_tokens=10,
+        absolute_error=0.0,
+        signed_relative_error=0.0,
+        absolute_percentage_error=0.0,
+    )
+
+    with pytest.raises(ValueError, match="prediction record candidates"):
+        LearningSnapshot(
+            identity=identity,
+            revision=cold.history_revision,
+            active_epoch=identity.learning_epoch,
+            samples=(replace(sample, committed_order=1),),
+            prediction_records=(record,),
+            evaluations=(extra_exact,),
+        )
+
+
+def test_anchor_use_intent_is_closed_immutable_and_epoch_bound() -> None:
+    features = analyze_responses_input({})
+    identity = _learning_identity(features)
+    intent = AnchorUseIntent(
+        kind=AnchorKind.EXACT,
+        identity=identity,
+        learning_epoch=identity.learning_epoch,
+        fingerprint=features.full_fingerprint,
+        source_sample_keys=(("boot", "request", 0),),
+    )
+
+    assert intent.source_sample_keys == (("boot", "request", 0),)
+    assert tuple(AnchorUseOutcome) == (
+        AnchorUseOutcome.RECORDED,
+        AnchorUseOutcome.PRUNED,
+    )
+    assert StoreCancellationPhase.COMMIT.value == "commit"
+    with pytest.raises(ValueError, match="epoch"):
+        replace(intent, learning_epoch=identity.learning_epoch + 1)
+    with pytest.raises(ValueError, match="exactly one"):
+        replace(intent, kind=AnchorKind.PREFIX, source_sample_keys=(
+            ("boot", "request", 0),
+            ("boot", "request-2", 0),
+        ))
 
 
 def test_sent_request_snapshot_copies_mutable_body_before_hash_validation() -> None:
@@ -837,3 +1070,227 @@ def test_every_known_text_surface_treats_configured_special_spellings_as_ordinar
 
     assert features.known_tokens == expected
     assert estimate_responses_input(payload) == max(expected, 1)
+
+
+def test_prediction_candidate_keys_accept_exactly_the_seven_v1_pairs() -> None:
+    legal = {
+        (PredictionMethod.HISTORY_EXACT, PredictionCandidateVariant.MEDIAN),
+        (PredictionMethod.HISTORY_PREFIX, PredictionCandidateVariant.DETERMINISTIC),
+        (PredictionMethod.HISTORY_PREFIX, PredictionCandidateVariant.ADDITIVE),
+        (PredictionMethod.HISTORY_PREFIX, PredictionCandidateVariant.MULTIPLICATIVE),
+        (PredictionMethod.PROFILE_CALIBRATED, PredictionCandidateVariant.ADDITIVE),
+        (PredictionMethod.PROFILE_CALIBRATED, PredictionCandidateVariant.MULTIPLICATIVE),
+        (PredictionMethod.COLD_START, PredictionCandidateVariant.DETERMINISTIC),
+    }
+
+    assert tuple(PredictionMethod) == (
+        PredictionMethod.HISTORY_EXACT,
+        PredictionMethod.HISTORY_PREFIX,
+        PredictionMethod.PROFILE_CALIBRATED,
+        PredictionMethod.COLD_START,
+    )
+    assert {
+        (method, variant)
+        for method in PredictionMethod
+        for variant in PredictionCandidateVariant
+        if (method, variant) in legal
+        and PredictionCandidateKey(method, variant) == PredictionCandidateKey(method, variant)
+    } == legal
+    for method in PredictionMethod:
+        for variant in PredictionCandidateVariant:
+            if (method, variant) not in legal:
+                with pytest.raises(ValueError, match="legal pair"):
+                    PredictionCandidateKey(method, variant)
+
+
+def test_prediction_record_preserves_variants_champions_and_selection_cardinality() -> None:
+    features = analyze_responses_input({})
+    prefix_deterministic = _prediction(features, method=PredictionMethod.HISTORY_PREFIX)
+    prefix_additive = _prediction(
+        features,
+        method=PredictionMethod.HISTORY_PREFIX,
+        variant=PredictionCandidateVariant.ADDITIVE,
+        unscaled_tokens=11.0,
+    )
+    cold = _prediction(features, unscaled_tokens=12.0)
+    prefix_champion = MethodChampion(prefix_additive.candidate_key, True)
+    cold_champion = MethodChampion(cold.candidate_key, True)
+    record = PredictionRecord(
+        ("boot", "request", 0),
+        prefix_additive.candidate_key,
+        (prefix_deterministic, prefix_additive, cold),
+        (prefix_champion, cold_champion),
+    )
+
+    assert record.selected is prefix_additive
+    assert record.candidates[:2] == (prefix_deterministic, prefix_additive)
+    with pytest.raises(ValueError, match="unique candidate keys"):
+        replace(record, candidates=(prefix_deterministic, prefix_deterministic, cold))
+    with pytest.raises(ValueError, match="exactly cover"):
+        replace(record, method_champions=(cold_champion,))
+    with pytest.raises(ValueError, match="unique champions"):
+        replace(record, method_champions=(prefix_champion, prefix_champion, cold_champion))
+    extra_exact = MethodChampion(
+        PredictionCandidateKey(PredictionMethod.HISTORY_EXACT, PredictionCandidateVariant.MEDIAN),
+        True,
+    )
+    with pytest.raises(ValueError, match="exactly cover"):
+        replace(record, method_champions=(extra_exact, prefix_champion, cold_champion))
+    missing_prefix_candidate = MethodChampion(
+        PredictionCandidateKey(PredictionMethod.HISTORY_PREFIX, PredictionCandidateVariant.MULTIPLICATIVE),
+        True,
+    )
+    with pytest.raises(ValueError, match="existing candidate"):
+        replace(record, method_champions=(missing_prefix_candidate, cold_champion))
+    with pytest.raises(ValueError, match="first eligible"):
+        replace(record, selected_key=cold.candidate_key)
+
+    cold_only = _record(("boot", "cold-only", 0), (cold,))
+    assert cold_only.selected_key == cold.candidate_key
+    assert cold_only.method_champions == (cold_champion,)
+    demoted = PredictionRecord(
+        ("boot", "demoted", 0),
+        cold.candidate_key,
+        (prefix_deterministic, cold),
+        (MethodChampion(prefix_deterministic.candidate_key, False), cold_champion),
+    )
+    assert demoted.selected is cold
+    with pytest.raises(ValueError, match="first eligible"):
+        replace(demoted, selected_key=prefix_deterministic.candidate_key)
+    with pytest.raises(ValueError, match="must be eligible"):
+        MethodChampion(cold.candidate_key, False)
+    exact = _prediction(features, method=PredictionMethod.HISTORY_EXACT)
+    with pytest.raises(ValueError, match="must be eligible"):
+        MethodChampion(exact.candidate_key, False)
+
+
+def test_prediction_decision_requires_method_specific_ephemeral_anchor_intent() -> None:
+    features = analyze_responses_input({"input": ["hello"]})
+    identity = _learning_identity(features)
+    exact = _prediction(features, identity=identity, method=PredictionMethod.HISTORY_EXACT)
+    prefix = _prediction(features, identity=identity, method=PredictionMethod.HISTORY_PREFIX)
+    cold = _prediction(features, identity=identity)
+    exact_intent = AnchorUseIntent(
+        AnchorKind.EXACT,
+        identity,
+        identity.learning_epoch,
+        features.full_fingerprint,
+        (("boot", "exact", 0),),
+    )
+    prefix_intent = AnchorUseIntent(
+        AnchorKind.PREFIX,
+        identity,
+        identity.learning_epoch,
+        features.prefix_fingerprints[-1].digest,
+        (("boot", "prefix", 0),),
+    )
+
+    assert PredictionDecision(exact, exact_intent).anchor_use_intent is exact_intent
+    assert PredictionDecision(prefix, prefix_intent).anchor_use_intent is prefix_intent
+    assert PredictionDecision(cold, None).anchor_use_intent is None
+    profile = _prediction(features, identity=identity, method=PredictionMethod.PROFILE_CALIBRATED)
+    assert PredictionDecision(profile, None).anchor_use_intent is None
+    with pytest.raises(ValueError, match="matching anchor-use intent kind"):
+        PredictionDecision(exact, None)
+    with pytest.raises(ValueError, match="matching anchor-use intent kind"):
+        PredictionDecision(exact, prefix_intent)
+    with pytest.raises(ValueError, match="must not carry"):
+        PredictionDecision(cold, exact_intent)
+    with pytest.raises(ValueError, match="must not carry"):
+        PredictionDecision(profile, exact_intent)
+    other_identity = replace(identity, actual_provider="provider-b")
+    with pytest.raises(ValueError, match="identity"):
+        PredictionDecision(
+            exact,
+            replace(exact_intent, identity=other_identity),
+        )
+    other_epoch_identity = replace(identity, learning_epoch=identity.learning_epoch + 1)
+    with pytest.raises(ValueError, match="identity"):
+        PredictionDecision(
+            exact,
+            replace(
+                exact_intent,
+                identity=other_epoch_identity,
+                learning_epoch=other_epoch_identity.learning_epoch,
+            ),
+        )
+
+
+def test_a18_visual_capability_is_presence_aware_per_item_and_pickle_safe(monkeypatch: pytest.MonkeyPatch) -> None:
+    class StubEncoding:
+        def encode_ordinary(self, text: str) -> list[int]:
+            counts = {"instructions": 2, "user": 3, "message": 4}
+            return [0] * counts.get(text, 0)
+
+    def stub_encoding(_name: str) -> StubEncoding:
+        return StubEncoding()
+
+    monkeypatch.setattr(tiktoken, "get_encoding", stub_encoding)
+    formula = SyntheticUnresizedPatchGridFormula(revision=1, patch_width=28, patch_height=28)
+    capabilities = TokenizationCapabilities(formula)
+    payload = {
+        "instructions": "instructions",
+        "input": [
+            {"type": "message", "role": "user", "content": "message"},
+            {"type": "reasoning", "encrypted_content": "opaque"},
+            {"type": "input_image", "width": 56, "height": 84},
+            {"type": "future-item", "opaque": True},
+        ],
+    }
+
+    features = analyze_responses_input(payload, capabilities=capabilities)
+
+    assert features.known_tokens == 29
+    assert features.capability_visual_tokens == 6
+    assert features.known_tokens + features.capability_visual_tokens == 35
+    assert MEDIA_REASON not in features.low_confidence_reasons
+    assert OPAQUE_BYTES_REASON in features.low_confidence_reasons
+    assert UNKNOWN_BYTES_REASON in features.low_confidence_reasons
+    assert features.estimator_generation == 2
+    assert pickle.loads(pickle.dumps(capabilities)) == capabilities
+    assert formula.kind is VisualTokenFormulaKind.SYNTHETIC_UNRESIZED_PATCH_GRID_V1
+
+    same_pixels_six = analyze_responses_input(
+        {"input": [{"type": "input_image", "width": 56, "height": 84}]},
+        capabilities=capabilities,
+    )
+    same_pixels_eight = analyze_responses_input(
+        {"input": [{"type": "input_image", "width": 42, "height": 112}]},
+        capabilities=capabilities,
+    )
+    assert same_pixels_six.feature_vector.get(FeatureName.MEDIA_PIXEL_COUNT).value == 4_704
+    assert same_pixels_eight.feature_vector.get(FeatureName.MEDIA_PIXEL_COUNT).value == 4_704
+    assert same_pixels_six.capability_visual_tokens == 6
+    assert same_pixels_eight.capability_visual_tokens == 8
+    assert analyze_responses_input({}, capabilities=capabilities).capability_visual_tokens == 0
+    assert analyze_responses_input(payload).capability_visual_tokens is None
+    missing_metadata = analyze_responses_input(
+        {"input": [{"type": "input_image", "width": 56}]},
+        capabilities=capabilities,
+    )
+    assert missing_metadata.capability_visual_tokens is None
+    assert MEDIA_REASON in missing_metadata.low_confidence_reasons
+    for invalid in (True, -1, 1.5):
+        with pytest.raises(ValueError, match="capability_visual_tokens"):
+            replace(features, capability_visual_tokens=cast(Any, invalid))
+
+
+def test_mixed_image_and_pdf_preserves_generic_media_reason_after_item_visual_success() -> None:
+    capabilities = TokenizationCapabilities(
+        SyntheticUnresizedPatchGridFormula(revision=1, patch_width=28, patch_height=28)
+    )
+    features = analyze_responses_input(
+        {
+            "input": [
+                {"type": "input_image", "width": 56, "height": 84},
+                {"type": "input_file", "page_count": 1, "media_type": "application/pdf"},
+            ]
+        },
+        capabilities=capabilities,
+    )
+
+    assert features.input_item_contributions[0].capability_visual_tokens == 6
+    assert features.input_item_contributions[1].capability_visual_tokens is None
+    assert features.capability_visual_tokens is None
+    assert MEDIA_REASON in features.low_confidence_reasons
+    assert PDF_REASON in features.low_confidence_reasons

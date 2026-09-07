@@ -11,7 +11,7 @@ from app.observability.metrics import RESPONSIVENESS
 from app.tokenization.features import TOKENIZER_NAME as _TOKENIZER_NAME
 from app.tokenization.features import analyze_responses_input
 from app.tokenization.features import count_ordinary as _count_ordinary
-from app.tokenization.types import EstimatorTiming
+from app.tokenization.types import EstimatorTiming, TokenizationCapabilities
 from app.wire_json import dumps
 
 
@@ -99,7 +99,15 @@ def estimate_anthropic_input(
 def estimate_responses_input(
     payload: Mapping[str, Any],
     *,
+    capabilities: TokenizationCapabilities | None = None,
     timings: list[EstimatorTiming] | None = None,
 ) -> int:
     """Return the legacy integer view of the structured Responses analysis."""
-    return max(analyze_responses_input(payload, timings=timings).known_tokens, 1)
+    return max(
+        analyze_responses_input(
+            payload,
+            capabilities=capabilities,
+            timings=timings,
+        ).known_tokens,
+        1,
+    )

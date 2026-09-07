@@ -19,13 +19,17 @@ from app.tokenization.types import (
     EstimatorTiming,
     FeatureName,
     FeatureVector,
+    FixedContextContribution,
+    InputItemContribution,
     PrefixFingerprint,
     ProfileKey,
+    SyntheticUnresizedPatchGridFormula,
     TokenComponent,
+    TokenizationCapabilities,
 )
 
 TOKENIZER_NAME = "o200k_base"
-ESTIMATOR_GENERATION = 1
+ESTIMATOR_GENERATION = 2
 PROFILE_SCHEMA_REVISION = 1
 _PREFIX_DOMAIN = b"ghc-api-proxy:responses-prefix:v1\0"
 _COMPONENT_KINDS = (
@@ -219,6 +223,14 @@ def _empty_string_set() -> set[str]:
     return set()
 
 
+def _empty_media_items() -> list[tuple[Mapping[str, Any], str]]:
+    return []
+
+
+def _empty_item_contribution_parts() -> list[tuple[int, int, int, int, int]]:
+    return []
+
+
 @dataclass(slots=True)
 class _Analysis:
     encoding: tiktoken.Encoding
@@ -238,19 +250,64 @@ class _Analysis:
     media_kinds: set[str] = field(default_factory=_empty_string_set)
     unknown_type_digests: set[str] = field(default_factory=_empty_string_set)
     low_confidence_reasons: set[str] = field(default_factory=_empty_string_set)
+    media_items: list[tuple[Mapping[str, Any], str]] = field(default_factory=_empty_media_items)
+    fixed_visible_tokens: int = 0
+    fixed_framing_tokens: int = 0
+    _active_item_visible_tokens: int | None = None
+    _active_item_framing_tokens: int = 0
+    _active_item_nested_framing_tokens: int = 0
+    _active_item_media_start: int = 0
+    item_contribution_parts: list[tuple[int, int, int, int, int]] = field(
+        default_factory=_empty_item_contribution_parts
+    )
 
     def add_text(self, component: str, feature: FeatureName, text: str) -> None:
         count = count_ordinary(self.encoding, text)
         self.component_tokens[component] += count
         self.component_instances[component] += 1
         self.increment(feature, count)
+        if self._active_item_visible_tokens is None:
+            self.fixed_visible_tokens += count
+        else:
+            self._active_item_visible_tokens += count
 
     def add_structured_text(self, component: str, feature: FeatureName, value: object) -> None:
         self.add_text(component, feature, _canonical_json(value).decode("utf-8"))
 
-    def add_framing(self, instances: int = 1) -> None:
+    def add_framing(self, instances: int = 1, *, item_framing: bool = False) -> None:
         self.component_tokens["framing"] += 4 * instances
         self.component_instances["framing"] += instances
+        tokens = 4 * instances
+        if self._active_item_visible_tokens is None:
+            if item_framing:
+                raise ValueError("item framing requires an active input item")
+            self.fixed_framing_tokens += tokens
+        elif item_framing:
+            if instances != 1 or self._active_item_framing_tokens:
+                raise ValueError("each input item must have exactly one framing unit")
+            self._active_item_framing_tokens = tokens
+        else:
+            self._active_item_nested_framing_tokens += tokens
+
+    def begin_item(self) -> None:
+        if self._active_item_visible_tokens is not None:
+            raise RuntimeError("input item analysis cannot nest")
+        self._active_item_visible_tokens = 0
+        self._active_item_framing_tokens = 0
+        self._active_item_nested_framing_tokens = 0
+        self._active_item_media_start = len(self.media_items)
+
+    def finish_item(self) -> None:
+        if self._active_item_visible_tokens is None or self._active_item_framing_tokens != 4:
+            raise RuntimeError("input item contribution is incomplete")
+        self.item_contribution_parts.append((
+            self._active_item_visible_tokens,
+            self._active_item_framing_tokens,
+            self._active_item_nested_framing_tokens,
+            self._active_item_media_start,
+            len(self.media_items),
+        ))
+        self._active_item_visible_tokens = None
 
     def increment(self, feature: FeatureName, amount: int) -> None:
         current = self.feature_values[feature]
@@ -268,6 +325,7 @@ class _Analysis:
 
     def record_media(self, value: Mapping[str, Any], item_type: str) -> None:
         self.increment(FeatureName.MEDIA_COUNT, 1)
+        self.media_items.append((value, item_type))
         category = _media_category(value, item_type)
         source_kind = _media_source_kind(value)
         self.media_kinds.add(f"{category}:{source_kind}")
@@ -284,7 +342,35 @@ class _Analysis:
         if category == "pdf":
             self.low_confidence_reasons.add(PDF_REASON)
 
-    def finish(self, payload: Mapping[str, Any]) -> EstimateFeatures:
+    def capability_visual_tokens(
+        self,
+        capabilities: TokenizationCapabilities | None,
+        media_items: Sequence[tuple[Mapping[str, Any], str]] | None = None,
+    ) -> int | None:
+        selected_media = self.media_items if media_items is None else media_items
+        if not selected_media:
+            return 0
+        formula = capabilities.visual_formula if capabilities is not None else None
+        if not isinstance(formula, SyntheticUnresizedPatchGridFormula):
+            return None
+        total = 0
+        for value, item_type in selected_media:
+            if _media_category(value, item_type) != "image":
+                return None
+            width = _metadata_integer(value, "width")
+            height = _metadata_integer(value, "height")
+            if width is None or height is None:
+                return None
+            total += math.ceil(width / formula.patch_width) * math.ceil(height / formula.patch_height)
+        if media_items is None:
+            self.low_confidence_reasons.discard(MEDIA_REASON)
+        return total
+
+    def finish(
+        self,
+        payload: Mapping[str, Any],
+        capabilities: TokenizationCapabilities | None,
+    ) -> EstimateFeatures:
         components = tuple(
             TokenComponent(
                 kind=kind,
@@ -298,8 +384,31 @@ class _Analysis:
         all_unknown_digests = sorted(self.unknown_type_digests, key=bytes.fromhex)
         retained_unknown_digests = tuple(all_unknown_digests[:8])
         full_fingerprint, context_fingerprint, prefix_fingerprints = _fingerprints(payload)
+        capability_visual_tokens = self.capability_visual_tokens(capabilities)
+        fixed_context_contribution = FixedContextContribution(
+            self.fixed_visible_tokens,
+            self.fixed_framing_tokens,
+            0.0,
+        )
+        input_item_contributions = tuple(
+            InputItemContribution(
+                visible_tokens,
+                item_framing_tokens,
+                nested_framing_tokens,
+                self.capability_visual_tokens(capabilities, self.media_items[start:end]),
+                0.0,
+            )
+            for (
+                visible_tokens,
+                item_framing_tokens,
+                nested_framing_tokens,
+                start,
+                end,
+            ) in self.item_contribution_parts
+        )
         return EstimateFeatures(
             known_tokens=known_tokens,
+            capability_visual_tokens=capability_visual_tokens,
             components=components,
             profile_key=ProfileKey(
                 item_kinds=tuple(sorted(self.item_kinds)),
@@ -319,6 +428,8 @@ class _Analysis:
             low_confidence_reasons=tuple(sorted(self.low_confidence_reasons)),
             estimator_generation=ESTIMATOR_GENERATION,
             profile_schema_revision=PROFILE_SCHEMA_REVISION,
+            fixed_context_contribution=fixed_context_contribution,
+            input_item_contributions=input_item_contributions,
         )
 
 
@@ -537,45 +648,49 @@ def _analyze_summary_part(analysis: _Analysis, raw_part: object) -> None:
 
 
 def _analyze_item(analysis: _Analysis, raw_item: object) -> None:
-    analysis.add_framing()
-    if isinstance(raw_item, str):
-        analysis.item_kinds.add("input_text")
-        analysis.increment(FeatureName.MESSAGE_ITEM_COUNT, 1)
-        analysis.mark_present(FeatureName.MESSAGE_TOKENS)
-        analysis.add_text("message", FeatureName.MESSAGE_TOKENS, raw_item)
-        return
-    if not isinstance(raw_item, Mapping):
+    analysis.begin_item()
+    analysis.add_framing(item_framing=True)
+    try:
+        if isinstance(raw_item, str):
+            analysis.item_kinds.add("input_text")
+            analysis.increment(FeatureName.MESSAGE_ITEM_COUNT, 1)
+            analysis.mark_present(FeatureName.MESSAGE_TOKENS)
+            analysis.add_text("message", FeatureName.MESSAGE_TOKENS, raw_item)
+            return
+        if not isinstance(raw_item, Mapping):
+            analysis.item_kinds.add("unknown")
+            analysis.record_unknown(f"input-item:{_json_kind(raw_item)}", raw_item)
+            return
+        item = cast(Mapping[str, Any], raw_item)
+        item_type = item.get("type")
+        if item_type == "message":
+            analysis.item_kinds.add("message")
+            _analyze_message(analysis, item)
+            return
+        if item_type == "function_call":
+            analysis.item_kinds.add("function_call")
+            _analyze_function_call(analysis, item)
+            return
+        if item_type == "function_call_output":
+            analysis.item_kinds.add("function_call_output")
+            _analyze_function_output(analysis, item)
+            return
+        if item_type == "reasoning":
+            analysis.item_kinds.add("reasoning")
+            _analyze_reasoning(analysis, item)
+            return
+        if isinstance(item_type, str) and item_type in _MEDIA_TYPES:
+            analysis.item_kinds.add(item_type)
+            analysis.record_media(item, item_type)
+            _record_unknown_fields(analysis, item, _MEDIA_PART_FIELDS, f"media-item:{item_type}")
+            return
         analysis.item_kinds.add("unknown")
-        analysis.record_unknown(f"input-item:{_json_kind(raw_item)}", raw_item)
-        return
-    item = cast(Mapping[str, Any], raw_item)
-    item_type = item.get("type")
-    if item_type == "message":
-        analysis.item_kinds.add("message")
-        _analyze_message(analysis, item)
-        return
-    if item_type == "function_call":
-        analysis.item_kinds.add("function_call")
-        _analyze_function_call(analysis, item)
-        return
-    if item_type == "function_call_output":
-        analysis.item_kinds.add("function_call_output")
-        _analyze_function_output(analysis, item)
-        return
-    if item_type == "reasoning":
-        analysis.item_kinds.add("reasoning")
-        _analyze_reasoning(analysis, item)
-        return
-    if isinstance(item_type, str) and item_type in _MEDIA_TYPES:
-        analysis.item_kinds.add(item_type)
-        analysis.record_media(item, item_type)
-        _record_unknown_fields(analysis, item, _MEDIA_PART_FIELDS, f"media-item:{item_type}")
-        return
-    analysis.item_kinds.add("unknown")
-    analysis.record_unknown(
-        item_type if isinstance(item_type, str) else f"input-item:{_json_kind(item_type)}",
-        item,
-    )
+        analysis.record_unknown(
+            item_type if isinstance(item_type, str) else f"input-item:{_json_kind(item_type)}",
+            item,
+        )
+    finally:
+        analysis.finish_item()
 
 
 def _analyze_top_level(analysis: _Analysis, payload: Mapping[str, Any]) -> None:
@@ -777,6 +892,7 @@ def _media_pdf_pages(value: Mapping[str, Any]) -> int | None:
 def analyze_responses_input(
     payload: Mapping[str, Any],
     *,
+    capabilities: TokenizationCapabilities | None = None,
     timings: list[EstimatorTiming] | None = None,
 ) -> EstimateFeatures:
     with _measure("lookup", timings):
@@ -784,4 +900,4 @@ def analyze_responses_input(
     with _measure("estimate", timings):
         analysis = _Analysis(encoding)
         _analyze_top_level(analysis, payload)
-        return analysis.finish(payload)
+        return analysis.finish(payload, capabilities)

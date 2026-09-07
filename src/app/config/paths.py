@@ -47,6 +47,10 @@ def tokenization_state_path() -> Path:
     return user_data_path() / "tokenization.json"
 
 
+def tokenization_learning_path() -> Path:
+    """Where versioned token-prediction history lives."""
+    return user_data_path() / "tokenization-learning.sqlite3"
+
 
 def tls_material_dir() -> Path:
     """Where a generated self-signed pair is kept.

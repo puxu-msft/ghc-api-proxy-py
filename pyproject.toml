@@ -36,6 +36,7 @@ dependencies = [
     "zstandard",
     "uvicorn",
     "cryptography>=50.0.0",
+    "aiosqlite>=0.22.1",
 ]
 
 [dependency-groups]
