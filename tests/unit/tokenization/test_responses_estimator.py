@@ -7,15 +7,18 @@ Each test here corresponds to one such mutation: drop the piece it adds, and thi
 
 from typing import Any
 
+import pytest
 import tiktoken
 
 from app.tokenization.estimators import estimate_responses_input
+from app.wire_json import dumps
 
 ENCODING = "o200k_base"
+SPECIAL_SPELLINGS = sorted(tiktoken.get_encoding(ENCODING).special_tokens_set)
 
 
 def tokens(text: str) -> int:
-    return len(tiktoken.get_encoding(ENCODING).encode(text))
+    return len(tiktoken.get_encoding(ENCODING).encode(text, disallowed_special=()))
 
 
 def base() -> dict[str, Any]:
@@ -103,6 +106,69 @@ def test_the_text_of_a_message_is_counted() -> None:
     grew_by = estimate_responses_input(payload) - estimate_responses_input(base())
 
     assert grew_by >= tokens(said)
+
+
+def _special_surface(surface: str, spelling: str) -> tuple[dict[str, Any], int]:
+    if surface == "instructions":
+        return {"instructions": spelling}, tokens(spelling) + 4
+    if surface == "message":
+        text = f"user\n{spelling}"
+        return {"input": [{"type": "message", "role": "user", "content": spelling}]}, tokens(text) + 4
+    if surface == "tool-schema":
+        tool = {
+            "type": "function",
+            "name": "lookup",
+            "parameters": {"type": "object", "description": spelling},
+        }
+        return {"tools": [tool]}, tokens(dumps([tool]).decode()) + 4
+    if surface == "function-call-arguments":
+        text = f"call_1\nlookup\n{spelling}"
+        return {
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "lookup",
+                    "arguments": spelling,
+                }
+            ]
+        }, tokens(text) + 4
+    if surface == "function-call-output":
+        text = f"call_1\n{spelling}"
+        return {
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": spelling,
+                }
+            ]
+        }, tokens(text) + 4
+    raise AssertionError(f"unknown test surface: {surface}")
+
+
+def test_configured_special_spellings_include_the_reported_input() -> None:
+    assert "<|endoftext|>" in SPECIAL_SPELLINGS
+
+
+@pytest.mark.parametrize("spelling", SPECIAL_SPELLINGS)
+@pytest.mark.parametrize(
+    "surface",
+    [
+        "instructions",
+        "message",
+        "tool-schema",
+        "function-call-arguments",
+        "function-call-output",
+    ],
+)
+def test_configured_special_spellings_are_ordinary_text_on_every_responses_surface(
+    spelling: str,
+    surface: str,
+) -> None:
+    payload, expected = _special_surface(surface, spelling)
+
+    assert estimate_responses_input(payload) == expected
 
 
 def test_an_empty_body_still_counts_as_something() -> None:

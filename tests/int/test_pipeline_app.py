@@ -2077,6 +2077,30 @@ def test_count_tokens_estimates_locally_for_a_model_with_no_upstream_counter() -
     assert seen == []
 
 
+@pytest.mark.parametrize("model", ["claude-model", "gpt-model"])
+def test_count_tokens_treats_special_token_spellings_as_ordinary_text(model: str) -> None:
+    client, seen = make_client(
+        lambda _: httpx2.Response(599),
+        overrides={"inbound": {"anthropic_count_tokens": {"providers": ["local"]}}},
+    )
+
+    response = client.post(
+        "/v1/messages/count_tokens",
+        json={
+            "model": model,
+            "messages": [
+                {"role": "user", "content": "before <|endoftext|> after"}
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert set(response.json()) == {"input_tokens", "estimated"}
+    assert response.json()["input_tokens"] >= 1
+    assert response.json()["estimated"] is True
+    assert seen == []
+
+
 def test_count_tokens_rejects_a_body_that_is_not_countable() -> None:
     client, seen = make_client(lambda _: httpx2.Response(200, json={"input_tokens": 1}))
     response = client.post(

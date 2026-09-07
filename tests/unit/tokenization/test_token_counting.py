@@ -4,11 +4,20 @@ from typing import Any
 
 import httpx2
 import pytest
+import tiktoken
 
 from app.models.anthropic import MessagesRequest
 from app.tokenization.estimators import estimate_anthropic_input
 from app.tokenization.service import AnthropicTokenCountingService
 from app.tokenization.state_store import TokenizationStateStore
+from app.wire_json import dumps
+
+ENCODING = tiktoken.get_encoding("o200k_base")
+SPECIAL_SPELLINGS = sorted(ENCODING.special_tokens_set)
+
+
+def ordinary_tokens(text: str) -> int:
+    return len(ENCODING.encode(text, disallowed_special=()))
 
 
 class StubTarget:
@@ -39,6 +48,43 @@ def _request() -> MessagesRequest:
 
 def test_local_token_estimator_returns_positive_count() -> None:
     assert estimate_anthropic_input(_request()) > 0
+
+
+def _special_anthropic_request(surface: str, spelling: str) -> tuple[MessagesRequest, int]:
+    payload: dict[str, Any] = {"model": "claude-test", "max_tokens": 1, "messages": []}
+    if surface == "system":
+        payload["system"] = spelling
+        expected = ordinary_tokens(spelling) + 4
+    elif surface == "message":
+        payload["messages"] = [{"role": "user", "content": spelling}]
+        expected = ordinary_tokens("user") + ordinary_tokens(spelling) + 4
+    elif surface == "tool-schema":
+        payload["tools"] = [
+            {
+                "name": "lookup",
+                "input_schema": {"type": "object", "description": spelling},
+            }
+        ]
+        expected = 0
+    else:
+        raise AssertionError(f"unknown test surface: {surface}")
+    request = MessagesRequest.model_validate(payload)
+    if surface == "tool-schema":
+        assert request.tools is not None
+        tool_data = [tool.model_dump(mode="json", exclude_none=True) for tool in request.tools]
+        expected = ordinary_tokens(dumps(tool_data).decode()) + 4
+    return request, expected
+
+
+@pytest.mark.parametrize("spelling", SPECIAL_SPELLINGS)
+@pytest.mark.parametrize("surface", ["system", "message", "tool-schema"])
+def test_configured_special_spellings_are_ordinary_text_on_every_anthropic_surface(
+    spelling: str,
+    surface: str,
+) -> None:
+    request, expected = _special_anthropic_request(surface, spelling)
+
+    assert estimate_anthropic_input(request) == expected
 
 
 def _counter(

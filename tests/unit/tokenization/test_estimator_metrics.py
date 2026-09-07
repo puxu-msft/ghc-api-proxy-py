@@ -18,7 +18,7 @@ def test_estimator_times_lookup_and_estimation_separately(
     monkeypatch.setattr(estimators, "RESPONSIVENESS", metrics)
 
     class Encoding:
-        def encode(self, text: str) -> list[int]:
+        def encode_ordinary(self, text: str) -> list[int]:
             now[0] += .2
             return [1, 2]
 
@@ -48,7 +48,7 @@ def test_estimator_failure_identity_is_preserved(
     error = ValueError("known tokenizer failure")
 
     class Encoding:
-        def encode(self, text: str) -> list[int]:
+        def encode_ordinary(self, text: str) -> list[int]:
             raise error
 
     def lookup(name: str) -> Encoding:

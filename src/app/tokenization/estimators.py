@@ -46,6 +46,10 @@ async def preload_tokenizer() -> None:
     await run_sync(tiktoken.get_encoding, _TOKENIZER_NAME)
 
 
+def _count_ordinary(encoding: tiktoken.Encoding, text: str) -> int:
+    return len(encoding.encode_ordinary(text))
+
+
 def _anthropic_content_text(
     content: str | list[ContentBlock],
     *,
@@ -84,21 +88,20 @@ def estimate_anthropic_input(
     with _measure("anthropic", "estimate", timings):
         total = 0
         if isinstance(request.system, str):
-            total += len(encoding.encode(request.system)) + 4
+            total += _count_ordinary(encoding, request.system) + 4
         elif request.system:
-            total += sum(len(encoding.encode(block.text)) + 4 for block in request.system)
+            total += sum(_count_ordinary(encoding, block.text) + 4 for block in request.system)
         if request.tools:
             tool_data = [tool.model_dump(mode="json", exclude_none=True) for tool in request.tools]
-            total += len(encoding.encode(dumps(tool_data).decode())) + 4
+            total += _count_ordinary(encoding, dumps(tool_data).decode()) + 4
         for message in request.messages:
-            total += len(encoding.encode(message.role))
-            total += len(
-                encoding.encode(
-                    _anthropic_content_text(
-                        message.content,
-                        assistant=message.role == "assistant",
-                    )
-                )
+            total += _count_ordinary(encoding, message.role)
+            total += _count_ordinary(
+                encoding,
+                _anthropic_content_text(
+                    message.content,
+                    assistant=message.role == "assistant",
+                ),
             )
             total += 4
         return max(total, 1)
@@ -165,17 +168,17 @@ def estimate_responses_input(
         total = 0
         instructions = payload.get("instructions")
         if isinstance(instructions, str) and instructions:
-            total += len(encoding.encode(instructions)) + 4
+            total += _count_ordinary(encoding, instructions) + 4
         tools = payload.get("tools")
         if tools:
-            total += len(encoding.encode(dumps(tools).decode())) + 4
+            total += _count_ordinary(encoding, dumps(tools).decode()) + 4
         items = payload.get("input")
         if isinstance(items, list):
             for item in cast(list[Any], items):
                 if not isinstance(item, dict):
-                    total += len(encoding.encode(dumps(item).decode())) + 4
+                    total += _count_ordinary(encoding, dumps(item).decode()) + 4
                     continue
                 text = _responses_item_text(cast(dict[str, Any], item))
                 if text:
-                    total += len(encoding.encode(text)) + 4
+                    total += _count_ordinary(encoding, text) + 4
         return max(total, 1)

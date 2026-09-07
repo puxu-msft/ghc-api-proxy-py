@@ -5,7 +5,7 @@ from pathlib import Path
 import anyio
 import pytest
 from prometheus_client import CollectorRegistry
-from prompt_admission_process_helper import controlled_estimate
+from prompt_admission_process_helper import controlled_estimate, failed_estimate
 
 import app.tokenization.worker as worker_module
 from app.models.anthropic import MessagesRequest
@@ -57,13 +57,13 @@ async def test_real_worker_propagates_validation_error_without_fake_metric_sampl
     ) == 0
 
 
-async def test_real_worker_keeps_encoding_failure_and_stage_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_real_worker_keeps_estimation_failure_and_stage_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
     registry = CollectorRegistry()
     monkeypatch.setattr(worker_module, "RESPONSIVENESS", ResponsivenessMetrics(registry))
-    payload = {"model": "model", "input": [{"type": "message", "role": "user", "content": "<|endoftext|>"}]}
+    monkeypatch.setattr(worker_module, "_estimate_input", failed_estimate)
 
-    with pytest.raises(ValueError, match="disallowed special token"):
-        await LocalTokenWorker().estimate("openai-responses", payload)
+    with pytest.raises(ValueError, match="synthetic encoding failure"):
+        await LocalTokenWorker().estimate("openai-responses", {"model": "model", "input": []})
 
     for phase, failures in (("lookup", 0), ("estimate", 1)):
         labels = {"format": "responses", "phase": phase}

@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from app.tokenization.estimators import EstimatorTiming
 from app.tokenization.worker import TokenEstimate
 
 
@@ -20,3 +21,14 @@ def controlled_count(_tokenizer: str, text: str) -> int:
 
 def controlled_estimate(_protocol: str, payload: dict[str, Any]) -> TokenEstimate:
     return TokenEstimate(controlled_count("unused", payload["input"]), ())
+
+
+def failed_estimate(_protocol: str, _payload: dict[str, Any]) -> TokenEstimate:
+    return TokenEstimate(
+        None,
+        (
+            EstimatorTiming("responses", "lookup", 0.0, False),
+            EstimatorTiming("responses", "estimate", 0.0, True),
+        ),
+        ValueError("synthetic encoding failure"),
+    )
