@@ -166,6 +166,8 @@ class RequestTrace:
     requested_model: str = ""
     model: str = ""
     attempts: int = 1
+    # Monotonic offset at which the final replacement attempt opened. `None` means the request never retried. The final line turns this into the last-attempt duration using the same total duration it already reports.
+    last_retry_started_s: float | None = None
     # What each replayed attempt was replacing, in the order the replays were opened. A transparent replay is invisible to the client by design, and until this existed it was invisible to the record too: a successful replacement neither hands over nor re-raises, so `retries=N` was the whole account and the exceptions that caused it were gone.
     #
     # A list rather than the first one. A review put three attempts on the wire with a different failure in the second position and watched it disappear behind the first — and "the later ones failed the same way" was an assumption nothing checked. Empty means no replacement was ever opened; it does **not** mean no second upstream request was made, because a replacement that fails to produce a stream is appended here and then returns.
@@ -364,6 +366,12 @@ class RequestTrace:
             if attempt.token_admission is not None
         )
 
+    def absorb_attempt_timing(self, context: RequestContext) -> None:
+        """Project the start of the final retry attempt onto the request line."""
+        attempt = context.current_attempt
+        if attempt is not None and attempt.index > 0:
+            self.last_retry_started_s = max(0.0, attempt.started_at - self.started)
+
     def absorb_conversion(self, context: RequestContext) -> None:
         """Take whatever translation has recorded so far onto the line.
 
@@ -383,6 +391,12 @@ def request_line_from_trace(
     duration_s: float | None = None,
 ) -> RequestLine:
     """Detach the legacy display/JSON projection from the mutable request trace."""
+    elapsed = time.monotonic() - trace.started if duration_s is None else duration_s
+    last_retry_duration_s = (
+        max(0.0, elapsed - trace.last_retry_started_s)
+        if trace.last_retry_started_s is not None
+        else None
+    )
     return RequestLine(
         method=trace.method,
         path=trace.path,
@@ -396,7 +410,8 @@ def request_line_from_trace(
         model=trace.model,
         status_code=status_code,
         started_at=trace.started_at,
-        duration_s=(time.monotonic() - trace.started if duration_s is None else duration_s),
+        duration_s=elapsed,
+        last_retry_duration_s=last_retry_duration_s,
         first_upstream_byte_s=trace.first_upstream_byte_s,
         upstream_max_gap_s=trace.upstream_max_gap_s,
         upstream_chunks=trace.upstream_chunks,

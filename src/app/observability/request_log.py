@@ -147,6 +147,8 @@ class RequestLine:
     status_code: int | None = None
     started_at: str = ""
     duration_s: float | None = None
+    # The elapsed time of the final attempt, when this request replaced an earlier attempt. Kept beside the total so the console can show `<last-retry>/<total>` without changing ordinary lines.
+    last_retry_duration_s: float | None = None
     first_upstream_byte_s: float | None = None
     # How the upstream stream was paced, for the question the duration cannot answer: a request that took four minutes because upstream went quiet for most of one of them, and a request that took four minutes producing bytes throughout, are the same number here and different incidents. `upstream_max_gap_s` is the longest silence between two arrivals from upstream, measured only *between* them — the wait before the first is `first_upstream_byte_s` above, and the wait after the last is not a gap between anything. `None` means fewer than two arrivals, which is not the same as no silence.
     # A gap is timed against what `with_idle_timeout` counts as activity, so the number can be read straight against `upstream_request_timeouts.stream_idle`: a max gap sitting just under the configured idle timeout is a request that nearly died, and nothing else on this record says so. The default for that setting is 0 — no terminator at all — which is exactly the configuration where this field is the only account of a silence anyone will ever get.
@@ -654,7 +656,10 @@ def format_completion_line(
         parts.append(paint(str(line.status_code), STATUS_COLOURS[status], color=color))
     parts.extend(_subject(line, succeeded=succeeded, color=color))
     if line.duration_s is not None:
-        parts.append(paint(format_duration(line.duration_s), duration_colour(line.duration_s), color=color))
+        duration = format_duration(line.duration_s)
+        if line.attempts > 1 and line.last_retry_duration_s is not None:
+            duration = f"{format_duration(line.last_retry_duration_s)}/{duration}"
+        parts.append(paint(duration, duration_colour(line.duration_s), color=color))
 
     # Upstream HTTP body bytes, one field for both directions so they read as a pair rather than as two unrelated numbers. These are not full wire bytes and not downstream delivery bytes.
     # Only the returning half escalates. What this proxy sent upstream is a consequence of the request the client made and says nothing about how the reply went, so it stays quiet whatever its size.

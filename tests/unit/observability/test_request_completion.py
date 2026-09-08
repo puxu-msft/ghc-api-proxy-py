@@ -214,6 +214,7 @@ def test_finalized_request_is_one_immutable_source_for_store_json_and_console(
         "status_code",
         "started_at",
         "duration_s",
+        "last_retry_duration_s",
         "first_upstream_byte_s",
         "upstream_max_gap_s",
         "upstream_chunks",

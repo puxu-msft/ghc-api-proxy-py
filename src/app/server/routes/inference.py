@@ -720,6 +720,7 @@ async def _dispatch_after_body(
         _observe_failed_upstream_response(context, trace, chain, error)
         trace.model = context.resolved_model
         trace.attempts = context.attempt_count
+        trace.absorb_attempt_timing(context)
         trace.detail = str(error)
         trace.absorb_token_admissions(context)
         # A refused crossing is exactly where the losses matter: they name which field the request could not carry, and the error alone rarely does.
@@ -736,6 +737,7 @@ async def _dispatch_after_body(
     trace.model = context.resolved_model
     trace.requested_model = context.requested_model
     trace.attempts = context.attempt_count
+    trace.absorb_attempt_timing(context)
     trace.absorb_token_admissions(context)
     # The request half has crossed by now whatever happens next, so this covers the three returns below. The buffered path calls again once the reply has crossed back.
     trace.absorb_conversion(context)
@@ -1253,6 +1255,8 @@ class _StreamAccounting:
                 completion_unit = "native_terminal_batch"
             else:
                 completion_unit = "translated_drain"
+        if self.context is not None:
+            self.trace.absorb_attempt_timing(self.context)
         self.completion.settle(
             status_code=self.status_code,
             upstream_response_bytes=self.trace.upstream_response_body_bytes,

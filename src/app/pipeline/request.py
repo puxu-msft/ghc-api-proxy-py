@@ -7,6 +7,7 @@ The user ruled that no ownership or permission rule applies, so this is a plain 
 That document now calls the object `ClientRequest` and gives each upstream try its own `UpstreamAttempt`. Here it is still `RequestContext` — the name the earlier single-document version of that spec used — holding its tries as `Attempt` records. Whether to follow the rename is that document's author's call, not this module's.
 """
 
+import time
 from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -50,6 +51,7 @@ class Attempt:
     """One upstream exchange within a request."""
 
     index: int
+    started_at: float = field(default_factory=time.monotonic)
     endpoint: ModelEndpoint | None = None
     payload: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
     status_code: int | None = None

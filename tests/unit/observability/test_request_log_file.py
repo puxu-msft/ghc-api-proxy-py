@@ -116,6 +116,7 @@ def test_a_successful_request_writes_one_complete_structured_record(tmp_path: Pa
         "status_code",
         "started_at",
         "duration_s",
+        "last_retry_duration_s",
         "first_upstream_byte_s",
         "upstream_max_gap_s",
         "upstream_chunks",
@@ -158,6 +159,7 @@ def test_a_successful_request_writes_one_complete_structured_record(tmp_path: Pa
         "status_code": 200,
         "started_at": "2026-08-20T15:01:53.580Z",
         "duration_s": "ignored",
+        "last_retry_duration_s": None,
         "first_upstream_byte_s": 0.42,
         # How the stream was paced. `None` is fewer than two arrivals from upstream, which is what a buffered reply looks like — and is not the same claim as "there was no silence".
         "upstream_max_gap_s": 6.5,

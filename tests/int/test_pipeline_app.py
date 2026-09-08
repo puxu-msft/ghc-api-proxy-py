@@ -52,6 +52,7 @@ from app.model_provider.ghc_client import GhcApiClient, GhcClientConfig
 from app.model_provider.ghc_client.tokens import CopilotTokenManager
 from app.observability import rejection_capture
 from app.observability.active_requests import ActiveRequestRegistry
+from app.observability.footer import format_duration
 from app.observability.logging import setup_logging
 from app.observability.request_completion import RequestCompletionCoordinator
 from app.observability.request_log_file import request_logs_dir
@@ -7411,6 +7412,9 @@ def test_a_replay_is_reported_on_the_request_line(
     assert "peer closed the connection" in replaced[0]
     # And on the line this test is named for. A review deleted the rendering branch and every test here stayed green, because they all read the structured record instead.
     line = next(item for item in _request_lines(caplog.records) if "retries=" in item)
+    last_retry = cast(float, record["last_retry_duration_s"])
+    total = cast(float, record["duration_s"])
+    assert f"{format_duration(last_retry)}/{format_duration(total)}" in line
     assert "RemoteProtocolError" in line
     assert "peer closed the connection" in line
 

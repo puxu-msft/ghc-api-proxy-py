@@ -231,6 +231,23 @@ def test_retries_are_reported_once_the_count_is_final() -> None:
     assert "retries=2" in line
 
 
+def test_retried_request_duration_shows_last_attempt_over_total() -> None:
+    line = format_completion_line(
+        RequestLine(
+            method="POST",
+            path="/p",
+            inbound_format="f",
+            model="m",
+            status_code=200,
+            duration_s=6.2,
+            last_retry_duration_s=2.7,
+            attempts=2,
+        ),
+        status="ok",
+    )
+    assert line == "200 f/m 2.7s/6.2s retries=1"
+
+
 def test_what_each_replay_replaced_is_named_and_the_whole_set_is_bounded() -> None:
     """Three entries, each individually short enough to pass, whose sum is not.
 
