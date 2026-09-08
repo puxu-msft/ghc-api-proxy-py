@@ -1,4 +1,4 @@
-"""Rate limiting, in two halves.
+"""Rate limiting, in three parts.
 
 Reactive: the spec triggers it only on upstream 429 or 502, and explicitly not on 503 or 504.
 Once limited, requests are spaced by `request_interval`.
@@ -8,6 +8,12 @@ Proactive: upstream advertises its remaining budget on successful responses.
 The wall can therefore be seen before it is hit.
 Spacing costs nothing when the budget is healthy and avoids the 429 when it is not.
 It needs no configuration of its own, because the numbers come from upstream.
+
+Backoff: consecutive retryable upstream failures of any kind — a torn connection, a timeout, a
+5xx — hold the next attempt back, doubling per failure. Retrying each one instantly adds load
+exactly when an upstream is least able to take it. Failures are reported through `note_failure`
+by whichever layer saw them, so the wait is shared across requests and covers the replay path
+alongside the driver's own retry loop.
 """
 
 import time
@@ -113,6 +119,7 @@ class RateLimiter:
         self._limited_since = 0.0
         self._successes = 0
         self._proactive_interval = 0.0
+        self._failures = 0
 
     @property
     def mode(self) -> RateLimitMode:
@@ -121,6 +128,24 @@ class RateLimiter:
     @property
     def proactive_spacing(self) -> float:
         return self._proactive_interval
+
+    def _failure_backoff(self) -> float:
+        """Wait owed before the next attempt, from consecutive retryable upstream failures.
+
+        Each failure in a row doubles the wait — `base`, then `2·base`, then `4·base`, capped — so
+        a flapping upstream is asked again at widening intervals instead of being hammered. A
+        success clears the streak — see `observe_success`.
+        """
+        if self._failures <= 0:
+            return 0.0
+        # The exponent is bounded before the power is taken: a streak that has run for days would
+        # otherwise raise a float out of `2 ** (failures - 1)`, and the retry loop must be told the
+        # upstream failed, not die on an OverflowError instead of the error it was reporting.
+        exponent = min(self._failures - 1, 64)
+        return min(
+            self._config.failure_backoff_base_sec * 2.0**exponent,
+            self._config.failure_backoff_max_sec,
+        )
 
     def _spacing(self) -> float:
         if self._mode is RateLimitMode.NORMAL:
@@ -134,7 +159,10 @@ class RateLimiter:
         wait = max(0.0, self._next_allowed - now)
         if wait > 0:
             await self._sleep(wait)
-        self._next_allowed = self._clock() + self._spacing()
+        # `max` rather than assignment, for the same reason `note_failure` uses it: this limiter is
+        # shared, and a failure noted by another request while this one slept must not be erased
+        # by the wake-up.
+        self._next_allowed = max(self._next_allowed, self._clock() + self._spacing())
         return wait
 
     def _maybe_start_recovering(self) -> None:
@@ -144,10 +172,27 @@ class RateLimiter:
             self._mode = RateLimitMode.RECOVERING
             self._successes = 0
 
+    def note_failure(self) -> None:
+        """Record an upstream attempt failure and hold the next attempt back accordingly.
+
+        Deliberately separate from `observe_failure`: the 429/502 path reports the same failure
+        twice (once from the response, once through `_handle_failure`), and counting it there
+        would double the streak. Callers report one failed attempt exactly once.
+
+        The wait is pushed onto `next_allowed` here rather than folded into `_spacing`, because
+        `acquire` reads the *previous* acquire's spacing — a wait set only there would land one
+        attempt later than the failure it answers, and a replay path that opens a fresh driver per
+        reopen would never be delayed at all. `max` keeps an existing limited-mode wait intact: a
+        backoff never shortens what `retry-after` already asked for.
+        """
+        self._failures += 1
+        self._next_allowed = max(self._next_allowed, self._clock() + self._failure_backoff())
+
     def observe_success(self, headers: Mapping[str, str] | None = None) -> None:
         """Record a success and whatever budget it advertised."""
         if headers is not None:
             self._proactive_interval = proactive_interval(read_signal(headers))
+        self._failures = 0
         if self._mode is RateLimitMode.RECOVERING:
             self._successes += 1
             if self._successes >= self._config.consecutive_successes:

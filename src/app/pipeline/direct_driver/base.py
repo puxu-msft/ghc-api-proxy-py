@@ -28,6 +28,7 @@ from app.pipeline.events import FrozenSubscribers
 from app.pipeline.exceptions import (
     Disposition,
     PipelineAbort,
+    PipelineRetry,
     PromptTokenLimitExceeded,
     UpstreamError,
     UpstreamTimeout,
@@ -467,6 +468,12 @@ class DirectDriver:
         await self._publish(EVENT_ATTEMPT_FAILED, context, outcome)
         disposition = classify(error)
         if disposition is Disposition.RETRY:
+            if self._rate_limiter is not None and not isinstance(error, PipelineRetry):
+                # Feed the provider's shared failure streak, so repeated upstream failures space
+                # the next attempt out instead of retrying instantly. A subscriber's
+                # `PipelineRetry` is not an upstream failure and does not feed this — the same
+                # distinction `reason_for` draws.
+                self._rate_limiter.note_failure()
             funded, detail = self._budget.take_for(error)
             if funded:
                 return True

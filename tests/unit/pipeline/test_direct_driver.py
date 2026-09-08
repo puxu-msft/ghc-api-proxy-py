@@ -25,6 +25,7 @@ from app.pipeline.direct_driver import (
 )
 from app.pipeline.events import SubscriberRegistry
 from app.pipeline.exceptions import PipelineAbort, PipelineRetry, UpstreamError
+from app.pipeline.rate_limiting import RateLimiter, RateLimitMode
 from app.pipeline.request import FORMAT_ENDPOINTS, RequestContext, WireFormat
 from app.pipeline.routing import RoutingError, decide_route, split_format_suffix
 
@@ -175,6 +176,9 @@ class RejectingRateLimiter:
         return True
 
     def observe_success(self, _headers: dict[str, str]) -> None:
+        pass
+
+    def note_failure(self) -> None:
         pass
 
 
@@ -469,6 +473,41 @@ async def test_retryable_upstream_error_is_attempted_again() -> None:
     assert outcome.succeeded is True
     assert outcome.attempts == 2
     assert EVENT_ATTEMPT_FAILED in outcome.events
+
+
+@pytest.mark.asyncio
+async def test_a_failed_attempt_holds_the_next_one_back() -> None:
+    # The retry loop has no interval of its own; the spacing comes from the shared rate limiter,
+    # which the failure feeds through `note_failure`. A provider raised `UpstreamError` without a
+    # status, so the reactive half never engages and the wait is the failure backoff alone.
+    class FakeClock:
+        def __init__(self) -> None:
+            self.now = 0.0
+            self.slept: list[float] = []
+
+        def __call__(self) -> float:
+            return self.now
+
+        async def sleep(self, seconds: float) -> None:
+            self.slept.append(seconds)
+            self.now += seconds
+
+    clock = FakeClock()
+    from app.config.schema import ReactiveRateLimiterConfig
+
+    rate_limiter = RateLimiter(ReactiveRateLimiterConfig(), clock=clock, sleep=clock.sleep)
+    provider = FakeProvider(responses=[UpstreamError("boom"), httpx2.Response(200)])
+    direct = AnthropicMessagesDriver(
+        provider,
+        SubscriberRegistry[RequestContext]().freeze(),
+        budget=RetryBudget(max_total=3),
+        rate_limiter=rate_limiter,
+        clock=clock,
+    )
+    outcome = await direct.run(context())
+    assert outcome.succeeded is True
+    assert clock.slept == pytest.approx([0.5])
+    assert rate_limiter.mode is RateLimitMode.NORMAL
 
 
 @pytest.mark.asyncio

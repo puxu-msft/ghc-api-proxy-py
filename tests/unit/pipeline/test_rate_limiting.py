@@ -200,3 +200,106 @@ async def test_limited_spacing_never_undercuts_the_proactive_one() -> None:
     rate_limiter.observe_failure(429)
     await rate_limiter.acquire()
     assert await rate_limiter.acquire() == pytest.approx(20.0)
+
+
+# --- failure backoff ---------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_first_failure_holds_the_next_attempt_by_the_base() -> None:
+    clock = FakeClock()
+    rate_limiter = limiter(clock)
+    await rate_limiter.acquire()
+    rate_limiter.note_failure()
+    assert rate_limiter.mode is RateLimitMode.NORMAL
+    assert await rate_limiter.acquire() == pytest.approx(0.5)
+
+
+@pytest.mark.asyncio
+async def test_consecutive_failures_double_the_wait_up_to_the_cap() -> None:
+    clock = FakeClock()
+    rate_limiter = limiter(clock, failure_backoff_base_sec=1, failure_backoff_max_sec=3)
+    await rate_limiter.acquire()
+    for expected in (1.0, 2.0, 3.0, 3.0):
+        rate_limiter.note_failure()
+        assert await rate_limiter.acquire() == pytest.approx(expected)
+
+
+@pytest.mark.asyncio
+async def test_a_success_clears_the_failure_streak() -> None:
+    clock = FakeClock()
+    rate_limiter = limiter(clock)
+    await rate_limiter.acquire()
+    rate_limiter.note_failure()
+    rate_limiter.note_failure()
+    rate_limiter.observe_success()
+    await rate_limiter.acquire()
+    rate_limiter.note_failure()
+    assert await rate_limiter.acquire() == pytest.approx(0.5)
+
+
+@pytest.mark.asyncio
+async def test_backoff_never_shortens_a_limited_mode_wait() -> None:
+    # `retry-after` and `retry_interval` stay the authority on a 429; the streak only ever asks
+    # for more room than they do.
+    clock = FakeClock()
+    rate_limiter = limiter(clock, retry_interval=10)
+    rate_limiter.observe_failure(429)
+    rate_limiter.note_failure()
+    assert await rate_limiter.acquire() == pytest.approx(10.0)
+
+
+@pytest.mark.asyncio
+async def test_a_sustained_limited_streak_eventually_waits_longer_than_the_interval() -> None:
+    clock = FakeClock()
+    rate_limiter = limiter(clock, retry_interval=10, failure_backoff_base_sec=4)
+    waits: list[float] = []
+    for _ in range(3):
+        rate_limiter.observe_failure(429)
+        rate_limiter.note_failure()
+        waits.append(await rate_limiter.acquire())
+    # The streak asks 4, 8, 16; the first two stay under the configured interval.
+    assert waits == pytest.approx([10.0, 10.0, 16.0])
+
+
+@pytest.mark.asyncio
+async def test_zero_base_disables_the_backoff() -> None:
+    clock = FakeClock()
+    rate_limiter = limiter(clock, failure_backoff_base_sec=0)
+    await rate_limiter.acquire()
+    rate_limiter.note_failure()
+    rate_limiter.note_failure()
+    assert await rate_limiter.acquire() == 0.0
+
+
+@pytest.mark.asyncio
+async def test_a_streak_longer_than_the_exponent_can_survive_caps_instead_of_overflowing() -> None:
+    # Days of continuous failure accumulate a huge streak; the retry loop must be told the
+    # upstream failed, not die on a float overflow raised out of the doubling.
+    clock = FakeClock()
+    rate_limiter = limiter(clock)
+    await rate_limiter.acquire()
+    for _ in range(2000):
+        rate_limiter.note_failure()
+    assert await rate_limiter.acquire() == pytest.approx(30.0)
+
+
+@pytest.mark.asyncio
+async def test_a_wait_pushed_while_another_acquire_slept_is_not_erased() -> None:
+    # The limiter is shared: a failure another request notes while this acquire is waking up must
+    # survive the wake-up's own schedule write.
+    clock = FakeClock()
+
+    async def sleep_and_note(seconds: float) -> None:
+        await clock.sleep(seconds)
+        rate_limiter.note_failure()
+
+    rate_limiter = RateLimiter(
+        ReactiveRateLimiterConfig(), clock=clock, sleep=sleep_and_note
+    )
+    await rate_limiter.acquire()
+    rate_limiter.note_failure()
+    await rate_limiter.acquire()
+    # The note during the sleep pushed the schedule one second out (failures=2 → 0.5 · 2¹); the
+    # wake-up's own schedule write kept it instead of resetting it to "now".
+    assert await rate_limiter.acquire() == pytest.approx(1.0)

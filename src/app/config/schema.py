@@ -336,15 +336,25 @@ class ProactiveRateLimiterConfig(Section):
 
 
 class ReactiveRateLimiterConfig(Section):
-    """Engaged only by an upstream 429 or 502, per the spec.
+    """Two halves with different triggers.
 
-    503 and 504 stay with ordinary retry, so a slow upstream does not become a rate limit.
+    The limited half engages only on an upstream 429 or 502, per the spec; 503 and 504 stay with
+    ordinary retry, so a slow upstream does not become a rate limit.
+
+    The backoff half engages on consecutive retryable upstream failures of any kind — a torn
+    connection, a timeout, a 5xx. Repeated failures are the signature of an upstream that is
+    struggling, and retrying each one instantly adds load exactly when it hurts. The spacing
+    doubles per consecutive failure up to `failure_backoff_max_sec`; one success resets it.
     """
 
     retry_interval: int = Field(default=10, ge=0)
     request_interval: int = Field(default=10, ge=0)
     recovery_interval: int = Field(default=600, ge=0)
     consecutive_successes: int = Field(default=5, ge=1)
+    # Seconds to wait before the first retry after an upstream failure, doubling per further
+    # consecutive failure. 0 disables the backoff.
+    failure_backoff_base_sec: float = Field(default=0.5, ge=0)
+    failure_backoff_max_sec: float = Field(default=30.0, ge=0)
 
 
 class HedgeConfig(Section):

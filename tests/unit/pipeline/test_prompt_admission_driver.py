@@ -139,6 +139,9 @@ class CountingLimiter:
     def observe_success(self, _headers: Mapping[str, str]) -> None:
         return None
 
+    def note_failure(self) -> None:
+        return None
+
 
 class AdvancingAdmission:
     def __init__(

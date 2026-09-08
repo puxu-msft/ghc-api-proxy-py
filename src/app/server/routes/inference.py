@@ -949,6 +949,14 @@ async def _dispatch_after_body(
                     request_id=trace.request_id,
                 )
                 return None
+            # The tear this replay replaces is an upstream failure, whatever the replacement then
+            # does. Noting it here feeds the provider's failure streak, so a stream that keeps
+            # tearing is reopened with a wait between attempts instead of back-to-back — the
+            # driver's own `_handle_failure` never saw this failure, because its attempt had
+            # already handed the body over when the tear happened. The wait stays at the base
+            # rather than widening: each replacement's headers arrive successfully, and that
+            # success is what clears the streak. Widening is the pre-header failures' shape.
+            chain.rate_limiter_for(replay_route.provider_name).note_failure()
             if replay_payload is None or replay_admission is None:
                 raise RuntimeError("upstream replay has no source attempt admission")
             # Replay the exact final payload and admission decision that produced the response currently being delivered. Rerouting or rerunning mutable shaping here can connect a prefix produced from one conversation to a replacement built from another.
