@@ -142,6 +142,28 @@ def _unrecognised_in_mapping(discovery: ProviderDiscovery) -> str:
     return f"{discovery.value!r}, whose {head!r}"
 
 
+def _choice_from_discovery(
+    discovery: ProviderDiscovery,
+    *,
+    requested: str,
+    providers: ProviderRegistry,
+) -> ProviderChoice:
+    if discovery.origin == "qualified":
+        provider_name = discovery.provider
+    elif discovery.origin == "fallback":
+        provider_name = _fallback_name(providers, _unrecognised_in_mapping(discovery))
+    else:
+        provider_name = providers.default_name
+    return ProviderChoice(
+        provider_name=provider_name,
+        origin=discovery.origin,
+        target=discovery.target,
+        requested=requested,
+        matched_key=discovery.matched_key,
+        hops=discovery.hops,
+    )
+
+
 def choose_provider(
     model_name: str,
     *,
@@ -150,11 +172,46 @@ def choose_provider(
 ) -> ProviderChoice:
     """Decide which provider serves an inbound model name.
 
-    Two sources, in priority order. A `provider/` prefix on the request itself wins outright — it is how an operator checks a provider by hand without editing configuration and restarting. Otherwise the qualifiers written into `model_mappings` decide, via `discover_provider`.
+    A mapping keyed by the complete request name wins first. A bare request with no direct match gets a second lookup prefixed by the default provider name; a qualified request gets one prefixed by the fallback provider name when configured. Together, those lookups let configuration redirect both an advertised provider-qualified model and a bare request that would otherwise go to the default provider. Otherwise a `provider/` prefix on the request itself wins outright — it is how an operator checks a provider by hand without editing configuration and restarting. Mapping values decide the remaining routes via `discover_provider`.
 
-    When the request carries its own prefix, the alias chain is **still** walked, but only for the name: a qualifier further down the chain cannot take the request away from the provider it explicitly asked for. Without that, `A/opus` with `opus: B/claude-opus-5` in the table would be served by B, which reads the priority backwards.
+    When the request carries its own prefix and no complete-name mapping applies, the alias chain is still walked, but only for the name: a qualifier further down the chain cannot take the request away from the provider it explicitly asked for. Without that, `A/opus` with `opus: B/claude-opus-5` in the table would be served by B, which reads the priority backwards.
     """
     explicit, bare, request_qualified = split_provider_qualifier(model_name, providers.names)
+    complete_name_discovery = discover_provider(
+        model_name, mappings=mappings, provider_names=providers.names
+    )
+    if complete_name_discovery.matched_key:
+        return _choice_from_discovery(
+            complete_name_discovery,
+            requested=bare,
+            providers=providers,
+        )
+
+    if not request_qualified:
+        default_qualified_discovery = discover_provider(
+            f"{providers.default_name}{QUALIFIER_SEPARATOR}{bare}",
+            mappings=mappings,
+            provider_names=providers.names,
+        )
+        if default_qualified_discovery.matched_key:
+            return _choice_from_discovery(
+                default_qualified_discovery,
+                requested=bare,
+                providers=providers,
+            )
+    elif providers.fallback_name:
+        fallback_qualified_discovery = discover_provider(
+            f"{providers.fallback_name}{QUALIFIER_SEPARATOR}{bare}",
+            mappings=mappings,
+            provider_names=providers.names,
+        )
+        if fallback_qualified_discovery.matched_key:
+            return _choice_from_discovery(
+                fallback_qualified_discovery,
+                requested=bare,
+                providers=providers,
+            )
+
     discovery = discover_provider(bare, mappings=mappings, provider_names=providers.names)
 
     if request_qualified:
@@ -170,20 +227,7 @@ def choose_provider(
             hops=discovery.hops,
         )
 
-    if discovery.origin == "qualified":
-        provider_name = discovery.provider
-    elif discovery.origin == "fallback":
-        provider_name = _fallback_name(providers, _unrecognised_in_mapping(discovery))
-    else:
-        provider_name = providers.default_name
-    return ProviderChoice(
-        provider_name=provider_name,
-        origin=discovery.origin,
-        target=discovery.target,
-        requested=bare,
-        matched_key=discovery.matched_key,
-        hops=discovery.hops,
-    )
+    return _choice_from_discovery(discovery, requested=bare, providers=providers)
 
 
 type Serviceability = Literal["yes", "absent", "disabled", "unknown", "unroutable"]

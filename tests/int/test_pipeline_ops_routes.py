@@ -14,8 +14,11 @@ from fastapi.testclient import TestClient
 from prometheus_client import REGISTRY
 
 from app.config.schema import ProxyConfig
+from app.model_provider.registry import ProviderRegistry
 from app.model_provider.types import ModelDescriptor, ModelEndpoint
 from app.observability.metrics import RESPONSIVENESS
+from app.pipeline.request import WireFormat
+from app.pipeline.routing import decide_route
 from app.server.app_state import CHAIN_STATE_KEY
 from app.server.routes.ops import router as ops_router
 from app.server.routes.router import build_router
@@ -126,6 +129,101 @@ def client_for(
 
 def config_with(mappings: dict[str, str], **rest: Any) -> ProxyConfig:
     return ProxyConfig.model_validate({"model_mappings": mappings, **rest})
+
+
+def test_a_qualified_mapping_key_can_redirect_a_qualified_request() -> None:
+    providers = {
+        "ttthree": StubProvider("ttthree", frozenset({"deepseek-v4-flash-messages"})),
+        "ttthree-a": StubProvider(
+            "ttthree-a", frozenset({"deepseek-v4-flash-messages"})
+        ),
+    }
+
+    route = decide_route(
+        requested_model="ttthree/deepseek-v4-flash-messages",
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        providers=ProviderRegistry(providers, default="ttthree"),
+        mappings={
+            "ttthree/deepseek-v4-flash-messages": (
+                "ttthree-a/deepseek-v4-flash-messages"
+            )
+        },
+    )
+
+    assert route.provider_name == "ttthree-a"
+    assert route.model_id == "deepseek-v4-flash-messages"
+
+
+def test_a_bare_request_uses_the_default_provider_qualified_mapping_key() -> None:
+    providers = {
+        "ttthree": StubProvider("ttthree", frozenset({"deepseek-v4-flash-messages"})),
+        "ttthree-a": StubProvider(
+            "ttthree-a", frozenset({"deepseek-v4-flash-messages"})
+        ),
+    }
+
+    route = decide_route(
+        requested_model="deepseek-v4-flash-messages",
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        providers=ProviderRegistry(providers, default="ttthree"),
+        mappings={
+            "ttthree/deepseek-v4-flash-messages": (
+                "ttthree-a/deepseek-v4-flash-messages"
+            )
+        },
+    )
+
+    assert route.provider_name == "ttthree-a"
+    assert route.model_id == "deepseek-v4-flash-messages"
+
+
+def test_a_bare_mapping_key_precedes_the_default_provider_qualified_key() -> None:
+    providers = {
+        "ttthree": StubProvider("ttthree", frozenset({"deepseek-v4-flash-messages"})),
+        "ttthree-a": StubProvider(
+            "ttthree-a", frozenset({"deepseek-v4-flash-messages"})
+        ),
+    }
+
+    route = decide_route(
+        requested_model="deepseek-v4-flash-messages",
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        providers=ProviderRegistry(providers, default="ttthree"),
+        mappings={
+            "deepseek-v4-flash-messages": "ttthree-a/deepseek-v4-flash-messages",
+            "ttthree/deepseek-v4-flash-messages": "ttthree/deepseek-v4-flash-messages",
+        },
+    )
+
+    assert route.provider_name == "ttthree-a"
+    assert route.model_id == "deepseek-v4-flash-messages"
+
+
+def test_a_qualified_request_uses_the_fallback_provider_qualified_mapping_key() -> None:
+    providers = {
+        "ttthree": StubProvider("ttthree", frozenset({"deepseek-v4-flash-messages"})),
+        "ttthree-a": StubProvider(
+            "ttthree-a", frozenset({"deepseek-v4-flash-messages"})
+        ),
+    }
+
+    route = decide_route(
+        requested_model="ttthree/deepseek-v4-flash-messages",
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        providers=ProviderRegistry(
+            providers,
+            default="ttthree",
+            fallback="ttthree-a",
+        ),
+        mappings={
+            "ttthree-a/deepseek-v4-flash-messages": (
+                "ttthree-a/deepseek-v4-flash-messages"
+            )
+        },
+    )
+
+    assert route.provider_name == "ttthree-a"
+    assert route.model_id == "deepseek-v4-flash-messages"
 
 
 def github_config(**rest: Any) -> ProxyConfig:
