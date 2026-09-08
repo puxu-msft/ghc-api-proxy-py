@@ -600,10 +600,10 @@ hook_fix_responses_request:
   # 本项目自编的 `rs_<uuid4>_<index>` ID 用于内部拿 reasoning 做不透明信息的携带者，上游会验证签发 encrypted_content 时的 item id。启用以删除该 id。
   # repair_minted_reasoning_ids: true
 
-  # 遇到 "401 input item ID does not belong to this connection" 时，怎么修复
+  # 切换账号后，遇到 "401 input item ID does not belong to this connection" 时，怎么处置旧账号签发的 reasoning 状态。
   #   abandon         = 不恢复，直接交还上游 401。
-  #   strip_reasoning = 只删除顶层 type: reasoning item 的 id。（默认）
-  #   strip_all       = 删除所有顶层 input item 的 id。
+  #   strip_reasoning = 只删除顶层 type: reasoning item 的 encrypted_content。（默认）
+  #   strip_all       = 删除全部顶层 input item 的 id，并删除 reasoning 的 encrypted_content。
   fix_401_item_id_not_belong_to_this_connection: strip_reasoning
 
   # 覆盖 `include: ["reasoning.encrypted_content"]`

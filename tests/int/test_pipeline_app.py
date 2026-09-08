@@ -282,6 +282,61 @@ def test_opt_in_raw_capture_records_client_and_upstream_bodies(tmp_path: Path) -
     assert orjson.loads(base64.b64decode(request_record["body"]))["model"] == "claude-model"
 
 
+def test_raw_capture_keeps_both_failed_account_switch_attempts(tmp_path: Path) -> None:
+    capture_dir = tmp_path / "captures"
+    client, _ = make_client(
+        lambda _: httpx2.Response(
+            401,
+            json={"error": {"message": "input item ID does not belong to this connection"}},
+        ),
+        overrides={
+            "observability": {
+                "raw_capture": {
+                    "enabled": True,
+                    "directory": str(capture_dir),
+                }
+            }
+        },
+    )
+
+    with client:
+        response = client.post(
+            "/responses",
+            headers={
+                "x-claude-code-session-id": "session-capture",
+                "x-claude-code-agent-id": "agent-capture",
+            },
+            json={
+                "model": "gpt-model",
+                "input": [
+                    {
+                        "type": "reasoning",
+                        "id": "rs_old_account",
+                        "encrypted_content": "old-account-seal",
+                    }
+                ],
+            },
+        )
+
+    assert response.status_code == 401
+    _chain_of(client).raw_capture.flush()  # type: ignore[union-attr]
+    files = list(capture_dir.glob("session-*/agent-*.jsonl.zst"))
+    with files[0].open("rb") as stream:
+        compressed = stream.read()
+    with zstandard.ZstdDecompressor().stream_reader(io.BytesIO(compressed)) as reader:
+        records = [orjson.loads(line) for line in reader.read().splitlines()]
+
+    requests = [
+        orjson.loads(base64.b64decode(record["body"]))
+        for record in records
+        if record["event"] == "upstream.request.body"
+    ]
+    assert len(requests) == 2
+    assert requests[0]["input"][0]["encrypted_content"] == "old-account-seal"
+    assert "encrypted_content" not in requests[1]["input"][0]
+    assert [record["status_code"] for record in records if record["event"] == "upstream.response.start"] == [401, 401]
+
+
 def test_invalid_thinking_profile_regex_fails_while_building_the_chain() -> None:
     provider, http_client = make_provider(
         lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []})

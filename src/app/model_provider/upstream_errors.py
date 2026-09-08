@@ -181,6 +181,7 @@ def normalize_upstream_error(error: BaseException) -> PipelineError | None:
             body=parts.body,
             body_bytes=parts.body_bytes,
             content_type=parts.content_type,
+            sent=_sent_body(error),
             body_observed=True,
         )
     if isinstance(error, _CONNECTION_ERRORS):

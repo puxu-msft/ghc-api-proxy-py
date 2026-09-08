@@ -55,6 +55,7 @@ class UpstreamError(PipelineError):
         body: str = "",
         body_bytes: bytes = b"",
         content_type: str = "",
+        sent: bytes = b"",
         body_observed: bool = False,
     ) -> None:
         super().__init__(message)
@@ -67,6 +68,7 @@ class UpstreamError(PipelineError):
         # Empty bytes are ambiguous without this bit: they may be a measured empty response or a streaming body nobody consumed. Non-empty bytes prove observation on their own; empty requires the response boundary to say so explicitly.
         self.body_observed = body_observed or bool(body_bytes)
         self.content_type = content_type
+        self.sent = sent
 
 
 class UpstreamTimeout(UpstreamError):
@@ -142,7 +144,7 @@ CONNECTION_BOUND_INPUT_ITEM_ID = "input item ID does not belong to this connecti
 
 
 class ConnectionBoundInputIdRetry(PipelineRetry):
-    """Retry a Copilot Responses request with historical item IDs removed."""
+    """Retry a Copilot Responses request with account-bound reasoning state removed."""
 
     def __init__(self, error: UpstreamError, payload: dict[str, Any]) -> None:
         super().__init__(CONNECTION_BOUND_INPUT_ITEM_ID)

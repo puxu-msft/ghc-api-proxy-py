@@ -67,7 +67,7 @@ EVENTS = (
 )
 
 
-def _without_connection_bound_input_ids(
+def _without_connection_bound_input_state(
     payload: dict[str, Any],
     policy: ConnectionBoundInputIdPolicy,
 ) -> dict[str, Any] | None:
@@ -81,10 +81,12 @@ def _without_connection_bound_input_ids(
         if not isinstance(item, dict):
             continue
         entry = cast(dict[str, Any], item)
-        if "id" not in entry or (policy == "strip_reasoning" and entry.get("type") != "reasoning"):
-            continue
-        del entry["id"]
-        removed = True
+        if entry.get("type") == "reasoning" and "encrypted_content" in entry:
+            del entry["encrypted_content"]
+            removed = True
+        if policy == "strip_all" and "id" in entry:
+            del entry["id"]
+            removed = True
     return recovered if removed else None
 
 
@@ -168,6 +170,25 @@ async def _finish_response_cleanup(
             raise active_primary
     elif cleanup_error is not None:
         raise cleanup_error
+
+
+def _capture_failed_upstream_attempt(
+    capture: RawRequestCapture | None,
+    error: BaseException,
+    *,
+    attempt: int,
+) -> None:
+    """Keep the wire evidence when an SDK status exception bypasses a response."""
+    upstream_error = error.error if isinstance(error, ConnectionBoundInputIdRetry) else error
+    if capture is None or not isinstance(upstream_error, UpstreamError):
+        return
+    if upstream_error.sent:
+        capture.upstream_request_body(upstream_error.sent, attempt=attempt)
+    if upstream_error.status_code is not None:
+        capture.upstream_response_start(upstream_error.status_code, attempt=attempt)
+    if upstream_error.body_observed:
+        capture.upstream_response_body(upstream_error.body_bytes, attempt=attempt)
+        capture.upstream_response_end(attempt=attempt)
 
 
 @dataclass(slots=True)
@@ -401,6 +422,7 @@ class DirectDriver:
                 _reraise_if_cancelling(error)
                 attempt.error = str(error)
                 if isinstance(capture, RawRequestCapture):
+                    _capture_failed_upstream_attempt(capture, error, attempt=attempt.index)
                     capture.upstream_attempt_end(attempt.index, complete=False)
                 if not await self._handle_failure(error, context, outcome):
                     return outcome
@@ -499,7 +521,7 @@ class DirectDriver:
                 outcome.error = error.error
                 await self._publish(EVENT_REQUEST_FAILED, context, outcome)
                 return False
-            recovered = _without_connection_bound_input_ids(
+            recovered = _without_connection_bound_input_state(
                 error.payload,
                 self._connection_bound_input_id_policy,
             )
