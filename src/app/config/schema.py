@@ -29,6 +29,7 @@ type WebSearchConstraintPolicy = Literal["error", "drop_fields"]
 # What to do with a Claude Code auto mode authorisation request. `passthrough` forwards it upstream like anything else; the other two answer it here with a fixed decision and never call upstream at all.
 # Spelled out rather than using `false` for the disabled state, per `config.example.yaml`. The bool spelling that `assistant_message_layout` and `context_editing.enabled` use exists to dodge YAML 1.1 reading a bare `off` as boolean false; `passthrough` is not a word that trap applies to, so it can say what it means.
 type AutoModeDecision = Literal["passthrough", "allow", "block"]
+type ConnectionBoundInputIdPolicy = Literal["abandon", "strip_reasoning", "strip_all"]
 # What to do with `thinking.display` on the way to an Anthropic Messages upstream. `passthrough` — the default — sends whatever the client said and adds nothing; `drop` removes the key; the two remaining values rewrite it. `omitted` streams `thinking` blocks with empty text and is the upstream default on the Claude 5 family, `summarized` asks for a readable summary of the reasoning instead.
 type ThinkingDisplayPolicy = Literal["passthrough", "drop", "omitted", "summarized"]
 type AnthropicEffort = Literal["low", "medium", "high", "xhigh", "max"]
@@ -619,6 +620,10 @@ class FixAnthropicSseHook(Section):
 
 
 class FixResponsesRequestHook(Section):
+    fix_401_item_id_not_belong_to_this_connection: ConnectionBoundInputIdPolicy = (
+        "strip_reasoning"
+    )
+
     # **Off by default, and it stays off**: `.dev/docs/direct-passthrough/spec.md` §2.7 requires a compatibility reshape on a native leg to be declared and optional, never folded into what is called verbatim. The user ruled the switch and its narrow shape together on 2026-09-01.
     #
     # What it turns on: an inbound `reasoning` item that carries `encrypted_content` **and** whose `id` matches the one shape `ResponsesFramer._item_id` could emit has that `id` removed before the body goes upstream. Upstream verifies the seal against the id it issued, so such a pair is refused every time it is replayed — permanently, for any client that keeps a rollout history. GitHub issue #4.

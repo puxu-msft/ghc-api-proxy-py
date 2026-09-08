@@ -16,6 +16,7 @@ from typing import Any, Protocol, cast
 
 import httpx2
 
+from app.config.schema import ConnectionBoundInputIdPolicy
 from app.model_provider import (
     ModelDescriptor,
     ModelEndpoint,
@@ -26,6 +27,7 @@ from app.model_provider import (
 from app.observability.raw_capture import RawRequestCapture
 from app.pipeline.events import FrozenSubscribers
 from app.pipeline.exceptions import (
+    ConnectionBoundInputIdRetry,
     Disposition,
     PipelineAbort,
     PipelineRetry,
@@ -33,6 +35,7 @@ from app.pipeline.exceptions import (
     UpstreamError,
     UpstreamTimeout,
     classify,
+    is_connection_bound_input_id_error,
 )
 from app.pipeline.rate_limiting import RateLimiter
 from app.pipeline.request import ENDPOINT_FORMATS, Attempt, RequestContext
@@ -62,6 +65,27 @@ EVENTS = (
     EVENT_REQUEST_SUCCEEDED,
     EVENT_REQUEST_FAILED,
 )
+
+
+def _without_connection_bound_input_ids(
+    payload: dict[str, Any],
+    policy: ConnectionBoundInputIdPolicy,
+) -> dict[str, Any] | None:
+    recovered = deepcopy(payload)
+    items = recovered.get("input")
+    if not isinstance(items, list):
+        return None
+
+    removed = False
+    for item in cast(list[Any], items):
+        if not isinstance(item, dict):
+            continue
+        entry = cast(dict[str, Any], item)
+        if "id" not in entry or (policy == "strip_reasoning" and entry.get("type") != "reasoning"):
+            continue
+        del entry["id"]
+        removed = True
+    return recovered if removed else None
 
 
 def _clear_exception_backedges(
@@ -229,6 +253,7 @@ class DirectDriver:
         attempt_deadline: int = 0,
         response_header_timeout: int = 0,
         rate_limiter: RateLimiter | None = None,
+        connection_bound_input_id_policy: ConnectionBoundInputIdPolicy = "strip_reasoning",
         clock: Callable[[], float] | None = None,
     ) -> None:
         if (descriptor is None) is not (admission is None):
@@ -264,6 +289,9 @@ class DirectDriver:
         self._attempt_deadline = attempt_deadline
         self._response_header_timeout = response_header_timeout
         self._rate_limiter = rate_limiter
+        self._connection_bound_input_id_policy: ConnectionBoundInputIdPolicy = (
+            connection_bound_input_id_policy
+        )
         self._clock = clock
 
     @property
@@ -466,6 +494,30 @@ class DirectDriver:
             if status is not None:
                 self._rate_limiter.observe_failure(status, headers)
         await self._publish(EVENT_ATTEMPT_FAILED, context, outcome)
+        if isinstance(error, ConnectionBoundInputIdRetry):
+            if self._connection_bound_input_id_policy == "abandon":
+                outcome.error = error.error
+                await self._publish(EVENT_REQUEST_FAILED, context, outcome)
+                return False
+            recovered = _without_connection_bound_input_ids(
+                error.payload,
+                self._connection_bound_input_id_policy,
+            )
+            if recovered is None:
+                outcome.error = error.error
+                await self._publish(EVENT_REQUEST_FAILED, context, outcome)
+                return False
+            self._prepared_payload = deepcopy(recovered)
+            context.payload = deepcopy(recovered)
+            context.extras["connection_bound_input_id_recovery_attempted"] = True
+            return True
+        if (
+            context.extras.get("connection_bound_input_id_recovery_attempted") is True
+            and is_connection_bound_input_id_error(error)
+        ):
+            outcome.error = error
+            await self._publish(EVENT_REQUEST_FAILED, context, outcome)
+            return False
         disposition = classify(error)
         if disposition is Disposition.RETRY:
             if self._rate_limiter is not None and not isinstance(error, PipelineRetry):

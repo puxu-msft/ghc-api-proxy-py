@@ -6,6 +6,7 @@ Binds the endpoint; the loop is shared, so behaviour cannot drift between the fo
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from app.config.schema import ConnectionBoundInputIdPolicy
 from app.model_provider import ModelDescriptor, ModelEndpoint, ModelProvider
 from app.pipeline.direct_driver.base import AdmissionPolicy, Budget, DirectDriver
 from app.pipeline.events import FrozenSubscribers
@@ -30,6 +31,7 @@ class OpenAIResponsesDriver(DirectDriver):
         attempt_deadline: int = 0,
         response_header_timeout: int = 0,
         rate_limiter: RateLimiter | None = None,
+        connection_bound_input_id_policy: ConnectionBoundInputIdPolicy = "strip_reasoning",
         clock: Callable[[], float] | None = None,
     ) -> None:
         super().__init__(
@@ -44,5 +46,6 @@ class OpenAIResponsesDriver(DirectDriver):
             attempt_deadline=attempt_deadline,
             response_header_timeout=response_header_timeout,
             rate_limiter=rate_limiter,
+            connection_bound_input_id_policy=connection_bound_input_id_policy,
             clock=clock,
         )

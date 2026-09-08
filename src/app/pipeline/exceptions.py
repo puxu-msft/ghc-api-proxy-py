@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from app.tokenization.admission import TokenAdmissionObservation
@@ -138,6 +138,18 @@ class PipelineRetry(PipelineError):
         self.reason = reason
 
 
+CONNECTION_BOUND_INPUT_ITEM_ID = "input item ID does not belong to this connection"
+
+
+class ConnectionBoundInputIdRetry(PipelineRetry):
+    """Retry a Copilot Responses request with historical item IDs removed."""
+
+    def __init__(self, error: UpstreamError, payload: dict[str, Any]) -> None:
+        super().__init__(CONNECTION_BOUND_INPUT_ITEM_ID)
+        self.error = error
+        self.payload = payload
+
+
 class PipelineAbort(PipelineError):
     """Explicit request to stop this request without retrying."""
 
@@ -168,3 +180,11 @@ def classify(error: BaseException) -> Disposition:
 
 def is_known(error: BaseException) -> bool:
     return isinstance(error, PipelineError)
+
+
+def is_connection_bound_input_id_error(error: BaseException) -> bool:
+    return (
+        isinstance(error, UpstreamError)
+        and error.status_code == 401
+        and CONNECTION_BOUND_INPUT_ITEM_ID in error.body
+    )

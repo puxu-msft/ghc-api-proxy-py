@@ -17,7 +17,7 @@ from pydantic import ValidationError
 
 from app.config.schema import LOCAL_COUNTER
 from app.core.chain import Chain
-from app.model_provider import ModelDescriptor, ModelProvider
+from app.model_provider import ModelDescriptor, ModelEndpoint, ModelProvider
 from app.models.anthropic import MessagesRequest
 from app.observability.metrics import BETA_FLAGS_STRIPPED
 from app.observability.raw_capture import RawRequestCapture
@@ -280,6 +280,11 @@ async def _drive(
     # Read straight off the field it names. It used to be resolved against `response_header_overrides`, which is a different setting entirely: an operator capping the header wait for one model would have capped that model's whole attempt instead, cutting a long turn short in the name of a guard that was never asked for.
     attempt_deadline = timeouts.upstream_request_deadline
     driver_type = DRIVERS[route.endpoint]
+    driver_options: dict[str, Any] = {}
+    if route.endpoint is ModelEndpoint.OPENAI_RESPONSES:
+        driver_options["connection_bound_input_id_policy"] = (
+            chain.config.hook_fix_responses_request.fix_401_item_id_not_belong_to_this_connection
+        )
     driver = driver_type(
         provider,
         chain.subscribers,

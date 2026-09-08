@@ -5213,6 +5213,120 @@ def test_a_sealed_reasoning_item_reaches_upstream_the_way_the_client_wrote_it() 
     assert forwarded["input"] == [sent_by_client], forwarded["input"]
 
 
+def test_an_account_switch_retries_connection_bound_input_ids_once() -> None:
+    """The driver owns recovery so the two wire requests are two upstream attempts."""
+    client, seen = make_client(
+        lambda request: (
+            httpx2.Response(
+                401,
+                json={"error": {"message": "input item ID does not belong to this connection"}},
+            )
+            if orjson.loads(request.content)["input"][0].get("id")
+            else httpx2.Response(200, json={"id": "resp_recovered", "output": []})
+        )
+    )
+    item: dict[str, Any] = {
+        "type": "reasoning",
+        "id": "msg_from_previous_account",
+        "summary": [],
+        "encrypted_content": "old-account-seal",
+    }
+
+    response = client.post("/responses", json={"model": "gpt-model", "input": [item]})
+
+    assert response.status_code == 200
+    assert len(seen) == 2
+    first_input = orjson.loads(seen[0].content)["input"]
+    recovered_input = orjson.loads(seen[1].content)["input"]
+    assert first_input == [item]
+    assert "id" not in recovered_input[0]
+
+
+def test_an_account_switch_can_strip_all_input_item_ids() -> None:
+    client, seen = make_client(
+        lambda request: (
+            httpx2.Response(
+                401,
+                json={"error": {"message": "input item ID does not belong to this connection"}},
+            )
+            if orjson.loads(request.content)["input"][0].get("id")
+            else httpx2.Response(200, json={"id": "resp_recovered", "output": []})
+        ),
+        overrides={
+            "hook_fix_responses_request": {
+                "fix_401_item_id_not_belong_to_this_connection": "strip_all"
+            }
+        },
+    )
+
+    response = client.post(
+        "/responses",
+        json={
+            "model": "gpt-model",
+            "input": [{"type": "message", "id": "msg_from_previous_account"}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(seen) == 2
+    assert "id" not in orjson.loads(seen[1].content)["input"][0]
+
+
+def test_an_account_switch_can_abandon_connection_bound_input_ids() -> None:
+    client, seen = make_client(
+        lambda _: httpx2.Response(
+            401,
+            json={"error": {"message": "input item ID does not belong to this connection"}},
+        ),
+        overrides={
+            "hook_fix_responses_request": {
+                "fix_401_item_id_not_belong_to_this_connection": "abandon"
+            }
+        },
+    )
+
+    response = client.post(
+        "/responses",
+        json={
+            "model": "gpt-model",
+            "input": [{"type": "reasoning", "id": "rs_from_previous_account"}],
+        },
+    )
+
+    assert response.status_code == 401
+    assert len(seen) == 1
+
+
+def test_an_account_switch_recovery_does_not_repeat_under_the_401_budget() -> None:
+    """A second identical 401 is terminal, even when ordinary 401 retries are enabled."""
+    client, seen = make_client(
+        lambda _: httpx2.Response(
+            401,
+            json={"error": {"message": "input item ID does not belong to this connection"}},
+        ),
+        overrides={
+            "hook_fix_responses_request": {
+                "fix_401_item_id_not_belong_to_this_connection": "strip_all"
+            },
+            "upstream_request_retry": {
+                "max_total": 1,
+                "strategies": {"githubTokenExpired": {"max_retries": 1}},
+            }
+        },
+    )
+
+    response = client.post(
+        "/responses",
+        json={
+            "model": "gpt-model",
+            "input": [{"type": "message", "id": "msg_from_previous_account"}],
+        },
+    )
+
+    assert response.status_code == 401
+    assert len(seen) == 2
+
+
 POISONED_REASONING_ITEM: dict[str, Any] = {
     "type": "reasoning",
     # The id upstream named when the issue #4 body was replayed on 2026-09-01: `rs_` + a `uuid4` + `_0`.

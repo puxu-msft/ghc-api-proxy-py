@@ -1,14 +1,16 @@
 from collections.abc import AsyncIterator, Callable
+from typing import Any, cast
 
 import httpx2
 import openai
+import orjson
 import pytest
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 
 from app.model_provider.ghc_client import GhcApiClient, GhcClientConfig
 from app.model_provider.ghc_client.tokens import CopilotTokenManager
-from app.pipeline.exceptions import UpstreamRateLimit
+from app.pipeline.exceptions import ConnectionBoundInputIdRetry, UpstreamError, UpstreamRateLimit
 
 BASE_URL = "https://copilot.example"
 
@@ -261,3 +263,74 @@ async def test_ordinary_send_raises_in_the_pipelines_vocabulary() -> None:
     assert raised.value.retry_after == 7.0
     # The SDK error is still reachable, so nothing about the cause is lost in translation.
     assert isinstance(raised.value.__cause__, openai.RateLimitError)
+
+
+@pytest.mark.asyncio
+async def test_responses_signals_connection_bound_input_ids_for_retry() -> None:
+    """The direct driver owns the retry so its attempt accounting remains accurate."""
+    seen: list[dict[str, Any]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.host == "api.github.com":
+            return httpx2.Response(
+                200,
+                json={"token": "copilot", "expires_at": 5000, "refresh_in": 1500},
+            )
+        payload = orjson.loads(request.content)
+        seen.append(payload)
+        return httpx2.Response(
+            401,
+            json={"error": {"message": "input item ID does not belong to this connection"}},
+        )
+
+    client, http_client = build_client(handler)
+    try:
+        with pytest.raises(ConnectionBoundInputIdRetry) as raised:
+            await client.send_responses(
+                {
+                    "model": "m",
+                    "input": [
+                        {
+                            "type": "message",
+                            "id": "msg_from_previous_account",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "continue"}],
+                        }
+                    ],
+                },
+                interaction_id="interaction",
+            )
+    finally:
+        await http_client.aclose()
+
+    assert len(seen) == 1
+    first_input = cast(list[dict[str, Any]], seen[0]["input"])
+    assert first_input[0]["id"] == "msg_from_previous_account"
+    carried_input = cast(list[dict[str, Any]], raised.value.payload["input"])
+    assert carried_input[0]["id"] == "msg_from_previous_account"
+
+
+@pytest.mark.asyncio
+async def test_responses_does_not_retry_an_unrelated_401() -> None:
+    seen: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.host == "api.github.com":
+            return httpx2.Response(
+                200,
+                json={"token": "copilot", "expires_at": 5000, "refresh_in": 1500},
+            )
+        seen.append(request)
+        return httpx2.Response(401, json={"error": {"message": "token expired"}})
+
+    client, http_client = build_client(handler)
+    try:
+        with pytest.raises(UpstreamError, match="upstream returned 401"):
+            await client.send_responses(
+                {"model": "m", "input": [{"type": "message", "id": "msg_unchanged"}]},
+                interaction_id="interaction",
+            )
+    finally:
+        await http_client.aclose()
+
+    assert len(seen) == 1

@@ -65,125 +65,94 @@ server:
 inbound:
   # 当前路由的上游若提供 `POST /v1/messages/count_tokens`，优先使用上游；
   # 上游不提供或调用失败时，自动回退到本地 calibrated tiktoken 估算。
-  # When the routed upstream provides `POST /v1/messages/count_tokens`, it is preferred; if it is unavailable or fails, the local calibrated tiktoken estimate is used.
   anthropic_count_tokens:
     max_retries: 2
 
-# 模型名映射：请求模型 → 目标模型。
-# Model name mappings: request model → target model.
+# 入站路由。模型名映射：请求模型 → 目标模型。
 #
-# 注意：这是模型名映射的唯一来源——没有任何内置默认值。
-# This is the SOLE source of model-name mapping — there are no built-in defaults.
+# 若入站模型形如 "provider/model-id"，则为显式指定的模型提供方，从该全称开始尝试映射；若入站模型形如 "model-id"，则从该裸名开始尝试映射，如裸名未中则使用默认模型提供方补为全称，再次尝试映射。
 #
-# 大小写不敏感。 / Keys/values are spelling-insensitive.
+# 每次映射都先检查是否已精确命中了一个可用的上游模型：
+#   如果映射后为裸名，则分别尝试映射前显式指定的模型提供方（如有）、默认模型提供方；
+#   如果映射后为全称，则只尝试映射后显式指定的模型提供方。
+# 一旦命中，则入站路由结束，开始后续处理（分析是否需要线路格式翻译、整形修改等）。
+#
+# 如果映射后没有命中，但映射后的值存在另一条映射规则，则再次尝试映射，直到命中或没有可用的映射规则为止。
+# 如果最终没有命中任何可用的上游模型，则返回 400 错误，不透传到默认模型提供方。（TODO：新需求，实现后删除该括号内的补充说明）
+#
+# 注意：这是模型名映射的唯一来源——没有任何代码内置的默认值。
+# 注意：大小写不敏感。
 #
 # Anthropic 模型名兼容处理："." 与 "-" 可互换。
 #   例如，入站 "claude-opus-4-5" 可命中下述规则：
 #     claude-opus-4.5: claude-opus-4.8
 #
 # Anthropic 模型名兼容处理：剥离 "[1m]" 后缀。
-#   例如，入站 "opus[1m]" 可命中下述规则（按顺序尝试）：
-#     opus-1m: claude-opus-4.8
+#   例如，入站 "opus[1m]" 会被视为 "opus"，可命中下述规则：
 #     opus: claude-opus-4.8
-#
-# Anthropic-compatible model name resolver: "." and "-" are interchangeable
-#   For example, ingress "claude-opus-4-5" can hit the following rule:
-#     claude-opus-4.5: claude-opus-4.8
-#
-# Anthropic-compatible model name resolver: strip "[1m]" suffix
-#   For example, ingress "opus[1m]" can hit the following rules (in order):
-#     opus-1m: claude-opus-4.8
-#     opus: claude-opus-4.8
-#
-# 若目标在可用模型列表中，直接解析命中；否则，当作别名再次尝试解析；仍不可用则放弃映射、直接透传（上游随后拒绝它）。
-# If a target is in the available models list, it is resolved directly; otherwise, it is treated as an alias and resolved again;
-# if still unavailable, the mapping is abandoned and passed through (the upstream then rejects it).
 #
 model_mappings:
 
-  # 短别名必须指定，否则会被直接透传给上游并被拒绝。
-  # Short aliases must be set; an unmapped alias is sent upstream as-is and rejected.
-
-  # 使用最新版本 / Use latest version
-  #
-
-  fable: claude-opus-5
-  claude-fable-5: claude-opus-5
-
+  # 映射中定义的别名会暴露在 `GET /models` 中，客户端可直接使用别名访问模型。
+  # 显式指定模型提供方，如果模型提供方不支持则会被拒绝。
+  fable: ghc/claude-opus-5
+  # 不显式指定模型提供方，会根据默认模型提供方推导。
   opus: claude-opus-5
-  claude-opus-4.1: claude-opus-5
-  claude-opus-4.5: claude-opus-5
-  claude-opus-4.6: claude-opus-5
-  claude-opus-4.7: claude-opus-5
+  # 映射到不同系列的模型。如果模型提供方不提供直传路径，自动推导可用的线路格式。通常搭配格式翻译功能，如：入站 anthropic-messages 出站 openai-responses。
+  sonnet: gpt-5.6-terra
+  # 显式指定出站线路格式，如果模型提供方不支持则会被拒绝。
+  haiku: gpt-5.6-luna@openai-chat-completions
 
-  sonnet: claude-sonnet-5
-  claude-sonnet-4.5: claude-sonnet-5
-  claude-sonnet-4.6: claude-sonnet-5
+  # 假设默认模型提供方 ghc 提供了 claude-fable-5 claude-opus-5。
+  # 已存在的模型名也可映射，相当于无法用原名访问该模型。
+  claude-fable-5: claude-opus-5
+  # 这里没有映射 "ghc/claude-fable-5: xxx"，因此，入站可用使用 "ghc/claude-fable-5" 访问该模型。
 
-  # haiku: claude-haiku-4.5
-
-  # 使用 GPT 系列 / Use GPT series
-  #
-
-  gpt: gpt-5.6-sol
-  gpt-5.5: gpt-5.6-terra
-
-  haiku: gpt-5.6-luna
-  claude-haiku-4.5: gpt-5.6-luna
-
-  # Anthropic 模型名兼容处理：日期后缀 / Anthropic-compatible model name resolver: date-suffix
-  #
-  # 自 2026/07/16 起，不再自动剥离日期后缀 "-YYYYMMDD"，必须显式配置。
-  # Since 2026/07/16, date-suffix "-YYYYMMDD" is no longer internally stripped; must be explicitly set.
-  #
-  claude-opus-4-5-20251101: claude-opus-5
-  claude-opus-4-1-20250805: claude-opus-5
-  claude-haiku-4-5-20251001: gpt-5.6-luna
-  claude-sonnet-4-5-20250929: claude-sonnet-5
+  # 映射到另一模型提供方的模型。
+  ghc/gpt-6-astra: openai/gpt-6-astra
 
 # ============================================================================
-# 模型提供者 / Model Providers
+# 模型提供者
 # ============================================================================
 
 model_providers:
   ghc:
     type: github_copilot
 
-    # 显式指定上游 GitHub Copilot API 基础 URL。
-    # Explicit upstream GitHub Copilot API base URL.
-    # api_base_url: "https://api.githubcopilot.com"
+    # 显式指定上游 GitHub Copilot API 基础 URL。默认是 https://api.githubcopilot.com
+    # api_base_url: "https://api.enterprise.githubcopilot.com"
 
-    # GitHub Token 文件路径。
-    # GitHub Token file path.
-    #
-    # 不支持热重载（需重启）。 / Not hot-reloadable (requires restart).
-    #
-    github_token_file: "$XDG_DATA_HOME/ghc-api-proxy/github_token.txt"
+    # GitHub Token 文件路径。默认是 "$XDG_DATA_HOME/ghc-api-proxy/github_token-{key}.txt"
+    # 不支持热重载（需重启）。
+    github_token_file: "$XDG_DATA_HOME/ghc-api-proxy/github_token-ghc.txt"
 
     # 后台刷新模型列表（保持 `GET /models` 缓存新鲜）的间隔秒数（0 = 禁用）。
-    # Seconds between background model list refreshes (To keep `GET /models` cache fresh) (0 = disabled).
     model_refresh_interval: 3600
 
-    # 禁用模型，即便上游仍在对外提供它们。只匹配上游 `model.id`。
-    # Disable models even if upstream still advertises them. Match is exact against `model.id`.
-    #
+    # 暴露在 `GET /models` 中的未禁用模型列表。只匹配上游 `model.id`。可以用 `/regex/` 写正则表达式。不设置则全部暴露，显式置空则全不暴露。
+    exposed_models:
+      # 等价于全部暴露
+      - '/.*/'
+
+    # 禁用模型，即便上游仍在对外提供它们。只匹配上游 `model.id`。可以用 `/regex/` 写正则表达式。不设置、显式置空则全不禁用。
     disabled_models:
       - claude-opus-4.6
-      # - claude-opus-4.7
+      - claude-opus-4.7
       # - claude-opus-4.8
-      # - claude-opus-5
-      # - clause-sonnet-4.6
+      - claude-opus-5
+      - clause-sonnet-4.6
       # - clause-sonnet-5
       # - gemini-3.1-pro-preview
       # - gemini-3.5-flash
       - gpt-5.3-codex
-      # - gpt-5.4-mini
-      # - gpt-5.4
-      # - gpt-5.5
+      - gpt-5.4-mini
+      - gpt-5.4
+      - gpt-5.5
       # - gpt-5.6-luna
       # - gpt-5.6-sol
       # - gpt-5.6-terra
-      # - mai-code-1-flash-picker
+      - mai-code-1-flash-picker
+      # - mai-code-1.1-flash
       # - trajectory-compaction
       - gpt-5-mini
       - gpt-4o-mini-2024-07-18
@@ -193,7 +162,7 @@ model_providers:
       # - text-embedding-3-small-inference
       - claude-sonnet-4.5
       - claude-opus-4.5
-      # - claude-haiku-4.5
+      - claude-haiku-4.5
       - gemini-3-flash-preview
       - gemini-2.5-pro
       - gpt-4.1-2025-04-14
@@ -210,12 +179,34 @@ model_providers:
       - gpt-4o
       - text-embedding-ada-002
 
+    # 哪些模型支持 WebSearch
     models_support_web_search:
-      - gpt-5.6-sol
-      - gpt-5.6-terra
-      - gpt-5.6-luna
+      - gpt-6-astra
+      - gpt-5\.6-\S+
       - gpt-5.5
 
+  # TODO: 未来可能支持 papyrus 模型提供者，暂时不启用。
+  # papyrus:
+  #   type: papyrus
+
+  sub2api_a:
+    type: sub2api
+    # api_base_url:
+
+    # 从文件读取 X-API-Key。默认是 $XDG_DATA_HOME/ghc-api-proxy/sub2api_token-{key}.txt
+    # 不支持热重载（需重启）。
+    token_file: "$XDG_DATA_HOME/ghc-api-proxy/sub2api-sub2api_a.txt"
+
+    # sub2api 上游会按需提供 wire format 支持，显式配置以启用。如配置为 URL 则不再根据 api_base_url 推导。
+    openai_chat_completions_endpoint: true
+    openai_responses_endpoint: true
+    # anthropic_messages_endpoint: true
+
+    model_refresh_interval: 0
+    disabled_models: []
+
+# 默认模型提供方。
+# TODO：此项合并、取代 fallback_model_provider。实现后删除本行。
 default_model_provider: ghc
 
 # ============================================================================
@@ -601,10 +592,31 @@ hook_fix_anthropic_sse:
     action: as_end_turn
     text: "Please rephrase your request with a more safe statement."
 
-# hook_fix_responses_request:
-#   # 从 Chat Completions 格式的`call_xxx` ID 转为 Responses API 的 `fc_xxx`。
-#   # Convert Chat Completions `call_xxx` IDs to Responses API `fc_xxx`.
-#   rename_call_id_as_fc_id: true
+hook_fix_responses_request:
+  # # 从 Chat Completions 格式的`call_xxx` ID 转为 Responses API 的 `fc_xxx`。
+  # # Convert Chat Completions `call_xxx` IDs to Responses API `fc_xxx`.
+  # rename_call_id_as_fc_id: true
+
+  # 本项目自编的 `rs_<uuid4>_<index>` ID 用于内部拿 reasoning 做不透明信息的携带者，上游会验证签发 encrypted_content 时的 item id。启用以删除该 id。
+  # repair_minted_reasoning_ids: true
+
+  # 遇到 "401 input item ID does not belong to this connection" 时，怎么修复
+  #   abandon         = 不恢复，直接交还上游 401。
+  #   strip_reasoning = 只删除顶层 type: reasoning item 的 id。（默认）
+  #   strip_all       = 删除所有顶层 input item 的 id。
+  fix_401_item_id_not_belong_to_this_connection: strip_reasoning
+
+  # 覆盖 `include: ["reasoning.encrypted_content"]`
+  #   passthrough  = 透传
+  #   always_add   = 总是添加
+  #   always_strip = 总是剥离（剥离后变空的 `include` 键一并移除）
+  reasoning_encrypted_include: passthrough  # passthrough | always_add | always_strip
+
+  # 是否保留消息中的 `reasoning.encrypted_content` 字段
+  #   passthrough = 透传
+  #   strip       = 剥离。如果剥离后 `reasoning` 块为空，则生成空的明文 `reasoning` 对象。
+  #   strip_2     = 剥离。如果剥离后 `reasoning` 块为空，将其移除；如果因此消息为空，将其移除。
+  reasoning_encrypted_content: passthrough
 
 # hook_fix_responses_sse:
 #   # 修复上游流在 `output_item.added` / `output_item.done` 间不一致的 item ID。`@ai-sdk/openai` 校验 ID 连续性需要。

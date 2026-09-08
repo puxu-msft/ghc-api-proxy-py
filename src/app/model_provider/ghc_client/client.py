@@ -11,6 +11,11 @@ from app.model_provider.ghc_client.config import GhcClientConfig
 from app.model_provider.ghc_client.headers import build_request_headers
 from app.model_provider.ghc_client.tokens import CopilotTokenManager
 from app.model_provider.upstream_errors import normalize_upstream_error
+from app.pipeline.exceptions import (
+    ConnectionBoundInputIdRetry,
+    UpstreamError,
+    is_connection_bound_input_id_error,
+)
 
 
 class GhcApiClient:
@@ -192,15 +197,20 @@ class GhcApiClient:
         extra_headers: Mapping[str, str] | None = None,
         interaction_id: str,
     ) -> httpx2.Response:
-        return await self._in_pipeline_terms(
-            self._post_openai(
-                "/responses",
-                payload,
-                stream=stream,
-                extra_headers=extra_headers,
-                interaction_id=interaction_id,
+        try:
+            return await self._in_pipeline_terms(
+                self._post_openai(
+                    "/responses",
+                    payload,
+                    stream=stream,
+                    extra_headers=extra_headers,
+                    interaction_id=interaction_id,
+                )
             )
-        )
+        except UpstreamError as error:
+            if not is_connection_bound_input_id_error(error):
+                raise
+            raise ConnectionBoundInputIdRetry(error, dict(payload)) from error
 
     async def send_embeddings(
         self,
