@@ -35,6 +35,7 @@
 | 2026-08-27 | §5.3 | 配置侧限定认不出时，错误消息报 mapping 的**值**而非键。首版报键，那句话字面为假，且把运维引向条目的另一半——正是 §5.2 花一整节要消灭的失效形态，`UnknownModel` 那侧做到了、`RoutingError` 这侧没有 | 实现评审 MPR-04 |
 | 2026-09-08 | **§3.3、§4.1、§4.2.1** | 补记 secondary provider 的可发现名称。非 default provider 的每个可用模型增加 `provider/model` 候选名；裸模型名仍参与候选计算，模型列表只返回 serviceable 条目，而 `routes` 保留诊断所需的非 serviceable 状态。旧文档曾断言 `/v1/models` 不会列出限定名，该断言已被 `52d57a09` 推翻 | 实现提交 `52d57a09` 及 `tests/int/test_pipeline_ops_routes.py` |
 | 2026-09-08 | **§4.1** | 明确三个模型列表入口的 `provider` 查询参数：按最终 `owned_by` 精确筛选，筛选发生在路由与 serviceability 判定之后；未提供时保持完整可路由列表，未知或空值返回空数据而不是改变 HTTP 状态 | 实现提交 `3b223e8e` 及 `tests/int/test_pipeline_ops_routes.py` |
+| 2026-09-08 | **§1.4** | 随包 `ghc` 只在配置文件、环境变量和 CLI 都未声明随包图中不存在的 provider 名时参与配置。任一高优先级层声明新 provider 名即移除随包 provider 图及其 `default_model_provider: ghc`，单个自定义 provider 仍由既有默认选择规则自动采用；仅覆盖现有 provider 字段仍正常合并 | 用户直接要求 |
 
 ## 修订记录
 
@@ -112,6 +113,12 @@ model_mappings:
 配置里的名字**不选择** provider，路由选择：`driver.py` 的 `ask_upstream` 闭包捕获的是 `shape_request` 定下的那个 provider。所以 `providers: [A, local]` 而某请求路由到了 B 时，问的是 B。
 
 单 provider 下两种读法行为完全一致，这个偏差一直不可见；多 provider 让它可见了，但它是**既有行为**，不是本次引入的。要不要让配置真正选择计数用的 provider（并处理「用 A 数 B 的模型」是否有意义），是一个独立问题。**记入 `deferred.md` D-4。**
+
+### 1.4 随包 `ghc` 只服务于未配置 provider 图的启动
+
+**用户裁决。** 随包配置中的 `model_providers.ghc` 与 `default_model_provider: ghc` 是没有任何 operator provider 配置时的启动默认值，不是每个部署都附加的一条 provider。
+
+配置文件、环境变量或 CLI 中任一高优先级层只要在 `model_providers` 下声明随包图中不存在的 provider 名，加载器就移除随包的整个 provider 图和随包默认名，再合并高优先级层。这样配置 `tenant` 不会得到意外的 `ghc`；若最终只有一个 provider，`resolve_default_name` 按既有规则自动采用它。配置多个 provider 时，operator 必须明确提供 `default_model_provider`。仅覆盖随包已有 provider 的字段，例如环境变量更新它的凭据，仍按普通逐键合并。
 
 ## 2. 解析规则
 
