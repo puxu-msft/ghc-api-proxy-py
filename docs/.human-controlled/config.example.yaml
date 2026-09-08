@@ -361,6 +361,13 @@ reactive_rate_limiter:
   # 退出受限模式所需的连续成功次数
   consecutive_successes: 5
 
+  # 上游失败后重试的起始等待秒数，逐次连续失败翻倍；0 关闭退让
+  # Seconds to wait before the first retry after an upstream failure, doubling per further consecutive failure; 0 disables the backoff
+  failure_backoff_base_sec: 0.5
+  # 失败退让等待的封顶秒数
+  # Ceiling for the failure backoff wait
+  failure_backoff_max_sec: 10.0
+
 # ============================================================================
 # 客户端的按块交付 / Client-side block delivery
 # ============================================================================
