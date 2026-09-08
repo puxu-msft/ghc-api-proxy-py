@@ -32,13 +32,14 @@ _SEND_METHODS = {
     ModelEndpoint.OPENAI_EMBEDDINGS,
 }
 DRIVEN_ENDPOINTS = frozenset(_SEND_METHODS)
-_DEFAULT_ENDPOINTS = frozenset(
-    {
-        ModelEndpoint.ANTHROPIC_MESSAGES,
-        ModelEndpoint.OPENAI_RESPONSES,
-        ModelEndpoint.OPENAI_CHAT_COMPLETIONS,
-    }
-)
+# The three protocols a sub2api operator may declare as directly served. Their
+# capability comes from config, so the constant that used to default them all on
+# is gone: an undeclared protocol is disabled until an operator enables it.
+_CONFIGURED_ENDPOINT_FIELDS = {
+    ModelEndpoint.OPENAI_CHAT_COMPLETIONS: "openai_chat_completions_endpoint",
+    ModelEndpoint.OPENAI_RESPONSES: "openai_responses_endpoint",
+    ModelEndpoint.ANTHROPIC_MESSAGES: "anthropic_messages_endpoint",
+}
 
 _CHAT_ENDPOINT_CAPABILITIES = ChatEndpointCapabilities(
     response_modes=frozenset(
@@ -114,6 +115,18 @@ class OpenAICompatibleProvider:
     def disabled_ids(self) -> frozenset[str]:
         return frozenset(self._descriptors) & self._disabled
 
+    def _enabled_direct_endpoints(self) -> frozenset[ModelEndpoint]:
+        """The three chat protocols this upstream is configured to serve directly.
+
+        Empty or `False` disables a protocol; `True` or a URL string enables it.
+        The config and the client share this gate so capability and address agree.
+        """
+        return frozenset(
+            endpoint
+            for endpoint, field in _CONFIGURED_ENDPOINT_FIELDS.items()
+            if getattr(self._config, field)
+        )
+
     def describe(self, model_id: str) -> ModelDescriptor | None:
         if model_id in self._disabled:
             return None
@@ -131,6 +144,7 @@ class OpenAICompatibleProvider:
         generation = self._catalog_generation + 1
         refreshed_at = datetime.now(UTC).isoformat(timespec="seconds")
         allowed_models = frozenset(self._config.models)
+        enabled_endpoints = self._enabled_direct_endpoints()
         descriptors: dict[str, ModelDescriptor] = {}
         for entry in cast(list[Any], entries):
             if not isinstance(entry, dict):
@@ -147,7 +161,20 @@ class OpenAICompatibleProvider:
                 if advertised is None
                 else resolve_endpoints(advertised, model_type="chat")
             )
-            endpoints = _DEFAULT_ENDPOINTS if resolved is None else resolved.known
+            if resolved is None:
+                # No advertised capability: fall back to exactly what the operator
+                # declared as directly served (the old default-enabled-all-three).
+                endpoints = enabled_endpoints
+            else:
+                # The catalogue is the upstream's claim; config is what this proxy
+                # trusts it can reach directly. Keep the intersection for the
+                # gated chat protocols, and keep embeddings (never gated) as-is.
+                endpoints = frozenset(
+                    endpoint
+                    for endpoint in resolved.known
+                    if endpoint in enabled_endpoints
+                    or endpoint is ModelEndpoint.OPENAI_EMBEDDINGS
+                )
             descriptors[model_id] = ModelDescriptor(
                 id=model_id,
                 endpoints=endpoints,

@@ -42,7 +42,10 @@ type AnthropicThinkingMode = Literal["adaptive", "enabled"]
 # They are pinned and reported as restart-required rather than silently applied.
 NOT_HOT_RELOADABLE = frozenset(
     {
+        "model_providers.*.anthropic_messages_endpoint",
         "model_providers.*.api_base_url",
+        "model_providers.*.openai_chat_completions_endpoint",
+        "model_providers.*.openai_responses_endpoint",
         "model_providers.*.app_version",
         "model_providers.*.auth_base_url",
         "model_providers.*.auth_state_file",
@@ -217,14 +220,25 @@ class CodebuddyProviderConfig(_ModelProviderConfigBase):
     auth_state_file: str = ""
 
 
+# Tri-state for a sub2api upstream's native protocol endpoints
+# (spec: `sub2api-provider/spec.md`). Empty (or absent) disables direct serving
+# of that protocol; `True` enables it on the standard `api_base_url` path;
+# a non-empty absolute HTTP(S) URL enables it at that exact address.
+EndpointSetting = bool | str
+
+
 class OpenAICompatibleProviderConfig(_ModelProviderConfigBase):
     type: Literal["sub2api"]
     api_base_url: str = Field(default="", min_length=1, validate_default=True)
     api_key: str = Field(default="", repr=False)
     models: list[str] = Field(default_factory=list)
     model_refresh_interval: int = Field(default=3600, ge=0)
-    # sub2api catalogues may omit endpoint capabilities; the provider then supplies
-    # its three native protocol endpoints as the default capability set.
+    # A sub2api upstream does not necessarily serve all three native protocols
+    # directly; these three independently declare per-protocol capability and
+    # address (Anthropic Messages also gates upstream `count_tokens`).
+    openai_chat_completions_endpoint: EndpointSetting = ""
+    openai_responses_endpoint: EndpointSetting = ""
+    anthropic_messages_endpoint: EndpointSetting = ""
 
     @field_validator("api_base_url")
     @classmethod
@@ -244,6 +258,38 @@ class OpenAICompatibleProviderConfig(_ModelProviderConfigBase):
             or (port is not None and not 1 <= port <= 65535)
         ):
             raise ValueError("api_base_url must be a valid absolute HTTP(S) URL")
+        return value
+
+    @field_validator(
+        "openai_chat_completions_endpoint",
+        "openai_responses_endpoint",
+        "anthropic_messages_endpoint",
+    )
+    @classmethod
+    def _endpoint_setting_must_be_boolean_or_absolute_url(
+        cls,
+        value: EndpointSetting,
+    ) -> EndpointSetting:
+        # `false` collapses to the same disabled state as leaving it empty.
+        if value is False:
+            return ""
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return ""
+            if value != stripped:
+                raise ValueError("endpoint URL may not have leading or trailing whitespace")
+            try:
+                parsed = urlsplit(value)
+                port = parsed.port
+            except ValueError as error:
+                raise ValueError("endpoint must be a valid absolute HTTP(S) URL") from error
+            if (
+                parsed.scheme not in {"http", "https"}
+                or not parsed.hostname
+                or (port is not None and not 1 <= port <= 65535)
+            ):
+                raise ValueError("endpoint must be a valid absolute HTTP(S) URL")
         return value
 
     @field_validator("models")

@@ -5,7 +5,7 @@ from typing import Any, cast
 
 import httpx2
 
-from app.config.schema import OpenAICompatibleProviderConfig
+from app.config.schema import EndpointSetting, OpenAICompatibleProviderConfig
 from app.model_provider.openai_compatible.errors import upstream_error_from_response
 from app.model_provider.types import ModelEndpoint
 from app.model_provider.upstream_errors import normalize_upstream_error
@@ -23,6 +23,11 @@ _PATHS = {
     ModelEndpoint.OPENAI_RESPONSES: RESPONSES_PATH,
     ModelEndpoint.OPENAI_CHAT_COMPLETIONS: CHAT_COMPLETIONS_PATH,
     ModelEndpoint.OPENAI_EMBEDDINGS: EMBEDDINGS_PATH,
+}
+_CONFIGURED_ENDPOINT_FIELDS = {
+    ModelEndpoint.ANTHROPIC_MESSAGES: "anthropic_messages_endpoint",
+    ModelEndpoint.OPENAI_RESPONSES: "openai_responses_endpoint",
+    ModelEndpoint.OPENAI_CHAT_COMPLETIONS: "openai_chat_completions_endpoint",
 }
 _OWNED_HEADERS = frozenset(
     {
@@ -75,6 +80,36 @@ class OpenAICompatibleClient:
             return path.removeprefix("/v1")
         return path
 
+    def _endpoint_url(self, endpoint: ModelEndpoint) -> str:
+        """The exact upstream address for a protocol endpoint.
+
+        `True` means the standard path on `api_base_url`; a URL string means that
+        address verbatim. Endpoints not gated by config (embeddings) keep their
+        base-relative path. A disabled protocol raises: capability filtering in
+        the provider should have kept it off every descriptor before anything
+        tries to send to it.
+        """
+        setting = self._endpoint_setting(endpoint)
+        if isinstance(setting, str) and setting.strip():
+            return setting.rstrip("/")
+        if setting is True:
+            path = _PATHS[endpoint]
+            if endpoint is ModelEndpoint.ANTHROPIC_MESSAGES:
+                path = self._anthropic_path(path)
+            return f"{self._base_url}{path}"
+        if setting is None:
+            return f"{self._base_url}{_PATHS[endpoint]}"
+        raise ValueError(f"endpoint {endpoint.value} is not configured for this upstream")
+
+    def _endpoint_setting(
+        self,
+        endpoint: ModelEndpoint,
+    ) -> EndpointSetting | None:
+        if endpoint is ModelEndpoint.OPENAI_EMBEDDINGS:
+            return None
+        field = _CONFIGURED_ENDPOINT_FIELDS[endpoint]
+        return cast(EndpointSetting, getattr(self._config, field))
+
     async def _send(
         self,
         request: httpx2.Request,
@@ -105,13 +140,10 @@ class OpenAICompatibleClient:
         stream: bool = False,
         extra_headers: Mapping[str, str] | None = None,
     ) -> httpx2.Response:
-        path = _PATHS[endpoint]
-        if endpoint is ModelEndpoint.ANTHROPIC_MESSAGES:
-            path = self._anthropic_path(path)
         body = dumps(dict(payload))
         request = self._http.build_request(
             "POST",
-            f"{self._base_url}{path}",
+            self._endpoint_url(endpoint),
             headers=self._headers(stream=stream, extra_headers=extra_headers),
             content=body,
         )
@@ -137,9 +169,13 @@ class OpenAICompatibleClient:
 
     async def count_tokens(self, payload: Mapping[str, Any]) -> httpx2.Response:
         body = dumps(dict(payload))
+        # The count leg rides the Anthropic Messages endpoint: when it is disabled
+        # the provider's descriptor never carries the endpoint, so `require_endpoint`
+        # fails before this is reached. Its URL is the messages address plus the
+        # count suffix.
         request = self._http.build_request(
             "POST",
-            f"{self._base_url}{self._anthropic_path(COUNT_TOKENS_PATH)}",
+            f"{self._endpoint_url(ModelEndpoint.ANTHROPIC_MESSAGES)}/count_tokens",
             headers=self._headers(),
             content=body,
         )

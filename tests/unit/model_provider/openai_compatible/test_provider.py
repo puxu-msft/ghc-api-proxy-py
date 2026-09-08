@@ -12,6 +12,7 @@ from app.model_provider import (
     ProviderRegistry,
 )
 from app.model_provider.openai_compatible import OpenAICompatibleClient
+from app.model_provider.types import CapabilityMissing
 from app.pipeline.exceptions import UpstreamRejected
 from app.pipeline.request import WireFormat
 from app.pipeline.routing import decide_route
@@ -86,6 +87,61 @@ def test_sub2api_provider_rejects_an_invalid_api_base_url(
         )
 
 
+def test_endpoint_settings_accept_enabled_bool_url_and_empty() -> None:
+    provider = OpenAICompatibleProviderConfig.model_validate(
+        {
+            "type": "sub2api",
+            "api_base_url": "https://ttthree.example/v1",
+            "openai_chat_completions_endpoint": True,
+            "openai_responses_endpoint": "https://proxy.example/alt/responses",
+            "anthropic_messages_endpoint": "",
+        }
+    )
+    assert provider.openai_chat_completions_endpoint is True
+    assert provider.openai_responses_endpoint == "https://proxy.example/alt/responses"
+    assert provider.anthropic_messages_endpoint == ""
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        False,  # collapses to disabled
+        "https://proxy.example/responses",
+    ],
+)
+def test_endpoint_setting_false_and_url_keep_their_state(value: object) -> None:
+    provider = OpenAICompatibleProviderConfig.model_validate(
+        {
+            "type": "sub2api",
+            "api_base_url": "https://ttthree.example/v1",
+            "openai_responses_endpoint": value,
+        }
+    )
+    if value is False:
+        assert provider.openai_responses_endpoint == ""
+    else:
+        assert provider.openai_responses_endpoint == "https://proxy.example/responses"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "not-a-url",
+        "  https://proxy.example/responses",
+        "ftp://proxy.example/responses",
+    ],
+)
+def test_endpoint_setting_rejects_a_non_absolute_http_url(value: str) -> None:
+    with pytest.raises(ValidationError):
+        OpenAICompatibleProviderConfig.model_validate(
+            {
+                "type": "sub2api",
+                "api_base_url": "https://ttthree.example/v1",
+                "openai_responses_endpoint": value,
+            }
+        )
+
+
 @pytest.mark.asyncio
 async def test_configured_models_are_filtered_from_upstream_catalog_and_keep_metadata() -> None:
     seen: list[httpx2.Request] = []
@@ -117,7 +173,7 @@ async def test_configured_models_are_filtered_from_upstream_catalog_and_keep_met
         )
 
     http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
-    provider_config = config()
+    provider_config = config(openai_responses_endpoint=True)
     provider = OpenAICompatibleProvider(
         "ttthree",
         OpenAICompatibleClient(http_client, provider_config),
@@ -174,7 +230,7 @@ async def test_models_refresh_is_not_static_even_when_an_allowlist_is_configured
 
 
 @pytest.mark.asyncio
-async def test_sub2api_catalog_defaults_to_all_three_native_protocols() -> None:
+async def test_sub2api_catalog_uses_configured_native_endpoints() -> None:
     seen: list[httpx2.Request] = []
 
     def handler(request: httpx2.Request) -> httpx2.Response:
@@ -187,7 +243,12 @@ async def test_sub2api_catalog_defaults_to_all_three_native_protocols() -> None:
         return httpx2.Response(200, json={"type": "message", "content": []})
 
     http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
-    provider_config = config(models=["native-model"])
+    provider_config = config(
+        models=["native-model"],
+        openai_chat_completions_endpoint=True,
+        openai_responses_endpoint=True,
+        anthropic_messages_endpoint=True,
+    )
     provider = OpenAICompatibleProvider(
         "ttthree",
         OpenAICompatibleClient(http_client, provider_config),
@@ -215,6 +276,43 @@ async def test_sub2api_catalog_defaults_to_all_three_native_protocols() -> None:
 
 
 @pytest.mark.asyncio
+async def test_sub2api_without_configured_endpoints_has_no_direct_capability() -> None:
+    http_client = httpx2.AsyncClient(
+        transport=httpx2.MockTransport(
+            lambda request: httpx2.Response(
+                200,
+                json={"object": "list", "data": [{"id": "native-model"}]},
+            )
+        )
+    )
+    provider_config = config(models=["native-model"])
+    provider = OpenAICompatibleProvider(
+        "ttthree",
+        OpenAICompatibleClient(http_client, provider_config),
+        provider_config,
+    )
+
+    try:
+        await provider.refresh_catalog()
+        descriptor = provider.describe("native-model")
+        assert descriptor is not None
+        # Nothing declared: the broken-out default removes the old default-all-on,
+        # so the model advertises no directly served protocol at all.
+        assert descriptor.endpoints == frozenset()
+        assert descriptor.unknown_endpoints == ()
+
+        with pytest.raises(CapabilityMissing):
+            decide_route(
+                requested_model="native-model",
+                inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+                providers=ProviderRegistry({"ttthree": provider}, default="ttthree"),
+                mappings={},
+            )
+    finally:
+        await http_client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_sub2api_count_tokens_reaches_the_native_endpoint() -> None:
     seen: list[httpx2.Request] = []
 
@@ -223,7 +321,7 @@ async def test_sub2api_count_tokens_reaches_the_native_endpoint() -> None:
         return httpx2.Response(200, json={"input_tokens": 5})
 
     http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
-    provider_config = config(models=["native-model"])
+    provider_config = config(models=["native-model"], anthropic_messages_endpoint=True)
     provider = OpenAICompatibleProvider(
         "ttthree",
         OpenAICompatibleClient(http_client, provider_config),
@@ -246,6 +344,79 @@ async def test_sub2api_count_tokens_reaches_the_native_endpoint() -> None:
 
 
 @pytest.mark.asyncio
+async def test_custom_responses_url_is_used_verbatim() -> None:
+    seen: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        if request.url.path == "/v1/models":
+            return httpx2.Response(
+                200,
+                json={"object": "list", "data": [{"id": "remote-model"}]},
+            )
+        return httpx2.Response(200, json={"id": "resp-1", "object": "response"})
+
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
+    provider_config = config(
+        models=[],
+        openai_responses_endpoint="https://alt.example/openai/v1/responses",
+    )
+    provider = OpenAICompatibleProvider(
+        "ttthree",
+        OpenAICompatibleClient(http_client, provider_config),
+        provider_config,
+    )
+
+    try:
+        await provider.refresh_catalog()
+        descriptor = provider.describe("remote-model")
+        assert descriptor is not None
+        response = await provider.send(
+            ModelEndpoint.OPENAI_RESPONSES,
+            {"model": "remote-model", "input": "ping"},
+            descriptor=descriptor,
+        )
+    finally:
+        await http_client.aclose()
+
+    assert response.status_code == 200
+    assert str(seen[1].url) == "https://alt.example/openai/v1/responses"
+
+
+@pytest.mark.asyncio
+async def test_custom_anthropic_url_also_relocates_count_tokens() -> None:
+    seen: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(200, json={"input_tokens": 5})
+
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
+    provider_config = config(
+        models=["native-model"],
+        anthropic_messages_endpoint="https://anthropic-proxy.example/company/messages",
+    )
+    provider = OpenAICompatibleProvider(
+        "ttthree",
+        OpenAICompatibleClient(http_client, provider_config),
+        provider_config,
+    )
+    provider.replace_catalog({"data": [{"id": "native-model"}]})
+
+    try:
+        descriptor = provider.describe("native-model")
+        assert descriptor is not None
+        await provider.count_tokens(
+            {"model": "native-model", "messages": [{"role": "user", "content": "hi"}]},
+            descriptor=descriptor,
+        )
+    finally:
+        await http_client.aclose()
+
+    assert str(seen[0].url) == "https://anthropic-proxy.example/company/messages/count_tokens"
+
+
+@pytest.mark.asyncio
 async def test_models_catalog_and_responses_request_use_openai_compatible_wire() -> None:
     seen: list[httpx2.Request] = []
 
@@ -259,7 +430,7 @@ async def test_models_catalog_and_responses_request_use_openai_compatible_wire()
         return httpx2.Response(200, json={"id": "resp-1", "object": "response"})
 
     http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
-    provider_config = config(models=[])
+    provider_config = config(models=[], openai_responses_endpoint=True)
     provider = OpenAICompatibleProvider(
         "ttthree",
         OpenAICompatibleClient(http_client, provider_config),
@@ -292,7 +463,7 @@ async def test_explicit_catalog_chat_endpoint_is_supported() -> None:
             lambda request: seen.append(request) or httpx2.Response(200, json={"choices": []})
         )
     )
-    provider_config = config(models=[])
+    provider_config = config(models=[], openai_chat_completions_endpoint=True)
     provider = OpenAICompatibleProvider(
         "ttthree",
         OpenAICompatibleClient(http_client, provider_config),
@@ -331,7 +502,7 @@ async def test_client_preserves_upstream_rejection_and_sent_body() -> None:
             lambda _: httpx2.Response(400, content=b'{"error":"bad request"}')
         )
     )
-    client = OpenAICompatibleClient(http_client, config())
+    client = OpenAICompatibleClient(http_client, config(openai_responses_endpoint=True))
 
     try:
         with pytest.raises(UpstreamRejected) as raised:
