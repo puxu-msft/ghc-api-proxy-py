@@ -176,7 +176,7 @@ def test_auth_finds_the_tenant_config_through_the_environment(tmp_path: Path) ->
 def test_auth_derives_the_origin_and_token_file_of_the_named_provider(tmp_path: Path) -> None:
     """Both halves move together: the host the device code comes from, and the file the token lands in.
 
-    A login that reaches the tenant but writes where that provider never reads is as unusable as one that reached dotcom, so neither is asserted alone. A second provider here, because the loader merges over the bundled default rather than replacing it — the bundled `ghc` cannot be removed.
+    A login that reaches the tenant but writes where that provider never reads is as unusable as one that reached dotcom, so neither is asserted alone. Declaring a provider graph also removes the bundled `ghc`, rather than leaving an unexpected account available for authentication.
     """
     token_file = tmp_path / "tenant-token"
     config_path = _auth_config(
@@ -194,15 +194,12 @@ def test_auth_derives_the_origin_and_token_file_of_the_named_provider(tmp_path: 
         )
         other = runner.invoke(app, ["auth", "ghc", "--config", str(config_path)])
 
-    # Per call, not `call_args`: two invocations share one recorder and the property only remembers the last.
-    tenant_call, ghc_call = authenticate.call_args_list
+    tenant_call = authenticate.call_args
     assert result.exit_code == 0
     assert tenant_call.kwargs["web_base_url"] == "https://octocorp.ghe.com"
     assert tenant_call.args[1] == token_file
-    # The other provider in the same config keeps its own origin and its own file.
-    assert other.exit_code == 0
-    assert ghc_call.kwargs["web_base_url"] == "https://github.com"
-    assert ghc_call.args[1] == user_data_path() / "github_token-ghc.txt"
+    assert other.exit_code != 0
+    assert len(authenticate.call_args_list) == 1
 
 
 def test_a_self_hosted_enterprise_server_reaches_its_own_oauth_origin(tmp_path: Path) -> None:

@@ -56,8 +56,17 @@ def test_each_layer_beats_the_one_below(tmp_path: Path) -> None:
 
 
 def test_bundled_layer_applies_when_nothing_overrides_it() -> None:
-    config = load_proxy_config(bundled={"graceful_cleanup_timeout": 10}, environ={})
+    config = load_proxy_config(
+        bundled={
+            "graceful_cleanup_timeout": 10,
+            "model_providers": {"ghc": {"type": "github_copilot"}},
+            "default_model_provider": "ghc",
+        },
+        environ={},
+    )
     assert config.graceful_cleanup_timeout == 10
+    assert set(config.model_providers) == {"ghc"}
+    assert config.default_model_provider == "ghc"
 
 
 def test_user_file_overrides_only_the_keys_it_names(tmp_path: Path) -> None:
@@ -70,6 +79,42 @@ def test_user_file_overrides_only_the_keys_it_names(tmp_path: Path) -> None:
     )
     assert config.client_delivery.sse_ping_interval == 5
     assert config.client_delivery.buffering_policy == "full"
+
+
+def test_configured_provider_graph_replaces_the_bundled_ghc_default(tmp_path: Path) -> None:
+    path = write_config(
+        tmp_path,
+        "model_providers:\n"
+        "  tenant:\n"
+        "    type: github_copilot\n",
+    )
+
+    config = load_proxy_config(
+        config_path=path,
+        bundled={
+            "model_providers": {"ghc": {"type": "github_copilot"}},
+            "default_model_provider": "ghc",
+        },
+        environ={},
+    )
+
+    assert set(config.model_providers) == {"tenant"}
+    assert config.default_model_provider == ""
+
+
+def test_environment_provider_graph_replaces_the_bundled_ghc_default() -> None:
+    config = load_proxy_config(
+        bundled={
+            "model_providers": {"ghc": {"type": "github_copilot"}},
+            "default_model_provider": "ghc",
+        },
+        environ={
+            "GHC_API_PROXY_MODEL_PROVIDERS__TENANT__TYPE": "github_copilot",
+        },
+    )
+
+    assert set(config.model_providers) == {"tenant"}
+    assert config.default_model_provider == ""
 
 
 def test_lists_replace_rather_than_accumulate(tmp_path: Path) -> None:

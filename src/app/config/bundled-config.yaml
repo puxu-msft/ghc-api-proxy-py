@@ -48,7 +48,7 @@ model_mappings:
   claude-haiku-4-5-20251001: gpt-5.6-luna
   claude-sonnet-4-5-20250929: claude-sonnet-5
 
-# 至少要有一个 provider：`model_providers` 的 schema 默认是空字典，而路由在能力上 fail-closed——没有 provider 时每个请求都会被拒。
+# 没有高优先级配置声明新 provider 名时，随包 `ghc` 是启动默认值。配置文件、环境变量或 CLI 声明了随包图中没有的 provider 名时，整个随包 provider 图（包括 `default_model_provider`）都不会参与合并，避免用户配置的 provider 静默多出一个 `ghc`。仅覆盖已有 provider 的字段仍按普通层叠规则合并。
 model_providers:
   ghc:
     type: github_copilot

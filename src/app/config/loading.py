@@ -197,9 +197,8 @@ def load_proxy_config(
     environ: Mapping[str, str] | None = None,
     bundled: Mapping[str, Any] | None = None,
 ) -> ProxyConfig:
-    layers: list[Mapping[str, Any]] = [
-        bundled if bundled is not None else bundled_config_values(),
-    ]
+    bundled_values = bundled if bundled is not None else bundled_config_values()
+    layers: list[Mapping[str, Any]] = [bundled_values]
     resolved_path = resolve_config_path(config_path)
     if resolved_path is not None:
         # Rebased before merging, so only the paths this file declares are affected — an environment or CLI value keeps shell semantics. Ruled 2026-08-28; see `_rebase_configured_paths`.
@@ -208,6 +207,28 @@ def load_proxy_config(
         )
     layers.append(environment_values(environ))
     layers.append({key: value for key, value in (cli_overrides or {}).items() if value is not None})
+
+    # The bundled `ghc` is a bootstrap default, not a sibling of an operator's
+    # provider graph. A new provider name in a higher-priority layer replaces
+    # both it and its bundled default selection; otherwise every configured
+    # provider would silently gain `ghc` as an additional provider. A
+    # field-level override of an existing bundled provider remains a merge.
+    bundled_provider_names = (
+        bundled_values.get("model_providers", {}).keys()
+        if isinstance(bundled_values.get("model_providers"), Mapping)
+        else ()
+    )
+    if any(
+        isinstance(layer.get("model_providers"), Mapping)
+        and any(name not in bundled_provider_names for name in layer["model_providers"])
+        for layer in layers[1:]
+    ):
+        bundled_values = {
+            key: value
+            for key, value in bundled_values.items()
+            if key not in {"model_providers", "default_model_provider"}
+        }
+        layers[0] = bundled_values
 
     merged: dict[str, Any] = {}
     for layer in layers:
