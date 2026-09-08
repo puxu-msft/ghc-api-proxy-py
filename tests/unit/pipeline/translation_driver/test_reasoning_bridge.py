@@ -236,9 +236,30 @@ def test_anthropic_signature_carriers_are_direction_mismatches_in_responses_slot
     assert caught.value.code == "project_v2_direction_mismatch"
 
 
-def test_responses_encrypted_content_null_is_rejected_instead_of_becoming_string_none() -> None:
+def test_responses_encrypted_content_null_is_treated_as_absent() -> None:
+    assert read_responses_reasoning(
+        {
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "visible"}],
+            "encrypted_content": None,
+        }
+    ) == ReasoningContent(
+        visible_text="visible",
+        source_format="openai-responses",
+        summary_parts=(ReasoningSummaryPart("visible"),),
+    )
+
+
+@pytest.mark.parametrize("encrypted_content", [42, [], {}])
+def test_responses_non_string_encrypted_content_is_still_rejected(
+    encrypted_content: object,
+) -> None:
     with pytest.raises(ReasoningBridgeError) as caught:
         read_responses_reasoning(
-            {"type": "reasoning", "summary": [], "encrypted_content": None}
+            {
+                "type": "reasoning",
+                "summary": [],
+                "encrypted_content": encrypted_content,
+            }
         )
     assert caught.value.code == "responses_encrypted_content_malformed"

@@ -179,6 +179,43 @@ def test_reasoning_carries_encrypted_content_only_when_there_was_some() -> None:
     assert second.encrypted_content is None
 
 
+def test_reasoning_stream_accepts_null_encrypted_content_as_absent() -> None:
+    from app.pipeline.delivery.formats.openai_responses import ResponsesAssembler
+    from app.pipeline.delivery.sse_source import SseEvent
+
+    assembler = ResponsesAssembler()
+    assembler.push(
+        SseEvent(
+            event="response.output_item.added",
+            data=orjson.dumps(
+                {
+                    "output_index": 0,
+                    "item": {"id": "rs_1", "type": "reasoning", "summary": []},
+                }
+            ).decode(),
+        )
+    )
+    blocks = assembler.push(
+        SseEvent(
+            event="response.output_item.done",
+            data=orjson.dumps(
+                {
+                    "output_index": 0,
+                    "item": {
+                        "id": "rs_1",
+                        "type": "reasoning",
+                        "summary": [{"type": "summary_text", "text": "visible"}],
+                        "encrypted_content": None,
+                    },
+                }
+            ).decode(),
+        )
+    )
+
+    assert len(blocks) == 1
+    assert blocks[0].payload["thinking"] == "visible"
+
+
 def test_native_anthropic_signature_streams_through_a_responses_client_carrier() -> None:
     block = CompletedBlock(
         index=0,

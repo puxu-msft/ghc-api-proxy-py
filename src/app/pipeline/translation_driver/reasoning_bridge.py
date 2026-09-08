@@ -209,14 +209,14 @@ def read_responses_reasoning(item: Mapping[str, Any]) -> ReasoningContent:
         raise ReasoningBridgeError("responses_reasoning_malformed", "item type must be reasoning")
     parts = summary_parts_from_wire(item.get("summary"))
     visible = visible_summary(parts)
-    if "encrypted_content" not in item:
+    encrypted = item.get("encrypted_content")
+    if encrypted is None:
         return ReasoningContent(
             visible_text=visible,
             source_format=OPENAI_RESPONSES,
             summary_parts=parts,
         )
 
-    encrypted = item.get("encrypted_content")
     if not isinstance(encrypted, str):
         raise ReasoningBridgeError(
             "responses_encrypted_content_malformed",
