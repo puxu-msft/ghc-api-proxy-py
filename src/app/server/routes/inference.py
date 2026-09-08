@@ -773,7 +773,13 @@ async def _dispatch_after_body(
     active.set_model(trace.request_id, context.resolved_model)
     trace.reasoning_effort = _reasoning_effort(context)
     active.set_effort(trace.request_id, trace.reasoning_effort)
-    active.set_attempts(trace.request_id, context.attempt_count)
+    active.set_attempts(
+        trace.request_id,
+        context.attempt_count,
+        last_attempt_started_at=(
+            context.current_attempt.started_at if context.current_attempt is not None else None
+        ),
+    )
     trace.model = context.resolved_model
     trace.requested_model = context.requested_model
     trace.attempts = context.attempt_count
@@ -978,7 +984,15 @@ async def _dispatch_after_body(
                 # Every failure, not the first. The same review put a bare `h2.ProtocolError` in the second position of three and watched it vanish behind the first attempt's `RemoteProtocolError`, which is the exact class of failure this whole slice exists to make visible.
                 if context.attempt_count > opened_before:
                     trace.attempts = context.attempt_count
-                    active.set_attempts(trace.request_id, context.attempt_count)
+                    active.set_attempts(
+                        trace.request_id,
+                        context.attempt_count,
+                        last_attempt_started_at=(
+                            context.current_attempt.started_at
+                            if context.current_attempt is not None
+                            else None
+                        ),
+                    )
                     trace.absorb_token_admissions(context)
                     trace.replaced_failures.append(one_line(repr(replacing)))
                     # The replacement attempt now owns response conversion facts even if it fails before obtaining headers and an assembler. The discarded attempt's losses must not become the final request's losses.

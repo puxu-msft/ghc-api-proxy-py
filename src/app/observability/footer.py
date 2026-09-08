@@ -36,6 +36,8 @@ class ActiveRequest:
     effort: str = "none"
     upstream_response_bytes: int | None = None
     attempts: int = 1
+    # Monotonic instant the current attempt opened, for the `<last>/<total> (<n>)` split a retried in-flight request shows. `None` means no attempt beyond the first has opened, so the current attempt *is* the request and `<last>` == `<total>`.
+    last_attempt_started_at: float | None = None
     route: str = ""
     inbound_format: str = ""
     provider_name: str = ""
@@ -60,13 +62,23 @@ def format_bytes(count: int) -> str:
 
 
 def _item(request: ActiveRequest, now: float, *, unicode: bool) -> str:
-    """`<elapsed>[ ↓<bytes>]` for one request, with the retry count when there is one.
+    """`<elapsed>[ ↓<bytes>]` for one request, split into `<last>/<total> (<n>)` when it has retried.
 
     The arrow degrades to `<` where the stream's encoding cannot carry it, matching the direction idiom the existing `[<-->]` status prefix already uses. Not dropped entirely: without a marker the byte count would read as a second time field.
+
+    For a retried request the elapsed becomes two durations and the retry count, mirroring the finished line's `<last>/<total> retries=N` — the footer is live so the count still rises and is quoted in parentheses rather than named. `<total>` is the whole request's age; `<last>` is the current attempt's own age since it opened.
     """
-    elapsed = format_duration(max(0.0, now - request.started_at))
+    total = max(0.0, now - request.started_at)
     if request.attempts > 1:
-        elapsed = f"{elapsed}({request.attempts - 1})"
+        last_attempt_started_at = (
+            request.last_attempt_started_at
+            if request.last_attempt_started_at is not None
+            else request.started_at
+        )
+        last = max(0.0, now - last_attempt_started_at)
+        elapsed = f"{format_duration(last)}/{format_duration(total)} ({request.attempts - 1})"
+    else:
+        elapsed = format_duration(total)
     if request.upstream_response_bytes is None:
         return elapsed
     return f"{elapsed} {'↓' if unicode else '<'}{format_bytes(request.upstream_response_bytes)}"

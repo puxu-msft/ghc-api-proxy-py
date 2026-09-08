@@ -15,6 +15,7 @@ def _request(
     upstream_response_bytes: int | None = None,
     attempts: int = 1,
     effort: str = "none",
+    last_attempt_started_at: float | None = None,
 ) -> ActiveRequest:
     return ActiveRequest(
         request_id=request_id,
@@ -23,6 +24,7 @@ def _request(
         effort=effort,
         upstream_response_bytes=upstream_response_bytes,
         attempts=attempts,
+        last_attempt_started_at=last_attempt_started_at,
     )
 
 
@@ -124,7 +126,15 @@ def test_absent_byte_count_is_not_the_same_as_zero() -> None:
     assert "↓0B" in build_footer([_request("a", "gpt-5", 1.0, upstream_response_bytes=0)], NOW, 80)
 
 
-def test_retries_are_reported_next_to_the_elapsed() -> None:
+def test_retries_show_last_attempt_over_total_with_the_count_in_parentheses() -> None:
+    # A 5s-old request whose current attempt opened 2.5s ago reports both ages and the replacement count, mirroring the finished line's `<last>/<total> retries=N` but live.
+    assert "2.5s/5.0s (2)" in build_footer(
+        [_request("a", "gpt-5", 5.0, attempts=3, last_attempt_started_at=NOW - 2.5)], NOW, 80
+    )
+
+
+def test_a_retried_request_without_an_observed_attempt_start_degrades_to_total() -> None:
+    # Only reachable with a hand-built record; the serving path always supplies `last_attempt_started_at` once `attempts > 1`. The count still shows.
     assert "(2)" in build_footer([_request("a", "gpt-5", 5.0, attempts=3)], NOW, 80)
 
 

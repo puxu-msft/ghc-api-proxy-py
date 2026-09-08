@@ -125,6 +125,7 @@ def test_live_snapshot_carries_both_byte_frontiers_and_routing_facts() -> None:
     registry.set_provider("req-1", "ghc")
     registry.set_stream("req-1", True)
     registry.set_effort("req-1", "xhigh")
+    registry.set_attempts("req-1", 3, last_attempt_started_at=12.0)
     registry.add_upstream_response_bytes("req-1", 7)
     registry.add_downstream_bytes("req-1", 0)
 
@@ -133,6 +134,8 @@ def test_live_snapshot_carries_both_byte_frontiers_and_routing_facts() -> None:
     assert live.effort == "xhigh"
     assert live.route == "/v1/responses"
     assert live.inbound_format == "openai-responses"
+    assert live.attempts == 3
+    assert live.last_attempt_started_at == 12.0
     assert live.provider_name == "ghc"
     assert live.stream is True
     assert live.upstream_response_bytes == 7

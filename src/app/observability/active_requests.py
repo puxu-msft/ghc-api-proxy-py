@@ -30,6 +30,7 @@ class _Entry:
     effort: str = "none"
     upstream_response_bytes: int | None = None
     attempts: int = 1
+    last_attempt_started_at: float | None = None
     route: str = ""
     inbound_format: str = ""
     provider_name: str = ""
@@ -100,6 +101,7 @@ class ActiveRequestRegistry:
                     effort=entry.effort,
                     upstream_response_bytes=entry.upstream_response_bytes,
                     attempts=entry.attempts,
+                    last_attempt_started_at=entry.last_attempt_started_at,
                     route=entry.route,
                     inbound_format=entry.inbound_format,
                     provider_name=entry.provider_name,
@@ -170,11 +172,13 @@ class ActiveRequestRegistry:
             if entry is not None:
                 entry.stream = stream
 
-    def set_attempts(self, request_id: str, attempts: int) -> None:
+    def set_attempts(self, request_id: str, attempts: int, *, last_attempt_started_at: float | None = None) -> None:
         with self._lock:
             entry = self._entries.get(request_id)
             if entry is not None:
                 entry.attempts = attempts
+                if last_attempt_started_at is not None:
+                    entry.last_attempt_started_at = last_attempt_started_at
 
     def add_upstream_response_bytes(self, request_id: str, count: int) -> None:
         """Record decoded upstream HTTP response-body bytes as they arrive."""
