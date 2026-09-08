@@ -87,6 +87,17 @@ def _version() -> str:
         return "unknown"
 
 
+def _model_availability_messages(chain: Chain) -> tuple[str, ...]:
+    messages: list[str] = []
+    for provider_name in sorted(chain.providers.names):
+        provider = chain.providers.get(provider_name)
+        enabled = len(provider.available_ids)
+        disabled = len(provider.disabled_ids)
+        count = f"{enabled}/{enabled + disabled}" if disabled else str(enabled)
+        messages.append(f"{count} models available from {provider_name}")
+    return tuple(messages)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
     """Carry the calibrator's state across restarts.
@@ -104,8 +115,8 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
     except Exception as error:
         logger.warning(f"model catalog unavailable, serving as not-ready: {error}", status="fail")
     else:
-        provider = chain.providers.get(chain.providers.default_name)
-        logger.info(f"{len(provider.available_ids)} models available from {chain.providers.default_name}", status="ok")
+        for message in _model_availability_messages(chain):
+            logger.info(message, status="ok")
     await chain.tokenization.load()
     # Probed, not configured: whether a live footer belongs on this stream is a fact about where the output goes, and the process can see that for itself. Nothing is logged when it comes back unsupported — a pipe or a CI job is the normal case, not a degradation worth a line in everybody's log.
     tui = footer_tui_or_none(chain.active_requests, chain.capabilities)

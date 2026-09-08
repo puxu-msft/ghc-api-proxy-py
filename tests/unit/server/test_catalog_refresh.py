@@ -13,6 +13,7 @@ from app.model_provider.ghc_client.models import run_model_refresh_loop
 from app.server.composition import refresh_catalogs
 from app.server.pipeline_app import (
     _catalog_refresh_intervals,  # pyright: ignore[reportPrivateUsage]
+    _model_availability_messages,  # pyright: ignore[reportPrivateUsage]
     create_pipeline_app,
 )
 
@@ -48,6 +49,36 @@ class _Registry:
 def _chain(providers: dict[str, _Provider]) -> Chain:
     # Only the one attribute `refresh_catalogs` reads; a whole `Chain` would drag composition in.
     return cast(Chain, SimpleNamespace(providers=_Registry(providers)))
+
+
+def test_startup_model_messages_include_every_provider_and_disabled_totals() -> None:
+    class _CatalogProvider:
+        def __init__(
+            self,
+            available: set[str],
+            disabled: set[str],
+        ) -> None:
+            self.available_ids = frozenset(available)
+            self.disabled_ids = frozenset(disabled)
+
+    providers = {
+        "ghc": _CatalogProvider({"gpt-5.5", "gpt-5.6"}, {"gpt-4o"}),
+        "xingchen": _CatalogProvider({"chat-pro"}, set()),
+    }
+    chain = cast(
+        Chain,
+        SimpleNamespace(
+            providers=SimpleNamespace(
+                names=frozenset(providers),
+                get=providers.__getitem__,
+            )
+        ),
+    )
+
+    assert _model_availability_messages(chain) == (
+        "2/3 models available from ghc",
+        "1 models available from xingchen",
+    )
 
 
 @pytest.mark.asyncio
