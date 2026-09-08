@@ -4,8 +4,10 @@ import logging
 import pytest
 import structlog
 
+import app.observability.logging as logging_module
 from app.model_provider.ghc_client.auth.providers import NoGitHubToken
 from app.observability.logging import LogFormat, get_logger, setup_logging
+from app.observability.terminal import TerminalCapabilities
 
 
 def _flush_handlers() -> None:
@@ -48,6 +50,57 @@ def test_text_renderer_uses_fixed_width_prefix(capsys: pytest.CaptureFixture[str
     captured = capsys.readouterr()
     assert "[FAIL]" in captured.err
     assert "upstream_failed" in captured.err
+
+
+def test_text_renderer_makes_link_fields_clickable_on_an_interactive_terminal(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        logging_module,
+        "detect_terminal",
+        lambda: TerminalCapabilities(live=True, color=False, unicode=True),
+    )
+    setup_logging(log_format="text", colors=False)
+
+    path = "/models?provider=ghc"
+    get_logger().info(
+        f"see {path}",
+        status="ok",
+        link_text=path,
+        link_url=f"http://127.0.0.1:4142{path}",
+    )
+    _flush_handlers()
+
+    output = capsys.readouterr().err
+    assert (
+        "\x1b]8;;http://127.0.0.1:4142/models?provider=ghc\x1b\\"
+        "/models?provider=ghc"
+        "\x1b]8;;\x1b\\"
+    ) in output
+    assert "link_text=" not in output
+    assert "link_url=" not in output
+
+
+def test_json_renderer_keeps_link_fields_without_terminal_control_sequences(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    setup_logging(log_format="json")
+    path = "/models?provider=ghc"
+
+    get_logger().info(
+        f"see {path}",
+        status="ok",
+        link_text=path,
+        link_url=f"http://127.0.0.1:4142{path}",
+    )
+    _flush_handlers()
+
+    output = capsys.readouterr().err
+    assert "\x1b]8;;" not in output
+    event = json.loads(output)
+    assert event["link_text"] == path
+    assert event["link_url"] == f"http://127.0.0.1:4142{path}"
 
 
 def test_stdlib_logging_is_rendered_by_structlog(capsys: pytest.CaptureFixture[str]) -> None:

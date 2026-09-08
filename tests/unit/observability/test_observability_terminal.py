@@ -5,7 +5,7 @@ Both inputs are injected, so every combination is reachable without a terminal a
 
 import io
 
-from app.observability.terminal import DIM, RESET, detect_terminal, paint
+from app.observability.terminal import DIM, RESET, detect_terminal, hyperlink, paint
 
 
 class _Stream(io.TextIOWrapper):
@@ -75,6 +75,22 @@ def test_a_stream_that_refuses_to_answer_is_treated_as_not_a_terminal() -> None:
 
     # Erring towards plain output: the cost of being wrong this way is a missing footer, and the cost of the other way is escape sequences in somebody's log file.
     assert detect_terminal(_Closed(), {"TERM": "xterm"}).live is False
+
+
+def test_a_terminal_hyperlink_wraps_only_the_visible_text() -> None:
+    assert hyperlink(
+        "/models?provider=ghc",
+        "http://127.0.0.1:4142/models?provider=ghc",
+        enabled=True,
+    ) == (
+        "\x1b]8;;http://127.0.0.1:4142/models?provider=ghc\x1b\\"
+        "/models?provider=ghc"
+        "\x1b]8;;\x1b\\"
+    )
+
+
+def test_a_disabled_terminal_hyperlink_is_plain_text() -> None:
+    assert hyperlink("/models?provider=ghc", "http://example.test", enabled=False) == "/models?provider=ghc"
 
 
 def test_an_empty_colour_leaves_the_text_alone() -> None:

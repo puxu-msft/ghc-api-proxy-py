@@ -20,6 +20,8 @@ MAGENTA = "\x1b[35m"
 CYAN = "\x1b[36m"
 WHITE = "\x1b[37m"
 BOLD_RED = "\x1b[1;31m"
+OSC8_START = "\x1b]8;;"
+OSC8_END = "\x1b]8;;\x1b\\"
 
 
 def paint(text: str, code: str, *, color: bool) -> str:
@@ -30,6 +32,13 @@ def paint(text: str, code: str, *, color: bool) -> str:
     An empty `code` means leave it alone, and emits nothing — not a bare reset, which is what a naive format string would produce and which would end the *previous* span early.
     """
     return f"{code}{text}{RESET}" if color and text and code else text
+
+
+def hyperlink(text: str, url: str, *, enabled: bool) -> str:
+    """Make `text` clickable with an OSC 8 terminal hyperlink when supported."""
+    if not enabled or not text or not url:
+        return text
+    return f"{OSC8_START}{url}\x1b\\{text}{OSC8_END}"
 
 
 def duration_colour(seconds: float) -> str:

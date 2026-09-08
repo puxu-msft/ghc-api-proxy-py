@@ -5,7 +5,16 @@ from typing import Any, Literal
 import structlog
 from structlog.typing import EventDict, Processor, WrappedLogger
 
-from app.observability.terminal import CYAN, DIM, GREEN, RED, YELLOW, detect_terminal, paint
+from app.observability.terminal import (
+    CYAN,
+    DIM,
+    GREEN,
+    RED,
+    YELLOW,
+    detect_terminal,
+    hyperlink,
+    paint,
+)
 
 LogFormat = Literal["json", "text"]
 STATUS_PREFIXES = {
@@ -78,6 +87,8 @@ def _render_text(
     logger: WrappedLogger,
     method_name: str,
     event_dict: EventDict,
+    *,
+    hyperlinks: bool = False,
 ) -> str:
     """`[PREFIX] HH:MM:SS <message> <extras>`, the console log shape this project has kept — `app.observability.request_log` records where the frame came from.
 
@@ -94,6 +105,14 @@ def _render_text(
     prefix = str(event_dict.pop("prefix", PENDING))
     timestamp = str(event_dict.pop("timestamp", ""))
     event = str(event_dict.pop("event", ""))
+    link_text = event_dict.pop("link_text", None)
+    link_url = event_dict.pop("link_url", None)
+    if isinstance(link_text, str) and isinstance(link_url, str):
+        event = event.replace(
+            link_text,
+            hyperlink(link_text, link_url, enabled=hyperlinks),
+            1,
+        )
     event_dict.pop("logger", None)
     event_dict.pop("level", None)
     # The prefix is this field, rendered. Printing it again at the end of the line says the same thing twice and pushes the message left of a column of `status=ok`.
@@ -108,13 +127,18 @@ def _render_text(
     return f"{painted_prefix} {paint(timestamp, DIM, color=colors)} {body}{suffix}{trace}"
 
 
-def _build_renderer(log_format: LogFormat, *, colors: bool) -> Processor:
+def _build_renderer(
+    log_format: LogFormat,
+    *,
+    colors: bool,
+    hyperlinks: bool,
+) -> Processor:
     if log_format == "json":
         return structlog.processors.JSONRenderer()
 
     def render(logger: WrappedLogger, method_name: str, event_dict: EventDict) -> str:
         event_dict["_colors"] = colors
-        return _render_text(logger, method_name, event_dict)
+        return _render_text(logger, method_name, event_dict, hyperlinks=hyperlinks)
 
     return render
 
@@ -126,8 +150,13 @@ def setup_logging(
     colors: bool | None = None,
 ) -> None:
     # One detector for the whole process. Asking `isatty()` here as well would be a second answer to the same question, free to disagree with the one the footer uses — and a log stream that colours itself while the footer has decided the terminal cannot take colour is exactly the kind of split nobody thinks to look for.
-    resolved_colors = detect_terminal().color if colors is None else colors
-    renderer = _build_renderer(log_format, colors=resolved_colors)
+    capabilities = detect_terminal()
+    resolved_colors = capabilities.color if colors is None else colors
+    renderer = _build_renderer(
+        log_format,
+        colors=resolved_colors,
+        hyperlinks=capabilities.live,
+    )
 
     shared_processors: list[Processor] = [
         structlog.contextvars.merge_contextvars,

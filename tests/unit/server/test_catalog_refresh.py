@@ -68,6 +68,13 @@ def test_startup_model_messages_include_every_provider_and_disabled_totals() -> 
     chain = cast(
         Chain,
         SimpleNamespace(
+            config=SimpleNamespace(
+                server=SimpleNamespace(
+                    host="127.0.0.1",
+                    port=4142,
+                    tls=SimpleNamespace(mode=False),
+                )
+            ),
             providers=SimpleNamespace(
                 names=frozenset(providers),
                 get=providers.__getitem__,
@@ -76,8 +83,16 @@ def test_startup_model_messages_include_every_provider_and_disabled_totals() -> 
     )
 
     assert _model_availability_messages(chain) == (
-        "2/3 models available from ghc",
-        "1 models available from xingchen",
+        pipeline_app_module._ModelAvailabilityMessage(  # pyright: ignore[reportPrivateUsage]
+            text="2/3 models available from ghc; see /models?provider=ghc",
+            link_text="/models?provider=ghc",
+            link_url="http://127.0.0.1:4142/models?provider=ghc",
+        ),
+        pipeline_app_module._ModelAvailabilityMessage(  # pyright: ignore[reportPrivateUsage]
+            text="1 models available from xingchen; see /models?provider=xingchen",
+            link_text="/models?provider=xingchen",
+            link_url="http://127.0.0.1:4142/models?provider=xingchen",
+        ),
     )
 
 

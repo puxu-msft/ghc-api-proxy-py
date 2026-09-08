@@ -8,7 +8,9 @@ Separate from `app_factory`, which builds the chain no entry point reaches. Moun
 import os
 from collections.abc import AsyncGenerator
 from contextlib import ExitStack, asynccontextmanager
+from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
+from urllib.parse import quote
 
 import anyio
 from fastapi import FastAPI
@@ -29,6 +31,23 @@ from app.server.routes.router import build_router
 TOKENIZATION_FLUSH_SECONDS = 5.0
 
 
+@dataclass(frozen=True, slots=True)
+class _ModelAvailabilityMessage:
+    text: str
+    link_text: str
+    link_url: str
+
+
+def _models_path(provider_name: str) -> str:
+    return f"/models?provider={quote(provider_name, safe='')}"
+
+
+def _models_base_url(chain: Chain) -> str:
+    host = chain.config.server.host
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    scheme = "https" if chain.config.server.tls.mode in (True, "both") else "http"
+    return f"{scheme}://{host}:{chain.config.server.port}"
 
 
 def create_pipeline_app(chain: Chain) -> FastAPI:
@@ -87,14 +106,22 @@ def _version() -> str:
         return "unknown"
 
 
-def _model_availability_messages(chain: Chain) -> tuple[str, ...]:
-    messages: list[str] = []
+def _model_availability_messages(chain: Chain) -> tuple[_ModelAvailabilityMessage, ...]:
+    base_url = _models_base_url(chain)
+    messages: list[_ModelAvailabilityMessage] = []
     for provider_name in sorted(chain.providers.names):
         provider = chain.providers.get(provider_name)
         enabled = len(provider.available_ids)
         disabled = len(provider.disabled_ids)
         count = f"{enabled}/{enabled + disabled}" if disabled else str(enabled)
-        messages.append(f"{count} models available from {provider_name}")
+        path = _models_path(provider_name)
+        messages.append(
+            _ModelAvailabilityMessage(
+                text=f"{count} models available from {provider_name}; see {path}",
+                link_text=path,
+                link_url=f"{base_url}{path}",
+            )
+        )
     return tuple(messages)
 
 
@@ -116,7 +143,12 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
         logger.warning(f"model catalog unavailable, serving as not-ready: {error}", status="fail")
     else:
         for message in _model_availability_messages(chain):
-            logger.info(message, status="ok")
+            logger.info(
+                message.text,
+                status="ok",
+                link_text=message.link_text,
+                link_url=message.link_url,
+            )
     await chain.tokenization.load()
     # Probed, not configured: whether a live footer belongs on this stream is a fact about where the output goes, and the process can see that for itself. Nothing is logged when it comes back unsupported — a pipe or a CI job is the normal case, not a degradation worth a line in everybody's log.
     tui = footer_tui_or_none(chain.active_requests, chain.capabilities)
