@@ -163,7 +163,9 @@ def test_production_responses_fields_and_inert_provider_token_cross_the_pty(
     assert escaped in raw
     assert "…".encode() in raw
     assert b"provider)\x1b[31m,\n\\" not in raw
-    assert b"\x1b[32mcompleted\x1b[0m" in raw, "the formatter-owned completed style never crossed Rich"
+    # This fixture includes a required custom_tool_call, so the contextual formatter must keep completed uncoloured.
+    assert b"completed custom_tool_call" in raw
+    assert b"\x1b[32mcompleted\x1b[0m" not in raw, "completed with a client action must not be painted green"
     assert _found_ordinals(capture.final) == {1, 2, 3}
 
 
