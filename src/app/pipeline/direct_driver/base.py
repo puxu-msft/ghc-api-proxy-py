@@ -52,6 +52,7 @@ EVENT_ATTEMPT_SUCCEEDED = "attempt.succeeded"
 EVENT_ATTEMPT_FAILED = "attempt.failed"
 EVENT_REQUEST_SUCCEEDED = "request.succeeded"
 EVENT_REQUEST_FAILED = "request.failed"
+PROVIDER_BOUND_OBSERVER = "provider_bound_observer"
 
 EVENTS = (
     EVENT_ATTEMPT_PREPARE,
@@ -278,6 +279,14 @@ class DirectDriver:
         for subscription in self._subscribers.for_event(event):
             await subscription.handler(context)
 
+    def _publish_provider_bound(self, context: RequestContext) -> None:
+        observer = context.extras.get(PROVIDER_BOUND_OBSERVER)
+        if observer is None:
+            return
+        if not callable(observer):
+            raise TypeError(f"{PROVIDER_BOUND_OBSERVER} must be callable")
+        cast(Callable[[RequestContext], None], observer)(context)
+
     def _now(self) -> float:
         return self._clock() if self._clock is not None else asyncio.get_running_loop().time()
 
@@ -296,6 +305,7 @@ class DirectDriver:
             await self._publish(EVENT_ATTEMPT_PREPARE, context, outcome)
         else:
             source_payload = self._prepared_payload
+        self._publish_provider_bound(context)
         if self._descriptor is not None and self._admission is not None:
             # A private structural copy closes the nested-alias window between the final mutable subscriber and the rate-limiter wait. The same object is admitted and sent. A delivery replay starts from the source attempt's already-final copy and makes another private copy rather than rerunning mutable shaping.
             attempt.payload = deepcopy(dict(source_payload))

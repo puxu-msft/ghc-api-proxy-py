@@ -40,6 +40,7 @@ from app.pipeline.direct_driver import (
     DRIVERS,
     EVENT_ATTEMPT_PREPARE,
     EVENT_REQUEST_SUCCEEDED,
+    PROVIDER_BOUND_OBSERVER,
     DriverOutcome,
     LedgerBudget,
 )
@@ -91,6 +92,16 @@ def ledger_for(context: RequestContext, chain: Chain) -> RetryLedger:
     if context.retry_ledger is None:
         context.retry_ledger = RetryLedger(chain.config.upstream_request_retry)
     return context.retry_ledger
+
+
+def _notify_provider_bound(context: RequestContext) -> None:
+    observer = context.extras.get(PROVIDER_BOUND_OBSERVER)
+    if observer is None:
+        return
+    if not callable(observer):
+        raise TypeError(f"{PROVIDER_BOUND_OBSERVER} must be callable")
+    cast(Callable[[RequestContext], None], observer)(context)
+
 
 def shape_request(
     chain: Chain,
@@ -416,6 +427,7 @@ async def handle_count_tokens(
     context.extras[COUNTING_ONLY] = True
     for subscription in chain.subscribers.for_event(EVENT_ATTEMPT_PREPARE):
         await subscription.handler(context)
+    _notify_provider_bound(context)
 
     # One estimator per wire contract, and the calibration key follows it. The protocols' payload estimates stay separate so neither corrects the other with its own error; the same reason applies to the factor learnt from them. The idea came from `.dev/docs/archived-2604-rewrite/tokenization.md`, which the user ruled obsolete on 2026-08-20 — it is kept on the reasoning, not on that document's authority.
     protocol = route.target_format.value

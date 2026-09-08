@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 class _Entry:
     model: str
     started_at: float
+    effort: str = "none"
     upstream_response_bytes: int | None = None
     attempts: int = 1
     route: str = ""
@@ -96,6 +97,7 @@ class ActiveRequestRegistry:
                     request_id=request_id,
                     model=entry.model,
                     started_at=entry.started_at,
+                    effort=entry.effort,
                     upstream_response_bytes=entry.upstream_response_bytes,
                     attempts=entry.attempts,
                     route=entry.route,
@@ -111,9 +113,20 @@ class ActiveRequestRegistry:
                 completed=tuple(self._completed),
             )
 
-    def add(self, request_id: str, *, model: str = "", started_at: float | None = None) -> None:
+    def add(
+        self,
+        request_id: str,
+        *,
+        model: str = "",
+        effort: str = "none",
+        started_at: float | None = None,
+    ) -> None:
         with self._lock:
-            self._entries[request_id] = _Entry(model=model, started_at=started_at if started_at is not None else time.monotonic())
+            self._entries[request_id] = _Entry(
+                model=model,
+                started_at=started_at if started_at is not None else time.monotonic(),
+                effort=effort,
+            )
 
     def remove(self, request_id: str) -> None:
         with self._lock:
@@ -131,6 +144,12 @@ class ActiveRequestRegistry:
             entry = self._entries.get(request_id)
             if entry is not None:
                 entry.model = model
+
+    def set_effort(self, request_id: str, effort: str) -> None:
+        with self._lock:
+            entry = self._entries.get(request_id)
+            if entry is not None:
+                entry.effort = effort
 
     def set_route(self, request_id: str, *, route: str, inbound_format: str) -> None:
         with self._lock:

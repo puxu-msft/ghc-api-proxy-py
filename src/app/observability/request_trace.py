@@ -165,6 +165,7 @@ class RequestTrace:
     upstream_protocol: str = ""
     requested_model: str = ""
     model: str = ""
+    reasoning_effort: str = "none"
     attempts: int = 1
     # Monotonic offset at which the final replacement attempt opened. `None` means the request never retried. The final line turns this into the last-attempt duration using the same total duration it already reports.
     last_retry_started_s: float | None = None
@@ -408,6 +409,7 @@ def request_line_from_trace(
         upstream_protocol=trace.upstream_protocol,
         requested_model=trace.requested_model,
         model=trace.model,
+        reasoning_effort=trace.reasoning_effort,
         status_code=status_code,
         started_at=trace.started_at,
         duration_s=elapsed,

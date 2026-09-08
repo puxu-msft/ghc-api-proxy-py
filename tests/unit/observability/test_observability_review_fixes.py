@@ -124,11 +124,13 @@ def test_live_snapshot_carries_both_byte_frontiers_and_routing_facts() -> None:
     registry.set_route("req-1", route="/v1/responses", inbound_format="openai-responses")
     registry.set_provider("req-1", "ghc")
     registry.set_stream("req-1", True)
+    registry.set_effort("req-1", "xhigh")
     registry.add_upstream_response_bytes("req-1", 7)
     registry.add_downstream_bytes("req-1", 0)
 
     (live,) = registry.observation_snapshot().live
     assert live.model == "gpt-model"
+    assert live.effort == "xhigh"
     assert live.route == "/v1/responses"
     assert live.inbound_format == "openai-responses"
     assert live.provider_name == "ghc"

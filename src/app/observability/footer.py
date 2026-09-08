@@ -2,7 +2,7 @@
 
 Pure. Callers supply the active set, the current time and the column count; nothing here reads a clock or touches I/O, so the whole width algorithm is testable without a terminal.
 
-There is one shape whatever the concurrency: one segment per model, `<model>[ xN] <t1>[ ↓<b1>] <t2>[ ↓<b2>] ...`, joined by ` | `. The model name is the only thing that merges. Every in-flight request keeps its own elapsed and its own byte count, because those are the two fields that differ between two calls to the same model and are the reason to look at the line at all.
+There is one shape whatever the concurrency: one segment per model and reasoning effort, `<model>[<effort>][ xN] <t1>[ ↓<b1>] <t2>[ ↓<b2>] ...`, joined by ` | `. The model and effort are the grouping key. Every in-flight request keeps its own elapsed and its own byte count, because those are the two fields that differ between two calls to the same model and are the reason to look at the line at all.
 
 How many requests each segment gets is decided by the terminal width rather than a fixed per-model cap: every shown model is guaranteed its longest-running request, and the leftover columns are handed out round-robin. A wide terminal shows every in-flight request; a narrow one degrades to the slowest few per model instead of dropping whole models.
 """
@@ -27,12 +27,13 @@ CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 class ActiveRequest:
     """One in-flight request, as the footer needs it.
 
-    `model` is empty until routing resolves it. `upstream_response_bytes` stays `None` until the request observes an upstream HTTP response-body chunk: its absence means "nothing has arrived from upstream yet", which is a different fact from `0`. `downstream_bytes` independently counts body bytes whose ASGI send returned; the narrow footer does not render that richer fact yet.
+    `model` is empty until routing resolves it. `effort` is `none` until the provider-bound request selects a named reasoning effort. `upstream_response_bytes` stays `None` until the request observes an upstream HTTP response-body chunk: its absence means "nothing has arrived from upstream yet", which is a different fact from `0`. `downstream_bytes` independently counts body bytes whose ASGI send returned; the narrow footer does not render that richer fact yet.
     """
 
     request_id: str
     model: str
     started_at: float
+    effort: str = "none"
     upstream_response_bytes: int | None = None
     attempts: int = 1
     route: str = ""
@@ -76,6 +77,7 @@ class _Group:
     """One model and its in-flight requests, longest-running first."""
 
     model: str
+    effort: str
     items: list[str]
 
     @property
@@ -85,6 +87,7 @@ class _Group:
         `xN` reports how many requests the model actually has, not how many are shown. Under width pressure the two differ, and this count is what tells you the line is hiding something. ASCII rather than the multiplication sign upstream uses, to keep the line free of characters a linter flags as ambiguous and a terminal may render double-width.
         """
         name = self.model or RESOLVING
+        name = f"{name}[{self.effort}]"
         return f"{name} x{len(self.items)}" if len(self.items) > 1 else name
 
     def render(self, count: int) -> str:
@@ -96,12 +99,13 @@ def _group(active: list[ActiveRequest], now: float, *, unicode: bool) -> list[_G
 
     The key is the raw model string, empty included — **not** the `(resolving)` placeholder, which is only a rendering of "not known yet". A model genuinely named `(resolving)` would otherwise merge with the unresolved requests, which is a different thing entirely.
     """
-    groups: dict[str, _Group] = {}
+    groups: dict[tuple[str, str], _Group] = {}
     for request in sorted(active, key=lambda item: item.started_at):
-        group = groups.get(request.model)
+        key = (request.model, request.effort)
+        group = groups.get(key)
         if group is None:
-            group = _Group(model=request.model, items=[])
-            groups[request.model] = group
+            group = _Group(model=request.model, effort=request.effort, items=[])
+            groups[key] = group
         group.items.append(_item(request, now, unicode=unicode))
     return list(groups.values())
 

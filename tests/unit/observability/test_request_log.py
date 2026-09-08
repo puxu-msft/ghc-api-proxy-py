@@ -121,6 +121,21 @@ def test_the_join_key_is_kept_for_the_lines_somebody_will_come_looking_for() -> 
     assert format_completion_line(served, status="gone").endswith(f"req={identifier}")
 
 
+def test_completion_lines_show_reasoning_effort_after_the_model() -> None:
+    line = RequestLine(
+        method="POST",
+        path="/v1/messages",
+        inbound_format="anthropic-messages",
+        model="claude-opus-5",
+        reasoning_effort="xhigh",
+        status_code=200,
+        duration_s=1.0,
+    )
+    assert format_completion_line(line, status="ok").startswith(
+        "200 anthropic-messages/claude-opus-5[xhigh] "
+    )
+
+
 def test_the_verdict_rather_than_the_status_code_decides_how_the_line_reads() -> None:
     """The one line that could say `[FAIL]` and read as an answer at the same time.
 
@@ -595,6 +610,40 @@ def test_an_unmapped_model_is_named_once() -> None:
     )
     assert "→" not in line
     assert "f/same-model" in line
+
+
+def test_a_provider_qualified_model_is_not_reported_as_a_model_switch() -> None:
+    line = format_completion_line(
+        RequestLine(
+            method="POST",
+            path="/v1/responses",
+            inbound_format="openai-responses",
+            requested_model="ttthree/glm-5.3-flash",
+            model="glm-5.3-flash",
+            reasoning_effort="high",
+            status_code=200,
+            duration_s=1.0,
+        ),
+        status="ok",
+    )
+    assert line == "200 openai-responses/glm-5.3-flash[high] 1.0s"
+
+
+def test_a_provider_qualified_model_mapping_still_shows_the_model_switch() -> None:
+    line = format_completion_line(
+        RequestLine(
+            method="POST",
+            path="/v1/responses",
+            inbound_format="openai-responses",
+            requested_model="ttthree/fast",
+            model="glm-5.3-flash",
+            reasoning_effort="high",
+            status_code=200,
+            duration_s=1.0,
+        ),
+        status="ok",
+    )
+    assert line == "200 openai-responses/ttthree/fast → glm-5.3-flash[high] 1.0s"
 
 
 def test_both_upstream_http_body_directions_are_reported() -> None:

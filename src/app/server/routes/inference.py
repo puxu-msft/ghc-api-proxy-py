@@ -6,7 +6,7 @@ Split out of `app.server.pipeline_app` on 2026-08-22. That module is the app fac
 import asyncio
 import sys
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Coroutine
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Coroutine, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -66,6 +66,7 @@ from app.pipeline.delivery_policy import (
     stream_idle_seconds,
     stream_settings,
 )
+from app.pipeline.direct_driver import PROVIDER_BOUND_OBSERVER
 from app.pipeline.driver import (
     RESPONSE_CONVERSION_LOSSES,
     handle_bounded,
@@ -172,6 +173,31 @@ async def serve(request: Request) -> Response:
     if isinstance(response, StreamingResponse):
         return response
     return _AccountedResponse(response, completion)
+
+
+def _reasoning_effort(context: RequestContext) -> str:
+    """Read the named effort from the provider-bound request body."""
+    payload = context.payload
+    if context.target_format is WireFormat.OPENAI_RESPONSES:
+        reasoning = payload.get("reasoning")
+        if isinstance(reasoning, Mapping):
+            effort = cast(Mapping[str, Any], reasoning).get("effort")
+            if isinstance(effort, str) and effort:
+                return effort
+        return "none"
+    if context.target_format is WireFormat.ANTHROPIC_MESSAGES:
+        thinking = payload.get("thinking")
+        if (
+            isinstance(thinking, Mapping)
+            and cast(Mapping[str, Any], thinking).get("type") == "disabled"
+        ):
+            return "none"
+        output_config = payload.get("output_config")
+        if isinstance(output_config, Mapping):
+            effort = cast(Mapping[str, Any], output_config).get("effort")
+            if isinstance(effort, str) and effort:
+                return effort
+    return "none"
 
 
 def _aborted(failure: BaseException) -> tuple[LogStatus, str]:
@@ -642,6 +668,12 @@ async def _dispatch_after_body(
 
     active = chain.active_requests
 
+    def _provider_bound(prepared: RequestContext) -> None:
+        trace.reasoning_effort = _reasoning_effort(prepared)
+        active.set_effort(trace.request_id, trace.reasoning_effort)
+
+    context.extras[PROVIDER_BOUND_OBSERVER] = _provider_bound
+
     def _routed(routed: RequestContext) -> None:
         """Publish routing facts the moment routing decides them."""
         active.set_model(trace.request_id, routed.resolved_model)
@@ -681,6 +713,8 @@ async def _dispatch_after_body(
             _count_upstream_response_observed(context)
             # Routing runs inside the handler, so a failure after it has a resolved model worth naming; before it, this is still empty and the field drops out.
             trace.model = context.resolved_model
+            trace.reasoning_effort = _reasoning_effort(context)
+            active.set_effort(trace.request_id, trace.reasoning_effort)
             trace.detail = str(error)
             # A count that failed still translated, and what the translation could not carry is part of why it may have failed.
             trace.absorb_conversion(context)
@@ -693,6 +727,8 @@ async def _dispatch_after_body(
         # A count is a model request like any other: it resolves a model and it produces a token number, and a line that reported neither made the busiest endpoint on the proxy the least legible one.
         trace.model = context.resolved_model
         active.set_model(trace.request_id, context.resolved_model)
+        trace.reasoning_effort = _reasoning_effort(context)
+        active.set_effort(trace.request_id, trace.reasoning_effort)
         tokens = counted.get("input_tokens")
         if isinstance(tokens, int):
             trace.usage = {"input_tokens": tokens}
@@ -719,6 +755,8 @@ async def _dispatch_after_body(
     except Exception as error:
         _observe_failed_upstream_response(context, trace, chain, error)
         trace.model = context.resolved_model
+        trace.reasoning_effort = _reasoning_effort(context)
+        active.set_effort(trace.request_id, trace.reasoning_effort)
         trace.attempts = context.attempt_count
         trace.absorb_attempt_timing(context)
         trace.detail = str(error)
@@ -733,6 +771,8 @@ async def _dispatch_after_body(
             translated=context.translation_required,
         )
     active.set_model(trace.request_id, context.resolved_model)
+    trace.reasoning_effort = _reasoning_effort(context)
+    active.set_effort(trace.request_id, trace.reasoning_effort)
     active.set_attempts(trace.request_id, context.attempt_count)
     trace.model = context.resolved_model
     trace.requested_model = context.requested_model

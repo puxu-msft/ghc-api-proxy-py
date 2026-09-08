@@ -144,6 +144,7 @@ class RequestLine:
     upstream_protocol: str = ""
     requested_model: str = ""
     model: str = ""
+    reasoning_effort: str | None = None
     status_code: int | None = None
     started_at: str = ""
     duration_s: float | None = None
@@ -591,7 +592,12 @@ def format_tokens(usage: dict[str, Any], *, unicode: bool = True, color: bool = 
     return " ".join(parts)
 
 
-def _subject(line: RequestLine, *, succeeded: bool, color: bool) -> list[str]:
+def _subject(
+    line: RequestLine,
+    *,
+    succeeded: bool,
+    color: bool,
+) -> list[str]:
     """Who the request was for: the model when the request worked, the route when it did not.
 
     `succeeded` is the line's verdict rather than its status code, so a stream that tore mid-turn takes the route form even though it answered 200 — that line is one somebody has to reproduce, and dressing it as `<inbound-format>/<model>` said the opposite of its own `[FAIL]` prefix. A client that left takes the route form too: nobody received the answer, so nothing about it earned the shape that means one arrived.
@@ -600,9 +606,14 @@ def _subject(line: RequestLine, *, succeeded: bool, color: bool) -> list[str]:
 
     On a successful line the route collapses into the format prefix, and a count then loses the one thing that said which endpoint it hit: `/v1/messages` and `/v1/messages/count_tokens` take the same body and so report the same format. The suffix puts that back. Composed here rather than carried on the record, for the same reason the reasoning and tool words are — what to call it is a display decision, and what happened is that a count-tokens endpoint was asked.
     """
-    target = paint(line.model, MAGENTA, color=color)
+    target_model = (
+        f"{line.model}[{line.reasoning_effort}]"
+        if line.model and line.reasoning_effort is not None
+        else line.model
+    )
+    target = paint(target_model, MAGENTA, color=color)
     named = target
-    if line.requested_model and line.model and line.requested_model != line.model:
+    if _model_was_remapped(line.requested_model, line.model):
         named = f"{paint(line.requested_model, DIM, color=color)} → {target}"
 
     if succeeded and line.model:
@@ -614,6 +625,14 @@ def _subject(line: RequestLine, *, succeeded: bool, color: bool) -> list[str]:
     if line.model:
         parts.append(named)
     return parts
+
+
+def _model_was_remapped(requested_model: str, resolved_model: str) -> bool:
+    """Whether the requested name differs from the resolved model beyond a provider qualifier."""
+    if not requested_model or not resolved_model or requested_model == resolved_model:
+        return False
+    _, separator, unqualified_model = requested_model.partition("/")
+    return not separator or unqualified_model != resolved_model
 
 
 def format_arrival_line(line: RequestLine) -> str:
@@ -654,7 +673,13 @@ def format_completion_line(
         parts.append(paint(protocols, DIM, color=color))
     if line.status_code is not None:
         parts.append(paint(str(line.status_code), STATUS_COLOURS[status], color=color))
-    parts.extend(_subject(line, succeeded=succeeded, color=color))
+    parts.extend(
+        _subject(
+            line,
+            succeeded=succeeded,
+            color=color,
+        )
+    )
     if line.duration_s is not None:
         duration = format_duration(line.duration_s)
         if line.attempts > 1 and line.last_retry_duration_s is not None:

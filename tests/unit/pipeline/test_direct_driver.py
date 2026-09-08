@@ -18,6 +18,7 @@ from app.pipeline.direct_driver import (
     EVENT_ATTEMPT_PREPARE,
     EVENT_REQUEST_FAILED,
     EVENT_REQUEST_SUCCEEDED,
+    PROVIDER_BOUND_OBSERVER,
     AnthropicMessagesDriver,
     DirectDriver,
     RetryBudget,
@@ -432,6 +433,33 @@ async def test_subscriber_edit_reaches_the_sent_payload() -> None:
     # The attempt copies the payload when it opens.
     # An edit made during prepare must therefore be re-read rather than lost.
     assert provider.sent[0][1]["marker"] == "set"
+
+
+@pytest.mark.asyncio
+async def test_provider_bound_observer_runs_after_prepare_subscribers() -> None:
+    registry = SubscriberRegistry[RequestContext]()
+
+    async def add_effort(ctx: RequestContext) -> None:
+        ctx.payload["output_config"] = {"effort": "xhigh"}
+
+    registry.subscribe(EVENT_ATTEMPT_PREPARE, "effort", add_effort)
+    observed: list[dict[str, Any]] = []
+    request = context()
+
+    def observe(current: RequestContext) -> None:
+        observed.append(dict(current.payload))
+
+    request.extras[PROVIDER_BOUND_OBSERVER] = observe
+
+    await driver(FakeProvider(), registry).run(request)
+
+    assert observed == [
+        {
+            "model": "claude-model",
+            "messages": [],
+            "output_config": {"effort": "xhigh"},
+        }
+    ]
 
 
 @pytest.mark.asyncio

@@ -211,6 +211,7 @@ def test_finalized_request_is_one_immutable_source_for_store_json_and_console(
         "upstream_protocol",
         "requested_model",
         "model",
+        "reasoning_effort",
         "status_code",
         "started_at",
         "duration_s",

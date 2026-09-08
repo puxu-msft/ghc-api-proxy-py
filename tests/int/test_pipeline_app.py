@@ -2633,9 +2633,21 @@ def test_a_streaming_request_stays_registered_until_its_body_is_finished() -> No
     calls: list[str] = []
 
     class Recording(ActiveRequestRegistry):
-        def add(self, request_id: str, *, model: str = "", started_at: float | None = None) -> None:
+        def add(
+            self,
+            request_id: str,
+            *,
+            model: str = "",
+            effort: str = "none",
+            started_at: float | None = None,
+        ) -> None:
             calls.append("add")
-            super().add(request_id, model=model, started_at=started_at)
+            super().add(
+                request_id,
+                model=model,
+                effort=effort,
+                started_at=started_at,
+            )
 
         def add_upstream_response_bytes(self, request_id: str, count: int) -> None:
             calls.append("bytes")
@@ -2788,7 +2800,7 @@ def test_a_served_request_writes_exactly_one_log_line(request_log: None, caplog:
     lines = _request_lines(caplog.records)
     assert len(lines) == 1
     # A success names the model instead of the route, and carries the status and how long it took.
-    assert lines[0].startswith("H1/H1 200 anthropic-messages/claude-model ")
+    assert lines[0].startswith("H1/H1 200 anthropic-messages/claude-model[none] ")
 
 
 def test_a_token_count_says_it_was_one_and_which_counter_answered(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
@@ -2807,7 +2819,7 @@ def test_a_token_count_says_it_was_one_and_which_counter_answered(request_log: N
     lines = _request_lines(caplog.records)
     assert len(lines) == 1
     # Both legs, because this count really did go upstream, and the counter named because the number is upstream's own measurement.
-    assert lines[0].startswith("H1/H1 200 anthropic-messages-count-tokens/claude-model ")
+    assert lines[0].startswith("H1/H1 200 anthropic-messages-count-tokens/claude-model[none] ")
     assert lines[0].endswith("provider(ghc)")
     # Both directions of that leg. One of them alone would say, by this line's own convention, that nothing came back — from the exchange that produced the number on the line.
     assert re.search(r"[↑>][\d.]+(B|KiB|MiB)\b", lines[0]), "the body sent upstream is what the count was measured on"
@@ -2832,7 +2844,7 @@ def test_a_count_upstream_could_not_answer_is_reported_as_an_estimate(request_lo
     assert response.json()["estimated"] is True
     lines = _request_lines(caplog.records)
     assert len(lines) == 1
-    assert lines[0].startswith("H1 200 anthropic-messages-count-tokens/claude-model ")
+    assert lines[0].startswith("H1 200 anthropic-messages-count-tokens/claude-model[none] ")
     assert lines[0].endswith("provider(ghc-failed,local)")
 
 
@@ -2854,7 +2866,7 @@ def test_a_count_with_no_upstream_counter_says_that_rather_than_a_failure(reques
     lines = _request_lines(caplog.records)
     assert len(lines) == 1
     # One leg, because nothing was sent, and the reason says that is by design rather than a failure.
-    assert lines[0].startswith("H1 200 anthropic-messages-count-tokens/gpt-model ")
+    assert lines[0].startswith("H1 200 anthropic-messages-count-tokens/gpt-model[none] ")
     assert lines[0].endswith("provider(no-counter,local)")
 
 
@@ -2875,7 +2887,7 @@ def test_a_count_upstream_answered_uselessly_keeps_the_leg_it_flew(request_log: 
     lines = _request_lines(caplog.records)
     assert len(lines) == 1
     # Both legs and both directions, next to the counter that says the number on the line is not upstream's.
-    assert lines[0].startswith("H1/H1 200 anthropic-messages-count-tokens/claude-model ")
+    assert lines[0].startswith("H1/H1 200 anthropic-messages-count-tokens/claude-model[none] ")
     assert lines[0].endswith("provider(ghc-failed,local)")
     assert re.search(r"[↑>][\d.]+(B|KiB|MiB)\b", lines[0])
     assert re.search(r"[↓<][\d.]+(B|KiB|MiB)\b", lines[0])
@@ -3512,7 +3524,7 @@ def test_a_streaming_request_reports_what_it_received_from_upstream(request_log:
 
     lines = _request_lines(caplog.records)
     assert len(lines) == 1
-    assert lines[0].startswith("H1/H1 200 anthropic-messages/claude-model ")
+    assert lines[0].startswith("H1/H1 200 anthropic-messages/claude-model[none] ")
     assert "↓" in lines[0], "a streamed upstream response must report its received body bytes"
     assert "↓0B" not in lines[0]
 
@@ -5584,7 +5596,7 @@ def test_a_direct_buffered_responses_reply_is_observed_before_translation(
         client.post("/responses", json={"model": "gpt-model", "input": []})
 
     line = _request_lines(caplog.records)[0]
-    assert line.startswith("H1/H1 200 openai-responses/gpt-model ")
+    assert line.startswith("H1/H1 200 openai-responses/gpt-model[none] ")
     assert "completed reason(enc:1) function_call(Bash)" in line
     assert line.count("reason(enc:1)") == 1
     assert "end_turn" not in line and "tool_use" not in line
@@ -7410,11 +7422,11 @@ def test_a_replay_is_reported_on_the_request_line(
     assert len(replaced) == 1
     assert "RemoteProtocolError" in replaced[0]
     assert "peer closed the connection" in replaced[0]
-    # And on the line this test is named for. A review deleted the rendering branch and every test here stayed green, because they all read the structured record instead.
     line = next(item for item in _request_lines(caplog.records) if "retries=" in item)
     last_retry = cast(float, record["last_retry_duration_s"])
     total = cast(float, record["duration_s"])
     assert f"{format_duration(last_retry)}/{format_duration(total)}" in line
+    # And on the line this test is named for. A review deleted the rendering branch and every test here stayed green, because they all read the structured record instead.
     assert "RemoteProtocolError" in line
     assert "peer closed the connection" in line
 

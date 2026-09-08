@@ -86,6 +86,7 @@ def test_a_successful_request_writes_one_complete_structured_record(tmp_path: Pa
         upstream_protocol="H2",
         requested_model="claude-opus-5",
         model="gpt-5.1-codex",
+        reasoning_effort="xhigh",
         attempts=2,
         started=time.monotonic() - 1.0,
         started_at="2026-08-20T15:01:53.580Z",
@@ -113,6 +114,7 @@ def test_a_successful_request_writes_one_complete_structured_record(tmp_path: Pa
         "upstream_protocol",
         "requested_model",
         "model",
+        "reasoning_effort",
         "status_code",
         "started_at",
         "duration_s",
@@ -156,6 +158,7 @@ def test_a_successful_request_writes_one_complete_structured_record(tmp_path: Pa
         "upstream_protocol": "H2",
         "requested_model": "claude-opus-5",
         "model": "gpt-5.1-codex",
+        "reasoning_effort": "xhigh",
         "status_code": 200,
         "started_at": "2026-08-20T15:01:53.580Z",
         "duration_s": "ignored",
@@ -207,6 +210,7 @@ def test_a_successful_request_writes_one_complete_structured_record(tmp_path: Pa
     # The join key lives in the record, not on the console line: there is nothing to join to on a request that worked, and the id is wider than several real fields put together.
     assert "req-1" not in emitted[0][0]
     assert emitted[0][1] == record["status"]
+    assert "gpt-5.1-codex[xhigh]" in emitted[0][0]
 
 
 def test_legacy_tool_summary_does_not_fabricate_native_terminal_facts(

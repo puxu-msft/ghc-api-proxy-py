@@ -8,13 +8,27 @@ from app.observability.footer import ActiveRequest, build_footer
 NOW = 1_000.0
 
 
-def _request(request_id: str, model: str, age: float, upstream_response_bytes: int | None = None, attempts: int = 1) -> ActiveRequest:
-    return ActiveRequest(request_id=request_id, model=model, started_at=NOW - age, upstream_response_bytes=upstream_response_bytes, attempts=attempts)
+def _request(
+    request_id: str,
+    model: str,
+    age: float,
+    upstream_response_bytes: int | None = None,
+    attempts: int = 1,
+    effort: str = "none",
+) -> ActiveRequest:
+    return ActiveRequest(
+        request_id=request_id,
+        model=model,
+        started_at=NOW - age,
+        effort=effort,
+        upstream_response_bytes=upstream_response_bytes,
+        attempts=attempts,
+    )
 
 
 def test_open_connections_are_shown_as_their_own_block() -> None:
     active = [_request("a", "gpt-5", 1.0)]
-    assert build_footer(active, NOW, 200, connections=2) == "[<-->] 2 clients | gpt-5 1.0s"
+    assert build_footer(active, NOW, 200, connections=2) == "[<-->] 2 clients | gpt-5[none] 1.0s"
     assert build_footer(active, NOW, 200, connections=1).startswith("[<-->] 1 clients | ")
 
 
@@ -38,7 +52,7 @@ def test_requests_of_one_model_are_separated_by_commas() -> None:
         _request("b", "claude-opus-5", 28.3, upstream_response_bytes=8_396),
         _request("c", "claude-opus-5", 3.6),
     ]
-    assert build_footer(active, NOW, 200) == "[<-->] claude-opus-5 x3 48.6s ↓15.6KiB, 28.3s ↓8.2KiB, 3.6s"
+    assert build_footer(active, NOW, 200) == "[<-->] claude-opus-5[none] x3 48.6s ↓15.6KiB, 28.3s ↓8.2KiB, 3.6s"
 
 
 def test_draining_says_so_in_the_prefix() -> None:
@@ -64,7 +78,7 @@ def test_no_active_requests_render_nothing() -> None:
 
 def test_one_segment_per_model_with_a_count_of_what_it_actually_has() -> None:
     line = build_footer([_request("a", "gpt-5", 2.0), _request("b", "gpt-5", 1.0)], NOW, 200)
-    assert line.startswith("[<-->] gpt-5 x2 ")
+    assert line.startswith("[<-->] gpt-5[none] x2 ")
     # Each request keeps its own elapsed; the model name is the only thing that merges.
     assert "2.0s" in line
     assert "1.0s" in line
@@ -78,6 +92,20 @@ def test_requests_and_models_are_ordered_oldest_first() -> None:
     )
     # A model's position is that of its oldest request, so the one worth worrying about survives the width budget and the newest is what gets cut.
     assert line.index("slow-model") < line.index("fast-model")
+
+
+def test_same_model_with_different_efforts_is_not_merged() -> None:
+    line = build_footer(
+        [
+            _request("low", "gpt-5", 2.0, effort="low"),
+            _request("high", "gpt-5", 1.0, effort="high"),
+        ],
+        NOW,
+        200,
+    )
+    assert "gpt-5[low] 2.0s" in line
+    assert "gpt-5[high] 1.0s" in line
+    assert "x2" not in line
 
 
 def test_an_unresolved_model_renders_as_resolving() -> None:
@@ -138,7 +166,7 @@ def test_leftover_width_is_shared_round_robin_rather_than_by_first_come() -> Non
     ]
     wide = build_footer(active, NOW, 200)
     assert wide.count("x2") == 2
-    narrow = build_footer(active, NOW, 44)
+    narrow = build_footer(active, NOW, 52)
     # Both models are still named even though neither can show everything.
     assert "alpha" in narrow
     assert "bravo" in narrow
