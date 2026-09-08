@@ -587,12 +587,13 @@ def test_a_mapped_model_shows_what_was_asked_for_and_what_answered() -> None:
             inbound_format="anthropic-messages",
             requested_model="claude-sonnet-4.5",
             model="claude-sonnet-5",
+            provider_name="ghc",
             status_code=200,
             duration_s=1.5,
         ),
         status="ok",
     )
-    assert line == "200 anthropic-messages/claude-sonnet-4.5 → claude-sonnet-5 1.5s"
+    assert line == "200 anthropic-messages/claude-sonnet-4.5 → ghc/claude-sonnet-5 1.5s"
 
 
 def test_an_unmapped_model_is_named_once() -> None:
@@ -637,13 +638,14 @@ def test_a_provider_qualified_model_mapping_still_shows_the_model_switch() -> No
             inbound_format="openai-responses",
             requested_model="ttthree/fast",
             model="glm-5.3-flash",
+            provider_name="ttthree",
             reasoning_effort="high",
             status_code=200,
             duration_s=1.0,
         ),
         status="ok",
     )
-    assert line == "200 openai-responses/ttthree/fast → glm-5.3-flash[high] 1.0s"
+    assert line == "200 openai-responses/ttthree/fast → ttthree/glm-5.3-flash[high] 1.0s"
 
 
 def test_both_upstream_http_body_directions_are_reported() -> None:

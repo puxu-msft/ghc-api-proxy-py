@@ -679,6 +679,7 @@ async def _dispatch_after_body(
         active.set_model(trace.request_id, routed.resolved_model)
         active.set_provider(trace.request_id, routed.provider_name)
         trace.model = routed.resolved_model
+        trace.provider_name = routed.provider_name
 
     def _count_upstream_response_observed(counted_context: RequestContext) -> None:
         """Project count transport facts as soon as its buffered response exists."""

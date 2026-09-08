@@ -211,6 +211,7 @@ def test_finalized_request_is_one_immutable_source_for_store_json_and_console(
         "upstream_protocol",
         "requested_model",
         "model",
+        "provider_name",
         "reasoning_effort",
         "status_code",
         "started_at",
@@ -244,6 +245,7 @@ def test_finalized_request_is_one_immutable_source_for_store_json_and_console(
         "observation",
     }
     assert record["status"] == "ok"
+    assert record["provider_name"] == ""
     assert record["bytes_in"] == 11
     assert record["bytes_out"] == 13
     assert record["terminal_status"] == "completed"

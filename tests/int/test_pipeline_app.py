@@ -4761,7 +4761,7 @@ def test_the_count_endpoint_reports_its_model_and_its_number(request_log: None, 
         client.post("/v1/messages/count_tokens", json={"model": "alias", "messages": [{"role": "user", "content": "hi"}]})
 
     line = _request_lines(caplog.records)[0]
-    assert "alias → claude-model" in line
+    assert "alias → ghc/claude-model[none]" in line
     assert "↑4.2k" in line
 
 
@@ -5273,6 +5273,66 @@ def test_the_repair_is_opt_in_end_to_end(
     assert response.status_code == 200
     forwarded = orjson.loads(seen[-1].content)
     assert forwarded["input"] == [expected], why
+
+
+@pytest.mark.parametrize(
+    ("overrides", "client_include", "expected", "why"),
+    [
+        (
+            None,
+            None,
+            None,
+            "the shipped default adds nothing: a request without include goes up without one",
+        ),
+        (
+            None,
+            ["OTHER"],
+            ["file_search_call.results"],
+            "the shipped default strips nothing: the client's own include goes up verbatim",
+        ),
+        (
+            {"reasoning_encrypted_include": "always_add"},
+            None,
+            ["reasoning.encrypted_content"],
+            "always_add asks for the seal on a request that carried no include",
+        ),
+        (
+            {"reasoning_encrypted_include": "always_strip"},
+            ["OTHER", "reasoning.encrypted_content"],
+            ["file_search_call.results"],
+            "always_strip takes the entry and keeps the client's other includables",
+        ),
+    ],
+)
+def test_the_encrypted_reasoning_include_is_configured_end_to_end(
+    overrides: dict[str, Any] | None,
+    client_include: list[str] | None,
+    expected: list[str] | None,
+    why: str,
+) -> None:
+    """`model.reasoning_encrypted_include`, end to end: config key → chain → the bytes upstream receives.
+
+    The unit tests beside `reasoning_encrypted_include.py` hold each policy against each body shape; what this adds is that the key is wired and that the shipped default really is passthrough — neither of which a unit test calling the function with a `policy` argument can say. The request is a native `/responses` body because that is the leg where the client's own `include` exists to be forwarded or stripped; the translated Anthropic leg composes no `include` of its own.
+    """
+    other_includable = "file_search_call.results"
+    body: dict[str, Any] = {"model": "gpt-model", "input": [], "stream": True}
+    if client_include is not None:
+        body["include"] = [
+            other_includable if entry == "OTHER" else entry for entry in client_include
+        ]
+    client, seen = make_client(
+        lambda _: httpx2.Response(
+            200,
+            content=drifting_sealed_reasoning_sse(),
+            headers={"content-type": "text/event-stream"},
+        ),
+        overrides=overrides,
+    )
+    response = client.post("/responses", json=body)
+
+    assert response.status_code == 200
+    forwarded = orjson.loads(seen[-1].content)
+    assert forwarded.get("include") == expected, why
 
 
 def test_a_direct_responses_client_declares_hosted_web_search_for_itself() -> None:

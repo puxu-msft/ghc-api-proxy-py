@@ -144,6 +144,7 @@ class RequestLine:
     upstream_protocol: str = ""
     requested_model: str = ""
     model: str = ""
+    provider_name: str = ""
     reasoning_effort: str | None = None
     status_code: int | None = None
     started_at: str = ""
@@ -621,6 +622,8 @@ def _subject(
         if line.model and line.reasoning_effort is not None
         else line.model
     )
+    if _model_was_remapped(line.requested_model, line.model) and line.provider_name:
+        target_model = f"{line.provider_name}/{target_model}"
     target = paint(target_model, MAGENTA, color=color)
     named = target
     if _model_was_remapped(line.requested_model, line.model):
