@@ -211,6 +211,40 @@ async def test_the_model_list_names_the_provider_that_would_actually_answer() ->
 
 
 @pytest.mark.asyncio
+async def test_the_model_list_can_filter_by_provider() -> None:
+    providers = {
+        "A": StubProvider("A", frozenset({"claude-opus-5"})),
+        "B": StubProvider("B", frozenset({"gpt-5.6-terra"})),
+    }
+    config = config_with({"claude-opus-4.8": "A/claude-opus-5"})
+
+    async with client_for(
+        frozenset(), config, providers=providers, default="B"
+    ) as client:
+        response = await client.get("/models?provider=A")
+
+    assert response.status_code == 200
+    assert {
+        entry["id"] for entry in response.json()["data"]
+    } == {"claude-opus-4.8", "A/claude-opus-5"}
+
+
+@pytest.mark.asyncio
+async def test_the_model_list_exposes_non_default_catalogs_with_provider_qualifiers() -> None:
+    providers = {
+        "ghc": StubProvider("ghc", frozenset({"default-model"})),
+        "ttthree": StubProvider("ttthree", frozenset({"secondary-model"})),
+    }
+
+    async with client_for(frozenset(), providers=providers, default="ghc") as client:
+        response = await client.get("/v1/models")
+
+    entries = {entry["id"]: entry for entry in response.json()["data"]}
+    assert entries["default-model"]["owned_by"] == "ghc"
+    assert entries["ttthree/secondary-model"]["owned_by"] == "ttthree"
+
+
+@pytest.mark.asyncio
 async def test_the_model_list_preserves_upstream_model_metadata() -> None:
     catalog = {
         "object": "list",

@@ -209,12 +209,29 @@ class RouteReport:
 def _candidate_names(providers: ProviderRegistry, mappings: Mapping[str, str]) -> tuple[str, ...]:
     """Every name worth reporting on: catalog ids and mapping keys alike.
 
-    Catalog names first, then mapping keys, each group sorted; de-duplicated by `canonical` with the first spelling kept. So a name that is both an upstream id and a mapping key appears once, spelled the way upstream spells it — the catalog is the authority on its own ids, while a mapping key is whatever an operator typed. Spec §4.1 point 2.
+    Catalog names first, then qualified catalog names, then mapping keys, each group
+    sorted; de-duplicated by `canonical` with the first spelling kept. The default
+    provider keeps its bare ids for compatibility, while secondary providers need
+    qualified ids so clients can discover them without a mapping. Spec §4.1 point 2.
     """
-    catalog = sorted({model for name in providers.names for model in providers.get(name).available_ids})
+    catalog = sorted(
+        {
+            model
+            for name in providers.names
+            for model in providers.get(name).available_ids
+        }
+    )
+    qualified_catalog = sorted(
+        {
+            f"{name}/{model}"
+            for name in providers.names
+            if name != providers.default_name
+            for model in providers.get(name).available_ids
+        }
+    )
     seen: set[str] = set()
     ordered: list[str] = []
-    for name in (*catalog, *sorted(mappings)):
+    for name in (*catalog, *qualified_catalog, *sorted(mappings)):
         key = canonical(name)
         if not key or key in seen:
             continue

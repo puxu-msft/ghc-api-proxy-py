@@ -348,3 +348,30 @@ async def test_client_preserves_upstream_rejection_and_sent_body() -> None:
         "model": "configured-model",
         "input": "bad",
     }
+
+
+@pytest.mark.asyncio
+async def test_catalog_request_sends_the_configured_api_key() -> None:
+    seen: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(
+            200,
+            json={"object": "list", "data": [{"id": "remote-model"}]},
+        )
+
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
+    provider_config = config(models=[])
+    provider = OpenAICompatibleProvider(
+        "ttthree",
+        OpenAICompatibleClient(http_client, provider_config),
+        provider_config,
+    )
+
+    try:
+        assert await provider.refresh_catalog() is True
+    finally:
+        await http_client.aclose()
+
+    assert seen[0].headers["authorization"] == "Bearer test-key"
