@@ -318,8 +318,9 @@ class _NamedAction:
 
 @dataclass(frozen=True, slots=True)
 class _Reasoning:
-    kind: _ReasoningKind
-    count: int
+    # Counts per kind, so one contiguous reasoning run — even one that flips between
+    # `txt` and `enc` — collapses into a single segment instead of a row of `reason(...)`.
+    counts: dict[_ReasoningKind, int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -366,7 +367,7 @@ def _response_display_segment(
 ) -> _ResponseDisplaySegment | None:
     reasoning_kind = _reasoning_kind(item)
     if reasoning_kind is not None:
-        return _Reasoning(kind=reasoning_kind, count=1)
+        return _Reasoning(counts={reasoning_kind: 1})
     return _action_display_segment(
         item.client_action.requirement,
         item.type,
@@ -392,12 +393,14 @@ def _coalesce_response_display_segments(
         elif (
             isinstance(previous, _Reasoning)
             and isinstance(segment, _Reasoning)
-            and previous.kind == segment.kind
         ):
-            coalesced[-1] = _Reasoning(
-                kind=previous.kind,
-                count=previous.count + segment.count,
-            )
+            # Adjacent reasoning merges whatever their kinds — the alternation between
+            # `txt` and `enc` inside one run is order the log line never needed; the run
+            # collapses to the combined per-kind counts below.
+            counts = dict(previous.counts)
+            for kind, count in segment.counts.items():
+                counts[kind] = counts.get(kind, 0) + count
+            coalesced[-1] = _Reasoning(counts=counts)
         else:
             coalesced.append(segment)
     return tuple(coalesced)
@@ -413,8 +416,15 @@ def _render_response_display_segment(
         names = [inert_token(name) for name in segment.raw_names]
         return f"{item_type}({_painted_tools(names, color=color)})"
     if isinstance(segment, _Reasoning):
+        # Fixed enc-then-txt order (same as `format_thinking`) so two lines compare at a
+        # glance rather than echoing whichever kind happened to lead this run.
+        named = ",".join(
+            f"{kind}:{segment.counts.get(kind, 0)}"
+            for kind in ("enc", "txt")
+            if segment.counts.get(kind, 0)
+        )
         return paint(
-            f"{REASONING_WORD[ReplyDialect.RESPONSES]}({segment.kind}:{segment.count})",
+            f"{REASONING_WORD[ReplyDialect.RESPONSES]}({named})",
             DIM,
             color=color,
         )

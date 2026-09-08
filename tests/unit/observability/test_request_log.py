@@ -877,7 +877,7 @@ def test_response_items_project_to_typed_display_segments() -> None:
     cases: tuple[tuple[dict[str, object], object], ...] = (
         (
             {"type": "reasoning", "summary": [{"text": "visible"}]},
-            _Reasoning("txt", 1),
+            _Reasoning({"txt": 1}),
         ),
         (
             {
@@ -885,7 +885,7 @@ def test_response_items_project_to_typed_display_segments() -> None:
                 "summary": [],
                 "encrypted_content": "sealed",
             },
-            _Reasoning("enc", 1),
+            _Reasoning({"enc": 1}),
         ),
         ({"type": "message"}, None),
         (
@@ -946,7 +946,7 @@ def test_response_display_segments_coalesce_adjacent_named_actions() -> None:
 def test_response_display_segments_keep_visible_barriers() -> None:
     barriers = (
         _NamedAction("function_call", ("Read",)),
-        _Reasoning("enc", 1),
+        _Reasoning({"enc": 1}),
         _NamedAction("function_call", ("Bash",)),
         _UnknownAction("future_tool_call"),
         _NamedAction("function_call", ("Read",)),
@@ -960,9 +960,10 @@ def test_response_display_segments_keep_visible_barriers() -> None:
     )
 
     assert _coalesce_response_display_segments(barriers) == barriers
+    # A contiguous reasoning run flips `enc` and `txt` and still folds into one segment.
     assert _coalesce_response_display_segments(
-        (_Reasoning("enc", 1), _Reasoning("enc", 2), _Reasoning("txt", 1))
-    ) == (_Reasoning("enc", 3), _Reasoning("txt", 1))
+        (_Reasoning({"enc": 1}), _Reasoning({"enc": 2}), _Reasoning({"txt": 1}))
+    ) == (_Reasoning({"enc": 3, "txt": 1}),)
     assert _coalesce_response_display_segments(
         colliding_display_types
     ) == colliding_display_types
@@ -1084,7 +1085,7 @@ def test_reasoning_and_tools_preserve_interleaved_visible_order() -> None:
     )
 
 
-def test_reasoning_counts_only_contiguous_same_kind_runs() -> None:
+def test_reasoning_counts_aggregate_contiguous_runs_across_kinds() -> None:
     same_observation, same = _responses_observation_and_line({
         "status": "completed",
         "output": [
@@ -1110,7 +1111,7 @@ def test_reasoning_counts_only_contiguous_same_kind_runs() -> None:
         ),
     )
     assert ordered.endswith(
-        "completed reason(txt:1) reason(enc:1) reason(txt:1)"
+        "completed reason(enc:1,txt:2)"
     )
     _assert_output_item_facts(
         ordered_observation,
@@ -1118,6 +1119,34 @@ def test_reasoning_counts_only_contiguous_same_kind_runs() -> None:
             (0, "reasoning", None, 1, True, False),
             (1, "reasoning", None, 0, False, True),
             (2, "reasoning", None, 1, True, False),
+        ),
+    )
+
+
+def test_a_long_alternating_reasoning_run_collapses_to_one_field() -> None:
+    # The reported TUI-log noise: a run of alternating `txt`/`enc` reasoning with no
+    # tool call between them used to render as six `reason(...)` segments.
+    observation, line = _responses_observation_and_line({
+        "status": "completed",
+        "output": [
+            {"type": "reasoning", "summary": [{"text": "a"}]},
+            {"type": "reasoning", "summary": [], "encrypted_content": "b"},
+            {"type": "reasoning", "summary": [{"text": "c"}]},
+            {"type": "reasoning", "summary": [], "encrypted_content": "d"},
+            {"type": "reasoning", "summary": [{"text": "e"}]},
+            {"type": "reasoning", "summary": [], "encrypted_content": "f"},
+        ],
+    })
+
+    assert line.endswith("completed reason(enc:3,txt:3)")
+    assert "reason(enc:1)" not in line
+    assert "reason(txt:1)" not in line
+    # Durable facts stay item-by-item; only the console projection collapses the run.
+    _assert_output_item_facts(
+        observation,
+        tuple(
+            (i, "reasoning", None, int(i % 2 == 0), i % 2 == 0, i % 2 == 1)
+            for i in range(6)
         ),
     )
 
