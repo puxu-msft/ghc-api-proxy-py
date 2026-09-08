@@ -146,7 +146,7 @@ def _upstream_metadata(provider: ModelProvider, model_id: str) -> dict[str, Any]
     return {}
 
 
-def _model_entries(chain: Chain) -> list[dict[str, Any]]:
+def _model_entries(chain: Chain, *, provider_name: str | None = None) -> list[dict[str, Any]]:
     data: list[dict[str, Any]] = []
     for row in route_table(
         providers=chain.providers, mappings=chain.config.model_mappings
@@ -155,6 +155,8 @@ def _model_entries(chain: Chain) -> list[dict[str, Any]]:
             continue
         if row.provider is None:
             raise RuntimeError(f"serviceable model {row.name!r} has no provider")
+        if provider_name is not None and row.provider != provider_name:
+            continue
         provider = chain.providers.get(row.provider)
         entry = _upstream_metadata(provider, row.model)
         entry.update({"id": row.name, "object": "model", "owned_by": row.provider})
@@ -317,7 +319,7 @@ async def list_models(request: Request) -> JSONResponse:
     model_format = _requested_model_format(request)
     if model_format is None:
         return _invalid_model_format()
-    data = _model_entries(chain)
+    data = _model_entries(chain, provider_name=request.query_params.get("provider"))
     if model_format == "pi":
         data = [_pi_model(entry) for entry in data]
 
