@@ -33,6 +33,7 @@ from app.pipeline.subscribers import (
     HOSTED_WEB_SEARCH_GATE_ID,
     MINTED_REASONING_IDS_ID,
     REASONING_CARRIER_LAST_MILE_ID,
+    REASONING_ENCRYPTED_INCLUDE_ID,
     SERVER_TOOL_CAPABILITY_ID,
     register_builtin_subscribers,
 )
@@ -49,6 +50,8 @@ EXPECTED_ON_ATTEMPT_PREPARE = (
     ANTHROPIC_THINKING_CAPABILITY_ID,
     # Position is convention, not constraint: it is the only pass on this event that reads `input`, and every neighbour works on the Anthropic-shaped body's `tools`, `messages` or `content`, so none of them can see what it wrote or write what it reads.
     MINTED_REASONING_IDS_ID,
+    # Also convention: the only pass on this event that reads the top-level `include`, and under the default policy it returns without reading the body at all.
+    REASONING_ENCRYPTED_INCLUDE_ID,
     BLANK_TEXT_BLOCKS_ID,
     REASONING_CARRIER_LAST_MILE_ID,
     ANTHROPIC_CACHE_CONTROL_ID,
@@ -391,8 +394,9 @@ async def test_a_translated_route_is_counted_from_the_body_it_would_actually_sen
     assert answer["estimated"] is True
     # Not called at all, rather than called and refused: a refusal from this one is fatal.
     assert provider.counted == []
-    # The trail says why, in words that do not accuse the config file of a fault it does not have.
-    assert context.extras["count_tokens_attempts"] == ["ghc:no-counter-for-openai-responses"]
+    # No upstream leg was attempted, so the reason is recorded separately from the empty trail.
+    assert context.extras["count_tokens_reason"] == "no-counter"
+    assert "count_tokens_attempts" not in context.extras
 
 
 async def test_the_counted_body_is_the_repaired_one() -> None:

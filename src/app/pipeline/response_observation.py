@@ -11,8 +11,9 @@ from app.pipeline.response_action import (
     ClientActionObservation,
     classify_responses_client_action,
 )
-from app.protocols.responses_anthropic import (
-    ResponseConversionError,
+from app.pipeline.translation_driver.responses_events import parse_responses_event
+from app.pipeline.translation_driver.usage import (
+    ResponsesUsageError,
     ResponseUsageFacts,
     convert_responses_usage,
 )
@@ -264,44 +265,41 @@ class ResponsesObserver:
 
     def observe_event(self, event: ResponseEvent) -> None:
         try:
-            # Provider accounting is an observation boundary, not the client-wire codec. The stdlib decoder preserves JSON integer tokens as arbitrary-precision Python ints; `orjson.loads` converts values beyond 64-bit to float before `freeze_json` can retain them exactly.
-            decoded = load_json_exact(event.data)
-            if not isinstance(decoded, dict):
-                self._issue("event_payload_not_object", "event.data")
-                return
-            data = cast(dict[str, Any], decoded)
+            parsed = parse_responses_event(event)
+            event_name = parsed.name
+            data = dict(parsed.data)
             self._availability = ResponseAvailability.OBSERVED
             if self._terminal_seen is None:
                 self._terminal_seen = False
-            if event.event in _ITEM_EVENTS and not self._terminal_items_sealed:
-                self._observe_event_item(event.event, data)
+            if event_name in _ITEM_EVENTS and not self._terminal_items_sealed:
+                self._observe_event_item(event_name, data)
             response = data.get("response")
             if isinstance(response, Mapping):
-                terminal = event.event if event.event in _NORMAL_TERMINALS | _FAILURE_TERMINALS else None
+                terminal = (
+                    event_name
+                    if event_name in _NORMAL_TERMINALS | _FAILURE_TERMINALS
+                    else None
+                )
                 self._observe_response_mapping(
                     cast(Mapping[str, Any], response),
                     envelope=data,
                     terminal_event=terminal,
                     complete_body=terminal is not None,
                 )
-            elif event.event in _NORMAL_TERMINALS | (_FAILURE_TERMINALS - {"error"}):
-                self._terminal_event_type = event.event
-                self._terminal_seen = event.event in _NORMAL_TERMINALS
+            elif event_name in _NORMAL_TERMINALS | (_FAILURE_TERMINALS - {"error"}):
+                self._terminal_event_type = event_name
+                self._terminal_seen = event_name in _NORMAL_TERMINALS
                 self._terminal_items_sealed = True
                 self._items = None
                 self._issue("terminal_response_not_object", "response")
-            if event.event == "error":
-                self._terminal_event_type = event.event
+            if event_name == "error":
+                self._terminal_event_type = event_name
                 self._terminal_seen = False
                 self._terminal_items_sealed = True
                 self._items = None
                 # CAPI nests `{error:{code,message}}`; the public Responses event is flat `{type,code,message}`. Preserve whichever holder upstream actually used, preferring the nested object when present just as the delivery failure parser does.
                 error_value = data.get("error") if "error" in data else data
-                self._error = (
-                    self._field(data, "error", field_path="error")
-                    if "error" in data
-                    else self._freeze_value(data, field_path="error")
-                )
+                self._error = _safe_error_field(error_value, field_path="error")
                 self._error_summary = _provider_error_summary(error_value)
         except Exception as error:
             self._issue("event_observation_failed", "event.data", error)
@@ -448,7 +446,7 @@ class ResponsesObserver:
 
         if "error" in response:
             error_value = response.get("error")
-            self._error = self._field(response, "error", field_path="response.error")
+            self._error = _safe_error_field(error_value, field_path="response.error")
             self._error_summary = _provider_error_summary(error_value)
         if "copilot_usage" in envelope:
             self._provider_usage = self._field(
@@ -525,7 +523,7 @@ class ResponsesObserver:
             )
         try:
             converted = convert_responses_usage(value)
-        except ResponseConversionError as error:
+        except ResponsesUsageError as error:
             return UsageObservation(
                 normalized=NormalizedUsage(),
                 raw=raw,
@@ -533,8 +531,8 @@ class ResponsesObserver:
                 issues=(
                     ObservationIssue(
                         code=error.code,
-                        field_path=error.field_path,
-                        detail=str(error),
+                        field_path="response.usage",
+                        detail=f"{type(error).__module__}.{type(error).__qualname__}",
                     ),
                 ),
             )
@@ -595,7 +593,11 @@ class ResponsesObserver:
             ObservationIssue(
                 code=code,
                 field_path=field_path,
-                detail=str(error)[:500] if error is not None else None,
+                detail=(
+                    f"{type(error).__module__}.{type(error).__qualname__}"
+                    if error is not None
+                    else None
+                ),
             )
         )
 
@@ -743,13 +745,39 @@ def _provider_error_summary(value: object) -> ProviderErrorSummary | None:
         return ProviderErrorSummary(
             type=_bounded_string(error.get("type")),
             code=_bounded_string(error.get("code")),
-            message=_bounded_line(error.get("message")),
+            message=_safe_provider_error_message(error.get("message")),
         )
     return ProviderErrorSummary(
         type=None,
         code=None,
-        message=_bounded_line(value),
+        message=_safe_provider_error_message(value),
     )
+
+
+def _safe_error_field(value: object, *, field_path: str) -> JsonObservation:
+    if value is None:
+        return JsonObservation(availability=JsonAvailability.EXPLICIT_NULL)
+    safe: dict[str, str] = {"present": "true"}
+    if isinstance(value, Mapping):
+        mapping = cast(Mapping[str, object], value)
+        for key in ("type", "code"):
+            candidate = mapping.get(key)
+            if isinstance(candidate, str) and candidate:
+                safe[key] = candidate
+        if mapping.get("message") is not None:
+            safe["message"] = "upstream error message present"
+    return JsonObservation(
+        availability=JsonAvailability.OBSERVED,
+        value=freeze_json(safe, path=field_path),
+    )
+
+
+def _safe_provider_error_message(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str) and not value:
+        return None
+    return "upstream error message present"
 
 
 def _bounded_string(value: object, *, limit: int = 240) -> str | None:
@@ -758,15 +786,6 @@ def _bounded_string(value: object, *, limit: int = 240) -> str | None:
     if len(value) <= limit:
         return value
     return f"{value[:limit]}… (+{len(value) - limit} more chars)"
-
-
-def _bounded_line(value: object, *, limit: int = 240) -> str | None:
-    if not isinstance(value, str):
-        return None
-    flattened = " ".join(value.split())
-    if len(flattened) <= limit:
-        return flattened
-    return f"{flattened[:limit]}… (+{len(flattened) - limit} more chars)"
 
 
 def _missing_json(observed: bool) -> JsonObservation:

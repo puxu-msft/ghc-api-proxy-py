@@ -16,6 +16,7 @@
 | `builtin:hosted-web-search-gate` | `attempt.prepare` | after `builtin:server-tool-capability` | Nothing forces it — the two are mutually exclusive by route, one acting only when the target is Anthropic Messages and the other only when it is Responses, so neither can see what the other wrote. Registered next to it because they answer the same question for the two legs, and a reader looking for "where is web search decided" should find both in one place rather than at either end of the list. |
 | `builtin:anthropic-thinking-capability` | `attempt.prepare` | — | Nothing forces its position: `thinking` and `output_config` are touched by nothing else on this event, and its two neighbours read `tools` and `content`. Registered here, after the pair above, because it is the third capability gate and they belong together — all three answer "will the model this is going to actually take this field". |
 | `builtin:repair-minted-reasoning-ids` | `attempt.prepare` | — | Nothing forces its position. It reads and edits `input`, which on this event nothing else touches: every neighbour works on `tools`, `messages` or `content`, and those belong to the Anthropic-shaped body. Off by default; `.dev/docs/direct-passthrough/spec.md` §6.5. |
+| `builtin:reasoning-encrypted-include` | `attempt.prepare` | — | Nothing forces its position. It reads and edits the top-level `include`, which on this event nothing else touches, and on the default policy it returns without reading the body at all. Registered next to `builtin:repair-minted-reasoning-ids` because both are Responses-body passes whose neighbour set is empty. |
 | `builtin:blank-text-blocks` | `attempt.prepare` | before `builtin:reasoning-carrier-last-mile` | This pass only removes text blocks that say nothing. Removing one can put two thinking blocks together, so the following pass owns the resulting Anthropic-only repair rather than this remover inventing a separator itself. |
 | `builtin:reasoning-carrier-last-mile` | `attempt.prepare` | **after `builtin:blank-text-blocks`** | Refuses every project or compatible synthetic carrier still present in provider-bound wire. On an Anthropic target only, it then owns the configured thinking adjacency repair. Running after blank removal means it sees the body actually being sent and leaves no second separator owner. |
 | `builtin:anthropic-cache-control-vocabulary` | `attempt.prepare` | **after `builtin:server-tool-capability`, by an explicit constraint** | It removes the `cache_control` keys upstream refuses from every marker in the body, and `server_tools.py` can put one back while rewriting a result. It only deletes fields, never blocks or messages, but it still precedes the final invariant assertion so the last subscriber observes the exact provider-bound body. |
@@ -27,7 +28,12 @@
 import re
 from collections.abc import Mapping, Sequence
 
-from app.config.schema import AssistantMessageLayout, CacheControlMode, ThinkingDisplayPolicy
+from app.config.schema import (
+    AssistantMessageLayout,
+    CacheControlMode,
+    ReasoningEncryptedIncludePolicy,
+    ThinkingDisplayPolicy,
+)
 from app.pipeline.direct_driver.base import EVENT_ATTEMPT_PREPARE
 from app.pipeline.events import SubscriberRegistry
 from app.pipeline.request import RequestContext
@@ -55,6 +61,12 @@ from app.pipeline.subscribers.reasoning_carrier import (
     SUBSCRIBER_ID as REASONING_CARRIER_LAST_MILE_ID,
 )
 from app.pipeline.subscribers.reasoning_carrier import guard_and_layout_reasoning
+from app.pipeline.subscribers.reasoning_encrypted_include import (
+    SUBSCRIBER_ID as REASONING_ENCRYPTED_INCLUDE_ID,
+)
+from app.pipeline.subscribers.reasoning_encrypted_include import (
+    shape_reasoning_encrypted_include,
+)
 from app.pipeline.subscribers.server_tools import SUBSCRIBER_ID as SERVER_TOOL_CAPABILITY_ID
 from app.pipeline.subscribers.server_tools import adapt_server_tools
 
@@ -71,6 +83,7 @@ def register_builtin_subscribers(
     cache_control: CacheControlMode = "sanitize",
     cache_control_sanitize: Sequence[tuple[re.Pattern[str], frozenset[str]]] = (),
     repair_minted_reasoning_ids_enabled: bool = False,
+    reasoning_encrypted_include: ReasoningEncryptedIncludePolicy = "passthrough",
 ) -> None:
     """Add every built-in subscriber to a registry that has not been frozen yet.
 
@@ -110,6 +123,14 @@ def register_builtin_subscribers(
         # Bound at registration for the reason its neighbours give: it is a startup decision, and a per-request field holding one is a field something can change mid-flight.
         lambda context: repair_minted_reasoning_ids(
             context, enabled=repair_minted_reasoning_ids_enabled
+        ),
+    )
+    registry.subscribe(
+        EVENT_ATTEMPT_PREPARE,
+        REASONING_ENCRYPTED_INCLUDE_ID,
+        # Bound at registration for the reason its neighbours give: it is a startup decision, and a per-request field holding one is a field something can change mid-flight.
+        lambda context: shape_reasoning_encrypted_include(
+            context, policy=reasoning_encrypted_include
         ),
     )
     registry.subscribe(
@@ -154,6 +175,7 @@ __all__ = [
     "HOSTED_WEB_SEARCH_GATE_ID",
     "MINTED_REASONING_IDS_ID",
     "REASONING_CARRIER_LAST_MILE_ID",
+    "REASONING_ENCRYPTED_INCLUDE_ID",
     "SERVER_TOOL_CAPABILITY_ID",
     "adapt_server_tools",
     "adapt_thinking_capability",
@@ -164,4 +186,5 @@ __all__ = [
     "register_builtin_subscribers",
     "repair_minted_reasoning_ids",
     "repair_trailing_assistant",
+    "shape_reasoning_encrypted_include",
 ]

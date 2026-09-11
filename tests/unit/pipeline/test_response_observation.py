@@ -21,7 +21,7 @@ from app.pipeline.response_observation import (
     freeze_json,
     thaw_json,
 )
-from app.protocols.responses_anthropic import convert_responses_usage
+from app.pipeline.translation_driver.usage import convert_responses_usage
 
 
 @pytest.mark.parametrize(
@@ -462,7 +462,7 @@ def test_unavailable_attempt_observation_names_that_no_provider_body_was_seen() 
     assert observed.issues[0].field_path == "response"
 
 
-def test_provider_error_summary_is_bounded_once_while_raw_error_stays_exact() -> None:
+def test_provider_error_observation_keeps_only_safe_error_metadata() -> None:
     message = "first\nsecond " + "x" * 300
     observer = ResponsesObserver()
     observer.observe_response({
@@ -480,13 +480,13 @@ def test_provider_error_summary_is_bounded_once_while_raw_error_stays_exact() ->
     assert observed.error_summary.type == "server_error"
     assert observed.error_summary.code == "provider_broke"
     assert observed.error_summary.message is not None
-    assert "\n" not in observed.error_summary.message
-    assert observed.error_summary.message.endswith("more chars)")
+    assert observed.error_summary.message == "upstream error message present"
     assert observed.error.value is not None
     assert thaw_json(observed.error.value) == {
+        "present": "true",
         "type": "server_error",
         "code": "provider_broke",
-        "message": message,
+        "message": "upstream error message present",
     }
 
 
@@ -506,7 +506,42 @@ def test_provider_error_summary_bounds_type_and_code_as_well_as_message() -> Non
     assert summary is not None
     assert summary.type is not None and summary.type.endswith("more chars)")
     assert summary.code is not None and summary.code.endswith("more chars)")
-    assert summary.message is not None and summary.message.endswith("more chars)")
+    assert summary.message == "upstream error message present"
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        {
+            "type": "error",
+            "error": {
+                "type": "server_error",
+                "code": "provider_broke",
+                "message": "do-not-store-this-event-marker",
+            },
+        },
+        {
+            "type": "error",
+            "code": "provider_broke",
+            "message": "do-not-store-this-flat-marker",
+        },
+    ],
+)
+def test_stream_error_event_observation_redacts_provider_message(
+    event: dict[str, object],
+) -> None:
+    observer = ResponsesObserver()
+    observer.observe_event(
+        SseEvent(event="error", data=orjson.dumps(event).decode())
+    )
+
+    observed = observer.snapshot()
+
+    assert observed.error.value is not None
+    safe = thaw_json(observed.error.value)
+    assert "do-not-store-this" not in orjson.dumps(safe).decode()
+    assert observed.error_summary is not None
+    assert observed.error_summary.message == "upstream error message present"
 
 
 @pytest.mark.parametrize(
@@ -556,14 +591,15 @@ def test_missing_usage_details_remain_unknown_in_exact_and_normalized_facts() ->
 
 
 @pytest.mark.parametrize(
-    "input_details",
+    ("input_details", "expected_input_tokens"),
     [
-        {"cached_tokens": 4},
-        {"cache_write_tokens": 3},
+        ({"cached_tokens": 4}, 5),
+        ({"cache_write_tokens": 3}, 6),
     ],
 )
-def test_fresh_input_stays_unknown_when_either_cache_detail_is_missing(
+def test_fresh_input_uses_zero_for_an_omitted_cache_detail(
     input_details: dict[str, int],
+    expected_input_tokens: int,
 ) -> None:
     observer = ResponsesObserver()
 
@@ -578,9 +614,9 @@ def test_fresh_input_stays_unknown_when_either_cache_detail_is_missing(
     usage = observer.snapshot().usage
 
     assert usage is not None
-    assert usage.normalized.input_tokens is None
+    assert usage.normalized.input_tokens == expected_input_tokens
     assert usage.exact is not None
-    assert usage.exact.input_tokens is None
+    assert usage.exact.input_tokens == expected_input_tokens
 
 
 def test_bool_output_index_is_rejected_without_colliding_with_integer_one() -> None:

@@ -17,5 +17,6 @@
 - 历史：`/history/api/*`、`/history/ws`
 - 指标：`/metrics`
 - 状态与配置：`/api/status`、`/api/config`
+- 调试取证规则：`GET/POST /api/debug/capture-rules`、`DELETE /api/debug/capture-rules/{id}`；规则按 provider、已解析 model-id、session-id 精确匹配，agent-id 可选
 - ~~审批：`/api/approval/*`、`/api/approval/ws`~~ 暂不支持
 - ~~Tokenization：`/api/tokenization/calibration`、`/api/tokenization/limits`~~ 暂不支持

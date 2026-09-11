@@ -1,12 +1,14 @@
 """Model name resolution, per the rules in `config.example.yaml`.
 
 `model_mappings` is the sole source; there are no built-in defaults.
+Compatibility spellings select mapping keys, while the catalog-aware
+`resolve_with_catalogs` function decides which mapping target can actually serve
+the request. Unavailable targets may continue through another mapping, but a
+request never silently falls back to its original name.
 
-The spec's compatibility rules are matching rules, not rewriting rules.
-They decide which mapping key an inbound name hits.
-The date suffix is deliberately not among them; since 2026/07/16 it must be configured.
-
-**Resolution is two passes, and it has to be.** A mapping value may name the provider that serves it (`claude-opus-4.8: A/claude-opus-5`), so the provider is not known until the chain has been walked — while the catalog that decides when the walk is over belongs to that same provider. One function cannot close that loop. So `discover_provider` walks the chain without consulting any catalog and answers only "whose is this", and `resolve_against_catalog` then answers "what is it called there". `.dev/docs/multi-provider-routing/spec.md` §2 is the normative statement of both.
+The lower-level discovery helpers below are retained for mapping diagnostics and
+route-table explanations. Request routing uses `resolve_with_catalogs`, because
+provider selection and catalog availability must be decided together.
 """
 
 import re
@@ -20,7 +22,8 @@ _MAX_ALIAS_HOPS = 8
 # What separates a provider name from the model name in a qualified value or an inbound model name. `/` rather than `@`, which `split_format_suffix` already spends on the wire format, and rather than `:`, which YAML would make an operator quote.
 QUALIFIER_SEPARATOR = "/"
 
-# Where the provider serving a request came from. A closed set of exactly three, and that is a property worth keeping: `discover_provider` returns on the first qualifier it reads, so a chain cannot contribute a second opinion, and `/api/status` can report `origin` as an enumeration rather than as prose. Spec §2.2.
+# Where the provider serving a request came from. A closed set keeps route
+# reports descriptive rather than prose-valued.
 type ProviderOrigin = Literal["qualified", "fallback", "default"]
 
 
@@ -170,7 +173,7 @@ def inspect_mappings(
     mappings: Mapping[str, str],
     provider_names: frozenset[str],
     *,
-    fallback: str = "",
+    default_provider: str = "",
 ) -> tuple[MappingProblem, ...]:
     """Every problem in `model_mappings` that needs no catalog to find.
 
@@ -178,7 +181,7 @@ def inspect_mappings(
 
     Reported, never raised. A deployment with a typo'd qualifier still starts and still serves everything else; the ruling was explicitly against failing start-up over this. Spec §5.1.
 
-    `fallback` is the configured fallback provider's **name**, empty when there is none — not a boolean, because the wording is the point and the name is half of it. The same typo means "these keys go to B" in one deployment and "every request naming these keys will be refused" in another; an operator reading the first sentence should not have to open the configuration again to learn which provider B is. Spec §5.1.1.
+    `default_provider` is also the provider that catches an unknown qualifier.
     """
     problems: list[MappingProblem] = []
 
@@ -187,11 +190,7 @@ def inspect_mappings(
         if qualified and provider is None:
             head = value.partition(QUALIFIER_SEPARATOR)[0]
             configured = ", ".join(sorted(provider_names)) or "none"
-            consequence = (
-                f"will be served by the fallback provider {fallback!r}"
-                if fallback
-                else "will be REFUSED, because no fallback_model_provider is set"
-            )
+            consequence = f"will be served by the default provider {default_provider!r}"
             problems.append(
                 MappingProblem(
                     kind="unknown-provider",
@@ -301,3 +300,219 @@ def resolve_against_catalog(
     if direct is not None:
         return ModelResolution(requested, direct, matched_key, hops=hops)
     return ModelResolution(requested, requested.strip(), matched_key, passthrough=True, hops=hops)
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogModelResolution:
+    """A mapping result that has already selected a provider and catalog id."""
+
+    requested: str
+    provider: str
+    resolved: str
+    target: str
+    matched_key: str = ""
+    hops: int = 0
+    format_name: str = ""
+    origin: ProviderOrigin = "default"
+
+
+def _split_mapping_format(value: str) -> tuple[str, str]:
+    """Remove an optional `@format` suffix from a mapping value."""
+    model, separator, format_name = value.rpartition("@")
+    if not separator or not model:
+        return value, ""
+    return model, format_name
+
+
+def resolve_with_catalogs(
+    requested: str,
+    *,
+    mappings: Mapping[str, str],
+    provider_names: frozenset[str],
+    available: Mapping[str, frozenset[str]],
+    default_provider: str,
+) -> CatalogModelResolution | None:
+    """Resolve a request by trying every mapping target against provider catalogs.
+
+    A mapping is an alias only until its target is known to be available. Bare
+    targets are checked on the provider that qualified the mapping, then on the
+    default provider. Qualified targets are checked only on their named provider.
+    An unavailable target may itself be another alias, so the walk continues
+    until a catalog hit or the hop budget is exhausted.
+    """
+    index = _index(mappings)
+    catalog_indexes = {
+        provider: {canonical(model): model for model in model_ids}
+        for provider, model_ids in available.items()
+    }
+
+    def find_entry(name: str) -> tuple[str, str] | None:
+        return next(
+            (index[key] for key in candidate_keys(name) if key in index),
+            None,
+        )
+
+    def unique(names: tuple[str | None, ...]) -> tuple[str, ...]:
+        seen: set[str] = set()
+        result: list[str] = []
+        for name in names:
+            if name and name not in seen:
+                seen.add(name)
+                result.append(name)
+        return tuple(result)
+
+    def catalog_id(provider: str, model: str) -> str | None:
+        return catalog_indexes.get(provider, {}).get(canonical(model))
+
+    def walk(
+        current: str,
+        *,
+        source_provider: str | None,
+        source_origin: ProviderOrigin,
+        visited: frozenset[str],
+        first_key: str,
+        hops: int,
+        inherited_format: str,
+    ) -> CatalogModelResolution | None:
+        if hops >= _MAX_ALIAS_HOPS:
+            return None
+
+        current_name, current_format = _split_mapping_format(current)
+        entry = find_entry(current_name)
+        if entry is not None:
+            matched_key, value = entry
+            marker = canonical(matched_key)
+            if marker in visited:
+                return None
+
+            target_name, target_format = _split_mapping_format(value)
+            format_name = target_format or inherited_format or current_format
+            explicit, model, qualified = split_provider_qualifier(
+                target_name, provider_names
+            )
+            if qualified:
+                target_provider = explicit or default_provider
+                candidates = unique((target_provider,))
+                target_origin: ProviderOrigin = (
+                    "qualified" if explicit is not None else "fallback"
+                )
+                next_name = target_name
+                next_source = target_provider or None
+            else:
+                candidates = unique((source_provider, default_provider))
+                target_origin = source_origin if source_provider else "default"
+                next_name = model
+                next_source = source_provider or default_provider
+
+            for provider in candidates:
+                resolved = catalog_id(provider, model)
+                if resolved is not None:
+                    return CatalogModelResolution(
+                        requested=requested,
+                        provider=provider,
+                        resolved=resolved,
+                        target=model,
+                        matched_key=first_key or matched_key,
+                        hops=hops + 1,
+                        format_name=format_name,
+                        origin=target_origin
+                        if provider == next_source
+                        else ("default" if provider == default_provider else target_origin),
+                    )
+
+            return walk(
+                next_name,
+                source_provider=next_source,
+                source_origin=target_origin,
+                visited=visited | {marker},
+                first_key=first_key or matched_key,
+                hops=hops + 1,
+                inherited_format=format_name,
+            )
+
+        explicit, model, qualified = split_provider_qualifier(
+            current_name, provider_names
+        )
+        if qualified:
+            target_provider = explicit or default_provider
+            candidates = unique((target_provider,))
+            target_origin: ProviderOrigin = (
+                "qualified" if explicit is not None else "fallback"
+            )
+        else:
+            candidates = unique((source_provider, default_provider))
+            target_origin = source_origin if source_provider else "default"
+
+        for provider in candidates:
+            resolved = catalog_id(provider, model)
+            if resolved is not None:
+                return CatalogModelResolution(
+                    requested=requested,
+                    provider=provider,
+                    resolved=resolved,
+                    target=model,
+                    matched_key=first_key,
+                    hops=hops,
+                    format_name=inherited_format or current_format,
+                    origin=target_origin
+                    if provider == (explicit or source_provider)
+                    else ("default" if provider == default_provider else target_origin),
+                )
+        return None
+
+    explicit, bare, request_qualified = split_provider_qualifier(
+        requested.strip(), provider_names
+    )
+    request_provider = explicit or default_provider
+    request_origin: ProviderOrigin = (
+        "qualified" if explicit is not None else "fallback" if request_qualified else "default"
+    )
+
+    seeds: list[tuple[str, str | None, ProviderOrigin]] = [
+        (requested.strip(), request_provider, request_origin)
+    ]
+    if request_qualified:
+        seeds.append(
+            (
+                f"{default_provider}{QUALIFIER_SEPARATOR}{bare}",
+                default_provider,
+                "fallback",
+            )
+        )
+    else:
+        seeds.append(
+            (
+                f"{default_provider}{QUALIFIER_SEPARATOR}{bare}",
+                default_provider,
+                "default",
+            )
+        )
+
+    # A lookup fallback is only for a missing mapping key. Once a key exists,
+    # its target and any aliases reachable from that target own the request;
+    # failing that chain must not silently select another key.
+    for seed, source_provider, source_origin in seeds:
+        if find_entry(seed) is None:
+            continue
+        return walk(
+            seed,
+            source_provider=source_provider,
+            source_origin=source_origin,
+            visited=frozenset(),
+            first_key="",
+            hops=0,
+            inherited_format="",
+        )
+
+    if not request_provider:
+        return None
+    resolved = catalog_id(request_provider, bare)
+    if resolved is None:
+        return None
+    return CatalogModelResolution(
+        requested=requested,
+        provider=request_provider,
+        resolved=resolved,
+        target=bare,
+        origin=request_origin,
+    )

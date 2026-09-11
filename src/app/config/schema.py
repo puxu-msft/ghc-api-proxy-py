@@ -29,6 +29,8 @@ type WebSearchConstraintPolicy = Literal["error", "drop_fields"]
 # What to do with a Claude Code auto mode authorisation request. `passthrough` forwards it upstream like anything else; the other two answer it here with a fixed decision and never call upstream at all.
 # Spelled out rather than using `false` for the disabled state, per `config.example.yaml`. The bool spelling that `assistant_message_layout` and `context_editing.enabled` use exists to dodge YAML 1.1 reading a bare `off` as boolean false; `passthrough` is not a word that trap applies to, so it can say what it means.
 type AutoModeDecision = Literal["passthrough", "allow", "block"]
+# What this proxy does with the `include` entry that asks a Responses upstream for encrypted reasoning. Encrypted reasoning is opt-in on that wire: only a request carrying `reasoning.encrypted_content` in its `include` array gets the opaque seal back, and every other spelling returns summary text alone. `passthrough` — the default — adds nothing and strips nothing, so a translated request sends no `include` at all and a native request forwards the client's own array verbatim; `always_add` makes sure every Responses-bound request carries the entry, which is what cross-turn reasoning reuse needs on a `store: false` upstream; `always_strip` removes the entry wherever it appears, and drops an `include` key left empty by the removal.
+type ReasoningEncryptedIncludePolicy = Literal["passthrough", "always_add", "always_strip"]
 type ConnectionBoundInputIdPolicy = Literal["abandon", "strip_reasoning", "strip_all"]
 # What to do with `thinking.display` on the way to an Anthropic Messages upstream. `passthrough` — the default — sends whatever the client said and adds nothing; `drop` removes the key; the two remaining values rewrite it. `omitted` streams `thinking` blocks with empty text and is the upstream default on the Claude 5 family, `summarized` asks for a readable summary of the reasoning instead.
 type ThinkingDisplayPolicy = Literal["passthrough", "drop", "omitted", "summarized"]
@@ -85,11 +87,14 @@ class Section(BaseModel):
 
 
 class RawCaptureConfig(Section):
-    enabled: bool = False
+    # Kept only so an old `enabled: false` file remains readable. `true` is
+    # deliberately invalid: selection is owned by SQLite rules and the HTTP
+    # management surface, never by a switch that captures every request.
+    enabled: Literal[False] = False
     directory: str = ""
+    rules_database: str = ""
     compression_level: int = Field(default=3, ge=1, le=22)
     max_file_bytes: int = Field(default=512 * 1024 * 1024, ge=0)
-    max_total_bytes: int = Field(default=4 * 1024 * 1024 * 1024, ge=0)
 
 
 class ObservabilityConfig(Section):
@@ -631,6 +636,9 @@ class FixResponsesRequestHook(Section):
     # It repairs history rather than behaviour: nothing produces that pair any more, since `1fb37cd` carries upstream's own events. Leave it off unless a conversation from before that commit is worth keeping alive. `app.pipeline.subscribers.minted_reasoning_ids` holds the predicate and why each part of it is needed.
     repair_minted_reasoning_ids: bool = False
 
+    # How `include: ["reasoning.encrypted_content"]` is shaped on every Responses-bound request, translated or native. The default is the behaviour this proxy has always had — a translated request carries no `include`, a native request forwards the client's — because the default of a switch like this is not the place to start asking an upstream for a payload kind it never asked for before. It lives under this hook rather than at the top level because it is a request-side reshape on the Responses wire, the same body this hook's other key repairs; `app.pipeline.subscribers.reasoning_encrypted_include` holds the pass and the reasons each non-default value exists.
+    reasoning_encrypted_include: ReasoningEncryptedIncludePolicy = "passthrough"
+
 
 class FixResponsesSseHook(Section):
     # **The name is the user's own**, written into `docs/.human-controlled/config.example.yaml` before any of this existed: "修复上游流在 `output_item.added` / `output_item.done` 间不一致的 item ID。`@ai-sdk/openai` 校验 ID 连续性需要。" The measurement is wider than that sentence — every id in the stream drifts, not only the two it names — but the key keeps their spelling.
@@ -691,14 +699,9 @@ class ProxyConfig(Section):
     model_providers: dict[str, ModelProviderConfig] = Field(
         default_factory=lambda: dict[str, ModelProviderConfig]()
     )
+    # The provider used for unqualified names and as the fallback when a
+    # request or mapping names an unknown provider.
     default_model_provider: str = ""
-
-    # Where a request goes when its mapping value **named** a provider that is not configured — `x: typo/claude-opus-5`. Deliberately a second key rather than a reuse of the one above, because "the operator wrote no qualifier" and "the operator wrote one and got it wrong" are different facts and only the second is a defect. Folding them together would make a typo indistinguishable from the ordinary case, which is precisely the state this key exists to end.
-    #
-    # May be left unset, and then such a request is **refused** rather than quietly served by the default. Refusing is the fail-closed direction: the alternative sends a request to an upstream nobody named, and the operator's evidence that anything was wrong is a bill on the wrong account.
-    #
-    # Naming a provider that does not exist stops start-up, exactly as `default_model_provider` does. Spec §1.2.
-    fallback_model_provider: str = ""
 
     @field_validator("model_providers", mode="before")
     @classmethod

@@ -13,7 +13,7 @@ import httpx2
 from app.config.schema import ProxyConfig
 from app.model_provider import ModelDescriptor, ModelEndpoint
 from app.pipeline.delivery_policy import assembler_for
-from app.pipeline.driver import CLIENT_SEARCH_TOOL, handle
+from app.pipeline.driver import handle
 from app.pipeline.request import RequestContext, WireFormat
 from app.server.composition import build_chain
 
@@ -125,7 +125,7 @@ async def test_handling_a_request_puts_the_search_tools_name_on_the_context() ->
 
     await handle(chain, context)
 
-    assert context.extras[CLIENT_SEARCH_TOOL] == "ToolSearch"
+    assert context.client_search_tool == "ToolSearch"
     [sent] = provider.sent
     assert any(tool.get("type") == "tool_search" for tool in sent["tools"])
 
@@ -167,4 +167,4 @@ async def test_a_request_with_no_search_records_no_name() -> None:
 
     await handle(chain, context)
 
-    assert CLIENT_SEARCH_TOOL not in context.extras
+    assert context.client_search_tool == ""

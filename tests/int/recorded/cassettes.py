@@ -1,6 +1,6 @@
 """Recording real upstream traffic, and replaying it byte-for-byte.
 
-Hand-written rather than vcrpy: the PoC in `.dev/docs/test-infrastructure/reports/260818-vcrpy-poc.md` found that vcrpy merges
+Hand-written rather than vcrpy: the historical PoC in `.dev/docs/server-layout/history/test-infrastructure/reports/260818-vcrpy-poc.md` found that vcrpy merges
 the chunks of a streamed response, and no configuration prevents it. This project's delivery layer works a block at a time, so a recording that flattens the stream into one chunk cannot reproduce the timing the layer is built around — which is precisely the class of defect a recording is for.
 
 The reason this exists at all: hand-written stand-ins mirrored what we assumed upstream does. Real

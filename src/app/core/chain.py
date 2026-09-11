@@ -18,6 +18,7 @@ from app.config.paths import tokenization_state_path
 from app.config.schema import ProxyConfig
 from app.model_provider import ProviderRegistry
 from app.observability.active_requests import ActiveRequestRegistry
+from app.observability.debug_capture import DebugCaptureRuleStore
 from app.observability.raw_capture import RawCaptureStore
 from app.observability.terminal import TerminalCapabilities, detect_terminal
 from app.pipeline.events import FrozenSubscribers
@@ -47,6 +48,7 @@ class Chain:
     # Who is in flight right now. Always maintained, whether or not anything renders it: the cost is one dict entry per request, and making it conditional would mean the footer shows an empty line for its first few seconds after being switched on.
     active_requests: ActiveRequestRegistry = field(default_factory=ActiveRequestRegistry)
     raw_capture: RawCaptureStore | None = None
+    debug_capture_rules: DebugCaptureRuleStore | None = None
     # Probed once, here, and shared by the footer and the log lines. Asking twice invites two answers that disagree, and a log stream that emits a glyph the footer has already decided this terminal cannot encode is exactly the kind of split nobody thinks to look for.
     capabilities: TerminalCapabilities = field(default_factory=detect_terminal)
     # What the `local` token counter has learnt. Constructing it touches nothing; `load()` does.
@@ -73,5 +75,7 @@ class Chain:
         """
         if self.raw_capture is not None:
             self.raw_capture.close()
+        if self.debug_capture_rules is not None:
+            self.debug_capture_rules.close()
         for client in self.provider_clients.values():
             await client.aclose()

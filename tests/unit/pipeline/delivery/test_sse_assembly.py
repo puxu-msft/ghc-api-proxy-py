@@ -22,7 +22,7 @@ from app.pipeline.delivery.sse_source import SseEvent, encode_frame, parse_frame
 from app.pipeline.reply import blocks_from_anthropic
 from app.pipeline.translation_driver.reasoning_bridge import ReasoningBridgeError
 from app.pipeline.translation_driver.responses import from_openai_responses_response
-from app.pipeline.translation_driver.semantic import LossCode
+from app.pipeline.translation_driver.semantic import LossCode, TranslationRefused
 
 
 def frame(event: str, data: dict[str, Any], *, space: bool = True) -> bytes:
@@ -471,6 +471,36 @@ def test_responses_function_call_becomes_a_tool_use_block() -> None:
     assert blocks[0].payload["id"] == "c1"
 
 
+def test_unknown_responses_output_item_is_skipped_and_warned() -> None:
+    assembler = ResponsesAssembler()
+    assembler.push(
+        SseEvent(
+            "response.output_item.added",
+            orjson.dumps(
+                {"output_index": 0, "item": {"id": "x1", "type": "custom_tool_call"}}
+            ).decode(),
+        )
+    )
+
+    assert assembler.push(
+        SseEvent(
+            "response.output_item.done",
+            orjson.dumps(
+                {
+                    "output_index": 0,
+                    "item": {"id": "x1", "type": "custom_tool_call", "name": "x"},
+                }
+            ).decode(),
+        )
+    ) == ()
+    assert assembler.failure is None
+    assert len(assembler.opaque_payloads) == 1
+    warning = assembler.response_warnings[0]
+    assert warning.code == "opaque-response-skipped"
+    assert warning.source_format == "openai-responses"
+    assert warning.field_path == "output[0]"
+
+
 def test_responses_incomplete_maps_to_max_tokens() -> None:
     # `.dev/docs/anthropic-responses-bridge/spec.md` fixes this direction.
     assembler = ResponsesAssembler()
@@ -514,7 +544,44 @@ def test_responses_tool_call_sets_the_tool_use_stop_reason() -> None:
     assert assembler.terminal.stop_reason == "tool_use"
 
 
-def test_malformed_tool_arguments_are_kept_rather_than_dropped() -> None:
+def test_a_message_item_with_multiple_content_parts_keeps_block_cardinality() -> None:
+    assembler = ResponsesAssembler()
+    assembler.push(
+        SseEvent(
+            "response.output_item.added",
+            orjson.dumps(
+                {"output_index": 0, "item": {"id": "i1", "type": "message"}}
+            ).decode(),
+        )
+    )
+    blocks = assembler.push(
+        SseEvent(
+            "response.output_item.done",
+            orjson.dumps(
+                {
+                    "output_index": 0,
+                    "item": {
+                        "id": "i1",
+                        "type": "message",
+                        "status": "completed",
+                        "content": [
+                            {"type": "output_text", "text": "first"},
+                            {"type": "output_text", "text": "second"},
+                        ],
+                    },
+                }
+            ).decode(),
+        )
+    )
+
+    assert [block.payload for block in blocks] == [
+        {"type": "text", "text": "first"},
+        {"type": "text", "text": "second"},
+    ]
+    assert [block.index for block in blocks] == [0, 1]
+
+
+def test_malformed_tool_arguments_are_rejected_at_the_semantic_seam() -> None:
     assembler = ResponsesAssembler()
     assembler.push(SseEvent("response.output_item.added", orjson.dumps(
         {"item": {"id": "i1", "type": "function_call", "call_id": "c", "name": "Read"}}
@@ -522,13 +589,130 @@ def test_malformed_tool_arguments_are_kept_rather_than_dropped() -> None:
     assembler.push(SseEvent("response.function_call_arguments.delta", orjson.dumps(
         {"item_id": "i1", "delta": "{not json"}
     ).decode()))
-    blocks = assembler.push(SseEvent("response.output_item.done", orjson.dumps(
-        {"item": {"id": "i1", "type": "function_call", "call_id": "c", "name": "Read"}}
-    ).decode()))
-    assert blocks[0].payload["input"] == {"__raw": "{not json"}
+    with pytest.raises(TranslationRefused, match="arguments must be valid JSON"):
+        assembler.push(
+            SseEvent(
+                "response.output_item.done",
+                orjson.dumps(
+                    {
+                        "item": {
+                            "id": "i1",
+                            "type": "function_call",
+                            "call_id": "c",
+                            "name": "Read",
+                        }
+                    }
+                ).decode(),
+            )
+        )
 
 
 # --- one summary, two ways in ----------------------------------------------
+
+
+def test_truncated_tool_arguments_wait_for_terminal_hand_over_decision() -> None:
+    assembler = ResponsesAssembler()
+    _responses_item(assembler, 0, {"type": "message", "id": "m1", "status": "completed"})
+    assembler.push(
+        SseEvent(
+            "response.output_item.added",
+            orjson.dumps(
+                {
+                    "output_index": 1,
+                    "item": {
+                        "id": "fc1",
+                        "type": "function_call",
+                        "call_id": "c1",
+                        "name": "Bash",
+                    },
+                }
+            ).decode(),
+        )
+    )
+    assembler.push(
+        SseEvent(
+            "response.function_call_arguments.delta",
+            orjson.dumps({"output_index": 1, "delta": "{not json"}).decode(),
+        )
+    )
+
+    assert (
+        assembler.push(
+            SseEvent(
+                "response.output_item.done",
+                orjson.dumps(
+                    {
+                        "output_index": 1,
+                        "item": {
+                            "id": "fc1",
+                            "type": "function_call",
+                            "call_id": "c1",
+                            "name": "Bash",
+                            "status": "incomplete",
+                        },
+                    }
+                ).decode(),
+            )
+        )
+        == ()
+    )
+    assert assembler.failure is None
+    assert assembler.push(
+        SseEvent(
+            "response.incomplete",
+            orjson.dumps(
+                {"response": {"incomplete_details": {"reason": "max_output_tokens"}}}
+            ).decode(),
+        )
+    ) == ()
+
+
+def test_first_truncated_tool_call_does_not_raise_before_terminal() -> None:
+    assembler = ResponsesAssembler()
+    assembler.push(
+        SseEvent(
+            "response.output_item.added",
+            orjson.dumps(
+                {
+                    "output_index": 0,
+                    "item": {
+                        "id": "fc0",
+                        "type": "function_call",
+                        "call_id": "c0",
+                        "name": "Bash",
+                    },
+                }
+            ).decode(),
+        )
+    )
+    assembler.push(
+        SseEvent(
+            "response.function_call_arguments.delta",
+            orjson.dumps({"output_index": 0, "delta": "{not json"}).decode(),
+        )
+    )
+
+    assert (
+        assembler.push(
+            SseEvent(
+                "response.output_item.done",
+                orjson.dumps(
+                    {
+                        "output_index": 0,
+                        "item": {
+                            "id": "fc0",
+                            "type": "function_call",
+                            "call_id": "c0",
+                            "name": "Bash",
+                            "status": "incomplete",
+                        },
+                    }
+                ).decode(),
+            )
+        )
+        == ()
+    )
+    assert assembler.failure is None
 
 
 def test_a_reply_summarises_the_same_whether_it_streamed_or_arrived_whole() -> None:
@@ -823,6 +1007,29 @@ def _terminal(assembler: ResponsesAssembler, reason: str) -> tuple[CompletedBloc
             orjson.dumps({"response": {"incomplete_details": {"reason": reason}}}).decode(),
         )
     )
+
+
+def test_unknown_only_response_does_not_fake_a_clean_end_turn() -> None:
+    assembler = ResponsesAssembler()
+
+    assert _responses_item(
+        assembler,
+        0,
+        {"type": "future_output_item", "status": "completed"},
+    ) == ()
+    assert (
+        assembler.push(
+            SseEvent(
+                "response.completed",
+                orjson.dumps({"response": {"status": "completed"}}).decode(),
+            )
+        )
+        == ()
+    )
+
+    assert assembler.terminal.stop_reason == "incomplete"
+    assert assembler.response_losses
+    assert assembler.response_warnings
 
 
 def test_an_incomplete_expected_search_after_a_block_never_enters_cut_short() -> None:

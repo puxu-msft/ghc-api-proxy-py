@@ -148,7 +148,7 @@ def test_a_successful_request_writes_one_complete_structured_record(tmp_path: Pa
     }
     assert record | {"at": "ignored", "duration_s": "ignored"} == {
         "at": "ignored",
-        "status": "ok",
+        "status": "retry",
         "method": "POST",
         "path": "/v1/messages",
         "request_id": "req-1",
@@ -214,6 +214,7 @@ def test_a_successful_request_writes_one_complete_structured_record(tmp_path: Pa
     assert "req-1" not in emitted[0][0]
     assert emitted[0][1] == record["status"]
     assert "gpt-5.1-codex[xhigh]" in emitted[0][0]
+    assert "POST /v1/messages" not in emitted[0][0]
 
 
 def test_legacy_tool_summary_does_not_fabricate_native_terminal_facts(

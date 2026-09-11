@@ -21,7 +21,7 @@ from httpcore2._async.interfaces import AsyncConnectionInterface
 from httpx2._utils import get_environment_proxies
 from openai import AsyncOpenAI
 
-from app.config.paths import expand_user_path, user_data_path
+from app.config.paths import debug_capture_rules_path, expand_user_path, user_data_path
 from app.config.schema import (
     CodebuddyProviderConfig,
     GithubCopilotProviderConfig,
@@ -73,6 +73,7 @@ from app.model_provider.openai_compatible import (
     OpenAICompatibleClient,
     OpenAICompatibleProvider,
 )
+from app.observability.debug_capture import DebugCaptureRuleStore
 from app.observability.raw_capture import RawCaptureStore
 from app.pipeline.events import SubscriberRegistry
 from app.pipeline.model_resolution import inspect_mappings
@@ -567,13 +568,12 @@ def build_chain(
 
     `http_client` is still taken because the caller built one to resolve base URLs before this ran, and closing it stays the caller's business. It is no longer what the providers use.
     """
-    # Everything that can be rejected without constructing anything, before anything is constructed. Two of these used to sit *after* the provider loop — `resolve_default_name` inside the `Chain(...)` call, and the registry's own name validation — so a one-letter typo in `fallback_model_provider` built one client per provider and then threw, leaving them with no reference and no way to close them. `build_chain` is synchronous and `AsyncClient.aclose()` is not, so there is no cleanup to write here; moving the checks in front of the allocation is the fix that a sync function can actually make.
+    # Everything that can be rejected without constructing anything, before anything is constructed. `resolve_default_name` used to sit *after* the provider loop, so a typo in `default_model_provider` built one client per provider and then threw, leaving them with no reference and no way to close them. `build_chain` is synchronous and `AsyncClient.aclose()` is not, so there is no cleanup to write here; moving the check in front of the allocation is the fix that a sync function can actually make.
     #
     # What that leaves: a failure *inside* the loop (an unreadable token path, say) still abandons the clients built so far. Those clients have never issued a request — nothing in this function does — so their connection pools are empty and no socket is open; what leaks is a Python object that the collector takes. That is why this is worth reordering rather than restructuring.
     default_name = resolve_default_name(config)
-    for chosen in (default_name, config.fallback_model_provider):
-        if chosen and chosen not in config.model_providers:
-            raise ProviderNotConfigured(chosen)
+    if default_name not in config.model_providers:
+        raise ProviderNotConfigured(default_name)
     supported_provider_types = {
         GITHUB_COPILOT_PROVIDER_TYPE,
         XINGCHEN_PROVIDER_TYPE,
@@ -637,7 +637,7 @@ def build_chain(
     for problem in inspect_mappings(
         config.model_mappings,
         frozenset(config.model_providers),
-        fallback=config.fallback_model_provider,
+        default_provider=default_name,
     ):
         logger.warning("model_mappings %s: %s", problem.kind, problem.detail)
 
@@ -685,22 +685,26 @@ def build_chain(
             config.hook_fix_anthropic_request.cache_control_sanitize
         ),
         repair_minted_reasoning_ids_enabled=config.hook_fix_responses_request.repair_minted_reasoning_ids,
+        reasoning_encrypted_include=config.hook_fix_responses_request.reasoning_encrypted_include,
     )
 
     raw_capture_config = config.observability.raw_capture
-    raw_capture = None
-    if raw_capture_config.enabled:
-        raw_capture_root = (
-            expand_user_path(raw_capture_config.directory)
-            if raw_capture_config.directory.strip()
-            else user_data_path() / "raw-captures"
-        )
-        raw_capture = RawCaptureStore(
-            raw_capture_root,
-            compression_level=raw_capture_config.compression_level,
-            max_file_bytes=raw_capture_config.max_file_bytes,
-            max_total_bytes=raw_capture_config.max_total_bytes,
-        )
+    raw_capture_root = (
+        expand_user_path(raw_capture_config.directory)
+        if raw_capture_config.directory.strip()
+        else user_data_path() / "raw-captures"
+    )
+    rules_database = (
+        expand_user_path(raw_capture_config.rules_database)
+        if raw_capture_config.rules_database.strip()
+        else debug_capture_rules_path()
+    )
+    raw_capture = RawCaptureStore(
+        raw_capture_root,
+        compression_level=raw_capture_config.compression_level,
+        max_file_bytes=raw_capture_config.max_file_bytes,
+    )
+    debug_capture_rules = DebugCaptureRuleStore(rules_database)
 
     return Chain(
         config=config,
@@ -711,7 +715,6 @@ def build_chain(
         providers=ProviderRegistry(
             providers,
             default=default_name,
-            fallback=config.fallback_model_provider,
         ),
         translators=default_registry(config.model_translation),
         subscribers=subscriber_registry.freeze(),
@@ -720,6 +723,7 @@ def build_chain(
         # One limiter per provider: a limit on one upstream must not throttle another.
         rate_limiters={name: RateLimiter(config.reactive_rate_limiter) for name in providers},
         raw_capture=raw_capture,
+        debug_capture_rules=debug_capture_rules,
     )
 
 

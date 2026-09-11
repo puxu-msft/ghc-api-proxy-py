@@ -174,6 +174,19 @@ def test_compat_migration_warns_and_preserves_explicit_new_keys() -> None:
     assert migrated["timeouts"] == {"stream_idle": 90, "response_header": 120}
 
 
+def test_fallback_provider_compatibility_migrates_to_default_provider() -> None:
+    with pytest.warns(DeprecationWarning, match="fallback_model_provider"):
+        migrated = migrate_compat(
+            {
+                "fallback_model_provider": "xingchen",
+                "default_model_provider": "ghc",
+            }
+        )
+
+    assert migrated["default_model_provider"] == "ghc"
+    assert "fallback_model_provider" not in migrated
+
+
 def test_settings_are_frozen() -> None:
     settings = AppSettings()
 

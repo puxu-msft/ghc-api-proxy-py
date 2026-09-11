@@ -71,10 +71,14 @@ def test_a_server_error_is_retryable_and_named_as_one(status: int) -> None:
 
 def test_a_429_carries_its_retry_after() -> None:
     """The number that decides how long to wait. Lost entirely when the SDK error was flattened."""
-    normalized = normalize_upstream_error(status_error(429, headers={"retry-after": "12"}))
+    sent = b'{"model":"gpt-model"}'
+    normalized = normalize_upstream_error(
+        status_error(429, headers={"retry-after": "12"}, sent=sent)
+    )
 
     assert isinstance(normalized, UpstreamRateLimit)
     assert normalized.retry_after == 12.0
+    assert normalized.sent == sent
     assert classify(normalized) is Disposition.RETRY
 
 
@@ -86,18 +90,48 @@ def test_a_401_is_named_as_a_token_problem_rather_than_a_server_error() -> None:
 
 
 def test_a_timeout_becomes_a_network_retry() -> None:
-    request = httpx2.Request("POST", "https://upstream.example/responses")
+    request = httpx2.Request(
+        "POST",
+        "https://upstream.example/responses",
+        content=b'{"model":"gpt-model"}',
+    )
     normalized = normalize_upstream_error(openai.APITimeoutError(request=request))
 
     assert isinstance(normalized, UpstreamTimeout)
     assert reason_for(normalized) is RetryReason.NETWORK
+    assert normalized.sent == b'{"model":"gpt-model"}'
+    httpx_timeout = normalize_upstream_error(
+        httpx2.ReadTimeout("slow", request=request)
+    )
+    assert isinstance(httpx_timeout, UpstreamTimeout)
+    assert httpx_timeout.sent == b'{"model":"gpt-model"}'
+
+
+def test_normalized_request_evidence_distinguishes_observed_empty_body_from_absence() -> None:
+    observed_request = httpx2.Request(
+        "POST",
+        "https://upstream.example/responses",
+        content=b"",
+    )
+    observed = normalize_upstream_error(
+        httpx2.ReadTimeout("slow", request=observed_request)
+    )
+    absent = normalize_upstream_error(httpx2.ReadTimeout("slow"))
+
+    assert isinstance(observed, UpstreamTimeout)
+    assert (observed.sent, observed.sent_observed) == (b"", True)
+    assert isinstance(absent, UpstreamTimeout)
+    assert (absent.sent, absent.sent_observed) == (b"", False)
 
 
 def test_a_transport_failure_becomes_a_network_retry() -> None:
-    normalized = normalize_upstream_error(httpx2.ConnectError("refused"))
+    sent = b'{"model":"gpt-model"}'
+    request = httpx2.Request("POST", "https://upstream.example/responses", content=sent)
+    normalized = normalize_upstream_error(httpx2.ConnectError("refused", request=request))
 
     assert isinstance(normalized, UpstreamError)
     assert normalized.status_code is None
+    assert normalized.sent == sent
     assert reason_for(normalized) is RetryReason.NETWORK
 
 

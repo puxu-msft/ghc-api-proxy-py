@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from typing import Any, cast
 
 from app.pipeline.translation_driver.content import BlockKind, ContentBlock, SemanticMessage
+from app.pipeline.translation_driver.options import TranslationOptions
 from app.pipeline.translation_driver.reasoning import (
     ANTHROPIC_EFFORTS,
     EFFORT_LADDER,
@@ -34,6 +35,7 @@ from app.pipeline.translation_driver.semantic import (
 from app.pipeline.translation_driver.tool_choice import intent_from_anthropic_tool_choice
 
 WIRE_FORMAT = "anthropic-messages"
+CHAT_COMPLETIONS_WIRE_FORMAT = "openai-chat-completions"
 RESPONSES_WIRE_FORMAT = "openai-responses"
 
 _PASSTHROUGH_KEYS = frozenset(
@@ -359,9 +361,13 @@ def _message_from_anthropic(raw: Mapping[str, Any]) -> SemanticMessage:
 def from_anthropic_messages(
     payload: Mapping[str, Any],
     *,
+    options: TranslationOptions | None = None,
     source_headers: Mapping[str, str] | None = None,
     translated: bool = False,
 ) -> SemanticRequest:
+    if options is not None:
+        source_headers = options.source_headers
+        translated = options.translated
     blocks, problem = system_blocks_from_value(payload.get("system"))
     conversion = Conversion()
     thinking_effort, nested_extensions = read_anthropic_thinking_effort(
@@ -652,8 +658,13 @@ def _apply_responses_thinking(
 
 
 def to_anthropic_messages(
-    request: SemanticRequest, target_model: TranslationTarget | None = None
+    request: SemanticRequest,
+    target_model: TranslationTarget | None = None,
+    *,
+    options: TranslationOptions | None = None,
 ) -> dict[str, Any]:
+    if options is not None and target_model is None:
+        target_model = options.target
     target = target_model or TranslationTarget()
     messages: list[dict[str, Any]] = []
     for message in request.messages:
@@ -686,7 +697,26 @@ def to_anthropic_messages(
     _restore_thinking(payload, request)
     _apply_responses_thinking(payload, request, target)
     _restore_tool_choice(payload, request)
-    payload.update(request.extensions_for(WIRE_FORMAT))
+    chat_stop = request.unknown_fields.get("stop")
+    chat_stop_supported = request.source_format == CHAT_COMPLETIONS_WIRE_FORMAT and (
+        isinstance(chat_stop, str)
+        or (
+            isinstance(chat_stop, list)
+            and all(
+                isinstance(item, str) for item in cast(list[Any], chat_stop)
+            )
+        )
+    )
+    if chat_stop_supported:
+        payload["stop_sequences"] = (
+            [chat_stop] if isinstance(chat_stop, str) else list(cast(list[Any], chat_stop))
+        )
+    payload.update(
+        request.unknown_fields_for(
+            WIRE_FORMAT,
+            excluded=frozenset({"stop"}) if chat_stop_supported else frozenset(),
+        )
+    )
     return payload
 
 

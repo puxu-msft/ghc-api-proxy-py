@@ -8,6 +8,7 @@ from app.pipeline.model_resolution import (
     find_alias_cycles,
     inspect_mappings,
     resolve_against_catalog,
+    resolve_with_catalogs,
     split_provider_qualifier,
 )
 
@@ -38,6 +39,151 @@ def resolve_full(
 
 def resolve(name: str, mappings: dict[str, str] | None = None) -> str:
     return resolve_full(name, mappings).resolved
+
+
+def resolve_catalog(
+    name: str,
+    mappings: dict[str, str],
+    *,
+    available: dict[str, frozenset[str]],
+    default: str = "A",
+):
+    return resolve_with_catalogs(
+        name,
+        mappings=mappings,
+        provider_names=frozenset(available),
+        available=available,
+        default_provider=default,
+    )
+
+
+def test_catalog_resolution_follows_an_unavailable_alias() -> None:
+    outcome = resolve_catalog(
+        "alias",
+        {"alias": "missing", "missing": "A/claude-opus-5"},
+        available={"A": frozenset({"claude-opus-5"})},
+    )
+
+    assert outcome is not None
+    assert outcome.provider == "A"
+    assert outcome.resolved == "claude-opus-5"
+    assert outcome.hops == 2
+
+
+def test_bare_mapping_target_tries_the_source_provider_then_default() -> None:
+    outcome = resolve_catalog(
+        "A/alias",
+        {"A/alias": "shared"},
+        available={"A": frozenset(), "B": frozenset({"shared"})},
+        default="B",
+    )
+
+    assert outcome is not None
+    assert outcome.provider == "B"
+    assert outcome.resolved == "shared"
+
+
+def test_qualified_request_does_not_fall_back_to_the_default_catalog() -> None:
+    outcome = resolve_catalog(
+        "A/shared",
+        {},
+        available={"A": frozenset(), "B": frozenset({"shared"})},
+        default="B",
+    )
+
+    assert outcome is None
+
+
+def test_qualified_request_does_not_use_a_bare_mapping_key() -> None:
+    outcome = resolve_catalog(
+        "A/alias",
+        {"alias": "B/shared"},
+        available={
+            "A": frozenset({"alias"}),
+            "B": frozenset({"shared"}),
+        },
+        default="B",
+    )
+
+    assert outcome is not None
+    assert outcome.provider == "A"
+    assert outcome.resolved == "alias"
+
+
+def test_qualified_mapping_target_does_not_fall_back_to_default_catalog() -> None:
+    outcome = resolve_catalog(
+        "alias",
+        {"alias": "A/shared"},
+        available={"A": frozenset(), "B": frozenset({"shared"})},
+        default="B",
+    )
+
+    assert outcome is None
+
+
+def test_bare_request_tries_its_default_provider_qualified_mapping_key() -> None:
+    outcome = resolve_catalog(
+        "shared",
+        {"B/shared": "A/claude-opus-5"},
+        available={"A": frozenset({"claude-opus-5"}), "B": frozenset()},
+        default="B",
+    )
+
+    assert outcome is not None
+    assert outcome.provider == "A"
+    assert outcome.resolved == "claude-opus-5"
+
+
+def test_qualified_request_retries_with_the_default_provider_mapping_key() -> None:
+    outcome = resolve_catalog(
+        "A/shared",
+        {"B/shared": "B/claude-opus-5"},
+        available={"A": frozenset(), "B": frozenset({"claude-opus-5"})},
+        default="B",
+    )
+
+    assert outcome is not None
+    assert outcome.provider == "B"
+    assert outcome.resolved == "claude-opus-5"
+
+
+def test_a_failed_qualified_mapping_does_not_try_the_default_provider_key() -> None:
+    outcome = resolve_catalog(
+        "A/shared",
+        {
+            "A/shared": "gone",
+            "B/shared": "B/claude-opus-5",
+        },
+        available={"A": frozenset(), "B": frozenset({"claude-opus-5"})},
+        default="B",
+    )
+
+    assert outcome is None
+
+
+def test_a_failed_bare_mapping_does_not_try_the_default_qualified_key() -> None:
+    outcome = resolve_catalog(
+        "shared",
+        {
+            "shared": "gone",
+            "A/shared": "A/claude-opus-5",
+        },
+        available={"A": frozenset({"claude-opus-5"})},
+        default="A",
+    )
+
+    assert outcome is None
+
+
+def test_mapping_value_can_carry_a_format_suffix() -> None:
+    outcome = resolve_catalog(
+        "alias",
+        {"alias": "A/claude-opus-5@openai-responses"},
+        available={"A": frozenset({"claude-opus-5"})},
+    )
+
+    assert outcome is not None
+    assert outcome.format_name == "openai-responses"
 
 
 # --- name resolution, unchanged by multi-provider routing ---------------------------------
@@ -290,14 +436,11 @@ def test_a_plain_chain_is_not_a_cycle() -> None:
 
 
 def test_an_unknown_provider_is_reported_with_what_will_happen_to_it() -> None:
-    with_fallback = inspect_mappings({"x": "typo/claude-opus-5"}, PROVIDERS, fallback="B")
-    without = inspect_mappings({"x": "typo/claude-opus-5"}, PROVIDERS)
-    assert [p.kind for p in with_fallback] == ["unknown-provider"]
-    assert [p.kind for p in without] == ["unknown-provider"]
-    # Same defect, different consequence — and the consequence is what the operator acts on.
-    # The quoted name is asserted, not a bare `B`: an independent verifier's first probe passed while the message said only "the fallback provider", because `B` happened to appear in the "configured: A, B" list further along the same string.
-    assert "fallback provider 'B'" in with_fallback[0].detail
-    assert "REFUSED" in without[0].detail
+    with_default = inspect_mappings(
+        {"x": "typo/claude-opus-5"}, PROVIDERS, default_provider="B"
+    )
+    assert [p.kind for p in with_default] == ["unknown-provider"]
+    assert "default provider 'B'" in with_default[0].detail
 
 
 def test_an_empty_model_name_is_reported() -> None:

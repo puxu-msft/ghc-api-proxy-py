@@ -21,6 +21,8 @@ from app.model_provider import ModelDescriptor, ModelEndpoint
 from app.pipeline.delivery.assembling import Terminal
 from app.pipeline.response_observation import ResponseObservation, ResponsesObserver
 from app.pipeline.retry import RetryLedger
+from app.pipeline.translation_driver.options import TranslationOptions
+from app.pipeline.translation_driver.semantic import SemanticRequest, TranslationTarget
 
 
 class WireFormat(StrEnum):
@@ -96,6 +98,14 @@ class RequestContext:
     route_reason: str = ""
     # What the catalog publishes about the model this attempt is going to, carried straight off the route so a subscriber reads the same descriptor routing decided on. `None` means routing has not run, or ran against a provider that does not describe the model — a subscriber reading a capability off it must treat that as "the catalog said nothing", never as permission.
     model_descriptor: ModelDescriptor | None = None
+
+    # Request-scoped translation facts that the Responses response half cannot
+    # recover from upstream output items alone.
+    client_search_tool: str = ""
+    hosted_web_search_expected: bool = False
+    semantic_request: SemanticRequest | None = None
+    translation_target: TranslationTarget | None = None
+    translation_options: TranslationOptions | None = None
 
     attempts: list[Attempt] = field(default_factory=lambda: list[Attempt]())
 

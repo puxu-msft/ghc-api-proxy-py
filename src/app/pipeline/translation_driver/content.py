@@ -115,3 +115,4 @@ class SemanticMessage:
 
     role: str
     blocks: tuple[ContentBlock, ...] = ()
+    raw: Mapping[str, Any] = field(default_factory=lambda: dict[str, Any]())

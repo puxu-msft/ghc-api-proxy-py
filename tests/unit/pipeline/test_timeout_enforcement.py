@@ -5,14 +5,22 @@ The defect being fixed is a configured timeout that never takes effect, which lo
 
 import asyncio
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import httpx2
 import pytest
 
 from app.model_provider import ModelDescriptor, ModelEndpoint
+from app.observability.raw_capture import (
+    RawCaptureStore,
+    activate_pending_upstream_capture,
+    iter_raw_capture_records,
+    observe_active_upstream_request,
+)
 from app.pipeline.direct_driver import AnthropicMessagesDriver, RetryBudget
 from app.pipeline.events import SubscriberRegistry
+from app.pipeline.exceptions import UpstreamTimeout
 from app.pipeline.request import RequestContext, WireFormat
 
 DESCRIPTOR = ModelDescriptor(
@@ -72,6 +80,50 @@ class SlowProvider:
     async def count_tokens(self, payload: Any, *, descriptor: ModelDescriptor) -> httpx2.Response:
         # Present so the fake really satisfies the protocol. Nothing here counts tokens, and a silent stub would let a test think it had.
         raise NotImplementedError("this fake does not count tokens")
+
+
+class FailingProvider(SlowProvider):
+    def __init__(self, error: UpstreamTimeout) -> None:
+        super().__init__(delay=0.0)
+        self._error = error
+
+    async def send(
+        self,
+        endpoint: ModelEndpoint,
+        payload: Any,
+        *,
+        descriptor: ModelDescriptor,
+        stream: bool = False,
+        extra_headers: Any = None,
+        interaction_id: str | None = None,
+    ) -> httpx2.Response:
+        del endpoint, payload, descriptor, stream, extra_headers, interaction_id
+        self.calls += 1
+        raise self._error
+
+
+class BoundarySlowProvider(SlowProvider):
+    async def send(
+        self,
+        endpoint: ModelEndpoint,
+        payload: Any,
+        *,
+        descriptor: ModelDescriptor,
+        stream: bool = False,
+        extra_headers: Any = None,
+        interaction_id: str | None = None,
+    ) -> httpx2.Response:
+        del endpoint, payload, descriptor, stream, extra_headers, interaction_id
+        self.calls += 1
+        request = httpx2.Request(
+            "POST",
+            "https://stub.invalid/v1/messages",
+            content=b"transport-boundary-body",
+        )
+        with activate_pending_upstream_capture():
+            observe_active_upstream_request(request)
+            await asyncio.sleep(self._delay)
+        return httpx2.Response(200, json={})
 
 
 def context() -> RequestContext:
@@ -145,6 +197,93 @@ async def test_the_header_guard_stops_an_upstream_that_never_answers() -> None:
     outcome = await driver_under_test.run(context())
     assert outcome.succeeded is False
     assert "no response headers within 1s" in str(outcome.error)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sent_observed", "expected_bodies"),
+    [(True, [(0, b"")]), (False, [])],
+)
+async def test_error_fallback_distinguishes_observed_empty_body_from_absent_evidence(
+    tmp_path: Path,
+    sent_observed: bool,
+    expected_bodies: list[tuple[int, bytes]],
+) -> None:
+    store = RawCaptureStore(tmp_path)
+    capture = store.start(
+        session_id="error-session",
+        agent_id="error-agent",
+        request_id=f"error-request-{sent_observed}",
+        method="POST",
+        path="/v1/messages",
+    )
+    request = context()
+    request.extras["raw_capture"] = capture
+    provider = FailingProvider(
+        UpstreamTimeout(
+            "injected provider failure",
+            sent=b"",
+            sent_observed=sent_observed,
+        )
+    )
+
+    outcome = await driver(provider, deadline=0).run(request)
+    capture.finish(status_code=None, complete=True)
+    store.flush()
+
+    assert outcome.succeeded is False
+    [capture_path] = tmp_path.glob("session-*/agent-*.cborseq.zst")
+    assert [
+        (record["attempt"], record["body"])
+        for record in iter_raw_capture_records(capture_path)
+        if record["event"] == "upstream.request.body"
+    ] == expected_bodies
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_header_timeout_keeps_transport_boundary_body_and_resets_scope(
+    tmp_path: Path,
+) -> None:
+    store = RawCaptureStore(tmp_path)
+    capture = store.start(
+        session_id="timeout-session",
+        agent_id="timeout-agent",
+        request_id="timeout-request",
+        method="POST",
+        path="/v1/messages",
+    )
+    request = context()
+    request.extras["raw_capture"] = capture
+    provider = BoundarySlowProvider(delay=5.0)
+    driver_under_test = AnthropicMessagesDriver(
+        provider,
+        SubscriberRegistry[RequestContext]().freeze(),
+        budget=RetryBudget(max_total=0),
+        response_header_timeout=1,
+    )
+
+    outcome = await driver_under_test.run(request)
+    with activate_pending_upstream_capture():
+        observe_active_upstream_request(
+            httpx2.Request(
+                "POST",
+                "https://stub.invalid/after-timeout",
+                content=b"must-not-leak-after-timeout",
+            )
+        )
+    capture.finish(status_code=None, complete=True)
+    store.flush()
+
+    assert outcome.succeeded is False
+    assert "no response headers within 1s" in str(outcome.error)
+    [capture_path] = tmp_path.glob("session-*/agent-*.cborseq.zst")
+    assert [
+        record["body"]
+        for record in iter_raw_capture_records(capture_path)
+        if record["event"] == "upstream.request.body"
+    ] == [b"transport-boundary-body"]
+    store.close()
 
 
 @pytest.mark.asyncio

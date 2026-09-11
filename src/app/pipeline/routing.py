@@ -18,7 +18,6 @@ from app.model_provider import (
     ModelDescriptor,
     ModelEndpoint,
     ProviderRegistry,
-    UnknownModel,
 )
 from app.pipeline.model_resolution import (
     QUALIFIER_SEPARATOR,
@@ -27,7 +26,7 @@ from app.pipeline.model_resolution import (
     ProviderOrigin,
     canonical,
     discover_provider,
-    resolve_against_catalog,
+    resolve_with_catalogs,
     split_provider_qualifier,
 )
 from app.pipeline.request import (
@@ -116,30 +115,9 @@ class ProviderChoice:
     hops: int = 0
 
 
-def _fallback_name(providers: ProviderRegistry, subject: str) -> str:
-    """The configured fallback, or a refusal that names the thing actually at fault.
-
-    Refusing rather than falling back to the default is the user's ruling and the fail-closed direction: an unrecognised qualifier means the operator *did* express an intent and got it wrong, so serving the request from wherever the default happens to point would answer a question nobody asked, on an account nobody chose. Spec §5.3.
-
-    `subject` is a phrase, not a bare name, because the two callers have different culprits. On the request side the client's own model name carries the bad prefix. On the configuration side it is the mapping **value** — and quoting the key there would be false in the same way §5.2 describes: it sends an operator to check whether the alias is misspelled when the misspelling is on the other side of the colon.
-    """
-    name = providers.fallback_name
-    if not name:
-        configured = ", ".join(sorted(providers.names)) or "none"
-        raise RoutingError(
-            f"{subject} names a model provider this deployment does not configure, "
-            f"and no `fallback_model_provider` is set to catch it "
-            f"(configured providers: {configured})"
-        )
-    return name
-
-
-def _unrecognised_in_mapping(discovery: ProviderDiscovery) -> str:
-    """How to describe a mapping entry whose value names an unconfigured provider."""
-    head = discovery.value.partition(QUALIFIER_SEPARATOR)[0]
-    if discovery.matched_key:
-        return f"mapping value {discovery.value!r} (for key {discovery.matched_key!r}), whose {head!r}"
-    return f"{discovery.value!r}, whose {head!r}"
+def _fallback_name(providers: ProviderRegistry) -> str:
+    """Use the default provider when a qualifier cannot be resolved."""
+    return providers.default_name
 
 
 def _choice_from_discovery(
@@ -151,7 +129,7 @@ def _choice_from_discovery(
     if discovery.origin == "qualified":
         provider_name = discovery.provider
     elif discovery.origin == "fallback":
-        provider_name = _fallback_name(providers, _unrecognised_in_mapping(discovery))
+        provider_name = _fallback_name(providers)
     else:
         provider_name = providers.default_name
     return ProviderChoice(
@@ -172,7 +150,7 @@ def choose_provider(
 ) -> ProviderChoice:
     """Decide which provider serves an inbound model name.
 
-    A mapping keyed by the complete request name wins first. A bare request with no direct match gets a second lookup prefixed by the default provider name; a qualified request gets one prefixed by the fallback provider name when configured. Together, those lookups let configuration redirect both an advertised provider-qualified model and a bare request that would otherwise go to the default provider. Otherwise a `provider/` prefix on the request itself wins outright — it is how an operator checks a provider by hand without editing configuration and restarting. Mapping values decide the remaining routes via `discover_provider`.
+    A mapping keyed by the complete request name wins first. A bare request with no direct match gets a second lookup prefixed by the default provider name; a qualified request gets one prefixed by that same default provider name. Together, those lookups let configuration redirect both an advertised provider-qualified model and a bare request that would otherwise go to the default provider. Otherwise a `provider/` prefix on the request itself wins outright — it is how an operator checks a provider by hand without editing configuration and restarting. Mapping values decide the remaining routes via `discover_provider`.
 
     When the request carries its own prefix and no complete-name mapping applies, the alias chain is still walked, but only for the name: a qualifier further down the chain cannot take the request away from the provider it explicitly asked for. Without that, `A/opus` with `opus: B/claude-opus-5` in the table would be served by B, which reads the priority backwards.
     """
@@ -199,9 +177,9 @@ def choose_provider(
                 requested=bare,
                 providers=providers,
             )
-    elif providers.fallback_name:
+    else:
         fallback_qualified_discovery = discover_provider(
-            f"{providers.fallback_name}{QUALIFIER_SEPARATOR}{bare}",
+            f"{providers.default_name}{QUALIFIER_SEPARATOR}{bare}",
             mappings=mappings,
             provider_names=providers.names,
         )
@@ -219,7 +197,7 @@ def choose_provider(
         return ProviderChoice(
             provider_name=explicit
             if recognised
-            else _fallback_name(providers, f"the requested model {model_name!r}"),
+            else _fallback_name(providers),
             origin="qualified" if recognised else "fallback",
             target=discovery.target,
             requested=bare,
@@ -228,6 +206,74 @@ def choose_provider(
         )
 
     return _choice_from_discovery(discovery, requested=bare, providers=providers)
+
+
+def _resolve_model_for_route(
+    requested_model: str,
+    *,
+    providers: ProviderRegistry,
+    mappings: Mapping[str, str],
+) -> tuple[ProviderChoice, ModelResolution, WireFormat | None, bool]:
+    bare_model, request_format = split_format_suffix(requested_model)
+    available = {
+        name: providers.get(name).available_ids for name in providers.names
+    }
+    resolution = resolve_with_catalogs(
+        bare_model,
+        mappings=mappings,
+        provider_names=providers.names,
+        available=available,
+        default_provider=providers.default_name,
+    )
+    if resolution is None:
+        discovery = discover_provider(
+            bare_model,
+            mappings=mappings,
+            provider_names=providers.names,
+        )
+        detail = (
+            f" after applying mapping value {discovery.value!r}"
+            if discovery.value
+            else ""
+        )
+        if discovery.value and QUALIFIER_SEPARATOR in discovery.value:
+            provider_name = discovery.value.partition(QUALIFIER_SEPARATOR)[0]
+            if provider_name not in providers.names:
+                detail += f" (provider {provider_name!r} is not configured)"
+        raise RoutingError(
+            f"no configured provider offers model {bare_model!r}{detail}"
+        )
+
+    mapped_format: WireFormat | None = None
+    if resolution.format_name:
+        try:
+            mapped_format = WireFormat(resolution.format_name)
+        except ValueError:
+            raise RoutingError(
+                f"unknown target format {resolution.format_name!r} in mapping "
+                f"for {resolution.matched_key!r}"
+            ) from None
+        if mapped_format not in FORMAT_ENDPOINTS:
+            raise RoutingError(
+                f"target format {resolution.format_name!r} in mapping for "
+                f"{resolution.matched_key!r} has no endpoint on this proxy"
+            )
+
+    choice = ProviderChoice(
+        provider_name=resolution.provider,
+        origin=resolution.origin,
+        target=resolution.target,
+        requested=resolution.requested,
+        matched_key=resolution.matched_key,
+        hops=resolution.hops,
+    )
+    model_resolution = ModelResolution(
+        requested=resolution.requested,
+        resolved=resolution.resolved,
+        matched_key=resolution.matched_key,
+        hops=resolution.hops,
+    )
+    return choice, model_resolution, request_format or mapped_format, request_format is not None
 
 
 type Serviceability = Literal["yes", "absent", "disabled", "unknown", "unroutable"]
@@ -298,23 +344,44 @@ def _report_for(
         return RouteReport(name, None, name, "default", "unroutable")
 
     try:
-        choice = choose_provider(bare, providers=providers, mappings=mappings)
+        choice, resolution, _, _ = _resolve_model_for_route(
+            bare,
+            providers=providers,
+            mappings=mappings,
+        )
     except RoutingError:
-        # The one shape with no provider at all: a qualifier naming an unconfigured provider, with no `fallback_model_provider` to catch it. Reported rather than omitted — a row that cannot be served is exactly what an operator opened this to find. Spec §4.2.2.
-        discovery = discover_provider(bare, mappings=mappings, provider_names=providers.names)
-        return RouteReport(name, None, discovery.target, "fallback", "unroutable")
+        # The one shape with no provider at all is unreachable after the
+        # default provider also became the unknown-qualifier fallback.
+        try:
+            choice = choose_provider(bare, providers=providers, mappings=mappings)
+        except RoutingError:
+            discovery = discover_provider(
+                bare,
+                mappings=mappings,
+                provider_names=providers.names,
+            )
+            return RouteReport(name, None, discovery.target, "fallback", "unroutable")
+        provider = providers.get(choice.provider_name)
+        available = provider.available_ids
+        disabled = provider.disabled_ids
+        if not available and not disabled:
+            serviceable: Serviceability = "unknown"
+        elif canonical(choice.target) in {canonical(model) for model in disabled}:
+            serviceable = "disabled"
+        else:
+            serviceable = "absent"
+        return RouteReport(
+            name,
+            provider.name,
+            choice.target,
+            choice.origin,
+            serviceable,
+        )
 
     provider = providers.get(choice.provider_name)
     # Read once each. `GithubCopilotProvider` rebuilds both sets on every access, and this function used to touch `available_ids` three times per row.
     available = provider.available_ids
     disabled = provider.disabled_ids
-    resolution = resolve_against_catalog(
-        choice.requested,
-        choice.target,
-        available=available,
-        matched_key=choice.matched_key,
-        hops=choice.hops,
-    )
     intended = choice.target if choice.target != resolution.resolved else ""
 
     if not available and not disabled:
@@ -360,28 +427,26 @@ def decide_route(
     providers: ProviderRegistry,
     mappings: Mapping[str, str],
 ) -> Route:
-    bare_model, explicit_format = split_format_suffix(requested_model)
-    choice = choose_provider(bare_model, providers=providers, mappings=mappings)
-    provider = providers.get(choice.provider_name)
-    resolution = resolve_against_catalog(
-        choice.requested,
-        choice.target,
-        available=provider.available_ids,
-        matched_key=choice.matched_key,
-        hops=choice.hops,
+    choice, resolution, selected_format, request_format_was_explicit = _resolve_model_for_route(
+        requested_model,
+        providers=providers,
+        mappings=mappings,
     )
-
+    provider = providers.get(choice.provider_name)
     descriptor = provider.describe(resolution.resolved)
     if descriptor is None:
-        raise UnknownModel(provider.name, resolution.resolved, choice.target)
+        raise RoutingError(
+            f"{provider.name} does not offer model {resolution.resolved!r} after "
+            f"applying `model_mappings` for {choice.requested!r}"
+        )
     if not descriptor.endpoints and not descriptor.unknown_endpoints:
         raise CapabilityMissing(provider.name, descriptor.id)
 
-    if explicit_format is not None:
-        endpoint = FORMAT_ENDPOINTS[explicit_format]
+    if selected_format is not None:
+        endpoint = FORMAT_ENDPOINTS[selected_format]
         if not descriptor.supports(endpoint):
             raise EndpointNotSupported(provider.name, descriptor.id, endpoint.value)
-        reason = "explicit_format"
+        reason = "explicit_format" if request_format_was_explicit else "mapped_format"
     else:
         inbound_endpoint = FORMAT_ENDPOINTS[inbound_format]
         if descriptor.supports(inbound_endpoint):

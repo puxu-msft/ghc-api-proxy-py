@@ -16,6 +16,7 @@ dependencies = [
     # See .dev/docs/httpx2-migration/plan.md.
     "anthropic>=1",
     "anyio",
+    "cbor2",
     "fastapi>=0.141",
     "httpx2[http2,socks,ws]>=2.12",
     "openai>=3",

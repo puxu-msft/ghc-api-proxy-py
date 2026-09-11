@@ -6,9 +6,10 @@ What is *not* here is deliberate. Rendering a failure as HTTP belongs to the edg
 """
 
 import asyncio
+import time
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import replace
 from typing import Any, cast
 from uuid import uuid4
 
@@ -20,7 +21,7 @@ from app.core.chain import Chain
 from app.model_provider import ModelDescriptor, ModelEndpoint, ModelProvider
 from app.models.anthropic import MessagesRequest
 from app.observability.metrics import BETA_FLAGS_STRIPPED
-from app.observability.raw_capture import RawRequestCapture
+from app.observability.raw_capture import RawRequestCapture, pending_upstream_capture
 from app.pipeline.anthropic_request_hook import fix_anthropic_request
 from app.pipeline.auto_mode_classifier import AutoModeVerdict, classify, log_hit, verdict_text
 from app.pipeline.count_tokens import (
@@ -36,6 +37,7 @@ from app.pipeline.delivery.formats.anthropic_messages_synthetic_reply import (
     failed_search_sse,
     query_from_request,
 )
+from app.pipeline.delivery_policy import assembler_for, delivery_buffer, framer_for
 from app.pipeline.direct_driver import (
     DRIVERS,
     EVENT_ATTEMPT_PREPARE,
@@ -43,11 +45,15 @@ from app.pipeline.direct_driver import (
     PROVIDER_BOUND_OBSERVER,
     DriverOutcome,
     LedgerBudget,
+    capture_failed_upstream_attempt,
 )
 from app.pipeline.exceptions import (
+    UpstreamError,
+    UpstreamRejected,
     UpstreamTimeout,
 )
-from app.pipeline.request import RequestContext, WireFormat
+from app.pipeline.handled import DeliveryPlan, HandledRequest
+from app.pipeline.request import FORMAT_ENDPOINTS, RequestContext, WireFormat
 from app.pipeline.request_headers import (
     apply_path_header_policy,
     strip_denied_beta_flags,
@@ -56,6 +62,7 @@ from app.pipeline.request_headers import (
 from app.pipeline.retry import RetryLedger
 from app.pipeline.routing import Route, apply_route, decide_route, translation_target
 from app.pipeline.subscribers.counting import COUNTING_ONLY
+from app.pipeline.translation_driver.options import TranslationOptions
 from app.pipeline.translation_driver.semantic import (
     ConversionFact,
     SemanticRequest,
@@ -66,23 +73,6 @@ from app.tokenization.admission import TokenAdmissionObservation
 from app.tokenization.scaling import scale_local_estimate
 from app.wire_json import dumps
 
-# Where request-translation facts are kept for the response half. Neither kind of Responses search call carries enough information to recover these decisions from the response itself.
-CLIENT_SEARCH_TOOL = "client_search_tool"
-HOSTED_WEB_SEARCH_EXPECTED = "hosted_web_search_expected"
-RESPONSE_CONVERSION_LOSSES = "response_conversion_losses"
-
-@dataclass(slots=True)
-class HandledRequest:
-    context: RequestContext
-    route: Route
-    outcome: DriverOutcome
-    # Written by this proxy rather than by an upstream. The route still names whichever upstream would have answered — that is what the console line reports — so the reply's own dialect has to be carried separately, or `dialect_for` would try to read Anthropic blocks with the
-    # Responses assembler.
-    synthesized: bool = False
-
-    @property
-    def response(self) -> httpx2.Response | None:
-        return self.outcome.response
 
 def ledger_for(context: RequestContext, chain: Chain) -> RetryLedger:
     """One budget for the whole client request, built on first use and kept on the request.
@@ -170,6 +160,13 @@ def _translate_with_facts(
     source_headers: Mapping[str, str],
 ) -> tuple[dict[str, Any], SemanticRequest]:
     target = translation_target(descriptor, chain.thinking_profiles)
+    options = TranslationOptions(
+        source_headers=source_headers,
+        translated=route.inbound_format is not route.target_format,
+        target=target,
+        model_translation=chain.config.model_translation,
+    )
+    context.translation_options = options
     try:
         translated, semantic = chain.translators.translate(
             context.payload,
@@ -177,12 +174,40 @@ def _translate_with_facts(
             target=route.target_format,
             target_model=target,
             source_headers=source_headers,
+            options=options,
         )
     except TranslationRefused as refusal:
         _keep_conversion_facts(context, refusal.facts)
         raise
     _keep_conversion_facts(context, semantic.conversion.facts)
     return translated, semantic
+
+
+def _reencode_target_payload(
+    chain: Chain,
+    context: RequestContext,
+    *,
+    payload: Mapping[str, Any],
+    source_format: WireFormat,
+    target_format: WireFormat,
+    model_id: str,
+) -> dict[str, Any]:
+    """Rebuild a changed target wire from the current post-prepare payload."""
+    options = context.translation_options
+    if options is None:
+        raise RuntimeError("translated attempt has no translation options")
+    semantic = chain.translators.decode(payload, source=source_format, options=options)
+    translated = chain.translators.encode(
+        semantic,
+        target=target_format,
+        options=options,
+    )
+    translated["model"] = model_id
+    context.semantic_request = semantic
+    context.client_search_tool = semantic.client_search_tool
+    context.hosted_web_search_expected = semantic.hosted_web_search_expected
+    _keep_conversion_facts(context, semantic.conversion.facts)
+    return translated
 
 
 async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[RequestContext], None] | None = None) -> HandledRequest:
@@ -223,19 +248,24 @@ async def handle(chain: Chain, context: RequestContext, on_routed: Callable[[Req
             source_headers,
         )
         context.payload = translated
-        if semantic.client_search_tool:
-            # Kept for the response half, which cannot recover it: a `tool_search_call` names no tool, so without this the model's search request has no name to come back under.
-            context.extras[CLIENT_SEARCH_TOOL] = semantic.client_search_tool
-        if semantic.hosted_web_search_expected:
-            # The same `web_search_call` spelling can be requested or unsolicited. Only the request translator knows which one this turn permits D6 to revive as a native pair.
-            context.extras[HOSTED_WEB_SEARCH_EXPECTED] = True
+        context.client_search_tool = semantic.client_search_tool
+        context.hosted_web_search_expected = semantic.hosted_web_search_expected
+        context.semantic_request = semantic
+        context.translation_target = translation_target(descriptor, chain.thinking_profiles)
         if not semantic.conversion.lossless:
             context.extras["conversion_losses"] = list(semantic.conversion.losses)
 
     # The payload names the inbound model; upstream must be asked for the resolved one.
     context.payload["model"] = route.model_id
 
-    return await _drive(chain, context, provider, route, descriptor)
+    return await _drive(
+        chain,
+        context,
+        provider,
+        route,
+        descriptor,
+        on_routed=on_routed,
+    )
 
 
 async def replay_prepared(
@@ -263,6 +293,7 @@ async def replay_prepared(
         descriptor,
         prepared_payload=prepared_payload,
         reused_admission=reused_admission,
+        on_routed=on_routed,
     )
 
 
@@ -275,6 +306,7 @@ async def _drive(
     *,
     prepared_payload: Mapping[str, Any] | None = None,
     reused_admission: TokenAdmissionObservation | None = None,
+    on_routed: Callable[[RequestContext], None] | None = None,
 ) -> HandledRequest:
     timeouts = chain.config.upstream_request_timeouts
     # Read straight off the field it names. It used to be resolved against `response_header_overrides`, which is a different setting entirely: an operator capping the header wait for one model would have capped that model's whole attempt instead, cutting a long turn short in the name of a guard that was never asked for.
@@ -300,8 +332,57 @@ async def _drive(
         admission=chain.prompt_token_admission,
         prepared_payload=prepared_payload,
         reused_admission=reused_admission,
+        **driver_options,
     )
+    if route.translation_required:
+        source_target_format = route.target_format
+
+        def reencode_target_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+            target_format = context.target_format or route.target_format
+            return _reencode_target_payload(
+                chain,
+                context,
+                payload=payload,
+                source_format=source_target_format,
+                target_format=target_format,
+                model_id=route.model_id,
+            )
+
+        driver.configure_reencode_payload(reencode_target_payload)
     outcome = await driver.run(context)
+    if context.target_format is not None and context.target_format is not route.target_format:
+        route = replace(
+            route,
+            endpoint=FORMAT_ENDPOINTS[context.target_format],
+            target_format=context.target_format,
+            translation_required=context.inbound_format is not context.target_format,
+            reason="runtime_target_format_change",
+        )
+
+    def attach_delivery_plan(handled: HandledRequest) -> HandledRequest:
+        def build_plan(
+            on_passthrough_terminal_unit: Callable[[], None] | None,
+        ) -> DeliveryPlan:
+            return DeliveryPlan(
+                assembler=assembler_for(
+                    handled,
+                    hand_over_stop_reasons=frozenset(
+                        chain.config.upstream_request_retry.hand_over_stop_reasons
+                    ),
+                ),
+                buffer=delivery_buffer(chain),
+                framer=framer_for(
+                    handled,
+                    chain,
+                    message_id=context.id,
+                    model=context.resolved_model,
+                    on_passthrough_terminal_unit=on_passthrough_terminal_unit,
+                ),
+            )
+
+        handled.delivery_plan = build_plan
+        return handled
+
     if isinstance(outcome.error, WebSearchNotExecutable) and context.inbound_format is WireFormat.ANTHROPIC_MESSAGES:
         # Answered rather than failed. The client issues a search as its own sub-request, and on an HTTP error its main-conversation model calls the tool again — three times before it gave up, in the one case on record — while a search that cannot run will not start working on the third attempt. No client *mechanism* repeats a failed tool result, so the reply says so in the protocol's own words. (Whether the model repeats one anyway is unmeasured; see `anthropic_messages_synthetic_reply`.)
         #
@@ -312,13 +393,42 @@ async def _drive(
         # Reachable from a `/responses` request even after the search gate stopped judging one, so this is not a second lock on the same door. A model that only supports `/v1/messages` routes an inbound Responses request onto the Anthropic leg, where `to_anthropic_messages` assigns `tools` across **verbatim** — the bare declaration stays bare — and `builtin:server-tool-capability` refuses it because its prefix table catches the bare spelling too. Delivery then frames by the *client's* leg: streaming tore on `ValueError: no Responses item shape for block kind 'server_tool_use'`, and non-streaming was worse — a 200, logged `ok`, carrying an Anthropic message body to a Responses client with nothing anywhere saying so. Both measured 2026-08-30.
         #
         # Falling through leaves `outcome` carrying the refusal, which becomes an error envelope in the client's own format. That is the honest answer here: the synthesis exists to spare one specific client the repeat calls an HTTP error drew from it, and a client that cannot read the synthesis gains nothing from it.
-        return HandledRequest(
+        return attach_delivery_plan(HandledRequest(
             context=context,
             route=route,
             outcome=_answered_failed_search(context, route),
             synthesized=True,
+        ))
+    source_attempt = context.current_attempt
+    source_payload = (
+        deepcopy(source_attempt.payload) if source_attempt is not None else None
+    )
+    source_admission = (
+        source_attempt.token_admission if source_attempt is not None else None
+    )
+
+    async def reopen(replacing: Exception) -> HandledRequest | None:
+        del replacing
+        if chain.active_requests.draining:
+            return None
+        if source_payload is None or source_admission is None:
+            raise RuntimeError("upstream replay has no source attempt admission")
+        chain.rate_limiter_for(route.provider_name).note_failure()
+        return await replay_prepared(
+            chain,
+            context,
+            route,
+            source_payload,
+            source_admission,
+            on_routed,
         )
-    return HandledRequest(context=context, route=route, outcome=outcome)
+
+    return attach_delivery_plan(HandledRequest(
+        context=context,
+        route=route,
+        outcome=outcome,
+        reopen=reopen if source_payload is not None else None,
+    ))
 
 def _answered_failed_search(context: RequestContext, route: Route) -> DriverOutcome:
     """A reply this proxy writes, saying the search was attempted and did not run.
@@ -434,7 +544,7 @@ async def handle_count_tokens(
         await subscription.handler(context)
     _notify_provider_bound(context)
 
-    # One estimator per wire contract, and the calibration key follows it. The protocols' payload estimates stay separate so neither corrects the other with its own error; the same reason applies to the factor learnt from them. The idea came from `.dev/docs/archived-2604-rewrite/tokenization.md`, which the user ruled obsolete on 2026-08-20 — it is kept on the reasoning, not on that document's authority.
+    # One estimator per wire contract, and the calibration key follows it. The protocols' payload estimates stay separate so neither corrects the other with its own error; the same reason applies to the factor learnt from them. The idea came from `.dev/docs/token-counting/history/2604-rewrite/tokenization.md`, which the user ruled obsolete on 2026-08-20 — it is kept on the reasoning, not on that document's authority.
     protocol = route.target_format.value
     if route.target_format is WireFormat.ANTHROPIC_MESSAGES:
         protocol = "anthropic"
@@ -456,22 +566,79 @@ async def handle_count_tokens(
 
     async def ask_upstream(payload: Mapping[str, Any]) -> int:
         _check_count_deadline(deadline_at)
+        if context.extras.get("count_tokens_upstream_attempt_started") is True:
+            context.begin_attempt()
+        else:
+            context.extras["count_tokens_upstream_attempt_started"] = True
         capture = context.extras.get("raw_capture")
         attempt = context.current_attempt.index if context.current_attempt is not None else 0
+        started_at = time.monotonic()
+
+        def record_attempt(
+            *,
+            status_code: int | None,
+            body_bytes: int,
+            complete: bool,
+            error: BaseException | None = None,
+        ) -> dict[str, Any]:
+            attempts = context.extras.setdefault("count_tokens_body_attempts", [])
+            if not isinstance(attempts, list):
+                raise TypeError("count_tokens_body_attempts must be a list")
+            entry: dict[str, Any] = {
+                "attempt": attempt,
+                "status_code": status_code,
+                "started_at": started_at,
+                "ended_at": time.monotonic(),
+                "body_bytes": body_bytes,
+                "complete": complete,
+                "exception_module": (
+                    type(error).__module__ if error is not None else None
+                ),
+                "exception_type": (
+                    type(error).__qualname__ if error is not None else None
+                ),
+            }
+            cast(list[Any], attempts).append(entry)
+            return entry
+
         if isinstance(capture, RawRequestCapture):
             capture.upstream_attempt_start(attempt)
         try:
-            response = await provider.count_tokens(payload, descriptor=descriptor)
-        except BaseException:
+            with pending_upstream_capture(
+                capture if isinstance(capture, RawRequestCapture) else None,
+                attempt,
+            ):
+                response = await provider.count_tokens(payload, descriptor=descriptor)
+        except BaseException as error:
+            error_body = getattr(error, "body_bytes", b"")
+            error_observed = getattr(error, "body_observed", False)
+            record_attempt(
+                status_code=(
+                    error.status_code
+                    if isinstance(error, (UpstreamError, UpstreamRejected))
+                    else None
+                ),
+                body_bytes=(
+                    len(error_body)
+                    if isinstance(error_body, bytes) and error_observed
+                    else 0
+                ),
+                complete=False,
+                error=error,
+            )
             if isinstance(capture, RawRequestCapture):
+                capture_failed_upstream_attempt(capture, error, attempt=attempt)
                 capture.upstream_attempt_end(attempt, complete=False)
             raise
         if isinstance(capture, RawRequestCapture):
             capture.upstream_request_body(response.request.content, attempt=attempt)
             capture.upstream_response_start(response.status_code, attempt=attempt)
             capture.upstream_response_body(response.content, attempt=attempt)
-            capture.upstream_response_end(attempt=attempt)
-            capture.upstream_attempt_end(attempt, complete=True)
+        attempt_record = record_attempt(
+            status_code=response.status_code,
+            body_bytes=len(response.content),
+            complete=True,
+        )
         # Taken before the body is read and before the response is closed, so the count line can report the leg it actually flew. Without these a count answered by upstream and one estimated in this process render identically apart from the counter's name — same missing byte fields, same single protocol label — and the line's own convention is that a missing field means the exchange had nothing to put there.
         # What the leg's presence means is narrower than "upstream answered the count": it means upstream *responded*. A refusal or a transport failure never reaches here — `send_anthropic_count_tokens` raises it as a pipeline error — but a 200 whose body carries no usable `input_tokens` does, and then the raise below hands the count to the estimator with both legs already recorded. `↑…B ↓…B … provider(ghc-failed,local)` is the right reading of that: upstream was asked, upstream replied, and the reply could not be used.
         context.extras["count_tokens_upstream_protocol"] = response.http_version
@@ -480,11 +647,38 @@ async def handle_count_tokens(
         context.extras["count_tokens_upstream_response_bytes"] = len(response.content)
         if on_upstream_response is not None:
             on_upstream_response(context)
+        primary: BaseException | None = None
+        cleanup_error: BaseException | None = None
         try:
             response.raise_for_status()
             body = cast(dict[str, Any], response.json())
+        except BaseException as error:
+            primary = error
+            raise
         finally:
-            await response.aclose()
+            try:
+                await response.aclose()
+            except BaseException as error:
+                cleanup_error = error
+                attempt_record["complete"] = False
+                attempt_record["ended_at"] = time.monotonic()
+                attempt_record["exception_module"] = type(error).__module__
+                attempt_record["exception_type"] = type(error).__qualname__
+                if primary is not None:
+                    primary.add_note(
+                        f"upstream response cleanup failed: {type(error).__qualname__}"
+                    )
+            if isinstance(capture, RawRequestCapture):
+                capture.upstream_response_end(
+                    attempt=attempt,
+                    complete=cleanup_error is None,
+                )
+                capture.upstream_attempt_end(
+                    attempt,
+                    complete=cleanup_error is None,
+                )
+            if primary is None and cleanup_error is not None:
+                raise cleanup_error
         counted = body.get("input_tokens")
         if not isinstance(counted, int) or counted <= 0:
             raise ValueError("upstream count_tokens gave no positive input_tokens")

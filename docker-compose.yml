@@ -1,0 +1,31 @@
+services:
+  ghc-api-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghc-api-proxy:local
+    container_name: ghc-api-proxy
+    init: true
+    restart: unless-stopped
+    environment:
+      GHC_HOST: "0.0.0.0"
+      GHC_PORT: "4142"
+      GHC_UPSTREAM__TYPE: "generic"
+      GHC_LOG_LEVEL: "INFO"
+      GHC_HISTORY__ENABLED: "true"
+      GHC_HISTORY__DB_PATH: "/data/history.db"
+      GHC_TOKENIZATION__STATE_PATH: "/data/tokenization.json"
+    ports:
+      - "4142:4142"
+    volumes:
+      - ./data:/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4142/health/liveness', timeout=5).read()"
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s

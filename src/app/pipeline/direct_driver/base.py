@@ -24,7 +24,7 @@ from app.model_provider import (
     require_descriptor_owner,
     require_endpoint,
 )
-from app.observability.raw_capture import RawRequestCapture
+from app.observability.raw_capture import RawRequestCapture, pending_upstream_capture
 from app.pipeline.events import FrozenSubscribers
 from app.pipeline.exceptions import (
     ConnectionBoundInputIdRetry,
@@ -33,12 +33,19 @@ from app.pipeline.exceptions import (
     PipelineRetry,
     PromptTokenLimitExceeded,
     UpstreamError,
+    UpstreamRejected,
     UpstreamTimeout,
     classify,
     is_connection_bound_input_id_error,
 )
 from app.pipeline.rate_limiting import RateLimiter
-from app.pipeline.request import ENDPOINT_FORMATS, Attempt, RequestContext
+from app.pipeline.request import (
+    ENDPOINT_FORMATS,
+    FORMAT_ENDPOINTS,
+    Attempt,
+    RequestContext,
+    WireFormat,
+)
 from app.pipeline.retry import RetryLedger, reason_for
 from app.streaming.keepalive import (
     find_cancellation,
@@ -172,7 +179,7 @@ async def _finish_response_cleanup(
         raise cleanup_error
 
 
-def _capture_failed_upstream_attempt(
+def capture_failed_upstream_attempt(
     capture: RawRequestCapture | None,
     error: BaseException,
     *,
@@ -180,15 +187,39 @@ def _capture_failed_upstream_attempt(
 ) -> None:
     """Keep the wire evidence when an SDK status exception bypasses a response."""
     upstream_error = error.error if isinstance(error, ConnectionBoundInputIdRetry) else error
-    if capture is None or not isinstance(upstream_error, UpstreamError):
+    if capture is None or not isinstance(upstream_error, (UpstreamError, UpstreamRejected)):
         return
-    if upstream_error.sent:
+    if getattr(upstream_error, "sent_observed", False):
         capture.upstream_request_body(upstream_error.sent, attempt=attempt)
     if upstream_error.status_code is not None:
         capture.upstream_response_start(upstream_error.status_code, attempt=attempt)
-    if upstream_error.body_observed:
-        capture.upstream_response_body(upstream_error.body_bytes, attempt=attempt)
+        if upstream_error.body_observed:
+            capture.upstream_response_body(upstream_error.body_bytes, attempt=attempt)
+        capture.upstream_response_end(
+            complete=upstream_error.body_complete,
+            attempt=attempt,
+        )
+
+
+def capture_returned_upstream_response(
+    capture: RawRequestCapture | None,
+    response: httpx2.Response,
+    *,
+    attempt: int,
+) -> None:
+    """Keep a response that was returned before a later step discarded it."""
+    if capture is None:
+        return
+    capture.upstream_request_body(response.request.content, attempt=attempt)
+    capture.upstream_response_start(response.status_code, attempt=attempt)
+    if response.is_stream_consumed:
+        raw_body = response.extensions.get("upstream_raw_response_body")
+        if not isinstance(raw_body, bytes):
+            raw_body = response.content
+        capture.upstream_response_body(raw_body, attempt=attempt)
         capture.upstream_response_end(attempt=attempt)
+    else:
+        capture.upstream_response_end(complete=False, attempt=attempt)
 
 
 @dataclass(slots=True)
@@ -314,10 +345,22 @@ class DirectDriver:
             connection_bound_input_id_policy
         )
         self._clock = clock
+        self._reencode_payload: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None
+        # The wire format of the payload that was prepared for the previous
+        # attempt. Retries normally reuse that payload; a changed context
+        # target is the only reason to rebuild it.
+        self._prepared_target_format = target_format
 
     @property
     def endpoint(self) -> ModelEndpoint:
         return self._endpoint
+
+    def configure_reencode_payload(
+        self,
+        reencode: Callable[[Mapping[str, Any]], dict[str, Any]],
+    ) -> None:
+        """Install the target-wire-to-IR-to-target-wire retry adapter."""
+        self._reencode_payload = reencode
 
     async def _publish(self, event: str, context: RequestContext, outcome: DriverOutcome) -> None:
         """Run one event's subscribers in the frozen order.
@@ -344,6 +387,30 @@ class DirectDriver:
         if attempt.deadline_at is not None and self._now() >= attempt.deadline_at:
             raise UpstreamTimeout(f"attempt exceeded {self._attempt_deadline}s")
 
+    def _bind_target_format(
+        self,
+        context: RequestContext,
+        target_format: str,
+        *,
+        attempt: Attempt,
+    ) -> None:
+        try:
+            wire_format = WireFormat(target_format)
+            endpoint = FORMAT_ENDPOINTS[wire_format]
+        except (KeyError, ValueError) as error:
+            raise ValueError(
+                f"runtime target format change has no endpoint: {target_format!r}"
+            ) from error
+        if self._descriptor is not None:
+            require_endpoint(self._descriptor, endpoint, self._provider.name)
+        self._endpoint = endpoint
+        self._target_format = target_format
+        self._prepared_target_format = target_format
+        context.endpoint = endpoint
+        context.target_format = wire_format
+        context.translation_required = context.inbound_format.value != target_format
+        attempt.endpoint = endpoint
+
     async def _prepare_and_send(
         self,
         context: RequestContext,
@@ -353,8 +420,25 @@ class DirectDriver:
         source_payload: Mapping[str, Any] = context.payload
         if self._prepared_payload is None:
             await self._publish(EVENT_ATTEMPT_PREPARE, context, outcome)
+            target_wire = context.target_format or WireFormat(self._prepared_target_format)
+            target_format = target_wire.value
+            if (
+                target_format != self._prepared_target_format
+            ):
+                if self._reencode_payload is None:
+                    raise ValueError(
+                        "runtime target format change requires a reencode adapter"
+                    )
+                # Prepare subscribers are the production seam where a retry
+                # may select a different target. Re-encode the final,
+                # post-prepare payload, then reuse it for the rest of this
+                # attempt and for ordinary retries.
+                context.payload = self._reencode_payload(context.payload)
+                self._bind_target_format(context, target_format, attempt=attempt)
+            source_payload = context.payload
         else:
             source_payload = self._prepared_payload
+        attempt.endpoint = self._endpoint
         self._publish_provider_bound(context)
         if self._descriptor is not None and self._admission is not None:
             # A private structural copy closes the nested-alias window between the final mutable subscriber and the rate-limiter wait. The same object is admitted and sent. A delivery replay starts from the source attempt's already-final copy and makes another private copy rather than rerunning mutable shaping.
@@ -383,7 +467,7 @@ class DirectDriver:
         if self._rate_limiter is not None:
             context.extras["rate_limit_wait_s"] = await self._rate_limiter.acquire()
             self._raise_if_deadline_elapsed(attempt)
-        return await self._send(context, attempt.payload)
+        return await self._send(context, attempt.payload, attempt=attempt.index)
 
     async def _run_attempt(
         self,
@@ -422,7 +506,7 @@ class DirectDriver:
                 _reraise_if_cancelling(error)
                 attempt.error = str(error)
                 if isinstance(capture, RawRequestCapture):
-                    _capture_failed_upstream_attempt(capture, error, attempt=attempt.index)
+                    capture_failed_upstream_attempt(capture, error, attempt=attempt.index)
                     capture.upstream_attempt_end(attempt.index, complete=False)
                 if not await self._handle_failure(error, context, outcome):
                     return outcome
@@ -480,6 +564,11 @@ class DirectDriver:
                 if not handed_off:
                     outcome.response = None
                     if isinstance(capture, RawRequestCapture):
+                        capture_returned_upstream_response(
+                            capture,
+                            response,
+                            attempt=attempt.index,
+                        )
                         capture.upstream_attempt_end(attempt.index, complete=False)
                     await _finish_response_cleanup(
                         response,
@@ -562,6 +651,8 @@ class DirectDriver:
         self,
         context: RequestContext,
         payload: dict[str, Any],
+        *,
+        attempt: int,
     ) -> httpx2.Response:
         """Send one attempt until its response headers arrive.
 
@@ -570,20 +661,23 @@ class DirectDriver:
         descriptor = self._descriptor or self._provider.describe(context.resolved_model)
         if descriptor is None:
             raise RuntimeError("direct driver has no routed model descriptor")
-        send = self._provider.send(
-            self._endpoint,
-            payload,
-            descriptor=descriptor,
-            stream=context.stream,
-            extra_headers=context.client_headers or None,
-            interaction_id=context.interaction_id_for_provider(),
-        )
-        if self._response_header_timeout <= 0:
-            return await send
-        try:
-            async with asyncio.timeout(self._response_header_timeout):
+        capture = context.extras.get("raw_capture")
+        raw_capture = capture if isinstance(capture, RawRequestCapture) else None
+        with pending_upstream_capture(raw_capture, attempt):
+            send = self._provider.send(
+                self._endpoint,
+                payload,
+                descriptor=descriptor,
+                stream=context.stream,
+                extra_headers=context.client_headers or None,
+                interaction_id=context.interaction_id_for_provider(),
+            )
+            if self._response_header_timeout <= 0:
                 return await send
-        except TimeoutError as error:
-            raise UpstreamTimeout(
-                f"no response headers within {self._response_header_timeout}s"
-            ) from error
+            try:
+                async with asyncio.timeout(self._response_header_timeout):
+                    return await send
+            except TimeoutError as error:
+                raise UpstreamTimeout(
+                    f"no response headers within {self._response_header_timeout}s"
+                ) from error

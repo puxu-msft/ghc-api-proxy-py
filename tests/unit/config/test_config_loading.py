@@ -102,6 +102,23 @@ def test_configured_provider_graph_replaces_the_bundled_ghc_default(tmp_path: Pa
     assert config.default_model_provider == ""
 
 
+def test_legacy_yaml_fallback_provider_migrates_to_default(
+    tmp_path: Path,
+) -> None:
+    path = write_config(
+        tmp_path,
+        "model_providers:\n"
+        "  tenant:\n"
+        "    type: github_copilot\n"
+        "fallback_model_provider: tenant\n",
+    )
+
+    with pytest.warns(DeprecationWarning, match="fallback_model_provider"):
+        config = load_proxy_config(config_path=path, bundled={}, environ={})
+
+    assert config.default_model_provider == "tenant"
+
+
 def test_environment_provider_graph_replaces_the_bundled_ghc_default() -> None:
     config = load_proxy_config(
         bundled={
@@ -248,7 +265,7 @@ def test_added_provider_is_pinned_out_as_one_graph_change() -> None:
     )
 
 
-def test_provider_graph_change_restores_default_and_fallback() -> None:
+def test_provider_graph_change_restores_default() -> None:
     startup = ProxyConfig.model_validate(
         {
             "model_providers": {"ghc": {"type": "github_copilot"}},
@@ -262,7 +279,6 @@ def test_provider_graph_change_restores_default_and_fallback() -> None:
                 "xingchen": xingchen_values(),
             },
             "default_model_provider": "xingchen",
-            "fallback_model_provider": "xingchen",
         }
     )
 
@@ -270,10 +286,8 @@ def test_provider_graph_change_restores_default_and_fallback() -> None:
 
     assert set(outcome.config.model_providers) == {"ghc"}
     assert outcome.config.default_model_provider == "ghc"
-    assert outcome.config.fallback_model_provider == ""
     assert outcome.restart_required == (
         "default_model_provider",
-        "fallback_model_provider",
         "model_providers.xingchen",
     )
 

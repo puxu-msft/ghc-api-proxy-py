@@ -205,8 +205,7 @@ model_providers:
     model_refresh_interval: 0
     disabled_models: []
 
-# 默认模型提供方。
-# TODO：此项合并、取代 fallback_model_provider。实现后删除本行。
+# 默认模型提供方；未识别的 provider 限定也由此 provider 兜底。
 default_model_provider: ghc
 
 # ============================================================================
@@ -410,6 +409,17 @@ client_delivery:
 
 history:
   enabled: true
+
+# 原始请求/响应取证捕获。默认没有命中规则时关闭；内容可能包含完整 prompt、工具输入、工具结果与模型输出。通过 HTTP API 添加匹配规则后，仅对应请求开启全量记录。
+# Capture files are RFC 8742 CBOR Sequences compressed as independently appendable zstd frames. Bodies remain native binary strings; files use session-<hash>/agent-<hash>.cborseq.zst and are never JSONL.
+# Rules are stored in SQLite and managed through GET/POST/DELETE /api/debug/capture-rules. A rule matches provider + resolved model_id + session_id and may add an exact agent_id.
+# max_file_bytes counts actual compressed bytes of each capture file. 0 disables that limit. Quota loss is reported at request completion using safe metadata only; raw bodies and credentials never enter ordinary logs.
+observability:
+  raw_capture:
+    directory: "$XDG_DATA_HOME/ghc-api-proxy/raw-captures"
+    rules_database: "$XDG_DATA_HOME/ghc-api-proxy/debug-capture-rules.sqlite3"
+    compression_level: 3
+    max_file_bytes: 536870912
 
 # ============================================================================
 # 模块化与钩子 / Modularization & Hooks

@@ -11,11 +11,24 @@ from app.model_provider.ghc_client.config import GhcClientConfig
 from app.model_provider.ghc_client.headers import build_request_headers
 from app.model_provider.ghc_client.tokens import CopilotTokenManager
 from app.model_provider.upstream_errors import normalize_upstream_error
+from app.observability.raw_capture import (
+    activate_pending_upstream_capture,
+    observe_active_upstream_request_hook,
+)
 from app.pipeline.exceptions import (
     ConnectionBoundInputIdRetry,
     UpstreamError,
     is_connection_bound_input_id_error,
 )
+
+
+def _install_raw_capture_request_hook(sdk_client: object) -> None:
+    http_client = getattr(sdk_client, "_client", None)
+    if not isinstance(http_client, httpx2.AsyncClient):
+        return
+    request_hooks = http_client.event_hooks["request"]
+    if observe_active_upstream_request_hook not in request_hooks:
+        request_hooks.append(observe_active_upstream_request_hook)
 
 
 class GhcApiClient:
@@ -40,6 +53,8 @@ class GhcApiClient:
         self._tokens = tokens
         self._config = config
         self._interaction_id = interaction_id
+        _install_raw_capture_request_hook(openai_client)
+        _install_raw_capture_request_hook(anthropic_client)
 
     async def headers_for_interaction(
         self,
@@ -91,18 +106,18 @@ class GhcApiClient:
         extra_headers: Mapping[str, str] | None = None,
         interaction_id: str,
     ) -> httpx2.Response:
-        return await self._openai.post(
-            path,
-            cast_to=httpx2.Response,
-            body=cast(OpenAIBody, dict(payload)),
-            options={
-                "headers": await self.headers_for_interaction(
-                    interaction_id,
-                    extra_headers=extra_headers,
-                )
-            },
-            stream=stream,
+        headers = await self.headers_for_interaction(
+            interaction_id,
+            extra_headers=extra_headers,
         )
+        with activate_pending_upstream_capture():
+            return await self._openai.post(
+                path,
+                cast_to=httpx2.Response,
+                body=cast(OpenAIBody, dict(payload)),
+                options={"headers": headers},
+                stream=stream,
+            )
 
     async def _post_anthropic(
         self,
@@ -113,18 +128,18 @@ class GhcApiClient:
         extra_headers: Mapping[str, str] | None = None,
         interaction_id: str,
     ) -> httpx2.Response:
-        return await self._anthropic.post(
-            path,
-            cast_to=httpx2.Response,
-            body=cast(AnthropicBody, dict(payload)),
-            options={
-                "headers": await self.headers_for_interaction(
-                    interaction_id,
-                    extra_headers=extra_headers,
-                )
-            },
-            stream=stream,
+        headers = await self.headers_for_interaction(
+            interaction_id,
+            extra_headers=extra_headers,
         )
+        with activate_pending_upstream_capture():
+            return await self._anthropic.post(
+                path,
+                cast_to=httpx2.Response,
+                body=cast(AnthropicBody, dict(payload)),
+                options={"headers": headers},
+                stream=stream,
+            )
 
     @staticmethod
     async def _in_pipeline_terms(post: Coroutine[Any, Any, httpx2.Response]) -> httpx2.Response:

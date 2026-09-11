@@ -11,14 +11,21 @@ from typing import TYPE_CHECKING, Any, cast
 
 from starlette.requests import ClientDisconnect
 
+from app.model_provider.upstream_errors import normalize_upstream_error
 from app.observability.logging import get_logger
 from app.observability.metrics import TRANSLATION_LOSSES
 from app.observability.raw_capture import RawRequestCapture
-from app.observability.request_log import LogStatus, RequestLine, format_completion_line, status_for
+from app.observability.request_log import (
+    LogStatus,
+    RequestLine,
+    UpstreamBodyAttempt,
+    format_completion_line,
+    status_for,
+)
 from app.observability.request_log_file import utc_timestamp, write_finalized_record
 from app.observability.request_trace import REQUEST_LOGGER, RequestTrace, request_line_from_trace
 from app.pipeline.delivery.assembling import ClientAction, ReplyDialect
-from app.pipeline.hand_over import one_line
+from app.pipeline.exceptions import UpstreamError, UpstreamRejected
 from app.pipeline.response_action import ClientActionRequirement
 from app.pipeline.response_observation import (
     ExactUsage,
@@ -156,6 +163,7 @@ class FinalizedRequest:
     delivery: DeliveryObservation
     timings: TimingObservation
     body_bytes: BodyBytesObservation
+    upstream_body_attempts: tuple[UpstreamBodyAttempt, ...]
     token_admissions: tuple[TokenAdmissionObservation, ...] = ()
     interruptions: tuple[InterruptionObservation, ...] = ()
 
@@ -241,6 +249,10 @@ class FinalizedRequest:
                 "delivery": _delivery_dict(self.delivery),
                 "timings": _timings_dict(self.timings),
                 "body_bytes": _body_bytes_dict(self.body_bytes),
+                "upstream_body_attempts": [
+                    _upstream_body_attempt_dict(attempt)
+                    for attempt in self.upstream_body_attempts
+                ],
             },
         }
 
@@ -352,7 +364,10 @@ class RequestCompletionCoordinator:
             try:
                 self.chain.active_requests.add_downstream_bytes(self.request_id, count)
             except Exception as error:
-                _warn_no_raise("could not update live downstream bytes: %r", error)
+                _warn_no_raise(
+                    "could not update live downstream bytes: exception_type=%s",
+                    _exception_type_name(error),
+                )
             if self.raw_capture is not None:
                 self.raw_capture.client_response_body(
                     body_bytes,
@@ -437,7 +452,7 @@ class RequestCompletionCoordinator:
         category: str,
         exception_module: str,
         exception_type: str,
-        message: str | None,
+        error: BaseException | None,
     ) -> None:
         self._interruptions.append(
             InterruptionObservation(
@@ -449,7 +464,7 @@ class RequestCompletionCoordinator:
                 category=category,
                 exception_module=exception_module,
                 exception_type=exception_type,
-                message=message,
+                message=(safe_exception_detail(error) if error is not None else None),
                 continuation_synthesized=True,
             )
         )
@@ -496,9 +511,7 @@ class RequestCompletionCoordinator:
 
     def note_secondary_cleanup_notes(self, error: BaseException) -> None:
         for note in self._exception_notes_for(error):
-            self._append_secondary_detail(
-                note if note.startswith("cleanup also failed:") else f"cleanup note: {note}"
-            )
+            self._append_secondary_detail(f"cleanup note: {note}")
 
     def _append_secondary_detail(self, suffix: str) -> None:
         if suffix in self._secondary_detail_suffixes:
@@ -540,7 +553,7 @@ class RequestCompletionCoordinator:
             and self._failure.category
             in {FailureCategory.DISCONNECT, FailureCategory.CANCELLED}
         ):
-            # Keep the structured primary message in DeliveryObservation while retaining the established stream-specific console explanation for routine client aborts. Server-side send failures keep their exact primary detail.
+            # Keep the structured primary projection in DeliveryObservation while retaining the established stream-specific console explanation for routine client aborts. Server-side send failures retain their category and stable type/status metadata.
             self.trace.detail = self._ending_with_secondaries(detail)
 
     def settle(
@@ -581,7 +594,9 @@ class RequestCompletionCoordinator:
         status = status_for(
             status_code,
             override=("fail" if provider_failed else self.trace.status_override),
+            attempts=self.trace.attempts,
         )
+        retry_as_success = status == "retry" and self.trace.status_override is None
         finalized_s = time.monotonic() - self.trace.started
         line = request_line_from_trace(
             self.trace,
@@ -624,6 +639,7 @@ class RequestCompletionCoordinator:
                 upstream_response=self._upstream_response_bytes,
                 downstream_response=self._downstream_body_bytes,
             ),
+            upstream_body_attempts=tuple(self.trace.upstream_body_attempts),
             token_admissions=self.trace.token_admissions,
             interruptions=tuple(self._interruptions),
         )
@@ -634,7 +650,7 @@ class RequestCompletionCoordinator:
             )
         # Set before every sink. A re-entrant or duplicate publisher sees the same immutable record and cannot repeat a side effect.
         self._record = record
-        self._emit(record)
+        self._emit(record, retry_as_success=retry_as_success)
         return record
 
     def _note_interruption(
@@ -725,45 +741,88 @@ class RequestCompletionCoordinator:
         if not self.trace.detail:
             self.trace.detail = summary.message or summary.type or summary.category.value
 
-    def _emit(self, record: FinalizedRequest) -> None:
+    def _emit(self, record: FinalizedRequest, *, retry_as_success: bool) -> None:
         sinks = (
             ("request store", lambda: self.chain.active_requests.complete(self.request_id, record)),
             ("translation loss metrics", lambda: _record_translation_losses(record)),
             ("structured request record", lambda: write_finalized_record(record.to_record_dict())),
-            ("completion line", lambda: _log_finalized(self.chain, record)),
+            (
+                "completion line",
+                lambda: _log_finalized(
+                    self.chain,
+                    record,
+                    retry_as_success=retry_as_success,
+                ),
+            ),
         )
         for name, sink in sinks:
             try:
                 sink()
             except Exception as error:
-                _warn_no_raise("could not emit %s: %r", name, error)
+                _warn_no_raise(
+                    "could not emit %s: exception_type=%s",
+                    name,
+                    _exception_type_name(error),
+                )
 
 
-def _safe_exception_message(error: BaseException) -> str | None:
-    for render in (str, repr):
-        try:
-            rendered = one_line(render(error))
-        except BaseException as rendering_error:
-            _warn_no_raise(
-                "could not render %s for request observability: %r",
-                type(error).__qualname__,
-                rendering_error,
-            )
+def _exception_type_name(error: BaseException) -> str:
+    return f"{type(error).__module__}.{type(error).__qualname__}"
+
+
+def safe_exception_detail(error: BaseException) -> str:
+    """Project an exception to fixed upstream status or stable type metadata."""
+    seen: set[int] = set()
+    pending: list[BaseException] = [error]
+    unnormalized_upstream_type: str | None = None
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
             continue
-        if rendered:
-            return rendered
-    return None
+        seen.add(id(current))
+        normalized = normalize_upstream_error(current)
+        upstream = normalized if normalized is not None else current
+        if isinstance(upstream, (UpstreamError, UpstreamRejected)):
+            status = upstream.status_code
+            return (
+                f"upstream request failed with status {status}"
+                if status is not None
+                else "upstream request failed before a response"
+            )
+        module = type(current).__module__
+        qualname = type(current).__qualname__
+        if (
+            "upstream" in qualname.lower()
+            or module.startswith(("httpx", "httpcore", "openai", "anthropic", "h2"))
+        ) and unnormalized_upstream_type is None:
+            unnormalized_upstream_type = _exception_type_name(current)
+        pending.extend(
+            linked
+            for linked in (
+                current.__cause__,
+                current.__context__,
+                getattr(current, "cause", None),
+            )
+            if isinstance(linked, BaseException)
+        )
+    if unnormalized_upstream_type is not None:
+        return f"upstream exception: {unnormalized_upstream_type}"
+    return _exception_type_name(error)
+
+
+def _safe_exception_message(error: BaseException) -> str:
+    return safe_exception_detail(error)
 
 
 def safe_exception_notes(error: BaseException) -> tuple[str, ...]:
-    """Read one exception's notes as inert base strings without trusting dynamic methods."""
+    """Project exception-note presence without copying note text into observability."""
     try:
         raw_notes = getattr(error, "__notes__", None)
-    except BaseException as rendering_error:
+    except BaseException as notes_error:
         _warn_no_raise(
-            "could not read %s notes for request observability: %r",
-            type(error).__qualname__,
-            rendering_error,
+            "could not read %s notes for request observability: exception_type=%s",
+            _exception_type_name(error),
+            _exception_type_name(notes_error),
         )
         return ("<exception notes unavailable>",)
     if raw_notes is None:
@@ -771,34 +830,14 @@ def safe_exception_notes(error: BaseException) -> tuple[str, ...]:
     if type(raw_notes) is not list:
         _warn_no_raise(
             "ignored an invalid %s notes container for request observability",
-            type(error).__qualname__,
+            _exception_type_name(error),
         )
         return ("<invalid exception notes container>",)
-
-    normalized: list[str] = []
-    notes = cast(list[object], raw_notes)
-    for note in notes:
-        if not isinstance(note, str):
-            normalized.append("<invalid exception note>")
-            continue
-        try:
-            # Calling the base C implementation avoids a str subclass's overridden `split`, `encode`, `__hash__`, or related methods from re-entering request control flow.
-            base_note = bytes.decode(str.encode(note, "utf-8", "replace"), "utf-8")
-            rendered = one_line(base_note)
-        except BaseException as rendering_error:
-            _warn_no_raise(
-                "could not normalize an exception note for request observability: %r",
-                rendering_error,
-            )
-            normalized.append("<unrenderable exception note>")
-            continue
-        if rendered:
-            normalized.append(rendered)
-    return tuple(normalized)
+    return ("<exception notes present>",) if raw_notes else ()
 
 
 def safe_exception_graph_notes(error: BaseException) -> tuple[str, ...]:
-    """Collect normalized notes from a whole cause/context/group graph once each."""
+    """Collect stable note-presence metadata from a whole exception graph once."""
     seen_nodes: set[int] = set()
     seen_notes: set[str] = set()
     notes: list[str] = []
@@ -853,7 +892,12 @@ def _record_translation_losses(record: FinalizedRequest) -> None:
         TRANSLATION_LOSSES.labels(direction=direction, code=code).inc()
 
 
-def _log_finalized(chain: Chain, record: FinalizedRequest) -> None:
+def _log_finalized(
+    chain: Chain,
+    record: FinalizedRequest,
+    *,
+    retry_as_success: bool = False,
+) -> None:
     line = record.request_line()
     get_logger(REQUEST_LOGGER).info(
         format_completion_line(
@@ -862,6 +906,8 @@ def _log_finalized(chain: Chain, record: FinalizedRequest) -> None:
             unicode=chain.capabilities.unicode,
             color=chain.capabilities.color,
             response_observation=record.response,
+            upstream_body_attempts=record.upstream_body_attempts,
+            retry_as_success=retry_as_success,
         ),
         status=record.status,
     )
@@ -872,7 +918,10 @@ def _freeze_line_or_fallback(line: RequestLine) -> FrozenJsonObject:
         return _freeze_line(line)
     except Exception as error:
         # Domain construction is observability too. A malformed legacy projection must not replace the response or a primary exception; retain enough safe identity to keep one finalized record and report why the rich projection was unavailable.
-        _warn_no_raise("could not freeze the full legacy request projection: %r", error)
+        _warn_no_raise(
+            "could not freeze the full legacy request projection: exception_type=%s",
+            _exception_type_name(error),
+        )
         return _freeze_line(
             RequestLine(
                 method=line.method,
@@ -1171,6 +1220,27 @@ def _body_bytes_dict(body: BodyBytesObservation) -> dict[str, JsonValue]:
     }
 
 
+def _upstream_body_attempt_dict(
+    attempt: UpstreamBodyAttempt,
+) -> dict[str, JsonValue]:
+    return {
+        "attempt": attempt.attempt,
+        "status_code": attempt.status_code,
+        "body_started_s": attempt.body_started_s,
+        "first_byte_s": attempt.first_byte_s,
+        "last_byte_s": attempt.last_byte_s,
+        "final_pull_started_s": attempt.final_pull_started_s,
+        "ended_s": attempt.ended_s,
+        "final_pull_s": attempt.final_pull_s,
+        "tail_gap_s": attempt.tail_gap_s,
+        "body_bytes": attempt.body_bytes,
+        "chunks": attempt.chunks,
+        "outcome": attempt.outcome,
+        "exception_module": attempt.exception_module,
+        "exception_type": attempt.exception_type,
+    }
+
+
 def _string(mapping: dict[str, Any], key: str) -> str:
     value = mapping[key]
     return value if isinstance(value, str) else ""
@@ -1240,6 +1310,7 @@ __all__ = [
     "InterruptionPhase",
     "RequestCompletionCoordinator",
     "TimingObservation",
+    "safe_exception_detail",
     "safe_exception_graph_notes",
     "safe_exception_notes",
 ]

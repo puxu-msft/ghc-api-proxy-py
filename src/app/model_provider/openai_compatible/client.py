@@ -8,7 +8,16 @@ import httpx2
 from app.config.schema import EndpointSetting, OpenAICompatibleProviderConfig
 from app.model_provider.openai_compatible.errors import upstream_error_from_response
 from app.model_provider.types import ModelEndpoint
-from app.model_provider.upstream_errors import normalize_upstream_error
+from app.model_provider.upstream_errors import (
+    normalize_upstream_cleanup_error,
+    normalize_upstream_error,
+    normalize_upstream_response_error,
+    read_response_body_with_evidence,
+)
+from app.observability.raw_capture import (
+    activate_pending_upstream_capture,
+    observe_active_upstream_request,
+)
 from app.wire_json import dumps
 
 ANTHROPIC_MESSAGES_PATH = "/v1/messages"
@@ -117,7 +126,9 @@ class OpenAICompatibleClient:
         stream: bool,
     ) -> httpx2.Response:
         try:
-            response = await self._http.send(request, stream=stream)
+            with activate_pending_upstream_capture():
+                observe_active_upstream_request(request)
+                response = await self._http.send(request, stream=stream)
         except BaseException as error:
             normalized = normalize_upstream_error(error)
             if normalized is None:
@@ -125,12 +136,29 @@ class OpenAICompatibleClient:
             raise normalized from error
         if response.is_success:
             return response
+        primary: BaseException | None = None
         try:
-            if not response.is_stream_consumed:
-                await response.aread()
+            try:
+                if not response.is_stream_consumed:
+                    await read_response_body_with_evidence(response)
+            except BaseException as error:
+                normalized = normalize_upstream_response_error(error, response)
+                if normalized is not None:
+                    raise normalized from error
+                raise
             raise upstream_error_from_response(response)
+        except BaseException as error:
+            primary = error
+            raise
         finally:
-            await response.aclose()
+            try:
+                await response.aclose()
+            except BaseException as cleanup:
+                if primary is None:
+                    raise normalize_upstream_cleanup_error(cleanup, response) from cleanup
+                primary.add_note(
+                    f"upstream response cleanup failed: {type(cleanup).__qualname__}"
+                )
 
     async def send(
         self,

@@ -24,11 +24,7 @@ from app.pipeline.delivery.formats.openai_responses_passthrough import (
 from app.pipeline.delivery.framing import OutboundFramer
 from app.pipeline.delivery.passthrough import PassthroughFramer
 from app.pipeline.delivery.stream import StreamSettings
-from app.pipeline.driver import (
-    CLIENT_SEARCH_TOOL,
-    HOSTED_WEB_SEARCH_EXPECTED,
-    HandledRequest,
-)
+from app.pipeline.handled import HandledRequest
 from app.pipeline.request import WireFormat
 
 
@@ -140,10 +136,8 @@ def assembler_for(
         return ResponsesAssembler(
             hand_over_stop_reasons=hand_over_stop_reasons,
             # Put on the context by the request translation. The streaming path needs it for the same reason the buffered one does — a `tool_search_call` names no tool — and reads it from the same place, so the two cannot come to deliver the model's search request under different names.
-            client_search_tool=str(handled.context.extras.get(CLIENT_SEARCH_TOOL, "")),
-            hosted_web_search_expected=bool(
-                handled.context.extras.get(HOSTED_WEB_SEARCH_EXPECTED)
-            ),
+            client_search_tool=handled.context.client_search_tool,
+            hosted_web_search_expected=handled.context.hosted_web_search_expected,
         )
     if dialect_for(handled) is ReplyDialect.CHAT_COMPLETIONS:
         # A Chat Completions upstream is reached only translated; the old default

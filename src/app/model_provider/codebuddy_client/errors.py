@@ -10,7 +10,13 @@ responses rather than SDK exceptions.
 
 import httpx2
 
-from app.model_provider.upstream_errors import RETRYABLE_STATUSES, retry_after_seconds
+from app.model_provider.upstream_errors import (
+    RETRYABLE_STATUSES,
+    response_body_evidence,
+    response_body_text,
+    retry_after_seconds,
+    sent_body_evidence_from_error,
+)
 from app.pipeline.exceptions import UpstreamError, UpstreamRateLimit, UpstreamRejected
 
 
@@ -20,46 +26,41 @@ def upstream_error_from(
     """Classify one non-200 response the same way the Copilot client's SDK errors are."""
     headers = {str(key): str(value) for key, value in response.headers.items()}
     status = response.status_code
+    body_bytes, body_observed = response_body_evidence(response)
+    body = response_body_text(response, body_bytes, body_observed)
+    sent, sent_observed = sent_body_evidence_from_error(response)
     if status == 429:
         return UpstreamRateLimit(
             f"upstream rate limited: {status}",
             retry_after=retry_after_seconds(headers),
             headers=headers,
-            body=response.text,
-            body_bytes=response.content,
+            body=body,
+            body_bytes=body_bytes,
             content_type=headers.get("content-type", ""),
-            body_observed=True,
+            sent=sent,
+            sent_observed=sent_observed,
+            body_observed=body_observed,
         )
     if 400 <= status < 500 and status not in RETRYABLE_STATUSES:
-        # A rejected body is as large as the conversation that produced it, so the
-        # sent bytes are read only here, the one classification that reports them.
-        sent = b""
-        request = getattr(response, "request", None)
-        if request is not None:
-            try:
-                content = request.content
-            except Exception:
-                # `httpx.Request.content` raises for a body that was never read; no
-                # send on this path streams, but a classification failure must not
-                # replace upstream's verdict with a traceback.
-                content = b""
-            sent = content if isinstance(content, bytes) else b""
         return UpstreamRejected(
             f"upstream rejected the request: {status}",
             status_code=status,
             headers=headers,
-            body=response.text,
-            body_bytes=response.content,
+            body=body,
+            body_bytes=body_bytes,
             content_type=headers.get("content-type", ""),
             sent=sent,
-            body_observed=True,
+            sent_observed=sent_observed,
+            body_observed=body_observed,
         )
     return UpstreamError(
         f"upstream returned {status}",
         status_code=status,
         headers=headers,
-        body=response.text,
-        body_bytes=response.content,
+        body=body,
+        body_bytes=body_bytes,
         content_type=headers.get("content-type", ""),
-        body_observed=True,
+        sent=sent,
+        sent_observed=sent_observed,
+        body_observed=body_observed,
     )

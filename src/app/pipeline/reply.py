@@ -12,10 +12,10 @@ from app.pipeline.delivery.formats.anthropic_messages import (
     terminal_from_anthropic,
 )
 from app.pipeline.delivery_policy import dialect_for
-from app.pipeline.driver import (
-    CLIENT_SEARCH_TOOL,
-    HOSTED_WEB_SEARCH_EXPECTED,
+from app.pipeline.handled import (
     RESPONSE_CONVERSION_LOSSES,
+    RESPONSE_CONVERSION_OPAQUE_PAYLOADS,
+    RESPONSE_CONVERSION_WARNINGS,
     HandledRequest,
 )
 from app.pipeline.request import WireFormat
@@ -40,16 +40,23 @@ def response_payload(chain: Chain, handled: HandledRequest, body: dict[str, Any]
         source=route.target_format,
         target=route.inbound_format,
         # Put here by the request half. Without it a `tool_search_call` has no name to come back under, and the client is handed a turn in which the model appears to have said nothing while it is in fact waiting for a search.
-        client_search_tool=str(handled.context.extras.get(CLIENT_SEARCH_TOOL, "")),
-        hosted_web_search_expected=bool(
-            handled.context.extras.get(HOSTED_WEB_SEARCH_EXPECTED)
-        ),
+        client_search_tool=handled.context.client_search_tool,
+        hosted_web_search_expected=handled.context.hosted_web_search_expected,
         hand_over_stop_reasons=frozenset(
             chain.config.upstream_request_retry.hand_over_stop_reasons
         ),
+        options=handled.context.translation_options,
     )
     if not semantic.conversion.lossless:
         handled.context.extras[RESPONSE_CONVERSION_LOSSES] = list(semantic.conversion.losses)
+    if semantic.conversion.warnings:
+        handled.context.extras[RESPONSE_CONVERSION_WARNINGS] = list(
+            semantic.conversion.warnings
+        )
+    if semantic.opaque_payloads:
+        handled.context.extras[RESPONSE_CONVERSION_OPAQUE_PAYLOADS] = list(
+            semantic.opaque_payloads
+        )
     return translated
 
 def blocks_from_anthropic(body: dict[str, Any]) -> list[CompletedBlock]:

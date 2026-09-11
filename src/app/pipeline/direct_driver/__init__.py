@@ -23,6 +23,8 @@ from app.pipeline.direct_driver.base import (
     DriverOutcome,
     LedgerBudget,
     RetryBudget,
+    capture_failed_upstream_attempt,
+    capture_returned_upstream_response,
 )
 from app.pipeline.direct_driver.openai_chat_completions import OpenAIChatCompletionsDriver
 from app.pipeline.direct_driver.openai_embeddings import OpenAIEmbeddingsDriver
@@ -80,4 +82,6 @@ __all__ = [
     "OpenAIEmbeddingsDriver",
     "OpenAIResponsesDriver",
     "RetryBudget",
+    "capture_failed_upstream_attempt",
+    "capture_returned_upstream_response",
 ]

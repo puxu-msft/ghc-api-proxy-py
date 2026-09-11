@@ -10,14 +10,13 @@ The Anthropic passthrough path keeps the blocks and their markers intact.
 """
 
 import json
-import logging
 from collections.abc import Callable, Mapping
 from typing import Any, cast
 
 from app.config.schema import SystemPromptPlacement, WebSearchConstraintPolicy
-from app.pipeline import anthropic_server_tools
-from app.pipeline.server_tool_text import render_server_tool_block, web_search_call_text
+from app.pipeline.server_tool_text import render_server_tool_block
 from app.pipeline.translation_driver.content import BlockKind, ContentBlock, SemanticMessage
+from app.pipeline.translation_driver.options import TranslationOptions
 from app.pipeline.translation_driver.reasoning import (
     RESPONSES_EFFORTS,
     EffortSource,
@@ -26,10 +25,16 @@ from app.pipeline.translation_driver.reasoning import (
     align_effort,
 )
 from app.pipeline.translation_driver.reasoning_bridge import (
-    ReasoningBridgeError,
     ReasoningNotPortable,
-    read_responses_reasoning,
     reasoning_to_responses,
+)
+from app.pipeline.translation_driver.responses_items import (
+    ResponsesItemContext,
+    normalize_input_item,
+    normalize_response_item,
+)
+from app.pipeline.translation_driver.responses_items import (
+    record_web_search_call_id_loss as _record_web_search_call_id_loss,
 )
 from app.pipeline.translation_driver.semantic import (
     Conversion,
@@ -52,8 +57,6 @@ from app.pipeline.translation_driver.tool_search import (
 )
 
 WIRE_FORMAT = "openai-responses"
-
-logger = logging.getLogger(__name__)
 
 _PASSTHROUGH_KEYS = frozenset(
     {
@@ -137,9 +140,13 @@ def read_responses_thinking_effort(
 def from_openai_responses(
     payload: Mapping[str, Any],
     *,
+    options: TranslationOptions | None = None,
     source_headers: Mapping[str, str] | None = None,
     translated: bool = False,
 ) -> SemanticRequest:
+    if options is not None:
+        source_headers = options.source_headers
+        translated = options.translated
     del source_headers, translated
     blocks, problem = _blocks_from_instructions(payload.get("instructions"))
     thinking_effort, nested_extensions = read_responses_thinking_effort(payload)
@@ -373,9 +380,14 @@ def _web_search_tool(
                 f"{declared}.{key} into {WIRE_FORMAT}: upstream has no such parameter, so the"
                 " search may read outside the requested set",
             )
-            logger.warning(
-                "web search %s cannot be sent to this endpoint; the search will run without it and this proxy cannot check what was read",
-                key,
+            conversion.warn(
+                LossCode.SERVER_TOOL_CONSTRAINT_DROPPED.value,
+                source_format="anthropic-messages",
+                field_path=f"tools.{declared}.{key}",
+                detail=(
+                    "web search will run without this constraint; the proxy cannot "
+                    "check what was read"
+                ),
             )
             continue
         if key in _WEB_SEARCH_DROPPED:
@@ -516,11 +528,14 @@ def _tools_for_upstream(
     request.hosted_web_search_expected = bool(mapped)
     if mapped:
         # INFO rather than DEBUG: a client with web search switched on triggers this every request, so it is a setting and not a warning — but it is also the only place an operator can see that the declaration they sent is not the one that went out.
-        logger.info(
-            "translated %d Anthropic web search declaration(s) into this endpoint's own spelling: %s -> %s",
-            len(mapped),
-            ", ".join(sorted(mapped)),
-            _WEB_SEARCH_TYPE,
+        request.conversion.warn(
+            "server-tool-translated",
+            source_format="anthropic-messages",
+            field_path="tools",
+            detail=(
+                f"translated {len(mapped)} web search declaration(s): "
+                f"{', '.join(sorted(mapped))} -> {_WEB_SEARCH_TYPE}"
+            ),
         )
     return kept, mapped_names, function_names, search_names
 
@@ -528,85 +543,17 @@ def _tools_for_upstream(
 def blocks_from_item(
     item: dict[str, Any], *, client_search_tool: str = ""
 ) -> tuple[str, tuple[ContentBlock, ...]]:
-    """Read one Responses item as the role it belongs to and the blocks it holds.
-
-    Shared by the request `input` reader and the response `output` reader: an item means the same thing in both, and two copies of this would drift the moment one gained an item type.
-
-    `client_search_tool` is the name a `tool_search_call` is handed back under. Empty when this request translated no search, in which case such an item is not expected and falls through to the unknown branch — which is the honest outcome: without a name there is no call to hand back.
-    """
-    kind = str(item.get("type", ""))
-    if kind == "tool_search_output":
-        # The upstream's own report of a **hosted** search — it ran the search and is saying what it loaded. Anthropic has no block for that, and a client that declared a hosted search asked for exactly this to happen out of sight. An empty block list is "nothing to carry", which is different from the unknown branch's "we did not recognise this".
-        return "assistant", ()
-    if kind == "tool_search_call" and client_search_tool:
-        # Back to an ordinary call on the client's own tool. `arguments` needs no decoding here: this wire spells them as an object, unlike `function_call`, whose arguments are a JSON string.
-        arguments = item.get("arguments")
-        return "assistant", (
-            ContentBlock(
-                BlockKind.TOOL_USE,
-                call_id=str(item.get("call_id") or item.get("id", "")),
-                name=client_search_tool,
-                # `isinstance` rather than a null check, and the same test the streaming path uses. The SDK types this as an object, so anything else is malformed — but Anthropic's `tool_use.input` is an object too, and handing a client a string there is a shape its parser will not take. The two delivery paths agreeing on one answer matters more than which answer, and this project has paid for them disagreeing before.
-                arguments=arguments if isinstance(arguments, dict) else {},
-                raw=item,
-            ),
-        )
-    if kind == "message":
-        return (
-            str(item.get("role", "user")),
-            tuple(_block_from_content_part(part) for part in _dict_list(item.get("content"))),
-        )
-    if kind == "function_call":
-        return "assistant", (
-            ContentBlock(
-                BlockKind.TOOL_USE,
-                call_id=str(item.get("call_id") or item.get("id", "")),
-                name=str(item.get("name", "")),
-                arguments=_decoded_arguments(item.get("arguments")),
-                raw=item,
-            ),
-        )
-    if kind == "function_call_output":
-        return "user", (
-            ContentBlock(
-                BlockKind.TOOL_RESULT,
-                call_id=str(item.get("call_id", "")),
-                output=item.get("output"),
-                raw=item,
-            ),
-        )
-    if kind == "reasoning":
-        try:
-            reasoning = read_responses_reasoning(item)
-        except ReasoningBridgeError as error:
-            raise TranslationRefused(
-                error.detail,
-                code=error.code,
-                field_path="input.reasoning",
-            ) from error
-        return "assistant", (
-            ContentBlock(BlockKind.REASONING, reasoning=reasoning, raw=item),
-        )
-    if kind == "web_search_call":
-        # The item-local reader also serves Responses request history, where no request-scoped
-        # expected fact exists. Keep the conservative D3 text form here. The response-only reader
-        # wraps this function and substitutes a native pair only when the Anthropic request half
-        # actually mapped a hosted declaration.
-        return "assistant", (
-            ContentBlock(BlockKind.TEXT, text=web_search_call_text(item.get("action")), raw=item),
-        )
-    return "user", (ContentBlock(BlockKind.UNKNOWN, raw=item),)
+    return normalize_input_item(
+        item,
+        context=ResponsesItemContext(client_search_tool=client_search_tool),
+    )
 
 
 def record_web_search_call_id_loss(
     item: dict[str, Any],
     conversion: Conversion,
 ) -> None:
-    if item.get("type") != "web_search_call":
-        return
-    detail = anthropic_server_tools.web_search_call_id_loss(item.get("id"))
-    if detail is not None:
-        conversion.record(LossCode.SERVER_TOOL_CALL_ID_NOT_CARRIED, detail)
+    _record_web_search_call_id_loss(item, conversion)
 
 
 def response_blocks_from_item(
@@ -616,35 +563,13 @@ def response_blocks_from_item(
     client_search_tool: str = "",
     hosted_web_search_expected: bool = False,
 ) -> tuple[str, tuple[ContentBlock, ...]]:
-    """Read one response item with request-scoped hosted-search context."""
-    if item.get("type") != "web_search_call":
-        return blocks_from_item(item, client_search_tool=client_search_tool)
-    if not hosted_web_search_expected:
-        conversion.record(
-            LossCode.SERVER_TOOL_NOT_CARRIED,
-            anthropic_server_tools.unsolicited_web_search_loss(item.get("action")),
-        )
-        return blocks_from_item(item, client_search_tool=client_search_tool)
-
-    pair = anthropic_server_tools.unavailable_web_search_pair(item.get("action"))
-    conversion.record(
-        LossCode.SERVER_TOOL_PARTIALLY_REPRESENTABLE,
-        anthropic_server_tools.partial_web_search_loss(pair, item.get("status")),
-    )
-    return "assistant", (
-        ContentBlock(
-            BlockKind.SERVER_TOOL_USE,
-            call_id=str(pair.call["id"]),
-            name=anthropic_server_tools.WEB_SEARCH,
-            arguments=pair.action.input,
-            raw=pair.call,
+    return normalize_response_item(
+        item,
+        context=ResponsesItemContext(
+            client_search_tool=client_search_tool,
+            hosted_web_search_expected=hosted_web_search_expected,
         ),
-        ContentBlock(
-            BlockKind.WEB_SEARCH_TOOL_RESULT,
-            call_id=str(pair.call["id"]),
-            output=pair.result["content"],
-            raw=pair.result,
-        ),
+        conversion=conversion,
     )
 
 
@@ -658,28 +583,6 @@ def _messages_from_input(value: object) -> list[SemanticMessage]:
         role, blocks = blocks_from_item(item)
         messages.append(SemanticMessage(role, blocks))
     return messages
-
-
-def _block_from_content_part(part: dict[str, Any]) -> ContentBlock:
-    kind = str(part.get("type", ""))
-    if kind in {"input_text", "output_text", "text"}:
-        return ContentBlock(BlockKind.TEXT, text=str(part.get("text", "")), raw=part)
-    if kind == "input_image":
-        return ContentBlock(BlockKind.IMAGE, raw=part)
-    return ContentBlock(BlockKind.UNKNOWN, raw=part)
-
-
-def _decoded_arguments(value: object) -> Any:
-    """`arguments` is a JSON string on the wire; the model holds the decoded value.
-
-    A string that does not parse is kept as-is rather than discarded — a malformed tool call is still what the model produced, and losing it would hide the defect.
-    """
-    if not isinstance(value, str):
-        return value
-    try:
-        return json.loads(value)
-    except json.JSONDecodeError:
-        return value
 
 
 # Measured against real traffic on 2026-08-18: the existing service sends exactly these item shapes for the same conversation — `message` with `input_text`, `function_call` whose `arguments` is a JSON *string*, `function_call_output` whose `output` is a string, and `reasoning` carrying `encrypted_content`.
@@ -984,9 +887,17 @@ def to_openai_responses(
     request: SemanticRequest,
     target_model: TranslationTarget | None = None,
     *,
+    options: TranslationOptions | None = None,
     system_prompts: SystemPromptPlacement = "instructions-joint-string",
     web_search_domain_restrictions: WebSearchConstraintPolicy = "drop_fields",
 ) -> dict[str, Any]:
+    if options is not None:
+        target_model = target_model or options.target
+        if options.model_translation is not None:
+            system_prompts = options.model_translation.to_openai_responses.system_prompts
+            web_search_domain_restrictions = (
+                options.model_translation.to_openai_responses.web_search_domain_restrictions
+            )
     # Resolved before anything is written, because the same answer shapes both halves: which tool becomes the `tool_search` builtin, and how the history's calls to it are rendered. Passed to both rather than computed twice — two independent answers to "is there a search here" is how the tools array and the history come to disagree.
     search = _search_context(request)
     # Recorded on the request so the response half can find it. It is not readable from the Responses body: a `tool_search_call` names no tool, because on that wire the search *is* the tool.

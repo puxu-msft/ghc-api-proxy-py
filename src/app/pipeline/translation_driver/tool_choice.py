@@ -70,3 +70,35 @@ def intent_from_responses_tool_choice(
             if isinstance(name, str) and name:
                 return ToolChoiceIntent(mode="tool", name=name, disable_parallel=disable)
     return None
+
+
+def intent_from_chat_tool_choice(
+    choice: object, parallel_tool_calls: object
+) -> ToolChoiceIntent | None:
+    """Read supported Chat Completions spellings.
+
+    Chat's named function choice nests the function name below ``function``;
+    that is deliberately not accepted by the Responses reader.
+    """
+    disable = True if parallel_tool_calls is False else None
+    if choice == "auto":
+        return ToolChoiceIntent(mode="auto", disable_parallel=disable)
+    if choice == "required":
+        return ToolChoiceIntent(mode="any", disable_parallel=disable)
+    if choice == "none":
+        return ToolChoiceIntent(mode="none", disable_parallel=disable)
+    if not isinstance(choice, Mapping):
+        return None
+    entry = dict[str, Any](cast(Mapping[str, Any], choice))
+    if set(entry) != {"type", "function"} or entry.get("type") != "function":
+        return None
+    function = entry.get("function")
+    if not isinstance(function, Mapping):
+        return None
+    function_entry = dict[str, Any](cast(Mapping[str, Any], function))
+    if set(function_entry) != {"name"}:
+        return None
+    name = function_entry.get("name")
+    if isinstance(name, str) and name:
+        return ToolChoiceIntent(mode="tool", name=name, disable_parallel=disable)
+    return None

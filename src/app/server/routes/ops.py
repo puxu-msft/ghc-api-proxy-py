@@ -15,16 +15,93 @@ from urllib.parse import urlsplit, urlunsplit
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 from prometheus_client import REGISTRY, generate_latest
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.config.schema import GithubCopilotProviderConfig
 from app.core.chain import Chain
 from app.model_provider.base import ModelProvider
 from app.model_provider.copilot_pricing import pricing_for
+from app.observability.debug_capture import DebugCaptureRuleStore
 from app.pipeline.model_resolution import canonical
 from app.pipeline.routing import route_table
 from app.server.app_state import chain_of
 
 router = APIRouter()
+
+
+class _DebugCaptureRulePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str = Field(min_length=1)
+    model_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    agent_id: str | None = Field(default=None, min_length=1)
+
+    @field_validator("provider", "model_id", "session_id", "agent_id", mode="before")
+    @classmethod
+    def _strip_non_empty(cls, value: object) -> object:
+        if value is None:
+            return None
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        raise ValueError("capture rule conditions must be non-empty strings")
+
+
+def _debug_capture_rules(request: Request) -> DebugCaptureRuleStore | None:
+    return chain_of(request).debug_capture_rules
+
+
+def _debug_capture_rules_unavailable() -> JSONResponse:
+    return JSONResponse(
+        {
+            "error": {
+                "type": "proxy_internal_error",
+                "message": "debug capture rule store is not configured",
+            }
+        },
+        status_code=503,
+    )
+
+
+@router.get("/api/debug/capture-rules")
+async def list_debug_capture_rules(request: Request) -> JSONResponse:
+    """List the request predicates that currently enable full raw capture."""
+    store = _debug_capture_rules(request)
+    if store is None:
+        return _debug_capture_rules_unavailable()
+    return JSONResponse({"data": [rule.as_dict() for rule in store.list_rules()]})
+
+
+@router.post("/api/debug/capture-rules")
+async def create_debug_capture_rule(
+    payload: _DebugCaptureRulePayload,
+    request: Request,
+) -> JSONResponse:
+    """Create an idempotent provider/model/session capture predicate."""
+    store = _debug_capture_rules(request)
+    if store is None:
+        return _debug_capture_rules_unavailable()
+    rule, created = store.create_rule(**payload.model_dump())
+    return JSONResponse(rule.as_dict(), status_code=201 if created else 200)
+
+
+@router.delete("/api/debug/capture-rules/{rule_id}")
+async def delete_debug_capture_rule(rule_id: int, request: Request) -> Response:
+    """Remove one capture predicate; deleting a missing id is a client error."""
+    store = _debug_capture_rules(request)
+    if store is None:
+        return _debug_capture_rules_unavailable()
+    if not store.delete_rule(rule_id):
+        return JSONResponse(
+            {
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": f"debug capture rule {rule_id} does not exist",
+                }
+            },
+            status_code=404,
+        )
+    return Response(status_code=204)
 
 
 @router.get("/health/liveness")
@@ -105,7 +182,6 @@ async def status(request: Request) -> JSONResponse:
         {
             "ready": _is_ready(chain),
             "default_model_provider": chain.providers.default_name,
-            "fallback_model_provider": chain.providers.fallback_name or None,
             "providers": providers,
             "routes": routes,
         }

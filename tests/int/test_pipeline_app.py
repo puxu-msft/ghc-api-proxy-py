@@ -5,10 +5,8 @@ Upstream protocol behaviour is therefore the real thing rather than a friendlier
 """
 
 import asyncio
-import base64
 import contextlib
 import inspect
-import io
 import logging
 import re
 import ssl
@@ -29,7 +27,6 @@ import httpx2
 import orjson
 import pytest
 import structlog
-import zstandard
 from anthropic import AsyncAnthropic
 from count_worker_helper import blocked_count_job
 from fastapi import FastAPI
@@ -50,10 +47,10 @@ from app.core.chain import Chain
 from app.model_provider import GithubCopilotProvider, ModelDescriptor, ModelEndpoint, ModelProvider
 from app.model_provider.ghc_client import GhcApiClient, GhcClientConfig
 from app.model_provider.ghc_client.tokens import CopilotTokenManager
-from app.observability import rejection_capture
 from app.observability.active_requests import ActiveRequestRegistry
 from app.observability.footer import format_duration
 from app.observability.logging import setup_logging
+from app.observability.raw_capture import iter_raw_capture_records
 from app.observability.request_completion import RequestCompletionCoordinator
 from app.observability.request_log_file import request_logs_dir
 from app.observability.request_trace import REQUEST_LOGGER, RequestTrace
@@ -246,14 +243,24 @@ def test_opt_in_raw_capture_records_client_and_upstream_bodies(tmp_path: Path) -
         overrides={
             "observability": {
                 "raw_capture": {
-                    "enabled": True,
                     "directory": str(capture_dir),
+                    "rules_database": str(tmp_path / "rules.sqlite3"),
                 }
             }
         },
     )
 
     with client:
+        rule_response = client.post(
+            "/api/debug/capture-rules",
+            json={
+                "provider": "ghc",
+                "model_id": "claude-model",
+                "session_id": "session-capture",
+                "agent_id": "agent-capture",
+            },
+        )
+        assert rule_response.status_code == 201
         response = client.post(
             "/v1/messages",
             headers={
@@ -265,12 +272,9 @@ def test_opt_in_raw_capture_records_client_and_upstream_bodies(tmp_path: Path) -
 
     assert response.status_code == 200
     _chain_of(client).raw_capture.flush()  # type: ignore[union-attr]
-    files = list(capture_dir.glob("session-*/agent-*.jsonl.zst"))
+    files = list(capture_dir.glob("session-*/agent-*.cborseq.zst"))
     assert len(files) == 1
-    with files[0].open("rb") as stream:
-        compressed = stream.read()
-    with zstandard.ZstdDecompressor().stream_reader(io.BytesIO(compressed)) as reader:
-        records = [orjson.loads(line) for line in reader.read().splitlines()]
+    records = list(iter_raw_capture_records(files[0]))
 
     events = [record["event"] for record in records]
     assert "request.body" in events
@@ -279,7 +283,7 @@ def test_opt_in_raw_capture_records_client_and_upstream_bodies(tmp_path: Path) -
     assert "client.response.body" in events
     assert events.count("client.response.start") == 1
     request_record = next(record for record in records if record["event"] == "request.body")
-    assert orjson.loads(base64.b64decode(request_record["body"]))["model"] == "claude-model"
+    assert orjson.loads(request_record["body"])["model"] == "claude-model"
 
 
 def test_raw_capture_keeps_both_failed_account_switch_attempts(tmp_path: Path) -> None:
@@ -292,14 +296,24 @@ def test_raw_capture_keeps_both_failed_account_switch_attempts(tmp_path: Path) -
         overrides={
             "observability": {
                 "raw_capture": {
-                    "enabled": True,
                     "directory": str(capture_dir),
+                    "rules_database": str(tmp_path / "rules.sqlite3"),
                 }
             }
         },
     )
 
     with client:
+        rule_response = client.post(
+            "/api/debug/capture-rules",
+            json={
+                "provider": "ghc",
+                "model_id": "gpt-model",
+                "session_id": "session-capture",
+                "agent_id": "agent-capture",
+            },
+        )
+        assert rule_response.status_code == 201
         response = client.post(
             "/responses",
             headers={
@@ -320,14 +334,11 @@ def test_raw_capture_keeps_both_failed_account_switch_attempts(tmp_path: Path) -
 
     assert response.status_code == 401
     _chain_of(client).raw_capture.flush()  # type: ignore[union-attr]
-    files = list(capture_dir.glob("session-*/agent-*.jsonl.zst"))
-    with files[0].open("rb") as stream:
-        compressed = stream.read()
-    with zstandard.ZstdDecompressor().stream_reader(io.BytesIO(compressed)) as reader:
-        records = [orjson.loads(line) for line in reader.read().splitlines()]
+    files = list(capture_dir.glob("session-*/agent-*.cborseq.zst"))
+    records = list(iter_raw_capture_records(files[0]))
 
     requests = [
-        orjson.loads(base64.b64decode(record["body"]))
+        orjson.loads(record["body"])
         for record in records
         if record["event"] == "upstream.request.body"
     ]
@@ -335,6 +346,72 @@ def test_raw_capture_keeps_both_failed_account_switch_attempts(tmp_path: Path) -
     assert requests[0]["input"][0]["encrypted_content"] == "old-account-seal"
     assert "encrypted_content" not in requests[1]["input"][0]
     assert [record["status_code"] for record in records if record["event"] == "upstream.response.start"] == [401, 401]
+
+
+def test_raw_capture_is_selective_and_rule_api_is_persistent(tmp_path: Path) -> None:
+    capture_dir = tmp_path / "captures"
+    client, _ = make_client(
+        lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}),
+        overrides={
+            "observability": {
+                "raw_capture": {
+                    "directory": str(capture_dir),
+                    "rules_database": str(tmp_path / "rules.sqlite3"),
+                }
+            }
+        },
+    )
+
+    with client:
+        payload = {
+            "provider": "ghc",
+            "model_id": "claude-model",
+            "session_id": "session-to-capture",
+        }
+        created = client.post("/api/debug/capture-rules", json=payload)
+        duplicate = client.post("/api/debug/capture-rules", json=payload)
+        listed = client.get("/api/debug/capture-rules")
+        invalid = client.post(
+            "/api/debug/capture-rules",
+            json={**payload, "session_id": " "},
+        )
+        assert created.status_code == 201
+        assert duplicate.status_code == 200
+        assert listed.json()["data"][0]["provider"] == "ghc"
+        assert invalid.status_code == 422
+
+        unmatched = client.post(
+            "/v1/messages",
+            headers={"x-claude-code-session-id": "other-session"},
+            json={"model": "claude-model", "messages": []},
+        )
+        matched = client.post(
+            "/v1/messages",
+            headers={"x-claude-code-session-id": "session-to-capture"},
+            json={"model": "claude-model", "messages": []},
+        )
+
+        assert unmatched.status_code == 200
+        assert matched.status_code == 200
+        rule_id = created.json()["id"]
+        deleted = client.delete(f"/api/debug/capture-rules/{rule_id}")
+        assert deleted.status_code == 204
+        missing = client.delete(f"/api/debug/capture-rules/{rule_id}")
+        assert missing.status_code == 404
+        assert missing.json() == {
+            "error": {
+                "type": "invalid_request_error",
+                "message": f"debug capture rule {rule_id} does not exist",
+            }
+        }
+
+    _chain_of(client).raw_capture.flush()  # type: ignore[union-attr]
+    files = list(capture_dir.glob("session-*/agent-*.cborseq.zst"))
+    assert len(files) == 1
+    records = list(iter_raw_capture_records(files[0]))
+    assert {record["request_id"] for record in records} == {
+        records[0]["request_id"]
+    }
 
 
 def test_invalid_thinking_profile_regex_fails_while_building_the_chain() -> None:
@@ -1444,9 +1521,9 @@ def test_unknown_model_is_refused_before_the_network() -> None:
     client, seen = make_client(lambda _: httpx2.Response(200, json={}))
     response = client.post("/v1/messages", json={"model": "mystery", "messages": []})
 
-    # **404 rather than 400.** The model named is not in the catalog, which is "no such thing" and not "your body is malformed" — and `CapabilityMissing` above is exactly the distinction 400 was blurring. Neither SDK retries either status, so what changes is the exception class the client catches.
-    assert response.status_code == 404
-    assert response.json()["error"]["type"] == "not_found_error"
+    # Model mapping is fail-closed: an unavailable name is a malformed routing request, not a passthrough to the default provider.
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request_error"
     assert seen == []
 
 
@@ -1950,6 +2027,227 @@ def test_count_tokens_falls_back_to_the_local_estimate() -> None:
     assert body["input_tokens"] > 0
 
 
+def test_rule_selected_count_capture_keeps_each_upstream_retry(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    calls = 0
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            return httpx2.Response(500, json={"error": f"attempt-{calls}"})
+        return httpx2.Response(200, json={"input_tokens": 4242})
+
+    capture_dir = tmp_path / "captures"
+    client, seen = make_client(
+        handler,
+        overrides={
+            "observability": {
+                "raw_capture": {
+                    "directory": str(capture_dir),
+                    "rules_database": str(tmp_path / "rules.sqlite3"),
+                }
+            }
+        },
+    )
+
+    with caplog.at_level(logging.WARNING, logger="app.observability.raw_capture"), client:
+        rule = client.post(
+            "/api/debug/capture-rules",
+            json={
+                "provider": "ghc",
+                "model_id": "claude-model",
+                "session_id": "count-session",
+            },
+        )
+        response = client.post(
+            "/v1/messages/count_tokens",
+            headers={"x-claude-code-session-id": "count-session"},
+            json={"model": "claude-model", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert rule.status_code == 201
+        assert response.status_code == 200
+
+    _chain_of(client).raw_capture.flush()  # type: ignore[union-attr]
+    [capture_path] = capture_dir.glob("session-*/agent-*.cborseq.zst")
+    records = list(iter_raw_capture_records(capture_path))
+    starts = [
+        record["attempt"]
+        for record in records
+        if record["event"] == "upstream.attempt.start"
+    ]
+    response_statuses = [
+        record["status_code"]
+        for record in records
+        if record["event"] == "upstream.response.start"
+    ]
+    request_bodies = [
+        record["body"]
+        for record in records
+        if record["event"] == "upstream.request.body"
+    ]
+    assert starts == [0, 1, 2]
+    assert response_statuses == [500, 500, 200]
+    assert request_bodies == [request.content for request in seen]
+    response_ends = [
+        (record["attempt"], record["complete"])
+        for record in records
+        if record["event"] == "upstream.response.end"
+    ]
+    attempt_ends = [
+        (record["attempt"], record["complete"])
+        for record in records
+        if record["event"] == "upstream.attempt.end"
+    ]
+    assert response_ends == [(0, True), (1, True), (2, True)]
+    assert attempt_ends == [(0, False), (1, False), (2, True)]
+    assert not any(
+        "raw request capture incomplete at request completion" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_rule_selected_count_capture_marks_cleanup_failure_incomplete(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class FailingBufferedResponse(httpx2.Response):
+        async def aclose(self) -> None:
+            raise RuntimeError("count response cleanup failed")
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return FailingBufferedResponse(
+            200,
+            content=b'{"input_tokens": 4242}',
+            request=request,
+        )
+
+    capture_dir = tmp_path / "captures"
+    client, seen = make_client(
+        handler,
+        overrides={
+            "inbound": {"anthropic_count_tokens": {"max_retries": 0}},
+            "observability": {
+                "raw_capture": {
+                    "directory": str(capture_dir),
+                    "rules_database": str(tmp_path / "rules.sqlite3"),
+                }
+            },
+        },
+    )
+
+    with caplog.at_level(logging.WARNING, logger="app.observability.raw_capture"), client:
+        rule = client.post(
+            "/api/debug/capture-rules",
+            json={
+                "provider": "ghc",
+                "model_id": "claude-model",
+                "session_id": "count-cleanup-session",
+            },
+        )
+        response = client.post(
+            "/v1/messages/count_tokens",
+            headers={"x-claude-code-session-id": "count-cleanup-session"},
+            json={"model": "claude-model", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert rule.status_code == 201
+        assert response.status_code == 200
+        assert response.json()["estimated"] is True
+
+    assert len(seen) == 1
+    _chain_of(client).raw_capture.flush()  # type: ignore[union-attr]
+    [capture_path] = capture_dir.glob("session-*/agent-*.cborseq.zst")
+    records = list(iter_raw_capture_records(capture_path))
+    response_ends = [
+        (record["attempt"], record["complete"])
+        for record in records
+        if record["event"] == "upstream.response.end"
+    ]
+    attempt_ends = [
+        (record["attempt"], record["complete"])
+        for record in records
+        if record["event"] == "upstream.attempt.end"
+    ]
+    assert response_ends == [(0, False)]
+    assert attempt_ends == [(0, False)]
+    response_end_index = next(
+        index
+        for index, record in enumerate(records)
+        if record["event"] == "upstream.response.end"
+    )
+    attempt_end_index = next(
+        index
+        for index, record in enumerate(records)
+        if record["event"] == "upstream.attempt.end"
+    )
+    assert response_end_index < attempt_end_index
+    assert [
+        record["body"]
+        for record in records
+        if record["event"] == "upstream.response.body"
+    ] == [b'{"input_tokens": 4242}']
+    completion_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if "raw request capture incomplete at request completion" in record.getMessage()
+    ]
+    assert len(completion_messages) == 1
+    assert "reason=upstream_incomplete" in completion_messages[0]
+    assert "response_body_capture_complete=false" in completion_messages[0]
+    assert "forensic_replay_complete=false" in completion_messages[0]
+
+
+def test_rule_selected_rejection_capture_keeps_upstream_wire_evidence(
+    tmp_path: Path,
+) -> None:
+    capture_dir = tmp_path / "captures"
+    client, seen = make_client(
+        lambda _: httpx2.Response(
+            400,
+            json={"error": {"message": "request rejected"}},
+        ),
+        overrides={
+            "observability": {
+                "raw_capture": {
+                    "directory": str(capture_dir),
+                    "rules_database": str(tmp_path / "rules.sqlite3"),
+                }
+            }
+        },
+    )
+
+    with client:
+        rule = client.post(
+            "/api/debug/capture-rules",
+            json={
+                "provider": "ghc",
+                "model_id": "claude-model",
+                "session_id": "rejection-session",
+            },
+        )
+        response = client.post(
+            "/v1/messages",
+            headers={"x-claude-code-session-id": "rejection-session"},
+            json={"model": "claude-model", "messages": []},
+        )
+        assert rule.status_code == 201
+        assert response.status_code == 400
+
+    _chain_of(client).raw_capture.flush()  # type: ignore[union-attr]
+    [capture_path] = capture_dir.glob("session-*/agent-*.cborseq.zst")
+    records = list(iter_raw_capture_records(capture_path))
+    events = [record["event"] for record in records]
+    assert "upstream.request.body" in events
+    assert "upstream.response.start" in events
+    assert "upstream.response.body" in events
+    request_record = next(
+        record for record in records if record["event"] == "upstream.request.body"
+    )
+    assert request_record["body"] == seen[-1].read()
+
+
 def test_count_tokens_translated_responses_treats_special_spellings_as_text() -> None:
     client, seen = make_client(
         lambda _: httpx2.Response(599, json={"error": "must not be called"}),
@@ -2330,49 +2628,20 @@ def test_an_upstream_count_does_not_run_local_calibration(tmp_path: Path) -> Non
     assert not state.exists()
 
 
-def test_a_refused_body_is_kept_where_someone_can_read_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Proves the note is written on the path a request actually takes, not merely that a function can write one.
-
-    Two investigations in one day had to reconstruct the outbound request from the client's own transcripts, because nothing here kept it. A capture module nobody calls looks identical to a working one from every other angle — which is the failure this repository has already had three times — so this asserts through the app, and on the body as it went out rather than as it arrived.
-    """
-    monkeypatch.setattr(rejection_capture, "user_data_path", lambda: tmp_path)
-    refusal = '{"type":"error","error":{"message":"messages: text content blocks must be non-empty"}}'
-    client, seen = make_client(lambda _: httpx2.Response(400, text=refusal))
-
-    response = client.post(
-        "/v1/messages",
-        json={
-            "model": "claude-model",
-            "messages": [
-                {"role": "user", "content": [{"type": "text", "text": "hi"}, {"type": "text", "text": ""}]}
-            ],
+def test_an_unmatched_refusal_does_not_write_a_legacy_capture(tmp_path: Path) -> None:
+    """A 4xx without a debug rule must not persist a JSON body outside CBOR capture."""
+    capture_dir = tmp_path / "captures"
+    client, _ = make_client(
+        lambda _: httpx2.Response(400, text='{"error":"must not be persisted"}'),
+        overrides={
+            "observability": {
+                "raw_capture": {
+                    "directory": str(capture_dir),
+                    "rules_database": str(tmp_path / "rules.sqlite3"),
+                }
+            }
         },
     )
-
-    assert response.status_code == 400
-    captures = list((tmp_path / "rejected").glob("*.json"))
-    assert len(captures) == 1, f"nothing kept the refused body: {captures}"
-    record = orjson.loads(captures[0].read_bytes())
-    assert record["status"] == 400
-    assert "text content blocks must be non-empty" in record["upstream"]
-    # The blank block is gone from what was sent, so the capture must show it gone too: this is the body upstream refused, not the one the client offered.
-    assert record["payload"]["messages"][0]["content"] == [{"type": "text", "text": "hi"}]
-    assert record["payload"] == orjson.loads(seen[-1].read())
-
-
-def test_a_refused_body_is_kept_as_the_bytes_that_actually_crossed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The capture must hold the wire body, not only a dict that would have to be serialized again to become one.
-
-    `payload` beside it is the request as the pipeline built it, and re-encoding that dict is a guess at what went out: key order, separators and whatever the SDK did on the way are all decided after the pipeline is finished with it. Only the *length* of the real bytes was ever recorded, on the completion line, which cannot be compared against anything.
-
-    Asserted through the app for the same reason as the test above — the bytes are read at the SDK error boundary, and a boundary nobody reaches looks exactly like a working one — and against `seen`, which is httpx's own record of the request it sent.
-    """
-    monkeypatch.setattr(rejection_capture, "user_data_path", lambda: tmp_path)
-    client, seen = make_client(lambda _: httpx2.Response(400, text='{"error":"no"}'))
 
     response = client.post(
         "/v1/messages",
@@ -2380,13 +2649,8 @@ def test_a_refused_body_is_kept_as_the_bytes_that_actually_crossed(
     )
 
     assert response.status_code == 400
-    captures = list((tmp_path / "rejected").glob("*.json"))
-    assert len(captures) == 1, f"nothing kept the refused body: {captures}"
-    record = orjson.loads(captures[0].read_bytes())
-    wire = seen[-1].read()
-    assert wire, "this test is only meaningful if a body really went out"
-    assert record["sent"].encode() == wire
-    assert record["sent_bytes"] == len(wire)
+    assert not list(capture_dir.rglob("*.cborseq.zst"))
+    assert not list(tmp_path.rglob("rejected/*.json"))
 
 
 def thinking(text: str = "t", signature: str = "sig") -> dict[str, Any]:
@@ -2900,7 +3164,7 @@ def test_a_count_upstream_could_not_answer_is_reported_as_an_estimate(request_lo
     lines = _request_lines(caplog.records)
     assert len(lines) == 1
     assert lines[0].startswith("H1 200 anthropic-messages-count-tokens/claude-model[none] ")
-    assert lines[0].endswith("provider(ghc-failed,local)")
+    assert "provider(ghc-failed,local)" in lines[0]
 
 
 def test_a_count_with_no_upstream_counter_says_that_rather_than_a_failure(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
@@ -2943,7 +3207,7 @@ def test_a_count_upstream_answered_uselessly_keeps_the_leg_it_flew(request_log: 
     assert len(lines) == 1
     # Both legs and both directions, next to the counter that says the number on the line is not upstream's.
     assert lines[0].startswith("H1/H1 200 anthropic-messages-count-tokens/claude-model[none] ")
-    assert lines[0].endswith("provider(ghc-failed,local)")
+    assert "provider(ghc-failed,local)" in lines[0]
     assert re.search(r"[↑>][\d.]+(B|KiB|MiB)\b", lines[0])
     assert re.search(r"[↓<][\d.]+(B|KiB|MiB)\b", lines[0])
 
@@ -3068,11 +3332,11 @@ def test_buffered_responses_status_error_keeps_body_and_error_summary(
     assert observed["error_summary"] == {
         "type": "server_error",
         "code": "status_error",
-        "message": "provider rejected this response",
+        "message": "upstream error message present",
     }
     assert record["status"] == "fail"
     assert record["stop_reason"] == "error"
-    assert "provider rejected this response" in record["detail"]
+    assert record["detail"] == "upstream request failed with status 400"
     line = _request_lines(caplog.records)[-1]
     assert "error(status_error)" in line
 
@@ -3120,7 +3384,7 @@ def test_streamed_responses_completed_with_error_uses_one_error_projection(
     assert record["observation"]["response"]["error_summary"]["code"] == (
         "status_error"
     )
-    assert "provider response failed: provider completed with an error" in record[
+    assert "provider response failed: upstream error message present" in record[
         "detail"
     ]
     assert "error(status_error)" in _request_lines(caplog.records)[-1]
@@ -3177,13 +3441,16 @@ def test_a_refused_request_is_reported_with_its_route_and_reason(request_log: No
     client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
 
     with caplog.at_level(logging.INFO):
-        client.post("/v1/messages", json={"model": "no-such-model", "messages": []})
+        response = client.post("/v1/messages", json={"model": "no-such-model", "messages": []})
 
     lines = _request_lines(caplog.records)
     assert len(lines) == 1
-    # A failure keeps `METHOD /path`, because that is what has to be reproduced, and ends in the reason. One protocol label rather than a pair: this request never reached upstream, so there is no second leg to name.
-    assert lines[0].startswith("H1 404 POST /v1/messages ")
-    assert "no-such-model" in lines[0]
+    # The client wire error retains the rejected model while ordinary observability only carries the safe failure type.
+    assert response.status_code == 400
+    assert "no-such-model" in response.json()["error"]["message"]
+    assert lines[0].startswith("H1 400 POST /v1/messages ")
+    assert "app.pipeline.routing.RoutingError" in lines[0]
+    assert "no-such-model" not in lines[0]
 
 
 def test_an_upstream_refusal_is_described_by_the_same_error_info_on_the_line_and_wire(
@@ -3208,7 +3475,8 @@ def test_an_upstream_refusal_is_described_by_the_same_error_info_on_the_line_and
     (line, status), = _request_outcomes(caplog.records)
     assert status == "fail"
     assert message == f"upstream returned 400: {upstream_message}"
-    assert f": {message} req=" in line
+    assert "upstream request failed with status 400 req=" in line
+    assert upstream_message not in line
     assert "Error code: 400" not in line
 
 
@@ -3226,7 +3494,10 @@ def test_a_request_that_raised_on_its_way_out_still_writes_its_one_line(
     client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
 
     def exploding(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
-        raise RuntimeError("nobody anticipated this")
+        try:
+            raise ValueError("chain-secret")
+        except ValueError as cause:
+            raise RuntimeError("outer-secret") from cause
 
     monkeypatch.setattr("app.server.routes.inference.response_payload", exploding)
 
@@ -3238,8 +3509,11 @@ def test_a_request_that_raised_on_its_way_out_still_writes_its_one_line(
     assert len(outcomes) == 1, "an exception on the way out is an exit path and owes exactly one line"
     line, status = outcomes[0]
     assert status == "fail"
-    # The exception is named, not merely alluded to. `str(RuntimeError())` is empty and would leave the detail as a colon with nothing after it, so the line quotes the `repr` — which is why the class name appears here even though this one does have a message.
-    assert "request failed before a response: RuntimeError" in line
+    # The root exception type remains visible for diagnosis, but neither its message nor linked exception text may cross into ordinary request observability.
+    assert "request failed before a response: builtins.RuntimeError" in line
+    assert "outer-secret" not in line
+    assert "chain-secret" not in line
+    assert "ValueError" not in line
     snapshot = _registry(client).observation_snapshot()
     assert snapshot.live == (), "and the slot is still released"
     assert len(snapshot.completed) == 1
@@ -3251,7 +3525,13 @@ def test_a_request_that_raised_on_its_way_out_still_writes_its_one_line(
     delivery = record["observation"]["delivery"]
     assert delivery["state"] == "not_started"
     assert delivery["intended_http_status"] is None
-    assert delivery["failure"]["origin"] == "dispatch"
+    failure = delivery["failure"]
+    assert failure["origin"] == "dispatch"
+    assert failure["type"] == "RuntimeError"
+    assert failure["message"] == "builtins.RuntimeError"
+    serialized_completion = orjson.dumps(record)
+    assert b"outer-secret" not in serialized_completion
+    assert b"chain-secret" not in serialized_completion
     assert record["observation"]["timings"]["response_ready_s"] is None
 
 
@@ -3345,11 +3625,13 @@ def _request_for_direct_serve(client: TestClient) -> Request:
     )
 
 
-async def test_disconnect_records_an_independent_failure_without_escaping_the_app(
+async def test_disconnect_cleanup_failure_projects_metadata_without_leaking_the_error_or_note(
     request_log: None,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     client, _ = make_client(lambda _: httpx2.Response(200, json={"id": "msg_1", "content": []}))
-    context_failure = RuntimeError("independent context failure")
+    context_failure = RuntimeError("cleanup-message-secret")
+    context_failure.add_note("cleanup-note-secret")
     cancellation = asyncio.CancelledError()
     failure = ClientDisconnect()
     failure.__cause__ = cancellation
@@ -3364,11 +3646,12 @@ async def test_disconnect_records_an_independent_failure_without_escaping_the_ap
         del request, chain, trace, completion
         raise failure
 
-    with pytest.MonkeyPatch.context() as patch:
+    with caplog.at_level(logging.INFO), pytest.MonkeyPatch.context() as patch:
         patch.setattr(inference_route, "_dispatch", dispatch)
         response = await inference_route.serve(_request_for_direct_serve(client))
 
     assert response.status_code == 499
+    assert context_failure.__notes__ == ["cleanup-note-secret"]
     snapshot = _registry(client).observation_snapshot()
     assert snapshot.live == ()
     assert len(snapshot.completed) == 1
@@ -3380,8 +3663,16 @@ async def test_disconnect_records_an_independent_failure_without_escaping_the_ap
     additional = record.delivery.additional_failures[0]
     assert additional.origin.value == "cleanup"
     assert additional.type == "RuntimeError"
-    assert additional.message == "independent context failure"
-    assert "cleanup also failed: independent context failure" in record.request_line().detail
+    assert additional.message == "builtins.RuntimeError"
+    assert additional.notes == ("<exception notes present>",)
+    assert "cleanup also failed: builtins.RuntimeError; <exception notes present>" in record.request_line().detail
+    lines = _request_lines(caplog.records)
+    assert len(lines) == 1
+    assert "cleanup-message-secret" not in lines[0]
+    assert "cleanup-note-secret" not in lines[0]
+    serialized_completion = orjson.dumps(_records()[0])
+    assert b"cleanup-message-secret" not in serialized_completion
+    assert b"cleanup-note-secret" not in serialized_completion
 
 
 async def test_ssl_want_read_cleanup_on_disconnect_is_observed_without_escaping(
@@ -3422,9 +3713,8 @@ async def test_ssl_want_read_cleanup_on_disconnect_is_observed_without_escaping(
     additional = record.delivery.additional_failures[0]
     assert additional.origin.value == "cleanup"
     assert additional.type == "SSLWantReadError"
-    assert additional.message is not None
-    assert "The operation did not complete (read)" in additional.message
-    assert "cleanup also failed: The operation did not complete (read)" in record.request_line().detail
+    assert additional.message == "ssl.SSLWantReadError"
+    assert "cleanup also failed: ssl.SSLWantReadError" in record.request_line().detail
 
 
 async def test_nested_group_notes_are_normalized_and_preserved_after_disconnect(
@@ -3465,13 +3755,14 @@ async def test_nested_group_notes_are_normalized_and_preserved_after_disconnect(
     additional = record.delivery.additional_failures[0]
     assert additional.origin.value == "cleanup"
     assert additional.type == "ExceptionGroup"
-    assert additional.notes == ("nested group note",)
-    assert "nested group note" in record.request_line().detail
+    assert additional.message == "builtins.ExceptionGroup"
+    assert additional.notes == ("<exception notes present>",)
+    assert "cleanup also failed: builtins.ExceptionGroup; <exception notes present>" in record.request_line().detail
     records = _records()
     assert len(records) == 1
     delivery = cast(dict[str, Any], records[0]["observation"])["delivery"]
     serialized = cast(dict[str, Any], cast(dict[str, Any], delivery)["additional_failures"][0])
-    assert serialized["notes"] == ["nested group note"]
+    assert serialized["notes"] == ["<exception notes present>"]
 
 
 async def test_unrenderable_disconnect_secondary_is_recorded_without_escaping(
@@ -3515,7 +3806,8 @@ async def test_unrenderable_disconnect_secondary_is_recorded_without_escaping(
     additional = record.delivery.additional_failures[0]
     assert additional.origin.value == "cleanup"
     assert additional.type == "UnrenderableCleanupError"
-    assert additional.message is None
+    assert additional.message is not None
+    assert additional.message.endswith("UnrenderableCleanupError")
     detail = record.request_line().detail
     assert "cleanup also failed: " in detail
     assert detail.endswith("UnrenderableCleanupError")
@@ -3555,13 +3847,13 @@ async def test_disconnect_notes_remain_observable_after_the_exception_is_consume
     record = snapshot.completed[0]
     assert record.status == "gone"
     assert record.delivery.failure is not None
-    assert record.delivery.failure.notes == ("cleanup also failed: note-only cleanup",)
-    assert record.request_line().detail.endswith("cleanup also failed: note-only cleanup")
+    assert record.delivery.failure.notes == ("<exception notes present>",)
+    assert record.request_line().detail.endswith("cleanup note: <exception notes present>")
     records = _records()
     assert len(records) == 1
     delivery = cast(dict[str, Any], records[0]["observation"])["delivery"]
     serialized_failure = cast(dict[str, Any], cast(dict[str, Any], delivery)["failure"])
-    assert serialized_failure["notes"] == ["cleanup also failed: note-only cleanup"]
+    assert serialized_failure["notes"] == ["<exception notes present>"]
 
 
 def test_a_streaming_request_reports_what_it_received_from_upstream(request_log: None, caplog: pytest.LogCaptureFixture) -> None:
@@ -3598,7 +3890,7 @@ def test_a_streaming_request_reports_what_it_received_from_upstream(request_log:
             False,
             False,
             "fail",
-            "stream failed before a terminal event: upstream tore",
+            "stream failed before a terminal event: upstream stream failure: builtins.ConnectionError",
             id="upstream-tear",
         ),
         pytest.param(
@@ -3643,6 +3935,9 @@ def test_one_shot_accounting_reports_how_delivery_actually_ended(
         drained=drained,
         failure=failure,
     )
+    if failure is not None:
+        accounting.upstream_body_started = True
+        accounting.failure_provenance = lambda _error: True
     if completion_accepted:
         accounting.completion_delivery.accept(True)
     chain.active_requests.add(trace.request_id)
@@ -3712,7 +4007,8 @@ async def test_a_client_deadline_is_accounted_as_the_failure_its_frame_reports(
     assert b"client_deadline_exceeded" in b"".join(chunks)
     (line, status), = _request_outcomes(caplog.records)
     assert status == "fail"
-    assert "client request exceeded its deadline" in line
+    assert "app.streaming.deadline.ClientDeadlineError" in line
+    assert "client request exceeded its deadline" not in line
     assert "upstream stream ended without a terminal event" not in line
 
 
@@ -3762,6 +4058,7 @@ async def test_an_upstream_that_tore_says_so_and_says_what_broke(
     accounting = _StreamAccounting(
         chain=chain, request_id="req_1", trace=trace, completion=completion, status_code=200, assembler=assembler
     )
+    accounting.failure_provenance = lambda _error: True
     chain.active_requests.add("req_1")
 
     async def tears_after_the_first_block() -> AsyncIterator[bytes]:
@@ -3790,7 +4087,9 @@ async def test_an_upstream_that_tore_says_so_and_says_what_broke(
 
     (line, status), = _request_outcomes(caplog.records)
     assert status == "fail"
-    assert "connection reset by peer" in line, f"the only record of what broke was dropped: {line}"
+    assert "upstream request failed before a response" in line, (
+        f"the safe reason for what broke was dropped: {line}"
+    )
     # Neither of the other two endings: upstream did not run out, and nobody on this side walked away.
     assert "upstream stream ended without a terminal event" not in line
     assert "delivery stopped before upstream finished" not in line
@@ -3820,6 +4119,7 @@ async def test_a_tear_after_the_stop_reason_is_still_a_tear(
         yield sse_upstream_without_message_stop("first", "second")
         raise httpx2.ReadError("connection reset by peer")
 
+    accounting.failure_provenance = lambda _error: True
     delivery = _tracked_delivery(
         delivering(
             tears_after_its_stop_reason(),
@@ -3841,7 +4141,7 @@ async def test_a_tear_after_the_stop_reason_is_still_a_tear(
     completion.publish()
     (line, status), = _request_outcomes(caplog.records)
     assert status == "fail", f"a tear was reported as a clean finish: {line}"
-    assert "connection reset by peer" in line
+    assert "upstream request failed before a response" in line
 
 
 def test_a_stream_cut_after_its_stop_reason_is_not_called_truncated(
@@ -4622,11 +4922,9 @@ async def test_disconnect_before_upstream_headers_cancels_the_dispatch() -> None
     assert additional.origin.value == "cleanup"
     assert additional.category.value == "error"
     assert additional.type == "ExceptionGroup"
-    assert additional.message is not None
-    assert "provider cleanup replaced cancellation" in additional.message
-    assert additional.notes == ("provider cleanup note",)
-    assert "cleanup also failed: provider cleanup replaced cancellation" in record.request_line().detail
-    assert "provider cleanup note" in record.request_line().detail
+    assert additional.message == "builtins.ExceptionGroup"
+    assert additional.notes == ("<exception notes present>",)
+    assert "cleanup also failed: builtins.ExceptionGroup; <exception notes present>" in record.request_line().detail
     assert len(record.interruptions) == 1
     interruption = record.interruptions[0]
     assert interruption.kind.value == "http_disconnect"
@@ -5276,7 +5574,7 @@ def test_an_account_switch_retries_connection_bound_input_ids_once() -> None:
                 401,
                 json={"error": {"message": "input item ID does not belong to this connection"}},
             )
-            if orjson.loads(request.content)["input"][0].get("id")
+            if orjson.loads(request.content)["input"][0].get("encrypted_content")
             else httpx2.Response(200, json={"id": "resp_recovered", "output": []})
         )
     )
@@ -5294,7 +5592,8 @@ def test_an_account_switch_retries_connection_bound_input_ids_once() -> None:
     first_input = orjson.loads(seen[0].content)["input"]
     recovered_input = orjson.loads(seen[1].content)["input"]
     assert first_input == [item]
-    assert "id" not in recovered_input[0]
+    assert recovered_input[0]["id"] == item["id"]
+    assert "encrypted_content" not in recovered_input[0]
 
 
 def test_an_account_switch_can_strip_all_input_item_ids() -> None:
@@ -5304,7 +5603,10 @@ def test_an_account_switch_can_strip_all_input_item_ids() -> None:
                 401,
                 json={"error": {"message": "input item ID does not belong to this connection"}},
             )
-            if orjson.loads(request.content)["input"][0].get("id")
+            if any(
+                "id" in item or "encrypted_content" in item
+                for item in orjson.loads(request.content)["input"]
+            )
             else httpx2.Response(200, json={"id": "resp_recovered", "output": []})
         ),
         overrides={
@@ -5318,13 +5620,23 @@ def test_an_account_switch_can_strip_all_input_item_ids() -> None:
         "/responses",
         json={
             "model": "gpt-model",
-            "input": [{"type": "message", "id": "msg_from_previous_account"}],
+            "input": [
+                {"type": "message", "id": "msg_from_previous_account"},
+                {
+                    "type": "reasoning",
+                    "id": "rs_from_previous_account",
+                    "encrypted_content": "old-account-seal",
+                },
+            ],
         },
     )
 
     assert response.status_code == 200
     assert len(seen) == 2
-    assert "id" not in orjson.loads(seen[1].content)["input"][0]
+    recovered_input = orjson.loads(seen[1].content)["input"]
+    assert "id" not in recovered_input[0]
+    assert "id" not in recovered_input[1]
+    assert "encrypted_content" not in recovered_input[1]
 
 
 def test_an_account_switch_can_abandon_connection_bound_input_ids() -> None:
@@ -5444,6 +5756,14 @@ def test_the_repair_is_opt_in_end_to_end(
     assert forwarded["input"] == [expected], why
 
 
+def test_the_encrypted_reasoning_include_default_is_passthrough() -> None:
+    """The schema default itself, asserted where the unit tests cannot reach it either.
+
+    The parametrised cases below hold the wiring; this one holds the default. Both halves are needed: a default flipped to `always_add` would turn the no-include case red, one flipped to `always_strip` would not — but it would turn this assertion red, and the strip is the silent failure mode (a native client's seal quietly stops round-tripping while everything else stays green).
+    """
+    assert ProxyConfig().hook_fix_responses_request.reasoning_encrypted_include == "passthrough"
+
+
 @pytest.mark.parametrize(
     ("overrides", "client_include", "expected", "why"),
     [
@@ -5460,13 +5780,19 @@ def test_the_repair_is_opt_in_end_to_end(
             "the shipped default strips nothing: the client's own include goes up verbatim",
         ),
         (
-            {"reasoning_encrypted_include": "always_add"},
+            None,
+            ["reasoning.encrypted_content"],
+            ["reasoning.encrypted_content"],
+            "the shipped default strips nothing: an include that already names the seal goes up verbatim",
+        ),
+        (
+            {"hook_fix_responses_request": {"reasoning_encrypted_include": "always_add"}},
             None,
             ["reasoning.encrypted_content"],
             "always_add asks for the seal on a request that carried no include",
         ),
         (
-            {"reasoning_encrypted_include": "always_strip"},
+            {"hook_fix_responses_request": {"reasoning_encrypted_include": "always_strip"}},
             ["OTHER", "reasoning.encrypted_content"],
             ["file_search_call.results"],
             "always_strip takes the entry and keeps the client's other includables",
@@ -5479,7 +5805,7 @@ def test_the_encrypted_reasoning_include_is_configured_end_to_end(
     expected: list[str] | None,
     why: str,
 ) -> None:
-    """`model.reasoning_encrypted_include`, end to end: config key → chain → the bytes upstream receives.
+    """`reasoning_encrypted_include`, end to end: config key → chain → the bytes upstream receives.
 
     The unit tests beside `reasoning_encrypted_include.py` hold each policy against each body shape; what this adds is that the key is wired and that the shipped default really is passthrough — neither of which a unit test calling the function with a `policy` argument can say. The request is a native `/responses` body because that is the leg where the client's own `include` exists to be forwarded or stripped; the translated Anthropic leg composes no `include` of its own.
     """
@@ -5876,7 +6202,8 @@ def test_a_direct_buffered_provider_failure_is_not_logged_as_an_http_success(
     assert "POST /responses gpt-model" in line
     assert f" {expected}" in line
     if provider_error is not None:
-        assert provider_error["message"] in line
+        assert "upstream error message present" in line
+        assert provider_error["message"] not in line
     assert " req=" in line
     assert "completed" not in line
 
@@ -6029,6 +6356,9 @@ async def test_a_body_that_fails_to_close_is_still_accounted_for() -> None:
 
     class _Accounting:
         completion = _Completion()
+
+        def note_unstarted_upstream_body_cleanup(self) -> None:
+            pass
 
         def settle(self) -> None:
             finished.append("settled")
@@ -6236,6 +6566,74 @@ def test_the_configured_header_timeout_reaches_the_driver() -> None:
 
     assert response.status_code != 200
     assert "no response headers within 1s" in response.text
+
+
+def test_header_timeout_keeps_transport_boundary_raw_capture(tmp_path: Path) -> None:
+    transport_bodies: list[bytes] = []
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        transport_bodies.append(request.content)
+        await asyncio.sleep(1.5)
+        return httpx2.Response(200, json={"id": "unreachable", "content": []})
+
+    capture_dir = tmp_path / "captures"
+    client, seen = make_client(
+        cast(Callable[[httpx2.Request], httpx2.Response], handler),
+        mappings={"timeout-source-model": "gpt-model"},
+        overrides={
+            "observability": {
+                "raw_capture": {
+                    "directory": str(capture_dir),
+                    "rules_database": str(tmp_path / "rules.sqlite3"),
+                }
+            },
+            "upstream_request_timeouts": {"response_header": 1},
+            "upstream_request_retry": {"max_total": 0},
+        },
+    )
+
+    with client:
+        rule = client.post(
+            "/api/debug/capture-rules",
+            json={
+                "provider": "ghc",
+                "model_id": "gpt-model",
+                "session_id": "timeout-capture-session",
+            },
+        )
+        response = client.post(
+            "/v1/messages",
+            headers={"x-claude-code-session-id": "timeout-capture-session"},
+            json={
+                "model": "timeout-source-model",
+                "messages": [{"role": "user", "content": "timeout capture source"}],
+            },
+        )
+        assert rule.status_code == 201
+
+    assert response.status_code != 200
+    assert "no response headers within 1s" in response.text
+    _chain_of(client).raw_capture.flush()  # type: ignore[union-attr]
+    [capture_path] = capture_dir.glob("session-*/agent-*.cborseq.zst")
+    records = list(iter_raw_capture_records(capture_path))
+    capture_bodies = [
+        record["body"]
+        for record in records
+        if record["event"] == "upstream.request.body"
+    ]
+    ingress_body = b"".join(
+        cast(bytes, record["body"])
+        for record in records
+        if record["event"] == "request.body"
+    )
+
+    assert len(transport_bodies) == 1
+    assert transport_bodies[0]
+    assert ingress_body
+    assert ingress_body != transport_bodies[0]
+    # `seen` excludes auth and startup catalog traffic; the capture must contain only the exact inference send that reached the transport before headers timed out.
+    assert [request.content for request in seen] == transport_bodies
+    assert capture_bodies == transport_bodies
 
 
 def test_a_slow_answer_is_left_alone_when_no_header_timeout_is_set() -> None:
@@ -7234,6 +7632,109 @@ def test_a_torn_stream_the_client_never_saw_is_replayed_end_to_end() -> None:
     assert record["observation"]["timings"]["upstream_timing_attempt"] == 2
 
 
+def test_each_successful_header_attempt_records_its_body_progress_before_read_timeout(
+    request_log: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """HTTP 200 is only a header fact; each replay still needs its own body evidence."""
+    calls: list[int] = []
+    first_chunk = (
+        b'event: content_block_start\n'
+        b'data: {"index":0,"content_block":{"type":"text"}}\n\n'
+    )
+
+    async def some_bytes_then_timeout() -> AsyncIterator[bytes]:
+        yield first_chunk
+        raise httpx2.ReadTimeout("")
+
+    async def no_bytes_then_timeout() -> AsyncIterator[bytes]:
+        if False:
+            yield b"unreachable"
+        raise httpx2.ReadTimeout("")
+
+    def upstream(_: httpx2.Request) -> httpx2.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            body: AsyncIterator[bytes] | bytes = some_bytes_then_timeout()
+        elif len(calls) == 2:
+            body = no_bytes_then_timeout()
+        else:
+            body = sse_upstream("kept")
+        return httpx2.Response(
+            200,
+            content=body,
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client, _ = make_client(
+        upstream,
+        overrides={
+            "reactive_rate_limiter": {
+                "failure_backoff_base_sec": 0,
+                "failure_backoff_max_sec": 0,
+            }
+        },
+    )
+    delivered = _delivered(client)
+
+    assert b"kept" in delivered
+    assert len(calls) == 3
+    record = _records()[-1]
+    attempts = record["observation"]["upstream_body_attempts"]
+    assert all(
+        set(attempt)
+        == {
+            "attempt",
+            "status_code",
+            "body_started_s",
+            "first_byte_s",
+            "last_byte_s",
+            "final_pull_started_s",
+            "ended_s",
+            "final_pull_s",
+            "tail_gap_s",
+            "body_bytes",
+            "chunks",
+            "outcome",
+            "exception_module",
+            "exception_type",
+        }
+        for attempt in attempts
+    )
+    assert [
+        (
+            attempt["attempt"],
+            attempt["status_code"],
+            attempt["body_bytes"],
+            attempt["chunks"],
+            attempt["outcome"],
+            attempt["exception_type"],
+        )
+        for attempt in attempts
+    ] == [
+        (1, 200, len(first_chunk), 1, "error", httpx2.ReadTimeout.__qualname__),
+        (2, 200, 0, 0, "error", httpx2.ReadTimeout.__qualname__),
+        (3, 200, len(sse_upstream("kept")), 1, "complete", None),
+    ]
+    assert attempts[0]["first_byte_s"] is not None
+    assert attempts[0]["ended_s"] >= attempts[0]["last_byte_s"]
+    assert attempts[0]["exception_module"] == httpx2.ReadTimeout.__module__
+    assert attempts[1]["first_byte_s"] is None
+    assert attempts[1]["last_byte_s"] is None
+    assert attempts[1]["ended_s"] >= attempts[1]["body_started_s"]
+    assert attempts[1]["exception_module"] == httpx2.ReadTimeout.__module__
+    assert b"content_block_start" not in orjson.dumps(attempts)
+    lines = _request_lines(caplog.records)
+    assert len(lines) == 1
+    assert re.search(r"body-attempts=1:200/[0-9.]+(?:B|KiB)/error@[0-9.]+(?:ms|s)", lines[0])
+    assert re.search(r"2:200/0B/error@[0-9.]+(?:ms|s)", lines[0])
+    assert re.search(r"3:200/[0-9.]+(?:B|KiB)/complete@[0-9.]+(?:ms|s)", lines[0])
+    assert (
+        "retries=2 after upstream request failed before a response; "
+        "upstream request failed before a response"
+    ) in lines[0]
+
+
 def test_a_replay_on_the_translation_leg_sends_the_conversation_again(
     request_log: None,
     caplog: pytest.LogCaptureFixture,
@@ -7649,15 +8150,13 @@ def test_a_replay_is_reported_on_the_request_line(
     # And what it replaced. A transparent replay that succeeds neither hands over nor re-raises, so `attempts` was the whole account and the exception that caused it was gone — invisible to the client by design, invisible to the record by accident.
     replaced = cast(list[str], record["replaced_failures"])
     assert len(replaced) == 1
-    assert "RemoteProtocolError" in replaced[0]
-    assert "peer closed the connection" in replaced[0]
+    assert replaced[0] == "upstream request failed before a response"
     line = next(item for item in _request_lines(caplog.records) if "retries=" in item)
     last_retry = cast(float, record["last_retry_duration_s"])
     total = cast(float, record["duration_s"])
     assert f"{format_duration(last_retry)}/{format_duration(total)}" in line
     # And on the line this test is named for. A review deleted the rendering branch and every test here stayed green, because they all read the structured record instead.
-    assert "RemoteProtocolError" in line
-    assert "peer closed the connection" in line
+    assert "upstream request failed before a response" in line
 
 
 def test_a_tear_after_the_turn_finished_is_recorded_without_being_called_a_failure(
@@ -7698,12 +8197,11 @@ def test_a_tear_after_the_turn_finished_is_recorded_without_being_called_a_failu
 
     record = _records()[-1]
     # Its own field rather than `detail`: `detail` says how the turn came out, and this says what the connection did afterwards. They are not alternatives — see the `max_tokens` case above, where both are set.
-    assert "RemoteProtocolError" in record["tore_after_terminal"]
-    assert "peer reset the connection after its last frame" in record["tore_after_terminal"]
+    assert record["tore_after_terminal"] == "upstream request failed before a response"
     assert record["detail"] == "", "nothing went wrong with the turn itself"
     # Matched on the note, not on the route: a line that succeeded names the model instead, which is what this one does.
     line = next(item for item in _request_lines(caplog.records) if "closed abruptly" in item)
-    assert "RemoteProtocolError" in line
+    assert "upstream request failed before a response" in line
     # Not painted as a failure: the turn is complete and the client has it.
     assert record["status"] == "ok"
     assert "end_turn" in line
@@ -7834,7 +8332,7 @@ def test_a_long_upstream_failure_is_cut_before_it_reaches_the_line(
     assert len(replaced) == 1
     # Cut, and saying so rather than trailing off — the same shape the hand-over message uses.
     assert len(replaced[0]) < 400
-    assert "more chars" in replaced[0]
+    assert replaced[0] == "upstream request failed before a response"
     line = next(item for item in _request_lines(caplog.records) if "retries=" in item)
     assert len(line) < 800
     assert huge not in line
@@ -7863,12 +8361,13 @@ def test_a_long_failure_is_cut_on_the_hand_over_line_too(
         _delivered(client)
 
     line = next(item for item in _request_lines(caplog.records) if "handed back" in item)
-    assert "RemoteProtocolError" in line
-    assert "more chars" in line
+    assert "upstream request failed before a response" in line
     assert huge not in line
     assert len(line) < 800
-    expected = hand_over_module.one_line(repr(httpx2.RemoteProtocolError(huge)))
-    assert _records()[-1]["detail"].endswith(expected)
+    assert _records()[-1]["detail"].endswith(
+        "turn handed back to the client to continue after "
+        "upstream request failed before a response"
+    )
 
 
 def test_the_client_deadline_survives_a_replay() -> None:
@@ -8008,7 +8507,7 @@ def test_an_interrupted_turn_is_handed_back_to_the_client_as_a_tool_call(
     assert interruption["category"] == handed["input"]["category"]
     assert interruption["exception_module"] == httpx2.RemoteProtocolError.__module__
     assert interruption["exception_type"] == httpx2.RemoteProtocolError.__qualname__
-    assert "ConnectionTerminated" in interruption["message"]
+    assert interruption["message"] == "upstream request failed before a response"
     assert interruption["continuation_synthesized"] is True
     timings = record["observation"]["timings"]
     assert timings["upstream_timing_attempt"] == 1
@@ -8225,8 +8724,7 @@ async def test_real_h1_incomplete_chunked_body_records_the_exact_trigger_and_pul
         assert events.count("message_stop") == 1
         assert events[-1] == "message_stop"
         assert record["status"] == "ok"
-        assert "RemoteProtocolError" in record["tore_after_terminal"]
-        assert "incomplete chunked read" in record["tore_after_terminal"]
+        assert record["tore_after_terminal"] == "upstream request failed before a response"
     else:
         handed = _handed_back(response.content)
         assert b'"thinking_delta"' in response.content
@@ -8245,9 +8743,7 @@ async def test_real_h1_incomplete_chunked_body_records_the_exact_trigger_and_pul
         assert interruption["category"] == handed["input"]["category"] == "network"
         assert interruption["exception_module"] == httpx2.RemoteProtocolError.__module__
         assert interruption["exception_type"] == httpx2.RemoteProtocolError.__qualname__
-        assert interruption["message"] == (
-            "peer closed connection without sending complete message body (incomplete chunked read)"
-        )
+        assert interruption["message"] == "upstream request failed before a response"
         assert record["status"] == "retry"
     assert record["observation"]["delivery"]["state"] == "accepted"
     assert record["observation"]["delivery"]["unit"] == "translated_drain"
@@ -8304,11 +8800,11 @@ def test_only_the_attempt_that_synthesizes_continuation_records_an_interruption(
     assert interruption["attempt"] == 2
     assert interruption["category"] == handed["input"]["category"] == "network"
     assert interruption["exception_type"] == httpx2.RemoteProtocolError.__qualname__
-    assert interruption["message"] == "second attempt tore after a complete block"
+    assert interruption["message"] == "upstream request failed before a response"
     assert record["attempts"] == 2
     assert record["observation"]["timings"]["upstream_timing_attempt"] == 2
     assert len(record["replaced_failures"]) == 1
-    assert "first attempt tore" in record["replaced_failures"][0]
+    assert record["replaced_failures"][0] == "upstream request failed before a response"
 
 
 def test_the_marker_sits_below_this_sides_bookkeeping_in_production(
@@ -8389,7 +8885,7 @@ def test_runtime_upstream_stream_failure_is_reported_without_escaping_the_app() 
     failure = delivery["failure"]
     assert failure["origin"] == "upstream"
     assert failure["type"] == httpx2.RemoteProtocolError.__qualname__
-    assert failure["message"] == str(error)
+    assert failure["message"] == "upstream request failed before a response"
 
 
 async def test_reported_upstream_failure_does_not_hide_a_distinct_cleanup_failure() -> None:
@@ -8499,7 +8995,7 @@ def test_hand_back_renders_the_failure_once_for_payload_and_trigger() -> None:
     )
     assert error.render_calls == 1
     assert "first and only render" in handed["input"]["message"]
-    assert interruption["message"] == "first and only render"
+    assert interruption["message"].endswith("OneShotUpstreamError")
     assert interruption["exception_type"].endswith("OneShotUpstreamError")
 
 
@@ -8550,7 +9046,7 @@ def test_hand_back_reports_unrenderable_trigger_without_losing_the_outcome(
     assert {report["renderer"] for report in reports} == {"str", "repr"}
     assert "UnrenderableUpstreamError" in handed["input"]["message"]
     assert interruption["exception_type"].endswith("UnrenderableUpstreamError")
-    assert interruption["message"] is None
+    assert interruption["message"].endswith("UnrenderableUpstreamError")
     assert record["status"] == "retry"
     assert "UnrenderableUpstreamError" in record["detail"]
 
@@ -8578,8 +9074,7 @@ def test_a_hand_over_says_what_it_swallowed(
 
     handed_lines = [line for line in _request_lines(caplog.records) if "handed back" in line]
     assert len(handed_lines) == 1
-    assert "RemoteProtocolError" in handed_lines[0]
-    assert "peer closed the connection" in handed_lines[0]
+    assert "upstream request failed before a response" in handed_lines[0]
 
 
 def test_a_failure_the_taxonomy_cannot_name_is_still_upstreams() -> None:
@@ -8677,8 +9172,7 @@ def test_a_tear_after_a_turn_that_ran_out_of_room_is_reported_alongside_the_hand
     assert record["status"] == "retry", "the ending is still the hand-over"
     assert "handed back" in record["detail"]
     # And the tear is on the record too, in a field of its own rather than competing for `detail`.
-    assert "RemoteProtocolError" in record["tore_after_terminal"]
-    assert "peer reset after the last frame" in record["tore_after_terminal"]
+    assert record["tore_after_terminal"] == "upstream request failed before a response"
     line = next(item for item in _request_lines(caplog.records) if "handed back" in item)
     assert "upstream closed abruptly after finishing the turn" in line, (
         "the hand-over detail took the whole line and the tear was reported nowhere"

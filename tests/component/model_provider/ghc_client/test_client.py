@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator, Callable
+from pathlib import Path
 from typing import Any, cast
 
 import httpx2
@@ -8,8 +9,16 @@ import pytest
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 
+from app.config.schema import GithubCopilotProviderConfig
 from app.model_provider.ghc_client import GhcApiClient, GhcClientConfig
 from app.model_provider.ghc_client.tokens import CopilotTokenManager
+from app.model_provider.github_copilot import GithubCopilotProvider
+from app.observability.raw_capture import (
+    RawCaptureStore,
+    iter_raw_capture_records,
+    observe_active_upstream_request_hook,
+    pending_upstream_capture,
+)
 from app.pipeline.exceptions import ConnectionBoundInputIdRetry, UpstreamError, UpstreamRateLimit
 
 BASE_URL = "https://copilot.example"
@@ -63,6 +72,111 @@ def token_or(response: httpx2.Response) -> Callable[[httpx2.Request], httpx2.Res
         return response
 
     return handler
+
+
+@pytest.mark.asyncio
+async def test_capture_hook_is_idempotent_and_excludes_token_and_catalog_traffic(
+    tmp_path: Path,
+) -> None:
+    seen: list[tuple[str, bytes]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.host == "api.github.com":
+            seen.append(("token", request.content))
+            return httpx2.Response(
+                200,
+                json={"token": "copilot", "expires_at": 5000, "refresh_in": 1500},
+            )
+        if request.url.path.endswith("/models"):
+            seen.append(("catalog", request.content))
+            return httpx2.Response(
+                200,
+                json={
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": "captured-model",
+                            "supported_endpoints": ["/v1/messages"],
+                        }
+                    ],
+                },
+            )
+        seen.append(("inference", request.content))
+        return httpx2.Response(200, json={"id": "msg_1", "content": []})
+
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
+    tokens = CopilotTokenManager(StaticTokenSource(), http_client, clock=lambda: 1000)
+    openai_client = AsyncOpenAI(
+        api_key="proxy-managed",
+        base_url=BASE_URL,
+        http_client=http_client,
+        max_retries=0,
+    )
+    anthropic_client = AsyncAnthropic(
+        api_key="proxy-managed",
+        base_url=BASE_URL,
+        http_client=http_client,
+        max_retries=0,
+    )
+    config = GhcClientConfig(api_base_url_override=BASE_URL)
+    client = GhcApiClient(
+        openai_client,
+        anthropic_client,
+        tokens,
+        config,
+        interaction_id="interaction",
+    )
+    # A second wrapper over the same SDK clients must not append another hook.
+    GhcApiClient(
+        openai_client,
+        anthropic_client,
+        tokens,
+        config,
+        interaction_id="second-interaction",
+    )
+    provider = GithubCopilotProvider(
+        "ghc",
+        client,
+        GithubCopilotProviderConfig(type="github_copilot"),
+        http_client=http_client,
+        base_url=BASE_URL,
+    )
+    store = RawCaptureStore(tmp_path)
+    capture = store.start(
+        session_id="ghc-scope-session",
+        agent_id="ghc-scope-agent",
+        request_id="ghc-scope-request",
+        method="POST",
+        path="/v1/messages",
+    )
+    try:
+        with pending_upstream_capture(capture, 0):
+            assert await provider.refresh_catalog() is True
+        with pending_upstream_capture(capture, 1):
+            response = await client.send_anthropic_messages(
+                {"model": "captured-model"},
+                interaction_id="inference-interaction",
+            )
+        await response.aclose()
+        capture.finish(status_code=200, complete=True)
+        store.flush()
+        [capture_path] = tmp_path.glob("session-*/agent-*.cborseq.zst")
+        captured_bodies = [
+            (record["attempt"], record["body"])
+            for record in iter_raw_capture_records(capture_path)
+            if record["event"] == "upstream.request.body"
+        ]
+        hook_count = http_client.event_hooks["request"].count(
+            observe_active_upstream_request_hook
+        )
+    finally:
+        store.close()
+        await http_client.aclose()
+
+    assert [kind for kind, _ in seen] == ["token", "catalog", "inference"]
+    [inference_body] = [body for kind, body in seen if kind == "inference"]
+    assert captured_bodies == [(1, inference_body)]
+    assert hook_count == 1
 
 
 @pytest.mark.asyncio

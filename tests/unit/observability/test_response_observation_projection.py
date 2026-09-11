@@ -1,3 +1,4 @@
+from app.observability.request_log import format_tokens
 from app.observability.request_trace import RequestTrace
 from app.pipeline.delivery.assembling import ReplyDialect, Terminal
 from app.pipeline.response_observation import ResponsesObserver
@@ -67,6 +68,25 @@ def test_source_observation_is_the_final_legacy_projection_after_client_translat
     assert trace.stop_reason == "tool_use"
 
 
+def test_grok_usage_without_cached_tokens_keeps_the_total_input_count() -> None:
+    observer = ResponsesObserver()
+    observer.observe_response(
+        {
+            "status": "completed",
+            "output": [],
+            "usage": {
+                "input_tokens": 65_700,
+                "input_tokens_details": {"cache_write_tokens": 0},
+                "output_tokens": 186,
+            },
+        }
+    )
+    trace = RequestTrace(method="POST", path="/responses")
+    trace.absorb_response(observer.snapshot())
+
+    assert format_tokens(trace.usage) == "↑65.7k+0 ↓186"
+
+
 def test_provider_error_overrides_completed_legacy_ending_and_adds_detail() -> None:
     trace = RequestTrace(method="POST", path="/v1/responses")
     observer = ResponsesObserver()
@@ -83,5 +103,5 @@ def test_provider_error_overrides_completed_legacy_ending_and_adds_detail() -> N
 
     assert trace.stop_reason == "error"
     assert trace.detail == (
-        "provider response failed: provider completed with an error"
+        "provider response failed: upstream error message present"
     )

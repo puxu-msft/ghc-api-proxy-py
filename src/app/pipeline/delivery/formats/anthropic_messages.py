@@ -417,10 +417,12 @@ def anthropic_failure_from(event: SseEvent) -> StreamFailure | None:
     raw = data.get("error")
     detail = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
     spelled = str(detail.get("type", ""))
+    message = detail.get("message")
+    safe_message = message if isinstance(message, str) else ""
     logger.warning(
         "upstream sent an error event mid-stream: type=%r message=%r",
         spelled,
-        detail.get("message", ""),
+        safe_message,
     )
     return StreamFailure(
         origin=FailureOrigin.UPSTREAM_EVENT,

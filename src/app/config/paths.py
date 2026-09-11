@@ -52,6 +52,11 @@ def tokenization_learning_path() -> Path:
     return user_data_path() / "tokenization-learning.sqlite3"
 
 
+def debug_capture_rules_path() -> Path:
+    """Where HTTP-managed raw-capture selection rules live."""
+    return user_data_path() / "debug-capture-rules.sqlite3"
+
+
 def tls_material_dir() -> Path:
     """Where a generated self-signed pair is kept.
 

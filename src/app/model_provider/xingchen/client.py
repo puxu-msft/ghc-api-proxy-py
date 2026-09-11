@@ -6,8 +6,18 @@ from uuid import UUID, uuid4
 import httpx2
 
 from app.config.schema import XingchenProviderConfig
-from app.model_provider.upstream_errors import normalize_upstream_error
+from app.model_provider.upstream_errors import (
+    normalize_upstream_cleanup_error,
+    normalize_upstream_error,
+    normalize_upstream_response_error,
+    read_response_body_with_evidence,
+)
 from app.model_provider.xingchen.signing import SIGN_VERSION, sign_gateway_request
+from app.observability.raw_capture import (
+    activate_pending_upstream_capture,
+    observe_active_upstream_request,
+)
+from app.pipeline.exceptions import PipelineError
 from app.wire_json import dumps
 
 CHAT_COMPLETIONS_PATH = "/chat/completions"
@@ -124,14 +134,37 @@ class XingchenClient:
             request.headers[name] = value
 
         try:
-            response = await self._http.send(request, stream=stream)
+            with activate_pending_upstream_capture():
+                observe_active_upstream_request(request)
+                response = await self._http.send(request, stream=stream)
             if not response.is_success:
+                primary: BaseException | None = None
                 try:
-                    if not response.is_stream_consumed:
-                        await response.aread()
+                    try:
+                        if not response.is_stream_consumed:
+                            await read_response_body_with_evidence(response)
+                    except BaseException as error:
+                        primary = normalize_upstream_response_error(error, response) or error
+                        raise primary from error
                     response.raise_for_status()
-                finally:
+                except BaseException as error:
+                    primary = error
+                try:
                     await response.aclose()
+                except BaseException as error:
+                    if primary is None:
+                        primary = normalize_upstream_cleanup_error(error, response)
+                    else:
+                        primary.add_note(
+                            f"upstream response cleanup failed: {type(error).__qualname__}"
+                        )
+                if primary is not None:
+                    if isinstance(primary, PipelineError):
+                        raise primary
+                    normalized = normalize_upstream_error(primary)
+                    if normalized is not None:
+                        raise normalized from primary
+                    raise primary
             return response
         except BaseException as error:
             normalized = normalize_upstream_error(error)

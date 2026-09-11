@@ -11,8 +11,10 @@ Blocks are the same `ContentBlock` the request side uses, read and written by th
 `D-ARCH = B` asks for one typed truth, and two block models would have been two. This file used to hold Anthropic-shaped dicts under a `kind`, which is why the Responses writer sent `arguments` as an object where the wire wants a JSON string, and why a reasoning block crossing to Anthropic arrived with an empty signature.
 """
 
+from base64 import urlsafe_b64encode
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from hashlib import sha256
 from typing import Any, cast
 
 from app.pipeline.translation_driver.anthropic_messages import (
@@ -22,27 +24,34 @@ from app.pipeline.translation_driver.anthropic_messages import (
 from app.pipeline.translation_driver.content import BlockKind, ContentBlock
 from app.pipeline.translation_driver.openai_responses import (
     item_from_block,
-    record_web_search_call_id_loss,
-    response_blocks_from_item,
 )
-from app.pipeline.translation_driver.semantic import Conversion, LossCode
-from app.protocols.responses_anthropic import (
-    ResponseConversionError,
+from app.pipeline.translation_driver.options import TranslationOptions
+from app.pipeline.translation_driver.responses_items import (
+    ResponsesItemContext,
+    normalize_response_item,
+    record_web_search_call_id_loss,
+)
+from app.pipeline.translation_driver.responses_terminal import (
+    END_TURN,
+    FINISHED_STOP_REASONS,
+    INCOMPLETE_REASONS,
+    stop_reason_from_response,
+)
+from app.pipeline.translation_driver.semantic import (
+    Conversion,
+    LossCode,
+)
+from app.pipeline.translation_driver.usage import (
+    ResponsesUsageError,
     anthropic_usage_from_responses,
 )
 
 TEXT = "text"
-
-MAX_TOKENS = "max_tokens"
-END_TURN = "end_turn"
-TOOL_USE_STOP = "tool_use"
-CONTENT_FILTER = "content_filter"
+_ANTHROPIC_MESSAGE_ID_NAMESPACE = b"ghc-api-proxy:anthropic-message-id:v1\0"
 
 # Stop reasons that mean the turn finished, said in the Responses vocabulary of completed / incomplete / failed. `tool_use` belongs here: a turn that ends by calling a tool is one the model chose to end, not one that was cut short. The empty string is here because `SemanticResponse.stop_reason` is a bare `str`, and an unset one means nobody said — reading that as a truncation would report an observation that was never made.
 #
 # **This is the one copy.** The streaming framer for the same client leg (`app/pipeline/delivery/formats/openai_responses.py`) imports it from here rather than keeping its own. These two are the buffered and the streaming half of one leg, and `fef7d96` is the record of what it costs when the two halves describe one fact differently: which answer a reader sees then depends on something the reply itself does not carry. It lived here as a duplicate until 2026-08-27, kept in step by a comment; the import is what makes "the same set" checkable instead of remembered. The direction works because `delivery` already imports from `translation_driver` and never the reverse.
-FINISHED_STOP_REASONS = frozenset({END_TURN, TOOL_USE_STOP, ""})
-
 # This proxy's word for a truncation → the Responses enumeration's word for it. A forward table rather than a passthrough: `incomplete_details.reason` is an enumeration — `max_output_tokens` or `content_filter`, or null (openai SDK 3.3.1, `openai.types.responses.response.IncompleteDetails`) — so a reason not in here has no legal spelling and must become null, which is upstream's own shape for "incomplete, no reason given".
 #
 # Everything else that can arrive is Anthropic's own (`stop_sequence`, `pause_turn`, `refusal`, `model_context_window_exceeded`) or this proxy's synthesis (`incomplete`, written when upstream said the response was incomplete and gave no reason). A Responses client can read none of those, so they travel as `status: "incomplete"` with a null reason: the fact that the turn was cut short is the part it can act on, and a word from the wrong vocabulary would be worse than no word at all.
@@ -50,17 +59,33 @@ FINISHED_STOP_REASONS = frozenset({END_TURN, TOOL_USE_STOP, ""})
 # `refusal` is deliberately not mapped onto `content_filter`. The two are neighbours, not synonyms — `config/schema.py` says so where it keeps `content_filter` off `hand_over_stop_reasons` — and this project does not invent a mapping for a shape upstream has never sent. Shared with the streaming framer the same way `FINISHED_STOP_REASONS` is, and for the same reason.
 #
 # `content_filter` maps to itself, and that is a different kind of entry from the one above. The reader keeps upstream's own word when it has no Anthropic spelling (`from_openai_responses_response` returns `reason or "incomplete"`), so a filtered turn arrives here already carrying the Responses enumeration's own term. Without the identity row the forward table dropped it to null on the way out, and a client that had been told *why* its turn was cut short got back only *that* it was — a round trip losing a word it never had to translate. Added 2026-08-27; this is upstream's term going home, not a mapping invented for it.
-INCOMPLETE_REASONS = {MAX_TOKENS: "max_output_tokens", CONTENT_FILTER: CONTENT_FILTER}
+@dataclass(frozen=True, slots=True)
+class OpaqueResponsePayload:
+    """A response structure understood only by its source wire format."""
+
+    source_format: str
+    field_path: str
+    payload: Mapping[str, Any]
+    kind: str = ""
+
+    def copy_payload(self) -> dict[str, Any]:
+        return dict(self.payload)
 
 
 @dataclass(slots=True)
 class SemanticResponse:
     id: str = ""
     model: str = ""
+    upstream_id: str = ""
+    upstream_model: str = ""
     blocks: list[ContentBlock] = field(default_factory=lambda: list[ContentBlock]())
     stop_reason: str = END_TURN
     usage: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
     conversion: Conversion = field(default_factory=Conversion)
+    source_format: str = ""
+    opaque_payloads: list[OpaqueResponsePayload] = field(
+        default_factory=lambda: list[OpaqueResponsePayload]()
+    )
 
 
 def _mapping_list(value: object) -> list[dict[str, Any]]:
@@ -75,17 +100,35 @@ def _mapping_list(value: object) -> list[dict[str, Any]]:
 def from_anthropic_response(
     payload: Mapping[str, Any],
     *,
+    options: TranslationOptions | None = None,
     client_search_tool: str = "",
     hosted_web_search_expected: bool = False,
     hand_over_stop_reasons: frozenset[str] = frozenset({"max_tokens"}),
 ) -> SemanticResponse:
     """Accept and ignore response facts that only the Responses wire can use."""
+    if options is not None:
+        client_search_tool = options.client_search_tool
+        hosted_web_search_expected = options.hosted_web_search_expected
+        hand_over_stop_reasons = options.hand_over_stop_reasons
     del client_search_tool, hosted_web_search_expected, hand_over_stop_reasons
     response = SemanticResponse(
         id=str(payload.get("id", "")),
         model=str(payload.get("model", "")),
         stop_reason=str(payload.get("stop_reason") or END_TURN),
+        source_format="anthropic-messages",
     )
+    for key in sorted(
+        set(payload)
+        - {"id", "type", "role", "model", "content", "stop_reason", "stop_sequence", "usage"}
+    ):
+        response.opaque_payloads.append(
+            OpaqueResponsePayload(
+                source_format="anthropic-messages",
+                field_path=key,
+                payload={key: payload[key]},
+                kind="top-level-field",
+            )
+        )
     usage = payload.get("usage")
     if isinstance(usage, Mapping):
         response.usage = dict[str, Any](cast(Mapping[str, Any], usage))
@@ -105,11 +148,24 @@ def _anthropic_usage(usage: Mapping[str, Any]) -> dict[str, Any]:
     """
     try:
         return dict[str, Any](anthropic_usage_from_responses(usage))
-    except ResponseConversionError:
+    except ResponsesUsageError:
         return {}
 
 
-def to_anthropic_response(response: SemanticResponse) -> dict[str, Any]:
+def anthropic_message_id_from_response_id(upstream_response_id: str) -> str:
+    """Map an upstream identity to a stable, opaque Anthropic message identity."""
+    digest = sha256(
+        _ANTHROPIC_MESSAGE_ID_NAMESPACE + upstream_response_id.encode("utf-8")
+    ).digest()[:24]
+    token = urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return f"msg_{token}"
+
+
+def to_anthropic_response(
+    response: SemanticResponse,
+    *,
+    options: TranslationOptions | None = None,
+) -> dict[str, Any]:
     """Render a reply that arrived whole as an Anthropic message body.
 
     A legal success with nothing to say gets `content: []`, not a text block carrying no text. The spec permits either — it says such a reply *may* carry the empty block — so the choice is settled by what happens next: the client stores this turn and replays it, and upstream refuses an assistant turn holding a blank text block (400, `messages: text content blocks must be non-empty`) while accepting one whose content is empty (200, both mid-conversation and last). Measured 2026-08-20, `exp/260820-empty-text-probe/` F3 against F6 and F4.
@@ -123,7 +179,22 @@ def to_anthropic_response(response: SemanticResponse) -> dict[str, Any]:
         )
         if rendered is not None
     ]
-    return {
+    skipped_opaque = False
+    for opaque in response.opaque_payloads:
+        if opaque.source_format == "anthropic-messages" and opaque.kind == "top-level-field":
+            continue
+        skipped_opaque = True
+        detail = "Anthropic encoder cannot interpret opaque payload"
+        response.conversion.record(LossCode.OPAQUE_RESPONSE_SKIPPED, detail)
+        response.conversion.warn(
+            LossCode.OPAQUE_RESPONSE_SKIPPED.value,
+            source_format=opaque.source_format,
+            field_path=opaque.field_path,
+            detail=detail,
+        )
+    if skipped_opaque and not content and response.stop_reason == END_TURN:
+        response.stop_reason = "incomplete"
+    encoded = {
         "id": response.id,
         "type": "message",
         "role": "assistant",
@@ -133,35 +204,23 @@ def to_anthropic_response(response: SemanticResponse) -> dict[str, Any]:
         "stop_sequence": None,
         "usage": response.usage or {"input_tokens": 0, "output_tokens": 0},
     }
+    for opaque in response.opaque_payloads:
+        if opaque.source_format == "anthropic-messages" and opaque.kind == "top-level-field":
+            encoded.update(opaque.copy_payload())
+    return encoded
 
 
 def _responses_stop_reason(
     payload: Mapping[str, Any],
     has_tool_call: bool,
 ) -> tuple[str, str | None]:
-    """Map the Responses terminal state onto an Anthropic stop reason."""
-    status = str(payload.get("status", "completed"))
-    if status == "incomplete":
-        details = payload.get("incomplete_details")
-        reason = ""
-        if isinstance(details, Mapping):
-            reason = str(cast(Mapping[str, Any], details).get("reason", ""))
-        if reason == "max_output_tokens":
-            return MAX_TOKENS, None
-        # Upstream's own word, unmapped, exactly as the streaming path does it. The output-token limit is the only reason with an Anthropic spelling, so it is the only one translated; everything else used to become `end_turn`, which reported a turn upstream had cut short as one it finished. The two paths described the same fact differently until this line, which is worse than either answer on its own.
-        #
-        # `"incomplete"` when upstream said the response was incomplete without saying why — still its own word, since that is the `status` it sent — and it keeps that case out of `end_turn` too.
-        #
-        # No longer recorded as a conversion loss: nothing is lost now that the reason reaches the client.
-        return reason or "incomplete", None
-    if has_tool_call:
-        return TOOL_USE_STOP, None
-    return END_TURN, None
+    return stop_reason_from_response(payload, has_tool_call=has_tool_call)
 
 
 def from_openai_responses_response(
     payload: Mapping[str, Any],
     *,
+    options: TranslationOptions | None = None,
     hand_over_stop_reasons: frozenset[str] = frozenset({"max_tokens"}),
     client_search_tool: str = "",
     hosted_web_search_expected: bool = False,
@@ -170,10 +229,32 @@ def from_openai_responses_response(
 
     It cannot be read off this payload: on the Responses wire the search *is* the tool, so the item names nothing. The request half identified it, and without that name a `tool_search_call` has nowhere to go — the client would be told the model said nothing while the model was in fact waiting for a search.
     """
+    translated = options.translated if options is not None else True
+    if options is not None:
+        hand_over_stop_reasons = options.hand_over_stop_reasons
+        client_search_tool = options.client_search_tool
+        hosted_web_search_expected = options.hosted_web_search_expected
+    upstream_id = str(payload.get("id", ""))
+    upstream_model = str(payload.get("model", ""))
     response = SemanticResponse(
-        id=str(payload.get("id", "")),
-        model=str(payload.get("model", "")),
+        id=anthropic_message_id_from_response_id(upstream_id) if upstream_id else "",
+        model=upstream_model,
+        upstream_id=upstream_id,
+        upstream_model=upstream_model,
+        source_format="openai-responses",
     )
+    for key in sorted(
+        set(payload)
+        - {"id", "object", "model", "status", "incomplete_details", "output", "usage"}
+    ):
+        response.opaque_payloads.append(
+            OpaqueResponsePayload(
+                source_format="openai-responses",
+                field_path=key,
+                payload={key: payload[key]},
+                kind="top-level-field",
+            )
+        )
     usage = payload.get("usage")
     if isinstance(usage, Mapping):
         response.usage = _anthropic_usage(cast(Mapping[str, Any], usage))
@@ -182,8 +263,7 @@ def from_openai_responses_response(
     #
     # Read here rather than after the loop because the drop happens inside it. The streaming assembler cannot do this: its items close before the terminal event says why, so it holds the one it cut short instead and answers the same question a moment later.
     will_hand_over, _ = _responses_stop_reason(payload, has_tool_call=False)
-    for item in _mapping_list(payload.get("output")):
-        record_web_search_call_id_loss(item, response.conversion)
+    for item_index, item in enumerate(_mapping_list(payload.get("output"))):
         expected_web_search = (
             hosted_web_search_expected and item.get("type") == "web_search_call"
         )
@@ -198,21 +278,37 @@ def from_openai_responses_response(
             # The same blind spot comes with it: a `reasoning` item carries no `status` at all, so a truncated one is invisible here too. Left open deliberately; `.dev/docs/upstream/retry-and-continuation/deferred.md` §2.
             #
             # Only when something whole came before. Half a sentence still beats an empty answer, so the rule reverses when this is all there is — which is why the test is on `response.blocks` rather than on the item's position. Ruled 2026-08-21 for the streaming path and extended here 2026-08-22, when the ruling that a non-streaming turn could not be continued was withdrawn: dropping it is only defensible because the client is handed a way to get it back.
+            record_web_search_call_id_loss(item, response.conversion)
             response.conversion.record(
                 LossCode.ITEM_NOT_CARRIED, f"truncated {item.get('type')!r} dropped"
             )
             continue
-        _, blocks = response_blocks_from_item(
+        _, blocks = normalize_response_item(
             item,
+            context=ResponsesItemContext(
+                client_search_tool=client_search_tool,
+                hosted_web_search_expected=hosted_web_search_expected,
+                allow_incomplete_tool_arguments=(
+                    str(item.get("status", "")) == "incomplete"
+                ),
+            ),
             conversion=response.conversion,
-            client_search_tool=client_search_tool,
-            hosted_web_search_expected=hosted_web_search_expected,
         )
         for block in blocks:
             if block.kind is BlockKind.UNKNOWN:
-                response.conversion.record(
-                    LossCode.ITEM_NOT_CARRIED, f"output item {item.get('type')!r}"
+                response.opaque_payloads.append(
+                    OpaqueResponsePayload(
+                        source_format="openai-responses",
+                        field_path=f"output[{item_index}]",
+                        payload=item,
+                        kind=str(item.get("type", "")),
+                    )
                 )
+                if item.get("type") == "tool_search_call" and translated:
+                    response.conversion.record(
+                        LossCode.ITEM_NOT_CARRIED,
+                        "tool_search_call has no client search tool context",
+                    )
                 continue
             response.blocks.append(block)
 
@@ -224,7 +320,11 @@ def from_openai_responses_response(
     return response
 
 
-def to_openai_responses_response(response: SemanticResponse) -> dict[str, Any]:
+def to_openai_responses_response(
+    response: SemanticResponse,
+    *,
+    options: TranslationOptions | None = None,
+) -> dict[str, Any]:
     """Render the blocks as Responses `output` items.
 
     Every block in a response is the assistant's, which is what makes text `output_text`.
@@ -239,9 +339,29 @@ def to_openai_responses_response(response: SemanticResponse) -> dict[str, Any]:
         )
         if item is not None
     ]
+    skipped_opaque = False
+    for opaque in response.opaque_payloads:
+        if opaque.source_format == "openai-responses" and opaque.kind not in {
+            "top-level-field",
+        }:
+            rendered.append(opaque.copy_payload())
+        elif opaque.source_format == "openai-responses" and opaque.kind == "top-level-field":
+            continue
+        else:
+            skipped_opaque = True
+            detail = "Responses encoder cannot interpret opaque payload"
+            response.conversion.record(LossCode.OPAQUE_RESPONSE_SKIPPED, detail)
+            response.conversion.warn(
+                LossCode.OPAQUE_RESPONSE_SKIPPED.value,
+                source_format=opaque.source_format,
+                field_path=opaque.field_path,
+                detail=detail,
+            )
+    if skipped_opaque and not rendered and response.stop_reason == END_TURN:
+        response.stop_reason = "incomplete"
     finished = response.stop_reason in FINISHED_STOP_REASONS
     reason = None if finished else INCOMPLETE_REASONS.get(response.stop_reason)
-    return {
+    encoded = {
         "id": response.id,
         "object": "response",
         "model": response.model,
@@ -251,6 +371,10 @@ def to_openai_responses_response(response: SemanticResponse) -> dict[str, Any]:
         "output": [_as_output_item(item) for item in rendered],
         "usage": response.usage,
     }
+    for opaque in response.opaque_payloads:
+        if opaque.source_format == "openai-responses" and opaque.kind == "top-level-field":
+            encoded.update(opaque.copy_payload())
+    return encoded
 
 
 def _as_output_item(item: dict[str, Any]) -> dict[str, Any]:

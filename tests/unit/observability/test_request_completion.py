@@ -272,9 +272,11 @@ def test_finalized_request_is_one_immutable_source_for_store_json_and_console(
         "delivery",
         "timings",
         "body_bytes",
+        "upstream_body_attempts",
     }
     assert observation["token_admission"] == []
     assert observation["interruptions"] == []
+    assert observation["upstream_body_attempts"] == []
     response = cast(dict[str, Any], observation["response"])
     assert set(response) == {
         "availability",
@@ -380,6 +382,30 @@ def test_finalized_request_is_one_immutable_source_for_store_json_and_console(
     assert trace.response_observation is first.response
 
 
+def test_a_successful_retry_is_reported_as_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    completion, trace, _store, records, logger = _coordinator(monkeypatch)
+    trace.attempts = 2
+    trace.replaced_failures.append(
+        "StreamDeadlineError('attempt exceeded its deadline')"
+    )
+    completion.mark_response_ready(200)
+    completion.note_asgi_message_sent({"type": "http.response.start", "status": 200})
+    completion.note_asgi_message_sent({"type": "http.response.body", "body": b"retry"})
+    completion.settle(status_code=200, upstream_response_bytes=13)
+
+    record = completion.publish()
+
+    assert record.status == "retry"
+    assert records[0]["status"] == "retry"
+    assert logger.events[0][1] == "retry"
+    rendered = str(logger.events[0][0])
+    assert rendered.startswith("200 openai-responses/gpt-model[none] ")
+    assert "POST /responses" not in rendered
+    assert "req=req_1" not in rendered
+
+
 def test_token_admission_observations_are_ordered_complete_and_prompt_free(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -460,7 +486,6 @@ def test_token_admission_observations_are_ordered_complete_and_prompt_free(
 
 def test_interruption_evidence_is_ordered_typed_and_orthogonal_to_delivery(
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
     class BadReceiveError(RuntimeError):
         def __str__(self) -> str:
@@ -481,7 +506,7 @@ def test_interruption_evidence_is_ordered_typed_and_orthogonal_to_delivery(
         category="network",
         exception_module="httpx2",
         exception_type="RemoteProtocolError",
-        message="peer closed",
+        error=RuntimeError("upstream-interruption-secret"),
     )
     completion.note_asgi_message_sent({"type": "http.response.start", "status": 200})
     completion.note_asgi_message_sent({"type": "http.response.body", "body": b"retry"})
@@ -509,18 +534,18 @@ def test_interruption_evidence_is_ordered_typed_and_orthogonal_to_delivery(
     assert serialized[1]["category"] == "error"
     assert serialized[1]["exception_module"] == __name__
     assert serialized[1]["exception_type"].endswith("BadReceiveError")
-    assert serialized[1]["message"] is None
+    assert cast(str, serialized[1]["message"]).endswith("BadReceiveError")
     assert serialized[2]["origin"] == "upstream"
     assert serialized[2]["attempt"] == 2
     assert serialized[2]["category"] == "network"
     assert serialized[2]["exception_module"] == "httpx2"
     assert serialized[2]["exception_type"] == "RemoteProtocolError"
-    assert serialized[2]["message"] == "peer closed"
+    assert serialized[2]["message"] == "builtins.RuntimeError"
     assert serialized[2]["continuation_synthesized"] is True
     assert [item["observed_s"] for item in serialized] == sorted(
         item["observed_s"] for item in serialized
     )
-    assert "BadReceiveError for request observability" in caplog.text
+    assert "upstream-interruption-secret" not in json.dumps(serialized)
 
 
 def test_error_only_response_serializes_an_absent_usage_dto(
@@ -1012,7 +1037,7 @@ async def test_legacy_freeze_failure_does_not_replace_a_primary_send_error(
     record = store.observation_snapshot().completed[-1]
     assert record.status == "gone"
     assert record.delivery.failure is not None
-    assert record.delivery.failure.message == "client transport closed"
+    assert record.delivery.failure.message == "builtins.OSError"
     assert record.request_line().detail == "request observability degraded: FrozenJsonError"
     assert len(records) == 1
     assert len(logger.events) == 1
@@ -1168,7 +1193,7 @@ def test_secondary_unwind_failure_does_not_replace_the_primary_delivery_failure(
     assert record.status == "gone"
     assert record.delivery.failure is not None
     assert record.delivery.failure.origin is FailureOrigin.SEND
-    assert record.delivery.failure.message == "client transport closed"
+    assert record.delivery.failure.message == "builtins.OSError"
 
 
 @pytest.mark.asyncio
@@ -1214,17 +1239,17 @@ async def test_stream_cleanup_failure_does_not_replace_a_send_disconnect(
     assert record.delivery.failure is not None
     assert record.delivery.failure.origin is FailureOrigin.SEND
     assert record.delivery.failure.category is FailureCategory.DISCONNECT
-    assert record.delivery.failure.message == "client transport closed"
+    assert record.delivery.failure.message == "builtins.OSError"
     (additional,) = tuple(
         failure
         for failure in record.delivery.additional_failures
         if failure.origin is FailureOrigin.CLEANUP
     )
     assert additional.type == "RuntimeError"
-    assert additional.message == "inner cleanup failed"
+    assert additional.message == "builtins.RuntimeError"
     assert record.request_line().detail == (
         "delivery stopped before upstream finished; "
-        "cleanup also failed: inner cleanup failed"
+        "cleanup also failed: builtins.RuntimeError"
     )
     assert record.interruptions == ()
 
@@ -1270,21 +1295,17 @@ async def test_stream_disconnect_note_survives_authoritative_ending(
     assert record.status == "gone"
     assert record.delivery.failure is not None
     assert record.delivery.failure.type == "ClientDisconnect"
-    assert record.delivery.failure.notes == (
-        "cleanup also failed: note-only streaming cleanup",
-    )
+    assert record.delivery.failure.notes == ("<exception notes present>",)
     assert record.request_line().detail == (
         "delivery stopped before upstream finished; "
-        "cleanup also failed: note-only streaming cleanup"
+        "cleanup note: <exception notes present>"
     )
     delivery = cast(
         dict[str, Any],
         cast(dict[str, Any], records[-1]["observation"])["delivery"],
     )
     serialized_failure = cast(dict[str, Any], delivery["failure"])
-    assert serialized_failure["notes"] == [
-        "cleanup also failed: note-only streaming cleanup"
-    ]
+    assert serialized_failure["notes"] == ["<exception notes present>"]
 
 
 @pytest.mark.asyncio
@@ -1347,7 +1368,7 @@ async def test_accepted_native_terminal_survives_later_cleanup_failure(
     assert record.delivery.failure is None
     assert record.delivery.post_delivery_failure is not None
     assert record.delivery.post_delivery_failure.origin is FailureOrigin.CLEANUP
-    assert record.delivery.post_delivery_failure.message == "transport tail cleanup failed"
+    assert record.delivery.post_delivery_failure.message == "builtins.RuntimeError"
 
 
 @pytest.mark.asyncio
@@ -1405,19 +1426,19 @@ async def test_pre_acceptance_cancellation_remains_primary_when_cleanup_fails(
     assert interruption.continuation_synthesized is False
     detail = record.request_line().detail
     assert "delivery stopped before upstream finished" in detail
-    assert "cleanup also failed: transport tail cleanup failed" in detail
+    assert "cleanup also failed: builtins.RuntimeError" in detail
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("error_type", "expected_message"),
+    "error_type",
     [
-        (RuntimeError, "ASGI receive failed"),
-        (StringCancelledError, "StringCancelledError"),
-        (StringExitedError, "StringExitedError"),
-        (UnrenderableReceiveError, None),
-        (WhitespaceRenderedError, "WhitespaceRenderedError"),
-        (OneShotRenderedError, "first and only render"),
+        RuntimeError,
+        StringCancelledError,
+        StringExitedError,
+        UnrenderableReceiveError,
+        WhitespaceRenderedError,
+        OneShotRenderedError,
     ],
     ids=[
         "ordinary",
@@ -1425,13 +1446,12 @@ async def test_pre_acceptance_cancellation_remains_primary_when_cleanup_fails(
         "str-exited",
         "both-renderers-fail",
         "whitespace-falls-back",
-        "single-render-shared",
+        "single-render-is-not-called",
     ],
 )
 async def test_response_receive_error_is_recorded_and_re_raised_by_identity(
     monkeypatch: pytest.MonkeyPatch,
     error_type: type[RuntimeError],
-    expected_message: str | None,
 ) -> None:
     completion, trace, store, _records, _logger = _coordinator(monkeypatch)
     monkeypatch.setattr(completion_module, "logger", BaseExplodingReporter())
@@ -1476,14 +1496,11 @@ async def test_response_receive_error_is_recorded_and_re_raised_by_identity(
     assert interruption.kind.value == "asgi_receive_error"
     assert interruption.phase is InterruptionPhase.RESPONSE_STREAM
     assert interruption.exception_type == error_type.__qualname__
-    if expected_message is None:
-        assert interruption.message is None
-    else:
-        assert interruption.message is not None
-        assert expected_message in interruption.message
+    expected_message = f"{error_type.__module__}.{error_type.__qualname__}"
+    assert interruption.message == expected_message
     assert interruption.continuation_synthesized is False
     if isinstance(receive_error, OneShotRenderedError):
-        assert receive_error.render_calls == 1
+        assert receive_error.render_calls == 0
         failure_summaries = [
             record.delivery.failure,
             record.delivery.post_delivery_failure,
@@ -1495,7 +1512,7 @@ async def test_response_receive_error_is_recorded_and_re_raised_by_identity(
             if summary is not None and summary.type == "OneShotRenderedError"
         ]
         assert len(matching) == 1
-        assert matching[0].message == "first and only render"
+        assert matching[0].message == expected_message
 
 
 @pytest.mark.asyncio
@@ -1620,7 +1637,7 @@ async def test_stream_start_failure_publishes_without_starting_the_body(
 
 
 @pytest.mark.asyncio
-async def test_stream_start_server_failure_keeps_its_primary_detail(
+async def test_stream_start_server_failure_projects_its_primary_detail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     completion, trace, store, _records, _logger = _coordinator(monkeypatch)
@@ -1649,8 +1666,57 @@ async def test_stream_start_server_failure_keeps_its_primary_detail(
     record = store.observation_snapshot().completed[-1]
     assert record.status == "fail"
     assert record.delivery.failure is not None
-    assert record.delivery.failure.message == "ASGI server could not start response"
-    assert record.request_line().detail == "ASGI server could not start response"
+    assert record.delivery.failure.message == "builtins.RuntimeError"
+    assert record.request_line().detail == "builtins.RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_local_stream_failure_preserves_the_error_without_recording_its_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    completion, trace, store, records, logger = _coordinator(monkeypatch)
+
+    async def body() -> AsyncGenerator[bytes]:
+        raise RuntimeError("local-stream-secret")
+        yield b"unreachable"
+
+    accounting = _StreamAccounting(
+        chain=completion.chain,
+        request_id=trace.request_id,
+        trace=trace,
+        completion=completion,
+        status_code=200,
+    )
+    response = _AccountedStreamingResponse(
+        _tracked_delivery(body(), accounting),
+        accounting,
+        status_code=200,
+    )
+    completion.mark_response_ready(200)
+    sent: list[Message] = []
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    with pytest.raises(RuntimeError) as raised:
+        await response(STREAM_SCOPE, receive_request, send)
+
+    assert str(raised.value) == "local-stream-secret"
+    assert [message["type"] for message in sent] == ["http.response.start"]
+    record = store.observation_snapshot().completed[-1]
+    assert record.status == "fail"
+    assert record.delivery.failure is not None
+    assert record.delivery.failure.origin is FailureOrigin.WRAPPED
+    assert record.delivery.failure.message == "builtins.RuntimeError"
+    assert record.request_line().detail == (
+        "stream failed before a terminal event: builtins.RuntimeError"
+    )
+    assert len(records) == 1
+    assert len(logger.events) == 1
+    ordinary_line = str(logger.events[0][0])
+    serialized_completion = json.dumps(records[0])
+    assert "local-stream-secret" not in ordinary_line
+    assert "local-stream-secret" not in serialized_completion
 
 
 @pytest.mark.asyncio
@@ -1745,7 +1811,10 @@ def test_reported_stream_failure_outranks_an_earlier_send_disconnect(
     record = completion.publish()
 
     assert record.status == "fail"
-    assert "reported stream failure" in record.request_line().detail
+    if origin is StreamFailureOrigin.UPSTREAM_EVENT:
+        assert "stream_failed" in record.request_line().detail
+    else:
+        assert "reported stream failure" in record.request_line().detail
     assert record.delivery.failure is not None
     assert record.delivery.failure.category is FailureCategory.DISCONNECT
 
@@ -1967,7 +2036,7 @@ async def test_background_and_cleanup_failures_both_reach_the_final_record(
     assert record.delivery.post_delivery_failure.origin is FailureOrigin.BACKGROUND
     assert len(record.delivery.additional_failures) == 1
     assert record.delivery.additional_failures[0].origin is FailureOrigin.CLEANUP
-    assert record.delivery.additional_failures[0].message == "cleanup failed second"
+    assert record.delivery.additional_failures[0].message == "builtins.OSError"
     delivery = cast(
         dict[str, Any],
         cast(dict[str, Any], records[0]["observation"])["delivery"],

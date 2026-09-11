@@ -12,7 +12,7 @@ this library's business.
 
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from typing import Any, cast
 
 import httpx2
@@ -21,9 +21,26 @@ import orjson
 from app.model_provider.codebuddy_client.auth_state import CodebuddyCredentials
 from app.model_provider.codebuddy_client.config import CodebuddyClientConfig
 from app.model_provider.codebuddy_client.errors import upstream_error_from
+from app.model_provider.upstream_errors import (
+    normalize_upstream_cleanup_error,
+    normalize_upstream_response_error,
+    read_response_body_with_evidence,
+    sent_body_evidence_from_error,
+)
+from app.observability.raw_capture import (
+    activate_pending_upstream_capture,
+    observe_active_upstream_request,
+)
 from app.pipeline.exceptions import UpstreamError, UpstreamTimeout
 
 CHAT_COMPLETIONS_PATH = "/v2/chat/completions"
+
+
+def _sent_for(error: object, fallback: object) -> tuple[bytes, bool]:
+    sent, sent_observed = sent_body_evidence_from_error(error)
+    if sent_observed:
+        return sent, sent_observed
+    return sent_body_evidence_from_error(fallback)
 
 
 class CodebuddyClient:
@@ -69,22 +86,69 @@ class CodebuddyClient:
         # defeat the delivery layer entirely.
         request = self._http.build_request("POST", url, headers=headers, json=body)
         try:
-            response = await self._http.send(request, stream=True)
+            with activate_pending_upstream_capture():
+                observe_active_upstream_request(request)
+                response = await self._http.send(request, stream=True)
         except httpx2.TimeoutException as error:
-            raise UpstreamTimeout(f"upstream timed out: {error}") from error
+            sent, sent_observed = _sent_for(error, request)
+            raise UpstreamTimeout(
+                f"upstream timed out: {error}",
+                sent=sent,
+                sent_observed=sent_observed,
+            ) from error
         except httpx2.HTTPError as error:
-            raise UpstreamError(f"upstream connection failed: {error}") from error
+            sent, sent_observed = _sent_for(error, request)
+            raise UpstreamError(
+                f"upstream connection failed: {error}",
+                sent=sent,
+                sent_observed=sent_observed,
+            ) from error
         if response.status_code != 200:
             # Read before classifying: the classifier reads `response.text`, which
             # raises on a response whose body was never pulled.
-            await response.aread()
-            raise upstream_error_from(response)
+            primary: BaseException | None = None
+            try:
+                try:
+                    await read_response_body_with_evidence(response)
+                except BaseException as error:
+                    normalized = normalize_upstream_response_error(error, response)
+                    if normalized is not None:
+                        raise normalized from error
+                    raise
+                raise upstream_error_from(response)
+            except BaseException as error:
+                primary = error
+                raise
+            finally:
+                try:
+                    await response.aclose()
+                except BaseException as cleanup:
+                    if primary is None:
+                        raise normalize_upstream_cleanup_error(cleanup, response) from cleanup
+                    primary.add_note(
+                        f"upstream response cleanup failed: {type(cleanup).__qualname__}"
+                    )
         if stream:
             return response
+        primary: BaseException | None = None
         try:
             return await aggregate_stream(response)
+        except BaseException as error:
+            normalized = normalize_upstream_response_error(error, response)
+            if normalized is not None:
+                primary = normalized
+                raise normalized from error
+            primary = error
+            raise
         finally:
-            await response.aclose()
+            try:
+                await response.aclose()
+            except BaseException as cleanup:
+                if primary is None:
+                    raise normalize_upstream_cleanup_error(cleanup, response) from cleanup
+                primary.add_note(
+                    f"upstream response cleanup failed: {type(cleanup).__qualname__}"
+                )
 
 
 async def aggregate_stream(response: httpx2.Response) -> httpx2.Response:
@@ -101,13 +165,27 @@ async def aggregate_stream(response: httpx2.Response) -> httpx2.Response:
     model = ""
     finish_reason = ""
     usage: dict[str, Any] = {}
+    raw_body = bytearray()
+    response.extensions["upstream_raw_response_body"] = b""
 
-    async for line in response.aiter_lines():
-        line = line.strip()
-        if not line.startswith("data:"):
+    async def lines() -> AsyncIterator[bytes]:
+        pending = b""
+        async for chunk in response.aiter_bytes():
+            raw_body.extend(chunk)
+            response.extensions["upstream_raw_response_body"] = bytes(raw_body)
+            pending += chunk
+            while b"\n" in pending:
+                line, pending = pending.split(b"\n", 1)
+                yield line
+        if pending:
+            yield pending
+
+    async for raw_line in lines():
+        line = raw_line.strip()
+        if not line.startswith(b"data:"):
             continue
         data = line[5:].strip()
-        if data == "[DONE]":
+        if data == b"[DONE]":
             break
         try:
             loaded = cast(object, orjson.loads(data))
@@ -188,4 +266,7 @@ async def aggregate_stream(response: httpx2.Response) -> httpx2.Response:
         content=orjson.dumps(body),
         headers={"content-type": "application/json"},
         request=response.request,
+        extensions={
+            "upstream_raw_response_body": bytes(raw_body),
+        },
     )

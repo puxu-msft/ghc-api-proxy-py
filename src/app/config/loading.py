@@ -14,6 +14,7 @@ from typing import Any, cast
 
 import yaml
 
+from app.config.compat import migrate_compat
 from app.config.paths import expand_user_path, spec_config_file_path
 from app.config.schema import ProxyConfig
 
@@ -31,6 +32,7 @@ NON_SETTING_VARIABLES = frozenset({CONFIG_PATH_VARIABLE, GITHUB_TOKEN_VARIABLE})
 ENV_ALIASES: Mapping[str, tuple[str, ...]] = {
     "host": ("server", "host"),
     "port": ("server", "port"),
+    "fallback_model_provider": ("default_model_provider",),
 }
 
 
@@ -70,6 +72,7 @@ _PATH_FIELDS: tuple[tuple[str, ...], ...] = (
     ("model_providers", "*", "auth_state_file"),
     ("pidfile_dir",),
     ("observability", "raw_capture", "directory"),
+    ("observability", "raw_capture", "rules_database"),
 )
 
 
@@ -203,7 +206,10 @@ def load_proxy_config(
     if resolved_path is not None:
         # Rebased before merging, so only the paths this file declares are affected — an environment or CLI value keeps shell semantics. Ruled 2026-08-28; see `_rebase_configured_paths`.
         layers.append(
-            _rebase_configured_paths(_read_yaml(resolved_path), resolved_path.parent.absolute())
+            _rebase_configured_paths(
+                migrate_compat(_read_yaml(resolved_path)),
+                resolved_path.parent.absolute(),
+            )
         )
     layers.append(environment_values(environ))
     layers.append({key: value for key, value in (cli_overrides or {}).items() if value is not None})

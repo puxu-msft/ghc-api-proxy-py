@@ -21,16 +21,17 @@ from starlette.types import Message, Receive, Scope, Send
 
 from app.core.chain import Chain
 from app.errors import ErrorCategory
+from app.model_provider.upstream_errors import normalize_upstream_error
 from app.observability.logging import get_logger
 from app.observability.metrics import ATTRIBUTION_LINES_STRIPPED
 from app.observability.raw_capture import RawRequestCapture, agent_id_from_headers
-from app.observability.rejection_capture import capture_rejection
 from app.observability.request_completion import (
     FailureOrigin as CompletionFailureOrigin,
 )
 from app.observability.request_completion import (
     InterruptionPhase,
     RequestCompletionCoordinator,
+    safe_exception_detail,
     safe_exception_graph_notes,
     safe_exception_notes,
 )
@@ -59,33 +60,34 @@ from app.pipeline.delivery.stream import (
     stream_delivery,
 )
 from app.pipeline.delivery_policy import (
-    assembler_for,
     carries_upstream_natively,
-    delivery_buffer,
-    framer_for,
     stream_idle_seconds,
     stream_settings,
 )
 from app.pipeline.direct_driver import PROVIDER_BOUND_OBSERVER
 from app.pipeline.driver import (
-    RESPONSE_CONVERSION_LOSSES,
     handle_bounded,
     handle_count_tokens,
     ledger_for,
-    replay_prepared,
 )
 from app.pipeline.error_classify import describe
-from app.pipeline.exceptions import UpstreamTimeout
-from app.pipeline.hand_over import HandBackOutcome, hand_back_block, one_line, replay_reason
+from app.pipeline.exceptions import UpstreamError, UpstreamRejected, UpstreamTimeout
+from app.pipeline.hand_over import HandBackOutcome, hand_back_block, replay_reason
+from app.pipeline.handled import (
+    RESPONSE_CONVERSION_LOSSES,
+    RESPONSE_CONVERSION_OPAQUE_PAYLOADS,
+    RESPONSE_CONVERSION_WARNINGS,
+)
 from app.pipeline.reply import reply_summary, response_payload
 from app.pipeline.request import RequestContext, WireFormat
 from app.pipeline.session_identity import interaction_id_from_headers
-from app.pipeline.translation_driver.semantic import Loss
+from app.pipeline.translation_driver.semantic import ConversionWarning, Loss
 from app.server.app_state import chain_of
 from app.server.http_errors import error_response, proxy_error
 from app.server.inbound import InboundRequestError, build_context
 from app.server.routes.table import route_for_path
 from app.streaming.deadline import (
+    ClientDeadlineError,
     with_client_deadline_at,
     with_deadline_at,
 )
@@ -133,22 +135,10 @@ async def serve(request: Request) -> Response:
     get_logger(REQUEST_LOGGER).debug(format_arrival_line(RequestLine(method=trace.method, path=trace.path)), status="pending")
 
     chain.active_requests.add(trace.request_id)
-    raw_capture = (
-        chain.raw_capture.start(
-            session_id=interaction_id_from_headers(request.headers) or "unknown-session",
-            agent_id=agent_id_from_headers(request.headers) or "unknown-agent",
-            request_id=trace.request_id,
-            method=trace.method,
-            path=trace.path,
-        )
-        if chain.raw_capture is not None
-        else None
-    )
     completion = RequestCompletionCoordinator(
         chain=chain,
         trace=trace,
         request_id=trace.request_id,
-        raw_capture=raw_capture,
     )
     try:
         response = await _dispatch(request, chain, trace, completion)
@@ -207,13 +197,45 @@ def _aborted(failure: BaseException) -> tuple[LogStatus, str]:
 
     A client that left is `gone` rather than `fail`, on the ruling `_ending` already records: against an interactive client, abandoning a turn is routine, and painting it the same red as a proxy that broke buries the ones worth reading. The cancellation branch also covers a shutdown cancelling its own in-flight requests, where nobody left at all — so its wording names no side, because nothing here can tell the two apart and the line should not claim to.
 
-    The failure is quoted with `repr` rather than the `str` `_ending` uses, because that one has a known transport error in hand and this one has whatever escaped. `str(KeyError("model"))` is `"'model'"` with no hint of what kind of thing went wrong, and `str(RuntimeError())` is empty outright — which would print the detail as a colon and nothing after it, exactly the unreadable absence this function exists to prevent. An exception that arrived wrapped in a group is quoted as the group, which is honest: nothing between here and the raise unwraps one, so picking a member would be a guess about which one mattered.
+    An ordinary failure is represented by its qualified exception type only. Its message and linked exception text may contain upstream-controlled or request-derived content, so neither is allowed onto the ordinary request line.
     """
     if isinstance(failure, ClientDisconnect):
         return "gone", "client disconnected before the request was answered"
     if isinstance(failure, asyncio.CancelledError):
         return "gone", "request cancelled before it was answered"
-    return "fail", f"request failed before a response: {failure!r}"
+    return "fail", f"request failed before a response: {_safe_failure_detail(failure)}"
+
+
+def _safe_failure_detail(error: BaseException) -> str:
+    """Use the shared type/status-only ordinary diagnostic projection."""
+    return safe_exception_detail(error)
+
+
+def _safe_upstream_failure_detail(error: BaseException) -> str:
+    """Project a failure known to be upstream without retaining its raw text."""
+    normalized = normalize_upstream_error(error)
+    if isinstance(normalized, (UpstreamError, UpstreamRejected)):
+        return _safe_failure_detail(normalized)
+    seen: set[int] = set()
+    pending: list[BaseException] = [error]
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        normalized = normalize_upstream_error(current)
+        if isinstance(normalized, (UpstreamError, UpstreamRejected)):
+            return _safe_failure_detail(normalized)
+        pending.extend(
+            linked
+            for linked in (
+                current.__cause__,
+                current.__context__,
+                getattr(current, "cause", None),
+            )
+            if isinstance(linked, BaseException)
+        )
+    return f"upstream stream failure: {type(error).__module__}.{type(error).__qualname__}"
 
 
 def _absorb_response_observation(context: RequestContext, trace: RequestTrace) -> None:
@@ -525,7 +547,7 @@ async def _dispatch(
             if not timeout.expired():
                 raise
         error = UpstreamTimeout(f"client request exceeded {client_deadline}s")
-        trace.detail = str(error)
+        trace.detail = _safe_failure_detail(error)
         return error_response(error, inbound_format=route.wire_format.value)
     return await _dispatch_with_body(request, chain, trace, completion, client_deadline_at)
 
@@ -593,6 +615,8 @@ async def _dispatch_after_body(
     *,
     client_deadline_at: float | None,
 ) -> Response:
+    session_id = interaction_id_from_headers(request.headers)
+    agent_id = agent_id_from_headers(request.headers)
     # The template rather than the URL: once a path carries parameters the two differ, and only the template identifies the route. The router records which of its own paths answered, so this is that answer rather than a second match of our own. Reading it also survives a mount prefix — measured, `--root-path /api` made `route_for_path(request.url.path)` miss on every route and answer 404 from the branch below.
     matched = request.scope.get("route")
     route = route_for_path(getattr(matched, "path", None) or request.url.path)
@@ -642,7 +666,7 @@ async def _dispatch_after_body(
         # The path parameters go with the body because for some routes they are part of it: Azure names the deployment in the URL and sends a body with no model, so what the client asked for can only be read from the two together.
         context = build_context(route, body, request.headers, request.path_params)
     except InboundRequestError as error:
-        trace.detail = str(error)
+        trace.detail = _safe_failure_detail(error)
         return error_response(
             proxy_error(ErrorCategory.CLIENT, str(error)),
             inbound_format=route.wire_format.value,
@@ -663,8 +687,6 @@ async def _dispatch_after_body(
     # Recorded here rather than beside the resolved model, so every path below — the count endpoint, the failures, the ones that never route at all — reports what the client asked for even when nothing answered it.
     trace.message_id = context.id
     trace.requested_model = context.requested_model
-    if completion.raw_capture is not None:
-        context.extras["raw_capture"] = completion.raw_capture
 
     active = chain.active_requests
 
@@ -680,6 +702,30 @@ async def _dispatch_after_body(
         active.set_provider(trace.request_id, routed.provider_name)
         trace.model = routed.resolved_model
         trace.provider_name = routed.provider_name
+        if (
+            completion.raw_capture is None
+            and chain.raw_capture is not None
+            and chain.debug_capture_rules is not None
+            and session_id is not None
+            and chain.debug_capture_rules.matches(
+                provider=routed.provider_name,
+                model_id=routed.resolved_model,
+                session_id=session_id,
+                agent_id=agent_id,
+            )
+        ):
+            capture = chain.raw_capture.start(
+                session_id=session_id,
+                agent_id=agent_id,
+                request_id=trace.request_id,
+                method=trace.method,
+                path=trace.path,
+            )
+            completion.raw_capture = capture
+            capture.request_body(raw_body)
+            capture.request_body_end(complete=True)
+        if completion.raw_capture is not None:
+            routed.extras["raw_capture"] = completion.raw_capture
 
     def _count_upstream_response_observed(counted_context: RequestContext) -> None:
         """Project count transport facts as soon as its buffered response exists."""
@@ -716,10 +762,20 @@ async def _dispatch_after_body(
             trace.model = context.resolved_model
             trace.reasoning_effort = _reasoning_effort(context)
             active.set_effort(trace.request_id, trace.reasoning_effort)
-            trace.detail = str(error)
+            trace.attempts = context.attempt_count
+            trace.absorb_buffered_upstream_attempts(context)
+            active.set_attempts(
+                trace.request_id,
+                context.attempt_count,
+                last_attempt_started_at=(
+                    context.current_attempt.started_at
+                    if context.current_attempt is not None
+                    else None
+                ),
+            )
+            trace.detail = _safe_failure_detail(error)
             # A count that failed still translated, and what the translation could not carry is part of why it may have failed.
             trace.absorb_conversion(context)
-            # No capture here on purpose. `count_tokens` converts every upstream failure into `CountTokensUnavailable` before it reaches this line, so an `UpstreamRejected` never arrives and a call would be wiring that looks live and is not. That conversion also means a counting request refused over its body answers 503 rather than upstream's own verdict, which is a separate gap and not this one's to close.
             return error_response(
                 error,
                 inbound_format=route.wire_format.value,
@@ -727,7 +783,18 @@ async def _dispatch_after_body(
             )
         # A count is a model request like any other: it resolves a model and it produces a token number, and a line that reported neither made the busiest endpoint on the proxy the least legible one.
         trace.model = context.resolved_model
+        trace.attempts = context.attempt_count
+        trace.absorb_buffered_upstream_attempts(context)
         active.set_model(trace.request_id, context.resolved_model)
+        active.set_attempts(
+            trace.request_id,
+            context.attempt_count,
+            last_attempt_started_at=(
+                context.current_attempt.started_at
+                if context.current_attempt is not None
+                else None
+            ),
+        )
         trace.reasoning_effort = _reasoning_effort(context)
         active.set_effort(trace.request_id, trace.reasoning_effort)
         tokens = counted.get("input_tokens")
@@ -760,12 +827,10 @@ async def _dispatch_after_body(
         active.set_effort(trace.request_id, trace.reasoning_effort)
         trace.attempts = context.attempt_count
         trace.absorb_attempt_timing(context)
-        trace.detail = str(error)
+        trace.detail = _safe_failure_detail(error)
         trace.absorb_token_admissions(context)
         # A refused crossing is exactly where the losses matter: they name which field the request could not carry, and the error alone rarely does.
         trace.absorb_conversion(context)
-        # Before the response is written, because `context.payload` is the body upstream refused and nothing downstream keeps it.
-        capture_rejection(context, error, request_id=trace.request_id)
         return error_response(
             error,
             inbound_format=route.wire_format.value,
@@ -795,9 +860,8 @@ async def _dispatch_after_body(
         _observe_failed_upstream_response(context, trace, chain, error)
         # Build the record once and give both presentations its message. Classifying again inside `error_response` left the wire on `ErrorInfo.message` while the completion line read the SDK exception's incompatible `__str__`.
         info = describe(error, source_format=route.wire_format.value)
-        trace.detail = one_line(info.message)
+        trace.detail = _safe_failure_detail(error)
         # The branch an upstream refusal actually takes: the driver reports it in the outcome rather than raising, so the exception path above never sees one.
-        capture_rejection(context, error, request_id=trace.request_id)
         return error_response(
             info,
             inbound_format=route.wire_format.value,
@@ -840,28 +904,17 @@ async def _dispatch_after_body(
     if context.stream:
         # The instant the driver fixed when it opened this attempt, read rather than recomputed: a second `now + deadline` here would start the clock at the moment the headers came back and quietly grant the attempt a second full lifetime.
         attempt = context.current_attempt
-        # This is the attempt whose headers and body are about to be delivered. A pre-header retry may have made it attempt 1 or later, so replay sources cannot be hard-coded to request attempt 0. A synthesized stream can have an attempt that failed before admission and never needs replay; defer the invariant check until `_reopen` is actually called.
-        replay_payload = (
-            deepcopy(attempt.payload)
-            if attempt is not None and attempt.token_admission is not None
-            else None
-        )
-        replay_admission = attempt.token_admission if attempt is not None else None
-        replay_route = handled.route
         settings = stream_settings(chain)
         completion_delivery = _CompletionDelivery()
-        framer = framer_for(
-            handled,
-            chain,
-            message_id=context.id,
-            model=context.resolved_model,
-            on_passthrough_terminal_unit=completion_delivery.offer,
-        )
+        if handled.delivery_plan is None:
+            raise RuntimeError("stream delivery plan is not configured")
+        delivery_plan = handled.delivery_plan(completion_delivery.offer)
+        framer = delivery_plan.framer
         if framer is None:
             # This client leg has no outbound framer, so there is no block to deliver. The upstream stream is read whole and handed over in one write, in the client's own dialect, byte for byte. Ruled 2026-08-22; before this branch existed those bytes went into an assembler that recognised none of them and the client got a 200 with an empty body and no error frame.
             # The same guards in the same order as the block path below, so an idle upstream, an expired attempt and an expired client deadline all still stop this the same way, and the byte counter still sees every byte.
             # What is *not* the same is what the client is told when one fires. The block path writes an error frame; there is no framer for this leg, so the guard's exception ends the response after `one_shot_delivery` sends the upstream bytes that had already arrived — 200, `text/event-stream`, those bytes, and no error frame.
-            # This is the same shape as the defect this branch removed, on a narrower path. Deliberate for now: naming an error in a dialect nobody here can write is the same piece of work as finding this dialect's block boundaries, and the ruling deferred that. See `.dev/docs/tmp/260822-ghc-api-conformance-summary.md`.
+            # This is the same shape as the defect this branch removed, on a narrower path. Deliberate for now: naming an error in a dialect nobody here can write is the same piece of work as finding this dialect's block boundaries, and the ruling deferred that. See `.dev/docs/ghe-device-flow/history/260822-ghc-api-conformance-summary.md`.
             one_shot_accounting = _StreamAccounting(
                 chain=chain,
                 request_id=trace.request_id,
@@ -887,12 +940,21 @@ async def _dispatch_after_body(
                                 trace.request_id,
                                 trace,
                                 attempt=context.attempt_count,
+                                status_code=response.status_code,
                                 attempt_index=(
                                     context.current_attempt.index
                                     if context.current_attempt is not None
                                     else None
                                 ),
                                 capture=one_shot_accounting.completion.raw_capture,
+                                on_body_started=one_shot_accounting.note_upstream_body_started,
+                                on_body_failure=lambda error: (
+                                    one_shot_accounting.note_runtime_failure(
+                                        error,
+                                        True,
+                                        lambda _candidate: True,
+                                    )
+                                ),
                             ),
                             deadline_at=client_deadline_at,
                         ),
@@ -921,7 +983,7 @@ async def _dispatch_after_body(
                 deadline_at=attempt.deadline_at if attempt is not None else None,
             )
         )
-        assembler = assembler_for(handled, hand_over_stop_reasons=_hand_over_reasons)
+        assembler = delivery_plan.assembler
         accounting = _StreamAccounting(
             chain=chain,
             request_id=trace.request_id,
@@ -956,27 +1018,11 @@ async def _dispatch_after_body(
                     request_id=trace.request_id,
                 )
                 return None
-            # The tear this replay replaces is an upstream failure, whatever the replacement then
-            # does. Noting it here feeds the provider's failure streak, so a stream that keeps
-            # tearing is reopened with a wait between attempts instead of back-to-back — the
-            # driver's own `_handle_failure` never saw this failure, because its attempt had
-            # already handed the body over when the tear happened. The wait stays at the base
-            # rather than widening: each replacement's headers arrive successfully, and that
-            # success is what clears the streak. Widening is the pre-header failures' shape.
-            chain.rate_limiter_for(replay_route.provider_name).note_failure()
-            if replay_payload is None or replay_admission is None:
-                raise RuntimeError("upstream replay has no source attempt admission")
-            # Replay the exact final payload and admission decision that produced the response currently being delivered. Rerouting or rerunning mutable shaping here can connect a prefix produced from one conversation to a replacement built from another.
+            if handled.reopen is None:
+                raise RuntimeError("stream replay action is not configured")
             opened_before = context.attempt_count
             try:
-                again = await replay_prepared(
-                    chain,
-                    context,
-                    replay_route,
-                    replay_payload,
-                    replay_admission,
-                    _routed,
-                )
+                again = await handled.reopen(replacing)
             finally:
                 # Both written off the same fact — whether `begin_attempt` ran — so an entry here always means an upstream attempt was opened for it, and never the reverse.
                 #
@@ -995,9 +1041,13 @@ async def _dispatch_after_body(
                         ),
                     )
                     trace.absorb_token_admissions(context)
-                    trace.replaced_failures.append(one_line(repr(replacing)))
+                    trace.replaced_failures.append(
+                        _safe_upstream_failure_detail(replacing)
+                    )
                     # The replacement attempt now owns response conversion facts even if it fails before obtaining headers and an assembler. The discarded attempt's losses must not become the final request's losses.
                     accounting.response_loss_assembler = None
+            if again is None:
+                return None
             reopened = again.outcome.response
             if reopened is None or not again.context.stream:
                 return None
@@ -1011,7 +1061,10 @@ async def _dispatch_after_body(
                 reopened.status_code,
                 attempt=fresh_attempt_index,
             )
-            fresh_assembler = assembler_for(again, hand_over_stop_reasons=_hand_over_reasons)
+            if again.delivery_plan is None:
+                return None
+            fresh_plan = again.delivery_plan(completion_delivery.offer)
+            fresh_assembler = fresh_plan.assembler
             # The accounting reads terminal and response-conversion facts off whichever assembler is current, and after this the current one is this.
             accounting.assembler = fresh_assembler
             accounting.response_loss_assembler = fresh_assembler
@@ -1033,14 +1086,16 @@ async def _dispatch_after_body(
                         trace.request_id,
                         trace,
                         attempt=again.context.attempt_count,
+                        status_code=reopened.status_code,
                         attempt_index=fresh_attempt.index if fresh_attempt is not None else None,
                         capture=accounting.completion.raw_capture,
+                        on_body_started=accounting.note_upstream_body_started,
                     ),
                     deadline_at=client_deadline_at,
                 ),
                 fresh_upstream,
                 fresh_assembler,
-                delivery_buffer(chain),
+                fresh_plan.buffer,
             )
 
         def _hand_back_streaming(
@@ -1056,19 +1111,24 @@ async def _dispatch_after_body(
             outcome = _hand_back(error, stop_reason)
             if outcome is None:
                 return None
+            safe_trigger_message = (
+                _safe_upstream_failure_detail(error)
+                if error is not None
+                else None
+            )
             if outcome.trigger is not None:
                 accounting.completion.note_upstream_stream_failure(
                     attempt=context.attempt_count,
                     category=outcome.trigger.category,
                     exception_module=outcome.trigger.exception_module,
                     exception_type=outcome.trigger.exception_type,
-                    message=outcome.trigger.message,
+                    error=error,
                 )
             # The client is about to get a complete reply it will act on, and the upstream attempt behind it did not finish.
             accounting.handed_over = True
             # Kept because a hand-over is the one ending that swallows its cause: the exception never leaves the delivery generator, so `_StreamAccounting.failure` — which is set from what propagates — stays `None` and the completion line had nothing to say about *why* the turn was handed back. Two reviews found failures reaching the client as a clean `retry` line with no account of them anywhere.
             accounting.handed_over_error = (
-                outcome.trigger.legacy_repr or outcome.trigger.exception_type
+                safe_trigger_message or outcome.trigger.exception_type
                 if outcome.trigger is not None
                 else None
             )
@@ -1097,18 +1157,20 @@ async def _dispatch_after_body(
                             trace.request_id,
                             trace,
                             attempt=context.attempt_count,
+                            status_code=response.status_code,
                             attempt_index=(
                                 context.current_attempt.index
                                 if context.current_attempt is not None
                                 else None
                             ),
                             capture=accounting.completion.raw_capture,
+                            on_body_started=accounting.note_upstream_body_started,
                         ),
                         deadline_at=client_deadline_at,
                     ),
                     assembler,
                     upstream=upstream_side,
-                    buffer=delivery_buffer(chain),
+                    buffer=delivery_plan.buffer,
                     settings=settings,
                     framer=framer,
                     replay=replay,
@@ -1128,9 +1190,15 @@ async def _dispatch_after_body(
         )
 
     # What upstream sent us, not what we hand onward. A buffered reply is one read, so this is the whole of it.
-    trace.received = len(response.content)
+    raw_response_body = response.extensions.get("upstream_raw_response_body")
+    if not isinstance(raw_response_body, bytes):
+        raw_response_body = response.extensions.get("codebuddy_raw_upstream_body")
+    captured_response_body = (
+        raw_response_body if isinstance(raw_response_body, bytes) else response.content
+    )
+    trace.received = len(captured_response_body)
     trace.received_known = True
-    completion.note_upstream_response_body(response.content, attempt=attempt_index)
+    completion.note_upstream_response_body(captured_response_body, attempt=attempt_index)
     completion.note_upstream_response_end(attempt=attempt_index)
     if attempt_index is not None:
         completion.note_upstream_attempt_end(attempt_index, complete=True)
@@ -1225,6 +1293,32 @@ def _assembler_response_losses(assembler: BlockAssembler[Any] | None) -> list[Lo
     return [loss for loss in cast(tuple[object, ...], value) if isinstance(loss, Loss)]
 
 
+def _assembler_response_warnings(
+    assembler: BlockAssembler[Any] | None,
+) -> list[ConversionWarning]:
+    if assembler is None:
+        return []
+    value = getattr(assembler, "response_warnings", ())
+    if not isinstance(value, tuple):
+        return []
+    return [
+        warning
+        for warning in cast(tuple[object, ...], value)
+        if isinstance(warning, ConversionWarning)
+    ]
+
+
+def _assembler_response_opaque_payloads(
+    assembler: BlockAssembler[Any] | None,
+) -> list[Any]:
+    if assembler is None:
+        return []
+    value = getattr(assembler, "opaque_payloads", ())
+    if not isinstance(value, tuple):
+        return []
+    return list(cast(tuple[object, ...], value))
+
+
 @dataclass(slots=True)
 class _StreamAccounting:
     """One streaming request's slot in the footer and its eventual log line.
@@ -1257,6 +1351,9 @@ class _StreamAccounting:
     failure: BaseException | None = None
     # Bound to the attempt's positive upstream marker. It rechecks the exception graph after the error-frame send, so a cleanup failure attached to the same root cannot ride through the identity gate unnoticed.
     failure_provenance: Callable[[Exception], bool] | None = None
+    # The outer response can be closed before the body generator is ever pulled.
+    # In that case the generator's own finally cannot write an incomplete boundary.
+    upstream_body_started: bool = False
 
     def settle(self) -> None:
         """Settle stream-specific facts without publishing the request-wide record."""
@@ -1299,7 +1396,9 @@ class _StreamAccounting:
                 # No status override either way. This does not decide how the turn came out: an `end_turn` that tears afterwards is still `ok` because the client holds the whole reply, and a `max_tokens` that tears afterwards is still `retry` because the client still has a turn to carry on. What it decides is nothing; it only says what the connection did.
                 #
                 # Bounded like the other exceptions that reach this line, and for the same reason — upstream chooses the text and `repr` has no limit.
-                self.trace.tore_after_terminal = one_line(repr(self.tore_after_terminal))
+                self.trace.tore_after_terminal = _safe_upstream_failure_detail(
+                    self.tore_after_terminal
+                )
         if self.context is not None:
             _absorb_response_observation(self.context, self.trace)
             observation = self.context.response_observation
@@ -1308,6 +1407,12 @@ class _StreamAccounting:
             # Response conversion is attempt-scoped while streaming. A transparent replay replaces the assembler, so publish only the current assembler's facts and overwrite anything the discarded attempt observed before recomputing the request trace.
             self.context.extras[RESPONSE_CONVERSION_LOSSES] = _assembler_response_losses(
                 self.response_loss_assembler
+            )
+            self.context.extras[RESPONSE_CONVERSION_WARNINGS] = _assembler_response_warnings(
+                self.response_loss_assembler
+            )
+            self.context.extras[RESPONSE_CONVERSION_OPAQUE_PAYLOADS] = (
+                _assembler_response_opaque_payloads(self.response_loss_assembler)
             )
             self.trace.absorb_conversion(self.context)
         completion_unit = None
@@ -1352,6 +1457,24 @@ class _StreamAccounting:
         if self.tore_after_terminal is None:
             self.tore_after_terminal = error
 
+    def note_upstream_body_started(self) -> None:
+        self.upstream_body_started = True
+
+    def note_unstarted_upstream_body_cleanup(self) -> None:
+        if self.upstream_body_started:
+            return
+        self.upstream_body_started = True
+        capture = self.completion.raw_capture
+        if capture is None:
+            return
+        attempt = (
+            self.context.current_attempt.index
+            if self.context is not None and self.context.current_attempt is not None
+            else max(0, self.trace.attempts - 1)
+        )
+        capture.upstream_response_end(complete=False, attempt=attempt)
+        capture.upstream_attempt_end(attempt, complete=False)
+
     def _apply_ending(self) -> None:
         status, detail = self._ending()
         self.completion.note_stream_ending(
@@ -1369,7 +1492,7 @@ class _StreamAccounting:
     def _ending(self) -> tuple[LogStatus, str]:
         """Which of the three ways this stream stopped short, and how much of a problem each is.
 
-        The failure is quoted rather than summarised. It is the durable account of what went wrong: an upstream reset unwinds through delivery into this accounting object, then may be consumed after its error frame's ASGI send returns. A line reporting only that the stream stopped would discard the one fact worth having.
+        The failure is projected to fixed status or stable type metadata. It remains the durable account of what went wrong without copying exception text into the ordinary request line.
 
         A client that left is `gone` rather than `fail`, ruled 2026-08-20. Two of these are the proxy's problem and one is not: on a proxy fronting an interactive client, cancelling a turn is routine, and painting every Esc the same red as an upstream reset would bury the resets. `[ OK ]`, which is what those lines used to get, is the other direction of the same mistake — it made a cancelled turn indistinguishable from an answer that arrived.
 
@@ -1384,7 +1507,16 @@ class _StreamAccounting:
                 return "retry", f"turn handed back to the client to continue after {self.handed_over_error}"
             return "retry", "turn handed back to the client to continue"
         if self.failure is not None:
-            return "fail", f"stream failed before a terminal event: {self.failure}"
+            if self.failure_provenance is None:
+                return (
+                    "fail",
+                    f"stream failed before a terminal event: {_safe_failure_detail(self.failure)}",
+                )
+            return (
+                "fail",
+                f"stream failed before a terminal event: "
+                f"{_safe_upstream_failure_detail(self.failure)}",
+            )
         # Before the drain, because **either kind of assembler failure drains**: the delivery loop reports it and returns, so the generator ends normally and `drained` is set. The drain wording is wrong for both of them, in opposite directions. For a refusal it would be false twice over — upstream did send its terminal, and this side is what stopped before reading it. For an upstream failure event it says "no terminal arrived" about a stream that ended with an explicit failure terminal: `response.failed`, `response.cancelled` and Anthropic's `error` are terminals, and the bridge Spec lists them as such. Either way it sends whoever reads the line to the wrong half of the system.
         #
         # Read off the assembler rather than guessed here, which is what the note above asks for; `origin` is the assembler's own record of who decided.
@@ -1392,7 +1524,10 @@ class _StreamAccounting:
         if reported is not None:
             if reported.origin is FailureOrigin.PROXY_REFUSAL:
                 return "fail", f"refused mid-stream: {reported.info.message}"
-            return "fail", f"upstream reported a stream failure: {reported.info.message}"
+            return (
+                "fail",
+                f"upstream reported a stream failure: {reported.info.code}",
+            )
         if self.drained:
             return "fail", "upstream stream ended without a terminal event"
         if self.assembler is not None and self.assembler.terminal.seen:
@@ -1583,7 +1718,10 @@ class _AccountedStreamingResponse(StreamingResponse):
 
     async def aclose(self) -> None:
         """Release a prepared response that never crossed into ASGI delivery."""
-        await self._cleanup.aclose()
+        try:
+            await self._cleanup.aclose()
+        finally:
+            self._accounting.note_unstarted_upstream_body_cleanup()
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         self._accounting.completion.mark_response_ready(self.status_code)
@@ -1678,6 +1816,7 @@ class _AccountedStreamingResponse(StreamingResponse):
                 raise cleanup_error
         finally:
             # The inner generator may already have settled. This fallback covers response-start failure where it was never pulled; publication follows both content and response-owner cleanup.
+            self._accounting.note_unstarted_upstream_body_cleanup()
             self._accounting.settle()
             self._accounting.completion.publish()
 
@@ -1689,8 +1828,11 @@ async def _counted_upstream(
     trace: RequestTrace,
     *,
     attempt: int,
+    status_code: int | None = None,
     attempt_index: int | None = None,
     capture: RawRequestCapture | None = None,
+    on_body_started: Callable[[], None] | None = None,
+    on_body_failure: Callable[[Exception], None] | None = None,
 ) -> AsyncGenerator[bytes]:
     """Count what upstream sends, as it arrives, and forward it untouched.
 
@@ -1702,8 +1844,10 @@ async def _counted_upstream(
 
     **Closing this closes the stream under it**, the same way `with_idle_timeout` and `read_events` do. This was the one layer of the production chain that did not, and it was the layer everything else releases through: `read_events` closes the outermost composite and the client deadline closes this one, and the chain stopped here. A client that went away mid-turn therefore left the marker, both guards and the upstream response open until the collector reached them — measured 2026-08-24 against the real five-object composition, where the raw source stayed open across a tick and only an explicit close released it. A cancellation propagates all the way down **when the close succeeds**, which is why the client deadline's own path was never the one that leaked and an ordinary early close was. A source with no `aclose` is left alone, and a close that itself fails is ordered against whatever was already propagating — both by `finish_stream_cleanup`, which is what this delegates the whole of cleanup to.
     """
+    if on_body_started is not None:
+        on_body_started()
     trace.received_known = True
-    trace.begin_upstream_body_timing(attempt)
+    trace.begin_upstream_body_timing(attempt, status_code=status_code)
     previous: float | None = None
     upstream_eof = False
     try:
@@ -1713,8 +1857,6 @@ async def _counted_upstream(
                 chunk = await anext(chunks)
             except StopAsyncIteration:
                 trace.note_upstream_end(time.monotonic())
-                if capture is not None:
-                    capture.upstream_response_end(attempt=attempt_index)
                 upstream_eof = True
                 break
             except Exception as error:
@@ -1725,7 +1867,9 @@ async def _counted_upstream(
                     else None
                 )
                 if replaced_cancellation is None:
-                    trace.note_upstream_end(time.monotonic())
+                    trace.note_upstream_end(time.monotonic(), error=error)
+                if on_body_failure is not None:
+                    on_body_failure(error)
                 raise
             now = time.monotonic()
             if chunk and trace.first_upstream_byte_s is None:
@@ -1735,7 +1879,7 @@ async def _counted_upstream(
                 if trace.upstream_max_gap_s is None or gap > trace.upstream_max_gap_s:
                     trace.upstream_max_gap_s = gap
             previous = now
-            trace.note_upstream_chunk(now)
+            trace.note_upstream_chunk(now, body_bytes=len(chunk))
             # Every arrival, not only the ones carrying bytes, so a gap here means what a gap means to `with_idle_timeout` underneath — that guard resets on any item, and a count using a different rule would put the two numbers on scales that cannot be compared. httpx's `aiter_bytes` drops empty chunks anyway, so on the production chain the two rules agree.
             trace.upstream_chunks += 1
             trace.received += len(chunk)
@@ -1759,9 +1903,22 @@ async def _counted_upstream(
         if primary is None:
             primary = cleanup_cancellation
         if capture is not None:
+            capture_attempt = (
+                attempt_index if attempt_index is not None else attempt - 1
+            )
+            capture_complete = (
+                upstream_eof
+                and primary is None
+                and cleanup_error is None
+                and cleanup_cancellation is None
+            )
+            capture.upstream_response_end(
+                complete=capture_complete,
+                attempt=capture_attempt,
+            )
             capture.upstream_attempt_end(
-                attempt_index if attempt_index is not None else attempt - 1,
-                complete=upstream_eof,
+                capture_attempt,
+                complete=capture_complete,
             )
         if primary is not None:
             if cleanup_error is not None:
@@ -1815,7 +1972,18 @@ async def _tracked_delivery(chunks: AsyncGenerator[bytes], accounting: _StreamAc
         else:
             if accounting.failure is not error:
                 # One-shot and unexpected local paths have no inner source marker. The normal block path records the exact upstream/local origin through `on_runtime_failure` before the exception reaches here.
-                accounting.note_runtime_failure(error, False)
+                one_shot_upstream = (
+                    accounting.assembler is None
+                    and accounting.failure_provenance is not None
+                    and not isinstance(error, ClientDeadlineError)
+                )
+                existing_provenance = accounting.failure_provenance
+                accounting.note_runtime_failure(
+                    error,
+                    one_shot_upstream or existing_provenance is not None,
+                    existing_provenance
+                    or ((lambda _candidate: True) if one_shot_upstream else None),
+                )
             provenance = accounting.failure_provenance
             if (
                 error is not accepted_upstream_failure

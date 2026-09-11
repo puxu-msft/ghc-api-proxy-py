@@ -6,7 +6,7 @@ Split out of `app.server.pipeline_app` on 2026-08-22. It had grown to a third of
 """
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, cast
 
 from app.core.chain import Chain
@@ -15,6 +15,7 @@ from app.observability.metrics import TRANSLATION_LOSSES
 from app.observability.request_log import (
     LogStatus,
     RequestLine,
+    UpstreamBodyAttempt,
     format_completion_line,
     status_for,
 )
@@ -190,6 +191,9 @@ class RequestTrace:
     upstream_end_s: float | None = None
     upstream_tail_gap_s: float | None = None
     upstream_final_pull_s: float | None = None
+    upstream_body_attempts: list[UpstreamBodyAttempt] = field(
+        default_factory=list[UpstreamBodyAttempt]
+    )
     upstream_request_body_bytes: int | None = None
     received: int = 0
     # Distinguishes an observed empty upstream body from a request that never reached a response body at all.
@@ -218,14 +222,28 @@ class RequestTrace:
         """Decoded upstream response-body bytes, preserving observed zero."""
         return self.received if self.received_known else None
 
-    def begin_upstream_body_timing(self, attempt: int) -> None:
-        """Start the atomic timing projection for the latest body attempt."""
+    def begin_upstream_body_timing(
+        self,
+        attempt: int,
+        *,
+        status_code: int | None = None,
+        now: float | None = None,
+    ) -> None:
+        """Start latest-attempt timing and retain a separate immutable attempt entry."""
+        started = time.monotonic() if now is None else now
         self.upstream_timing_attempt = attempt
         self.last_upstream_chunk_s = None
         self.final_upstream_pull_started_s = None
         self.upstream_end_s = None
         self.upstream_tail_gap_s = None
         self.upstream_final_pull_s = None
+        self.upstream_body_attempts.append(
+            UpstreamBodyAttempt(
+                attempt=attempt,
+                status_code=status_code,
+                body_started_s=started - self.started,
+            )
+        )
 
     def note_upstream_pull_started(self, now: float) -> None:
         if self.upstream_timing_attempt is None:
@@ -234,13 +252,45 @@ class RequestTrace:
         self.upstream_end_s = None
         self.upstream_tail_gap_s = None
         self.upstream_final_pull_s = None
+        current = self._current_upstream_body_attempt()
+        self.upstream_body_attempts[-1] = replace(
+            current,
+            final_pull_started_s=self.final_upstream_pull_started_s,
+            ended_s=None,
+            final_pull_s=None,
+            tail_gap_s=None,
+            outcome="open",
+            exception_module=None,
+            exception_type=None,
+        )
 
-    def note_upstream_chunk(self, now: float) -> None:
+    def note_upstream_chunk(self, now: float, *, body_bytes: int) -> None:
         if self.final_upstream_pull_started_s is None:
             raise RuntimeError("upstream pull timing has not started")
         self.last_upstream_chunk_s = now - self.started
+        current = self._current_upstream_body_attempt()
+        self.upstream_body_attempts[-1] = replace(
+            current,
+            first_byte_s=(
+                self.last_upstream_chunk_s
+                if body_bytes and current.first_byte_s is None
+                else current.first_byte_s
+            ),
+            last_byte_s=(
+                self.last_upstream_chunk_s
+                if body_bytes
+                else current.last_byte_s
+            ),
+            body_bytes=current.body_bytes + body_bytes,
+            chunks=current.chunks + 1,
+        )
 
-    def note_upstream_end(self, now: float) -> None:
+    def note_upstream_end(
+        self,
+        now: float,
+        *,
+        error: Exception | None = None,
+    ) -> None:
         if self.final_upstream_pull_started_s is None:
             raise RuntimeError("upstream pull timing has not started")
         self.upstream_end_s = now - self.started
@@ -252,6 +302,85 @@ class RequestTrace:
             if self.last_upstream_chunk_s is not None
             else None
         )
+        current = self._current_upstream_body_attempt()
+        self.upstream_body_attempts[-1] = replace(
+            current,
+            ended_s=self.upstream_end_s,
+            final_pull_s=self.upstream_final_pull_s,
+            tail_gap_s=(
+                self.upstream_end_s - current.last_byte_s
+                if current.last_byte_s is not None
+                else None
+            ),
+            outcome="error" if error is not None else "complete",
+            exception_module=type(error).__module__ if error is not None else None,
+            exception_type=type(error).__qualname__ if error is not None else None,
+        )
+
+    def _current_upstream_body_attempt(self) -> UpstreamBodyAttempt:
+        if not self.upstream_body_attempts:
+            raise RuntimeError("upstream body attempt has not started")
+        current = self.upstream_body_attempts[-1]
+        if current.attempt != self.upstream_timing_attempt:
+            raise RuntimeError("upstream body attempt does not match latest timing")
+        return current
+
+    def absorb_buffered_upstream_attempts(self, context: RequestContext) -> None:
+        raw_attempts = context.extras.get("count_tokens_body_attempts")
+        if not isinstance(raw_attempts, list):
+            return
+        for raw in cast(list[Any], raw_attempts):
+            if not isinstance(raw, dict):
+                continue
+            entry = cast(dict[str, Any], raw)
+            attempt = entry.get("attempt")
+            status_code = entry.get("status_code")
+            started_at = entry.get("started_at")
+            ended_at = entry.get("ended_at")
+            body_bytes = entry.get("body_bytes")
+            complete = entry.get("complete")
+            if not (
+                type(attempt) is int
+                and (status_code is None or type(status_code) is int)
+                and isinstance(started_at, float)
+                and isinstance(ended_at, float)
+                and type(body_bytes) is int
+                and type(complete) is bool
+            ):
+                continue
+            started_s = started_at - self.started
+            ended_s = ended_at - self.started
+            first_byte_s = started_s if body_bytes > 0 else None
+            self.upstream_body_attempts.append(
+                UpstreamBodyAttempt(
+                    attempt=attempt,
+                    status_code=status_code,
+                    body_started_s=started_s,
+                    first_byte_s=first_byte_s,
+                    last_byte_s=ended_s if body_bytes > 0 else None,
+                    final_pull_started_s=started_s,
+                    ended_s=ended_s,
+                    final_pull_s=max(0.0, ended_at - started_at),
+                    tail_gap_s=(
+                        max(0.0, ended_at - started_at)
+                        if body_bytes > 0
+                        else None
+                    ),
+                    body_bytes=body_bytes,
+                    chunks=1 if body_bytes > 0 else 0,
+                    outcome="complete" if complete else "error",
+                    exception_module=(
+                        entry.get("exception_module")
+                        if isinstance(entry.get("exception_module"), str)
+                        else None
+                    ),
+                    exception_type=(
+                        entry.get("exception_type")
+                        if isinstance(entry.get("exception_type"), str)
+                        else None
+                    ),
+                )
+            )
 
     def absorb(self, reply: Terminal) -> None:
         """Take the aggregated reply record onto the line.
@@ -459,7 +588,11 @@ def log_completion(
         status_code,
         upstream_response_body_bytes=upstream_response_body_bytes,
     )
-    status = status_for(status_code, override=trace.status_override)
+    status = status_for(
+        status_code,
+        override=trace.status_override,
+        attempts=trace.attempts,
+    )
     # Counted here rather than where the loss is recorded, so the count and the record are produced from the same tuple and cannot disagree about what this request lost.
     # One increment per request per kind, not per loss. A request carrying screenshots records one `block-not-carried` per block -- 30 of them in a measured case -- and counting each would make the rate track how many blocks a conversation had rather than how often a crossing loses something. The record keeps every one; the counter answers "how many requests were affected".
     for direction, code in sorted({(loss["direction"], loss["code"]) for loss in line.losses}):
@@ -472,6 +605,7 @@ def log_completion(
             unicode=chain.capabilities.unicode,
             color=chain.capabilities.color,
             response_observation=trace.response_observation,
+            retry_as_success=status == "retry" and trace.status_override is None,
         ),
         status=status,
     )

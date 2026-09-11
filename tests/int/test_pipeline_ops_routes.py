@@ -80,11 +80,9 @@ class StubRegistry:
         providers: dict[str, StubProvider],
         *,
         default: str | None = None,
-        fallback: str = "",
     ) -> None:
         self._providers = providers
         self._default = default or next(iter(providers))
-        self._fallback = fallback
 
     @property
     def names(self) -> frozenset[str]:
@@ -98,10 +96,6 @@ class StubRegistry:
     def default_name(self) -> str:
         return self._default
 
-    @property
-    def fallback_name(self) -> str:
-        return self._fallback
-
     def get(self, name: str) -> StubProvider:
         return self._providers[name]
 
@@ -112,17 +106,20 @@ def client_for(
     *,
     providers: dict[str, StubProvider] | None = None,
     default: str | None = None,
-    fallback: str = "",
 ) -> httpx2.AsyncClient:
     app = FastAPI()
     app.include_router(ops_router)
     built = providers if providers is not None else {"ghc": StubProvider("ghc", ids)}
-    registry = StubRegistry(built, default=default, fallback=fallback)
+    registry = StubRegistry(built, default=default)
     # Only what the routes under test read; standing up a whole Chain would tie these to composition. A default `ProxyConfig()` rather than `None` since 2026-08-27: the model list and the status document both consult `model_mappings` now, because routing does.
     setattr(
         app.state,
         CHAIN_STATE_KEY,
-        SimpleNamespace(providers=registry, config=config or ProxyConfig()),
+        SimpleNamespace(
+            providers=registry,
+            config=config or ProxyConfig(),
+            debug_capture_rules=None,
+        ),
     )
     return httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://t")
 
@@ -199,7 +196,7 @@ def test_a_bare_mapping_key_precedes_the_default_provider_qualified_key() -> Non
     assert route.model_id == "deepseek-v4-flash-messages"
 
 
-def test_a_qualified_request_uses_the_fallback_provider_qualified_mapping_key() -> None:
+def test_a_qualified_request_uses_the_default_provider_qualified_mapping_key() -> None:
     providers = {
         "ttthree": StubProvider("ttthree", frozenset({"deepseek-v4-flash-messages"})),
         "ttthree-a": StubProvider(
@@ -212,8 +209,7 @@ def test_a_qualified_request_uses_the_fallback_provider_qualified_mapping_key() 
         inbound_format=WireFormat.ANTHROPIC_MESSAGES,
         providers=ProviderRegistry(
             providers,
-            default="ttthree",
-            fallback="ttthree-a",
+            default="ttthree-a",
         ),
         mappings={
             "ttthree-a/deepseek-v4-flash-messages": (
@@ -243,6 +239,33 @@ async def test_liveness_says_nothing_about_readiness() -> None:
         response = await client.get("/health/liveness")
     assert response.status_code == 200
     assert response.json() == {"status": "alive"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["get", "post", "delete"])
+async def test_capture_rule_management_reports_unconfigured_store(operation: str) -> None:
+    expected = {
+        "error": {
+            "type": "proxy_internal_error",
+            "message": "debug capture rule store is not configured",
+        }
+    }
+    async with client_for(frozenset()) as client:
+        if operation == "get":
+            response = await client.get("/api/debug/capture-rules")
+        elif operation == "post":
+            response = await client.post(
+                "/api/debug/capture-rules",
+                json={
+                    "provider": "ghc",
+                    "model_id": "claude-opus-5",
+                    "session_id": "session-unconfigured",
+                },
+            )
+        else:
+            response = await client.delete("/api/debug/capture-rules/1")
+    assert response.status_code == 503
+    assert response.json() == expected
 
 
 @pytest.mark.asyncio
@@ -739,7 +762,7 @@ async def test_api_status_tells_a_disabled_model_from_a_missing_one() -> None:
 
 
 @pytest.mark.asyncio
-async def test_api_status_says_unroutable_rather_than_inventing_a_provider() -> None:
+async def test_api_status_routes_unknown_provider_through_the_default() -> None:
     """Spec §4.2.2. A qualifier naming nothing, with no fallback configured, has no provider at all.
 
     The row still has to exist — it is the one an operator opened this to find — and its `provider` is `null`, because the alternatives are to omit the row or to name a provider that will never serve it.
@@ -747,12 +770,11 @@ async def test_api_status_says_unroutable_rather_than_inventing_a_provider() -> 
     config = config_with({"x": "typo/claude-opus-5"})
     async with client_for(frozenset({"claude-opus-5"}), config) as client:
         body = (await client.get("/api/status")).json()
-    assert body["fallback_model_provider"] is None
     assert body["routes"]["x"] == {
-        "provider": None,
+        "provider": "ghc",
         "model": "claude-opus-5",
         "origin": "fallback",
-        "serviceable": "unroutable",
+        "serviceable": "yes",
     }
 
 

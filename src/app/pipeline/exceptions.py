@@ -56,7 +56,9 @@ class UpstreamError(PipelineError):
         body_bytes: bytes = b"",
         content_type: str = "",
         sent: bytes = b"",
+        sent_observed: bool = False,
         body_observed: bool = False,
+        body_complete: bool | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
@@ -67,8 +69,13 @@ class UpstreamError(PipelineError):
         self.body_bytes = body_bytes
         # Empty bytes are ambiguous without this bit: they may be a measured empty response or a streaming body nobody consumed. Non-empty bytes prove observation on their own; empty requires the response boundary to say so explicitly.
         self.body_observed = body_observed or bool(body_bytes)
+        self.body_complete = (
+            self.body_observed if body_complete is None else body_complete
+        )
         self.content_type = content_type
         self.sent = sent
+        # An empty request body is legal wire evidence, while the default `b""` also represents no evidence. Keep the observation bit separate so a fallback never invents an empty send.
+        self.sent_observed = sent_observed or bool(sent)
 
 
 class UpstreamTimeout(UpstreamError):
@@ -85,7 +92,10 @@ class UpstreamRateLimit(UpstreamError):
         body: str = "",
         body_bytes: bytes = b"",
         content_type: str = "",
+        sent: bytes = b"",
+        sent_observed: bool = False,
         body_observed: bool = False,
+        body_complete: bool | None = None,
     ) -> None:
         super().__init__(
             message,
@@ -94,7 +104,10 @@ class UpstreamRateLimit(UpstreamError):
             body=body,
             body_bytes=body_bytes,
             content_type=content_type,
+            sent=sent,
+            sent_observed=sent_observed,
             body_observed=body_observed,
+            body_complete=body_complete,
         )
         self.retry_after = retry_after
 
@@ -106,7 +119,7 @@ class UpstreamRejected(PipelineError):
 
     The status and body travel so the client is told what upstream actually said, rather than a bare 502 that reads like the proxy failed.
 
-    `sent` travels for the same reason one level further back: upstream's verdict is a verdict on a particular string of bytes, and that string exists nowhere else. The payload dict survives on the context, but it is the body *before* serialization and so cannot answer a refusal about key order, separators, or anything an SDK did on the way out. The bytes are read off the response the SDK attached to its own exception, which is discarded the moment the error is handled, so they are carried on the error rather than fetched later. Empty when the failure arrived without a request to read them off.
+    `sent` travels for the same reason one level further back: upstream's verdict is a verdict on a particular string of bytes, and that string exists nowhere else. The payload dict survives on the context, but it is the body *before* serialization and so cannot answer a refusal about key order, separators, or anything an SDK did on the way out. The bytes are read off the response the SDK attached to its own exception, which is discarded the moment the error is handled, so they are carried on the error rather than fetched later. `sent_observed` distinguishes a measured empty request from missing request evidence.
     """
 
     def __init__(
@@ -119,7 +132,9 @@ class UpstreamRejected(PipelineError):
         body_bytes: bytes = b"",
         content_type: str = "",
         sent: bytes = b"",
+        sent_observed: bool = False,
         body_observed: bool = False,
+        body_complete: bool | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
@@ -128,8 +143,12 @@ class UpstreamRejected(PipelineError):
         # See `UpstreamError`. Not the same thing as `sent` below, which is the *request*.
         self.body_bytes = body_bytes
         self.body_observed = body_observed or bool(body_bytes)
+        self.body_complete = (
+            self.body_observed if body_complete is None else body_complete
+        )
         self.content_type = content_type
         self.sent = sent
+        self.sent_observed = sent_observed or bool(sent)
 
 
 class PipelineRetry(PipelineError):

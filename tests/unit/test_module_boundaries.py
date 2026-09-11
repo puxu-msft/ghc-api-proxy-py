@@ -45,8 +45,9 @@ _ARCHIVED = (
     "app.shutdown",
     "app.server.app_factory",
     "app.pipeline.executor",
-    # Archived 2026-08-23, and the submodules here are why this tuple holds names rather than top-level packages: `app.protocols`, `app.models` and `app.model_provider.ghc_client` are all live, and only these modules under them went. A name that resolves again means one came back.
-    "app.protocols.gemini",
+    # The old wire-converter namespace was retired once production translation
+    # moved to `app.pipeline.translation_driver`.
+    "app.protocols",
     "app.models.gemini",
     # The pre-header transport guard. Its only caller was `GhcApiClient.send_responses_headers`, whose only caller was `CopilotUpstream` — an adapter to a protocol that had already been archived, and one nothing in `src/` or `tests/` ever instantiated. What it knew (a bare `h2.exceptions.ProtocolError` reaches callers unwrapped) now lives on the live path in `app/model_provider/ghc_client/errors.py`, which is what made it safe to move rather than rewire.
     "app.model_provider.ghc_client.transport",
@@ -84,6 +85,13 @@ def test_the_typed_kernel_is_a_leaf() -> None:
     kernel = reachable_from("app.pipeline.translation_driver.content")
 
     assert not [name for name in kernel if name.startswith(("app.anthropic", "app.upstream"))]
+
+
+def test_translation_driver_does_not_reach_legacy_protocol_converters() -> None:
+    """The active translation seam must not pull in the legacy protocol package."""
+    reachable = reachable_from("app.pipeline.translation_driver.registry")
+
+    assert not [name for name in reachable if name == "app.protocols" or name.startswith("app.protocols.")]
 
 
 def test_the_error_vocabulary_is_a_leaf() -> None:

@@ -9,7 +9,7 @@ Which statuses come back retryable is a judgement about determinism, not about s
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import httpx2
 from anthropic import APIConnectionError as AnthropicConnectionError
@@ -89,6 +89,7 @@ class UpstreamResponseParts:
     headers: dict[str, str]
     body: str
     body_bytes: bytes
+    body_observed: bool
     content_type: str
 
 
@@ -97,6 +98,7 @@ def _response_parts(error: Exception) -> UpstreamResponseParts:
     headers: dict[str, str] = {}
     body = ""
     body_bytes = b""
+    body_observed = False
     response: Any = getattr(error, "response", None)
     if response is not None:
         raw = getattr(response, "headers", None)
@@ -105,40 +107,161 @@ def _response_parts(error: Exception) -> UpstreamResponseParts:
         if status is None:
             candidate = getattr(response, "status_code", None)
             status = candidate if isinstance(candidate, int) else None
-        text = getattr(response, "text", None)
-        if isinstance(text, str):
-            body = text
-        # Read after `text` rather than instead of it: both are properties over the same already-read buffer, so this costs nothing, and `body` has consumers that predate this record.
-        content = getattr(response, "content", None)
-        if isinstance(content, bytes):
-            body_bytes = content
+        body_bytes, body_observed = response_body_evidence(response)
+        body = response_body_text(response, body_bytes, body_observed)
     return UpstreamResponseParts(
         status=status,
         headers=headers,
         body=body,
         body_bytes=body_bytes,
+        body_observed=body_observed if response is not None else False,
         # Off the headers rather than guessed from the payload: what the client is told this content is has to be what upstream said it is, including when upstream was wrong about it.
         content_type=headers.get("content-type", ""),
     )
 
 
-def _sent_body(error: Exception) -> bytes:
+def _sent_body(error: object) -> tuple[bytes, bool]:
     """The bytes httpx actually put on the wire, taken off the request the SDK attached to its failed response.
 
     Read here because this is the last point at which they exist. The response — and the request under it — is dropped with the SDK exception the moment it is translated, and everything downstream has only the payload dict, which is what the body looked like before it was serialized. `len()` of these bytes was already being reported on the completion line; the bytes themselves were never kept anywhere, so a refusal about how a body was encoded had nothing to be read against.
 
-    Taken only for a refusal, not for every SDK failure. A rejected body is as large as the conversation that produced it, and a 5xx or a rate limit is not answered by looking at it.
+    Taken for failures that carry a request or response object. A rejected body is as large as the conversation that produced it, and a read timeout needs the same bytes to replay the attempt even though it has no response status.
     """
-    response: Any = getattr(error, "response", None)
-    request: Any = getattr(response, "request", None)
+    try:
+        request: Any = getattr(error, "request", None)
+    except (AttributeError, RuntimeError):
+        request = None
     if request is None:
-        return b""
+        response: Any = getattr(error, "response", None)
+        try:
+            request = getattr(response, "request", None)
+        except (AttributeError, RuntimeError):
+            request = None
+    if request is None:
+        return b"", False
     try:
         content: Any = request.content
     except Exception:
         # `httpx.Request.content` raises when the body was a stream that was never read, which no send on this path uses. Guarded rather than assumed because this runs while an upstream failure is already on its way to the client: a second failure here would replace upstream's own verdict with a traceback about the note we were trying to take.
-        return b""
-    return content if isinstance(content, bytes) else b""
+        return b"", False
+    return (content, True) if isinstance(content, bytes) else (b"", False)
+
+
+def sent_body_evidence_from_error(error: object) -> tuple[bytes, bool]:
+    """Extract request bytes and distinguish observed emptiness from absence."""
+    return _sent_body(error)
+
+
+def sent_body_from_error(error: object) -> bytes:
+    """Extract request bytes from an SDK, httpx, or response error carrier."""
+    return sent_body_evidence_from_error(error)[0]
+
+
+def normalize_upstream_response_error(
+    error: BaseException,
+    response: httpx2.Response,
+) -> PipelineError | None:
+    """Normalize a timeout/transport error raised while consuming a response body."""
+    if isinstance(error, PipelineError):
+        return None
+    sent, sent_observed = _sent_body(error)
+    if not sent_observed:
+        sent, sent_observed = _sent_body(response)
+    body_bytes, body_observed = _response_body_evidence(response)
+    raw_status = getattr(response, "status_code", None)
+    status = raw_status if isinstance(raw_status, int) else None
+    headers = {str(key): str(value) for key, value in response.headers.items()}
+    content_type = headers.get("content-type", "")
+    if isinstance(error, _TIMEOUT_ERRORS):
+        return UpstreamTimeout(
+            f"upstream timed out: {error}",
+            status_code=status,
+            headers=headers,
+            sent=sent,
+            sent_observed=sent_observed,
+            body_bytes=body_bytes,
+            content_type=content_type,
+            body_observed=body_observed,
+            body_complete=False,
+        )
+    if isinstance(error, _CONNECTION_ERRORS):
+        return UpstreamError(
+            f"upstream connection failed: {error}",
+            status_code=status,
+            headers=headers,
+            sent=sent,
+            sent_observed=sent_observed,
+            body_bytes=body_bytes,
+            content_type=content_type,
+            body_observed=body_observed,
+            body_complete=False,
+        )
+    return None
+
+
+def normalize_upstream_cleanup_error(
+    error: BaseException,
+    response: httpx2.Response,
+) -> PipelineError:
+    """Turn a provider response cleanup failure into a capture-able upstream error."""
+    normalized = normalize_upstream_response_error(error, response)
+    if normalized is not None:
+        return normalized
+    body_bytes, body_observed = _response_body_evidence(response)
+    headers = {str(key): str(value) for key, value in response.headers.items()}
+    sent, sent_observed = _sent_body(error)
+    if not sent_observed:
+        sent, sent_observed = _sent_body(response)
+    return UpstreamError(
+        "upstream response cleanup failed",
+        status_code=response.status_code,
+        headers=headers,
+        body_bytes=body_bytes,
+        content_type=headers.get("content-type", ""),
+        sent=sent,
+        sent_observed=sent_observed,
+        body_observed=body_observed,
+        body_complete=False,
+    )
+
+
+def _response_body_evidence(response: httpx2.Response) -> tuple[bytes, bool]:
+    values = cast(Mapping[str, object], response.extensions)
+    for key in ("upstream_raw_response_body", "codebuddy_raw_upstream_body"):
+        body = values.get(key)
+        if isinstance(body, bytes):
+            return body, True
+    try:
+        body = response.content
+        consumed = response.is_stream_consumed
+    except (AttributeError, RuntimeError):
+        return b"", False
+    return body, bool(consumed)
+
+
+def response_body_evidence(response: httpx2.Response) -> tuple[bytes, bool]:
+    """Expose response bytes already consumed or accumulated by a provider."""
+    return _response_body_evidence(response)
+
+
+def response_body_text(response: httpx2.Response, body: bytes, observed: bool) -> str:
+    if not observed:
+        return ""
+    try:
+        text = response.text
+    except (AttributeError, RuntimeError, UnicodeError):
+        text = None
+    return text if isinstance(text, str) else body.decode("utf-8", errors="replace")
+
+
+async def read_response_body_with_evidence(response: httpx2.Response) -> bytes:
+    """Read a response while publishing the partial body for failure normalization."""
+    body = bytearray()
+    response.extensions["upstream_raw_response_body"] = b""
+    async for chunk in response.aiter_bytes():
+        body.extend(chunk)
+        response.extensions["upstream_raw_response_body"] = bytes(body)
+    return bytes(body)
 
 
 def normalize_upstream_error(error: BaseException) -> PipelineError | None:
@@ -148,8 +271,15 @@ def normalize_upstream_error(error: BaseException) -> PipelineError | None:
     """
     if isinstance(error, PipelineError):
         return None
+    if not isinstance(error, _TIMEOUT_ERRORS + _STATUS_ERRORS + _CONNECTION_ERRORS):
+        return None
+    sent, sent_observed = _sent_body(error)
     if isinstance(error, _TIMEOUT_ERRORS):
-        return UpstreamTimeout(f"upstream timed out: {error}")
+        return UpstreamTimeout(
+            f"upstream timed out: {error}",
+            sent=sent,
+            sent_observed=sent_observed,
+        )
     if isinstance(error, _STATUS_ERRORS):
         parts = _response_parts(error)
         status = parts.status
@@ -161,7 +291,9 @@ def normalize_upstream_error(error: BaseException) -> PipelineError | None:
                 body=parts.body,
                 body_bytes=parts.body_bytes,
                 content_type=parts.content_type,
-                body_observed=True,
+                sent=sent,
+                sent_observed=sent_observed,
+                body_observed=parts.body_observed,
             )
         if status is not None and status not in RETRYABLE_STATUSES and 400 <= status < 500:
             return UpstreamRejected(
@@ -171,8 +303,9 @@ def normalize_upstream_error(error: BaseException) -> PipelineError | None:
                 body=parts.body,
                 body_bytes=parts.body_bytes,
                 content_type=parts.content_type,
-                body_observed=True,
-                sent=_sent_body(error),
+                body_observed=parts.body_observed,
+                sent=sent,
+                sent_observed=sent_observed,
             )
         return UpstreamError(
             f"upstream returned {status}: {error}",
@@ -181,10 +314,13 @@ def normalize_upstream_error(error: BaseException) -> PipelineError | None:
             body=parts.body,
             body_bytes=parts.body_bytes,
             content_type=parts.content_type,
-            sent=_sent_body(error),
-            body_observed=True,
+            sent=sent,
+            sent_observed=sent_observed,
+            body_observed=parts.body_observed,
         )
-    if isinstance(error, _CONNECTION_ERRORS):
-        # No response exists yet, so there is no status to carry and nothing to reject over.
-        return UpstreamError(f"upstream connection failed: {error}")
-    return None
+    # No response exists yet, so there is no status to carry and nothing to reject over.
+    return UpstreamError(
+        f"upstream connection failed: {error}",
+        sent=sent,
+        sent_observed=sent_observed,
+    )

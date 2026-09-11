@@ -1,6 +1,6 @@
 """The per-request console lines.
 
-The frame is `[PREFIX] HH:MM:SS METHOD /path ...`, with the fixed-width prefix and the timestamp supplied by the structlog processor chain. What this module builds is the part after them. That frame was taken from `.dev/docs/archived-2604-rewrite/DESIGN.md`, which the user ruled obsolete on 2026-08-20 — it is what this project shipped and has kept, not a standing decision, and no current document restates it.
+The frame is `[PREFIX] HH:MM:SS METHOD /path ...`, with the fixed-width prefix and the timestamp supplied by the structlog processor chain. What this module builds is the part after them. That frame was taken from `.dev/docs/tui/history/2604-rewrite/DESIGN.md`, which the user ruled obsolete on 2026-08-20 — it is what this project shipped and has kept, not a standing decision, and no current document restates it.
 
 The field order follows `copilot-api-js`, whose real rendered lines look like `[ OK ] 14:25:36 200 anthropic/claude-opus-4-8 1.2s ↑1.0k+8.0k+1.0k ↻80% ↓456 end_turn`. Two things there are deliberate rather than incidental, and both are kept: a **successful** line collapses method and path into `<inbound-format>/<model>`, because once a request has worked, which model answered is the thing worth reading and the route is noise; a line that did **not** succeed keeps `METHOD /path`, because that is what has to be reproduced. Which of the two a line is comes from the verdict passed to `format_completion_line`, never from the status code: a streamed reply's code is settled when upstream's headers arrive, so a stream that tore an hour later still carries a 200 and would otherwise be dressed as an answer that arrived.
 
@@ -118,6 +118,26 @@ def format_protocols(client: str, upstream: str) -> str:
     if client and upstream:
         return f"{client}/{upstream}"
     return client or upstream
+
+
+@dataclass(frozen=True, slots=True)
+class UpstreamBodyAttempt:
+    """Safe, attempt-local evidence collected while an upstream body is pulled."""
+
+    attempt: int
+    status_code: int | None
+    body_started_s: float
+    first_byte_s: float | None = None
+    last_byte_s: float | None = None
+    final_pull_started_s: float | None = None
+    ended_s: float | None = None
+    final_pull_s: float | None = None
+    tail_gap_s: float | None = None
+    body_bytes: int = 0
+    chunks: int = 0
+    outcome: Literal["open", "complete", "error"] = "open"
+    exception_module: str | None = None
+    exception_type: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -663,6 +683,8 @@ def format_completion_line(
     unicode: bool = True,
     color: bool = False,
     response_observation: ResponseObservation | None = None,
+    upstream_body_attempts: tuple[UpstreamBodyAttempt, ...] = (),
+    retry_as_success: bool = False,
 ) -> str:
     """The message body for a finished request.
 
@@ -672,11 +694,13 @@ def format_completion_line(
 
     `status` is the whole line's verdict and is **required**, because the status code cannot supply it: a streamed reply's code is fixed when upstream's headers arrive, so a stream that tore halfway is a failure wearing a 200. It decides three things together — the prefix the processor will print, whether this line takes the successful shape, and how the code is painted — so that a line can no longer say `[FAIL]` while every other part of it reads as an answer that arrived. No default, deliberately: the one wrong value here is `ok`, and a default would hand it to exactly the caller who forgot to think about it.
 
+    `retry_as_success` is the one deliberate split in that rule: a transparent upstream replay has a `retry` prefix but still delivered the final answer, while a hand-over `retry` did not finish the turn and keeps the route-shaped failure form.
+
     Colour carries meaning rather than decoration, following `copilot-api-js`: the status and the failure reason say whether to care, the model is the one name worth finding at a glance, and the duration escalates on its own so a slow request is visible without reading the number.
 
     What came *back* escalates too, on its own scale — bytes and output tokens both go quiet, plain, then warm as they cross an order of magnitude. What went out does not: its size follows from the request the client made and says nothing about how the reply went.
     """
-    succeeded = status == "ok"
+    succeeded = status == "ok" or (status == "retry" and retry_as_success)
     up, down = ("↑", "↓") if unicode else (">", "<")
 
     parts: list[str] = []
@@ -730,6 +754,9 @@ def format_completion_line(
         else "",
     ]
     parts.extend(part for part in upstream_bodies if part)
+    body_attempts = format_upstream_body_attempts(upstream_body_attempts)
+    if body_attempts:
+        parts.append(paint(body_attempts, YELLOW, color=color))
 
     tokens = format_tokens(line.usage, unicode=unicode, color=color)
     if tokens:
@@ -787,21 +814,46 @@ def format_completion_line(
     if line.detail:
         # The same tier as the status code, because this is that verdict's explanation and cannot be louder than it. Fixed red here left a cancelled turn reading as an incident — amber prefix, amber 200, red account of why — which is the reading `STATUS_COLOURS` exists to prevent.
         rendered = f"{rendered}: {paint(line.detail, STATUS_COLOURS[status], color=color)}"
-    if line.request_id and status != "ok":
+    if line.request_id and not succeeded:
         # Full rather than shortened: this is the join key between the console line and its structured record, so two simultaneous failures must never become ambiguous. Past the detail as well as past the fields — the detail is what the reader came for, and a UUID wedged in front of it would be read as part of the explanation.
         rendered = f"{rendered} {paint(f'req={line.request_id}', DIM, color=color)}"
     return rendered
 
 
-def status_for(status_code: int | None, *, override: LogStatus | None = None) -> LogStatus:
-    """The `status` field the prefix processor turns into `[ OK ]`, `[FAIL]` or `[GONE]`.
+def format_upstream_body_attempts(attempts: tuple[UpstreamBodyAttempt, ...]) -> str:
+    """Compactly map each successful response header to its body result."""
+    if len(attempts) <= 1 and not any(attempt.outcome == "error" for attempt in attempts):
+        return ""
+    rendered: list[str] = []
+    for attempt in attempts:
+        status = str(attempt.status_code) if attempt.status_code is not None else "?"
+        ending = attempt.outcome
+        if attempt.ended_s is not None:
+            ending = f"{ending}@{format_duration(attempt.ended_s)}"
+        rendered.append(
+            f"{attempt.attempt}:{status}/{format_bytes(attempt.body_bytes)}/{ending}"
+        )
+    return f"body-attempts={','.join(rendered)}"
+
+
+def status_for(
+    status_code: int | None,
+    *,
+    override: LogStatus | None = None,
+    attempts: int = 1,
+) -> LogStatus:
+    """The `status` field the prefix processor turns into `[ OK ]`, `[FAIL]`, `[GONE]` or `[RETY]`.
 
     Driven by whether the request produced a usable response rather than by the exception type, so an upstream 500 delivered intact and a transport error that produced nothing both read as failures — which is what the person watching cares about.
 
     `override` carries what the status code cannot. A streaming response's status is fixed the moment upstream's headers arrive and stays 200 however the next several minutes go, so the code that watched the delivery end is the only thing that knows whether an answer actually arrived — and, separately, whether anyone was still there to receive it. One value rather than a flag per outcome, because these are alternatives and a pile of booleans would let two of them be true at once.
+
+    A delivered response that needed more than one upstream attempt is a retry rather than a clean success. The client still received a usable answer, so this does not become `fail`; the distinct status keeps the replaced upstream failure visible.
     """
     if override is not None:
-        return override
-    if status_code is None:
-        return "fail"
-    return "ok" if status_code < 400 else "fail"
+        status = override
+    elif status_code is None:
+        status = "fail"
+    else:
+        status = "ok" if status_code < 400 else "fail"
+    return "retry" if status == "ok" and attempts > 1 else status

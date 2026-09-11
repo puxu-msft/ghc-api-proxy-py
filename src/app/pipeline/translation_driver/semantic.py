@@ -1,6 +1,6 @@
 """The intermediate representation translators meet at.
 
-`docs/.human-controlled/message-translation.md` routes translation through "inbound format <-> intermediate <-> upstream format".
+`docs/.human-controlled/message-translation.md` routes translation through "wire format <-> semantic IR <-> wire format".
 No translator pair needs to know about any other.
 Adding a format means writing its two translators, not touching the ones already there.
 
@@ -36,6 +36,7 @@ class LossCode(StrEnum):
     Codes rather than prose because the reason is read by other code — a metric, a receipt, a future degradation policy — and matching on English is how those quietly stop matching. The detail string stays for a human reading a log; the code is what anything else keys on.
     """
 
+    UNKNOWN_FIELDS_NOT_CARRIED = "extensions-not-carried"
     EXTENSIONS_NOT_CARRIED = "extensions-not-carried"
     SYSTEM_METADATA_NOT_CARRIED = "system-metadata-not-carried"
     SYSTEM_FIELD_MALFORMED = "system-field-malformed"
@@ -59,6 +60,7 @@ class LossCode(StrEnum):
     SYNTHETIC_TURN_ADDED = "synthetic-turn-added"
     # Upstream answered with an error this proxy could not read as one. Recorded rather than silently dropped, because it is what decides whether the client is handed upstream's original alongside our envelope — spec §10.1.
     UPSTREAM_ERROR_NOT_INTERPRETED = "upstream-error-not-interpreted"
+    OPAQUE_RESPONSE_SKIPPED = "opaque-response-skipped"
 
 
 class ConversionFactCode(StrEnum):
@@ -69,6 +71,16 @@ class ConversionFactCode(StrEnum):
 @dataclass(frozen=True, slots=True)
 class ConversionFact:
     code: ConversionFactCode
+    detail: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ConversionWarning:
+    """A structured, source-scoped diagnostic for best-effort projection."""
+
+    code: str
+    source_format: str
+    field_path: str
     detail: str = ""
 
 
@@ -121,12 +133,32 @@ class Conversion:
 
     losses: list[Loss] = field(default_factory=lambda: list[Loss]())
     facts: list[ConversionFact] = field(default_factory=lambda: list[ConversionFact]())
+    warnings: list[ConversionWarning] = field(
+        default_factory=lambda: list[ConversionWarning]()
+    )
 
     def record(self, code: LossCode, detail: str = "") -> None:
         self.losses.append(Loss(code, detail))
 
     def observe(self, code: ConversionFactCode, detail: str = "") -> None:
         self.facts.append(ConversionFact(code, detail))
+
+    def warn(
+        self,
+        code: str,
+        *,
+        source_format: str,
+        field_path: str,
+        detail: str = "",
+    ) -> None:
+        self.warnings.append(
+            ConversionWarning(
+                code=code,
+                source_format=source_format,
+                field_path=field_path,
+                detail=detail,
+            )
+        )
 
     def has(self, code: LossCode) -> bool:
         return any(loss.code is code for loss in self.losses)
@@ -155,7 +187,7 @@ class TranslationTarget:
 
 @dataclass(slots=True)
 class SemanticRequest:
-    """The intermediate form of an inbound model request."""
+    """The semantic IR for a model request."""
 
     model: str
     system: list[SystemBlock] = field(default_factory=lambda: list[SystemBlock]())
@@ -173,13 +205,31 @@ class SemanticRequest:
     client_search_tool: str = ""
     # True only when the writer actually mapped an Anthropic dated web-search declaration into the Responses builtin. The response half reads this to distinguish D6's requested call from D3's unsolicited call; the response payload cannot answer who asked for it.
     hosted_web_search_expected: bool = False
-    # Fields no translator claimed, kept so an unknown key is not silently dropped.
+    # Request unknown fields no decoder claimed, kept source-scoped so they are
+    # projected only by an explicit target codec rule.
     extensions: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
     # Unclaimed siblings inside objects a reader otherwise owns. Kept separately so a writer can merge the object before its modelled fields overwrite stale residual values.
     nested_extensions: dict[str, dict[str, Any]] = field(
         default_factory=lambda: dict[str, dict[str, Any]]()
     )
     conversion: Conversion = field(default_factory=Conversion)
+
+    @property
+    def unknown_fields(self) -> dict[str, Any]:
+        """Request-side fields no decoder claimed, scoped to ``source_format``."""
+        return self.extensions
+
+    @unknown_fields.setter
+    def unknown_fields(self, value: dict[str, Any]) -> None:
+        self.extensions = value
+
+    @property
+    def nested_unknown_fields(self) -> dict[str, dict[str, Any]]:
+        return self.nested_extensions
+
+    @nested_unknown_fields.setter
+    def nested_unknown_fields(self, value: dict[str, dict[str, Any]]) -> None:
+        self.nested_extensions = value
 
     def extensions_for(self, wire_format: str) -> dict[str, Any]:
         """The extensions a writer for `wire_format` may replay — all of them or none.
@@ -195,6 +245,22 @@ class SemanticRequest:
         )
         return {}
 
+    def unknown_fields_for(
+        self,
+        wire_format: str,
+        *,
+        excluded: frozenset[str] = frozenset(),
+    ) -> dict[str, Any]:
+        fields = {key: value for key, value in self.extensions.items() if key not in excluded}
+        if not fields or self.source_format == wire_format:
+            return fields
+        self.conversion.record(
+            LossCode.EXTENSIONS_NOT_CARRIED,
+            f"from {self.source_format or 'an unnamed format'} into {wire_format}: "
+            f"{', '.join(sorted(fields))}",
+        )
+        return {}
+
     def nested_extensions_for(self, wire_format: str) -> dict[str, dict[str, Any]]:
         if not self.nested_extensions:
             return {}
@@ -207,6 +273,9 @@ class SemanticRequest:
                     f"from {self.source_format} into {wire_format}: {name}.{key}",
                 )
         return {}
+
+    def nested_unknown_fields_for(self, wire_format: str) -> dict[str, dict[str, Any]]:
+        return self.nested_extensions_for(wire_format)
 
 
 def system_blocks_from_value(value: object) -> tuple[list[SystemBlock], LossCode | None]:

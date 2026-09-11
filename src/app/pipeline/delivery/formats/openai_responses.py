@@ -15,6 +15,8 @@ The sequence is shaped by what the OpenAI SDK's stream parser requires, read fro
 
 import logging
 import time
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, cast
 
 import orjson
@@ -42,6 +44,8 @@ from app.pipeline.delivery.blocks import (
 from app.pipeline.delivery.sse_frame import SseFrame
 from app.pipeline.delivery.sse_source import SseEvent
 from app.pipeline.server_tool_text import web_search_call_text
+from app.pipeline.translation_driver.anthropic_messages import block_to_anthropic
+from app.pipeline.translation_driver.content import BlockKind
 from app.pipeline.translation_driver.reasoning_bridge import (
     ReasoningBridgeError,
     read_anthropic_reasoning,
@@ -49,16 +53,24 @@ from app.pipeline.translation_driver.reasoning_bridge import (
     reasoning_to_anthropic,
     reasoning_to_responses,
 )
+from app.pipeline.translation_driver.responses_events import parse_responses_event
+from app.pipeline.translation_driver.responses_items import (
+    ResponsesItemContext,
+    normalize_response_item,
+)
 
 # The buffered half of this same client leg owns these two tables; this is the streaming half. They were duplicated until 2026-08-27 and kept in step by a comment on each — `fef7d96` is the record of what it costs when the two halves describe one ending differently, so "the same set" is worth making checkable rather than remembered. The import runs `delivery` → `translation_driver`, which is the direction this module already depends in.
-from app.pipeline.translation_driver.responses import (
+from app.pipeline.translation_driver.responses_terminal import (
+    END_TURN,
     FINISHED_STOP_REASONS,
     INCOMPLETE_REASONS,
+    terminal_facts_from_event,
 )
-from app.pipeline.translation_driver.semantic import Loss, LossCode
-from app.protocols.responses_anthropic import (
-    ResponseConversionError,
-    anthropic_usage_from_responses,
+from app.pipeline.translation_driver.semantic import (
+    Conversion,
+    ConversionWarning,
+    Loss,
+    LossCode,
 )
 
 logger = logging.getLogger(__name__)
@@ -70,6 +82,16 @@ logger = logging.getLogger(__name__)
 OPENAI_RESPONSES = "openai-responses"
 
 _FAILURE_EVENTS = frozenset({"error", "response.failed", "response.cancelled"})
+
+
+@dataclass(frozen=True, slots=True)
+class OpaqueStreamingPayload:
+    """A Responses structure this streaming target cannot interpret."""
+
+    source_format: str
+    field_path: str
+    payload: dict[str, Any]
+    kind: str
 
 
 def _words(holder: dict[str, Any]) -> tuple[str, str]:
@@ -110,7 +132,12 @@ def responses_failure_from(event: SseEvent) -> StreamFailure | None:
     if kind not in _FAILURE_EVENTS:
         return None
     code, message = _failure_words(kind, data)
-    logger.warning("upstream sent %r mid-stream: code=%r message=%r", kind, code, message)
+    logger.warning(
+        "upstream sent %r mid-stream: code=%r message=%r",
+        kind,
+        code,
+        message,
+    )
     return StreamFailure(
         origin=FailureOrigin.UPSTREAM_EVENT,
         # Upstream's own event name, kept rather than normalised to `error`. `response.failed` and `response.cancelled` are different things to a client of that API, and a direct leg replays whichever arrived.
@@ -219,7 +246,12 @@ class ResponsesFramer:
     def block(self, block: CompletedBlock) -> tuple[bytes, ...]:
         """The closing frame group for one whole block. A caller never gets half of one.
 
-        A kind this does not know is refused rather than served as something else — the same choice `block_frames` makes for a compat mode it does not implement, and for the same reason. The `else` used to fall through to `_message`, which reads `payload[TEXT]`; an unknown kind has no such key, so the client was handed an empty assistant turn and "we did not recognise this" became indistinguishable from "upstream sent nothing". It can only fire if a block kind is added without this switch being updated, which is a mistake worth hearing about.
+        A `CompletedBlock` kind this framer does not know is refused rather than
+        served as something else. Response structures that the source decoder
+        does not know never reach this method: they are recorded as opaque
+        payloads and skipped with a structured warning. Reaching this branch
+        therefore means the internal block invariant was extended without
+        updating the target framer, not that an unknown upstream item arrived.
         """
         if block.kind == TOOL_USE:
             frames = self._function_call(block)
@@ -427,9 +459,9 @@ TOOL_SEARCH_OUTPUT = "tool_search_output"
 DISCARDED = "discarded"
 # A draft kind meaning **"this proxy does not know what this item is"**, which is a different fact from `DISCARDED` and gets the opposite treatment.
 #
-# It exists because the fallback used to be the item's own type string. That produced a `CompletedBlock` whose `kind` was, say, `custom_tool_call` while its payload was `{"type": "text", "text": ""}` — a block contradicting itself, and empty besides, because an unrecognised item's content arrives on events this assembler does not consume (`response.custom_tool_call_input.delta` for that one). The two legs then failed differently and neither was right: `ResponsesFramer` raised `ValueError` mid-stream after a 200 (**GitHub issue #2**), and `AnthropicFramer` sent a `content_block_start` with empty text — a shape upstream refuses when the turn is replayed, delivered under a `stop_reason` of `end_turn` that told the client the model had finished while it was in fact waiting on a tool call.
+# It exists because the fallback used to be the item's own type string. That produced a `CompletedBlock` whose `kind` was, say, `custom_tool_call` while its payload was `{"type": "text", "text": ""}` — a block contradicting itself, and empty besides, because an unrecognised item's content arrives on events this assembler does not consume (`response.custom_tool_call_input.delta` for that one). The target leg now records the item as source-scoped opaque payload, skips it, and emits a structured warning rather than manufacturing a blank block or refusing the rest of the turn.
 #
-# `anthropic-responses-bridge/spec.md`'s response matrix has required the answer all along, and its wording names both of those failures: 未知 output item → `REJECT`, **不得由空 text block或正常 terminal 掩盖**. So this is not new behaviour; it is the implementation arriving at a clause that was already frozen. The same document requires the streaming and non-streaming paths to be equivalent, which is why `translation_driver/responses.py` changes with it.
+# `anthropic-responses-bridge/spec.md` requires the streaming and non-streaming paths to agree on this best-effort response policy. Malformed lifecycle remains a refusal; an otherwise deliverable unknown output item is not.
 UNKNOWN = "unknown"
 
 
@@ -453,11 +485,14 @@ class ResponsesAssembler:
         self._hosted_web_search_expected = hosted_web_search_expected
         # Attempt-scoped by ownership: a transparent replay replaces the assembler and therefore discards the losses from the attempt it replaced.
         self._response_losses: list[Loss] = []
+        self._response_warnings: list[ConversionWarning] = []
+        self._opaque_payloads: list[OpaqueStreamingPayload] = []
+        self._opaque_only = False
         # Which endings will hand the turn back to the client, and so which ones may drop the block upstream cut short. One setting, because dropping content is only defensible when the client is handed a way to get it back.
         self._hand_over_stop_reasons = hand_over_stop_reasons
         # The block upstream cut short, held rather than emitted or discarded, because at the moment it closes this side does not yet know *why* the response is incomplete — that arrives on the terminal event. Exactly one item can ever be in here: upstream cuts the last one short and then stops.
         self._cut_short: CompletedBlock | None = None
-        self._cut_short_loss: Loss | None = None
+        self._cut_short_loss: tuple[Loss, ...] | None = None
         self._cut_short_item_type: str = ""
         self._drafts: dict[str, Draft] = {}
         # **Block numbers are handed out when a deliverable block is formed, not when its item opens.** A block held as `_cut_short` reserves its number before anyone receives it; that is safe because such an item is the last one — the field above says so — so a number reserved and then dropped has no later block to leave a hole in front of, and the hand-back block that may follow numbers itself from `DeliverySession.committed_count`. The Anthropic framer writes this number into `content_block_start`, `_delta`, `_stop` and `signature_delta` verbatim, so a number that is allocated and then never used is a hole in the client's sequence, and two blocks sharing one is a second block read as a continuation of the first.
@@ -483,6 +518,43 @@ class ResponsesAssembler:
         """Response conversion facts owned by this upstream attempt."""
         return tuple(self._response_losses)
 
+    @property
+    def response_warnings(self) -> tuple[ConversionWarning, ...]:
+        """Structured diagnostics for response structures skipped by the target."""
+        return tuple(self._response_warnings)
+
+    @property
+    def opaque_payloads(self) -> tuple[OpaqueStreamingPayload, ...]:
+        """Source-scoped response payloads with no target block representation."""
+        return tuple(self._opaque_payloads)
+
+    def _record_opaque(self, item: Mapping[str, Any], *, field_path: str) -> None:
+        item_payload = dict[str, Any](item)
+        item_type = str(item_payload.get("type", ""))
+        self._opaque_only = True
+        self._opaque_payloads.append(
+            OpaqueStreamingPayload(
+                source_format=OPENAI_RESPONSES,
+                field_path=field_path,
+                payload=item_payload,
+                kind=item_type,
+            )
+        )
+        self._response_warnings.append(
+            ConversionWarning(
+                code=LossCode.OPAQUE_RESPONSE_SKIPPED.value,
+                source_format=OPENAI_RESPONSES,
+                field_path=field_path,
+                detail=f"unsupported output item {item_type!r} skipped by target",
+            )
+        )
+        self._response_losses.append(
+            Loss(
+                LossCode.OPAQUE_RESPONSE_SKIPPED,
+                f"unsupported output item {item_type!r} skipped by target",
+            )
+        )
+
     def close(self) -> tuple[CompletedBlock, ...]:
         """Nothing: what this assembler still holds is a half-built block, which every ending drops."""
         return ()
@@ -503,8 +575,9 @@ class ResponsesAssembler:
         return bool(self._drafts) or self._cut_short is not None
 
     def push(self, event: SseEvent) -> tuple[CompletedBlock, ...]:
-        data = event.json()
-        kind = event.event or str(data.get("type", ""))
+        parsed = parse_responses_event(event)
+        data = dict(parsed.data)
+        kind = parsed.name
 
         if kind == "response.output_item.added":
             self._open(data)
@@ -544,10 +617,16 @@ class ResponsesAssembler:
             held_type, self._cut_short_item_type = self._cut_short_item_type, ""
             if held is not None and self._terminal.stop_reason not in self._hand_over_stop_reasons:
                 if held_loss is not None:
-                    self._response_losses.append(held_loss)
+                    self._response_losses.extend(held_loss)
                 self._terminal.record(held)
                 return (held,)
             if held is not None:
+                if held_loss is not None:
+                    self._response_losses.extend(
+                        loss
+                        for loss in held_loss
+                        if loss.code is not LossCode.SERVER_TOOL_NOT_CARRIED
+                    )
                 self._response_losses.append(
                     Loss(
                         LossCode.ITEM_NOT_CARRIED,
@@ -738,6 +817,79 @@ class ResponsesAssembler:
         if draft is not None:
             draft.partial_json += delta
 
+    def _item_for_normalizer(self, draft: Draft, data: dict[str, Any]) -> dict[str, Any]:
+        raw = data.get("item")
+        closing = dict[str, Any](cast(dict[str, Any], raw)) if isinstance(raw, dict) else {}
+        if draft.kind == TEXT:
+            if closing.get("type") != "message":
+                closing["type"] = "message"
+            content = closing.get("content")
+            if not isinstance(content, list) or not content:
+                closing["content"] = [{"type": "output_text", "text": draft.text}]
+            return closing
+        if draft.kind == TOOL_USE and closing.get("type") == TOOL_SEARCH_CALL:
+            return closing
+        if draft.kind == TOOL_USE:
+            return {
+                **draft.payload,
+                **closing,
+                "type": "function_call",
+                "call_id": str(
+                    closing.get("call_id")
+                    or draft.payload.get("call_id")
+                    or closing.get("id")
+                    or draft.payload.get("id", "")
+                ),
+                "name": str(closing.get("name") or draft.payload.get("name", "")),
+                "arguments": draft.partial_json
+                or str(closing.get("arguments") or draft.payload.get("arguments") or "{}"),
+            }
+        if draft.kind == THINKING:
+            item = {**draft.payload, **closing, "type": "reasoning"}
+            if "summary" not in item:
+                item["summary"] = self._summary_from_draft(draft)
+            if "encrypted_content" not in item and "encrypted_content" in draft.payload:
+                item["encrypted_content"] = draft.payload["encrypted_content"]
+            return item
+        return {**draft.payload, **closing}
+
+    def _normalized_blocks(
+        self,
+        draft: Draft,
+        data: dict[str, Any],
+    ) -> tuple[tuple[CompletedBlock, ...], tuple[Loss, ...], bool]:
+        item = self._item_for_normalizer(draft, data)
+        conversion = Conversion()
+        _, blocks = normalize_response_item(
+            item,
+            context=ResponsesItemContext(
+                client_search_tool=self._client_search_tool,
+                hosted_web_search_expected=self._hosted_web_search_expected,
+                allow_incomplete_tool_arguments=(
+                    str(item.get("status", "")) == "incomplete"
+                ),
+            ),
+            conversion=conversion,
+        )
+        completed: list[CompletedBlock] = []
+        unknown = False
+        for block in blocks:
+            if block.kind is BlockKind.UNKNOWN:
+                unknown = True
+                continue
+            payload = block_to_anthropic(block, conversion)
+            if payload is None:
+                continue
+            completed.append(
+                CompletedBlock(
+                    index=-1,
+                    kind=str(payload.get("type", block.kind.value)),
+                    payload=payload,
+                    reasoning=block.reasoning,
+                )
+            )
+        return tuple(completed), tuple(conversion.losses), unknown
+
     def _close(self, data: dict[str, Any]) -> tuple[CompletedBlock, ...]:
         key = self._item_key(data)
         draft = self._drafts.pop(key, None)
@@ -772,7 +924,92 @@ class ResponsesAssembler:
         # Held rather than dropped, and only when something whole came before it. Half a sentence is not what the client asked for, but it still beats an empty answer, so the rule reverses when this is all there is — and whether it is dropped at all depends on an ending this side has not been told about yet. Ruled 2026-08-21, narrowed 2026-08-22.
         #
         # A `reasoning` item carries no `status` at all — verified against a completed one, whose key set is identical — so this cannot see a truncated one and does not try. Left open deliberately; `.dev/docs/upstream/retry-and-continuation/deferred.md` §2.
-        cut_short = _upstream_cut_this_item_short(data) and self._terminal.blocks > 0
+        cut_short = _upstream_cut_this_item_short(data) and (
+            self._terminal.blocks > 0 or draft.kind == TOOL_USE
+        )
+        if cut_short and draft.kind == TOOL_USE:
+            source = draft.payload
+            block = CompletedBlock(
+                index=self._emitted,
+                kind=TOOL_USE,
+                payload={
+                    "type": TOOL_USE,
+                    "id": str(source.get("call_id") or source.get("id", "")),
+                    "name": str(source.get("name", "")),
+                    "input": decode_json(draft.partial_json or "{}"),
+                },
+            )
+            self._emitted += 1
+            self._cut_short = block
+            self._cut_short_loss = ()
+            self._cut_short_item_type = str(
+                cast(dict[str, Any], data.get("item") or {}).get("type", "")
+            )
+            return ()
+        if draft.kind in {TEXT, TOOL_USE, THINKING, WEB_SEARCH_CALL}:
+            completed, losses, unknown = self._normalized_blocks(draft, data)
+            if unknown:
+                item_type = str(
+                    cast(dict[str, Any], data.get("item") or {}).get("type", "")
+                ) or "?"
+                item = self._item_for_normalizer(draft, data)
+                self._record_opaque(
+                    item,
+                    field_path=f"output[{data.get('output_index', '?')}]",
+                )
+                logger.warning(
+                    "skipping an output item this proxy cannot convert: type=%r item_id=%r",
+                    item_type,
+                    str(draft.payload.get("id", "")),
+                )
+                return ()
+            if not completed:
+                return ()
+            if cut_short and len(completed) == 1:
+                block = completed[0]
+                block = CompletedBlock(
+                    index=self._emitted,
+                    kind=block.kind,
+                    payload=block.payload,
+                    reasoning=block.reasoning,
+                    admission_group=block.admission_group,
+                )
+                self._emitted += 1
+                self._cut_short = block
+                self._cut_short_loss = losses
+                self._cut_short_item_type = str(
+                    cast(dict[str, Any], data.get("item") or {}).get("type", "")
+                )
+                return ()
+            delivered: list[CompletedBlock] = []
+            for block in completed:
+                admission_group = block.admission_group
+                if (
+                    not admission_group
+                    and block.kind in {SERVER_TOOL_USE, WEB_SEARCH_TOOL_RESULT}
+                ):
+                    call_id = str(
+                        block.payload.get("id")
+                        or block.payload.get("tool_use_id")
+                        or ""
+                    )
+                    admission_group = f"hosted-web-search:{call_id}"
+                delivered.append(
+                    CompletedBlock(
+                        index=self._emitted,
+                        kind=block.kind,
+                        payload=block.payload,
+                        reasoning=block.reasoning,
+                        admission_group=admission_group,
+                    )
+                )
+                self._emitted += 1
+            self._response_losses.extend(losses)
+            for block in delivered:
+                if block.kind == TOOL_USE:
+                    self._saw_tool_call = True
+                self._terminal.record(block)
+            return tuple(delivered)
         kind = draft.kind
         reasoning = None
         block_loss: Loss | None = None
@@ -780,32 +1017,16 @@ class ResponsesAssembler:
             # Recognised and deliberately not delivered — see the item map for which items land here and why. The point of naming them is that they never reach the text fallback, which would turn each into an empty block.
             return ()
         if draft.kind == UNKNOWN:
-            # **Refused, not rendered and not dropped.** `spec.md`'s response matrix requires `REJECT` for an unknown output item, and spells out that it must not be masked by an empty text block or by a normal terminal — naming, in one line, exactly what the two legs each used to do instead.
-            #
-            # Reported through `failure` rather than raised, because the delivery loop already knows how to end a stream this way and does it correctly: blocks completed before this one go out first — they arrived, and what a client received should not depend on when the refusal landed — then the error frame, then **no terminal**, which `.dev/docs/error-envelope/spec.md` §3.5 requires of a turn that will not succeed. Raising instead would tear the stream, which is the defect rather than the fix.
-            #
-            # `replayable=False`: this is our refusal, not upstream's report, so there is no upstream event to hand a direct client. The framer spells it on either leg.
             item_type = str(cast(dict[str, Any], data.get("item") or {}).get("type", "")) or "?"
+            item = self._item_for_normalizer(draft, data)
+            self._record_opaque(
+                item,
+                field_path=f"output[{data.get('output_index', '?')}]",
+            )
             logger.warning(
-                "refusing an output item this proxy cannot carry: type=%r item_id=%r",
+                "skipping an output item this proxy cannot carry: type=%r item_id=%r",
                 item_type,
                 str(draft.payload.get("id", "")),
-            )
-            self._failure = StreamFailure(
-                event="error",
-                raw_data="",
-                origin=FailureOrigin.PROXY_REFUSAL,
-                info=ErrorInfo(
-                    # **`NOT_IMPLEMENTED`, not `UPSTREAM`.** The category is not "which side did the bytes come from" — it is what the client can do differently, and the two answers differ: `UPSTREAM` means upstream failed, is a 502, and is retryable by default; `NOT_IMPLEMENTED` means this proxy never built the crossing being asked for, is a 501, and explicitly is not. This item is a legal one the SDK declares, and `UNKNOWN` is this side recognising that it cannot convert it — the same capability gap as `TranslatorNotFound`, not an upstream fault. Filing it as `UPSTREAM` would tell a client to retry something that will never work, and send whoever reads it to the wrong side.
-                    #
-                    # The status code is the one this category *would* have carried had the failure happened before the headers went out. Nothing rewrites the response: it was fixed at 200 when upstream's headers arrived, and neither SSE writer reads this field. What carries the meaning after that point is `code`, which stays specific — `.dev/docs/error-envelope/spec.md` §6.4.
-                    #
-                    # `source_format` is left empty on purpose. It names the dialect an error was *read from*, and this one was not read from anything; it is a refusal this proxy formed.
-                    category=ErrorCategory.NOT_IMPLEMENTED,
-                    message=f"upstream sent an output item this proxy cannot convert: {item_type}",
-                    status_code=STATUS_FOR_CATEGORY[ErrorCategory.NOT_IMPLEMENTED],
-                    code="unknown_output_item",
-                ),
             )
             return ()
         if draft.kind == TOOL_USE:
@@ -878,7 +1099,7 @@ class ResponsesAssembler:
         if cut_short:
             # Neither the block nor its rendering loss is final until the terminal says whether hand-over will reproduce it.
             self._cut_short = block
-            self._cut_short_loss = block_loss
+            self._cut_short_loss = (block_loss,) if block_loss is not None else ()
             self._cut_short_item_type = str(
                 cast(dict[str, Any], data.get("item") or {}).get("type", "")
             )
@@ -932,6 +1153,8 @@ class ResponsesAssembler:
 
     def _read_terminal(self, kind: str, data: dict[str, Any]) -> None:
         read_responses_terminal(kind, data, self._terminal, saw_tool_call=self._saw_tool_call)
+        if self._opaque_only and self._terminal.blocks == 0 and self._terminal.stop_reason == END_TURN:
+            self._terminal.stop_reason = "incomplete"
 
 
 def read_responses_terminal(
@@ -945,31 +1168,13 @@ def read_responses_terminal(
 
     **The guard is here rather than at each call site**, and it was not here when this function was extracted. The translating assembler had it outside, in a `kind in {...}` branch; the passthrough leg then called this for *every* envelope event, so `response.created` set `seen=True` and `stop_reason="end_turn"` before upstream had said anything at all. Everything downstream that asks "did upstream finish" then answered yes: a torn stream broke out of the delivery loop as an orderly ending, no error frame was written, the exception was swallowed, and replay was never even asked. Measured across three endings; the leg reported a clean `ok` for each. Putting the guard in the shared function is what stops the third caller repeating it.
     """
-    if kind not in {"response.completed", "response.incomplete"}:
+    facts = terminal_facts_from_event(kind, data, saw_tool_call=saw_tool_call)
+    if facts is None:
         return
     terminal.seen = True
-    raw = data.get("response")
-    response = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
-    usage = response.get("usage")
-    if isinstance(usage, dict):
-        terminal.usage = _anthropic_usage(cast(dict[str, Any], usage))
-        # Kept as it arrived, for the leg that has to report it back in upstream's own shape. See `Terminal.upstream_usage`.
-        terminal.upstream_usage = dict[str, Any](cast(dict[str, Any], usage))
-    if kind == "response.incomplete":
-        details = response.get("incomplete_details")
-        reason = ""
-        if isinstance(details, dict):
-            reason = str(cast(dict[str, Any], details).get("reason", ""))
-        # `.dev/docs/anthropic-responses-bridge/spec.md`: the output-token limit is max_tokens downstream. That one has an Anthropic spelling; nothing else does, so nothing else is translated.
-        #
-        # Everything upstream did not name `max_output_tokens` used to become `end_turn`, which reported a turn upstream had cut short as one it finished — the same defect `Terminal.stop_reason` was given an empty default to avoid, reintroduced one field further down. It is upstream's word that goes on the wire now, unmapped. Claude Code's own schema for this field is a nullable string with no enumeration and its readers compare against known values and skip the rest, so a word it does not know costs it nothing; a wrong word it does know costs a reader the truth.
-        #
-        # `"incomplete"` when upstream said the response was incomplete without saying why. That is still upstream's own word for it — the terminal event is `response.incomplete` and the response carries `status: "incomplete"` — and it keeps the one case with no reason out of `end_turn` as well. Leaving it empty would not: `stream_delivery` fills an empty reason with `end_turn`, which is right for a stream that ended cleanly and says nothing, and wrong here.
-        terminal.stop_reason = (
-            "max_tokens" if reason == "max_output_tokens" else reason or "incomplete"
-        )
-        return
-    terminal.stop_reason = TOOL_USE if saw_tool_call else "end_turn"
+    terminal.stop_reason = facts.stop_reason
+    terminal.usage = facts.usage
+    terminal.upstream_usage = facts.upstream_usage
 
 
 def _upstream_cut_this_item_short(data: dict[str, Any]) -> bool:
@@ -981,16 +1186,3 @@ def _upstream_cut_this_item_short(data: dict[str, Any]) -> bool:
     item = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
     status = item.get("status")
     return status == "incomplete"
-
-
-def _anthropic_usage(usage: dict[str, Any]) -> dict[str, Any]:
-    """Responses token counts in the keys every reader of this record already expects.
-
-    Stored converted rather than raw because `Terminal.usage` is read as Anthropic reports it, and a Responses usage read that way is not merely missing the cache fields: its `input_tokens` *includes* what came from cache, so a mostly-cached prompt is reported as having been sent whole. The conversion is the one the buffered path already does, reused rather than repeated — the subtraction is the load-bearing part and two copies of it would drift.
-
-    A malformed usage yields no counts instead of propagating. This runs on the terminal event of a stream whose blocks have already been delivered, and the numbers it produces are for a log line: aborting a delivered response over a field nobody is waiting on would trade a working reply for a cosmetic one.
-    """
-    try:
-        return dict[str, Any](anthropic_usage_from_responses(usage))
-    except ResponseConversionError:
-        return {}

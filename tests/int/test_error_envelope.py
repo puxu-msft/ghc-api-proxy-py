@@ -185,15 +185,15 @@ def test_each_inbound_dialect_gets_its_own_envelope(
 
     response = client.post(path, json={**body, "model": "no-such-model"})
 
-    assert response.status_code == 404, "an unknown model is not found, not a malformed request"
+    assert response.status_code == 400, "an unavailable model mapping is a malformed routing request"
     assert seen == []
     parsed = orjson.loads(response.content)
     if wire == "anthropic":
         assert parsed["type"] == "error"
-        assert parsed["error"]["type"] == "not_found_error"
+        assert parsed["error"]["type"] == "invalid_request_error"
     else:
         assert "type" not in parsed
-        assert parsed["error"]["type"] == "not_found_error"
+        assert parsed["error"]["type"] == "invalid_request_error"
         assert parsed["error"]["param"] is None
 
 
@@ -248,17 +248,15 @@ def test_a_retryable_upstream_failure_is_not_told_not_to_be_retried() -> None:
     assert "x-should-retry" not in response.headers
 
 
-def test_an_unimplemented_translation_is_not_blamed_on_the_clients_body() -> None:
-    """**Behaviour change**: `TranslatorNotFound` used to answer 400.
-
-    A 400 tells the client its request was malformed and invites it to fix the body. Nothing is wrong with the body — this proxy has not built the crossing it asked for, which is a 501 and nothing the client can do anything about.
-    """
+def test_chat_translation_validates_the_decoded_semantic_request() -> None:
+    """Chat Completions now decodes through the semantic IR before encoding."""
     client, seen = make_client(failing_upstream(400))
 
     response = client.post("/v1/chat/completions", json={"model": "claude-model", "messages": []})
 
-    assert response.status_code == 501
-    assert seen == []
+    assert response.status_code == 400
+    assert len(seen) == 1
+    assert seen[0].url.path == "/v1/messages"
 
 
 def test_the_body_that_will_not_parse_is_answered_in_the_endpoints_dialect() -> None:

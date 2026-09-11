@@ -102,7 +102,6 @@ def _pin_provider_graph(
 
 _PROVIDER_GRAPH_SELECTORS: tuple[tuple[str, ...], ...] = (
     ("default_model_provider",),
-    ("fallback_model_provider",),
 )
 
 

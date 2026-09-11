@@ -8,17 +8,21 @@ import pytest
 
 from app.pipeline.request import WireFormat
 from app.pipeline.translation_driver.anthropic_messages import from_anthropic_messages
+from app.pipeline.translation_driver.content import BlockKind, ContentBlock
 from app.pipeline.translation_driver.openai_chat_completions import (
     chat_usage_to_anthropic,
     from_chat_completions_response,
+    from_openai_chat_completions,
     to_openai_chat_completions,
+    to_openai_chat_completions_response,
 )
 from app.pipeline.translation_driver.reasoning_carrier import (
     CHAT_REASONING_CONTENT,
     RESPONSES_SUMMARY_TEXT_LAYOUT,
     decode_reasoning_carrier,
 )
-from app.pipeline.translation_driver.registry import TranslatorNotFound, default_registry
+from app.pipeline.translation_driver.registry import default_registry
+from app.pipeline.translation_driver.responses import SemanticResponse
 from app.pipeline.translation_driver.semantic import LossCode, TranslationRefused
 
 
@@ -605,9 +609,167 @@ def test_the_registry_serves_the_chat_pair() -> None:
     assert translated["stop_reason"] == "end_turn"
 
 
-def test_no_chat_inbound_translator_is_registered() -> None:
-    """A chat-speaking client is served by the passthrough leg, not by translation."""
+def test_chat_request_decoder_and_same_format_round_trip_use_the_ir() -> None:
     registry = default_registry()
 
-    with pytest.raises(TranslatorNotFound):
-        registry.inbound(WireFormat.OPENAI_CHAT_COMPLETIONS)
+    source = {
+        "model": "m",
+        "messages": [
+            {"role": "system", "content": "be concise"},
+            {"role": "user", "content": "hello"},
+        ],
+        "temperature": 0.2,
+        "future_field": {"kept": True},
+    }
+
+    translated, semantic = registry.translate(
+        source,
+        source=WireFormat.OPENAI_CHAT_COMPLETIONS,
+        target=WireFormat.OPENAI_CHAT_COMPLETIONS,
+    )
+
+    assert [message.role for message in semantic.messages] == ["user"]
+    assert translated["messages"] == [
+        {"role": "system", "content": "be concise"},
+        {"role": "user", "content": "hello"},
+    ]
+    assert translated["future_field"] == {"kept": True}
+
+
+def test_chat_named_tool_choice_and_stop_cross_to_anthropic_and_responses() -> None:
+    source = {
+        "model": "m",
+        "messages": [{"role": "user", "content": "hello"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "weather",
+                    "description": "look it up",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ],
+        "tool_choice": {"type": "function", "function": {"name": "weather"}},
+        "stop": "DONE",
+    }
+    registry = default_registry()
+
+    anthropic, anthropic_semantic = registry.translate(
+        source,
+        source=WireFormat.OPENAI_CHAT_COMPLETIONS,
+        target=WireFormat.ANTHROPIC_MESSAGES,
+    )
+    assert anthropic["tool_choice"] == {"type": "tool", "name": "weather"}
+    assert anthropic["stop_sequences"] == ["DONE"]
+    assert anthropic_semantic.conversion.lossless
+
+    responses, responses_semantic = registry.translate(
+        source,
+        source=WireFormat.OPENAI_CHAT_COMPLETIONS,
+        target=WireFormat.OPENAI_RESPONSES,
+    )
+    assert responses["tool_choice"] == {"type": "function", "name": "weather"}
+    assert "stop" not in responses
+    assert responses_semantic.conversion.has(LossCode.EXTENSIONS_NOT_CARRIED)
+
+
+def test_chat_named_tool_choice_and_stop_same_format_round_trip_exactly() -> None:
+    source = {
+        "model": "m",
+        "messages": [{"role": "user", "content": "hello"}],
+        "tool_choice": {"type": "function", "function": {"name": "weather"}},
+        "parallel_tool_calls": False,
+        "stop": ["DONE", "STOP"],
+    }
+
+    translated, semantic = default_registry().translate(
+        source,
+        source=WireFormat.OPENAI_CHAT_COMPLETIONS,
+        target=WireFormat.OPENAI_CHAT_COMPLETIONS,
+    )
+
+    assert translated["tool_choice"] == source["tool_choice"]
+    assert translated["parallel_tool_calls"] is False
+    assert translated["stop"] == source["stop"]
+    assert semantic.tool_choice is not None
+    assert semantic.tool_choice.mode == "tool"
+    assert semantic.tool_choice.name == "weather"
+
+
+@pytest.mark.parametrize(
+    ("choice", "mode", "name"),
+    [
+        ("auto", "auto", None),
+        ("required", "any", None),
+        ("none", "none", None),
+        ({"type": "function", "function": {"name": "weather"}}, "tool", "weather"),
+    ],
+)
+def test_chat_decoder_claims_chat_tool_choice_shapes(
+    choice: object,
+    mode: str,
+    name: str | None,
+) -> None:
+    request = from_openai_chat_completions(
+        {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tool_choice": choice,
+        }
+    )
+
+    assert request.tool_choice is not None
+    assert request.tool_choice.mode == mode
+    assert request.tool_choice.name == name
+    assert "tool_choice" not in request.unknown_fields
+
+
+def test_chat_response_encoder_records_skipped_image_and_unknown_blocks() -> None:
+    response = SemanticResponse(
+        id="r",
+        model="m",
+        source_format="openai-responses",
+        blocks=[
+            ContentBlock(BlockKind.IMAGE, raw={"type": "input_image"}),
+            ContentBlock(BlockKind.UNKNOWN, raw={"type": "future"}),
+        ],
+    )
+
+    encoded = to_openai_chat_completions_response(response)
+
+    assert encoded["choices"][0]["message"]["content"] is None
+    assert response.conversion.has(LossCode.BLOCK_NOT_CARRIED)
+    assert [warning.code for warning in response.conversion.warnings] == [
+        "unsupported-semantic-block",
+        "unsupported-semantic-block",
+    ]
+
+
+def test_chat_response_same_format_round_trip_preserves_unknown_fields() -> None:
+    payload = {
+        "id": "chatcmpl-opaque",
+        "model": "m",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "ok",
+                    "future_message_field": {"value": 1},
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "future_top_level": True,
+    }
+
+    translated, semantic = default_registry().translate_response(
+        payload,
+        source=WireFormat.OPENAI_CHAT_COMPLETIONS,
+        target=WireFormat.OPENAI_CHAT_COMPLETIONS,
+    )
+
+    assert translated["choices"][0]["message"]["future_message_field"] == {"value": 1}
+    assert translated["future_top_level"] is True
+    assert semantic.conversion.warnings == []

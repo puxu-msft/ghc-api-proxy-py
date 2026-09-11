@@ -3,6 +3,7 @@ callers, and upstream refusals mapped onto the closed error set.
 """
 
 import json
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx2
@@ -94,13 +95,18 @@ async def test_stream_true_returns_the_upstream_response_untouched(tmp_path: Any
 
 
 async def test_non_streaming_aggregates_content_usage_and_finish(tmp_path: Any) -> None:
+    upstream_body = b""
+
     def handler(request: httpx2.Request) -> httpx2.Response:
-        return sse(
+        nonlocal upstream_body
+        response = sse(
             {"model": "glm-5.2", "choices": [{"delta": {"content": "he"}, "finish_reason": None}]},
             {"model": "glm-5.2", "choices": [{"delta": {"content": "llo"}, "finish_reason": None}]},
             {"model": "glm-5.2", "choices": [{"delta": {}, "finish_reason": "stop"}]},
             {"model": "glm-5.2", "choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 2}},
         )
+        upstream_body = response.content
+        return response
 
     client, http_client = build_client(handler, tmp_path)
     response = await client.send_chat_completions({"model": "glm-5.2"}, stream=False)
@@ -111,6 +117,7 @@ async def test_non_streaming_aggregates_content_usage_and_finish(tmp_path: Any) 
     assert body["choices"][0]["finish_reason"] == "stop"
     assert body["usage"] == {"prompt_tokens": 10, "completion_tokens": 2}
     assert body["model"] == "glm-5.2"
+    assert response.extensions["upstream_raw_response_body"] == upstream_body
 
 
 async def test_non_streaming_aggregates_indexed_tool_calls(tmp_path: Any) -> None:
@@ -172,3 +179,65 @@ async def test_a_timeout_is_named(tmp_path: Any) -> None:
     with pytest.raises(UpstreamTimeout):
         await client.send_chat_completions({"model": "glm-5.2"}, stream=False)
     await http_client.aclose()
+
+
+async def test_a_timeout_while_aggregating_keeps_the_sent_body(tmp_path: Any) -> None:
+    seen: list[bytes] = []
+
+    class FailingBody(httpx2.AsyncByteStream):
+        def __aiter__(self) -> AsyncIterator[bytes]:
+            return self._fail()
+
+        async def _fail(self) -> AsyncIterator[bytes]:
+            raise httpx2.ReadTimeout("body timeout")
+            yield b""
+
+        async def aclose(self) -> None:
+            return None
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request.read())
+        return httpx2.Response(
+            200,
+            content=FailingBody(),
+            headers={"content-type": "text/event-stream"},
+            request=request,
+        )
+
+    client, http_client = build_client(handler, tmp_path)
+    with pytest.raises(UpstreamTimeout) as raised:
+        await client.send_chat_completions({"model": "glm-5.2"}, stream=False)
+
+    await http_client.aclose()
+    assert raised.value.sent == seen[0]
+
+
+async def test_a_status_body_timeout_is_normalized_with_the_sent_body(tmp_path: Any) -> None:
+    seen: list[bytes] = []
+
+    class FailingBody(httpx2.AsyncByteStream):
+        def __aiter__(self) -> AsyncIterator[bytes]:
+            return self._fail()
+
+        async def _fail(self) -> AsyncIterator[bytes]:
+            raise httpx2.ReadTimeout("error body timeout")
+            yield b""
+
+        async def aclose(self) -> None:
+            return None
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request.read())
+        return httpx2.Response(
+            500,
+            content=FailingBody(),
+            headers={"content-type": "application/json"},
+            request=request,
+        )
+
+    client, http_client = build_client(handler, tmp_path)
+    with pytest.raises(UpstreamTimeout) as raised:
+        await client.send_chat_completions({"model": "glm-5.2"}, stream=False)
+
+    await http_client.aclose()
+    assert raised.value.sent == seen[0]

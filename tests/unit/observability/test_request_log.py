@@ -263,6 +263,29 @@ def test_retried_request_duration_shows_last_attempt_over_total() -> None:
     assert line == "200 f/m 2.7s/6.2s retries=1"
 
 
+def test_transparent_retry_keeps_the_delivered_shape() -> None:
+    request = RequestLine(
+        method="POST",
+        path="/p",
+        request_id="req_1",
+        inbound_format="f",
+        model="m",
+        status_code=200,
+        duration_s=6.2,
+        last_retry_duration_s=2.7,
+        attempts=2,
+    )
+
+    delivered = format_completion_line(request, status="retry", retry_as_success=True)
+    assert delivered.startswith("200 f/m 2.7s/6.2s")
+    assert "POST /p" not in delivered
+    assert "req=req_1" not in delivered
+
+    handed_over = format_completion_line(request, status="retry")
+    assert handed_over.startswith("200 POST /p m 2.7s/6.2s")
+    assert handed_over.endswith("req=req_1")
+
+
 def test_what_each_replay_replaced_is_named_and_the_whole_set_is_bounded() -> None:
     """Three entries, each individually short enough to pass, whose sum is not.
 
@@ -1592,7 +1615,7 @@ def test_responses_failure_events_keep_their_actual_terminal_names() -> None:
 
         assert observation.provider_failed is True
         assert observation.error_summary is not None
-        assert observation.error_summary.message == "boom"
+        assert observation.error_summary.message == "upstream error message present"
         assert line.endswith(expected)
 
 

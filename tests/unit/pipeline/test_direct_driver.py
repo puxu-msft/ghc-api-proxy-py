@@ -1,17 +1,19 @@
 import asyncio
 from collections.abc import AsyncIterator, Mapping
+from dataclasses import replace
+from types import SimpleNamespace
 from typing import Any, cast
 
 import anyio
 import httpx2
 import pytest
 
+from app.config.schema import ProxyConfig
 from app.model_provider import (
     EndpointNotSupported,
     ModelDescriptor,
     ModelEndpoint,
     ProviderRegistry,
-    UnknownModel,
 )
 from app.pipeline.direct_driver import (
     EVENT_ATTEMPT_FAILED,
@@ -23,11 +25,19 @@ from app.pipeline.direct_driver import (
     DirectDriver,
     RetryBudget,
 )
+from app.pipeline.driver import (
+    _reencode_target_payload,  # pyright: ignore[reportPrivateUsage]
+    handle,
+)
 from app.pipeline.events import SubscriberRegistry
 from app.pipeline.exceptions import PipelineAbort, PipelineRetry, UpstreamError
 from app.pipeline.rate_limiting import RateLimiter, RateLimitMode
 from app.pipeline.request import FORMAT_ENDPOINTS, RequestContext, WireFormat
 from app.pipeline.routing import RoutingError, decide_route, split_format_suffix
+from app.pipeline.translation_driver.options import TranslationOptions
+from app.pipeline.translation_driver.registry import default_registry
+from app.pipeline.translation_driver.semantic import TranslationTarget
+from app.server.composition import build_chain
 
 CATALOG: dict[str, ModelDescriptor] = {
     "claude-model": ModelDescriptor(
@@ -282,34 +292,40 @@ async def test_deadline_during_retry_cleanup_stays_a_timeout() -> None:
     assert len(provider.sent) == 1
 
 
-def test_an_unroutable_qualifier_names_the_value_not_the_key() -> None:
-    """The key names the alias; the **value** is what names a provider that does not exist.
+def test_an_unknown_mapping_provider_uses_the_default_provider() -> None:
+    route = decide_route(
+        requested_model="claude-opus-4.8",
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        providers=routing_registry(),
+        mappings={"claude-opus-4.8": "typo/claude-model"},
+    )
 
-    Reporting the key sends an operator to check whether `claude-opus-4.8` is spelled right, when the misspelling is on the other side of the colon — the same failure `UnknownModel` carries `target` to avoid. An independent reviewer found this message saying `'claude-opus-4.8' names a model provider this deployment does not configure`, which is not true of the key.
-    """
+    assert route.provider_name == "ghc"
+    assert route.model_id == "claude-model"
+
+
+def test_an_unknown_request_provider_uses_the_default_provider() -> None:
+    route = decide_route(
+        requested_model="typo/claude-model",
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        providers=routing_registry(),
+        mappings={},
+    )
+
+    assert route.provider_name == "ghc"
+    assert route.model_id == "claude-model"
+
+
+def test_unavailable_model_on_a_configured_provider_is_not_reported_as_unknown_provider() -> None:
     with pytest.raises(RoutingError) as raised:
         decide_route(
-            requested_model="claude-opus-4.8",
+            requested_model="alias",
             inbound_format=WireFormat.ANTHROPIC_MESSAGES,
             providers=routing_registry(),
-            mappings={"claude-opus-4.8": "typo/claude-model"},
+            mappings={"alias": "ghc/missing-model"},
         )
-    message = str(raised.value)
-    assert "typo/claude-model" in message
-    assert "'typo'" in message
-    assert "claude-opus-4.8" in message
 
-
-def test_a_request_side_qualifier_still_names_the_requested_model() -> None:
-    """The control for the test above: on this path the client's own name carries the bad prefix."""
-    with pytest.raises(RoutingError) as raised:
-        decide_route(
-            requested_model="typo/claude-model",
-            inbound_format=WireFormat.ANTHROPIC_MESSAGES,
-            providers=routing_registry(),
-            mappings={},
-        )
-    assert "typo/claude-model" in str(raised.value)
+    assert "provider 'ghc' is not configured" not in str(raised.value)
 
 
 def test_route_needs_no_translation_when_the_model_speaks_the_inbound_format() -> None:
@@ -403,13 +419,37 @@ def test_route_applies_model_mappings() -> None:
 
 
 def test_route_rejects_an_unmapped_unknown_model() -> None:
-    with pytest.raises(UnknownModel):
+    with pytest.raises(RoutingError, match="no configured provider offers"):
         decide_route(
             requested_model="mystery",
             inbound_format=WireFormat.ANTHROPIC_MESSAGES,
             providers=routing_registry(),
             mappings={},
         )
+
+
+def test_mapping_follows_an_unavailable_alias_to_the_next_mapping() -> None:
+    route = decide_route(
+        requested_model="alias",
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        providers=routing_registry(),
+        mappings={"alias": "missing", "missing": "claude-model"},
+    )
+
+    assert route.model_id == "claude-model"
+
+
+def test_mapping_value_can_select_the_outbound_format() -> None:
+    route = decide_route(
+        requested_model="alias",
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        providers=routing_registry(),
+        mappings={"alias": "gpt-model@openai-responses"},
+    )
+
+    assert route.model_id == "gpt-model"
+    assert route.endpoint is ModelEndpoint.OPENAI_RESPONSES
+    assert route.reason == "mapped_format"
 
 
 @pytest.mark.asyncio
@@ -437,6 +477,162 @@ async def test_subscriber_edit_reaches_the_sent_payload() -> None:
     # The attempt copies the payload when it opens.
     # An edit made during prepare must therefore be re-read rather than lost.
     assert provider.sent[0][1]["marker"] == "set"
+
+
+@pytest.mark.asyncio
+async def test_retry_reuses_the_post_prepare_attempt_payload() -> None:
+    registry = SubscriberRegistry[RequestContext]()
+
+    async def add_marker(ctx: RequestContext) -> None:
+        ctx.payload["marker"] = "set"
+
+    registry.subscribe(EVENT_ATTEMPT_PREPARE, "marker", add_marker)
+    provider = FakeProvider(
+        responses=[UpstreamError("boom", status_code=502), httpx2.Response(200)]
+    )
+    direct = driver(provider, registry)
+    outcome = await direct.run(context())
+
+    assert outcome.succeeded is True
+    assert "reencoded" not in provider.sent[0][1]
+    assert provider.sent[1][1]["marker"] == "set"
+
+
+@pytest.mark.asyncio
+async def test_target_format_change_is_the_only_retry_reencode_path() -> None:
+    registry = SubscriberRegistry[RequestContext]()
+
+    async def add_marker(ctx: RequestContext) -> None:
+        ctx.payload["temperature"] = 0.7
+
+    registry.subscribe(EVENT_ATTEMPT_PREPARE, "marker", add_marker)
+    provider = FakeProvider(
+        responses=[UpstreamError("boom", status_code=502), httpx2.Response(200)]
+    )
+    request = context()
+    request.payload = {
+        "model": "claude-model",
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+    request.target_format = WireFormat.OPENAI_RESPONSES
+    request.translation_options = TranslationOptions(
+        translated=True,
+        target=TranslationTarget(model_id="claude-model"),
+    )
+    direct = driver(provider, registry)
+    chain = cast(Any, SimpleNamespace(translators=default_registry()))
+    direct.configure_reencode_payload(
+        lambda payload: _reencode_target_payload(
+            chain,
+            request,
+            payload=payload,
+            source_format=WireFormat.OPENAI_CHAT_COMPLETIONS,
+            target_format=WireFormat.OPENAI_RESPONSES,
+            model_id="claude-model",
+        )
+    )
+
+    outcome = await direct.run(request)
+
+    assert outcome.succeeded is True
+    assert provider.sent[1][1]["temperature"] == 0.7
+    assert provider.sent[1][1]["input"][0]["content"][0]["text"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_handle_reencodes_when_a_retry_changes_the_target_format() -> None:
+    subscribers = SubscriberRegistry[RequestContext]()
+
+    async def change_target_on_retry(request: RequestContext) -> None:
+        request.target_format = WireFormat.ANTHROPIC_MESSAGES
+
+    subscribers.subscribe(
+        EVENT_ATTEMPT_FAILED,
+        "change-target-on-retry",
+        change_target_on_retry,
+    )
+
+    class RoutedProvider(FakeProvider):
+        def describe(self, model_id: str) -> ModelDescriptor | None:
+            descriptor = super().describe(model_id)
+            return replace(descriptor, provider_name=self.name) if descriptor else None
+
+    provider = RoutedProvider(
+        responses=[UpstreamError("boom", status_code=502), httpx2.Response(200)]
+    )
+    config = ProxyConfig.model_validate(
+        {
+            "default_model_provider": "ghc",
+            "model_providers": {"ghc": {"type": "github_copilot"}},
+        }
+    )
+    http_client = httpx2.AsyncClient()
+    chain = build_chain(
+        config,
+        http_client=http_client,
+        providers={"ghc": provider},
+        subscribers=subscribers,
+    )
+    request = RequestContext(
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        requested_model="dual-model@openai-responses",
+        payload={
+            "model": "dual-model",
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+    )
+
+    try:
+        outcome = await handle(chain, request)
+    finally:
+        await http_client.aclose()
+
+    assert outcome.outcome.succeeded is True
+    assert provider.sent[0][0] is ModelEndpoint.OPENAI_RESPONSES
+    assert "input" in provider.sent[0][1]
+    assert provider.sent[1][0] is ModelEndpoint.ANTHROPIC_MESSAGES
+    assert "input" not in provider.sent[1][1]
+    assert provider.sent[1][1]["messages"][0]["content"][0]["text"] == "hello"
+    assert request.endpoint is ModelEndpoint.ANTHROPIC_MESSAGES
+    assert request.target_format is WireFormat.ANTHROPIC_MESSAGES
+    assert request.attempts[1].token_admission is not None
+    assert (
+        request.attempts[1].token_admission.target_format
+        == WireFormat.ANTHROPIC_MESSAGES.value
+    )
+
+
+
+def test_real_target_format_reencode_reads_the_post_prepare_payload() -> None:
+    request = RequestContext(
+        inbound_format=WireFormat.ANTHROPIC_MESSAGES,
+        requested_model="m",
+        payload={},
+        target_format=WireFormat.OPENAI_RESPONSES,
+        translation_options=TranslationOptions(
+            translated=True,
+            target=TranslationTarget(model_id="m"),
+        ),
+    )
+    chain = cast(Any, SimpleNamespace(translators=default_registry()))
+    prepared = {
+        "model": "m",
+        "messages": [{"role": "user", "content": "edited during prepare"}],
+        "stream": False,
+    }
+
+    encoded = _reencode_target_payload(
+        chain,
+        request,
+        payload=prepared,
+        source_format=WireFormat.OPENAI_CHAT_COMPLETIONS,
+        target_format=WireFormat.OPENAI_RESPONSES,
+        model_id="m",
+    )
+
+    assert encoded["input"][0]["content"][0]["text"] == "edited during prepare"
+    assert request.semantic_request is not None
+    assert request.semantic_request.messages[0].blocks[0].text == "edited during prepare"
 
 
 @pytest.mark.asyncio
