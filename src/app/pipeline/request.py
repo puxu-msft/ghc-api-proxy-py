@@ -9,12 +9,11 @@ That document now calls the object `ClientRequest` and gives each upstream try i
 
 import time
 from collections.abc import Mapping, MutableMapping
+from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from app.tokenization.admission import TokenAdmissionObservation
+from types import MappingProxyType
+from typing import Any, cast
 from uuid import uuid4
 
 from app.model_provider import ModelDescriptor, ModelEndpoint
@@ -23,6 +22,7 @@ from app.pipeline.response_observation import ResponseObservation, ResponsesObse
 from app.pipeline.retry import RetryLedger
 from app.pipeline.translation_driver.options import TranslationOptions
 from app.pipeline.translation_driver.semantic import SemanticRequest, TranslationTarget
+from app.tokenization.admission import TokenAdmissionObservation
 
 
 class WireFormat(StrEnum):
@@ -48,6 +48,89 @@ FORMAT_ENDPOINTS: dict[WireFormat, ModelEndpoint] = {
 }
 
 
+def _freeze_payload(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        mapping = cast(Mapping[str, Any], value)
+        frozen: dict[str, Any] = {
+            key: _freeze_payload(item) for key, item in mapping.items()
+        }
+        return MappingProxyType(frozen)
+    if isinstance(value, list):
+        return tuple(_freeze_payload(item) for item in cast(list[Any], value))
+    if isinstance(value, tuple):
+        return tuple(_freeze_payload(item) for item in cast(tuple[Any, ...], value))
+    if isinstance(value, set):
+        return frozenset(_freeze_payload(item) for item in cast(set[Any], value))
+    return deepcopy(value)
+
+
+def _thaw_payload(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        mapping = cast(Mapping[str, Any], value)
+        thawed: dict[str, Any] = {
+            key: _thaw_payload(item) for key, item in mapping.items()
+        }
+        return thawed
+    if isinstance(value, tuple):
+        return [_thaw_payload(item) for item in cast(tuple[Any, ...], value)]
+    if isinstance(value, frozenset):
+        return {_thaw_payload(item) for item in cast(frozenset[Any], value)}
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class AttemptPlan:
+    """The immutable, fully resolved facts for one upstream attempt."""
+
+    provider_name: str
+    descriptor: ModelDescriptor
+    model_id: str
+    client_format: WireFormat
+    payload_format: WireFormat
+    target_format: WireFormat
+    endpoint: ModelEndpoint
+    payload: Mapping[str, Any]
+    admission: TokenAdmissionObservation
+
+    def __post_init__(self) -> None:
+        if self.payload_format is not self.target_format:
+            raise ValueError("attempt plan payload and target formats must agree")
+        if FORMAT_ENDPOINTS.get(self.target_format) is not self.endpoint:
+            raise ValueError("attempt plan endpoint does not match target format")
+        if self.descriptor.id != self.model_id:
+            raise ValueError("attempt plan descriptor and model do not agree")
+        if self.descriptor.provider_name != self.provider_name:
+            raise ValueError("attempt plan descriptor and provider do not agree")
+        if not self.descriptor.supports(self.endpoint):
+            raise ValueError("attempt plan descriptor does not support its endpoint")
+        if self.admission.model != self.model_id:
+            raise ValueError("attempt plan admission and model do not agree")
+        if self.admission.provider != self.provider_name:
+            raise ValueError("attempt plan admission and provider do not agree")
+        if self.admission.target_format != self.target_format.value:
+            raise ValueError("attempt plan admission and target format do not agree")
+        if self.admission.catalog_generation != self.descriptor.catalog_generation:
+            raise ValueError("attempt plan admission and descriptor generation do not agree")
+        if self.admission.catalog_refreshed_at != self.descriptor.catalog_refreshed_at:
+            raise ValueError("attempt plan admission and descriptor refresh time do not agree")
+        object.__setattr__(self, "payload", _freeze_payload(self.payload))
+
+    @property
+    def admission_observation(self) -> TokenAdmissionObservation:
+        return self.admission
+
+    @property
+    def provider(self) -> str:
+        return self.provider_name
+
+    @property
+    def admission_result(self) -> TokenAdmissionObservation:
+        return self.admission
+
+    def payload_matches(self, payload: Mapping[str, Any]) -> bool:
+        return _thaw_payload(self.payload) == payload
+
+
 @dataclass(slots=True)
 class Attempt:
     """One upstream exchange within a request."""
@@ -64,6 +147,8 @@ class Attempt:
     response_observer: ResponsesObserver | None = None
     # One result per attempt. Kept on the attempt so a retry cannot overwrite the admission facts of the request it replaced.
     token_admission: TokenAdmissionObservation | None = None
+    # The immutable resolved facts are an additional projection for validation and observability.
+    plan: AttemptPlan | None = None
 
 
 @dataclass(slots=True)

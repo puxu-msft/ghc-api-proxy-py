@@ -204,6 +204,11 @@ class ModelDescriptor:
             raise ValueError("Chat endpoint requires non-null capabilities")
         if not has_chat_endpoint and self.chat_endpoint_capabilities is not None:
             raise ValueError("Chat capabilities require the Chat endpoint")
+        object.__setattr__(
+            self,
+            "request_headers",
+            MappingProxyType(dict(self.request_headers)),
+        )
 
     def supports(self, endpoint: ModelEndpoint) -> bool:
         return endpoint in self.endpoints

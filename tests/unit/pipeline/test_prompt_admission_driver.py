@@ -1,7 +1,7 @@
 import asyncio
 from collections.abc import Mapping
 from dataclasses import replace
-from typing import Any
+from typing import Any, cast
 
 import httpx2
 import pytest
@@ -32,6 +32,7 @@ from app.tokenization.admission import (
     PromptTokenAdmission,
     TokenAdmissionObservation,
     TokenAdmissionOutcome,
+    reuse_token_admission,
 )
 
 
@@ -269,6 +270,193 @@ async def test_private_snapshot_does_not_share_nested_payload_during_limiter_wai
 
 
 @pytest.mark.asyncio
+async def test_attempt_plan_is_coherent_and_isolated_from_context_mutation() -> None:
+    payload = {
+        "model": "gpt-model",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "original"}],
+            }
+        ],
+    }
+    request = context(payload)
+    outcome = await driver(RecordingProvider()).run(request)
+
+    assert outcome.succeeded is True
+    plan = request.attempts[0].plan
+    assert plan is not None
+    assert plan.provider_name == "ghc"
+    assert plan.descriptor is request.model_descriptor
+    assert plan.model_id == "gpt-model"
+    assert plan.client_format is WireFormat.OPENAI_RESPONSES
+    assert plan.payload_format is WireFormat.OPENAI_RESPONSES
+    assert plan.target_format is WireFormat.OPENAI_RESPONSES
+    assert plan.endpoint is ModelEndpoint.OPENAI_RESPONSES
+    assert plan.admission is request.attempts[0].token_admission
+    assert plan.payload["input"][0]["content"][0]["text"] == "original"
+
+    cast(Any, payload)["input"][0]["content"][0]["text"] = "changed"
+    assert plan.payload["input"][0]["content"][0]["text"] == "original"
+    with pytest.raises(TypeError):
+        cast(Any, plan.payload)["model"] = "changed"
+
+
+@pytest.mark.asyncio
+async def test_attempt_plan_freezes_descriptor_request_headers() -> None:
+    headers = {"x-model-route": "before"}
+    model = ModelDescriptor(
+        id="gpt-model",
+        endpoints=frozenset({ModelEndpoint.OPENAI_RESPONSES}),
+        request_headers=headers,
+        provider_name="ghc",
+        catalog_generation=7,
+        catalog_refreshed_at="2026-09-04T00:00:00+00:00",
+        prompt_token_limits=PromptTokenLimits(
+            tokenizer="o200k_base",
+            max_prompt_tokens=8,
+            max_context_window_tokens=10,
+        ),
+    )
+    request = context()
+
+    outcome = await driver(RecordingProvider(), model_descriptor=model).run(request)
+
+    assert outcome.succeeded is True
+    plan = request.attempts[0].plan
+    assert plan is not None
+    headers["x-model-route"] = "after"
+    assert plan.descriptor.request_headers["x-model-route"] == "before"
+    with pytest.raises(TypeError):
+        cast(Any, plan.descriptor.request_headers)["x-model-route"] = "changed"
+
+
+@pytest.mark.asyncio
+async def test_two_funded_retries_reuse_plan_without_rerunning_admission_or_prepare() -> None:
+    registry = SubscriberRegistry[RequestContext]()
+    prepare_calls = 0
+
+    async def count_prepare(_request: RequestContext) -> None:
+        nonlocal prepare_calls
+        prepare_calls += 1
+
+    registry.subscribe(EVENT_ATTEMPT_PREPARE, "test:count-prepare", count_prepare)
+    provider = RecordingProvider(
+        [
+            UpstreamError("try again", status_code=503),
+            UpstreamError("try again", status_code=503),
+            httpx2.Response(200),
+        ]
+    )
+    admission = AdvancingAdmission([0.0])
+
+    outcome = await driver(
+        provider,
+        registry=registry,
+        admission=admission,
+        max_total=2,
+    ).run(context())
+
+    assert outcome.succeeded is True
+    assert prepare_calls == 1
+    assert admission.calls == 1
+    assert [attempt.token_admission.outcome for attempt in outcome.context.attempts if attempt.token_admission] == [
+        TokenAdmissionOutcome.ADMITTED_FAST,
+        TokenAdmissionOutcome.REUSED,
+        TokenAdmissionOutcome.REUSED,
+    ]
+    assert all(attempt.plan is not None for attempt in outcome.context.attempts)
+
+
+@pytest.mark.asyncio
+async def test_replay_from_a_reused_admission_keeps_the_canonical_facts() -> None:
+    source = TokenAdmissionObservation(
+        attempt=1,
+        origin="proxy",
+        outcome=TokenAdmissionOutcome.ADMITTED_COUNTED,
+        target_format=WireFormat.OPENAI_RESPONSES.value,
+        model="gpt-model",
+        provider="ghc",
+        catalog_generation=7,
+        catalog_refreshed_at="2026-09-04T00:00:00+00:00",
+        tokenizer="o200k_base",
+        max_prompt_tokens=8,
+        max_context_window_tokens=10,
+        field_path="input",
+        field_kind="input",
+        field_utf8_byte_count=20,
+        field_token_count=8,
+    )
+    reused = reuse_token_admission(source, attempt=2)
+    provider = RecordingProvider()
+    admission = AdvancingAdmission([0.0])
+
+    outcome = await driver(
+        provider,
+        admission=admission,
+        prepared_payload={"model": "gpt-model", "input": "source"},
+        reused_admission=reused,
+    ).run(context({"model": "gpt-model", "input": "working-copy"}))
+
+    assert outcome.succeeded is True
+    assert admission.calls == 0
+    observed = outcome.context.attempts[0].token_admission
+    assert observed == replace(
+        source,
+        attempt=0,
+        outcome=TokenAdmissionOutcome.REUSED,
+        reused_from_attempt=1,
+        reused_outcome=TokenAdmissionOutcome.ADMITTED_COUNTED.value,
+    )
+
+
+@pytest.mark.asyncio
+async def test_reused_plan_restores_route_facts_mutated_after_failure() -> None:
+    registry = SubscriberRegistry[RequestContext]()
+    prepare_calls = 0
+    mutated_descriptor = descriptor(
+        model="other-model",
+        provider_name="other",
+    )
+
+    async def count_prepare(_request: RequestContext) -> None:
+        nonlocal prepare_calls
+        prepare_calls += 1
+
+    async def mutate_route(request: RequestContext) -> None:
+        request.resolved_model = mutated_descriptor.id
+        request.provider_name = mutated_descriptor.provider_name
+        request.model_descriptor = mutated_descriptor
+        request.endpoint = ModelEndpoint.ANTHROPIC_MESSAGES
+        request.inbound_format = WireFormat.ANTHROPIC_MESSAGES
+
+    registry.subscribe(EVENT_ATTEMPT_PREPARE, "test:count-prepare", count_prepare)
+    registry.subscribe(EVENT_ATTEMPT_FAILED, "test:mutate-route", mutate_route)
+    provider = RecordingProvider(
+        [UpstreamError("try again", status_code=503), httpx2.Response(200)]
+    )
+
+    request = context()
+    outcome = await driver(
+        provider,
+        registry=registry,
+        max_total=1,
+    ).run(request)
+
+    assert outcome.succeeded is True
+    assert prepare_calls == 1
+    assert request.resolved_model == "gpt-model"
+    assert request.provider_name == "ghc"
+    assert request.endpoint is ModelEndpoint.OPENAI_RESPONSES
+    assert request.inbound_format is WireFormat.OPENAI_RESPONSES
+    assert request.attempts[1].plan is not None
+    assert request.model_descriptor == request.attempts[1].plan.descriptor
+    assert request.attempts[1].plan.model_id == "gpt-model"
+    assert request.attempts[1].plan.endpoint is ModelEndpoint.OPENAI_RESPONSES
+
+
+@pytest.mark.asyncio
 async def test_prepare_cannot_reroute_the_captured_descriptor() -> None:
     registry = SubscriberRegistry[RequestContext]()
 
@@ -414,6 +602,10 @@ async def test_prepared_replay_reuses_payload_and_observation_without_prepare_or
         reused_from_attempt=1,
         reused_outcome=TokenAdmissionOutcome.ADMITTED_COUNTED.value,
     )
+    plan = outcome.context.attempts[0].plan
+    assert plan is not None
+    assert plan.payload["input"] == "source"
+    assert plan.admission == observed
 
 
 @pytest.mark.asyncio

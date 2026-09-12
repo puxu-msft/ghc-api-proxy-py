@@ -43,6 +43,7 @@ from app.pipeline.request import (
     ENDPOINT_FORMATS,
     FORMAT_ENDPOINTS,
     Attempt,
+    AttemptPlan,
     RequestContext,
     WireFormat,
 )
@@ -350,6 +351,7 @@ class DirectDriver:
         # attempt. Retries normally reuse that payload; a changed context
         # target is the only reason to rebuild it.
         self._prepared_target_format = target_format
+        self._reusable_plan: AttemptPlan | None = None
 
     @property
     def endpoint(self) -> ModelEndpoint:
@@ -411,6 +413,79 @@ class DirectDriver:
         context.translation_required = context.inbound_format.value != target_format
         attempt.endpoint = endpoint
 
+    def _can_reuse_plan(self, context: RequestContext) -> bool:
+        plan = self._reusable_plan
+        if plan is None:
+            return False
+        if context.target_format is not plan.target_format:
+            return False
+        if not plan.payload_matches(context.payload):
+            return False
+        if (
+            context.provider_name != plan.provider_name
+            or context.resolved_model != plan.model_id
+            or context.model_descriptor != plan.descriptor
+            or context.endpoint is not plan.endpoint
+            or context.inbound_format is not plan.client_format
+        ):
+            self._restore_plan_route(context, plan)
+        return (
+            context.provider_name == plan.provider_name
+            and context.resolved_model == plan.model_id
+            and context.model_descriptor == plan.descriptor
+            and context.endpoint is plan.endpoint
+            and context.inbound_format is plan.client_format
+        )
+
+    def _restore_plan_route(
+        self,
+        context: RequestContext,
+        plan: AttemptPlan,
+    ) -> None:
+        """Restore the immutable route facts before a reused delivery is observed."""
+        self._endpoint = plan.endpoint
+        self._target_format = plan.target_format.value
+        self._prepared_target_format = plan.target_format.value
+        context.provider_name = plan.provider_name
+        context.resolved_model = plan.model_id
+        context.model_descriptor = plan.descriptor
+        context.endpoint = plan.endpoint
+        context.inbound_format = plan.client_format
+        context.target_format = plan.target_format
+        context.translation_required = context.inbound_format is not plan.target_format
+
+    def _driver_route_matches(
+        self,
+        context: RequestContext,
+        *,
+        client_format: WireFormat,
+    ) -> bool:
+        return (
+            self._descriptor is not None
+            and context.provider_name == self._provider.name
+            and context.resolved_model == self._descriptor.id
+            and context.model_descriptor == self._descriptor
+            and context.endpoint is self._endpoint
+            and context.inbound_format is client_format
+        )
+
+    def _restore_driver_route(
+        self,
+        context: RequestContext,
+        *,
+        client_format: WireFormat,
+        reset_target: bool,
+    ) -> None:
+        assert self._descriptor is not None
+        context.resolved_model = self._descriptor.id
+        context.provider_name = self._provider.name
+        context.model_descriptor = self._descriptor
+        context.endpoint = self._endpoint
+        context.inbound_format = client_format
+        if reset_target:
+            context.target_format = WireFormat(self._prepared_target_format)
+        context.translation_required = context.inbound_format is not context.target_format
+
     async def _prepare_and_send(
         self,
         context: RequestContext,
@@ -418,26 +493,71 @@ class DirectDriver:
         attempt: Attempt,
     ) -> httpx2.Response:
         source_payload: Mapping[str, Any] = context.payload
+        reusable_plan = self._reusable_plan if self._can_reuse_plan(context) else None
+        client_format = (
+            reusable_plan.client_format
+            if reusable_plan is not None
+            else (
+                self._reusable_plan.client_format
+                if self._reusable_plan is not None
+                else context.inbound_format
+            )
+        )
         if self._prepared_payload is None:
-            await self._publish(EVENT_ATTEMPT_PREPARE, context, outcome)
-            target_wire = context.target_format or WireFormat(self._prepared_target_format)
-            target_format = target_wire.value
-            if (
-                target_format != self._prepared_target_format
-            ):
-                if self._reencode_payload is None:
-                    raise ValueError(
-                        "runtime target format change requires a reencode adapter"
+            if reusable_plan is not None:
+                source_payload = context.payload
+            else:
+                if (
+                    self._reusable_plan is not None
+                    and not self._driver_route_matches(
+                        context,
+                        client_format=client_format,
                     )
-                # Prepare subscribers are the production seam where a retry
-                # may select a different target. Re-encode the final,
-                # post-prepare payload, then reuse it for the rest of this
-                # attempt and for ordinary retries.
-                context.payload = self._reencode_payload(context.payload)
-                self._bind_target_format(context, target_format, attempt=attempt)
-            source_payload = context.payload
+                ):
+                    self._restore_driver_route(
+                        context,
+                        client_format=client_format,
+                        reset_target=True,
+                    )
+                await self._publish(EVENT_ATTEMPT_PREPARE, context, outcome)
+                if (
+                    self._descriptor is not None
+                    and not self._driver_route_matches(
+                        context,
+                        client_format=client_format,
+                    )
+                ):
+                    self._restore_driver_route(
+                        context,
+                        client_format=client_format,
+                        reset_target=True,
+                    )
+                target_wire = context.target_format or WireFormat(self._prepared_target_format)
+                target_format = target_wire.value
+                if (
+                    target_format != self._prepared_target_format
+                ):
+                    if self._reencode_payload is None:
+                        raise ValueError(
+                            "runtime target format change requires a reencode adapter"
+                        )
+                    # Prepare subscribers are the production seam where a retry
+                    # may select a different target. Re-encode the final,
+                    # post-prepare payload, then reuse it for the rest of this
+                    # attempt and for ordinary retries.
+                    context.payload = self._reencode_payload(context.payload)
+                    self._bind_target_format(context, target_format, attempt=attempt)
+                source_payload = context.payload
         else:
             source_payload = self._prepared_payload
+        if self._descriptor is not None:
+            context.resolved_model = self._descriptor.id
+            context.provider_name = self._provider.name
+            context.model_descriptor = self._descriptor
+            context.endpoint = self._endpoint
+            context.inbound_format = client_format
+            context.target_format = WireFormat(self._target_format)
+            context.translation_required = context.inbound_format is not context.target_format
         attempt.endpoint = self._endpoint
         self._publish_provider_bound(context)
         if self._descriptor is not None and self._admission is not None:
@@ -450,6 +570,11 @@ class DirectDriver:
                     self._reused_admission,
                     attempt=attempt.index,
                 )
+            elif reusable_plan is not None:
+                attempt.token_admission = reuse_token_admission(
+                    reusable_plan.admission,
+                    attempt=attempt.index,
+                )
             else:
                 observation = await self._admission.evaluate(
                     attempt=attempt.index,
@@ -459,8 +584,21 @@ class DirectDriver:
                 )
                 attempt.token_admission = observation
                 self._raise_if_deadline_elapsed(attempt)
-                if observation.outcome is TokenAdmissionOutcome.REJECTED:
-                    raise PromptTokenLimitExceeded(observation)
+            assert attempt.token_admission is not None
+            attempt.plan = AttemptPlan(
+                provider_name=self._provider.name,
+                descriptor=self._descriptor,
+                model_id=self._descriptor.id,
+                client_format=context.inbound_format,
+                payload_format=WireFormat(self._target_format),
+                target_format=WireFormat(self._target_format),
+                endpoint=self._endpoint,
+                payload=attempt.payload,
+                admission=attempt.token_admission,
+            )
+            self._reusable_plan = attempt.plan
+            if attempt.token_admission.outcome is TokenAdmissionOutcome.REJECTED:
+                raise PromptTokenLimitExceeded(attempt.token_admission)
         else:
             # Compatibility path for direct driver tests and callers that have not routed a model. Production configures both descriptor and admission.
             attempt.payload = dict(source_payload)

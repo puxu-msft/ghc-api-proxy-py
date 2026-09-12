@@ -111,12 +111,40 @@ _REUSABLE_OUTCOMES = frozenset(
 )
 
 
+def canonical_token_admission(
+    source: TokenAdmissionObservation,
+) -> TokenAdmissionObservation:
+    """Return the original admission facts behind any reuse projection."""
+    if source.outcome is not TokenAdmissionOutcome.REUSED:
+        return source
+    if source.reused_outcome is None:
+        raise ValueError("reused admission is missing its original outcome")
+    try:
+        outcome = TokenAdmissionOutcome(source.reused_outcome)
+    except ValueError as error:
+        raise ValueError(
+            f"reused admission has an invalid original outcome {source.reused_outcome!r}"
+        ) from error
+    return replace(
+        source,
+        attempt=(
+            source.reused_from_attempt
+            if source.reused_from_attempt is not None
+            else source.attempt
+        ),
+        outcome=outcome,
+        reused_from_attempt=None,
+        reused_outcome=None,
+    )
+
+
 def reuse_token_admission(
     source: TokenAdmissionObservation,
     *,
     attempt: int,
 ) -> TokenAdmissionObservation:
     """Record that delivery reused one already-decided final payload."""
+    source = canonical_token_admission(source)
     if source.outcome not in _REUSABLE_OUTCOMES:
         raise ValueError(f"cannot reuse token admission outcome {source.outcome.value!r}")
     return replace(

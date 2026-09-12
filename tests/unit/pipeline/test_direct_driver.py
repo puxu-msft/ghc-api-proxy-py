@@ -600,6 +600,11 @@ async def test_handle_reencodes_when_a_retry_changes_the_target_format() -> None
         request.attempts[1].token_admission.target_format
         == WireFormat.ANTHROPIC_MESSAGES.value
     )
+    assert request.attempts[0].plan is not None
+    assert request.attempts[1].plan is not None
+    assert request.attempts[1].plan.target_format is WireFormat.ANTHROPIC_MESSAGES
+    assert request.attempts[1].plan.endpoint is ModelEndpoint.ANTHROPIC_MESSAGES
+    assert request.attempts[1].plan.descriptor is request.model_descriptor
 
 
 
