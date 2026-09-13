@@ -56,6 +56,13 @@ class HistoryPage:
 
 
 @dataclass(frozen=True, slots=True)
+class HistoryRetentionCandidate:
+    entry_id: str
+    finished_at: str
+    archive_reference: HistoryArchiveReference
+
+
+@dataclass(frozen=True, slots=True)
 class HistoryDurabilityReceipt:
     entry_id: str
     state: HistoryDurability
@@ -294,6 +301,22 @@ class HistoryWriter:
             self._transport_for,
             entry_id,
             include_archived,
+        )
+
+    async def retention_candidates(
+        self,
+        *,
+        finished_before: str,
+        limit: int = 100,
+    ) -> tuple[HistoryRetentionCandidate, ...]:
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        if self._task is None or self._closed:
+            raise RuntimeError("History writer is not running")
+        return await asyncio.to_thread(
+            self._retention_candidates,
+            finished_before,
+            limit,
         )
 
     async def archive_entry(self, entry_id: str) -> HistoryMutation:
@@ -635,6 +658,62 @@ class HistoryWriter:
             return None
         return transport or None
 
+    def _retention_candidates(
+        self,
+        finished_before: str,
+        limit: int,
+    ) -> tuple[HistoryRetentionCandidate, ...]:
+        connection = self._open_read_connection()
+        try:
+            rows = connection.execute(
+                """
+                SELECT entry_id, finished_at, archive_path, archive_offset,
+                       archive_length, archive_digest
+                FROM history_entries
+                WHERE archive_state = ?
+                  AND pinned = 0
+                  AND finished_at < ?
+                ORDER BY finished_at ASC, entry_id ASC
+                LIMIT ?
+                """,
+                (HistoryArchiveState.ARCHIVED.value, finished_before, limit),
+            ).fetchall()
+        finally:
+            connection.close()
+        candidates: list[HistoryRetentionCandidate] = []
+        for row in rows:
+            (
+                entry_id,
+                finished_at,
+                archive_path,
+                archive_offset,
+                archive_length,
+                archive_digest,
+            ) = row
+            if not (
+                isinstance(entry_id, str)
+                and isinstance(finished_at, str)
+                and isinstance(archive_path, str)
+                and type(archive_offset) is int
+                and type(archive_length) is int
+                and isinstance(archive_digest, str)
+            ):
+                raise RuntimeError("History index contains an invalid retention row")
+            candidates.append(
+                HistoryRetentionCandidate(
+                    entry_id=entry_id,
+                    finished_at=finished_at,
+                    archive_reference=HistoryArchiveReference(
+                        relative_path=archive_path,
+                        offset=archive_offset,
+                        length=archive_length,
+                        digest=archive_digest,
+                        entry_id=entry_id,
+                    ),
+                )
+            )
+        return tuple(candidates)
+
     def _open_read_connection(self) -> sqlite3.Connection:
         return sqlite3.connect(self.database_path, timeout=5.0)
 
@@ -897,6 +976,7 @@ __all__ = [
     "HistoryIndexEntry",
     "HistoryMutation",
     "HistoryPage",
+    "HistoryRetentionCandidate",
     "HistorySubmission",
     "HistoryTransportSource",
     "HistoryWriter",

@@ -13,6 +13,7 @@ from app.history import (
     HistoryEntry,
     HistoryMutation,
     HistoryOutcome,
+    HistoryRetentionCandidate,
     HistorySubmission,
     HistoryWriter,
 )
@@ -103,5 +104,37 @@ async def test_history_archive_failure_is_visible_and_retryable(tmp_path: Path) 
         assert archived is not None
         assert archived.archive_state is HistoryArchiveState.ARCHIVED
         assert archived.archived is True
+    finally:
+        await writer.close()
+
+
+@pytest.mark.asyncio
+async def test_retention_candidates_exclude_pinned_entries(tmp_path: Path) -> None:
+    writer = HistoryWriter(
+        database_path=tmp_path / "history.sqlite3",
+        archive=HistoryArchiveStore(tmp_path / "archive"),
+    )
+    await writer.start()
+    entry = _entry()
+    try:
+        await writer.submit(entry, session_id="session-1", agent_id=None)
+        await writer.wait_idle()
+        assert await writer.archive_entry(entry.request_id) is HistoryMutation.ARCHIVING
+        await writer.wait_archive_idle()
+
+        candidates = await writer.retention_candidates(
+            finished_before="2026-09-14T00:00:00.000Z"
+        )
+        assert len(candidates) == 1
+        assert isinstance(candidates[0], HistoryRetentionCandidate)
+        assert candidates[0].entry_id == entry.request_id
+
+        assert await writer.pin_entry(entry.request_id) is HistoryMutation.UPDATED
+        assert (
+            await writer.retention_candidates(
+                finished_before="2026-09-14T00:00:00.000Z"
+            )
+            == ()
+        )
     finally:
         await writer.close()
