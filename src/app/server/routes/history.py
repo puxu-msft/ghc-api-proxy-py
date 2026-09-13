@@ -1,7 +1,5 @@
 """Read-only History index and transport export routes."""
 
-import asyncio
-
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse, Response
 
@@ -100,10 +98,8 @@ async def get_history_entry(
 
 @router.get("/history/api/entries/{entry_id}/transport")
 async def export_history_transport(entry_id: str, request: Request) -> Response:
-    chain = chain_of(request)
-    writer = getattr(chain, "history_writer", None)
-    raw_capture = getattr(chain, "raw_capture", None)
-    if writer is None or raw_capture is None:
+    writer = getattr(chain_of(request), "history_writer", None)
+    if writer is None:
         return _history_unavailable()
     try:
         entry = await writer.get_entry(entry_id)
@@ -117,21 +113,17 @@ async def export_history_transport(entry_id: str, request: Request) -> Response:
                 },
                 status_code=409,
             )
-        if entry.capture_ref is None:
+        if entry.transport_reference is None:
             return JSONResponse(
                 {
                     "error": {
                         "type": "source_unavailable",
-                        "message": "history entry has no capture attachment",
+                        "message": "history entry has no archived transport envelope",
                     }
                 },
                 status_code=409,
             )
-        payload = await asyncio.to_thread(
-            raw_capture.export_request,
-            entry.capture_ref,
-            entry_id,
-        )
+        payload = await writer.transport_for(entry_id)
     except (OSError, ValueError):
         return JSONResponse(
             {
@@ -192,17 +184,32 @@ async def _mutate_history_entry(
             },
             status_code=409,
         )
-    return JSONResponse(
+    if mutation is HistoryMutation.ARCHIVE_FAILED:
+        return JSONResponse(
+            {
+                "error": {
+                    "type": "source_unavailable",
+                    "message": "history archive could not be confirmed",
+                    "code": "archive_failed",
+                }
+            },
+            status_code=503,
+        )
+    response = JSONResponse(
         {
             "id": entry_id,
             "operation": operation.removeprefix("_").removesuffix("_entry"),
             "state": (
                 "already_applied"
                 if mutation is HistoryMutation.ALREADY_APPLIED
+                else "archiving"
+                if mutation is HistoryMutation.ARCHIVING
                 else "updated"
             ),
-        }
+        },
+        status_code=202 if mutation is HistoryMutation.ARCHIVING else 200,
     )
+    return response
 
 
 @router.post("/history/api/entries/{entry_id}/archive")

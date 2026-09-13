@@ -25,6 +25,26 @@ def test_history_archive_round_trips_payload_and_reference(tmp_path: Path) -> No
     }
 
 
+def test_history_archive_round_trips_credential_bearing_transport_envelope(
+    tmp_path: Path,
+) -> None:
+    store = HistoryArchiveStore(tmp_path)
+    transport = b"\x28\xb5\x2f\xfdtransport"
+
+    reference = store.append(
+        session_id="session-transport",
+        agent_id=None,
+        entry_id="request-transport",
+        payload={"outcome": "completed"},
+        transport=transport,
+    )
+
+    assert store.read_transport(reference) == transport
+    record = store.read(reference)
+    assert record["transport_media_type"] == "application/cbor-seq+zstd"
+    assert record["transport_contains_credentials"] is True
+
+
 def test_history_archive_rolls_over_and_keeps_previous_segment_readable(
     tmp_path: Path,
 ) -> None:

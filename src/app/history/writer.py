@@ -8,7 +8,7 @@ import sqlite3
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import cast
+from typing import Protocol, cast
 
 from app.history.archive import HistoryArchiveReference, HistoryArchiveStore
 from app.history.entry import HistoryEntry
@@ -31,6 +31,21 @@ class HistoryMutation(StrEnum):
     ALREADY_APPLIED = "already_applied"
     NOT_FOUND = "not_found"
     PINNED = "pinned"
+    ARCHIVING = "archiving"
+    ARCHIVE_FAILED = "archive_failed"
+
+
+class HistoryArchiveState(StrEnum):
+    ACTIVE = "active"
+    ARCHIVING = "archiving"
+    ARCHIVED = "archived"
+    ARCHIVE_FAILED = "archive_failed"
+
+
+class HistoryTransportSource(Protocol):
+    def export_request(self, relative_path: str, request_id: str) -> bytes:
+        """Return the filtered binary transport export for one request."""
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +67,9 @@ class HistoryIndexEntry:
     capture_status: str
     capture_ref: str | None
     archive_reference: HistoryArchiveReference
+    transport_reference: HistoryArchiveReference | None
+    archive_state: HistoryArchiveState
+    archive_error_code: str | None
     pinned: bool
     archived: bool
 
@@ -72,6 +90,20 @@ class HistoryIndexEntry:
                 "length": self.archive_reference.length,
                 "digest": self.archive_reference.digest,
             },
+            "transport": (
+                {
+                    "path": self.transport_reference.relative_path,
+                    "offset": self.transport_reference.offset,
+                    "length": self.transport_reference.length,
+                    "digest": self.transport_reference.digest,
+                    "media_type": "application/cbor-seq+zstd",
+                    "contains_credentials": True,
+                }
+                if self.transport_reference is not None
+                else None
+            ),
+            "archive_state": self.archive_state.value,
+            "archive_error_code": self.archive_error_code,
             "pinned": self.pinned,
             "archived": self.archived,
         }
@@ -92,17 +124,23 @@ class HistoryWriter:
         *,
         database_path: Path,
         archive: HistoryArchiveStore,
+        transport_source: HistoryTransportSource | None = None,
         queue_size: int = 1000,
     ) -> None:
         if queue_size <= 0:
             raise ValueError("queue_size must be positive")
         self.database_path = database_path
         self.archive = archive
+        self.transport_source = transport_source
         self._queue: asyncio.Queue[_HistoryWriteJob | None] = asyncio.Queue(
+            maxsize=queue_size
+        )
+        self._archive_queue: asyncio.Queue[str | None] = asyncio.Queue(
             maxsize=queue_size
         )
         self._connection: sqlite3.Connection | None = None
         self._task: asyncio.Task[None] | None = None
+        self._archive_task: asyncio.Task[None] | None = None
         self._receipts: dict[str, HistoryDurabilityReceipt] = {}
         self._closed = False
 
@@ -111,6 +149,10 @@ class HistoryWriter:
             return
         self._connection = await asyncio.to_thread(self._open_connection)
         self._task = asyncio.create_task(self._run(), name="history-writer")
+        self._archive_task = asyncio.create_task(
+            self._run_archive(),
+            name="history-archive",
+        )
 
     async def submit(
         self,
@@ -148,6 +190,9 @@ class HistoryWriter:
 
     async def wait_idle(self) -> None:
         await self._queue.join()
+
+    async def wait_archive_idle(self) -> None:
+        await self._archive_queue.join()
 
     def receipt_for(self, entry_id: str) -> HistoryDurabilityReceipt | None:
         return self._receipts.get(entry_id)
@@ -196,10 +241,35 @@ class HistoryWriter:
             include_archived,
         )
 
+    async def transport_for(
+        self,
+        entry_id: str,
+        *,
+        include_archived: bool = False,
+    ) -> bytes | None:
+        if self._task is None or self._closed:
+            raise RuntimeError("History writer is not running")
+        return await asyncio.to_thread(
+            self._transport_for,
+            entry_id,
+            include_archived,
+        )
+
     async def archive_entry(self, entry_id: str) -> HistoryMutation:
         if self._task is None or self._closed:
             raise RuntimeError("History writer is not running")
-        return await asyncio.to_thread(self._archive_entry, entry_id)
+        mutation = await asyncio.to_thread(self._begin_archive, entry_id)
+        if mutation is HistoryMutation.ARCHIVING:
+            try:
+                self._archive_queue.put_nowait(entry_id)
+            except asyncio.QueueFull:
+                await asyncio.to_thread(
+                    self._mark_archive_failed,
+                    entry_id,
+                    "archive_queue_full",
+                )
+                return HistoryMutation.ARCHIVE_FAILED
+        return mutation
 
     async def pin_entry(self, entry_id: str) -> HistoryMutation:
         if self._task is None or self._closed:
@@ -218,11 +288,16 @@ class HistoryWriter:
         await self._queue.join()
         await self._queue.put(None)
         await self._task
+        await self._archive_queue.join()
+        await self._archive_queue.put(None)
+        if self._archive_task is not None:
+            await self._archive_task
         connection = self._connection
         if connection is not None:
             await asyncio.to_thread(connection.close)
         self._connection = None
         self._task = None
+        self._archive_task = None
 
     async def _run(self) -> None:
         while True:
@@ -246,6 +321,29 @@ class HistoryWriter:
                 self._receipts[job.entry.request_id] = receipt
             finally:
                 self._queue.task_done()
+
+    async def _run_archive(self) -> None:
+        while True:
+            entry_id = await self._archive_queue.get()
+            try:
+                if entry_id is None:
+                    return
+                try:
+                    await asyncio.to_thread(self._complete_archive, entry_id)
+                except Exception as error:
+                    failure_code = _failure_code(error)
+                    await asyncio.to_thread(
+                        self._mark_archive_failed,
+                        entry_id,
+                        failure_code,
+                    )
+                    logger.warning(
+                        "History archive failed: entry_id=%s failure_code=%s",
+                        entry_id,
+                        failure_code,
+                    )
+            finally:
+                self._archive_queue.task_done()
 
     def _open_connection(self) -> sqlite3.Connection:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -273,40 +371,72 @@ class HistoryWriter:
                 archive_length INTEGER NOT NULL,
                 archive_digest TEXT NOT NULL,
                 capture_ref TEXT,
+                transport_path TEXT,
+                transport_offset INTEGER,
+                transport_length INTEGER,
+                transport_digest TEXT,
                 pinned INTEGER NOT NULL DEFAULT 0,
-                archived INTEGER NOT NULL DEFAULT 0
+                archived INTEGER NOT NULL DEFAULT 0,
+                archive_state TEXT NOT NULL DEFAULT 'active',
+                archive_error_code TEXT
             );
             CREATE INDEX IF NOT EXISTS history_entries_started
                 ON history_entries (started_at);
             """
         )
+        self._ensure_schema(connection)
         connection.commit()
         return connection
+
+    @staticmethod
+    def _ensure_schema(connection: sqlite3.Connection) -> None:
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(history_entries)").fetchall()
+        }
+        additions = (
+            ("capture_ref", "TEXT"),
+            ("transport_path", "TEXT"),
+            ("transport_offset", "INTEGER"),
+            ("transport_length", "INTEGER"),
+            ("transport_digest", "TEXT"),
+            ("archive_state", "TEXT NOT NULL DEFAULT 'active'"),
+            ("archive_error_code", "TEXT"),
+        )
+        for name, definition in additions:
+            if name not in columns:
+                connection.execute(
+                    f"ALTER TABLE history_entries ADD COLUMN {name} {definition}"
+                )
+        connection.execute(
+            """
+            UPDATE history_entries
+            SET archive_state = 'archived'
+            WHERE archived = 1 AND archive_state = 'active'
+            """
+        )
 
     def _persist(self, job: _HistoryWriteJob) -> HistoryDurabilityReceipt:
         connection = self._connection
         if connection is None:
             raise RuntimeError("History writer is not started")
         entry = job.entry
+        transport = self._transport_for_entry(entry)
         reference = self.archive.append(
             session_id=job.session_id,
             agent_id=job.agent_id,
             entry_id=entry.request_id,
             payload=entry.as_dict(),
+            transport=transport,
         )
-        columns = {
-            row[1]
-            for row in connection.execute("PRAGMA table_info(history_entries)").fetchall()
-        }
-        if "capture_ref" not in columns:
-            connection.execute("ALTER TABLE history_entries ADD COLUMN capture_ref TEXT")
         connection.execute(
             """
             INSERT OR REPLACE INTO history_entries (
                 entry_id, session_id, agent_id, started_at, finished_at,
                 outcome, delivery, capture_status, archive_path,
-                archive_offset, archive_length, archive_digest, capture_ref
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                archive_offset, archive_length, archive_digest, capture_ref,
+                transport_path, transport_offset, transport_length, transport_digest
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 entry.request_id,
@@ -322,6 +452,10 @@ class HistoryWriter:
                 reference.length,
                 reference.digest,
                 entry.capture_ref,
+                reference.relative_path if transport is not None else None,
+                reference.offset if transport is not None else None,
+                reference.length if transport is not None else None,
+                reference.digest if transport is not None else None,
             ),
         )
         connection.commit()
@@ -343,7 +477,9 @@ class HistoryWriter:
                 SELECT entry_id, session_id, agent_id, started_at, finished_at,
                        outcome, delivery, capture_status, archive_path,
                        archive_offset, archive_length, archive_digest, capture_ref,
-                       pinned, archived
+                       transport_path, transport_offset, transport_length,
+                       transport_digest, pinned, archived, archive_state,
+                       archive_error_code
                 FROM history_entries
                 {clause}
                 ORDER BY started_at DESC
@@ -367,7 +503,9 @@ class HistoryWriter:
                 SELECT entry_id, session_id, agent_id, started_at, finished_at,
                        outcome, delivery, capture_status, archive_path,
                        archive_offset, archive_length, archive_digest, capture_ref,
-                       pinned, archived
+                       transport_path, transport_offset, transport_length,
+                       transport_digest, pinned, archived, archive_state,
+                       archive_error_code
                 FROM history_entries
                 WHERE entry_id = ?
                 """,
@@ -394,31 +532,140 @@ class HistoryWriter:
             raise RuntimeError("History archive payload is not an object")
         return cast(dict[str, object], payload)
 
+    def _transport_for(
+        self,
+        entry_id: str,
+        include_archived: bool,
+    ) -> bytes | None:
+        entry = self._get_entry(entry_id, include_archived)
+        if entry is None or entry.transport_reference is None:
+            return None
+        return self.archive.read_transport(entry.transport_reference)
+
+    def _transport_for_entry(self, entry: HistoryEntry) -> bytes | None:
+        source = self.transport_source
+        capture_ref = entry.capture_ref
+        if source is None or capture_ref is None:
+            return None
+        try:
+            transport = source.export_request(capture_ref, entry.request_id)
+        except Exception as error:
+            logger.warning(
+                "History transport export failed: entry_id=%s failure_code=%s",
+                entry.request_id,
+                _failure_code(error),
+            )
+            return None
+        return transport or None
+
     def _open_read_connection(self) -> sqlite3.Connection:
         return sqlite3.connect(self.database_path, timeout=5.0)
 
-    def _archive_entry(self, entry_id: str) -> HistoryMutation:
+    def _begin_archive(self, entry_id: str) -> HistoryMutation:
         connection = self._open_read_connection()
         try:
             row = connection.execute(
-                "SELECT pinned, archived FROM history_entries WHERE entry_id = ?",
+                """
+                SELECT pinned, archived, archive_state
+                FROM history_entries
+                WHERE entry_id = ?
+                """,
                 (entry_id,),
             ).fetchone()
             if row is None:
                 return HistoryMutation.NOT_FOUND
-            pinned, archived = row
-            if type(archived) is not int or type(pinned) is not int:
+            pinned, archived, archive_state = row
+            if (
+                type(archived) is not int
+                or type(pinned) is not int
+                or not isinstance(archive_state, str)
+            ):
                 raise RuntimeError("History index contains invalid state flags")
-            if archived:
+            if archive_state == HistoryArchiveState.ARCHIVED.value or archived:
                 return HistoryMutation.ALREADY_APPLIED
             if pinned:
                 return HistoryMutation.PINNED
             connection.execute(
-                "UPDATE history_entries SET archived = 1 WHERE entry_id = ?",
-                (entry_id,),
+                """
+                UPDATE history_entries
+                SET archive_state = ?, archive_error_code = NULL
+                WHERE entry_id = ?
+                """,
+                (HistoryArchiveState.ARCHIVING.value, entry_id),
             )
             connection.commit()
-            return HistoryMutation.UPDATED
+            return HistoryMutation.ARCHIVING
+        finally:
+            connection.close()
+
+    def _complete_archive(self, entry_id: str) -> None:
+        connection = self._open_read_connection()
+        try:
+            row = connection.execute(
+                """
+                SELECT archive_path, archive_offset, archive_length,
+                       archive_digest, archive_state
+                FROM history_entries
+                WHERE entry_id = ?
+                """,
+                (entry_id,),
+            )
+            values = row.fetchone()
+            if values is None:
+                raise ValueError("History entry disappeared during archive")
+            (
+                archive_path,
+                archive_offset,
+                archive_length,
+                archive_digest,
+                archive_state,
+            ) = values
+            if archive_state != HistoryArchiveState.ARCHIVING.value:
+                return
+            if not (
+                isinstance(archive_path, str)
+                and type(archive_offset) is int
+                and type(archive_length) is int
+                and isinstance(archive_digest, str)
+            ):
+                raise ValueError("History archive reference is invalid")
+            reference = HistoryArchiveReference(
+                relative_path=archive_path,
+                offset=archive_offset,
+                length=archive_length,
+                digest=archive_digest,
+                entry_id=entry_id,
+            )
+            self.archive.read(reference)
+            connection.execute(
+                """
+                UPDATE history_entries
+                SET archived = 1, archive_state = ?, archive_error_code = NULL
+                WHERE entry_id = ?
+                """,
+                (HistoryArchiveState.ARCHIVED.value, entry_id),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def _mark_archive_failed(self, entry_id: str, failure_code: str) -> None:
+        connection = self._open_read_connection()
+        try:
+            connection.execute(
+                """
+                UPDATE history_entries
+                SET archive_state = ?, archive_error_code = ?
+                WHERE entry_id = ? AND archive_state = ?
+                """,
+                (
+                    HistoryArchiveState.ARCHIVE_FAILED.value,
+                    failure_code,
+                    entry_id,
+                    HistoryArchiveState.ARCHIVING.value,
+                ),
+            )
+            connection.commit()
         finally:
             connection.close()
 
@@ -465,8 +712,14 @@ def _index_entry_from_row(row: tuple[object, ...]) -> HistoryIndexEntry:
         archive_length,
         archive_digest,
         capture_ref,
+        transport_path,
+        transport_offset,
+        transport_length,
+        transport_digest,
         pinned,
         archived,
+        archive_state,
+        archive_error_code,
     ) = row
     if not (
         isinstance(entry_id, str)
@@ -482,10 +735,37 @@ def _index_entry_from_row(row: tuple[object, ...]) -> HistoryIndexEntry:
         and type(archive_length) is int
         and isinstance(archive_digest, str)
         and (capture_ref is None or isinstance(capture_ref, str))
+        and (transport_path is None or isinstance(transport_path, str))
+        and (transport_offset is None or type(transport_offset) is int)
+        and (transport_length is None or type(transport_length) is int)
+        and (transport_digest is None or isinstance(transport_digest, str))
         and type(pinned) is int
         and type(archived) is int
+        and isinstance(archive_state, str)
+        and (archive_error_code is None or isinstance(archive_error_code, str))
     ):
         raise RuntimeError("History index contains an invalid row")
+    transport_reference: HistoryArchiveReference | None = None
+    transport_values = (
+        transport_path,
+        transport_offset,
+        transport_length,
+        transport_digest,
+    )
+    if any(value is not None for value in transport_values):
+        if not all(value is not None for value in transport_values):
+            raise RuntimeError("History index contains an incomplete transport reference")
+        transport_reference = HistoryArchiveReference(
+            relative_path=cast(str, transport_path),
+            offset=cast(int, transport_offset),
+            length=cast(int, transport_length),
+            digest=cast(str, transport_digest),
+            entry_id=entry_id,
+        )
+    try:
+        state = HistoryArchiveState(archive_state)
+    except ValueError as error:
+        raise RuntimeError("History index contains an invalid archive state") from error
     return HistoryIndexEntry(
         entry_id=entry_id,
         session_id=session_id,
@@ -503,16 +783,21 @@ def _index_entry_from_row(row: tuple[object, ...]) -> HistoryIndexEntry:
             digest=archive_digest,
             entry_id=entry_id,
         ),
+        transport_reference=transport_reference,
+        archive_state=state,
+        archive_error_code=archive_error_code,
         pinned=bool(pinned),
-        archived=bool(archived),
+        archived=bool(archived) or state is HistoryArchiveState.ARCHIVED,
     )
 
 
 __all__ = [
+    "HistoryArchiveState",
     "HistoryDurability",
     "HistoryDurabilityReceipt",
     "HistoryIndexEntry",
     "HistoryMutation",
     "HistorySubmission",
+    "HistoryTransportSource",
     "HistoryWriter",
 ]

@@ -711,6 +711,7 @@ def build_chain(
         HistoryWriter(
             database_path=user_data_path() / "history.sqlite3",
             archive=HistoryArchiveStore(user_data_path() / "history-archive"),
+            transport_source=raw_capture,
         )
         if config.history.enabled
         else None

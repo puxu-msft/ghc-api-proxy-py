@@ -14,6 +14,7 @@ import zstandard
 
 HISTORY_ARCHIVE_SCHEMA_VERSION = 1
 HISTORY_SEGMENT_SUFFIX = ".history.cborseq.zst"
+HISTORY_TRANSPORT_MEDIA_TYPE = "application/cbor-seq+zstd"
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,19 +65,22 @@ class HistoryArchiveStore:
         agent_id: str | None,
         entry_id: str,
         payload: Mapping[str, object],
+        transport: bytes | None = None,
     ) -> HistoryArchiveReference:
         if not entry_id.strip():
             raise ValueError("entry_id must be a non-empty string")
-        encoded = cbor2.dumps(
-            {
-                "schema_version": HISTORY_ARCHIVE_SCHEMA_VERSION,
-                "entry_id": entry_id,
-                "session_id": session_id,
-                "agent_id": agent_id,
-                "payload": dict(payload),
-            },
-            canonical=True,
-        )
+        record: dict[str, object] = {
+            "schema_version": HISTORY_ARCHIVE_SCHEMA_VERSION,
+            "entry_id": entry_id,
+            "session_id": session_id,
+            "agent_id": agent_id,
+            "payload": dict(payload),
+        }
+        if transport is not None:
+            record["transport"] = transport
+            record["transport_media_type"] = HISTORY_TRANSPORT_MEDIA_TYPE
+            record["transport_contains_credentials"] = True
+        encoded = cbor2.dumps(record, canonical=True)
         frame = zstandard.ZstdCompressor(level=self.compression_level).compress(encoded)
         key = (_identity_key(session_id), _identity_key(agent_id))
         with self._lock:
@@ -119,6 +123,19 @@ class HistoryArchiveStore:
         if record.get("entry_id") != reference.entry_id:
             raise ValueError("History archive reference entry id mismatch")
         return record
+
+    def read_transport(self, reference: HistoryArchiveReference) -> bytes | None:
+        record = self.read(reference)
+        transport = record.get("transport")
+        if transport is None:
+            return None
+        if not isinstance(transport, bytes):
+            raise ValueError("History archive transport is not a byte string")
+        if record.get("transport_media_type") != HISTORY_TRANSPORT_MEDIA_TYPE:
+            raise ValueError("unsupported History archive transport media type")
+        if record.get("transport_contains_credentials") is not True:
+            raise ValueError("History archive transport credential marker is invalid")
+        return transport
 
     def iter_records(self, relative_path: str) -> Iterator[dict[str, Any]]:
         path = self.root / relative_path
@@ -183,6 +200,7 @@ def _read_zstd_frame(stream: Any) -> bytes | None:
 __all__ = [
     "HISTORY_ARCHIVE_SCHEMA_VERSION",
     "HISTORY_SEGMENT_SUFFIX",
+    "HISTORY_TRANSPORT_MEDIA_TYPE",
     "HistoryArchiveReference",
     "HistoryArchiveStore",
 ]

@@ -3,6 +3,7 @@
 from app.history.archive import (
     HISTORY_ARCHIVE_SCHEMA_VERSION,
     HISTORY_SEGMENT_SUFFIX,
+    HISTORY_TRANSPORT_MEDIA_TYPE,
     HistoryArchiveReference,
     HistoryArchiveStore,
 )
@@ -13,19 +14,23 @@ from app.history.entry import (
     HistoryOutcome,
 )
 from app.history.writer import (
+    HistoryArchiveState,
     HistoryDurability,
     HistoryDurabilityReceipt,
     HistoryIndexEntry,
     HistoryMutation,
     HistorySubmission,
+    HistoryTransportSource,
     HistoryWriter,
 )
 
 __all__ = [
     "HISTORY_ARCHIVE_SCHEMA_VERSION",
     "HISTORY_SEGMENT_SUFFIX",
+    "HISTORY_TRANSPORT_MEDIA_TYPE",
     "CaptureCapabilities",
     "HistoryArchiveReference",
+    "HistoryArchiveState",
     "HistoryArchiveStore",
     "HistoryDelivery",
     "HistoryDurability",
@@ -35,5 +40,6 @@ __all__ = [
     "HistoryMutation",
     "HistoryOutcome",
     "HistorySubmission",
+    "HistoryTransportSource",
     "HistoryWriter",
 ]

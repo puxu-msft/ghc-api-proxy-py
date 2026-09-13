@@ -153,6 +153,7 @@ async def test_history_archive_is_one_way_and_pinned_entries_block_it(
             archived = await client.post(
                 "/history/api/entries/request-route-1/archive"
             )
+            await writer.wait_archive_idle()
             listed = await client.get("/history/api/entries")
             detail = await client.get("/history/api/entries/request-route-1")
 
@@ -160,7 +161,7 @@ async def test_history_archive_is_one_way_and_pinned_entries_block_it(
         assert blocked.status_code == 409
         assert blocked.json()["error"]["code"] == "entry_pinned"
         assert unpinned.status_code == 200
-        assert archived.status_code == 200
+        assert archived.status_code == 202
         assert listed.json()["data"] == []
         assert detail.status_code == 404
     finally:
@@ -191,6 +192,7 @@ async def test_history_transport_export_returns_filtered_binary_capture(
     writer = HistoryWriter(
         database_path=tmp_path / "history.sqlite3",
         archive=HistoryArchiveStore(tmp_path / "archive"),
+        transport_source=raw_capture,
     )
     await writer.start()
     entry = replace(
