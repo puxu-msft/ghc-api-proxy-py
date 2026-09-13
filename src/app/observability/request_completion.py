@@ -30,6 +30,7 @@ from app.pipeline.exceptions import UpstreamError, UpstreamRejected
 from app.pipeline.response_action import ClientActionRequirement
 from app.pipeline.response_observation import (
     ExactUsage,
+    FrozenJson,
     FrozenJsonObject,
     JsonObservation,
     ObservationIssue,

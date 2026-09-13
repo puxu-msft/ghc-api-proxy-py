@@ -139,6 +139,7 @@ def test_history_entry_projects_capture_capabilities_without_raw_body() -> None:
             wire_diagnostic_eligible=True,
             semantic_replay_eligible=True,
             live_replay_eligible=True,
+            capture_ref="session-abc/agent-def.cborseq.zst",
         ),
     )
 
@@ -146,7 +147,7 @@ def test_history_entry_projects_capture_capabilities_without_raw_body() -> None:
 
     assert entry.capture.status == "complete"
     assert entry.capture.wire_diagnostic_eligible is True
-    assert entry.as_dict()["capture"]["capture_ref"] is None
+    assert entry.capture_ref == "session-abc/agent-def.cborseq.zst"
 
 
 def test_history_entry_projects_client_semantic_payloads() -> None:

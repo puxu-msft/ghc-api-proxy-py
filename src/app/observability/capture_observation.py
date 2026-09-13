@@ -19,6 +19,7 @@ class RawCaptureObservation:
     wire_diagnostic_eligible: bool
     semantic_replay_eligible: bool
     live_replay_eligible: bool
+    capture_ref: str | None = None
 
 
 __all__ = ["CaptureStatus", "RawCaptureObservation"]

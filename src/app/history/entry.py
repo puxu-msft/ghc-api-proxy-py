@@ -100,6 +100,11 @@ class HistoryEntry:
             losses=freeze_json(list(line.losses)),
             facts=freeze_json(list(line.facts)),
             capture=_capture_capabilities(facts.capture),
+            capture_ref=(
+                facts.capture.capture_ref
+                if facts.capture is not None
+                else None
+            ),
             semantic_request=facts.semantic_request,
             semantic_response=facts.semantic_response,
         )

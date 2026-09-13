@@ -50,6 +50,7 @@ class HistoryIndexEntry:
     outcome: str
     delivery: str
     capture_status: str
+    capture_ref: str | None
     archive_reference: HistoryArchiveReference
     pinned: bool
     archived: bool
@@ -64,6 +65,7 @@ class HistoryIndexEntry:
             "outcome": self.outcome,
             "delivery": self.delivery,
             "capture_status": self.capture_status,
+            "capture_ref": self.capture_ref,
             "archive": {
                 "path": self.archive_reference.relative_path,
                 "offset": self.archive_reference.offset,
@@ -270,6 +272,7 @@ class HistoryWriter:
                 archive_offset INTEGER NOT NULL,
                 archive_length INTEGER NOT NULL,
                 archive_digest TEXT NOT NULL,
+                capture_ref TEXT,
                 pinned INTEGER NOT NULL DEFAULT 0,
                 archived INTEGER NOT NULL DEFAULT 0
             );
@@ -291,13 +294,19 @@ class HistoryWriter:
             entry_id=entry.request_id,
             payload=entry.as_dict(),
         )
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(history_entries)").fetchall()
+        }
+        if "capture_ref" not in columns:
+            connection.execute("ALTER TABLE history_entries ADD COLUMN capture_ref TEXT")
         connection.execute(
             """
             INSERT OR REPLACE INTO history_entries (
                 entry_id, session_id, agent_id, started_at, finished_at,
                 outcome, delivery, capture_status, archive_path,
-                archive_offset, archive_length, archive_digest
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                archive_offset, archive_length, archive_digest, capture_ref
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 entry.request_id,
@@ -312,6 +321,7 @@ class HistoryWriter:
                 reference.offset,
                 reference.length,
                 reference.digest,
+                entry.capture_ref,
             ),
         )
         connection.commit()
@@ -332,7 +342,7 @@ class HistoryWriter:
                 f"""
                 SELECT entry_id, session_id, agent_id, started_at, finished_at,
                        outcome, delivery, capture_status, archive_path,
-                       archive_offset, archive_length, archive_digest,
+                       archive_offset, archive_length, archive_digest, capture_ref,
                        pinned, archived
                 FROM history_entries
                 {clause}
@@ -356,7 +366,7 @@ class HistoryWriter:
                 """
                 SELECT entry_id, session_id, agent_id, started_at, finished_at,
                        outcome, delivery, capture_status, archive_path,
-                       archive_offset, archive_length, archive_digest,
+                       archive_offset, archive_length, archive_digest, capture_ref,
                        pinned, archived
                 FROM history_entries
                 WHERE entry_id = ?
@@ -454,6 +464,7 @@ def _index_entry_from_row(row: tuple[object, ...]) -> HistoryIndexEntry:
         archive_offset,
         archive_length,
         archive_digest,
+        capture_ref,
         pinned,
         archived,
     ) = row
@@ -470,6 +481,7 @@ def _index_entry_from_row(row: tuple[object, ...]) -> HistoryIndexEntry:
         and type(archive_offset) is int
         and type(archive_length) is int
         and isinstance(archive_digest, str)
+        and (capture_ref is None or isinstance(capture_ref, str))
         and type(pinned) is int
         and type(archived) is int
     ):
@@ -483,6 +495,7 @@ def _index_entry_from_row(row: tuple[object, ...]) -> HistoryIndexEntry:
         outcome=outcome,
         delivery=delivery,
         capture_status=capture_status,
+        capture_ref=capture_ref,
         archive_reference=HistoryArchiveReference(
             relative_path=archive_path,
             offset=archive_offset,

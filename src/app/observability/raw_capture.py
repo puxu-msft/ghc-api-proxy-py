@@ -161,6 +161,9 @@ class RawCaptureStore:
             agent_key = hashlib.sha256(agent_id.encode("utf-8")).hexdigest()[:24]
         return self.root / f"session-{session_key}" / f"agent-{agent_key}{CAPTURE_FILE_SUFFIX}"
 
+    def reference_for(self, session_id: str, agent_id: str | None) -> str:
+        return self._path_for(session_id, agent_id).relative_to(self.root).as_posix()
+
     def append(
         self,
         capture: RawRequestCapture,
@@ -636,6 +639,7 @@ class RawRequestCapture:
             and status is not CaptureStatus.CORRUPT,
             live_replay_eligible=request_available
             and status is not CaptureStatus.CORRUPT,
+            capture_ref=self.store.reference_for(self.session_id, self.agent_id),
         )
 
 
