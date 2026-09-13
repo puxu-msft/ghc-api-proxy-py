@@ -44,6 +44,12 @@ def _entry() -> HistoryEntry:
         losses=empty,
         facts=empty,
         capture=CaptureCapabilities(),
+        semantic_request=freeze_json(
+            {"messages": [{"role": "user", "content": "hi"}]}
+        ),
+        semantic_response=freeze_json(
+            {"content": [{"type": "text", "text": "hello"}]}
+        ),
     )
 
 
@@ -82,11 +88,16 @@ async def test_history_routes_read_durable_index_entry(tmp_path: Path) -> None:
         ) as client:
             listed = await client.get("/history/api/entries")
             detail = await client.get("/history/api/entries/request-route-1")
+            semantic = await client.get(
+                "/history/api/entries/request-route-1?include=semantic"
+            )
 
         assert listed.status_code == 200
         assert listed.json()["data"][0]["id"] == "request-route-1"
         assert detail.status_code == 200
         assert detail.json()["outcome"] == "completed"
+        assert semantic.status_code == 200
+        assert semantic.json()["semantic_request"]["messages"][0]["content"] == "hi"
     finally:
         await writer.close()
 

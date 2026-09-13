@@ -8,6 +8,7 @@ import sqlite3
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from typing import cast
 
 from app.history.archive import HistoryArchiveReference, HistoryArchiveStore
 from app.history.entry import HistoryEntry
@@ -175,6 +176,20 @@ class HistoryWriter:
             raise RuntimeError("History writer is not running")
         return await asyncio.to_thread(
             self._get_entry,
+            entry_id,
+            include_archived,
+        )
+
+    async def semantic_payload_for(
+        self,
+        entry_id: str,
+        *,
+        include_archived: bool = False,
+    ) -> dict[str, object] | None:
+        if self._task is None or self._closed:
+            raise RuntimeError("History writer is not running")
+        return await asyncio.to_thread(
+            self._semantic_payload_for,
             entry_id,
             include_archived,
         )
@@ -354,6 +369,20 @@ class HistoryWriter:
             return None
         entry = _index_entry_from_row(row)
         return entry if include_archived or not entry.archived else None
+
+    def _semantic_payload_for(
+        self,
+        entry_id: str,
+        include_archived: bool,
+    ) -> dict[str, object] | None:
+        entry = self._get_entry(entry_id, include_archived)
+        if entry is None:
+            return None
+        record = self.archive.read(entry.archive_reference)
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            raise RuntimeError("History archive payload is not an object")
+        return cast(dict[str, object], payload)
 
     def _open_read_connection(self) -> sqlite3.Connection:
         return sqlite3.connect(self.database_path, timeout=5.0)

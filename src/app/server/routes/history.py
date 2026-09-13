@@ -41,7 +41,11 @@ async def list_history_entries(
 
 
 @router.get("/history/api/entries/{entry_id}")
-async def get_history_entry(entry_id: str, request: Request) -> JSONResponse:
+async def get_history_entry(
+    entry_id: str,
+    request: Request,
+    include: str = Query(default=""),
+) -> JSONResponse:
     writer = getattr(chain_of(request), "history_writer", None)
     if writer is None:
         return _history_unavailable()
@@ -59,7 +63,35 @@ async def get_history_entry(entry_id: str, request: Request) -> JSONResponse:
             },
             status_code=404,
         )
-    return JSONResponse(entry.as_dict())
+    result = entry.as_dict()
+    if include:
+        if include != "semantic":
+            return JSONResponse(
+                {
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "include must be 'semantic'",
+                    }
+                },
+                status_code=400,
+            )
+        try:
+            semantic = await writer.semantic_payload_for(entry_id)
+        except RuntimeError:
+            return _history_unavailable()
+        if semantic is None:
+            return JSONResponse(
+                {
+                    "error": {
+                        "type": "source_unavailable",
+                        "message": "semantic History payload is unavailable",
+                    }
+                },
+                status_code=409,
+            )
+        result["semantic_request"] = semantic.get("semantic_request")
+        result["semantic_response"] = semantic.get("semantic_response")
+    return JSONResponse(result)
 
 
 async def _mutate_history_entry(
