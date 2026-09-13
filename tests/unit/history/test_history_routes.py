@@ -215,6 +215,9 @@ async def test_history_transport_export_returns_filtered_binary_capture(
             response = await client.get(
                 "/history/api/entries/request-transport-1/transport"
             )
+            included = await client.get(
+                "/history/api/entries/request-transport-1?include=transport"
+            )
 
         assert response.status_code == 200
         assert response.headers["content-type"].startswith(
@@ -226,6 +229,9 @@ async def test_history_transport_export_returns_filtered_binary_capture(
         assert {record["request_id"] for record in records} == {
             "request-transport-1"
         }
+
+        assert included.status_code == 200
+        assert included.content == response.content
     finally:
         await writer.close()
         raw_capture.close()

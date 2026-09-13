@@ -47,7 +47,9 @@ async def get_history_entry(
     entry_id: str,
     request: Request,
     include: str = Query(default=""),
-) -> JSONResponse:
+) -> Response:
+    if include == "transport":
+        return await export_history_transport(entry_id, request)
     writer = getattr(chain_of(request), "history_writer", None)
     if writer is None:
         return _history_unavailable()
