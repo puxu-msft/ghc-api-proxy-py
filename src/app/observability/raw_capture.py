@@ -19,6 +19,11 @@ import cbor2
 import httpx2
 import zstandard
 
+from app.observability.capture_observation import (
+    CaptureStatus,
+    RawCaptureObservation,
+)
+
 logger = logging.getLogger(__name__)
 
 AGENT_ID_HEADERS = ("x-claude-code-agent-id", "x-agent-id")
@@ -587,6 +592,51 @@ class RawRequestCapture:
                 str(writer_error).lower(),
                 str(response_body_complete).lower(),
             )
+
+
+    def observation(self) -> RawCaptureObservation:
+        with self._condition:
+            committed = self._committed_event_types
+            dropped = self._drop_reason
+            incomplete = self._incomplete_reason
+            finished = self._finished
+            request_available = {
+                "request.body",
+                "request.body.end",
+            } <= committed
+            client_response_available = "client.response.body" in committed
+            upstream_response_available = bool(
+                {"upstream.response.body", "upstream.response.end"} & committed
+            )
+            if not finished:
+                status = CaptureStatus.PENDING
+            elif dropped == "path_poisoned":
+                status = CaptureStatus.CORRUPT
+            elif (
+                dropped is not None
+                or incomplete is not None
+                or not request_available
+                or not client_response_available
+                or not upstream_response_available
+            ):
+                status = CaptureStatus.INCOMPLETE
+            else:
+                status = CaptureStatus.COMPLETE
+        return RawCaptureObservation(
+            status=status,
+            client_request_available=request_available,
+            client_response_available=client_response_available,
+            wire_diagnostic_eligible=(
+                status is CaptureStatus.COMPLETE
+                and request_available
+                and client_response_available
+                and upstream_response_available
+            ),
+            semantic_replay_eligible=request_available
+            and status is not CaptureStatus.CORRUPT,
+            live_replay_eligible=request_available
+            and status is not CaptureStatus.CORRUPT,
+        )
 
 
 def iter_raw_capture_records(path: Path) -> Iterator[dict[str, Any]]:

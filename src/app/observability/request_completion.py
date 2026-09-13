@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, cast
 from starlette.requests import ClientDisconnect
 
 from app.model_provider.upstream_errors import normalize_upstream_error
+from app.observability.capture_observation import RawCaptureObservation
 from app.observability.logging import get_logger
 from app.observability.metrics import TRANSLATION_LOSSES
 from app.observability.raw_capture import RawRequestCapture
@@ -174,6 +175,7 @@ class RequestFacts:
     interruptions: tuple[InterruptionObservation, ...] = ()
     session_id: str | None = None
     agent_id: str | None = None
+    capture: RawCaptureObservation | None = None
 
     def request_line(self) -> RequestLine:
         value = thaw_json(self.legacy)
@@ -615,6 +617,13 @@ class RequestCompletionCoordinator:
             upstream_response_body_bytes=self._upstream_response_bytes,
             duration_s=self._legacy_duration_s,
         )
+        capture_observation = None
+        if self.raw_capture is not None:
+            self.raw_capture.finish(
+                status_code=self._status_code,
+                complete=self.delivery_accepted,
+            )
+            capture_observation = self.raw_capture.observation()
         record = RequestFacts(
             status=status,
             at=utc_timestamp(),
@@ -655,12 +664,8 @@ class RequestCompletionCoordinator:
             interruptions=tuple(self._interruptions),
             session_id=self.trace.session_id,
             agent_id=self.trace.agent_id,
+            capture=capture_observation,
         )
-        if self.raw_capture is not None:
-            self.raw_capture.finish(
-                status_code=self._status_code,
-                complete=self.delivery_accepted,
-            )
         # Set before every sink. A re-entrant or duplicate publisher sees the same immutable record and cannot repeat a side effect.
         self._record = record
         self._emit(record, retry_as_success=retry_as_success)

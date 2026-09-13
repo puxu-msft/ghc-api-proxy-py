@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import cast
 
+from app.observability.capture_observation import RawCaptureObservation
 from app.observability.request_completion import (
     DeliveryState,
     FailureCategory,
@@ -98,7 +99,7 @@ class HistoryEntry:
             usage=_freeze_object(line.usage),
             losses=freeze_json(list(line.losses)),
             facts=freeze_json(list(line.facts)),
-            capture=CaptureCapabilities(),
+            capture=_capture_capabilities(facts.capture),
         )
 
     def as_dict(self) -> dict[str, JsonValue]:
@@ -139,6 +140,21 @@ def _freeze_object(value: object) -> FrozenJsonObject:
     if not isinstance(frozen, FrozenJsonObject):
         raise TypeError("History object projection did not produce a JSON object")
     return frozen
+
+
+def _capture_capabilities(
+    observation: RawCaptureObservation | None,
+) -> CaptureCapabilities:
+    if observation is None:
+        return CaptureCapabilities()
+    return CaptureCapabilities(
+        status=observation.status.value,
+        client_request_available=observation.client_request_available,
+        client_response_available=observation.client_response_available,
+        wire_diagnostic_eligible=observation.wire_diagnostic_eligible,
+        semantic_replay_eligible=observation.semantic_replay_eligible,
+        live_replay_eligible=observation.live_replay_eligible,
+    )
 
 
 def _outcome_for(facts: RequestFacts) -> HistoryOutcome:

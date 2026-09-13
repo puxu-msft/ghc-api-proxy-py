@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from app.history import HistoryDelivery, HistoryEntry, HistoryOutcome
+from app.observability.capture_observation import (
+    CaptureStatus,
+    RawCaptureObservation,
+)
 from app.observability.request_completion import (
     BodyBytesObservation,
     DeliveryObservation,
@@ -121,3 +127,23 @@ def test_history_entry_distinguishes_failed_uncertain_delivery() -> None:
 
     assert entry.outcome is HistoryOutcome.FAILED
     assert entry.delivery is HistoryDelivery.UNCERTAIN
+
+
+def test_history_entry_projects_capture_capabilities_without_raw_body() -> None:
+    facts = replace(
+        _facts(status="ok", delivery=DeliveryState.ACCEPTED, downstream_body_bytes=4),
+        capture=RawCaptureObservation(
+            status=CaptureStatus.COMPLETE,
+            client_request_available=True,
+            client_response_available=True,
+            wire_diagnostic_eligible=True,
+            semantic_replay_eligible=True,
+            live_replay_eligible=True,
+        ),
+    )
+
+    entry = HistoryEntry.from_request_facts(facts)
+
+    assert entry.capture.status == "complete"
+    assert entry.capture.wire_diagnostic_eligible is True
+    assert entry.as_dict()["capture"]["capture_ref"] is None
