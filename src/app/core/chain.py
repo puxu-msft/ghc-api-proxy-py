@@ -11,6 +11,7 @@ It is not a leaf, and saying so is more useful than pretending: `TranslatorRegis
 
 import re
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import httpx2
 
@@ -29,6 +30,9 @@ from app.pipeline.translation_driver.registry import TranslatorRegistry
 from app.tokenization.admission import PromptTokenAdmission
 from app.tokenization.state_store import TokenizationStateStore
 from app.tokenization.worker import LocalTokenWorker
+
+if TYPE_CHECKING:
+    from app.history.writer import HistoryWriter
 
 
 @dataclass(slots=True)
@@ -49,6 +53,7 @@ class Chain:
     active_requests: ActiveRequestRegistry = field(default_factory=ActiveRequestRegistry)
     raw_capture: RawCaptureStore | None = None
     debug_capture_rules: DebugCaptureRuleStore | None = None
+    history_writer: HistoryWriter | None = None
     # Probed once, here, and shared by the footer and the log lines. Asking twice invites two answers that disagree, and a log stream that emits a glyph the footer has already decided this terminal cannot encode is exactly the kind of split nobody thinks to look for.
     capabilities: TerminalCapabilities = field(default_factory=detect_terminal)
     # What the `local` token counter has learnt. Constructing it touches nothing; `load()` does.
@@ -77,5 +82,7 @@ class Chain:
             self.raw_capture.close()
         if self.debug_capture_rules is not None:
             self.debug_capture_rules.close()
+        if self.history_writer is not None:
+            await self.history_writer.close()
         for client in self.provider_clients.values():
             await client.aclose()

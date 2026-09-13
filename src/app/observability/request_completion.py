@@ -753,6 +753,7 @@ class RequestCompletionCoordinator:
     def _emit(self, record: RequestFacts, *, retry_as_success: bool) -> None:
         sinks = (
             ("request store", lambda: self.chain.active_requests.complete(self.request_id, record)),
+            ("history projection", lambda: _submit_history_projection(self.chain, record)),
             ("translation loss metrics", lambda: _record_translation_losses(record)),
             ("structured request record", lambda: write_finalized_record(record.to_record_dict())),
             (
@@ -773,6 +774,24 @@ class RequestCompletionCoordinator:
                     name,
                     _exception_type_name(error),
                 )
+
+
+def _submit_history_projection(chain: Chain, record: RequestFacts) -> None:
+    history_writer = getattr(chain, "history_writer", None)
+    if history_writer is None:
+        return
+    from app.history import HistoryEntry, HistorySubmission
+
+    submission = history_writer.submit_nowait(
+        HistoryEntry.from_request_facts(record),
+        session_id=None,
+        agent_id=None,
+    )
+    if submission is not HistorySubmission.ACCEPTED:
+        _warn_no_raise(
+            "history projection rejected: request_id=%s",
+            record.request_line().request_id,
+        )
 
 
 def _exception_type_name(error: BaseException) -> str:

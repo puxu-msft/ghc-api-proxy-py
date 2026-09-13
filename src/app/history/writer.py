@@ -74,6 +74,19 @@ class HistoryWriter:
         session_id: str | None,
         agent_id: str | None,
     ) -> HistorySubmission:
+        return self.submit_nowait(
+            entry,
+            session_id=session_id,
+            agent_id=agent_id,
+        )
+
+    def submit_nowait(
+        self,
+        entry: HistoryEntry,
+        *,
+        session_id: str | None,
+        agent_id: str | None,
+    ) -> HistorySubmission:
         if self._task is None or self._closed:
             return HistorySubmission.REJECTED
         try:

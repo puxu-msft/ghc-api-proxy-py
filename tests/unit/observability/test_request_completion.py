@@ -13,6 +13,7 @@ from starlette.types import Message, Receive, Scope, Send
 
 import app.observability.request_completion as completion_module
 from app.errors import ErrorCategory, ErrorInfo
+from app.history import HistoryEntry, HistorySubmission
 from app.observability.active_requests import ActiveRequestRegistry
 from app.observability.request_completion import (
     DeliveryState,
@@ -103,6 +104,45 @@ class OneShotRenderedError(RuntimeError):
 class WhitespaceRenderedError(RuntimeError):
     def __str__(self) -> str:
         return " \n\t "
+
+
+class RecordingHistoryWriter:
+    def __init__(self) -> None:
+        self.entries: list[object] = []
+
+    def submit_nowait(
+        self,
+        entry: object,
+        *,
+        session_id: str | None,
+        agent_id: str | None,
+    ) -> HistorySubmission:
+        assert session_id is None
+        assert agent_id is None
+        self.entries.append(entry)
+        return HistorySubmission.ACCEPTED
+
+
+def test_publish_submits_a_history_projection_when_writer_is_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    completion, trace, _store, _records, _logger = _coordinator(monkeypatch)
+    writer = RecordingHistoryWriter()
+    completion.chain.history_writer = writer
+    trace.terminal_status = "completed"
+    completion.mark_response_ready(200)
+    completion.note_asgi_message_sent({"type": "http.response.start", "status": 200})
+    completion.note_asgi_message_sent(
+        {"type": "http.response.body", "body": b"reply"}
+    )
+    completion.settle(status_code=200, upstream_response_bytes=13)
+
+    completion.publish()
+
+    assert len(writer.entries) == 1
+    entry = writer.entries[0]
+    assert isinstance(entry, HistoryEntry)
+    assert entry.request_id == trace.request_id
 
 
 def _coordinator(

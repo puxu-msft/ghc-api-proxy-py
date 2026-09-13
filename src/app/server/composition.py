@@ -30,6 +30,8 @@ from app.config.schema import (
     XingchenProviderConfig,
 )
 from app.core.chain import Chain
+from app.history.archive import HistoryArchiveStore
+from app.history.writer import HistoryWriter
 from app.model_provider import (
     CODEBUDDY_PROVIDER_TYPE,
     GITHUB_COPILOT_PROVIDER_TYPE,
@@ -705,6 +707,14 @@ def build_chain(
         max_file_bytes=raw_capture_config.max_file_bytes,
     )
     debug_capture_rules = DebugCaptureRuleStore(rules_database)
+    history_writer = (
+        HistoryWriter(
+            database_path=user_data_path() / "history.sqlite3",
+            archive=HistoryArchiveStore(user_data_path() / "history-archive"),
+        )
+        if config.history.enabled
+        else None
+    )
 
     return Chain(
         config=config,
@@ -724,6 +734,7 @@ def build_chain(
         rate_limiters={name: RateLimiter(config.reactive_rate_limiter) for name in providers},
         raw_capture=raw_capture,
         debug_capture_rules=debug_capture_rules,
+        history_writer=history_writer,
     )
 
 

@@ -150,6 +150,17 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
                 link_url=message.link_url,
             )
     await chain.tokenization.load()
+    history_writer = getattr(chain, "history_writer", None)
+    if history_writer is not None:
+        try:
+            await history_writer.start()
+        except Exception as error:
+            logger.warning(
+                "history writer unavailable: exception_type=%s",
+                f"{type(error).__module__}.{type(error).__qualname__}",
+            )
+            if hasattr(chain, "history_writer"):
+                chain.history_writer = None
     # Probed, not configured: whether a live footer belongs on this stream is a fact about where the output goes, and the process can see that for itself. Nothing is logged when it comes back unsupported — a pipe or a CI job is the normal case, not a degradation worth a line in everybody's log.
     tui = footer_tui_or_none(chain.active_requests, chain.capabilities)
     async with anyio.create_task_group() as flushing:
