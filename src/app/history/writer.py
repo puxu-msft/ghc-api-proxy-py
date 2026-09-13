@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import sqlite3
 from dataclasses import dataclass
@@ -46,6 +47,12 @@ class HistoryTransportSource(Protocol):
     def export_request(self, relative_path: str, request_id: str) -> bytes:
         """Return the filtered binary transport export for one request."""
         ...
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryPage:
+    entries: tuple[HistoryIndexEntry, ...]
+    next_cursor: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,15 +209,49 @@ class HistoryWriter:
         *,
         limit: int = 50,
         include_archived: bool = False,
+        session_id: str | None = None,
+        agent_id: str | None = None,
+        outcome: str | None = None,
+        delivery: str | None = None,
+        capture_status: str | None = None,
     ) -> tuple[HistoryIndexEntry, ...]:
+        page = await self.list_entries_page(
+            limit=limit,
+            include_archived=include_archived,
+            session_id=session_id,
+            agent_id=agent_id,
+            outcome=outcome,
+            delivery=delivery,
+            capture_status=capture_status,
+        )
+        return page.entries
+
+    async def list_entries_page(
+        self,
+        *,
+        limit: int = 50,
+        include_archived: bool = False,
+        cursor: str | None = None,
+        session_id: str | None = None,
+        agent_id: str | None = None,
+        outcome: str | None = None,
+        delivery: str | None = None,
+        capture_status: str | None = None,
+    ) -> HistoryPage:
         if limit <= 0:
             raise ValueError("limit must be positive")
         if self._task is None or self._closed:
             raise RuntimeError("History writer is not running")
         return await asyncio.to_thread(
-            self._list_entries,
+            self._list_entries_page,
             limit,
             include_archived,
+            cursor,
+            session_id,
+            agent_id,
+            outcome,
+            delivery,
+            capture_status,
         )
 
     async def get_entry(
@@ -464,14 +505,42 @@ class HistoryWriter:
             state=HistoryDurability.DURABLE,
         )
 
-    def _list_entries(
+    def _list_entries_page(
         self,
         limit: int,
         include_archived: bool,
-    ) -> tuple[HistoryIndexEntry, ...]:
+        cursor: str | None,
+        session_id: str | None,
+        agent_id: str | None,
+        outcome: str | None,
+        delivery: str | None,
+        capture_status: str | None,
+    ) -> HistoryPage:
         connection = self._open_read_connection()
         try:
-            clause = "" if include_archived else "WHERE archived = 0"
+            clauses: list[str] = []
+            parameters: list[object] = []
+            if not include_archived:
+                clauses.append("archived = 0")
+            for name, value in (
+                ("session_id", session_id),
+                ("agent_id", agent_id),
+                ("outcome", outcome),
+                ("delivery", delivery),
+                ("capture_status", capture_status),
+            ):
+                if value is not None:
+                    clauses.append(f"{name} = ?")
+                    parameters.append(value)
+            if cursor is not None:
+                cursor_started_at, cursor_entry_id = _decode_cursor(cursor)
+                clauses.append(
+                    "(started_at < ? OR (started_at = ? AND entry_id < ?))"
+                )
+                parameters.extend(
+                    [cursor_started_at, cursor_started_at, cursor_entry_id]
+                )
+            where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
             rows = connection.execute(
                 f"""
                 SELECT entry_id, session_id, agent_id, started_at, finished_at,
@@ -481,15 +550,23 @@ class HistoryWriter:
                        transport_digest, pinned, archived, archive_state,
                        archive_error_code
                 FROM history_entries
-                {clause}
-                ORDER BY started_at DESC
+                {where}
+                ORDER BY started_at DESC, entry_id DESC
                 LIMIT ?
                 """,
-                (limit,),
+                (*parameters, limit + 1),
             ).fetchall()
         finally:
             connection.close()
-        return tuple(_index_entry_from_row(row) for row in rows)
+        has_next = len(rows) > limit
+        visible_rows = rows[:limit]
+        entries = tuple(_index_entry_from_row(row) for row in visible_rows)
+        next_cursor = (
+            _encode_cursor(entries[-1].started_at, entries[-1].entry_id)
+            if has_next and entries
+            else None
+        )
+        return HistoryPage(entries=entries, next_cursor=next_cursor)
 
     def _get_entry(
         self,
@@ -697,6 +774,28 @@ def _failure_code(error: BaseException) -> str:
     return f"{type(error).__module__}.{type(error).__qualname__}"
 
 
+def _encode_cursor(started_at: str, entry_id: str) -> str:
+    raw = f"{started_at}\x00{entry_id}".encode()
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_cursor(cursor: str) -> tuple[str, str]:
+    if not cursor:
+        raise ValueError("history cursor must not be empty")
+    padding = "=" * (-len(cursor) % 4)
+    try:
+        decoded = base64.b64decode(cursor + padding, altchars=b"-_", validate=True)
+    except (ValueError, UnicodeError) as error:
+        raise ValueError("history cursor is invalid") from error
+    try:
+        started_at, entry_id = decoded.decode("utf-8").split("\x00", 1)
+    except (UnicodeDecodeError, ValueError) as error:
+        raise ValueError("history cursor is invalid") from error
+    if not started_at or not entry_id:
+        raise ValueError("history cursor is invalid")
+    return started_at, entry_id
+
+
 def _index_entry_from_row(row: tuple[object, ...]) -> HistoryIndexEntry:
     (
         entry_id,
@@ -797,6 +896,7 @@ __all__ = [
     "HistoryDurabilityReceipt",
     "HistoryIndexEntry",
     "HistoryMutation",
+    "HistoryPage",
     "HistorySubmission",
     "HistoryTransportSource",
     "HistoryWriter",

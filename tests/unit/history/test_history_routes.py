@@ -121,6 +121,65 @@ async def test_history_routes_report_unavailable_store() -> None:
 
 
 @pytest.mark.asyncio
+async def test_history_list_supports_keyset_pagination_and_filters(tmp_path: Path) -> None:
+    writer = HistoryWriter(
+        database_path=tmp_path / "history.sqlite3",
+        archive=HistoryArchiveStore(tmp_path / "archive"),
+    )
+    await writer.start()
+    entries = [
+        replace(
+            _entry(),
+            request_id=f"request-page-{index}",
+            started_at=f"2026-09-13T00:00:0{index}.000Z",
+            session_id=f"session-{index}",
+        )
+        for index in (1, 2, 3)
+    ]
+    try:
+        for entry in entries:
+            await writer.submit(
+                entry,
+                session_id=entry.session_id,
+                agent_id=None,
+            )
+        await writer.wait_idle()
+
+        app = FastAPI()
+        app.include_router(router)
+        setattr(app.state, CHAIN_STATE_KEY, SimpleNamespace(history_writer=writer))
+        async with httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            first = await client.get("/history/api/entries?limit=2")
+            cursor = first.json()["next_cursor"]
+            second = await client.get(
+                "/history/api/entries",
+                params={"limit": 2, "cursor": cursor},
+            )
+            session = await client.get(
+                "/history/api/entries",
+                params={"session_id": "session-2"},
+            )
+            invalid = await client.get(
+                "/history/api/entries",
+                params={"cursor": "not-a-cursor"},
+            )
+
+        assert [item["id"] for item in first.json()["data"]] == [
+            "request-page-3",
+            "request-page-2",
+        ]
+        assert [item["id"] for item in second.json()["data"]] == ["request-page-1"]
+        assert [item["id"] for item in session.json()["data"]] == ["request-page-2"]
+        assert invalid.status_code == 400
+        assert invalid.json()["error"]["type"] == "invalid_request_error"
+    finally:
+        await writer.close()
+
+
+@pytest.mark.asyncio
 async def test_history_archive_is_one_way_and_pinned_entries_block_it(
     tmp_path: Path,
 ) -> None:
@@ -220,6 +279,12 @@ async def test_history_transport_export_returns_filtered_binary_capture(
             included = await client.get(
                 "/history/api/entries/request-transport-1?include=transport"
             )
+            semantic_export = await client.get(
+                "/history/api/entries/request-transport-1?export=semantic"
+            )
+            full_export = await client.get(
+                "/history/api/entries/request-transport-1?export=full"
+            )
 
         assert response.status_code == 200
         assert response.headers["content-type"].startswith(
@@ -234,6 +299,14 @@ async def test_history_transport_export_returns_filtered_binary_capture(
 
         assert included.status_code == 200
         assert included.content == response.content
+        assert semantic_export.status_code == 200
+        assert semantic_export.json()["contains_credentials"] is False
+        assert semantic_export.json()["data"]["semantic_request"]["messages"][0][
+            "content"
+        ] == "hi"
+        assert full_export.status_code == 200
+        assert full_export.json()["contains_credentials"] is True
+        assert full_export.json()["transport"]["encoding"] == "base64"
     finally:
         await writer.close()
         raw_capture.close()
