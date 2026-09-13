@@ -1,8 +1,8 @@
 # Raw capture 产品规格
 
-日期：2026-09-08
-状态：**ACTIVE v22**
-权威范围：`observability.raw_capture` 的选择规则、管理接口、文件格式、路径、配额、可读性、安全边界与失败诊断。其他规格可以要求采集哪些 exchange，但不得另行定义落盘格式或把全量 capture 重新接回全局配置开关。
+日期：2026-09-08，2026-09-09，2026-09-13 修订
+状态：**ACTIVE v24**
+权威范围：`observability.raw_capture` 的选择规则、管理接口、文件格式、路径、配额、可读性、安全边界、capture capability 与失败诊断。其他规格可以要求采集哪些 exchange，但不得另行定义落盘格式或把全量 capture 重新接回全局配置开关。
 
 ## 1. 用户裁决
 
@@ -28,7 +28,7 @@
 - `POST /api/debug/capture-rules` 接受 `{provider, model_id, session_id, agent_id?}`，创建或返回唯一规则；
 - `DELETE /api/debug/capture-rules/{id}` 删除指定规则，规则不存在返回 404。
 
-管理接口只管理条件，不接受 body、不直接写 capture 文件。服务默认监听本机地址，因此该接口的默认暴露范围是本机；若部署改变监听范围，必须由部署层负责访问控制。SQLite 数据库路径是独立持久化路径，服务启动时创建表和唯一约束，规则变更在下一次匹配查询中生效，不需要重启。
+管理接口只管理条件，不接受 body、不直接写 capture 文件。服务默认监听本机地址，因此该接口的默认暴露范围是本机；若部署改变监听范围，必须由部署层负责访问控制。SQLite 数据库路径是独立持久化路径，服务启动时创建表和唯一约束，规则变更在下一次匹配查询中生效，不需要重启。管理能力未完成装配时，接口必须返回稳定的 JSON 服务错误和明确的不可用状态，不得让未处理异常穿透为框架默认错误页。
 
 规则匹配发生在入站 JSON 已读取、路由已经解析出 provider/model-id 之后，并且必须早于第一次 upstream attempt。命中后，代理立刻创建该 request 的完整 capture，并把已经读取的原始入站 body 作为第一份 `request.body` 事件补录；后续 upstream request、upstream response、client response、retry 和错误事件继续写入同一 capture。未命中请求不得因为规则查询而创建 capture 文件或记录原始 body。无法解析 body 或无法解析 provider/model-id 的请求没有可匹配的完整条件，因此不启动规则 capture。
 
@@ -47,9 +47,33 @@
 
 ## 4. 捕获内容与安全边界
 
-捕获流可以保存入站原始 request body、实际 upstream request body、upstream response body 和客户端实际收到的 response body；上游重试/恢复必须保留 attempt 边界与每次实际发送/收到的 body。请求头和认证信息不得写入 capture。由于 body 可能包含 prompt、工具输入、工具结果、模型输出或其他敏感内容，只有显式创建的匹配规则可以开启指定请求的 capture，未命中请求不得记录正文。
+命中规则的 capture 保存完整 transport evidence：
 
-普通日志和请求完成记录绝不得复制 raw request/response body、认证 header、token 或 session/agent 原始 identity。普通日志只可记录安全诊断元数据，例如 request ID、固定枚举原因、固定事件类型和 completeness 布尔值。
+- 入站/client request headers 与原始 body；
+- 每个 upstream attempt 的 request/response headers、body 和边界；
+- client response headers 与原始 body；
+- retry、cleanup、错误和 capture completeness 事件；
+- credentials、Authorization、Cookie 和其他 transport-sensitive fields。
+
+capture 默认仍是 opt-in；没有命中持久化规则的请求不得创建 capture 或记录正文。规则命中后不再提供 body-only profile：每个 capture 都是 full-header/full-transport capture。capture 文件、History cold transport 和显式 transport export 都属于敏感数据面。
+
+普通日志、metrics、LiveObservation 和 request log 仍必须使用 safe projection，不得复制 raw request/response body、认证 header、token、session/agent 原始 identity 或未知异常原文。History 的普通 list/detail projection 也只返回 metadata、semantic summary、capability 和 reference；完整 transport 必须显式请求 transport/evidence projection，并标记 `contains_credentials=true`。
+
+捕获请求的实际 upstream request body 必须在请求真正交给 upstream transport 的边界保留，即使随后发生代理侧 header/attempt timeout，也不得因为代理重新包装异常而丢失这份证据。Replay 不得自动复用 capture headers/credentials；它使用当前配置重新生成认证。
+
+### 4.1 Capture status 与 capability
+
+每个 request capture 和其 History attachment 都必须能表达：
+
+- `capture_status`: `none | pending | complete | incomplete | corrupt`；
+- `client_request_available`；
+- 每个 upstream attempt 的 request/response/boundary completeness；
+- `client_response_available`；
+- `wire_diagnostic_eligible`；
+- `semantic_replay_eligible`；
+- `live_replay_eligible`。
+
+`capture_status=complete` 是总览而不是 replay gate 的唯一条件。请求 body 完整但 response partial 的 capture 可以支持部分 semantic/live source，却不能被当作完整 wire diagnostic。
 
 ## 5. 配额与写入
 
@@ -63,7 +87,7 @@ reservation 表示“已经落盘 + 已入队待确认”的实际压缩字节�
 
 内存 poison 不是跨 store/process 的事实来源。每个新 `RawCaptureStore` 在某个 `.cborseq.zst` path **第一次获准 append 之前**，必须用生产 reader 验证该文件从首 frame 到尾 frame 的完整性、每 frame 单一 CBOR item 与顶层 map 合同；不存在或空文件视为可 append。验证与“该 path 已验证/已 poisoned”的状态转换必须受 store accounting lock 串行化，使并发首个 appender 只有一个验证者，且任何 frame 都不能越过验证先入队。验证成功后，该 store 生命周期内依赖自身 writer ack/poison 状态，不重复扫描；验证发生 `OSError`、zstd/CBOR decode error、截断 frame、额外 item 或非 map 时立即把 path 标为 poisoned，不 append、不 reservation，并让当前及后续 capture 稳定报告 `path_poisoned`。验证错误的普通日志不得格式化文件内容、decoder payload 或原始 identity。
 
-per-request capture 必须跟踪 outstanding writer acknowledgements。`finish()` 写入 `request.end` 后必须等待该 request 已接受的队列项全部得到成功、失败或丢弃回执，再决定完成诊断；否则异步 writer 在完成行之后失败会再次静默。达到配额、队列满、store 已关闭、编码/压缩准备失败或 writer 失败时，停止该 request 后续 capture，但不得影响代理请求本身。若代理请求本身以 `complete=false` 结束，即使 writer 没有报错，capture 也必须以固定的 `request_incomplete` 原因报告取证不完整。
+per-request capture 必须跟踪 outstanding writer acknowledgements。`finish()` 写入 `request.end` 后必须等待该 request 已接受的队列项全部得到成功、失败或丢弃回执，再决定完成诊断；否则异步 writer 在完成行之后失败会再次静默。达到配额、队列满、store 已关闭、编码/压缩准备失败或 writer 失败时，停止该 request 后续 capture，但不得影响代理请求本身。失败或被丢弃的 upstream attempt 可以以 `complete=false` 写入 attempt 边界；这只描述该 attempt 没有成功交付，不得单独把整次 request 标成 `upstream_incomplete`，因为失败 attempt 的 request/response wire body 仍可能已经完整保存。只有明确的 partial response/body boundary 或 capture drop 才能设置 request-level 的 `upstream_incomplete`。若代理请求本身以 `complete=false` 结束，即使 writer 没有报错，capture 也必须以固定的 `request_incomplete` 原因报告取证不完整。响应 body 完整性必须依据相关 response-body 事件已经成功 committed 的事实判断；在第一条事件就关闭、配额耗尽或写入失败而没有任何 response-body evidence 时，必须报告 `response_body_capture_complete=false`，不能把“尚未尝试写 response body”当成完整。count_tokens 等 buffered response 只有在 response cleanup 也成功后，才能提交完整的 response boundary。
 
 ## 6. 完成诊断
 
@@ -81,6 +105,8 @@ writer `OSError` 的稳定原因枚举是 `writer_error`。worker 的即时 warn
 
 | 日期 | 版本 | 变化 | 触发 |
 |---|---|---|---|
+| 2026-09-13 | v24 | 明确 full transport capture：命中规则的 capture 保存完整 headers/credentials；普通日志与 History 默认 projection 仍 safe；新增 capture status/capability matrix；History 通过 capture reference 关联 full transport；replay 使用当前认证而不复用 source headers | 可观测性、History、debug、replay 重构 shared understanding |
+| 2026-09-09 | v23 | 明确失败 attempt 的业务结果不等于 request-level 取证不完整；response-body completeness 以已 committed evidence 判断；buffered count response 要等 cleanup 成功；管理 API 未装配和未知异常日志都必须使用稳定安全投影；代理侧 timeout 不得丢失已交给 upstream transport 的 request body | 动态 capture 独立验收 F-01 至 F-05 与普通日志回归 |
 | 2026-09-09 | v22 | §6 固定完成诊断 `reason` 的封闭枚举（补 `store_closed`/`writer_queue_full`/`capture_error`/`upstream_incomplete`） | 合并态评审 M-1：派生枚举与代码漂移 |
 | 2026-09-09 | v21 | 移除全局（目录级）配额 `max_total_bytes`；capture 的总量由规则选择与 per-file 配额约束；遗留 `.jsonl.zst` 不再计入任何配额 | 用户裁决：不再提供全局配额 |
 | 2026-09-09 | v20 | usage observation issues 只保留稳定 code、固定 field path 与 exception type，不把上游可控字段名或异常文本写入 ordinary record | 最终验收 DYN-CAP-27 |

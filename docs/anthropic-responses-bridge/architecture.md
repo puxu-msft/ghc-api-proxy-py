@@ -462,9 +462,9 @@ Continuation 是独立 recovery protocol，不是普通 retry。它只有在具�
 
 ## History 与 observer
 
-### Request lifecycle journal 与 History receipt stream
+### Request lifecycle facts 与 History receipt stream
 
-Driver 把完整 typed lifecycle facts 追加到 request-local fact journal，再由 History、hooks、logs、metrics 和 tracing 各自投影。这里的“完整”指 route、每次 attempt、conversion、exchange close／cancel、每个 Anthropic block、delivery frontier、projection handoff 与 terminal facts 都不因默认持久化精简而从请求内真相中删除；它不要求保存每个 raw transport byte。Journal 不是另一个 state machine；它记录 owner 已发布的事实与 effect，不允许 observer 回写 driver state，也不等于默认 SQLite schema。Request journal 的边界到 `request.finalized` 为止；SQLite commit／failure 是随后由 History writer 独立拥有并发布的 durability receipt，不属于 request-local journal 的“完整”范围。
+Driver 把 typed lifecycle facts 追加到 request-local `RequestJournal`，再由 History、hooks、logs、metrics 和 tracing 各自投影。`RequestJournal` 只在 request 生命周期内存在，边界到 `request.finalized` 为止；它不是默认持久化 event stream，也不是 raw transport log。当前 History、observer、capture 和 replay 的行为权威分别见 [`../observability/spec.md`](../observability/spec.md)、[`../history/spec.md`](../history/spec.md)、[`../raw-capture/spec.md`](../raw-capture/spec.md) 和 [`../replay/spec.md`](../replay/spec.md)。
 
 Request-local journal 的事件面包括：
 
@@ -487,9 +487,9 @@ History writer 的独立 receipt event stream 只承载 `history.durable`、`his
 
 ### History 投影
 
-History projection 必须在 assembler／buffer cleanup **之前**由 driver 从待冻结 journal 生成。Projection 是自包含 immutable value：需要保留既有客户端可见 response 时，在此阶段形成该 response 或把其 immutable ownership 移交给 History consumer；不得让异步 writer 在 cleanup 后回头读取 request buffer。History queue 必须按 job 数有界，避免大 response 在异步 writer queue 中无界堆积。History consumer 返回 `Accepted(projection_id)` 后，projection 归 History 所有，driver 发布 `history.projection_accepted`，request owner 只释放自己的引用；writer 等待 `request.finalized` barrier 后完成序列化／transaction，发布 `history.durable` 或 `history.persistence_failed` receipt，并恰好一次释放该 projection。返回 `Rejected(reason)` 时，driver 发布 `history.projection_rejected`，由 request owner 恰好一次释放该 projection 并完成 cleanup；未被 writer 接受的 projection 不得伪造 persistence receipt，也不能无限保留大 block。
+History projection 必须在 assembler／buffer cleanup **之前**由 driver 从待冻结 `RequestFacts` 生成。Projection 是自包含 immutable value：它保存每个 client request 的 semantic projection、attempt/delivery/terminal summary、capture capability 和 replay provenance。不得让异步 writer 在 cleanup 后回头读取 request buffer。History consumer 返回 `Accepted(projection_id)` 后，projection 归 History 所有；writer 随后独立发布 `history.durable` 或 `history.persistence_failed` receipt。captured entry 的 full transport 进入独立 HistoryArchiveStore cold segment，未命中 capture 的 entry 没有 full transport，也不可 replay。详细行为见 [History spec](../history/spec.md)。
 
-默认持久化由本 Architecture 的当前约束本身规定：保留原始 Anthropic payload、既有客户端可见 response、original／resolved model、selected route／transport、`attempt_count`、`retry_strategies_applied`、必要的 conversion／commit／terminal 摘要、normalized usage 与 final error；**不持久化完整 request-local journal，不持久化连续逐-attempt 对象图，也不持久化 raw Responses event 序列。** 完整逐-attempt diagnostics 只可进入已另行裁决的可选 detailed mode／受限诊断附件。不得借新增 journal 隐式改变这些当前约束。 [2604 History system 原件](history/2604-history-system.md)只保留这一设计沿革的 provenance：它是已过期的目标设计，不是用户裁决，也不是 current architecture authority。
+默认不持久化完整 `RequestJournal` event stream，也不把 raw Responses event sequence 展平成 History。History 只持久化稳定 request projection；捕获的完整 wire evidence 由 raw capture/History transport attachment 按独立完整性合同管理。旧的 [2604 History system](history/2604-history-system.md) 只保留设计沿革 provenance，不是 current authority。
 
 非流式 History 可保存完整规范化 Anthropic response。流式 History projection 从 committed block ledger 与 immutable completed-block records 形成；它不得依赖 cleanup 后仍存活的 request buffer，也不得从 raw Responses events 重推导语义。只有所有 block 正常 committed 并且 terminal batch 完成时状态才是 completed；block conversion failure、capacity failure、sink uncertainty、client abort 或 upstream truncation分别保留明确终止原因。
 
@@ -567,7 +567,7 @@ History projection 必须在 assembler／buffer cleanup **之前**由 driver 从
 - **默认 route：** 明确 override 通过 capability gate 后优先；无 override 且 Messages／Responses 双端点同时可用时默认 Messages。
 - **Reasoning identity：** 项目自己的版本化 carrier 是默认 producer；consumer 额外兼容 `copilot-api-js` v1 的合法 payload、bare prefix 与 legacy sentinel 主路径。兼容不要求所有 malformed decoder 边界逐字节相同，也不授权复制 upstream 的有损聚合。Cardinality 固定为一个 Responses reasoning item 对应一个 Anthropic thinking block；item 内 summary parts 可拼接，item 间不得聚合，non-empty encrypted-only 必须保留为空 visible thinking 加本 item carrier。历史基线的 forward 聚合 helper 只是迁移反例，不是 current primitive。具体 wire expected 以 Finalized Spec 为准。
 - **Delivery：** block buffering，首个完整 block 前 no live downstream；HTTP success response start 由 delayed-start owner 管理。
-- **History：** 完整 journal 仅为 request-local 运行态真相；默认 History 仍是既有轻量终态投影。
+- **History：** `RequestJournal` 仅为 request-local 运行态真相；History 保存稳定 request projection，captured entry 的 full transport 由独立 cold attachment 承载。
 
 ## 唯一用户裁决矩阵
 
@@ -637,7 +637,7 @@ History projection 必须在 assembler／buffer cleanup **之前**由 driver 从
 2. **Per-attempt semantic conversion gate：** `PRE_SEND` 后每次重新从当前 semantic state 生成 wire；request／response 的 text、tool、reasoning、usage、error 与 strict unknown policy 不存在旁路 converter。
 3. **Protocol／transport gate：** route policy 只选 protocol leg，HTTP／WS transport 只交换并归一事件；transport 不静默 fallback／retry，exchange 在 success、failure、cancel 和 shutdown 均有唯一 cleanup owner。
 4. **Delivery gate：** assembler、continuous-prefix sequencer、per-request buffer cap、delayed response start、唯一 sink 与 envelope-aware frontier 已共同接线；首 block 前零 success headers／body，write uncertainty 不被误判为未提交。
-5. **Lifecycle／History gate：** request-local journal、immutable History projection、`request.finalized` barrier、writer receipt ownership、projection ownership release 与 single finalize 边界已接通；默认 History 仍只持久化既定精简投影。
+5. **Lifecycle／History gate：** request-local journal、immutable History projection、`request.finalized` barrier、writer receipt ownership、projection ownership release 与 single finalize 边界已接通；History 的 full transport 只属于 captured entry 的独立 cold attachment。
 6. **真实入口验收 gate：** 对应 Acceptance required gates 已在真实 ASGI／HTTP／WS／sink 接缝证明正确样本为绿、目标缺陷注入为红；helper 单测、模块存在或候选分支局部通过不能替代该门。
 
 #### M2 过渡退出条件
@@ -652,7 +652,7 @@ M2 不是永久混合架构。满足以下条件后，A 形过渡必须退出：
 | M2 per-item identity 丢 multi-part | **已采纳并修订（C）** | 新增 `AnthropicBlockKey`，以 source item＋content part＋semantic kind 标识目标 Anthropic block；顺序来自协议 output／content 序位 | 同一 item 多 parts、跨 item 交错、done-only、重复 done、delta-after-done 的正反控制 |
 | M3 frontier 漏 headers／`message_start` | **已采纳并修订（C）** | Frontier 扩展为 headers、`message_start`、连续 blocks、terminal 与 uncertainty；新增 delayed response-start owner 和分状态 failure matrix | 真实 ASGI probe 证明首 block／terminal 前无 success headers，且 headers 已提交后的错误不再冒充 pre-commit retry |
 | M4／R2-M2 cleanup、History projection 与 durability receipt owner 冲突 | **已采纳并修订（A，遵从本轮用户裁决）** | cleanup 前移交 immutable projection＋reservation token；driver 发布 `request.finalized` 后冻结 request journal；History writer 独立拥有并另发 durable／failed receipt，不回写 request state | accepted 后 request 可结束；writer 后续 durable／failed 均按 projection id 可观测；rejected 不伪造 receipt；reservation 在各分支恰好释放一次 |
-| M5 完整 attempt records 越过精简 History 裁决 | **已采纳并修订（C）** | 完整 typed journal 仅 request-local；默认 History 只投影既有 response 与标量／终态摘要，detailed mode 仍需另行裁决 | 默认 schema 不出现逐-attempt 对象图或 raw event 序列，`attempt_count` 等摘要与 request-local journal 一致 |
+| M5 完整 attempt records 越过精简 History 裁决 | **已采纳并修订（C）** | 完整 typed journal 仅 request-local；History 保存稳定 request projection 与有序 attempt summary，full transport 只进入 captured entry 的 cold attachment | 默认 schema 不出现完整 journal/raw event sequence；`attempt_count`、attempt summary 与 request facts 一致 |
 | U1 用户重裁：`>16 MiB block` 是夸张假设，旧超大 block 债务设计过度 | **用户已重裁并修订，覆盖旧决定（A）；本行的容量机制部分已于 2026-08-19 再次被覆盖，见 U3 行** | 删除超大 block 专属债务状态与状态机；16 MiB 不再是架构边界；只保留普通 global reservation／backpressure，实际全局内存耗尽时最小止血为拒绝新 admission，不设计落盘 | 代码与测试不得出现按单个 block 大小分叉的状态、threshold 或 spill 路径；不同大小的 block 只经过普通 reservation，容量恢复后正样本可继续 |
 | U2／R2-M3 reasoning carrier、block cardinality 与迁移路径 | **已采纳并修订（A，遵从本轮用户裁决）** | v1 carrier byte-compatible；一 Responses reasoning item 对应一 thinking block，non-empty encrypted-only no-loss；保留 main `ed77c9d…` 的 codec／reverse primitive，替换待修的跨 item forward aggregation 与错误 oracle | 两个 reasoning items 分别 round-trip 自己的 summary／ciphertext；encrypted-only 保留；恢复 main 聚合／last-ciphertext-wins 缺陷时测试变红，同时 carrier fixtures 保持为绿 |
 | 可读性-M1 ADR-BRIDGE-04 把 Spec 已冻结的 unknown capability fail-closed 重新列为待决 | **已采纳并修订（C）** | 顶部已决合同、Route policy 与独立的“已决约束的架构承载记录”统一声明 fail closed；ADR-BRIDGE-04 已从“待主会话确认”列表移除，仅说明架构如何承载 Spec 约束 | 全文不得再把 unknown／missing capability 行为写成 Architecture 待确认项；改变该行为必须先重裁正式 Spec |
