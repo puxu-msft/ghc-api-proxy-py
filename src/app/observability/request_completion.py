@@ -155,7 +155,13 @@ class BodyBytesObservation:
 
 
 @dataclass(frozen=True, slots=True)
-class FinalizedRequest:
+class RequestFacts:
+    """Frozen typed facts for one finalized client request.
+
+    The compatibility alias below keeps existing sinks and callers stable while
+    the request lifecycle moves away from a completion-record-shaped owner.
+    """
+
     status: LogStatus
     at: str
     legacy: FrozenJsonObject
@@ -257,6 +263,9 @@ class FinalizedRequest:
         }
 
 
+FinalizedRequest = RequestFacts
+
+
 @dataclass(slots=True)
 class RequestCompletionCoordinator:
     chain: Chain
@@ -294,7 +303,7 @@ class RequestCompletionCoordinator:
     _raw_client_response_started: bool = False
     _authoritative_stream_ending: bool = False
     _settled: bool = False
-    _record: FinalizedRequest | None = None
+    _record: RequestFacts | None = None
     raw_capture: RawRequestCapture | None = None
 
     @property
@@ -578,7 +587,7 @@ class RequestCompletionCoordinator:
         if completion_unit is not None:
             self.note_completion_unit_accepted(completion_unit)
 
-    def publish(self) -> FinalizedRequest:
+    def publish(self) -> RequestFacts:
         if self._record is not None:
             return self._record
         if not self._settled:
@@ -604,7 +613,7 @@ class RequestCompletionCoordinator:
             upstream_response_body_bytes=self._upstream_response_bytes,
             duration_s=self._legacy_duration_s,
         )
-        record = FinalizedRequest(
+        record = RequestFacts(
             status=status,
             at=utc_timestamp(),
             legacy=_freeze_line_or_fallback(line),
@@ -741,7 +750,7 @@ class RequestCompletionCoordinator:
         if not self.trace.detail:
             self.trace.detail = summary.message or summary.type or summary.category.value
 
-    def _emit(self, record: FinalizedRequest, *, retry_as_success: bool) -> None:
+    def _emit(self, record: RequestFacts, *, retry_as_success: bool) -> None:
         sinks = (
             ("request store", lambda: self.chain.active_requests.complete(self.request_id, record)),
             ("translation loss metrics", lambda: _record_translation_losses(record)),
@@ -886,7 +895,7 @@ def _failure_summary(
     )
 
 
-def _record_translation_losses(record: FinalizedRequest) -> None:
+def _record_translation_losses(record: RequestFacts) -> None:
     line = record.request_line()
     for direction, code in sorted({(loss["direction"], loss["code"]) for loss in line.losses}):
         TRANSLATION_LOSSES.labels(direction=direction, code=code).inc()
@@ -894,7 +903,7 @@ def _record_translation_losses(record: FinalizedRequest) -> None:
 
 def _log_finalized(
     chain: Chain,
-    record: FinalizedRequest,
+    record: RequestFacts,
     *,
     retry_as_success: bool = False,
 ) -> None:
@@ -1309,6 +1318,7 @@ __all__ = [
     "InterruptionOrigin",
     "InterruptionPhase",
     "RequestCompletionCoordinator",
+    "RequestFacts",
     "TimingObservation",
     "safe_exception_detail",
     "safe_exception_graph_notes",

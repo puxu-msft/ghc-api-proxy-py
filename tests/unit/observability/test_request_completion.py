@@ -20,6 +20,7 @@ from app.observability.request_completion import (
     FailureOrigin,
     InterruptionPhase,
     RequestCompletionCoordinator,
+    RequestFacts,
 )
 from app.observability.request_log import format_completion_line
 from app.observability.request_trace import RequestTrace
@@ -189,6 +190,7 @@ def test_finalized_request_is_one_immutable_source_for_store_json_and_console(
     second = completion.publish()
 
     assert first is second
+    assert isinstance(first, RequestFacts)
     snapshot = store.observation_snapshot()
     assert snapshot.live == ()
     assert snapshot.completed == (first,)

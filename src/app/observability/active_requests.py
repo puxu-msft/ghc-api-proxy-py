@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 from app.observability.footer import ActiveRequest
 
 if TYPE_CHECKING:
-    from app.observability.request_completion import FinalizedRequest
+    from app.observability.request_completion import RequestFacts
 
 
 @dataclass(slots=True)
@@ -41,13 +41,13 @@ class _Entry:
 @dataclass(frozen=True, slots=True)
 class RequestObservationSnapshot:
     live: tuple[ActiveRequest, ...]
-    completed: tuple[FinalizedRequest, ...]
+    completed: tuple[RequestFacts, ...]
 
 
 @dataclass(slots=True)
 class ActiveRequestRegistry:
     _entries: dict[str, _Entry] = field(default_factory=lambda: dict[str, _Entry]())
-    _completed: deque[FinalizedRequest] = field(
+    _completed: deque[RequestFacts] = field(
         default_factory=lambda: deque(maxlen=256)
     )
     # Uncontended in practice — the critical sections are a dict write or a short copy — so the cost is a few tens of nanoseconds on a path that is already doing network I/O.
@@ -134,7 +134,7 @@ class ActiveRequestRegistry:
         with self._lock:
             self._entries.pop(request_id, None)
 
-    def complete(self, request_id: str, record: FinalizedRequest) -> None:
+    def complete(self, request_id: str, record: RequestFacts) -> None:
         """Atomically move one request out of live and into the bounded completed side."""
         with self._lock:
             self._entries.pop(request_id, None)

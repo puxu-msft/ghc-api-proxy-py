@@ -53,7 +53,7 @@ def write_request_record(line: RequestLine, *, status: str) -> Path | None:
 def write_finalized_record(record: dict[str, JsonValue]) -> Path | None:
     """Append a versioned finalized record without an implicit string fallback.
 
-    `FinalizedRequest.to_record_dict()` is the only domain-to-JSON conversion. Reaching this boundary with anything else is an observability error worth logging, not a reason to silently turn a structured value into its Python representation.
+    `RequestFacts.to_record_dict()` is the only domain-to-JSON conversion. Reaching this boundary with anything else is an observability error worth logging, not a reason to silently turn a structured value into its Python representation.
     """
     try:
         now = datetime.now(UTC)
