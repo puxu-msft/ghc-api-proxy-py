@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
-from app.history.archive import HistoryArchiveStore
+from app.history.archive import HistoryArchiveReference, HistoryArchiveStore
 from app.history.entry import HistoryEntry
 
 logger = logging.getLogger(__name__)
@@ -30,6 +30,41 @@ class HistoryDurabilityReceipt:
     entry_id: str
     state: HistoryDurability
     failure_code: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryIndexEntry:
+    entry_id: str
+    session_id: str | None
+    agent_id: str | None
+    started_at: str
+    finished_at: str
+    outcome: str
+    delivery: str
+    capture_status: str
+    archive_reference: HistoryArchiveReference
+    pinned: bool
+    archived: bool
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "id": self.entry_id,
+            "session_id": self.session_id,
+            "agent_id": self.agent_id,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "outcome": self.outcome,
+            "delivery": self.delivery,
+            "capture_status": self.capture_status,
+            "archive": {
+                "path": self.archive_reference.relative_path,
+                "offset": self.archive_reference.offset,
+                "length": self.archive_reference.length,
+                "digest": self.archive_reference.digest,
+            },
+            "pinned": self.pinned,
+            "archived": self.archived,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +141,36 @@ class HistoryWriter:
 
     def receipt_for(self, entry_id: str) -> HistoryDurabilityReceipt | None:
         return self._receipts.get(entry_id)
+
+    async def list_entries(
+        self,
+        *,
+        limit: int = 50,
+        include_archived: bool = False,
+    ) -> tuple[HistoryIndexEntry, ...]:
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        if self._task is None or self._closed:
+            raise RuntimeError("History writer is not running")
+        return await asyncio.to_thread(
+            self._list_entries,
+            limit,
+            include_archived,
+        )
+
+    async def get_entry(
+        self,
+        entry_id: str,
+        *,
+        include_archived: bool = False,
+    ) -> HistoryIndexEntry | None:
+        if self._task is None or self._closed:
+            raise RuntimeError("History writer is not running")
+        return await asyncio.to_thread(
+            self._get_entry,
+            entry_id,
+            include_archived,
+        )
 
     async def close(self) -> None:
         if self._task is None or self._closed:
@@ -218,14 +283,123 @@ class HistoryWriter:
             state=HistoryDurability.DURABLE,
         )
 
+    def _list_entries(
+        self,
+        limit: int,
+        include_archived: bool,
+    ) -> tuple[HistoryIndexEntry, ...]:
+        connection = self._open_read_connection()
+        try:
+            clause = "" if include_archived else "WHERE archived = 0"
+            rows = connection.execute(
+                f"""
+                SELECT entry_id, session_id, agent_id, started_at, finished_at,
+                       outcome, delivery, capture_status, archive_path,
+                       archive_offset, archive_length, archive_digest,
+                       pinned, archived
+                FROM history_entries
+                {clause}
+                ORDER BY started_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        finally:
+            connection.close()
+        return tuple(_index_entry_from_row(row) for row in rows)
+
+    def _get_entry(
+        self,
+        entry_id: str,
+        include_archived: bool,
+    ) -> HistoryIndexEntry | None:
+        connection = self._open_read_connection()
+        try:
+            row = connection.execute(
+                """
+                SELECT entry_id, session_id, agent_id, started_at, finished_at,
+                       outcome, delivery, capture_status, archive_path,
+                       archive_offset, archive_length, archive_digest,
+                       pinned, archived
+                FROM history_entries
+                WHERE entry_id = ?
+                """,
+                (entry_id,),
+            ).fetchone()
+        finally:
+            connection.close()
+        if row is None:
+            return None
+        entry = _index_entry_from_row(row)
+        return entry if include_archived or not entry.archived else None
+
+    def _open_read_connection(self) -> sqlite3.Connection:
+        return sqlite3.connect(self.database_path, timeout=5.0)
+
 
 def _failure_code(error: BaseException) -> str:
     return f"{type(error).__module__}.{type(error).__qualname__}"
 
 
+def _index_entry_from_row(row: tuple[object, ...]) -> HistoryIndexEntry:
+    (
+        entry_id,
+        session_id,
+        agent_id,
+        started_at,
+        finished_at,
+        outcome,
+        delivery,
+        capture_status,
+        archive_path,
+        archive_offset,
+        archive_length,
+        archive_digest,
+        pinned,
+        archived,
+    ) = row
+    if not (
+        isinstance(entry_id, str)
+        and (session_id is None or isinstance(session_id, str))
+        and (agent_id is None or isinstance(agent_id, str))
+        and isinstance(started_at, str)
+        and isinstance(finished_at, str)
+        and isinstance(outcome, str)
+        and isinstance(delivery, str)
+        and isinstance(capture_status, str)
+        and isinstance(archive_path, str)
+        and type(archive_offset) is int
+        and type(archive_length) is int
+        and isinstance(archive_digest, str)
+        and type(pinned) is int
+        and type(archived) is int
+    ):
+        raise RuntimeError("History index contains an invalid row")
+    return HistoryIndexEntry(
+        entry_id=entry_id,
+        session_id=session_id,
+        agent_id=agent_id,
+        started_at=started_at,
+        finished_at=finished_at,
+        outcome=outcome,
+        delivery=delivery,
+        capture_status=capture_status,
+        archive_reference=HistoryArchiveReference(
+            relative_path=archive_path,
+            offset=archive_offset,
+            length=archive_length,
+            digest=archive_digest,
+            entry_id=entry_id,
+        ),
+        pinned=bool(pinned),
+        archived=bool(archived),
+    )
+
+
 __all__ = [
     "HistoryDurability",
     "HistoryDurabilityReceipt",
+    "HistoryIndexEntry",
     "HistorySubmission",
     "HistoryWriter",
 ]

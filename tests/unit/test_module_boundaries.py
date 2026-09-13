@@ -37,7 +37,6 @@ _ARCHIVED = (
     "app.routes",
     "app.hooks",
     "app.openai",
-    "app.history",
     "app.delivery",
     "app.context",
     "app.deps",

@@ -5,6 +5,7 @@ Kept out of the package `__init__` on purpose: `app.server.inbound` imports the 
 
 from fastapi import APIRouter
 
+from app.server.routes.history import router as history_router
 from app.server.routes.inference import serve
 from app.server.routes.ops import router as ops_router
 from app.server.routes.table import ROUTES, expanded_paths
@@ -27,4 +28,5 @@ def build_router() -> APIRouter:
             router.add_api_route(path, serve, methods=["POST"])
     # Health, the model list and metrics. A supervisor that cannot ask whether the process is ready has to guess, and the inference routes alone give it nothing to ask.
     router.include_router(ops_router)
+    router.include_router(history_router)
     return router
