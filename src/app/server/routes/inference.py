@@ -668,13 +668,13 @@ async def _dispatch_after_body(
     try:
         # The path parameters go with the body because for some routes they are part of it: Azure names the deployment in the URL and sends a body with no model, so what the client asked for can only be read from the two together.
         context = build_context(route, body, request.headers, request.path_params)
-    trace.semantic_request = freeze_json(context.original_payload)
     except InboundRequestError as error:
         trace.detail = _safe_failure_detail(error)
         return error_response(
             proxy_error(ErrorCategory.CLIENT, str(error)),
             inbound_format=route.wire_format.value,
         )
+    trace.semantic_request = freeze_json(context.original_payload)
 
     # After parsing and before routing, which is where `docs/.human-controlled/message-format-reshape.md` puts it: the line is addressed to Anthropic's billing rather than to any model, so routing, translation and the token counter should not be reading it. Scope is what that document specifies — the leading lines of `system[0]` — so an attribution line placed anywhere else does still travel.
     # Off unless the operator asks, per the same document. It was resident for one commit, under that document's previous revision.
@@ -1182,6 +1182,7 @@ async def _dispatch_after_body(
                     on_tear_after_terminal=accounting.note_tear_after_terminal,
                     on_runtime_failure=accounting.note_runtime_failure,
                     observe_event=_observe_response_event,
+                    on_committed=accounting.note_committed_units,
                     # The client and upstream speak the same dialect exactly when nothing had to be translated. Delivery cannot work this out for itself: one assembler serves both a Responses client directly and a Responses upstream on its way to Anthropic, and the framer is the client's either way.
                     passthrough=not context.translation_required,
                 ),
@@ -1359,6 +1360,21 @@ class _StreamAccounting:
     # The outer response can be closed before the body generator is ever pulled.
     # In that case the generator's own finally cannot write an incomplete boundary.
     upstream_body_started: bool = False
+    committed_blocks: list[dict[str, Any]] = field(
+        default_factory=lambda: list[dict[str, Any]]()
+    )
+
+    def note_committed_units(self, units: tuple[object, ...]) -> None:
+        if self.trace.inbound_format != WireFormat.ANTHROPIC_MESSAGES.value:
+            return
+        for unit in units:
+            payload = getattr(unit, "payload", None)
+            kind = getattr(unit, "kind", None)
+            if not isinstance(payload, dict) or not isinstance(kind, str):
+                continue
+            block = dict(cast(dict[str, Any], payload))
+            block.setdefault("type", kind)
+            self.committed_blocks.append(block)
 
     def settle(self) -> None:
         """Settle stream-specific facts without publishing the request-wide record."""
@@ -1386,6 +1402,18 @@ class _StreamAccounting:
             assert terminal is not None
             # Absorbed either way. Every field on the record was put there by an event that actually arrived, so a stream cut off mid-turn still has a true account of the blocks it did produce — which tools were asked for, how much reasoning came back — and withholding those said nothing about the truncation while losing everything else. What upstream never said is now simply absent from the record rather than standing at a default that reads like an answer.
             self.trace.absorb(terminal)
+            if (
+                self.committed_blocks
+                and self.trace.inbound_format == WireFormat.ANTHROPIC_MESSAGES.value
+            ):
+                semantic_response: dict[str, Any] = {
+                    "content": list(self.committed_blocks),
+                }
+                if self.trace.stop_reason:
+                    semantic_response["stop_reason"] = self.trace.stop_reason
+                if self.trace.usage:
+                    semantic_response["usage"] = dict(self.trace.usage)
+                self.trace.semantic_response = freeze_json(semantic_response)
             # Deliberately still gated on `seen` while the line above is not, and conservatively rather than undecidedly: `reply is not None` currently means the reply finished, hooks and History are written against that, and widening it is a contract change that belongs with the STR-04 slice which needs a failed History anyway. Registered in `.dev/docs/anthropic-responses-bridge/implementation.md`'s 结构怪味登记 so it is reconsidered there rather than rediscovered.
             if terminal.seen and self.context is not None:
                 self.context.reply = terminal

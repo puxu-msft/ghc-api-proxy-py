@@ -381,6 +381,7 @@ async def stream_delivery[UnitT: DeliveryUnit](
     on_tear_after_terminal: Callable[[Exception], None] | None = None,
     on_runtime_failure: Callable[[Exception, bool, FailureProvenance | None], None] | None = None,
     observe_event: Callable[[SseEvent], None] | None = None,
+    on_committed: Callable[[tuple[UnitT, ...]], None] | None = None,
     passthrough: bool = False,
 ) -> AsyncGenerator[bytes]:
     """Turn an upstream byte stream into the client's SSE, one complete block at a time.
@@ -412,6 +413,7 @@ async def stream_delivery[UnitT: DeliveryUnit](
             on_tear_after_terminal=on_tear_after_terminal,
             on_runtime_failure=on_runtime_failure,
             observe_event=observe_event,
+            on_committed=on_committed,
             passthrough=passthrough,
         )
     ) as inner:
@@ -434,6 +436,7 @@ async def _deliver[UnitT: DeliveryUnit](
     on_tear_after_terminal: Callable[[Exception], None] | None = None,
     on_runtime_failure: Callable[[Exception, bool, FailureProvenance | None], None] | None = None,
     observe_event: Callable[[SseEvent], None] | None = None,
+    on_committed: Callable[[tuple[UnitT, ...]], None] | None = None,
     passthrough: bool = False,
 ) -> AsyncGenerator[bytes]:
     """Assemble and frame the response. Wrapped by `stream_delivery`, which stamps the clock."""
@@ -470,6 +473,7 @@ async def _deliver[UnitT: DeliveryUnit](
                                 admission_batch,
                                 framer,
                                 client_has_bytes.is_set(),
+                                on_committed=on_committed,
                             ):
                                 client_has_bytes.set()
                                 wrote = True
@@ -597,7 +601,13 @@ async def _deliver[UnitT: DeliveryUnit](
 
     # `direct-passthrough/spec.md` §7.2's closing sequence, asked of the assembler before the buffer is drained so that whatever it releases still passes through the policy. The translating assemblers answer with nothing — what they hold is a half-built block, which every ending drops. The passthrough answers with the finished groups its queue was holding behind an item that never closed, and those were previously abandoned along with upstream's own terminal: one unclosed item produced a 200 with zero bytes.
     for admission_batch in _admission_batches(assembler.close()):
-        for chunk in _commit(session, admission_batch, framer, client_has_bytes.is_set()):
+        for chunk in _commit(
+            session,
+            admission_batch,
+            framer,
+            client_has_bytes.is_set(),
+            on_committed=on_committed,
+        ):
             client_has_bytes.set()
             yield chunk
 
@@ -746,6 +756,8 @@ def _commit[UnitT: DeliveryUnit](
     batch: Iterable[UnitT],
     framer: OutboundFramer[UnitT],
     started: bool,
+    *,
+    on_committed: Callable[[tuple[UnitT, ...]], None] | None = None,
 ) -> Iterator[bytes]:
     """Offer one admission batch and lazily frame each unit the buffer released.
 
@@ -760,3 +772,10 @@ def _commit[UnitT: DeliveryUnit](
         yield from framer.preamble()
     for ready in released:
         yield from framer.block(ready)
+        if on_committed is not None:
+            try:
+                on_committed((ready,))
+            except Exception:
+                logging.getLogger("app.observability").exception(
+                    "committed response observation callback failed"
+                )
