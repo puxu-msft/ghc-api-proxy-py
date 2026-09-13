@@ -23,6 +23,7 @@ from app.observability.request_completion import (
     RequestCompletionCoordinator,
     RequestFacts,
 )
+from app.observability.request_journal import RequestJournalEventKind
 from app.observability.request_log import format_completion_line
 from app.observability.request_trace import RequestTrace
 from app.pipeline.delivery.assembling import ClientAction, StreamFailure, Terminal
@@ -143,6 +144,13 @@ def test_publish_submits_a_history_projection_when_writer_is_available(
     entry = writer.entries[0]
     assert isinstance(entry, HistoryEntry)
     assert entry.request_id == trace.request_id
+    record = completion.publish()
+    assert [event.kind for event in record.journal] == [
+        RequestJournalEventKind.RESPONSE_READY,
+        RequestJournalEventKind.DELIVERY_STARTED,
+        RequestJournalEventKind.DELIVERY_FINISHED,
+        RequestJournalEventKind.FINALIZED,
+    ]
 
 
 def _coordinator(

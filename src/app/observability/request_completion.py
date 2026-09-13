@@ -16,6 +16,11 @@ from app.observability.capture_observation import RawCaptureObservation
 from app.observability.logging import get_logger
 from app.observability.metrics import TRANSLATION_LOSSES
 from app.observability.raw_capture import RawRequestCapture
+from app.observability.request_journal import (
+    RequestJournal,
+    RequestJournalEvent,
+    RequestJournalEventKind,
+)
 from app.observability.request_log import (
     LogStatus,
     RequestLine,
@@ -174,6 +179,7 @@ class RequestFacts:
     upstream_body_attempts: tuple[UpstreamBodyAttempt, ...]
     token_admissions: tuple[TokenAdmissionObservation, ...] = ()
     interruptions: tuple[InterruptionObservation, ...] = ()
+    journal: tuple[RequestJournalEvent, ...] = ()
     session_id: str | None = None
     agent_id: str | None = None
     semantic_request: FrozenJson | None = None
@@ -312,6 +318,10 @@ class RequestCompletionCoordinator:
     _settled: bool = False
     _record: RequestFacts | None = None
     raw_capture: RawRequestCapture | None = None
+    journal: RequestJournal = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.journal = RequestJournal(self.request_id)
 
     @property
     def delivery_accepted(self) -> bool:
@@ -331,6 +341,11 @@ class RequestCompletionCoordinator:
             self._response_ready_s = time.monotonic() - self.trace.started
         if self._legacy_duration_s is None:
             self._legacy_duration_s = self._response_ready_s
+        self.journal.record(
+            RequestJournalEventKind.RESPONSE_READY,
+            self._response_ready_s,
+            {"status_code": status_code},
+        )
 
     def note_asgi_message_offered(self, message: Mapping[str, Any]) -> None:
         if message.get("type") != "http.response.start":
@@ -358,6 +373,11 @@ class RequestCompletionCoordinator:
             self._http_start_accepted = True
             if self._state is DeliveryState.NOT_STARTED:
                 self._state = DeliveryState.STARTED
+                self.journal.record(
+                    RequestJournalEventKind.DELIVERY_STARTED,
+                    time.monotonic() - self.trace.started,
+                    {"status_code": status},
+                )
             return
         if kind == "http.response.pathsend":
             self._state = DeliveryState.ACCEPTED
@@ -396,6 +416,14 @@ class RequestCompletionCoordinator:
             self._state = DeliveryState.ACCEPTED
             if self._unit is None:
                 self._unit = "body"
+            self.journal.record(
+                RequestJournalEventKind.DELIVERY_FINISHED,
+                time.monotonic() - self.trace.started,
+                {
+                    "body_bytes": self._downstream_body_bytes,
+                    "unit": self._unit,
+                },
+            )
 
     def note_request_body(self, body: bytes) -> None:
         if self.raw_capture is not None:
@@ -426,6 +454,11 @@ class RequestCompletionCoordinator:
                 headers=headers,
                 attempt=attempt,
             )
+        self.journal.record(
+            RequestJournalEventKind.UPSTREAM_RESPONSE_STARTED,
+            time.monotonic() - self.trace.started,
+            {"attempt": attempt, "status_code": status_code},
+        )
 
     def note_upstream_response_body(self, body: bytes, *, attempt: int | None = None) -> None:
         if self.raw_capture is not None:
@@ -439,6 +472,11 @@ class RequestCompletionCoordinator:
     ) -> None:
         if self.raw_capture is not None:
             self.raw_capture.upstream_response_end(complete=complete, attempt=attempt)
+        self.journal.record(
+            RequestJournalEventKind.UPSTREAM_RESPONSE_FINISHED,
+            time.monotonic() - self.trace.started,
+            {"attempt": attempt, "complete": complete},
+        )
 
     def note_upstream_attempt_end(self, attempt: int, *, complete: bool) -> None:
         if self.raw_capture is not None:
@@ -635,6 +673,12 @@ class RequestCompletionCoordinator:
                 complete=self.delivery_accepted,
             )
             capture_observation = self.raw_capture.observation()
+        self.journal.record(
+            RequestJournalEventKind.FINALIZED,
+            time.monotonic() - self.trace.started,
+            {"status": status, "delivery": self._state.value},
+        )
+        journal_events = self.journal.freeze()
         record = RequestFacts(
             status=status,
             at=utc_timestamp(),
@@ -673,6 +717,7 @@ class RequestCompletionCoordinator:
             upstream_body_attempts=tuple(self.trace.upstream_body_attempts),
             token_admissions=self.trace.token_admissions,
             interruptions=tuple(self._interruptions),
+            journal=journal_events,
             session_id=self.trace.session_id,
             agent_id=self.trace.agent_id,
             capture=capture_observation,
@@ -695,6 +740,17 @@ class RequestCompletionCoordinator:
         error: BaseException | None = None,
         continuation_synthesized: bool = False,
     ) -> None:
+        self.journal.record(
+            RequestJournalEventKind.INTERRUPTION,
+            time.monotonic() - self.trace.started,
+            {
+                "kind": kind.value,
+                "origin": origin.value,
+                "phase": phase.value,
+                "attempt": attempt,
+                "category": category,
+            },
+        )
         self._interruptions.append(
             InterruptionObservation(
                 kind=kind,
@@ -744,6 +800,15 @@ class RequestCompletionCoordinator:
             origin=origin,
             message=self._exception_message(error),
             notes=self._exception_notes_for(error),
+        )
+        self.journal.record(
+            RequestJournalEventKind.FAILURE,
+            time.monotonic() - self.trace.started,
+            {
+                "origin": origin.value,
+                "category": summary.category.value,
+                "type": summary.type,
+            },
         )
         if self._state is DeliveryState.ACCEPTED:
             if self._post_delivery_failure is None:
