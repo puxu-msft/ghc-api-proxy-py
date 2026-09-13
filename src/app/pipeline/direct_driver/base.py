@@ -193,7 +193,11 @@ def capture_failed_upstream_attempt(
     if getattr(upstream_error, "sent_observed", False):
         capture.upstream_request_body(upstream_error.sent, attempt=attempt)
     if upstream_error.status_code is not None:
-        capture.upstream_response_start(upstream_error.status_code, attempt=attempt)
+        capture.upstream_response_start(
+            upstream_error.status_code,
+            headers=upstream_error.headers,
+            attempt=attempt,
+        )
         if upstream_error.body_observed:
             capture.upstream_response_body(upstream_error.body_bytes, attempt=attempt)
         capture.upstream_response_end(
@@ -211,8 +215,18 @@ def capture_returned_upstream_response(
     """Keep a response that was returned before a later step discarded it."""
     if capture is None:
         return
+    capture.upstream_request_start(
+        response.request.method,
+        response.request.url.path,
+        headers=response.request.headers,
+        attempt=attempt,
+    )
     capture.upstream_request_body(response.request.content, attempt=attempt)
-    capture.upstream_response_start(response.status_code, attempt=attempt)
+    capture.upstream_response_start(
+        response.status_code,
+        headers=response.headers,
+        attempt=attempt,
+    )
     if response.is_stream_consumed:
         raw_body = response.extensions.get("upstream_raw_response_body")
         if not isinstance(raw_body, bytes):

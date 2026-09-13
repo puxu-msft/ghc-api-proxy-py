@@ -632,7 +632,16 @@ async def handle_count_tokens(
             raise
         if isinstance(capture, RawRequestCapture):
             capture.upstream_request_body(response.request.content, attempt=attempt)
-            capture.upstream_response_start(response.status_code, attempt=attempt)
+            transport_headers = response.extensions.get("upstream_transport_headers")
+            capture.upstream_response_start(
+                response.status_code,
+                headers=(
+                    cast(Mapping[str, str], transport_headers)
+                    if isinstance(transport_headers, Mapping)
+                    else response.headers
+                ),
+                attempt=attempt,
+            )
             capture.upstream_response_body(response.content, attempt=attempt)
         attempt_record = record_attempt(
             status_code=response.status_code,

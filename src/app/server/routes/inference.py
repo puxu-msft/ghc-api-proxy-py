@@ -724,6 +724,7 @@ async def _dispatch_after_body(
                 request_id=trace.request_id,
                 method=trace.method,
                 path=trace.path,
+                headers=request.headers,
             )
             completion.raw_capture = capture
             capture.request_body(raw_body)
@@ -876,7 +877,16 @@ async def _dispatch_after_body(
     attempt_index = current_attempt.index if current_attempt is not None else None
     trace.upstream_request_body_bytes = len(response.request.content)
     completion.note_upstream_request_body(response.request.content, attempt=attempt_index)
-    completion.note_upstream_response_start(response.status_code, attempt=attempt_index)
+    transport_headers = response.extensions.get("upstream_transport_headers")
+    completion.note_upstream_response_start(
+        response.status_code,
+        headers=(
+            cast(Mapping[str, str], transport_headers)
+            if isinstance(transport_headers, Mapping)
+            else response.headers
+        ),
+        attempt=attempt_index,
+    )
     trace.upstream_protocol = http_label(response.http_version)
     # Snapshot the live socket now. `log_completion` intentionally runs only after the response is released, when httpcore's `client_addr` lookup can already raise `OSError: [Errno 9] Bad file descriptor`.
     trace.upstream_conn = snapshot_upstream_connection(response)
@@ -1063,6 +1073,7 @@ async def _dispatch_after_body(
             )
             completion.note_upstream_response_start(
                 reopened.status_code,
+                headers=reopened.headers,
                 attempt=fresh_attempt_index,
             )
             if again.delivery_plan is None:

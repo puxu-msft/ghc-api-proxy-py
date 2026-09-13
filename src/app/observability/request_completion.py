@@ -350,7 +350,10 @@ class RequestCompletionCoordinator:
                 and isinstance(status, int)
                 and not isinstance(status, bool)
             ):
-                self.raw_capture.client_response_start(status)
+                self.raw_capture.client_response_start(
+                    status,
+                    headers=message.get("headers"),
+                )
                 self._raw_client_response_started = True
             self._http_start_accepted = True
             if self._state is DeliveryState.NOT_STARTED:
@@ -414,10 +417,15 @@ class RequestCompletionCoordinator:
         self,
         status_code: int,
         *,
+        headers: object | None = None,
         attempt: int | None = None,
     ) -> None:
         if self.raw_capture is not None:
-            self.raw_capture.upstream_response_start(status_code, attempt=attempt)
+            self.raw_capture.upstream_response_start(
+                status_code,
+                headers=headers,
+                attempt=attempt,
+            )
 
     def note_upstream_response_body(self, body: bytes, *, attempt: int | None = None) -> None:
         if self.raw_capture is not None:

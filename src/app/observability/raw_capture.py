@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from collections.abc import Generator, Iterator, Mapping
+from collections.abc import Generator, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -29,6 +29,39 @@ logger = logging.getLogger(__name__)
 AGENT_ID_HEADERS = ("x-claude-code-agent-id", "x-agent-id")
 CAPTURE_FILE_SUFFIX = ".cborseq.zst"
 CAPTURE_SCHEMA_VERSION = 2
+
+
+def _header_text(value: object) -> str:
+    if isinstance(value, bytes):
+        return value.decode("latin-1", errors="replace")
+    return str(value)
+
+
+def _capture_headers(headers: object | None) -> dict[str, str]:
+    """Preserve every observed header name and value in selected evidence."""
+    if headers is None:
+        return {}
+    if isinstance(headers, Mapping):
+        entries: Iterable[object] = cast(
+            Iterable[object],
+            cast(Mapping[object, object], headers).items(),
+        )
+    elif isinstance(headers, Iterable):
+        entries = cast(Iterable[object], headers)
+    else:
+        return {}
+    captured: dict[str, str] = {}
+    for entry in entries:
+        if not isinstance(entry, Sequence) or isinstance(entry, (str, bytes)):
+            continue
+        pair = cast(Sequence[object], entry)
+        if len(pair) != 2:
+            continue
+        name, value = pair
+        normalized_name = _header_text(name).lower()
+        if normalized_name:
+            captured[normalized_name] = _header_text(value)
+    return captured
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +111,12 @@ def observe_active_upstream_request(request: httpx2.Request) -> None:
     if scope is None or scope.capture is None:
         return
     try:
+        scope.capture.upstream_request_start(
+            request.method,
+            request.url.path,
+            headers=request.headers,
+            attempt=scope.attempt,
+        )
         scope.capture.upstream_request_body(request.content, attempt=scope.attempt)
     except BaseException:
         return
@@ -135,6 +174,7 @@ class RawCaptureStore:
         request_id: str,
         method: str,
         path: str,
+        headers: object | None = None,
     ) -> RawRequestCapture:
         capture = RawRequestCapture(
             store=self,
@@ -149,6 +189,7 @@ class RawCaptureStore:
                 "event": "request.start",
                 "method": method,
                 "path": path,
+                **({"headers": _capture_headers(headers)} if headers is not None else {}),
             }
         )
         return capture
@@ -400,6 +441,7 @@ class RawRequestCapture:
         self._enabled = True
         self._finished = False
         self._request_body_finished = False
+        self._upstream_request_header_attempts: set[int | None] = set()
         self._drop_reason: str | None = None
         self._first_dropped_event: str | None = None
         self._writer_error_event: str | None = None
@@ -496,6 +538,28 @@ class RawRequestCapture:
             }
         )
 
+    def upstream_request_start(
+        self,
+        method: str,
+        path: str,
+        *,
+        headers: object | None = None,
+        attempt: int | None = None,
+    ) -> None:
+        with self._condition:
+            if attempt in self._upstream_request_header_attempts:
+                return
+            self._upstream_request_header_attempts.add(attempt)
+        self.append_event(
+            {
+                "event": "upstream.request.start",
+                "attempt": attempt,
+                "method": method,
+                "path": path,
+                "headers": _capture_headers(headers),
+            }
+        )
+
     def upstream_request_body(self, body: bytes, *, attempt: int | None = None) -> None:
         with self._condition:
             if attempt in self._upstream_request_body_attempts:
@@ -509,14 +573,21 @@ class RawRequestCapture:
             }
         )
 
-    def upstream_response_start(self, status_code: int, *, attempt: int | None = None) -> None:
-        self.append_event(
-            {
-                "event": "upstream.response.start",
-                "attempt": attempt,
-                "status_code": status_code,
-            }
-        )
+    def upstream_response_start(
+        self,
+        status_code: int,
+        *,
+        headers: object | None = None,
+        attempt: int | None = None,
+    ) -> None:
+        event: dict[str, Any] = {
+            "event": "upstream.response.start",
+            "attempt": attempt,
+            "status_code": status_code,
+        }
+        if headers is not None:
+            event["headers"] = _capture_headers(headers)
+        self.append_event(event)
 
     def upstream_response_body(self, body: bytes, *, attempt: int | None = None) -> None:
         self.append_event(
@@ -543,8 +614,19 @@ class RawRequestCapture:
             }
         )
 
-    def client_response_start(self, status_code: int) -> None:
-        self.append_event({"event": "client.response.start", "status_code": status_code})
+    def client_response_start(
+        self,
+        status_code: int,
+        *,
+        headers: object | None = None,
+    ) -> None:
+        event: dict[str, Any] = {
+            "event": "client.response.start",
+            "status_code": status_code,
+        }
+        if headers is not None:
+            event["headers"] = _capture_headers(headers)
+        self.append_event(event)
 
     def client_response_body(self, body: bytes, *, more_body: bool) -> None:
         self.append_event(
