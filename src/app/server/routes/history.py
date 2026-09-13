@@ -3,6 +3,7 @@
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
+from app.history import HistoryMutation
 from app.server.app_state import chain_of
 
 router = APIRouter()
@@ -59,6 +60,67 @@ async def get_history_entry(entry_id: str, request: Request) -> JSONResponse:
             status_code=404,
         )
     return JSONResponse(entry.as_dict())
+
+
+async def _mutate_history_entry(
+    request: Request,
+    entry_id: str,
+    operation: str,
+) -> JSONResponse:
+    writer = getattr(chain_of(request), "history_writer", None)
+    if writer is None:
+        return _history_unavailable()
+    try:
+        mutation = await getattr(writer, operation)(entry_id)
+    except RuntimeError:
+        return _history_unavailable()
+    if mutation is HistoryMutation.NOT_FOUND:
+        return JSONResponse(
+            {
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": f"history entry {entry_id!r} does not exist",
+                }
+            },
+            status_code=404,
+        )
+    if mutation is HistoryMutation.PINNED:
+        return JSONResponse(
+            {
+                "error": {
+                    "type": "conflict_error",
+                    "message": "history entry is pinned",
+                    "code": "entry_pinned",
+                }
+            },
+            status_code=409,
+        )
+    return JSONResponse(
+        {
+            "id": entry_id,
+            "operation": operation.removeprefix("_").removesuffix("_entry"),
+            "state": (
+                "already_applied"
+                if mutation is HistoryMutation.ALREADY_APPLIED
+                else "updated"
+            ),
+        }
+    )
+
+
+@router.post("/history/api/entries/{entry_id}/archive")
+async def archive_history_entry(entry_id: str, request: Request) -> JSONResponse:
+    return await _mutate_history_entry(request, entry_id, "archive_entry")
+
+
+@router.post("/history/api/entries/{entry_id}/pin")
+async def pin_history_entry(entry_id: str, request: Request) -> JSONResponse:
+    return await _mutate_history_entry(request, entry_id, "pin_entry")
+
+
+@router.post("/history/api/entries/{entry_id}/unpin")
+async def unpin_history_entry(entry_id: str, request: Request) -> JSONResponse:
+    return await _mutate_history_entry(request, entry_id, "unpin_entry")
 
 
 __all__ = ["router"]

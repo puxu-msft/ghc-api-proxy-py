@@ -16,6 +16,7 @@ from app.history.writer import (
     HistoryDurability,
     HistoryDurabilityReceipt,
     HistoryIndexEntry,
+    HistoryMutation,
     HistorySubmission,
     HistoryWriter,
 )
@@ -31,6 +32,7 @@ __all__ = [
     "HistoryDurabilityReceipt",
     "HistoryEntry",
     "HistoryIndexEntry",
+    "HistoryMutation",
     "HistoryOutcome",
     "HistorySubmission",
     "HistoryWriter",

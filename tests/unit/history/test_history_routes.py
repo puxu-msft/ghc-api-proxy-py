@@ -105,3 +105,50 @@ async def test_history_routes_report_unavailable_store() -> None:
 
     assert response.status_code == 503
     assert response.json()["error"]["type"] == "proxy_internal_error"
+
+
+@pytest.mark.asyncio
+async def test_history_archive_is_one_way_and_pinned_entries_block_it(
+    tmp_path: Path,
+) -> None:
+    writer = HistoryWriter(
+        database_path=tmp_path / "history.sqlite3",
+        archive=HistoryArchiveStore(tmp_path / "archive"),
+    )
+    await writer.start()
+    entry = _entry()
+    try:
+        await writer.submit(entry, session_id="session-route", agent_id=None)
+        await writer.wait_idle()
+
+        app = FastAPI()
+        app.include_router(router)
+        setattr(app.state, CHAIN_STATE_KEY, SimpleNamespace(history_writer=writer))
+        async with httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            pinned = await client.post(
+                "/history/api/entries/request-route-1/pin"
+            )
+            blocked = await client.post(
+                "/history/api/entries/request-route-1/archive"
+            )
+            unpinned = await client.post(
+                "/history/api/entries/request-route-1/unpin"
+            )
+            archived = await client.post(
+                "/history/api/entries/request-route-1/archive"
+            )
+            listed = await client.get("/history/api/entries")
+            detail = await client.get("/history/api/entries/request-route-1")
+
+        assert pinned.status_code == 200
+        assert blocked.status_code == 409
+        assert blocked.json()["error"]["code"] == "entry_pinned"
+        assert unpinned.status_code == 200
+        assert archived.status_code == 200
+        assert listed.json()["data"] == []
+        assert detail.status_code == 404
+    finally:
+        await writer.close()

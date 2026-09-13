@@ -25,6 +25,13 @@ class HistorySubmission(StrEnum):
     REJECTED = "rejected"
 
 
+class HistoryMutation(StrEnum):
+    UPDATED = "updated"
+    ALREADY_APPLIED = "already_applied"
+    NOT_FOUND = "not_found"
+    PINNED = "pinned"
+
+
 @dataclass(frozen=True, slots=True)
 class HistoryDurabilityReceipt:
     entry_id: str
@@ -171,6 +178,21 @@ class HistoryWriter:
             entry_id,
             include_archived,
         )
+
+    async def archive_entry(self, entry_id: str) -> HistoryMutation:
+        if self._task is None or self._closed:
+            raise RuntimeError("History writer is not running")
+        return await asyncio.to_thread(self._archive_entry, entry_id)
+
+    async def pin_entry(self, entry_id: str) -> HistoryMutation:
+        if self._task is None or self._closed:
+            raise RuntimeError("History writer is not running")
+        return await asyncio.to_thread(self._set_pinned, entry_id, True)
+
+    async def unpin_entry(self, entry_id: str) -> HistoryMutation:
+        if self._task is None or self._closed:
+            raise RuntimeError("History writer is not running")
+        return await asyncio.to_thread(self._set_pinned, entry_id, False)
 
     async def close(self) -> None:
         if self._task is None or self._closed:
@@ -336,6 +358,54 @@ class HistoryWriter:
     def _open_read_connection(self) -> sqlite3.Connection:
         return sqlite3.connect(self.database_path, timeout=5.0)
 
+    def _archive_entry(self, entry_id: str) -> HistoryMutation:
+        connection = self._open_read_connection()
+        try:
+            row = connection.execute(
+                "SELECT pinned, archived FROM history_entries WHERE entry_id = ?",
+                (entry_id,),
+            ).fetchone()
+            if row is None:
+                return HistoryMutation.NOT_FOUND
+            pinned, archived = row
+            if type(archived) is not int or type(pinned) is not int:
+                raise RuntimeError("History index contains invalid state flags")
+            if archived:
+                return HistoryMutation.ALREADY_APPLIED
+            if pinned:
+                return HistoryMutation.PINNED
+            connection.execute(
+                "UPDATE history_entries SET archived = 1 WHERE entry_id = ?",
+                (entry_id,),
+            )
+            connection.commit()
+            return HistoryMutation.UPDATED
+        finally:
+            connection.close()
+
+    def _set_pinned(self, entry_id: str, pinned: bool) -> HistoryMutation:
+        connection = self._open_read_connection()
+        try:
+            row = connection.execute(
+                "SELECT pinned FROM history_entries WHERE entry_id = ?",
+                (entry_id,),
+            ).fetchone()
+            if row is None:
+                return HistoryMutation.NOT_FOUND
+            current = row[0]
+            if type(current) is not int:
+                raise RuntimeError("History index contains an invalid pin flag")
+            if bool(current) is pinned:
+                return HistoryMutation.ALREADY_APPLIED
+            connection.execute(
+                "UPDATE history_entries SET pinned = ? WHERE entry_id = ?",
+                (int(pinned), entry_id),
+            )
+            connection.commit()
+            return HistoryMutation.UPDATED
+        finally:
+            connection.close()
+
 
 def _failure_code(error: BaseException) -> str:
     return f"{type(error).__module__}.{type(error).__qualname__}"
@@ -400,6 +470,7 @@ __all__ = [
     "HistoryDurability",
     "HistoryDurabilityReceipt",
     "HistoryIndexEntry",
+    "HistoryMutation",
     "HistorySubmission",
     "HistoryWriter",
 ]
