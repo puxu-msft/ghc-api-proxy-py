@@ -608,7 +608,7 @@ def test_queue_full_preparation_warning_is_safe(
     def raise_full(_: object) -> None:
         raise Full
 
-    monkeypatch.setattr(cast(Any, store._queue), "put_nowait", raise_full)
+    monkeypatch.setattr(cast(Any, store)._queue, "put_nowait", raise_full)
     identity_marker = "queue-full-identity-marker"
     body_marker = b"queue-full-body-marker"
     with caplog.at_level(logging.WARNING, logger="app.observability.raw_capture"):

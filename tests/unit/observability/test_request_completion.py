@@ -129,7 +129,7 @@ def test_publish_submits_a_history_projection_when_writer_is_available(
 ) -> None:
     completion, trace, _store, _records, _logger = _coordinator(monkeypatch)
     writer = RecordingHistoryWriter()
-    completion.chain.history_writer = writer
+    cast(Any, completion.chain).history_writer = writer
     trace.terminal_status = "completed"
     completion.mark_response_ready(200)
     completion.note_asgi_message_sent({"type": "http.response.start", "status": 200})
