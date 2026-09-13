@@ -1,7 +1,9 @@
-"""Read-only History index routes."""
+"""Read-only History index and transport export routes."""
+
+import asyncio
 
 from fastapi import APIRouter, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from app.history import HistoryMutation
 from app.server.app_state import chain_of
@@ -92,6 +94,67 @@ async def get_history_entry(
         result["semantic_request"] = semantic.get("semantic_request")
         result["semantic_response"] = semantic.get("semantic_response")
     return JSONResponse(result)
+
+
+@router.get("/history/api/entries/{entry_id}/transport")
+async def export_history_transport(entry_id: str, request: Request) -> Response:
+    chain = chain_of(request)
+    writer = getattr(chain, "history_writer", None)
+    raw_capture = getattr(chain, "raw_capture", None)
+    if writer is None or raw_capture is None:
+        return _history_unavailable()
+    try:
+        entry = await writer.get_entry(entry_id)
+        if entry is None:
+            return JSONResponse(
+                {
+                    "error": {
+                        "type": "source_unavailable",
+                        "message": "history entry is not available for transport export",
+                    }
+                },
+                status_code=409,
+            )
+        if entry.capture_ref is None:
+            return JSONResponse(
+                {
+                    "error": {
+                        "type": "source_unavailable",
+                        "message": "history entry has no capture attachment",
+                    }
+                },
+                status_code=409,
+            )
+        payload = await asyncio.to_thread(
+            raw_capture.export_request,
+            entry.capture_ref,
+            entry_id,
+        )
+    except (OSError, ValueError):
+        return JSONResponse(
+            {
+                "error": {
+                    "type": "source_unavailable",
+                    "message": "capture transport evidence is unavailable",
+                }
+            },
+            status_code=409,
+        )
+    if not payload:
+        return JSONResponse(
+            {
+                "error": {
+                    "type": "source_unavailable",
+                    "message": "capture transport evidence is empty",
+                }
+            },
+            status_code=409,
+        )
+    return Response(
+        content=payload,
+        media_type="application/cbor-seq+zstd",
+        headers={"X-Capture-Contains-Credentials": "true"},
+    )
 
 
 async def _mutate_history_entry(

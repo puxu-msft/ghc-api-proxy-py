@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,6 +18,7 @@ from app.history import (
     HistorySubmission,
     HistoryWriter,
 )
+from app.observability.raw_capture import RawCaptureStore, iter_raw_capture_records
 from app.pipeline.response_observation import FrozenJsonObject, freeze_json
 from app.server.app_state import CHAIN_STATE_KEY
 from app.server.routes.history import router
@@ -163,3 +165,67 @@ async def test_history_archive_is_one_way_and_pinned_entries_block_it(
         assert detail.status_code == 404
     finally:
         await writer.close()
+
+
+@pytest.mark.asyncio
+async def test_history_transport_export_returns_filtered_binary_capture(
+    tmp_path: Path,
+) -> None:
+    raw_capture = RawCaptureStore(tmp_path / "captures")
+    capture = raw_capture.start(
+        session_id="session-transport",
+        agent_id=None,
+        request_id="request-transport-1",
+        method="POST",
+        path="/v1/messages",
+    )
+    capture.request_body(b'{"model":"model"}')
+    capture.request_body_end(complete=True)
+    capture.upstream_response_body(b'{"ok":true}')
+    capture.upstream_response_end(complete=True, attempt=0)
+    capture.client_response_body(b'{"ok":true}', more_body=False)
+    capture.finish(status_code=200, complete=True)
+    raw_capture.flush()
+    capture_ref = raw_capture.reference_for("session-transport", None)
+
+    writer = HistoryWriter(
+        database_path=tmp_path / "history.sqlite3",
+        archive=HistoryArchiveStore(tmp_path / "archive"),
+    )
+    await writer.start()
+    entry = replace(
+        _entry(),
+        request_id="request-transport-1",
+        capture_ref=capture_ref,
+    )
+    try:
+        await writer.submit(entry, session_id="session-transport", agent_id=None)
+        await writer.wait_idle()
+        app = FastAPI()
+        app.include_router(router)
+        setattr(
+            app.state,
+            CHAIN_STATE_KEY,
+            SimpleNamespace(history_writer=writer, raw_capture=raw_capture),
+        )
+        async with httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.get(
+                "/history/api/entries/request-transport-1/transport"
+            )
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith(
+            "application/cbor-seq+zstd"
+        )
+        export_path = tmp_path / "export.cborseq.zst"
+        export_path.write_bytes(response.content)
+        records = list(iter_raw_capture_records(export_path))
+        assert {record["request_id"] for record in records} == {
+            "request-transport-1"
+        }
+    finally:
+        await writer.close()
+        raw_capture.close()

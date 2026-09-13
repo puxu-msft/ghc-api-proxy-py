@@ -271,6 +271,16 @@ class RawCaptureStore:
     def flush(self) -> None:
         self._queue.join()
 
+    def export_request(self, relative_path: str, request_id: str) -> bytes:
+        path = self.root / relative_path
+        compressor = zstandard.ZstdCompressor(level=self.compression_level)
+        frames: list[bytes] = []
+        for record in iter_raw_capture_records(path):
+            if record.get("request_id") != request_id:
+                continue
+            frames.append(compressor.compress(cbor2.dumps(record, canonical=True)))
+        return b"".join(frames)
+
     def close(self) -> None:
         with self._lock:
             if self._closed:
