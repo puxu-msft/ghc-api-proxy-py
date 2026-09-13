@@ -10,12 +10,12 @@ def test_rules_are_persistent_idempotent_and_agent_aware(tmp_path: Path) -> None
     store = DebugCaptureRuleStore(database)
 
     rule, created = store.create_rule(
-        provider="sub2api",
+        provider="bridge",
         model_id="deepseek-v4-pro",
         session_id="session-1",
     )
     duplicate, duplicate_created = store.create_rule(
-        provider=" sub2api ",
+        provider=" bridge ",
         model_id="deepseek-v4-pro",
         session_id="session-1",
     )
@@ -24,13 +24,13 @@ def test_rules_are_persistent_idempotent_and_agent_aware(tmp_path: Path) -> None
     assert duplicate_created is False
     assert duplicate == rule
     assert store.matches(
-        provider="sub2api",
+        provider="bridge",
         model_id="deepseek-v4-pro",
         session_id="session-1",
         agent_id="any-agent",
     )
     assert not store.matches(
-        provider="sub2api",
+        provider="bridge",
         model_id="other-model",
         session_id="session-1",
     )
@@ -40,7 +40,7 @@ def test_rules_are_persistent_idempotent_and_agent_aware(tmp_path: Path) -> None
     assert reopened.list_rules() == (rule,)
     assert reopened.delete_rule(rule.id)
     assert not reopened.matches(
-        provider="sub2api",
+        provider="bridge",
         model_id="deepseek-v4-pro",
         session_id="session-1",
     )

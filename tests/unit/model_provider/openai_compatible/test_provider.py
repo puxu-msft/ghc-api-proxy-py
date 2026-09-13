@@ -21,7 +21,7 @@ from app.wire_json import loads
 
 def config(**overrides: Any) -> OpenAICompatibleProviderConfig:
     values: dict[str, Any] = {
-        "type": "sub2api",
+        "type": "bridge",
         "api_base_url": "https://ttthree.example/v1",
         "api_key": "test-key",
         "models": ["configured-model"],
@@ -30,31 +30,39 @@ def config(**overrides: Any) -> OpenAICompatibleProviderConfig:
     return OpenAICompatibleProviderConfig.model_validate(values)
 
 
-def test_ttthree_name_can_use_the_sub2api_provider_type() -> None:
+def test_opencode_zen_uses_the_public_bridge_provider_shape() -> None:
     proxy = ProxyConfig.model_validate(
         {
             "model_providers": {
-                "ttthree": {
-                    "type": "sub2api",
-                    "api_base_url": "https://ttthree.example/v1",
+                "opencode_zen": {
+                    "type": "bridge",
+                    "api_base_url": "https://opencode.ai/zen/v1",
                     "api_key": "test-key",
+                    "openai_chat_completions_endpoint": True,
+                    "openai_responses_endpoint": True,
+                    "anthropic_messages_endpoint": True,
                 }
             },
-            "default_model_provider": "ttthree",
+            "default_model_provider": "opencode_zen",
         }
     )
 
-    provider = proxy.model_providers["ttthree"]
+    provider = proxy.model_providers["opencode_zen"]
     assert isinstance(provider, OpenAICompatibleProviderConfig)
+    assert provider.type == "bridge"
+    assert provider.api_base_url == "https://opencode.ai/zen/v1"
+    assert provider.openai_chat_completions_endpoint is True
+    assert provider.openai_responses_endpoint is True
+    assert provider.anthropic_messages_endpoint is True
     assert "test-key" not in repr(provider)
 
 
-def test_sub2api_provider_requires_an_api_base_url() -> None:
+def test_bridge_provider_requires_an_api_base_url() -> None:
     with pytest.raises(ValidationError):
-        OpenAICompatibleProviderConfig.model_validate({"type": "sub2api"})
+        OpenAICompatibleProviderConfig.model_validate({"type": "bridge"})
 
 
-@pytest.mark.parametrize("provider_type", ["openai_compatible", "openai"])
+@pytest.mark.parametrize("provider_type", ["sub2api", "openai_compatible", "openai"])
 def test_legacy_provider_types_are_rejected(provider_type: str) -> None:
     with pytest.raises(ValidationError):
         ProxyConfig.model_validate(
@@ -78,19 +86,19 @@ def test_legacy_provider_types_are_rejected(provider_type: str) -> None:
         " https://example.com/v1",
     ],
 )
-def test_sub2api_provider_rejects_an_invalid_api_base_url(
+def test_bridge_provider_rejects_an_invalid_api_base_url(
     api_base_url: str,
 ) -> None:
     with pytest.raises(ValidationError):
         OpenAICompatibleProviderConfig.model_validate(
-            {"type": "sub2api", "api_base_url": api_base_url}
+            {"type": "bridge", "api_base_url": api_base_url}
         )
 
 
 def test_endpoint_settings_accept_enabled_bool_url_and_empty() -> None:
     provider = OpenAICompatibleProviderConfig.model_validate(
         {
-            "type": "sub2api",
+            "type": "bridge",
             "api_base_url": "https://ttthree.example/v1",
             "openai_chat_completions_endpoint": True,
             "openai_responses_endpoint": "https://proxy.example/alt/responses",
@@ -112,7 +120,7 @@ def test_endpoint_settings_accept_enabled_bool_url_and_empty() -> None:
 def test_endpoint_setting_false_and_url_keep_their_state(value: object) -> None:
     provider = OpenAICompatibleProviderConfig.model_validate(
         {
-            "type": "sub2api",
+            "type": "bridge",
             "api_base_url": "https://ttthree.example/v1",
             "openai_responses_endpoint": value,
         }
@@ -135,7 +143,7 @@ def test_endpoint_setting_rejects_a_non_absolute_http_url(value: str) -> None:
     with pytest.raises(ValidationError):
         OpenAICompatibleProviderConfig.model_validate(
             {
-                "type": "sub2api",
+                "type": "bridge",
                 "api_base_url": "https://ttthree.example/v1",
                 "openai_responses_endpoint": value,
             }
@@ -230,7 +238,7 @@ async def test_models_refresh_is_not_static_even_when_an_allowlist_is_configured
 
 
 @pytest.mark.asyncio
-async def test_sub2api_catalog_uses_configured_native_endpoints() -> None:
+async def test_bridge_catalog_uses_configured_native_endpoints() -> None:
     seen: list[httpx2.Request] = []
 
     def handler(request: httpx2.Request) -> httpx2.Response:
@@ -276,7 +284,7 @@ async def test_sub2api_catalog_uses_configured_native_endpoints() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sub2api_without_configured_endpoints_has_no_direct_capability() -> None:
+async def test_bridge_without_configured_endpoints_has_no_direct_capability() -> None:
     http_client = httpx2.AsyncClient(
         transport=httpx2.MockTransport(
             lambda request: httpx2.Response(
@@ -313,7 +321,7 @@ async def test_sub2api_without_configured_endpoints_has_no_direct_capability() -
 
 
 @pytest.mark.asyncio
-async def test_sub2api_count_tokens_reaches_the_native_endpoint() -> None:
+async def test_bridge_count_tokens_reaches_the_native_endpoint() -> None:
     seen: list[httpx2.Request] = []
 
     def handler(request: httpx2.Request) -> httpx2.Response:
@@ -545,4 +553,4 @@ async def test_catalog_request_sends_the_configured_api_key() -> None:
     finally:
         await http_client.aclose()
 
-    assert seen[0].headers["authorization"] == "Bearer test-key"
+    assert seen[0].headers["authorization"] == "Bearer " + provider_config.api_key

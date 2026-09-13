@@ -12,12 +12,8 @@ from app.model_provider.github_copilot import (
 )
 from app.model_provider.github_copilot import GithubCopilotProvider
 from app.model_provider.openai_compatible import (
-    PROVIDER_TYPE as SUB2API_PROVIDER_TYPE,
-)
-from app.model_provider.openai_compatible import (
-    PROVIDER_TYPES as SUB2API_PROVIDER_TYPES,
-)
-from app.model_provider.openai_compatible import (
+    BRIDGE_PROVIDER_TYPE,
+    BRIDGE_PROVIDER_TYPES,
     OpenAICompatibleClient,
     OpenAICompatibleProvider,
     Sub2ApiClient,
@@ -57,10 +53,10 @@ from app.model_provider.xingchen import (
 from app.model_provider.xingchen import XingchenClient, XingchenProvider
 
 __all__ = [
+    "BRIDGE_PROVIDER_TYPE",
+    "BRIDGE_PROVIDER_TYPES",
     "CODEBUDDY_PROVIDER_TYPE",
     "GITHUB_COPILOT_PROVIDER_TYPE",
-    "SUB2API_PROVIDER_TYPE",
-    "SUB2API_PROVIDER_TYPES",
     "XINGCHEN_PROVIDER_TYPE",
     "CapabilityMissing",
     "CatalogProvider",

@@ -464,7 +464,7 @@ def _without_credentials(url: str) -> str:
 
 _CREDENTIAL_REDACTION = "***"
 _PROVIDER_CREDENTIAL_FIELDS = {
-    "sub2api": frozenset({"api_key"}),
+    "bridge": frozenset({"api_key"}),
     "xingchen": frozenset({"gateway_api_key", "x_token"}),
 }
 

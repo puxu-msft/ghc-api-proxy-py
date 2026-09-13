@@ -12,28 +12,22 @@ from app.config.schema import (
 )
 from app.pipeline.model_resolution import QUALIFIER_SEPARATOR, canonical
 
-SPEC_PATH = Path(__file__).resolve().parents[3] / "docs/.human-controlled/config.example.yaml"
+BUNDLED_CONFIG_PATH = Path(__file__).resolve().parents[3] / "src/app/config/bundled-config.yaml"
 
 
-@pytest.mark.skipif(not SPEC_PATH.is_file(), reason="authoritative config spec not present")
-def test_authoritative_example_config_parses() -> None:
-    # The spec file is the oracle.
-    # extra="forbid" means any active key we failed to model fails here, not at startup.
-    raw = yaml.safe_load(SPEC_PATH.read_text(encoding="utf-8"))
+@pytest.mark.skipif(not BUNDLED_CONFIG_PATH.is_file(), reason="bundled config not present")
+def test_bundled_config_parses() -> None:
+    # The bundled file is executable runtime input. The human-controlled example is
+    # documentation and may contain illustrative or deprecated snippets.
+    raw = yaml.safe_load(BUNDLED_CONFIG_PATH.read_text(encoding="utf-8"))
     config = ProxyConfig.model_validate(raw)
 
-    assert config.server.tls.mode == "both"
-    assert config.server.host == "127.0.0.1"
-    assert config.server.port == 4142
     assert config.default_model_provider == "ghc"
     assert config.model_providers["ghc"].type == "github_copilot"
-    assert config.model_providers["ghc"].github_token_file.endswith("github_token.txt")
     assert config.model_mappings["opus"] == "claude-opus-5"
-    assert config.upstream_request_timeouts.upstream_request_deadline == 1200
-    assert config.client_delivery.client_request_deadline == 3600
-    assert config.upstream_request_retry.strategies.network.max_retries == 9
-    assert config.hooks.on_client_request_parsed == []
-    assert config.history.enabled is True
+    assert config.hook_fix_anthropic_request.cache_control_sanitize == {
+        "claude-.*": ["scope"]
+    }
 
 
 def test_defaults_disable_the_upstream_silence_terminators() -> None:

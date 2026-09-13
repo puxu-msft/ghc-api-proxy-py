@@ -133,7 +133,7 @@ async def test_non_ghc_direct_clients_observe_active_capture_at_transport_bounda
             http_client,
             OpenAICompatibleProviderConfig.model_validate(
                 {
-                    "type": "sub2api",
+                    "type": "bridge",
                     "api_base_url": "https://openai-compatible.example/v1",
                     "models": ["test-model"],
                     "openai_responses_endpoint": True,

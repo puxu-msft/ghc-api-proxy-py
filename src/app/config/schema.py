@@ -75,9 +75,9 @@ NOT_HOT_RELOADABLE = frozenset(
     }
 )
 
-# Fields shared with an older provider but fixed into the Xingchen instance at startup. Kept type-scoped so this feature does not silently change the existing GitHub Copilot hot-reload contract.
+# Fields shared with an older provider but fixed into provider instances at startup. Kept type-scoped so this feature does not silently change the existing GitHub Copilot hot-reload contract.
 PROVIDER_NOT_HOT_RELOADABLE: dict[str, frozenset[str]] = {
-    "sub2api": frozenset({"disabled_models", "model_refresh_interval"}),
+    "bridge": frozenset({"disabled_models", "model_refresh_interval"}),
     "xingchen": frozenset({"disabled_models"}),
 }
 
@@ -226,7 +226,7 @@ class CodebuddyProviderConfig(_ModelProviderConfigBase):
     auth_state_file: str = ""
 
 
-# Tri-state for a sub2api upstream's native protocol endpoints
+# Tri-state for a bridge upstream's native protocol endpoints
 # (spec: `sub2api-provider/spec.md`). Empty (or absent) disables direct serving
 # of that protocol; `True` enables it on the standard `api_base_url` path;
 # a non-empty absolute HTTP(S) URL enables it at that exact address.
@@ -234,12 +234,12 @@ EndpointSetting = bool | str
 
 
 class OpenAICompatibleProviderConfig(_ModelProviderConfigBase):
-    type: Literal["sub2api"]
+    type: Literal["bridge"]
     api_base_url: str = Field(default="", min_length=1, validate_default=True)
     api_key: str = Field(default="", repr=False)
     models: list[str] = Field(default_factory=list)
     model_refresh_interval: int = Field(default=3600, ge=0)
-    # A sub2api upstream does not necessarily serve all three native protocols
+    # A bridge upstream does not necessarily serve all three native protocols
     # directly; these three independently declare per-protocol capability and
     # address (Anthropic Messages also gates upstream `count_tokens`).
     openai_chat_completions_endpoint: EndpointSetting = ""

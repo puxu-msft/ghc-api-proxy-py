@@ -35,7 +35,7 @@ from app.history.writer import HistoryWriter
 from app.model_provider import (
     CODEBUDDY_PROVIDER_TYPE,
     GITHUB_COPILOT_PROVIDER_TYPE,
-    SUB2API_PROVIDER_TYPES,
+    BRIDGE_PROVIDER_TYPES,
     XINGCHEN_PROVIDER_TYPE,
     GithubCopilotProvider,
     ModelProvider,
@@ -580,7 +580,7 @@ def build_chain(
         GITHUB_COPILOT_PROVIDER_TYPE,
         XINGCHEN_PROVIDER_TYPE,
         CODEBUDDY_PROVIDER_TYPE,
-    } | SUB2API_PROVIDER_TYPES
+    } | BRIDGE_PROVIDER_TYPES
     for name, provider_config in config.model_providers.items():
         if provider_config.type not in supported_provider_types:
             raise ValueError(f"unsupported provider type {provider_config.type!r} for {name!r}")

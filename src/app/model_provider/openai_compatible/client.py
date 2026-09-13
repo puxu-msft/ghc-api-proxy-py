@@ -1,4 +1,4 @@
-"""Raw HTTP client for the sub2api provider."""
+"""Raw HTTP client for the bridge provider."""
 
 from collections.abc import Mapping
 from typing import Any, cast
@@ -73,7 +73,7 @@ class OpenAICompatibleClient:
             "Content-Type": "application/json",
         }
         if self._config.api_key:
-            headers["Authorization"] = f"Bearer {self._config.api_key}"
+            headers["Authorization"] = "Bearer " + self._config.api_key
         if extra_headers:
             headers.update(
                 {

@@ -139,12 +139,12 @@ def test_only_positive_catalog_provider_intervals_create_refresh_jobs() -> None:
                 "active": {"type": "github_copilot", "model_refresh_interval": 17},
                 "disabled": {"type": "github_copilot", "model_refresh_interval": 0},
                 "responses": {
-                    "type": "sub2api",
+                    "type": "bridge",
                     "api_base_url": "https://ttthree.example/v1",
                     "model_refresh_interval": 23,
                 },
                 "static-responses": {
-                    "type": "sub2api",
+                    "type": "bridge",
                     "api_base_url": "https://ttthree.example/v1",
                     "models": ["model"],
                     "model_refresh_interval": 29,
@@ -208,7 +208,7 @@ async def test_pipeline_lifespan_starts_and_cancels_the_configured_refresh_task(
                 "active": {"type": "github_copilot", "model_refresh_interval": 17},
                 "disabled": {"type": "github_copilot", "model_refresh_interval": 0},
                 "responses": {
-                    "type": "sub2api",
+                    "type": "bridge",
                     "api_base_url": "https://ttthree.example/v1",
                     "model_refresh_interval": 23,
                 },

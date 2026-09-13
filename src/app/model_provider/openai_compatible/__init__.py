@@ -14,11 +14,16 @@ from app.model_provider.openai_compatible.provider import (
     OpenAICompatibleProvider,
 )
 
+BRIDGE_PROVIDER_TYPE = PROVIDER_TYPE
+BRIDGE_PROVIDER_TYPES = PROVIDER_TYPES
+
 Sub2ApiClient = OpenAICompatibleClient
 Sub2ApiProvider = OpenAICompatibleProvider
 
 __all__ = [
     "ANTHROPIC_MESSAGES_PATH",
+    "BRIDGE_PROVIDER_TYPE",
+    "BRIDGE_PROVIDER_TYPES",
     "CHAT_COMPLETIONS_PATH",
     "COUNT_TOKENS_PATH",
     "DRIVEN_ENDPOINTS",

@@ -1,4 +1,4 @@
-"""The sub2api provider, which natively serves three protocol endpoints."""
+"""The bridge provider, which natively serves three protocol endpoints."""
 
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -22,7 +22,7 @@ from app.model_provider.types import (
     resolve_endpoints,
 )
 
-PROVIDER_TYPE = "sub2api"
+PROVIDER_TYPE = "bridge"
 PROVIDER_TYPES = frozenset({PROVIDER_TYPE})
 
 _SEND_METHODS = {
@@ -32,7 +32,7 @@ _SEND_METHODS = {
     ModelEndpoint.OPENAI_EMBEDDINGS,
 }
 DRIVEN_ENDPOINTS = frozenset(_SEND_METHODS)
-# The three protocols a sub2api operator may declare as directly served. Their
+# The three protocols a bridge operator may declare as directly served. Their
 # capability comes from config, so the constant that used to default them all on
 # is gone: an undeclared protocol is disabled until an operator enables it.
 _CONFIGURED_ENDPOINT_FIELDS = {
