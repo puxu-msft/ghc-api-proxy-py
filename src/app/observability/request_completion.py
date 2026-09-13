@@ -172,6 +172,8 @@ class RequestFacts:
     upstream_body_attempts: tuple[UpstreamBodyAttempt, ...]
     token_admissions: tuple[TokenAdmissionObservation, ...] = ()
     interruptions: tuple[InterruptionObservation, ...] = ()
+    session_id: str | None = None
+    agent_id: str | None = None
 
     def request_line(self) -> RequestLine:
         value = thaw_json(self.legacy)
@@ -651,6 +653,8 @@ class RequestCompletionCoordinator:
             upstream_body_attempts=tuple(self.trace.upstream_body_attempts),
             token_admissions=self.trace.token_admissions,
             interruptions=tuple(self._interruptions),
+            session_id=self.trace.session_id,
+            agent_id=self.trace.agent_id,
         )
         if self.raw_capture is not None:
             self.raw_capture.finish(
@@ -784,8 +788,8 @@ def _submit_history_projection(chain: Chain, record: RequestFacts) -> None:
 
     submission = history_writer.submit_nowait(
         HistoryEntry.from_request_facts(record),
-        session_id=None,
-        agent_id=None,
+        session_id=record.session_id,
+        agent_id=record.agent_id,
     )
     if submission is not HistorySubmission.ACCEPTED:
         _warn_no_raise(

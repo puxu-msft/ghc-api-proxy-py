@@ -87,6 +87,8 @@ def _facts(
         ),
         body_bytes=BodyBytesObservation(10, 20, downstream_body_bytes),
         upstream_body_attempts=(),
+        session_id="session-1",
+        agent_id="agent-1",
     )
 
 
@@ -97,6 +99,8 @@ def test_history_entry_projects_completed_request_facts() -> None:
 
     assert entry.outcome is HistoryOutcome.COMPLETED
     assert entry.delivery is HistoryDelivery.COMPLETE
+    assert entry.session_id == "session-1"
+    assert entry.agent_id == "agent-1"
     assert entry.capture.status == "none"
     assert entry.as_dict()["request_id"] == "req_history_1"
 

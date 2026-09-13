@@ -617,6 +617,8 @@ async def _dispatch_after_body(
 ) -> Response:
     session_id = interaction_id_from_headers(request.headers)
     agent_id = agent_id_from_headers(request.headers)
+    trace.session_id = session_id
+    trace.agent_id = agent_id
     # The template rather than the URL: once a path carries parameters the two differ, and only the template identifies the route. The router records which of its own paths answered, so this is that answer rather than a second match of our own. Reading it also survives a mount prefix — measured, `--root-path /api` made `route_for_path(request.url.path)` miss on every route and answer 404 from the branch below.
     matched = request.scope.get("route")
     route = route_for_path(getattr(matched, "path", None) or request.url.path)

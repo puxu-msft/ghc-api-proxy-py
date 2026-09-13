@@ -158,6 +158,8 @@ class RequestTrace:
     method: str
     path: str
     request_id: str = ""
+    session_id: str | None = None
+    agent_id: str | None = None
     message_id: str = ""
     inbound_format: str = ""
     # Which endpoint took the request, recorded as soon as the route is known — before anything can fail — so a count that never reached a counter is still reported as a count.

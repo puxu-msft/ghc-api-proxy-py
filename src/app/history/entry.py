@@ -72,6 +72,8 @@ class HistoryEntry:
     capture_ref: str | None = None
     semantic_request: FrozenJson | None = None
     semantic_response: FrozenJson | None = None
+    session_id: str | None = None
+    agent_id: str | None = None
 
     @classmethod
     def from_request_facts(cls, facts: RequestFacts) -> HistoryEntry:
@@ -79,6 +81,8 @@ class HistoryEntry:
         outcome = _outcome_for(facts)
         return cls(
             request_id=line.request_id,
+            session_id=facts.session_id,
+            agent_id=facts.agent_id,
             started_at=line.started_at,
             finished_at=facts.at,
             outcome=outcome,
@@ -101,6 +105,8 @@ class HistoryEntry:
         """Return the safe projection without exposing raw transport evidence."""
         return {
             "request_id": self.request_id,
+            "session_id": self.session_id,
+            "agent_id": self.agent_id,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "outcome": self.outcome.value,
