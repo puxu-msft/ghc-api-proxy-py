@@ -12,6 +12,12 @@ from app.history.entry import (
     HistoryEntry,
     HistoryOutcome,
 )
+from app.history.writer import (
+    HistoryDurability,
+    HistoryDurabilityReceipt,
+    HistorySubmission,
+    HistoryWriter,
+)
 
 __all__ = [
     "HISTORY_ARCHIVE_SCHEMA_VERSION",
@@ -20,6 +26,10 @@ __all__ = [
     "HistoryArchiveReference",
     "HistoryArchiveStore",
     "HistoryDelivery",
+    "HistoryDurability",
+    "HistoryDurabilityReceipt",
     "HistoryEntry",
     "HistoryOutcome",
+    "HistorySubmission",
+    "HistoryWriter",
 ]
