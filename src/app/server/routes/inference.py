@@ -80,6 +80,7 @@ from app.pipeline.handled import (
 )
 from app.pipeline.reply import reply_summary, response_payload
 from app.pipeline.request import RequestContext, WireFormat
+from app.pipeline.response_observation import freeze_json
 from app.pipeline.session_identity import interaction_id_from_headers
 from app.pipeline.translation_driver.semantic import ConversionWarning, Loss
 from app.server.app_state import chain_of
@@ -667,6 +668,7 @@ async def _dispatch_after_body(
     try:
         # The path parameters go with the body because for some routes they are part of it: Azure names the deployment in the URL and sends a body with no model, so what the client asked for can only be read from the two together.
         context = build_context(route, body, request.headers, request.path_params)
+    trace.semantic_request = freeze_json(context.original_payload)
     except InboundRequestError as error:
         trace.detail = _safe_failure_detail(error)
         return error_response(
@@ -1233,6 +1235,7 @@ async def _dispatch_after_body(
         )
     body = cast(dict[str, Any], parsed_reply)
     payload = response_payload(chain, handled, body)
+    trace.semantic_response = freeze_json(payload)
     # Summarised before the hand-over is appended, so the line describes what *upstream* produced.
     # The streaming path reads its summary off the assembler, which never sees the synthesised block;
     # reading this one off the finished payload instead made the same upstream reply report two different things depending on which route carried it — one block and no tools, or two blocks and a tool the model never asked for. That divergence is the thing this whole area exists to remove, and it had been pushed back into the observability surface.

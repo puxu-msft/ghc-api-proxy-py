@@ -100,6 +100,8 @@ class HistoryEntry:
             losses=freeze_json(list(line.losses)),
             facts=freeze_json(list(line.facts)),
             capture=_capture_capabilities(facts.capture),
+            semantic_request=facts.semantic_request,
+            semantic_response=facts.semantic_response,
         )
 
     def as_dict(self) -> dict[str, JsonValue]:
@@ -123,6 +125,12 @@ class HistoryEntry:
             "usage": cast(dict[str, JsonValue], thaw_json(self.usage)),
             "losses": thaw_json(self.losses),
             "facts": thaw_json(self.facts),
+            "semantic_request": thaw_json(self.semantic_request)
+            if self.semantic_request is not None
+            else None,
+            "semantic_response": thaw_json(self.semantic_response)
+            if self.semantic_response is not None
+            else None,
             "capture": {
                 "status": self.capture.status,
                 "client_request_available": self.capture.client_request_available,

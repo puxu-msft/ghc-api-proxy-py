@@ -23,7 +23,11 @@ from app.observability.request_log_file import write_request_record
 from app.pipeline.delivery.assembling import ClientAction, ReplyDialect, Terminal
 from app.pipeline.request import RequestContext
 from app.pipeline.response_action import ClientActionRequirement
-from app.pipeline.response_observation import JsonAvailability, ResponseObservation
+from app.pipeline.response_observation import (
+    FrozenJson,
+    JsonAvailability,
+    ResponseObservation,
+)
 from app.pipeline.translation_driver.semantic import ConversionFact, Loss
 from app.tokenization.admission import TokenAdmissionObservation
 
@@ -160,6 +164,8 @@ class RequestTrace:
     request_id: str = ""
     session_id: str | None = None
     agent_id: str | None = None
+    semantic_request: FrozenJson | None = None
+    semantic_response: FrozenJson | None = None
     message_id: str = ""
     inbound_format: str = ""
     # Which endpoint took the request, recorded as soon as the route is known — before anything can fail — so a count that never reached a counter is still reported as a count.

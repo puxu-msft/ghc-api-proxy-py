@@ -15,7 +15,7 @@ from app.observability.request_completion import (
     TimingObservation,
 )
 from app.pipeline.delivery.assembling import ReplyDialect
-from app.pipeline.response_observation import FrozenJsonObject, freeze_json
+from app.pipeline.response_observation import FrozenJsonObject, freeze_json, thaw_json
 
 
 def _facts(
@@ -147,3 +147,20 @@ def test_history_entry_projects_capture_capabilities_without_raw_body() -> None:
     assert entry.capture.status == "complete"
     assert entry.capture.wire_diagnostic_eligible is True
     assert entry.as_dict()["capture"]["capture_ref"] is None
+
+
+def test_history_entry_projects_client_semantic_payloads() -> None:
+    facts = replace(
+        _facts(status="ok", delivery=DeliveryState.ACCEPTED, downstream_body_bytes=4),
+        semantic_request=freeze_json({"messages": [{"role": "user", "content": "hi"}]}),
+        semantic_response=freeze_json({"content": [{"type": "text", "text": "hello"}]}),
+    )
+
+    entry = HistoryEntry.from_request_facts(facts)
+
+    assert thaw_json(entry.semantic_request) == {
+        "messages": [{"role": "user", "content": "hi"}]
+    }
+    assert thaw_json(entry.semantic_response) == {
+        "content": [{"type": "text", "text": "hello"}]
+    }

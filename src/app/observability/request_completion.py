@@ -175,6 +175,8 @@ class RequestFacts:
     interruptions: tuple[InterruptionObservation, ...] = ()
     session_id: str | None = None
     agent_id: str | None = None
+    semantic_request: FrozenJson | None = None
+    semantic_response: FrozenJson | None = None
     capture: RawCaptureObservation | None = None
 
     def request_line(self) -> RequestLine:
@@ -665,6 +667,8 @@ class RequestCompletionCoordinator:
             session_id=self.trace.session_id,
             agent_id=self.trace.agent_id,
             capture=capture_observation,
+            semantic_request=self.trace.semantic_request,
+            semantic_response=self.trace.semantic_response,
         )
         # Set before every sink. A re-entrant or duplicate publisher sees the same immutable record and cannot repeat a side effect.
         self._record = record
