@@ -441,12 +441,12 @@ class RawRequestCapture:
         self._enabled = True
         self._finished = False
         self._request_body_finished = False
-        self._upstream_request_header_attempts: set[int | None] = set()
         self._drop_reason: str | None = None
         self._first_dropped_event: str | None = None
         self._writer_error_event: str | None = None
         self._missing_event_types: set[str] = set()
         self._committed_event_types: set[str] = set()
+        self._upstream_request_header_attempts: set[int | None] = set()
         self._upstream_request_body_attempts: set[int | None] = set()
         self._incomplete_reason: str | None = None
         self._first_incomplete_event: str | None = None
@@ -687,7 +687,6 @@ class RawRequestCapture:
                 str(writer_error).lower(),
                 str(response_body_complete).lower(),
             )
-
 
     def observation(self) -> RawCaptureObservation:
         with self._condition:
