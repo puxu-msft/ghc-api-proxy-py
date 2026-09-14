@@ -6,7 +6,7 @@ from typing import Any
 import anyio
 import httpx2
 
-from app.model_provider.ghc_client.config import GITHUB_WEB_BASE_URL
+from app.model_provider.ghc.config import GITHUB_WEB_BASE_URL
 
 GITHUB_CLIENT_ID = "Iv1.b507a08c87ecfe98"
 DEVICE_CODE_PATH = "/login/device/code"

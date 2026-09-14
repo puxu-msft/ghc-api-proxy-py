@@ -1,6 +1,6 @@
 import pytest
 
-from app.model_provider.ghc_client import (
+from app.model_provider.ghc import (
     GhcClientConfig,
     resolve_api_base_url,
     resolve_github_web_base_url,

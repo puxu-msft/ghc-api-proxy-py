@@ -22,7 +22,7 @@ from app.model_provider import (
     model_type_of,
     resolve_endpoints,
 )
-from app.model_provider.ghc_client.auth.providers import NoGitHubToken
+from app.model_provider.ghc.auth.providers import NoGitHubToken
 from app.observability.footer import CONTROL_CHARS
 from app.server.composition import build_chain, build_http_client, resolve_provider_base_urls
 

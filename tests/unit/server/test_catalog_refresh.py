@@ -9,7 +9,7 @@ import pytest
 import app.server.pipeline_app as pipeline_app_module
 from app.config.schema import ProxyConfig
 from app.core.chain import Chain
-from app.model_provider.ghc_client.models import run_model_refresh_loop
+from app.model_provider.ghc.models import run_model_refresh_loop
 from app.server.composition import refresh_catalogs
 from app.server.pipeline_app import (
     _catalog_refresh_intervals,  # pyright: ignore[reportPrivateUsage]

@@ -25,8 +25,8 @@ from _upstream import BASE_URL, CATALOG, ScriptedUpstream
 
 from app.config.schema import GithubCopilotProviderConfig, ProxyConfig
 from app.model_provider import GithubCopilotProvider
-from app.model_provider.ghc_client import GhcApiClient, GhcClientConfig
-from app.model_provider.ghc_client.tokens import CopilotTokenManager
+from app.model_provider.ghc import GhcApiClient, GhcClientConfig
+from app.model_provider.ghc.tokens import CopilotTokenManager
 from app.server.composition import build_chain
 from app.server.pipeline_app import create_pipeline_app
 

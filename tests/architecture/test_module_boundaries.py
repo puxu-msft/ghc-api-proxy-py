@@ -48,8 +48,8 @@ _ARCHIVED = (
     # moved to `app.pipeline.translation_driver`.
     "app.protocols",
     "app.models.gemini",
-    # The pre-header transport guard. Its only caller was `GhcApiClient.send_responses_headers`, whose only caller was `CopilotUpstream` — an adapter to a protocol that had already been archived, and one nothing in `src/` or `tests/` ever instantiated. What it knew (a bare `h2.exceptions.ProtocolError` reaches callers unwrapped) now lives on the live path in `app/model_provider/ghc_client/errors.py`, which is what made it safe to move rather than rewire.
-    "app.model_provider.ghc_client.transport",
+    # The pre-header transport guard. Its only caller was `GhcApiClient.send_responses_headers`, whose only caller was `CopilotUpstream` — an adapter to a protocol that had already been archived, and one nothing in `src/` or `tests/` ever instantiated. What it knew (a bare `h2.exceptions.ProtocolError` reaches callers unwrapped) now lives on the live path in `app/model_provider/ghc/errors.py`, which is what made it safe to move rather than rewire.
+    "app.model_provider.ghc.transport",
 )
 
 _RESOLVES = (
@@ -104,13 +104,13 @@ def test_the_error_vocabulary_is_a_leaf() -> None:
 
 
 def test_pipeline_exceptions_stay_importable_without_the_pipeline() -> None:
-    """`app.model_provider.ghc_client` speaks this vocabulary, and the cycle it closed was a real outage.
+    """`app.model_provider.ghc` speaks this vocabulary, and the cycle it closed was a real outage.
 
-    Normalising SDK errors needed the pipeline's exception names; importing them pulled in the executor, then `app.upstream`, then `app.model_provider.ghc_client` itself, and the process would not start.
+    Normalising SDK errors needed the pipeline's exception names; importing them pulled in the executor, then `app.upstream`, then `app.model_provider.ghc` itself, and the process would not start.
     """
     errors = reachable_from("app.pipeline.exceptions")
 
-    assert not [name for name in errors if name.startswith(("app.upstream", "app.model_provider.ghc_client"))]
+    assert not [name for name in errors if name.startswith(("app.upstream", "app.model_provider.ghc"))]
 
 
 def test_h2_is_imported_only_for_its_types() -> None:

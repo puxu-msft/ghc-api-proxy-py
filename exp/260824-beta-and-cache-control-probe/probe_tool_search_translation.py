@@ -21,8 +21,8 @@ from uuid import uuid4
 
 import httpx2 as httpx
 
-from app.model_provider.ghc_client.config import GhcClientConfig
-from app.model_provider.ghc_client.headers import build_identity_headers, build_request_headers
+from app.model_provider.ghc.config import GhcClientConfig
+from app.model_provider.ghc.headers import build_identity_headers, build_request_headers
 
 TOKEN_FILE = Path.home() / ".local/share/ghc-api-proxy/github_token"
 AUTH_URL = "https://api.github.com/copilot_internal/v2/token"

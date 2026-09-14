@@ -18,7 +18,7 @@ from openai import AsyncOpenAI
 from app.config.schema import GithubCopilotProviderConfig, ProxyConfig
 from app.core.chain import Chain
 from app.model_provider import GithubCopilotProvider, ModelProvider
-from app.model_provider.ghc_client import CopilotTokenManager, GhcApiClient, GhcClientConfig
+from app.model_provider.ghc import CopilotTokenManager, GhcApiClient, GhcClientConfig
 from app.server.composition import build_chain
 from recorded.cassettes import Cassette, ReplayTransport
 

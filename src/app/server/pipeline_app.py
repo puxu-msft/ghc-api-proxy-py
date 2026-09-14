@@ -17,7 +17,7 @@ from fastapi import FastAPI
 
 from app.config.schema import GithubCopilotProviderConfig, OpenAICompatibleProviderConfig
 from app.core.chain import Chain
-from app.model_provider.ghc_client.models import run_model_refresh_loop
+from app.model_provider.ghc.models import run_model_refresh_loop
 from app.observability.logging import get_logger
 from app.observability.responsiveness import monitor_event_loop
 from app.observability.tui import footer_tui_or_none

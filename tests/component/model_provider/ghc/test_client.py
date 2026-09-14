@@ -10,8 +10,8 @@ from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 
 from app.config.schema import GithubCopilotProviderConfig
-from app.model_provider.ghc_client import GhcApiClient, GhcClientConfig
-from app.model_provider.ghc_client.tokens import CopilotTokenManager
+from app.model_provider.ghc import GhcApiClient, GhcClientConfig
+from app.model_provider.ghc.tokens import CopilotTokenManager
 from app.model_provider.github_copilot import GithubCopilotProvider
 from app.observability.raw_capture import (
     RawCaptureStore,

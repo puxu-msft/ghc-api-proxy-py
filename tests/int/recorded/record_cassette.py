@@ -24,7 +24,7 @@ import httpx2
 from app.config.schema import GithubCopilotProviderConfig, ProxyConfig
 from app.core.chain import Chain
 from app.model_provider import ModelProvider, resolve_default_name
-from app.model_provider.ghc_client import (
+from app.model_provider.ghc import (
     CopilotTokenManager,
     GhcClientConfig,
     build_identity_headers,

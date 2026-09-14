@@ -7,9 +7,9 @@ from anthropic._types import Body as AnthropicBody
 from openai import AsyncOpenAI
 from openai._types import Body as OpenAIBody
 
-from app.model_provider.ghc_client.config import GhcClientConfig
-from app.model_provider.ghc_client.headers import build_request_headers
-from app.model_provider.ghc_client.tokens import CopilotTokenManager
+from app.model_provider.ghc.config import GhcClientConfig
+from app.model_provider.ghc.headers import build_request_headers
+from app.model_provider.ghc.tokens import CopilotTokenManager
 from app.model_provider.upstream_errors import normalize_upstream_error
 from app.observability.raw_capture import (
     activate_pending_upstream_capture,

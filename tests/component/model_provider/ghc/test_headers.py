@@ -1,4 +1,4 @@
-from app.model_provider.ghc_client import (
+from app.model_provider.ghc import (
     GhcClientConfig,
     build_identity_headers,
     build_request_headers,

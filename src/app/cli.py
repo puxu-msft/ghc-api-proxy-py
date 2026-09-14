@@ -32,9 +32,9 @@ from app.model_provider.codebuddy_client import (
     DesktopAuthState,
     discover_auth_file,
 )
-from app.model_provider.ghc_client.auth.providers import FileTokenProvider
-from app.model_provider.ghc_client.auth.service import authenticate_device, clear_stored_token
-from app.model_provider.ghc_client.config import GhcClientConfig
+from app.model_provider.ghc.auth.providers import FileTokenProvider
+from app.model_provider.ghc.auth.service import authenticate_device, clear_stored_token
+from app.model_provider.ghc.config import GhcClientConfig
 from app.model_provider.types import ProviderError
 from app.observability.logging import get_logger, setup_logging
 from app.server.composition import (

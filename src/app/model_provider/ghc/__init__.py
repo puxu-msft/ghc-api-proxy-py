@@ -11,21 +11,21 @@ It sat at `app.ghc_client` until 2026-08-21, as though talking to Copilot were a
 The docstring also said "Imports nothing from `app.*`", which had already stopped being true: `errors.py` imports `app.pipeline.exceptions` to normalise SDK failures into the vocabulary the pipeline speaks, and `auth/` reaches `app.config` for the token file's location and for the one environment variable name. Nothing enforced the claim, so it went stale in silence — which is the reason to state what the dependencies are instead of that there are none.
 """
 
-from app.model_provider.ghc_client.account import GitHubAccountClient, infer_account_type
-from app.model_provider.ghc_client.client import GhcApiClient
-from app.model_provider.ghc_client.config import (
+from app.model_provider.ghc.account import GitHubAccountClient, infer_account_type
+from app.model_provider.ghc.client import GhcApiClient
+from app.model_provider.ghc.config import (
     GhcClientConfig,
     resolve_api_base_url,
     resolve_github_web_base_url,
 )
-from app.model_provider.ghc_client.device_flow import (
+from app.model_provider.ghc.device_flow import (
     DeviceCode,
     DeviceFlowClient,
     DeviceFlowError,
 )
-from app.model_provider.ghc_client.headers import build_identity_headers, build_request_headers
-from app.model_provider.ghc_client.models import ModelCatalogPage, fetch_models
-from app.model_provider.ghc_client.tokens import (
+from app.model_provider.ghc.headers import build_identity_headers, build_request_headers
+from app.model_provider.ghc.models import ModelCatalogPage, fetch_models
+from app.model_provider.ghc.tokens import (
     CopilotTokenInfo,
     CopilotTokenManager,
     GitHubTokenSource,

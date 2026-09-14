@@ -5,7 +5,7 @@ import pytest
 import structlog
 
 import app.observability.logging as logging_module
-from app.model_provider.ghc_client.auth.providers import NoGitHubToken
+from app.model_provider.ghc.auth.providers import NoGitHubToken
 from app.observability.logging import LogFormat, get_logger, setup_logging
 from app.observability.terminal import TerminalCapabilities
 

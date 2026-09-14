@@ -45,8 +45,8 @@ import app.tokenization.worker as token_worker_module
 from app.config.schema import GithubCopilotProviderConfig, ProxyConfig
 from app.core.chain import Chain
 from app.model_provider import GithubCopilotProvider, ModelDescriptor, ModelEndpoint, ModelProvider
-from app.model_provider.ghc_client import GhcApiClient, GhcClientConfig
-from app.model_provider.ghc_client.tokens import CopilotTokenManager
+from app.model_provider.ghc import GhcApiClient, GhcClientConfig
+from app.model_provider.ghc.tokens import CopilotTokenManager
 from app.observability.active_requests import ActiveRequestRegistry
 from app.observability.footer import format_duration
 from app.observability.logging import setup_logging

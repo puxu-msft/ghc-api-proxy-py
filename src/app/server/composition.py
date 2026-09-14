@@ -53,7 +53,7 @@ from app.model_provider.codebuddy_client import (
     DesktopAuthState,
     discover_auth_file,
 )
-from app.model_provider.ghc_client import (
+from app.model_provider.ghc import (
     CopilotTokenManager,
     GhcApiClient,
     GhcClientConfig,
@@ -63,14 +63,14 @@ from app.model_provider.ghc_client import (
     infer_account_type,
     resolve_api_base_url,
 )
-from app.model_provider.ghc_client.auth.providers import (
+from app.model_provider.ghc.auth.providers import (
     CLITokenProvider,
     EnvTokenProvider,
     FileTokenProvider,
     GitHubTokenManager,
     NoGitHubToken,
 )
-from app.model_provider.ghc_client.config import AccountType
+from app.model_provider.ghc.config import AccountType
 from app.model_provider.openai_compatible import (
     OpenAICompatibleClient,
     OpenAICompatibleProvider,

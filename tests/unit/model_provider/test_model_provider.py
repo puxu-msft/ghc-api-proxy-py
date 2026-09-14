@@ -26,8 +26,8 @@ from app.model_provider import (
     require_endpoint,
     resolve_default_name,
 )
-from app.model_provider.ghc_client import GhcApiClient, GhcClientConfig
-from app.model_provider.ghc_client.tokens import CopilotTokenManager
+from app.model_provider.ghc import GhcApiClient, GhcClientConfig
+from app.model_provider.ghc.tokens import CopilotTokenManager
 
 BASE_URL = "https://copilot.example"
 

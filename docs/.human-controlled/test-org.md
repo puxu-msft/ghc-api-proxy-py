@@ -7,7 +7,7 @@
 ```
 tests/
     unit/<类似 src 的包结构>/   # 轻量的函数级、多函数级内存测试，不追求全覆盖，核心关切即可
-    component/{ghc_client,history}/     # 某个内聚的模块、组件的整体或多部分联调测试
+    component/{ghc,history}/     # 某个内聚的模块、组件的整体或多部分联调测试
     int/                        # 跨模块集成测试，可能启动单独 proxy process 和 test client，也可能不
     e2e/claude/                 # 真实 claude cli binary + CLAUDE_CONFIG_DIR + proxy process + mock upstream
 ```

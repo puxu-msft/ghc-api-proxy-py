@@ -4,9 +4,9 @@ from typing import Protocol
 
 import httpx2
 
-from app.model_provider.ghc_client.auth.providers import FileTokenProvider
-from app.model_provider.ghc_client.config import GITHUB_WEB_BASE_URL
-from app.model_provider.ghc_client.device_flow import DeviceCode, DeviceFlowClient
+from app.model_provider.ghc.auth.providers import FileTokenProvider
+from app.model_provider.ghc.config import GITHUB_WEB_BASE_URL
+from app.model_provider.ghc.device_flow import DeviceCode, DeviceFlowClient
 
 
 class DeviceFlow(Protocol):
