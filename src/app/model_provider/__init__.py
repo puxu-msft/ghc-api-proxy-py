@@ -1,12 +1,19 @@
 """Abstraction over upstream model providers.
 
-GitHub Copilot and Xingchen are instances: each owns a catalog and the endpoints it can drive.
+Each provider owns a catalog and the endpoints it can drive.
 Callers route through the shared protocol without depending on either concrete provider.
 """
 
 from app.model_provider.base import CatalogProvider, ModelProvider
 from app.model_provider.codebuddy import PROVIDER_TYPE as CODEBUDDY_PROVIDER_TYPE
 from app.model_provider.codebuddy import CodebuddyProvider
+from app.model_provider.commandcode import (
+    PROVIDER_TYPE as COMMANDCODE_PROVIDER_TYPE,
+)
+from app.model_provider.commandcode import (
+    CommandCodeClient,
+    CommandCodeProvider,
+)
 from app.model_provider.github_copilot import (
     PROVIDER_TYPE as GITHUB_COPILOT_PROVIDER_TYPE,
 )
@@ -56,6 +63,7 @@ __all__ = [
     "BRIDGE_PROVIDER_TYPE",
     "BRIDGE_PROVIDER_TYPES",
     "CODEBUDDY_PROVIDER_TYPE",
+    "COMMANDCODE_PROVIDER_TYPE",
     "GITHUB_COPILOT_PROVIDER_TYPE",
     "XINGCHEN_PROVIDER_TYPE",
     "CapabilityMissing",
@@ -65,6 +73,8 @@ __all__ = [
     "ChatEndpointCapabilities",
     "ChatResponseMode",
     "CodebuddyProvider",
+    "CommandCodeClient",
+    "CommandCodeProvider",
     "DescriptorProviderMismatch",
     "EndpointNotImplemented",
     "EndpointNotSupported",

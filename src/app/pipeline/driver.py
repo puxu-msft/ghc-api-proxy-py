@@ -118,8 +118,13 @@ def shape_request(
         on_routed(context)
 
     # Before anything reads `client_headers` for the attempt, and after `apply_route` because until routing decides there is no answer to which path this is. `build_context` has already applied the floor, so this is a policy question rather than a safety one: `message-format-reshape.md` gives the direct path a blacklist and the translation path a whitelist, and today that whitelist is empty — a translated request forwards none of the client's headers, `anthropic-beta` included.
+    source_headers = context.source_headers_for_translation()
     context.client_headers = apply_path_header_policy(
         context.client_headers, translated=context.translation_required
+    )
+    context.commandcode_zdr = (
+        context.target_format is WireFormat.COMMANDCODE
+        and source_headers.get("x-cmd-zdr") == "1"
     )
 
     if context.inbound_format is WireFormat.ANTHROPIC_MESSAGES:
@@ -546,10 +551,16 @@ async def handle_count_tokens(
 
     # One estimator per wire contract, and the calibration key follows it. The protocols' payload estimates stay separate so neither corrects the other with its own error; the same reason applies to the factor learnt from them. The idea came from `.dev/docs/token-counting/history/2604-rewrite/tokenization.md`, which the user ruled obsolete on 2026-08-20 — it is kept on the reasoning, not on that document's authority.
     protocol = route.target_format.value
+    estimate_payload: Mapping[str, Any] = context.payload
     if route.target_format is WireFormat.ANTHROPIC_MESSAGES:
         protocol = "anthropic"
+    elif route.target_format is WireFormat.COMMANDCODE:
+        # Command Code has no count endpoint or native estimator. The count
+        # route is Anthropic Messages, so estimate the original client body
+        # rather than the provider envelope.
+        protocol = "anthropic"
+        estimate_payload = context.original_payload or context.payload
     elif route.target_format is not WireFormat.OPENAI_RESPONSES:
-        # Unreachable today and written to stay loud if that changes: the only outbound translators registered are Anthropic and Responses, so any other target already failed above with `TranslatorNotFound`. Add one — chat-completions is the obvious candidate, and three models in the catalogue advertise nothing else — and this branch opens. Reading a chat-completions body with the Responses estimator finds no `input` and no `instructions` and returns 1, which is not an estimate but a claim that the request is free.
         raise CountTokensRequestError(
             f"no token estimator for {route.target_format.value}; add one before routing counts there"
         )
@@ -560,7 +571,7 @@ async def handle_count_tokens(
         nonlocal estimate
         if estimate is None:
             _check_count_deadline(deadline_at)
-            estimate = await chain.local_token_worker.estimate(protocol, context.payload)
+            estimate = await chain.local_token_worker.estimate(protocol, estimate_payload)
             _check_count_deadline(deadline_at)
         return estimate
 

@@ -53,6 +53,8 @@ class LossCode(StrEnum):
     SERVER_TOOL_CONSTRAINT_DROPPED = "server-tool-constraint-dropped"
     REASONING_INTENT_APPROXIMATED = "reasoning-intent-approximated"
     REASONING_INTENT_NOT_CARRIED = "reasoning-intent-not-carried"
+    MESSAGE_PHASE_NOT_CARRIED = "message-phase-not-carried"
+    COMMANDCODE_STREAM_FORCED = "commandcode-stream-forced"
     TOOL_DESCRIPTION_COERCED = "tool-description-coerced"
     # A `cache_control` key upstream does not accept, removed so the rest of the request can be sent. Its own member rather than `EXTENSIONS_NOT_CARRIED` because what was lost is specific and consequential: `scope` decides how widely a cached prefix is shared, so dropping it changes what the cache does rather than dropping decoration. Spec §7.1.
     CACHE_CONTROL_FIELD_NOT_CARRIED = "cache-control-field-not-carried"
@@ -199,6 +201,9 @@ class SemanticRequest:
     thinking_effort: ThinkingEffortIntent | None = None
     # None means absent or unclaimed; an unclaimed choice remains in extensions for exact replay.
     tool_choice: ToolChoiceIntent | None = None
+    # Explicit Responses/Chat parallelism is independent of tool selection.
+    # Anthropic's nested disable flag is still carried by ``tool_choice``.
+    parallel_tool_calls: bool | None = None
     # Which wire format the extensions below came off. A writer for a different format must not replay them: an unclaimed key is unclaimed *in its own format*, and in another one it is at best meaningless. Measured — sending Anthropic's `context_management` to the Responses endpoint gets `failed to parse request`, so replaying it is not merely untidy.
     source_format: str = ""
     # The client's own tool-search tool, when one was identified. Written by the outbound writer rather than read off the wire, because identification depends on what that writer decided to do — and the *response* half needs the same answer to turn a `tool_search_call` back into a call on that tool. Empty means no search was translated, which is also the answer when identification declined.
@@ -231,17 +236,25 @@ class SemanticRequest:
     def nested_unknown_fields(self, value: dict[str, dict[str, Any]]) -> None:
         self.nested_extensions = value
 
-    def extensions_for(self, wire_format: str) -> dict[str, Any]:
+    def extensions_for(
+        self,
+        wire_format: str,
+        *,
+        excluded: frozenset[str] = frozenset(),
+    ) -> dict[str, Any]:
         """The extensions a writer for `wire_format` may replay — all of them or none.
 
         Records the drop rather than performing it silently, which is what `Conversion` is for.
         """
-        if not self.extensions or self.source_format == wire_format:
-            return dict(self.extensions)
+        fields = {
+            key: value for key, value in self.extensions.items() if key not in excluded
+        }
+        if not fields or self.source_format == wire_format:
+            return fields
         self.conversion.record(
             LossCode.EXTENSIONS_NOT_CARRIED,
             f"from {self.source_format or 'an unnamed format'} into {wire_format}: "
-            f"{', '.join(sorted(self.extensions))}",
+            f"{', '.join(sorted(fields))}",
         )
         return {}
 
@@ -261,16 +274,34 @@ class SemanticRequest:
         )
         return {}
 
-    def nested_extensions_for(self, wire_format: str) -> dict[str, dict[str, Any]]:
-        if not self.nested_extensions:
+    def nested_extensions_for(
+        self,
+        wire_format: str,
+        *,
+        excluded: Mapping[str, frozenset[str]] | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        excluded_fields = excluded or {}
+        fields_by_name = {
+            name: {
+                key: value
+                for key, value in fields.items()
+                if key not in excluded_fields.get(name, frozenset())
+            }
+            for name, fields in self.nested_extensions.items()
+        }
+        fields_by_name = {
+            name: fields for name, fields in fields_by_name.items() if fields
+        }
+        if not fields_by_name:
             return {}
         if self.source_format == wire_format:
-            return {name: dict(fields) for name, fields in self.nested_extensions.items()}
-        for name, fields in self.nested_extensions.items():
+            return {name: dict(fields) for name, fields in fields_by_name.items()}
+        source = self.source_format or "an unnamed format"
+        for name, fields in fields_by_name.items():
             for key in sorted(fields):
                 self.conversion.record(
                     LossCode.EXTENSIONS_NOT_CARRIED,
-                    f"from {self.source_format} into {wire_format}: {name}.{key}",
+                    f"from {source} into {wire_format}: {name}.{key}",
                 )
         return {}
 

@@ -384,6 +384,9 @@ class PassthroughFramer:
     def terminal(self, terminal: Terminal) -> tuple[bytes, ...]:
         return ()
 
+    def supports_stop_reason(self, stop_reason: str) -> bool:
+        return False
+
     def error(self, info: ErrorInfo) -> bytes:
         return self.delegate.error(info)
 

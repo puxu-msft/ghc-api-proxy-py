@@ -112,6 +112,7 @@ _WRITERS = {
     "openai-chat-completions": _openai,
     "openai-responses": _openai,
     "openai-embeddings": _openai,
+    "commandcode": _openai,
     "gemini-generate-content": _gemini,
 }
 

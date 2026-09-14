@@ -274,13 +274,35 @@ class AnthropicFramer:
 
         The Responses framer answers the same absence with a `null`, because its own schema permits one. The two legs therefore differ on this, with a reason; it is not a mismatch to tidy away.
         """
+        stop_reason = terminal.stop_reason or "end_turn"
+        if stop_reason not in {
+            "end_turn",
+            "max_tokens",
+            "stop_sequence",
+            "tool_use",
+            "pause_turn",
+            "refusal",
+            "model_context_window_exceeded",
+        }:
+            stop_reason = "end_turn"
         return tuple(
             frame.encode()
             for frame in terminal_frames(
-                stop_reason=terminal.stop_reason or "end_turn",
+                stop_reason=stop_reason,
                 usage=terminal.usage or {"output_tokens": 0},
             )
         )
+
+    def supports_stop_reason(self, stop_reason: str) -> bool:
+        return stop_reason in {
+            "end_turn",
+            "max_tokens",
+            "stop_sequence",
+            "tool_use",
+            "pause_turn",
+            "refusal",
+            "model_context_window_exceeded",
+        }
 
     def error(self, info: ErrorInfo) -> bytes:
         return error_frame(info).encode()

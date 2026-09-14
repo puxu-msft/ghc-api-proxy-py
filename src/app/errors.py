@@ -139,6 +139,7 @@ ERROR_TYPES_BY_FORMAT: dict[str, dict[ErrorCategory, str]] = {
     "openai-chat-completions": OPENAI_ERROR_TYPES,
     "openai-responses": OPENAI_ERROR_TYPES,
     "openai-embeddings": OPENAI_ERROR_TYPES,
+    "commandcode": OPENAI_ERROR_TYPES,
     "gemini-generate-content": GEMINI_ERROR_STATUSES,
 }
 
@@ -198,6 +199,7 @@ CONDITION_CODES_BY_FORMAT: dict[str, dict[ErrorCondition, str]] = {
     "openai-chat-completions": OPENAI_CONDITION_CODES,
     "openai-responses": OPENAI_CONDITION_CODES,
     "openai-embeddings": OPENAI_CONDITION_CODES,
+    "commandcode": OPENAI_CONDITION_CODES,
 }
 
 # The one sentence a client is known to key on, and the reason this whole condition exists. Spec §5.5.3.

@@ -587,17 +587,12 @@ async def test_delivering_a_truncated_stream_does_not_make_its_record_look_finis
 
 @pytest.mark.asyncio
 async def test_an_eof_between_blocks_closes_the_message_without_claiming_success() -> None:
-    """Upstream stopped at a block boundary without saying why. Every block it produced is whole, so nothing the client holds is damaged and an error frame would call a reply truncated when nothing was cut. Ruled 2026-08-22.
-
-    The invariant that outlives the ruling is the one this test has carried through two rewrites: **never dress a turn upstream did not finish as one it did.** The chain originally flushed `end_turn` here, which stored a truncated answer in the client's history as a complete one; the fix made it an error; this makes it a clean close under upstream's own word for it. `end_turn` staying absent is what makes the third version a refinement of the second rather than a reversion to the first, and it is asserted for that reason.
-    """
+    """An EOF without a terminal must use the Anthropic error convention."""
     body = await _truncated_delivery(AnthropicAssembler())
 
-    assert '"type":"error"' not in body
-    assert "incomplete_responses_stream" not in body
-    assert "message_stop" in body
-    # Read off the frame rather than matched as a substring. Asserting `"incomplete" in body` and then `"end_turn" not in body` looked like two checks and was one: only one `stop_reason` is ever emitted, so the second was strictly implied by the first and could never fail on its own. An equality pins both directions at once — the reason it must be, and every reason it must not be, `end_turn` above all.
-    assert _closing_stop_reason(body) == "incomplete"
+    assert '"type":"error"' in body
+    assert "incomplete_responses_stream" in body
+    assert "message_stop" not in body
 
 
 @pytest.mark.asyncio
@@ -711,16 +706,14 @@ async def _responses_delivery(payloads: list[bytes]) -> str:
 
 @pytest.mark.asyncio
 async def test_a_responses_eof_between_whole_items_closes_the_message() -> None:
-    """The same ruling on the leg it actually fires on.
-
-    Measured over 133 929 recorded upstream streams: of the 109 that ended without a terminal event, the four that stopped at a block boundary were **all** on this leg — the Anthropic leg's 32 were every one of them mid-block. So the refinement's only real-world trigger had no test at all until this one, and both formats' `cut_mid_block` needs its own.
-    """
+    """The translated Responses leg uses the client's legal Anthropic error shape."""
     body = await _responses_delivery(
         _responses_item(0, "msg_a", status="completed") + _responses_item(1, "msg_b", status="completed")
     )
 
-    assert '"type":"error"' not in body
-    assert _closing_stop_reason(body) == "incomplete"
+    assert '"type":"error"' in body
+    assert "incomplete_responses_stream" in body
+    assert "message_stop" not in body
     assert '"text":"part0"' in body
     assert '"text":"part1"' in body
 
@@ -2358,10 +2351,7 @@ async def test_a_severed_stream_still_errors_when_no_hand_over_is_configured() -
 
 @pytest.mark.asyncio
 async def test_an_eof_at_a_block_boundary_is_still_closed_rather_than_handed_back() -> None:
-    """The 2026-08-22 ruling is untouched by the hand-over above.
-
-    That ending reports no error, so line 30's 将报错合成为 never reaches it. Asked with a continuation configured, because that is the only arrangement in which the two rulings could have collided.
-    """
+    """A legal client error is not a continuation trigger."""
     handed: list[BaseException | None] = []
 
     def synthesize(error: BaseException | None, _stop_reason: str) -> dict[str, Any]:
@@ -2381,7 +2371,7 @@ async def test_an_eof_at_a_block_boundary_is_still_closed_rather_than_handed_bac
     ]
     body = b"".join(chunks).decode()
 
-    assert handed == [], "a boundary close is not an error, so nothing is handed back"
-    assert "incomplete_responses_stream" not in body
-    assert '"stop_reason":"incomplete"' in body
+    assert handed == [], "a dialect error is not a continuation trigger"
+    assert "incomplete_responses_stream" in body
+    assert '"stop_reason":"incomplete"' not in body
     assert '"text":"kept"' in body

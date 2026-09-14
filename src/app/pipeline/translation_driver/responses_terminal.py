@@ -15,11 +15,18 @@ from app.pipeline.translation_driver.usage import (
 )
 
 MAX_TOKENS = "max_tokens"
+MAX_MESSAGES = "max_messages"
 END_TURN = "end_turn"
 TOOL_USE = "tool_use"
 CONTENT_FILTER = "content_filter"
+STEERED = "steered"
 FINISHED_STOP_REASONS = frozenset({END_TURN, TOOL_USE, ""})
-INCOMPLETE_REASONS = {MAX_TOKENS: "max_output_tokens", CONTENT_FILTER: CONTENT_FILTER}
+INCOMPLETE_REASONS = {
+    MAX_TOKENS: "max_output_tokens",
+    MAX_MESSAGES: MAX_MESSAGES,
+    CONTENT_FILTER: CONTENT_FILTER,
+    STEERED: STEERED,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,7 +108,9 @@ __all__ = [
     "END_TURN",
     "FINISHED_STOP_REASONS",
     "INCOMPLETE_REASONS",
+    "MAX_MESSAGES",
     "MAX_TOKENS",
+    "STEERED",
     "TOOL_USE",
     "ResponsesTerminalFacts",
     "stop_reason_from_response",

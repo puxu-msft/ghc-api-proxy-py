@@ -15,7 +15,11 @@ from urllib.parse import quote
 import anyio
 from fastapi import FastAPI
 
-from app.config.schema import GithubCopilotProviderConfig, OpenAICompatibleProviderConfig
+from app.config.schema import (
+    CommandCodeProviderConfig,
+    GithubCopilotProviderConfig,
+    OpenAICompatibleProviderConfig,
+)
 from app.core.chain import Chain
 from app.model_provider.ghc.models import run_model_refresh_loop
 from app.observability.logging import get_logger
@@ -67,7 +71,14 @@ def _catalog_refresh_intervals(chain: Chain) -> tuple[tuple[str, int], ...]:
     return tuple(
         (name, provider.model_refresh_interval)
         for name, provider in chain.config.model_providers.items()
-        if isinstance(provider, (GithubCopilotProviderConfig, OpenAICompatibleProviderConfig))
+        if isinstance(
+            provider,
+            (
+                GithubCopilotProviderConfig,
+                OpenAICompatibleProviderConfig,
+                CommandCodeProviderConfig,
+            ),
+        )
         and provider.model_refresh_interval > 0
     )
 

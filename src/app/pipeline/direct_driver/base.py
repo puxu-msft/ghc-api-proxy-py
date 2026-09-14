@@ -186,16 +186,52 @@ def capture_failed_upstream_attempt(
     *,
     attempt: int,
 ) -> None:
-    """Keep the wire evidence when an SDK status exception bypasses a response."""
-    upstream_error = error.error if isinstance(error, ConnectionBoundInputIdRetry) else error
-    if capture is None or not isinstance(upstream_error, (UpstreamError, UpstreamRejected)):
+    """Keep the wire evidence when an upstream failure bypasses a response.
+
+    The driver normally calls this before wrapping the failure in a retry
+    exhaustion error. Walking the links as well keeps the same canonical
+    capture path correct for callers that hand it the final wrapper instead.
+    """
+    if capture is None:
+        return
+    pending: list[BaseException] = [error]
+    seen: set[int] = set()
+    upstream_error: UpstreamError | UpstreamRejected | None = None
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, (UpstreamError, UpstreamRejected)):
+            upstream_error = current
+            break
+        if isinstance(current, ConnectionBoundInputIdRetry):
+            pending.append(current.error)
+        pending.extend(
+            linked
+            for linked in (
+                current.__cause__,
+                current.__context__,
+                getattr(current, "cause", None),
+            )
+            if isinstance(linked, BaseException)
+        )
+    if upstream_error is None:
         return
     if getattr(upstream_error, "sent_observed", False):
         capture.upstream_request_body(upstream_error.sent, attempt=attempt)
-    if upstream_error.status_code is not None:
+    transport_status = getattr(upstream_error, "transport_status_code", None)
+    if not isinstance(transport_status, int):
+        transport_status = upstream_error.status_code
+    transport_headers = getattr(upstream_error, "transport_headers", None)
+    if isinstance(transport_headers, Mapping):
+        transport_headers = cast(Mapping[str, str], transport_headers)
+    else:
+        transport_headers = upstream_error.headers
+    if transport_status is not None:
         capture.upstream_response_start(
-            upstream_error.status_code,
-            headers=upstream_error.headers,
+            transport_status,
+            headers=transport_headers,
             attempt=attempt,
         )
         if upstream_error.body_observed:
@@ -222,9 +258,17 @@ def capture_returned_upstream_response(
         attempt=attempt,
     )
     capture.upstream_request_body(response.request.content, attempt=attempt)
+    transport_status = response.extensions.get("upstream_transport_status_code")
+    if not isinstance(transport_status, int):
+        transport_status = response.status_code
+    transport_headers = response.extensions.get("upstream_transport_headers")
+    if isinstance(transport_headers, Mapping):
+        transport_headers = cast(Mapping[str, str], transport_headers)
+    else:
+        transport_headers = response.headers
     capture.upstream_response_start(
-        response.status_code,
-        headers=response.headers,
+        transport_status,
+        headers=transport_headers,
         attempt=attempt,
     )
     if response.is_stream_consumed:
@@ -815,14 +859,25 @@ class DirectDriver:
             raise RuntimeError("direct driver has no routed model descriptor")
         capture = context.extras.get("raw_capture")
         raw_capture = capture if isinstance(capture, RawRequestCapture) else None
+        if self._endpoint is ModelEndpoint.COMMANDCODE_GENERATE:
+            interaction_id = context.interaction_id or context.provider_interaction_id
+            if interaction_id is None and context.semantic_request is not None:
+                candidate = context.semantic_request.extensions.get("prompt_cache_key")
+                if isinstance(candidate, str) and candidate:
+                    interaction_id = candidate
+        else:
+            interaction_id = context.interaction_id_for_provider()
+        extra_headers = dict(context.client_headers)
+        if self._endpoint is ModelEndpoint.COMMANDCODE_GENERATE and context.commandcode_zdr:
+            extra_headers["x-cmd-zdr"] = "1"
         with pending_upstream_capture(raw_capture, attempt):
             send = self._provider.send(
                 self._endpoint,
                 payload,
                 descriptor=descriptor,
                 stream=context.stream,
-                extra_headers=context.client_headers or None,
-                interaction_id=context.interaction_id_for_provider(),
+                extra_headers=extra_headers or None,
+                interaction_id=interaction_id,
             )
             if self._response_header_timeout <= 0:
                 return await send

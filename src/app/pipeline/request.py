@@ -32,6 +32,7 @@ class WireFormat(StrEnum):
     OPENAI_CHAT_COMPLETIONS = "openai-chat-completions"
     OPENAI_RESPONSES = "openai-responses"
     OPENAI_EMBEDDINGS = "openai-embeddings"
+    COMMANDCODE = "commandcode"
     # Ratified in `api.md` and routed, but no translator answers to this name yet. `InboundRoute.implemented` is what keeps a request from reaching one; the value exists so the route table can say which format the path carries rather than borrowing a neighbour's.
     GEMINI_GENERATE_CONTENT = "gemini-generate-content"
 
@@ -41,6 +42,7 @@ ENDPOINT_FORMATS: dict[ModelEndpoint, WireFormat] = {
     ModelEndpoint.OPENAI_CHAT_COMPLETIONS: WireFormat.OPENAI_CHAT_COMPLETIONS,
     ModelEndpoint.OPENAI_RESPONSES: WireFormat.OPENAI_RESPONSES,
     ModelEndpoint.OPENAI_EMBEDDINGS: WireFormat.OPENAI_EMBEDDINGS,
+    ModelEndpoint.COMMANDCODE_GENERATE: WireFormat.COMMANDCODE,
 }
 
 FORMAT_ENDPOINTS: dict[WireFormat, ModelEndpoint] = {
@@ -191,6 +193,9 @@ class RequestContext:
     semantic_request: SemanticRequest | None = None
     translation_target: TranslationTarget | None = None
     translation_options: TranslationOptions | None = None
+    # Request-scoped Command Code control extracted before translated-header
+    # policy; it is reintroduced only at the Command Code send boundary.
+    commandcode_zdr: bool = False
 
     attempts: list[Attempt] = field(default_factory=lambda: list[Attempt]())
 

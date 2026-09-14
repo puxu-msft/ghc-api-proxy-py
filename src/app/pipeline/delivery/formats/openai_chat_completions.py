@@ -16,6 +16,7 @@ one leg answer those questions once.
 
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -23,6 +24,7 @@ from app.errors import STATUS_FOR_CATEGORY, ErrorCategory, ErrorInfo
 from app.pipeline.chat_completions.events import ChatEventFacts, ChatEventKind, ChatEventReader
 from app.pipeline.delivery.assembling import FailureOrigin, ReplyDialect, StreamFailure, Terminal
 from app.pipeline.delivery.blocks import TEXT, THINKING, TOOL_USE, CompletedBlock
+from app.pipeline.delivery.formats.errors import write_error
 from app.pipeline.delivery.sse_source import SseEvent
 from app.pipeline.response_observation import FrozenJsonObject, JsonAvailability, thaw_json
 from app.pipeline.translation_driver.openai_chat_completions import (
@@ -35,6 +37,7 @@ from app.pipeline.translation_driver.reasoning_bridge import (
     read_chat_reasoning,
     reasoning_to_anthropic,
 )
+from app.pipeline.translation_driver.usage import chat_usage_from_anthropic
 
 _logger = logging.getLogger(__name__)
 
@@ -324,3 +327,103 @@ def chat_failure_from_facts(facts: ChatEventFacts, *, raw_data: str) -> StreamFa
             source_bytes=raw_data.encode(),
         ),
     )
+
+
+class ChatCompletionsFramer:
+    """Frame semantic blocks as Chat Completions SSE.
+
+    This is used only when Chat Completions is the client leg and the upstream
+    speaks another format. Direct Chat passthrough remains byte-preserving.
+    """
+
+    def __init__(self, *, message_id: str, model: str) -> None:
+        self._message_id = message_id
+        self._model = model
+        self._created = int(time.time())
+        self._started = False
+        self._tool_index = 0
+
+    def preamble(self) -> tuple[bytes, ...]:
+        return ()
+
+    def block(self, block: CompletedBlock) -> tuple[bytes, ...]:
+        delta: dict[str, Any]
+        if block.kind == TEXT:
+            delta = {"content": str(block.payload.get("text", ""))}
+        elif block.kind == THINKING:
+            delta = {"reasoning_content": str(block.payload.get("thinking", ""))}
+        elif block.kind == TOOL_USE:
+            delta = {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "index": self._tool_index,
+                        "id": str(block.payload.get("id", "")),
+                        "type": "function",
+                        "function": {
+                            "name": str(block.payload.get("name", "")),
+                            "arguments": json.dumps(
+                                block.payload.get("input", {}),
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                        },
+                    }
+                ],
+            }
+            self._tool_index += 1
+        else:
+            return ()
+        if not self._started:
+            delta = {"role": "assistant", **delta}
+            self._started = True
+        return (self._chunk(delta=delta, finish_reason=None),)
+
+    def terminal(self, terminal: Terminal) -> tuple[bytes, ...]:
+        reason = {
+            "end_turn": "stop",
+            "tool_use": "tool_calls",
+            "max_tokens": "length",
+        }.get(terminal.stop_reason, "stop")
+        usage = chat_usage_from_anthropic(terminal.usage)
+        return (
+            self._chunk(delta={}, finish_reason=reason, usage=usage),
+            b"data: [DONE]\n\n",
+        )
+
+    def supports_stop_reason(self, stop_reason: str) -> bool:
+        return stop_reason in {"end_turn", "tool_use", "max_tokens"}
+
+    def error(self, info: ErrorInfo) -> bytes:
+        return (
+            "data: "
+            + json.dumps(write_error(info, wire_format=WIRE_FORMAT), ensure_ascii=False)
+            + "\n\n"
+        ).encode()
+
+    def keepalive(self) -> bytes:
+        return b": ping\n\n"
+
+    @property
+    def synthesises_terminal(self) -> bool:
+        return True
+
+    def _chunk(
+        self,
+        *,
+        delta: dict[str, Any],
+        finish_reason: str | None,
+        usage: dict[str, Any] | None = None,
+    ) -> bytes:
+        body: dict[str, Any] = {
+            "id": self._message_id,
+            "object": "chat.completion.chunk",
+            "created": self._created,
+            "model": self._model,
+            "choices": [
+                {"index": 0, "delta": delta, "finish_reason": finish_reason}
+            ],
+        }
+        if usage is not None:
+            body["usage"] = usage
+        return f"data: {json.dumps(body, ensure_ascii=False)}\n\n".encode()

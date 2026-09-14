@@ -15,6 +15,7 @@ intermediate form did not carry.
 """
 
 import json
+import time
 from collections.abc import Mapping
 from typing import Any, cast
 
@@ -24,7 +25,11 @@ from app.pipeline.translation_driver.content import (
     SemanticMessage,
 )
 from app.pipeline.translation_driver.options import TranslationOptions
-from app.pipeline.translation_driver.reasoning import EffortSource
+from app.pipeline.translation_driver.reasoning import (
+    RESPONSES_EFFORTS,
+    EffortSource,
+    ThinkingEffortIntent,
+)
 from app.pipeline.translation_driver.reasoning_bridge import read_chat_reasoning
 from app.pipeline.translation_driver.responses import (
     OpaqueResponsePayload,
@@ -40,6 +45,7 @@ from app.pipeline.translation_driver.semantic import (
     TranslationTarget,
 )
 from app.pipeline.translation_driver.tool_choice import intent_from_chat_tool_choice
+from app.pipeline.translation_driver.usage import chat_usage_from_anthropic
 
 WIRE_FORMAT = "openai-chat-completions"
 RESPONSES_WIRE_FORMAT = "openai-responses"
@@ -76,6 +82,7 @@ _PASSTHROUGH_KEYS = frozenset(
         "max_completion_tokens",
         "temperature",
         "parallel_tool_calls",
+        "reasoning_effort",
     }
 )
 
@@ -202,11 +209,14 @@ def to_openai_chat_completions(
         intent.effort_source is not EffortSource.ANTHROPIC_DEFAULT
         or "thinking" in request.nested_extensions
     ):
-        conversion.record(
-            LossCode.REASONING_INTENT_NOT_CARRIED,
-            "Chat Completions publishes no reasoning field this proxy has measured; "
-            "the request's reasoning intent was not sent",
-        )
+        if request.source_format == WIRE_FORMAT and intent.effort is not None:
+            body["reasoning_effort"] = intent.effort
+        else:
+            conversion.record(
+                LossCode.REASONING_INTENT_NOT_CARRIED,
+                "Chat Completions publishes no reasoning field this proxy has measured; "
+                "the request's reasoning intent was not sent",
+            )
     return body
 
 
@@ -317,13 +327,27 @@ def from_openai_chat_completions(
             function = tool.get("function")
             if tool.get("type") == "function" and isinstance(function, Mapping):
                 fn = dict[str, Any](cast(Mapping[str, Any], function))
-                tools.append(
+                translated_tool: dict[str, Any] = {
+                    "type": "function",
+                    "name": fn.get("name", ""),
+                    "description": fn.get("description", ""),
+                    "input_schema": fn.get("parameters"),
+                }
+                translated_tool.update(
                     {
-                        "name": fn.get("name", ""),
-                        "description": fn.get("description", ""),
-                        "input_schema": fn.get("parameters", {}),
+                        key: value
+                        for key, value in fn.items()
+                        if key not in {"name", "description", "parameters"}
                     }
                 )
+                translated_tool.update(
+                    {
+                        key: value
+                        for key, value in tool.items()
+                        if key not in {"type", "function"}
+                    }
+                )
+                tools.append(translated_tool)
             else:
                 tools.append(tool)
 
@@ -339,6 +363,22 @@ def from_openai_chat_completions(
         source_format=WIRE_FORMAT,
         conversion=conversion,
     )
+    parallel_tool_calls = payload.get("parallel_tool_calls")
+    if isinstance(parallel_tool_calls, bool):
+        request.parallel_tool_calls = parallel_tool_calls
+    raw_effort = payload.get("reasoning_effort")
+    if raw_effort is not None:
+        if not isinstance(raw_effort, str) or raw_effort not in RESPONSES_EFFORTS:
+            raise TranslationRefused(
+                "invalid Chat Completions reasoning_effort",
+                code="effort-invalid",
+                field_path="reasoning_effort",
+            )
+        request.thinking_effort = ThinkingEffortIntent(
+            enabled=raw_effort != "none",
+            effort=raw_effort,
+            effort_source=EffortSource.CHAT_COMPLETIONS,
+        )
     max_tokens = payload.get("max_tokens", payload.get("max_completion_tokens"))
     if isinstance(max_tokens, int):
         request.max_output_tokens = max_tokens
@@ -494,13 +534,13 @@ def _chat_tool_choice(request: SemanticRequest) -> tuple[object, bool | None]:
         if crossing and "tool_choice" in request.unknown_fields:
             raise ToolChoiceNotSupported("tool_choice has no supported Chat Completions translation")
         if not crossing and "tool_choice" in request.unknown_fields:
-            return request.unknown_fields["tool_choice"], None
-        return None, None
+            return request.unknown_fields["tool_choice"], request.parallel_tool_calls
+        return None, request.parallel_tool_calls
     if crossing and not request.tools:
         if intent.mode in {"any", "tool"}:
             raise ToolChoiceNotSupported("a forced tool choice requires declared tools")
         if intent.mode in {"auto", "none"}:
-            return None, None
+            return None, request.parallel_tool_calls
     mapped: object
     if intent.mode in {"auto", "none"}:
         mapped = intent.mode
@@ -512,7 +552,13 @@ def _chat_tool_choice(request: SemanticRequest) -> tuple[object, bool | None]:
         mapped = {"type": "function", "function": {"name": intent.name}}
     else:
         raise ToolChoiceNotSupported(f"{intent.mode} tool choice has no Chat Completions spelling")
-    parallel = False if intent.disable_parallel is True else None
+    parallel = (
+        request.parallel_tool_calls
+        if request.parallel_tool_calls is not None
+        else False
+        if intent.disable_parallel is True
+        else None
+    )
     return mapped, parallel
 
 
@@ -661,6 +707,12 @@ def to_openai_chat_completions_response(
         TOOL_USE_STOP: "tool_calls",
         MAX_TOKENS: "length",
     }.get(response.stop_reason, response.stop_reason or "stop")
+    if finish_reason not in {"stop", "length", "tool_calls", "content_filter", "function_call"}:
+        response.conversion.record(
+            LossCode.ITEM_NOT_CARRIED,
+            f"internal stop reason {response.stop_reason!r} mapped to Chat Completions stop",
+        )
+        finish_reason = "stop"
     for opaque in response.opaque_payloads:
         if opaque.source_format == WIRE_FORMAT and opaque.kind == "message-field":
             message.update(opaque.copy_payload())
@@ -681,6 +733,7 @@ def to_openai_chat_completions_response(
     encoded = {
         "id": response.id,
         "object": "chat.completion",
+        "created": int(time.time()),
         "model": response.model,
         "choices": [
             {
@@ -689,7 +742,7 @@ def to_openai_chat_completions_response(
                 "finish_reason": finish_reason,
             }
         ],
-        "usage": response.usage or None,
+        "usage": chat_usage_from_anthropic(response.usage) if response.usage else None,
     }
     for opaque in response.opaque_payloads:
         if opaque.source_format == WIRE_FORMAT and opaque.kind == "top-level-field":

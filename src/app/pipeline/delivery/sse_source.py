@@ -269,3 +269,59 @@ async def read_events(chunks: AsyncIterator[bytes]) -> AsyncIterator[SseEvent]:
     finally:
         if close is not None:
             await close()
+
+
+async def read_ndjson_events(chunks: AsyncIterator[bytes]) -> AsyncIterator[SseEvent]:
+    """Read one Command Code JSON object per line.
+
+    The generic delivery loop consumes ``SseEvent`` because it needs only an
+    event name and raw JSON data; this reader supplies the same semantic envelope
+    without pretending that Command Code speaks SSE.
+    """
+    pending = bytearray()
+    close = getattr(chunks, "aclose", None)
+    try:
+        async for chunk in chunks:
+            pending.extend(chunk)
+            while True:
+                separator = pending.find(b"\n")
+                if separator < 0:
+                    break
+                line = bytes(pending[:separator]).rstrip(b"\r")
+                del pending[: separator + 1]
+                if not line or line == b"[DONE]" or line.startswith(b":"):
+                    continue
+                event_name = ""
+                try:
+                    loaded = orjson.loads(line)
+                except orjson.JSONDecodeError:
+                    loaded = None
+                if isinstance(loaded, dict):
+                    loaded_map = cast(dict[str, Any], loaded)
+                    candidate = loaded_map.get("type")
+                    if isinstance(candidate, str):
+                        event_name = candidate
+                yield SseEvent(
+                    event=event_name,
+                    data=line.decode("utf-8", errors="replace"),
+                )
+        if pending:
+            line = bytes(pending).rstrip(b"\r")
+            if line and line != b"[DONE]" and not line.startswith(b":"):
+                event_name = ""
+                try:
+                    loaded = orjson.loads(line)
+                except orjson.JSONDecodeError:
+                    loaded = None
+                if isinstance(loaded, dict):
+                    loaded_map = cast(dict[str, Any], loaded)
+                    candidate = loaded_map.get("type")
+                    if isinstance(candidate, str):
+                        event_name = candidate
+                yield SseEvent(
+                    event=event_name,
+                    data=line.decode("utf-8", errors="replace"),
+                )
+    finally:
+        if close is not None:
+            await close()

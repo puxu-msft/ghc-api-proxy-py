@@ -73,7 +73,31 @@ def test_buffered_unknown_output_item_is_opaque_and_warns_when_skipped() -> None
     assert semantic.conversion.warnings[0].field_path == "output[0]"
     assert not semantic.conversion.lossless
     assert semantic.conversion.has(LossCode.OPAQUE_RESPONSE_SKIPPED)
-    assert payload["stop_reason"] == "incomplete"
+    assert payload["stop_reason"] == "end_turn"
+
+
+def test_buffered_responses_metadata_does_not_count_as_skipped_output() -> None:
+    payload, semantic = default_registry().translate_response(
+        {
+            "id": "resp_metadata",
+            "model": "gpt-test",
+            "status": "completed",
+            "service_tier": "default",
+            "metadata": {"trace": "opaque"},
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "answer"}],
+                }
+            ],
+        },
+        source=WireFormat.OPENAI_RESPONSES,
+        target=WireFormat.ANTHROPIC_MESSAGES,
+    )
+
+    assert payload["content"] == [{"type": "text", "text": "answer"}]
+    assert not semantic.conversion.has(LossCode.OPAQUE_RESPONSE_SKIPPED)
 
 
 def test_same_format_round_trip_retains_opaque_output_without_diagnostics() -> None:
@@ -166,24 +190,31 @@ def test_buffered_incomplete_tool_call_defers_malformed_arguments_to_terminal() 
 
 
 @pytest.mark.parametrize(
-    ("kind", "expected"),
+    ("reason", "expected"),
     [
-        ("response.incomplete", "max_tokens"),
-        ("response.incomplete", "incomplete"),
-        ("response.completed", "end_turn"),
+        ("max_output_tokens", "max_tokens"),
+        ("max_messages", "max_messages"),
+        ("steered", "steered"),
+        ("", "incomplete"),
     ],
 )
 def test_terminal_normalizer_uses_event_kind_when_status_is_absent(
-    kind: str,
+    reason: str,
     expected: str,
 ) -> None:
-    data: dict[str, object] = (
-        {"response": {"incomplete_details": {"reason": "max_output_tokens"}}}
-        if expected == "max_tokens"
-        else {"response": {}}
-    )
+    data: dict[str, object] = {
+        "response": (
+            {"incomplete_details": {"reason": reason}}
+            if reason
+            else {}
+        )
+    }
 
-    facts = terminal_facts_from_event(kind, data, saw_tool_call=False)
+    facts = terminal_facts_from_event(
+        "response.incomplete",
+        data,
+        saw_tool_call=False,
+    )
 
     assert facts is not None
     assert facts.stop_reason == expected

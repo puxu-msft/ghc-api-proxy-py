@@ -47,6 +47,7 @@ def response_payload(chain: Chain, handled: HandledRequest, body: dict[str, Any]
         ),
         options=handled.context.translation_options,
     )
+    handled.context.extras["semantic_stop_reason"] = semantic.stop_reason
     if not semantic.conversion.lossless:
         handled.context.extras[RESPONSE_CONVERSION_LOSSES] = list(semantic.conversion.losses)
     if semantic.conversion.warnings:

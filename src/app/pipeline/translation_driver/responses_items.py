@@ -103,7 +103,21 @@ def _normalize_item(
     *,
     context: ResponsesItemContext,
 ) -> tuple[str, tuple[ContentBlock, ...]]:
-    kind = str(item.get("type", ""))
+    raw_kind = item.get("type")
+    role = item.get("role")
+    easy_message = isinstance(role, str) and role in {
+        "user",
+        "assistant",
+        "system",
+        "developer",
+    }
+    kind = (
+        str(raw_kind)
+        if isinstance(raw_kind, str) and raw_kind
+        else "message"
+        if easy_message
+        else ""
+    )
     if kind == TOOL_SEARCH_OUTPUT:
         return "assistant", ()
     if kind == TOOL_SEARCH_CALL and context.client_search_tool:
@@ -122,7 +136,7 @@ def _normalize_item(
             str(item.get("role", "user")),
             tuple(
                 _block_from_content_part(part)
-                for part in _mapping_list(item.get("content"))
+                for part in _content_parts(item.get("content"))
             ),
         )
     if kind == "function_call":
@@ -139,10 +153,17 @@ def _normalize_item(
             ),
         )
     if kind == "function_call_output":
+        call_id = item.get("call_id")
+        if not isinstance(call_id, str) or not call_id:
+            raise TranslationRefused(
+                "function_call_output requires a non-empty call_id",
+                code="function-call-output-call-id-missing",
+                field_path="input[].call_id",
+            )
         return "user", (
             ContentBlock(
                 BlockKind.TOOL_RESULT,
-                call_id=str(item.get("call_id", "")),
+                call_id=call_id,
                 output=item.get("output"),
                 raw=item,
             ),
@@ -170,15 +191,18 @@ def _normalize_item(
     return "user", (ContentBlock(BlockKind.UNKNOWN, raw=item),)
 
 
-def _mapping_list(value: object) -> list[dict[str, Any]]:
+def _content_parts(value: object) -> list[dict[str, Any]]:
+    if isinstance(value, str):
+        return [{"type": "input_text", "text": value}]
     if not isinstance(value, list):
         return []
-    entries = cast(list[object], value)
-    return [
-        dict[str, Any](cast(Mapping[str, Any], entry))
-        for entry in entries
-        if isinstance(entry, Mapping)
-    ]
+    parts: list[dict[str, Any]] = []
+    for entry in cast(list[object], value):
+        if isinstance(entry, str):
+            parts.append({"type": "input_text", "text": entry})
+        elif isinstance(entry, Mapping):
+            parts.append(dict[str, Any](cast(Mapping[str, Any], entry)))
+    return parts
 
 
 def _block_from_content_part(part: dict[str, Any]) -> ContentBlock:

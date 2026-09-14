@@ -23,6 +23,7 @@ from app.pipeline.direct_driver import (
     EVENT_REQUEST_SUCCEEDED,
     PROVIDER_BOUND_OBSERVER,
     AnthropicMessagesDriver,
+    CommandCodeDriver,
     DirectDriver,
     RetryBudget,
 )
@@ -949,6 +950,23 @@ async def test_the_driver_hands_the_clients_headers_to_the_provider() -> None:
 
     assert outcome.succeeded is True
     assert provider.sent_headers == [{"anthropic-beta": "context-management-2025-06-27"}]
+
+
+@pytest.mark.asyncio
+async def test_the_commandcode_driver_hands_scoped_zdr_at_the_send_boundary() -> None:
+    provider = FakeProvider()
+    ctx = context()
+    ctx.commandcode_zdr = True
+    direct = CommandCodeDriver(
+        provider,
+        SubscriberRegistry[RequestContext]().freeze(),
+        budget=RetryBudget(max_total=1),
+    )
+
+    outcome = await direct.run(ctx)
+
+    assert outcome.succeeded is True
+    assert provider.sent_headers == [{"x-cmd-zdr": "1"}]
 
 
 @pytest.mark.asyncio

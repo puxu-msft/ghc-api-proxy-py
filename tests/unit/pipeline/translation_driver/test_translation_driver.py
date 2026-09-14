@@ -1724,7 +1724,13 @@ def test_response_round_trip_preserves_summary_part_boundaries_and_extensions() 
         source=WireFormat.ANTHROPIC_MESSAGES,
         target=WireFormat.OPENAI_RESPONSES,
     )
-    assert restored["output"] == response["output"]
+    restored_item = restored["output"][0]
+    assert restored_item["type"] == "reasoning"
+    assert restored_item["summary"] == response["output"][0]["summary"]
+    assert restored_item["encrypted_content"] == "ENC"
+    assert restored_item["id"].startswith("rs_")
+    assert restored_item["status"] == "completed"
+    assert restored_item["content"] == []
     assert semantic.conversion.lossless
 
 

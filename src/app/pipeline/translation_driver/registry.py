@@ -14,6 +14,10 @@ from app.pipeline.translation_driver.anthropic_messages import (
     from_anthropic_messages,
     to_anthropic_messages,
 )
+from app.pipeline.translation_driver.commandcode import (
+    from_commandcode_response,
+    to_commandcode,
+)
 from app.pipeline.translation_driver.openai_chat_completions import (
     from_chat_completions_response,
     from_openai_chat_completions,
@@ -343,5 +347,9 @@ def default_registry(config: ModelTranslationConfig | None = None) -> Translator
     )
     registry.register_response_writer(
         WireFormat.OPENAI_CHAT_COMPLETIONS, to_openai_chat_completions_response
+    )
+    registry.register_encoder(WireFormat.COMMANDCODE, to_commandcode)
+    registry.register_response_reader(
+        WireFormat.COMMANDCODE, from_commandcode_response
     )
     return registry

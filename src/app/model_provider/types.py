@@ -36,6 +36,7 @@ class ModelEndpoint(StrEnum):
     OPENAI_RESPONSES = "/responses"
     OPENAI_RESPONSES_WS = "ws:/responses"
     OPENAI_EMBEDDINGS = "/embeddings"
+    COMMANDCODE_GENERATE = "/alpha/generate"
 
 
 type CatalogSource = Literal["upstream", "static"]

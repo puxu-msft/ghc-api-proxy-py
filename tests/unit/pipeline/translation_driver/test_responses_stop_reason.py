@@ -8,6 +8,7 @@ The second half of the file is the reverse crossing — an Anthropic `stop_reaso
 from typing import Any
 
 import pytest
+from openai.types.responses import Response
 
 from app.pipeline.translation_driver.responses import (
     SemanticResponse,
@@ -125,11 +126,13 @@ def _rendered(stop_reason: str) -> dict[str, Any]:
     )
 
 
-# Every `stop_reason` that can reach the writer, and what the Responses vocabulary has for it. The Anthropic six are the ones Claude Code itself compares against (`.dev/docs/upstream/retry-and-continuation/reports/260821-upstream-termination-reasons.md` §2.3 counted the literals); `incomplete` is this proxy's own synthesis for an upstream that said the reply was cut short without saying why. `incomplete_details.reason` is an enumeration of `max_output_tokens` and `content_filter` only (openai SDK 3.3.1), so everything but the token limit crosses as a null reason.
+# Every `stop_reason` that can reach the writer, and what the Responses vocabulary has for it. The Anthropic six are the ones Claude Code itself compares against (`.dev/docs/upstream/retry-and-continuation/reports/260821-upstream-termination-reasons.md` §2.3 counted the literals); `incomplete` is this proxy's own synthesis for an upstream that said the reply was cut short without saying why. The installed SDK also permits `max_messages`, `content_filter`, and `steered`, so those identity spellings remain legal on the way back out.
 _TERMINAL_STATE = [
     ("end_turn", "completed", None),
     ("tool_use", "completed", None),
     ("max_tokens", "incomplete", {"reason": "max_output_tokens"}),
+    ("max_messages", "incomplete", {"reason": "max_messages"}),
+    ("steered", "incomplete", {"reason": "steered"}),
     ("refusal", "incomplete", None),
     ("pause_turn", "incomplete", None),
     ("stop_sequence", "incomplete", None),
@@ -174,6 +177,17 @@ def test_a_filtered_turn_carries_its_reason_back_out() -> None:
     """
     assert _rendered("content_filter")["status"] == "incomplete"
     assert _rendered("content_filter")["incomplete_details"] == {"reason": "content_filter"}
+
+
+@pytest.mark.parametrize("reason", ["max_messages", "steered"])
+def test_current_responses_incomplete_reasons_are_validated_and_preserved(
+    reason: str,
+) -> None:
+    rendered = _rendered(reason)
+
+    assert rendered["status"] == "incomplete"
+    assert rendered["incomplete_details"] == {"reason": reason}
+    Response.model_validate(rendered)
 
 
 def test_a_finished_turn_is_unaffected() -> None:

@@ -36,6 +36,7 @@ PING_FRAME = b": ping\n\n"
 
 type FailureProvenance = Callable[[Exception], bool]
 type _ExceptionGraphFingerprint = frozenset[tuple[str, int, int, int]]
+type EventReader = Callable[[AsyncIterator[bytes]], AsyncIterator[SseEvent]]
 
 
 def _exception_graph_fingerprint(error: BaseException) -> _ExceptionGraphFingerprint | None:
@@ -201,6 +202,7 @@ async def _events_with_ping(
     interval: int,
     *,
     last_write: _LastWrite,
+    event_reader: EventReader | None = None,
 ) -> AsyncGenerator[_Pull]:
     """Pull upstream events, and offer a way to ask whether a deadline has come due.
 
@@ -214,7 +216,7 @@ async def _events_with_ping(
 
     Nothing here decides that a cue goes out. The scheduler hands over what upstream produced and a way to ask; the caller asks once it has assembled the event and knows whether that wrote anything. That ordering is what keeps an assembler failure, an end-of-stream and a run of ready events from each defeating the guard in its own way. A cue can still land immediately before an ending the next pull has not revealed yet — accepted rather than fixed, because missing an owed keep-alive breaks the contract and sending a spare one does not, and no amount of restructuring tells you what the next pull holds.
     """
-    events = read_events(chunks).__aiter__()
+    events = (event_reader or read_events)(chunks).__aiter__()
     loop = asyncio.get_running_loop()
     task: asyncio.Task[SseEvent] | None = None
     ping_deadline = loop.time() + interval if interval > 0 else None
@@ -383,6 +385,7 @@ async def stream_delivery[UnitT: DeliveryUnit](
     observe_event: Callable[[SseEvent], None] | None = None,
     on_committed: Callable[[tuple[UnitT, ...]], None] | None = None,
     passthrough: bool = False,
+    event_reader: EventReader | None = None,
 ) -> AsyncGenerator[bytes]:
     """Turn an upstream byte stream into the client's SSE, one complete block at a time.
 
@@ -415,6 +418,7 @@ async def stream_delivery[UnitT: DeliveryUnit](
             observe_event=observe_event,
             on_committed=on_committed,
             passthrough=passthrough,
+            event_reader=event_reader,
         )
     ) as inner:
         async for chunk in inner:
@@ -438,6 +442,7 @@ async def _deliver[UnitT: DeliveryUnit](
     observe_event: Callable[[SseEvent], None] | None = None,
     on_committed: Callable[[tuple[UnitT, ...]], None] | None = None,
     passthrough: bool = False,
+    event_reader: EventReader | None = None,
 ) -> AsyncGenerator[bytes]:
     """Assemble and frame the response. Wrapped by `stream_delivery`, which stamps the clock."""
     session = DeliverySession(buffer=buffer)
@@ -456,6 +461,7 @@ async def _deliver[UnitT: DeliveryUnit](
                     chunks,
                     settings.sse_ping_interval,
                     last_write=last_write,
+                    event_reader=event_reader,
                 )
             ) as events:
                 async for pull in events:
@@ -600,7 +606,8 @@ async def _deliver[UnitT: DeliveryUnit](
         raise torn
 
     # `direct-passthrough/spec.md` §7.2's closing sequence, asked of the assembler before the buffer is drained so that whatever it releases still passes through the policy. The translating assemblers answer with nothing — what they hold is a half-built block, which every ending drops. The passthrough answers with the finished groups its queue was holding behind an item that never closed, and those were previously abandoned along with upstream's own terminal: one unclosed item produced a 200 with zero bytes.
-    for admission_batch in _admission_batches(assembler.close()):
+    closed_units = assembler.close()
+    for admission_batch in _admission_batches(closed_units):
         for chunk in _commit(
             session,
             admission_batch,
@@ -610,6 +617,11 @@ async def _deliver[UnitT: DeliveryUnit](
         ):
             client_has_bytes.set()
             yield chunk
+
+    failure = assembler.failure
+    if failure is not None:
+        yield _report_failure(failure, framer=framer, passthrough=passthrough)
+        return
 
     remaining = session.finish()
     if remaining and not client_has_bytes.is_set():
@@ -642,22 +654,36 @@ async def _deliver[UnitT: DeliveryUnit](
             and settings.unterminated_stop_reason
             and framer.synthesises_terminal
         ):
-            # Upstream closed cleanly *between* blocks. Every block it produced is whole and already delivered, so nothing the client holds is damaged — the only thing missing is upstream's own word for why it stopped, and an error frame answers that by calling a reply truncated when nothing was cut. Ruled 2026-08-22.
+            # Upstream closed cleanly *between* blocks. Every block it produced is whole and already delivered, so nothing the client holds is damaged — the only thing missing is upstream's own word for why it stopped.
             #
-            # The reason on the wire is a synthesis and stays configurable so that it is chosen rather than inherited: `client_delivery.unterminated_stream_stop_reason` carries it, defaults to upstream's own `incomplete`, and going empty puts this ending back to the error below. What it must not silently become is `end_turn` — that is what `framer.terminal` fills an empty reason with, and it would claim a turn upstream never claimed.
+            # The reason on the wire is a synthesis and stays configurable so that it is chosen rather than inherited: `client_delivery.unterminated_stream_stop_reason` carries it, defaults to upstream's own `incomplete`, and going empty puts this ending back to the error below. A client dialect that has no legal spelling for the configured reason uses that same error path rather than exposing an internal value or silently claiming `end_turn`.
             #
             # `cut_mid_block` rather than "did the client get whole blocks": the latter is always true under block-level delivery and so discriminates nothing.
             # Upstream's own word wins when it gave one. An Anthropic leg splits its ending — `message_delta` carries the reason, `message_stop` merely closes — so a stream that lost only the second still told us why it stopped, and overwriting that with the configured synthesis replaced an observation with an invention. The caller already ruled this way for the completion line (`inference.py`, on `terminal.stop_reason` being set), and this used to disagree with it: the log said `max_tokens` while the client was told `incomplete`.
-            for frame in framer.terminal(
-                replace(terminal, stop_reason=terminal.stop_reason or settings.unterminated_stop_reason)
-            ):
+            stop_reason = terminal.stop_reason or settings.unterminated_stop_reason
+            if not framer.supports_stop_reason(stop_reason):
+                # Responses can spell this as `status: incomplete`; Anthropic and
+                # Chat Completions cannot, so their framers refuse it here.
+                failure = UpstreamStreamUnterminated(
+                    "upstream stream ended without a terminal event"
+                )
+                yield framer.error(
+                    _stream_error(
+                        ErrorCategory.UPSTREAM,
+                        str(failure),
+                        code="incomplete_responses_stream",
+                    )
+                )
+                return
+            for frame in framer.terminal(replace(terminal, stop_reason=stop_reason)):
                 yield frame
             return
         # An EOF that cut through a block, or the refinement switched off. Either way this reports an error, and an error with content already in the client's hands is what the hand-over exists for.
         #
         # Asked here on exactly the same terms as the torn path above, which is the whole point: the two endings leave the client in the same place, and `retry.py` already states that it is that place — not the manner of arrival — that decides what may legally happen next. Until this branch existed, being killed by this side's own idle guard produced a *better* client outcome than upstream closing cleanly, because the guard raises and a clean EOF does not. Authority is `docs/.human-controlled/upstream-retry-and-continuation.md` line 30, which gates on 已经交付过至少一个完整块 and then prescribes 将报错合成为自制的 `tool_use` 返回给客户端; a terminal-less stream appears on neither of that document's 无法继续 lists. Spec item 7, amended 2026-08-24. Production incident req=75ccdf6f.
         #
-        # **Not** asked before the block-boundary close above. That ending reports no error, so line 30's 将报错合成为 never reaches it, and the 2026-08-22 ruling that made it a clean close stands untouched.
+        # **Not** asked before a supported block-boundary close above. That
+        # ending reports no error, so line 30's 将报错合成为 never reaches it.
         #
         # `_hand_over` re-asks `session.finish()`, which already ran above; it returns nothing the second time, and the call is kept rather than special-cased because the torn path reaches the same function having flushed nothing.
         #

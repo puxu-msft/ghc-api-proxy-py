@@ -48,6 +48,7 @@ _FALLBACK_ORDER: tuple[WireFormat, ...] = (
     WireFormat.ANTHROPIC_MESSAGES,
     WireFormat.OPENAI_RESPONSES,
     WireFormat.OPENAI_CHAT_COMPLETIONS,
+    WireFormat.COMMANDCODE,
     WireFormat.OPENAI_EMBEDDINGS,
 )
 

@@ -50,7 +50,7 @@ from app.observability.request_trace import (
 from app.pipeline.anthropic_request_hook import strip_attribution_lines
 from app.pipeline.delivery.assembling import BlockAssembler, FailureOrigin
 from app.pipeline.delivery.blocks import TOOL_USE
-from app.pipeline.delivery.sse_source import SseEvent
+from app.pipeline.delivery.sse_source import SseEvent, read_events, read_ndjson_events
 from app.pipeline.delivery.stream import (
     Attempt,
     ContinuationSupport,
@@ -877,9 +877,10 @@ async def _dispatch_after_body(
     attempt_index = current_attempt.index if current_attempt is not None else None
     trace.upstream_request_body_bytes = len(response.request.content)
     completion.note_upstream_request_body(response.request.content, attempt=attempt_index)
+    transport_status = response.extensions.get("upstream_transport_status_code")
     transport_headers = response.extensions.get("upstream_transport_headers")
     completion.note_upstream_response_start(
-        response.status_code,
+        transport_status if isinstance(transport_status, int) else response.status_code,
         headers=(
             cast(Mapping[str, str], transport_headers)
             if isinstance(transport_headers, Mapping)
@@ -1159,6 +1160,11 @@ async def _dispatch_after_body(
             eligible=replay_reason,
             reopen=_reopen,
         )
+        event_reader = (
+            read_ndjson_events
+            if handled.route.target_format is WireFormat.COMMANDCODE
+            else read_events
+        )
         return _AccountedStreamingResponse(
             _tracked_delivery(
                 stream_delivery(
@@ -1194,6 +1200,7 @@ async def _dispatch_after_body(
                     on_runtime_failure=accounting.note_runtime_failure,
                     observe_event=_observe_response_event,
                     on_committed=accounting.note_committed_units,
+                    event_reader=event_reader,
                     # The client and upstream speak the same dialect exactly when nothing had to be translated. Delivery cannot work this out for itself: one assembler serves both a Responses client directly and a Responses upstream on its way to Anthropic, and the framer is the client's either way.
                     passthrough=not context.translation_required,
                 ),
@@ -1253,9 +1260,15 @@ async def _dispatch_after_body(
     # reading this one off the finished payload instead made the same upstream reply report two different things depending on which route carried it — one block and no tools, or two blocks and a tool the model never asked for. That divergence is the thing this whole area exists to remove, and it had been pushed back into the observability surface.
     context.reply = reply_summary(handled, payload)
     # The shape is checked before the block is built, not after. Built first, a body whose `content` was not a list left a warning logged, an id spent and a hand-over silently not happening — the reply going out unchanged with nothing saying so.
+    semantic_stop_reason = context.extras.get("semantic_stop_reason")
+    stop_reason = (
+        semantic_stop_reason
+        if isinstance(semantic_stop_reason, str)
+        else str(payload.get("stop_reason", ""))
+    )
     handed = (
-        _hand_back(None, str(payload.get("stop_reason", "")))
-        if str(payload.get("stop_reason", "")) in _hand_over_reasons
+        _hand_back(None, stop_reason)
+        if stop_reason in _hand_over_reasons
         and isinstance(payload.get("content"), list)
         else None
     )

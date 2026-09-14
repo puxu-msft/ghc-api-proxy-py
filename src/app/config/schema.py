@@ -53,6 +53,7 @@ NOT_HOT_RELOADABLE = frozenset(
         "model_providers.*.auth_base_url",
         "model_providers.*.auth_state_file",
         "model_providers.*.client_type",
+        "model_providers.*.command_code_version",
         "model_providers.*.device_id",
         "model_providers.*.gateway_api_key",
         "model_providers.*.github_token_file",
@@ -63,6 +64,10 @@ NOT_HOT_RELOADABLE = frozenset(
         "model_providers.*.type",
         "model_providers.*.user_agent",
         "model_providers.*.x_token",
+        "model_providers.*.project_slug",
+        "model_providers.*.zdr",
+        "model_providers.*.initialize_upstream",
+        "model_providers.*.empty_system_placeholder",
         "pidfile_dir",
         "proxy",
         "reactive_rate_limiter",
@@ -78,6 +83,7 @@ NOT_HOT_RELOADABLE = frozenset(
 # Fields shared with an older provider but fixed into provider instances at startup. Kept type-scoped so this feature does not silently change the existing GitHub Copilot hot-reload contract.
 PROVIDER_NOT_HOT_RELOADABLE: dict[str, frozenset[str]] = {
     "bridge": frozenset({"disabled_models", "model_refresh_interval"}),
+    "commandcode": frozenset({"disabled_models", "model_refresh_interval"}),
     "xingchen": frozenset({"disabled_models"}),
 }
 
@@ -226,6 +232,61 @@ class CodebuddyProviderConfig(_ModelProviderConfigBase):
     auth_state_file: str = ""
 
 
+class CommandCodeProviderConfig(_ModelProviderConfigBase):
+    type: Literal["commandcode"]
+    api_base_url: str = "https://api.commandcode.ai"
+    api_key: str = Field(min_length=1, repr=False)
+    models: list[str] = Field(default_factory=list)
+    model_refresh_interval: int = Field(default=300, ge=0)
+    project_slug: str = "cc-proxy"
+    command_code_version: str = "0.32.3"
+    zdr: bool = False
+    initialize_upstream: bool = True
+    empty_system_placeholder: bool = True
+
+    @field_validator(
+        "api_base_url",
+        "api_key",
+        "project_slug",
+        "command_code_version",
+    )
+    @classmethod
+    def _value_may_not_be_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("value may not be empty or blank")
+        if value != value.strip():
+            raise ValueError("value may not have leading or trailing whitespace")
+        return value
+
+    @field_validator("api_base_url")
+    @classmethod
+    def _api_base_url_must_be_absolute_http_url(cls, value: str) -> str:
+        try:
+            parsed = urlsplit(value)
+            port = parsed.port
+        except ValueError as error:
+            raise ValueError("api_base_url must be a valid absolute HTTP(S) URL") from error
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or (port is not None and not 1 <= port <= 65535)
+        ):
+            raise ValueError("api_base_url must be a valid absolute HTTP(S) URL")
+        return value.rstrip("/")
+
+    @field_validator("models")
+    @classmethod
+    def _models_must_be_distinct_and_addressable(cls, value: list[str]) -> list[str]:
+        if any(not model.strip() for model in value):
+            raise ValueError("models may not contain an empty or blank model id")
+        if len(value) != len(set(value)):
+            raise ValueError("models may not contain duplicate ids")
+        canonical = [_canonical_model_name(model) for model in value]
+        if len(canonical) != len(set(canonical)):
+            raise ValueError("models may not contain canonically equivalent ids")
+        return value
+
+
 # Tri-state for a bridge upstream's native protocol endpoints
 # (spec: `sub2api-provider/spec.md`). Empty (or absent) disables direct serving
 # of that protocol; `True` enables it on the standard `api_base_url` path;
@@ -315,6 +376,7 @@ type ModelProviderConfig = Annotated[
     GithubCopilotProviderConfig
     | XingchenProviderConfig
     | CodebuddyProviderConfig
+    | CommandCodeProviderConfig
     | OpenAICompatibleProviderConfig,
     Field(discriminator="type"),
 ]

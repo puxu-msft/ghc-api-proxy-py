@@ -24,6 +24,7 @@ from openai import AsyncOpenAI
 from app.config.paths import debug_capture_rules_path, expand_user_path, user_data_path
 from app.config.schema import (
     CodebuddyProviderConfig,
+    CommandCodeProviderConfig,
     GithubCopilotProviderConfig,
     OpenAICompatibleProviderConfig,
     ProxyConfig,
@@ -33,9 +34,10 @@ from app.core.chain import Chain
 from app.history.archive import HistoryArchiveStore
 from app.history.writer import HistoryWriter
 from app.model_provider import (
-    CODEBUDDY_PROVIDER_TYPE,
-    GITHUB_COPILOT_PROVIDER_TYPE,
     BRIDGE_PROVIDER_TYPES,
+    CODEBUDDY_PROVIDER_TYPE,
+    COMMANDCODE_PROVIDER_TYPE,
+    GITHUB_COPILOT_PROVIDER_TYPE,
     XINGCHEN_PROVIDER_TYPE,
     GithubCopilotProvider,
     ModelProvider,
@@ -53,6 +55,7 @@ from app.model_provider.codebuddy_client import (
     DesktopAuthState,
     discover_auth_file,
 )
+from app.model_provider.commandcode import CommandCodeClient, CommandCodeProvider
 from app.model_provider.ghc import (
     CopilotTokenManager,
     GhcApiClient,
@@ -545,6 +548,16 @@ def build_xingchen_provider(
     return XingchenProvider(name, client, provider_config)
 
 
+def build_commandcode_provider(
+    name: str,
+    provider_config: CommandCodeProviderConfig,
+    *,
+    http_client: httpx2.AsyncClient,
+) -> CommandCodeProvider:
+    client = CommandCodeClient(http_client, provider_config)
+    return CommandCodeProvider(name, client, provider_config)
+
+
 def build_openai_compatible_provider(
     name: str,
     provider_config: OpenAICompatibleProviderConfig,
@@ -580,6 +593,7 @@ def build_chain(
         GITHUB_COPILOT_PROVIDER_TYPE,
         XINGCHEN_PROVIDER_TYPE,
         CODEBUDDY_PROVIDER_TYPE,
+        COMMANDCODE_PROVIDER_TYPE,
     } | BRIDGE_PROVIDER_TYPES
     for name, provider_config in config.model_providers.items():
         if provider_config.type not in supported_provider_types:
@@ -621,6 +635,12 @@ def build_chain(
                 # rule the Copilot branch follows, with the file read (and refreshed)
                 # at the first request instead.
                 built[name] = build_codebuddy_provider(name, provider_config, http_client=client)
+            elif isinstance(provider_config, CommandCodeProviderConfig):
+                built[name] = build_commandcode_provider(
+                    name,
+                    provider_config,
+                    http_client=client,
+                )
             elif isinstance(provider_config, OpenAICompatibleProviderConfig):
                 built[name] = build_openai_compatible_provider(
                     name,
@@ -764,6 +784,7 @@ __all__ = [
     "Chain",
     "TransportOptions",
     "build_chain",
+    "build_commandcode_provider",
     "build_copilot_provider",
     "build_github_token_source",
     "build_http_client",

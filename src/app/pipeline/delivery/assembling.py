@@ -36,6 +36,7 @@ class ReplyDialect(StrEnum):
     # that describe one of its replies are the assembler's problem, not the
     # client's: the client still reads its own format.
     CHAT_COMPLETIONS = "chat-completions"
+    COMMANDCODE = "commandcode"
 
 
 @dataclass(frozen=True, slots=True)

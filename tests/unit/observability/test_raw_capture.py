@@ -11,9 +11,14 @@ import httpx2
 import pytest
 import zstandard
 
-from app.config.schema import OpenAICompatibleProviderConfig, XingchenProviderConfig
+from app.config.schema import (
+    CommandCodeProviderConfig,
+    OpenAICompatibleProviderConfig,
+    XingchenProviderConfig,
+)
 from app.model_provider.codebuddy_client.client import CodebuddyClient
 from app.model_provider.codebuddy_client.config import CodebuddyClientConfig
+from app.model_provider.commandcode.client import CommandCodeClient
 from app.model_provider.openai_compatible.client import OpenAICompatibleClient
 from app.model_provider.types import ModelEndpoint
 from app.model_provider.xingchen.client import XingchenClient
@@ -24,7 +29,11 @@ from app.observability.raw_capture import (
     observe_active_upstream_request,
     pending_upstream_capture,
 )
-from app.pipeline.direct_driver.base import capture_returned_upstream_response
+from app.pipeline.direct_driver.base import (
+    capture_failed_upstream_attempt,
+    capture_returned_upstream_response,
+)
+from app.pipeline.exceptions import PipelineAbort, UpstreamRateLimit, UpstreamRejected
 
 
 def _records(path: Path) -> list[dict[str, object]]:
@@ -254,6 +263,161 @@ def test_a_session_agent_capture_appends_request_and_response_events(tmp_path: P
     assert records[-1]["complete"] is True
 
 
+def test_capture_records_full_header_boundaries(
+    tmp_path: Path,
+) -> None:
+    store = RawCaptureStore(tmp_path)
+    capture = store.start(
+        session_id="session-1",
+        agent_id="agent-1",
+        request_id="request-headers",
+        method="POST",
+        path="/v1/messages",
+        headers={
+            "Authorization": "request-secret",
+            "X-Request-ID": "request-id",
+            "X-Unlisted": "request-marker",
+        },
+    )
+    capture.upstream_request_start(
+        "POST",
+        "/alpha/generate",
+        headers={
+            "Authorization": "upstream-secret",
+            "x-command-code-version": "test-version",
+            "x-unlisted": "upstream-marker",
+        },
+        attempt=0,
+    )
+    capture.upstream_response_start(
+        200,
+        headers={
+            "content-type": "application/x-ndjson",
+            "set-cookie": "response-secret",
+            "x-request-id": "response-id",
+        },
+        attempt=0,
+    )
+    capture.client_response_start(
+        200,
+        headers=[
+            (b"content-type", b"application/json"),
+            (b"x-unlisted", b"client-marker"),
+        ],
+    )
+    capture.finish(status_code=200, complete=True)
+    store.flush()
+
+    records = _records(next(tmp_path.glob("session-*/agent-*.cborseq.zst")))
+    starts = {
+        record["event"]: record
+        for record in records
+        if isinstance(record["event"], str) and record["event"].endswith(".start")
+    }
+    assert starts["request.start"]["headers"] == {
+        "authorization": "request-secret",
+        "x-request-id": "request-id",
+        "x-unlisted": "request-marker",
+    }
+    assert starts["upstream.request.start"]["headers"] == {
+        "authorization": "upstream-secret",
+        "x-command-code-version": "test-version",
+        "x-unlisted": "upstream-marker",
+    }
+    assert starts["upstream.response.start"]["status_code"] == 200
+    assert starts["upstream.response.start"]["headers"] == {
+        "content-type": "application/x-ndjson",
+        "set-cookie": "response-secret",
+        "x-request-id": "response-id",
+    }
+    assert starts["client.response.start"]["headers"] == {
+        "content-type": "application/json",
+        "x-unlisted": "client-marker",
+    }
+    assert "request-secret" in repr(records)
+    assert "upstream-secret" in repr(records)
+    assert "response-secret" in repr(records)
+    assert "request-marker" in repr(records)
+    assert "upstream-marker" in repr(records)
+    assert "client-marker" in repr(records)
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_commandcode_ndjson_error_capture_uses_transport_response_boundary(
+    tmp_path: Path,
+) -> None:
+    upstream_body = b'{"type":"error","message":"<429> overloaded"}\n'
+
+    def handler(_: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            200,
+            content=upstream_body,
+            headers={
+                "content-type": "application/x-ndjson",
+                "x-request-id": "transport-request",
+            },
+        )
+
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
+    client = CommandCodeClient(
+        http_client,
+        CommandCodeProviderConfig.model_validate(
+            {
+                "type": "commandcode",
+                "api_key": "user_test",
+                "initialize_upstream": False,
+            }
+        ),
+    )
+    store = RawCaptureStore(tmp_path)
+    capture = store.start(
+        session_id="commandcode-session",
+        agent_id="commandcode-agent",
+        request_id="commandcode-request",
+        method="POST",
+        path="/v1/messages",
+    )
+    try:
+        with (
+            pending_upstream_capture(capture, 0),
+            pytest.raises(UpstreamRateLimit) as raised,
+        ):
+            await client.send(
+                {"params": {"model": "m", "messages": []}},
+                stream=False,
+            )
+        capture_failed_upstream_attempt(capture, raised.value, attempt=0)
+        capture.upstream_attempt_end(0, complete=False)
+        capture.finish(status_code=429, complete=True)
+        store.flush()
+    finally:
+        store.close()
+        await http_client.aclose()
+
+    records = _records(next(tmp_path.glob("session-*/agent-*.cborseq.zst")))
+    response_start = next(
+        record for record in records if record["event"] == "upstream.response.start"
+    )
+    response_body = next(
+        record for record in records if record["event"] == "upstream.response.body"
+    )
+    request_start = next(
+        record for record in records if record["event"] == "upstream.request.start"
+    )
+    assert response_start["status_code"] == 200
+    response_headers = cast(dict[str, str], response_start["headers"])
+    request_headers = cast(dict[str, str], request_start["headers"])
+    assert response_headers == {
+        "content-type": "application/x-ndjson",
+        "content-length": str(len(upstream_body)),
+        "x-request-id": "transport-request",
+    }
+    assert response_body["body"] == upstream_body
+    assert request_start["path"] == "/alpha/generate"
+    assert request_headers["authorization"] == "Bearer user_test"
+
+
 def test_capture_is_a_stream_of_native_cbor_maps_not_json(tmp_path: Path) -> None:
     store = RawCaptureStore(tmp_path)
     capture = store.start(
@@ -466,6 +630,44 @@ def test_discarded_response_capture_prefers_the_real_upstream_body(
         if record["event"] == "upstream.response.body"
     )
     assert body == b"event: response.completed\n\n"
+
+
+def test_failed_upstream_response_body_uses_the_canonical_capture_event(
+    tmp_path: Path,
+) -> None:
+    store = RawCaptureStore(tmp_path)
+    capture = store.start(
+        session_id="session-1",
+        agent_id="agent-1",
+        request_id="request-failed-response",
+        method="POST",
+        path="/responses",
+    )
+    upstream = UpstreamRejected(
+        "upstream rejected the request",
+        status_code=400,
+        body_bytes=b'{"error":"original"}',
+        body_observed=True,
+        body_complete=True,
+        sent=b'{"input":[]}',
+        sent_observed=True,
+    )
+
+    capture_failed_upstream_attempt(
+        capture,
+        PipelineAbort("retry budget exhausted", cause=upstream),
+        attempt=0,
+    )
+    capture.upstream_attempt_end(0, complete=False)
+    capture.finish(status_code=502, complete=True)
+    store.flush()
+
+    records = _records(next(tmp_path.glob("session-*/agent-*.cborseq.zst")))
+    body_records = [
+        record for record in records if record["event"] == "upstream.response.body"
+    ]
+    assert [record["body"] for record in body_records] == [b'{"error":"original"}']
+    assert body_records[0]["attempt"] == 0
 
 
 def test_partial_response_boundary_is_reported_at_request_completion(

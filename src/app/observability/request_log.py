@@ -42,11 +42,13 @@ REASONING_WORD = {
     ReplyDialect.ANTHROPIC: "think",
     ReplyDialect.RESPONSES: "reason",
     ReplyDialect.CHAT_COMPLETIONS: "reason",
+    ReplyDialect.COMMANDCODE: "reason",
 }
 TOOL_WORD = {
     ReplyDialect.ANTHROPIC: TOOL_USE_REASON,
     ReplyDialect.RESPONSES: "function_call",
     ReplyDialect.CHAT_COMPLETIONS: "tool_calls",
+    ReplyDialect.COMMANDCODE: "tool-calls",
 }
 
 # Where a reply stops being ordinary. Bytes are 1024-based, matching what `format_bytes` prints. A count inside the printed figure's rounding band can show the same number in a different colour from one just over the threshold; the thresholds are the round numbers rather than the rounding band, and that is the accepted trade.
@@ -62,6 +64,7 @@ RECEIVED_BYTES_THRESHOLDS = {
     # — closer to Anthropic's economy than to Responses' echoed tool arrays. The
     # sighting that replaces this guess should pick its own numbers.
     ReplyDialect.CHAT_COMPLETIONS: (10 * 1024, 100 * 1024),
+    ReplyDialect.COMMANDCODE: (10 * 1024, 100 * 1024),
 }
 NOTABLE_TOKENS, HEAVY_TOKENS = 1_000, 10_000
 

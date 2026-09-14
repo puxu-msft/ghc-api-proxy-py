@@ -32,6 +32,10 @@ class OutboundFramer[UnitT: DeliveryUnit = CompletedBlock](Protocol):
         """Close the response cleanly. Mutually exclusive with `error`."""
         ...
 
+    def supports_stop_reason(self, stop_reason: str) -> bool:
+        """Whether a synthesized semantic stop reason has a legal wire spelling."""
+        ...
+
     def error(self, info: ErrorInfo) -> bytes:
         """The one frame that says a started stream will not end successfully.
 

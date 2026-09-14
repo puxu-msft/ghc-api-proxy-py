@@ -28,6 +28,7 @@ from app.pipeline.translation_driver.reasoning_carrier import (
 ANTHROPIC_MESSAGES = "anthropic-messages"
 OPENAI_CHAT_COMPLETIONS = "openai-chat-completions"
 OPENAI_RESPONSES = "openai-responses"
+COMMANDCODE = "commandcode"
 
 
 class CarrierSlot(StrEnum):
@@ -139,6 +140,15 @@ def read_chat_reasoning(text: str) -> ReasoningContent:
     return ReasoningContent(
         visible_text=text,
         source_format=OPENAI_CHAT_COMPLETIONS,
+        summary_parts=_canonical_summary(text),
+    )
+
+
+def read_commandcode_reasoning(text: str) -> ReasoningContent:
+    """One Command Code visible reasoning event with no native opaque state."""
+    return ReasoningContent(
+        visible_text=text,
+        source_format=COMMANDCODE,
         summary_parts=_canonical_summary(text),
     )
 
@@ -262,10 +272,10 @@ def reasoning_to_anthropic(
             return {"type": "redacted_thinking", "data": state.value}
         return {"type": "thinking", "thinking": content.visible_text, "signature": state.value}
 
-    if content.source_format == OPENAI_CHAT_COMPLETIONS:
+    if content.source_format in {OPENAI_CHAT_COMPLETIONS, COMMANDCODE}:
         if not bridge_for_client or content.state is not None or content.redacted:
             raise ReasoningNotPortable(
-                "Chat Completions reasoning cannot be sent to an Anthropic upstream"
+                "visible provider reasoning cannot be sent to an Anthropic upstream"
             )
         return {
             "type": "thinking",
@@ -299,10 +309,10 @@ def reasoning_to_responses(
             item["encrypted_content"] = state.value
         return item
 
-    if content.source_format == OPENAI_CHAT_COMPLETIONS:
+    if content.source_format in {OPENAI_CHAT_COMPLETIONS, COMMANDCODE}:
         if not bridge_for_client or content.state is not None or content.redacted:
             raise ReasoningNotPortable(
-                "Chat Completions reasoning cannot be sent to a Responses upstream"
+                "visible provider reasoning cannot be sent to a Responses upstream"
             )
         return {
             "type": "reasoning",
@@ -552,6 +562,7 @@ def _is_canonical_responses_projection(parts: Sequence[ReasoningSummaryPart]) ->
 
 __all__ = [
     "ANTHROPIC_MESSAGES",
+    "COMMANDCODE",
     "OPENAI_CHAT_COMPLETIONS",
     "OPENAI_RESPONSES",
     "CarrierSlot",
@@ -562,6 +573,7 @@ __all__ = [
     "classify_responses_carrier",
     "read_anthropic_reasoning",
     "read_chat_reasoning",
+    "read_commandcode_reasoning",
     "read_responses_reasoning",
     "reasoning_to_anthropic",
     "reasoning_to_responses",

@@ -151,15 +151,37 @@ def from_openai_responses(
     blocks, problem = _blocks_from_instructions(payload.get("instructions"))
     thinking_effort, nested_extensions = read_responses_thinking_effort(payload)
     model = payload.get("model")
+    input_messages = _messages_from_input(payload.get("input"))
+    input_system: list[SystemBlock] = []
+    messages: list[SemanticMessage] = []
+    conversion = Conversion()
+    for message in input_messages:
+        if message.role in {"system", "developer"}:
+            if message.phase is not None:
+                conversion.record(
+                    LossCode.MESSAGE_PHASE_NOT_CARRIED,
+                    f"{message.role} message phase {message.phase!r} has no instructions spelling",
+                )
+            for block in message.blocks:
+                if block.kind is BlockKind.TEXT:
+                    input_system.append(SystemBlock(text=block.text))
+                else:
+                    conversion.record(
+                        LossCode.BLOCK_NOT_CARRIED,
+                        f"{message.role} input block {block.kind.value} has no system-text spelling",
+                    )
+            continue
+        messages.append(message)
     request = SemanticRequest(
         model=model if isinstance(model, str) else "",
-        system=blocks,
-        messages=_messages_from_input(payload.get("input")),
+        system=[*blocks, *input_system],
+        messages=messages,
         tools=_dict_list(payload.get("tools")),
         stream=bool(payload.get("stream", False)),
         thinking_effort=thinking_effort,
         source_format=WIRE_FORMAT,
         nested_extensions=nested_extensions,
+        conversion=conversion,
     )
     if problem is not None:
         request.conversion.record(problem, "instructions")
@@ -179,13 +201,12 @@ def from_openai_responses(
     request.tool_choice = intent_from_responses_tool_choice(
         choice, payload.get("parallel_tool_calls")
     )
-    if request.tool_choice is None:
-        if "tool_choice" in payload:
-            request.extensions["tool_choice"] = choice
-        # Without a claimed choice, parallel_tool_calls remains in extensions as well.
-    elif payload.get("parallel_tool_calls") is False:
-        # The intent now carries this field; do not also report it as a lost extension.
+    parallel_tool_calls = payload.get("parallel_tool_calls")
+    if isinstance(parallel_tool_calls, bool):
+        request.parallel_tool_calls = parallel_tool_calls
         request.extensions.pop("parallel_tool_calls", None)
+    if request.tool_choice is None and "tool_choice" in payload:
+        request.extensions["tool_choice"] = choice
     return request
 
 
@@ -576,12 +597,71 @@ def response_blocks_from_item(
 def _messages_from_input(value: object) -> list[SemanticMessage]:
     """Read Responses `input` items back into typed messages.
 
-    Each item becomes its own message, because Responses has no message grouping to preserve: a `function_call` is a top-level item, not a block inside an assistant turn.
+    Responses puts assistant text, reasoning, and function calls in separate
+    top-level items. They form one assistant turn for a Chat-like upstream.
     """
+    if isinstance(value, str):
+        return [
+            SemanticMessage(
+                "user",
+                (ContentBlock(BlockKind.TEXT, text=value),),
+            )
+        ]
+
     messages: list[SemanticMessage] = []
+    pending_assistant: list[ContentBlock] = []
+    pending_assistant_phase: str | None = None
+
+    def flush_assistant() -> None:
+        nonlocal pending_assistant_phase
+        if pending_assistant:
+            messages.append(
+                SemanticMessage(
+                    "assistant",
+                    tuple(pending_assistant),
+                    phase=pending_assistant_phase,
+                )
+            )
+            pending_assistant.clear()
+        pending_assistant_phase = None
+
     for item in _dict_list(value):
         role, blocks = blocks_from_item(item)
-        messages.append(SemanticMessage(role, blocks))
+        kind = item.get("type")
+        phase = item.get("phase") if isinstance(item.get("phase"), str) else None
+        typed_assistant_item = isinstance(kind, str) and kind in {
+            "message",
+            "reasoning",
+            "function_call",
+        }
+        assistant_item = (
+            role == "assistant"
+            and (
+                typed_assistant_item
+                or (
+                    not isinstance(kind, str)
+                    and item.get("role") == "assistant"
+                )
+            )
+        )
+        if assistant_item:
+            if (
+                pending_assistant
+                and phase is not None
+                and pending_assistant_phase is not None
+                and phase != pending_assistant_phase
+            ):
+                flush_assistant()
+            pending_assistant.extend(blocks)
+            if phase is not None:
+                pending_assistant_phase = phase
+            continue
+        flush_assistant()
+        if blocks:
+            messages.append(
+                SemanticMessage(role, blocks, raw=item, phase=phase)
+            )
+    flush_assistant()
     return messages
 
 
@@ -602,16 +682,26 @@ def _input_from_messages(
                     parts.append(item)
                     continue
                 if parts:
-                    items.append(_message_item(message.role, parts))
+                    items.append(
+                        _message_item(message.role, parts, phase=message.phase)
+                    )
                     parts = []
                 items.append(item)
         if parts:
-            items.append(_message_item(message.role, parts))
+            items.append(_message_item(message.role, parts, phase=message.phase))
     return items
 
 
-def _message_item(role: str, parts: list[dict[str, Any]]) -> dict[str, Any]:
-    return {"type": "message", "role": role, "content": parts}
+def _message_item(
+    role: str,
+    parts: list[dict[str, Any]],
+    *,
+    phase: str | None = None,
+) -> dict[str, Any]:
+    item: dict[str, Any] = {"type": "message", "role": role, "content": parts}
+    if phase is not None:
+        item["phase"] = phase
+    return item
 
 
 def item_from_block(
@@ -717,8 +807,23 @@ def _server_tool_block_as_text(
     return rendering.source_type, rendering.text, rendering.dropped_opaque
 
 
+def unpack_raw_tool_arguments(value: Any) -> str | None:
+    """Recover malformed argument text from the assembler's marker."""
+    if not isinstance(value, dict):
+        return None
+    entries = cast(dict[str, Any], value)
+    if len(entries) == 1:
+        raw = entries.get("__raw")
+        if isinstance(raw, str):
+            return raw
+    return None
+
+
 def _encoded_arguments(value: Any) -> str:
     """Responses wants a JSON string here, not an object. Sending an object is a 400."""
+    raw = unpack_raw_tool_arguments(value)
+    if raw is not None:
+        return raw
     if isinstance(value, str):
         return value
     return json.dumps(value if value is not None else {}, ensure_ascii=False)
@@ -926,6 +1031,8 @@ def to_openai_responses(
         payload["max_output_tokens"] = request.max_output_tokens
     if request.temperature is not None:
         payload["temperature"] = request.temperature
+    if request.parallel_tool_calls is not None:
+        payload["parallel_tool_calls"] = request.parallel_tool_calls
     payload.update(request.nested_extensions_for(WIRE_FORMAT))
     _apply_reasoning(payload, request, target_model or TranslationTarget())
     payload.update(request.extensions_for(WIRE_FORMAT))

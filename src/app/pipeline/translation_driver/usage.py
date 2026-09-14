@@ -68,6 +68,51 @@ def anthropic_usage_from_responses(usage: object) -> dict[str, int]:
     return convert_responses_usage(usage).wire.model_dump()
 
 
+def _count(usage: Mapping[str, Any], key: str) -> int:
+    value = usage.get(key)
+    return value if type(value) is int and value >= 0 else 0
+
+
+def responses_usage_from_anthropic(usage: Mapping[str, Any]) -> dict[str, Any]:
+    """Render canonical Anthropic-style usage as the complete Responses shape."""
+    input_tokens = _count(usage, "input_tokens")
+    cache_read = _count(usage, "cache_read_input_tokens")
+    cache_write = _count(usage, "cache_creation_input_tokens")
+    output_tokens = _count(usage, "output_tokens")
+    reasoning_tokens = _count(usage, "reasoning_tokens")
+    total_input = input_tokens + cache_read + cache_write
+    return {
+        "input_tokens": total_input,
+        "input_tokens_details": {
+            "cached_tokens": cache_read,
+            "cache_write_tokens": cache_write,
+        },
+        "output_tokens": output_tokens,
+        "output_tokens_details": {"reasoning_tokens": reasoning_tokens},
+        "total_tokens": total_input + output_tokens,
+    }
+
+
+def chat_usage_from_anthropic(usage: Mapping[str, Any]) -> dict[str, Any]:
+    """Render canonical Anthropic-style usage as the complete Chat shape."""
+    input_tokens = _count(usage, "input_tokens")
+    cache_read = _count(usage, "cache_read_input_tokens")
+    cache_write = _count(usage, "cache_creation_input_tokens")
+    output_tokens = _count(usage, "output_tokens")
+    reasoning_tokens = _count(usage, "reasoning_tokens")
+    prompt_tokens = input_tokens + cache_read + cache_write
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": output_tokens,
+        "total_tokens": prompt_tokens + output_tokens,
+        "prompt_tokens_details": {
+            "cached_tokens": cache_read,
+            "cache_write_tokens": cache_write,
+        },
+        "completion_tokens_details": {"reasoning_tokens": reasoning_tokens},
+    }
+
+
 def convert_responses_usage(value: object) -> ResponseUsageConversion:
     if value is None:
         return ResponseUsageConversion(

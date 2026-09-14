@@ -474,7 +474,7 @@ def test_buffered_chat_reasoning_reaches_both_client_formats_as_typed_content() 
     ]
     assert responses["output"][1]["type"] == "message"
     assert responses["output"][1]["content"] == [
-        {"type": "output_text", "text": "answer"}
+        {"type": "output_text", "text": "answer", "annotations": [], "logprobs": []}
     ]
     assert not responses_semantic.conversion.has(LossCode.BLOCK_NOT_CARRIED)
 

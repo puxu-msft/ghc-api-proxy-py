@@ -34,6 +34,7 @@ from app.pipeline.delivery.formats.anthropic_messages import (
     render,
     terminal_frames,
 )
+from app.pipeline.delivery.formats.commandcode import CommandCodeAssembler
 from app.pipeline.delivery.formats.openai_responses import (
     ResponsesAssembler,
     ResponsesFramer,
@@ -53,6 +54,7 @@ __all__ = [
     "BlockAssembler",
     "BlockBuffer",
     "BufferCapExceeded",
+    "CommandCodeAssembler",
     "CompletedBlock",
     "DeliveryError",
     "DeliverySession",

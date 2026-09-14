@@ -26,6 +26,7 @@ from app.pipeline.direct_driver.base import (
     capture_failed_upstream_attempt,
     capture_returned_upstream_response,
 )
+from app.pipeline.direct_driver.commandcode import CommandCodeDriver
 from app.pipeline.direct_driver.openai_chat_completions import OpenAIChatCompletionsDriver
 from app.pipeline.direct_driver.openai_embeddings import OpenAIEmbeddingsDriver
 from app.pipeline.direct_driver.openai_responses import OpenAIResponsesDriver
@@ -60,6 +61,7 @@ DRIVERS: dict[ModelEndpoint, DriverFactory] = {
     ModelEndpoint.OPENAI_CHAT_COMPLETIONS: OpenAIChatCompletionsDriver,
     ModelEndpoint.OPENAI_RESPONSES: OpenAIResponsesDriver,
     ModelEndpoint.OPENAI_EMBEDDINGS: OpenAIEmbeddingsDriver,
+    ModelEndpoint.COMMANDCODE_GENERATE: CommandCodeDriver,
 }
 
 __all__ = [
@@ -74,6 +76,7 @@ __all__ = [
     "AdmissionPolicy",
     "AnthropicMessagesDriver",
     "Budget",
+    "CommandCodeDriver",
     "DirectDriver",
     "DriverFactory",
     "DriverOutcome",

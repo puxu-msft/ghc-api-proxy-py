@@ -15,7 +15,11 @@ from app.pipeline.delivery.formats.anthropic_messages import (
     AnthropicAssembler,
     AnthropicFramer,
 )
-from app.pipeline.delivery.formats.openai_chat_completions import ChatCompletionsAssembler
+from app.pipeline.delivery.formats.commandcode import CommandCodeAssembler
+from app.pipeline.delivery.formats.openai_chat_completions import (
+    ChatCompletionsAssembler,
+    ChatCompletionsFramer,
+)
 from app.pipeline.delivery.formats.openai_responses import ResponsesAssembler, ResponsesFramer
 from app.pipeline.delivery.formats.openai_responses_passthrough import (
     responses_passthrough_assembler,
@@ -40,6 +44,8 @@ def dialect_for(handled: HandledRequest) -> ReplyDialect:
         return ReplyDialect.ANTHROPIC
     if handled.route.target_format is WireFormat.OPENAI_RESPONSES:
         return ReplyDialect.RESPONSES
+    if handled.route.target_format is WireFormat.COMMANDCODE:
+        return ReplyDialect.COMMANDCODE
     if handled.route.target_format is WireFormat.OPENAI_CHAT_COMPLETIONS:
         return ReplyDialect.CHAT_COMPLETIONS
     return ReplyDialect.ANTHROPIC
@@ -57,7 +63,10 @@ def delivers_blocks(handled: HandledRequest) -> bool:
     """
     if handled.synthesized:
         return True
-    return handled.route.inbound_format is not WireFormat.OPENAI_CHAT_COMPLETIONS
+    return (
+        handled.route.inbound_format is not WireFormat.OPENAI_CHAT_COMPLETIONS
+        or handled.route.translation_required
+    )
 
 def carries_upstream_natively(handled: HandledRequest) -> bool:
     """Whether this route's client speaks the dialect upstream answered in, so nothing needs translating.
@@ -113,6 +122,11 @@ def framer_for(
             reshape=reshape,
             on_terminal_unit=on_passthrough_terminal_unit,
         )
+    if handled.route.inbound_format is WireFormat.OPENAI_CHAT_COMPLETIONS:
+        return ChatCompletionsFramer(
+            message_id=message_id,
+            model=model,
+        )
     return AnthropicFramer(
         message_id=message_id,
         model=model,
@@ -146,6 +160,8 @@ def assembler_for(
         # with an empty body — the exact defect `delivers_blocks` documents for the
         # mirror-image route.
         return ChatCompletionsAssembler()
+    if dialect_for(handled) is ReplyDialect.COMMANDCODE:
+        return CommandCodeAssembler()
     return AnthropicAssembler()
 
 def stream_settings(chain: Chain) -> StreamSettings:

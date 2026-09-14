@@ -18,6 +18,7 @@ class EffortSource(StrEnum):
     ANTHROPIC_DEFAULT = "anthropic-default"
     ANTHROPIC_TOP_LEVEL = "anthropic-top-level"
     ANTHROPIC_PER_MESSAGE = "anthropic-per-message"
+    CHAT_COMPLETIONS = "chat-completions"
     RESPONSES = "responses"
 
 

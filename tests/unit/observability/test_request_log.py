@@ -746,6 +746,29 @@ def test_a_responses_turn_names_the_item_upstream_actually_sent() -> None:
     assert format_stop_reason("tool_use", ("Bash",), ReplyDialect.ANTHROPIC) == "tool_use(Bash)"
 
 
+def test_a_commandcode_completion_line_uses_every_dialect_projection() -> None:
+    line = format_completion_line(
+        RequestLine(
+            method="POST",
+            path="/v1/messages",
+            inbound_format="anthropic-messages",
+            model="command-model",
+            status_code=200,
+            bytes_out=100 * 1024,
+            stop_reason="tool_use",
+            tools=("Bash",),
+            thinking=("enc",),
+            dialect=ReplyDialect.COMMANDCODE,
+        ),
+        status="ok",
+    )
+
+    assert line == (
+        "200 anthropic-messages/command-model ↓100.0KiB "
+        "tool-calls(Bash) reason(enc:1)"
+    )
+
+
 def _responses_observation_and_line(
     body: dict[str, object],
     *,

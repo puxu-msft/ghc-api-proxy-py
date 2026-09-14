@@ -46,6 +46,9 @@ from app.pipeline.delivery.sse_source import SseEvent
 from app.pipeline.server_tool_text import web_search_call_text
 from app.pipeline.translation_driver.anthropic_messages import block_to_anthropic
 from app.pipeline.translation_driver.content import BlockKind
+from app.pipeline.translation_driver.openai_responses import (
+    unpack_raw_tool_arguments,
+)
 from app.pipeline.translation_driver.reasoning_bridge import (
     ReasoningBridgeError,
     read_anthropic_reasoning,
@@ -160,11 +163,9 @@ def _json_arguments(value: object) -> str:
     The assembler parsed them on the way in, so this re-serialises.
     `{"__raw": …}` is its marker for arguments it could not parse — upstream sent malformed JSON, which is on record for a turn cut short mid-call — and the raw text is handed back rather than the marker, which would otherwise reach the client as a tool argument literally named `__raw`.
     """
-    if isinstance(value, dict):
-        entries = dict[str, Any](value)  # pyright: ignore[reportUnknownArgumentType]
-        raw = entries.get("__raw")
-        if len(entries) == 1 and isinstance(raw, str):
-            return raw
+    raw = unpack_raw_tool_arguments(value)
+    if raw is not None:
+        return raw
     return orjson.dumps(value).decode()
 
 
@@ -417,6 +418,9 @@ class ResponsesFramer:
                 },
             ).encode(),
         )
+
+    def supports_stop_reason(self, stop_reason: str) -> bool:
+        return True
 
     def error(self, info: ErrorInfo) -> bytes:
         """The one frame that says a started stream will not end successfully.

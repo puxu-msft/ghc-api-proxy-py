@@ -618,6 +618,7 @@ CONDITION_CODE_CASES: tuple[tuple[str, str | None], ...] = (
     ("openai-chat-completions", "context_length_exceeded"),
     ("openai-responses", "context_length_exceeded"),
     ("openai-embeddings", "context_length_exceeded"),
+    ("commandcode", "context_length_exceeded"),
     # Google's error object has no string identifier — `code` is the HTTP status — so the expectation is an absence rather than a spelling.
     ("gemini-generate-content", None),
 )

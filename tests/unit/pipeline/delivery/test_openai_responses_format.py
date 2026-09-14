@@ -449,6 +449,8 @@ def test_a_block_kind_this_does_not_know_is_refused_rather_than_emptied() -> Non
     ("stop_reason", "expected"),
     [
         ("max_tokens", "max_output_tokens"),
+        ("max_messages", "max_messages"),
+        ("steered", "steered"),
         # Written by the assembler when upstream said incomplete and gave no reason.
         ("incomplete", None),
         # Anthropic's vocabulary. Reachable only through a route this proxy cannot build today, but the passthrough that used to send them had no way of knowing that.
