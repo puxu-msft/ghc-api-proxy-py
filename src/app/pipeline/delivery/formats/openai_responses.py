@@ -33,6 +33,8 @@ from app.pipeline.delivery.assembling import (
     decode_json,
 )
 from app.pipeline.delivery.blocks import (
+    FILE,
+    IMAGE,
     REDACTED_THINKING,
     SERVER_TOOL_USE,
     TEXT,
@@ -260,6 +262,19 @@ class ResponsesFramer:
             frames = self._reasoning(block)
         elif block.kind == TEXT:
             frames = self._message(block)
+        elif block.kind == IMAGE:
+            frames = self._image(block)
+        elif block.kind == FILE:
+            frames = self._message(
+                CompletedBlock(
+                    index=block.index,
+                    kind=TEXT,
+                    payload={
+                        "type": TEXT,
+                        "text": f"[file] {self._file_reference(block)}",
+                    },
+                )
+            )
         else:
             raise ValueError(f"no Responses item shape for block kind {block.kind!r}")
         self._output_index += 1
@@ -381,6 +396,74 @@ class ResponsesFramer:
                 "response.output_item.added", {"output_index": index, "item": item}
             ).encode(),
             self._frame("response.output_item.done", {"output_index": index, "item": item}).encode(),
+        )
+
+    def _image(self, block: CompletedBlock) -> tuple[bytes, ...]:
+        source = block.payload.get("source")
+        source_map: Mapping[str, Any] = (
+            cast(Mapping[str, Any], source) if isinstance(source, Mapping) else {}
+        )
+        data = source_map.get("data")
+        if not isinstance(data, str) or not data:
+            logger.warning("rendering non-base64 image block as text for Responses output")
+            return self._message(
+                CompletedBlock(
+                    index=block.index,
+                    kind=TEXT,
+                    payload={
+                        "type": TEXT,
+                        "text": f"[image] {self._image_reference(block)}",
+                    },
+                )
+            )
+
+        index = self._output_index
+        item_id = self._item_id("ig")
+        opening: dict[str, Any] = {
+            "id": item_id,
+            "type": "image_generation_call",
+            "status": "in_progress",
+        }
+        closing: dict[str, Any] = {
+            **opening,
+            "status": "completed",
+            "result": data,
+        }
+        self._items.append(closing)
+        return (
+            self._frame(
+                "response.output_item.added",
+                {"output_index": index, "item": opening},
+            ).encode(),
+            self._frame(
+                "response.output_item.done",
+                {"output_index": index, "item": closing},
+            ).encode(),
+        )
+
+    @staticmethod
+    def _image_reference(block: CompletedBlock) -> str:
+        source = block.payload.get("source")
+        source_map: Mapping[str, Any] = (
+            cast(Mapping[str, Any], source) if isinstance(source, Mapping) else {}
+        )
+        return str(
+            source_map.get("url")
+            or source_map.get("file_id")
+            or "unavailable image"
+        )
+
+    @staticmethod
+    def _file_reference(block: CompletedBlock) -> str:
+        source = block.payload.get("source")
+        source_map: Mapping[str, Any] = (
+            cast(Mapping[str, Any], source) if isinstance(source, Mapping) else {}
+        )
+        return str(
+            source_map.get("url")
+            or source_map.get("file_id")
+            or block.payload.get("title")
+            or "unavailable file"
         )
 
     def terminal(self, terminal: Terminal) -> tuple[bytes, ...]:
@@ -668,6 +751,7 @@ class ResponsesAssembler:
             "message": TEXT,
             "function_call": TOOL_USE,
             "reasoning": THINKING,
+            "image_generation_call": IMAGE,
             # Delivered as a call on the client's own tool when a name is known. **Without one it is discarded rather than left to fall through**: the fallback renders an empty text block, and an assistant turn carrying one is refused when the client replays it. Discarding loses the model's search request either way; the difference is whether the turn stays replayable.
             TOOL_SEARCH_CALL: TOOL_USE if self._client_search_tool else DISCARDED,
             # The upstream's own account of a **hosted** search: it ran the search and is reporting what it loaded. There is no Anthropic block for that, and the client did not ask for one — it asked for a hosted search, whose whole point is that it happens elsewhere.
@@ -848,6 +932,12 @@ class ResponsesAssembler:
                 "arguments": draft.partial_json
                 or str(closing.get("arguments") or draft.payload.get("arguments") or "{}"),
             }
+        if draft.kind == IMAGE:
+            return {
+                **draft.payload,
+                **closing,
+                "type": "image_generation_call",
+            }
         if draft.kind == THINKING:
             item = {**draft.payload, **closing, "type": "reasoning"}
             if "summary" not in item:
@@ -950,7 +1040,7 @@ class ResponsesAssembler:
                 cast(dict[str, Any], data.get("item") or {}).get("type", "")
             )
             return ()
-        if draft.kind in {TEXT, TOOL_USE, THINKING, WEB_SEARCH_CALL}:
+        if draft.kind in {TEXT, TOOL_USE, THINKING, IMAGE, WEB_SEARCH_CALL}:
             completed, losses, unknown = self._normalized_blocks(draft, data)
             if unknown:
                 item_type = str(
@@ -1179,6 +1269,8 @@ def read_responses_terminal(
     terminal.stop_reason = facts.stop_reason
     terminal.usage = facts.usage
     terminal.upstream_usage = facts.upstream_usage
+    terminal.usage_present = facts.usage_present
+    terminal.usage_malformed = facts.usage_malformed
 
 
 def _upstream_cut_this_item_short(data: dict[str, Any]) -> bool:

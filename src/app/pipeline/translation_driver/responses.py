@@ -43,8 +43,7 @@ from app.pipeline.translation_driver.semantic import (
     LossCode,
 )
 from app.pipeline.translation_driver.usage import (
-    ResponsesUsageError,
-    anthropic_usage_from_responses,
+    convert_responses_usage,
     responses_usage_from_anthropic,
 )
 
@@ -83,6 +82,7 @@ class SemanticResponse:
     blocks: list[ContentBlock] = field(default_factory=lambda: list[ContentBlock]())
     stop_reason: str = END_TURN
     usage: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
+    usage_present: bool = False
     conversion: Conversion = field(default_factory=Conversion)
     source_format: str = ""
     opaque_payloads: list[OpaqueResponsePayload] = field(
@@ -133,6 +133,7 @@ def from_anthropic_response(
         )
     usage = payload.get("usage")
     if isinstance(usage, Mapping):
+        response.usage_present = True
         response.usage = dict[str, Any](cast(Mapping[str, Any], usage))
 
     response.blocks = [
@@ -141,17 +142,34 @@ def from_anthropic_response(
     return response
 
 
-def _anthropic_usage(usage: Mapping[str, Any]) -> dict[str, Any]:
+def _anthropic_usage(
+    usage: object,
+    conversion: Conversion | None = None,
+) -> dict[str, Any]:
     """Responses token counts in Anthropic's keys, for a body that is about to claim to be Anthropic's.
 
     This used to copy the object across untouched, which handed the client `input_tokens_details` and `total_tokens` it has no schema for, no `cache_read_input_tokens` at all, and — the part that misleads rather than merely omits — an `input_tokens` that in Responses *includes* what came from cache but in Anthropic means what was sent fresh. A heavily cached prompt therefore arrived downstream looking like a full-price one. The streaming path converts, so the same route was answering with two different usage contracts depending on one flag.
 
-    A malformed usage leaves the field empty rather than failing the response. The reply itself is complete and legal; refusing to deliver it over a count would trade the answer for its accounting, and passing the raw object through instead would put back the shape the client cannot read.
+    A malformed field is projected best-effort: valid sibling counts remain
+    visible, while the conversion records a structured usage loss. The reply
+    itself is complete and legal; refusing to deliver it over one bad count
+    would trade the answer for its accounting, and passing the raw object
+    through would put back the shape the client cannot read.
     """
-    try:
-        return dict[str, Any](anthropic_usage_from_responses(usage))
-    except ResponsesUsageError:
+    converted = convert_responses_usage(usage, strict=False)
+    if conversion is not None:
+        for fact in converted.facts:
+            if fact.code == "usage_malformed":
+                conversion.record(LossCode.USAGE_MALFORMED, fact.field_path)
+            elif fact.code == "usage_inconsistent":
+                conversion.record(LossCode.USAGE_INCONSISTENT, fact.field_path)
+    if any(
+        fact.code == "usage_malformed"
+        and fact.field_path in {"usage.input_tokens", "usage.output_tokens"}
+        for fact in converted.facts
+    ):
         return {}
+    return dict[str, Any](converted.wire.model_dump())
 
 
 def anthropic_message_id_from_response_id(upstream_response_id: str) -> str:
@@ -224,7 +242,11 @@ def to_anthropic_response(
         "content": content,
         "stop_reason": anthropic_stop_reason,
         "stop_sequence": None,
-        "usage": response.usage or {"input_tokens": 0, "output_tokens": 0},
+        "usage": (
+            response.usage
+            if response.usage_present or response.usage
+            else {"input_tokens": 0, "output_tokens": 0}
+        ),
     }
     for opaque in response.opaque_payloads:
         if opaque.source_format == "anthropic-messages" and opaque.kind == "top-level-field":
@@ -290,9 +312,12 @@ def from_openai_responses_response(
                 kind="top-level-field",
             )
         )
-    usage = payload.get("usage")
-    if isinstance(usage, Mapping):
-        response.usage = _anthropic_usage(cast(Mapping[str, Any], usage))
+    if "usage" in payload and payload.get("usage") is not None:
+        response.usage_present = True
+        response.usage = _anthropic_usage(
+            payload.get("usage"),
+            response.conversion,
+        )
 
     # Whether this ending will hand the turn back, which is what decides whether the block upstream cut short may be dropped at all. One setting for both, since dropping content is only defensible when the client is handed a way to get it back — separating them let a `content_filter` ending drop a block and hand over nothing, and the client lost a passage it could not ask for again on a line that read `[ OK ]`.
     #
@@ -405,7 +430,12 @@ def to_openai_responses_response(
         # Always present, null when there is nothing legal to put in it — that is the key's shape on the wire, and it is how a client tells "no reason given" from a field this proxy forgot to write.
         "incomplete_details": {"reason": reason} if reason is not None else None,
         "output": [
-            _as_output_item(item, response_id=response.id, output_index=index)
+            _as_output_item(
+                item,
+                response_id=response.id,
+                output_index=index,
+                conversion=response.conversion,
+            )
             for index, item in enumerate(rendered)
         ],
         "parallel_tool_calls": True,
@@ -426,13 +456,14 @@ def _as_output_item(
     *,
     response_id: str,
     output_index: int,
+    conversion: Conversion,
 ) -> dict[str, Any]:
     """Wrap a bare content part in the message item a Responses `output` expects.
 
     The shared writer produces content parts, because in a request they sit inside a message. In a response each one is its own item, so the wrapping happens here rather than by giving the writer a second mode.
     """
     kind = str(item.get("type", ""))
-    if kind in {"output_text", "input_text", "input_image"}:
+    if kind in {"output_text", "input_text"}:
         part = {
             **item,
             "type": "output_text",
@@ -450,6 +481,66 @@ def _as_output_item(
             "status": "completed",
             "content": [part],
         }
+    if kind == "input_image":
+        image_url = item.get("image_url")
+        if isinstance(image_url, Mapping):
+            image_url = cast(Mapping[str, Any], image_url).get("url")
+        if isinstance(image_url, str) and image_url.startswith("data:") and ";base64," in image_url:
+            header, data = image_url.split(",", 1)
+            media_type = header[5:].removesuffix(";base64")
+            if media_type and data:
+                return {
+                    "id": str(item.get("id") or f"ig_{response_id}_{output_index}"),
+                    "type": "image_generation_call",
+                    "status": "completed",
+                    "result": data,
+                }
+        reference = image_url or item.get("file_id") or "unavailable image"
+        conversion.record(
+            LossCode.IMAGE_SOURCE_COERCED,
+            "Responses output image reference was rendered as text",
+        )
+        return {
+            "id": f"msg_{response_id}_{output_index}",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [
+                {
+                    "type": "output_text",
+                    "text": f"[image] {reference}",
+                    "annotations": [],
+                    "logprobs": [],
+                }
+            ],
+        }
+    if kind == "input_file":
+        reference = item.get("file_url") or item.get("file_id") or item.get("filename") or "unavailable file"
+        conversion.record(
+            LossCode.IMAGE_SOURCE_COERCED,
+            "Responses output file reference was rendered as text",
+        )
+        return {
+            "id": f"msg_{response_id}_{output_index}",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [
+                {
+                    "type": "output_text",
+                    "text": f"[file] {reference}",
+                    "annotations": [],
+                    "logprobs": [],
+                }
+            ],
+        }
+    if kind == "image_generation_call":
+        return {
+            **item,
+            "id": str(item.get("id") or f"ig_{response_id}_{output_index}"),
+            "type": "image_generation_call",
+            "status": str(item.get("status") or "completed"),
+        }
     if kind == "message":
         content: list[dict[str, Any]] = []
         for part in item.get("content", []):
@@ -459,6 +550,7 @@ def _as_output_item(
                 dict[str, Any](cast(Mapping[str, Any], part)),
                 response_id=response_id,
                 output_index=output_index,
+                conversion=conversion,
             )
             parts = normalized.get("content")
             if isinstance(parts, list) and parts and isinstance(parts[0], Mapping):

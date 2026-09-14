@@ -24,6 +24,7 @@ TEXT = "text"
 TOOL_SEARCH_CALL = "tool_search_call"
 TOOL_SEARCH_OUTPUT = "tool_search_output"
 WEB_SEARCH_CALL = "web_search_call"
+IMAGE_GENERATION_CALL = "image_generation_call"
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +140,10 @@ def _normalize_item(
                 for part in _content_parts(item.get("content"))
             ),
         )
+    if kind == "image":
+        return "user", (ContentBlock(BlockKind.IMAGE, raw=item),)
+    if kind in {"document", "file"}:
+        return "user", (ContentBlock(BlockKind.FILE, raw=item),)
     if kind == "function_call":
         return "assistant", (
             ContentBlock(
@@ -168,6 +173,11 @@ def _normalize_item(
                 raw=item,
             ),
         )
+    if kind == IMAGE_GENERATION_CALL:
+        result = item.get("result")
+        if isinstance(result, str) and result:
+            return "assistant", (ContentBlock(BlockKind.IMAGE, raw=item),)
+        return "assistant", (ContentBlock(BlockKind.UNKNOWN, raw=item),)
     if kind == "reasoning":
         try:
             reasoning = read_responses_reasoning(item)
@@ -211,6 +221,8 @@ def _block_from_content_part(part: dict[str, Any]) -> ContentBlock:
         return ContentBlock(BlockKind.TEXT, text=str(part.get("text", "")), raw=part)
     if kind == "input_image":
         return ContentBlock(BlockKind.IMAGE, raw=part)
+    if kind == "input_file":
+        return ContentBlock(BlockKind.FILE, raw=part)
     return ContentBlock(BlockKind.UNKNOWN, raw=part)
 
 

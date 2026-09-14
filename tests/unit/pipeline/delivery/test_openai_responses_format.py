@@ -9,7 +9,6 @@ from typing import Any, cast, get_args
 
 import orjson
 import pytest
-from openai._models import construct_type
 from openai._types import omit
 from openai.lib.streaming.responses import ResponseStreamState
 from openai.types.responses import ParsedResponse
@@ -25,6 +24,7 @@ from app.pipeline.delivery.blocks import (
     CompletedBlock,
 )
 from app.pipeline.delivery.formats.openai_responses import ResponsesFramer
+from tests.unit.pipeline.responses_sdk import validate_responses_stream_event
 
 
 def framer() -> ResponsesFramer:
@@ -44,10 +44,12 @@ def events_of(frames: tuple[bytes, ...]) -> list[str]:
 def as_event(frame: bytes) -> Any:
     """One frame decoded back into the SDK's own event object.
 
-    `construct_type` is the SDK's loose constructor and it answers `object`, so the cast is here once rather than at each call site. It is the same path the SDK's SSE decoder takes, which is the point — the events the parser sees under test are built the way it builds them.
+    The discriminated union is validated strictly here. The stream state is
+    still the SDK's behavioural oracle, but its own loose constructor would
+    otherwise accept malformed events and hide wire-shape regressions.
     """
     payload = orjson.loads(frame.decode().split("data: ", 1)[1])
-    return cast(Any, construct_type(value=payload, type_=ResponseStreamEvent))
+    return validate_responses_stream_event(payload)
 
 
 def replay(frames: list[bytes]) -> ParsedResponse[Any]:
@@ -77,12 +79,22 @@ def whole(framer_: ResponsesFramer, blocks: list[CompletedBlock], terminal: Term
     return frames
 
 
+def sdk_usage(*, input_tokens: int = 0, output_tokens: int = 0) -> dict[str, Any]:
+    return {
+        "input_tokens": input_tokens,
+        "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+        "output_tokens": output_tokens,
+        "output_tokens_details": {"reasoning_tokens": 0},
+        "total_tokens": input_tokens + output_tokens,
+    }
+
+
 def test_the_sdk_reconstructs_the_text_it_was_sent() -> None:
     response = replay(
         whole(
             framer(),
             [text_block(0, "Hello"), text_block(1, " world")],
-            Terminal(stop_reason="end_turn", seen=True, upstream_usage={"input_tokens": 7}),
+            Terminal(stop_reason="end_turn", seen=True, upstream_usage=sdk_usage(input_tokens=7)),
         )
     )
 
@@ -288,7 +300,7 @@ def test_a_truncated_turn_completes_as_incomplete_with_upstreams_reason() -> Non
     frames = whole(
         framer(),
         [text_block(0, "half a sen")],
-        Terminal(stop_reason="max_tokens", seen=True, upstream_usage={"output_tokens": 64}),
+        Terminal(stop_reason="max_tokens", seen=True, upstream_usage=sdk_usage(output_tokens=64)),
     )
     state: ResponseStreamState[Any] = ResponseStreamState(input_tools=[], text_format=omit)
     for frame in frames:
@@ -298,7 +310,7 @@ def test_a_truncated_turn_completes_as_incomplete_with_upstreams_reason() -> Non
     last = orjson.loads(frames[-1].decode().split("data: ", 1)[1])["response"]
     assert last["status"] == "incomplete"
     assert last["incomplete_details"] == {"reason": "max_output_tokens"}
-    assert last["usage"] == {"output_tokens": 64}
+    assert last["usage"] == sdk_usage(output_tokens=64)
     # The text that did arrive is still in the output, because half an answer beats none.
     assert last["output"][0]["content"][0]["text"] == "half a sen"
 

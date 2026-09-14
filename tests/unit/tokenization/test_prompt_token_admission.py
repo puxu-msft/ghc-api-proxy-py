@@ -362,7 +362,11 @@ async def test_real_translator_native_image_shapes_remain_in_the_admission_domai
     count = text_count(text)
     payload = translated_image_payload(image, text)
 
-    assert [item["type"] for item in payload["input"]] == ["message", "image"]
+    assert [item["type"] for item in payload["input"]] == ["message"]
+    assert [part["type"] for part in payload["input"][0]["content"]] == [
+        "input_text",
+        "input_image",
+    ]
     observed = await PromptTokenAdmission().evaluate(
         attempt=0,
         target_format=OPENAI_RESPONSES,
@@ -466,7 +470,13 @@ async def test_native_image_and_encrypted_reasoning_are_not_counted_as_text() ->
                 {
                     "type": "message",
                     "role": "user",
-                    "content": [{"type": "input_image", "image_url": "data:image/png;base64," + "A" * 1000}],
+                    "content": [
+                        {
+                            "type": "input_image",
+                            "detail": "auto",
+                            "image_url": "data:image/png;base64," + "A" * 1000,
+                        }
+                    ],
                 },
                 {"type": "reasoning", "summary": [], "encrypted_content": "A" * 1000},
             ],
@@ -475,6 +485,60 @@ async def test_native_image_and_encrypted_reasoning_are_not_counted_as_text() ->
 
     assert observed.outcome is TokenAdmissionOutcome.ADMITTED_FAST
     assert observed.field_path is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "part",
+    [
+        {
+            "type": "input_text",
+            "text": "abcdefghij " * 100,
+            "prompt_cache_breakpoint": {"mode": "explicit"},
+        },
+        {
+            "type": "input_image",
+            "detail": "auto",
+            "image_url": "https://example.invalid/image.png",
+            "prompt_cache_breakpoint": {"mode": "explicit"},
+        },
+        {
+            "type": "input_file",
+            "file_id": "file-1",
+            "filename": "report.pdf",
+            "prompt_cache_breakpoint": {"mode": "explicit"},
+        },
+    ],
+    ids=["text", "image", "file"],
+)
+async def test_sdk_prompt_cache_breakpoint_does_not_skip_admission(
+    part: dict[str, Any],
+) -> None:
+    text = "abcdefghij " * 100
+    count = text_count(text)
+    if part["type"] != "input_text":
+        part = {"type": part["type"], **part}
+    observed = await PromptTokenAdmission().evaluate(
+        attempt=0,
+        target_format=OPENAI_RESPONSES,
+        descriptor=descriptor(prompt_limit=count - 2, context_limit=count - 1),
+        payload={
+            "model": "gpt-model",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": text},
+                        part,
+                    ],
+                }
+            ],
+        },
+    )
+
+    assert observed.outcome is TokenAdmissionOutcome.REJECTED
+    assert observed.field_path == "input[0].content[0].text"
 
 
 @pytest.mark.asyncio

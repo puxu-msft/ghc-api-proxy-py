@@ -28,6 +28,7 @@ class BlockKind(StrEnum):
     SERVER_TOOL_USE = "server_tool_use"
     WEB_SEARCH_TOOL_RESULT = "web_search_tool_result"
     IMAGE = "image"
+    FILE = "file"
     UNKNOWN = "unknown"
 
 

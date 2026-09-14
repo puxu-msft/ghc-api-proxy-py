@@ -10,8 +10,7 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from app.pipeline.translation_driver.usage import (
-    ResponsesUsageError,
-    anthropic_usage_from_responses,
+    convert_responses_usage,
 )
 
 MAX_TOKENS = "max_tokens"
@@ -37,6 +36,8 @@ class ResponsesTerminalFacts:
     usage: dict[str, Any]
     upstream_usage: dict[str, Any] | None
     status: str = ""
+    usage_present: bool = False
+    usage_malformed: bool = False
 
 
 def stop_reason_from_response(
@@ -81,18 +82,23 @@ def terminal_facts_from_event(
         terminal_response,
         has_tool_call=saw_tool_call,
     )
-    raw_usage: object = response.get("usage")
+    raw_usage: Any = terminal_response.get("usage")
+    usage_present = "usage" in response and raw_usage is not None
     upstream_usage = (
         dict[str, Any](cast(Mapping[str, Any], raw_usage))
         if isinstance(raw_usage, Mapping)
         else None
     )
     usage: dict[str, Any] = {}
-    if upstream_usage is not None:
-        try:
-            usage = anthropic_usage_from_responses(upstream_usage)
-        except ResponsesUsageError:
-            usage = {}
+    usage_malformed = False
+    if usage_present:
+        converted = convert_responses_usage(cast(object, raw_usage), strict=False)
+        usage_malformed = any(
+            fact.code == "usage_malformed"
+            and fact.field_path in {"usage.input_tokens", "usage.output_tokens"}
+            for fact in converted.facts
+        )
+        usage = {} if usage_malformed else converted.wire.model_dump()
     return ResponsesTerminalFacts(
         event_type=kind,
         seen=True,
@@ -100,6 +106,8 @@ def terminal_facts_from_event(
         usage=usage,
         upstream_usage=upstream_usage,
         status=str(terminal_response.get("status", "")),
+        usage_present=usage_present,
+        usage_malformed=usage_malformed,
     )
 
 

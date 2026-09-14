@@ -248,7 +248,16 @@ def _coerced_description(tool: dict[str, Any], conversion: Conversion) -> dict[s
 #
 # **A whitelist, and that is the point of the whole function below.** The version this replaced copied every key except `input_schema`, so anything a client put on a tool travelled to an endpoint that never agreed to it. That is not a list of fields to fix one at a time: each unknown key is a candidate 400 on the entire request, they arrive one client release at a time, and each is only discovered by a user losing a turn. `defer_loading` is the one that was reported (`req=fcc0bebc`, `gpt-5.6-sol`); `eager_input_streaming` and `cache_control` were riding the same line unnoticed.
 _RESPONSES_FUNCTION_TOOL_FIELDS = frozenset(
-    {"type", "name", "description", "parameters", "strict", "allowed_callers", "output_schema"}
+    {
+        "async",
+        "type",
+        "name",
+        "description",
+        "parameters",
+        "strict",
+        "allowed_callers",
+        "output_schema",
+    }
 )
 
 # Deliberately **not** in the set above, though the SDK does list it as a function-tool field.
@@ -282,6 +291,7 @@ def _function_tool(
             **{key: value for key, value in tool.items() if key != "input_schema"},
             "type": tool.get("type", "function"),
             "parameters": tool["input_schema"],
+            "strict": tool.get("strict", False),
         }
 
     allowed = (
@@ -678,7 +688,12 @@ def _input_from_messages(
             item = _item_from_block(block, message.role, conversion, search)
             if item is not None:
                 # Text and images belong inside one message item; everything else is top-level, so an accumulated message must be flushed before the standalone item goes out or the conversation order changes.
-                if "type" in item and item["type"] in {"input_text", "output_text", "input_image"}:
+                if "type" in item and item["type"] in {
+                    "input_text",
+                    "output_text",
+                    "input_image",
+                    "input_file",
+                }:
                     parts.append(item)
                     continue
                 if parts:
@@ -702,6 +717,248 @@ def _message_item(
     if phase is not None:
         item["phase"] = phase
     return item
+
+
+def _image_part(raw: Mapping[str, Any], conversion: Conversion, *, field_path: str) -> dict[str, Any]:
+    """Render an Anthropic image block as a Responses input image.
+
+    Anthropic puts the source kind under ``source`` while Responses uses one
+    of ``image_url`` or ``file_id`` directly on the content part. Unknown
+    shapes remain visible as text instead of disappearing or turning into a
+    new local refusal.
+    """
+    if raw.get("type") == "image_generation_call":
+        return dict(raw)
+    if raw.get("type") == "input_image":
+        part = dict(raw)
+        part.setdefault("detail", "auto")
+        return part
+
+    source = raw.get("source")
+    candidate = cast(Mapping[str, Any], source) if isinstance(source, Mapping) else raw
+    source_type = candidate.get("type")
+    detail = raw.get("detail", candidate.get("detail"))
+
+    if source_type == "url" and isinstance(candidate.get("url"), str) and candidate["url"]:
+        part: dict[str, Any] = {"type": "input_image", "image_url": candidate["url"]}
+    elif (
+        source_type == "base64"
+        and isinstance(candidate.get("media_type"), str)
+        and isinstance(candidate.get("data"), str)
+    ):
+        part = {
+            "type": "input_image",
+            "image_url": f"data:{candidate['media_type']};base64,{candidate['data']}",
+        }
+    elif isinstance(candidate.get("file_id"), str) and candidate["file_id"]:
+        part = {"type": "input_image", "file_id": candidate["file_id"]}
+    elif isinstance(raw.get("image_url"), str) and raw["image_url"]:
+        part = {"type": "input_image", "image_url": raw["image_url"]}
+    elif isinstance(raw.get("file_id"), str) and raw["file_id"]:
+        part = {"type": "input_image", "file_id": raw["file_id"]}
+    else:
+        conversion.record(
+            LossCode.IMAGE_SOURCE_COERCED,
+            f"{field_path}: unsupported image source was preserved as text",
+        )
+        return {
+            "type": "input_text",
+            "text": json.dumps(dict(raw), ensure_ascii=False, sort_keys=True),
+        }
+
+    part["detail"] = detail if detail in {"auto", "low", "high"} else "auto"
+    return part
+
+
+def _file_part(raw: Mapping[str, Any], conversion: Conversion, *, field_path: str) -> dict[str, Any]:
+    """Render a document/file result as a Responses input file when possible."""
+    if raw.get("type") == "input_file":
+        return dict(raw)
+
+    source = raw.get("source")
+    candidate = cast(Mapping[str, Any], source) if isinstance(source, Mapping) else raw
+    source_type = candidate.get("type")
+    filename = (
+        raw.get("name")
+        or raw.get("filename")
+        or raw.get("title")
+        or candidate.get("filename")
+    )
+
+    if isinstance(candidate.get("file_id"), str) and candidate["file_id"]:
+        part: dict[str, Any] = {"type": "input_file", "file_id": candidate["file_id"]}
+    elif (
+        source_type == "base64"
+        and isinstance(candidate.get("media_type"), str)
+        and isinstance(candidate.get("data"), str)
+    ):
+        part = {
+            "type": "input_file",
+            "file_data": f"data:{candidate['media_type']};base64,{candidate['data']}",
+        }
+    elif source_type == "url" and isinstance(candidate.get("url"), str) and candidate["url"]:
+        part = {"type": "input_file", "file_url": candidate["url"]}
+    else:
+        conversion.record(
+            LossCode.IMAGE_SOURCE_COERCED,
+            f"{field_path}: unsupported file source was preserved as text",
+        )
+        return {
+            "type": "input_text",
+            "text": json.dumps(dict(raw), ensure_ascii=False, sort_keys=True),
+        }
+
+    if isinstance(filename, str) and filename:
+        part["filename"] = filename
+    return part
+
+
+def _native_image_item(
+    raw: Mapping[str, Any],
+    conversion: Conversion,
+) -> dict[str, Any]:
+    if not _known_native_image_shape(raw):
+        return dict(raw)
+    rendered = _image_part(raw, conversion, field_path="messages.image")
+    return rendered
+
+
+def _known_native_image_shape(raw: Mapping[str, Any]) -> bool:
+    if raw.get("type") != "image":
+        return True
+    if not set(raw).issubset({"type", "source", "cache_control", "transformations"}):
+        return False
+    source = raw.get("source")
+    if not isinstance(source, Mapping):
+        return False
+    source_map = cast(Mapping[str, Any], source)
+    source_type = source_map.get("type")
+    if source_type == "url":
+        source_known = (
+            set(source_map) == {"type", "url"} and isinstance(source_map.get("url"), str)
+        )
+    elif source_type == "base64":
+        source_known = (
+            set(source_map) == {"type", "media_type", "data"}
+            and isinstance(source_map.get("media_type"), str)
+            and isinstance(source_map.get("data"), str)
+            and source_map["media_type"]
+            in {"image/gif", "image/jpeg", "image/png", "image/webp"}
+        )
+    elif source_type == "file":
+        source_known = (
+            set(source_map) == {"type", "file_id"}
+            and isinstance(source_map.get("file_id"), str)
+        )
+    else:
+        source_known = False
+    if not source_known:
+        return False
+
+    cache = raw.get("cache_control")
+    if cache is not None:
+        if not isinstance(cache, Mapping):
+            return False
+        cache_map = cast(Mapping[str, Any], cache)
+        if (
+            cache_map.get("type") != "ephemeral"
+            or not set(cache_map).issubset({"type", "ttl"})
+            or (
+                "ttl" in cache_map
+                and (
+                    not isinstance(cache_map["ttl"], str)
+                    or cache_map["ttl"] not in {"5m", "1h"}
+                )
+            )
+        ):
+            return False
+    transformations = raw.get("transformations")
+    if transformations is not None:
+        if not isinstance(transformations, Mapping):
+            return False
+        transformations_map = cast(Mapping[str, Any], transformations)
+        if (
+            set(transformations_map) != {"oversized_image"}
+            or (
+                not isinstance(transformations_map["oversized_image"], str)
+                or transformations_map["oversized_image"] not in {"downsize", "error"}
+            )
+        ):
+            return False
+    return True
+
+
+def _native_file_item(
+    raw: Mapping[str, Any],
+    conversion: Conversion,
+) -> dict[str, Any]:
+    rendered = _file_part(raw, conversion, field_path="messages.document")
+    if rendered.get("type") == "input_text" and raw.get("type") in {"document", "file"}:
+        return dict(raw)
+    return rendered
+
+
+def _tool_result_content_part(
+    part: object,
+    conversion: Conversion,
+    *,
+    field_path: str,
+) -> dict[str, Any]:
+    if isinstance(part, str):
+        return {"type": "input_text", "text": part}
+    if not isinstance(part, Mapping):
+        conversion.record(
+            LossCode.TOOL_RESULT_CONTENT_FLATTENED,
+            f"{field_path}: non-object content was serialized as text",
+        )
+        return {"type": "input_text", "text": json.dumps(part, ensure_ascii=False)}
+
+    raw = dict[str, Any](cast(Mapping[str, Any], part))
+    kind = str(raw.get("type", ""))
+    if kind in {"text", "input_text", "output_text"}:
+        return {"type": "input_text", "text": str(raw.get("text", ""))}
+    if kind in {"image", "input_image"}:
+        return _image_part(raw, conversion, field_path=field_path)
+    if kind in {"document", "file", "input_file"}:
+        return _file_part(raw, conversion, field_path=field_path)
+
+    conversion.record(
+        LossCode.TOOL_RESULT_CONTENT_FLATTENED,
+        f"{field_path}: unsupported content block {kind!r} was serialized as text",
+    )
+    return {"type": "input_text", "text": json.dumps(raw, ensure_ascii=False, sort_keys=True)}
+
+
+def _tool_result_output(
+    block: ContentBlock,
+    conversion: Conversion,
+) -> str | list[dict[str, Any]]:
+    """Preserve structured tool output using Responses content parts.
+
+    Responses accepts a string or an array of input text/image/file parts for
+    ``function_call_output.output``. Keep the historical string form when the
+    Anthropic result is text-only, and use the array form whenever a non-text
+    block is present.
+    """
+    output = block.output
+    if isinstance(output, str):
+        return output
+    if output is None:
+        return ""
+    if not isinstance(output, list):
+        return json.dumps(output, ensure_ascii=False)
+
+    parts = [
+        _tool_result_content_part(
+            part,
+            conversion,
+            field_path=f"messages.tool_result[{index}]",
+        )
+        for index, part in enumerate(cast(list[object], output))
+    ]
+    if all(part.get("type") == "input_text" for part in parts):
+        return "".join(str(part.get("text", "")) for part in parts)
+    return parts
 
 
 def item_from_block(
@@ -753,7 +1010,9 @@ def _item_from_block(
         part_type = "output_text" if role == "assistant" else "input_text"
         return {"type": part_type, "text": block.text}
     if block.kind is BlockKind.IMAGE:
-        return dict(block.raw) if block.raw else None
+        return _native_image_item(block.raw, conversion)
+    if block.kind is BlockKind.FILE:
+        return _native_file_item(block.raw, conversion)
     if block.kind is BlockKind.TOOL_USE:
         return {
             "type": "function_call",
@@ -762,14 +1021,17 @@ def _item_from_block(
             "arguments": _encoded_arguments(block.arguments),
         }
     if block.kind is BlockKind.TOOL_RESULT:
-        output = _flattened_output(block, conversion)
+        output = _tool_result_output(block, conversion)
         if block.is_error:
             # Responses has no error flag; preserve the failure as text without interpreting any existing prefix.
             conversion.record(
                 LossCode.TOOL_RESULT_ERROR_MARKED,
                 f"tool result for {block.call_id}: is_error marked in text",
             )
-            output = f"[tool_error] {output}"
+            if isinstance(output, list):
+                output = [{"type": "input_text", "text": "[tool_error] "}, *output]
+            else:
+                output = f"[tool_error] {output}"
         return {
             "type": "function_call_output",
             "call_id": block.call_id,
@@ -827,35 +1089,6 @@ def _encoded_arguments(value: Any) -> str:
     if isinstance(value, str):
         return value
     return json.dumps(value if value is not None else {}, ensure_ascii=False)
-
-
-def _flattened_output(block: ContentBlock, conversion: Conversion) -> str:
-    """`function_call_output.output` is a string, while Anthropic's `content` may be blocks.
-
-    Text blocks join; anything else has no slot here and is recorded rather than silently swallowed, which is what happens to an image inside a tool result.
-    """
-    output = block.output
-    if isinstance(output, str):
-        return output
-    if output is None:
-        return ""
-    if isinstance(output, list):
-        texts: list[str] = []
-        dropped = False
-        for part in cast(list[object], output):
-            if isinstance(part, Mapping):
-                entry = cast(Mapping[str, Any], part)
-                if str(entry.get("type", "")) == "text":
-                    texts.append(str(entry.get("text", "")))
-                    continue
-            dropped = True
-        if dropped:
-            conversion.record(
-                LossCode.TOOL_RESULT_CONTENT_FLATTENED,
-                f"non-text tool result content for {block.call_id}",
-            )
-        return "".join(texts)
-    return json.dumps(output, ensure_ascii=False)
 
 
 def _reasoning_item(

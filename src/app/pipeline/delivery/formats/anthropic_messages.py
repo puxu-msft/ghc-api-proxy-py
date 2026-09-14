@@ -285,11 +285,14 @@ class AnthropicFramer:
             "model_context_window_exceeded",
         }:
             stop_reason = "end_turn"
+        usage = terminal.usage
+        if not usage and not terminal.usage_present and not terminal.usage_malformed:
+            usage = {"output_tokens": 0}
         return tuple(
             frame.encode()
             for frame in terminal_frames(
                 stop_reason=stop_reason,
-                usage=terminal.usage or {"output_tokens": 0},
+                usage=usage,
             )
         )
 

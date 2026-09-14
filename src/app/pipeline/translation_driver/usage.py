@@ -63,9 +63,16 @@ class ResponseUsageConversion:
     facts: tuple[ResponseConversionFact, ...]
 
 
-def anthropic_usage_from_responses(usage: object) -> dict[str, int]:
+def anthropic_usage_from_responses(
+    usage: object,
+    *,
+    strict: bool = True,
+) -> dict[str, int]:
     """Return Responses usage using the Anthropic wire field names."""
-    return convert_responses_usage(usage).wire.model_dump()
+    converted = convert_responses_usage(usage, strict=strict)
+    if not strict and _core_usage_is_malformed(converted):
+        return {}
+    return converted.wire.model_dump()
 
 
 def _count(usage: Mapping[str, Any], key: str) -> int:
@@ -113,7 +120,11 @@ def chat_usage_from_anthropic(usage: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def convert_responses_usage(value: object) -> ResponseUsageConversion:
+def convert_responses_usage(
+    value: object,
+    *,
+    strict: bool = True,
+) -> ResponseUsageConversion:
     if value is None:
         return ResponseUsageConversion(
             wire=AnthropicUsage(),
@@ -121,25 +132,68 @@ def convert_responses_usage(value: object) -> ResponseUsageConversion:
             facts=(ResponseConversionFact(code="usage_estimated", field_path="usage"),),
         )
 
-    usage = _mapping(value, "usage")
-    total_input = _non_negative_integer(usage, "input_tokens", "usage.input_tokens")
-    output = _non_negative_integer(usage, "output_tokens", "usage.output_tokens")
+    facts: list[ResponseConversionFact] = []
+    usage = _mapping(value, "usage", strict=strict, facts=facts)
+    total_input = _read_integer(
+        usage,
+        "input_tokens",
+        "usage.input_tokens",
+        strict=strict,
+        facts=facts,
+    )
+    output = _read_integer(
+        usage,
+        "output_tokens",
+        "usage.output_tokens",
+        strict=strict,
+        facts=facts,
+    )
     upstream_total = _optional_non_negative_integer_or_none(
         usage,
         "total_tokens",
         "usage.total_tokens",
+        strict=strict,
+        facts=facts,
     )
     input_details = _usage_details(
         usage.get("input_tokens_details"),
         "usage.input_tokens_details",
+        strict=strict,
+        facts=facts,
     )
     output_details = _usage_details(
         usage.get("output_tokens_details"),
         "usage.output_tokens_details",
+        strict=strict,
+        facts=facts,
     )
     cache_read_observed = input_details.get("cached_tokens")
+    if cache_read_observed is None and "cache_read_input_tokens" in usage:
+        cache_read_observed = _read_integer(
+            usage,
+            "cache_read_input_tokens",
+            "usage.cache_read_input_tokens",
+            strict=strict,
+            facts=facts,
+        )
     cache_creation_observed = input_details.get("cache_write_tokens")
+    if cache_creation_observed is None and "cache_creation_input_tokens" in usage:
+        cache_creation_observed = _read_integer(
+            usage,
+            "cache_creation_input_tokens",
+            "usage.cache_creation_input_tokens",
+            strict=strict,
+            facts=facts,
+        )
     reasoning_observed = output_details.get("reasoning_tokens")
+    if reasoning_observed is None and "reasoning_tokens" in usage:
+        reasoning_observed = _read_integer(
+            usage,
+            "reasoning_tokens",
+            "usage.reasoning_tokens",
+            strict=strict,
+            facts=facts,
+        )
     cache_read = cache_read_observed or 0
     cache_creation = cache_creation_observed or 0
     reasoning = reasoning_observed or 0
@@ -150,7 +204,6 @@ def convert_responses_usage(value: object) -> ResponseUsageConversion:
     exact_input_tokens = wire_input_tokens if has_cache_breakdown else None
     total_tokens = total_input + output
 
-    facts: list[ResponseConversionFact] = []
     if total_input < cache_read + cache_creation:
         facts.append(
             ResponseConversionFact(
@@ -194,24 +247,49 @@ def convert_responses_usage(value: object) -> ResponseUsageConversion:
     )
 
 
-def _usage_details(value: object, field_path: str) -> Mapping[str, int]:
+def _core_usage_is_malformed(converted: ResponseUsageConversion) -> bool:
+    return any(
+        fact.code == "usage_malformed"
+        and fact.field_path in {"usage.input_tokens", "usage.output_tokens"}
+        for fact in converted.facts
+    )
+
+
+def _usage_details(
+    value: object,
+    field_path: str,
+    *,
+    strict: bool,
+    facts: list[ResponseConversionFact],
+) -> Mapping[str, int]:
     if value is None:
         return MappingProxyType({})
-    details = _mapping(value, field_path)
+    details = _mapping(value, field_path, strict=strict, facts=facts)
     converted: dict[str, int] = {}
     for key, candidate in details.items():
-        converted[key] = _non_negative_integer_value(candidate, f"{field_path}.{key}")
+        converted[key] = _read_integer_value(
+            candidate,
+            f"{field_path}.{key}",
+            strict=strict,
+            facts=facts,
+        )
     return MappingProxyType(converted)
 
 
-def _mapping(value: object, field_path: str) -> Mapping[str, Any]:
+def _mapping(
+    value: object,
+    field_path: str,
+    *,
+    strict: bool = True,
+    facts: list[ResponseConversionFact] | None = None,
+) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
-        _fail(field_path, "invalid_response", f"{field_path} must be an object")
+        if strict:
+            _fail(field_path, "invalid_response", f"{field_path} must be an object")
+        if facts is not None:
+            facts.append(ResponseConversionFact(code="usage_malformed", field_path=field_path))
+        return MappingProxyType({})
     return cast(Mapping[str, Any], value)
-
-
-def _non_negative_integer(value: Mapping[str, Any], key: str, field_path: str) -> int:
-    return _non_negative_integer_value(value.get(key), field_path)
 
 
 def _non_negative_integer_value(candidate: object, field_path: str) -> int:
@@ -220,12 +298,55 @@ def _non_negative_integer_value(candidate: object, field_path: str) -> int:
     return candidate
 
 
+def _read_integer(
+    value: Mapping[str, Any],
+    key: str,
+    field_path: str,
+    *,
+    strict: bool,
+    facts: list[ResponseConversionFact],
+) -> int:
+    return _read_integer_value(
+        value.get(key),
+        field_path,
+        strict=strict,
+        facts=facts,
+    )
+
+
+def _read_integer_value(
+    candidate: object,
+    field_path: str,
+    *,
+    strict: bool,
+    facts: list[ResponseConversionFact],
+) -> int:
+    try:
+        return _non_negative_integer_value(candidate, field_path)
+    except ResponsesUsageError:
+        if strict:
+            raise
+        facts.append(ResponseConversionFact(code="usage_malformed", field_path=field_path))
+        return 0
+
+
 def _optional_non_negative_integer_or_none(
-    value: Mapping[str, Any], key: str, field_path: str
+    value: Mapping[str, Any],
+    key: str,
+    field_path: str,
+    *,
+    strict: bool,
+    facts: list[ResponseConversionFact],
 ) -> int | None:
     if key not in value or value[key] is None:
         return None
-    return _non_negative_integer(value, key, field_path)
+    return _read_integer(
+        value,
+        key,
+        field_path,
+        strict=strict,
+        facts=facts,
+    )
 
 
 def _fail(field_path: str, code: str, message: str) -> Never:

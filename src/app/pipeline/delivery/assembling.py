@@ -70,6 +70,10 @@ class Terminal:
     #
     # `None` on every leg but the Responses streaming one, the buffered path included — and `None` rather than an empty mapping, because those are different answers. A usage of zero is a measurement; not having asked is not. An empty default would have made "upstream reported nothing" and "nobody looked" the same value, which is the defect `stop_reason`'s empty default exists to avoid, one field further down.
     upstream_usage: dict[str, Any] | None = None
+    # Distinguishes an upstream usage object that was present but malformed
+    # from a terminal that never reported usage.
+    usage_present: bool = False
+    usage_malformed: bool = False
     # The direct Responses terminal's own status. Separate from `stop_reason`, which remains the translated semantic ending used by delivery and continuation.
     terminal_status: str = ""
     # Required or unknown client-action facts from the direct terminal's authoritative `response.output` snapshot, in output order.

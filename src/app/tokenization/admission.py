@@ -57,8 +57,23 @@ _ALLOWED_ITEM_FIELDS = {
         {"agent", "call_id", "execution", "id", "status", "tools", "type"}
     ),
 }
-_ALLOWED_TEXT_PART_FIELDS = frozenset({"annotations", "logprobs", "text", "type"})
-_ALLOWED_IMAGE_PART_FIELDS = frozenset({"detail", "file_id", "image_url", "type"})
+_ALLOWED_TEXT_PART_FIELDS = frozenset(
+    {"annotations", "logprobs", "prompt_cache_breakpoint", "text", "type"}
+)
+_ALLOWED_IMAGE_PART_FIELDS = frozenset(
+    {"detail", "file_id", "image_url", "prompt_cache_breakpoint", "type"}
+)
+_ALLOWED_FILE_PART_FIELDS = frozenset(
+    {
+        "detail",
+        "file_data",
+        "file_id",
+        "file_url",
+        "filename",
+        "prompt_cache_breakpoint",
+        "type",
+    }
+)
 _ALLOWED_SUMMARY_FIELDS = frozenset({"text", "type"})
 _IMAGE_MEDIA_TYPES = frozenset({"image/gif", "image/jpeg", "image/png", "image/webp"})
 _IMAGE_CACHE_TTLS = frozenset({"5m", "1h"})
@@ -230,6 +245,15 @@ def _known_image_transformations(value: object) -> bool:
     )
 
 
+def _known_prompt_cache_breakpoint(value: object) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, Mapping):
+        return False
+    breakpoint = cast(Mapping[str, Any], value)
+    return set(breakpoint) == {"mode"} and breakpoint.get("mode") == "explicit"
+
+
 def _known_native_image(item: Mapping[str, Any]) -> bool:
     return (
         _known_image_source(item.get("source"))
@@ -261,6 +285,8 @@ def _message_candidates(item: Mapping[str, Any], index: int) -> list[_TextCandid
         if kind in {"input_text", "output_text"}:
             if _unknown_fields(part, _ALLOWED_TEXT_PART_FIELDS):
                 return None
+            if not _known_prompt_cache_breakpoint(part.get("prompt_cache_breakpoint")):
+                return None
             text = part.get("text")
             if not isinstance(text, str):
                 return None
@@ -268,6 +294,14 @@ def _message_candidates(item: Mapping[str, Any], index: int) -> list[_TextCandid
             continue
         if kind == "input_image":
             if _unknown_fields(part, _ALLOWED_IMAGE_PART_FIELDS):
+                return None
+            if not _known_prompt_cache_breakpoint(part.get("prompt_cache_breakpoint")):
+                return None
+            continue
+        if kind == "input_file":
+            if _unknown_fields(part, _ALLOWED_FILE_PART_FIELDS):
+                return None
+            if not _known_prompt_cache_breakpoint(part.get("prompt_cache_breakpoint")):
                 return None
             continue
         return None

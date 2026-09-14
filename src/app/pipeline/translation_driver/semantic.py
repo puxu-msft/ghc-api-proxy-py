@@ -47,6 +47,10 @@ class LossCode(StrEnum):
     TOOL_RESULT_CONTENT_FLATTENED = "tool-result-content-flattened"
     # Responses has no tool-result error flag; the failure is represented by a text prefix.
     TOOL_RESULT_ERROR_MARKED = "tool-result-error-marked"
+    IMAGE_SOURCE_COERCED = "image-source-coerced"
+    IMAGE_MEDIA_TYPE_ASSUMED = "image-media-type-assumed"
+    USAGE_MALFORMED = "usage-malformed"
+    USAGE_INCONSISTENT = "usage-inconsistent"
     SERVER_TOOL_NOT_CARRIED = "server-tool-not-carried"
     SERVER_TOOL_CALL_ID_NOT_CARRIED = "server-tool-call-id-not-carried"
     SERVER_TOOL_PARTIALLY_REPRESENTABLE = "server-tool-partially-representable"

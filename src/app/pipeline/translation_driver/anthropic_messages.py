@@ -3,6 +3,7 @@
 Reads and writes the typed content model rather than moving `dict`s around. `D-ARCH = B`: wire shapes live at this boundary and nowhere inside.
 """
 
+import json
 from collections.abc import Mapping
 from typing import Any, cast
 
@@ -285,6 +286,7 @@ TOOL_RESULT = "tool_result"
 SERVER_TOOL_USE = "server_tool_use"
 WEB_SEARCH_TOOL_RESULT = "web_search_tool_result"
 IMAGE = "image"
+DOCUMENT = "document"
 
 
 def _dict_list(value: object) -> list[dict[str, Any]]:
@@ -347,6 +349,8 @@ def _block_from_anthropic(raw: dict[str, Any]) -> ContentBlock:
         )
     if kind == IMAGE:
         return ContentBlock(BlockKind.IMAGE, raw=raw)
+    if kind == DOCUMENT:
+        return ContentBlock(BlockKind.FILE, raw=raw)
     return ContentBlock(BlockKind.UNKNOWN, raw=raw)
 
 
@@ -466,10 +470,14 @@ def _block_to_anthropic(
     if block.kind is BlockKind.TOOL_RESULT:
         result: dict[str, Any] = {"type": TOOL_RESULT, "tool_use_id": block.call_id}
         if block.output is not None:
-            result["content"] = block.output
+            result["content"] = _responses_content_to_anthropic(block.output, conversion)
         if block.is_error:
             result["is_error"] = True
         return result
+    if block.kind is BlockKind.IMAGE:
+        return _image_to_anthropic(block.raw, conversion)
+    if block.kind is BlockKind.FILE:
+        return _file_to_anthropic(block.raw, conversion)
     if block.kind is BlockKind.SERVER_TOOL_USE:
         if block.raw.get("type") == SERVER_TOOL_USE:
             return dict(block.raw)
@@ -493,11 +501,122 @@ def _block_to_anthropic(
             "tool_use_id": block.call_id,
             "content": block.output,
         }
-    # Image and unknown blocks have no modelled fields; their original is the only faithful rendering, and returning it is what keeps a same-format crossing exact.
+    # Unknown blocks have no modelled fields; their original is the only faithful rendering, and returning it is what keeps a same-format crossing exact.
     if block.raw:
         return dict(block.raw)
     conversion.record(LossCode.BLOCK_NOT_CARRIED, f"{block.kind.value} into {WIRE_FORMAT}")
     return None
+
+
+def _data_url_parts(value: object) -> tuple[str, str] | None:
+    if not isinstance(value, str) or not value.startswith("data:") or ";base64," not in value:
+        return None
+    header, data = value.split(",", 1)
+    media_type = header[5:].removesuffix(";base64")
+    if not media_type or not data:
+        return None
+    return media_type, data
+
+
+def _image_to_anthropic(raw: Mapping[str, Any], conversion: Conversion) -> dict[str, Any]:
+    if raw.get("type") == IMAGE:
+        return dict(raw)
+    image_url = raw.get("image_url")
+    if isinstance(image_url, Mapping):
+        image_url = cast(Mapping[str, Any], image_url).get("url")
+    if isinstance(image_url, str) and image_url:
+        data_url = _data_url_parts(image_url)
+        if data_url is not None:
+            media_type, data = data_url
+            return {
+                "type": IMAGE,
+                "source": {"type": "base64", "media_type": media_type, "data": data},
+            }
+        return {"type": IMAGE, "source": {"type": "url", "url": image_url}}
+    file_id = raw.get("file_id")
+    if isinstance(file_id, str) and file_id:
+        return {"type": IMAGE, "source": {"type": "file", "file_id": file_id}}
+    result = raw.get("result")
+    if isinstance(result, str) and result:
+        conversion.record(
+            LossCode.IMAGE_MEDIA_TYPE_ASSUMED,
+            "image_generation_call result was returned as image/png",
+        )
+        return {
+            "type": IMAGE,
+            "source": {"type": "base64", "media_type": "image/png", "data": result},
+        }
+    conversion.record(
+        LossCode.IMAGE_SOURCE_COERCED,
+        "Responses image block had no image_url, file_id, or result",
+    )
+    return {"type": IMAGE, "source": {"type": "url", "url": ""}}
+
+
+def _file_to_anthropic(raw: Mapping[str, Any], conversion: Conversion) -> dict[str, Any]:
+    if raw.get("type") == DOCUMENT:
+        return dict(raw)
+    file_id = raw.get("file_id")
+    if isinstance(file_id, str) and file_id:
+        source: dict[str, Any] = {"type": "file", "file_id": file_id}
+    else:
+        file_url = raw.get("file_url")
+        if isinstance(file_url, str) and file_url:
+            source = {"type": "url", "url": file_url}
+        else:
+            file_data = raw.get("file_data")
+            data_url = _data_url_parts(file_data)
+            if data_url is None:
+                conversion.record(
+                    LossCode.IMAGE_SOURCE_COERCED,
+                    "Responses input_file had no file_id, file_url, or data URL",
+                )
+                return {
+                    "type": DOCUMENT,
+                    "source": {
+                        "type": "base64",
+                        "media_type": "application/octet-stream",
+                        "data": "",
+                    },
+                }
+            media_type, data = data_url
+            source = {"type": "base64", "media_type": media_type, "data": data}
+    result: dict[str, Any] = {"type": DOCUMENT, "source": source}
+    if isinstance(raw.get("filename"), str) and raw["filename"]:
+        result["title"] = raw["filename"]
+    return result
+
+
+def _responses_content_to_anthropic(value: Any, conversion: Conversion) -> Any:
+    if not isinstance(value, list):
+        return value
+    rendered: list[dict[str, Any]] = []
+    for part in cast(list[object], value):
+        if isinstance(part, str):
+            rendered.append({"type": TEXT, "text": part})
+            continue
+        if not isinstance(part, Mapping):
+            conversion.record(
+                LossCode.TOOL_RESULT_CONTENT_FLATTENED,
+                "non-object Responses tool result content was serialized as text",
+            )
+            rendered.append({"type": TEXT, "text": str(part)})
+            continue
+        raw = dict[str, Any](cast(Mapping[str, Any], part))
+        kind = str(raw.get("type", ""))
+        if kind in {"input_text", "output_text", TEXT}:
+            rendered.append({"type": TEXT, "text": str(raw.get("text", ""))})
+        elif kind == "input_image":
+            rendered.append(_image_to_anthropic(raw, conversion))
+        elif kind == "input_file":
+            rendered.append(_file_to_anthropic(raw, conversion))
+        else:
+            conversion.record(
+                LossCode.TOOL_RESULT_CONTENT_FLATTENED,
+                f"unsupported Responses tool result content {kind!r} was serialized as text",
+            )
+            rendered.append({"type": TEXT, "text": json.dumps(raw, ensure_ascii=False)})
+    return rendered
 
 
 def _reasoning_to_anthropic(

@@ -8,19 +8,21 @@ The second half of the file is the reverse crossing — an Anthropic `stop_reaso
 from typing import Any
 
 import pytest
-from openai.types.responses import Response
 
 from app.pipeline.translation_driver.responses import (
     SemanticResponse,
     from_openai_responses_response,
     to_openai_responses_response,
 )
+from tests.unit.pipeline.responses_sdk import validate_responses_response
 
 
 def _reply(reason: str | None) -> dict[str, Any]:
     details = {"reason": reason} if reason is not None else None
-    return {
+    payload: dict[str, Any] = {
         "id": "resp_1",
+        "object": "response",
+        "created_at": 0,
         "model": "gpt-model",
         "status": "incomplete",
         "incomplete_details": details,
@@ -28,11 +30,24 @@ def _reply(reason: str | None) -> dict[str, Any]:
             {
                 "type": "message",
                 "id": "m1",
+                "role": "assistant",
                 "status": "incomplete",
-                "content": [{"type": "output_text", "text": "half"}],
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "half",
+                        "annotations": [],
+                        "logprobs": [],
+                    }
+                ],
             }
         ],
+        "parallel_tool_calls": True,
+        "tool_choice": "auto",
+        "tools": [],
     }
+    validate_responses_response(payload)
+    return payload
 
 
 def test_the_output_token_limit_is_translated() -> None:
@@ -60,21 +75,36 @@ def test_a_complete_reply_is_unaffected() -> None:
 
 
 def _reply_with(*items: dict[str, Any]) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "id": "resp_1",
+        "object": "response",
+        "created_at": 0,
         "model": "gpt-model",
         "status": "incomplete",
         "incomplete_details": {"reason": "max_output_tokens"},
         "output": list(items),
+        "parallel_tool_calls": True,
+        "tool_choice": "auto",
+        "tools": [],
     }
+    validate_responses_response(payload)
+    return payload
 
 
 def _message(text: str, status: str) -> dict[str, Any]:
     return {
         "type": "message",
         "id": f"m_{text}",
+        "role": "assistant",
         "status": status,
-        "content": [{"type": "output_text", "text": text}],
+        "content": [
+            {
+                "type": "output_text",
+                "text": text,
+                "annotations": [],
+                "logprobs": [],
+            }
+        ],
     }
 
 
@@ -121,9 +151,11 @@ def test_an_operator_can_say_a_filtered_turn_is_worth_carrying_on() -> None:
 
 def _rendered(stop_reason: str) -> dict[str, Any]:
     """The reverse crossing: what a `/responses` client is handed for an Anthropic reply that stopped this way."""
-    return to_openai_responses_response(
+    rendered = to_openai_responses_response(
         SemanticResponse(id="msg_1", model="claude-model", stop_reason=stop_reason)
     )
+    validate_responses_response(rendered)
+    return rendered
 
 
 # Every `stop_reason` that can reach the writer, and what the Responses vocabulary has for it. The Anthropic six are the ones Claude Code itself compares against (`.dev/docs/upstream/retry-and-continuation/reports/260821-upstream-termination-reasons.md` §2.3 counted the literals); `incomplete` is this proxy's own synthesis for an upstream that said the reply was cut short without saying why. The installed SDK also permits `max_messages`, `content_filter`, and `steered`, so those identity spellings remain legal on the way back out.
@@ -187,7 +219,7 @@ def test_current_responses_incomplete_reasons_are_validated_and_preserved(
 
     assert rendered["status"] == "incomplete"
     assert rendered["incomplete_details"] == {"reason": reason}
-    Response.model_validate(rendered)
+    validate_responses_response(rendered)
 
 
 def test_a_finished_turn_is_unaffected() -> None:

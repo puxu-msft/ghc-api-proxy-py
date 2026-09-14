@@ -37,6 +37,11 @@ from app.pipeline.translation_driver.semantic import (
     TranslationRefused,
     TranslationTarget,
 )
+from tests.unit.pipeline.responses_sdk import (
+    validate_responses_input_item,
+    validate_responses_request,
+    validate_responses_tool,
+)
 
 # The worked example from `docs/.human-controlled/message-translation.md`.
 ANTHROPIC_SYSTEM: list[dict[str, Any]] = [
@@ -59,6 +64,20 @@ ANTHROPIC_REQUEST: dict[str, Any] = {
     "max_tokens": 100,
     "stream": True,
 }
+
+
+def validate_bridge_input_items(payload: dict[str, Any]) -> None:
+    """Validate SDK-owned input items; assistant replay is a project bridge seam.
+
+    The installed SDK's request union does not model this proxy's compact
+    assistant-history spelling (`output_text` without SDK output-item metadata).
+    That compatibility shape is tested semantically here; every other input
+    item is validated by the SDK.
+    """
+    for item in payload["input"]:
+        if item.get("type") == "message" and item.get("role") == "assistant":
+            continue
+        validate_responses_input_item(item)
 
 
 def test_system_becomes_a_single_instructions_string() -> None:
@@ -108,12 +127,14 @@ def test_anthropic_tools_become_responses_function_tools() -> None:
         source=WireFormat.ANTHROPIC_MESSAGES,
         target=WireFormat.OPENAI_RESPONSES,
     )
-    assert payload["tools"] == [
+    sdk_payload = validate_responses_request(payload)
+    assert list(sdk_payload["tools"]) == [
         {
             "type": "function",
             "name": "get_time",
             "description": "Return the current time.",
             "parameters": {"type": "object", "properties": {}},
+            "strict": False,
         }
     ]
 
@@ -139,14 +160,16 @@ def test_messages_and_limits_map_to_the_responses_names() -> None:
         source=WireFormat.ANTHROPIC_MESSAGES,
         target=WireFormat.OPENAI_RESPONSES,
     )
+    validate_bridge_input_items(payload)
+    sdk_payload = payload
     # Anthropic's block shape does not survive as-is: upstream answers `Invalid value: 'text'`.
-    assert payload["input"] == [
+    assert sdk_payload["input"] == [
         {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}
     ]
-    assert payload["max_output_tokens"] == 100
-    assert payload["stream"] is True
-    assert "messages" not in payload
-    assert "max_tokens" not in payload
+    assert sdk_payload["max_output_tokens"] == 100
+    assert sdk_payload["stream"] is True
+    assert "messages" not in sdk_payload
+    assert "max_tokens" not in sdk_payload
 
 
 def test_round_trip_through_the_intermediate_preserves_the_request() -> None:
@@ -1118,7 +1141,9 @@ def test_a_real_conversation_becomes_responses_input_items() -> None:
         source=WireFormat.ANTHROPIC_MESSAGES,
         target=WireFormat.OPENAI_RESPONSES,
     )
-    assert payload["input"] == [
+    validate_bridge_input_items(payload)
+    sdk_payload = payload
+    assert sdk_payload["input"] == [
         {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "read it"}]},
         {
             "type": "message",
@@ -1142,7 +1167,9 @@ def test_tool_arguments_cross_as_a_json_string() -> None:
         source=WireFormat.ANTHROPIC_MESSAGES,
         target=WireFormat.OPENAI_RESPONSES,
     )
-    call = next(item for item in payload["input"] if item["type"] == "function_call")
+    validate_bridge_input_items(payload)
+    sdk_payload = payload
+    call = next(item for item in sdk_payload["input"] if item["type"] == "function_call")
     assert isinstance(call["arguments"], str)
 
 
@@ -1169,7 +1196,11 @@ def test_an_errored_tool_result_is_marked_in_text() -> None:
         source=WireFormat.ANTHROPIC_MESSAGES,
         target=WireFormat.OPENAI_RESPONSES,
     )
-    output = next(item for item in payload["input"] if item["type"] == "function_call_output")
+    validate_bridge_input_items(payload)
+    sdk_payload = payload
+    output = next(
+        item for item in sdk_payload["input"] if item["type"] == "function_call_output"
+    )
     assert output["output"] == "[tool_error] permission denied"
     assert semantic.conversion.has(LossCode.TOOL_RESULT_ERROR_MARKED)
 
@@ -1181,7 +1212,11 @@ def test_a_passing_tool_result_is_not_marked() -> None:
         source=WireFormat.ANTHROPIC_MESSAGES,
         target=WireFormat.OPENAI_RESPONSES,
     )
-    output = next(item for item in payload["input"] if item["type"] == "function_call_output")
+    validate_bridge_input_items(payload)
+    sdk_payload = payload
+    output = next(
+        item for item in sdk_payload["input"] if item["type"] == "function_call_output"
+    )
     assert output["output"] == "file body"
     assert not semantic.conversion.has(LossCode.TOOL_RESULT_ERROR_MARKED)
 
@@ -1199,7 +1234,10 @@ def test_a_literal_tool_error_prefix_is_not_reinterpreted(is_error: bool) -> Non
         source=WireFormat.ANTHROPIC_MESSAGES,
         target=WireFormat.OPENAI_RESPONSES,
     )
-    assert payload["input"][0]["output"] == ("[tool_error] " if is_error else "") + text
+    sdk_payload = validate_responses_request(payload)
+    assert sdk_payload["input"][0]["output"] == (
+        "[tool_error] " if is_error else ""
+    ) + text
     assert semantic.conversion.has(LossCode.TOOL_RESULT_ERROR_MARKED) is is_error
 
     restored, _ = default_registry().translate(
@@ -1809,7 +1847,12 @@ def test_an_anthropic_web_search_declaration_becomes_the_spelling_this_endpoint_
     )
     assert payload["tools"] == [
         {"type": "web_search"},
-        {"type": "function", "name": "get_time", "parameters": {"type": "object"}},
+        {
+            "type": "function",
+            "name": "get_time",
+            "parameters": {"type": "object"},
+            "strict": False,
+        },
     ]
     assert semantic.hosted_web_search_expected is True
 
@@ -2291,6 +2334,7 @@ def test_a_deferred_tool_does_not_reach_the_responses_wire() -> None:
             "name": "get_time",
             "description": "Return the current time.",
             "parameters": {"type": "object", "properties": {}},
+            "strict": False,
         }
     ]
     assert conversion.has(LossCode.SERVER_TOOL_CONSTRAINT_DROPPED), conversion.losses
@@ -2327,7 +2371,12 @@ def test_a_field_this_wire_never_agreed_to_is_not_forwarded() -> None:
         }
     )
 
-    assert tools[0] == {"type": "function", "name": "get_time", "parameters": {"type": "object"}}
+    assert tools[0] == {
+        "type": "function",
+        "name": "get_time",
+        "parameters": {"type": "object"},
+        "strict": False,
+    }
     assert conversion.has(LossCode.EXTENSIONS_NOT_CARRIED), conversion.losses
     assert any("cache_control" in loss.detail for loss in conversion.losses)
     assert any("eager_input_streaming" in loss.detail for loss in conversion.losses)
@@ -2343,6 +2392,7 @@ def test_the_fields_this_wire_does_take_survive_the_whitelist() -> None:
             "name": "get_time",
             "description": "Return the current time.",
             "input_schema": {"type": "object"},
+            "async": True,
             "strict": True,
             "allowed_callers": ["direct"],
             "output_schema": {"type": "string"},
@@ -2354,10 +2404,12 @@ def test_the_fields_this_wire_does_take_survive_the_whitelist() -> None:
         "name": "get_time",
         "description": "Return the current time.",
         "parameters": {"type": "object"},
+        "async": True,
         "strict": True,
         "allowed_callers": ["direct"],
         "output_schema": {"type": "string"},
     }
+    validate_responses_tool(tools[0])
     # Scoped to the two codes this whitelist can produce, not `lossless`: the shared request fixture carries a `cache_control` on its system block, which records a loss of its own and has nothing to do with tools.
     assert not conversion.has(LossCode.EXTENSIONS_NOT_CARRIED), conversion.losses
     assert not conversion.has(LossCode.SERVER_TOOL_CONSTRAINT_DROPPED), conversion.losses
@@ -2420,6 +2472,7 @@ def test_the_clients_search_tool_is_promoted_and_the_deferred_flag_survives() ->
             "description": "Get the weather.",
             "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
             "defer_loading": True,
+            "strict": False,
         },
     ]
 

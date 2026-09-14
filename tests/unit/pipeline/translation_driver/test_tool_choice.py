@@ -7,6 +7,7 @@ import pytest
 from app.pipeline.request import WireFormat
 from app.pipeline.translation_driver.registry import default_registry
 from app.pipeline.translation_driver.semantic import TranslationRefused
+from tests.unit.pipeline.responses_sdk import validate_responses_request
 
 
 def responses_request(choice: object) -> dict[str, Any]:
@@ -19,12 +20,14 @@ def responses_request(choice: object) -> dict[str, Any]:
                 "name": "ToolSearch",
                 "description": "Find a tool",
                 "parameters": {"type": "object"},
+                "strict": False,
             },
             {
                 "type": "function",
                 "name": "lookup",
                 "parameters": {"type": "object"},
                 "defer_loading": True,
+                "strict": False,
             },
         ],
         "tool_choice": choice,
@@ -50,11 +53,14 @@ def test_unaffected_function_choice_survives_another_tools_promotion(extra: dict
     payload, _ = default_registry().translate(
         request, source=WireFormat.OPENAI_RESPONSES, target=WireFormat.OPENAI_RESPONSES
     )
-    assert len(payload["tools"]) == len(request["tools"])
-    assert payload["tools"][0]["type"] == "tool_search"
-    assert payload["tools"][1]["name"] == "lookup"
+    sdk_payload = validate_responses_request(payload)
+    assert len(sdk_payload["tools"]) == len(request["tools"])
+    assert sdk_payload["tools"][0]["type"] == "tool_search"
+    assert sdk_payload["tools"][1]["name"] == "lookup"
     assert payload["tool_choice"] == choice
-    assert payload["parallel_tool_calls"] is False
+    assert sdk_payload["tool_choice"]["type"] == "function"
+    assert sdk_payload["tool_choice"]["name"] == "lookup"
+    assert sdk_payload["parallel_tool_calls"] is False
 
 
 @pytest.mark.parametrize("choice", [None, {"type": "function", "name": ""}, {"type": []}])
@@ -85,8 +91,11 @@ def test_an_unaffected_allowlist_survives_another_tools_promotion() -> None:
         source=WireFormat.OPENAI_RESPONSES,
         target=WireFormat.OPENAI_RESPONSES,
     )
+    sdk_payload = validate_responses_request(payload)
     assert payload["tool_choice"] == choice
-    assert payload["parallel_tool_calls"] is False
+    assert sdk_payload["tool_choice"]["type"] == "allowed_tools"
+    assert sdk_payload["tool_choice"]["mode"] == "required"
+    assert sdk_payload["parallel_tool_calls"] is False
 
 
 def test_web_search_repoint_does_not_discard_unknown_choice_fields() -> None:
@@ -112,15 +121,21 @@ def test_a_same_named_function_remains_selectable_on_the_same_format(builtin_typ
             "input": [],
             "tools": [
                 {"type": builtin_type, "name": "WebSearch"},
-                {"type": "function", "name": "WebSearch", "parameters": {"type": "object"}},
+                {
+                    "type": "function",
+                    "name": "WebSearch",
+                    "parameters": {"type": "object"},
+                    "strict": False,
+                },
             ],
             "tool_choice": choice,
         },
         source=WireFormat.OPENAI_RESPONSES,
         target=WireFormat.OPENAI_RESPONSES,
     )
-    assert payload["tool_choice"] == choice
-    assert any(tool.get("name") == "WebSearch" for tool in payload["tools"])
+    sdk_payload = validate_responses_request(payload)
+    assert sdk_payload["tool_choice"] == {"type": "function", "name": "WebSearch"}
+    assert any(tool.get("name") == "WebSearch" for tool in sdk_payload["tools"])
 
 
 @pytest.mark.parametrize(
@@ -159,9 +174,12 @@ def test_history_only_search_name_does_not_count_as_a_rewritten_declaration(extr
     payload, semantic = default_registry().translate(
         request, source=WireFormat.OPENAI_RESPONSES, target=WireFormat.OPENAI_RESPONSES
     )
+    sdk_payload = validate_responses_request(payload)
     assert semantic.client_search_tool == "SearchOld"
-    assert not any(tool["type"] == "tool_search" for tool in payload["tools"])
+    assert not any(tool["type"] == "tool_search" for tool in sdk_payload["tools"])
     assert payload["tool_choice"] == choice
+    assert sdk_payload["tool_choice"]["type"] == "function"
+    assert sdk_payload["tool_choice"]["name"] == "SearchOld"
 
 
 @pytest.mark.parametrize(
