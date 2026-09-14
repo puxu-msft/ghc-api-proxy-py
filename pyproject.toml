@@ -55,11 +55,17 @@ dev = [
 ghc-api-proxy = "app.cli:main"
 
 [tool.pytest.ini_options]
+# `uv run pytest` is the unit-test inner loop. Architecture, component, integration and
+# systemd groups remain available through an explicit path; `uv run pytest tests` is the
+# full default regression entry. TUI and end-to-end groups stay opt-in because of setup.
 # tests/tui is excluded from the default sweep and has its own entry; see tests/tui/conftest.py.
 # `--ignore` only drops it from directory discovery, so naming the path still runs it.
 addopts = "--strict-markers --strict-config --ignore=tests/tui --ignore=tests/e2e"
 asyncio_mode = "auto"
-testpaths = ["tests"]
+markers = [
+    "real_process: exercise the actual AnyIO process worker instead of the unit-test substitute",
+]
+testpaths = ["tests/unit"]
 
 [tool.ruff]
 target-version = "py314"

@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
@@ -8,6 +8,7 @@ import anyio
 import httpx2
 import pytest
 
+import app.tokenization.admission as admission_module
 from app.config.schema import ProxyConfig
 from app.model_provider import (
     EndpointNotSupported,
@@ -138,6 +139,18 @@ def driver(
 ) -> DirectDriver:
     frozen = (registry or SubscriberRegistry[RequestContext]()).freeze()
     return AnthropicMessagesDriver(provider, frozen, budget=RetryBudget(max_total=max_total))
+
+
+@pytest.fixture(autouse=True)
+def inline_prompt_admission_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def run_sync(
+        function: Callable[..., Any],
+        *args: Any,
+        **_kwargs: Any,
+    ) -> Any:
+        return function(*args)
+
+    monkeypatch.setattr(admission_module, "run_sync", run_sync)
 
 
 class UnreadStream(httpx2.AsyncByteStream):
@@ -564,6 +577,11 @@ async def test_handle_reencodes_when_a_retry_changes_the_target_format() -> None
         {
             "default_model_provider": "ghc",
             "model_providers": {"ghc": {"type": "github_copilot"}},
+            "reactive_rate_limiter": {
+                "retry_interval": 0,
+                "request_interval": 0,
+                "failure_backoff_base_sec": 0,
+            },
         }
     )
     http_client = httpx2.AsyncClient()

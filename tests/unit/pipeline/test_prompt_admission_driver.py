@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from typing import Any, cast
 
@@ -7,6 +7,7 @@ import httpx2
 import pytest
 
 import app.pipeline.direct_driver.base as driver_module
+import app.tokenization.admission as admission_module
 from app.model_provider import (
     DescriptorProviderMismatch,
     EndpointNotSupported,
@@ -187,6 +188,18 @@ class AdvancingAdmission:
             field_kind="input",
             field_utf8_byte_count=5,
         )
+
+
+@pytest.fixture(autouse=True)
+def inline_prompt_admission_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def run_sync(
+        function: Callable[..., Any],
+        *args: Any,
+        **_kwargs: Any,
+    ) -> Any:
+        return function(*args)
+
+    monkeypatch.setattr(admission_module, "run_sync", run_sync)
 
 
 def driver(

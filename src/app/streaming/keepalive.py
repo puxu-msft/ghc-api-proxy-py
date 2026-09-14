@@ -171,6 +171,12 @@ async def finish_async_cleanup(
     Returns the cleanup failure and the first cancellation received while waiting as separate facts. The caller owns their priority relative to `primary`; this function only guarantees that the release task has reached a terminal state before either is acted on.
     """
     cleanup_task = asyncio.create_task(cleanup())
+
+    def observe_cleanup_result(task: asyncio.Task[None]) -> None:
+        if not task.cancelled():
+            task.exception()
+
+    cleanup_task.add_done_callback(observe_cleanup_result)
     current = asyncio.current_task()
     cancelling_seen = current.cancelling() if current is not None else 0
     deferred_cancellation: asyncio.CancelledError | None = None

@@ -157,7 +157,10 @@ def test_upstreams_status_survives_a_retry_budget_running_out() -> None:
 
     503 means overloaded and is worth waiting on; 502 means the gateway itself broke. Both SDKs pick their exception class from the status, so the two are different instructions to the client — and the old answer gave the wrong one for 401, 500, 503 and 504 alike.
     """
-    client, _ = make_client(failing_upstream(503))
+    client, _ = make_client(
+        failing_upstream(503),
+        overrides={"upstream_request_retry": {"max_total": 0}},
+    )
 
     response = client.post("/v1/messages", json={"model": "claude-model", "messages": []})
 
@@ -241,7 +244,10 @@ def test_a_retryable_upstream_failure_is_not_told_not_to_be_retried() -> None:
 
     Renamed from a test that claimed to check the `not direct` term of that condition. It never could: no upstream status maps to `INTERNAL` or `NOT_IMPLEMENTED`, so a direct answer cannot reach the branch at all, and a mutation removing `not direct` left this green. What it *can* observe is the category rule — 503 is `OVERLOADED`, which is not one of the two — and that is what it now says it checks.
     """
-    client, _ = make_client(failing_upstream(503))
+    client, _ = make_client(
+        failing_upstream(503),
+        overrides={"upstream_request_retry": {"max_total": 0}},
+    )
 
     response = client.post("/v1/messages", json={"model": "claude-model", "messages": []})
 

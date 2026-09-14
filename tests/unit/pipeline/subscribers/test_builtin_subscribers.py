@@ -12,6 +12,7 @@ from typing import Any
 import httpx2
 import pytest
 
+import app.tokenization.worker as worker_module
 from app.config.schema import FixAnthropicRequestHook, ProxyConfig
 from app.model_provider import EndpointNotSupported, ModelDescriptor, ModelEndpoint
 from app.models.anthropic import MessagesRequest
@@ -59,6 +60,14 @@ EXPECTED_ON_ATTEMPT_PREPARE = (
 )
 # Keyed by event, so a subscriber added on a *different* event fails here too. Asserting one bucket would have let the next one land on `attempt.failed` with both assertions still green — a lock that only covers the door it was hung on.
 EXPECTED_BY_EVENT = {EVENT_ATTEMPT_PREPARE: EXPECTED_ON_ATTEMPT_PREPARE}
+
+
+@pytest.fixture(autouse=True)
+def inline_local_token_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def run_sync(function: Any, *args: Any, **_kwargs: Any) -> Any:
+        return function(*args)
+
+    monkeypatch.setattr(worker_module, "run_sync", run_sync)
 
 
 def frozen_by_event(frozen: Any) -> dict[str, tuple[str, ...]]:

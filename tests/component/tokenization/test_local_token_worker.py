@@ -1,25 +1,74 @@
 import asyncio
 import json
 import pickle
+import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any, cast
 
 import anyio
 import pytest
 from prometheus_client import CollectorRegistry
-from prompt_admission_process_helper import controlled_estimate, failed_estimate
 
 import app.tokenization.worker as worker_module
 from app.models.anthropic import MessagesRequest
 from app.observability.metrics import ResponsivenessMetrics
 from app.pipeline.count_tokens import CountTokensRequestError
-from app.tokenization.estimators import estimate_anthropic_input, estimate_responses_input
+from app.tokenization.estimators import (
+    EstimatorTiming,
+    estimate_anthropic_input,
+    estimate_responses_input,
+)
 from app.tokenization.types import (
     EstimateFeatures,
     FeatureName,
     SyntheticUnresizedPatchGridFormula,
     TokenizationCapabilities,
 )
-from app.tokenization.worker import LocalTokenWorker
+from app.tokenization.worker import LocalTokenWorker, TokenEstimate
+
+
+def controlled_count(_tokenizer: str, text: str) -> int:
+    control = json.loads(text)
+    entered = Path(control["entered"])
+    release = Path(control["release"])
+    entered.write_text("entered", encoding="utf-8")
+    while not release.exists():
+        time.sleep(0.01)
+    return int(control["result"])
+
+
+def controlled_estimate(_protocol: str, payload: dict[str, Any]) -> TokenEstimate:
+    return TokenEstimate(controlled_count("unused", payload["input"]), ())
+
+
+def failed_estimate(_protocol: str, _payload: dict[str, Any]) -> TokenEstimate:
+    return TokenEstimate(
+        None,
+        (
+            EstimatorTiming("responses", "lookup", 0.0, False),
+            EstimatorTiming("responses", "estimate", 0.0, True),
+        ),
+        ValueError("synthetic encoding failure"),
+    )
+
+
+@pytest.fixture(autouse=True)
+def inline_worker_process(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if cast(Any, request).node.get_closest_marker("real_process") is not None:
+        return
+
+    async def run_sync(
+        function: Callable[..., Any],
+        *args: Any,
+        **_kwargs: Any,
+    ) -> Any:
+        return function(*args)
+
+    monkeypatch.setattr(worker_module, "run_sync", run_sync)
 
 
 @pytest.mark.parametrize("protocol", ["anthropic", "openai-responses"])
@@ -120,6 +169,7 @@ def controlled_payload(directory: Path, name: str) -> tuple[dict[str, str], Path
     return {"input": text}, entered, release
 
 
+@pytest.mark.real_process
 async def test_real_worker_can_be_cancelled_while_running_and_queued(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

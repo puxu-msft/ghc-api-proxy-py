@@ -299,6 +299,23 @@ def test_the_recorded_catalog_capture_reads_end_to_end() -> None:
     from app.model_provider.github_copilot import DRIVEN_ENDPOINTS
 
     raw = json.loads((REPO_ROOT / "refs" / "available_models.json").read_text(encoding="utf-8"))
+    # Keep the capture as the shape oracle, but use a stable synthetic entry for field assertions.
+    # Upstream model IDs age out independently of the catalog fields this test exercises.
+    mock_id = "mock-anthropic-catalog-model"
+    raw["data"].append(
+        _model(
+            mock_id,
+            capabilities={
+                "family": mock_id,
+                "type": "chat",
+                "limits": {
+                    "max_context_window_tokens": 1_000_000,
+                    "max_output_tokens": 64_000,
+                },
+            },
+            supported_endpoints=["/chat/completions", "/v1/messages"],
+        )
+    )
 
     rows, unreadable = build_rows(
         raw,
@@ -312,14 +329,14 @@ def test_the_recorded_catalog_capture_reads_end_to_end() -> None:
     assert {row.id for row in rows if row.status == "disabled"} == {"gpt-4o"}
     assert not [row.id for row in rows if row.status == "malformed"]
 
-    opus = by_id["claude-opus-4.6"]
-    assert opus.status == "ok"
-    assert opus.vendor == "Anthropic"
-    assert opus.family == "claude-opus-4.6"
-    assert opus.context_window == 1000000
-    assert opus.max_output_tokens == 64000
-    assert opus.endpoints == ("/chat/completions", "/v1/messages")
-    assert opus.undriven == frozenset()
+    mocked = by_id[mock_id]
+    assert mocked.status == "ok"
+    assert mocked.vendor == "Anthropic"
+    assert mocked.family == mock_id
+    assert mocked.context_window == 1_000_000
+    assert mocked.max_output_tokens == 64_000
+    assert mocked.endpoints == ("/chat/completions", "/v1/messages")
+    assert mocked.undriven == frozenset()
 
 
 def _catalog(**overrides: Any) -> ProviderCatalog:
