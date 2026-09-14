@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Observability / History / Debug / Replay 文档重构报告</title>
+  <style>
+    :root { color-scheme: light; --ink:#1f2937; --muted:#64748b; --line:#dbe3ec; --ok:#166534; --warn:#92400e; --bg:#f8fafc; }
+    body { margin:0; color:var(--ink); background:var(--bg); font:15px/1.65 system-ui,-apple-system,"Segoe UI",sans-serif; }
+    main { max-width:1100px; margin:32px auto; padding:0 24px 56px; background:#fff; }
+    h1 { margin:0 -24px 18px; padding:28px 24px 22px; border-bottom:1px solid var(--line); font-size:28px; }
+    h2 { margin-top:34px; padding-bottom:6px; border-bottom:1px solid var(--line); font-size:20px; }
+    h3 { margin-top:24px; font-size:16px; }
+    p, li { max-width:95ch; }
+    .meta { color:var(--muted); margin-bottom:22px; }
+    .summary { padding:16px 18px; border-left:4px solid var(--ok); background:#f0fdf4; }
+    .accepted { padding:14px 18px; border-left:4px solid var(--warn); background:#fffbeb; }
+    table { width:100%; border-collapse:collapse; margin:14px 0 22px; }
+    th, td { border:1px solid var(--line); padding:9px 10px; text-align:left; vertical-align:top; }
+    th { background:#f1f5f9; }
+    code { background:#f1f5f9; padding:1px 4px; border-radius:3px; }
+    .pass { color:var(--ok); font-weight:700; }
+    .deferred { color:var(--warn); font-weight:700; }
+    .small { color:var(--muted); font-size:13px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Observability / History / Debug / Replay 文档重构报告</h1>
+  <p class="meta">日期：2026-09-14　文档 checkpoint：<code>6baa7f7</code>　代码核验基线：<code>30384269</code></p>
+
+  <div class="summary">
+    <strong>结论：</strong>本轮文档重构已完成。四轮独立 agent review 的最终结果为
+    <span class="pass">0 blocker / 0 major</span>；此前发现的文档 authority、入口、生命周期和 finding disposition 问题均已收敛。
+    当前实现中尚未完成的长期能力没有被伪装成完成，而是进入对应主题的 <code>status.md</code> / <code>deferred.md</code>。
+  </div>
+
+  <h2>1. 文档结构重构</h2>
+  <table>
+    <thead><tr><th>主题</th><th>Current authority</th><th>状态 / 长期候选</th><th>Review disposition</th></tr></thead>
+    <tbody>
+      <tr><td>Observability</td><td><code>docs/observability/spec.md</code></td><td><code>status.md</code> / <code>deferred.md</code></td><td><code>review-disposition.md</code></td></tr>
+      <tr><td>History</td><td><code>docs/history/spec.md</code></td><td><code>status.md</code> / <code>deferred.md</code></td><td>共享 observability disposition</td></tr>
+      <tr><td>Raw capture</td><td><code>docs/raw-capture/spec.md</code>，ACTIVE v25</td><td><code>status.md</code> / <code>deferred.md</code></td><td><code>review-disposition.md</code></td></tr>
+      <tr><td>Replay</td><td><code>docs/replay/spec.md</code>，ACTIVE v3</td><td><code>status.md</code> / <code>deferred.md</code></td><td>共享 observability disposition</td></tr>
+    </tbody>
+  </table>
+  <ul>
+    <li>根 inventory 已登记 observability、history、raw-capture、replay，以及此前漏列的 commandcode-provider、sub2api-provider。</li>
+    <li>implementation ledger 已收窄为状态、提交、验证证据和 current owner，不再复制行为合同。</li>
+    <li>History identity metadata 与 raw transport headers/credentials 的边界已写入 current Specs，消除两种安全读法。</li>
+    <li>用户控制目录未被直接修改；缺失的 <code>observability.md</code> 已写入候选材料，等待用户控制流程。</li>
+  </ul>
+
+  <h2>2. 多轮 agent review 与修复</h2>
+  <table>
+    <thead><tr><th>轮次</th><th>视角</th><th>结果</th><th>处置</th></tr></thead>
+    <tbody>
+      <tr><td>Round 1</td><td>authority / contract / governance</td><td>初版发现若干 major；随后确认部分报告误读了 CAS 后 stale working copy</td><td>建立 clean committed HEAD 复核边界，撤回 stale-source findings</td></tr>
+      <tr><td>Round 2</td><td>authority / contract / governance</td><td>authority pass；contract pass + 1 minor；governance 2 major</td><td>补齐 topic entries、root/repair 状态区分、raw disposition 和 v25 指针</td></tr>
+      <tr><td>Round 3</td><td>authority / contract / governance</td><td>authority pass；contract pass + 1 minor；governance 1 major</td><td>逐 finding 映射 adversarial verifier 的 F-01/F-02/F-03/AC-28/AC-29</td></tr>
+      <tr><td>Round 4</td><td>窄范围治理复核</td><td class="pass">pass，0 blocker / 0 major / 0 minor</td><td>确认 root/repair、v25 指针与 raw disposition 已闭合</td></tr>
+    </tbody>
+  </table>
+  <p class="small">各轮原始报告保留在 <code>docs/observability/reports/</code>，包括 stale-source 误判的更正过程；报告本身是 provenance，不替代 current Spec。</p>
+
+  <h2>3. 已修复的主要文档问题</h2>
+  <table>
+    <thead><tr><th>问题</th><th>修复</th></tr></thead>
+    <tbody>
+      <tr><td>Root inventory 漏列 current topics</td><td>根 README 增补六个主题，并为四个核心主题提供唯一 README → Spec → status/deferred 路径。</td></tr>
+      <tr><td>Root README 与 repair owner 对 re-root 状态冲突</td><td>root README 改为明确区分“目标结构”和“当前尚未完成挂载”；repair README 保持唯一 current owner。</td></tr>
+      <tr><td>Ledger 形成第二份合同权威</td><td>ledger 只保留状态/证据索引，合同细节回到主题 Spec。</td></tr>
+      <tr><td>Raw-capture 历史 finding 无法处置</td><td>逐报告、逐 finding 映射 A1、RC-FINAL、M、F-01/F-02/F-03、AC-28/AC-29，并指向 current owner/deferred。</td></tr>
+      <tr><td>v24/v25 版本导航漂移</td><td>raw-capture Spec、status、deferred、review disposition 统一到 ACTIVE v25。</td></tr>
+      <tr><td>实现限制被写成 done</td><td>RequestJournal taxonomy、History restart recovery、Replay result boundary、per-attempt capability 等进入 accepted-deferred，未再写入 done。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>4. 已接受并记录、不在本轮实现的长期候选</h2>
+  <div class="accepted">
+    <ul>
+      <li>HistoryArchiveStore 重启时恢复既有 segment metadata 与 tail integrity。</li>
+      <li>完整 RequestJournal route/attempt/block/terminal/history-receipt taxonomy，以及 JSONL writer 的唯一 owner。</li>
+      <li>Raw capture per-attempt durable capability matrix、failure/cleanup boundary hardening、非流式 aggregate 与 HTTP CRUD 独立 oracle。</li>
+      <li>Replay CLI 的 semantic/live mode exposure、完整 delivery/cancel/deadline/result History provenance。</li>
+      <li>完整回归中的 4 个基线失败：pipeline fixture、缺失 replay_prepared 假设、陈旧 config spec、catalog fixture；它们在基线提交上复现。</li>
+    </ul>
+  </div>
+  <p>这些事项都有明确 current owner 和 deferred 入口；“未做”是可追踪处置，不是隐含的完成声明。</p>
+
+  <h2>5. 验证与边界</h2>
+  <ul>
+    <li>最终 scoped Markdown link probe：21 个 current scoped 文件、157 个本地链接、<strong>missing=0</strong>。</li>
+    <li>代码验证基线 <code>30384269</code>：Ruff、Pyright 通过；full pytest 为 3566 passed、2 skipped、4 baseline failures，覆盖率 89.65%。</li>
+    <li>本轮没有修改主线代码、没有触碰 4141、没有 push。</li>
+    <li>未修改 <code>docs/.human-controlled/</code>；候选材料位于 <code>human-controlled-docs-candidates/260914-observability.md</code>。</li>
+    <li>dotdev 中其他主题的并行 WIP 没有被纳入本 checkpoint。</li>
+  </ul>
+
+  <h2>6. 交接入口</h2>
+  <p>新接手者从 <code>.dev/README.md</code> 开始，进入 <code>docs/observability/README.md</code>；再按主题进入各自的 <code>spec.md</code>、<code>status.md</code>、<code>deferred.md</code>。实现切片提交与验证证据只在 <code>implementation-ledger.md</code> 和 review disposition 中索引，不应反过来替代 Spec。</p>
+</main>
+</body>
+</html>
