@@ -2,9 +2,9 @@
 
 这里保存开发过程中的 living docs、决策边界、实验、报告和可复核证据。它不是产品面向使用者的说明书：产品行为由各话题自己的 living `spec.md`、`status.md`、`plan.md` 或 `deferred.md` 定义。
 
-本 README 是 dotdev re-root 后分支根目录的入口。在主工作树中，dotdev checkout 通过 Git worktree 挂载在 `.dev/`；因此从主工作树读取本文件时，`docs/`、`exp/` 等相对路径就是 dotdev 的分支根内容。
+本 README 是 dotdev 目标根树的入口。**当前 re-root/worktree 挂载尚未闭合**；当前工作树通过 `.dev/` 访问 dotdev 内容，但不得把该路径描述为已完成的最终挂载。当前结构与 re-root 顺序以 [repository repair README](docs/dotdev-repository-repair/README.md) 为准。
 
-## 当前结构与结构修复
+## 目标结构与当前结构修复状态
 
 目标且验收后的 dotdev 根树如下：
 
@@ -17,7 +17,7 @@ tools/                          文档维护工具
 verification/                   结构与文档验证资产（如适用）
 ```
 
-共享主工作树的 `.dev/` 是上述根树的 worktree 挂载点，而不是另一层文档前缀。应在该 checkout 的根目录处理 dotdev 的版本控制和协作边界；按当前任务所有权选择精确路径，并在发布前比较 remote tip，避免覆盖并行 WIP。是否建立 checkpoint、执行 re-root/worktree 挂载及其验收顺序，由 [repository repair README](docs/dotdev-repository-repair/README.md) 作为唯一 current owner。
+最终目标是让共享主工作树的 `.dev/` 成为上述根树的 worktree 挂载点，而不是另一层文档前缀；该目标当前仍待 repair owner 的独立复扫、git checkpoint 和挂载验收。应在当前 dotdev checkout 根目录处理版本控制和协作边界；按任务所有权选择精确路径，并在发布前比较 remote tip，避免覆盖并行 WIP。
 
 `docs/` 是当前活文档根；`exp/`、`human-controlled-docs-candidates/`、`tools/` 与它同级。旧的嵌套 `.dev/.dev/` 布局及其提交链仅是迁移前历史/provenance，不能作为新文件的落点、同步模型或当前目录结构的依据。
 
@@ -51,10 +51,14 @@ verification/                   结构与文档验证资产（如适用）
 | `docs/graceful-shutdown/` | 关闭、restart handover 与相关证据 |
 | `docs/hosted-web-search/` | hosted web search 状态与兼容性材料 |
 | `docs/httpx2-migration/` | [living Plan](docs/httpx2-migration/plan.md) 的 residual owner；步骤 4 prose audit、`httpx2`/`httpcore2` logger 筛噪及验证尚未闭合 |
+| `docs/history/` | History projection、cold archive、query/export、archive/pin/retention contract；从 [`docs/history/README.md`](docs/history/README.md) 进入 |
 | `docs/interaction-context/` | [current interaction contract](docs/interaction-context/spec.md)；原始设计/WIP 仅在 history 中保真保存 |
 | `docs/multi-provider-routing/` | 多 provider routing 的规格、处置和 deferred work |
+| `docs/observability/` | RequestFacts、RequestJournal、LiveObservation、request log/metrics 与本轮实现状态；从 [`docs/observability/README.md`](docs/observability/README.md) 进入 |
 | `docs/project-review-principles-skill/` | project-review-principles skill 的项目内材料 |
+| `docs/raw-capture/` | rule-selected binary full transport capture、capability、writer diagnostics；从 [`docs/raw-capture/README.md`](docs/raw-capture/README.md) 进入 |
 | `docs/reasoning-carrier/` | [v2 implementation status](docs/reasoning-carrier/tracking.md) 与规格；main 集成是审计基线已核实的代码事实，`RC-TF-01` 仍待独立 test-discriminability 复验 |
+| `docs/replay/` | 独立 replay process 的 source/mode/target/deadline/provenance contract；从 [`docs/replay/README.md`](docs/replay/README.md) 进入 |
 | `docs/server-layout/` | server layout 的现行说明与决策 |
 | `docs/service-cutover/` | 服务切换的计划和 readiness |
 | `docs/systemd-rolling/` | systemd rolling 的独立 current owner |
@@ -64,6 +68,8 @@ verification/                   结构与文档验证资产（如适用）
 | `docs/tui/` | TUI 合同、决策和 deferred work |
 | `docs/upstream/` | 上游 retry、continuation 与相关失败语义 |
 | `docs/xingchen/` | Xingchen provider 规格和状态 |
+| `docs/commandcode-provider/` | Command Code provider 的 current spec 与接线状态 |
+| `docs/sub2api-provider/` | Sub2API provider 的 current spec；实现状态以其文档为准 |
 | `docs/tmp/` | 临时交换机制；当前没有把它当作一个产品主题 |
 
 各主题的状态以自己的 living docs 为准。本表不以历史报告取代它们，也不把代码审计、未重跑的测试、部署状态或用户裁决混为同一种结论。

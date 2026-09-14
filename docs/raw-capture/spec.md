@@ -1,7 +1,7 @@
 # Raw capture 产品规格
 
 日期：2026-09-08，2026-09-09，2026-09-13 修订
-状态：**ACTIVE v24**
+状态：**ACTIVE v25**
 权威范围：`observability.raw_capture` 的选择规则、管理接口、文件格式、路径、配额、可读性、安全边界、capture capability 与失败诊断。其他规格可以要求采集哪些 exchange，但不得另行定义落盘格式或把全量 capture 重新接回全局配置开关。
 
 ## 1. 用户裁决
@@ -57,7 +57,7 @@
 
 capture 默认仍是 opt-in；没有命中持久化规则的请求不得创建 capture 或记录正文。规则命中后不再提供 body-only profile：每个 capture 都是 full-header/full-transport capture。capture 文件、History cold transport 和显式 transport export 都属于敏感数据面。
 
-普通日志、metrics、LiveObservation 和 request log 仍必须使用 safe projection，不得复制 raw request/response body、认证 header、token、session/agent 原始 identity 或未知异常原文。History 的普通 list/detail projection 也只返回 metadata、semantic summary、capability 和 reference；完整 transport 必须显式请求 transport/evidence projection，并标记 `contains_credentials=true`。
+普通日志、metrics、LiveObservation 和 request log 仍必须使用 safe projection，不得复制 raw request/response body、认证 header、token、session/agent 原始 transport identity 或未知异常原文。History 的普通 list/detail projection 可以返回由 History contract 拥有的 normalized session/agent metadata，以及 semantic summary、capability 和 reference；不得把 raw transport headers/credentials 复制到该 projection。完整 transport 必须显式请求 transport/evidence projection，并标记 `contains_credentials=true`。
 
 捕获请求的实际 upstream request body 必须在请求真正交给 upstream transport 的边界保留，即使随后发生代理侧 header/attempt timeout，也不得因为代理重新包装异常而丢失这份证据。Replay 不得自动复用 capture headers/credentials；它使用当前配置重新生成认证。
 
@@ -105,6 +105,7 @@ writer `OSError` 的稳定原因枚举是 `writer_error`。worker 的即时 warn
 
 | 日期 | 版本 | 变化 | 触发 |
 |---|---|---|---|
+| 2026-09-14 | v25 | 澄清 History-owned identity metadata 与 raw transport identity 的边界；普通 History projection 可保留 History contract 的 identity 字段，但不得复制 capture headers/credentials | 多轮文档 review 发现 raw-capture 与 History identity wording 可产生两种安全解释 |
 | 2026-09-13 | v24 | 明确 full transport capture：命中规则的 capture 保存完整 headers/credentials；普通日志与 History 默认 projection 仍 safe；新增 capture status/capability matrix；History 通过 capture reference 关联 full transport；replay 使用当前认证而不复用 source headers | 可观测性、History、debug、replay 重构 shared understanding |
 | 2026-09-09 | v23 | 明确失败 attempt 的业务结果不等于 request-level 取证不完整；response-body completeness 以已 committed evidence 判断；buffered count response 要等 cleanup 成功；管理 API 未装配和未知异常日志都必须使用稳定安全投影；代理侧 timeout 不得丢失已交给 upstream transport 的 request body | 动态 capture 独立验收 F-01 至 F-05 与普通日志回归 |
 | 2026-09-09 | v22 | §6 固定完成诊断 `reason` 的封闭枚举（补 `store_closed`/`writer_queue_full`/`capture_error`/`upstream_incomplete`） | 合并态评审 M-1：派生枚举与代码漂移 |

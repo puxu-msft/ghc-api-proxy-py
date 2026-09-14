@@ -2,7 +2,7 @@
 
 日期：2026-09-13
 
-状态：**DESIGN-ONLY v1**。Replay 与主程序分离，当前不接入主程序 API，也不属于 live request lifecycle。本规格定义未来独立 replay process 的 source、eligibility、执行和 provenance 合同，不声称功能已实现。
+状态：**ACTIVE v3**。Replay 与主程序分离，不接入主程序 API，也不属于 live request lifecycle。独立 `app.replay` process/CLI 已实现 source gate、wire diagnostic、注入式 semantic/live executor、target/deadline skeleton 和 provenance fields；完整 result boundary 与 CLI mode exposure 的当前状态见 [`status.md`](status.md)，长期候选见 [`deferred.md`](deferred.md)。
 
 ## 1. Boundary
 
@@ -15,7 +15,7 @@ Replay 是独立进程读取 History/Capture artifacts 的操作，不写主程�
 - 记录 replay eligibility 和 provenance fields；
 - 暴露由 History/raw capture specs 定义的读取面。
 
-Replay process 负责未来的 diagnostic/semantic/live execution。主程序当前没有 `/api/replay`。
+Replay process 负责 diagnostic/semantic/live execution。semantic/live 的实际 pipeline/upstream executor 由调用方显式注入；process 不接收或复用 source headers/credentials。主程序当前没有 `/api/replay`。
 
 ## 2. Source eligibility
 
@@ -94,7 +94,7 @@ Replay 遇到 `function_call`、`custom_tool_call` 或其他 client action 时�
 - outcome/delivery/client actions；
 - result History entry/reference。
 
-Replay result 不默认内嵌 source full transport。显式 evidence projection 才能读取完整 transport，并标记 `contains_credentials=true`。
+Replay result 不默认内嵌 source full transport。当前 process result 携带 source/provenance、target、deadline/outcome 和 client actions；持久化为 History projection 由独立调用方显式提交，不自动覆盖 source entry。显式 evidence projection 才能读取完整 transport，并标记 `contains_credentials=true`。
 
 ## 7. Security boundary
 
@@ -104,4 +104,6 @@ Replay result 不默认内嵌 source full transport。显式 evidence projection
 
 | 日期 | 版本 | 变化 | 触发 |
 |---|---|---|---|
+| 2026-09-14 | v3 | 将 ACTIVE contract 与当前 process/CLI 实现边界分层，明确 result delivery/cancel/History reference 与 CLI semantic/live exposure 仍属 deferred | 多轮文档 review 与当前实现对账 |
+| 2026-09-13 | v2 | 实现独立 `app.replay` process/CLI；capture-required source gate、explicit selector、wire offline diagnostic、注入式 semantic/live executor、target/deadline/cancel、client-action return-only 和 new replay provenance result | 七项实施切片 |
 | 2026-09-13 | v1 | 建立独立 replay process、capture-required source matrix、wire/semantic/live mode、explicit target、sync deadline/cancel、client-action boundary 和 provenance；标记 design-only | 可观测性、History、debug 重构 grill 达成 shared understanding |

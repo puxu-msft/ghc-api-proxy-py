@@ -2,7 +2,7 @@
 
 日期：2026-09-13
 
-状态：**ACTIVE v1**。这是可观测性事实、实时投影、日志和指标的行为权威；当前生产实现只覆盖其中一部分，未实现部分不得被描述为已接线。
+状态：**ACTIVE v2**。这是可观测性事实、实时投影、日志和指标的行为权威；当前生产实现只覆盖其中一部分，未实现部分不得被描述为已接线。实现状态见 [`status.md`](status.md)，长期候选见 [`deferred.md`](deferred.md)。
 
 ## 1. 范围与术语
 
@@ -117,10 +117,11 @@ History sink、日志 sink、metrics sink、TUI sink 或 capture sink 失败，�
 
 ## 6. 当前实现边界
 
-当前实现已有 `RequestTrace`、`FinalizedRequest`、`ActiveRequestRegistry`、request log、metrics 和 rule-selected raw capture，但这些对象仍存在重复投影和部分同步写入。它们不是本规格已经实现的证明；后续实现必须先收敛事实 owner，再逐个接入 projection。
+当前实现已提供 `RequestFacts`、bounded `RequestJournal`、`ActiveRequestRegistry`、request log、metrics、History handoff 和 rule-selected raw capture。实现仍是本规格的子集：Journal taxonomy、History receipt event 和 JSONL owner 仍有明确 deferred 项；这些限制由 [`status.md`](status.md) 和 [`deferred.md`](deferred.md) 记录，不改变本节以上的 normative contract。
 
 ## 7. 修订记录
 
 | 日期 | 版本 | 变化 | 触发 |
 |---|---|---|---|
+| 2026-09-14 | v2 | 增加 current implementation/status/deferred 分层，明确 bounded RequestJournal 与完整 lifecycle taxonomy 的边界，避免 implementation ledger 冒充行为权威 | 多轮文档 review 与当前实现对账 |
 | 2026-09-13 | v1 | 建立 RequestJournal/RequestFacts、LiveObservation、request log、metrics 与 sink isolation 的独立行为权威；明确四类产品面和 outcome/delivery 正交模型 | 可观测性、History、debug 重构 grill 达成 shared understanding |

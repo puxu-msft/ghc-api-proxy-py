@@ -2,7 +2,7 @@
 
 日期：2026-09-13
 
-状态：**ACTIVE v1**。这是 HistoryEntry、HistoryArchiveStore、查询面、durability、archive、pin 和 retention 的行为权威。当前新链尚未完整实现本规格；`src/.archived/` 下的旧 History 不构成当前实现。
+状态：**ACTIVE v2**。这是 HistoryEntry、HistoryArchiveStore、查询面、durability、archive、pin 和 retention 的行为权威。当前实现边界见 [`status.md`](status.md)，长期候选见 [`deferred.md`](deferred.md)；`src/.archived/` 下的旧 History 不构成当前实现。
 
 ## 1. History 的边界
 
@@ -16,13 +16,15 @@ History 是跨重启可查询的 request projection，不是 raw capture event s
 
 History 不是实时请求列表。实时 view 由 [`../observability/spec.md`](../observability/spec.md) 定义，使用独立的 `/api/observability/requests` 查询面。
 
+History-owned session/agent metadata 是 queryable request identity，不是 raw transport header、credential 或 capture body。Raw transport 的敏感边界仍由 [`../raw-capture/spec.md`](../raw-capture/spec.md) 定义；普通 History projection 不复制这些 transport fields。
+
 ## 2. HistoryEntry projection
 
 每个 entry 的稳定 projection 至少包含：
 
 | 类别 | 内容 |
 |---|---|
-| identity/time | `request_id`、session/agent identity、started/finished timestamps |
+| identity/time | `request_id`、History-owned session/agent metadata、started/finished timestamps |
 | route | inbound format、requested/resolved model、provider、target policy、client/upstream protocol |
 | outcome | `outcome`、`delivery`、HTTP status、terminal facts、failure classification |
 | attempts | ordered attempt summary、attempt count、retry count、replaced failures、timing、body byte counts |
@@ -163,4 +165,5 @@ active -> archiving -> archived
 
 | 日期 | 版本 | 变化 | 触发 |
 |---|---|---|---|
+| 2026-09-14 | v2 | 明确 History-owned identity metadata 与 raw transport identity/credentials 的边界，并把实现限制与长期 hardening 移到 status/deferred | 多轮文档 review 与当前实现对账 |
 | 2026-09-13 | v1 | 建立一 client request 一 entry、semantic projection、captured full transport、HistoryArchiveStore、capture capability、单向 archive、pin/retention 和独立 durability receipt 合同 | 可观测性、History、debug 重构 grill 达成 shared understanding |
