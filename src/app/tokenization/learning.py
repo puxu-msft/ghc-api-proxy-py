@@ -15,13 +15,18 @@ from app.model_provider.types import ModelDescriptor, ModelEndpoint
 from app.pipeline.request import WireFormat
 from app.tokenization.features import TOKENIZER_NAME
 from app.tokenization.learning_store import TokenLearningStore
-from app.tokenization.prediction import build_prediction_record, evaluate
+from app.tokenization.prediction import (
+    build_prediction_record,
+    evaluate,
+    predict_exact_or_prefix,
+)
 from app.tokenization.types import (
     LearningIdentity,
     LearningSnapshot,
     LearningUpdate,
     NoPrefixCheckpointChange,
     StoredSample,
+    TokenPrediction,
 )
 from app.wire_json import dumps, loads
 
@@ -103,6 +108,7 @@ class TokenLearningService:
         self._queue: asyncio.Queue[TokenLearningOffer | None] = asyncio.Queue(maxsize=max_items)
         self._pending_body_bytes = 0
         self._task: asyncio.Task[None] | None = None
+        self._anchor_tasks: set[asyncio.Task[None]] = set()
         self._state = "new"
 
     @property
@@ -160,6 +166,52 @@ class TokenLearningService:
         self._pending_body_bytes += len(body)
         return True
 
+    async def flush(self) -> None:
+        await self._queue.join()
+        if self._anchor_tasks:
+            await asyncio.gather(*tuple(self._anchor_tasks), return_exceptions=True)
+
+    async def predict_responses(
+        self,
+        *,
+        payload: Mapping[str, Any],
+        provider_name: str,
+        resolved_model: str,
+        endpoint: ModelEndpoint,
+        target_format: WireFormat,
+        descriptor: ModelDescriptor,
+    ) -> TokenPrediction | None:
+        if (
+            self._state != "running"
+            or target_format is not WireFormat.OPENAI_RESPONSES
+        ):
+            return None
+        features = await self._worker.analyze_responses(
+            payload,
+            capabilities=descriptor.tokenization_capabilities,
+        )
+        identity = LearningIdentity(
+            actual_provider=provider_name,
+            resolved_model=resolved_model,
+            endpoint=endpoint.value,
+            wire_format=target_format.value,
+            tokenizer=TOKENIZER_NAME,
+            descriptor_fingerprint=descriptor_fingerprint(descriptor),
+            estimator_generation=features.estimator_generation,
+            profile_schema_revision=features.profile_schema_revision,
+            learning_epoch=0,
+        )
+        snapshot = await self._store.snapshot_for_prediction(identity)
+        decision = predict_exact_or_prefix(features, snapshot)
+        if decision.anchor_use_intent is not None:
+            task = asyncio.create_task(
+                self._record_anchor_use(decision.anchor_use_intent),
+                name="token-learning-anchor-use",
+            )
+            self._anchor_tasks.add(task)
+            task.add_done_callback(self._anchor_tasks.discard)
+        return decision.prediction
+
     async def close(self) -> None:
         if self._state == "closed":
             return
@@ -170,6 +222,7 @@ class TokenLearningService:
         await self._queue.put(None)
         if self._task is not None:
             await self._task
+        await self.flush()
         await self._store.close()
         self._state = "closed"
 
@@ -177,6 +230,7 @@ class TokenLearningService:
         while True:
             offer = await self._queue.get()
             if offer is None:
+                self._queue.task_done()
                 return
             self._pending_body_bytes -= len(offer.body)
             try:
@@ -188,6 +242,14 @@ class TokenLearningService:
                     offer.resolved_model,
                     offer.attempt_index,
                 )
+            finally:
+                self._queue.task_done()
+
+    async def _record_anchor_use(self, intent: Any) -> None:
+        try:
+            await self._store.record_anchor_use(intent)
+        except Exception:
+            logger.exception("token learning anchor use failed")
 
     async def _learn(self, offer: TokenLearningOffer) -> None:
         decoded = loads(offer.body)

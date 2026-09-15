@@ -1,7 +1,7 @@
 from decimal import ROUND_CEILING, Decimal
 
 
-def scale_local_estimate(tokens: int, multiplier: float) -> int:
+def scale_local_estimate(tokens: int | float, multiplier: float) -> int:
     """Compatibility wrapper for the sole public prediction finalization boundary."""
     return finalize_local_prediction(tokens, multiplier)
 

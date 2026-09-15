@@ -85,3 +85,52 @@ async def test_learning_service_persists_same_attempt_body_and_usage(
     assert snapshot.samples[0].raw_body_sha256 == snapshot.samples[0].features.raw_sent_body_sha256
     assert len(snapshot.prediction_records) == 1
     await reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_learning_service_selects_exact_history_for_a_repeated_count(
+    tmp_path: Path,
+    inline_token_worker: None,
+) -> None:
+    payload = {
+        "model": "gpt-model",
+        "input": [{"type": "message", "role": "user", "content": "hello"}],
+    }
+    body = b'{"input":[{"content":"hello","role":"user","type":"message"}],"model":"gpt-model"}'
+    descriptor = ModelDescriptor(
+        id="gpt-model",
+        endpoints=frozenset({ModelEndpoint.OPENAI_RESPONSES}),
+        provider_name="ghc",
+    )
+    service = TokenLearningService(
+        LocalTokenWorker(),
+        store=TokenLearningStore(tmp_path / "learning.sqlite3"),
+    )
+
+    await service.start()
+    assert service.offer(
+        request_id="request-1",
+        attempt_index=0,
+        body=body,
+        actual_input_tokens=42,
+        provider_name="ghc",
+        resolved_model="gpt-model",
+        endpoint=ModelEndpoint.OPENAI_RESPONSES,
+        target_format=WireFormat.OPENAI_RESPONSES,
+        descriptor=descriptor,
+    )
+    await service.flush()
+
+    selected = await service.predict_responses(
+        payload=payload,
+        provider_name="ghc",
+        resolved_model="gpt-model",
+        endpoint=ModelEndpoint.OPENAI_RESPONSES,
+        target_format=WireFormat.OPENAI_RESPONSES,
+        descriptor=descriptor,
+    )
+
+    assert selected is not None
+    assert selected.method.value == "history-exact"
+    assert selected.unscaled_tokens == 42
+    await service.close()

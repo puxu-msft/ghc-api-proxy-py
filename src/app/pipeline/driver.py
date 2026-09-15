@@ -566,18 +566,30 @@ async def handle_count_tokens(
         )
     calibration = chain.tokenization.calibration
     estimate: int | None = None
+    prediction: float | None = None
 
-    async def ensure_estimate() -> int:
-        nonlocal estimate
-        if estimate is None:
+    async def ensure_estimate() -> None:
+        nonlocal estimate, prediction
+        if estimate is None and prediction is None:
             _check_count_deadline(deadline_at)
-            estimate = await chain.local_token_worker.estimate(
-                protocol,
-                estimate_payload,
-                capabilities=descriptor.tokenization_capabilities,
-            )
+            if route.target_format is WireFormat.OPENAI_RESPONSES:
+                selected = await chain.token_learning.predict_responses(
+                    payload=estimate_payload,
+                    provider_name=provider.name,
+                    resolved_model=route.model_id,
+                    endpoint=ModelEndpoint.OPENAI_RESPONSES,
+                    target_format=route.target_format,
+                    descriptor=descriptor,
+                )
+                if selected is not None:
+                    prediction = selected.unscaled_tokens
+            if prediction is None:
+                estimate = await chain.local_token_worker.estimate(
+                    protocol,
+                    estimate_payload,
+                    capabilities=descriptor.tokenization_capabilities,
+                )
             _check_count_deadline(deadline_at)
-        return estimate
 
     async def ask_upstream(payload: Mapping[str, Any]) -> int:
         _check_count_deadline(deadline_at)
@@ -710,9 +722,16 @@ async def handle_count_tokens(
 
     def estimate_locally(payload: Mapping[str, Any]) -> int:
         del payload
-        if estimate is None:
+        if prediction is None and estimate is None:
             raise RuntimeError("local token estimate was not prepared")
         _check_count_deadline(deadline_at)
+        if prediction is not None:
+            return scale_local_estimate(
+                prediction,
+                settings.local_estimate_multiplier,
+            )
+        if estimate is None:
+            raise RuntimeError("local token estimate was not prepared")
         return scale_local_estimate(
             calibration.calibrate(protocol, route.model_id, estimate),
             settings.local_estimate_multiplier,
