@@ -249,6 +249,47 @@ def _absorb_response_observation(context: RequestContext, trace: RequestTrace) -
     trace.absorb_response(observation)
 
 
+def _offer_token_learning(
+    chain: Chain,
+    context: RequestContext,
+    body: bytes,
+    *,
+    attempt_index: int | None,
+) -> None:
+    if (
+        context.target_format is not WireFormat.OPENAI_RESPONSES
+        or context.endpoint is None
+        or context.model_descriptor is None
+        or attempt_index is None
+    ):
+        return
+    observation = context.response_observation
+    usage = observation.usage if observation is not None else None
+    exact = usage.exact if usage is not None else None
+    if (
+        observation is None
+        or observation.provider_failed
+        or observation.terminal_event_type not in {"response.completed", "response.incomplete"}
+        or exact is None
+        or exact.inconsistent
+    ):
+        return
+    actual_input_tokens = exact.upstream_input_tokens
+    if type(actual_input_tokens) is not int or actual_input_tokens < 0:
+        return
+    chain.token_learning.offer(
+        request_id=context.id,
+        attempt_index=attempt_index,
+        body=body,
+        actual_input_tokens=actual_input_tokens,
+        provider_name=context.provider_name,
+        resolved_model=context.resolved_model,
+        endpoint=context.endpoint,
+        target_format=context.target_format,
+        descriptor=context.model_descriptor,
+    )
+
+
 def _observe_failed_upstream_response(
     context: RequestContext,
     trace: RequestTrace,
@@ -937,6 +978,7 @@ async def _dispatch_after_body(
                 completion=completion,
                 status_code=response.status_code,
                 context=context,
+                upstream_request_body=response.request.content,
                 completion_delivery=completion_delivery,
             )
             return _AccountedStreamingResponse(
@@ -1006,6 +1048,7 @@ async def _dispatch_after_body(
             completion=completion,
             status_code=response.status_code,
             context=context,
+            upstream_request_body=response.request.content,
             assembler=assembler,
             response_loss_assembler=assembler,
             passthrough=carries_upstream_natively(handled),
@@ -1068,6 +1111,7 @@ async def _dispatch_after_body(
                 return None
             fresh_attempt = again.context.current_attempt
             fresh_attempt_index = fresh_attempt.index if fresh_attempt is not None else None
+            accounting.upstream_request_body = reopened.request.content
             completion.note_upstream_request_body(
                 reopened.request.content,
                 attempt=fresh_attempt_index,
@@ -1234,6 +1278,12 @@ async def _dispatch_after_body(
         _absorb_response_observation(context, trace)
         if context.response_observation is not None and context.response_observation.provider_failed:
             trace.status_override = "fail"
+    _offer_token_learning(
+        chain,
+        context,
+        response.request.content,
+        attempt_index=attempt_index,
+    )
     try:
         parsed_reply: object = response.json()
     except ValueError as error:
@@ -1384,6 +1434,7 @@ class _StreamAccounting:
     # The outer response can be closed before the body generator is ever pulled.
     # In that case the generator's own finally cannot write an incomplete boundary.
     upstream_body_started: bool = False
+    upstream_request_body: bytes | None = None
     committed_blocks: list[dict[str, Any]] = field(
         default_factory=lambda: list[dict[str, Any]]()
     )
@@ -1472,6 +1523,14 @@ class _StreamAccounting:
                 _assembler_response_opaque_payloads(self.response_loss_assembler)
             )
             self.trace.absorb_conversion(self.context)
+            if self.upstream_request_body is not None:
+                attempt = self.context.current_attempt
+                _offer_token_learning(
+                    self.chain,
+                    self.context,
+                    self.upstream_request_body,
+                    attempt_index=attempt.index if attempt is not None else None,
+                )
         completion_unit = None
         if delivered_whole:
             if self.assembler is None:

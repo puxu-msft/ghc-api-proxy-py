@@ -28,6 +28,7 @@ from app.pipeline.request import RequestContext
 from app.pipeline.translation_driver.reasoning import CompiledThinkingProfiles
 from app.pipeline.translation_driver.registry import TranslatorRegistry
 from app.tokenization.admission import PromptTokenAdmission
+from app.tokenization.learning import TokenLearningService
 from app.tokenization.state_store import TokenizationStateStore
 from app.tokenization.worker import LocalTokenWorker
 
@@ -63,12 +64,14 @@ class Chain:
     # One CPU permit shared by count estimation and the exceptional large-field admission path. Ordinary inference stays on the byte fast path without acquiring it.
     local_token_worker: LocalTokenWorker = field(default_factory=LocalTokenWorker)
     prompt_token_admission: PromptTokenAdmission = field(init=False)
+    token_learning: TokenLearningService = field(init=False)
     # `strip_anthropic_beta_flags` compiled, in the order the operator wrote it. Same reason as `web_search_models` above it: a pattern that does not compile belongs to the config, so it should stop start-up rather than the first request that happens to reach the table.
     beta_flag_denials: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = ()
     thinking_profiles: CompiledThinkingProfiles = ()
 
     def __post_init__(self) -> None:
         self.prompt_token_admission = PromptTokenAdmission(limiter=self.local_token_worker.limiter)
+        self.token_learning = TokenLearningService(self.local_token_worker)
 
     def rate_limiter_for(self, provider_name: str) -> RateLimiter:
         return self.rate_limiters[provider_name]
@@ -78,6 +81,7 @@ class Chain:
 
         `http_client` is **not** closed here. It is built by the caller — to resolve base URLs before this chain exists — and closing it from both sides is how one of them ends up closing a client the other still holds. Whoever built it closes it; `cli.py` does, in the same `finally` that calls this.
         """
+        await self.token_learning.close()
         if self.raw_capture is not None:
             self.raw_capture.close()
         if self.debug_capture_rules is not None:
