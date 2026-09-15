@@ -571,7 +571,11 @@ async def handle_count_tokens(
         nonlocal estimate
         if estimate is None:
             _check_count_deadline(deadline_at)
-            estimate = await chain.local_token_worker.estimate(protocol, estimate_payload)
+            estimate = await chain.local_token_worker.estimate(
+                protocol,
+                estimate_payload,
+                capabilities=descriptor.tokenization_capabilities,
+            )
             _check_count_deadline(deadline_at)
         return estimate
 

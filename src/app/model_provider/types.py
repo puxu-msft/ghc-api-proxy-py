@@ -4,11 +4,16 @@ Endpoint identifiers are the upstream paths a catalog advertises in `supported_e
 They are not a naming of our own, so an answer can be compared with what upstream said.
 """
 
+from __future__ import annotations
+
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
+
+if TYPE_CHECKING:
+    from app.tokenization.types import TokenizationCapabilities
 
 
 class ChatResponseMode(StrEnum):
@@ -197,6 +202,7 @@ class ModelDescriptor:
     catalog_generation: int = 0
     catalog_refreshed_at: str = ""
     prompt_token_limits: PromptTokenLimits | None = None
+    tokenization_capabilities: TokenizationCapabilities | None = None
     chat_endpoint_capabilities: ChatEndpointCapabilities | None = None
 
     def __post_init__(self) -> None:

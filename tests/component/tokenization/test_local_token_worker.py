@@ -19,6 +19,7 @@ from app.tokenization.estimators import (
     estimate_anthropic_input,
     estimate_responses_input,
 )
+from app.tokenization.features import analyze_responses_input
 from app.tokenization.types import (
     EstimateFeatures,
     FeatureName,
@@ -128,6 +129,29 @@ async def test_real_worker_returns_pickle_safe_structured_responses_features(
         labels = {"format": "responses", "phase": phase}
         assert registry.get_sample_value("ghc_proxy_local_tokenizer_duration_seconds_count", labels) == 1
         assert registry.get_sample_value("ghc_proxy_local_tokenizer_duration_failures_total", labels) == 0
+
+
+async def test_real_worker_estimate_includes_model_visual_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(worker_module, "RESPONSIVENESS", ResponsivenessMetrics(CollectorRegistry()))
+    payload = {
+        "model": "gpt-model",
+        "input": [{"type": "input_image", "width": 56, "height": 84}],
+    }
+    capabilities = TokenizationCapabilities(
+        SyntheticUnresizedPatchGridFormula(revision=1, patch_width=28, patch_height=28)
+    )
+    features = analyze_responses_input(payload, capabilities=capabilities)
+    assert features.capability_visual_tokens is not None
+
+    result = await LocalTokenWorker().estimate(
+        "openai-responses",
+        payload,
+        capabilities=capabilities,
+    )
+
+    assert result == features.known_tokens + features.capability_visual_tokens
 
 
 async def test_real_worker_propagates_validation_error_without_fake_metric_samples(monkeypatch: pytest.MonkeyPatch) -> None:

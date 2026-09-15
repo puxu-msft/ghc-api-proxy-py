@@ -48,7 +48,11 @@ def _estimate_input(
                 capabilities=capabilities,
                 timings=timings,
             )
-            count = max(features.known_tokens, 1)
+            count = max(
+                features.known_tokens
+                + (features.capability_visual_tokens or 0),
+                1,
+            )
         else:
             raise CountTokensRequestError(f"no token estimator for {protocol}; add one before routing counts there")
     except Exception as error:
@@ -90,8 +94,14 @@ class LocalTokenWorker:
             raise result.error
         return result
 
-    async def estimate(self, protocol: str, payload: Mapping[str, Any]) -> int:
-        result = await self._run(protocol, payload)
+    async def estimate(
+        self,
+        protocol: str,
+        payload: Mapping[str, Any],
+        *,
+        capabilities: TokenizationCapabilities | None = None,
+    ) -> int:
+        result = await self._run(protocol, payload, capabilities)
         if result.tokens is None:
             raise RuntimeError("token worker returned neither a count nor an error")
         return result.tokens
