@@ -161,14 +161,16 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
                 link_url=message.link_url,
             )
     await chain.tokenization.load()
-    try:
-        await chain.token_learning.start()
-    except Exception as error:
-        logger.warning(
-            "token learning unavailable: exception_type=%s",
-            f"{type(error).__module__}.{type(error).__qualname__}",
-            status="fail",
-        )
+    token_learning = getattr(chain, "token_learning", None)
+    if token_learning is not None:
+        try:
+            await token_learning.start()
+        except Exception as error:
+            logger.warning(
+                "token learning unavailable: exception_type=%s",
+                f"{type(error).__module__}.{type(error).__qualname__}",
+                status="fail",
+            )
     history_writer = getattr(chain, "history_writer", None)
     if history_writer is not None:
         try:
@@ -199,6 +201,7 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
                 yield
         finally:
             # The periodic flush cannot be relied on to have caught the last change.
-            await chain.token_learning.close()
+            if token_learning is not None:
+                await token_learning.close()
             await chain.tokenization.flush()
             flushing.cancel_scope.cancel()
