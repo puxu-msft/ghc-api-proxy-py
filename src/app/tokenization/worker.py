@@ -40,7 +40,11 @@ def _estimate_input(
     timings: list[EstimatorTiming] = []
     try:
         if protocol == "anthropic":
-            count = estimate_anthropic_input(_countable(payload), timings=timings)
+            count = estimate_anthropic_input(
+                _countable(payload),
+                capabilities=capabilities,
+                timings=timings,
+            )
             features = None
         elif protocol == "openai-responses":
             features = analyze_responses_input(
