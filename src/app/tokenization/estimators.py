@@ -17,7 +17,7 @@ from app.wire_json import dumps
 
 @contextmanager
 def _measure(
-    format_name: Literal["anthropic", "responses"],
+    format_name: Literal["anthropic", "responses", "commandcode"],
     phase: Literal["lookup", "estimate"],
     timings: list[EstimatorTiming] | None,
 ) -> Generator[None]:
@@ -234,3 +234,115 @@ def estimate_responses_input(
         ).known_tokens,
         1,
     )
+
+
+def _commandcode_structured_tokens(
+    encoding: tiktoken.Encoding,
+    value: object,
+) -> int:
+    return _count_ordinary(encoding, dumps(value).decode())
+
+
+def _commandcode_content_tokens(
+    encoding: tiktoken.Encoding,
+    content: object,
+) -> int:
+    if isinstance(content, str):
+        return _count_ordinary(encoding, content)
+    if not isinstance(content, list):
+        return _commandcode_structured_tokens(encoding, content)
+    total = 0
+    for raw_part in cast(list[object], content):
+        if not isinstance(raw_part, Mapping):
+            total += 4
+            continue
+        part = cast(Mapping[str, object], raw_part)
+        part_type = part.get("type")
+        total += 4
+        if part_type in {"text", "reasoning"} and isinstance(part.get("text"), str):
+            total += _count_ordinary(encoding, cast(str, part["text"]))
+        elif part_type == "tool-call":
+            for key in ("toolCallId", "toolName"):
+                value = part.get(key)
+                if isinstance(value, str):
+                    total += _count_ordinary(encoding, value)
+            if "input" in part:
+                total += _commandcode_structured_tokens(encoding, part.get("input"))
+        elif part_type == "tool-result":
+            for key in ("toolCallId", "toolName"):
+                value = part.get(key)
+                if isinstance(value, str):
+                    total += _count_ordinary(encoding, value)
+            output = part.get("output")
+            if isinstance(output, Mapping) and cast(Mapping[str, object], output).get("type") == "text":
+                value = cast(Mapping[str, object], output).get("value")
+                total += (
+                    _count_ordinary(encoding, value)
+                    if isinstance(value, str)
+                    else _commandcode_structured_tokens(encoding, value)
+                )
+            elif output is not None:
+                total += _commandcode_structured_tokens(encoding, cast(object, output))
+        elif part_type == "image":
+            # Command Code's image carrier is not ordinary prompt text.
+            continue
+        elif isinstance(part.get("text"), str):
+            total += _count_ordinary(encoding, cast(str, part["text"]))
+    return total
+
+
+def estimate_commandcode_input(
+    payload: Mapping[str, Any],
+    *,
+    capabilities: TokenizationCapabilities | None = None,
+    timings: list[EstimatorTiming] | None = None,
+) -> int:
+    """Estimate the final Command Code envelope, not the inbound Anthropic body."""
+    with _measure("commandcode", "lookup", timings):
+        encoding = tiktoken.get_encoding(_TOKENIZER_NAME)
+    with _measure("commandcode", "estimate", timings):
+        raw_params = payload.get("params", payload)
+        if not isinstance(raw_params, Mapping):
+            raise ValueError("Command Code payload must contain an object params field")
+        params = cast(Mapping[str, object], raw_params)
+        total = 0
+        system = params.get("system")
+        if isinstance(system, str):
+            total += _count_ordinary(encoding, system) + 4
+        elif (
+            system is None
+            and capabilities is not None
+            and capabilities.commandcode_empty_system_placeholder is True
+        ):
+            total += _count_ordinary(encoding, " ") + 4
+        messages = params.get("messages")
+        if isinstance(messages, list):
+            for raw_message in cast(list[object], messages):
+                if not isinstance(raw_message, Mapping):
+                    total += 4
+                    continue
+                message = cast(Mapping[str, object], raw_message)
+                role = message.get("role")
+                if isinstance(role, str):
+                    total += _count_ordinary(encoding, role)
+                total += _commandcode_content_tokens(encoding, message.get("content", ""))
+                total += 4
+        elif messages is not None:
+            message_value: object = messages
+            total += _commandcode_structured_tokens(encoding, message_value)
+        tools: object = params.get("tools")
+        if isinstance(tools, list):
+            tool_list = cast(list[object], tools)
+            if tool_list:
+                total += (
+                    _commandcode_structured_tokens(encoding, tool_list)
+                    + 4
+                    + 4 * len(tool_list)
+                )
+            else:
+                total += 4
+        elif tools is not None:
+            total += _commandcode_structured_tokens(encoding, tools) + 4
+        if "tool_choice" in params:
+            total += _commandcode_structured_tokens(encoding, params["tool_choice"]) + 4
+        return max(total, 1)

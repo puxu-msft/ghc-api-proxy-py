@@ -70,6 +70,9 @@ def descriptor_fingerprint(descriptor: ModelDescriptor) -> str:
         "tokenization_capabilities": (
             {
                 "anthropic_thinking_mode": capabilities.anthropic_thinking_mode,
+                "commandcode_empty_system_placeholder": (
+                    capabilities.commandcode_empty_system_placeholder
+                ),
                 "visual_formula": (
                     {
                         "kind": formula.kind.value,

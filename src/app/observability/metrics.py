@@ -103,7 +103,7 @@ class ResponsivenessMetrics:
         }
         self.tokenizer = self._family(
             "local_tokenizer_duration", "Local estimator lookup or post-lookup estimation duration; not pure BPE CPU time.", registry,
-            ("format", "phase"), tuple((fmt, phase) for fmt in ("anthropic", "responses") for phase in ("lookup", "estimate")),
+            ("format", "phase"), tuple((fmt, phase) for fmt in ("anthropic", "responses", "commandcode") for phase in ("lookup", "estimate")),
         )
         self.loop_active = Gauge("ghc_proxy_event_loop_monitor_active", "Running event-loop heartbeat tasks.", registry=registry)
         self.tui_active = Gauge("ghc_proxy_tui_active", "Active footer lifecycles.", registry=registry)

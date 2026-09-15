@@ -9,7 +9,11 @@ from pydantic import ValidationError
 from app.models.anthropic import MessagesRequest
 from app.observability.metrics import RESPONSIVENESS
 from app.pipeline.count_tokens import CountTokensRequestError
-from app.tokenization.estimators import EstimatorTiming, estimate_anthropic_input
+from app.tokenization.estimators import (
+    EstimatorTiming,
+    estimate_anthropic_input,
+    estimate_commandcode_input,
+)
 from app.tokenization.features import analyze_responses_input
 from app.tokenization.types import EstimateFeatures, TokenizationCapabilities
 
@@ -57,6 +61,13 @@ def _estimate_input(
                 + (features.capability_visual_tokens or 0),
                 1,
             )
+        elif protocol == "commandcode":
+            count = estimate_commandcode_input(
+                payload,
+                capabilities=capabilities,
+                timings=timings,
+            )
+            features = None
         else:
             raise CountTokensRequestError(f"no token estimator for {protocol}; add one before routing counts there")
     except Exception as error:

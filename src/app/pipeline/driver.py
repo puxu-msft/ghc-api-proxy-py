@@ -555,11 +555,7 @@ async def handle_count_tokens(
     if route.target_format is WireFormat.ANTHROPIC_MESSAGES:
         protocol = "anthropic"
     elif route.target_format is WireFormat.COMMANDCODE:
-        # Command Code has no count endpoint or native estimator. The count
-        # route is Anthropic Messages, so estimate the original client body
-        # rather than the provider envelope.
-        protocol = "anthropic"
-        estimate_payload = context.original_payload or context.payload
+        protocol = "commandcode"
     elif route.target_format is not WireFormat.OPENAI_RESPONSES:
         raise CountTokensRequestError(
             f"no token estimator for {route.target_format.value}; add one before routing counts there"

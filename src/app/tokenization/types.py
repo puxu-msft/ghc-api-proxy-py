@@ -17,7 +17,7 @@ type DriftKind = Literal["exact", "profile"]
 
 @dataclass(frozen=True, slots=True)
 class EstimatorTiming:
-    format: Literal["anthropic", "responses"]
+    format: Literal["anthropic", "responses", "commandcode"]
     phase: Literal["lookup", "estimate"]
     seconds: float
     failed: bool
@@ -454,12 +454,18 @@ type VisualTokenFormula = SyntheticUnresizedPatchGridFormula
 class TokenizationCapabilities:
     visual_formula: VisualTokenFormula | None = None
     anthropic_thinking_mode: Literal["keep_all", "last_turn_only"] | None = None
+    commandcode_empty_system_placeholder: bool | None = None
 
     def __post_init__(self) -> None:
         if self.visual_formula is not None and type(self.visual_formula) is not SyntheticUnresizedPatchGridFormula:
             raise ValueError("visual formula must be a closed tokenization formula variant")
         if self.anthropic_thinking_mode not in (None, "keep_all", "last_turn_only"):
             raise ValueError("anthropic thinking mode must be keep_all or last_turn_only")
+        if (
+            self.commandcode_empty_system_placeholder is not None
+            and type(self.commandcode_empty_system_placeholder) is not bool
+        ):
+            raise ValueError("Command Code empty system placeholder must be a boolean or absent")
 
 
 class StoreCancellationPhase(StrEnum):

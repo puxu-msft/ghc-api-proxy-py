@@ -18,6 +18,7 @@ from app.model_provider.types import (
     require_descriptor_owner,
     require_endpoint,
 )
+from app.tokenization.types import TokenizationCapabilities
 
 PROVIDER_TYPE = "commandcode"
 DRIVEN_ENDPOINTS = frozenset({ModelEndpoint.COMMANDCODE_GENERATE})
@@ -114,6 +115,9 @@ class CommandCodeProvider:
                 provider_name=self._name,
                 catalog_generation=generation,
                 catalog_refreshed_at=refreshed_at,
+                tokenization_capabilities=TokenizationCapabilities(
+                    commandcode_empty_system_placeholder=self._config.empty_system_placeholder,
+                ),
             )
         self._descriptors = descriptors
         self._raw_catalog = dict(raw)
