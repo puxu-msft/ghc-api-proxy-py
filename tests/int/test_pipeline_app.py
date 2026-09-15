@@ -993,7 +993,12 @@ def test_an_anthropic_web_search_declaration_reaches_upstream_in_its_own_spellin
     sent = orjson.loads(seen[-1].read())
     assert sent["tools"] == [
         {"type": "web_search"},
-        {"type": "function", "name": "get_time", "parameters": {"type": "object"}},
+        {
+            "type": "function",
+            "name": "get_time",
+            "parameters": {"type": "object"},
+            "strict": False,
+        },
     ]
     # The dated Anthropic spelling is the exact value upstream named when it refused the turn.
     assert b"web_search_20250305" not in seen[-1].read()
@@ -6446,7 +6451,7 @@ def test_a_malformed_usage_costs_the_counts_and_not_the_buffered_reply(
 
     assert response.status_code == 200
     assert response.json()["content"] == [{"type": "text", "text": "hi"}]
-    assert response.json()["usage"] == {"input_tokens": 0, "output_tokens": 0}
+    assert response.json()["usage"] == {}
 
 
 def _upstream_that_goes_quiet(gap: float) -> Callable[[httpx2.Request], httpx2.Response]:
