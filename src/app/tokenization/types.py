@@ -453,10 +453,13 @@ type VisualTokenFormula = SyntheticUnresizedPatchGridFormula
 @dataclass(frozen=True, slots=True)
 class TokenizationCapabilities:
     visual_formula: VisualTokenFormula | None = None
+    anthropic_thinking_mode: Literal["keep_all", "last_turn_only"] | None = None
 
     def __post_init__(self) -> None:
         if self.visual_formula is not None and type(self.visual_formula) is not SyntheticUnresizedPatchGridFormula:
             raise ValueError("visual formula must be a closed tokenization formula variant")
+        if self.anthropic_thinking_mode not in (None, "keep_all", "last_turn_only"):
+            raise ValueError("anthropic thinking mode must be keep_all or last_turn_only")
 
 
 class StoreCancellationPhase(StrEnum):
