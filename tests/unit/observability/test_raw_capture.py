@@ -471,26 +471,26 @@ def test_capture_records_full_header_boundaries(
         for record in records
         if isinstance(record["event"], str) and record["event"].endswith(".start")
     }
-    assert starts["request.start"]["headers"] == {
-        "authorization": "request-secret",
-        "x-request-id": "request-id",
-        "x-unlisted": "request-marker",
-    }
-    assert starts["upstream.request.start"]["headers"] == {
-        "authorization": "upstream-secret",
-        "x-command-code-version": "test-version",
-        "x-unlisted": "upstream-marker",
-    }
+    assert starts["request.start"]["headers"] == [
+        ["authorization", "request-secret"],
+        ["x-request-id", "request-id"],
+        ["x-unlisted", "request-marker"],
+    ]
+    assert starts["upstream.request.start"]["headers"] == [
+        ["authorization", "upstream-secret"],
+        ["x-command-code-version", "test-version"],
+        ["x-unlisted", "upstream-marker"],
+    ]
     assert starts["upstream.response.start"]["status_code"] == 200
-    assert starts["upstream.response.start"]["headers"] == {
-        "content-type": "application/x-ndjson",
-        "set-cookie": "response-secret",
-        "x-request-id": "response-id",
-    }
-    assert starts["client.response.start"]["headers"] == {
-        "content-type": "application/json",
-        "x-unlisted": "client-marker",
-    }
+    assert starts["upstream.response.start"]["headers"] == [
+        ["content-type", "application/x-ndjson"],
+        ["set-cookie", "response-secret"],
+        ["x-request-id", "response-id"],
+    ]
+    assert starts["client.response.start"]["headers"] == [
+        ["content-type", "application/json"],
+        ["x-unlisted", "client-marker"],
+    ]
     assert "request-secret" in repr(records)
     assert "upstream-secret" in repr(records)
     assert "response-secret" in repr(records)
@@ -563,16 +563,18 @@ async def test_commandcode_ndjson_error_capture_uses_transport_response_boundary
         record for record in records if record["event"] == "upstream.request.start"
     )
     assert response_start["status_code"] == 200
-    response_headers = cast(dict[str, str], response_start["headers"])
-    request_headers = cast(dict[str, str], request_start["headers"])
-    assert response_headers == {
-        "content-type": "application/x-ndjson",
-        "content-length": str(len(upstream_body)),
-        "x-request-id": "transport-request",
-    }
+    response_headers = cast(list[list[str]], response_start["headers"])
+    request_headers = cast(list[list[str]], request_start["headers"])
+    assert response_headers == [
+        ["content-type", "application/x-ndjson"],
+        ["x-request-id", "transport-request"],
+        ["content-length", str(len(upstream_body))],
+    ]
     assert response_body["body"] == upstream_body
     assert request_start["path"] == "/alpha/generate"
-    assert request_headers["authorization"] == "Bearer user_test"
+    assert [
+        value for name, value in request_headers if name == "authorization"
+    ] == ["Bearer user_test"]
 
 
 def test_capture_is_a_stream_of_native_cbor_maps_not_json(tmp_path: Path) -> None:

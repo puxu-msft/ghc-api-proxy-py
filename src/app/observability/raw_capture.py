@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from collections.abc import Generator, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -38,23 +38,30 @@ def _header_text(value: object) -> str:
     return str(value)
 
 
-def _capture_headers(headers: object | None) -> dict[str, str] | None:
-    """Normalize valid header containers without inventing observed headers."""
+def _capture_headers(headers: object | None) -> list[list[str]] | None:
+    """Normalize headers to an ordered pair list without dropping duplicates."""
     if headers is None:
         return None
     if isinstance(headers, Mapping):
         try:
-            entries: Iterable[object] = cast(
-                Iterable[object],
-                cast(Mapping[object, object], headers).items(),
-            )
+            multi_items = getattr(cast(object, headers), "multi_items", None)
+            if callable(multi_items):
+                entries = cast(
+                    Iterable[object],
+                    cast(Callable[[], object], multi_items)(),
+                )
+            else:
+                entries = cast(
+                    Iterable[object],
+                    cast(Mapping[object, object], headers).items(),
+                )
         except BaseException:
             return None
     elif isinstance(headers, Iterable) and not isinstance(headers, (str, bytes)):
         entries = cast(Iterable[object], headers)
     else:
         return None
-    captured: dict[str, str] = {}
+    captured: list[list[str]] = []
     try:
         for entry in entries:
             if not isinstance(entry, Sequence) or isinstance(entry, (str, bytes)):
@@ -66,7 +73,7 @@ def _capture_headers(headers: object | None) -> dict[str, str] | None:
             normalized_name = _header_text(name).lower()
             if not normalized_name:
                 return None
-            captured[normalized_name] = _header_text(value)
+            captured.append([normalized_name, _header_text(value)])
     except BaseException:
         return None
     return captured
