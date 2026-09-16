@@ -219,6 +219,13 @@ def test_tls_mode_accepts_the_three_states(value: bool | str) -> None:
     assert config.server.tls.mode == value
 
 
+def test_history_export_token_rejects_fewer_than_sixteen_characters() -> None:
+    with pytest.raises(ValidationError):
+        ProxyConfig.model_validate(
+            {"server": {"history_export_token": "fifteen-charss!"}}
+        )
+
+
 def test_yaml_off_reaches_context_editing_as_a_bool() -> None:
     # YAML 1.1 parses a bare `off` as boolean false.
     # The disabled state must accept a bool, not the literal string the comment shows.

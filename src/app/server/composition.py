@@ -725,6 +725,7 @@ def build_chain(
         raw_capture_root,
         compression_level=raw_capture_config.compression_level,
         max_file_bytes=raw_capture_config.max_file_bytes,
+        max_total_bytes=raw_capture_config.max_total_bytes,
     )
     debug_capture_rules = DebugCaptureRuleStore(rules_database)
     history_writer = (

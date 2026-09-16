@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from app.config.loading import (
     CONFIG_PATH_VARIABLE,
@@ -154,6 +154,19 @@ def test_lists_replace_rather_than_accumulate(tmp_path: Path) -> None:
 def test_environment_nests_on_double_underscore() -> None:
     values = environment_values({"GHC_API_PROXY_CLIENT_DELIVERY__SSE_PING_INTERVAL": "7", "OTHER": "x"})
     assert values == {"client_delivery": {"sse_ping_interval": "7"}}
+
+
+def test_nested_environment_loads_history_export_token_as_a_secret() -> None:
+    config = load_proxy_config(
+        bundled={},
+        environ={
+            "GHC_API_PROXY_SERVER__HISTORY_EXPORT_TOKEN": "example-only-token-1234",
+        },
+    )
+
+    token = config.server.history_export_token
+    assert isinstance(token, SecretStr)
+    assert token.get_secret_value() == "example-only-token-1234"
 
 
 def xingchen_values(**overrides: object) -> dict[str, object]:

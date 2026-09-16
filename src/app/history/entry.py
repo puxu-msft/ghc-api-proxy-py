@@ -36,6 +36,56 @@ class HistoryDelivery(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class CaptureAttemptCapabilities:
+    """Safe, attempt-local replay eligibility facts."""
+
+    attempt: int
+    attempt_started: bool = False
+    request_started: bool = False
+    request_headers_available: bool = False
+    request_body_available: bool = False
+    response_started: bool = False
+    response_headers_available: bool = False
+    response_body_available: bool = False
+    response_complete: bool = False
+    attempt_complete: bool = False
+    wire_diagnostic_eligible: bool = False
+
+    def __post_init__(self) -> None:
+        """Never trust a stored eligibility bit more than its evidence matrix."""
+        object.__setattr__(
+            self,
+            "wire_diagnostic_eligible",
+            (
+                self.attempt_started
+                and self.request_started
+                and self.request_headers_available
+                and self.request_body_available
+                and self.response_started
+                and self.response_headers_available
+                and self.response_body_available
+                and self.response_complete
+                and self.attempt_complete
+            ),
+        )
+
+    def as_dict(self) -> dict[str, bool | int]:
+        return {
+            "attempt": self.attempt,
+            "attempt_started": self.attempt_started,
+            "request_started": self.request_started,
+            "request_headers_available": self.request_headers_available,
+            "request_body_available": self.request_body_available,
+            "response_started": self.response_started,
+            "response_headers_available": self.response_headers_available,
+            "response_body_available": self.response_body_available,
+            "response_complete": self.response_complete,
+            "attempt_complete": self.attempt_complete,
+            "wire_diagnostic_eligible": self.wire_diagnostic_eligible,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class CaptureCapabilities:
     status: str = "none"
     client_request_available: bool = False
@@ -43,6 +93,38 @@ class CaptureCapabilities:
     wire_diagnostic_eligible: bool = False
     semantic_replay_eligible: bool = False
     live_replay_eligible: bool = False
+    upstream_attempts: tuple[CaptureAttemptCapabilities, ...] = ()
+
+    def replay_rejection_code(
+        self,
+        mode: str,
+        *,
+        attempt_id: int | None = None,
+    ) -> str | None:
+        """Return the stable reason this finalized capture cannot replay."""
+        if self.status == "corrupt":
+            return "source_capture_corrupt"
+        if self.status == "none":
+            return "source_content_unavailable"
+        if mode == "wire_diagnostic":
+            eligible = (
+                attempt_id is not None
+                and self.wire_diagnostic_eligible
+                and any(
+                    attempt.attempt == attempt_id
+                    and attempt.wire_diagnostic_eligible
+                    for attempt in self.upstream_attempts
+                )
+            )
+        elif mode == "semantic":
+            eligible = (
+                self.client_request_available and self.semantic_replay_eligible
+            )
+        elif mode == "live":
+            eligible = self.client_request_available and self.live_replay_eligible
+        else:
+            return "source_capability_denied"
+        return None if eligible else "source_capability_denied"
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,7 +181,9 @@ class HistoryEntry:
             usage=_freeze_object(line.usage),
             losses=freeze_json(list(line.losses)),
             facts=freeze_json(list(line.facts)),
-            capture=_capture_capabilities(facts.capture),
+            capture=_capture_capabilities(
+                facts.capture,
+            ),
             capture_ref=(
                 facts.capture.capture_ref
                 if facts.capture is not None
@@ -136,15 +220,21 @@ class HistoryEntry:
             "semantic_response": thaw_json(self.semantic_response)
             if self.semantic_response is not None
             else None,
-            "capture": {
-                "status": self.capture.status,
-                "client_request_available": self.capture.client_request_available,
-                "client_response_available": self.capture.client_response_available,
-                "wire_diagnostic_eligible": self.capture.wire_diagnostic_eligible,
-                "semantic_replay_eligible": self.capture.semantic_replay_eligible,
-                "live_replay_eligible": self.capture.live_replay_eligible,
-                "capture_ref": self.capture_ref,
-            },
+            "capture": cast(
+                JsonValue,
+                {
+                    "status": self.capture.status,
+                    "client_request_available": self.capture.client_request_available,
+                    "client_response_available": self.capture.client_response_available,
+                    "wire_diagnostic_eligible": self.capture.wire_diagnostic_eligible,
+                    "semantic_replay_eligible": self.capture.semantic_replay_eligible,
+                    "live_replay_eligible": self.capture.live_replay_eligible,
+                    "upstream_attempts": [
+                        attempt.as_dict() for attempt in self.capture.upstream_attempts
+                    ],
+                    "capture_ref": self.capture_ref,
+                },
+            ),
         }
 
 
@@ -167,6 +257,22 @@ def _capture_capabilities(
         wire_diagnostic_eligible=observation.wire_diagnostic_eligible,
         semantic_replay_eligible=observation.semantic_replay_eligible,
         live_replay_eligible=observation.live_replay_eligible,
+        upstream_attempts=tuple(
+            CaptureAttemptCapabilities(
+                attempt=attempt.attempt,
+                attempt_started=attempt.attempt_started,
+                request_started=attempt.request_started,
+                request_headers_available=attempt.request_headers_available,
+                request_body_available=attempt.request_body_available,
+                response_started=attempt.response_started,
+                response_headers_available=attempt.response_headers_available,
+                response_body_available=attempt.response_body_available,
+                response_complete=attempt.response_complete,
+                attempt_complete=attempt.attempt_complete,
+                wire_diagnostic_eligible=attempt.wire_diagnostic_eligible,
+            )
+            for attempt in observation.upstream_attempts
+        ),
     )
 
 
@@ -204,6 +310,7 @@ def _delivery_for(
 
 
 __all__ = [
+    "CaptureAttemptCapabilities",
     "CaptureCapabilities",
     "HistoryDelivery",
     "HistoryEntry",

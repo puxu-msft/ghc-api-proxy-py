@@ -4,6 +4,7 @@ import random
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from queue import Full
+from threading import Event
 from typing import Any, cast
 
 import cbor2
@@ -11,9 +12,11 @@ import httpx2
 import pytest
 import zstandard
 
+from app.config.compat import migrate_compat
 from app.config.schema import (
     CommandCodeProviderConfig,
     OpenAICompatibleProviderConfig,
+    RawCaptureConfig,
     XingchenProviderConfig,
 )
 from app.model_provider.codebuddy_client.client import CodebuddyClient
@@ -74,6 +77,40 @@ def _install_one_short_capture_write(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(Path, "open", open_with_one_short_write)
 
 
+def _block_next_capture_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Event, Event]:
+    original_open = cast(Any, Path.open)
+    write_started = Event()
+    release_write = Event()
+    block_pending = True
+
+    def open_with_one_blocked_write(path: Path, *args: Any, **kwargs: Any) -> Any:
+        nonlocal block_pending
+        stream: Any = original_open(path, *args, **kwargs)
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if (
+            block_pending
+            and mode == "ab"
+            and path.name.endswith(".cborseq.zst")
+        ):
+            block_pending = False
+            write_started.set()
+            assert release_write.wait(timeout=5)
+        return stream
+
+    monkeypatch.setattr(Path, "open", open_with_one_blocked_write)
+    return write_started, release_write
+
+
+class _FixedCaptureCompressor:
+    def __init__(self, *_: object, **__: object) -> None:
+        pass
+
+    def compress(self, _: bytes) -> bytes:
+        return b"x" * 64
+
+
 def test_transport_boundary_observer_requires_active_scope_and_deduplicates_attempts(
     tmp_path: Path,
 ) -> None:
@@ -115,6 +152,126 @@ def test_transport_boundary_observer_requires_active_scope_and_deduplicates_atte
         for record in _records(capture_path)
         if record["event"] == "upstream.request.body"
     ] == [(0, b"transport bytes"), (1, b"")]
+    store.close()
+
+
+def test_observation_projects_only_committed_per_attempt_raw_evidence(
+    tmp_path: Path,
+) -> None:
+    store = RawCaptureStore(tmp_path)
+    capture = store.start(
+        session_id="session-evidence",
+        agent_id="agent-evidence",
+        request_id="request-evidence",
+        method="POST",
+        path="/v1/messages",
+    )
+    capture.request_body(b'{"input":"request"}')
+    capture.request_body_end(complete=True)
+
+    capture.upstream_attempt_start(0)
+    capture.upstream_request_start("POST", "/responses", headers={}, attempt=0)
+    capture.upstream_request_body(b'{"input":"first"}', attempt=0)
+    capture.upstream_response_start(200, headers={}, attempt=0)
+    capture.upstream_response_body(b'{"output":"first"}', attempt=0)
+    capture.upstream_response_end(complete=True, attempt=0)
+    capture.upstream_attempt_end(0, complete=True)
+
+    capture.upstream_attempt_start(1)
+    capture.upstream_request_start("POST", "/responses", attempt=1)
+    capture.upstream_request_body(b'{"input":"second"}', attempt=1)
+    capture.upstream_response_start(502, attempt=1)
+    capture.upstream_response_body(b'{"output":"partial"}', attempt=1)
+    capture.upstream_response_end(complete=False, attempt=1)
+    capture.upstream_attempt_end(1, complete=False)
+
+    capture.client_response_start(200, headers={})
+    capture.client_response_body(b'{"output":"delivered"}', more_body=False)
+    capture.finish(status_code=200, complete=True)
+    store.flush()
+
+    observation = capture.observation()
+
+    assert observation.status.value == "incomplete"
+    assert observation.client_request_available is True
+    assert observation.semantic_replay_eligible is True
+    assert observation.live_replay_eligible is True
+    assert observation.wire_diagnostic_eligible is True
+    assert observation.upstream_attempts[0].wire_diagnostic_eligible is True
+    assert observation.upstream_attempts[1].attempt_started is True
+    assert observation.upstream_attempts[1].request_started is True
+    assert observation.upstream_attempts[1].request_headers_available is False
+    assert observation.upstream_attempts[1].request_body_available is True
+    assert observation.upstream_attempts[1].response_started is True
+    assert observation.upstream_attempts[1].response_headers_available is False
+    assert observation.upstream_attempts[1].response_body_available is True
+    assert observation.upstream_attempts[1].response_complete is False
+    assert observation.upstream_attempts[1].attempt_complete is False
+    assert observation.upstream_attempts[1].wire_diagnostic_eligible is False
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ("request_headers", "response_headers", "expected_request_headers"),
+    [
+        ("malformed-request-headers", {}, False),
+        ({}, [("x-valid", "value"), "malformed-response-header"], True),
+    ],
+)
+def test_committed_writer_invalid_upstream_headers_are_not_evidence(
+    tmp_path: Path,
+    request_headers: object,
+    response_headers: object,
+    expected_request_headers: bool,
+) -> None:
+    store = RawCaptureStore(tmp_path)
+    capture = store.start(
+        session_id="session-invalid-headers",
+        agent_id="agent-invalid-headers",
+        request_id="request-invalid-headers",
+        method="POST",
+        path="/v1/messages",
+    )
+    capture.request_body(b'{"input":"request"}')
+    capture.request_body_end(complete=True)
+    capture.upstream_attempt_start(0)
+    capture.upstream_request_start(
+        "POST",
+        "/responses",
+        headers=request_headers,
+        attempt=0,
+    )
+    capture.upstream_request_body(b'{"input":"upstream"}', attempt=0)
+    capture.upstream_response_start(
+        200,
+        headers=response_headers,
+        attempt=0,
+    )
+    capture.upstream_response_body(b'{"output":"upstream"}', attempt=0)
+    capture.upstream_response_end(complete=True, attempt=0)
+    capture.upstream_attempt_end(0, complete=True)
+    capture.client_response_body(b'{"output":"client"}', more_body=False)
+    capture.finish(status_code=200, complete=True)
+    store.flush()
+
+    [attempt] = capture.observation().upstream_attempts
+    [capture_path] = tmp_path.glob("session-*/agent-*.cborseq.zst")
+    starts = {
+        record["event"]: record
+        for record in _records(capture_path)
+        if record["event"] in {"upstream.request.start", "upstream.response.start"}
+    }
+
+    assert attempt.request_started is True
+    assert attempt.response_started is True
+    assert attempt.request_headers_available is expected_request_headers
+    assert attempt.response_headers_available is not expected_request_headers
+    assert attempt.wire_diagnostic_eligible is False
+    assert "headers" not in (
+        starts["upstream.request.start"]
+        if not expected_request_headers
+        else starts["upstream.response.start"]
+    )
     store.close()
 
 
@@ -475,9 +632,7 @@ def test_capture_appends_complete_frames_and_rejects_a_truncated_tail(tmp_path: 
 
 
 def test_legacy_jsonl_files_do_not_participate_in_any_quota(tmp_path: Path) -> None:
-    # A large sparse legacy file exhausts the retired default total quota of
-    # the old implementation; per-file quota 0 disables the only remaining
-    # quota, so a fresh append must still succeed.
+    # A legacy file does not consume either current-format file or total quota.
     legacy = tmp_path / "legacy" / "agent-old.jsonl.zst"
     legacy.parent.mkdir()
     with legacy.open("wb") as handle:
@@ -497,6 +652,104 @@ def test_legacy_jsonl_files_do_not_participate_in_any_quota(tmp_path: Path) -> N
     assert len(files) == 1
     assert [record["event"] for record in _records(files[0])] == ["request.start"]
     assert legacy.stat().st_size == 4 * 1024 * 1024 * 1024
+
+
+def test_raw_capture_total_quota_survives_compat_and_schema_loading() -> None:
+    migrated = migrate_compat(
+        {"observability": {"raw_capture": {"max_total_bytes": 123}}}
+    )
+    raw_capture = RawCaptureConfig.model_validate(
+        cast(dict[str, object], migrated["observability"])["raw_capture"]
+    )
+
+    assert raw_capture.max_total_bytes == 123
+
+
+def test_total_quota_inventories_existing_current_capture_files_without_deleting_them(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    first_store = RawCaptureStore(tmp_path, max_file_bytes=0, max_total_bytes=0)
+    first = first_store.start(
+        session_id="existing-session",
+        agent_id="agent-1",
+        request_id="existing-request",
+        method="POST",
+        path="/v1/messages",
+    )
+    first.finish(status_code=200, complete=True)
+    first_store.close()
+    [existing_path] = tmp_path.glob("session-*/agent-*.cborseq.zst")
+    existing_bytes = existing_path.read_bytes()
+
+    with caplog.at_level(logging.WARNING, logger="app.observability.raw_capture"):
+        capped_store = RawCaptureStore(
+            tmp_path,
+            max_file_bytes=0,
+            max_total_bytes=len(existing_bytes),
+        )
+        rejected = capped_store.start(
+            session_id="new-session",
+            agent_id="agent-1",
+            request_id="new-request",
+            method="POST",
+            path="/v1/messages",
+        )
+        rejected.finish(status_code=200, complete=True)
+        capped_store.close()
+
+    assert existing_path.read_bytes() == existing_bytes
+    assert list(tmp_path.glob("session-*/agent-*.cborseq.zst")) == [existing_path]
+    private_store = cast(Any, capped_store)
+    assert private_store._reserved_total_bytes == len(existing_bytes)
+    completion = next(
+        record.getMessage()
+        for record in caplog.records
+        if "raw request capture incomplete at request completion" in record.getMessage()
+    )
+    assert "request_id=new-request" in completion
+    assert "reason=total_quota_exceeded" in completion
+
+
+def test_total_quota_reserves_queued_compressed_frames_across_capture_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(zstandard, "ZstdCompressor", _FixedCaptureCompressor)
+    write_started, release_write = _block_next_capture_write(monkeypatch)
+    store = RawCaptureStore(tmp_path, max_file_bytes=0, max_total_bytes=96)
+    try:
+        first = store.start(
+            session_id="first-session",
+            agent_id="agent-1",
+            request_id="first-request",
+            method="POST",
+            path="/v1/messages",
+        )
+        assert write_started.wait(timeout=5)
+
+        second = store.start(
+            session_id="second-session",
+            agent_id="agent-1",
+            request_id="second-request",
+            method="POST",
+            path="/v1/messages",
+        )
+        second.finish(status_code=200, complete=True)
+        release_write.set()
+        store.flush()
+
+        private_store = cast(Any, store)
+        first_path = private_store._path_for("first-session", "agent-1")
+        second_path = private_store._path_for("second-session", "agent-1")
+        assert first_path.stat().st_size == 64
+        assert not second_path.exists()
+        assert private_store._reserved_total_bytes == 64
+        assert first.observation().status.value == "pending"
+        assert second.observation().status.value == "incomplete"
+    finally:
+        release_write.set()
+        store.close()
 
 
 def test_capture_path_uses_exact_hash_prefixes_without_raw_identity_values(
@@ -905,6 +1158,7 @@ def test_capture_error_preparation_warning_is_safe(
     ("quota_kwargs", "expected_reason"),
     [
         ({"max_file_bytes": 512}, "file_quota_exceeded"),
+        ({"max_total_bytes": 512}, "total_quota_exceeded"),
     ],
 )
 def test_quota_drop_is_reported_safely_at_request_completion(
@@ -954,7 +1208,7 @@ def test_quota_drop_is_reported_safely_at_request_completion(
         message
         for message in messages
         if "could not keep raw request capture frame" in message
-        and "reason=file_quota_exceeded" in message
+        and f"reason={expected_reason}" in message
     ]
     assert len(quota_messages) == 1
     assert "request_id=request-quota event=request.body" in quota_messages[0]

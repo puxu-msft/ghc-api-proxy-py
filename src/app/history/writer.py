@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import sqlite3
 from dataclasses import dataclass
@@ -12,7 +13,11 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from app.history.archive import HistoryArchiveReference, HistoryArchiveStore
-from app.history.entry import HistoryEntry
+from app.history.entry import (
+    CaptureAttemptCapabilities,
+    CaptureCapabilities,
+    HistoryEntry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +85,7 @@ class HistoryIndexEntry:
     delivery: str
     capture_status: str
     capture_ref: str | None
+    capture: CaptureCapabilities
     archive_reference: HistoryArchiveReference
     transport_reference: HistoryArchiveReference | None
     archive_state: HistoryArchiveState
@@ -98,6 +104,18 @@ class HistoryIndexEntry:
             "delivery": self.delivery,
             "capture_status": self.capture_status,
             "capture_ref": self.capture_ref,
+            "capture": {
+                "status": self.capture.status,
+                "client_request_available": self.capture.client_request_available,
+                "client_response_available": self.capture.client_response_available,
+                "wire_diagnostic_eligible": self.capture.wire_diagnostic_eligible,
+                "semantic_replay_eligible": self.capture.semantic_replay_eligible,
+                "live_replay_eligible": self.capture.live_replay_eligible,
+                "upstream_attempts": [
+                    attempt.as_dict() for attempt in self.capture.upstream_attempts
+                ],
+                "capture_ref": self.capture_ref,
+            },
             "archive": {
                 "path": self.archive_reference.relative_path,
                 "offset": self.archive_reference.offset,
@@ -430,6 +448,12 @@ class HistoryWriter:
                 outcome TEXT NOT NULL,
                 delivery TEXT NOT NULL,
                 capture_status TEXT NOT NULL,
+                client_request_available INTEGER NOT NULL DEFAULT 0,
+                client_response_available INTEGER NOT NULL DEFAULT 0,
+                wire_diagnostic_eligible INTEGER NOT NULL DEFAULT 0,
+                semantic_replay_eligible INTEGER NOT NULL DEFAULT 0,
+                live_replay_eligible INTEGER NOT NULL DEFAULT 0,
+                upstream_attempts_json TEXT NOT NULL DEFAULT '[]',
                 archive_path TEXT NOT NULL,
                 archive_offset INTEGER NOT NULL,
                 archive_length INTEGER NOT NULL,
@@ -460,6 +484,12 @@ class HistoryWriter:
         }
         additions = (
             ("capture_ref", "TEXT"),
+            ("client_request_available", "INTEGER NOT NULL DEFAULT 0"),
+            ("client_response_available", "INTEGER NOT NULL DEFAULT 0"),
+            ("wire_diagnostic_eligible", "INTEGER NOT NULL DEFAULT 0"),
+            ("semantic_replay_eligible", "INTEGER NOT NULL DEFAULT 0"),
+            ("live_replay_eligible", "INTEGER NOT NULL DEFAULT 0"),
+            ("upstream_attempts_json", "TEXT NOT NULL DEFAULT '[]'"),
             ("transport_path", "TEXT"),
             ("transport_offset", "INTEGER"),
             ("transport_length", "INTEGER"),
@@ -497,10 +527,13 @@ class HistoryWriter:
             """
             INSERT OR REPLACE INTO history_entries (
                 entry_id, session_id, agent_id, started_at, finished_at,
-                outcome, delivery, capture_status, archive_path,
+                outcome, delivery, capture_status, client_request_available,
+                client_response_available, wire_diagnostic_eligible,
+                semantic_replay_eligible, live_replay_eligible,
+                upstream_attempts_json, archive_path,
                 archive_offset, archive_length, archive_digest, capture_ref,
                 transport_path, transport_offset, transport_length, transport_digest
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 entry.request_id,
@@ -511,6 +544,12 @@ class HistoryWriter:
                 entry.outcome.value,
                 entry.delivery.value,
                 entry.capture.status,
+                int(entry.capture.client_request_available),
+                int(entry.capture.client_response_available),
+                int(entry.capture.wire_diagnostic_eligible),
+                int(entry.capture.semantic_replay_eligible),
+                int(entry.capture.live_replay_eligible),
+                _encode_attempt_capabilities(entry.capture.upstream_attempts),
                 reference.relative_path,
                 reference.offset,
                 reference.length,
@@ -567,7 +606,10 @@ class HistoryWriter:
             rows = connection.execute(
                 f"""
                 SELECT entry_id, session_id, agent_id, started_at, finished_at,
-                       outcome, delivery, capture_status, archive_path,
+                       outcome, delivery, capture_status, client_request_available,
+                       client_response_available, wire_diagnostic_eligible,
+                       semantic_replay_eligible, live_replay_eligible,
+                       upstream_attempts_json, archive_path,
                        archive_offset, archive_length, archive_digest, capture_ref,
                        transport_path, transport_offset, transport_length,
                        transport_digest, pinned, archived, archive_state,
@@ -601,7 +643,10 @@ class HistoryWriter:
             row = connection.execute(
                 """
                 SELECT entry_id, session_id, agent_id, started_at, finished_at,
-                       outcome, delivery, capture_status, archive_path,
+                       outcome, delivery, capture_status, client_request_available,
+                       client_response_available, wire_diagnostic_eligible,
+                       semantic_replay_eligible, live_replay_eligible,
+                       upstream_attempts_json, archive_path,
                        archive_offset, archive_length, archive_digest, capture_ref,
                        transport_path, transport_offset, transport_length,
                        transport_digest, pinned, archived, archive_state,
@@ -885,6 +930,12 @@ def _index_entry_from_row(row: tuple[object, ...]) -> HistoryIndexEntry:
         outcome,
         delivery,
         capture_status,
+        client_request_available,
+        client_response_available,
+        wire_diagnostic_eligible,
+        semantic_replay_eligible,
+        live_replay_eligible,
+        upstream_attempts_json,
         archive_path,
         archive_offset,
         archive_length,
@@ -908,6 +959,12 @@ def _index_entry_from_row(row: tuple[object, ...]) -> HistoryIndexEntry:
         and isinstance(outcome, str)
         and isinstance(delivery, str)
         and isinstance(capture_status, str)
+        and type(client_request_available) is int
+        and type(client_response_available) is int
+        and type(wire_diagnostic_eligible) is int
+        and type(semantic_replay_eligible) is int
+        and type(live_replay_eligible) is int
+        and isinstance(upstream_attempts_json, str)
         and isinstance(archive_path, str)
         and type(archive_offset) is int
         and type(archive_length) is int
@@ -954,6 +1011,15 @@ def _index_entry_from_row(row: tuple[object, ...]) -> HistoryIndexEntry:
         delivery=delivery,
         capture_status=capture_status,
         capture_ref=capture_ref,
+        capture=CaptureCapabilities(
+            status=capture_status,
+            client_request_available=bool(client_request_available),
+            client_response_available=bool(client_response_available),
+            wire_diagnostic_eligible=bool(wire_diagnostic_eligible),
+            semantic_replay_eligible=bool(semantic_replay_eligible),
+            live_replay_eligible=bool(live_replay_eligible),
+            upstream_attempts=_decode_attempt_capabilities(upstream_attempts_json),
+        ),
         archive_reference=HistoryArchiveReference(
             relative_path=archive_path,
             offset=archive_offset,
@@ -967,6 +1033,70 @@ def _index_entry_from_row(row: tuple[object, ...]) -> HistoryIndexEntry:
         pinned=bool(pinned),
         archived=bool(archived) or state is HistoryArchiveState.ARCHIVED,
     )
+
+
+def _encode_attempt_capabilities(
+    attempts: tuple[CaptureAttemptCapabilities, ...],
+) -> str:
+    return json.dumps(
+        [attempt.as_dict() for attempt in attempts],
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _decode_attempt_capabilities(value: str) -> tuple[CaptureAttemptCapabilities, ...]:
+    try:
+        decoded = cast(object, json.loads(value))
+    except json.JSONDecodeError as error:
+        raise RuntimeError("History index contains invalid attempt capabilities") from error
+    if not isinstance(decoded, list):
+        raise RuntimeError("History index contains invalid attempt capabilities")
+    attempts: list[CaptureAttemptCapabilities] = []
+    for item in cast(list[object], decoded):
+        if not isinstance(item, dict):
+            raise RuntimeError("History index contains invalid attempt capabilities")
+        item = cast(dict[str, object], item)
+        attempt = item.get("attempt")
+        attempt_started = item.get("attempt_started")
+        request_started = item.get("request_started")
+        request_headers_available = item.get("request_headers_available")
+        request_body_available = item.get("request_body_available")
+        response_started = item.get("response_started")
+        response_headers_available = item.get("response_headers_available")
+        response_body_available = item.get("response_body_available")
+        response_complete = item.get("response_complete")
+        attempt_complete = item.get("attempt_complete")
+        wire_diagnostic_eligible = item.get("wire_diagnostic_eligible")
+        if type(attempt) is not int:
+            raise RuntimeError("History index contains invalid attempt capabilities")
+        attempts.append(
+            CaptureAttemptCapabilities(
+                attempt=attempt,
+                attempt_started=attempt_started is True,
+                request_started=request_started is True,
+                request_headers_available=request_headers_available is True,
+                request_body_available=request_body_available is True,
+                response_started=response_started is True,
+                response_headers_available=response_headers_available is True,
+                response_body_available=response_body_available is True,
+                response_complete=response_complete is True,
+                attempt_complete=attempt_complete is True,
+                wire_diagnostic_eligible=(
+                    wire_diagnostic_eligible is True
+                    and attempt_started is True
+                    and request_started is True
+                    and request_headers_available is True
+                    and request_body_available is True
+                    and response_started is True
+                    and response_headers_available is True
+                    and response_body_available is True
+                    and response_complete is True
+                    and attempt_complete is True
+                ),
+            )
+        )
+    return tuple(attempts)
 
 
 __all__ = [

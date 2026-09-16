@@ -9,7 +9,7 @@ A request that started under one version keeps seeing it.
 from typing import Annotated, Literal, cast
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 type TlsMode = bool | Literal["both"]
 # The internal name of the local estimator leg in count-token results.
@@ -101,6 +101,7 @@ class RawCaptureConfig(Section):
     rules_database: str = ""
     compression_level: int = Field(default=3, ge=1, le=22)
     max_file_bytes: int = Field(default=512 * 1024 * 1024, ge=0)
+    max_total_bytes: int = Field(default=4 * 1024 * 1024 * 1024, ge=0)
 
 
 class ObservabilityConfig(Section):
@@ -119,6 +120,9 @@ class ServerConfig(Section):
     # Localhost-only by default; the port deliberately differs from the Bun service on 4141.
     host: str = "127.0.0.1"
     port: int = Field(default=4142, ge=1, le=65535)
+    # Deliberately has no default: History transport can carry upstream credentials, so it must
+    # fail closed even when the listener is configured beyond loopback.
+    history_export_token: SecretStr | None = Field(default=None, min_length=16)
     tls: TlsConfig = Field(default_factory=TlsConfig)
 
 

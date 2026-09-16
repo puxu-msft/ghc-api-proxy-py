@@ -2,9 +2,18 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from app.history import HistoryDelivery, HistoryEntry, HistoryOutcome
+import pytest
+
+from app.history import (
+    CaptureCapabilities,
+    HistoryDelivery,
+    HistoryEntry,
+    HistoryOutcome,
+)
+from app.history.entry import CaptureAttemptCapabilities
 from app.observability.capture_observation import (
     CaptureStatus,
+    RawCaptureAttemptObservation,
     RawCaptureObservation,
 )
 from app.observability.request_completion import (
@@ -148,6 +157,200 @@ def test_history_entry_projects_capture_capabilities_without_raw_body() -> None:
     assert entry.capture.status == "complete"
     assert entry.capture.wire_diagnostic_eligible is True
     assert entry.capture_ref == "session-abc/agent-def.cborseq.zst"
+    assert entry.as_dict()["capture"] == {
+        "status": "complete",
+        "client_request_available": True,
+        "client_response_available": True,
+        "wire_diagnostic_eligible": True,
+        "semantic_replay_eligible": True,
+        "live_replay_eligible": True,
+        "upstream_attempts": [],
+        "capture_ref": "session-abc/agent-def.cborseq.zst",
+    }
+
+
+def test_history_entry_projects_attempt_capability_matrix() -> None:
+    facts = replace(
+        _facts(
+            status="ok",
+            delivery=DeliveryState.ACCEPTED,
+        ),
+        capture=RawCaptureObservation(
+            status=CaptureStatus.COMPLETE,
+            client_request_available=True,
+            client_response_available=True,
+            wire_diagnostic_eligible=True,
+            semantic_replay_eligible=True,
+            live_replay_eligible=True,
+            capture_ref="session-abc/agent-def.cborseq.zst",
+            upstream_attempts=(
+                RawCaptureAttemptObservation(
+                    attempt=0,
+                    attempt_started=True,
+                    request_started=True,
+                    request_headers_available=True,
+                    request_body_available=True,
+                    response_started=True,
+                    response_headers_available=True,
+                    response_body_available=True,
+                    response_complete=True,
+                    attempt_complete=True,
+                ),
+                RawCaptureAttemptObservation(
+                    attempt=1,
+                    request_headers_available=False,
+                    request_body_available=True,
+                    response_headers_available=True,
+                    response_body_available=False,
+                    response_complete=False,
+                    attempt_complete=False,
+                ),
+            ),
+        ),
+    )
+
+    entry = HistoryEntry.from_request_facts(facts)
+
+    assert entry.capture.upstream_attempts == (
+        CaptureAttemptCapabilities(
+            attempt=0,
+            attempt_started=True,
+            request_started=True,
+            request_headers_available=True,
+            request_body_available=True,
+            response_started=True,
+            response_headers_available=True,
+            response_body_available=True,
+            response_complete=True,
+            attempt_complete=True,
+            wire_diagnostic_eligible=True,
+        ),
+        CaptureAttemptCapabilities(
+            attempt=1,
+            request_headers_available=False,
+            request_body_available=True,
+            response_headers_available=True,
+            response_body_available=False,
+            response_complete=False,
+            attempt_complete=False,
+            wire_diagnostic_eligible=False,
+        ),
+    )
+    assert entry.capture.replay_rejection_code(
+        "wire_diagnostic",
+        attempt_id=0,
+    ) is None
+    assert (
+        entry.capture.replay_rejection_code(
+            "wire_diagnostic",
+            attempt_id=1,
+        )
+        == "source_capability_denied"
+    )
+    capture = entry.as_dict()["capture"]
+    assert isinstance(capture, dict)
+    assert capture["upstream_attempts"] == [
+        {
+            "attempt": 0,
+            "attempt_started": True,
+            "request_started": True,
+            "request_headers_available": True,
+            "request_body_available": True,
+            "response_started": True,
+            "response_headers_available": True,
+            "response_body_available": True,
+            "response_complete": True,
+            "attempt_complete": True,
+            "wire_diagnostic_eligible": True,
+        },
+        {
+            "attempt": 1,
+            "attempt_started": False,
+            "request_started": False,
+            "request_headers_available": False,
+            "request_body_available": True,
+            "response_started": False,
+            "response_headers_available": True,
+            "response_body_available": False,
+            "response_complete": False,
+            "attempt_complete": False,
+            "wire_diagnostic_eligible": False,
+        },
+    ]
+
+
+@pytest.mark.parametrize(
+    ("capabilities", "mode", "expected_code"),
+    [
+        (
+            CaptureCapabilities(
+                status="corrupt",
+                semantic_replay_eligible=True,
+            ),
+            "semantic",
+            "source_capture_corrupt",
+        ),
+        (
+            CaptureCapabilities(
+                status="incomplete",
+                client_request_available=True,
+                live_replay_eligible=True,
+            ),
+            "live",
+            None,
+        ),
+        (
+            CaptureCapabilities(status="none"),
+            "semantic",
+            "source_content_unavailable",
+        ),
+        (
+            CaptureCapabilities(
+                status="complete",
+                client_request_available=False,
+                semantic_replay_eligible=True,
+            ),
+            "semantic",
+            "source_capability_denied",
+        ),
+        (
+            CaptureCapabilities(
+                status="complete",
+                client_request_available=True,
+                wire_diagnostic_eligible=True,
+                upstream_attempts=(
+                    CaptureAttemptCapabilities(
+                        attempt=0,
+                        attempt_started=True,
+                        request_started=True,
+                        request_headers_available=True,
+                        request_body_available=True,
+                        response_started=True,
+                        response_headers_available=True,
+                        response_body_available=True,
+                        response_complete=True,
+                        attempt_complete=True,
+                        wire_diagnostic_eligible=True,
+                    ),
+                ),
+            ),
+            "wire_diagnostic",
+            None,
+        ),
+    ],
+)
+def test_capture_capabilities_own_replay_eligibility_decision(
+    capabilities: CaptureCapabilities,
+    mode: str,
+    expected_code: str | None,
+) -> None:
+    assert (
+        capabilities.replay_rejection_code(
+            mode,
+            attempt_id=0 if mode == "wire_diagnostic" else None,
+        )
+        == expected_code
+    )
 
 
 def test_history_entry_projects_client_semantic_payloads() -> None:

@@ -110,14 +110,7 @@ class HistoryArchiveStore:
             raise ValueError("History archive reference points past segment end")
         if hashlib.sha256(frame).hexdigest() != reference.digest:
             raise ValueError("History archive frame digest mismatch")
-        try:
-            decoded = zstandard.ZstdDecompressor().decompress(frame)
-            value = cbor2.loads(decoded)
-        except (cbor2.CBORDecodeError, zstandard.ZstdError) as error:
-            raise ValueError("History archive frame is unreadable") from error
-        if not isinstance(value, dict):
-            raise ValueError("History archive frame is not a map")
-        record = cast(dict[str, Any], value)
+        record = _decode_history_frame(frame)
         if record.get("schema_version") != HISTORY_ARCHIVE_SCHEMA_VERSION:
             raise ValueError("unsupported History archive schema version")
         if record.get("entry_id") != reference.entry_id:
@@ -144,14 +137,14 @@ class HistoryArchiveStore:
                 frame = _read_zstd_frame(stream)
                 if frame is None:
                     return
-                decoded = zstandard.ZstdDecompressor().decompress(frame)
-                value = cbor2.loads(decoded)
-                if not isinstance(value, dict):
-                    raise ValueError("History archive frame is not a map")
-                yield cast(dict[str, Any], value)
+                yield _decode_history_frame(frame)
 
     def _segment_for(self, key: tuple[str, str], frame_length: int) -> _Segment:
         current = self._segments.get(key)
+        if current is None:
+            current = self._restore_current_segment(key)
+            if current is not None:
+                self._segments[key] = current
         if current is not None and (
             current.size == 0
             or current.size + frame_length <= self.max_segment_bytes
@@ -168,10 +161,65 @@ class HistoryArchiveStore:
         self._segments[key] = segment
         return segment
 
+    def _restore_current_segment(self, key: tuple[str, str]) -> _Segment | None:
+        directory = self.root / f"session-{key[0]}" / f"agent-{key[1]}"
+        if not directory.exists():
+            return None
+
+        segments: list[_Segment] = []
+        for path in directory.iterdir():
+            number = _segment_number(path)
+            if number is None:
+                continue
+            segments.append(
+                _Segment(
+                    number=number,
+                    path=path,
+                    size=_validated_segment_size(path),
+                )
+            )
+        if not segments:
+            return None
+        return max(segments, key=lambda segment: segment.number)
+
 
 def _identity_key(value: str | None) -> str:
     raw = value if value is not None else "<missing>"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+
+def _segment_number(path: Path) -> int | None:
+    prefix = "history-"
+    name = path.name
+    if not path.is_file() or not name.startswith(prefix) or not name.endswith(HISTORY_SEGMENT_SUFFIX):
+        return None
+    number_text = name[len(prefix) : -len(HISTORY_SEGMENT_SUFFIX)]
+    if len(number_text) != 6 or not number_text.isdecimal():
+        return None
+    return int(number_text)
+
+
+def _validated_segment_size(path: Path) -> int:
+    try:
+        with path.open("rb") as stream:
+            while True:
+                frame = _read_zstd_frame(stream)
+                if frame is None:
+                    return stream.tell()
+                _decode_history_frame(frame)
+    except ValueError as error:
+        raise ValueError(f"History archive segment is not safe to append: {path}") from error
+
+
+def _decode_history_frame(frame: bytes) -> dict[str, Any]:
+    try:
+        decoded = zstandard.ZstdDecompressor().decompress(frame)
+        value = cbor2.loads(decoded)
+    except (cbor2.CBORDecodeError, zstandard.ZstdError) as error:
+        raise ValueError("History archive frame is unreadable") from error
+    if not isinstance(value, dict):
+        raise ValueError("History archive frame is not a map")
+    return cast(dict[str, Any], value)
 
 
 def _read_zstd_frame(stream: Any) -> bytes | None:

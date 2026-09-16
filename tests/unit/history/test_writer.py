@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -17,6 +19,7 @@ from app.history import (
     HistorySubmission,
     HistoryWriter,
 )
+from app.history.entry import CaptureAttemptCapabilities
 from app.pipeline.response_observation import FrozenJsonObject, freeze_json
 
 
@@ -68,6 +71,78 @@ async def test_history_writer_accepts_and_durably_records_entry(tmp_path: Path) 
         receipt = writer.receipt_for(entry.request_id)
         assert receipt is not None
         assert receipt.state is HistoryDurability.DURABLE
+    finally:
+        await writer.close()
+
+
+@pytest.mark.asyncio
+async def test_history_writer_round_trips_safe_attempt_capability_matrix(
+    tmp_path: Path,
+) -> None:
+    writer = HistoryWriter(
+        database_path=tmp_path / "history.sqlite3",
+        archive=HistoryArchiveStore(tmp_path / "archive"),
+    )
+    await writer.start()
+    try:
+        entry = replace(
+            _entry(),
+            capture=CaptureCapabilities(
+                status="incomplete",
+                client_request_available=True,
+                semantic_replay_eligible=True,
+                live_replay_eligible=True,
+                upstream_attempts=(
+                    CaptureAttemptCapabilities(
+                        attempt=0,
+                        attempt_started=True,
+                        request_started=True,
+                        request_headers_available=True,
+                        request_body_available=True,
+                        response_started=True,
+                        response_headers_available=True,
+                        response_body_available=True,
+                        response_complete=True,
+                        attempt_complete=True,
+                        wire_diagnostic_eligible=True,
+                    ),
+                    CaptureAttemptCapabilities(
+                        attempt=1,
+                        attempt_started=True,
+                        request_started=True,
+                        request_headers_available=False,
+                        request_body_available=True,
+                        response_started=True,
+                        response_headers_available=False,
+                        response_body_available=True,
+                        response_complete=False,
+                        attempt_complete=False,
+                        wire_diagnostic_eligible=False,
+                    ),
+                ),
+            ),
+        )
+        await writer.submit(entry, session_id="session-1", agent_id=None)
+        await writer.wait_idle()
+
+        indexed = await writer.get_entry(entry.request_id)
+
+        assert indexed is not None
+        assert indexed.capture == entry.capture
+        projection = cast(dict[str, object], indexed.as_dict()["capture"])
+        assert set(projection) == {
+            "status",
+            "client_request_available",
+            "client_response_available",
+            "wire_diagnostic_eligible",
+            "semantic_replay_eligible",
+            "live_replay_eligible",
+            "upstream_attempts",
+            "capture_ref",
+        }
+        assert projection["upstream_attempts"] == [
+            attempt.as_dict() for attempt in entry.capture.upstream_attempts
+        ]
     finally:
         await writer.close()
 

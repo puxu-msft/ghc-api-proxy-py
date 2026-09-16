@@ -175,7 +175,9 @@ class RequestTrace:
     requested_model: str = ""
     model: str = ""
     provider_name: str = ""
-    reasoning_effort: str = "none"
+    # None means the provider-bound wire body carried no explicit effort. It is
+    # distinct from an explicit `reasoning.effort=none`, which is preserved.
+    reasoning_effort: str | None = None
     attempts: int = 1
     # Monotonic offset at which the final replacement attempt opened. `None` means the request never retried. The final line turns this into the last-attempt duration using the same total duration it already reports.
     last_retry_started_s: float | None = None

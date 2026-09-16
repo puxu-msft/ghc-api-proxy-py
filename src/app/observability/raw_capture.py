@@ -21,6 +21,7 @@ import zstandard
 
 from app.observability.capture_observation import (
     CaptureStatus,
+    RawCaptureAttemptObservation,
     RawCaptureObservation,
 )
 
@@ -37,30 +38,37 @@ def _header_text(value: object) -> str:
     return str(value)
 
 
-def _capture_headers(headers: object | None) -> dict[str, str]:
-    """Preserve every observed header name and value in selected evidence."""
+def _capture_headers(headers: object | None) -> dict[str, str] | None:
+    """Normalize valid header containers without inventing observed headers."""
     if headers is None:
-        return {}
+        return None
     if isinstance(headers, Mapping):
-        entries: Iterable[object] = cast(
-            Iterable[object],
-            cast(Mapping[object, object], headers).items(),
-        )
-    elif isinstance(headers, Iterable):
+        try:
+            entries: Iterable[object] = cast(
+                Iterable[object],
+                cast(Mapping[object, object], headers).items(),
+            )
+        except BaseException:
+            return None
+    elif isinstance(headers, Iterable) and not isinstance(headers, (str, bytes)):
         entries = cast(Iterable[object], headers)
     else:
-        return {}
+        return None
     captured: dict[str, str] = {}
-    for entry in entries:
-        if not isinstance(entry, Sequence) or isinstance(entry, (str, bytes)):
-            continue
-        pair = cast(Sequence[object], entry)
-        if len(pair) != 2:
-            continue
-        name, value = pair
-        normalized_name = _header_text(name).lower()
-        if normalized_name:
+    try:
+        for entry in entries:
+            if not isinstance(entry, Sequence) or isinstance(entry, (str, bytes)):
+                return None
+            pair = cast(Sequence[object], entry)
+            if len(pair) != 2:
+                return None
+            name, value = pair
+            normalized_name = _header_text(name).lower()
+            if not normalized_name:
+                return None
             captured[normalized_name] = _header_text(value)
+    except BaseException:
+        return None
     return captured
 
 
@@ -132,7 +140,44 @@ class _QueuedCaptureFrame:
     compressed: bytes
     capture: RawRequestCapture
     event_type: str
+    evidence: _CaptureEventEvidence
     reserved_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class _CaptureEventEvidence:
+    """The non-sensitive facts a committed raw frame proves."""
+
+    event_type: str
+    attempt: int | None
+    headers_available: bool
+    complete: bool | None
+
+
+@dataclass(slots=True)
+class _AttemptEvidence:
+    attempt_started: bool = False
+    request_started: bool = False
+    request_headers_available: bool = False
+    request_body_available: bool = False
+    response_started: bool = False
+    response_headers_available: bool = False
+    response_body_available: bool = False
+    response_end_complete: bool = False
+    response_end_incomplete: bool = False
+    attempt_end_complete: bool = False
+    attempt_end_incomplete: bool = False
+
+
+def _capture_event_evidence(event: Mapping[str, object]) -> _CaptureEventEvidence:
+    attempt = event.get("attempt")
+    complete = event.get("complete")
+    return _CaptureEventEvidence(
+        event_type=str(event.get("event", "unknown")),
+        attempt=attempt if type(attempt) is int else None,
+        headers_available=_capture_headers(event.get("headers")) is not None,
+        complete=complete if type(complete) is bool else None,
+    )
 
 
 def agent_id_from_headers(headers: Mapping[str, str]) -> str | None:
@@ -153,15 +198,18 @@ class RawCaptureStore:
         *,
         compression_level: int = 3,
         max_file_bytes: int = 512 * 1024 * 1024,
+        max_total_bytes: int = 4 * 1024 * 1024 * 1024,
     ) -> None:
         self.root = root
         self.compression_level = compression_level
         self._lock = Lock()
         self._queue: Queue[_QueuedCaptureFrame | None] = Queue(maxsize=1024)
         self._reserved_file_bytes: dict[Path, int] = {}
+        self._reserved_total_bytes = _existing_capture_bytes(root)
         self._poisoned_paths: set[Path] = set()
         self._validated_paths: set[Path] = set()
         self._max_file_bytes = max_file_bytes
+        self._max_total_bytes = max_total_bytes
         self._closed = False
         self._worker = Thread(target=self._write_loop, name="raw-capture-writer", daemon=True)
         self._worker.start()
@@ -189,7 +237,11 @@ class RawCaptureStore:
                 "event": "request.start",
                 "method": method,
                 "path": path,
-                **({"headers": _capture_headers(headers)} if headers is not None else {}),
+                **(
+                    {"headers": captured_headers}
+                    if (captured_headers := _capture_headers(headers)) is not None
+                    else {}
+                ),
             }
         )
         return capture
@@ -230,6 +282,7 @@ class RawCaptureStore:
                 compressed=compressed,
                 capture=capture,
                 event_type=event_type,
+                evidence=_capture_event_evidence(event),
                 reserved_bytes=len(compressed),
             )
             with self._lock:
@@ -252,6 +305,17 @@ class RawCaptureStore:
                         "file_quota_exceeded",
                     )
                     return False, "file_quota_exceeded"
+                if (
+                    self._max_total_bytes > 0
+                    and self._reserved_total_bytes + queued.reserved_bytes
+                    > self._max_total_bytes
+                ):
+                    self._log_prepare_warning(
+                        capture,
+                        event_type,
+                        "total_quota_exceeded",
+                    )
+                    return False, "total_quota_exceeded"
                 try:
                     self._queue.put_nowait(queued)
                 except Full as error:
@@ -263,6 +327,7 @@ class RawCaptureStore:
                     )
                     return False, "writer_queue_full"
                 self._reserved_file_bytes[path] = current_file_bytes + queued.reserved_bytes
+                self._reserved_total_bytes += queued.reserved_bytes
                 capture.note_writer_frame_queued()
         except (cbor2.CBOREncodeError, OSError, TypeError, zstandard.ZstdError) as error:
             self._log_prepare_warning(
@@ -411,10 +476,21 @@ class RawCaptureStore:
                     self._reserved_file_bytes[item.path] = remaining_file_bytes
                 else:
                     del self._reserved_file_bytes[item.path]
+                self._reserved_total_bytes -= released_bytes
             item.capture.note_writer_frame_completed(
-                item.event_type,
+                item.evidence,
                 drop_reason=drop_reason,
             )
+
+
+def _existing_capture_bytes(root: Path) -> int:
+    if not root.is_dir():
+        return 0
+    return sum(
+        path.stat().st_size
+        for path in root.rglob(f"*{CAPTURE_FILE_SUFFIX}")
+        if path.is_file()
+    )
 
 
 class RawRequestCapture:
@@ -448,6 +524,10 @@ class RawRequestCapture:
         self._committed_event_types: set[str] = set()
         self._upstream_request_header_attempts: set[int | None] = set()
         self._upstream_request_body_attempts: set[int | None] = set()
+        self._client_request_body_committed = False
+        self._client_request_end_complete = False
+        self._client_request_end_incomplete = False
+        self._attempt_evidence: dict[int, _AttemptEvidence] = {}
         self._incomplete_reason: str | None = None
         self._first_incomplete_event: str | None = None
 
@@ -467,17 +547,54 @@ class RawRequestCapture:
 
     def note_writer_frame_completed(
         self,
-        event_type: str,
+        event: _CaptureEventEvidence,
         *,
         drop_reason: str | None,
     ) -> None:
         with self._condition:
             if drop_reason is not None:
-                self._mark_drop_locked(drop_reason, event_type)
+                self._mark_drop_locked(drop_reason, event.event_type)
             else:
-                self._committed_event_types.add(event_type)
+                self._committed_event_types.add(event.event_type)
+                self._record_committed_evidence_locked(event)
             self._pending_writes -= 1
             self._condition.notify_all()
+
+    def _record_committed_evidence_locked(self, event: _CaptureEventEvidence) -> None:
+        if event.event_type == "request.body":
+            self._client_request_body_committed = True
+        elif event.event_type == "request.body.end":
+            if event.complete is True:
+                self._client_request_end_complete = True
+            else:
+                self._client_request_end_incomplete = True
+
+        attempt = event.attempt
+        if attempt is None:
+            return
+        evidence = self._attempt_evidence.setdefault(attempt, _AttemptEvidence())
+        if event.event_type == "upstream.attempt.start":
+            evidence.attempt_started = True
+        elif event.event_type == "upstream.request.start":
+            evidence.request_started = True
+            evidence.request_headers_available = event.headers_available
+        elif event.event_type == "upstream.request.body":
+            evidence.request_body_available = True
+        elif event.event_type == "upstream.response.start":
+            evidence.response_started = True
+            evidence.response_headers_available = event.headers_available
+        elif event.event_type == "upstream.response.body":
+            evidence.response_body_available = True
+        elif event.event_type == "upstream.response.end":
+            if event.complete is True:
+                evidence.response_end_complete = True
+            else:
+                evidence.response_end_incomplete = True
+        elif event.event_type == "upstream.attempt.end":
+            if event.complete is True:
+                evidence.attempt_end_complete = True
+            else:
+                evidence.attempt_end_incomplete = True
 
     def has_writer_failure(self) -> bool:
         with self._condition:
@@ -550,15 +667,15 @@ class RawRequestCapture:
             if attempt in self._upstream_request_header_attempts:
                 return
             self._upstream_request_header_attempts.add(attempt)
-        self.append_event(
-            {
-                "event": "upstream.request.start",
-                "attempt": attempt,
-                "method": method,
-                "path": path,
-                "headers": _capture_headers(headers),
-            }
-        )
+        event: dict[str, Any] = {
+            "event": "upstream.request.start",
+            "attempt": attempt,
+            "method": method,
+            "path": path,
+        }
+        if (captured_headers := _capture_headers(headers)) is not None:
+            event["headers"] = captured_headers
+        self.append_event(event)
 
     def upstream_request_body(self, body: bytes, *, attempt: int | None = None) -> None:
         with self._condition:
@@ -585,8 +702,8 @@ class RawRequestCapture:
             "attempt": attempt,
             "status_code": status_code,
         }
-        if headers is not None:
-            event["headers"] = _capture_headers(headers)
+        if (captured_headers := _capture_headers(headers)) is not None:
+            event["headers"] = captured_headers
         self.append_event(event)
 
     def upstream_response_body(self, body: bytes, *, attempt: int | None = None) -> None:
@@ -624,8 +741,8 @@ class RawRequestCapture:
             "event": "client.response.start",
             "status_code": status_code,
         }
-        if headers is not None:
-            event["headers"] = _capture_headers(headers)
+        if (captured_headers := _capture_headers(headers)) is not None:
+            event["headers"] = captured_headers
         self.append_event(event)
 
     def client_response_body(self, body: bytes, *, more_body: bool) -> None:
@@ -694,13 +811,35 @@ class RawRequestCapture:
             dropped = self._drop_reason
             incomplete = self._incomplete_reason
             finished = self._finished
-            request_available = {
-                "request.body",
-                "request.body.end",
-            } <= committed
+            request_available = (
+                self._client_request_body_committed
+                and self._client_request_end_complete
+                and not self._client_request_end_incomplete
+            )
             client_response_available = "client.response.body" in committed
             upstream_response_available = bool(
                 {"upstream.response.body", "upstream.response.end"} & committed
+            )
+            upstream_attempts = tuple(
+                RawCaptureAttemptObservation(
+                    attempt=attempt,
+                    attempt_started=evidence.attempt_started,
+                    request_started=evidence.request_started,
+                    request_headers_available=evidence.request_headers_available,
+                    request_body_available=evidence.request_body_available,
+                    response_started=evidence.response_started,
+                    response_headers_available=evidence.response_headers_available,
+                    response_body_available=evidence.response_body_available,
+                    response_complete=(
+                        evidence.response_end_complete
+                        and not evidence.response_end_incomplete
+                    ),
+                    attempt_complete=(
+                        evidence.attempt_end_complete
+                        and not evidence.attempt_end_incomplete
+                    ),
+                )
+                for attempt, evidence in sorted(self._attempt_evidence.items())
             )
             if not finished:
                 status = CaptureStatus.PENDING
@@ -721,16 +860,22 @@ class RawRequestCapture:
             client_request_available=request_available,
             client_response_available=client_response_available,
             wire_diagnostic_eligible=(
-                status is CaptureStatus.COMPLETE
-                and request_available
-                and client_response_available
-                and upstream_response_available
+                status not in {CaptureStatus.PENDING, CaptureStatus.CORRUPT}
+                and any(
+                    attempt.wire_diagnostic_eligible
+                    for attempt in upstream_attempts
+                )
             ),
-            semantic_replay_eligible=request_available
-            and status is not CaptureStatus.CORRUPT,
-            live_replay_eligible=request_available
-            and status is not CaptureStatus.CORRUPT,
+            semantic_replay_eligible=(
+                request_available
+                and status not in {CaptureStatus.PENDING, CaptureStatus.CORRUPT}
+            ),
+            live_replay_eligible=(
+                request_available
+                and status not in {CaptureStatus.PENDING, CaptureStatus.CORRUPT}
+            ),
             capture_ref=self.store.reference_for(self.session_id, self.agent_id),
+            upstream_attempts=upstream_attempts,
         )
 
 

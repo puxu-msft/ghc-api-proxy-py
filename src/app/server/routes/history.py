@@ -1,9 +1,11 @@
 """Read-only History index and transport export routes."""
 
 import base64
+from hmac import compare_digest
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse, Response
+from pydantic import SecretStr
 
 from app.history import HistoryMutation
 from app.server.app_state import chain_of
@@ -20,6 +22,31 @@ def _history_unavailable() -> JSONResponse:
             }
         },
         status_code=503,
+    )
+
+
+def _history_transport_access_denied() -> JSONResponse:
+    return JSONResponse(
+        {
+            "error": {
+                "type": "access_denied",
+                "message": "history transport export access is denied",
+            }
+        },
+        status_code=403,
+    )
+
+
+def _has_history_transport_access(request: Request) -> bool:
+    """Check the separately configured management secret without trusting listener locality."""
+    chain = chain_of(request)
+    server = getattr(getattr(chain, "config", None), "server", None)
+    configured_token = getattr(server, "history_export_token", None)
+    supplied_token = request.headers.get("X-History-Export-Token")
+    return (
+        isinstance(configured_token, SecretStr)
+        and supplied_token is not None
+        and compare_digest(configured_token.get_secret_value(), supplied_token)
     )
 
 
@@ -192,6 +219,8 @@ async def export_history_semantic(entry_id: str, request: Request) -> Response:
 
 
 async def export_history_full(entry_id: str, request: Request) -> Response:
+    if not _has_history_transport_access(request):
+        return _history_transport_access_denied()
     writer = getattr(chain_of(request), "history_writer", None)
     if writer is None:
         return _history_unavailable()
@@ -249,6 +278,8 @@ async def export_history_full(entry_id: str, request: Request) -> Response:
 
 @router.get("/history/api/entries/{entry_id}/transport")
 async def export_history_transport(entry_id: str, request: Request) -> Response:
+    if not _has_history_transport_access(request):
+        return _history_transport_access_denied()
     writer = getattr(chain_of(request), "history_writer", None)
     if writer is None:
         return _history_unavailable()

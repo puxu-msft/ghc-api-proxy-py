@@ -8,6 +8,7 @@ import httpx2
 import pytest
 from fastapi import FastAPI
 
+from app.config.schema import ProxyConfig
 from app.history import (
     CaptureCapabilities,
     HistoryArchiveStore,
@@ -115,9 +116,12 @@ async def test_history_routes_report_unavailable_store() -> None:
         base_url="http://test",
     ) as client:
         response = await client.get("/history/api/entries")
+        transport = await client.get("/history/api/entries/any/transport")
 
     assert response.status_code == 503
     assert response.json()["error"]["type"] == "proxy_internal_error"
+    assert transport.status_code == 403
+    assert transport.json()["error"]["type"] == "access_denied"
 
 
 @pytest.mark.asyncio
@@ -267,24 +271,56 @@ async def test_history_transport_export_returns_filtered_binary_capture(
         setattr(
             app.state,
             CHAIN_STATE_KEY,
-            SimpleNamespace(history_writer=writer, raw_capture=raw_capture),
+            SimpleNamespace(
+                config=ProxyConfig.model_validate(
+                    {"server": {"history_export_token": "test-history-export-token"}}
+                ),
+                history_writer=writer,
+                raw_capture=raw_capture,
+            ),
         )
         async with httpx2.AsyncClient(
             transport=httpx2.ASGITransport(app=app),
             base_url="http://test",
         ) as client:
-            response = await client.get(
+            denied_transport = await client.get(
                 "/history/api/entries/request-transport-1/transport"
             )
-            included = await client.get(
+            denied_included = await client.get(
                 "/history/api/entries/request-transport-1?include=transport"
+            )
+            denied_full_export = await client.get(
+                "/history/api/entries/request-transport-1?export=full"
+            )
+            wrong_token = await client.get(
+                "/history/api/entries/request-transport-1/transport",
+                headers={"X-History-Export-Token": "wrong-history-export-token"},
+            )
+            response = await client.get(
+                "/history/api/entries/request-transport-1/transport",
+                headers={"X-History-Export-Token": "test-history-export-token"},
+            )
+            included = await client.get(
+                "/history/api/entries/request-transport-1?include=transport",
+                headers={"X-History-Export-Token": "test-history-export-token"},
             )
             semantic_export = await client.get(
                 "/history/api/entries/request-transport-1?export=semantic"
             )
             full_export = await client.get(
-                "/history/api/entries/request-transport-1?export=full"
+                "/history/api/entries/request-transport-1?export=full",
+                headers={"X-History-Export-Token": "test-history-export-token"},
             )
+
+        for denied in (
+            denied_transport,
+            denied_included,
+            denied_full_export,
+            wrong_token,
+        ):
+            assert denied.status_code == 403
+            assert denied.json()["error"]["type"] == "access_denied"
+            assert "test-history-export-token" not in denied.text
 
         assert response.status_code == 200
         assert response.headers["content-type"].startswith(

@@ -37,6 +37,14 @@ server:
   host: 127.0.0.1
   port: 4142
 
+  # History transport 与 export=full 会返回可能包含 credentials 的原始取证数据，默认拒绝。
+  # History transport and export=full can return raw evidence containing credentials, and are denied by default.
+  # 配置至少 16 字符的独立 secret 后，调用方必须发送相同的 X-History-Export-Token header。
+  # Configure a separate secret of at least 16 characters; callers must send it in X-History-Export-Token.
+  # 不要在示例或版本控制中放入真实 token。semantic/index 查询不受此控制影响。
+  # Never put a real token in an example or version control. Semantic/index queries are unaffected.
+  # history_export_token: "replace-with-a-secret-of-at-least-16-characters"
+
   tls:
     # 模式
     #   false  = 仅 HTTP
@@ -413,13 +421,14 @@ history:
 # 原始请求/响应取证捕获。默认没有命中规则时关闭；内容可能包含完整 prompt、工具输入、工具结果与模型输出。通过 HTTP API 添加匹配规则后，仅对应请求开启全量记录。
 # Capture files are RFC 8742 CBOR Sequences compressed as independently appendable zstd frames. Bodies remain native binary strings; files use session-<hash>/agent-<hash>.cborseq.zst and are never JSONL.
 # Rules are stored in SQLite and managed through GET/POST/DELETE /api/debug/capture-rules. A rule matches provider + resolved model_id + session_id and may add an exact agent_id.
-# max_file_bytes counts actual compressed bytes of each capture file. 0 disables that limit. Quota loss is reported at request completion using safe metadata only; raw bodies and credentials never enter ordinary logs.
+# max_file_bytes counts actual compressed bytes of each capture file. max_total_bytes counts all existing/current `.cborseq.zst` files at startup plus queued compressed frames. 0 disables its respective limit. Reaching either admission cap preserves existing evidence and drops only the new frame; quota loss is reported at request completion using safe metadata only, so raw bodies and credentials never enter ordinary logs.
 observability:
   raw_capture:
     directory: "$XDG_DATA_HOME/ghc-api-proxy/raw-captures"
     rules_database: "$XDG_DATA_HOME/ghc-api-proxy/debug-capture-rules.sqlite3"
     compression_level: 3
     max_file_bytes: 536870912
+    max_total_bytes: 4294967296
 
 # ============================================================================
 # 模块化与钩子 / Modularization & Hooks

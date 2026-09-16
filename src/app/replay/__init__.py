@@ -7,6 +7,8 @@ from app.replay.process import (
     ReplayProcess,
     ReplayRequest,
     ReplayResult,
+    ReplaySourceAuthority,
+    ReplaySourceReceipt,
     ReplaySourceSelector,
     ReplayTargetPolicy,
 )
@@ -18,6 +20,8 @@ __all__ = [
     "ReplayProcess",
     "ReplayRequest",
     "ReplayResult",
+    "ReplaySourceAuthority",
+    "ReplaySourceReceipt",
     "ReplaySourceSelector",
     "ReplayTargetPolicy",
 ]
