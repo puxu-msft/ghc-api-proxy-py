@@ -1,0 +1,8 @@
+# HTTP 400 content-type: text/plain; charset=utf-8
+
+{
+  "error": {
+    "message": "Invalid value: 'web_fetch'. Supported values are: 'code_interpreter', 'programmatic_tool_calling', 'function', 'namespace', 'tool_search', 'file_search', 'web_search_preview', 'web_search_preview_2025_03_11', 'image_generation', 'mcp', 'custom', 'computer', 'computer_use_preview', 'shell', and 'apply_patch'.",
+    "code": "invalid_request_body"
+  }
+}

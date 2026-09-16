@@ -1,0 +1,44 @@
+{
+  "why": "The translated equivalent on the other leg. Decides whether the repair is a property of the Anthropic endpoint or of the body.",
+  "request": {
+    "model": "gpt-5.5",
+    "input": [
+      {
+        "type": "message",
+        "role": "user",
+        "content": [
+          {
+            "type": "input_text",
+            "text": "Weather in Paris?"
+          }
+        ]
+      },
+      {
+        "type": "function_call",
+        "call_id": "call_1",
+        "name": "get_weather",
+        "arguments": "{\"city\":\"Paris\"}"
+      },
+      {
+        "type": "message",
+        "role": "user",
+        "content": [
+          {
+            "type": "input_text",
+            "text": "never mind"
+          }
+        ]
+      }
+    ],
+    "max_output_tokens": 32,
+    "stream": false
+  },
+  "status": 400
+}
+
+{
+  "error": {
+    "message": "No tool output found for function call call_1.",
+    "code": "invalid_request_body"
+  }
+}

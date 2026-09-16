@@ -1,0 +1,196 @@
+==============================================================================================================
+EXPERIMENT: baseline_no_cap
+  Positive control for the measurement itself. 6 concurrent streaming GETs on a stock httpx.AsyncClient(http2=True). If these do not all land on one TCP connection, nothing below means anything.
+--------------------------------------------------------------------------------------------------------------
+  TCP connections accepted by server: 1
+    conn#0: 6 stream(s) ['/req/0', '/req/1', '/req/2', '/req/3', '/req/4', '/req/5'] max_concurrent=6 goaway_sent=False
+    req 0 (served on conn#0): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 1 (served on conn#0): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 2 (served on conn#0): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 3 (served on conn#0): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 4 (served on conn#0): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 5 (served on conn#0): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+  summary: 6/6 OK, 0 FAIL, wall 0.33s
+
+==============================================================================================================
+EXPERIMENT: cap2
+  Candidate 2. Same 6 requests through StreamCappedPool(max_streams_per_connection=2). Prediction: ceil(6/2)=3 TCP connections, 2 streams each.
+--------------------------------------------------------------------------------------------------------------
+  TCP connections accepted by server: 3
+    conn#0: 2 stream(s) ['/req/0', '/req/1'] max_concurrent=2 goaway_sent=False
+    conn#1: 2 stream(s) ['/req/2', '/req/3'] max_concurrent=2 goaway_sent=False
+    conn#2: 2 stream(s) ['/req/4', '/req/5'] max_concurrent=2 goaway_sent=False
+    req 0 (served on conn#0): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 1 (served on conn#0): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 2 (served on conn#1): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 3 (served on conn#1): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 4 (served on conn#2): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 5 (served on conn#2): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+  summary: 6/6 OK, 0 FAIL, wall 0.34s
+
+==============================================================================================================
+EXPERIMENT: no_cap_goaway
+  Local reproduction of the production incident. 6 streams share one connection; the server sends one GOAWAY(NO_ERROR, last_stream_id=2**31-1) and then still delivers every stream's terminating DATA. Prediction: all 6 die anyway.
+--------------------------------------------------------------------------------------------------------------
+  >>> sending GOAWAY(error_code=0, last_stream_id=2**31-1) on conn#0 only
+SSL connection is closed
+SSL connection is closed
+  (conn#0: client already gone when the tail was written -- ConnectionResetError: Connection lost)
+  TCP connections accepted by server: 1
+    conn#0: 6 stream(s) ['/req/0', '/req/1', '/req/2', '/req/3', '/req/4', '/req/5'] max_concurrent=6 goaway_sent=True
+    req 0 (served on conn#0): FAIL httpx.RemoteProtocolError: <ConnectionTerminated error_code:0, last_stream_id:2147483647, additional_data:None>
+    req 1 (served on conn#0): FAIL httpx.RemoteProtocolError: <ConnectionTerminated error_code:0, last_stream_id:2147483647, additional_data:None>
+    req 2 (served on conn#0): FAIL httpx.RemoteProtocolError: <ConnectionTerminated error_code:0, last_stream_id:2147483647, additional_data:None>
+    req 3 (served on conn#0): FAIL httpx.RemoteProtocolError: <ConnectionTerminated error_code:0, last_stream_id:2147483647, additional_data:None>
+    req 4 (served on conn#0): FAIL httpx.RemoteProtocolError: <ConnectionTerminated error_code:0, last_stream_id:2147483647, additional_data:None>
+    req 5 (served on conn#0): FAIL httpx.RemoteProtocolError: <ConnectionTerminated error_code:0, last_stream_id:2147483647, additional_data:None>
+  summary: 0/6 OK, 6 FAIL, wall 0.82s
+
+==============================================================================================================
+EXPERIMENT: cap2_goaway
+  The point of the whole exercise. Same GOAWAY, but with cap=2 the 6 streams are spread over 3 connections and only conn#0 is hit. Prediction: exactly 2 FAIL, 4 OK.
+--------------------------------------------------------------------------------------------------------------
+  >>> sending GOAWAY(error_code=0, last_stream_id=2**31-1) on conn#0 only
+  (conn#0: client already gone when the tail was written -- ConnectionResetError: Connection lost)
+  TCP connections accepted by server: 3
+    conn#0: 2 stream(s) ['/req/0', '/req/1'] max_concurrent=2 goaway_sent=True
+    conn#1: 2 stream(s) ['/req/2', '/req/3'] max_concurrent=2 goaway_sent=False
+    conn#2: 2 stream(s) ['/req/4', '/req/5'] max_concurrent=2 goaway_sent=False
+    req 0 (served on conn#0): FAIL httpx.RemoteProtocolError: <ConnectionTerminated error_code:0, last_stream_id:2147483647, additional_data:None>
+    req 1 (served on conn#0): FAIL httpx.RemoteProtocolError: <ConnectionTerminated error_code:0, last_stream_id:2147483647, additional_data:None>
+    req 2 (served on conn#1): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 3 (served on conn#1): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 4 (served on conn#2): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 5 (served on conn#2): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+  summary: 4/6 OK, 2 FAIL, wall 0.85s
+
+==============================================================================================================
+EXPERIMENT: cap1
+  The value the sister project copilot-api-js actually shipped (b5892380f, 2026-07-22). cap=1 is one stream per connection. Prediction: 6 TCP connections for 6 concurrent requests -- which is the HTTP/1.1 connection model wearing HTTP/2 framing.
+--------------------------------------------------------------------------------------------------------------
+  TCP connections accepted by server: 6
+    conn#0: 1 stream(s) ['/req/0'] max_concurrent=1 goaway_sent=False
+    conn#1: 1 stream(s) ['/req/1'] max_concurrent=1 goaway_sent=False
+    conn#2: 1 stream(s) ['/req/2'] max_concurrent=1 goaway_sent=False
+    conn#3: 1 stream(s) ['/req/3'] max_concurrent=1 goaway_sent=False
+    conn#4: 1 stream(s) ['/req/4'] max_concurrent=1 goaway_sent=False
+    conn#5: 1 stream(s) ['/req/5'] max_concurrent=1 goaway_sent=False
+    req 0 (served on conn#0): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 1 (served on conn#1): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 2 (served on conn#2): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 3 (served on conn#3): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 4 (served on conn#4): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 5 (served on conn#5): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+  summary: 6/6 OK, 0 FAIL, wall 0.36s
+
+==============================================================================================================
+EXPERIMENT: cap1_goaway
+  cap=1 under the same GOAWAY. Prediction: exactly 1 FAIL, 5 OK. A multi-victim event is impossible by construction, because no connection ever carries two streams.
+--------------------------------------------------------------------------------------------------------------
+  >>> sending GOAWAY(error_code=0, last_stream_id=2**31-1) on conn#0 only
+  (conn#0: client already gone when the tail was written -- ConnectionResetError: Connection lost)
+  TCP connections accepted by server: 6
+    conn#0: 1 stream(s) ['/req/0'] max_concurrent=1 goaway_sent=True
+    conn#1: 1 stream(s) ['/req/1'] max_concurrent=1 goaway_sent=False
+    conn#2: 1 stream(s) ['/req/2'] max_concurrent=1 goaway_sent=False
+    conn#3: 1 stream(s) ['/req/3'] max_concurrent=1 goaway_sent=False
+    conn#4: 1 stream(s) ['/req/4'] max_concurrent=1 goaway_sent=False
+    conn#5: 1 stream(s) ['/req/5'] max_concurrent=1 goaway_sent=False
+    req 0 (served on conn#0): FAIL httpx.RemoteProtocolError: <ConnectionTerminated error_code:0, last_stream_id:2147483647, additional_data:None>
+    req 1 (served on conn#1): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 2 (served on conn#2): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 3 (served on conn#3): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 4 (served on conn#4): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 5 (served on conn#5): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+  summary: 5/6 OK, 1 FAIL, wall 0.95s
+
+==============================================================================================================
+EXPERIMENT: http11_no_h2
+  The alternative already available in this project: upstream_transport.http2 = false. 6 concurrent streaming GETs over HTTP/1.1, then one connection is abruptly killed mid-response. Prediction: 6 TCP connections and exactly 1 casualty -- i.e. numerically identical to cap=1, with no httpcore private API involved at all.
+--------------------------------------------------------------------------------------------------------------
+  >>> abruptly dropping conn#0 (/req/0) mid-response
+  TCP connections accepted by server: 6
+    req 0 (served on conn#0): FAIL httpx.RemoteProtocolError: peer closed connection without sending complete message body (incomplete chunked read)
+    req 1 (served on conn#1): OK   http/HTTP/1.1 body=b'data: start\n\ndata: bye\n\n'
+    req 2 (served on conn#2): OK   http/HTTP/1.1 body=b'data: start\n\ndata: bye\n\n'
+    req 3 (served on conn#3): OK   http/HTTP/1.1 body=b'data: start\n\ndata: bye\n\n'
+    req 4 (served on conn#4): OK   http/HTTP/1.1 body=b'data: start\n\ndata: bye\n\n'
+    req 5 (served on conn#5): OK   http/HTTP/1.1 body=b'data: start\n\ndata: bye\n\n'
+  summary: 5/6 OK, 1 FAIL, wall 0.63s
+
+==============================================================================================================
+EXPERIMENT: early_close_reuse
+  Two SEQUENTIAL requests, each closed after one chunk (simulating a cancelled downstream). Prediction: cap=1 HTTP/2 reuses one connection (1 accept); HTTP/1.1 must reconnect (2 accepts).
+--------------------------------------------------------------------------------------------------------------
+    h2 cap=1  request 0: got b'data: start\n\n', closed early
+    h2 cap=1  request 1: got b'data: start\n\n', closed early
+  HTTP/2 cap=1: server accepted 1 TCP connection(s); stream ids per conn: [(0, [1, 3])]
+    http/1.1  request 0: got b'data: start\n\n', closed early
+    http/1.1  request 1: got b'data: start\n\n', closed early
+  HTTP/1.1: server accepted 2 TCP connection(s)
+  reading: a difference here means HTTP/1.1 pays an extra TCP+TLS handshake (~155ms against api.githubcopilot.com) every time a response is abandoned early.
+
+==============================================================================================================
+EXPERIMENT: server_advertised_mcs
+  Candidate 3. Stock pool, no client-side cap. The SERVER advertises SETTINGS_MAX_CONCURRENT_STREAMS=2 in its initial SETTINGS, and each stream is auto-finished 0.4s after it opens. Does a low MAX_CONCURRENT_STREAMS make httpcore open more connections, or does it throttle onto the one it has?
+--------------------------------------------------------------------------------------------------------------
+  TCP connections accepted by server: 1
+    conn#0: 6 stream(s) ['/req/0', '/req/1', '/req/2', '/req/3', '/req/4', '/req/5'] max_concurrent=2 goaway_sent=False
+    req 0 (served on conn#0): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 1 (served on conn#0): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 2 (served on conn#0): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 3 (served on conn#0): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 4 (served on conn#0): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 5 (served on conn#0): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+  summary: 6/6 OK, 0 FAIL, wall 1.22s
+  reading: 6 requests x 0.4s hold. One connection at concurrency 2 means three waves, ~1.2s. One connection at concurrency 6 would be ~0.4s. Three connections at 2 would also be ~0.4s.
+
+==============================================================================================================
+EXPERIMENT: cap2_plus_advertised_mcs2
+  Our cap equal to what the server advertises. Prediction: 3 connections x 2 streams, and no throttling, because no connection ever wants more slots than the server granted it.
+--------------------------------------------------------------------------------------------------------------
+  TCP connections accepted by server: 3
+    conn#0: 2 stream(s) ['/req/0', '/req/1'] max_concurrent=2 goaway_sent=False
+    conn#1: 2 stream(s) ['/req/2', '/req/3'] max_concurrent=2 goaway_sent=False
+    conn#2: 2 stream(s) ['/req/4', '/req/5'] max_concurrent=2 goaway_sent=False
+    req 0 (served on conn#0): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 1 (served on conn#0): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 2 (served on conn#1): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 3 (served on conn#1): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 4 (served on conn#2): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 5 (served on conn#2): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+  summary: 6/6 OK, 0 FAIL, wall 0.45s
+  reading: ~0.4s means no serialisation happened; ~1.2s would mean the cap did not prevent queueing.
+
+==============================================================================================================
+EXPERIMENT: cap4_above_advertised_mcs2
+  Our cap set ABOVE what the server advertises. 6 requests, cap=4 -> 2 connections (4 and 2), but the server only permits 2 concurrent streams each. Shows what happens when the two numbers disagree.
+--------------------------------------------------------------------------------------------------------------
+  TCP connections accepted by server: 2
+    conn#0: 4 stream(s) ['/req/0', '/req/1', '/req/2', '/req/3'] max_concurrent=2 goaway_sent=False
+    conn#1: 2 stream(s) ['/req/4', '/req/5'] max_concurrent=2 goaway_sent=False
+    req 0 (served on conn#0): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 1 (served on conn#0): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 2 (served on conn#0): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 3 (served on conn#0): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 4 (served on conn#1): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 5 (served on conn#1): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+  summary: 6/6 OK, 0 FAIL, wall 0.83s
+  reading: The connection holding 4 assignments can only run 2 at a time, so it costs an extra wave (~0.8s).
+
+==============================================================================================================
+EXPERIMENT: sharded_clients
+  Candidate 4, the dumb fallback. Three independent httpx.AsyncClient instances, requests round-robined. Prediction: 3 TCP connections, 2 streams each -- same shape as cap2, with no private API touched.
+--------------------------------------------------------------------------------------------------------------
+  TCP connections accepted by server: 3
+    conn#0: 2 stream(s) ['/req/0', '/req/3'] max_concurrent=2 goaway_sent=False
+    conn#1: 2 stream(s) ['/req/1', '/req/4'] max_concurrent=2 goaway_sent=False
+    conn#2: 2 stream(s) ['/req/2', '/req/5'] max_concurrent=2 goaway_sent=False
+    req 0 (served on conn#0): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 1 (served on conn#1): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 2 (served on conn#2): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 3 (served on conn#0): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 4 (served on conn#1): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+    req 5 (served on conn#2): OK   http/HTTP/2 body=b'data: start\n\ndata: bye\n\n'
+  summary: 6/6 OK, 0 FAIL, wall 0.35s
+

@@ -1,0 +1,21 @@
+{
+  "model": "gpt-5.5",
+  "input": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Search the web for today's date."
+        }
+      ]
+    }
+  ],
+  "max_output_tokens": 512,
+  "stream": false,
+  "tools": [
+    {
+      "type": "web_search"
+    }
+  ]
+}

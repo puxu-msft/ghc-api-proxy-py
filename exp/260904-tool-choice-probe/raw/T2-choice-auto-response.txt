@@ -1,0 +1,134 @@
+# HTTP 200 content-type: application/json
+
+{
+  "copilot_usage": {
+    "token_details": [
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 500000000000,
+        "model": "gpt-5.5",
+        "token_count": 50,
+        "token_type": "input"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 50000000000,
+        "model": "gpt-5.5",
+        "token_count": 0,
+        "token_type": "cache_read"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 0,
+        "model": "gpt-5.5",
+        "token_count": 0,
+        "token_type": "cache_write"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 3000000000000,
+        "model": "gpt-5.5",
+        "token_count": 11,
+        "token_type": "output"
+      }
+    ],
+    "total_nano_aiu": 58000000
+  },
+  "created_at": 1788466600,
+  "id": "LCkUXvn0KphdJOwYeCXkkGP0/4eoRvsm55n94l+QSOj3xD09D+CrluwRzoFul5cfb4LAzjj1ovLpZpQ+48EwXj9WUvNn07YNPSTaQcDAAP8piC4s7XHiA1cyO74FbrxUmnXdIcCVdFwkWCN0tCgjWlkfEAPoU7u+XPr59QjVj9Nkj49/fRlXRGO9vwd9oPrazS8MeQaO1vd31CwGXNW8MpCt7kHvgUiVX0cFkfA7oyDqN8v1txHA/94nGZS8HOAKCgqLQSOcYAiCKlg/uNvHift8S5kjC0FSNJxaHm+WmlSZt2iQ6R6S1JB0IsahDdVRiCX5LLT3i+5iaM3AnT51RsP9YzCLqsqeJQhcy3ExoOASTGh3398b9idldGexOV63a1nUorsU29vf5hxVroGJzvWhuJsR71Hw",
+  "incomplete_details": null,
+  "instructions": null,
+  "max_output_tokens": 256,
+  "model": "gpt-5.5-2026-04-23",
+  "object": "response",
+  "output": [
+    {
+      "content": [
+        {
+          "annotations": [],
+          "logprobs": [],
+          "text": "The capital of France is Paris.",
+          "type": "output_text"
+        }
+      ],
+      "id": "JHM7K9UUNTjo0WtsxsU1fqS5tMLwVdIapwUo6eiNU8lwaTcv8+oMjcD+1ojG2KMWZSXNjBCCec8E/o084g2CT2+mocDpUS+QyhBqXGK1PqaoPSTVV11mzjQlfq5OaVMsCBkvvOb7kTz5371r0P8bTnMT7wxurwCjq6vc4wU5pCgRRcv32hfoRtPoHImCYEQGTIPatgqwpM5OldJDPtqQ0L7KifxLpxV7TUX/Qq3jiYK6NiIUwpKYfjsDLkCNn7dcMjQaDvd/BJMH91WOU10E/BrFuvSHun7CvSRY47uZ1agrqVqaiPmdkmoOJjt2GC7a7SZhkuvJQ6FYYPVJLajMGi2b9uHNPz1a5tnwkjmSBxmKB69jdosg/ss06TFMSJqFWJ3U3q/PShVgeskhFIK/HZUmd/tiWtQ=",
+      "phase": "final_answer",
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    }
+  ],
+  "output_text": null,
+  "parallel_tool_calls": true,
+  "previous_response_id": null,
+  "prompt_cache_retention": "24h",
+  "reasoning": {
+    "context": "current_turn",
+    "effort": "medium",
+    "summary": null
+  },
+  "safety_identifier": "REDACTED",
+  "service_tier": "default",
+  "status": "completed",
+  "temperature": 1,
+  "text": {
+    "format": {
+      "type": "text"
+    },
+    "verbosity": "medium"
+  },
+  "tool_choice": "auto",
+  "tool_usage": {
+    "image_gen": {
+      "input_tokens": 0,
+      "input_tokens_details": {
+        "image_tokens": 0,
+        "text_tokens": 0
+      },
+      "output_tokens": 0,
+      "output_tokens_details": {
+        "image_tokens": 0,
+        "text_tokens": 0
+      },
+      "total_tokens": 0
+    },
+    "web_search": {
+      "num_requests": 0
+    }
+  },
+  "tools": [
+    {
+      "type": "function",
+      "description": "Get the weather for a city",
+      "name": "get_weather",
+      "output_schema": null,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "city": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "city"
+        ]
+      },
+      "strict": true
+    }
+  ],
+  "top_p": 0.98,
+  "truncation": "disabled",
+  "usage": {
+    "input_tokens": 50,
+    "input_tokens_details": {
+      "cache_write_tokens": 0,
+      "cached_tokens": 0
+    },
+    "output_tokens": 11,
+    "output_tokens_details": {
+      "reasoning_tokens": 0
+    },
+    "total_tokens": 61
+  }
+}

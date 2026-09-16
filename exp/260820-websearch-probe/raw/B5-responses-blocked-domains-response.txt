@@ -1,0 +1,8 @@
+# HTTP 400 content-type: text/plain; charset=utf-8
+
+{
+  "error": {
+    "message": "Unknown parameter: 'tools[0].blocked_domains'.",
+    "code": "invalid_request_body"
+  }
+}

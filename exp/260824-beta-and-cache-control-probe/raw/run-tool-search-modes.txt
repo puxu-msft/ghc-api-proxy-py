@@ -1,0 +1,5 @@
+[ 200] S0-control-no-defer-no-search: function_call:get_weather
+[ 200] S1-server-execution: reasoning | tool_search_call:"" | tool_search_output:"" | function_call:get_weather
+[ 200] S2-client-execution-full: reasoning | tool_search_call:""
+[400] S3-client-execution-bare: Invalid Value: 'tools.tool_search.description'. Client-executed tool_search requires a description.
+[ 200] S4-no-execution-field: reasoning | tool_search_call:"" | tool_search_output:"" | function_call:get_weather

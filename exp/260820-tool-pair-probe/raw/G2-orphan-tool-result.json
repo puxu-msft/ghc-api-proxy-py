@@ -1,0 +1,61 @@
+{
+  "why": "A result with no call before it. The second thing the repair removes.",
+  "request": {
+    "model": "claude-sonnet-5",
+    "max_tokens": 32,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "Weather in Paris?"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "ok"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "toolu_1",
+            "content": "18C"
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "name": "get_weather",
+        "description": "Get the weather.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "city": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    ]
+  },
+  "status": 400
+}
+
+{
+  "type": "error",
+  "error": {
+    "type": "invalid_request_error",
+    "message": "messages.2.content.0: unexpected `tool_use_id` found in `tool_result` blocks: toolu_1. Each `tool_result` block must have a corresponding `tool_use` block in the previous message."
+  },
+  "request_id": "req_011CeEJ2vf3UTJ2BZ2HTW2Z6"
+}

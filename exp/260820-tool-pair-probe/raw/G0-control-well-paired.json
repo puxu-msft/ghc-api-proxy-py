@@ -1,0 +1,115 @@
+{
+  "why": "Positive control. If this is not 200 nothing below can be read as a verdict on pairing.",
+  "request": {
+    "model": "claude-sonnet-5",
+    "max_tokens": 32,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "Weather in Paris?"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_1",
+            "name": "get_weather",
+            "input": {
+              "city": "Paris"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "toolu_1",
+            "content": "18C"
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "name": "get_weather",
+        "description": "Get the weather.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "city": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    ]
+  },
+  "status": 200
+}
+
+{
+  "content": [
+    {
+      "text": "The weather in Paris is currently **18\u00b0C**. Let me know if you'd like more details, such as forec",
+      "type": "text"
+    }
+  ],
+  "copilot_usage": {
+    "token_details": [
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 200000000000,
+        "token_count": 485,
+        "token_type": "input"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 20000000000,
+        "token_count": 0,
+        "token_type": "cache_read"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 250000000000,
+        "token_count": 0,
+        "token_type": "cache_write"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 1000000000000,
+        "token_count": 32,
+        "token_type": "output"
+      }
+    ],
+    "total_nano_aiu": 129000000
+  },
+  "id": "msg_011CeEJ2qSWfHFRDLkkVDkwa",
+  "model": "claude-sonnet-5",
+  "role": "assistant",
+  "stop_details": null,
+  "stop_reason": "max_tokens",
+  "stop_sequence": null,
+  "type": "message",
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 0,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "inference_geo": "global",
+    "input_tokens": 485,
+    "output_tokens": 32,
+    "output_tokens_details": {
+      "thinking_tokens": 0
+    }
+  }
+}

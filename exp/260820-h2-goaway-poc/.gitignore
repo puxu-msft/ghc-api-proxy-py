@@ -1,0 +1,4 @@
+# Throwaway self-signed loopback cert. `gen_cert.py` regenerates both on demand,
+# so there is nothing here worth keeping and no reason to put a private key in the history.
+cert.pem
+key.pem

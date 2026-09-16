@@ -1,0 +1,148 @@
+# HTTP 200 content-type: application/json
+
+{
+  "copilot_usage": {
+    "token_details": [
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 500000000000,
+        "token_count": 5096,
+        "token_type": "input"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 50000000000,
+        "token_count": 3584,
+        "token_type": "cache_read"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 0,
+        "token_count": 0,
+        "token_type": "cache_write"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 3000000000000,
+        "token_count": 53,
+        "token_type": "output"
+      }
+    ],
+    "total_nano_aiu": 2886200000
+  },
+  "created_at": 1787210000,
+  "id": "bk92Esym/khWtcZW1KMZA52+5NtMxgxde1O3KjktSkbiQtOrhMd9/oRlSoiJAOglX8PRa65MAXbILne/LPu/l/Ef+aC6ED4OjaQGSaSBkUHa1QZed5a3/2TJVB7iq6Oa3QmbXuHTCiur6NEQ6khkaWdcSOE47Nm9k0Wc5Ew+E63wSg9hGvT7FsHw1U3kY+sk1cSVVFk4ljera3GlDowjcNld37JZFITD3s3m630qdpBYentLqRwPEVmbtZfFHfBbVnlDJBhk/BQZ51TPTXybsv/8wDrC0KFtfA95ayrjcqZDYjcbbEdxotlVc1W97RH8kpzq2aat0kbfSt3mimp6qecPUlcV0z/KINJ1YixMM8kbN/sokl82sA6hMFM6/SSlpr0lYh5tpgSQeL5nlQu9ZuWbI+/k8h0j",
+  "incomplete_details": null,
+  "instructions": null,
+  "max_output_tokens": 64,
+  "model": "gpt-5.5-2026-04-23",
+  "object": "response",
+  "output": [
+    {
+      "action": {
+        "queries": [
+          "capital of France"
+        ],
+        "query": "capital of France",
+        "type": "search"
+      },
+      "id": "raShE0EPZQC+gQjFFG5rtoHs7X0468oP1RW6BO0Cx3/6hkqDr4Ynko0hdu0sGEhcpyDbOQP3spMvsBDkk/r8uWMxs+wPM4J6o0/wBXX5pENHRL62UO1e/u3mwR/rO/GQ/CUrhB/KrhKXkAXR21axP0n8IS3HhJhYZTNcQ86Jj38gbVBrRJDZPnw/Tds/wmGnhBmDiqi/HPstOzDobTAaIX0XeYPDsyDCYSWdTemZJWc1eLRbx7uzjMmcwItncK4KxqwUfkAIHgtaUMqglgKY8NeqvrlqF5cslaKAtoHyy6MB9ZSgGGV47AHxrVVUYwIleqByEk1zvFMX2uXw12ZNh0kdGNU4Pn7en0q8dp8s0XlzNnE9+o6rmlbE2sSr8/M6Ez4TMKJ0Ou+qkdTvM71JzylFUiY/TA==",
+      "status": "completed",
+      "type": "web_search_call"
+    },
+    {
+      "content": [
+        {
+          "annotations": [
+            {
+              "end_index": 168,
+              "start_index": 36,
+              "title": "France \u2013 EU country | European Union",
+              "type": "url_citation",
+              "url": "https://european-union.europa.eu/principles-countries-history/eu-countries/france_en?utm_source=openai"
+            }
+          ],
+          "logprobs": [],
+          "text": "The capital of France is **Paris**. ([european-union.europa.eu](https://european-union.europa.eu/principles-countries-history/eu-countries/france_en?utm_source=openai))",
+          "type": "output_text"
+        }
+      ],
+      "id": "+0PzkZ2CMzb8SWq6kiWsPcRqx+Krwfi796GaOx433FE7/yfBMPrTcApfbhEfHMwgcLNVgbgVC+uvB0xLOIKEVkhGmCswjKjEMb5iieDYa98XWV9SIToHIZS083krVZ/cD5a1KF4+MIyGoaO8tcnN7dvXFKHq4tEi5zxA2AEOYriH2BqhXJbJwtWkMCi/M1n604OP8CnJj0MNLZVB/B6avjQtfHNWf14pQWwQ2QjZpLGfNT3UFyNoztCUl9w0kxlbhJb2JyqWfe3dqmPvwyXRLZV0GDgmqIZ4sHJhB30bgbb1+jMWilMJ5QHnUq+Z/Tcm4lPwTfqo2HQf1cXyrAjZ1yWHGK2Fk64I93bQta2UNHhOPOHcvPUcfYIaolkBzR46K0Ccflw4dwbGjjAkE49incj4TJIAhTk=",
+      "phase": "final_answer",
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    }
+  ],
+  "output_text": null,
+  "parallel_tool_calls": true,
+  "previous_response_id": null,
+  "prompt_cache_retention": "24h",
+  "reasoning": {
+    "context": "current_turn",
+    "effort": "medium",
+    "summary": null
+  },
+  "safety_identifier": "REDACTED",
+  "service_tier": "default",
+  "status": "completed",
+  "temperature": 1,
+  "text": {
+    "format": {
+      "type": "text"
+    },
+    "verbosity": "medium"
+  },
+  "tool_choice": {
+    "type": "web_search_preview"
+  },
+  "tool_usage": {
+    "image_gen": {
+      "input_tokens": 0,
+      "input_tokens_details": {
+        "image_tokens": 0,
+        "text_tokens": 0
+      },
+      "output_tokens": 0,
+      "output_tokens_details": {
+        "image_tokens": 0,
+        "text_tokens": 0
+      },
+      "total_tokens": 0
+    },
+    "web_search": {
+      "num_requests": 1
+    }
+  },
+  "tools": [
+    {
+      "type": "web_search",
+      "return_token_budget": "default",
+      "search_content_types": [
+        "text"
+      ],
+      "search_context_size": "medium",
+      "user_location": {
+        "type": "approximate",
+        "city": null,
+        "country": "US",
+        "region": null,
+        "timezone": null
+      }
+    }
+  ],
+  "top_p": 0.98,
+  "truncation": "disabled",
+  "usage": {
+    "input_tokens": 8680,
+    "input_tokens_details": {
+      "cache_write_tokens": 0,
+      "cached_tokens": 3584
+    },
+    "output_tokens": 53,
+    "output_tokens_details": {
+      "reasoning_tokens": 26
+    },
+    "total_tokens": 8733
+  }
+}

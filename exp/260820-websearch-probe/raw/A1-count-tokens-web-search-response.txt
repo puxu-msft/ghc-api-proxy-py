@@ -1,0 +1,8 @@
+# HTTP 400 content-type: text/plain; charset=utf-8
+
+{
+  "error": {
+    "message": "The use of the web search tool is not supported.",
+    "code": "unsupported_value"
+  }
+}

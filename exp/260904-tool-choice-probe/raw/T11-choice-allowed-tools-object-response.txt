@@ -1,0 +1,156 @@
+# HTTP 200 content-type: application/json
+
+{
+  "copilot_usage": {
+    "token_details": [
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 500000000000,
+        "model": "gpt-5.5",
+        "token_count": 93,
+        "token_type": "input"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 50000000000,
+        "model": "gpt-5.5",
+        "token_count": 0,
+        "token_type": "cache_read"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 0,
+        "model": "gpt-5.5",
+        "token_count": 0,
+        "token_type": "cache_write"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 3000000000000,
+        "model": "gpt-5.5",
+        "token_count": 11,
+        "token_type": "output"
+      }
+    ],
+    "total_nano_aiu": 79500000
+  },
+  "created_at": 1788473200,
+  "id": "iwr1Mxqw58s1JWEs9B8j7s0xiXbFSBo+0UcaWHVaMK0Fymsa72FiPpVKAMGKdV/Eng8vBHJ6cQ2YPU89/INFcOrwV/CmWHX4Dmt6AB/TUT+PHfPfn28vOQwD7lSEQEM8cK/Gut3mmIo8Z2z7ZhwcGTVopP2/8uoz9avI0cDQugmr4ndnBmyJ+MQBFONsdeJYXHyEkJ+7ocCQLFklWnZUOp2OBKwCwr9Czf4e/D7VMv3mHM3lHZ5LBiSzl6Nb/G/nLbUrnFiUyPK7y7+hVBScs82xGwzUUJ+62genKsNdYrnVteuejY/QqCoaD+LE8kgWV6Qfd7zI6k6Y6SSjXTaPs7ZZwcNvD6w+mhpl8P5405G5Ys/i0SBhCdjPcy2Faq38hyqAjoA1IEP+Bj+1T2zCIqKdUweTfYF4",
+  "incomplete_details": null,
+  "instructions": null,
+  "max_output_tokens": 256,
+  "model": "gpt-5.5-2026-04-23",
+  "object": "response",
+  "output": [
+    {
+      "content": [
+        {
+          "annotations": [],
+          "logprobs": [],
+          "text": "The capital of France is Paris.",
+          "type": "output_text"
+        }
+      ],
+      "id": "NZYigJi5sKZi2bM2rzeN79YpaE6CTQtYvB9ygeIDG2+7vYvNrWXPBFN9iOqF4dtpwDC0eWtqAmIRt6YvLeX593frgZ22Q5lhiUkMEDgNMaVHJtgbOWHqvYNki4dqdy+dRykjB7Qr+NbuVRDC4Xjgkq508hY4VLj6YsIUgxpXmVIHFLd3Fh6loI14tDLfeHpv/ZWG12Kxmmi+25+ABUZB71M7+cqO/xmvnILD16JrkZL/OTY0RVQeNTy4wWImik9mGxqoi+XDSZPqi5SrLXl520d/YSvXmWQxL+7utNTDaENQX8Tj0RbtzIFu/eH1aslHvxYIiaht+PP3ygXIPBjdula4oyXqaR8GbffovRiITIzxJsRZNxCtMvv426+2AZgq+EHdNvVYogi+2g6DLhRrVAZzUVfwwY4=",
+      "phase": "final_answer",
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    }
+  ],
+  "output_text": null,
+  "parallel_tool_calls": true,
+  "previous_response_id": null,
+  "prompt_cache_retention": "24h",
+  "reasoning": {
+    "context": "current_turn",
+    "effort": "medium",
+    "summary": null
+  },
+  "safety_identifier": "REDACTED",
+  "service_tier": "default",
+  "status": "completed",
+  "temperature": 1,
+  "text": {
+    "format": {
+      "type": "text"
+    },
+    "verbosity": "medium"
+  },
+  "tool_choice": {
+    "type": "allowed_tools",
+    "mode": "auto",
+    "tools": [
+      {
+        "type": "function",
+        "name": "get_weather"
+      }
+    ]
+  },
+  "tool_usage": {
+    "image_gen": {
+      "input_tokens": 0,
+      "input_tokens_details": {
+        "image_tokens": 0,
+        "text_tokens": 0
+      },
+      "output_tokens": 0,
+      "output_tokens_details": {
+        "image_tokens": 0,
+        "text_tokens": 0
+      },
+      "total_tokens": 0
+    },
+    "web_search": {
+      "num_requests": 0
+    }
+  },
+  "tools": [
+    {
+      "type": "function",
+      "description": "Get the weather for a city",
+      "name": "get_weather",
+      "output_schema": null,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "city": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "city"
+        ]
+      },
+      "strict": true
+    },
+    {
+      "type": "tool_search",
+      "description": "Search for tools that are available but not yet loaded.",
+      "execution": "client",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ],
+  "top_p": 0.98,
+  "truncation": "disabled",
+  "usage": {
+    "input_tokens": 93,
+    "input_tokens_details": {
+      "cache_write_tokens": 0,
+      "cached_tokens": 0
+    },
+    "output_tokens": 11,
+    "output_tokens_details": {
+      "reasoning_tokens": 0
+    },
+    "total_tokens": 104
+  }
+}

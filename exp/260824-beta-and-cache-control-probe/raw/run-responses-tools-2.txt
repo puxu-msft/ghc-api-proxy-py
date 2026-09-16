@@ -1,0 +1,8 @@
+[OK ] P0-control-plain-function-tools: 
+[400] P1-defer-loading-as-translated-today: Invalid Value: 'tools.defer_loading'. Deferred tools require tools.tool_search.
+[OK ] P2-defer-loading-false-only: 
+[OK ] P3-cache-control-on-a-tool: 
+[OK ] P4-cache-control-with-scope-on-a-tool: 
+[400] P5-anthropic-tool-search-server-tool: Invalid value: 'too...119'. Supported values are: 'code_interpreter', 'programmatic_tool_calling', 'function', 'namespace', 'tool_search', 'file_search', 'web_search_preview', 'web_search_preview_2025_03_11', 'image_generation', 'mcp', 'custom', 'computer', 'computer_use_preview', 'shell', and 'apply_patch'.
+[OK ] P6-defer-loading-with-tool-search-builtin: 
+[400] P7-defer-loading-with-top-level-tool-search: Invalid Value: 'tools.defer_loading'. Deferred tools require tools.tool_search.

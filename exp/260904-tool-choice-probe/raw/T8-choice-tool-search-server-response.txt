@@ -1,0 +1,8 @@
+# HTTP 400 content-type: text/plain; charset=utf-8
+
+{
+  "error": {
+    "message": "Missing required parameter: 'tool_choice.tools'.",
+    "code": "invalid_request_body"
+  }
+}

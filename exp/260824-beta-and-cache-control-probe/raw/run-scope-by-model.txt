@@ -1,0 +1,8 @@
+model                 control    scope   ttl=1h  note
+claude-opus-5             200      400      200  system.1.cache_control.ephemeral.scope: Extra inputs are not permitted
+claude-opus-4.8           200      400      200  system.1.cache_control.ephemeral.scope: Extra inputs are not permitted
+claude-opus-4.7           200      400      200  system.1.cache_control.ephemeral.scope: Extra inputs are not permitted
+claude-opus-4.6           200      400      200  system.1.cache_control.ephemeral.scope: Extra inputs are not permitted
+claude-sonnet-5           200      400      200  system.1.cache_control.ephemeral.scope: Extra inputs are not permitted
+claude-sonnet-4.6         200      400      200  
+claude-haiku-4.5          200      400      200  system.1.cache_control.ephemeral.scope: Extra inputs are not permitted

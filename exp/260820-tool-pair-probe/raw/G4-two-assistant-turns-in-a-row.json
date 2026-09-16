@@ -1,0 +1,106 @@
+{
+  "why": "What dropping an emptied turn produces. If this is refused, dropping is not an available repair.",
+  "request": {
+    "model": "claude-sonnet-5",
+    "max_tokens": 32,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "Weather in Paris?"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "one"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "two"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "go on"
+          }
+        ]
+      }
+    ]
+  },
+  "status": 200
+}
+
+{
+  "content": [
+    {
+      "signature": "EtsCCqUBCBAYAipAlDSVRNgr361nTEaZF9SlplHS2x5FObUZTbmZ4gccmAN/TmJDSDfPk8mMNm9KDhabKBuGgofBQe012HZxs+PWDzIPY2xhdWRlLXNvbm5ldC01OABCCHRoaW5raW5nWiRjZWQxZjk4ZS0wYjUxLTQ2MTAtODI4Mi00ZTVkODgzODQ1NzRyEHKNiAp1t75onyW000vyXY+IAQGoAdXOnNQGEgz+j6YOfPwEtggXojcaDJghzClrYDjwJfXwhyIwCrII2ZZYpAWGAJXhcsl1NDAtXq2T/FFhFaTuJqL6UTUVvDNQJOu0OEy+sIqs9nCEKmM8gupWMnLzjW22SDqufUQPOpaKal9OHoG6uE0iksx7qHnHqb4tlACheAgpnWYx6pVMmpX45gKb/M3ZTtddmJ9haymAIc+ZUxUO47ogPCL4BG1h5XKIRAep/jSajv4POGeKEccYAQ==",
+      "thinking": "",
+      "type": "thinking"
+    }
+  ],
+  "copilot_usage": {
+    "token_details": [
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 200000000000,
+        "token_count": 23,
+        "token_type": "input"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 20000000000,
+        "token_count": 0,
+        "token_type": "cache_read"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 250000000000,
+        "token_count": 0,
+        "token_type": "cache_write"
+      },
+      {
+        "batch_size": 1000000,
+        "cost_per_batch": 1000000000000,
+        "token_count": 32,
+        "token_type": "output"
+      }
+    ],
+    "total_nano_aiu": 36600000
+  },
+  "id": "msg_011CeEJ32Qa3k1uqD145dm9v",
+  "model": "claude-sonnet-5",
+  "role": "assistant",
+  "stop_details": null,
+  "stop_reason": "max_tokens",
+  "stop_sequence": null,
+  "type": "message",
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 0,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "inference_geo": "global",
+    "input_tokens": 23,
+    "output_tokens": 32,
+    "output_tokens_details": {
+      "thinking_tokens": 31
+    }
+  }
+}

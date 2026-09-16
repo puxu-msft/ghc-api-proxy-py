@@ -1,0 +1,49 @@
+====================================================================================================
+PROBE 1: what the real upstream advertises, and what a fresh connection costs in latency
+  Unauthenticated. TLS handshake + h2 connection preface only; no HTTP request is sent.
+====================================================================================================
+--- api.githubcopilot.com ---
+  sample 0: alpn='h2' tcp_connect=9.1ms tls_handshake=159.8ms total=168.9ms
+    server SETTINGS: {'ENABLE_CONNECT_PROTOCOL': 1, 'INITIAL_WINDOW_SIZE': 67108864, 'MAX_CONCURRENT_STREAMS': 100, 'MAX_FRAME_SIZE': 68608}
+    -> advertised SETTINGS_MAX_CONCURRENT_STREAMS = 100
+  sample 1: alpn='h2' tcp_connect=8.1ms tls_handshake=154.3ms total=162.4ms
+    server SETTINGS: {'ENABLE_CONNECT_PROTOCOL': 1, 'INITIAL_WINDOW_SIZE': 67108864, 'MAX_CONCURRENT_STREAMS': 100, 'MAX_FRAME_SIZE': 68608}
+    -> advertised SETTINGS_MAX_CONCURRENT_STREAMS = 100
+  sample 2: alpn='h2' tcp_connect=7.9ms tls_handshake=149.7ms total=157.6ms
+    server SETTINGS: {'ENABLE_CONNECT_PROTOCOL': 1, 'INITIAL_WINDOW_SIZE': 67108864, 'MAX_CONCURRENT_STREAMS': 100, 'MAX_FRAME_SIZE': 68608}
+    -> advertised SETTINGS_MAX_CONCURRENT_STREAMS = 100
+
+--- api.github.com ---
+  sample 0: alpn='h2' tcp_connect=8.5ms tls_handshake=20.8ms total=29.2ms
+    server SETTINGS: {'ENABLE_CONNECT_PROTOCOL': 1, 'INITIAL_WINDOW_SIZE': 67108864, 'MAX_CONCURRENT_STREAMS': 100, 'MAX_FRAME_SIZE': 68608}
+    -> advertised SETTINGS_MAX_CONCURRENT_STREAMS = 100
+  sample 1: alpn='h2' tcp_connect=8.3ms tls_handshake=21.0ms total=29.3ms
+    server SETTINGS: {'ENABLE_CONNECT_PROTOCOL': 1, 'INITIAL_WINDOW_SIZE': 67108864, 'MAX_CONCURRENT_STREAMS': 100, 'MAX_FRAME_SIZE': 68608}
+    -> advertised SETTINGS_MAX_CONCURRENT_STREAMS = 100
+  sample 2: alpn='h2' tcp_connect=7.4ms tls_handshake=14.4ms total=21.8ms
+    server SETTINGS: {'ENABLE_CONNECT_PROTOCOL': 1, 'INITIAL_WINDOW_SIZE': 67108864, 'MAX_CONCURRENT_STREAMS': 100, 'MAX_FRAME_SIZE': 68608}
+    -> advertised SETTINGS_MAX_CONCURRENT_STREAMS = 100
+
+====================================================================================================
+PROBE 1b: does the upstream accept an http/1.1-only ALPN offer?
+  This is what `upstream_transport.http2 = false` makes httpx send.
+====================================================================================================
+--- api.githubcopilot.com: ALPN offering ONLY http/1.1 ---
+  sample 0: negotiated alpn='http/1.1' tls_version=TLSv1.3 total=160.4ms
+  sample 1: negotiated alpn='http/1.1' tls_version=TLSv1.3 total=178.4ms
+
+--- api.github.com: ALPN offering ONLY http/1.1 ---
+  sample 0: negotiated alpn='http/1.1' tls_version=TLSv1.3 total=16.9ms
+  sample 1: negotiated alpn='http/1.1' tls_version=TLSv1.3 total=44.3ms
+
+====================================================================================================
+PROBE 2: memory cost of extra connections
+====================================================================================================
+--- client-side RSS vs live HTTP/2 connections (one client, cap=1, one open stream each) ---
+  h2 server running in pid 1601311 on port 38673
+  baseline (client built, 0 connections): rss=44848 KiB, fds=9
+  1 connections: rss=45776 KiB  delta=928 KiB  per-connection=928.0 KiB  fds=10  (pool holds 1 connections)
+  10 connections: rss=46352 KiB  delta=1504 KiB  per-connection=150.4 KiB  fds=19  (pool holds 10 connections)
+  50 connections: rss=49596 KiB  delta=4748 KiB  per-connection=95.0 KiB  fds=59  (pool holds 50 connections)
+  100 connections: rss=53548 KiB  delta=8700 KiB  per-connection=87.0 KiB  fds=109  (pool holds 100 connections)
+

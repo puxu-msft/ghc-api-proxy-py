@@ -1,0 +1,10 @@
+# HTTP 400 content-type: text/plain; charset=utf-8
+
+{
+  "error": {
+    "message": "The requested model is not supported.",
+    "code": "model_not_supported",
+    "param": "model",
+    "type": "invalid_request_error"
+  }
+}

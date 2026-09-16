@@ -1,0 +1,28 @@
+{
+  "why": "The one input the subscriber passes through untouched. What does the client actually get?",
+  "request": {
+    "model": "claude-sonnet-5",
+    "max_tokens": 32,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": ""
+          }
+        ]
+      }
+    ]
+  },
+  "status": 400
+}
+
+{
+  "type": "error",
+  "error": {
+    "type": "invalid_request_error",
+    "message": "messages: text content blocks must be non-empty"
+  },
+  "request_id": "req_011CeEAYyUcNRDi5kU262eg5"
+}

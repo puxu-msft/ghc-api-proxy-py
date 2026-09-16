@@ -1,0 +1,4 @@
+name carried on the context: 'ToolSearch'
+assembler built with: 'ToolSearch'
+[ 200] streamed blocks the client would receive: thinking | tool_use:ToolSearch
+        input={'query': 'weather current conditions and forecast tool for Paris, France'}
