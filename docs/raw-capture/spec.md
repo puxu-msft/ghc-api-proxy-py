@@ -1,7 +1,7 @@
 # Raw capture 产品规格
 
-日期：2026-09-08，2026-09-09，2026-09-13 修订
-状态：**ACTIVE v25**
+日期：2026-09-08，2026-09-09，2026-09-13，2026-09-15，2026-09-16 修订
+状态：**ACTIVE v29**
 权威范围：`observability.raw_capture` 的选择规则、管理接口、文件格式、路径、配额、可读性、安全边界、capture capability 与失败诊断。其他规格可以要求采集哪些 exchange，但不得另行定义落盘格式或把全量 capture 重新接回全局配置开关。
 
 ## 1. 用户裁决
@@ -16,7 +16,7 @@
 <directory>/session-<sha256-prefix>/agent-<sha256-prefix>.cborseq.zst
 ```
 
-`session` prefix 是原始 session ID 的 SHA-256 前 24 个十六进制字符；真实 `agent_id` 的 prefix 是原始 agent ID 的 SHA-256 前 24 个十六进制字符。缺失 agent-id 使用 `agent-missing-<sha256("missing-agent-id")-prefix>` 的独立命名空间，避免与任何真实 agent-id 文件碰撞；文件名和目录名不得出现原始 identity。新实现不得创建或追加 `.jsonl.zst`。旧 `.jsonl.zst` 只作为升级前遗留文件保留，不自动迁移、不参与新格式读取；不存在目录级总量配额，遗留文件不参与任何配额计算。
+`session` prefix 是原始 session ID 的 SHA-256 前 24 个十六进制字符；真实 `agent_id` 的 prefix 是原始 agent ID 的 SHA-256 前 24 个十六进制字符。缺失 agent-id 使用 `agent-missing-<sha256("missing-agent-id")-prefix>` 的独立命名空间，避免与任何真实 agent-id 文件碰撞；文件名和目录名不得出现原始 identity。新实现不得创建或追加 `.jsonl.zst`。旧 `.jsonl.zst` 只作为升级前遗留文件保留，不自动迁移、不参与新格式读取，也不参与 current-format total quota 盘点。
 
 ## 2.1 调试规则与管理接口
 
@@ -35,6 +35,8 @@
 ## 3. 二进制结构化流
 
 逻辑流是 **CBOR Sequence（RFC 8742）**，不是 JSON，也不是私有长度前缀 envelope。每条事件是一个完整 CBOR map；body 使用 CBOR byte string 原样承载，不做 Base64。每个 CBOR item 单独压缩成一个完整 zstd frame，再将 frame 追加到文件。
+
+事件中的 HTTP `headers` 使用按线上顺序排列的 `[name, value]` pair list，name 规范化为小写；重复 header name 必须保留为多个 pair，不得合并或覆盖。reader 必须继续接受既有 v2 文件中的 map 形态，以便读取已落盘证据；新写入统一使用 pair list。
 
 这组边界同时满足：
 
@@ -55,7 +57,7 @@
 - retry、cleanup、错误和 capture completeness 事件；
 - credentials、Authorization、Cookie 和其他 transport-sensitive fields。
 
-capture 默认仍是 opt-in；没有命中持久化规则的请求不得创建 capture 或记录正文。规则命中后不再提供 body-only profile：每个 capture 都是 full-header/full-transport capture。capture 文件、History cold transport 和显式 transport export 都属于敏感数据面。
+capture 默认仍是 opt-in；没有命中持久化规则的请求不得创建 capture 或记录正文。规则命中后不再提供 body-only profile：每个 capture 都是 full-header/full-transport capture。capture 文件、History cold transport 和显式 transport export 都属于敏感数据面。History 的 credential-bearing transport/full export 必须由独立的管理 secret 保护：服务配置 `server.history_export_token` 后，调用方在 `X-History-Export-Token` 提供相同值；未配置或不匹配一律稳定 `403 access_denied`，不依赖 listener 是否为 loopback，也不得泄漏 secret 或 capture 内容。这个 gate 不适用于 credential-free 的 History list/detail/semantic projection。
 
 普通日志、metrics、LiveObservation 和 request log 仍必须使用 safe projection，不得复制 raw request/response body、认证 header、token、session/agent 原始 transport identity 或未知异常原文。History 的普通 list/detail projection 可以返回由 History contract 拥有的 normalized session/agent metadata，以及 semantic summary、capability 和 reference；不得把 raw transport headers/credentials 复制到该 projection。完整 transport 必须显式请求 transport/evidence projection，并标记 `contains_credentials=true`。
 
@@ -67,21 +69,21 @@ capture 默认仍是 opt-in；没有命中持久化规则的请求不得创建 c
 
 - `capture_status`: `none | pending | complete | incomplete | corrupt`；
 - `client_request_available`；
-- 每个 upstream attempt 的 request/response/boundary completeness；
+- `upstream_attempts[]` 的逐 attempt 矩阵：`attempt_started`、`request_started`、request headers/body presence、`response_started`、response headers/body presence、`response_complete`、`attempt_complete` 与由这些事实导出的 `wire_diagnostic_eligible`；
 - `client_response_available`；
 - `wire_diagnostic_eligible`；
 - `semantic_replay_eligible`；
 - `live_replay_eligible`。
 
-`capture_status=complete` 是总览而不是 replay gate 的唯一条件。请求 body 完整但 response partial 的 capture 可以支持部分 semantic/live source，却不能被当作完整 wire diagnostic。
+矩阵中的每一项只可由同一 `RawRequestCapture` 的对应 raw frame 已获 writer acknowledgement 的事实投影；未写入、被丢弃、字段缺失或类型不正确一律为 false。不得读取 `RequestTrace`、`UpstreamBodyAttempt` 或 response timing 来推断 request/header/boundary completeness。`capture_status=complete` 是总览而不是 replay gate 的唯一条件。`none` 与 `corrupt` 否决所有 replay mode；`pending`/`incomplete` 不能单独否决 semantic/live，后两种 mode 要按完整 client request 与各自 capability 决定。请求 body 完整但 response partial 的 capture 可以支持部分 semantic/live source，却不能被当作完整 wire diagnostic；wire 还必须验证所选 attempt 的 request/response headers、body 与显式 boundaries。
 
 ## 5. 配额与写入
 
-`max_file_bytes` 限制一个 `.cborseq.zst` 文件的实际压缩后字节数；`0` 表示禁用。不存在目录级总量配额：capture 的总量由规则选择与单文件配额约束，不再提供 `max_total_bytes`。配额 reservation 必须包含已经落盘与已排队但尚未落盘的压缩 frame，防止并发超额。
+`max_file_bytes` 限制一个 `.cborseq.zst` 文件的实际压缩后字节数；`max_total_bytes` 限制一个 raw-capture directory 内所有 current-format `.cborseq.zst` 文件的实际压缩后总字节数；各自的 `0` 表示禁用对应限制。store 启动时必须盘点现有 `.cborseq.zst` 的实际 size；遗留 `.jsonl.zst` 不计入。若已有 evidence 已经超过新的 total budget，store 不删除、不迁移、不截断它，而是拒绝任何会使 total 继续增长的新 frame。配额 reservation 必须同时包含已经落盘与已排队但尚未落盘的压缩 frame，防止并发超过 per-file 或 total budget。
 
 写入使用有界后台队列。一次事件先完成 CBOR 编码和 zstd frame 压缩，再在锁内检查/预留实际 frame 字节并入队，后台 worker 负责创建目录和 append frame。每个队列项必须携带所属 per-request capture、固定 event type 与预留字节成本，不能只携带匿名 `(path, bytes)`。
 
-reservation 表示“已经落盘 + 已入队待确认”的实际压缩字节。writer 完整写入后只把该项确认为 committed，数值不变；writer 在 `mkdir/open/write/close` 任一阶段得到 `OSError` 时，必须在同一 accounting 锁下按实际已写字节回滚未写入部分，不能让不存在的字节继续占用 file quota。短写或 close error 即使已有部分字节落盘，也属于 capture 不完整：已写部分继续计入实际磁盘成本，未写部分回滚，并停止该 capture 后续尚未落盘的 queued frame。
+reservation 表示“已经落盘 + 已入队待确认”的实际压缩字节，并且同时计入 file 与 directory total accounting。writer 完整写入后只把该项确认为 committed，两个数值均不变；writer 在 `mkdir/open/write/close` 任一阶段得到 `OSError` 时，必须在同一 accounting 锁下按实际已写字节回滚未写入部分，不能让不存在的字节继续占用 file 或 total quota。短写或 close error 即使已有部分字节落盘，也属于 capture 不完整：已写部分继续计入实际磁盘成本，未写部分同时从两个 reservation 回滚，并停止该 capture 后续尚未落盘的 queued frame。
 
 `0 < persisted_bytes < reserved_bytes` 表示共享 append stream 已留下不完整 zstd frame；这不是单个 request capture 的私有失败，而是该 `path` 的 store 级 poisoned 状态。poison 必须在 accounting lock 内与 partial-write 回执同时登记，并在当前 store 生命周期内不可自动清除。poison 后任何已经排队或新到达、指向同一路径的 frame 都不得继续 append；其 reservation 必须完整回滚，所属 capture 必须收到稳定 `path_poisoned` incomplete 原因。不同 path 不受影响，已落盘的 partial bytes 继续按实际文件大小计入 file quota。
 
@@ -97,14 +99,18 @@ writer `OSError` 的稳定原因枚举是 `writer_error`。worker 的即时 warn
 
 同一路径在先前 request 的 partial write 后，后续 request 的稳定首因枚举是 `path_poisoned`；其 `writer_error` 布尔值只表示该 request 自己是否收到 writer error，不得把前一个 request 的错误冒充成本 request 的 writer error。完成 warning 必须关联后续 request ID 并给出 `forensic_replay_complete=false`。普通日志仍不得包含 path 对应的原始 session/agent identity 或任何 body/credential。
 
-已知的单文件配额耗尽案例中，如果文件只留下 `request.start`，完成 warning 必须明确给出 `reason=file_quota_exceeded`，且当 upstream/client response body 已尝试但未保存时给出 `response_body_capture_complete=false`。诊断不得尝试写回已满的 capture 文件，也不得把 body 降级写入普通日志。
+已知的 file 或 total 配额耗尽案例中，如果文件只留下 `request.start`，完成 warning 必须明确给出对应的 `reason=file_quota_exceeded` 或 `reason=total_quota_exceeded`，且当 upstream/client response body 已尝试但未保存时给出 `response_body_capture_complete=false`。诊断不得尝试写回已满的 capture 文件，也不得把 body 降级写入普通日志。
 
-完成诊断 `reason` 的合法全集是封闭枚举：`file_quota_exceeded`、`writer_queue_full`、`store_closed`、`capture_error`、`writer_error`、`path_poisoned`、`request_incomplete`、`upstream_incomplete`。本段与前文按场景讨论的枚举是同一全集的子集；实现新增任何原因都必须先修订本节。
+完成诊断 `reason` 的合法全集是封闭枚举：`file_quota_exceeded`、`total_quota_exceeded`、`writer_queue_full`、`store_closed`、`capture_error`、`writer_error`、`path_poisoned`、`request_incomplete`、`upstream_incomplete`。本段与前文按场景讨论的枚举是同一全集的子集；实现新增任何原因都必须先修订本节。
 
 ## 7. 修订记录
 
 | 日期 | 版本 | 变化 | 触发 |
 |---|---|---|---|
+| 2026-09-16 | v29 | full-header capture 改为保序 pair list，保留重复 HTTP header；reader 兼容既有 v2 map 形态 | RCR-20260916-02 |
+| 2026-09-16 | v28 | 将 per-attempt matrix 精确为由 writer-acknowledged RawCapture frames 投影的 request/response/header/boundary facts；禁止以 response timing 或 `UpstreamBodyAttempt` 补全缺失事实 | replay review RCR-04 |
+| 2026-09-15 | v27 | 恢复 current-format `max_total_bytes` admission cap：启动盘点 `.cborseq.zst`、同锁 reservation 已落盘和 queued compressed bytes、超额拒绝新 frame；不删除任何已有 evidence，遗留 `.jsonl.zst` 仍不计入 | 用户要求防止 full-header/body capture 无界增长，并明确选择安全 admission cap 而非自动删除 |
+| 2026-09-15 | v26 | 将 History transport/full export 的独立 management-secret 访问边界写入 raw-capture sensitive-data contract，明确不以 loopback 代替授权，semantic/index projection 不受 gate 限制 | History route 发现 credentials export 未有独立访问控制 |
 | 2026-09-14 | v25 | 澄清 History-owned identity metadata 与 raw transport identity 的边界；普通 History projection 可保留 History contract 的 identity 字段，但不得复制 capture headers/credentials | 多轮文档 review 发现 raw-capture 与 History identity wording 可产生两种安全解释 |
 | 2026-09-13 | v24 | 明确 full transport capture：命中规则的 capture 保存完整 headers/credentials；普通日志与 History 默认 projection 仍 safe；新增 capture status/capability matrix；History 通过 capture reference 关联 full transport；replay 使用当前认证而不复用 source headers | 可观测性、History、debug、replay 重构 shared understanding |
 | 2026-09-09 | v23 | 明确失败 attempt 的业务结果不等于 request-level 取证不完整；response-body completeness 以已 committed evidence 判断；buffered count response 要等 cleanup 成功；管理 API 未装配和未知异常日志都必须使用稳定安全投影；代理侧 timeout 不得丢失已交给 upstream transport 的 request body | 动态 capture 独立验收 F-01 至 F-05 与普通日志回归 |

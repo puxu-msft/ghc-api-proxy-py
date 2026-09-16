@@ -1,9 +1,9 @@
 # Raw capture Review disposition
 
-日期：2026-09-14  
-当前 Spec：[`spec.md`](spec.md) ACTIVE v25
+日期：2026-09-16
+当前 Spec：[`spec.md`](spec.md) ACTIVE v29
 
-报告原件保持 point-in-time，不重写。当前状态由 v25 Spec、`status.md` 和本表共同导航。
+报告原件保持 point-in-time，不重写。当前状态由 v29 Spec、`status.md` 和本表共同导航。
 
 | 报告 / finding | 当前处置 | current owner / evidence |
 |---|---|---|
@@ -25,7 +25,10 @@
 | `260909-coordinator-audit-checklist.md` | methodology/provenance | checklist only; it is not a finding disposition or current gate |
 | full-header / credentials | closed | `050f0e3e` + `1c348dfc` |
 | capture reference / History attachment | closed | History slices; owners are `history/spec.md` + `raw-capture/spec.md` |
-| per-attempt capability matrix | accepted-deferred | [`deferred.md`](deferred.md) and `../history/deferred.md` |
+| per-attempt capability matrix | closed | v28 code/tests；RCR-04 final review |
+| `RCR-20260916-01` 非法 capture status | accepted-deferred，用户裁决为非严重问题 | 不在本修复切片；保持当前 source authority 边界 |
+| `RCR-20260916-02` 重复 header 丢失 | closed | v29 pair-list representation + duplicate-header regression |
+| `RCR-20260916-03` topic 状态漂移 | closed | v29 status/deferred/disposition sync |
 | user-controlled candidate refresh | pending user-controlled flow | [`../../human-controlled-docs-candidates/260914-observability.md`](../../human-controlled-docs-candidates/260914-observability.md) |
 
 旧报告目录：[`reports/`](reports/)。
