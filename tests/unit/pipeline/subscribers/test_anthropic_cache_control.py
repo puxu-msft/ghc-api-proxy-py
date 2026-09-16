@@ -1,6 +1,6 @@
 """Which `cache_control` keys reach an Anthropic Messages upstream.
 
-The shape under test is the one a user's machine actually sent on 2026-08-24 and got a 400 for — `{"type": "ephemeral", "scope": …}` on `system[1]` — and the refusal paths quoted here are upstream's own words from `exp/260824-beta-and-cache-control-probe/`, not invented ones.
+The shape under test is the one a user's machine actually sent on 2026-08-24 and got a 400 for — `{"type": "ephemeral", "scope": …}` on `system[1]` — and the refusal paths quoted here are upstream's own words from `.dev/exp/260824-beta-and-cache-control-probe/`, not invented ones.
 
 **The position set is wider than the reported failure.** The 400 named `system.1`; the request schema allows a marker on the request itself, on system blocks, on message content blocks, inside `tool_result` / `search_result` / `document.source` content lists, and on tools. Tests written from the reported path alone would leave every other position uncovered, which is how the first version of this pass shipped missing three of them.
 

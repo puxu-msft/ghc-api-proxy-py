@@ -11,7 +11,7 @@ Both were measured on a legal three-turn body ending in `user`, and both leave i
 
 **A prefill the client wrote itself is left alone**, and that is the whole reason this reads `original_payload` rather than just the tail of `messages`. Prefill is a documented Anthropic feature; a client using it deliberately is asking for something this model no longer offers, and upstream's refusal says exactly that. Appending a turn there would hand back a perfectly good answer that silently ignored the constraint the client asked for — the client would have no way to learn its prefill did nothing. Repairing what *we* broke and reporting what the client asked for are different jobs.
 
-**An assistant turn with `content: []` is not a prefill and is left alone too.** Measured in this repository on 2026-08-20 (`exp/260820-empty-text-probe/`, F4 and F6): upstream answers 200 to one, last or mid-conversation. The first draft of this module asserted "must not end on an assistant turn" as a flat rule and would have injected a user instruction into a request that already worked — and into exactly the shape its neighbour `drop_blank_text_blocks` produces, since that pass empties an assistant turn rather than dropping it. Two measured 400s made a rule that a third measured 200 already contradicted.
+**An assistant turn with `content: []` is not a prefill and is left alone too.** Measured in this repository on 2026-08-20 (`.dev/exp/260820-empty-text-probe/`, F4 and F6): upstream answers 200 to one, last or mid-conversation. The first draft of this module asserted "must not end on an assistant turn" as a flat rule and would have injected a user instruction into a request that already worked — and into exactly the shape its neighbour `drop_blank_text_blocks` produces, since that pass empties an assistant turn rather than dropping it. Two measured 400s made a rule that a third measured 200 already contradicted.
 
 Spec: `.dev/docs/anthropic-direct-request-shape/spec.md` §6.
 """
@@ -57,7 +57,7 @@ def _last_role(payload: Mapping[str, Any]) -> str | None:
 def _is_empty_content(message: Mapping[str, Any]) -> bool:
     """Whether this turn carries an empty block list — a turn with nothing in it to continue.
 
-    Measured in this repository on 2026-08-20 (`exp/260820-empty-text-probe/`, F4 and F6): a final assistant turn with `content: []` answers **200** on `claude-sonnet-5`, and so does one mid-conversation. It is not a prefill, because there is nothing to prefill with. `drop_blank_text_blocks` produces exactly this shape — it empties an assistant turn rather than dropping it — so without this test the two passes would fight, and the second would inject a user instruction into a request that was already fine.
+    Measured in this repository on 2026-08-20 (`.dev/exp/260820-empty-text-probe/`, F4 and F6): a final assistant turn with `content: []` answers **200** on `claude-sonnet-5`, and so does one mid-conversation. It is not a prefill, because there is nothing to prefill with. `drop_blank_text_blocks` produces exactly this shape — it empties an assistant turn rather than dropping it — so without this test the two passes would fight, and the second would inject a user instruction into a request that was already fine.
 
     Only the empty *list* is treated this way, which is the shape that was measured. `content: ""` is left to the prefill branch: nothing has measured it, and the measured 400s were both non-empty content.
     """

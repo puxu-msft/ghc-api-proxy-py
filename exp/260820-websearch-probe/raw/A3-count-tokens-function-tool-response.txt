@@ -1,5 +1,0 @@
-# HTTP 200 content-type: application/json
-
-{
-  "input_tokens": 427
-}

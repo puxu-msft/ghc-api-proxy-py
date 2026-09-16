@@ -137,7 +137,7 @@ def _role(message: Any) -> str:
 def repair_tool_pairs(messages: list[Any]) -> tuple[int, int, int]:
     """Remove calls nothing answered and answers nothing called, returning how many of each and how many turns that emptied.
 
-    Both endpoints refuse a broken pair, and each says so in its own words. Measured 2026-08-20, `exp/260820-tool-pair-probe/`:
+    Both endpoints refuse a broken pair, and each says so in its own words. Measured 2026-08-20, `.dev/exp/260820-tool-pair-probe/`:
 
     - a `tool_use` the next turn does not answer → 400, ``messages.2: `tool_use` ids were found without `tool_result` blocks immediately after`` (G1);
     - a `tool_result` naming no call before it → 400, ``unexpected `tool_use_id` found in `tool_result` blocks`` (G2);

@@ -36,7 +36,7 @@ SYNTHETIC_TURN = {"role": "user", "content": [{"type": "text", "text": SYNTHETIC
 async def test_an_emptied_assistant_tail_is_left_alone() -> None:
     """`content: []` is not a prefill, and upstream answers 200 to it — measured here, not assumed.
 
-    `exp/260820-empty-text-probe/` F4 and F6: a final assistant turn with an empty block list answers 200 on this model, and so does one mid-conversation. The shape matters because `drop_blank_text_blocks` *produces* it — that pass empties an assistant turn rather than dropping it — so a flat "must not end on assistant" rule makes the two passes fight, and this one wins by adding a user instruction to a request that already worked.
+    `.dev/exp/260820-empty-text-probe/` F4 and F6: a final assistant turn with an empty block list answers 200 on this model, and so does one mid-conversation. The shape matters because `drop_blank_text_blocks` *produces* it — that pass empties an assistant turn rather than dropping it — so a flat "must not end on assistant" rule makes the two passes fight, and this one wins by adding a user instruction to a request that already worked.
     """
     provider = RecordingProvider()
     body: dict[str, Any] = {

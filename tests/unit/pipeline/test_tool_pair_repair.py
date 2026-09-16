@@ -1,6 +1,6 @@
 """Calls nothing answered, and answers nothing called.
 
-Both endpoints refuse a broken `tool_use` / `tool_result` pair, and each says so in its own words. Measured 2026-08-20 against the live upstream, `exp/260820-tool-pair-probe/`:
+Both endpoints refuse a broken `tool_use` / `tool_result` pair, and each says so in its own words. Measured 2026-08-20 against the live upstream, `.dev/exp/260820-tool-pair-probe/`:
 
 | probe | shape | result |
 |---|---|---|

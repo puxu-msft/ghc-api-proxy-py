@@ -2,7 +2,7 @@
 
 Upstream rejects the whole request over one of these: `400 messages: text content blocks must be non-empty`, and a sibling wording, `text content blocks must contain non-whitespace text`, for a block that is only spaces. Production hit the first on 2026-08-20 twice in a row on `/v1/messages` with `claude-opus-5`, and the same rejection is in this machine's transcripts from 2026-07-15 against the previous service, so it is a standing property of the leg rather than something the rewrite introduced.
 
-Which leg is not a guess. `exp/260820-empty-text-probe/` asked the live upstream: `/responses` answers 200 to an empty `input_text`, to a whitespace-only one, and to an assistant turn carrying an empty `output_text`, while `/v1/messages` answers 400 in the same run with the same credentials. So this runs at `attempt.prepare`, where the routed endpoint is known, and does nothing at all to a body bound for Responses.
+Which leg is not a guess. `.dev/exp/260820-empty-text-probe/` asked the live upstream: `/responses` answers 200 to an empty `input_text`, to a whitespace-only one, and to an assistant turn carrying an empty `output_text`, while `/v1/messages` answers 400 in the same run with the same credentials. So this runs at `attempt.prepare`, where the routed endpoint is known, and does nothing at all to a body bound for Responses.
 """
 
 from typing import Any
@@ -85,7 +85,7 @@ async def test_whitespace_only_text_counts_as_blank() -> None:
 async def test_an_assistant_turn_that_said_nothing_is_allowed_to_say_nothing() -> None:
     """`content: []` is the spelling this upstream takes for a turn with nothing in it.
 
-    Measured 2026-08-20 (`exp/260820-empty-text-probe/`): an assistant turn with `content: []` returns 200 both mid-conversation (F6) and as the final turn (F4), while the blank block it replaces returns 400 (F3). The two mean the same and only one travels, so this is the same rewrite `system` gets — and it turns a request that could not have succeeded into one that can.
+    Measured 2026-08-20 (`.dev/exp/260820-empty-text-probe/`): an assistant turn with `content: []` returns 200 both mid-conversation (F6) and as the final turn (F4), while the blank block it replaces returns 400 (F3). The two mean the same and only one travels, so this is the same rewrite `system` gets — and it turns a request that could not have succeeded into one that can.
     """
     payload = await _run(
         {
@@ -104,7 +104,7 @@ async def test_an_assistant_turn_that_said_nothing_is_allowed_to_say_nothing() -
 async def test_a_user_turn_that_said_nothing_goes_rather_than_its_content() -> None:
     """A user turn has no spelling for "nothing", so the turn is what goes.
 
-    `content: []` is refused for a user turn in its own words — `messages.0: user messages must have non-empty content` (F1, 400) — beside the blank block's own refusal (F2, 400). Dropping the turn was declined at first because it puts two same-role turns next to each other and that had not been measured; `exp/260820-tool-pair-probe/` G4 has since measured it at 200.
+    `content: []` is refused for a user turn in its own words — `messages.0: user messages must have non-empty content` (F1, 400) — beside the blank block's own refusal (F2, 400). Dropping the turn was declined at first because it puts two same-role turns next to each other and that had not been measured; `.dev/exp/260820-tool-pair-probe/` G4 has since measured it at 200.
 
     The reference implementation gets this wrong in the other direction — it filters without a surviving-block check and sends `content: []` for every role.
     """
@@ -202,7 +202,7 @@ async def test_a_body_with_nothing_blank_is_unchanged() -> None:
 async def test_a_body_bound_for_responses_is_not_touched() -> None:
     """Measured, not assumed: that endpoint takes the shape, so rewriting it would be a change with nothing behind it.
 
-    `exp/260820-empty-text-probe/` sent an empty `input_text`, a whitespace-only one, and an empty `output_text` on an assistant turn to the live `/responses`; all three came back 200, in the run whose positive control got 400 from `/v1/messages` over the block below.
+    `.dev/exp/260820-empty-text-probe/` sent an empty `input_text`, a whitespace-only one, and an empty `output_text` on an assistant turn to the live `/responses`; all three came back 200, in the run whose positive control got 400 from `/v1/messages` over the block below.
     """
     original: dict[str, Any] = {
         "system": [{"type": "text", "text": "be brief"}, {"type": "text", "text": ""}],

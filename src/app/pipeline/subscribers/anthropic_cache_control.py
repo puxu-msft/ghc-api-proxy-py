@@ -2,7 +2,7 @@
 
 Copilot's Anthropic endpoint validates `cache_control` with a strict schema: its words are `Extra inputs are not permitted`, and **any** key it does not know kills the whole request. Claude Code sends `{"type": "ephemeral", "scope": …}` — the `scope` field the `prompt-caching-scope-2026-01-05` beta introduces — and every request carrying one comes back 400.
 
-Measured 2026-08-24 against the live enterprise upstream, `claude-opus-5`, positive control first, the whole matrix run twice with identical results (`exp/260824-beta-and-cache-control-probe/`):
+Measured 2026-08-24 against the live enterprise upstream, `claude-opus-5`, positive control first, the whole matrix run twice with identical results (`.dev/exp/260824-beta-and-cache-control-probe/`):
 
 - `{"type": "ephemeral"}` → 200, and `{"type": "ephemeral", "ttl": "1h"}` → 200 with or without its own beta. So `ttl` is kept: removing it would be a pure loss.
 - `{"type": "ephemeral", "scope": "organization"}` → 400 `system.1.cache_control.ephemeral.scope: Extra inputs are not permitted`, and the same on a message block (`messages.0.content.0.text.cache_control…`) and on a tool (`tools.0.custom.cache_control…`). Three separate schemas upstream, so all three have to be walked.

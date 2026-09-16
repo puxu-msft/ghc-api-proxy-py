@@ -920,7 +920,7 @@ def test_a_responses_request_falling_back_to_chat_points_at_input_when_empty() -
 def test_the_responses_leg_keeps_the_blank_blocks_it_was_given() -> None:
     """The primary path is not rewritten to satisfy a rule only the other path has.
 
-    Measured on 2026-08-20 (`exp/260820-empty-text-probe/`): the live `/responses` answers 200 to an empty `input_text`, to a whitespace-only one, and to an assistant turn carrying an empty `output_text`, in the same run whose positive control got 400 from `/v1/messages` over the Anthropic spelling of the same thing. So removal belongs at `attempt.prepare` on the Anthropic leg, and nothing earlier.
+    Measured on 2026-08-20 (`.dev/exp/260820-empty-text-probe/`): the live `/responses` answers 200 to an empty `input_text`, to a whitespace-only one, and to an assistant turn carrying an empty `output_text`, in the same run whose positive control got 400 from `/v1/messages` over the Anthropic spelling of the same thing. So removal belongs at `attempt.prepare` on the Anthropic leg, and nothing earlier.
 
     This is the guard against putting it back too early. A revision that strips before translation passes every unit test of the subscriber and fails here, which is the only place the difference shows.
     """
