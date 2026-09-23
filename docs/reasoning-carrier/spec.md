@@ -1,6 +1,6 @@
 # Reasoning 跨协议 carrier 与结构保真规格
 
-状态：imported living specification；另一 source clone 曾在隔离 worktree 实施并评审，当前 checkout 未集成，且原 source ref／worktree 不可达。恢复条件见 [`tracking.md`](tracking.md)。
+状态：活规格；v2 实现已集成 main，当前实现和验证范围见 [`tracking.md`](tracking.md)。本文的初稿背景和历史实施范围不代表当前尚未实施。
 
 ## 1. 权威边界与修订来源
 
@@ -18,11 +18,11 @@
 
 ## 2. 问题状态
 
-当前项目主 v1 carrier 使用 `ghc-api-proxy:synthetic-reasoning:v1:` namespace，将 Responses 的非空 `encrypted_content` 编码为严格 JSON 后放进 Anthropic `thinking.signature`。它能 value-exact 恢复该字符串，但 payload key 集合固定为 `{tag, encrypted_content}`，只覆盖 Responses→Anthropic 一个方向，不能承载其他独有结构。
+本规格起草时，项目主 v1 carrier 使用 `ghc-api-proxy:synthetic-reasoning:v1:` namespace，将 Responses 的非空 `encrypted_content` 编码为严格 JSON 后放进 Anthropic `thinking.signature`。它能 value-exact 恢复该字符串，但 payload key 集合固定为 `{tag, encrypted_content}`，只覆盖 Responses→Anthropic 一个方向，不能承载其他独有结构。以下是当时的问题背景，不是当前实现状态。
 
-Responses reasoning item 的 `summary` 是有序 `summary_text` parts。当前 buffered reader、streaming assembler 和旧 helper 都先把这些 parts 拼成一个字符串，内部 `ContentBlock` 也只有一个 `text` 字段；回送时只能重建一个 `summary_text`。因此 part 数量、空 part 和分段边界在进入 carrier 之前已经丢失。
+Responses reasoning item 的 `summary` 是有序 `summary_text` parts。当时的 buffered reader、streaming assembler 和旧 helper 都先把这些 parts 拼成一个字符串，内部 `ContentBlock` 也只有一个 `text` 字段；回送时只能重建一个 `summary_text`。因此 part 数量、空 part 和分段边界在进入 carrier 之前已经丢失。
 
-当前路径还存在四种不一致：
+当时路径还存在四种不一致：
 
 1. translation driver 把项目 unknown version 和 malformed v1 都当成无 payload 的合法代理 carrier，恢复为 summary-only reasoning 且不记录 loss；旧 helper 则拒绝恢复。
 2. buffered Anthropic→Responses 遇到原生 Claude signature 时删除整个 reasoning 并记录 loss；streaming 路径保留 summary、静默丢 signature。
@@ -197,6 +197,7 @@ Profile通过后才校验record与outer visible content的跨字段关系：
 - 项目 carrier 所携带的原生 state只能恢复给 record type命名的目标格式。正常跨格式路径必须在translator内完成解包，使last-mile只看见provider原生fields。
 - `attempt.prepare`必须挂载一个对两种target都生效的resident carrier guard；它扫描当前attempt即将发送的target wire，并调用共享classifier识别所有非provider原生synthetic forms：本项目`ghc-api-proxy:synthetic-reasoning:`下的v1、v2、unknown version与malformed payload，以及兼容`copilot-api:synthetic-reasoning:v1`的payload prefix、bare prefix和legacy bare sentinel。不得只匹配项目prefix。
 - Guard若仍发现任一上述carrier，说明same-format direct path绕过了consumer、路由已换到无法消费其state的provider，或translator漏了解包。Guard在网络调用前返回稳定的`reasoning_carrier_not_unwrapped` translation error，保留字段路径和carrier分类但不记录完整payload。
+- `project_v2` 分类为合法只证明信封可解析，不证明它的原生state能移交给当前目标。尤其是carrier含Responses原生`encrypted_content`而目标模型没有Responses协议腿时，不能把密文当Anthropic signature、不能只保留可见summary伪装为无损请求；在没有已裁定的有损迁移合同前仍按上述规则拒绝。2026-09-23一次真实请求中，`sonnet`映射到仅开放Messages／Chat Completions的`claude-opus-5.5`，其历史有8个这种carrier；拒绝发生在任何upstream request之前。
 - Guard不负责猜测或恢复跨格式语义，也不把carrier原样送出。这样same-format direct path不需要临时构造`SemanticRequest.conversion` loss sink，也不会静默drop后继续一个已失去continuation的turn。
 - 原生foreign state在正常cross-format translator中的既有`reasoning-state-not-portable`行为不变；不得借guard把native opaque误判成项目carrier，也不把可见summary降级为普通文本。
 
@@ -305,9 +306,9 @@ translation driver、兼容helper、buffered response与streaming response必须
 - 同一输入路由到Anthropic Messages upstream时，last-mile按配置完成destack。
 - 用户真实输出恰好等于`[ghc-api-proxy: thinking separator]`时，不得被carrier decoder或Responses路径清理器误删。
 
-## 13. 实施范围
+## 13. 历史实施范围
 
-预计涉及：
+以下是本规格起草时预计涉及的范围；当前集成状态见 [`tracking.md`](tracking.md)：
 
 - `src/app/pipeline/translation_driver/content.py`
 - `src/app/pipeline/translation_driver/reasoning_carrier.py`和新的统一typed reasoning codec／projection owner
@@ -325,10 +326,11 @@ translation driver、兼容helper、buffered response与streaming response必须
 
 统一typed codec／projection是唯一reasoning语义owner。旧`responses_reasoning.py`和`protocols/*`facade若因兼容import暂留，只能调用统一core，不得保留独立v2 parser／writer或summary accumulator；旧helper tests迁移到core，只保留facade delegation smoke test。能够确认无生产／外部import依赖的旧入口可以在本patch删除，但删除前必须按项目收尾规则独立评审，不能为去重自行扩大破坏面。
 
-实现不得提前修改observable behavior；本规格通过独立评审并完成finding处置后才进入worktree代码阶段。
+实现不得先于本活规格更改observable behavior；此前的独立评审与worktree实施阶段已完成，不再作为当前实现尚未开始的前置条件。
 
 ## 14. 修订记录
 
+- 2026-09-23，当前状态与§7.3澄清：纠正首页、§2及§13仍把已集成v2写成未集成／待实施的过时描述；依本次带规则的真实capture补明，合法`project_v2`承载Responses原生密文而目标无Responses腿时，不存在无损的Anthropic投影，末端拒绝符合既有opaque边界而非代理漏解包。此修订不批准丢弃历史state；当前请求证据见`reports/260923-cross-model-carrier-rejection.md`。
 - 2026-09-04，v1草案：依据用户本轮“使用两种协议的opaque槽搭建格式化内部结构、传递独有细节，并根因修复summary分段丢失”的指示，建立双向typed v2 envelope、结构化IR、统一路径和last-mile destack合同；取代历史v1的非通用限制及未落地的ordinal-only v2候选。
 - 2026-09-04，v2评审修订：采纳两份独立评审的全部findings，取消payload内layout omission，冻结outer-slot profiles与分类precedence，修正streaming字段为`summary_index`并补齐event authority，增加same-format resident guard与完整subscriber／streaming owner，裁定旧helper薄委托统一core，修正summary正控，并同步降格ordinal-only v2实验。处置 authority为`spec-review-disposition.md`。
 - 2026-09-04，v3复评修订：补`part.added.text`baseline与`part.done.status=incomplete`，将last-mile guard扩到兼容`copilot-api` synthetic v1，严格分离profile结构判定与presentation跨字段判定并增加独立vectors；同时采纳wire复评的两条minor，收窄unknown records职责并固定canonical bare producer spelling。
