@@ -8,7 +8,7 @@
 
 - **症状**：4,469 samples／233.5 MiB（其中prefix digest arrays 182 MiB——同一会话每轮都把整条前缀链再存一遍）时，一次whole-state read约22 s（decode占90%以上），startup 67.9 s，每个learning transaction读3～4次，count_tokens在每次commit后的reader refresh里等一次full read（2026-09-22 p50 18.8 s）；4141 RSS 1.95 GB。
 - **止血**（main `f4b41229`；[spec.md](spec.md) §8.2／§8.3／§8.5与2026-09-24修订记录）：sample caps降为256／512；只超出可剪枝caps的state不再是invalid，由writer在migration／sample／prune transaction中剪回；逐行decode按完整stored values复用；prune planner一次性计算victim keys。同一副本修复后startup 3.3 s、full read 0.35 s。
-- **上线须知**：首次以新caps启动的进程要把既有store剪到512个samples，按当前规模约1分钟且期间未ready；之后恢复秒级启动。
+- **上线须知**：首次以新caps启动的进程要把既有store剪到512个samples，按当前规模约1分钟且期间未ready；之后恢复秒级启动。`--restart`滚动交接时，旧进程每个learning transaction持写锁66～88 s，而新进程migration的`busy_retry_timeout`只有5 s，新进程可能记`token learning unavailable`并在不学习的状态下运行到下次重启——这是既有行为，首次上线更易碰上；旧进程在新进程剪枝期间也会记几条`token learning offer failed`。
 - **仍待根治**：每个transaction仍读取全部retained rows（只是不再重复decode），caps因此不能再放宽；根治方向是validated state的增量维护、prefix chain不再逐sample全量持久化、writer自己commit后reader不再重读。
 
 ## 当前阶段
