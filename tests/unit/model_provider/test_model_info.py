@@ -265,9 +265,10 @@ def assert_rate_complete(pricing: dict[str, object]) -> None:
         assert set(pricing) == _RATES
         return
     assert isinstance(tiers, list)
-    base = next(tier for tier in tiers if tier["name"] == "default")
+    tier_list = cast(list[dict[str, object]], tiers)
+    base = next(tier for tier in tier_list if tier["name"] == "default")
     assert set(base) == _RATES | {"name"}
-    for tier in tiers:
+    for tier in tier_list:
         if tier is base:
             continue
         # `input_min_tokens` is the tier's threshold, and `_pi_cost` drops the block
